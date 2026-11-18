@@ -4,8 +4,10 @@
 //!
 //! Settings: `bucket` (required), `base_path`, `endpoint` (a host, `host:port` or URL; AWS's
 //! regional endpoint by default), `protocol`, `region` (`us-east-1` by default; the signing
-//! region), `path_style_access`, `readonly`, and the credentials `access_key`, `secret_key` and
-//! `session_token`. Elasticsearch reads credentials from its keystore; a roll cluster has no
+//! region), `path_style_access`, `readonly`, `chunk_size`, `buffer_size`, `max_multipart_parts`,
+//! `max_multipart_upload_cleanup_size`, the throttles `max_snapshot_bytes_per_sec` and
+//! `max_restore_bytes_per_sec` ([`super::transfer`]), and the credentials `access_key`,
+//! `secret_key` and `session_token`. Elasticsearch reads credentials from its keystore; a roll cluster has no
 //! keystore its tenant can write, so they come with the repository's settings and are kept apart
 //! from them ([`Repository::secrets`]), sealed under the deployment's key ([`crate::seal`]),
 //! opened only to sign a request and never shown: `GET _snapshot` and the cluster state print
@@ -25,10 +27,13 @@
 //!   segments it read, each by `<segment id>-<live docs>` and its chunks.
 //! - `indices/<index uuid>/<shard>/<segment id>-<live docs>.<n>.gz`: the documents a restore
 //!   indexes again (id, routing, source with its vectors, sequence number, primary term and
-//!   version), gzipped, about 8 MiB a chunk. A segment's live documents only ever shrink, so the
-//!   key names one set of documents for good: a later snapshot of an unchanged segment reuses
-//!   its chunks (incremental snapshots, as Elasticsearch reuses files) and only new segments are
-//!   read and uploaded.
+//!   version), one gzip stream per segment cut into objects of `chunk_size` (`n` from 0), each
+//!   uploaded in `buffer_size` parts when larger ([`super::transfer::Upload`]). Snapshots written
+//!   before `chunk_size` gzipped each ~8 MiB chunk on its own: a reader takes the chunks as one
+//!   multi-member stream, so both read alike. A segment's live documents only ever shrink, so
+//!   the key names one set of documents for good: a later snapshot of an unchanged segment
+//!   reuses its chunks (incremental snapshots, as Elasticsearch reuses files) and only new
+//!   segments are read and uploaded.
 //!
 //! These are documents, not roll's segment files: a restore parses JSON it reads with bounds,
 //! never segment files from a bucket someone else may have written, and the format is the same
@@ -41,7 +46,7 @@ use crate::s3::{self as client, Credentials, Location};
 use crate::write::{CopyTarget, DocCopy};
 use bytes::Bytes;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::io::{BufRead, Read, Write};
+use std::io::{Read, Write};
 
 /// Node setting that lets `s3` repositories reach private addresses (local development).
 pub const ALLOW_PRIVATE: &str = "roll.repository.s3.allow_private_hosts";
@@ -58,10 +63,12 @@ const DATA_SNAPSHOTS_MAX: usize = 10_000;
 /// Indices over every snapshot of the repository data.
 const DATA_INDICES_MAX: usize = 100_000;
 const SHARD_FILE_MAX: usize = 64 << 20;
-const CHUNK_MAX: usize = 128 << 20;
 const HEAD_MAX: usize = 64 << 10;
-/// A chunk is closed once it holds this much compressed.
-const CHUNK_TARGET: usize = 8 << 20;
+/// Compressed bytes gathered before they go to the object being written.
+const DRAIN: usize = 1 << 20;
+/// Compressed bytes inflated at a time while reading: what one step can inflate to is bounded
+/// (deflate's ratio is at most ~1032:1), and records are taken out between steps.
+const FEED: usize = 8 << 10;
 /// Generations past `index.latest` a reader looks for.
 const PROBES: i64 = 16;
 /// `index.number_of_shards`' bound: repository data from a bucket is someone's input.
@@ -83,6 +90,16 @@ pub(super) fn validate(cluster: &crate::Cluster, name: &str, settings: &Settings
     }
     if !client::valid_bucket(bucket) {
         return Err(create(EsError::illegal_argument(format!("invalid bucket name [{bucket}]"))));
+    }
+    // `S3Repository`'s constructor: `buffer_size`, `chunk_size`, `max_multipart_parts`, then
+    // the chunk no smaller than the buffer.
+    let buffer = transfer::bounded_size(settings, "buffer_size", transfer::default_buffer(cluster), transfer::MIN_PART, transfer::MAX_PART).map_err(create)?;
+    let chunk = transfer::bounded_size(settings, "chunk_size", transfer::MAX_FILE, transfer::MIN_PART, transfer::MAX_FILE).map_err(create)?;
+    transfer::max_parts(settings).map_err(create)?;
+    if buffer > chunk {
+        let shown = |key: &str, v: i64| settings.get(key).map_or_else(|| crate::units::ByteSize(v).human(), str::to_string);
+        let why = format!("chunk_size ({}) can't be lower than buffer_size ({}).", shown("chunk_size", chunk), shown("buffer_size", buffer));
+        return Err(create(repository_exception(name, why)));
     }
     let base = settings.get("base_path").unwrap_or_default();
     if !base.is_empty() && base.trim_end_matches('/').split('/').any(|seg| seg.is_empty() || seg == "." || seg == "..") {
@@ -175,12 +192,17 @@ impl ShardBlobs {
 
 /// A registered `s3` repository's bucket.
 pub(super) struct Bucket {
-    name: String,
-    s3: client::Client,
+    pub(super) name: String,
+    pub(super) s3: client::Client,
     /// `<base_path>/roll/`.
-    prefix: String,
-    /// The `request` breaker, charged while repository data is parsed.
-    budget: Arc<search_aggs::memory::MemoryBudget>,
+    pub(super) prefix: String,
+    /// The `request` breaker, charged while repository data is parsed and parts are held.
+    pub(super) budget: Arc<search_aggs::memory::MemoryBudget>,
+    /// The repository's traffic on this node: throttles and counters.
+    pub(super) io: Arc<transfer::RepoIo>,
+    pub(super) sizes: transfer::Sizes,
+    /// How many dangling multipart uploads one cleanup aborts.
+    upload_cleanup: usize,
 }
 
 impl Bucket {
@@ -197,12 +219,22 @@ impl Bucket {
         let s3 = client::Client::new(at, creds, allow_private(cluster)).map_err(|e| failed(name, e))?;
         let base = r.settings.get("base_path").unwrap_or_default().trim_matches('/');
         let prefix = if base.is_empty() { "roll/".to_string() } else { format!("{base}/roll/") };
-        let budget = cluster.breakers.request(cluster, &cluster.state());
-        Ok(Bucket { name: name.to_string(), s3, prefix, budget })
+        let st = cluster.state();
+        let budget = cluster.breakers.request(cluster, &st);
+        let io = cluster.snapshot_data.repo_io(name, r, &st);
+        let sizes = transfer::sizes(cluster, &r.settings);
+        Ok(Bucket { name: name.to_string(), s3, prefix, budget, io, sizes, upload_cleanup: transfer::upload_cleanup_limit(&r.settings) })
     }
 
     fn fail(&self, what: &str, e: client::Error) -> EsError {
         repository_exception(&self.name, format!("{what}: {e}"))
+    }
+
+    fn failed_upload(&self, f: transfer::Failed) -> EsError {
+        match f {
+            transfer::Failed::S3(e) => self.fail("writing snapshot contents", e),
+            transfer::Failed::Breaker(e) => e,
+        }
     }
 
     fn shard_dir(&self, index_uuid: &str, shard: u32) -> String {
@@ -352,27 +384,35 @@ impl Bucket {
                 }
             }
             let wanted: HashSet<u32> = fresh.iter().map(|(o, _)| *o).collect();
+            let mut reading = std::time::Duration::ZERO;
+            let started = std::time::Instant::now();
             let mut docs = crate::write::live_root_docs(searcher, &|seg| wanted.contains(&seg.ord))?.into_iter().peekable();
+            reading += started.elapsed();
             for (ord, key) in fresh {
-                let mut seg = SegmentBlob { key, docs: 0, chunks: Vec::new() };
-                let mut chunk = Chunk::new();
-                while let Some(&doc) = docs.peek() {
-                    if searcher.segment_of(doc).map(|(s, _)| s.ord) != Some(ord) {
-                        break;
+                let mut up = SegmentUpload::new(self, index_uuid, shard, key);
+                let sent = async {
+                    while let Some(&doc) = docs.peek() {
+                        if searcher.segment_of(doc).map(|(s, _)| s.ord) != Some(ord) {
+                            break;
+                        }
+                        docs.next();
+                        let started = std::time::Instant::now();
+                        up.push(&crate::write::read_copy(searcher, vectors, doc)?);
+                        reading += started.elapsed();
+                        up.drain(DRAIN, &mut files, uploaded).await?;
                     }
-                    docs.next();
-                    chunk.push(&crate::write::read_copy(searcher, vectors, doc)?);
-                    seg.docs += 1;
-                    if chunk.len() >= CHUNK_TARGET {
-                        let body = std::mem::replace(&mut chunk, Chunk::new()).finish();
-                        self.put_chunk(index_uuid, shard, &mut seg, body, &mut files, uploaded).await?;
+                    Ok::<(), EsError>(())
+                }
+                .await;
+                match sent {
+                    Ok(()) => blobs.segments.push(up.finish(&mut files, uploaded).await?),
+                    Err(e) => {
+                        up.abort().await;
+                        return Err(e);
                     }
                 }
-                if chunk.records > 0 {
-                    self.put_chunk(index_uuid, shard, &mut seg, chunk.finish(), &mut files, uploaded).await?;
-                }
-                blobs.segments.push(seg);
             }
+            self.io.read_for_upload(reading);
         }
         let body = Bytes::from(blobs.to_json().to_json());
         let key = self.shard_file(snapshot, index_uuid, shard);
@@ -387,38 +427,40 @@ impl Bucket {
         Ok(files)
     }
 
-    async fn put_chunk(&self, index_uuid: &str, shard: u32, seg: &mut SegmentBlob, body: Vec<u8>, files: &mut ShardFiles, uploaded: &mut Vec<String>) -> EsResult<()> {
-        let key = self.chunk(index_uuid, shard, &seg.key, seg.chunks.len());
-        let n = body.len() as u64;
-        self.s3.put(&key, Bytes::from(body)).await.map_err(|e| self.fail("writing snapshot contents", e))?;
-        uploaded.push(key);
-        seg.chunks.push(n);
-        files.file_count += 1;
-        files.size_in_bytes += n;
-        files.incremental_file_count += 1;
-        files.incremental_size_in_bytes += n;
-        Ok(())
-    }
-
     /// Indexes every document shard `shard` of index `index_uuid` holds in `blobs` into `idx`
-    /// (unrefreshed). A chunk is read, then indexed: nothing is held across the reads.
+    /// (unrefreshed). Each segment's chunks are read as they arrive (paying the restore
+    /// throttles) and their records indexed as they complete: no more than one record and what
+    /// one step inflates is held.
     async fn import(&self, cluster: &crate::Cluster, idx: &Arc<IndexMeta>, blobs: &ShardBlobs, index_uuid: &str, shard: u32) -> EsResult<()> {
+        let source_max = source_max(cluster);
+        // Charged as the body of the write that indexed it would be. A target is made for each
+        // piece read (it isn't held across a read).
+        let index = |target: &CopyTarget, copy: DocCopy| -> EsResult<()> {
+            let _in_flight = cluster.breakers.charge_in_flight(cluster, &cluster.state(), copy.source.len() as u64)?;
+            target.index(&copy)
+        };
         for seg in &blobs.segments {
-            for n in 0..seg.chunks.len() {
+            let mut records = Records::new(source_max);
+            let first = self.chunk(index_uuid, shard, &seg.key, 0);
+            let damaged = |key: &str, why: &str| EsError::new(500, "snapshot_restore_exception", format!("[{}] the snapshot contents [{key}] are damaged: {why}", self.name));
+            for (n, &size) in seg.chunks.iter().enumerate() {
                 let key = self.chunk(index_uuid, shard, &seg.key, n);
-                let Some(raw) = self.s3.get(&key, CHUNK_MAX).await.map_err(|e| self.fail("reading snapshot contents", e))? else {
+                let Some(mut body) = self.s3.open(&key, None).await.map_err(|e| self.fail("reading snapshot contents", e))? else {
                     return Err(EsError::new(500, "snapshot_restore_exception", format!("[{}] the snapshot contents [{key}] are missing from the repository", self.name)));
                 };
-                let damaged = |why: &str| EsError::new(500, "snapshot_restore_exception", format!("[{}] the snapshot contents [{key}] are damaged: {why}", self.name));
-                let target = CopyTarget::new(cluster, idx)?;
-                let mut r = std::io::BufReader::new(flate2::read::GzDecoder::new(&raw[..]));
-                let source_max = source_max(cluster);
-                while let Some(copy) = read_record(&mut r, source_max).map_err(|e| damaged(&e))? {
-                    // Charged as the body of the write that indexed it would be.
-                    let _in_flight = cluster.breakers.charge_in_flight(cluster, &cluster.state(), copy.source.len() as u64)?;
-                    target.index(&copy)?;
+                let mut read = 0u64;
+                while let Some(piece) = body.next().await.map_err(|e| self.fail("reading snapshot contents", e))? {
+                    read += piece.len() as u64;
+                    self.io.read(&cluster.snapshot_data.recovery, piece.len() as u64).await;
+                    let target = CopyTarget::new(cluster, idx)?;
+                    records.push(&piece, &mut |c| index(&target, c), &|why| damaged(&key, why))?;
+                }
+                if read != size {
+                    return Err(damaged(&key, &format!("it holds [{read}] bytes, not the [{size}] recorded")));
                 }
             }
+            let target = CopyTarget::new(cluster, idx)?;
+            records.finish(&mut |c| index(&target, c), &|why| damaged(&first, why))?;
         }
         Ok(())
     }
@@ -454,6 +496,27 @@ impl Bucket {
                 }
             }
         }
+        // As Elasticsearch does after snapshot deletions: uploads a crash left are aborted.
+        let _ = self.abort_dangling().await;
+    }
+
+    /// Aborts the multipart uploads under the repository's prefix that aren't running here (what
+    /// a crash or a lost connection left), at most `max_multipart_upload_cleanup_size` of them:
+    /// how many. A server matching listed keys only exactly (MinIO) lists none here; its own
+    /// stale-upload expiry removes them.
+    async fn abort_dangling(&self) -> Result<u64, client::Error> {
+        if self.upload_cleanup == 0 {
+            return Ok(0);
+        }
+        let running = self.io.running_uploads();
+        let uploads = self.s3.list_uploads(&self.prefix, self.upload_cleanup + running.len()).await?;
+        let mut aborted = 0;
+        for (key, id) in uploads.into_iter().filter(|(_, id)| !running.contains(id)).take(self.upload_cleanup) {
+            if self.s3.abort_multipart(&key, &id).await.is_ok() {
+                aborted += 1;
+            }
+        }
+        Ok(aborted)
     }
 
     /// Every object under `indices/` that no snapshot of `data` references, older repository
@@ -485,6 +548,8 @@ impl Bucket {
                 count += 1;
             }
         }
+        // Best effort: a server without `ListMultipartUploads` still cleans up its objects.
+        let _ = self.abort_dangling().await;
         Ok((bytes, count))
     }
 
@@ -510,38 +575,151 @@ impl Bucket {
     }
 }
 
-/// A chunk being written: records, gzipped.
-struct Chunk {
+/// A segment's records going up: one gzip stream, cut into objects of the repository's chunk
+/// size, each an [`transfer::Upload`].
+struct SegmentUpload<'a> {
+    bucket: &'a Bucket,
+    index_uuid: &'a str,
+    shard: u32,
+    seg: SegmentBlob,
     enc: flate2::write::GzEncoder<Vec<u8>>,
-    records: usize,
+    current: Option<transfer::Upload<'a>>,
 }
 
-impl Chunk {
-    fn new() -> Chunk {
-        Chunk { enc: flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast()), records: 0 }
+impl<'a> SegmentUpload<'a> {
+    fn new(bucket: &'a Bucket, index_uuid: &'a str, shard: u32, key: String) -> SegmentUpload<'a> {
+        let enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        SegmentUpload { bucket, index_uuid, shard, seg: SegmentBlob { key, docs: 0, chunks: Vec::new() }, enc, current: None }
     }
 
-    /// One record: a JSON line (id, routing, sequence number, primary term, version and the
-    /// source's length), the source's bytes as stored, a line feed.
     fn push(&mut self, c: &DocCopy) {
-        let head = obj! {
-            "id" => c.id.clone(),
-            "routing" => c.routing.clone().map(Value::from).unwrap_or(Value::Null),
-            "seq_no" => c.seq_no, "primary_term" => c.primary_term, "version" => c.version,
-            "len" => c.source.len() as i64,
-        };
-        let w = &mut self.enc;
-        // Writing into a Vec doesn't fail.
-        let _ = w.write_all(head.to_json().as_bytes()).and_then(|_| w.write_all(b"\n")).and_then(|_| w.write_all(&c.source)).and_then(|_| w.write_all(b"\n"));
-        self.records += 1;
+        write_record(&mut self.enc, c);
+        self.seg.docs += 1;
     }
 
-    fn len(&self) -> usize {
-        self.enc.get_ref().len()
+    /// Sends what was compressed once it is at least `min` bytes.
+    async fn drain(&mut self, min: usize, files: &mut ShardFiles, uploaded: &mut Vec<String>) -> EsResult<()> {
+        if self.enc.get_ref().len() < min.max(1) {
+            return Ok(());
+        }
+        let out = std::mem::take(self.enc.get_mut());
+        self.feed(&out, files, uploaded).await
     }
 
-    fn finish(self) -> Vec<u8> {
-        self.enc.finish().unwrap_or_default()
+    async fn feed(&mut self, mut data: &[u8], files: &mut ShardFiles, uploaded: &mut Vec<String>) -> EsResult<()> {
+        let bucket = self.bucket;
+        while !data.is_empty() {
+            let (index_uuid, shard, seg) = (self.index_uuid, self.shard, &self.seg);
+            let up = self.current.get_or_insert_with(|| {
+                let key = bucket.chunk(index_uuid, shard, &seg.key, seg.chunks.len());
+                transfer::Upload::new(&bucket.s3, &bucket.io, bucket.budget.clone(), key, bucket.sizes.buffer)
+            });
+            let n = (bucket.sizes.chunk - up.size()).min(data.len() as u64) as usize;
+            up.write(&data[..n]).await.map_err(|e| bucket.failed_upload(e))?;
+            data = &data[n..];
+            if up.size() == bucket.sizes.chunk {
+                self.close(files, uploaded).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Completes the object being written.
+    async fn close(&mut self, files: &mut ShardFiles, uploaded: &mut Vec<String>) -> EsResult<()> {
+        let Some(mut up) = self.current.take() else { return Ok(()) };
+        let n = up.finish().await.map_err(|e| self.bucket.failed_upload(e))?;
+        uploaded.push(up.key().to_string());
+        self.seg.chunks.push(n);
+        files.file_count += 1;
+        files.size_in_bytes += n;
+        files.incremental_file_count += 1;
+        files.incremental_size_in_bytes += n;
+        Ok(())
+    }
+
+    /// Ends the stream and completes its last object.
+    async fn finish(mut self, files: &mut ShardFiles, uploaded: &mut Vec<String>) -> EsResult<SegmentBlob> {
+        let enc = std::mem::replace(&mut self.enc, flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast()));
+        let rest = enc.finish().unwrap_or_default();
+        if let Err(e) = self.feed(&rest, files, uploaded).await {
+            self.abort().await;
+            return Err(e);
+        }
+        self.close(files, uploaded).await?;
+        Ok(self.seg)
+    }
+
+    /// Abandons the object being written (its multipart upload is aborted).
+    async fn abort(&mut self) {
+        if let Some(mut up) = self.current.take() {
+            up.abort().await;
+        }
+    }
+}
+
+/// One record: a JSON line (id, routing, sequence number, primary term, version and the
+/// source's length), the source's bytes as stored, a line feed.
+fn write_record(w: &mut impl Write, c: &DocCopy) {
+    let head = obj! {
+        "id" => c.id.clone(),
+        "routing" => c.routing.clone().map(Value::from).unwrap_or(Value::Null),
+        "seq_no" => c.seq_no, "primary_term" => c.primary_term, "version" => c.version,
+        "len" => c.source.len() as i64,
+    };
+    // Writing into a Vec (through an encoder) doesn't fail.
+    let _ = w.write_all(head.to_json().as_bytes()).and_then(|_| w.write_all(b"\n")).and_then(|_| w.write_all(&c.source)).and_then(|_| w.write_all(b"\n"));
+}
+
+/// Records taken out of a segment's gzipped chunks as their bytes arrive ([`SegmentUpload`]'s
+/// format; older snapshots' chunks are gzip members of their own, read the same way).
+struct Records {
+    dec: flate2::write::MultiGzDecoder<Vec<u8>>,
+    /// How much of the inflated bytes was taken out already.
+    at: usize,
+    source_max: usize,
+}
+
+impl Records {
+    fn new(source_max: usize) -> Records {
+        Records { dec: flate2::write::MultiGzDecoder::new(Vec::new()), at: 0, source_max }
+    }
+
+    /// Inflates `raw` [`FEED`] bytes at a time, handing each record completed to `each`.
+    fn push(&mut self, raw: &[u8], each: &mut impl FnMut(DocCopy) -> EsResult<()>, damaged: &dyn Fn(&str) -> EsError) -> EsResult<()> {
+        for piece in raw.chunks(FEED) {
+            // Flushed so what was inflated is in the buffer, not held back inside the decoder.
+            self.dec.write_all(piece).and_then(|_| self.dec.flush()).map_err(|e| damaged(&e.to_string()))?;
+            self.take(each, damaged)?;
+        }
+        Ok(())
+    }
+
+    fn take(&mut self, each: &mut impl FnMut(DocCopy) -> EsResult<()>, damaged: &dyn Fn(&str) -> EsError) -> EsResult<()> {
+        loop {
+            let next = parse_record(&self.dec.get_ref()[self.at..], self.source_max).map_err(|e| damaged(&e))?;
+            let Some((copy, used)) = next else { break };
+            self.at += used;
+            each(copy)?;
+        }
+        let v = self.dec.get_mut();
+        if self.at == v.len() {
+            v.clear();
+            self.at = 0;
+        } else if self.at >= 1 << 20 {
+            v.drain(..self.at);
+            self.at = 0;
+        }
+        Ok(())
+    }
+
+    /// The end of the segment: nothing may be left over.
+    fn finish(mut self, each: &mut impl FnMut(DocCopy) -> EsResult<()>, damaged: &dyn Fn(&str) -> EsError) -> EsResult<()> {
+        self.dec.try_finish().map_err(|e| damaged(&e.to_string()))?;
+        self.take(each, damaged)?;
+        match self.at == self.dec.get_ref().len() {
+            true => Ok(()),
+            false => Err(damaged("a record is cut short")),
+        }
     }
 }
 
@@ -580,37 +758,39 @@ fn source_max(cluster: &crate::Cluster) -> usize {
     node.map_or(crate::api::nodes::MAX_CONTENT_LENGTH, |b| b.0).clamp(0, i32::MAX as i64) as usize
 }
 
-/// The next record of a chunk ([`Chunk::push`]), `None` at its end. A source longer than
+/// The record at the start of `buf` ([`SegmentUpload::push`]) and the bytes it takes, or `None`
+/// when `buf` doesn't hold all of it yet. A header past [`HEAD_MAX`] or a source longer than
 /// `source_max` is refused.
-fn read_record(r: &mut impl BufRead, source_max: usize) -> Result<Option<DocCopy>, String> {
-    let mut head = Vec::new();
-    let n = r.by_ref().take(HEAD_MAX as u64 + 1).read_until(b'\n', &mut head).map_err(|e| e.to_string())?;
-    if n == 0 {
-        return Ok(None);
-    }
-    if head.last() != Some(&b'\n') {
-        return Err("a record's header is cut short or too long".into());
-    }
-    let v = crate::json::parse(&head).ok().flatten().ok_or("a record's header isn't JSON")?;
+fn parse_record(buf: &[u8], source_max: usize) -> Result<Option<(DocCopy, usize)>, String> {
+    let Some(nl) = buf.iter().take(HEAD_MAX + 1).position(|b| *b == b'\n') else {
+        return match buf.len() > HEAD_MAX {
+            true => Err("a record's header is too long".into()),
+            false => Ok(None),
+        };
+    };
+    let v = crate::json::parse(&buf[..=nl]).ok().flatten().ok_or("a record's header isn't JSON")?;
     let int = |k: &str| v.get(k).and_then(Value::as_i64).ok_or_else(|| format!("a record has no [{k}]"));
     let len = int("len")?;
     if !(0..=source_max as i64).contains(&len) {
         return Err(format!("a record's source length [{len}] is out of bounds"));
     }
-    let mut source = Vec::new();
-    r.by_ref().take(len as u64).read_to_end(&mut source).map_err(|e| e.to_string())?;
-    let mut lf = [0u8; 1];
-    if source.len() != len as usize || r.read_exact(&mut lf).is_err() || lf[0] != b'\n' {
+    let end = nl + 1 + len as usize + 1;
+    if buf.len() < end {
+        return Ok(None);
+    }
+    if buf[end - 1] != b'\n' {
         return Err("a record's source is cut short".into());
     }
-    Ok(Some(DocCopy {
+    let copy = DocCopy {
         id: v.get("id").and_then(Value::as_str).ok_or("a record has no [id]")?.to_string(),
         routing: v.get("routing").and_then(Value::as_str).map(str::to_string),
-        source: Bytes::from(source),
+        source: Bytes::copy_from_slice(&buf[nl + 1..end - 1]),
         seq_no: int("seq_no")?,
         primary_term: int("primary_term")?,
         version: int("version")?,
-    }))
+        ignored_source: Vec::new(),
+    };
+    Ok(Some((copy, end)))
 }
 
 /// Repository `name` when it keeps its contents in a tenant's bucket.
@@ -768,7 +948,10 @@ async fn export_index(ctx: &Ctx<'_>, bucket: &Bucket, uuid: &str, location: &str
             Some(p) => bucket.read_shard(p, index_uuid, n).await?,
             None => None,
         };
-        let mut f = bucket.export_shard(searcher.as_ref(), &vectors, uuid, index_uuid, n, prev.as_ref(), uploaded).await?;
+        bucket.io.shard_started();
+        let exported = bucket.export_shard(searcher.as_ref(), &vectors, uuid, index_uuid, n, prev.as_ref(), uploaded).await;
+        bucket.io.shard_done();
+        let mut f = exported?;
         f.start_ms = start_ms;
         f.time_ms = (crate::time::now_millis() - start_ms).max(0);
         running.set(index_uuid, n, ShardRun::Done(f));
@@ -892,25 +1075,46 @@ pub(super) async fn cleanup(ctx: &Ctx<'_>, repo: &str, r: &Repository) -> EsResu
 mod tests {
     use super::*;
 
+    fn gzip_member(raw: &[u8]) -> Vec<u8> {
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        enc.write_all(raw).unwrap();
+        enc.finish().unwrap()
+    }
+
     #[test]
     fn records_round_trip_and_bounds_hold() {
         let copies = [
-            DocCopy { id: "1".into(), routing: None, source: Bytes::from_static(b"{\"a\":1}"), seq_no: 0, primary_term: 1, version: 1 },
-            DocCopy { id: "x\ny".into(), routing: Some("r".into()), source: Bytes::from_static(b"{\n \"b\" : \"\\n\"}"), seq_no: 7, primary_term: 2, version: 3 },
+            DocCopy { id: "1".into(), routing: None, source: Bytes::from_static(b"{\"a\":1}"), seq_no: 0, primary_term: 1, version: 1, ignored_source: Vec::new() },
+            DocCopy { id: "x\ny".into(), routing: Some("r".into()), source: Bytes::from_static(b"{\n \"b\" : \"\\n\"}"), seq_no: 7, primary_term: 2, version: 3, ignored_source: Vec::new() },
         ];
-        let mut c = Chunk::new();
+        // Two gzip members (as older snapshots' chunks are), fed in awkward pieces.
+        let mut raw = Vec::new();
         for d in &copies {
-            c.push(d);
+            let mut one = Vec::new();
+            write_record(&mut one, d);
+            raw.extend(gzip_member(&one));
         }
-        let raw = c.finish();
-        let mut r = std::io::BufReader::new(flate2::read::GzDecoder::new(&raw[..]));
-        let back: Vec<DocCopy> = std::iter::from_fn(|| read_record(&mut r, 1 << 20).unwrap()).collect();
+        let damaged = |why: &str| EsError::internal(why.to_string());
+        let mut back = Vec::new();
+        let mut keep = |c| {
+            back.push(c);
+            Ok(())
+        };
+        let mut records = Records::new(1 << 20);
+        for piece in raw.chunks(7) {
+            records.push(piece, &mut keep, &damaged).unwrap();
+        }
+        records.finish(&mut keep, &damaged).unwrap();
         assert_eq!(back, copies);
-        // A length past the bound, or past what's there, is refused rather than allocated.
+        // A length past the bound is refused rather than waited for; a cut record fails at the end.
         let huge = format!("{{\"id\":\"1\",\"seq_no\":0,\"primary_term\":1,\"version\":1,\"len\":{}}}\n", u64::MAX / 2);
-        assert!(read_record(&mut std::io::Cursor::new(huge.into_bytes()), 1 << 20).is_err());
-        let short = b"{\"id\":\"1\",\"seq_no\":0,\"primary_term\":1,\"version\":1,\"len\":10}\n{}\n".to_vec();
-        assert!(read_record(&mut std::io::Cursor::new(short), 1 << 20).is_err());
+        assert!(parse_record(huge.as_bytes(), 1 << 20).is_err());
+        assert!(parse_record(&vec![b'x'; HEAD_MAX + 2], 1 << 20).is_err());
+        let short = b"{\"id\":\"1\",\"seq_no\":0,\"primary_term\":1,\"version\":1,\"len\":10}\n{}\n";
+        assert!(matches!(parse_record(short, 1 << 20), Ok(None)));
+        let mut cut = Records::new(1 << 20);
+        cut.push(&gzip_member(short), &mut |_| Ok(()), &damaged).unwrap();
+        assert!(cut.finish(&mut |_| Ok(()), &damaged).is_err());
         assert!(ShardBlobs::parse(br#"{"segments":[{"key":"../../x","docs":1,"chunks":[1]}]}"#).is_none());
         // Repository data is bounded inflated, and by the values parsing it would build.
         let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());

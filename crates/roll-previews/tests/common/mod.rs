@@ -95,6 +95,21 @@ impl Source for FakeCode {
             self.teardowns.lock().push((p.id.clone(), t.to_string()));
         }
     }
+    /// A plain body from the preview's state (roll code builds the real one from its summary).
+    fn git_report_body(&self, p: &Preview, _s: &Settings, deleted: Option<Option<&str>>) -> Option<roll_previews::ports::GitReportBody> {
+        let state = match (deleted, p.state) {
+            (Some(_), _) => None,
+            (None, roll_previews::State::Ready | roll_previews::State::Sleeping) => Some("success"),
+            (None, roll_previews::State::Failed) => Some("failure"),
+            (None, _) => Some("pending"),
+        };
+        Some(roll_previews::ports::GitReportBody {
+            state: state.map(str::to_string),
+            description: format!("{:?}", p.state),
+            target_url: p.services.first().map(|s| s.url.clone()),
+            comment: format!("{:?} at {}{}", p.state, p.head, if deleted.is_some() { ", deleted" } else { "" }),
+        })
+    }
     async fn budget(&self, repos: &[String], alert: &roll_previews::ports::BudgetAlert) -> anyhow::Result<()> {
         self.budgets.lock().push((repos.to_vec(), alert.clone()));
         Ok(())
@@ -196,6 +211,11 @@ pub type Vars = Vec<(String, String)>;
 #[derive(Default)]
 pub struct FakeApps {
     pub deployed: Mutex<HashMap<(String, String), String>>,
+    /// Every deploy a deploy hook asked for: (preview, service, its rebuild number).
+    pub rebuilt: Mutex<Vec<(String, String, i64)>>,
+
+    /// Every project's own preview domain, verified (roll apps' project preview domain).
+    pub domain: Mutex<Option<(String, bool)>>,
     /// roll apps' catalog for the project (unset: none, so roll.toml's services), and the memory
     /// its preview environments run with.
     pub catalog: Mutex<Option<Vec<roll_previews::ports::CatalogService>>>,
@@ -207,6 +227,14 @@ pub struct FakeApps {
     /// The variables each service was last deployed with.
     pub vars: Mutex<HashMap<(String, String), Vars>>,
     pub removed: Mutex<Vec<(String, String)>>,
+    /// What each service uses, by name (unset: not running).
+    pub metrics: Mutex<HashMap<String, (f64, u64)>>,
+    /// What every service's log holds.
+    pub log: Mutex<Vec<String>>,
+    /// What each seed or release job was run able to reach.
+    pub seed_egress: Mutex<Vec<roll_previews::settings::EgressRule>>,
+    /// What each service was deployed able to reach.
+    pub egress: Mutex<HashMap<(String, String), roll_previews::settings::EgressRule>>,
     /// Seeds run (their DATABASE_URL), and the exit code the next ones give.
     pub seeds: Mutex<Vec<String>>,
     pub seed_exit: std::sync::atomic::AtomicI32,
@@ -229,6 +257,8 @@ pub struct FakeApps {
     pub slept: Mutex<Vec<(String, String)>>,
     /// The PNG every screenshot is (unset: the backend can't take one), and the previews taken.
     pub shot: Mutex<Option<Vec<u8>>>,
+    /// What the screenshot's page logs as its first error.
+    pub page_says: Mutex<Option<String>>,
     /// The API operations a screenshot reads when it's asked to (`github.openapi`), by a
     /// revision the preview runs.
     pub api: Mutex<HashMap<String, Vec<String>>>,
@@ -258,12 +288,19 @@ impl Apps for FakeApps {
             anyhow::bail!("the build failed");
         }
         self.deployed.lock().insert((t.preview.clone(), t.service.clone()), t.revision.clone());
+        if let Some(n) = t.rebuild {
+            self.rebuilt.lock().push((t.preview.clone(), t.service.clone(), n));
+        }
         self.vars.lock().insert((t.preview.clone(), t.service.clone()), t.vars.clone());
         self.feedback.lock().insert((t.preview.clone(), t.service.clone()), t.feedback);
+        self.egress.lock().insert((t.preview.clone(), t.service.clone()), t.egress);
         Ok(None)
     }
     async fn catalog(&self, _project: &str) -> anyhow::Result<Option<Vec<roll_previews::ports::CatalogService>>> {
         Ok(self.catalog.lock().clone())
+    }
+    async fn preview_domain(&self, _project: &str) -> Option<(String, bool)> {
+        self.domain.lock().clone()
     }
     async fn memory_mb(&self, _: &str, _: &str) -> Option<u32> {
         *self.memory.lock()
@@ -287,15 +324,21 @@ impl Apps for FakeApps {
         self.removed.lock().push((p.to_string(), s.to_string()));
         Ok(())
     }
+    async fn metrics(&self, _: &str, service: &str) -> Option<(f64, u64)> {
+        self.metrics.lock().get(service).copied()
+    }
     async fn logs(&self, _: &str, _: &str, _: usize) -> Vec<String> {
-        Vec::new()
+        self.log.lock().clone()
     }
     async fn seed(&self, job: &roll_previews::ports::SeedJob) -> anyhow::Result<(i32, String)> {
         let db = job.env.iter().find(|(k, _)| k == "DATABASE_URL").map(|(_, v)| v.clone()).unwrap_or_default();
         self.seeds.lock().push(db);
+        self.seed_egress.lock().push(job.egress);
         let at_rev = self.deployed.lock().values().filter(|r| **r == job.revision).count();
         self.runs.lock().push((job.seed.run.clone(), job.revision.clone(), at_rev));
-        Ok((self.seed_exit.load(Ordering::SeqCst), "seed output".into()))
+        // A job that prints what it was given.
+        let printed: Vec<String> = job.env.iter().filter(|(k, _)| k == "STRIPE_KEY").map(|(k, v)| format!(", {k}={v}")).collect();
+        Ok((self.seed_exit.load(Ordering::SeqCst), format!("seed output{}", printed.concat())))
     }
     async fn screenshot(&self, preview: &str, service: &str, opts: &roll_previews::ports::ShotOptions) -> anyhow::Result<Option<roll_previews::ports::Shot>> {
         let Some(png) = self.shot.lock().clone() else { return Ok(None) };
@@ -314,7 +357,8 @@ impl Apps for FakeApps {
             .collect();
         self.crops_asked.lock().extend(opts.crops.iter().map(|c| c.note.clone()));
         let crops = opts.crops.iter().filter(|c| c.selector != "#missing").map(|c| (c.note.clone(), png.clone())).collect();
-        Ok(Some(roll_previews::ports::Shot { png, speed: None, health: None, a11y: None, phone: None, pages, text: None, links: None, api, crops }))
+        let health = self.page_says.lock().clone().map(|said| roll_previews::PageHealth { errors: 1, first_error: Some(said), failed: 0, first_failed: None, unstable: false });
+        Ok(Some(roll_previews::ports::Shot { png, speed: None, health, a11y: None, phone: None, pages, text: None, links: None, api, crops }))
     }
     fn status(&self, p: &str, s: &str) -> Option<ServiceState> {
         self.running.lock().contains(&(p.to_string(), s.to_string())).then_some(ServiceState::Running)
@@ -328,6 +372,41 @@ impl Apps for FakeApps {
 }
 
 /// roll secrets as previews see it: every `ensure` (environment, trusted). With `dynamic`, each
+/// A Git URL service's repository: records each status and comment (a comment gets id 77,
+/// edits name it). `connected: false` posts nothing.
+/// A posted status: service, sha, state, description, link.
+pub type PostedStatus = (String, String, String, String, Option<String>);
+
+pub struct FakeGitReport {
+    pub connected: std::sync::atomic::AtomicBool,
+    pub statuses: Mutex<Vec<PostedStatus>>,
+    pub comments: Mutex<Vec<(u64, Option<u64>, String)>>,
+}
+
+impl Default for FakeGitReport {
+    fn default() -> Self {
+        FakeGitReport { connected: std::sync::atomic::AtomicBool::new(true), statuses: Mutex::new(Vec::new()), comments: Mutex::new(Vec::new()) }
+    }
+}
+
+#[async_trait]
+impl roll_previews::ports::GitReport for FakeGitReport {
+    async fn status(&self, service: &str, sha: &str, state: &str, description: &str, target_url: Option<&str>) -> anyhow::Result<bool> {
+        if !self.connected.load(Ordering::SeqCst) {
+            return Ok(false);
+        }
+        self.statuses.lock().push((service.into(), sha.into(), state.into(), description.into(), target_url.map(Into::into)));
+        Ok(true)
+    }
+    async fn comment(&self, _service: &str, _repo: &str, number: u64, body: &str, existing: Option<u64>) -> anyhow::Result<Option<u64>> {
+        if !self.connected.load(Ordering::SeqCst) {
+            return Ok(None);
+        }
+        self.comments.lock().push((number, existing, body.into()));
+        Ok(Some(77))
+    }
+}
+
 /// resolve issues a credential (`DB_PASSWORD=pw-<n>` under lease `lease-<n>`); renewals and
 /// revocations are recorded, and a lease in `ended` can't be renewed.
 #[derive(Default)]
@@ -338,20 +417,37 @@ pub struct FakeSecrets {
     pub renewed: Mutex<Vec<String>>,
     pub revoked: Mutex<Vec<String>>,
     pub ended: Mutex<std::collections::HashSet<String>>,
+    /// What each ensure said the preview branched.
+    pub branched: Mutex<Vec<(Kind, String)>>,
+    /// Keys resolve answers as followed (links to a branched parent: nothing of it resolved).
+    pub followed: Mutex<Vec<(String, Kind, String, String)>>,
+    /// The base's links (`links`), and what each ensure set as the environment's own keys.
+    pub links: Mutex<Vec<(String, Kind, String, String)>>,
+    pub own: Mutex<Vec<(String, String)>>,
+    /// Values every resolve answers (static secrets).
+    pub values: Mutex<Vec<(String, String)>>,
 }
 
 #[async_trait]
 impl roll_previews::ports::Secrets for FakeSecrets {
-    async fn ensure(&self, _: &str, env: &str, _: &str, _: &[(String, String)], trusted: bool, _: i64) -> anyhow::Result<()> {
+    async fn ensure(&self, _: &str, env: &str, _: &str, vars: &[(String, String)], trusted: bool, _: i64, branches: &[(Kind, String)]) -> anyhow::Result<()> {
         self.ensured.lock().push((env.to_string(), trusted));
+        *self.branched.lock() = branches.to_vec();
+        *self.own.lock() = vars.to_vec();
         Ok(())
     }
-    async fn resolve(&self, _: &str, _: &str, _: bool, _: &str) -> anyhow::Result<roll_previews::ports::Resolved> {
-        if !self.dynamic.load(Ordering::SeqCst) {
-            return Ok(Default::default());
+    async fn resolve(&self, _: &str, _: &str, _: bool, dynamic: bool, _: &str) -> anyhow::Result<roll_previews::ports::Resolved> {
+        let followed = self.followed.lock().clone();
+        let values = self.values.lock().clone();
+        if !dynamic || !self.dynamic.load(Ordering::SeqCst) {
+            return Ok(roll_previews::ports::Resolved { followed, values, ..Default::default() });
         }
         let n = self.issued.fetch_add(1, Ordering::SeqCst) + 1;
-        Ok(roll_previews::ports::Resolved { values: vec![("DB_PASSWORD".into(), format!("pw-{n}"))], problems: Vec::new(), leases: vec![format!("lease-{n}")] })
+        let values = values.into_iter().chain([("DB_PASSWORD".into(), format!("pw-{n}"))]).collect();
+        Ok(roll_previews::ports::Resolved { values, problems: Vec::new(), leases: vec![format!("lease-{n}")], followed, plain: Vec::new() })
+    }
+    async fn links(&self, _: &str, _: &str) -> anyhow::Result<Vec<(String, Kind, String, String)>> {
+        Ok(self.links.lock().clone())
     }
     async fn renew(&self, _: &str, lease: &str) -> anyhow::Result<Option<i64>> {
         if self.ended.lock().contains(lease) {

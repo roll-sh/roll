@@ -1,11 +1,12 @@
 import { FileUp } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { appsApi, type Link, type ProjectImport, type Service, type Source } from "@/lib/apps-api";
+import { appsApi, type ImportFile, type Link, type ProjectImport, type Service, type Source } from "@/lib/apps-api";
 import { looksSecret } from "@/lib/secret-names";
 import type { Template } from "@/lib/templates";
 import type { WorkspaceProject } from "@/lib/workspace-api";
 import { redisApi } from "@/lib/redis-api";
 import { nosqlApi } from "@/lib/nosql-api";
+import { searchApi } from "@/lib/search-api";
 import { api, streams } from "@/lib/roll-api";
 import { storageApi } from "@/lib/storage-api";
 import { freeSpot, service as serviceView } from "@/lib/workspace-resources";
@@ -121,8 +122,14 @@ export function stepLine(s: ImportStep): { mark: string; text: string } {
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
-/** A roll.toml (with `[apps]`) or a Compose file, read by rolld; nothing about it decides here. */
-function fileOf(text: string, filename: string): { roll_toml: string } | { compose: string } {
+/** A roll.toml (with `[apps]`), a Compose file, or another platform's (Render's render.yaml,
+ *  fly.toml, railway.json or .toml, Heroku's app.json), by its name; read by rolld. */
+export function fileOf(text: string, filename: string): ImportFile {
+  const base = filename.split(/[\\/]/).pop()?.toLowerCase() ?? "";
+  if (/^render\.ya?ml$/.test(base)) return { render: text };
+  if (base === "fly.toml") return { fly: text };
+  if (base === "railway.json" || base === "railway.toml") return { railway: text };
+  if (base === "app.json") return { heroku: text };
   if (/\.toml$/i.test(filename) || (!/\.ya?ml$/i.test(filename) && /^\s*\[(apps|databases)[.\]]/m.test(text))) return { roll_toml: text };
   return { compose: text };
 }
@@ -204,6 +211,7 @@ export function ImportPane({ project, spot, onDone, repo, git, template }: { pro
       if (kinds.has("bucket")) for (const b of await storageApi.buckets()) names.set(`bucket:${b.name}`, b.name);
       if (kinds.has("stream")) for (const s of await streams.list()) names.set(`stream:${s.id}`, s.name);
       if (kinds.has("nosql")) for (const d of await nosqlApi.list()) names.set(`nosql:${d.id}`, d.name);
+      if (kinds.has("search")) for (const c of await searchApi.list()) names.set(`search:${c.id}`, c.name);
       const dbs = new Map<string, string>();
       for (const r of project.resources) {
         const n = names.get(`${r.kind}:${r.ref}`);
@@ -335,7 +343,7 @@ export function ImportPane({ project, spot, onDone, repo, git, template }: { pro
       ) : (
       <>
       <Label>
-        roll.toml or Compose file <span className="font-normal">read by rolld; nothing is made until you apply</span>
+        roll.toml, Compose file, render.yaml, fly.toml, railway.json or app.json <span className="font-normal">read by rolld; nothing is made until you apply</span>
       </Label>
       <textarea
         value={text}
@@ -425,7 +433,7 @@ export function ImportPane({ project, spot, onDone, repo, git, template }: { pro
             </div>
           )}
           {madeSecrets.length > 0 && <p className="mt-2 text-[11px] text-subtle">Made for you, once, never shown: {madeSecrets.join(", ")}</p>}
-          {!given && "compose" in fileOf(text, filename) && (
+          {!given && !("roll_toml" in fileOf(text, filename)) && (
             <a
               href={`data:text/plain;charset=utf-8,${encodeURIComponent(read.imp.roll_toml)}`}
               download="roll.toml"

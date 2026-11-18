@@ -538,6 +538,24 @@ impl GitHub {
         environment: &str,
         description: &str,
     ) -> Result<u64> {
+        self.create_deployment_in(installation, owner, repo, sha, environment, description, true, false)
+            .await
+    }
+
+    /// A deployment of `sha` to `environment`, saying whether that environment is transient (a
+    /// preview) or production.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_deployment_in(
+        &self,
+        installation: u64,
+        owner: &str,
+        repo: &str,
+        sha: &str,
+        environment: &str,
+        description: &str,
+        transient: bool,
+        production: bool,
+    ) -> Result<u64> {
         let path = repo_path(owner, repo, "/deployments");
         let body = json!({
             "ref": sha,
@@ -545,8 +563,8 @@ impl GitHub {
             "description": description,
             "auto_merge": false,
             "required_contexts": [],
-            "transient_environment": true,
-            "production_environment": false,
+            "transient_environment": transient,
+            "production_environment": production,
         });
         let v: Value = self
             .send_json(Who::Installation(installation), Method::POST, &path, &body)
@@ -602,6 +620,18 @@ impl GitHub {
         }
         self.send_json(Who::Installation(installation), Method::POST, &path, &body)
             .await
+    }
+
+    /// A commit's check runs (`GET …/commits/{sha}/check-runs`, the first 100).
+    pub async fn commit_check_runs(&self, installation: u64, owner: &str, repo: &str, sha: &str) -> Result<Value> {
+        let path = repo_path(owner, repo, &format!("/commits/{}/check-runs?per_page=100", percent_encode(sha)));
+        self.get(Who::Installation(installation), &path).await
+    }
+
+    /// A commit's combined status (`GET …/commits/{sha}/status`: the latest of each context).
+    pub async fn commit_status(&self, installation: u64, owner: &str, repo: &str, sha: &str) -> Result<Value> {
+        let path = repo_path(owner, repo, &format!("/commits/{}/status?per_page=100", percent_encode(sha)));
+        self.get(Who::Installation(installation), &path).await
     }
 
     // ── pull requests ──

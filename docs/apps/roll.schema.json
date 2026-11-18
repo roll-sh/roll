@@ -89,6 +89,22 @@
           "minimum": 0,
           "description": "How long a new instance may take to become healthy, seconds."
         },
+        "health_every_s": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 300,
+          "description": "Seconds between two health checks of a running instance (default 10)."
+        },
+        "health_failures": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10,
+          "description": "Failed health checks in a row that replace an instance (default 3)."
+        },
+        "health_command": {
+          "type": "string",
+          "description": "A worker's health check: a shell command in its instance, healthy on exit 0."
+        },
         "suspend_after_s": {
           "type": "integer",
           "minimum": 0,
@@ -129,6 +145,12 @@
           "minimum": 0,
           "description": "Scale out above this CPU percent."
         },
+        "memory_target": {
+          "type": "integer",
+          "minimum": 10,
+          "maximum": 100,
+          "description": "Scale out above this percent of each instance's memory."
+        },
         "restart": {
           "type": "string",
           "enum": [
@@ -151,6 +173,10 @@
           "type": "boolean",
           "description": "Raw TCP, not HTTP."
         },
+        "rebuild_on_base": {
+          "type": "boolean",
+          "description": "Build again (same revision, no cache) when a base image moves."
+        },
         "rollback_on_crash": {
           "type": "boolean",
           "description": "Roll back when a new deployment crash-loops."
@@ -164,8 +190,7 @@
             "additionalProperties": false,
             "required": [
               "name",
-              "schedule",
-              "command"
+              "schedule"
             ],
             "properties": {
               "name": {
@@ -178,6 +203,10 @@
               },
               "command": {
                 "type": "string"
+              },
+              "path": {
+                "type": "string",
+                "description": "A web service's path to GET instead of a command (Vercel's crons)."
               },
               "timezone": {
                 "type": "string",
@@ -201,9 +230,10 @@
           "type": "string",
           "enum": [
             "auto",
-            "dockerfile"
+            "dockerfile",
+            "functions"
           ],
-          "description": "auto: detect; dockerfile: build the tree's own Dockerfile."
+          "description": "auto: detect; dockerfile: build the tree's own Dockerfile; functions: run a static site's netlify/functions and api/ as a Node service."
         },
         "dockerfile": {
           "type": "string",

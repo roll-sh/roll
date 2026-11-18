@@ -45,6 +45,18 @@ pub struct LogLine {
     /// `ERROR`): read once as it's written; absent when it says none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub level: Option<Level>,
+    /// Part of a stack trace in the app's output (`errors::occurrences`' joining, as it's
+    /// written): `start` on its first line, `more` on the rest from the same instance and stream,
+    /// so a view shows the trace as one entry however other instances' lines fall between.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace: Option<Trace>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Trace {
+    Start,
+    More,
 }
 
 /// A line's level, least to most severe (Cloud Run's severities, folded).
@@ -130,6 +142,56 @@ impl Log {
     }
 }
 
+/// The shortest value redacted: anything shorter (`1`, `true`, a port) is too common in a log
+/// to hide without hiding what the log says.
+const MIN_REDACT: usize = 6;
+/// The most values one log redacts (each line of a multi-line value counts).
+const MAX_REDACT: usize = 2000;
+/// The deployments' values a log keeps redacting (the live one, a canary, a few before).
+const REDACT_DEPLOYMENTS: usize = 8;
+
+/// Secret values taken out of a log's lines as they're written (GitHub Actions' masking): an
+/// environment's sealed and sensitive variables and its links' credentials, wherever a build
+/// step, the app, a job or roll prints one. Each becomes `***`.
+pub struct Redact(aho_corasick::AhoCorasick);
+
+impl Redact {
+    /// What redacts `values` (each, and each line of one over several), if any is long enough.
+    pub fn of<'a>(values: impl IntoIterator<Item = &'a str>) -> Option<Arc<Redact>> {
+        let mut v: Vec<&str> = values.into_iter().flat_map(|v| std::iter::once(v).chain(v.lines().filter(move |_| v.contains('\n')))).map(str::trim).filter(|v| v.len() >= MIN_REDACT).collect();
+        v.sort_unstable();
+        v.dedup();
+        v.truncate(MAX_REDACT);
+        if v.is_empty() {
+            return None;
+        }
+        aho_corasick::AhoCorasick::builder().match_kind(aho_corasick::MatchKind::LeftmostLongest).build(&v).ok().map(|a| Arc::new(Redact(a)))
+    }
+
+    /// The line with every value in it as `***`, or none when it holds none.
+    pub fn apply(&self, text: &str) -> Option<String> {
+        if !self.0.is_match(text) {
+            return None;
+        }
+        let mut out = String::with_capacity(text.len());
+        self.0.replace_all_with(text, &mut out, |_, _, dst| {
+            dst.push_str("***");
+            true
+        });
+        Some(out)
+    }
+}
+
+/// A log's redactions: each deployment's values (newest last), and all of them together.
+#[derive(Default)]
+struct Redactions {
+    by: Vec<(String, Vec<String>)>,
+    all: Option<Arc<Redact>>,
+}
+
+/// A log, an instance and a stream: where a trace is open.
+type TraceKey = (Arc<str>, Option<Arc<str>>, u8);
+
 /// Where the log tap sends `(log key, line)`.
 pub type Tap = tokio::sync::mpsc::Sender<(Arc<str>, LogLine)>;
 
@@ -142,11 +204,15 @@ pub struct LogHub {
     /// Whether some drain asks for request (`http:`) and build (`build:`) lines.
     tap_http: std::sync::atomic::AtomicBool,
     tap_build: std::sync::atomic::AtomicBool,
+    /// The traces open in each log's instance and stream: their kind and lines so far.
+    traces: Mutex<HashMap<TraceKey, (crate::errors::Kind, usize)>>,
+    /// What each log takes out of its lines ([`Redact`]), by log key.
+    redactions: Mutex<HashMap<String, Redactions>>,
 }
 
 impl LogHub {
     pub fn new(objects: Option<Objects>) -> Arc<LogHub> {
-        Arc::new(LogHub { logs: Mutex::new(HashMap::new()), objects, tap: Mutex::new(None), tap_http: Default::default(), tap_build: Default::default() })
+        Arc::new(LogHub { logs: Mutex::new(HashMap::new()), objects, tap: Mutex::new(None), tap_http: Default::default(), tap_build: Default::default(), traces: Mutex::new(HashMap::new()), redactions: Mutex::new(HashMap::new()) })
     }
 
     /// Every runtime line from now on, `(log key, line)`, at most `capacity` waiting.
@@ -164,6 +230,64 @@ impl LogHub {
 
     pub fn sink(self: &Arc<Self>, key: impl Into<String>, stream: Stream) -> LogSink {
         LogSink { hub: self.clone(), key: Arc::from(key.into()), stream, instance: None, deployment: None, redact: None }
+    }
+
+    /// From now on `key`'s lines have `deployment`'s secret `values` taken out, with the values of
+    /// the few deployments before it (an old instance still draining prints too).
+    pub fn redact(&self, key: &str, deployment: &str, mut values: Vec<String>) {
+        // Each as a JSON string holds it too (an OTLP record, a span's attribute, written as JSON).
+        let escaped: Vec<String> = values.iter().filter_map(|v| serde_json::to_string(v).ok().map(|j| j[1..j.len() - 1].to_string()).filter(|j| j != v)).collect();
+        values.extend(escaped);
+        let mut all = self.redactions.lock();
+        let r = all.entry(key.to_string()).or_default();
+        r.by.retain(|(d, _)| d != deployment);
+        r.by.push((deployment.to_string(), values));
+        if r.by.len() > REDACT_DEPLOYMENTS {
+            r.by.remove(0);
+        }
+        r.all = Redact::of(r.by.iter().flat_map(|(_, v)| v.iter().map(String::as_str)));
+    }
+
+    /// `to` redacts what `from` does (a job's log, its environment's values).
+    pub fn redact_like(&self, from: &str, to: &str) {
+        let mut all = self.redactions.lock();
+        if let Some(r) = all.get(from) {
+            let copy = Redactions { by: r.by.clone(), all: r.all.clone() };
+            all.insert(to.to_string(), copy);
+        }
+    }
+
+    fn redaction(&self, key: &str) -> Option<Arc<Redact>> {
+        self.redactions.lock().get(key).and_then(|r| r.all.clone())
+    }
+
+    /// Whether an app's line starts a stack trace, goes on with the one open in its instance and
+    /// stream, or neither (which closes any open there).
+    fn trace_of(&self, key: &Arc<str>, instance: &Option<Arc<str>>, stream: Stream, text: &str) -> Option<Trace> {
+        let k = (key.clone(), instance.clone(), stream as u8);
+        let mut open = self.traces.lock();
+        if let Some((kind, n)) = open.get(&k).copied() {
+            match crate::errors::continues(kind, text, n) {
+                Some(end) if n < crate::errors::MAX_TRACE_LINES => {
+                    if end {
+                        open.remove(&k);
+                    } else {
+                        open.insert(k, (kind, n + 1));
+                    }
+                    return Some(Trace::More);
+                }
+                _ => {
+                    open.remove(&k);
+                }
+            }
+        }
+        let kind = crate::errors::starts(text)?;
+        // Instances that ended mid-trace leave theirs open: bounded, whatever comes.
+        if open.len() >= 10_000 {
+            open.clear();
+        }
+        open.insert(k, (kind, 1));
+        Some(Trace::Start)
     }
 
     fn push(&self, key: &str, line: LogLine) {
@@ -313,7 +437,7 @@ impl LogHub {
                     if l.dropped > 0 {
                         let t = lines.last().map_or_else(code_sql::now_ms, |x| x.t);
                         let text = format!("… {} lines dropped: more than {} MiB of output in a few seconds", l.dropped, UNFLUSHED_MAX >> 20);
-                        lines.push(LogLine { t, stream: Stream::System, instance: None, deployment: None, text, level: Some(Level::Warn) });
+                        lines.push(LogLine { t, stream: Stream::System, instance: None, deployment: None, text, level: Some(Level::Warn), trace: None });
                     }
                     l.unflushed_bytes = 0;
                     l.dropped = 0;
@@ -360,12 +484,14 @@ impl LogHub {
         let mut logs = self.logs.lock();
         if logs.get(key).is_some_and(|l| l.unflushed.is_empty() && l.dropped == 0) {
             logs.remove(key);
+            self.redactions.lock().remove(key);
         }
     }
 
     /// Forget a log in memory (a deleted environment); its chunks expire with the bucket's rule.
     pub fn forget(&self, key: &str) {
         self.logs.lock().remove(key);
+        self.redactions.lock().remove(key);
     }
 
     pub async fn delete(&self, key: &str) {
@@ -415,6 +541,9 @@ impl LogSink {
         if let Some(r) = &self.redact {
             text = text.replace(&**r, "…");
         }
+        if let Some(t) = self.hub.redaction(&self.key).and_then(|r| r.apply(&text)) {
+            text = t;
+        }
         if text.len() > LINE_MAX {
             let mut cut = LINE_MAX;
             while !text.is_char_boundary(cut) {
@@ -423,6 +552,8 @@ impl LogSink {
             text.truncate(cut);
             text.push('…');
         }
+        let app = matches!(self.stream, Stream::Stdout | Stream::Stderr);
+        let trace = if app { self.hub.trace_of(&self.key, &self.instance, self.stream, &text) } else { None };
         self.hub.push(
             &self.key,
             LogLine {
@@ -431,7 +562,8 @@ impl LogSink {
                 instance: self.instance.as_deref().map(str::to_string),
                 deployment: self.deployment.as_deref().map(str::to_string),
                 // The app's own lines say their level; roll's and the access log don't.
-                level: matches!(self.stream, Stream::Stdout | Stream::Stderr).then(|| level_of(&text)).flatten(),
+                level: app.then(|| level_of(&text)).flatten(),
+                trace,
                 text,
             },
         );
@@ -486,6 +618,43 @@ pub async fn pump(mut r: impl tokio::io::AsyncRead + Unpin, sink: LogSink) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A log's secret values are `***` wherever a line holds them, a multi-line value's lines too,
+    /// and a value too short to hide is left.
+    #[tokio::test]
+    async fn secret_values_are_taken_out_of_a_logs_lines() {
+        let hub = LogHub::new(None);
+        hub.redact("env:svc_x/production", "dep_a", vec!["s3cr3t-token".into(), "abc".into(), "-----BEGIN KEY-----\nMIIBOgIBAAJBAKj34GkxFhD9\n-----END KEY-----".into()]);
+        let sink = hub.sink("env:svc_x/production", Stream::Stdout);
+        sink.line("auth with s3cr3t-token then abc");
+        sink.line("MIIBOgIBAAJBAKj34GkxFhD9");
+        hub.redact_like("env:svc_x/production", "job:job_1");
+        hub.sink("job:job_1", Stream::Stdout).line("s3cr3t-token");
+        let got: Vec<String> = hub.tail("env:svc_x/production", 10, None).await.into_iter().map(|l| l.text).collect();
+        assert_eq!(got, ["auth with *** then abc", "***"]);
+        assert_eq!(hub.tail("job:job_1", 10, None).await[0].text, "***");
+        // Written as JSON (an OTLP record), a value with a quote in it is still found.
+        hub.redact("trace:svc_x/production", "dep_a", vec!["pa\"ss-word".into()]);
+        hub.sink("trace:svc_x/production", Stream::System).line(serde_json::json!({ "attr": "pa\"ss-word" }).to_string());
+        assert_eq!(hub.tail("trace:svc_x/production", 10, None).await[0].text, r#"{"attr":"***"}"#);
+    }
+
+    /// A trace's lines are marked as one however another instance's lines fall between them,
+    /// and the first line that doesn't go on ends it.
+    #[tokio::test]
+    async fn a_stack_traces_lines_are_marked_as_one_trace() {
+        let hub = LogHub::new(None);
+        let base = hub.sink("env:svc_x/production", Stream::Stderr);
+        let (a, b) = (base.instance("a", "d"), base.instance("b", "d"));
+        a.line("Traceback (most recent call last):");
+        b.line("GET / 200");
+        a.line("  File \"/app/x.py\", line 3, in f");
+        a.line("ZeroDivisionError: division by zero");
+        a.line("after");
+        let marks: Vec<(String, Option<Trace>)> = hub.tail("env:svc_x/production", 10, None).await.into_iter().map(|l| (l.text, l.trace)).collect();
+        let want = [Some(Trace::Start), None, Some(Trace::More), Some(Trace::More), None];
+        assert_eq!(marks.iter().map(|(_, t)| *t).collect::<Vec<_>>(), want, "{marks:?}");
+    }
 
     #[tokio::test]
     async fn a_search_finds_lines_in_stored_chunks_and_in_memory_in_order() {

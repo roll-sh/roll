@@ -200,6 +200,7 @@ impl CodeSource {
                     .then(|| p.diff_link.clone())
                     .flatten()
                     .map(|(exp, sig)| format!("{}/v1/previews/{}/screenshot.png?diff=base&exp={exp}&sig={sig}", self.code.config.api_url.trim_end_matches('/'), p.id)),
+                issues: linear_issues(&p.title, p.branch.as_deref()),
                 notes: p
                     .notes
                     .iter()
@@ -364,6 +365,18 @@ impl Source for CodeSource {
         Ok(())
     }
 
+    fn git_report_body(&self, p: &Preview, s: &Settings, deleted: Option<Option<&str>>) -> Option<crate::ports::GitReportBody> {
+        let marker = format!("<!-- roll-preview:{} -->", p.id);
+        if let Some(teardown) = deleted {
+            return Some(crate::ports::GitReportBody { state: None, description: String::new(), target_url: None, comment: code_control::github::preview_comment_for(None, &marker, teardown) });
+        }
+        let summary = self.summary(p, s);
+        let (state, _, description) = code_control::github::preview_states(Some(&summary));
+        let env = summary.environment.as_ref();
+        let target_url = env.and_then(|e| e.services.first().map(|x| x.url.clone()).filter(|u| !u.is_empty())).or_else(|| env.and_then(|e| e.dashboard_url.clone()));
+        Some(crate::ports::GitReportBody { state: state.map(str::to_string), description, target_url, comment: code_control::github::preview_comment_for(Some(&summary), &marker, None) })
+    }
+
     async fn forget(&self, p: &Preview, teardown: Option<&str>) {
         let Some(change) = &p.change else { return };
         // Only the change's preview environment, never roll code's own preview of it.
@@ -388,11 +401,11 @@ impl Trees for CodeSource {
         iso.prepare(job, tree.path()).await
     }
 
-    async fn run(&self, iso: &Arc<dyn Isolation>, spec: &code_preview::config::CheckSpec, repo: &str, revision: &str, env: &[(String, String)]) -> anyhow::Result<code_preview::runner::RunOutput> {
+    async fn run(&self, iso: &Arc<dyn Isolation>, spec: &code_preview::config::CheckSpec, repo: &str, revision: &str, env: &[(String, String)], network: Option<code_preview::isolation::Network>) -> anyhow::Result<code_preview::runner::RunOutput> {
         let r = self.repo(repo)?;
         let cs = self.code.store.resolve_or_404(&r.id, revision)?;
         let tree = self.code.checkout(&r.id, &cs).await?;
-        Ok(code_preview::runner::run_check(iso, spec, tree.path(), env).await)
+        Ok(code_preview::runner::run_check_on(iso, spec, tree.path(), env, network).await)
     }
 }
 
@@ -402,13 +415,12 @@ impl Trees for CodeSource {
 pub struct Backend {
     inner: Arc<dyn PreviewBackend>,
     engine: OnceLock<Weak<Engine>>,
-    workspace: Arc<roll_workspace::Workspace>,
     source: Arc<CodeSource>,
 }
 
 impl Backend {
-    pub fn new(inner: Arc<dyn PreviewBackend>, workspace: Arc<roll_workspace::Workspace>, source: Arc<CodeSource>) -> Arc<Backend> {
-        Arc::new(Backend { inner, engine: OnceLock::new(), workspace, source })
+    pub fn new(inner: Arc<dyn PreviewBackend>, source: Arc<CodeSource>) -> Arc<Backend> {
+        Arc::new(Backend { inner, engine: OnceLock::new(), source })
     }
 
     pub fn attach(&self, engine: &Arc<Engine>) {
@@ -419,10 +431,10 @@ impl Backend {
     fn environment_for(&self, repo: &RepoRow) -> Option<(Arc<Engine>, String)> {
         let engine = self.engine.get().and_then(Weak::upgrade)?;
         let full = repo.full_name();
-        // The first project that stands for the repo (`Workspace::trusts`), not just any canvas it's on.
-        let project = self.workspace.list(roll_workspace::Scope::All).ok()?.into_iter().find(|p| p.resources.iter().any(|r| r.kind == roll_workspace::Kind::Repo && r.r#ref == full) && self.workspace.trusts(p, roll_workspace::Kind::Repo, &full))?;
-        engine.store.settings(&project.id).ok().filter(|s| s.enabled)?;
-        Some((engine, project.id))
+        // The project that speaks for the repo (one that stands for it, `Workspace::trusts`, with
+        // previews on): the same one whose preview reports to the change.
+        let (project, _) = engine.speaker(roll_workspace::Kind::Repo, &full)?;
+        Some((engine, project))
     }
 }
 
@@ -430,6 +442,11 @@ impl Backend {
 impl PreviewBackend for Backend {
     async fn create(&self, repo: &RepoRow, change: &code_control::model::Change, dir: &Path) -> anyhow::Result<code_control::model::Preview> {
         let Some((engine, project)) = self.environment_for(repo) else { return self.inner.create(repo, change, dir).await };
+        // roll code's own call: the change's preview, whichever project made it (one per change).
+        if let Some(existing) = engine.store.row_by_change(&change.id)? {
+            let s = engine.store.settings(&existing.project_id)?;
+            return Ok(self.source.summary(&engine.store.view(existing)?, &s));
+        }
         let (p, _) = engine.create(&project, &repo.full_name(), None, Some(&change.id), "roll").await.map_err(|e| anyhow::anyhow!("{e}"))?;
         let s = engine.store.settings(&project)?;
         Ok(self.source.summary(&p, &s))
@@ -450,5 +467,52 @@ impl PreviewBackend for Backend {
             },
             _ => self.inner.delete(repo, change).await,
         }
+    }
+}
+
+/// The Linear issues a change names: `ENG-123` (a team key of 1 to 7 capital letters or digits,
+/// starting with a letter, a dash, a number) anywhere in its title, and one at the start of its
+/// branch's last part in any case (`ada/eng-123-fix-cart`, Linear's own branch names), given in
+/// capitals. At most 3, once each, the title's first.
+pub fn linear_issues(title: &str, branch: Option<&str>) -> Vec<String> {
+    fn issue(key: &str, n: &str) -> Option<String> {
+        let key_ok = (1..=7).contains(&key.len()) && key.starts_with(|c: char| c.is_ascii_alphabetic()) && key.bytes().all(|b| b.is_ascii_alphanumeric());
+        let n_ok = (1..=7).contains(&n.len()) && n.bytes().all(|b| b.is_ascii_digit()) && !n.starts_with('0');
+        (key_ok && n_ok).then(|| format!("{}-{n}", key.to_ascii_uppercase()))
+    }
+    let mut out: Vec<String> = Vec::new();
+    for word in title.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-')) {
+        let parts: Vec<&str> = word.split('-').collect();
+        for w in parts.windows(2) {
+            if w[0].bytes().all(|b| !b.is_ascii_lowercase())
+                && let Some(i) = issue(w[0], w[1])
+                && !out.contains(&i)
+            {
+                out.push(i);
+            }
+        }
+    }
+    if let Some(last) = branch.and_then(|b| b.rsplit('/').next()) {
+        let mut parts = last.split('-');
+        if let (Some(k), Some(n)) = (parts.next(), parts.next())
+            && let Some(i) = issue(k, n)
+            && !out.contains(&i)
+        {
+            out.push(i);
+        }
+    }
+    out.truncate(3);
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_changes_linear_issues_from_its_title_and_branch() {
+        let i = super::linear_issues;
+        assert_eq!(i("ENG-123: Fix the cart", None), ["ENG-123"], "roll's Linear agent's changes");
+        assert_eq!(i("Fix the cart (fixes ENG-12, WEB-7)", Some("ada/eng-123-fix-cart")), ["ENG-12", "WEB-7", "ENG-123"], "Linear's branch names, in any case");
+        assert_eq!(i("bump covid-19 data, ENG-0", Some("feat/cart-badge")), Vec::<String>::new(), "lowercase in a title, a zero, a branch without one");
+        assert_eq!(i("A-1 B-2 C-3 D-4", None).len(), 3, "at most 3");
     }
 }

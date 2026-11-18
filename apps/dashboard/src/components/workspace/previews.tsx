@@ -1,5 +1,6 @@
 import { ExternalLink, GitBranch, Settings2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { counts, matches, SHOW_LABEL, type PreviewShow } from "@/lib/preview-filter";
 import { checkSummary, openUrl, previewsApi, screenshotUrl, type Preview, type PreviewSettings, type PreviewUsage } from "@/lib/previews-api";
 import type { WorkspaceProject } from "@/lib/workspace-api";
 import { resourceKey, type ResourceView } from "@/lib/workspace-resources";
@@ -44,6 +45,8 @@ export function ProjectPreviews({
 }) {
   const { list, error, reload, put } = usePreviews(project.id);
   const [openId, setOpenId] = useState<string | null>(initial ?? null);
+  const [text, setText] = useState("");
+  const [show, setShow] = useState<PreviewShow>("all");
   const [settings, setSettings] = useState<PreviewSettings | null>(null);
   const [settingsError, setSettingsError] = useState<string | null>(null);
   const [rules, setRules] = useState(false);
@@ -165,14 +168,32 @@ export function ProjectPreviews({
           )}
 
           {error && !list && <p className="mt-4 rounded-lg border border-danger/40 bg-danger/10 px-3 py-2 text-[12px] text-danger">Previews didn't load: {error}</p>}
-          {list && list.length > 0 && (
-            <ul className="mt-4 overflow-hidden rounded-xl border border-line-2 bg-panel inset-shadow-highlight" aria-label="Previews">
-              {/* Those waiting for a visual review first (a stable sort keeps the rest newest first). */}
-              {[...list].sort((a, b) => Number(toReview(b)) - Number(toReview(a))).map((p) => (
-                <Row key={p.id} preview={p} open={p.id === openId} onOpen={() => setOpenId(p.id)} />
-              ))}
-            </ul>
-          )}
+          {list && list.length >= FILTER_FROM && <ListFilter list={list} text={text} show={show} onText={setText} onShow={setShow} />}
+          {list && list.length > 0 && (() => {
+            // Filtered only once there are enough to need it (a short list is read at a glance).
+            const shown = list.length >= FILTER_FROM ? list.filter((p) => matches(p, text, show)) : list;
+            return shown.length ? (
+              <ul className="mt-3 overflow-hidden rounded-xl border border-line-2 bg-panel inset-shadow-highlight" aria-label="Previews">
+                {/* Those waiting for a visual review first (a stable sort keeps the rest newest first). */}
+                {[...shown].sort((a, b) => Number(toReview(b)) - Number(toReview(a))).map((p) => (
+                  <Row key={p.id} preview={p} open={p.id === openId} onOpen={() => setOpenId(p.id)} />
+                ))}
+              </ul>
+            ) : (
+              <p className="mt-4 text-[12.5px] text-subtle">
+                No preview matches.{" "}
+                <button
+                  onClick={() => {
+                    setText("");
+                    setShow("all");
+                  }}
+                  className="text-accent hover:underline"
+                >
+                  Show all {list.length}
+                </button>
+              </p>
+            );
+          })()}
           {list && list.length === 0 && <Empty repos={repos} onBranch={() => setBranching(true)} />}
           {!list && !error && <p className="mt-6 text-[12.5px] text-subtle">Loading…</p>}
         </div>
@@ -214,6 +235,40 @@ export function ProjectPreviews({
   );
 }
 
+/** The list's filter shows once a project has this many previews. */
+const FILTER_FROM = 4;
+
+/** Search and state for a long list (Vercel's deployments list): every word matches a title,
+ * branch, slug, repo or `#number`; the states show their counts. */
+function ListFilter({ list, text, show, onText, onShow }: { list: Preview[]; text: string; show: PreviewShow; onText: (t: string) => void; onShow: (s: PreviewShow) => void }) {
+  const n = counts(list);
+  return (
+    <div className="mt-4 flex flex-wrap items-center gap-2">
+      <input
+        value={text}
+        onChange={(e) => onText(e.target.value)}
+        placeholder="Filter by title, branch or #number"
+        aria-label="Filter previews"
+        className="h-7 w-[min(260px,100%)] rounded-md border border-line-2 bg-raised px-2 text-[12px] text-fg placeholder:text-subtle inset-shadow-highlight outline-none focus:border-accent/60"
+      />
+      <div className="flex flex-wrap items-center gap-1" role="group" aria-label="Show">
+        {(Object.keys(SHOW_LABEL) as PreviewShow[])
+          .filter((s) => s === "all" || n[s] > 0)
+          .map((s) => (
+            <button
+              key={s}
+              onClick={() => onShow(s)}
+              aria-pressed={show === s}
+              className={`h-7 rounded-md border px-2 text-[11.5px] transition-colors ${show === s ? "border-line-3 bg-fg/[0.07] text-fg" : "border-line-2 text-muted hover:text-fg"}`}
+            >
+              {SHOW_LABEL[s]} <span className="font-mono text-subtle">{n[s]}</span>
+            </button>
+          ))}
+      </div>
+    </div>
+  );
+}
+
 /** Its pages differ from main's and nobody has accepted them yet (the `roll/visual` review). */
 const toReview = (p: Preview) => p.visual_review?.state === "changed" && p.desired !== "deleted";
 
@@ -245,6 +300,11 @@ function Row({ preview: p, open, onOpen }: { preview: Preview; open: boolean; on
             </span>
           )}
           <NewAgainstMain preview={p} />
+          {p.reported_by && (
+            <span className="shrink-0 rounded border border-line-2 px-1 text-[10.5px] text-muted" title={`${p.reported_by} reports this pull request (its roll/preview status and comment); this preview says nothing there`}>
+              quiet
+            </span>
+          )}
           {p.baseline && (
             <span className="shrink-0 rounded border border-line-2 px-1 text-[10.5px] text-muted" title="roll keeps it to compare the project's changes with">
               baseline

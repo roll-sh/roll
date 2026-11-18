@@ -12,6 +12,10 @@
 //! [`Meter::count_requests`] by every metering pass; each request is billed once, also when its
 //! cluster unloaded in between.
 //!
+//! Request metrics and slow log entries (`search_server::Node::take_observations`) go to the
+//! catalog's rings with the same pass ([`Meter::observe`]): nothing per cluster runs for them
+//! either, and a cluster's history stays in the catalog wherever it loads next.
+//!
 //! The resident size of a loaded cluster is measured from its engine ([`resident_bytes`]): the
 //! heap its shards hold (segments still in memory, segment readers' heap and caches, indexing
 //! buffers, the version map) plus [`LOADED_BASE_BYTES`] for the cluster itself (state, analysis
@@ -222,6 +226,18 @@ impl Meter {
         Ok(refresh)
     }
 
+    /// Stores what the node observed of cluster `name` since the last pass: its minutes of
+    /// request metrics and its slow log entries. A cluster deleted meanwhile is skipped.
+    pub async fn observe(&self, name: &str, o: search_server::Observed) -> anyhow::Result<()> {
+        if o.is_empty() {
+            return Ok(());
+        }
+        let Some(c) = self.store.by_name(name).await? else { return Ok(()) };
+        self.store.record_metrics(&c.id, &o.minutes).await?;
+        let entries: Vec<(i64, String)> = o.slow.iter().map(|e| (e.at_ms, e.to_json().to_string())).collect();
+        self.store.record_slowlog(&c.id, &entries).await
+    }
+
     /// The index count a cluster had when it unloaded (consumed).
     pub fn take_indices(&self, cluster: &str) -> Option<i64> {
         self.state.lock().indices.remove(cluster)
@@ -278,28 +294,33 @@ mod tests {
     async fn meter() -> (Arc<Meter>, Arc<Store>) {
         let store = Arc::new(Store::memory().unwrap());
         store
-            .insert(&SearchCluster {
-                id: "srch_a".into(),
-                name: "app".into(),
-                region: "local".into(),
-                flavor: "elasticsearch".into(),
-                password: "pw".into(),
-                idle_timeout_s: 300,
-                max_in_flight: 64,
-                max_body_mb: 100,
-                destructive_requires_name: true,
-                parent_id: None,
-                parent_at: None,
-                created_at: 0,
-                password_rotated_at: None,
-                indices: 0,
-                docs: 0,
-                stored_bytes: 1000,
-                own_bytes: 1000,
-                loaded_on: None,
-                wake_at: None,
-                owner: None,
-            })
+            .insert(
+                &SearchCluster {
+                    id: "srch_a".into(),
+                    name: "app".into(),
+                    region: "local".into(),
+                    flavor: "elasticsearch".into(),
+                    password: "pw".into(),
+                    idle_timeout_s: 300,
+                    max_in_flight: 64,
+                    max_body_mb: 100,
+                    destructive_requires_name: true,
+                    parent_id: None,
+                    parent_at: None,
+                    created_at: 0,
+                    password_rotated_at: None,
+                    indices: 0,
+                    docs: 0,
+                    stored_bytes: 1000,
+                    own_bytes: 1000,
+                    loaded_on: None,
+                    wake_at: None,
+                    owner: None,
+                    restored_at: None,
+                    ip_allowlist: Vec::new(),
+                },
+                crate::store::Caps::NONE,
+            )
             .await
             .unwrap();
         (Meter::new(store.clone()), store)

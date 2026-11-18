@@ -8,6 +8,7 @@
 
 import { apiHeaders, call, onApiStatus, ROLL_API } from "./roll-api";
 import { withSession } from "./code-token";
+import type { MetricsRange, SearchMetrics, SearchSlowLog } from "./search-performance";
 
 export type Flavor = "elasticsearch" | "opensearch";
 
@@ -49,8 +50,13 @@ export interface SearchInfo {
   tls: boolean;
   domain: string | null;
   history_retention_s: number;
+  /** How long a deleted cluster can be restored (`--search-deleted-retention-days`; 0: never). */
+  deleted_retention_s: number;
   defaults: SearchDefaults;
   pricing: SearchPricing;
+  /** A signed-in person's (not an admin's): how many clusters, and always-on ones, they may own
+   * (0: no cap). Past one, a create, branch or switch to always-on answers 409 saying so. */
+  caps?: { clusters: number; always_on: number };
   /** The operator's (and admins') only: where the node keeps its data, and its node-wide figures. */
   storage?: string;
   loaded?: number;
@@ -77,6 +83,19 @@ export interface SearchSettings {
   destructive_requires_name: boolean;
 }
 
+/** One entry of a cluster's IP allowlist (roll apps' `allow_ips` have the same shape). */
+export interface IpRule {
+  /** Canonical: `203.0.113.7/32`, `10.0.0.0/8`, `2001:db8::/32`. */
+  cidr: string;
+  description?: string;
+}
+
+/** What `PATCH /v1/search/clusters/{id}` takes. */
+export type SearchClusterPatch = Partial<SearchSettings> & {
+  /** Only these networks reach the cluster's endpoint ([]: anyone). */
+  ip_allowlist?: (string | IpRule)[];
+};
+
 export interface BranchRef {
   id: string;
   name: string;
@@ -101,6 +120,8 @@ export interface SearchCluster extends SearchSettings {
   own_bytes: number;
   /** The signed-in person (`usr_…`) whose cluster it is; null for the operator's and admins'. */
   owner?: string | null;
+  /** Only these networks reach its endpoint ([]: anyone). The dashboard and API aren't filtered. */
+  ip_allowlist: IpRule[];
   url: string;
   host: string;
   port: number;
@@ -109,6 +130,25 @@ export interface SearchCluster extends SearchSettings {
   branches: BranchRef[];
   /** Only in the responses that create the cluster or rotate its password. */
   password?: string;
+}
+
+/** A deleted cluster kept for restoring (`GET /v1/search/clusters?deleted=true`). */
+export interface DeletedSearchCluster extends SearchSettings {
+  id: string;
+  /** The name it had (it restores under it unless another cluster took it). */
+  name: string;
+  region: string;
+  parent_id: string | null;
+  created_at: number;
+  indices: number;
+  docs: number;
+  /** Still billed as storage until it is purged. */
+  stored_bytes: number;
+  owner?: string | null;
+  /** Unix seconds. */
+  deleted_at: number;
+  /** Unix seconds: when its storage is removed for good. */
+  purge_at: number;
 }
 
 export interface SearchIndex {
@@ -193,8 +233,11 @@ export const searchApi = {
   get: (id: string) => call<SearchCluster>("GET", cl(id)),
   create: (name: string, settings: Partial<SearchSettings>) =>
     call<SearchCluster>("POST", "/v1/search/clusters", { name, ...settings }),
-  update: (id: string, settings: Partial<SearchSettings>) => call<SearchCluster>("PATCH", cl(id), settings),
+  update: (id: string, settings: SearchClusterPatch) => call<SearchCluster>("PATCH", cl(id), settings),
   remove: (id: string) => call<{ deleted: string; name: string }>("DELETE", cl(id)),
+  deleted: () => call<DeletedSearchCluster[]>("GET", "/v1/search/clusters?deleted=true"),
+  /** Without `name` it comes back under its own (409 when another cluster took it). */
+  restore: (id: string, name?: string) => call<SearchCluster>("POST", `${cl(id)}/restore`, name ? { name } : {}),
   branch: (id: string, name: string, at?: number) => call<SearchCluster>("POST", `${cl(id)}/branches`, { name, at }),
   rotatePassword: (id: string) => call<SearchCluster>("POST", `${cl(id)}/password`, {}),
   unload: (id: string) => call<{ unloaded: boolean }>("POST", `${cl(id)}/unload`, {}),
@@ -203,6 +246,8 @@ export const searchApi = {
   request: (id: string, method: string, path: string, body?: unknown) =>
     call<ConsoleResponse>("POST", `${cl(id)}/request`, { method, path, body }),
   usage: (id: string, days = 30) => call<SearchUsage>("GET", `${cl(id)}/usage?days=${days}`),
+  metrics: (id: string, range: MetricsRange) => call<SearchMetrics>("GET", `${cl(id)}/metrics?range=${range}`),
+  slowlog: (id: string) => call<SearchSlowLog>("GET", `${cl(id)}/slowlog`),
   createKey: (id: string, name: string, access: KeyAccess, expiresInS?: number) =>
     call<NewSearchKey>("POST", `${cl(id)}/keys`, { name, access, expires_in_s: expiresInS }),
   revokeKey: (id: string, key: string) => call<null>("DELETE", `${cl(id)}/keys/${encodeURIComponent(key)}`),
@@ -240,14 +285,22 @@ export interface NewInferenceFromSecret {
   secret: { project?: string; environment: string; path?: string; key: string };
 }
 
-/** An Elasticsearch error body's reason (`error.reason`, or the first root cause's). */
+/**
+ * An Elasticsearch error body's reason (`error.reason`, or the first root cause's), followed by
+ * the innermost `caused_by` reason when the outer one doesn't already say it: a parse failure's
+ * outer reason is a generic wrapper ("Failed to build [query_rule] …") and the cause is the news.
+ */
 export function esReason(body: unknown, status: number): string {
   const e = (body as { error?: unknown } | null)?.error;
   if (typeof e === "string") return e;
   if (e && typeof e === "object") {
-    const o = e as { type?: string; reason?: string; root_cause?: { reason?: string }[] };
+    type Cause = { type?: string; reason?: string; caused_by?: Cause };
+    const o = e as Cause & { root_cause?: { reason?: string }[] };
     const reason = o.reason ?? o.root_cause?.[0]?.reason;
-    if (reason) return o.type ? `${o.type}: ${reason}` : reason;
+    let inner: Cause | undefined = o.caused_by;
+    for (let i = 0; inner?.caused_by && i < 16; i++) inner = inner.caused_by;
+    const cause = inner?.reason && reason && !reason.includes(inner.reason) ? `: ${inner.reason}` : "";
+    if (reason) return (o.type ? `${o.type}: ${reason}` : reason) + cause;
   }
   return `HTTP ${status}`;
 }
@@ -362,6 +415,15 @@ export function formatDuration(s: number) {
   if (s % 3600 === 0) return `${s / 3600}h`;
   if (s % 60 === 0) return `${s / 60}m`;
   return `${s}s`;
+}
+
+/** A window such as the deleted-cluster retention: whole days in words ("7 days"). */
+export function formatWindow(s: number) {
+  if (s > 0 && s % 86_400 === 0) {
+    const d = s / 86_400;
+    return `${d} day${d === 1 ? "" : "s"}`;
+  }
+  return formatDuration(s);
 }
 
 /** The URL with credentials embedded (`http://user:password@host:port`). */

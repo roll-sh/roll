@@ -273,6 +273,18 @@ fn run_over(v: &Value) -> bool {
     matches!(v["status"].as_str(), Some("completed" | "failed" | "canceled"))
 }
 
+/// A deploy that's done one way or another (roll apps' final states); `queued`, `building` and
+/// `deploying` aren't.
+fn deploy_over(v: &Value) -> bool {
+    matches!(v["status"].as_str(), Some("active" | "ready" | "failed" | "canceled" | "superseded" | "removed" | "inactive"))
+}
+
+/// A job that ended (roll apps' `succeeded`, `failed`, `skipped`, `timed_out`, `canceled`):
+/// anything but `running`.
+fn job_over(v: &Value) -> bool {
+    v["status"].as_str().is_some_and(|s| s != "running")
+}
+
 /// An approval a person decided (or that expired): anything but `pending`.
 fn decided(v: &Value) -> bool {
     v["state"].as_str().is_some_and(|s| s != "pending")
@@ -402,6 +414,23 @@ static TOOLS: &[Tool] = &[
         "POST",
         "/v1/access/check",
         &[breq("method", Ty::Str, "HTTP method, e.g. DELETE"), breq("path", Ty::Str, "The API path, e.g. /v1/projects/prj_x"), b("body", Ty::Obj, "The JSON body, for SQL, Redis or CQL")],
+    ),
+    t(
+        "access_request_access",
+        "Ask for access for a while",
+        "Ask a person to let this connection do one more thing for a while, saying why: one action on one product (one resource, environment or folder if named) for 15m, 1h, 8h or 1d. Answers the pending approval; wait for it with access_wait_approval, then go on.",
+        "access",
+        "POST",
+        "/v1/access/requests",
+        &[
+            breq("product", Ty::Str, "The product, e.g. postgres, apps, secrets"),
+            breq("action", Ty::Str, "read, write, delete, reveal, deploy or admin"),
+            b("resource", Ty::Str, "One resource's id (every resource of the product when left out)"),
+            b("environment", Ty::Str, "Only in this environment"),
+            b("path", Ty::Str, "Only under this folder"),
+            breq("for", Ty::Str, "15m, 1h, 8h or 1d"),
+            breq("reason", Ty::Str, "Why: the person deciding reads it"),
+        ],
     ),
     t("access_list_approvals", "List approvals", "Approvals, newest first: pending ones wait for the operator.", "access", "GET", "/v1/access/approvals", &[q("state", Ty::Str, "pending, approved, denied, used")]),
     t("access_audit_log", "Audit log", "Every request made with a token and every MCP tool call, newest first.", "access", "GET", "/v1/access/audit", &[q("grant", Ty::Str, "Only this token (tok_…)"), q("product", Ty::Str, "Only this product"), q("decision", Ty::Str, "allow, deny or ask"), q("limit", Ty::Int, "At most (default 100)")]),
@@ -662,6 +691,16 @@ static TOOLS: &[Tool] = &[
     t("tasks_get_topic", "Get a topic", "A topic and its endpoints.", "tasks", "GET", "/v1/tasks/topics/{name}", &[req("name", "Topic")]),
     t("tasks_set_topic", "Create or replace a topic", "A topic with exactly these endpoints.", "tasks", "PUT", "/v1/tasks/topics/{name}", &[req("name", "Topic"), breq("endpoints", Ty::Arr, "URLs, or {\"url\", \"name\"} objects")]),
     t("tasks_delete_topic", "Delete a topic", "Delete a topic; its pending messages stay.", "tasks", "DELETE", "/v1/tasks/topics/{name}", &[req("name", "Topic")]),
+    t("tasks_delete_queue", "Delete a task queue", "Delete a queue. One with unfinished messages is refused unless force=true, which cancels them.", "tasks", "DELETE", "/v1/tasks/queues/{name}", &[req("name", "Queue"), q("force", Ty::Bool, "Cancel its unfinished messages too")]),
+    t(
+        "tasks_cancel_messages",
+        "Cancel task messages",
+        "Cancel many messages at once: these ids, or every one a queue, URL, topic, label or schedule names (all=true for every message). Answers how many were canceled.",
+        "tasks",
+        "POST",
+        "/v1/tasks/messages/cancel",
+        &[b("ids", Ty::Arr, "Message ids"), b("queue", Ty::Str, "A queue's"), b("url", Ty::Str, "Those to this URL"), b("topic", Ty::Str, "A topic's"), b("label", Ty::Str, "Those with this label"), b("schedule_id", Ty::Str, "A schedule's"), b("all", Ty::Bool, "Every message")],
+    ),
     t("tasks_send_event", "Send an event", "An event that starts the functions it triggers (an id makes it idempotent).", "tasks", "POST", "/v1/tasks/events", &[breq("name", Ty::Str, "Event name, e.g. user.signup"), b("data", Ty::Any, "Its data"), b("id", Ty::Str, "Idempotency id")]),
     t("tasks_list_events", "List events", "Events received, newest first.", "tasks", "GET", "/v1/tasks/events", &[q("name", Ty::Str, "Only this event"), q("cursor", Ty::Str, "From a page's cursor"), q("limit", Ty::Int, "At most (50)")]),
     t("tasks_get_event", "Get an event", "An event and the runs it started.", "tasks", "GET", "/v1/tasks/events/{id}", &[req("id", "Event id")]),
@@ -685,7 +724,7 @@ static TOOLS: &[Tool] = &[
     t("tasks_trigger_schedule", "Fire a schedule now", "Publish what a schedule publishes once, now.", "tasks", "POST", "/v1/tasks/schedules/{id}/trigger", &[req("id", "Schedule id")]),
     t("tasks_usage", "Tasks usage", "Messages, deliveries and runs by day, and what they cost.", "tasks", "GET", "/v1/tasks/usage", &[q("days", Ty::Int, "Days back (30)")]),
     // ── search (roll search) ──
-    t("search_list_clusters", "List search clusters", "Elasticsearch-compatible search clusters.", "search", "GET", "/v1/search/clusters", &[]),
+    t("search_list_clusters", "List search clusters", "Elasticsearch-compatible search clusters; deleted=true lists those deleted recently instead (each with deleted_at, purge_at and its name), which search_restore_cluster brings back.", "search", "GET", "/v1/search/clusters", &[q("deleted", Ty::Bool, "Recently deleted clusters instead")]),
     t("search_get_cluster", "Get a search cluster", "A cluster's settings, state (loaded or asleep), indices, documents, size, URL and branches.", "search", "GET", "/v1/search/clusters/{cluster}", &[req("cluster", "Cluster id or name")]),
     t(
         "search_create_cluster",
@@ -698,7 +737,8 @@ static TOOLS: &[Tool] = &[
     ),
     t("search_branch_cluster", "Branch a search cluster", "A copy-on-write branch of a cluster, now or at a time within its history.", "search", "POST", "/v1/search/clusters/{cluster}/branches", &[req("cluster", "Cluster id or name"), breq("name", Ty::Str, "Branch name"), b("at", Ty::Int, "Unix seconds")]),
     t("search_update_cluster", "Update a search cluster", "Change a cluster's settings: idle_timeout_s (0: always loaded), max_in_flight, max_body_mb at once; flavor or destructive_requires_name put it to sleep to reload once no request runs.", "search", "PATCH", "/v1/search/clusters/{cluster}", &[req("cluster", "Cluster id or name"), b("idle_timeout_s", Ty::Int, "Seconds idle before it sleeps (0: never)"), b("max_in_flight", Ty::Int, "Requests at once"), b("max_body_mb", Ty::Int, "Largest request body"), b("destructive_requires_name", Ty::Bool, "Refuse wildcard deletes"), b("flavor", Ty::Str, "elasticsearch or opensearch")]),
-    t("search_delete_cluster", "Delete a search cluster", "Delete a cluster and its indices (its branches keep working).", "search", "DELETE", "/v1/search/clusters/{cluster}", &[req("cluster", "Cluster id or name")]),
+    t("search_delete_cluster", "Delete a search cluster", "Delete a cluster and its indices (its branches keep working). It's kept for the deployment's restore window (7 days by default) and search_restore_cluster brings it back until then.", "search", "DELETE", "/v1/search/clusters/{cluster}", &[req("cluster", "Cluster id or name")]),
+    t("search_restore_cluster", "Restore a deleted search cluster", "Bring a deleted cluster back as it was (data, snapshots, settings, password, API keys) within its restore window, by its id (search_list_clusters with deleted=true). Its name, or name if that's taken.", "search", "POST", "/v1/search/clusters/{cluster}/restore", &[req("cluster", "The deleted cluster's id"), b("name", Ty::Str, "Another name, if its own is taken")]),
     t("search_usage", "Search usage", "A cluster's metering and cost, against the same workload on Elastic Cloud and Amazon OpenSearch.", "search", "GET", "/v1/search/clusters/{cluster}/usage", &[req("cluster", "Cluster id or name"), q("days", Ty::Int, "Days back (default 30)")]),
     t("search_list_indices", "List indices", "A cluster's indices.", "search", "GET", "/v1/search/clusters/{cluster}/indices", &[req("cluster", "Cluster id or name")]),
     t("search_get_index", "Get an index", "An index's mappings, settings and aliases.", "search", "GET", "/v1/search/clusters/{cluster}/indices/{index}", &[req("cluster", "Cluster"), req("index", "Index")]),
@@ -744,6 +784,7 @@ static TOOLS: &[Tool] = &[
     t("secrets_list_cloud_accounts", "List cloud accounts", "A project's GCP and Azure accounts that dynamic credentials come from (no secrets; adding one is the project admin's, in the dashboard).", "secrets", "GET", "/v1/secrets/projects/{project}/cloud-accounts", &[req("project", "Workspace project")]),
     t("secrets_list_cas", "List certificate authorities", "A project's own certificate authorities: their public certificates, domains and limits (never a CA's key; adding one is the project admin's, in the dashboard).", "secrets", "GET", "/v1/secrets/projects/{project}/cas", &[req("project", "Workspace project")]),
     t("secrets_list_ssh_cas", "List SSH certificate authorities", "A project's SSH CAs: their public keys, principals and limits (never a private key; adding one is the project admin's, in the dashboard).", "secrets", "GET", "/v1/secrets/projects/{project}/ssh-cas", &[req("project", "Workspace project")]),
+    t("secrets_list_github_apps", "List GitHub Apps", "A project's GitHub Apps that short-lived installation tokens come from: app and installation ids, repositories and permissions (never the private key; adding one is the project admin's, in the dashboard).", "secrets", "GET", "/v1/secrets/projects/{project}/github-apps", &[req("project", "Workspace project")]),
     t("secrets_changes", "Secret changes", "What changed in an environment, newest first: who, when, which keys (fingerprints, never values).", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/changes", &[SECRET_PROJECT, ENV, q("before", Ty::Int, "Changes before this sequence number"), q("limit", Ty::Int, "How many")]),
     t("secrets_versions", "A secret's versions", "A secret's history, newest first (fingerprints, who and when; never values).", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/versions", &[SECRET_PROJECT, ENV, req("name", "Secret name"), q("path", Ty::Str, "Folder")]),
     t("secrets_compare", "Compare environments", "Which keys differ between two environments (missing, or a different value by fingerprint; never values).", "secrets", "GET", "/v1/secrets/projects/{project}/compare", &[SECRET_PROJECT, qreq("from", "Environment"), qreq("to", "Environment"), q("path", Ty::Str, "Folder")]),
@@ -792,7 +833,8 @@ static TOOLS: &[Tool] = &[
         breq("candidates", Ty::Arr, "Strings from the diff to check (at most 20,000)"),
     ]),
     // ── apps (roll apps) ──
-    t("apps_list_services", "List services", "App services.", "apps", "GET", "/v1/apps/services", &[]),
+    t("apps_list_services", "List services", "App services; with deleted, the ones deleted in the last 48 hours, which apps_restore_service brings back until purge_at.", "apps", "GET", "/v1/apps/services", &[q("project", Ty::Str, "Only this workspace project's"), q("deleted", Ty::Bool, "The deleted services kept for a restore")]),
+    t("apps_restore_service", "Restore a deleted service", "Bring back a service deleted in the last 48 hours, as it was: environments, volumes, domains, links, name, and its live deployments running again (a \"deploy\" action).", "apps", "POST", "/v1/apps/services/{service}/restore", &[SERVICE]),
     t(
         "apps_create_service",
         "Create a service",
@@ -817,19 +859,26 @@ static TOOLS: &[Tool] = &[
         b("maintenance", Ty::Any, "true, {message} or false: answer a maintenance page instead of the app"),
         b("allow_ips", Ty::Arr, "Only these addresses get in: [cidr or {cidr, description}]"),
         b("rate_limit", Ty::Obj, "{per_minute, burst?}: requests a client address may make"),
-        b("firewall", Ty::Arr, "[{action: allow|deny, path?, methods?, user_agent?}], first match wins"),
+        b("firewall", Ty::Arr, "[{action: allow|deny|limit|challenge, path?, methods?, user_agent?, per_minute?, burst?}], first match wins; limit holds a client to per_minute (1-100000) on what it matches; challenge lets in a browser that passed a proof of work this hour (GET only)"),
+        b("routes", Ty::Arr, "[{path, service}] (at most 20): a path (a prefix ends in *) another service of the project answers, by name, or null for none"),
+        b("egress", Ty::Any, "{mode: roll|open, hosts?}: roll lets its code reach roll and only these hosts (at most 20, *. for subdomains), from the next deploy; null is open"),
+        b("vitals", Ty::Bool, "Measure its pages' Web Vitals in visitors' browsers (read them with apps_vitals)"),
+        b("traces", Ty::Bool, "Send its OpenTelemetry traces and metrics to roll (OTEL_EXPORTER_OTLP_* from the next deploy)"),
+        b("redeploy_on_secrets", Ty::Bool, "Redeploy (the same image, new values) when the project's roll secrets change"),
+        b("pages", Ty::Obj, "{error?, maintenance?}: its own HTML for roll's error and maintenance pages (null puts roll's back)"),
         b("headers", Ty::Any, "Response header rules: [{path?, set: {name: value}, replace?}] (at most 20), or null for none"),
         b("paused", Ty::Bool, "Pause it (no deploys on push, nothing running) or resume it"),
         // A rollback holds deploys (apps #26): false lets pushes and hooks deploy again.
         b("held", Ty::Bool, "false: resume deploys a rollback held (held_after shows since when)"),
         b("hostname", Ty::Str, "Its new name on the roll domain (<hostname>.<domain>); the old one stops answering"),
+        b("report", Ty::Bool, "false: its deploys post no commit status and no GitHub Deployment (something else reports them)"),
     ]),
     t("apps_update_service", "Update a service", "Change a service's name, source, build or run settings (fields given are changed; run takes alerts {memory_pct, error_pct, p95_ms} for metric alerts).", "apps", "PATCH", "/v1/apps/services/{service}", &[
         SERVICE,
         b("name", Ty::Str, "New name"),
         b("source", Ty::Obj, "Where it's built from (repo or image), as apps_get_service shows it"),
         b("build", Ty::Obj, "Build settings to change"),
-        b("run", Ty::Obj, "Run settings to change (instances, memory, start command, h2c, alerts {memory_pct, error_pct, p95_ms}; schedules [{name, schedule (cron or @daily), command, timezone?, timeout_s?}] runs commands as jobs of the live deployment, replacing the list; only size, scale, health checks, timers, alerts, rollout and restarts are write; any other run setting needs deploy, as source and build do; a worker's scale {stream, group, per_instance} needs read on that stream)"),
+        b("run", Ty::Obj, "Run settings to change (instances, memory, start command, h2c, alerts {memory_pct, error_pct, p95_ms}; schedules [{name, schedule (cron or @daily), command, timezone?, timeout_s?}] runs commands as jobs of the live deployment, replacing the list; health checks health_path, health_every_s, health_failures, or a worker's health_command; rollout {steps, step_s, error_pct, manual?} for gradual rollouts (manual waits for apps_rollout); rebuild_on_base rebuilds the same revision when a base image moves; only size, scale, health checks, timers, alerts, rollout and restarts are write; any other run setting needs deploy, as source and build do; a worker's scale {stream, group, per_instance} needs read on that stream)"),
     ]),
     t(
         "apps_deploy",
@@ -845,6 +894,8 @@ static TOOLS: &[Tool] = &[
             b("image", Ty::Str, "Or an image"),
             b("message", Ty::Str, "Why"),
             b("no_traffic", Ty::Bool, "Build and health-check it, then stop at status ready without sending it traffic"),
+            b("no_cache", Ty::Bool, "Build from scratch: no cached layer, no reused build"),
+            b("closed", Ty::Bool, "Refuse (409) unless the environment builds closed (its builds get no secret value)"),
             IDEMPOTENCY,
         ],
     ),
@@ -860,12 +911,30 @@ static TOOLS: &[Tool] = &[
         &[SERVICE, ENV, breq("from", Ty::Str, "The environment to take it from"), b("message", Ty::Str, "Why")],
     ),
     t("apps_cancel_deploy", "Cancel a deploy", "Stop a deploy that hasn't gone live.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/deploys/{deploy}/cancel", &[SERVICE, ENV, req("deploy", "Deploy id")]),
+    t(
+        "apps_rollout",
+        "Move a manual rollout",
+        "A gradual rollout set to manual waits after each step that passed (the environment's canary says waiting): advance to its next step, all to send it every request, or abort to put the old deployment back. A \"deploy\" action.",
+        "apps",
+        "POST",
+        "/v1/apps/services/{service}/environments/{env}/deploys/{deploy}/rollout",
+        &[SERVICE, ENV, req("deploy", "Deploy id (the canary's deployment)"), breq("action", Ty::Str, "advance, all or abort")],
+    ),
     t("apps_sleep", "Sleep", "Stop an environment's instances until a request or apps_wake wakes them.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/sleep", &[SERVICE, ENV]),
     t("apps_wake", "Wake", "Start a sleeping environment's instances.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/wake", &[SERVICE, ENV]),
     t("apps_usage", "Service usage", "An environment's usage and cost per day.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/usage", &[SERVICE, ENV, q("days", Ty::Int, "Days back")]),
     t("apps_restart", "Restart a service", "Restart an environment's instances.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/restart", &[SERVICE, ENV]),
+    t(
+        "apps_purge_cache",
+        "Purge cached answers",
+        "Drop answers roll's cache keeps for a web service (on-demand revalidation): some paths (a trailing * a prefix), answers carrying some cache tags, or neither for everything. Answers how many went. Production is a \"deploy\" action.",
+        "apps",
+        "POST",
+        "/v1/apps/services/{service}/environments/{env}/cache/purge",
+        &[SERVICE, ENV, b("paths", Ty::Arr, "1-100 absolute paths (any query; a trailing * is a prefix)"), b("tags", Ty::Arr, "1-100 cache tags its answers carried (any case)")],
+    ),
     t("apps_restart_instance", "Restart one instance", "Replace one instance of a web service (a fresh one answers before this one drains; if it doesn't start, this one keeps serving). Instance names are in apps_get_environment. Production is a \"deploy\" action.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/instances/{name}/restart", &[SERVICE, ENV, req("name", "Instance id (instances[].id in apps_get_environment)")]),
-    t("apps_redeploy", "Redeploy", "Deploy what's running again with the current settings and variables (production is a \"deploy\" action).", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/redeploy", &[SERVICE, ENV, b("message", Ty::Str, "Why")]),
+    t("apps_redeploy", "Redeploy", "Deploy what's running again with the current settings and variables (production is a \"deploy\" action).", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/redeploy", &[SERVICE, ENV, b("message", Ty::Str, "Why"), b("closed", Ty::Bool, "Refuse (409) unless the environment builds closed")]),
     t(
         "apps_run_job",
         "Run a job",
@@ -878,25 +947,36 @@ static TOOLS: &[Tool] = &[
     t("apps_job_logs", "Job logs", "A job's output (it ends with the job).", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/jobs/{job}/logs", &[SERVICE, ENV, req("job", "Job id"), q("tail", Ty::Int, "Last lines")]),
     t("apps_list_jobs", "List jobs", "An environment's one-off jobs, newest first: command, status, exit code, when.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/jobs", &[SERVICE, ENV]),
     t("apps_get_job", "Get a job", "One job: its status, exit code and timing; poll it until it ends, then read apps_job_logs.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/jobs/{job}", &[SERVICE, ENV, req("job", "Job id")]),
+    t(
+        "apps_wait_job",
+        "Wait for a job to finish",
+        "A job once it ends (succeeded, failed, skipped, timed out or canceled), with its exit code. A client that runs MCP tasks gets a task that waits as long as it takes; otherwise this answers the status now (call again to keep waiting).",
+        "apps",
+        "GET",
+        "/v1/apps/services/{service}/environments/{env}/jobs/{job}",
+        &[SERVICE, ENV, req("job", "Job id")],
+    )
+    .until(job_over),
     t("apps_cancel_job", "Cancel a job", "Stop a running job (production is a \"deploy\" action).", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/jobs/{job}/cancel", &[SERVICE, ENV, req("job", "Job id")]),
     t("apps_events", "App events", "What happened to services (deploys going live or failing, crash loops, failed cron runs and jobs, memory, error and latency alerts, and audit.* changes to settings, variables, domains and links), in order after a cursor.", "apps", "GET", "/v1/apps/events", &[q("after", Ty::Int, "The last answer's next"), q("limit", Ty::Int, "At most this many")]),
     t("apps_list_variables", "List variables", "An environment's variables, values masked. A sealed variable is never readable again by anyone (only the running service gets it): set a new value or delete it, never look for the old one.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/variables", &[SERVICE, ENV]),
     t(
         "apps_set_variables",
         "Set variables",
-        "Set or unset an environment's variables (production is a \"deploy\" action).",
+        "Set or unset an environment's variables, or copy some from another environment (copy_from with copy: their values, never shown; needs reveal on that environment too). Production is a \"deploy\" action.",
         "apps",
         "PATCH",
         "/v1/apps/services/{service}/environments/{env}/variables",
-        &[SERVICE, ENV, b("set", Ty::Obj, "{NAME: value}"), b("unset", Ty::Arr, "Names to remove")],
+        &[SERVICE, ENV, b("set", Ty::Obj, "{NAME: value}"), b("unset", Ty::Arr, "Names to remove"), b("copy_from", Ty::Str, "Another environment to copy values from"), b("copy", Ty::Arr, "Names to copy from copy_from")],
     ),
-    t("apps_metrics", "Service metrics", "CPU, memory and requests of an environment.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/metrics", &[SERVICE, ENV, q("minutes", Ty::Int, "Window")]),
+    t("apps_diff_environments", "Compare environments", "How an environment differs from another (Railway's environment sync): variables missing, extra or with another value (names only; which differ needs reveal on both), and settings with the body that makes each match. Read on both environments.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/diff", &[SERVICE, ENV, qreq("from", "The environment to compare with")]),
+    t("apps_metrics", "Service metrics", "CPU, memory and requests of an environment, and each instance's own last hour (by_instance).", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/metrics", &[SERVICE, ENV, q("minutes", Ty::Int, "Window")]),
     t("apps_plan", "Plan a service", "How roll would build and run a repo (provider, framework, install, build and start commands, port), before making a service: a dry run.", "apps", "POST", "/v1/apps/plan", &[breq("repo", Ty::Str, "owner/name"), b("revision", Ty::Str, "A branch or commit"), b("root", Ty::Str, "The app's folder in the repo")]),
     t("apps_import", "Check a project file", "What a roll.toml or a docker-compose file would make, without making anything: the apps with their source, branch, run settings, links and variables, the databases, notes, and the file as roll.toml (check it before roll up --all).", "apps", "POST", "/v1/apps/import", &[b("roll_toml", Ty::Str, "A roll.toml's text"), b("compose", Ty::Str, "A docker-compose.yml's text")]),
     t("apps_export_project", "Export a project file", "A project as a roll.toml: its services (source, branch, run settings that differ from defaults) and the postgres and redis databases they link, variables by name only, never a value. Write it to the repo, check it with apps_import, deploy it with roll up --all.", "apps", "POST", "/v1/apps/projects/{project}/export", &[req("project", "Workspace project"), b("databases", Ty::Obj, "Names for the linked databases, as {\"postgres:<ref>\": \"db\"}")]),
-    t("apps_get_environment", "Get an environment", "One environment: its URL, state (running, asleep), live deploy, branch and size.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}", &[SERVICE, ENV]),
+    t("apps_get_environment", "Get an environment", "One environment: its URL, state (running, asleep), live deploy, branch and size; build_closed (its builds get no secret value) and base_updated (base images that moved since its build).", "apps", "GET", "/v1/apps/services/{service}/environments/{env}", &[SERVICE, ENV]),
     t("apps_delete_environment", "Delete an environment", "Delete an environment with its deploys, instances and domains. Irreversible.", "apps", "DELETE", "/v1/apps/services/{service}/environments/{env}", &[SERVICE, ENV]),
-    t("apps_link", "Link a resource", "Give a service a roll resource's connection variables (DATABASE_URL and the like, with prefix if given): kind is postgres, redis, bucket, stream, queue or nosql. Needs reveal on the resource; the next deploy picks it up.", "apps", "PUT", "/v1/apps/services/{service}/links/{kind}/{ref}", &[SERVICE, req("kind", "postgres, redis, bucket, stream, queue or nosql"), req("ref", "The resource's id or name"), b("prefix", Ty::Str, "Variable name prefix")]),
+    t("apps_link", "Link a resource", "Give a service a roll resource's connection variables (DATABASE_URL and the like, with prefix if given): kind is postgres, redis, bucket, stream, queue, nosql or search (a search cluster: a data-only key of the link's own). Needs reveal on the resource; the next deploy picks it up.", "apps", "PUT", "/v1/apps/services/{service}/links/{kind}/{ref}", &[SERVICE, req("kind", "postgres, redis, bucket, stream, queue, nosql or search"), req("ref", "The resource's id or name"), b("prefix", Ty::Str, "Variable name prefix")]),
     t("apps_unlink", "Unlink a resource", "Stop giving a service a linked resource's variables (from the next deploy).", "apps", "DELETE", "/v1/apps/services/{service}/links/{kind}/{ref}", &[SERVICE, req("kind", "Link kind"), req("ref", "The resource's id or name")]),
     t("apps_verify_domain", "Check a domain", "Check a custom domain's DNS now and answer its state (pending, verified) and the record to add.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/domains/{host}/verify", &[SERVICE, ENV, req("host", "The domain")]),
     t("apps_list_backups", "Volume backups", "An environment's volume backups, newest first (7 kept).", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/volume/backups", &[SERVICE, ENV]),
@@ -904,7 +984,18 @@ static TOOLS: &[Tool] = &[
     t("apps_restore_backup", "Restore a volume backup", "Put an environment's volume back as it was in a backup, replacing its files; the environment sleeps meanwhile.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/volume/backups/{backup}/restore", &[SERVICE, ENV, req("backup", "Backup id")]),
     t("apps_activity", "Service activity", "Who changed what on a service, newest first (never a value); with all, its whole timeline: deploys, failures, crash loops, alerts, domains, spend.", "apps", "GET", "/v1/apps/services/{service}/activity", &[SERVICE, q("all", Ty::Bool, "The whole timeline, not only changes")]),
     t("apps_get_deploy", "Get a deploy", "One deploy: its status, commit, image and when it went live.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/deploys/{deploy}", &[SERVICE, ENV, req("deploy", "Deploy id")]),
+    t(
+        "apps_wait_deploy",
+        "Wait for a deploy to finish",
+        "A deploy once it's live or failed, with how far each step got. A client that runs MCP tasks gets a task that waits as long as it takes; otherwise this answers the status now (call again to keep waiting).",
+        "apps",
+        "GET",
+        "/v1/apps/services/{service}/environments/{env}/deploys/{deploy}",
+        &[SERVICE, ENV, req("deploy", "Deploy id (from apps_deploy, apps_redeploy or apps_promote)")],
+    )
+    .until(deploy_over),
     t("apps_list_links", "List links", "The databases, buckets, streams and other services a service is linked to.", "apps", "GET", "/v1/apps/services/{service}/links", &[SERVICE]),
+    t("apps_vitals", "Web Vitals", "What visitors' browsers measured on an environment's pages (with vitals on): LCP, INP, CLS, FCP and TTFB p75s rated good, needs-improvement or poor, overall and for the 20 routes with the most page loads.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/vitals", &[SERVICE, ENV, q("minutes", Ty::Int, "How far back, 60-10080 (default 1440)")]),
     t("apps_route_stats", "Route stats", "An environment's routes from its access log over the last minutes (5-60, default 60): requests, 5xx and 4xx errors, p50/p95/max latency per route (ids folded as :id), the busiest, most failing and slowest 50 of each. Start here when a service is slow or failing.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/routes", &[SERVICE, ENV, q("minutes", Ty::Int, "How far back, 5-60 (default 60)")]),
     t("apps_list_cron_runs", "Cron runs", "A cron service's runs, newest first.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/runs", &[SERVICE, ENV]),
     t("apps_get_cron_run", "Get a cron run", "One cron run: its status, exit code, start and end.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/runs/{run}", &[SERVICE, ENV, req("run", "Run id")]),
@@ -983,6 +1074,7 @@ static TOOLS: &[Tool] = &[
     ),
     t("previews_refresh", "Refresh a preview", "Redeploy a preview now.", "previews", "POST", "/v1/previews/{id}/refresh", &[req("id", "Preview id")]),
     t("previews_logs", "Preview logs", "A preview's deploy and service logs.", "previews", "GET", "/v1/previews/{id}/logs", &[req("id", "Preview id")]),
+    t("previews_requests", "A preview's requests", "A preview's latest 200 requests through roll, newest first: service, method, path (never its query), status and time. Start here to find the request that failed.", "previews", "GET", "/v1/previews/{id}/requests", &[req("id", "Preview id")]),
     t(
         "previews_reset",
         "Reset a preview",

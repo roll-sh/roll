@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { approvableTogether, byConcern, catalogFor, denyRedirect, draftOf, expiringSoon, grantMatches, mcpConfig, parseAuthorize, presetFor, presetRules, publicJwk, rulesOf, statusOf, toolsetCost, waitsForAdmin, withToolsets, type Approval, type Preset } from "./access-api";
+import { installLink, accessRequest, approversText, parseApprovers, deciderName, describeApprovalRule, gateProgress, rememberable, proposedRule, approvableTogether, byConcern, catalogFor, denyRedirect, draftOf, expiringSoon, grantMatches, mcpConfig, parseAuthorize, githubIdentity, githubStep, presetFor, presetRules, publicJwk, rulesOf, trustedLabel, statusOf, toolsetCost, waitsForAdmin, withToolsets, type Approval, type Preset, idpFromForm } from "./access-api";
 
 const presets: Preset[] = [
   { id: "read-only", name: "Read only", description: "", rules: [{ product: "*", resources: "*", actions: { read: "allow" } }] },
@@ -140,6 +140,22 @@ describe("the checkup", () => {
 });
 
 describe("machine clients", () => {
+  it("trusts one repository's GitHub Actions, on a ref or in an environment, and says so in words", () => {
+    const on = (r: ReturnType<typeof githubIdentity>) => ("identity" in r ? r.identity.subject : r.problem);
+    expect(on(githubIdentity("acme/web", "refs/heads/main"))).toBe("repo:acme/web:ref:refs/heads/main");
+    expect(on(githubIdentity("acme/web", "refs/heads/main", "production"))).toBe("repo:acme/web:environment:production");
+    expect(on(githubIdentity("acme/web"))).toBe("repo:acme/web:*");
+    expect(on(githubIdentity("acme"))).toBe("The repository is owner/name");
+    expect(on(githubIdentity("acme/*"))).toBe("The repository is owner/name");
+    const gh = (subject: string) => trustedLabel({ issuer: "https://token.actions.githubusercontent.com", subject });
+    expect(gh("repo:acme/web:ref:refs/heads/main")).toBe("GitHub Actions in acme/web on refs/heads/main");
+    expect(gh("repo:acme/web:environment:production")).toBe("GitHub Actions in acme/web (production)");
+    const step = githubStep("mcl_1", "https://api.roll.example/v1/access/oauth/token");
+    expect(step).toContain("audience=https://api.roll.example\"");
+    expect(step).toContain("client_id=mcl_1");
+    expect(step).toContain("::add-mask::");
+  });
+
   it("turns openssl's PEM public keys into the JWKs the API takes, and refuses a private key", () => {
     const ed = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA5rj3iN7HTU2KOZ5TXM2Zyw8+3iISgidPeqHONeMvZQM=\n-----END PUBLIC KEY-----\n";
     expect(publicJwk(ed)).toEqual({ jwk: { kty: "OKP", crv: "Ed25519", x: "5rj3iN7HTU2KOZ5TXM2Zyw8-3iISgidPeqHONeMvZQM" } });
@@ -147,5 +163,73 @@ describe("machine clients", () => {
       "-----BEGIN PUBLIC KEY-----\r\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE0CXl01/W8B09OrWXFui602a0TapW\r\nrUnzlc/PDXFBLWXU0czXjt63cFk2Zkq8vPXit79F07TIc2OQ08izssxVEg==\r\n-----END PUBLIC KEY-----";
     expect(publicJwk(ec)).toEqual({ jwk: { kty: "EC", crv: "P-256", x: "0CXl01_W8B09OrWXFui602a0TapWrUnzlc_PDXFBLWU", y: "1NHM147et3BZNmZKvLz14re_RdO0yHNjkNPIs7LMVRI" } });
     expect(publicJwk("-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEI…\n-----END PRIVATE KEY-----")).toHaveProperty("problem");
+  });
+});
+
+describe("a refusal's proposal", () => {
+  it("reads roll's widen link as one rule, and nothing else", () => {
+    expect(proposedRule("?add=postgres:delete&id=prj_a", "allow")).toEqual({ product: "postgres", resources: [{ id: "prj_a" }], actions: { delete: "allow" } });
+    expect(proposedRule("?add=search:read&id=cl_1&index=logs", "ask")).toEqual({ product: "search", resources: [{ id: "cl_1", index: "logs" }], actions: { read: "ask" } });
+    expect(proposedRule("?add=apps:deploy", "allow")).toEqual({ product: "apps", resources: "*", actions: { deploy: "allow" } });
+    expect(proposedRule("?add=postgres:everything&id=x", "allow")).toBeNull();
+    expect(proposedRule("?add=*:admin", "allow")).toBeNull();
+    expect(proposedRule("", "allow")).toBeNull();
+  });
+});
+
+describe("two-person approvals", () => {
+  it("says what a pending approval still needs, and who approved it", () => {
+    expect(gateProgress({ gates: [] })).toBeNull();
+    expect(gateProgress({ gates: [{ approvals: 2, approved: 1 }], approved_by: ["usr_bob"] })).toBe("approved by usr_bob · 1 more approval needed");
+    expect(gateProgress({ gates: [{ approvals: 2, approved: 0, approvers: ["usr_a", "usr_b"] }] })).toBe("2 more approvals needed (from usr_a, usr_b)");
+  });
+  it("reads an access request's time and reason, and never offers to remember it", () => {
+    const asked = { method: "GRANT", resource: "pa", args: { for: "1h", reason: "drop scratch" } };
+    expect(accessRequest(asked)).toEqual({ for: "1h", reason: "drop scratch" });
+    expect(accessRequest({ method: "DELETE" })).toBeNull();
+    expect(rememberable(asked)).toBe(false);
+  });
+  it("reads chat approvers with the accounts some are linked to", () => {
+    expect(parseApprovers("U1=usr_ana, @U2 U1")).toEqual({ approvers: ["U1", "U2"], people: { U1: "usr_ana" } });
+    expect(approversText({ approvers: ["U1", "U2"], people: { U1: "usr_ana" } })).toBe("U1=usr_ana, U2");
+  });
+  it("names whoever is looking as an approval records them", () => {
+    expect(deciderName({ kind: "operator", locked: true })).toBe("operator");
+    expect(deciderName({ kind: "operator", user: { id: "usr_bob", handle: "bob" }, locked: true })).toBe("usr_bob");
+    expect(deciderName(null)).toBeNull();
+  });
+  it("names a rule as the policy panel lists it, and a gated approval isn't remembered", () => {
+    expect(describeApprovalRule({ product: "secrets", actions: ["reveal"], environments: ["production"], approvals: 2 })).toBe("Secrets · reveal · production: 2 approvals");
+    expect(rememberable({ resource: "prj_a", gates: [{ approvals: 2, approved: 1 }] })).toBe(false);
+    expect(rememberable({ resource: "prj_a" })).toBe(true);
+  });
+});
+
+describe("one-click installs", () => {
+  it("links Cursor and VS Code to the server's URL alone, and nothing else", () => {
+    const url = "https://api.roll.example/v1/mcp?tools=search";
+    const cursor = installLink("cursor", url)!;
+    const config = new URL(cursor.href).searchParams.get("config")!;
+    expect(cursor.href.startsWith("cursor://anysphere.cursor-deeplink/mcp/install?name=roll&")).toBe(true);
+    expect(JSON.parse(atob(config))).toEqual({ url });
+    const vscode = installLink("vscode", url)!;
+    expect(JSON.parse(decodeURIComponent(vscode.href.slice("vscode:mcp/install?".length)))).toEqual({ name: "roll", type: "http", url });
+    expect(installLink("claude-code", url)).toBeNull();
+  });
+});
+
+describe("idpFromForm", () => {
+  const form = { issuer: "https://acme.okta.com", name: " Okta ", matching: "email" as const, domains: "", jwks: "", admins: false };
+  it("needs an https issuer and, matching by email, the domains it vouches for", () => {
+    expect(idpFromForm({ ...form, issuer: "http://acme.okta.com" })).toEqual({ problem: "The issuer is an https URL" });
+    expect(idpFromForm(form)).toEqual({ problem: "Name the email domains it vouches for" });
+    expect(idpFromForm({ ...form, domains: "acme.com, nope" })).toEqual({ problem: "nope isn't a domain" });
+    expect(idpFromForm({ ...form, domains: "acme.com", jwks: "{}" })).toMatchObject({ problem: expect.stringContaining("JWKS") });
+    expect(idpFromForm({ ...form, domains: "@Acme.com acme.com, acme.co.uk", admins: true })).toEqual({
+      idp: { issuer: "https://acme.okta.com", matching: "email", domains: ["acme.com", "acme.co.uk"], admins: true, name: "Okta" },
+    });
+    expect(idpFromForm({ ...form, matching: "aud_sub" })).toEqual({ idp: { issuer: "https://acme.okta.com", matching: "aud_sub", name: "Okta" } });
+    // Tied to an SSO connection: its proven domains, never typed ones.
+    expect(idpFromForm({ ...form, domains: "evil.com", sso: "sso_1" })).toEqual({ idp: { issuer: "https://acme.okta.com", matching: "email", name: "Okta", sso: "sso_1" } });
   });
 });

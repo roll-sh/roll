@@ -27,7 +27,7 @@
 
 use crate::meter::{Meter, MeterHooks, engine_figures, index_figures, now_ms};
 use crate::pricing::{Cost, Pricing};
-use crate::store::{SearchCluster, Store, UsageTotals};
+use crate::store::{Caps, DeletedCluster, Inserted, IpRule, Over, Recorded, SearchCluster, Store, UsageTotals};
 pub use crate::wake::SqlCatalog;
 use crate::wake::{ControlHooks, GuardedStores, LOAD_WAIT, Wakes};
 use base64::Engine;
@@ -90,6 +90,12 @@ pub struct SearchConfig {
     pub history_retention: Duration,
     /// Garbage collection of unreferenced segments and WAL files.
     pub gc_interval: Option<Duration>,
+    /// How long a deleted cluster's storage is kept for restoring (`--search-deleted-retention-days`;
+    /// zero: deleted at once).
+    pub deleted_retention: Duration,
+    /// How often deleted clusters whose window ended are purged ([`Control::purge_deleted`];
+    /// `None`: never in the background).
+    pub purge_interval: Option<Duration>,
     /// How often the node wakes sleeping clusters whose background jobs came due
     /// ([`Control::start_job_wakes`]; `None`: never).
     pub job_wake_interval: Option<Duration>,
@@ -119,6 +125,9 @@ pub struct SearchConfig {
     /// Elastic Cloud): an `s3` repository on roll's own object storage, so `_snapshot` and
     /// snapshot lifecycle policies work without registering one. `None`: no default repository.
     pub default_repository: Option<String>,
+    /// What a signed-in person who isn't an admin may own (rolld:
+    /// `--search-max-clusters-per-person`, `--search-max-always-on-per-person`; 0: no cap).
+    pub person_caps: Caps,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -146,6 +155,8 @@ impl SearchConfig {
             sync_objects: false,
             history_retention: Duration::from_secs(86_400),
             gc_interval: Some(Duration::from_secs(3600)),
+            deleted_retention: Duration::from_secs(7 * 86_400),
+            purge_interval: Some(Duration::from_secs(600)),
             job_wake_interval: Some(Duration::from_secs(15)),
             metering_interval: Duration::from_secs(60),
             test_features: false,
@@ -165,6 +176,7 @@ impl SearchConfig {
             pricing: Pricing::default(),
             sealer: None,
             default_repository: Some("found-snapshots".into()),
+            person_caps: Caps { clusters: 50, always_on: 2 },
         }
     }
 }
@@ -179,6 +191,50 @@ pub struct ClusterOptions {
     pub max_in_flight: Option<i64>,
     pub max_body_mb: Option<i64>,
     pub destructive_requires_name: Option<bool>,
+    /// Who may reach the data plane: CIDRs or addresses, each a string or `{cidr, description?}`
+    /// (at most [`search_server::allow::MAX_ENTRIES`]); `[]` opens the cluster to anyone again.
+    pub ip_allowlist: Option<Vec<IpRuleInput>>,
+}
+
+/// An allowlist entry as given (roll apps' `allow_ips` take the same).
+#[derive(Clone, Debug, Deserialize)]
+#[serde(untagged)]
+pub enum IpRuleInput {
+    Cidr(String),
+    Rule(IpRuleFields),
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IpRuleFields {
+    pub cidr: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+/// The most characters an allowlist entry's description may have.
+const DESCRIPTION_CHARS: usize = 200;
+
+/// An allowlist as given, checked and made canonical.
+fn ip_rules(given: Vec<IpRuleInput>) -> Result<Vec<IpRule>> {
+    if given.len() > search_server::allow::MAX_ENTRIES {
+        return Err(ControlError::Invalid(format!("ip_allowlist: at most {} entries", search_server::allow::MAX_ENTRIES)));
+    }
+    given
+        .into_iter()
+        .map(|g| {
+            let (cidr, description) = match g {
+                IpRuleInput::Cidr(c) => (c, None),
+                IpRuleInput::Rule(r) => (r.cidr, r.description),
+            };
+            let net = search_server::allow::parse_cidr(&cidr).map_err(|e| ControlError::Invalid(format!("ip_allowlist: {e}")))?;
+            let description = description.map(|d| d.trim().to_string()).filter(|d| !d.is_empty());
+            if description.as_ref().is_some_and(|d| d.chars().count() > DESCRIPTION_CHARS || d.chars().any(char::is_control)) {
+                return Err(ControlError::Invalid(format!("ip_allowlist: a description is one line of at most {DESCRIPTION_CHARS} characters")));
+            }
+            Ok(IpRule { cidr: net.to_string(), description })
+        })
+        .collect()
 }
 
 /// One REST request through the console.
@@ -218,10 +274,36 @@ const ALWAYS_ON: Duration = Duration::from_secs(100 * 365 * 86_400);
 
 const ALPHABET: &[u8] = b"abcdefghijkmnpqrstuvwxyz23456789";
 
+/// How long a restore's or purge's claim on a deleted cluster holds before another node may take
+/// it over (the node that held it died).
+const CLAIM_TTL: Duration = Duration::from_secs(15 * 60);
+
+/// Most revokes a deleted cluster keeps for its restore ([`Control::delete_key`]).
+const MAX_KEPT_REVOKES: i64 = 1000;
+
+/// The name a deleted cluster's storage is kept under: never a cluster name (those have no `_`),
+/// and new for every delete, so a copy from an earlier delete of the same cluster is never
+/// mixed in.
+fn kept_name(id: &str) -> String {
+    format!("deleted_{id}_{}", random_string(8))
+}
+
 fn random_string(n: usize) -> String {
     let mut bytes = vec![0u8; n];
     getrandom::fill(&mut bytes).expect("os randomness");
     bytes.iter().map(|b| ALPHABET[*b as usize % ALPHABET.len()] as char).collect()
+}
+
+/// The 409 for a write past a person's cap: the cap, their count, and how it's raised.
+fn over(o: Over) -> ControlError {
+    ControlError::Conflict(match o {
+        Over::Clusters { cap, count } => format!(
+            "you have {count} search clusters (branches included) and a person may have {cap}: delete one, or the operator can raise the cap with --search-max-clusters-per-person"
+        ),
+        Over::AlwaysOn { cap, count } => format!(
+            "you have {count} always-on search clusters (idle_timeout_s 0) and a person may have {cap}: a cluster that sleeps when idle (idle_timeout_s above 0) doesn't count, or the operator can raise the cap with --search-max-always-on-per-person"
+        ),
+    })
 }
 
 pub fn new_id() -> String {
@@ -259,7 +341,25 @@ pub fn spec_for(c: &SearchCluster) -> ClusterSpec {
     spec.max_in_flight = c.max_in_flight.max(1) as usize;
     spec.max_body_bytes = Some((c.max_body_mb.max(1) as usize) << 20);
     spec.destructive_requires_name = c.destructive_requires_name;
+    spec.ip_allowlist = allowlist_of(&c.ip_allowlist);
     spec
+}
+
+/// The node's allowlist for the catalog's rules. They were checked when written; one that no
+/// longer parses (a hand-edited catalog) is logged and closes the list rather than opening it.
+fn allowlist_of(rules: &[IpRule]) -> search_server::IpAllowlist {
+    let mut nets = Vec::with_capacity(rules.len());
+    for r in rules {
+        match search_server::allow::parse_cidr(&r.cidr) {
+            Ok(n) => nets.push(n),
+            Err(e) => tracing::error!(cidr = r.cidr, error = e, "an IP allowlist entry in the catalog doesn't parse: it admits nobody"),
+        }
+    }
+    if nets.is_empty() && !rules.is_empty() {
+        // 0.0.0.0 is never a client's address.
+        nets.push(std::net::IpAddr::from([0, 0, 0, 0]).into());
+    }
+    search_server::IpAllowlist::new(nets)
 }
 
 /// `target` as a loaded instance can take it now, and whether it needs a reload: the dialect
@@ -345,6 +445,50 @@ pub struct Usage {
     pub cost: Cost,
 }
 
+/// A metrics range: which ring it reads (`res`), the step of its points and how many.
+struct MetricsRange {
+    res: i64,
+    step: i64,
+    points: i64,
+}
+
+impl MetricsRange {
+    fn parse(range: &str) -> Option<MetricsRange> {
+        match range {
+            // A minute a point.
+            "1h" => Some(MetricsRange { res: 60, step: 60, points: 60 }),
+            // 15 minutes a point, from the minute ring.
+            "24h" => Some(MetricsRange { res: 60, step: 900, points: 96 }),
+            // 2 hours a point, from the hour ring.
+            "14d" => Some(MetricsRange { res: 3600, step: 7200, points: 168 }),
+            _ => None,
+        }
+    }
+}
+
+/// One kind's (or every kind's) requests over `seconds`, as the metrics route answers them.
+fn summary_json(k: &search_server::metrics::KindStats, seconds: i64) -> Value {
+    let ms = |q: f64| k.latency.quantile(q).map(|us| (us / 1000.0 * 1000.0).round() / 1000.0);
+    json!({
+        "requests": k.requests(),
+        "rate": k.requests() as f64 / seconds.max(1) as f64,
+        "2xx": k.ok,
+        "4xx": k.client_errors,
+        "5xx": k.server_errors,
+        "rejected": k.rejected,
+        "p50_ms": ms(0.5),
+        "p95_ms": ms(0.95),
+        "p99_ms": ms(0.99),
+    })
+}
+
+fn point_json(at: i64, s: &search_server::metrics::Stats, seconds: i64) -> Value {
+    let mut v = json!({ "at": at, "all": summary_json(&s.all(), seconds) });
+    for k in search_server::metrics::KINDS {
+        v[k.name()] = summary_json(s.kind(k), seconds);
+    }
+    v
+}
 
 pub struct Control {
     pub cfg: SearchConfig,
@@ -442,6 +586,7 @@ impl Control {
         let _ = control.me.set(Arc::downgrade(&control));
         control.start_metering();
         control.start_gc();
+        control.start_purges();
         control.start_always_on();
         control.start_job_wakes();
         Ok(control)
@@ -592,7 +737,10 @@ impl Control {
         Ok(())
     }
 
-    fn apply(mut c: SearchCluster, o: ClusterOptions) -> SearchCluster {
+    fn apply(mut c: SearchCluster, o: ClusterOptions) -> Result<SearchCluster> {
+        if let Some(v) = o.ip_allowlist {
+            c.ip_allowlist = ip_rules(v)?;
+        }
         if let Some(v) = o.flavor {
             c.flavor = v.to_ascii_lowercase();
         }
@@ -608,7 +756,7 @@ impl Control {
         if let Some(v) = o.destructive_requires_name {
             c.destructive_requires_name = v;
         }
-        c
+        Ok(c)
     }
 
     /// Fails when the name is taken, by a cluster or by data left in object storage.
@@ -622,12 +770,17 @@ impl Control {
         Ok(())
     }
 
-    async fn insert(&self, c: &SearchCluster) -> Result<()> {
-        if self.store.insert(c).await? {
-            Ok(())
-        } else {
-            Err(ControlError::Conflict(format!("a search cluster named {} already exists", c.name)))
+    async fn insert(&self, c: &SearchCluster, caps: Caps) -> Result<()> {
+        match self.store.insert(c, caps).await? {
+            Inserted::Yes => Ok(()),
+            Inserted::Taken => Err(ControlError::Conflict(format!("a search cluster named {} already exists", c.name))),
+            Inserted::Over(o) => Err(over(o)),
         }
+    }
+
+    /// Saves a cluster's settings, checking `caps` in the same transaction.
+    async fn save(&self, c: &SearchCluster, caps: Caps) -> Result<()> {
+        self.store.update(c, caps).await?.map_err(over)
     }
 
     fn fresh(&self, name: &str) -> SearchCluster {
@@ -653,16 +806,19 @@ impl Control {
             loaded_on: None,
             wake_at: None,
             owner: None,
+            restored_at: None,
+            ip_allowlist: Vec::new(),
         }
     }
 
     /// A new, empty cluster, `owner`'s (a signed-in person's `usr_…`; `None`: the operator's).
-    /// Nothing is written to object storage until it is first used.
-    pub async fn create(&self, name: &str, o: ClusterOptions, owner: Option<&str>) -> Result<SearchCluster> {
-        let c = Self::apply(SearchCluster { owner: owner.map(str::to_string), ..self.fresh(name) }, o);
+    /// Past one of `caps` for the owner it is refused (409). Nothing is written to object storage
+    /// until it is first used.
+    pub async fn create(&self, name: &str, o: ClusterOptions, owner: Option<&str>, caps: Caps) -> Result<SearchCluster> {
+        let c = Self::apply(SearchCluster { owner: owner.map(str::to_string), ..self.fresh(name) }, o)?;
         self.check(&c)?;
         self.check_free(name).await?;
-        self.insert(&c).await?;
+        self.insert(&c, caps).await?;
         self.store.set_stats(&c.id, c.created_at, 0, 0, 0).await?;
         self.open_always_on(&c).await;
         Ok(c)
@@ -713,10 +869,10 @@ impl Control {
     /// A new cluster with `parent`'s indices, as they are now or as they were at `at` (Unix
     /// seconds, within the history window). Instant: the branch's commit points name the
     /// parent's segments, nothing is copied. Settings and the owner come from the parent (settings
-    /// unless given). In a
+    /// unless given), and the branch counts toward the owner's `caps`. In a
     /// fleet, call it on the node holding the parent (the API forwards there): a loaded parent
     /// is committed first, so the branch sees every acknowledged write.
-    pub async fn branch(&self, parent: &str, name: &str, at: Option<i64>, o: ClusterOptions) -> Result<SearchCluster> {
+    pub async fn branch(&self, parent: &str, name: &str, at: Option<i64>, o: ClusterOptions, caps: Caps) -> Result<SearchCluster> {
         let p = self.get(parent).await?;
         let now = now();
         if let Some(t) = at {
@@ -737,9 +893,16 @@ impl Control {
                 ..p.clone()
             },
             o,
-        );
+        )?;
         self.check(&c)?;
         self.check_free(name).await?;
+        // Refused by a cap before anything is copied (the insert's count, in its transaction,
+        // still decides).
+        if let Some(owner) = &c.owner
+            && let Some(o) = self.store.check_caps(owner, c.idle_timeout_s, caps).await?
+        {
+            return Err(over(o));
+        }
         // A parent that was never written to has nothing to copy: the branch starts empty too.
         if self.data.cluster_exists(&p.name).await? {
             let r = match at {
@@ -755,8 +918,9 @@ impl Control {
                 }
             }
         }
-        if let Err(e) = self.insert(&c).await {
-            // Lost a race for the name: don't leave the branch's objects behind.
+        if let Err(e) = self.insert(&c, caps).await {
+            // Lost a race for the name, or the owner is at a cap: don't leave the branch's
+            // objects behind.
             if let Err(e2) = self.data.delete_cluster(&c.name).await {
                 tracing::warn!(cluster = c.name, error = %e2, "removing an orphaned branch failed");
             }
@@ -788,7 +952,8 @@ impl Control {
         if window == 0 {
             return Err(ControlError::Invalid("point-in-time branches are disabled on this node (no history is retained)".into()));
         }
-        let oldest = (now - window).max(p.created_at);
+        // A restored cluster's history starts at its restore.
+        let oldest = (now - window).max(p.created_at).max(p.restored_at.unwrap_or(0));
         if at < oldest {
             return Err(ControlError::Invalid(format!("outside the history window (earliest is {oldest})")));
         }
@@ -798,13 +963,14 @@ impl Control {
     /// Changes settings. Credentials, limits (`max_in_flight` included) and the idle timeout
     /// apply at once, also to a cluster that is waking up. A new flavor (dialect) or
     /// `destructive_requires_name` default needs a reload: the cluster is unloaded now if no
-    /// request runs, or as soon as none does; until then it keeps its current ones.
-    pub async fn update(&self, id: &str, o: ClusterOptions) -> Result<SearchCluster> {
+    /// request runs, or as soon as none does; until then it keeps its current ones. Making the
+    /// cluster always-on past the owner's `caps.always_on` is refused (409).
+    pub async fn update(&self, id: &str, o: ClusterOptions, caps: Caps) -> Result<SearchCluster> {
         let c = {
             let _g = self.specs.lock().await;
-            let c = Self::apply(self.get(id).await?, o);
+            let c = Self::apply(self.get(id).await?, o)?;
             self.check(&c)?;
-            self.store.update(&c).await?;
+            self.save(&c, caps).await?;
             self.apply_spec(&c.name).await;
             c
         };
@@ -824,7 +990,7 @@ impl Control {
             let mut c = self.get(id).await?;
             c.password = random_string(32);
             c.password_rotated_at = Some(now());
-            self.store.update(&c).await?;
+            self.save(&c, Caps::NONE).await?;
             self.apply_spec(&c.name).await;
             c
         };
@@ -989,8 +1155,10 @@ impl Control {
         }
     }
 
-    /// Deletes a cluster and its data. Branches keep working: segments they share are deleted
-    /// by garbage collection only once nothing references them.
+    /// Deletes a cluster: it leaves lists and lookups and stops answering at once, and its name
+    /// is free. With a retention window (`deleted_retention`) its storage is kept until the
+    /// window ends, for [`Self::restore`]; without one, it goes now. Branches keep working:
+    /// segments they share are deleted by garbage collection only once nothing references them.
     pub async fn delete(&self, id: &str) -> Result<()> {
         let c = self.get(id).await?;
         {
@@ -1033,8 +1201,12 @@ impl Control {
         if !self.unload_retrying(&c.name, Duration::from_secs(30)).await {
             return Err(ControlError::Conflict(format!("cluster {} has requests running; retry", c.name)));
         }
-        self.data.delete_cluster(&c.name).await?;
-        self.store.delete(&c.id).await?;
+        if self.cfg.deleted_retention.is_zero() {
+            self.data.delete_cluster(&c.name).await?;
+            self.store.delete(&c.id).await?;
+        } else {
+            self.keep_deleted(c).await?;
+        }
         // Its lease goes for good: the next cluster with this name starts from nothing.
         if let Some(l) = self.cluster_leases() {
             l.cluster().retire(&crate::cluster::key(&c.name));
@@ -1042,6 +1214,198 @@ impl Control {
         self.refreshed.lock().remove(&c.name);
         self.reloads.lock().remove(&c.name);
         Ok(())
+    }
+
+    /// Moves a deleted cluster's storage to a name of its own (a branch: new commit points that
+    /// name the same segments, pins and state; nothing is copied), then flips its catalog row
+    /// to deleted, which frees the name, then removes the commit points under the name. The flip
+    /// is the commit point: before it the cluster is still there (and the copy is removed), after
+    /// it the cluster is deleted, and storage left under the name keeps the name from being
+    /// reused (`check_free`) rather than mixing into another cluster.
+    async fn keep_deleted(&self, c: &SearchCluster) -> Result<()> {
+        let kept = kept_name(&c.id);
+        if self.data.cluster_exists(&c.name).await?
+            && let Err(e) = self.data.branch(&c.name, &kept, None).await
+        {
+            if let Err(e2) = self.data.delete_cluster(&kept).await {
+                tracing::warn!(cluster = c.name, kept, error = %e2, "removing a partial copy of a deleted search cluster failed");
+            }
+            return Err(ControlError::Internal(e));
+        }
+        let at = now();
+        let purge_at = at + self.cfg.deleted_retention.as_secs() as i64;
+        if !self.store.mark_deleted(&c.id, &kept, at, purge_at).await? {
+            // Deleted meanwhile by another call: its copy is the one kept.
+            let _ = self.data.delete_cluster(&kept).await;
+            return Err(ControlError::NotFound(format!("no search cluster {}", c.id)));
+        }
+        if let Err(e) = self.data.delete_cluster(&c.name).await {
+            // The cluster is deleted; its old commit points only block the name until removed.
+            tracing::warn!(cluster = c.name, error = %e, "removing a deleted search cluster's commit points under its name failed; the name stays taken until they are");
+        }
+        Ok(())
+    }
+
+    /// Deleted clusters kept for restoring (of `owner` only, when given), newest first.
+    pub async fn list_deleted(&self, owner: Option<&str>) -> Result<Vec<DeletedCluster>> {
+        Ok(self.store.list_deleted(owner).await?)
+    }
+
+    /// The deleted cluster `id`, while it can be restored.
+    pub async fn get_deleted(&self, id: &str) -> Result<DeletedCluster> {
+        match self.store.get_deleted(id).await? {
+            Some(d) if d.purge_at > now() => Ok(d),
+            _ => Err(ControlError::NotFound(format!("no deleted search cluster {id}"))),
+        }
+    }
+
+    /// Brings deleted cluster `id` back as it was (data, settings, owner, credentials), under
+    /// its own name or `name`. Its storage moves back by a branch of the kept copy. The catalog
+    /// claim makes it exclusive with a purge (and another restore) on any node, and reserves
+    /// the name for the restore's duration.
+    ///
+    /// Under another name the password and API keys stay; clients use the new name as the
+    /// Basic auth user, in an API key's id (`<key id>@<name>`) and as the host label.
+    pub async fn restore(&self, id: &str, name: Option<&str>, caps: Caps) -> Result<SearchCluster> {
+        let d = self.get_deleted(id).await?;
+        let target = name.unwrap_or(&d.cluster.name).to_string();
+        if !valid_name(&target) {
+            return Err(ControlError::Invalid("name: 1-63 lowercase letters, digits or '-', starting with a letter and not ending with '-'".into()));
+        }
+        let taken = || {
+            ControlError::Conflict(format!(
+                "the name {target} is taken by another search cluster: restore under another name with {{\"name\": \"…\"}}"
+            ))
+        };
+        if self.store.by_name(&target).await?.is_some() || self.wakes.is_deleting(&target) {
+            return Err(taken());
+        }
+        let claim = random_string(16);
+        let stale_before = now() - CLAIM_TTL.as_secs() as i64;
+        let reserved = match self.store.claim_deleted(&d.cluster.id, &claim, Some(&target), now(), stale_before).await? {
+            crate::store::Claim::Claimed { reserved } => reserved,
+            crate::store::Claim::Taken => return Err(taken()),
+            crate::store::Claim::Busy => return Err(ControlError::Conflict(format!("deleted search cluster {id} is being restored or purged; retry"))),
+            crate::store::Claim::Gone => return Err(ControlError::NotFound(format!("no deleted search cluster {id}"))),
+        };
+        match self.restore_claimed(&d, &target, &reserved, &claim, caps).await {
+            Ok(c) => Ok(c),
+            Err(e) => {
+                if let Err(e2) = self.store.release_claim(&d.cluster.id, &claim).await {
+                    tracing::warn!(cluster = id, error = %e2, "releasing a failed restore's claim failed; it lapses");
+                }
+                Err(e)
+            }
+        }
+    }
+
+    async fn restore_claimed(&self, d: &DeletedCluster, target: &str, reserved: &str, claim: &str, caps: Caps) -> Result<SearchCluster> {
+        // Storage under the reserved name can only be an earlier, crashed restore's: the name
+        // was this row's since then, and was free of storage before.
+        if reserved == target {
+            if self.data.cluster_exists(target).await? {
+                self.data.delete_cluster(target).await?;
+            }
+        } else if self.data.cluster_exists(target).await? {
+            return Err(ControlError::Conflict(format!("object storage already holds data of a cluster named {target}")));
+        }
+        let had_data = self.data.cluster_exists(&d.stored_as).await?;
+        if had_data && let Err(e) = self.data.branch(&d.stored_as, target, None).await {
+            let _ = self.data.delete_cluster(target).await;
+            return Err(ControlError::Internal(e));
+        }
+        match self.store.finish_restore(&d.cluster.id, claim, now(), caps).await? {
+            Ok(true) => {}
+            Ok(false) => {
+                // The claim went stale and a purge took it.
+                let _ = self.data.delete_cluster(target).await;
+                return Err(ControlError::Conflict(format!("deleted search cluster {} was purged while restoring", d.cluster.id)));
+            }
+            Err(o) => {
+                // The owner is at a cap: the cluster stays deleted (its kept copy is untouched).
+                let _ = self.data.delete_cluster(target).await;
+                return Err(over(o));
+            }
+        }
+        // Credentials revoked while it was deleted, before anything else (the sweep retries a
+        // failure).
+        self.apply_revokes(&d.cluster.id).await;
+        if had_data && let Err(e) = self.data.delete_cluster(&d.stored_as).await {
+            tracing::warn!(cluster = target, kept = d.stored_as, error = %e, "removing a restored search cluster's kept copy failed");
+        }
+        let c = self.get(&d.cluster.id).await?;
+        if let Err(e) = self.refresh_stats(&c.name, now_ms()).await {
+            tracing::warn!(cluster = c.name, error = %e, "reading a restored search cluster's figures failed");
+            self.meter.mark_dirty(&c.name);
+        }
+        self.open_always_on(&c).await;
+        self.get(&c.id).await
+    }
+
+    /// Purges the deleted clusters whose window ended by `now` (Unix seconds): their kept
+    /// storage goes the way a delete without a window removes it (`search_store::Store::delete_cluster`:
+    /// commit points, state and pins; segments only once no branch references them, by garbage
+    /// collection), then their rows. Each is claimed first, so a restore or another node's purge
+    /// never runs on it at the same time. Returns how many were purged.
+    pub async fn purge_deleted(&self, now: i64) -> Result<usize> {
+        let mut purged = 0;
+        for d in self.store.due_purges(now).await? {
+            let claim = random_string(16);
+            let stale_before = crate::control::now() - CLAIM_TTL.as_secs() as i64;
+            match self.store.claim_deleted(&d.cluster.id, &claim, None, now, stale_before).await? {
+                crate::store::Claim::Claimed { .. } => {}
+                _ => continue,
+            }
+            // A crashed restore's reserved name may hold a copy of the kept storage (see
+            // `restore_claimed`).
+            let mut names = vec![d.stored_as.clone()];
+            if d.reserved != d.stored_as {
+                names.push(d.reserved.clone());
+            }
+            let mut ok = true;
+            for n in &names {
+                if let Err(e) = self.data.delete_cluster(n).await {
+                    tracing::warn!(cluster = d.cluster.id, storage = n, error = %e, "purging a deleted search cluster failed; retried later");
+                    ok = false;
+                }
+            }
+            if ok && self.store.finish_purge(&d.cluster.id, &claim).await? {
+                purged += 1;
+            } else if let Err(e) = self.store.release_claim(&d.cluster.id, &claim).await {
+                tracing::warn!(cluster = d.cluster.id, error = %e, "releasing a purge claim failed; it lapses");
+            }
+        }
+        Ok(purged)
+    }
+
+    /// [`Self::purge_deleted`] every `purge_interval`, on one node of a fleet at a time
+    /// (`singleton:search-purge`), as garbage collection is placed.
+    fn start_purges(&self) {
+        let (Some(me), Some(every)) = (self.me.get().cloned(), self.cfg.purge_interval) else { return };
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(every).await;
+                let Some(c) = me.upgrade() else { return };
+                if let Some(cl) = c.cluster_leases().map(|l| l.cluster().clone())
+                    && !tokio::task::spawn_blocking(move || cl.singleton("search-purge")).await.unwrap_or(false)
+                {
+                    continue;
+                }
+                match c.purge_deleted(now()).await {
+                    Ok(0) => {}
+                    Ok(n) => tracing::info!(purged = n, "purged deleted search clusters"),
+                    Err(e) => tracing::warn!(error = %e, "purging deleted search clusters failed"),
+                }
+                match c.store.clusters_with_revokes().await {
+                    Ok(ids) => {
+                        for id in ids {
+                            c.apply_revokes(&id).await;
+                        }
+                    }
+                    Err(e) => tracing::warn!(error = %e, "listing restored search clusters' revokes failed"),
+                }
+            }
+        });
     }
 
     /// Test seam: delays every cluster's metadata load, to widen the window of a wake.
@@ -1216,22 +1580,85 @@ impl Control {
     }
 
     /// Revokes what [`Self::mint_link`] made (`kept`), at once. Gone already (the key, the
-    /// user, the cluster) is done.
+    /// user, the cluster) is done. On a deleted cluster it is kept for the restore, which
+    /// revokes it ([`Self::keep_revoke`]).
     pub async fn revoke_link(&self, id: &str, kept: &str) -> Result<()> {
+        if !matches!(kept.split_once(':'), Some(("key" | "osuser" | "user", _))) {
+            return Err(ControlError::Invalid(format!("not a link credential: {kept:?}")));
+        }
+        match self.get(id).await {
+            Ok(c) => self.revoke_on(&c, kept).await,
+            Err(ControlError::NotFound(_)) => self.keep_revoke(id, kept).await.map(drop),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// A revoke (what [`Self::revoke_link`] takes) on deleted cluster `id`: a restore brings the
+    /// cluster's security back as it was, so it is kept with the row and the restore applies it
+    /// before it answers ([`Self::apply_revokes`]). `false`: `id` is no deleted cluster (purged,
+    /// or never was).
+    async fn keep_revoke(&self, id: &str, credential: &str) -> Result<bool> {
+        if credential.len() > 512 {
+            return Ok(false);
+        }
+        match self.store.record_revoke(id, credential, now(), MAX_KEPT_REVOKES).await? {
+            Recorded::Yes => Ok(true),
+            Recorded::Gone => Ok(false),
+            Recorded::Full => Err(ControlError::Conflict(format!(
+                "deleted search cluster {id} keeps {MAX_KEPT_REVOKES} revoked keys for its restore already: restore it, then revoke"
+            ))),
+            // Restored meanwhile: revoke it there. Hidden while a delete runs (a fleet's
+            // `deleting`): retried, never "gone", or the restore would bring it back.
+            Recorded::Live => match self.get(id).await {
+                Ok(c) => self.revoke_on(&c, credential).await.map(|()| true),
+                Err(ControlError::NotFound(_)) => Err(ControlError::Conflict(format!("search cluster {id} is being deleted; retry"))),
+                Err(e) => Err(e),
+            },
+        }
+    }
+
+    /// Applies the revokes kept while cluster `id` was deleted, forgetting each once it is done
+    /// (gone already counts). One that fails stays for the purge sweep to try again.
+    pub(crate) async fn apply_revokes(&self, id: &str) {
+        let pending = match self.store.revokes(id).await {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(cluster = id, error = %e, "reading a restored search cluster's revokes failed");
+                return;
+            }
+        };
+        if pending.is_empty() {
+            return;
+        }
         let c = match self.get(id).await {
             Ok(c) => c,
-            Err(ControlError::NotFound(_)) => return Ok(()),
-            Err(e) => return Err(e),
+            Err(e) => {
+                tracing::warn!(cluster = id, error = %e, "revoking a restored search cluster's keys failed");
+                return;
+            }
         };
+        for credential in pending {
+            let r = match self.revoke_on(&c, &credential).await {
+                Ok(()) => self.store.forget_revoke(id, &credential).await.map_err(ControlError::from),
+                Err(e) => Err(e),
+            };
+            if let Err(e) = r {
+                tracing::warn!(cluster = c.name, error = %e, "revoking a key removed while its search cluster was deleted failed; retried");
+            }
+        }
+    }
+
+    /// [`Self::revoke_link`] on live cluster `c`.
+    async fn revoke_on(&self, c: &SearchCluster, kept: &str) -> Result<()> {
         match kept.split_once(':') {
-            Some(("key", key_id)) => match self.delete_key(&c.id, key_id).await {
+            Some(("key", key_id)) => match self.delete_key_on(c, key_id).await {
                 Ok(()) | Err(ControlError::NotFound(_)) => Ok(()),
                 Err(e) => Err(e),
             },
             Some(("osuser", name)) => {
                 let api = "/_plugins/_security/api";
                 for path in [format!("{api}/internalusers/{name}"), format!("{api}/roles/{name}")] {
-                    let r = self.call(&c, EsRequest::new("DELETE", &path)).await;
+                    let r = self.call(c, EsRequest::new("DELETE", &path)).await;
                     if r.status >= 300 && r.status != 404 {
                         return Err(ControlError::Internal(anyhow::anyhow!("removing link user {name} of cluster {} failed ({})", c.name, r.status)));
                     }
@@ -1239,7 +1666,7 @@ impl Control {
                 Ok(())
             }
             Some(("user", user)) => {
-                let r = self.call(&c, EsRequest::new("DELETE", &format!("/_security/user/{}", urlencoding::encode(user)))).await;
+                let r = self.call(c, EsRequest::new("DELETE", &format!("/_security/user/{}", urlencoding::encode(user)))).await;
                 if r.status < 300 || r.status == 404 { Ok(()) } else { Err(ControlError::Internal(anyhow::anyhow!("removing link user {user} of cluster {} failed ({})", c.name, r.status))) }
             }
             _ => Err(ControlError::Invalid(format!("not a link credential: {kept:?}"))),
@@ -1300,17 +1727,34 @@ impl Control {
     }
 
     /// Revokes API key `key_id` of cluster `id` (`NotFound` when it doesn't exist or was
-    /// revoked already).
+    /// revoked already). On a deleted cluster (by its id) it is kept for the restore, which
+    /// revokes it ([`Self::keep_revoke`]): roll secrets unlinking meanwhile must not see "gone"
+    /// and leave a key the restore brings back.
     pub async fn delete_key(&self, id: &str, key_id: &str) -> Result<()> {
-        let c = self.get(id).await?;
+        let c = match self.get(id).await {
+            Ok(c) => c,
+            Err(ControlError::NotFound(m)) => {
+                let kept = match self.store.get_deleted(id).await? {
+                    // Only what the route could revoke on the live cluster.
+                    Some(d) if d.cluster.flavor != "opensearch" || key_id.starts_with(OS_KEY_PREFIX) => self.keep_revoke(id, &format!("key:{key_id}")).await?,
+                    _ => false,
+                };
+                return if kept { Ok(()) } else { Err(ControlError::NotFound(m)) };
+            }
+            Err(e) => return Err(e),
+        };
+        self.delete_key_on(&c, key_id).await
+    }
+
+    async fn delete_key_on(&self, c: &SearchCluster, key_id: &str) -> Result<()> {
         if c.flavor == "opensearch" {
             // Only users the keys route made: never another internal user.
             let api = "/_plugins/_security/api";
             if !key_id.starts_with(OS_KEY_PREFIX) {
                 return Err(ControlError::NotFound(format!("no API key {key_id} on cluster {}", c.name)));
             }
-            let r = self.call(&c, EsRequest::new("DELETE", &format!("{api}/internalusers/{}", urlencoding::encode(key_id)))).await;
-            let _ = self.call(&c, EsRequest::new("DELETE", &format!("{api}/roles/{}", urlencoding::encode(key_id)))).await;
+            let r = self.call(c, EsRequest::new("DELETE", &format!("{api}/internalusers/{}", urlencoding::encode(key_id)))).await;
+            let _ = self.call(c, EsRequest::new("DELETE", &format!("{api}/roles/{}", urlencoding::encode(key_id)))).await;
             return match r.status {
                 s if s < 300 => Ok(()),
                 404 => Err(ControlError::NotFound(format!("no API key {key_id} on cluster {}", c.name))),
@@ -1318,7 +1762,7 @@ impl Control {
             };
         }
         let body = serde_json::to_vec(&json!({ "ids": [key_id] })).unwrap_or_default();
-        let resp = self.call(&c, EsRequest::json("DELETE", "/_security/api_key", body)).await;
+        let resp = self.call(c, EsRequest::json("DELETE", "/_security/api_key", body)).await;
         let v: Value = serde_json::from_slice(&resp.body).unwrap_or(Value::Null);
         let revoked = v["invalidated_api_keys"].as_array().is_some_and(|a| a.iter().any(|k| k.as_str() == Some(key_id)));
         match (resp.status, revoked) {
@@ -1477,6 +1921,12 @@ impl Control {
         for (name, n) in self.node.take_request_counts() {
             self.meter.count_requests(&name, n.min(i64::MAX as u64) as i64);
         }
+        for (name, o) in self.node.take_observations() {
+            // Lost if the catalog can't take them now: they are a picture, not a bill.
+            if let Err(e) = self.meter.observe(&name, o).await {
+                tracing::warn!(cluster = name, error = %e, "storing search metrics failed");
+            }
+        }
         let at = now_ms();
         for (name, forced) in self.meter.sample(at).await? {
             let due = forced || self.refreshed.lock().get(&name).is_none_or(|t| at - t >= self.cfg.stats_interval.as_millis() as i64);
@@ -1489,6 +1939,66 @@ impl Control {
             }
         }
         Ok(())
+    }
+
+    /// Request metrics of a cluster over `range` (`1h`, `24h` or `14d`): its buckets in the
+    /// catalog plus what this node recorded since the last metering pass, in points of the
+    /// range's step (only points with requests), and totals. See `docs/search/architecture.md`,
+    /// "Observability".
+    pub async fn metrics(&self, id: &str, range: &str) -> Result<Value> {
+        let c = self.get(id).await?;
+        let Some(r) = MetricsRange::parse(range) else {
+            return Err(ControlError::Invalid(format!("range must be 1h, 24h or 14d, not {range}")));
+        };
+        let now = now();
+        let to = now - now.rem_euclid(r.step);
+        let from = to - (r.points - 1) * r.step;
+        let mut buckets: std::collections::BTreeMap<i64, search_server::metrics::Stats> = std::collections::BTreeMap::new();
+        let mut add = |at: i64, s: &search_server::metrics::Stats| {
+            if at >= from {
+                buckets.entry(at - at.rem_euclid(r.step)).or_default().merge(s);
+            }
+        };
+        for (at, s) in self.store.metrics_since(&c.id, r.res, from).await? {
+            add(at, &s);
+        }
+        // Not flushed yet: what the cluster's owner (here) recorded since the last pass.
+        for (minute, s) in self.node.peek_observations(&c.name).minutes {
+            add(minute.min(i64::MAX as u64 / 60) as i64 * 60, &s);
+        }
+        let mut total = search_server::metrics::Stats::default();
+        let points: Vec<Value> = buckets
+            .iter()
+            .filter(|(_, s)| !s.is_empty())
+            .map(|(at, s)| {
+                total.merge(s);
+                point_json(*at, s, r.step)
+            })
+            .collect();
+        Ok(json!({
+            "range": range,
+            "step_s": r.step,
+            "from": from,
+            "to": to + r.step,
+            "points": points,
+            "totals": point_json(from, &total, r.points * r.step),
+        }))
+    }
+
+    /// A cluster's slow log, newest first: the catalog's entries and those this node hasn't
+    /// handed on yet, at most [`search_es::slowlog::MAX_ENTRIES`].
+    pub async fn slowlog(&self, id: &str) -> Result<Value> {
+        let c = self.get(id).await?;
+        let mut entries: Vec<Value> = self.node.peek_observations(&c.name).slow.iter().rev().map(search_es::slowlog::Entry::to_json).collect();
+        for row in self.store.slowlog(&c.id).await? {
+            if entries.len() >= search_es::slowlog::MAX_ENTRIES {
+                break;
+            }
+            if let Ok(v) = serde_json::from_str::<Value>(&row) {
+                entries.push(v);
+            }
+        }
+        Ok(json!({ "entries": entries, "max_entries": search_es::slowlog::MAX_ENTRIES }))
     }
 
     /// Re-reads a cluster's docs and stored bytes from its commit points.
@@ -1631,8 +2141,11 @@ mod tests {
             loaded_on: None,
             wake_at: None,
             owner: None,
+            restored_at: None,
+            ip_allowlist: vec![IpRule { cidr: "203.0.113.0/24".into(), description: None }],
         };
         let s = spec_for(&c);
+        assert!(s.ip_allowlist.contains("::ffff:203.0.113.9".parse().unwrap()) && !s.ip_allowlist.is_open());
         assert_eq!(s.name, "app");
         assert_eq!(s.dialect, Dialect::OpenSearch);
         assert_eq!(s.credentials.len(), 1);

@@ -36,9 +36,12 @@ pub mod s3;
 pub mod scripting;
 pub mod search;
 pub mod seal;
+pub mod slowlog;
 pub mod search_source;
 pub mod stack;
 pub mod tasks;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod thread_pool;
 pub mod time;
 pub mod tsds;

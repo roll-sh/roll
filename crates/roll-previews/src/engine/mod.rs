@@ -24,6 +24,8 @@ pub fn preview_key(id: &str) -> String {
 }
 
 /// Settled previews aren't converged again until something changes.
+/// The most refused hosts a preview's activity names (the rest are counted).
+const EGRESS_TOLD_MAX: usize = 50;
 const SETTLED: i64 = i64::MAX;
 /// How long a converge holds a preview (its `next_at` meanwhile); a crash is retried after it.
 const CONVERGE_LEASE_MS: i64 = 300_000;
@@ -94,6 +96,14 @@ impl Default for Config {
 }
 
 impl Config {
+    /// A host label's URL under a project's own preview domain (`(base, https)`), or under rolld's.
+    pub fn url_in(&self, domain: Option<&(String, bool)>, host: &str) -> String {
+        match domain {
+            Some((base, https)) => format!("{}://{host}.{base}", if *https { "https" } else { "http" }),
+            None => self.url(host),
+        }
+    }
+
     pub fn url(&self, host: &str) -> String {
         let port = match (self.scheme.as_str(), self.port) {
             ("http", Some(80)) | ("https", Some(443)) | (_, None) => String::new(),
@@ -139,7 +149,12 @@ pub struct Engine {
     kick: Notify,
     /// In a cluster: requests that act on running services go to the reconciler's node.
     pub cluster: std::sync::OnceLock<Arc<roll_cluster::Cluster>>,
+    /// Where a Git URL service's previews are posted (rolld: roll apps' GitHub App connection).
+    pub git_report: std::sync::OnceLock<Arc<dyn crate::ports::GitReport>>,
     usage_read: Mutex<HashMap<String, i64>>,
+    /// What each preview's services used, read at (ms): `GET …/metrics` reads them again only after
+    /// [`METRICS_FOR`], however many sheets poll.
+    metrics_read: Mutex<HashMap<String, (i64, Vec<crate::ServiceMetrics>)>>,
     /// Previews whose screenshot a converge asked for; taken after the pass (`pass`).
     shots_wanted: Mutex<std::collections::HashSet<String>>,
     /// Previews with a screenshot task queued or running, and whether it was asked again
@@ -153,6 +168,11 @@ pub struct Engine {
     counters: Counters,
     /// The hosts each preview's egress proxy refused that its activity already says.
     egress_told: Mutex<HashMap<String, std::collections::HashSet<String>>>,
+    /// Held while a Git URL preview's report is posted: a converge's and a screenshot's at once
+    /// would each make the pull request's first comment before either kept its id.
+    git_reporting: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// What each preview's output mustn't show (`masks.rs`).
+    log_masks: Mutex<HashMap<String, masks::Masks>>,
     /// Screenshots taken at once on this node ([`screenshot_slots`]).
     shooting: Arc<tokio::sync::Semaphore>,
     /// Services a converge just deployed at a change's new head, woken after the pass (`warm`).
@@ -162,6 +182,8 @@ pub struct Engine {
     deploying_since: Mutex<HashMap<(String, String), i64>>,
     /// The unresolved secrets last told per preview (each set once in its activity).
     secrets_told: Mutex<HashMap<String, Vec<String>>>,
+    /// When each project's own preview domain was last read from roll apps (ms).
+    domain_read: Mutex<HashMap<String, i64>>,
     /// The paths a head changes (`repo`, `head`, or `from..head`), for the path filters. Between
     /// two changesets they never change; since the merge base they could, if part of the change
     /// lands first, and then the next push reads them again. Cleared past [`PATHS_KEPT`] heads.
@@ -211,8 +233,11 @@ impl Engine {
             leader,
             kick: Notify::new(),
             cluster: std::sync::OnceLock::new(),
+            git_report: std::sync::OnceLock::new(),
             usage_read: Mutex::new(HashMap::new()),
+            metrics_read: Mutex::new(HashMap::new()),
             secrets_told: Mutex::new(HashMap::new()),
+            domain_read: Mutex::new(HashMap::new()),
             paths_seen: Mutex::new(HashMap::new()),
             shots_wanted: Mutex::new(std::collections::HashSet::new()),
             shots_running: Mutex::new(HashMap::new()),
@@ -220,6 +245,8 @@ impl Engine {
             counters: Counters::default(),
             shooting: Arc::new(tokio::sync::Semaphore::new(screenshot_slots())),
             egress_told: Mutex::new(HashMap::new()),
+            git_reporting: Mutex::new(HashMap::new()),
+            log_masks: Mutex::new(HashMap::new()),
             warm_wanted: Mutex::new(Vec::new()),
             deploying_since: Mutex::new(HashMap::new()),
             passing: tokio::sync::Mutex::new(()),
@@ -476,9 +503,11 @@ impl Engine {
     /// without them, saying which). The leases of the dynamic credentials among them come back
     /// too: the caller keeps them while what it starts runs ([`Engine::keep_leases`]) or revokes
     /// them when it's done.
-    pub(super) async fn resolve_secrets(&self, r: &Row, untrusted: bool, consumer: &str) -> anyhow::Result<(Vec<(String, String)>, Vec<String>)> {
+    /// Also the keys whose values are plain (a host, a port: roll secrets' `plain`, and a followed
+    /// key whose field isn't a credential), which a preview's logs may show.
+    pub(super) async fn resolve_secrets(&self, r: &Row, untrusted: bool, dynamic: bool, consumer: &str) -> anyhow::Result<(Vec<(String, String)>, Vec<String>, Vec<String>)> {
         let consumer = format!("preview:{}/{consumer}", env_name(&r.id));
-        let got = self.secrets.resolve(&r.project_id, &env_name(&r.id), untrusted, &consumer).await.map_err(|e| anyhow::anyhow!("secrets: {e:#}"))?;
+        let got = self.secrets.resolve(&r.project_id, &env_name(&r.id), untrusted, dynamic, &consumer).await.map_err(|e| anyhow::anyhow!("secrets: {e:#}"))?;
         let mut problems = got.problems.clone();
         problems.sort();
         let new = self.secrets_told.lock().insert(r.id.clone(), problems.clone()).is_none_or(|before| before != problems);
@@ -487,7 +516,23 @@ impl Engine {
             let more = problems.len().saturating_sub(shown.len());
             let _ = self.store.log(&r.id, &format!("secrets that don't resolve: {}{}", shown.join("; "), if more > 0 { format!(" (and {more} more)") } else { String::new() }));
         }
-        Ok((got.values, got.leases))
+        // A followed key: the branch's value for that field, or blank (never the parent's).
+        let mut values = got.values;
+        let mut plain = got.plain;
+        if !got.followed.is_empty() {
+            let branches = self.branch_vars(&r.id).await?;
+            for (name, kind, parent, field) in got.followed {
+                let vars = branches.iter().find(|(k, p, _)| *k == kind && *p == parent).map(|(_, _, v)| v.clone()).unwrap_or_default();
+                let value = crate::names::follow(kind, &field, vars);
+                values.retain(|(k, _)| *k != name);
+                plain.retain(|k| *k != name);
+                if !masks::credential_name(&field) {
+                    plain.push(name.clone());
+                }
+                values.push((name, value));
+            }
+        }
+        Ok((values, got.leases, plain))
     }
 
     /// A start of `service` runs on `leases` now: the previous start's are revoked (that
@@ -518,7 +563,7 @@ impl Engine {
         let Ok(rows) = self.store.rows(None) else { return };
         for r in rows.into_iter().filter(|r| r.desired == Desired::Active) {
             let Ok(s) = self.store.settings(&r.project_id) else { continue };
-            if s.egress != crate::settings::EgressRule::Roll || s.egress_hosts.is_empty() {
+            if s.egress_for(r.trusted) != crate::settings::EgressRule::Roll || s.egress_hosts.is_empty() {
                 continue;
             }
             let local = match self.cluster.get() {
@@ -532,8 +577,27 @@ impl Engine {
                 let refused = self.apps.egress_refused(&r.id).await;
                 let mut told = self.egress_told.lock();
                 let seen = told.entry(r.id.clone()).or_default();
-                refused.into_iter().filter(|h| seen.insert(h.clone())).collect()
+                // At most `EGRESS_TOLD_MAX` hosts said per preview: code trying made-up names
+                // mustn't grow this, or push the rest of the activity out.
+                let room = EGRESS_TOLD_MAX.saturating_sub(seen.len());
+                let mut fresh: Vec<String> = refused.into_iter().filter(|h| !seen.contains(h)).collect();
+                let more = fresh.len().saturating_sub(room);
+                fresh.truncate(room);
+                seen.extend(fresh.iter().cloned());
+                if more > 0 && seen.len() >= EGRESS_TOLD_MAX && seen.insert("…".into()) {
+                    let _ = self.store.log(&r.id, &format!("its code tried {more} more hosts outside roll (refused); only the first {EGRESS_TOLD_MAX} are named"));
+                }
+                fresh
             };
+            if fresh.is_empty() {
+                continue;
+            }
+            // A name is its code's to choose (`<secret>.example.com`): masked as its logs are.
+            let Ok(values) = self.masks(&r.id).await else {
+                let _ = self.store.log(&r.id, &format!("its code tried to reach {} hosts outside roll (refused)", fresh.len()));
+                continue;
+            };
+            let fresh: Vec<String> = fresh.iter().map(|h| code_preview::runner::mask(h, &values)).collect();
             // `<host> private`: listed, but it resolves only to private addresses.
             let (private, unlisted): (Vec<String>, Vec<String>) = fresh.into_iter().partition(|h| h.ends_with(" private"));
             if !unlisted.is_empty() {
@@ -656,7 +720,7 @@ fn wants(s: &Settings, c: &ChangeInfo) -> bool {
     }
     match asks(c) {
         Some(asked) => asked,
-        None => !s.manual && (s.drafts || !c.draft) && crate::glob::any(&s.branches, c.branch.as_deref().unwrap_or("*")),
+        None => !s.manual && (s.drafts || !c.draft) && crate::glob::any(&s.branches, c.branch.as_deref().unwrap_or("*")) && !crate::glob::any(&s.skip_authors, &c.author),
     }
 }
 
@@ -737,6 +801,7 @@ fn short(rev: &str) -> &str {
 mod converge;
 mod discover;
 mod env;
+mod masks;
 mod requests;
 
 #[cfg(test)]
@@ -769,6 +834,11 @@ mod tests {
         assert!(!wants(&s, &ChangeInfo { branch: Some("fix/x".into()), ..ch.clone() }));
         assert!(!wants(&s, &ChangeInfo { draft: true, ..ch.clone() }));
         assert!(!wants(&s, &ChangeInfo { title: "Fix typo [Skip Preview]".into(), ..ch.clone() }));
+        // A dependency bot's pull request is skipped by its author, unless a person asks.
+        let bots = Settings { skip_authors: vec!["*[bot]".into()], ..s.clone() };
+        let bump = ChangeInfo { author: "dependabot[bot]".into(), ..ch.clone() };
+        assert!(wants(&bots, &ChangeInfo { author: "ada".into(), ..ch.clone() }) && !wants(&bots, &bump));
+        assert!(wants(&bots, &ChangeInfo { labels: vec!["preview".into()], ..bump.clone() }), "a label asks");
         assert!(wants(&s, &ChangeInfo { title: "[preview] try the new nav".into(), branch: Some("fix/x".into()), draft: true, ..ch.clone() }));
         assert!(!wants(&s, &ChangeInfo { title: "[preview]".into(), open: false, ..ch.clone() }));
         // Unused for 6 of a week's hours: quiet; within a day: when. A 4-hour TTL warns an hour ahead.

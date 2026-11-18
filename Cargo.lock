@@ -274,6 +274,7 @@ name = "apps-control"
 version = "0.1.0"
 dependencies = [
  "aes-gcm",
+ "aho-corasick",
  "anyhow",
  "apps-build",
  "async-trait",
@@ -6839,6 +6840,7 @@ dependencies = [
  "roll-auth",
  "roll-cluster",
  "roll-net",
+ "roll-oidc",
  "roll-workspace",
  "serde",
  "serde_json",
@@ -6867,8 +6869,12 @@ dependencies = [
  "getrandom 0.4.3",
  "hex",
  "http-body-util",
+ "percent-encoding",
  "reqwest",
+ "ring",
  "roll-auth",
+ "roll-net",
+ "roll-oidc",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -6887,6 +6893,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
+ "crc32fast",
  "flate2",
  "getrandom 0.4.3",
  "qrcode",
@@ -7056,9 +7063,11 @@ dependencies = [
  "roll-auth",
  "roll-workspace",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "tokio",
  "tower",
+ "tracing",
  "url",
 ]
 
@@ -7069,6 +7078,16 @@ dependencies = [
  "reqwest",
  "tokio",
  "url",
+]
+
+[[package]]
+name = "roll-oidc"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "ring",
+ "serde_json",
+ "tracing",
 ]
 
 [[package]]
@@ -7127,6 +7146,7 @@ dependencies = [
  "regex",
  "ring",
  "roll-auth",
+ "roll-oidc",
  "roll-workspace",
  "rsa",
  "serde",
@@ -7241,6 +7261,7 @@ dependencies = [
  "roll-edge",
  "roll-mcp",
  "roll-net",
+ "roll-oidc",
  "roll-previews",
  "roll-secrets",
  "roll-workspace",
@@ -7979,6 +8000,7 @@ dependencies = [
  "bytes",
  "chrono",
  "chrono-tz",
+ "crc32fast",
  "flate2",
  "foldhash 0.2.0",
  "hkdf",
@@ -8057,6 +8079,7 @@ dependencies = [
  "http-body-util",
  "hyper 1.12.0",
  "hyper-util",
+ "ipnet",
  "libc",
  "libmimalloc-sys",
  "mimalloc",

@@ -25,6 +25,7 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route("/v1/previews/{id}/refresh", post(refresh))
         .route("/v1/previews/{id}/keep", post(keep))
         .route("/v1/previews/{id}/visual/accept", post(accept_visual))
+        .route("/v1/previews/{id}/approve", post(approve))
         .route("/v1/previews/{id}/env", get(vars).put(put_vars))
         .route("/v1/previews/{id}/shares", get(shares).post(share))
         .route("/v1/previews/{id}/shares/{share}", axum::routing::delete(unshare))
@@ -44,6 +45,8 @@ pub fn router(engine: Arc<Engine>) -> Router {
                 .route("/v1/previews/{id}/sleep", post(sleep))
                 .route("/v1/previews/{id}/wake", post(wake))
                 .route("/v1/previews/{id}/logs", get(logs))
+                .route("/v1/previews/{id}/requests", get(requests))
+                .route("/v1/previews/{id}/metrics", get(metrics))
                 .route_layer(axum::middleware::from_fn_with_state(engine.clone(), on_leader))
                 .with_state(engine.clone()),
         )
@@ -51,7 +54,11 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route("/v1/previews/projects/{project}/settings", get(settings).put(put_settings))
         .route("/v1/previews/projects/{project}/usage", get(usage))
         .route("/v1/previews/projects/{project}/bypass", get(bypass).post(rotate_bypass).delete(delete_bypass))
+        .route("/v1/previews/projects/{project}/hooks", get(hooks).post(create_hook))
+        .route("/v1/previews/projects/{project}/hooks/{hook}", axum::routing::delete(delete_hook))
         .route_layer(axum::middleware::from_fn_with_state(engine.clone(), scoped))
+        // A deploy hook: the secret in its path is the credential (rolld's gate lets it through).
+        .route("/v1/previews/hooks/{secret}", axum::routing::post(run_hook))
         .with_state(engine)
 }
 
@@ -243,6 +250,27 @@ async fn accept_visual(AxState(e): S, Path(id): Path<String>, who: Option<axum::
         (None, None) => ("operator".into(), true),
     };
     e.accept_visual(&id, &by, behind.as_deref(), person, seen.as_deref(), path.as_deref()).await.map(Json)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ApproveBody {
+    /// The head that was looked at (`head`): refused (409) when the pull request moved on.
+    head: String,
+}
+
+/// A writer lets one head of a fork's pull request on a Git URL service run.
+async fn approve(AxState(e): S, Path(id): Path<String>, who: Option<axum::Extension<roll_auth::SignedIn>>, grant: Option<axum::Extension<roll_auth::Grant>>, b: Bytes) -> crate::Result<Json<Preview>> {
+    check_id(&id)?;
+    let ApproveBody { head } = body(&b)?;
+    // A person's call (or the operator's), never a token's: an automation reading the pull
+    // request's own text mustn't release a fork's code.
+    let by = match (who, grant) {
+        (_, Some(_)) => return Err(Error::Forbidden("approving a fork's code to run is a person's call: sign in, not a token".into())),
+        (Some(axum::Extension(u)), None) => u.handle,
+        (None, None) => "operator".into(),
+    };
+    blocking(e, move |e| e.approve(&id, &head, &by)).await.map(Json)
 }
 
 #[derive(Deserialize)]
@@ -508,6 +536,17 @@ struct LogsQuery {
     follow: Option<String>,
 }
 
+/// What its running services use (`{services: [...]}`; 404 for no such preview).
+async fn metrics(AxState(e): S, Path(id): Path<String>) -> crate::Result<Json<Value>> {
+    check_id(&id)?;
+    Ok(Json(json!({ "services": e.metrics(&id).await? })))
+}
+
+async fn requests(AxState(e): S, Path(id): Path<String>) -> crate::Result<Json<Value>> {
+    check_id(&id)?;
+    Ok(Json(json!({ "requests": e.requests(&id).await? })))
+}
+
 /// A service's last lines; with `follow`, server-sent events: `event: service` (its name), then
 /// one event per line as it comes, with keep-alives.
 async fn logs(AxState(e): S, Path(id): Path<String>, Query(q): Query<LogsQuery>) -> crate::Result<Response> {
@@ -606,6 +645,54 @@ async fn delete_bypass(AxState(e): S, Path(project): Path<String>) -> crate::Res
     .await?;
     e.kick();
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `{hooks: [{id, name, branches, created_at, fired_at}]}`: never their secrets.
+async fn hooks(AxState(e): S, Path(project): Path<String>) -> crate::Result<Json<Value>> {
+    let hooks = blocking(e, move |e| {
+        e.workspace_project(&project)?;
+        e.store.hooks(&project)
+    })
+    .await?;
+    Ok(Json(json!({ "hooks": hooks })))
+}
+
+#[derive(Deserialize)]
+struct NewHook {
+    name: String,
+    #[serde(default = "every_branch")]
+    branches: Vec<String>,
+}
+
+fn every_branch() -> Vec<String> {
+    vec!["*".into()]
+}
+
+/// `{name, branches?}` → 201 `{hook, path}`: the path (`/v1/previews/hooks/rlb_…`) is shown
+/// only here.
+async fn create_hook(AxState(e): S, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
+    let b: NewHook = serde_json::from_slice(&b).map_err(|err| Error::BadRequest(format!("expected {{name, branches?}}: {err}")))?;
+    let (hook, path) = blocking(e, move |e| e.create_hook(&project, &b.name, &b.branches)).await?;
+    let mut r = (StatusCode::CREATED, Json(json!({ "hook": hook, "path": path }))).into_response();
+    r.headers_mut().insert(axum::http::header::CACHE_CONTROL, axum::http::HeaderValue::from_static("no-store"));
+    Ok(r)
+}
+
+async fn delete_hook(AxState(e): S, Path((project, hook)): Path<(String, String)>) -> crate::Result<StatusCode> {
+    blocking(e, move |e| {
+        e.workspace_project(&project)?;
+        e.store.delete_hook(&project, &hook)
+    })
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// A deploy hook fired: 202 `{rebuilt: [preview ids], coalesced}`; anything but a live hook is
+/// a 404. The body is ignored (a CMS sends its own payload).
+async fn run_hook(AxState(e): S, Path(secret): Path<String>, req: axum::extract::Request) -> crate::Result<Response> {
+    let from = req.extensions().get::<axum::extract::ConnectInfo<std::net::SocketAddr>>().map(|c| c.0.ip().to_string());
+    let (rebuilt, coalesced) = blocking(e, move |e| e.run_hook(&secret, from.as_deref())).await?;
+    Ok((StatusCode::ACCEPTED, Json(json!({ "rebuilt": rebuilt, "coalesced": coalesced }))).into_response())
 }
 
 /// Ask every live preview of `project` to converge again.

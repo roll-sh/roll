@@ -26,6 +26,10 @@ pub struct Settings {
     /// … that none of these match (empty: none ignored). A change's paths are everything since
     /// its merge base with the default branch.
     pub ignore_paths: Vec<String>,
+    /// Globs on a change's author (a pull request's GitHub login: `dependabot[bot]`, `*[bot]`):
+    /// a change by one gets no preview unless its title or a label asks (Netlify's and Vercel's
+    /// ignored builds for dependency bots). Empty: everyone's.
+    pub skip_authors: Vec<String>,
     /// `"<kind>:<ref>"` → `branch`, `schema` or `skip`; resources not listed get `data`.
     pub resources: BTreeMap<String, ResourceRule>,
     pub data: Mode,
@@ -65,6 +69,11 @@ pub struct Settings {
     /// `*.sentry.io`), through a proxy on the preview's network that refuses anything else.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub egress_hosts: Vec<String>,
+    /// What a fork's preview (an untrusted head a writer approved to run) may reach when `egress`
+    /// is `open`: `roll` (the default) holds it to roll's products and `egress_hosts`, since an
+    /// approval is to run its code, not a read of it for what it sends out; `open` lets it reach
+    /// what the project's own previews do.
+    pub egress_forks: EgressRule,
     /// Branch the data as of a point in time (Neon's time-travel branches), where the product
     /// keeps history: `-24h` (`-30m`, `-7d`) before each branching or reset, or an RFC 3339 time;
     /// at most 30 days back. Products without history branch as of now and say so.
@@ -324,6 +333,7 @@ impl Default for Settings {
             manual: false,
             paths: Vec::new(),
             ignore_paths: Vec::new(),
+            skip_authors: Vec::new(),
             resources: BTreeMap::new(),
             data: Mode::Branch,
             reset_every_hours: 0,
@@ -341,6 +351,7 @@ impl Default for Settings {
             mail: MailRule::Catch,
             egress: EgressRule::Open,
             egress_hosts: Vec::new(),
+            egress_forks: EgressRule::Roll,
             data_at: None,
             feedback: true,
             warm: true,
@@ -373,6 +384,12 @@ pub fn is_production(env: &str) -> bool {
 }
 
 impl Settings {
+    /// What a preview's code may reach: the project's rule, and for a fork's head (`trusted`
+    /// false) `egress_forks` where the project's is open.
+    pub fn egress_for(&self, trusted: bool) -> EgressRule {
+        if trusted { self.egress } else if self.egress == EgressRule::Roll { EgressRule::Roll } else { self.egress_forks }
+    }
+
     /// These settings with `patch`'s fields on top (objects merge, everything else replaces),
     /// checked.
     pub fn patched(&self, patch: &Value) -> Result<Settings> {
@@ -390,6 +407,9 @@ impl Settings {
         let bad = |m: String| Err(Error::BadRequest(m));
         if self.branches.is_empty() || self.branches.len() > MAX_BRANCH_GLOBS || self.branches.iter().any(|b| b.is_empty() || b.len() > 200) {
             return bad(format!("branches: 1–{MAX_BRANCH_GLOBS} globs of 1–200 characters"));
+        }
+        if self.skip_authors.len() > MAX_BRANCH_GLOBS || self.skip_authors.iter().any(|a| a.is_empty() || a.len() > 200) {
+            return bad(format!("skip_authors: at most {MAX_BRANCH_GLOBS} globs of 1–200 characters"));
         }
         for (name, list) in [("paths", &self.paths), ("ignore_paths", &self.ignore_paths)] {
             if list.len() > MAX_BRANCH_GLOBS || list.iter().any(|p| p.len() > 200 || code_control::review::pattern::Pattern::new(p).is_none()) {
@@ -418,8 +438,8 @@ impl Settings {
         if let Some(h) = self.egress_hosts.iter().find(|h| !egress_host_ok(h)) {
             return bad(format!("egress_hosts: {h:?} isn't a host name (api.stripe.com, or *.sentry.io for its subdomains)"));
         }
-        if !self.egress_hosts.is_empty() && self.egress != EgressRule::Roll {
-            return bad("egress_hosts: only with egress \"roll\" (with \"open\" everything is reachable)".into());
+        if !self.egress_hosts.is_empty() && self.egress != EgressRule::Roll && self.egress_forks != EgressRule::Roll {
+            return bad("egress_hosts: only with egress (or egress_forks) \"roll\" (with \"open\" everything is reachable)".into());
         }
         if !(1..=24 * 90).contains(&self.ttl_hours) {
             return bad("ttl_hours: 1 to 2160".into());

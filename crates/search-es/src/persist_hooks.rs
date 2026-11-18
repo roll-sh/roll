@@ -111,6 +111,8 @@ impl Engine {
                 id: i,
                 shard,
                 counters: ShardCounters::default(),
+                slow: Default::default(),
+                slowlog: self.slowlog.clone(),
                 dirty_since: AtomicI64::new(0),
                 last_search: AtomicI64::new(epoch_ms()),
                 request_cache: Default::default(),
@@ -183,13 +185,13 @@ impl Engine {
                     )));
                 }
                 crate::search::index_time::apply(scripts, st, &idx.mapping, &value, &mut parsed)?;
-                let stored = crate::write::stored_source(idx, &table, &src, &value);
+                let stored = crate::write::stored_doc(idx, &table, &src, &value, crate::xcontent::XContentType::Json);
                 let doc = if crate::engine::tsdb::is_time_series(idx) {
                     let (gen_id, tsid, _) = crate::write::time_series_id(idx, &parsed, id, routing)?;
-                    let meta = DocMeta { id: &gen_id, routing: None, source: stored, tsid: Some((&tsid, routing.unwrap_or(""))) };
+                    let meta = DocMeta { id: &gen_id, routing: None, source: stored.source, ignored_source: stored.ignored_source, tsid: Some((&tsid, routing.unwrap_or(""))) };
                     convert::to_indexable(&table, &parsed, &meta)?
                 } else {
-                    convert::to_indexable(&table, &parsed, &DocMeta { id, routing, source: stored, tsid: None })?
+                    convert::to_indexable(&table, &parsed, &DocMeta { id, routing, source: stored.source, ignored_source: stored.ignored_source, tsid: None })?
                 };
                 let mut op = IndexOp::new(doc);
                 op.origin = Origin::Replay { seq_no, primary_term, version };

@@ -18,8 +18,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// What a target can ask for; a new one gets the two that need someone.
-pub const EVENTS: [&str; 18] = [
+pub const EVENTS: [&str; 22] = [
     "deploy.failed",
+    "deploy.base_updated",
+    "rollout.waiting",
+    "deploy.ready",
+    "error.new",
     "crash_loop",
     "deploy.active",
     "spend.alert",
@@ -38,7 +42,7 @@ pub const EVENTS: [&str; 18] = [
     "volume.backup_failed",
     "volume.full",
 ];
-const DEFAULT_EVENTS: [&str; 15] = ["deploy.failed", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"];
+const DEFAULT_EVENTS: [&str; 18] = ["deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"];
 /// Whether a target with `events` hears an event: its own kind, or for a resolution, the alert's
 /// (whoever heard an alert hears it clear; there's nothing else to ask for).
 fn wants(events: &[String], kind: &str, data: &Value) -> bool {
@@ -365,6 +369,12 @@ impl Apps {
         match e.kind.as_str() {
             "deploy.failed" => (format!("{what}: deploy failed"), format!("The deploy{rev} failed: {}. The live deployment keeps serving.", e.data["error"].as_str().unwrap_or("no reason given"))),
             "deploy.active" => (format!("{what}: deployed"), format!("A new deployment{rev} is live.")),
+            "rollout.waiting" => (
+                format!("{what}: a rollout waits for you at {}%", e.data["share"]),
+                format!("The deployment{rev} passed its step at {}% of requests and holds there until someone advances it, puts it all live or rolls it back (the service page, or `roll apps rollout`). It still rolls back by itself if it starts failing.", e.data["share"]),
+            ),
+            "deploy.base_updated" => (format!("{what}: its base image {} was updated", e.data["image"].as_str().unwrap_or("")), "A deploy now would build on the new one and get its fixes (Deploy without the cache, or `run.rebuild_on_base` to do it by itself).".to_string()),
+            "deploy.ready" => (format!("{what}: built and waiting to go live"), format!("The deployment{rev} is healthy beside the live one, on its own URL ({}), and waits for a person to put it live.", e.data["url"].as_str().unwrap_or("its deployment URL"))),
             "spend.alert" | "spend.limit" => {
                 let (project, usd, limit) = (e.data["project_name"].as_str().unwrap_or("a project"), e.data["usd"].as_f64().unwrap_or(0.0), e.data["limit_usd"].as_f64().unwrap_or(0.0));
                 if e.kind == "spend.alert" {
@@ -377,6 +387,7 @@ impl Apps {
             "alert.errors" => (format!("{what}: errors"), format!("{}% of its {} requests in five minutes answered 5xx (the alert is at {}%).", e.data["value"], e.data["requests"], e.data["threshold"])),
             "alert.latency" => (format!("{what}: slow"), format!("Its p95 latency reached {} ms (the alert is at {} ms).", e.data["value"], e.data["threshold"])),
             "alert.capacity" => (format!("{what}: at capacity"), format!("{}% of its {} requests in five minutes found all {} instances busy ({} requests each at once). Raise its max instances (`roll apps set --max`) or its concurrency, or make it answer faster (the alert is at {}%).", e.data["value"], e.data["requests"], e.data["max_instances"], e.data["concurrency"], e.data["threshold"])),
+            "error.new" => (format!("{what}: a new error, {}", e.data["name"].as_str().unwrap_or("an error")), "Its log has an error it hasn't had before. The Metrics tab's Errors shows it whole, with how often it happens.".to_string()),
             "alert.log" => (format!("{what}: its log says {}", e.data["pattern"]), format!("{} lines in five minutes matched (the alert is at {}).", e.data["count"], e.data["threshold"])),
             "volume.full" => (format!("{what}: its volume is {}% full", e.data["pct"]), format!("It holds {:.1} GB of its {} GB: give it more room (`roll apps set --volume`) or delete what it doesn't need before it fills up.", e.data["used_bytes"].as_f64().unwrap_or(0.0) / 1_073_741_824.0, e.data["size_gb"])),
             "volume.backup_failed" => (format!("{what}: volume backup failed"), format!("The daily backup of its volume failed: {}. The last one that worked is still there.", e.data["error"].as_str().unwrap_or("no reason given"))),
@@ -393,9 +404,13 @@ impl Apps {
             }
             "cron.failed" | "job.failed" => {
                 let what_ran = if e.kind == "cron.failed" { "A scheduled run" } else { "A job" };
-                let how = match (e.data["status"].as_str(), e.data["exit_code"].as_i64()) {
-                    (Some("timed_out"), _) => "ran past its timeout".to_string(),
-                    (_, Some(c)) => format!("exited with code {c}"),
+                let how = match (e.data["status"].as_str(), e.data["exit_code"].as_i64(), e.data["path"].as_str()) {
+                    (_, _, Some(p)) => match e.data["http_status"].as_u64() {
+                        Some(c) => format!("calling {p} answered {c}"),
+                        None => format!("calling {p} got no answer: {}", e.data["error"].as_str().unwrap_or("it didn't answer")),
+                    },
+                    (Some("timed_out"), _, _) => "ran past its timeout".to_string(),
+                    (_, Some(c), _) => format!("exited with code {c}"),
                     _ => "didn't start".to_string(),
                 };
                 (format!("{what}: {} failed", if e.kind == "cron.failed" { "cron run" } else { "job" }), format!("{what_ran} {how}."))

@@ -28,8 +28,14 @@ export type Environment = {
   notify: string | null;
   /** An ephemeral environment that may read a protected base (else it never does). */
   trusted: boolean;
+  /** An ephemeral environment's branched resources (absent: none); keys linked to them come back in `followed`. */
+  branches?: Branch[];
 };
-/** `PUT …/environments/{env}`: what it should be; `replace` also deletes its other own keys at `path`. */
+/** A resource a preview branched: a key linked to `kind` `parent` never resolves in its environment. */
+export type Branch = { kind: string; parent: string };
+/** A key left out because it links a branched resource: roll previews sets `name` from its branch's `field`. */
+export type Followed = { name: string; kind: string; parent: string; field: string };
+/** `PUT …/environments/{env}`: what it should be; `replace` also deletes its other own keys at `path`; `branches` replaces the list (absent keeps it). */
 export type Ensure = Omit<NewEnvironment, "slug"> & { replace?: boolean };
 export type Ensured = { environment: Environment; created: boolean; change: Change | null };
 export type NewEnvironment = {
@@ -43,6 +49,8 @@ export type NewEnvironment = {
   expires_at?: number;
   ttl_minutes?: number;
   secrets?: Op[];
+  /** Ephemeral only, and only roll previews (or the operator) adds one: the resources its preview branched. */
+  branches?: Branch[];
 };
 /** `history_days`: how long old values are kept (null: for good). */
 export type Overview = { project: string; environments: Environment[]; previews: number; history_days: number | null };
@@ -101,7 +109,9 @@ export type Problem = { key: string; problem: string };
 /** `dynamic`: keys holding a dynamic link's short-lived credential; `linked`: keys whose value comes from any link. */
 /** `withheld`: sensitive keys left out (only roll's runtimes and syncs read them); `sensitive`: those included (a runtime's read), never to be shown. */
 /** `digest` (with `?digest=1`): the folder's `…/digest`, taken just before this read (a watch compares from it). */
-export type Values = { values: Record<string, string>; problems: Problem[]; leases: string[]; dynamic: string[]; linked: string[]; withheld?: string[]; sensitive?: string[]; digest?: string };
+/** `followed`: keys linked to a resource the ephemeral environment's preview branched, left out of `values`. */
+/** `plain`: of `linked`, keys whose link field isn't a credential (a host, a port): logs may show them; every other value is a secret. */
+export type Values = { values: Record<string, string>; problems: Problem[]; leases: string[]; dynamic: string[]; linked: string[]; plain?: string[]; withheld?: string[]; sensitive?: string[]; followed?: Followed[]; digest?: string };
 export type CellSource = "own" | "import" | "base";
 /** `misfit`: the typed-key rule the stored value breaks (shown only to whoever may reveal it). */
 export type Cell = { fp: string; version: number; updated_at: number; link: Link | null; reference: boolean; source: CellSource; comment: boolean; personal: boolean; misfit?: string; expires_at?: number };
@@ -214,12 +224,17 @@ export type Identity = {
 /** `jwks`: the issuer's keys (a JWKS document as text); then the issuer is never fetched. */
 export type NewIdentity = { name: string; issuer: string; audience: string; subject: string; claims?: Record<string, string>; environments?: string[]; paths?: string[]; actions: Action[]; ttl_minutes?: number; allowed_ips?: string[]; jwks?: string };
 export type NewToken = { name: string; environments?: string[]; paths?: string[]; actions: Action[]; expires_at?: number; ttl_days?: number; allowed_ips?: string[] };
-export type AuditEntry = { id: number; at: number; actor: string; action: string; environment: string | null; path: string | null; keys: string[]; summary: string; ip: string | null };
+/** `approval`: the approval that let the request through roll-access's gate (an `ask` approved; `until` when a rule it remembered allowed it). */
+export type AuditEntry = { id: number; at: number; actor: string; action: string; environment: string | null; path: string | null; keys: string[]; summary: string; ip: string | null; approval?: Approval };
+/** `by`: who approved it, in order (more than one when a policy asks for two people). */
+export type Approval = { id: string; by?: string[]; until?: number };
 /** `since`: rows at or after this time (ms); `before`: rows older than this id. */
 export type AuditFilter = { env?: string; key?: string; actor?: string; action?: string; before?: number; since?: number; limit?: number };
 export type AuditFormat = "csv" | "jsonl";
 /** An audit stream to a SIEM: signed batches of new rows, in order. */
-export type Sink = { id: string; url: string; status: "new" | "ok" | "error"; error: string | null; cursor: number; delivered_at: number | null; created_at: number; created_by: string };
+/** `format`: how a batch goes (`roll` signed JSON; `splunk`, `datadog` and `bearer` carry a token that is never shown). */
+export type SinkFormat = "roll" | "splunk" | "datadog" | "bearer";
+export type Sink = { id: string; url: string; format: SinkFormat; status: "new" | "ok" | "error"; error: string | null; cursor: number; delivered_at: number | null; created_at: number; created_by: string };
 export type Imported = Applied & { skipped: string[] };
 /** A local copy against a folder (`POST …/environments/{env}/diff`): names only. */
 export type FileDiff = { added: string[]; changed: string[]; same: string[]; missing: string[]; references: string[]; linked: string[] };
@@ -257,7 +272,8 @@ export type Health = { ok: boolean; key: "env" | "kms" | "file" | "missing"; res
 /** An IAM user whose access keys roll rotates, acting as one of the project's AWS roles (`role` is its id). */
 export type AwsUser = { id: string; name: string; role: string; user: string; created_at: number; created_by: string };
 /** An AWS role a project registered for dynamic credentials (its trust policy pins `sts:ExternalId` = `roll-secrets:<project>`). */
-export type AwsRole = { id: string; name: string; role_arn: string; created_at: number; created_by: string };
+/** `trust`: `external_id` (roll's AWS role with the project's ExternalId) or `oidc` (roll's issuer: no AWS credential of roll's). */
+export type AwsRole = { id: string; name: string; role_arn: string; trust: "external_id" | "oidc"; created_at: number; created_by: string };
 /** Where a key is set (`GET /v1/secrets/search?key=`): names and versions, never a value. */
 export type Place = { project: string; project_name: string; environment: string; path: string; key: string; version: number; updated_at: number; linked: boolean };
 /** One thing to fix (`GET …/health`), worst first: where, never a value. */
@@ -290,10 +306,12 @@ export type CloudAccount =
 export type NewCloudAccount = { name: string } & ({ cloud: "gcp"; audience: string; service_account: string } | { cloud: "azure"; tenant: string; client_id: string; scope?: string });
 /** A Postgres, MySQL, Redis or MongoDB server outside roll: two login roles that take turns (managed), a group dynamic logins join, or both; the admin URL stays sealed. */
 export type OutsideDatabase = { id: string; name: string; host: string; roles: string[]; group?: string; ca?: string; created_at: number; created_by: string };
+/** A GitHub App's installation; `repositories` and `permissions` are the most its tokens may reach. */
+export type GitHubApp = { id: string; name: string; app_id: number; installation_id: number; api_base: string; repositories: string[]; permissions: Record<string, string>; created_at: number; created_by: string };
 export type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };
 export type WhoAmI = { principal: string; project?: string | null; scopes?: unknown };
 
 /** A `roll-seal-v1` box (base64url fields): X25519 to the recipient, HKDF-SHA256, AES-256-GCM. */
 export type Sealed = { v: number; epk: string; nonce: string; ct: string };
 /** A resolve sealed to the caller's key: `sealed` opens to the JSON of `Values.values`, with `context` as the associated data. */
-export type SealedValues = { sealed: Sealed; context: string; problems: Problem[]; leases: string[]; dynamic: string[]; linked: string[] };
+export type SealedValues = { sealed: Sealed; context: string; problems: Problem[]; leases: string[]; dynamic: string[]; linked: string[]; followed?: Followed[] };

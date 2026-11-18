@@ -58,6 +58,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
     let env = "/v1/apps/services/{id}/environments/{env}";
     let service_routes = Router::new()
         .route("/v1/apps/services/{id}", get(get_service).patch(patch_service).delete(delete_service))
+        .route("/v1/apps/services/{id}/restore", post(restore_service))
         .route("/v1/apps/services/{id}/links", get(links))
         .route("/v1/apps/services/{id}/activity", get(activity))
         .route("/v1/apps/services/{id}/links/{kind}/{ref}", put(put_link).delete(delete_link))
@@ -74,6 +75,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route("/v1/apps/projects/{project}/notifications/{nid}/deliveries", get(deliveries))
         .route("/v1/apps/services/{id}/registry", put(put_registry).delete(delete_registry))
         .route("/v1/apps/services/{id}/git-login", put(put_git_login).delete(delete_git_login))
+        .route("/v1/apps/services/{id}/github", put(put_github).delete(delete_github))
         .route("/v1/apps/services/{id}/environments", get(environments))
         .route(env, get(get_env).put(put_env).delete(delete_env))
         .route(&format!("{env}/deploys"), get(deploys).post(create_deploy).layer(DefaultBodyLimit::max(apps.cfg.upload_max)))
@@ -81,6 +83,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/deploys/{{dep}}/logs"), get(deploy_logs))
         .route(&format!("{env}/deploys/{{dep}}/commits"), get(deploy_commits))
         .route(&format!("{env}/deploys/{{dep}}/rollback"), post(rollback))
+        .route(&format!("{env}/deploys/{{dep}}/rollout"), post(rollout_action))
         .route(&format!("{env}/rollback"), post(rollback_previous))
         .route(&format!("{env}/deploys/{{dep}}/cancel"), post(cancel))
         .route(&format!("{env}/redeploy"), post(redeploy))
@@ -89,16 +92,25 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/volume/backups"), get(backups).post(backup_volume))
         .route(&format!("{env}/volume/backups/{{bid}}/restore"), post(restore_volume))
         .route(&format!("{env}/restart"), post(restart))
+        .route(&format!("{env}/cache/purge"), post(purge_cache))
         .route(&format!("{env}/instances/{{name}}/restart"), post(restart_instance))
         .route(&format!("{env}/files"), get(read_files).put(write_files).layer(DefaultBodyLimit::max(crate::shell::FILES_MAX)))
         .route(&format!("{env}/sleep"), post(sleep))
         .route(&format!("{env}/wake"), post(wake))
         .route(&format!("{env}/variables"), get(variables).patch(change_variables))
+        .route(&format!("{env}/diff"), get(env_diff))
         .route(&format!("{env}/pending"), get(pending))
         .route(&format!("{env}/variables/values"), get(reveal))
         .route(&format!("{env}/logs"), get(env_logs))
         .route(&format!("{env}/metrics"), get(metrics))
         .route(&format!("{env}/routes"), get(routes))
+        .route(&format!("{env}/analytics"), get(analytics))
+        .route(&format!("{env}/visit"), post(visit))
+        .route(&format!("{env}/vitals"), get(vitals))
+        .route(&format!("{env}/app-metrics"), get(app_metrics))
+        .route(&format!("{env}/errors"), get(errors))
+        .route(&format!("{env}/traces"), get(traces))
+        .route(&format!("{env}/traces/{{trace}}"), get(trace))
         .route(&format!("{env}/usage"), get(usage))
         .route(&format!("{env}/runs"), get(runs).post(run_now))
         .route(&format!("{env}/runs/{{run}}"), get(get_run))
@@ -135,6 +147,15 @@ async fn on_owner(State(apps): S, req: Request, next: Next) -> Response {
     let Some(id) = req.uri().path().strip_prefix("/v1/apps/services/").map(|r| r.split('/').next().unwrap_or("").to_string()) else {
         return next.run(req).await;
     };
+    // A deleted service is no service but to restore it or delete it for good.
+    let root = req.uri().path().trim_end_matches('/') == format!("/v1/apps/services/{id}");
+    let keeps = (root && req.method() == axum::http::Method::DELETE) || req.uri().path() == format!("/v1/apps/services/{id}/restore");
+    if !keeps {
+        let sid = id.clone();
+        if let Ok((_, Some(_))) = apps.db(move |s| s.service_any(&sid)).await {
+            return Error::NotFound(format!("no service {id}")).into_response();
+        }
+    }
     let cluster = apps.deps.cluster.clone();
     cluster.dispatch(&lease_key(&id), req, |req, _guard| next.run(req)).await
 }
@@ -153,7 +174,7 @@ async fn import(State(apps): S, b: Bytes) -> R {
     use apps_build::project::{VarSpec, compose_to_toml, entry_kind, entry_run, parse_project};
     let v = body(&b)?;
     let text = |k: &str| v.get(k).and_then(Value::as_str);
-    if [text("roll_toml"), text("compose")].into_iter().flatten().any(|t| t.len() > 1 << 20) {
+    if [text("roll_toml"), text("compose"), text("render"), text("fly"), text("railway"), text("heroku"), text("procfile")].into_iter().flatten().any(|t| t.len() > 1 << 20) {
         return Err(Error::BadRequest("the file is at most 1 MiB".into()));
     }
     // A repo's own roll.toml (a "deploy to roll" link): its root's, at a revision or its head.
@@ -193,15 +214,32 @@ async fn import(State(apps): S, b: Bytes) -> R {
     let (git_url, git_branch) = from_git.as_ref().map(|(u, b, _)| (Some(u.clone()), Some(b.clone()))).unwrap_or_default();
     let repo = text("repo").map(str::to_string);
     let from_repo = from_repo.or(from_git.map(|(_, _, t)| t));
-    let (toml_text, notes) = match (from_repo, text("roll_toml"), text("compose")) {
-        (Some(t), None, None) => (t, Vec::new()),
-        (None, Some(t), None) => (t.to_string(), Vec::new()),
+    // Another platform's file (Render's Blueprint, fly.toml, railway.json, Heroku's app.json and
+    // Procfile), read as roll.toml with notes on what isn't carried over.
+    let platform: Vec<(&str, String)> = ["render", "fly", "railway", "heroku"].into_iter().filter_map(|k| Some((k, text(k)?.to_string()))).collect();
+    let procfile = text("procfile").map(str::to_string);
+    let given = [from_repo.is_some(), text("roll_toml").is_some(), text("compose").is_some()].into_iter().filter(|b| *b).count() + platform.len();
+    if given != 1 {
+        return Err(Error::BadRequest("give one of roll_toml, compose, render, fly, railway, heroku (with procfile), repo or git".into()));
+    }
+    let (toml_text, notes) = match (from_repo, text("roll_toml"), text("compose"), platform.into_iter().next()) {
+        (Some(t), _, _, _) => (t, Vec::new()),
+        (_, Some(t), _, _) => (t.to_string(), Vec::new()),
         // Off the runtime's threads: a large file is a few hundred milliseconds of parsing.
-        (None, None, Some(c)) => {
+        (_, _, Some(c), _) => {
             let c = c.to_string();
             tokio::task::spawn_blocking(move || compose_to_toml(&c)).await.map_err(|e| Error::Internal(e.to_string()))?.map_err(|e| Error::BadRequest(e.to_string()))?
         }
-        _ => return Err(Error::BadRequest("give one of roll_toml, compose, repo or git".into())),
+        (_, _, _, Some((kind, t))) => tokio::task::spawn_blocking(move || match kind {
+            "render" => apps_build::imports::render_to_toml(&t),
+            "fly" => apps_build::imports::fly_to_toml(&t),
+            "railway" => apps_build::imports::railway_to_toml(&t),
+            _ => apps_build::imports::heroku_to_toml(&t, procfile.as_deref()),
+        })
+        .await
+        .map_err(|e| Error::Internal(e.to_string()))?
+        .map_err(|e| Error::BadRequest(e.to_string()))?,
+        _ => return Err(Error::BadRequest("give one of roll_toml, compose, render, fly, railway, heroku, repo or git".into())),
     };
     let f = parse_project(&toml_text).map_err(|e| Error::BadRequest(e.to_string()))?;
     let apps: serde_json::Map<String, Value> = f
@@ -347,9 +385,14 @@ async fn plan(State(apps): S, b: Bytes) -> R {
 #[derive(Deserialize)]
 struct ProjectQuery {
     project: Option<String>,
+    /// The deleted services instead, kept for a restore.
+    deleted: Option<bool>,
 }
 
 async fn list_services(State(apps): S, Query(q): Query<ProjectQuery>) -> R {
+    if q.deleted == Some(true) {
+        return ok(apps.deleted_services(q.project).await?);
+    }
     ok(apps.services(q.project).await?)
 }
 
@@ -413,9 +456,13 @@ async fn patch_service(State(apps): S, Path(id): Path<String>, ext: Extensions, 
     ok(s)
 }
 
-async fn delete_service(State(apps): S, Path(id): Path<String>) -> R {
-    apps.delete_service(&id).await?;
+async fn delete_service(State(apps): S, Path(id): Path<String>, ext: Extensions) -> R {
+    apps.delete_service(&id, actor(&ext)).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+async fn restore_service(State(apps): S, Path(id): Path<String>, ext: Extensions) -> R {
+    ok(apps.restore_service(&id, actor(&ext)).await?)
 }
 
 async fn links(State(apps): S, Path(id): Path<String>) -> R {
@@ -571,6 +618,18 @@ async fn put_git_login(State(apps): S, Path(id): Path<String>, ext: Extensions, 
 async fn delete_git_login(State(apps): S, Path(id): Path<String>, ext: Extensions) -> R {
     let s = apps.delete_git_login(&id).await?;
     apps.audit("git_login.removed", &id, "", actor(&ext), json!({})).await;
+    ok(s)
+}
+
+async fn put_github(State(apps): S, Path(id): Path<String>, ext: Extensions) -> R {
+    let s = apps.put_github(&id).await?;
+    apps.audit("github.connected", &id, "", actor(&ext), json!({ "repo": s.github.as_ref().map(|g| g.repo.clone()), "installation": s.github.as_ref().map(|g| g.installation) })).await;
+    ok(s)
+}
+
+async fn delete_github(State(apps): S, Path(id): Path<String>, ext: Extensions) -> R {
+    let s = apps.delete_github(&id).await?;
+    apps.audit("github.disconnected", &id, "", actor(&ext), json!({})).await;
     ok(s)
 }
 
@@ -939,6 +998,7 @@ struct HookQuery {
 fn hooks_router(apps: Arc<Apps>) -> Router {
     Router::new()
         .route("/v1/apps/hooks/{id}/{env}/{token}", post(run_hook))
+
         .route_layer(axum::middleware::from_fn_with_state(apps.clone(), hook_on_owner))
         .with_state(apps)
 }
@@ -975,6 +1035,7 @@ async fn run_hook(State(apps): S, Path((id, env, token)): Path<(String, String, 
     let d = match apps.run_hook(&id, &env, &token, q.image, payload).await? {
         crate::hooks::HookOutcome::Deployed(d) => *d,
         crate::hooks::HookOutcome::Ignored(why) => return ok(json!({ "ignored": why })),
+        crate::hooks::HookOutcome::Plain => unreachable!("run_hook deploys a plain call"),
     };
     // The gate never saw it: who called is in the service's activity.
     let address = ext.get::<axum::extract::ConnectInfo<std::net::SocketAddr>>().map(|c| c.0.ip().to_string());
@@ -994,6 +1055,18 @@ async fn rollback(State(apps): S, Path((id, env, dep)): Path<(String, String, St
     Ok((StatusCode::ACCEPTED, Json(d)).into_response())
 }
 
+#[derive(Deserialize)]
+struct RolloutBody {
+    action: crate::model::RolloutAction,
+}
+
+async fn rollout_action(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>, ext: Extensions, Json(b): Json<RolloutBody>) -> R {
+    apps.deployment(&id, &env, &dep).await?;
+    apps.rollout_action(&dep, b.action)?;
+    apps.audit("rollout.decided", &id, &env, actor(&ext), json!({ "deployment": dep, "action": format!("{:?}", b.action).to_ascii_lowercase() })).await;
+    Ok((StatusCode::ACCEPTED, Json(json!({ "deployment": dep }))).into_response())
+}
+
 async fn rollback_previous(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, b: Bytes) -> R {
     let keep = body(&b)?.get("keep_variables").and_then(Value::as_bool).unwrap_or(false);
     let d = apps.rollback_previous(&id, &env, actor(&ext), keep).await?;
@@ -1002,6 +1075,12 @@ async fn rollback_previous(State(apps): S, Path((id, env)): Path<(String, String
 
 async fn cancel(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>) -> R {
     ok(apps.cancel(&id, &env, &dep).await?)
+}
+
+async fn purge_cache(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, b: Bytes) -> R {
+    let v = apps.purge_cache(&id, &env, if b.is_empty() { json!({}) } else { body(&b)? }).await?;
+    apps.audit("cache.purged", &id, &env, actor(&ext), v.clone()).await;
+    ok(v)
 }
 
 async fn restart(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {
@@ -1039,8 +1118,39 @@ async fn reveal(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Ex
     ok(v)
 }
 
+#[derive(Deserialize)]
+struct DiffQuery {
+    from: String,
+}
+
+async fn env_diff(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q): Query<DiffQuery>, ext: Extensions) -> R {
+    ok(apps.environment_diff(&id, &env, &q.from, roll_auth::Grant::on(&ext)).await?)
+}
+
 async fn change_variables(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, b: Bytes) -> R {
-    let change = body(&b)?;
+    let mut change = body(&b)?;
+    // Another environment's values copied (`copy_from`, `copy`: names): set here as given there.
+    if let Some(from) = change.get("copy_from").cloned() {
+        let Value::String(from) = from else { return Err(Error::BadRequest("copy_from is another environment's name".into())) };
+        if from == env {
+            return Err(Error::BadRequest("copy_from is another environment".into()));
+        }
+        let names: Vec<String> = change["copy"].as_array().map(|a| a.iter().filter_map(|n| n.as_str().map(str::to_string)).collect()).filter(|n: &Vec<String>| !n.is_empty()).ok_or_else(|| Error::BadRequest("copy is a list of the names to copy".into()))?;
+        let copied = apps.copied_variables(&id, &from, &names).await?;
+        let o = change.as_object_mut().expect("an object");
+        o.remove("copy_from");
+        o.remove("copy");
+        let set = o.entry("set").or_insert_with(|| json!({}));
+        let Some(set) = set.as_object_mut() else { return Err(Error::BadRequest("set is an object of names to values".into())) };
+        for (k, v) in copied {
+            if set.contains_key(&k) {
+                return Err(Error::BadRequest(format!("{k} is both set and copied")));
+            }
+            set.insert(k, Value::String(v));
+        }
+    } else if change.get("copy").is_some() {
+        return Err(Error::BadRequest("copy needs copy_from, the environment to copy from".into()));
+    }
     let values: Vec<&str> = change["set"].as_object().into_iter().flatten().filter_map(|(_, v)| v.as_str()).collect();
     if values.iter().any(|v| v.contains("${{")) {
         let svc = apps.service(&id).await?;
@@ -1072,6 +1182,55 @@ async fn metrics(State(apps): S, Path((id, env)): Path<(String, String)>, Query(
 }
 
 /// `GET …/routes?minutes=`: errors and latency by route, from the access log (`crate::traffic`).
+#[derive(serde::Deserialize)]
+struct TraceQuery {
+    minutes: Option<i64>,
+    min_ms: Option<u64>,
+}
+
+async fn traces(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q): Query<TraceQuery>) -> R {
+    ok(apps.traces(&id, &env, q.minutes.unwrap_or(60), q.min_ms.unwrap_or(0)).await?)
+}
+
+#[derive(Deserialize)]
+struct VitalsQuery {
+    minutes: Option<i64>,
+}
+
+async fn errors(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q): Query<VitalsQuery>) -> R {
+    ok(apps.errors(&id, &env, q.minutes.unwrap_or(1440)).await?)
+}
+
+async fn app_metrics(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q): Query<VitalsQuery>) -> R {
+    ok(apps.app_metrics(&id, &env, q.minutes.unwrap_or(60)).await?)
+}
+
+async fn vitals(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q): Query<VitalsQuery>) -> R {
+    ok(apps.vitals(&id, &env, q.minutes.unwrap_or(1440)).await?)
+}
+
+#[derive(Deserialize)]
+struct VisitBody {
+    to: String,
+}
+
+/// A signed-in person's one-use way into a sign-in-gated environment (roll's dashboard asks
+/// for it as them, then sends the browser there). A token isn't a person: only a session gets one.
+async fn visit(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, Json(b): Json<VisitBody>) -> R {
+    let Some(user) = ext.get::<roll_auth::SignedIn>() else {
+        return Err(Error::Forbidden("signing in to an environment is for a person signed in to roll, not a token".into()));
+    };
+    ok(json!({ "url": apps.visit_ticket(&id, &env, &user.user, &user.session, &b.to).await? }))
+}
+
+async fn trace(State(apps): S, Path((id, env, trace)): Path<(String, String, String)>) -> R {
+    ok(apps.trace(&id, &env, &trace).await?)
+}
+
+async fn analytics(State(apps): S, Path((id, env)): Path<(String, String)>, Query(w): Query<Window>) -> R {
+    ok(apps.analytics(&id, &env, w.minutes.unwrap_or(1_440)).await?)
+}
+
 async fn routes(State(apps): S, Path((id, env)): Path<(String, String)>, Query(w): Query<Window>) -> R {
     ok(apps.routes(&id, &env, w.minutes.unwrap_or(60)).await?)
 }

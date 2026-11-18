@@ -25,12 +25,15 @@
 //! - Search mode: `?tools=search` (or `X-MCP-Tools: search`) lists a search tool and two run tools
 //!   instead of every tool ([`search`]).
 
+pub mod ask;
 pub mod card;
+pub mod guard;
 pub mod lockdown;
 pub mod modern;
 pub mod prompts;
 pub mod resources;
 pub mod search;
+pub mod skills;
 pub mod tasks;
 pub mod tools;
 pub mod ui;
@@ -159,6 +162,7 @@ async fn seen_by(State(m): State<Mcp>, axum::extract::Path(id): axum::extract::P
         as_user,
         ip: None,
         url_elicitation: false,
+        form_elicitation: false,
         modern: false,
         toolsets: None,
         readonly: false,
@@ -196,7 +200,7 @@ async fn toolset_costs(State(m): State<Mcp>, ext: Extensions) -> Response {
     if !caller {
         return unauthorized(&m.config);
     }
-    let ctx = Ctx { m, headers: HeaderMap::new(), principal: Principal::Operator, ip: None, url_elicitation: false, modern: false, toolsets: None, readonly: false, search: false, lockdown: false, tasks: false, ui: false, client: None, as_user: false, names: Default::default() };
+    let ctx = Ctx { m, headers: HeaderMap::new(), principal: Principal::Operator, ip: None, url_elicitation: false, form_elicitation: false, modern: false, toolsets: None, readonly: false, search: false, lockdown: false, tasks: false, ui: false, client: None, as_user: false, names: Default::default() };
     let mut by: std::collections::BTreeMap<String, (usize, usize, usize)> = Default::default();
     for t in ctx.tools() {
         let e = by.entry(t["_meta"]["roll/product"].as_str().unwrap_or("code").to_string()).or_default();
@@ -394,16 +398,37 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
         .or_else(|| headers.get("mcp-session-id").and_then(|v| v.to_str().ok()).and_then(session_client))
         .or_else(|| headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok()).and_then(roll_access::evaluate::client_name))
         .map(Arc::from);
-    let ctx = Arc::new(Ctx { m, headers, principal, ip, as_user, url_elicitation, modern, toolsets, readonly, search, lockdown, tasks, ui, client, names: Default::default() });
+    let form_elicitation = modern && modern::form_elicitation(&messages[0]);
+    let ctx = Arc::new(Ctx { m, headers, principal, ip, as_user, url_elicitation, form_elicitation, modern, toolsets, readonly, search, lockdown, tasks, ui, client, names: Default::default() });
     // A call that asked for progress, from a client that takes a stream: answered as one, with
     // progress until the answer (MCP's `notifications/progress`).
+    // 2026-07-28's long-lived channel for list changes (SEP-2575): an open stream of its own.
+    if ctx.modern && !batch && messages.len() == 1 && messages[0]["method"] == "subscriptions/listen" {
+        return listen(ctx, &messages[0]).await;
+    }
     let progress = accepts_sse(&ctx.headers).then(|| messages.iter().find(|m| m["method"] == "tools/call").and_then(|m| m["params"]["_meta"].get("progressToken").cloned())).flatten();
-    let mut resp = if wants_sse(&ctx.headers) || progress.is_some() {
+    let mut resp = if progress.is_some() {
         let stream = progress_stream(Box::pin(async move { process(&ctx, messages).await }), progress, PROGRESS_EVERY)
+            .map(|r| Ok::<_, std::convert::Infallible>(Event::default().event("message").data(r.to_string())));
+        Sse::new(stream).keep_alive(KeepAlive::new().interval(SSE_KEEPALIVE)).into_response()
+    } else if wants_sse(&ctx.headers) {
+        // A 2026-07-28 client hears list changes only on a listen stream it asked for (SEP-2575).
+        let legacy = !ctx.modern;
+        let stream = futures::stream::once(Box::pin(async move {
+            let answers = process(&ctx, messages).await;
+            if legacy { with_list_changed(answers) } else { answers }
+        }))
+            .flat_map(futures::stream::iter)
             .map(|r| Ok::<_, std::convert::Infallible>(Event::default().event("message").data(r.to_string())));
         Sse::new(stream).keep_alive(KeepAlive::new().interval(SSE_KEEPALIVE)).into_response()
     } else {
         let mut responses = process(&ctx, messages).await;
+        // An access request was approved: the connection's tools changed. A client that takes a
+        // stream hears it (MCP's `notifications/tools/list_changed`) before the answer.
+        if !ctx.modern && accepts_sse(&ctx.headers) && widened(&responses) {
+            let events: Vec<_> = with_list_changed(responses).into_iter().map(|r| Ok::<_, std::convert::Infallible>(Event::default().event("message").data(r.to_string()))).collect();
+            return Sse::new(futures::stream::iter(events)).into_response();
+        }
         match responses.pop() {
             // A method the revision doesn't have is a 404 (with its JSON-RPC error), so a client
             // tells it from a server that has no MCP endpoint here.
@@ -454,6 +479,23 @@ fn accepts_sse(h: &HeaderMap) -> bool {
     accept(h).contains("text/event-stream")
 }
 
+/// Whether an answer is an access request just approved (the connection may do more, so its
+/// tools changed).
+fn widened(responses: &[Value]) -> bool {
+    responses.iter().any(|r| {
+        let s = &r["result"]["structuredContent"];
+        s["method"] == "GRANT" && s["state"] == "approved"
+    })
+}
+
+/// The answers, with `notifications/tools/list_changed` first when the tools changed.
+fn with_list_changed(responses: Vec<Value>) -> Vec<Value> {
+    if !widened(&responses) {
+        return responses;
+    }
+    std::iter::once(json!({ "jsonrpc": "2.0", "method": "notifications/tools/list_changed" })).chain(responses).collect()
+}
+
 type Work = Pin<Box<dyn Future<Output = Vec<Value>> + Send>>;
 
 /// `work`'s responses as a stream, with a progress notification for `token` every `every` until
@@ -492,6 +534,8 @@ struct Ctx {
     as_user: bool,
     /// The client opens URLs for elicitation: an approval comes back as one to open, then retry.
     url_elicitation: bool,
+    /// A 2026-07-28 client that fills in forms: a call missing an id asks for it (`ask`).
+    form_elicitation: bool,
     /// A modern request (2026-07-28): served on its own, its answers marked as that revision's.
     modern: bool,
     /// The products whose tools are listed (`None`: every product's).
@@ -514,6 +558,28 @@ struct Ctx {
 }
 
 impl Ctx {
+    /// The same request's view, as a grant is now (a subscription looks again while it's open).
+    fn as_now(&self, g: roll_auth::Grant) -> Ctx {
+        Ctx {
+            m: self.m.clone(),
+            headers: self.headers.clone(),
+            principal: Principal::Grant(g),
+            ip: self.ip,
+            as_user: self.as_user,
+            url_elicitation: self.url_elicitation,
+            form_elicitation: self.form_elicitation,
+            modern: self.modern,
+            toolsets: self.toolsets.clone(),
+            readonly: self.readonly,
+            search: self.search,
+            lockdown: self.lockdown,
+            tasks: self.tasks,
+            ui: self.ui,
+            client: self.client.clone(),
+            names: Default::default(),
+        }
+    }
+
     /// Whether the caller might use a tool for this product and these actions at all, and asked
     /// for its toolset.
     fn may(&self, product: &str, actions: &[Action]) -> bool {
@@ -627,6 +693,8 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
                     rpc_error(id, -32602, "arguments must be an object")
                 } else if ctx.readonly && !tool_names(ctx).contains(&name) {
                     rpc_result(id, json!({ "content": [{ "type": "text", "text": format!("{name} isn't read-only, and this connection is (?readonly=1): connect without it to change things") }], "isError": true }))
+                } else if let Some(r) = ask_for_missing(ctx, &name, &mut args, &params).await {
+                    rpc_result(id, r)
                 } else {
                     // A client that takes tasks gets one for a call that runs long (or waits for
                     // a person); everyone else waits for the answer.
@@ -648,13 +716,13 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
                 Err((code, message)) => rpc_error(id, code, message),
             },
             "resources/list" => {
-                let mut list = resources::list();
-                if ctx.ui
-                    && let Some(a) = list.as_array_mut()
-                {
-                    a.push(ui::resource());
+                let mut all = resources::list().as_array().cloned().unwrap_or_default();
+                // The MCP Apps view, for a host that renders it; then the skills' files.
+                if ctx.ui {
+                    all.push(ui::resource());
                 }
-                rpc_result(id, json!({ "resources": list }))
+                all.extend(skills::resources(&tool_names(ctx)));
+                rpc_result(id, json!({ "resources": all }))
             }
             "resources/read" => match params.get("uri").and_then(Value::as_str) {
                 Some(resources::GUIDE) => rpc_result(id, resources::guide()),
@@ -675,7 +743,17 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
                         }
                     }
                 }
+                Some(uri) if uri.starts_with("skill://") => match skills::read(uri, &tool_names(ctx)) {
+                    Some(v) => rpc_result(id, v),
+                    // The Skills extension's answer for a file roll doesn't serve.
+                    None => rpc_error(id, -32602, format!("No skill file is served at {uri}")),
+                },
                 other => rpc_error(id, -32002, format!("resource not found: {}", other.unwrap_or(""))),
+            },
+            "skills/list" => rpc_result(id, skills::list(&tool_names(ctx))),
+            "skills/get" => match skills::get(params.get("uri").and_then(Value::as_str).unwrap_or(""), &tool_names(ctx)) {
+                Ok(v) => rpc_result(id, v),
+                Err(e) => rpc_error(id, -32602, e),
             },
             "resources/templates/list" => rpc_result(id, json!({ "resourceTemplates": resources::templates(&tool_names(ctx)) })),
             "prompts/list" => rpc_result(id, prompts::list(&tool_names(ctx))),
@@ -727,7 +805,173 @@ async fn complete(ctx: &Arc<Ctx>, params: &Value) -> Result<Value, String> {
     Ok(json!({ "completion": { "values": values, "hasMore": more } }))
 }
 
+/// A call missing an id it needs, from a client that fills in forms: the person's choice from the
+/// retry's `inputResponses` goes into `args`; while one is still missing, the form asking for it
+/// (its choices what the connection may read), or why the call stops. `None`: run the call.
+async fn ask_for_missing(ctx: &Arc<Ctx>, name: &str, args: &mut Value, params: &Value) -> Option<Value> {
+    if !ctx.form_elicitation {
+        return None;
+    }
+    let refused = |why: String| json!({ "content": [{ "type": "text", "text": why }], "isError": true });
+    if let Some(responses) = params.get("inputResponses")
+        && let Err(why) = ask::fill(args, responses)
+    {
+        return Some(refused(why));
+    }
+    // Only a tool this connection is offered; the gate still decides the call.
+    let tool = tools::all().iter().find(|t| t.name == name).filter(|_| tool_names(ctx).iter().any(|n| n == name))?;
+    let (param, src) = ask::missing(tool, args)?;
+    if !tool_names(ctx).iter().any(|t| t == src.tool) {
+        return None;
+    }
+    // The choices, read through the gate with the caller's token (never asking a person).
+    let answer = call_as(ctx, src.tool, (src.args)(args), true).await?;
+    if answer["isError"] == true {
+        return None;
+    }
+    let (values, more) = prompts::values(&answer["structuredContent"], src.fields, "");
+    if values.is_empty() {
+        return None;
+    }
+    Some(ask::input_required(tool.title, param, &values, more))
+}
+
 /// The names of the tools this connection is offered (what prompts may use).
+/// Subscriptions open at once per token (the operator's counts as one).
+const LISTENS_PER_TOKEN: usize = 4;
+
+/// One open subscription of a token's, counted until it's dropped.
+struct ListenSlot(String);
+
+static LISTENS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, usize>>> = std::sync::LazyLock::new(Default::default);
+
+impl ListenSlot {
+    fn take(who: &str) -> Option<ListenSlot> {
+        let mut open = LISTENS.lock().unwrap_or_else(|e| e.into_inner());
+        let n = open.entry(who.to_string()).or_default();
+        if *n >= LISTENS_PER_TOKEN {
+            return None;
+        }
+        *n += 1;
+        Some(ListenSlot(who.to_string()))
+    }
+}
+
+impl Drop for ListenSlot {
+    fn drop(&mut self) {
+        let mut open = LISTENS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(n) = open.get_mut(&self.0) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                open.remove(&self.0);
+            }
+        }
+    }
+}
+
+/// How often an open subscription looks at its grant again, and how long one stays open.
+const LISTEN_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
+const LISTEN_FOR: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// `subscriptions/listen` (MCP 2026-07-28, SEP-2575): an open stream that starts with
+/// `notifications/subscriptions/acknowledged` (only what was asked and roll sends: tool and prompt
+/// list changes) and says when the connection's tools change: an access request approved, a rule
+/// remembered, the token edited. The grant is looked up again every few seconds, never cached;
+/// once it stops working the stream ends. A connection with the operator's token never changes.
+async fn listen(ctx: Arc<Ctx>, msg: &Value) -> Response {
+    let id = msg.get("id").cloned().unwrap_or(Value::Null);
+    let asked = &msg["params"]["notifications"];
+    let (tools, prompts) = (asked["toolsListChanged"] == true, asked["promptsListChanged"] == true);
+    let mut agreed = json!({});
+    if tools {
+        agreed["toolsListChanged"] = json!(true);
+    }
+    if prompts {
+        agreed["promptsListChanged"] = json!(true);
+    }
+    // Tagged with the subscription like everything on its stream: a client matches the ack by it.
+    if !tools && !prompts {
+        return Json(rpc_error(id, -32602, "nothing to listen for: roll sends toolsListChanged and promptsListChanged")).into_response();
+    }
+    let ack = json!({ "jsonrpc": "2.0", "method": "notifications/subscriptions/acknowledged", "params": { "notifications": agreed, "_meta": { "io.modelcontextprotocol/subscriptionId": id } } });
+    let grant = match &ctx.principal {
+        Principal::Grant(g) => Some(g.id.to_string()),
+        Principal::Operator => None,
+    };
+    // A few open at once per token: each looks at its grant every few seconds.
+    let held = match ListenSlot::take(grant.as_deref().unwrap_or("operator")) {
+        Some(h) => h,
+        None => return Json(rpc_error(id, -32000, format!("at most {LISTENS_PER_TOKEN} subscriptions open at once per token: close one first"))).into_response(),
+    };
+    let access = ctx.m.config.access.clone();
+    let deadline = tokio::time::Instant::now() + LISTEN_FOR;
+    // The tools it's offered as the grant is now (`None`: it no longer works).
+    let now = move |ctx: Arc<Ctx>, grant: String, access: Option<Arc<roll_access::Access>>| async move {
+        let a = access?;
+        let g = tokio::task::spawn_blocking(move || roll_auth::Grants::grant(&*a, &grant)).await.ok()??;
+        Some(tool_names(&ctx.as_now(g)))
+    };
+    struct State {
+        ctx: Arc<Ctx>,
+        last: Option<Vec<String>>,
+        queue: Vec<Value>,
+        done: bool,
+        /// Held while the stream lives: dropped with it, whoever ends it.
+        _slot: ListenSlot,
+    }
+    // What it's offered as it subscribes: a change from here on is told.
+    let last = match &grant {
+        Some(g) => now(ctx.clone(), g.clone(), access.clone()).await,
+        None => Some(Vec::new()),
+    };
+    let start = State { ctx, last, queue: vec![ack], done: false, _slot: held };
+    let stream = futures::stream::unfold(start, move |mut s| {
+        let (id, grant, access) = (id.clone(), grant.clone(), access.clone());
+        async move {
+            loop {
+                if !s.queue.is_empty() {
+                    let next = s.queue.remove(0);
+                    return Some((next, s));
+                }
+                if s.done {
+                    return None;
+                }
+                let names = match &grant {
+                    Some(g) => now(s.ctx.clone(), g.clone(), access.clone()).await,
+                    None => s.last.clone().or(Some(Vec::new())),
+                };
+                let over = tokio::time::Instant::now() >= deadline;
+                match names {
+                    // Ended by roll: the token stopped working, or the hour is up. A result first, so
+                    // the client knows to listen again if it still can.
+                    None => {}
+                    Some(_) if over => {}
+                    Some(names) => {
+                        if s.last.as_ref().is_some_and(|l| *l != names) {
+                            let meta = json!({ "io.modelcontextprotocol/subscriptionId": id });
+                            if tools {
+                                s.queue.push(json!({ "jsonrpc": "2.0", "method": "notifications/tools/list_changed", "params": { "_meta": meta } }));
+                            }
+                            if prompts {
+                                s.queue.push(json!({ "jsonrpc": "2.0", "method": "notifications/prompts/list_changed", "params": { "_meta": meta } }));
+                            }
+                        }
+                        s.last = Some(names);
+                        if s.queue.is_empty() {
+                            tokio::time::sleep(LISTEN_EVERY).await;
+                        }
+                        continue;
+                    }
+                }
+                s.done = true;
+                s.queue.push(json!({ "jsonrpc": "2.0", "id": id, "result": {} }));
+            }
+        }
+    })
+    .map(|v| Ok::<_, std::convert::Infallible>(Event::default().event("message").data(v.to_string())));
+    Sse::new(stream).keep_alive(KeepAlive::new().interval(SSE_KEEPALIVE)).into_response()
+}
+
 fn tool_names(ctx: &Ctx) -> Vec<String> {
     ctx.names.get_or_init(|| ctx.tools().iter().filter_map(|t| t["name"].as_str().map(str::to_string)).collect()).clone()
 }
@@ -758,9 +1002,19 @@ fn initialize(ctx: &Ctx, params: &Value) -> Value {
 
 /// What roll offers, the same in `initialize` and `server/discover`.
 fn capabilities(tasks: bool) -> Value {
-    let mut c = json!({ "tools": { "listChanged": false }, "resources": { "listChanged": false, "subscribe": false }, "prompts": { "listChanged": false }, "completions": {} });
+    // Tools (and so prompts) change when an access request is approved: said on a listen stream
+    // (2026-07-28) or that call's stream (older clients).
+    let mut c = json!({
+        "tools": { "listChanged": true },
+        "resources": { "listChanged": false, "subscribe": false },
+        "prompts": { "listChanged": true },
+        "completions": {},
+        // Skills over MCP: `skills/list`, `skills/get`, and their files as resources (no directories).
+        "extensions": { skills::EXT: {} },
+    });
+    // MCP Apps: HTML views for the hosts that render them.
+    c["extensions"][ui::EXT] = json!({});
     // 2026-07-28's tasks extension, where results can be sealed (tasks::on).
-    c["extensions"] = json!({ ui::EXT: {} });
     if tasks {
         c["extensions"][tasks::EXT] = json!({});
     }
@@ -777,7 +1031,7 @@ fn instructions(ctx: &Ctx) -> Value {
     let who = match &ctx.principal {
         Principal::Operator => "You're connected as roll's operator: every tool is available.".to_string(),
         Principal::Grant(g) => format!(
-            "You're connected with the token \"{}\": it allows only what its owner chose, and tools/list shows only tools it can use. A call outside its rules fails with \"not allowed\": ask the user to widen the token rather than retrying.",
+            "You're connected with the token \"{}\": it allows only what its owner chose, and tools/list shows only tools it can use. A call outside its rules fails with \"not allowed\": rather than retrying, ask the user to widen the token, or ask for one rule for a while with access_request_access (saying why).",
             g.name
         ),
     };
@@ -820,6 +1074,25 @@ async fn call_as(ctx: &Arc<Ctx>, name: &str, args: Value, quiet: bool) -> Option
     let tool: Arc<str> = if quiet { format!("completion/complete:{name}").into() } else { name.into() };
     ext.insert(McpCall { tool, args: Arc::new(redacted), ip: ctx.ip, elicits: ctx.url_elicitation, client: ctx.client.clone(), quiet });
     let started = std::time::Instant::now();
+    // A credential headed where people and other agents read it is refused before it's sent
+    // (guard.rs): a data-loss check, not a permission (the gate decides those).
+    // What it writes to, worked out once (a fronted set's list is built to look).
+    let target = writes_to(ctx, name);
+    let found = match target.as_ref().and_then(|(product, write)| guard::check(product, *write, &args)) {
+        None if !quiet => match &target {
+            Some((product, write)) => secret_value_in(ctx, name, product, *write, &args).await,
+            None => None,
+        },
+        found => found,
+    };
+    if !quiet && let Some(found) = found {
+        let text = format!(
+            "not sent: {} holds what looks like {}. Written where people and agents read it, a credential leaks: keep it in roll secrets (secrets_set) and refer to it by name.",
+            found.at, found.kind
+        );
+        refused_audit(ctx, name, &found, started).await;
+        return Some(tool_error(text, json!({ "refused": "credential", "at": found.at, "kind": found.kind })));
+    }
     // The gate decides (and audits) every call a grant makes; the MCP layer refuses nothing itself.
     let (mut result, route) = if let Some(t) = tools::all().iter().find(|t| t.name == name) {
         (run(ctx, t, &args, ext).await, format!("{} {}", t.method, t.path))
@@ -875,6 +1148,141 @@ async fn call_as(ctx: &Arc<Ctx>, name: &str, args: Value, quiet: bool) -> Option
         }
     }
     Some(result)
+}
+
+/// A tool's product, and whether it writes (a built-in tool's method, a fronted set's
+/// `readOnlyHint`).
+fn writes_to(ctx: &Ctx, name: &str) -> Option<(String, bool)> {
+    Some(match tools::all().iter().find(|t| t.name == name) {
+        Some(t) => (t.product.to_string(), t.method != "GET"),
+        None => {
+            let def = ctx.m.sets.iter().flat_map(|s| s.tools()).find(|t| t["name"] == name)?;
+            let product = def["_meta"]["roll/product"].as_str().map(str::to_string).unwrap_or_else(|| name.split('_').next().unwrap_or_default().to_string());
+            (product, def["annotations"]["readOnlyHint"] != true)
+        }
+    })
+}
+
+/// The most projects a token's write is checked against (one scan each).
+const SCAN_PROJECTS: usize = 50;
+
+/// The value of a roll secret a write would put where people and agents read it. Asked of roll
+/// secrets' own scan (`POST …/leaks`) as the caller, through the gated router, so it only ever
+/// matches values the caller may reveal (never a test of a guess), and only for a token that may
+/// reveal secrets at all: the one that could have read a value to leak.
+async fn secret_value_in(ctx: &Arc<Ctx>, name: &str, product: &str, write: bool, args: &Value) -> Option<guard::Found> {
+    if !write || !guard::read_by_others(product) {
+        return None;
+    }
+    let Principal::Grant(g) = &ctx.principal else { return None };
+    if !g.scope.may("secrets", roll_auth::scope::Action::Reveal) {
+        return None;
+    }
+    // Only words that look like a credential (a region or `production` never matches), all of
+    // them: past roll secrets' limit for a scan the call isn't sent.
+    let Some(candidates) = guard::candidates(args) else {
+        return Some(guard::Found { kind: format!("more than {} words that look like credentials (too many to check)", guard::MAX_CANDIDATES), at: "arguments".into() });
+    };
+    if candidates.is_empty() {
+        return None;
+    }
+    // The projects its secrets rules name, or (a rule over every project) the ones it can list.
+    let mut projects: Vec<String> = Vec::new();
+    let mut every = false;
+    for r in g.scope.0.iter().filter(|r| (r.product == "secrets" || r.product == "*") && r.actions.contains_key(&roll_auth::scope::Action::Reveal)) {
+        match &r.resources {
+            roll_auth::scope::Resources::All => every = true,
+            roll_auth::scope::Resources::Some(sel) => projects.extend(sel.iter().map(|s| match s {
+                roll_auth::scope::Selector::Project { project } => project.clone(),
+                roll_auth::scope::Selector::Id { id, .. } => id.clone(),
+            })),
+        }
+    }
+    if every {
+        match guard_route(ctx, "GET", "/v1/workspace/projects", None).await {
+            Ok(list) => projects.extend(list.as_array().into_iter().flatten().filter_map(|p| p["id"].as_str().map(str::to_string))),
+            Err(e) => tracing::warn!(error = %e, tool = %name, "the credential guard couldn't list the token's projects"),
+        }
+    }
+    projects.sort();
+    projects.dedup();
+    if projects.len() > SCAN_PROJECTS {
+        return Some(guard::Found { kind: format!("words that look like credentials, and the token reaches more than {SCAN_PROJECTS} projects' secrets (too many to check)"), at: "arguments".into() });
+    }
+    let words: Vec<&str> = candidates.iter().map(|(w, _)| w.as_str()).collect();
+    for p in projects {
+        let route = format!("/v1/secrets/projects/{}/leaks", percent_encoding::utf8_percent_encode(&p, percent_encoding::NON_ALPHANUMERIC));
+        let found = match guard_route(ctx, "POST", &route, Some(json!({ "candidates": words }))).await {
+            Ok(f) => f,
+            // Not checked (roll secrets is off, or refused it): said, not silent.
+            Err(e) => {
+                tracing::warn!(error = %e, tool = %name, "the credential guard couldn't scan a project's secrets");
+                continue;
+            }
+        };
+        if let Some(f) = found.as_array().and_then(|l| l.first()) {
+            let at = f["index"].as_u64().and_then(|i| candidates.get(i as usize)).map_or("arguments".to_string(), |(_, at)| at.clone());
+            let kind = format!("the value of roll secret {} ({})", f["key"].as_str().unwrap_or("?"), f["environment"].as_str().unwrap_or("?"));
+            return Some(guard::Found { kind, at });
+        }
+    }
+    None
+}
+
+/// A request through the gated router with the caller's token, for the guard: quiet (it never
+/// asks a person), its JSON answer.
+async fn guard_route(ctx: &Arc<Ctx>, method: &str, route: &str, body: Option<Value>) -> Result<Value, String> {
+    // roll secrets audits a guard's scans as `secrets.guard`, apart from a person's scans.
+    let mut req = Request::builder().method(method).uri(route).header(header::CONTENT_TYPE, "application/json").header("x-roll-guard", "1");
+    for (k, v) in forward_headers(&ctx.headers, &Value::Null).iter() {
+        req = req.header(k, v);
+    }
+    let mut req = req.body(body.map_or(Body::empty(), |b| Body::from(b.to_string()))).map_err(|e| e.to_string())?;
+    // rolld keeps `X-Roll-Guard` on roll secrets' routes only for an in-process call carrying this
+    // extension with tool "guard" (secrets' #169): keep both if this ever changes.
+    req.extensions_mut().insert(McpCall { tool: "guard".into(), args: Arc::new(json!({ "route": route })), ip: ctx.ip, elicits: false, client: ctx.client.clone(), quiet: true });
+    let resp = match ctx.m.api.clone().oneshot(req).await {
+        Ok(r) => r,
+        Err(e) => match e {},
+    };
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    let bytes = axum::body::to_bytes(resp.into_body(), MAX_ANSWER).await.map_err(|e| e.to_string())?;
+    serde_json::from_slice(&bytes).map_err(|e| e.to_string())
+}
+
+/// A refused credential in the audit log: the gate never saw the call. Where and what kind, never
+/// the value (the arguments aren't kept).
+async fn refused_audit(ctx: &Arc<Ctx>, name: &str, found: &guard::Found, started: std::time::Instant) {
+    let Some(access) = ctx.m.config.access.clone() else { return };
+    let (grant_id, grant_name) = match &ctx.principal {
+        Principal::Grant(g) => (Some(g.id.to_string()), Some(g.name.to_string())),
+        Principal::Operator => (None, None),
+    };
+    let e = roll_access::store::AuditEvent {
+        id: roll_access::new_id("aud"),
+        at: code_sql_now(),
+        grant_id,
+        grant_name,
+        source: "mcp".into(),
+        tool: Some(name.to_string()),
+        method: "POST".into(),
+        route: "tool".into(),
+        product: name.split('_').next().map(str::to_string),
+        action: None,
+        resource: Some(format!("{} in {}", found.kind, found.at)),
+        decision: "deny".into(),
+        approval: None,
+        status: 400,
+        args: None,
+        ip: ctx.ip.map(|i| i.to_string()),
+        duration_ms: started.elapsed().as_millis() as i64,
+        client: ctx.client.as_deref().map(str::to_string),
+    };
+    if let Some(e) = access.store.queue_audit(e) {
+        let _ = tokio::task::spawn_blocking(move || access.store.audit(&e)).await;
+    }
 }
 
 /// `roll://access/me`: `GET /v1/access` through the gated router with the caller's headers, as a
@@ -1032,7 +1440,15 @@ async fn outcome(tool: &str, resp: Response) -> Value {
         }
         let text = match status {
             StatusCode::UNAUTHORIZED => format!("{msg}: the token isn't valid any more (reconnect)"),
-            StatusCode::FORBIDDEN => format!("not allowed: {msg}"),
+            // Where the person can allow it, when roll says (the token's page, the rule proposed).
+            // And what the agent can ask for itself, for a while (an access request).
+            StatusCode::FORBIDDEN => match body.get("widen").and_then(Value::as_str) {
+                Some(w) => match body.get("request").filter(|r| r.is_object()) {
+                    Some(ask) => format!("not allowed: {msg}. If the user wants this token to be able to, they can allow it here: {w}. Or ask for it for a while yourself: call access_request_access with {ask}, then access_wait_approval."),
+                    None => format!("not allowed: {msg}. If the user wants this token to be able to, they can allow it here: {w}"),
+                },
+                None => format!("not allowed: {msg}"),
+            },
             StatusCode::NOT_FOUND => format!("not found: {msg}"),
             _ => msg,
         };
@@ -1054,6 +1470,12 @@ async fn outcome(tool: &str, resp: Response) -> Value {
                 (format!("{} bytes of {ct} (base64 in structuredContent.content_b64)", bytes.len()), json!({ "content_type": ct, "bytes": bytes.len(), "content_b64": b64 }))
             }
         },
+    };
+    // An access request approved: say what changed, for a client that won't hear list_changed.
+    let text = if structured["method"] == "GRANT" && structured["state"] == "approved" {
+        format!("Approved: {}. This connection's tools changed: list them again (tools/list) to see the ones it may use now.\n\n{text}", structured["summary"].as_str().unwrap_or("the access asked for"))
+    } else {
+        text
     };
     json!({ "content": [{ "type": "text", "text": text }], "structuredContent": structured, "isError": false })
 }

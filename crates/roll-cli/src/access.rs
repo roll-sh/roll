@@ -70,6 +70,33 @@ pub enum Token {
     },
     /// Take back what an approval allowed a token for a while (`roll token show` lists them).
     TakeBack { id: String, approval: String },
+    /// Ask a person, with the token you're using (ROLL_TOKEN), for one more rule for a while,
+    /// saying why; `--wait` waits for the decision.
+    ///
+    /// Example:
+    ///   roll token request --product postgres --allow delete --resource prj_ab… --for 1h \
+    ///     --reason "drop the scratch database" --wait
+    Request {
+        #[arg(long)]
+        product: String,
+        /// One action: read, write, delete, reveal, deploy or admin.
+        #[arg(long)]
+        allow: String,
+        /// One resource (every resource of the product when left out).
+        #[arg(long)]
+        resource: Option<String>,
+        #[arg(long)]
+        environment: Option<String>,
+        /// 15m, 1h, 8h or 1d.
+        #[arg(long = "for", default_value = "1h")]
+        for_: String,
+        /// Why: the person deciding reads it.
+        #[arg(long)]
+        reason: String,
+        /// Wait (up to 10 minutes) until a person decides.
+        #[arg(long)]
+        wait: bool,
+    },
     /// Which tokens need attention and why (admin over everything, never expiring, unused,
     /// narrower than their rules, roaming), each with its fix.
     Checkup,
@@ -83,8 +110,19 @@ pub enum Token {
     /// credentials). The operator's, or, signed in, a person's own acting as them.
     #[command(subcommand)]
     Client(MachineCmd),
+    /// Enterprise sign-in (SEP-990, ID-JAG): the identity providers roll trusts to vouch for
+    /// their people, and the apps they may sign people in to. Nothing to show them.
+    ///
+    /// Examples:
+    ///   roll token enterprise trust https://acme.okta.com --name Okta --domain acme.com
+    ///   roll token enterprise app create Claude --product code,workspace --allow read,write
+    Enterprise {
+        #[command(subcommand)]
+        what: Option<EnterpriseCmd>,
+    },
     /// roll's rules for every token: `--max-days 90`, `--require-expiry`, `--no-limit`,
-    /// `--max-idle-days 60` (`0` for no idle limit); nothing to show them.
+    /// `--max-idle-days 60` (`0` for no idle limit), `--approval-rule secrets:reveal@production=2`
+    /// (what needs several approvers); nothing to show them.
     Policy {
         #[arg(long)]
         max_days: Option<u32>,
@@ -95,7 +133,54 @@ pub enum Token {
         /// Tokens unused this many days stop working (0: no limit).
         #[arg(long)]
         max_idle_days: Option<u32>,
+        /// Add a rule asking several people to approve: `product[:action][@env,…]=N[/approver,…]`,
+        /// e.g. `secrets:reveal@production=2` or `postgres:delete=2/usr_a,usr_b`. Repeatable.
+        #[arg(long = "approval-rule", value_parser = approval_rule)]
+        approval_rules: Vec<Value>,
+        /// Remove every approval rule (one person decides each request again).
+        #[arg(long, conflicts_with = "approval_rules")]
+        no_approval_rules: bool,
     },
+}
+
+/// `--approver` values: chat ids, and the roll accounts of those given as `U…=usr_…`.
+fn chat_approvers(given: &[String]) -> (Vec<String>, std::collections::BTreeMap<String, String>) {
+    let mut ids = Vec::new();
+    let mut people = std::collections::BTreeMap::new();
+    for a in given {
+        let (id, user) = a.split_once('=').map_or((a.as_str(), None), |(i, u)| (i, Some(u)));
+        let id = id.trim().trim_start_matches('@').to_string();
+        if let Some(u) = user {
+            people.insert(id.clone(), u.trim().to_string());
+        }
+        ids.push(id);
+    }
+    (ids, people)
+}
+
+/// `product[:action][@env,…]=N[/approver,…]` as a policy approval rule.
+fn approval_rule(s: &str) -> Result<Value, String> {
+    let bad = || format!("{s:?}: product[:action][@env,…]=N[/approver,…], e.g. secrets:reveal@production=2");
+    let (what, rest) = s.split_once('=').ok_or_else(bad)?;
+    let (n, approvers) = rest.split_once('/').map_or((rest, None), |(n, a)| (n, Some(a)));
+    let approvals: u8 = n.trim().parse().map_err(|_| bad())?;
+    let (what, envs) = what.split_once('@').map_or((what, None), |(w, e)| (w, Some(e)));
+    let (product, action) = what.split_once(':').map_or((what, None), |(p, a)| (p, Some(a)));
+    if product.trim().is_empty() {
+        return Err(bad());
+    }
+    let list = |l: &str| l.split(',').map(str::trim).filter(|x| !x.is_empty()).map(String::from).collect::<Vec<_>>();
+    let mut rule = json!({ "product": product.trim(), "approvals": approvals });
+    if let Some(a) = action {
+        rule["actions"] = json!(list(a));
+    }
+    if let Some(e) = envs {
+        rule["environments"] = json!(list(e));
+    }
+    if let Some(a) = approvers {
+        rule["approvers"] = json!(list(a));
+    }
+    Ok(rule)
 }
 
 #[derive(Args)]
@@ -136,21 +221,168 @@ pub enum MachineCmd {
     /// Revoke a machine client: its tokens stop working at once, and it gets no more.
     Revoke { id: String },
     /// A new credential for a machine client, keeping its id and rules: a new key with
-    /// --public-key, else a new secret (shown once). The old one stops now, with the tokens it
+    /// --public-key, CI's own identity with --github, --gitlab or --issuer, else a new secret
+    /// (shown once). The old one stops now, with the tokens it
     /// got, unless --keep-old keeps it working while the automation moves over.
     ///
     /// Examples:
     ///   roll token client rotate mcl_… --keep-old 1h
     ///   roll token client rotate mcl_… --public-key ci-2026.pub.pem
+    ///   roll token client rotate mcl_… --github acme/web --ref refs/heads/main   (CI's own identity)
+    Rotate(Box<ClientRotate>),
+}
+
+#[derive(Subcommand)]
+pub enum EnterpriseCmd {
+    /// Trust an identity provider (its issuer, an https URL); again to change how it's set up.
+    Trust {
+        issuer: String,
+        /// What people call it ("Okta").
+        #[arg(long)]
+        name: Option<String>,
+        /// Its keys pinned (a JWKS file), for a provider roll can't reach.
+        #[arg(long)]
+        jwks: Option<std::path::PathBuf>,
+        /// How a person is found: by their verified email (default), or by `aud_sub` naming
+        /// their roll account.
+        #[arg(long = "match", value_parser = ["email", "aud_sub"], default_value = "email")]
+        matching: String,
+        /// An email domain it vouches for (acme.com); repeat for more. Email matching needs one.
+        #[arg(long = "domain")]
+        domains: Vec<String>,
+        /// Let it sign in roll's admins too (they act as the operator).
+        #[arg(long)]
+        admins: bool,
+        /// A multi-tenant issuer's one tenant roll trusts (its assertions' `tenant` claim).
+        #[arg(long)]
+        tenant: Option<String>,
+        /// The SSO connection that is this same provider (`sso_…`, on the account page's single sign-on): it vouches
+        /// for the domains a DNS record proved for that connection, instead of `--domain`.
+        #[arg(long, conflicts_with = "domains")]
+        sso: Option<String>,
+    },
+    /// Stop trusting an identity provider: no new sign-ins from it.
+    Untrust { issuer: String },
+    /// The apps an identity provider may sign people in to.
+    #[command(subcommand)]
+    App(EnterpriseAppCmd),
+}
+
+#[derive(Subcommand)]
+pub enum EnterpriseAppCmd {
+    /// Register an app (its client id is what the provider puts in an assertion): with
+    /// --public-key it signs its client assertions; without, roll makes a secret, shown once.
+    Create {
+        name: String,
+        #[command(flatten)]
+        rules: RuleArgs,
+        /// Its public key: a PEM file (Ed25519 or P-256) or a JWK.
+        #[arg(long)]
+        public_key: Option<std::path::PathBuf>,
+    },
+    /// Change an app's name or rules: its people's connections take the new rules at once.
+    Update {
+        id: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[command(flatten)]
+        rules: RuleArgs,
+    },
+    /// A new credential for an app, keeping its client id and its people's connections: with
+    /// --public-key a key, without a new secret (shown once). The old secret stops now with the
+    /// tokens it got, unless --keep-old keeps it working while the app moves over. A leaked app
+    /// signs in again from here.
     Rotate {
         id: String,
         /// Its new public key: a PEM file (Ed25519 or P-256) or a JWK.
         #[arg(long)]
         public_key: Option<std::path::PathBuf>,
-        /// The old credential keeps working this long (1h, 2d; at most 7d).
+        /// The old secret keeps working this long (1h, 2d; at most 7d).
         #[arg(long)]
         keep_old: Option<String>,
     },
+    /// Remove an app: every person's connection to it is revoked.
+    Remove { id: String },
+}
+
+/// CI's own identity as a machine client's credential (`create` and `rotate`): GitHub Actions,
+/// GitLab CI, or any issuer.
+#[derive(Args)]
+pub struct IdentityArgs {
+    /// Trust this repository's GitHub Actions instead: its jobs sign in with their own OIDC token
+    /// (`permissions: id-token: write`), so nothing is stored in GitHub (owner/repo).
+    #[arg(long, conflicts_with_all = ["gitlab", "issuer"])]
+    github: Option<String>,
+    /// Trust this GitLab.com project's CI jobs instead (`id_tokens`), so nothing is stored in
+    /// GitLab (group/project, subgroups too).
+    #[arg(long, conflicts_with = "issuer")]
+    gitlab: Option<String>,
+    /// Trust any CI system's OIDC tokens instead (Buildkite, CircleCI, Terraform Cloud, a
+    /// cluster's own): its issuer URL, the token's `iss`. With --subject.
+    #[arg(long, requires = "subject")]
+    issuer: Option<String>,
+    /// With --issuer: the token's `sub`, or a pattern of it with `*` (a shared issuer's must name
+    /// one tenant: Buildkite's `organization:acme:…`).
+    #[arg(long, requires = "issuer")]
+    subject: Option<String>,
+    /// With --issuer: another claim the token must carry, `name=value` (`*` patterns too);
+    /// repeatable.
+    #[arg(long = "claim", requires = "issuer")]
+    claims: Vec<String>,
+    /// With --issuer: the audience its tokens are minted for (default roll's API URL).
+    #[arg(long, requires = "issuer")]
+    audience: Option<String>,
+    /// With --issuer: the issuer's keys, pinned, for one roll can't reach (a JWKS file:
+    /// `kubectl get --raw /openid/v1/jwks`).
+    #[arg(long, requires = "issuer")]
+    jwks: Option<std::path::PathBuf>,
+    /// With --github or --gitlab: only jobs on this ref (GitHub: refs/heads/main; GitLab: the
+    /// branch, main).
+    #[arg(long, conflicts_with = "environment")]
+    r#ref: Option<String>,
+    /// With --github or --gitlab: only jobs in this environment (production).
+    #[arg(long)]
+    environment: Option<String>,
+}
+
+impl IdentityArgs {
+    /// The identity these flags describe, if any.
+    fn identity(&self) -> anyhow::Result<Option<Value>> {
+        if (self.r#ref.is_some() || self.environment.is_some()) && self.github.is_none() && self.gitlab.is_none() {
+            bail!("--ref and --environment narrow --github or --gitlab");
+        }
+        Ok(match (&self.github, &self.gitlab, &self.issuer) {
+            (Some(repo), ..) => Some(github_identity(repo, self.r#ref.as_deref(), self.environment.as_deref())?),
+            (None, Some(project), _) => Some(gitlab_identity(project, self.r#ref.as_deref(), self.environment.as_deref())?),
+            (None, None, Some(issuer)) => {
+                let mut claims = serde_json::Map::new();
+                for kv in &self.claims {
+                    let (k, v) = kv.split_once('=').filter(|(k, v)| !k.is_empty() && !v.is_empty()).with_context(|| format!("--claim {kv}: name=value"))?;
+                    claims.insert(k.to_string(), json!(v));
+                }
+                let jwks = match &self.jwks {
+                    Some(path) => Some(std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?),
+                    None => None,
+                };
+                Some(json!({ "issuer": issuer, "subject": self.subject, "claims": claims, "audience": self.audience, "jwks": jwks }))
+            }
+            _ => None,
+        })
+    }
+}
+
+#[derive(Args)]
+pub struct ClientRotate {
+    id: String,
+    /// Its new public key: a PEM file (Ed25519 or P-256) or a JWK.
+    #[arg(long, conflicts_with_all = ["github", "gitlab", "issuer"])]
+    public_key: Option<std::path::PathBuf>,
+    /// Or trust CI's own identity from now on (nothing stored in CI).
+    #[command(flatten)]
+    identity: IdentityArgs,
+    /// The old credential keeps working this long (1h, 2d; at most 7d).
+    #[arg(long)]
+    keep_old: Option<String>,
 }
 
 #[derive(Args)]
@@ -163,8 +395,10 @@ pub struct ClientCreate {
     #[arg(long, default_value = "30d")]
     expires: String,
     /// Its public key: a PEM file (Ed25519 or P-256) or a JWK (Ed25519, P-256 or RSA).
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["github", "gitlab", "issuer"])]
     public_key: Option<std::path::PathBuf>,
+    #[command(flatten)]
+    identity: IdentityArgs,
     /// Addresses its tokens may be used from (CIDRs), repeatable.
     #[arg(long = "ip", value_delimiter = ',')]
     ip_allow: Vec<String>,
@@ -198,6 +432,63 @@ fn public_jwk(text: &str) -> anyhow::Result<Value> {
     bail!("an Ed25519 or P-256 PEM public key (for RSA, give its JWK)")
 }
 
+/// GitHub Actions as a trusted identity: the repository's jobs (on a ref, or in an environment).
+fn github_identity(repo: &str, git_ref: Option<&str>, environment: Option<&str>) -> anyhow::Result<Value> {
+    let ok = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+    let Some((owner, name)) = repo.split_once('/').filter(|(o, n)| ok(o) && ok(n)) else {
+        bail!("--github is owner/repo");
+    };
+    // GitHub's `sub`: repo:<owner>/<repo>:ref:<ref>, or :environment:<name> for an environment's jobs.
+    let subject = match (git_ref, environment) {
+        (_, Some(env)) => format!("repo:{owner}/{name}:environment:{env}"),
+        (Some(r), None) => format!("repo:{owner}/{name}:ref:{r}"),
+        (None, None) => format!("repo:{owner}/{name}:*"),
+    };
+    Ok(json!({ "issuer": "https://token.actions.githubusercontent.com", "subject": subject }))
+}
+
+/// GitLab.com's CI as a trusted identity: a project's jobs (on a branch, or in an environment).
+fn gitlab_identity(project: &str, branch: Option<&str>, environment: Option<&str>) -> anyhow::Result<Value> {
+    let ok = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+    if !project.contains('/') || !project.split('/').all(ok) {
+        bail!("--gitlab is group/project (subgroups too)");
+    }
+    // GitLab's `sub`: project_path:<group>/<project>:ref_type:branch:ref:<branch>; an environment
+    // is its own claim.
+    let subject = match branch {
+        Some(b) => format!("project_path:{project}:ref_type:branch:ref:{b}"),
+        None => format!("project_path:{project}:*"),
+    };
+    let mut identity = json!({ "issuer": "https://gitlab.com", "subject": subject });
+    if let Some(env) = environment {
+        identity["claims"] = json!({ "environment": env });
+    }
+    Ok(identity)
+}
+
+/// The `.gitlab-ci.yml` job lines that trade the job's ID token for a roll token.
+fn gitlab_step(client_id: &str, endpoint: &str, audience: &str) -> String {
+    format!(
+        "  id_tokens:\n\
+         \x20   ROLL_OIDC:\n\
+         \x20     aud: {audience}\n\
+         \x20 before_script:\n\
+         \x20   - export ROLL_TOKEN=$(curl -sSf {endpoint} -d grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer -d client_id={client_id} --data-urlencode \"assertion=$ROLL_OIDC\" | jq -r .access_token)"
+    )
+}
+
+/// The workflow step that trades a job's OIDC token for a roll token, masked, as `ROLL_TOKEN`.
+fn github_step(client_id: &str, endpoint: &str, audience: &str) -> String {
+    format!(
+        "      - name: Sign in to roll\n\
+         \x20       run: |\n\
+         \x20         oidc=$(curl -sSf -H \"Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN\" \"$ACTIONS_ID_TOKEN_REQUEST_URL&audience={audience}\" | jq -r .value)\n\
+         \x20         token=$(curl -sSf {endpoint} -d grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer -d client_id={client_id} --data-urlencode \"assertion=$oidc\" | jq -r .access_token)\n\
+         \x20         echo \"::add-mask::$token\"\n\
+         \x20         echo \"ROLL_TOKEN=$token\" >> \"$GITHUB_ENV\""
+    )
+}
+
 async fn machine(api: &Api, json_out: bool, cmd: MachineCmd) -> anyhow::Result<()> {
     match cmd {
         MachineCmd::Create(c) => {
@@ -205,7 +496,8 @@ async fn machine(api: &Api, json_out: bool, cmd: MachineCmd) -> anyhow::Result<(
                 Some(path) => Some(public_jwk(&std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?)?),
                 None => None,
             };
-            let body = json!({ "name": c.name, "rules": rules(api, &c.rules).await?, "expires_at": expiry(&c.expires)?, "ip_allow": c.ip_allow, "rate_per_minute": c.rate, "public_jwk": jwk });
+            let oidc = c.identity.identity()?;
+            let body = json!({ "name": c.name, "rules": rules(api, &c.rules).await?, "expires_at": expiry(&c.expires)?, "ip_allow": c.ip_allow, "rate_per_minute": c.rate, "public_jwk": jwk, "oidc": oidc });
             let made = api.post("/v1/access/clients", body).await?;
             if json_out {
                 println!("{}", serde_json::to_string_pretty(&made)?);
@@ -213,7 +505,22 @@ async fn machine(api: &Api, json_out: bool, cmd: MachineCmd) -> anyhow::Result<(
             }
             print_grant(&made["grant"]);
             println!("client_id:      {}\ntoken endpoint: {}", s(&made["client_id"]), s(&made["token_endpoint"]));
-            if let Some(secret) = made["client_secret"].as_str() {
+            let endpoint = s(&made["token_endpoint"]);
+            let audience = endpoint.trim_end_matches("/v1/access/oauth/token");
+            if c.identity.github.is_some() {
+                eprintln!("Nothing to store in GitHub. In the workflow, give the job `permissions: id-token: write`, then:\n");
+                println!("{}", github_step(&s(&made["client_id"]), &endpoint, audience));
+            } else if c.identity.gitlab.is_some() {
+                eprintln!("Nothing to store in GitLab. In .gitlab-ci.yml, add to the job:\n");
+                println!("{}", gitlab_step(&s(&made["client_id"]), &endpoint, audience));
+            } else if c.identity.issuer.is_some() {
+                println!("client_id:      {}\ntoken endpoint: {}", s(&made["client_id"]), endpoint);
+                eprintln!(
+                    "Nothing to store in CI. Get the job's OIDC token for audience {}, then trade it:\n  curl -sSf {endpoint} -d grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer -d client_id={} --data-urlencode \"assertion=$OIDC_TOKEN\"",
+                    c.identity.audience.as_deref().unwrap_or(audience),
+                    s(&made["client_id"])
+                );
+            } else if let Some(secret) = made["client_secret"].as_str() {
                 println!("\n{secret}\n");
                 eprintln!("Copy the secret now: it isn't shown again. Trade it for a token with grant_type=client_credentials (client_secret_basic or client_secret_post).");
             } else {
@@ -231,17 +538,25 @@ async fn machine(api: &Api, json_out: bool, cmd: MachineCmd) -> anyhow::Result<(
                 println!("no machine clients yet: roll token client create <name> --preset read-only --public-key key.pub.pem");
             }
             for c in &list {
-                println!("{}  {}", s(&c["client_id"]), if c["signs_with_key"] == true { "signs with a key" } else { "a secret" });
+                let how = match &c["trusts"] {
+                    t if t.is_object() => format!("trusts {}: {}", s(&t["issuer"]).trim_start_matches("https://"), s(&t["subject"])),
+                    _ if c["signs_with_key"] == true => "signs with a key".to_string(),
+                    _ => "signs with a secret".to_string(),
+                };
+                let last = c["last_sign_in"].as_i64().map(|t| format!("last sign-in {}", ago(t / 1000))).unwrap_or_else(|| "never signed in".into());
+                println!("{}  {how}  ({last})", s(&c["client_id"]));
                 print_grant(&c["grant"]);
             }
         }
-        MachineCmd::Rotate { id, public_key, keep_old } => {
+        MachineCmd::Rotate(r) => {
+            let ClientRotate { id, public_key, identity, keep_old } = *r;
+            let oidc = identity.identity()?;
             let jwk = match &public_key {
                 Some(path) => Some(public_jwk(&std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?)?),
                 None => None,
             };
             let keep = keep_old.as_deref().map(|k| span(k, "--keep-old")).transpose()?.flatten().map(|ms| ms / 1000);
-            let made = api.post(&format!("/v1/access/clients/{}/rotate", urlencoding::encode(&id)), json!({ "public_jwk": jwk, "keep_old_for_s": keep })).await?;
+            let made = api.post(&format!("/v1/access/clients/{}/rotate", urlencoding::encode(&id)), json!({ "public_jwk": jwk, "oidc": oidc, "keep_old_for_s": keep })).await?;
             if json_out {
                 println!("{}", serde_json::to_string_pretty(&made)?);
                 return Ok(());
@@ -252,6 +567,7 @@ async fn machine(api: &Api, json_out: bool, cmd: MachineCmd) -> anyhow::Result<(
                     println!("{secret}");
                     eprintln!("{old} Copy the new secret now: it isn't shown again.");
                 }
+                None if oidc.is_some() => eprintln!("{id} trusts CI's own identity now: nothing to store in CI. {old}"),
                 None => eprintln!("{id} signs with the new key now. {old}"),
             }
         }
@@ -390,6 +706,8 @@ pub enum Mcp {
         #[arg(long, requires = "install")]
         channel: Option<String>,
         /// A chat user id (Slack `U…`, a Discord user id) who may decide there; repeat it for more.
+        /// `U…=usr_…` links them to their roll account: they decide as that person (they count
+        /// toward the policy's approval rules, never for their own token's request).
         #[arg(long, requires = "install")]
         approver: Vec<String>,
         #[arg(long, conflicts_with_all = ["install", "channel"])]
@@ -467,6 +785,120 @@ fn span(s: &str, flag: &str) -> anyhow::Result<Option<i64>> {
 }
 
 /// The rules a `create` asks for: the preset's (its "project" filled in), then a rule of its own.
+async fn enterprise(api: &Api, json_out: bool, cmd: Option<EnterpriseCmd>) -> anyhow::Result<()> {
+    let current = api.get("/v1/access/enterprise").await?;
+    let idps = |v: &Value| v["idps"].as_array().cloned().unwrap_or_default();
+    let other = |list: Vec<Value>, issuer: &str| -> Vec<Value> { list.into_iter().filter(|i| i["issuer"].as_str().map(|s| s.trim_end_matches('/')) != Some(issuer.trim_end_matches('/'))).collect() };
+    let out = match cmd {
+        None => current,
+        Some(EnterpriseCmd::Trust { issuer, name, jwks, matching, domains, admins, tenant, sso }) => {
+            // Again for the same issuer and tenant changes it; another tenant is another entry.
+            let mut list: Vec<Value> = idps(&current)
+                .into_iter()
+                .filter(|i| i["issuer"].as_str().map(|s| s.trim_end_matches('/')) != Some(issuer.trim_end_matches('/')) || i["tenant"].as_str() != tenant.as_deref())
+                .collect();
+            let mut idp = json!({ "issuer": issuer, "matching": matching, "domains": domains, "admins": admins });
+            if let Some(t) = tenant {
+                idp["tenant"] = json!(t);
+            }
+            if let Some(s) = sso {
+                idp["sso"] = json!(s);
+            }
+            if let Some(n) = name {
+                idp["name"] = json!(n);
+            }
+            if let Some(path) = jwks {
+                idp["jwks"] = json!(std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?);
+            }
+            list.push(idp);
+            api.call(reqwest::Method::PUT, "/v1/access/enterprise/idps", Some(json!({ "idps": list }))).await?;
+            api.get("/v1/access/enterprise").await?
+        }
+        Some(EnterpriseCmd::Untrust { issuer }) => {
+            let list = other(idps(&current), &issuer);
+            if list.len() == idps(&current).len() {
+                anyhow::bail!("roll doesn't trust {issuer}");
+            }
+            api.call(reqwest::Method::PUT, "/v1/access/enterprise/idps", Some(json!({ "idps": list }))).await?;
+            api.get("/v1/access/enterprise").await?
+        }
+        Some(EnterpriseCmd::App(EnterpriseAppCmd::Create { name, rules: r, public_key })) => {
+            let jwk = match &public_key {
+                Some(path) => Some(public_jwk(&std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?)?),
+                None => None,
+            };
+            let made = api.post("/v1/access/enterprise/apps", json!({ "name": name, "rules": rules(api, &r).await?, "public_jwk": jwk })).await?;
+            if !json_out {
+                println!("client_id: {}", s(&made["client_id"]));
+                if let Some(secret) = made["client_secret"].as_str() {
+                    println!("client_secret (shown once; it's the app's, never the identity provider's): {secret}");
+                }
+                println!("Give the identity provider this client id for the app: it puts it in each person's assertion.");
+                return Ok(());
+            }
+            made
+        }
+        Some(EnterpriseCmd::App(EnterpriseAppCmd::Update { id, name, rules: r })) => {
+            if name.is_none() && !r.given() {
+                bail!("nothing to change: --name, or the app's new rules (--preset, --product, --allow…)");
+            }
+            let mut body = json!({});
+            if let Some(n) = name {
+                body["name"] = json!(n);
+            }
+            if r.given() {
+                body["rules"] = rules(api, &r).await?;
+            }
+            let app = api.call(reqwest::Method::PATCH, &format!("/v1/access/enterprise/apps/{}", urlencoding::encode(&id)), Some(body)).await?;
+            if !json_out {
+                println!("{} changed: its people's connections have its rules now", s(&app["name"]));
+                return Ok(());
+            }
+            app
+        }
+        Some(EnterpriseCmd::App(EnterpriseAppCmd::Rotate { id, public_key, keep_old })) => {
+            let jwk = match &public_key {
+                Some(path) => Some(public_jwk(&std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?)?),
+                None => None,
+            };
+            let keep = keep_old.as_deref().map(|k| span(k, "--keep-old")).transpose()?.flatten().map(|ms| ms / 1000);
+            let app = api.post(&format!("/v1/access/enterprise/apps/{}/rotate", urlencoding::encode(&id)), json!({ "public_jwk": jwk, "keep_old_for_s": keep })).await?;
+            if !json_out {
+                // The secret alone on stdout (for a script to hand to the provider); words on stderr.
+                let old = if app["old_until"].is_i64() { "The old secret keeps working a while (old_until in --json)." } else { "The old secret and the tokens it got stopped." };
+                match app["client_secret"].as_str() {
+                    Some(secret) => {
+                        println!("{secret}");
+                        eprintln!("{old} Copy the new secret now: it isn't shown again.");
+                    }
+                    None => eprintln!("{} signs with its new key now. {old}", s(&app["name"])),
+                }
+                return Ok(());
+            }
+            app
+        }
+        Some(EnterpriseCmd::App(EnterpriseAppCmd::Remove { id })) => api.call(reqwest::Method::DELETE, &format!("/v1/access/enterprise/apps/{}", urlencoding::encode(&id)), None).await?,
+    };
+    if json_out {
+        println!("{}", serde_json::to_string_pretty(&out)?);
+    } else if out.get("revoked").is_some() {
+        println!("removed; {} people's connections revoked", out["revoked"]);
+    } else {
+        for i in idps(&out) {
+            let domains: Vec<&str> = i["domains"].as_array().into_iter().flatten().filter_map(|d| d.as_str()).collect();
+            println!("trusts {} ({}; people by {}{}{})", s(&i["issuer"]), i["name"].as_str().unwrap_or("-"), s(&i["matching"]), if domains.is_empty() { String::new() } else { format!(" at {}", domains.join(", ")) }, if i["admins"] == true { "; admins too" } else { "" });
+        }
+        for app in out["apps"].as_array().into_iter().flatten() {
+            let leaked = app["leaked"].as_str().map(|w| format!("  its secret leaked ({w}): rotate it")).unwrap_or_default();
+            println!("app {}  {}  {}{leaked}", s(&app["client_id"]), s(&app["name"]), if app["signs_with_key"] == true { "signs with a key" } else { "a secret" });
+        }
+        if idps(&out).is_empty() && out["apps"].as_array().is_none_or(|a| a.is_empty()) {
+            println!("no identity provider is trusted, and no app registered");
+        }
+    }
+    Ok(())
+}
+
 async fn rules(api: &Api, c: &RuleArgs) -> anyhow::Result<Value> {
     let mut rules = Vec::new();
     let selectors = || {
@@ -668,6 +1100,27 @@ pub async fn token(api: &Api, json_out: bool, cmd: Token, credential: &Credentia
                 println!("revoked {} ({})", s(&g["id"]), s(&g["name"]));
             }
         }
+        Token::Request { product, allow, resource, environment, for_, reason, wait } => {
+            let mut asked = api.post("/v1/access/requests", json!({ "product": product, "action": allow, "resource": resource, "environment": environment, "for": for_, "reason": reason })).await?;
+            let id = s(&asked["id"]).to_string();
+            if wait {
+                eprintln!("waiting for a person to decide {id} (on roll's approvals page, in chat, or `roll mcp approve {id}`)…");
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
+                while asked["state"] == "pending" && std::time::Instant::now() < deadline {
+                    asked = api.get(&format!("/v1/access/approvals/{}?wait=55", urlencoding::encode(&id))).await?;
+                }
+            }
+            if json_out {
+                println!("{}", serde_json::to_string_pretty(&asked)?);
+            } else {
+                match asked["state"].as_str() {
+                    Some("approved") => println!("{id} approved: this token may {allow} on {product} for {for_}"),
+                    Some("denied") => anyhow::bail!("{id} denied{}", asked["reason"].as_str().map(|r| format!(": {r}")).unwrap_or_default()),
+                    Some("pending") => println!("{id} waits for a person: {}", s(&asked["summary"])),
+                    other => anyhow::bail!("{id} is {}", other.unwrap_or("unknown")),
+                }
+            }
+        }
         Token::Tools { id } => {
             let seen = api.get(&format!("/v1/access/tokens/{}/tools", urlencoding::encode(&id))).await?;
             if json_out {
@@ -734,6 +1187,7 @@ pub async fn token(api: &Api, json_out: bool, cmd: Token, credential: &Credentia
                         "tighten" => format!("roll token tighten {} --apply", s(&c["grant"]["id"])),
                         "expire" => format!("roll token edit {} --expires 30d", s(&c["grant"]["id"])),
                         "limit_addresses" => format!("roll token edit {} --ip <cidr>", s(&c["grant"]["id"])),
+                        "rotate_client" => "roll token client list, then roll token client rotate <mcl_…> --github owner/repo (or --public-key key.pub.pem)".to_string(),
                         other => other.to_string(),
                     };
                     println!("  {}: {fix}", s(&f["why"]));
@@ -813,12 +1267,21 @@ pub async fn token(api: &Api, json_out: bool, cmd: Token, credential: &Credentia
                 println!("note: {u} is set too, and isn't used: {source} wins.");
             }
         }
-        Token::Policy { max_days, require_expiry, no_limit, max_idle_days } => {
+        Token::Policy { max_days, require_expiry, no_limit, max_idle_days, approval_rules, no_approval_rules } => {
             let mut p = api.get("/v1/access/policy").await?;
             if let Some(d) = max_idle_days {
                 p["max_idle_days"] = if d == 0 { Value::Null } else { json!(d) };
             }
-            if max_days.is_some() || require_expiry.is_some() || no_limit || max_idle_days.is_some() {
+            let rules_changed = no_approval_rules || !approval_rules.is_empty();
+            if no_approval_rules {
+                p["approval_rules"] = json!([]);
+            }
+            if !approval_rules.is_empty() {
+                let mut all = p["approval_rules"].as_array().cloned().unwrap_or_default();
+                all.extend(approval_rules);
+                p["approval_rules"] = json!(all);
+            }
+            if max_days.is_some() || require_expiry.is_some() || no_limit || max_idle_days.is_some() || rules_changed {
                 if let Some(d) = max_days {
                     p["max_days"] = json!(d);
                 }
@@ -837,9 +1300,21 @@ pub async fn token(api: &Api, json_out: bool, cmd: Token, credential: &Credentia
                 let must = if p["require_expiry"].as_bool() == Some(true) { ", and must expire" } else { "" };
                 let idle = p["max_idle_days"].as_u64().map(|d| format!("; unused for {d} days, they stop")).unwrap_or_default();
                 println!("tokens live {days}{must}{idle}");
+                for r in p["approval_rules"].as_array().into_iter().flatten() {
+                    let names = |k: &str, none: &str| r[k].as_array().map_or_else(|| none.to_string(), |l| l.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", "));
+                    println!(
+                        "{} {} in {}: {} approvals from {}",
+                        r["product"].as_str().unwrap_or("?"),
+                        names("actions", "anything"),
+                        names("environments", "every environment"),
+                        r["approvals"],
+                        names("approvers", "anyone who decides (never the token's own person)")
+                    );
+                }
             }
         }
         Token::Client(cmd) => machine(api, json_out, cmd).await?,
+        Token::Enterprise { what } => enterprise(api, json_out, what).await?,
         Token::Presets => {
             let c = api.get("/v1/access/catalog").await?;
             if json_out {
@@ -1001,7 +1476,11 @@ pub async fn mcp(api: &Api, json_out: bool, cmd: Mcp) -> anyhow::Result<()> {
         Mcp::Notify { install, channel, approver, off } => {
             let v = match (install, channel, off) {
                 (Some(i), Some(c), _) => {
-                    let chat = json!({ "install": i, "channel": c.trim_start_matches('#'), "approvers": approver });
+                    let (ids, people) = chat_approvers(&approver);
+                    let mut chat = json!({ "install": i, "channel": c.trim_start_matches('#'), "approvers": ids });
+                    if !people.is_empty() {
+                        chat["people"] = json!(people);
+                    }
                     api.call(reqwest::Method::PUT, "/v1/access/notify", Some(json!({ "chat": chat }))).await?
                 }
                 (_, _, true) => api.call(reqwest::Method::PUT, "/v1/access/notify", Some(json!({ "chat": null }))).await?,
@@ -1012,7 +1491,8 @@ pub async fn mcp(api: &Api, json_out: bool, cmd: Mcp) -> anyhow::Result<()> {
             } else if v["chat"].is_null() {
                 println!("approvals go only to the dashboard and `roll mcp approvals`");
             } else {
-                let who: Vec<&str> = v["chat"]["approvers"].as_array().map(|a| a.iter().filter_map(|v| v.as_str()).collect()).unwrap_or_default();
+                let people = &v["chat"]["people"];
+                let who: Vec<String> = v["chat"]["approvers"].as_array().map(|a| a.iter().filter_map(|v| v.as_str()).map(|u| people[u].as_str().map_or(u.to_string(), |p| format!("{u} ({p})"))).collect()).unwrap_or_default();
                 println!("approvals are also posted to {} in {}; decided there by {}", s(&v["chat"]["channel"]), s(&v["chat"]["install"]), who.join(", "));
             }
         }
@@ -1047,6 +1527,19 @@ pub async fn mcp(api: &Api, json_out: bool, cmd: Mcp) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chat_approvers_can_name_their_account() {
+        let (ids, people) = chat_approvers(&["U1=usr_ana".into(), "@U2".into()]);
+        assert_eq!((ids, people.get("U1").map(String::as_str), people.len()), (vec!["U1".to_string(), "U2".to_string()], Some("usr_ana"), 1));
+    }
+
+    #[test]
+    fn approval_rules_read_as_the_policy_takes_them() {
+        assert_eq!(approval_rule("secrets:reveal@production=2").unwrap(), json!({ "product": "secrets", "actions": ["reveal"], "environments": ["production"], "approvals": 2 }));
+        assert_eq!(approval_rule("postgres=1/usr_a, usr_b").unwrap(), json!({ "product": "postgres", "approvals": 1, "approvers": ["usr_a", "usr_b"] }));
+        assert!(approval_rule("secrets:reveal").is_err() && approval_rule("=2").is_err() && approval_rule("apps=two").is_err());
+    }
 
     #[test]
     fn expiry_and_dates() {

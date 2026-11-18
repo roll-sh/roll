@@ -66,6 +66,111 @@ impl Engine {
         if problems.is_empty() { Ok(()) } else { Err(crate::Error::BadRequest(problems.join("; "))) }
     }
 
+    /// A head nobody approved yet: nothing of it runs (its services sleep) until a writer does.
+    async fn await_approval(&self, r: &Row) -> anyhow::Result<()> {
+        for svc in self.store.services(&r.id)? {
+            self.apps.sleep(&r.id, &svc.name).await;
+            self.store.set_service(&r.id, &svc.name, ServiceState::Sleeping, None, None)?;
+        }
+        let row = self.store.update(&r.id, |row| {
+            row.state = State::AwaitingApproval;
+            row.next_at = if row.generation == r.generation { SETTLED } else { 0 };
+            row.attempts = 0;
+            row.error = None;
+        })?;
+        self.report(row).await;
+        Ok(())
+    }
+
+    /// One data resource of a preview brought to what its rules want (branched, reset, masked,
+    /// given credentials): `(whether it was reset, a problem to say)`. The resources of a preview
+    /// are independent, so a converge runs them together.
+    async fn converge_resource(&self, r: &Row, s: &Settings, name: &str, res: ResourceRow, reset_due: bool, asked: &[String]) -> anyhow::Result<(bool, Option<String>)> {
+        let mut reset = false;
+        let key = format!("{}:{}", res.kind.as_str(), res.parent);
+        let b = match self.brancher(res.kind) {
+            Ok(b) => b.clone(),
+            Err(e) => {
+                let msg = e.to_string();
+                self.store.set_resource(&r.id, res.kind, &res.parent, |x| {
+                    x.state = ResourceState::Failed;
+                    x.error = Some(msg.clone());
+                })?;
+                return Ok((false, Some(msg)));
+            }
+        };
+        match &res.r#ref {
+            None => {
+                // As of `data_at` where the product keeps history (structure-only needs none).
+                let at = s.data_at.as_deref().filter(|_| res.mode == Mode::Branch).and_then(|a| crate::settings::data_at_secs(a, self.store.now_ms().unwrap_or(0) / 1000));
+                let past = match at {
+                    Some(at) => b.branch_at(&res.parent, name, res.mode, at).await.map_err(|e| anyhow::anyhow!("branching {key} as of {at}: {e:#}"))?,
+                    None => None,
+                };
+                if at.is_some() && past.is_none() {
+                    self.store.log(&r.id, &format!("{key} keeps no history: branched as of now, not data_at"))?;
+                }
+                let made = match past {
+                    Some(m) => m,
+                    None => b.branch(&res.parent, name, res.mode).await.map_err(|e| anyhow::anyhow!("branching {key}: {e:#}"))?,
+                };
+                // Recorded at once (a crash mustn't lose it), Ready only once it's masked.
+                self.store.set_resource(&r.id, res.kind, &res.parent, |x| {
+                    x.r#ref = Some(made.r#ref.clone());
+                    x.kept = made.kept.clone();
+                    x.state = ResourceState::Pending;
+                    x.error = None;
+                })?;
+                self.store.log(&r.id, &format!("branched {key} as {}", made.r#ref))?;
+                self.store.set_seed_needed(&r.id, true)?;
+                self.mask(&r.id, &b, &key, &made.r#ref, s).await?;
+                self.store.set_resource(&r.id, res.kind, &res.parent, |x| x.state = ResourceState::Ready)?;
+            }
+            Some(branch) if reset_due || asked.iter().any(|a| a == "*" || *a == key) => {
+                self.store.set_resource(&r.id, res.kind, &res.parent, |x| x.state = ResourceState::Resetting)?;
+                let at = s.data_at.as_deref().filter(|_| res.mode == Mode::Branch).and_then(|a| crate::settings::data_at_secs(a, self.store.now_ms().unwrap_or(0) / 1000));
+                let past = match at {
+                    Some(at) => b.reset_at(&res.parent, branch, res.kept.as_deref(), name, res.mode, at).await.map_err(|e| anyhow::anyhow!("resetting {key} as of {at}: {e:#}"))?,
+                    None => None,
+                };
+                let fresh = match past {
+                    Some(f) => f,
+                    None => b.reset(&res.parent, branch, res.kept.as_deref(), name, res.mode).await.map_err(|e| anyhow::anyhow!("resetting {key}: {e:#}"))?,
+                };
+                self.store.set_resource(&r.id, res.kind, &res.parent, |x| {
+                    x.r#ref = Some(fresh.r#ref.clone());
+                    x.kept = fresh.kept.clone();
+                    x.state = ResourceState::Resetting;
+                    x.error = None;
+                    x.bytes = 0;
+                })?;
+                self.store.log(&r.id, &format!("reset {key} from its parent"))?;
+                self.store.set_seed_needed(&r.id, true)?;
+                self.mask(&r.id, &b, &key, &fresh.r#ref, s).await?;
+                self.store.set_resource(&r.id, res.kind, &res.parent, |x| x.state = ResourceState::Ready)?;
+                reset = true;
+            }
+            // Made (or reset) but not finished: masks again, then Ready.
+            Some(branch) if res.state != ResourceState::Ready => {
+                self.mask(&r.id, &b, &key, branch, s).await?;
+                self.store.set_resource(&r.id, res.kind, &res.parent, |x| {
+                    x.state = ResourceState::Ready;
+                    x.error = None;
+                })?;
+            }
+            // Recorded without credentials (from before its product handed any out): get them,
+            // so its services never need the product's own.
+            Some(branch) if res.kept.is_none() => {
+                if let Some(kept) = b.credentials(&res.parent, branch, name).await.map_err(|e| anyhow::anyhow!("credentials for {key}: {e:#}"))? {
+                    self.store.set_resource(&r.id, res.kind, &res.parent, |x| x.kept = Some(kept.clone()))?;
+                    self.store.log(&r.id, &format!("{key} has credentials of its own now"))?;
+                }
+            }
+            Some(_) => {}
+        }
+        Ok((reset, None))
+    }
+
     /// Bring one active preview to its desired state.
     pub(super) async fn converge(&self, r: &Row) -> anyhow::Result<()> {
         let s = self.store.settings(&r.project_id)?;
@@ -82,19 +187,10 @@ impl Engine {
                 return Ok(());
             }
             if !c.may_run() {
-                for svc in self.store.services(&r.id)? {
-                    self.apps.sleep(&r.id, &svc.name).await;
-                    self.store.set_service(&r.id, &svc.name, ServiceState::Sleeping, None, None)?;
-                }
-                let row = self.store.update(&r.id, |row| {
-                    row.state = State::AwaitingApproval;
-                    row.next_at = if row.generation == r.generation { SETTLED } else { 0 };
-                    row.attempts = 0;
-                    row.error = None;
-                })?;
-                self.report(row).await;
-                return Ok(());
+                return self.await_approval(r).await;
             }
+        } else if !self.git_head_may_run(r)? {
+            return self.await_approval(r).await;
         }
         if r.state == State::Queued {
             self.store.update(&r.id, |row| row.next_at = if row.generation == r.generation { SETTLED } else { 0 })?;
@@ -171,89 +267,23 @@ impl Engine {
                 self.store.set_service(&r.id, &svc.name, ServiceState::Sleeping, None, None)?;
             }
         }
-        for res in self.store.resources(&r.id)? {
-            let key = format!("{}:{}", res.kind.as_str(), res.parent);
-            let b = match self.brancher(res.kind) {
-                Ok(b) => b.clone(),
+        // Every resource at once (a Postgres branch doesn't wait for the bucket's): each records its
+        // own progress as it goes, and the first error is the converge's once all are done.
+        let results = futures::future::join_all(self.store.resources(&r.id)?.into_iter().map(|res| self.converge_resource(r, &s, &name, res, reset_due, &asked))).await;
+        let mut first_error = None;
+        for result in results {
+            match result {
+                Ok((reset, problem)) => {
+                    reset_any |= reset;
+                    problems.extend(problem);
+                }
                 Err(e) => {
-                    let msg = e.to_string();
-                    self.store.set_resource(&r.id, res.kind, &res.parent, |x| {
-                        x.state = ResourceState::Failed;
-                        x.error = Some(msg.clone());
-                    })?;
-                    problems.push(msg);
-                    continue;
+                    first_error.get_or_insert(e);
                 }
-            };
-            match &res.r#ref {
-                None => {
-                    // As of `data_at` where the product keeps history (structure-only needs none).
-                    let at = s.data_at.as_deref().filter(|_| res.mode == Mode::Branch).and_then(|a| crate::settings::data_at_secs(a, self.store.now_ms().unwrap_or(0) / 1000));
-                    let past = match at {
-                        Some(at) => b.branch_at(&res.parent, &name, res.mode, at).await.map_err(|e| anyhow::anyhow!("branching {key} as of {at}: {e:#}"))?,
-                        None => None,
-                    };
-                    if at.is_some() && past.is_none() {
-                        self.store.log(&r.id, &format!("{key} keeps no history: branched as of now, not data_at"))?;
-                    }
-                    let made = match past {
-                        Some(m) => m,
-                        None => b.branch(&res.parent, &name, res.mode).await.map_err(|e| anyhow::anyhow!("branching {key}: {e:#}"))?,
-                    };
-                    // Recorded at once (a crash mustn't lose it), Ready only once it's masked.
-                    self.store.set_resource(&r.id, res.kind, &res.parent, |x| {
-                        x.r#ref = Some(made.r#ref.clone());
-                        x.kept = made.kept.clone();
-                        x.state = ResourceState::Pending;
-                        x.error = None;
-                    })?;
-                    self.store.log(&r.id, &format!("branched {key} as {}", made.r#ref))?;
-                    self.store.set_seed_needed(&r.id, true)?;
-                    self.mask(&r.id, &b, &key, &made.r#ref, &s).await?;
-                    self.store.set_resource(&r.id, res.kind, &res.parent, |x| x.state = ResourceState::Ready)?;
-                }
-                Some(branch) if reset_due || asked.iter().any(|a| a == "*" || *a == key) => {
-                    self.store.set_resource(&r.id, res.kind, &res.parent, |x| x.state = ResourceState::Resetting)?;
-                    let at = s.data_at.as_deref().filter(|_| res.mode == Mode::Branch).and_then(|a| crate::settings::data_at_secs(a, self.store.now_ms().unwrap_or(0) / 1000));
-                    let past = match at {
-                        Some(at) => b.reset_at(&res.parent, branch, res.kept.as_deref(), &name, res.mode, at).await.map_err(|e| anyhow::anyhow!("resetting {key} as of {at}: {e:#}"))?,
-                        None => None,
-                    };
-                    let fresh = match past {
-                        Some(f) => f,
-                        None => b.reset(&res.parent, branch, res.kept.as_deref(), &name, res.mode).await.map_err(|e| anyhow::anyhow!("resetting {key}: {e:#}"))?,
-                    };
-                    self.store.set_resource(&r.id, res.kind, &res.parent, |x| {
-                        x.r#ref = Some(fresh.r#ref.clone());
-                        x.kept = fresh.kept.clone();
-                        x.state = ResourceState::Resetting;
-                        x.error = None;
-                        x.bytes = 0;
-                    })?;
-                    self.store.log(&r.id, &format!("reset {key} from its parent"))?;
-                    self.store.set_seed_needed(&r.id, true)?;
-                    self.mask(&r.id, &b, &key, &fresh.r#ref, &s).await?;
-                    self.store.set_resource(&r.id, res.kind, &res.parent, |x| x.state = ResourceState::Ready)?;
-                    reset_any = true;
-                }
-                // Made (or reset) but not finished: masks again, then Ready.
-                Some(branch) if res.state != ResourceState::Ready => {
-                    self.mask(&r.id, &b, &key, branch, &s).await?;
-                    self.store.set_resource(&r.id, res.kind, &res.parent, |x| {
-                        x.state = ResourceState::Ready;
-                        x.error = None;
-                    })?;
-                }
-                // Recorded without credentials (from before its product handed any out): get them,
-                // so its services never need the product's own.
-                Some(branch) if res.kept.is_none() => {
-                    if let Some(kept) = b.credentials(&res.parent, branch, &name).await.map_err(|e| anyhow::anyhow!("credentials for {key}: {e:#}"))? {
-                        self.store.set_resource(&r.id, res.kind, &res.parent, |x| x.kept = Some(kept.clone()))?;
-                        self.store.log(&r.id, &format!("{key} has credentials of its own now"))?;
-                    }
-                }
-                Some(_) => {}
             }
+        }
+        if let Some(e) = first_error {
+            return Err(e);
         }
         if reset_any || reset_due || !asked.is_empty() {
             self.store.update(&r.id, |row| {
@@ -307,8 +337,23 @@ impl Engine {
             }
             anyhow::bail!("this preview may not inherit the production environment {:?}", s.secrets.base);
         }
-        let vars = self.preview_vars(r, &s).await?;
+        let mut vars = self.preview_vars(r, &s).await?;
         let branches = self.branch_vars(&r.id).await?;
+        // A link of the base to a parent the preview branched, under a name of its own
+        // (`STAGING_PGPASS`): set from the branch as the environment's own key, so whoever
+        // resolves it (roll apps too, which reads the environment itself) gets the branch's value,
+        // never the parent's. Read from the base's list (links, no values): nothing resolved.
+        // Unreadable: the converge fails (tried again) rather than let roll apps resolve a
+        // renamed link to the parent.
+        let links = self.secrets.links(&r.project_id, &s.secrets.base).await.map_err(|e| anyhow::anyhow!("secrets: reading the base's links: {e:#}"))?;
+        for (key, kind, parent, field) in links {
+            if vars.iter().any(|(k, _)| *k == key) {
+                continue;
+            }
+            if let Some((_, _, own)) = branches.iter().find(|(k, p, _)| *k == kind && *p == parent) {
+                vars.push((key, crate::names::follow(kind, &field, own.clone())));
+            }
+        }
         let (access_token, bypass) = match self.store.access(&r.id)? {
             Some(crate::store::Access { token: t, required: true, bypass }) if !t.is_empty() => (Some(t), bypass),
             _ => (None, None),
@@ -317,7 +362,14 @@ impl Engine {
         // preview nobody converges any more lets it lapse.
         let trusted = s.secrets.allow_production && r.trusted;
         let expires_at = self.store.now_ms()? + SECRETS_ENV_MARGIN_MS;
-        self.secrets.ensure(&r.project_id, &env_name(&r.id), &s.secrets.base, &vars, trusted, expires_at).await.map_err(|e| anyhow::anyhow!("secrets: {e:#}"))?;
+        // What it branched: roll secrets resolves nothing of those parents' (`followed`).
+        let branched: Vec<(Kind, String)> = self.store.resources(&r.id)?.into_iter().map(|x| (x.kind, x.parent)).collect();
+        self.secrets.ensure(&r.project_id, &env_name(&r.id), &s.secrets.base, &vars, trusted, expires_at, &branched).await.map_err(|e| anyhow::anyhow!("secrets: {e:#}"))?;
+        // Its logs' masks follow what it's given now: these values at once (roll apps' instances
+        // get them without a start here), roll secrets' read again at the next logs read.
+        let own: Vec<(String, String)> = project_env(&s, r.branch.as_deref()).into_iter().chain(self.store.vars(&r.id)?).collect();
+        self.add_masks(&r.id, super::masks::secret_values(&[], &[], &own, &vars));
+        self.stale_masks(&r.id);
 
         // 3b. The project's seed, once on fresh data, before anything serves it.
         if let Some(seed) = &s.seed
@@ -353,7 +405,14 @@ impl Engine {
         // (spec, repo, revision, whether roll apps runs it)
         let mut wanted: Vec<(ServiceSpec, String, String, bool)> = Vec::new();
         let head_of = |repo: String| async move {
-            if repo == r.repo { Ok::<_, anyhow::Error>(Some(r.build().to_string())) } else { self.head_for(&repo, r.branch.as_deref(), None).await }
+            if repo == r.repo {
+                Ok::<_, anyhow::Error>(Some(r.build().to_string()))
+            } else if repo.starts_with("git:") {
+                // Another Git URL service of the project: its own (production's) build.
+                Ok(Some(String::new()))
+            } else {
+                self.head_for(&repo, r.branch.as_deref(), None).await
+            }
         };
         match self.apps.catalog(&r.project_id).await.map_err(|e| anyhow::anyhow!("reading the project's services: {e:#}"))? {
             Some(catalog) if !catalog.is_empty() => {
@@ -382,6 +441,15 @@ impl Engine {
         let mut still_deploying = false;
         let mut checks: Vec<(String, String, String)> = Vec::new();
         let mut deployed: Vec<String> = Vec::new();
+        // Rebuilds a deploy hook asked for: each one is a deploy of every service, built afresh.
+        let rebuilds = self.store.rebuilds(&r.id)?;
+        let rebuilt = if rebuilds > 0 { format!("#r{rebuilds}") } else { String::new() };
+
+        // (what's sent, its fingerprint, the revision, whether it's the change's own repo)
+        let mut to_deploy: Vec<(Target, String, String, bool)> = Vec::new();
+
+        // The project's own preview domain, when it has one (`Store::set_project_domain`).
+        let domain = self.store.project_domain(&r.project_id)?;
         for (spec, repo, rev, on_apps) in wanted {
             keep.push(spec.name.clone());
             if let Some(path) = &spec.health {
@@ -389,7 +457,7 @@ impl Engine {
             }
             // What it costs is what it runs with: a backend's preview size when it has one.
             let memory_mb = if on_apps { self.apps.memory_mb(&r.id, &spec.name).await.unwrap_or(spec.memory_mb) } else { spec.memory_mb };
-            let svc = self.store.want_service(&r.id, &spec.name, &repo, &rev, memory_mb, &|h| self.cfg.url(h))?;
+            let svc = self.store.want_service(&r.id, &spec.name, &repo, &rev, memory_mb, &|h| self.cfg.url_in(domain.as_ref(), h))?;
             // A redeploy when the revision moved, or what it's deployed with did (its variables:
             // a reset's new URLs, changed overrides; on roll apps its access): the runtime
             // restarts it on its next request, roll apps redeploys it.
@@ -400,8 +468,12 @@ impl Engine {
             let feedback = s.feedback && r.change_id.is_some() && access_token.is_some();
             // Egress too: a service moves onto (or off) the preview's own network by restarting.
             let fingerprint = config_fingerprint(&vars, access_token.is_some() && on_apps, bypass.as_deref().filter(|_| on_apps), trusted, feedback && on_apps)
-                + &if s.egress == crate::settings::EgressRule::Roll { format!("e{}", s.egress_hosts.join(",")) } else { String::new() };
-            let config_moved = self.store.service_config(&r.id, &spec.name)?.as_deref() != Some(fingerprint.as_str());
+                + &if s.egress_for(r.trusted) == crate::settings::EgressRule::Roll { format!("e{}", s.egress_hosts.join(",")) } else { String::new() }
+                + &rebuilt;
+            let was = self.store.service_config(&r.id, &spec.name)?;
+            let config_moved = was.as_deref() != Some(fingerprint.as_str());
+            // Moved only by a rebuild (or with one): the same head built again, nothing cached.
+            let fresh = rebuilds > 0 && was.as_deref().and_then(|w| w.rsplit_once("#r")).is_none_or(|(_, n)| n != rebuilds.to_string());
             // The head it ran stays reachable at a URL of its own (Vercel's per-push URLs): the
             // change's own services on the runtime, a trusted change's.
             if !on_apps
@@ -409,14 +481,21 @@ impl Engine {
                 && r.trusted
                 && let Some(old) = svc.deployed.as_deref().filter(|d| *d != rev && !d.is_empty())
             {
-                for gone in self.store.pin(&r.id, &spec.name, old, &|h| self.cfg.url(h))? {
+                for gone in self.store.pin(&r.id, &spec.name, old, &|h| self.cfg.url_in(domain.as_ref(), h))? {
                     self.apps.remove(&r.id, &gone).await.map_err(|e| anyhow::anyhow!("removing {gone}: {e:#}"))?;
                 }
             }
             // A deploy the backend is still on is asked about again (until it's live or fails).
             let in_flight = self.deploying_since.lock().contains_key(&(r.id.clone(), spec.name.clone()));
             if svc.deployed.as_deref() != Some(&rev) || reset_any || config_moved || in_flight {
-                let git = if repo.is_empty() || rev.is_empty() { None } else { self.source.git_commit(&repo, &rev).await? };
+                // A Git URL service's revision is its git commit already.
+                let git = if repo.is_empty() || rev.is_empty() {
+                    None
+                } else if repo.starts_with("git:") {
+                    Some(rev.clone())
+                } else {
+                    self.source.git_commit(&repo, &rev).await?
+                };
                 let t = Target {
                     project: r.project_id.clone(),
                     preview: r.id.clone(),
@@ -433,49 +512,63 @@ impl Engine {
                     access_token: access_token.clone(),
                     bypass_sha256: bypass.clone(),
                     feedback,
-                    egress: s.egress,
+                    egress: s.egress_for(r.trusted),
                     egress_hosts: s.egress_hosts.clone(),
+                    rebuild: fresh.then_some(rebuilds),
                 };
                 self.store.set_service(&r.id, &spec.name, ServiceState::Deploying, None, None)?;
-                match self.apps.deploy(&t).await {
-                    Ok(url) => {
-                        self.deploying_since.lock().remove(&(r.id.clone(), spec.name.clone()));
-                        if let Some(url) = url {
-                            self.store.set_service_url(&r.id, &spec.name, &url)?;
-                        }
-                        let state = self.apps.status(&r.id, &spec.name).unwrap_or(ServiceState::Sleeping);
-                        self.store.set_service(&r.id, &spec.name, state, Some(&rev), None)?;
-                        self.store.set_service_config(&r.id, &spec.name, &fingerprint)?;
-                        // A new deploy is checked again, even at the same revision.
-                        self.store.set_healthy(&r.id, &spec.name, "")?;
-                        self.store.log(&r.id, &format!("deployed {} at {}", spec.name, short(&rev)))?;
-                        if repo == r.repo {
-                            deployed.push(spec.name.clone());
-                        }
+                to_deploy.push((t, fingerprint, rev.clone(), repo == r.repo));
+            }
+        }
+        // Every deploy at once (on roll apps each waits for its rollout), their outcomes in order.
+        let mut failed: Option<String> = None;
+        let outcomes = futures::future::join_all(to_deploy.iter().map(|(t, ..)| self.apps.deploy(t))).await;
+        for ((t, fingerprint, rev, own), outcome) in to_deploy.into_iter().zip(outcomes) {
+            let spec = &t.spec;
+            match outcome {
+                Ok(url) => {
+                    self.deploying_since.lock().remove(&(r.id.clone(), spec.name.clone()));
+                    if let Some(url) = url {
+                        self.store.set_service_url(&r.id, &spec.name, &url)?;
                     }
-                    // Accepted, not live yet: no slot waits on a build; come back and ask again.
-                    Err(e) if e.downcast_ref::<crate::ports::StillDeploying>().is_some() => {
-                        let now = self.store.now_ms()?;
-                        let since = *self.deploying_since.lock().entry((r.id.clone(), spec.name.clone())).or_insert(now);
-                        if now - since > DEPLOY_WAIT_MS {
-                            self.deploying_since.lock().remove(&(r.id.clone(), spec.name.clone()));
-                            let msg = format!("{e:#}, for over {} minutes", DEPLOY_WAIT_MS / 60_000);
-                            self.store.set_service(&r.id, &spec.name, ServiceState::Failed, None, Some(&msg))?;
-                            anyhow::bail!("deploying {}: {msg}", spec.name);
-                        }
-                        self.store.set_service(&r.id, &spec.name, ServiceState::Deploying, None, None)?;
-                        // The backend has what this deploy sent (its variables): a change made
-                        // meanwhile, even one back to how it was before, is sent again.
-                        self.store.set_service_config(&r.id, &spec.name, &fingerprint)?;
-                        still_deploying = true;
-                    }
-                    Err(e) => {
-                        let msg = format!("{e:#}");
-                        self.store.set_service(&r.id, &spec.name, ServiceState::Failed, None, Some(&msg))?;
-                        anyhow::bail!("deploying {}: {msg}", spec.name);
+                    let state = self.apps.status(&r.id, &spec.name).unwrap_or(ServiceState::Sleeping);
+                    self.store.set_service(&r.id, &spec.name, state, Some(&rev), None)?;
+                    self.store.set_service_config(&r.id, &spec.name, &fingerprint)?;
+                    // A new deploy is checked again, even at the same revision.
+                    self.store.set_healthy(&r.id, &spec.name, "")?;
+                    self.store.log(&r.id, &format!("deployed {} at {}", spec.name, short(&rev)))?;
+                    if own {
+                        deployed.push(spec.name.clone());
                     }
                 }
+                // Accepted, not live yet: no slot waits on a build; come back and ask again.
+                Err(e) if e.downcast_ref::<crate::ports::StillDeploying>().is_some() => {
+                    let now = self.store.now_ms()?;
+                    let since = *self.deploying_since.lock().entry((r.id.clone(), spec.name.clone())).or_insert(now);
+                    if now - since > DEPLOY_WAIT_MS {
+                        self.deploying_since.lock().remove(&(r.id.clone(), spec.name.clone()));
+                        let msg = format!("{e:#}, for over {} minutes", DEPLOY_WAIT_MS / 60_000);
+                        self.store.set_service(&r.id, &spec.name, ServiceState::Failed, None, Some(&msg))?;
+                        failed.get_or_insert(format!("deploying {}: {msg}", spec.name));
+                        continue;
+                    }
+                    self.store.set_service(&r.id, &spec.name, ServiceState::Deploying, None, None)?;
+                    // The backend has what this deploy sent (its variables): a change made
+                    // meanwhile, even one back to how it was before, is sent again.
+                    self.store.set_service_config(&r.id, &spec.name, &fingerprint)?;
+                    still_deploying = true;
+                }
+                Err(e) => {
+                    let msg = format!("{e:#}");
+                    self.store.set_service(&r.id, &spec.name, ServiceState::Failed, None, Some(&msg))?;
+                    failed.get_or_insert(format!("deploying {}: {msg}", spec.name));
+                }
             }
+        }
+        // Every outcome is kept first: a failed deploy doesn't lose the others' (which would be
+        // deployed again for nothing).
+        if let Some(e) = failed {
+            anyhow::bail!(e);
         }
         if still_deploying {
             let again = self.store.now_ms()? + DEPLOY_POLL_MS;
@@ -492,11 +585,16 @@ impl Engine {
         // 4b. Health: a service with a `health` path counts once it answers 2xx/3xx there, asked
         // once per revision (Render's and Railway's checks). Anything else fails the preview, and
         // the retry asks again.
+        // Asked all at once (a probe wakes a sleeping service: a cold start each), answered in order.
+        let mut asked = Vec::new();
         for (name, rev, path) in checks {
-            if self.store.healthy(&r.id, &name)?.as_deref() == Some(rev.as_str()) {
-                continue;
+            if self.store.healthy(&r.id, &name)?.as_deref() != Some(rev.as_str()) {
+                asked.push((name, rev, path));
             }
-            let answer = match self.apps.probe(&r.id, &name, &path).await {
+        }
+        let answers = futures::future::join_all(asked.iter().map(|(name, _, path)| self.apps.probe(&r.id, name, path))).await;
+        for ((name, rev, path), answer) in asked.into_iter().zip(answers) {
+            let answer = match answer {
                 Ok(a) => a,
                 // Its start was overtaken (slept, redeployed, pushed): converge again soon.
                 Err(e) if e.downcast_ref::<crate::ports::StillDeploying>().is_some() => {
@@ -519,7 +617,13 @@ impl Engine {
                     self.store.set_healthy(&r.id, &name, &rev)?;
                     self.store.log(&r.id, &format!("{name} is healthy ({path}: {status})"))?;
                 }
-                Some((status, said)) => anyhow::bail!("{name} answered {status} on {path}: {}", said.chars().take(200).collect::<String>()),
+                // Its answer is its code's words, and becomes the preview's error (the pull
+                // request's comment): masked as its logs are.
+                Some((status, said)) => {
+                    // Masked whole, then cut: a value the cut splits isn't left half shown.
+                    let said: String = code_preview::runner::mask(&said, &self.masks(&r.id).await?).chars().take(200).collect();
+                    anyhow::bail!("{name} answered {status} on {path}: {said}")
+                }
                 None => {}
             }
         }
@@ -619,7 +723,13 @@ impl Engine {
         let crops = self.crops_wanted(r).await;
         let opts = crate::ports::ShotOptions { pages: first_paths, hide: hide.clone(), openapi, endpoints, states, browsers, crops };
         let started = std::time::Instant::now();
-        match self.apps.screenshot(&r.id, &first.name, &opts).await {
+        // The page's words are its code's: what it was given is masked before they're kept (and
+        // reach the pull request's comment); a run whose masks can't be read fails as a run.
+        let taken = match self.apps.screenshot(&r.id, &first.name, &opts).await {
+            Ok(Some(mut shot)) => self.mask_shot(&r.id, &mut shot).await.map(|()| Some(shot)).map_err(|e| anyhow::anyhow!("reading what its page mustn't show: {e}")),
+            other => other,
+        };
+        match taken {
             Ok(Some(shot)) => {
                 // Kept under the entry that asked for each (`/pricing`, or `web:/pricing`).
                 let mut pages: Vec<crate::ports::PageShot> = shot
@@ -744,7 +854,11 @@ impl Engine {
             }
             let opts = crate::ports::ShotOptions { pages: paths.iter().filter(|p| **p != "/").map(|p| p.to_string()).collect(), hide: hide.to_vec(), ..Default::default() };
             match self.apps.screenshot(&r.id, svc, &opts).await {
-                Ok(Some(shot)) => {
+                Ok(Some(mut shot)) => {
+                    if let Err(e) = self.mask_shot(&r.id, &mut shot).await {
+                        let _ = self.store.log(&r.id, &format!("{svc}'s pages weren't kept: {e}"));
+                        continue;
+                    }
                     if let Some(key) = &key {
                         let _ = self.store.set_service_shot_key(&r.id, svc, key);
                     }
@@ -833,14 +947,27 @@ impl Engine {
     async fn run_job(&self, r: &Row, s: &Settings, vars: &[(String, String)], what: &str, job: &crate::settings::Seed) -> anyhow::Result<()> {
         let untrusted = !(s.secrets.allow_production && r.trusted);
         // Its dynamic credentials last as long as the job does.
-        let (mut env, leases) = self.resolve_secrets(r, untrusted, what).await?;
+        let (mut env, leases, plain) = self.resolve_secrets(r, untrusted, true, what).await?;
+        // Its output becomes the preview's error (a teardown's, the pull request's comment): what
+        // it was given is masked there, as checks' output is.
+        let own: Vec<(String, String)> = project_env(s, r.branch.as_deref()).into_iter().chain(self.store.vars(&r.id)?).collect();
+        let hide = super::masks::secret_values(&env, &plain, &own, vars);
+        self.add_masks(&r.id, hide.clone());
         for (k, v) in vars {
             set(&mut env, k, v.clone());
         }
         set(&mut env, "ROLL_PREVIEW", r.id.clone());
         set(&mut env, "ROLL_REPO", r.repo.clone());
         set(&mut env, "ROLL_CHANGESET", r.build().to_string());
-        let run = crate::ports::SeedJob { preview: r.id.clone(), repo: r.repo.clone(), revision: r.build().to_string(), seed: job.clone(), env };
+        let run = crate::ports::SeedJob {
+            preview: r.id.clone(),
+            repo: r.repo.clone(),
+            revision: r.build().to_string(),
+            seed: job.clone(),
+            env,
+            egress: s.egress_for(r.trusted),
+            egress_hosts: s.egress_hosts.clone(),
+        };
         self.store.log(&r.id, &format!("{what}: {}", job.run.lines().next().unwrap_or("")))?;
         let ran = self.apps.seed(&run).await;
         for l in &leases {
@@ -848,9 +975,9 @@ impl Engine {
                 warn!(preview = %r.id, lease = %l, error = %e, "previews: revoking a job's dynamic credential (it expires by itself)");
             }
         }
-        let (code, tail) = ran.map_err(|e| anyhow::anyhow!("{what}: {e:#}"))?;
+        let (code, tail) = ran.map_err(|e| anyhow::anyhow!("{what}: {}", code_preview::runner::mask(&format!("{e:#}"), &hide)))?;
         if code != 0 {
-            anyhow::bail!("the {what} command failed with exit code {code}\n\n{}", tail.trim_end());
+            anyhow::bail!("the {what} command failed with exit code {code}\n\n{}", code_preview::runner::mask(tail.trim_end(), &hide));
         }
         Ok(())
     }
@@ -1005,7 +1132,14 @@ impl Engine {
         }
         let view = self.store.preview(&r.id)?;
         // The change hears it went, and how its teardown failed if it did.
-        self.source.forget(&view, self.store.teardown_error(&r.id)?.as_deref()).await;
+        let teardown = self.store.teardown_error(&r.id)?;
+        self.source.forget(&view, teardown.as_deref()).await;
+        // A Git URL service's pull request too, unless another project's preview of it speaks
+        // now (it carries the comment on; saying this one went could land after it).
+        let hands_over = matches!(self.refresh_voice(r), Ok((_, false)));
+        if !hands_over && let Ok(s) = self.store.settings(&r.project_id) {
+            self.report_on_git(&view, &s, Some(teardown.as_deref())).await;
+        }
         // What it cost this month stays counted against the project's budget.
         self.store.add_spend(&r.project_id, crate::store::month_start(self.store.now_ms()?), view.cost.month_to_date_usd)?;
         self.store.remove(&r.id)?;
@@ -1014,12 +1148,18 @@ impl Engine {
         }
         self.usage_read.lock().remove(&r.id);
         self.secrets_told.lock().remove(&r.id);
+        self.egress_told.lock().remove(&r.id);
+        self.git_reporting.lock().remove(&r.id);
+        self.forget_masks(&r.id);
         info!(preview = %r.id, "previews: deleted");
         Ok(())
     }
 
     pub(super) async fn report(&self, row: Row) {
         let Ok(s) = self.store.settings(&row.project_id) else { return };
+        // Who speaks for a Git URL service's branch as of now: another project's preview of it
+        // stays on its own sheet (`report_on_git`).
+        let _ = self.refresh_voice(&row);
         if let Ok(mut p) = self.store.view(row) {
             // The open notes, newest first (a few), for the pull request's comment.
             if p.change.is_some() {
@@ -1032,7 +1172,127 @@ impl Engine {
                 }).collect();
             }
             self.source.report(&p, &s).await;
+            self.report_on_git(&p, &s, None).await;
         }
     }
 
+    /// A Git URL service's preview on its repository (Vercel's status and comment): the
+    /// `roll/preview` status on its head and, for a pull request's, the comment edited in place,
+    /// each posted only when it changed (what was posted is kept, so a restart posts nothing new).
+    /// `deleted`: the preview went (its comment says so). Best effort: a failure is logged and
+    /// tried at the next report.
+    pub(super) async fn report_on_git(&self, p: &Preview, s: &crate::Settings, deleted: Option<Option<&str>>) {
+        let (Some(gr), Some(service)) = (self.git_report.get(), p.repo.strip_prefix("git:")) else { return };
+        // Another project speaks for the service: its own preview posts (and says it went).
+        if p.reported_by.is_some() {
+            return;
+        }
+        // One report at a time per preview (what's posted, and the comment's id, read and kept
+        // in turn).
+        let turn = self.git_reporting.lock().entry(p.id.clone()).or_default().clone();
+        let _turn = turn.lock().await;
+        // Only a project that stands for the service speaks for it on its repository (anyone may
+        // put any service on their own canvas: `Workspace::trusts`).
+        let stands = self.workspace.get(roll_workspace::Scope::All, &p.project).is_ok_and(|project| self.workspace.trusts(&project, roll_workspace::Kind::Service, service));
+        if !stands {
+            return;
+        }
+        let Some(mut body) = self.source.git_report_body(p, s, deleted) else { return };
+        // A fork's pull request waits for a writer in roll's sheet (not roll code's
+        // `approve-run`), and nothing of it is linked: it hasn't run.
+        if deleted.is_none() && p.state == State::AwaitingApproval {
+            body.description = "Waiting for a writer to approve running this fork (Approve and run, in roll)".into();
+            body.target_url = None;
+        }
+        let Ok((last_status, comment_id, last_hash)) = self.store.git_report(&p.id) else { return };
+        // The project's own switches, as for a roll code change's (`github.status`, `.comment`).
+        if let Some(state) = body.state.as_ref().filter(|_| s.github.status) {
+            let key = format!("{}:{state}:{}", p.head, body.description);
+            if last_status.as_deref() != Some(key.as_str()) {
+                match gr.status(service, &p.head, state, &body.description, body.target_url.as_deref()).await {
+                    Ok(true) => {
+                        let _ = self.store.set_git_report(&p.id, Some(&key), None);
+                    }
+                    Ok(false) => return,
+                    Err(e) => tracing::warn!(preview = %p.id, error = %e, "previews: a Git URL preview's status"),
+                }
+            }
+        }
+        let Ok(Some(pull)) = self.store.git_pull(&p.id) else { return };
+        if !s.github.comment {
+            return;
+        }
+        // Its repository, as roll apps named it in the pull request's page: the comment's number
+        // and id are that repository's, whatever the service is connected to later.
+        let Some(repo) = pull_repo(&pull.url) else { return };
+        let hash = format!("{:016x}", body.comment.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, x| (h ^ x as u64).wrapping_mul(0x0100_0000_01b3)));
+        if last_hash.as_deref() == Some(hash.as_str()) {
+            return;
+        }
+        // The pull request's comment, whichever project's preview posted it: one per pull request.
+        let comment_id = comment_id.or_else(|| self.store.pull_comment(service, &repo, pull.number).ok().flatten());
+        match gr.comment(service, &repo, pull.number as u64, &body.comment, comment_id.map(|i| i as u64)).await {
+            Ok(Some(id)) => {
+                let _ = self.store.set_git_report(&p.id, None, Some((id as i64, &hash)));
+                let _ = self.store.set_pull_comment(service, &repo, pull.number, id as i64);
+            }
+            Ok(None) => {}
+            Err(e) => tracing::warn!(preview = %p.id, error = %e, "previews: a Git URL preview's pull request comment"),
+        }
+    }
+
+}
+
+impl Engine {
+    /// The project roll code's `POST …/preview` makes a change's preview in, as `(id, name)`: of
+    /// the projects with previews on that stand for `kind r#ref` (`Workspace::trusts`), the one
+    /// that has had it on its canvas longest, then by id.
+    pub fn speaker(&self, kind: roll_workspace::Kind, r#ref: &str) -> Option<(String, String)> {
+        self.workspace
+            .projects_of(kind.as_str(), r#ref)
+            .ok()?
+            .iter()
+            .filter_map(|id| self.workspace.get(roll_workspace::Scope::All, id).ok())
+            .filter(|p| self.workspace.trusts(p, kind, r#ref) && self.store.settings(&p.id).is_ok_and(|s| s.enabled))
+            .filter_map(|p| p.resources.iter().find(|x| x.kind == kind && x.r#ref == r#ref).map(|x| (x.added_at, p.id.clone(), p.name.clone())))
+            .min()
+            .map(|(_, id, name)| (id, name))
+    }
+
+    /// Keeps `row`'s [`crate::Preview::reported_by`] up to date: `(changed, it speaks)`. With no
+    /// speaker at all (its project's previews just turned off) it speaks for itself. Only a Git
+    /// URL service's previews can be quiet: each project with the service on its canvas has its
+    /// own preview of a branch, where a change has one preview (made by its repo's speaker).
+    /// An error (the workspace or the store unread) changes nothing: the voice stored stays.
+    pub(super) fn refresh_voice(&self, row: &Row) -> anyhow::Result<(bool, bool)> {
+        let Some(svc) = row.repo.strip_prefix("git:") else { return Ok((false, true)) };
+        // Of the projects with an active preview of this branch (each stands for the service, or
+        // its preview would be gone), the one that has had the service on its canvas longest:
+        // a project whose rules skip the branch has no preview, so it never silences one that does.
+        let mut speaker: Option<(i64, String, String)> = None;
+        let mut operators = false;
+        for r in self.store.branch_rows(&row.repo, row.branch.as_deref())? {
+            let p = self.workspace.get(roll_workspace::Scope::All, &r.project_id)?;
+            if r.id == row.id {
+                operators = p.owner.is_empty();
+            }
+            let Some(added) = p.resources.iter().find(|x| x.kind == roll_workspace::Kind::Service && x.r#ref == svc).map(|x| x.added_at) else { continue };
+            let key = (added, p.id.clone(), p.name.clone());
+            if speaker.as_ref().is_none_or(|s| key < *s) {
+                speaker = Some(key);
+            }
+        }
+        // Named only on the operator's projects, which see every project: a person's project
+        // never learns another owner's project's name (they're 404s to them).
+        let by = speaker.filter(|(_, id, _)| *id != row.project_id).map(|(_, _, name)| if operators { name } else { "another project".into() });
+        Ok((self.store.set_reported_by(&row.id, by.as_deref())?, by.is_none()))
+    }
+}
+
+/// `owner/name` of a pull request's page (`https://<host>/<owner>/<name>/pull/<n>`).
+fn pull_repo(url: &str) -> Option<String> {
+    let path = url.split_once("://")?.1.split_once('/')?.1;
+    let mut parts = path.split('/');
+    let (owner, name, kind) = (parts.next()?, parts.next()?, parts.next()?);
+    (kind == "pull" && !owner.is_empty() && !name.is_empty()).then(|| format!("{owner}/{name}"))
 }

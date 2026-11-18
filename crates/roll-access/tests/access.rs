@@ -32,9 +32,9 @@ impl Resolver for DefaultBranch {
 }
 
 /// Signed-in people: a cookie `rls_<user>` is that user's session; a user taken out is disabled.
-/// The people accounts knows, and what they've been mailed (`user: subject`).
+/// The people accounts knows, what they've been mailed (`user: subject`), and its SSO connections.
 #[derive(Default)]
-struct People(std::sync::Mutex<std::collections::HashMap<String, roll_auth::SignedIn>>, std::sync::Mutex<Vec<String>>);
+struct People(std::sync::Mutex<std::collections::HashMap<String, roll_auth::SignedIn>>, std::sync::Mutex<Vec<String>>, std::sync::Mutex<std::collections::HashMap<String, roll_auth::SsoTrust>>, std::sync::Mutex<std::collections::HashSet<String>>);
 
 impl People {
     fn add(&self, user: &str, handle: &str) {
@@ -43,6 +43,14 @@ impl People {
     }
     fn remove(&self, user: &str) {
         self.0.lock().unwrap().remove(user);
+    }
+    /// An SSO connection `id` for `issuer` with these proven domains (`None`: removed).
+    fn sso(&self, id: &str, at: Option<(&str, &[&str])>) {
+        let mut all = self.2.lock().unwrap();
+        match at {
+            Some((issuer, verified)) => all.insert(id.into(), roll_auth::SsoTrust { name: "Okta".into(), issuer: issuer.into(), verified: verified.iter().map(|d| d.to_string()).collect() }),
+            None => all.remove(id),
+        };
     }
     fn set_admin(&self, user: &str, admin: bool) {
         if let Some(p) = self.0.lock().unwrap().get_mut(user) {
@@ -66,6 +74,20 @@ impl roll_auth::Sessions for People {
     fn person_now(&self, user: &str) -> Result<Option<roll_auth::SignedIn>, String> {
         Ok(self.0.lock().unwrap().get(user).cloned())
     }
+    /// Everyone's address is `<handle>@acme.test`.
+    fn person_by_email<'a>(&'a self, email: &'a str) -> roll_auth::BoxFuture<'a, Result<Option<roll_auth::SignedIn>, String>> {
+        let p = self.0.lock().unwrap().values().find(|p| format!("{}@acme.test", p.handle) == email.to_lowercase()).cloned();
+        Box::pin(async move { Ok(p) })
+    }
+    fn sso_trust<'a>(&'a self, id: &'a str) -> roll_auth::BoxFuture<'a, Result<Option<roll_auth::SsoTrust>, String>> {
+        let t = self.2.lock().unwrap().get(id).cloned();
+        Box::pin(async move { Ok(t) })
+    }
+    /// Fresh unless the test made the person's sessions stale.
+    fn fresh<'a>(&'a self, user: &'a str, _session: &'a str) -> roll_auth::BoxFuture<'a, Result<bool, String>> {
+        let stale = self.3.lock().unwrap().contains(user);
+        Box::pin(async move { Ok(!stale) })
+    }
     fn admins(&self) -> roll_auth::BoxFuture<'_, Result<Vec<String>, String>> {
         Box::pin(async { Ok(vec!["usr_root".to_string()]) })
     }
@@ -86,7 +108,8 @@ struct Daemon {
 
 /// What the stand-in products saw: the operator's marker and a grant.
 fn seen(ext: &axum::http::Extensions) -> Value {
-    json!({ "operator": roll_auth::Operator::on(ext), "grant": roll_auth::Grant::on(ext).map(|g| g.id.to_string()) })
+    let approved = roll_auth::Approved::on(ext).map(|a| json!({ "id": &*a.id, "by": a.by.iter().map(|b| &**b).collect::<Vec<_>>(), "until": a.until }));
+    json!({ "operator": roll_auth::Operator::on(ext), "grant": roll_auth::Grant::on(ext).map(|g| g.id.to_string()), "approved": approved })
 }
 
 fn postgres() -> Router {
@@ -116,6 +139,7 @@ fn postgres() -> Router {
         .route("/v1/apps/services/{id}/links/{kind}/{ref}", axum::routing::put(|| async { axum::Json(json!({ "ok": true })) }))
         .route("/v1/apps/services/{id}/environments/{env}", axum::routing::put(|| async { axum::Json(json!({ "ok": true })) }))
         .route("/v1/search/clusters/{id}/indices/{index}/search", post(|| async { axum::Json(json!({ "hits": [] })) }))
+        .route("/v1/search/clusters", post(|| async { axum::Json(json!({ "id": "cl_new", "password": "fresh" })) }))
         .route("/v1/search/clusters/{id}/indices", get(|| async { axum::Json(json!([])) }))
         .route("/v1/search/clusters/{id}/request", post(|| async { axum::Json(json!({})) }))
         .route("/v1/search/clusters/{id}/indices/{index}/bulk", post(|body: String| async move { axum::Json(json!({ "lines": body.lines().count() })) }))
@@ -128,6 +152,16 @@ fn postgres() -> Router {
         .route("/v1/secrets/projects/{project}/environments/{env}/imports", axum::routing::put(|| async { axum::Json(json!({})) }))
 }
 
+/// A test daemon's database: Postgres when `ROLL_CODE_TEST_DATABASE` says so, else SQLite with one
+/// reader, not production's four. Every test runs a daemon with two of these at once, so five
+/// connections each ran a gate inside a systemd user unit (1,024 open files) out of descriptors.
+fn test_db(path: std::path::PathBuf, name: &str) -> code_sql::Db {
+    if std::env::var(code_sql::TEST_DATABASE_ENV).is_ok_and(|u| !u.is_empty()) {
+        return code_sql::Db::open_or_test(&code_sql::Target::Sqlite(path), name).unwrap();
+    }
+    code_sql::Db::open_sqlite(&path, code_sql::SqliteOptions { readers: 1, cache_kib: 2048 }).unwrap()
+}
+
 impl Daemon {
     fn new(wait_ms: u64) -> Daemon {
         Daemon::with(wait_ms, |_| {})
@@ -135,7 +169,7 @@ impl Daemon {
 
     fn with(wait_ms: u64, configure: impl FnOnce(&mut Config)) -> Daemon {
         let dir = tempfile::tempdir().unwrap();
-        let ws_db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("workspace.db")), "workspace").unwrap();
+        let ws_db = test_db(dir.path().join("workspace.db"), "workspace");
         let workspace = Arc::new(roll_workspace::Workspace::new(ws_db).unwrap());
         let mut resolvers = Resolvers::default();
         resolvers.by_kind.insert("endpoint", Arc::new(Endpoints));
@@ -144,7 +178,7 @@ impl Daemon {
         // Metadata documents from 127.0.0.1 (the test's own server) are allowed here only.
         let mut config = Config { locked: true, approval_wait: std::time::Duration::from_millis(wait_ms), metadata_allow_private: true, ..Config::default() };
         configure(&mut config);
-        let access = Access::with_db(code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("access.db")), "access").unwrap(), config, resolvers).unwrap();
+        let access = Access::with_db(test_db(dir.path().join("access.db"), "access"), config, resolvers).unwrap();
         let rules = vec![
             roll_auth::Rule { route: "/v1/open", access: roll_auth::Access::Public("a shared link") },
             roll_auth::Rule { route: "/v1/workspace", access: roll_auth::Access::User("a user's own projects") },
@@ -217,6 +251,13 @@ impl Daemon {
         let status = resp.status();
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         (status, serde_json::from_slice(&bytes).unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into())))
+    }
+
+    /// A request roll's MCP server makes for a tool call (its `McpCall` extension), with `token`.
+    async fn via_mcp(&self, token: &str, method: Method, path: &str) -> StatusCode {
+        let mut req = Request::builder().method(method).uri(path).header("authorization", format!("Bearer {token}")).body(Body::empty()).unwrap();
+        req.extensions_mut().insert(roll_access::evaluate::McpCall { tool: "test_tool".into(), args: Arc::new(json!({})), ip: None, elicits: false, client: None, quiet: false });
+        self.router.clone().oneshot(req).await.unwrap().status()
     }
 
     async fn form(&self, path: &str, form: &[(&str, &str)]) -> (StatusCode, Value) {
@@ -648,6 +689,20 @@ async fn approvals_are_posted_to_chat_and_decided_there() {
     let (_, a) = d.call(OPERATOR, Method::GET, &format!("/v1/access/approvals/{id}"), None).await;
     assert_eq!((a["state"].as_str(), a["decided_by"].as_str()), (Some("approved"), Some("slack:U1")));
 
+    // Under a two-person rule a chat press counts only as the account the operator linked it to,
+    // and never for that person's own token's request.
+    let notify = json!({ "chat": { "install": "chi_a", "channel": "C9", "approvers": ["U1", "U3"], "people": { "U1": "usr_ana", "U3": "usr_ben" } } });
+    assert_eq!(d.call(OPERATOR, Method::PUT, "/v1/access/notify", Some(json!({ "chat": { "install": "chi_a", "channel": "C9", "approvers": ["U1"], "people": { "U2": "usr_x" } } }))).await.0, StatusCode::BAD_REQUEST, "people are approvers");
+    assert_eq!(d.call(OPERATOR, Method::PUT, "/v1/access/notify", Some(notify)).await.0, StatusCode::OK);
+    d.call(OPERATOR, Method::PUT, "/v1/access/policy", Some(json!({ "approval_rules": [{ "product": "postgres", "actions": ["delete"], "approvals": 2 }] }))).await;
+    let (_, pending) = d.call(&asker, Method::DELETE, "/v1/projects/pb", None).await;
+    let id = pending["approval"].as_str().unwrap().to_string();
+    d.access.decide_from_chat(id.clone(), true, "slack:U1".into(), "chi_a".into()).await.unwrap();
+    assert!(d.access.decide_from_chat(id.clone(), true, "slack:U1".into(), "chi_a".into()).await.is_err(), "once");
+    d.access.decide_from_chat(id.clone(), true, "slack:U3".into(), "chi_a".into()).await.unwrap();
+    let (_, a) = d.call(OPERATOR, Method::GET, &format!("/v1/access/approvals/{id}"), None).await;
+    assert_eq!((a["state"].as_str(), a["approved_by"].clone()), (Some("approved"), json!(["usr_ana", "usr_ben"])), "{a}");
+
     // Once a day, the tokens about to expire are posted there too.
     d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }]), json!({ "name": "ci-deploy", "expires_at": code_sql::now_ms() + 2 * 86_400_000 })).await;
     assert!(d.access.expiry_digest().await.unwrap());
@@ -735,20 +790,28 @@ async fn oauth_connects_an_mcp_client() {
     assert_eq!(exchange(verifier, code).await.1["error"], "invalid_grant", "a code works once");
     let access = tokens["access_token"].as_str().unwrap().to_string();
     assert!(access.starts_with("rlo_"));
-    assert_eq!(d.call(&access, Method::GET, "/v1/projects", None).await.0, StatusCode::OK);
-    assert_eq!(d.call(&access, Method::DELETE, "/v1/projects/pa", None).await.0, StatusCode::FORBIDDEN);
+    // It asked for the MCP server (RFC 8707), so it works through that server only: the API
+    // directly refuses it (lockdown, the credential guard and a read-only URL can't be stepped
+    // around), and a token request for another resource is refused.
+    assert_eq!(d.via_mcp(&access, Method::GET, "/v1/projects").await, StatusCode::OK);
+    assert_eq!(d.via_mcp(&access, Method::DELETE, "/v1/projects/pa").await, StatusCode::FORBIDDEN);
+    let (s, direct) = d.call(&access, Method::GET, "/v1/projects", None).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED, "{direct}");
+    assert!(direct.to_string().contains("MCP server"), "{direct}");
+    let elsewhere = d.form("/v1/access/oauth/token", &[("grant_type", "authorization_code"), ("code", "x"), ("redirect_uri", redirect), ("client_id", client_id), ("code_verifier", verifier), ("resource", "https://elsewhere.example/mcp")]).await;
+    assert_eq!(elsewhere.1["error"], "invalid_target");
 
     let refresh = tokens["refresh_token"].as_str().unwrap();
     assert_eq!(d.call(refresh, Method::GET, "/v1/projects", None).await.0, StatusCode::UNAUTHORIZED, "a refresh token opens nothing");
     let (s, next) = d.form("/v1/access/oauth/token", &[("grant_type", "refresh_token"), ("refresh_token", refresh), ("client_id", client_id)]).await;
     assert_eq!(s, StatusCode::OK, "{next}");
-    assert_eq!(d.call(next["access_token"].as_str().unwrap(), Method::GET, "/v1/projects", None).await.0, StatusCode::OK);
+    assert_eq!(d.via_mcp(next["access_token"].as_str().unwrap(), Method::GET, "/v1/projects").await, StatusCode::OK);
+    assert_eq!(d.call(next["access_token"].as_str().unwrap(), Method::GET, "/v1/projects", None).await.0, StatusCode::UNAUTHORIZED, "a refresh keeps the audience");
     // A spent refresh token used again: someone else has a copy (OAuth 2.1), so the whole
     // connection is revoked, the fresh tokens with it, and it says why.
     let reuse = d.form("/v1/access/oauth/token", &[("grant_type", "refresh_token"), ("refresh_token", refresh), ("client_id", client_id)]).await;
     assert_eq!(reuse.1["error"], "invalid_grant", "refresh tokens rotate");
-    let (s, _) = d.call(next["access_token"].as_str().unwrap(), Method::GET, "/v1/projects", None).await;
-    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    assert_eq!(d.via_mcp(next["access_token"].as_str().unwrap(), Method::GET, "/v1/projects").await, StatusCode::UNAUTHORIZED);
     let grant = next["grant_id"].as_str().unwrap();
     let (_, g) = d.call(OPERATOR, Method::GET, &format!("/v1/access/tokens/{grant}"), None).await;
     assert!(g["revoked_why"].as_str().is_some_and(|w| w.contains("used again")), "{g}");
@@ -1091,6 +1154,133 @@ async fn a_persons_token_past_the_policy_waits_for_an_admin() {
 /// A signed-in user's own token acts as them (docs/permissions.md, "Users' own tokens"): it
 /// reaches only what their account does, whatever its rules say; they see and manage only their
 /// own tokens and decide their own token's approvals; and it stops when their account does.
+async fn approve_with(d: &Daemon, who: &str, apr: &str, body: Value) -> (StatusCode, Value) {
+    d.as_user(who, Method::POST, &format!("/v1/access/approvals/{apr}/approve"), Some(body)).await
+}
+
+/// A token asks for one more rule for a while, saying why (docs/permissions.md, "Access
+/// requests"): a person approves it, the policy's gates apply, and it's a rule until it lapses.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_token_asks_for_access_for_a_while() {
+    let d = Daemon::new(50);
+    let ask = json!({ "product": "postgres", "action": "delete", "resource": "pa", "for": "1h", "reason": "drop the scratch database I made" });
+    // A token made never to ask a person doesn't ask for more either.
+    let (fixed, _) = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }]), json!({})).await;
+    assert_eq!(d.call(&fixed, Method::POST, "/v1/access/requests", Some(ask.clone())).await.0, StatusCode::FORBIDDEN);
+    let (token, id) = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }, { "product": "workspace", "resources": "*", "actions": { "delete": "ask" } }]), json!({})).await;
+    assert_eq!(d.call(&token, Method::DELETE, "/v1/projects/pa", None).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(d.call(&token, Method::POST, "/v1/access/requests", Some(json!({ "product": "postgres", "action": "delete", "for": "1y", "reason": "x" }))).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(d.call(OPERATOR, Method::POST, "/v1/access/requests", Some(ask.clone())).await.0, StatusCode::BAD_REQUEST, "only a token asks");
+    let tokens = json!({ "product": "access", "action": "admin", "for": "15m", "reason": "let me fix my own rules" });
+    assert_eq!(d.call(&token, Method::POST, "/v1/access/requests", Some(tokens)).await.0, StatusCode::FORBIDDEN, "never tokens and approvals");
+    let (s, apr) = d.call(&token, Method::POST, "/v1/access/requests", Some(ask.clone())).await;
+    assert_eq!((s, apr["state"].as_str(), apr["args"]["reason"].as_str()), (StatusCode::ACCEPTED, Some("pending"), Some("drop the scratch database I made")), "{apr}");
+    assert!(apr["summary"].as_str().is_some_and(|s| s.contains("every environment")), "the person reads its whole reach: {apr}");
+    let apr = apr["id"].as_str().unwrap().to_string();
+    assert_eq!(d.call(&token, Method::POST, "/v1/access/requests", Some(ask)).await.1["id"], json!(apr), "the same request again is the one waiting");
+    // It can't be approved for longer, and a token never decides it.
+    assert_eq!(d.call(OPERATOR, Method::POST, &format!("/v1/access/approvals/{apr}/approve"), Some(json!({ "remember": "always" }))).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(d.call(&token, Method::POST, &format!("/v1/access/approvals/{apr}/approve"), Some(json!({}))).await.0, StatusCode::FORBIDDEN);
+    // Decided anywhere (chat decides through the same call), it's the rule at once.
+    assert_eq!(d.access.decide(&apr, true, "operator", None).unwrap().state, "approved");
+    // Now it may, on that one database, for the hour; never another.
+    assert_eq!(d.call(&token, Method::DELETE, "/v1/projects/pa", None).await.0, StatusCode::OK);
+    assert_eq!(d.call(&token, Method::DELETE, "/v1/projects/pb", None).await.0, StatusCode::FORBIDDEN);
+    let (_, g) = d.call(OPERATOR, Method::GET, &format!("/v1/access/tokens/{id}"), None).await;
+    assert_eq!(g["temporary"][0]["approval"], json!(apr), "{g}");
+
+    // Under a two-person rule, what two people approved is usable: the gate doesn't ask again.
+    d.people.add("usr_bob", "bob");
+    d.call(OPERATOR, Method::PUT, "/v1/access/policy", Some(json!({ "approval_rules": [{ "product": "postgres", "actions": ["delete"], "approvals": 2, "approvers": ["operator", "usr_bob"] }] }))).await;
+    let ask = json!({ "product": "postgres", "action": "delete", "resource": "pc", "for": "15m", "reason": "and this one" });
+    let apr = d.call(&token, Method::POST, "/v1/access/requests", Some(ask)).await.1["id"].as_str().unwrap().to_string();
+    assert_eq!(d.access.decide(&apr, true, "operator", None).unwrap().state, "pending");
+    assert_eq!(d.access.decide(&apr, true, "usr_bob", None).unwrap().state, "approved");
+    assert_eq!(d.call(&token, Method::DELETE, "/v1/projects/pc", None).await.0, StatusCode::OK);
+    // And the one approved by one person before the gate asks again.
+    assert_eq!(d.call(&token, Method::DELETE, "/v1/projects/pa", None).await.1["code"], "approval_pending");
+}
+
+/// What roll's policy names needs several people (docs/permissions.md, "Two-person approvals"):
+/// each approves once, the person whose token asked never counts, it stays pending until there
+/// are enough, it's never remembered, and the product is told who approved it.
+#[tokio::test(flavor = "multi_thread")]
+async fn two_people_approve_what_the_policy_names() {
+    let d = Daemon::new(50);
+    for (u, h) in [("usr_alice", "alice"), ("usr_bob", "bob"), ("usr_carol", "carol")] {
+        d.people.add(u, h);
+    }
+    d.people.set_admin("usr_bob", true);
+    d.people.set_admin("usr_carol", true);
+    let policy = |rules: Value| {
+        let d = &d;
+        async move { d.call(OPERATOR, Method::PUT, "/v1/access/policy", Some(json!({ "approval_rules": rules }))).await }
+    };
+    assert_eq!(policy(json!([{ "product": "postgres", "approvals": 2, "approvers": ["usr_bob"] }])).await.0, StatusCode::BAD_REQUEST, "two approvals from one approver");
+    assert_eq!(policy(json!([{ "product": "nope", "approvals": 2 }])).await.0, StatusCode::BAD_REQUEST);
+    let (s, p) = policy(json!([{ "product": "postgres", "actions": ["delete"], "approvals": 2 }])).await;
+    assert_eq!(s, StatusCode::OK, "{p}");
+
+    let (token, _) = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "delete": "ask" } }]), json!({})).await;
+    let apr = d.call(&token, Method::DELETE, "/v1/projects/pa", None).await.1["approval"].as_str().unwrap().to_string();
+    let approve = |who: &'static str, body: Value| {
+        let (d, apr) = (&d, apr.clone());
+        async move { d.as_user(who, Method::POST, &format!("/v1/access/approvals/{apr}/approve"), Some(body)).await }
+    };
+    // The operator's token isn't one person: it counts only where a rule names it.
+    let (s, e) = d.call(OPERATOR, Method::POST, &format!("/v1/access/approvals/{apr}/approve"), Some(json!({}))).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{e}");
+    // One person isn't enough, and approves once; it can't be remembered.
+    let (s, a) = approve("usr_bob", json!({})).await;
+    assert_eq!((s, a["state"].as_str(), a["approved_by"].clone()), (StatusCode::OK, Some("pending"), json!(["usr_bob"])), "{a}");
+    assert_eq!(a["gates"], json!([{ "approvals": 2, "approved": 1 }]), "what it still needs");
+    // An admin acts as the operator and is still named (the page knows they've approved).
+    let (_, me) = d.as_user("usr_bob", Method::GET, "/v1/access", None).await;
+    assert_eq!((me["kind"].as_str(), me["user"]["id"].as_str()), (Some("operator"), Some("usr_bob")), "{me}");
+    assert_eq!(approve("usr_bob", json!({})).await.0, StatusCode::CONFLICT);
+    assert_eq!(approve("usr_carol", json!({ "remember": "1h" })).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(d.send(&token, Method::DELETE, "/v1/projects/pa", None, &[("x-roll-approval", &apr)]).await.1["code"], "approval_pending");
+    // The second: it runs, and the product hears both.
+    let (s, a) = approve("usr_carol", json!({})).await;
+    assert_eq!((s, a["state"].as_str()), (StatusCode::OK, Some("approved")), "{a}");
+    let (s, ran) = d.send(&token, Method::DELETE, "/v1/projects/pa", None, &[("x-roll-approval", &apr)]).await;
+    assert_eq!((s, ran["approved"]["by"].clone()), (StatusCode::OK, json!(["usr_bob", "usr_carol"])), "{ran}");
+
+    // A rule remembered for a while before a gate covered it asks again: the gate isn't skipped.
+    policy(json!([])).await;
+    let apr = d.call(&token, Method::DELETE, "/v1/projects/pr", None).await.1["approval"].as_str().unwrap().to_string();
+    assert_eq!(approve_with(&d, "usr_bob", &apr, json!({ "remember": "1h" })).await.0, StatusCode::OK);
+    assert_eq!(d.call(&token, Method::DELETE, "/v1/projects/pr", None).await.0, StatusCode::OK, "remembered");
+    policy(json!([{ "product": "postgres", "actions": ["delete"], "approvals": 2 }])).await;
+    assert_eq!(d.call(&token, Method::DELETE, "/v1/projects/pr", None).await.1["code"], "approval_pending", "a gate came since");
+    // Denied after one approval: denied.
+    let apr = d.call(&token, Method::DELETE, "/v1/projects/pd", None).await.1["approval"].as_str().unwrap().to_string();
+    approve_with(&d, "usr_bob", &apr, json!({})).await;
+    assert_eq!(d.as_user("usr_carol", Method::POST, &format!("/v1/access/approvals/{apr}/deny"), Some(json!({}))).await.1["state"], "denied");
+
+    // Named approvers: only they count, and a named person who isn't an admin sees and decides it.
+    policy(json!([{ "product": "postgres", "actions": ["delete"], "approvals": 1, "approvers": ["usr_carol", "usr_alice"] }])).await;
+    let apr = d.call(&token, Method::DELETE, "/v1/projects/pb", None).await.1["approval"].as_str().unwrap().to_string();
+    let (s, e) = d.as_user("usr_bob", Method::POST, &format!("/v1/access/approvals/{apr}/approve"), Some(json!({}))).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{e}");
+    assert!(e["error"].as_str().is_some_and(|m| m.contains("usr_carol")), "{e}");
+    let (_, hers) = d.as_user("usr_alice", Method::GET, "/v1/access/approvals?state=pending", None).await;
+    assert!(hers.as_array().unwrap().iter().any(|x| x["id"] == json!(apr)), "{hers}");
+    assert_eq!(d.as_user("usr_alice", Method::POST, &format!("/v1/access/approvals/{apr}/approve"), Some(json!({}))).await.1["state"], "approved");
+
+    // A person's own token: someone else approves its request, never them.
+    policy(json!([{ "product": "workspace", "actions": ["delete"], "approvals": 1 }])).await;
+    let rules = json!([{ "product": "workspace", "resources": "*", "actions": { "write": "allow", "delete": "ask" } }]);
+    let (_, made) = d.as_user("usr_alice", Method::POST, "/v1/access/tokens", Some(json!({ "name": "agent", "rules": rules }))).await;
+    let hers = made["token"].as_str().unwrap().to_string();
+    let (_, p) = d.call(&hers, Method::POST, "/v1/workspace/projects", Some(json!({ "name": "scratch" }))).await;
+    let (_, asked) = d.call(&hers, Method::DELETE, &format!("/v1/workspace/projects/{}", p["id"].as_str().unwrap()), None).await;
+    let apr = asked["approval"].as_str().unwrap_or_else(|| panic!("{asked}")).to_string();
+    let (s, e) = d.as_user("usr_alice", Method::POST, &format!("/v1/access/approvals/{apr}/approve"), Some(json!({}))).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{e}");
+    assert_eq!(d.as_user("usr_bob", Method::POST, &format!("/v1/access/approvals/{apr}/approve"), Some(json!({}))).await.1["state"], "approved");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_users_token_acts_as_them() {
     let d = Daemon::new(50);
@@ -1285,11 +1475,21 @@ async fn approvals_can_be_remembered() {
     };
     assert_eq!(approve(apr.clone(), json!("forever")).await.0, StatusCode::BAD_REQUEST, "nothing is decided");
     assert_eq!(approve(apr.clone(), json!("1h")).await.0, StatusCode::OK);
-    assert_eq!(d.send(&token, Method::DELETE, "/v1/projects/pa", None, &[("x-roll-approval", &apr)]).await.0, StatusCode::OK);
+    // The product is told which approval let the request run, who decided it and, for a
+    // remembered rule, until when (its audit names them).
+    let (s, ran) = d.send(&token, Method::DELETE, "/v1/projects/pa", None, &[("x-roll-approval", &apr)]).await;
+    assert_eq!((s, ran["approved"]["id"].as_str(), ran["approved"]["by"][0].as_str()), (StatusCode::OK, Some(apr.as_str()), Some("operator")), "{ran}");
     let hour = apr.clone();
     // For an hour: the same request runs without asking; another project still asks.
-    assert_eq!(ask("pa").await.0, StatusCode::OK);
-    assert_eq!(ask("pb").await.1["code"], "approval_pending");
+    let (s, ran) = ask("pa").await;
+    assert_eq!((s, ran["approved"]["id"].as_str(), ran["approved"]["until"].is_i64()), (StatusCode::OK, Some(hour.as_str()), true), "{ran}");
+    let (_, pending) = ask("pb").await;
+    assert_eq!(pending["code"], "approval_pending");
+    // Approved once: that request alone (no until).
+    let once = pending["approval"].as_str().unwrap().to_string();
+    assert_eq!(d.call(OPERATOR, Method::POST, &format!("/v1/access/approvals/{once}/approve"), Some(json!({}))).await.0, StatusCode::OK);
+    let (s, ran) = d.send(&token, Method::DELETE, "/v1/projects/pb", None, &[("x-roll-approval", &once)]).await;
+    assert_eq!((s, ran["approved"]["id"].as_str(), ran["approved"]["until"].is_null()), (StatusCode::OK, Some(once.as_str()), true), "{ran}");
     // A while never becomes for good through a token it makes.
     let child = json!({ "name": "child", "rules": [{ "product": "postgres", "resources": [{ "id": "pa" }], "actions": { "delete": "allow" } }] });
     assert_eq!(d.call(&token, Method::POST, "/v1/access/tokens", Some(child)).await.0, StatusCode::FORBIDDEN);
@@ -1416,6 +1616,40 @@ async fn a_machine_client_trades_its_credential_for_a_token_its_rules_bound() {
     assert_eq!(search(token.clone()).await, StatusCode::OK);
     assert_eq!(d.call(&token, Method::GET, "/v1/secrets/projects/prj_a/transit", None).await.0, StatusCode::FORBIDDEN, "only what its rules allow");
     assert_eq!(d.call(&token, Method::GET, "/v1/access/clients", None).await.0, StatusCode::FORBIDDEN, "a client never manages clients");
+    // A token can be asked for narrower: scope=read-only keeps only its rules' reads.
+    let wide = json!([{ "product": "workspace", "resources": "*", "actions": { "read": "allow", "write": "allow" } }]);
+    let (_, w) = d.call(OPERATOR, Method::POST, "/v1/access/clients", Some(json!({ "name": "wide", "rules": wide }))).await;
+    let (wid, wsecret) = (w["client_id"].as_str().unwrap().to_string(), w["client_secret"].as_str().unwrap().to_string());
+    let trade = |scope: &'static str| {
+        let (d, wid, wsecret) = (&d, wid.clone(), wsecret.clone());
+        async move { d.form("/v1/access/oauth/token", &[("grant_type", "client_credentials"), ("client_id", &wid), ("client_secret", &wsecret), ("scope", scope)]).await }
+    };
+    let (_, ro) = trade("read-only").await;
+    assert_eq!(ro["scope"], "read-only", "{ro}");
+    let ro = ro["access_token"].as_str().unwrap().to_string();
+    assert_eq!(d.call(&ro, Method::GET, "/v1/workspace/projects", None).await.0, StatusCode::OK);
+    assert_eq!(d.call(&ro, Method::POST, "/v1/workspace/projects", Some(json!({ "name": "nope" }))).await.0, StatusCode::FORBIDDEN, "read-only can't write");
+    let full = trade("granted").await.1["access_token"].as_str().unwrap().to_string();
+    assert_eq!(d.call(&full, Method::POST, "/v1/workspace/projects", Some(json!({ "name": "yes" }))).await.0, StatusCode::CREATED, "its rules otherwise");
+    assert_eq!(trade("full").await.1["error"], "invalid_scope", "never wider");
+    // Each sign-in is in the audit log on the client's grant: who, with what (never a secret);
+    // and its making is too, named for what it was.
+    let wgrant = w["grant"]["id"].as_str().unwrap().to_string();
+    // (Audit rows are written off the request: wait for the making's too, not only the sign-ins.)
+    let log = d
+        .audit_until(&format!("/v1/access/audit?grant={wgrant}"), |l| {
+            let rows = l.as_array().unwrap();
+            rows.iter().filter(|e| e["decision"] == "sign_in").count() >= 2 && rows.iter().any(|e| e["decision"] == "create_client")
+        })
+        .await;
+    let sign_in = log.as_array().unwrap().iter().find(|e| e["decision"] == "sign_in").unwrap();
+    assert_eq!((sign_in["args"]["by"].as_str(), sign_in["args"]["credential"].as_str()), (Some(wid.as_str()), Some("secret")), "{sign_in}");
+    assert!(!log.to_string().contains(&wsecret), "no secret in the log");
+    assert!(log.as_array().unwrap().iter().any(|e| e["decision"] == "create_client"), "{log}");
+    // The list says when it last signed in (never, for one that hasn't).
+    let (_, list) = d.call(OPERATOR, Method::GET, "/v1/access/clients", None).await;
+    let seen = |c: &str| list.as_array().unwrap().iter().find(|e| e["client_id"] == c).map(|e| e["last_sign_in"].is_i64());
+    assert_eq!((seen(&wid), seen(&id)), (Some(true), Some(true)), "{list}");
     // Its id is no ordinary OAuth client's: no device or consent flow may hang another grant on
     // it (someone else's, which its sign-ins could then land on).
     let (s, e) = d.form("/v1/access/oauth/device_authorization", &[("client_id", &id)]).await;
@@ -1442,6 +1676,10 @@ async fn a_machine_client_trades_its_credential_for_a_token_its_rules_bound() {
     assert_eq!(s, StatusCode::OK, "{signed}");
     assert_eq!(search(signed["access_token"].as_str().unwrap().to_string()).await, StatusCode::OK);
     assert_eq!(assert_with(jwt).await.0, StatusCode::UNAUTHORIZED, "a replayed assertion");
+    // The checkup nudges a client on a secret toward a key (or CI's own identity), not one on a key.
+    let (_, check) = d.call(OPERATOR, Method::GET, "/v1/access/checkup", None).await;
+    let kinds = |grant: &Value| check.as_array().unwrap().iter().find(|c| c["grant"]["id"] == *grant).map(|c| c["findings"].as_array().unwrap().iter().map(|f| f["kind"].as_str().unwrap().to_string()).collect::<Vec<_>>()).unwrap_or_default();
+    assert!(kinds(&made["grant"]["id"]).contains(&"secret_client".to_string()) && !kinds(&keyed["grant"]["id"]).contains(&"secret_client".to_string()), "{check}");
 
     // Rotated, it keeps its id: kept a minute, the old secret works beside the new one; rotated
     // again keeping nothing, the old ones stop at once, and so do the tokens they got.
@@ -1470,6 +1708,89 @@ async fn a_machine_client_trades_its_credential_for_a_token_its_rules_bound() {
     // Revoking one by hand does the same.
     assert_eq!(d.call(OPERATOR, Method::DELETE, &format!("/v1/access/clients/{kid}"), None).await.0, StatusCode::OK);
     assert_eq!(search(signed["access_token"].as_str().unwrap().to_string()).await, StatusCode::UNAUTHORIZED);
+}
+
+/// A machine client can trust CI's own OIDC token instead of holding a credential (trusted
+/// publishing): a token from its repository and branch signs in for an hour's token within its
+/// rules; anyone else's, another audience, an expired one or one another key signed doesn't, and a
+/// shared issuer's identity must name one repository.
+#[tokio::test]
+async fn a_ci_job_signs_in_with_its_own_oidc_token() {
+    use base64::Engine;
+    use ring::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair, KeyPair};
+    let d = Daemon::new(50);
+    let rng = ring::rand::SystemRandom::new();
+    let pair = |rng: &ring::rand::SystemRandom| {
+        let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, rng).unwrap();
+        let point = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8.as_ref(), rng).unwrap().public_key().as_ref().to_vec();
+        (pkcs8.as_ref().to_vec(), point)
+    };
+    let (ci_key, ci_point) = pair(&rng);
+    let (other_key, _) = pair(&rng);
+    let b64 = |b: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b);
+    // GitHub's issuer, its keys pinned (no fetch in a test).
+    let jwks = json!({ "keys": [{ "kty": "EC", "crv": "P-256", "kid": "gh1", "x": b64(&ci_point[1..33]), "y": b64(&ci_point[33..]) }] }).to_string();
+    let gh = "https://token.actions.githubusercontent.com";
+    let rules = json!([{ "product": "search", "resources": [{ "id": "cl_1" }], "actions": { "read": "allow" } }]);
+    let open = json!({ "name": "deploy", "rules": rules, "oidc": { "issuer": gh, "subject": "repo:*", "jwks": jwks } });
+    assert_eq!(d.call(OPERATOR, Method::POST, "/v1/access/clients", Some(open)).await.0, StatusCode::BAD_REQUEST, "a shared issuer's identity names one repository");
+    let body = json!({ "name": "deploy", "rules": rules, "oidc": { "issuer": gh, "subject": "repo:acme/web:ref:refs/heads/main", "claims": { "repository_owner_id": "42" }, "jwks": jwks } });
+    let (s, made) = d.call(OPERATOR, Method::POST, "/v1/access/clients", Some(body)).await;
+    assert!(s == StatusCode::CREATED && made.get("client_secret").is_none(), "{made}");
+    let id = made["client_id"].as_str().unwrap().to_string();
+    let (_, list) = d.call(OPERATOR, Method::GET, "/v1/access/clients", None).await;
+    let trusts = &list.as_array().unwrap().iter().find(|c| c["client_id"] == id.as_str()).unwrap()["trusts"];
+    assert_eq!((trusts["subject"].as_str(), trusts["pinned_keys"].as_u64()), (Some("repo:acme/web:ref:refs/heads/main"), Some(1)), "{trusts}");
+    let aud = trusts["audience"].as_str().unwrap().to_string();
+
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+    let mint = |key: &[u8], claims: Value| {
+        let mut h = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256);
+        h.kid = Some("gh1".into());
+        jsonwebtoken::encode(&h, &claims, &jsonwebtoken::EncodingKey::from_ec_der(key)).unwrap()
+    };
+    let claims = |sub: &str, aud: &str, exp: i64| json!({ "iss": gh, "sub": sub, "aud": aud, "exp": exp, "iat": now, "repository_owner_id": "42" });
+    let sign_in = |jwt: String| {
+        let (d, id) = (&d, id.clone());
+        async move { d.form("/v1/access/oauth/token", &[("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"), ("client_id", &id), ("assertion", &jwt)]).await }
+    };
+    let (s, got) = sign_in(mint(&ci_key, claims("repo:acme/web:ref:refs/heads/main", &aud, now + 300))).await;
+    assert_eq!(s, StatusCode::OK, "{got}");
+    let token = got["access_token"].as_str().unwrap().to_string();
+    assert_eq!(d.call(&token, Method::POST, "/v1/search/clusters/cl_1/indices/logs/search", Some(json!({}))).await.0, StatusCode::OK);
+    assert_eq!(d.call(&token, Method::GET, "/v1/secrets/projects/prj_a/transit", None).await.0, StatusCode::FORBIDDEN, "only what its rules allow");
+    // The audit log says which CI run signed in: the token's subject, never the token.
+    let grant = made["grant"]["id"].as_str().unwrap();
+    let log = d.audit_until(&format!("/v1/access/audit?grant={grant}"), |l| l.as_array().unwrap().iter().any(|e| e["decision"] == "sign_in")).await;
+    let row = log.as_array().unwrap().iter().find(|e| e["decision"] == "sign_in").unwrap();
+    assert_eq!((row["args"]["credential"].as_str(), row["args"]["subject"].as_str()), (Some("oidc"), Some("repo:acme/web:ref:refs/heads/main")), "{row}");
+
+    for (why, jwt) in [
+        ("another repository", mint(&ci_key, claims("repo:evil/web:ref:refs/heads/main", &aud, now + 300))),
+        ("another branch", mint(&ci_key, claims("repo:acme/web:ref:refs/heads/dev", &aud, now + 300))),
+        ("another audience", mint(&ci_key, claims("repo:acme/web:ref:refs/heads/main", "https://elsewhere.example", now + 300))),
+        ("expired", mint(&ci_key, claims("repo:acme/web:ref:refs/heads/main", &aud, now - 600))),
+        ("another key", mint(&other_key, claims("repo:acme/web:ref:refs/heads/main", &aud, now + 300))),
+    ] {
+        let (s, e) = sign_in(jwt).await;
+        assert_eq!((s, e["error"].as_str()), (StatusCode::BAD_REQUEST, Some("invalid_grant")), "{why}: {e}");
+    }
+}
+
+/// A refusal says where a person can allow it: the token's own page with the refused rule
+/// proposed (product, action, the resource), which they decide on; nothing widens by itself.
+#[tokio::test]
+async fn a_refusal_links_to_where_a_person_can_allow_it() {
+    let d = Daemon::new(50);
+    let (token, id) = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }]), json!({})).await;
+    let (s, e) = d.call(&token, Method::DELETE, "/v1/projects/prj_a", None).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let widen = url::Url::parse(e["widen"].as_str().unwrap_or_else(|| panic!("{e}"))).unwrap();
+    let q: std::collections::HashMap<String, String> = widen.query_pairs().into_owned().collect();
+    assert!(widen.path().ends_with(&format!("/dashboard/access/tokens/{id}")), "{widen}");
+    assert_eq!((q.get("add").map(String::as_str), q.get("id").map(String::as_str)), (Some("postgres:delete"), Some("prj_a")), "{widen}");
+    // Its token stays as it was: the link only proposes.
+    assert_eq!(d.call(&token, Method::DELETE, "/v1/projects/prj_a", None).await.0, StatusCode::FORBIDDEN);
 }
 
 /// A person's own machine client acts as them, as their tokens do: within their account's reach,
@@ -1656,6 +1977,26 @@ async fn a_link_needs_reveal_on_what_it_links() {
     assert_eq!(asked["resource"], "prj_y, prj_z", "{asked}");
     let (s, _) = d.call(OPERATOR, Method::POST, &format!("/v1/access/approvals/{apr}/approve"), Some(json!({ "remember": "1h" }))).await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
+}
+
+/// A search cluster made with a `parent` is a branch of it, a copy of its indices: it needs `write`
+/// on the parent too, as `…/{id}/branches` does, so a token for one project's clusters can't
+/// branch (and read) any other cluster.
+#[tokio::test]
+async fn a_search_branch_by_parent_needs_write_on_the_parent() {
+    let d = Daemon::new(50);
+    let project = d.workspace.create("", "app", "", None).unwrap();
+    let mine = json!({ "product": "search", "resources": [{ "project": project.id }], "actions": { "write": "allow" } });
+    let (scoped, _) = d.token(json!([mine.clone()]), json!({})).await;
+    let create = |t: &str, body: Value| {
+        let (d, t, p) = (&d, t.to_string(), project.id.clone());
+        async move { d.send(&t, Method::POST, "/v1/search/clusters", Some(body), &[("x-roll-project", &p)]).await }
+    };
+    assert_eq!(create(&scoped, json!({ "name": "fresh" })).await.0, StatusCode::OK);
+    let (s, e) = create(&scoped, json!({ "name": "copy", "parent": "cl_9" })).await;
+    assert_eq!((s, e["needs"]["action"].as_str(), e["needs"]["resource"].as_str()), (StatusCode::FORBIDDEN, Some("write"), Some("cl_9")), "{e}");
+    let (both, _) = d.token(json!([mine, { "product": "search", "resources": [{ "id": "cl_9" }], "actions": { "write": "allow" } }]), json!({})).await;
+    assert_eq!(create(&both, json!({ "name": "copy", "parent": "cl_9" })).await.0, StatusCode::OK);
 }
 
 /// What the gate costs a request: a token's request against the same one by the operator (no
@@ -1922,4 +2263,250 @@ async fn registration_from_one_network_is_limited() {
     }
     let (s, e) = register().await;
     assert_eq!((s, e["error"].as_str()), (StatusCode::TOO_MANY_REQUESTS, Some("too_many_requests")), "{e}");
+}
+
+/// A company's identity provider signs a person in to an app (SEP-990, the ID-JAG grant): the app
+/// authenticates, the provider's assertion names the person, and the token acts as them within
+/// the app's rules. Replays, another client's assertion, another audience and an unknown person
+/// are refused; removing the app ends its people's tokens.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_enterprise_idp_signs_a_person_in_to_an_app() {
+    use base64::Engine;
+    use ring::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair, KeyPair};
+    let d = Daemon::new(50);
+    d.people.add("usr_alice", "alice");
+    d.people.add("usr_bob", "bob");
+    d.people.add("usr_root", "root");
+    d.people.set_admin("usr_root", true);
+    let rng = ring::rand::SystemRandom::new();
+    let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng).unwrap();
+    let point = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8.as_ref(), &rng).unwrap().public_key().as_ref().to_vec();
+    let b64 = |b: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b);
+    let jwks = json!({ "keys": [{ "kty": "EC", "crv": "P-256", "kid": "okta1", "x": b64(&point[1..33]), "y": b64(&point[33..]) }] }).to_string();
+    let okta = "https://acme.okta.example";
+    assert_eq!(d.call(OPERATOR, Method::PUT, "/v1/access/enterprise/idps", Some(json!({ "idps": [{ "issuer": "http://acme.okta.example", "jwks": jwks }] }))).await.0, StatusCode::BAD_REQUEST, "an https issuer");
+    assert_eq!(d.call(OPERATOR, Method::PUT, "/v1/access/enterprise/idps", Some(json!({ "idps": [{ "issuer": okta, "jwks": jwks }] }))).await.0, StatusCode::BAD_REQUEST, "email matching names its domains");
+    let trust = |admins: bool| {
+        let (d, jwks) = (&d, jwks.clone());
+        async move { d.call(OPERATOR, Method::PUT, "/v1/access/enterprise/idps", Some(json!({ "idps": [{ "issuer": okta, "jwks": jwks, "name": "Okta", "domains": ["acme.test"], "admins": admins }] }))).await.0 }
+    };
+    assert_eq!(trust(false).await, StatusCode::OK);
+    let rules = json!([{ "product": "workspace", "resources": "*", "actions": { "read": "allow", "write": "allow" } }]);
+    let (s, app) = d.call(OPERATOR, Method::POST, "/v1/access/enterprise/apps", Some(json!({ "name": "Claude", "rules": rules }))).await;
+    assert_eq!(s, StatusCode::CREATED, "{app}");
+    let (client_id, secret) = (app["client_id"].as_str().unwrap().to_string(), app["client_secret"].as_str().unwrap().to_string());
+    let (_, listed) = d.call(OPERATOR, Method::GET, "/v1/access/enterprise", None).await;
+    assert!(listed["apps"][0].get("client_secret").is_none() && listed["apps"][0].get("secret_hash").is_none(), "never its secret: {listed}");
+
+    let api = d.access.config.api_url.trim_end_matches('/').to_string();
+    assert_eq!((listed["audience"].as_str(), listed["token_endpoint"].as_str()), (Some(api.as_str()), Some(format!("{api}/v1/access/oauth/token").as_str())), "what the provider is set up with");
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+    let idjag = |claims: Value| {
+        let mut h = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256);
+        h.kid = Some("okta1".into());
+        h.typ = Some("oauth-id-jag+jwt".into());
+        jsonwebtoken::encode(&h, &claims, &jsonwebtoken::EncodingKey::from_ec_der(pkcs8.as_ref())).unwrap()
+    };
+    let claims = |jti: &str, email: &str, aud: &str, client: &str| json!({ "iss": okta, "sub": "00u1alice", "aud": aud, "client_id": client, "jti": jti, "exp": now + 300, "iat": now, "email": email, "email_verified": true, "resource": api });
+    let sign_in = |assertion: String, secret: String| {
+        let (d, id) = (&d, client_id.clone());
+        async move { d.form("/v1/access/oauth/token", &[("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"), ("assertion", &assertion), ("client_id", &id), ("client_secret", &secret)]).await }
+    };
+    let (s, got) = sign_in(idjag(claims("j1", "alice@acme.test", &api, &client_id)), secret.clone()).await;
+    assert_eq!((s, got.get("refresh_token")), (StatusCode::OK, None), "{got}");
+    let token = got["access_token"].as_str().unwrap().to_string();
+    let (_, me) = d.call(&token, Method::GET, "/v1/access", None).await;
+    assert_eq!((me["grant"]["user"].as_str(), me["grant"]["created_by"].as_str()), (Some("usr_alice"), Some(format!("enterprise:{okta}").as_str())), "it acts as alice: {me}");
+    assert_eq!(d.call(&token, Method::POST, "/v1/workspace/projects", Some(json!({ "name": "from-claude" }))).await.0, StatusCode::CREATED);
+    // An assertion for roll's MCP server alone: its token works through that server, never on the
+    // API directly (draft -06: the token is held to the assertion's resources).
+    let mut for_mcp = claims("j40", "alice@acme.test", &api, &client_id);
+    for_mcp["resource"] = json!(format!("{api}/v1/mcp"));
+    let (_, mcp_only) = sign_in(idjag(for_mcp), secret.clone()).await;
+    let mcp_token = mcp_only["access_token"].as_str().unwrap_or_else(|| panic!("{mcp_only}")).to_string();
+    assert_eq!(d.via_mcp(&mcp_token, Method::GET, "/v1/workspace/projects").await, StatusCode::OK);
+    assert_eq!(d.call(&mcp_token, Method::GET, "/v1/workspace/projects", None).await.0, StatusCode::UNAUTHORIZED, "the MCP server's only");
+    // Refusals: a replay, the wrong secret, no client authentication, another client's assertion,
+    // another audience, someone with no account.
+    assert_eq!(sign_in(idjag(claims("j1", "alice@acme.test", &api, &client_id)), secret.clone()).await.1["error"], "invalid_grant");
+    assert_eq!(sign_in(idjag(claims("j2", "alice@acme.test", &api, &client_id)), "rlc_wrong".into()).await.1["error"], "invalid_client");
+    let bare = d.form("/v1/access/oauth/token", &[("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"), ("assertion", &idjag(claims("j3", "alice@acme.test", &api, &client_id)))]).await;
+    assert_eq!(bare.1["error"], "invalid_client", "{bare:?}");
+    assert_eq!(sign_in(idjag(claims("j4", "alice@acme.test", &api, "ent_other")), secret.clone()).await.1["error"], "invalid_grant");
+    assert_eq!(sign_in(idjag(claims("j5", "alice@acme.test", "https://elsewhere.example", &client_id)), secret.clone()).await.1["error"], "invalid_grant");
+    assert_eq!(sign_in(idjag(claims("j6", "mallory@acme.test", &api, &client_id)), secret.clone()).await.1["error"], "access_denied");
+    // An email the provider didn't say it verified, or outside its domains: no.
+    let mut unverified = claims("j8", "alice@acme.test", &api, &client_id);
+    unverified.as_object_mut().unwrap().remove("email_verified");
+    assert_eq!(sign_in(idjag(unverified), secret.clone()).await.1["error"], "access_denied");
+    assert_eq!(sign_in(idjag(claims("j9", "alice@elsewhere.test", &api, &client_id)), secret.clone()).await.1["error"], "access_denied");
+    // An admin acts as the operator: only from a provider the operator lets sign admins in.
+    assert_eq!(sign_in(idjag(claims("j10", "root@acme.test", &api, &client_id)), secret.clone()).await.1["error"], "access_denied");
+    trust(true).await;
+    assert_eq!(sign_in(idjag(claims("j11", "root@acme.test", &api, &client_id)), secret.clone()).await.0, StatusCode::OK);
+    trust(false).await;
+    // The same provider as people's SSO connection: its issuer, and the domains its DNS records
+    // proved, as they are at each sign-in (never typed domains).
+    let tie = |idp: Value| {
+        let d = &d;
+        async move { d.call(OPERATOR, Method::PUT, "/v1/access/enterprise/idps", Some(json!({ "idps": [idp] }))).await.0 }
+    };
+    d.people.sso("sso_okta", Some((okta, &["acme.test"])));
+    d.people.sso("sso_other", Some(("https://other.example", &["acme.test"])));
+    assert_eq!(tie(json!({ "issuer": okta, "jwks": jwks, "sso": "sso_nope" })).await, StatusCode::BAD_REQUEST, "no such connection");
+    assert_eq!(tie(json!({ "issuer": okta, "jwks": jwks, "sso": "sso_other" })).await, StatusCode::BAD_REQUEST, "another issuer's connection");
+    assert_eq!(tie(json!({ "issuer": okta, "jwks": jwks, "sso": "sso_okta", "domains": ["acme.test"] })).await, StatusCode::BAD_REQUEST, "its domains are the connection's");
+    assert_eq!(tie(json!({ "issuer": okta, "jwks": jwks, "sso": "sso_okta" })).await, StatusCode::OK);
+    assert_eq!(sign_in(idjag(claims("j50", "alice@acme.test", &api, &client_id)), secret.clone()).await.0, StatusCode::OK);
+    d.people.sso("sso_okta", Some((okta, &[])));
+    assert_eq!(sign_in(idjag(claims("j51", "alice@acme.test", &api, &client_id)), secret.clone()).await.1["error"], "access_denied", "the domain's proof is gone");
+    d.people.sso("sso_okta", None);
+    assert_eq!(sign_in(idjag(claims("j52", "alice@acme.test", &api, &client_id)), secret.clone()).await.1["error"], "access_denied", "the connection is gone");
+    trust(false).await;
+    // Exactly one audience (draft-ietf-oauth-identity-assertion-authz-grant-06 §4.4.1): an array
+    // of one is roll's, a second audience is refused.
+    let mut two = claims("j30", "alice@acme.test", &api, &client_id);
+    two["aud"] = json!([api, "https://elsewhere.example"]);
+    assert_eq!(sign_in(idjag(two), secret.clone()).await.1["error"], "invalid_grant", "two audiences");
+    let mut one = claims("j31", "alice@acme.test", &api, &client_id);
+    one["aud"] = json!([api]);
+    assert_eq!(sign_in(idjag(one), secret.clone()).await.0, StatusCode::OK, "an array of one");
+    // A multi-tenant issuer: trusted with one tenant, never its others; an assertion naming a
+    // tenant from a provider trusted without one is refused.
+    let tenant_of = |jti: &str, tenant: &str| {
+        let mut c = claims(jti, "alice@acme.test", &api, &client_id);
+        c["tenant"] = json!(tenant);
+        c
+    };
+    assert_eq!(sign_in(idjag(tenant_of("j32", "t-acme")), secret.clone()).await.1["error"], "invalid_grant", "a tenant roll wasn't told about");
+    let put = d.call(OPERATOR, Method::PUT, "/v1/access/enterprise/idps", Some(json!({ "idps": [{ "issuer": okta, "jwks": jwks, "domains": ["acme.test"], "tenant": "t-acme" }] }))).await;
+    assert_eq!(put.0, StatusCode::OK, "{put:?}");
+    assert_eq!(sign_in(idjag(tenant_of("j33", "t-acme")), secret.clone()).await.0, StatusCode::OK, "the trusted tenant");
+    assert_eq!(sign_in(idjag(tenant_of("j34", "t-evil")), secret.clone()).await.1["error"], "invalid_grant", "another tenant at the same issuer");
+    assert_eq!(sign_in(idjag(claims("j35", "alice@acme.test", &api, &client_id)), secret.clone()).await.1["error"], "invalid_grant", "no tenant, from a tenant-pinned provider");
+    trust(false).await;
+    let (_, meta) = d.call(OPERATOR, Method::GET, "/.well-known/oauth-authorization-server", None).await;
+    assert_eq!(meta["authorization_grant_profiles_supported"], json!(["urn:ietf:params:oauth:grant-profile:id-jag"]), "{meta}");
+    // The assertion's read-only scope: the token reads, never writes.
+    let mut reads = claims("j12", "bob@acme.test", &api, &client_id);
+    reads["scope"] = json!("read-only");
+    let (_, ro) = sign_in(idjag(reads), secret.clone()).await;
+    let ro_token = ro["access_token"].as_str().unwrap_or_else(|| panic!("{ro}")).to_string();
+    assert_eq!(d.call(&ro_token, Method::POST, "/v1/workspace/projects", Some(json!({ "name": "nope" }))).await.0, StatusCode::FORBIDDEN, "read-only");
+    // Revoked in roll: the provider can't hand it back.
+    let bobs = d.call(&ro_token, Method::GET, "/v1/access", None).await.1["grant"]["id"].as_str().unwrap().to_string();
+    assert_eq!(d.call(OPERATOR, Method::DELETE, &format!("/v1/access/tokens/{bobs}"), None).await.0, StatusCode::OK);
+    assert_eq!(sign_in(idjag(claims("j13", "bob@acme.test", &api, &client_id)), secret.clone()).await.1["error"], "access_denied");
+    // Again later: the same connection, a new token.
+    let (_, again) = sign_in(idjag(claims("j7", "ALICE@acme.test", &api, &client_id)), secret.clone()).await;
+    let token2 = again["access_token"].as_str().unwrap_or_else(|| panic!("{again}")).to_string();
+    let (_, me2) = d.call(&token2, Method::GET, "/v1/access", None).await;
+    assert_eq!(me2["grant"]["id"], me["grant"]["id"], "one connection per person and app");
+    // Narrowing the app narrows every live token at once (its people's connections take its rules).
+    let reads_only = json!([{ "product": "workspace", "resources": "*", "actions": { "read": "allow" } }]);
+    let (s, changed) = d.call(OPERATOR, Method::PATCH, &format!("/v1/access/enterprise/apps/{client_id}"), Some(json!({ "rules": reads_only }))).await;
+    assert_eq!(s, StatusCode::OK, "{changed}");
+    assert_eq!(d.call(&token2, Method::POST, "/v1/workspace/projects", Some(json!({ "name": "after-narrowing" }))).await.0, StatusCode::FORBIDDEN, "narrowed at once");
+    assert_eq!(d.call(&token2, Method::GET, "/v1/access", None).await.0, StatusCode::OK, "the connection stays");
+    // A rotation keeping the old secret a while: both sign in; the new one is answered once.
+    let (s, rotated) = d.call(OPERATOR, Method::POST, &format!("/v1/access/enterprise/apps/{client_id}/rotate"), Some(json!({ "keep_old_for_s": 3600 }))).await;
+    let secret2 = rotated["client_secret"].as_str().unwrap_or_else(|| panic!("{s} {rotated}")).to_string();
+    assert!(rotated["old_until"].as_i64().is_some(), "{rotated}");
+    assert_eq!(sign_in(idjag(claims("j20", "alice@acme.test", &api, &client_id)), secret.clone()).await.0, StatusCode::OK, "the old secret, kept");
+    let (_, fresh) = sign_in(idjag(claims("j21", "alice@acme.test", &api, &client_id)), secret2.clone()).await;
+    let token3 = fresh["access_token"].as_str().unwrap_or_else(|| panic!("{fresh}")).to_string();
+    // Leaked (found by a scan, or GitHub's): the secret, the kept one and every token go at once.
+    assert!(d.access.revoke_leaked(std::slice::from_ref(&secret2), "a public gist").unwrap().is_empty(), "no grant is revoked: the connections stay");
+    assert_eq!(d.call(&token3, Method::GET, "/v1/access", None).await.0, StatusCode::UNAUTHORIZED, "its tokens ended");
+    for (jti, s) in [("j22", &secret2), ("j23", &secret)] {
+        assert_eq!(sign_in(idjag(claims(jti, "alice@acme.test", &api, &client_id)), s.clone()).await.1["error"], "invalid_client", "after the leak");
+    }
+    let (_, listed) = d.call(OPERATOR, Method::GET, "/v1/access/enterprise", None).await;
+    assert_eq!(listed["apps"][0]["leaked"], "found in a public gist", "{listed}");
+    // The operator rotates it: a new secret, and the same people back on their connections.
+    let (_, again) = d.call(OPERATOR, Method::POST, &format!("/v1/access/enterprise/apps/{client_id}/rotate"), Some(json!({ "keep_old_for_s": 3600 }))).await;
+    assert!(again["old_until"].is_null() && again["leaked"].is_null(), "a leaked secret is never kept: {again}");
+    let secret3 = again["client_secret"].as_str().unwrap().to_string();
+    let (_, back) = sign_in(idjag(claims("j24", "alice@acme.test", &api, &client_id)), secret3).await;
+    let token4 = back["access_token"].as_str().unwrap_or_else(|| panic!("{back}")).to_string();
+    assert_eq!(d.call(&token4, Method::GET, "/v1/access", None).await.1["grant"]["id"], me["grant"]["id"], "the same connection");
+    let token2 = token4;
+    // Removing the app ends its people's tokens (alice's and root's; bob's was revoked already).
+    assert_eq!(d.call(OPERATOR, Method::DELETE, &format!("/v1/access/enterprise/apps/{client_id}"), None).await.1["revoked"], 2);
+    assert_eq!(d.call(&token2, Method::GET, "/v1/access", None).await.0, StatusCode::UNAUTHORIZED);
+}
+
+/// Sudo mode (docs/accounts.md): a token made from a person's session needs a recent proof; the
+/// operator's token, which has no session, doesn't.
+#[tokio::test]
+async fn a_token_from_a_session_needs_a_recent_proof() {
+    let d = Daemon::new(50);
+    d.people.add("usr_alice", "alice");
+    let rules = json!([{ "product": "workspace", "resources": "*", "actions": { "read": "allow" } }]);
+    d.people.3.lock().unwrap().insert("usr_alice".into());
+    let (s, e) = d.as_user("usr_alice", Method::POST, "/v1/access/tokens", Some(json!({ "name": "ci", "rules": rules }))).await;
+    assert_eq!((s, e["code"].as_str()), (StatusCode::FORBIDDEN, Some("reauth_required")), "{e}");
+    assert_eq!(d.call(OPERATOR, Method::POST, "/v1/access/tokens", Some(json!({ "name": "ci", "rules": rules }))).await.0, StatusCode::CREATED);
+    d.people.3.lock().unwrap().clear();
+    assert_eq!(d.as_user("usr_alice", Method::POST, "/v1/access/tokens", Some(json!({ "name": "ci", "rules": rules }))).await.0, StatusCode::CREATED);
+}
+
+/// An incident's cut-off (docs/permissions.md, "Revoking at once"): every listed token at once,
+/// with why, all or none; the operator's only.
+#[tokio::test]
+async fn tokens_are_revoked_at_once_or_not_at_all() {
+    let d = Daemon::new(50);
+    d.people.add("usr_alice", "alice");
+    let rules = json!([{ "product": "workspace", "resources": "*", "actions": { "read": "allow" } }]);
+    let mut made = Vec::new();
+    for name in ["ci", "deploy", "kept"] {
+        let (_, g) = d.call(OPERATOR, Method::POST, "/v1/access/tokens", Some(json!({ "name": name, "rules": rules }))).await;
+        made.push((g["grant"]["id"].as_str().unwrap().to_string(), g["token"].as_str().unwrap().to_string()));
+    }
+    let ids = |i: &[usize]| json!(i.iter().map(|&n| made[n].0.clone()).collect::<Vec<_>>());
+    // An unknown id refuses the lot.
+    let (s, _) = d.call(OPERATOR, Method::POST, "/v1/access/tokens/revoke", Some(json!({ "ids": [made[0].0, "grt_nope"], "why": "incident 42" }))).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    assert_eq!(d.call(&made[0].1, Method::GET, "/v1/workspace/projects", None).await.0, StatusCode::OK, "nothing was revoked");
+    // Not a person's, not a token's.
+    assert_eq!(d.as_user("usr_alice", Method::POST, "/v1/access/tokens/revoke", Some(json!({ "ids": ids(&[0]), "why": "x" }))).await.0, StatusCode::FORBIDDEN);
+    let (s, r) = d.call(OPERATOR, Method::POST, "/v1/access/tokens/revoke", Some(json!({ "ids": ids(&[0, 1]), "why": "incident 42: the CI box leaked" }))).await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+    assert!(r["revoked"].as_array().unwrap().iter().all(|g| g["revoked_why"] == "incident 42: the CI box leaked" && g["revoked_at"].is_i64()), "{r}");
+    assert_eq!(d.call(&made[0].1, Method::GET, "/v1/workspace/projects", None).await.0, StatusCode::UNAUTHORIZED);
+    assert_eq!(d.call(&made[1].1, Method::GET, "/v1/workspace/projects", None).await.0, StatusCode::UNAUTHORIZED);
+    assert_eq!(d.call(&made[2].1, Method::GET, "/v1/workspace/projects", None).await.0, StatusCode::OK, "only the listed ones");
+}
+
+/// A decoy token (docs/permissions.md, "Decoy tokens"): it never allows anything, answers as an
+/// unknown token does, and its use is in the audit log, on the token, and in the admins' mail.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_decoy_token_allows_nothing_and_gives_its_user_away() {
+    let d = Daemon::new(50);
+    d.people.add("usr_alice", "alice");
+    // A person's decoy never waits for an admin, whatever its rules (they're never used).
+    assert_eq!(d.call(OPERATOR, Method::PUT, "/v1/access/policy", Some(json!({ "approve_people": ["reveal", "admin"] }))).await.0, StatusCode::OK);
+    let rules = json!([{ "product": "workspace", "resources": "*", "actions": { "read": "allow", "admin": "allow" } }]);
+    let (s, g) = d.as_user("usr_alice", Method::POST, "/v1/access/tokens", Some(json!({ "name": "aws creds in the old wiki", "rules": rules, "decoy": true }))).await;
+    assert_eq!(s, StatusCode::CREATED, "{g}");
+    assert_eq!((g["grant"]["decoy"].as_bool(), g["grant"].get("pending")), (Some(true), None), "{g}");
+    let (id, token) = (g["grant"]["id"].as_str().unwrap().to_string(), g["token"].as_str().unwrap().to_string());
+    // Used: refused as a revoked or made-up token is, word for word.
+    let (s, used) = d.call(&token, Method::GET, "/v1/workspace/projects", None).await;
+    let (_, unknown) = d.call(&roll_access::new_secret("rlt_"), Method::GET, "/v1/workspace/projects", None).await;
+    assert_eq!((s, &used), (StatusCode::UNAUTHORIZED, &unknown));
+    // It's on the token and in the audit log; the admins and its owner are told.
+    let (_, got) = d.call(OPERATOR, Method::GET, &format!("/v1/access/tokens/{id}"), None).await;
+    assert!(got["last_used_at"].is_i64(), "{got}");
+    let (_, log) = d.call(OPERATOR, Method::GET, "/v1/access/audit?limit=50", None).await;
+    assert!(log.as_array().unwrap().iter().any(|e| e["source"] == "decoy" && e["grant_id"] == id.as_str() && e["route"] == "/v1/workspace/projects"), "{log}");
+    let mut told = Vec::new();
+    for _ in 0..100 {
+        told = d.people.1.lock().unwrap().clone();
+        if told.iter().any(|t| t.starts_with("usr_root: A decoy token was used")) && told.iter().any(|t| t.starts_with("usr_alice: A decoy token was used")) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(told.iter().any(|t| t.starts_with("usr_root: A decoy token was used")) && told.iter().any(|t| t.starts_with("usr_alice: A decoy token was used")), "{told:?}");
 }

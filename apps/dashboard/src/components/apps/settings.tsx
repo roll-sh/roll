@@ -48,8 +48,12 @@ interface Form {
   memory: number;
   healthPath: string;
   healthTimeout: string;
+  healthEvery: string;
+  healthFailures: string;
+  healthCommand: string;
   drain: string;
   cpuTarget: string;
+  memoryTarget: string;
   alertMemory: string;
   alertErrors: string;
   alertP95: string;
@@ -59,6 +63,7 @@ interface Form {
   rolloutSteps: string;
   rolloutStep: string;
   rolloutErrors: string;
+  rolloutManual: boolean;
   h2c: boolean;
   public: boolean;
   restart: "always" | "on_failure" | "never";
@@ -66,6 +71,7 @@ interface Form {
   affinity: boolean;
   tcp: boolean;
   rollbackOnCrash: boolean;
+  rebuildOnBase: boolean;
   scaleStream: string;
   scaleGroup: string;
   scalePer: string;
@@ -108,8 +114,12 @@ export function formOf(s: Service): Form {
     memory: s.run.memory_mb,
     healthPath: str(s.run.health_path),
     healthTimeout: str(s.run.health_timeout_s),
+    healthEvery: str(s.run.health_every_s),
+    healthFailures: str(s.run.health_failures),
+    healthCommand: str(s.run.health_command),
     drain: str(s.run.drain_s),
     cpuTarget: str(s.run.cpu_target),
+    memoryTarget: str(s.run.memory_target),
     alertMemory: str(s.run.alerts?.memory_pct),
     alertErrors: str(s.run.alerts?.error_pct),
     alertP95: str(s.run.alerts?.p95_ms),
@@ -119,6 +129,7 @@ export function formOf(s: Service): Form {
     rolloutSteps: (s.run.rollout?.steps ?? []).join(", "),
     rolloutStep: str(s.run.rollout?.step_s),
     rolloutErrors: str(s.run.rollout?.error_pct),
+    rolloutManual: !!s.run.rollout?.manual,
     h2c: !!s.run.h2c,
     public: s.run.public !== false,
     restart: s.run.restart ?? "always",
@@ -126,6 +137,7 @@ export function formOf(s: Service): Form {
     affinity: !!s.run.affinity,
     tcp: !!s.run.tcp,
     rollbackOnCrash: !!s.run.rollback_on_crash,
+    rebuildOnBase: !!s.run.rebuild_on_base,
     scaleStream: s.run.scale?.stream ?? "",
     scaleGroup: s.run.scale?.group ?? "",
     scalePer: str(s.run.scale?.per_instance),
@@ -184,8 +196,12 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   if (f.memory !== before.memory) run.memory_mb = f.memory;
   if (f.healthPath !== before.healthPath) run.health_path = text(f.healthPath);
   if (f.healthTimeout !== before.healthTimeout) run.health_timeout_s = num(f.healthTimeout);
+  if (f.healthEvery !== before.healthEvery) run.health_every_s = num(f.healthEvery);
+  if (f.healthFailures !== before.healthFailures) run.health_failures = num(f.healthFailures);
+  if (f.healthCommand !== before.healthCommand) run.health_command = text(f.healthCommand);
   if (f.drain !== before.drain) run.drain_s = num(f.drain);
   if (f.cpuTarget !== before.cpuTarget) run.cpu_target = num(f.cpuTarget);
+  if (f.memoryTarget !== before.memoryTarget) run.memory_target = num(f.memoryTarget);
   if (f.alertMemory !== before.alertMemory || f.alertErrors !== before.alertErrors || f.alertP95 !== before.alertP95 || f.alertCapacity !== before.alertCapacity || f.alertLog !== before.alertLog || f.alertLogCount !== before.alertLogCount)
     run.alerts = {
       memory_pct: Number(f.alertMemory) || 0,
@@ -195,13 +211,14 @@ export function patchOf(s: Service, f: Form): ServicePatch {
       ...(f.alertLog.trim() ? { log_match: f.alertLog.trim() } : {}),
       log_count: Number(f.alertLogCount) || 10,
     };
-  if (f.rolloutSteps !== before.rolloutSteps || f.rolloutStep !== before.rolloutStep || f.rolloutErrors !== before.rolloutErrors)
-    run.rollout = { steps: rolloutSteps(f.rolloutSteps) ?? [], step_s: Number(f.rolloutStep) || 120, error_pct: Number(f.rolloutErrors) || 5 };
+  if (f.rolloutSteps !== before.rolloutSteps || f.rolloutStep !== before.rolloutStep || f.rolloutErrors !== before.rolloutErrors || f.rolloutManual !== before.rolloutManual)
+    run.rollout = { steps: rolloutSteps(f.rolloutSteps) ?? [], step_s: Number(f.rolloutStep) || 120, error_pct: Number(f.rolloutErrors) || 5, ...(f.rolloutManual ? { manual: true } : {}) };
   if (f.h2c !== before.h2c) run.h2c = f.h2c ? true : null;
   if (f.public !== before.public) run.public = f.public ? null : false;
   if (f.affinity !== before.affinity) run.affinity = f.affinity ? true : null;
   if (f.tcp !== before.tcp) run.tcp = f.tcp ? true : null;
   if (f.rollbackOnCrash !== before.rollbackOnCrash) run.rollback_on_crash = f.rollbackOnCrash ? true : null;
+  if (f.rebuildOnBase !== before.rebuildOnBase) run.rebuild_on_base = f.rebuildOnBase ? true : null;
   if (f.restart !== before.restart || f.restartTries !== before.restartTries) {
     run.restart = f.restart === "always" ? null : f.restart;
     run.restart_tries = f.restart === "on_failure" ? num(f.restartTries) : null;
@@ -216,7 +233,7 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   return patch;
 }
 
-const NUMERIC: (keyof Form)[] = ["scalePer", "port", "timeout", "retries", "min", "max", "concurrency", "healthTimeout", "drain", "cpuTarget", "suspendAfter", "sleepAfter", "volumeSize", "alertMemory", "alertErrors", "alertP95", "alertCapacity", "alertLogCount", "rolloutStep", "rolloutErrors", "restartTries"];
+const NUMERIC: (keyof Form)[] = ["scalePer", "port", "timeout", "retries", "min", "max", "concurrency", "healthTimeout", "healthEvery", "healthFailures", "drain", "cpuTarget", "memoryTarget", "suspendAfter", "sleepAfter", "volumeSize", "alertMemory", "alertErrors", "alertP95", "alertCapacity", "alertLogCount", "rolloutStep", "rolloutErrors", "restartTries"];
 
 /** A rollout's steps as typed (`10, 50`): increasing percents 1–99, at most five; null when they aren't. */
 export function rolloutSteps(v: string): number[] | null {
@@ -324,6 +341,7 @@ export function SettingsTab({
           </Grid>
           {service.source.kind === "image" && <RegistryLogin service={service} runner={runner} />}
           {service.source.kind === "git" && <GitLogin service={service} runner={runner} />}
+          {service.source.kind === "git" && <GitHubApp service={service} runner={runner} />}
         </Section>
 
         {form.sourceKind !== "image" && (
@@ -477,6 +495,9 @@ export function SettingsTab({
                   <Field label="CPU target (%)" hint="another instance while they average over it for a minute; empty: requests only">
                     {t("cpuTarget", "70")}
                   </Field>
+                  <Field label="Memory target (%)" hint="of each instance's memory, the same way; empty: not on memory">
+                    {t("memoryTarget", "80")}
+                  </Field>
                   <Field label="Suspend after (s)" hint="idle; 0 never suspends">
                     {t("suspendAfter", "30")}
                   </Field>
@@ -515,10 +536,29 @@ export function SettingsTab({
           <Grid>
             {web && (
               <>
-                <Field label="Health check path" hint="checked at each deploy and every 10 s while running; none: the port accepting">
+                <Field label="Health check path" hint="checked at each deploy and while running; none: the port accepting">
                   {t("healthPath", "/healthz")}
                 </Field>
                 <Field label="Health timeout (s)">{t("healthTimeout", "60")}</Field>
+              </>
+            )}
+            {form.type === "worker" && (
+              <Field label="Health command" hint="run in each instance; exit 0 is healthy, so a hung consumer is replaced">
+                {t("healthCommand", "test -f /tmp/alive")}
+              </Field>
+            )}
+            {(web || form.type === "worker") && (
+              <>
+                <Field label="Check every (s)" hint="while running; empty: 10">
+                  {t("healthEvery", "10")}
+                </Field>
+                <Field label="Failures before it's replaced" hint="in a row; empty: 3">
+                  {t("healthFailures", "3")}
+                </Field>
+              </>
+            )}
+            {web && (
+              <>
                 <Field label="Alert: 5xx share (%)" hint="of five minutes' requests; 0 off">
                   {t("alertErrors", "5")}
                 </Field>
@@ -539,6 +579,14 @@ export function SettingsTab({
                 <option value="back">Rolls back to the one before</option>
               </select>
             </Field>
+            {service.source.kind !== "image" && (
+              <Field label="When a base image is updated" hint="its registry moves the tag it builds on (a security fix)">
+                <select value={form.rebuildOnBase ? "build" : "say"} onChange={(e) => set("rebuildOnBase", e.target.value === "build")} className={`${input} w-full`}>
+                  <option value="say">Says so</option>
+                  <option value="build">Builds the same revision again</option>
+                </select>
+              </Field>
+            )}
             <Field label="Alert: its log says" hint="text in its output (any case); empty: off">
               {t("alertLog", "panic")}
             </Field>
@@ -600,6 +648,12 @@ export function SettingsTab({
                   <Field label="Each step (s)">{t("rolloutStep", "120")}</Field>
                   <Field label="Roll back at 5xx (%)" hint="of its requests in a step, and more than the old one">
                     {t("rolloutErrors", "5")}
+                  </Field>
+                  <Field label="Each step" hint="by itself after its time, or held until you advance it">
+                    <select value={form.rolloutManual ? "manual" : "timed"} onChange={(e) => set("rolloutManual", e.target.value === "manual")} className={`${input} w-full`}>
+                      <option value="timed">Advances by itself</option>
+                      <option value="manual">Waits for you</option>
+                    </select>
                   </Field>
                 </>
               )}
@@ -673,12 +727,12 @@ export function SettingsTab({
                   if (await runner.run("delete", () => appsApi.remove(service.id).then(() => true))) onDeleted();
                 }}
               >
-                Deletes every environment, instance, deployment and image of <span className="font-mono text-fg">{service.name}</span>. Its URLs stop answering.
-                {service.run.volume ? " Its volume goes too, after a last backup kept for a week." : ""}
+                Stops every environment of <span className="font-mono text-fg">{service.name}</span>: its URLs stop answering. For 48 hours it can be restored as it was from {projectName}'s settings; then its deployments, images
+                {service.run.volume ? " and volume (after a last backup kept for a week)" : ""} are deleted for good.
               </Confirm>
             ) : (
               <div className="flex flex-wrap items-center justify-between gap-3">
-                <p className="text-[13px] text-muted">Delete the service, its environments, deployments and images.</p>
+                <p className="text-[13px] text-muted">Delete the service, its environments, deployments and images (restorable for 48 hours).</p>
                 <button className={danger} onClick={() => setDeleting(true)}>
                   <Trash2 className="size-3.5" /> Delete
                 </button>
@@ -808,6 +862,7 @@ const Grid = ({ children }: { children: ReactNode }) => <div className="grid gap
 function GitLogin({ service, runner }: { service: Service; runner: Runner }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [fromSecret, setFromSecret] = useState(false);
   const l = service.git_login;
   return (
     <div className="border-t border-line px-5 py-4">
@@ -816,6 +871,11 @@ function GitLogin({ service, runner }: { service: Service; runner: Runner }) {
         <div className="mt-2 flex flex-wrap items-center gap-3 text-[13px] text-muted">
           <span>
             Fetches as <span className="font-mono text-fg">{l.username}</span> from <span className="font-mono text-fg">{l.host}</span>
+            {l.secret && (
+              <>
+                , its token the project's secret <span className="font-mono text-fg">{l.secret}</span>
+              </>
+            )}
           </span>
           <button type="button" className={btn} disabled={runner.busy !== null} onClick={() => void runner.run("git-login", () => appsApi.deleteGitLogin(service.id))}>
             Remove
@@ -826,7 +886,7 @@ function GitLogin({ service, runner }: { service: Service; runner: Runner }) {
           className="mt-2 flex flex-wrap items-end gap-2"
           onSubmit={(e) => {
             e.preventDefault();
-            void runner.run("git-login", () => appsApi.putGitLogin(service.id, { username, password })).then((ok) => {
+            void runner.run("git-login", () => appsApi.putGitLogin(service.id, fromSecret ? { username, secret: password } : { username, password })).then((ok) => {
               if (ok) {
                 setUsername("");
                 setPassword("");
@@ -835,13 +895,51 @@ function GitLogin({ service, runner }: { service: Service; runner: Runner }) {
           }}
         >
           <input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="username" aria-label="Git username" autoComplete="off" spellCheck={false} className={`${input} w-44 font-mono text-[12px]`} />
-          <input value={password} onChange={(e) => setPassword(e.target.value)} type="password" placeholder="token or app password" aria-label="Git token" autoComplete="new-password" className={`${input} w-56 font-mono text-[12px]`} />
+          <input
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            type={fromSecret ? "text" : "password"}
+            placeholder={fromSecret ? "the secret's name, GIT_TOKEN" : "token or app password"}
+            aria-label={fromSecret ? "Secret name" : "Git token"}
+            autoComplete="new-password"
+            spellCheck={false}
+            className={`${input} w-56 font-mono text-[12px]`}
+          />
+          <label className="flex items-center gap-1.5 text-[12px] text-muted">
+            <input type="checkbox" checked={fromSecret} onChange={(e) => setFromSecret(e.target.checked)} />
+            from a roll secret
+          </label>
           <button type="submit" className={primary} disabled={!username || !password || runner.busy !== null}>
             Save login
           </button>
-          <span className="text-[12px] text-subtle">Sealed; sent only to this repository's host.</span>
+          <span className="text-[12px] text-subtle">Sealed, or read from that roll secret at each fetch; sent only to this repository's host.</span>
         </form>
       )}
+    </div>
+  );
+}
+
+/** roll's GitHub App for a Git URL service: fetches with its installation's tokens and commit
+ *  statuses on deploys. Connecting is the operator's (installations span tenants). */
+function GitHubApp({ service, runner }: { service: Service; runner: Runner }) {
+  const g = service.github;
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-3 border-t border-line px-5 py-4">
+      <div>
+        <p className="text-[13px] font-medium">GitHub App</p>
+        <p className="mt-1 text-[12px] text-muted">
+          {g ? (
+            <>
+              Connected to <span className="font-mono text-fg">{g.repo}</span>: fetches with its installation's short-lived tokens, and deploys show as commit statuses.
+            </>
+          ) : (
+            "On GitHub, roll's App can fetch this repository (a private one too) and show deploys as commit statuses. Connecting is the operator's."
+          )}
+        </p>
+      </div>
+      <button type="button" className={btn} disabled={runner.busy !== null} onClick={() => void runner.run("github", () => (g ? appsApi.disconnectGitHub(service.id) : appsApi.connectGitHub(service.id)))}>
+        {g ? "Disconnect" : "Connect"}
+      </button>
     </div>
   );
 }

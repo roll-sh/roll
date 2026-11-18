@@ -18,6 +18,7 @@
 pub mod completion;
 pub mod convert;
 pub mod fields;
+pub mod ignored_source;
 pub mod pattern_text;
 pub mod ranges;
 pub mod shapes;
@@ -294,6 +295,10 @@ pub struct ShardEngine {
     pub id: u32,
     pub shard: Shard,
     pub counters: ShardCounters,
+    /// Its index's slow log thresholds ([`apply_shard_settings`]).
+    pub slow: crate::slowlog::Thresholds,
+    /// The cluster's slow log, which this shard's slow operations go to.
+    pub slowlog: Arc<crate::slowlog::SlowLog>,
     /// When the first write not yet refreshed happened (ms since the engine epoch, 0: none).
     dirty_since: AtomicI64,
     /// The last search (ms since the engine epoch).
@@ -960,11 +965,13 @@ fn normalization(get: &dyn Fn(&str) -> Option<String>) -> search_index::similari
 pub struct Engine {
     indices: RwLock<HashMap<String, Arc<IndexEngine>>>,
     storage: Arc<dyn ShardStorage>,
+    /// The cluster's slow log entries not yet handed on ([`crate::slowlog`]).
+    pub slowlog: Arc<crate::slowlog::SlowLog>,
 }
 
 impl Default for Engine {
     fn default() -> Self {
-        Engine { indices: RwLock::new(HashMap::new()), storage: Arc::new(MemoryShards) }
+        Engine::with_storage(Arc::new(MemoryShards))
     }
 }
 
@@ -976,7 +983,7 @@ impl std::fmt::Debug for Engine {
 
 impl Engine {
     pub fn with_storage(storage: Arc<dyn ShardStorage>) -> Engine {
-        Engine { indices: RwLock::new(HashMap::new()), storage }
+        Engine { indices: RwLock::new(HashMap::new()), storage, slowlog: Default::default() }
     }
 
     /// Applies `idx`'s dynamic shard settings (`index.gc_deletes`) to its loaded shards now,
@@ -1024,6 +1031,8 @@ impl Engine {
                             id: i,
                             shard,
                             counters: ShardCounters::default(),
+                            slow: Default::default(),
+                            slowlog: self.slowlog.clone(),
                             dirty_since: AtomicI64::new(0),
                             last_search: AtomicI64::new(epoch_ms()),
                             request_cache: Default::default(),
@@ -1092,6 +1101,7 @@ pub(crate) fn apply_shard_settings(idx: &IndexMeta, shards: &[Arc<ShardEngine>])
     for s in shards {
         s.shard.set_gc_deletes(gc);
         s.shard.set_best_compression(best);
+        s.slow.apply(idx);
     }
 }
 

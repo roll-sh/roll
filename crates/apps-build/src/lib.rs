@@ -14,13 +14,16 @@ mod df;
 mod docker;
 mod dotnet;
 mod elixir;
+pub mod functions;
 mod golang;
 mod java;
 mod node;
 pub mod packages;
 mod php;
+pub mod imports;
 pub mod project;
 mod python;
+pub mod site_configs;
 mod ruby;
 mod static_site;
 #[cfg(test)]
@@ -72,6 +75,11 @@ pub struct Overrides {
     /// is the stage's build argument, so a changed value rebuilds what read it.
     #[serde(skip)]
     pub build_env: Vec<String>,
+    /// Of `build_env`, those kept as files (`files` on the variables): a name and its absolute
+    /// path. Each step mounts them there (`--mount=type=secret,target=…`: an `.npmrc`, a
+    /// registry's login) instead of in its environment, and still never in a layer.
+    #[serde(skip)]
+    pub build_files: Vec<(String, String)>,
     /// The Procfile's process this service runs (`web`, `worker`): its command is the start
     /// command when nothing above names one. None reads no Procfile.
     #[serde(skip)]
@@ -86,6 +94,9 @@ pub enum Builder {
     Auto,
     /// Build the tree's own Dockerfile.
     Dockerfile,
+    /// Run a static site's functions (`netlify/functions/`, `api/`) as a small Node service
+    /// ([`functions`]).
+    Functions,
 }
 
 /// How a tree builds and runs (`Plan` in docs/apps/http-api.md).
@@ -114,6 +125,47 @@ pub struct Plan {
     /// service sets none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub release: Option<String>,
+    /// vercel.json's `crons`: paths the service calls on a schedule ([`site_configs::vercel_crons`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub crons: Vec<Cron>,
+    /// A static site's function directories the `functions` builder runs (`netlify/functions`,
+    /// `api`): a service of their own beside it does ([`functions`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub functions: Vec<String>,
+}
+
+/// The images a Dockerfile builds on (its `FROM`s), for watching them move: not its own stages,
+/// `scratch`, ones already pinned by digest or named with a build argument; at most 10.
+pub fn base_images(dockerfile: &str) -> Vec<String> {
+    let (mut stages, mut out) = (Vec::<String>::new(), Vec::<String>::new());
+    let joined = dockerfile.replace("\\\r\n", " ").replace("\\\n", " ");
+    for line in joined.lines() {
+        let mut w = line.split_whitespace();
+        if !w.next().is_some_and(|k| k.eq_ignore_ascii_case("FROM")) {
+            continue;
+        }
+        let Some(image) = w.find(|t| !t.starts_with("--")) else { continue };
+        let lower = image.to_ascii_lowercase();
+        // A stage named before it is one of its own, not an image.
+        let own = stages.contains(&lower);
+        if let (Some(as_), Some(name)) = (w.next(), w.next())
+            && as_.eq_ignore_ascii_case("AS")
+        {
+            stages.push(name.to_ascii_lowercase());
+        }
+        if own || lower == "scratch" || image.contains('@') || image.contains('$') || out.iter().any(|o| o == image) || out.len() >= 10 {
+            continue;
+        }
+        out.push(image.to_string());
+    }
+    out
+}
+
+/// A path called on a schedule (vercel.json's `crons`).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Cron {
+    pub path: String,
+    pub schedule: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -131,6 +183,8 @@ pub enum Provider {
     Dotnet,
     Elixir,
     Static,
+    /// A static site's functions ([`functions`]).
+    Functions,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -229,6 +283,32 @@ pub fn plan(tree: &dyn Tree, overrides: &Overrides) -> Result<Plan, Error> {
         p.release = Some(cmd.clone());
         p.notes.push(format!("pre-deploy: the Procfile's release: {cmd}"));
     }
+    // A runtime past (or near) its end of life: said, so a deploy isn't quietly unpatched.
+    if let Some(v) = p.language_version.clone() {
+        let today = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64 / 86_400).unwrap_or(0);
+        if let Some(n) = version::end_of_life_note(p.provider, &v, today) {
+            p.notes.push(n);
+        }
+    }
+    // A static site's functions (Netlify's, Vercel's `api/`) never run: said, not dropped silently.
+    if p.start.as_deref() == Some(static_site::START) {
+        for (dir, what, route) in [("netlify/functions", "Netlify Functions", "/.netlify/functions/*"), ("netlify/edge-functions", "Netlify Edge Functions", "the paths they answer"), ("api", "Vercel functions", "/api/*")] {
+            let n = tree.list(dir).iter().filter(|f| [".js", ".mjs", ".cjs", ".ts", ".mts", ".py", ".go"].iter().any(|e| f.ends_with(e)) || f.ends_with('/')).count();
+            if n > 0 {
+                p.notes.push(format!("{dir}/ has {n} {what}, which a static site doesn't run: Run its functions makes a service of them, with {route} routed to it"));
+                if functions::DIRS.iter().any(|(d, _)| *d == dir) {
+                    p.functions.push(dir.to_string());
+                }
+            }
+        }
+    }
+    // Vercel's crons, whatever builds it (a Next.js app's usually).
+    if let Some(text) = tree.read("vercel.json").and_then(|b| String::from_utf8(b).ok()) {
+        for c in site_configs::vercel_crons(&text) {
+            p.notes.push(format!("vercel.json's cron: {} calls {}", c.schedule, c.path));
+            p.crons.push(c);
+        }
+    }
     for (store, why) in uses(tree) {
         p.uses.push(store);
         p.notes.push(format!("{why}: it uses {}", store.label()));
@@ -248,6 +328,9 @@ pub fn plan(tree: &dyn Tree, overrides: &Overrides) -> Result<Plan, Error> {
 
 fn detect(tree: &dyn Tree, overrides: &Overrides) -> Result<Plan, Error> {
     let o = overrides.trimmed();
+    if o.builder == Builder::Functions {
+        return functions::plan(tree, &o);
+    }
     if o.builder == Builder::Dockerfile || tree.read("Dockerfile").is_some() {
         return docker::plan(tree, &o);
     }
@@ -327,6 +410,7 @@ impl Overrides {
             spa: self.spa,
             packages: self.packages.clone(),
             build_env: self.build_env.clone(),
+            build_files: self.build_files.clone(),
             process: self.process.clone(),
         }
     }
@@ -341,6 +425,8 @@ pub(crate) struct Commands<'a> {
     pub custom_install: bool,
     /// [`Overrides::build_env`].
     pub env: &'a [String],
+    /// [`Overrides::build_files`].
+    pub files: &'a [(String, String)],
 }
 
 type Render = Box<dyn FnOnce(&Commands<'_>) -> String>;
@@ -376,6 +462,7 @@ impl Draft {
             start: start.as_deref(),
             custom_install: o.install.is_some(),
             env: &o.build_env,
+            files: &o.build_files,
         });
         Plan {
             provider: self.provider,
@@ -390,6 +477,8 @@ impl Draft {
             spa: false,
             uses: Vec::new(),
             release: None,
+            crons: Vec::new(),
+            functions: Vec::new(),
         }
     }
 }

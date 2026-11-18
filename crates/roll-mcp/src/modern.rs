@@ -27,6 +27,13 @@ pub fn version(msg: &Value) -> Option<&str> {
     msg["params"]["_meta"][VERSION].as_str()
 }
 
+/// Whether the request's client fills in forms for elicitation (`elicitation.form`, or an empty
+/// `elicitation`, which is forms).
+pub fn form_elicitation(msg: &Value) -> bool {
+    let e = &msg["params"]["_meta"][CAPABILITIES]["elicitation"];
+    e.get("form").is_some() || e.as_object().is_some_and(|o| o.is_empty())
+}
+
 /// What the client declared on this request: whether it opens URLs for elicitation, and its name.
 pub fn client(msg: &Value) -> (bool, Option<String>) {
     let meta = &msg["params"]["_meta"];
@@ -72,9 +79,12 @@ pub fn check(h: &HeaderMap, msg: &Value, legacy: &[&str]) -> Result<(), (StatusC
         None => return mismatch("MCP-Protocol-Version is missing".into()),
     }
     let method = msg["method"].as_str().unwrap_or_default();
+    // A notification (no id) may come without it: the TypeScript SDK sends `notifications/cancelled`
+    // so, and there's no answer for a proxy to route.
     match header_value(h, "mcp-method") {
         Some(v) if v == method => {}
         Some(v) => return mismatch(format!("Mcp-Method {v:?} isn't the body's {method:?}")),
+        None if msg.get("id").is_none() => {}
         None => return mismatch("Mcp-Method is missing".into()),
     }
     let named = match method {

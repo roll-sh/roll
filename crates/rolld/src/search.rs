@@ -72,6 +72,15 @@ pub struct SearchArgs {
     /// Expect PROXY protocol headers on the REST port (behind an AWS NLB or HAProxy).
     #[arg(long = "search-proxy-protocol", env = "ROLL_SEARCH_PROXY_PROTOCOL", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
     pub search_proxy_protocol: bool,
+    /// The header a trusted proxy in front of the REST port puts the client's address in (e.g.
+    /// `CF-Connecting-IP`), for clusters' IP allowlists. Believed only from a peer in
+    /// --search-trusted-proxies; never `X-Forwarded-For`, which clients write themselves.
+    #[arg(long = "search-client-ip-header", env = "ROLL_SEARCH_CLIENT_IP_HEADER")]
+    pub search_client_ip_header: Option<String>,
+    /// Comma-separated CIDRs of the proxies whose --search-client-ip-header is believed (the
+    /// peer is the PROXY header's source with --search-proxy-protocol).
+    #[arg(long = "search-trusted-proxies", env = "ROLL_SEARCH_TRUSTED_PROXIES")]
+    pub search_trusted_proxies: Option<String>,
     /// Point-in-time branching window, in seconds (0 disables it).
     #[arg(long = "search-history", env = "ROLL_SEARCH_HISTORY", default_value_t = 86_400)]
     pub search_history_s: u64,
@@ -79,6 +88,10 @@ pub struct SearchArgs {
     /// cluster, one node at a time runs it.
     #[arg(long = "search-gc-interval", env = "ROLL_SEARCH_GC_INTERVAL", default_value_t = 3600)]
     pub search_gc_interval_s: u64,
+    /// Days a deleted cluster's storage is kept, so `POST /v1/search/clusters/{id}/restore`
+    /// can bring it back (billed as storage meanwhile); 0 deletes at once.
+    #[arg(long = "search-deleted-retention-days", env = "ROLL_SEARCH_DELETED_RETENTION_DAYS", default_value_t = 7)]
+    pub search_deleted_retention_days: u64,
     /// The name of every cluster's default snapshot repository, on roll's own object storage
     /// (empty: none).
     #[arg(long = "search-default-repository", env = "ROLL_SEARCH_DEFAULT_REPOSITORY", default_value = "found-snapshots")]
@@ -90,6 +103,13 @@ pub struct SearchArgs {
     /// on this machine, tests).
     #[arg(long = "search-inference-allow-private", env = "ROLL_SEARCH_INFERENCE_ALLOW_PRIVATE", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
     pub search_inference_allow_private: bool,
+    /// Search clusters a signed-in person may own, branches included (0: no cap). The operator
+    /// and admins aren't capped.
+    #[arg(long = "search-max-clusters-per-person", env = "ROLL_SEARCH_MAX_CLUSTERS_PER_PERSON", default_value_t = 50)]
+    pub search_max_clusters_per_person: u32,
+    /// Of those, clusters that never unload (`idle_timeout_s` 0) a person may own (0: no cap).
+    #[arg(long = "search-max-always-on-per-person", env = "ROLL_SEARCH_MAX_ALWAYS_ON_PER_PERSON", default_value_t = 2)]
+    pub search_max_always_on_per_person: u32,
     /// Publish Elasticsearch's test cluster features (to run the YAML REST suites against
     /// clusters created through the API). Test deployments only.
     #[arg(long = "search-test-features", env = "ROLL_SEARCH_TEST_FEATURES", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
@@ -141,7 +161,9 @@ impl Search {
         cfg.history_retention = Duration::from_secs(args.search_history_s);
         cfg.test_features = args.search_test_features;
         cfg.gc_interval = (args.search_gc_interval_s > 0).then(|| Duration::from_secs(args.search_gc_interval_s));
+        cfg.deleted_retention = Duration::from_secs(args.search_deleted_retention_days.saturating_mul(86_400));
         cfg.default_repository = Some(args.search_default_repository.trim().to_string()).filter(|n| !n.is_empty());
+        cfg.person_caps = search_control::store::Caps { clusters: args.search_max_clusters_per_person.into(), always_on: args.search_max_always_on_per_person.into() };
         if args.search_repository_allow_private {
             cfg.node_settings.push((search_control::S3_ALLOW_PRIVATE.to_string(), "true".to_string()));
         }
@@ -155,7 +177,8 @@ impl Search {
         if let Some(p) = public {
             p.search(&mut cfg);
         }
-        let mut opts = search_server::ListenOptions { proxy_protocol: args.search_proxy_protocol, ..Default::default() };
+        let client = search_server::ClientAddresses::new(args.search_client_ip_header.as_deref(), args.search_trusted_proxies.as_deref())?;
+        let mut opts = search_server::ListenOptions { proxy_protocol: args.search_proxy_protocol, client, ..Default::default() };
         if let (Some(c), Some(k)) = (&args.search_tls_cert, &args.search_tls_key) {
             anyhow::ensure!(fleet.is_none(), "--search-tls-cert is for a single node: in a cluster TLS ends at the edge");
             opts.tls = Some(search_server::net::tls_acceptor(&std::fs::read(c)?, &std::fs::read(k)?)?);
@@ -205,12 +228,12 @@ impl Search {
     /// Serves the REST listener until it fails or [`Search::shutdown`] stops it.
     pub async fn serve(&self) -> anyhow::Result<()> {
         let listener = self.listener.lock().await.take().ok_or_else(|| anyhow::anyhow!("search listener already serving"))?;
-        // On a cluster each request runs on its cluster's owner: the front names the cluster and
-        // dispatches it (`search_control::cluster`).
+        // On a cluster each request runs on its cluster's owner: the front names the cluster,
+        // decides the client's address (for IP allowlists) and dispatches it, the address
+        // signed (`search_control::cluster`).
         if self.cluster.is_some() {
-            let front = search_control::cluster::rest_router(self.control.clone());
             let stop = self.stop.clone();
-            axum::serve(listener, front).with_graceful_shutdown(async move { stop.wait().await }).await?;
+            search_control::cluster::serve_front(listener, self.control.clone(), &self.opts, async move { stop.wait().await }).await?;
             return Ok(());
         }
         search_server::serve_until(listener, self.control.node.clone(), self.opts.clone(), self.stop.clone()).await

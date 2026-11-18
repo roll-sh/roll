@@ -159,13 +159,16 @@ pub struct ServiceSpec {
 }
 
 /// A screenshot of a service's page, and how fast it loaded when the backend could time it.
-#[derive(Clone, Debug)]
+/// Serialised (its PNGs as base64) when it's taken on the node a roll apps instance runs on.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Shot {
+    #[serde(with = "png_b64")]
     pub png: Vec<u8>,
     pub speed: Option<crate::PageSpeed>,
     pub health: Option<crate::PageHealth>,
     pub a11y: Option<crate::PageA11y>,
     /// The same page at a phone's width, when the backend took one.
+    #[serde(with = "png_b64::opt")]
     pub phone: Option<Vec<u8>>,
     /// The project's other pages (`github.pages`) the backend took, in the same session.
     pub pages: Vec<PageShot>,
@@ -177,11 +180,112 @@ pub struct Shot {
     pub api: Option<Vec<String>>,
     /// The notes' elements it cropped ([`ShotOptions::crops`]), by note: PNGs of at most
     /// [`crate::store::CROP_MAX`] bytes. A note whose element wasn't found is left out.
+    #[serde(with = "png_b64::pairs")]
     pub crops: Vec<(String, Vec<u8>)>,
 }
 
-/// A note's element to crop in a screenshot run: its page and its selector, both checked.
+/// PNG bytes as base64 in JSON (a [`Shot`] from another node).
+mod png_b64 {
+    use base64::Engine as _;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
+
+    pub fn serialize<S: Serializer>(v: &[u8], s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&B64.encode(v))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        B64.decode(String::deserialize(d)?).map_err(serde::de::Error::custom)
+    }
+
+    pub mod opt {
+        use super::*;
+
+        pub fn serialize<S: Serializer>(v: &Option<Vec<u8>>, s: S) -> Result<S::Ok, S::Error> {
+            match v {
+                Some(b) => s.serialize_some(&B64.encode(b)),
+                None => s.serialize_none(),
+            }
+        }
+
+        pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Vec<u8>>, D::Error> {
+            Option::<String>::deserialize(d)?.map(|t| B64.decode(t).map_err(serde::de::Error::custom)).transpose()
+        }
+    }
+
+    pub mod pairs {
+        use super::*;
+
+        pub fn serialize<S: Serializer>(v: &[(String, Vec<u8>)], s: S) -> Result<S::Ok, S::Error> {
+            s.collect_seq(v.iter().map(|(k, b)| (k, B64.encode(b))))
+        }
+
+        pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<(String, Vec<u8>)>, D::Error> {
+            Vec::<(String, String)>::deserialize(d)?.into_iter().map(|(k, t)| Ok((k, B64.decode(t).map_err(serde::de::Error::custom)?))).collect()
+        }
+    }
+}
+
+/// A push to a branch of a roll apps service built from a Git URL that none of its environments
+/// follows (roll apps' push hook, checked against the repository before it's handed on): the
+/// branch's preview is made or moved to `sha`, or goes when `sha` is `None` (the branch was
+/// deleted). It may come more than once for the same sha.
 #[derive(Clone, Debug, PartialEq)]
+pub struct GitPush {
+    /// The roll apps service (`svc_…`).
+    pub service: String,
+    pub url: String,
+    pub branch: String,
+    pub sha: Option<String>,
+    /// The push's commit message (`[skip preview]` in it skips one).
+    pub message: String,
+    /// The pull request the push is of (GitHub's `pull_request`, GitLab's merge request events),
+    /// every claim checked against the repository's refs by roll apps first. A fork's is
+    /// `branch: "pull/<n>"`; a same-repo one names its real branch. `sha: None` with a pull: it
+    /// closed.
+    pub pull: Option<GitPull>,
+}
+
+/// What a Git URL service's preview says on its repository ([`Source::git_report_body`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct GitReportBody {
+    /// The commit status (`pending`, `success`, `failure`; `None`: no status, e.g. deleted).
+    pub state: Option<String>,
+    pub description: String,
+    /// The service's URL (plain: never the access token) or roll's dashboard.
+    pub target_url: Option<String>,
+    /// The pull request's comment, edited in place.
+    pub comment: String,
+}
+
+/// Posts a Git URL service's preview where its code lives (rolld: roll apps' GitHub App
+/// connection, a short-lived token for that one repository; never the service's git login).
+/// `Ok(false)` / `Ok(None)`: the service isn't connected, so nothing was posted.
+#[async_trait]
+pub trait GitReport: Send + Sync {
+    /// The commit status `roll/preview` on `sha`.
+    async fn status(&self, service: &str, sha: &str, state: &str, description: &str, target_url: Option<&str>) -> anyhow::Result<bool>;
+    /// Pull request `number` of `repo` (`owner/name`)'s comment, `existing` edited in place (made
+    /// again if it's gone): its id. Nothing (`None`) when the service is connected to another
+    /// repository now: a number and a comment id are that repository's.
+    async fn comment(&self, service: &str, repo: &str, number: u64, body: &str, existing: Option<u64>) -> anyhow::Result<Option<u64>>;
+}
+
+/// A pull request of a Git URL service's repository, as roll apps hands it on.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GitPull {
+    pub number: u64,
+    /// Untrusted text from the pull request: shown as plain words only, at most 200 characters.
+    pub title: String,
+    /// The pull request's page, built by roll apps from the provider's host and the number.
+    pub url: String,
+    /// From another repository (its head repo isn't the base's): it runs only once approved.
+    pub fork: bool,
+}
+
+/// A note's element to crop in a screenshot run: its page and its selector, both checked.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CropAsk {
     pub note: String,
     pub path: String,
@@ -189,7 +293,8 @@ pub struct CropAsk {
 }
 
 /// What a screenshot run takes: the project's other pages, and what it blanks first.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct ShotOptions {
     pub pages: Vec<String>,
     pub hide: Vec<String>,
@@ -207,9 +312,10 @@ pub struct ShotOptions {
 }
 
 /// One more page of a [`Shot`]: its path, its PNG, and what went wrong while it loaded.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PageShot {
     pub path: String,
+    #[serde(with = "png_b64")]
     pub png: Vec<u8>,
     pub errors: u32,
     /// What its session found besides the picture.
@@ -266,6 +372,13 @@ pub trait Source: Send + Sync {
     async fn report(&self, preview: &Preview, settings: &crate::Settings);
     /// The preview is gone; `teardown`: what the project's teardown said when it failed.
     async fn forget(&self, preview: &Preview, teardown: Option<&str>);
+    /// What a Git URL service's preview (no roll code change) says on its repository: the
+    /// `roll/preview` status and the pull request's comment, as a roll code change's preview
+    /// says them (`None`: nothing, e.g. a preview being deleted's status). `deleted`: its last
+    /// comment.
+    fn git_report_body(&self, _preview: &Preview, _settings: &crate::Settings, _deleted: Option<Option<&str>>) -> Option<GitReportBody> {
+        None
+    }
     /// The project's previews passed `alert.percent` of their monthly budget: tell the people
     /// who follow its repos (roll code: each repo's `budget` event). `Err` when it couldn't be
     /// queued: the engine tries again on its next pass.
@@ -314,6 +427,10 @@ pub struct Target {
     /// With `egress` `roll`: the hosts outside roll it may still reach, through the preview's
     /// egress proxy.
     pub egress_hosts: Vec<String>,
+    /// The `n`th rebuild a deploy hook asked for: built again at the same head with nothing
+    /// cached (a static site reads its content at build time). roll apps builds with `no_cache`;
+    /// the runtime builds at each start anyway.
+    pub rebuild: Option<i64>,
 }
 
 /// A deploy the backend accepted that hasn't finished (a build, a rollout): the converge leaves
@@ -352,6 +469,10 @@ pub struct SeedJob {
     pub revision: String,
     pub seed: crate::settings::Seed,
     pub env: Vec<(String, String)>,
+    /// What its code may reach, as the preview's services (`Settings::egress_for`): a fork's
+    /// migrations run with its branched data, so they're held to it too.
+    pub egress: crate::settings::EgressRule,
+    pub egress_hosts: Vec<String>,
 }
 
 /// A service in a project's catalog (roll apps): a repo's (built at a revision) or an image's.
@@ -394,6 +515,16 @@ pub trait Apps: Send + Sync {
     /// service until it succeeds, so nothing is left running).
     async fn remove(&self, preview: &str, service: &str) -> anyhow::Result<()>;
     async fn logs(&self, preview: &str, service: &str, lines: usize) -> Vec<String>;
+    /// The latest requests to the preview's services through roll, newest first (none where the
+    /// backend serves them itself).
+    fn requests(&self, _preview: &str) -> Vec<crate::RequestLine> {
+        Vec::new()
+    }
+    /// What the service uses right now, `(cores, resident bytes)`: `None` when it isn't running
+    /// (or the backend can't tell).
+    async fn metrics(&self, _preview: &str, _service: &str) -> Option<(f64, u64)> {
+        None
+    }
     /// The service's output as it comes, after its last `lines`: `None` where it can't be
     /// followed (the engine reads `logs` again every few seconds instead).
     async fn follow(&self, _preview: &str, _service: &str, _lines: usize) -> Option<tokio::sync::mpsc::Receiver<String>> {
@@ -403,7 +534,13 @@ pub trait Apps: Send + Sync {
     async fn seed(&self, _job: &SeedJob) -> anyhow::Result<(i32, String)> {
         anyhow::bail!("this server can't run seed commands")
     }
-    /// A PNG of the service's page as it first shows (`None`: this backend can't take one).
+    /// The project's own preview domain, verified (roll apps' project preview domain: a wildcard
+    /// custom domain, `*.preview.acme.dev`), as `(base, https)`: its previews answer on
+    /// `<label>.<base>`. `None`: none, or not verified yet (rolld's preview domain then).
+    async fn preview_domain(&self, _project: &str) -> Option<(String, bool)> {
+        None
+    }
+
     /// The memory the service's live deployment runs with in this preview (a backend's preview
     /// settings and the environment's own over the service's). `None`: not known, the catalog's.
     async fn memory_mb(&self, _preview: &str, _service: &str) -> Option<u32> {
@@ -441,13 +578,23 @@ pub trait Secrets: Send + Sync {
     /// allows production and the change is trusted). It expires by itself `expires_at` (ms) at the
     /// latest, so a teardown that never happened leaves nothing for long; each converge pushes
     /// that out.
-    async fn ensure(&self, project: &str, env: &str, base: &str, vars: &[(String, String)], trusted: bool, expires_at: i64) -> anyhow::Result<()>;
+    /// `branches`: what the preview branched (`(kind, parent)`): a link of the environment (or its
+    /// base) to one of those parents isn't resolved but comes back in [`Resolved::followed`].
+    #[allow(clippy::too_many_arguments)]
+    async fn ensure(&self, project: &str, env: &str, base: &str, vars: &[(String, String)], trusted: bool, expires_at: i64, branches: &[(Kind, String)]) -> anyhow::Result<()>;
     /// Every variable of `env`, inherited ones included, for `consumer` (a start of one service,
     /// a job): a dynamic link issues it a fresh credential under a lease ([`Resolved::leases`]),
     /// which the caller renews while it runs and revokes when it stops.
     /// `untrusted`: nothing of a protected environment resolves (directly, by reference, by
     /// import or through the base): what the preview's code reads is its own overrides and links.
-    async fn resolve(&self, project: &str, env: &str, untrusted: bool, consumer: &str) -> anyhow::Result<Resolved>;
+    /// `dynamic: false`: no dynamic credential is issued at all (those keys are left out), for a
+    /// read that starts nothing (masking a preview's logs).
+    async fn resolve(&self, project: &str, env: &str, untrusted: bool, dynamic: bool, consumer: &str) -> anyhow::Result<Resolved>;
+    /// The links of environment `env` (its own and what it inherits or imports): `(key, kind,
+    /// resource, field)`, with no values (nothing resolved, no lease).
+    async fn links(&self, _project: &str, _env: &str) -> anyhow::Result<Vec<(String, Kind, String, String)>> {
+        Ok(Vec::new())
+    }
     /// Push a lease's end out: `Some(its new end, ms)`, or `None` once it has ended (revoked,
     /// expired, past its longest life): a new start resolves a new credential then.
     async fn renew(&self, _project: &str, _lease: &str) -> anyhow::Result<Option<i64>> {
@@ -469,6 +616,12 @@ pub struct Resolved {
     pub problems: Vec<String>,
     /// The leases of the dynamic credentials among `values`.
     pub leases: Vec<String>,
+    /// Keys of links to a parent the preview branched, which roll secrets resolved nothing for:
+    /// `(name, kind, parent, field)`. The engine sets each from the branch ([`crate::names::follow`]).
+    pub followed: Vec<(String, Kind, String, String)>,
+    /// Keys of `values` linked to a field that isn't a credential (a host, a port, a database's
+    /// name): roll secrets' `plain`. A preview's logs show them; every other value is masked.
+    pub plain: Vec<String>,
 }
 
 /// Until roll secrets lands: no environments, so services get the project's overrides and the
@@ -477,11 +630,11 @@ pub struct NoSecrets;
 
 #[async_trait]
 impl Secrets for NoSecrets {
-    async fn ensure(&self, _: &str, _: &str, _: &str, _: &[(String, String)], _: bool, _: i64) -> anyhow::Result<()> {
+    async fn ensure(&self, _: &str, _: &str, _: &str, _: &[(String, String)], _: bool, _: i64, _: &[(Kind, String)]) -> anyhow::Result<()> {
         Ok(())
     }
 
-    async fn resolve(&self, _: &str, _: &str, _: bool, _: &str) -> anyhow::Result<Resolved> {
+    async fn resolve(&self, _: &str, _: &str, _: bool, _: bool, _: &str) -> anyhow::Result<Resolved> {
         Ok(Resolved::default())
     }
 

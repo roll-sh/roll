@@ -81,9 +81,54 @@ pub struct Inst {
     /// The stop a crash started: a start of the same instance waits for it, so it never stops
     /// the restarted process.
     stopping: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Its last hour by minute (Railway's per replica): `(minute, CPU seconds, seconds measured,
+    /// peak memory bytes)`, from the reaper's samples.
+    minutes: Mutex<std::collections::VecDeque<(i64, f64, f64, u64)>>,
+}
+
+/// An instance's last hour by minute ([`EnvLive::by_instance`]).
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct InstanceSeries {
+    pub instance: String,
+    pub deployment: String,
+    pub minutes: Vec<i64>,
+    /// Cores in use, on average over each minute.
+    pub cpu: Vec<f64>,
+    /// The minute's peak.
+    pub memory_bytes: Vec<u64>,
 }
 
 impl Inst {
+    /// One sample: `cpu_s` CPU seconds over `elapsed` seconds, and memory in use now.
+    fn record(&self, minute: i64, cpu_s: f64, elapsed: f64, memory: u64) {
+        let mut m = self.minutes.lock();
+        match m.back_mut() {
+            Some(last) if last.0 == minute => {
+                last.1 += cpu_s;
+                last.2 += elapsed;
+                last.3 = last.3.max(memory);
+            }
+            _ => m.push_back((minute, cpu_s, elapsed, memory)),
+        }
+        while m.front().is_some_and(|f| f.0 <= minute - 60) {
+            m.pop_front();
+        }
+    }
+
+    fn series(&self) -> Option<InstanceSeries> {
+        let m = self.minutes.lock();
+        if m.is_empty() {
+            return None;
+        }
+        Some(InstanceSeries {
+            instance: self.name.clone(),
+            deployment: self.deployment.clone(),
+            minutes: m.iter().map(|x| x.0).collect(),
+            cpu: m.iter().map(|x| if x.2 > 0.0 { (x.1 / x.2 * 1000.0).round() / 1000.0 } else { 0.0 }).collect(),
+            memory_bytes: m.iter().map(|x| x.3).collect(),
+        })
+    }
+
     fn new(name: String, deployment: String) -> Arc<Inst> {
         Arc::new(Inst {
             name,
@@ -98,6 +143,7 @@ impl Inst {
             private_checked: Mutex::new(None),
             health_fails: AtomicU32::new(0),
             stopping: Mutex::new(None),
+            minutes: Mutex::new(std::collections::VecDeque::new()),
         })
     }
 
@@ -230,6 +276,27 @@ pub struct Gate {
     pub preview: bool,
     /// Headers its answers carry.
     pub headers: Vec<crate::model::HeaderRule>,
+    /// Paths another service answers, the first that takes a path deciding.
+    pub routes: Vec<crate::model::Route>,
+    /// Traces are on: the proxy adds its own span to each request's trace.
+    pub traces: bool,
+    /// Its pages carry roll's Web Vitals tag.
+    pub vitals: bool,
+    /// Its challenge rules' key ([`crate::challenge`]), when it has such a rule.
+    pub challenge_key: Option<Vec<u8>>,
+}
+
+/// A rate-limit bucket: which (0 the environment's, 1 + i firewall rule i's) and whose.
+type BucketKey = (u16, Option<std::net::IpAddr>);
+
+/// A firewall's answer: in, a 403, or in under a rule's own limit (its bucket, 1 + its index).
+#[derive(Debug, PartialEq)]
+pub enum Verdict {
+    Allow,
+    Deny,
+    Limit(u16, crate::model::RateLimit),
+    /// In with a pass ([`crate::challenge`]); else its page.
+    Challenge,
 }
 
 /// Clients a rate limit remembers at most (a full bucket is the same as none, so those go first).
@@ -238,8 +305,16 @@ const MAX_BUCKETS: usize = 100_000;
 impl Gate {
     /// Whether its firewall lets the request in: the first rule that matches decides; none
     /// matching, it does.
-    pub fn firewall_allows(&self, method: &str, path: &str, user_agent: &str) -> bool {
-        self.firewall.iter().find(|r| r.matches(method, path, user_agent)).is_none_or(|r| r.action == crate::model::FirewallAction::Allow)
+    /// What its firewall says of the request: the first rule that matches decides; none lets it
+    /// in.
+    pub fn firewall_verdict(&self, method: &str, path: &str, user_agent: &str) -> Verdict {
+        match self.firewall.iter().enumerate().find(|(_, r)| r.matches(method, path, user_agent)) {
+            None => Verdict::Allow,
+            Some((_, r)) if r.action == crate::model::FirewallAction::Allow => Verdict::Allow,
+            Some((i, r)) if r.action == crate::model::FirewallAction::Limit => Verdict::Limit(i as u16 + 1, crate::model::RateLimit { per_minute: r.per_minute.unwrap_or(60), burst: r.burst }),
+            Some((_, r)) if r.action == crate::model::FirewallAction::Challenge => Verdict::Challenge,
+            Some(_) => Verdict::Deny,
+        }
     }
 
     /// Whether `client` (the address the fleet vouches for) gets in. None, with a list: no.
@@ -378,15 +453,19 @@ pub struct EnvLive {
     gate: Mutex<Option<Arc<Gate>>>,
     gate_gen: AtomicU64,
     /// Each client's tokens and when they were counted (its rate limit; None: no address).
-    buckets: Mutex<HashMap<Option<std::net::IpAddr>, (f64, Instant)>>,
+    /// Each client's tokens, by bucket: 0 the environment's rate limit, 1 + i firewall rule i's.
+    buckets: Mutex<HashMap<BucketKey, (f64, Instant)>>,
     /// CPU its awake instances used and could have used, per tick, for `cpu_window` (only what
     /// the runtime measures).
     cpu_samples: Mutex<std::collections::VecDeque<(Instant, f64, f64)>>,
+    /// The same for memory: bytes in use and the instances' limits, per tick.
+    mem_samples: Mutex<std::collections::VecDeque<(Instant, f64, f64)>>,
     /// The instances CPU last asked for: kept while the window fills again after a scale-out,
     /// so the new instance isn't taken straight back in.
     cpu_need: AtomicU32,
     last_tick: Mutex<Option<Instant>>,
-    last_health: Mutex<Option<Instant>>,
+    /// When each serving deployment's instances were last health-checked.
+    last_health: Mutex<HashMap<String, Instant>>,
     client: hyper_util::client::legacy::Client<hyper_util::client::legacy::connect::HttpConnector, axum::body::Body>,
     /// HTTP/2 without TLS, for an h2c app's health checks.
     client_h2: hyper_util::client::legacy::Client<hyper_util::client::legacy::connect::HttpConnector, axum::body::Body>,
@@ -433,9 +512,10 @@ impl EnvLive {
             gate_gen: AtomicU64::new(0),
             buckets: Mutex::new(HashMap::new()),
             cpu_samples: Mutex::new(std::collections::VecDeque::new()),
+            mem_samples: Mutex::new(std::collections::VecDeque::new()),
             cpu_need: AtomicU32::new(0),
             last_tick: Mutex::new(None),
-            last_health: Mutex::new(None),
+            last_health: Mutex::new(HashMap::new()),
             client: hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new()).build_http(),
             client_h2: hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new()).http2_only(true).build_http(),
         })
@@ -935,6 +1015,11 @@ impl EnvLive {
     /// One request from `client` under `limit`: let through (a token taken), or how long until
     /// the next token.
     pub fn take_token(&self, client: Option<std::net::IpAddr>, limit: &crate::model::RateLimit) -> Result<(), Duration> {
+        self.take_token_in(0, client, limit)
+    }
+
+    /// [`Self::take_token`] in one of its buckets (a firewall rule's own: 1 + its index).
+    pub fn take_token_in(&self, bucket: u16, client: Option<std::net::IpAddr>, limit: &crate::model::RateLimit) -> Result<(), Duration> {
         let (rate, burst) = (limit.per_minute as f64 / 60.0, limit.burst() as f64);
         // An IPv6 client counts by its /64: one host has the whole of it to rotate through.
         let client = client.map(|ip| match ip {
@@ -942,8 +1027,9 @@ impl EnvLive {
             v4 => v4,
         });
         let now = Instant::now();
+        let key = (bucket, client);
         let mut b = self.buckets.lock();
-        if b.len() >= MAX_BUCKETS && !b.contains_key(&client) {
+        if b.len() >= MAX_BUCKETS && !b.contains_key(&key) {
             // Full ones first: they're the same as no entry. Then the longest unseen, never
             // everyone's (a flood of new addresses mustn't reset the limited ones).
             b.retain(|_, (tokens, at)| *tokens + now.duration_since(*at).as_secs_f64() * rate < burst);
@@ -956,7 +1042,7 @@ impl EnvLive {
                 b.retain(|_, (_, at)| *at > nth);
             }
         }
-        let (tokens, at) = b.entry(client).or_insert((burst, now));
+        let (tokens, at) = b.entry(key).or_insert((burst, now));
         *tokens = (*tokens + now.duration_since(*at).as_secs_f64() * rate).min(burst);
         *at = now;
         if *tokens >= 1.0 {
@@ -1642,22 +1728,29 @@ impl EnvLive {
         }
         let now = Instant::now();
         let insts = self.meter_tick(now).await;
-        let due = {
-            let mut last = self.last_health.lock();
-            let due = last.is_none_or(|t| now.duration_since(t) >= self.cfg.health_every);
-            if due {
-                *last = Some(now);
-            }
-            due
-        };
-        // Each deployment's instances by its own health path (a canary's may differ).
+        // Each deployment's instances by its own health path and interval (a canary's may differ).
         let serving: Vec<Arc<Template>> = self.template().into_iter().chain(self.canary.lock().as_ref().map(|(t, _)| t.clone())).collect();
-        for tpl in serving.iter().filter(|_| due) {
+        let due: Vec<&Arc<Template>> = {
+            let mut last = self.last_health.lock();
+            last.retain(|d, _| serving.iter().any(|t| &t.deployment == d));
+            serving
+                .iter()
+                .filter(|t| {
+                    let every = t.run.health_every_s.map_or(self.cfg.health_every, |s| Duration::from_secs(s as u64));
+                    let due = last.get(&t.deployment).is_none_or(|at| now.duration_since(*at) >= every);
+                    if due {
+                        last.insert(t.deployment.clone(), now);
+                    }
+                    due
+                })
+                .collect()
+        };
+        for tpl in due {
             if tpl.run.kind == RunType::Web
                 && let Some(path) = tpl.run.health_path.as_deref()
             {
                 let mine: Vec<Arc<Inst>> = insts.iter().filter(|i| i.deployment == tpl.deployment).cloned().collect();
-                self.check_health(&mine, path, tpl.run.concurrency, tpl.run.h2c).await;
+                self.check_health(&mine, path, &tpl.run).await;
             }
         }
         if self.held.load(Ordering::SeqCst) {
@@ -1695,8 +1788,10 @@ impl EnvLive {
         };
         let insts = self.instances();
         let (mut cpu, mut mem, mut up) = (0.0, 0u64, 0usize);
-        // What was measured, and what those instances could have used (`run.cpu` each).
+        // What was measured, and what those instances could have used (`run.cpu` each), and
+        // their memory against its limits.
         let (mut used, mut capacity) = (0.0, 0.0);
+        let (mut mem_used, mut mem_cap) = (0.0, 0.0);
         for i in &insts {
             if !matches!(i.phase(), Phase::Running(_)) {
                 continue;
@@ -1707,6 +1802,7 @@ impl EnvLive {
                     let mut seen = i.cpu_seen.lock();
                     if let Some(prev) = *seen {
                         let d = u.cpu_ns.saturating_sub(prev) as f64 / 1e9;
+                        i.record(now_ms() / 60_000, d, elapsed, u.memory_bytes);
                         cpu += d;
                         if let Some(tpl) = self.serving(&i.deployment) {
                             used += d;
@@ -1715,6 +1811,10 @@ impl EnvLive {
                     }
                     *seen = Some(u.cpu_ns);
                     mem += u.memory_bytes;
+                    if let Some(tpl) = self.serving(&i.deployment) {
+                        mem_used += u.memory_bytes as f64;
+                        mem_cap += ((tpl.run.memory_mb as u64) << 20) as f64;
+                    }
                 }
                 // A runtime that can't say what an instance uses (Fargate, which bills by size ×
                 // time) meters what it was given: its CPU for the interval and its memory.
@@ -1729,20 +1829,38 @@ impl EnvLive {
         if up > 0 || elapsed > 0.0 {
             self.meter.lock().sample(now_ms(), cpu, mem, elapsed, up);
         }
-        let mut s = self.cpu_samples.lock();
-        if capacity > 0.0 {
-            s.push_back((now, used, capacity));
-        }
-        while s.front().is_some_and(|(at, ..)| now.duration_since(*at) > self.cfg.cpu_window) {
-            s.pop_front();
+        for (samples, used, cap) in [(&self.cpu_samples, used, capacity), (&self.mem_samples, mem_used, mem_cap)] {
+            let mut s = samples.lock();
+            if cap > 0.0 {
+                s.push_back((now, used, cap));
+            }
+            while s.front().is_some_and(|(at, ..)| now.duration_since(*at) > self.cfg.cpu_window) {
+                s.pop_front();
+            }
         }
         insts
+    }
+
+    /// Its instances' last hour by minute (those it has now, that were measured), by name.
+    pub fn by_instance(&self) -> Vec<InstanceSeries> {
+        let mut v: Vec<InstanceSeries> = self.instances().iter().filter_map(|i| i.series()).collect();
+        v.sort_by(|a, b| a.instance.cmp(&b.instance));
+        v
     }
 
     /// Its awake instances' CPU over the last `cpu_window`, in percent of what they could use;
     /// None until the window is nearly full of measurements.
     fn cpu_load(&self) -> Option<f64> {
-        let s = self.cpu_samples.lock();
+        self.load(&self.cpu_samples)
+    }
+
+    /// Its awake instances' memory over the same window, in percent of their limits.
+    fn mem_load(&self) -> Option<f64> {
+        self.load(&self.mem_samples)
+    }
+
+    fn load(&self, samples: &Mutex<std::collections::VecDeque<(Instant, f64, f64)>>) -> Option<f64> {
+        let s = samples.lock();
         let span = s.back()?.0.duration_since(s.front()?.0);
         if span < self.cfg.cpu_window.mul_f64(0.8) {
             return None;
@@ -1777,7 +1895,9 @@ impl EnvLive {
     /// answers errors with its port still open) replace it: it's out of rotation and stopped
     /// as a crash (counted toward a crash loop), and the next request or the floor starts a
     /// fresh one.
-    async fn check_health(&self, insts: &[Arc<Inst>], path: &str, concurrency: u32, h2c: bool) {
+    async fn check_health(&self, insts: &[Arc<Inst>], path: &str, run: &Run) {
+        let (concurrency, h2c) = (run.concurrency, run.h2c);
+        let failures = run.health_failures.unwrap_or(self.cfg.health_failures);
         // An instance with as many requests as it takes is busy, not broken: a probe that queues
         // behind them proves nothing, so it isn't checked until it has room.
         let running: Vec<(&Arc<Inst>, SocketAddr)> = insts
@@ -1795,9 +1915,9 @@ impl EnvLive {
                 continue;
             }
             let n = i.health_fails.fetch_add(1, Ordering::SeqCst) + 1;
-            self.log.stream(Stream::System).line(format!("{}: health check {path} failed ({n} of {})", i.name, self.cfg.health_failures));
+            self.log.stream(Stream::System).line(format!("{}: health check {path} failed ({n} of {failures})", i.name));
             // Still the instance that was checked (not stopped or replaced meanwhile).
-            if n >= self.cfg.health_failures && i.phase() == Phase::Running(Some(addr)) {
+            if n >= failures && i.phase() == Phase::Running(Some(addr)) {
                 // Out of rotation now; what it's serving gets the drain to finish.
                 self.crashed_with(i, &format!("its health check {path} failed {n} times in a row"), self.cfg.drain);
             }
@@ -1814,9 +1934,14 @@ impl EnvLive {
         // Fewer than needed by the requests in flight for a while → one goes.
         let in_flight: u32 = insts.iter().map(|i| i.in_flight()).sum();
         let mut needed = in_flight.div_ceil(run.concurrency).max(run.min_instances).max(1);
-        // On CPU too: as many as would bring the average under the target.
-        if let (Some(target), Some(load)) = (run.cpu_target, self.cpu_load().filter(|_| awake > 0)) {
-            let by_cpu = ((awake as f64 * load / target as f64).ceil() as u32).min(run.max_instances.max(1));
+        // On CPU and memory too: as many as would bring the average under the target (the one
+        // that asks for more decides).
+        let by = |target: Option<u32>, load: Option<f64>, what: &'static str| -> Option<(u32, f64, u32, &'static str)> {
+            let (target, load) = (target?, load.filter(|_| awake > 0)?);
+            Some((((awake as f64 * load / target as f64).ceil() as u32).min(run.max_instances.max(1)), load, target, what))
+        };
+        let wanted = [by(run.cpu_target, self.cpu_load(), "CPU"), by(run.memory_target, self.mem_load(), "memory")].into_iter().flatten().max_by_key(|(n, ..)| *n);
+        if let Some((by_cpu, load, target, what)) = wanted {
             self.cpu_need.store(by_cpu, Ordering::SeqCst);
             if by_cpu > awake && awake < run.max_instances {
                 // One more at a time, then a fresh window to judge it by.
@@ -1826,13 +1951,14 @@ impl EnvLive {
                     if self.start(&inst, run, None, deadline).await.is_ok() {
                         awake += 1;
                         self.cpu_samples.lock().clear();
+                        self.mem_samples.lock().clear();
                         self.cpu_need.store(awake, Ordering::SeqCst);
-                        self.log.stream(Stream::System).line(format!("scaled out: CPU at {load:.0}% of the {target}% target, {awake} instances"));
+                        self.log.stream(Stream::System).line(format!("scaled out: {what} at {load:.0}% of the {target}% target, {awake} instances"));
                     }
                 }
             }
             needed = needed.max(by_cpu);
-        } else if run.cpu_target.is_some() {
+        } else if run.cpu_target.is_some() || run.memory_target.is_some() {
             needed = needed.max(self.cpu_need.load(Ordering::SeqCst));
         }
         let over = awake > needed;
@@ -1938,6 +2064,14 @@ impl EnvLive {
         let mut up = 0;
         for i in &insts {
             match i.phase() {
+                // Up but failing its health command (a consumer that hung): replaced as a crash.
+                Phase::Running(_) if tpl.spec.health.is_some() && self.runtime.unhealthy(&i.name).await => {
+                    let h = tpl.spec.health.as_ref().expect("checked");
+                    let why = format!("its health command failed {} times in a row", h.failures);
+                    self.log.stream(Stream::System).line(format!("{}: {why}", i.name));
+                    self.crashed(i, &why);
+                    self.after_stop(i, run, false, &why);
+                }
                 Phase::Running(_) if self.runtime.running(&i.name).await => {
                     up += 1;
                     // A minute up: its crashes are no longer in a row.
@@ -2141,10 +2275,13 @@ mod tests {
                 cpu: 0.5,
                 memory_mb: 512,
                 network: None,
+                closed: false,
                 aliases: vec![],
                 volume: None,
                 idle_stop_s: None,
                 registry: None,
+                files: vec![],
+                health: None,
             },
             run,
             spa: false,

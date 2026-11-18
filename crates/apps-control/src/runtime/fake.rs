@@ -5,7 +5,9 @@
 //! variables: `FAKE_UNHEALTHY=1` answers 500 on every path, `FAKE_BOOT_MS` delays its first
 //! answer, `FAKE_SLOW_MS` delays every answer (requests pile up; one still waiting when the instance
 //! stops answers 502, as a killed process's would; `/sleep/<ms>` is one such request), `FAKE_MISSING=<prefix>` answers
-//! 404 for paths under it, `FAKE_EXIT=<code>` makes it a
+//! 404 for paths under it, `FAKE_CACHE=<value>` answers with it as `Cache-Control` (and `Cache-Tag: <the path's first
+//! segment>, all`), and counts
+//! the requests it answers at `/count`, `FAKE_EXIT=<code>` makes it a
 //! job that exits with that code (cron runs, workers). The fake builder fails a build whose tree
 //! has a file `FAIL_BUILD`, and takes as many milliseconds as a file `SLOW_BUILD` says.
 
@@ -60,6 +62,11 @@ pub struct Fake {
     pub shared: std::sync::atomic::AtomicBool,
     instances: Mutex<HashMap<String, FakeInstance>>,
     networks: Mutex<Vec<String>>,
+    /// Networks made with no route out, and the egress proxies asked for (network, hosts).
+    closed: Mutex<Vec<String>>,
+    pub proxies: Mutex<Vec<(String, Vec<String>)>>,
+    /// What the egress proxies say they refused ([`Fake::refuse`]).
+    refused: Mutex<Vec<super::egress::Refused>>,
     /// Tars written into instances (`copy_to`), by instance and directory, read back as they were.
     copied: Mutex<HashMap<(String, String), Vec<u8>>>,
     /// What a volume reports it takes, over its contents' length ([`Fake::set_volume_used`]).
@@ -69,6 +76,10 @@ pub struct Fake {
     pub pulled_as: Mutex<Option<String>>,
     /// Each build's `no_cache` and its Dockerfile, in order.
     pub built: Mutex<Vec<(bool, String)>>,
+    /// Each build's variables' names, in order.
+    pub build_vars: Mutex<Vec<Vec<String>>>,
+    /// Each build's closed network, in order (none: the default one).
+    pub build_networks: Mutex<Vec<Option<String>>>,
     /// The manifests of the image archives it loaded.
     pub loaded: Mutex<Vec<String>>,
     /// Images removed ([`Builder::remove_image`]).
@@ -79,6 +90,10 @@ pub struct Fake {
     oom: Mutex<std::collections::HashSet<String>>,
     /// Instances busy at this share of their CPU ([`Fake::set_busy`]), from when it was set.
     busy: Mutex<HashMap<String, (f64, std::time::Instant)>>,
+    /// Instances whose health command fails from now on ([`Fake::fail_health`]).
+    failing: Mutex<std::collections::HashSet<String>>,
+    /// Memory an instance says it uses ([`Fake::set_memory`]; else 64 MiB).
+    memory: Mutex<HashMap<String, u64>>,
     /// Volumes' contents (what a backup reads and a restore writes).
     volumes: Mutex<HashMap<String, Vec<u8>>>,
     /// What a tag points at in its registry ([`Fake::move_tag`]); zeros when unset.
@@ -98,6 +113,17 @@ impl Fake {
         self.busy.lock().insert(name.to_string(), (share, std::time::Instant::now()));
     }
 
+    /// Instance `name`'s health command fails from now on (a consumer that hung), until it starts
+    /// again.
+    pub fn fail_health(&self, name: &str) {
+        self.failing.lock().insert(name.to_string());
+    }
+
+    /// Instance `name` uses this many bytes of memory from now on.
+    pub fn set_memory(&self, name: &str, bytes: u64) {
+        self.memory.lock().insert(name.to_string(), bytes);
+    }
+
     /// Another service connects to `name`'s port while it sleeps (what Docker counts in its
     /// sandbox).
     pub fn connect(&self, name: &str) {
@@ -111,6 +137,11 @@ impl Fake {
 
     pub fn state(&self, name: &str) -> Option<FakeState> {
         self.instances.lock().get(name).map(|i| i.state)
+    }
+
+    /// What instance `name` was made from.
+    pub fn spec(&self, name: &str) -> Option<InstanceSpec> {
+        self.instances.lock().get(name).map(|i| i.spec.clone())
     }
 
     /// Instances (name, deployment, state) of a service, by name.
@@ -190,6 +221,16 @@ impl Fake {
         self.networks.lock().clone()
     }
 
+    /// The networks made with no route out.
+    pub fn closed_networks(&self) -> Vec<String> {
+        self.closed.lock().clone()
+    }
+
+    /// An egress proxy refused `host` (as one would, an instance having tried it).
+    pub fn refuse(&self, host: &str, private: bool) {
+        self.refused.lock().push(super::egress::Refused { host: host.to_string(), private });
+    }
+
     pub fn count(c: &AtomicU64) -> u64 {
         c.load(Ordering::SeqCst)
     }
@@ -204,6 +245,8 @@ async fn serve(spec: InstanceSpec, listener: tokio::net::TcpListener, log: LogSi
     let boot = var(&spec, "FAKE_BOOT_MS").and_then(|v| v.parse().ok()).map(Duration::from_millis);
     let slow = var(&spec, "FAKE_SLOW_MS").and_then(|v| v.parse().ok()).map(Duration::from_millis);
     let missing = var(&spec, "FAKE_MISSING").map(str::to_string);
+    let cache = var(&spec, "FAKE_CACHE").and_then(|v| axum::http::HeaderValue::from_str(v).ok());
+    let answered = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let echo: Vec<(String, String)> = var(&spec, "FAKE_ECHO")
         .map(|names| names.split(',').filter_map(|n| var(&spec, n).map(|v| (n.to_string(), v.to_string()))).collect())
         .unwrap_or_default();
@@ -213,9 +256,13 @@ async fn serve(spec: InstanceSpec, listener: tokio::net::TcpListener, log: LogSi
     log.line(format!("listening on {}", spec.port.unwrap_or(0)));
     let (name, dep, kill) = (spec.name.clone(), spec.deployment.clone(), killed.clone());
     let app = axum::Router::new().fallback(move |req: Request| {
-        let (name, dep, echo, sick, missing, killed) = (name.clone(), dep.clone(), echo.clone(), sick.clone(), missing.clone(), kill.clone());
+        let (name, dep, echo, sick, missing, killed, cache, answered) = (name.clone(), dep.clone(), echo.clone(), sick.clone(), missing.clone(), kill.clone(), cache.clone(), answered.clone());
         async move {
             use axum::response::IntoResponse;
+            if req.uri().path() == "/count" {
+                return answered.load(std::sync::atomic::Ordering::SeqCst).to_string().into_response();
+            }
+            answered.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if missing.as_deref().is_some_and(|m| req.uri().path().starts_with(m)) {
                 return (axum::http::StatusCode::NOT_FOUND, axum::Json(serde_json::json!({ "path": req.uri().path() }))).into_response();
             }
@@ -243,7 +290,16 @@ async fn serve(spec: InstanceSpec, listener: tokio::net::TcpListener, log: LogSi
             let cookie = req.headers().get("cookie").and_then(|h| h.to_str().ok()).unwrap_or("").to_string();
             let version = format!("{:?}", req.version());
             let te = req.headers().get("te").and_then(|h| h.to_str().ok()).unwrap_or("").to_string();
-            (status, axum::Json(serde_json::json!({ "instance": name, "deployment": dep, "path": req.uri().path(), "vars": vars, "forwarded_host": host, "cookie": cookie, "version": version, "te": te }))).into_response()
+            let traceparent = req.headers().get("traceparent").and_then(|h| h.to_str().ok()).unwrap_or("").to_string();
+            let mut r = (status, axum::Json(serde_json::json!({ "instance": name, "deployment": dep, "path": req.uri().path(), "vars": vars, "forwarded_host": host, "cookie": cookie, "version": version, "te": te, "traceparent": traceparent }))).into_response();
+            if let Some(c) = cache {
+                r.headers_mut().insert(axum::http::header::CACHE_CONTROL, c);
+                let seg = req.uri().path().trim_start_matches('/').split('/').next().unwrap_or("").to_string();
+                if let Ok(t) = axum::http::HeaderValue::from_str(&format!("{seg}, all")) {
+                    r.headers_mut().insert("cache-tag", t);
+                }
+            }
+            r
         }
     });
     // Served by hand so a kill ends every connection too, kept-alive ones included, as the
@@ -314,6 +370,8 @@ impl Runtime for Fake {
         if let Some(a) = self.accepted.lock().get_mut(name) {
             a.0 = 0;
         }
+        // A fresh process isn't the one that hung: its health starts over, as Docker's does.
+        self.failing.lock().remove(name);
         let spec = {
             let m = self.instances.lock();
             let i = m.get(name).ok_or_else(|| anyhow::anyhow!("no instance {name}"))?;
@@ -498,6 +556,10 @@ impl Runtime for Fake {
         matches!(self.state(name), Some(FakeState::Running | FakeState::Paused))
     }
 
+    async fn unhealthy(&self, name: &str) -> bool {
+        self.instances.lock().get(name).is_some_and(|i| i.spec.health.is_some() && i.state == FakeState::Running) && self.failing.lock().contains(name)
+    }
+
     async fn adopt(&self, spec: &InstanceSpec, _log: LogSink) -> Option<super::Adopted> {
         let m = self.instances.lock();
         let i = m.get(&spec.name).filter(|i| i.spec.deployment == spec.deployment)?;
@@ -524,7 +586,7 @@ impl Runtime for Fake {
             FakeState::Running => {
                 let cpu = self.instances.lock().get(name).map_or(0.0, |i| i.spec.cpu);
                 let grown = self.busy.lock().get(name).map_or(0.0, |(share, since)| share * cpu * since.elapsed().as_secs_f64() * 1e9);
-                Some(Usage { cpu_ns: 1_000_000 + grown as u64, memory_bytes: 64 << 20 })
+                Some(Usage { cpu_ns: 1_000_000 + grown as u64, memory_bytes: self.memory.lock().get(name).copied().unwrap_or(64 << 20) })
             }
             _ => None,
         }
@@ -534,16 +596,42 @@ impl Runtime for Fake {
         self.instances.lock().values().filter(|i| service.is_none_or(|s| i.spec.service == s)).map(|i| i.spec.name.clone()).collect()
     }
 
-    async fn ensure_network(&self, name: &str, _service: &str) -> anyhow::Result<()> {
+    async fn list_env(&self, service: &str, env: &str) -> Vec<String> {
+        self.instances.lock().values().filter(|i| i.spec.service == service && i.spec.env == env).map(|i| i.spec.name.clone()).collect()
+    }
+
+    async fn ensure_network(&self, name: &str, _service: &str, closed: bool) -> anyhow::Result<()> {
         let mut n = self.networks.lock();
         if !n.iter().any(|x| x == name) {
             n.push(name.to_string());
+            if closed {
+                self.closed.lock().push(name.to_string());
+            }
         }
         Ok(())
     }
 
+    fn closes_egress(&self) -> bool {
+        true
+    }
+
+    async fn egress_proxy(&self, network: &str, _service: &str, hosts: &[String]) -> anyhow::Result<String> {
+        self.proxies.lock().push((network.to_string(), hosts.to_vec()));
+        Ok(super::egress::proxy_url(network, hosts))
+    }
+
+    async fn build_egress(&self, project: &str) -> anyhow::Result<Option<super::BuildEgress>> {
+        let network = format!("roll-apps-build-{}", project.strip_prefix("prj_").unwrap_or(project));
+        Ok(Some(super::BuildEgress { network: network.clone(), proxy: "http://192.0.2.1:3128".into(), builder: network }))
+    }
+
+    fn egress_refused(&self, _network: &str, _hosts: &[String]) -> Vec<super::egress::Refused> {
+        self.refused.lock().clone()
+    }
+
     async fn remove_network(&self, name: &str) {
         self.networks.lock().retain(|x| x != name);
+        self.closed.lock().retain(|x| x != name);
     }
 
     async fn remove_volume(&self, name: &str) {
@@ -612,6 +700,8 @@ impl Builder for Fake {
         }
         let dockerfile = std::fs::read_to_string(job.context.join(&job.dockerfile)).map_err(|_| anyhow::anyhow!("no Dockerfile in the context"))?;
         self.built.lock().push((job.no_cache, dockerfile));
+        self.build_vars.lock().push(job.env.iter().map(|(k, _)| k.clone()).collect());
+        self.build_networks.lock().push(job.egress.as_ref().map(|e| e.network.clone()));
         log.line("#2 DONE");
         Ok(job.tag.clone())
     }
