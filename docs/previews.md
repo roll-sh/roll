@@ -306,6 +306,18 @@ behind the `Apps` trait:
     apps services are checked by roll apps.
 - The tree is copied into the container, never bind-mounted.
 - Each service answers at `<service>-<slug>.<domain>`.
+- A project with its own preview domain (roll apps' project preview domain: a verified wildcard
+  custom domain, `*.preview.acme.dev`) has its previews answer at `<service>-<slug>.preview.acme.dev`
+  instead (Vercel's preview deployment suffix), so cookies scoped to the team's domain and OAuth
+  redirect allowlists work.
+  - **Who serves what:** on roll's runtime, rolld's preview router serves those names, and only
+    for the project that holds the domain. On roll apps, the `pv-` environment says its label
+    (`preview_host`) and apps routes the name to it.
+  - **Changes:** the domain is read from roll apps at most once a minute. When it's verified,
+    changed or removed, the project's runtime services' URLs move and every preview reports
+    again, so the pull request's links follow.
+  - **TLS:** plain HTTP for now, on a local node or behind the user's own TLS proxy. TLS waits on
+    wildcard certificates over DNS-01 (roll apps' "Wildcard certificates", on the edge).
   - `<slug>` is `pr<number>` for a GitHub PR, `c<number>` for a roll code change, or the branch
     name for a branch preview, then `-<project name>`.
   - Example: `web-pr482-shop.preview.roll.site`.

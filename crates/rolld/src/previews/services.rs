@@ -138,7 +138,20 @@ impl roll_previews::ports::Apps for RollApps {
         if self.feedback {
             body["feedback"] = json!(t.feedback);
         }
-        self.api.call(Method::PUT, &path, Some(body)).await?;
+        // Its label under the project's own preview domain (`<label>.preview.acme.dev`, roll apps'
+        // project preview domain): apps routes that name to this environment.
+        body["preview_host"] = json!(t.host);
+        match self.api.call(Method::PUT, &path, Some(body.clone())).await {
+            // A roll apps that predates project preview domains refuses the field: the environment
+            // is made without it (its rolld preview URL still works).
+            Err(e) if e.downcast_ref::<super::Refused>().is_some_and(|r| r.status.as_u16() == 400 && r.error == "unknown field preview_host") => {
+                body.as_object_mut().map(|o| o.remove("preview_host"));
+                self.api.call(Method::PUT, &path, Some(body)).await?;
+            }
+            r => {
+                r?;
+            }
+        }
         // Every variable the preview sets: the branches' plain names and the project's overrides,
         // and each prefixed link to a branched parent pointed at the branch (a link is roll apps'
         // own variable, which would still reach production).
@@ -225,6 +238,15 @@ impl roll_previews::ports::Apps for RollApps {
         self.settle(&path, deployment).await?;
         let env = self.api.get(&path).await?;
         Ok(s(&env["url"]))
+    }
+
+    /// The project's verified preview domain (`GET /v1/apps/projects/{project}/preview-domain`:
+    /// `{hostname: "*.preview.acme.dev", status, tls, …}`; 404 when it has none).
+    async fn preview_domain(&self, project: &str) -> Option<(String, bool)> {
+        let d = self.api.get(&format!("/v1/apps/projects/{}/preview-domain", seg(project))).await.ok()?;
+        (d["status"].as_str() == Some("active")).then_some(())?;
+        let base = d["hostname"].as_str()?.strip_prefix("*.")?.to_ascii_lowercase();
+        Some((base, d["tls"].as_str() == Some("issued")))
     }
 
     async fn memory_mb(&self, preview: &str, service: &str) -> Option<u32> {
@@ -477,6 +499,10 @@ impl roll_previews::ports::Apps for Services {
 
     async fn memory_mb(&self, preview: &str, service: &str) -> Option<u32> {
         self.apps.memory_mb(preview, service).await
+    }
+
+    async fn preview_domain(&self, project: &str) -> Option<(String, bool)> {
+        self.apps.preview_domain(project).await
     }
 
     async fn deploy(&self, t: &roll_previews::ports::Target) -> anyhow::Result<Option<String>> {

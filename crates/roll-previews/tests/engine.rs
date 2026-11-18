@@ -1310,3 +1310,23 @@ async fn data_at_branches_from_history_where_there_is_some() {
     assert!(said.iter().any(|m| m.contains("keeps no history: branched as of now")), "{said:?}");
 }
 
+
+/// A project with its own preview domain (roll apps' verified wildcard, `*.preview.acme.dev`)
+/// has its previews' services answer under it, and only its previews: a label of another
+/// project's preview under that domain names nothing.
+#[tokio::test]
+async fn a_projects_own_preview_domain_serves_only_its_previews() {
+    let e = env(json!({ "enabled": true }));
+    *e.apps.domain.lock() = Some(("preview.acme.dev".into(), false));
+    e.code.open(change("chg_d", 7));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_d").unwrap().unwrap();
+    let web = e.engine.store.services(&p.id).unwrap().into_iter().find(|s| s.name == "web").unwrap();
+    assert_eq!(web.url, format!("http://{}.preview.acme.dev", web.host), "its URL is on the project's domain");
+    assert_eq!(e.engine.store.service_for_domain_host(&web.host, "preview.acme.dev").unwrap(), Some((p.id.clone(), "web".to_string())));
+    // Another project's own domain doesn't reach this project's previews.
+    let none = |_: &str| String::new();
+    e.engine.store.set_project_domain("prj_other", Some(("preview.other.dev", false)), &none, &none).unwrap();
+    assert_eq!(e.engine.store.service_for_domain_host(&web.host, "preview.other.dev").unwrap(), None, "only the domain's own project's previews");
+    assert_eq!(e.engine.store.service_for_domain_host(&web.host, "preview.unknown.dev").unwrap(), None);
+}

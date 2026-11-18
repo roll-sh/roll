@@ -155,8 +155,14 @@ impl Default for RuntimeConfig {
     }
 }
 
+/// How long the bases of projects' own preview domains are kept before they're read again.
+const DOMAINS_FOR: Duration = Duration::from_secs(10);
+
 pub struct Runtime {
     cfg: RuntimeConfig,
+    /// Projects' own preview domains' bases, and when they were read (every request is matched
+    /// against them, so the store is read at most every [`DOMAINS_FOR`]).
+    domains: Mutex<(Option<std::time::Instant>, Arc<std::collections::HashSet<String>>)>,
     iso: Arc<dyn Isolation>,
     trees: Arc<dyn Trees>,
     store: Arc<Store>,
@@ -198,6 +204,7 @@ pub fn container_name(host: &str) -> String {
 impl Runtime {
     pub fn new(cfg: RuntimeConfig, iso: Arc<dyn Isolation>, trees: Arc<dyn Trees>, store: Arc<Store>) -> Arc<Runtime> {
         Arc::new_cyclic(|me| Runtime {
+            domains: Mutex::new((None, Arc::new(std::collections::HashSet::new()))),
             cfg,
             iso,
             trees,
@@ -569,11 +576,31 @@ impl Runtime {
     pub fn service_for_host(&self, host: &str) -> Option<(String, String)> {
         let host = host.rsplit_once(':').filter(|(_, p)| p.bytes().all(|b| b.is_ascii_digit())).map_or(host, |(h, _)| h);
         let host = host.trim_end_matches('.').to_ascii_lowercase();
-        let label = host.strip_suffix(&self.cfg.domain)?.strip_suffix('.')?;
-        if label.contains('.') || label.is_empty() {
+        if let Some(label) = host.strip_suffix(&self.cfg.domain).and_then(|h| h.strip_suffix('.')) {
+            if label.contains('.') || label.is_empty() {
+                return None;
+            }
+            return self.store.service_for_host(label).ok().flatten();
+        }
+        // Under a project's own preview domain (`<label>.preview.acme.dev`): only that
+        // project's previews.
+        let (label, base) = host.split_once('.')?;
+        if label.is_empty() || !self.domain_bases().contains(base) {
             return None;
         }
-        self.store.service_for_host(label).ok().flatten()
+        self.store.service_for_domain_host(label, base).ok().flatten()
+    }
+
+    /// The bases of projects' own preview domains, read again after [`DOMAINS_FOR`].
+    fn domain_bases(&self) -> Arc<std::collections::HashSet<String>> {
+        let mut d = self.domains.lock();
+        if d.0.is_none_or(|at| at.elapsed() > DOMAINS_FOR) {
+            if let Ok(bases) = self.store.domain_bases() {
+                d.1 = Arc::new(bases.into_iter().collect());
+            }
+            d.0 = Some(std::time::Instant::now());
+        }
+        d.1.clone()
     }
 
     /// The notes left on `path` of the preview's pages, as JSON (the latest 50; for whoever has

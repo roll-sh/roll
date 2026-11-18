@@ -2,6 +2,9 @@
 
 use super::*;
 
+/// How often a project's own preview domain is read from roll apps (ms).
+const DOMAIN_EVERY: i64 = 60_000;
+
 impl Engine {
     /// The previews a project should have, from its repos' open changes and its rules.
     /// Once a month per level: tell the project's repos its previews passed 80% (then 100%) of
@@ -37,6 +40,32 @@ impl Engine {
         }
     }
 
+    /// The project's own preview domain, read from roll apps at most once a [`DOMAIN_EVERY`]:
+    /// when it's verified, changed or gone, its runtime services' URLs move and every preview of
+    /// the project reports again (the pull request's links).
+    async fn follow_domain(&self, project_id: &str) -> anyhow::Result<()> {
+        let now = self.store.now_ms()?;
+        if self.domain_read.lock().get(project_id).is_some_and(|at| now - at < DOMAIN_EVERY) {
+            return Ok(());
+        }
+        self.domain_read.lock().insert(project_id.to_string(), now);
+        let new = self.apps.preview_domain(project_id).await;
+        let old = self.store.project_domain(project_id)?;
+        let moved = self.store.set_project_domain(project_id, new.as_ref().map(|(b, h)| (b.as_str(), *h)), &|h| self.cfg.url_in(new.as_ref(), h), &|h| self.cfg.url_in(old.as_ref(), h))?;
+        if moved {
+            let said = match &new {
+                Some((base, _)) => format!("its previews answer on *.{base} (the project's own preview domain)"),
+                None => "its previews answer on roll's preview domain again".to_string(),
+            };
+            info!(project = %project_id, "previews: {said}");
+            for r in self.store.rows(Some(project_id))?.into_iter().filter(|r| r.desired == Desired::Active) {
+                self.store.log(&r.id, &said)?;
+                self.store.update(&r.id, |row| row.next_at = 0)?;
+            }
+        }
+        Ok(())
+    }
+
     pub(super) async fn discover(&self, project_id: &str, s: &Settings) -> anyhow::Result<()> {
         let project = match self.workspace.get(roll_workspace::Scope::All, project_id) {
             Ok(p) => p,
@@ -50,6 +79,7 @@ impl Engine {
             }
             Err(e) => return Err(e.into()),
         };
+        self.follow_domain(project_id).await?;
         // Only repos the project stands for (`Workspace::trusts`): anyone may put any repo on their
         // own canvas, and a preview runs a change's code with the project's secrets.
         let repos: Vec<String> = project.resources.iter().filter(|r| r.kind == roll_workspace::Kind::Repo && self.workspace.trusts(&project, r.kind, &r.r#ref)).map(|r| r.r#ref.clone()).collect();
