@@ -295,6 +295,16 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
         blocking(move || a.store.by_secret(&t)).await
     };
     let grant = match lookup {
+        // A decoy (docs/permissions.md, "Decoy tokens"): nobody should ever use it, so whoever did
+        // found it where it was planted. It answers as an unknown token does (they learn nothing),
+        // and its owner and the admins are told. Before the idle rule: a decoy is never used.
+        Ok(Some(g)) if g.decoy => {
+            let ip = client_ip(&req, &access.config);
+            let route = req.extensions().get::<MatchedPath>().map_or_else(|| "unmatched".to_string(), |m| m.as_str().to_string());
+            let ua = req.headers().get(header::USER_AGENT).and_then(|v| v.to_str().ok()).map(|s| s.chars().filter(|c| !c.is_control()).take(120).collect::<String>());
+            access.decoy_tripped(&g, ip.map(|i| i.to_string()), &route, ua);
+            return invalid_token(&access);
+        }
         // Unused longer than the operator's policy allows: it stops (making it again is a person's
         // choice, not an agent's).
         Ok(Some(g)) if access.policy_now().idle(&g, code_sql::now_ms()) => return invalid_token(&access),

@@ -16,9 +16,22 @@
 use serde_json::Value;
 
 /// The secrets roll makes that scanners look for: grants' (`rlt_`, `rlo_`, `rlf_`), machine
-/// clients' (`rlc_`), and other products' made the same way: apps' deploy hooks (`rlk_`).
+/// clients' (`rlc_`), and other products' made the same way: apps' deploy hooks (`rlk_`) and SSO
+/// connections' SCIM tokens (`rlp_`, roll-accounts).
 /// (`rlh_` is roll code's automations' inbound webhook secrets: another shape, not ours.)
-pub const SECRET_PREFIXES: [&str; 5] = ["rlt_", "rlo_", "rlf_", "rlc_", "rlk_"];
+pub const SECRET_PREFIXES: [&str; 6] = ["rlt_", "rlo_", "rlf_", "rlc_", "rlk_", "rlp_"];
+
+/// A secret: `prefix`, 34 random characters of lowercase base32 (170 bits) and 6 of checksum, so a
+/// scanner can tell a real roll token from look-alike text without asking roll ([`checksum_ok`],
+/// as GitHub's tokens carry a CRC32).
+pub fn new_secret(prefix: &str) -> String {
+    const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
+    let mut b = [0u8; 34];
+    getrandom::fill(&mut b).expect("system randomness");
+    let body = format!("{prefix}{}", b.iter().map(|x| ALPHABET[(x & 31) as usize] as char).collect::<String>());
+    let sum = checksum(&body);
+    format!("{body}{sum}")
+}
 
 /// The last 6 characters a secret ends with: CRC-32 of everything before, as base32 (30 bits).
 pub fn checksum(body: &str) -> String {
@@ -65,19 +78,76 @@ fn find(v: &Value, at: &str, counts: &dyn Fn(&'static str) -> bool) -> Option<Fo
     }
 }
 
-/// The kind of the first credential in `s`.
-fn kind_in(s: &str) -> Option<&'static str> {
+/// The kind of the first credential in `s` (`"a GitHub token"`, `"a private key"`, `"a roll
+/// token"`…), if any: what roll's guard refuses to write where others read, and what roll code's
+/// landings and `roll secrets scan` can warn about before a key roll doesn't hold is pushed.
+pub fn kind_in(s: &str) -> Option<&'static str> {
     if private_key(s) {
         return Some("a private key");
     }
     s.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-')).find_map(kind_of)
 }
 
+/// A credential in a text: its kind and its byte range.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Match {
+    pub kind: &'static str,
+    pub start: usize,
+    pub end: usize,
+}
+
+/// The most matches [`find_all`] answers: past it, the rest of the text isn't looked at.
+pub const MAX_MATCHES: usize = 1000;
+
+/// Every credential in `text`, in order, each with its kind and byte range (at most
+/// [`MAX_MATCHES`]), so a landing's warning or a scan can point at the line. A private key's block
+/// is one match; the words inside it aren't looked at again.
+pub fn find_all(text: &str) -> Vec<Match> {
+    let mut keys: Vec<Match> = Vec::new();
+    let mut from = 0;
+    while keys.len() < MAX_MATCHES
+        && let Some(i) = text[from..].find("-----BEGIN ")
+    {
+        let start = from + i;
+        match private_key_at(&text[start..]) {
+            Some(len) => {
+                keys.push(Match { kind: "a private key", start, end: start + len });
+                from = start + len;
+            }
+            None => from = start + "-----BEGIN ".len(),
+        }
+    }
+    let mut out = keys.clone();
+    let in_key = |at: usize| keys.iter().any(|k| k.start <= at && at < k.end);
+    let word = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-';
+    let mut start: Option<usize> = None;
+    for (i, c) in text.char_indices().chain(std::iter::once((text.len(), ' '))) {
+        match (word(c), start) {
+            (true, None) => start = Some(i),
+            (false, Some(s)) => {
+                start = None;
+                if !in_key(s)
+                    && let Some(kind) = kind_of(&text[s..i])
+                {
+                    out.push(Match { kind, start: s, end: i });
+                    if out.len() >= MAX_MATCHES {
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out.sort_by_key(|m| m.start);
+    out.truncate(MAX_MATCHES);
+    out
+}
+
 fn kind_of(w: &str) -> Option<&'static str> {
     let rest = |prefix: &str| w.strip_prefix(prefix);
     let all = |s: &str, ok: fn(char) -> bool| s.chars().all(ok);
     let alnum = |c: char| c.is_ascii_alphanumeric();
-    if ["rlt_", "rlo_", "rlf_", "rlc_", "rlk_"].iter().any(|p| w.starts_with(p)) && checksum_ok(w) {
+    if SECRET_PREFIXES.iter().any(|p| w.starts_with(p)) && checksum_ok(w) {
         return Some(ROLL);
     }
     // AWS's documentation keys (`…EXAMPLE`) are in code and docs everywhere.
@@ -116,13 +186,26 @@ pub fn read_by_others(product: &str) -> bool {
 /// A private key's block: the header, a body of base64 lines, the footer (a bare header in code
 /// that parses keys isn't one).
 fn private_key(s: &str) -> bool {
-    let Some(start) = s.find("-----BEGIN ") else { return false };
-    let rest = &s[start..];
-    let Some(head_end) = rest.find("PRIVATE KEY-----") else { return false };
-    let body = &rest[head_end + "PRIVATE KEY-----".len()..];
-    let Some(end) = body.find("-----END ") else { return false };
-    let b64: String = body[..end].chars().filter(|c| !c.is_whitespace()).collect();
-    b64.len() >= 64 && b64.chars().all(|c| c.is_ascii_alphanumeric() || "+/=".contains(c))
+    s.find("-----BEGIN ").is_some_and(|start| private_key_at(&s[start..]).is_some())
+}
+
+/// A private key's block at the start of `s` (`-----BEGIN …`): its length through the footer's
+/// closing dashes.
+fn private_key_at(s: &str) -> Option<usize> {
+    let head_end = s.find("PRIVATE KEY-----")?;
+    // The header is one line: a "PRIVATE KEY" further on belongs to something else.
+    if s[..head_end].contains('\n') {
+        return None;
+    }
+    let body_start = head_end + "PRIVATE KEY-----".len();
+    let end = s[body_start..].find("-----END ")?;
+    let b64: String = s[body_start..body_start + end].chars().filter(|c| !c.is_whitespace()).collect();
+    if b64.len() < 64 || !b64.chars().all(|c| c.is_ascii_alphanumeric() || "+/=".contains(c)) {
+        return None;
+    }
+    let footer = body_start + end + "-----END ".len();
+    let close = s[footer..].find("-----").map(|i| footer + i + 5).unwrap_or(s.len());
+    Some(close)
 }
 
 /// One step into an object's key in a path (`arguments.body`), bounded and with nothing a log
@@ -225,5 +308,40 @@ mod tests {
         assert_eq!(words("NODE_ENV=production region us-east-1 user postgres pw=Tr0ub4dor-Horse-77"), vec!["Tr0ub4dor-Horse-77"]);
         let padding: String = (0..MAX_CANDIDATES + 1).map(|i| format!("Zq{i:06}Hy8Lw3Rt ")).collect();
         assert!(candidates(&json!({ "body": padding })).is_none());
+    }
+}
+
+#[cfg(test)]
+mod prefix_tests {
+    /// Every prefix roll makes is one the guard and scanners know, checksummed.
+    #[test]
+    fn every_roll_secret_is_a_credential() {
+        for p in super::SECRET_PREFIXES {
+            let s = super::new_secret(p);
+            assert!(super::checksum_ok(&s), "{p}");
+            assert_eq!(super::kind_in(&format!("token: {s}")), Some(super::ROLL), "{p}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod find_all_tests {
+    use super::*;
+
+    #[test]
+    fn finds_each_credential_with_its_place() {
+        let gh = format!("ghp_{}", "a".repeat(36));
+        let key = format!("-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----", "QUJD".repeat(20));
+        let text = format!("token = {gh}\naws AKIAIOSFODNN7EXAMPLE is the docs' one, AKIAZ2345678901234AB isn't\n{key}\nsk-ant-{}\n", "x".repeat(40));
+        let found = find_all(&text);
+        let kinds: Vec<&str> = found.iter().map(|m| m.kind).collect();
+        assert_eq!(kinds, ["a GitHub token", "an AWS access key", "a private key", "an Anthropic API key"]);
+        assert_eq!(&text[found[0].start..found[0].end], gh);
+        assert_eq!(&text[found[2].start..found[2].end], key, "a key's block, header to footer");
+        assert_eq!(kind_in(&text), Some("a private key"));
+        assert!(find_all("a plain sentence, production, us-east-1").is_empty());
+        // Bounded however much a text holds.
+        let many = format!("{gh} ").repeat(MAX_MATCHES + 50);
+        assert_eq!(find_all(&many).len(), MAX_MATCHES);
     }
 }

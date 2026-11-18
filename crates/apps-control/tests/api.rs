@@ -3045,9 +3045,13 @@ async fn a_closed_environments_build_gets_no_secret_values() {
     let env = format!("/v1/apps/services/{id}/environments/production");
     let (st, b) = call(&w.api, "PATCH", &format!("{env}/variables"), Some(json!({"set": {"API_TOKEN": "tok_9f8e7d6c5b", "DATABASE_URL": "postgres://app:tok_9f8e7d6c5b@db/app", "GREETING": "hello-world"}, "seal": ["API_TOKEN"]}))).await;
     assert!(st.is_success(), "{b}");
+    // A deploy that asks to be built closed (roll previews' for a fork's head) is refused while
+    // the environment is open; a node without the field refuses it as unknown.
+    assert_eq!(call(&w.api, "POST", &format!("{env}/deploys"), Some(json!({"closed": true}))).await.0, StatusCode::CONFLICT);
     let (st, e) = call(&w.api, "PUT", &env, Some(json!({"egress": {"mode": "roll"}}))).await;
     assert_eq!((st, e["build_closed"].as_bool()), (StatusCode::OK, Some(true)), "{e}");
-    let (_, d) = call(&w.api, "POST", &format!("{env}/deploys"), Some(json!({}))).await;
+    let (st, d) = call(&w.api, "POST", &format!("{env}/deploys"), Some(json!({"closed": true}))).await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{d}");
     settled(&w, &id, "production", d["id"].as_str().unwrap()).await;
     let vars = w.fake.build_vars.lock().last().cloned().unwrap();
     assert!(vars.contains(&"GREETING".to_string()) && !vars.contains(&"API_TOKEN".to_string()) && !vars.contains(&"DATABASE_URL".to_string()), "{vars:?}");
@@ -3520,8 +3524,17 @@ async fn a_web_service_scales_on_its_cpu() {
         panic!("never {n} running: {:?}", w.fake.instances(id));
     }
     until(&w, &id, 1).await;
-    w.fake.set_busy(&running(&w, &id)[0], 0.9);
+    let busy = running(&w, &id)[0].clone();
+    w.fake.set_busy(&busy, 0.9);
     until(&w, &id, 2).await;
+    // Each instance's own CPU and memory, its last hour by minute (Railway's per replica).
+    let (_, m) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/metrics?minutes=60"), None).await;
+    let each = m["by_instance"].as_array().unwrap_or_else(|| panic!("{m}"));
+    let of = |n: &str| each.iter().find(|x| x["instance"] == n).cloned().unwrap_or_else(|| panic!("{n} in {m}"));
+    let hot = of(&busy);
+    assert!(hot["cpu"].as_array().unwrap().last().unwrap().as_f64().unwrap() > 0.1, "{hot}");
+    assert_eq!(hot["memory_bytes"].as_array().unwrap().last().unwrap().as_u64(), Some(64 << 20), "{hot}");
+    assert_eq!(hot["minutes"].as_array().unwrap().len(), hot["cpu"].as_array().unwrap().len());
     for n in running(&w, &id) {
         w.fake.set_busy(&n, 0.05);
     }
@@ -4930,6 +4943,17 @@ async fn a_git_url_service_connects_to_rolls_github_app() {
     assert_eq!(*gh.deployments.lock(), vec![(1, "production".to_string(), true)]);
     let states: Vec<_> = gh.deployment_states.lock().iter().map(|(id, s, u)| (*id, s.clone(), u.is_some())).collect();
     assert_eq!(states, vec![(1, "in_progress".to_string(), false), (1, "success".to_string(), true)]);
+    // An environment someone else reports (roll previews' `pv-` ones, `report: false`): its
+    // deploys post no status and no Deployment; reporting again, they do.
+    let prod = format!("/v1/apps/services/{id}/environments/production");
+    let (st, e) = call(&w.api, "PUT", &prod, Some(json!({"report": false}))).await;
+    assert_eq!((st, &e["report"]), (StatusCode::OK, &json!(false)), "{e}");
+    let before = (gh.statuses.lock().len(), gh.deployments.lock().len());
+    let (_, q) = call(&w.api, "POST", &format!("{prod}/deploys"), Some(json!({}))).await;
+    settled(&w, &id, "production", q["id"].as_str().unwrap()).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!((gh.statuses.lock().len(), gh.deployments.lock().len()), before, "nothing reported");
+    assert_eq!(call(&w.api, "PUT", &prod, Some(json!({"report": true}))).await.0, StatusCode::OK);
     // The App's own (verified) push reaches it with no hook set: run on its owner, it deploys the
     // pushed head; another installation's, or another repository's, doesn't.
     let second = git.commit_saying(&[("package.json", r#"{"name":"site","scripts":{"start":"node server.js"}}"#), ("server.js", "require('http') // v2")], "via the App");

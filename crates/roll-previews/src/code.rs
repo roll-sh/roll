@@ -365,6 +365,18 @@ impl Source for CodeSource {
         Ok(())
     }
 
+    fn git_report_body(&self, p: &Preview, s: &Settings, deleted: Option<Option<&str>>) -> Option<crate::ports::GitReportBody> {
+        let marker = format!("<!-- roll-preview:{} -->", p.id);
+        if let Some(teardown) = deleted {
+            return Some(crate::ports::GitReportBody { state: None, description: String::new(), target_url: None, comment: code_control::github::preview_comment_for(None, &marker, teardown) });
+        }
+        let summary = self.summary(p, s);
+        let (state, _, description) = code_control::github::preview_states(Some(&summary));
+        let env = summary.environment.as_ref();
+        let target_url = env.and_then(|e| e.services.first().map(|x| x.url.clone()).filter(|u| !u.is_empty())).or_else(|| env.and_then(|e| e.dashboard_url.clone()));
+        Some(crate::ports::GitReportBody { state: state.map(str::to_string), description, target_url, comment: code_control::github::preview_comment_for(Some(&summary), &marker, None) })
+    }
+
     async fn forget(&self, p: &Preview, teardown: Option<&str>) {
         let Some(change) = &p.change else { return };
         // Only the change's preview environment, never roll code's own preview of it.
@@ -403,13 +415,12 @@ impl Trees for CodeSource {
 pub struct Backend {
     inner: Arc<dyn PreviewBackend>,
     engine: OnceLock<Weak<Engine>>,
-    workspace: Arc<roll_workspace::Workspace>,
     source: Arc<CodeSource>,
 }
 
 impl Backend {
-    pub fn new(inner: Arc<dyn PreviewBackend>, workspace: Arc<roll_workspace::Workspace>, source: Arc<CodeSource>) -> Arc<Backend> {
-        Arc::new(Backend { inner, engine: OnceLock::new(), workspace, source })
+    pub fn new(inner: Arc<dyn PreviewBackend>, source: Arc<CodeSource>) -> Arc<Backend> {
+        Arc::new(Backend { inner, engine: OnceLock::new(), source })
     }
 
     pub fn attach(&self, engine: &Arc<Engine>) {
@@ -420,10 +431,10 @@ impl Backend {
     fn environment_for(&self, repo: &RepoRow) -> Option<(Arc<Engine>, String)> {
         let engine = self.engine.get().and_then(Weak::upgrade)?;
         let full = repo.full_name();
-        // The first project that stands for the repo (`Workspace::trusts`), not just any canvas it's on.
-        let project = self.workspace.list(roll_workspace::Scope::All).ok()?.into_iter().find(|p| p.resources.iter().any(|r| r.kind == roll_workspace::Kind::Repo && r.r#ref == full) && self.workspace.trusts(p, roll_workspace::Kind::Repo, &full))?;
-        engine.store.settings(&project.id).ok().filter(|s| s.enabled)?;
-        Some((engine, project.id))
+        // The project that speaks for the repo (one that stands for it, `Workspace::trusts`, with
+        // previews on): the same one whose preview reports to the change.
+        let (project, _) = engine.speaker(roll_workspace::Kind::Repo, &full)?;
+        Some((engine, project))
     }
 }
 

@@ -11,6 +11,7 @@ pub mod aws;
 pub mod codebuild;
 pub mod docker;
 pub mod egress;
+pub mod ingress;
 pub mod engine;
 pub mod fake;
 pub mod fargate;
@@ -224,6 +225,12 @@ pub trait Runtime: Send + Sync {
     /// Names of every instance this runtime has for `service` (or for every service), made by
     /// any process of this node.
     async fn list(&self, service: Option<&str>) -> Vec<String>;
+    /// Names of everything this runtime has for `service`'s environment `env` (instances, their
+    /// sandboxes and wakers, runs), whoever made them: what an environment's teardown removes
+    /// before its network goes. None where a teardown of the live state is enough.
+    async fn list_env(&self, _service: &str, _env: &str) -> Vec<String> {
+        Vec::new()
+    }
     /// Make the project's private network if it's missing; `closed`: one with no route out
     /// ([`Runtime::closes_egress`]).
     async fn ensure_network(&self, name: &str, service: &str, closed: bool) -> anyhow::Result<()>;

@@ -256,6 +256,20 @@ impl roll_previews::ports::Apps for RollApps {
         Ok(())
     }
 
+    /// The `pv-` environment's latest minute (roll apps' metrics): cores, and resident bytes.
+    /// None while nothing ran that minute (asleep).
+    async fn metrics(&self, preview: &str, service: &str) -> Option<(f64, u64)> {
+        let (id, env) = self.find(preview, service).await.ok()??;
+        let m = self.api.get(&format!("{}/metrics?minutes=5", Self::env_path(&id, &env))).await.ok()?;
+        // The last finished minute: the one under way counts its CPU over the whole minute, so it
+        // reads low (and its memory is 0 in its first second). Memory is summed over instances, and
+        // shown against what one runs with: one instance's, on average.
+        let at = |k: &str| m[k].as_array().and_then(|a| a.get(a.len().saturating_sub(2)).cloned());
+        let (cpu, mem) = (at("cpu")?.as_f64()?, at("memory_bytes")?.as_u64()?);
+        let instances = at("instances").and_then(|v| v.as_u64()).unwrap_or(1).max(1);
+        (mem > 0).then_some((cpu, mem / instances))
+    }
+
     async fn logs(&self, preview: &str, service: &str, lines: usize) -> Vec<String> {
         let Ok(Some((id, env))) = self.find(preview, service).await else { return Vec::new() };
         let v = self.api.get(&format!("{}/logs?tail={lines}", Self::env_path(&id, &env))).await.unwrap_or(Value::Null);
@@ -407,6 +421,47 @@ pub trait Reach: Send + Sync {
 /// roll previews' notes for roll apps' feedback button, by the preview's environment name.
 /// roll apps' pushes to branches of a Git URL service that none of its environments follows: each
 /// branch's preview (`Engine::git_push`). Handed off at once, the hook is waiting.
+/// A Git URL service's preview where its code lives (docs/previews.md, "Git URL services"):
+/// through roll apps' GitHub App connection, `github: {installation, repo}` read from roll apps
+/// (never from an event), with short-lived installation tokens (roll code's client). A service
+/// that isn't connected gets nothing; its git login is never used to write.
+pub struct GitReport {
+    pub api: Api,
+    pub code: std::sync::Arc<code_control::Code>,
+}
+
+impl GitReport {
+    /// The service's connection: installation, owner, repository.
+    async fn connection(&self, service: &str) -> anyhow::Result<Option<(u64, String, String)>> {
+        let s = match self.api.get(&format!("/v1/apps/services/{}", seg(service))).await {
+            Ok(s) => s,
+            Err(e) if is_404(&e) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let g = &s["github"];
+        let (Some(installation), Some((owner, repo))) = (g["installation"].as_u64(), g["repo"].as_str().and_then(|r| r.split_once('/'))) else { return Ok(None) };
+        Ok(Some((installation, owner.to_string(), repo.to_string())))
+    }
+}
+
+#[async_trait]
+impl roll_previews::ports::GitReport for GitReport {
+    async fn status(&self, service: &str, sha: &str, state: &str, description: &str, target_url: Option<&str>) -> anyhow::Result<bool> {
+        let Some((installation, owner, repo)) = self.connection(service).await? else { return Ok(false) };
+        self.code.github_commit_status(installation, &owner, &repo, sha, state, "roll/preview", description, target_url).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+        Ok(true)
+    }
+
+    async fn comment(&self, service: &str, pull_repo: &str, number: u64, body: &str, existing: Option<u64>) -> anyhow::Result<Option<u64>> {
+        let Some((installation, owner, repo)) = self.connection(service).await? else { return Ok(None) };
+        // Connected to another repository since (its source moved): this number isn't its.
+        if !format!("{owner}/{repo}").eq_ignore_ascii_case(pull_repo) {
+            return Ok(None);
+        }
+        self.code.github_comment(installation, &owner, &repo, number, body, existing).await.map(Some).map_err(|e| anyhow::anyhow!("{e}"))
+    }
+}
+
 pub struct GitPushes(pub std::sync::Weak<roll_previews::Engine>);
 
 #[async_trait]
@@ -511,6 +566,10 @@ impl roll_previews::ports::Apps for Services {
     /// The requests roll's runtime proxied (roll apps' instances are served by roll apps' own).
     fn requests(&self, preview: &str) -> Vec<roll_previews::RequestLine> {
         self.runtime.requests(preview)
+    }
+
+    async fn metrics(&self, preview: &str, service: &str) -> Option<(f64, u64)> {
+        if matches!(self.apps.find(preview, service).await, Ok(Some(_))) { self.apps.metrics(preview, service).await } else { self.runtime.metrics(preview, service).await }
     }
 
     async fn follow(&self, preview: &str, service: &str, lines: usize) -> Option<tokio::sync::mpsc::Receiver<String>> {
