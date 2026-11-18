@@ -1249,7 +1249,7 @@ async fn visit(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Ext
     let Some(user) = ext.get::<roll_auth::SignedIn>() else {
         return Err(Error::Forbidden("signing in to an environment is for a person signed in to roll, not a token".into()));
     };
-    ok(json!({ "url": apps.visit_ticket(&id, &env, &user.user, &b.to).await? }))
+    ok(json!({ "url": apps.visit_ticket(&id, &env, &user.user, &user.session, &b.to).await? }))
 }
 
 async fn trace(State(apps): S, Path((id, env, trace)): Path<(String, String, String)>) -> R {

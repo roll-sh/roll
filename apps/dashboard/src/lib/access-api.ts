@@ -100,6 +100,8 @@ export interface Grant {
   revoked_why?: string;
   /** What its rules don't allow asks a person instead of being refused. */
   ask_otherwise?: boolean;
+  /** A decoy (honeytoken): it never works, and any use tells its owner and the admins. */
+  decoy?: boolean;
   /** Rules a person allowed for a while when approving its requests, each until a time (Unix ms). */
   temporary?: { rule: Rule; until: number; approval?: string }[];
   /** Its requests over the last day (in the list). */
@@ -114,6 +116,8 @@ export interface NewGrant {
   ip_allow?: string[];
   rate_per_minute?: number | null;
   ask_otherwise?: boolean;
+  /** A decoy: never works; any use is reported (docs/permissions.md, "Decoy tokens"). */
+  decoy?: boolean;
 }
 
 /** A token that needs attention (`GET /v1/access/checkup`). */

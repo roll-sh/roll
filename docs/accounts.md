@@ -67,8 +67,13 @@ totp(user_id TEXT PRIMARY KEY, seed TEXT NOT NULL,  -- sealed with ROLL_SECRET_K
      enabled INTEGER NOT NULL, last_step INTEGER NOT NULL, created_at INTEGER NOT NULL)
 recovery_codes(user_id TEXT, code_hash TEXT, PRIMARY KEY (user_id, code_hash))
 passkeys(id TEXT PRIMARY KEY, user_id TEXT NOT NULL, credential_id TEXT NOT NULL UNIQUE,
-         public_key TEXT NOT NULL, sign_count INTEGER NOT NULL, name TEXT NOT NULL,
-         created_at INTEGER NOT NULL, last_used_at INTEGER)      -- phase 2, see below
+         public_key TEXT NOT NULL,                                -- COSE, base64url
+         sign_count INTEGER NOT NULL, name TEXT NOT NULL,
+         created_at INTEGER NOT NULL, last_used_at INTEGER, synced INTEGER)
+sign_in_places(user_id TEXT, place TEXT, first_at INTEGER, last_at INTEGER,  -- new-sign-in mail
+         PRIMARY KEY (user_id, place))                            -- place: sha256(browser, network)
+passkey_challenges(id TEXT PRIMARY KEY, user_id TEXT, purpose TEXT NOT NULL,  -- register | signin
+         challenge TEXT NOT NULL, expires_at INTEGER NOT NULL)     -- used once, 5 minutes
 throttle(key TEXT PRIMARY KEY, n INTEGER NOT NULL, since INTEGER NOT NULL)
 ```
 
@@ -348,10 +353,99 @@ When the user has TOTP on, every sign-in (email code or OAuth) ends at level `mf
 `GET /v1/accounts/session` then says `mfa_required`, and the dashboard asks for a code:
 `POST /v1/accounts/signin/totp {code}` or `POST /v1/accounts/signin/recovery {code}`.
 
-Passkeys (WebAuthn) are phase 2: the `passkeys` table is in place; registration and assertion
-need a CBOR/COSE parser and attestation handling that didn't fit this phase cleanly. They will
-be a second factor (and later a first one) next to TOTP, through
-`/v1/accounts/me/passkeys` and `/v1/accounts/signin/passkey/{options,verify}`.
+A passkey (below) gives the second factor too: `methods` lists `passkey` when the person has one.
+
+### Passkeys
+
+Passkeys (WebAuthn Level 3, `src/passkeys.rs`) sign a person in without a code, and can't be
+phished: a passkey works only on roll's own site.
+
+- **Made** on the account page: `POST /v1/accounts/me/passkeys/options` answers `{id, publicKey}`
+  for `navigator.credentials.create`, and `POST /v1/accounts/me/passkeys {id, name, credential}`
+  keeps it. The options ask for a discoverable credential, ES256, EdDSA or RS256 (2048 bits and
+  up), and no attestation: roll trusts no attestation statement (whatever `fmt` a browser sends,
+  it's ignored), so any authenticator works and none is vouched for. At most 20 per person.
+- **On its own** (`POST /v1/accounts/signin/passkey/options` with no session, then
+  `POST /v1/accounts/signin/passkey {id, credential}`): any passkey the browser holds for roll
+  (user verification `required`) signs its person in, as both factors, TOTP on or not (GitHub
+  counts a passkey the same way). An authenticator that didn't verify the person (no PIN or
+  biometric) is refused. An enforced SSO domain still signs in only through its provider.
+- **As the second factor** (the same two routes with a session owing one): the person's own
+  passkeys, user verification `preferred` (presence is enough on top of the first factor).
+- A challenge is used once, within five minutes, and only for the sign-in it was made for: one
+  made for a second factor never signs anyone in on its own, and one made without a session
+  never finishes someone's second factor.
+- Checked every time: the ceremony type, the challenge, the origin (the dashboard's,
+  `ROLL_WEB_URL`; never inside another site's frame), the RP id hash (the dashboard's host), user
+  presence, the signature over the authenticator data and the client data's hash, and the sign
+  count: a count that doesn't go up when either side counts means a copied key, refused (synced
+  passkeys count 0 and stay there). `synced` shows whether the passkey is backed up across the
+  person's devices (the authenticator's `BS` flag).
+- Everything from the browser is hostile: the CBOR reader takes definite lengths only, believes
+  a length or count only as far as the bytes present hold it, and stops at a small depth; a
+  credential id is at most 1023 bytes; the blobs at most 16 KiB.
+- Anonymous challenges are throttled per address (60 every 10 minutes). Passkeys need
+  `ROLL_WEB_URL` (503 `{code: "passkeys_off"}` without it); `GET /v1/accounts` says
+  `providers.passkey`.
+- A refused passkey sign-in is in the passkey owner's security log (by `anonymous` when no
+  session owed a second factor); adding, renaming and removing one are there too.
+
+### Recovery
+
+Someone who lost their authenticator app and their recovery codes asks an admin to reset their
+second factor, as Okta's and Google Workspace's admins reset factors (`src/recovery.rs`):
+
+- They sign in with their first factor (an email code, GitHub, Google), then, on the
+  second-factor step, ask with a reason: `POST /v1/accounts/signin/reset-request {reason}` (a
+  session owing a second factor; 1–500 characters). Their one pending request is answered again
+  rather than a second made; three a day at most.
+- Every other admin is mailed the request and its reason, with a link to the account page's
+  "Second-factor resets". An admin checks it's them some other way (a call, in person: the email
+  code alone got them this far), then approves or declines (sudo mode; never their own).
+- Approving takes their TOTP and recovery codes away and ends their sign-ins waiting for one;
+  their next sign-in is whole and they set it up again. They're mailed either way, and each step
+  is in their security log (`recovery.request`, `recovery.approve`, `recovery.deny`).
+- Passkeys aren't taken: one still works on its own.
+
+### New sign-ins
+
+As GitHub does, the first whole sign-in (nothing more owed) from a browser and network a person
+hasn't signed in from before mails them: "A new sign-in to your roll account", with the browser
+in words ("Firefox on Windows"), the address, and a link to their Recent activity. A stolen code
+or link shows up in their inbox, not only in their security log.
+
+- A place is the browser and OS from the User-Agent plus the network (an IPv4 /24, an IPv6 /48),
+  kept hashed in `sign_in_places` (the newest 50 per person), so a new address at the same home
+  or office isn't new.
+- A person's first sign-in mails nothing, and neither does the first after this shipped (nobody
+  is mailed for what they did before). Without mail configured nothing is sent.
+- The mail goes out off the request, after the sign-in's answer.
+
+### Sudo mode
+
+As GitHub does, a change to how an account is reached needs the person to have proved who they
+are in the last two hours: their sign-in (a session's start), or a confirmation since. A stolen
+session cookie alone can't add its own passkey or authenticator app, unlink the owner's GitHub,
+or make someone an admin.
+
+- What needs it, from a person's own session: adding a passkey (`POST /me/passkeys/options` and
+  `POST /me/passkeys`), removing one, setting up an authenticator app (`POST /me/totp`), unlinking
+  a sign-in method. From an admin's session: changing a person's `admin` or `disabled`, an invite
+  that makes an admin, and adding, changing or removing an SSO connection or its SCIM token. The
+  operator's token has no session: it's exempt. Turning TOTP off and new recovery codes already
+  take a code. Making a roll token from a session (`POST /v1/access/tokens`, a person's or an
+  admin's) needs it too: roll-access asks `roll_auth::Sessions::fresh`, so a stolen cookie can't
+  mint a long-lived token (a token a token makes is within that token).
+- Without a recent proof: 403 `{code: "reauth_required"}`. `GET /v1/accounts/me/reauth` says
+  until when the session is fresh and how its person can confirm (`totp`, `passkey`, `email`),
+  and `POST /v1/accounts/me/reauth` takes `{code}` (TOTP or a recovery code), `{challenge, code}`
+  (an email code from `POST /me/reauth/email`, sent to their own address; anyone else's code
+  proves nothing) or `{id, credential}` (a passkey, from `POST /me/reauth/passkey/options`, only
+  their own). It's fresh for another two hours (`sessions.verified_at`).
+- The dashboard asks in place: the change's call answers `reauth_required`, a "Confirm it's you"
+  dialog (mounted by the app shell) takes the proof, and the call runs once more (`withReauth` in
+  `lib/reauth.ts`, used by the accounts client and every product's `call` in `roll-api.ts`).
+- Each confirmation, and each refused one, is in the person's security log (`reauth`).
 
 ## Routes
 
@@ -379,7 +473,7 @@ type MfaRequired = { status: "mfa_required"; methods: ("totp" | "recovery")[]; c
 
 | Route | Body | Answer |
 | --- | --- | --- |
-| `GET /v1/accounts` | | `{providers: {email: bool, github: bool, google: bool, sso: bool}}`: which sign-ins are configured |
+| `GET /v1/accounts` | | `{providers: {email: bool, github: bool, google: bool, sso: bool, passkey: bool}}`: which sign-ins are configured |
 | `GET /v1/accounts/session` | | `{status: "anonymous"}`, `MfaRequired` or `SignedIn` (always 200) |
 | `POST /v1/accounts/invites/peek` | `{token}` | `{email, expires_at}`; 404 for a used, revoked, expired or unknown invite |
 | `POST /v1/accounts/email/start` | `{email, invite?}` | 202 `{challenge}`; 400 bad email; 403 `{code: "sso_required"}` for a domain whose SSO connection enforces it; 503 `{code: "email_off"}` when mail isn't configured |
@@ -388,6 +482,9 @@ type MfaRequired = { status: "mfa_required"; methods: ("totp" | "recovery")[]; c
 | `GET /v1/accounts/oauth/{provider}/callback` | query `code`, `state` (or `error`) | 303 to the dashboard, see above |
 | `POST /v1/accounts/sso/start` | `{email, invite?, return_to?}`, or `{intent: "link"}` with a session (csrf) | `{url}` and `Set-Cookie` (the browser cookie); 400 `{code: "no_sso"}` when no connection answers for the email's (verified) domain, `throttled`, `provider` |
 | `GET /v1/accounts/sso/{id}/callback` | query `code`, `state` (or `error`) | 303 to the dashboard; `?error=` `unverified_email`, `domain`, `not_invited`, `link_required`, `linked_elsewhere`, `link_email`, `state` or `provider` |
+| `POST /v1/accounts/signin/passkey/options` | | `{id, publicKey}` for `navigator.credentials.get`: with a session owing a second factor, that person's passkeys; without, any (throttled per address); 503 `{code: "passkeys_off"}` |
+| `POST /v1/accounts/signin/passkey` | `{id, credential}` | 200 `SignedIn`, with `Set-Cookie`; 400 `{code: "passkey"}` (unknown, wrong site, unverified, copied, a used or another sign-in's challenge); 403 `{code: "sso_required"}` |
+| `POST /v1/accounts/signin/reset-request` | `{reason}` (a session owing a second factor) | 202 `{id, state, created_at}`: admins are mailed; 401 without a first factor |
 | `POST /v1/accounts/signout` | | 204, clears the cookie and deletes the session (any level; csrf) |
 
 ### Second factor (a session at level `mfa`, csrf)
@@ -411,6 +508,15 @@ type MfaRequired = { status: "mfa_required"; methods: ("totp" | "recovery")[]; c
 | `POST /v1/accounts/me/totp/confirm` | `{code}` | `{recovery_codes: string[10]}`, shown once; 400 `{code: "bad_code"}`; 404 nothing to confirm |
 | `DELETE /v1/accounts/me/totp` | `{code}` (TOTP or recovery) | 204; 400 `{code: "bad_code"}` |
 | `POST /v1/accounts/me/recovery-codes` | `{code}` (TOTP) | `{recovery_codes}`, replacing the old ones |
+| `GET /v1/accounts/me/reauth` | | `{fresh_until, methods: ("totp" \| "passkey" \| "email")[]}` (sudo mode) |
+| `POST /v1/accounts/me/reauth` | `{code}`, `{challenge, code}` or `{id, credential}` | `{fresh_until}`; 400 `{code: "bad_code"}` or `{code: "passkey"}` |
+| `POST /v1/accounts/me/reauth/email` | | 202 `{challenge}`: a code to the person's own address |
+| `POST /v1/accounts/me/reauth/passkey/options` | | `{id, publicKey}`: the person's own passkeys |
+| `GET /v1/accounts/me/passkeys` | | `{passkeys: [{id, name, created_at, last_used_at, synced}]}` (never a key) |
+| `POST /v1/accounts/me/passkeys/options` | | `{id, publicKey}` for `navigator.credentials.create`; 409 at 20 passkeys |
+| `POST /v1/accounts/me/passkeys` | `{id, name, credential}` | 201 `Passkey`; 400 `{code: "passkey"}`; 409 already registered |
+| `PATCH /v1/accounts/me/passkeys/{id}` | `{name}` | `Passkey` (1–64 characters) |
+| `DELETE /v1/accounts/me/passkeys/{id}` | | 204; 404 if it isn't yours |
 
 Linking: `POST /v1/accounts/oauth/{provider}/start {intent: "link"}` with the session, then the
 same callback; on success it redirects to `return_to` (default `/dashboard/account`).
@@ -419,6 +525,9 @@ same callback; on success it redirects to `return_to` (default `/dashboard/accou
 
 | Route | Body | Answer |
 | --- | --- | --- |
+| `GET /v1/accounts/reset-requests` | | `ResetRequest[]`: `{id, user, email, handle, reason, ip, user_agent, created_at, state, decided_by, decided_at}`, pending first |
+| `POST /v1/accounts/reset-requests/{id}/approve` | | `ResetRequest`: TOTP and recovery codes gone (sudo mode; 403 `own_request` for your own; 409 decided) |
+| `POST /v1/accounts/reset-requests/{id}/deny` | | `ResetRequest` (sudo mode) |
 | `POST /v1/accounts/invites` | `{email, admin?, handle?}` | 201 `Invite & {token, url}` (the token is shown once, and mailed when mail is on); 409 an account has the email |
 | `GET /v1/accounts/invites` | | `Invite[]`, newest first |
 | `DELETE /v1/accounts/invites/{id}` | | 204 (unused invites only; 409 once used) |
@@ -511,6 +620,6 @@ Each product needs its resources to have an owner, and its routes to scope by th
 - **Workspace**: done in phase 1.
 - **Billing** (Home's spend): per user once the above carry owners.
 - **Orgs**: users in roll code orgs, and invites into an org.
-- **Passkeys**: see "Second factor".
+- **Passkeys**: done (see "Passkeys").
 - **Handles**: renaming a handle renames the roll code owner.
 - **CLI**: `roll login` through the device flow, giving a session-backed token.
