@@ -255,6 +255,46 @@ steps:
   candidates as `roll secrets scan` cuts them and checked with `POST …/leaks` (fingerprints; only
   values the token may reveal), and each stored value found fails the check with an annotation on
   its file and line naming the key and environment, never the value.
+## Azure Pipelines
+
+A pipeline logs in with its own OIDC token, as GitHub Actions' jobs do: nothing long-lived in its
+variables. Azure DevOps signs a pipeline's token as its organization
+(`iss` `https://vstoken.dev.azure.com/<organization id>`, the GUID in `$(System.CollectionId)`),
+for Azure's audience (`aud` `api://AzureADTokenExchange`; a pipeline can't ask for another), with
+the pipeline as its subject (`sub` `p://<organization>/<project>/<pipeline>`):
+
+```sh
+roll secrets identities add deploy --for-env production --audience api://AzureADTokenExchange \
+  --issuer https://vstoken.dev.azure.com/<organization id> --subject p://acme/shop/deploy
+```
+
+```yaml
+variables:
+  ROLL_API_URL: https://roll.example.com
+  ROLL_IDENTITY: idn_…
+steps:
+  - script: roll run --env production -- ./deploy.sh
+    env:
+      SYSTEM_ACCESSTOKEN: $(System.AccessToken)   # a secret: a script sees it only when mapped
+```
+
+With `ROLL_IDENTITY` set and no `ROLL_TOKEN`, roll asks Azure for the token itself
+(`POST $(System.OidcRequestUri)?api-version=7.1` with the job's access token; the answer's
+`oidcToken`) and logs in. Elsewhere, put the token in `ROLL_OIDC_TOKEN` yourself. The dashboard's
+New identity has an Azure Pipelines choice that fills in the issuer and audience.
+
+- The audience is Azure's, not roll's, so a token the pipeline got for Azure itself would also
+  log in here: that's why the subject names one pipeline exactly. A pipeline's subject is its
+  name, and two pipelines in different folders of one project can share one, so whoever may
+  create a pipeline in that project could make another `deploy`. For production, use a service
+  connection instead, whose use its own pipeline permissions, approvals and checks guard: an Azure
+  Resource Manager connection with workload identity federation, `ROLL_AZURE_SERVICE_CONNECTION`
+  set to its id, and the identity's issuer and subject copied from the connection's "Workload
+  Identity federation details" (older connections: `sc://<organization>/<project>/<connection>`
+  from the organization's issuer; newer ones: Entra's issuer and an `/eid1/…/sc/<organization id>/<connection id>` subject).
+- Roll treats Azure's issuers like the shared ones: an identity whose subject could match more
+  than one pipeline or connection is refused.
+
 ## Kubernetes
 Three ways, as the best products offer:
 - **Mounted (`sdk/csi-provider`)**: a provider for the [Secrets Store CSI
@@ -1932,7 +1972,7 @@ open it.
 ## Syncs
 
 A **sync** pushes an environment's resolved values to a platform outside roll, one way, whenever
-they change: GitHub Actions secrets, GitLab CI/CD variables, Vercel, Netlify, Render, Fly.io,
+they change: GitHub Actions secrets, GitLab CI/CD variables, Azure DevOps variable groups, Vercel, Netlify, Render, Fly.io,
 Railway, Heroku, DigitalOcean App Platform, CircleCI, Bitbucket Pipelines, Terraform Cloud, Cloudflare Workers, AWS Parameter Store and Secrets Manager, Google Secret Manager, Azure Key Vault, a Kubernetes Secret, an endpoint
 of the team's own, or a deploy hook that only hears that something changed. Infisical's "secret
 syncs" are the reference. roll secrets stays the source of truth: a sync never reads from its
@@ -2007,6 +2047,7 @@ last_synced_at, error}`:
 | `aws-ssm` | `{region, prefix: "/shop/production/", access_key_id_key, secret_access_key_key, kms_key_id?}` | Parameter Store `SecureString`s named `<prefix><name>` |
 | `google-secret-manager` | `{project, prefix?, service_account_key}` | one Secret Manager secret per key, `<prefix><KEY>`, each change a new version |
 | `azure-key-vault` | `{vault, tenant_id, client_id, client_secret_key}` | one Key Vault secret per key (`_` becomes `-`) |
+| `azure-devops` | `{organization, project, group, token_key}`, or `tenant_id, client_id, client_secret_key` instead of `token_key` | an Azure Pipelines variable group's variables, all secret |
 | `aws-secrets-manager` | `{region, secret_name: "shop/production", access_key_id_key, secret_access_key_key, kms_key_id?}` | one Secrets Manager secret: the environment's values as a JSON object |
 
 ### `github`
@@ -2121,6 +2162,48 @@ this environment and folder holding an access token with the `api` scope, and a 
 instance's public URL (gitlab.com by default; fetched like a webhook, `PublicOnly`). A changed key
 is updated in that scope, or created; a removed one is deleted. Values are raw (no `$` expansion),
 and masked when GitLab can mask them (8 characters or more, no spaces), so they stay out of job logs.
+
+### `azure-devops`
+
+An Azure DevOps variable group's variables, `{organization, project, group}` (`dev.azure.com/acme`,
+its project's name or id, the group's name), all pushed as secret variables, which pipelines that
+link the group read (`variables: [{ group: shop-production }]`; a script gets a secret only
+through its step's `env:`, as Azure Pipelines does for every secret). It signs in one of two ways:
+
+- `token_key`: the key holding a personal access token with **Variable Groups (Read, create, &
+  manage)**, sent as Basic auth;
+- `tenant_id`, `client_id` and `client_secret_key`: a Microsoft Entra service principal (client
+  credentials at `login.microsoftonline.com`, for Azure DevOps' own resource
+  `499b84ac-1321-427f-aa17-267ca6975798`), as `azure-key-vault` signs in. Microsoft is phasing
+  personal access tokens down for automation; the principal has to be a user of the organization
+  with the Administrator role on the group (Pipelines → Library → the group's Security).
+
+```sh
+roll secrets -e production syncs add azure-devops --target organization=acme --target project=shop \
+  --target group=shop-production --target token_key=AZURE_DEVOPS_PAT
+```
+
+Each push finds the group by name (`GET …/{project}/_apis/distributedtask/variablegroups?groupName=`,
+the one whose name matches exactly) and puts it back whole (`PUT …/{organization}/_apis/distributedtask/variablegroups/{id}`,
+API 7.1), since Azure's update replaces every variable at once: every key this sync manages is
+set with its value and `isSecret: true` (all of them on each push, never a secret without its
+value), removed ones (keys this sync pushed before) are dropped, and the group's plain variables go
+back as they came, its description and project references too. **Give the sync a group of its
+own**: Azure never returns a secret variable's value, so a secret roll doesn't manage couldn't be
+written back as it was, and a group holding one is refused, naming it, rather than risk clearing
+it. Azure's variable names are case-insensitive, and so is the match. Roll creates no group: one that doesn't
+exist fails the push (create it in Pipelines → Library), and so does one linked to a Key Vault
+(sync to the vault instead). A key named with a prefix Azure Pipelines keeps for itself
+(`endpoint`, `input`, `secret`, `path`, `securefile`, any case: `SECRET_KEY` too) never reaches a
+task, so it's an error naming it: leave it out with `keys`, or set a `prefix`.
+
+`organization` is 1–50 letters, digits and `-`; `project` up to 64 letters, digits, spaces and
+`-_.`; `group` up to 128 characters without `*` (Azure's filter takes it as a wildcard). Calls go
+only to `dev.azure.com` (and `login.microsoftonline.com`), through the guarded client:
+`PublicOnly`, no redirects, at most 1 MiB of an answer, timeouts. Errors carry Azure's status and
+`typeKey`, never an answer. A refused token answers with a sign-in page (203), which the error
+says. Two writers can race: something that edits the group between roll's read and its write
+loses that edit (Azure's API has no precondition to send); the next push sets roll's keys again.
 
 ### `kubernetes`
 
@@ -2384,7 +2467,12 @@ minutes.
 - **Shared issuers.** GitHub Actions, GitLab.com, Terraform Cloud, Buildkite and Google sign for
   every tenant they host, so an identity of theirs must name one tenant literally in its subject
   (`repo:acme/web:…`, `project_path:group/project:…`, `organization:acme:…`, a Google service
-  account's numeric id exactly): `repo:*` would let anyone's job in. Narrow further with claims
+  account's numeric id exactly): `repo:*` would let anyone's job in. Azure's issuers are one per
+  organization (`https://vstoken.dev.azure.com/<organization id>`) or Entra tenant
+  (`https://login.microsoftonline.com/<tenant>/v2.0`), but every project, pipeline and app in it
+  shares them, so an identity names one pipeline (`p://acme/shop/deploy`) or service connection
+  (`sc://acme/shop/roll-prod`, or Entra's `/eid1/…` subject) exactly, without `*` (see "Azure
+  Pipelines" above). Narrow further with claims
   (`ref=refs/heads/main`, or GitHub's `environment`). A token that lives longer than a day is
   refused. Key fetches are one at a time per issuer, and a failed one isn't retried for 30 s.
   Logins are capped at 120 a minute per identity and 240 per client address (429 `rate_limited`),
@@ -2428,7 +2516,8 @@ minutes.
   audited.
 - **The CLI.** With `ROLL_IDENTITY=idn_…` and no `ROLL_TOKEN`, `roll secrets …` and `roll run` log
   in by themselves, with the token from `ROLL_OIDC_TOKEN`, `ROLL_OIDC_TOKEN_FILE` (a Kubernetes
-  projected service account token) or GitHub Actions' own endpoint (`permissions: id-token: write`;
+  projected service account token), Azure Pipelines' own endpoint (`SYSTEM_ACCESSTOKEN` mapped
+  into the step: "Azure Pipelines" above) or GitHub Actions' own endpoint (`permissions: id-token: write`;
   audience `ROLL_OIDC_AUDIENCE`, default the server's URL):
 
   ```sh

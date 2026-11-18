@@ -465,7 +465,7 @@ pub enum Syncs {
     Ls,
     /// Add a sync of this environment and folder: `add github --target repo=acme/web`.
     Add {
-        /// The kind: github, gitlab, vercel, aws-secrets-manager, … (`syncs ls` lists them).
+        /// The kind: github, gitlab, azure-devops, vercel, aws-secrets-manager, … (`syncs ls` lists them).
         kind: String,
         /// The target's fields as `name=value` (repeat), as `syncs ls` describes them.
         #[arg(long = "target", value_name = "NAME=VALUE")]
@@ -3042,9 +3042,10 @@ fn write_private(path: &std::path::Path, text: &str) -> anyhow::Result<()> {
 }
 
 /// A workload identity's login (`ROLL_IDENTITY`): the workload's own OIDC token, from
-/// `ROLL_OIDC_TOKEN`, `ROLL_OIDC_TOKEN_FILE` (a Kubernetes projected token) or GitHub Actions
-/// (`permissions: id-token: write`; audience `ROLL_OIDC_AUDIENCE`, default `roll`), for a
-/// short-lived secrets token and when it ends (ms).
+/// `ROLL_OIDC_TOKEN`, `ROLL_OIDC_TOKEN_FILE` (a Kubernetes projected token), GitHub Actions
+/// (`permissions: id-token: write`; audience `ROLL_OIDC_AUDIENCE`, default the server's URL) or
+/// Azure Pipelines (`SYSTEM_ACCESSTOKEN` mapped in), for a short-lived secrets token and when it
+/// ends (ms).
 pub async fn identity_login(api: &Api, identity: &str) -> anyhow::Result<(String, i64)> {
     let env = |k: &str| std::env::var(k).ok().filter(|t| !t.trim().is_empty());
     let oidc = if let Some(t) = env("ROLL_OIDC_TOKEN") {
@@ -3059,8 +3060,21 @@ pub async fn identity_login(api: &Api, identity: &str) -> anyhow::Result<(String
         anyhow::ensure!(r.status().is_success(), "GitHub Actions answered {} for its OIDC token (does the job have `permissions: id-token: write`?)", r.status());
         let v: Value = r.json().await?;
         v["value"].as_str().context("GitHub Actions' OIDC answer has no value")?.to_string()
+    } else if let (Some(url), Some(bearer)) = (env("SYSTEM_OIDCREQUESTURI"), env("SYSTEM_ACCESSTOKEN")) {
+        // Azure Pipelines: the pipeline's own token (`p://org/project/pipeline`), or a service
+        // connection's (`sc://…`) with ROLL_AZURE_SERVICE_CONNECTION. Its audience is always
+        // Azure's (`api://AzureADTokenExchange`).
+        let sep = if url.contains('?') { '&' } else { '?' };
+        let mut url = format!("{url}{sep}api-version=7.1");
+        if let Some(sc) = env("ROLL_AZURE_SERVICE_CONNECTION") {
+            url.push_str(&format!("&serviceConnectionId={}", enc(&sc)));
+        }
+        let r = reqwest::Client::new().post(url).bearer_auth(bearer).header("content-type", "application/json").body("").send().await.context("asking Azure Pipelines for its OIDC token")?;
+        anyhow::ensure!(r.status().is_success(), "Azure Pipelines answered {} for its OIDC token (is SYSTEM_ACCESSTOKEN mapped from $(System.AccessToken)?)", r.status());
+        let v: Value = r.json().await.context("Azure Pipelines' OIDC answer isn't JSON")?;
+        v["oidcToken"].as_str().context("Azure Pipelines' OIDC answer has no oidcToken")?.to_string()
     } else {
-        anyhow::bail!("ROLL_IDENTITY is set but there's no OIDC token: set ROLL_OIDC_TOKEN or ROLL_OIDC_TOKEN_FILE, or run in GitHub Actions with `permissions: id-token: write`");
+        anyhow::bail!("ROLL_IDENTITY is set but there's no OIDC token: set ROLL_OIDC_TOKEN or ROLL_OIDC_TOKEN_FILE, run in GitHub Actions with `permissions: id-token: write`, or in Azure Pipelines with SYSTEM_ACCESSTOKEN: $(System.AccessToken)");
     };
     // A request of its own, without a token (never through `Api::call`, which renews logins).
     let mut req = api.http.post(format!("{}/v1/secrets/login", api.base)).json(&json!({ "identity": identity, "token": oidc.trim() }));

@@ -2754,6 +2754,17 @@ async fn a_workload_logs_in_with_its_oidc_token_for_a_short_lived_scoped_token()
     let (s, _) = api.req(Method::GET, "/environments/staging/values", None, before["token"].as_str()).await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);
 
+    // Azure Pipelines: one issuer per organization, so an identity names one pipeline (or service
+    // connection), and the token's audience is Azure's own.
+    let ado = "https://vstoken.dev.azure.com/00000000-0000-0000-0000-00000000a0b1";
+    let azure = Issuer::new();
+    let pipeline = |subject: &str| json!({ "name": "pipeline", "issuer": ado, "audience": "api://AzureADTokenExchange", "subject": subject, "environments": ["staging"], "actions": ["read", "reveal"], "jwks": azure.jwks().to_string() });
+    assert_eq!(api.call(Method::POST, "/identities", Some(pipeline("p://acme/shop/*"))).await.0, StatusCode::BAD_REQUEST, "every pipeline of the organization");
+    let a = api.ok(Method::POST, "/identities", Some(pipeline("p://acme/shop/deploy"))).await;
+    let run = |sub: &str| json!({ "identity": a["id"], "token": azure.sign(json!({ "iss": ado, "aud": "api://AzureADTokenExchange", "sub": sub, "exp": now + 300, "iat": now })) });
+    assert_eq!(api.call(Method::POST, "/v1/secrets/login", Some(run("p://acme/shop/deploy"))).await.0, StatusCode::OK);
+    assert_eq!(api.call(Method::POST, "/v1/secrets/login", Some(run("p://acme/shop/deploy-preview"))).await.0, StatusCode::FORBIDDEN);
+
     // Deleting the identity ends what it gave out.
     api.ok(Method::DELETE, &format!("/identities/{id}"), None).await;
     let (s, _) = api.req(Method::GET, "/environments/staging/values", None, Some(&token)).await;
