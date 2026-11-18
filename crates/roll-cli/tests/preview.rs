@@ -281,3 +281,16 @@ fn mask_suggestions_from_the_cli() {
     s.ok(&["masks", "shop", "--apply"]);
     assert_eq!(s.json(&["masks", "shop"])["suggestions"].as_array().map(Vec::len), Some(0));
 }
+
+/// `roll preview errors` answers a preview's grouped errors (none here: nothing runs in this
+/// harness), and a preview that isn't one is an error.
+#[test]
+fn errors_from_the_cli() {
+    let s = server();
+    s.ok(&["settings", "shop", "--set", "enabled=true"]);
+    let created = s.json(&["create", "--project", "shop", "--repo", "acme/web", "--branch", "main"]);
+    let id = created["id"].as_str().unwrap();
+    assert!(s.ok(&["errors", id]).contains("no errors in the last 60 minutes"));
+    assert_eq!(s.json(&["errors", id, "--minutes", "1440"])["groups"].as_array().map(Vec::len), Some(0));
+    assert!(!s.roll(&["errors", "pv_nope"]).0);
+}
