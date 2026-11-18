@@ -271,7 +271,7 @@ export interface AuditEvent {
   grant_id: string | null;
   grant_name: string | null;
   /** A request (`api`, `mcp`), a change to tokens and access (`access`: who in `args.by`), or roll's own act (`leak`, `workload`). */
-  source: "api" | "mcp" | "access" | "leak" | "workload";
+  source: "api" | "mcp" | "access" | "leak" | "workload" | "accounts";
   tool: string | null;
   method: string;
   /** The route pattern, never the path. */
@@ -747,7 +747,10 @@ export function grantMatches(g: Pick<Grant, "name" | "id" | "hint" | "client" | 
 
 /** Who an audit row is by: a change's person (`args.by`), else a request's grant, else the operator. */
 export function auditWho(e: AuditEvent): string {
-  const by = e.source === "access" && e.args && typeof e.args === "object" ? (e.args as { by?: unknown }).by : undefined;
+  const args = e.args && typeof e.args === "object" ? (e.args as { by?: unknown; actor?: unknown }) : {};
+  // People's accounts (docs/accounts.md, "Audit"): who acted (a person's id, operator, scim:<connection>).
+  if (e.source === "accounts" && typeof args.actor === "string") return args.actor;
+  const by = e.source === "access" ? args.by : undefined;
   if (typeof by === "string") return by;
   return e.source === "access" ? "operator" : (e.grant_name ?? "operator");
 }
@@ -755,6 +758,8 @@ export function auditWho(e: AuditEvent): string {
 /** What an audit row did: a tool, a request's route, or a change and the token it's about. */
 export function auditWhat(e: AuditEvent): string {
   if (e.tool) return e.tool;
+  // An account event: its action (`sign_in`, `scim.update`) or its request.
+  if (e.source === "accounts") return e.method === "-" ? e.route : `${e.method} ${e.route.replace(/^[A-Z]+ /, "")}`;
   return e.source === "access" && e.grant_name ? `${e.method} ${e.route} · ${e.grant_name}` : `${e.method} ${e.route}`;
 }
 
@@ -787,6 +792,7 @@ const PRODUCT_NAMES: Record<string, string> = {
   search: "Search",
   observability: "Logs & metrics",
   access: "Tokens & access",
+  accounts: "Accounts",
 };
 
 export const productName = (p: string) => PRODUCT_NAMES[p] ?? p;

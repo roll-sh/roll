@@ -10,6 +10,7 @@
 //!   (`roll_auth::check`) resolves session cookies with.
 
 pub mod api;
+pub mod audit;
 mod mail;
 mod oauth;
 mod scim;
@@ -381,6 +382,8 @@ pub struct Accounts {
     sso_discovery: std::sync::Mutex<std::collections::HashMap<String, (sso::Discovered, std::time::Instant)>>,
     /// TXT records, for proving SSO domains (DNS over HTTPS; a table in tests).
     txt: std::sync::RwLock<Arc<dyn sso::TxtLookup>>,
+    /// Where account events go (rolld: roll-access's audit log); none until it's set.
+    audit: std::sync::RwLock<Option<Arc<dyn audit::Audit>>>,
     owners: Option<Arc<dyn Owners>>,
 }
 
@@ -417,7 +420,7 @@ impl Accounts {
         }
         let doh = std::env::var("ROLL_ACCOUNTS_DOH").ok().filter(|u| !u.trim().is_empty()).unwrap_or_else(|| "https://cloudflare-dns.com/dns-query".into());
         let txt: Arc<dyn sso::TxtLookup> = Arc::new(sso::Doh { client: sso_http.clone(), url: doh });
-        Ok(Accounts { db, config, mailer, http, sso_http, sso_discovery: Default::default(), txt: std::sync::RwLock::new(txt), owners })
+        Ok(Accounts { db, config, mailer, http, sso_http, sso_discovery: Default::default(), txt: std::sync::RwLock::new(txt), audit: Default::default(), owners })
     }
 
     /// Where SSO domains' TXT records are read (tests answer from a table).
@@ -908,7 +911,8 @@ impl Accounts {
     }
 
     /// Check a challenge's code: the user it signs in (made from the invite on first sign-in).
-    pub fn email_verify(&self, challenge: &str, code: &str) -> Result<String> {
+    /// The person an email code signs in, and whether their account was made now (an invite).
+    pub fn email_verify(&self, challenge: &str, code: &str) -> Result<(String, bool)> {
         let now = self.db.now_ms()?;
         // A try is used up before the code is checked, in one write: guesses sent in parallel
         // can't share one.
@@ -932,8 +936,8 @@ impl Accounts {
         }
         self.forget(&key)?;
         match (user, invite) {
-            (Some(u), _) => Ok(u),
-            (None, Some(inv)) => self.create_user(NewUser { invite_id: &inv, email: &email, hint: None, name: None, identity: None }),
+            (Some(u), _) => Ok((u, false)),
+            (None, Some(inv)) => self.create_user(NewUser { invite_id: &inv, email: &email, hint: None, name: None, identity: None }).map(|u| (u, true)),
             (None, None) => Err(Error::bad_code()),
         }
     }

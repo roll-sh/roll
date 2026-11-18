@@ -37,6 +37,26 @@ const MAX_PAGE: i64 = 200;
 const MAX_TEXT: usize = 255;
 
 type S = State<Arc<Accounts>>;
+type Ip = Option<axum::Extension<roll_auth::ClientIp>>;
+
+/// A SCIM change in the audit log, as the connection that made it (`failed`: why it didn't
+/// happen, or happened only in part, as a deactivation that couldn't finish).
+fn event(a: &Accounts, conn: &crate::sso::Connection, action: &str, user: Option<&str>, mut detail: Value, failed: Option<&Error>, who: &crate::audit::Who) {
+    if let Some(e) = failed {
+        detail["refused"] = json!(e.redirect_code());
+    }
+    a.record(crate::audit::AccountEvent {
+        actor: format!("scim:{}", conn.id),
+        action: action.to_string(),
+        method: "-".into(),
+        target: user.map(crate::audit::clean_id),
+        ok: failed.is_none(),
+        status: failed.map(crate::audit::status_of).unwrap_or(200),
+        ip: who.ip,
+        user_agent: who.user_agent.clone(),
+        detail,
+    });
+}
 
 pub(crate) fn routes() -> Router<Arc<Accounts>> {
     Router::new()
@@ -431,7 +451,8 @@ async fn get_user(State(a): S, headers: HeaderMap, Path(id): Path<String>) -> R 
     Ok(scim_json(StatusCode::OK, body))
 }
 
-async fn create_user(State(a): S, headers: HeaderMap, Json(v): Json<Value>) -> R {
+async fn create_user(State(a): S, ip: Ip, headers: HeaderMap, Json(v): Json<Value>) -> R {
+    let who = crate::audit::Who::of(ip, &headers);
     let (id, body) = blocking(&a, move |a| {
         let conn = connection_of(a, &headers)?;
         let email = email_of(&v)?;
@@ -444,7 +465,10 @@ async fn create_user(State(a): S, headers: HeaderMap, Json(v): Json<Value>) -> R
             Some(x) => bool_of(x)?,
         };
         let external = v.get("externalId").and_then(Value::as_str);
-        let id = a.scim_create(&conn, &email, &user_name, name_of(&v).as_deref(), external, active)?;
+        let id = a
+            .scim_create(&conn, &email, &user_name, name_of(&v).as_deref(), external, active)
+            .inspect_err(|e| event(a, &conn, "scim.create", None, json!({ "email": email }), Some(e), &who))?;
+        event(a, &conn, "scim.create", Some(&id), json!({ "active": active }), None, &who);
         Ok((id.clone(), user_json(a, &a.scim_person(&conn, &id)?)))
     })
     .await?;
@@ -455,7 +479,8 @@ async fn create_user(State(a): S, headers: HeaderMap, Json(v): Json<Value>) -> R
     Ok(r)
 }
 
-async fn replace_user(State(a): S, headers: HeaderMap, Path(id): Path<String>, Json(v): Json<Value>) -> R {
+async fn replace_user(State(a): S, ip: Ip, headers: HeaderMap, Path(id): Path<String>, Json(v): Json<Value>) -> R {
+    let who = crate::audit::Who::of(ip, &headers);
     let body = blocking(&a, move |a| {
         let conn = connection_of(a, &headers)?;
         let person = a.scim_person(&conn, &id)?;
@@ -473,14 +498,17 @@ async fn replace_user(State(a): S, headers: HeaderMap, Path(id): Path<String>, J
                 Some(x) => Some(bool_of(x)?),
             },
         };
-        a.scim_update(&conn, &id, ch)?;
+        let detail = json!({ "active": ch.active, "user_name": ch.user_name.is_some(), "external_id": ch.external_id.is_some() });
+        a.scim_update(&conn, &id, ch).inspect_err(|e| event(a, &conn, "scim.update", Some(&id), detail.clone(), Some(e), &who))?;
+        event(a, &conn, "scim.update", Some(&id), detail, None, &who);
         Ok(user_json(a, &a.scim_person(&conn, &id)?))
     })
     .await?;
     Ok(scim_json(StatusCode::OK, body))
 }
 
-async fn patch_user(State(a): S, headers: HeaderMap, Path(id): Path<String>, Json(v): Json<Value>) -> R {
+async fn patch_user(State(a): S, ip: Ip, headers: HeaderMap, Path(id): Path<String>, Json(v): Json<Value>) -> R {
+    let who = crate::audit::Who::of(ip, &headers);
     let body = blocking(&a, move |a| {
         let conn = connection_of(a, &headers)?;
         if !v.get("schemas").and_then(Value::as_array).is_some_and(|s| s.iter().any(|x| x == PATCH_OP)) {
@@ -522,7 +550,9 @@ async fn patch_user(State(a): S, headers: HeaderMap, Path(id): Path<String>, Jso
                 (other, _) => return Err(invalid(&format!("op {other:?}: add, replace or remove"))),
             }
         }
-        a.scim_update(&conn, &id, ch)?;
+        let detail = json!({ "active": ch.active, "user_name": ch.user_name.is_some(), "external_id": ch.external_id.is_some() });
+        a.scim_update(&conn, &id, ch).inspect_err(|e| event(a, &conn, "scim.update", Some(&id), detail.clone(), Some(e), &who))?;
+        event(a, &conn, "scim.update", Some(&id), detail, None, &who);
         Ok(user_json(a, &a.scim_person(&conn, &id)?))
     })
     .await?;
@@ -530,10 +560,13 @@ async fn patch_user(State(a): S, headers: HeaderMap, Path(id): Path<String>, Jso
 }
 
 /// Deactivate: roll keeps the account (its history), disabled, as `active: false` does.
-async fn delete_user(State(a): S, headers: HeaderMap, Path(id): Path<String>) -> R {
+async fn delete_user(State(a): S, ip: Ip, headers: HeaderMap, Path(id): Path<String>) -> R {
+    let who = crate::audit::Who::of(ip, &headers);
     blocking(&a, move |a| {
         let conn = connection_of(a, &headers)?;
-        a.scim_update(&conn, &id, Change { active: Some(false), ..Change::default() })
+        a.scim_update(&conn, &id, Change { active: Some(false), ..Change::default() }).inspect_err(|e| event(a, &conn, "scim.update", Some(&id), json!({ "active": false }), Some(e), &who))?;
+        event(a, &conn, "scim.update", Some(&id), json!({ "active": false }), None, &who);
+        Ok(())
     })
     .await?;
     Ok(StatusCode::NO_CONTENT.into_response())

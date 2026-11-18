@@ -424,6 +424,24 @@ same callback; on success it redirects to `return_to` (default `/dashboard/accou
 
 A non-admin session on these is 403 `{code: "admin_only"}`; no credentials at all is 401.
 
+## Audit
+
+People's accounts are in roll's audit log (`/dashboard/access/audit`, `GET /v1/access/audit?product=accounts`,
+and the SIEM sinks), as Okta's System Log and GitHub's audit log keep them:
+
+- every write to an accounts route, once answered: its method and route (`PATCH
+  /v1/accounts/users/{id}`), the id it names, who made it (a person's id, `operator`,
+  `anonymous`), its status, the client's address (read as the gate reads it: trusted proxies) and
+  user agent: invites, users disabled or made admin, sessions ended, SSO connections and SCIM
+  tokens, TOTP, links;
+- every sign-in that ended, well or not (`sign_in`): the person (or `anonymous`), the method
+  (`email`, `github`, `google`, `sso:<connection>`, `totp`, `recovery_code`) and why it was refused
+  (`bad_code`, `sso_required`, `disabled`, `not_invited`…);
+- SCIM's changes (`scim.create`, `scim.update` with `active`), as `scim:<connection>`.
+
+Never a body: no code, token, secret or password is in an event. Starting a sign-in isn't
+recorded (its end is).
+
 ## Mail
 
 - `ROLL_ACCOUNTS_MAIL_FROM` (e.g. `roll <noreply@roll.sh>`) turns on mail through SES v2
