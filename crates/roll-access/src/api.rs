@@ -23,6 +23,7 @@ pub fn router(access: Arc<Access>) -> Router {
         .route("/v1/access/catalog", get(catalog_view))
         .route("/v1/access/check", post(check))
         .route("/v1/access/tokens", get(list).post(create))
+        .route("/v1/access/tokens/revoke", post(revoke_many))
         .route("/v1/access/tokens/{id}", get(get_one).patch(update).delete(revoke))
         .route("/v1/access/tokens/{id}/rotate", post(rotate))
         .route("/v1/access/tokens/{id}/approve", post(approve_token))
@@ -31,6 +32,7 @@ pub fn router(access: Arc<Access>) -> Router {
         .route("/v1/access/tokens/{id}/networks", get(networks))
         .route("/v1/access/checkup", get(checkup))
         .route("/v1/access/tokens/{id}/temporary/{approval}", axum::routing::delete(forget))
+        .route("/v1/access/requests", post(request_access))
         .route("/v1/access/approvals", get(approvals))
         .route("/v1/access/approvals/{id}", get(approval))
         .route("/v1/access/approvals/{id}/approve", post(approve))
@@ -41,6 +43,11 @@ pub fn router(access: Arc<Access>) -> Router {
         .route("/v1/access/audit/sinks/{id}/retry", post(retry_sink))
         .route("/v1/access/notify", get(notify).put(set_notify))
         .route("/v1/access/policy", get(policy).put(set_policy))
+        .route("/v1/access/enterprise", get(crate::enterprise::get_config))
+        .route("/v1/access/enterprise/idps", axum::routing::put(crate::enterprise::put_idps))
+        .route("/v1/access/enterprise/apps", post(crate::enterprise::add_app))
+        .route("/v1/access/enterprise/apps/{id}", axum::routing::delete(crate::enterprise::remove_app).patch(crate::enterprise::update_app))
+        .route("/v1/access/enterprise/apps/{id}/rotate", post(crate::enterprise::rotate_app))
         .route("/v1/access/clients", get(crate::clients_api::list).post(crate::clients_api::create))
         .route("/v1/access/clients/{id}", axum::routing::delete(crate::clients_api::revoke))
         .route("/v1/access/clients/{id}/rotate", post(crate::clients_api::rotate))
@@ -66,6 +73,7 @@ fn change_name(method: &axum::http::Method, route: &str) -> String {
         (&Method::POST, "/v1/access/tokens") => "create".into(),
         (&Method::PATCH, "/v1/access/tokens/{id}") => "change".into(),
         (&Method::DELETE, "/v1/access/tokens/{id}") => "revoke".into(),
+        (&Method::POST, "/v1/access/tokens/revoke") => "revoke_many".into(),
         (&Method::DELETE, "/v1/access/tokens/{id}/temporary/{approval}") => "forget".into(),
         (&Method::POST, "/v1/access/oauth/authorize") => "connect".into(),
         (&Method::POST, "/v1/access/oauth/devices/{code}") => "connect".into(),
@@ -210,7 +218,11 @@ pub(crate) fn operator_only(access: &Access, ext: &Extensions, what: &str) -> cr
 
 async fn me(State(a): S, ext: Extensions) -> crate::Result<Json<Value>> {
     Ok(Json(match who(&a, &ext)? {
-        Who::Operator => json!({ "kind": "operator", "locked": a.config.locked }),
+        // A signed-in admin acts as the operator, and is still who they are (what they approved).
+        Who::Operator => match ext.get::<roll_auth::SignedIn>() {
+            Some(u) => json!({ "kind": "operator", "user": { "id": u.user, "handle": u.handle }, "locked": a.config.locked }),
+            None => json!({ "kind": "operator", "locked": a.config.locked }),
+        },
         Who::Grant(g) => {
             let id = g.id.to_string();
             let grant = blocking(a.clone(), move |a| a.store.get(&id)).await?;
@@ -299,7 +311,7 @@ async fn check(State(a): S, ext: Extensions, Json(c): Json<Check>) -> crate::Res
         (Who::Grant(_), Some(_)) => return Err(Error::Forbidden("a token checks only itself".into())),
         (Who::Operator | Who::User(_), Some(id)) => {
             let g = visible_grant(&a, &who, id).await?;
-            (g.effective_rules(code_sql::now_ms()), g.ask_otherwise)
+            (g.effective_rules(code_sql::now_ms(), |r| a.policy_now().asks_again(r)), g.ask_otherwise)
         }
         (Who::Operator, None) => return Ok(Json(json!({ "decision": "allow", "why": "the operator may do everything" }))),
         (Who::User(_), None) => return Err(Error::BadRequest("name the token to check (token)".into())),
@@ -539,12 +551,22 @@ impl Access {
     }
 
     async fn create_for(self: &Arc<Self>, ext: &Extensions, mut new: NewGrant) -> crate::Result<(crate::store::Grant, String)> {
+        // Sudo mode (docs/accounts.md): a token made from a person's session (theirs, or an
+        // admin's acting as the operator) needs a recent proof, so a stolen cookie can't mint a
+        // long-lived token. One a token makes is within that token; the operator's has no session.
+        if let (Some(u), None) = (ext.get::<roll_auth::SignedIn>(), ext.get::<roll_auth::Grant>())
+            && let Some(people) = self.people.get()
+            && !people.fresh(&u.user, &u.session).await.map_err(Error::Internal)?
+        {
+            return Err(Error::ReauthRequired("confirm it's you first (on your account page, or GET /v1/accounts/me/reauth): making a token needs a sign-in in the last two hours".into()));
+        }
         // A user's token is theirs, and so is one their token makes: it acts as them.
         let who = who(self, ext)?;
         // A person's own token past what the policy has an admin approve waits for one (one their
         // token makes is within that token, which was approved).
+        // A decoy allows nothing, so nothing about it waits for an admin.
         let asker = match &who {
-            Who::User(u) if self.policy_now().needs_approval(&new.rules, new.ask_otherwise) => Some(u.handle.clone()),
+            Who::User(u) if !new.decoy && self.policy_now().needs_approval(&new.rules, new.ask_otherwise) => Some(u.handle.clone()),
             _ => None,
         };
         new.pending = asker.is_some();
@@ -782,6 +804,59 @@ async fn revoke(State(a): S, ext: Extensions, Path(id): Path<String>) -> crate::
     Ok(Json(json!(blocking(a, move |a| a.store.revoke(&id)).await?)))
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RevokeMany {
+    ids: Vec<String>,
+    why: String,
+}
+
+/// An incident's cut-off (docs/permissions.md, "Revoking at once"): every listed token at once,
+/// all or none. The operator's.
+async fn revoke_many(State(a): S, ext: Extensions, axum::Json(b): axum::Json<RevokeMany>) -> crate::Result<Json<Value>> {
+    operator_only(&a, &ext, "revoke tokens in bulk")?;
+    let by = actor(&ext);
+    let revoked = a.revoke_many(b.ids, &b.why, &by).await?;
+    Ok(Json(json!({ "revoked": revoked })))
+}
+
+impl Access {
+    /// Revoke every grant in `ids` at once (roll secrets' incident cut-off calls this in process,
+    /// its reach choosing the ids): all or none, an audit row per grant with why and who.
+    pub async fn revoke_many(self: &Arc<Self>, ids: Vec<String>, why: &str, by: &str) -> crate::Result<Vec<crate::store::Grant>> {
+        let why = why.trim().to_string();
+        if why.is_empty() {
+            return Err(Error::BadRequest("say why (the incident): it's on every revoked token".into()));
+        }
+        let (w, a2) = (why.clone(), self.clone());
+        let revoked = tokio::task::spawn_blocking(move || a2.store.revoke_many(&ids, &w)).await.map_err(|e| Error::Internal(e.to_string()))??;
+        let at = code_sql::now_ms();
+        for g in &revoked {
+            self.store.audit(&crate::store::AuditEvent {
+                id: crate::new_id("aud"),
+                at,
+                grant_id: Some(g.id.clone()),
+                grant_name: Some(g.name.clone()),
+                source: "access".into(),
+                tool: None,
+                method: "POST".into(),
+                route: "/v1/access/tokens/revoke".into(),
+                product: Some("access".into()),
+                action: Some("admin".into()),
+                resource: Some(format!("revoked by {by}: {why}").chars().take(300).collect()),
+                decision: "revoke".into(),
+                approval: None,
+                status: 200,
+                args: None,
+                ip: None,
+                duration_ms: 0,
+                client: None,
+            });
+        }
+        Ok(revoked)
+    }
+}
+
 /// Take back what an approval allowed a token for a while. The operator decides approvals, so
 /// the operator takes them back.
 async fn forget(State(a): S, ext: Extensions, Path((id, approval)): Path<(String, String)>) -> crate::Result<Json<Value>> {
@@ -840,6 +915,7 @@ async fn grants_of(a: &Arc<Access>, user: &str) -> crate::Result<std::collection
 /// A person sees their own tokens' approvals only: filtered in the query, so the limit counts theirs.
 async fn approvals(State(a): S, ext: Extensions, Query(q): Query<ApprovalsQuery>) -> crate::Result<Json<Value>> {
     let who = who(&a, &ext)?;
+    let filtered = q.grant.is_some();
     let grants: Option<Vec<String>> = match (who.mine(), q.grant) {
         (None, g) => g.map(|g| vec![g]),
         (Some(user), g) => {
@@ -850,7 +926,25 @@ async fn approvals(State(a): S, ext: Extensions, Query(q): Query<ApprovalsQuery>
             })
         }
     };
-    let list = blocking(a, move |a| a.store.approvals(q.state.as_deref(), grants.as_deref(), q.limit.unwrap_or(100))).await?;
+    // A signed-in person (never a token of theirs) also sees what roll's policy names them to
+    // approve, unless they asked for one token's.
+    let me = match &who {
+        Who::User(u) if !filtered => Some(u.user.clone()),
+        _ => None,
+    };
+    let (state, limit) = (q.state.clone(), q.limit.unwrap_or(100));
+    let list = blocking(a, move |a| {
+        let mut list: Vec<_> = a.store.approvals(state.as_deref(), grants.as_deref(), limit)?.into_iter().map(|x| a.gated(x)).collect();
+        // A person also sees what roll's policy names them to approve.
+        if let Some(user) = me.filter(|_| state.as_deref().is_none_or(|s| s == "pending")) {
+            let named: Vec<_> = a.store.approvals(Some("pending"), None, 200)?.into_iter().filter(|x| a.names_approver(x, &user) && !list.iter().any(|l| l.id == x.id)).map(|x| a.gated(x)).collect();
+            list.extend(named);
+            list.sort_by_key(|x| std::cmp::Reverse(x.created_at));
+            list.truncate(limit);
+        }
+        Ok(list)
+    })
+    .await?;
     Ok(Json(json!(list)))
 }
 
@@ -863,7 +957,8 @@ async fn may_decide(a: &Arc<Access>, ext: &Extensions, id: &str) -> crate::Resul
         Who::User(u) => {
             let id2 = id.to_string();
             let found = blocking(a.clone(), move |a| a.store.approval(&id2)).await?;
-            if grants_of(a, &u.user).await?.contains(&found.grant_id) { Ok(u.user) } else { Err(Error::NotFound(format!("no approval {id}"))) }
+            // Their own tokens', and those roll's policy names them to approve.
+            if grants_of(a, &u.user).await?.contains(&found.grant_id) || a.names_approver(&found, &u.user) { Ok(u.user) } else { Err(Error::NotFound(format!("no approval {id}"))) }
         }
     }
 }
@@ -884,7 +979,7 @@ async fn approval(State(a): S, ext: Extensions, Path(id): Path<String>, Query(q)
         Who::User(_) => false,
     };
     let not_mine = match who.mine() {
-        Some(user) => !grants_of(&a, user).await?.contains(&found.grant_id),
+        Some(user) => !grants_of(&a, user).await?.contains(&found.grant_id) && !a.names_approver(&found, user),
         None => false,
     };
     if hidden || not_mine {
@@ -894,7 +989,7 @@ async fn approval(State(a): S, ext: Extensions, Path(id): Path<String>, Query(q)
         Some(w) => crate::evaluate::wait(&a, &id, std::time::Duration::from_secs(w.min(55))).await?,
         None => found,
     };
-    Ok(Json(json!(found)))
+    Ok(Json(json!(a.gated(found))))
 }
 
 #[derive(Deserialize, Default)]
@@ -915,9 +1010,10 @@ async fn approve(State(a): S, ext: Extensions, Path(id): Path<String>, body: axu
     let by = may_decide(&a, &ext, &id).await?;
     let ap: Approve = if body.iter().all(u8::is_ascii_whitespace) { Approve::default() } else { serde_json::from_slice(&body).map_err(|e| Error::BadRequest(format!("invalid body: {e}")))? };
     let remembered = remembered(&a, &id, ap.remember.as_deref()).await?;
-    let decided = blocking(a.clone(), move |a| a.store.decide(&id, true, &by, None)).await?;
+    let decided = blocking(a.clone(), move |a| a.decide(&id, true, &by, None)).await?;
     a.changed(&decided);
-    if let Some((grant, rule, until)) = remembered {
+    // Checked again now it's decided: a gate added meanwhile means it was approved once.
+    if let Some((grant, rule, until)) = remembered.filter(|_| decided.state == "approved" && a.policy().gates(&decided).is_empty()) {
         let apr = decided.id.clone();
         blocking(a.clone(), move |a| a.store.remember(&grant, &rule, until, &apr)).await?;
     }
@@ -939,10 +1035,18 @@ async fn remembered(a: &Arc<Access>, id: &str, remember: Option<&str>) -> crate:
     let Some(until) = until else { return Ok(None) };
     let id2 = id.to_string();
     let found = blocking(a.clone(), move |a| a.store.approval(&id2)).await?;
+    if asked_for(&found).is_some() {
+        return Err(Error::BadRequest("an access request is for the time it asked: approve it as it is".into()));
+    }
+    // What needs several people is approved once each time: a rule for a while would let the next
+    // ones through with fewer.
+    if let Some(g) = a.policy().gates(&found).first() {
+        return Err(Error::BadRequest(format!("roll's policy asks {} people to approve this: approve it once", g.approvals)));
+    }
     // About one resource, as a rule would name it: not something new, not several links at once.
-    let Some(resource) = found.resource.clone().filter(|r| !r.starts_with("new in ") && !r.contains(", ")) else {
+    if !found.resource.as_deref().is_some_and(|r| !r.starts_with("new in ") && !r.contains(", ")) {
         return Err(Error::BadRequest("this request isn't about one resource: approve it once".into()));
-    };
+    }
     // A route whose product filters per environment answers about no environment: a rule from it
     // would drop the environments the token is limited to.
     if catalog::find(&found.method, &found.route, &found.path).is_some_and(|f| f.row.filters_itself) {
@@ -953,19 +1057,7 @@ async fn remembered(a: &Arc<Access>, id: &str, remember: Option<&str>) -> crate:
     if found.scope_index.as_deref().is_some_and(|ix| !roll_auth::scope::rememberable_part(&found.product, ix)) {
         return Err(Error::BadRequest("this request names no single encryption key: approve it once".into()));
     }
-    let selector = match found.scope_index.clone() {
-        Some(ix) => roll_auth::scope::Selector::Id { id: resource.strip_suffix(&format!("/{ix}")).unwrap_or(&resource).to_string(), index: Some(ix) },
-        None => roll_auth::scope::Selector::id(resource),
-    };
-    let action: Action = serde_json::from_value(json!(found.action)).map_err(|_| Error::Internal(format!("approval {id} has action {}", found.action)))?;
-    let rule = roll_auth::scope::Rule {
-        product: found.product.clone(),
-        resources: roll_auth::scope::Resources::Some(vec![selector]),
-        // Only where the request was: an approval in development never reaches production.
-        environments: found.environment.clone().map(|e| vec![e]),
-        paths: found.scope_path.clone().map(|p| vec![p]),
-        actions: [(action, roll_auth::scope::Effect::Allow)].into_iter().collect(),
-    };
+    let rule = rule_of(&found)?;
     // What the request named becomes a rule: it meets the rules' own checks (one line, sizes).
     if let Some(p) = roll_auth::scope::Scope(vec![rule.clone()]).problems().first() {
         return Err(Error::BadRequest(format!("this request can't be remembered ({p}): approve it once")));
@@ -979,11 +1071,147 @@ async fn remembered(a: &Arc<Access>, id: &str, remember: Option<&str>) -> crate:
     Ok(Some((found.grant_id, rule, until)))
 }
 
+/// The rule an approval is about: its action on its one resource (or the product's every resource
+/// when it named none), only where it was (environment, folder, indices).
+pub(crate) fn rule_of(found: &crate::store::Approval) -> crate::Result<roll_auth::scope::Rule> {
+    let action: Action = serde_json::from_value(json!(found.action)).map_err(|_| Error::Internal(format!("approval {} has action {}", found.id, found.action)))?;
+    let resources = match (found.resource.clone(), found.scope_index.clone()) {
+        (None, _) => roll_auth::scope::Resources::All,
+        (Some(r), Some(ix)) => roll_auth::scope::Resources::Some(vec![roll_auth::scope::Selector::Id { id: r.strip_suffix(&format!("/{ix}")).unwrap_or(&r).to_string(), index: Some(ix) }]),
+        (Some(r), None) => roll_auth::scope::Resources::Some(vec![roll_auth::scope::Selector::id(r)]),
+    };
+    Ok(roll_auth::scope::Rule {
+        product: found.product.clone(),
+        resources,
+        // Only where the request was: an approval in development never reaches production.
+        environments: found.environment.clone().map(|e| vec![e]),
+        paths: found.scope_path.clone().map(|p| vec![p]),
+        actions: [(action, roll_auth::scope::Effect::Allow)].into_iter().collect(),
+    })
+}
+
+/// How long an access request asked for (ms), or `None` for an approval of a request.
+pub(crate) fn asked_for(a: &crate::store::Approval) -> Option<i64> {
+    (a.method == ACCESS_REQUEST_METHOD).then(|| a.args["for"].as_str().and_then(request_duration)).flatten()
+}
+
+/// An access request is an approval with this method on `/v1/access/requests`.
+pub const ACCESS_REQUEST_METHOD: &str = "GRANT";
+
+fn request_duration(s: &str) -> Option<i64> {
+    Some(match s {
+        "15m" => 15 * 60_000,
+        "1h" => 3_600_000,
+        "8h" => 8 * 3_600_000,
+        "1d" => 24 * 3_600_000,
+        _ => return None,
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AccessRequest {
+    product: String,
+    action: Action,
+    /// One resource (the product's own id); the product's every resource when left out.
+    resource: Option<String>,
+    environment: Option<String>,
+    path: Option<String>,
+    /// Indices or keys within the resource (search's indices, a transit key).
+    index: Option<String>,
+    /// `15m`, `1h`, `8h` or `1d`.
+    #[serde(rename = "for")]
+    for_: String,
+    /// Why: the person deciding reads it.
+    reason: String,
+}
+
+/// A token asks for one more rule for a while, saying why (docs/permissions.md, "Access
+/// requests"), as Teleport's access requests and Entra's PIM do: a person approves it (the
+/// policy's approval rules apply) and it becomes a rule for that long. Only a token asks for
+/// itself; the operator and people change tokens directly.
+async fn request_access(State(a): S, ext: Extensions, Json(r): Json<AccessRequest>) -> crate::Result<(StatusCode, Json<Value>)> {
+    let Who::Grant(g) = who(&a, &ext)? else {
+        return Err(Error::BadRequest("only a token asks for access; change a token's rules instead".into()));
+    };
+    let id = g.id.to_string();
+    let grant = blocking(a.clone(), move |a| a.store.get(&id)).await?;
+    if grant.kind == "workload" {
+        return Err(Error::Forbidden("a workload's token is fixed: it asks for nothing".into()));
+    }
+    // Only a token made to involve people asks them (as only a token that asks may make one that
+    // does): one with "ask for anything else", or a rule that asks.
+    let asks = grant.ask_otherwise || grant.rules.0.iter().any(|r| r.actions.values().any(|e| *e == roll_auth::scope::Effect::Ask));
+    if !asks {
+        return Err(Error::Forbidden("this token was made never to ask a person: its owner changes its rules instead".into()));
+    }
+    if request_duration(&r.for_).is_none() {
+        return Err(Error::BadRequest("for: 15m, 1h, 8h or 1d".into()));
+    }
+    // Tokens and approvals are changed by people, never asked for: a token that could manage
+    // tokens could widen itself past any approval.
+    if r.product == "access" {
+        return Err(Error::Forbidden("a token never asks for access to tokens and approvals: a person changes those".into()));
+    }
+    let reason = r.reason.trim().to_string();
+    if reason.is_empty() || reason.chars().count() > 500 || reason.contains(|c: char| c.is_control() && c != '\n') {
+        return Err(Error::BadRequest("reason: why, in up to 500 characters (the person deciding reads it)".into()));
+    }
+    let short = |v: &Option<String>| v.as_ref().is_some_and(|s| s.is_empty() || s.len() > 200 || s.contains(char::is_control) || s == "*");
+    if !PRODUCTS.contains(&r.product.as_str()) || short(&r.resource) || short(&r.environment) || short(&r.path) || short(&r.index) || (r.index.is_some() && r.resource.is_none()) {
+        return Err(Error::BadRequest("one product (not *), and a resource, environment, path or index of 1 to 200 characters (index only with a resource)".into()));
+    }
+    let resource = match (&r.resource, &r.index) {
+        (Some(res), Some(ix)) => Some(format!("{res}/{ix}")),
+        (res, _) => res.clone(),
+    };
+    let draft = crate::store::Approval { product: r.product.clone(), action: r.action.as_str().into(), resource: resource.clone(), environment: r.environment.clone(), scope_path: r.path.clone(), scope_index: r.index.clone(), ..Default::default() };
+    let rule = rule_of(&draft)?;
+    if let Some(p) = roll_auth::scope::Scope(vec![rule.clone()]).problems().first() {
+        return Err(Error::BadRequest(format!("this can't be a rule: {p}")));
+    }
+    let request_hash = crate::hash(&format!("access request\n{}\n{}", serde_json::to_string(&rule).unwrap_or_default(), r.for_));
+    // The same request again is the one already waiting.
+    let (a2, gid, h2) = (a.clone(), grant.id.clone(), request_hash.clone());
+    if let Some(open) = blocking(a2, move |a| a.store.open_approval(&gid, &h2)).await? {
+        return Ok((StatusCode::ACCEPTED, Json(json!(a.gated(open)))));
+    }
+    // What the person approves, in full: every resource and every environment when none is named.
+    let what = resource.as_deref().map_or_else(|| format!("every {} resource", r.product), |res| format!("{} {res}", r.product));
+    let env = r.environment.as_deref().map_or_else(|| "every environment".to_string(), |e| format!("environment {e}"));
+    let folder = r.path.as_deref().map(|p| format!(", folder {p}")).unwrap_or_default();
+    let summary = format!("asks to {} {what} in {env}{folder} for {}: {reason}", r.action.as_str(), r.for_);
+    let args = json!({ "for": r.for_, "reason": reason });
+    let (env, path, index) = (r.environment.clone(), r.path.clone(), r.index.clone());
+    let (product, action, g2) = (r.product.clone(), r.action.as_str().to_string(), grant.clone());
+    let asked = blocking(a.clone(), move |a| {
+        a.store.ask(crate::store::Ask {
+            grant: &g2,
+            product: &product,
+            action: &action,
+            resource: resource.as_deref(),
+            method: ACCESS_REQUEST_METHOD,
+            route: "/v1/access/requests",
+            path: "/v1/access/requests",
+            summary,
+            args,
+            tool: None,
+            request_hash,
+            environment: env.as_deref(),
+            scope_path: path.as_deref(),
+            scope_index: index.as_deref(),
+        })
+    })
+    .await?;
+    a.announce(&asked, grant.user.as_deref());
+    Ok((StatusCode::ACCEPTED, Json(json!(a.gated(asked)))))
+}
+
 async fn deny(State(a): S, ext: Extensions, Path(id): Path<String>, body: axum::body::Bytes) -> crate::Result<Json<Value>> {
     let by = may_decide(&a, &ext, &id).await?;
     let d: Decision = if body.iter().all(u8::is_ascii_whitespace) { Decision::default() } else { serde_json::from_slice(&body).map_err(|e| Error::BadRequest(format!("invalid body: {e}")))? };
     let reason = d.reason.map(|r| r.chars().take(500).collect::<String>());
-    let decided = blocking(a.clone(), move |a| a.store.decide(&id, false, &by, reason.as_deref())).await?;
+    let decided = blocking(a.clone(), move |a| a.decide(&id, false, &by, reason.as_deref())).await?;
     a.changed(&decided);
     Ok(Json(json!(decided)))
 }
@@ -1003,14 +1231,22 @@ async fn set_notify(State(a): S, ext: Extensions, Json(v): Json<Value>) -> crate
     let short = |v: &Value| v.as_str().is_some_and(|i| i.len() <= 64 && !i.is_empty());
     let id = |v: &Value| short(v) && v.as_str().is_some_and(|i| i.bytes().all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b)));
     let approvers = chat["approvers"].as_array().filter(|a| !a.is_empty() && a.len() <= 50 && a.iter().all(id));
+    // `people`: an approver's roll account (`{"U1": "usr_…"}`), so a press there decides as that
+    // person: it counts toward the policy's approval rules, never for their own token's request.
+    let people_ok = match &chat["people"] {
+        Value::Null => true,
+        Value::Object(m) => m.iter().all(|(k, v)| approvers.is_some_and(|a| a.iter().any(|x| x == k)) && id(v) && v.as_str().is_some_and(|u| u.starts_with("usr_"))),
+        _ => false,
+    };
     let ok = chat.is_null()
         || (short(&chat["install"])
             && short(&chat["channel"])
             && approvers.is_some()
-            && chat.as_object().is_some_and(|o| o.keys().all(|k| ["install", "channel", "approvers"].contains(&k.as_str()))));
+            && people_ok
+            && chat.as_object().is_some_and(|o| o.keys().all(|k| ["install", "channel", "approvers", "people"].contains(&k.as_str()))));
     if !ok || v.as_object().is_none_or(|o| o.keys().any(|k| k != "chat")) {
         return Err(Error::BadRequest(
-            "expected {\"chat\": {\"install\": \"chi_…\", \"channel\": \"C…\", \"approvers\": [\"U…\"]}} (1-50 chat user ids who may decide) or {\"chat\": null}".into(),
+            "expected {\"chat\": {\"install\": \"chi_…\", \"channel\": \"C…\", \"approvers\": [\"U…\"], \"people\"?: {\"U…\": \"usr_…\"}}} (1-50 chat user ids who may decide, and the roll accounts of those who have one) or {\"chat\": null}".into(),
         ));
     }
     let v2 = json!({ "chat": chat });
@@ -1051,8 +1287,12 @@ async fn policy(State(a): S) -> crate::Result<Json<Value>> {
 
 async fn set_policy(State(a): S, ext: Extensions, Json(p): Json<crate::Policy>) -> crate::Result<Json<Value>> {
     operator_only(&a, &ext, "set roll's token policy")?;
-    if p.max_days == Some(0) || p.max_idle_days == Some(0) {
-        return Err(Error::BadRequest("max_days and max_idle_days are at least 1 (or null for no limit)".into()));
+    if let Some(problem) = p.problems() {
+        return Err(Error::BadRequest(problem));
+    }
+    // With no accounts, only the operator's token decides: a rule must name it.
+    if a.people.get().is_none() && p.approval_rules.iter().any(|r| r.approvers.is_none()) {
+        return Err(Error::BadRequest("roll has no accounts here, so only the operator's token decides: an approval rule names its approvers (\"operator\")".into()));
     }
     let v = json!(p);
     blocking(a.clone(), move |a| a.store.set_setting("policy", &v)).await?;
