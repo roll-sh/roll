@@ -48,7 +48,7 @@ export interface Invite {
 export type SessionState =
   | { status: "anonymous" }
   | { status: "mfa_required"; methods: ("totp" | "recovery" | "passkey")[]; csrf: string }
-  | { status: "signed_in"; user: User; session: Session; csrf: string };
+  | { status: "signed_in"; user: User; session: Session; csrf: string; second_factor_required?: boolean };
 
 export type SignInAnswer = Exclude<SessionState, { status: "anonymous" }>;
 
@@ -238,6 +238,8 @@ export const accountsApi = {
   addPasskey: (id: string, name: string, credential: unknown) => call<Passkey>("POST", "/me/passkeys", { id, name, credential }),
   renamePasskey: (id: string, name: string) => call<Passkey>("PATCH", `/me/passkeys/${encodeURIComponent(id)}`, { name }),
   removePasskey: (id: string) => call<null>("DELETE", `/me/passkeys/${encodeURIComponent(id)}`),
+  accountPolicy: () => call<{ require_second_factor: boolean }>("GET", "/policy"),
+  setAccountPolicy: (p: { require_second_factor: boolean }) => call<{ require_second_factor: boolean }>("PUT", "/policy", p),
   requestReset: (reason: string) => call<{ id: string; state: string }>("POST", "/signin/reset-request", { reason }),
   resetRequests: () => call<ResetRequest[]>("GET", "/reset-requests"),
   decideReset: (id: string, approve: boolean) => call<ResetRequest>("POST", `/reset-requests/${encodeURIComponent(id)}/${approve ? "approve" : "deny"}`),

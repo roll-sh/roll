@@ -15,6 +15,7 @@ mod mail;
 mod oauth;
 pub mod passkeys;
 mod places;
+pub mod policy;
 pub mod recovery;
 mod sudo;
 mod scim;
@@ -138,6 +139,10 @@ CREATE TABLE IF NOT EXISTS sign_in_places (
     last_at INTEGER NOT NULL,
     PRIMARY KEY (user_id, place)
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS account_policy (
+    id INTEGER PRIMARY KEY,
+    policy TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS passkey_challenges (
     id TEXT PRIMARY KEY,
     user_id TEXT,
@@ -1038,6 +1043,13 @@ impl roll_auth::Sessions for Resolver {
         let (accounts, user, session) = (self.0.clone(), user.to_string(), session.to_string());
         Box::pin(async move {
             tokio::task::spawn_blocking(move || accounts.fresh_for(&user, &session).map_err(|e| e.to_string())).await.map_err(|e| e.to_string())?
+        })
+    }
+
+    fn second_factor_missing<'a>(&'a self, user: &'a str, session: &'a str) -> roll_auth::BoxFuture<'a, Result<bool, String>> {
+        let (accounts, user, session) = (self.0.clone(), user.to_string(), session.to_string());
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || accounts.second_factor_missing(&user, &session).map_err(|e| e.to_string())).await.map_err(|e| e.to_string())?
         })
     }
 

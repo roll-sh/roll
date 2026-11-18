@@ -277,6 +277,13 @@ pub trait Sessions: Send + Sync + 'static {
         let _ = id;
         Box::pin(async { Ok(None) })
     }
+    /// Whether `user`'s session `session` lacks the second factor the company requires
+    /// (docs/accounts.md, "Second factor for everyone"): then it reaches only the account's own
+    /// routes, to set one up. False by default. Never cached.
+    fn second_factor_missing<'a>(&'a self, user: &'a str, session: &'a str) -> BoxFuture<'a, Result<bool, String>> {
+        let _ = (user, session);
+        Box::pin(async { Ok(false) })
+    }
     /// Whether session `session` (of `user`) proved who it is recently: sudo mode
     /// (docs/accounts.md). A token made from a session needs it, so a stolen cookie can't mint a
     /// long-lived token. True by default: an implementation without sudo mode keeps tokens as
@@ -466,6 +473,18 @@ pub async fn check(State(gate): State<Arc<Gate>>, mut req: Request, next: Next) 
             }
             match session {
                 Session::Full(s) => {
+                    // A company that requires a second factor: until this person sets one up,
+                    // their session reaches only their account (where they do).
+                    if !req.uri().path().starts_with("/v1/accounts") {
+                        match sessions.second_factor_missing(&s.user, &s.session).await {
+                            Ok(false) => {}
+                            Ok(true) => return error(StatusCode::FORBIDDEN, "your company requires a second factor: set up an authenticator app or a passkey on your account page first", "second_factor_required"),
+                            Err(e) => {
+                                tracing::warn!(error = %e, "sessions: second factor check failed");
+                                return error(StatusCode::SERVICE_UNAVAILABLE, "sessions are unavailable; try again", "unavailable");
+                            }
+                        }
+                    }
                     if s.admin {
                         req.extensions_mut().insert(Operator);
                     }

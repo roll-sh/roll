@@ -48,6 +48,7 @@ export function AccountPage() {
           {user.admin && <Resets me={user.id} />}
           {user.admin && <Users me={user.id} />}
           {user.admin && <SsoSection />}
+          {user.admin && <EveryoneSecondFactor />}
         </div>
       )}
     </AppShell>
@@ -370,6 +371,31 @@ function Passkeys() {
           <span className="text-[11.5px] text-subtle">{list?.length ? "With one, you can skip the authenticator app's code too." : "Your browser or phone keeps it, synced if you use iCloud Keychain or Google Password Manager."}</span>
         </div>
         {error && <p className="px-4 pb-3 text-[12px] text-danger">{error}</p>}
+      </div>
+    </Section>
+  );
+}
+
+/** Admins: a second factor for everyone (docs/accounts.md). */
+function EveryoneSecondFactor() {
+  const [on, setOn] = useState<boolean | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    accountsApi.accountPolicy().then((p) => setOn(p.require_second_factor), () => setOn(null));
+  }, []);
+  if (on === null) return null;
+  return (
+    <Section id="require-2fa" title="A second factor for everyone" lead="People without an authenticator app or a passkey can use only their account page until they set one up. Sign-ins through your company's SSO are its provider's to check.">
+      <div className={`${card} space-y-2 p-4`}>
+        <label className="flex items-center gap-2 text-[12.5px]">
+          <input
+            type="checkbox"
+            checked={on}
+            onChange={(e) => accountsApi.setAccountPolicy({ require_second_factor: e.target.checked }).then((p) => (setOn(p.require_second_factor), setError(null)), (err) => setError(errorText(err)))}
+          />
+          Require a second factor
+        </label>
+        {error && <p className="text-[12px] text-danger">{error}</p>}
       </div>
     </Section>
   );
