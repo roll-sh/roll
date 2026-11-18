@@ -1,7 +1,7 @@
 import { ExternalLink, GitBranch, Settings2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { counts, matches, SHOW_LABEL, type PreviewShow } from "@/lib/preview-filter";
-import { checkSummary, openUrl, previewsApi, screenshotUrl, type ErrorGroup, type Preview, type PreviewSettings, type PreviewUsage } from "@/lib/previews-api";
+import { checkSummary, openUrl, previewsApi, screenshotUrl, type Preview, type PreviewSettings, type PreviewUsage } from "@/lib/previews-api";
 import type { WorkspaceProject } from "@/lib/workspace-api";
 import { resourceKey, type ResourceView } from "@/lib/workspace-resources";
 import { Inspector } from "./inspector";
@@ -284,29 +284,59 @@ function NewAgainstMain({ preview: p }: { preview: Preview }) {
   );
 }
 
-/** Its errors in the last hour, read once per row while it runs or sleeps (the sheet's Errors tab lists them). */
+/** Rows' error counts in flight at once: a long list asks a few at a time, not one request per row together. */
+const COUNTS_AT_ONCE = 3;
+let countsRunning = 0;
+const countsWaiting: (() => void)[] = [];
+
+/** `read` once a slot is free (see {@link COUNTS_AT_ONCE}). */
+async function inTurn<T>(read: () => Promise<T>): Promise<T> {
+  if (countsRunning >= COUNTS_AT_ONCE) await new Promise<void>((go) => countsWaiting.push(go));
+  countsRunning++;
+  try {
+    return await read();
+  } finally {
+    countsRunning--;
+    countsWaiting.shift()?.();
+  }
+}
+
+/** How many errors its services wrote in the last hour, read once its row is on screen while it runs or sleeps (counted only: the sheet's Errors tab lists them). */
 function RecentErrors({ preview: p }: { preview: Preview }) {
-  const [groups, setGroups] = useState<ErrorGroup[]>([]);
+  const [count, setCount] = useState(0);
+  const [seen, setSeen] = useState(false);
+  const ref = useRef<HTMLSpanElement>(null);
   const up = p.desired !== "deleted" && (p.state === "ready" || p.state === "sleeping");
   useEffect(() => {
-    if (!up) {
-      setGroups([]);
+    // Its row's line: this one's `contents` has no box of its own to intersect.
+    const el = ref.current?.parentElement;
+    if (seen || !el) return;
+    if (typeof IntersectionObserver === "undefined") return setSeen(true);
+    const io = new IntersectionObserver((entries) => entries.some((e) => e.isIntersecting) && setSeen(true));
+    io.observe(el);
+    return () => io.disconnect();
+  }, [seen]);
+  useEffect(() => {
+    if (!up || !seen) {
+      setCount(0);
       return;
     }
     let live = true;
-    previewsApi.errors(p.id, 60).then(
-      (r) => live && setGroups(r.groups),
+    inTurn(() => (live ? previewsApi.errorCount(p.id, 60) : Promise.resolve({ count: 0, minutes: 60 }))).then(
+      (r) => live && setCount(r.count),
       () => {},
     );
     return () => {
       live = false;
     };
-  }, [p.id, up]);
-  if (!groups.length) return null;
-  const times = groups.reduce((n, g) => n + g.count, 0);
+  }, [p.id, up, seen]);
   return (
-    <span className="shrink-0 rounded border border-danger/40 px-1 font-mono text-[10.5px] text-danger tabular-nums" title={`${groups.length} ${groups.length === 1 ? "error" : "different errors"}, ${times} ${times === 1 ? "time" : "times"} in the last hour: open it for which`}>
-      {groups.length} {groups.length === 1 ? "error" : "errors"}
+    <span ref={ref} className="contents">
+      {count > 0 && (
+        <span className="shrink-0 rounded border border-danger/40 px-1 font-mono text-[10.5px] text-danger tabular-nums" title={`${count} ${count === 1 ? "error" : "errors"} in its output in the last hour: open it for which`}>
+          {count > 999 ? "999+" : count} {count === 1 ? "error" : "errors"}
+        </span>
+      )}
     </span>
   );
 }

@@ -525,9 +525,12 @@ pub trait Apps: Send + Sync {
     async fn metrics(&self, _preview: &str, _service: &str) -> Option<(f64, u64)> {
         None
     }
-    /// Its errors in the last `minutes`, grouped (none where the backend can't tell).
-    async fn errors(&self, _preview: &str, _service: &str, _minutes: i64) -> Vec<crate::ErrorGroup> {
-        Vec::new()
+    /// Its errors in the last `minutes`, grouped (none where the backend can't tell when a line
+    /// was written). Text the backend cuts before grouping it is masked first with `masks`' values
+    /// (`crate::mask_cut`), read only when there's an error; the engine masks every title and
+    /// sample again. `None`: only the counts are used, nothing is masked and no text leaves.
+    async fn errors(&self, _preview: &str, _service: &str, _minutes: i64, _masks: Option<&crate::engine::ErrorMasks<'_>>) -> crate::Result<Vec<crate::ErrorGroup>> {
+        Ok(Vec::new())
     }
     /// The service's output as it comes, after its last `lines`: `None` where it can't be
     /// followed (the engine reads `logs` again every few seconds instead).

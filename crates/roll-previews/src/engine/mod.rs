@@ -136,8 +136,10 @@ impl Counters {
     }
 }
 
-/// A preview's errors by `(id, minutes)`: when read (ms), and what.
+/// A preview's errors by `(id, minutes)`: when read (ms), and what (masked).
 type ErrorsRead = HashMap<(String, i64), (i64, Vec<crate::ErrorGroup>)>;
+/// How many errors a preview's services wrote by `(id, minutes)`: when read (ms), and how many.
+type ErrorCountsRead = HashMap<(String, i64), (i64, u64)>;
 
 pub struct Engine {
     pub cfg: Config,
@@ -161,6 +163,11 @@ pub struct Engine {
     /// Each preview's errors over a span of minutes, read at (ms): `GET …/errors` reads them again
     /// only after [`requests::ERRORS_FOR`].
     errors_read: Mutex<ErrorsRead>,
+    /// The same, counted only (a list's rows): nothing in them is masked, so no values are read.
+    error_counts_read: Mutex<ErrorCountsRead>,
+    /// Keys the fingerprints `GET …/errors` answers (random per process): one is a group's name on
+    /// a sheet, never a hash of what the error said.
+    errors_key: [u8; 32],
     /// Previews whose screenshot a converge asked for; taken after the pass (`pass`).
     shots_wanted: Mutex<std::collections::HashSet<String>>,
     /// Previews with a screenshot task queued or running, and whether it was asked again
@@ -243,6 +250,12 @@ impl Engine {
             usage_read: Mutex::new(HashMap::new()),
             metrics_read: Mutex::new(HashMap::new()),
             errors_read: Mutex::new(HashMap::new()),
+            error_counts_read: Mutex::new(HashMap::new()),
+            errors_key: {
+                let mut k = [0u8; 32];
+                getrandom::fill(&mut k).expect("system randomness");
+                k
+            },
             secrets_told: Mutex::new(HashMap::new()),
             domain_read: Mutex::new(HashMap::new()),
             paths_seen: Mutex::new(HashMap::new()),
@@ -809,6 +822,8 @@ mod converge;
 mod discover;
 mod env;
 mod masks;
+pub use masks::ErrorMasks;
+pub use requests::error_span;
 mod requests;
 
 #[cfg(test)]

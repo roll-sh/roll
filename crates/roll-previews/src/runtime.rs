@@ -196,33 +196,75 @@ pub fn cache_name(repo: &str) -> String {
     format!("roll-previews-cache-{}", crate::label_part(repo, 40))
 }
 
-/// The longest line [`Runtime::timed_lines`] keeps.
+/// The longest line [`Runtime::timed_lines`] keeps (bytes of its text; a stamp is ~31 more).
 const TIMED_LINE_MAX: usize = 16 << 10;
+/// The most of a stream's output [`Runtime::timed_lines`] holds (its newest lines), and reads.
+const TIMED_KEEP_MAX: usize = 4 << 20;
+const TIMED_READ_MAX: u64 = 64 << 20;
+/// How long [`Runtime::timed_lines`] reads before it gives up (nothing: no groups).
+const TIMED_READ_FOR: Duration = Duration::from_secs(10);
 
-fn cut_line(l: &str) -> String {
-    let mut end = l.len().min(TIMED_LINE_MAX);
-    while !l.is_char_boundary(end) {
-        end -= 1;
+/// One stream of `docker logs --timestamps` (`2026-11-18T10:00:00.123456789Z text`) as `(ms,
+/// stderr, text)`, oldest first: read a line at a time, a line's bytes past [`TIMED_LINE_MAX`]
+/// dropped as they come (its text then cut on a character), its newest lines up to `keep` bytes
+/// held. A line without a stamp takes the one before's.
+async fn read_timed<R: tokio::io::AsyncRead + Unpin>(r: R, stderr: bool, keep: usize) -> Vec<(i64, bool, String)> {
+    use tokio::io::AsyncBufReadExt;
+    let mut r = tokio::io::BufReader::new(tokio::io::AsyncReadExt::take(r, TIMED_READ_MAX));
+    let (mut out, mut held, mut last) = (std::collections::VecDeque::new(), 0, 0);
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        // Up to the newline, holding at most a stamp and TIMED_LINE_MAX of text.
+        let mut ended = false;
+        while !ended {
+            let Ok(chunk) = r.fill_buf().await else { break };
+            if chunk.is_empty() {
+                break;
+            }
+            let (n, nl) = match chunk.iter().position(|b| *b == b'\n') {
+                Some(i) => (i + 1, true),
+                None => (chunk.len(), false),
+            };
+            let room = (TIMED_LINE_MAX + 64).saturating_sub(buf.len());
+            buf.extend_from_slice(&chunk[..(n - nl as usize).min(room)]);
+            r.consume(n);
+            ended = nl;
+        }
+        if buf.is_empty() && !ended {
+            break;
+        }
+        let l = String::from_utf8_lossy(&buf);
+        let l: &str = &l;
+        let (ts, text) = l.split_once(' ').unwrap_or((l, ""));
+        let text = match humantime::parse_rfc3339(ts) {
+            Ok(t) => {
+                last = t.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0);
+                text
+            }
+            Err(_) => l,
+        };
+        let mut end = text.len().min(TIMED_LINE_MAX);
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        held += end;
+        out.push_back((last, stderr, text[..end].to_string()));
+        while held > keep {
+            held -= out.pop_front().map(|l| l.2.len()).unwrap_or(held);
+        }
     }
-    l[..end].to_string()
+    out.into()
 }
 
-/// `docker logs --timestamps` output (`2026-11-18T10:00:00.123456789Z text`) as `(ms, stderr,
-/// text)`; a line without a stamp takes the one before's.
-fn parse_timed(out: &str, stderr: bool) -> Vec<(i64, bool, String)> {
-    let mut last = 0;
-    out.lines()
-        .map(|l| {
-            let (ts, text) = l.split_once(' ').unwrap_or((l, ""));
-            match humantime::parse_rfc3339(ts) {
-                Ok(t) => {
-                    last = t.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0);
-                    (last, stderr, cut_line(text))
-                }
-                Err(_) => (last, stderr, cut_line(l)),
-            }
-        })
-        .collect()
+/// A service's stdout and stderr as one, by their stamps (each stream's lines in their order),
+/// its last `lines`.
+fn merge_timed(mut out: Vec<(i64, bool, String)>, err: Vec<(i64, bool, String)>, lines: usize) -> Vec<(i64, bool, String)> {
+    out.extend(err);
+    out.sort_by_key(|l| l.0);
+    let skip = out.len().saturating_sub(lines);
+    out.drain(..skip);
+    out
 }
 
 /// The container of a service: every one roll previews makes starts with `roll-previews-`.
@@ -1216,25 +1258,23 @@ impl Apps for Runtime {
 
 impl Runtime {
     /// A service's output over the last `minutes` as `(ms, from stderr, text)`, oldest first, at
-    /// most its last `lines` (each cut at 16 KiB): what its errors are read from. Docker stamps
-    /// each line; a backend that can't gives its tail, every line stamped now.
+    /// most its last `lines` (each cut at 16 KiB, at most 4 MiB a stream, read for at most 10 s):
+    /// what its errors are read from. Only Docker stamps its lines: on another backend nothing
+    /// (an old crash in its tail would read as new).
     pub async fn timed_lines(&self, preview: &str, service: &str, minutes: i64, lines: usize) -> Vec<(i64, bool, String)> {
         let Ok(Some(host)) = self.store.services(preview).map(|v| v.into_iter().find(|s| s.name == service).map(|s| s.host)) else { return Vec::new() };
-        let name = container_name(&host);
         if self.iso.name() != "docker" {
-            let now = self.store.now_ms().unwrap_or(0);
-            return self.iso.logs_tail(&name, lines).await.lines().map(|l| (now, false, cut_line(l))).collect();
+            return Vec::new();
         }
-        let (since, tail) = (format!("{minutes}m"), lines.to_string());
+        let (since, tail, name) = (format!("{minutes}m"), lines.to_string(), container_name(&host));
         let args = ["logs", "--timestamps", "--since", &since, "--tail", &tail, &name];
-        let Ok(out) = tokio::process::Command::new("docker").args(args).stdin(std::process::Stdio::null()).output().await else { return Vec::new() };
-        let mut all = parse_timed(&String::from_utf8_lossy(&out.stdout), false);
-        all.extend(parse_timed(&String::from_utf8_lossy(&out.stderr), true));
-        // Stable: each stream's lines stay in their order.
-        all.sort_by_key(|l| l.0);
-        let skip = all.len().saturating_sub(lines);
-        all.drain(..skip);
-        all
+        let spawned = tokio::process::Command::new("docker").args(args).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).kill_on_drop(true).spawn();
+        let Ok(mut child) = spawned else { return Vec::new() };
+        let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else { return Vec::new() };
+        let read = async { tokio::join!(read_timed(stdout, false, TIMED_KEEP_MAX), read_timed(stderr, true, TIMED_KEEP_MAX)) };
+        // Past its time `child` is dropped, which kills it.
+        let Ok((out, err)) = tokio::time::timeout(TIMED_READ_FOR, read).await else { return Vec::new() };
+        merge_timed(out, err, lines)
     }
 
     /// A screenshot run in container `name`'s own network (its page at `127.0.0.1:<port>`, so the
@@ -1711,6 +1751,25 @@ async fn serve(rt: Arc<Runtime>, preview: String, service: String, req: Request)
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// `docker logs --timestamps` is read as stamped lines: a line with no stamp takes the one
+    /// before's, a long one is cut on a character while it's read, only the newest lines up to the
+    /// cap are held, and stdout and stderr interleave by their stamps.
+    #[tokio::test]
+    async fn a_services_stamped_output_is_read_bounded() {
+        let long = format!("2026-11-18T10:00:02Z {}é", "x".repeat(TIMED_LINE_MAX - 1));
+        let out = format!("2026-11-18T10:00:01.5Z GET / 200\nno stamp here\n{long}\n2026-11-18T10:00:04Z last");
+        let out = read_timed(out.as_bytes(), false, 1 << 20).await;
+        let t = |ms: i64| 1_794_996_000_000 + ms;
+        assert_eq!(out.iter().map(|l| l.0).collect::<Vec<_>>(), [t(1_500), t(1_500), t(2_000), t(4_000)]);
+        assert_eq!((out[1].2.as_str(), out[2].2.len(), out[3].2.as_str()), ("no stamp here", TIMED_LINE_MAX - 1, "last"));
+        let err = read_timed(&b"2026-11-18T10:00:03Z boom\n"[..], true, 1 << 20).await;
+        let merged = merge_timed(out.clone(), err, 3);
+        assert_eq!(merged.iter().map(|l| (l.1, &l.2[..l.2.len().min(4)])).collect::<Vec<_>>(), [(false, "xxxx"), (true, "boom"), (false, "last")]);
+        // Held up to the cap: the newest lines.
+        let kept = read_timed(&b"2026-11-18T10:00:01Z aaaa\n2026-11-18T10:00:02Z bbbb\n2026-11-18T10:00:03Z cccc\n"[..], false, 8).await;
+        assert_eq!(kept.iter().map(|l| l.2.as_str()).collect::<Vec<_>>(), ["bbbb", "cccc"]);
+    }
 
     struct NoTrees;
 

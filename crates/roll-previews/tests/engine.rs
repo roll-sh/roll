@@ -342,7 +342,9 @@ async fn a_previews_metrics_are_what_its_running_services_use() {
 }
 
 /// A preview's errors are its services' groups, newest first, named by service, with a secret its
-/// code printed shown as `***` in the title and the sample (as its logs are); 404 for no such preview.
+/// code printed shown as `***` in the title and the sample (as its logs are), a value a cut split
+/// included; its values are read only when there's an error (counting reads none), and a
+/// fingerprint isn't the backend's; 404 for no such preview.
 #[tokio::test]
 async fn a_previews_errors_are_its_services_groups_masked() {
     let e = env(json!({ "enabled": true }));
@@ -351,11 +353,18 @@ async fn a_previews_errors_are_its_services_groups_masked() {
     e.engine.pass().await.unwrap();
     let p = e.engine.store.row_by_change("chg_er").unwrap().unwrap();
     let web = e.engine.store.services(&p.id).unwrap().into_iter().next().unwrap();
+    let masks_read = || e.secrets.reasons.lock().iter().filter(|r| *r == "logs").count();
+    let before = masks_read();
+    assert!(e.engine.errors(&p.id, 60).await.unwrap().is_empty());
+    assert_eq!(masks_read(), before, "no errors, no values read");
     let group = |f: &str, title: &str, last_seen: i64| roll_previews::ErrorGroup { service: String::new(), fingerprint: f.into(), kind: "line".into(), title: title.into(), count: 2, first_seen: 1, last_seen, sample: format!("{title}\n  at charge()") };
-    e.apps.errors.lock().insert(web.name.clone(), vec![group("aa", "card declined", 5), group("bb", "Stripe rejected sk_test_51Hx9", 9)]);
-    let got = e.engine.errors(&p.id, 60).await.unwrap();
-    assert_eq!(got.iter().map(|g| (g.service.as_str(), g.fingerprint.as_str())).collect::<Vec<_>>(), [(web.name.as_str(), "bb"), (web.name.as_str(), "aa")]);
-    assert_eq!((got[0].title.as_str(), got[0].sample.as_str()), ("Stripe rejected ***", "Stripe rejected ***\n  at charge()"));
+    e.apps.errors.lock().insert(web.name.clone(), vec![group("aa", "card declined sk_test_51", 5), group("bb", "Stripe rejected sk_test_51Hx9", 9)]);
+    assert_eq!(e.engine.error_count(&p.id, 360).await.unwrap(), 4);
+    assert_eq!(masks_read(), before, "counting reads no values");
+    let got = e.engine.errors(&p.id, 360).await.unwrap();
+    assert_eq!(got.iter().map(|g| (g.service.as_str(), g.title.as_str())).collect::<Vec<_>>(), [(web.name.as_str(), "Stripe rejected ***"), (web.name.as_str(), "card declined ***")]);
+    assert_eq!((got[0].sample.as_str(), got[1].sample.as_str()), ("Stripe rejected ***\n  at charge()", "card declined ***\n  at charge()"));
+    assert!(got.iter().all(|g| g.fingerprint.len() == 16 && !["aa", "bb"].contains(&g.fingerprint.as_str())), "{got:?}");
     assert!(matches!(e.engine.errors("pv_nope", 60).await, Err(roll_previews::Error::NotFound(_))));
 }
 

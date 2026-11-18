@@ -495,8 +495,10 @@ export const previewsApi = {
   requests: (id: string) => call<{ requests: RequestLine[] }>("GET", `${one(id)}/requests`),
   /** What its running services use right now (cores of CPU, resident memory, the memory each runs with). */
   metrics: (id: string) => call<{ services: ServiceMetrics[] }>("GET", `${one(id)}/metrics`),
-  /** Its services' errors in the last `minutes` (5–1440, 60 by default), grouped, newest first; masked as its logs are. */
-  errors: (id: string, minutes?: number) => call<{ groups: ErrorGroup[] }>("GET", `${one(id)}/errors${query({ minutes })}`),
+  /** Its services' errors in the last `minutes` (5–1440, 60 by default, rounded up to 15-minute steps), grouped, newest first; masked as its logs are. */
+  errors: (id: string, minutes?: number) => call<{ minutes: number; groups: ErrorGroup[] }>("GET", `${one(id)}/errors${query({ minutes })}`),
+  /** How many errors its services wrote in that span (a list's rows: nothing to mask, so no values are read). */
+  errorCount: (id: string, minutes?: number) => call<{ minutes: number; count: number }>("GET", `${one(id)}/errors/count${query({ minutes })}`),
   logs: (id: string, opts: { service?: string; lines?: number } = {}) =>
     call<{ service: string; lines: string[] }>("GET", `${one(id)}/logs${query(opts)}`),
   /** Newest first. */
@@ -536,7 +538,7 @@ export function parseSse(rest: string, text: string): { events: { event: string;
   return { events, rest: left };
 }
 
-/** One error in a preview's service's output, grouped (a stack trace joined from its lines, or an error line): how many, first and last seen (ms), and the newest one whole. */
+/** One error in a preview's service's output, grouped (a stack trace joined from its lines, or an error line): how many, first and last seen (ms), and the newest one whole. `fingerprint` names the group (keyed per process: not stable across restarts). */
 export type ErrorGroup = { service: string; fingerprint: string; kind: string; title: string; count: number; first_seen: number; last_seen: number; sample: string };
 
 /** A running service's use right now: cores of CPU, resident bytes (an instance's, on roll apps), and the MB it runs with. */

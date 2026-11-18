@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 /// Lines one read looks at, groups an answer lists, frames a fingerprint takes, and a sample's size.
 const MAX_LINES: usize = 100_000;
-const MAX_GROUPS: usize = 50;
+pub const MAX_GROUPS: usize = 50;
 const FRAMES: usize = 3;
 const MAX_SAMPLE: usize = 8 << 10;
 /// The most lines one trace joins.
@@ -22,7 +22,8 @@ pub(crate) const MAX_TRACE_LINES: usize = 200;
 /// New errors said (`error.new`) an environment a pass, at most.
 const NEW_PER_PASS: usize = 5;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Kind {
     Python,
     Java,
@@ -256,21 +257,30 @@ pub fn name_of(o: &Occurrence) -> String {
 }
 
 /// The occurrences of one error: how many, first and last seen (ms), on which instances, and the
-/// newest one whole (its title the group's).
-#[derive(Debug)]
+/// newest one whole (its title the group's). Serialized as `GET …/errors` answers one (roll
+/// previews reads it so).
+#[derive(Debug, serde::Serialize)]
 pub struct Group {
     pub fingerprint: String,
     pub kind: Kind,
     pub title: String,
     pub count: usize,
+    #[serde(rename = "first_seen")]
     pub first: i64,
+    #[serde(rename = "last_seen")]
     pub last: i64,
+    /// Answered as how many.
+    #[serde(serialize_with = "how_many")]
     pub instances: BTreeSet<String>,
     pub sample: String,
 }
 
-/// The errors in some lines (oldest first), grouped by fingerprint: the most frequent first, at
-/// most 50.
+fn how_many<S: serde::Serializer>(v: &BTreeSet<String>, s: S) -> std::result::Result<S::Ok, S::Error> {
+    s.serialize_u64(v.len() as u64)
+}
+
+/// The errors in some lines (oldest first), grouped by fingerprint: the most frequent first (an
+/// answer lists the first [`MAX_GROUPS`]).
 pub fn groups(lines: &[LogLine]) -> Vec<Group> {
     let mut groups: HashMap<String, Group> = HashMap::new();
     for o in occurrences(lines) {
@@ -288,7 +298,6 @@ pub fn groups(lines: &[LogLine]) -> Vec<Group> {
     }
     let mut list: Vec<Group> = groups.into_values().collect();
     list.sort_by(|a, b| b.count.cmp(&a.count).then(b.last.cmp(&a.last)));
-    list.truncate(MAX_GROUPS);
     list
 }
 
@@ -340,10 +349,8 @@ impl Apps {
         // Oldest first, as a trace was written.
         let (lines, cut) = self.logs.read(&format!("env:{service}/{env}"), |l| matches!(l.stream, Stream::Stdout | Stream::Stderr), Some(since), None, MAX_LINES).await;
         let scanned = lines.len();
-        let groups: Vec<Value> = groups(&lines)
-            .into_iter()
-            .map(|g| json!({ "fingerprint": g.fingerprint, "kind": g.kind.name(), "title": g.title, "count": g.count, "first_seen": g.first, "last_seen": g.last, "instances": g.instances.len(), "sample": g.sample }))
-            .collect();
+        let mut groups = groups(&lines);
+        groups.truncate(MAX_GROUPS);
         Ok(json!({ "minutes": minutes, "groups": groups, "scanned": scanned, "cut": cut || scanned >= MAX_LINES }))
     }
 }

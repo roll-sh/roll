@@ -7,6 +7,13 @@ const METRICS_FOR: i64 = 10_000;
 /// How long a preview's errors are kept before they're read again (ms).
 pub(super) const ERRORS_FOR: i64 = 10_000;
 
+/// The span of minutes a preview's errors are read over: 5–1,440, rounded up to a 15-minute step
+/// (the dashboard's 60, 360 and 1,440 stay as they are), so asking for every minute in between
+/// can't step past [`ERRORS_FOR`]'s cache.
+pub fn error_span(minutes: i64) -> i64 {
+    (minutes.clamp(5, 1440) + 14) / 15 * 15
+}
+
 /// The least time between two rebuilds by one deploy hook (ms).
 pub const HOOK_EVERY: i64 = 60_000;
 
@@ -621,36 +628,83 @@ impl Engine {
         Ok(m)
     }
 
-    /// Its services' errors in the last `minutes`, grouped, newest first (on its holder, which runs
-    /// them). Titles and samples masked as its logs are: its code can print its secrets. Read at
-    /// most once per [`ERRORS_FOR`] for a span, whoever asks.
+    /// Its services' errors in the last `minutes` ([`error_span`]), grouped, newest first (on its
+    /// holder, which runs them). Titles and samples masked as its logs are, a value a cut split
+    /// too ([`crate::mask_cut`]): its code can print its secrets. Its values are read only when
+    /// there's an error. A fingerprint is keyed ([`Engine::error_fingerprint`]). Read at most once
+    /// per [`ERRORS_FOR`] for a span, whoever asks. (roll apps answers its 50 most frequent
+    /// groups a service; a `roll.toml` service's newest 50.)
     pub async fn errors(&self, id: &str, minutes: i64) -> Result<Vec<crate::ErrorGroup>> {
         self.store.row(id)?;
         let now = self.store.now_ms()?;
-        let key = (id.to_string(), minutes);
+        let key = (id.to_string(), error_span(minutes));
         if let Some((at, g)) = self.errors_read.lock().get(&key)
             && now - at < ERRORS_FOR
         {
             return Ok(g.clone());
         }
+        let masks = super::ErrorMasks::new(self, id);
         let services = self.store.services(id)?;
-        let got = futures::future::join_all(services.iter().map(|s| self.apps.errors(id, &s.name, minutes))).await;
-        let mut groups: Vec<crate::ErrorGroup> = services
-            .into_iter()
-            .zip(got)
-            .flat_map(|(s, gs)| gs.into_iter().map(move |g| crate::ErrorGroup { service: s.name.clone(), ..g }))
-            .collect();
+        let got = futures::future::join_all(services.iter().map(|s| self.apps.errors(id, &s.name, key.1, Some(&masks)))).await;
+        let mut groups = Vec::new();
+        for (s, gs) in services.iter().zip(got) {
+            groups.extend(gs?.into_iter().map(|g| crate::ErrorGroup { service: s.name.clone(), ..g }));
+        }
         groups.sort_by(|a, b| b.last_seen.cmp(&a.last_seen).then(b.count.cmp(&a.count)));
-        let texts = groups.iter().flat_map(|g| [g.title.clone(), g.sample.clone()]).collect();
-        let mut masked = self.masked(id, texts).await?.into_iter();
-        for g in &mut groups {
-            g.title = masked.next().unwrap_or_default();
-            g.sample = masked.next().unwrap_or_default();
+        if !groups.is_empty() {
+            let values = masks.values().await?;
+            for g in &mut groups {
+                g.title = crate::mask_cut(&g.title, values);
+                g.sample = crate::mask_cut(&g.sample, values);
+                g.fingerprint = self.error_fingerprint(id, &g.service, &g.fingerprint);
+            }
         }
         let mut read = self.errors_read.lock();
         read.retain(|_, (at, _)| now - *at < ERRORS_FOR);
         read.insert(key, (now, groups.clone()));
         Ok(groups)
+    }
+
+    /// How many errors its services wrote in the last `minutes` ([`error_span`]): a list's rows.
+    /// Counted from the groups [`Engine::errors`] lists, but nothing they say leaves, so nothing is
+    /// masked and no values are read. Kept as long.
+    pub async fn error_count(&self, id: &str, minutes: i64) -> Result<u64> {
+        self.store.row(id)?;
+        let now = self.store.now_ms()?;
+        let key = (id.to_string(), error_span(minutes));
+        if let Some((at, n)) = self.error_counts_read.lock().get(&key)
+            && now - at < ERRORS_FOR
+        {
+            return Ok(*n);
+        }
+        if let Some((at, g)) = self.errors_read.lock().get(&key)
+            && now - at < ERRORS_FOR
+        {
+            return Ok(g.iter().map(|g| g.count).sum());
+        }
+        let services = self.store.services(id)?;
+        let got = futures::future::join_all(services.iter().map(|s| self.apps.errors(id, &s.name, key.1, None))).await;
+        let mut n = 0;
+        for gs in got {
+            n += gs?.iter().map(|g| g.count).sum::<u64>();
+        }
+        let mut read = self.error_counts_read.lock();
+        read.retain(|_, (at, _)| now - *at < ERRORS_FOR);
+        read.insert(key, (now, n));
+        Ok(n)
+    }
+
+    /// A group's fingerprint as answered: its preview, service and backend fingerprint under this
+    /// process's random key, so it names the group without being a hash anyone could match
+    /// against guesses of what the error said.
+    fn error_fingerprint(&self, id: &str, service: &str, fingerprint: &str) -> String {
+        use hmac::Mac;
+        let mut m = hmac::Hmac::<sha2::Sha256>::new_from_slice(&self.errors_key).expect("any key length");
+        for part in [id, service, fingerprint] {
+            m.update(part.as_bytes());
+            m.update(&[0]);
+        }
+        hex::encode(&m.finalize().into_bytes()[..8])
     }
 
     pub async fn logs(&self, id: &str, service: Option<&str>, lines: usize) -> Result<(String, Vec<String>)> {

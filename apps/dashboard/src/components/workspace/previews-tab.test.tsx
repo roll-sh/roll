@@ -79,7 +79,8 @@ beforeEach(() => {
   api.shares.mockResolvedValue([]);
   api.mail.mockResolvedValue({ mail: [] });
   api.metrics.mockResolvedValue({ services: [] });
-  api.errors.mockResolvedValue({ groups: [] });
+  api.errors.mockResolvedValue({ minutes: 60, groups: [] });
+  api.errorCount.mockResolvedValue({ minutes: 60, count: 0 });
   api.hooks.mockResolvedValue({ hooks: [] });
   // The sheet's full view: the list's item stands in where a test doesn't give one.
   api.get.mockRejectedValue(new Error("not in this test"));
