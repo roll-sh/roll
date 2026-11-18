@@ -251,7 +251,7 @@ pub async fn resolve_cluster(ctx: &Ctx<'_>) -> EsResult<Reply> {
         if let Some(l) = ctx.cluster.config.links.clone() {
             for r in crate::remote::remotes(&ctx.state()) {
                 let Some(target) = r.link(&*l) else { continue };
-                let rq = links::request(ctx, &r.alias, "GET", "/_resolve/cluster/*", None);
+                let rq = links::request(ctx, &r.alias, "GET", "/_resolve/index/*", None);
                 let answer = links::join(&r.alias, links::leg(ctx, &r, target, rq)).await;
                 out.insert(r.alias.clone(), remote_resolution(&r, answer, false));
             }
@@ -261,7 +261,9 @@ pub async fn resolve_cluster(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let Some(split) = links::split(ctx, &exprs)? else { return resolve_local(ctx, &exprs).map(|v| Reply::Body(200, v)) };
     let mut legs = Vec::new();
     for (r, target, remote_exprs) in &split.legs {
-        let uri = format!("/_resolve/cluster/{}{}", links::path_segment(remote_exprs), links::query_string(ctx, &["name", "pretty", "human", "error_trace", "filter_path"], &[]));
+        // The remote's own `_resolve/index` (what a cross-cluster key's `view_index_metadata`
+        // grants; `indices:admin/resolve/cluster` it doesn't) says whether anything matches.
+        let uri = format!("/_resolve/index/{}{}", links::path_segment(remote_exprs), links::query_string(ctx, &["name", "pretty", "human", "error_trace", "filter_path", "timeout"], &[]));
         let rq = links::request(ctx, &r.alias, "GET", &uri, None);
         legs.push((r.clone(), links::leg(ctx, r, target.clone(), rq)));
     }
@@ -279,26 +281,28 @@ pub async fn resolve_cluster(ctx: &Ctx<'_>) -> EsResult<Reply> {
     Reply::ok(Value::Obj(out))
 }
 
-/// A linked remote's entry in `_resolve/cluster`: its own `(local)` entry, or why it couldn't
-/// be asked.
+/// A linked remote's entry in `_resolve/cluster`, from its `_resolve/index` answer (every
+/// roll cluster runs this version), or why it couldn't be asked.
 fn remote_resolution(r: &crate::remote::Remote, answer: crate::remote::links::Answer, with_indices: bool) -> Value {
     use crate::remote::links::Answer;
     let mut m = Map::new();
     match answer {
         Answer::Ok(v) => {
-            let own = v.get("(local)").and_then(Value::as_object).cloned().unwrap_or_default();
             m.insert("connected".into(), true.into());
             m.insert("skip_unavailable".into(), r.skip_unavailable.into());
             if with_indices {
-                for k in ["matching_indices", "error"] {
-                    if let Some(x) = own.get(k) {
-                        m.insert(k.into(), x.clone());
-                    }
-                }
+                let any = ["indices", "aliases", "data_streams"].iter().any(|k| v.get(k).and_then(Value::as_array).is_some_and(|a| !a.is_empty()));
+                m.insert("matching_indices".into(), any.into());
             }
-            if let Some(x) = own.get("version") {
-                m.insert("version".into(), x.clone());
-            }
+            m.insert(
+                "version".into(),
+                obj! {
+                    "number" => crate::version::ES_VERSION,
+                    "build_flavor" => "default",
+                    "minimum_wire_compatibility_version" => crate::version::MIN_WIRE_COMPAT,
+                    "minimum_index_compatibility_version" => crate::version::MIN_INDEX_COMPAT,
+                },
+            );
         }
         Answer::Failed(e) => {
             m.insert("connected".into(), true.into());
