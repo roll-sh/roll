@@ -1,7 +1,7 @@
 """A client for roll secrets (docs/secrets.md, "Consumption"), with the same surface as
 @roll/secrets and sdk/go/secrets: an environment's values, the runtime resolve (sealed to a key only
-this process holds, if asked), the digest that moves when the values would, and a watch that follows
-it and renews dynamic leases.
+this process holds, if asked), the digest that moves when the values would, a watch that follows
+it and renews dynamic leases, and one key's writes.
 
 The standard library only, but for sealed resolves, which need ``cryptography`` (the ``seal``
 extra).
@@ -148,27 +148,70 @@ class Client:
     def _env(self, env: str) -> str:
         return f"/v1/secrets/projects/{urllib.parse.quote(self.project_id(), safe='')}/environments/{urllib.parse.quote(env, safe='')}"
 
-    def values(self, env: str, path: str = "", fresh: bool = False) -> Values:
+    def values(self, env: str, path: str = "", fresh: bool = False, dynamic: bool = True) -> Values:
         """``env``'s values under ``path`` (the root by default), references resolved. ``fresh``
-        skips ``cache_ttl`` (a watch that saw the digest move reads anew)."""
+        skips ``cache_ttl`` (a watch that saw the digest move reads anew). ``dynamic=False`` issues
+        no dynamic credential (for a reader that can't renew a lease): those keys are left out and
+        named in ``Values.dynamic``, and such an answer can be kept."""
         url = self._env(env) + "/values" + _q(path)
+        if not dynamic:
+            url += ("&" if "?" in url else "?") + "dynamic=false"
         if self.cache_ttl <= 0 or fresh:
             v = Values._of(self._call("GET", url))
             if fresh:
                 with self._lock:
                     self._cache.pop(url, None)
             return v
-        return copy.deepcopy(self._cached(url))
+        return copy.deepcopy(self._cached(url, keep_dynamic=not dynamic))
 
-    def _cached(self, url: str) -> Values:
-        """Kept for ``cache_ttl``, then revalidated with the digest (a 304 keeps them)."""
+    def _cached(self, url: str, keep_dynamic: bool = False) -> Values:
+        """Kept for ``cache_ttl``, then revalidated with the digest (a 304 keeps them).
+        ``keep_dynamic``: read with ``dynamic=false``, so naming dynamic keys holds no credential."""
         with self._lock:
             hit = self._cache.get(url)
         if hit and self._clock() - hit[2] < self.cache_ttl:
             return hit[0]
-        return self._authed(lambda token: self._revalidate(url, token, hit))
+        return self._authed(lambda token: self._revalidate(url, token, hit, keep_dynamic))
 
-    def _revalidate(self, url: str, token: str, hit: Any) -> Values:
+    def _secret(self, env: str, key: str, path: str) -> str:
+        return self._env(env) + "/secrets/" + urllib.parse.quote(key, safe="") + _q(path)
+
+    def set(self, env: str, key: str, value: str, path: str = "", comment: Optional[str] = None, message: Optional[str] = None) -> Dict[str, Any]:
+        """Sets ``key`` to ``value`` in ``path``'s folder (the root by default), replacing a link the
+        key had. Answers ``{change, secret, warnings}``: the change (None when the same value writes
+        nothing) and the key's new version. A protected environment, or a folder that needs
+        approval, is a ``SecretsError`` with the code ``approval_required`` (open a change request
+        instead). Errors never hold the value. Drops the cached reads."""
+        body: Dict[str, Any] = {"value": value, "link": None}
+        if comment is not None:
+            body["comment"] = comment
+        if message:
+            body["message"] = message
+        try:
+            return self._call("PUT", self._secret(env, key, path), body) or {}
+        finally:
+            self._drop_cache()
+
+    def delete(self, env: str, key: str, path: str = "") -> Dict[str, Any]:
+        """Deletes ``key`` from ``path``'s folder. Answers ``{deleted, change}``: a key that isn't
+        there (or only shows through a base or an import) is ``deleted: False``, not an error;
+        ``approval_required`` as for ``set``. Drops the cached reads."""
+        try:
+            w = self._call("DELETE", self._secret(env, key, path)) or {}
+        except SecretsError as e:
+            if e.status != 404:
+                raise
+            return {"deleted": False, "change": None}
+        finally:
+            self._drop_cache()
+        return {"deleted": True, "change": w.get("change")}
+
+    def _drop_cache(self) -> None:
+        # Every kept read: a reference or an import elsewhere may follow the key.
+        with self._lock:
+            self._cache.clear()
+
+    def _revalidate(self, url: str, token: str, hit: Any, keep_dynamic: bool = False) -> Values:
         """One conditional read of ``url`` with ``token``: a 304 keeps ``hit``'s values."""
         req = urllib.request.Request(self.api + url + ("&" if "?" in url else "?") + "digest=1", method="GET")
         if token:
@@ -190,9 +233,10 @@ class Client:
             raise SecretsError(err.get("error") or f"{e.code} {e.reason}", e.code, err.get("code")) from None
         v = Values._of(json.loads(text))
         with self._lock:
-            # Never kept: dynamic credentials (they end with their lease) or a key that didn't
-            # resolve (the digest may not move when the link recovers).
-            if v.dynamic or v.problems:
+            # Never kept: dynamic credentials (they end with their lease; with dynamic=false there
+            # are none, only their names) or a key that didn't resolve (the digest may not move
+            # when the link recovers).
+            if (v.dynamic and not keep_dynamic) or v.problems:
                 self._cache.pop(url, None)
             else:
                 self._cache[url] = (v, etag.removeprefix("W/").strip('"'), self._clock())
@@ -210,9 +254,15 @@ class Client:
         opened = json.loads(open_sealed(r["sealed"], key, r["context"]))
         return Values._of(r, values=opened)
 
-    def digest(self, env: str, path: str = "") -> str:
-        """Moves whenever ``env``'s values under ``path`` would; reads no value."""
-        return self._call("GET", self._env(env) + "/digest" + _q(path))["digest"]
+    def digest(self, env: str, path: str = "", since: Optional[str] = None, wait: float = 0) -> str:
+        """Moves whenever ``env``'s values under ``path`` would; reads no value. With ``since`` and
+        ``wait`` (seconds, at most 60), a long poll: it answers as soon as the digest differs from
+        ``since``, or with the same one when ``wait`` runs out."""
+        q = _q(path)
+        if since and wait >= 1:
+            # Under this client's own timeout, and the server's 25.
+            q += ("&" if q else "?") + "since=" + urllib.parse.quote(since, safe="") + "&wait=" + str(int(max(1, min(wait, 25, self.timeout - 5))))
+        return self._call("GET", self._env(env) + "/digest" + q)["digest"]
 
     def transit(self, name: str) -> "Transit":
         """The project's encryption key ``name`` (docs/secrets.md, "Encryption keys"): data is
@@ -243,11 +293,18 @@ class Client:
         fail = on_error or (lambda _e: None)
         last: Optional[str] = None
         leases: List[str] = []
-        renewed = 0.0
-        waited = 0.0
+        renewed = time.monotonic()
         while not stop.is_set():
+            # A long poll: a change arrives within a second or two; ``every`` paces a server
+            # without them. It never outlasts the next renewal.
+            held = False
+            asked = time.monotonic()
             try:
-                now = self.digest(env, path)
+                until_renew = max(1.0, renew_every - (asked - renewed))
+                now = self.digest(env, path, since=last, wait=min(25.0, until_renew)) if last else self.digest(env, path)
+                held = last is not None and (now != last or time.monotonic() - asked >= 1)
+                if stop.is_set():
+                    break  # stopped while the poll was held: nothing more is called back
                 if now != last:
                     v = self.resolve(env, consumer, path) if consumer else self.values(env, path, fresh=True)
                     before, last = last, now
@@ -260,11 +317,10 @@ class Client:
                     on_change(v)
             except Exception as e:  # noqa: BLE001 - the watch goes on, as documented
                 fail(e)
-            if stop.wait(every):
+            if not held and stop.wait(every):
                 break
-            waited += every
-            if waited - renewed >= renew_every:
-                renewed = waited
+            if time.monotonic() - renewed >= renew_every:
+                renewed = time.monotonic()
                 for lease in leases:
                     try:
                         self.renew(lease)

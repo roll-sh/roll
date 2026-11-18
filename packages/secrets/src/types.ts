@@ -97,6 +97,8 @@ export type Change = { seq: number; environment: string; path: string; message: 
 /** `what`: added | changed | deleted | comment | tags | link | rotated */
 export type Item = { key: string; path: string; type: SecretType; what: string[]; from_fp: string | null; to_fp: string | null };
 export type Written = { change: Change | null; secret: Secret | null; warnings: string[] };
+/** The client's `delete`: `deleted` is false when the key wasn't there. */
+export type Deleted = { deleted: boolean; change: Change | null };
 /** `change` is null when nothing changed. */
 /** `request`: the change request opened instead (a promotion into a protected environment). */
 export type Applied = { change: Change | null; items: Item[]; warnings: string[]; request?: ChangeRequest };
@@ -196,7 +198,10 @@ export type NewShare = { ciphertext: string; note?: string; views?: number; ttl_
 export type KeyType = "url" | "int" | "port" | "bool" | "json" | "email";
 /** A key every standard environment must define in a folder; typed keys also say what its value must be. */
 /** `owner`: who supplies it (a person or team), named in health and the daily notice. */
-export type Required = { key: string; path: string; comment: string; type?: KeyType; pattern?: string; owner?: string };
+export type PasswordClass = "lower" | "upper" | "digit" | "symbol";
+/** What a key's values must be made of, and what generators make (`classes` defaults to letters and digits; `symbols` to `!#%&*+-=?^_~`). */
+export type PasswordPolicy = { length: number; classes?: PasswordClass[]; symbols?: string };
+export type Required = { key: string; path: string; comment: string; type?: KeyType; pattern?: string; owner?: string; password?: PasswordPolicy };
 /** A workload identity: CI jobs and clusters whose OIDC tokens match log in for a short-lived token. */
 export type Identity = {
   id: string;
@@ -309,6 +314,10 @@ export type OutsideDatabase = { id: string; name: string; host: string; roles: s
 /** A GitHub App's installation; `repositories` and `permissions` are the most its tokens may reach. */
 export type GitHubApp = { id: string; name: string; app_id: number; installation_id: number; api_base: string; repositories: string[]; permissions: Record<string, string>; created_at: number; created_by: string };
 export type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };
+/** A Kubernetes cluster whose service accounts get short-lived tokens per lease (dynamic `kubernetes` links); the admin token and the CA stay sealed. */
+export type KubernetesCluster = { id: string; name: string; api_url: string; has_ca: boolean; created_at: number; created_by: string };
+/** `token`: a service account token that may create tokens; `ca_pem`: the cluster's CA, when it isn't publicly trusted. */
+export type NewKubernetesCluster = { name: string; api_url: string; ca_pem?: string; token: string };
 export type WhoAmI = { principal: string; project?: string | null; scopes?: unknown };
 
 /** A `roll-seal-v1` box (base64url fields): X25519 to the recipient, HKDF-SHA256, AES-256-GCM. */
