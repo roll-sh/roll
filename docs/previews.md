@@ -1490,7 +1490,7 @@ type Settings = {
       password, in the push's environment (`GIT_CONFIG_*`: never argv, the user's config or a
       remote); credential helpers aren't asked and redirects aren't followed. The push is forced
       and names that one ref: a run again moves the branch (roll code takes a non-fast-forward
-      push to any branch but the default one). A pushed branch is a roll code change, as any is.
+      push to any branch but the default one). A pushed branch is a roll code change, as any is, but a change of a `preview/…` branch gets no preview of its own (the branch's is the one), unless its title or a label asks; its checks still run, on the uncommitted work.
     - **The repo** is `--repo`, else the one a remote of the checkout points at: a remote whose
       URL is that repo's `clone_url`. **The project** is `--project`, else the one project whose
       canvas has the repo.
