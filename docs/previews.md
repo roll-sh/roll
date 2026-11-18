@@ -1475,7 +1475,29 @@ type Settings = {
   Awake, Asleep with their counts; `lib/preview-filter.ts`), status, cost, logs, and open,
   sleep, wake, reset and delete actions, plus a "Previews" overlay on the canvas that draws each
   preview's branches next to their parents.
-- **CLI**: `roll preview ls|show|open|create|rm|sleep|wake|refresh|reset|keep|logs [-f]|activity|settings|usage|bypass|wait`.
+- **CLI**: `roll preview ls|show|open|create|rm|sleep|wake|refresh|reset|keep|logs [-f]|activity|settings|usage|bypass|wait|up|down`.
+  - `roll preview up [--project P] [--repo owner/name] [--name N] [--no-wait] [--timeout S]`
+    previews a checkout's working tree as it is, as `netlify deploy` and `vercel deploy` do from a
+    directory: uncommitted and untracked files included, what `.gitignore` leaves out left out.
+    - **The commit.** It's made on the side: HEAD's tree read into an index of its own
+      (`GIT_INDEX_FILE` in a temporary directory), `git add -A`, `git write-tree`, then `git
+      commit-tree -p HEAD` (no parent without a HEAD) with the message `roll preview up`. The
+      user's index, HEAD, refs and files never move.
+    - **The push.** To `refs/heads/preview/<handle>/<name>` at the repo's clone URL. `<handle>`
+      is the caller's (`GET /v1/access`: the signed-in person, or a person's own token), else
+      `operator`. `<name>` is `--name` or the checked-out branch (`local` when detached), made
+      one ref segment (`feat/login` is `feat-login`). The CLI's own credential goes as the Basic
+      password, in the push's environment (`GIT_CONFIG_*`: never argv, the user's config or a
+      remote); credential helpers aren't asked and redirects aren't followed. The push is forced
+      and names that one ref: a run again moves the branch (roll code takes a non-fast-forward
+      push to any branch but the default one). A pushed branch is a roll code change, as any is.
+    - **The repo** is `--repo`, else the one a remote of the checkout points at: a remote whose
+      URL is that repo's `clone_url`. **The project** is `--project`, else the one project whose
+      canvas has the repo.
+    - **Then** it makes the branch's preview, or reuses the one it has (`create --branch`'s),
+      waits until it's ready (unless `--no-wait`) and prints its URL, as `wait` does.
+  - `roll preview down [--name N] [--repo owner/name]` deletes that preview and the
+    `preview/<handle>/<name>` branch (a delete push, as `up`'s).
   For CI outside GitHub, `roll preview wait --change chg_…` (or `create … --wait`) blocks until
   the preview is ready and prints its URL (`--service` for another), exiting 1 if it fails, is
   deleted or isn't ready within `--timeout` (600 s): the next step tests that URL with the
