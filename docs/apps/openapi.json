@@ -235,7 +235,7 @@
               }
             }
           },
-          "description": "`{ url, sources?, environments?, services?, previews?, headers? }` (https, a public host; `sources` some of `runtime` (default), `http`, `build`; services by name or id; `headers` `{name: value}`, at most 10, sealed, never roll's own or `content-type`)"
+          "description": "`{ url, format?, sources?, environments?, services?, previews?, headers? }` (https, a public host, or `syslog+tls://host:port` for `format: \"syslog\"`, which takes no headers; `sources` some of `runtime` (default), `http`, `build`; services by name or id; `headers` `{name: value}`, at most 10, sealed, never roll's own or `content-type`)"
         },
         "responses": {
           "201": {
@@ -317,7 +317,7 @@
               }
             }
           },
-          "description": "`{ sources?, environments?, services?, previews?, headers? }` (given ones replace, `headers` all of them; a new URL is a new drain)"
+          "description": "`{ sources?, environments?, services?, previews?, headers? }` (given ones replace, `headers` all of them; a new URL or format is a new drain)"
         },
         "responses": {
           "200": {
@@ -336,7 +336,7 @@
     },
     "/v1/apps/projects/{project}/drains/{did}/test": {
       "post": {
-        "description": "Answers `{ ok, code, error }` (one line sent now, signed and with its headers, not retried).",
+        "description": "Answers `{ ok, code, error }` (one line sent now, signed and with its headers, not retried; `code` null for syslog).",
         "operationId": "postProjectsProjectDrainsDidTest",
         "parameters": [
           {
@@ -358,7 +358,7 @@
         ],
         "responses": {
           "200": {
-            "description": "`{ ok, code, error }` (one line sent now, signed and with its headers, not retried)"
+            "description": "`{ ok, code, error }` (one line sent now, signed and with its headers, not retried; `code` null for syslog)"
           },
           "4XX": {
             "$ref": "#/components/responses/Error"

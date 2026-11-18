@@ -2498,6 +2498,84 @@ async fn a_log_drain_gets_the_runtime_output_signed() {
     assert!(!lines.is_empty() && lines.iter().all(|l| l["source"] == "http"), "{lines:?}");
 }
 
+/// A drain in another format: syslog (RFC 5424, octet-counted, as Papertrail takes it) and OTLP
+/// logs (a collector's `/v1/logs`), each with the runtime output.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_log_drain_speaks_syslog_or_otlp() {
+    use tokio::io::AsyncReadExt;
+    let w = world().await;
+    let base = format!("/v1/apps/projects/{}/drains", w.project);
+    // A syslog server: what each connection sends, kept.
+    let syslog = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let sys_at = syslog.local_addr().unwrap();
+    let heard: Arc<parking_lot::Mutex<Vec<u8>>> = Default::default();
+    let h = heard.clone();
+    tokio::spawn(async move {
+        while let Ok((mut c, _)) = syslog.accept().await {
+            let h = h.clone();
+            tokio::spawn(async move {
+                let mut b = Vec::new();
+                let _ = c.read_to_end(&mut b).await;
+                h.lock().extend_from_slice(&b);
+            });
+        }
+    });
+    let otlp: Arc<parking_lot::Mutex<Vec<(axum::http::HeaderMap, Value)>>> = Default::default();
+    let o = otlp.clone();
+    let app = axum::Router::new().route("/v1/logs", axum::routing::post(move |h: axum::http::HeaderMap, b: bytes::Bytes| {
+        let o = o.clone();
+        async move {
+            o.lock().push((h, serde_json::from_slice(&b).unwrap()));
+            StatusCode::OK
+        }
+    }));
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let otlp_at = l.local_addr().unwrap();
+    tokio::spawn(axum::serve(l, app).into_future());
+    assert_eq!(call(&w.api, "POST", &base, Some(json!({"url": format!("syslog://{sys_at}"), "format": "syslog", "headers": {"X-Key": "k"}}))).await.0, StatusCode::BAD_REQUEST, "a syslog server is sent no headers");
+    assert_eq!(call(&w.api, "POST", &base, Some(json!({"url": "syslog+tls://logs.example.com", "format": "syslog"}))).await.0, StatusCode::BAD_REQUEST, "it names its port");
+    assert_eq!(call(&w.api, "POST", &base, Some(json!({"url": format!("http://{otlp_at}/v1/logs"), "format": "gelf"}))).await.0, StatusCode::BAD_REQUEST);
+    let (st, sd) = call(&w.api, "POST", &base, Some(json!({"url": format!("syslog://{sys_at}"), "format": "syslog"}))).await;
+    assert_eq!((st, sd["format"].as_str()), (StatusCode::CREATED, Some("syslog")), "{sd}");
+    let (st, od) = call(&w.api, "POST", &base, Some(json!({"url": format!("http://{otlp_at}/v1/logs"), "format": "otlp", "headers": {"Authorization": "Bearer t-1"}}))).await;
+    assert_eq!(st, StatusCode::CREATED, "{od}");
+    assert_eq!(call(&w.api, "PATCH", &format!("{base}/{}", od["id"].as_str().unwrap()), Some(json!({"format": "ndjson"}))).await.0, StatusCode::BAD_REQUEST, "a new format is a new drain");
+    let test = call(&w.api, "POST", &format!("{base}/{}/test", sd["id"].as_str().unwrap()), None).await.1;
+    assert_eq!((&test["ok"], &test["code"]), (&json!(true), &Value::Null), "{test}");
+    let (svc, _) = image_service(&w, "api", json!({"port": 80})).await;
+    visit(&w, &host(&svc["environments"][0]["url"]), "/").await;
+    let mut said = String::new();
+    let mut sent = Vec::new();
+    for _ in 0..200 {
+        said = String::from_utf8_lossy(&heard.lock()).to_string();
+        sent = otlp.lock().clone();
+        if said.contains("listening on") && sent.iter().any(|(_, b)| b.to_string().contains("listening on")) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    // Octet-counted RFC 5424: `<len> <14>1 <time> api production <instance> runtime - <text>`.
+    let mut rest = said.as_str();
+    let mut messages = Vec::new();
+    while let Some((n, after)) = rest.split_once(' ') {
+        let n: usize = n.parse().unwrap_or_else(|_| panic!("not octet-counted: {said:?}"));
+        messages.push(&after[..n]);
+        rest = &after[n..];
+    }
+    let m = messages.iter().find(|m| m.contains("listening on")).unwrap_or_else(|| panic!("{said:?}"));
+    let parts: Vec<&str> = m.splitn(8, ' ').collect();
+    assert_eq!((parts[0], parts[2], parts[3], parts[5], parts[6]), ("<14>1", "api", "production", "runtime", "-"), "{m}");
+    assert!(parts[1].ends_with('Z') && parts[4].starts_with("roll-apps-"), "{m}");
+    // OTLP: a resource for the service and environment, a record a line, the vendor's key sent.
+    let (h, body) = sent.iter().find(|(_, b)| b.to_string().contains("listening on")).cloned().unwrap_or_else(|| panic!("{sent:?}"));
+    assert_eq!((h["content-type"].to_str().unwrap(), h["authorization"].to_str().unwrap()), ("application/json", "Bearer t-1"));
+    let rl = &body["resourceLogs"][0];
+    let attrs: Vec<(String, String)> = rl["resource"]["attributes"].as_array().unwrap().iter().map(|a| (a["key"].as_str().unwrap().into(), a["value"]["stringValue"].as_str().unwrap().into())).collect();
+    assert!(attrs.contains(&("service.name".into(), "api".into())) && attrs.contains(&("deployment.environment.name".into(), "production".into())), "{attrs:?}");
+    let records = rl["scopeLogs"][0]["logRecords"].as_array().unwrap();
+    assert!(records.iter().any(|r| r["body"]["stringValue"].as_str().is_some_and(|t| t.contains("listening on")) && r["timeUnixNano"].as_str().is_some_and(|t| t.len() >= 19)), "{records:?}");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_failed_deploy_is_sent_to_the_projects_targets_signed_and_retried() {
     use hmac::Mac;

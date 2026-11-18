@@ -912,12 +912,17 @@ pub enum AppsCmd {
         yes: bool,
     },
     /// The project's log drains: list them, `--add <https url>` (prints its signing secret
-    /// once), `--edit <id>`, `--test <id>`, or `--remove <id>`.
+    /// once; `--format otlp` for a collector's `/v1/logs`, `--format syslog` for
+    /// `syslog+tls://host:port`), `--edit <id>`, `--test <id>`, or `--remove <id>`.
     Drains {
         #[command(flatten)]
         target: Target,
         #[arg(long, conflicts_with_all = ["remove", "edit", "test"])]
         add: Option<String>,
+        /// With `--add`: how its lines go: `ndjson` (the default, signed), `otlp` (OpenTelemetry
+        /// logs over OTLP/HTTP JSON) or `syslog` (RFC 5424 over TLS).
+        #[arg(long, requires = "add", value_parser = ["ndjson", "otlp", "syslog"])]
+        format: Option<String>,
         /// With `--add` or `--edit`: what it's sent, comma-separated: `runtime` (the default),
         /// `http` (a request a line), `build`.
         #[arg(long, value_name = "SOURCES")]
@@ -3805,7 +3810,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Drains { target, add, source, only_env, only_service, previews, every_env, every_service, header, edit, test, remove } => {
+        AppsCmd::Drains { target, add, format, source, only_env, only_service, previews, every_env, every_service, header, edit, test, remove } => {
             let given = source.is_some() || !only_env.is_empty() || !only_service.is_empty() || previews.is_some() || !header.is_empty();
             if given && add.is_none() && edit.is_none() {
                 bail!("--source, --only-env, --only-service, --previews and --header go with --add or --edit");
@@ -3839,7 +3844,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 }
                 settings.insert("headers".into(), Value::Object(h));
             }
-            let row = |d: &Value| format!("{}  {}  {}{}", s(&d["id"]), s(&d["host"]), d["sources"].as_array().map(|a| a.iter().map(s).collect::<Vec<_>>().join(",")).unwrap_or_default(), d["headers"].as_array().filter(|a| !a.is_empty()).map(|a| format!("  headers {}", a.iter().map(s).collect::<Vec<_>>().join(", "))).unwrap_or_default());
+            let row = |d: &Value| format!("{}  {}{}  {}{}", s(&d["id"]), s(&d["host"]), d["format"].as_str().filter(|f| *f != "ndjson").map(|f| format!("  {f}")).unwrap_or_default(), d["sources"].as_array().map(|a| a.iter().map(s).collect::<Vec<_>>().join(",")).unwrap_or_default(), d["headers"].as_array().filter(|a| !a.is_empty()).map(|a| format!("  headers {}", a.iter().map(s).collect::<Vec<_>>().join(", "))).unwrap_or_default());
             if let Some(id) = test {
                 let r = api.post(&format!("{path}/{}/test", enc(&id)), json!({})).await?;
                 if !json_out {
@@ -3862,10 +3867,15 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 d
             } else if let Some(url) = add {
                 settings.insert("url".into(), json!(url));
+                if let Some(f) = &format {
+                    settings.insert("format".into(), json!(f));
+                }
                 let d = api.post(&path, Value::Object(settings)).await?;
                 if !json_out {
                     println!("{}  {}  secret {}", s(&d["id"]), s(&d["host"]), s(&d["secret"]));
-                    eprintln!("the secret is shown once: check X-Roll-Signature-256 with it");
+                    if format.as_deref().is_none_or(|f| f == "ndjson") {
+                        eprintln!("the secret is shown once: check X-Roll-Signature-256 with it");
+                    }
                     return Ok(());
                 }
                 d

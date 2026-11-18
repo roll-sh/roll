@@ -214,7 +214,13 @@ pub struct LogDrain {
     pub previews: bool,
     /// The names of the headers it's sent with (an API key's: their values are sealed).
     pub headers: Vec<String>,
+    /// How its lines go: `ndjson` (roll's own, signed), `otlp` (OpenTelemetry logs over
+    /// OTLP/HTTP JSON) or `syslog` (RFC 5424 over TLS, RFC 5425's framing).
+    pub format: String,
 }
+
+/// How a drain's lines can go ([`LogDrain::format`]).
+pub const DRAIN_FORMATS: [&str; 3] = ["ndjson", "otlp", "syslog"];
 
 /// What a drain can be sent.
 pub const DRAIN_SOURCES: [&str; 3] = ["runtime", "http", "build"];
