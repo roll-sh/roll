@@ -228,6 +228,9 @@ pub trait GitHubApp: Send + Sync {
 /// gives a ticket and again every few minutes of a visitor's session. Unset: a session lasts.
 pub trait Visitors: Send + Sync {
     fn may_open(&self, user: &str, project: &str) -> bool;
+    /// Whether the roll login `session` (`ses_…`, the one that asked for the ticket) is still
+    /// live: signing out of roll, or a person revoking their sessions, ends what it opened.
+    fn session_live(&self, user: &str, session: &str) -> bool;
 }
 
 /// Email to a person through their account (rolld fills it with roll-accounts' mailer). Unset or
