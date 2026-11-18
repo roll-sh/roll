@@ -1406,7 +1406,7 @@ impl Apps {
             tag: format!("roll-apps-{}:{}", svc.id.strip_prefix("svc_").unwrap_or(&svc.id), d.id.strip_prefix("dep_").unwrap_or(&d.id)),
             cpu: 2.0,
             memory_mb: 4096,
-            timeout: self.cfg.build_timeout,
+            timeout: build_timeout(svc.build.timeout_s, self.cfg.build_timeout, log),
             own_dockerfile: plan.provider == apps_build::Provider::Dockerfile,
             env: build_env,
             env_hash,
@@ -2706,6 +2706,18 @@ fn build_failure(lines: &[String]) -> Option<String> {
     })
 }
 
+
+/// How long a build may take: the service's `build.timeout_s`, held to the node's own limit.
+fn build_timeout(own: Option<u32>, node: Duration, log: &LogSink) -> Duration {
+    match own.map(|s| Duration::from_secs(s.into())) {
+        Some(t) if t > node => {
+            log.line(format!("build.timeout_s is {} minutes; this node builds for at most {}", t.as_secs() / 60, node.as_secs() / 60));
+            node
+        }
+        Some(t) => t,
+        None => node,
+    }
+}
 
 /// A closed environment's proxy variables (`proxy` for its listed hosts): `HTTP_PROXY` and
 /// `HTTPS_PROXY` in both cases, and `NO_PROXY` naming what's reached directly: the host, its

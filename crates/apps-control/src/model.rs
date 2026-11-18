@@ -358,6 +358,11 @@ pub struct Build {
     /// Aptfile): apt or apk names, in every stage built on an image.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub packages: Option<Vec<String>>,
+    /// The longest its build may take, in seconds (Render's, Cloud Build's): 60 up to the node's
+    /// own limit (`ROLL_APPS_BUILD_TIMEOUT`, in minutes, 30 by default; a longer one is held to
+    /// it); unset: the node's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_s: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -393,6 +398,9 @@ impl Build {
         }
         if let Some(p) = &self.packages {
             apps_build::packages::check(p).map_err(|why| Error::BadRequest(format!("build.{why}")))?;
+        }
+        if self.timeout_s.is_some_and(|t| !(60..=6 * 3600).contains(&t)) {
+            return Err(Error::BadRequest("build.timeout_s is 60–21600 seconds".into()));
         }
         Ok(())
     }

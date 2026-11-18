@@ -45,6 +45,8 @@ export interface Build {
   target?: string;
   /** System packages the generated Dockerfile installs (apt, or apk on Alpine): `ffmpeg`, `chromium`. */
   packages?: string[];
+  /** The longest its build may take, seconds (60–21600, held to the node's own limit); unset: the node's. */
+  timeout_s?: number;
 }
 
 export type ServiceType = "web" | "worker" | "cron";

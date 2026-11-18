@@ -359,6 +359,10 @@ pub enum AppsCmd {
         /// apt, or apk on Alpine); `none`: no more.
         #[arg(long)]
         packages: Option<String>,
+        /// The longest its build may take, in seconds (60–21600, held to the node's own limit);
+        /// `none`: the node's.
+        #[arg(long, value_name = "SECONDS")]
+        build_timeout: Option<String>,
         /// A gradual rollout: the shares of requests a new deployment takes in turn (`10,50`);
         /// `none` switches at once.
         #[arg(long, value_name = "PERCENTS")]
@@ -2531,7 +2535,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Set { target, name, repo, root, image, upload, builder, dockerfile, stage, install, build_command, build_start, health_timeout, health_every, health_failures, health_command, alert_memory, alert_errors, alert_p95, alert_log, alert_log_count, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, retries, volume, watch, packages, rollout, rollout_step, rollout_errors, rollout_manual, h2c, scale, public, drain, cpu_target, memory_target, restart, restart_tries, affinity, tcp, rollback_on_crash, rebuild_on_base } => {
+        AppsCmd::Set { target, name, repo, root, image, upload, builder, dockerfile, stage, install, build_command, build_start, health_timeout, health_every, health_failures, health_command, alert_memory, alert_errors, alert_p95, alert_log, alert_log_count, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, retries, volume, watch, packages, build_timeout, rollout, rollout_step, rollout_errors, rollout_manual, h2c, scale, public, drain, cpu_target, memory_target, restart, restart_tries, affinity, tcp, rollback_on_crash, rebuild_on_base } => {
             let svc = service(api, &target).await?;
             // The service's rollout with what was given replaced (the API takes it whole).
             let rollout = if rollout.is_some() || rollout_step.is_some() || rollout_errors.is_some() || rollout_manual.is_some() {
@@ -2593,6 +2597,15 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 Some(w) => {
                     let paths: Vec<&str> = w.split(',').map(str::trim).filter(|p| !p.is_empty()).collect();
                     build.insert("watch".into(), json!(paths));
+                }
+            }
+            match build_timeout.as_deref() {
+                None => {}
+                Some("none") => {
+                    build.insert("timeout_s".into(), Value::Null);
+                }
+                Some(t) => {
+                    build.insert("timeout_s".into(), json!(t.parse::<u32>().map_err(|_| anyhow::anyhow!("--build-timeout is seconds, or none"))?));
                 }
             }
             match packages.as_deref() {
