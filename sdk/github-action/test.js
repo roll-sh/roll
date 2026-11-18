@@ -90,3 +90,34 @@ test("scan fails a change that adds a stored value, naming where and never the v
   assert.ok(!printed.replace(/::add-mask::.*\n/g, "").includes("sk_live_value123"), "the value is never printed");
   assert.ok(!asked.includes("console.log('hi');"), "only added lines are asked about");
 });
+
+test("client-id signs the job in to roll as a trusted machine client: the token masked before it's exported, and roll's reason when it isn't", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "roll-action-"));
+  const ghEnv = path.join(dir, "env");
+  const fetchFn = async (url, init = {}) => {
+    const u = new URL(url);
+    if (u.host === "github.oidc") return new Response(JSON.stringify({ value: "the-oidc-token" }));
+    assert.equal(u.pathname, "/v1/access/oauth/token");
+    const f = new URLSearchParams(init.body);
+    assert.equal(f.get("grant_type"), "urn:ietf:params:oauth:grant-type:jwt-bearer");
+    if (f.get("client_id") === "mcl_ci" && f.get("assertion") === "the-oidc-token") return new Response(JSON.stringify({ access_token: "rla_job", token_type: "Bearer" }));
+    return new Response(JSON.stringify({ error: "invalid_grant", error_description: "the token's ref isn't the one this client trusts" }), { status: 400 });
+  };
+  let printed = "";
+  const out = {
+    write: (s) => {
+      // When the token's mask is printed, nothing has been exported yet.
+      if (s === "::add-mask::rla_job\n") assert.ok(!fs.existsSync(ghEnv) || !fs.readFileSync(ghEnv, "utf8").includes("rla_job"), "masked first");
+      printed += s;
+    },
+  };
+  const env = { "INPUT_API-URL": "https://roll.test", "INPUT_CLIENT-ID": "mcl_ci", ACTIONS_ID_TOKEN_REQUEST_URL: "https://github.oidc/token", ACTIONS_ID_TOKEN_REQUEST_TOKEN: "gh-request", GITHUB_ENV: ghEnv };
+  await run(env, out, fetchFn);
+  assert.match(fs.readFileSync(ghEnv, "utf8"), /^ROLL_TOKEN<<(roll_[0-9a-f]+)\nrla_job\n\1\n$/);
+  const unmasked = printed.replace(/::add-mask::.*\n/g, "");
+  assert.ok(!unmasked.includes("rla_job") && !unmasked.includes("the-oidc-token"), "nothing prints the token or the assertion");
+  // Refused: roll's reason, naming the client, never the assertion.
+  await assert.rejects(run({ ...env, "INPUT_CLIENT-ID": "mcl_other" }, out, fetchFn), (e) => /mcl_other: invalid_grant: the token's ref isn't the one this client trusts/.test(e.message) && !e.message.includes("the-oidc-token"));
+  // Two ways in at once is refused, not picked between.
+  await assert.rejects(run({ ...env, INPUT_IDENTITY: "idn_ci" }, out, fetchFn), /client-id .* or identity or token, not more than one/);
+});

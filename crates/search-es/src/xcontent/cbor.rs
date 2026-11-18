@@ -79,7 +79,7 @@ fn head(out: &mut Vec<u8>, major: u8, n: u64) {
     }
 }
 
-fn decimal_to_be_bytes(digits: &str) -> Vec<u8> {
+pub(crate) fn decimal_to_be_bytes(digits: &str) -> Vec<u8> {
     // Big-endian base-256 accumulator.
     let mut mag: Vec<u8> = vec![0];
     for d in digits.bytes().filter(u8::is_ascii_digit) {

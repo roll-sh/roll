@@ -112,8 +112,13 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
   first: its container is paused (`docker pause`), keeping its memory (12–22 MiB for the
   measured service) and using no CPU, and it reads and costs as asleep. A visit in that window
   thaws it: 48–72 ms to the first response on this machine, where a cold start is 3.3–3.9 s.
-  After `ROLL_PREVIEWS_WARM_MINUTES` (30; 0 stops at once, as before) it's stopped for good, and
-  a node keeps at most `ROLL_PREVIEWS_WARM_MAX` (32) frozen, stopping the oldest past it. A
+  After `ROLL_PREVIEWS_WARM_MINUTES` (480, a working day; 0 stops at once) it's stopped for good,
+  and a node keeps at most `ROLL_PREVIEWS_WARM_MAX` (32) frozen, stopping the oldest past it, so
+  the window costs no more memory than 32 frozen services however long it is. A frozen service
+  doesn't hold its data up: measured (2026-11-17), the preview's Postgres branch suspended within
+  five minutes of its services freezing and stayed suspended while they were frozen, so a longer
+  window keeps the next visit at tens of milliseconds without keeping a database running (the
+  window was 30 minutes until then). A
   request that lands just as a service freezes thaws it again at once. A frozen service keeps
   its dynamic credentials renewed (its process comes back with them). Docker only: Fargate has
   no pause, so services there stop. Sleep asked for (`roll preview sleep`, the sheet's Sleep)
@@ -162,7 +167,10 @@ state. A pass of the reconciler:
    1. A deleted preview runs its deletion (above).
    2. A fork's head that isn't approved stops the preview's services and waits as
       `awaiting_approval`. Its data branches stay.
-   3. Every data resource without a branch is branched, as `pv-<preview id>` on its parent. The
+   3. Every data resource without a branch is branched, as `pv-<preview id>` on its parent, all
+      of them at once (each records its own progress; the first error is the converge's once
+      all are done: 14 s from change to ready with eight products, against 16.6–18.4 s one
+      after another). The
       name is the idempotency key: the adapter looks the name up under that parent first, and
       checks that it is a child of that parent. A crash between "branched" and "recorded" finds
       the branch the next time.
@@ -260,7 +268,9 @@ behind the `Apps` trait:
   - Every variable of a link to a branched resource comes from the branch, under roll apps'
     names (a stream's `KAFKA_BROKERS`/`KAFKA_USERNAME`/`KAFKA_PASSWORD`, a bucket's
     `AWS_ENDPOINT_URL`, a search cluster's `ELASTICSEARCH_API_KEY` or `OPENSEARCH_URL`/
-    `OPENSEARCH_USERNAME`/`OPENSEARCH_PASSWORD`, from the branch's login), or is set blank when
+    `OPENSEARCH_USERNAME`/`OPENSEARCH_PASSWORD`: the branch's data-only key or user, made with the
+    branch through roll search's keys route (`access: data`), with `ELASTICSEARCH_URL` then carrying
+    no login, so code that needs more than production's link fails in its preview too), or is set blank when
     the branch has nothing for it (a Redis branch gives its `REDIS_REST_URL`/`REDIS_REST_TOKEN`
     too). Never production's: until 2026-11-16 a name that differed
     from the branch's kept production's value, so a stream's or an OpenSearch cluster's preview
@@ -323,7 +333,7 @@ behind the `Apps` trait:
      | Stream | `KAFKA_BOOTSTRAP_SERVERS`, `KAFKA_SASL_USERNAME`, `KAFKA_SASL_PASSWORD` |
      | Queue | `AMQP_URL` |
      | Tasks | `ROLL_TASKS_URL`, `ROLL_TASKS_TOKEN` |
-     | Search | `ELASTICSEARCH_URL` |
+     | Search | `ELASTICSEARCH_URL` (the branch's own login in it), and a data-only credential of the branch as production's link gets: `ELASTICSEARCH_API_KEY`, or `OPENSEARCH_USERNAME`/`OPENSEARCH_PASSWORD` on OpenSearch |
 
      With two resources of a kind, the first one takes the plain name and the others add
      `_<NAME>` (`DATABASE_URL_ANALYTICS`).
@@ -364,8 +374,10 @@ none of the service's environments follows, after checking the branch really is 
   its services asleep meanwhile. One waiting holds a place under `max_previews` (anyone can open
   them). A close deletes the preview. A later push never makes a row trusted again. A fork's row
   is found by its number (a writer's branch named `pull/7` is another preview). Approving is a
-  person's call (a token gets 403), and it's refused while the project says Roll only, which
-  doesn't cover roll apps yet. A title loses control and invisible formatting characters.
+  person's call (a token gets 403). Under Roll only it's refused: roll apps holds the `pv-`
+  environment's instance to it (apps' #143) but not its build, which sees the environment's
+  variables on an open network (an adversarial review's finding). A title loses control and
+  invisible formatting characters.
   `a_forks_pull_request_on_a_git_url_service_runs_only_its_approved_head`; live in
   `scripts/preview-apps.sh` with GitHub's `pull_request` events through roll apps' hook (#115:
   `GitPushes::takes_pulls`).
@@ -491,6 +503,25 @@ previews' code may reach:
 - `egress: "open"` (the default, as before): anything.
 - `egress: "roll"`: only roll's own products (the preview's branches) and roll's proxy in front
   of it. Nothing on the internet.
+- `egress_forks`: what a fork's preview reaches when `egress` is `"open"`. It's `"roll"` by
+  default, with `egress_hosts` still allowed through the proxy; `"open"` lets it reach what the
+  project's own previews do. A fork's head runs only once a writer approves it, but an approval
+  is to run its code, not a read of what it sends out. With open egress, an approved fork could
+  post the values it resolved (staging's, since an untrusted preview never gets a protected
+  environment's) anywhere. This mirrors roll secrets' split, where untrusted gets less. Asked
+  for by the roll secrets thread (2026-11-17). It holds for its services and for its seed,
+  release and teardown jobs: each runs on the preview's own network, with the listed hosts
+  through its egress proxy (an adversarial review found the jobs ran on Docker's default bridge).
+  On roll apps it holds for the instance (apps' #143). A roll apps build isn't held to it: the
+  build sees the environment's variables on an open network. So a fork's head on a Git URL service
+  under Roll only isn't approved to run until roll apps builds closed environments that way.
+
+Under `"roll"`, a preview's services resolve names through Docker's embedded DNS with
+TEST-NET-1 (`192.0.2.1`, never routed) as its upstream. The network's own names (`roll-egress`,
+the other services) resolve, and an outside name (`<secret>.attacker.example`) is forwarded
+nowhere it could be read, whatever the Docker version. From version 26, Docker doesn't forward
+from an internal network; before that, it did, from the host. The egress proxy checks a name
+against `egress_hosts` before it resolves it.
 
 **Decision (2026-11-16): enforce it on the node, with a Docker internal network per preview.**
 A preview whose project chooses `"roll"` gets its own network made with `--internal`, which has
@@ -514,8 +545,11 @@ It's measured on ai-server: a container on such a network gets "network unreacha
 outside address, and the host reaches its server at its address. Containers there can't reach
 the host either way (the host's firewall), so the products' reach is the same as on the default
 bridge. On the fleet, where products listen on every interface, the network's gateway reaches
-them. It's reversible: `"open"` is the default, and the setting only adds a network. It covers
-services roll's runtime runs; a service hosted on roll apps follows roll apps' own networking.
+them. It's reversible: `"open"` is the default, and the setting only adds a network. A service
+hosted on roll apps gets the same rule: the preview's environment there is made with
+`egress: {mode: "roll", hosts}`, so it runs on a network of its own with no route out and its
+listed hosts go through roll apps' egress proxy (docs/apps/README.md, "Egress"); what that proxy
+refuses shows in the preview's activity too.
 Changing it restarts the services (it's part of what they're deployed with). Live in
 `scripts/preview-cost.sh`: the service reached 1.1.1.1 with `open`, then ran on
 `roll-previews-net-<id>`, was still served through roll, and got "network unreachable".
@@ -876,7 +910,8 @@ land on the change.
   picture, and a selector roll refuses (`selector_ok`) is never sent. At most 10 notes a run,
   each picture at most 512 KiB, 50 kept a preview; a note already cropped isn't asked again, and
   one whose element isn't on the page has none. `GET …/notes/{note}/crop` serves it, the notes
-  list says `crop`, and the sheet shows it with the note.
+  list says `crop`, and the sheet shows it with the note, as does the change page's review
+  timeline in roll (beside the note's review).
   `a_notes_element_is_cropped_by_the_next_screenshot`.
 - The open notes reach the pull request (Vercel's comments): the preview's own comment, updated
   in place, lists them (newest first, at most 10), each with its page, who and what as plain
@@ -966,8 +1001,9 @@ and admins see every project.
 | `GET /v1/previews/{id}/connect` | | `{branches: [{kind, parent, vars}]}`: each data branch's connection as its services get it, the branch's own credentials (a Postgres branch's role, never the parent's or a superuser's), read from the products each time; 409 while it's being deleted |
 | `GET /v1/previews/{id}/qr.png` | `service?` | The preview's link with its access (`share_url`, or that service's) as a QR code PNG, to open on a phone; `Cache-Control: no-store` (it carries the token); 404 with no link yet |
 | `POST /v1/previews/{id}/visual/accept` | `{head?, path?}` (the screenshot's looked at, `visual_review.head`; `path`: that page only, `""` the first, else every page) | `Preview`: how a change's pages look at its latest screenshot is accepted (`visual_review`, `roll/visual`); 404 for a page it has no screenshot of; 409 with no screenshot yet, 400 for a branch's preview, 403 from the change's author or from a token when the review is required, 409 when `head` isn't the latest screenshot's (a newer one came in) |
-| `GET /v1/previews/{id}/logs?service=&lines=` | | `{service, lines: string[]}` |
+| `GET /v1/previews/{id}/logs?service=&lines=` | | `{service, lines: string[]}`, masked: every value the preview got from roll secrets, the project's `env` and the preview's own variables, and its branches' credentials (a password, key or token, a URL's password) are `***`, as checks' output is (each line of 6 characters or more). A preview's code, a fork's too, can print what it was given, and anyone who reads the preview reads its logs. 409 when what they must hide can't be read. A seed's, release's or teardown's output (the preview's error, a teardown's in the pull request's comment), what its page said in a screenshot run (its errors and failed requests, broken links, words, markup and API operations: the comment's "What went wrong") and the hosts its egress proxy refused (a name is its code's to choose) are masked the same way (a picture can't be: a page that renders a secret shows it). Masking matches values as written, so code that prints a secret encoded (base64, hex) gets it through, as with every log masker (GitHub Actions' too). It hides what a preview shows, not what its code sends: with egress open (the default) its code reaches the internet, DNS included. Under "Roll only" it can't: the preview's network is `--internal`, where Docker's embedded DNS doesn't forward outside names (SERVFAIL; checked on Docker 29.9) and no resolver is reachable, and the egress proxy checks a name against `egress_hosts` before it resolves it, so `<secret>.attacker.example` is never looked up; on roll apps, every variable previews sets in the `pv-` environment is sealed, so apps' own logs hide it and its API never returns it (`…/connect` and `…/env` reveal them) |
 | `GET /v1/previews/{id}/logs?service=&lines=&follow=1` | | `text/event-stream`: `event: service` (its name), then one event per line, the last `lines` first and then as they come. `docker logs -f` for `roll.toml` services; for others the tail is read every 2 s (2,000 lines wide after the first read) and only new lines are sent, with a line saying so when some were missed. Runs on the preview's holder; the stream ends when the client goes |
+| `GET /v1/previews/{id}/requests` | | `{requests: [{at, service, method, path, status, ms}]}`: its latest 200 requests through roll's runtime, newest first (Vercel's request log): never the query, which can carry a token, and the path masked as its logs are (a path is its code's to choose); `ms` until the answer's headers. Kept in memory on the preview's holder (runs there) and gone with its last service; a roll apps instance's requests are roll apps' own. The sheet's Requests tab, errors at a glance; `roll preview requests <id> [--errors]` |
 | `GET /v1/previews/{id}/activity` | | `Activity[]`, newest first |
 | `GET /v1/previews/projects/{project}/settings` | | `Settings` |
 | `PUT /v1/previews/projects/{project}/settings` | `Settings` (partial) | `Settings` |
@@ -1035,7 +1071,8 @@ type Settings = {
   visual_review: "off" | "check" | "required";   // the roll/visual review; required also blocks landing in roll ("off")
   feedback: boolean;                  // a feedback button on its pages for people who came in through roll (true)
   egress: "open" | "roll";            // what its services' code may reach: anything ("open"), or only roll's products on a network with no route out (see "Egress")
-  egress_hosts?: string[];            // with "roll": hosts outside roll still reachable through its egress proxy (api.stripe.com, *.sentry.io; at most 20)
+  egress_hosts?: string[];            // with "roll" (or egress_forks "roll", for forks): hosts outside roll still reachable through its egress proxy (api.stripe.com, *.sentry.io; at most 20)
+  egress_forks: "roll" | "open";      // what a fork's preview reaches when egress is "open" (default "roll")
   warm: boolean;                      // wake the change's services as soon as a new head is deployed (true)
   env_for: Record<string, Record<string, string>>; // branch glob → variables, over env, under a preview's own ({})
   seed: Job | null;                   // once on fresh data
@@ -1052,6 +1089,14 @@ type Settings = {
   sleeping_usd_month, active_usd_hour, dashboard_url, github}` (docs/code/http-api.md). A change whose repo is in
   a project with previews on gets its preview from here instead of code-preview's single
   container.
+- **Linear issue** (Vercel's Linear integration): `PreviewEnvironment.issues` holds the Linear
+  issues the change names, `ENG-123` in its title (roll's Linear agent titles its changes so) or
+  at the start of its branch's last part (`ada/eng-123-fix-cart`, Linear's own branch names). The
+  gallery's Linear template "A change's preview on its Linear issue" (`linear-preview-on-issue`:
+  the `preview` trigger, ready and naming an issue, then `linear.attach`) links the preview there
+  with how its pages compare with main's; attaching the same link again updates it. A name that
+  isn't an issue of the workspace fails that run's step and nothing else.
+  `a_changes_linear_issues_from_its_title_and_branch`, `linear-templates.test.ts`.
 - **GitHub PR**, through roll code's GitHub outbox (durable, retried, sent on the repo's owner):
   - one comment, edited in place, with a table of services, URLs, status, data branches and cost;
   - a commit status `roll/preview` on the head. A preview removed before it was ready (the change
@@ -1253,7 +1298,12 @@ type Settings = {
     acceptance doesn't clear the blocker), as with approvals; and a required one is a person's,
     which a scoped or OAuth token (an agent's) can't give (403). Automations see it too: the `preview` trigger's
     `preview.environment.visual_review.state` field, and the built-in "Tell me when a visual change
-    waits for a review" template (a notice linking to the preview, or a Slack step instead).
+    waits for a review" template (a notice linking to the preview, or a Slack step instead). The
+    event's `became` (`ready`, `failed`, `visual_change`) names what an update reached that the
+    preview wasn't already at, at its head, so that template, "Post a change's preview to Slack
+    when it's ready" and "Tell me when a change's preview fails" fire once a
+    push, as Vercel's Slack app posts once a deployment, not at every state, cost or screenshot
+    change, nor when a sleeping preview wakes.
     The same session checks what a screen reader can't name (images without alt text, form
     fields without a label, buttons and links with no name) and whether the document has a
     language and a title (`page_a11y`, counts and the first one's markup, bounded; "**Accessibility:**
@@ -1317,7 +1367,9 @@ type Settings = {
     expiry is 30 days after it was taken) and works only while the preview is live and public,
     so a project that turns private takes its old comments' images down at once.
     It wakes the service once per push, so it's off by default.
-- **Dashboard**: a Previews tab on each project, with the list, status, cost, logs, and open,
+- **Dashboard**: a Previews tab on each project, with the list (a filter once there are four or
+  more: every word against title, branch, slug, repo or `#number`, and All, Needs you, Failed,
+  Awake, Asleep with their counts; `lib/preview-filter.ts`), status, cost, logs, and open,
   sleep, wake, reset and delete actions, plus a "Previews" overlay on the canvas that draws each
   preview's branches next to their parents.
 - **CLI**: `roll preview ls|show|open|create|rm|sleep|wake|refresh|reset|keep|logs [-f]|activity|settings|usage|bypass|wait`.
@@ -1450,8 +1502,12 @@ Ranked by what a person notices first. Done so far:
   renewed while it runs, revoked when it stops (a sleeping preview holds none);
 - with roll apps' #26 on main: Promote (a trusted change's preview's build deployed to
   production as is, through roll apps' own promote with `expect`, as the person), screenshots of a
-  roll apps service in its instance's network on one node (`Apps::reachable`), and the feedback
-  button on its environment;
+  roll apps service in its instance's network (`Apps::reachable`), and the feedback button on its
+  environment. On a fleet the instance runs on its service's holder (lease `apps:service:<id>`),
+  so the preview's node sends the run there as a signed hop to `/internal/previews/apps-shot` (`require_signed`: rolld's gate lets `/internal` through without a token, so an unsigned request is refused there; only a `pv-` environment; two runs at once per node).
+  This is the way roll search sends a cluster's REST requests to its owner. The holder takes it
+  in its own Docker and answers the `Shot` as JSON (its PNGs base64). Fargate still has no
+  container to join, and that's left to the cloud thread;
 - alarms on previews' failures in the cloud stack (`preview-converge-failures`,
   `preview-screenshot-failures`: most of a quarter-hour's runs failing, never rolling a deploy back);
 - idle services frozen before they stop, so a visit in the next half hour is back in tens of
@@ -1466,6 +1522,7 @@ Ranked by what a person notices first. Done so far:
   no route out (roll's products and roll's proxy still reach them);
 - allowed outside hosts (`egress_hosts`) through a per-preview egress proxy, what it refused said
   in the activity;
+- a note's picture beside it on the change page in roll too (its review in the timeline);
 - only the pages a push can change are taken again (Chromatic's TurboSnap): another service that
   runs what it ran at the push before (its revision, what it's deployed with, the same data)
   keeps its pages, checks and all, without a browser run;
@@ -1573,6 +1630,7 @@ Ranked by what a person notices first. Done so far:
 - metrics: converges, screenshots and their failures as EMF lines (`PreviewConvergeFailures`,
   `PreviewScreenshotFailures`; docs/cloud/README.md);
 - visual reviews in automations (the `preview` trigger's field, a built-in template);
+- the preview on the change's Linear issue (`issues`, the Linear template);
 - an acceptance carried over a push that changes nothing visible;
 - speed against main ("300 ms slower than main") accessibility problems and errors new against it;
 - a look at the sheet and the change page from screenshots of a live preview (the screenshot's
@@ -1636,12 +1694,7 @@ Ranked by what a person notices first. Done so far:
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.
-5. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
-   to a work item from Linear gets its preview's link and visual review posted there, as an
-   automation template on the `preview` trigger.
-   It needs roll to remember which issue a change was made for (Linear's side only attaches it
-   today): the agents thread's `linear.attach` could record the link.
-6. **Screenshots of roll apps' services, and their feedback button, on the fleet**: on one node
+5. **Screenshots of roll apps' services, and their feedback button, on the fleet**: on one node
    they're done (`Reach` = roll apps' `Apps::reachable`; `scripts/preview-apps.sh`: the apps
    service screenshotted in its instance's network, main's baseline on roll apps, the feedback
    button on its environment). On a fleet an instance runs on its service's holder, and Fargate
@@ -1651,12 +1704,12 @@ Ranked by what a person notices first. Done so far:
    access link, in the browser container. Ranked lower: the cloud fleet runs instances on
    Fargate, where neither `reachable` nor rolld's Docker screenshot works (a browser task of its
    own, with the cloud thread).
-7. **Watch: pg-control's recovery to a time seconds old** (unowned; reported to the user by the
+6. **Watch: pg-control's recovery to a time seconds old** (unowned; reported to the user by the
    Postgres strategy session): a point-in-time branch at such a time stayed in recovery past two
    minutes even with the parent's history reporting `end` past it, where pg-control's own test
    (which waits on the safekeeper's flush position) passes. `data_at` is fine for times hours
    old; the live script will check it once this is understood.
-8. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
+7. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
    daemon left containers) failed a wake with "the container name is already in use". A remove
    that dropped the service's entry before stopping it could start a second container under the
    name (fixed), and a preview's services starting at once each made its egress proxy under the

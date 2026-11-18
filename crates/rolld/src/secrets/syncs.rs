@@ -223,6 +223,27 @@ impl Hooks {
         Ok(u)
     }
 
+    /// GET `url` (the same guards: https, public addresses, no redirects), a 2xx only, at most
+    /// `limit` bytes: an OIDC issuer's discovery document and keys.
+    fn get_bounded(&self, url: &str, limit: usize) -> Result<Vec<u8>> {
+        let u = self.url(url)?;
+        let host = u.host_str().unwrap_or_default().to_string();
+        block_on(async {
+            let mut resp = self.client.get(u).header("accept", "application/json").send().await.map_err(|e| Error::Link(format!("{host}: {}", e.without_url())))?;
+            if !resp.status().is_success() {
+                return Err(Error::Link(format!("{host} answered {}", resp.status())));
+            }
+            let mut out = Vec::new();
+            while let Some(c) = resp.chunk().await.map_err(|e| Error::Link(format!("{host}: {}", e.without_url())))? {
+                if out.len() + c.len() > limit {
+                    return Err(Error::Link(format!("{host}: an answer over {limit} bytes")));
+                }
+                out.extend_from_slice(&c);
+            }
+            Ok(out)
+        })
+    }
+
     /// POST `body`, signed with the sync's secret.
     fn post(&self, url: &url::Url, p: &Push<'_>, body: &Json) -> Result<()> {
         let secret = p.secret.ok_or_else(|| Error::Internal("a signed sync has no secret".into()))?;
@@ -399,22 +420,23 @@ impl roll_secrets::Deliver for AuditDeliver {
 
     /// An OIDC issuer's documents: the same guards, a 2xx only, at most `limit` bytes.
     fn get(&self, url: &str, limit: usize) -> Result<Vec<u8>> {
-        let u = self.0.url(url)?;
-        let host = u.host_str().unwrap_or_default().to_string();
-        block_on(async {
-            let mut resp = self.0.client.get(u).header("accept", "application/json").send().await.map_err(|e| Error::Link(format!("{host}: {}", e.without_url())))?;
-            if !resp.status().is_success() {
-                return Err(Error::Link(format!("{host} answered {}", resp.status())));
-            }
-            let mut out = Vec::new();
-            while let Some(c) = resp.chunk().await.map_err(|e| Error::Link(format!("{host}: {}", e.without_url())))? {
-                if out.len() + c.len() > limit {
-                    return Err(Error::Link(format!("{host}: an answer over {limit} bytes")));
-                }
-                out.extend_from_slice(&c);
-            }
-            Ok(out)
-        })
+        self.0.get_bounded(url, limit)
+    }
+}
+
+/// The guarded client as roll-oidc's fetcher, for roll-access's trusted machine clients: the same
+/// one roll secrets' identities fetch with.
+pub struct OidcFetch(Hooks);
+
+impl OidcFetch {
+    pub fn new(allow_private: bool) -> OidcFetch {
+        OidcFetch(Hooks::new(allow_private))
+    }
+}
+
+impl roll_oidc::Fetch for OidcFetch {
+    fn get(&self, url: &str, limit: usize) -> std::result::Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+        self.0.get_bounded(url, limit).map_err(|e| Box::new(e) as _)
     }
 }
 

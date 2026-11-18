@@ -266,6 +266,8 @@ export function secretsApi(project: string) {
     /** The answer holds its signing secret, once. */
     addRotator: (r: { name: string; url: string }) => req<Rotator & { secret: string }>("POST", `${P}/rotators`, r),
     deleteRotator: (id: string) => req<null>("DELETE", `${P}/rotators/${enc(id)}`),
+    updateRotator: (id: string, ch: { name?: string; url?: string }) => req<Rotator>("PATCH", `${P}/rotators/${enc(id)}`, ch),
+    rotateRotatorSecret: (id: string) => req<Rotator & { secret: string }>("POST", `${P}/rotators/${enc(id)}/rotate-secret`),
   };
 }
 

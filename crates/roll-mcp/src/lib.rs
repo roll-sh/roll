@@ -1089,7 +1089,11 @@ async fn outcome(tool: &str, resp: Response) -> Value {
         }
         let text = match status {
             StatusCode::UNAUTHORIZED => format!("{msg}: the token isn't valid any more (reconnect)"),
-            StatusCode::FORBIDDEN => format!("not allowed: {msg}"),
+            // Where the person can allow it, when roll says (the token's page, the rule proposed).
+            StatusCode::FORBIDDEN => match body.get("widen").and_then(Value::as_str) {
+                Some(w) => format!("not allowed: {msg}. If the user wants this token to be able to, they can allow it here: {w}"),
+                None => format!("not allowed: {msg}"),
+            },
             StatusCode::NOT_FOUND => format!("not found: {msg}"),
             _ => msg,
         };
