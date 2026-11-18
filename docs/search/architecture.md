@@ -204,6 +204,52 @@ writes a new generation and the other keeps reading its own. Point-in-time
 branches (`at`) replay the parent's WAL up to that time into new segments for the child. Garbage
 collection deletes a segment object only when no manifest of any cluster references it.
 
+## Deleting and restoring
+
+A cluster's storage is keyed by its name (`search/c/<name>/`), and a deleted cluster's name is
+free at once, so a delete moves the storage aside (`search-control` `Control::delete`):
+
+1. **Delete.** The cluster is hidden, locked out and unloaded (flushed) as before. Its storage
+   is branched to a name no cluster can have, `deleted_<id>_<random>` (new commit points naming
+   the same segments, plus its pins and state; nothing is copied). Then, in one catalog
+   transaction, its row becomes deleted: `name` takes the kept name (which frees the real one),
+   with `deleted_name`, `deleted_at` and `purge_at` (`--search-deleted-retention-days`, 7). Then
+   the commit points under the old name are removed. The row flip is the commit point: before it
+   the cluster still exists and the copy is removed; after it, leftovers under the old name only
+   keep the name from being reused (`check_free`). With a window of 0 the delete is today's:
+   storage and row go at once.
+2. **Meanwhile** the row and its storage log stay, so the kept bytes are billed as storage;
+   lookups, lists, wakes and the always-on loop see only live rows. Branches keep working: they
+   name segments, not the parent.
+3. **Restore** (`POST …/{id}/restore`) claims the row in one transaction (`claim`, `claimed_at`)
+   and reserves the name it restores to in `name`, so no create takes it meanwhile; it fails
+   with 409 when another cluster has it. It branches the kept copy back to the name, flips the
+   row live (only if its claim still holds), then removes the kept copy. Under another name the
+   password and API keys stay: the name is only the user, the key id's suffix and the host label.
+   A restored cluster's point-in-time history starts at the restore (`restored_at`).
+   **Keys revoked meanwhile stay revoked.** The restore brings the cluster's security back as
+   it was, so a key revoked while the cluster was deleted (roll secrets or roll apps unlinking:
+   `DELETE …/{id}/keys/{key}`, `Control::revoke_link`) would work again. So that route, on a
+   deleted cluster its caller may see, keeps the revoke with the row (`search_revokes`, checked
+   against the row in the same transaction, at most 1,000 per cluster) and answers 204; the
+   restore applies them right after the row goes live, before it answers, and forgets each once
+   done. One that fails stays, and the purge sweep retries it every 10 minutes. This was chosen
+   over invalidating every link key at the restore: that would also kill the keys still linked,
+   whose managed values roll secrets keeps until their next rotation, and a user's own data
+   keys. It fails safe the same way: the route answers 204 only once the revoke is committed,
+   otherwise an error that roll secrets' sweeper retries (as for a live cluster).
+4. **Purge.** After `purge_at` a sweep (every 10 minutes; on a fleet one node at a time,
+   `singleton:search-purge`, as garbage collection is placed) claims each due row the same way,
+   removes the kept copy with `Store::delete_cluster` (commit points, state and pins; segments
+   only through garbage collection, which keeps whatever a branch's manifests name), then the
+   row and its usage, only if its claim still holds.
+
+Restore and purge never run on one cluster at once: each needs the claim, taken by a
+conditional update in a serializable catalog transaction shared by every node, and each
+finishes only while its claim holds. A claim lapses after 15 minutes (its node died); a
+restore that crashed after reserving a name leaves storage only under that name, which the next
+restore or the purge removes.
+
 ## Multi-tenancy and authentication
 
 A request finds its cluster by, in order: Basic auth username (`<cluster>` with the cluster's
@@ -232,6 +278,85 @@ without naming either. With no key they are stored as given, as Elasticsearch do
 Elasticsearch does without cluster state encryption. Users' passwords are hashes and API keys
 are kept as hashes, never sealed.
 
+## Client addresses and IP allowlists
+
+A cluster can have an IP allowlist (`ip_allowlist`: at most 64 CIDRs, IPv4 or IPv6, each with an
+optional description; empty means open). It works like Elastic Cloud's traffic filters and AWS
+OpenSearch Service's IP-based policies. It filters the **data plane**: every request to the
+cluster's Elasticsearch/OpenSearch endpoint, on any node and through the edge. The node checks it
+in `Node::enter_from` as soon as it knows which cluster the request names (`search-server`
+`allow.rs`). It runs before the credentials are looked at and before a sleeping cluster wakes. A
+refused request gets Elastic Cloud's answer, 403
+`{"ok":false,"message":"Forbidden due to traffic filtering"}`, the same for every cluster and
+dialect. Wrong credentials from a refused address get that 403, not a 401, so a scanner can't
+probe credentials or learn the flavor or version. A name that isn't a cluster still gets the
+401 it gets today: whether a cluster exists can be told from outside, as on Elastic Cloud (404
+from its proxy), and cluster names are DNS labels anyway.
+
+The **control plane** isn't filtered: `/v1/search` and the dashboard sit behind roll's own
+sign-in and tokens, as Elastic Cloud's console and API aren't subject to traffic filters. Its
+own requests to a cluster (the console, the per-index routes, links' API keys, previews'
+masking) run in process (`Control::call`, `Origin::Internal`). On a fleet they are forwarded to
+the owner signed with `INTERNAL_CLIENT` in place of an address. So the dashboard's console keeps
+working from anywhere, also on a cluster whose allowlist admits nobody the person is at.
+
+**The client address** is decided by the node that accepted the connection, by one rule
+(`ClientAddresses`, rolld's flags):
+
+1. The connection's peer: the socket's peer, or with `--search-proxy-protocol` the PROXY header's
+   source. The NLB is transparent: a v1/v2 header is read before anything else, within 5 s,
+   and a connection without a valid one is dropped. A `LOCAL` header (a health check) leaves
+   the socket's peer.
+2. When the operator names a header (`--search-client-ip-header`, e.g. `CF-Connecting-IP`), its
+   address replaces the peer's only when that peer is inside `--search-trusted-proxies`. The
+   last value is used (a proxy appends its own). A header from any other peer is ignored, and an
+   unreadable one leaves the peer. Neither flag works without the other, and naming
+   `X-Forwarded-For` or `Forwarded` is refused: those carry what the client wrote itself.
+3. IPv4-mapped IPv6 addresses (`::ffff:a.b.c.d`, from a dual-stack socket) are the IPv4 address
+   they carry, for the trusted-proxy check and for the allowlist. A mapped CIDR in an allowlist
+   is stored as its IPv4 CIDR.
+
+Nothing else is believed: a client's own `X-Forwarded-For`, `X-Real-IP` or `x-roll-code-client`
+never decides its address.
+
+**On the fleet** the node a client reached decides the address. It is roll-edge's HTTPS
+listener for `<cluster>.search.…`, which puts it in `ConnectInfo`, or a node's REST port
+(`cluster::serve_front`, the same rule as above). A forward to the owner carries it in
+`x-roll-code-client`, which the HMAC over the forward covers (roll-cluster `sign.rs`). The owner
+takes the address only from that signed field (`cluster::origin_of`). The owner's check is the
+one that counts; the forwarding node doesn't check first, since it doesn't hold the cluster. The
+internal route forwards arrive on (`/internal/search/rest`, which rolld's gate lets in without
+a token) takes signed requests only (`roll_cluster::require_signed`). So a client can't reach the
+owner with an address it chose, or with none. A forward that carries no address, or one that
+doesn't parse, is refused by any allowlist.
+
+**roll cloud** (docs/cloud/README.md) needs no search flags for this. Clients reach clusters at
+`https://<cluster>.search.<region>.<domain>` through the NLB, which sends PROXY v2 to the edge
+(`--edge-proxy-protocol`). These hostnames are DNS only, not proxied by Cloudflare, so the
+edge's client is the PROXY source, the client's own address. The REST port (`--search-http`)
+isn't behind the NLB there. A deployment that puts the REST port itself behind a load balancer
+sets `--search-proxy-protocol` for an NLB or HAProxy. Behind an HTTP proxy that writes the
+client's address, it names that header with the proxy's addresses as trusted: for Cloudflare,
+`--search-client-ip-header CF-Connecting-IP --search-trusted-proxies <cloudflare.com/ips>`, with
+the PROXY header first when an NLB sits between them.
+
+**What an owner must allow.** Anything that uses the cluster over its endpoint is a client like
+any other, and roll apps' instances and roll previews' services are no exception. They connect
+from the addresses roll's hosts send from, which every tenant on those hosts shares. On one node
+an app instance reaches a linked cluster through roll apps' link relay on the host's loopback, so
+the address search sees is the node's own (`127.0.0.1`, or `::1`), not the container's; an
+instance that calls the REST port directly comes from the container bridge's gateway (`172.17.0.1`
+on Docker's default network).
+On roll cloud today it is per-task public IPs. There is no NAT gateway (docs/cloud/README.md,
+"Isolated work"), and fixed outbound addresses are roll apps' Next item "Static outbound IPs".
+Until then, a cluster that a roll-hosted app or preview uses stays open, or lists those
+addresses as they change. As on Elastic Cloud, where other deployments can't connect through a
+traffic filter unless admitted, roll doesn't let its own hosted workloads through implicitly:
+that would let every tenant's app past every allowlist. Credentials still decide who gets in
+after that. What roll does for a link itself (making and revoking its API key, a preview
+branch's masking) is the control plane and needs nothing. A branch starts with its parent's
+allowlist (a preview's branch included); change it like any setting.
+
 ## Snapshots
 
 - **Where they live.** A repository's snapshots are recorded with the cluster's metadata, keyed
@@ -246,9 +371,9 @@ are kept as hashes, never sealed.
   once, so every cluster has it without a write, a branch sees its parent's snapshots there, and
   an idle cluster costs nothing more (no policy of its own: a tenant's SLM policy wakes the
   cluster only when due). It shows as an `s3` repository with client `roll`, a client no tenant
-  can name, and can't be changed or unregistered. A deleted cluster's snapshots go with it, as
-  its data does: no API could reach them, and backups meant to outlive a cluster go to an `s3`
-  repository in the tenant's own bucket.
+  can name, and can't be changed or unregistered. A deleted cluster's snapshots are kept with
+  its data for the restore window and go with it at the purge ([Deleting and restoring](#deleting-and-restoring));
+  backups meant to outlive a cluster go to an `s3` repository in the tenant's own bucket.
 - **`s3` repositories** (`search-es` `api/snapshots/s3.rs`, client `s3.rs`) keep everything in
   the tenant's bucket under `<base_path>/roll/`: the repository data at each generation
   (`index-N`, written only if absent, so two clusters never commit the same generation), and per
@@ -262,6 +387,41 @@ are kept as hashes, never sealed.
   `http.max_content_length` (charged to the breakers as its write was), listings by pages and
   objects, and a restore checks names and global state as the APIs that set them do. Taking a snapshot reads the open shards' searchers (a closed index's last commit,
   pinned only while it is read), so nothing stays in roll's storage.
+- **Objects and parts** (`api/snapshots/transfer.rs`). A segment's records are one gzip stream
+  cut into objects of `chunk_size` (default and most 5tb, least 5mb, never more than
+  `buffer_size` × `max_multipart_parts`); an object larger than `buffer_size` (5mb to 5gb;
+  default 100mb or 5% of the node's heap, whichever is less) goes up as a multipart upload of
+  `buffer_size` parts, the settings validated with Elasticsearch's messages. One part at a time is
+  held, charged to the `request` breaker, and a restore inflates and indexes records as the
+  bytes arrive, so neither side holds a whole file. An upload that fails is aborted; one a crash
+  left is aborted by `_cleanup` and after snapshot deletions (as Elasticsearch does then), listed
+  by `ListMultipartUploads` under the repository's prefix, at most
+  `max_multipart_upload_cleanup_size` (1,000) at a time, never one running on this node. MinIO
+  lists uploads by exact key only, so it gets none listed and relies on its own 24 h stale-upload
+  expiry. Snapshots written before `chunk_size` (a gzip member per ~8 MiB chunk) read the same.
+- **Throttling.** `max_snapshot_bytes_per_sec` (default 40mb) paces uploads and
+  `max_restore_bytes_per_sec` (default unlimited) a restore's reads, each through one limiter
+  per repository on the node that every transfer shares (as Lucene's `SimpleRateLimiter`, which
+  Elasticsearch uses: bytes pay as they are produced, each payment due one byte-time after the
+  previous one, so producing them overlaps the wait and a burst is at most one payment). A
+  restore also pays the cluster's `indices.recovery.max_bytes_per_sec` (default 40mb), as
+  Elasticsearch's restores do: roll has no peer recovery, so this is the setting's only effect.
+  Repository analysis pays the same limits. `_nodes/stats/repositories` reports
+  Elasticsearch's counters: throttled read and write time, shard snapshots started, completed and
+  in progress, blobs and bytes uploaded, upload and read time. Elasticsearch has no throttle time
+  in `_snapshot/_status` and none from repositories in `_recovery`, and neither has roll.
+- **Analysis** (`POST _snapshot/<repo>/_analyze`, `api/snapshots/analyze.rs`). On an `s3`
+  repository it exercises the bucket under `roll/temp-analysis-<id>/`: a contended register
+  (`register_operation_count` compare-and-exchange increments by `If-Match`, all of which must
+  land) and an uncontended one, overwrite protection (of concurrent `If-None-Match: *` writers
+  exactly one wins), then Elasticsearch's blob sizes (`getBlobSizes`, ported), each blob written
+  (in parts past `buffer_size`), sometimes read early, overwritten or written and aborted
+  (`rare_action_probability`), and read back whole or as a range against a regenerated
+  checksum; then listed with their sizes and deleted. A failed check answers
+  Elasticsearch's `repository_verification_exception` chain after removing what it wrote. It
+  writes no more than `max_total_data_size`, runs at most 16 blobs at once, holds a part per
+  blob in flight (breaker-charged), pays the repository's throttles and stops at `timeout`. On
+  roll's own repositories it plans and answers without storage, as before.
 - **Credentials.** Elasticsearch takes an `s3` client's keys from its keystore; a roll tenant
   has none, so `access_key`, `secret_key` and `session_token` come with the repository's
   settings and are moved out of them at once into the repository's sealed secrets (`seal.rs`,
@@ -299,13 +459,62 @@ applies: every cluster is this node's.
 - **Catalog**: the shared system database (`ROLL_SYSTEM_DATABASE`, schema `search`), through
   `code-sql` like the other products' catalogs; `search.db` (SQLite) on one node.
 - **Background work** on owners: metering of loaded clusters; garbage collection of unreferenced
-  objects on one node (`singleton:search-gc`); always-on clusters taken by the node they're placed
-  on.
+  objects on one node (`singleton:search-gc`), and the purge of deleted clusters whose window
+  ended on one node (`singleton:search-purge`); always-on clusters taken by the node they're
+  placed on. A deleted cluster has no owner: its restore runs on whichever node gets the call.
 - **Drains** (SIGTERM, deploys, Spot): roll-cluster hands every lease off; each cluster flushes and
   unloads as its guard ends, and the next request loads it on its new owner from its manifests and
   the WAL after them.
 - **Metering** per cluster: loaded GB-hours, requests, stored GB-months; the dashboard compares the
   cost with Elastic Cloud and Amazon OpenSearch Service for the same workload.
+
+## Observability
+
+Per cluster, as Elastic Cloud's Performance tab and logs show them: request metrics and the
+search and indexing slow logs, in the dashboard's Performance tab and through
+`GET /v1/search/clusters/{id}/metrics` and `/slowlog`.
+
+- **Recording** (`search-server` `metrics.rs`). Each request admitted to a cluster is counted
+  by kind, from its path (`search`: `_search`, `_msearch`, `_count`, async search, kNN, EQL,
+  ES|QL, SQL, terms enum; `index`: writes through `_bulk`, `_doc`, `_create`, `_update`,
+  by-query; `other`), by response class (below 400, 4xx, 5xx, and 429 apart: the cluster's
+  rate, in-flight and byte limits, which never ran the request, and its thread pools) and by
+  latency, from taking the cluster's permits (queueing included) to the answer being durable.
+  Latency goes into a log histogram of 256 buckets (8 per power of two of microseconds, up to
+  about 4.5 hours: percentiles within about 6%), which merges exactly, so any range's
+  percentiles come from its buckets. A loaded cluster's recorder is a lock and the minute in
+  progress (3 KiB, allocated by its first request of the minute); a request bumps a few
+  counters under the lock and allocates nothing.
+- **Slow logs** (`search-es` `slowlog.rs`). The thresholds are index settings, cached per shard
+  as atomics when the index's settings apply, so with none set a phase costs one relaxed load
+  and is not timed. Entries wait in the cluster's ring (500 entries, 1 MiB), each with its
+  source cut at 1,000 characters (`index.indexing.slowlog.source` for documents) and the
+  client's `X-Opaque-Id`; never a header or credential.
+- **Where it's kept: the catalog, with the metering.** Every metering pass (60 s) takes each
+  cluster's finished and current minutes and new slow log entries
+  (`Node::take_observations`) and writes them to the catalog: `search_metrics` holds two fixed
+  rings per cluster, one row per slot (1,440 one-minute buckets for 24 hours, 336 one-hour
+  buckets for 14 days; a slot's bucket adds up within its minute or hour and is replaced when
+  its time comes round), and `search_slowlog` the newest 500 entries. A cluster that unloads
+  hands its recorder to the node's carry-over, which the next pass empties, so a sleeping
+  cluster holds nothing in memory, has no timer, and writes no row: an idle minute costs
+  nothing anywhere. The routes read the catalog and add what the owner recorded since the
+  last pass.
+- **On a fleet** the owner records (requests run there), and every node's pass writes to the
+  shared catalog, so a cluster that moves (a drain, a takeover) keeps its history: the old
+  owner's last minutes go in with its next pass, or its shutdown's. Two owners writing the same
+  minute during a handoff add up in one transaction. A node killed without a shutdown loses at
+  most the minute or so it hadn't handed on.
+- **Cost.** Memory: nothing for a sleeping cluster; about 3 KiB per loaded cluster with traffic
+  in the current minute (16 finished minutes at most if no pass takes them), plus its slow log
+  ring (empty unless thresholds are set; 1 MiB at most). Catalog: at most 1,776 metric rows and
+  500 slow log rows per cluster, a few hundred bytes each. CPU, on a release `search-dev`
+  answering a `term` search on a 10,000-document index over keep-alive HTTP (2026-11-17,
+  three alternating rounds of 20,000 requests, `perf stat` user instructions of the server):
+  483.3k instructions per request before (480.3k-485.4k) and 485.6k after (484.5k-486.9k),
+  +0.5%, within the rounds' own spread; the recording path alone (classifying the request, the
+  clock reads, the recorder) is 112 ns per request (`metrics::tests::record_cost`, release),
+  about 0.05% of the request's ~600k cycles.
 
 ## Testing
 

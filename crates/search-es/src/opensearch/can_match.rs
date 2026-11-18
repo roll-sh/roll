@@ -289,6 +289,7 @@ mod tests {
         let v = crate::json::parse::parse(body.as_bytes()).unwrap().unwrap();
         let source = crate::search_source::SearchSource::parse(&v, None).unwrap();
         SearchRequest {
+            slowlog: Default::default(),
             indices: Vec::new(),
             opts: crate::meta::resolve::IndicesOptions::STRICT_EXPAND_OPEN_FORBID_CLOSED,
             source,

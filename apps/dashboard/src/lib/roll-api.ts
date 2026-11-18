@@ -1,6 +1,7 @@
 /** Client for the rolld control-plane API (Postgres: crates/pg-control/src/api.rs; streams: crates/stream-broker/src/http; Redis: redis-api.ts). */
 
 import { operatorHeaders, requestSignIn, withSession } from "./code-token";
+import { withReauth } from "./reauth";
 
 /** The API as browsers reach it (`VITE_ROLL_API`, built in), and the server's default. */
 export const ROLL_API = import.meta.env?.VITE_ROLL_API ?? "http://127.0.0.1:7070";
@@ -93,7 +94,24 @@ export function onApiStatus(status: number) {
   if (status === 401) requestSignIn();
 }
 
-export async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
+/** A product API's refusal, with its `code` (`reauth_required`, `forbidden`…) when it said one. */
+export class ApiError extends Error {
+  readonly status: number;
+  readonly code?: string;
+  // Plain fields, not parameter properties: Node's type stripping (test:node) can't run those.
+  constructor(message: string, status: number, code?: string) {
+    super(message);
+    this.status = status;
+    this.code = code;
+  }
+}
+
+/** A product API call; sudo mode's refusal asks the person to confirm, then runs it once more. */
+export function call<T>(method: string, path: string, body?: unknown): Promise<T> {
+  return withReauth(() => callOnce<T>(method, path, body));
+}
+
+async function callOnce<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(
     `${ROLL_API}${path}`,
     withSession({
@@ -112,7 +130,7 @@ export async function call<T>(method: string, path: string, body?: unknown): Pro
     // Not the API (a proxy's error page, say): report the status, not a JSON syntax error.
     if (res.ok) throw new Error(`${method} ${path}: the response isn't JSON`);
   }
-  if (!res.ok) throw new Error(data?.error ?? `${res.status} ${res.statusText}`.trim());
+  if (!res.ok) throw new ApiError(data?.error ?? `${res.status} ${res.statusText}`.trim(), res.status, typeof data?.code === "string" ? data.code : undefined);
   return data as T;
 }
 
