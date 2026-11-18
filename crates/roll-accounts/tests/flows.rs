@@ -746,17 +746,27 @@ async fn account_events_are_audited() {
     let invite = env.invite("ada@example.com").await;
     let mut adab = Browser::default();
     let ada = env.email_sign_in(&mut adab, "ada@example.com", Some(&invite)).await.json["user"]["id"].as_str().unwrap().to_string();
-    // A wrong code: a refused sign-in, by nobody yet.
+    // A wrong code for her account: a refused sign-in, by nobody known, in her log.
     let mut b = Browser::default();
     let started = env.call(&mut b, Method::POST, "/v1/accounts/email/start", Some(json!({ "email": "ada@example.com" }))).await;
+    // The code is made after the answer (its timing says nothing): wait for its mail.
+    for _ in 0..200 {
+        if read_codes(&env.outbox, "ada@example.com").len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
     let wrong = env.call(&mut b, Method::POST, "/v1/accounts/email/verify", Some(json!({ "challenge": started.json["challenge"], "code": "000000" }))).await;
     assert_eq!(wrong.status, StatusCode::BAD_REQUEST);
-    // Her own security log: her account made, her sign-in, and her own change, newest first.
+    // Her own security log: her account made, her sign-in, the refused code, and her own change,
+    // newest first.
     assert_eq!(env.call(&mut adab, Method::PATCH, "/v1/accounts/me", Some(json!({ "name": "Ada L." }))).await.status, StatusCode::OK);
     let log = env.call(&mut adab, Method::GET, "/v1/accounts/me/activity", None).await;
-    let actions: Vec<&str> = log.json["events"].as_array().unwrap().iter().map(|e| e["action"].as_str().unwrap()).collect();
-    assert_eq!(actions, ["PATCH /v1/accounts/me", "sign_in", "user.create"], "{}", log.json);
-    assert_eq!((log.json["events"][1]["detail"]["method"].as_str(), log.json["events"][1]["ip"].as_str()), (Some("email"), Some("203.0.113.7")));
+    let rows = log.json["events"].as_array().unwrap();
+    let actions: Vec<(&str, bool)> = rows.iter().map(|e| (e["action"].as_str().unwrap(), e["ok"].as_bool().unwrap())).collect();
+    assert_eq!(actions, [("PATCH /v1/accounts/me", true), ("sign_in", false), ("sign_in", true), ("user.create", true)], "{}", log.json);
+    assert_eq!((rows[1]["actor"].as_str(), rows[1]["detail"]["refused"].as_str()), (Some("anonymous"), Some("bad_code")));
+    assert_eq!((rows[2]["detail"]["method"].as_str(), rows[2]["ip"].as_str()), (Some("email"), Some("203.0.113.7")));
     assert_eq!(env.operator(Method::PATCH, &format!("/v1/accounts/users/{ada}"), json!({ "disabled": true })).await.status, StatusCode::OK);
 
     let got = events.0.lock().unwrap().clone();
@@ -772,7 +782,7 @@ async fn account_events_are_audited() {
     let signed = find(&|e| e.action == "sign_in" && e.ok);
     assert_eq!((signed.actor.as_str(), signed.detail["method"].as_str()), (ada.as_str(), Some("email")));
     let refused = find(&|e| e.action == "sign_in" && !e.ok);
-    assert_eq!((refused.actor.as_str(), refused.detail["refused"].as_str(), refused.status), ("anonymous", Some("bad_code"), 400));
+    assert_eq!((refused.actor.as_str(), refused.target.as_deref(), refused.detail["refused"].as_str(), refused.status), ("anonymous", Some(ada.as_str()), Some("bad_code"), 400));
     // The disable says what it set.
     let off = find(&|e| e.action == "PATCH /v1/accounts/users/{id}");
     assert_eq!((off.actor.as_str(), off.target.as_deref(), off.detail["set"]["disabled"].as_bool()), ("operator", Some(ada.as_str()), Some(true)));
