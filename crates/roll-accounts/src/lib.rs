@@ -11,6 +11,8 @@
 
 pub mod api;
 pub mod audit;
+mod deletion;
+mod email_change;
 mod mail;
 mod oauth;
 pub mod passkeys;
@@ -182,6 +184,15 @@ CREATE TABLE IF NOT EXISTS sso_connections (
     provision INTEGER NOT NULL,
     created_at INTEGER NOT NULL,
     challenge TEXT NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS email_changes (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    email TEXT NOT NULL,
+    code_hash TEXT NOT NULL,
+    attempts INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS scim_tokens (
     connection_id TEXT PRIMARY KEY,
@@ -369,6 +380,8 @@ pub struct User {
     pub disabled: bool,
     pub created_at: i64,
     pub totp: bool,
+    /// How many passkeys they have (with `totp`: whether they have a second factor).
+    pub passkeys: u32,
     pub identities: Vec<Identity>,
 }
 
@@ -494,6 +507,14 @@ impl Accounts {
             db.add_column("sessions", "sso_connection", "TEXT")?;
             db.add_column("sessions", "sso_sid", "TEXT")?;
         }
+        // When a session last used a passkey: phishing-resistant sign-in counts it.
+        if !db.has_column("sessions", "passkey_at")? {
+            db.add_column("sessions", "passkey_at", "INTEGER")?;
+        }
+        // A person deleted their own account: the row is a tombstone from then on.
+        if !db.has_column("users", "deleted_at")? {
+            db.add_column("users", "deleted_at", "INTEGER")?;
+        }
         // How each session began (`sso`, or not): enforcing SSO ends the others.
         if !db.has_column("sessions", "method")? {
             db.add_column("sessions", "method", "TEXT")?;
@@ -548,7 +569,9 @@ impl Accounts {
         })?;
         let Some(((id, user, level), (seen_at, expires_at), (handle, admin, disabled, code_owner))) = row else { return Ok(None) };
         let full = level == "full";
-        if disabled || expires_at <= now || (full && seen_at + SESSION_IDLE_MS <= now) {
+        // A company's idle timeout (its account policy), else roll's week.
+        let idle = self.account_policy()?.idle_ms();
+        if disabled || expires_at <= now || (full && seen_at + idle <= now) {
             return Ok(None);
         }
         if !full {
@@ -593,7 +616,9 @@ impl Accounts {
     /// (a PIN or biometric) and holds the key, so it's both factors, as GitHub counts it.
     pub(crate) fn issue_passkey(&self, user: &str, user_agent: &str) -> Result<Issued> {
         self.sso_not_enforced(user)?;
-        self.issue_session(user, user_agent, Some("passkey"), true)
+        let issued = self.issue_session(user, user_agent, Some("passkey"), true)?;
+        self.mark_passkey(&issued.id)?;
+        Ok(issued)
     }
 
     fn issue_session(&self, user: &str, user_agent: &str, method: Option<&str>, both_factors: bool) -> Result<Issued> {
@@ -707,8 +732,18 @@ impl Accounts {
         Ok(self.db.read(|c| c.query_row("SELECT code_owner_id FROM users WHERE id = ?", [user], |r| r.get::<_, Option<String>>(0)).optional())?.flatten())
     }
 
+    /// The handles of the people `ids` name (at most 500), whatever their state.
+    pub fn handles(&self, ids: &[String]) -> Result<Vec<(String, String)>> {
+        let ids = &ids[..ids.len().min(500)];
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let marks = vec!["?"; ids.len()].join(", ");
+        Ok(self.db.read(|c| c.query(&format!("SELECT id, handle FROM users WHERE id IN ({marks})"), ids, |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))))?)
+    }
+
     pub fn users(&self) -> Result<Vec<User>> {
-        let ids = self.db.read(|c| c.query("SELECT id FROM users ORDER BY created_at, id", (), |r| r.get::<_, String>(0)))?;
+        let ids = self.db.read(|c| c.query("SELECT id FROM users WHERE deleted_at IS NULL ORDER BY created_at, id", (), |r| r.get::<_, String>(0)))?;
         ids.iter().map(|id| self.user(id)).collect()
     }
 
@@ -730,7 +765,8 @@ impl Accounts {
     /// lifts only a disable of its own, never an admin's.
     pub(crate) fn update_user_by(&self, id: &str, admin: Option<bool>, disabled: Option<bool>, by: &str) -> Result<User> {
         self.db.write(|c| {
-            if c.query_row("SELECT 1 FROM users WHERE id = ?", [id], |_| Ok(())).optional()?.is_none() {
+            // A deleted account is gone for good: no admin turns it back on.
+            if c.query_row("SELECT 1 FROM users WHERE id = ? AND deleted_at IS NULL", [id], |_| Ok(())).optional()?.is_none() {
                 return Err(Error::NotFound(format!("no user {id}")));
             }
             if let Some(a) = admin {
@@ -1078,6 +1114,10 @@ impl roll_auth::Sessions for Resolver {
         self.0.person(user).map_err(|e| e.to_string())
     }
 
+    fn handles(&self, ids: &[String]) -> Result<Vec<(String, String)>, String> {
+        self.0.handles(ids).map_err(|e| e.to_string())
+    }
+
     fn sso_trust<'a>(&'a self, id: &'a str) -> roll_auth::BoxFuture<'a, Result<Option<roll_auth::SsoTrust>, String>> {
         let (accounts, id) = (self.0.clone(), id.to_string());
         Box::pin(async move {
@@ -1097,11 +1137,9 @@ impl roll_auth::Sessions for Resolver {
         })
     }
 
-    fn second_factor_missing<'a>(&'a self, user: &'a str, session: &'a str) -> roll_auth::BoxFuture<'a, Result<bool, String>> {
+    fn missing<'a>(&'a self, user: &'a str, session: &'a str) -> roll_auth::BoxFuture<'a, Result<Option<roll_auth::Missing>, String>> {
         let (accounts, user, session) = (self.0.clone(), user.to_string(), session.to_string());
-        Box::pin(async move {
-            tokio::task::spawn_blocking(move || accounts.second_factor_missing(&user, &session).map_err(|e| e.to_string())).await.map_err(|e| e.to_string())?
-        })
+        Box::pin(async move { tokio::task::spawn_blocking(move || accounts.missing(&user, &session).map_err(|e| e.to_string())).await.map_err(|e| e.to_string())? })
     }
 
     fn network_ok<'a>(&'a self, _user: &'a str, ip: Option<std::net::IpAddr>) -> roll_auth::BoxFuture<'a, Result<bool, String>> {
@@ -1167,12 +1205,14 @@ fn load_user(c: &code_sql::Conn<'_>, id: &str) -> code_sql::Result<Option<User>>
                 disabled: r.get(5)?,
                 created_at: r.get(6)?,
                 totp: false,
+                passkeys: 0,
                 identities: Vec::new(),
             })
         })
         .optional()?;
     let Some(mut user) = user else { return Ok(None) };
     user.totp = c.query_row("SELECT 1 FROM totp WHERE user_id = ? AND enabled = 1", [id], |_| Ok(())).optional()?.is_some();
+    user.passkeys = c.query_row("SELECT COUNT(*) FROM passkeys WHERE user_id = ?", [id], |r| r.get::<_, i64>(0))?.clamp(0, u32::MAX as i64) as u32;
     user.identities = c.query("SELECT provider, login, email FROM identities WHERE user_id = ? ORDER BY provider", [id], |r| {
         Ok(Identity { provider: r.get(0)?, login: r.get(1)?, email: r.get(2)? })
     })?;

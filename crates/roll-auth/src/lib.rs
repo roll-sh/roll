@@ -255,6 +255,16 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// Resolves session cookies (`roll-accounts`): one lookup per request, never cached, so
 /// revocation is immediate. `Err` is a database failure (the gate answers 503).
+/// What a company's sign-in policy says a session still needs before it reaches past the person's
+/// own account (docs/accounts.md).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Missing {
+    /// A second factor: an authenticator app or a passkey ("Second factor for everyone").
+    SecondFactor,
+    /// A passkey used in this session: phishing-resistant sign-in.
+    Passkey,
+}
+
 pub trait Sessions: Send + Sync + 'static {
     /// The cookie's name: `__Host-roll_session`, or `roll_session` on plain-HTTP local setups.
     fn cookie(&self) -> &str;
@@ -277,12 +287,12 @@ pub trait Sessions: Send + Sync + 'static {
         let _ = id;
         Box::pin(async { Ok(None) })
     }
-    /// Whether `user`'s session `session` lacks the second factor the company requires
-    /// (docs/accounts.md, "Second factor for everyone"): then it reaches only the account's own
-    /// routes, to set one up. False by default. Never cached.
-    fn second_factor_missing<'a>(&'a self, user: &'a str, session: &'a str) -> BoxFuture<'a, Result<bool, String>> {
+    /// What `user`'s session `session` still lacks that the company requires (docs/accounts.md,
+    /// "Second factor for everyone", "Phishing-resistant sign-in"): until then it reaches only the
+    /// account's own routes, to set it up. Nothing by default. Never cached.
+    fn missing<'a>(&'a self, user: &'a str, session: &'a str) -> BoxFuture<'a, Result<Option<Missing>, String>> {
         let _ = (user, session);
-        Box::pin(async { Ok(false) })
+        Box::pin(async { Ok(None) })
     }
     /// Whether `user`'s session may be used from `ip` (`None`: not known): a company's allowed
     /// networks (docs/accounts.md). True by default. Never cached.
@@ -304,6 +314,14 @@ pub trait Sessions: Send + Sync + 'static {
     fn person_now(&self, user: &str) -> Result<Option<SignedIn>, String> {
         let _ = user;
         Ok(None)
+    }
+
+    /// The handles of the people `ids` name, disabled and deleted ones too (an audit page naming
+    /// who acted and who it was about): blocking, one lookup for all. Unknown ids are left out;
+    /// none by default.
+    fn handles(&self, ids: &[String]) -> Result<Vec<(String, String)>, String> {
+        let _ = ids;
+        Ok(Vec::new())
     }
     /// Mail a person about something of theirs (a token of theirs used from a new network,
     /// revoked as leaked, or about to expire). Nothing when they're disabled or gone, or mail is
@@ -510,12 +528,13 @@ pub async fn check(State(gate): State<Arc<Gate>>, mut req: Request, next: Next) 
             }
             match session {
                 Session::Full(s) => {
-                    // A company that requires a second factor: until this person sets one up,
-                    // their session reaches only their account (where they do).
+                    // A company that requires a second factor, or a passkey sign-in: until this
+                    // person has one, their session reaches only their account (where they get it).
                     if !req.uri().path().starts_with("/v1/accounts") {
-                        match sessions.second_factor_missing(&s.user, &s.session).await {
-                            Ok(false) => {}
-                            Ok(true) => return error(StatusCode::FORBIDDEN, "your company requires a second factor: set up an authenticator app or a passkey on your account page first", "second_factor_required"),
+                        match sessions.missing(&s.user, &s.session).await {
+                            Ok(None) => {}
+                            Ok(Some(Missing::SecondFactor)) => return error(StatusCode::FORBIDDEN, "your company requires a second factor: set up an authenticator app or a passkey on your account page first", "second_factor_required"),
+                            Ok(Some(Missing::Passkey)) => return error(StatusCode::FORBIDDEN, "your company requires a passkey: add one on your account page and confirm it's you with it (or sign in with it)", "passkey_required"),
                             Err(e) => {
                                 tracing::warn!(error = %e, "sessions: second factor check failed");
                                 return error(StatusCode::SERVICE_UNAVAILABLE, "sessions are unavailable; try again", "unavailable");

@@ -49,7 +49,9 @@ pub fn router(accounts: Arc<Accounts>) -> Router {
         .route("/v1/accounts/network-policy", get(network_policy).put(set_network_policy))
         .route("/v1/accounts/reset-requests/{id}/approve", post(approve_reset))
         .route("/v1/accounts/reset-requests/{id}/deny", post(deny_reset))
-        .route("/v1/accounts/me", get(me).patch(update_me))
+        .route("/v1/accounts/me", get(me).patch(update_me).delete(delete_me))
+        .route("/v1/accounts/me/email", post(change_email))
+        .route("/v1/accounts/me/email/confirm", post(confirm_email))
         .route("/v1/accounts/me/sessions", get(my_sessions))
         .route("/v1/accounts/me/activity", get(my_activity))
         .route("/v1/accounts/me/sessions/{id}", delete(revoke_my_session))
@@ -199,7 +201,12 @@ fn session_body(a: &Accounts, issued_token: &str, user: &str, session: &str, sec
     if second_factor {
         return Ok(json!({ "status": "mfa_required", "methods": second_methods(a, user), "csrf": csrf }));
     }
-    Ok(json!({ "status": "signed_in", "user": a.user(user)?, "session": a.session_info(session)?, "csrf": csrf, "second_factor_required": a.second_factor_missing(user, session)? }))
+    let missing = a.missing(user, session)?;
+    Ok(json!({
+        "status": "signed_in", "user": a.user(user)?, "session": a.session_info(session)?, "csrf": csrf,
+        "second_factor_required": missing == Some(roll_auth::Missing::SecondFactor),
+        "passkey_required": missing == Some(roll_auth::Missing::Passkey),
+    }))
 }
 
 /// How a person owing a second factor can give it: TOTP, a recovery code, and a passkey if they
@@ -605,7 +612,7 @@ async fn signin_passkey(State(a): S, owed: Owed, ip: Ip, headers: HeaderMap, b: 
         let user = checked.as_ref().ok().cloned().or_else(|| owed.as_ref().map(|o| o.user.clone()));
         let done = checked.and_then(|user| match &owed {
             // The challenge was this owing person's, and the passkey theirs (both checked).
-            Some(o) => a.complete(o, &ua),
+            Some(o) => a.complete(o, &ua).and_then(|issued| a.mark_passkey(&issued.id).map(|()| issued)),
             None => a.issue_passkey(&user, &ua),
         });
         match (done, user) {
@@ -666,7 +673,8 @@ async fn account_policy(State(a): S, me: Me, op: Op) -> Result<Response> {
 async fn set_account_policy(State(a): S, me: Me, op: Op, b: Bytes) -> Result<Response> {
     admin_sudo(&a, &me, &op).await?;
     let p: crate::policy::AccountPolicy = body(&b)?;
-    Ok(Json(blocking(&a, move |a| a.set_account_policy(p)).await?).into_response())
+    let by = me.map(|Extension(u)| (u.user, u.session));
+    Ok(Json(blocking(&a, move |a| a.set_account_policy_by(p, by.as_ref().map(|(u, s)| (u.as_str(), s.as_str())))).await?).into_response())
 }
 
 /// Allowed networks (docs/accounts.md): where people's sessions may be used from.
@@ -763,7 +771,13 @@ async fn reauth(State(a): S, me: Me, ip: Ip, headers: HeaderMap, b: Bytes) -> Re
                 }),
                 _ => return Err(Error::BadRequest("a code, an email's challenge and code, or a passkey".into(), None)),
             };
-            let done = proved.and_then(|()| a.mark_verified(&u.user, &u.session));
+            let done = proved.and_then(|()| a.mark_verified(&u.user, &u.session)).and_then(|until| {
+                // A passkey used now makes the session phishing-resistant (docs/accounts.md).
+                if method == "passkey" {
+                    a.mark_passkey(&u.session)?;
+                }
+                Ok(until)
+            });
             a.record_reauth(&u.user, method, done.as_ref().err(), &who);
             Ok(json!({ "fresh_until": done? }))
         })
@@ -855,6 +869,54 @@ async fn update_me(State(a): S, me: Me, b: Bytes) -> Result<Response> {
     let u = signed_in(me)?;
     let Name { name } = body(&b)?;
     Ok(Json(blocking(&a, move |a| a.rename(&u.user, &name)).await?).into_response())
+}
+
+#[derive(Deserialize)]
+struct Confirm {
+    confirm: String,
+}
+
+/// Delete your own account (docs/accounts.md, "Deleting your account"): signed out here too.
+async fn delete_me(State(a): S, me: Me, b: Bytes) -> Result<Response> {
+    let u = signed_in(me)?;
+    sudo(&a, &u).await?;
+    let Confirm { confirm } = body(&b)?;
+    let mail = blocking(&a, move |a| a.delete_self(&u.user, &confirm)).await?;
+    if a.mail_on() {
+        a.send_later(mail, "account deleted");
+    }
+    Ok(with_cookies(StatusCode::NO_CONTENT.into_response(), [cookie(&a, a.config.session_cookie(), "", 0)]))
+}
+
+#[derive(Deserialize)]
+struct NewEmail {
+    email: String,
+}
+
+/// Move your account to another address: a code goes there (docs/accounts.md, "Your address").
+async fn change_email(State(a): S, me: Me, b: Bytes) -> Result<(StatusCode, Json<Value>)> {
+    let u = signed_in(me)?;
+    sudo(&a, &u).await?;
+    if !a.mail_on() {
+        return Err(Error::Unavailable("email isn't configured on this server".into(), "email_off"));
+    }
+    let NewEmail { email } = body(&b)?;
+    let challenge = crate::new_id("chl");
+    let id = challenge.clone();
+    if let Some(mail) = blocking(&a, move |a| a.email_change_start(&u.user, &id, &email)).await? {
+        a.send_later(mail, "address change code");
+    }
+    Ok((StatusCode::ACCEPTED, Json(json!({ "challenge": challenge }))))
+}
+
+/// The code from the new address: the account moves, and the old address is told.
+async fn confirm_email(State(a): S, me: Me, b: Bytes) -> Result<Json<crate::User>> {
+    let u = signed_in(me)?;
+    sudo(&a, &u).await?;
+    let Verify { challenge, code } = body(&b)?;
+    let (user, mail) = blocking(&a, move |a| a.email_change_confirm(&u.user, &challenge, &code)).await?;
+    a.send_later(mail, "address changed");
+    Ok(Json(user))
 }
 
 #[derive(Deserialize)]
