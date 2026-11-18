@@ -105,6 +105,13 @@ pub enum Secrets {
         #[arg(long)]
         raw: bool,
     },
+    /// Print a TOTP key's current one-time code and the seconds it has left.
+    Totp {
+        key: String,
+        /// When fewer than 5 seconds are left, wait for the next code.
+        #[arg(long)]
+        wait: bool,
+    },
     /// Set secrets: `KEY=VALUE…`, or one `KEY` with the value on stdin.
     Set {
         #[arg(required = true)]
@@ -373,6 +380,24 @@ pub enum Secrets {
         to: String,
         #[arg(long)]
         out: Option<std::path::PathBuf>,
+    },
+    /// Back the project up on a schedule into one of its roll buckets, sealed to `--to`: shows the
+    /// schedule with no flags, sets it with `--bucket` and `--to`, stops it with `--off`.
+    #[command(name = "backup-schedule")]
+    BackupSchedule {
+        #[arg(long, requires = "to", conflicts_with = "off")]
+        bucket: Option<String>,
+        /// The recipient's public key (base64url X25519).
+        #[arg(long, requires = "bucket")]
+        to: Option<String>,
+        /// Hours between backups (default 24).
+        #[arg(long, requires = "bucket")]
+        every: Option<u32>,
+        /// How many to keep (default 30).
+        #[arg(long, requires = "bucket")]
+        keep: Option<u32>,
+        #[arg(long)]
+        off: bool,
     },
     /// Load a backup into this project (which has no secrets yet), opened with the secret key.
     Restore {
@@ -933,7 +958,7 @@ pub enum RequiredCmd {
         key: String,
         #[arg(long, default_value = "/")]
         path: String,
-        /// url, int, port, bool, json or email.
+        /// url, int, port, bool, json, email or totp (a TOTP seed: `roll secrets totp KEY`).
         #[arg(long = "type")]
         kind: Option<String>,
         /// A regular expression the whole value must match.
@@ -1030,6 +1055,10 @@ pub struct Run {
     /// Replace variables already set in this shell (default: the shell's value wins).
     #[arg(long = "override")]
     pub override_env: bool,
+    /// Add `<KEY>_CODE` beside each TOTP key: its one-time code when the values were read. It
+    /// expires with its step (30 s by default), so it suits a command that logs in right away.
+    #[arg(long)]
+    pub totp_codes: bool,
     /// Restart the command when the environment changes (checked every `--interval` seconds).
     #[arg(long)]
     pub watch: bool,
@@ -1302,6 +1331,21 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 eprintln!("warning: {}", s(&p["problem"]));
             }
             println!("{}", s(&v["value"]));
+        }
+        Secrets::Totp { key, wait } => {
+            let url = format!("{env}/secrets/{}/totp?{}", enc(&key), c.q());
+            let mut v = c.call(Method::GET, &url, None).await?;
+            let left = |v: &Value| (v["expires_at"].as_i64().unwrap_or(0) - now_ms()).max(0);
+            if wait && left(&v) < 5_000 {
+                eprintln!("waiting {} s for the next code…", (left(&v) + 999) / 1000);
+                tokio::time::sleep(std::time::Duration::from_millis(left(&v) as u64 + 250)).await;
+                v = c.call(Method::GET, &url, None).await?;
+            }
+            if json_out {
+                return print(&v);
+            }
+            println!("{}", s(&v["code"]));
+            eprintln!("{} s left", left(&v) / 1000);
         }
         Secrets::Set { pairs, comment, tags, personal, generate, request, message, expires } => {
             let expires = expires.as_deref().map(expiry).transpose()?;
@@ -2274,6 +2318,31 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     eprintln!("Backed up {} to {}: sealed, only the secret key opens it.", c.project, path.display());
                 }
                 None => println!("{text}"),
+            }
+        }
+        Secrets::BackupSchedule { bucket, to, every, keep, off } => {
+            let path = format!("{}/backup/schedule", c.base());
+            if off {
+                c.call(Method::DELETE, &path, None).await?;
+                println!("Stopped scheduled backups of {} (the ones made stay in the bucket).", c.project);
+                return Ok(());
+            }
+            let v = match (bucket, to) {
+                (Some(bucket), Some(to)) => c.call(Method::PUT, &path, Some(json!({ "bucket": bucket, "recipient": to, "every_hours": every, "keep": keep }))).await?,
+                _ => c.call(Method::GET, &path, None).await?,
+            };
+            if json_out {
+                return print(&v);
+            }
+            if v.is_null() {
+                println!("{} isn't backed up on a schedule.", c.project);
+                return Ok(());
+            }
+            println!("{} backs up to bucket {} every {} h, keeping {}.", c.project, s(&v["bucket"]), v["every_hours"], v["keep"]);
+            match (v["last_key"].as_str(), v["last_error"].as_str()) {
+                (_, Some(e)) => println!("The last attempt failed: {e}"),
+                (Some(k), None) => println!("The last one: {k}"),
+                _ => println!("The first one is due now."),
             }
         }
         Secrets::Restore { file, key } => {
@@ -3712,7 +3781,8 @@ fn render(tpl: &str, get: impl Fn(&str) -> Option<String>) -> Result<String, Vec
 /// already sets (unless `--override`). Fails on a problem unless `--allow-unresolved`.
 async fn run_env(c: &Client<'_>, at: &At, r: &Run) -> anyhow::Result<(Vec<Var>, Vec<String>, Digests)> {
     let digest = if r.watch { "&digest=1" } else { "" };
-    let path = format!("{}/values?{}{digest}", c.env(&at.env), c.q());
+    let codes = if r.totp_codes { "&codes=1" } else { "" };
+    let path = format!("{}/values?{}{digest}{codes}", c.env(&at.env), c.q());
     let digest_path = format!("{}/digest?{}", c.env(&at.env), c.q());
     let header = |fetched_at| crate::fallback::Header { v: 1, asked: at.project.clone().unwrap_or_default(), project: c.project.clone(), environment: at.env.clone(), path: at.path.clone(), fetched_at };
     // Env files, read first: their entries win over the environment's.

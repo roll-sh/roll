@@ -90,6 +90,24 @@ impl Api {
         Ok(v)
     }
 
+    /// GET a product's route as the operator, reading at most `limit` bytes of its answer (JSON,
+    /// 2xx only): for objects whose size the caller knows, never the whole of whatever is there.
+    pub(crate) fn get_bounded(&self, path: &str, limit: usize) -> roll_secrets::Result<Json> {
+        let router = self.0.get().ok_or_else(|| Error::Link("the product APIs aren't up yet".into()))?.clone();
+        let mut req = Request::builder().method(Method::GET).uri(path);
+        req.extensions_mut().map(|e| e.insert(roll_auth::Operator));
+        let req = req.body(Body::empty()).map_err(|e| Error::Internal(e.to_string()))?;
+        let route = path.split('?').next().unwrap_or(path).to_string();
+        tokio::runtime::Handle::current().block_on(async move {
+            let resp = router.oneshot(req).await.map_err(|e| Error::Link(e.to_string()))?;
+            if !resp.status().is_success() {
+                return Err(Error::Link(format!("GET {route}: {}", resp.status().as_u16())));
+            }
+            let bytes = http_body_util::Limited::new(resp.into_body(), limit).collect().await.map_err(|_| Error::Link(format!("GET {route}: an answer over {limit} bytes")))?.to_bytes();
+            serde_json::from_slice(&bytes).map_err(|_| Error::Link(format!("GET {route}: not JSON")))
+        })
+    }
+
     /// Delete a product's resource; one that's already gone (404) is done.
     fn delete_gone(&self, path: &str) -> roll_secrets::Result<()> {
         match self.call_status(Method::DELETE, path, None)? {
@@ -398,6 +416,10 @@ pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Work
     };
     // Opening blocks on the database.
     let secrets = Arc::new(tokio::task::block_in_place(|| Secrets::open(&target, pg, workspace.clone(), opts))?);
+    // How many reads of values a token or a person makes a minute on this node (0: no limit).
+    if let Ok(n) = std::env::var("ROLL_SECRETS_READS_PER_MINUTE") {
+        secrets.set_reads_per_minute(n.trim().parse().map_err(|_| anyhow::anyhow!("ROLL_SECRETS_READS_PER_MINUTE is a number of reads a minute (0: no limit), not {n:?}"))?);
+    }
     // Where clients reach rolld: a CA's certificates name its CRL there.
     secrets.set_public_api(args.code_public_url.clone().unwrap_or_else(|| format!("http://{}:{}", args.public_host, args.api.port())));
     // A deleted project's secrets go with it.

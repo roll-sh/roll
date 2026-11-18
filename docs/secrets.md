@@ -130,6 +130,16 @@ Everything below works the same from the dashboard (a project's **Secrets**) and
    RollSecrets c = RollSecrets.builder().build(); // ROLL_API_URL, ROLL_TOKEN or ROLL_IDENTITY, ROLL_PROJECT
    Watch w = c.watch("production", WatchOptions.of(v -> reload(v.values())));
    ```
+
+   In .NET, `sdk/dotnet/secrets` (`Roll.Secrets`, .NET 8 and the base class library only, X25519
+   its own), with `AddRollSecrets` for `IConfiguration` in `Roll.Secrets.Configuration`:
+
+   ```csharp
+   using var c = new RollSecretsClient(); // ROLL_API_URL, ROLL_TOKEN or ROLL_IDENTITY, ROLL_PROJECT
+   await using var w = c.Watch("production", new WatchOptions { OnChange = v => Reload(v.Values) });
+   builder.Configuration.AddRollSecrets("production", s => s.ReloadOnChange = true);
+   var ct = await c.Transit("cards").EncryptAsync(cardNumber, $"order:{id}");
+   ```
 8. **When something goes wrong**: `roll secrets history`, `roll secrets rollback --at 2h`, the
    audit log (`roll secrets audit`, or streamed to your SIEM), and `roll secrets share KEY` to hand
    one value to someone outside roll through a link that works once.
@@ -724,7 +734,7 @@ and resolves refuse to start without it, as they do for an unresolved reference.
 environment counts what its base defines.
 
 **Typed keys.** A required key can also say what its value must be: a `type` (`url`, `int`,
-`port`, `bool`, `json`, `email`) and a `pattern` (a regular expression the whole value matches;
+`port`, `bool`, `json`, `email`, `totp`: see TOTP keys) and a `pattern` (a regular expression the whole value matches;
 at most 500 characters, checked when it's set). A write, an import, a promotion, a change request
 or a new ephemeral environment's overrides with a value that doesn't fit is refused with 400
 naming the key and the rule (`PORT must be a port (1–65535)`), never the value. A value with a
@@ -747,6 +757,39 @@ typed keys are (`DB_PASSWORD needs at least a digit`, never the value). The gene
 `--generate N` if asked), and so do the dashboard's Generate and Health's New value buttons. Set one in
 Environments → Required keys (a length and a set of classes) or with `roll secrets
 required add DB_PASSWORD --password-length 32 --classes lower,upper,digit,symbol --symbols '-_'`.
+
+### TOTP keys
+
+A key whose value is a TOTP seed (RFC 6238) hands out the current one-time code, as Vault's TOTP
+engine and 1Password's one-time passwords do: CI that logs into a 2FA-protected registry or vendor
+console reads the code, never a person's phone. A key is one when it's typed `totp` (a required
+key, `roll secrets required add REGISTRY_TOTP --type totp`) or its value is an `otpauth://totp/`
+URI.
+
+- **The value** is an `otpauth://totp/…?secret=…` URI (`algorithm` SHA1, SHA256 or SHA512;
+  `digits` 6–8; `period` 15–120 s; other parameters, such as `issuer`, are kept and ignored) or a
+  bare base32 seed (any case, spaces allowed), which means SHA1, 6 digits and 30 s. The secret is
+  80–1024 bits. A typed key's write with a seed that doesn't parse is refused with 400 naming the
+  rule (`REGISTRY_TOTP must be a TOTP seed (…): digits must be 6–8`), never the value. Otherwise
+  it's a secret like any other: versions, audit, sensitive, references, protected environments.
+- **`GET …/secrets/{key}/totp`** answers `{code, expires_at, period}` (`expires_at` in ms: the end
+  of the code's step). It needs `reveal`, as a reveal does (the code is a credential), reads the
+  seed through the same path (a sensitive key's code reaches only roll's runtimes, an untrusted
+  caller gets one only where it could reveal the seed, a reference resolves), and is audited as
+  `secrets.totp` with the key's name, never the code: a read of the key, as a reveal is (insights,
+  health's `unread`, reach, an alert for a new address). A key that isn't a TOTP key is a 400.
+- **Reads with codes.** `…/values?codes=1` and a resolve with `"codes": true` add `<KEY>_CODE`
+  beside each TOTP key that parses (its seed stays under `<KEY>`; a name the folder already uses is
+  left alone; a sensitive key's code is sensitive too). `roll run --totp-codes` asks for them. A
+  code is valid until its step ends, at most `period` seconds: it suits a command that logs in
+  right away, not a long-running one (`--watch` doesn't restart for a new code). Such a read is
+  never a 304. `roll secrets totp KEY [-e ENV] [--path P] [--wait]` prints the code and the seconds
+  left; `--wait` waits for the next code when fewer than 5 s are left.
+- The dashboard shows a TOTP key's code on its row (**Code**) with a ring counting down its step,
+  hidden again as a revealed value is (typed keys only: the row doesn't know an untyped key's
+  value). The clients ask for a code (`totp(env, key)` in TypeScript, `TOTP` in Go, `totp` in
+  Python) or compute one from a seed they already resolved, a sealed resolve's say (`totpAt`,
+  `TOTPAt`, `totp_at`), each checked against RFC 6238's vectors.
 
 ### Owners
 
@@ -1454,6 +1497,7 @@ numbers, tokens, notes) in its own database without holding a key.
 ```
 roll secrets ls      [-p project] [-e env] [--path /]          # keys, masked
 roll secrets get     KEY [--raw]
+roll secrets totp    KEY [--wait]                               # a TOTP key's current code and the seconds left
 roll secrets set     KEY=VALUE… | KEY (value from stdin) [--comment] [--tag]
 roll secrets rm      KEY…
 roll secrets import  .env [--overwrite]                         # one change (.env or JSON)
@@ -1489,7 +1533,7 @@ roll secrets transit sign NAME | verify NAME SIGNATURE | hmac NAME | public NAME
 roll secrets transit import NAME [--vault-version N]                                # the key on stdin
 roll secrets kubernetes [--name N] [--namespace NS] [--refresh 1h] [--url URL]   # ESO manifests
 roll secrets reach [KEY]                     # who and what can read it
-roll run [-p project] [-e production] [--path /] [--env-file .env]… [--allow-unresolved] [--watch] [--mask | --no-mask] [--fallback FILE [--fallback-max-age 7d]] -- <command…>
+roll run [-p project] [-e production] [--path /] [--env-file .env]… [--allow-unresolved] [--totp-codes] [--watch] [--mask | --no-mask] [--fallback FILE [--fallback-max-age 7d]] -- <command…>
 roll ssh [-p project] [-e production] [--cert SSH_CERT] [--identity SSH_KEY] -- <ssh arguments…>
 roll completions bash|zsh|fish|powershell
 ```
@@ -1882,6 +1926,18 @@ opened archive; admin, audited `project.restore`), on this server or another. Va
 before any environment is protected, so a restore isn't a change request; what can't be restored
 (a link to a resource that project doesn't have, an import of another project's folder) comes back
 as a warning, by name. Disaster recovery, and moving a project between roll servers.
+
+**Scheduled backups** (Vault's automated snapshots, Akeyless' DR): `PUT …/backup/schedule
+{bucket, recipient, every_hours?, keep?}` (admin; default every 24 h, keeping 30, at most 500) writes the same
+sealed file (`{sealed, context}`, as `POST …/backup` answers) into one of the project's own roll
+buckets, as `roll-secrets/backups/<project>/<time>.json`, the first one at once. Each is read back
+and compared before it counts, and the oldest beyond `keep` are deleted (only roll's own
+`<time>.json` files there: nothing else in the bucket is touched). roll never holds the key
+that opens them: the recipient's secret key restores one as above. One node runs each (a schedule
+is claimed by moving its next time on); what a person set up runs only while they can still reach
+the project, and only into a bucket the project still has. `GET …/backup/schedule` says when the
+last one landed, its key, and why the last attempt failed; `DELETE` stops it (what's in the bucket
+stays).
 
 ### Checking against a template
 
@@ -2400,7 +2456,7 @@ action:
 | Action | Routes |
 | --- | --- |
 | `read` | names, metadata, versions, history, compare, folders, imports, exports (listing), what's shared with the project, requests, links, leases, required keys, listing syncs, insights, the audit log |
-| `reveal` | `…/values`, `…/secrets/{key}/value`, `…/versions/{v}/value`, `…/requests/{id}/values`, `…/resolve`, renewing a lease (whoever could read the credential), creating a one-time share (how a value leaves roll) |
+| `reveal` | `…/values`, `…/secrets/{key}/value`, `…/secrets/{key}/totp`, `…/versions/{v}/value`, `…/requests/{id}/values`, `…/resolve`, renewing a lease (whoever could read the credential), creating a one-time share (how a value leaves roll) |
 | `write` | set, batch changes, rotate, rollback, promote, folders, imports (a project's own), create an environment, open or apply a request |
 | `delete` | a secret, an environment, ephemeral environments by label, a lease |
 | `admin` | rename or reorder environments, protection and approval policy, reviewing a request, syncs (create, delete, run), tokens and identities (listing too), audit sinks, revoking another's one-time share, exports (sharing a folder with another project), imports from another project, purge and retention, required keys (setting), making a trusted preview |
@@ -2495,6 +2551,16 @@ code owner (`ada/…`).
   missing-key notices) count a project only for repositories it's trusted for: otherwise anyone
   could hand a stranger's previews their variables (say, a `DATABASE_URL` pointing at their own
   server), or watch a stranger's landings for their values.
+
+### Read quotas
+
+A token or a person reads values at most 600 times a minute, counted across every node in the
+database they share (the operator sets it:
+`ROLL_SECRETS_READS_PER_MINUTE`, 0 for no limit), as Vault's rate-limit quotas: past that,
+`…/values`, `…/resolve` and a key's reveal answer 429 (`rate_limited`) for the rest of the minute,
+before anything is decrypted, issued or audited. roll's own runtimes (apps, previews, checks,
+syncs, workload identities' logins) and the operator aren't held to it. A service that reads in a
+loop should cache (the clients' `cacheTtl`) or follow the digest (`watch`).
 
 ### Reach
 
@@ -2779,6 +2845,9 @@ isn't in the workspace is 404.
 | `PUT /environments/{env}/imports?path=` | `Import[]` | `Import[]` |
 | `GET /environments/{env}/exports?path=` | | `Export[]` |
 | `POST /backup` | `{recipient}` | `{sealed, context}`: the whole project, sealed to `recipient` (admin) |
+| `GET /backup/schedule` | | `BackupSchedule` or null (admin): bucket, recipient, `every_hours`, `keep`, `next_at`, `last_at`, `last_key`, `last_error` |
+| `PUT /backup/schedule` | `{bucket, recipient, every_hours?, keep?}` | `BackupSchedule` (admin; one of the project's roll buckets; the first backup at once) |
+| `DELETE /backup/schedule` | | 204 (admin; the backups made stay) |
 | `POST /restore` | `Archive` (an opened backup) | `{environments, secrets, warnings}` (admin; an empty project) |
 | `GET /suggestions` | | `Suggestion[]`: canvas resources linked nowhere yet, with their usual keys and where they'd go |
 | `GET /shared` | | `Import[]`: the folders other projects share with this one |
@@ -2788,15 +2857,16 @@ isn't in the workspace is 404.
 | `PUT /environments/{env}/secrets/{key}?path=` | `SetSecret` | `Written`; 409 `stale` when `if_version` isn't the key's version |
 | `DELETE /environments/{env}/secrets/{key}?path=&type=&if_version=` | | `Written`; 409 `stale` when `if_version` isn't the key's version |
 | `GET /environments/{env}/secrets/{key}/value?path=&resolve=` | | `{value, problems}` |
+| `GET /environments/{env}/secrets/{key}/totp?path=` | | `{code, expires_at, period}` (`reveal`; a key that isn't a TOTP key is a 400; audited as `secrets.totp`, without the code) |
 | `GET /environments/{env}/secrets/{key}/versions?path=&type=` | | `Version[]` newest first |
 | `GET /environments/{env}/secrets/{key}/versions/{v}/value?path=&type=` | | `{value}` |
 | `POST /environments/{env}/secrets/{key}/rotate?path=` | | `Applied` |
 | `POST /environments/{env}/secrets/{key}/purge?path=` | `{before_version?}` | `{purged}` (`admin`) |
-| `GET /environments/{env}/values?path=&format=&resolve=&dynamic=&strict=&digest=&name=&namespace=&seq=&at=` | | `Values` (`dynamic=false`: a dynamic key is left out, named in `dynamic`, instead of a fresh credential; `strict=1`: any problem is a 409 `unresolved` naming the keys, so a reader keeps what it had; `digest=1`: the folder's `…/digest`, taken just before the read, as `digest`; with `seq`: as stored after that change, `seq` in the answer), or text with `format`: `dotenv`, `shell`, `json`, `yaml`, `docker` (`--env-file`; a value with a line break is a 400 naming the key) or `kubernetes` (a Secret named `name`, default the environment, in `namespace`); with `digest=1` or `If-None-Match` an `ETag` (the digest), and `If-None-Match` with the digest still current is a 304 that decrypts and issues nothing, and writes one `secrets.revalidate` row a day per caller and folder (so health and insights still see the folder read) (never for a folder holding a dynamic credential unless `dynamic=false`: a lease ends without moving the digest) |
+| `GET /environments/{env}/values?path=&format=&resolve=&dynamic=&strict=&digest=&codes=&name=&namespace=&seq=&at=` | | `Values` (`codes=1`: `<KEY>_CODE` beside each TOTP key, never a 304; `dynamic=false`: a dynamic key is left out, named in `dynamic`, instead of a fresh credential; `strict=1`: any problem is a 409 `unresolved` naming the keys, so a reader keeps what it had; `digest=1`: the folder's `…/digest`, taken just before the read, as `digest`; with `seq`: as stored after that change, `seq` in the answer), or text with `format`: `dotenv`, `shell`, `json`, `yaml`, `docker` (`--env-file`; a value with a line break is a 400 naming the key) or `kubernetes` (a Secret named `name`, default the environment, in `namespace`); with `digest=1` or `If-None-Match` an `ETag` (the digest), and `If-None-Match` with the digest still current is a 304 that decrypts and issues nothing, and writes one `secrets.revalidate` row a day per caller and folder (so health and insights still see the folder read) (never for a folder holding a dynamic credential unless `dynamic=false`: a lease ends without moving the digest) |
 | `GET /environments/{env}/insights?path=` | | `Insights` (read) |
 | `GET /environments/{env}/reach?path=&key=` | | `Reach` (a project admin's): tokens and identities that reach it, syncs, projects it's shared with, folders that import it, readers in 30 days |
 | `GET /environments/{env}/digest?path=&since=&wait=` | | `{digest}` (read: changes when the values would; a live link counts its value's keyed fingerprint as the product answers, read at most every 10 s, and at once when roll rotates it or the product's own password, reset or restore route changes it). With `since` (a digest the caller has) and `wait` (seconds, at most 25), a long poll: it answers as soon as the digest differs, else with the same one when `wait` runs out (at most 32 held per principal and 4096 per node; past that it answers at once); `roll run --watch`, `roll secrets render --watch` and the TS, Go and Python watches use it (and roll apps' redeploys in process, through `SecretSource::wait_digest`: one held poll per environment), so a change to the project's own values reaches them in a second or two (a live link's product-side change, or another project's shared folder, within about 10 s) |
-| `POST /environments/{env}/resolve` | `{path?, consumer, seal_to?, untrusted?, dynamic?}` | `Values` or `{sealed, context, problems, leases, dynamic, linked, followed}` (`dynamic: false`: a consumer that can't renew leases, such as a preview's service, gets no dynamic credential; those keys are left out, named in `dynamic`; a key linked to a resource the ephemeral environment branched is left out and named in `followed`, in the clear beside a sealed box: names only) |
+| `POST /environments/{env}/resolve` | `{path?, consumer, seal_to?, untrusted?, dynamic?, codes?}` | `Values` or `{sealed, context, problems, leases, dynamic, linked, followed}` (`dynamic: false`: a consumer that can't renew leases, such as a preview's service, gets no dynamic credential; those keys are left out, named in `dynamic`; a key linked to a resource the ephemeral environment branched is left out and named in `followed`, in the clear beside a sealed box: names only) |
 | `GET /environments/{env}/changes?before=&limit=` | | `Change[]` newest first |
 | `POST /environments/{env}/changes` | `Batch` | 201 `Applied` |
 | `POST /environments/{env}/diff` | `{dotenv} \| {json}, path?` | `{added, changed, same, missing, references, linked}`: a local copy against the folder by fingerprint, names only (`reveal`, audited) |
@@ -3294,7 +3364,9 @@ rotating a database's admin password and editing registrations in place (#75), s
    rotations, KMS refusals, live leases and failing work (Vault telemetry, CloudWatch).
 3. **Scheduled sealed backups** (building: into one of the project's roll buckets, read back and
    pruned to `keep`; S3 next), as Vault's snapshots and Akeyless' DR.
-4. **Read quotas per token** on values, resolve and reveal (Vault's rate-limit quotas).
+4. **Read quotas per token** on values, resolve and reveal (Vault's rate-limit quotas; built:
+   `feature/roll-secrets-read-quotas`, 600 a minute per token or person, the operator's
+   `ROLL_SECRETS_READS_PER_MINUTE`).
 5. **Rotation windows and schedules** (`Sun 02:00–04:00`, `rate(30 days)`, cron) and **password
    policies per key** (length, classes, a target's rules) for every generated value (AWS Secrets
    Manager, Vault password policies).
@@ -3304,18 +3376,23 @@ rotating a database's admin password and editing registrations in place (#75), s
    lives), and Terraform updating registrations in place (#72, after #75).
 8. **More dynamic credentials**: Kubernetes service account tokens, Snowflake, LDAP and Active
    Directory passwords (Vault, Infisical).
-9. **.NET client, a Pulumi provider, a Lambda extension and an Ansible lookup** (`IConfiguration`;
-   AWS's Parameters and Secrets extension; Vault's and 1Password's Ansible). Java is built
+9. **A Pulumi provider, a Lambda extension and an Ansible lookup** (AWS's Parameters and Secrets
+   extension; Vault's and 1Password's Ansible). Java is built
    (`sdk/java/secrets`, `feature/roll-secrets-java`: values, sealed resolves, long-polled watches,
-   the cache, transit); its Spring `PropertySource` adapter is next.
+   the cache, transit); its Spring `PropertySource` adapter is next. .NET
+   is built (`sdk/dotnet/secrets`, `feature/roll-secrets-dotnet`: values, sealed resolves with its
+   own X25519, long-polled watches, the cache, transit, and `AddRollSecrets` for `IConfiguration`).
 10. **A gateway into private networks** (Infisical's and Akeyless' gateways); **ACME on project
    CAs**.
-11. *The user's call:* land the stack (#62, then #63–#73; roll search before #62).
-12. *Waits on roll MCP's #25 on `main`:* #64 (#30 onto #62: roll-access's tokens replace `rlst_`;
+11. *Landing (approved):* #20 and #62 are on main; the follow-ups go one at a time when the merge
+   lock is free (the order is in "Landing").
+12. *Unblocked (#25 is on `main`):* #64 rebuilt on main (#30 onto #62: roll-access's tokens replace `rlst_`;
    roll MCP's `feature/mcp-on-landing` is #25 with it, its gate passing), then a workload identity
    a person creates asks roll-access's policy (held until an admin approves), and the Access tab
    shows tokens waiting for approval and rotations that keep the old secret (`keep_old_for_s`).
-13. *Waits on other threads:* transit keys scoped by name (#24/#25 with #47), a live check of
+13. *Waits on other threads:* transit keys scoped by name (roll MCP's #80 puts `.index("name")` on
+   every per-key row; then `GET …/transit` lists only the keys the grant allows, marked
+   `filters_itself`, with roll-auth's `filters_itself` letting an index-limited rule through), a live check of
    OpenSearch links (#29 with #51), roll redis and nosql keeping a rotated password a while,
    splitting the CLI's `secrets.rs` once the stack has landed.
 14. *Waits on linking chat users to roll accounts:* approving change requests from Slack.

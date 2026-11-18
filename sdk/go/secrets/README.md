@@ -18,6 +18,10 @@ key, _ := secrets.GenerateKey()
 v, err = c.ResolveSealed(ctx, "production", "", "app:web", key)
 
 // Reload when the environment changes; dynamic credentials' leases are renewed meanwhile.
+// A TOTP key's one-time code (docs/secrets.md, "TOTP keys"), or one from a seed already resolved.
+otp, err := c.TOTP(ctx, "production", "", "REGISTRY_TOTP")   // otp.Code, otp.ExpiresAt
+otp, err = secrets.TOTPAt(v.Values["REGISTRY_TOTP"], time.Now())
+
 // An encryption key (docs/secrets.md, "Encryption keys"): the key stays in roll.
 cards := c.Transit("cards")
 ct, err := cards.Encrypt(ctx, []byte(cardNumber), "order:42")

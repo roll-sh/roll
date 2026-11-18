@@ -108,7 +108,7 @@ impl SyncTarget for FakeSync {
 
 /// Audit deliveries, kept instead of sent; and an OIDC issuer's keys, served.
 #[derive(Default)]
-struct Sent(Mutex<Vec<Value>>, Mutex<Option<Value>>, std::sync::atomic::AtomicBool, Mutex<Option<(String, String)>>);
+struct Sent(Mutex<Vec<Value>>, Mutex<Option<Value>>, std::sync::atomic::AtomicBool, Mutex<Option<(String, String)>>, Mutex<BTreeMap<(String, String), Value>>);
 
 impl roll_secrets::Deliver for Sent {
     fn check(&self, url: &str) -> roll_secrets::Result<()> {
@@ -153,6 +153,21 @@ impl roll_secrets::Deliver for Sent {
             _ => return Err(roll_secrets::Error::Link(format!("{url}: 404"))),
         };
         Ok(doc.to_string().into_bytes())
+    }
+    /// A roll bucket's objects.
+    fn put_object(&self, bucket: &str, key: &str, body: &Value) -> roll_secrets::Result<()> {
+        self.4.lock().unwrap().insert((bucket.into(), key.into()), body.clone());
+        Ok(())
+    }
+    fn get_object(&self, bucket: &str, key: &str, _: usize) -> roll_secrets::Result<Value> {
+        self.4.lock().unwrap().get(&(bucket.into(), key.into())).cloned().ok_or_else(|| roll_secrets::Error::Link("404".into()))
+    }
+    fn list_objects(&self, bucket: &str, prefix: &str) -> roll_secrets::Result<Vec<String>> {
+        Ok(self.4.lock().unwrap().keys().filter(|(b, k)| b == bucket && k.starts_with(prefix)).map(|(_, k)| k.clone()).collect())
+    }
+    fn delete_object(&self, bucket: &str, key: &str) -> roll_secrets::Result<()> {
+        self.4.lock().unwrap().remove(&(bucket.into(), key.into()));
+        Ok(())
     }
     /// A rotator outside roll: each issue is a new vendor key.
     fn call(&self, url: &str, _: &str, secret: &Secret, body: &Value, _: usize) -> roll_secrets::Result<zeroize::Zeroizing<Vec<u8>>> {
@@ -1047,6 +1062,21 @@ async fn a_token_reaches_only_its_environments_folders_and_actions() {
     }
     let (_, who) = api.req(Method::GET, "/v1/secrets/whoami", None, Some(&token)).await;
     assert_eq!(who["project"].as_str(), Some(api.project.as_str()));
+    // A token in a loop is told to slow down before it decrypts and audits without end; the
+    // operator sets how far (600 a minute unless told).
+    api.secrets.set_reads_per_minute(5);
+    let mut refused = None;
+    for _ in 0..6 {
+        let (s, v) = api.req(Method::GET, "/environments/production/values?path=/api", None, Some(&token)).await;
+        if s == StatusCode::TOO_MANY_REQUESTS {
+            refused = Some(v["code"].clone());
+            break;
+        }
+    }
+    assert_eq!(refused, Some(json!("rate_limited")));
+    api.secrets.set_reads_per_minute(600);
+    let (s, _) = api.req(Method::GET, "/environments/production/values?path=/api", None, Some(&token)).await;
+    assert_eq!(s, StatusCode::OK);
     // A project-wide read answers per environment; one about the project as a whole (other
     // environments' key names, shares, required keys) needs a rule over all of it.
     assert_eq!(api.req(Method::GET, "/environments", None, Some(&token)).await.0, StatusCode::OK);
@@ -2257,6 +2287,51 @@ async fn a_sensitive_keys_value_reaches_only_roll_s_runtimes() {
 }
 
 #[tokio::test]
+async fn a_totp_key_hands_out_its_current_code_to_whoever_may_reveal_it() {
+    let api = Api::new().await;
+    // RFC 6238's own SHA1 test seed (`12345678901234567890`, base32), 8 digits.
+    const SEED: &str = "otpauth://totp/roll:ci?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&digits=8";
+    api.ok(Method::PUT, "/required", Some(json!([{ "key": "REGISTRY_TOTP", "type": "totp" }]))).await;
+    // A malformed seed is refused by its rule, never echoed.
+    let (s, e) = api.call(Method::PUT, "/environments/production/secrets/REGISTRY_TOTP", Some(json!({ "value": "otpauth://totp/roll:ci?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&digits=9" }))).await;
+    assert_eq!((s, e["error"].as_str()), (StatusCode::BAD_REQUEST, Some("REGISTRY_TOTP must be a TOTP seed (an otpauth://totp/ URI or base32): digits must be 6–8")));
+    api.set("production", "REGISTRY_TOTP", SEED).await;
+    api.set("production", "PLAIN", "not-a-seed").await;
+
+    // The code for the step that ends at `expires_at`, as RFC 6238 computes it.
+    let t = roll_secrets::totp::parse(SEED).unwrap();
+    assert_eq!(t.code_at(59).as_str(), "94287082", "RFC 6238, Appendix B");
+    let c = api.ok(Method::GET, "/environments/production/secrets/REGISTRY_TOTP/totp", None).await;
+    let expires = c["expires_at"].as_i64().unwrap();
+    assert!(expires > code_sql::now_ms() && expires <= code_sql::now_ms() + 30_000, "{expires}");
+    let code = c["code"].as_str().unwrap().to_string();
+    assert_eq!(code, t.code_at(expires as u64 / 1000 - 30).as_str());
+    assert_eq!(api.call(Method::GET, "/environments/production/secrets/PLAIN/totp", None).await.0, StatusCode::BAD_REQUEST);
+
+    // It's a credential: `reveal` on the folder, as a reveal; `read` alone isn't enough.
+    let read = api.token(json!({ "environments": ["production"], "paths": ["/"], "actions": ["read"] }));
+    assert_eq!(api.req(Method::GET, "/environments/production/secrets/REGISTRY_TOTP/totp", None, Some(&read)).await.0, StatusCode::FORBIDDEN);
+    let reveal = api.token(json!({ "environments": ["production"], "paths": ["/"], "actions": ["read", "reveal"] }));
+    let (s, c) = api.req(Method::GET, "/environments/production/secrets/REGISTRY_TOTP/totp", None, Some(&reveal)).await;
+    assert!(s == StatusCode::OK && c["code"].as_str().is_some_and(|c| c.len() == 8), "{s} {c}");
+
+    // A read that asks for codes gets `<KEY>_CODE` beside the seed (`roll run --totp-codes`).
+    let v = api.ok(Method::GET, "/environments/production/values?codes=1", None).await;
+    assert!(v["values"]["REGISTRY_TOTP_CODE"].as_str().is_some_and(|c| c.len() == 8) && v["values"].get("PLAIN_CODE").is_none(), "{v}");
+    assert!(api.values("production", "/").await["values"].get("REGISTRY_TOTP_CODE").is_none());
+
+    // Audited as `secrets.totp`, the code nowhere in it.
+    let audit = api.ok(Method::GET, "/audit?action=secrets.totp", None).await;
+    let rows = audit.as_array().unwrap();
+    assert!(rows.len() == 2 && rows.iter().all(|r| r["summary"] == "made a one-time code of REGISTRY_TOTP" && r["keys"] == json!(["REGISTRY_TOTP"])), "{audit}");
+    for r in rows {
+        let mut r = r.clone();
+        r.as_object_mut().unwrap().retain(|k, _| !["id", "at", "seq"].contains(&k.as_str()));
+        assert!(!r.to_string().contains(&code), "{r}");
+    }
+}
+
+#[tokio::test]
 async fn an_encryption_key_encrypts_for_apps_and_never_leaves_roll() {
     use base64::Engine;
     let b64 = |s: &[u8]| base64::engine::general_purpose::STANDARD.encode(s);
@@ -2865,6 +2940,41 @@ async fn every_route_is_in_the_http_contract() {
     let missing: Vec<String> = routes.iter().map(|r| norm(r)).filter(|r| !documented.contains(r)).collect();
     assert!(routes.len() > 40, "the routes were read ({})", routes.len());
     assert!(missing.is_empty(), "routes missing from docs/secrets.md's HTTP table: {missing:?}");
+}
+
+#[tokio::test]
+async fn scheduled_backups_land_sealed_in_the_projects_bucket_and_keep_the_newest() {
+    let api = Api::new().await;
+    api.ok(Method::PUT, "/environments/production/secrets/STRIPE", Some(json!({ "value": "sk_live_nightly" }))).await;
+    let secret = [9u8; 32];
+    let schedule = json!({ "bucket": "assets", "recipient": roll_secrets::crypto::public_key(&secret), "every_hours": 24, "keep": 2 });
+    let (s, _) = api.call(Method::PUT, "/backup/schedule", Some(schedule.clone())).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "only a bucket of the project's own");
+    api.ok(Method::PUT, &format!("/v1/workspace/projects/{}/resources/bucket/assets", api.project), Some(json!({ "x": 0, "y": 0 }))).await;
+    api.ok(Method::PUT, "/backup/schedule", Some(schedule)).await;
+    // Two older ones there already: the run leaves the newest two, and nothing roll didn't write.
+    let prefix = format!("roll-secrets/backups/{}/", api.project);
+    for old in ["20200101T000000.000Z.json", "20200102T000000.000Z.json", "notes.txt"] {
+        api.sent.4.lock().unwrap().insert(("assets".into(), format!("{prefix}{old}")), json!({}));
+    }
+    let s = api.secrets.clone();
+    tokio::task::spawn_blocking(move || s.sweep().unwrap()).await.unwrap();
+    let mut kept: Vec<String> = api.sent.4.lock().unwrap().keys().map(|(_, k)| k.clone()).collect();
+    kept.sort();
+    assert_eq!(kept.pop().as_deref(), Some(format!("{prefix}notes.txt").as_str()));
+    assert!(kept.len() == 2 && kept[0].ends_with("20200102T000000.000Z.json"), "{kept:?}");
+    let schedule = api.ok(Method::GET, "/backup/schedule", None).await;
+    assert!(schedule["last_error"].is_null() && schedule["last_key"] == kept[1], "{schedule}");
+    // Sealed: only the recipient's secret key opens it, and it holds the project.
+    let backup = api.sent.4.lock().unwrap()[&("assets".to_string(), kept[1].clone())].clone();
+    assert!(!backup.to_string().contains("sk_live_nightly"));
+    let sealed: roll_secrets::crypto::Sealed = serde_json::from_value(backup["sealed"].clone()).unwrap();
+    let plain = roll_secrets::crypto::open_sealed(&secret, backup["context"].as_str().unwrap(), &sealed).unwrap();
+    assert!(String::from_utf8_lossy(&plain).contains("sk_live_nightly"));
+    // Not due again for a day.
+    let s = api.secrets.clone();
+    tokio::task::spawn_blocking(move || s.sweep().unwrap()).await.unwrap();
+    assert_eq!(api.sent.4.lock().unwrap().len(), 3);
 }
 
 #[tokio::test]
