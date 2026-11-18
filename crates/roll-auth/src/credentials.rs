@@ -90,7 +90,7 @@ fn kind_of(w: &str) -> Option<&'static str> {
     let rest = |prefix: &str| w.strip_prefix(prefix);
     let all = |s: &str, ok: fn(char) -> bool| s.chars().all(ok);
     let alnum = |c: char| c.is_ascii_alphanumeric();
-    if ["rlt_", "rlo_", "rlf_", "rlc_", "rlk_"].iter().any(|p| w.starts_with(p)) && checksum_ok(w) {
+    if SECRET_PREFIXES.iter().any(|p| w.starts_with(p)) && checksum_ok(w) {
         return Some(ROLL);
     }
     // AWS's documentation keys (`…EXAMPLE`) are in code and docs everywhere.
@@ -238,5 +238,18 @@ mod tests {
         assert_eq!(words("NODE_ENV=production region us-east-1 user postgres pw=Tr0ub4dor-Horse-77"), vec!["Tr0ub4dor-Horse-77"]);
         let padding: String = (0..MAX_CANDIDATES + 1).map(|i| format!("Zq{i:06}Hy8Lw3Rt ")).collect();
         assert!(candidates(&json!({ "body": padding })).is_none());
+    }
+}
+
+#[cfg(test)]
+mod prefix_tests {
+    /// Every prefix roll makes is one the guard and scanners know, checksummed.
+    #[test]
+    fn every_roll_secret_is_a_credential() {
+        for p in super::SECRET_PREFIXES {
+            let s = super::new_secret(p);
+            assert!(super::checksum_ok(&s), "{p}");
+            assert_eq!(super::kind_in(&format!("token: {s}")), Some(super::ROLL), "{p}");
+        }
     }
 }
