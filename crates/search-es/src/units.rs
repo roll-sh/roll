@@ -288,6 +288,18 @@ impl ByteSize {
         self.0
     }
 
+    /// A setting's bound as Elasticsearch prints it, in the unit it was made of: the largest
+    /// that divides it (`5tb`, `1b`, `2684354550000b`).
+    pub fn exact(&self) -> String {
+        let b = self.0;
+        for (unit, suffix) in [(PB, "pb"), (TB, "tb"), (GB, "gb"), (MB, "mb"), (KB, "kb")] {
+            if b != 0 && b % unit == 0 {
+                return format!("{}{suffix}", b / unit);
+            }
+        }
+        format!("{b}b")
+    }
+
     /// `ByteSizeValue.toString()`: `1kb`, `1.5mb`, `10b`.
     pub fn human(&self) -> String {
         let b = self.0;
