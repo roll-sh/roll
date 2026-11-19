@@ -880,6 +880,55 @@ session thread's user instructions by `perf stat --per-thread` over a 14 s run l
 the difference in selects; CPUs 4 and 22): base (`c4ad9402d`) 38,025 / 38,948 / 37,578, the stack
 (`e974a84e1`) 37,624 / 39,504 / 37,995 user instructions a select, alternated.
 
+## Short write transactions, round 10: locks without sched_yield as they would ship (2026-11-19, agent 266)
+
+HANDOFF.md has the reading. short_txn at 32 clients (UPDATE, SELECT, INSERT, COMMIT with
+fsync; 100,000 accounts), lane A through `tools/lane.sh` (one pair a hold, 20:10-21:35 CET),
+plain dist builds (`tools/dist.sh`): **base** `f4f52c366`; **new** the same with
+`src/parklock.rs` on the size models' shards, the sequences' mutex and the store's commit
+lock; **vend** the same with agent 259's `vendor/parking_lot_core` (`set_spin_yield(false)` in
+roll-engine, every parking_lot lock). Alternating pairs, agent 243's harness as agent 259 left
+it (`~/.cache/a266/bench`). Per pair: foreign cores on the server CPUs (base / arm), tps, p99
+ms, user cycles a transaction (the whole run, every server thread). **One pair of 22 was clean**
+(both runs at or under 1.0 foreign core: s32/p1); lane.sh read 5.2-7.2 foreign cores on the
+lane's 8 CPUs in every hold (other sessions' unpinned rustc), load averages 31-119. No 8-client
+pairs and no point-read count: the 32-client cells never got their clean pairs.
+
+| pair | foreign base/arm | tps | Δtps | p99 ms | Δp99 | Δ user cycles/txn |
+|---|---|---|---|---|---|---|
+| s32/p1 (new) | 0.65/0.94 | 8374 -> 7459 | -10.9% | 14.72 -> 19.88 | +35.0% | +3.0% |
+| s32/p2 | 0.86/1.41 | 7830 -> 6175 | -21.1% | 16.15 -> 25.16 | +55.8% | +5.8% |
+| s32/p3 | 1.99/1.80 | 4414 -> 5448 | +23.4% | 99.29 -> 29.41 | -70.4% | -3.4% |
+| s32/p4 | 2.15/1.66 | 4777 -> 4328 | -9.4% | 35.20 -> 95.56 | +171.5% | -1.0% |
+| s32/p5 | 2.17/1.14 | 3805 -> 6808 | +78.9% | 101.44 -> 23.23 | -77.1% | -3.8% |
+| s32/p6 | 1.57/2.10 | 5450 -> 4609 | -15.4% | 28.71 -> 32.91 | +14.6% | -1.3% |
+| s32/p7 | 1.77/2.59 | 5597 -> 3227 | -42.3% | 25.54 -> 98.34 | +285.1% | +7.4% |
+| s32/p8 | 1.72/1.27 | 4793 -> 6260 | +30.6% | 36.49 -> 29.63 | -18.8% | -0.0% |
+| s32/p9 | 1.48/2.42 | 6000 -> 3777 | -37.1% | 34.94 -> 63.03 | +80.4% | +5.3% |
+| s32/p10 | 1.09/0.87 | 6860 -> 7782 | +13.4% | 21.12 -> 17.02 | -19.4% | -1.8% |
+| s32/p11 | 1.49/0.79 | 6192 -> 7995 | +29.1% | 23.95 -> 16.25 | -32.1% | -1.7% |
+| v32/p1 (vend) | 2.17/0.90 | 4327 -> 7460 | +72.4% | 40.33 -> 11.28 | -72.0% | -3.1% |
+| v32/p2 | 1.60/1.19 | 5232 -> 5828 | +11.4% | 62.70 -> 30.85 | -50.8% | +0.3% |
+| v32/p3 | 1.30/1.01 | 6228 -> 7424 | +19.2% | 22.29 -> 12.20 | -45.3% | -4.2% |
+| v32/p4 | 0.64/1.04 | 8629 -> 6811 | -21.1% | 14.59 -> 18.39 | +26.1% | +9.6% |
+| v32/p5 | 0.85/2.29 | 7605 -> 3926 | -48.4% | 21.76 -> 26.57 | +22.1% | +11.9% |
+| v32/p6 | 0.83/2.09 | 7705 -> 4344 | -43.6% | 15.99 -> 37.92 | +137.1% | +13.2% |
+| v32/p7 | 0.82/1.30 | 8223 -> 6213 | -24.4% | 14.55 -> 14.95 | +2.7% | +6.2% |
+| v32/p8 | 1.26/2.09 | 6801 -> 4312 | -36.6% | 19.48 -> 24.99 | +28.3% | +10.9% |
+| v32/p9 | 2.17/1.50 | 4409 -> 5761 | +30.7% | 35.44 -> 18.37 | -48.2% | -1.7% |
+| v32/p10 | 1.08/0.93 | 6531 -> 7347 | +12.5% | 42.97 -> 14.65 | -65.9% | +0.9% |
+| v32/p11 | 1.44/0.81 | 5624 -> 7706 | +37.0% | 26.29 -> 13.68 | -48.0% | -5.3% |
+
+- Medians of all pairs (not a gate): new tps -9.4% (up in 5 of 11), p99 +14.6% (up in 6), user
+  cycles -1.0%; vend tps +11.4% (up in 6 of 11), p99 -45.3% (up in 5), user cycles +0.9%.
+- Split by which run saw more foreign load: new, arm less loaded (6) tps +26.3%, p99 -25.8%;
+  arm more loaded (5) tps -21.1%, p99 +55.8%. vend, arm less loaded (6) tps +24.9%, p99
+  -49.5%; more loaded (5) tps -36.6%, p99 +26.1%, cycles +10.9%. The pairs within 0.3 foreign
+  core of each other: new +13.4 / -10.9 / +23.4% tps, -19.4 / +35.0 / -70.4% p99; vend +12.5 /
+  +19.2% tps, -65.9 / -45.3% p99.
+- `sched_yield` a transaction (one run of new, 32 clients, perf stat on the server, 7 s, 0.64
+  foreign core): 0.40 (24,693 at 8,755 tps); agent 259's base reading 1.75.
+
 ## Short write transactions, round 9: a run queue, locks without sched_yield (2026-11-19, agent 259)
 
 HANDOFF.md has the design and the reading. short_txn at 32 clients (and point reads), lane A,

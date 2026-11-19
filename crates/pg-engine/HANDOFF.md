@@ -13027,6 +13027,57 @@ failed: all passed.
 Not this round's: roll's `VACUUM (VERBOSE)` sends none of PostgreSQL's INFO lines (agent 205's
 note, still open).
 
+## Short write transactions, round 10: locks without sched_yield as they would ship (agent 266)
+
+BENCH.md "Short write transactions, round 10" has the pairs. Base `f4f52c366`, plain dist builds,
+short_txn at 32 clients on lane A through `tools/lane.sh` (one pair a hold), agent 259's
+harness (`~/.cache/a266/bench`). **Nothing landed: no clean gate.** 22 pairs in 2.5 hours, one
+clean (both runs at or under 1.0 foreign core on the server CPUs); lane.sh read 5.2-7.2 foreign
+cores on the lane's 8 CPUs in every hold (other sessions' unpinned rustc on CPUs 6-9, 24-27),
+load averages 31-119. The measuring stopped at the brief's 90 minutes without a clean pair; no
+8-client pairs and no point-read count were run (no decision rested on them).
+
+Two forms of agent 259's change (patches in `~/.cache/a266/patches/`):
+
+1. *A lock of our own on the three hot locks, no vendored crate* (`parklock-three-locks.patch`:
+   `src/parklock.rs`, `lock_api` and `parking_lot_core` from crates.io, both already in the lock
+   file). A wrapper over parking_lot's locks can't do it: their slow paths run parking_lot's
+   `SpinWait` (three spins, then up to seven `sched_yield`) whenever nobody is parked yet, and a
+   wrapper that spins on `try_lock` first only adds spinning before that. So `parklock` is a raw
+   mutex (`RawMutex` + `RawMutexTimed`, the commit lock's `try_lock_for`) and a raw
+   reader-writer lock (`RawRwLock`) on `parking_lot_core::park` / `unpark_one` /
+   `unpark_filter`, used through `lock_api` (the same API as parking_lot's, so no caller
+   changed): 2 + 4 + ... + 64 pause hints (a few microseconds) and park, parking_lot's
+   eventual-fairness handoff on unlock, readers not passing parked threads unless woken,
+   `try_read` / `try_write` as parking_lot's. On the size models' shards (`sizing::Models`), the
+   sequences (`Database::seqs`) and the store's commit lock (`Store::commit`): 81% of the
+   base's yields by agent 259's call-site profile. The durable wait's mutex (6%) uses a
+   parking_lot `Condvar` and was left. Unit-tested under 16 and 48 threads on 2 and 12 CPUs
+   (mutual exclusion, whole writes seen by readers, timed locks). Yields at 32 clients 1.75 ->
+   0.40 a transaction (agent 259's reading on `bc9102ebb` against one run of this build; the
+   rest: the durable wait, the lock manager, xids). Measured: the clean pair went the wrong way
+   (tps -10.9%, p99 +35.0%, user cycles +3.0%); the 10 loaded pairs follow the foreign load (the
+   less loaded run wins in 9 of 10). Medians of all 11: tps -9.4%, p99 +14.6%, cycles -1.0%. Not
+   kept.
+2. *Agent 259's vendored `parking_lot_core`* (`locks-no-sched-yield-vendored.patch`, rebased on
+   `f4f52c366` unchanged: it applied as it was). 11 pairs, none clean: medians tps +11.4%, p99
+   -45.3% (down in 6), cycles +0.9%; in the two pairs whose runs were within 0.3 foreign core
+   of each other tps +12.5% and +19.2%, p99 -65.9% and -45.3%, as agent 259's seven pairs
+   (p99 -41%). But the pairs follow the foreign load as much as the arm (the less loaded run
+   won in all 11), and the four pairs with the base at 0.64-0.85 foreign cores went against it
+   (tps -21 to -48%, cycles +6 to +13%). Not kept: no clean pair.
+
+Item 4 (the size model's exclusive lock in UPDATE, nextval's fsync under the sequence mutex) was
+not reached: it was only for after a kept change. Whether no-yield locks change agents 256's and
+243's case is open; nothing here measured it.
+
+**What is left:** the vendored form is the one that showed a p99 effect in both rounds (259's 7
+pairs, this round's loaded pairs); the three-lock form saved the yields but not the latency,
+which says the remaining yielders matter, or the RwLock's policy does (readers waiting behind
+any parked thread). Both need three clean pairs on a quiet lane A, 32 and 8 clients; on this
+host's daytime load a pair is decided by which run gets the foreign builds. Measure at night,
+or after the other sessions' builds are pinned off the lanes.
+
 ## Short write transactions, round 9: a run queue in front of the executor, locks without sched_yield (agent 259)
 
 BENCH.md "Short write transactions, round 9" has the pairs. Base `bc9102ebb`, plain dist builds
