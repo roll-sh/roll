@@ -407,6 +407,22 @@ pub fn check_reference(v: &str) -> std::result::Result<(), String> {
     Ok(())
 }
 
+/// The references a project's rules hold: `(scope, name, reference)`, `scope` `env` or the
+/// `env_for` glob.
+pub fn references(s: &Settings) -> Vec<(String, String, String)> {
+    std::iter::once(("env".to_string(), &s.env))
+        .chain(s.env_for.iter().map(|(g, v)| (g.clone(), v)))
+        .flat_map(|(scope, vars)| vars.iter().filter(|(_, v)| is_reference(v)).map(move |(k, v)| (scope.clone(), k.clone(), v.clone())))
+        .collect()
+}
+
+/// A reference's environment and folder (`roll://ENV/folder/KEY` → `("ENV", "/folder")`).
+pub fn reference_place(v: &str) -> (String, String) {
+    let parts: Vec<&str> = v.strip_prefix("roll://").unwrap_or(v).split('/').collect();
+    let folder = if parts.len() > 2 { format!("/{}", parts[1..parts.len() - 1].join("/")) } else { "/".into() };
+    (parts[0].to_string(), folder)
+}
+
 pub fn is_production(env: &str) -> bool {
     let e = env.to_ascii_lowercase();
     e.contains("prod") || e.split(['-', '_']).any(|w| matches!(w, "prd" | "live" | "main" | "master"))

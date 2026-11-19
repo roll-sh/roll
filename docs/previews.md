@@ -399,11 +399,20 @@ behind the `Apps` trait:
   out and logged as a secret that doesn't resolve), a branched parent's link is followed as any,
   and the value is masked in what the preview shows. A payment provider's test key then stays in
   roll secrets (its health, leak scanning, reach and rotation) rather than in the project's rules.
-  A plain value is kept as it is: its `${` is escaped, so it's never a reference by accident. A
+  A rule naming an environment other than the one the previews follow (`secrets.base`) routes
+  its values into code whoever pushes a branch controls, so a person choosing that reach must be
+  able to reveal it: saving a new or changed reference needs its writer's reveal on that
+  environment's folder in roll secrets (roll secrets' own answer for the request's caller, as roll
+  apps asks it; 403 otherwise), and who wrote each is kept (`env_refs`) for roll secrets'
+  maker-checked binding (`bind_ref`, its #407), which will stop a reference whose writer lost
+  access. A reference to the base needs none of this.
+  A plain value is kept as it is: its `${` is escaped (every value previews write goes through
+  one place, rolld's ensure), so it's never a reference by accident and reads back as written. A
   preview's own variables refuse a reference (400) until roll secrets' maker-checked binding for
   references a person chooses (`bind_ref`, its #407). Renaming an environment rewrites roll
   secrets' references, not these rules: the next converge logs the old name as one that doesn't
-  resolve. `a_roll_reference_becomes_roll_secrets_own_and_a_plain_value_stays_plain`;
+  resolve. `a_roll_reference_becomes_roll_secrets_own_and_a_plain_value_stays_plain`,
+  `a_rules_reference_to_another_environment_needs_its_writers_reveal_there`;
   `scripts/preview-cost.sh` reads a staging key through `roll://staging/…` in the live service's
   environment, and a `${USER}` left as it is;
   4. the branched resources' URLs:

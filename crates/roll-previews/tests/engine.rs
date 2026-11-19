@@ -1171,6 +1171,34 @@ async fn a_signed_in_person_sees_only_their_own_projects_previews() {
     assert!(v["branches"].as_array().unwrap().iter().any(|b| b["kind"] == "postgres" && b["vars"]["DATABASE_URL"].as_str().is_some_and(|u| u.starts_with("fake://"))), "{body}");
 }
 
+/// A project rule naming another environment's key (`roll://ENV/KEY`) routes its values into code
+/// whoever pushes a branch controls: saving one needs its writer's reveal there (roll secrets
+/// decides); the environment its previews follow needs none.
+#[tokio::test]
+async fn a_rules_reference_to_another_environment_needs_its_writers_reveal_there() {
+    use tower::ServiceExt;
+    struct StagingOnly;
+    impl roll_previews::ports::Reveal for StagingOnly {
+        fn may_reveal(&self, who: &roll_previews::ports::Asker<'_>, _: &str, env: &str, folder: &str) -> bool {
+            who.user.is_some_and(|u| u.user == "usr_b") && env == "staging" && folder == "/payments"
+        }
+    }
+    let e = env(json!({ "enabled": true }));
+    let _ = e.engine.reveal.set(Arc::new(StagingOnly));
+    let mine = e.ws.create("usr_b", "mine", "", None).unwrap();
+    let put = |env: serde_json::Value| {
+        let router = roll_previews::api::router(e.engine.clone());
+        let mut req = axum::http::Request::put(format!("/v1/previews/projects/{}/settings", mine.id)).header("content-type", "application/json").body(axum::body::Body::from(json!({ "env": env }).to_string())).unwrap();
+        req.extensions_mut().insert(roll_auth::SignedIn { user: "usr_b".into(), handle: "b".into(), admin: false, code_owner: None, session: "ses_1".into() });
+        async move { router.oneshot(req).await.unwrap().status().as_u16() }
+    };
+    assert_eq!(put(json!({ "K": "roll://qa/KEY" })).await, 403, "no reveal on qa");
+    assert_eq!(put(json!({ "K": "roll://staging/KEY" })).await, 403, "reveal on staging's /payments only");
+    assert_eq!(put(json!({ "K": "roll://staging/payments/KEY" })).await, 200);
+    let base = e.engine.store.settings(&mine.id).unwrap().secrets.base;
+    assert_eq!(put(json!({ "K": "roll://staging/payments/KEY", "B": format!("roll://{base}/OTHER") })).await, 200, "the environment it follows needs nothing more");
+}
+
 /// A variable set while a deploy is still going, then removed, is removed from the backend too:
 /// what was sent counts, not only what went live.
 #[tokio::test]

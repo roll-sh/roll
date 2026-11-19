@@ -11,6 +11,19 @@ use serde_json::{Value, json};
 /// secrets: every route 404s) gives its previews no environment and nothing to resolve.
 pub struct Secrets(pub Api);
 
+/// Who may name an environment's keys in previews' rules: roll secrets' own answer for the
+/// request's caller (as roll apps asks it).
+pub struct SecretsReveal(pub Arc<roll_secrets::Secrets>);
+
+impl roll_previews::ports::Reveal for SecretsReveal {
+    fn may_reveal(&self, who: &roll_previews::ports::Asker<'_>, project: &str, env: &str, folder: &str) -> bool {
+        match self.0.caller_of(who.operator, who.user, who.grant) {
+            Ok(caller) => caller.allows(roll_secrets::Action::Reveal, &roll_secrets::Scope::at(project, env, folder)),
+            Err(_) => false,
+        }
+    }
+}
+
 
 /// The environment's own keys. A plain value is kept as it is (a `${` in it escaped: it's never
 /// a reference by accident); a project rule's `roll://ENV[/folder]/KEY` becomes roll secrets' own
@@ -182,5 +195,18 @@ mod tests {
         assert_eq!(value("roll://staging/STRIPE_KEY").unwrap(), "${staging.STRIPE_KEY}");
         assert_eq!(value("hello ${USER}").unwrap(), "hello $${USER}");
         assert!(value("roll://other@staging/STRIPE_KEY").is_err());
+        // A plain value reads back from roll secrets as written: `${x}`, and a `$${` escaped once.
+        for plain in ["hello ${USER}", "a $${x} b", "$${", "cost: $5 ${staging.KEY}"] {
+            let kept = value(plain).unwrap();
+            let read: String = roll_secrets::refs::parse(&kept)
+                .into_iter()
+                .map(|p| match p {
+                    roll_secrets::refs::Part::Text(t) => t.to_string(),
+                    roll_secrets::refs::Part::Escaped => "${".into(),
+                    roll_secrets::refs::Part::Ref(_, raw) => panic!("{plain:?} read as a reference: {raw}"),
+                })
+                .collect();
+            assert_eq!(read, plain);
+        }
     }
 }

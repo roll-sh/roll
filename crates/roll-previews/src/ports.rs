@@ -495,6 +495,34 @@ pub struct BudgetAlert {
 /// What's at a path in a service, as a tar, as it's read.
 pub type FileStream = Box<dyn tokio::io::AsyncRead + Send + Unpin>;
 
+/// Who asks, as rolld's gate put it on the request: roll secrets decides from it.
+pub struct Asker<'a> {
+    pub operator: bool,
+    pub user: Option<&'a roll_auth::SignedIn>,
+    pub grant: Option<&'a roll_auth::Grant>,
+}
+
+impl Asker<'_> {
+    pub fn of(ext: &axum::http::Extensions) -> Asker<'_> {
+        Asker { operator: roll_auth::Operator::on(ext), user: ext.get::<roll_auth::SignedIn>(), grant: roll_auth::Grant::on(ext) }
+    }
+
+    /// Who they are in what's kept: a token by its id, a person by theirs, else the operator.
+    pub fn principal(&self) -> String {
+        match (self.grant, self.user) {
+            (Some(g), _) => format!("token:{}", g.id),
+            (None, Some(u)) => u.user.clone(),
+            (None, None) => "operator".into(),
+        }
+    }
+}
+
+/// Whether someone may reveal a folder of a project's environment in roll secrets (rolld: roll
+/// secrets' own check, `Caller::allows(Reveal, …)`).
+pub trait Reveal: Send + Sync {
+    fn may_reveal(&self, who: &Asker<'_>, project: &str, env: &str, folder: &str) -> bool;
+}
+
 /// What reads an OpenTelemetry export request (OTLP/HTTP: protobuf or JSON, gzip or not) into
 /// spans (rolld: roll apps' reader). An error is the request's fault.
 pub trait SpanReader: Send + Sync {

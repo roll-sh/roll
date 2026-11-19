@@ -940,7 +940,7 @@ async fn mask_suggestions(AxState(e): S, Path(project): Path<String>, grant: Opt
     e.mask_suggestions(&project, may_read).await.map(Json)
 }
 
-async fn put_settings(AxState(e): S, Path(project): Path<String>, b: Bytes) -> crate::Result<Json<crate::Settings>> {
+async fn put_settings(AxState(e): S, Path(project): Path<String>, ext: axum::http::Extensions, b: Bytes) -> crate::Result<Json<crate::Settings>> {
     let patch: Value = body(&b)?;
     let (p, check) = (project.clone(), patch.clone());
     let (old, new) = blocking(e.clone(), move |e| {
@@ -951,9 +951,24 @@ async fn put_settings(AxState(e): S, Path(project): Path<String>, b: Bytes) -> c
     })
     .await?;
     e.check_masks(&old, &new).await?;
+    // A reference to an environment other than the one the previews follow routes its values into
+    // code whoever pushes a branch controls: a new or changed one needs its writer's reveal there.
+    let who = crate::ports::Asker::of(&ext);
+    let before = crate::settings::references(&old);
+    for (scope, name, reference) in crate::settings::references(&new).into_iter().filter(|r| !before.contains(r)) {
+        let (env, folder) = crate::settings::reference_place(&reference);
+        if env == new.secrets.base {
+            continue;
+        }
+        if !e.reveal.get().is_some_and(|r| r.may_reveal(&who, &project, &env, &folder)) {
+            return Err(Error::Forbidden(format!("{scope}: {name}: naming {env}'s keys needs reveal on {env} in roll secrets")));
+        }
+    }
+    let by = who.principal();
     let s = blocking(e.clone(), move |e| {
         let s = e.store.settings(&project)?.patched(&patch)?;
         let s = e.store.put_settings(&project, &s)?;
+        e.store.set_env_refs(&project, &crate::settings::references(&s), &by)?;
         // Every preview of the project converges on the new rules (modes, masks, variables,
         // access): nothing waits for its next push.
         reconverge(e, &project)?;

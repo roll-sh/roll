@@ -175,6 +175,9 @@ pub struct Engine {
     /// (rolld: roll apps' reader); unset, the intake answers 404.
     traces: Mutex<traces::Kept>,
     pub span_reader: std::sync::OnceLock<Arc<dyn crate::ports::SpanReader>>,
+    /// Who may name another environment's keys in the project's rules (rolld: roll secrets);
+    /// unset, a rule's reference to one is refused.
+    pub reveal: std::sync::OnceLock<Arc<dyn crate::ports::Reveal>>,
     /// Open shells in previews' services (`shell.rs`), by id.
     shells: Mutex<HashMap<String, Arc<shell::ShellSession>>>,
     /// Each running service's follower to the drains (`drains.rs`), by preview and service.
@@ -302,6 +305,7 @@ impl Engine {
             shells: Mutex::new(HashMap::new()),
             traces: Mutex::new(HashMap::new()),
             span_reader: std::sync::OnceLock::new(),
+            reveal: std::sync::OnceLock::new(),
             forwards: Mutex::new(HashMap::new()),
             forwards_said: Mutex::new(HashMap::new()),
             forwards_end: Mutex::new(HashMap::new()),
