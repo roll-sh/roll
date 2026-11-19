@@ -159,6 +159,18 @@ pub struct Engine {
 
     /// Where a Git URL service's previews are posted (rolld: roll apps' GitHub App connection).
     pub git_report: std::sync::OnceLock<Arc<dyn crate::ports::GitReport>>,
+    /// The projects' log drains (roll apps'); unset, previews' runtime output goes to none.
+    pub drains: std::sync::OnceLock<Arc<dyn crate::ports::Drains>>,
+    /// Forwarded connections open per preview, and when each (preview, person, service, port)
+    /// was last said in the activity (`shell.rs`).
+    forwards: Mutex<HashMap<String, Arc<std::sync::atomic::AtomicUsize>>>,
+    forwards_said: Mutex<HashMap<(String, String, String, u16), i64>>,
+    /// Open shells in previews' services (`shell.rs`), by id.
+    shells: Mutex<HashMap<String, Arc<shell::ShellSession>>>,
+    /// Each running service's follower to the drains (`drains.rs`), by preview and service.
+    draining: Mutex<HashMap<(String, String), Arc<drains::Draining>>>,
+    /// When this process started, as Docker's `--since` takes it: a follower's first start.
+    started_stamp: String,
     usage_read: Mutex<HashMap<String, i64>>,
     /// What each preview's services used, read at (ms): `GET …/metrics` reads them again only after
     /// [`METRICS_FOR`], however many sheets poll.
@@ -275,6 +287,12 @@ impl Engine {
             warm_wanted: Mutex::new(Vec::new()),
             deploying_since: Mutex::new(HashMap::new()),
             passing: tokio::sync::Mutex::new(()),
+            drains: std::sync::OnceLock::new(),
+            draining: Mutex::new(HashMap::new()),
+            shells: Mutex::new(HashMap::new()),
+            forwards: Mutex::new(HashMap::new()),
+            forwards_said: Mutex::new(HashMap::new()),
+            started_stamp: drains::now_stamp(),
         })
     }
 
@@ -371,6 +389,7 @@ impl Engine {
         }
         while set.join_next().await.is_some() {}
         self.tend_leases().await;
+        self.tend_drains().await;
         self.note_refused_egress().await;
         // Services those converges deployed at a new head, woken so their first visit is warm (a
         // few at a time, off the pass).
@@ -825,8 +844,10 @@ fn short(rev: &str) -> &str {
 
 mod converge;
 mod discover;
+mod drains;
 mod env;
 mod masks;
+pub mod shell;
 pub use masks::ErrorMasks;
 pub use requests::error_span;
 mod requests;

@@ -338,6 +338,25 @@ behind the `Apps` trait:
     A converge waits for it a few seconds at most: one still installing or booting is asked
     again on a later pass (for up to 20 minutes), so no converge slot waits on a build. roll
     apps services are checked by roll apps.
+  - **Log drains.** A project that sends its logs to a drain (roll apps' log drains,
+    `previews: true`: Datadog, Better Stack, a collector) gets its previews' `roll.toml` services
+    there too, as Vercel's and Render's drains take previews' output. roll apps sends its own
+    `pv-` environments' instances' output itself; for a `roll.toml` service the preview's holder
+    follows its container (`docker logs -f --timestamps --since`), masks each batch as the
+    sheet's logs are, and hands it to roll apps' drainer (`Apps::drain_preview_lines`), so the
+    lines get the drain's queue, signature, format and limits. A line's `environment` is the
+    preview's `pv-` one, `service_name` the service, and `service`, `instance` and `deployment`
+    are null: a drain narrowed to roll apps services never gets one. Each running service has
+    one follower, only while a drain wants previews' output (asked every pass, read again
+    every 30 s). A follower after a restart or a redeploy starts at the stamp of the last line
+    sent and drops what Docker gives again, so nothing is lost or sent twice. A process's first
+    follower starts when the process did, and lines whose masks can't be read aren't sent.
+    A preview's jobs (`release`, `seed`, `teardown`) go to drains of builds (`sources`
+    `build`, where Render and Vercel put deploy-time commands): each job's output tail once it
+    ends, masked with what it was given and then as logs are, the job's name its
+    `service_name`.
+    `a_previews_runtime_output_goes_to_the_projects_log_drains_masked`,
+    `a_previews_runtime_lines_reach_only_drains_that_take_previews`.
 - The tree is copied into the container, never bind-mounted.
 - Each service answers at `<service>-<slug>.<domain>`.
   - `<slug>` is `pr<number>` for a GitHub PR, `c<number>` for a roll code change, or the branch
@@ -1099,6 +1118,33 @@ The rebuild is a number on the preview, part of what each service was deployed w
 rebuild that's asked while a deploy is under way still runs once it's done, and converging again
 builds nothing more.
 
+### A shell, files and ports in a preview
+
+Render's shell on a preview environment and `heroku run -a <review app>`: a login shell in a
+preview's running `roll.toml` service, through the Docker Engine API (an exec with a TTY, as
+roll apps' shells are), over HTTP as the dashboard's terminal drives roll apps' (a session, its
+screen as server-sent events, keys and resizes posted). It runs on the preview's holder, starts
+or thaws a sleeping service and keeps it awake while it's open, and the activity says who
+opened it. Every route of it is `admin` (rolld's catalogue), as roll apps' shells: it runs
+anything with the preview's variables and branches, so its output isn't masked. A roll apps
+service's shell is roll apps' own, on its `pv-` environment: the sheet's Shell tab opens that one
+for it (the project's roll apps service of that name, as Promote finds it), so every service of
+a preview has its shell in the same place. A redeploy ends a shell with the
+container it was in; a preview that goes ends its shells first.
+`roll preview shell <preview> [--service]` makes this terminal the shell's (raw mode, its size
+followed) until it exits. Files go in and out the same way (`…/files`, `roll preview cp <preview>
+./seed.sql :/tmp/`, `roll preview cp <preview> :/app/out.csv .`, as `roll apps cp`: `docker cp`
+in the service's container, at most 100 MiB a time, admin, said in the activity). A port it
+listens on comes to a laptop the same way (`…/forward`, `roll preview forward <preview> 9229`, as
+`roll apps proxy`): a relay in the service's network namespace (`--network container:`, as
+screenshots join it) reaches `127.0.0.1:<port>` there whatever network the preview has, Roll-only
+egress included, removed with each connection. `a_shell_in_a_previews_service_is_said_and_bounded`;
+`files_go_in_and_out_of_a_previews_service_and_are_said`,
+`a_forwarded_port_carries_bytes_is_said_once_and_is_bounded`; `scripts/preview-cost.sh` types into a
+live preview's container through `roll preview shell` and reads its `ROLL_PREVIEW` back, puts a
+file in with `roll preview cp` and brings it back, and reads the service through `roll preview
+forward` (no relay left after).
+
 ### Feedback on the preview page
 
 Vercel Comments, Netlify's drawer: people reviewing a preview leave notes on its pages, and they
@@ -1235,6 +1281,14 @@ and admins see every project.
 | `POST /v1/previews/{id}/visual/accept` | `{head?, path?}` (the screenshot's looked at, `visual_review.head`; `path`: that page only, `""` the first, else every page) | `Preview`: how a change's pages look at its latest screenshot is accepted (`visual_review`, `roll/visual`); 404 for a page it has no screenshot of; 409 with no screenshot yet, 400 for a branch's preview, 403 from the change's author or from a token when the review is required, 409 when `head` isn't the latest screenshot's (a newer one came in) |
 | `GET /v1/previews/{id}/logs?service=&lines=` | | `{service, lines: string[]}`, masked: every value the preview got from roll secrets, the project's `env` and the preview's own variables, and its branches' credentials (a password, key or token, a URL's password) are `***`, as checks' output is (each line of 6 characters or more). A preview's code, a fork's too, can print what it was given, and anyone who reads the preview reads its logs. 409 when what they must hide can't be read. A seed's, release's or teardown's output (the preview's error, a teardown's in the pull request's comment), what its page said in a screenshot run (its errors and failed requests, broken links, words, markup and API operations: the comment's "What went wrong") and the hosts its egress proxy refused (a name is its code's to choose) are masked the same way (a picture can't be: a page that renders a secret shows it). Masking matches values as written, so code that prints a secret encoded (base64, hex) gets it through, as with every log masker (GitHub Actions' too). It hides what a preview shows, not what its code sends: with egress open (the default) its code reaches the internet, DNS included. Under "Roll only" it can't: the preview's network is `--internal`, where Docker's embedded DNS doesn't forward outside names (SERVFAIL; checked on Docker 29.9) and no resolver is reachable, and the egress proxy checks a name against `egress_hosts` before it resolves it, so `<secret>.attacker.example` is never looked up; on roll apps, every variable previews sets in the `pv-` environment is sealed, so apps' own logs hide it and its API never returns it (`…/connect` and `…/env` reveal them) |
 | `GET /v1/previews/{id}/logs?service=&lines=&follow=1` | | `text/event-stream`: `event: service` (its name), then one event per line, the last `lines` first and then as they come. `docker logs -f` for `roll.toml` services; for others the tail is read every 2 s (2,000 lines wide after the first read) and only new lines are sent, with a line saying so when some were missed. Runs on the preview's holder; the stream ends when the client goes |
+| `POST /v1/previews/{id}/shell/sessions` | `{ service?, cols?, rows? }` (the preview's first service without one; 120×32) | 201 `{ id }`: a login shell (bash where the image has it, else sh) in the running `roll.toml` service's container, started or thawed if it sleeps (up to 60 s), kept awake while the shell is open, its opener in the activity ("ana opened a shell in web"). At most 4 a preview (409); a roll apps service's is 409 (its own shell is on its `pv-` environment in roll apps). Runs on the preview's holder. A terminal isn't masked: it's an admin's, as roll apps' shells are, and reaches what the service does (the preview's branches and variables, never a parent's) |
+| `GET /v1/previews/{id}/shell/sessions/{sh}/screen` | | `text/event-stream`: base64 chunks (the scrollback first, at most 256 KiB), then `event: closed` when the shell ends (its `exit`, a close, the preview going, a minute with nobody watching: a closed tab gives its place back) |
+| `POST /v1/previews/{id}/shell/sessions/{sh}/keys` | `{ data }` (base64, at most 64 KiB) | 204; 404 once it's closed |
+| `POST /v1/previews/{id}/shell/sessions/{sh}/resize` | `{ cols, rows }` | 204 |
+| `DELETE /v1/previews/{id}/shell/sessions/{sh}` | | 204 |
+| `GET /v1/previews/{id}/files?service=&path=` | | `application/x-tar`: what's at `path` (absolute) in the running `roll.toml` service, started if it sleeps (`docker cp`), `x-roll-service` naming it; 404 before any of the answer when nothing is there; said in the activity ("ana copied /app/out.csv out of web"). Admin, as the shell is (it reads anything the service keeps); a roll apps service's is 409 (roll apps' own `…/files` on `pv-`). Runs on the preview's holder |
+| `GET /v1/previews/{id}/forward?service=&port=` | WebSocket | one TCP connection to `port` in the running `roll.toml` service, any port it listens on (a debugger's, an admin's), published or not: a relay (busybox `nc`, `alpine:3.20`, 32 MiB, no capabilities) in the service's network namespace, removed with the connection; binary both ways, an empty message a half-close, as roll apps' tunnel (`roll preview forward`). The service is held awake while connections are open; at most 32 a preview (409); said in the activity once an hour per person, service and port. Admin; a roll apps service's is 409 (roll apps' own tunnel). Runs on the preview's holder (roll-cluster forwards the upgrade) |
+| `PUT /v1/previews/{id}/files?service=&path=` | a tar, at most 100 MiB | `{ service, path }`: its files written under the directory `path`, said in the activity. Admin |
 | `GET /v1/previews/{id}/requests` | | `{requests: [{at, service, method, path, status, ms}]}`: its latest 200 requests through roll's runtime, newest first (Vercel's request log): never the query, which can carry a token, and the path masked as its logs are (a path is its code's to choose); `ms` until the answer's headers. Kept in memory on the preview's holder (runs there) and gone with its last service; a roll apps instance's requests are roll apps' own. The sheet's Requests tab, errors at a glance; `roll preview requests <id> [--errors]` |
 | `GET /v1/previews/{id}/metrics` | | `{services: [{service, cpu, memory_bytes, memory_mb}]}`: what its running services use right now (Render's and Railway's metrics): cores of CPU and resident memory, against the memory each runs with. It comes from `docker stats` for roll's runtime. For roll apps' instances it's their last finished minute (`…/environments/pv-…/metrics`), with memory per instance. A sleeping service isn't listed. 404 for no such preview. It runs on the preview's holder, and is read again at most every 10 s, however many sheets ask. The sheet shows it on each running service, read every 15 s while it's open |
 | `GET /v1/previews/{id}/errors?minutes=` | | `{minutes, groups: [{service, fingerprint, kind, title, count, first_seen, last_seen, sample}]}`: its services' errors in the last `minutes` (5–1,440, 60 by default, rounded up to a 15-minute step), grouped as roll apps groups an environment's (Sentry's issues and Vercel's runtime logs, from the output alone; docs/apps/http-api.md): a stack trace (Python, JVM, Node, Go) joined from its lines, or an error line, by what it is (its type and first frames with numbers and ids taken out). `fingerprint` names a group (keyed under a random key per process, so it says nothing of the error and changes on a restart); `kind` is `python`, `java`, `node`, `go` or `line`; `sample` is the newest one whole (8 KiB at most); newest first. Title and sample are masked as its logs are, a value a cut split included (its start at a line's end is `***` too): its code can print its secrets. Its values are read (an audited read) only when there's an error. A roll apps service's are roll apps' own (`…/environments/pv-…/errors`, its 50 most frequent); a `roll.toml` service's are read from its container's last 2,000 lines in the span (`docker logs --timestamps --since`, at most 4 MiB a stream for at most 10 s), masked before they're grouped, its newest 50. A runtime that doesn't stamp lines gives none (its tail's old crash would read as new). 404 for no such preview. It runs on the preview's holder and is read again at most every 10 s for a span, however many ask. The sheet's Errors tab |
@@ -1614,12 +1668,15 @@ type Settings = {
   more: every word against title, branch, slug, repo or `#number`, and All, Needs you, Failed,
   Awake, Asleep with their counts; `lib/preview-filter.ts`), status, cost, how many errors
   its services wrote in the last hour, logs, and open, sleep, wake, reset and delete
-  actions. A preview's sheet has its Overview, Activity, Logs (live while a service runs),
-  Requests and Errors (its services' errors grouped, newest first, each with how many times, when
+  actions. A preview's sheet has its Overview, Activity, Logs (live while a service runs; a filter
+  box, text or `/regex/`, and "Problems only", warnings and worse read as roll apps reads a line's
+  level, `lib/preview-logs.ts`; errors in red; all in the browser on the masked lines), Shell
+  (a terminal on a `roll.toml` service's shell: "A shell in a preview"; it shares roll apps'
+  terminal, `components/terminal-screen.tsx`), Requests and Errors (its services' errors grouped, newest first, each with how many times, when
   last seen, the service and its title, opening to its newest sample; the last hour, 6 or 24),
   plus a "Previews" overlay on the canvas that draws each
   preview's branches next to their parents.
-- **CLI**: `roll preview ls|show|open|create|rm|sleep|wake|refresh|reset|keep|logs [-f]|activity|visitors|settings|usage|bypass|wait|up|down|masks|errors|metrics|hooks`.
+- **CLI**: `roll preview ls|show|open|create|rm|sleep|wake|refresh|reset|keep|logs [-f]|activity|visitors|settings|usage|bypass|wait|up|down|masks|errors|metrics|hooks|shell|cp|forward`.
   - `roll preview up [--project P] [--repo owner/name] [--name N] [--no-wait] [--timeout S] [--force]`
     previews a checkout's working tree as it is, as `netlify deploy` and `vercel deploy` do from a
     directory: uncommitted and untracked files included, what `.gitignore` leaves out left out.
@@ -1961,49 +2018,58 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-Every feature in review has its `roll preview` command too: `metrics`, `hooks` (#344), `errors`
-(on #326), `visitors` (on #335), `masks [--apply]` (on #324), `up`/`down` (#314).
+Every feature in review has its `roll preview` command too: `shell` (#364).
 
-1. **Sign-in access, in review** (#285): `access: "team"` (Vercel Authentication, Netlify's team
-   access), so only people signed in to roll who can open the project open its previews, not
-   whoever has the link. On roll apps the `pv-` environment gets apps' `access: {signed_in:
-   true}`; on roll's runtime previews' gate does the same ticket handshake. Being fixed after an
-   independent review: signing out of roll must end a preview session, the ticket URL keeps the
-   service's own scheme and port, a racing access change, the link token stripped under `team`.
-   Review findings fixed (914b738b5); main merged in (c256d4eaf). The feedback button under
-   `team` is #300 on it: a visitor let in through roll (link or a live team session) gets it, and
-   a note is posted from roll's dashboard as the signed-in person; a team preview's services on
-   roll apps get no button yet (apps adds it only for link visitors).
-2. **Who opened a team preview, in review** (#335, on #285): a sign-in to a `team` preview (the ticket traded for a
-   session) is said in its activity, once per person per session ("ana opened it"), so a team sees
-   who looked at production's data; the sheet lists who opened it lately.
-3. **`roll preview up`, in review** (#314): a preview of the working tree (Netlify's `netlify deploy`, Vercel's
-   `vercel deploy`): from a checkout of a project's repo, uncommitted changes included, a commit
-   made without touching the user's index or HEAD is pushed to a branch of their own
-   (`preview/<user>/<name>`) and previewed, the URL printed once it's ready; again moves it,
-   `roll preview down` deletes the branch and the preview.
-4. **Mask suggestions, in review** (#324, review findings fixed: never a suggestion that fails masking, checked on real Postgres; Tonic's and Neon's anonymisation). The dialog reads columns only when asked, so opening it never resets a running parent's idle timer: previews read production's data, and
-   today the rules dialog only says "mask what holds people's data" when a resource has no masks
-   at all. Name the columns and fields that look like personal data (email, phone, name, address,
-   birth date, IP, national ids, tokens) in each branched Postgres, NoSQL and search parent and
-   aren't masked, each with a one-click rule (`email`, `redact`, `hash`, `null`), on the rules
-   dialog and the sheet.
-5. **A preview's errors on its sheet, in review** (#326, review findings fixed: masked whole before any cut, bounded log reads, a count route that reads no secrets; Vercel's runtime logs, Sentry's grouping): the sheet shows
-   raw logs only. Group a preview's errors by fingerprint: roll apps' `…/environments/pv-…/errors`
-   for its instances, the same grouping over roll's runtime's logs (stack traces joined, ids and
-   numbers taken out), masked as logs are; the count on the row and the pull request comment's
-   "What went wrong".
-6. **A project's own preview domain, the wiring, in review** (draft #341, on #305; previews' half #275 is on main): after apps'
-   #278, rolld hands apps' `PreviewRouter` previews' `runtime::serve_host`, and
-   `scripts/preview-apps.sh` checks a verified domain over plain HTTP, a roll apps service and a
-   runtime one by label. TLS waits on wildcard certificates over DNS-01 on the edge.
-7. **Bots on Git URL services** (draft #305, on apps' #282; and draft #343 on apps' #317: a bot's branch push makes no preview at all, by its pusher): previews' own `GitPull` carries the
-   opener and `skip_authors` reaches a Git URL service's pull requests. Undraft once #282 is on
-   main.
-8. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+1. **A shell in a preview's service, in review** (#364, on #363; Render's shell, `heroku run`):
+   the API, the engine's sessions, the exec, `roll preview shell` and the sheet's Shell tab (roll
+   apps' terminal, shared; a roll apps service opens roll apps' own shell on its `pv-`
+   environment). See "A shell in a preview". The look at the real sheet found three bugs, fixed:
+   a terminal that remounted closed its own shell, closed tabs held shells for 10 minutes, and a
+   short command's last output raced its end.
+2. **A preview's `roll.toml` services and jobs in the project's log drains, in review** (#363):
+   roll apps' drains with `previews: true` got only roll apps' own `pv-` environments, so a team
+   with Datadog on a drain saw half of a preview's output. See "Log drains" under Services.
+3. **Search and levels in the sheet's logs, in review** (`feature/roll-previews-log-search`, on
+   #364; Vercel's runtime logs, Render's log explorer): a filter box (text or `/regex/`, on the
+   masked lines, in the browser), "Problems only", and errors marked, read as roll apps reads a
+   line's level. Next for it: stderr apart (the followed stream doesn't say which yet).
+4. **Files in and out of a preview's service, in review** (`feature/roll-previews-files`, on
+   #364; `roll preview cp`, as roll apps' `…/files`): a dump taken in the shell, a fixture put
+   in, `docker cp` in the service's container, admin as the shell is, 100 MiB a time.
+5. **Secret references in previews' variables** (roll secrets' suggestion, after its #329):
+   `env`, `env_for` and a preview's own variables are plain values outside roll secrets
+   (redacted on read, but outside health, leak scanning, reach and the cut-off), and a payment
+   provider's test key is just what teams put there. Take `roll://ENV/KEY` there, resolved
+   through `Secrets::resolve_for(ResourceRef::new(kind, id).untrusted(), …)` (never a
+   protected environment or a sensitive key), and offer to keep a pasted value in the base
+   environment's folder.
+6. **A port of a preview's service on a laptop, in review** (`feature/roll-previews-forward`, on
+   #372; `roll preview forward`, roll apps' tunnel): any port the service listens on, through a
+   relay in its network namespace (so Roll-only egress's `--internal` networks don't stop it),
+   admin, on the preview's holder.
+7. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-9. **Watch: pg-control's recovery to a time seconds old** (unowned).
-10. **Watch: a cold start on a Docker name conflict.**
+8. **Watch: pg-control's recovery to a time seconds old** (unowned).
+9. **A cold start on a Docker name conflict, in review** (#374): a start whose container name is
+   still being removed (a stop just before it) removes it again and tries twice more, half a
+   second apart, before it fails.
+
+Landed in previews' lock turn of 2026-11-19 (main 5eb41bf5f, exactly the gated tree: one
+combined tree, each step tagged, gated once with both live checks, landing simulated with
+`git merge-tree` before the chain, then landed one at a time, each identical to its step):
+- team access, people signed in to roll (#285), its feedback button (#300) and who opened it
+  (#335);
+- `roll preview up` and `down`, a preview of the working tree (#314);
+- mask suggestions, every one applying on real Postgres (#324);
+- a preview's errors grouped on its sheet (#326);
+- `roll preview metrics` and `hooks` (#344);
+- `skip_authors` on a Git URL service's pull requests (#305) and a bot's branch push by its
+  pusher (#343), after apps' #282 and #317;
+- a project's own preview domain wired to roll apps' ingress (#341), after apps' #278;
+- the Next list (#296).
+The gate's live script caught one thing no suite did: #285's review fix retires a project's
+links when it leaves `link` access, and `preview-cost.sh` still used the old cookie (fixed on
+#285).
 
 Landed in previews' lock turn of 2026-11-18 (main 440e13ebf; one combined tree, each step
 tagged and gated once with both live checks, then landed one at a time, each identical to its
