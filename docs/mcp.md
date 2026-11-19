@@ -852,9 +852,11 @@ waits on a sibling PR reaching main is last.
    begun with the old link (#351); alerts naming every SSO change and everything a change to a
    person did (#333); the session list ending sessions as the policy does (#337); signing out of
    the others pointing to tokens and connections (#342); a 48 KiB cut for dense JSON (#355).
-   Open for the next turn (fresh chain `~/.local/share/roll-mcp/turn4-chain.sh`, waiter
-   `roll-mcp-lock348`, land with `land-chain.sh`): #348, #322, #323, #328, #333, #334, #337, #338,
-   #342, #345, #349, #351, #353, #355, #360.
+   Open for the next turn (landed by the unit `roll-mcp-turn4-auto` once previews releases: a
+   fresh chain on main, one gate, one PR a round): #348, #322, #323, #328, #333, #334, #337, #338,
+   #342, #345, #349, #351, #353, #355, #360 (approvals remembered for a week or 30 days), #362
+   (debugging reads as tools: apps' errors, traces and metrics, queue internals, preview errors
+   and unmasked personal data, search branches).
 2. **Landed 2026-11-18, turn 3 (main e84194b6f, ci green):** a person's own data export (#283),
    hardware keys only (#286), one provider for people and agents (#287), an SSO connection's
    session length (#289) and back-channel logout (#292), allowed networks (#294), a second factor
