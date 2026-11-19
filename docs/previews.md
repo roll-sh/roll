@@ -2025,19 +2025,25 @@ Ranked by what a person notices first. Done so far:
    through `Secrets::resolve_for(ResourceRef::new(kind, id).untrusted(), …)` (never a
    protected environment or a sensitive key), and offer to keep a pasted value in the base
    environment's folder.
-2. **stderr apart in the sheet's logs**: the followed stream merges a container's stdout and
+2. **WebSocket upgrades checked against the dashboard's origins** (from turn 6's review): a
+   WebSocket upgrade is a GET, which rolld's gate lets past its CSRF and Origin check, so an
+   admin's `SameSite=Lax` cookie opens `…/forward` (and roll apps' tunnel and shell) from any page
+   on the API's own site. It only matters where a preview host shares the API's registrable
+   domain (a self-hosted `api.acme.dev` with `*.preview.acme.dev`). One check in the gate for
+   every product's upgrades, agreed with the apps and MCP threads.
+3. **stderr apart in the sheet's logs**: the followed stream merges a container's stdout and
    stderr (`docker logs -f` read as one), so the sheet can't show stderr on its own. The drains
    already tell them apart (`drain_from` tags each line); tag `follow` the same way and carry it
    to the sheet.
-3. **Traces of a preview's `roll.toml` services** (Vercel's preview traces, roll apps' `traces`):
+4. **Traces of a preview's `roll.toml` services** (Vercel's preview traces, roll apps' `traces`):
    roll apps keeps an environment's spans when it sets the OpenTelemetry SDK's variables; a
    preview's services on roll's runtime get none. Give them `OTEL_EXPORTER_OTLP_ENDPOINT` to a
    preview-scoped intake and show its recent traces on the sheet, beside its errors.
-4. **Files and ports from the sheet**: a download for a path (the shell's `…/files`) and the
+5. **Files and ports from the sheet**: a download for a path (the shell's `…/files`) and the
    `roll preview forward` line for a port, so the sheet covers what the CLI does.
-5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+6. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-6. **Watch: pg-control's recovery to a time seconds old** (unowned).
+7. **Watch: pg-control's recovery to a time seconds old** (unowned).
 
 Landed in previews' lock turn 6 of 2026-11-19 (main 741f8b789, exactly the gated tree; built and
 gated before the lock came, rebuilt on the new main when it did, the stack's own diff checked line
