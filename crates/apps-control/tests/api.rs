@@ -2731,6 +2731,60 @@ async fn a_log_drain_speaks_syslog_or_otlp() {
     assert!(records.iter().any(|r| r["body"]["stringValue"].as_str().is_some_and(|t| t.contains("listening on")) && r["timeUnixNano"].as_str().is_some_and(|t| t.len() >= 19)), "{records:?}");
 }
 
+/// Uptime checks (Cloud Monitoring's): a path GET'd through the environment's own proxy on its
+/// schedule; two failures in a row are `check.down` once, the next pass resolves it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_uptime_check_goes_down_and_comes_back() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "web", json!({"port": 80, "min_instances": 1})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    for bad in [json!([{"name": "Bad Name", "path": "/"}]), json!([{"name": "a", "path": "x"}]), json!([{"name": "a", "path": "/", "every_s": 5}]), json!([{"name": "a", "path": "/"}, {"name": "a", "path": "/b"}])] {
+        assert_eq!(call(&w.api, "PUT", &base, Some(json!({"checks": bad}))).await.0, StatusCode::BAD_REQUEST, "{bad}");
+    }
+    let (st, env) = call(&w.api, "PUT", &base, Some(json!({"checks": [{"name": "home", "path": "/", "every_s": 60}]}))).await;
+    assert_eq!((st, env["checks"][0]["every_s"].as_u64(), env["check_states"][0]["up"].clone()), (StatusCode::OK, Some(60), Value::Null), "{env}");
+    // Each pass a minute on (the pass runs a check that's due), its result read back.
+    let t0 = code_sql::now_ms() + 3_600_000;
+    let pass = |n: i64| {
+        let w = &w;
+        let base = base.clone();
+        async move {
+            w.apps.cron_pass(t0 + n * 61_000).await;
+            for _ in 0..200 {
+                let st = call(&w.api, "GET", &base, None).await.1["check_states"][0].clone();
+                if st["last_at"].as_i64() == Some(t0 + n * 61_000) && !st["status"].is_null() {
+                    return st;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            panic!("pass {n} never came back");
+        }
+    };
+    let up = pass(0).await;
+    assert_eq!((up["up"].as_bool(), up["status"].as_u64()), (Some(true), Some(200)), "{up}");
+    // It now expects what the app never answers (whichever instance answers): it fails.
+    call(&w.api, "PUT", &base, Some(json!({"checks": [{"name": "home", "path": "/", "every_s": 60, "status": 299}]}))).await;
+    let once = pass(1).await;
+    assert_eq!((once["up"].as_bool(), once["failures"].as_u64()), (Some(true), Some(1)), "one failure isn't down: {once}");
+    let down = pass(2).await;
+    assert_eq!((down["up"].as_bool(), down["error"].as_str()), (Some(false), Some("answered 200")), "{down}");
+    pass(3).await;
+    call(&w.api, "PUT", &base, Some(json!({"checks": [{"name": "home", "path": "/", "every_s": 60}]}))).await;
+    assert_eq!(pass(4).await["up"].as_bool(), Some(true));
+    // Each event is written a moment after its state.
+    let mut ev = Value::Null;
+    for _ in 0..200 {
+        ev = call(&w.api, "GET", "/v1/apps/events?after=0", None).await.1;
+        if ev.to_string().contains("alert.resolved") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let kinds: Vec<&str> = ev["events"].as_array().unwrap().iter().filter(|e| e["data"]["check"] == "home").map(|e| e["kind"].as_str().unwrap()).collect();
+    assert_eq!(kinds, ["check.down", "alert.resolved"], "down once, then resolved: {ev}");
+}
+
 /// PagerDuty and Opsgenie targets (Heroku's, Cloud Monitoring's): a failure opens an incident
 /// keyed by its service, environment and alert, a resolved alert or the next good deploy closes
 /// it; the key goes with each call and never comes back.
@@ -2823,7 +2877,7 @@ async fn a_failed_deploy_is_sent_to_the_projects_targets_signed_and_retried() {
     let (st, hook) = call(&w.api, "POST", &base, Some(json!({"url": format!("http://{ok_at}/hook")}))).await;
     assert_eq!(st, StatusCode::CREATED, "{hook}");
     let secret = hook["secret"].as_str().unwrap().to_string();
-    assert_eq!(hook["events"], json!(["deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"]), "the default events");
+    assert_eq!(hook["events"], json!(["check.down", "deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"]), "the default events");
     let (_, down) = call(&w.api, "POST", &base, Some(json!({"kind": "webhook", "url": format!("http://{bad_at}/x"), "events": ["deploy.failed"]}))).await;
     let (_, list) = call(&w.api, "GET", &base, None).await;
     assert!(!list.to_string().contains(&secret) && !list.to_string().contains("/hook"), "neither the secret nor the URL comes back: {list}");

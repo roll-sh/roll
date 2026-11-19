@@ -1941,6 +1941,24 @@ the same host. No cookie, no id, no third party.
 tag, the script is served, beacons read back as p75s by route, a beacon with nothing measured is
 refused; off again, the paths are the app's.
 
+## Uptime checks
+
+An environment's `checks` (Cloud Monitoring's uptime checks, Render's and Fly's HTTP checks;
+`PUT …/environments/{env} {checks: [{name, path, every_s?, timeout_s?, status?, contains?}]}`,
+the environment's Settings → Uptime checks): at most five, each a GET of its own `path` every
+`every_s` (30–3600, default 60) through the environment's own proxy on its owner, as a visitor's
+request goes but past its gates (allow list, firewall, rate limit, access), as a path schedule's
+call is, with `roll-uptime/1.0` as its user agent. It passes on `status` (any 2xx or 3xx when it
+says none) and, with `contains`, an answer whose first 64 KiB holds the text. Two failures in a row
+are `check.down` (its name, path, status or why there was none), once until it passes again; the
+next pass is `alert.resolved` for it. Both go to notification targets (`check.down` is in the
+defaults), and on-call ones keep an incident per check. A check is a request: it wakes a service
+that scales to zero and keeps it from sleeping as often as it runs, so a sleepy service's check
+runs rarely or not at all. Not run in a preview, a paused environment or one in maintenance. How
+each stands (`check_states`: up, failures in a row, the last status and time, why it failed, since
+when it's down) is in memory on the owner, so a takeover starts it over.
+`an_uptime_check_goes_down_and_comes_back`, `checks::tests`.
+
 ## Visitors
 
 Visitors and page views (Vercel's Web Analytics, Netlify's, Plausible's way: no script to add, no
@@ -3014,16 +3032,17 @@ skipped the registry check; runs and consoles ran their sidecars unmetered; side
 the app's for autoscaling; invented event properties grew a read without bound; sbt's script name
 dropped `_`, missed `"""…"""` and had no tree of its own without a plugin; a dev start.sh turned a
 static site into a container. Firewall rules on more than the path were built next, then PagerDuty and Opsgenie targets
-("Notifications"), then external proxy rewrites and conditional rules ("Static sites").
+("Notifications"), then external proxy rewrites and conditional rules ("Static sites"), then uptime
+checks ("Uptime checks").
 
 1. **Variables that belong in roll secrets** (roll secrets' review): a secret-looking variable
    pasted into the panel offers "Move to roll secrets" (into the project environment apps
    already injects), and a variable may be `roll://ENV/KEY`, resolved through roll secrets'
    `Secrets::resolve_for(ResourceRef::new(Kind::Service, id), …)` (#329, audited as the service,
    rotation seen through `digest_for`), so values reach its health, leak guard and audit chain.
-2. **Uptime checks and heartbeats** (Cloud Monitoring's uptime checks, Healthchecks'):
-   `checks: [{path, every_s, expect}]` through the public URL (said to keep a scale-to-zero
-   service awake), `check.down`/resolved; `POST /__roll/heartbeat/<token>` for jobs outside roll.
+2. **Heartbeats** (Healthchecks', Cronitor's): `heartbeats: [{name, every_s, grace_s}]` on an
+   environment, each with a token; `POST /__roll/heartbeat/<token>` from a job outside roll (or a
+   worker), a missed one `heartbeat.missed`, the next ping resolving it.
 3. **Image vulnerability scanning** (Cloud Run's Artifact Analysis): a pinned Trivy run in the
    builder after each build, counts on the deployment, `…/deploys/{dep}/vulnerabilities`,
    `deploy.vulnerable`, an opt-in `run.block_on: "critical"`; `rebuild_on_base` rescans.

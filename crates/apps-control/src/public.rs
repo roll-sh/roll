@@ -180,6 +180,32 @@ pub(crate) async fn call_scheduled(apps: Arc<Apps>, service: &str, env: &str, ho
     Ok(r)
 }
 
+/// GET `path` of an environment on its owner for an uptime check (`crate::checks`), as `host`
+/// asks and past its gates as a schedule's call is: the status and at most `max` bytes of the
+/// answer, or why it never answered.
+pub(crate) async fn call_check(apps: Arc<Apps>, service: &str, env: &str, host: &str, path: &str, timeout: std::time::Duration, max: usize) -> std::result::Result<(u16, Vec<u8>), String> {
+    let mut req = Request::builder().method(axum::http::Method::GET).uri(path).header(header::HOST, host).header(header::USER_AGENT, "roll-uptime/1.0").body(Body::empty()).map_err(|e| e.to_string())?;
+    req.extensions_mut().insert(Scheduled);
+    tokio::time::timeout(timeout, async {
+        let r = proxy(apps, service, env, None, req).await;
+        let status = r.status().as_u16();
+        // At most `max` read; the rest dropped, so its instance's lease and meter end with it.
+        let mut body = r.into_body().into_data_stream();
+        let mut out = Vec::new();
+        use futures::StreamExt;
+        while let Some(Ok(chunk)) = body.next().await {
+            let room = max.saturating_sub(out.len());
+            out.extend_from_slice(&chunk[..chunk.len().min(room)]);
+            if out.len() >= max {
+                break;
+            }
+        }
+        (status, out)
+    })
+    .await
+    .map_err(|_| format!("it didn't answer within {} s", timeout.as_secs()))
+}
+
 /// The owner's route for public traffic another node sends it ([`serve`]).
 const INTERNAL: &str = "/internal/apps/public";
 /// On it: the service, environment and deployment (`<service>/<env>[/<deployment>]`), and the
