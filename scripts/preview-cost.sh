@@ -406,6 +406,27 @@ api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d]" | grep -q 
 for _ in $(seq 1 30); do [ "$(docker ps -aq --filter name=roll-previews-fwd- | wc -l)" = 0 ] && break; sleep 0.5; done
 [ "$(docker ps -aq --filter name=roll-previews-fwd- | wc -l)" = 0 ] || { echo "a forward's relay should go with its connection"; exit 1; }
 
+say "traces: with the project's traces on, the service gets OpenTelemetry's variables, and spans it posts are the preview's traces"
+api PUT "/v1/previews/projects/$PRJ/settings" '{"traces":true}' >/dev/null
+# It restarts with them (its deploy's fingerprint): the env it writes at start says so.
+OTEL=""
+for _ in $(seq 1 120); do
+  OTEL=$(curl -sS -b "$JAR" -H "Host: $HOST" "http://$API/env.txt" | sed -n 's/^OTEL_EXPORTER_OTLP_ENDPOINT=//p')
+  [ -n "$OTEL" ] && break
+  sleep 1
+done
+[ -n "$OTEL" ] || { echo "the service should get OTEL_EXPORTER_OTLP_ENDPOINT with traces on"; exit 1; }
+# The span an SDK in it would send, to the endpoint and token it was given. Posted from this host:
+# on ai-server the firewall keeps containers from the host (as with the mail catcher and host
+# Postgres), so the container's own `host.docker.internal` hop can't be checked here.
+OTEL_HERE=$(echo "$OTEL" | sed 's#host.docker.internal#127.0.0.1#')
+NOW_NS=$(date +%s%N)
+SPANS="{\"resourceSpans\":[{\"resource\":{\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"web\"}}]},\"scopeSpans\":[{\"spans\":[{\"traceId\":\"abababababababababababababababab\",\"spanId\":\"0101010101010101\",\"name\":\"GET /checkout\",\"startTimeUnixNano\":\"$((NOW_NS - 40000000))\",\"endTimeUnixNano\":\"$NOW_NS\"},{\"traceId\":\"abababababababababababababababab\",\"spanId\":\"0202020202020202\",\"parentSpanId\":\"0101010101010101\",\"name\":\"charge card\",\"startTimeUnixNano\":\"$((NOW_NS - 30000000))\",\"endTimeUnixNano\":\"$((NOW_NS - 5000000))\",\"status\":{\"code\":2}}]}]}]}"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' -d "$SPANS" "$OTEL_HERE/v1/traces")" = 200 ] || { echo "the service's OpenTelemetry endpoint should take its spans: $OTEL_HERE"; exit 1; }
+TRACES=$(api GET "/v1/previews/$PV/traces" | jq_ "[(t['name'], t['spans'], t['error']) for t in d['traces']]")
+case "$TRACES" in *"('GET /checkout', 2, True)"*) ;; *) echo "the span posted should be the preview's trace: $TRACES"; exit 1;; esac
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' -d '{}' "http://$API/v1/previews/$PV/otlp/not-the-token/v1/traces")" = 404 ] || { echo "another token should be 404"; exit 1; }
+
 say "a screenshot of the service (github.screenshot), once per head"
 # And /pricing, which the test service doesn't have (a 404 page, one failed request).
 api PUT "/v1/previews/projects/$PRJ/settings" '{"github":{"screenshot":true,"pages":["/pricing","web:/","wiki:/"],"widths":[768],"hide":[".clock"],"budget":{"load_ms":60000},"openapi":"/openapi.json","endpoints":["/openapi.json"],"states":[{"name":"tab","page":"/","steps":[{"press":"Tab"}]}],"browsers":["firefox","webkit-phone"]}}' >/dev/null
