@@ -16145,3 +16145,166 @@ shuffled) and wire (74) also passed with `--profile verify-checked`, and the reg
 files' 17,654 EXPLAINs ran on a checked build without a panic. An earlier quick-check failed
 regress (opr_sanity's row order, the catalog growth fixed above) and golden_wire (the dropped
 autovacuum rule); both are in the text.
+
+## Behaviour gaps closed by agent 262 (2026-11-19)
+
+Recorded against a private PostgreSQL 18.6 (`a262-pg`, the reference image `postgres@sha256:77f58511...`,
+default settings, autovacuum's naptime an hour). Probes in `~/.cache/a262/probe`: `cmp.sh` runs a SQL
+file in a fresh database on both servers and diffs; `mxcmp.sh` runs a two-session Python scenario on
+both with ids renamed by first appearance (recreate `a262-pg` first: its multis are the cluster's);
+`persist.sh` the same, then a clean restart or (`MODE=kill`) a kill -9 of both, then the xmax rows.
+A probe past the model lowers the engine's limit: `ENGENV=ROLL_MODEL_MAX_VERSIONS=1000 ./eng.sh
+<binary> <port>`.
+
+### Tables past the model's limit (item 1)
+
+**What exactness would cost by lifting the limit** (BENCH "Tables past the model's limit at 10M
+rows"): the bulk script at 10M rows, one plain dist binary of `bc9102ebb` at the 400,000 limit and
+lifted (`ROLL_MODEL_MAX_VERSIONS`). Lifted (every table modelled, so exact), user instructions per
+step: COPY +17.7%, CREATE INDEX +50.6%, CREATE UNIQUE INDEX +49.8%, UPDATE of half the rows
++119%, DELETE of a quarter +39%, VACUUM +146%, ANALYZE x15, `count(*), sum(c)` x5.3; peak memory
+1.7-1.8 GB -> 3.5 GB (VmHWM), about 125 bytes a version and 140 bytes a live row of model
+(PostgreSQL's heap and two indexes take about 150 bytes a row on disk and 2 GB of shared buffers;
+its UPDATE 283 G against the lifted engine's 292 G and the estimating engine's 133 G). So the
+limit stays: a model costing more than PostgreSQL's pages, held in memory for every big table, and
+per-write upkeep above the estimate's, is not the way. What exactness needs instead, per
+difference, is in the estimate (`EstHeap`), each paid for only where it is used:
+
+- **Row locks (xmax): done** (`exec/sizing/estlocks.rs`). The estimate keeps, per row whose
+  latest version has a lock's xmax, that xmax and the version's xmin (`EstHeap::locks`, by the
+  key's `key_hash`; a few dozen bytes a locked row, nothing for the others), computed with agent
+  249's rules (`new_xmax`, `already_locked`, `carried_xmax`): FOR SHARE / FOR UPDATE / FOR KEY
+  SHARE, a foreign key check's KEY SHARE on the referenced row, ON CONFLICT DO UPDATE's lock
+  carried into the new version (`RETURNING (xmax = 0)` and a later `SELECT xmax` agree), two
+  lockers' MultiXactId. An UPDATE's new version carries the lockers still running, a DELETE or
+  UPDATE drops the old version's, VACUUM freezes them with `freeze_xmax` where the freezing is
+  required or the VACUUM aggressive (FREEZE, table age), and the multis left hold relminmxid back
+  (`estlocks::min_multi`). Durable as the modelled tables' xmax records (`XMAX_PREFIX`), at TID
+  `multixact::EST_AT` with the version's xmin in the key (`est_xmax_key`: one record a version, so a
+  locker committing after an updater can't overwrite the updater's record of the carried lock), in
+  the transaction's state records; read when an estimate is made (restored from its records, a
+  table outgrowing the model, a rewrite). A model laid out afresh takes them back where the
+  version's xmin matches; the model's update and delete drop them. Writes past the model look for
+  locks only when the table's group of oids may have one (`Models::locks_maybe`: one atomic load
+  for the bulk UPDATE / DELETE). Matched (`mxbig.py`, limit 1,000, 5,000 rows): two FOR SHARE
+  lockers (one multi, its members), a lone locker, a foreign key insert, an upsert, an update of
+  a locked row, FOR UPDATE rolled back, KEY SHARE then another session's update, a delete,
+  VACUUM's relminmxid, VACUUM FREEZE, a database-wide VACUUM's datminmxid; after a clean restart
+  and after kill -9 of both servers every xmax as PostgreSQL's (`persist.sh`). Tests
+  `crash_ctids::multixact_past_the_model_survives_a_restart` / `_a_crash` (249's scenario, the
+  model's limit at 2). pgrowlocks reads them too (a multi's every member while one runs, at the
+  estimated TID, else the row's place in the scan). The whole isolation suite with the model's
+  limit at 2 versions (every spec's tables past it: `ROLL_MODEL_MAX_VERSIONS=2` on the
+  quick-check's `pg_isolation` binary and reference): 1,601 / 1,648 permutations as PostgreSQL's;
+  the differing specs are SSI's page and index predicate locks (predicate-gin / -gist / -hash,
+  read-write-unique-4), a second UPDATE's row order (eval-plan-qual-trigger, below) and
+  intra-grant-inplace (as with the model); the lock specs (tuplelock-*, multixact-no-*,
+  lock-update-traversal, fk-deadlock) all match, and of the engine's `roll-multixact` all but the
+  KEY SHARE over a running update. Not done: the xmax of a version an update or delete replaced,
+  for snapshots that still see it (a running or aborted updater, a REPEATABLE READ reader: 0
+  here); FOR KEY SHARE past a running update going on to its version (no version chain past the
+  model).
+- **ctid: done for tables keyed by row ids** (`EstHeap::rowid_tid`, `sizing::estimated_ctid`):
+  a version placed out of key order has its TID (`moved`); a row of a run is at the run's first
+  line pointer plus the row ids between them (one sequence a table, no cache, so the ids follow the
+  order rows went in), which stays exact after deletes and VACUUM because PostgreSQL never moves a
+  line pointer. Shown in the system column and the wait contexts (`row_tid`). Matched
+  (`big2.sql`): rows of a load, after deleting a third, after an update. A table keyed by a primary
+  key keeps the key's hash for rows of runs: their offsets would need the run's rows counted
+  in storage order with the deleted ones (a per-page bitmap of deleted offsets, ~37 bytes a page,
+  and a count from the run's start or a cursor in a scan).
+- **Placement after VACUUM, HOT on pages with room** (not done): needs each page's free space and
+  free line pointers (the model's page state but the tuples' visibility, for pruning), and the old
+  version's TID at an update: the heap model's page, at a cost close to the model's.
+- **A second UPDATE in heap order** (not done): the UPDATE's scan would read in heap order (the
+  merge `next_heap_ordered` does for plain scans), which 237 measured as the reason not to.
+- **TRUNCATE then COPY into an index of repeating values** (not done): a key presence filter (a
+  Bloom filter, ~1 byte a distinct key) for the leaf summaries' duplicates, and _bt_strategy's
+  split of leaves of duplicates (237: exact presence alone gives 1,631 leaves against 1,178).
+
+### MultiXact's rest (item 2)
+
+- **datminmxid** (`session/ddl/vacuum.rs` `catalogs_vacuumed`, `update_datminmxid`). A
+  database-wide VACUUM (or one naming a catalog) sets the system catalogs' and their TOAST
+  tables' relminmxid to OldestMxact (`static_rows::catalog_storage`, the 107 relations of kind r
+  / t), and every VACUUM then computes vac_update_datfrozenxid's datminmxid, the oldest relminmxid
+  of the database's tables, materialized views and TOAST tables, catalogs included
+  (`system::relminmxid_rels`), kept in the cluster registry (`DbEntry::min_mxid`) and shown in
+  pg_database; it never goes back.
+- **Truncation** (`MultiXacts::truncate`, `Database::truncate_multis`): vac_truncate_clog's
+  TruncateMultiXact. PostgreSQL's multis are the cluster's; here each database has its own ids, so
+  the cluster's oldest datminmxid is compared by time: each datminmxid keeps a bound
+  (`MinMxid::bound`: when its multi was made, or the oldest running transaction then for a
+  database with none left, recorded by its database-wide VACUUM), and a database's multis before
+  its own datminmxid and made before every other database's bound go, in every open database.
+  `pg_get_multixact_members` of one is "MultiXactId N does no longer exist -- apparent
+  wraparound", as PostgreSQL's once every database, template0 included, was vacuumed
+  (`trunc.py`); the records are deleted (the last one made stays: it gives the next id) and the
+  oldest left is kept under multi 0's key. Still differing: another database's datminmxid (its
+  own next multi here, 1 for one without multis; PostgreSQL's is the cluster's OldestMxact); a
+  closed database's multis wait for its own next VACUUM to go.
+- **`count(DISTINCT xmax)`**: ORDER BY, window ORDER BY, WITHIN GROUP and DISTINCT aggregates over
+  xid, cid, aclitem and arrays of unorderable types fail with "could not identify an ordering
+  operator for type xid" (DETAIL "Aggregates with DISTINCT must be able to sort their inputs." for
+  an aggregate; an anonymous record's fields are compared as it runs, as record_ops does), PARTITION
+  BY over one with "could not implement window PARTITION BY" (`binder::expr::unorderable`); GROUP BY
+  and SELECT DISTINCT still hash them. Found on the way: system columns couldn't be read in a
+  window's PARTITION BY / ORDER BY, a WINDOW clause or an aggregate's ORDER BY (pg_query's walker
+  doesn't go into them, so the scans didn't carry them: `mentions_sys_column`). Golden
+  `a262_unorderable`.
+
+### Left lists (item 3)
+
+- **A FROM-list function over an empty table** (233, 240, 248, 254): `gather_group` walked into a
+  FROM function's own join (the empty row and the call, its arguments as LATERAL values), so the
+  join search had two items for it and put a Materialize over the pair; now it is one relation, a
+  Function Scan (never materialized: `InKind::FunctionScan`, rescanned at its run cost), and
+  `t0, fset(0)` plans as PostgreSQL's: the function outer, its error raised over the empty table.
+- **EXPLAIN dropping a PL FROM-function's alias under a WHERE or a join** (254): `add_filter`
+  pushed the WHERE into the function's join and rebuilt it without its `from_call`; the quals now
+  stay above the call (the Function Scan's Filter), and the join case was the item above. VERBOSE's
+  `Function Call:` comes back with it. Golden `a262_from_functions`.
+- **EXPLAIN ANALYZE `Index Searches` for array conditions**: one primitive index scan per run of
+  values whose matches begin on the leaf the scan is on (_bt_advance_array_keys;
+  `skipcount::array_searches`, from the btree model): `{1,2}` 1, `{1,400}` 2, five values on three
+  leaves 3, a bitmap index scan's too.
+- **Incremental Sort's cost under LIMIT**: EXPLAIN's Limit re-costs an Incremental Sort below it
+  with cost_incremental_sort's limit_tuples (the planner already did): `ORDER BY a, b LIMIT 10`
+  over groups of 909 rows 41.93..583.60 as PostgreSQL's (was 66.96..858.92). Golden
+  `a262_explain_analyze`. Left: `LIMIT 1` over groups of 10 rows is 449.30 against 449.31.
+- **254's dropped CREATE INDEX rule**: index_update_stats leaves the table's relpages / reltuples
+  alone when autovacuum isn't running (AutoVacuumingActive: autovacuum and track_counts); the
+  golden_wire, parallel_scan and heap_order_scan harnesses now set `autovacuum_naptime` past their
+  run instead of autovacuum off (their expectations were recorded with it on). Test
+  `autovacuum::create_index_without_autovacuum_leaves_table_statistics`.
+- **Merge join's inner rows** (not done): a merge join whose outer side ends first reads its
+  inner side up to one row past the outer's last key in PostgreSQL (an inner Sort shows 31
+  rows); the engine builds its inner side whole before probing (`HashJoinNode` in merge mode), so
+  it shows 20,000. A Merge Right Join run with its sides the other way round shows the same. The
+  way in is a lazy inner build in merge mode (pull inner rows while the probe's key is past the
+  last read).
+- Not worked on this round: EXPLAIN ANALYZE's sort memory and q15's dense bitmap lines; catalogs'
+  dead row versions and all-visible bits; system views planned as engine relations; index
+  expressions' calls folded once per relcache load; scroll cursors after page splits; pg_statio
+  block counts of inserts; an inlined SQL function's equality shown `(a = 1)` for `(1 = a)`.
+
+### Measured
+
+BENCH "Tables past the model's limit at 10M rows" has the lift's numbers and the gate. Point reads
+and short transactions, plain dist builds, base `bc9102ebb` against the round: on lane A (pgbench, 8
+clients, five pairs each) every run had 0.85-10.9 foreign cores, so no pair counts (medians -0.16% and
+-2.72% user instructions a transaction); in process (the `bench` example, 1 client, five pairs each,
+(I30 - I10) / (ops30 - ops10)) point selects **+0.01%** (every pair within -0.12..+0.17%), short
+transactions -1.24% (+-2% a pair). Bulk script: not re-measured against base (nothing on its paths
+changed for tables without row locks but one atomic load a row on UPDATE / DELETE past the model).
+
+Verification: quick-check with `QC_CHECKED=1` on `2478ed62e` (the round on `bc9102ebb`): build,
+clippy (16 warnings, none new in changed files), tests 490 passed in 41 binaries and the same with
+`--profile verify-checked`, crash seeds 1-3 x 2 and power_cut_at_every_point, regress 51,148 /
+51,150 with 0 newly differing, isolation 1,647 / 1,648, pg_dump 14,609 passed. A first quick-check
+failed golden `internal_types` (`count(distinct (x, 1))` over json: an anonymous record's fields
+are compared as it runs, record_ops; fixed); the isolation suite past the model is above.
+
+These supersede agent 249's "Not done" note on datminmxid, truncation, `count(DISTINCT xmax)` and
+a table too big to model keeping no xmax, and the FROM-function and alias entries of the left
+lists of agents 233, 240, 248 and 254 (their sections are left as they were).

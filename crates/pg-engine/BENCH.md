@@ -339,6 +339,69 @@ foreign cores per pass: b1 1.69 1.03 2.07; b2 1.29 0.96 1.45.
 **Dropped: the shorter walk of a passed row (b3 against b2, 1 pair)**: q13 +1.1, q20 +1.2, q22
 +1.2, q19 +0.9, q14 +0.8, the 22 +0.21%.
 
+## Tables past the model's limit at 10M rows (2026-11-19, agent 262)
+
+HANDOFF "Behaviour gaps closed by agent 262" has what it means. The bulk script (agent 246's
+`bulkx.sh` with joined windows, copied to `~/.cache/a262/bench`) at 10,000,000 rows
+(`~/.cache/a262/gen.py`: the 1M file's formula, `bulk10m.tsv`), one plain dist build of origin's
+`bc9102ebb` (**b0**) run twice per pair: at the model's limit (400,000 versions: the table's sizes
+are the estimate's) and lifted (`ROLL_MODEL_MAX_VERSIONS=1000000000`: the table modelled), lane C,
+two pairs in opposite orders (`lift10m.sh`), and PostgreSQL 18.6 once (`pg10m.sh`). G user
+instructions of the server's cgroup; every counter ran 100% of its window. Foreign load on the lane
+was 0.8-2.8 cores in every engine run (lane.sh: 4.1-4.9 cores over each pair; the counts repeat
+within 0.2% regardless). Rows equal in every run (count and sums of every column).
+
+| step | limit (2 runs) | lifted (2 runs) | lifted / limit | PostgreSQL 18.6 |
+|---|---|---|---|---|
+| COPY in | 88.6 | 104.3 | +17.7% | 65.0 |
+| CREATE INDEX | 52.8 | 79.5 / 79.7 | +50.6% | 40.6 |
+| CREATE UNIQUE INDEX | 34.4 | 51.6 / 51.5 | +49.8% | 29.0 |
+| UPDATE half | 133.2 | 292.1 | +119.3% | 283.2 |
+| DELETE a quarter | 98.8 / 98.9 | 137.5 | +39.1% | 16.0 |
+| VACUUM | 17.5 | 43.0 | +146% | 23.0 |
+| ANALYZE | 1.30 | 19.5 | x15 | 0.76 |
+| `count(*), sum(c)` | 3.50 | 18.7 | x5.3 | 4.74 |
+| peak (cgroup / VmHWM, MB) | 1,808-2,024 / 1,655-1,845 | 3,857-4,050 / 3,490 | | 6,032 / - |
+
+Model memory lifted, the server's RSS after each step less the limit's run: 1,873 MB after the
+UPDATE (15M versions, about 125 bytes a version), 1,039 MB after VACUUM (7.5M live rows, about 140
+bytes a row; PostgreSQL's heap and two indexes take about 150 bytes a row on disk, 2 GB of
+shared buffers in memory).
+
+### Gate: point reads and short transactions (lane A, plain dist)
+
+**b0** (`bc9102ebb`) against **n1** (`31e738b03`: the round without its last commit, the FROM
+functions' join-search and qual change, which touches planning only), agent 254's harness
+(`~/.cache/a262/gate`: pgbench scale 1, 8 clients, `-M prepared`, a fresh server each run, perf
+stat of the server's user instructions over seconds 3..11), five alternating pairs a workload, one
+pair per `tools/lane.sh a` hold. **Every run had 0.85-10.9 cores of foreign load on the lane's
+CPUs (a255, a259, a263 benchmarking there, host load 40-60): no pair counts under the 1.0 rule.**
+For what they show, user instructions per transaction, new against base:
+
+| workload | pairs | per pair | median |
+|---|---|---|---|
+| point reads (`-S`) | 5 | -0.16, -0.16, -0.75, -0.46, +0.37% | -0.16% |
+| short transactions (`-N`) | 5 | +0.33, -2.72, -5.67, +11.6, -3.45% | -2.72% |
+
+So the gate was taken **in process** too (the brief's fallback): the `bench` example built with each
+engine (`tools/dist.sh --example bench`: plain dist, **ib0** at `bc9102ebb`, **in2** at the round's
+code, `9a514b518`'s tree = `27f3198cf`), `bench --target inproc oltp --clients 1 --only <case>` on a
+fresh 100,000-row database a run, in a container on lane A's server CPUs (6,7 / 24,25), perf stat of
+the process's user instructions (client and engine both), (I30 s - I10 s) / (ops30 - ops10) a
+run pair (`~/.cache/a262/inproc`); five alternating pairs a case, one per lane hold (lane.sh's
+foreign load 3.8-7.6 cores in every hold).
+
+| case | per pair | median |
+|---|---|---|
+| point_select (37,7xx instructions a read) | -0.12, +0.02, +0.01, -0.06, +0.17% | **+0.01%** |
+| short_txn (UPDATE, SELECT, INSERT, COMMIT with fsync; ~275,000) | +1.15, -2.26, -1.24, -18.5 (a base outlier), +2.43% | -1.24% |
+
+Point reads are within +0.3% in every pair. The short transactions spread by +-2% a pair (their
+commits wait on the WAL's fsync, and the waiting threads' instructions count), around no change:
+nothing in the round runs on their paths but a branch in the model's update and delete when the old
+version has an xmax (none here) and one atomic load of `Models::locks_maybe` for tables past the
+model (none here).
+
 ## Analytic CPU, round 5 (2026-11-18/19, agent 258)
 
 HANDOFF "Analytic CPU, round 5" has what changed. Lane C (servers in containers on CPUs
