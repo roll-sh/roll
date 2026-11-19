@@ -725,8 +725,17 @@ Built 2026-11-19 (in review): Terraform for search clusters (#350's item 3): clu
    once, sealed, never shown back), tests them with a sample, deletes them, and opens a
    `semantic_text` quickstart in the console. The index browser's mapping view is a field table
    (type, inference endpoint, vector dims, similarity and index type, analyzers, what isn't
-   indexed; the JSON a toggle away). Left: a roll secret as an endpoint's key (after #20), MCP
-   tools (they follow the routes; the MCP thread).
+   indexed; the JSON a toggle away). An API-keyed endpoint's key can be a roll secret of the project
+   whose canvas holds the cluster ("A roll secret" in the tab, `roll search inference create --secret`):
+   rolld's `POST /v1/search/clusters/{id}/inference/secrets` reads it as the caller (`reveal`),
+   creates the endpoint with it, and makes a `search-inference` sync, so a rotated value is pushed
+   to the endpoint (`_inference/{task}/{id}/_update`) within seconds; the sync pins where the
+   endpoint sends the key, a digest of its settings, and follows the cluster's id through a
+   restore under another name (docs/secrets.md, "roll search's inference endpoints"). Left: the
+   same for `s3` snapshot repositories' credentials (item 5); an endpoint whose key follows a
+   secret made from the Elasticsearch API (it stays
+   as Elasticsearch has it: clients send keys); and MCP tools for the new route (they follow the
+   routes; the MCP thread).
 12. **Semantic search** (the largest gap against Elasticsearch 9 and Elastic Cloud after machine
    learning). Landed in #265: the rest of Elasticsearch 9's inference services (Azure OpenAI, Amazon
    Bedrock, Google Vertex AI and AI Studio, Hugging Face, Mistral, Voyage AI, Jina AI, DeepSeek,
