@@ -2129,31 +2129,30 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Secret references in previews' variables, in review** (#436;
-   roll secrets' suggestion): `roll://ENV[/folder]/KEY` in `env` and `env_for` becomes roll
-   secrets' own reference in the preview's environment, read there untrusted; a plain value's
-   `${` is escaped. Next for it: a preview's own variables once roll secrets' `bind_ref` lands
-   (#407), and the rules dialog offering to keep a pasted value in the base environment.
-2. **New errors against main, in review** (#438, on #431; Sentry's new issues in a release): an
-   error group main's preview doesn't have on the record (`new_errors`), the verdict strip, the
-   change page and a count in the pull request's checks.
-3. **Repeated queries in a trace, in review** (#441, on #438; Sentry's N+1 detection): a trace
-   running one database statement ten times or more says it (`repeated`) on the trace list, the
-   route table, the trace and `roll preview traces --routes`.
-4. **A preview's own variables only in roll secrets** (roll secrets' review, 2026-11-19): `PUT
-   …/{id}/env` keeps their values as plain JSON in the previews table though they go to the
-   preview's ephemeral environment anyway; keep only their names there (roll secrets the one copy,
-   sealed), or seal the column bound to the preview's id. Nothing logs or prints the map today.
+1. **Where a slower route's time went, in review** (`feature/roll-previews-route-why`; Sentry's
+   span comparison): the span whose median grew most against main's preview's, with each slower
+   route on `…/routes`, the sheet, the record, the change page and the pull request's comment.
+2. **References a person chooses** (after roll secrets' #407, `bind_ref`/`resolve_as`): a
+   preview's own variables take `roll://` too, and the rules' references (who wrote each is kept,
+   `env_refs`) move to bindings, so a writer who loses reveal stops theirs.
+3. **New errors that survive per-preview values**: an error line holding the preview's own id
+   or its branch's host reads as new against main's though it's the same error; mask a
+   preview's own values out of a line (as roll apps' grouping takes ids out) before it's
+   fingerprinted, so both previews' groups meet.
+4. **The rules dialog offers to keep a pasted value in roll secrets** (roll secrets' suggestion):
+   a value that looks like a credential pasted into `env` is offered a key in the base
+   environment, and the rule becomes its `roll://` reference.
 5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
 6. **Watch: pg-control's recovery to a time seconds old** (unowned).
 
-In review after turn 9: the routes slower than main's preview on the record, the verdict strip,
-the change page and the pull request's comment (#431); an error group opens its request's trace
-(#433). An independent review of them, and of #436, #438 and #441, found 13 things, all fixed
-before they land (a reference past the reveal check by a leading space, reads that held up the
-reconcile pass, reports on every trace's drift, false new errors where main's can't be read, log
-lines in a public comment, unmasked span services and keys) or written down as limits.
+Landed in previews' lock turn 10 of 2026-11-19 (main 020da3033, exactly its gated tree): the
+routes slower than main's preview in the verdict strip, the change page and the comment (#431),
+new errors against main's preview (#438), repeated queries in traces (#441), an error group
+opening its request's trace (#433), `roll://` references in the preview rules (#436, reviewed by
+roll secrets) and a preview's own variables sealed at rest (#452). An independent review of
+them found 13 things, all fixed before they landed or written down as limits; a look at them on
+real data found the route table cutting names to two characters (fixed on #441).
 
 Landed in previews' lock turn 9 of 2026-11-19 (main 84d246b60, exactly its gated tree): turns 7
 and 8's review fixes (span bytes bounded, traces off for roll apps, the intake's token first,
