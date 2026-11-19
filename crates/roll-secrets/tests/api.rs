@@ -106,10 +106,10 @@ impl SyncTarget for FakeSync {
     }
 }
 
-/// Audit deliveries, kept instead of sent; an OIDC issuer's keys, served; vendors' APIs; and a
-/// Snowflake account's SQL API.
+/// Audit deliveries, kept instead of sent; an OIDC issuer's keys, served; vendors' APIs; a
+/// Snowflake account's SQL API; and MongoDB Atlas's Admin API.
 #[derive(Default)]
-struct Sent(Mutex<Vec<Value>>, Mutex<Option<Value>>, std::sync::atomic::AtomicBool, Mutex<Option<(String, String)>>, Mutex<BTreeMap<(String, String), Value>>, Mutex<Vendors>, FakeSnowflake);
+struct Sent(Mutex<Vec<Value>>, Mutex<Option<Value>>, std::sync::atomic::AtomicBool, Mutex<Option<(String, String)>>, Mutex<BTreeMap<(String, String), Value>>, Mutex<Vendors>, FakeSnowflake, FakeAtlas);
 
 /// A fake Snowflake user: its two key slots (base64 SPKI DER), password, default role, granted
 /// roles and days to expiry.
@@ -215,6 +215,131 @@ struct Vendors {
 const TWILIO_SID: &str = concat!("AC", "0123456789abcdef", "0123456789abcdef");
 const TWILIO_KEYS: &str = concat!("https://api.twilio.com/2010-04-01/Accounts/", "AC", "0123456789abcdef", "0123456789abcdef", "/Keys");
 
+const ATLAS_GROUP: &str = "5f1d3c2b4a6e7f8091a2b3c4";
+const ATLAS_CLIENT: &str = "mdb_sa_id_0123456789abcdef";
+
+/// MongoDB Atlas's Admin API for one project, as its docs describe it: the service account's
+/// secret, the access tokens it gave, its database users (as the API shows them, with the
+/// password kept aside), every call (method and path) and every request body.
+#[derive(Default)]
+struct FakeAtlas {
+    secret: Mutex<String>,
+    tokens: Mutex<Vec<String>>,
+    token_requests: std::sync::atomic::AtomicUsize,
+    users: Mutex<BTreeMap<String, (Value, String)>>,
+    calls: Mutex<Vec<String>>,
+    bodies: Mutex<Vec<String>>,
+}
+
+impl FakeAtlas {
+    fn password(&self, user: &str) -> Option<String> {
+        self.users.lock().unwrap().get(user).map(|(_, pw)| pw.clone())
+    }
+
+    /// An ISO 8601 date in UTC (`2026-11-17T12:00:00Z`), as unix ms.
+    fn date_ms(d: &Value) -> Option<i64> {
+        let c = regex::Regex::new(r"^(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d):(\d\d)Z$").unwrap().captures(d.as_str()?)?;
+        let n = |i: usize| c[i].parse::<u16>().unwrap();
+        let date = time::Date::from_calendar_date(i32::from(n(1)), time::Month::try_from(n(2) as u8).ok()?, n(3) as u8).ok()?;
+        Some(date.with_hms(n(4) as u8, n(5) as u8, n(6) as u8).ok()?.assume_utc().unix_timestamp() * 1000)
+    }
+
+    /// A date Atlas takes for `deleteAfterDate`: in the future, within a week of the request.
+    fn check_date(&self, d: &Value, now_ms: i64) -> bool {
+        Self::date_ms(d).is_some_and(|ms| ms > now_ms && ms <= now_ms + 7 * 24 * 3_600_000)
+    }
+
+    fn answer(&self, method: &str, url: &str, headers: &[(&str, &str)], body: Option<(&str, &str)>) -> (u16, Value) {
+        use base64::Engine;
+        let header = |k: &str| headers.iter().find(|(h, _)| h.eq_ignore_ascii_case(k)).map(|(_, v)| *v);
+        let path = url.strip_prefix("https://cloud.mongodb.com").unwrap();
+        self.calls.lock().unwrap().push(format!("{method} {path}"));
+        if path == "/api/oauth/token" {
+            self.token_requests.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let basic = format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("{ATLAS_CLIENT}:{}", self.secret.lock().unwrap())));
+            if method != "POST" || body != Some(("application/x-www-form-urlencoded", "grant_type=client_credentials")) || header("authorization") != Some(basic.as_str()) {
+                return (401, json!({ "error": "invalid_client", "error_description": "Invalid client credentials" }));
+            }
+            let token = format!("eyJ.fake-{}", self.tokens.lock().unwrap().len());
+            self.tokens.lock().unwrap().push(token.clone());
+            return (200, json!({ "access_token": token, "expires_in": 3600, "token_type": "Bearer" }));
+        }
+        let bearer = header("authorization").and_then(|a| a.strip_prefix("Bearer ")).unwrap_or_default();
+        if !self.tokens.lock().unwrap().iter().any(|t| t == bearer) {
+            return (401, json!({ "error": 401, "errorCode": "NOT_AUTHORIZED", "reason": "Unauthorized" }));
+        }
+        let Some(rest) = path.strip_prefix(&format!("/api/atlas/v2/groups/{ATLAS_GROUP}")) else {
+            return (404, json!({ "error": 404, "errorCode": "GROUP_NOT_FOUND", "detail": "No group with ID found." }));
+        };
+        // Each resource answers only its own versions (406 otherwise), and a body is that version.
+        let version = match rest {
+            r if r.starts_with("/clusters/") => "application/vnd.atlas.2024-08-05+json",
+            r if r.starts_with("/flexClusters/") => "application/vnd.atlas.2024-11-13+json",
+            _ => "application/vnd.atlas.2023-01-01+json",
+        };
+        if header("accept") != Some(version) || body.is_some_and(|(t, _)| t != version) {
+            return (406, json!({ "error": 406, "errorCode": "INVALID_VERSION_DATE" }));
+        }
+        let body: Value = body.map(|(_, b)| serde_json::from_str(b).unwrap()).unwrap_or_default();
+        if body.is_object() {
+            self.bodies.lock().unwrap().push(body.to_string());
+        }
+        let now = code_sql::now_ms();
+        let mut users = self.users.lock().unwrap();
+        let shown = |u: &Value| {
+            let mut u = u.clone();
+            u["links"] = json!([{ "href": "https://cloud.mongodb.com/x", "rel": "self" }]);
+            u
+        };
+        match (method, rest) {
+            ("GET", "/databaseUsers?itemsPerPage=1") => (200, json!({ "results": users.values().take(1).map(|(u, _)| shown(u)).collect::<Vec<_>>(), "totalCount": users.len() })),
+            ("GET", "/clusters/Cluster0") => (200, json!({ "name": "Cluster0", "connectionStrings": { "standard": "mongodb://x", "standardSrv": "mongodb+srv://cluster0.abcde.mongodb.net" } })),
+            ("GET", "/flexClusters/Flex0") => (200, json!({ "name": "Flex0", "connectionStrings": { "standardSrv": "mongodb+srv://flex0.fghij.mongodb.net" } })),
+            ("GET", r) if r.starts_with("/clusters/") => (404, json!({ "error": 404, "errorCode": "CLUSTER_NOT_FOUND" })),
+            ("GET", r) if r.starts_with("/flexClusters/") => (404, json!({ "error": 404, "errorCode": "FLEX_CLUSTER_NOT_FOUND" })),
+            ("POST", "/databaseUsers") => {
+                let name = body["username"].as_str().unwrap_or_default().to_string();
+                let roles_ok = body["roles"].as_array().is_some_and(|r| !r.is_empty() && r.iter().all(|r| r["roleName"].is_string() && r["databaseName"].is_string()));
+                if body["groupId"] != ATLAS_GROUP || body["databaseName"] != "admin" || !roles_ok || !body["password"].is_string() || body.get("deleteAfterDate").is_some_and(|d| !self.check_date(d, now)) {
+                    return (400, json!({ "error": 400, "errorCode": "INVALID_ATTRIBUTE" }));
+                }
+                if users.contains_key(&name) {
+                    return (409, json!({ "error": 409, "errorCode": "USER_ALREADY_EXISTS" }));
+                }
+                let mut u = body.clone();
+                let pw = u.as_object_mut().unwrap().remove("password").unwrap().as_str().unwrap().to_string();
+                u.as_object_mut().unwrap().remove("groupId");
+                users.insert(name, (u.clone(), pw));
+                (201, shown(&u))
+            }
+            (m, r) => {
+                let Some(name) = r.strip_prefix("/databaseUsers/admin/") else { return (404, json!({ "error": 404, "errorCode": "RESOURCE_NOT_FOUND" })) };
+                let name = name.replace("%40", "@");
+                let Some((user, pw)) = users.get(&name).cloned() else { return (404, json!({ "error": 404, "errorCode": "USERNAME_NOT_FOUND" })) };
+                match m {
+                    "GET" => (200, shown(&user)),
+                    "DELETE" => {
+                        users.remove(&name);
+                        (204, Value::Null)
+                    }
+                    "PATCH" => {
+                        // The whole user comes back as read, with what changed.
+                        if body["groupId"] != ATLAS_GROUP || body["username"] != name.as_str() || body.get("links").is_some() || body["roles"] != user["roles"] || body.get("scopes") != user.get("scopes") || body.get("deleteAfterDate").is_some_and(|d| !self.check_date(d, now)) {
+                            return (400, json!({ "error": 400, "errorCode": "INVALID_ATTRIBUTE" }));
+                        }
+                        let mut u = body.clone();
+                        let pw = u.as_object_mut().unwrap().remove("password").and_then(|p| p.as_str().map(String::from)).unwrap_or(pw);
+                        u.as_object_mut().unwrap().remove("groupId");
+                        users.insert(name, (u.clone(), pw));
+                        (200, shown(&u))
+                    }
+                    _ => (405, json!({ "error": 405 })),
+                }
+            }
+        }
+    }
+}
+
 impl roll_secrets::Deliver for Sent {
     fn check(&self, url: &str) -> roll_secrets::Result<()> {
         if url.starts_with("https://") { Ok(()) } else { Err(roll_secrets::Error::BadRequest("url is a public https:// URL".into())) }
@@ -310,8 +435,13 @@ impl roll_secrets::Deliver for Sent {
         Ok(answer.to_string().into_bytes().into())
     }
     /// SendGrid's and Twilio's key APIs, matched on the URL, each taking only its credential;
-    /// Snowflake's SQL API apart ([`Sent::snowflake`]).
+    /// Snowflake's SQL API ([`Sent::snowflake`]) and MongoDB Atlas's Admin API ([`FakeAtlas`]) apart.
     fn request(&self, method: &str, url: &str, headers: &[(&str, &Secret)], body: Option<(&str, &Secret)>, _: usize) -> roll_secrets::Result<(u16, zeroize::Zeroizing<Vec<u8>>)> {
+        if url.starts_with("https://cloud.mongodb.com/") {
+            let headers: Vec<(&str, &str)> = headers.iter().map(|(k, v)| (*k, v.expose())).collect();
+            let (status, v) = self.7.answer(method, url, &headers, body.map(|(t, b)| (t, b.expose())));
+            return Ok((status, if v.is_null() { Vec::new() } else { v.to_string().into_bytes() }.into()));
+        }
         if url.starts_with("https://myorg-acct.snowflakecomputing.com") {
             return self.snowflake(method, url, headers, body);
         }
@@ -445,9 +575,9 @@ impl roll_secrets::clouds::CloudTokens for FakeClouds {
 }
 
 /// A Postgres server outside roll: each role's current password and, for a dynamic login, its
-/// group and `VALID UNTIL`; the flag refuses every change.
+/// group and `VALID UNTIL`; the flag refuses every change; the gateways calls went through.
 #[derive(Default)]
-struct Outside(std::sync::Mutex<BTreeMap<String, String>>, std::sync::atomic::AtomicBool, std::sync::Mutex<BTreeMap<String, (String, i64)>>, std::sync::atomic::AtomicBool, std::sync::atomic::AtomicBool);
+struct Outside(std::sync::Mutex<BTreeMap<String, String>>, std::sync::atomic::AtomicBool, std::sync::Mutex<BTreeMap<String, (String, i64)>>, std::sync::atomic::AtomicBool, std::sync::atomic::AtomicBool, std::sync::Mutex<Vec<Option<String>>>);
 
 impl Outside {
     /// The admin's password as the server has it.
@@ -457,41 +587,43 @@ impl Outside {
 }
 
 impl roll_secrets::outside::OutsideDb for Outside {
-    fn check(&self, url: &str, _: Option<&str>, roles: &[String], _: Option<&str>) -> Result<(), String> {
+    fn check(&self, at: &roll_secrets::outside::Target<'_>, roles: &[String], _: Option<&str>) -> Result<(), String> {
+        self.5.lock().unwrap().push(at.gateway.map(str::to_string));
         // With the flag set, the server can't be reached at all.
         if self.4.load(std::sync::atomic::Ordering::Relaxed) {
             return Err("connection timed out".into());
         }
-        if !url.contains(&format!("admin:{}@", self.admin())) {
+        if !at.url.contains(&format!("admin:{}@", self.admin())) {
             return Err("password authentication failed".into());
         }
-        if url.contains("@db.example") && roles.iter().all(|r| r.starts_with("app_")) { Ok(()) } else { Err("there's no role that can log in".into()) }
+        if at.url.contains("@db.example") && roles.iter().all(|r| r.starts_with("app_")) { Ok(()) } else { Err("there's no role that can log in".into()) }
     }
-    fn set_password(&self, _: &str, _: Option<&str>, role: &str, password: &str) -> Result<(), String> {
+    fn set_password(&self, at: &roll_secrets::outside::Target<'_>, role: &str, password: &str) -> Result<(), String> {
+        self.5.lock().unwrap().push(at.gateway.map(str::to_string));
         if self.1.load(std::sync::atomic::Ordering::Relaxed) {
             return Err("connection refused".into());
         }
         self.0.lock().unwrap().insert(role.into(), password.into());
         Ok(())
     }
-    fn create_login(&self, _: &str, _: Option<&str>, name: &str, password: &str, group: &str, until: i64) -> Result<(), String> {
+    fn create_login(&self, _: &roll_secrets::outside::Target<'_>, name: &str, password: &str, group: &str, until: i64) -> Result<(), String> {
         self.0.lock().unwrap().insert(name.into(), password.into());
         self.2.lock().unwrap().insert(name.into(), (group.into(), until));
         Ok(())
     }
-    fn extend_login(&self, _: &str, _: Option<&str>, name: &str, until: i64) -> Result<(), String> {
+    fn extend_login(&self, _: &roll_secrets::outside::Target<'_>, name: &str, until: i64) -> Result<(), String> {
         self.2.lock().unwrap().get_mut(name).ok_or("no such role")?.1 = until;
         Ok(())
     }
-    fn drop_login(&self, _: &str, _: Option<&str>, name: &str) -> Result<(), String> {
+    fn drop_login(&self, _: &roll_secrets::outside::Target<'_>, name: &str) -> Result<(), String> {
         self.0.lock().unwrap().remove(name);
         self.2.lock().unwrap().remove(name);
         Ok(())
     }
-    fn set_own_password(&self, url: &str, _: Option<&str>, password: &str) -> Result<(), String> {
+    fn set_own_password(&self, at: &roll_secrets::outside::Target<'_>, password: &str) -> Result<(), String> {
         // The admin logs in with the password it has, which then changes; with the flag set, the
         // reply is lost after the change.
-        if !url.contains(&format!(":{}@", self.admin())) {
+        if !at.url.contains(&format!(":{}@", self.admin())) {
             return Err("password authentication failed".into());
         }
         self.0.lock().unwrap().insert("admin".into(), password.into());
@@ -787,6 +919,19 @@ impl roll_secrets::Workloads for Gate {
         self.tokens.lock().unwrap().retain(|_, g| &*g.id != id);
         Ok(())
     }
+    /// As `POST /v1/access/tokens`: its owner is whoever's request it is. As roll-access's
+    /// `create_grant`, extensions that name no one (no operator marker, person or grant) are
+    /// refused, even on an open server.
+    fn token(&self, ext: &axum::http::Extensions, name: &str, rule: roll_auth::scope::Rule) -> roll_secrets::Result<roll_secrets::Minted> {
+        if !roll_auth::Operator::on(ext) && ext.get::<roll_auth::SignedIn>().is_none() && roll_auth::Grant::on(ext).is_none() {
+            return Err(roll_secrets::Error::Forbidden("these extensions name no one".into()));
+        }
+        let (secret, id) = self.grant(name, rule, ext.get::<roll_auth::SignedIn>().map(|u| u.user.as_str()));
+        Ok(roll_secrets::Minted { id, secret, expires_at: 0 })
+    }
+    fn revoke_token(&self, id: &str, _: &str) -> roll_secrets::Result<()> {
+        self.revoke(id)
+    }
 }
 
 async fn fake_gate(axum::extract::State(gate): axum::extract::State<Arc<Gate>>, mut req: Request<Body>, next: axum::middleware::Next) -> axum::response::Response {
@@ -841,7 +986,7 @@ impl Api {
         let clouds = Arc::new(FakeClouds::default());
         let gate = Arc::new(Gate::default());
         let granted: Arc<dyn roll_auth::Grants> = Arc::new(Granted { gate: gate.clone(), people: people.clone() });
-        let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links, syncs, open: true, trust_forwarded_for: false, web_url: None, deliver: Some(sent.clone()), grants: Some(granted), people: Some(people.clone()), workloads: Some(gate.clone()), kms: Some(kms.clone()), sts: Some(sts.clone()), outside: Some(outside.clone()), directory: Some(directory.clone()), github: Some(github.clone()), clouds: Some(roll_secrets::clouds::Clouds { issuer: ISSUER_URL.into(), tokens: clouds.clone() }) };
+        let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links, syncs, open: true, trust_forwarded_for: false, web_url: None, deliver: Some(sent.clone()), grants: Some(granted), people: Some(people.clone()), workloads: Some(gate.clone()), kms: Some(kms.clone()), sts: Some(sts.clone()), outside: Some(outside.clone()), directory: Some(directory.clone()), github: Some(github.clone()), clouds: Some(roll_secrets::clouds::Clouds { issuer: ISSUER_URL.into(), tokens: clouds.clone() }), gateways: None };
         let secrets = Arc::new(Secrets::new(db.clone(), ws.clone(), opts).unwrap());
         let router = roll_workspace::router(ws.clone()).merge(roll_secrets::router(secrets.clone())).layer(axum::middleware::from_fn_with_state(gate.clone(), fake_gate));
         let mut api = Api { sent, gate, kms, sts, ws: ws.clone(), people, router, secrets, db, fake, sync, outside, directory, github, clouds, project: String::new(), _dir: dir };
@@ -2543,6 +2688,124 @@ async fn a_snowflake_account_rotates_key_slots_in_turn_and_makes_a_user_per_leas
 }
 
 #[tokio::test]
+async fn an_atlas_project_rotates_two_users_in_turn_and_makes_a_user_per_lease() {
+    let api = Api::new().await;
+    let atlas = &api.sent.7;
+    // A throwaway secret for the fake service account.
+    const SECRET: &str = "mdb_sa_sk_FakeOnlyForThisTest0123456789";
+    *atlas.secret.lock().unwrap() = SECRET.into();
+    for u in ["app_a", "app_b"] {
+        let user = json!({ "username": u, "databaseName": "admin", "roles": [{ "roleName": "readWrite", "databaseName": "shop" }], "scopes": [{ "name": "Cluster0", "type": "CLUSTER" }] });
+        atlas.users.lock().unwrap().insert(u.into(), (user, "set-by-hand".into()));
+    }
+    let tokens = || atlas.token_requests.load(std::sync::atomic::Ordering::Relaxed);
+    let new = |secret: &str, users: Value, roles: Value| json!({ "name": "shop-atlas", "group_id": ATLAS_GROUP, "client_id": ATLAS_CLIENT, "client_secret": secret, "managed_users": users, "roles": roles });
+    // Every name is checked before anything is sent.
+    for (body, why) in [
+        (new(SECRET, json!(["app_a"]), json!([])), "two"),
+        (new(SECRET, json!(["app_a", "app_b"]), json!(["atlasAdmin@admin"])), "atlasAdmin"),
+        (new(SECRET, json!(["app_a", "app_b"]), json!(["read"])), "role@db"),
+        (json!({ "name": "x", "group_id": "../../orgs", "client_id": ATLAS_CLIENT, "client_secret": SECRET, "roles": ["read@shop"] }), "group_id"),
+    ] {
+        let (s, e) = api.call(Method::POST, "/atlas-projects", Some(body)).await;
+        assert!(s == StatusCode::BAD_REQUEST && e.to_string().contains(why), "{e}");
+    }
+    assert!(atlas.calls.lock().unwrap().is_empty());
+    // A wrong secret gets no token: the answer has Atlas's code, never a secret.
+    let (s, e) = api.call(Method::POST, "/atlas-projects", Some(new("mdb_sa_sk_wrong", json!(["app_a", "app_b"]), json!(["read@shop"])))).await;
+    assert!(s == StatusCode::BAD_REQUEST && e.to_string().contains("invalid_client") && !e.to_string().contains("mdb_sa_sk_wrong"), "{e}");
+    let (s, e) = api.call(Method::POST, "/atlas-projects", Some(new(SECRET, json!(["app_a", "app_c"]), json!(["read@shop"])))).await;
+    assert!(s == StatusCode::BAD_REQUEST && e.to_string().contains("no database user app_c"), "{e}");
+    let a = api.ok(Method::POST, "/atlas-projects", Some(new(SECRET, json!(["app_a", "app_b"]), json!(["read@shop", "readWrite@shop.orders"])))).await;
+    let id = a["id"].as_str().unwrap().to_string();
+    assert!(id.starts_with("atl_") && a.get("client_secret").is_none() && a["client_id"] == ATLAS_CLIENT && a["group_id"] == ATLAS_GROUP && a["managed_users"] == json!(["app_a", "app_b"]), "{a}");
+    assert_eq!(tokens(), 3, "each registration took a token of its own, kept nowhere");
+
+    // Managed: the two users take turns, each rotation setting the idle one's password.
+    let link = |field: &str, options: Value| json!({ "kind": "mongodb_atlas", "ref": id, "field": field, "mode": "managed", "options": options });
+    let set = |ops: Vec<(&str, Value)>| json!({ "ops": ops.into_iter().map(|(k, l)| json!({ "op": "set", "key": k, "link": l })).collect::<Vec<_>>() });
+    for (l, why) in [(link("password", json!({ "grace_minutes": 1 })), "grace_minutes"), (link("connection_string", json!({})), "cluster option"), (link("password", json!({ "cluster": "Nope" })), "CLUSTER_NOT_FOUND")] {
+        let (s, e) = api.call(Method::POST, "/environments/production/changes", Some(set(vec![("MONGODB_PASSWORD", l)]))).await;
+        assert!(s == StatusCode::BAD_REQUEST && e.to_string().contains(why), "{e}");
+    }
+    // A Flex cluster isn't under clusters: its own route gives the connection string.
+    let on = json!({ "cluster": "Flex0" });
+    api.ok(Method::POST, "/environments/production/changes", Some(set(vec![("MONGODB_USERNAME", link("username", on.clone())), ("MONGODB_PASSWORD", link("password", on.clone())), ("MONGODB_URL", link("connection_string", on.clone()))]))).await;
+    let login = || async {
+        let v = api.values("production", "/").await["values"].clone();
+        assert_eq!(v["MONGODB_URL"], "mongodb+srv://flex0.fghij.mongodb.net");
+        (v["MONGODB_USERNAME"].as_str().unwrap().to_string(), v["MONGODB_PASSWORD"].as_str().unwrap().to_string())
+    };
+    let (user, first) = login().await;
+    assert!(user == "app_a" && atlas.password("app_a") == Some(first.clone()) && first.len() == 32 && first.bytes().all(|b| b.is_ascii_alphanumeric()), "{user}");
+    let rotate = || api.call(Method::POST, "/environments/production/secrets/MONGODB_PASSWORD/rotate", None);
+    assert!(rotate().await.0.is_success());
+    let (user, second) = login().await;
+    assert!(user == "app_b" && atlas.password("app_b") == Some(second.clone()), "{user}");
+    assert_eq!(atlas.password("app_a"), Some(first.clone()), "the first login keeps working through its grace");
+    // The rotation's hold on its user ends (it lasts two minutes).
+    let unhold = id.clone();
+    api.db
+        .write(move |c| {
+            let s: String = c.query_row("SELECT state FROM atlas_projects WHERE id = ?", [unhold.as_str()], |r| r.get(0))?;
+            let mut v: Value = serde_json::from_str(&s).unwrap();
+            v["held"] = json!({});
+            c.execute("UPDATE atlas_projects SET state = ? WHERE id = ?", [v.to_string().as_str(), unhold.as_str()])
+        })
+        .unwrap();
+    assert_eq!(rotate().await.0, StatusCode::CONFLICT, "app_a is still in its grace");
+    let p = api.project.clone();
+    api.db.write(move |c| c.execute("UPDATE leases SET expires_at = 0 WHERE project_id = ? AND kind = 'retired'", [p.as_str()])).unwrap();
+    let s = api.secrets.clone();
+    tokio::task::spawn_blocking(move || s.sweep().unwrap()).await.unwrap();
+    let retired = atlas.password("app_a").unwrap();
+    assert!(retired != first && retired != second, "its grace over, app_a's password is one nobody knows");
+    assert_eq!(atlas.users.lock().unwrap()["app_a"].0["scopes"], json!([{ "name": "Cluster0", "type": "CLUSTER" }]), "a rotation keeps the user's scopes");
+    assert_eq!(tokens(), 4, "one token served every call since");
+
+    // Dynamic: a user per lease with the link's roles, on the link's cluster only, which Atlas
+    // deletes after the lease (plus ten minutes) even if roll doesn't.
+    let dynamic = |field: &str, roles: Value| json!({ "kind": "mongodb_atlas", "ref": id, "field": field, "mode": "dynamic", "options": { "ttl_minutes": 15, "roles": roles, "cluster": "Cluster0" } });
+    let (s, e) = api.call(Method::POST, "/environments/staging/changes", Some(set(vec![("TMP_USER", dynamic("username", json!(["dbAdmin@shop"])))]))).await;
+    assert!(s == StatusCode::BAD_REQUEST && e.to_string().contains("dbAdmin@shop"), "only the project's roles: {e}");
+    let orders = json!(["readWrite@shop.orders"]);
+    api.ok(Method::POST, "/environments/staging/changes", Some(set(vec![("TMP_USER", dynamic("username", orders.clone())), ("TMP_PASSWORD", dynamic("password", orders.clone())), ("TMP_URL", dynamic("connection_string", orders.clone()))]))).await;
+    // Atlas revokes the cached token: roll takes a new one, once.
+    atlas.tokens.lock().unwrap().clear();
+    let r = api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "job:sync" }))).await;
+    assert_eq!(tokens(), 5);
+    let lease = r["leases"][0].as_str().unwrap().to_string();
+    let user = r["values"]["TMP_USER"].as_str().unwrap().to_string();
+    assert!(user == format!("roll_{lease}") && r["values"]["TMP_URL"] == "mongodb+srv://cluster0.abcde.mongodb.net", "{r}");
+    let (made, pw) = atlas.users.lock().unwrap()[&user].clone();
+    assert_eq!(Some(pw.as_str()), r["values"]["TMP_PASSWORD"].as_str());
+    assert_eq!((made["roles"].clone(), made["scopes"].clone()), (json!([{ "roleName": "readWrite", "databaseName": "shop", "collectionName": "orders" }]), json!([{ "name": "Cluster0", "type": "CLUSTER" }])));
+    let after = |u: &str| FakeAtlas::date_ms(&atlas.users.lock().unwrap()[u].0["deleteAfterDate"]).unwrap() - code_sql::now_ms();
+    assert!((24 * 60_000..=26 * 60_000).contains(&after(&user)), "the lease's 15 minutes and ten more");
+    // Renewing moves Atlas's date too.
+    api.ok(Method::POST, &format!("/leases/{lease}/renew"), Some(json!({ "ttl_minutes": 120 }))).await;
+    assert!((129 * 60_000..=131 * 60_000).contains(&after(&user)));
+    // Ending the lease deletes the user.
+    api.ok(Method::DELETE, &format!("/leases/{lease}"), None).await;
+    assert!(!atlas.users.lock().unwrap().contains_key(&user));
+    // Code nobody vetted gets no user at all.
+    let check = api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "check:fork#1", "untrusted": true }))).await;
+    assert!(check["values"].get("TMP_PASSWORD").is_none() && check["leases"] == json!([]), "{check}");
+    assert!(!atlas.users.lock().unwrap().keys().any(|u| u.starts_with("roll_")));
+
+    // The service account's secret is in no answer, audit row, request body to the API, or path.
+    let listed = api.ok(Method::GET, "/atlas-projects", None).await;
+    let audit = api.ok(Method::GET, "/audit", None).await;
+    let p = api.project.clone();
+    let rows: Vec<String> = api.db.read(move |c| c.query("SELECT summary || keys || action FROM audit WHERE project_id = ?", [p.as_str()], |r| r.get(0))).unwrap();
+    let sent = format!("{:?}{:?}", atlas.bodies.lock().unwrap(), atlas.calls.lock().unwrap());
+    assert!(audit.to_string().contains("atlas.add") && !format!("{listed}{audit}{rows:?}{sent}").contains(SECRET));
+    // In use, it can't go.
+    let (s, _) = api.call(Method::DELETE, &format!("/atlas-projects/{id}"), None).await;
+    assert_eq!(s, StatusCode::CONFLICT, "its keys keep it");
+}
+
+#[tokio::test]
 async fn a_cloud_account_trusts_one_projects_token() {
     use base64::Engine;
     let api = Api::new().await;
@@ -2587,7 +2850,7 @@ async fn a_cloud_account_trusts_one_projects_token() {
     // The deployment key rotates: the issuer's key is resealed with the new one (health says when
     // the previous key can go), and keeps signing once the previous key is gone.
     let reopen = |current: &str, previous: Option<&str>| {
-        let opts = Options { keyring: Ok(Keyring::new(current, previous).unwrap()), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None, clouds: Some(roll_secrets::clouds::Clouds { issuer: ISSUER_URL.into(), tokens: api.clouds.clone() }), kms: None, sts: None, outside: None, directory: None, github: None, workloads: None };
+        let opts = Options { keyring: Ok(Keyring::new(current, previous).unwrap()), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None, clouds: Some(roll_secrets::clouds::Clouds { issuer: ISSUER_URL.into(), tokens: api.clouds.clone() }), kms: None, sts: None, outside: None, directory: None, github: None, workloads: None, gateways: None };
         Secrets::new(api.db.clone(), api.ws.clone(), opts).unwrap()
     };
     let (old, new) = ("k".repeat(32), "n".repeat(32));
@@ -3237,7 +3500,7 @@ async fn a_customer_managed_key_wraps_the_data_key_and_revoking_it_locks_roll_ou
     let cert = api.values("production", "/").await["values"]["TLS_CERT"].clone();
     assert!(cert.as_str().is_some_and(|c| c.starts_with("-----BEGIN CERTIFICATE-----")), "{cert}");
     let node = |keyring: Keyring| {
-        let opts = Options { keyring: Ok(keyring), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None, kms: Some(api.kms.clone()), sts: None, outside: None, directory: None, github: None, clouds: None, workloads: None };
+        let opts = Options { keyring: Ok(keyring), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None, kms: Some(api.kms.clone()), sts: None, outside: None, directory: None, github: None, clouds: None, workloads: None, gateways: None };
         Arc::new(Secrets::new(api.db.clone(), api.ws.clone(), opts).unwrap())
     };
     // The deployment key rotates: health counts the wrapped project as not resealed until the
@@ -3264,7 +3527,7 @@ async fn a_customer_managed_key_wraps_the_data_key_and_revoking_it_locks_roll_ou
     assert_eq!(roll_secrets::router(fresh).oneshot(Request::delete(format!("/v1/secrets/projects/{}/kms", api.project)).body(Body::empty()).unwrap()).await.unwrap().status(), StatusCode::LOCKED);
     // Back with roll alone: no KMS needed any more.
     *api.kms.revoked.lock().unwrap() = false;
-    let opts = Options { keyring: Ok(Keyring::new(&"n".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None, kms: Some(api.kms.clone()), sts: None, outside: None, directory: None, github: None, clouds: None, workloads: None };
+    let opts = Options { keyring: Ok(Keyring::new(&"n".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None, kms: Some(api.kms.clone()), sts: None, outside: None, directory: None, github: None, clouds: None, workloads: None, gateways: None };
     let after = Arc::new(Secrets::new(api.db.clone(), api.ws.clone(), opts).unwrap());
     assert!(roll_secrets::router(after.clone()).oneshot(Request::delete(format!("/v1/secrets/projects/{}/kms", api.project)).body(Body::empty()).unwrap()).await.unwrap().status().is_success());
     *api.kms.revoked.lock().unwrap() = true;
@@ -3662,4 +3925,72 @@ async fn reach_names_who_and_what_can_read_a_folder() {
     // It lists the project's credentials: a project admin's.
     let (s, _) = api.req(Method::GET, "/environments/production/reach", None, Some(&deploy)).await;
     assert_eq!(s, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn a_gateway_has_one_token_that_opens_only_its_link_and_reaches_its_projects_databases() {
+    let api = Api::new().await;
+    let reader = api.token(json!({ "actions": ["read"] }));
+    let (s, _) = api.req(Method::POST, "/gateways", Some(json!({ "name": "vpc" })), Some(&reader)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "making a gateway is admin");
+    // A token doesn't make a gateway's token (a project-wide rule doesn't cover it), but may make
+    // one that logs in through an identity.
+    let admin = api.token(json!({ "actions": ["read", "admin"] }));
+    let (s, _) = api.req(Method::POST, "/gateways", Some(json!({ "name": "vpc" })), Some(&admin)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let (s, ci) = api.req(Method::POST, "/gateways", Some(json!({ "name": "ci", "token": false })), Some(&admin)).await;
+    assert!(s == StatusCode::CREATED && ci.get("token").is_none(), "{ci}");
+
+    // The operator on a server without sign-in (no one marked on the request) gets its token.
+    let made = api.ok(Method::POST, "/gateways", Some(json!({ "name": "vpc" }))).await;
+    let gw = made["gateway"]["id"].as_str().unwrap().to_string();
+    let secret = made["token"].as_str().unwrap().to_string();
+    let grant = api.gate.tokens.lock().unwrap().get(&secret).cloned().unwrap();
+    assert_eq!((grant.scope.0.as_slice(), made["gateway"]["token_id"].as_str()), (&[roll_secrets::gateways::rule(&gw)][..], Some(&*grant.id)), "one rule, naming the gateway");
+    assert!(api.secrets.gateway_link(&gw, false, None, Some(&grant)).is_ok());
+    // It opens its link and reads nothing; other tokens don't open the link.
+    let (s, _) = api.req(Method::GET, "/environments/production/values?path=/", None, Some(&secret)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let reader_grant = api.gate.tokens.lock().unwrap().get(&reader).cloned().unwrap();
+    assert!(api.secrets.gateway_link(&gw, false, None, Some(&reader_grant)).is_err());
+    assert!(api.secrets.gateway_link(ci["gateway"]["id"].as_str().unwrap(), false, None, Some(&grant)).is_err(), "nor another gateway's");
+
+    // Status as the link reports it; a replaced link's end leaves it online.
+    let listed = api.ok(Method::GET, "/gateways", None).await;
+    assert_eq!(listed.as_array().unwrap().len(), 2);
+    assert_eq!(listed[1]["status"]["online"], false);
+    let allow = vec!["10.0.0.0/8:5432".to_string()];
+    let hello = |conn| roll_secrets::gateways::Hello { conn, node: "node-a", version: "0.1.0", allow: &allow, grant: Some(&grant.id) };
+    api.secrets.gateway_connected(&gw, &hello("c1")).unwrap();
+    api.secrets.gateway_connected(&gw, &hello("c2")).unwrap();
+    api.secrets.gateway_disconnected(&gw, "c1", "replaced").unwrap();
+    assert!(!api.secrets.gateway_seen(&gw, "c1").unwrap() && api.secrets.gateway_seen(&gw, "c2").unwrap());
+    let status = api.ok(Method::GET, "/gateways", None).await[1]["status"].clone();
+    assert_eq!((status["online"].as_bool(), status["node"].as_str(), status["allow"].clone()), (Some(true), Some("node-a"), json!(allow)));
+
+    // A database through it: the provider is told which gateway (rolld lets it be private there).
+    let db = json!({ "name": "billing", "url": "postgres://admin:hunter2@db.example:5432/app", "roles": ["app_blue", "app_green"], "gateway": gw });
+    let d = api.ok(Method::POST, "/outside-databases", Some(db)).await;
+    assert_eq!((d["gateway"].as_str(), api.outside.5.lock().unwrap().last().cloned().flatten()), (Some(gw.as_str()), Some(gw.clone())));
+    let (s, _) = api.call(Method::POST, "/outside-databases", Some(json!({ "name": "y", "url": "postgres://a:b@db.example/x", "roles": ["app_c", "app_d"], "gateway": "gw_nottheirs" }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "only the project's own gateways");
+    // An identity that logs the gateway in: no scope of its own.
+    let mut identity = json!({ "name": "gw-k8s", "issuer": "https://k8s.example", "audience": "roll", "subject": "system:serviceaccount:roll:gateway", "gateway": gw, "jwks": Issuer::new().jwks().to_string(), "actions": ["read"] });
+    let (s, _) = api.call(Method::POST, "/identities", Some(identity.clone())).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    identity.as_object_mut().unwrap().remove("actions");
+    let i = api.ok(Method::POST, "/identities", Some(identity)).await;
+    assert_eq!(i["gateway"].as_str(), Some(gw.as_str()));
+
+    // Deleting: refused while used, then its token is revoked and its link can't open.
+    let (s, _) = api.call(Method::DELETE, &format!("/gateways/{gw}"), None).await;
+    assert_eq!(s, StatusCode::CONFLICT);
+    api.ok(Method::DELETE, &format!("/outside-databases/{}", d["id"].as_str().unwrap()), None).await;
+    api.ok(Method::DELETE, &format!("/identities/{}", i["id"].as_str().unwrap()), None).await;
+    let (s, _) = api.call(Method::DELETE, &format!("/gateways/{gw}"), None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    assert!(!api.gate.tokens.lock().unwrap().contains_key(&secret), "its token is revoked");
+    assert!(api.secrets.gateway_link(&gw, true, None, None).is_err());
+    let audit = api.ok(Method::GET, "/audit?action=gateway.connect", None).await.to_string();
+    assert!(audit.contains("node-a") && !audit.contains(&secret), "{audit}");
 }

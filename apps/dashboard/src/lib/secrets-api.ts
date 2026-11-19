@@ -7,7 +7,7 @@
  * revealed value for as long as it's shown and no longer.
  */
 
-import type { Action, SecretType, Environment, NewEnvironment, Overview, Folder, Import, Link, Secret, SetSecret, Batch, Change, Written, Applied, ChangeDetail, Version, Problem, Values, Grid, Compare, RequestState, RequestValue, Insights, ChangeRequest, LinkTarget, Lease, Token, Export, Ensure, Ensured, Suggestion, Identity, NewIdentity, Required, KeyType, Totp, Share, NewShare, NewToken, AuditEntry, AuditFilter, AuditFormat, Sink, Imported, ImportedAsRequest, ExportFormat, Sync, NewSync, SyncKind, Health, WhoAmI, Place, Rotator, SaasRotator, NewSaasRotator, AwsRole, Finding, ProjectFindings, SyncPreview, FileDiff, OutsideDatabase, Directory, NewDirectory, SnowflakeAccount, NewSnowflakeAccount, AwsUser, CloudAccount, NewCloudAccount, KubernetesCluster, NewKubernetesCluster, SignedCertificate, CaCertificate, Ca, SshCa, HostCertificate, UserCertificate, TransitKey, TransitPublicKey, Rotation, FolderPolicy, Reach, GitHubApp, SinkFormat } from "@roll/secrets/types";
+import type { Action, SecretType, Environment, NewEnvironment, Overview, Folder, Import, Link, Secret, SetSecret, Batch, Change, Written, Applied, ChangeDetail, Version, Problem, Values, Grid, Compare, RequestState, RequestValue, Insights, ChangeRequest, LinkTarget, Lease, Token, Export, Ensure, Ensured, Suggestion, Identity, NewIdentity, Required, KeyType, Totp, Share, NewShare, NewToken, AuditEntry, AuditFilter, AuditFormat, Sink, Imported, ImportedAsRequest, ExportFormat, Sync, NewSync, SyncKind, Health, WhoAmI, Place, Rotator, SaasRotator, NewSaasRotator, AwsRole, Finding, ProjectFindings, SyncPreview, FileDiff, OutsideDatabase, Directory, NewDirectory, SnowflakeAccount, NewSnowflakeAccount, AtlasProject, NewAtlasProject, AwsUser, CloudAccount, NewCloudAccount, KubernetesCluster, NewKubernetesCluster, SignedCertificate, CaCertificate, Ca, AcmeSettings, NewAcmeKey, SshCa, HostCertificate, UserCertificate, TransitKey, TransitPublicKey, Rotation, FolderPolicy, Reach, GitHubApp, SinkFormat, Gateway, MadeGateway } from "@roll/secrets/types";
 import type { Grant } from "./access-api";
 import { withSession } from "./code-token";
 import { grantFor, tokenOf } from "./secrets-tokens";
@@ -218,7 +218,7 @@ export function secretsApi(project: string) {
     addGitHubApp: (a: { name: string; app_id: number; installation_id: number; private_key: string; api_base?: string; repositories: string[]; permissions: Record<string, string> }) => req<GitHubApp>("POST", `${P}/github-apps`, a),
     deleteGitHubApp: (id: string) => req<null>("DELETE", `${P}/github-apps/${enc(id)}`),
     outsideDatabases: () => req<OutsideDatabase[]>("GET", `${P}/outside-databases`),
-    addOutsideDatabase: (d: { name: string; url: string; roles: [string, string] | []; group?: string; ca?: string }) => req<OutsideDatabase>("POST", `${P}/outside-databases`, d),
+    addOutsideDatabase: (d: { name: string; url: string; roles: [string, string] | []; group?: string; ca?: string; gateway?: string }) => req<OutsideDatabase>("POST", `${P}/outside-databases`, d),
     deleteOutsideDatabase: (id: string) => req<null>("DELETE", `${P}/outside-databases/${enc(id)}`),
     /** LDAP and Active Directory: registering one binds to it and finds its accounts, groups and base. */
     directories: () => req<Directory[]>("GET", `${P}/directories`),
@@ -228,6 +228,14 @@ export function secretsApi(project: string) {
     snowflakeAccounts: () => req<SnowflakeAccount[]>("GET", `${P}/snowflake-accounts`),
     addSnowflakeAccount: (a: NewSnowflakeAccount) => req<SnowflakeAccount>("POST", `${P}/snowflake-accounts`, a),
     deleteSnowflakeAccount: (id: string) => req<null>("DELETE", `${P}/snowflake-accounts/${enc(id)}`),
+    /** MongoDB Atlas: registering one takes a token as its service account and finds the managed users. */
+    atlasProjects: () => req<AtlasProject[]>("GET", `${P}/atlas-projects`),
+    addAtlasProject: (a: NewAtlasProject) => req<AtlasProject>("POST", `${P}/atlas-projects`, a),
+    deleteAtlasProject: (id: string) => req<null>("DELETE", `${P}/atlas-projects/${enc(id)}`),
+    /** Gateways into private networks: making one returns its roll token once. */
+    gateways: () => req<Gateway[]>("GET", `${P}/gateways`),
+    addGateway: (g: { name: string; token?: boolean }) => req<MadeGateway>("POST", `${P}/gateways`, g),
+    deleteGateway: (id: string) => req<null>("DELETE", `${P}/gateways/${enc(id)}`),
     updateOutsideDatabase: (id: string, ch: { name?: string; url?: string; ca?: string }) => req<OutsideDatabase>("PATCH", `${P}/outside-databases/${enc(id)}`, ch),
     rotateOutsideAdmin: (id: string) => req<OutsideDatabase>("POST", `${P}/outside-databases/${enc(id)}/rotate-admin`),
     /** `format` other than `roll` needs the SIEM's `token` (sealed, never shown again). */
@@ -263,6 +271,13 @@ export function secretsApi(project: string) {
     caCertificates: (id: string) => req<CaCertificate[]>("GET", `${P}/cas/${enc(id)}/certificates`),
     /** On the CA's CRL until it expires. */
     revokeCertificate: (id: string, serial: string) => req<null>("POST", `${P}/cas/${enc(id)}/revoke`, { serial }),
+    /** ACME on the CA: its directory URL, pre-authorized names and External Account Bindings. */
+    caAcme: (id: string) => req<AcmeSettings>("GET", `${P}/cas/${enc(id)}/acme`),
+    setCaAcme: (id: string, preAuthorize: boolean) => req<AcmeSettings>("PATCH", `${P}/cas/${enc(id)}/acme`, { pre_authorize: preAuthorize }),
+    /** A binding's HMAC key is in this answer only. */
+    addAcmeBinding: (id: string, b: { label?: string; names?: string[]; days?: number }) => req<NewAcmeKey>("POST", `${P}/cas/${enc(id)}/acme/eab`, b),
+    /** Every account made with the binding stops at once. */
+    revokeAcmeBinding: (id: string, eab: string) => req<null>("DELETE", `${P}/cas/${enc(id)}/acme/eab/${enc(eab)}`),
     /** GCP and Azure accounts: registering one proves its trust names this project and no other. */
     cloudAccounts: () => req<CloudAccount[]>("GET", `${P}/cloud-accounts`),
     addCloudAccount: (a: NewCloudAccount) => req<CloudAccount>("POST", `${P}/cloud-accounts`, a),

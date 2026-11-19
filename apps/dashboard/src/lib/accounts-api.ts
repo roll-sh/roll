@@ -196,10 +196,10 @@ export function peopleCsv(list: User[]): string {
 }
 
 /** People's filters in the admin list. */
-export type PeopleFilter = "everyone" | "admins" | "no-second-factor" | "turned-off";
+export type PeopleFilter = "everyone" | "admins" | "no-second-factor" | "dormant" | "turned-off";
 
 /** The people matching `query` (name, handle or address, any case) and `filter`. */
-export function findPeople<U extends Pick<User, "name" | "handle" | "email" | "admin" | "disabled" | "totp" | "passkeys">>(list: U[], query: string, filter: PeopleFilter): U[] {
+export function findPeople<U extends Pick<User, "name" | "handle" | "email" | "admin" | "disabled" | "totp" | "passkeys" | "last_active_at" | "created_at">>(list: U[], query: string, filter: PeopleFilter): U[] {
   const q = query.trim().toLowerCase();
   return list.filter((u) => {
     if (q && ![u.name, u.handle, u.email].some((s) => s.toLowerCase().includes(q))) return false;
@@ -208,6 +208,8 @@ export function findPeople<U extends Pick<User, "name" | "handle" | "email" | "a
         return u.admin;
       case "no-second-factor":
         return !u.disabled && !u.totp && !u.passkeys;
+      case "dormant":
+        return dormant(u);
       case "turned-off":
         return u.disabled;
       default:
