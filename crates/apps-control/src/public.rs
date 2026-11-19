@@ -249,7 +249,7 @@ fn from_internal(mut req: Request) -> Request {
 
 /// The Horizon mark, `@roll/brand`'s export (`packages/brand/assets/horizon-dark.svg`) drawn in
 /// the text's colour; a test keeps the copy equal to it.
-const HORIZON: &str = include_str!("../assets/horizon.svg");
+pub(crate) const HORIZON: &str = include_str!("../assets/horizon.svg");
 
 /// What a visitor sees when roll answers instead of the app: the mark, a title and a line, dark
 /// or light as their system is. A 503 (waking, restarting, busy) looks again by itself.
@@ -494,7 +494,7 @@ enum Again {
 /// Which of roll's pages a response is (never an app's own answer), so an environment's own
 /// page can take its place ([`their_page`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum RollPage {
+pub(crate) enum RollPage {
     Error,
     Maintenance,
 }
@@ -519,7 +519,7 @@ async fn their_page(apps: &Arc<Apps>, service: &str, env: &str, r: Response) -> 
     Response::from_parts(parts, Body::from(html))
 }
 
-fn escape(s: &str) -> String {
+pub(crate) fn escape(s: &str) -> String {
     s.chars()
         .map(|c| match c {
             '&' => "&amp;".to_string(),
@@ -579,8 +579,35 @@ async fn check_access(apps: &Arc<Apps>, service: &str, env: &str, req: &mut Requ
             return Some(sign_in(apps, service, env, req));
         }
     }
+    // A password ([`crate::password`]): its session, or its page's POST.
+    if let Some(ph) = access.password_hash.clone() {
+        if let Some(v) = take_cookie(req, &crate::password::cookie(env))
+            && apps.password_session_ok(service, env, &ph, &v).await
+        {
+            take_cookie(req, &format!("roll_access_{env}"));
+            return None;
+        }
+        if req.uri().path() == crate::password::PATH && req.method() == axum::http::Method::POST {
+            let client = crate::live::client_ip(roll_cluster::client_addr(req).as_deref());
+            let Ok(body) = axum::body::to_bytes(std::mem::take(req.body_mut()), 4096).await else { return Some(StatusCode::PAYLOAD_TOO_LARGE.into_response()) };
+            return Some(apps.password_post(service, env, &ph, client, &body).await);
+        }
+    }
     let signed_in = access.signed_in;
-    let Some(hash) = access.token_hash else { return Some(denied(apps, service, env).await) };
+    // No way in yet: the password's page, signing in, or the 401.
+    let password = access.password_hash.is_some();
+    let turned_away = |req: &Request| {
+        let to = crate::visit::local_path(req.uri().path_and_query().map_or("/", |p| p.as_str()));
+        let page_load = req.method() == axum::http::Method::GET;
+        (to, page_load)
+    };
+    let Some(hash) = access.token_hash else {
+        if password {
+            let (to, page_load) = turned_away(req);
+            return Some(if page_load { crate::password::page(StatusCode::UNAUTHORIZED, &to, "") } else { denied(apps, service, env).await });
+        }
+        return Some(denied(apps, service, env).await);
+    };
     let name = format!("roll_access_{env}");
     let query = req.uri().query().unwrap_or("").to_string();
     let mut token = None;
@@ -623,7 +650,13 @@ async fn check_access(apps: &Arc<Apps>, service: &str, env: &str, req: &mut Requ
         }
     }
     if !ok {
-        // No token, and no session: signing in is the other way in.
+        // No token, and no session: the password, or signing in, is the other way in.
+        if password {
+            let (to, page_load) = turned_away(req);
+            if page_load {
+                return Some(crate::password::page(StatusCode::UNAUTHORIZED, &to, ""));
+            }
+        }
         return Some(if signed_in { sign_in(apps, service, env, req) } else { denied(apps, service, env).await });
     }
     req.headers_mut().remove(header::COOKIE);

@@ -278,6 +278,8 @@ pub struct Access {
     pub token_hash: Option<String>,
     pub bypass_hash: Option<String>,
     pub signed_in: bool,
+    /// Its password's argon2id hash ([`crate::password`]), never returned.
+    pub password_hash: Option<String>,
 }
 
 /// A private registry's login for a service's image (`PUT …/registry`); the password is sealed
@@ -1382,6 +1384,9 @@ pub struct Environment {
     /// People signed in to roll who may open the project get in (`access.signed_in`).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub signed_in: bool,
+    /// Visitors may type its password (`access.password`; never returned).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub password: bool,
     /// A cron service's next scheduled run (unix ms), once it has a deployment.
     pub next_run_at: Option<i64>,
     /// Its schedules (`run.schedules`) as they stand: the next due time and the job each last

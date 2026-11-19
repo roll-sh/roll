@@ -365,7 +365,7 @@ type EnvironmentPut = {
    *  person may still open the project (a disabled account is turned away). null: public again. */
   /** `bypass_sha256`: the SHA-256 (hex) of an automation's secret (CI's end-to-end tests): a
    *  request with `X-Roll-Preview-Bypass: <secret>` goes in with no cookie or redirect. */
-  access?: { token?: string; signed_in?: boolean; bypass_sha256?: string } | null;
+  access?: { token?: string; signed_in?: boolean; password?: string /* 8–200: visitors type it on roll's page (its argon2id hash only kept; a session cookie for 7 days, ended by a new password; 10 tries a client every 10 minutes) */; bypass_sha256?: string } | null;
   /** Creating it: start with this environment's variables, except its sealed ones (ignored when it exists). */
   variables_from?: string;
   /** A push deploys only once its commit's checks pass (statuses other than roll apps' own):
@@ -468,6 +468,7 @@ type Environment = EnvironmentSummary & {
   port: number | null;       // locally, the service's own port (ROLL_APPS_PORTS)
   private: boolean;          // its hostnames answer only visitors with its access token, or who signed in
   signed_in?: true;          // people signed in to roll who can open its project get in (access.signed_in)
+  password?: true;           // visitors may type its password (access.password; never returned)
   next_run_at: number | null; // a cron service's next scheduled run, once deployed
   volume_used?: { bytes: number; at: number }; // how full its volume was when last measured (hourly, on its owner), when it has one
   checks?: Check[];         // its uptime checks (as the PUT's)
