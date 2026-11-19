@@ -565,6 +565,11 @@ previews are listed once those products are on.
 | `storage_restore_object` | An object back from the trash. | `POST /v1/storage/buckets/{name}/trash/restore` |
 | `storage_usage` | A bucket's usage. | `GET /v1/storage/buckets/{bucket}/usage` |
 | `storage_usage_all` | Storage and requests across every bucket. | `GET /v1/storage/usage` |
+| `storage_list_accounts` | Storage's accounts (12-digit ids): name, alias, the default. | `GET /v1/storage/accounts` |
+| `storage_list_keys` | An account's access keys: permission, buckets, IAM user, last use (never a secret). | `GET /v1/storage/keys` |
+| `storage_list_roles` | An account's IAM roles: ARN, trust, permissions policy, session length. | `GET /v1/storage/roles` |
+| `storage_get_role` | One IAM role. | `GET /v1/storage/roles/{name}` |
+| `storage_list_replication_targets` | Buckets outside roll that replication copies to (never the secret). | `GET /v1/storage/replication-targets` |
 | `storage_update_bucket` | Change a bucket's versioning, lifecycle rules, CORS, trash days, tags or whether it's public: what's left out stays. | `PATCH /v1/storage/buckets/{bucket}` |
 | `storage_delete_objects` | Delete these keys, or every object under a prefix (to the trash). | `POST /v1/storage/buckets/{bucket}/delete` |
 | `streams_list` | Kafka-compatible streams. | `GET /v1/streams` |

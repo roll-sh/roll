@@ -535,6 +535,11 @@ static TOOLS: &[Tool] = &[
     t("storage_restore_object", "Restore a deleted object", "Bring an object back from the trash (key and deleted_at from storage_list_trash).", "storage", "POST", "/v1/storage/buckets/{bucket}/trash/restore", &[BUCKET, breq("key", Ty::Str, "Object key"), breq("deleted_at", Ty::Int, "When it was deleted, as listed")]),
     t("storage_usage", "Storage usage", "A bucket's usage.", "storage", "GET", "/v1/storage/buckets/{bucket}/usage", &[BUCKET, DAYS]),
     t("storage_usage_all", "Storage usage, every bucket", "Storage and requests across every bucket.", "storage", "GET", "/v1/storage/usage", &[DAYS]),
+    t("storage_list_accounts", "List storage accounts", "Storage's accounts (AWS-style, 12-digit ids): name, alias, and which is the default (creating one is the operator's).", "storage", "GET", "/v1/storage/accounts", &[]),
+    t("storage_list_keys", "List S3 access keys", "An account's access keys: id, name, permission, the buckets it's limited to, the IAM user it belongs to and when it was last used (never a secret).", "storage", "GET", "/v1/storage/keys", &[q("account", Ty::Str, "Account id (12 digits; the default account when left out)")]),
+    t("storage_list_roles", "List IAM roles", "An account's IAM roles: ARN, trust, permissions policy and session length. Use it when an assumed role is refused.", "storage", "GET", "/v1/storage/roles", &[q("account", Ty::Str, "Account id (12 digits; the default account when left out)")]),
+    t("storage_get_role", "Get an IAM role", "One IAM role: its ARN, trust, permissions policy and session length.", "storage", "GET", "/v1/storage/roles/{name}", &[req("name", "Role name"), q("account", Ty::Str, "Account id (12 digits; the default account when left out)")]),
+    t("storage_list_replication_targets", "List replication targets", "Buckets outside roll that replication copies to: endpoint, region, access key id, buckets (never the secret; adding one is admin).", "storage", "GET", "/v1/storage/replication-targets", &[]),
     t(
         "storage_update_bucket",
         "Change a bucket",
