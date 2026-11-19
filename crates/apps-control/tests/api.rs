@@ -2405,6 +2405,21 @@ async fn matching_log_lines_are_a_metric() {
     assert_eq!((s["shows"].as_str(), s["points"][0][1].as_f64()), (Some("value"), Some(3.0)), "{s}");
 }
 
+/// A service's id however a client spells it (`svc%5F…`: `_` may be percent-encoded) is one
+/// service with one owner: made where no lease is taken and only ever named encoded, its live
+/// routes still run (roll MCP's sweep: they were 503 "moving").
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_encoded_service_id_has_the_same_owner() {
+    let w = world().await;
+    let (st, svc) = call(&w.api, "POST", &format!("/v1/apps/projects/{}/services", w.project), Some(json!({"name": "x", "source": {"kind": "upload"}}))).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let encoded = svc["id"].as_str().unwrap().replace('_', "%5F");
+    let env = format!("/v1/apps/services/{encoded}/environments/production");
+    assert_eq!(call(&w.api, "PUT", &env, Some(json!({}))).await.0, StatusCode::OK);
+    let (st, r) = call(&w.api, "POST", &format!("{env}/restart"), Some(json!({}))).await;
+    assert_ne!(st, StatusCode::SERVICE_UNAVAILABLE, "{r}");
+}
+
 /// An instance the kernel killed for its memory says so: in the log and in why it crashed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_instance_killed_for_its_memory_says_so() {
