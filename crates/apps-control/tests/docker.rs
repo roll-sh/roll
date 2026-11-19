@@ -71,6 +71,8 @@ struct World {
     project: String,
     db: code_sql::Db,
     ws: Arc<roll_workspace::Workspace>,
+    /// Its DNS, for a custom domain's records.
+    dns: Arc<StaticDns>,
     /// Its Docker objects go when it does ([`Cleanup`]).
     _cleanup: Cleanup,
 }
@@ -164,6 +166,7 @@ async fn docker_world_with(netns: Option<bool>, setup: impl FnOnce(&mut AppsConf
     cfg.tcp_ports = Some((free, free));
     cfg.tcp_host = "127.0.0.1".into();
     setup(&mut cfg);
+    let dns = Arc::new(StaticDns::default());
     let deps = Deps {
         runtime: Arc::new(match netns {
             Some(on) => Docker::new(dir.path().join("scratch")).with_netns(on),
@@ -173,7 +176,7 @@ async fn docker_world_with(netns: Option<bool>, setup: impl FnOnce(&mut AppsConf
         sources: None,
         secrets: Arc::new(NoSecrets),
         resources: Arc::new(LoopbackDb),
-        resolver: Arc::new(StaticDns::default()),
+        resolver: dns.clone(),
         tls: Arc::new(apps_control::integrations::NoTls),
         objects: None,
         cluster,
@@ -184,7 +187,7 @@ async fn docker_world_with(netns: Option<bool>, setup: impl FnOnce(&mut AppsConf
     let api = apps_control::api::router(apps.clone());
     let public = apps_control::public::router(apps.clone());
     let _cleanup = Cleanup { db: db.clone(), project: project.clone() };
-    Some(World { _dir: dir, apps, api, public, project, db, ws, _cleanup })
+    Some(World { _dir: dir, apps, api, public, project, db, ws, dns, _cleanup })
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1187,6 +1190,53 @@ async fn a_closed_environment_reaches_nothing_but_its_listed_hosts() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     assert!(docker(&["network", "inspect", &closed]).await.is_err(), "the closed network and its proxy's relay went with the service");
+}
+
+/// A custom domain on another port of the app, on real Docker: its instance publishes that port
+/// too (on loopback, in its network sandbox), and the domain's requests reach it there while the
+/// service's own name stays on its port.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_custom_domain_reaches_another_port_on_docker() {
+    let Some(w) = docker_world().await else { return };
+    let start = "mkdir -p /a /b; echo main > /a/index.html; echo admin > /b/index.html; httpd -p 9000 -h /b; httpd -f -p $PORT -h /a";
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "panel", "source": {"kind": "image", "image": "busybox:1.37"}, "run": {"port": 8080, "start": start, "memory_mb": 256, "cpu": 0.5} })), "application/json", None).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    let env = format!("/v1/apps/services/{id}/environments/production");
+    let h = "admin.example.org";
+    let (_, d) = call(&w.api, "POST", &format!("{env}/domains"), Some(json!({ "hostname": h })), "application/json", None).await;
+    w.dns.add(h, "CNAME", d["target"].as_str().unwrap());
+    w.dns.add(&format!("_roll-challenge.{h}"), "TXT", d["token"].as_str().unwrap());
+    assert_eq!(call(&w.api, "POST", &format!("{env}/domains/{h}/verify"), None, "application/json", None).await.1["status"], "active");
+    assert_eq!(call(&w.api, "PATCH", &format!("{env}/domains/{h}"), Some(json!({"port": 9000})), "application/json", None).await.0, StatusCode::OK);
+    let settled = |dep: String| {
+        let (api, env) = (w.api.clone(), env.clone());
+        async move {
+            for _ in 0..1200 {
+                let (_, x) = call(&api, "GET", &format!("{env}/deploys/{dep}"), None, "application/json", None).await;
+                if !["queued", "building", "deploying"].contains(&x["status"].as_str().unwrap_or("")) {
+                    assert_eq!(x["status"], "active", "{x}");
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            panic!("{dep} never settled");
+        }
+    };
+    settled(svc["environments"][0]["latest"]["id"].as_str().unwrap().to_string()).await;
+    let (_, r) = call(&w.api, "POST", &format!("{env}/redeploy"), Some(json!({})), "application/json", None).await;
+    settled(r["id"].as_str().unwrap_or_else(|| panic!("{r}")).to_string()).await;
+    let get = |host: String| {
+        let public = w.public.clone();
+        async move {
+            let resp = public.oneshot(Request::get("/").header("host", host).body(Body::empty()).unwrap()).await.unwrap();
+            (resp.status(), String::from_utf8_lossy(&resp.into_body().collect().await.unwrap().to_bytes()).trim().to_string())
+        }
+    };
+    let own = svc["environments"][0]["url"].as_str().unwrap().trim_start_matches("http://").split(':').next().unwrap().to_string();
+    assert_eq!(get(h.to_string()).await, (StatusCode::OK, "admin".to_string()));
+    assert_eq!(get(own).await, (StatusCode::OK, "main".to_string()));
+    delete_for_good(&w.api, &id).await;
 }
 
 /// A closed environment's build on real Docker runs on its project's builder, on a network with

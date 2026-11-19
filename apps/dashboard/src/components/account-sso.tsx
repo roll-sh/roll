@@ -1,5 +1,6 @@
 import { Building2, Copy } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
+import { accessApi, tieForAgents, untieForAgents, type EnterpriseIdp } from "@/lib/access-api";
 import { accountsApi, ssoDomains, type SsoConnection } from "@/lib/accounts-api";
 
 const card = "rounded-xl border border-line-2 bg-sheet inset-shadow-highlight";
@@ -20,7 +21,13 @@ export function SsoSection() {
   const [error, setError] = useState<string | null>(null);
   const load = useCallback(() => accountsApi.ssoConnections().then(setList, (e) => setError(errorText(e))), []);
   useEffect(() => void load(), [load]);
-  const change = (id: string, c: { enforce?: boolean; provision?: boolean }) => accountsApi.updateSso(id, c).then(load, (e) => setError(errorText(e)));
+  // Enterprise sign-in's providers (agents): a connection can be one too, set up once.
+  const [idps, setIdps] = useState<EnterpriseIdp[] | null>(null);
+  useEffect(() => {
+    accessApi.enterprise().then((e) => setIdps(e.idps), () => setIdps(null));
+  }, []);
+  const saveIdps = (next: EnterpriseIdp[]) => accessApi.setIdps(next).then((r) => setIdps(r.idps), (e) => setError(errorText(e)));
+  const change = (id: string, c: { enforce?: boolean; provision?: boolean; session_hours?: number }) => accountsApi.updateSso(id, c).then(load, (e) => setError(errorText(e)));
   return (
     <section id="sso" className="rise scroll-mt-16">
       <div className="flex items-end gap-3">
@@ -113,6 +120,25 @@ export function SsoSection() {
               </div>
             )}
             <Scim connection={c} onChange={load} onError={setError} />
+            {idps && (
+              <div className="mt-2 flex flex-wrap items-center gap-2 text-[12px] text-muted">
+                {idps.some((i) => i.sso === c.id) ? (
+                  <>
+                    Agents sign in through it too (enterprise sign-in, for its verified domains).
+                    <button onClick={() => void saveIdps(untieForAgents(idps, c.id))} className={btn}>
+                      Stop
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    Let it sign in your people&apos;s agents too (enterprise sign-in), for the domains it proved.
+                    <button disabled={c.verified.length === 0} onClick={() => void saveIdps(tieForAgents(idps, c))} className={btn}>
+                      Use for agents too
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
             <div className="mt-2 flex flex-wrap items-center gap-x-5 gap-y-1.5 text-[12px] text-muted">
               <label className="flex items-center gap-1.5">
                 <input type="checkbox" checked={c.enforce} onChange={(e) => void change(c.id, { enforce: e.target.checked })} />
@@ -122,9 +148,26 @@ export function SsoSection() {
                 <input type="checkbox" checked={c.provision} onChange={(e) => void change(c.id, { provision: e.target.checked })} />
                 Make accounts for new people (never admins)
               </label>
+              <label className="flex items-center gap-1.5">
+                Sessions last
+                <select value={c.session_hours ?? 0} onChange={(e) => void change(c.id, { session_hours: Number(e.target.value) })} className="rounded-md border border-line-2 bg-canvas px-1.5 py-0.5 text-[12px]">
+                  {[0, 1, 8, 12, 24, 72, 168].map((h) => (
+                    <option key={h} value={h}>
+                      {h === 0 ? "30 days" : h < 24 ? `${h} hours` : h === 24 ? "1 day" : `${h / 24} days`}
+                    </option>
+                  ))}
+                </select>
+                then sign in through it again
+              </label>
               <span className="flex min-w-0 items-center gap-1.5">
                 redirect URI <span className="truncate font-mono text-[11.5px] text-fg">{c.redirect_uri}</span>
                 <button onClick={() => navigator.clipboard.writeText(c.redirect_uri)} className={btn} aria-label="Copy the redirect URI">
+                  <Copy className="size-3.5" />
+                </button>
+              </span>
+              <span className="flex min-w-0 items-center gap-1.5" title="Register it at the provider: signing out there (or an admin ending someone's sessions) ends their roll sessions from it at once">
+                back-channel logout URI <span className="truncate font-mono text-[11.5px] text-fg">{c.backchannel_logout_uri}</span>
+                <button onClick={() => navigator.clipboard.writeText(c.backchannel_logout_uri)} className={btn} aria-label="Copy the back-channel logout URI">
                   <Copy className="size-3.5" />
                 </button>
               </span>
