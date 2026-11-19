@@ -1279,6 +1279,14 @@ pub struct Environment {
     pub checks: Vec<Check>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub check_states: Vec<CheckState>,
+    /// Its heartbeats ([]: none; their tokens never), and how each stands.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub heartbeats: Vec<Heartbeat>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub heartbeat_states: Vec<HeartbeatState>,
+    /// Only in the PUT's answer that added them: each new heartbeat's ping URL, its token in it.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub heartbeat_urls: std::collections::BTreeMap<String, String>,
     /// What its code may reach: anything (`open`), or roll and the listed hosts (`roll`).
     pub egress: Egress,
     /// Hosts its egress proxy refused lately (its code tried them; they aren't listed).
@@ -1602,6 +1610,57 @@ impl Check {
         }
         Ok(self)
     }
+}
+
+/// An environment's heartbeats, at most ([`Heartbeat`]).
+pub const MAX_HEARTBEATS: usize = 10;
+
+/// A heartbeat (`heartbeats` on an environment; `crate::heartbeats`, Healthchecks'): something
+/// outside roll (a job, a backup, a device) pings `/__roll/heartbeat/<token>` on the
+/// environment's host at least every `every_s`; past that and `grace_s`, it's
+/// `heartbeat.missed`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Heartbeat {
+    /// Unique in the environment: a-z, 0-9 and -, at most 32.
+    pub name: String,
+    /// 60–604800 (a week).
+    pub every_s: u32,
+    /// 0–86400 (default 300).
+    #[serde(default = "Heartbeat::default_grace")]
+    pub grace_s: u32,
+    /// When it was added (ms): the first ping is due from then.
+    #[serde(default)]
+    pub added_at: i64,
+    /// Its token's SHA-256 (the token itself is shown once).
+    #[serde(default, skip_serializing)]
+    pub token_hash: String,
+}
+
+impl Heartbeat {
+    fn default_grace() -> u32 {
+        300
+    }
+
+    pub fn check(&self) -> Result<()> {
+        let bad = |m: &str| Err(Error::BadRequest(format!("heartbeats: {m}")));
+        if self.name.is_empty() || self.name.len() > 32 || !self.name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') {
+            return bad("a heartbeat's name is a-z, 0-9 and -, at most 32");
+        }
+        if !(60..=604_800).contains(&self.every_s) || self.grace_s > 86_400 {
+            return bad("every_s is 60–604800, grace_s 0–86400");
+        }
+        Ok(())
+    }
+}
+
+/// A heartbeat as it stands ([`Environment::heartbeat_states`]).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct HeartbeatState {
+    pub name: String,
+    pub last_ping_at: Option<i64>,
+    /// When the next ping is due by (past it and the grace: missed).
+    pub due_at: i64,
+    pub missed: bool,
 }
 
 /// A check as it stands on the environment's owner ([`Environment::check_states`]).

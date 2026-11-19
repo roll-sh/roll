@@ -1214,6 +1214,12 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
         }
         return by("rate_limit", r);
     }
+    // Heartbeats (`crate::heartbeats`): a ping from outside, any method, on its own host. Its token is
+    // its credential, so a private environment's pings come in too; nothing wakes.
+    if let Some(token) = req.uri().path().strip_prefix(crate::heartbeats::PATH).filter(|t| !t.is_empty() && t.len() <= 64 && !t.contains('/')) {
+        let token = token.to_string();
+        return if apps.heartbeat_ping(service, env, &token).await { (StatusCode::OK, "ok\n").into_response() } else { page(StatusCode::NOT_FOUND, "Not found", "There's no heartbeat with this address.") };
+    }
     // A private environment answers only visitors with its token, before anything wakes. A
     // site's rewrite (a header only roll sets) was let in by the site, by the project's own rule.
     // A site's rewrite was let in by the site; roll's own scheduled call by roll.

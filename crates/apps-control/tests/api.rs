@@ -2785,6 +2785,51 @@ async fn an_uptime_check_goes_down_and_comes_back() {
     assert_eq!(kinds, ["check.down", "alert.resolved"], "down once, then resolved: {ev}");
 }
 
+/// Heartbeats (Healthchecks', Cronitor's): something outside roll pings its URL; one that
+/// doesn't within its period and grace is `heartbeat.missed` once, the next ping resolves it. The
+/// URL is shown once, when the heartbeat is added, and a kept heartbeat keeps it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn heartbeats_ping_and_go_missed() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "web", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let h = host(&svc["environments"][0]["url"]);
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    for bad in [json!([{"name": "b", "every_s": 5}]), json!([{"name": "b", "every_s": 3600, "url": "x"}]), json!([{"name": "b", "every_s": 3600}, {"name": "b", "every_s": 60}])] {
+        assert_eq!(call(&w.api, "PUT", &base, Some(json!({"heartbeats": bad}))).await.0, StatusCode::BAD_REQUEST, "{bad}");
+    }
+    // Private: a heartbeat's token is a ping's own way in.
+    let (st, env) = call(&w.api, "PUT", &base, Some(json!({"access": {"token": "aaaaaaaabbbbbbbbccccdddd"}, "heartbeats": [{"name": "backup", "every_s": 3600}]}))).await;
+    assert_eq!((st, env["private"].as_bool()), (StatusCode::OK, Some(true)), "{env}");
+    let url = env["heartbeat_urls"]["backup"].as_str().unwrap().to_string();
+    let path = format!("/__roll/{}", url.split_once("/__roll/").unwrap().1);
+    let token = path.rsplit('/').next().unwrap().to_string();
+    let read = call(&w.api, "GET", &base, None).await.1;
+    assert!(read["heartbeat_urls"].is_null() && !read.to_string().contains(&token), "the URL is shown once: {read}");
+    let ping = |path: String| {
+        let public = w.public.clone();
+        let req = Request::builder().method("POST").uri(path).header("host", h.clone()).body(Body::empty()).unwrap();
+        async move { public.oneshot(req).await.unwrap().status() }
+    };
+    assert_eq!(ping("/__roll/heartbeat/hb_wrong".into()).await, StatusCode::NOT_FOUND);
+    assert_eq!(ping(path.clone()).await, StatusCode::OK);
+    let state = call(&w.api, "GET", &base, None).await.1["heartbeat_states"][0].clone();
+    assert!(state["last_ping_at"].is_i64() && state["missed"] == false, "{state}");
+    // Past its hour and five minutes' grace: missed once, however many passes.
+    let late = state["last_ping_at"].as_i64().unwrap() + 3_900_000;
+    w.apps.cron_pass(late).await;
+    w.apps.cron_pass(late + 60_000).await;
+    assert_eq!(call(&w.api, "GET", &base, None).await.1["heartbeat_states"][0]["missed"], true);
+    // A kept heartbeat keeps its URL; the next ping resolves the miss.
+    let (_, env) = call(&w.api, "PUT", &base, Some(json!({"heartbeats": [{"name": "backup", "every_s": 7200, "grace_s": 60}]}))).await;
+    assert!(env["heartbeat_urls"].is_null() && env["heartbeats"][0]["every_s"] == 7200, "{env}");
+    assert_eq!(ping(path).await, StatusCode::OK);
+    assert_eq!(call(&w.api, "GET", &base, None).await.1["heartbeat_states"][0]["missed"], false);
+    let ev = call(&w.api, "GET", "/v1/apps/events?after=0", None).await.1;
+    let kinds: Vec<&str> = ev["events"].as_array().unwrap().iter().filter(|e| e["data"]["heartbeat"] == "backup").map(|e| e["kind"].as_str().unwrap()).collect();
+    assert_eq!(kinds, ["heartbeat.missed", "alert.resolved"], "missed once, then resolved: {ev}");
+}
+
 /// PagerDuty and Opsgenie targets (Heroku's, Cloud Monitoring's): a failure opens an incident
 /// keyed by its service, environment and alert, a resolved alert or the next good deploy closes
 /// it; the key goes with each call and never comes back.
@@ -2877,7 +2922,7 @@ async fn a_failed_deploy_is_sent_to_the_projects_targets_signed_and_retried() {
     let (st, hook) = call(&w.api, "POST", &base, Some(json!({"url": format!("http://{ok_at}/hook")}))).await;
     assert_eq!(st, StatusCode::CREATED, "{hook}");
     let secret = hook["secret"].as_str().unwrap().to_string();
-    assert_eq!(hook["events"], json!(["check.down", "deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"]), "the default events");
+    assert_eq!(hook["events"], json!(["check.down", "heartbeat.missed", "deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"]), "the default events");
     let (_, down) = call(&w.api, "POST", &base, Some(json!({"kind": "webhook", "url": format!("http://{bad_at}/x"), "events": ["deploy.failed"]}))).await;
     let (_, list) = call(&w.api, "GET", &base, None).await;
     assert!(!list.to_string().contains(&secret) && !list.to_string().contains("/hook"), "neither the secret nor the URL comes back: {list}");
