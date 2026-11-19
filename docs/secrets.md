@@ -3674,7 +3674,8 @@ cache waited out. Ranked now:
    review (2026-11-18 evening): one high, two medium, four low, all being fixed. High: #304's freeze
    let roll's own products through (every in-process reader counts as the folder's admin), so a
    frozen folder still fed previews, checks and apps; only people, the operator and roll-access
-   grants pass now. Medium: #281's old head replayed after a cut (a permanent gap digest); #277's
+   grants pass now (#304 14e7e55ab: a private `frozen` flag only the operator's, a person's and a
+   token's constructors set; tested for apps' deploys and untrusted checks). Medium: #281's old head replayed after a cut (a permanent gap digest); #277's
    replay refusal beaten by changing the box's `v`. Low: #330 storing an outsider's credential, #290's
    duplicated `Signature=`, #329's source bucket choosing the reference's project (and its refusal
    text an oracle), #248's per-reader eviction. Sound: #303's fixes, #274, #262, #281's key provenance.
