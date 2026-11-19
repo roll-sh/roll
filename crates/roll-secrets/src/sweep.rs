@@ -500,6 +500,9 @@ impl Secrets {
         self.sweep_retention()?;
         self.sweep_reminders()?;
         self.sweep_alerts()?;
+        if let Err(e) = self.end_decoys() {
+            tracing::warn!("revoking ended decoys failed: {e}");
+        }
         // Digests of the audit log, and its retention (at a digest: audit.rs).
         if let Err(e) = self.sweep_audit_chain(crate::audit::RETENTION_DAYS * 86_400_000) {
             tracing::warn!("signing the audit log's digests failed: {e}");

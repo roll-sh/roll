@@ -871,6 +871,10 @@ struct Gate {
     tokens: Mutex<BTreeMap<String, roll_auth::Grant>>,
     /// Grants made so far: ids stay unique after revocations.
     made: std::sync::atomic::AtomicUsize,
+    /// Decoy grants' ids (roll-access's decoys): they allow nothing, and a use is told to secrets.
+    decoys: Mutex<std::collections::BTreeSet<String>>,
+    /// Where a decoy's use is told, as rolld's `on_decoy` hook does.
+    secrets: std::sync::OnceLock<Arc<Secrets>>,
 }
 
 impl Gate {
@@ -898,6 +902,9 @@ struct Granted {
 
 impl roll_auth::Grants for Granted {
     fn grant(&self, id: &str) -> Option<roll_auth::Grant> {
+        if self.gate.decoys.lock().unwrap().contains(id) {
+            return None;
+        }
         let g = self.gate.tokens.lock().unwrap().values().find(|g| &*g.id == id).cloned()?;
         match &g.user {
             Some(user) if roll_secrets::People::person(&*self.people, user).ok().flatten().is_none() => None,
@@ -913,11 +920,25 @@ impl roll_secrets::Workloads for Gate {
         Ok(roll_secrets::Minted { id, secret, expires_at: now + minutes as i64 * 60_000 })
     }
     fn grants(&self) -> roll_secrets::Result<Vec<roll_auth::Grant>> {
-        Ok(self.tokens.lock().unwrap().values().cloned().collect())
+        let decoys = self.decoys.lock().unwrap().clone();
+        Ok(self.tokens.lock().unwrap().values().filter(|g| !decoys.contains(&*g.id)).cloned().collect())
     }
     fn revoke(&self, id: &str) -> roll_secrets::Result<()> {
         self.tokens.lock().unwrap().retain(|_, g| &*g.id != id);
         Ok(())
+    }
+    fn mint_decoy(&self, name: &str, rule: roll_auth::scope::Rule, owner: Option<&str>) -> roll_secrets::Result<roll_secrets::Minted> {
+        let (short, id) = self.grant(name, rule, owner);
+        // As long and random as a real token's, so nothing about the value sets it apart.
+        let secret = format!("rlt_fakedecoy{}{short}", "Q7wZ3kP9xR2mV8tL5nB4cY6h");
+        let mut tokens = self.tokens.lock().unwrap();
+        let g = tokens.remove(&short).expect("just made");
+        tokens.insert(secret.clone(), g);
+        self.decoys.lock().unwrap().insert(id.clone());
+        Ok(roll_secrets::Minted { id, secret, expires_at: 0 })
+    }
+    fn revoke_decoy(&self, id: &str) -> roll_secrets::Result<()> {
+        self.revoke(id)
     }
     /// As `POST /v1/access/tokens`: its owner is whoever's request it is. As roll-access's
     /// `create_grant`, extensions that name no one (no operator marker, person or grant) are
@@ -938,6 +959,14 @@ async fn fake_gate(axum::extract::State(gate): axum::extract::State<Arc<Gate>>, 
     use axum::response::IntoResponse;
     if let Some(t) = roll_auth::bearer(req.headers()).map(str::to_string) {
         let Some(g) = gate.tokens.lock().unwrap().get(&t).cloned() else { return StatusCode::UNAUTHORIZED.into_response() };
+        // A decoy answers as an unknown token does, and roll secrets hears of it.
+        if gate.decoys.lock().unwrap().contains(&*g.id) {
+            if let Some(s) = gate.secrets.get().cloned() {
+                let id = g.id.to_string();
+                tokio::task::spawn_blocking(move || s.decoy_used(&id, Some("203.0.113.7"), "/v1/secrets/whoami").unwrap()).await.unwrap();
+            }
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
         req.extensions_mut().insert(g);
     }
     next.run(req).await
@@ -988,6 +1017,7 @@ impl Api {
         let granted: Arc<dyn roll_auth::Grants> = Arc::new(Granted { gate: gate.clone(), people: people.clone() });
         let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links, syncs, open: true, trust_forwarded_for: false, web_url: None, deliver: Some(sent.clone()), grants: Some(granted), people: Some(people.clone()), workloads: Some(gate.clone()), kms: Some(kms.clone()), sts: Some(sts.clone()), outside: Some(outside.clone()), directory: Some(directory.clone()), github: Some(github.clone()), clouds: Some(roll_secrets::clouds::Clouds { issuer: ISSUER_URL.into(), tokens: clouds.clone() }), gateways: None };
         let secrets = Arc::new(Secrets::new(db.clone(), ws.clone(), opts).unwrap());
+        let _ = gate.secrets.set(secrets.clone());
         let router = roll_workspace::router(ws.clone()).merge(roll_secrets::router(secrets.clone())).layer(axum::middleware::from_fn_with_state(gate.clone(), fake_gate));
         let mut api = Api { sent, gate, kms, sts, ws: ws.clone(), people, router, secrets, db, fake, sync, outside, directory, github, clouds, project: String::new(), _dir: dir };
         let (_, p) = api.call(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "shop" }))).await;
@@ -3448,6 +3478,86 @@ async fn reads_unlike_the_reader_are_alerted() {
     assert_eq!(logged.as_array().map(Vec::len), Some(2), "{logged}");
 }
 
+/// A decoy key (docs/secrets.md, "Decoys") reads like any other key, and using its token raises
+/// `decoy_used`: the audit log, health first, and the environment's notify URL. Never the value.
+#[tokio::test]
+async fn a_decoy_key_reads_as_any_other_and_its_use_is_alerted() {
+    let api = Api::new().await;
+    api.ok(Method::PUT, "/environments/staging/policy", Some(json!({ "protected": false, "notify_url": "https://hooks.example/T0/B0/x" }))).await;
+    let made = api.ok(Method::POST, "/environments/staging/decoys", Some(json!({ "key": "LEGACY_DEPLOY_TOKEN", "kind": "rlt", "path": "/ci" }))).await;
+    assert_eq!((made["key"].as_str(), made["decoy"]["kind"].as_str(), made["decoy"]["uses"].as_i64()), (Some("LEGACY_DEPLOY_TOKEN"), Some("rlt"), Some(0)), "{made}");
+    // Only a new key, and only the kinds roll can watch.
+    assert_eq!(api.call(Method::POST, "/environments/staging/decoys", Some(json!({ "key": "LEGACY_DEPLOY_TOKEN", "kind": "rlt", "path": "/ci" }))).await.0, StatusCode::CONFLICT);
+    assert_eq!(api.call(Method::POST, "/environments/staging/decoys", Some(json!({ "key": "OLD_AWS_KEY", "kind": "aws" }))).await.0, StatusCode::BAD_REQUEST);
+    // Its value is a roll token like any other, in the values a deploy reads.
+    let value = api.ok(Method::GET, "/environments/staging/secrets/LEGACY_DEPLOY_TOKEN/value?path=/ci", None).await["value"].as_str().unwrap().to_string();
+    assert!(value.starts_with("rlt_"), "{value}");
+    assert_eq!(api.ok(Method::GET, "/environments/staging/values?path=/ci", None).await["values"]["LEGACY_DEPLOY_TOKEN"], value);
+    // Whoever found it tries it: refused as an unknown token is.
+    assert_eq!(api.req(Method::GET, "/v1/secrets/whoami", None, Some(&value)).await.0, StatusCode::UNAUTHORIZED);
+    let health = api.ok(Method::GET, "/health", None).await;
+    assert_eq!((health[0]["issue"].as_str(), health[0]["key"].as_str(), health[0]["path"].as_str()), (Some("decoy_used"), Some("LEGACY_DEPLOY_TOKEN"), Some("/ci")), "{health}");
+    assert!(health[0]["detail"].as_str().unwrap().contains("203.0.113.7"), "{health}");
+    let logged = api.ok(Method::GET, "/audit?action=secrets.alert", None).await;
+    assert_eq!((logged[0]["action"].as_str(), logged[0]["ip"].as_str(), logged[0]["environment"].as_str()), (Some("secrets.alert.decoy_used"), Some("203.0.113.7"), Some("staging")), "{logged}");
+    let s = api.secrets.clone();
+    tokio::task::spawn_blocking(move || s.sweep().unwrap()).await.unwrap();
+    let sent = api.sent.0.lock().unwrap().clone();
+    let alert = sent.iter().find(|n| n["alert"]["kind"] == "decoy_used").unwrap_or_else(|| panic!("{sent:?}"));
+    assert_eq!((alert["alert"]["key"].as_str(), alert["alert"]["ip"].as_str()), (Some("LEGACY_DEPLOY_TOKEN"), Some("203.0.113.7")));
+    // Never the value, anywhere it was told.
+    for told in [json!(sent).to_string(), logged.to_string(), health.to_string()] {
+        assert!(!told.contains(&value), "{told}");
+    }
+    // A second try within the hour is counted, not told again.
+    api.req(Method::GET, "/v1/secrets/whoami", None, Some(&value)).await;
+    let listed = api.ok(Method::GET, "/environments/staging/secrets?path=/ci", None).await;
+    assert_eq!(listed[0]["decoy"]["uses"], 2, "{listed}");
+    assert_eq!(api.ok(Method::GET, "/audit?action=secrets.alert", None).await.as_array().map(Vec::len), Some(1));
+}
+
+/// Only the project's admins can tell a key is a decoy: to a reader, writer or revealer it's the
+/// same as any other key, in listings, health and the audit log; and only an admin plants one.
+#[tokio::test]
+async fn only_admins_can_tell_a_key_is_a_decoy() {
+    let api = Api::new().await;
+    api.ok(Method::PUT, "/environments/production/secrets/STRIPE_KEY", Some(json!({ "value": "sk_test_not_a_real_key_0000" }))).await;
+    api.ok(Method::POST, "/environments/production/decoys", Some(json!({ "key": "BACKUP_DB_TOKEN", "kind": "rlt" }))).await;
+    let dev = api.token(json!({ "actions": ["read", "reveal", "write", "delete"] }));
+    assert_eq!(api.req(Method::POST, "/environments/production/decoys", Some(json!({ "key": "OTHER", "kind": "rlt" })), Some(&dev)).await.0, StatusCode::FORBIDDEN);
+    let (_, listed) = api.req(Method::GET, "/environments/production/secrets", None, Some(&dev)).await;
+    let shape = |key: &str| listed.as_array().unwrap().iter().find(|s| s["key"] == key).unwrap().as_object().unwrap().keys().cloned().collect::<Vec<_>>();
+    assert_eq!(shape("BACKUP_DB_TOKEN"), shape("STRIPE_KEY"), "{listed}");
+    let (_, one) = api.req(Method::GET, "/environments/production/secrets/BACKUP_DB_TOKEN", None, Some(&dev)).await;
+    assert!(one.get("decoy").is_none(), "{one}");
+    // Its use is the admins' news.
+    let (_, value) = api.req(Method::GET, "/environments/production/secrets/BACKUP_DB_TOKEN/value", None, Some(&dev)).await;
+    api.req(Method::GET, "/v1/secrets/whoami", None, value["value"].as_str()).await;
+    let (_, health) = api.req(Method::GET, "/health", None, Some(&dev)).await;
+    assert!(!health.to_string().contains("decoy"), "{health}");
+    let (_, audit) = api.req(Method::GET, "/audit", None, Some(&dev)).await;
+    assert!(!audit.to_string().contains("decoy"), "{audit}");
+    assert!(api.ok(Method::GET, "/audit", None).await.to_string().contains("secrets.alert.decoy_used"));
+}
+
+/// Deleting a decoy key, or giving it a value of its own, ends the decoy: its token is revoked
+/// after the write.
+#[tokio::test]
+async fn deleting_a_decoy_key_revokes_its_token() {
+    let api = Api::new().await;
+    let decoys = || api.gate.decoys.lock().unwrap().clone();
+    let live = |id: &str| api.gate.tokens.lock().unwrap().values().any(|g| &*g.id == id);
+    api.ok(Method::POST, "/environments/development/decoys", Some(json!({ "key": "OLD_CI_TOKEN", "kind": "rlt" }))).await;
+    api.ok(Method::POST, "/environments/development/decoys", Some(json!({ "key": "SPARE_TOKEN", "kind": "rlt" }))).await;
+    let ids: Vec<String> = decoys().into_iter().collect();
+    assert!(ids.iter().all(|id| live(id)));
+    api.ok(Method::DELETE, "/environments/development/secrets/OLD_CI_TOKEN", None).await;
+    api.ok(Method::PUT, "/environments/development/secrets/SPARE_TOKEN", Some(json!({ "value": "an-ordinary-value-now" }))).await;
+    assert!(ids.iter().all(|id| !live(id)), "{ids:?}");
+    let listed = api.ok(Method::GET, "/environments/development/secrets", None).await;
+    assert!(listed[0].get("decoy").is_none(), "{listed}");
+}
+
 /// A roll-access rule naming one encryption key (`{id: "prj_…", index: "payments"}`) reaches that
 /// key alone: the list shows it, its operations work, another key's are refused.
 #[tokio::test]
@@ -4123,4 +4233,88 @@ async fn a_gateway_has_one_token_that_opens_only_its_link_and_reaches_its_projec
     assert!(api.secrets.gateway_link(&gw, true, None, None).is_err());
     let audit = api.ok(Method::GET, "/audit?action=gateway.connect", None).await.to_string();
     assert!(audit.contains("node-a") && !audit.contains(&secret), "{audit}");
+}
+
+#[tokio::test]
+async fn another_product_resolves_a_reference_only_for_a_resource_its_project_stands_for() {
+    use roll_secrets::{Refusal, ResourceRef};
+    use roll_workspace::Kind;
+    let api = Api::new().await;
+    api.set("production", "AWS_SECRET_ACCESS_KEY", "fake-secret-one").await;
+    let photos = ResourceRef::new(Kind::Bucket, "photos");
+    let reference = "roll://production/AWS_SECRET_ACCESS_KEY";
+    let s = api.secrets.clone();
+    let resolve = move |r: &ResourceRef, reference: &str| s.resolve_for(r, reference);
+
+    // On no canvas: no project to read from.
+    assert!(matches!(resolve(&photos, reference), Err(Refusal::NoProject(_))));
+    // On a person's canvas that doesn't stand for it (anyone may put any bucket on theirs).
+    let (_, mine) = api.as_ada(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "mine" }))).await;
+    let mine = mine["id"].as_str().unwrap().to_string();
+    let (s, _) = api.as_ada(Method::PUT, &format!("/v1/workspace/projects/{mine}/resources/bucket/photos"), Some(json!({ "x": 0, "y": 0 }))).await;
+    assert!(s.is_success());
+    let refused = resolve(&photos, reference).unwrap_err();
+    assert!(matches!(refused, Refusal::NotTrusted(_)), "{refused}");
+
+    // On the operator's project, which stands for its canvas: resolved as its runtime, protected
+    // environments included (as a service's deploy), and audited as the bucket.
+    api.ok(Method::PUT, &format!("/v1/workspace/projects/{}/resources/bucket/photos", api.project), Some(json!({ "x": 0, "y": 0 }))).await;
+    api.ok(Method::PUT, "/environments/production/policy", Some(json!({ "protected": true, "approvals": 1 }))).await;
+    let got = resolve(&photos, reference).unwrap();
+    assert_eq!((got.value.expose(), got.version), ("fake-secret-one", 1));
+    assert!(!format!("{got:?}").contains("fake-secret-one"), "the value redacts itself");
+    let audit = api.ok(Method::GET, "/audit?action=secrets.resolve", None).await;
+    assert_eq!((audit[0]["actor"].as_str(), audit[0]["keys"].clone()), (Some("storage:bucket:photos"), json!(["AWS_SECRET_ACCESS_KEY"])), "{audit}");
+    assert!(!audit.to_string().contains("fake-secret-one"));
+    // A reference may name only that project.
+    assert!(resolve(&photos, &format!("roll://{}@production/AWS_SECRET_ACCESS_KEY", api.project)).is_ok());
+    assert!(matches!(resolve(&photos, &format!("roll://{mine}@production/AWS_SECRET_ACCESS_KEY")), Err(Refusal::NotTrusted(_))));
+    let missing = resolve(&photos, "roll://production/NOPE").unwrap_err();
+    assert!(matches!(missing, Refusal::NoSuchKey(_)), "{missing}");
+    // An ephemeral environment that isn't trusted never reaches its protected base.
+    api.ok(Method::POST, "/environments", Some(json!({ "slug": "pr-1", "base": "production" }))).await;
+    let refused = resolve(&photos, "roll://pr-1/AWS_SECRET_ACCESS_KEY").unwrap_err();
+    assert!(matches!(refused, Refusal::Protected(_)) && !refused.to_string().contains("fake-secret-one"), "{refused}");
+
+    // The digest moves with the value, without reading it.
+    let before = api.secrets.digest_for(&photos, reference).unwrap();
+    api.ok(Method::PUT, "/environments/production/policy", Some(json!({ "protected": false }))).await;
+    api.set("production", "AWS_SECRET_ACCESS_KEY", "fake-secret-two").await;
+    assert_ne!(api.secrets.digest_for(&photos, reference).unwrap(), before);
+    assert_eq!(resolve(&photos, reference).unwrap().value.expose(), "fake-secret-two");
+}
+
+#[tokio::test]
+async fn an_untrusted_resource_ref_never_reads_a_protected_environment_or_a_sensitive_key() {
+    use roll_secrets::{Refusal, ResourceRef};
+    use roll_workspace::Kind;
+    let api = Api::new().await;
+    api.set("production", "AWS_SECRET_ACCESS_KEY", "fake-protected").await;
+    api.ok(Method::PUT, "/environments/staging/secrets/STRIPE_KEY", Some(json!({ "value": "fake-sensitive", "tags": ["sensitive"] }))).await;
+    api.set("staging", "PLAIN_KEY", "fake-plain").await;
+    api.ok(Method::PUT, "/environments/production/policy", Some(json!({ "protected": true, "approvals": 1 }))).await;
+    api.ok(Method::PUT, &format!("/v1/workspace/projects/{}/resources/bucket/photos", api.project), Some(json!({ "x": 0, "y": 0 }))).await;
+    let (trusted, branch) = (ResourceRef::new(Kind::Bucket, "photos"), ResourceRef::new(Kind::Bucket, "photos").untrusted());
+    let (protected, sensitive, plain) = ("roll://production/AWS_SECRET_ACCESS_KEY", "roll://staging/STRIPE_KEY", "roll://staging/PLAIN_KEY");
+
+    // The resource itself reads as its project's runtime.
+    assert_eq!(api.secrets.resolve_for(&trusted, protected).unwrap().value.expose(), "fake-protected");
+    assert_eq!(api.secrets.resolve_for(&trusted, sensitive).unwrap().value.expose(), "fake-sensitive");
+    // The same ref as an untrusted copy: refused both, the digest refused the same way.
+    for (reference, what) in [(protected, "protected"), (sensitive, "sensitive")] {
+        let refused = api.secrets.resolve_for(&branch, reference).unwrap_err();
+        let ok = match what {
+            "protected" => matches!(refused, Refusal::Protected(_)),
+            _ => matches!(refused, Refusal::Unusable(_)),
+        };
+        assert!(ok && !refused.to_string().contains("fake-"), "{what}: {refused}");
+        let digest = api.secrets.digest_for(&branch, reference).unwrap_err();
+        assert_eq!(std::mem::discriminant(&digest), std::mem::discriminant(&refused), "{what}: {digest}");
+        assert!(api.secrets.digest_for(&trusted, reference).is_ok());
+    }
+    // What an untrusted reader may read still resolves, audited as the untrusted copy.
+    assert_eq!(api.secrets.resolve_for(&branch, plain).unwrap().value.expose(), "fake-plain");
+    assert!(api.secrets.digest_for(&branch, plain).is_ok());
+    let audit = api.ok(Method::GET, "/audit?action=secrets.resolve", None).await;
+    assert_eq!((audit[0]["actor"].as_str(), audit[0]["keys"].clone()), (Some("storage:bucket:photos (untrusted)"), json!(["PLAIN_KEY"])), "{audit}");
 }

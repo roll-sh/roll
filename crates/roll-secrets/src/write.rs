@@ -311,6 +311,8 @@ pub(crate) fn apply(c: &Conn<'_>, dek: &Dek, mac: &crate::Keyring, env: &EnvRow,
                     params![cur.id, cur.version + 1, seq, project, env.id, item.path, item.key, item.owner, cur.comment, json(&cur.tags), cur.link.as_ref().map(json), now, caller.principal, cur.expires_at],
                 )?;
                 c.execute("DELETE FROM secrets WHERE id = ?", [&cur.id])?;
+                // A decoy ends with its key (its token is revoked after the write: `end_decoys`).
+                c.execute("UPDATE decoys SET ended_at = ? WHERE secret_id = ? AND ended_at IS NULL", params![now, cur.id])?;
                 if let (Some(l), Some(id)) = (&cur.link, credential_id(&cur.link_state)) {
                     dropped_credentials.insert(id, (l.clone(), cur.link_state.clone().unwrap_or_default()));
                 }
@@ -380,6 +382,12 @@ pub(crate) fn apply(c: &Conn<'_>, dek: &Dek, mac: &crate::Keyring, env: &EnvRow,
                 }
                 if what.is_empty() {
                     continue;
+                }
+                // A decoy's value is its credential: a new value or a link makes it an ordinary key.
+                if let Some(cur) = &cur
+                    && what.iter().any(|w| w == "changed" || w == "link")
+                {
+                    c.execute("UPDATE decoys SET ended_at = ? WHERE secret_id = ? AND ended_at IS NULL", params![now, cur.id])?;
                 }
                 if let Some(cur) = &cur
                     && let Some(old) = credential_id(&cur.link_state)
@@ -705,6 +713,25 @@ impl Secrets {
     /// (`if_version`: the key moved since it was read, so the change is refused as `stale`).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn commit_with(&self, project: &str, env_slug: &str, items: Vec<Item>, expect: &[(usize, i64)], kind: &str, message: &str, if_seq: Option<i64>, force: bool, caller: &Caller) -> Result<Applied> {
+        self.commit_then(project, env_slug, items, expect, kind, message, if_seq, force, caller, &|_, _, _| Ok(()))
+    }
+
+    /// [`Self::commit_with`], running `then` in the change's own transaction after it's applied
+    /// (a decoy's mark). Inside the write: only the database.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn commit_then(
+        &self,
+        project: &str,
+        env_slug: &str,
+        items: Vec<Item>,
+        expect: &[(usize, i64)],
+        kind: &str,
+        message: &str,
+        if_seq: Option<i64>,
+        force: bool,
+        caller: &Caller,
+        then: &dyn Fn(&Conn<'_>, &EnvRow, i64) -> Result<()>,
+    ) -> Result<Applied> {
         let warnings = self.warnings(project, env_slug, &items, caller);
         // A rollback restores what was there, typed or not.
         if kind != "rollback" {
@@ -732,10 +759,20 @@ impl Secrets {
             {
                 return Err(Error::Conflict("stale", format!("{} changed after #{s}", env.slug)));
             }
-            apply(c, &dek, self.keys()?, &env, &prepared.items, kind, message, caller, now)
+            let applied = apply(c, &dek, self.keys()?, &env, &prepared.items, kind, message, caller, now)?;
+            then(c, &env, now)?;
+            Ok(applied)
         });
         match res {
-            Ok((change, items)) => Ok(Applied { change: (!items.is_empty()).then_some(change), items, warnings, request: None }),
+            Ok((change, items)) => {
+                // A decoy whose key this changed or deleted: its token goes now.
+                if items.iter().any(|d| d.what.iter().any(|w| w == "deleted" || w == "changed" || w == "link"))
+                    && let Err(e) = self.end_decoys()
+                {
+                    tracing::warn!(project, "ending decoys after a change failed (the sweeper retries): {e}");
+                }
+                Ok(Applied { change: (!items.is_empty()).then_some(change), items, warnings, request: None })
+            }
             Err(e) => {
                 self.discard(&prepared);
                 Err(e)

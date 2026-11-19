@@ -68,9 +68,15 @@ async fn gate(axum::extract::State(tokens): axum::extract::State<Tokens>, mut re
     next.run(req).await
 }
 
-/// The workspace (with the project `shop`) and secrets routers on a local port: the API's URL,
-/// secrets itself, the workspace, and the directory they keep their databases in.
-async fn serve() -> (String, Arc<roll_secrets::Secrets>, Arc<roll_workspace::Workspace>, tempfile::TempDir) {
+/// The workspace, secrets and access routers on a local port, with the project `shop`.
+struct Server {
+    api: String,
+    secrets: Arc<roll_secrets::Secrets>,
+    projects: Arc<roll_workspace::Workspace>,
+    _dir: tempfile::TempDir,
+}
+
+async fn start() -> Server {
     let dir = tempfile::tempdir().unwrap();
     let ws_db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("workspace.db")), "workspace").unwrap();
     let ws = Arc::new(roll_workspace::Workspace::new(ws_db).unwrap());
@@ -105,13 +111,12 @@ async fn serve() -> (String, Arc<roll_secrets::Secrets>, Arc<roll_workspace::Wor
     let access = axum::Router::new().route("/v1/access/tokens", axum::routing::post(create_token)).with_state(tokens.clone());
     let router = roll_workspace::router(ws).merge(roll_secrets::router(served)).merge(access).layer(axum::middleware::from_fn_with_state(tokens, gate));
     tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-    (api, secrets, projects, dir)
+    Server { api, secrets, projects, _dir: dir }
 }
 
 #[tokio::test]
 async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_references() {
-    let (api, _secrets, projects, dir) = serve().await;
-
+    let Server { api, projects, _dir: dir, .. } = start().await;
     let at = ["secrets", "-p", "shop", "-e", "production"];
     ok(&api, &[], &[&at[..], &["set", "HOST=db.internal", "PORT=5432"]].concat(), None).await;
     ok(&api, &[], &[&at[..], &["set", "PASSWORD"]].concat(), Some("s3cret\n")).await;
@@ -211,6 +216,23 @@ async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_referen
     let scanned = roll(&api, &[], &["secrets", "-p", "shop", "scan", repo.path().to_str().unwrap()], None).await;
     assert!(scanned.code != Some(0) && scanned.stdout.contains("config.yml:3  HOST (production)"), "{}{}", scanned.stdout, scanned.stderr);
 
+    // A credential roll secrets doesn't hold: a pre-commit scan refuses it, `--store` moves it in
+    // from the file and says what to write instead. (Built from pieces: push protection scans
+    // this repo.)
+    let git = |args: &[&str]| assert!(std::process::Command::new("git").args(args).current_dir(repo.path()).status().unwrap().success());
+    git(&["init", "-q"]);
+    let aws = ["AKIA", "ROLLFIXTURE", "23456"].concat();
+    std::fs::write(repo.path().join("deploy.ts"), format!("// deploys\nexport const awsKey = \"{aws}\";\n")).unwrap();
+    git(&["add", "deploy.ts"]);
+    let cwd = [("ROLL_TEST_CWD", repo.path().to_str().unwrap())];
+    let refused = roll(&api, &cwd, &["secrets", "-p", "shop", "scan", "--staged"], None).await;
+    assert!(refused.code != Some(0) && refused.stdout.contains("deploy.ts:2  an AWS access key, not in roll secrets: roll secrets scan --store AWS_KEY=deploy.ts:2") && !refused.stdout.contains(&aws), "{}{}", refused.stdout, refused.stderr);
+    ok(&api, &cwd, &["secrets", "-p", "shop", "scan", "--staged", "--allow-unstored"], None).await;
+    let stored = ok(&api, &cwd, &[&at[..], &["scan", "--store", "deploy.ts:2"]].concat(), None).await;
+    assert!(stored.contains("as AWS_KEY in production:/") && stored.contains("Replace it with process.env.AWS_KEY") && !stored.contains(&aws), "{stored}");
+    let again = roll(&api, &cwd, &["secrets", "-p", "shop", "scan", "--staged"], None).await;
+    assert!(again.code != Some(0) && again.stdout.contains("deploy.ts:2  AWS_KEY (production)") && !again.stdout.contains("not in roll secrets"), "now it's the project's value: {}", again.stdout);
+
     // A config file filled from the environment: `\${…}` and shell syntax stay as written.
     let tpl = "url: http://${HOST}:${PORT}\nliteral: \\${HOST} ${HOME:-x} $PORT\n";
     let filled = ok(&api, &[], &[&at[..], &["render", "-"]].concat(), Some(tpl)).await;
@@ -254,15 +276,238 @@ async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_referen
     let public = ok(&api, &[], &["secrets", "keygen", "--out", key], None).await;
     ok(&api, &[], &["secrets", "-p", "shop", "backup", "--to", public.trim(), "--out", file], None).await;
     assert!(!std::fs::read_to_string(file).unwrap().contains("s3cret"), "sealed at rest");
+    // Its key split 2 of 3 and the key file gone: two holders' shares recover it.
+    let shares = ok(&api, &[], &["secrets", "key", "split", "--shares", "3", "--threshold", "2", "--file", key], None).await;
+    let shares: Vec<&str> = shares.lines().collect();
+    assert!(shares.len() == 3 && shares.iter().all(|s| s.starts_with("rlks_")), "{shares:?}");
+    std::fs::remove_file(key).unwrap();
+    let mixed = roll(&api, &[], &["secrets", "key", "combine"], Some(&format!("{}\n{}\n", shares[0], shares[0]))).await;
+    assert!(mixed.code != Some(0) && mixed.stdout.is_empty() && mixed.stderr.contains("given twice"), "{}", mixed.stderr);
+    ok(&api, &[], &["secrets", "key", "combine", "--out", key], Some(&format!("{}\n{}\n", shares[2], shares[0]))).await;
     projects.create("", "copy", "", None).unwrap();
     ok(&api, &[], &["secrets", "-p", "copy", "restore", file, "--key", key], None).await;
     let restored = ok(&api, &[], &["run", "-p", "copy", "-e", "production", "--allow-unresolved", "--no-mask", "--", "sh", "-c", "echo $HOST $PASSWORD"], None).await;
     assert_eq!(restored.trim(), "db.internal s3cret");
 }
 
+/// Answers each CLI's arguments with the file named after them (other characters `_`), from the
+/// mode's folder or `all`, and logs its arguments: a value must never be among them.
+const FAKE_CLI: &str = r#"#!/bin/sh
+bin=$(basename "$0")
+echo "$bin $*" >> "$FAKE_DIR/argv.log"
+k=${bin}_$(printf '%s' "$*" | tr -c 'A-Za-z0-9' '_')
+for d in "$FAKE_DIR/$FAKE_MODE" "$FAKE_DIR/all"; do
+  if [ -f "$d/$k.err" ]; then cat "$d/$k.err" >&2; exit 1; fi
+  if [ -f "$d/$k" ]; then cat "$d/$k"; exit 0; fi
+done
+echo "fake $bin: nothing recorded for: $*" >&2
+exit 2
+"#;
+
+/// Records `bin args`' answer in `mode` (`all`, `fail`, `collide`); `Err` text is its stderr.
+fn answer(dir: &std::path::Path, mode: &str, bin: &str, args: &str, out: Result<serde_json::Value, &str>) {
+    let key: String = format!("{bin}_{args}").chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
+    std::fs::create_dir_all(dir.join(mode)).unwrap();
+    match out {
+        Ok(v) => std::fs::write(dir.join(mode).join(key), v.to_string()).unwrap(),
+        Err(e) => std::fs::write(dir.join(mode).join(format!("{key}.err")), format!("{e}\n")).unwrap(),
+    }
+}
+
+/// Moving in through other managers' own CLIs (fakes printing what their docs show): each
+/// imports, stops on a secret it can't read, and stops on two secrets giving one key, and no
+/// value is ever on a command line or in an error.
+#[tokio::test]
+async fn import_from_other_managers_through_their_clis() {
+    use serde_json::json;
+    let Server { api, .. } = start().await;
+    let fake = tempfile::tempdir().unwrap();
+    let (dir, bin) = (fake.path().join("answers"), fake.path().join("bin"));
+    std::fs::create_dir_all(&bin).unwrap();
+    for name in ["op", "bws", "aws", "gcloud", "az", "akeyless"] {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(bin.join(name), FAKE_CLI).unwrap();
+        std::fs::set_permissions(bin.join(name), std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let a = |mode: &str, bin: &str, args: &str, out: Result<serde_json::Value, &str>| answer(&dir, mode, bin, args, out);
+
+    // 1Password: `op item list`, then `op item get` per item.
+    let item = |id: &str, title: &str, fields: serde_json::Value| json!({ "id": id, "title": title, "version": 1, "vault": { "id": "vlt0fake", "name": "Fake" }, "category": "LOGIN", "fields": fields });
+    let listed = |id: &str, title: &str| json!({ "id": id, "title": title, "version": 1, "vault": { "id": "vlt0fake", "name": "Fake" }, "category": "LOGIN" });
+    a("all", "op", "item list --vault Fake --format json", Ok(json!([listed("itm1", "Stripe"), listed("itm2", "Main DB")])));
+    a("all", "op", "item get itm1 --vault Fake --format json --reveal", Ok(item("itm1", "Stripe", json!([
+        { "id": "credential", "type": "CONCEALED", "label": "credential", "value": "fakevalue-op-1", "reference": "op://Fake/Stripe/credential" },
+        { "id": "notesPlain", "type": "STRING", "purpose": "NOTES", "label": "notesPlain", "value": "fakevalue-note" }
+    ]))));
+    let db = item("itm2", "Main DB", json!([
+        { "id": "username", "type": "STRING", "purpose": "USERNAME", "label": "username", "value": "fakevalue-op-2" },
+        { "id": "password", "type": "CONCEALED", "purpose": "PASSWORD", "label": "password", "value": "fakevalue-op-3" },
+        { "id": "abc", "section": { "id": "s1", "label": "Replica" }, "type": "STRING", "label": "port", "value": "6543" },
+        { "id": "otp", "type": "OTP", "label": "one-time password", "value": "otpauth://totp/fakevalue-otp" }
+    ]));
+    a("all", "op", "item get itm2 --vault Fake --format json --reveal", Ok(db.clone()));
+    a("all", "op", "item get Main DB --vault Fake --format json --reveal", Ok(db));
+    a("fail", "op", "item get itm2 --vault Fake --format json --reveal", Err("[ERROR] 2026/11/18 12:00:00 You don't have permission to view this item"));
+    a("collide", "op", "item list --vault Fake --format json", Ok(json!([listed("itm1", "Stripe"), listed("itm3", "stripe")])));
+    a("collide", "op", "item get itm3 --vault Fake --format json --reveal", Ok(item("itm3", "stripe", json!([{ "id": "credential", "type": "CONCEALED", "label": "credential", "value": "fakevalue-op-4" }]))));
+
+    // Bitwarden Secrets Manager: `bws secret list PROJECT_ID`.
+    let bws = |id: &str, key: &str, value: &str| json!({ "object": "secret", "id": id, "organizationId": "00000000-0000-0000-0000-00000000f00d", "projectId": "00000000-0000-0000-0000-0000000000aa", "key": key, "value": value, "note": "", "creationDate": "2026-01-01T00:00:00Z", "revisionDate": "2026-01-01T00:00:00Z" });
+    let project = "00000000-0000-0000-0000-0000000000aa";
+    let b1 = bws("00000000-0000-0000-0000-000000000001", "FAKE_API_KEY", "fakevalue-bws-1");
+    let b2 = bws("00000000-0000-0000-0000-000000000002", "FAKE_TOKEN", "fakevalue-bws-2");
+    a("all", "bws", &format!("secret list {project} --output json"), Ok(json!([b1, b2])));
+    a("fail", "bws", &format!("secret list {project} --output json"), Err("Error: \n   0: Received error message from server: [401 Unauthorized]"));
+    a("collide", "bws", &format!("secret list {project} --output json"), Ok(json!([b1, b2, bws("00000000-0000-0000-0000-000000000003", "FAKE_TOKEN", "fakevalue-bws-3")])));
+
+    // Parameter Store: one `aws ssm get-parameters-by-path` (the CLI pages itself).
+    let ssm_args = "ssm get-parameters-by-path --path /fake/shop --recursive --with-decryption --max-items 501 --output json";
+    let p = |name: &str, kind: &str, value: &str| json!({ "Name": name, "Type": kind, "Value": value, "Version": 1, "LastModifiedDate": "2026-01-01T00:00:00Z", "ARN": format!("arn:aws:ssm:us-east-1:000000000000:parameter{name}"), "DataType": "text" });
+    let params = vec![p("/fake/shop/API_URL", "String", "https://fakevalue.example"), p("/fake/shop/db/password", "SecureString", "fakevalue-ssm-1"), p("/fake/shop/db/db-user", "String", "fakevalue-ssm-2")];
+    a("all", "aws", ssm_args, Ok(json!({ "Parameters": params })));
+    a("fail", "aws", ssm_args, Err("An error occurred (AccessDeniedException) when calling the GetParametersByPath operation: The ciphertext refers to a customer master key that does not exist"));
+    let mut more = params.clone();
+    more.push(p("/fake/shop/api-url", "String", "fakevalue-ssm-3"));
+    a("collide", "aws", ssm_args, Ok(json!({ "Parameters": more })));
+
+    // Google Secret Manager: `gcloud secrets list`, then the latest version of each.
+    use base64::Engine;
+    let gsm = |id: &str| json!({ "name": format!("projects/123456789/secrets/{id}"), "createTime": "2026-01-01T00:00:00Z", "replication": { "automatic": {} }, "etag": "\"fake\"" });
+    let version = |id: &str, value: &str| json!({ "name": format!("projects/123456789/secrets/{id}/versions/1"), "payload": { "data": base64::engine::general_purpose::STANDARD.encode(value), "dataCrc32c": "1" } });
+    let access = |id: &str| format!("secrets versions access latest --secret {id} --project fake-project --format json");
+    a("all", "gcloud", "secrets list --project fake-project --format json", Ok(json!([gsm("fake-db-url"), gsm("fake-api-key"), gsm("fake-empty"), gsm("other-thing")])));
+    a("all", "gcloud", &access("fake-db-url"), Ok(version("fake-db-url", "fakevalue-gcp-1")));
+    a("all", "gcloud", &access("fake-api-key"), Ok(version("fake-api-key", "fakevalue-gcp-2")));
+    a("all", "gcloud", &access("fake-empty"), Err("ERROR: (gcloud.secrets.versions.access) NOT_FOUND: Secret Version [projects/123456789/secrets/fake-empty/versions/latest] not found or has no versions."));
+    a("fail", "gcloud", &access("fake-api-key"), Err("ERROR: (gcloud.secrets.versions.access) PERMISSION_DENIED: Permission 'secretmanager.versions.access' denied for resource 'projects/fake-project/secrets/fake-api-key/versions/latest'"));
+    a("collide", "gcloud", "secrets list --project fake-project --format json", Ok(json!([gsm("fake-db-url"), gsm("fake-DB_URL")])));
+    a("collide", "gcloud", &access("fake-DB_URL"), Ok(version("fake-DB_URL", "fakevalue-gcp-3")));
+
+    // Azure Key Vault: `az keyvault secret list`, then `show` per enabled secret. Its names are
+    // letters, digits and `-`, case-insensitive: two can't give one key.
+    let akv = |name: &str, enabled: bool| json!({ "attributes": { "enabled": enabled, "recoveryLevel": "Recoverable+Purgeable" }, "contentType": null, "id": format!("https://fake-vault.vault.azure.net/secrets/{name}"), "managed": null, "name": name, "tags": {} });
+    let shown = |name: &str, value: &str| json!({ "attributes": { "enabled": true }, "contentType": null, "id": format!("https://fake-vault.vault.azure.net/secrets/{name}/0123456789abcdef"), "kid": null, "managed": null, "name": name, "tags": {}, "value": value });
+    let show = |name: &str| format!("keyvault secret show --vault-name fake-vault --name {name} --output json");
+    a("all", "az", "keyvault secret list --vault-name fake-vault --output json", Ok(json!([akv("db-url", true), akv("api-key", true), akv("old-key", false)])));
+    a("all", "az", &show("db-url"), Ok(shown("db-url", "fakevalue-az-1")));
+    a("all", "az", &show("api-key"), Ok(shown("api-key", "fakevalue-az-2")));
+    a("fail", "az", &show("api-key"), Err("ERROR: (Forbidden) The user, group or application 'appid=00000000-0000-0000-0000-000000000000' does not have secrets get permission on key vault 'fake-vault'."));
+
+    // Akeyless: `akeyless list-items`, then `get-secret-value` per static secret.
+    let ak = |name: &str| json!({ "item_name": name, "item_id": 1, "item_type": "STATIC_SECRET", "item_sub_type": "generic", "item_tags": [] });
+    let list_args = "list-items --path /fake/shop --type static-secret --json";
+    let get = |name: &str| format!("get-secret-value --name {name} --json");
+    a("all", "akeyless", list_args, Ok(json!({ "items": [ak("/fake/shop/api-key"), ak("/fake/shop/db/url")], "folders": ["/fake/shop/db"], "next_page": "" })));
+    a("all", "akeyless", &get("/fake/shop/api-key"), Ok(json!({ "/fake/shop/api-key": "fakevalue-akl-1" })));
+    a("all", "akeyless", &get("/fake/shop/db/url"), Ok(json!({ "/fake/shop/db/url": "fakevalue-akl-2" })));
+    a("fail", "akeyless", &get("/fake/shop/db/url"), Err("Error: failed to get secret value: 403 Forbidden: access denied"));
+    a("collide", "akeyless", list_args, Ok(json!({ "items": [ak("/fake/shop/api-key"), ak("/fake/shop/API_KEY")], "folders": [], "next_page": "" })));
+    a("collide", "akeyless", &get("/fake/shop/API_KEY"), Ok(json!({ "/fake/shop/API_KEY": "fakevalue-akl-3" })));
+
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    let fake_dir = dir.to_str().unwrap().to_string();
+    let import = |env_name: &'static str, at: &'static str, from: &'static str, source: &'static str, extra: &'static [&'static str]| {
+        [&["secrets", "-p", "shop", "-e", env_name, "--path", at, "import", "--from", from, "--source", source][..], extra].concat()
+    };
+    let run = |at: &'static str, echo: &'static str| ["run", "-p", "shop", "-e", "production", "--path", at, "--no-mask", "--", "sh", "-c", echo];
+    let call = async |mode: &str, args: &[&str]| roll(&api, &[("PATH", path.as_str()), ("FAKE_DIR", fake_dir.as_str()), ("FAKE_MODE", mode)], args, None).await;
+    let done = async |mode: &str, args: &[&str]| {
+        let o = call(mode, args).await;
+        assert_eq!(o.code, Some(0), "roll {args:?}: {}\n{}", o.stderr, o.stdout);
+        assert!(!o.stdout.contains("fakevalue") && !o.stderr.contains("fakevalue"), "a value printed: {}{}", o.stdout, o.stderr);
+        o
+    };
+    // A failure or a collision stops it before anything is written (into staging, which stays
+    // empty), naming what stopped it and never a value.
+    let stops = async |mode: &str, args: &[&str], why: &str| {
+        let o = call(mode, args).await;
+        assert!(o.code != Some(0) && o.stderr.contains(why), "roll {args:?} should stop with {why:?}: {}\n{}", o.stderr, o.stdout);
+        assert!(!o.stdout.contains("fakevalue") && !o.stderr.contains("fakevalue"), "a value printed: {}{}", o.stdout, o.stderr);
+    };
+
+    // 1Password: a dry run first (names only), then the vault; one item's fields by its name.
+    let dry = done("all", &import("production", "/op", "1password", "Fake", &["--dry-run"])).await.stdout;
+    assert!(dry.contains("STRIPE_CREDENTIAL") && dry.contains("MAIN_DB_REPLICA_PORT") && !dry.contains("NOTES") && !dry.contains("ONE_TIME") && dry.contains("Dry run: nothing imported (4 keys in 1 change)."), "{dry}");
+    let one = done("all", &import("production", "/op", "1password", "Fake/Main DB", &["--dry-run"])).await.stdout;
+    assert!(one.contains("  PASSWORD\n") && one.contains("  REPLICA_PORT\n") && one.contains("  USERNAME\n"), "{one}");
+    done("all", &import("production", "/op", "1password", "Fake", &[])).await;
+    assert_eq!(ok(&api, &[], &run("/op", "echo $STRIPE_CREDENTIAL $MAIN_DB_USERNAME $MAIN_DB_PASSWORD $MAIN_DB_REPLICA_PORT"), None).await.trim(), "fakevalue-op-1 fakevalue-op-2 fakevalue-op-3 6543");
+    stops("fail", &import("staging", "/op", "1password", "Fake", &[]), "1password Fake/Main DB").await;
+    stops("collide", &import("staging", "/op", "1password", "Fake", &[]), "op://Fake/Stripe/credential and op://Fake/stripe/credential both give STRIPE_CREDENTIAL").await;
+
+    done("all", &import("production", "/bws", "bitwarden", project, &[])).await;
+    assert_eq!(ok(&api, &[], &run("/bws", "echo $FAKE_API_KEY $FAKE_TOKEN"), None).await.trim(), "fakevalue-bws-1 fakevalue-bws-2");
+    stops("fail", &import("staging", "/bws", "bitwarden", project, &[]), "401 Unauthorized").await;
+    stops("collide", &import("staging", "/bws", "bitwarden", project, &[]), "bitwarden secret 00000000-0000-0000-0000-000000000002 and bitwarden secret 00000000-0000-0000-0000-000000000003 both give FAKE_TOKEN").await;
+
+    // Parameter Store: the path's tree into folders, one change each; SecureStrings sensitive.
+    let dry = done("all", &import("production", "/ssm", "aws-parameter-store", "/fake/shop", &["--sensitive", "--dry-run"])).await.stdout;
+    assert!(dry.contains("/ssm/db: 2 keys\n  DB_USER\n  PASSWORD  (sensitive)\n"), "{dry}");
+    let out = done("all", &import("production", "/ssm", "aws-parameter-store", "/fake/shop", &["--sensitive"])).await.stdout;
+    assert!(out.contains("/ssm: 1 value") && out.contains("/ssm/db: 2 values"), "{out}");
+    assert_eq!(ok(&api, &[], &run("/ssm", "echo $API_URL"), None).await.trim(), "https://fakevalue.example");
+    assert_eq!(ok(&api, &[], &run("/ssm/db", "echo $DB_USER"), None).await.trim(), "fakevalue-ssm-2");
+    let sensitive = done("all", &run("/ssm/db", "echo ${PASSWORD:-withheld}")).await;
+    assert!(sensitive.stdout.trim() == "withheld" && sensitive.stderr.contains("left out PASSWORD (sensitive"), "{}{}", sensitive.stdout, sensitive.stderr);
+    stops("fail", &import("staging", "/ssm", "aws-parameter-store", "/fake/shop", &[]), "AccessDeniedException").await;
+    stops("collide", &import("staging", "/ssm", "aws-parameter-store", "/fake/shop", &[]), "/fake/shop/API_URL and /fake/shop/api-url both give API_URL").await;
+
+    // Google: the prefix's secrets, a secret with no version left out (named), others alone.
+    let o = done("all", &import("production", "/gcp", "gcp", "fake-project/fake-", &[])).await;
+    assert!(o.stderr.contains("gcp fake-project/fake-empty: no version, left out"), "{}", o.stderr);
+    assert_eq!(ok(&api, &[], &run("/gcp", "echo $DB_URL $API_KEY ${EMPTY:-none} ${OTHER_THING:-none}"), None).await.trim(), "fakevalue-gcp-1 fakevalue-gcp-2 none none");
+    stops("fail", &import("staging", "/gcp", "gcp", "fake-project/fake-", &[]), "PERMISSION_DENIED").await;
+    stops("collide", &import("staging", "/gcp", "gcp", "fake-project/fake-", &[]), "gcp fake-project/fake-db-url and gcp fake-project/fake-DB_URL both give DB_URL").await;
+
+    let o = done("all", &import("production", "/az", "azure", "fake-vault", &[])).await;
+    assert!(o.stderr.contains("azure fake-vault/old-key: disabled, left out"), "{}", o.stderr);
+    assert_eq!(ok(&api, &[], &run("/az", "echo $DB_URL $API_KEY ${OLD_KEY:-none}"), None).await.trim(), "fakevalue-az-1 fakevalue-az-2 none");
+    stops("fail", &import("staging", "/az", "azure", "fake-vault", &[]), "does not have secrets get permission").await;
+
+    done("all", &import("production", "/akl", "akeyless", "/fake/shop", &[])).await;
+    assert_eq!(ok(&api, &[], &run("/akl", "echo $API_KEY"), None).await.trim(), "fakevalue-akl-1");
+    assert_eq!(ok(&api, &[], &run("/akl/db", "echo $URL"), None).await.trim(), "fakevalue-akl-2");
+    stops("fail", &import("staging", "/akl", "akeyless", "/fake/shop", &[]), "akeyless /fake/shop/db/url").await;
+    stops("collide", &import("staging", "/akl", "akeyless", "/fake/shop", &[]), "akeyless /fake/shop/api-key and akeyless /fake/shop/API_KEY both give API_KEY").await;
+
+    for at in ["/op", "/bws", "/ssm", "/gcp", "/az", "/akl"] {
+        let staged = call("all", &["secrets", "-p", "shop", "-e", "staging", "--path", at, "ls"]).await;
+        assert!(!["STRIPE_CREDENTIAL", "MAIN_DB", "FAKE_", "API_URL", "DB_URL", "API_KEY"].iter().any(|k| staged.stdout.contains(k)), "a stopped import wrote into {at}: {}", staged.stdout);
+    }
+    let argv = std::fs::read_to_string(dir.join("argv.log")).unwrap();
+    assert!(argv.contains("gcloud secrets versions access latest --secret fake-db-url") && !argv.contains("fakevalue"), "{argv}");
+}
+
+/// A sealed start's ceremony: `key split` names the split rolld starts sealed with, and `unseal`
+/// gives a sealed node one share at a time (read from stdin, printed nowhere) until it unseals.
+#[tokio::test(flavor = "multi_thread")]
+async fn roll_secrets_unseal_gives_a_sealed_node_its_shares() {
+    const KEY: &str = "fake-deployment-key-for-the-cli-test-000";
+    let split = roll("http://127.0.0.1:9", &[], &["secrets", "key", "split", "--shares", "3", "--threshold", "2"], Some(KEY)).await;
+    assert_eq!(split.code, Some(0), "{}", split.stderr);
+    let shares: Vec<&str> = split.stdout.lines().collect();
+    let named = split.stderr.split("ROLL_SECRET_KEY_SEALED=").nth(1).and_then(|s| s.split_whitespace().next()).unwrap_or_else(|| panic!("{}", split.stderr));
+    let sealed = roll_secrets::unseal::Sealed::parse(named).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("secrets.db")), "secrets").unwrap();
+    let (unsealer, unsealed) = roll_secrets::unseal::Unsealer::new(sealed, db).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api = format!("http://{}", listener.local_addr().unwrap());
+    let node = roll_secrets::unseal::sealed_router(unsealer).into_make_service_with_connect_info::<std::net::SocketAddr>();
+    tokio::spawn(async move { axum::serve(listener, node).await.unwrap() });
+
+    assert!(ok(&api, &[], &["secrets", "unseal", "--status"], None).await.contains("sealed, 0 of 2 shares"));
+    let one = roll(&api, &[], &["secrets", "unseal"], Some(&format!("{}\n", shares[2]))).await;
+    assert!(one.code == Some(0) && one.stdout.contains("sealed, 1 of 2 shares"), "{}{}", one.stdout, one.stderr);
+    assert!(!format!("{}{}", one.stdout, one.stderr).contains("rlks_"), "a share was printed");
+    let done = ok(&api, &[], &["secrets", "unseal", "--node", &api], Some(&format!("{}\n", shares[0]))).await;
+    assert_eq!(done.trim(), format!("{api}: unsealed"));
+    assert_eq!(unsealed.await.unwrap().as_str(), KEY);
+}
+
 #[tokio::test]
 async fn an_exported_audit_log_verifies_offline_with_saved_keys_for_its_own_project_and_an_edit_fails_it() {
-    let (api, secrets, projects, _dir) = serve().await;
+    let Server { api, secrets, projects, _dir } = start().await;
     let shop = projects.list(roll_workspace::Scope::All).unwrap().into_iter().find(|p| p.name == "shop").unwrap().id;
     let at = ["secrets", "-p", "shop", "-e", "production"];
     ok(&api, &[], &[&at[..], &["set", "HOST=db.internal", "PORT=5432"]].concat(), None).await;

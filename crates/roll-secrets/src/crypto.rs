@@ -91,6 +91,7 @@ pub struct Keyring {
     /// What tells the current key from others without revealing it (a customer-wrapped data key
     /// records which deployment key sealed it inside: kms.rs).
     current_id: String,
+    previous_id: Option<String>,
     /// The audit chain's head MAC keys (audit.rs), current and previous: a database writer without
     /// the deployment key can't move the head.
     audit: Zeroizing<[u8; 32]>,
@@ -136,7 +137,7 @@ fn mac(key: &[u8; 32], msg: &[u8]) -> Hmac<Sha256> {
 impl Keyring {
     pub fn new(current: &str, previous: Option<&str>) -> Result<Keyring, CryptoError> {
         let previous = previous.filter(|p| !p.trim().is_empty());
-        Ok(Keyring { current: kek(current)?, previous: previous.map(kek).transpose()?, current_id: kek_id(current), audit: audit_key(current), audit_previous: previous.map(audit_key) })
+        Ok(Keyring { current: kek(current)?, previous: previous.map(kek).transpose()?, current_id: kek_id(current), previous_id: previous.map(kek_id), audit: audit_key(current), audit_previous: previous.map(audit_key) })
     }
 
     /// The audit chain's head MAC of `msg` (audit.rs), with the current deployment key.
@@ -153,6 +154,11 @@ impl Keyring {
     /// The current deployment key's id.
     pub fn current_id(&self) -> &str {
         &self.current_id
+    }
+
+    /// The previous deployment key's id, during a rotation.
+    pub fn previous_id(&self) -> Option<&str> {
+        self.previous_id.as_deref()
     }
 
     /// A fresh data key for `project`, and its sealed form to store.

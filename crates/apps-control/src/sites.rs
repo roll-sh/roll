@@ -27,6 +27,8 @@ pub struct Site {
     pub files: HashMap<String, (u64, u64)>,
     /// Its own `_redirects` and `_headers` ([`crate::site_rules`]).
     pub rules: crate::site_rules::SiteRules,
+    /// The forms its HTML marks, by name ([`crate::forms`]).
+    pub forms: HashMap<String, crate::forms::FormSpec>,
     /// Its files gzipped once asked for (a site never changes), and how many bytes those hold.
     pub gzipped: parking_lot::Mutex<Gzipped>,
     /// When a request last read it (unix seconds): a site nobody asks for leaves memory.
@@ -174,6 +176,25 @@ fn rules(tar: &std::path::Path, files: &HashMap<String, (u64, u64)>) -> std::io:
         Ok(Some(String::from_utf8_lossy(&b).into_owned()))
     };
     Ok(crate::site_rules::SiteRules::parse(read("_redirects")?.as_deref(), read("_headers")?.as_deref()))
+}
+
+/// The forms a site's HTML files mark ([`crate::forms::site_forms`]), read out of its tar.
+fn forms(tar: &std::path::Path, files: &HashMap<String, (u64, u64)>) -> std::io::Result<HashMap<String, crate::forms::FormSpec>> {
+    use std::io::{Read, Seek};
+    let mut pages: Vec<(&String, &(u64, u64))> = files.iter().filter(|(n, (_, len))| n.ends_with(".html") && *len <= crate::forms::MAX_HTML_BYTES).collect();
+    pages.sort();
+    let mut f = std::fs::File::open(tar)?;
+    let mut read = Vec::new();
+    for (name, &(off, len)) in pages.into_iter().take(500) {
+        f.seek(std::io::SeekFrom::Start(off))?;
+        let mut b = Vec::new();
+        (&mut f).take(len).read_to_end(&mut b)?;
+        // Cheap first: most pages have no form at all.
+        if b.windows(5).any(|w| w.eq_ignore_ascii_case(b"<form")) {
+            read.push((crate::forms::page_of(name), String::from_utf8_lossy(&b).into_owned()));
+        }
+    }
+    Ok(crate::forms::site_forms(read.into_iter()))
 }
 
 /// Whether a file answers `path` as it is (the file, or its directory's `index.html`), before
@@ -368,15 +389,16 @@ impl Apps {
             tokio::fs::rename(&part, &path).await.map_err(|e| Error::Internal(e.to_string()))?;
         }
         let p = path.clone();
-        let (files, rules) = tokio::task::spawn_blocking(move || {
+        let (files, rules, forms) = tokio::task::spawn_blocking(move || {
             let files = index(std::fs::File::open(&p)?)?;
             let rules = rules(&p, &files)?;
-            Ok::<_, anyhow::Error>((files, rules))
+            let forms = forms(&p, &files)?;
+            Ok::<_, anyhow::Error>((files, rules, forms))
         })
         .await
         .map_err(|e| Error::Internal(e.to_string()))?
         .map_err(|e| Error::Internal(e.to_string()))?;
-        let site = Arc::new(Site { tar: path, files, rules, gzipped: Default::default(), used: now.into() });
+        let site = Arc::new(Site { tar: path, files, rules, forms, gzipped: Default::default(), used: now.into() });
         self.sites.lock().insert(key.to_string(), site.clone());
         self.site_loads.lock().remove(key);
         Ok(site)
@@ -485,7 +507,7 @@ mod tests {
         assert_eq!(names, ["assets/app.js", "index.html"]);
         let (off, len) = files["assets/app.js"];
         assert_eq!(&bytes[off as usize..(off + len) as usize], b"go()");
-        let mut site = Site { tar: PathBuf::new(), files, rules: Default::default(), gzipped: Default::default(), used: 0.into() };
+        let mut site = Site { tar: PathBuf::new(), files, rules: Default::default(), forms: Default::default(), gzipped: Default::default(), used: 0.into() };
         assert_eq!(resolve(&site, "/", false), Some(("index.html", 200)));
         assert_eq!(resolve(&site, "/settings/profile", true), Some(("index.html", 200)), "a page path in a single-page app");
         assert_eq!(resolve(&site, "/settings/profile", false), None);

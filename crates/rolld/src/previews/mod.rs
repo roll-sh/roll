@@ -154,6 +154,8 @@ pub fn start(
         a.set_git_pushes(Arc::new(services::GitPushes(Arc::downgrade(&engine))));
         // And their status and pull request comment, where the code lives (roll's GitHub App).
         let _ = engine.git_report.set(Arc::new(services::GitReport { api: api.clone(), code: code.code.clone() }));
+        // roll.toml services' output to the project's log drains that take previews'.
+        let _ = engine.drains.set(Arc::new(services::AppsDrains { apps: a.clone(), wanted: Default::default() }));
     }
     if clustered {
         let _ = engine.cluster.set(cluster.clone());

@@ -489,6 +489,26 @@ pub struct BudgetAlert {
     pub max_usd_month: f64,
 }
 
+/// What's at a path in a service, as a tar, as it's read.
+pub type FileStream = Box<dyn tokio::io::AsyncRead + Send + Unpin>;
+
+/// A terminal's stream, both ways (a hijacked Docker exec).
+pub trait ShellIo: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
+impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> ShellIo for T {}
+
+/// A terminal in a running service: what [`Apps::resize_shell`] takes, and its stream.
+pub struct Shell {
+    pub id: String,
+    pub io: Box<dyn ShellIo>,
+}
+
+impl Shell {
+    /// A Docker exec's hijacked connection as a terminal.
+    pub fn upgraded(id: String, io: hyper::upgrade::Upgraded) -> Shell {
+        Shell { id, io: Box::new(hyper_util::rt::TokioIo::new(io)) }
+    }
+}
+
 /// A seed run: the project's command, on the preview's tree, with its variables. (No `Debug`:
 /// `env` holds passwords.)
 #[derive(Clone)]
@@ -522,6 +542,44 @@ pub trait EnvSource: Send + Sync {
     async fn env(&self, preview: &str, service: &str) -> anyhow::Result<(Target, Vec<(String, String)>)>;
     /// A request reached the preview: it's in use.
     fn touched(&self, preview: &str);
+}
+
+/// A line a preview's service wrote, masked, for a log drain: when (ms), whether on stderr, what.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DrainLine {
+    pub t: i64,
+    pub stderr: bool,
+    pub text: String,
+}
+
+/// Which of a drain's sources a preview's lines are: a running service's output, or a job's
+/// (`release`, `seed`, `teardown`: roll apps' `build`, where deploy-time commands go).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum DrainSource {
+    Runtime,
+    Build,
+}
+
+impl DrainSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DrainSource::Runtime => "runtime",
+            DrainSource::Build => "build",
+        }
+    }
+}
+
+/// A project's log drains (roll apps' `…/projects/{project}/drains`): the ones that take
+/// previews' runtime output get a preview's services on roll's runtime too, in its `pv-`
+/// environment, as roll apps' own preview environments' output.
+#[async_trait]
+pub trait Drains: Send + Sync {
+    /// Whether any of the project's drains takes previews' lines of `source` (cheap: asked each
+    /// pass).
+    async fn wanted(&self, project: &str, source: DrainSource) -> bool;
+    /// A service's (or a job's) lines, masked, oldest first. Never waits (a drain that can't keep
+    /// up loses lines).
+    fn send(&self, project: &str, environment: &str, service: &str, source: DrainSource, lines: Vec<DrainLine>);
 }
 
 /// Where services run: roll apps once it lands, [`crate::runtime::Runtime`] until then.
@@ -563,7 +621,13 @@ pub trait Apps: Send + Sync {
     }
     /// The service's output as it comes, after its last `lines`: `None` where it can't be
     /// followed (the engine reads `logs` again every few seconds instead).
-    async fn follow(&self, _preview: &str, _service: &str, _lines: usize) -> Option<tokio::sync::mpsc::Receiver<String>> {
+    async fn follow(&self, _preview: &str, _service: &str, _lines: usize) -> Option<tokio::sync::mpsc::Receiver<(bool, String)>> {
+        None
+    }
+    /// The service's output from `since` (a Docker stamp, RFC 3339, or Unix seconds) as it comes,
+    /// each line `(stderr, "<RFC 3339 stamp> <text>")`, for the project's log drains. `None`
+    /// where this backend doesn't run it (roll apps drains its own instances' output).
+    async fn drain_from(&self, _preview: &str, _service: &str, _since: &str) -> Option<tokio::sync::mpsc::Receiver<(bool, String)>> {
         None
     }
     /// Run a project's seed command to its end: `Ok((exit code, the output's tail))`.
@@ -604,6 +668,34 @@ pub trait Apps: Send + Sync {
     /// The hosts the preview's egress proxy refused lately (its project's `egress_hosts` don't
     /// list them), each once. No default, as `warm`.
     async fn egress_refused(&self, preview: &str) -> Vec<String>;
+    /// A login shell in the running service (started if it sleeps), `cols` by `rows`. `None`
+    /// where this backend has none here: roll apps' services have roll apps' own shell, on
+    /// their `pv-` environment.
+    async fn shell(&self, _preview: &str, _service: &str, _cols: u16, _rows: u16) -> anyhow::Result<Option<Shell>> {
+        Ok(None)
+    }
+    async fn resize_shell(&self, _id: &str, _cols: u16, _rows: u16) -> anyhow::Result<()> {
+        Ok(())
+    }
+    /// Someone is using the service through a terminal: it doesn't go to sleep meanwhile.
+    fn hold(&self, _preview: &str, _service: &str) {}
+    /// What's at `path` in the running service (started if it sleeps), as a tar. `None` where
+    /// this backend has none here: roll apps' services have roll apps' own `…/files`, on their
+    /// `pv-` environment.
+    async fn read_files(&self, _preview: &str, _service: &str, _path: &str) -> anyhow::Result<Option<FileStream>> {
+        Ok(None)
+    }
+    /// One TCP connection to `port` inside the running service (started if it sleeps), from its
+    /// own network namespace, so any port it listens on is reachable, published or not. `None`
+    /// where this backend has none here (roll apps' services: roll apps' own tunnel).
+    async fn forward(&self, _preview: &str, _service: &str, _port: u16) -> anyhow::Result<Option<Box<dyn ShellIo>>> {
+        Ok(None)
+    }
+    /// A tar's files written under `dir` in the running service (started if it sleeps). `false`
+    /// where this backend has none here.
+    async fn write_files(&self, _preview: &str, _service: &str, _dir: &str, _tar: bytes::Bytes) -> anyhow::Result<bool> {
+        Ok(false)
+    }
 }
 
 /// Who may open a project's previews under `access: "team"` (rolld fills it from roll's
