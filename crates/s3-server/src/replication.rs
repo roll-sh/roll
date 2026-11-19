@@ -199,7 +199,7 @@ pub(crate) async fn put(ctx: &mut Ctx, bucket: &Bucket, body: Body) -> Reply {
     let n = read_xml(ctx, body, "ReplicationConfiguration").await?;
     let mut cfg = parse(&n)?;
     cfg.validate(&bucket.name).map_err(|m| S3Error::msg(Code::InvalidRequest, m))?;
-    resolve_destinations(&ctx.server.notifier, &mut cfg, bucket.object_lock.is_some()).await.map_err(|m| S3Error::msg(Code::InvalidRequest, m))?;
+    resolve_destinations(&ctx.server.notifier, &mut cfg, &bucket.name, bucket.object_lock.is_some()).await.map_err(|m| S3Error::msg(Code::InvalidRequest, m))?;
     ctx.store().set_replication(&bucket.name, Some(&cfg)).await.s3()?;
     Ok(response::empty(StatusCode::OK))
 }
@@ -207,14 +207,14 @@ pub(crate) async fn put(ctx: &mut Ctx, bucket: &Bucket, body: Body) -> Reply {
 /// Where each rule's destination is: the rule's target, the target listing the bucket, or a
 /// roll bucket. A bucket outside roll must have versioning enabled, as S3 requires (asked of
 /// the target now). `Err` says what's wrong.
-pub(crate) async fn resolve_destinations(n: &crate::Notifier, cfg: &mut ReplicationConfig, object_lock: bool) -> Result<(), String> {
+pub(crate) async fn resolve_destinations(n: &crate::Notifier, cfg: &mut ReplicationConfig, source: &str, object_lock: bool) -> Result<(), String> {
     let store = n.store();
     for r in &mut cfg.rules {
         if r.target.is_none() {
             r.target = store.target_for_bucket(&r.destination).map_err(|e| e.to_string())?;
         }
         match &r.target {
-            Some(t) => n.external.check_destination(t, &r.destination, object_lock).await?,
+            Some(t) => n.external.check_destination(t, &r.destination, object_lock, source).await?,
             None => match store.bucket(&r.destination) {
                 Ok(_) => {}
                 Err(StoreError::NoSuchBucket(_)) => {
