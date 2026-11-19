@@ -225,7 +225,7 @@ async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_referen
     let here = ok(&api, &[("XDG_CONFIG_HOME", cfg), ("ROLL_TEST_CWD", web)], &["run", "--no-mask", "--", "sh", "-c", "echo $HOST"], None).await;
     assert_eq!(here.trim(), "db.internal");
     let doctor = ok(&api, &[("XDG_CONFIG_HOME", cfg), ("ROLL_TEST_CWD", web)], &["secrets", "doctor"], None).await;
-    assert!(doctor.contains("ok   this directory is set up for shop production:/") && !doctor.contains("FAIL"), "{doctor}");
+    assert!(doctor.contains("ok   using shop production:/ (all from your setup)") && !doctor.contains("FAIL"), "{doctor}");
 
     // A template's keys checked against the environment, by name only.
     let tpl = dir.path().join(".env.example");
@@ -678,4 +678,62 @@ async fn tokens_default_to_one_environment_and_90_days_and_setup_creates_its_pro
     ok(&api, &here, &["secrets", "setup", "-p", "web", "-e", "development", "--create"], None).await;
     assert!(projects.list(roll_workspace::Scope::All).unwrap().iter().any(|p| p.name == "web"));
     ok(&api, &here, &["secrets", "set", "PORT=3000"], None).await;
+}
+
+/// A repo's roll.toml suggests where its secrets are, and the person approves it (direnv's
+/// `allow`): unapproved or changed it's ignored with a hint, flags beat it, and it never chooses a
+/// protected environment.
+#[tokio::test]
+async fn a_repos_roll_toml_suggests_where_its_secrets_are_and_the_person_approves_it() {
+    let Server { api, .. } = start().await;
+    for (env, value) in [("development", "dev"), ("staging", "stg"), ("production", "prod")] {
+        ok(&api, &[], &["secrets", "-p", "shop", "-e", env, "set", &format!("WHERE={value}")], None).await;
+    }
+    ok(&api, &[], &["secrets", "-p", "shop", "envs", "protect", "production", "--approvals", "1"], None).await;
+
+    let home = tempfile::tempdir().unwrap();
+    let (repo, web, cfg) = (home.path().join("repo"), home.path().join("repo/web"), home.path().join("config"));
+    std::fs::create_dir_all(&web).unwrap();
+    let toml = |secrets: &str| std::fs::write(repo.join("roll.toml"), format!("[queue]\nbatch_size = 2\n\n[secrets]\nunstored_credentials = \"warn\"\n{secrets}")).unwrap();
+    let e = [("XDG_CONFIG_HOME", cfg.to_str().unwrap()), ("ROLL_TEST_CWD", web.to_str().unwrap())];
+    let echo = ["run", "--no-mask", "--", "sh", "-c", "echo $WHERE"];
+
+    // Unapproved: nothing from it is used (so no project here), and roll says how to approve it.
+    // A key a repo never holds is named and left out.
+    toml("project = \"shop\"\nenvironment = \"staging\"\napi_url = \"https://elsewhere.example\"\n");
+    let o = roll(&api, &e, &echo, None).await;
+    assert!(o.code != Some(0) && o.stderr.contains("suggests project shop, environment staging, but it isn't used until you approve it: roll secrets setup"), "{}", o.stderr);
+    assert!(o.stderr.contains("api_url: a repo never holds an API URL, a token or a value; ignored"), "{}", o.stderr);
+    // Outside a terminal, setup asks for --approve rather than prompting.
+    let o = roll(&api, &e, &["secrets", "setup"], None).await;
+    assert!(o.code != Some(0) && o.stderr.contains("roll secrets setup --approve"), "{}", o.stderr);
+
+    // Approved, it's used; flags beat it.
+    assert!(ok(&api, &e, &["secrets", "setup", "--approve"], None).await.contains("Approved"));
+    assert_eq!(ok(&api, &e, &echo, None).await.trim(), "stg");
+    assert_eq!(ok(&api, &e, &["run", "-e", "development", "--no-mask", "--", "sh", "-c", "echo $WHERE"], None).await.trim(), "dev");
+
+    // A changed table asks again.
+    toml("project = \"shop\"\nenvironment = \"development\"\n");
+    let o = roll(&api, &e, &echo, None).await;
+    assert!(o.code != Some(0) && o.stderr.contains("changed since you approved it (it was: project shop, environment staging"), "{}", o.stderr);
+    ok(&api, &e, &["secrets", "setup", "--approve"], None).await;
+    assert_eq!(ok(&api, &e, &echo, None).await.trim(), "dev");
+
+    // A protected environment is refused even approved; the person can still choose it.
+    toml("project = \"shop\"\nenvironment = \"production\"\n");
+    let approved = roll(&api, &e, &["secrets", "setup", "--approve"], None).await;
+    assert!(approved.code == Some(0) && approved.stderr.contains("production is protected"), "{}", approved.stderr);
+    let o = roll(&api, &e, &echo, None).await;
+    assert!(o.code != Some(0) && o.stderr.contains("chooses production, which is protected: a repo never chooses a protected environment, even approved"), "{}", o.stderr);
+    assert_eq!(ok(&api, &e, &["run", "-e", "production", "--no-mask", "--", "sh", "-c", "echo $WHERE"], None).await.trim(), "prod");
+
+    // Environments by branch, with roll code's globs; doctor says where each choice came from.
+    toml("project = \"shop\"\nenvironment = \"development\"\nbranches = { \"release/*\" = \"staging\" }\n");
+    let git = std::process::Command::new("git").args(["init", "-q", "-b", "release/1"]).current_dir(&repo).status().unwrap();
+    assert!(git.success());
+    ok(&api, &e, &["secrets", "setup", "--approve"], None).await;
+    assert_eq!(ok(&api, &e, &echo, None).await.trim(), "stg");
+    let doctor = roll(&api, &e, &["secrets", "doctor"], None).await.stdout;
+    assert!(doctor.contains("ok   using shop staging:/ (project from roll.toml, environment from roll.toml (branch release/*), path from the default)") && doctor.contains(": approved"), "{doctor}");
 }
