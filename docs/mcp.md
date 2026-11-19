@@ -712,6 +712,11 @@ previews are listed once those products are on.
 | `secrets_list_saas` | A project's rotators for third-party API keys: vendor and the account each rotates for (never a credential). | `GET /v1/secrets/projects/{project}/saas` |
 | `secrets_list_kubernetes` | The Kubernetes clusters a project issues service-account tokens for: names and API servers (never a token). | `GET /v1/secrets/projects/{project}/kubernetes` |
 | `secrets_list_github_apps` | A project's GitHub Apps for short-lived installation tokens (ids, repositories, permissions; never the private key; adding one is admin). | `GET /v1/secrets/projects/{project}/github-apps` |
+| `secrets_list_directories` | A project's LDAP and Active Directory servers: URL, flavor, bind DN, managed accounts, groups, gateway (never the bind password; adding one is admin). | `GET /v1/secrets/projects/{project}/directories` |
+| `secrets_list_snowflake_accounts` | A project's Snowflake accounts: host, admin user and role, the admin key's fingerprint, managed user, roles (never the key; adding one is admin). | `GET /v1/secrets/projects/{project}/snowflake-accounts` |
+| `secrets_list_atlas_projects` | A project's MongoDB Atlas projects: group id, client id, managed users, roles (never the client secret; adding one is admin). | `GET /v1/secrets/projects/{project}/atlas-projects` |
+| `secrets_list_gateways` | A project's gateways into private networks with each link's status (online, node, version, allow-list, last seen; never a token; making one is admin). | `GET /v1/secrets/projects/{project}/gateways` |
+| `secrets_ca_acme` | A CA's ACME server: directory, pre-authorization, challenges, external account bindings (never an HMAC key; making one is admin). | `GET /v1/secrets/projects/{project}/cas/{id}/acme` |
 | `secrets_changes` | What changed in an environment (who, when, which keys; never values). | `GET …/environments/{env}/changes` |
 | `secrets_get_change` | One change: what it did to each key (fingerprints, never values). | `GET /v1/secrets/projects/{project}/environments/{env}/changes/{seq}` |
 | `secrets_insights` | Each key's version, last change and read, reads in 30 days, staleness. | `GET /v1/secrets/projects/{project}/environments/{env}/insights` |

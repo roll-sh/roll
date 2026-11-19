@@ -321,6 +321,8 @@ mod finds {
             ("roll back secrets", "secrets_rollback"),
             ("which secrets nobody reads", "secrets_insights"),
             ("one-time code", "secrets_totp"),
+            ("is the gateway to my private network online", "secrets_list_gateways"),
+            ("acme external account binding", "secrets_ca_acme"),
         ]
         .iter()
         .filter_map(|(q, want)| {
