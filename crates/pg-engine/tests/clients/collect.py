@@ -1,6 +1,7 @@
 """collect.py <dir>: JUnit XML files (and PASS/FAIL/SKIP .lst files) in <dir> as sorted
 `PASS|FAIL|SKIP <test id>` lines."""
 import pathlib
+import re
 import sys
 import xml.etree.ElementTree as ET
 
@@ -36,6 +37,8 @@ for p in sorted(pathlib.Path(sys.argv[1]).rglob("*")):
                 out[r.get("testName", "?")] = st
         for tc in root.iter("testcase"):
             name = (tc.get("classname") or "") + "::" + (tc.get("name") or "")
+            # (A JUnit parameter's toString with a JVM object address: Hibernate's lambdas.)
+            name = re.sub(r"\$\$Lambda/0x[0-9a-f]+@[0-9a-f]+|@[0-9a-f]{6,8}\b", "", name)
             tags = {c.tag for c in tc}
             if tags & {"failure", "error"}:
                 st = "FAIL"
