@@ -590,6 +590,10 @@ pub struct Run {
     /// patches). Without it the environment only says so (`base_updated`).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub rebuild_on_base: bool,
+    /// A web service's page loaded before a deploy keeps talking to the deployment that served
+    /// it, for a day (Vercel's skew protection; [`crate::skew`]).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub skew_protection: bool,
     /// Commands on a schedule, each a job of the live deployment at its due times (Heroku
     /// Scheduler, Vercel crons): any service's, without a cron service of its own.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -1045,6 +1049,7 @@ impl Default for Run {
             tcp: false,
             rollback_on_crash: false,
             rebuild_on_base: false,
+            skew_protection: false,
             schedules: Vec::new(),
             sidecars: Vec::new(),
             block_on: None,

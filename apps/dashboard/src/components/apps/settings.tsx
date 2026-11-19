@@ -83,6 +83,7 @@ interface Form {
   tcp: boolean;
   rollbackOnCrash: boolean;
   rebuildOnBase: boolean;
+  skewProtection: boolean;
   blockOn: "" | "critical" | "high" | "medium" | "low";
   scaleStream: string;
   scaleGroup: string;
@@ -161,6 +162,7 @@ export function formOf(s: Service): Form {
     tcp: !!s.run.tcp,
     rollbackOnCrash: !!s.run.rollback_on_crash,
     rebuildOnBase: !!s.run.rebuild_on_base,
+    skewProtection: !!s.run.skew_protection,
     blockOn: s.run.block_on ?? "",
     scaleStream: s.run.scale?.stream ?? "",
     scaleGroup: s.run.scale?.group ?? "",
@@ -254,6 +256,7 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   if (f.tcp !== before.tcp) run.tcp = f.tcp ? true : null;
   if (f.rollbackOnCrash !== before.rollbackOnCrash) run.rollback_on_crash = f.rollbackOnCrash ? true : null;
   if (f.rebuildOnBase !== before.rebuildOnBase) run.rebuild_on_base = f.rebuildOnBase ? true : null;
+  if (f.skewProtection !== before.skewProtection) run.skew_protection = f.skewProtection ? true : null;
   if (f.blockOn !== before.blockOn) run.block_on = f.blockOn || null;
   if (f.restart !== before.restart || f.restartTries !== before.restartTries) {
     run.restart = f.restart === "always" ? null : f.restart;
@@ -660,6 +663,14 @@ export function SettingsTab({
                 <option value="back">Rolls back to the one before</option>
               </select>
             </Field>
+            {web && (
+              <Field label="A page loaded before a deploy" hint="its requests name their deployment: x-deployment-id, ?dpl=, or the cookie roll sets">
+                <select value={form.skewProtection ? "keep" : "live"} onChange={(e) => set("skewProtection", e.target.value === "keep")} className={`${input} w-full`}>
+                  <option value="live">Talks to what's live</option>
+                  <option value="keep">Keeps its deployment for a day (skew protection)</option>
+                </select>
+              </Field>
+            )}
             {service.source.kind !== "image" && (
               <Field label="When a base image is updated" hint="its registry moves the tag it builds on (a security fix)">
                 <select value={form.rebuildOnBase ? "build" : "say"} onChange={(e) => set("rebuildOnBase", e.target.value === "build")} className={`${input} w-full`}>

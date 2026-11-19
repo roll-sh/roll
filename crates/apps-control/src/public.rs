@@ -1381,6 +1381,18 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
     if live.paused() {
         return by("paused", page(StatusCode::SERVICE_UNAVAILABLE, "Paused", "This service is paused. Its owner can resume it."));
     }
+    // Skew protection (`run.skew_protection`): what a page loaded before a deploy asks for,
+    // naming its deployment, goes to that one (past every gate above, as its own URL would).
+    let skewed = match (deployment, live.template()) {
+        (None, Some(t)) if !ours && t.run.skew_protection => {
+            let asked = crate::skew::asked(&req);
+            apps.skew_target(service, env, &t, asked).await
+        }
+        _ => None,
+    };
+    let deployment = deployment.or(skewed.as_deref());
+    // A page load gets the deployment that answers it in a cookie (below).
+    let skew_cookie = deployment.is_none() && live.template().is_some_and(|t| t.run.skew_protection) && crate::skew::navigation(&req);
     // A static site's rewrite to one of the project's services, before its own cookies (a
     // gradual rollout's bucket, affinity) are read: they're the target's to read too.
     if !rewritten {
@@ -1798,6 +1810,9 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
         if let Ok(c) = HeaderValue::from_str(&format!("{BUCKET}={b}; Path=/; Max-Age=86400; HttpOnly; SameSite=Lax{secure}")) {
             resp.headers_mut().append(header::SET_COOKIE, c);
         }
+    }
+    if skew_cookie && let Some(c) = crate::skew::cookie(&lease.inst.deployment, apps.cfg.scheme == "https") {
+        resp.headers_mut().append(header::SET_COOKIE, c);
     }
     // Count the bytes out, and keep the instance leased until the body is sent.
     let counted = Arc::new(AtomicU64::new(0));

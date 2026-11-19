@@ -294,6 +294,7 @@ type Run = {
   /** A built service: build the same revision again, without the cache, when one of its base
    *  images moves in its registry (checked hourly on the owner). */
   rebuild_on_base?: boolean;
+  skew_protection?: boolean; /* a web service: a request that names a deployment (x-deployment-id, ?dpl=, or the __roll_dpl cookie each page load gets), not a page load, goes to it when it's one of the last three live before the live one, which went live less than a day ago */
   /** A deploy whose image has a known vulnerability this severe or worse fails before it goes live: the scan runs
    *  before the rollout, and a scan that can't run or finish fails it too. Never a rollback's. Changing it is a deploy. */
   block_on?: "critical" | "high" | "medium" | "low";

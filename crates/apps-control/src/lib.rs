@@ -18,6 +18,7 @@ pub mod backups;
 pub mod hooks;
 pub mod tags;
 pub mod sites;
+pub mod skew;
 pub mod site_rules;
 pub mod tunnel;
 pub mod tcp;
@@ -327,6 +328,8 @@ pub struct Apps {
     sites: Mutex<HashMap<String, Arc<sites::Site>>>,
     /// Per environment, for the live site's key: its earlier static deployments' site keys.
     earlier_sites: Mutex<HashMap<String, sites::EarlierSites>>,
+    /// Each environment's deployments a request may name ([`skew`]), by its live one.
+    pub(crate) skew: Mutex<HashMap<String, skew::Earlier>>,
     /// `(service, name)` → the id of the service of that name in its project, as of when.
     service_names: Mutex<HashMap<(String, String), NameLookup>>,
     /// A site being loaded, per key: one load at a time (the rest wait for it).
@@ -575,6 +578,7 @@ impl Apps {
             images: images::ImageCache::default(),
             sites: Mutex::new(HashMap::new()),
             earlier_sites: Mutex::new(HashMap::new()),
+            skew: Mutex::new(HashMap::new()),
             site_loads: Mutex::new(HashMap::new()),
             service_names: Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),

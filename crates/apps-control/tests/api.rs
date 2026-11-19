@@ -3852,6 +3852,45 @@ async fn a_followed_tag_that_moves_deploys_once() {
     assert!(w.apps.watch_tags().await.is_empty(), "the rollback stays");
 }
 
+/// Skew protection (Vercel's, `run.skew_protection`): a request that names an earlier live
+/// deployment (its header or `?dpl=`) goes to it; a page load gets what's live and a cookie
+/// naming it; a deployment that was never this environment's live one is never reached so.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_request_naming_an_earlier_deployment_goes_to_it() {
+    let w = world().await;
+    let (svc, d1) = image_service(&w, "web", json!({"port": 80, "skew_protection": true})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    let h = host(&call(&w.api, "GET", &base, None).await.1["url"]);
+    let (_, d2) = call(&w.api, "POST", &format!("{base}/deploys"), Some(json!({}))).await;
+    let d2 = settled(&w, &id, "production", d2["id"].as_str().unwrap()).await;
+    assert_eq!(visit_deployment(&w, &h, d2["id"].as_str().unwrap()).await.1["deployment"], d2["id"]);
+    let ask = |path: &str, headers: &[(&str, &str)]| {
+        let mut b = Request::builder().uri(path).header("host", h.clone());
+        for (k, v) in headers {
+            b = b.header(*k, *v);
+        }
+        let (public, req) = (w.public.clone(), b.body(Body::empty()).unwrap());
+        async move {
+            let resp = public.oneshot(req).await.unwrap();
+            let cookie = resp.headers().get_all("set-cookie").iter().map(|v| v.to_str().unwrap().to_string()).collect::<Vec<_>>().join("; ");
+            let v: Value = serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap_or(Value::Null);
+            (v["deployment"].clone(), cookie)
+        }
+    };
+    let first = d1["id"].as_str().unwrap();
+    assert_eq!(ask("/api", &[("x-deployment-id", first)]).await.0, d1["id"], "its header");
+    assert_eq!(ask(&format!("/app.js?dpl={first}"), &[]).await.0, d1["id"], "its query");
+    let cookie = format!("__roll_dpl={first}");
+    assert_eq!(ask("/api", &[("cookie", &cookie)]).await.0, d1["id"], "the cookie");
+    let (dep, set) = ask("/", &[("sec-fetch-dest", "document"), ("cookie", &cookie)]).await;
+    assert_eq!(dep, d2["id"], "a page load gets what's live");
+    assert!(set.contains(&format!("__roll_dpl={}", d2["id"].as_str().unwrap())), "{set}");
+    // Another service's deployment, or one never live here: what's live.
+    let (_, theirs) = image_service(&w, "other", json!({"port": 80})).await;
+    assert_eq!(ask("/api", &[("x-deployment-id", theirs["id"].as_str().unwrap())]).await.0, d2["id"]);
+}
+
 /// A deployment has its own URL: one deployed without traffic is reached there, not on the
 /// environment's, until a rollback to it puts it live.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
