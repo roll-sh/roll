@@ -37,12 +37,30 @@ pub fn router(apps: Arc<Apps>) -> axum::Router {
                 return r;
             }
             match apps.env_for_host(&host).await {
-                Some((service, env, deployment)) => serve(apps, service, env, deployment, req).await,
-                None => page(StatusCode::NOT_FOUND, "Nothing here", "No roll apps service answers on this address."),
+                // Image optimization on the environment's own host (`/__roll/image`).
+                Some((service, env, None, _)) if req.uri().path() == crate::images::PATH => crate::images::serve(apps, service, env, req).await,
+                Some((service, env, deployment, port)) => {
+                    let mut req = req;
+                    if let Some(p) = port {
+                        req.extensions_mut().insert(TargetPort(p));
+                    }
+                    serve(apps, service, env, deployment, req).await
+                }
+                // A name under a project's preview domain no environment holds: roll previews'
+                // (a preview on roll's own runtime), with the request as it came.
+                None => match apps.preview_router_for(&host).await {
+                    Some(router) => router.serve(req).await,
+                    None => page(StatusCode::NOT_FOUND, "Nothing here", "No roll apps service answers on this address."),
+                },
             }
         }
     })
 }
+
+/// The app's port a custom domain sends its requests to (`Domain::port`), when it isn't the
+/// service's own.
+#[derive(Clone, Copy)]
+struct TargetPort(u16);
 
 /// Where instances send traces: `/_roll/otlp/{service}/{env}/{token}/v1/traces`, any host.
 pub const OTLP: &str = "/_roll/otlp/";
@@ -1238,6 +1256,14 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
     // the proxy's own span in the request's trace (the wait, a wake, the answer).
     let span = gate.traces.then(|| ProxySpan::start(&apps, service, env, req.headers()));
     let access = Access { log: apps.logs.sink(format!("http:{service}/{env}"), crate::logs::Stream::Http), seen: Seen::of(&req), span, deployment: Default::default() };
+    // A custom domain sent to another of the app's ports: that port's address on the same
+    // instance (published from the deploy after the domain's port was set; until then, a 502).
+    if let Some(TargetPort(p)) = req.extensions().get::<TargetPort>().copied() {
+        match lease.inst.port_addr(p) {
+            Some(a) => lease.addr = a,
+            None => return by("port", page(StatusCode::BAD_GATEWAY, "Not on that port yet", &format!("This domain goes to the app's port {p}, which its live deployment doesn't publish: deploy again to publish it."))),
+        }
+    }
     let pq = req.uri().path_and_query().map(|p| p.as_str().to_string()).unwrap_or_else(|| "/".into());
     let Ok(uri) = format!("http://{}{pq}", lease.addr).parse::<Uri>() else {
         return (StatusCode::BAD_REQUEST, "bad request").into_response();

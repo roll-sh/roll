@@ -7,6 +7,8 @@ import { AgentsControl } from "./agents/agents-control";
 import { AskPanel } from "./ask";
 import { useMarkState } from "./mark-state";
 import { ReauthDialog } from "./reauth-dialog";
+import { Link } from "@/components/link";
+import { useSession } from "@/lib/accounts-api";
 import { NewProjectDialog } from "./workspace/new-project";
 import { Sidebar } from "./workspace/sidebar";
 
@@ -70,6 +72,7 @@ export function AppShell({ crumb, actions, bleed = false, children }: { crumb: R
               <WaitingApprovals />
               <AgentsControl pill={false} />
             </header>
+            <SecondFactorNotice />
 
             {bleed ? (
               <main className="relative min-h-0 flex-1">{children}</main>
@@ -104,5 +107,21 @@ export function AppShell({ crumb, actions, bleed = false, children }: { crumb: R
         )}
       </div>
     </LucideProvider>
+  );
+}
+
+/** A company that requires a second factor or a passkey sign-in (docs/accounts.md): until this
+ * person has it, only their account works, so the shell says where to go. */
+function SecondFactorNotice() {
+  const session = useSession();
+  if (session.status !== "signed_in" || !(session.second_factor_required || session.passkey_required)) return null;
+  return (
+    <div className="border-b border-line bg-accent/[0.06] px-4 py-2 text-[12.5px]">
+      {session.passkey_required ? "Your company requires a passkey." : "Your company requires a second factor."}{" "}
+      <Link href="/dashboard/account" className="text-accent hover:underline">
+        {session.passkey_required ? "Add one and confirm it's you with it" : "Set up an authenticator app or a passkey"}
+      </Link>{" "}
+      to use the rest of roll.
+    </div>
   );
 }

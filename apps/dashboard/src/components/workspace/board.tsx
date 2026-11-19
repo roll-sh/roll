@@ -183,6 +183,7 @@ function Node({ card, selected, onSelect, onMove }: { card: Card; selected: bool
               <span className="truncate">
                 {view!.stateLabel}
                 {view!.note && <span className="font-mono text-[10.5px] text-subtle"> · {view!.note}</span>}
+                {!!view!.toDeploy?.length && <span className="text-accent"> · changes to deploy</span>}
               </span>
               <span className="ml-auto font-mono text-[10.5px] text-subtle">{view!.meta}</span>
             </>
