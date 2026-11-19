@@ -2018,41 +2018,41 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-Every feature in review has its `roll preview` command too: `shell` (#364).
-
-1. **A shell in a preview's service, in review** (#364, on #363; Render's shell, `heroku run`):
-   the API, the engine's sessions, the exec, `roll preview shell` and the sheet's Shell tab (roll
-   apps' terminal, shared; a roll apps service opens roll apps' own shell on its `pv-`
-   environment). See "A shell in a preview". The look at the real sheet found three bugs, fixed:
-   a terminal that remounted closed its own shell, closed tabs held shells for 10 minutes, and a
-   short command's last output raced its end.
-2. **A preview's `roll.toml` services and jobs in the project's log drains, in review** (#363):
-   roll apps' drains with `previews: true` got only roll apps' own `pv-` environments, so a team
-   with Datadog on a drain saw half of a preview's output. See "Log drains" under Services.
-3. **Search and levels in the sheet's logs, in review** (`feature/roll-previews-log-search`, on
-   #364; Vercel's runtime logs, Render's log explorer): a filter box (text or `/regex/`, on the
-   masked lines, in the browser), "Problems only", and errors marked, read as roll apps reads a
-   line's level. Next for it: stderr apart (the followed stream doesn't say which yet).
-4. **Files in and out of a preview's service, in review** (`feature/roll-previews-files`, on
-   #364; `roll preview cp`, as roll apps' `…/files`): a dump taken in the shell, a fixture put
-   in, `docker cp` in the service's container, admin as the shell is, 100 MiB a time.
-5. **Secret references in previews' variables** (roll secrets' suggestion, after its #329):
+1. **Secret references in previews' variables** (roll secrets' suggestion, after its #329):
    `env`, `env_for` and a preview's own variables are plain values outside roll secrets
    (redacted on read, but outside health, leak scanning, reach and the cut-off), and a payment
    provider's test key is just what teams put there. Take `roll://ENV/KEY` there, resolved
    through `Secrets::resolve_for(ResourceRef::new(kind, id).untrusted(), …)` (never a
    protected environment or a sensitive key), and offer to keep a pasted value in the base
    environment's folder.
-6. **A port of a preview's service on a laptop, in review** (`feature/roll-previews-forward`, on
-   #372; `roll preview forward`, roll apps' tunnel): any port the service listens on, through a
-   relay in its network namespace (so Roll-only egress's `--internal` networks don't stop it),
-   admin, on the preview's holder.
-7. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+2. **stderr apart in the sheet's logs**: the followed stream merges a container's stdout and
+   stderr (`docker logs -f` read as one), so the sheet can't show stderr on its own. The drains
+   already tell them apart (`drain_from` tags each line); tag `follow` the same way and carry it
+   to the sheet.
+3. **Traces of a preview's `roll.toml` services** (Vercel's preview traces, roll apps' `traces`):
+   roll apps keeps an environment's spans when it sets the OpenTelemetry SDK's variables; a
+   preview's services on roll's runtime get none. Give them `OTEL_EXPORTER_OTLP_ENDPOINT` to a
+   preview-scoped intake and show its recent traces on the sheet, beside its errors.
+4. **Files and ports from the sheet**: a download for a path (the shell's `…/files`) and the
+   `roll preview forward` line for a port, so the sheet covers what the CLI does.
+5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-8. **Watch: pg-control's recovery to a time seconds old** (unowned).
-9. **A cold start on a Docker name conflict, in review** (#374): a start whose container name is
-   still being removed (a stop just before it) removes it again and tries twice more, half a
-   second apart, before it fails.
+6. **Watch: pg-control's recovery to a time seconds old** (unowned).
+
+Landed in previews' lock turn 6 of 2026-11-19 (main 741f8b789, exactly the gated tree; built and
+gated before the lock came, rebuilt on the new main when it did, the stack's own diff checked line
+for line against the green tree, gated again, landed one at a time, stacked PRs retargeted to
+main before the queue):
+- a preview's `roll.toml` services and jobs in the project's log drains (#363);
+- a shell in a preview's service: the API, `roll preview shell` and the sheet's Shell tab, a roll
+  apps service's being roll apps' own (#364);
+- search and levels in the sheet's logs (#369);
+- files in and out of a preview's service, `roll preview cp` (#372);
+- a port of a preview's service on a laptop, `roll preview forward` (#378);
+- a cold start that meets a container name still being removed tries again (#374).
+Looking at the real sheet (screenshots of a live preview) found three bugs before review: a
+terminal that remounted closed its own shell, closed tabs held shells open for ten minutes, and a
+short command's last output raced its end.
 
 Landed in previews' lock turn of 2026-11-19 (main 5eb41bf5f, exactly the gated tree: one
 combined tree, each step tagged, gated once with both live checks, landing simulated with
