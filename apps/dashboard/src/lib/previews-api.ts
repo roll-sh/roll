@@ -4,6 +4,7 @@
  */
 
 import { withSession } from "./code-token";
+import { followScreen, type ScreenHandlers } from "./sse";
 import { apiHeaders, call, onApiStatus, ROLL_API } from "./roll-api";
 
 export const PREVIEW_STATES = ["queued", "awaiting_approval", "creating", "ready", "sleeping", "updating", "failed", "deleting"] as const;
@@ -527,6 +528,11 @@ export const previewsApi = {
   errors: (id: string, minutes?: number) => call<{ minutes: number; groups: ErrorGroup[] }>("GET", `${one(id)}/errors${query({ minutes })}`),
   /** How many errors its services wrote in that span (a list's rows: nothing to mask, so no values are read). */
   errorCount: (id: string, minutes?: number) => call<{ minutes: number; count: number }>("GET", `${one(id)}/errors/count${query({ minutes })}`),
+  /** A login shell in a running `roll.toml` service (started if it sleeps, kept awake while open; admin). */
+  openShell: (id: string, body: { service?: string; cols: number; rows: number }) => call<{ id: string }>("POST", `${one(id)}/shell/sessions`, body),
+  shellKeys: (id: string, sh: string, data: string) => call<null>("POST", `${one(id)}/shell/sessions/${encodeURIComponent(sh)}/keys`, { data }),
+  resizeShell: (id: string, sh: string, size: { cols: number; rows: number }) => call<null>("POST", `${one(id)}/shell/sessions/${encodeURIComponent(sh)}/resize`, size),
+  closeShell: (id: string, sh: string) => call<null>("DELETE", `${one(id)}/shell/sessions/${encodeURIComponent(sh)}`),
   logs: (id: string, opts: { service?: string; lines?: number } = {}) =>
     call<{ service: string; lines: string[] }>("GET", `${one(id)}/logs${query(opts)}`),
   /** Newest first. */
@@ -597,6 +603,11 @@ export async function followLogs(id: string, service: string, lines: number, onL
     rest = parsed.rest;
     for (const e of parsed.events) if (e.event === "message") onLine(e.data);
   }
+}
+
+/** A preview's shell's screen: base64 chunks, the scrollback first, then `onClosed`. */
+export function followShell(id: string, sh: string, opts: ScreenHandlers): () => void {
+  return followScreen(`${ROLL_API}${one(id)}/shell/sessions/${encodeURIComponent(sh)}/screen`, () => apiHeaders() ?? {}, opts);
 }
 
 /** A resource as the reset body and the settings name it. */

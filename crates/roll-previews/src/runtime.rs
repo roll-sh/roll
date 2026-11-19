@@ -271,6 +271,57 @@ fn merge_timed(mut out: Vec<(i64, bool, String)>, err: Vec<(i64, bool, String)>,
     out
 }
 
+/// The relay a forwarded connection goes through: busybox's `nc`.
+const FORWARD_IMAGE: &str = "alpine:3.20";
+
+/// A forwarded connection's relay: its stdio, both ways; its container removed when it's dropped
+/// (a killed `docker run` client leaves the container running).
+struct Relay {
+    _child: tokio::process::Child,
+    name: String,
+    stdin: tokio::process::ChildStdin,
+    stdout: tokio::process::ChildStdout,
+}
+
+impl Drop for Relay {
+    fn drop(&mut self) {
+        let name = std::mem::take(&mut self.name);
+        if let Ok(h) = tokio::runtime::Handle::try_current() {
+            h.spawn(async move { code_preview::docker::remove(&name).await });
+        }
+    }
+}
+
+impl tokio::io::AsyncRead for Relay {
+    fn poll_read(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>, buf: &mut tokio::io::ReadBuf<'_>) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.stdout).poll_read(cx, buf)
+    }
+}
+
+impl tokio::io::AsyncWrite for Relay {
+    fn poll_write(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>, buf: &[u8]) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.stdin).poll_write(cx, buf)
+    }
+    fn poll_flush(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.stdin).poll_flush(cx)
+    }
+    fn poll_shutdown(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.stdin).poll_shutdown(cx)
+    }
+}
+
+/// A child's stdout that keeps the child (killed when dropped) for as long as it's read.
+struct ChildOut {
+    _child: tokio::process::Child,
+    out: tokio::process::ChildStdout,
+}
+
+impl tokio::io::AsyncRead for ChildOut {
+    fn poll_read(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>, buf: &mut tokio::io::ReadBuf<'_>) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.out).poll_read(cx, buf)
+    }
+}
+
 /// The container of a service: every one roll previews makes starts with `roll-previews-`.
 pub fn container_name(host: &str) -> String {
     format!("roll-previews-{host}")
@@ -483,6 +534,30 @@ impl Runtime {
             e.observed(preview, service, ServiceState::Running, None, 0).await;
         }
         Some(addr)
+    }
+
+    /// The container a terminal in the service goes into: started (or thawed) if it isn't
+    /// running, waited for up to 60 s, and used from then on (as a request would).
+    pub async fn shell_container(self: &Arc<Self>, preview: &str, service: &str) -> anyhow::Result<String> {
+        match self.ready(preview, service, Duration::from_secs(60)).await {
+            Ok(_) => {}
+            Err(Unavailable::Starting) => anyhow::bail!("{service} is still starting: try again in a moment"),
+            Err(Unavailable::NotFound) => anyhow::bail!("{service} isn't running on this node"),
+            Err(Unavailable::Failed(e)) => anyhow::bail!("{service} didn't start: {e}"),
+        }
+        let live = self.live(preview, service);
+        let name = live.container.lock().clone();
+        name.ok_or_else(|| anyhow::anyhow!("{service} isn't running on this node"))
+    }
+
+    /// The service is in use through a terminal: its idle clock starts again.
+    pub fn hold(&self, preview: &str, service: &str) {
+        if let Some(live) = self.live.lock().get(&(preview.to_string(), service.to_string())) {
+            *live.last_request.lock() = Instant::now();
+        }
+        if let Ok(e) = self.engine() {
+            e.touched(preview);
+        }
     }
 
     /// Where a service answers, starting it if needed; waits up to `wait`.
@@ -1327,6 +1402,71 @@ impl Apps for Runtime {
     async fn follow(&self, preview: &str, service: &str, lines: usize) -> Option<tokio::sync::mpsc::Receiver<String>> {
         let host = self.store.services(preview).ok()?.into_iter().find(|s| s.name == service)?.host;
         self.iso.follow(&container_name(&host), lines.clamp(1, 2000)).await
+    }
+
+    /// `docker cp <container>:<path> -`, read as it comes; the process goes when the stream does.
+    async fn read_files(&self, preview: &str, service: &str, path: &str) -> anyhow::Result<Option<crate::ports::FileStream>> {
+        let me = self.me.upgrade().ok_or_else(|| anyhow::anyhow!("the preview runtime is stopping"))?;
+        let name = me.shell_container(preview, service).await?;
+        let mut child = tokio::process::Command::new("docker")
+            .args(["cp", &format!("{name}:{path}"), "-"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()?;
+        let out = child.stdout.take().ok_or_else(|| anyhow::anyhow!("docker cp gave no output"))?;
+        self.hold(preview, service);
+        Ok(Some(Box::new(ChildOut { _child: child, out })))
+    }
+
+    /// A relay in the service's network namespace (`--network container:<it>`, as screenshots
+    /// join it): busybox's `nc` to `127.0.0.1:<port>` there, its stdio the connection. Removed
+    /// when the connection is dropped.
+    async fn forward(&self, preview: &str, service: &str, port: u16) -> anyhow::Result<Option<Box<dyn crate::ports::ShellIo>>> {
+        let me = self.me.upgrade().ok_or_else(|| anyhow::anyhow!("the preview runtime is stopping"))?;
+        let name = me.shell_container(preview, service).await?;
+        let relay = format!("roll-previews-fwd-{}", &crate::store::new_token()[..12]);
+        let mut child = tokio::process::Command::new("docker")
+            .args(["run", "--rm", "-i", "--name", &relay, "--network", &format!("container:{name}"), "--memory", "32m", "--cpus", "0.25", "--pids-limit", "16", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", FORWARD_IMAGE, "nc", "127.0.0.1", &port.to_string()])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()?;
+        let (stdin, stdout) = (child.stdin.take(), child.stdout.take());
+        let (Some(stdin), Some(stdout)) = (stdin, stdout) else { anyhow::bail!("the relay took no input") };
+        self.hold(preview, service);
+        Ok(Some(Box::new(Relay { _child: child, name: relay, stdin, stdout })))
+    }
+
+    /// `docker cp - <container>:<dir>` with the tar on its stdin.
+    async fn write_files(&self, preview: &str, service: &str, dir: &str, tar: bytes::Bytes) -> anyhow::Result<bool> {
+        use tokio::io::AsyncWriteExt;
+        let me = self.me.upgrade().ok_or_else(|| anyhow::anyhow!("the preview runtime is stopping"))?;
+        let name = me.shell_container(preview, service).await?;
+        let mut child = tokio::process::Command::new("docker")
+            .args(["cp", "-", &format!("{name}:{dir}")])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()?;
+        let mut stdin = child.stdin.take().ok_or_else(|| anyhow::anyhow!("docker cp took no input"))?;
+        stdin.write_all(&tar).await?;
+        drop(stdin);
+        let out = tokio::time::timeout(Duration::from_secs(120), child.wait_with_output()).await.map_err(|_| anyhow::anyhow!("writing the files took over 2 minutes"))??;
+        self.hold(preview, service);
+        if !out.status.success() {
+            let said = String::from_utf8_lossy(&out.stderr);
+            anyhow::bail!("{}", said.trim().lines().last().unwrap_or("docker cp failed").chars().take(300).collect::<String>());
+        }
+        Ok(true)
+    }
+
+    async fn drain_from(&self, preview: &str, service: &str, since: &str) -> Option<tokio::sync::mpsc::Receiver<(bool, String)>> {
+        let host = self.store.services(preview).ok()?.into_iter().find(|s| s.name == service)?.host;
+        self.iso.follow_since(&container_name(&host), since).await
     }
 
     /// Its running container's use, from Docker (a sleeping or frozen service has none).

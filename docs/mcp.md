@@ -888,8 +888,8 @@ waits on a sibling PR reaching main is last.
    overview: the access checkup, tokens, tighten proposals and a token's networks as read tools,
    and a `security_checkup` workflow that changes nothing, plus queues' users, tasks' apps and API
    keys, nosql's imports and a stream's keys as read tools, each answer checked for credentials first
-   (`feature/roll-mcp-next-6`, this PR, stacked on #380). Open: read tools for secrets' new
-   backends and storage's IAM (#380; unit `roll-mcp-land380` lands both after previews' turn). Ready,
+   (`feature/roll-mcp-next-6`, this PR). On main: read tools for secrets' new backends and
+   storage's IAM (#380). Ready,
    waiting for apps' turn (`feature/roll-mcp-apps-tools-3`, cut from apps #384; its PR opens once
    apps' stack is on main): `apps_deploy_vulnerabilities` (`severity`), `apps_environment_slo`,
    `apps_list_forms`, `apps_form_submissions` (a reveal; in lockdown each submission's `fields`
