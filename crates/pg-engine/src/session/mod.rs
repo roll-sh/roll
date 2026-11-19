@@ -1802,9 +1802,9 @@ impl Session {
                 done(QueryResult::command(tag))
             }
             NodeEnum::CreatedbStmt(_) | NodeEnum::DropdbStmt(_) => {
-                if self.status != TxnStatus::Idle
-                    || self.implicit && self.txn.as_ref().is_some_and(|t| t.borrow().has_writes())
-                {
+                // (A multi-statement query's implicit block too: `DROP DATABASE x; CREATE
+                // DATABASE x` in one Query fails at its first statement.)
+                if self.in_block() {
                     let what = if matches!(node, NodeEnum::CreatedbStmt(_)) {
                         "CREATE DATABASE"
                     } else {
@@ -3091,7 +3091,13 @@ impl Session {
                 }
             };
             // (getTypeInputInfo / getTypeBinaryInputInfo of a type no oid has: only where
-            // its input fails, which it always does.)
+            // its input fails, which it always does. A statement prepared before its
+            // parameter's type was dropped (and made again: an enum a migration recreated)
+            // keeps the old oid, which no type has now.)
+            let gone = ty.oid() >= crate::catalog::FIRST_USER_OID
+                && ty.missing_oid().is_none()
+                && self.visible_catalog().any_data_type(ty.oid()).is_none();
+            let ty = &if gone { std::borrow::Cow::Owned(DataType::missing(ty.oid())) } else { std::borrow::Cow::Borrowed(ty) };
             let missing = |e: Error| match ty.missing_oid() {
                 Some(o) => param_err(
                     missing_type(o, if f == 1 { "getTypeBinaryInputInfo" } else { "getTypeInputInfo" }),

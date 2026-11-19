@@ -1,0 +1,100 @@
+> CREATE EXTENSION citext
+-- CREATE EXTENSION
+
+> CREATE DOMAIN a263_email AS citext CHECK (VALUE ~ '@')
+-- CREATE DOMAIN
+
+> CREATE DOMAIN a263_ci AS citext COLLATE "C"
+-- CREATE DOMAIN
+
+> CREATE TABLE a263_people (e a263_email, c a263_ci, n citext)
+-- CREATE TABLE
+
+> SELECT typname, typcollation::regcollation FROM pg_type WHERE typname IN ('a263_email', 'a263_ci', '_a263_email') ORDER BY 1
+typname:name | typcollation:4191
+_a263_email | "default"
+a263_ci | "C"
+a263_email | "default"
+-- SELECT 3
+
+> SELECT a.attname, a.attcollation = t.typcollation AS same FROM pg_attribute a JOIN pg_type t ON t.oid = a.atttypid
+>   WHERE a.attrelid = 'a263_people'::regclass AND a.attnum > 0 ORDER BY a.attnum
+attname:name | same:bool
+e | t
+c | t
+n | t
+-- SELECT 3
+
+> CREATE SCHEMA a263_s
+-- CREATE SCHEMA
+
+> CREATE TABLE a263_s.t (r regclass, ty regtype, p regproc, n regnamespace)
+-- CREATE TABLE
+
+> INSERT INTO a263_s.t VALUES ('a263_s.t', 'a263_email', 'now', 'a263_s')
+-- INSERT 0 1
+
+> COPY a263_s.t TO STDOUT
+copy:text
+a263_s.t	a263_email	now	a263_s
+-- COPY 1
+
+> SET search_path = a263_s, public
+-- SET
+
+> COPY a263_s.t TO STDOUT (FORMAT csv)
+copy:text
+t,a263_email,now,a263_s
+-- COPY 1
+
+> RESET search_path
+-- RESET
+
+> CREATE TABLE a263_v1 AS SELECT '25'::oidvector AS v
+-- SELECT 1
+
+> CREATE TABLE a263_v2 AS SELECT ARRAY[25::oid]::oidvector AS v
+-- SELECT 1
+
+> SELECT array_lower(v1.v, 1) AS l1, array_lower(v2.v, 1) AS l2 FROM a263_v1 v1, a263_v2 v2
+l1:int4 | l2:int4
+0 | 1
+-- SELECT 1
+
+> SET enable_nestloop = off
+-- SET
+
+> SET enable_hashjoin = off
+-- SET
+
+> SELECT count(*) FROM a263_v1 JOIN a263_v2 USING (v)
+count:int8
+1
+-- SELECT 1
+
+> SET enable_mergejoin = off
+-- SET
+
+> SET enable_hashjoin = on
+-- SET
+
+> SELECT count(*) FROM a263_v1 JOIN a263_v2 USING (v)
+count:int8
+1
+-- SELECT 1
+
+> RESET enable_nestloop
+-- RESET
+
+> RESET enable_hashjoin
+-- RESET
+
+> RESET enable_mergejoin
+-- RESET
+
+> SELECT exists(SELECT FROM pg_proc JOIN pg_cast ON ARRAY[casttarget]::oidvector = proargtypes
+>   WHERE proname = 'lower' AND castsource = 'character varying(50)'::regtype) AS has_lower
+has_lower:bool
+t
+-- SELECT 1
+
