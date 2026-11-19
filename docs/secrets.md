@@ -5164,6 +5164,11 @@ members, the first hour, and the other products' credential inputs. Ranked:
 12. **Test gap:** rolld booting sealed (#367): no product or lease before the unseal, and every reader
     gets the key after it.
 
+Found since: `Reference::parse` trimmed its input, so ` roll://qa/KEY` passed previews' checks as
+plain text but resolved as a reference (previews' #436 review, fixed there in 7c0b10ab2). The root fix
+is building: parse is exact, and a value that's a reference only once trimmed or lowercased is an error
+(`fix/secrets-strict-reference`). Apps and search were told to decide "is a reference" only through it.
+
 Doc fixes found:
 - `:70` `secrets = "development"` reads as top-level roll.toml (it's per `[checks.<name>]`);
 - "Done and in PR #20" (merged 2026-11-15);
