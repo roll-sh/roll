@@ -14,6 +14,7 @@ import { CPU, MEMORY, mb, type Runner } from "./shared";
 import { SidecarsPanel } from "./sidecars";
 import { ChecksPanel } from "./checks";
 import { HeartbeatsPanel } from "./heartbeats";
+import { SplitPanel } from "./split";
 
 
 /** The form's values, as text (empty: the default). */
@@ -780,6 +781,7 @@ export function SettingsTab({
             <EnvironmentPanel key={env.name} service={service} env={env} runner={runner} onDeleted={onEnvDeleted} />
             {service.run.type === "web" && <ChecksPanel service={service.id} env={env} runner={runner} />}
             <HeartbeatsPanel service={service.id} env={env} runner={runner} />
+            {service.run.type === "web" && <SplitPanel key={env.name} service={service.id} env={env} others={service.environments.map((e) => e.name).filter((n) => n !== env.name)} runner={runner} />}
           </Anchor>
         )}
 

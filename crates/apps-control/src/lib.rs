@@ -1558,6 +1558,7 @@ impl Apps {
             checks: r.checks.clone(),
             heartbeat_states: self.heartbeat_states_of(&r.service, &r.name, &r.heartbeats).await,
             heartbeats: r.heartbeats.clone(),
+            split: r.split.clone(),
             heartbeat_urls: Default::default(),
             egress_refused: if r.egress.closed() { self.deps.runtime.egress_refused(&closed_network_name(&svc.project, &r.name), &r.egress.hosts) } else { Vec::new() },
             egress: r.egress.clone(),
@@ -1676,7 +1677,7 @@ impl Apps {
     pub async fn put_environment(self: &Arc<Self>, service: &str, env: &str, body: Value) -> Result<Environment> {
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "checks", "heartbeats", "paused", "held", "hostname", "traces", "egress", "vitals", "report", "preview_host"].contains(&k.as_str()) {
+            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "checks", "heartbeats", "split", "paused", "held", "hostname", "traces", "egress", "vitals", "report", "preview_host"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
@@ -1802,6 +1803,25 @@ impl Apps {
             Some(_) => return Err(Error::BadRequest(format!("routes is at most {} routes, or null", crate::model::MAX_ROUTES))),
         };
         // Uptime checks: unique names, at most MAX_CHECKS.
+        // A split test: another deployed-or-not environment of this service, never itself.
+        let split = match o.get("split") {
+            None => None,
+            Some(Value::Null) => Some(None),
+            Some(v) => {
+                let sp: crate::model::Split = serde_json::from_value(v.clone()).map_err(|e| Error::BadRequest(format!("split: {e}")))?;
+                if !(1..=99).contains(&sp.percent) {
+                    return Err(Error::BadRequest("split.percent is 1–99".into()));
+                }
+                if sp.environment == env {
+                    return Err(Error::BadRequest("split.environment is another environment".into()));
+                }
+                let (sid, other) = (service.to_string(), sp.environment.clone());
+                if self.db(move |s| s.environment(&sid, &other)).await.is_err() {
+                    return Err(Error::BadRequest(format!("split: this service has no environment {}", sp.environment)));
+                }
+                Some(Some(sp))
+            }
+        };
         // Heartbeats: kept ones keep their tokens; a new one's token is in this answer, once.
         let heartbeats = match o.get("heartbeats") {
             None => None,
@@ -2067,6 +2087,12 @@ impl Apps {
         if let Some(rules) = headers {
             let (sid, e) = (service.to_string(), env.to_string());
             self.db(move |s| s.set_headers(&sid, &e, &rules)).await?;
+            self.live(service, env).forget_gate();
+            self.changed(service);
+        }
+        if let Some(sp) = split {
+            let (sid, e) = (service.to_string(), env.to_string());
+            self.db(move |s| s.set_split(&sid, &e, sp.as_ref())).await?;
             self.live(service, env).forget_gate();
             self.changed(service);
         }
@@ -3297,7 +3323,7 @@ impl Apps {
             }
             false => None,
         };
-        let g = Arc::new(live::Gate { maintenance: row.maintenance, allow, rate: row.rate_limit, firewall: row.firewall, pages: row.pages, preview: row.ephemeral, headers: row.headers, routes: row.routes, traces, vitals: row.vitals, challenge_key });
+        let g = Arc::new(live::Gate { maintenance: row.maintenance, allow, rate: row.rate_limit, firewall: row.firewall, pages: row.pages, preview: row.ephemeral, headers: row.headers, routes: row.routes, traces, vitals: row.vitals, challenge_key, split: row.split });
         live.set_gate(g.clone(), seen);
         Ok(g)
     }

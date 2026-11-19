@@ -324,6 +324,8 @@ pub struct Gate {
     pub vitals: bool,
     /// Its challenge rules' key ([`crate::challenge`]), when it has such a rule.
     pub challenge_key: Option<Vec<u8>>,
+    /// Its split test.
+    pub split: Option<crate::model::Split>,
 }
 
 /// A rate-limit bucket: which (0 the environment's, 1 + i firewall rule i's) and whose.
