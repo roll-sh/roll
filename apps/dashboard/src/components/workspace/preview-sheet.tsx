@@ -1,10 +1,12 @@
-import { Boxes, Check, Copy, Database, ExternalLink, Eye, Inbox, ListChecks, Moon, Package, Pin, RefreshCw, RotateCcw, Search, Smartphone, Sun, Trash2, Waves, Zap, type LucideIcon } from "lucide-react";
+import { Boxes, Check, Copy, Database, ExternalLink, Eye, Inbox, ListChecks, Moon, Package, Pin, RefreshCw, RotateCcw, Search, Smartphone, SquareTerminal, Sun, Trash2, Waves, X, Zap, type LucideIcon } from "lucide-react";
 import { useEffect, useState } from "react";
-import { appsApi } from "@/lib/apps-api";
+import { appsApi, followShell as followAppsShell } from "@/lib/apps-api";
 import { codeApi } from "@/lib/code-api";
 import { Confirm } from "@/components/ui";
-import { endpointSlower, type EndpointTime, a11yWords, checkSummary, seoWords, duration, followLogs, openUrl, pageLabel, previewsApi, noteCropUrl, qrUrl, screenshotUrl, resourceId, thanMain, type CaughtMail, type PageCheck, type Preview, type TextDiff, type PreviewActivity, type PreviewKind, type PreviewShare, type RequestLine, type ServiceMetrics } from "@/lib/previews-api";
+import { TerminalScreen } from "@/components/terminal-screen";
+import { endpointSlower, type EndpointTime, a11yWords, checkSummary, seoWords, duration, followLogs, followShell, openUrl, pageLabel, previewsApi, noteCropUrl, qrUrl, screenshotUrl, resourceId, thanMain, type CaughtMail, type PageCheck, type Preview, type TextDiff, type PreviewActivity, type PreviewVisitor, type PreviewKind, type PreviewShare, type RequestLine, type ServiceMetrics, type ErrorGroup } from "@/lib/previews-api";
 import { verdict, type VerdictTarget } from "@/lib/preview-verdict";
+import { isProblem, logFilter, logLevel } from "@/lib/preview-logs";
 import { formatBytes } from "@/lib/roll-api";
 import { Head, Label, Rows, Stat, Tabs } from "./inspector";
 import { FeedbackForm, replyBody, replyOf, type PreviewFeedback } from "./preview-feedback";
@@ -69,7 +71,7 @@ export function PreviewSheet({
   /** It was posted (the link that brought it is spent). */
   onFeedbackPosted?: () => void;
 }) {
-  const [tab, setTab] = useState<"Overview" | "Activity" | "Logs" | "Requests">("Overview");
+  const [tab, setTab] = useState<"Overview" | "Activity" | "Logs" | "Shell" | "Requests" | "Errors">("Overview");
   const [busy, setBusy] = useState<string | null>(null);
   // The service whose link is shown as a QR code, to open on a phone.
   const [phoneFor, setPhoneFor] = useState<string | null>(null);
@@ -122,7 +124,7 @@ export function PreviewSheet({
         }
         onClose={onClose}
       />
-      <Tabs tabs={["Overview", "Activity", "Logs", "Requests"] as const} value={tab} onChange={setTab} />
+      <Tabs tabs={["Overview", "Activity", "Logs", "Shell", "Requests", "Errors"] as const} value={tab} onChange={setTab} />
       <div key={tab} className="rise flex-1 overflow-y-auto p-3 [scrollbar-width:none]">
         {tab === "Overview" ? (
           <>
@@ -480,8 +482,12 @@ export function PreviewSheet({
           <ActivityList id={p.id} updated={p.updated_at} />
         ) : tab === "Logs" ? (
           <Logs preview={p} />
-        ) : (
+        ) : tab === "Shell" ? (
+          <Shell preview={p} />
+        ) : tab === "Requests" ? (
           <Requests preview={p} />
+        ) : (
+          <Errors preview={p} />
         )}
       </div>
       <div className="border-t border-line px-3 py-2">
@@ -690,11 +696,13 @@ function Vars({ id }: { id: string }) {
 
 function ActivityList({ id, updated }: { id: string; updated: number }) {
   const [items, setItems] = useState<PreviewActivity[] | null>(null);
+  const [visitors, setVisitors] = useState<PreviewVisitor[]>([]);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
     let live = true;
-    previewsApi.activity(id).then(
-      (a) => live && (setItems(a), setError(null)),
+    // The list is a nicety: an older node without it (a 404) leaves the activity as it is.
+    Promise.all([previewsApi.activity(id), previewsApi.visitors(id).catch(() => [])]).then(
+      ([a, v]) => live && (setItems(a), setVisitors(v ?? []), setError(null)),
       (e) => live && setError(errorText(e)),
     );
     return () => {
@@ -703,18 +711,38 @@ function ActivityList({ id, updated }: { id: string; updated: number }) {
   }, [id, updated]);
   if (error) return <p className="text-[11.5px] text-danger">{error}</p>;
   if (!items) return <p className="text-[11.5px] text-subtle">Loading…</p>;
-  if (!items.length) return <p className="text-[11.5px] text-subtle">Nothing yet.</p>;
   return (
-    <ol className="space-y-2">
-      {items.map((a, i) => (
-        <li key={`${a.at}-${i}`} className="flex gap-2.5 text-[12px]">
-          <span className="w-14 shrink-0 pt-px text-right font-mono text-[10.5px] text-subtle" title={new Date(a.at).toLocaleString()}>
-            {since(a.at)}
-          </span>
-          <span className="min-w-0 flex-1 break-words text-soft">{a.message}</span>
-        </li>
-      ))}
-    </ol>
+    <>
+      {visitors.length > 0 && (
+        <section className="mb-4">
+          <Label>Who opened it</Label>
+          <ul className="mt-2 space-y-1.5">
+            {visitors.map((v) => (
+              <li key={v.who} className="flex gap-2.5 text-[12px]">
+                <span className="w-14 shrink-0 pt-px text-right font-mono text-[10.5px] text-subtle" title={new Date(v.last_at).toLocaleString()}>
+                  {since(v.last_at)}
+                </span>
+                <span className="min-w-0 flex-1 truncate font-mono text-soft">{v.who}</span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+      {items.length ? (
+        <ol className="space-y-2">
+          {items.map((a, i) => (
+            <li key={`${a.at}-${i}`} className="flex gap-2.5 text-[12px]">
+              <span className="w-14 shrink-0 pt-px text-right font-mono text-[10.5px] text-subtle" title={new Date(a.at).toLocaleString()}>
+                {since(a.at)}
+              </span>
+              <span className="min-w-0 flex-1 break-words text-soft">{a.message}</span>
+            </li>
+          ))}
+        </ol>
+      ) : (
+        <p className="text-[11.5px] text-subtle">Nothing yet.</p>
+      )}
+    </>
   );
 }
 
@@ -1388,11 +1416,199 @@ function Requests({ preview: p }: { preview: Preview }) {
   );
 }
 
+/** Spans the Errors tab reads, in minutes. */
+const ERROR_SPANS = [
+  [60, "1 hour"],
+  [360, "6 hours"],
+  [1440, "24 hours"],
+] as const;
+
+/** Its services' errors, grouped (Sentry's issues, from its output alone): newest first, each opening to its newest sample. */
+function Errors({ preview: p }: { preview: Preview }) {
+  const [minutes, setMinutes] = useState<number>(60);
+  const [list, setList] = useState<ErrorGroup[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [open, setOpen] = useState<string | null>(null);
+  const [n, setN] = useState(0);
+  useEffect(() => {
+    let live = true;
+    setError(null);
+    setList(null);
+    previewsApi.errors(p.id, minutes).then(
+      (r) => live && setList(r.groups),
+      (e) => live && setError(errorText(e)),
+    );
+    return () => {
+      live = false;
+    };
+  }, [p.id, minutes, n]);
+  const several = p.services.length > 1;
+  return (
+    <>
+      <div className="mb-2 flex items-center gap-2">
+        <select
+          aria-label="Span"
+          value={minutes}
+          onChange={(e) => setMinutes(Number(e.target.value))}
+          className="h-7 min-w-0 flex-1 rounded-md border border-line-2 bg-canvas px-2 text-[11.5px] outline-none focus:border-accent/60"
+        >
+          {ERROR_SPANS.map(([m, label]) => (
+            <option key={m} value={m}>
+              Last {label}
+            </option>
+          ))}
+        </select>
+        <button onClick={() => setN((x) => x + 1)} aria-label="Read the errors again" className="grid size-7 place-items-center rounded-md text-muted hover:bg-white/[0.06] hover:text-fg">
+          <RefreshCw className="size-3.5" />
+        </button>
+      </div>
+      {error ? (
+        <p className="text-[11.5px] text-danger">{error}</p>
+      ) : !list ? (
+        <p className="text-[11.5px] text-subtle">Loading…</p>
+      ) : !list.length ? (
+        <p className="text-[11.5px] text-subtle">No errors in its output.</p>
+      ) : (
+        <ul className="overflow-hidden rounded-lg border border-line-2 bg-canvas" aria-label="Errors">
+          {list.map((g) => {
+            const key = `${g.service}/${g.fingerprint}`;
+            const shown = open === key;
+            return (
+              <li key={key} className="border-b border-line last:border-b-0">
+                <button onClick={() => setOpen(shown ? null : key)} aria-expanded={shown} className="flex w-full items-baseline gap-2 px-2.5 py-1.5 text-left hover:bg-fg/[0.03]">
+                  <span className="w-9 shrink-0 text-right font-mono text-[10.5px] text-danger tabular-nums" title={`${g.count} since ${new Date(g.first_seen).toLocaleString()}`}>
+                    {g.count > 999 ? "999+" : `${g.count}×`}
+                  </span>
+                  <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-soft" title={g.title}>
+                    {g.title}
+                  </span>
+                  {several && <span className="shrink-0 font-mono text-[10.5px] text-subtle">{g.service}</span>}
+                  <span className="shrink-0 text-[10.5px] text-subtle" title={new Date(g.last_seen).toLocaleString()}>
+                    {since(g.last_seen)}
+                  </span>
+                </button>
+                {shown && (
+                  <pre className="rise max-h-[40vh] overflow-auto border-t border-line px-2.5 py-2 font-mono text-[10.5px] leading-relaxed whitespace-pre-wrap text-soft [scrollbar-width:thin]">{g.sample}</pre>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </>
+  );
+}
+
+/** A shell in one of the preview's services (Render's shell, `heroku run`): opened on request, its
+ * screen in a terminal, closed when it ends or the tab goes. A `roll.toml` service's is previews'
+ * (`…/previews/{id}/shell`); a roll apps service's is roll apps' own, on the preview's `pv-`
+ * environment, as Promote finds it (the project's roll apps service of that name). */
+function Shell({ preview: p }: { preview: Preview }) {
+  const [service, setService] = useState(p.services[0]?.name ?? "");
+  // The session, and the roll apps service it's on (null: previews' own).
+  const [session, setSession] = useState<{ id: string; apps: string | null } | null>(null);
+  const [state, setState] = useState<"idle" | "opening" | "ended">("idle");
+  const [error, setError] = useState<string | null>(null);
+  // The preview's services that roll apps runs: name → roll apps service id.
+  const [onApps, setOnApps] = useState<Record<string, string>>({});
+  useEffect(() => {
+    let live = true;
+    appsApi.services(p.project).then(
+      (all) => live && setOnApps(Object.fromEntries(all.filter((s) => s.project === p.project).map((s) => [s.name, s.id]))),
+      () => live && setOnApps({}),
+    );
+    return () => {
+      live = false;
+    };
+  }, [p.project]);
+  const env = `pv-${p.id.replace(/^pv_/, "")}`;
+  if (!p.services.length) return <p className="text-[11.5px] text-subtle">No services, so no shell.</p>;
+  const apps = onApps[service] ?? null;
+  const open = async () => {
+    setError(null);
+    setState("opening");
+    try {
+      const { id } = apps ? await appsApi.openShell(apps, env, { cols: 80, rows: 24 }) : await previewsApi.openShell(p.id, { service, cols: 80, rows: 24 });
+      setSession({ id, apps });
+      setState("idle");
+    } catch (e) {
+      setError(errorText(e));
+      setState("idle");
+    }
+  };
+  return (
+    <>
+      <div className="mb-2 flex items-center gap-2">
+        <select
+          aria-label="Service"
+          value={service}
+          disabled={!!session}
+          onChange={(e) => setService(e.target.value)}
+          className="h-7 min-w-0 flex-1 rounded-md border border-line-2 bg-canvas px-2 font-mono text-[11.5px] outline-none focus:border-accent/60"
+        >
+          {p.services.map((s) => (
+            <option key={s.name} value={s.name}>
+              {s.name}
+            </option>
+          ))}
+        </select>
+        {session ? (
+          <button onClick={() => setSession(null)} aria-label="Close the shell" className="flex h-7 items-center gap-1.5 rounded-md border border-line-2 px-2.5 text-[11.5px] text-soft hover:bg-white/[0.06] hover:text-fg">
+            <X className="size-3.5" /> Close
+          </button>
+        ) : (
+          <button onClick={() => void open()} disabled={state === "opening"} className="flex h-7 items-center gap-1.5 rounded-md bg-fg px-2.5 text-[11.5px] font-medium text-canvas disabled:opacity-60">
+            <SquareTerminal className="size-3.5" /> {state === "opening" ? "Opening…" : state === "ended" ? "Open another" : "Open a shell"}
+          </button>
+        )}
+      </div>
+      {session ? (
+        <TerminalScreen
+          key={session.id}
+          session={session.id}
+          className="h-[52vh] rounded-lg border border-line-2 bg-canvas p-1.5"
+          link={
+            session.apps
+              ? {
+                  follow: (h) => followAppsShell(session.apps!, env, session.id, h),
+                  keys: (data) => appsApi.shellKeys(session.apps!, env, session.id, data),
+                  resize: (size) => appsApi.resizeShell(session.apps!, env, session.id, size),
+                  close: () => appsApi.closeShell(session.apps!, env, session.id),
+                }
+              : {
+                  follow: (h) => followShell(p.id, session.id, h),
+                  keys: (data) => previewsApi.shellKeys(p.id, session.id, data),
+                  resize: (size) => previewsApi.resizeShell(p.id, session.id, size),
+                  close: () => previewsApi.closeShell(p.id, session.id),
+                }
+          }
+          onEnded={() => {
+            setSession(null);
+            setState("ended");
+          }}
+        />
+      ) : (
+        <>
+          {error && <p className="mb-1.5 text-[11.5px] leading-relaxed text-danger">{error}</p>}
+          <p className="text-[11.5px] leading-relaxed text-subtle">
+            {state === "ended" ? "The shell ended." : "bash (or sh) in the running service, with the preview's variables and its branches' data, never production's. A service that's asleep is started and kept awake while the shell is open; the activity says who opened it."}{" "}
+            From a terminal: <code className="font-mono text-soft">{apps ? `roll apps ssh -s ${service} -e ${env}` : `roll preview shell ${p.id} -s ${service}`}</code>.
+          </p>
+        </>
+      )}
+    </>
+  );
+}
+
 function Logs({ preview: p }: { preview: Preview }) {
   const [service, setService] = useState(p.services[0]?.name ?? "");
   const [lines, setLines] = useState<string[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [n, setN] = useState(0);
+  // A filter over what's shown (text, or `/regex/`) and warnings-and-worse only: in the browser,
+  // on the masked lines, never sent anywhere.
+  const [q, setQ] = useState("");
+  const [problems, setProblems] = useState(false);
   // A running service's log follows as it comes (pushed) while the page is in view; any other
   // is read once.
   const running = p.services.some((x) => x.name === service && x.state === "running");
@@ -1431,6 +1647,8 @@ function Logs({ preview: p }: { preview: Preview }) {
       abort.abort();
     };
   }, [p.id, service, running, visible, n]);
+  const filter = logFilter(q);
+  const shown = (lines ?? []).map((line) => ({ line, level: logLevel(line) })).filter((l) => (filter ? filter(l.line) : true) && (!problems || isProblem(l.level)));
   if (!p.services.length) return <p className="text-[11.5px] text-subtle">No services, so no logs.</p>;
   return (
     <>
@@ -1451,14 +1669,43 @@ function Logs({ preview: p }: { preview: Preview }) {
           <RefreshCw className="size-3.5" />
         </button>
       </div>
+      <div className="mb-2 flex items-center gap-2">
+        <input
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="Filter (text or /regex/)"
+          aria-label="Filter the log"
+          className={`h-7 min-w-0 flex-1 rounded-md border bg-canvas px-2 font-mono text-[11.5px] outline-none focus:border-accent/60 ${filter ? "border-line-2" : "border-danger/60"}`}
+        />
+        <label className="flex shrink-0 items-center gap-1.5 text-[11.5px] text-soft">
+          <input type="checkbox" checked={problems} onChange={(e) => setProblems(e.target.checked)} className="accent-[var(--color-accent)]" />
+          Problems only
+        </label>
+      </div>
       {error ? (
         <p className="text-[11.5px] text-danger">{error}</p>
       ) : !lines ? (
         <p className="text-[11.5px] text-subtle">Loading…</p>
       ) : (
-        <pre className="max-h-[60vh] overflow-auto rounded-lg border border-line-2 bg-canvas p-2.5 font-mono text-[10.5px] leading-relaxed whitespace-pre-wrap text-soft [scrollbar-width:thin]">
-          {lines.length ? lines.join("\n") : "No output yet."}
-        </pre>
+        <>
+          {(q.trim() || problems) && lines.length > 0 && (
+            <p className="mb-1.5 font-mono text-[10.5px] text-subtle">
+              {filter ? `${shown.length} of ${lines.length} lines` : "That regex doesn't read: fix it to filter."}
+            </p>
+          )}
+          <pre className="max-h-[60vh] overflow-auto rounded-lg border border-line-2 bg-canvas p-2.5 font-mono text-[10.5px] leading-relaxed whitespace-pre-wrap text-soft [scrollbar-width:thin]">
+            {!lines.length
+              ? "No output yet."
+              : !shown.length
+                ? "No lines match."
+                : shown.map(({ line, level }, i) => (
+                    <span key={i} className={level === "error" || level === "fatal" ? "text-danger" : level === "warn" ? "text-fg" : undefined}>
+                      {line}
+                      {"\n"}
+                    </span>
+                  ))}
+          </pre>
+        </>
       )}
     </>
   );
