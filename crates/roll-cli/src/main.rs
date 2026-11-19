@@ -309,6 +309,26 @@ impl Api {
         Ok(res)
     }
 
+    /// A PUT of raw bytes (a tar) with its content type: the JSON answer, once its status is a
+    /// success.
+    async fn put_bytes(&self, path: &str, content_type: &str, body: Vec<u8>) -> anyhow::Result<Value> {
+        let mut req = self.http.put(format!("{}{path}", self.base)).header("content-type", content_type).body(body);
+        if let Some(k) = &self.bearer().await? {
+            req = req.bearer_auth(k);
+        }
+        for (k, v) in &self.headers {
+            req = req.header(k, v);
+        }
+        let res = req.send().await.with_context(|| format!("can't reach {} (is it running?)", self.base))?;
+        let status = res.status();
+        let text = res.text().await.unwrap_or_default();
+        let value: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+        if !status.is_success() {
+            bail!("{}", value["error"].as_str().map(str::to_string).unwrap_or_else(|| status.to_string()));
+        }
+        Ok(value)
+    }
+
     async fn call(&self, method: reqwest::Method, path: &str, body: Option<Value>) -> anyhow::Result<Value> {
         self.answer(method, path, body).await?.map_err(|(status, message)| anyhow::Error::new(ApiStatus { status, message }))
     }
