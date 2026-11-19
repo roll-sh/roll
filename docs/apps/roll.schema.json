@@ -173,6 +173,14 @@
           "type": "boolean",
           "description": "Raw TCP, not HTTP."
         },
+        "log_metrics": {
+          "type": "array",
+          "description": "Counts of its log lines: [{name, pattern}]; each minute, the lines of its output matching pattern (any case) as a gauge named name, on Metrics and for scale."
+        },
+        "schedule_scale": {
+          "type": "array",
+          "description": "Floors by the clock: [{windows: [{from: \"mon 08:00\", to: \"fri 18:00\"}], timezone?, min_instances}]; in a window, its min_instances is the floor when higher."
+        },
         "metrics": {
           "type": "object",
           "description": "Its own Prometheus endpoint, scraped every 15 s on each running instance: port (default the app's), path (default /metrics)."
@@ -189,6 +197,16 @@
         "rebuild_on_base": {
           "type": "boolean",
           "description": "Build again (same revision, no cache) when a base image moves."
+        },
+        "queue_s": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 60,
+          "description": "A web service at max_instances with every instance at its concurrency: a request waits this long for a slot, then gets a 429."
+        },
+        "skew_protection": {
+          "type": "boolean",
+          "description": "A web service: a page loaded before a deploy keeps talking to the deployment that served it, for a day."
         },
         "rollback_on_crash": {
           "type": "boolean",

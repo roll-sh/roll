@@ -330,6 +330,11 @@ yet, as `{kind, message}`. Every landing rule adds blockers there. Today they ar
 - `checks`: the change's own checks haven't all passed. That's the repo's `required_checks`
   (any source, external CI included) plus, with `[queue] require_change_checks`, the queue's
   checks.
+- `secret_leak`: it adds the value of a secret roll secrets holds for the repo's project.
+- `secret_unstored`: with `[secrets] unstored_credentials = "block"`, it adds a credential roll
+  secrets doesn't hold (an AWS, GitHub, Stripe… key; not a placeholder, not in
+  `.roll/secrets-allow`). Without it, the same finding is a notice on the change. Both are
+  docs/secrets.md's, and an admin `bypass` lands over them (audited).
 
 Settings always come from `roll.toml` on the default branch's head, never from the change being
 landed, so a change can't loosen the rules it's checked against.
@@ -343,6 +348,9 @@ require_change_checks = true # a change's own checks must pass before it's queue
 
 [main]
 auto_revert = true           # post_merge repos: land the revert of whatever broke main
+
+[secrets]
+unstored_credentials = "block" # a credential roll secrets doesn't hold blocks (default "warn": a notice)
 ```
 
 **Throughput.** One batch tests up to `batch_size` changes at once, so the queue lands as many

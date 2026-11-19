@@ -695,7 +695,7 @@ impl Secrets {
                     a.created_by
                 ],
             )?;
-            audit::record(c, project, caller, "snowflake.add", None, None, &[], &format!("added Snowflake account {} ({}, {})", a.name, a.host, a.auth.as_str()), now)
+            audit::record(c, self.keys()?, project, caller, "snowflake.add", None, None, &[], &format!("added Snowflake account {} ({}, {})", a.name, a.host, a.auth.as_str()), now)
         })?;
         Ok(a)
     }
@@ -717,7 +717,7 @@ impl Secrets {
                 return Err(Error::Conflict("in_use", format!("{name} has {waiting} key(s) or user(s) still to retire (a grace period, or a dynamic lease): delete it once they're done")));
             }
             c.execute("DELETE FROM snowflake_accounts WHERE id = ?", [id])?;
-            audit::record(c, project, caller, "snowflake.delete", None, None, &[], &format!("deleted Snowflake account {name}"), now)
+            audit::record(c, self.keys()?, project, caller, "snowflake.delete", None, None, &[], &format!("deleted Snowflake account {name}"), now)
         })
     }
 
