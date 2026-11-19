@@ -683,6 +683,8 @@ previews are listed once those products are on.
 | `search_get_cluster` | A cluster's settings, state, indices, size, URL and branches. | `GET /v1/search/clusters/{cluster}` |
 | `search_create_cluster` | A new cluster, or a branch of one (its password once, to tokens that may reveal). | `POST /v1/search/clusters` |
 | `search_list_branches` | A cluster's branches. | `GET /v1/search/clusters/{id}/branches` |
+| `search_list_remotes` | The clusters this one searches across: alias, cluster, key id, whether it connects (never the key). | `GET /v1/search/clusters/{id}/remotes` |
+| `search_list_inference_secrets` | Inference endpoints keyed by a roll secret, and what each follows (never the value). | `GET /v1/search/clusters/{id}/inference/secrets` |
 | `search_branch_cluster` | A copy-on-write branch of a cluster. | `POST /v1/search/clusters/{cluster}/branches` |
 | `search_update_cluster` | A cluster's idle timeout, request limits, flavor, IP allowlist (admin). | `PATCH /v1/search/clusters/{id}` |
 | `search_delete_cluster` | Delete a cluster (its branches keep working); kept for the restore window. | `DELETE /v1/search/clusters/{id}` |
@@ -885,8 +887,9 @@ Ranked; the top item is in progress. A watchdog reads this list. Unblocked work 
 waits on a sibling PR reaching main is last.
 
 1. **Next, ranked (now):** `security_checkup` goes past tokens to what's open to the internet:
-   public buckets, search clusters with no IP allowlist, previews shared outside the team
-   (`feature/roll-mcp-next-7`, this PR). Ready, waiting for apps' turn (after search's;
+   public buckets, search clusters with no IP allowlist, previews shared outside the team; search's
+   cross-cluster remotes (#347) and inference secrets (#134) as read tools (linking stays the
+   cluster admin's) (`feature/roll-mcp-next-7`, this PR). Ready, waiting for apps' turn (after search's;
    `feature/roll-mcp-apps-tools-3`, cut from apps #384, its PR opened once apps' stack is on main):
    `apps_deploy_vulnerabilities` (`severity`), `apps_environment_slo`, `apps_list_forms`,
    `apps_form_submissions` (a reveal; in lockdown each submission's `fields` are withheld,
