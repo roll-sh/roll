@@ -357,7 +357,7 @@ async fn a_previews_errors_are_its_services_groups_masked() {
     let before = masks_read();
     assert!(e.engine.errors(&p.id, 60).await.unwrap().is_empty());
     assert_eq!(masks_read(), before, "no errors, no values read");
-    let group = |f: &str, title: &str, last_seen: i64| roll_previews::ErrorGroup { service: String::new(), fingerprint: f.into(), kind: "line".into(), title: title.into(), count: 2, first_seen: 1, last_seen, sample: format!("{title}\n  at charge()") };
+    let group = |f: &str, title: &str, last_seen: i64| roll_previews::ErrorGroup { service: String::new(), fingerprint: f.into(), kind: "line".into(), title: title.into(), count: 2, first_seen: 1, last_seen, sample: format!("{title}\n  at charge()"), trace: None };
     e.apps.errors.lock().insert(web.name.clone(), vec![group("aa", "card declined sk_test_51", 5), group("bb", "Stripe rejected sk_test_51Hx9", 9)]);
     assert_eq!(e.engine.error_count(&p.id, 360).await.unwrap(), 4);
     assert_eq!(masks_read(), before, "counting reads no values");
@@ -477,7 +477,8 @@ async fn a_shell_in_a_previews_service_is_said_and_bounded() {
 
 /// A preview's traces (the project's `traces: true`): its services get the OpenTelemetry SDK's
 /// variables, its intake keeps spans only with the preview's own token (anything else is a 404),
-/// and they're read back as traces, masked as its logs are.
+/// and they're read back as traces, masked as its logs are; an error group whose sample names one
+/// opens it.
 #[tokio::test]
 async fn a_previews_traces_are_kept_by_its_token_and_read_masked() {
     use roll_previews::engine::traces::Span;
@@ -527,6 +528,14 @@ async fn a_previews_traces_are_kept_by_its_token_and_read_masked() {
     e.engine.keep_spans(&p.id, &token, (0..20).map(big).collect()).unwrap();
     let n = e.engine.traces(&p.id, 60).await.unwrap()["traces"].as_array().map(Vec::len).unwrap();
     assert!(n <= 16, "{n} traces of 1 MiB spans kept");
+    // An error whose sample names a kept trace (an SDK logs its request's trace id) opens it; one
+    // naming a trace it doesn't keep doesn't.
+    let kept = e.engine.traces(&p.id, 60).await.unwrap()["traces"][0]["trace"].as_str().unwrap().to_string();
+    let group = |f: &str, title: &str, trace: &str| roll_previews::ErrorGroup { service: String::new(), fingerprint: f.into(), kind: "line".into(), title: title.into(), count: 1, first_seen: 1, last_seen: 2, sample: format!("{title} trace_id={trace}"), trace: None };
+    e.apps.errors.lock().insert(web.clone(), vec![group("aa", "kept", &kept.to_ascii_uppercase()), group("bb", "not kept", &"c".repeat(32))]);
+    let got = e.engine.errors(&p.id, 60).await.unwrap();
+    let trace_of = |title: &str| got.iter().find(|g| g.title == title).and_then(|g| g.trace.clone());
+    assert_eq!((trace_of("kept"), trace_of("not kept")), (Some(kept), None), "{got:?}");
 }
 
 /// A route clearly slower than on main's preview (from both previews' traces) goes on the change's

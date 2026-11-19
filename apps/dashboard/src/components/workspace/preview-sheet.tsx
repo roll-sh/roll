@@ -1533,6 +1533,31 @@ function Waterfall({ spans }: { spans: TraceSpan[] }) {
   );
 }
 
+/** The trace an error's sample names: its request's spans, under the sample. */
+function ErrorTrace({ preview: p, trace }: { preview: Preview; trace: string }) {
+  const [spans, setSpans] = useState<TraceSpan[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    previewsApi.trace(p.id, trace).then(
+      (r) => live && setSpans(r.spans),
+      (e) => live && setError(errorText(e)),
+    );
+    return () => {
+      live = false;
+    };
+  }, [p.id, trace]);
+  const ms = spans?.length ? Math.round((Math.max(...spans.map((s) => s.end)) - Math.min(...spans.map((s) => s.start))) / 1e6) : 0;
+  return (
+    <div className="rise border-t border-line pt-1.5">
+      <p className="px-2.5 font-mono text-[10px] text-subtle">
+        {error ? <span className="text-danger">{error}</span> : spans ? `its request's trace: ${spans.length} spans, ${ms} ms` : "its request's trace…"}
+      </p>
+      {spans && <Waterfall spans={spans} />}
+    </div>
+  );
+}
+
 /** Spans the Errors tab reads, in minutes. */
 const ERROR_SPANS = [
   [60, "1 hour"],
@@ -1607,6 +1632,7 @@ function Errors({ preview: p }: { preview: Preview }) {
                 {shown && (
                   <pre className="rise max-h-[40vh] overflow-auto border-t border-line px-2.5 py-2 font-mono text-[10.5px] leading-relaxed whitespace-pre-wrap text-soft [scrollbar-width:thin]">{g.sample}</pre>
                 )}
+                {shown && g.trace && <ErrorTrace preview={p} trace={g.trace} />}
               </li>
             );
           })}

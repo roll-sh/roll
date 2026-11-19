@@ -683,6 +683,15 @@ impl Engine {
                 g.sample = crate::mask_cut(&g.sample, values);
                 g.fingerprint = self.error_fingerprint(id, &g.service, &g.fingerprint);
             }
+            // A group whose newest sample names a trace the preview keeps opens it.
+            // (Only when a sample names something like one: reading them asks roll apps too.)
+            let named = groups.iter().any(|g| super::traces::trace_ids_in(&g.sample).next().is_some());
+            let kept: std::collections::HashSet<String> = if named { self.trace_rows(id, super::traces::KEEP_MS / 60_000).await?.into_iter().map(|t| t.trace).collect() } else { Default::default() };
+            if !kept.is_empty() {
+                for g in &mut groups {
+                    g.trace = super::traces::trace_ids_in(&g.sample).find(|t| kept.contains(t));
+                }
+            }
         }
         let mut read = self.errors_read.lock();
         read.retain(|_, (at, _)| now - *at < ERRORS_FOR);

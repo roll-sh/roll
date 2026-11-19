@@ -141,6 +141,12 @@ fn size(s: &Span) -> usize {
     64 + s.trace.len() + s.span.len() + s.parent.len() + s.name.len() + s.service.len() + s.attrs.iter().map(|(k, v)| 16 + k.len() + v.len()).sum::<usize>()
 }
 
+/// The trace ids a text names: each run of exactly 32 hex digits between characters that aren't
+/// letters or digits (`trace_id=…`, `"traceId":"…"`, a `traceparent`'s `00-…-…-01`), lowercased.
+pub fn trace_ids_in(text: &str) -> impl Iterator<Item = String> + '_ {
+    text.split(|c: char| !c.is_ascii_alphanumeric()).filter(|w| w.len() == 32 && w.bytes().all(|b| b.is_ascii_hexdigit())).map(str::to_ascii_lowercase)
+}
+
 /// A route's times: how many traces, their p50 and p95 (ms).
 #[derive(Clone, Debug, PartialEq)]
 pub struct RouteStat {
@@ -286,7 +292,7 @@ impl Engine {
 
     /// Every trace of the preview in the last `minutes`, newest first, unmasked: the runtime's kept
     /// spans summed, and its roll apps services' own while the project's traces are on.
-    async fn trace_rows(&self, id: &str, minutes: i64) -> Result<Vec<TraceRow>> {
+    pub(super) async fn trace_rows(&self, id: &str, minutes: i64) -> Result<Vec<TraceRow>> {
         self.store.row(id)?;
         let since = (self.store.now_ms()? - minutes * 60_000).max(0) as u64 * 1_000_000;
         // Summed under the lock without copying the spans (only each trace's row leaves it).
@@ -504,8 +510,11 @@ impl Engine {
         spans.sort_by_key(|s| s.start);
         let values = self.masks(id).await?;
         for s in &mut spans {
+            // Its code chose all of it: the name, the service (its SDK's resource) and each attribute.
             s.name = code_preview::runner::mask(&s.name, &values);
-            for (_, v) in &mut s.attrs {
+            s.service = code_preview::runner::mask(&s.service, &values);
+            for (k, v) in &mut s.attrs {
+                *k = code_preview::runner::mask(k, &values);
                 *v = code_preview::runner::mask(v, &values);
             }
         }
@@ -538,6 +547,13 @@ mod tests {
         assert_eq!(repeated_query(&spans), Some(Repeated { statement: "SELECT * FROM items WHERE order_id = ?".into(), count: REPEATED_MIN }));
         spans.pop();
         assert_eq!(repeated_query(&spans), None, "fewer than {REPEATED_MIN} isn't said");
+    }
+
+    #[test]
+    fn a_texts_trace_ids_are_whole_runs_of_32_hex_digits() {
+        let id = "4bf92f3577b34da6a3ce929d0e0e4736";
+        let found: Vec<String> = trace_ids_in(&format!("trace_id={id} traceparent=00-{}-00f067aa0ba902b7-01 x{id}0 {}", id.to_ascii_uppercase(), &id[..31])).collect();
+        assert_eq!(found, [id, id]);
     }
 
     #[test]

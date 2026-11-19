@@ -406,7 +406,7 @@ api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d]" | grep -q 
 for _ in $(seq 1 30); do [ "$(docker ps -aq --filter name=roll-previews-fwd- | wc -l)" = 0 ] && break; sleep 0.5; done
 [ "$(docker ps -aq --filter name=roll-previews-fwd- | wc -l)" = 0 ] || { echo "a forward's relay should go with its connection"; exit 1; }
 
-say "traces: with the project's traces on, the service gets OpenTelemetry's variables, and spans it posts are the preview's traces"
+say "traces: with the project's traces on, the service gets OpenTelemetry's variables, spans it posts are the preview's traces, and an error naming one opens it"
 api PUT "/v1/previews/projects/$PRJ/settings" '{"traces":true}' >/dev/null
 # It restarts with them (its deploy's fingerprint): the env it writes at start says so.
 OTEL=""
@@ -439,6 +439,15 @@ print(json.dumps({"resourceSpans": [{"resource": {"attributes": [{"key": "servic
 REPEATED=$(api GET "/v1/previews/$PV/routes" | jq_ "[(r['repeated'] or {}).get('statement', '') + ' ' + str((r['repeated'] or {}).get('count', 0)) for r in d['routes'] if r['name'] == 'GET /orders']")
 [ "$REPEATED" = "['SELECT * FROM items WHERE order_id = ? 12']" ] || { echo "the route should say its repeated query: $REPEATED"; exit 1; }
 [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' -d '{}' "http://$API/v1/previews/$PV/otlp/not-the-token/v1/traces")" = 404 ] || { echo "another token should be 404"; exit 1; }
+# An error its service logs with the request's trace id (as an SDK's logger does) opens that trace.
+docker exec "roll-previews-$(echo "$HOST" | cut -d. -f1)" sh -c 'echo "ERROR card declined trace_id=abababababababababababababababab" > /proc/1/fd/2'
+ERR_TRACE=""
+for _ in $(seq 1 30); do
+  ERR_TRACE=$(api GET "/v1/previews/$PV/errors" | jq_ "' '.join(g.get('trace') or '-' for g in d['groups'] if 'card declined' in g['title'])")
+  [ "$ERR_TRACE" = abababababababababababababababab ] && break
+  sleep 2
+done
+[ "$ERR_TRACE" = abababababababababababababababab ] || { echo "the error naming the trace should carry it: '$ERR_TRACE'"; exit 1; }
 
 say "a screenshot of the service (github.screenshot), once per head"
 # And /pricing, which the test service doesn't have (a 404 page, one failed request).
