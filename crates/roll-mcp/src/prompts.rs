@@ -139,7 +139,8 @@ const PROMPTS: &[Prompt] = &[
              would drop, in plain words. For each one that roams, call access_token_networks and name the networks \
              it was used from, so I can tell whether one is unexpected. Say which tokens to revoke (unused) and \
              which need an expiry. If you also have secrets_findings or previews_mask_suggestions, add the secrets \
-             that need fixing and the personal data previews don't mask yet. Change nothing yourself: applying a \
+             that need fixing and the personal data previews don't mask yet; with storage_list_keys, the S3 access \
+             keys that are admin over every bucket or unused for 90 days. Change nothing yourself: applying a \
              tighten, revoking or limiting a token is for me or the operator, on the token's page or with roll \
              token. Never print a secret."
                 .into()
