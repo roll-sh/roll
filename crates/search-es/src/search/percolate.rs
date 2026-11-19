@@ -28,7 +28,7 @@ pub fn check_query(cluster: &Cluster, st: &ClusterState, idx: &IndexMeta, table:
     let v = crate::json::parse(json.as_bytes()).map_err(|e| EsError::parse(e.to_string()))?.unwrap_or(Value::Null);
     let (q, _) = crate::query::parse_query(&v, None, &[])?;
     let searcher = engine.shard(0).shard.searcher();
-    let qctx = QueryCtx::new(cluster, st, idx, table, &searcher, crate::time::now_millis());
+    let qctx = QueryCtx::new(cluster, st, idx, table, &searcher, crate::time::now_millis(), crate::search::query::Reader::Unset);
     qctx.strict_unmapped.set(true);
     qctx.to_query(&q)?;
     if let Some(f) = qctx.unmapped.take() {
@@ -148,7 +148,7 @@ impl Percolated {
         let (slots, q) = (&v.slots, &*v.query);
         let table = self.mem.engine.table();
         let searcher = self.mem.engine.shard(0).shard.searcher();
-        let qctx = QueryCtx::new(cluster, st, &self.mem.meta, &table, &searcher, now);
+        let qctx = QueryCtx::new(cluster, st, &self.mem.meta, &table, &searcher, now, crate::search::query::Reader::Unset);
         let query = qctx.to_query(q)?;
         for slot in slots {
             let Some((&mdoc, _)) = self.slot_of.iter().find(|(_, s)| *s == slot) else { continue };
@@ -233,7 +233,7 @@ pub fn percolate(ctx: &QueryCtx, p: &Percolate) -> EsResult<QueryRef> {
                 continue;
             }
             let parsed = stored.queries[i as usize].clone();
-            let qctx = QueryCtx::new(ctx.cluster, ctx.st, &mem.meta, &mem_table, &mem_searcher, ctx.now_ms);
+            let qctx = QueryCtx::new(ctx.cluster, ctx.st, &mem.meta, &mem_table, &mem_searcher, ctx.now_ms, crate::search::query::Reader::Unset);
             let Ok(stored_q) = qctx.to_query(&parsed) else { continue };
             let q: QueryRef = arc(search_index::query::BooleanQuery::new().add(search_index::query::Occur::Must, stored_q).add(search_index::query::Occur::Filter, root.clone()));
             let w = mem_searcher.create_weight(&q, ScoreMode::Complete).map_err(ie)?;

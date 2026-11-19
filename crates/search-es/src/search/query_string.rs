@@ -42,9 +42,6 @@ enum Tk {
     Tilde(Option<String>),
 }
 
-/// `QueryParserBase.parse`: Lucene's `ParseException` (or `TokenMgrError`, for lexical
-/// errors) wrapped in a `ParseException` naming the query. Neither is an Elasticsearch
-/// exception, so the root cause stays the `query_shard_exception` around them.
 /// Groups nested in one another. Parsing and building the query recurse once per group, and a
 /// stack overflow aborts the whole node (Lucene's parser fails with the JVM's
 /// `StackOverflowError` somewhere past a few thousand): roll's own limit.
@@ -54,6 +51,9 @@ fn too_deep(q: &str) -> EsError {
     parse_error(q, &format!("the query nests groups deeper than {MAX_GROUP_DEPTH} levels"))
 }
 
+/// `QueryParserBase.parse`: Lucene's `ParseException` (or `TokenMgrError`, for lexical
+/// errors) wrapped in a `ParseException` naming the query. Neither is an Elasticsearch
+/// exception, so the root cause stays the `query_shard_exception` around them.
 fn parse_error(q: &str, msg: &str) -> EsError {
     let inner = if msg.starts_with("Lexical error") { "token_mgr_error" } else { "parse_exception" };
     EsError::java(400, "parse_exception", format!("Cannot parse '{q}': {msg}")).caused_by(EsError::java(400, inner, msg))

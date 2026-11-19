@@ -457,7 +457,7 @@ pub fn desugar(src: &str, start: usize, end: usize, params: &[(Option<String>, P
     let Node::Agg { op, by, inner, at: agg_at, end: agg_end } = node else {
         return Err(verification(src, node.span().0, "PROMQL without an aggregation is not supported"));
     };
-    let expr = |kind: ExprKind, at: usize, end: usize| Expr { kind, start: at, end };
+    let expr = |kind: ExprKind, at: usize, end: usize| Expr::new(kind, at, end);
     let col = |n: &str, at: usize, end: usize| expr(ExprKind::Col(n.to_string()), at, end);
     let (call, matchers) = match *inner {
         Node::Func { name: f, arg, at, end } => {

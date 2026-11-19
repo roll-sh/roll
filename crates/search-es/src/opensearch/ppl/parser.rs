@@ -330,13 +330,38 @@ pub struct Parser<'a> {
     folds: usize,
 }
 
-/// Parsing recurses once per nesting level and what runs the tree once per level of it, which
-/// grows with every operator a chain folds; a stack overflow aborts the whole node, so nesting
-/// plus the folds of a top-level expression are bounded (roll's own limit, as ES|QL's).
+/// Parentheses, `NOT`s and signs nested in one another, counted by a pre-scan as
+/// Elasticsearch's languages count them ([`prescan`]): parsing recurses once per level, and a
+/// stack overflow aborts the whole node (roll's own limit, as ES|QL's).
 const MAX_EXPRESSION_DEPTH: usize = 300;
 
+/// Operators one top-level expression may chain: the tree is walked and dropped recursively
+/// (roll's own bound).
+const MAX_CHAINED: usize = 1000;
+
+/// The pre-scan of the tokens, before anything parses: parentheses nest, and a run of `NOT`s
+/// or signs adds to the nesting it is in.
+fn prescan(toks: &[Token]) -> Result<(), EsError> {
+    let (mut parens, mut run, mut operand) = (0usize, 0usize, false);
+    for t in toks {
+        match &t.tok {
+            Tok::Op("(") => (parens, run, operand) = (parens + 1, 0, false),
+            Tok::Op(")") => (parens, run, operand) = (parens.saturating_sub(1), 0, true),
+            Tok::Ident { name, quoted: false } if name.eq_ignore_ascii_case("not") => (run, operand) = (run + 1, false),
+            Tok::Op("-" | "+") if !operand => run += 1,
+            other => (run, operand) = (0, matches!(other, Tok::Ident { .. } | Tok::Str(_) | Tok::Int(_) | Tok::Dec(_) | Tok::Span(_) | Tok::Op("]"))),
+        }
+        if parens + run > MAX_EXPRESSION_DEPTH {
+            return Err(super::syntax_error(format!("PPL statement exceeded the maximum expression depth allowed ({MAX_EXPRESSION_DEPTH})")));
+        }
+    }
+    Ok(())
+}
+
 pub fn parse(src: &str) -> Result<Query, EsError> {
-    let mut p = Parser { src, toks: lex(src)?, i: 0, depth: 0, folds: 0 };
+    let toks = lex(src)?;
+    prescan(&toks)?;
+    let mut p = Parser { src, toks, i: 0, depth: 0, folds: 0 };
     let explain = p.kw("explain");
     let q = p.query()?;
     if !matches!(p.peek(), Tok::Eof) {
@@ -491,15 +516,12 @@ impl Parser<'_> {
         if s.is_empty() { Err(self.unexpected("expecting an index name")) } else { Ok(s) }
     }
 
-    fn too_deep(&self) -> EsError {
-        super::syntax_error(format!("PPL statement exceeded the maximum expression depth allowed ({MAX_EXPRESSION_DEPTH})"))
+    fn too_long(&self) -> EsError {
+        super::syntax_error(format!("PPL statement chains more than {MAX_CHAINED} operators in one expression"))
     }
 
     /// Runs `f` one nesting level deeper (on a fresh stack segment when this one runs low).
     fn nest<R>(&mut self, f: impl FnOnce(&mut Self) -> Result<R, EsError>) -> Result<R, EsError> {
-        if self.depth + self.folds >= MAX_EXPRESSION_DEPTH {
-            return Err(self.too_deep());
-        }
         self.depth += 1;
         let r = crate::stack::maybe_grow(|| f(self));
         self.depth -= 1;
@@ -509,10 +531,13 @@ impl Parser<'_> {
     /// One more node on top of a chain (`a + b + c` is as deep as it is long).
     fn fold(&mut self) -> Result<(), EsError> {
         self.folds += 1;
-        if self.depth + self.folds > MAX_EXPRESSION_DEPTH { Err(self.too_deep()) } else { Ok(()) }
+        if self.folds > MAX_CHAINED { Err(self.too_long()) } else { Ok(()) }
     }
 
     fn search_or(&mut self) -> Result<Search, EsError> {
+        if self.depth == 0 {
+            self.folds = 0;
+        }
         let mut l = self.search_and()?;
         while self.kw("or") {
             self.fold()?;
@@ -1031,7 +1056,7 @@ impl Parser<'_> {
                 Cmd::Rex { field, pattern: pattern.ok_or_else(|| self.unexpected("expecting a pattern"))?, max_match, sed, offset_field }
             }
             "parse" => {
-                let field = self.value_expr()?;
+                let field = self.top_value_expr()?;
                 let pattern = self.string_lit()?;
                 Cmd::Parse { field, pattern }
             }
@@ -1063,7 +1088,7 @@ impl Parser<'_> {
                 Cmd::Spath { input: input.ok_or_else(|| self.unexpected("expecting input"))?, output, path }
             }
             "patterns" => {
-                let field = self.value_expr()?;
+                let field = self.top_value_expr()?;
                 let by = self.by_clause()?;
                 let mut c = Cmd::Patterns { field, by, method: String::new(), mode: String::new(), max_sample_count: None, show_numbered_token: None, new_field: "patterns_field".into(), pattern: None, variable_count_threshold: None, frequency_threshold: None };
                 if let Cmd::Patterns { method, mode, max_sample_count, show_numbered_token, new_field, pattern, variable_count_threshold, frequency_threshold, .. } = &mut c {
@@ -1153,13 +1178,13 @@ impl Parser<'_> {
             }
             "fillnull" => {
                 if self.kw("with") {
-                    let with = self.value_expr()?;
+                    let with = self.top_value_expr()?;
                     let fields = if self.kw("in") { self.field_list()?.into_iter().map(|f| f.0).collect() } else { Vec::new() };
                     Cmd::FillNull { with, fields }
                 } else {
                     self.expect_kw("value")?;
                     self.expect_op("=")?;
-                    let with = self.value_expr()?;
+                    let with = self.top_value_expr()?;
                     let fields = if matches!(self.peek(), Tok::Ident { .. }) { self.field_list()?.into_iter().map(|f| f.0).collect() } else { Vec::new() };
                     Cmd::FillNull { with, fields }
                 }
@@ -1539,6 +1564,14 @@ impl Parser<'_> {
             }
             return Ok(l);
         }
+    }
+
+    /// A command's own value expression: its chain counts from zero.
+    fn top_value_expr(&mut self) -> Result<Expr, EsError> {
+        if self.depth == 0 {
+            self.folds = 0;
+        }
+        self.value_expr()
     }
 
     pub fn value_expr(&mut self) -> Result<Expr, EsError> {

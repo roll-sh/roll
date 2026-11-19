@@ -774,7 +774,7 @@ impl Compiler<'_> {
                     }
                     return Ok((CE::Cast(Box::new(CE::Col(i)), t), t));
                 }
-                return self.compile(&Expr { kind: ExprKind::Call(name.into(), vec![(**x).clone()]), start: e.start, end: e.end });
+                return self.compile(&Expr::new(ExprKind::Call(name.into(), vec![(**x).clone()]), e.start, e.end));
             }
             ExprKind::Cast(x, ty) => {
                 // ES|QL has no conversion to text (`TO_STRING` gives keywords); SQL casts to
@@ -796,7 +796,7 @@ impl Compiler<'_> {
                 if xt.is_grid()
                     && let Some(f) = functions::conversion_to(t)
                 {
-                    return self.compile(&Expr { kind: ExprKind::Call(functions::name_of(f).into(), vec![(**x).clone()]), start: e.start, end: e.end });
+                    return self.compile(&Expr::new(ExprKind::Call(functions::name_of(f).into(), vec![(**x).clone()]), e.start, e.end));
                 }
                 (CE::Cast(Box::new(c), t), t)
             }
@@ -822,7 +822,7 @@ impl Compiler<'_> {
             ExprKind::Call(name, args) if name == "$ts_by" => {
                 let dimension = matches!(&args[0].kind, ExprKind::Col(c) if self.src.res.dimensions.get().is_some_and(|d| d.contains(c)));
                 let f = if dimension { "$last" } else { "$values" };
-                let call = Expr { kind: ExprKind::Call(f.into(), args.clone()), start: e.start, end: e.end };
+                let call = Expr::new(ExprKind::Call(f.into(), args.clone()), e.start, e.end);
                 let (c, t) = self.compile(&call)?;
                 (c, if t == DataType::Text { DataType::Keyword } else { t })
             }
@@ -2021,7 +2021,7 @@ impl Grouper {
                 }
                 // `TBUCKET(span)`: `BUCKET(@timestamp, span)`.
                 ExprKind::Call(f, args) if f == "tbucket" => {
-                    let mut full = vec![Expr { kind: ExprKind::Col("@timestamp".into()), start: n.expr.start, end: n.expr.start }];
+                    let mut full = vec![Expr::new(ExprKind::Col("@timestamp".into()), n.expr.start, n.expr.start)];
                     full.extend(args.iter().cloned());
                     compile_bucket(src, cols, &n.expr, &full)?
                 }
@@ -2047,10 +2047,10 @@ impl Grouper {
                 fn first_col(e: &Expr) -> Option<(&str, usize)> {
                     match &e.kind {
                         ExprKind::Col(c) => Some((c, e.start)),
-                        ExprKind::Neg(x) | ExprKind::Not(x) | ExprKind::IsNull(x, _) | ExprKind::Like(x, ..) | ExprKind::Cast(x, _) => first_col(x),
-                        ExprKind::Bin(_, a, b) => first_col(a).or_else(|| first_col(b)),
-                        ExprKind::In(x, l, _) => first_col(x).or_else(|| l.iter().find_map(first_col)),
-                        ExprKind::Call(_, args) => args.iter().find_map(first_col),
+                        ExprKind::Neg(x) | ExprKind::Not(x) | ExprKind::IsNull(x, _) | ExprKind::Like(x, ..) | ExprKind::Cast(x, _) => crate::stack::maybe_grow(|| first_col(x)),
+                        ExprKind::Bin(_, a, b) => crate::stack::maybe_grow(|| first_col(a)).or_else(|| crate::stack::maybe_grow(|| first_col(b))),
+                        ExprKind::In(x, l, _) => crate::stack::maybe_grow(|| first_col(x)).or_else(|| l.iter().find_map(|y| crate::stack::maybe_grow(|| first_col(y)))),
+                        ExprKind::Call(_, args) => args.iter().find_map(|y| crate::stack::maybe_grow(|| first_col(y))),
                         _ => None,
                     }
                 }
@@ -2564,7 +2564,7 @@ fn top_source_keys(prefix: &[Cmd], keys: &[super::parser::SortKey], cols: &[Col]
         if matches!(col.ty, DataType::Source | DataType::Unsupported | DataType::Null) {
             return None;
         }
-        out.push(super::parser::SortKey { expr: Expr { kind: ExprKind::Col(name), start: k.expr.start, end: k.expr.end }, asc: k.asc, nulls_first: k.nulls_first });
+        out.push(super::parser::SortKey { expr: Expr::new(ExprKind::Col(name), k.expr.start, k.expr.end), asc: k.asc, nulls_first: k.nulls_first });
     }
     Some((nw, out))
 }
@@ -2900,13 +2900,13 @@ fn pushdown(e: &Expr, cols: &[Col], ft: &[Value]) -> Option<Value> {
     match &e.kind {
         // A full-text call (rewritten to its hidden column) narrows the scan as itself.
         ExprKind::Col(c) if c.starts_with(super::fulltext::HIDDEN) => c[super::fulltext::HIDDEN.len()..].parse::<usize>().ok().and_then(|i| ft.get(i).cloned()),
-        ExprKind::Bin(BinOp::And, a, b) => match (pushdown(a, cols, ft), pushdown(b, cols, ft)) {
+        ExprKind::Bin(BinOp::And, a, b) => match (crate::stack::maybe_grow(|| pushdown(a, cols, ft)), crate::stack::maybe_grow(|| pushdown(b, cols, ft))) {
             (Some(x), Some(y)) => Some(obj! { "bool" => obj! { "filter" => crate::arr![x, y] } }),
             (Some(x), None) | (None, Some(x)) => Some(x),
             _ => None,
         },
         ExprKind::Bin(BinOp::Or, a, b) => {
-            let (x, y) = (pushdown(a, cols, ft)?, pushdown(b, cols, ft)?);
+            let (x, y) = (crate::stack::maybe_grow(|| pushdown(a, cols, ft))?, crate::stack::maybe_grow(|| pushdown(b, cols, ft))?);
             Some(obj! { "bool" => obj! { "should" => crate::arr![x, y], "minimum_should_match" => 1 } })
         }
         ExprKind::Bin(op @ (BinOp::Eq | BinOp::Lt | BinOp::Lte | BinOp::Gt | BinOp::Gte), a, b) => {
@@ -2997,8 +2997,8 @@ fn split_ignored(e: Expr) -> (Option<Value>, Option<Expr>) {
         ExprKind::In(x, list, false) if is_ignored(x) => list.iter().map(lit).collect::<Option<Vec<Value>>>().map(|vs| obj! { "terms" => obj! { "_ignored" => Value::Arr(vs) } }),
         ExprKind::Bin(BinOp::And, ..) => {
             let ExprKind::Bin(_, a, b) = e.kind else { unreachable!() };
-            let (qa, ra) = split_ignored(*a);
-            let (qb, rb) = split_ignored(*b);
+            let (qa, ra) = crate::stack::maybe_grow(|| split_ignored(*a));
+            let (qb, rb) = crate::stack::maybe_grow(|| split_ignored(*b));
             let q = match (qa, qb) {
                 (Some(x), Some(y)) => Some(obj! { "bool" => obj! { "filter" => crate::arr![x, y] } }),
                 (x, y) => x.or(y),
@@ -3006,7 +3006,7 @@ fn split_ignored(e: Expr) -> (Option<Value>, Option<Expr>) {
             let r = match (ra, rb) {
                 (Some(x), Some(y)) => {
                     let (s, en) = (x.start, y.end);
-                    Some(Expr { kind: ExprKind::Bin(BinOp::And, Box::new(x), Box::new(y)), start: s, end: en })
+                    Some(Expr::new(ExprKind::Bin(BinOp::And, Box::new(x), Box::new(y)), s, en))
                 }
                 (x, y) => x.or(y),
             };
@@ -3025,21 +3025,21 @@ pub(crate) fn refs(e: &Expr, out: &mut std::collections::HashSet<String>) {
         ExprKind::Col(c) => {
             out.insert(c.clone());
         }
-        ExprKind::Neg(x) | ExprKind::Not(x) | ExprKind::IsNull(x, _) | ExprKind::Like(x, ..) | ExprKind::Cast(x, _) => refs(x, out),
+        ExprKind::Neg(x) | ExprKind::Not(x) | ExprKind::IsNull(x, _) | ExprKind::Like(x, ..) | ExprKind::Cast(x, _) => crate::stack::maybe_grow(|| refs(x, out)),
         ExprKind::Bin(_, a, b) => {
-            refs(a, out);
-            refs(b, out);
+            crate::stack::maybe_grow(|| refs(a, out));
+            crate::stack::maybe_grow(|| refs(b, out));
         }
         ExprKind::In(x, l, _) => {
-            refs(x, out);
-            l.iter().for_each(|i| refs(i, out));
+            crate::stack::maybe_grow(|| refs(x, out));
+            l.iter().for_each(|i| crate::stack::maybe_grow(|| refs(i, out)));
         }
         ExprKind::Call(f, args) => {
             // `TBUCKET(span)` buckets `@timestamp`.
             if f == "tbucket" {
                 out.insert("@timestamp".into());
             }
-            args.iter().for_each(|a| refs(a, out))
+            args.iter().for_each(|a| crate::stack::maybe_grow(|| refs(a, out)))
         }
         ExprKind::Lit(_) | ExprKind::Star | ExprKind::Span(_) => {}
     }
@@ -3444,8 +3444,8 @@ fn expand_source(st: &crate::meta::ClusterState, cmd: &mut Cmd, text: &std::sync
                                     "_version" => "long",
                                     _ => "keyword",
                                 };
-                                let lit = Expr { kind: ExprKind::Lit(V::Null), start: 0, end: 0 };
-                                super::parser::Named { name: m.clone(), expr: Expr { kind: ExprKind::Cast(Box::new(lit), ty.into()), start: 0, end: 0 } }
+                                let lit = Expr::new(ExprKind::Lit(V::Null), 0, 0);
+                                super::parser::Named { name: m.clone(), expr: Expr::new(ExprKind::Cast(Box::new(lit), ty.into()), 0, 0) }
                             })
                             .collect();
                         if !nulls.is_empty() {
@@ -3695,16 +3695,16 @@ fn ref_positions(cmds: &[Cmd]) -> Vec<(String, usize)> {
     fn expr(e: &Expr, out: &mut Vec<(String, usize)>) {
         match &e.kind {
             ExprKind::Col(n) => out.push((n.clone(), e.start)),
-            ExprKind::Neg(x) | ExprKind::Not(x) | ExprKind::IsNull(x, _) | ExprKind::Like(x, ..) | ExprKind::Cast(x, _) => expr(x, out),
+            ExprKind::Neg(x) | ExprKind::Not(x) | ExprKind::IsNull(x, _) | ExprKind::Like(x, ..) | ExprKind::Cast(x, _) => crate::stack::maybe_grow(|| expr(x, out)),
             ExprKind::Bin(_, a, b) => {
-                expr(a, out);
-                expr(b, out);
+                crate::stack::maybe_grow(|| expr(a, out));
+                crate::stack::maybe_grow(|| expr(b, out));
             }
             ExprKind::In(x, l, _) => {
-                expr(x, out);
-                l.iter().for_each(|a| expr(a, out));
+                crate::stack::maybe_grow(|| expr(x, out));
+                l.iter().for_each(|a| crate::stack::maybe_grow(|| expr(a, out)));
             }
-            ExprKind::Call(_, args) => args.iter().for_each(|a| expr(a, out)),
+            ExprKind::Call(_, args) => args.iter().for_each(|a| crate::stack::maybe_grow(|| expr(a, out))),
             _ => {}
         }
     }
@@ -3808,8 +3808,8 @@ fn ts_rewrite(text: &str, cmds: &mut Vec<Cmd>) -> EsResult<()> {
         }
     }
     let Cmd::Stats { aggs, by } = cmds[si].clone() else { unreachable!() };
-    let col = |name: &str, at: usize| Expr { kind: ExprKind::Col(name.into()), start: at, end: at };
-    let call = |f: &str, args: Vec<Expr>, e: &Expr| Expr { kind: ExprKind::Call(f.into(), args), start: e.start, end: e.end };
+    let col = |name: &str, at: usize| Expr::new(ExprKind::Col(name.into()), at, at);
+    let call = |f: &str, args: Vec<Expr>, e: &Expr| Expr::new(ExprKind::Call(f.into(), args), e.start, e.end);
     let mut inner_aggs = Vec::new();
     let mut outer_aggs = Vec::new();
     for (i, a) in aggs.iter().enumerate() {
@@ -3906,7 +3906,7 @@ fn run_query<'a>(cluster: &'a Cluster, mut q: Query, filter: Option<Value>, w: &
                 if !b.iter().any(|c| matches!(c, Cmd::Limit(_))) {
                     cmds.push(Cmd::Limit(DEFAULT_LIMIT));
                 }
-                let tag = Expr { kind: ExprKind::Lit(V::Str(format!("fork{}", i + 1))), start: at, end: at };
+                let tag = Expr::new(ExprKind::Lit(V::Str(format!("fork{}", i + 1))), at, at);
                 cmds.push(Cmd::Eval(vec![super::parser::Named { name: "_fork".into(), expr: tag }]));
                 let bq = Query { src: q.src.clone(), cmds, sql: q.sql, locale: q.locale.clone(), settings: q.settings.clone() };
                 let (t, s) = run_query(cluster, bq, filter.clone(), w, false, &refs).await?;
@@ -4031,7 +4031,7 @@ async fn execute_plain(cluster: &Cluster, q: Query, filter: Option<Value>, w: &m
     if resolved.as_ref().is_some_and(|s| s.metadata.iter().any(|m| m == "_ignored"))
         && let Some(Cmd::Where(e)) = cmds.first_mut()
     {
-        let (pushed, rest) = split_ignored(std::mem::replace(e, Expr { kind: ExprKind::Lit(V::Null), start: 0, end: 0 }));
+        let (pushed, rest) = split_ignored(std::mem::replace(e, Expr::new(ExprKind::Lit(V::Null), 0, 0)));
         ignored_query = pushed;
         match rest {
             Some(r) => *e = r,

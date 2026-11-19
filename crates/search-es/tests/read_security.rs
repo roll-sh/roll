@@ -106,3 +106,27 @@ async fn lookup_runtime_fields_read_as_their_reader() {
     assert!(text.contains("\"red\""), "the visible document's visible field: {text}");
     assert!(!text.contains("s1") && !text.contains("s2") && !text.contains(r#"{"team":["blue"]}"#), "read around the reader's security: {text}");
 }
+
+/// Queries built outside the search's query phase read as its reader too: `_validate` with
+/// `explain` and a `filter` aggregation, through an `indexed_shape` of a hidden document.
+#[tokio::test]
+async fn validate_and_aggregations_read_as_their_reader() {
+    let c = cluster(r#""g""#).await;
+    for (m, u, b) in [
+        ("PUT", "/g", r#"{"mappings":{"properties":{"loc":{"type":"geo_shape"}}}}"#),
+        ("PUT", "/g/_doc/1?refresh=true", r#"{"loc":{"type":"point","coordinates":[2,2]}}"#),
+    ] {
+        assert!(call(&c, m, u, b, None).await.0 < 300, "{m} {u}");
+    }
+    let shape = r#"{"geo_shape":{"loc":{"indexed_shape":{"index":"p","id":"2","path":"shape"}}}}"#;
+    let validate = format!(r#"{{"query":{shape}}}"#);
+    let (_, v) = call(&c, "POST", "/g/_validate/query?explain=true", &validate, None).await;
+    assert!(v.to_json().contains("2.5"), "the superuser's explanation shows the shape: {}", v.to_json());
+    let (_, v) = call(&c, "POST", "/g/_validate/query?explain=true", &validate, Some("r")).await;
+    assert!(!v.to_json().contains("2.5"), "explained a hidden document's shape: {}", v.to_json());
+    let agg = format!(r#"{{"size":0,"aggs":{{"f":{{"filter":{shape}}}}}}}"#);
+    let (s, v) = call(&c, "POST", "/g/_search", &agg, None).await;
+    assert_eq!((s, v.pointer(&["aggregations", "f", "doc_count"]).and_then(Value::as_i64)), (200, Some(1)), "{}", v.to_json());
+    let (s, v) = call(&c, "POST", "/g/_search", &agg, Some("r")).await;
+    assert_ne!((s, v.pointer(&["aggregations", "f", "doc_count"]).and_then(Value::as_i64)), (200, Some(1)), "counted through a hidden document: {}", v.to_json());
+}

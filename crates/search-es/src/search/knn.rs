@@ -260,7 +260,7 @@ pub fn dfs(ctx: &crate::cluster::Cluster, st: &crate::meta::ClusterState, now: i
             };
             let started = std::time::Instant::now();
             let table = t.table();
-            let qctx = QueryCtx::new(ctx, st, &t.idx, &table, &searcher, now);
+            let qctx = QueryCtx::new(ctx, st, &t.idx, &table, &searcher, now, t.reader());
             // The boost applies once, to the score-doc queries below; an alias filter is one
             // more pre-filter of the vector search (`filtersInitial`).
             let mut kq = k.clone();

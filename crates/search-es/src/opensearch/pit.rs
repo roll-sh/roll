@@ -42,7 +42,6 @@ pub fn create(ctx: &Ctx) -> EsResult<Reply> {
     };
     let ka_value = TimeValue::parse(ka, "keep_alive")?;
     let ka = check_keep_alive(ctx, ka_value)?;
-    crate::search::contexts::check_pit_room(ctx)?;
     let mut req = crate::search::parse_request(ctx, None, None)?;
     req.source = Default::default();
     let st = ctx.state();
@@ -55,7 +54,7 @@ pub fn create(ctx: &Ctx) -> EsResult<Reply> {
     }
     let n = targets.len() as i64;
     let created = ctx.now_ms;
-    let id = ctx.cluster.contexts.open(SearchContext {
+    let id = crate::search::contexts::open_bounded_pit(ctx, SearchContext {
         targets,
         request: None,
         expires: Instant::now() + ka,
@@ -64,7 +63,7 @@ pub fn create(ctx: &Ctx) -> EsResult<Reply> {
         indices: req.indices.clone(),
         created_ms: created,
         keep_alive_ms: ka_value.as_millis(),
-    });
+    })?;
     Reply::ok(obj! {
         "pit_id" => id,
         "_shards" => obj! { "total" => n, "successful" => n, "skipped" => 0, "failed" => 0 },

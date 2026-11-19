@@ -155,7 +155,8 @@ async fn open_points_in_time_are_bounded() {
         }
     }
     let (status, v) = call(&c, "POST", "/idx/_pit?keep_alive=1h", "").await;
-    assert_eq!(status, 500, "{}", v.to_json());
+    assert_eq!(status, 429, "{}", v.to_json());
+    assert_eq!(at(&v, &["error", "type"]).as_str(), Some("rejected_execution_exception"));
     assert_eq!(at(&v, &["error", "reason"]).as_str(), Some("Trying to create too many Point In Time contexts. Must be less than or equal to: [1000]."));
     // Closing one makes room.
     assert_eq!(call(&c, "DELETE", "/_pit", &format!(r#"{{"id":"{first}"}}"#)).await.0, 200);

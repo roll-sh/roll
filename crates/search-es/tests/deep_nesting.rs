@@ -169,6 +169,8 @@ fn query_languages_bound_their_nesting() {
         // An `IN` list's items don't restart the count of the chain around them.
         esql(format!("FROM ql | WHERE {}", chain("n IN (1)", " AND ", 100_000))),
         esql(format!("FROM {}", nest("(FROM ", ")", "ql", 5_000))),
+        esql(format!("ROW a = 1 | {}", nest("FORK (", ")", "LIMIT 1", 20_000))),
+        esql(format!("ROW a = {}", chain("1", " + ", 301))),
         esql(format!("PROMQL index=ql step=1m {}", nest("sum(", ")", "x", 20_000))),
         sql(format!("SELECT {}", parens(20_000, "1"))),
         sql(format!("SELECT {}", chain("1", " + ", 100_000))),
@@ -187,6 +189,18 @@ fn query_languages_bound_their_nesting() {
         sql(format!("SELECT {}", chain("1", " + ", 240))),
         eql(format!("any where {}", parens(240, "true"))),
         search("kql", format!("{}k:a", "not ".repeat(290))),
+        // Elasticsearch's own limits are inclusive, and its languages count nesting, not chains.
+        esql(format!("ROW a = {}", parens(300, "1"))),
+        esql(format!("ROW a = {}", chain("1", " + ", 300))),
+        esql(format!("FROM ql | WHERE ({}) AND ({})", chain("n == 1", " OR ", 160), chain("k == \"a\"", " OR ", 160))),
+        esql(format!("FROM ql | WHERE {} | LIMIT 1", chain("n == 1", " OR ", 299))),
+        esql(format!("FROM ql | WHERE {}", parens(299, "MATCH(k, \"a\")"))),
+        sql(format!("SELECT * FROM ql WHERE {}", chain("n = 1", " OR ", 251))),
+        sql(format!("SELECT * FROM ql WHERE {}", chain("n = 1", " OR ", 900))),
+        ("POST", "/_sql/translate".to_string(), format!("{{\"query\":{}}}", q(format!("SELECT * FROM ql WHERE {}", chain("n = 1", " OR ", 900))))),
+        sql(format!("SELECT {}", parens(250, "1"))),
+        eql(format!("any where {}", chain("n == 1", " or ", 251))),
+        eql(format!("any where {}", parens(250, "true"))),
         search("query_string", parens(290, "a")),
         search("simple_query_string", parens(290, "a")),
     ];
@@ -208,7 +222,7 @@ fn query_languages_bound_their_nesting() {
     let r = &r[42..];
     let too_deep = |v: &Value| {
         let t = v.to_json();
-        t.contains("exceeded the maximum expression depth") || t.contains("deeper than")
+        t.contains("exceeded the maximum expression depth") || t.contains("deeper than") || t.contains("levels deep") || t.contains("chains more than")
     };
     for (i, (s, v)) in r[..n_far].iter().enumerate() {
         assert!((400..500).contains(s) && too_deep(v), "far #{i}: {s} {}", v.to_json());

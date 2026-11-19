@@ -127,16 +127,34 @@ struct P<'a> {
     /// `params` for the `?` placeholders, in order.
     params: &'a [V],
     next_param: usize,
-    /// Nesting of the expression being parsed ([`P::nest`]).
-    depth: usize,
-    /// Operators and casts folded in the current top-level expression ([`P::fold`]).
-    folds: usize,
 }
 
-/// `SqlParser.MAX_EXPRESSION_DEPTH`: parsing recurses once per nesting level and what runs the
-/// tree once per level of it, which grows with every operator a chain folds; a stack overflow
-/// aborts the whole node, so nesting plus the folds of a top-level expression are bounded.
+/// `SqlParser.MAX_EXPRESSION_DEPTH`, as its pre-scan counts it ([`prescan`]).
 const MAX_EXPRESSION_DEPTH: usize = 250;
+
+/// The tallest tree a statement may build. Elasticsearch doesn't bound operator chains (only
+/// its JVM stack does), but the tree is walked and dropped recursively, and a stack overflow
+/// aborts the whole node: roll's own bound.
+const MAX_TREE_HEIGHT: usize = 1000;
+
+/// `SqlParser`'s pre-scan of the tokens, before anything parses: parentheses nest, and a run
+/// of `NOT`s or signs adds to the nesting it is in.
+fn prescan(src: &str, t: &[(T, usize, usize)]) -> EsResult<()> {
+    let (mut parens, mut run, mut operand) = (0usize, 0usize, false);
+    for (tok, at, _) in t {
+        match tok {
+            T::Op("(") => (parens, run, operand) = (parens + 1, 0, false),
+            T::Op(")") => (parens, run, operand) = (parens.saturating_sub(1), 0, true),
+            T::Word(w) if w.eq_ignore_ascii_case("NOT") => (run, operand) = (run + 1, false),
+            T::Op("-" | "+") if !operand => run += 1,
+            other => (run, operand) = (0, matches!(other, T::Word(_) | T::Quoted(_) | T::Str(_) | T::Int(_) | T::Dec(_) | T::Op("?"))),
+        }
+        if parens + run > MAX_EXPRESSION_DEPTH {
+            return Err(parsing(src, *at, &format!("SQL statement exceeded the maximum expression depth allowed ({MAX_EXPRESSION_DEPTH})")));
+        }
+    }
+    Ok(())
+}
 
 /// What may start a select item (ANTLR's expected set after `SELECT`).
 const SELECT_ITEM_START: &str = "'ALL', 'ANALYZE', 'ANALYZED', 'CASE', 'CAST', 'CATALOGS', 'COLUMNS', 'CONVERT', 'CURRENT_DATE', 'CURRENT_TIME', 'CURRENT_TIMESTAMP', 'DAY', 'DEBUG', 'DISTINCT', 'EXECUTABLE', 'EXISTS', 'EXPLAIN', 'EXTRACT', 'FALSE', 'FIRST', 'FORMAT', 'FULL', 'FUNCTIONS', 'GRAPHVIZ', 'HOUR', 'INTERVAL', 'LAST', 'LEFT', 'LIMIT', 'MAPPED', 'MATCH', 'MINUTE', 'MONTH', 'NOT', 'NULL', 'OPTIMIZED', 'PARSED', 'PHYSICAL', 'PIVOT', 'PLAN', 'RIGHT', 'RLIKE', 'QUERY', 'SCHEMAS', 'SECOND', 'SHOW', 'SYS', 'TABLES', 'TEXT', 'TRUE', 'TOP', 'TYPE', 'TYPES', 'VERIFY', 'YEAR', FUNCTION_ESC, DATE_ESC, TIME_ESC, TIMESTAMP_ESC, GUID_ESC, '(', '+', '-', '*', '?', STRING, INTEGER_VALUE, DECIMAL_VALUE, IDENTIFIER, DIGIT_IDENTIFIER, QUOTED_IDENTIFIER, BACKQUOTED_IDENTIFIER";
@@ -234,45 +252,36 @@ impl P<'_> {
         Ok(self.src[start..end].to_string())
     }
 
-    fn too_deep(&self) -> EsError {
-        parsing(self.src, self.pos(), &format!("SQL statement exceeded the maximum expression depth allowed ({MAX_EXPRESSION_DEPTH})"))
-    }
-    /// Runs `f` one nesting level deeper (on a fresh stack segment when this one runs low).
-    fn nest<R>(&mut self, f: impl FnOnce(&mut Self) -> EsResult<R>) -> EsResult<R> {
-        if self.depth + self.folds >= MAX_EXPRESSION_DEPTH {
-            return Err(self.too_deep());
+    /// `e`, unless its tree is taller than [`MAX_TREE_HEIGHT`].
+    fn tall(&self, e: Expr) -> EsResult<Expr> {
+        if e.h > MAX_TREE_HEIGHT {
+            return Err(parsing(self.src, e.start, &format!("SQL statement nests or chains expressions more than {MAX_TREE_HEIGHT} levels deep")));
         }
-        self.depth += 1;
-        let r = crate::stack::maybe_grow(|| f(self));
-        self.depth -= 1;
-        r
+        Ok(e)
     }
-    /// One more node on top of a chain (`a + b + c` is as deep as it is long).
-    fn fold(&mut self) -> EsResult<()> {
-        self.folds += 1;
-        if self.depth + self.folds > MAX_EXPRESSION_DEPTH { Err(self.too_deep()) } else { Ok(()) }
+    /// Parses one nesting level deeper (on a fresh stack segment when this one runs low; the
+    /// pre-scan bounds how deep).
+    fn nest(&mut self, f: impl FnOnce(&mut Self) -> EsResult<Expr>) -> EsResult<Expr> {
+        let e = crate::stack::maybe_grow(|| f(self))?;
+        self.tall(e)
     }
     fn expr(&mut self) -> EsResult<Expr> {
-        if self.depth == 0 {
-            self.folds = 0;
-        }
-        self.or()
+        let e = self.or()?;
+        self.tall(e)
     }
     fn or(&mut self) -> EsResult<Expr> {
         let mut l = self.and()?;
         while self.eat_kw("OR") {
-            self.fold()?;
             let r = self.and()?;
-            l = bin(BinOp::Or, l, r);
+            l = self.tall(bin(BinOp::Or, l, r))?;
         }
         Ok(l)
     }
     fn and(&mut self) -> EsResult<Expr> {
         let mut l = self.not()?;
         while self.eat_kw("AND") {
-            self.fold()?;
             let r = self.not()?;
-            l = bin(BinOp::And, l, r);
+            l = self.tall(bin(BinOp::And, l, r))?;
         }
         Ok(l)
     }
@@ -281,7 +290,7 @@ impl P<'_> {
         if self.eat_kw("NOT") {
             let e = self.nest(Self::not)?;
             let end = e.end;
-            return Ok(Expr { kind: ExprKind::Not(Box::new(e)), start: s, end });
+            return Ok(Expr::new(ExprKind::Not(Box::new(e)), s, end));
         }
         self.pred()
     }
@@ -306,7 +315,7 @@ impl P<'_> {
             let neg = self.eat_kw("NOT");
             self.expect_kw("NULL")?;
             let end = self.t[self.i - 1].2;
-            return Ok(Expr { kind: ExprKind::IsNull(Box::new(l), neg), start, end });
+            return Ok(Expr::new(ExprKind::IsNull(Box::new(l), neg), start, end));
         }
         let neg = if self.is_kw("NOT") { self.bump(); true } else { false };
         if self.is_kw("LIKE") || self.is_kw("RLIKE") {
@@ -316,7 +325,7 @@ impl P<'_> {
             let T::Str(p) = t else { return Err(self.err("STRING")) };
             // SQL wildcards: `%` any run, `_` one character.
             let p = if rlike { p } else { p.replace('*', "\\*").replace('?', "\\?").replace('%', "*").replace('_', "?") };
-            return Ok(Expr { kind: ExprKind::Like(Box::new(l), p, rlike, neg), start, end });
+            return Ok(Expr::new(ExprKind::Like(Box::new(l), p, rlike, neg), start, end));
         }
         if self.eat_kw("IN") {
             if !self.eat_op("(") {
@@ -333,14 +342,14 @@ impl P<'_> {
             if !self.eat_op(")") {
                 return Err(self.err("')'"));
             }
-            return Ok(Expr { kind: ExprKind::In(Box::new(l), list, neg), start, end });
+            return Ok(Expr::new(ExprKind::In(Box::new(l), list, neg), start, end));
         }
         if self.eat_kw("BETWEEN") {
             let lo = self.add()?;
             self.expect_kw("AND")?;
             let hi = self.add()?;
             let e = bin(BinOp::And, bin(BinOp::Gte, l.clone(), lo), bin(BinOp::Lte, l, hi));
-            return Ok(if neg { Expr { start: e.start, end: e.end, kind: ExprKind::Not(Box::new(e)) } } else { e });
+            return Ok(if neg { Expr::new(ExprKind::Not(Box::new(e)), e.start, e.end) } else { e });
         }
         if neg {
             return Err(self.err("{'BETWEEN', 'IN', 'LIKE', 'RLIKE'}"));
@@ -356,9 +365,8 @@ impl P<'_> {
                 _ => return Ok(l),
             };
             self.bump();
-            self.fold()?;
             let r = self.mul()?;
-            l = bin(op, l, r);
+            l = self.tall(bin(op, l, r))?;
         }
     }
     fn mul(&mut self) -> EsResult<Expr> {
@@ -371,9 +379,8 @@ impl P<'_> {
                 _ => return Ok(l),
             };
             self.bump();
-            self.fold()?;
             let r = self.unary()?;
-            l = bin(op, l, r);
+            l = self.tall(bin(op, l, r))?;
         }
     }
     fn unary(&mut self) -> EsResult<Expr> {
@@ -382,18 +389,17 @@ impl P<'_> {
             let e = self.nest(Self::unary)?;
             let end = e.end;
             return Ok(match e.kind {
-                ExprKind::Lit(V::Int(i)) => Expr { kind: ExprKind::Lit(V::Int(-i)), start: s, end },
-                ExprKind::Lit(V::Long(i)) => Expr { kind: ExprKind::Lit(V::Long(-i)), start: s, end },
-                ExprKind::Lit(V::Double(d)) => Expr { kind: ExprKind::Lit(V::Double(-d)), start: s, end },
-                _ => Expr { kind: ExprKind::Neg(Box::new(e)), start: s, end },
+                ExprKind::Lit(V::Int(i)) => Expr::new(ExprKind::Lit(V::Int(-i)), s, end),
+                ExprKind::Lit(V::Long(i)) => Expr::new(ExprKind::Lit(V::Long(-i)), s, end),
+                ExprKind::Lit(V::Double(d)) => Expr::new(ExprKind::Lit(V::Double(-d)), s, end),
+                _ => Expr::new(ExprKind::Neg(Box::new(e)), s, end),
             });
         }
         let mut e = self.primary()?;
         while self.eat_op("::") {
-            self.fold()?;
             let ty = self.ident()?;
             let end = self.t[self.i - 1].2;
-            e = Expr { kind: ExprKind::Cast(Box::new(e), sql_type(&ty)), start: s, end };
+            e = self.tall(Expr::new(ExprKind::Cast(Box::new(e), sql_type(&ty)), s, end))?;
         }
         Ok(e)
     }
@@ -402,7 +408,7 @@ impl P<'_> {
     }
     fn primary_at(&mut self) -> EsResult<Expr> {
         let (t, s, e) = self.t[self.i].clone();
-        let lit = |v: V| Expr { kind: ExprKind::Lit(v), start: s, end: e };
+        let lit = |v: V| Expr::new(ExprKind::Lit(v), s, e);
         match t {
             T::Op("?") => {
                 self.bump();
@@ -435,7 +441,7 @@ impl P<'_> {
             }
             T::Op("*") => {
                 self.bump();
-                Ok(Expr { kind: ExprKind::Star, start: s, end: e })
+                Ok(Expr::new(ExprKind::Star, s, e))
             }
             T::Word(w) if w.eq_ignore_ascii_case("NULL") => {
                 self.bump();
@@ -458,7 +464,7 @@ impl P<'_> {
                 }
                 let end = self.t[self.i].2;
                 self.expect_kw("END")?;
-                Ok(Expr { kind: ExprKind::Call("case".into(), args), start: s, end })
+                Ok(Expr::new(ExprKind::Call("case".into(), args), s, end))
             }
             T::Word(w) if (w.eq_ignore_ascii_case("CAST") || w.eq_ignore_ascii_case("CONVERT")) && matches!(self.t[self.i + 1].0, T::Op("(")) => {
                 self.bump();
@@ -472,7 +478,7 @@ impl P<'_> {
                 if !self.eat_op(")") {
                     return Err(self.err("')'"));
                 }
-                Ok(Expr { kind: ExprKind::Cast(Box::new(x), sql_type(&ty)), start: s, end })
+                Ok(Expr::new(ExprKind::Cast(Box::new(x), sql_type(&ty)), s, end))
             }
             T::Word(_) | T::Quoted(_) => {
                 if matches!(t, T::Word(_)) && matches!(self.t[self.i + 1].0, T::Op("(")) {
@@ -498,19 +504,19 @@ impl P<'_> {
                     }
                     // Date part functions become DATE_EXTRACT.
                     if let Some(part) = date_part(&fname) {
-                        let mut a = vec![Expr { kind: ExprKind::Lit(V::Str(part.into())), start: s, end }];
+                        let mut a = vec![Expr::new(ExprKind::Lit(V::Str(part.into())), s, end)];
                         a.extend(args);
                         // SQL's datetime field functions return integers.
-                        let mut inner = Expr { kind: ExprKind::Call("date_extract".into(), a), start: s, end };
+                        let mut inner = Expr::new(ExprKind::Call("date_extract".into(), a), s, end);
                         if part == "day_of_week" {
                             // SQL counts from Sunday (1): `ISO % 7 + 1`.
-                            let lit = |v: i32| Box::new(Expr { kind: ExprKind::Lit(V::Int(v)), start: s, end });
-                            let m = Expr { kind: ExprKind::Bin(BinOp::Mod, Box::new(inner), lit(7)), start: s, end };
-                            inner = Expr { kind: ExprKind::Bin(BinOp::Add, Box::new(m), lit(1)), start: s, end };
+                            let lit = |v: i32| Box::new(Expr::new(ExprKind::Lit(V::Int(v)), s, end));
+                            let m = Expr::new(ExprKind::Bin(BinOp::Mod, Box::new(inner), lit(7)), s, end);
+                            inner = Expr::new(ExprKind::Bin(BinOp::Add, Box::new(m), lit(1)), s, end);
                         }
-                        return Ok(Expr { kind: ExprKind::Call("to_integer".into(), vec![inner]), start: s, end });
+                        return Ok(Expr::new(ExprKind::Call("to_integer".into(), vec![inner]), s, end));
                     }
-                    return Ok(Expr { kind: ExprKind::Call(fname, args), start: s, end });
+                    return Ok(Expr::new(ExprKind::Call(fname, args), s, end));
                 }
                 if let T::Word(w) = &t
                     && RESERVED.iter().any(|r| w.eq_ignore_ascii_case(r))
@@ -519,7 +525,7 @@ impl P<'_> {
                 }
                 let name = self.ident()?;
                 let end = self.t[self.i - 1].2;
-                Ok(Expr { kind: ExprKind::Col(name), start: s, end })
+                Ok(Expr::new(ExprKind::Col(name), s, end))
             }
             _ => Err(self.err("{'(', 'CASE', 'CAST', 'NULL', 'TRUE', 'FALSE', STRING, INTEGER_VALUE, DECIMAL_VALUE, IDENTIFIER}")),
         }
@@ -528,7 +534,7 @@ impl P<'_> {
 
 fn bin(op: BinOp, l: Expr, r: Expr) -> Expr {
     let (s, e) = (l.start, r.end);
-    Expr { kind: ExprKind::Bin(op, Box::new(l), Box::new(r)), start: s, end: e }
+    Expr::new(ExprKind::Bin(op, Box::new(l), Box::new(r)), s, e)
 }
 
 /// `SHOW FUNCTIONS`: Elasticsearch's SQL function registry, in its order.
@@ -606,10 +612,10 @@ fn date_part(f: &str) -> Option<&'static str> {
 
 fn contains_agg(e: &Expr) -> bool {
     match &e.kind {
-        ExprKind::Call(n, args) => super::esql::value::AGGS.contains(&n.as_str()) || args.iter().any(contains_agg),
-        ExprKind::Bin(_, a, b) => contains_agg(a) || contains_agg(b),
-        ExprKind::Neg(x) | ExprKind::Not(x) | ExprKind::IsNull(x, _) | ExprKind::Cast(x, _) | ExprKind::Like(x, ..) => contains_agg(x),
-        ExprKind::In(x, l, _) => contains_agg(x) || l.iter().any(contains_agg),
+        ExprKind::Call(n, args) => super::esql::value::AGGS.contains(&n.as_str()) || args.iter().any(|x| crate::stack::maybe_grow(|| contains_agg(x))),
+        ExprKind::Bin(_, a, b) => crate::stack::maybe_grow(|| contains_agg(a)) || crate::stack::maybe_grow(|| contains_agg(b)),
+        ExprKind::Neg(x) | ExprKind::Not(x) | ExprKind::IsNull(x, _) | ExprKind::Cast(x, _) | ExprKind::Like(x, ..) => crate::stack::maybe_grow(|| contains_agg(x)),
+        ExprKind::In(x, l, _) => crate::stack::maybe_grow(|| contains_agg(x)) || l.iter().any(|x| crate::stack::maybe_grow(|| contains_agg(x))),
         _ => false,
     }
 }
@@ -674,7 +680,8 @@ fn sql_like(pattern: &str, text: &str) -> bool {
 
 fn parse_with(src: &str, params: &[V]) -> EsResult<Stmt> {
     let t = lex(src)?;
-    let mut p = P { src, t, i: 0, params, next_param: 0, depth: 0, folds: 0 };
+    prescan(src, &t)?;
+    let mut p = P { src, t, i: 0, params, next_param: 0 };
     if p.eat_kw("SHOW") {
         if p.eat_kw("TABLES") {
             let like = if p.eat_kw("LIKE") {
@@ -749,7 +756,7 @@ fn parse_with(src: &str, params: &[V]) -> EsResult<Stmt> {
         cmds.push(Cmd::From { sources: vec![t.clone()], metadata: Vec::new(), at });
         t
     } else {
-        cmds.push(Cmd::Row(vec![Named { name: "__row".into(), expr: Expr { kind: ExprKind::Lit(V::Null), start: 0, end: 0 } }]));
+        cmds.push(Cmd::Row(vec![Named { name: "__row".into(), expr: Expr::new(ExprKind::Lit(V::Null), 0, 0) }]));
         String::new()
     };
     if p.eat_kw("WHERE") {
@@ -893,12 +900,12 @@ fn collect_aggs(src: &str, e: &Expr, aggs: &mut Vec<Named>, hidden: &mut Vec<Str
             }
             let _ = args;
         }
-        ExprKind::Call(_, args) => args.iter().for_each(|a| collect_aggs(src, a, aggs, hidden)),
+        ExprKind::Call(_, args) => args.iter().for_each(|a| crate::stack::maybe_grow(|| collect_aggs(src, a, aggs, hidden))),
         ExprKind::Bin(_, a, b) => {
-            collect_aggs(src, a, aggs, hidden);
-            collect_aggs(src, b, aggs, hidden);
+            crate::stack::maybe_grow(|| collect_aggs(src, a, aggs, hidden));
+            crate::stack::maybe_grow(|| collect_aggs(src, b, aggs, hidden));
         }
-        ExprKind::Neg(x) | ExprKind::Not(x) | ExprKind::IsNull(x, _) | ExprKind::Cast(x, _) => collect_aggs(src, x, aggs, hidden),
+        ExprKind::Neg(x) | ExprKind::Not(x) | ExprKind::IsNull(x, _) | ExprKind::Cast(x, _) => crate::stack::maybe_grow(|| collect_aggs(src, x, aggs, hidden)),
         _ => {}
     }
 }
@@ -908,13 +915,13 @@ fn rewrite_aggs(src: &str, e: Expr) -> Expr {
     let (s, en) = (e.start, e.end);
     let kind = match e.kind {
         ExprKind::Call(n, _) if super::esql::value::AGGS.contains(&n.as_str()) => ExprKind::Col(src[s..en].to_string()),
-        ExprKind::Call(n, args) => ExprKind::Call(n, args.into_iter().map(|a| rewrite_aggs(src, a)).collect()),
-        ExprKind::Bin(op, a, b) => ExprKind::Bin(op, Box::new(rewrite_aggs(src, *a)), Box::new(rewrite_aggs(src, *b))),
-        ExprKind::Not(x) => ExprKind::Not(Box::new(rewrite_aggs(src, *x))),
-        ExprKind::Neg(x) => ExprKind::Neg(Box::new(rewrite_aggs(src, *x))),
+        ExprKind::Call(n, args) => ExprKind::Call(n, args.into_iter().map(|a| crate::stack::maybe_grow(|| rewrite_aggs(src, a))).collect()),
+        ExprKind::Bin(op, a, b) => ExprKind::Bin(op, Box::new(crate::stack::maybe_grow(|| rewrite_aggs(src, *a))), Box::new(crate::stack::maybe_grow(|| rewrite_aggs(src, *b)))),
+        ExprKind::Not(x) => ExprKind::Not(Box::new(crate::stack::maybe_grow(|| rewrite_aggs(src, *x)))),
+        ExprKind::Neg(x) => ExprKind::Neg(Box::new(crate::stack::maybe_grow(|| rewrite_aggs(src, *x)))),
         other => other,
     };
-    Expr { kind, start: s, end: en }
+    Expr::new(kind, s, en)
 }
 
 /// Field types of a table (`field_caps`), to print SQL's type names and hide multi-fields.
@@ -930,12 +937,12 @@ async fn check_doc_values(ctx: &Ctx<'_>, table: &str, q: &Query) -> EsResult<()>
     fn uncounted(e: &Expr, out: &mut HashSet<String>) {
         match &e.kind {
             ExprKind::Call(f, _) if f.eq_ignore_ascii_case("count") => {}
-            ExprKind::Call(_, args) => args.iter().for_each(|a| uncounted(a, out)),
+            ExprKind::Call(_, args) => args.iter().for_each(|a| crate::stack::maybe_grow(|| uncounted(a, out))),
             ExprKind::Bin(_, a, b) => {
-                uncounted(a, out);
-                uncounted(b, out);
+                crate::stack::maybe_grow(|| uncounted(a, out));
+                crate::stack::maybe_grow(|| uncounted(b, out));
             }
-            ExprKind::Neg(x) | ExprKind::Not(x) | ExprKind::Cast(x, _) => uncounted(x, out),
+            ExprKind::Neg(x) | ExprKind::Not(x) | ExprKind::Cast(x, _) => crate::stack::maybe_grow(|| uncounted(x, out)),
             _ => exec::refs(e, out),
         }
     }
@@ -1416,9 +1423,9 @@ pub async fn translate(ctx: &Ctx<'_>) -> EsResult<Reply> {
 fn translate_expr(e: &Expr, types: &std::collections::HashMap<String, String>) -> Option<Value> {
     let lit = |x: &Expr| if let ExprKind::Lit(v) = &x.kind { Some(v.to_json(v.type_of())) } else { None };
     match &e.kind {
-        ExprKind::Bin(BinOp::And, a, b) => Some(obj! { "bool" => obj! { "must" => crate::arr![translate_expr(a, types)?, translate_expr(b, types)?], "boost" => 1.0 } }),
-        ExprKind::Bin(BinOp::Or, a, b) => Some(obj! { "bool" => obj! { "should" => crate::arr![translate_expr(a, types)?, translate_expr(b, types)?], "boost" => 1.0 } }),
-        ExprKind::Not(x) => Some(obj! { "bool" => obj! { "must_not" => crate::arr![translate_expr(x, types)?], "boost" => 1.0 } }),
+        ExprKind::Bin(BinOp::And, a, b) => Some(obj! { "bool" => obj! { "must" => crate::arr![crate::stack::maybe_grow(|| translate_expr(a, types))?, crate::stack::maybe_grow(|| translate_expr(b, types))?], "boost" => 1.0 } }),
+        ExprKind::Bin(BinOp::Or, a, b) => Some(obj! { "bool" => obj! { "should" => crate::arr![crate::stack::maybe_grow(|| translate_expr(a, types))?, crate::stack::maybe_grow(|| translate_expr(b, types))?], "boost" => 1.0 } }),
+        ExprKind::Not(x) => Some(obj! { "bool" => obj! { "must_not" => crate::arr![crate::stack::maybe_grow(|| translate_expr(x, types))?], "boost" => 1.0 } }),
         ExprKind::Bin(op, a, b) => {
             let ExprKind::Col(f) = &a.kind else { return None };
             let v = lit(b)?;

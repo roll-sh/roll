@@ -97,8 +97,9 @@ pub fn normalize(v: &Value, previous: Option<&Value>) -> EsResult<Map> {
         }
         if pass == REDACTED {
             // The stored password goes only where it went: a template sent elsewhere needs it
-            // given again.
-            let same_place = |p: &&Value| ["scheme", "host", "port"].iter().all(|k| p.get(k) == out.get(*k));
+            // given again, and so does one whose host is a template (it renders anywhere).
+            let templated = out.get("host").is_some_and(|h| h.to_es_string().contains("{{"));
+            let same_place = |p: &&Value| !templated && ["scheme", "host", "port"].iter().all(|k| p.get(k) == out.get(*k));
             match previous.filter(same_place).and_then(|p| p.pointer(&["auth", "basic", "password"])).map(Value::to_es_string) {
                 Some(old) => pass = old,
                 None => return Err(parse_err("found redacted password in field [password]")),
@@ -424,6 +425,11 @@ mod tests {
         for moved in ["http://attacker.example/q", "http://h.example:8080/q", "https://h.example/q"] {
             assert_eq!(normalize(&again(moved), Some(&Value::Obj(t.clone()))).unwrap_err().reason(), "found redacted password in field [password]", "{moved}");
         }
+        // A templated host renders wherever the payload says, even unchanged.
+        let tpl = |password: &str| obj! { "host" => "{{ctx.metadata.h}}.example", "port" => 80, "auth" => obj! { "basic" => obj! { "username" => "u", "password" => password } } };
+        let stored = normalize(&tpl("s"), None).unwrap();
+        let e = normalize(&tpl(REDACTED), Some(&Value::Obj(stored)));
+        assert_eq!(e.unwrap_err().reason(), "found redacted password in field [password]");
         let r = Request {
             scheme: "http".into(),
             host: "h".into(),
