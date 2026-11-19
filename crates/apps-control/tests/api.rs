@@ -2203,6 +2203,61 @@ async fn a_worker_scales_on_its_own_gauge() {
     assert_eq!((s["backlog"].as_u64(), s["wanted"].as_u64()), (Some(35), Some(4)), "{s}");
 }
 
+/// A password for an environment (Vercel's and Netlify's password protection): roll's page asks
+/// for it, the right one sets a session cookie (taken out of what the app sees), a wrong one asks
+/// again, each client gets ten tries, and a new password ends the old sessions. Never returned.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_password_lets_visitors_in() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "web", json!({"port": 80, "min_instances": 1})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    assert_eq!(call(&w.api, "PUT", &base, Some(json!({"access": {"password": "short"}}))).await.0, StatusCode::BAD_REQUEST);
+    let (st, env) = call(&w.api, "PUT", &base, Some(json!({"access": {"password": "correct horse"}}))).await;
+    assert_eq!((st, env["private"].as_bool(), env["password"].as_bool()), (StatusCode::OK, Some(true), Some(true)), "{env}");
+    assert!(!env.to_string().contains("argon2"), "never returned: {env}");
+    let h = host(&env["url"]);
+    let send = |method: &'static str, path: &'static str, cookie: Option<String>, body: Option<String>, ip: &'static str| {
+        let mut r = Request::builder().method(method).uri(path).header("host", h.clone());
+        if let Some(c) = cookie {
+            r = r.header("cookie", c);
+        }
+        if body.is_some() {
+            r = r.header("content-type", "application/x-www-form-urlencoded");
+        }
+        let mut req = r.body(body.map(Body::from).unwrap_or_else(Body::empty)).unwrap();
+        req.extensions_mut().insert(axum::extract::ConnectInfo(format!("{ip}:40000").parse::<std::net::SocketAddr>().unwrap()));
+        let public = w.public.clone();
+        async move {
+            let resp = public.oneshot(req).await.unwrap();
+            let st = resp.status();
+            let set = resp.headers().get("set-cookie").and_then(|v| v.to_str().ok()).map(|c| c.split(';').next().unwrap_or("").to_string());
+            let loc = resp.headers().get("location").and_then(|v| v.to_str().ok()).map(str::to_string);
+            (st, set, loc, String::from_utf8_lossy(&resp.into_body().collect().await.unwrap().to_bytes()).into_owned())
+        }
+    };
+    let (st, _, _, page) = send("GET", "/docs?x=1", None, None, "203.0.113.5").await;
+    assert!(st == StatusCode::UNAUTHORIZED && page.contains("type=password") && page.contains("value=\"/docs?x=1\""), "{st} {page}");
+    let (st, set, _, page) = send("POST", "/__roll/password", None, Some("password=nope&to=%2Fdocs".into()), "203.0.113.5").await;
+    assert!(st == StatusCode::UNAUTHORIZED && set.is_none() && page.contains("Wrong password"), "{st}");
+    let (st, set, loc, _) = send("POST", "/__roll/password", None, Some("password=correct+horse&to=%2Fdocs".into()), "203.0.113.5").await;
+    assert_eq!((st, loc.as_deref()), (StatusCode::SEE_OTHER, Some("/docs")));
+    let session = set.unwrap();
+    assert!(session.starts_with("roll_pass_production="), "{session}");
+    let (st, _, _, body) = send("GET", "/docs", Some(format!("{session}; theme=dark")), None, "203.0.113.5").await;
+    let app: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+    assert_eq!((st, app["cookie"].as_str()), (StatusCode::OK, Some("theme=dark")), "in, and the cookie is roll's: {body}");
+    // Ten tries a client: the eleventh wrong one waits.
+    for _ in 0..10 {
+        send("POST", "/__roll/password", None, Some("password=guess".into()), "198.51.100.7").await;
+    }
+    assert_eq!(send("POST", "/__roll/password", None, Some("password=correct+horse".into()), "198.51.100.7").await.0, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(send("POST", "/__roll/password", None, Some("password=correct+horse".into()), "203.0.113.5").await.0, StatusCode::SEE_OTHER, "another client isn't held");
+    // A new password: the old session ends.
+    call(&w.api, "PUT", &base, Some(json!({"access": {"password": "battery staple"}}))).await;
+    assert_eq!(send("GET", "/docs", Some(session), None, "203.0.113.5").await.0, StatusCode::UNAUTHORIZED);
+}
+
 /// An instance the kernel killed for its memory says so: in the log and in why it crashed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_instance_killed_for_its_memory_says_so() {

@@ -781,6 +781,7 @@ impl Store {
         db.add_column("domains", "verified_at", "INTEGER")?;
         db.add_column("env_access", "bypass_hash", "TEXT")?;
         db.add_column("env_access", "signed_in", "INTEGER NOT NULL DEFAULT 0")?;
+        db.add_column("env_access", "password_hash", "TEXT")?;
         // Bytes answered a minute (what egress is billed by), for Metrics.
         db.add_column("metrics", "egress_bytes", "INTEGER NOT NULL DEFAULT 0")?;
         // Requests past every instance's concurrency at max_instances a minute (saturation).
@@ -2268,10 +2269,10 @@ impl Store {
     pub fn access(&self, service: &str, env: &str) -> Result<Option<Access>> {
         Ok(self
             .db
-            .query_row("SELECT token_hash, bypass_hash, signed_in FROM env_access WHERE service = ? AND env = ?", params![service, env], |r| {
+            .query_row("SELECT token_hash, bypass_hash, signed_in, password_hash FROM env_access WHERE service = ? AND env = ?", params![service, env], |r| {
                 // No token: an empty one (the column was made required), which no digest matches.
                 let token: String = r.get(0)?;
-                Ok(Access { token_hash: Some(token).filter(|t| !t.is_empty()), bypass_hash: r.get(1)?, signed_in: r.get::<_, i64>(2)? != 0 })
+                Ok(Access { token_hash: Some(token).filter(|t| !t.is_empty()), bypass_hash: r.get(1)?, signed_in: r.get::<_, i64>(2)? != 0, password_hash: r.get(3)? })
             })
             .optional()?)
     }
@@ -2279,8 +2280,8 @@ impl Store {
     pub fn set_access(&self, service: &str, env: &str, access: Option<&Access>) -> Result<()> {
         match access {
             Some(a) => self.db.execute(
-                "INSERT INTO env_access (service, env, token_hash, bypass_hash, signed_in) VALUES (?, ?, ?, ?, ?) ON CONFLICT (service, env) DO UPDATE SET token_hash = excluded.token_hash, bypass_hash = excluded.bypass_hash, signed_in = excluded.signed_in",
-                params![service, env, a.token_hash.as_deref().unwrap_or(""), a.bypass_hash, a.signed_in as i64],
+                "INSERT INTO env_access (service, env, token_hash, bypass_hash, signed_in, password_hash) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (service, env) DO UPDATE SET token_hash = excluded.token_hash, bypass_hash = excluded.bypass_hash, signed_in = excluded.signed_in, password_hash = excluded.password_hash",
+                params![service, env, a.token_hash.as_deref().unwrap_or(""), a.bypass_hash, a.signed_in as i64, a.password_hash],
             )?,
             None => self.db.execute("DELETE FROM env_access WHERE service = ? AND env = ?", params![service, env])?,
         };
