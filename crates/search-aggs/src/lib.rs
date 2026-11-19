@@ -58,6 +58,7 @@ pub mod sort;
 pub mod util;
 pub mod values;
 pub mod version_string;
+pub mod wire;
 pub mod xparser;
 
 pub use collect::{AggCollector, ShardOptions};

@@ -199,20 +199,74 @@ Elasticsearch-flavor.
   (a revoked key, an index outside the key's access), is skipped with its failure in `_clusters`
   when `skip_unavailable` (the default) and fails the search otherwise.
 - **What reaches remotes**: `_search` and `_msearch` (merged as `ccs_minimize_roundtrips` does:
-  hits by score or sort values, totals, shards and failures, a `_clusters` section; aggregations
-  merged by type: bucket aggregations by key with their sub-aggregations, `min`, `max`, `sum`,
-  `value_count`, `stats`, held to `search.max_buckets`; others refused with a 400 naming them;
-  remotes' answers are held on the request circuit breaker while they merge), `_field_caps` (each remote index's
-  capabilities merged as local ones are), `_resolve/index`, `_resolve/cluster` and `_remote/info`.
-  An expression is authorized on the remotes only when every remote its alias pattern matches
-  is a link; `*:index` over a link and a loopback remote is authorized locally, whole.
-  Left: `scroll` and point in time across clusters, ES|QL `FROM <alias>:<index>`, suggesters and
-  `avg`/`cardinality`/percentile-style aggregations over several clusters, OpenSearch-flavor
-  clusters (their remotes still reach only the node itself).
+  hits by score or sort values, totals, shards and failures, a `_clusters` section; remotes'
+  answers are held on the request circuit breaker while they merge), `_field_caps` (each remote
+  index's capabilities merged as local ones are), `_resolve/index`, `_resolve/cluster` and
+  `_remote/info`. An expression is authorized on the remotes only when every remote its alias
+  pattern matches is a link; `*:index` over a link and a loopback remote is authorized locally,
+  whole.
+- **Aggregations**: every aggregation, pipelines included, answers what one cluster holding all
+  the data would. Each cluster reduces its part partially and the local cluster does the final
+  reduce from their internal state (`search-aggs` `wire`): HyperLogLog sketches, t-digests and
+  HDR histograms, sums with their counts, top hits with their sort keys (fetched on their own
+  cluster), held to `search.max_buckets` by the final reduce as one cluster's are. The state is
+  held on the request breaker before it's decoded, its nesting is bounded
+  (`search_aggs::wire::MAX_NESTING`: a document's 1000 JSON levels under 100 aggregation
+  levels), and it's encoded and decoded on a thread with a stack of its own. Only a
+  link's own request may ask for that state (`x-roll-partial-aggs`, honored
+  for a cross-cluster key's request only); a client asking gets the public answer. A
+  `geo_centroid`'s sums add up in another order, so its last digit may differ from one
+  cluster's, as Elasticsearch's does.
+- **Scroll and point in time** (`search-es` `remote/contexts.rs`): one opaque id holds each
+  cluster's own scroll or point in time, kept on the local cluster with the caller that opened
+  it. It answers only there and only to that caller (anyone else gets
+  `search_context_missing_exception`, 404), and the parts' ids never leave roll. Each part keeps
+  its own keep-alive, sent along with every page. A scroll page is the `size` best hits left
+  over all clusters (the coordinator keeps what a part sent ahead and asks it for more only when
+  it runs short), so pages go through the documents exactly as one cluster's scroll does.
+  `_search/scroll`, `DELETE _search/scroll`, `DELETE _pit` and point-in-time searches fan out
+  to the parts. The hits a part sent ahead are held on the request breaker for as long as the
+  scroll lives. A part with nothing to fetch is kept alive as long as the scroll through the
+  link's keep-alive call, which fetches nothing; a point in time is extended only by a search
+  that sends `keep_alive`. Pages of one scroll run one at a time, and a clear or close waits for
+  the page in flight. Every search on a point in time is authorized for its caller against the
+  point in time's local indices (a role that loses one loses it there too), and one naming
+  indices in its path is refused (400) before anything reads them. A scroll or point in time of
+  one cluster is its opener's alone too. `search_after` with a point in time pages exactly: each hit's `_shard_doc`
+  tiebreaker carries its cluster above its shard, and every cluster continues from the last
+  hit's place in that order.
+- **OpenSearch-flavor clusters**: `cluster.remote.*` and `_remote/info` answer as OpenSearch
+  3.9 does (`skip_unavailable` defaults to `false`, a seed or proxy address must be
+  `host:port`, no `cluster_credentials`), and a remote naming a roll cluster goes through the
+  same owner check. Linking them is left: OpenSearch has no `cross_cluster` API keys, so links
+  between OpenSearch-flavor clusters need a credential model of their own (probably an
+  internal user on the remote with a search-only role, issued and sealed as links' keys are).
+  Until then a search naming `alias:index` on them is refused (400), loopback remotes included,
+  where OpenSearch searches a loopback.
+- **Left**: ES|QL `FROM <alias>:<index>`; suggesters over several clusters.
 
-`crates/search-control/tests/control.rs` `cross_cluster_search_between_a_persons_own_clusters` and
-`a_sleeping_remote_wakes_and_a_gone_one_is_skipped`, and `tests/cluster.rs`
-`a_remote_on_another_node_is_searched_through_the_signed_forward` cover it.
+`crates/search-control/tests/control.rs` `cross_cluster_search_between_a_persons_own_clusters`,
+`a_sleeping_remote_wakes_and_a_gone_one_is_skipped`, `aggregations_across_clusters_equal_one_clusters`
+and `scroll_and_point_in_time_across_clusters`, and `tests/cluster.rs`
+`a_remote_on_another_node_is_searched_through_the_signed_forward` and
+`a_scroll_over_clusters_on_two_nodes_pages_through_either_front` cover it. The dashboard lists a
+cluster's remotes in its Settings (alias, cluster, `skip_unavailable`, state), and links or
+unlinks one of the person's own clusters (`components/search/remotes.tsx`).
+
+ES|QL `FROM <alias>:<index>` isn't across clusters yet, because roll's ES|QL can't push a part to
+a remote cheaply. The closest it has is `FROM` with subqueries (`Cmd::Union`), which runs whole
+queries on this cluster. Elasticsearch sends each remote the plan up to its first pipeline
+breaker. roll would need:
+
+1. a union branch that runs on a remote over the link, with the internal call switching off the
+   implicit `LIMIT 1000`;
+2. typed tables between clusters (`ip`, `version`, `unsigned_long`, geo and date-nanos columns
+   kept);
+3. `STATS` split into partial and final phases, so that a breaker's input doesn't cross
+   clusters row by row;
+4. `METADATA _index` named `alias:index`;
+5. `ENRICH` and `LOOKUP JOIN` with Elasticsearch's remote modes;
+6. the response's `_clusters` (`include_ccs_metadata`).
 
 **Terraform** (Elastic Cloud's `ec_deployment` and `elasticstack` providers, AWS's
 `aws_opensearch_domain`). roll's provider (`sdk/terraform-provider-roll`, its README has the
