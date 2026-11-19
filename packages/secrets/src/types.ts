@@ -88,9 +88,10 @@ export type Secret = {
   decoy?: Decoy;
 };
 /** A decoy key's mark: what it is, and its uses (each refused). */
-export type Decoy = { kind: "rlt"; created_at: number; created_by: string; uses: number; used_at: number | null; used_ip: string | null };
-/** `POST …/environments/{env}/decoys`: a new key whose value is a decoy credential. */
-export type NewDecoy = { key: string; kind: "rlt"; path?: string };
+export type Decoy = { kind: "rlt" | "postgres"; created_at: number; created_by: string; uses: number; used_at: number | null; used_ip: string | null };
+/** `POST …/environments/{env}/decoys`: a new key whose value is a decoy credential (`postgres`: a
+ * connection string for a role of `resource`, a roll Postgres database on the project's canvas). */
+export type NewDecoy = { key: string; kind: "rlt"; path?: string } | { key: string; kind: "postgres"; resource: string; path?: string };
 /** `expires_at`: null clears it; absent keeps it. */
 export type SetSecret = { value?: string; comment?: string; tags?: string[]; type?: SecretType; link?: Link | null; message?: string; expires_at?: number | null; if_version?: number };
 /** `path`: another folder for this one operation (default: the batch's). */

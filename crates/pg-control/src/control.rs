@@ -5,10 +5,11 @@ use crate::config::Config;
 use crate::history::Target;
 use crate::ids::{new_id, new_password, now};
 use crate::store::{Branch, Endpoint, EndpointState, LocalState, Project, READ_ONLY, READ_WRITE, Store};
+use pg_proxy::decoy::Decoy;
 use pg_proxy::{RouteError, Router};
 use pg_storage::Objects;
 use std::collections::{HashMap, HashSet};
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use thiserror::Error;
@@ -41,7 +42,37 @@ pub struct Control {
     pub(crate) receivers: Mutex<HashMap<String, JoinHandle<()>>>,
     /// Branches with a base backup in progress.
     pub(crate) backups: Mutex<HashSet<String>>,
+    /// How long each endpoint's compute took to start last from local data (a decoy's refusal
+    /// waits as long).
+    starts: Mutex<HashMap<String, Duration>>,
+    /// Who hears of a decoy role's logins.
+    decoy_listeners: Mutex<Vec<Arc<DecoyListener>>>,
 }
+
+type DecoyListener = dyn Fn(&DecoyLogin) + Send + Sync;
+
+/// A decoy role's login (roll secrets' Postgres decoys), refused by the proxy. Names and the
+/// address, never what the client sent.
+#[derive(Clone, Debug)]
+pub struct DecoyLogin {
+    pub project_id: String,
+    pub endpoint_id: String,
+    pub role: String,
+    pub peer: Option<IpAddr>,
+    /// Unix ms.
+    pub at: i64,
+}
+
+/// A decoy role as made.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct DecoyRole {
+    pub role: String,
+    /// The project's root branch's primary, where the role was made.
+    pub endpoint_id: String,
+}
+
+/// A compute's start when none was measured on this node yet (a decoy's refusal waits as long).
+const START_DEFAULT: Duration = Duration::from_millis(1500);
 
 pub const SUPPORTED_VERSIONS: [u32; 3] = [16, 17, 18];
 
@@ -75,6 +106,8 @@ impl Control {
             locks: Mutex::default(),
             receivers: Mutex::default(),
             backups: Mutex::default(),
+            starts: Mutex::default(),
+            decoy_listeners: Mutex::default(),
         }))
     }
 
@@ -182,6 +215,11 @@ impl Control {
         let project = self.project_or_404(&ep.project_id)?;
         let branch = self.store.branch(&ep.branch_id)?.ok_or_else(|| ControlError::NotFound(ep.branch_id.clone()))?;
         let started = std::time::Instant::now();
+        // A start from local data, as most are: not initdb's, a restore's or a new replica's.
+        let ordinary = match ep.is_primary() {
+            true => has_cluster(&self.branch_path(&branch), project.pg_version) && !branch.pending_recovery,
+            false => has_cluster(&self.replica_path(&ep), project.pg_version),
+        };
         self.store.set_endpoint_state(endpoint_id, EndpointState::Starting, None)?;
 
         let result = async {
@@ -240,6 +278,9 @@ impl Control {
                 self.store.set_endpoint_cu(endpoint_id, cu)?;
                 self.store.open_segment(endpoint_id, &ep.project_id, cu)?;
                 self.store.touch_endpoint(endpoint_id)?;
+                if ordinary {
+                    self.starts.lock().unwrap().insert(endpoint_id.to_string(), started.elapsed());
+                }
                 info!(endpoint = endpoint_id, ms = started.elapsed().as_millis() as u64, "compute started");
                 Ok(SocketAddr::from((Ipv4Addr::LOCALHOST, port)))
             }
@@ -599,6 +640,68 @@ impl Control {
         Ok(results)
     }
 
+    // ── decoy roles ──
+
+    /// Make `role` a decoy of the project (roll secrets' Postgres decoys): from here on the proxy
+    /// refuses its logins on every endpoint of the project, as Postgres refuses a wrong password,
+    /// without waking a compute, and tells [`Control::on_decoy_login`]'s listeners. It's also
+    /// made `NOLOGIN` (with no password) on the root branch, for any way in around the proxy.
+    /// The name is the caller's, so it looks like the roles it makes; one that exists is refused.
+    pub async fn create_decoy_role(self: &Arc<Self>, project_id: &str, role: &str) -> Result<DecoyRole> {
+        self.project_or_404(project_id)?;
+        if !decoy_name_ok(role) {
+            return Err(ControlError::Invalid("a decoy role's name is 1-62 of [a-z0-9_], not starting with a digit or pg_".into()));
+        }
+        if self.store.is_decoy_role(project_id, role)? {
+            return Err(ControlError::Conflict(format!("{role} is a decoy already")));
+        }
+        let ep = self.root_endpoint(project_id)?;
+        // First in Postgres: this fails for a role that exists, which must never become a decoy.
+        self.query(&ep.id, &format!("CREATE ROLE {role} NOLOGIN"), false).await?;
+        let mut salt = [0u8; 16];
+        getrandom::fill(&mut salt).map_err(|e| anyhow::anyhow!("os randomness: {e}"))?;
+        use base64::Engine as _;
+        if let Err(e) = self.store.insert_decoy_role(project_id, role, &base64::engine::general_purpose::STANDARD.encode(salt)) {
+            let _ = self.query(&ep.id, &format!("DROP ROLE IF EXISTS {role}"), false).await;
+            return Err(e.into());
+        }
+        Ok(DecoyRole { role: role.to_string(), endpoint_id: ep.id })
+    }
+
+    /// Drop a decoy role: from Postgres (with anything granted to it), then from the proxy's
+    /// table. Done already (or never a decoy) is fine.
+    pub async fn drop_decoy_role(self: &Arc<Self>, project_id: &str, role: &str) -> Result<()> {
+        self.project_or_404(project_id)?;
+        if !self.store.is_decoy_role(project_id, role)? {
+            return Ok(());
+        }
+        // Only names `create_decoy_role` took are in the table.
+        let ep = self.root_endpoint(project_id)?;
+        let sql = format!("DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{role}') THEN EXECUTE 'DROP OWNED BY {role}'; EXECUTE 'DROP ROLE {role}'; END IF; END $$;");
+        self.query(&ep.id, &sql, false).await?;
+        self.store.delete_decoy_role(project_id, role)?;
+        Ok(())
+    }
+
+    /// Hear of every decoy role's login this node's proxy refuses (called on the login's task:
+    /// hand anything slow off).
+    pub fn on_decoy_login(&self, f: impl Fn(&DecoyLogin) + Send + Sync + 'static) {
+        self.decoy_listeners.lock().unwrap().push(Arc::new(f));
+    }
+
+    fn tell_decoy_login(&self, login: &DecoyLogin) {
+        let listeners = self.decoy_listeners.lock().unwrap().clone();
+        for f in listeners {
+            f(login);
+        }
+    }
+
+    /// The primary endpoint of the project's root branch.
+    fn root_endpoint(&self, project_id: &str) -> Result<Endpoint> {
+        let root = self.store.branches(project_id)?.into_iter().find(|b| b.parent_id.is_none()).ok_or_else(|| ControlError::NotFound("root branch".into()))?;
+        self.store.endpoint_for_branch(&root.id)?.ok_or_else(|| ControlError::NotFound("primary endpoint".into()))
+    }
+
     pub(crate) fn connection_opened(&self, endpoint: &str) {
         *self.connections.lock().unwrap().entry(endpoint.to_string()).or_default() += 1;
         let _ = self.store.touch_endpoint(endpoint);
@@ -610,6 +713,14 @@ impl Control {
         }
         let _ = self.store.touch_endpoint(endpoint);
     }
+}
+
+/// A name `CREATE ROLE` takes unquoted, that Postgres won't cut (63 bytes) and doesn't reserve.
+fn decoy_name_ok(role: &str) -> bool {
+    (1..=62).contains(&role.len())
+        && role.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        && !role.as_bytes()[0].is_ascii_digit()
+        && !role.starts_with("pg_")
 }
 
 /// One query's messages: as the owner, or (`read_only`) as a role made for it and dropped after.
@@ -705,6 +816,21 @@ impl Router for ProxyRouter {
             Err(ControlError::NotFound(_)) => Err(RouteError::NotFound(format!("endpoint {endpoint} does not exist"))),
             Err(e) => Err(RouteError::Unavailable(format!("endpoint {endpoint} could not start: {e}"))),
         }
+    }
+
+    fn decoy(&self, endpoint: &str, user: &str, peer: Option<SocketAddr>) -> Option<Decoy> {
+        let found = match self.0.store.decoy_at(endpoint, user) {
+            Ok(found) => found?,
+            Err(e) => {
+                // Postgres refuses it anyway (`NOLOGIN`, no password): only the alert is lost.
+                warn!(endpoint, error = %e, "looking up a decoy role failed");
+                return None;
+            }
+        };
+        let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
+        self.0.tell_decoy_login(&DecoyLogin { project_id: found.project_id, endpoint_id: endpoint.to_string(), role: user.to_string(), peer: peer.map(|p| p.ip()), at });
+        let start = if found.running { Duration::ZERO } else { self.0.starts.lock().unwrap().get(endpoint).copied().unwrap_or(START_DEFAULT) };
+        Some(Decoy { salt: found.salt, pg_version: found.pg_version, start })
     }
 
     fn connection_opened(&self, endpoint: &str) {
