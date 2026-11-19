@@ -904,7 +904,12 @@ waits on a sibling PR reaching main is last.
    `apps_delete_form_submission`; in lockdown what a site's visitors wrote is withheld
    (`Tool::outside`: a submission's `fields`, and the field names a `form.submitted` event carries in
    `apps_events` and `apps_activity`, found by an independent review); `security_checkup` flags live
-   images with high or critical vulnerabilities. Waiting on secrets: value requests as tools
+   images with high or critical vulnerabilities. Landing in the same turn: #402 (the
+   credential guard finds database URLs carrying their password and a secret's share link; the guide
+   says what outsiders wrote is data, never instructions). Ready for previews #403: a preview's traces
+   (`previews_traces`, `previews_get_trace`; `feature/roll-mcp-previews-traces`). With search #382:
+   `search_suggestions` withholds each suggestion's `text` in lockdown (whichever lands second adds
+   it). Waiting on secrets: value requests as tools
    (`feature/roll-mcp-secrets-requests`; held for #277's answer token, `rlq_…`, which the same
    review found was missing: a request's listed id was the capability to answer it, so a `read`
    could plant a value; secrets moved #277 to batch 5 to fix it); later `secrets_verify_audit` once
