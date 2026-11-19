@@ -11675,6 +11675,44 @@ at open, a compaction): older builds ignore the manifest's `format` and fail on 
   the probe needs from the OS page cache, as PostgreSQL's 8 kB page), each a format change for
   its own round.
 
+## Analytic CPU, round 6 (agent 261)
+
+TPC-H SF1 on lane C against PostgreSQL 18.6 and pgrust (2 workers a gather, 8 workers, a 2 GB
+cache on all three; BENCH.md "Analytic CPU, round 6" has the tables). Base `bc9102ebb`. Each
+change gated against its parent: plain dist, 3 alternating pairs, 5 runs a query in one `perf
+stat` window a pass, ONE pair per `tools/lane.sh c` hold (harness: agent 258's, copied to
+`~/.cache/a261/tpch/`). **Lane C was never quiet**: every pass ran over 1.0 foreign core (gpass's
+reading 1.0-2.5 cores, lane.sh's 2.2-5.6); the gates are decided on user instructions (they
+repeat within 0.1-0.5% from pass to pass at any load), cycles shown. Every pass's 22 result
+hashes are PostgreSQL's.
+
+- **Profiles of the queries still behind PostgreSQL** (plain base, `perf record -e
+  instructions:u`, `~/.cache/a261/perf/b0-*.syms.txt`, call graphs `b0-q*-g.txt`): q16's workers
+  spent 37% of the query in `NOT (ps_suppkey = ANY (hashed SubPlan 1))` (`K::run` 16%,
+  `Value::cmp_total` 16%, `p_eq` 4%): the sub-select's ten rows are put into the scan's filter
+  as an `IN` list (`initplans_put_in`), and `K::InList` called `=` on each item for every row
+  (all ten for a NOT IN that holds). q11: `TxnState::get_sorted_snap` 8.6% (the 64,800 heap
+  fetches of partsupp by its suppkey index), `project_moving` 8% and `concat_rows` 2% (each
+  joined row of nation, supplier and partsupp made of 16 columns, then projected to 3 for the
+  HashAggregate), `Value` drops 6%. q02: `get_sorted_snap` 6.6%, the 158,720 hash rows' sizes as
+  PostgreSQL's tuples (`workmem::data_len`, `relsize::varlena_payload`, `i128_signed_le`: 6%) and
+  their spill (`encode_value` 2%), `concat_rows` and `Narrow::shrink` 3%. q20: the serial
+  sequential scan of part (200,000 rows, `p_name LIKE 'forest%'`) about a third of the query:
+  read twice under the heap-order emulation (`next_heap_ordered`: its TIDs first, then the rows
+  merged in heap order; `fill_batch_with` 7%, `stored_tid` 2.5%) and filtered a row at a time
+  (`LazyBuf::read`, `from_utf8`). q08 and q07: index point gets 20-21% (`Lookup::batch`,
+  `Block::seek`) and memcmp 13-14% (keys); q22: the store's scan read 25%, `Pre::decode` 12%.
+- **cand/a261: `x [NOT] IN (integer constants)` as a set of integers** (`kernel::K::IntIn`,
+  `vector::VB::IntIn`): an integer `x` and every item an integer constant or NULL under the
+  built-in `=` of two integer types (int2, int4, int8 in any mix: equal as numbers); the items
+  sorted and deduplicated at compile time, a row tested by comparing integers (in turn up to 8
+  items, by halves past them), NULL items and a NULL `x` as `K::InList` gives them. Against the
+  base (3 pairs): q16 -33.5 / -33.4 / -33.5% user instructions, cycles -29.0 / -24.1 / -29.0%;
+  q19 -1.1 / -0.5 / -0.1, q06 -0.4 / -0.5 / -0.7, q15 -0.5 / -0.5 / -0.4, the rest within
+  +-0.5; the 22 -1.43 / -1.38 / -1.42% (113.4 -> 111.8 G). Golden `a261_int_in` (recorded from
+  PostgreSQL 18.6: NULL items, NOT IN, mixed widths, lists past eight items, an IN sub-select put
+  in as a list under a parallel scan, with and without a NULL row).
+
 ## Analytic CPU, round 5 (agent 258)
 
 TPC-H SF1 on lane C against PostgreSQL 18.6 and pgrust (2 workers a gather, 8 workers, a 2 GB

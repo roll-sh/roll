@@ -285,6 +285,33 @@ The current checked measurements compare release engine builds and PostgreSQL 18
 the wire. Older rounds below are historical records, with their original methods and
 limits. Their results have not been reverified on the current source.
 
+## Analytic CPU, round 6 (2026-11-19, agent 261)
+
+HANDOFF "Analytic CPU, round 6" has what changed. Lane C as in round 5 (servers in containers on
+CPUs 14,15,32,33, `--memory 8g`; clients on 16,17,34,35), TPC-H SF1, a 2 GB cache and
+`max_parallel_workers_per_gather=2`, `max_parallel_workers=8` on all three. Harness: agent 258's
+copied to `~/.cache/a261/tpch/` (a pass: a fresh engine on the restored data directory, a
+warm-up of the 22, then per query 5 runs in one `perf stat -e instructions:u,cycles:u` window),
+each pair in its own `tools/lane.sh c` hold. Plain dist builds (`tools/dist.sh`) in a build
+worktree of their own: **b0** origin's `bc9102ebb`, **b1** b0 + cand/a261's change. The lane was
+never quiet (foreign cores per pass, gpass's reading, below; lane.sh's 2.2-5.6): gates are
+decided on user instructions.
+
+### The changes, gated (user instructions a run, % per pair against the parent; plain dist, 3 alternating pairs, 5 runs a query a pass; queries within +-0.5% left out)
+
+**cand/a261 (b1 against b0)**
+
+| query | instructions % per pair | cycles % per pair |
+|---|---|---|
+| q06 | -0.4 / -0.5 / -0.7 | -6.1 / -12.6 / +18.4 |
+| q15 | -0.5 / -0.5 / -0.4 | +0.9 / +2.8 / -3.6 |
+| q16 | -33.5 / -33.4 / -33.5 | -29.0 / -24.1 / -29.0 |
+| q19 | -1.1 / -0.5 / -0.1 | +15.0 / -1.8 / -5.7 |
+| all 22 | -1.43 / -1.38 / -1.42 (113.4 -> 111.8 G) | -2.96 / -3.91 / -4.03 |
+
+foreign cores per pass: b0 1.44 1.37 2.49; b1 1.35 1.03 2.07. Result hashes: PostgreSQL's in
+every pass.
+
 ## Analytic CPU, round 5 (2026-11-18/19, agent 258)
 
 HANDOFF "Analytic CPU, round 5" has what changed. Lane C (servers in containers on CPUs
