@@ -123,9 +123,22 @@ pub struct Reference {
 
 impl Reference {
     /// `Some` for a `roll://` value, an error for a malformed one, `None` for anything else.
+    ///
+    /// Exact: a value that would be a reference only once trimmed or lowercased (` roll://…`,
+    /// `ROLL://…`) is an error, never plain text and never a reference, so a product's own
+    /// "is this a reference?" check can't disagree with what's resolved.
     pub fn parse(text: &str) -> Result<Option<Reference>, Refusal> {
-        let Some(rest) = text.trim().strip_prefix("roll://") else { return Ok(None) };
         let bad = || Refusal::BadReference("a reference is roll://ENV/KEY, roll://ENV/folder/KEY or roll://PROJECT@ENV/KEY".into());
+        let Some(rest) = text.strip_prefix("roll://") else {
+            let t = text.trim_start();
+            if t.len() >= 7 && t.is_char_boundary(7) && t[..7].eq_ignore_ascii_case("roll://") {
+                return Err(Refusal::BadReference("a reference starts with roll:// exactly: no space before it, lowercase".into()));
+            }
+            return Ok(None);
+        };
+        if rest.trim_end().len() != rest.len() {
+            return Err(Refusal::BadReference("a reference has no space after it".into()));
+        }
         let (project, rest) = match rest.split_once('@') {
             Some((p, r)) if !p.is_empty() && !p.contains('/') => (Some(p.to_string()), r),
             Some(_) => return Err(bad()),
@@ -207,7 +220,7 @@ mod tests {
         assert_eq!(r("roll://shop@staging/payments/stripe/KEY").path, "/payments/stripe");
         assert_eq!(r("roll://shop@staging/KEY").project.as_deref(), Some("shop"));
         assert!(Reference::parse("not-a-reference").unwrap().is_none());
-        for bad in ["roll://production", "roll://prod/../KEY", "roll://@prod/KEY", "roll://prod//KEY"] {
+        for bad in ["roll://production", "roll://prod/../KEY", "roll://@prod/KEY", "roll://prod//KEY", " roll://prod/KEY", "\troll://prod/KEY", "ROLL://prod/KEY", "Roll://prod/KEY", "roll://prod/KEY "] {
             assert!(matches!(Reference::parse(bad), Err(Refusal::BadReference(_))), "{bad}");
         }
         assert_eq!(ResourceRef::new(Kind::Bucket, "photos").consumer(), "storage:bucket:photos");
