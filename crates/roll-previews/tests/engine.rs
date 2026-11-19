@@ -421,12 +421,19 @@ async fn a_previews_runtime_output_goes_to_the_projects_log_drains_masked() {
     *e.apps.drain_tx.lock() = None;
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     e.engine.pass().await.unwrap();
-    assert_eq!(e.apps.drain_since.lock().last().map(String::as_str), Some("2026-11-18T10:00:00.000000002Z"));
+    // From the earlier of the two streams' last lines: stdout's (stderr's own last is skipped as it comes again).
+    assert_eq!(e.apps.drain_since.lock().last().map(String::as_str), Some("2026-11-18T10:00:00.000000001Z"));
     say(true, "2026-11-18T10:00:00.000000002Z charging with sk_test_51Hx9").await;
     say(false, "2026-11-18T10:00:01.000000000Z ready").await;
     let all = sent(3).await;
     assert_eq!(all.len(), 3, "{all:?}");
     assert_eq!(all[2].3, "ready");
+    // stdout and stderr come through pipes of their own: a stderr line may come before an earlier
+    // stdout one, and both are sent.
+    say(true, "2026-11-18T10:00:03.000000000Z card declined").await;
+    say(false, "2026-11-18T10:00:02.000000000Z charging order 42").await;
+    let all = sent(5).await;
+    assert_eq!(all.iter().skip(3).map(|l| l.3.as_str()).collect::<Vec<_>>(), ["card declined", "charging order 42"], "{all:?}");
 }
 
 /// A shell in a preview's running service (Render's shell, `heroku run`): what's typed reaches its
@@ -466,6 +473,60 @@ async fn a_shell_in_a_previews_service_is_said_and_bounded() {
     }
     assert!(e.engine.shell_screen(&p.id, &sid).is_err(), "a closed shell is gone");
     e.engine.open_shell(&p.id, None, "ana", 80, 24).await.expect("its place is free again");
+}
+
+/// A preview's traces (the project's `traces: true`): its services get the OpenTelemetry SDK's
+/// variables, its intake keeps spans only with the preview's own token (anything else is a 404),
+/// and they're read back as traces, masked as its logs are.
+#[tokio::test]
+async fn a_previews_traces_are_kept_by_its_token_and_read_masked() {
+    use roll_previews::engine::traces::Span;
+    let e = env(json!({ "enabled": true, "traces": true }));
+    e.secrets.values.lock().push(("STRIPE_KEY".into(), "sk_test_51Hx9".into()));
+    e.code.open(change("chg_tr", 17));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_tr").unwrap().unwrap();
+    let web = e.engine.store.services(&p.id).unwrap().into_iter().next().unwrap().name;
+    // What a start of the service gets (the runtime reads it then, as its `EnvSource`).
+    let (_, vars) = roll_previews::ports::EnvSource::env(e.engine.as_ref(), &p.id, &web).await.unwrap();
+    let var = |k: &str| vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone()).unwrap_or_default();
+    let endpoint = var("OTEL_EXPORTER_OTLP_ENDPOINT");
+    assert!(endpoint.starts_with(&format!("http://127.0.0.1:7070/v1/previews/{}/otlp/", p.id)), "{endpoint}");
+    assert_eq!(var("OTEL_SERVICE_NAME"), web);
+    let token = endpoint.rsplit('/').next().unwrap().to_string();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as u64;
+    let span = |id: &str, parent: &str, name: &str, error: bool, attrs: Vec<(String, String)>| Span { trace: "a".repeat(32), span: id.into(), parent: parent.into(), name: name.into(), service: web.clone(), start: now - 30_000_000, end: now, error, attrs };
+    assert!(matches!(e.engine.keep_spans(&p.id, "not-the-token", vec![span("0000000000000001", "", "GET /", false, vec![])]), Err(roll_previews::Error::NotFound(_))));
+    let kept = e.engine.keep_spans(&p.id, &token, vec![span("0000000000000001", "", "GET /checkout?key=sk_test_51Hx9", false, vec![]), span("0000000000000002", "0000000000000001", "charge", true, vec![("stripe.key".into(), "sk_test_51Hx9".into())])]).unwrap();
+    assert_eq!(kept, 2);
+    let list = e.engine.traces(&p.id, 60).await.unwrap();
+    assert_eq!((list["traces"][0]["name"].as_str(), list["traces"][0]["spans"].as_u64(), list["traces"][0]["error"].as_bool()), (Some("GET /checkout?key=***"), Some(2), Some(true)), "{list}");
+    let one = e.engine.trace(&p.id, &"a".repeat(32)).await.unwrap();
+    assert_eq!(one["spans"][1]["attrs"][0][1].as_str(), Some("***"), "{one}");
+    assert!(!one.to_string().contains("sk_test_51Hx9"));
+    // A service on roll apps keeps its own (its pv- environment's, turned on by the deploy): on the
+    // same list, and one opens from it, masked the same way.
+    assert_eq!(e.apps.traces_asked.lock().get(&(p.id.clone(), web.clone())), Some(&true), "the deploy asks for the environment's traces");
+    let row = roll_previews::engine::traces::TraceRow { trace: "b".repeat(32), name: "POST /pay sk_test_51Hx9".into(), service: "api".into(), start_ms: now / 1_000_000 + 5, ms: 12, spans: 1, error: false };
+    *e.apps.app_traces.lock() = vec![(row, vec![span("0000000000000009", "", "POST /pay sk_test_51Hx9", false, vec![])])];
+    let list = e.engine.traces(&p.id, 60).await.unwrap();
+    assert_eq!(list["traces"].as_array().map(Vec::len), Some(2), "{list}");
+    assert_eq!(list["traces"][0]["name"].as_str(), Some("POST /pay ***"), "the newest first, masked");
+    let apps_one = e.engine.trace(&p.id, &"b".repeat(32)).await.unwrap();
+    assert_eq!(apps_one["spans"][0]["name"].as_str(), Some("POST /pay ***"));
+    // Each route's time from the traces (masked), with nothing of main's to compare yet.
+    let routes = e.engine.routes(&p.id, 60).await.unwrap();
+    assert!(routes["routes"].as_array().unwrap().iter().any(|r| r["name"] == "GET /checkout?key=***" && r["count"] == 1 && r["main_p50_ms"].is_null()), "{routes}");
+    // Turned off, what roll apps kept isn't the preview's to show.
+    let mut s = e.engine.store.settings(&e.project).unwrap();
+    s.traces = false;
+    e.engine.store.put_settings(&e.project, &s).unwrap();
+    assert_eq!(e.engine.traces(&p.id, 60).await.unwrap()["traces"].as_array().map(Vec::len), Some(1), "only the runtime's kept spans");
+    // A preview's spans are bounded by bytes (16 MiB), not only by count: big spans push the oldest out.
+    let big = |i: usize| Span { trace: format!("{i:032x}"), span: "0000000000000001".into(), parent: String::new(), name: "big".into(), service: web.clone(), start: now - 1_000_000, end: now, error: false, attrs: vec![("blob".into(), "x".repeat(1 << 20))] };
+    e.engine.keep_spans(&p.id, &token, (0..20).map(big).collect()).unwrap();
+    let n = e.engine.traces(&p.id, 60).await.unwrap()["traces"].as_array().map(Vec::len).unwrap();
+    assert!(n <= 16, "{n} traces of 1 MiB spans kept");
 }
 
 /// A port of a preview's service on a laptop (`roll preview forward`): bytes go both ways, port 0
@@ -548,7 +609,15 @@ async fn a_previews_logs_and_job_output_hide_its_secrets() {
     while followed.len() < 2 {
         followed.push(tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv()).await.unwrap().unwrap());
     }
-    assert_eq!(followed, ["listening on :3000", "charging with ***"]);
+    assert_eq!(followed, [(false, "listening on :3000".to_string()), (false, "charging with ***".to_string())], "a tail doesn't say which stream");
+    // Where the backend follows (Docker), each line says whether it came on stderr, masked too.
+    *e.apps.followed.lock() = Some(vec![(false, "listening on :3000".into()), (true, "charging with sk_test_51Hx9".into())]);
+    let (_, mut rx) = e.engine.follow(&p.id, None, 10).await.unwrap();
+    let mut tagged = Vec::new();
+    while tagged.len() < 2 {
+        tagged.push(tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv()).await.unwrap().unwrap());
+    }
+    assert_eq!(tagged, [(false, "listening on :3000".to_string()), (true, "charging with ***".to_string())]);
     let mut said = None;
     for _ in 0..400 {
         said = e.engine.store.page_health(&p.id).unwrap().and_then(|h| h.first_error);

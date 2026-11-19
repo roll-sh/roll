@@ -148,7 +148,9 @@ describe("the Previews tab", () => {
     const u = userEvent.setup({ delay: null });
     const worker = { ...preview.services[0], name: "worker", url: "https://worker-pr482-shop.preview.roll.site" };
     api.list.mockResolvedValue([{ ...preview, services: [...preview.services, worker] }]);
-    vi.mocked(appsApi.services).mockResolvedValue([{ id: "svc_web", project: "prj_shop", name: "web" }] as never);
+    vi.mocked(appsApi.services).mockResolvedValue([{ id: "svc_web", project: "prj_shop", name: "web" }, { id: "svc_worker", project: "prj_shop", name: "worker" }] as never);
+    // roll apps runs `web` in this preview (its pv- environment); its `worker` is production's only, and the preview's `worker` is roll.toml's.
+    vi.mocked(appsApi.environments).mockImplementation(async (id: string) => (id === "svc_web" ? [{ name: "pv-abc" }, { name: "production" }] : [{ name: "production" }]) as never);
     api.openShell.mockResolvedValue({ id: "pvsh_1" });
     vi.mocked(appsApi.openShell).mockResolvedValue({ id: "sh_apps" });
     view();

@@ -243,6 +243,9 @@ pub struct FakeApps {
     pub errors: Mutex<HashMap<String, Vec<roll_previews::ErrorGroup>>>,
     /// What every service's log holds.
     pub log: Mutex<Vec<String>>,
+    /// What a followed log gives, each line with whether it came on stderr (unset: the backend
+    /// can't follow, so the engine reads `log` again and again).
+    pub followed: Mutex<Option<Vec<(bool, String)>>>,
     /// What each seed or release job was run able to reach.
     pub seed_egress: Mutex<Vec<roll_previews::settings::EgressRule>>,
     /// What each service was deployed able to reach.
@@ -268,6 +271,10 @@ pub struct FakeApps {
     /// writes the followed container's lines into (`(stderr, "<stamp> <text>")`).
     pub drain_since: Mutex<Vec<String>>,
     pub drain_tx: Mutex<Option<tokio::sync::mpsc::Sender<(bool, String)>>>,
+    /// A roll apps backend's own traces (its `pv-` environment's), and their spans; and whether each
+    /// deploy asked for them (the project's `traces`).
+    pub app_traces: Mutex<Vec<(roll_previews::engine::traces::TraceRow, Vec<roll_previews::engine::traces::Span>)>>,
+    pub traces_asked: Mutex<HashMap<(String, String), bool>>,
     /// Tars written into services, by the directory they were written under.
     pub files: Mutex<HashMap<String, Vec<u8>>>,
     /// Services the runtime says run on this node, and those put to sleep.
@@ -312,6 +319,7 @@ impl Apps for FakeApps {
         self.vars.lock().insert((t.preview.clone(), t.service.clone()), t.vars.clone());
         self.feedback.lock().insert((t.preview.clone(), t.service.clone()), t.feedback);
         self.egress.lock().insert((t.preview.clone(), t.service.clone()), t.egress);
+        self.traces_asked.lock().insert((t.preview.clone(), t.service.clone()), t.traces);
         Ok(None)
     }
     async fn catalog(&self, _project: &str) -> anyhow::Result<Option<Vec<roll_previews::ports::CatalogService>>> {
@@ -350,6 +358,20 @@ impl Apps for FakeApps {
     }
     async fn logs(&self, _: &str, _: &str, _: usize) -> Vec<String> {
         self.log.lock().clone()
+    }
+    async fn follow(&self, _: &str, _: &str, _: usize) -> Option<tokio::sync::mpsc::Receiver<(bool, String)>> {
+        let lines = self.followed.lock().clone()?;
+        let (tx, rx) = tokio::sync::mpsc::channel(lines.len().max(1));
+        for l in lines {
+            let _ = tx.try_send(l);
+        }
+        Some(rx)
+    }
+    async fn traces(&self, _: &str, _: &str, _: i64) -> Vec<roll_previews::engine::traces::TraceRow> {
+        self.app_traces.lock().iter().map(|(r, _)| r.clone()).collect()
+    }
+    async fn trace(&self, _: &str, _: &str, trace: &str) -> Option<Vec<roll_previews::engine::traces::Span>> {
+        self.app_traces.lock().iter().find(|(r, _)| r.trace == trace).map(|(_, s)| s.clone())
     }
     /// What was written under `path` (nothing: an empty stream, as `docker cp` of a missing path).
     async fn read_files(&self, _: &str, _: &str, path: &str) -> anyhow::Result<Option<roll_previews::ports::FileStream>> {
@@ -588,7 +610,7 @@ pub fn env(settings: serde_json::Value) -> Env {
     let apps = Arc::new(FakeApps::default());
     let secrets = Arc::new(FakeSecrets::default());
     let engine = Engine::new(
-        Config { domain: "preview.test".into(), ..Config::default() },
+        Config { domain: "preview.test".into(), otlp: Some("127.0.0.1:7070".into()), ..Config::default() },
         store,
         ws.clone(),
         code.clone(),

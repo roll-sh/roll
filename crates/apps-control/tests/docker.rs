@@ -329,6 +329,17 @@ async fn a_static_sites_files_answer_without_a_container() {
     let running = apps_control::runtime::docker::docker(&["ps", "-q", "--filter", &format!("label=sh.roll.apps={id}")]).await.unwrap();
     assert!(running.is_empty(), "no container serves it: {running}");
     eprintln!("MEASURED static site from its files: first request {} ms (reads its index), warm median {} ms", first[0].as_millis(), median(warm).as_millis());
+    // Its image was scanned beside the rollout by the pinned Trivy, offline (the database's
+    // volume, `roll-apps-trivy-db`, stays: it's the node's, as BuildKit's cache is).
+    let deps = format!("/v1/apps/services/{id}/environments/production/deploys");
+    let began = Instant::now();
+    let mut scan = Value::Null;
+    while began.elapsed() < Duration::from_secs(300) && scan.is_null() {
+        scan = call(&w.api, "GET", &deps, None, "application/json", None).await.1[0]["vulnerabilities"].clone();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(scan["scanner"] == "trivy 0.76.1" && scan["error"].is_null(), "{scan}");
+    eprintln!("MEASURED image scan beside the rollout: done {} ms after it went live (the first downloads the database)", began.elapsed().as_millis());
     assert_eq!(delete_for_good(&w.api, &id).await.0, StatusCode::NO_CONTENT);
     let _ = apps_control::runtime::docker::docker(&["network", "rm", &apps_control::network_name(&w.project, "production")]).await;
     w.apps.shutdown().await;
@@ -426,6 +437,44 @@ async fn a_static_sites_functions_build_and_answer() {
     assert_eq!(fetch("/api/ping?n=7").await, (StatusCode::OK, r#"{"pong":"7"}"#.to_string()));
     assert_eq!(fetch("/api/web").await, (StatusCode::OK, "typed".to_string()));
     assert_eq!(fetch("/api/nope").await.0, StatusCode::NOT_FOUND);
+}
+
+/// A site's edge functions on Deno (Netlify's): one answers its own path, one wraps the site's
+/// answer through `context.next()`, which comes back to the apps listener signed (as instances
+/// reach it for traces) and answers the site's files.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sites_edge_functions_run_on_deno() {
+    // The apps listener, where `next()` comes back: served for real (instances reach it).
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let Some(w) = docker_world_with(None, |c| c.otlp_base = Some(format!("http://127.0.0.1:{port}"))).await else { return };
+    let app = w.public.clone();
+    tokio::spawn(async move { axum::serve(listener, app.into_make_service()).await });
+    let files = [
+        ("index.html", "<h1>site</h1>"),
+        ("netlify/edge-functions/hi.ts", "export default (req: Request) => new Response(`hi from ${typeof Deno}`);\nexport const config = { path: '/hi' };\n"),
+        ("netlify/edge-functions/shout.ts", "export default async (req: Request, ctx: any) => new Response((await (await ctx.next()).text()).toUpperCase(), { headers: { 'x-edge': '1' } });\nexport const config = { path: ['/', '/index.html'] };\n"),
+    ];
+    let (site, host) = deploy_tree(&w, "edgy", &files).await;
+    let (fns, _) = deploy_tree_with(&w, "edgy-fn", &files, json!({"builder": "functions"})).await;
+    let fetch = |path: &'static str| {
+        let req = Request::get(path).header("host", host.as_str()).body(Body::empty()).unwrap();
+        let public = w.public.clone();
+        async move {
+            let resp = public.oneshot(req).await.unwrap();
+            let st = resp.status();
+            (st, String::from_utf8(resp.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap())
+        }
+    };
+    assert_eq!(fetch("/hi").await, (StatusCode::OK, "hi from object".to_string()));
+    let got = fetch("/").await;
+    let (_, log) = call(&w.api, "GET", &format!("/v1/apps/services/{fns}/environments/production/logs?tail=40"), None, "application/json", None).await;
+    assert_eq!(got, (StatusCode::OK, "<H1>SITE</H1>".to_string()), "next() read the site's own file: {log}");
+    for id in [&site, &fns] {
+        assert_eq!(delete_for_good(&w.api, id).await.0, StatusCode::NO_CONTENT);
+    }
+    let _ = apps_control::runtime::docker::docker(&["network", "rm", &apps_control::network_name(&w.project, "production")]).await;
+    w.apps.shutdown().await;
 }
 
 /// What the generated Dockerfiles of Node, Python and Go make actually builds and answers, and a
@@ -805,6 +854,55 @@ async fn a_restart_keeps_the_running_container() {
     assert!(apps_control::runtime::docker::docker(&["network", "inspect", &net]).await.is_err(), "{net} is left");
 }
 
+/// A sidecar shares its instance's network namespace (the app reaches it on localhost), in a
+/// sandbox or in the instance's own, again after the instance sleeps and wakes (a joined
+/// container keeps a dead namespace unless it's started again), and goes with it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sidecar_answers_the_app_on_localhost_across_a_sleep() {
+    use apps_control::runtime::docker::docker;
+    for netns in [false, true] {
+        let Some(w) = docker_world_netns(Some(netns)).await else { return };
+        let (id, host) = deploy_container(&w, "with-sidecar").await;
+        let sidecar = json!([{"name": "side", "image": "busybox:1.37", "command": "mkdir -p /s && echo \"sidecar $GREETING\" > /s/index.html && exec httpd -f -p 9000 -h /s", "env": {"GREETING": "here"}, "memory_mb": 64}]);
+        let (st, v) = call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"sidecars": sidecar}})), "application/json", None).await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        let (_, d) = call(&w.api, "POST", &format!("/v1/apps/services/{id}/environments/production/redeploy"), Some(json!({})), "application/json", None).await;
+        let dep = d["id"].as_str().unwrap().to_string();
+        for _ in 0..1200 {
+            let (_, x) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/deploys/{dep}"), None, "application/json", None).await;
+            if x["status"] == "active" {
+                break;
+            }
+            assert!(!["failed", "canceled"].contains(&x["status"].as_str().unwrap_or("")), "netns {netns}: {x}");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let reach = || async {
+            assert_eq!(get(&w.public, &host).await.0, StatusCode::OK);
+            let live = w.apps.live(&id, "production");
+            let inst = live.instances().into_iter().find(|i| i.deployment == dep).map(|i| i.name.clone()).expect("the new deployment's instance");
+            let mut got = Err(anyhow::anyhow!("never asked"));
+            for _ in 0..50 {
+                got = docker(&["exec", &inst, "wget", "-q", "-O-", "-T", "2", "http://127.0.0.1:9000/"]).await;
+                if got.is_ok() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            assert_eq!(got.as_deref().ok().map(str::trim), Some("sidecar here"), "netns {netns}: {got:?}");
+            inst
+        };
+        let inst = reach().await;
+        let filter = format!("label=sh.roll.apps.of={inst}");
+        // Asleep: the sidecar stops with it; woken, it answers again.
+        w.apps.live(&id, "production").sleep().await;
+        let running = docker(&["ps", "-q", "--filter", &filter]).await.unwrap();
+        assert!(running.is_empty(), "netns {netns}: the sidecar sleeps with it");
+        reach().await;
+        assert_eq!(delete_for_good(&w.api, &id).await.0, StatusCode::NO_CONTENT);
+        assert_eq!(docker(&["ps", "-aq", "--filter", &filter]).await.unwrap(), "", "netns {netns}: the sidecar went with it");
+    }
+}
+
 /// An app bound to loopback in its container (a framework's dev default) fails its deploy at once
 /// saying so, read from its sandbox's sockets, not after the whole health timeout.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -976,40 +1074,58 @@ async fn deno_dotnet_and_elixir_trees_build_and_answer() {
         ),
     ];
     for (name, files, want) in apps {
-        let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": name, "source": {"kind": "upload"}, "run": {"memory_mb": 512, "cpu": 1.0, "health_timeout_s": 60} })), "application/json", None).await;
-        assert_eq!(st, StatusCode::CREATED, "{svc}");
-        let id = svc["id"].as_str().unwrap().to_string();
-        let tree = tempfile::tempdir().unwrap();
-        for (f, body) in files {
-            let at = tree.path().join(f);
-            std::fs::create_dir_all(at.parent().unwrap()).unwrap();
-            std::fs::write(at, body).unwrap();
-        }
-        let mut bundle = Vec::new();
-        roll_fetch::pack(&mut bundle, &Default::default(), Some(tree.path()), roll_fetch::Limits::default()).unwrap();
-        let (_, d) = call(&w.api, "POST", &format!("/v1/apps/services/{id}/environments/production/deploys"), None, "application/gzip", Some(bundle)).await;
-        let dep = d["id"].as_str().unwrap().to_string();
-        let mut x = Value::Null;
-        // A first build pulls its images and packages: minutes, not seconds.
-        for _ in 0..6000 {
-            x = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/deploys/{dep}"), None, "application/json", None).await.1;
-            if ["failed", "active"].contains(&x["status"].as_str().unwrap_or("")) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        if x["status"] != "active" {
-            let log = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/deploys/{dep}/logs?tail=80"), None, "application/json", None).await.1;
-            let lines: Vec<&str> = log.as_array().into_iter().flatten().filter_map(|l| l["text"].as_str()).collect();
-            panic!("{name}: {x}\n{}", lines.join("\n"));
-        }
-        let (_, env) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None, "application/json", None).await;
-        let host = env["url"].as_str().unwrap().trim_start_matches("http://").split(':').next().unwrap().to_string();
-        let resp = w.public.clone().oneshot(Request::get("/").header("host", host.as_str()).body(Body::empty()).unwrap()).await.unwrap();
-        let body = String::from_utf8(resp.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
-        assert!(body.contains(want), "{name}: {body}");
-        assert_eq!(delete_for_good(&w.api, &id).await.0, StatusCode::NO_CONTENT);
+        builds_and_answers(&w, name, files, want, json!({})).await;
     }
+}
+
+/// An uploaded tree, built as roll detects it, deployed, and asked for `/`: it says `want`.
+async fn builds_and_answers(w: &World, name: &str, files: &[(&str, &str)], want: &str, build: Value) {
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": name, "source": {"kind": "upload"}, "build": build, "run": {"memory_mb": 1024, "cpu": 1.0, "health_timeout_s": 120} })), "application/json", None).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    let tree = tempfile::tempdir().unwrap();
+    for (f, body) in files {
+        let at = tree.path().join(f);
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        std::fs::write(at, body).unwrap();
+    }
+    let mut bundle = Vec::new();
+    roll_fetch::pack(&mut bundle, &Default::default(), Some(tree.path()), roll_fetch::Limits::default()).unwrap();
+    let (_, d) = call(&w.api, "POST", &format!("/v1/apps/services/{id}/environments/production/deploys"), None, "application/gzip", Some(bundle)).await;
+    let dep = d["id"].as_str().unwrap().to_string();
+    let mut x = Value::Null;
+    // A first build pulls its images and packages: minutes, not seconds.
+    for _ in 0..6000 {
+        x = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/deploys/{dep}"), None, "application/json", None).await.1;
+        if ["failed", "active"].contains(&x["status"].as_str().unwrap_or("")) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    if x["status"] != "active" {
+        let log = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/deploys/{dep}/logs?tail=80"), None, "application/json", None).await.1;
+        let lines: Vec<&str> = log.as_array().into_iter().flatten().filter_map(|l| l["text"].as_str()).collect();
+        panic!("{name}: {x}\n{}", lines.join("\n"));
+    }
+    let (_, env) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None, "application/json", None).await;
+    let host = env["url"].as_str().unwrap().trim_start_matches("http://").split(':').next().unwrap().to_string();
+    let resp = w.public.clone().oneshot(Request::get("/").header("host", host.as_str()).body(Body::empty()).unwrap()).await.unwrap();
+    let body = String::from_utf8(resp.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
+    assert!(body.contains(want), "{name}: {body}");
+    assert_eq!(delete_for_good(&w.api, &id).await.0, StatusCode::NO_CONTENT);
+}
+
+/// Clojure (Leiningen), Gleam and a root start.sh, as roll detects them: each built, deployed and
+/// answering.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn clojure_gleam_and_a_start_script_build_and_answer() {
+    let Some(w) = docker_world().await else { return };
+    let clj = "(ns hi.core (:gen-class) (:import [com.sun.net.httpserver HttpServer HttpHandler] [java.net InetSocketAddress]))\n(defn -main [& _]\n  (let [port (Integer/parseInt (or (System/getenv \"PORT\") \"8080\"))\n        s (HttpServer/create (InetSocketAddress. \"0.0.0.0\" port) 0)]\n    (.createContext s \"/\" (reify HttpHandler (handle [_ x] (let [b (.getBytes \"clojure says hi\")] (.sendResponseHeaders x 200 (count b)) (with-open [o (.getResponseBody x)] (.write o b))))))\n    (.start s)))\n";
+    builds_and_answers(&w, "clojure-hi", &[("project.clj", "(defproject hi \"0.1.0\" :dependencies [[org.clojure/clojure \"1.12.0\"]] :main hi.core :aot [hi.core])\n"), ("src/hi/core.clj", clj)], "clojure says hi", json!({})).await;
+    let erl = "-module(hi_ffi).\n-export([serve/0]).\nserve() ->\n    Port = list_to_integer(os:getenv(\"PORT\", \"8080\")),\n    {ok, L} = gen_tcp:listen(Port, [binary, {active, false}, {reuseaddr, true}, {ip, {0,0,0,0}}]),\n    loop(L).\nloop(L) ->\n    {ok, C} = gen_tcp:accept(L),\n    _ = gen_tcp:recv(C, 0, 1000),\n    gen_tcp:send(C, <<\"HTTP/1.1 200 OK\\r\\ncontent-length: 14\\r\\nconnection: close\\r\\n\\r\\ngleam says hi\\n\">>),\n    gen_tcp:close(C),\n    loop(L).\n";
+    builds_and_answers(&w, "gleam-hi", &[("gleam.toml", "name = \"hi\"\nversion = \"1.0.0\"\n"), ("src/hi.gleam", "@external(erlang, \"hi_ffi\", \"serve\")\nfn serve() -> Nil\n\npub fn main() {\n  serve()\n}\n"), ("src/hi_ffi.erl", erl)], "gleam says hi", json!({})).await;
+    // A start.sh and the packages it needs (apt).
+    builds_and_answers(&w, "shell-hi", &[("start.sh", "#!/bin/bash\nmkdir -p /tmp/s && echo 'a start script says hi' > /tmp/s/index.html\nexec python3 -m http.server \"$PORT\" --bind 0.0.0.0 --directory /tmp/s\n")], "a start script says hi", json!({"packages": ["python3"]})).await;
 }
 
 /// A link to a database on this host's loopback reaches it from the container, through the

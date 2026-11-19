@@ -21,14 +21,15 @@
 //! [main]
 //! auto_revert = true
 //!
-//! [secrets]              # where teammates' roll secrets are: the `roll` CLI reads it
-//! project = "shop"
+//! [secrets]              # roll code's landing rule for credentials (code_control::settings)
+//! unstored_credentials = "block"
+//! project = "shop"       # where teammates' roll secrets are: the `roll` CLI reads it
 //! ```
 //!
 //! Parsing is strict (unknown keys are errors), and every error names the key at fault, because
 //! it ends up as the summary of a failed check or preview.
 
-use code_control::settings::{MainSettings, QueueSettings, RawMain, RawQueue};
+use code_control::settings::{MainSettings, QueueSettings, RawMain, RawQueue, RawSecrets};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -196,10 +197,10 @@ struct RawFile {
     preview: Option<RawPreview>,
     queue: Option<RawQueue>,
     main: Option<RawMain>,
-    /// roll secrets' suggestion for teammates (project, environment, path, branches), read by the
-    /// `roll` CLI (`roll-cli/src/secrets/repo.rs`), which ignores and names keys it doesn't know.
-    #[serde(rename = "secrets")]
-    _secrets: Option<toml::Table>,
+    /// roll code's landing settings for credentials (`code_control::settings::secrets`), and roll
+    /// secrets' suggestion for teammates (project, environment, path, branches), which the `roll`
+    /// CLI reads (`roll-cli/src/secrets/repo.rs`).
+    secrets: Option<RawSecrets>,
     /// roll apps' section (`apps_control::config`): read there; here only its
     /// `previews.screenshots`, roll previews'.
     app: Option<toml::Table>,
@@ -344,6 +345,7 @@ impl RollToml {
             return Err(format!("{FILE} [queue]: checks names {missing:?}, which isn't a [checks.{missing}] table"));
         }
         let main = raw.main.map(code_control::settings::main).unwrap_or_default();
+        raw.secrets.map(code_control::settings::secrets).transpose()?;
         // roll apps' `[app.previews.screenshots]`, the rest of `[app]` left to roll apps.
         let app_screenshots = match raw.app.as_ref().and_then(|a| a.get("previews")).and_then(|p| p.get("screenshots")) {
             None => None,
@@ -531,6 +533,17 @@ mod tests {
             let err = RollToml::parse(text).expect_err(text);
             assert!(err.contains(needle), "{text:?}: {err:?} should mention {needle:?}");
         }
+    }
+
+    /// One `[secrets]` table holds roll code's landing rule and the CLI's suggestion: both parsers
+    /// take it, and roll code's rule still reads.
+    #[test]
+    fn the_secrets_table_holds_the_landing_rule_and_the_suggestion() {
+        let text = "[secrets]\nunstored_credentials = \"block\"\nproject = \"shop\"\nenvironment = \"development\"\npath = \"/api\"\nbranches = { \"release/*\" = \"staging\" }\n";
+        RollToml::parse(text).unwrap();
+        let s = code_control::settings::parse(text).unwrap();
+        assert_eq!(s.secrets.unstored_credentials, code_control::settings::Unstored::Block);
+        assert!(RollToml::parse("[secrets]\nprojects = \"shop\"\n").unwrap_err().contains("projects"));
     }
 
     #[test]

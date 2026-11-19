@@ -514,6 +514,14 @@ pub async fn check(State(gate): State<Arc<Gate>>, mut req: Request, next: Next) 
             }
         };
         if let Some(session) = session {
+            // A WebSocket upgrade is a GET, so the CSRF check below lets it by, and a session
+            // cookie rides along from any page on the API's own site (`SameSite=Lax`): a preview
+            // or an app served under the same domain could open a shell or a tunnel as the person.
+            // A browser always sends its Origin on one, and a session's opens only from the
+            // dashboard's (or the API's own); a token's (the CLIs') is judged by its token alone.
+            if is_upgrade(req.headers()) && !gate.origin_ok(req.headers(), true) {
+                return error(StatusCode::FORBIDDEN, "a WebSocket with a roll session opens only from roll's dashboard", "origin");
+            }
             if !safe(req.method()) && !gate.csrf_ok(req.headers(), token) {
                 return error(StatusCode::FORBIDDEN, "this request needs the X-Roll-CSRF header from GET /v1/accounts/session", "csrf");
             }
@@ -581,12 +589,23 @@ fn safe(m: &Method) -> bool {
     matches!(*m, Method::GET | Method::HEAD | Method::OPTIONS)
 }
 
+/// An HTTP/1.1 upgrade to a WebSocket (`Upgrade: websocket`).
+fn is_upgrade(headers: &HeaderMap) -> bool {
+    headers.get(header::UPGRADE).and_then(|v| v.to_str().ok()).is_some_and(|v| v.split(',').any(|p| p.trim().eq_ignore_ascii_case("websocket")))
+}
+
 impl Gate {
     /// The CSRF header matches the session, and the origin (when sent) is one we serve.
     fn csrf_ok(&self, headers: &HeaderMap, session_token: &str) -> bool {
         let header_ok = headers.get(CSRF_HEADER).and_then(|v| v.to_str().ok()).is_some_and(|v| constant_eq(v.trim().as_bytes(), csrf_token(session_token).as_bytes()));
-        let origin_ok = match headers.get(header::ORIGIN) {
-            None => true,
+        header_ok && self.origin_ok(headers, false)
+    }
+
+    /// The request's origin is one we serve: the dashboard's, or the API's own. Without one, only
+    /// when it isn't `required`.
+    fn origin_ok(&self, headers: &HeaderMap, required: bool) -> bool {
+        match headers.get(header::ORIGIN) {
+            None => !required,
             Some(o) => {
                 self.own_origin.as_ref() == Some(o)
                     || match &self.origins {
@@ -594,8 +613,7 @@ impl Gate {
                         Origins::List(l) => l.iter().any(|a| a.as_bytes().eq_ignore_ascii_case(o.as_bytes())),
                     }
             }
-        };
-        header_ok && origin_ok
+        }
     }
 }
 

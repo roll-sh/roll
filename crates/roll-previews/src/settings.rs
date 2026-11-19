@@ -63,6 +63,11 @@ pub struct Settings {
     /// project's own mail settings reach previews.
     #[serde(default)]
     pub mail: MailRule,
+    /// Its `roll.toml` services get the OpenTelemetry SDK's variables, so an app with an SDK sends
+    /// its spans to the preview (the sheet's traces). Off by default: they're a preview's code's
+    /// words, kept a few hours.
+    #[serde(default)]
+    pub traces: bool,
     /// What its services' code may reach (docs/previews.md, "Egress"): `open` (the default)
     /// anything; `roll` only roll's own products, on a Docker network with no route out.
     #[serde(default)]
@@ -352,6 +357,7 @@ impl Default for Settings {
             access: Access::Link,
             visual_review: VisualReviewRule::Off,
             mail: MailRule::Catch,
+            traces: false,
             egress: EgressRule::Open,
             egress_hosts: Vec::new(),
             egress_forks: EgressRule::Roll,

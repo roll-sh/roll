@@ -128,7 +128,7 @@ impl From<&Args> for StorageOpts {
 /// store is open when this returns (and an error opening it fails startup); in a cluster it opens
 /// whenever this node gets the metadata's lease. `sink`: storage events into roll queues and
 /// streams.
-pub async fn start(args: &StorageOpts, home: &Path, storage: &StorageConfig, cluster: Arc<roll_cluster::Cluster>, sink: Arc<dyn s3_server::EventSink>) -> anyhow::Result<Storage> {
+pub async fn start(args: &StorageOpts, home: &Path, storage: &StorageConfig, cluster: Arc<roll_cluster::Cluster>, sink: Arc<dyn s3_server::EventSink>, credentials: Arc<dyn s3_server::TargetCredentials>) -> anyhow::Result<Storage> {
     let single = cluster.backend_name() == "memory";
     if !single && matches!(storage, StorageConfig::Local(_)) {
         anyhow::bail!("a storage cluster needs S3 (--s3-bucket): a local directory isn't shared between nodes");
@@ -200,7 +200,7 @@ pub async fn start(args: &StorageOpts, home: &Path, storage: &StorageConfig, clu
     let admin = args.s3_access_key.clone().zip(args.s3_secret_key.clone());
     let url = api_url.clone();
     let open: s3_server::cluster::Open = Arc::new(move |store: Arc<s3_store::Store>| {
-        let (scfg, ccfg, api_cfg, cache, admin, sink, url) = (scfg.clone(), ccfg.clone(), api_cfg.clone(), cache.clone(), admin.clone(), sink.clone(), url.clone());
+        let (scfg, ccfg, api_cfg, cache, admin, sink, credentials, url) = (scfg.clone(), ccfg.clone(), api_cfg.clone(), cache.clone(), admin.clone(), sink.clone(), credentials.clone(), url.clone());
         Box::pin(async move {
             if let Some((id, secret)) = &admin {
                 store.ensure_key(id, secret, "ROLL_S3_ACCESS_KEY").await?;
@@ -208,6 +208,7 @@ pub async fn start(args: &StorageOpts, home: &Path, storage: &StorageConfig, clu
             let control = s3_control::Control::new(store.clone(), ccfg).await?;
             let server = s3_server::Server::with_cache(store, scfg, cache);
             server.notifier.set_sink(sink);
+            server.notifier.set_target_credentials(credentials);
             control.set_server(server.clone());
             control.set_api_endpoint(url);
             let api = s3_api::Api::new(server.clone(), api_cfg);
