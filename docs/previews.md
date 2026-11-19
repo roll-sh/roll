@@ -1654,8 +1654,9 @@ type Settings = {
   more: every word against title, branch, slug, repo or `#number`, and All, Needs you, Failed,
   Awake, Asleep with their counts; `lib/preview-filter.ts`), status, cost, how many errors
   its services wrote in the last hour, logs, and open, sleep, wake, reset and delete
-  actions. A preview's sheet has its Overview, Activity, Logs (live while a service runs),
-  Requests and Errors (its services' errors grouped, newest first, each with how many times, when
+  actions. A preview's sheet has its Overview, Activity, Logs (live while a service runs), Shell
+  (a terminal on a `roll.toml` service's shell: "A shell in a preview"; it shares roll apps'
+  terminal, `components/terminal-screen.tsx`), Requests and Errors (its services' errors grouped, newest first, each with how many times, when
   last seen, the service and its title, opening to its newest sample; the last hour, 6 or 24),
   plus a "Previews" overlay on the canvas that draws each
   preview's branches next to their parents.
@@ -2006,8 +2007,8 @@ Every feature in review has its `roll preview` command too: `metrics`, `hooks` (
 
 0a. **A shell in a preview's service** (`feature/roll-previews-shell`, on the drains branch;
    Render's shell, `heroku run`): the API, the engine's sessions and the exec are in (see "A
-   shell in a preview") and `roll preview shell`; next, the sheet's terminal (roll apps' terminal
-   component).
+   shell in a preview"), `roll preview shell` and the sheet's Shell tab (roll apps' terminal,
+   shared).
 0. **A preview's `roll.toml` services in the project's log drains, in review**
    (`feature/roll-previews-drains`): roll apps' drains with `previews: true` got only roll apps'
    own `pv-` environments, so a team with Datadog on a drain saw half of a preview's output.
