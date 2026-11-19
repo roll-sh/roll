@@ -389,7 +389,45 @@ behind the `Apps` trait:
   3b. the preview's own variables (`PUT /v1/previews/{id}/env`, the sheet, `roll preview env`):
      Vercel's branch-scoped variables. Setting them redeploys its services; names roll or the
      preview's branches set (`ROLL_*`, `PORT`, `DATABASE_URL`, …) are refused, so they can't
-     point a preview at other data;
+     point a preview at other data. With `ROLL_SECRET_KEY` they're sealed at rest (AES-256-GCM,
+     bound to the preview's id: roll's reviewer's sealer), so the previews table holds no value
+     and a copy on another row doesn't open; ones written before a key read as they were and are
+     sealed at their next write. A node without the key that finds them sealed fails the
+     preview's converge rather than start its services without them
+     (`a_previews_own_variables_are_sealed_at_rest_to_it`);
+
+  A value of `env` or `env_for` can name a key in roll secrets instead of holding it (Doppler's
+  and 1Password's references): `roll://ENV/KEY` or `roll://ENV/folder/KEY`, in the project's own
+  environments (no `PROJECT@`: 400). It goes into the preview's environment as roll secrets' own
+  reference (`${ENV.folder.KEY}`) and is read there, with the environment, as the preview reads
+  everything: untrusted, so a protected environment or a sensitive key never resolves (it's left
+  out and logged as a secret that doesn't resolve), a branched parent's link is followed as any,
+  and the value is masked in what the preview shows. A payment provider's test key then stays in
+  roll secrets (its health, leak scanning, reach and rotation) rather than in the project's rules.
+  A rule naming an environment other than the one the previews follow (`secrets.base`) routes
+  its values into code whoever pushes a branch controls, so a person choosing that reach must be
+  able to reveal it: saving a new or changed reference needs its writer's reveal on that
+  environment's folder in roll secrets (roll secrets' own answer for the request's caller, as roll
+  apps asks it; 403 otherwise), and who wrote each is kept (`env_refs`) for roll secrets'
+  maker-checked binding (`bind_ref`, its #407), which will stop a reference whose writer lost
+  access. A reference to the base needs none of this, but changing the base needs its writer's
+  reveal on the new one (every preview's code then reads it). The rules are written only as they
+  were checked: another request's change in between is a 409.
+  Moving the base checks the references that named the old one as new. A value that reads as a
+  reference only once trimmed or lowercased (` roll://…`) is refused. Who wrote each reference
+  is kept, not yet checked again later: a writer who loses reveal leaves their reference working
+  until roll secrets' `bind_ref` binds it to them (its #407).
+  Only the rules' own references (checked when saved) go to roll secrets as references, as their
+  own input to rolld's ensure; every other value previews write, a preview's own variables and
+  anything stored before included, is plain text: its `${` is escaped, so it's never a reference
+  by accident and reads back as written. A
+  preview's own variables refuse a reference (400) until roll secrets' maker-checked binding for
+  references a person chooses (`bind_ref`, its #407). Renaming an environment rewrites roll
+  secrets' references, not these rules: the next converge logs the old name as one that doesn't
+  resolve. `a_roll_reference_becomes_roll_secrets_own_and_a_plain_value_stays_plain`,
+  `a_rules_reference_to_another_environment_needs_its_writers_reveal_there`;
+  `scripts/preview-cost.sh` reads a staging key through `roll://staging/…` in the live service's
+  environment, and a `${USER}` left as it is;
   4. the branched resources' URLs:
 
      | Resource | Variables |
@@ -1157,7 +1195,38 @@ Spans are kept on the preview's holder, in memory, its newest 20,000 for six hou
 preview: they're for looking at it now. The sheet lists recent traces under Requests, each opening
 to its spans as bars on the trace's time, and above them each route's time (p50, p95) against
 main's preview's same route, the clearly slower ones first and in red; `roll preview traces
-[--trace <id> | --routes]`. Read back masked as
+[--trace <id> | --routes]`. The holder reads the slower ones (at most five, the most slower than
+main first) onto the preview's record about once a minute, off the reconcile pass and a few
+previews at a time, main's routes once a round and only on main's own holder (where its spans
+are: elsewhere nothing is said rather than everything); only those few names are masked, each
+once (`slower_routes`, kept in the store's
+`runtime_facts` so any node shows them): the sheet's verdict strip says "2 routes slower than main" (opening
+Requests), and the pull request's comment says it in its checks with each route's p50 and
+main's, a route's name in a code span nothing in it can close. A change of which routes are slower
+(not of their times, which drift with every trace) reports the preview again
+(`a_route_slower_than_mains_reaches_the_record_and_the_report`).
+
+New errors against main (Sentry's new issues in a release): every five minutes, in the same round
+off the reconcile pass, the holder reads each running change's or branch's error groups of the
+last hour and main's preview's (once a round, and only while main's runs on this node: otherwise
+nothing is said rather than everything), compares them by service and fingerprint (the
+backends' own, before previews key them), and keeps the ones main's doesn't have on the record
+(`new_errors`: how many, and the most frequent five by service and title, masked and shown to
+120 characters; their values are read only when that set moved). The verdict strip leads with
+"2 new errors against main" (opening Errors) and the change page lists them; the pull request's
+comment only counts them by service (their lines can hold a branch's data, and anyone reading the
+pull request reads its comment). A change reports the preview again; an error fixed (gone from
+the last hour) goes. A preview asleep keeps what it last said. An error whose line holds a
+per-preview value (its id, its branch's host) can read as new where main's has the same one.
+`an_error_mains_preview_doesnt_have_reaches_the_record_and_the_report`.
+
+Repeated queries (Sentry's N+1 detection): a trace whose spans run one database statement
+(`db.statement`, or the newer `db.query.text`) ten times or more says it as `repeated`
+(`{statement, count}`), the statement's shape with its literals taken out (`SELECT … WHERE id = ?`,
+an `IN` list as one) and masked as its names are. The trace list and the route table (`…/routes`,
+a route's worst trace) tag it N+1, an opened trace says what it runs, and `roll preview traces
+--routes` prints it under the route. `a_statement_run_many_times_in_a_trace_is_said_by_its_shape`.
+Read back masked as
 its logs are: a span's name and attributes are its code's words. The intake reads OTLP with roll
 apps' reader (`apps_control::otlp::spans_of_request`). A roll apps service's traces are roll apps'
 own: with the project's `traces` the preview's `pv-` environment gets roll apps' `traces: true` (its
@@ -1165,6 +1234,12 @@ own OpenTelemetry variables and intake), and the preview's list and trace reads 
 apps too, masked the same way, one list for every service. `a_previews_traces_are_kept_by_its_token_and_read_masked`;
 `scripts/preview-cost.sh` posts a span from inside a live preview's service to its own endpoint and
 reads it back as the preview's trace.
+
+An error group (the Errors tab, `…/errors`) whose newest sample names a trace the preview keeps (a
+run of 32 hex digits on its own: `trace_id=…`, `"traceId":"…"`, a `traceparent`; most SDKs log the
+request's trace id with its error) carries it as `trace`: the Errors tab shows that request's spans
+under the sample, and `roll preview errors` prints its id for `roll preview traces --trace`. Only a
+kept trace counts, so a hex id that's something else links nothing.
 
 ### Feedback on the preview page
 
@@ -1316,7 +1391,7 @@ and admins see every project.
 | `PUT /v1/previews/{id}/files?service=&path=` | a tar, at most 100 MiB | `{ service, path }`: its files written under the directory `path`, said in the activity. Admin |
 | `GET /v1/previews/{id}/requests` | | `{requests: [{at, service, method, path, status, ms}]}`: its latest 200 requests through roll's runtime, newest first (Vercel's request log): never the query, which can carry a token, and the path masked as its logs are (a path is its code's to choose); `ms` until the answer's headers. Kept in memory on the preview's holder (runs there) and gone with its last service; a roll apps instance's requests are roll apps' own. The sheet's Requests tab, errors at a glance; `roll preview requests <id> [--errors]` |
 | `GET /v1/previews/{id}/metrics` | | `{services: [{service, cpu, memory_bytes, memory_mb}]}`: what its running services use right now (Render's and Railway's metrics): cores of CPU and resident memory, against the memory each runs with. It comes from `docker stats` for roll's runtime. For roll apps' instances it's their last finished minute (`…/environments/pv-…/metrics`), with memory per instance. A sleeping service isn't listed. 404 for no such preview. It runs on the preview's holder, and is read again at most every 10 s, however many sheets ask. The sheet shows it on each running service, read every 15 s while it's open |
-| `GET /v1/previews/{id}/errors?minutes=` | | `{minutes, groups: [{service, fingerprint, kind, title, count, first_seen, last_seen, sample}]}`: its services' errors in the last `minutes` (5–1,440, 60 by default, rounded up to a 15-minute step), grouped as roll apps groups an environment's (Sentry's issues and Vercel's runtime logs, from the output alone; docs/apps/http-api.md): a stack trace (Python, JVM, Node, Go) joined from its lines, or an error line, by what it is (its type and first frames with numbers and ids taken out). `fingerprint` names a group (keyed under a random key per process, so it says nothing of the error and changes on a restart); `kind` is `python`, `java`, `node`, `go` or `line`; `sample` is the newest one whole (8 KiB at most); newest first. Title and sample are masked as its logs are, a value a cut split included (its start at a line's end is `***` too): its code can print its secrets. Its values are read (an audited read) only when there's an error. A roll apps service's are roll apps' own (`…/environments/pv-…/errors`, its 50 most frequent); a `roll.toml` service's are read from its container's last 2,000 lines in the span (`docker logs --timestamps --since`, at most 4 MiB a stream for at most 10 s), masked before they're grouped, its newest 50. A runtime that doesn't stamp lines gives none (its tail's old crash would read as new). 404 for no such preview. It runs on the preview's holder and is read again at most every 10 s for a span, however many ask. The sheet's Errors tab |
+| `GET /v1/previews/{id}/errors?minutes=` | | `{minutes, groups: [{service, fingerprint, kind, title, count, first_seen, last_seen, sample, trace?}]}`: its services' errors in the last `minutes` (5–1,440, 60 by default, rounded up to a 15-minute step), grouped as roll apps groups an environment's (Sentry's issues and Vercel's runtime logs, from the output alone; docs/apps/http-api.md): a stack trace (Python, JVM, Node, Go) joined from its lines, or an error line, by what it is (its type and first frames with numbers and ids taken out). `fingerprint` names a group (keyed under a random key per process, so it says nothing of the error and changes on a restart); `kind` is `python`, `java`, `node`, `go` or `line`; `sample` is the newest one whole (8 KiB at most); newest first; `trace` the kept trace its sample names, if any. Title and sample are masked as its logs are, a value a cut split included (its start at a line's end is `***` too): its code can print its secrets. Its values are read (an audited read) only when there's an error. A roll apps service's are roll apps' own (`…/environments/pv-…/errors`, its 50 most frequent); a `roll.toml` service's are read from its container's last 2,000 lines in the span (`docker logs --timestamps --since`, at most 4 MiB a stream for at most 10 s), masked before they're grouped, its newest 50. A runtime that doesn't stamp lines gives none (its tail's old crash would read as new). 404 for no such preview. It runs on the preview's holder and is read again at most every 10 s for a span, however many ask. The sheet's Errors tab |
 | `GET /v1/previews/{id}/errors/count?minutes=` | | `{minutes, count}`: how many errors those groups hold. Nothing in them leaves, so nothing is masked and no values are read. Kept as long. A row of the Previews tab shows the last hour's once it's on screen, three rows at a time |
 | `GET /v1/previews/{id}/activity` | | `Activity[]`, newest first |
 | `GET /v1/previews/{id}/visitors` | | `[{who, last_at}]`: the last 8 people signed in to roll who opened it (`access: "team"`), by their handle, latest first; `last_at` is as of their session's last 5-minute recheck. Share links and the CI bypass aren't people and aren't listed |
@@ -2045,25 +2120,36 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Secret references in previews' variables** (roll secrets' suggestion, after its #329):
-   `env`, `env_for` and a preview's own variables are plain values outside roll secrets
-   (redacted on read, but outside health, leak scanning, reach and the cut-off), and a payment
-   provider's test key is just what teams put there. Take `roll://ENV/KEY` there, resolved
-   through `Secrets::resolve_for(ResourceRef::new(kind, id).untrusted(), …)` (never a
-   protected environment or a sensitive key), and offer to keep a pasted value in the base
-   environment's folder.
-2. **An independent review of turns 7 and 8** (a public OTLP intake, an untrusted parser, the
-   gate's WebSocket rule, the sheet's downloads): their findings fixed before anything builds on
-   them, as turn 6's were (#386).
-3. **Slowest routes from traces, in review** (`feature/roll-previews-slow-routes`, on #419;
-   Vercel's Observability, Sentry's performance): `…/routes`, the sheet's route table and
-   `roll preview traces --routes`. Next for it: the slower routes in the verdict strip and the pull
-   request comment.
-4. **An error group opens its trace**: a grouped error whose lines carry a trace id (most SDKs
-   log it) links to that trace's spans, so a failing request's path is one click from its error.
+1. **Secret references in previews' variables, in review** (#436;
+   roll secrets' suggestion): `roll://ENV[/folder]/KEY` in `env` and `env_for` becomes roll
+   secrets' own reference in the preview's environment, read there untrusted; a plain value's
+   `${` is escaped. Next for it: a preview's own variables once roll secrets' `bind_ref` lands
+   (#407), and the rules dialog offering to keep a pasted value in the base environment.
+2. **New errors against main, in review** (#438, on #431; Sentry's new issues in a release): an
+   error group main's preview doesn't have on the record (`new_errors`), the verdict strip, the
+   change page and a count in the pull request's checks.
+3. **Repeated queries in a trace, in review** (#441, on #438; Sentry's N+1 detection): a trace
+   running one database statement ten times or more says it (`repeated`) on the trace list, the
+   route table, the trace and `roll preview traces --routes`.
+4. **A preview's own variables only in roll secrets** (roll secrets' review, 2026-11-19): `PUT
+   …/{id}/env` keeps their values as plain JSON in the previews table though they go to the
+   preview's ephemeral environment anyway; keep only their names there (roll secrets the one copy,
+   sealed), or seal the column bound to the preview's id. Nothing logs or prints the map today.
 5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
 6. **Watch: pg-control's recovery to a time seconds old** (unowned).
+
+In review after turn 9: the routes slower than main's preview on the record, the verdict strip,
+the change page and the pull request's comment (#431); an error group opens its request's trace
+(#433). An independent review of them, and of #436, #438 and #441, found 13 things, all fixed
+before they land (a reference past the reveal check by a leading space, reads that held up the
+reconcile pass, reports on every trace's drift, false new errors where main's can't be read, log
+lines in a public comment, unmasked span services and keys) or written down as limits.
+
+Landed in previews' lock turn 9 of 2026-11-19 (main 84d246b60, exactly its gated tree): turns 7
+and 8's review fixes (span bytes bounded, traces off for roll apps, the intake's token first,
+stderr's event order, masks from the store; #419), each route's time from its traces against
+main's (#424), and `roll preview up` putting back the remote-tracking refs a push made (#427).
 
 Landed in previews' lock turns 7 and 8 of 2026-11-19 (main 490b68b75 and 7b4063ef2, each exactly
 its gated tree; turn 7 landed ahead of roll apps' chain4 with apps' and MCP's agreement, turn 8

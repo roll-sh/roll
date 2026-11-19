@@ -441,6 +441,31 @@ async fn traces_sent_by_instances_read_back() {
 /// Web Vitals: turned on, an environment's pages carry roll's tag and its script is served from
 /// its own host; the browser's beacons are kept checked (a route, bounded numbers) and read back
 /// as p75s rated by web.dev's thresholds, overall and by route; turned off, nothing is tagged.
+/// Snippets (Netlify's snippet injection): an environment's own HTML before `</head>` and
+/// before `</body>` of every page, never in what isn't one; bounded.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_environments_snippets_go_in_every_page() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "site", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let h = host(&svc["environments"][0]["url"]);
+    let env = format!("/v1/apps/services/{id}/environments/production");
+    let get = |path: &str, accept: &str| {
+        let r = Request::builder().uri(path).header("host", h.clone()).header("accept", accept).body(Body::empty()).unwrap();
+        let public = w.public.clone();
+        async move { String::from_utf8(public.oneshot(r).await.unwrap().into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap() }
+    };
+    let (st, e) = call(&w.api, "PUT", &env, Some(json!({"snippets": [{"at": "head", "html": "<meta name=x>"}, {"at": "body_end", "html": "<script>chat()</script>"}]}))).await;
+    assert_eq!((st, e["snippets"].as_array().map(Vec::len)), (StatusCode::OK, Some(2)), "{e}");
+    let page = get("/page", "text/html").await;
+    assert!(page.contains("<meta name=x></head>") && page.contains("<script>chat()</script></body>"), "{page}");
+    assert!(!get("/api", "application/json").await.contains("chat()"), "a page only");
+    let six = (0..6).map(|_| json!({"at": "head", "html": "x"})).collect::<Vec<_>>();
+    assert_eq!(call(&w.api, "PUT", &env, Some(json!({"snippets": six}))).await.0, StatusCode::BAD_REQUEST);
+    call(&w.api, "PUT", &env, Some(json!({"snippets": null}))).await;
+    assert!(!get("/page", "text/html").await.contains("chat()"), "gone");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn web_vitals_from_visitors_read_back_as_p75s() {
     let w = world().await;
@@ -2260,7 +2285,8 @@ async fn a_password_lets_visitors_in() {
 
 /// A deploy freeze (GitLab's freeze periods): a person's deploy is refused with its reason, or
 /// goes through with `override` (audited); a hook's deploy builds to `ready` beside the live one,
-/// as a hold's; a rollback is never frozen; lifting it deploys as ever.
+/// as a hold's, and putting it live needs the override too; rolling back to what was live is
+/// never frozen; lifting it deploys as ever.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_deploy_freeze_holds_deploys_but_never_a_rollback() {
     let w = world().await;
@@ -2278,9 +2304,16 @@ async fn a_deploy_freeze_holds_deploys_but_never_a_rollback() {
     let (_, h) = call(&w.api, "POST", &format!("{base}/hook"), None).await;
     let (st, d) = call(&w.api, "POST", &format!("{}?image=nginx:1.28", h["path"].as_str().unwrap()), None).await;
     assert_eq!(st, StatusCode::ACCEPTED, "{d}");
-    assert_eq!(settled(&w, &id, "production", d["id"].as_str().unwrap()).await["status"], "ready");
+    let held = d["id"].as_str().unwrap().to_string();
+    assert_eq!(settled(&w, &id, "production", &held).await["status"], "ready");
+    // Putting that never-live build live is a deploy: refused without override.
+    assert_eq!(call(&w.api, "POST", &format!("{base}/deploys/{held}/rollback"), None).await.0, StatusCode::CONFLICT);
     // With override: through, and in the audit log.
-    let (st, d) = call(&w.api, "POST", &format!("{base}/deploys"), Some(json!({"image": "nginx:1.28", "override": true}))).await;
+    assert_eq!(call(&w.api, "POST", &format!("{base}/deploys"), Some(json!({"image": "nginx:1.28", "override": true}))).await.0, StatusCode::BAD_REQUEST, "the header, never the body (roll-access reads the header)");
+    let r = Request::builder().method("POST").uri(format!("{base}/deploys")).header("content-type", "application/json").header("x-roll-override", "1").body(Body::from(json!({"image": "nginx:1.28"}).to_string())).unwrap();
+    let resp = w.api.clone().oneshot(r).await.unwrap();
+    let st = resp.status();
+    let d: Value = serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(st, StatusCode::ACCEPTED, "{d}");
     assert_eq!(settled(&w, &id, "production", d["id"].as_str().unwrap()).await["status"], "active");
     let (_, activity) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/activity"), None).await;
@@ -2481,10 +2514,20 @@ async fn status_page_incidents_open_and_close() {
     w.apps.cron_pass(late + 60_000).await;
     let (_, list) = call(&w.api, "GET", &format!("{page}/incidents"), None).await;
     let open: Vec<&Value> = list["incidents"].as_array().unwrap().iter().filter(|i| i["resolved_at"].is_null()).collect();
-    assert_eq!((open.len(), open[0]["title"].as_str(), open[0]["automatic"].as_bool()), (1, Some("web · heartbeat backup is down"), Some(true)), "{list}");
+    assert_eq!((open.len(), open[0]["title"].as_str(), open[0]["automatic"].as_bool()), (1, Some("web · backup is down"), Some(true)), "{list}");
     get(ping, host(&svc["environments"][0]["url"])).await;
     let (_, list) = call(&w.api, "GET", &format!("{page}/incidents"), None).await;
     assert!(list["incidents"][0]["resolved_at"].is_i64(), "{list}");
+    // Missed again, then the heartbeat removed: nothing will ping it now, so the sweep closes it.
+    let late = code_sql::now_ms() + 3_900_000;
+    w.apps.cron_pass(late + 120_000).await;
+    let (_, list) = call(&w.api, "GET", &format!("{page}/incidents"), None).await;
+    assert!(list["incidents"][0]["resolved_at"].is_null(), "open again: {list}");
+    call(&w.api, "PUT", &env, Some(json!({"heartbeats": null}))).await;
+    w.apps.cron_pass(late + 240_000).await;
+    let (_, list) = call(&w.api, "GET", &format!("{page}/incidents"), None).await;
+    let last = &list["incidents"][0];
+    assert!(last["resolved_at"].is_i64() && last.to_string().contains("no longer checked"), "{list}");
     // A person's own, and its update.
     assert_eq!(call(&w.api, "POST", &format!("{page}/incidents"), Some(json!({"title": "x", "state": "nope", "text": "y"}))).await.0, StatusCode::BAD_REQUEST);
     let (st, inc) = call(&w.api, "POST", &format!("{page}/incidents"), Some(json!({"title": "Slow checkouts", "text": "We're looking into slow checkouts."}))).await;
@@ -3838,6 +3881,74 @@ async fn a_followed_tag_that_moves_deploys_once() {
     assert!(w.apps.watch_tags().await.is_empty(), "the rollback stays");
 }
 
+/// The hard limit (Cloud Run's, `run.queue_s`): at max_instances with every instance at its
+/// concurrency, a request waits for a slot (and gets it when one frees in time), else a 429; the
+/// app gets `X-Request-Start`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_request_at_the_hard_limit_waits_then_gets_a_429() {
+    let w = world().await;
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "full", "source": {"kind": "image", "image": "nginx:1.27"}, "run": {"port": 80, "concurrency": 1, "max_instances": 1, "queue_s": 1}, "variables": {"FAKE_SLOW_MS": "600"} }))).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    let d = settled(&w, &id, "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await;
+    let host = host(&svc["environments"][0]["url"]);
+    let (_, v) = visit_deployment(&w, &host, d["id"].as_str().unwrap()).await;
+    let start = v["request_start"].as_str().and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+    assert!((code_sql::now_ms() - start).abs() < 60_000, "X-Request-Start is unix ms: {v}");
+    // Four at once on one instance taking one, 600 ms each, a second's queue: the second waits
+    // its turn; the third and fourth would wait past the second.
+    let mut statuses = Vec::new();
+    for _ in 0..5 {
+        visit_deployment(&w, &host, d["id"].as_str().unwrap()).await;
+        statuses = futures::future::join_all((0..4).map(|_| visit(&w, &host, "/"))).await.into_iter().map(|(st, _)| st).collect();
+        if statuses.iter().filter(|s| **s == StatusCode::OK).count() >= 2 && statuses.contains(&StatusCode::TOO_MANY_REQUESTS) {
+            break;
+        }
+    }
+    assert!(statuses.iter().all(|s| *s == StatusCode::OK || *s == StatusCode::TOO_MANY_REQUESTS), "{statuses:?}");
+    assert!(statuses.iter().filter(|s| **s == StatusCode::OK).count() >= 2 && statuses.contains(&StatusCode::TOO_MANY_REQUESTS), "{statuses:?}");
+    assert_eq!(call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"queue_s": 61}}))).await.0, StatusCode::BAD_REQUEST);
+}
+
+/// Skew protection (Vercel's, `run.skew_protection`): a request that names an earlier live
+/// deployment (its header or `?dpl=`) goes to it; a page load gets what's live and a cookie
+/// naming it; a deployment that was never this environment's live one is never reached so.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_request_naming_an_earlier_deployment_goes_to_it() {
+    let w = world().await;
+    let (svc, d1) = image_service(&w, "web", json!({"port": 80, "skew_protection": true})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    let h = host(&call(&w.api, "GET", &base, None).await.1["url"]);
+    let (_, d2) = call(&w.api, "POST", &format!("{base}/deploys"), Some(json!({}))).await;
+    let d2 = settled(&w, &id, "production", d2["id"].as_str().unwrap()).await;
+    assert_eq!(visit_deployment(&w, &h, d2["id"].as_str().unwrap()).await.1["deployment"], d2["id"]);
+    let ask = |path: &str, headers: &[(&str, &str)]| {
+        let mut b = Request::builder().uri(path).header("host", h.clone());
+        for (k, v) in headers {
+            b = b.header(*k, *v);
+        }
+        let (public, req) = (w.public.clone(), b.body(Body::empty()).unwrap());
+        async move {
+            let resp = public.oneshot(req).await.unwrap();
+            let cookie = resp.headers().get_all("set-cookie").iter().map(|v| v.to_str().unwrap().to_string()).collect::<Vec<_>>().join("; ");
+            let v: Value = serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap_or(Value::Null);
+            (v["deployment"].clone(), cookie)
+        }
+    };
+    let first = d1["id"].as_str().unwrap();
+    assert_eq!(ask("/api", &[("x-deployment-id", first)]).await.0, d1["id"], "its header");
+    assert_eq!(ask(&format!("/app.js?dpl={first}"), &[]).await.0, d1["id"], "its query");
+    let cookie = format!("__roll_dpl={first}");
+    assert_eq!(ask("/api", &[("cookie", &cookie)]).await.0, d1["id"], "the cookie");
+    let (dep, set) = ask("/", &[("sec-fetch-dest", "document"), ("cookie", &cookie)]).await;
+    assert_eq!(dep, d2["id"], "a page load gets what's live");
+    assert!(set.contains(&format!("__roll_dpl={}", d2["id"].as_str().unwrap())), "{set}");
+    // Another service's deployment, or one never live here: what's live.
+    let (_, theirs) = image_service(&w, "other", json!({"port": 80})).await;
+    assert_eq!(ask("/api", &[("x-deployment-id", theirs["id"].as_str().unwrap())]).await.0, d2["id"]);
+}
+
 /// A deployment has its own URL: one deployed without traffic is reached there, not on the
 /// environment's, until a rollback to it puts it live.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -4649,6 +4760,54 @@ async fn a_replaced_instance_finishes_its_requests_within_drain_s() {
     let (_, r) = call(&w.api, "POST", &format!("{base}/redeploy"), Some(json!({}))).await;
     settled(&w, &id, "production", r["id"].as_str().unwrap()).await;
     assert_eq!(slow.await.unwrap(), StatusCode::OK, "it finished on the old instance");
+}
+
+/// A variable that's a `roll://` reference to its own environment's secret is read as the
+/// service at each deploy and sealed; another environment's or a project's is refused when it's
+/// set, and one that doesn't resolve fails the deploy.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_roll_reference_variable_reads_its_environments_secret() {
+    struct Refs;
+    #[async_trait]
+    impl apps_control::integrations::SecretSource for Refs {
+        fn name(&self) -> &'static str {
+            "fake"
+        }
+        async fn resolve(&self, _: &str, _: &str, _: &str) -> anyhow::Result<Vec<apps_control::integrations::SecretVar>> {
+            Ok(Vec::new())
+        }
+        async fn resolve_ref(&self, _: &str, env: &str, service: &str, reference: &str) -> anyhow::Result<String> {
+            assert!(service.starts_with("svc_") && env == "production");
+            match reference {
+                "roll://production/db/URL" => Ok("postgres://from-secrets".into()),
+                r => anyhow::bail!("no such key: {r}"),
+            }
+        }
+    }
+    let w = world_full(|_| {}, false, |d| d.secrets = Arc::new(Refs)).await;
+    let (svc, _) = image_service(&w, "api", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    let vars_path = format!("{base}/variables");
+    let set = |vars: Value| call(&w.api, "PATCH", &vars_path, Some(json!({ "set": vars })));
+    assert_eq!(set(json!({"X": "roll://staging/KEY"})).await.0, StatusCode::BAD_REQUEST, "another environment's");
+    assert_eq!(set(json!({"X": "roll://acme@production/KEY"})).await.0, StatusCode::BAD_REQUEST, "a project's");
+    assert_eq!(set(json!({"X": " roll://staging/KEY"})).await.0, StatusCode::BAD_REQUEST, "read as a reference once trimmed: written exactly or refused");
+    assert_eq!(set(json!({"X": "ROLL://production/db/URL"})).await.0, StatusCode::BAD_REQUEST, "or lowercased");
+    assert!(set(json!({"DATABASE_URL": "roll://production/db/URL", "FAKE_ECHO": "DATABASE_URL"})).await.0.is_success());
+    let (_, d) = call(&w.api, "POST", &format!("{base}/redeploy"), Some(json!({}))).await;
+    let d = settled(&w, &id, "production", d["id"].as_str().unwrap()).await;
+    assert_eq!(d["status"], "active", "{d}");
+    let (_, body) = visit_deployment(&w, &host(&svc["environments"][0]["url"]), d["id"].as_str().unwrap()).await;
+    assert_eq!(body["vars"]["DATABASE_URL"], "postgres://from-secrets", "{body}");
+    let (_, vars) = call(&w.api, "GET", &format!("{base}/variables"), None).await;
+    assert!(!vars.to_string().contains("postgres://from-secrets"), "never shown: {vars}");
+    // One that doesn't resolve: the deploy fails, saying which.
+    let (st, r) = set(json!({"OTHER": "roll://production/missing"})).await;
+    assert!(st.is_success(), "{st} {r}");
+    let (st, d) = call(&w.api, "POST", &format!("{base}/redeploy"), Some(json!({}))).await;
+    let failed = if st.is_success() { settled(&w, &id, "production", d["id"].as_str().unwrap()).await.to_string() } else { d.to_string() };
+    assert!(failed.contains("OTHER") && failed.contains("didn't resolve"), "{failed}");
 }
 
 /// Project secrets in an environment's values are shown only to whom roll secrets would show
