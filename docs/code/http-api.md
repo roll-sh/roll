@@ -176,7 +176,7 @@ Change  = {id, repo_id, repo /* full name */, number /* per-repo, from 1 */, tit
            landed_as: string | null, conflict: {paths, head} | null,
            queue: QueueInfo | null /* its latest time in the merge queue */,
            blockers: Blocker[] /* why it can't be queued or land right now; [] when it can */,
-           notices?: Blocker[] /* what it should know but needn't block on: secret_missing (it reads an environment variable a roll secrets environment doesn't set); absent when none */,
+           notices?: Blocker[] /* what it should know but needn't block on: secret_missing (it reads an environment variable a roll secrets environment doesn't set), secret_unstored (a credential roll secrets doesn't hold, unless roll.toml makes it a blocker); absent when none */,
            review: ReviewSummary /* see Reviews */,
            created_at, updated_at}
 Blocker   = {kind: "state" | "draft" | "untrusted" | "checks" | "needs_approval" | "needs_codeowner" | "changes_requested"
@@ -184,9 +184,12 @@ Blocker   = {kind: "state" | "draft" | "untrusted" | "checks" | "needs_approval"
                    | "visual" /* its preview's pages differ from main's and nobody accepted them (visual_review = "required") */
                    | "secret_leak" /* it adds a roll secrets value; names keys, never values (docs/secrets.md) */
                    | "secret_missing" /* a notice, on a trusted change in a repo that isn't public: it reads an environment variable some roll secrets environment doesn't set (the key only) */
+                   | "secret_unstored" /* a notice, or a blocker with roll.toml's [secrets] unstored_credentials = "block": it adds a credential
+                                          roll secrets doesn't hold (kind, path and line, never the value; the first 20, then one counting the rest) */
                    /* more may come: show unknown kinds by message */,
              message,
-             key?: string, environments?: string[] /* secret_leak, secret_missing: the roll secrets key and where */}
+             key?: string, environments?: string[] /* secret_leak, secret_missing: the roll secrets key and where */,
+             path?: string, line?: number, fingerprint?: string /* secret_unstored: where (1-based line) and what .roll/secrets-allow names to keep it */}
 QueueInfo = {id /* qe_… */, position: number | null /* 1-based while queued; null once it left */,
              lane: "urgent" | "normal", state: EntryState, error: string | null /* why it was ejected: one line */,
              output: string | null /* the failing checks' log tail behind `error`, "<check>:\n<tail>" per check */,
