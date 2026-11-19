@@ -109,6 +109,50 @@ async fn tenants_are_isolated() {
     assert_eq!(b.cmd(["PUBLISH", "c", "x"]).await.unwrap(), Reply::Int(0));
 }
 
+/// A database's id is in every URL, so it proves nothing: only its current secret logs in as the
+/// default user, in either form of AUTH and as `default@db`, even after the tenant makes the
+/// default user password-less again; a rotated-out secret is refused at once.
+#[tokio::test]
+async fn only_the_current_secret_logs_in_as_the_default_user() {
+    let catalog = Arc::new(StaticCatalog::default());
+    catalog.insert(spec("alpha", "pa"));
+    let node = Node::new(catalog.clone(), None, NodeConfig::default());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let dir: Arc<dyn Directory> = node;
+    tokio::spawn(serve_tcp(listener, dir));
+    let auth = |args: &'static [&'static str]| async move {
+        let mut c = RespClient::connect(addr).await.unwrap();
+        match c.cmd(args.iter().copied()).await.unwrap() {
+            Reply::Ok => "OK".to_string(),
+            Reply::Error(e) => e.split(' ').next().unwrap().to_string(),
+            other => format!("{other:?}"),
+        }
+    };
+    let wrong: &[&'static [&'static str]] = &[&["AUTH", "alpha_wrong"], &["AUTH", "default", "alpha_wrong"], &["AUTH", "default@alpha", "wrong"]];
+    let check_wrong = || async {
+        for &args in wrong {
+            assert_eq!(auth(args).await, "WRONGPASS", "{args:?}");
+        }
+    };
+    // Before the database is loaded, and once it is.
+    check_wrong().await;
+    assert_eq!(auth(&["AUTH", "alpha_pa"]).await, "OK");
+    assert_eq!(auth(&["AUTH", "default", "alpha_pa"]).await, "OK");
+    assert_eq!(auth(&["AUTH", "default@alpha", "pa"]).await, "OK");
+    check_wrong().await;
+    let mut tenant = RespClient::connect(addr).await.unwrap();
+    assert_eq!(tenant.cmd(["AUTH", "alpha_pa"]).await.unwrap(), Reply::Ok);
+    assert_eq!(tenant.cmd(["ACL", "SETUSER", "default", "nopass"]).await.unwrap(), Reply::Ok);
+    check_wrong().await;
+    // Rotated: the old secret is refused in both forms, the new one logs in.
+    catalog.insert(spec("alpha", "pa2"));
+    assert_eq!(auth(&["AUTH", "alpha_pa"]).await, "WRONGPASS");
+    assert_eq!(auth(&["AUTH", "default", "alpha_pa"]).await, "WRONGPASS");
+    assert_eq!(auth(&["AUTH", "alpha_pa2"]).await, "OK");
+    assert_eq!(auth(&["AUTH", "default", "alpha_pa2"]).await, "OK");
+}
+
 #[tokio::test]
 async fn scales_to_zero_and_back() {
     let (addr, node) = start(Some(Duration::from_millis(200))).await;

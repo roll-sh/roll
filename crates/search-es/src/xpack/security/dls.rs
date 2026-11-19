@@ -208,7 +208,7 @@ impl ReadSecurity {
     pub fn of(ctx: &Ctx) -> Option<ReadSecurity> {
         let p = ctx.principal.get().filter(|p| !p.is_superuser())?;
         let eff = super::effective(&super::file_roles(ctx.cluster), &ctx.state(), p);
-        let restricts = eff.own.iter().chain(eff.limited_by.iter().flatten()).flat_map(|r| r.indices.iter()).any(|g| g.query.is_some() || g.field_security.is_some() || !g.masked.is_empty());
+        let restricts = eff.own.iter().chain(eff.limited_by.iter().flatten()).chain(eff.also.iter().flatten()).flat_map(|r| r.indices.iter()).any(|g| g.query.is_some() || g.field_security.is_some() || !g.masked.is_empty());
         if !restricts {
             return None;
         }
@@ -218,7 +218,7 @@ impl ReadSecurity {
     }
 
     fn sets(&self) -> impl Iterator<Item = &Vec<Permission>> {
-        std::iter::once(&self.0.eff.own).chain(self.0.eff.limited_by.iter())
+        std::iter::once(&self.0.eff.own).chain(self.0.eff.limited_by.iter()).chain(self.0.eff.also.iter())
     }
 
     /// A set's entries granting `action` on `index` (or on its data stream); without one, the

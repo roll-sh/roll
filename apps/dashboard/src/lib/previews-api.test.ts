@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { a11yWords, checkSummary, parseSse, previewsApi, unmaskedNote } from "./previews-api";
+import { a11yWords, checkSummary, followLogs, parseSse, previewsApi, unmaskedNote } from "./previews-api";
 import { ROLL_API } from "./roll-api";
 
 /** A fetch that answers from a table (`METHOD /path?query`) and records what it was asked. */
@@ -85,6 +85,16 @@ describe("following logs", () => {
     // A \r\n split between two chunks is one line end, not an event's end.
     const c = parseSse("", "event: service\r");
     expect(parseSse(c.rest, "\ndata: web\r\n\r\n").events).toEqual([{ event: "service", data: "web" }]);
+  });
+
+  it("says which lines came on stderr (`event: stderr`) and leaves the service's name out", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("event: service\ndata: web\n\ndata: listening on 8000\n\nevent: stderr\ndata: card declined\n\n", { status: 200 })));
+    const got: [string, boolean][] = [];
+    await followLogs("pv_abc", "web", 10, (l, stderr) => got.push([l, stderr]), new AbortController().signal);
+    expect(got).toEqual([
+      ["listening on 8000", false],
+      ["card declined", true],
+    ]);
   });
 });
 

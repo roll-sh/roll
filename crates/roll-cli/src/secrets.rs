@@ -105,6 +105,13 @@ pub enum Secrets {
         #[arg(long)]
         raw: bool,
     },
+    /// Print a TOTP key's current one-time code and the seconds it has left.
+    Totp {
+        key: String,
+        /// When fewer than 5 seconds are left, wait for the next code.
+        #[arg(long)]
+        wait: bool,
+    },
     /// Set secrets: `KEY=VALUE…`, or one `KEY` with the value on stdin.
     Set {
         #[arg(required = true)]
@@ -116,10 +123,11 @@ pub enum Secrets {
         /// A value of your own that replaces the shared one for you only.
         #[arg(long)]
         personal: bool,
-        /// Make each KEY a fresh random value of this many characters (letters and digits), made
-        /// here: `roll secrets set SESSION_SECRET --generate 48`.
-        #[arg(long, value_name = "LENGTH")]
-        generate: Option<usize>,
+        /// Make each KEY a fresh random value, made here: what the key's password policy asks if
+        /// it has one (`roll secrets required`), else LENGTH (default 48) letters and digits:
+        /// `roll secrets set SESSION_SECRET --generate`.
+        #[arg(long, value_name = "LENGTH", num_args = 0..=1)]
+        generate: Option<Option<usize>>,
         /// Open a change request instead of writing (protected environments).
         #[arg(long)]
         request: bool,
@@ -160,14 +168,18 @@ pub enum Secrets {
         /// A .env or JSON file (`-`: stdin); or `--from` another manager.
         #[arg(required_unless_present = "from")]
         file: Option<String>,
-        /// Read it from another manager's API, with your own token from its usual variable:
-        /// doppler (`DOPPLER_TOKEN`), vault (`VAULT_ADDR`, `VAULT_TOKEN`), infisical (`INFISICAL_TOKEN`),
-        /// aws (Secrets Manager through your `aws` CLI: its profiles and SSO).
+        /// Read it from another manager, signed in as you are there. From its API with your token
+        /// in its usual variable: doppler (`DOPPLER_TOKEN`), vault (`VAULT_ADDR`, `VAULT_TOKEN`),
+        /// infisical (`INFISICAL_TOKEN`). Through its own CLI: aws (Secrets Manager),
+        /// aws-parameter-store, 1password (`op`), bitwarden (`bws`), gcp (`gcloud`), azure (`az`),
+        /// akeyless.
         #[arg(long, conflicts_with = "file", requires = "source")]
         from: Option<String>,
         /// What to read there: doppler `project/config`, vault `mount/path` (KV v2), infisical
-        /// `workspace-id/environment[/path]`, aws a name prefix (`prod/app/`). With `--map`, the
-        /// part before the mapped name.
+        /// `workspace-id/environment[/path]`, aws a name prefix (`prod/app/`),
+        /// aws-parameter-store and akeyless a path (`/prod/app`), 1password `VAULT` or
+        /// `VAULT/ITEM`, bitwarden a project id, gcp `PROJECT[/PREFIX]`, azure a vault's name.
+        /// With `--map`, the part before the mapped name.
         #[arg(long)]
         source: Option<String>,
         /// Several environments at once: `dev=development,prd=production` reads `<source>/dev`
@@ -183,6 +195,14 @@ pub enum Secrets {
         overwrite: bool,
         #[arg(long)]
         request: bool,
+        /// Print the folders and keys it would import (never a value), and import nothing.
+        #[arg(long, requires = "from")]
+        dry_run: bool,
+        /// Tag what the source keeps secret `sensitive` (for good: no person or token reads it
+        /// back): Parameter Store's SecureStrings, 1Password's concealed fields, every value of
+        /// the other managers.
+        #[arg(long, requires = "from")]
+        sensitive: bool,
     },
     /// Fill `${KEY}` in a config file (`-`: stdin) from the environment; a key that isn't set fails.
     /// `\${KEY}` stays as written. Prints it, or writes `--out` (0600).
@@ -321,8 +341,9 @@ pub enum Secrets {
     /// Encryption keys (encryption as a service): encrypt stdin, decrypt stdin, rotate, list.
     #[command(subcommand)]
     Transit(TransitCmd),
-    /// The project's certificate authorities: list, add, print one's certificate, remove.
-    #[command(subcommand)]
+    /// The project's certificate authorities: list, add, print one's certificate, sign, revoke,
+    /// ACME, remove.
+    #[command(subcommand, alias = "ca")]
     Cas(CasCmd),
     /// The project's SSH CAs: list, add, print one's public key (for TrustedUserCAKeys), remove.
     #[command(subcommand, name = "ssh-cas")]
@@ -335,6 +356,32 @@ pub enum Secrets {
     /// list, add, remove.
     #[command(subcommand)]
     Databases(DatabasesCmd),
+    /// LDAP and Active Directory servers whose accounts roll rotates or makes per lease: list,
+    /// add (the bind password on stdin), remove.
+    #[command(subcommand)]
+    Directories(DirectoriesCmd),
+    /// Snowflake accounts whose service user's key roll rotates, or that make a user per lease:
+    /// list, add (the admin user's private key from a file), remove.
+    #[command(subcommand)]
+    Snowflake(SnowflakeCmd),
+    /// MongoDB Atlas projects whose two database users roll rotates in turn, or that make a user
+    /// per lease, through Atlas's Admin API: list, add (the service account's secret on stdin),
+    /// remove.
+    #[command(subcommand)]
+    Atlas(AtlasCmd),
+    /// Gateways into private networks (docs/secrets.md, "Gateways"): list with their status, add
+    /// (its token printed once), remove, and `up`: run one inside the network.
+    #[command(subcommand)]
+    Gateways(GatewaysCmd),
+    /// Vendor credentials roll issues and revokes keys with (SendGrid, Twilio, Okta, Entra,
+    /// Auth0): list, add (the credential on stdin), remove.
+    #[command(subcommand)]
+    Saas(SaasCmd),
+    /// Kubernetes clusters that issue short-lived service account tokens per lease (link kind
+    /// `kubernetes`): list, add (the admin token on stdin), remove. Not `kubernetes`, which pulls
+    /// an environment into a cluster.
+    #[command(subcommand, name = "kubernetes-clusters")]
+    KubernetesClusters(KubernetesClustersCmd),
     /// The project's GitHub Apps, for an installation token per lease (narrowed by the link's
     /// options.repositories and options.permissions): list, add, remove.
     #[command(subcommand, name = "github-apps")]
@@ -368,6 +415,24 @@ pub enum Secrets {
         #[arg(long)]
         out: Option<std::path::PathBuf>,
     },
+    /// Back the project up on a schedule into one of its roll buckets, sealed to `--to`: shows the
+    /// schedule with no flags, sets it with `--bucket` and `--to`, stops it with `--off`.
+    #[command(name = "backup-schedule")]
+    BackupSchedule {
+        #[arg(long, requires = "to", conflicts_with = "off")]
+        bucket: Option<String>,
+        /// The recipient's public key (base64url X25519).
+        #[arg(long, requires = "bucket")]
+        to: Option<String>,
+        /// Hours between backups (default 24).
+        #[arg(long, requires = "bucket")]
+        every: Option<u32>,
+        /// How many to keep (default 30).
+        #[arg(long, requires = "bucket")]
+        keep: Option<u32>,
+        #[arg(long)]
+        off: bool,
+    },
     /// Load a backup into this project (which has no secrets yet), opened with the secret key.
     Restore {
         file: std::path::PathBuf,
@@ -375,6 +440,11 @@ pub enum Secrets {
         #[arg(long)]
         key: std::path::PathBuf,
     },
+    /// Split the deployment key (`ROLL_SECRET_KEY`) or a backup's secret key into shares, any
+    /// threshold of which give it back, and combine them again. On this machine only: nothing
+    /// goes to roll.
+    #[command(subcommand)]
+    Key(KeyCmd),
     /// The folders this folder imports (its own project's, or a folder another project shares
     /// with it): list, add, rm.
     #[command(subcommand)]
@@ -389,6 +459,9 @@ pub enum Secrets {
     /// (`ROLL_IDENTITY`), no stored token: list, add, rm.
     #[command(subcommand)]
     Identities(Identities),
+    /// Decoy keys: a credential planted to be found, whose use raises `decoy_used` (admins only).
+    #[command(subcommand)]
+    Decoy(DecoyCmd),
     /// Hand a value to someone outside roll: a link that opens once (or `--views`) and expires.
     /// The value is encrypted here; the key is only in the link.
     Share {
@@ -405,8 +478,9 @@ pub enum Secrets {
     },
     /// Open a share's link (or `<id>#<key>`) and print its value; it counts as one of its opens.
     Open { link: String },
-    /// Pushes of an environment to outside platforms (GitHub Actions, Vercel, Cloudflare, AWS
-    /// Parameter Store, webhooks): list, add, run now, remove.
+    /// Pushes of an environment to outside platforms (GitHub Actions, Vercel, Cloudflare, Supabase,
+    /// AWS Parameter Store, Azure App Configuration, HashiCorp Vault, webhooks): list, add, run now,
+    /// remove.
     #[command(subcommand)]
     Syncs(Syncs),
     /// Streams of the audit log to a SIEM: list, add, remove.
@@ -459,7 +533,7 @@ pub enum Syncs {
     Ls,
     /// Add a sync of this environment and folder: `add github --target repo=acme/web`.
     Add {
-        /// The kind: github, gitlab, vercel, aws-secrets-manager, … (`syncs ls` lists them).
+        /// The kind: github, gitlab, azure-devops, vercel, aws-secrets-manager, … (`syncs ls` lists them).
         kind: String,
         /// The target's fields as `name=value` (repeat), as `syncs ls` describes them.
         #[arg(long = "target", value_name = "NAME=VALUE")]
@@ -626,7 +700,7 @@ pub enum AwsRolesCmd {
 pub enum DatabasesCmd {
     #[command(alias = "list")]
     Ls,
-    /// Register a database: its admin URL (postgres://admin:…@host:5432/db, mysql://…, sqlserver://…, clickhouse://…, rabbitmq://…, rediss://… or mongodb+srv://…) on stdin; two login
+    /// Register a database: its admin URL (postgres://admin:…@host:5432/db, mysql://…, sqlserver://…, clickhouse://…, rabbitmq://…, rediss://…, mongodb+srv://…, elasticsearch://…, opensearch://… or cassandra://…) on stdin; two login
     /// roles that take turns (managed links), a group dynamic logins join, or both.
     Add {
         name: String,
@@ -638,6 +712,9 @@ pub enum DatabasesCmd {
         /// The server's CA certificates (PEM file), when the system's don't cover it (Amazon RDS).
         #[arg(long)]
         ca: Option<std::path::PathBuf>,
+        /// Reach it through one of the project's gateways (gw_…): it may have a private address.
+        #[arg(long)]
+        gateway: Option<String>,
     },
     /// Change a registration in place: its name, its CA, or (--url) its admin URL from stdin,
     /// checked before it's kept.
@@ -680,6 +757,196 @@ pub enum GithubAppsCmd {
         /// A permission tokens may have at most, `name:level` (`contents:read`; repeat it).
         #[arg(long = "permission", required = true)]
         permissions: Vec<String>,
+    },
+    Rm { id: String },
+}
+
+#[derive(Subcommand)]
+pub enum KubernetesClustersCmd {
+    #[command(alias = "list")]
+    Ls,
+    /// Register a cluster: its API server's https:// URL, and on stdin a service account token
+    /// that may create tokens (`create` on `serviceaccounts/token`).
+    Add {
+        name: String,
+        api_url: String,
+        /// The cluster's CA certificates (PEM file), when its API server's certificate isn't
+        /// publicly trusted: then only it is trusted, for this cluster's calls.
+        #[arg(long)]
+        ca: Option<std::path::PathBuf>,
+    },
+    Rm { id: String },
+}
+
+#[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
+pub enum SaasCmd {
+    #[command(alias = "list")]
+    Ls,
+    /// Register a vendor credential, read from stdin (never an argument). Each vendor takes its
+    /// own flags: sendgrid `--scope`…; twilio `--account-sid`; okta `--domain --app-id`; entra
+    /// `--tenant --client-id --object-id`; auth0 `--domain --client-id --app-client-id`.
+    Add {
+        name: String,
+        /// sendgrid, twilio, okta, entra or auth0.
+        #[arg(long)]
+        vendor: String,
+        /// A scope each SendGrid key gets (none: full access).
+        #[arg(long = "scope", num_args = 1)]
+        scopes: Vec<String>,
+        #[arg(long)]
+        account_sid: Option<String>,
+        /// Okta's org host (acme.okta.com) or Auth0's tenant domain (acme.us.auth0.com).
+        #[arg(long)]
+        domain: Option<String>,
+        #[arg(long)]
+        app_id: Option<String>,
+        #[arg(long)]
+        tenant: Option<String>,
+        /// The app roll signs in as (Entra, Auth0).
+        #[arg(long)]
+        client_id: Option<String>,
+        /// The Entra application whose secret rotates (its object id).
+        #[arg(long)]
+        object_id: Option<String>,
+        /// The Auth0 app whose secret rotates.
+        #[arg(long)]
+        app_client_id: Option<String>,
+    },
+    Rm { id: String },
+}
+
+#[derive(Subcommand)]
+pub enum SnowflakeCmd {
+    #[command(alias = "list")]
+    Ls,
+    /// Register an account: roll signs in as `--admin-user` with its key pair; a managed user
+    /// (`--user`), the roles dynamic users get (`--role`, the first their default), or both.
+    Add {
+        name: String,
+        /// The account identifier (myorg-myaccount, or a locator such as xy12345.us-east-2.aws).
+        #[arg(long)]
+        account: String,
+        /// Reach it at <account>.privatelink.snowflakecomputing.com.
+        #[arg(long)]
+        privatelink: bool,
+        /// The user roll signs in as (its RSA_PUBLIC_KEY is the key's public half).
+        #[arg(long)]
+        admin_user: String,
+        /// The role roll's statements run as (default: the admin user's default role).
+        #[arg(long)]
+        admin_role: Option<String>,
+        /// The admin user's private key: a PEM file (PKCS#8 unencrypted, or PKCS#1), or - for stdin.
+        #[arg(long)]
+        key: String,
+        /// key_pair (default) or password: how the users roll hands out sign in.
+        #[arg(long, default_value = "key_pair")]
+        auth: String,
+        /// The service user managed links rotate.
+        #[arg(long = "user")]
+        managed_user: Option<String>,
+        /// A role dynamic users are granted.
+        #[arg(long = "role", num_args = 1)]
+        roles: Vec<String>,
+    },
+    Rm { id: String },
+}
+
+#[derive(Subcommand)]
+pub enum AtlasCmd {
+    #[command(alias = "list")]
+    Ls,
+    /// Register an Atlas project: roll takes a token as the organization service account
+    /// `--client-id` (its secret on stdin); two users managed links rotate in turn (`--user`
+    /// twice), the roles dynamic users get (`--role role@db[.collection]`), or both.
+    Add {
+        name: String,
+        /// The Atlas project's id (24 hex digits; the Admin API's groupId).
+        #[arg(long)]
+        group_id: String,
+        /// The service account's client id (mdb_sa_id_…).
+        #[arg(long)]
+        client_id: String,
+        /// A database user managed links rotate (give two: they take turns).
+        #[arg(long = "user", num_args = 1)]
+        managed_users: Vec<String>,
+        /// A role dynamic users get, as role@db or role@db.collection.
+        #[arg(long = "role", num_args = 1)]
+        roles: Vec<String>,
+    },
+    Rm { id: String },
+}
+
+#[derive(Subcommand)]
+pub enum GatewaysCmd {
+    #[command(alias = "list")]
+    Ls,
+    /// Make a gateway; its roll token is printed once (give it to `up` as ROLL_GATEWAY_TOKEN).
+    Add {
+        name: String,
+        /// No token: the gateway logs in through a workload identity made for it instead.
+        #[arg(long)]
+        no_token: bool,
+    },
+    Rm { id: String },
+    /// Run a gateway inside the private network: one WebSocket out to roll, and streams only to
+    /// what --allow lists (the token from ROLL_GATEWAY_TOKEN or --token-file, or --identity with
+    /// --oidc-token-file).
+    Up {
+        /// The gateway's id (gw_…).
+        #[arg(long)]
+        gateway: String,
+        /// HOST:PORT, *.SUFFIX:PORT or CIDR:PORT (IPv6 in brackets), where PORT may also be a range
+        /// LOW-HIGH (both included, 1-65535) or *; repeat it.
+        #[arg(long = "allow", num_args = 1)]
+        allow: Vec<String>,
+        /// A file of allow-list entries, one a line (# comments).
+        #[arg(long)]
+        allow_file: Option<std::path::PathBuf>,
+        /// A file holding the gateway's roll token (else ROLL_GATEWAY_TOKEN).
+        #[arg(long)]
+        token_file: Option<std::path::PathBuf>,
+        /// Log in through this workload identity (idn_…) instead of a token.
+        #[arg(long, requires = "oidc_token_file")]
+        identity: Option<String>,
+        /// The OIDC token file the identity logs in with, read again at each login (Kubernetes'
+        /// projected token).
+        #[arg(long)]
+        oidc_token_file: Option<std::path::PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum DirectoriesCmd {
+    #[command(alias = "list")]
+    Ls,
+    /// Register a directory: the bind account's password on stdin; one or two managed accounts
+    /// (two take turns), a base for dynamic users (and the groups they join), or both.
+    Add {
+        name: String,
+        /// ldaps://host[:636], or ldap://host[:389] (StartTLS, always).
+        #[arg(long)]
+        url: String,
+        /// The account roll binds as (it may reset the managed accounts' passwords and make users).
+        #[arg(long)]
+        bind_dn: String,
+        /// openldap or active_directory.
+        #[arg(long, default_value = "openldap")]
+        flavor: String,
+        #[arg(long = "account", num_args = 1)]
+        accounts: Vec<String>,
+        /// Where each dynamic lease's user is made (cn=roll-<lease>,<it>).
+        #[arg(long)]
+        user_base_dn: Option<String>,
+        /// A group each dynamic user joins.
+        #[arg(long = "group", num_args = 1)]
+        groups: Vec<String>,
+        /// Reach it through one of the project's gateways (gw_…): it may have a private address.
+        #[arg(long)]
+        gateway: Option<String>,
+        /// The server's CA certificates (PEM file), when the system's don't cover it.
+        #[arg(long)]
+        ca: Option<std::path::PathBuf>,
     },
     Rm { id: String },
 }
@@ -795,7 +1062,47 @@ pub enum CasCmd {
     Certs { id: String },
     /// Revoke a certificate (on the CA's CRL until it expires).
     Revoke { id: String, serial: String },
+    /// ACME on the CA (cert-manager, certbot, lego, Caddy): its directory URL and External Account
+    /// Bindings.
+    #[command(subcommand)]
+    Acme(AcmeCmd),
     Rm { id: String },
+}
+
+#[derive(Subcommand)]
+pub enum AcmeCmd {
+    /// External Account Bindings: the key id and HMAC key an ACME client makes its account with.
+    #[command(subcommand)]
+    Eab(EabCmd),
+    /// Make a binding's names valid without a challenge (on|off): its key is then the whole proof.
+    PreAuthorize {
+        ca: String,
+        #[arg(value_parser = ["on", "off"])]
+        state: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum EabCmd {
+    /// A new binding: prints its key id and HMAC key (shown once), the directory URL and a
+    /// cert-manager ClusterIssuer.
+    Add {
+        ca: String,
+        /// Names its accounts may order (each takes every name under it); the CA's whole policy
+        /// by default.
+        #[arg(long = "name")]
+        names: Vec<String>,
+        /// Days until it stops working (until revoked by default).
+        #[arg(long)]
+        days: Option<u32>,
+        #[arg(long)]
+        label: Option<String>,
+    },
+    /// The CA's directory URL and bindings.
+    #[command(alias = "list")]
+    Ls { ca: String },
+    /// Revoke a binding: every account made with it stops at once.
+    Rm { ca: String, id: String },
 }
 
 #[derive(Subcommand)]
@@ -868,6 +1175,32 @@ pub enum Tokens {
 }
 
 #[derive(Subcommand)]
+pub enum KeyCmd {
+    /// Split a key into `--shares` shares (`rlks_…`), any `--threshold` of which recover it. The
+    /// key is read from `--file`, else stdin (asked for without echo on a terminal).
+    Split {
+        #[arg(long)]
+        shares: usize,
+        #[arg(long)]
+        threshold: usize,
+        /// A file holding the key (`<home>/secrets.key`, a backup's secret key).
+        #[arg(long)]
+        file: Option<std::path::PathBuf>,
+        /// Write each share to its own file here (0600, never overwritten) instead of stdout.
+        #[arg(long)]
+        out_dir: Option<std::path::PathBuf>,
+    },
+    /// Combine shares into the key: one share per line on stdin, or asked for one at a time
+    /// without echo on a terminal. A damaged share, one of another split, or one given twice is
+    /// refused; the key is never guessed.
+    Combine {
+        /// Write the key here (0600, never overwritten) instead of stdout.
+        #[arg(long)]
+        out: Option<std::path::PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
 pub enum ImportsCmd {
     #[command(alias = "list")]
     Ls,
@@ -909,7 +1242,7 @@ pub enum RequiredCmd {
         key: String,
         #[arg(long, default_value = "/")]
         path: String,
-        /// url, int, port, bool, json or email.
+        /// url, int, port, bool, json, email or totp (a TOTP seed: `roll secrets totp KEY`).
         #[arg(long = "type")]
         kind: Option<String>,
         /// A regular expression the whole value must match.
@@ -920,11 +1253,34 @@ pub enum RequiredCmd {
         /// Who supplies it (a person or team): health and the daily notice name them.
         #[arg(long)]
         owner: Option<String>,
+        /// A password policy's length (8–256): values must be at least this long, and
+        /// `set KEY --generate` makes this many characters.
+        #[arg(long, value_name = "N")]
+        password_length: Option<u16>,
+        /// The policy's character classes, one of each required and nothing else: lower, upper,
+        /// digit, symbol (default lower,upper,digit).
+        #[arg(long, value_delimiter = ',', requires = "password_length")]
+        classes: Vec<String>,
+        /// Which characters `symbol` means (default !#%&*+-=?^_~).
+        #[arg(long, requires = "password_length")]
+        symbols: Option<String>,
     },
     Rm {
         key: String,
         #[arg(long, default_value = "/")]
         path: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum DecoyCmd {
+    /// Plant a decoy key in the environment's folder (`--path`): a new key whose value is a decoy
+    /// credential. It reads like any other key; any use of it raises `decoy_used`.
+    Add {
+        key: String,
+        /// What the value is: `rlt`, a roll token that allows nothing.
+        #[arg(long, default_value = "rlt")]
+        kind: String,
     },
 }
 
@@ -972,6 +1328,10 @@ pub enum Identities {
         /// cluster's own (`kubectl get --raw /openid/v1/jwks`). Then the issuer is never fetched.
         #[arg(long, value_name = "FILE")]
         jwks: Option<String>,
+        /// Log a gateway in (gw_…) instead of reading secrets: its tokens open that gateway's link
+        /// only (no --for-env, --for-path or --action).
+        #[arg(long, conflicts_with_all = ["envs", "paths", "actions"])]
+        gateway: Option<String>,
     },
     /// Replace an identity's pinned keys (the cluster rotated its signing key); its id stays.
     Keys {
@@ -995,6 +1355,10 @@ pub struct Run {
     /// Replace variables already set in this shell (default: the shell's value wins).
     #[arg(long = "override")]
     pub override_env: bool,
+    /// Add `<KEY>_CODE` beside each TOTP key: its one-time code when the values were read. It
+    /// expires with its step (30 s by default), so it suits a command that logs in right away.
+    #[arg(long)]
+    pub totp_codes: bool,
     /// Restart the command when the environment changes (checked every `--interval` seconds).
     #[arg(long)]
     pub watch: bool,
@@ -1091,13 +1455,21 @@ async fn project(api: &Api, given: Option<&str>) -> anyhow::Result<String> {
             let found: Vec<String> = list.as_array().into_iter().flatten().filter(|p| p["name"] == name).filter_map(|p| p["id"].as_str().map(String::from)).collect();
             match found.as_slice() {
                 [one] => Ok(one.clone()),
-                [] => bail!("no project named {name}"),
+                [] => {
+                    let mut seen: Vec<&str> = list.as_array().into_iter().flatten().filter_map(|p| p["name"].as_str()).collect();
+                    seen.sort_unstable();
+                    seen.dedup();
+                    match seen.as_slice() {
+                        [] => bail!("no project named {name}, and this token sees no projects"),
+                        _ => bail!("no project named {name}; the ones you can see: {}", seen.join(", ")),
+                    }
+                }
                 _ => bail!("{} projects are named {name}: give its prj_… id", found.len()),
             }
         }
         None => {
             let who = api.get("/v1/secrets/whoami").await?;
-            who["project"].as_str().map(String::from).context("which project? pass -p <name> or set ROLL_PROJECT")
+            who["project"].as_str().map(String::from).context("which project? pass -p <name>, set ROLL_PROJECT, or remember one for this folder with `roll secrets setup -p <name>`")
         }
     }
 }
@@ -1206,6 +1578,10 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
         }
         return Ok(());
     }
+    // A gateway runs with its own credential, in no project's name.
+    if let Secrets::Gateways(GatewaysCmd::Up { gateway, allow, allow_file, token_file, identity, oidc_token_file }) = &cmd {
+        return gateway_up(api, gateway.clone(), allow.clone(), allow_file.clone(), token_file.clone(), identity.clone(), oidc_token_file.clone()).await;
+    }
     // A key pair is this machine's, not a project's.
     if let Secrets::Keygen { out } = &cmd {
         let (secret, public) = crate::seal::keypair();
@@ -1213,6 +1589,10 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
         println!("{public}");
         eprintln!("The secret key is in {} (0600): keep it apart from the backups. The public key above goes to backup --to.", out.display());
         return Ok(());
+    }
+    // So is a key's split.
+    if let Secrets::Key(cmd) = cmd {
+        return key_shares(cmd);
     }
     let at = args.resolve();
     let c = Client { project: project(api, at.project.as_deref()).await?, api, at };
@@ -1268,14 +1648,35 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             }
             println!("{}", s(&v["value"]));
         }
+        Secrets::Totp { key, wait } => {
+            let url = format!("{env}/secrets/{}/totp?{}", enc(&key), c.q());
+            let mut v = c.call(Method::GET, &url, None).await?;
+            let left = |v: &Value| (v["expires_at"].as_i64().unwrap_or(0) - now_ms()).max(0);
+            if wait && left(&v) < 5_000 {
+                eprintln!("waiting {} s for the next code…", (left(&v) + 999) / 1000);
+                tokio::time::sleep(std::time::Duration::from_millis(left(&v) as u64 + 250)).await;
+                v = c.call(Method::GET, &url, None).await?;
+            }
+            if json_out {
+                return print(&v);
+            }
+            println!("{}", s(&v["code"]));
+            eprintln!("{} s left", left(&v) / 1000);
+        }
         Secrets::Set { pairs, comment, tags, personal, generate, request, message, expires } => {
             let expires = expires.as_deref().map(expiry).transpose()?;
+            // Password policies, for --generate (a caller who can't read them gets plain values).
+            let policies = if generate.is_some() { c.call(Method::GET, &format!("{}/required", c.base()), None).await.unwrap_or_default() } else { Value::Null };
             let mut ops = vec![];
             for p in &pairs {
                 let (key, value) = split_pair(p)?;
+                let policy = policies.as_array().into_iter().flatten().find(|r| r["key"] == key && r["path"] == c.at.path.as_str()).map(|r| &r["password"]).filter(|p| p.is_object());
                 let value = match (value, generate) {
                     (Some(_), Some(_)) => bail!("{key}: --generate makes the value; give only the key"),
-                    (None, Some(n)) => random_value(n)?,
+                    (None, Some(n)) => match policy {
+                        Some(p) => policy_value(p, n)?,
+                        None => random_value(n.unwrap_or(48))?,
+                    },
                     (Some(v), None) => v,
                     (None, None) if pairs.len() == 1 => {
                         let mut v = String::new();
@@ -1317,48 +1718,31 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             write(&c, &env, ops, None, request, json_out).await?;
         }
         Secrets::Edit { request } => edit(&c, &env, request, json_out).await?,
-        Secrets::Import { file, from, source, map, recursive, overwrite, request } => {
-            if recursive {
-                anyhow::ensure!(from.as_deref() == Some("vault") && map.is_empty(), "--recursive reads a Vault KV v2 tree: --from vault --source mount/path");
-                let tree = vault_tree(source.as_deref().unwrap_or_default()).await?;
-                anyhow::ensure!(!tree.is_empty(), "nothing to import under {}", source.as_deref().unwrap_or_default());
-                for (folder, values) in &tree {
-                    let path = format!("{}/{}", c.at.path.trim_end_matches('/'), folder).replace("//", "/");
-                    let path = if path.len() > 1 { path.trim_end_matches('/').to_string() } else { path };
-                    let body = import_body(&serde_json::to_string(values)?, &path, overwrite, request)?;
-                    let v = c.call(Method::POST, &format!("{env}/import"), Some(body)).await.map_err(approval_hint).with_context(|| format!("importing into {path}"))?;
-                    let skipped = v["skipped"].as_array().map_or(0, Vec::len);
-                    match v.get("request").filter(|r| r.is_object()) {
-                        Some(r) => println!("{path}: change request {} ({} values)", s(&r["id"]), values.len()),
-                        None => println!("{path}: {} value{}{}", values.len(), if values.len() == 1 { "" } else { "s" }, if skipped > 0 { format!(", {skipped} existing skipped (use --overwrite)") } else { String::new() }),
-                    }
+        Secrets::Import { file, from, source, map, recursive, overwrite, request, dry_run, sensitive } => {
+            if let Some(from) = from {
+                anyhow::ensure!(!recursive || (from == "vault" && map.is_empty()), "--recursive reads a Vault KV v2 tree: --from vault --source mount/path");
+                let source = source.unwrap_or_default();
+                let o = ImportOpts { overwrite, request, sensitive, dry_run, message: format!("imported from {from} {}", source.chars().take(200).collect::<String>()) };
+                if map.is_empty() {
+                    let folders = read_source(&from, &source, recursive).await?;
+                    return import_folders(&c, &env, &folders, &o, None, json_out).await;
                 }
-                return Ok(());
-            }
-            if let (Some(from), false) = (&from, map.is_empty()) {
-                let base = source.as_deref().unwrap_or_default().trim_end_matches('/');
+                let base = source.trim_end_matches('/');
                 for pair in &map {
                     let (src, dst) = pair.split_once('=').with_context(|| format!("{pair}: --map is source=environment"))?;
-                    let values = import_from(from, &format!("{base}/{src}")).await.with_context(|| format!("reading {base}/{src}"))?;
-                    let body = import_body(&serde_json::to_string(&values)?, &c.at.path, overwrite, request)?;
-                    let v = c.call(Method::POST, &format!("{}/import", c.env(dst)), Some(body)).await.map_err(approval_hint).with_context(|| format!("importing into {dst}"))?;
-                    let skipped = v["skipped"].as_array().map_or(0, Vec::len);
-                    match v.get("request").filter(|r| r.is_object()) {
-                        Some(r) => println!("{src} → {dst}: change request {} ({} values)", s(&r["id"]), values.len()),
-                        None => println!("{src} → {dst}: {} value{}{}", values.len(), if values.len() == 1 { "" } else { "s" }, if skipped > 0 { format!(", {skipped} existing skipped (use --overwrite)") } else { String::new() }),
-                    }
+                    let folders = read_source(&from, &format!("{base}/{src}"), false).await.with_context(|| format!("reading {base}/{src}"))?;
+                    import_folders(&c, &c.env(dst), &folders, &o, Some(&format!("{src} → {dst}")), json_out).await?;
                 }
                 return Ok(());
             }
-            let text = match (file.as_deref(), from) {
-                (_, Some(from)) => serde_json::to_string(&import_from(&from, source.as_deref().unwrap_or_default()).await?)?,
-                (Some("-"), None) => {
+            let text = match file.as_deref() {
+                Some("-") => {
                     let mut t = String::new();
                     std::io::stdin().read_to_string(&mut t)?;
                     t
                 }
-                (Some(f), None) => std::fs::read_to_string(f).with_context(|| format!("reading {f}"))?,
-                (None, None) => bail!("a file, or --from another manager"),
+                Some(f) => std::fs::read_to_string(f).with_context(|| format!("reading {f}"))?,
+                None => bail!("a file, or --from another manager"),
             };
             let v = c
                 .call(Method::POST, &format!("{env}/import"), Some(import_body(&text, &c.at.path, overwrite, request)?))
@@ -1753,15 +2137,15 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     println!("{}  {:<16} {:<32} {}{group}", s(&d["id"]), s(&d["name"]), s(&d["host"]), roles.join(" "));
                 }
             }
-            DatabasesCmd::Add { name, roles, group, ca } => {
+            DatabasesCmd::Add { name, roles, group, ca, gateway } => {
                 // The admin URL holds a password: never an argument.
                 if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-                    eprint!("Admin URL (postgres://admin:…@host:5432/db, mysql://…, sqlserver://…, clickhouse://…, rabbitmq://…, rediss://… or mongodb+srv://…), then Enter and Ctrl-D: ");
+                    eprint!("Admin URL (postgres://admin:…@host:5432/db, mysql://…, sqlserver://…, clickhouse://…, rabbitmq://…, rediss://…, mongodb+srv://…, elasticsearch://…, opensearch://… or cassandra://…), then Enter and Ctrl-D: ");
                 }
                 let mut url = String::new();
                 std::io::stdin().read_to_string(&mut url).context("reading the admin URL from stdin")?;
                 let ca = ca.map(|p| std::fs::read_to_string(&p).with_context(|| format!("reading {}", p.display()))).transpose()?;
-                let v = c.call(Method::POST, &format!("{}/outside-databases", c.base()), Some(json!({ "name": name, "url": url.trim(), "roles": roles, "group": group, "ca": ca }))).await?;
+                let v = c.call(Method::POST, &format!("{}/outside-databases", c.base()), Some(json!({ "name": name, "url": url.trim(), "roles": roles, "group": group, "ca": ca, "gateway": gateway }))).await?;
                 if json_out {
                     return print(&v);
                 }
@@ -1804,6 +2188,141 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 println!("Removed {id}");
             }
         },
+        Secrets::Gateways(g) => match g {
+            GatewaysCmd::Ls => {
+                let v = c.call(Method::GET, &format!("{}/gateways", c.base()), None).await?;
+                if json_out {
+                    return print(&v);
+                }
+                for g in v.as_array().into_iter().flatten() {
+                    let st = &g["status"];
+                    let state = match (st["online"].as_bool(), st["node"].as_str()) {
+                        (Some(true), Some(node)) => format!("online on {node}, roll {}", s(&st["version"])),
+                        _ => st["last_seen_at"].as_i64().map(|t| format!("offline, last seen {}", ago(t))).unwrap_or_else(|| "never connected".into()),
+                    };
+                    let allow: Vec<&str> = st["allow"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+                    println!("{}  {:<16} {state}{}", s(&g["id"]), s(&g["name"]), if allow.is_empty() { String::new() } else { format!("  allows {}", allow.join(" ")) });
+                }
+            }
+            GatewaysCmd::Add { name, no_token } => {
+                let v = c.call(Method::POST, &format!("{}/gateways", c.base()), Some(json!({ "name": name, "token": !no_token }))).await?;
+                if json_out {
+                    return print(&v);
+                }
+                let id = s(&v["gateway"]["id"]);
+                match v["token"].as_str() {
+                    Some(t) => {
+                        println!("{t}");
+                        eprintln!("Added gateway {name} ({id}). Its token is above, shown once. Inside the network:\n  ROLL_GATEWAY_TOKEN=… roll secrets gateways up --gateway {id} --allow HOST:PORT");
+                    }
+                    None => eprintln!("Added gateway {name} ({id}), without a token: make a workload identity with \"gateway\": \"{id}\" for it to log in."),
+                }
+            }
+            GatewaysCmd::Rm { id } => {
+                c.call(Method::DELETE, &format!("{}/gateways/{}", c.base(), enc(&id)), None).await?;
+                println!("Removed {id} (its token is revoked)");
+            }
+            GatewaysCmd::Up { .. } => unreachable!("handled above"),
+        },
+        Secrets::Directories(d) => match d {
+            DirectoriesCmd::Ls => {
+                let v = c.call(Method::GET, &format!("{}/directories", c.base()), None).await?;
+                if json_out {
+                    return print(&v);
+                }
+                for d in v.as_array().into_iter().flatten() {
+                    let accounts: Vec<&str> = d["managed_accounts"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+                    let users = d["user_base_dn"].as_str().map(|b| format!("  dynamic in {b}")).unwrap_or_default();
+                    println!("{}  {:<16} {:<32} {:<16} {}{users}", s(&d["id"]), s(&d["name"]), s(&d["url"]), s(&d["flavor"]), accounts.join(" "));
+                }
+            }
+            DirectoriesCmd::Add { name, url, bind_dn, flavor, accounts, user_base_dn, groups, ca, gateway } => {
+                // The bind password: never an argument.
+                if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                    eprint!("Bind password for {bind_dn}, then Enter and Ctrl-D: ");
+                }
+                let mut password = String::new();
+                std::io::stdin().read_to_string(&mut password).context("reading the bind password from stdin")?;
+                let password = password.trim_end_matches(['\r', '\n']);
+                let ca = ca.map(|p| std::fs::read_to_string(&p).with_context(|| format!("reading {}", p.display()))).transpose()?;
+                let body = json!({ "name": name, "url": url, "bind_dn": bind_dn, "bind_password": password, "flavor": flavor, "managed_accounts": accounts, "user_base_dn": user_base_dn, "groups": groups, "ca": ca, "gateway": gateway });
+                let v = c.call(Method::POST, &format!("{}/directories", c.base()), Some(body)).await?;
+                if json_out {
+                    return print(&v);
+                }
+                println!("Added {} ({}): link LDAP_BIND_DN and LDAP_PASSWORD to it, managed (its accounts) or dynamic (a user per lease).", s(&v["name"]), s(&v["id"]));
+            }
+            DirectoriesCmd::Rm { id } => {
+                c.call(Method::DELETE, &format!("{}/directories/{}", c.base(), enc(&id)), None).await?;
+                println!("Removed {id}");
+            }
+        },
+        Secrets::Atlas(d) => match d {
+            AtlasCmd::Ls => {
+                let v = c.call(Method::GET, &format!("{}/atlas-projects", c.base()), None).await?;
+                if json_out {
+                    return print(&v);
+                }
+                for a in v.as_array().into_iter().flatten() {
+                    let list = |k: &str| a[k].as_array().into_iter().flatten().filter_map(Value::as_str).collect::<Vec<_>>().join(" ");
+                    let (users, roles) = (list("managed_users"), list("roles"));
+                    let roles = if roles.is_empty() { String::new() } else { format!("  dynamic as {roles}") };
+                    println!("{}  {:<16} {}  {:<24} {}{roles}", s(&a["id"]), s(&a["name"]), s(&a["group_id"]), s(&a["client_id"]), if users.is_empty() { "-" } else { &users });
+                }
+            }
+            AtlasCmd::Add { name, group_id, client_id, managed_users, roles } => {
+                // The service account's secret: never an argument.
+                if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                    eprint!("Client secret for {client_id}, then Enter and Ctrl-D: ");
+                }
+                let mut secret = String::new();
+                std::io::stdin().read_to_string(&mut secret).context("reading the client secret from stdin")?;
+                let body = json!({ "name": name, "group_id": group_id, "client_id": client_id, "client_secret": secret.trim(), "managed_users": managed_users, "roles": roles });
+                let v = c.call(Method::POST, &format!("{}/atlas-projects", c.base()), Some(body)).await?;
+                if json_out {
+                    return print(&v);
+                }
+                println!("Added {} ({}): link MONGODB_USERNAME and MONGODB_PASSWORD to it (and MONGODB_CONNECTION_STRING with a cluster), managed (its two users) or dynamic (a user per lease).", s(&v["name"]), s(&v["id"]));
+            }
+            AtlasCmd::Rm { id } => {
+                c.call(Method::DELETE, &format!("{}/atlas-projects/{}", c.base(), enc(&id)), None).await?;
+                println!("Removed {id}");
+            }
+        },
+        Secrets::Snowflake(d) => match d {
+            SnowflakeCmd::Ls => {
+                let v = c.call(Method::GET, &format!("{}/snowflake-accounts", c.base()), None).await?;
+                if json_out {
+                    return print(&v);
+                }
+                for a in v.as_array().into_iter().flatten() {
+                    let roles: Vec<&str> = a["roles"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+                    let managed = a["managed_user"].as_str().unwrap_or("-");
+                    let roles = if roles.is_empty() { String::new() } else { format!("  dynamic as {}", roles.join(" ")) };
+                    println!("{}  {:<16} {:<40} {:<8} {managed}{roles}", s(&a["id"]), s(&a["name"]), s(&a["host"]), s(&a["auth"]));
+                }
+            }
+            SnowflakeCmd::Add { name, account, privatelink, admin_user, admin_role, key, auth, managed_user, roles } => {
+                // The private key: a file or stdin, never an argument.
+                let mut pem = String::new();
+                if key == "-" {
+                    std::io::stdin().read_to_string(&mut pem).context("reading the private key from stdin")?;
+                } else {
+                    pem = std::fs::read_to_string(&key).with_context(|| format!("reading {key}"))?;
+                }
+                let body = json!({ "name": name, "account": account, "privatelink": privatelink, "admin_user": admin_user, "admin_role": admin_role, "admin_private_key": pem, "auth": auth, "managed_user": managed_user, "roles": roles });
+                let v = c.call(Method::POST, &format!("{}/snowflake-accounts", c.base()), Some(body)).await?;
+                if json_out {
+                    return print(&v);
+                }
+                let secret = if v["auth"] == "password" { "SNOWFLAKE_PASSWORD" } else { "SNOWFLAKE_PRIVATE_KEY" };
+                println!("Added {} ({}): link SNOWFLAKE_USER, SNOWFLAKE_ACCOUNT and {secret} to it, managed (its user) or dynamic (a user per lease).", s(&v["name"]), s(&v["id"]));
+            }
+            SnowflakeCmd::Rm { id } => {
+                c.call(Method::DELETE, &format!("{}/snowflake-accounts/{}", c.base(), enc(&id)), None).await?;
+                println!("Removed {id}");
+            }
+        },
         Secrets::GithubApps(g) => match g {
             GithubAppsCmd::Ls => {
                 let v = c.call(Method::GET, &format!("{}/github-apps", c.base()), None).await?;
@@ -1833,6 +2352,75 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             }
             GithubAppsCmd::Rm { id } => {
                 c.call(Method::DELETE, &format!("{}/github-apps/{}", c.base(), enc(&id)), None).await?;
+                println!("Removed {id}");
+            }
+        },
+        Secrets::KubernetesClusters(k) => match k {
+            KubernetesClustersCmd::Ls => {
+                let v = c.call(Method::GET, &format!("{}/kubernetes", c.base()), None).await?;
+                if json_out {
+                    return print(&v);
+                }
+                for k in v.as_array().into_iter().flatten() {
+                    let ca = if k["has_ca"].as_bool() == Some(true) { "  its own CA" } else { "" };
+                    println!("{}  {:<16} {}{ca}", s(&k["id"]), s(&k["name"]), s(&k["api_url"]));
+                }
+            }
+            KubernetesClustersCmd::Add { name, api_url, ca } => {
+                // The admin token is a credential: never an argument.
+                if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                    eprint!("Service account token roll manages the cluster with, then Enter and Ctrl-D: ");
+                }
+                let mut token = zeroize::Zeroizing::new(String::new());
+                std::io::stdin().read_to_string(&mut token).context("reading the admin token from stdin")?;
+                let ca = ca.map(|p| std::fs::read_to_string(&p).with_context(|| format!("reading {}", p.display()))).transpose()?;
+                let v = c.call(Method::POST, &format!("{}/kubernetes", c.base()), Some(json!({ "name": name, "api_url": api_url, "ca_pem": ca, "token": token.trim() }))).await?;
+                if json_out {
+                    return print(&v);
+                }
+                println!("Added {} ({}): link KUBE_TOKEN to it, dynamic, with options namespace and service_account, or role_rules for an account made per lease (KUBE_API_URL and KUBE_CA for a kubeconfig).", s(&v["name"]), s(&v["id"]));
+            }
+            KubernetesClustersCmd::Rm { id } => {
+                c.call(Method::DELETE, &format!("{}/kubernetes/{}", c.base(), enc(&id)), None).await?;
+                println!("Removed {id}");
+            }
+        },
+        Secrets::Saas(a) => match a {
+            SaasCmd::Ls => {
+                let v = c.call(Method::GET, &format!("{}/saas", c.base()), None).await?;
+                if json_out {
+                    return print(&v);
+                }
+                for r in v.as_array().into_iter().flatten() {
+                    let target: Vec<String> = r["target"].as_object().into_iter().flatten().map(|(k, v)| format!("{k}={}", v.as_str().map(String::from).unwrap_or_else(|| v.to_string()))).collect();
+                    println!("{}  {:<16} {:<9} {}", s(&r["id"]), s(&r["name"]), s(&r["vendor"]), target.join(" "));
+                }
+            }
+            SaasCmd::Add { name, vendor, scopes, account_sid, domain, app_id, tenant, client_id, object_id, app_client_id } => {
+                let mut target = serde_json::Map::new();
+                if !scopes.is_empty() {
+                    target.insert("scopes".into(), json!(scopes));
+                }
+                for (k, v) in [("account_sid", account_sid), ("domain", domain), ("app_id", app_id), ("tenant", tenant), ("client_id", client_id), ("object_id", object_id), ("app_client_id", app_client_id)] {
+                    if let Some(v) = v {
+                        target.insert(k.into(), json!(v));
+                    }
+                }
+                // The vendor credential mints keys: never an argument.
+                if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                    eprint!("The {vendor} credential roll issues keys with, then Enter and Ctrl-D: ");
+                }
+                let mut credential = zeroize::Zeroizing::new(String::new());
+                std::io::stdin().read_to_string(&mut credential).context("reading the credential from stdin")?;
+                let body = json!({ "name": name, "vendor": vendor, "target": target, "credential": credential.trim() });
+                let v = c.call(Method::POST, &format!("{}/saas", c.base()), Some(body)).await?;
+                if json_out {
+                    return print(&v);
+                }
+                println!("Added {} ({}): link a key to its secret (and id), managed, to have roll issue and rotate it.", s(&v["name"]), s(&v["id"]));
+            }
+            SaasCmd::Rm { id } => {
+                c.call(Method::DELETE, &format!("{}/saas/{}", c.base(), enc(&id)), None).await?;
                 println!("Removed {id}");
             }
         },
@@ -2069,6 +2657,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 c.call(Method::DELETE, &format!("{}/cas/{}", c.base(), enc(&id)), None).await?;
                 println!("Removed {id}");
             }
+            CasCmd::Acme(cmd) => acme(&c, cmd, json_out).await?,
         },
         Secrets::Transit(t) => match t {
             TransitCmd::Ls => {
@@ -2193,7 +2782,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 println!("Revoked {id}");
             }
         },
-        Secrets::Keygen { .. } | Secrets::Find { .. } | Secrets::Doctor | Secrets::Health { all: true, .. } => unreachable!("handled before a project is picked"),
+        Secrets::Keygen { .. } | Secrets::Key(_) | Secrets::Find { .. } | Secrets::Doctor | Secrets::Health { all: true, .. } => unreachable!("handled before a project is picked"),
         Secrets::Backup { to, out } => {
             let v = c.call(Method::POST, &format!("{}/backup", c.base()), Some(json!({ "recipient": to }))).await?;
             let text = serde_json::to_string_pretty(&v)?;
@@ -2203,6 +2792,31 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     eprintln!("Backed up {} to {}: sealed, only the secret key opens it.", c.project, path.display());
                 }
                 None => println!("{text}"),
+            }
+        }
+        Secrets::BackupSchedule { bucket, to, every, keep, off } => {
+            let path = format!("{}/backup/schedule", c.base());
+            if off {
+                c.call(Method::DELETE, &path, None).await?;
+                println!("Stopped scheduled backups of {} (the ones made stay in the bucket).", c.project);
+                return Ok(());
+            }
+            let v = match (bucket, to) {
+                (Some(bucket), Some(to)) => c.call(Method::PUT, &path, Some(json!({ "bucket": bucket, "recipient": to, "every_hours": every, "keep": keep }))).await?,
+                _ => c.call(Method::GET, &path, None).await?,
+            };
+            if json_out {
+                return print(&v);
+            }
+            if v.is_null() {
+                println!("{} isn't backed up on a schedule.", c.project);
+                return Ok(());
+            }
+            println!("{} backs up to bucket {} every {} h, keeping {}.", c.project, s(&v["bucket"]), v["every_hours"], v["keep"]);
+            match (v["last_key"].as_str(), v["last_error"].as_str()) {
+                (_, Some(e)) => println!("The last attempt failed: {e}"),
+                (Some(k), None) => println!("The last one: {k}"),
+                _ => println!("The first one is due now."),
             }
         }
         Secrets::Restore { file, key } => {
@@ -2301,11 +2915,15 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                         return print(&list);
                     }
                     for x in &rows {
-                        let rule = [x["type"].as_str().map(|t| format!("type {t}")), x["pattern"].as_str().map(|p| format!("/{p}/"))].into_iter().flatten().collect::<Vec<_>>().join(" ");
+                        let password = x["password"]["length"].as_u64().map(|n| {
+                            let classes = x["password"]["classes"].as_array().map(|c| c.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(",")).unwrap_or_else(|| "lower,upper,digit".into());
+                            format!("password {n}+ {classes}")
+                        });
+                        let rule = [x["type"].as_str().map(|t| format!("type {t}")), x["pattern"].as_str().map(|p| format!("/{p}/")), password].into_iter().flatten().collect::<Vec<_>>().join(" ");
                         println!("{:<28} {:<12} {:<28} {}{}", s(&x["key"]), s(&x["path"]), rule, x["comment"].as_str().unwrap_or_default(), x["owner"].as_str().map(|o| format!("  (owner {o})")).unwrap_or_default());
                     }
                 }
-                RequiredCmd::Add { key, path, kind, pattern, comment, owner } => {
+                RequiredCmd::Add { key, path, kind, pattern, comment, owner, password_length, classes, symbols } => {
                     rows.retain(|x| !same(x, &key, &path));
                     let mut row = json!({ "key": key, "path": path, "comment": comment });
                     if let Some(k) = kind {
@@ -2316,6 +2934,16 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     }
                     if let Some(o) = owner {
                         row["owner"] = json!(o);
+                    }
+                    if let Some(length) = password_length {
+                        let mut p = json!({ "length": length });
+                        if !classes.is_empty() {
+                            p["classes"] = json!(classes);
+                        }
+                        if let Some(s) = symbols {
+                            p["symbols"] = json!(s);
+                        }
+                        row["password"] = p;
                     }
                     rows.push(row);
                     put(rows).await?;
@@ -2343,7 +2971,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     println!("{}  {:<16} {}{keys}  {}  envs {}  {}  {} min  used {used}", s(&i["id"]), s(&i["name"]), s(&i["issuer"]), s(&i["subject"]), list(&i["environments"]), list(&i["actions"]), i["ttl_minutes"]);
                 }
             }
-            Identities::Add { name, github, issuer, subject, audience, claims, envs, paths, actions, ttl_minutes, allow_ips, jwks } => {
+            Identities::Add { name, github, issuer, subject, audience, claims, envs, paths, actions, ttl_minutes, allow_ips, jwks, gateway } => {
                 let (issuer, subject) = match (github, issuer, subject) {
                     (Some(repo), _, _) => ("https://token.actions.githubusercontent.com".to_string(), format!("repo:{repo}:*")),
                     (None, Some(i), Some(s)) => (i, s),
@@ -2353,7 +2981,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     .iter()
                     .map(|c| c.split_once('=').map(|(k, v)| (k.trim().to_string(), json!(v.trim()))).with_context(|| format!("--claim {c}: name=value")))
                     .collect::<anyhow::Result<_>>()?;
-                let actions = if actions.is_empty() { vec!["read".to_string(), "reveal".to_string()] } else { actions };
+                let actions = if gateway.is_some() { vec![] } else if actions.is_empty() { vec!["read".to_string(), "reveal".to_string()] } else { actions };
                 let audience = audience.unwrap_or_else(|| c.api.base.clone());
                 let mut body = json!({ "name": name, "issuer": issuer, "audience": audience, "subject": subject, "claims": claims, "actions": actions });
                 if !envs.is_empty() {
@@ -2364,6 +2992,9 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 }
                 if let Some(m) = ttl_minutes {
                     body["ttl_minutes"] = json!(m);
+                }
+                if let Some(g) = &gateway {
+                    body["gateway"] = json!(g);
                 }
                 if !allow_ips.is_empty() {
                     body["allowed_ips"] = json!(allow_ips);
@@ -2392,6 +3023,14 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 println!("Deleted {id}");
             }
         },
+        Secrets::Decoy(DecoyCmd::Add { key, kind }) => {
+            let v = c.call(Method::POST, &format!("{env}/decoys"), Some(json!({ "key": key, "kind": kind, "path": c.at.path }))).await?;
+            if json_out {
+                return print(&v);
+            }
+            println!("Planted decoy {key} in {}:{}", c.at.env, c.at.path);
+            eprintln!("It reads like any other key: sync it or export it where an intruder would look. Its use shows in `roll secrets health` and the activity, and goes to the environment's notify URL.");
+        }
         Secrets::Share { key, views, ttl, note } => {
             let value = match &key {
                 Some(k) => {
@@ -2664,10 +3303,88 @@ async fn envs(c: &Client<'_>, e: Envs, json_out: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// An import's body: a JSON file (an object of `KEY: value` or an array of `{key, value}`, as
-/// other managers export) when it parses as one, else a `.env` file.
-/// An environment's values from another manager's API, as `{KEY: value}`: read here, with the
-/// user's own token, and never through roll's server.
+/// How `import --from` writes what it read.
+struct ImportOpts {
+    overwrite: bool,
+    request: bool,
+    sensitive: bool,
+    dry_run: bool,
+    message: String,
+}
+
+/// What another manager gives, by folder under the import's path: read here, signed in as the
+/// user is there, and never through roll's server.
+async fn read_source(from: &str, source: &str, recursive: bool) -> anyhow::Result<crate::managers::Folders> {
+    let entries = |m: serde_json::Map<String, Value>| m.into_iter().map(|(key, v)| crate::managers::Entry { key, value: s(&v).to_string(), secret: true }).collect::<Vec<_>>();
+    if recursive {
+        return Ok(vault_tree(source).await?.into_iter().map(|(folder, m)| (folder, entries(m))).collect());
+    }
+    if let Some(folders) = crate::managers::read(from, source).await? {
+        return Ok(folders);
+    }
+    Ok(vec![(String::new(), entries(import_from(from, source).await?))])
+}
+
+/// `folder` under the import's path `at`.
+fn under(at: &str, folder: &str) -> String {
+    let path = format!("{}/{}", at.trim_end_matches('/'), folder).replace("//", "/");
+    if path.len() > 1 { path.trim_end_matches('/').to_string() } else { path }
+}
+
+/// What another manager gave, imported into `env` (its API base): one change (or change request)
+/// per folder, or with `dry_run` its folders and keys printed, never a value. `label` names a
+/// `--map` pair.
+async fn import_folders(c: &Client<'_>, env: &str, folders: &crate::managers::Folders, o: &ImportOpts, label: Option<&str>, json_out: bool) -> anyhow::Result<()> {
+    anyhow::ensure!(!folders.is_empty(), "nothing to import");
+    let single = folders.len() == 1 && folders[0].0.is_empty();
+    let plural = |n: usize| if n == 1 { "" } else { "s" };
+    for (folder, entries) in folders {
+        let path = under(&c.at.path, folder);
+        let at = match (label, single) {
+            (Some(l), true) => l.to_string(),
+            (Some(l), false) => format!("{l} {path}"),
+            (None, _) => path.clone(),
+        };
+        if o.dry_run {
+            println!("{at}: {} key{}", entries.len(), plural(entries.len()));
+            for e in entries {
+                println!("  {}{}", e.key, if o.sensitive && e.secret { "  (sensitive)" } else { "" });
+            }
+            continue;
+        }
+        let items: Vec<Value> = entries.iter().map(|e| json!({ "key": e.key, "value": e.value, "sensitive": o.sensitive && e.secret })).collect();
+        let body = json!({ "json": items, "path": path, "overwrite": o.overwrite, "request": o.request, "message": o.message });
+        let v = c.call(Method::POST, &format!("{env}/import"), Some(body)).await.map_err(approval_hint).with_context(|| format!("importing into {path}"))?;
+        if single && label.is_none() {
+            if json_out {
+                println!("{}", serde_json::to_string_pretty(&v)?);
+                return Ok(());
+            }
+            if let Some(r) = v.get("request").filter(|r| r.is_object()) {
+                println!("Opened change request {} on {}", s(&r["id"]), c.at.env);
+            } else {
+                summary(&v);
+            }
+            if let Some(sk) = v["skipped"].as_array().filter(|a| !a.is_empty()) {
+                println!("Skipped {} existing (use --overwrite): {}", sk.len(), sk.iter().map(s).collect::<Vec<_>>().join(", "));
+            }
+            continue;
+        }
+        let skipped = v["skipped"].as_array().map_or(0, Vec::len);
+        match v.get("request").filter(|r| r.is_object()) {
+            Some(r) => println!("{at}: change request {} ({} values)", s(&r["id"]), entries.len()),
+            None => println!("{at}: {} value{}{}", entries.len(), plural(entries.len()), if skipped > 0 { format!(", {skipped} existing skipped (use --overwrite)") } else { String::new() }),
+        }
+    }
+    if o.dry_run {
+        let keys: usize = folders.iter().map(|f| f.1.len()).sum();
+        println!("Dry run: nothing imported ({keys} key{} in {} change{}).", plural(keys), folders.len(), plural(folders.len()));
+    }
+    Ok(())
+}
+
+/// An environment's values from another manager's API (or Secrets Manager through the `aws`
+/// CLI), as `{KEY: value}`.
 async fn import_from(from: &str, source: &str) -> anyhow::Result<serde_json::Map<String, Value>> {
     let env = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
     let need = |k: &str| env(k).with_context(|| format!("set {k}"));
@@ -2746,12 +3463,14 @@ async fn import_from(from: &str, source: &str) -> anyhow::Result<serde_json::Map
                 }
             }
         }
-        other => bail!("{other}: --from is doppler, vault, infisical or aws"),
+        other => bail!("{other}: --from is doppler, vault, infisical, aws, {}", crate::managers::SOURCES.join(", ")),
     }
     anyhow::ensure!(!out.is_empty(), "{from} {source} has no values to import");
     Ok(out)
 }
 
+/// An import's body: a JSON file (an object of `KEY: value` or an array of `{key, value}`, as
+/// other managers export) when it parses as one, else a `.env` file.
 fn import_body(text: &str, path: &str, overwrite: bool, request: bool) -> anyhow::Result<Value> {
     let trimmed = text.trim_start();
     if trimmed.starts_with('{') || trimmed.starts_with('[') {
@@ -2892,6 +3611,41 @@ async fn sinks(c: &Client<'_>, cmd: Sinks, json_out: bool) -> anyhow::Result<()>
     Ok(())
 }
 
+/// A random value by a key's password policy (`{length, classes?, symbols?}`, as the server
+/// checks it): its length (or `n`, if longer), one of each of its classes and nothing else.
+fn policy_value(p: &Value, n: Option<usize>) -> anyhow::Result<String> {
+    let classes: Vec<&str> = p["classes"].as_array().map(|c| c.iter().filter_map(Value::as_str).collect()).filter(|c: &Vec<&str>| !c.is_empty()).unwrap_or_else(|| vec!["lower", "upper", "digit"]);
+    let symbols = p["symbols"].as_str().unwrap_or("!#%&*+-=?^_~");
+    let sets: Vec<&str> = classes
+        .iter()
+        .map(|c| match *c {
+            "lower" => "abcdefghijklmnopqrstuvwxyz",
+            "upper" => "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+            "digit" => "0123456789",
+            _ => symbols,
+        })
+        .collect();
+    let alphabet: Vec<u8> = sets.concat().into_bytes();
+    let len = n.unwrap_or(0).max(p["length"].as_u64().unwrap_or(48) as usize);
+    anyhow::ensure!((8..=4096).contains(&len) && !alphabet.is_empty() && alphabet.len() <= 256, "--generate is 8–4096 characters");
+    let limit = 256 - 256 % alphabet.len();
+    loop {
+        let mut out = String::with_capacity(len);
+        let mut buf = [0u8; 64];
+        while out.len() < len {
+            getrandom::fill(&mut buf).expect("system randomness");
+            for b in buf {
+                if (b as usize) < limit && out.len() < len {
+                    out.push(alphabet[b as usize % alphabet.len()] as char);
+                }
+            }
+        }
+        if sets.iter().all(|s| out.chars().any(|ch| s.contains(ch))) {
+            return Ok(out);
+        }
+    }
+}
+
 /// A random value of `n` letters and digits (62 symbols, rejection-sampled: no bias).
 fn random_value(n: usize) -> anyhow::Result<String> {
     anyhow::ensure!((8..=4096).contains(&n), "--generate is 8–4096 characters");
@@ -2910,6 +3664,117 @@ fn random_value(n: usize) -> anyhow::Result<String> {
 }
 
 /// Write `text` to a new file only its owner can read (never over an existing one).
+/// `roll secrets key split` and `combine` (docs/secrets.md, "Splitting the deployment key"). A
+/// share or the key goes only to stdout or a 0600 file, never to stderr or roll.
+fn key_shares(cmd: KeyCmd) -> anyhow::Result<()> {
+    use roll_keyshares as keyshares;
+    use std::io::IsTerminal as _;
+    let terminal = std::io::stdin().is_terminal();
+    match cmd {
+        KeyCmd::Split { shares, threshold, file, out_dir } => {
+            let key = zeroize::Zeroizing::new(match &file {
+                Some(f) => std::fs::read_to_string(f).with_context(|| format!("reading {}", f.display()))?,
+                None if terminal => read_hidden("Key: ")?,
+                None => {
+                    let mut k = String::new();
+                    std::io::stdin().read_to_string(&mut k)?;
+                    k
+                }
+            });
+            // As rolld reads it: surrounding whitespace isn't part of the key.
+            let key = key.trim();
+            if key.len() < 32 {
+                bail!("the key is shorter than 32 characters: not a deployment key (ROLL_SECRET_KEY) or a backup's secret key");
+            }
+            let parts = keyshares::split(key.as_bytes(), shares, threshold)?;
+            match out_dir {
+                Some(dir) => {
+                    for (i, share) in parts.iter().enumerate() {
+                        write_private(&dir.join(format!("roll-key-share-{}-of-{shares}", i + 1)), &format!("{share}\n"))?;
+                    }
+                    eprintln!("Wrote {shares} shares to {} (roll-key-share-N-of-{shares}): any {threshold} recover the key. Give each to a different holder, then delete them here.", dir.display());
+                }
+                None => {
+                    for share in &parts {
+                        println!("{share}");
+                    }
+                    eprintln!("{shares} shares, any {threshold} recover the key: give each to a different holder.");
+                }
+            }
+        }
+        KeyCmd::Combine { out } => {
+            let mut given: Vec<zeroize::Zeroizing<String>> = Vec::new();
+            if terminal {
+                // One at a time, each checked as it's entered, until the split's threshold.
+                loop {
+                    let need = given.first().and_then(|s| keyshares::Share::parse(1, s).ok()).map(|s| s.threshold as usize);
+                    if need.is_some_and(|n| given.len() >= n) {
+                        break;
+                    }
+                    let prompt = match need {
+                        Some(n) => format!("Share {} of {n}: ", given.len() + 1),
+                        None => "Share 1: ".to_string(),
+                    };
+                    let share = zeroize::Zeroizing::new(read_hidden(&prompt)?.trim().to_string());
+                    if share.is_empty() {
+                        bail!("no share entered");
+                    }
+                    let mut next: Vec<&str> = given.iter().map(|s| s.as_str()).collect();
+                    next.push(&share);
+                    match keyshares::combine(&next) {
+                        Ok(_) | Err(keyshares::KeyShareError::TooFew { .. }) => given.push(share),
+                        Err(e @ keyshares::KeyShareError::Mismatch) => return Err(e.into()),
+                        Err(e) => eprintln!("{e}; enter it again"),
+                    }
+                }
+            } else {
+                let mut text = zeroize::Zeroizing::new(String::new());
+                std::io::stdin().read_to_string(&mut text)?;
+                given = text.lines().map(str::trim).filter(|l| !l.is_empty()).map(|l| zeroize::Zeroizing::new(l.to_string())).collect();
+            }
+            let key = keyshares::combine(&given)?;
+            let key = zeroize::Zeroizing::new(String::from_utf8(key.to_vec()).map_err(|_| anyhow::anyhow!("the combined key isn't text"))?);
+            match out {
+                Some(path) => {
+                    write_private(&path, &key)?;
+                    eprintln!("The key is in {} (0600).", path.display());
+                }
+                None => println!("{}", key.as_str()),
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A line read from the terminal on stdin without echoing it.
+fn read_hidden(prompt: &str) -> anyhow::Result<String> {
+    use std::io::{BufRead as _, Write as _};
+    eprint!("{prompt}");
+    std::io::stderr().flush()?;
+    // SAFETY: tcgetattr fills the termios we own; tcsetattr takes it by pointer, and the guard
+    // restores the original on the same descriptor.
+    struct Restore(libc::termios);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &self.0) };
+        }
+    }
+    let _guard = unsafe {
+        let mut t: libc::termios = std::mem::zeroed();
+        if libc::tcgetattr(libc::STDIN_FILENO, &mut t) != 0 {
+            bail!("can't turn off the terminal's echo");
+        }
+        let was = t;
+        t.c_lflag &= !libc::ECHO;
+        t.c_lflag |= libc::ECHONL;
+        libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &t);
+        Restore(was)
+    };
+    let mut line = String::new();
+    std::io::stdin().lock().read_line(&mut line)?;
+    Ok(line.trim_end_matches(['\r', '\n']).to_string())
+}
+
 fn write_private(path: &std::path::Path, text: &str) -> anyhow::Result<()> {
     use std::io::Write;
     #[cfg(unix)]
@@ -2923,9 +3788,10 @@ fn write_private(path: &std::path::Path, text: &str) -> anyhow::Result<()> {
 }
 
 /// A workload identity's login (`ROLL_IDENTITY`): the workload's own OIDC token, from
-/// `ROLL_OIDC_TOKEN`, `ROLL_OIDC_TOKEN_FILE` (a Kubernetes projected token) or GitHub Actions
-/// (`permissions: id-token: write`; audience `ROLL_OIDC_AUDIENCE`, default `roll`), for a
-/// short-lived secrets token and when it ends (ms).
+/// `ROLL_OIDC_TOKEN`, `ROLL_OIDC_TOKEN_FILE` (a Kubernetes projected token), GitHub Actions
+/// (`permissions: id-token: write`; audience `ROLL_OIDC_AUDIENCE`, default the server's URL) or
+/// Azure Pipelines (`SYSTEM_ACCESSTOKEN` mapped in), for a short-lived secrets token and when it
+/// ends (ms).
 pub async fn identity_login(api: &Api, identity: &str) -> anyhow::Result<(String, i64)> {
     let env = |k: &str| std::env::var(k).ok().filter(|t| !t.trim().is_empty());
     let oidc = if let Some(t) = env("ROLL_OIDC_TOKEN") {
@@ -2940,8 +3806,21 @@ pub async fn identity_login(api: &Api, identity: &str) -> anyhow::Result<(String
         anyhow::ensure!(r.status().is_success(), "GitHub Actions answered {} for its OIDC token (does the job have `permissions: id-token: write`?)", r.status());
         let v: Value = r.json().await?;
         v["value"].as_str().context("GitHub Actions' OIDC answer has no value")?.to_string()
+    } else if let (Some(url), Some(bearer)) = (env("SYSTEM_OIDCREQUESTURI"), env("SYSTEM_ACCESSTOKEN")) {
+        // Azure Pipelines: the pipeline's own token (`p://org/project/pipeline`), or a service
+        // connection's (`sc://…`) with ROLL_AZURE_SERVICE_CONNECTION. Its audience is always
+        // Azure's (`api://AzureADTokenExchange`).
+        let sep = if url.contains('?') { '&' } else { '?' };
+        let mut url = format!("{url}{sep}api-version=7.1");
+        if let Some(sc) = env("ROLL_AZURE_SERVICE_CONNECTION") {
+            url.push_str(&format!("&serviceConnectionId={}", enc(&sc)));
+        }
+        let r = reqwest::Client::new().post(url).bearer_auth(bearer).header("content-type", "application/json").body("").send().await.context("asking Azure Pipelines for its OIDC token")?;
+        anyhow::ensure!(r.status().is_success(), "Azure Pipelines answered {} for its OIDC token (is SYSTEM_ACCESSTOKEN mapped from $(System.AccessToken)?)", r.status());
+        let v: Value = r.json().await.context("Azure Pipelines' OIDC answer isn't JSON")?;
+        v["oidcToken"].as_str().context("Azure Pipelines' OIDC answer has no oidcToken")?.to_string()
     } else {
-        anyhow::bail!("ROLL_IDENTITY is set but there's no OIDC token: set ROLL_OIDC_TOKEN or ROLL_OIDC_TOKEN_FILE, or run in GitHub Actions with `permissions: id-token: write`");
+        anyhow::bail!("ROLL_IDENTITY is set but there's no OIDC token: set ROLL_OIDC_TOKEN or ROLL_OIDC_TOKEN_FILE, run in GitHub Actions with `permissions: id-token: write`, or in Azure Pipelines with SYSTEM_ACCESSTOKEN: $(System.AccessToken)");
     };
     // A request of its own, without a token (never through `Api::call`, which renews logins).
     let mut req = api.http.post(format!("{}/v1/secrets/login", api.base)).json(&json!({ "identity": identity, "token": oidc.trim() }));
@@ -3308,8 +4187,8 @@ async fn render_watch(c: &Client<'_>, env: &str, file: &str, tpl: &str, out: &st
                     }
                 }
             }
-            _ = tokio::time::sleep(std::time::Duration::from_secs(interval.max(1))) => {
-                let now = match digests(c, &follow).await {
+            now = next_digests(c, &follow, &last, std::time::Duration::from_secs(interval.max(1))) => {
+                let now = match now {
                     Ok(d) => d,
                     Err(e) => {
                         eprintln!("roll secrets render: couldn't check {} ({e}); {out} stays as it is", c.at.env);
@@ -3398,7 +4277,7 @@ async fn doctor(api: &Api, args: &AtArgs) -> anyhow::Result<()> {
                                     parts.push(format!("{what}: {}", list.join(", ")));
                                 }
                             }
-                            (false, format!(".env is stale against {} ({}); roll secrets export > .env, or roll run", at.env, parts.join("; ")))
+                            (false, format!(".env is stale against {} ({}); run the app with `roll run -- <command>` instead of keeping values in a file", at.env, parts.join("; ")))
                         });
                     }
                     Err(e) => checks.push((false, format!("comparing .env: {e}"))),
@@ -3578,7 +4457,8 @@ fn render(tpl: &str, get: impl Fn(&str) -> Option<String>) -> Result<String, Vec
 /// already sets (unless `--override`). Fails on a problem unless `--allow-unresolved`.
 async fn run_env(c: &Client<'_>, at: &At, r: &Run) -> anyhow::Result<(Vec<Var>, Vec<String>, Digests)> {
     let digest = if r.watch { "&digest=1" } else { "" };
-    let path = format!("{}/values?{}{digest}", c.env(&at.env), c.q());
+    let codes = if r.totp_codes { "&codes=1" } else { "" };
+    let path = format!("{}/values?{}{digest}{codes}", c.env(&at.env), c.q());
     let digest_path = format!("{}/digest?{}", c.env(&at.env), c.q());
     let header = |fetched_at| crate::fallback::Header { v: 1, asked: at.project.clone().unwrap_or_default(), project: c.project.clone(), environment: at.env.clone(), path: at.path.clone(), fetched_at };
     // Env files, read first: their entries win over the environment's.
@@ -3730,6 +4610,39 @@ async fn digests(c: &Client<'_>, follow: &[String]) -> anyhow::Result<Digests> {
 }
 
 type Digests = std::collections::BTreeMap<String, String>;
+
+/// The followed folders' digests, once they may have moved. One folder (the usual case) is
+/// long-polled: the answer comes as soon as it moves (or after 25 s unchanged); a server that
+/// answers at once is asked again after `every`. Several are checked every `every`.
+async fn next_digests(c: &Client<'_>, follow: &[String], last: &Digests, every: std::time::Duration) -> anyhow::Result<Digests> {
+    if let [p] = follow
+        && let Some(d) = last.get(p)
+    {
+        let asked = std::time::Instant::now();
+        let sep = if p.contains('?') { '&' } else { '?' };
+        let url = format!("{p}{sep}since={}&wait=25", enc(d));
+        let poll = c.call(Method::GET, &url, None);
+        // Held at most 25 s: past 40 the server (or what's between) isn't answering.
+        let answer = match tokio::time::timeout(std::time::Duration::from_secs(40), poll).await {
+            Ok(a) => a,
+            Err(_) => Err(anyhow::anyhow!("no answer in 40 s")),
+        };
+        // A failure (rolld restarting, a revoked token) waits `every` like any check, never spins.
+        let now = match answer {
+            Ok(v) => Digests::from([(p.clone(), s(&v["digest"]))]),
+            Err(e) => {
+                tokio::time::sleep(every).await;
+                return Err(e);
+            }
+        };
+        if now == *last && asked.elapsed() < std::time::Duration::from_secs(1) {
+            tokio::time::sleep(every).await;
+        }
+        return Ok(now);
+    }
+    tokio::time::sleep(every).await;
+    digests(c, follow).await
+}
 
 /// Which followed folders moved between two polls, as `env:/path` (another project's as
 /// `prj_…@env:/path`), for a watch's message.
@@ -3948,8 +4861,8 @@ async fn watch(c: &Client<'_>, at: &At, r: &Run, mut env: Vec<Var>, mut leases: 
                         }
                     }
                 }
-                _ = tokio::time::sleep(every) => {
-                    let now = match digests(c, &follow).await {
+                now = next_digests(c, &follow, &last, every) => {
+                    let now = match now {
                         Ok(d) => d,
                         Err(e) => {
                             eprintln!("roll run: couldn't check {} ({e}); still running", at.env);
@@ -3995,6 +4908,93 @@ async fn stop(child: &mut tokio::process::Child) {
         }
     }
     let _ = child.kill().await;
+}
+
+/// `roll secrets cas acme …`: a CA's ACME directory, bindings and pre-authorization.
+async fn acme(c: &Client<'_>, cmd: AcmeCmd, json_out: bool) -> anyhow::Result<()> {
+    let at = |ca: &str| format!("{}/cas/{}/acme", c.base(), enc(ca));
+    let print = |v: &Value| -> anyhow::Result<()> {
+        println!("{}", serde_json::to_string_pretty(v)?);
+        Ok(())
+    };
+    match cmd {
+        AcmeCmd::PreAuthorize { ca, state } => {
+            let id = ca_id(c, &ca).await?;
+            let v = c.call(Method::PATCH, &at(&id), Some(json!({ "pre_authorize": state == "on" }))).await?;
+            if json_out {
+                return print(&v);
+            }
+            if state == "on" {
+                println!("{ca}: a binding's names are valid without a challenge; its HMAC key is the whole proof.");
+            } else {
+                println!("{ca}: every name is proven with http-01, dns-01 or tls-alpn-01.");
+            }
+        }
+        AcmeCmd::Eab(EabCmd::Add { ca, names, days, label }) => {
+            let id = ca_id(c, &ca).await?;
+            let body = json!({ "names": (!names.is_empty()).then_some(names), "days": days, "label": label });
+            let v = c.call(Method::POST, &format!("{}/eab", at(&id)), Some(body)).await?;
+            if json_out {
+                return print(&v);
+            }
+            let (key_id, hmac, directory) = (s(&v["key_id"]), s(&v["hmac_key"]), s(&v["directory"]));
+            println!("Directory  {directory}");
+            println!("Key id     {key_id}");
+            println!("HMAC key   {hmac}");
+            eprintln!("The HMAC key isn't shown again. certbot: --server {directory} --eab-kid {key_id} --eab-hmac-key <HMAC key>; lego: --server {directory} --eab --kid {key_id} --hmac <HMAC key>.");
+            println!("\n# cert-manager: kubectl -n cert-manager create secret generic roll-{ca}-eab --from-literal secret=<HMAC key>\n{}", cluster_issuer(&ca, &directory, &key_id));
+        }
+        AcmeCmd::Eab(EabCmd::Ls { ca }) => {
+            let id = ca_id(c, &ca).await?;
+            let v = c.call(Method::GET, &at(&id), None).await?;
+            if json_out {
+                return print(&v);
+            }
+            println!("Directory  {}", s(&v["directory"]));
+            println!("Pre-authorized names: {}", if v["pre_authorize"] == true { "on (a binding's key is the whole proof)" } else { "off" });
+            for b in v["bindings"].as_array().into_iter().flatten() {
+                let names: Vec<&str> = b["names"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+                let state = match (b["revoked_at"].as_i64(), b["expires_at"].as_i64()) {
+                    (Some(t), _) => format!("revoked {}", day(t)),
+                    (None, Some(t)) => format!("until {}", day(t)),
+                    (None, None) => "live".into(),
+                };
+                let scope = if names.is_empty() { "the CA's names".to_string() } else { names.join(",") };
+                println!("{}  {:<16} {}  {} account(s)  {state}", s(&b["id"]), s(&b["label"]), scope, b["accounts"]);
+            }
+        }
+        AcmeCmd::Eab(EabCmd::Rm { ca, id }) => {
+            let ca_id = ca_id(c, &ca).await?;
+            c.call(Method::DELETE, &format!("{}/eab/{}", at(&ca_id), enc(&id)), None).await?;
+            println!("Revoked {id}: its accounts stop at once");
+        }
+    }
+    Ok(())
+}
+
+/// A cert-manager ClusterIssuer for a CA's ACME directory, with a binding's key id (its HMAC key
+/// in the Secret `roll-<ca>-eab`).
+fn cluster_issuer(ca: &str, directory: &str, key_id: &str) -> String {
+    format!(
+        "apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: roll-{ca}
+spec:
+  acme:
+    server: {directory}
+    privateKeySecretRef:
+      name: roll-{ca}-acme-account
+    externalAccountBinding:
+      keyID: {key_id}
+      keySecretRef:
+        name: roll-{ca}-eab
+        key: secret
+    solvers:
+      - http01:
+          ingress:
+            ingressClassName: nginx"
+    )
 }
 
 /// A CA's id from its id or its name.
@@ -4056,16 +5056,9 @@ async fn transit_stdin(c: &Client<'_>, name: &str, route: &str, field: &str) -> 
     Ok(s(&v[field]).to_string())
 }
 
-/// Run the user's `aws` CLI with `args` and read its JSON (errors name the command, never output).
+/// The user's `aws` CLI's JSON (errors name the command, never its output).
 async fn aws(args: &[&str]) -> anyhow::Result<Value> {
-    let out = tokio::process::Command::new(std::env::var("ROLL_AWS_CLI").unwrap_or_else(|_| "aws".into()))
-        .args(args)
-        .stdin(std::process::Stdio::null())
-        .output()
-        .await
-        .context("running the aws CLI (install it, or set ROLL_AWS_CLI)")?;
-    anyhow::ensure!(out.status.success(), "aws {}: {}", args[..2].join(" "), String::from_utf8_lossy(&out.stderr).lines().last().unwrap_or_default().chars().take(200).collect::<String>());
-    serde_json::from_slice(&out.stdout).context("the aws CLI's answer isn't JSON")
+    crate::managers::aws(args).await
 }
 
 /// A Secrets Manager secret as keys: a JSON object's fields as they are; anything else one key
@@ -4075,11 +5068,7 @@ fn aws_entries(name: &str, prefix: &str, text: &str) -> Vec<(String, String)> {
         return fields.into_iter().filter(|(_, v)| !v.is_null()).map(|(k, v)| (k, v.as_str().map(String::from).unwrap_or_else(|| v.to_string()))).collect();
     }
     let last = name.strip_prefix(prefix).unwrap_or(name).rsplit('/').next().unwrap_or(name);
-    let mut key: String = last.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_uppercase() } else { '_' }).collect();
-    if key.chars().next().is_some_and(|c| c.is_ascii_digit()) {
-        key.insert(0, '_');
-    }
-    vec![(key, text.to_string())]
+    vec![(crate::managers::upper_key(last), text.to_string())]
 }
 
 /// Vault answered with this status (matched by the status, never by an error's text).
@@ -4254,5 +5243,28 @@ mod relogin_tests {
         assert!(no_answer(&api.get("/v1/echo").await.unwrap_err()));
         down.store(false, Ordering::SeqCst);
         assert_eq!(auth(api.get("/v1/echo").await.unwrap()), "Bearer rlt_4");
+    }
+}
+
+/// `roll secrets gateways up`: the gateway's loop (roll-gateway's agent) until its credential
+/// stops working. Log lines go to stderr; never the token or a stream's bytes.
+async fn gateway_up(api: &Api, gateway: String, allow: Vec<String>, allow_file: Option<std::path::PathBuf>, token_file: Option<std::path::PathBuf>, identity: Option<String>, oidc_token_file: Option<std::path::PathBuf>) -> anyhow::Result<()> {
+    use roll_gateway::agent::{Agent, Auth};
+    let mut entries = allow;
+    if let Some(f) = &allow_file {
+        entries.extend(std::fs::read_to_string(f).with_context(|| format!("reading {}", f.display()))?.lines().map(str::to_string));
+    }
+    let allow = roll_gateway::allow::AllowList::parse(entries.iter().map(String::as_str)).map_err(|e| anyhow::anyhow!(e))?;
+    let auth = match (identity, oidc_token_file, token_file) {
+        (Some(identity), Some(oidc_file), _) => Auth::Identity { identity, oidc_file },
+        (_, _, Some(f)) => Auth::Token(std::fs::read_to_string(&f).with_context(|| format!("reading {}", f.display()))?.trim().to_string()),
+        _ => Auth::Token(std::env::var("ROLL_GATEWAY_TOKEN").ok().filter(|t| !t.trim().is_empty()).map(|t| t.trim().to_string()).context("give the gateway's token in ROLL_GATEWAY_TOKEN or --token-file, or --identity with --oidc-token-file")?),
+    };
+    eprintln!("roll gateway {gateway}: allowing {}", allow.entries().join(", "));
+    let log = std::sync::Arc::new(|line: &str| eprintln!("{} {line}", chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ")));
+    let agent = Agent { url: api.base.clone(), gateway, auth, allow, version: env!("CARGO_PKG_VERSION").to_string(), log };
+    tokio::select! {
+        r = roll_gateway::agent::run(agent) => r.map_err(|e| anyhow::anyhow!(e)),
+        _ = tokio::signal::ctrl_c() => Ok(()),
     }
 }

@@ -130,7 +130,13 @@ pub trait Isolation: Send + Sync {
     /// A running job's output as it comes, after its last `tail` lines: `None` where it can't be
     /// followed (the caller reads [`Isolation::logs_tail`] again instead). Dropping the receiver
     /// stops following.
-    async fn follow(&self, _name: &str, _tail: usize) -> Option<tokio::sync::mpsc::Receiver<String>> {
+    async fn follow(&self, _name: &str, _tail: usize) -> Option<tokio::sync::mpsc::Receiver<(bool, String)>> {
+        None
+    }
+    /// A running job's output from `since` (an RFC 3339 stamp or Unix seconds) as it comes, each
+    /// line `(stderr, "<stamp> <text>")` with its RFC 3339 stamp: `None` where it can't be
+    /// followed. Dropping the receiver stops following.
+    async fn follow_since(&self, _name: &str, _since: &str) -> Option<tokio::sync::mpsc::Receiver<(bool, String)>> {
         None
     }
 }

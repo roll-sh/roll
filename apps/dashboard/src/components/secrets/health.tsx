@@ -7,6 +7,7 @@ import { secretsHref, useSecrets } from "./secrets-page";
 import { card, errorText, ErrorNote, ghost, Section, sized, useLoad } from "./ui";
 
 const ISSUES: { issue: Finding["issue"]; title: string; what: string; serious: boolean }[] = [
+  { issue: "decoy_used", title: "Decoy used", what: "Someone used a decoy key's token: they found it where it was planted. Cut off whatever could reach that place, rotate the real credentials beside it, then delete the decoy and plant a new one.", serious: true },
   { issue: "expired", title: "Expired", what: "Their values stopped working outside roll.", serious: true },
   { issue: "rotation_failing", title: "Rotation failing", what: "Their scheduled rotation fails: the database, vendor or rotator refused or didn't answer. The old credential keeps working; roll tries again.", serious: true },
   { issue: "revoke_failing", title: "Not revoked yet", what: "Credentials roll retired or that expired but couldn't revoke yet: they still work until it can. roll keeps trying.", serious: true },
@@ -24,8 +25,10 @@ const ISSUES: { issue: Finding["issue"]; title: string; what: string; serious: b
 
 /** Everything insights flag, in every environment at once, worst first (docs/secrets.md, "Health"). */
 export function HealthView() {
-  const { api, project, standard, reloadEnvs } = useSecrets();
+  const { api, project, standard, reloadEnvs, required } = useSecrets();
   const [code, setCode] = useState(false);
+  // A new value, as the key's password policy asks if it has one.
+  const fresh = (f: Finding) => generateValue(48, required.find((r) => r.key === f.key && r.path === f.path)?.password);
   const base = useLoad(() => api.health(), [api]);
   // The code check apart: refused (it needs code read on every repository), the rest still shows.
   const coded = useLoad(() => (code ? api.health(true) : Promise.resolve(null)), [api, code]);
@@ -47,7 +50,7 @@ export function HealthView() {
   // Every weak key of one environment, a new random value each: one change, or one request.
   const fixAll = async (env: string, rows: Finding[]) => {
     setError(null);
-    const ops: Op[] = rows.map((f) => ({ op: "set", key: f.key, path: f.path, value: generateValue() }));
+    const ops: Op[] = rows.map((f) => ({ op: "set", key: f.key, path: f.path, value: fresh(f) }));
     const message = `new random values for ${rows.length} weak ${rows.length === 1 ? "key" : "keys"} (from Health)`;
     try {
       try {
@@ -130,7 +133,7 @@ export function HealthView() {
                   {f.owner && <span className="text-[11.5px] text-muted" title="Who supplies it (the required key's owner)">ask {f.owner}</span>}
                   <span className={`ml-auto text-[11.5px] ${serious ? "text-danger" : "text-muted"}`}>{f.detail}</span>
                   {f.issue === "weak" && (
-                    <button className={`${ghost} h-6`} onClick={() => fix(f, { value: generateValue() }, "a new random value")} title="48 random letters and digits, made here; a change request where the environment is protected">
+                    <button className={`${ghost} h-6`} onClick={() => fix(f, { value: fresh(f) }, "a new random value")} title="48 random letters and digits (or what the key's password policy asks), made here; a change request where the environment is protected">
                       <Dices className="size-3.5" /> New value
                     </button>
                   )}

@@ -227,7 +227,7 @@ impl Apps {
     /// A push to a branch apps doesn't follow, checked against the repository's refs and handed
     /// to roll previews. What the hook answers (`{ ignored }`).
     async fn hand_to_previews(self: &Arc<Self>, pushes: Arc<dyn crate::integrations::GitPushes>, service: &str, url: &str, push: BranchPush) -> String {
-        let BranchPush { branch, sha, message } = push;
+        let BranchPush { branch, sha, message, pusher } = push;
         let refs = match self.git_remote(service, url).await.ls_refs().await {
             Ok(r) => r,
             Err(e) => return format!("a push to {branch}: the repository didn't answer ({e:#})"),
@@ -237,7 +237,7 @@ impl Apps {
             return format!("a push to {branch}, but the repository has it {}", now.map_or("deleted".to_string(), |s| format!("at {}", &s[..12.min(s.len())])));
         }
         let what = if sha.is_some() { "for its preview" } else { "deleted: its preview goes" };
-        pushes.pushed(crate::integrations::GitPush { service: service.to_string(), url: url.to_string(), branch: branch.clone(), sha, message, pull: None }).await;
+        pushes.pushed(crate::integrations::GitPush { service: service.to_string(), url: url.to_string(), branch: branch.clone(), sha, message, pusher, pull: None }).await;
         format!("a push to {branch}, handed to roll previews {what}")
     }
 
@@ -248,7 +248,7 @@ impl Apps {
     /// (the head ref stays): at worst a forged one takes a preview down, as a forged branch
     /// deletion would. What the hook answers.
     async fn hand_pull_to_previews(self: &Arc<Self>, pushes: Arc<dyn crate::integrations::GitPushes>, service: &str, url: &str, p: PullEvent) -> String {
-        let PullEvent { number, title, branch, sha, fork, gitlab } = p;
+        let PullEvent { number, title, branch, sha, fork, gitlab, author, actor } = p;
         let page = format!("{}{}{number}", url.trim_end_matches('/').trim_end_matches(".git"), if gitlab { "/-/merge_requests/" } else { "/pull/" });
         let branch = if fork { format!("pull/{number}") } else { branch };
         if let Some(sha) = &sha {
@@ -266,8 +266,8 @@ impl Apps {
             }
         }
         let what = if sha.is_some() { "for its preview" } else { "closed: its preview goes" };
-        let pull = crate::integrations::GitPull { number, title: title.chars().take(200).collect(), url: page, fork };
-        pushes.pushed(crate::integrations::GitPush { service: service.to_string(), url: url.to_string(), branch, sha, message: String::new(), pull: Some(pull) }).await;
+        let pull = crate::integrations::GitPull { number, title: title.chars().take(200).collect(), url: page, fork, author };
+        pushes.pushed(crate::integrations::GitPush { service: service.to_string(), url: url.to_string(), branch, sha, message: String::new(), pusher: actor, pull: Some(pull) }).await;
         format!("pull request {number}, handed to roll previews {what}")
     }
 }
@@ -281,6 +281,10 @@ struct PullEvent {
     sha: Option<String>,
     fork: bool,
     gitlab: bool,
+    /// Who opened it (untrusted, at most 100 characters).
+    author: Option<String>,
+    /// Who acted (pushed to it, reopened it): untrusted, at most 100 characters.
+    actor: Option<String>,
 }
 
 /// A branch a push moved to `sha` (none: it was deleted).
@@ -288,6 +292,14 @@ struct BranchPush {
     branch: String,
     sha: Option<String>,
     message: String,
+    /// Who pushed (untrusted, at most 100 characters).
+    pusher: Option<String>,
+}
+
+/// Who pushed or acted, as the event names them: GitHub's and Gitea's `sender.login`, GitLab's
+/// `user_username` (a push) or `user.username` (a merge request), Bitbucket's `actor.nickname`.
+fn actor_of(p: &Value) -> Option<String> {
+    [&p["sender"]["login"], &p["user_username"], &p["user"]["username"], &p["actor"]["nickname"]].into_iter().find_map(|v| v.as_str().filter(|s| !s.is_empty())).map(|s| s.chars().take(100).collect())
 }
 
 enum Push {
@@ -327,7 +339,7 @@ fn push_of(w: &Webhook) -> Push {
             }
             let branch = new["name"].as_str().or(old["name"].as_str()).unwrap_or("").to_string();
             let sha = new["target"]["hash"].as_str().filter(|s| hex(s)).map(str::to_ascii_lowercase);
-            moved.push(BranchPush { branch, sha, message: new["target"]["message"].as_str().unwrap_or("").to_string() });
+            moved.push(BranchPush { branch, sha, message: new["target"]["message"].as_str().unwrap_or("").to_string(), pusher: actor_of(p) });
         }
         return if moved.is_empty() { Push::Ignored(format!("a push of a {}, not a branch", kinds.join(", "))) } else { Push::Branches(moved) };
     }
@@ -337,7 +349,7 @@ fn push_of(w: &Webhook) -> Push {
     let Some(branch) = r.strip_prefix("refs/heads/") else { return Push::Ignored(format!("a push of {r}, not a branch")) };
     let sha = p["after"].as_str().or(p["checkout_sha"].as_str()).filter(|s| hex(s));
     let message = p["head_commit"]["message"].as_str().or_else(|| p["commits"].as_array().and_then(|c| c.last()).and_then(|c| c["message"].as_str())).unwrap_or("");
-    Push::Branches(vec![BranchPush { branch: branch.to_string(), sha: sha.map(str::to_ascii_lowercase), message: message.to_string() }])
+    Push::Branches(vec![BranchPush { branch: branch.to_string(), sha: sha.map(str::to_ascii_lowercase), message: message.to_string(), pusher: actor_of(p) }])
 }
 
 /// GitHub's `pull_request` or GitLab's `Merge Request Hook` event as a [`Push::Pull`]; None
@@ -345,16 +357,19 @@ fn push_of(w: &Webhook) -> Push {
 fn pull_of(w: &Webhook) -> Option<Push> {
     let p = &w.body;
     let hex = |s: &str| s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit());
-    let (number, title, branch, sha, fork, gitlab, action) = match w.event.as_deref()? {
+    let (number, title, branch, sha, fork, gitlab, action, author) = match w.event.as_deref()? {
         "pull_request" => {
             let pr = &p["pull_request"];
             let fork = pr["head"]["repo"]["id"].as_u64().is_none() || pr["head"]["repo"]["id"] != pr["base"]["repo"]["id"];
-            (pr["number"].as_u64().or(p["number"].as_u64()), pr["title"].as_str(), pr["head"]["ref"].as_str(), pr["head"]["sha"].as_str(), fork, false, p["action"].as_str().unwrap_or(""))
+            (pr["number"].as_u64().or(p["number"].as_u64()), pr["title"].as_str(), pr["head"]["ref"].as_str(), pr["head"]["sha"].as_str(), fork, false, p["action"].as_str().unwrap_or(""), pr["user"]["login"].as_str())
         }
         "Merge Request Hook" => {
             let mr = &p["object_attributes"];
             let fork = mr["source_project_id"].as_u64().is_none() || mr["source_project_id"] != mr["target_project_id"];
-            (mr["iid"].as_u64(), mr["title"].as_str(), mr["source_branch"].as_str(), mr["last_commit"]["id"].as_str(), fork, true, mr["action"].as_str().unwrap_or(""))
+            // GitLab's `user` is whoever acted (a push to it, a reopen); the opener is only
+            // `author_id`. Named when they're the same person, else unknown.
+            let opener = (p["user"]["id"].as_u64().is_some() && p["user"]["id"] == mr["author_id"]).then(|| p["user"]["username"].as_str()).flatten();
+            (mr["iid"].as_u64(), mr["title"].as_str(), mr["source_branch"].as_str(), mr["last_commit"]["id"].as_str(), fork, true, mr["action"].as_str().unwrap_or(""), opener)
         }
         _ => return None,
     };
@@ -369,7 +384,8 @@ fn pull_of(w: &Webhook) -> Option<Push> {
         (true, None) => return Some(Push::Ignored(format!("pull request {number} names no head commit"))),
         (false, _) => None,
     };
-    Some(Push::Pull(PullEvent { number, title: title.unwrap_or("").to_string(), branch: branch.to_string(), sha, fork, gitlab }))
+    let author = author.filter(|a| !a.is_empty()).map(|a| a.chars().take(100).collect());
+    Some(Push::Pull(PullEvent { number, title: title.unwrap_or("").to_string(), branch: branch.to_string(), sha, fork, gitlab, author, actor: actor_of(p) }))
 }
 
 /// A hook's token: `rlk_`, 34 random characters of lowercase base32 and 6 of CRC-32, as roll's

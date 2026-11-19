@@ -111,6 +111,18 @@ Infisical's and 1Password's CLIs do, rather than a token pasted into a shell pro
   tasks`' own tokens), refreshing it within a minute of its access token's end under a lock
   (`logins.lock`), so two commands never spend one refresh token. A login that can't be refreshed
   says so once (`run roll login`) and the command goes on without it.
+- **Which roll a command goes to**: `--api`, else `ROLL_API_URL`, else the saved login's URL
+  (`roll login <url>` signs in to that one). With several logins it's the one last signed in to or
+  picked, said on stderr; when none is newest (logins kept before this rule), a terminal asks which
+  and remembers it, and anything else is refused with the list. With no login it's a local rolld
+  (`http://127.0.0.1:7070`); roll has no hosted default yet. Whichever URL it is, only that URL's
+  own login goes with the command: logins are kept and looked up by the URL that issued them.
+- **An `ask` the CLI meets** (an `approval_pending` answer, "Approvals" below) is printed at once
+  with its approval, the page to approve it on, and a pointer to remembering it (that page's menu
+  beside Approve: "For 30 days" or "Always"; below), so later runs in the same
+  environment and folder stop asking, then sent again with `X-Roll-Approval` until it
+  runs, is denied, or its ten minutes end (then it says how to approve and run it again). A request
+  of a scoped or signed-in token still unanswered after 5 seconds says it may be held for a person.
 - Logging in again revokes the login it replaces; `roll logout` revokes the connection (its refresh
   token) and forgets it.
 
@@ -555,10 +567,16 @@ remembers only a request that named one. The builder writes it `prj_1/payments,p
 a project's keys to tick, as it lists a cluster's indices.
 
 It covers the routes of one key (`/v1/secrets/projects/{project}/transit/{name}/…`: encrypt,
-decrypt, sign, verify, HMAC, the public key), at their own actions, so a service that signs with
-one key needs write on that key only, not on the project. Listing, creating, rotating and deleting
-keys stay the project's (`roll_auth::scope::sub_resources` lists the products that have such
-names; secrets' rows name `{name}` with `.index("name")`).
+decrypt, sign, verify, HMAC, the public key; rotating, its minimum version and deleting it at
+admin), at their own actions, so a service that signs with one key needs write on that key only,
+not on the project. Roll secrets checks the key again itself (`Caller::need_key`). The list
+(`GET …/transit`) shows such a rule only the keys it names: the row filters by index
+(`filters_index`), roll-auth lets a rule limited to some indices match such a list and no other
+request that names none (secrets' health and leaks filter only by environment and folder, so a
+key-limited token gets a 403 there), and roll secrets asks the grant about each key
+(`Grants::reaches_key`); with none reachable it's a 403. Creating a key stays the project's
+(`roll_auth::scope::sub_resources` lists the products that have such names; secrets' rows name
+`{name}` with `.index("name")`).
 
 ### Presets
 
@@ -690,11 +708,14 @@ what a person said yes to.
 ### Remembered approvals
 
 Approving can also allow what's asked again, as Claude Code's and Cursor's "allow for this
-session" or "always" do (`POST …/approve {remember: "1h" | "8h" | "1d" | "always"}`, the approvals
+session" or "always" do (`POST …/approve {remember: "1h" | "8h" | "1d" | "7d" | "30d" | "always"}`, the approvals
 page's "Once ▾", `roll mcp approve --remember 1h`):
 
 - It allows the request's action on its one resource (`{product, resources: [{id}], actions:
-  {<action>: "allow"}}`); nothing broader. A request about the product as a whole or about
+  {<action>: "allow"}}`); nothing broader. It keeps the environment and folder the request was about (an
+  approval in development never reaches production) and belongs to the grant that asked: another
+  client the person approved doesn't inherit it, and it ends with that grant. A week or 30 days
+  suits a developer's own CLI (`roll run` in development asks once). A request about the product as a whole or about
   something new ("new in a project") can only be approved once.
 - For a while, the rule is the grant's `temporary`: it lapses by itself, and decisions read the
   grant's rules plus the live temporary ones. For good, it's added to the grant's `rules`, and the
@@ -1070,6 +1091,11 @@ look (an old repo, a wiki page, a backup's config):
   hour per decoy and person). A decoy can't be turned into a working token.
 - It's checksummed like any `rlt_`, so scanners report a leaked decoy too (roll revokes it, which
   ends the trap: plant another).
+- roll secrets plants them as decoy keys (docs/secrets.md, "Decoys"). rolld mints each with
+  `Access::mint_decoy`, owned by whoever planted it, and revokes it with `Access::revoke_decoy`
+  when its key changes or goes. A product hears each use through `Access::on_decoy`, after the
+  audit row and the mail. A decoy is never a live grant for a product's background work or for
+  reach (`Grants::grant` answers `None`).
 
 ## Leaked tokens
 
@@ -1161,9 +1187,9 @@ Under `/v1/access`. Bodies are JSON; errors are `{"error": string, "code"?: stri
 | `POST /v1/access/tokens/{id}/rotate` | access admin | `{keep_old_for_s?}`: a new secret with the same rules; the old one stops at once, or works that long (at most 604800, a week: Stripe's roll key); in its grace the old one calls products but manages no tokens (403 `rotated_secret` on `/v1/access`) → `{grant, token}`; not for OAuth connections |
 | `GET /v1/access/approvals` | access read | newest first; `?state=pending`, `?grant=<id>` (one token's), `?limit=` (at most 500) |
 | `GET /v1/access/approvals/{id}` | the grant that asked, or access read | an approval; `?wait=55` waits for a decision |
-| `POST /v1/access/approvals/{id}/approve` | operator | `{remember?: "1h" \| "8h" \| "1d" \| "always"}`: also allow the same action on the same resource ("Remembered approvals") |
+| `POST /v1/access/approvals/{id}/approve` | operator | `{remember?: "1h" \| "8h" \| "1d" \| "7d" \| "30d" \| "always"}`: also allow the same action on the same resource ("Remembered approvals") |
 | `POST /v1/access/approvals/{id}/deny` | operator | `{reason?}` |
-| `GET /v1/access/audit` | access read | `?grant=&product=&action=&decision=&source=&resource=&before=&limit=`; `resource` is who touched it: that resource or anything under it (`cl_1` finds `cl_1/logs-a`); `&format=jsonl` answers one event per line and `&format=csv` a row each (UTC times, every cell quoted; a formula character is defused with `'` at a cell's start and after a `;`, tab or `|` inside it, which some spreadsheets split on), as a download (the audit page and `roll mcp audit --format csv` or `jsonl`) |
+| `GET /v1/access/audit` | access read | `?grant=&product=&action=&decision=&source=&resource=&before=&limit=`; `resource` is who touched it: that resource or anything under it (`cl_1` finds `cl_1/logs-a`); `&format=jsonl` answers one event per line and `&format=csv` a row each (UTC times, every cell quoted; a formula character is defused with `'` at a cell's start and after a `;`, tab or `|` inside it, which some spreadsheets split on), as a download (the audit page and `roll mcp audit --format csv` or `jsonl`). Rows that name people (`usr_` ids: an account event's actor, a change's `by`, a resource) carry `actor_handle` and `resource_handle`, disabled and deleted people too, looked up for each answer; the CSV has them as its last two columns |
 | `POST /v1/access/leaks/github` | public (GitHub's signature) | GitHub secret scanning reports: `[{token, type, url, source}]` → `[{token_hash, token_type, label}]`; live tokens are revoked |
 | `GET /v1/access/audit/sinks` | operator | where the log streams: `Sink[]` (`{id, url, status, error, cursor_at, delivered_at, created_at, created_by}`) |
 | `POST /v1/access/audit/sinks` | operator | `{url, from_start?}` → 201 `{sink, secret}`; the secret is shown this once |

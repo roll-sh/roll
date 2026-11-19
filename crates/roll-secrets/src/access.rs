@@ -95,6 +95,12 @@ pub trait Grants: Send + Sync + std::fmt::Debug {
     fn everything(&self) -> bool {
         false
     }
+    /// Whether the caller may `action` encryption key `name` of `project` (roll-access's rules
+    /// can name one key: `{id: "prj_…", index: "<name>"}`). Others answer for the whole project.
+    fn reaches_key(&self, action: Action, project: &str, name: &str) -> bool {
+        let _ = name;
+        self.allows(action, &Scope::project(project))
+    }
 }
 
 /// A signed-in person who isn't an admin (docs/accounts.md): everything on the projects they own,
@@ -241,6 +247,17 @@ pub fn rule(project: &str, environments: Option<Vec<String>>, paths: Option<Vec<
     }
 }
 
+fn scope_action(action: Action) -> roll_auth::scope::Action {
+    use roll_auth::scope;
+    match action {
+        Action::Read => scope::Action::Read,
+        Action::Reveal => scope::Action::Reveal,
+        Action::Write => scope::Action::Write,
+        Action::Delete => scope::Action::Delete,
+        Action::Admin => scope::Action::Admin,
+    }
+}
+
 /// Short-lived roll-access tokens for workload identities' logins (rolld: `Access::mint_workload`).
 /// The login is the proof, so there's no caller to gate: roll-access checks the rule is within the
 /// identity's scope and that its owner can still sign in.
@@ -254,6 +271,31 @@ pub trait Workloads: Send + Sync {
     /// those that reach a folder). Blocking.
     fn grants(&self) -> crate::Result<Vec<roll_auth::Grant>> {
         Ok(vec![])
+    }
+    /// A long-lived roll token with `rule`, made for the request `ext` belongs to as `POST
+    /// /v1/access/tokens` makes one (its owner the caller; a gateway's). Blocking.
+    fn token(&self, ext: &axum::http::Extensions, name: &str, rule: roll_auth::scope::Rule) -> crate::Result<Minted> {
+        let _ = (ext, name, rule);
+        Err(crate::Error::BadRequest("roll tokens aren't on this server".into()))
+    }
+    /// Revoke a token [`Workloads::token`] made, saying why. Blocking.
+    fn revoke_token(&self, id: &str, why: &str) -> crate::Result<()> {
+        let _ = (id, why);
+        Ok(())
+    }
+    /// A decoy token (docs/secrets.md, "Decoys"; roll-access's decoys): it looks as `rule` says and
+    /// allows nothing, and roll-access tells roll secrets of each use
+    /// ([`crate::Secrets::decoy_used`]). Owned by `owner` (`None`: the operator), who's mailed
+    /// on its use. `expires_at` is 0: a decoy doesn't end on its own.
+    fn mint_decoy(&self, name: &str, rule: roll_auth::scope::Rule, owner: Option<&str>) -> crate::Result<Minted> {
+        let _ = (name, rule, owner);
+        Err(crate::Error::BadRequest("decoys aren't on this server".into()))
+    }
+    /// End a decoy token now (its key was deleted or changed). `Ok` when it's gone, whether or not
+    /// it was live.
+    fn revoke_decoy(&self, id: &str) -> crate::Result<()> {
+        let _ = id;
+        Ok(())
     }
 }
 
@@ -273,13 +315,7 @@ pub struct GrantGrants(pub roll_auth::Grant);
 impl Grants for GrantGrants {
     fn allows(&self, action: Action, at: &Scope<'_>) -> bool {
         use roll_auth::scope;
-        let action = match action {
-            Action::Read => scope::Action::Read,
-            Action::Reveal => scope::Action::Reveal,
-            Action::Write => scope::Action::Write,
-            Action::Delete => scope::Action::Delete,
-            Action::Admin => scope::Action::Admin,
-        };
+        let action = scope_action(action);
         // A project-wide read that answers per environment and folder (its environments' names,
         // health, findings, the audit log) answers only what the grant reaches in each: a rule
         // limited to some of them takes part in it, as roll-access's `filters_itself` routes do.
@@ -291,6 +327,13 @@ impl Grants for GrantGrants {
         let r = scope::Resource { product: "secrets".into(), id: Some(at.project.into()), project: Some(at.project.into()), environment: at.env.map(Into::into), path: at.path.map(Into::into), filters_itself: filtered, ..Default::default() };
         // `ask` pauses a whole request at the gate; inside the product it's a no.
         self.0.allows(&r, action) == scope::Outcome::Allow
+    }
+
+    /// One key, as rolld's gate judges a request naming it (the project's id, the key as its index).
+    fn reaches_key(&self, action: Action, project: &str, name: &str) -> bool {
+        use roll_auth::scope;
+        let r = scope::Resource { product: "secrets".into(), id: Some(project.into()), project: Some(project.into()), index: Some(name.into()), ..Default::default() };
+        self.allows(action, &Scope::project(project)) || self.0.allows(&r, scope_action(action)) == scope::Outcome::Allow
     }
 
     /// Code read on the repository, as it sits on `project`'s canvas.
@@ -393,6 +436,15 @@ impl Caller {
 
     pub fn allows(&self, action: Action, at: &Scope<'_>) -> bool {
         self.grants.allows(action, at)
+    }
+
+    /// As [`Caller::need`], for encryption key `name` of `project`: a grant limited to that key
+    /// reaches it too.
+    pub fn need_key(&self, action: Action, project: &str, name: &str) -> crate::Result<()> {
+        if self.grants.reaches_key(action, project, name) {
+            return Ok(());
+        }
+        self.need(action, &Scope::project(project))
     }
 
     pub fn need(&self, action: Action, at: &Scope<'_>) -> crate::Result<()> {

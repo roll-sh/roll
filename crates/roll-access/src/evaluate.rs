@@ -164,6 +164,7 @@ pub(crate) fn target(access: &Access, row: &Row, params: &[(String, String)], qu
             }
             r.index = row.index.and_then(param);
             r.filters_itself = row.filters_itself;
+            r.filters_index = row.filters_index;
             if let Some(name) = row.path_query {
                 let path = query.and_then(|qs| url::form_urlencoded::parse(qs.as_bytes()).find(|(k, _)| k == name).map(|(_, v)| v.into_owned()));
                 r.path = Some(path.filter(|p| !p.is_empty()).unwrap_or_else(|| "/".into()));
@@ -396,7 +397,12 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
         Some(user) => {
             let Some(people) = access.people.get().cloned() else { return invalid_token(&access) };
             match people.person(&user).await {
-                Ok(Some(p)) => Some(p),
+                Ok(Some(p)) => {
+                    // Their token's use counts as their activity (dormant people), off the request.
+                    let (people, user) = (people.clone(), user.clone());
+                    drop(tokio::task::spawn_blocking(move || people.used(&user)));
+                    Some(p)
+                }
                 Ok(None) => return invalid_token(&access),
                 Err(e) => {
                     tracing::warn!(error = %e, "looking up a token's user");

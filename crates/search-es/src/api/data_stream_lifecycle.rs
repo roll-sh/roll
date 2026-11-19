@@ -13,8 +13,18 @@
 //! the cluster's authority (Elasticsearch's data stream lifecycle origin). A failed operation
 //! is kept per index in the error store (`dsl.error`: first occurrence, last recorded,
 //! message, retry count) that `_lifecycle/explain` and `_lifecycle/stats` print, cleared by
-//! the next success. Force merging and downsampling rounds are not run (roll merges segments
-//! itself; see docs/search/compatibility.md).
+//! the next success.
+//!
+//! Then, as `maybeExecuteDownsampling` and `maybeExecuteForceMerge` do, it maintains the
+//! other backing and failure indices it manages. A time series backing index whose
+//! `downsampling` rounds have come due (each round's `after` counted from the generation date,
+//! not before the index's end time; only rounds coarser than an index already downsampled) is
+//! write-blocked and downsampled with the last of them to `downsample-<interval>-<origin
+//! index>`, which takes its place among the backing indices with the source's generation date
+//! as its `index.lifecycle.origination_date`; the source is deleted. Every other such index (a
+//! time series one once its end time has passed) gets the
+//! `data_streams.lifecycle.target.merge.policy.*` merge settings and one force merge, recorded
+//! per index ([`MERGED`]: Elasticsearch's `force_merge_completed_timestamp`).
 //!
 //! **When passes run.** Elasticsearch polls every `data_streams.lifecycle.poll_interval`
 //! (5m). A loaded roll cluster polls at that interval only while a write could change an
@@ -23,7 +33,9 @@
 //! known instant ([`next_due`]), which is also when a sleeping cluster is woken. A `max_age`
 //! that came due without a rollover (the index is empty: `min_docs=1`) is recorded once
 //! (`dsl.checked`), so it doesn't wake the cluster again: only a write, which loads the
-//! cluster anyway, can make that rollover happen.
+//! cluster anyway, can make that rollover happen. A force merge is due once an index is no
+//! longer written to, a downsampling round at its time: neither repeats, so an idle data
+//! stream has nothing due between rounds.
 
 use super::data_streams::{automatic_max_age, effective_retention, failures_effective_retention, failures_lifecycle_of, time_setting};
 use crate::cluster::{Cluster, Dialect};
@@ -39,6 +51,8 @@ pub const ERRORS: &str = "dsl.error";
 /// Per rollover target (`<data stream>` or `<data stream>::failures`): the write index whose
 /// `max_age` came due without a rollover, and when that was found.
 const CHECKED: &str = "dsl.checked";
+/// Per index name: `{uuid, at}` once the lifecycle force merged it.
+const MERGED: &str = "dsl.merged";
 
 const DEFAULT_ROLLOVER: &str = "max_age=auto,max_primary_shard_size=50gb,min_docs=1,max_primary_shard_docs=200000000";
 /// `DataStreamLifecycleErrorStore.MAX_ERROR_MESSAGE_LENGTH`.
@@ -201,6 +215,68 @@ fn retention_candidates<'a>(st: &'a ClusterState, ds: &'a DataStream) -> impl It
     backing.chain(failure).filter_map(|(n, r)| st.metadata.indices.get(n).map(|i| (&**i, r))).filter(move |(i, _)| !skipped(i) && !downsampling(i) && managed_by_dsl(ds, i))
 }
 
+/// A time series index's end time.
+fn ts_end(idx: &IndexMeta) -> Option<i64> {
+    if idx.settings.get("index.mode") != Some("time_series") {
+        return None;
+    }
+    idx.settings.get("index.time_series.end_time").and_then(|v| crate::meta::index_settings::parse_date_setting(v).ok())
+}
+
+/// The indices of `ds` the lifecycle maintains besides rolling over and deleting them: its
+/// managed backing and failure indices that aren't write indices or skipped.
+fn maintained<'a>(st: &'a ClusterState, ds: &'a DataStream) -> impl Iterator<Item = &'a IndexMeta> + 'a {
+    ds.indices
+        .iter()
+        .chain(&ds.failure_indices)
+        .filter(move |n| ds.write_index() != Some(n.as_str()) && ds.failure_write_index() != Some(n.as_str()))
+        .filter_map(move |n| st.metadata.indices.get(n).map(|i| &**i))
+        .filter(move |i| !skipped(i) && managed_by_dsl(ds, i))
+}
+
+/// One downsampling round of a lifecycle (`DataStreamLifecycle.DownsamplingRound`).
+#[derive(Clone)]
+struct Round {
+    after: i64,
+    interval: String,
+    interval_ms: i64,
+}
+
+fn rounds(ds: &DataStream) -> Vec<Round> {
+    let Some(l) = ds.lifecycle.as_ref().filter(|l| enabled(l)) else { return Vec::new() };
+    let ms = |v: &Value| TimeValue::parse(&v.to_es_string(), "").ok().map(|t| t.as_millis());
+    l.get("downsampling")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|r| Some(Round { after: ms(r.get("after")?)?, interval: r.get("fixed_interval")?.to_es_string(), interval_ms: ms(r.get("fixed_interval")?)? }))
+        .collect()
+}
+
+/// The downsampling rounds of a time series backing index: each with when it comes due (its
+/// `after` past the generation date, and the end time past), coarser than the index's own
+/// interval if it is a downsample already.
+fn index_rounds(st: &ClusterState, ds: &DataStream, idx: &IndexMeta) -> Vec<(i64, Round)> {
+    if !ds.indices.contains(&idx.name) || idx.settings.get("index.mode") != Some("time_series") {
+        return Vec::new();
+    }
+    let Some(generation) = generation_date(st, ds, idx) else { return Vec::new() };
+    let own = idx.settings.get("index.downsample.interval").and_then(|v| TimeValue::parse(v, "").ok()).map_or(0, |t| t.as_millis());
+    let end = ts_end(idx).unwrap_or(0);
+    rounds(ds).into_iter().filter(|r| r.interval_ms > own).map(|r| (generation.saturating_add(r.after).max(end), r)).collect()
+}
+
+/// When the index's next force merge or downsampling round is due (`None`: nothing left).
+fn maintenance_due(st: &ClusterState, ds: &DataStream, idx: &IndexMeta) -> Option<i64> {
+    let generation = generation_date(st, ds, idx).unwrap_or(0);
+    let merge = (!merged(st, idx)).then(|| ts_end(idx).unwrap_or(generation).max(generation));
+    index_rounds(st, ds, idx).into_iter().map(|(t, _)| t).chain(merge).min()
+}
+
+fn merged(st: &ClusterState, idx: &IndexMeta) -> bool {
+    st.metadata.xpack.get(MERGED, &idx.name).is_some_and(|m| m.get("uuid").and_then(Value::as_str) == Some(idx.uuid.as_str()))
+}
+
 /// Whether an operation on the index failed (it is retried on the next poll, not at a time).
 fn failed(st: &ClusterState, idx: &IndexMeta) -> bool {
     error_of(st, idx).is_some()
@@ -233,6 +309,11 @@ pub fn next_due(st: &ClusterState) -> Option<i64> {
                 at(deletion_due(st, ds, idx, &retention));
             }
         }
+        for idx in maintained(st, ds) {
+            if !failed(st, idx) {
+                at(maintenance_due(st, ds, idx));
+            }
+        }
     }
     due
 }
@@ -248,6 +329,9 @@ pub fn polls(st: &ClusterState) -> bool {
 struct Work {
     rollovers: Vec<(String, String, Map)>,
     deletes: Vec<String>,
+    /// Data stream, backing index and the round to downsample it with.
+    downsamples: Vec<(String, String, Round)>,
+    merges: Vec<String>,
 }
 
 /// One pass over every data stream at `now` (`DataStreamLifecycleService.run`).
@@ -257,7 +341,7 @@ pub async fn run(cluster: &Cluster, now: i64) {
 
 async fn pass(cluster: &Cluster, now: i64) {
     let st = cluster.state();
-    if !active(&st) && st.metadata.xpack.len(ERRORS) == 0 {
+    if !active(&st) && st.metadata.xpack.len(ERRORS) == 0 && st.metadata.xpack.len(MERGED) == 0 {
         return;
     }
     let mut work = Work::default();
@@ -278,6 +362,19 @@ async fn pass(cluster: &Cluster, now: i64) {
         for (idx, retention) in retention_candidates(&st, ds) {
             if deletion_due(&st, ds, idx, &retention).is_some_and(|d| now >= d) {
                 work.deletes.push(idx.name.clone());
+            }
+        }
+        for idx in maintained(&st, ds) {
+            if work.deletes.contains(&idx.name) {
+                continue;
+            }
+            // `waitForInProgressOrTriggerDownsampling`: the last round that is due; an index
+            // being downsampled isn't merged in the same pass.
+            let due_round = index_rounds(&st, ds, idx).into_iter().filter(|(t, _)| now >= *t).max_by_key(|(_, r)| r.interval_ms);
+            if let Some((_, round)) = due_round {
+                work.downsamples.push((ds.name.clone(), idx.name.clone(), round));
+            } else if !merged(&st, idx) && ts_end(idx).is_none_or(|e| now >= e) {
+                work.merges.push(idx.name.clone());
             }
         }
     }
@@ -307,14 +404,103 @@ async fn pass(cluster: &Cluster, now: i64) {
         let r = internal::call_system(cluster, "DELETE", &format!("/{}", enc(name)), None).await;
         errors.push((name.clone(), r.err().map(|e| e.to_value(false))));
     }
+    for (ds, name, round) in &work.downsamples {
+        let r = downsample(cluster, ds, name, round).await;
+        errors.push((name.clone(), r.err().map(|e| e.to_value(false))));
+    }
+    let mut merged_now = Vec::new();
+    for name in &work.merges {
+        match force_merge(cluster, name).await {
+            Ok(uuid) => merged_now.push((name.clone(), uuid)),
+            Err(e) => errors.push((name.clone(), Some(e.to_value(false)))),
+        }
+    }
+    if !merged_now.is_empty() {
+        let _ = cluster
+            .update(|st| {
+                for (name, uuid) in &merged_now {
+                    store::put(st, MERGED, name, obj! { "uuid" => uuid.clone(), "at" => now }, now)?;
+                }
+                Ok(())
+            })
+            .await;
+    }
     checked.retain(|(t, _)| !rolled.contains(t));
     record(cluster, errors, checked, now).await;
+}
+
+/// `maybeExecuteForceMerge`: the target merge settings, then a force merge. Returns the
+/// index's uuid.
+async fn force_merge(cluster: &Cluster, name: &str) -> Result<String, crate::error::EsError> {
+    let (uuid, settings) = {
+        let st = cluster.state();
+        let Some(idx) = st.metadata.indices.get(name) else { return Err(crate::error::EsError::index_not_found_bare(name)) };
+        let floor = st.metadata.cluster_setting("data_streams.lifecycle.target.merge.policy.floor_segment").unwrap_or("100mb").to_string();
+        let factor = st.metadata.cluster_setting("data_streams.lifecycle.target.merge.policy.merge_factor").unwrap_or("16").to_string();
+        let same = idx.settings.get("index.merge.policy.floor_segment") == Some(floor.as_str()) && idx.settings.get("index.merge.policy.merge_factor") == Some(factor.as_str());
+        (idx.uuid.clone(), (!same).then(|| obj! { "index.merge.policy.floor_segment" => floor, "index.merge.policy.merge_factor" => factor }))
+    };
+    if let Some(s) = settings {
+        internal::call_system(cluster, "PUT", &format!("/{}/_settings", enc(name)), Some(&s)).await?;
+    }
+    internal::call_system(cluster, "POST", &format!("/{}/_forcemerge", enc(name)), None).await?;
+    Ok(uuid)
+}
+
+/// One downsampling round of a backing index: write-blocked, downsampled, the downsample put
+/// in its place (`ReplaceSourceWithDownsampleIndexTask`), the source deleted.
+async fn downsample(cluster: &Cluster, ds: &str, name: &str, round: &Round) -> Result<(), crate::error::EsError> {
+    let (blocked, target) = {
+        let st = cluster.state();
+        let Some(idx) = st.metadata.indices.get(name) else { return Ok(()) };
+        let origin = idx.settings.get("index.downsample.origin.name").unwrap_or(name);
+        (idx.settings.get("index.blocks.write") == Some("true"), format!("downsample-{}-{origin}", round.interval))
+    };
+    if !blocked {
+        internal::call_system(cluster, "PUT", &format!("/{}/_block/write", enc(name)), None).await?;
+    }
+    let body = obj! { "fixed_interval" => round.interval.clone() };
+    internal::call_system(cluster, "POST", &format!("/{}/_downsample/{}", enc(name), enc(&target)), Some(&body)).await?;
+    let (ds, source, t) = (ds.to_string(), name.to_string(), target.clone());
+    cluster
+        .update(move |st| {
+            let (Some(d), Some(src), Some(dst)) = (st.metadata.data_streams.get(&ds).cloned(), st.metadata.indices.get(&source).cloned(), st.metadata.indices.get(&t).cloned()) else {
+                return Ok(());
+            };
+            let Some(pos) = d.indices.iter().position(|n| *n == source) else { return Ok(()) };
+            let generation = generation_date(st, &d, &src);
+            let mut nd = (*d).clone();
+            nd.indices[pos] = t.clone();
+            nd.generation += 1;
+            st.metadata.data_streams.insert(ds.clone(), std::sync::Arc::new(nd));
+            if let Some(g) = generation.filter(|_| !dst.settings.contains("index.lifecycle.origination_date")) {
+                let mut ni = (*dst).clone();
+                ni.settings.set("index.lifecycle.origination_date", g.to_string());
+                ni.settings_version += 1;
+                st.metadata.indices.insert(t.clone(), std::sync::Arc::new(ni));
+            }
+            // The downsample carries the source's force merge (Elasticsearch copies the
+            // custom metadata).
+            if let Some(m) = st.metadata.xpack.get(MERGED, &source).filter(|m| m.get("uuid").and_then(Value::as_str) == Some(src.uuid.as_str())).cloned() {
+                let at = m.get("at").cloned().unwrap_or(Value::from(0));
+                store::family_mut(st, MERGED).insert(t.clone(), obj! { "uuid" => dst.uuid.clone(), "at" => at });
+            }
+            Ok(())
+        })
+        .await?;
+    internal::call_system(cluster, "DELETE", &format!("/{}", enc(name)), None).await?;
+    Ok(())
 }
 
 /// Writes the pass's outcomes: errors recorded or cleared (and those of indices no longer
 /// managed dropped), `max_age`s found without a rollover. No write when nothing changed.
 async fn record(cluster: &Cluster, errors: Vec<(String, Option<Value>)>, checked: Vec<(String, String)>, now: i64) {
     let st = cluster.state();
+    // A force merge record outlives neither its index nor the index's lifecycle.
+    let gone = |st: &ClusterState, name: &str, rec: &Value| match (st.metadata.indices.get(name), st.metadata.data_stream_of(name)) {
+        (Some(idx), Some(_)) => rec.get("uuid").and_then(Value::as_str) != Some(idx.uuid.as_str()),
+        _ => true,
+    };
     let stale = |st: &ClusterState, name: &str, rec: &Value| match (st.metadata.indices.get(name), st.metadata.data_stream_of(name)) {
         (Some(idx), Some(ds)) => rec.get("uuid").and_then(Value::as_str) != Some(idx.uuid.as_str()) || !managed_by_dsl(ds, idx),
         _ => true,
@@ -322,6 +508,7 @@ async fn record(cluster: &Cluster, errors: Vec<(String, Option<Value>)>, checked
     let changes = !checked.is_empty()
         || errors.iter().any(|(n, e)| e.is_some() || st.metadata.xpack.get(ERRORS, n).is_some())
         || st.metadata.xpack.iter(ERRORS).any(|(n, r)| stale(&st, n, r))
+        || st.metadata.xpack.iter(MERGED).any(|(n, r)| gone(&st, n, r))
         || st.metadata.xpack.iter(CHECKED).any(|(t, c)| {
             let ds = st.metadata.data_streams.get(t.trim_end_matches("::failures"));
             ds.is_none_or(|d| c.get("index").and_then(Value::as_str).is_none_or(|i| d.write_index() != Some(i) && d.failure_write_index() != Some(i)))
@@ -362,9 +549,13 @@ async fn record(cluster: &Cluster, errors: Vec<(String, Option<Value>)>, checked
                 };
                 store::put(st, ERRORS, name, rec, now)?;
             }
-            let gone: Vec<String> = st.metadata.xpack.iter(ERRORS).filter(|(n, r)| stale(st, n, r)).map(|(n, _)| n.clone()).collect();
-            for n in gone {
+            let old_errors: Vec<String> = st.metadata.xpack.iter(ERRORS).filter(|(n, r)| stale(st, n, r)).map(|(n, _)| n.clone()).collect();
+            for n in old_errors {
                 store::remove(st, ERRORS, &n);
+            }
+            let old_merges: Vec<String> = st.metadata.xpack.iter(MERGED).filter(|(n, r)| gone(st, n, r)).map(|(n, _)| n.clone()).collect();
+            for n in old_merges {
+                store::remove(st, MERGED, &n);
             }
             let old: Vec<String> = st
                 .metadata
@@ -441,6 +632,9 @@ mod tests {
         let new_created = st.metadata.indices[&after[1]].creation_date();
         assert_eq!(new_created, rolled_at, "the new write index is dated the run's time");
         drop(st);
+        // The old index is force merged in the next pass.
+        assert_eq!(super::next_due(&c.state()), Some(rolled_at));
+        super::run(&c, rolled_at).await;
         // Next: the old index's retention (7d after its rollover), before the new one's age.
         assert_eq!(super::next_due(&c.state()), Some((rolled_at + 7 * DAY).min(new_created + DAY)));
         let (_, v) = call(&c, "GET", &format!("/{first}/_lifecycle/explain"), "").await;
@@ -452,6 +646,66 @@ mod tests {
         let left = backing(&c);
         assert!(!left.contains(&first) && !c.state().metadata.indices.contains_key(&first), "{left:?}");
         assert!(c.state().metadata.indices.contains_key(left.last().unwrap()), "the write index stays");
+    }
+
+    /// A rolled-over backing index gets the target merge settings and one force merge. A
+    /// time series one is merged once its end time has passed, then downsampled when its
+    /// round comes due: the downsample takes its place, dated from the source's generation,
+    /// with the force merge carried over, so nothing is due for it afterwards.
+    #[tokio::test]
+    async fn force_merges_and_downsamples() {
+        let c = Arc::new(Cluster::open(ClusterConfig::new("c"), Arc::new(MemoryStore::new())).await.unwrap());
+        let ok = |s: u16, v: &Value| assert!(s < 300, "{v}");
+        let (s, v) = call(&c, "PUT", "/_index_template/app", r#"{"index_patterns":["logs-app*"],"data_stream":{},"template":{"lifecycle":{}}}"#).await;
+        ok(s, &v);
+        let (s, v) = call(&c, "PUT", "/_data_stream/logs-app", "").await;
+        ok(s, &v);
+        let (s, v) = call(&c, "POST", "/logs-app/_rollover", "").await;
+        ok(s, &v);
+        let first = backing(&c)[0].clone();
+        let now = crate::time::now_millis();
+        super::run(&c, now).await;
+        let st = c.state();
+        let idx = &st.metadata.indices[&first];
+        assert_eq!((idx.settings.get("index.merge.policy.floor_segment"), idx.settings.get("index.merge.policy.merge_factor")), (Some("100mb"), Some("16")));
+        assert!(super::merged(&st, idx));
+        assert_eq!(super::maintenance_due(&st, &st.metadata.data_streams["logs-app"], idx), None, "merged once");
+        drop(st);
+
+        let t = r#"{"index_patterns":["metrics-t*"],"data_stream":{},"template":{"settings":{"index.mode":"time_series","index.routing_path":["host"]},
+            "mappings":{"properties":{"@timestamp":{"type":"date"},"host":{"type":"keyword","time_series_dimension":true},"cpu":{"type":"double","time_series_metric":"gauge"}}},
+            "lifecycle":{"downsampling":[{"after":"1d","fixed_interval":"1h"}]}}}"#;
+        let (s, v) = call(&c, "PUT", "/_index_template/metrics", t).await;
+        ok(s, &v);
+        let ts = chrono::DateTime::from_timestamp_millis(now).unwrap().to_rfc3339();
+        let (s, v) = call(&c, "POST", "/metrics-t/_doc?refresh=true", &format!(r#"{{"@timestamp":"{ts}","host":"a","cpu":2}}"#)).await;
+        ok(s, &v);
+        let (s, v) = call(&c, "POST", "/metrics-t/_rollover", "").await;
+        ok(s, &v);
+        let source = c.state().metadata.data_streams["metrics-t"].indices[0].clone();
+        let (generation, end) = {
+            let st = c.state();
+            let (ds, idx) = (&st.metadata.data_streams["metrics-t"], &st.metadata.indices[&source]);
+            let (g, e) = (super::generation_date(&st, ds, idx).unwrap(), super::ts_end(idx).unwrap());
+            assert_eq!(super::maintenance_due(&st, ds, idx), Some(e), "merged once writes can't reach it");
+            (g, e)
+        };
+        super::run(&c, end).await;
+        let st = c.state();
+        let (ds, idx) = (&st.metadata.data_streams["metrics-t"], &st.metadata.indices[&source]);
+        assert!(super::merged(&st, idx));
+        assert_eq!(super::maintenance_due(&st, ds, idx), Some((generation + DAY).max(end)), "the round is next");
+        drop(st);
+        super::run(&c, (generation + DAY).max(end)).await;
+        let target = format!("downsample-1h-{source}");
+        let st = c.state();
+        let ds = &st.metadata.data_streams["metrics-t"];
+        assert_eq!(ds.indices[0], target);
+        assert!(!st.metadata.indices.contains_key(&source));
+        let idx = &st.metadata.indices[&target];
+        assert_eq!(idx.settings.get("index.lifecycle.origination_date"), Some(generation.to_string().as_str()));
+        assert_eq!(super::maintenance_due(&st, ds, idx), None, "no coarser round, merged already");
+        assert!(st.metadata.xpack.get(super::MERGED, &source).is_none());
     }
 
     /// An index an ILM policy manages (`prefer_ilm` default) and one with

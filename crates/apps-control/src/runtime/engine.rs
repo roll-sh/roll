@@ -55,6 +55,8 @@ pub struct Inspect {
     pub network: Option<String>,
     /// Its health check's verdict (`starting`, `healthy`, `unhealthy`), when it has one.
     pub health: Option<String>,
+    /// Each published container port and the host port it's on (the main one's is `host_port`).
+    pub published: std::collections::BTreeMap<u16, u16>,
 }
 
 impl Engine {
@@ -346,9 +348,18 @@ fn parse_inspect(body: &[u8]) -> anyhow::Result<Inspect> {
         port: String,
     }
     let c: Container = serde_json::from_slice(body).context("reading an inspect")?;
-    let host_port = c.host.ports.into_iter().flatten().flat_map(|(_, b)| b.into_iter().flatten()).find_map(|b| b.port.parse().ok());
-    let exposed = c.config.as_ref().and_then(|c| c.exposed.as_ref()).and_then(|e| e.keys().find_map(|k| k.strip_suffix("/tcp")?.parse().ok()));
-    let labels = c.config.and_then(|c| c.labels).unwrap_or_default();
+    let labels = c.config.as_ref().and_then(|c| c.labels.clone()).unwrap_or_default();
+    // The app's own port (`sh.roll.apps.port`) among others a domain sends to; else the first.
+    let main: Option<u16> = labels.get("sh.roll.apps.port").and_then(|p| p.parse().ok());
+    let published: std::collections::BTreeMap<u16, u16> = c
+        .host
+        .ports
+        .into_iter()
+        .flatten()
+        .filter_map(|(k, b)| Some((k.strip_suffix("/tcp")?.parse().ok()?, b.into_iter().flatten().find_map(|b| b.port.parse().ok())?)))
+        .collect();
+    let host_port = main.and_then(|m| published.get(&m).copied()).or_else(|| published.values().next().copied());
+    let exposed = main.or_else(|| c.config.as_ref().and_then(|c| c.exposed.as_ref()).and_then(|e| e.keys().find_map(|k| k.strip_suffix("/tcp")?.parse().ok())));
     let cpu_nanos = labels.get("sh.roll.apps.cpu").and_then(|v| v.parse().ok());
     let named: Vec<(String, Endpoint)> = c.net.and_then(|n| n.networks).into_iter().flatten().collect();
     let network = named.first().map(|(n, _)| n.clone());
@@ -357,7 +368,7 @@ fn parse_inspect(body: &[u8]) -> anyhow::Result<Inspect> {
     let closed = labels.get("sh.roll.apps.closed").and_then(|p| p.parse::<u16>().ok()).and_then(|p| Some(std::net::SocketAddr::new(networks.iter().find_map(|e| e.ip.parse().ok())?, p)));
     let pid = (c.state.running && c.state.pid > 0).then_some(c.state.pid);
     let health = c.state.health.map(|h| h.status).filter(|s| !s.is_empty());
-    Ok(Inspect { id: c.id, running: c.state.running, host_port, cpu_nanos, exit_code: c.state.exit_code, oom_killed: c.state.oom_killed, pid, gateways, exposed, closed, network, health })
+    Ok(Inspect { id: c.id, running: c.state.running, host_port, cpu_nanos, exit_code: c.state.exit_code, oom_killed: c.state.oom_killed, pid, gateways, exposed, closed, network, health, published })
 }
 
 /// Splits Docker's multiplexed log stream (a container without a TTY): frames of an 8-byte header
@@ -408,7 +419,11 @@ mod tests {
     #[test]
     fn inspect_reads_id_state_and_the_published_port() {
         let body = br#"{"Id":"abc","State":{"Running":true},"HostConfig":{"PortBindings":{"8080/tcp":[{"HostIp":"127.0.0.1","HostPort":"41234"}]}}}"#;
-        assert_eq!(parse_inspect(body).unwrap(), Inspect { id: "abc".into(), running: true, host_port: Some(41234), cpu_nanos: None, exit_code: None, oom_killed: false, pid: None, gateways: vec![], exposed: None, closed: None, network: None, health: None });
+        assert_eq!(parse_inspect(body).unwrap(), Inspect { id: "abc".into(), running: true, host_port: Some(41234), cpu_nanos: None, exit_code: None, oom_killed: false, pid: None, gateways: vec![], exposed: None, closed: None, network: None, health: None, published: [(8080, 41234)].into() });
+        // Another port a domain sends to: the main one is the labelled one, whatever sorts first.
+        let two = br#"{"Id":"t","State":{"Running":true},"Config":{"Labels":{"sh.roll.apps.port":"8080"},"ExposedPorts":{"3000/tcp":{},"8080/tcp":{}}},"HostConfig":{"PortBindings":{"3000/tcp":[{"HostPort":"40001"}],"8080/tcp":[{"HostPort":"40002"}]}}}"#;
+        let t = parse_inspect(two).unwrap();
+        assert_eq!((t.host_port, t.exposed, t.published.get(&3000).copied()), (Some(40002), Some(8080), Some(40001)));
         let oom = br#"{"Id":"o","State":{"Running":false,"ExitCode":137,"OOMKilled":true},"HostConfig":{}}"#;
         let i = parse_inspect(oom).unwrap();
         assert_eq!((i.exit_code, i.oom_killed), (Some(137), true));

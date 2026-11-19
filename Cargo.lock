@@ -277,6 +277,7 @@ dependencies = [
  "aho-corasick",
  "anyhow",
  "apps-build",
+ "argon2",
  "async-trait",
  "aws-config",
  "aws-sdk-cloudwatchlogs",
@@ -311,6 +312,8 @@ dependencies = [
  "roll-cluster",
  "roll-fetch",
  "roll-workspace",
+ "rustls-native-certs",
+ "s3-image",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -318,12 +321,14 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "tokio-rustls 0.26.6",
  "tokio-tungstenite 0.30.0",
  "tokio-util",
  "toml",
  "tower",
  "tracing",
  "url",
+ "zeroize",
  "zip",
 ]
 
@@ -4355,6 +4360,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "lber"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cbcf559624bfd9fe8d488329a8959766335a43a9b8b2cdd6a2c379fca02909a5"
+dependencies = [
+ "bytes",
+ "nom 7.1.3",
+]
+
+[[package]]
+name = "ldap3"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "01fe89f5e7cfb7e4701e3a38ff9f00358e026a9aee940355d88ee9d81e5c7503"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "futures",
+ "futures-util",
+ "lber",
+ "log",
+ "nom 7.1.3",
+ "percent-encoding",
+ "rustls 0.23.46",
+ "rustls-native-certs",
+ "thiserror",
+ "tokio",
+ "tokio-rustls 0.26.6",
+ "tokio-stream",
+ "tokio-util",
+ "url",
+ "x509-parser",
+]
+
+[[package]]
 name = "leb128fmt"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6869,12 +6909,16 @@ dependencies = [
  "getrandom 0.4.3",
  "hex",
  "http-body-util",
+ "ipnet",
  "percent-encoding",
+ "rcgen",
  "reqwest",
  "ring",
  "roll-auth",
  "roll-net",
  "roll-oidc",
+ "rustls-pki-types",
+ "rustls-webpki 0.103.15",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -6884,6 +6928,7 @@ dependencies = [
  "tower",
  "tracing",
  "url",
+ "x509-parser",
  "zeroize",
 ]
 
@@ -6948,6 +6993,8 @@ dependencies = [
  "roll-auth",
  "roll-cluster",
  "roll-fetch",
+ "roll-gateway",
+ "roll-keyshares",
  "roll-previews",
  "roll-secrets",
  "roll-workspace",
@@ -7050,6 +7097,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "roll-gateway"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "futures-util",
+ "hickory-resolver",
+ "httpdate",
+ "ipnet",
+ "rand 0.8.8",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite 0.30.0",
+]
+
+[[package]]
+name = "roll-keyshares"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "getrandom 0.4.3",
+ "sha2 0.10.9",
+ "thiserror",
+ "zeroize",
+]
+
+[[package]]
 name = "roll-mcp"
 version = "0.1.0"
 dependencies = [
@@ -7111,6 +7186,7 @@ dependencies = [
  "hyper-util",
  "image",
  "parking_lot",
+ "percent-encoding",
  "roll-auth",
  "roll-cluster",
  "roll-workspace",
@@ -7122,6 +7198,7 @@ dependencies = [
  "tokio",
  "tower",
  "tracing",
+ "url",
 ]
 
 [[package]]
@@ -7140,6 +7217,7 @@ dependencies = [
  "hkdf",
  "hmac 0.12.1",
  "http-body-util",
+ "instant-acme",
  "ipnet",
  "rand 0.8.8",
  "rcgen",
@@ -7156,6 +7234,7 @@ dependencies = [
  "thiserror",
  "time",
  "tokio",
+ "tokio-rustls 0.26.6",
  "tower",
  "tracing",
  "x509-cert",
@@ -7199,6 +7278,7 @@ dependencies = [
  "aws-smithy-runtime-api",
  "axum",
  "base64 0.22.1",
+ "bcrypt",
  "bytes",
  "chrono",
  "clap",
@@ -7215,9 +7295,12 @@ dependencies = [
  "hmac 0.12.1",
  "http-body 1.1.0",
  "http-body-util",
+ "hyper 1.12.0",
+ "hyper-util",
  "ipnet",
  "kafka-protocol",
  "lapin",
+ "ldap3",
  "libc",
  "libmimalloc-sys",
  "mimalloc",
@@ -7259,6 +7342,7 @@ dependencies = [
  "roll-auth",
  "roll-cluster",
  "roll-edge",
+ "roll-gateway",
  "roll-mcp",
  "roll-net",
  "roll-oidc",
@@ -7276,6 +7360,7 @@ dependencies = [
  "search-control",
  "search-server",
  "search-store",
+ "serde",
  "serde_json",
  "sha2 0.10.9",
  "stream-broker",
@@ -7292,6 +7377,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "urlencoding",
+ "x509-parser",
  "zeroize",
 ]
 
@@ -7931,6 +8017,7 @@ dependencies = [
  "icu_properties",
  "regex",
  "regex-syntax",
+ "search-test-support",
  "serde_json",
  "smallvec",
  "unicode-normalization",
@@ -7947,6 +8034,7 @@ dependencies = [
  "memmap2",
  "rand 0.8.8",
  "regex-syntax",
+ "search-test-support",
  "serde_json",
  "thiserror",
  "zstd 0.14.3",
@@ -7966,11 +8054,15 @@ dependencies = [
  "futures",
  "futures-util",
  "getrandom 0.4.3",
+ "hmac 0.12.1",
  "http-body-util",
+ "jsonwebtoken",
  "parking_lot",
+ "rand 0.8.8",
  "reqwest",
  "roll-auth",
  "roll-cluster",
+ "rsa",
  "rusqlite",
  "search-es",
  "search-index",
@@ -7978,11 +8070,13 @@ dependencies = [
  "search-store",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror",
  "tokio",
  "tower-http 0.7.1",
  "tracing",
+ "tracing-subscriber",
  "urlencoding",
 ]
 
@@ -7993,6 +8087,9 @@ dependencies = [
  "aes-gcm",
  "anyhow",
  "async-trait",
+ "aws-credential-types",
+ "aws-sigv4",
+ "aws-smithy-runtime-api",
  "base64 0.22.1",
  "bcrypt",
  "blake2",
@@ -8005,6 +8102,7 @@ dependencies = [
  "hkdf",
  "indexmap",
  "itoa",
+ "jsonwebtoken",
  "libc",
  "memchr",
  "parking_lot",
@@ -8014,12 +8112,14 @@ dependencies = [
  "regex-syntax",
  "reqwest",
  "roll-net",
+ "rsa",
  "ryu",
  "search-aggs",
  "search-analysis",
  "search-codec",
  "search-index",
  "search-painless",
+ "search-test-support",
  "serde_json",
  "serde_yaml_ng",
  "sha1 0.10.7",
@@ -8041,6 +8141,7 @@ dependencies = [
  "rand 0.8.8",
  "search-analysis",
  "search-codec",
+ "search-test-support",
  "serde_json",
  "smallvec",
  "thiserror",
@@ -8058,6 +8159,7 @@ dependencies = [
  "libm",
  "regex-syntax",
  "ryu",
+ "search-test-support",
  "serde_json",
  "sha1 0.10.7",
  "sha2 0.10.9",
@@ -8111,11 +8213,19 @@ dependencies = [
  "memmap2",
  "parking_lot",
  "pg-storage",
+ "search-test-support",
  "serde",
  "serde_json",
  "tokio",
  "tracing",
  "zstd 0.14.3",
+]
+
+[[package]]
+name = "search-test-support"
+version = "0.1.0"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

@@ -11,8 +11,8 @@ const PAGE = 100;
  * `/dashboard/access/audit`: every request a token made and every MCP tool call, newest first,
  * with the decision, the resource, and the arguments as stored (secrets redacted).
  */
-export function Audit({ grant }: { grant?: string }) {
-  const [filter, setFilter] = useState<AuditFilter>({ grant });
+export function Audit({ grant, product, resource }: { grant?: string; product?: string; resource?: string }) {
+  const [filter, setFilter] = useState<AuditFilter>({ grant, product, resource });
   const [events, setEvents] = useState<AuditEvent[] | null>(null);
   const [more, setMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -129,7 +129,7 @@ function Row({ e, onResource }: { e: AuditEvent; onResource: (resource: string) 
         <span className="w-28 shrink-0 truncate">{auditWho(e)}</span>
         <span className="min-w-0 flex-1 truncate font-mono text-[11px]">{what}</span>
         <span className="hidden w-40 shrink-0 truncate text-muted sm:block">
-          {e.product ? productName(e.product) : ""} {e.resource ?? ""}
+          {e.product ? productName(e.product) : ""} {e.resource_handle ?? e.resource ?? ""}
         </span>
         <span className={`w-10 shrink-0 text-right font-mono ${e.status >= 400 ? "text-danger" : "text-subtle"}`}>{e.status}</span>
       </button>

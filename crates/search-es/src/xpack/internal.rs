@@ -78,6 +78,7 @@ pub fn principal_of(u: &Value) -> Option<crate::xpack::security::Principal> {
             role_descriptors: a.get("role_descriptors").cloned().unwrap_or(Value::Null),
             limited_by: a.get("limited_by").cloned().unwrap_or(Value::Null),
             cross_cluster: a.get("cross_cluster").and_then(Value::as_bool).unwrap_or(false),
+            remote: None,
         })),
         None => crate::xpack::security::AuthKind::Realm,
     };
@@ -155,7 +156,9 @@ impl Caller {
         }
         // The headers that made it this principal: the node's authentication (narrowed to some
         // indices on a per-index route) or the client's credentials, and its run-as user.
-        let headers = [AUTHENTICATED_HEADER, INDEX_SCOPE_HEADER, "Authorization", RUN_AS_HEADER]
+        // A linked remote cluster's request keeps its remote access too (only roll's own calls
+        // reach here with it), or its key alone would be refused.
+        let headers = [AUTHENTICATED_HEADER, INDEX_SCOPE_HEADER, "Authorization", RUN_AS_HEADER, crate::remote::links::REMOTE_ACCESS_HEADER]
             .into_iter()
             .filter(|h| *h != "Authorization" || ctx.request.header(AUTHENTICATED_HEADER).is_none())
             .filter_map(|h| ctx.request.header(h).map(|v| (h.to_string(), v.to_string())))
@@ -231,6 +234,9 @@ pub fn call_as<'a>(ctx: &crate::rest::Ctx<'_>, cluster: &'a Cluster, method: &st
     if let Some(user) = ctx.request.header(crate::xpack::security::RUN_AS_HEADER) {
         req.headers.push((crate::xpack::security::RUN_AS_HEADER.into(), user.to_string()));
     }
+    if let Some(access) = ctx.request.header(crate::remote::links::REMOTE_ACCESS_HEADER) {
+        req.headers.push((crate::remote::links::REMOTE_ACCESS_HEADER.into(), access.to_string()));
+    }
     Box::pin(async move {
         let resp = crate::rest::handle(cluster, req).await;
         let v = if resp.body.is_empty() { Value::Null } else { crate::json::parse(&resp.body).ok().flatten().unwrap_or(Value::Null) };
@@ -252,6 +258,15 @@ pub fn call_ndjson<'a>(cluster: &'a Cluster, method: &str, uri: &str, body: Stri
         let v = crate::json::parse(&resp.body).ok().flatten().unwrap_or(Value::Null);
         if resp.status < 300 { Ok(v) } else { Err(error_from_body(resp.status, &v)) }
     })
+}
+
+/// [`call_ndjson`] with the cluster's own authority (`POST <uri>`).
+pub fn call_ndjson_system<'a>(cluster: &'a Cluster, uri: &str, body: String) -> Call<'a> {
+    let mut req = EsRequest::new("POST", uri);
+    req.headers.push((SYSTEM_HEADER.into(), "true".into()));
+    req.body = bytes::Bytes::from(body);
+    req.headers.push(("Content-Type".into(), "application/x-ndjson".into()));
+    send(cluster, req)
 }
 
 /// Plain Java exceptions (not `ElasticsearchException`s), which root-cause guessing treats
