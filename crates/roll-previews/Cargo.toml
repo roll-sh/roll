@@ -11,7 +11,7 @@ image.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 base64.workspace = true
-axum.workspace = true
+axum = { workspace = true, features = ["ws"] }
 bytes.workspace = true
 code-control.workspace = true
 code-preview.workspace = true

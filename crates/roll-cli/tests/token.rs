@@ -1,6 +1,7 @@
 //! `roll token …` and `roll mcp …`, the real binary against rolld's gate and `/v1/access` in
 //! process (docs/permissions.md): a token made from a preset works as `ROLL_TOKEN` within its
-//! rules, a request it may only ask for waits for `roll mcp approve`, and revoking it ends it.
+//! rules, a request it may only ask for waits for `roll mcp approve` (saying where, and asking
+//! again once the gate's hold ends), and revoking it ends it.
 
 use serde_json::{Value, json};
 use std::process::{Command, Output};
@@ -14,7 +15,7 @@ async fn serve() -> (String, tempfile::TempDir) {
     let workspace = Arc::new(roll_workspace::Workspace::new(ws).unwrap());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let api = format!("http://{}", listener.local_addr().unwrap());
-    let config = roll_access::Config { locked: true, approval_wait: std::time::Duration::from_secs(20), api_url: api.clone(), device_interval: std::time::Duration::from_secs(1), ..Default::default() };
+    let config = roll_access::Config { locked: true, approval_wait: std::time::Duration::from_secs(2), api_url: api.clone(), device_interval: std::time::Duration::from_secs(1), ..Default::default() };
     let access = roll_access::Access::open(&code_sql::Target::Sqlite(dir.path().join("access.db")), Default::default(), config, Default::default()).unwrap();
     let gate = roll_auth::Gate::new(Some(roll_auth::AdminToken::new(OPERATOR).unwrap()), Vec::new());
     gate.set_authorizer(Arc::new(roll_access::evaluate::Evaluator(access.clone())));
@@ -64,7 +65,8 @@ async fn a_token_from_the_cli_is_held_to_its_rules() {
     let refused = roll(&api, &token, &["token", "list"]);
     assert!(!refused.status.success() && String::from_utf8_lossy(&refused.stderr).contains("can't"), "{refused:?}");
 
-    // An ask waits for `roll mcp approve`, then runs.
+    // An ask waits for `roll mcp approve`, then runs: the gate's hold ends first, so the CLI says
+    // where to approve it and sends it again with its approval.
     let api2 = api.clone();
     let token2 = token.clone();
     let delete = std::thread::spawn(move || roll(&api2, &token2, &["db", "delete", "prj_a"]));
@@ -77,8 +79,12 @@ async fn a_token_from_the_cli_is_held_to_its_rules() {
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
-    assert!(roll(&api, "", &["mcp", "approve", &approval.expect("an approval")]).status.success());
-    assert!(delete.join().unwrap().status.success());
+    let approval = approval.expect("an approval");
+    std::thread::sleep(std::time::Duration::from_millis(2500));
+    assert!(roll(&api, "", &["mcp", "approve", &approval]).status.success());
+    let deleted = delete.join().unwrap();
+    let said = String::from_utf8_lossy(&deleted.stderr);
+    assert!(deleted.status.success() && said.contains(&format!("approve it ({approval})")) && said.contains("/dashboard/access/approvals?id="), "{deleted:?}");
 
     // Tightened to what it used: read as before (a list names no project), delete only on prj_a,
     // still asking.
@@ -218,6 +224,8 @@ async fn roll_login_signs_the_cli_in_through_the_browser() {
     let me = json_of(&bare(&["--json", "token", "whoami"]).output().unwrap());
     let id = me["grant"]["id"].as_str().unwrap().to_string();
     assert!(me["credential"]["source"].as_str().is_some_and(|s| s.starts_with("roll login")), "{me}");
+    // Nor ROLL_API_URL: commands go to the one login's roll.
+    assert!(bare(&["db", "list"]).env_remove("ROLL_API_URL").output().unwrap().status.success());
     let both = json_of(&bare(&["--json", "token", "whoami"]).env("ROLL_ADMIN_TOKEN", OPERATOR).output().unwrap());
     assert_eq!(both["credential"]["source"], "ROLL_ADMIN_TOKEN");
     assert!(both["credential"]["unused"][0].as_str().is_some_and(|s| s.starts_with("roll login")), "{both}");

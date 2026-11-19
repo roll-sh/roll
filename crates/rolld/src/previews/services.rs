@@ -578,6 +578,39 @@ impl apps_control::integrations::FeedbackNotes for Notes {
 }
 
 /// roll apps' own (`Apps::reachable`): the instance's container and port, its lease held.
+/// roll apps' log drains, for previews' services on roll's runtime: whether a project's take
+/// previews' output is read again after [`DRAINS_FOR`].
+pub struct AppsDrains {
+    pub apps: Arc<apps_control::Apps>,
+    pub wanted: std::sync::Mutex<std::collections::HashMap<(String, roll_previews::ports::DrainSource), (std::time::Instant, bool)>>,
+}
+
+const DRAINS_FOR: std::time::Duration = std::time::Duration::from_secs(30);
+
+#[async_trait]
+impl roll_previews::ports::Drains for AppsDrains {
+    async fn wanted(&self, project: &str, source: roll_previews::ports::DrainSource) -> bool {
+        let key = (project.to_string(), source);
+        if let Some((at, w)) = self.wanted.lock().unwrap_or_else(|e| e.into_inner()).get(&key)
+            && at.elapsed() < DRAINS_FOR
+        {
+            return *w;
+        }
+        let w = self.apps.drains_take_previews(project, None, source.as_str()).await.unwrap_or(false);
+        let mut m = self.wanted.lock().unwrap_or_else(|e| e.into_inner());
+        if m.len() > 5000 {
+            m.clear();
+        }
+        m.insert(key, (std::time::Instant::now(), w));
+        w
+    }
+
+    fn send(&self, project: &str, environment: &str, service: &str, source: roll_previews::ports::DrainSource, lines: Vec<roll_previews::ports::DrainLine>) {
+        let lines = lines.into_iter().map(|l| apps_control::drains::PreviewLine { t: l.t, stderr: l.stderr, text: l.text }).collect();
+        self.apps.drain_preview_lines(project, environment, service, source.as_str(), lines);
+    }
+}
+
 pub struct AppsReach(pub Arc<apps_control::Apps>);
 
 #[async_trait]
@@ -669,8 +702,61 @@ impl roll_previews::ports::Apps for Services {
         Ok(group_errors(&lines))
     }
 
-    async fn follow(&self, preview: &str, service: &str, lines: usize) -> Option<tokio::sync::mpsc::Receiver<String>> {
+    async fn follow(&self, preview: &str, service: &str, lines: usize) -> Option<tokio::sync::mpsc::Receiver<(bool, String)>> {
         if matches!(self.apps.find(preview, service).await, Ok(Some(_))) { None } else { self.runtime.follow(preview, service, lines).await }
+    }
+
+    /// A `roll.toml` service's terminal: a login shell exec'd in its container through the Docker
+    /// Engine API, as roll apps' shells are (roll apps' services have their own, on `pv-…`).
+    async fn shell(&self, preview: &str, service: &str, cols: u16, rows: u16) -> anyhow::Result<Option<roll_previews::ports::Shell>> {
+        if self.apps.find(preview, service).await?.is_some() {
+            return Ok(None);
+        }
+        let Some(engine) = apps_control::runtime::engine::Engine::local() else { anyhow::bail!("a shell needs Docker on a local socket") };
+        let container = self.runtime.shell_container(preview, service).await?;
+        // bash when the image has it, else sh; a login shell, so the image's profile applies.
+        let login = "if command -v bash >/dev/null 2>&1; then exec bash -l; else exec sh -l; fi";
+        let (id, io) = engine.exec_tty(&container, &["sh", "-c", login], &["TERM=xterm-256color"], cols, rows).await?;
+        Ok(Some(roll_previews::ports::Shell::upgraded(id, io)))
+    }
+
+    async fn resize_shell(&self, id: &str, cols: u16, rows: u16) -> anyhow::Result<()> {
+        match apps_control::runtime::engine::Engine::local() {
+            Some(e) => e.resize(id, cols, rows).await,
+            None => Ok(()),
+        }
+    }
+
+    fn hold(&self, preview: &str, service: &str) {
+        self.runtime.hold(preview, service);
+    }
+
+    /// A `roll.toml` service's port (roll apps' services have roll apps' own tunnel, on `pv-…`).
+    async fn forward(&self, preview: &str, service: &str, port: u16) -> anyhow::Result<Option<Box<dyn roll_previews::ports::ShellIo>>> {
+        if self.apps.find(preview, service).await?.is_some() {
+            return Ok(None);
+        }
+        self.runtime.forward(preview, service, port).await
+    }
+
+    /// A `roll.toml` service's files (roll apps' services have their own, on `pv-…`).
+    async fn read_files(&self, preview: &str, service: &str, path: &str) -> anyhow::Result<Option<roll_previews::ports::FileStream>> {
+        if self.apps.find(preview, service).await?.is_some() {
+            return Ok(None);
+        }
+        self.runtime.read_files(preview, service, path).await
+    }
+
+    async fn write_files(&self, preview: &str, service: &str, dir: &str, tar: bytes::Bytes) -> anyhow::Result<bool> {
+        if self.apps.find(preview, service).await?.is_some() {
+            return Ok(false);
+        }
+        self.runtime.write_files(preview, service, dir, tar).await
+    }
+
+    /// roll apps drains its own instances' output (a drain's `previews`).
+    async fn drain_from(&self, preview: &str, service: &str, since: &str) -> Option<tokio::sync::mpsc::Receiver<(bool, String)>> {
+        if matches!(self.apps.find(preview, service).await, Ok(Some(_))) { None } else { self.runtime.drain_from(preview, service, since).await }
     }
 
     async fn seed(&self, job: &roll_previews::ports::SeedJob) -> anyhow::Result<(i32, String)> {

@@ -1049,6 +1049,7 @@ impl Engine {
             }
         }
         let (code, tail) = ran.map_err(|e| anyhow::anyhow!("{what}: {}", code_preview::runner::mask(&format!("{e:#}"), &hide)))?;
+        self.drain_job(&r.project_id, &r.id, what, &code_preview::runner::mask(&tail, &hide)).await;
         if code != 0 {
             anyhow::bail!("the {what} command failed with exit code {code}\n\n{}", code_preview::runner::mask(tail.trim_end(), &hide));
         }
@@ -1189,6 +1190,8 @@ impl Engine {
             }
             self.store.set_ran_head(&r.id, None)?;
         }
+        // Its shells end with it.
+        self.close_shells_of(&r.id);
         for p in self.store.pinned(&r.id)? {
             let name = format!("{}@{}", p.service, p.revision);
             self.apps.remove(&r.id, &name).await.map_err(|e| anyhow::anyhow!("removing {name}: {e:#}"))?;
