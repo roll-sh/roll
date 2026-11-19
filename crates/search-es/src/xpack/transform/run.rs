@@ -77,6 +77,23 @@ pub async fn run_due(cluster: &Cluster, now: i64) -> usize {
     due.len()
 }
 
+/// How long a batch transform stays started after `_start` answers, at least. Elasticsearch
+/// 9.5.5 runs a batch transform as a persistent task, removed once its checkpoint and final
+/// state are written to its internal indices: `_start` refuses it as already started, and its
+/// stats say `started` with the checkpoint done, for 68-201 ms after the first `_start` answered
+/// (an empty or five-document source, at load 55, where `_start` itself took 109-313 ms). Roll's
+/// run over such a source ended 26-83 ms after the answer, so a second `_start` from a client
+/// slowed by load found it stopped and started it again.
+pub(super) const BATCH_TASK_MIN_MS: i64 = 200;
+
+/// How long a batch transform whose `_start` took `start_ms` stays started after the answer:
+/// [`BATCH_TASK_MIN_MS`], or as long as its `_start` took on a node slower than that.
+/// Elasticsearch's window is cluster work of the same kind as `_start`'s own (index writes, a
+/// cluster state update), so a loaded node stretches both alike, where a fixed time would not.
+pub(super) fn batch_hold_ms(start_ms: i64) -> i64 {
+    start_ms.max(BATCH_TASK_MIN_MS)
+}
+
 /// The frequency a transform is triggered at.
 pub(super) fn frequency_ms(t: &Value) -> i64 {
     t.get("frequency").and_then(|f| crate::units::TimeValue::parse(&f.to_es_string(), "frequency").ok()).map_or(60_000, |v| v.as_millis())
@@ -92,6 +109,12 @@ pub(super) async fn trigger(cluster: &Cluster, id: &str) {
     }
     if let Ok(t) = get_one(&cluster.state(), id)
         && state_of(&t) == "started"
+        && roll_state(&t).get("finished") == Some(&Value::Bool(true))
+    {
+        // A batch transform done with its checkpoint, held started ([`batch_hold_ms`]).
+        let _ = finish(cluster, id).await;
+    } else if let Ok(t) = get_one(&cluster.state(), id)
+        && state_of(&t) == "started"
     {
         // As the user who put or last updated it (Elasticsearch's stored security headers): it
         // reads and writes only what that user may.
@@ -106,6 +129,26 @@ pub(super) async fn trigger(cluster: &Cluster, id: &str) {
         let _ = record(cluster, id, outcome).await;
     }
     runs.end(id);
+}
+
+/// Stops a batch transform held started after its checkpoint ([`batch_hold_ms`]).
+async fn finish(cluster: &Cluster, id: &str) -> EsResult<()> {
+    let id = id.to_string();
+    let now = crate::time::now_millis();
+    cluster
+        .update(move |st| {
+            let Some(cur) = st.metadata.xpack.get(TRANSFORMS, &id).cloned() else { return Ok(()) };
+            if state_of(&cur) != "started" {
+                return Ok(());
+            }
+            let v = with_roll_state(cur, |r| {
+                r.insert("state".into(), "stopped".into());
+                r.shift_remove("next_run");
+                r.shift_remove("finished");
+            });
+            store::put(st, TRANSFORMS, &id, v, now).map(|_| ())
+        })
+        .await
 }
 
 /// What one trigger did.
@@ -304,6 +347,8 @@ pub(super) fn exp_avg(prev: Option<f64>, x: f64) -> f64 {
 pub(super) async fn record(cluster: &Cluster, id: &str, outcome: EsResult<Pass>) -> EsResult<()> {
     let id = id.to_string();
     let end = crate::time::now_millis();
+    // Without background work nothing would trigger the end of a hold: stop at once.
+    let background = cluster.handle().is_some();
     cluster
         .update(move |st| {
             let Some(cur) = st.metadata.xpack.get(TRANSFORMS, &id).cloned() else { return Ok(()) };
@@ -353,7 +398,11 @@ pub(super) async fn record(cluster: &Cluster, id: &str, outcome: EsResult<Pass>)
                         if let Some(b) = p.upper_bound {
                             r.insert("time_upper_bound".into(), b.into());
                         }
-                        if started && !continuous {
+                        let hold_until = r.get("hold_until").and_then(Value::as_i64).filter(|h| background && end < *h);
+                        if started && !continuous && let Some(h) = hold_until {
+                            r.insert("finished".into(), true.into());
+                            r.insert("next_run".into(), h.into());
+                        } else if started && !continuous {
                             r.insert("state".into(), "stopped".into());
                             r.shift_remove("next_run");
                         } else if started {

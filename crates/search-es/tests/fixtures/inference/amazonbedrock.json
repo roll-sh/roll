@@ -1,0 +1,1011 @@
+[
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-br",
+  "body": "{\"service\":\"amazonbedrock\",\"service_settings\":{\"access_key\":\"AKIAEXAMPLEKEY\",\"secret_key\":\"br-secret-1\",\"region\":\"us-east-1\",\"provider\":\"amazontitan\",\"model\":\"amazon.titan-embed-text-v2:0\"}}",
+  "status": 200,
+  "answer": "{\"inference_id\":\"fx-br\",\"task_type\":\"text_embedding\",\"service\":\"amazonbedrock\",\"service_settings\":{\"region\":\"us-east-1\",\"model\":\"amazon.titan-embed-text-v2:0\",\"provider\":\"AMAZONTITAN\",\"rate_limit\":{\"requests_per_minute\":240},\"dimensions\":4,\"similarity\":\"cosine\"},\"chunking_settings\":{\"strategy\":\"sentence\",\"max_chunk_size\":250,\"sentence_overlap\":1}}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/model/amazon.titan-embed-text-v2%3A0/invoke",
+    "headers": [
+     [
+      "amz-sdk-invocation-id",
+      "78fb3b35-b758-b94a-633c-1667cd2d10c0"
+     ],
+     [
+      "amz-sdk-request",
+      "attempt=1; max=1"
+     ],
+     [
+      "authorization",
+      "AWS4-HMAC-SHA256 Credential=AKIAEXAMPLEKEY/20261118/us-east-1/bedrock/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-content-sha256;x-amz-date, Signature=2f23d3028d5490c94ed6f2f803fa3e96da06c521ea303935b6056e30ea0678cd"
+     ],
+     [
+      "content-type",
+      "application/json"
+     ],
+     [
+      "x-amz-content-sha256",
+      "bf655ed6fa64186a912ca2dd47d02ecf947129bf01260bef5f6643d158f856fc"
+     ],
+     [
+      "x-amz-date",
+      "20261118T012734Z"
+     ]
+    ],
+    "body": "{\"inputText\":\"how big\"}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"embedding\": [0.427835, 0.35567, 0.283505, 0.21134], \"inputTextTokenCount\": 3}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "GET",
+  "path": "/_inference/fx-br",
+  "body": null,
+  "status": 200,
+  "answer": "{\"endpoints\":[{\"inference_id\":\"fx-br\",\"task_type\":\"text_embedding\",\"service\":\"amazonbedrock\",\"service_settings\":{\"region\":\"us-east-1\",\"model\":\"amazon.titan-embed-text-v2:0\",\"provider\":\"AMAZONTITAN\",\"rate_limit\":{\"requests_per_minute\":240},\"dimensions\":4,\"similarity\":\"cosine\"},\"chunking_settings\":{\"strategy\":\"sentence\",\"max_chunk_size\":250,\"sentence_overlap\":1}}]}",
+  "upstream": []
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/text_embedding/fx-br",
+  "body": "{\"input\":[\"hello world\"]}",
+  "status": 200,
+  "answer": "{\"text_embedding\":[{\"embedding\":[0.005155,-0.489691,0.015464,-0.479381]}]}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/model/amazon.titan-embed-text-v2%3A0/invoke",
+    "headers": [
+     [
+      "amz-sdk-invocation-id",
+      "29b77ec8-0fa0-71c0-d641-5eff8d3d697e"
+     ],
+     [
+      "amz-sdk-request",
+      "attempt=1; max=1"
+     ],
+     [
+      "authorization",
+      "AWS4-HMAC-SHA256 Credential=AKIAEXAMPLEKEY/20261118/us-east-1/bedrock/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-content-sha256;x-amz-date, Signature=2af33e02c522be1004baa3d2130523aa41ddae4477f6b8a14eace35d87a07056"
+     ],
+     [
+      "content-type",
+      "application/json"
+     ],
+     [
+      "x-amz-content-sha256",
+      "38e7eefe02fed2bc8685629227c0a0ad7ee56a58c98ffd69fa274af4afafa496"
+     ],
+     [
+      "x-amz-date",
+      "20261118T012735Z"
+     ]
+    ],
+    "body": "{\"inputText\":\"hello world\"}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"embedding\": [0.005155, -0.489691, 0.015464, -0.479381], \"inputTextTokenCount\": 3}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-brc",
+  "body": "{\"service\":\"amazonbedrock\",\"service_settings\":{\"access_key\":\"AKIAEXAMPLEKEY\",\"secret_key\":\"br-secret-2\",\"region\":\"us-east-1\",\"provider\":\"cohere\",\"model\":\"cohere.embed-english-v3\",\"similarity\":\"cosine\",\"max_input_tokens\":128,\"rate_limit\":{\"requests_per_minute\":60}},\"task_settings\":{\"truncation\":\"end\"}}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"status_exception\",\"reason\":\"Configuration contains settings [{truncation=end}] unknown to the [amazonbedrock] service\"}],\"type\":\"status_exception\",\"reason\":\"Configuration contains settings [{truncation=end}] unknown to the [amazonbedrock] service\"},\"status\":400}",
+  "upstream": []
+ },
+ {
+  "method": "GET",
+  "path": "/_inference/fx-brc",
+  "body": null,
+  "status": 404,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"resource_not_found_exception\",\"reason\":\"Inference endpoint not found [fx-brc]\"}],\"type\":\"resource_not_found_exception\",\"reason\":\"Inference endpoint not found [fx-brc]\"},\"status\":404}",
+  "upstream": []
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/text_embedding/fx-brc",
+  "body": "{\"input\":[\"hello world\",\"second\"],\"input_type\":\"search\"}",
+  "status": 404,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"resource_not_found_exception\",\"reason\":\"Inference endpoint not found [fx-brc]\"}],\"type\":\"resource_not_found_exception\",\"reason\":\"Inference endpoint not found [fx-brc]\"},\"status\":404}",
+  "upstream": []
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/text_embedding/fx-brc",
+  "body": "{\"input\":\"x\",\"task_settings\":{\"truncation\":\"none\"}}",
+  "status": 404,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"resource_not_found_exception\",\"reason\":\"Inference endpoint not found [fx-brc]\"}],\"type\":\"resource_not_found_exception\",\"reason\":\"Inference endpoint not found [fx-brc]\"},\"status\":404}",
+  "upstream": []
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/completion/fx-brx",
+  "body": "{\"service\":\"amazonbedrock\",\"service_settings\":{\"access_key\":\"AKIAEXAMPLEKEY\",\"secret_key\":\"br-secret-3\",\"region\":\"us-east-1\",\"provider\":\"anthropic\",\"model\":\"anthropic.claude-3-haiku-20240307-v1:0\"},\"task_settings\":{\"max_new_tokens\":64,\"temperature\":0.5,\"top_p\":0.9,\"top_k\":5.0}}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"validation_exception\",\"reason\":\"Validation Failed: 1: [task_settings] Invalid value [5.0]. [top_k] must be less than or equal to [1.0];\"}],\"type\":\"validation_exception\",\"reason\":\"Validation Failed: 1: [task_settings] Invalid value [5.0]. [top_k] must be less than or equal to [1.0];\"},\"status\":400}",
+  "upstream": []
+ },
+ {
+  "method": "GET",
+  "path": "/_inference/fx-brx",
+  "body": null,
+  "status": 404,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"resource_not_found_exception\",\"reason\":\"Inference endpoint not found [fx-brx]\"}],\"type\":\"resource_not_found_exception\",\"reason\":\"Inference endpoint not found [fx-brx]\"},\"status\":404}",
+  "upstream": []
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/completion/fx-brx",
+  "body": "{\"input\":[\"what is up\",\"two\"]}",
+  "status": 404,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"resource_not_found_exception\",\"reason\":\"Inference endpoint not found [fx-brx]\"}],\"type\":\"resource_not_found_exception\",\"reason\":\"Inference endpoint not found [fx-brx]\"},\"status\":404}",
+  "upstream": []
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/completion/fx-brx",
+  "body": "{\"input\":\"x\",\"task_settings\":{\"temperature\":0.1}}",
+  "status": 404,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"resource_not_found_exception\",\"reason\":\"Inference endpoint not found [fx-brx]\"}],\"type\":\"resource_not_found_exception\",\"reason\":\"Inference endpoint not found [fx-brx]\"},\"status\":404}",
+  "upstream": []
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/completion/fx-brm",
+  "body": "{\"service\":\"amazonbedrock\",\"service_settings\":{\"access_key\":\"AKIAEXAMPLEKEY\",\"secret_key\":\"s\",\"region\":\"us-east-1\",\"provider\":\"meta\",\"model\":\"meta.llama3-8b-instruct-v1:0\"}}",
+  "status": 200,
+  "answer": "{\"inference_id\":\"fx-brm\",\"task_type\":\"completion\",\"service\":\"amazonbedrock\",\"service_settings\":{\"region\":\"us-east-1\",\"model\":\"meta.llama3-8b-instruct-v1:0\",\"provider\":\"META\",\"rate_limit\":{\"requests_per_minute\":240}}}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/model/meta.llama3-8b-instruct-v1%3A0/converse",
+    "headers": [
+     [
+      "amz-sdk-invocation-id",
+      "c46d18b0-474c-ca8d-7f33-3109bac3ec0b"
+     ],
+     [
+      "amz-sdk-request",
+      "attempt=1; max=1"
+     ],
+     [
+      "authorization",
+      "AWS4-HMAC-SHA256 Credential=AKIAEXAMPLEKEY/20261118/us-east-1/bedrock/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-content-sha256;x-amz-date, Signature=056a1d773ca137870a7feaa37bd125c21e34013b5358febeea97b21777582cd0"
+     ],
+     [
+      "content-type",
+      "application/json"
+     ],
+     [
+      "x-amz-content-sha256",
+      "aa7585d4caf59c569e1a95c37a934994a7468aabb42fe04699f00e7a9daca4d5"
+     ],
+     [
+      "x-amz-date",
+      "20261118T012735Z"
+     ]
+    ],
+    "body": "{\"messages\":[{\"role\":\"user\",\"content\":[{\"text\":\"how big\"}]}]}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"output\": {\"message\": {\"role\": \"assistant\", \"content\": [{\"text\": \"bedrock: how big\"}]}}, \"stopReason\": \"end_turn\", \"usage\": {\"inputTokens\": 3, \"outputTokens\": 2, \"totalTokens\": 5}, \"metrics\": {\"latencyMs\": 1}}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/completion/fx-brm",
+  "body": "{\"input\":\"hi meta\"}",
+  "status": 200,
+  "answer": "{\"completion\":[{\"result\":\"bedrock: hi meta\"}]}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/model/meta.llama3-8b-instruct-v1%3A0/converse",
+    "headers": [
+     [
+      "amz-sdk-invocation-id",
+      "7ceae765-70e6-0ae9-278e-e86fcb7b8eaf"
+     ],
+     [
+      "amz-sdk-request",
+      "attempt=1; max=1"
+     ],
+     [
+      "authorization",
+      "AWS4-HMAC-SHA256 Credential=AKIAEXAMPLEKEY/20261118/us-east-1/bedrock/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-content-sha256;x-amz-date, Signature=0f5861d320ad3238ac509a25143498d5beee64d340554156cddbf872d3e1d3cc"
+     ],
+     [
+      "content-type",
+      "application/json"
+     ],
+     [
+      "x-amz-content-sha256",
+      "024652e361086c3a20eff8f28e7d3b91f9f1325e515327b90185ffc3b84b9448"
+     ],
+     [
+      "x-amz-date",
+      "20261118T012735Z"
+     ]
+    ],
+    "body": "{\"messages\":[{\"role\":\"user\",\"content\":[{\"text\":\"hi meta\"}]}]}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"output\": {\"message\": {\"role\": \"assistant\", \"content\": [{\"text\": \"bedrock: hi meta\"}]}}, \"stopReason\": \"end_turn\", \"usage\": {\"inputTokens\": 3, \"outputTokens\": 2, \"totalTokens\": 5}, \"metrics\": {\"latencyMs\": 1}}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/completion/fx-brm2",
+  "body": "{\"service\":\"amazonbedrock\",\"service_settings\":{\"access_key\":\"AKIAEXAMPLEKEY\",\"secret_key\":\"s\",\"region\":\"us-east-1\",\"provider\":\"meta\",\"model\":\"m\"},\"task_settings\":{\"top_k\":3.0}}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"validation_exception\",\"reason\":\"Validation Failed: 1: [task_settings] Invalid value [3.0]. [top_k] must be less than or equal to [1.0];\"}],\"type\":\"validation_exception\",\"reason\":\"Validation Failed: 1: [task_settings] Invalid value [3.0]. [top_k] must be less than or equal to [1.0];\"},\"status\":400}",
+  "upstream": []
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/completion/fx-bra",
+  "body": "{\"service\":\"amazonbedrock\",\"service_settings\":{\"access_key\":\"AKIAEXAMPLEKEY\",\"secret_key\":\"s\",\"region\":\"us-east-1\",\"provider\":\"ai21labs\",\"model\":\"ai21.jamba\"}}",
+  "status": 200,
+  "answer": "{\"inference_id\":\"fx-bra\",\"task_type\":\"completion\",\"service\":\"amazonbedrock\",\"service_settings\":{\"region\":\"us-east-1\",\"model\":\"ai21.jamba\",\"provider\":\"AI21LABS\",\"rate_limit\":{\"requests_per_minute\":240}}}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/model/ai21.jamba/converse",
+    "headers": [
+     [
+      "amz-sdk-invocation-id",
+      "83d46017-de72-df0f-fbfa-1bfd0f835b53"
+     ],
+     [
+      "amz-sdk-request",
+      "attempt=1; max=1"
+     ],
+     [
+      "authorization",
+      "AWS4-HMAC-SHA256 Credential=AKIAEXAMPLEKEY/20261118/us-east-1/bedrock/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-content-sha256;x-amz-date, Signature=8f7065765882f6d560609222b7e1df7727ba4a187e5f4c362611a70c3ea89c27"
+     ],
+     [
+      "content-type",
+      "application/json"
+     ],
+     [
+      "x-amz-content-sha256",
+      "aa7585d4caf59c569e1a95c37a934994a7468aabb42fe04699f00e7a9daca4d5"
+     ],
+     [
+      "x-amz-date",
+      "20261118T012735Z"
+     ]
+    ],
+    "body": "{\"messages\":[{\"role\":\"user\",\"content\":[{\"text\":\"how big\"}]}]}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"output\": {\"message\": {\"role\": \"assistant\", \"content\": [{\"text\": \"bedrock: how big\"}]}}, \"stopReason\": \"end_turn\", \"usage\": {\"inputTokens\": 3, \"outputTokens\": 2, \"totalTokens\": 5}, \"metrics\": {\"latencyMs\": 1}}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/completion/fx-brt",
+  "body": "{\"service\":\"amazonbedrock\",\"service_settings\":{\"access_key\":\"AKIAEXAMPLEKEY\",\"secret_key\":\"s\",\"region\":\"us-east-1\",\"provider\":\"amazontitan\",\"model\":\"amazon.titan-text\"}}",
+  "status": 200,
+  "answer": "{\"inference_id\":\"fx-brt\",\"task_type\":\"completion\",\"service\":\"amazonbedrock\",\"service_settings\":{\"region\":\"us-east-1\",\"model\":\"amazon.titan-text\",\"provider\":\"AMAZONTITAN\",\"rate_limit\":{\"requests_per_minute\":240}}}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/model/amazon.titan-text/converse",
+    "headers": [
+     [
+      "amz-sdk-invocation-id",
+      "e131db37-67bb-3b97-fa2a-4028960013cc"
+     ],
+     [
+      "amz-sdk-request",
+      "attempt=1; max=1"
+     ],
+     [
+      "authorization",
+      "AWS4-HMAC-SHA256 Credential=AKIAEXAMPLEKEY/20261118/us-east-1/bedrock/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-content-sha256;x-amz-date, Signature=be53cdd445911993a7bf1c9715cae1b469ebeb98ab375474e75f4e17878f3a2c"
+     ],
+     [
+      "content-type",
+      "application/json"
+     ],
+     [
+      "x-amz-content-sha256",
+      "aa7585d4caf59c569e1a95c37a934994a7468aabb42fe04699f00e7a9daca4d5"
+     ],
+     [
+      "x-amz-date",
+      "20261118T012735Z"
+     ]
+    ],
+    "body": "{\"messages\":[{\"role\":\"user\",\"content\":[{\"text\":\"how big\"}]}]}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"output\": {\"message\": {\"role\": \"assistant\", \"content\": [{\"text\": \"bedrock: how big\"}]}}, \"stopReason\": \"end_turn\", \"usage\": {\"inputTokens\": 3, \"outputTokens\": 2, \"totalTokens\": 5}, \"metrics\": {\"latencyMs\": 1}}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/completion/fx-brs",
+  "body": "{\"service\":\"amazonbedrock\",\"service_settings\":{\"access_key\":\"AKIAEXAMPLEKEY\",\"secret_key\":\"s\",\"region\":\"us-east-1\",\"provider\":\"mistral\",\"model\":\"mistral.mistral-7b\"}}",
+  "status": 200,
+  "answer": "{\"inference_id\":\"fx-brs\",\"task_type\":\"completion\",\"service\":\"amazonbedrock\",\"service_settings\":{\"region\":\"us-east-1\",\"model\":\"mistral.mistral-7b\",\"provider\":\"MISTRAL\",\"rate_limit\":{\"requests_per_minute\":240}}}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/model/mistral.mistral-7b/converse",
+    "headers": [
+     [
+      "amz-sdk-invocation-id",
+      "e947a7a4-33c5-0a40-ecf4-7116a725092e"
+     ],
+     [
+      "amz-sdk-request",
+      "attempt=1; max=1"
+     ],
+     [
+      "authorization",
+      "AWS4-HMAC-SHA256 Credential=AKIAEXAMPLEKEY/20261118/us-east-1/bedrock/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-content-sha256;x-amz-date, Signature=5008568eee87f92a27f157386d038285b9f74aa54d4e87bdd0e77b200d272ba9"
+     ],
+     [
+      "content-type",
+      "application/json"
+     ],
+     [
+      "x-amz-content-sha256",
+      "aa7585d4caf59c569e1a95c37a934994a7468aabb42fe04699f00e7a9daca4d5"
+     ],
+     [
+      "x-amz-date",
+      "20261118T012736Z"
+     ]
+    ],
+    "body": "{\"messages\":[{\"role\":\"user\",\"content\":[{\"text\":\"how big\"}]}]}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"output\": {\"message\": {\"role\": \"assistant\", \"content\": [{\"text\": \"bedrock: how big\"}]}}, \"stopReason\": \"end_turn\", \"usage\": {\"inputTokens\": 3, \"outputTokens\": 2, \"totalTokens\": 5}, \"metrics\": {\"latencyMs\": 1}}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/completion/fx-brco",
+  "body": "{\"service\":\"amazonbedrock\",\"service_settings\":{\"access_key\":\"AKIAEXAMPLEKEY\",\"secret_key\":\"s\",\"region\":\"us-east-1\",\"provider\":\"cohere\",\"model\":\"cohere.command-r\"}}",
+  "status": 200,
+  "answer": "{\"inference_id\":\"fx-brco\",\"task_type\":\"completion\",\"service\":\"amazonbedrock\",\"service_settings\":{\"region\":\"us-east-1\",\"model\":\"cohere.command-r\",\"provider\":\"COHERE\",\"rate_limit\":{\"requests_per_minute\":240}}}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/model/cohere.command-r/converse",
+    "headers": [
+     [
+      "amz-sdk-invocation-id",
+      "2393a09a-a6fa-1f7f-8428-c13aae53366e"
+     ],
+     [
+      "amz-sdk-request",
+      "attempt=1; max=1"
+     ],
+     [
+      "authorization",
+      "AWS4-HMAC-SHA256 Credential=AKIAEXAMPLEKEY/20261118/us-east-1/bedrock/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-content-sha256;x-amz-date, Signature=4b0ef153131f8d4aafe34a729af36b077fa082b508cb73e33f3c873a5cbda849"
+     ],
+     [
+      "content-type",
+      "application/json"
+     ],
+     [
+      "x-amz-content-sha256",
+      "aa7585d4caf59c569e1a95c37a934994a7468aabb42fe04699f00e7a9daca4d5"
+     ],
+     [
+      "x-amz-date",
+      "20261118T012736Z"
+     ]
+    ],
+    "body": "{\"messages\":[{\"role\":\"user\",\"content\":[{\"text\":\"how big\"}]}]}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"output\": {\"message\": {\"role\": \"assistant\", \"content\": [{\"text\": \"bedrock: how big\"}]}}, \"stopReason\": \"end_turn\", \"usage\": {\"inputTokens\": 3, \"outputTokens\": 2, \"totalTokens\": 5}, \"metrics\": {\"latencyMs\": 1}}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-bry",
+  "body": "{\"service\":\"amazonbedrock\",\"service_settings\":{\"access_key\":\"AKIAEXAMPLEKEY\",\"secret_key\":\"s\",\"region\":\"us-east-1\",\"provider\":\"meta\",\"model\":\"m\"}}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"status_exception\",\"reason\":\"The [text_embedding] task type for provider [meta] is not available\"}],\"type\":\"status_exception\",\"reason\":\"The [text_embedding] task type for provider [meta] is not available\"},\"status\":400}",
+  "upstream": []
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-bry",
+  "body": "{\"service\":\"amazonbedrock\",\"service_settings\":{\"access_key\":\"AKIAEXAMPLEKEY\",\"secret_key\":\"s\",\"region\":\"us-east-1\",\"provider\":\"nope\",\"model\":\"m\"}}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"validation_exception\",\"reason\":\"Validation Failed: 1: [service_settings] Invalid value [nope] received. [provider] must be one of [ai21labs, amazontitan, anthropic, cohere, meta, mistral];\"}],\"type\":\"validation_exception\",\"reason\":\"Validation Failed: 1: [service_settings] Invalid value [nope] received. [provider] must be one of [ai21labs, amazontitan, anthropic, cohere, meta, mistral];\"},\"status\":400}",
+  "upstream": []
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-bry",
+  "body": "{\"service\":\"amazonbedrock\",\"service_settings\":{\"region\":\"us-east-1\",\"provider\":\"amazontitan\",\"model\":\"m\"}}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"validation_exception\",\"reason\":\"Validation Failed: 1: [service_settings] does not contain the required setting [access_key];2: [service_settings] does not contain the required setting [secret_key];\"}],\"type\":\"validation_exception\",\"reason\":\"Validation Failed: 1: [service_settings] does not contain the required setting [access_key];2: [service_settings] does not contain the required setting [secret_key];\"},\"status\":400}",
+  "upstream": []
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-bry",
+  "body": "{\"service\":\"amazonbedrock\",\"service_settings\":{\"access_key\":\"\",\"secret_key\":1,\"provider\":\"amazontitan\"}}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"validation_exception\",\"reason\":\"Validation Failed: 1: [service_settings] does not contain the required setting [model];2: [service_settings] does not contain the required setting [region];\"}],\"type\":\"validation_exception\",\"reason\":\"Validation Failed: 1: [service_settings] does not contain the required setting [model];2: [service_settings] does not contain the required setting [region];\"},\"status\":400}",
+  "upstream": []
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/rerank/fx-bry",
+  "body": "{\"service\":\"amazonbedrock\",\"service_settings\":{\"access_key\":\"a\",\"secret_key\":\"s\",\"region\":\"us-east-1\",\"provider\":\"cohere\",\"model\":\"m\"}}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"status_exception\",\"reason\":\"The [amazonbedrock] service does not support task type [rerank]\"}],\"type\":\"status_exception\",\"reason\":\"The [amazonbedrock] service does not support task type [rerank]\"},\"status\":400}",
+  "upstream": []
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-bry",
+  "body": "{\"service\":\"amazonbedrock\",\"service_settings\":{\"access_key\":\"a\",\"secret_key\":\"s\",\"region\":\"us-east-1\",\"provider\":\"amazontitan\",\"model\":\"fail403\"}}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"exception\",\"reason\":\"AmazonBedrock invoke model failure: [denied (Service: BedrockRuntime, Status Code: 403, Request ID: null) (SDK Attempt Count: 1)]\"}],\"type\":\"status_exception\",\"reason\":\"Could not complete inference endpoint creation as validation call to service threw an exception.\",\"caused_by\":{\"type\":\"exception\",\"reason\":\"AmazonBedrock invoke model failure: [denied (Service: BedrockRuntime, Status Code: 403, Request ID: null) (SDK Attempt Count: 1)]\",\"caused_by\":{\"type\":\"validation_exception\",\"reason\":\"denied (Service: BedrockRuntime, Status Code: 403, Request ID: null) (SDK Attempt Count: 1)\"}}},\"status\":400}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/model/fail403/invoke",
+    "headers": [
+     [
+      "amz-sdk-invocation-id",
+      "d83f680b-0262-941e-db9c-9a3fd711b058"
+     ],
+     [
+      "amz-sdk-request",
+      "attempt=1; max=1"
+     ],
+     [
+      "authorization",
+      "AWS4-HMAC-SHA256 Credential=a/20261118/us-east-1/bedrock/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-content-sha256;x-amz-date, Signature=027125032e0ec4bdee498f4068a7e9189304c3eb555d1e4e3d36b6ef69f76bf6"
+     ],
+     [
+      "content-type",
+      "application/json"
+     ],
+     [
+      "x-amz-content-sha256",
+      "bf655ed6fa64186a912ca2dd47d02ecf947129bf01260bef5f6643d158f856fc"
+     ],
+     [
+      "x-amz-date",
+      "20261118T012736Z"
+     ]
+    ],
+    "body": "{\"inputText\":\"how big\"}",
+    "response": {
+     "status": 403,
+     "ctype": "application/json",
+     "headers": [
+      [
+       "x-amzn-ErrorType",
+       "ValidationException:http://internal.amazon.com/coral/com.amazon.bedrock/"
+      ]
+     ],
+     "body": "{\"message\": \"denied\"}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-bry",
+  "body": "{\"service\":\"amazonbedrock\",\"service_settings\":{\"access_key\":\"a\",\"secret_key\":\"s\",\"region\":\"us-east-1\",\"provider\":\"amazontitan\",\"model\":\"fail401\"}}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"exception\",\"reason\":\"AmazonBedrock invoke model failure: [Incorrect API key provided (Service: BedrockRuntime, Status Code: 401, Request ID: null) (SDK Attempt Count: 1)]\"}],\"type\":\"status_exception\",\"reason\":\"Could not complete inference endpoint creation as validation call to service threw an exception.\",\"caused_by\":{\"type\":\"exception\",\"reason\":\"AmazonBedrock invoke model failure: [Incorrect API key provided (Service: BedrockRuntime, Status Code: 401, Request ID: null) (SDK Attempt Count: 1)]\",\"caused_by\":{\"type\":\"validation_exception\",\"reason\":\"Incorrect API key provided (Service: BedrockRuntime, Status Code: 401, Request ID: null) (SDK Attempt Count: 1)\"}}},\"status\":400}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/model/fail401/invoke",
+    "headers": [
+     [
+      "amz-sdk-invocation-id",
+      "8d92abe6-7be7-1253-b0ac-5fb5ba240176"
+     ],
+     [
+      "amz-sdk-request",
+      "attempt=1; max=1"
+     ],
+     [
+      "authorization",
+      "AWS4-HMAC-SHA256 Credential=a/20261118/us-east-1/bedrock/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-content-sha256;x-amz-date, Signature=75c80981670cb2803f095af18fa345a1446f82cf0ba803be12fcdbe76756e947"
+     ],
+     [
+      "content-type",
+      "application/json"
+     ],
+     [
+      "x-amz-content-sha256",
+      "bf655ed6fa64186a912ca2dd47d02ecf947129bf01260bef5f6643d158f856fc"
+     ],
+     [
+      "x-amz-date",
+      "20261118T012736Z"
+     ]
+    ],
+    "body": "{\"inputText\":\"how big\"}",
+    "response": {
+     "status": 401,
+     "ctype": "application/json",
+     "headers": [
+      [
+       "x-amzn-ErrorType",
+       "ValidationException:http://internal.amazon.com/coral/com.amazon.bedrock/"
+      ]
+     ],
+     "body": "{\"message\": \"Incorrect API key provided\"}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-bry",
+  "body": "{\"service\":\"amazonbedrock\",\"service_settings\":{\"access_key\":\"a\",\"secret_key\":\"s\",\"region\":\"us-east-1\",\"provider\":\"amazontitan\",\"model\":\"m\",\"dimensions\":3}}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"validation_exception\",\"reason\":\"Validation Failed: 1: [service_settings] does not allow the setting [dimensions];\"}],\"type\":\"validation_exception\",\"reason\":\"Validation Failed: 1: [service_settings] does not allow the setting [dimensions];\"},\"status\":400}",
+  "upstream": []
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-bry2",
+  "body": "{\"service\":\"amazonbedrock\",\"service_settings\":{\"access_key\":\"a\",\"secret_key\":\"s\",\"region\":\"us-east-1\",\"provider\":\"amazontitan\",\"model\":\"m\"},\"task_settings\":{\"truncation\":\"end\"}}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"status_exception\",\"reason\":\"Configuration contains settings [{truncation=end}] unknown to the [amazonbedrock] service\"}],\"type\":\"status_exception\",\"reason\":\"Configuration contains settings [{truncation=end}] unknown to the [amazonbedrock] service\"},\"status\":400}",
+  "upstream": []
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/completion/fx-bry",
+  "body": "{\"service\":\"amazonbedrock\",\"service_settings\":{\"access_key\":\"a\",\"secret_key\":\"s\",\"region\":\"us-east-1\",\"provider\":\"anthropic\",\"model\":\"fail500\"}}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"exception\",\"reason\":\"AmazonBedrock converse failure: [boom (Service: BedrockRuntime, Status Code: 500, Request ID: null) (SDK Attempt Count: 1)]\"}],\"type\":\"status_exception\",\"reason\":\"Could not complete inference endpoint creation as validation call to service threw an exception.\",\"caused_by\":{\"type\":\"exception\",\"reason\":\"Failed to send request from inference entity id [fx-bry]\",\"caused_by\":{\"type\":\"exception\",\"reason\":\"org.elasticsearch.ElasticsearchException: AmazonBedrock converse failure: [boom (Service: BedrockRuntime, Status Code: 500, Request ID: null) (SDK Attempt Count: 1)]\",\"caused_by\":{\"type\":\"exception\",\"reason\":\"AmazonBedrock converse failure: [boom (Service: BedrockRuntime, Status Code: 500, Request ID: null) (SDK Attempt Count: 1)]\",\"caused_by\":{\"type\":\"validation_exception\",\"reason\":\"boom (Service: BedrockRuntime, Status Code: 500, Request ID: null) (SDK Attempt Count: 1)\"}}}}},\"status\":400}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/model/fail500/converse",
+    "headers": [
+     [
+      "amz-sdk-invocation-id",
+      "51a73214-f364-a095-414f-c4481b641d88"
+     ],
+     [
+      "amz-sdk-request",
+      "attempt=1; max=1"
+     ],
+     [
+      "authorization",
+      "AWS4-HMAC-SHA256 Credential=a/20261118/us-east-1/bedrock/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-content-sha256;x-amz-date, Signature=d60c4774ee1ead859253e64b0c5c9e3109b32a3391947fcc232b2396fd4ad090"
+     ],
+     [
+      "content-type",
+      "application/json"
+     ],
+     [
+      "x-amz-content-sha256",
+      "aa7585d4caf59c569e1a95c37a934994a7468aabb42fe04699f00e7a9daca4d5"
+     ],
+     [
+      "x-amz-date",
+      "20261118T012737Z"
+     ]
+    ],
+    "body": "{\"messages\":[{\"role\":\"user\",\"content\":[{\"text\":\"how big\"}]}]}",
+    "response": {
+     "status": 500,
+     "ctype": "application/json",
+     "headers": [
+      [
+       "x-amzn-ErrorType",
+       "ValidationException:http://internal.amazon.com/coral/com.amazon.bedrock/"
+      ]
+     ],
+     "body": "{\"message\": \"boom\"}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-bry",
+  "body": "{\"service\":\"amazonbedrock\",\"service_settings\":{\"access_key\":\"a\",\"secret_key\":\"s\",\"region\":\"us-east-1\",\"provider\":\"amazontitan\",\"model\":\"fail429\"}}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"exception\",\"reason\":\"AmazonBedrock invoke model failure: [Rate limit reached (Service: BedrockRuntime, Status Code: 429, Request ID: null) (SDK Attempt Count: 1)]\"}],\"type\":\"status_exception\",\"reason\":\"Could not complete inference endpoint creation as validation call to service threw an exception.\",\"caused_by\":{\"type\":\"exception\",\"reason\":\"AmazonBedrock invoke model failure: [Rate limit reached (Service: BedrockRuntime, Status Code: 429, Request ID: null) (SDK Attempt Count: 1)]\",\"caused_by\":{\"type\":\"validation_exception\",\"reason\":\"Rate limit reached (Service: BedrockRuntime, Status Code: 429, Request ID: null) (SDK Attempt Count: 1)\"}}},\"status\":400}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/model/fail429/invoke",
+    "headers": [
+     [
+      "amz-sdk-invocation-id",
+      "ffe91a2e-58d0-1bc3-daeb-7489a7d064ca"
+     ],
+     [
+      "amz-sdk-request",
+      "attempt=1; max=1"
+     ],
+     [
+      "authorization",
+      "AWS4-HMAC-SHA256 Credential=a/20261118/us-east-1/bedrock/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-content-sha256;x-amz-date, Signature=b55895f5d4c30b99e356fe922f91e96163dc3d5baeb2c1485f87289d6672f9aa"
+     ],
+     [
+      "content-type",
+      "application/json"
+     ],
+     [
+      "x-amz-content-sha256",
+      "bf655ed6fa64186a912ca2dd47d02ecf947129bf01260bef5f6643d158f856fc"
+     ],
+     [
+      "x-amz-date",
+      "20261118T012737Z"
+     ]
+    ],
+    "body": "{\"inputText\":\"how big\"}",
+    "response": {
+     "status": 429,
+     "ctype": "application/json",
+     "headers": [
+      [
+       "x-amzn-ErrorType",
+       "ValidationException:http://internal.amazon.com/coral/com.amazon.bedrock/"
+      ]
+     ],
+     "body": "{\"message\": \"Rate limit reached\"}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-bry",
+  "body": "{\"service\":\"amazonbedrock\",\"service_settings\":{\"access_key\":\"a\",\"secret_key\":\"s\",\"region\":\"us-east-1\",\"provider\":\"amazontitan\",\"model\":\"fail400\"}}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"exception\",\"reason\":\"AmazonBedrock invoke model failure: [bad thing (Service: BedrockRuntime, Status Code: 400, Request ID: null) (SDK Attempt Count: 1)]\"}],\"type\":\"status_exception\",\"reason\":\"Could not complete inference endpoint creation as validation call to service threw an exception.\",\"caused_by\":{\"type\":\"exception\",\"reason\":\"AmazonBedrock invoke model failure: [bad thing (Service: BedrockRuntime, Status Code: 400, Request ID: null) (SDK Attempt Count: 1)]\",\"caused_by\":{\"type\":\"validation_exception\",\"reason\":\"bad thing (Service: BedrockRuntime, Status Code: 400, Request ID: null) (SDK Attempt Count: 1)\"}}},\"status\":400}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/model/fail400/invoke",
+    "headers": [
+     [
+      "amz-sdk-invocation-id",
+      "c4e41e72-d674-3eab-cbbe-a619232235b6"
+     ],
+     [
+      "amz-sdk-request",
+      "attempt=1; max=1"
+     ],
+     [
+      "authorization",
+      "AWS4-HMAC-SHA256 Credential=a/20261118/us-east-1/bedrock/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-content-sha256;x-amz-date, Signature=f81071bd1abc208517cc2efb4d39d637b35f2bd228d7a93396eec09eaeb58e41"
+     ],
+     [
+      "content-type",
+      "application/json"
+     ],
+     [
+      "x-amz-content-sha256",
+      "bf655ed6fa64186a912ca2dd47d02ecf947129bf01260bef5f6643d158f856fc"
+     ],
+     [
+      "x-amz-date",
+      "20261118T012737Z"
+     ]
+    ],
+    "body": "{\"inputText\":\"how big\"}",
+    "response": {
+     "status": 400,
+     "ctype": "application/json",
+     "headers": [
+      [
+       "x-amzn-ErrorType",
+       "ValidationException:http://internal.amazon.com/coral/com.amazon.bedrock/"
+      ]
+     ],
+     "body": "{\"message\": \"bad thing\"}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/completion/fx-bry",
+  "body": "{\"service\":\"amazonbedrock\",\"service_settings\":{\"access_key\":\"a\",\"secret_key\":\"s\",\"region\":\"us-east-1\",\"provider\":\"anthropic\",\"model\":\"m\"},\"task_settings\":{\"temperature\":3.0,\"max_new_tokens\":-1}}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"validation_exception\",\"reason\":\"Validation Failed: 1: [task_settings] Invalid value [3.0]. [temperature] must be less than or equal to [1.0];2: [task_settings] Invalid value [-1]. [max_new_tokens] must be a positive integer;\"}],\"type\":\"validation_exception\",\"reason\":\"Validation Failed: 1: [task_settings] Invalid value [3.0]. [temperature] must be less than or equal to [1.0];2: [task_settings] Invalid value [-1]. [max_new_tokens] must be a positive integer;\"},\"status\":400}",
+  "upstream": []
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-br/_update",
+  "body": "{\"service_settings\":{\"access_key\":\"AKIANEW\",\"secret_key\":\"br-secret-new\"}}",
+  "status": 200,
+  "answer": "{\"inference_id\":\"fx-br\",\"task_type\":\"text_embedding\",\"service\":\"amazonbedrock\",\"service_settings\":{\"region\":\"us-east-1\",\"model\":\"amazon.titan-embed-text-v2:0\",\"provider\":\"AMAZONTITAN\",\"rate_limit\":{\"requests_per_minute\":240},\"dimensions\":4,\"similarity\":\"cosine\"},\"chunking_settings\":{\"strategy\":\"sentence\",\"max_chunk_size\":250,\"sentence_overlap\":1}}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/model/amazon.titan-embed-text-v2%3A0/invoke",
+    "headers": [
+     [
+      "amz-sdk-invocation-id",
+      "56be6203-9b1e-4e02-c6d0-221c71e180e1"
+     ],
+     [
+      "amz-sdk-request",
+      "attempt=1; max=1"
+     ],
+     [
+      "authorization",
+      "AWS4-HMAC-SHA256 Credential=AKIANEW/20261118/us-east-1/bedrock/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-content-sha256;x-amz-date, Signature=0739a37f4348f3b0d938139fd6087e9df98c0bb837c97c27830088bc52b2178a"
+     ],
+     [
+      "content-type",
+      "application/json"
+     ],
+     [
+      "x-amz-content-sha256",
+      "bf655ed6fa64186a912ca2dd47d02ecf947129bf01260bef5f6643d158f856fc"
+     ],
+     [
+      "x-amz-date",
+      "20261118T012737Z"
+     ]
+    ],
+    "body": "{\"inputText\":\"how big\"}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"embedding\": [0.427835, 0.35567, 0.283505, 0.21134], \"inputTextTokenCount\": 3}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/fx-br",
+  "body": "{\"input\":\"after update\"}",
+  "status": 200,
+  "answer": "{\"text_embedding\":[{\"embedding\":[-0.07732,0.345361,-0.231959,0.190722]}]}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/model/amazon.titan-embed-text-v2%3A0/invoke",
+    "headers": [
+     [
+      "amz-sdk-invocation-id",
+      "091bb947-d8f2-ebfa-0e0d-de946bdfc840"
+     ],
+     [
+      "amz-sdk-request",
+      "attempt=1; max=1"
+     ],
+     [
+      "authorization",
+      "AWS4-HMAC-SHA256 Credential=AKIAEXAMPLEKEY/20261118/us-east-1/bedrock/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-content-sha256;x-amz-date, Signature=36df4e3602d7eb47f4b2e3351d2305d1c3c0ee34d1dafd305fc5a0c292ff4fe2"
+     ],
+     [
+      "content-type",
+      "application/json"
+     ],
+     [
+      "x-amz-content-sha256",
+      "8274a9d29ce80061bcbbee402b0ce6b6ef716e94f46ca8ff5cb6472535dfcacc"
+     ],
+     [
+      "x-amz-date",
+      "20261118T012737Z"
+     ]
+    ],
+    "body": "{\"inputText\":\"after update\"}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"embedding\": [-0.07732, 0.345361, -0.231959, 0.190722], \"inputTextTokenCount\": 3}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-br/_update",
+  "body": "{\"service_settings\":{\"secret_key\":\"only\"}}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"validation_exception\",\"reason\":\"Validation Failed: 1: [service_settings] [access_key] and [secret_key] must be updated together; missing: [access_key];\"}],\"type\":\"validation_exception\",\"reason\":\"Validation Failed: 1: [service_settings] [access_key] and [secret_key] must be updated together; missing: [access_key];\"},\"status\":400}",
+  "upstream": []
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-br/_update",
+  "body": "{\"service_settings\":{\"region\":\"us-west-2\"}}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"status_exception\",\"reason\":\"Configuration contains settings [{region=us-west-2}] unknown to the [amazonbedrock] service\"}],\"type\":\"status_exception\",\"reason\":\"Configuration contains settings [{region=us-west-2}] unknown to the [amazonbedrock] service\"},\"status\":400}",
+  "upstream": []
+ },
+ {
+  "method": "DELETE",
+  "path": "/_inference/fx-br",
+  "body": null,
+  "status": 200,
+  "answer": "{\"acknowledged\":true,\"pipelines\":[],\"indexes\":[]}",
+  "upstream": []
+ },
+ {
+  "method": "DELETE",
+  "path": "/_inference/fx-brc",
+  "body": null,
+  "status": 404,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"resource_not_found_exception\",\"reason\":\"Inference endpoint not found [fx-brc]\"}],\"type\":\"resource_not_found_exception\",\"reason\":\"Inference endpoint not found [fx-brc]\"},\"status\":404}",
+  "upstream": []
+ },
+ {
+  "method": "DELETE",
+  "path": "/_inference/fx-brx",
+  "body": null,
+  "status": 404,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"resource_not_found_exception\",\"reason\":\"Inference endpoint not found [fx-brx]\"}],\"type\":\"resource_not_found_exception\",\"reason\":\"Inference endpoint not found [fx-brx]\"},\"status\":404}",
+  "upstream": []
+ },
+ {
+  "method": "DELETE",
+  "path": "/_inference/fx-brm",
+  "body": null,
+  "status": 200,
+  "answer": "{\"acknowledged\":true,\"pipelines\":[],\"indexes\":[]}",
+  "upstream": []
+ },
+ {
+  "method": "DELETE",
+  "path": "/_inference/fx-brco",
+  "body": null,
+  "status": 200,
+  "answer": "{\"acknowledged\":true,\"pipelines\":[],\"indexes\":[]}",
+  "upstream": []
+ },
+ {
+  "method": "DELETE",
+  "path": "/_inference/fx-bra",
+  "body": null,
+  "status": 200,
+  "answer": "{\"acknowledged\":true,\"pipelines\":[],\"indexes\":[]}",
+  "upstream": []
+ },
+ {
+  "method": "DELETE",
+  "path": "/_inference/fx-brt",
+  "body": null,
+  "status": 200,
+  "answer": "{\"acknowledged\":true,\"pipelines\":[],\"indexes\":[]}",
+  "upstream": []
+ },
+ {
+  "method": "DELETE",
+  "path": "/_inference/fx-brs",
+  "body": null,
+  "status": 200,
+  "answer": "{\"acknowledged\":true,\"pipelines\":[],\"indexes\":[]}",
+  "upstream": []
+ },
+ {
+  "method": "DELETE",
+  "path": "/_inference/fx-brcc",
+  "body": null,
+  "status": 404,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"resource_not_found_exception\",\"reason\":\"Inference endpoint not found [fx-brcc]\"}],\"type\":\"resource_not_found_exception\",\"reason\":\"Inference endpoint not found [fx-brcc]\"},\"status\":404}",
+  "upstream": []
+ },
+ {
+  "method": "DELETE",
+  "path": "/_inference/fx-bry2",
+  "body": null,
+  "status": 404,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"resource_not_found_exception\",\"reason\":\"Inference endpoint not found [fx-bry2]\"}],\"type\":\"resource_not_found_exception\",\"reason\":\"Inference endpoint not found [fx-bry2]\"},\"status\":404}",
+  "upstream": []
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/completion/fx-brx",
+  "body": "{\"service\":\"amazonbedrock\",\"service_settings\":{\"access_key\":\"AKIAEXAMPLEKEY\",\"secret_key\":\"s\",\"region\":\"us-east-1\",\"provider\":\"anthropic\",\"model\":\"anthropic.claude-3\"},\"task_settings\":{\"max_new_tokens\":64,\"temperature\":0.5,\"top_p\":0.9,\"top_k\":0.5}}",
+  "status": 200,
+  "answer": "{\"inference_id\":\"fx-brx\",\"task_type\":\"completion\",\"service\":\"amazonbedrock\",\"service_settings\":{\"region\":\"us-east-1\",\"model\":\"anthropic.claude-3\",\"provider\":\"ANTHROPIC\",\"rate_limit\":{\"requests_per_minute\":240}},\"task_settings\":{\"temperature\":0.5,\"top_p\":0.9,\"top_k\":0.5,\"max_new_tokens\":64}}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/model/anthropic.claude-3/converse",
+    "headers": [
+     [
+      "amz-sdk-invocation-id",
+      "6e256dde-17e7-9ee6-855d-c47842dbabe1"
+     ],
+     [
+      "amz-sdk-request",
+      "attempt=1; max=1"
+     ],
+     [
+      "authorization",
+      "AWS4-HMAC-SHA256 Credential=AKIAEXAMPLEKEY/20261118/us-east-1/bedrock/aws4_request, SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;content-type;host;x-amz-content-sha256;x-amz-date, Signature=a4b9e588949a3f03e0f31af339d3cd4c14e120b6b978bcf17f577648802a451b"
+     ],
+     [
+      "content-type",
+      "application/json"
+     ],
+     [
+      "x-amz-content-sha256",
+      "65db36cfb4f33cd3ca12a28f849ab4c9dc1862e180595610f535eb3f79074ce8"
+     ],
+     [
+      "x-amz-date",
+      "20261118T012738Z"
+     ]
+    ],
+    "body": "{\"messages\":[{\"role\":\"user\",\"content\":[{\"text\":\"how big\"}]}],\"inferenceConfig\":{\"maxTokens\":64,\"temperature\":0.5,\"topP\":0.9},\"additionalModelResponseFieldPaths\":[\"{\\\"top_k\\\":0.500000}\"]}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"output\": {\"message\": {\"role\": \"assistant\", \"content\": [{\"text\": \"bedrock: how big\"}]}}, \"stopReason\": \"end_turn\", \"usage\": {\"inputTokens\": 3, \"outputTokens\": 2, \"totalTokens\": 5}, \"metrics\": {\"latencyMs\": 1}}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/completion/fx-brm3",
+  "body": "{\"service\":\"amazonbedrock\",\"service_settings\":{\"access_key\":\"AKIAEXAMPLEKEY\",\"secret_key\":\"s\",\"region\":\"us-east-1\",\"provider\":\"meta\",\"model\":\"m\"},\"task_settings\":{\"top_k\":0.3}}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"status_exception\",\"reason\":\"The [top_k] task parameter is not available for provider [meta]\"}],\"type\":\"status_exception\",\"reason\":\"The [top_k] task parameter is not available for provider [meta]\"},\"status\":400}",
+  "upstream": []
+ }
+]

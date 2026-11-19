@@ -643,7 +643,7 @@ type LogDrain = {
   sources: ("runtime" | "http" | "build")[]; // runtime: the instances' output and roll's lines about them; http: the access log, a request a line (text: an AccessLine); build: each deploy's build
   environments: string[];     // only these environments' (empty: every one)
   services: string[];         // only these services' (ids; empty: every one)
-  previews: boolean;          // preview environments' too (a drain made before this field: true)
+  previews: boolean;          // preview environments' too (a drain made before this field: true), and a preview's services on roll's own runtime (its `pv-` environment, `service` null: never to a drain narrowed to `services`)
   headers: string[];          // the names of the headers it's sent with (values sealed, never returned)
   format: "ndjson" | "otlp" | "syslog"; // ndjson: signed batches of lines; otlp: an OTLP/HTTP JSON ExportLogsServiceRequest to the URL (a collector's /v1/logs); syslog: RFC 5424 over TLS (RFC 5425's octet counting), no headers
 };

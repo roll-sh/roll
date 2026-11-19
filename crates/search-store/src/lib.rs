@@ -47,10 +47,12 @@ pub mod keys;
 pub mod manifest;
 pub mod wal;
 
+mod audit;
 mod branch;
 mod gc;
 mod pins;
 
+pub use audit::AuditObject;
 pub use cache::{CacheStats, SegmentData, SegmentFetch, Verifier};
 pub use error::{Fenced, WalFull};
 pub use gc::GcStats;

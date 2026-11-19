@@ -249,6 +249,10 @@ pub struct Apps {
     drain_done: Arc<Mutex<Vec<String>>>,
     /// Projects whose drains changed on this node: the drainer reads theirs again (only theirs).
     pub(crate) drains_dirty: Mutex<std::collections::HashSet<String>>,
+    /// Previews' runtime lines on their way to the drainer ([`Apps::drain_preview_lines`]), and
+    /// its end of the channel until it starts.
+    pub(crate) preview_lines: tokio::sync::mpsc::Sender<drains::PreviewBatch>,
+    pub(crate) preview_lines_rx: Mutex<Option<tokio::sync::mpsc::Receiver<drains::PreviewBatch>>>,
     /// Private environments' token hashes, by environment, as the owner last read or set them.
     access: Mutex<HashMap<String, Option<Access>>>,
     /// Bumped by every change to the access cache: a cold read caches what it read only if
@@ -458,6 +462,7 @@ impl Apps {
     pub fn new(cfg: AppsConfig, store: Store, deps: Deps) -> Arc<Apps> {
         let cfg_allow = cfg.allow_private;
         let logs = LogHub::new(deps.objects.clone());
+        let (preview_lines, preview_lines_rx) = tokio::sync::mpsc::channel(drains::PREVIEW_BATCHES);
         Arc::new(Apps {
             cfg,
             store,
@@ -481,6 +486,8 @@ impl Apps {
             visitors: std::sync::OnceLock::new(),
             drain_done: Arc::new(Mutex::new(Vec::new())),
             drains_dirty: Mutex::new(Default::default()),
+            preview_lines,
+            preview_lines_rx: Mutex::new(Some(preview_lines_rx)),
             access: Mutex::new(HashMap::new()),
             access_gen: std::sync::atomic::AtomicU64::new(0),
             visits: Mutex::new(HashMap::new()),
