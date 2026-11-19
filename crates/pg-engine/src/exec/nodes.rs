@@ -367,6 +367,7 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
                 moves: None,
                 piped: false,
                 passed: false,
+                planned: None,
             })
         }
         Plan::ProjectSet { input, exprs, srfs } => Box::new(ProjectSetNode {
@@ -2501,6 +2502,9 @@ struct ProjectNode {
     /// The input makes its rows of the columns moved, as projected (`Node::project_columns`):
     /// they pass through.
     passed: bool,
+    /// The expressions as planned, when `exprs` read the input's rows narrowed to the columns
+    /// they read (`Node::project_columns` of those: `compute_below`).
+    planned: Option<Vec<Expr>>,
 }
 
 const NOT_MOVED: u32 = u32::MAX;
@@ -2720,7 +2724,7 @@ mod projection_tests {
             let mut p = ProjectNode {
                 input: Box::new(Items([Item::Part(part), Item::Row(row, 2)].into())),
                 exprs: vec![col(0), col(2)], moves: Some(vec![0, 2].into_boxed_slice()),
-                computed: None, tried: true, topk: None, piped: true, passed: false,
+                computed: None, tried: true, topk: None, piped: true, passed: false, planned: None,
             };
             match projected_item(&mut p, ctx).unwrap().unwrap() {
                 Item::Part(part) => {
@@ -2767,6 +2771,24 @@ impl ProjectNode {
         {
             self.moves = None;
             self.passed = true;
+            return Ok(());
+        }
+        // (Expressions over some of the input's columns, columns or kernels' (which read
+        // nothing but their columns and constants): the input's rows made of just those, the
+        // expressions read over them. TPC-H q11's joined rows of 16 columns, of which its
+        // aggregation's projection reads 3.)
+        if self.topk.is_none()
+            && !ctx.instrumented()
+            && self.exprs.iter().all(|e| matches!(e, Expr::Col(..)) || super::kernel::compile(e).is_some())
+            && let Some(need) = super::need::of(self.exprs.iter())
+            && let cols = (0..need.len()).filter(|&i| need[i]).map(|i| i as u32).collect::<Vec<u32>>()
+            && !cols.is_empty()
+            && self.input.project_columns(&cols, ctx)
+        {
+            let place = |i: usize| cols.binary_search(&(i as u32)).unwrap_or(usize::MAX);
+            let narrowed = self.exprs.iter().map(|e| e.clone().remap_cols(&place)).collect();
+            self.planned = Some(std::mem::replace(&mut self.exprs, narrowed));
+            self.moves = project_moves(&self.exprs);
             return Ok(());
         }
         // Large bounds build worker heaps without discarding rows. Their shallow slots
@@ -2920,7 +2942,10 @@ impl Node for ProjectNode {
     }
 
     fn restart(&mut self, ctx: &ExecCtx) -> Result<()> {
-        let ProjectNode { input, exprs: _, computed, tried, topk, moves, piped, passed } = self;
+        let ProjectNode { input, exprs, computed, tried, topk, moves, piped, passed, planned } = self;
+        if let Some(p) = planned.take() {
+            *exprs = p;
+        }
         *computed = None;
         *passed = false;
         *tried = false;
