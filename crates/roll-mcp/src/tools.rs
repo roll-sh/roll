@@ -114,7 +114,12 @@ impl Tool {
 
     /// Its MCP definition, as `tools/list` shows it.
     pub fn definition(&self) -> Value {
-        PREPARED.get(self.name).map_or_else(|| self.build_definition(), |p| p.definition.clone())
+        self.definition_ref().clone()
+    }
+
+    /// Its definition, worked out once: read it without copying (filtering, names).
+    pub fn definition_ref(&self) -> &'static Value {
+        &PREPARED[self.name].definition
     }
 
     fn find_actions(&self) -> Vec<Action> {
