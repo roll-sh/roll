@@ -13,7 +13,7 @@
 use std::fmt::Write as _;
 
 /// A JSON value.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Json {
     Null,
     Bool(bool),

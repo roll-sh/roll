@@ -709,7 +709,7 @@ pub struct RangeBucket {
 }
 
 /// `InternalRange` / `InternalDateRange` / `InternalGeoDistance` / `InternalBinaryRange`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Range {
     pub kind: RangeResultKind,
     pub buckets: Vec<RangeBucket>,
@@ -1242,7 +1242,7 @@ pub fn create_ip_prefix(def: &AggDef, spec: &IpPrefixSpec, ctx: &mut BindCtx<'_>
 }
 
 /// Settings of `ip_prefix` results.
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct IpPrefixConfig {
     pub is_ipv6: bool,
     pub prefix_length: u32,
@@ -1348,7 +1348,7 @@ impl Aggregator for IpPrefixAgg {
 }
 
 /// An `ip_prefix` bucket.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct IpPrefixBucket {
     pub key: Vec<u8>,
     pub doc_count: u64,
@@ -1356,7 +1356,7 @@ pub struct IpPrefixBucket {
 }
 
 /// `InternalIpPrefix`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct IpPrefix {
     pub cfg: Arc<IpPrefixConfig>,
     pub buckets: Vec<IpPrefixBucket>,

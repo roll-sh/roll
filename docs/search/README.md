@@ -215,9 +215,10 @@ Elasticsearch-flavor.
 - **OpenSearch-flavor clusters**: `cluster.remote.*` and `_remote/info` answer as OpenSearch
   3.9 does (`skip_unavailable` defaults to `false`, a seed or proxy address must be
   `host:port`, no `cluster_credentials`), and a remote naming a roll cluster goes through the
-  same owner check. They can't link yet: the owner check accepts only two Elasticsearch-flavor
-  clusters, and OpenSearch has no `cross_cluster` API key for the remote to issue, so their
-  remotes still reach only the node itself.
+  same owner check. Linking them is left: OpenSearch has no `cross_cluster` API keys, so links
+  between OpenSearch-flavor clusters need a credential model of their own (probably an
+  internal user on the remote with a search-only role, issued and sealed as links' keys are).
+  Until then their remotes reach only the node itself.
 - **Left**: ES|QL `FROM <alias>:<index>`; suggesters over several clusters.
 
 `crates/search-control/tests/control.rs` `cross_cluster_search_between_a_persons_own_clusters`,

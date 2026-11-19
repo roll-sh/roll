@@ -61,7 +61,7 @@ impl AggRequest {
 }
 
 /// One element of an aggregation path (`agg[key].metric`).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PathElement {
     pub full: String,
     pub name: String,
@@ -71,7 +71,7 @@ pub struct PathElement {
 
 /// `AggregationPath`: `agg1>agg2[key]>agg3.metric`. [`AggPath::parse`] never returns an empty
 /// path, so `elements[0]` always exists.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AggPath {
     pub elements: Vec<PathElement>,
     pub text: String,
@@ -180,7 +180,7 @@ impl std::fmt::Display for AggPath {
 }
 
 /// A bucket order (`BucketOrder`): simple orders, sub-aggregation paths, compounds.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum BucketOrder {
     Count { asc: bool },
     Key { asc: bool },

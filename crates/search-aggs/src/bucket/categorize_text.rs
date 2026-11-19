@@ -815,7 +815,7 @@ impl Categorizer {
 }
 
 /// `SerializableTokenListCategory`: a category with its token bytes.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct WireCategory {
     pub base_tokens: Vec<Box<[u8]>>,
     pub base_weights: Vec<u32>,
@@ -1336,14 +1336,14 @@ impl Aggregator for EmptyCategorize {
 }
 
 /// One category bucket.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct CatBucket {
     pub cat: WireCategory,
     pub aggs: Aggs,
 }
 
 /// `InternalCategorizationAggregation`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct CategorizeText {
     pub buckets: Vec<CatBucket>,
     pub required_size: usize,

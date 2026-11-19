@@ -425,7 +425,7 @@ fn collects_breadth_first(spec: &TermsSpec, cfg: &TermsConfig, mode: &Mode, subs
 }
 
 /// Settings every terms result carries.
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct TermsConfig {
     pub order: BucketOrder,
     pub size: usize,
@@ -1195,7 +1195,7 @@ impl Aggregator for UnmappedTermsAgg {
 }
 
 /// Which terms result.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TermsKind {
     Str,
     Long,
@@ -1206,7 +1206,7 @@ pub enum TermsKind {
 }
 
 /// A terms bucket key.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum TermKey {
     Bytes(Vec<u8>),
     Long(i64),
@@ -1264,7 +1264,7 @@ impl TermKey {
 }
 
 /// One terms bucket.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct TermsBucket {
     pub key: TermKey,
     pub doc_count: u64,
@@ -1273,7 +1273,7 @@ pub struct TermsBucket {
 }
 
 /// `StringTerms` / `LongTerms` / `DoubleTerms` / `UnmappedTerms` / `InternalMultiTerms`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Terms {
     pub kind: TermsKind,
     pub buckets: Vec<TermsBucket>,

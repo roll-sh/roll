@@ -1541,9 +1541,13 @@ the rest are skipped by the tests' own prerequisites.
   `geo_centroid` may differ in its last digit, as Elasticsearch's does). A scroll over several
   clusters is a set of per-cluster scrolls under one id, paged as one cluster's would be, where
   Elasticsearch scrolls across clusters without minimizing round trips; the pages hold the same
-  hits. Not across clusters yet: suggesters, ES|QL `FROM <alias>:<index>`, and links between
-  OpenSearch-flavor clusters (their `cluster.remote.*` and `_remote/info` follow OpenSearch 3.9:
-  `skip_unavailable` defaults to `false`, seeds are `host:port`).
+  hits. Not across clusters yet: suggesters and ES|QL `FROM <alias>:<index>`.
+- OpenSearch-flavor clusters' `cluster.remote.*` and `_remote/info` follow OpenSearch 3.9
+  (`skip_unavailable` defaults to `false`, a seed or proxy address must be `host:port`, no
+  `cluster_credentials`), and their remotes reach only the node itself. Linking OpenSearch-flavor
+  clusters is left: it needs a credential model of its own, since OpenSearch has no
+  `cross_cluster` API keys (probably an internal user on the remote with a search-only role,
+  issued and sealed as links' keys are).
 - Aggregations and sorting on keyed flattened sub-fields, `_index_mode` aggregations,
   nested sorts inside `top_hits`, and shard-level aggregation failures as partial results.
 - Compound retrievers (`rrf`, `linear`, `pinned`, `rule` and `rescorer` over them) follow

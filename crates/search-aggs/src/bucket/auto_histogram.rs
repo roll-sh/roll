@@ -81,13 +81,41 @@ pub fn parse(p: &mut XParser<'_>, name: &str) -> Result<AutoDateHistogramSpec> {
     Ok(s)
 }
 
-/// `RoundingInfo`: a rounding and the multiples of it the histogram may use.
-#[derive(Debug)]
+/// `RoundingInfo`: a rounding and the multiples of it the histogram may use. It travels as
+/// its rounding and unit ([`crate::wire`]); the rest comes from [`ROUNDINGS`].
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(into = "RoundingInfoWire", try_from = "RoundingInfoWire")]
 pub struct RoundingInfo {
     pub rounding: Rounding,
     pub inner: &'static [i32],
     pub rough_millis: i64,
     pub abbreviation: &'static str,
+}
+
+impl Clone for RoundingInfo {
+    fn clone(&self) -> Self {
+        RoundingInfo { rounding: self.rounding.clone(), inner: self.inner, rough_millis: self.rough_millis, abbreviation: self.abbreviation }
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RoundingInfoWire {
+    rounding: Rounding,
+    abbreviation: String,
+}
+
+impl From<RoundingInfo> for RoundingInfoWire {
+    fn from(r: RoundingInfo) -> Self {
+        RoundingInfoWire { rounding: r.rounding, abbreviation: r.abbreviation.to_string() }
+    }
+}
+
+impl TryFrom<RoundingInfoWire> for RoundingInfo {
+    type Error = String;
+    fn try_from(w: RoundingInfoWire) -> std::result::Result<Self, String> {
+        let &(_, _, rough_millis, abbreviation, inner) = ROUNDINGS.iter().find(|r| r.3 == w.abbreviation).ok_or_else(|| format!("unknown rounding [{}]", w.abbreviation))?;
+        Ok(RoundingInfo { rounding: w.rounding, inner, rough_millis, abbreviation })
+    }
 }
 
 impl RoundingInfo {
@@ -100,18 +128,21 @@ impl RoundingInfo {
     }
 }
 
+/// The roundings an `auto_date_histogram` may use: unit, name, rough millis, abbreviation and
+/// multiples (`AutoDateHistogramAggregationBuilder.buildRoundings`).
+const ROUNDINGS: [(DateUnit, &str, i64, &str, &[i32]); 6] = [
+    (DateUnit::Second, "second", 1000, "s", &[1, 5, 10, 30]),
+    (DateUnit::Minute, "minute", 60 * 1000, "m", &[1, 5, 10, 30]),
+    (DateUnit::Hour, "hour", 60 * 60 * 1000, "h", &[1, 3, 12]),
+    (DateUnit::Day, "day", 24 * 60 * 60 * 1000, "d", &[1, 7]),
+    (DateUnit::Month, "month", 30 * 24 * 60 * 60 * 1000, "M", &[1, 3]),
+    (DateUnit::Year, "year", 365 * 24 * 60 * 60 * 1000, "y", &[1, 5, 10, 20, 50, 100]),
+];
+
 /// `buildRoundings(timeZone, minimumInterval)`.
 fn build_roundings(zone: &TimeZone, minimum: Option<&str>) -> Result<Vec<RoundingInfo>> {
-    const ALL: [(DateUnit, &str, i64, &str, &[i32]); 6] = [
-        (DateUnit::Second, "second", 1000, "s", &[1, 5, 10, 30]),
-        (DateUnit::Minute, "minute", 60 * 1000, "m", &[1, 5, 10, 30]),
-        (DateUnit::Hour, "hour", 60 * 60 * 1000, "h", &[1, 3, 12]),
-        (DateUnit::Day, "day", 24 * 60 * 60 * 1000, "d", &[1, 7]),
-        (DateUnit::Month, "month", 30 * 24 * 60 * 60 * 1000, "M", &[1, 3]),
-        (DateUnit::Year, "year", 365 * 24 * 60 * 60 * 1000, "y", &[1, 5, 10, 20, 50, 100]),
-    ];
-    let from = minimum.and_then(|m| ALL.iter().position(|a| a.1 == m)).unwrap_or(0);
-    ALL[from..]
+    let from = minimum.and_then(|m| ROUNDINGS.iter().position(|a| a.1 == m)).unwrap_or(0);
+    ROUNDINGS[from..]
         .iter()
         .map(|&(unit, _, rough_millis, abbreviation, inner)| {
             Ok(RoundingInfo { rounding: Rounding::new(RoundingKind::Unit(unit), zone.clone(), 0)?, inner, rough_millis, abbreviation })
@@ -792,7 +823,7 @@ impl Aggregator for AutoAgg {
 }
 
 /// An `auto_date_histogram` bucket.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct AutoBucket {
     pub key: i64,
     pub doc_count: u64,
@@ -800,7 +831,7 @@ pub struct AutoBucket {
 }
 
 /// `InternalAutoDateHistogram`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct AutoDateHistogram {
     pub buckets: Vec<AutoBucket>,
     pub target: i32,

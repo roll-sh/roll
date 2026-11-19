@@ -64,3 +64,18 @@ pub(crate) fn date_formatter(pattern: &str, locale: Option<&str>) -> Result<Arc<
 fn failed(e: postcard::Error) -> AggError {
     AggError::illegal_state(format!("aggregation results across clusters: {e}"))
 }
+
+/// `#[serde(with)]` for arrays longer than serde's 32 elements.
+pub(crate) mod big_array {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer, T: Serialize, const N: usize>(a: &[T; N], s: S) -> Result<S::Ok, S::Error> {
+        a.as_slice().serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>, T: Deserialize<'de>, const N: usize>(d: D) -> Result<[T; N], D::Error> {
+        let v: Vec<T> = Vec::deserialize(d)?;
+        let n = v.len();
+        v.try_into().map_err(|_| serde::de::Error::invalid_length(n, &"an array of the expected length"))
+    }
+}

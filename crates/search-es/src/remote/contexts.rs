@@ -201,7 +201,7 @@ async fn close_parts(ctx: &Ctx<'_>, parts: &[Part], pit: bool) -> usize {
         calls.push(call);
     }
     for call in calls {
-        if let Ok(v) = finish_part(ctx, call).await {
+        if let Ok(v) = Box::pin(finish_part(ctx, call)).await {
             freed += v.get("num_freed").and_then(Value::as_i64).unwrap_or(0).max(0) as usize;
         }
     }
@@ -222,7 +222,7 @@ pub async fn start_scroll(ctx: &Ctx<'_>, req: &SearchRequest, body: Option<&Valu
     if let Value::Obj(m) = &mut body {
         m.shift_remove("from");
     }
-    let qs = links::query_string(ctx, links::PART_DROP, &[("scroll", &ka_text)]);
+    let qs = links::query_string(ctx, links::PART_DROP, &[("scroll", ka_text.as_str())]);
     let mut legs = Vec::new();
     for (r, target, exprs) in &split.legs {
         let uri = format!("/{}/_search{qs}", links::path_segment(exprs));
@@ -312,7 +312,7 @@ pub async fn scroll(ctx: &Ctx<'_>) -> EsResult<Reply> {
     }
     let mut failures = Vec::new();
     for (k, call) in calls {
-        match finish_part(ctx, call).await {
+        match Box::pin(finish_part(ctx, call)).await {
             Ok(mut v) => {
                 let p = &mut c.parts[k];
                 if let Some(id) = v.get("_scroll_id").and_then(Value::as_str) {
@@ -363,7 +363,7 @@ pub async fn scroll(ctx: &Ctx<'_>) -> EsResult<Reply> {
     match keep {
         None if ctx.cluster.dialect == crate::cluster::Dialect::Elasticsearch => {
             ctx.cluster.ccs_contexts.remove(&id, &owner);
-            close_parts(ctx, &c.parts, false).await;
+            Box::pin(close_parts(ctx, &c.parts, false)).await;
         }
         keep => {
             if let Some(k) = keep {
@@ -388,7 +388,7 @@ pub async fn clear_scroll(ctx: &Ctx<'_>) -> EsResult<Reply> {
     }
     let mut freed = if plain.is_empty() { 0 } else { crate::search::contexts::free_scrolls(ctx, &plain)? };
     for c in &contexts {
-        freed += close_parts(ctx, &c.parts, false).await;
+        freed += Box::pin(close_parts(ctx, &c.parts, false)).await;
     }
     Ok(crate::search::contexts::cleared(freed, &ids))
 }
@@ -420,7 +420,7 @@ pub async fn open_pit(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let mut parts = Vec::new();
     let mut details = Map::new();
     for (name, indices, mut part, call) in calls {
-        match finish_part(ctx, call).await {
+        match Box::pin(finish_part(ctx, call)).await {
             Ok(v) => {
                 let n = |k: &str| v.pointer(&["_shards", k]).and_then(Value::as_i64).unwrap_or(0);
                 total += n("total");
@@ -435,7 +435,7 @@ pub async fn open_pit(ctx: &Ctx<'_>) -> EsResult<Reply> {
             }
             Err((e, skip)) => {
                 if !skip {
-                    close_parts(ctx, &parts, true).await;
+                    Box::pin(close_parts(ctx, &parts, true)).await;
                     return Err(e);
                 }
                 details.insert(name, obj! { "status" => "skipped", "indices" => indices, "timed_out" => false, "failures" => crate::arr![obj! { "shard" => -1, "index" => Value::Null, "reason" => e.to_value(false) }] });
@@ -453,7 +453,7 @@ pub async fn close_pit(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let body = ctx.body_map()?.unwrap_or_default();
     let Some(id) = body.get("id").map(Value::to_es_string).filter(|i| is_ccs(i)) else { return crate::search::contexts::close_pit(ctx) };
     let freed = match ctx.cluster.ccs_contexts.remove(&id, &caller(ctx)).filter(|c| c.scroll.is_none()) {
-        Some(c) => close_parts(ctx, &c.parts, true).await,
+        Some(c) => Box::pin(close_parts(ctx, &c.parts, true)).await,
         None => 0,
     };
     // As Elasticsearch answers a point in time that's gone.
