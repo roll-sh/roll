@@ -1486,8 +1486,9 @@ mod progress_tests {
     use serde_json::json;
 
     /// A call that asked for progress hears it's still running until its answer, then the answer;
-    /// one that didn't gets only the answer.
-    #[tokio::test]
+    /// one that didn't gets only the answer. On tokio's paused clock, so the count doesn't depend
+    /// on the machine's load (a loaded gate once saw a third tick before the 130 ms answer).
+    #[tokio::test(start_paused = true)]
     async fn a_slow_call_reports_progress_until_it_answers() {
         let every = std::time::Duration::from_millis(50);
         let slow = || -> super::Work {
