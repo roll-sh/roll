@@ -352,7 +352,7 @@ behind the `Apps` trait:
   redirect allowlists work.
   - **Who serves what:** one wildcard record (`*.preview.acme.dev`) points at roll apps'
     ingress. A `pv-` environment says its label (`preview_host`), and apps serves that name.
-    Apps hands any other name under the domain to previews' router, in process (apps'
+    Apps hands any other name under the domain to previews' router, in process (rolld wires apps'
     `PreviewRouter`, #278), which serves a roll-runtime service, and only for the project that
     holds the domain. Previews answers the 404 for a name it doesn't hold. rolld's API port
     serves the same names too (a node without apps' ingress).
