@@ -24,6 +24,7 @@ humantime.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
 parking_lot.workspace = true
+percent-encoding.workspace = true
 roll-cluster.workspace = true
 roll-workspace.workspace = true
 roll-auth.workspace = true
@@ -33,6 +34,7 @@ sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -302,6 +302,7 @@ pub const OPERATOR_ONLY: &[(&str, &str)] = &[
     ("/v1/access/audit/sinks", "where the audit log is sent is the operator's choice"),
     ("/v1/access/audit/sinks/{id}", "where the audit log is sent is the operator's choice"),
     ("/v1/access/audit/sinks/{id}/retry", "where the audit log is sent is the operator's choice"),
+    ("/v1/previews/{id}/visit", "a browser session in a team-access preview is a signed-in person's (rolld's gate sees their session), never a token's"),
     ("/v1/apps/services/{id}/environments/{env}/visit", "a browser session in a sign-in-gated environment is a signed-in person's (rolld's gate sees their session), never a token's"),
     ("/v1/apps/services/{id}/github", "roll's GitHub App installations span tenants: connecting a service to one (its tokens fetch any repository the installation sees) is the operator's, as connecting a repo is roll code's admin token's"),
 ];
@@ -1235,6 +1236,13 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/secrets/projects/{project}/cas/{id}/certificates", "secrets", R, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/cas/{id}/revoke", "secrets", W, one(&["project"], "project")),
     row("DELETE", "/v1/secrets/projects/{project}/cas/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    // ACME on a CA: its directory, pre-authorization and External Account Bindings. A binding's
+    // HMAC key is answered once, to who may also reveal; making, revoking and pre-authorizing are
+    // the project admin's (an account acts with its binding's names).
+    row("GET", "/v1/secrets/projects/{project}/cas/{id}/acme", "secrets", R, one(&["project"], "project")),
+    row("PATCH", "/v1/secrets/projects/{project}/cas/{id}/acme", "secrets", ADMIN, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/cas/{id}/acme/eab", "secrets", ADMIN, one(&["project"], "project")).reveals(&["hmac_key"]),
+    row("DELETE", "/v1/secrets/projects/{project}/cas/{id}/acme/eab/{eab}", "secrets", ADMIN, one(&["project"], "project")),
     row("GET", "/v1/secrets/projects/{project}/ssh-cas", "secrets", R, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/ssh-cas", "secrets", ADMIN, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/ssh-cas/{id}/sign-host", "secrets", ADMIN, one(&["project"], "project")),
@@ -1249,6 +1257,26 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/secrets/projects/{project}/outside-databases", "secrets", R, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/outside-databases", "secrets", ADMIN, one(&["project"], "project")),
     row("DELETE", "/v1/secrets/projects/{project}/outside-databases/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    // LDAP and Active Directory: listing never shows the bind password; registering takes one.
+    row("GET", "/v1/secrets/projects/{project}/directories", "secrets", R, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/directories", "secrets", ADMIN, one(&["project"], "project")),
+    row("DELETE", "/v1/secrets/projects/{project}/directories/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    // Snowflake accounts: listing never shows the admin's private key; registering takes one.
+    row("GET", "/v1/secrets/projects/{project}/snowflake-accounts", "secrets", R, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/snowflake-accounts", "secrets", ADMIN, one(&["project"], "project")),
+    row("DELETE", "/v1/secrets/projects/{project}/snowflake-accounts/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    // MongoDB Atlas projects: listing shows the service account's client id, never its secret;
+    // registering takes one.
+    row("GET", "/v1/secrets/projects/{project}/atlas-projects", "secrets", R, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/atlas-projects", "secrets", ADMIN, one(&["project"], "project")),
+    row("DELETE", "/v1/secrets/projects/{project}/atlas-projects/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    // Gateways into private networks (docs/secrets.md, "Gateways"): records are the project's;
+    // a gateway's own link is write on the gateway by its id, which only its token's rule names
+    // (a project-wide rule doesn't reach it).
+    row("GET", "/v1/secrets/projects/{project}/gateways", "secrets", R, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/gateways", "secrets", ADMIN, one(&["project"], "project")).reveals(&["token"]),
+    row("DELETE", "/v1/secrets/projects/{project}/gateways/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    row("GET", "/v1/secrets/gateways/{id}/connect", "secrets", W, one(&["id"], "gateway")),
     row("PATCH", "/v1/secrets/projects/{project}/outside-databases/{id}", "secrets", ADMIN, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/outside-databases/{id}/rotate-admin", "secrets", ADMIN, one(&["project"], "project")),
     row("GET", "/v1/secrets/projects/{project}/kubernetes", "secrets", R, one(&["project"], "project")),
@@ -1326,6 +1354,11 @@ static ROWS: &[Row] = &[
     // runtime output elsewhere and its signing secret comes back once: reveal. The URL is never
     // answered (only its host).
     row("GET", "/v1/apps/projects/{project}/drains", "apps", R, one(&["project"], "project")),
+    // The project's preview domain: which names its preview environments answer under.
+    row("GET", "/v1/apps/projects/{project}/preview-domain", "apps", R, one(&["project"], "project")),
+    row("POST", "/v1/apps/projects/{project}/preview-domain", "apps", W, one(&["project"], "project")),
+    row("DELETE", "/v1/apps/projects/{project}/preview-domain", "apps", D, one(&["project"], "project")),
+    row("POST", "/v1/apps/projects/{project}/preview-domain/verify", "apps", W, one(&["project"], "project")),
     // Its services as roll.toml: settings and variables' names, never a value.
     row("POST", "/v1/apps/projects/{project}/export", "apps", R, one(&["project"], "project")),
     row("POST", "/v1/apps/projects/{project}/drains", "apps", REVEAL, one(&["project"], "project")),
@@ -1362,7 +1395,9 @@ static ROWS: &[Row] = &[
     // A volume's backups: making one changes nothing the app sees (write, production too);
     // restoring one replaces the volume's files (delete, as restoring over a branch is).
     row("POST", "/v1/apps/services/{id}/environments/{env}/volume/backups", "apps", W, one(PG, "service")).env(EnvFrom::Param("env")),
-    row("POST", "/v1/apps/services/{id}/environments/{env}/volume/backups/{bid}/restore", "apps", D, one(PG, "service")).env(EnvFrom::Param("env")),
+    // `from` restores another environment's backup here (its files are that environment's data):
+    // reveal there too.
+    row("POST", "/v1/apps/services/{id}/environments/{env}/volume/backups/{bid}/restore", "apps", D, one(PG, "service")).env(EnvFrom::Param("env")).copies_from(CopyFrom::Body("from")),
     // A shell runs any command where the service runs, with its variables (`env` prints them all):
     // admin in every environment, as an agent's shell is: its WebSocket, and all of a session
     // (opening, keys, screen, resizing, closing: what may close an admin's shell is admin too).
