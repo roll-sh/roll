@@ -130,7 +130,7 @@ pub fn routes(api: Router, config: Config, sets: Vec<Arc<dyn ToolSet>>) -> Route
 /// gate's: the token is read through the gated router with the caller's own credentials first,
 /// so only someone who may see it learns what it reaches.
 async fn seen_by(State(m): State<Mcp>, axum::extract::Path(id): axum::extract::Path<String>, ext: Extensions, headers: HeaderMap) -> Response {
-    let segment: String = percent_encoding::utf8_percent_encode(&id, percent_encoding::NON_ALPHANUMERIC).collect();
+    let segment: String = percent_encoding::utf8_percent_encode(&id, tools::SEGMENT).collect();
     let mut req = Request::builder().method("GET").uri(format!("/v1/access/tokens/{segment}"));
     for name in ["authorization", "cookie", "x-roll-user", "x-forwarded-for"] {
         if let Some(v) = headers.get(name) {
@@ -1223,7 +1223,7 @@ async fn secret_value_in(ctx: &Arc<Ctx>, name: &str, product: &str, write: bool,
     }
     let words: Vec<&str> = candidates.iter().map(|(w, _)| w.as_str()).collect();
     for p in projects {
-        let route = format!("/v1/secrets/projects/{}/leaks", percent_encoding::utf8_percent_encode(&p, percent_encoding::NON_ALPHANUMERIC));
+        let route = format!("/v1/secrets/projects/{}/leaks", percent_encoding::utf8_percent_encode(&p, tools::SEGMENT));
         let found = match guard_route(ctx, "POST", &route, Some(json!({ "candidates": words }))).await {
             Ok(f) => f,
             // Not checked (roll secrets is off, or refused it): said, not silent.

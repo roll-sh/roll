@@ -87,8 +87,14 @@ pub struct Request {
     pub body: Built,
 }
 
-fn seg(s: &str) -> String {
-    percent_encoding::utf8_percent_encode(s, percent_encoding::NON_ALPHANUMERIC).to_string()
+/// What a path segment keeps encoded: everything but letters, digits and `-`, `_`, `~` (RFC 3986's
+/// unreserved characters, as browsers and roll's CLI send them). An id's `_` sent as `%5F` reached
+/// products that route by the raw path (apps' owner routing) as a different key: its service was
+/// never "owned", so live actions answered 503. A `.` stays encoded, so `..` is never a dot-segment.
+pub const SEGMENT: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC.remove(b'-').remove(b'_').remove(b'~');
+
+pub fn seg(s: &str) -> String {
+    percent_encoding::utf8_percent_encode(s, SEGMENT).to_string()
 }
 
 fn as_text(v: &Value) -> String {
@@ -1219,6 +1225,9 @@ mod tests {
         let r = all().iter().find(|t| t.name == "storage_write_object").unwrap().request(&json!({ "bucket": "a b", "key": "x/y.txt", "content": "hi" })).unwrap();
         assert_eq!(r.uri, "/v1/storage/buckets/a%20b/upload?key=x%2Fy.txt");
         assert!(matches!(r.body, Built::Raw(ref b, _) if b == b"hi"));
+        // Ids go as they are (`svc_…`): a product that routes by the raw path sees the id it made.
+        let r = all().iter().find(|t| t.name == "apps_restart").unwrap().request(&json!({ "service": "svc_a-b~c", "env": ".." })).unwrap();
+        assert_eq!(r.uri, "/v1/apps/services/svc_a-b~c/environments/%2E%2E/restart");
         assert!(all()[0].request(&json!({ "nope": 1 })).is_err());
         // Explain plans the agent's statement in a read-only transaction, and runs nothing.
         let r = all().iter().find(|t| t.name == "postgres_explain").unwrap().request(&json!({ "endpoint": "ep_1", "sql": "select * from users;" })).unwrap();

@@ -235,6 +235,15 @@ pub enum Preview {
     /// What a preview's running services use right now: cores of CPU, resident memory against
     /// what each runs with.
     Metrics { preview: String },
+    /// Its recent traces (the project's `traces: true`: its services' OpenTelemetry spans),
+    /// newest first; `--trace <id>` one trace's spans.
+    Traces {
+        preview: String,
+        #[arg(long, default_value_t = 60)]
+        minutes: u32,
+        #[arg(long)]
+        trace: Option<String>,
+    },
     /// A project's deploy hooks (a secret URL a headless CMS calls on publish to build the
     /// previews of some branches again): lists them; `--add NAME` makes one (its URL printed
     /// once), `--rm HOOK` deletes one.
@@ -1212,6 +1221,36 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
             v
         }
 
+        Preview::Traces { preview, minutes, trace } => {
+            if let Some(t) = trace {
+                let v = api.get(&format!("/v1/previews/{preview}/traces/{t}")).await?;
+                if !as_json {
+                    let spans = v["spans"].as_array().cloned().unwrap_or_default();
+                    let t0 = spans.iter().filter_map(|s| s["start"].as_u64()).min().unwrap_or(0);
+                    for sp in spans {
+                        let (start, end) = (sp["start"].as_u64().unwrap_or(0), sp["end"].as_u64().unwrap_or(0));
+                        let mark = if sp["error"].as_bool() == Some(true) { "!" } else { " " };
+                        println!("{mark} +{:>6} ms {:>6} ms  {:<12} {}", start.saturating_sub(t0) / 1_000_000, end.saturating_sub(start) / 1_000_000, s(&sp["service"]), s(&sp["name"]));
+                    }
+                    return Ok(());
+                }
+                v
+            } else {
+                let v = api.get(&format!("/v1/previews/{preview}/traces?minutes={minutes}")).await?;
+                if !as_json {
+                    let traces = v["traces"].as_array().cloned().unwrap_or_default();
+                    if traces.is_empty() {
+                        println!("no traces in the last {} minutes (the project's `traces` setting turns them on)", v["minutes"].as_u64().unwrap_or(minutes as u64));
+                    }
+                    for t in traces {
+                        let mark = if t["error"].as_bool() == Some(true) { "!" } else { " " };
+                        println!("{mark} {:>8}  {:>6} ms  {:>3} spans  {:<12} {}  {}", ago(t["start_ms"].as_i64().unwrap_or(0) / 1000), t["ms"], t["spans"], s(&t["service"]), s(&t["name"]), s(&t["trace"]));
+                    }
+                    return Ok(());
+                }
+                v
+            }
+        }
         Preview::Shell { preview, service } => return shell(api, &preview, service.as_deref()).await,
         Preview::Forward { preview, port, service, local_port } => {
             let local = local_port.unwrap_or(port);
