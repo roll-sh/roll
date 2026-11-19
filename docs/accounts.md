@@ -391,6 +391,12 @@ phished: a passkey works only on roll's own site.
   (user verification `required`) signs its person in, as both factors, TOTP on or not (GitHub
   counts a passkey the same way). An authenticator that didn't verify the person (no PIN or
   biometric) is refused. An enforced SSO domain still signs in only through its provider.
+- **Autofill** (GitHub's and Google's): where the browser offers it (WebAuthn conditional
+  mediation), the sign-in page asks for those options as it loads and keeps a conditional request
+  open, and its email field is `autocomplete="username webauthn"`: the browser lists the person's
+  passkeys among the field's suggestions, and picking one signs in. "Sign in with a passkey"
+  cancels that request first (a browser runs one at a time). Checked in Chromium with its virtual
+  authenticator (`users-live/autofill-shot.sh`).
 - **As the second factor** (the same two routes with a session owing one): the person's own
   passkeys, user verification `preferred` (presence is enough on top of the first factor).
 - A challenge is used once, within five minutes, and only for the sign-in it was made for: one
@@ -515,6 +521,28 @@ roll's week). A session's last use is noted every five minutes, so the timeout h
 that. It applies at once to every session, on its next use. ("Sessions and second factors" on
 the account page; a `PUT` sends the whole policy.)
 
+### Admin alerts
+
+As Google Workspace's alert center and Okta's admin notifications: a change to who's an admin or
+how people sign in mails every other admin (`src/alerts.rs`, at most 50), saying what changed and
+who did it (an admin by handle and address, or "the operator's token"), with links to the audit
+log and People. The admin who made it isn't mailed. A stolen admin session that makes another
+account an admin, or quietly turns enforcement off, is seen at once.
+
+- Someone made an admin, or no longer one; an admin's account turned off; an invite that makes an
+  admin.
+- The sign-in policy (`PUT /policy`: second factor, idle timeout, passkeys), allowed networks,
+  hardware keys only.
+- An SSO connection added, removed or changed (enforcement, provisioning, domains, its client
+  credentials: what changed, never the secret), a SCIM token made or removed.
+
+Without mail configured there are no alerts; the audit log has every change either way.
+
+`max_session_hours` (1 to 720; absent: roll's 30 days) is the longest a session lasts after its
+sign-in, however much it's used, as Okta's maximum session lifetime: a company that wants its
+people to sign in every working day sets 8 or 12. It applies to sessions already open too, on
+their next use. An SSO connection's own session length still holds when it's shorter.
+
 ### Sudo mode
 
 As GitHub does, a change to how an account is reached needs the person to have proved who they
@@ -638,8 +666,9 @@ type MfaRequired = { status: "mfa_required"; methods: ("totp" | "recovery")[]; c
 | `DELETE /v1/accounts/me` | `{confirm}` (your handle) | 204, signed out: the account is deleted (sudo mode; "Deleting your account"); 409 the last admin |
 | `POST /v1/accounts/me/email` | `{email}` | 202 `{challenge}`: a code to the new address (sudo mode; "Your address") |
 | `POST /v1/accounts/me/email/confirm` | `{challenge, code}` | `User` at the new address; 400 `{code: "bad_code"}`; 409 the address has an account now |
-| `GET /v1/accounts/me/sessions` | | `Session[]`, newest first |
+| `GET /v1/accounts/me/sessions` | | `Session[]`, newest first: `{id, created_at, seen_at, expires_at, user_agent, current, method, passkey}`; `method` is how it signed in (`email`, `github`, `google`, `sso`, `passkey`; `null` for sessions older than this), `passkey` whether a passkey was used in it (with `sso`, a phishing-resistant session) |
 | `GET /v1/accounts/me/activity` | query `before?` (Unix ms), `limit?` (1–200, 50) | `{events: [{at, action, actor, ok, status, ip, user_agent, detail}]}`: your security log, newest first |
+| `DELETE /v1/accounts/me/sessions` | | `{ended}`: every session of yours but this one ends ("Sign out of all other sessions"); tokens and app connections keep working, so the page points to MCP & access |
 | `DELETE /v1/accounts/me/sessions/{id}` | | 204; 404 if it isn't yours |
 | `DELETE /v1/accounts/me/identities/{provider}` | | 204; 404 if not linked |
 | `POST /v1/accounts/me/totp` | | `{secret, otpauth_url, qr_png}` (`qr_png` a `data:image/png;base64,…` URL): a new seed, not on until confirmed; 409 if on; 503 `{code: "secret_key"}` without `ROLL_SECRET_KEY` |
@@ -666,8 +695,8 @@ same callback; on success it redirects to `return_to` (default `/dashboard/accou
 | --- | --- | --- |
 | `GET /v1/accounts/passkey-policy` | | `{require, models: [{aaguid, name, roots}]}` (hardware keys only) |
 | `PUT /v1/accounts/passkey-policy` | `{require, models}` | the policy, checked (UUIDs, names, PEM roots; a model when required); sudo mode; 400 `{code: "policy"}` |
-| `GET /v1/accounts/policy` | | `{require_second_factor, idle_minutes?, phishing_resistant?}` |
-| `PUT /v1/accounts/policy` | `{require_second_factor, idle_minutes?, phishing_resistant?: "admins" \| "everyone"}` | the policy (sudo mode; the whole of it); 400 `policy`; 409 turning on phishing-resistant sign-in from a session that hasn't used a passkey |
+| `GET /v1/accounts/policy` | | `{require_second_factor, idle_minutes?, max_session_hours?, phishing_resistant?}` |
+| `PUT /v1/accounts/policy` | `{require_second_factor, idle_minutes?, max_session_hours?, phishing_resistant?: "admins" \| "everyone"}` | the policy (sudo mode; the whole of it); 400 `policy`; 409 turning on phishing-resistant sign-in from a session that hasn't used a passkey |
 | `GET /v1/accounts/network-policy` | | `{on, networks}` (allowed networks) |
 | `PUT /v1/accounts/network-policy` | `{on, networks}` | the policy, networks normalised; sudo mode; 400 `networks` or `lockout` |
 | `GET /v1/accounts/reset-requests` | | `ResetRequest[]`: `{id, user, email, handle, reason, ip, user_agent, created_at, state, decided_by, decided_at}`, pending first |
@@ -676,9 +705,13 @@ same callback; on success it redirects to `return_to` (default `/dashboard/accou
 | `POST /v1/accounts/invites` | `{email, admin?, handle?}` | 201 `Invite & {token, url}` (the token is shown once, and mailed when mail is on); 409 an account has the email |
 | `GET /v1/accounts/invites` | | `Invite[]`, newest first |
 | `DELETE /v1/accounts/invites/{id}` | | 204 (unused invites only; 409 once used) |
-| `GET /v1/accounts/users` | | `User[]`, oldest first |
+| `POST /v1/accounts/invites/{id}/resend` | | `Invite` with a fresh `token` and `url`, valid another 7 days, mailed again; the old link stops at once, and so do sign-ins already begun with it (sudo mode for an invite that makes an admin); 409 used, or the address has an account now |
+| `GET /v1/accounts/users` | | `User[]`, oldest first; each with `last_active_at` (a sign-in or a session's use, noted every five minutes; `null` if not since roll began keeping it). People (exported as CSV from the page: handle, name, address, admin, turned off, second factors, dormant, last active, made; cells defused as the audit export's are) marks anyone with none in 90 days as dormant, as GitHub Enterprise's dormant users report does: turning off accounts nobody uses closes a way in |
 | `PATCH /v1/accounts/users/{id}` | `{admin?, disabled?}` | `User`; disabling deletes the user's sessions and cuts off their roll code owner (its tokens are revoked and its machines' links closed; turning the account back on gives none of them back) |
 | `DELETE /v1/accounts/users/{id}/sessions` | | 204: signs the user out everywhere |
+| `GET /v1/accounts/users/{id}/sessions` | | `Session[]`: the person's sessions (none `current`) |
+| `DELETE /v1/accounts/users/{id}/sessions/{session}` | | 204: ends that one session (a lost laptop); 404 if it isn't theirs |
+| `GET /v1/accounts/users/{id}/activity` | query `before?`, `limit?` | `{events}`: the person's security log, the same events they see of themselves (Okta's per-user System Log); "Security log" on a person in People |
 | `GET /v1/accounts/sso` | | `SsoConnection[]` (`{id, name, issuer, client_id, domains, verified, enforce, provision, created_at, redirect_uri, dns: {name, value}, scim}`; never the secret) |
 | `POST /v1/accounts/sso` | `{name?, issuer, client_id, client_secret, domains, enforce?, provision?}` | 201 `SsoConnection`; 400 when the issuer's discovery doesn't answer, `public_domain`; 409 a domain has a connection already; 503 `{code: "secret_key"}` without `ROLL_SECRET_KEY` |
 | `POST /v1/accounts/sso/{id}/verify` | | `SsoConnection`: its claimed domains whose `_roll-sso.<domain>` TXT record has its value are verified |
