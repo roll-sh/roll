@@ -94,8 +94,9 @@ fn grok_patterns_bound_their_nesting() {
     assert_eq!(r[2].0, 200, "{}", reason(&r[2].1));
 }
 
-/// A dotted name or path spells out one object per part: past 1000 parts (a request body's
-/// nesting), mappings, documents, ingest `set` and `dot_expander` refuse it before building it.
+/// A dotted name or path spells out one object per part. Documents refuse names past 100
+/// parts, ingest `set` and `dot_expander` paths past 1000 (a body's nesting), and mappings
+/// build only the objects their depth validation needs to refuse the name, before building it.
 #[test]
 fn long_dotted_paths_are_refused_before_they_build() {
     let long = vec!["a"; 50_000].join(".");
@@ -109,7 +110,7 @@ fn long_dotted_paths_are_refused_before_they_build() {
     ]);
     let depth = |v: &Value| reason(v).contains("Limit of mapping depth [20] has been exceeded due to object field [a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]");
     assert!(r[0].0 == 400 && depth(&r[0].1), "{:?}", r[0]);
-    assert!(r[1].0 == 400 && reason(&r[1].1).contains("has more than 1000 parts"), "{:?}", r[1]);
+    assert!(r[1].0 == 400 && reason(&r[1].1).contains("has more than 100 parts"), "{:?}", r[1]);
     for x in &r[2..4] {
         assert!(reason(&x.1).contains("exceeds the maximum allowed (1000"), "{:?}", x);
     }

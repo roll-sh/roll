@@ -1139,16 +1139,22 @@ impl ObjectMapper {
                 if parts.is_empty() {
                     return Err(EsError::illegal_argument("field name cannot contain only dots"));
                 }
-                // Its parent objects can't pass the depth limit, and building, validating and
-                // dropping them all walks the chain: past the nesting a request body may have,
-                // it's refused as the validation would refuse it.
+                // Past [`MAX_DOTTED_PARENTS`] its parent objects can't pass the depth limit, and
+                // building, validating and dropping them all walk the chain: the first ones over
+                // the limit are enough for the validation to refuse it as it refuses the whole
+                // name.
                 if parts.len() > MAX_DOTTED_PARENTS {
-                    let at = (ctx.depth_limit.max(1) as usize).min(parts.len() - 1);
-                    return Err(EsError::illegal_argument(format!(
-                        "Limit of mapping depth [{}] has been exceeded due to object field [{}]",
-                        ctx.depth_limit,
-                        parts[..at].join(".")
-                    )));
+                    let keep = ctx.depth_limit.max(0) as usize + 1;
+                    if keep >= MAX_DOTTED_PARENTS {
+                        return Err(EsError::illegal_argument(format!(
+                            "Limit of mapping depth [{}] has been exceeded due to object field [{}]",
+                            ctx.depth_limit,
+                            parts[..MAX_DOTTED_PARENTS].join(".")
+                        )));
+                    }
+                    let leaf = parts[parts.len() - 1];
+                    parts.truncate(keep);
+                    parts.push(leaf);
                 }
                 let leaf = parts[parts.len() - 1].to_string();
                 validate_field_name(&leaf)?;
@@ -1351,8 +1357,9 @@ fn parse_subobjects(v: &Value) -> Result<bool, EsError> {
     }
 }
 
-/// Parent objects a dotted field name may spell out (a request body nests at most 1000 levels).
-const MAX_DOTTED_PARENTS: usize = 1000;
+/// Parts of a dotted field name that become objects in full. Far past any depth limit
+/// (`index.mapping.depth.limit`, 20) yet shallow enough for every walk over the mapping.
+const MAX_DOTTED_PARENTS: usize = 100;
 
 /// A document field name with more parts than [`MAX_DOTTED_PARENTS`]: each part is an object
 /// level that resolving and mapping the name walk through all prefixes of, so it is refused
