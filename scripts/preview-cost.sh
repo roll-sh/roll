@@ -60,6 +60,8 @@ export ROLL_HOME=$HOME_DIR ROLL_API=$API ROLL_PROXY=127.0.0.1:${P}432 ROLL_REDIS
   ROLL_NOSQL_CQL=127.0.0.1:${P}042 ROLL_NOSQL_CQL_SHARD_AWARE=127.0.0.1:${P}043 ROLL_NOSQL_ALTERNATOR=127.0.0.1:${P}000 ROLL_NOSQL_REST=127.0.0.1:${P}100 \
   ROLL_CODE_PREVIEW_DOMAIN=$DOMAIN ROLL_PRODUCTS=${PREVIEW_PRODUCTS:-code,postgres,redis,storage,nosql,queues,streams,tasks,search} RUST_LOG=${RUST_LOG:-info}
 unset ROLL_ADMIN_TOKEN ROLL_CODE_TOKEN
+# A deployment key, as a real node has (what roll seals with it: roll secrets, a preview's own variables).
+export ROLL_SECRET_KEY=${PREVIEW_E2E_SECRET_KEY:-$(python3 -c 'import secrets; print(secrets.token_hex(32))')}
 say "starting rolld ($ROLL_PRODUCTS) in $HOME_DIR"
 nice -n 10 "$BIN" >"$HOME_DIR/rolld.log" 2>&1 &
 PID=$!
@@ -579,6 +581,9 @@ done
   curl -sS -b "$JAR" -H "Host: $HOST" "http://$API/env.txt" | grep -c . || true
   exit 1
 }
+# Kept sealed: the previews table holds no name or value of it.
+SEALED=$(python3 -c 'import sqlite3, sys; r = sqlite3.connect(sys.argv[1]).execute("SELECT vars FROM previews WHERE id = ?", (sys.argv[2],)).fetchone(); v = (r or [""])[0] or ""; print("ok" if v.startswith("v1:") and "FEATURE_FLAG" not in v else "plain: " + v[:20])' "$HOME_DIR/previews.db" "$PV")
+[ "$SEALED" = ok ] || { echo "a preview's own variables should be sealed at rest: $SEALED"; exit 1; }
 
 say "with ignore_paths, a docs-only push keeps the services and the preview reports the new head"
 api PUT "/v1/previews/projects/$PRJ/settings" '{"ignore_paths":["docs/"]}' >/dev/null

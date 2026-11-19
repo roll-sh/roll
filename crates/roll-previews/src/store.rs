@@ -579,10 +579,18 @@ pub struct Store {
     signing: std::sync::OnceLock<Vec<u8>>,
     db: Db,
     rates: Rates,
+    /// Seals a preview's own variables (rolld: with `ROLL_SECRET_KEY`); unset, they're kept as
+    /// written, and read either way.
+    pub sealer: std::sync::OnceLock<std::sync::Arc<dyn crate::ports::Sealer>>,
 }
 
 const COLUMNS: &str = "id, project_id, slug, repo, change_id, branch, number, title, github_pr, head, trusted, desired, state, error, attempts, \
      next_at, asleep, reset_requested, last_reset_at, last_active_at, expires_at, created_by, created_at, updated_at, generation, runs";
+
+/// What a preview's sealed variables are bound to.
+fn vars_aad(id: &str) -> String {
+    format!("preview-vars:{id}")
+}
 
 fn row(r: &code_sql::Row<'_>) -> code_sql::Result<Row> {
     let desired: String = r.get(11)?;
@@ -758,7 +766,7 @@ impl Store {
         if !db.has_column("shares", "opened_day")? {
             db.add_column("shares", "opened_day", "INTEGER")?;
         }
-        Ok(Store { db, rates: Rates::default(), signing: std::sync::OnceLock::new() })
+        Ok(Store { db, rates: Rates::default(), signing: std::sync::OnceLock::new(), sealer: std::sync::OnceLock::new() })
     }
 
     pub fn now_ms(&self) -> Result<i64> {
@@ -1268,7 +1276,21 @@ impl Store {
     /// The preview's own variables (`PUT …/env`), over the project's `env`.
     pub fn vars(&self, id: &str) -> Result<std::collections::BTreeMap<String, String>> {
         let raw: Option<String> = self.db.read(|c| c.query_row("SELECT vars FROM previews WHERE id = ?", [id], |r| r.get(0)).optional())?.flatten();
-        Ok(raw.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default())
+        self.open_vars(id, raw)
+    }
+
+    /// A preview's own variables as kept: sealed (`v1:…`, bound to its id) or, from before a key
+    /// or without one, plain JSON. Sealed without this node having the key is an error, never an
+    /// empty map: its services would start without them.
+    fn open_vars(&self, id: &str, raw: Option<String>) -> Result<std::collections::BTreeMap<String, String>> {
+        let Some(raw) = raw else { return Ok(Default::default()) };
+        let json = if raw.starts_with("v1:") {
+            let sealer = self.sealer.get().ok_or_else(|| Error::Internal(format!("{id}'s variables are sealed with ROLL_SECRET_KEY, which this node doesn't have")))?;
+            sealer.open(&vars_aad(id), &raw).ok_or_else(|| Error::Internal(format!("{id}'s variables don't open with this ROLL_SECRET_KEY")))?
+        } else {
+            raw
+        };
+        Ok(serde_json::from_str(&json).unwrap_or_default())
     }
 
     /// Change the preview's own variables in one write (`f` may run again; it only edits the map).
@@ -1276,9 +1298,13 @@ impl Store {
         self.db.write(|c| {
             let raw: Option<Option<String>> = c.query_row("SELECT vars FROM previews WHERE id = ?", [id], |r| r.get(0)).optional()?;
             let Some(raw) = raw else { return Err(Error::NotFound(format!("no preview {id}"))) };
-            let mut vars: std::collections::BTreeMap<String, String> = raw.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+            let mut vars = self.open_vars(id, raw)?;
             f(&mut vars)?;
-            let raw = (!vars.is_empty()).then(|| serde_json::to_string(&vars).unwrap_or_default());
+            // Sealed whenever this node can (the plain JSON of an older write goes at this one).
+            let raw = (!vars.is_empty()).then(|| serde_json::to_string(&vars).unwrap_or_default()).map(|json| match self.sealer.get() {
+                Some(s) => s.seal(&vars_aad(id), &json),
+                None => json,
+            });
             c.execute("UPDATE previews SET vars = ? WHERE id = ?", params![raw, id])?;
             Ok(vars)
         })
@@ -2995,6 +3021,45 @@ mod tests {
     }
 
     use super::*;
+
+    /// A preview's own variables are sealed at rest when the node has a key, bound to the
+    /// preview: the column holds no value, another preview's copy doesn't open, and plain ones
+    /// from before still read (sealed at their next write).
+    #[test]
+    fn a_previews_own_variables_are_sealed_at_rest_to_it() {
+        struct Rot;
+        impl crate::ports::Sealer for Rot {
+            fn seal(&self, aad: &str, plain: &str) -> String {
+                format!("v1:{aad}|{}", plain.chars().rev().collect::<String>())
+            }
+            fn open(&self, aad: &str, sealed: &str) -> Option<String> {
+                sealed.strip_prefix(&format!("v1:{aad}|")).map(|s| s.chars().rev().collect())
+            }
+        }
+        let (_dir, store) = store();
+        let (a, _) = store.create(&new("chg_va")).unwrap();
+        let (b, _) = store.create(&new("chg_vb")).unwrap();
+        let raw = |id: &str| store.db.read(|c| c.query_row("SELECT vars FROM previews WHERE id = ?", [id], |r| r.get::<_, Option<String>>(0))).unwrap().unwrap_or_default();
+        store.update_vars(&a.id, |v| {
+            v.insert("STRIPE_KEY".into(), "sk_test_51Hx9".into());
+            Ok(())
+        })
+        .unwrap();
+        assert!(raw(&a.id).contains("sk_test_51Hx9"), "no key: kept as written");
+        let _ = store.sealer.set(std::sync::Arc::new(Rot));
+        assert_eq!(store.vars(&a.id).unwrap()["STRIPE_KEY"], "sk_test_51Hx9", "a plain one from before still reads");
+        store.update_vars(&a.id, |v| {
+            v.insert("MODE".into(), "test".into());
+            Ok(())
+        })
+        .unwrap();
+        assert!(raw(&a.id).starts_with("v1:") && !raw(&a.id).contains("sk_test_51Hx9"), "sealed at its next write");
+        assert_eq!(store.vars(&a.id).unwrap().len(), 2);
+        // Copied onto another preview's row, it doesn't open there.
+        let sealed = raw(&a.id);
+        store.db.write(|c| c.execute("UPDATE previews SET vars = ? WHERE id = ?", params![sealed, b.id]).map(drop)).unwrap();
+        assert!(store.vars(&b.id).is_err());
+    }
 
     fn store() -> (tempfile::TempDir, Store) {
         let dir = tempfile::tempdir().unwrap();
