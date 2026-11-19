@@ -103,9 +103,12 @@ impl Secrets {
                 })
             })
         })?;
+        // Which keys are decoys is the admins' to know.
+        let decoys = self.sees_decoys(project, caller);
         // A token limited to some environments sees only their rows.
         Ok(rows
             .into_iter()
+            .filter(|r| decoys || !crate::decoys::ADMIN_ACTIONS.contains(&r.action.as_str()))
             .filter(|r| r.environment.as_deref().is_none_or(|e| caller.allows(Action::Read, &Scope::at(project, e, r.path.as_deref().unwrap_or("/")))))
             .collect())
     }

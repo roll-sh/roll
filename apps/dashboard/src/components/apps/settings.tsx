@@ -11,6 +11,10 @@ import { EnvironmentPanel, InstancesPanel } from "./environment";
 import { resourceKey } from "@/lib/workspace-resources";
 import { useWorkspace } from "@/lib/workspace-store";
 import { CPU, MEMORY, mb, type Runner } from "./shared";
+import { SidecarsPanel } from "./sidecars";
+import { ChecksPanel } from "./checks";
+import { HeartbeatsPanel } from "./heartbeats";
+import { SplitPanel } from "./split";
 
 
 /** The form's values, as text (empty: the default). */
@@ -59,6 +63,11 @@ interface Form {
   alertMemory: string;
   alertErrors: string;
   alertP95: string;
+  sloObjective: string;
+  metricsPath: string;
+  metricsPort: string;
+  sloLatency: string;
+  sloWindow: string;
   alertCapacity: string;
   alertLog: string;
   alertLogCount: string;
@@ -74,8 +83,10 @@ interface Form {
   tcp: boolean;
   rollbackOnCrash: boolean;
   rebuildOnBase: boolean;
+  blockOn: "" | "critical" | "high" | "medium" | "low";
   scaleStream: string;
   scaleGroup: string;
+  scaleMetric: string;
   scalePer: string;
   suspendAfter: string;
   sleepAfter: string;
@@ -130,6 +141,11 @@ export function formOf(s: Service): Form {
     alertMemory: str(s.run.alerts?.memory_pct),
     alertErrors: str(s.run.alerts?.error_pct),
     alertP95: str(s.run.alerts?.p95_ms),
+    sloObjective: str(s.run.slo?.objective),
+    metricsPath: s.run.metrics ? (s.run.metrics.path ?? "/metrics") : "",
+    metricsPort: str(s.run.metrics?.port),
+    sloLatency: str(s.run.slo?.latency_ms),
+    sloWindow: str(s.run.slo?.window_days),
     alertCapacity: str(s.run.alerts?.capacity_pct),
     alertLog: s.run.alerts?.log_match ?? "",
     alertLogCount: str(s.run.alerts?.log_count ?? 10),
@@ -145,8 +161,10 @@ export function formOf(s: Service): Form {
     tcp: !!s.run.tcp,
     rollbackOnCrash: !!s.run.rollback_on_crash,
     rebuildOnBase: !!s.run.rebuild_on_base,
+    blockOn: s.run.block_on ?? "",
     scaleStream: s.run.scale?.stream ?? "",
     scaleGroup: s.run.scale?.group ?? "",
+    scaleMetric: s.run.scale?.metric ?? "",
     scalePer: str(s.run.scale?.per_instance),
     suspendAfter: str(s.run.suspend_after_s),
     sleepAfter: str(s.run.sleep_after_s),
@@ -224,6 +242,10 @@ export function patchOf(s: Service, f: Form): ServicePatch {
       ...(f.alertLog.trim() ? { log_match: f.alertLog.trim() } : {}),
       log_count: Number(f.alertLogCount) || 10,
     };
+  if (f.metricsPath !== before.metricsPath || f.metricsPort !== before.metricsPort)
+    run.metrics = f.metricsPath.trim() ? { path: f.metricsPath.trim(), ...(num(f.metricsPort) ? { port: Number(f.metricsPort) } : {}) } : null;
+  if (f.sloObjective !== before.sloObjective || f.sloLatency !== before.sloLatency || f.sloWindow !== before.sloWindow)
+    run.slo = f.sloObjective.trim() ? { objective: Number(f.sloObjective), ...(num(f.sloLatency) ? { latency_ms: Number(f.sloLatency) } : {}), ...(num(f.sloWindow) ? { window_days: Number(f.sloWindow) } : {}) } : null;
   if (f.rolloutSteps !== before.rolloutSteps || f.rolloutStep !== before.rolloutStep || f.rolloutErrors !== before.rolloutErrors || f.rolloutManual !== before.rolloutManual)
     run.rollout = { steps: rolloutSteps(f.rolloutSteps) ?? [], step_s: Number(f.rolloutStep) || 120, error_pct: Number(f.rolloutErrors) || 5, ...(f.rolloutManual ? { manual: true } : {}) };
   if (f.h2c !== before.h2c) run.h2c = f.h2c ? true : null;
@@ -232,12 +254,15 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   if (f.tcp !== before.tcp) run.tcp = f.tcp ? true : null;
   if (f.rollbackOnCrash !== before.rollbackOnCrash) run.rollback_on_crash = f.rollbackOnCrash ? true : null;
   if (f.rebuildOnBase !== before.rebuildOnBase) run.rebuild_on_base = f.rebuildOnBase ? true : null;
+  if (f.blockOn !== before.blockOn) run.block_on = f.blockOn || null;
   if (f.restart !== before.restart || f.restartTries !== before.restartTries) {
     run.restart = f.restart === "always" ? null : f.restart;
     run.restart_tries = f.restart === "on_failure" ? num(f.restartTries) : null;
   }
-  if (f.scaleStream !== before.scaleStream || f.scaleGroup !== before.scaleGroup || f.scalePer !== before.scalePer)
-    run.scale = f.scaleStream && f.scaleGroup.trim() ? { stream: f.scaleStream, group: f.scaleGroup.trim(), ...(f.scalePer.trim() ? { per_instance: Number(f.scalePer) } : {}) } : null;
+  if (f.scaleStream !== before.scaleStream || f.scaleGroup !== before.scaleGroup || f.scalePer !== before.scalePer || f.scaleMetric !== before.scaleMetric) {
+    const per = f.scalePer.trim() ? { per_instance: Number(f.scalePer) } : {};
+    run.scale = f.scaleMetric.trim() ? { metric: f.scaleMetric.trim(), ...per } : f.scaleStream && f.scaleGroup.trim() ? { stream: f.scaleStream, group: f.scaleGroup.trim(), ...per } : null;
+  }
   if (f.suspendAfter !== before.suspendAfter) run.suspend_after_s = num(f.suspendAfter);
   if (f.sleepAfter !== before.sleepAfter) run.sleep_after_s = num(f.sleepAfter);
   if (f.volumeMount !== before.volumeMount || f.volumeSize !== before.volumeSize || f.backupEvery !== before.backupEvery || f.backupKeep !== before.backupKeep) {
@@ -249,7 +274,7 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   return patch;
 }
 
-const NUMERIC: (keyof Form)[] = ["scalePer", "port", "timeout", "retries", "min", "max", "concurrency", "healthTimeout", "healthEvery", "healthFailures", "drain", "cpuTarget", "memoryTarget", "suspendAfter", "sleepAfter", "volumeSize", "backupEvery", "backupKeep", "alertMemory", "alertErrors", "alertP95", "alertCapacity", "alertLogCount", "rolloutStep", "rolloutErrors", "restartTries"];
+const NUMERIC: (keyof Form)[] = ["scalePer", "port", "timeout", "retries", "min", "max", "concurrency", "healthTimeout", "healthEvery", "healthFailures", "drain", "cpuTarget", "memoryTarget", "suspendAfter", "sleepAfter", "volumeSize", "backupEvery", "backupKeep", "alertMemory", "alertErrors", "alertP95", "sloObjective", "sloLatency", "sloWindow", "metricsPort", "alertCapacity", "alertLogCount", "rolloutStep", "rolloutErrors", "restartTries"];
 
 /** A rollout's steps as typed (`10, 50`): increasing percents 1–99, at most five; null when they aren't. */
 export function rolloutSteps(v: string): number[] | null {
@@ -303,6 +328,7 @@ export function SettingsTab({
     ...(form.type !== "cron" ? ([["scaling", "Scaling"]] as [string, string][]) : []),
     ["health", "Health and alerts"],
     ...(web ? ([["networking", "Networking"], ["rollout", "Rollout"]] as [string, string][]) : []),
+    ...(form.type !== "cron" ? ([["sidecars", "Sidecars"]] as [string, string][]) : []),
     ...(env ? ([["environment", "Environment"]] as [string, string][]) : []),
   ];
   const project: [string, string][] = [["project", "Notifications and limits"]];
@@ -547,11 +573,16 @@ export function SettingsTab({
                       ))}
                     </select>
                   </Field>
-                  {form.scaleStream && (
+                  {!form.scaleStream && (
+                    <Field label="Or follow its own gauge" hint="a metric it reports (Prometheus or OpenTelemetry): a queue's depth, jobs in flight">
+                      {t("scaleMetric", "queue_depth")}
+                    </Field>
+                  )}
+                  {(form.scaleStream || form.scaleMetric.trim()) && (
                     <>
-                      <Field label="Consumer group">{t("scaleGroup", "billing")}</Field>
-                      <Field label="Messages per instance" hint="behind, before another starts">
-                        {t("scalePer", "1000")}
+                      {form.scaleStream && <Field label="Consumer group">{t("scaleGroup", "billing")}</Field>}
+                      <Field label={form.scaleStream ? "Messages per instance" : "Per instance"} hint={form.scaleStream ? "behind, before another starts" : "of the gauge, before another starts"}>
+                        {t("scalePer", form.scaleStream ? "1000" : "10")}
                       </Field>
                     </>
                   )}
@@ -594,6 +625,27 @@ export function SettingsTab({
                 <Field label="Alert: p95 latency (ms)" hint="in three of five minutes; 0 off">
                   {t("alertP95", "0")}
                 </Field>
+                <Field label="Metrics endpoint" hint="its Prometheus path, scraped every 15 s while it runs; empty: none">
+                  {t("metricsPath", "/metrics")}
+                </Field>
+                {form.metricsPath.trim() && (
+                  <Field label="Metrics port" hint="empty: its own port">
+                    {t("metricsPort", "9091")}
+                  </Field>
+                )}
+                <Field label="Objective (%)" hint="of requests not 5xx, e.g. 99.9; alerts when its error budget burns fast; empty: none">
+                  {t("sloObjective", "99.9")}
+                </Field>
+                {form.sloObjective.trim() && (
+                  <>
+                    <Field label="Objective: p95 under (ms)" hint="the same share of minutes; empty: requests only">
+                      {t("sloLatency", "300")}
+                    </Field>
+                    <Field label="Objective: window (days)" hint="1–60; empty: 28">
+                      {t("sloWindow", "28")}
+                    </Field>
+                  </>
+                )}
                 <Field label="Alert: over capacity (%)" hint="of five minutes' requests finding every instance busy at max instances; 0 off">
                   {t("alertCapacity", "10")}
                 </Field>
@@ -616,6 +668,13 @@ export function SettingsTab({
                 </select>
               </Field>
             )}
+            <Field label="Known vulnerabilities" hint="its image is scanned each deploy and daily; a hold scans before it goes live">
+              <select value={form.blockOn} onChange={(e) => set("blockOn", e.target.value as Form["blockOn"])} className={`${input} w-full`}>
+                <option value="">Never hold a deploy</option>
+                <option value="critical">Hold a deploy with a critical one</option>
+                <option value="high">Hold one with a high or critical</option>
+              </select>
+            </Field>
             <Field label="Alert: its log says" hint="text in its output (any case); empty: off">
               {t("alertLog", "panic")}
             </Field>
@@ -719,10 +778,19 @@ export function SettingsTab({
           </button>
         </div>
 
+        {service.run.type !== "cron" && (
+          <Anchor id="sidecars">
+            <SidecarsPanel service={service} runner={runner} />
+          </Anchor>
+        )}
+
         {env && (
           <Anchor id="environment" className="space-y-6">
             <InstancesPanel service={service} env={env} runner={runner} />
             <EnvironmentPanel key={env.name} service={service} env={env} runner={runner} onDeleted={onEnvDeleted} />
+            {service.run.type === "web" && <ChecksPanel service={service.id} env={env} runner={runner} />}
+            <HeartbeatsPanel service={service.id} env={env} runner={runner} />
+            {service.run.type === "web" && <SplitPanel key={env.name} service={service.id} env={env} others={service.environments.map((e) => e.name).filter((n) => n !== env.name)} runner={runner} />}
           </Anchor>
         )}
 

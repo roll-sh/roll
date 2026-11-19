@@ -396,7 +396,7 @@ impl Control {
             return Ok(());
         }
         let n = self.notifier.get().ok_or_else(|| ControlError::Unavailable("replication to buckets outside roll needs the S3 API, which isn't running".into()))?;
-        n.check_replication(cfg, b.object_lock.is_some()).await.map_err(invalid)
+        n.check_replication(cfg, &b.name, b.object_lock.is_some()).await.map_err(invalid)
     }
 
     /// Apply checked settings: the public access block before the store's own update (it

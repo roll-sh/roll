@@ -423,10 +423,12 @@ async fn run() -> anyhow::Result<()> {
 
     // roll storage on the node's cluster: every node serves it, the metadata's owner runs it, with
     // its event notifications into roll queues and streams, in process.
+    // Its replication targets' roll:// references resolve through roll secrets, set once it's open.
+    let storage_secrets = secrets::ForStorage::default();
     let mut storage_svc = match on.on(Product::Storage) {
         true => {
             let sink = std::sync::Arc::new(storage_events::RollSink { queues: queues.as_ref().map(|q| q.broker.clone()), streams: streams.as_ref().map(|s| s.broker.clone()) });
-            Some(storage::start(&storage_opts, &home, &storage, cluster.clone(), sink).await?)
+            Some(storage::start(&storage_opts, &home, &storage, cluster.clone(), sink, std::sync::Arc::new(storage_secrets.clone())).await?)
         }
         false => None,
     };
@@ -594,11 +596,16 @@ async fn run() -> anyhow::Result<()> {
     let _secrets_metrics = logs::SecretsMetrics::start(cluster.node_id().to_string(), secrets.clone());
     code_secrets.set(secrets.clone(), workspace.clone());
     apps_secrets.set(secrets.clone(), workspace.clone());
+    storage_secrets.set(secrets.clone());
     let _ = secrets_envs.0.set(secrets.clone());
     if let Some(c) = &code {
         secrets.set_code_refs(std::sync::Arc::new(secrets::CodeRefs(c.code.clone())));
     }
     router = router.merge(roll_secrets::router(secrets.clone()).layer(axum::middleware::map_request(secrets::guard_header))).merge(gateways.router());
+    // roll search's inference endpoints keyed by a project's secret (a sync rotations follow).
+    if search.is_some() {
+        router = router.merge(secrets::search_inference(secrets.clone(), workspace.clone(), products_api.clone()));
+    }
     products_api.set(router.clone());
     // A product's own credential changes (a password reset, a restore) move live links' digests
     // at once. Layered after the copy above: roll secrets' own rotations say so themselves.

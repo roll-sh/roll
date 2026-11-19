@@ -84,7 +84,13 @@ export type Secret = {
   expires_at: number | null;
   /** Why a credential's value is easy to guess; only for a caller who may reveal it. */
   weak?: string;
+  /** That it's a decoy (docs/secrets.md, "Decoys"): only for the project's admins. */
+  decoy?: Decoy;
 };
+/** A decoy key's mark: what it is, and its uses (each refused). */
+export type Decoy = { kind: "rlt"; created_at: number; created_by: string; uses: number; used_at: number | null; used_ip: string | null };
+/** `POST …/environments/{env}/decoys`: a new key whose value is a decoy credential. */
+export type NewDecoy = { key: string; kind: "rlt"; path?: string };
 /** `expires_at`: null clears it; absent keeps it. */
 export type SetSecret = { value?: string; comment?: string; tags?: string[]; type?: SecretType; link?: Link | null; message?: string; expires_at?: number | null; if_version?: number };
 /** `path`: another folder for this one operation (default: the batch's). */
@@ -292,7 +298,7 @@ export type AwsRole = { id: string; name: string; role_arn: string; trust: "exte
 /** Where a key is set (`GET /v1/secrets/search?key=`): names and versions, never a value. */
 export type Place = { project: string; project_name: string; environment: string; path: string; key: string; version: number; updated_at: number; linked: boolean };
 /** One thing to fix (`GET …/health`), worst first: where, never a value. */
-export type Finding = { issue: "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "public" | "weak" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string; owner?: string };
+export type Finding = { issue: "decoy_used" | "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "public" | "weak" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string; owner?: string };
 /** One project's findings (`GET /v1/secrets/findings`). */
 export type ProjectFindings = { project: string; project_name: string; findings: Finding[] };
 /** A URL roll calls to issue and revoke a value that lives outside roll (`rotator` links). */

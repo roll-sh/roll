@@ -466,6 +466,7 @@ is `-32602`.
 | `try_migration_on_branch` | `project` | A schema change tried on a branch first (create, migrate, compare), then on main only when it worked and you say so. | `postgres_get_project`, `postgres_create_branch`, `postgres_describe_schema`, `postgres_execute`, `postgres_delete_branch` |
 | `compare_branch_schemas` | `project`, `branch` | What a branch changed in the schema against main (Neon's schema compare), and the advisors' findings there; changes nothing. | `postgres_get_project`, `postgres_describe_schema`, `postgres_advisors` |
 | `tune_slow_query` | `project` | A slow query made faster on a branch first (Neon's query tuning): its plan, an index tried on a copy, both plans compared, main only when you say so. | `postgres_get_project`, `postgres_slow_queries`, `postgres_explain`, `postgres_create_branch`, `postgres_execute`, `postgres_delete_branch` |
+| `security_checkup` | | Which tokens need attention, most serious first: a narrower rule set for each over-broad one, where roaming ones were used from, which to revoke or give an expiry; adds secrets' findings, unmasked personal data, over-broad or unused S3 keys, public buckets, search clusters with no IP allowlist and previews shared outside the team when the connection has those tools. Changes nothing. | `access_checkup`, `access_tighten_token`, `access_token_networks` |
 | `debug_failing_service` | `service`, `env` | Why an environment is failing (what roll already flags in its `attention`, the whole timeline, deploys, deploy logs, failing requests and routes, metrics), then a fix or a rollback it asks about first. | `apps_get_environment`, `apps_activity`, `apps_route_stats`, `apps_list_deploys`, `apps_deploy_logs`, `apps_logs`, `apps_metrics` |
 
 ### As skills
@@ -508,6 +509,11 @@ previews are listed once those products are on.
 | `access_request_access` | Ask a person for one more rule for a while (15m, 1h, 8h or 1d), saying why; wait with `access_wait_approval`. Once it's approved, that call's answer says the tools changed: `notifications/tools/list_changed` first on its stream (for a client that accepts one; `tools.listChanged` is declared) and in its text. | `POST /v1/access/requests` |
 | `access_list_approvals` | Approvals, newest first: pending ones wait for the operator. | `GET /v1/access/approvals` |
 | `access_audit_log` | Every request made with a token and every MCP tool call, newest first. | `GET /v1/access/audit` |
+| `access_checkup` | The live tokens that need attention (everything, never expires, unused, narrower, roams), most serious first, each with its fix. A person's are their own. | `GET /v1/access/checkup` |
+| `access_list_tokens` | Tokens and OAuth connections you may see (rules, expiry, last use; never a secret). | `GET /v1/access/tokens` |
+| `access_get_token` | One token. | `GET /v1/access/tokens/{id}` |
+| `access_tighten_token` | A token's rules narrowed to what it used (a proposal; applying it is the operator's). | `GET /v1/access/tokens/{id}/tighten` |
+| `access_token_networks` | The networks a token was used from, first and last seen. | `GET /v1/access/tokens/{id}/networks` |
 | `workspace_list_projects` | Workspace projects, each with the resources on its canvas (kind, ref, position). | `GET /v1/workspace/projects` |
 | `workspace_get_project` | A workspace project and its resources. | `GET /v1/workspace/projects/{id}` |
 | `workspace_create_project` | A new workspace project to group resources. | `POST /v1/workspace/projects` |
@@ -565,6 +571,11 @@ previews are listed once those products are on.
 | `storage_restore_object` | An object back from the trash. | `POST /v1/storage/buckets/{name}/trash/restore` |
 | `storage_usage` | A bucket's usage. | `GET /v1/storage/buckets/{bucket}/usage` |
 | `storage_usage_all` | Storage and requests across every bucket. | `GET /v1/storage/usage` |
+| `storage_list_accounts` | Storage's accounts (12-digit ids): name, alias, the default. | `GET /v1/storage/accounts` |
+| `storage_list_keys` | An account's access keys: permission, buckets, IAM user, last use (never a secret). | `GET /v1/storage/keys` |
+| `storage_list_roles` | An account's IAM roles: ARN, trust, permissions policy, session length. | `GET /v1/storage/roles` |
+| `storage_get_role` | One IAM role. | `GET /v1/storage/roles/{name}` |
+| `storage_list_replication_targets` | Buckets outside roll that replication copies to (never the secret). | `GET /v1/storage/replication-targets` |
 | `storage_update_bucket` | Change a bucket's versioning, lifecycle rules, CORS, trash days, tags or whether it's public: what's left out stays. | `PATCH /v1/storage/buckets/{bucket}` |
 | `storage_delete_objects` | Delete these keys, or every object under a prefix (to the trash). | `POST /v1/storage/buckets/{bucket}/delete` |
 | `streams_list` | Kafka-compatible streams. | `GET /v1/streams` |
@@ -582,6 +593,7 @@ previews are listed once those products are on.
 | `streams_get_group` | A group's members, offsets and lag per partition. | `GET /v1/streams/{s}/groups/{g}` |
 | `streams_branch` | A stream branched, records shared (its key's secret: reveal). | `POST /v1/streams/{s}/branches` |
 | `streams_usage` | A stream's usage and throughput. | `GET /v1/streams/{stream}/usage` |
+| `streams_list_keys` | The SASL users a stream's clients sign in as (never a password). | `GET /v1/streams/{stream}/keys` |
 | `streams_update` | Change some of a stream's settings (as streams_get shows them: retention, throughput limits…); the rest stay. | `PATCH /v1/streams/{stream}` |
 | `streams_update_topic` | Grow a topic's partitions or change its configs, online. | `PATCH /v1/streams/{stream}/topics/{topic}` |
 | `streams_delete_group` | Delete a group and its committed offsets (refused while it has members). | `DELETE /v1/streams/{stream}/groups/{group}` |
@@ -598,6 +610,7 @@ previews are listed once those products are on.
 | `nosql_diff` | What a branch changed against its parent. | `GET /v1/nosql/databases/{id}/diff` |
 | `nosql_update_database` | Change a database's name, idle timeout, durability, history, expiry, read-only flag or masking policy: what's left out stays. Loosening masking or read-only needs admin. | `PATCH /v1/nosql/databases/{database}` |
 | `nosql_activity` | What a database is doing now: connected clients, slow queries, warnings and metrics. | `GET /v1/nosql/databases/{database}/activity` |
+| `nosql_list_imports` | A database's imports (cql://, s3://, file://): state, rows, tables, errors, schedule (the source's password hidden). | `GET /v1/nosql/databases/{id}/imports` |
 | `queues_overview` | The broker's totals and listeners. | `GET /v1/queues/overview` |
 | `queues_list_vhosts` | RabbitMQ-compatible virtual hosts. | `GET /v1/queues/vhosts` |
 | `queues_create_vhost` | A new virtual host. | `POST /v1/queues/vhosts` |
@@ -616,6 +629,7 @@ previews are listed once those products are on.
 | `queues_close_connection` | Close a client's connection (it may reconnect). | `DELETE /v1/queues/connections/{id}` |
 | `queues_list_channels` | Open channels with their prefetch and unacknowledged messages. | `GET /v1/queues/channels` |
 | `queues_list_policies` | Policies (message TTL, dead-lettering, length limits) and the queues they match. | `GET /v1/queues/policies` |
+| `queues_list_users` | The broker's users with their tags, permissions per vhost and limits (never a password). | `GET /v1/queues/users` |
 | `queues_set_policy` | Create or replace a policy: a pattern of queue or exchange names and what applies to them. | `PUT /v1/queues/policies/{vhost}/{name}` |
 | `queues_delete_policy` | Delete a policy. | `DELETE /v1/queues/policies/{vhost}/{name}` |
 | `queues_rates` | Publish, deliver and ack rates over the last minutes. | `GET /v1/queues/rates` |
@@ -635,6 +649,8 @@ previews are listed once those products are on.
 | `tasks_cancel_run` | Stop a durable function run. | `POST /v1/tasks/runs/{id}/cancel` |
 | `tasks_rerun` | A past run's function run again with its input. | `POST /v1/tasks/runs/{id}/rerun` |
 | `tasks_list_functions` | Durable functions. | `GET /v1/tasks/functions` |
+| `tasks_list_apps` | Synced apps: URL, functions, SDK, last sync. | `GET /v1/tasks/apps` |
+| `tasks_list_api_keys` | Tasks' API keys: name, prefix, made, last used (never the key). | `GET /v1/tasks/api-keys` |
 | `tasks_list_queues` | Queues with their parallelism, rate and backlog. | `GET /v1/tasks/queues` |
 | `tasks_stats` | Nodes, queue stats, dead letters, schedules and functions. | `GET /v1/tasks/stats` |
 | `tasks_list_dead_letters` | Messages that ran out of retries, newest first. | `GET /v1/tasks/dlq` |
@@ -667,6 +683,8 @@ previews are listed once those products are on.
 | `search_get_cluster` | A cluster's settings, state, indices, size, URL and branches. | `GET /v1/search/clusters/{cluster}` |
 | `search_create_cluster` | A new cluster, or a branch of one (its password once, to tokens that may reveal). | `POST /v1/search/clusters` |
 | `search_list_branches` | A cluster's branches. | `GET /v1/search/clusters/{id}/branches` |
+| `search_list_remotes` | The clusters this one searches across: alias, cluster, key id, whether it connects (never the key). | `GET /v1/search/clusters/{id}/remotes` |
+| `search_list_inference_secrets` | Inference endpoints keyed by a roll secret, and what each follows (never the value). | `GET /v1/search/clusters/{id}/inference/secrets` |
 | `search_branch_cluster` | A copy-on-write branch of a cluster. | `POST /v1/search/clusters/{cluster}/branches` |
 | `search_update_cluster` | A cluster's idle timeout, request limits, flavor, IP allowlist (admin). | `PATCH /v1/search/clusters/{id}` |
 | `search_delete_cluster` | Delete a cluster (its branches keep working); kept for the restore window. | `DELETE /v1/search/clusters/{id}` |
@@ -712,7 +730,17 @@ previews are listed once those products are on.
 | `secrets_list_saas` | A project's rotators for third-party API keys: vendor and the account each rotates for (never a credential). | `GET /v1/secrets/projects/{project}/saas` |
 | `secrets_list_kubernetes` | The Kubernetes clusters a project issues service-account tokens for: names and API servers (never a token). | `GET /v1/secrets/projects/{project}/kubernetes` |
 | `secrets_list_github_apps` | A project's GitHub Apps for short-lived installation tokens (ids, repositories, permissions; never the private key; adding one is admin). | `GET /v1/secrets/projects/{project}/github-apps` |
+| `secrets_list_directories` | A project's LDAP and Active Directory servers: URL, flavor, bind DN, managed accounts, groups, gateway (never the bind password; adding one is admin). | `GET /v1/secrets/projects/{project}/directories` |
+| `secrets_list_snowflake_accounts` | A project's Snowflake accounts: host, admin user and role, the admin key's fingerprint, managed user, roles (never the key; adding one is admin). | `GET /v1/secrets/projects/{project}/snowflake-accounts` |
+| `secrets_list_atlas_projects` | A project's MongoDB Atlas projects: group id, client id, managed users, roles (never the client secret; adding one is admin). | `GET /v1/secrets/projects/{project}/atlas-projects` |
+| `secrets_list_gateways` | A project's gateways into private networks with each link's status (online, node, version, allow-list, last seen; never a token; making one is admin). | `GET /v1/secrets/projects/{project}/gateways` |
+| `secrets_ca_acme` | A CA's ACME server: directory, pre-authorization, challenges, external account bindings (never an HMAC key; making one is admin). | `GET /v1/secrets/projects/{project}/cas/{id}/acme` |
 | `secrets_changes` | What changed in an environment (who, when, which keys; never values). | `GET …/environments/{env}/changes` |
+| `secrets_get_change` | One change: what it did to each key (fingerprints, never values). | `GET /v1/secrets/projects/{project}/environments/{env}/changes/{seq}` |
+| `secrets_insights` | Each key's version, last change and read, reads in 30 days, staleness. | `GET /v1/secrets/projects/{project}/environments/{env}/insights` |
+| `secrets_required` | The keys every standard environment must define. | `GET /v1/secrets/projects/{project}/required` |
+| `secrets_folders` | An environment's folders. | `GET /v1/secrets/projects/{project}/environments/{env}/folders` |
+| `secrets_suggestions` | Links roll suggests for a project's resources. | `GET /v1/secrets/projects/{project}/suggestions` |
 | `secrets_versions` | A secret's history (fingerprints, never values). | `GET …/environments/{env}/secrets/{name}/versions` |
 | `secrets_compare` | Which keys differ between two environments (never values). | `GET /v1/secrets/projects/{project}/compare` |
 | `secrets_rotate` | A new value for a secret, switched to: a generated one, or a managed link's, made where it lives. | `POST …/environments/{env}/secrets/{name}/rotate` |
@@ -858,26 +886,40 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **Next, ranked (now):** land turn 4 (15 PRs below, after previews), then open its follow-ups
-   (`feature/roll-mcp-turn4-followups`: the policy alert naming the longest session, People's
-   Dormant filter and turning the dormant off in one step); `previews_errors` and a
-   mask-suggestions tool once previews' #326 and #324 land (landing now); secrets' request (#277)
-   and cut-off (#304) tools when secrets' batch 4 lands; apps' forms tools once their routes land;
-   a removed person's repositories handed to someone else (waits for a repository transfer in roll
-   code). Not doing: "remember this browser"; `roll login`'s preset revealing development's values
-   without asking (#354, closed after review: a client's name proves nothing, so any approved
-   client would read them; #360 lets a CLI's approval be remembered for 30 days instead).
-   An independent security review of turn 4's account PRs (2026-11-19) found, and these fix:
-   token use counting as activity for dormant people (#349); resending an invite ending sign-ins
-   begun with the old link (#351); alerts naming every SSO change and everything a change to a
-   person did (#333); the session list ending sessions as the policy does (#337); signing out of
-   the others pointing to tokens and connections (#342); a 48 KiB cut for dense JSON (#355).
-   Open for the next turn (landed by the unit `roll-mcp-turn4-auto` once previews releases: a
-   fresh chain on main, one gate, one PR a round): #348, #322, #323, #328, #333, #334, #337, #338,
-   #342, #345, #349, #351, #353, #355, #360 (approvals remembered for a week or 30 days), #362
-   (debugging reads as tools: apps' errors, traces and metrics, queue internals, preview errors
-   and unmasked personal data, search branches).
-2. **Landed 2026-11-18, turn 3 (main e84194b6f, ci green):** a person's own data export (#283),
+1. **Next, ranked (now):** `security_checkup` goes past tokens to what's open to the internet:
+   public buckets, search clusters with no IP allowlist, previews shared outside the team; search's
+   cross-cluster remotes (#347) and inference secrets (#134) as read tools (linking stays the
+   cluster admin's) (`feature/roll-mcp-next-7`, this PR). Ready, waiting for apps' turn (after search's;
+   `feature/roll-mcp-apps-tools-4`, on apps #385, its PR opened once apps' stack is on main):
+   `apps_deploy_vulnerabilities` (`severity`), `apps_environment_slo`, `apps_list_forms`,
+   `apps_form_submissions` (a reveal; in lockdown each submission's `fields` are withheld,
+   `Tool::outside`: anyone can submit a site's form) and `apps_delete_form_submission`; then
+   images with critical vulnerabilities in `security_checkup`. Next unblocked: `tools/list` from borrowed definitions (an approval-less copy worked out once, serialized without cloning ~290 KB a call: about a fifth of its ~10 ms). Later, once secrets #281 lands: `secrets_verify_audit` (`GET …/audit/verify`, where the audit chain breaks) in `security_checkup`; no tools for decoys (#392, an admin's). Proposed to secrets (their call, #277's doc
+   says no tool today): `secrets_request_value` (write), `secrets_list_value_requests` and
+   `secrets_cancel_value_request`, so an agent that needs a key it doesn't have sends the person a
+   link and the value goes from their browser, sealed, into the folder, never through the
+   conversation; mapped once #277 lands if they agree. No tool for #304's cut-off (an incident
+   response that can revoke the agent's own token: a person's call; `secrets_reach` reads who can
+   reach a folder). Waiting on a sibling: a removed person's
+   repositories handed to someone else (waits for a repository transfer in roll code). Not doing:
+   "remember this browser"; a preset that reveals development's values without asking (#354);
+   tools for previews' shell, files and forward (ADMIN, interactive, as apps' shell and files).
+2. **Landed 2026-11-19 (main 09a3526b6, ci green):** read tools for secrets' new backends and
+   storage's IAM (#380); the access checkup, tokens, tighten proposals and a token's networks as
+   tools, the `security_checkup` workflow, queues' users, tasks' apps and API keys, nosql's imports
+   and a stream's keys (#383; live-checked with `live/reads-383.sh` against a rolld built from it).
+3. **Landed 2026-11-19 (main 8ce685ac8, ci green):** the turn-4 follow-ups (#373: the policy alert
+   names the longest session, People's Dormant filter and turning the dormant off in one step),
+   more secrets reads as tools with 10 more search-mode queries (#376), People as CSV (#377).
+4. **Landed 2026-11-19, turn 4 (main 97cdd7645, ci green):** steadier timing tests (#348), passkey
+   autofill (#322), an admin's per-person security log (#328), admin alerts (#333), search's audit
+   and analytics tools (#334), the longest session (#337), how each session signed in (#338),
+   signing out of the others (#342), People's search (#345), dormant people, token use counting
+   (#349), resending an invite (#351), secrets tools for agents (#353), tool answers that fit
+   clients' limits (#355), approvals remembered for a week or 30 days (#360), debugging reads as
+   tools (#362). An independent security review fixed six of them before landing; checked in a
+   real Chromium (`users-live/review-turn4.sh`).
+5. **Landed 2026-11-18, turn 3 (main e84194b6f, ci green):** a person's own data export (#283),
    hardware keys only (#286), one provider for people and agents (#287), an SSO connection's
    session length (#289) and back-channel logout (#292), allowed networks (#294), a second factor
    for everyone (#298) and who has one (#299), an idle timeout (#302), phishing-resistant sign-in
@@ -887,26 +929,20 @@ waits on a sibling PR reaching main is last.
    Kubernetes clusters (#310), and the audit log naming people by handle (#313). Gated as one tree,
    then landed one per round (`turn3-land.sh`: the queue drops stacked PRs that share anchors once
    a squash breaks their ancestry).
-3. **Landed 2026-11-18 (main 1a60b43be):** passkeys (#256), sudo mode (#257, #260), new-sign-in mail
+6. **Landed 2026-11-18 (main 1a60b43be):** passkeys (#256), sudo mode (#257, #260), new-sign-in mail
    (#258), second-factor resets (#263), refused codes in the security log (#254); for roll secrets,
    `revoke_many` and the public detectors (#267) and decoy tokens (#270).
-4. **Enterprise:** a provider made once in the dashboard for both people and agents (#252 picks
-   an existing connection today).
-5. **People's accounts, enterprise-grade:** on main since 2026-11-18: SSO (#225), SCIM
-   provisioning (#231), an audit trail of accounts in roll's audit log (#236) and a person's own
-   security log (#239). Next on it, ranked:
-   - **Checksummed `rlp_` SCIM tokens, revoked on a leak** (now; this PR): found by leak scanning
-     like roll's other secrets, stopped at once, the connection says where it was found.
-   - **One place for identity providers** (#252, open): an enterprise identity provider with `sso`
-     is people's SSO connection, vouching for the domains its DNS records proved (read at each
-     sign-in), instead of domains the operator typed. Left: a provider made once in the dashboard
-     for both (today the enterprise form picks an existing connection).
+7. **People's accounts, enterprise-grade:** on main: SSO (#225), SCIM provisioning (#231) with
+   checksummed `rlp_` tokens revoked on a leak (#250), accounts in roll's audit log (#236), a
+   person's own security log (#239), one place for identity providers (#252: an enterprise
+   provider with `sso` vouches for its SSO connection's proven domains), and one provider for
+   people and agents (#287: "Use for agents too" on an SSO connection). Left, both blocked:
    - SAML for providers without OIDC: its signature checks are s3-server's (`s3-proto`'s xmldsig,
      storage's STS); reuse means a shared crate, so the storage thread agrees first.
    - Provider groups to roles over SCIM: **blocked.** roll has no org or team membership for people
      yet (docs/accounts.md phase 2, "Orgs"), and its one role, admin, is never SCIM's to grant.
      Groups map to org membership once orgs exist.
-6. **Tools for sibling routes as they reach main** (each a row in tools.rs and the table above).
+8. **Tools for sibling routes as they reach main** (each a row in tools.rs and the table above).
    `secrets_list_github_apps` (secrets #73) is #253; secrets' other routes after batch 1 are admin,
    a credential, a person's review, or an existing tool's (`tool-gaps.py`, 2026-11-18). Waiting on
    open PRs: `secrets_totp` (secrets #194), apps #230 (`apps_restore_service`, deploy,
@@ -914,21 +950,21 @@ waits on a sibling PR reaching main is last.
    #219/#221/#222 (`rebuild_on_base`, firewall `challenge`, `build_closed`), apps #235 (`GET …/diff`,
    and `PATCH …/variables` `copy_from` on its own row with `copies_from`). Apps tells this thread
    as #230 and #235 land (their turn began 2026-11-18 03:00).
-7. **Gate flakes under load, for their owners:** code-sql's `writes_are_serializable_and_retried`
+9. **Gate flakes under load, for their owners:** code-sql's `writes_are_serializable_and_retried`
    and `killed_connections_never_lose_or_repeat_acknowledged_writes` (16 threads on one row exhaust
    the 40 conflict re-runs), and code-control's Linear e2e (30 s for the elicitation). A test-side
    deadline, not more retries in production, is the likely fix. (The 2026-11-18 turn's combined
    gate passed without them: #208, #209, #210, #225, #226, #231, #236 and #239 landed as one gated
    tree, main 53b939213.)
-8. **Enterprise sign-in (#210), what's left:** a live check with a real provider's ID-JAG (Okta's
+10. **Enterprise sign-in (#210), what's left:** a live check with a real provider's ID-JAG (Okta's
    Cross App Access sandbox needs an account: the review pack's decision 5). The draft names the
    tenant `tenant`; a provider whose assertions say it another way (Entra's own tokens use `tid`)
    gets a mapping once its ID-JAGs are checked, never a guess.
-9. **Lockdown by default where roll's own agents act on outside text:** roll code agents and
+11. **Lockdown by default where roll's own agents act on outside text:** roll code agents and
    automations that pick up issues and chat messages (the agents thread's call; no agents thread is
    running to tell), and chat messages that reach an agent marked `outside` (an install's
    non-members can't drive roll, so mostly members' text).
-10. **More MCP Apps views:** a rollback button on a deploy (calling `apps_rollback` through the
+12. **More MCP Apps views:** a rollback button on a deploy (calling `apps_rollback` through the
    host, so through the gate, as deploy), once a host that renders views is confirmed (the review
    pack's decision 4). A preview's screenshot against its baseline needs no view: hosts render
    `previews_screenshot`'s image (`diff=base`) themselves, and accepting a visual change stays a
@@ -936,30 +972,30 @@ waits on a sibling PR reaching main is last.
    (`examples/basic-host` v2.0.4: `users-live/host-shot.mjs`, with its one-line patch declaring
    the extension) and the stand-in; Claude.ai or ChatGPT need a public HTTPS rolld and the user's
    account.
-11. **Everyday routes with no tool:** rechecked on main 2026-11-18 (03:40, after secrets' batch 1
+13. **Everyday routes with no tool:** rechecked on main 2026-11-18 (03:40, after secrets' batch 1
    and search's and previews' turns): secrets' one gap is #253, search and previews have nothing new; what has no tool is a credential, a password, a key's
    material, a deployment key's health, a person's review, or admin by design (tasks, streams,
    storage, queues, postgres, Redis and NoSQL have theirs). Recheck each product after its thread
    lands routes (`tool-gaps.py origin/main <product> <branch>`).
-12. **More tools that wait:** `apps_wait_deploy` is in #108. Rechecked on main (05:50): Postgres
+14. **More tools that wait:** `apps_wait_deploy` is in #108. Rechecked on main (05:50): Postgres
    branch backups and restores answer once done (nothing to wait on); search's reindexes are
    Elasticsearch's own `_tasks` behind the operator's request route. Branch backups and search reindexes
    can use `until` once their routes answer a state to wait on (search's reindex is an
    Elasticsearch task today, with no roll route to watch). Recheck with `mcpc` (`~/.local/share/roll-mcp/live/mcpc-tasks.sh`), and with the
    TypeScript SDK's `client/ext/tasks` once it ships.
-13. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
+15. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
    rolld, and send each thread its conflicts and their resolutions (`sibling-auth.sh`: every
    route classified, per method, with #25; agreed conflicts resolved by `known-conflicts.py`), and
    compare each product's routes with its tools (an everyday route with no tool is a gap: apps'
    were found this way). #24 and #25 are on main, so `feature/mcp-on-landing` is retired:
    secrets' #64 lands on main directly.
-14. **The operator's steps:** only if a load balancer that terminates HTTP sits in front of rolld (not
+16. **The operator's steps:** only if a load balancer that terminates HTTP sits in front of rolld (not
    roll's own edge, which needs nothing), set `ROLL_TRUSTED_PROXIES` to its addresses; and register `rlt_`, `rlo_`, `rlf_`, `rlc_`, `rlk_`, `rlp_` and `rlb_` (`[a-z2-7]{40}` with a
    checksum) with GitHub's secret scanning partner program, so leaks on GitHub reach
    `/v1/access/leaks/github`.
-15. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
+17. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
    reach the daemon on the Docker bridge; run `pnpm test:pg` where they can (CI) before merging.
-16. **Step-up authorization (SEP-835), once clients do it:** a refused call could answer `403`
+18. **Step-up authorization (SEP-835), once clients do it:** a refused call could answer `403`
    `WWW-Authenticate: Bearer error="insufficient_scope", scope=…` so the client reopens roll's
    consent screen for the refused rule (as the refusal's widen link proposes it now). Not yet: today
    it would take the refusal's explanation and `access_request_access` away from the main clients,

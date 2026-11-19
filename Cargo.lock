@@ -277,6 +277,7 @@ dependencies = [
  "aho-corasick",
  "anyhow",
  "apps-build",
+ "argon2",
  "async-trait",
  "aws-config",
  "aws-sdk-cloudwatchlogs",
@@ -327,6 +328,7 @@ dependencies = [
  "tower",
  "tracing",
  "url",
+ "zeroize",
  "zip",
 ]
 
@@ -6993,6 +6995,7 @@ dependencies = [
  "roll-cluster",
  "roll-fetch",
  "roll-gateway",
+ "roll-keyshares",
  "roll-previews",
  "roll-secrets",
  "roll-workspace",
@@ -7109,6 +7112,17 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-tungstenite 0.30.0",
+]
+
+[[package]]
+name = "roll-keyshares"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "getrandom 0.4.3",
+ "sha2 0.10.9",
+ "thiserror",
+ "zeroize",
 ]
 
 [[package]]
