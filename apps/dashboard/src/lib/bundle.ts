@@ -88,6 +88,14 @@ export function tarBundle(files: BundleFile[]): Blob {
   return new Blob(parts as BlobPart[]);
 }
 
+/** A plain tar of `files` (paths relative, `/`-separated), as `…/files` takes it. */
+export function tarOf(files: BundleFile[]): Blob {
+  const parts: Uint8Array[] = [];
+  for (const f of files) parts.push(...entry(f.path, f.data, "0", executable(f.data) ? 0o755 : 0o644));
+  parts.push(new Uint8Array(1024));
+  return new Blob(parts as BlobPart[]);
+}
+
 /** gzip, with the browser's own `CompressionStream`. */
 export async function gzip(tar: Blob): Promise<Blob> {
   const stream = tar.stream().pipeThrough(new CompressionStream("gzip"));

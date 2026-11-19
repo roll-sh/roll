@@ -184,6 +184,8 @@ roll-oidc = { path = "crates/roll-oidc" }
 roll-mcp = { path = "crates/roll-mcp" }
 roll-net = { path = "crates/roll-net" }
 roll-secrets = { path = "crates/roll-secrets" }
+roll-secrets-chain = { path = "crates/roll-secrets-chain" }
+roll-keyshares = { path = "crates/roll-keyshares" }
 code-store = { path = "crates/code-store" }
 code-git = { path = "crates/code-git" }
 code-github = { path = "crates/code-github" }

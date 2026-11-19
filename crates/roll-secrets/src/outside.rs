@@ -291,7 +291,7 @@ impl Provider {
                 let now = self.db.now_ms()?;
                 self.db.write(|c| {
                     if c.execute("UPDATE outside_dbs SET url = ?, url_next = NULL WHERE id = ? AND url_next = ?", params![stored, id, sealed])? > 0 {
-                        audit::record(c, &project, &Caller::consumer("roll"), "outside_db.rotate_admin", None, None, &[], "finished an interrupted admin password rotation", now)?;
+                        audit::record(c, &self.keys, &project, &Caller::consumer("roll"), "outside_db.rotate_admin", None, None, &[], "finished an interrupted admin password rotation", now)?;
                     }
                     Ok::<_, Error>(())
                 })?;
@@ -428,7 +428,7 @@ impl Secrets {
                 params![id, project, d.name, d.host, sealed, d.ca, serde_json::to_string(&d.roles).expect("roles"), d.group, crate::turns::Turns::initial(), now, d.created_by, d.gateway],
             )?;
             let via = d.gateway.as_deref().map(|g| format!(" through {g}")).unwrap_or_default();
-            audit::record(c, project, caller, "outside_db.add", None, None, &[], &format!("added database {} ({}{via})", d.name, d.host), now)
+            audit::record(c, self.keys()?, project, caller, "outside_db.add", None, None, &[], &format!("added database {} ({}{via})", d.name, d.host), now)
         })?;
         Ok(d)
     }
@@ -502,7 +502,7 @@ impl Secrets {
                 changed.push("admin URL");
             }
             if !changed.is_empty() {
-                audit::record(c, project, caller, "outside_db.update", None, None, &[], &format!("changed database {}'s {}", d.name, changed.join(", ")), now)?;
+                audit::record(c, self.keys()?, project, caller, "outside_db.update", None, None, &[], &format!("changed database {}'s {}", d.name, changed.join(", ")), now)?;
             }
             Ok(())
         })?;
@@ -536,7 +536,7 @@ impl Secrets {
                 if c.execute("UPDATE outside_dbs SET url = ?, url_next = NULL, url_next_at = NULL WHERE id = ? AND url_next = ?", params![sealed, id, sealed_next])? == 0 {
                     return Ok(false);
                 }
-                audit::record(c, project, caller, "outside_db.rotate_admin", None, None, &[], &format!("{what} database {}'s admin password", d.name), now)?;
+                audit::record(c, self.keys()?, project, caller, "outside_db.rotate_admin", None, None, &[], &format!("{what} database {}'s admin password", d.name), now)?;
                 Ok(true)
             })
         };
@@ -623,7 +623,7 @@ impl Secrets {
                 return Err(Error::Conflict("in_use", format!("{name} has {waiting} login(s) still to retire (a grace period, or a dynamic lease): delete it once they're done")));
             }
             c.execute("DELETE FROM outside_dbs WHERE id = ?", [id])?;
-            audit::record(c, project, caller, "outside_db.delete", None, None, &[], &format!("deleted database {name}"), now)
+            audit::record(c, self.keys()?, project, caller, "outside_db.delete", None, None, &[], &format!("deleted database {name}"), now)
         })
     }
 
