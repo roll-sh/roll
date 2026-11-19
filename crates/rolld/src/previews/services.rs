@@ -702,7 +702,7 @@ impl roll_previews::ports::Apps for Services {
         Ok(group_errors(&lines))
     }
 
-    async fn follow(&self, preview: &str, service: &str, lines: usize) -> Option<tokio::sync::mpsc::Receiver<String>> {
+    async fn follow(&self, preview: &str, service: &str, lines: usize) -> Option<tokio::sync::mpsc::Receiver<(bool, String)>> {
         if matches!(self.apps.find(preview, service).await, Ok(Some(_))) { None } else { self.runtime.follow(preview, service, lines).await }
     }
 

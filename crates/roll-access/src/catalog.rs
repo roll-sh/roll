@@ -141,6 +141,12 @@ fn search_parent(b: &Value) -> Vec<Lent> {
     b.get("parent").and_then(Value::as_str).map(|p| Lent { kind: "search".into(), r#ref: p.into(), action: Action::Write }).into_iter().collect()
 }
 
+/// A search cluster linked as another's remote (`cluster`): roll issues a cross-cluster API key
+/// of it, so the link needs `admin` on it too, as making its keys does.
+fn search_remote(b: &Value) -> Vec<Lent> {
+    b.get("cluster").and_then(Value::as_str).map(|p| Lent { kind: "search".into(), r#ref: p.into(), action: Action::Admin }).into_iter().collect()
+}
+
 /// What an apps link's kind is, as a rule names it: its product and the resource kind its ids are.
 pub fn link_target(kind: &str) -> Option<(&'static str, &'static str)> {
     Some(match kind {
@@ -1136,6 +1142,13 @@ static ROWS: &[Row] = &[
     // An API key: its secret is in the answer.
     row("POST", "/v1/search/clusters/{id}/keys", "search", REVEAL, one(PG, "cluster")),
     row("DELETE", "/v1/search/clusters/{id}/keys/{key}", "search", ADMIN, one(PG, "cluster")),
+    row("GET", "/v1/search/clusters/{id}/remotes", "search", R, one(PG, "cluster")),
+    row("PUT", "/v1/search/clusters/{id}/remotes/{alias}", "search", ADMIN, one(PG, "cluster")).lends(Lend::Each(search_remote)),
+    row("DELETE", "/v1/search/clusters/{id}/remotes/{alias}", "search", ADMIN, one(PG, "cluster")),
+    // Inference endpoints keyed by a project's secret: making one changes the cluster as the
+    // console does; roll secrets checks `reveal` on the secret itself, as the caller.
+    row("GET", "/v1/search/clusters/{id}/inference/secrets", "search", R, one(PG, "cluster")),
+    row("POST", "/v1/search/clusters/{id}/inference/secrets", "search", ADMIN, one(PG, "cluster")),
     // Request metrics and the slow logs (queries' and documents' sources, cut): reads of the
     // cluster's data.
     row("GET", "/v1/search/clusters/{id}/metrics", "search", R, one(PG, "cluster")),
