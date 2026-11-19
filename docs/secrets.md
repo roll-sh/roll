@@ -3689,7 +3689,8 @@ cache waited out. Ranked now:
      keeps 127.0.0.1:7070 after `roll login`; the first `roll run` waits silently on an `ask` approval
      it can't handle; the quick start has no install or login; the dashboard's commands dead-end.
      Then a committed `[secrets]` in `roll.toml` and an interactive `setup` (Doppler's `doppler.yaml`),
-     designed (2026-11-19) so a repo suggests and the person approves, as direnv's `allow`:
+     designed (2026-11-19) so a repo suggests and the person approves, as direnv's `allow` (building:
+     `feature/roll-secrets-repo-setup`):
      - `roll.toml` may hold `[secrets] project = "shop"`, `environment = "development"`, `path`, and
        `branches = { "release/*" = "staging" }`; never an API URL, a token or a value (the #58 lesson:
        a repository never chooses where a token goes).
