@@ -2130,20 +2130,19 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **The comparison with main checked live end to end, in review**
-   (`feature/roll-previews-live-against`): `scripts/preview-cost.sh` posts traces to main's
-   preview and the change's (both running) and writes an error only the change's has, then waits
-   for the record's `slower_routes` (with `grew`) and `new_errors`, and the change's summary;
-   `ROLL_PREVIEWS_COMPARE_EVERY` sets the holder's rounds to a test's pace.
-2. **References a person chooses** (after roll secrets' #407, `bind_ref`/`resolve_as`): a
+1. **References a person chooses** (after roll secrets' #407, `bind_ref`/`resolve_as`): a
    preview's own variables take `roll://` too, and the rules' references (who wrote each is kept,
    `env_refs`) move to bindings, so a writer who loses reveal stops theirs.
-3. **The verdict strip and the comment shot with main's preview**: the turn-10 review pack had
-   no main's preview at that point of the script; take the strip ("N new errors", "N routes
-   slower") and the change page on the env item 1 leaves.
-4. **In review**: where a slower route's time went (#459), new errors that see past each
-   preview's own names (#460), keeping a pasted credential in roll secrets from the rules dialog
-   (#461).
+2. **A trace's ids masked like its words**: a span's name, service and attributes are masked,
+   but its trace and span ids are the code's choice too (a fork could send a hex secret as one);
+   refuse ids that aren't 32/16 hex characters at the intake, and mask the rest as the words are.
+3. **A preview of a repo with only a Compose file**: say in the sheet and the docs that roll apps'
+   Compose import (`roll apps import-compose`, New service's "A file") makes its services, whose
+   previews then come with the project's (roll apps' `pv-` environments), rather than a second
+   Compose reader in previews.
+4. **In review**: where a slower route's time went (#459), the comparison with main checked live
+   end to end with the strip shot on it (#464), new errors that see past each preview's own names
+   (#460), keeping a pasted credential in roll secrets from the rules dialog (#461).
 5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
 6. **Watch: pg-control's recovery to a time seconds old** (unowned).
