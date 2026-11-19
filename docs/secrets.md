@@ -3597,7 +3597,8 @@ followed key, renamed or not, gets its branch's value or a blank: the hole the t
 found is closed, checked live), #68 (AWS through roll's issuer; roles and users edited in
 place, 2026-11-17 as 3f829ca42) and #198 (plain link fields, 2026-11-17 as bc805ae41: roll apps
 hides every value from roll secrets in its logs unless it's plain connection detail).
-On main since 2026-11-18: #69–#73, #75–#77 and #147 (batch 1); #79, #81–#83, #87, #88, #92, #95,
+On main since 2026-11-18: #69–#73, #75–#77 and #147 (batch 1); #132, #136, #144, #165, #166, #173 and
+roll redis's #375 (batch 3, 2026-11-19); #79, #81–#83, #87, #88, #92, #95,
 #97, #102, #105, #110, #113, #117, #121, #124, #128, #145, #169, #194, #212, #213, #227, #229 (batch 2).
 In pull requests to main, each green: #79 with #95,
 #81 (read quotas across the fleet), #82 (metrics), #83 (scheduled backups), #86 (rotation
@@ -3634,7 +3635,9 @@ cache waited out. Ranked now:
    after the last the exact tree re-gated on the day's main (3feff202b). Batch 3 is ready (2026-11-18
    evening): #132; #136 + #165; #173; #166; #144 in five queue rounds, levelled, each gated, the
    combined tree gated on main c59fca59c with the live outside-databases check (`batch-3.txt`,
-   `batch3-round.sh`); in the order after apps and mcp, waiter `rs132-lock`. Then batch 4: today's
+   `batch3-round.sh`). **Batch 3 landed** (2026-11-19 02:56–04:07, one lock turn): #132; #136 + #165;
+   #173; #166; #144 (main cd65c5fcb = the gated tree plus #375), with roll redis's auth-bypass fix #375
+   ahead of it in the same turn. Then batch 4: today's
    PRs (#248 #262 #264 #274 #276 #277 #279 #281 #284 #290 #303 #304 #329 #330, the issuer work) and
    #86 (`batch-4-notes.txt`).
 3. **R2, cut off everything that reaches a folder** (#304): tokens through roll-access's bulk revoke,
