@@ -525,8 +525,14 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
     }
     let raw_need = need;
     let need = scan_need(s, need, ctx);
-    // (What the nodes above read, when the scan decodes a mask: before its filter's columns.)
-    let above: Option<Rc<[bool]>> = need.as_ref().and(raw_need).map(|n| Rc::from(&n[..n.len().min(s.table.columns.len())]));
+    // (What the nodes above read, when the scan decodes a mask: before its filter's columns. Only
+    // a filtered sequential scan's rows leave columns out, `Decode::late`: an index scan, a point
+    // read's, makes no copy.)
+    let above: Option<Rc<[bool]>> = (s.filter.is_some() && s.index.is_none())
+        .then_some(())
+        .and(need.as_ref())
+        .and(raw_need)
+        .map(|n| Rc::from(&n[..n.len().min(s.table.columns.len())]));
     let epq = ctx.epq.borrow().clone();
     if let Some(test) = epq.as_ref().and_then(|m| m.get(&(s as *const ScanPlan as usize))) {
         return epq_scan(s, test.as_ref(), ctx);
