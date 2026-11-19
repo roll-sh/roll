@@ -2,6 +2,9 @@
 
 use super::*;
 
+/// How often a project's own preview domain is read from roll apps (ms).
+const DOMAIN_EVERY: i64 = 60_000;
+
 impl Engine {
     /// The previews a project should have, from its repos' open changes and its rules.
     /// Once a month per level: tell the project's repos its previews passed 80% (then 100%) of
@@ -37,6 +40,32 @@ impl Engine {
         }
     }
 
+    /// The project's own preview domain, read from roll apps at most once a [`DOMAIN_EVERY`]:
+    /// when it's verified, changed or gone, its runtime services' URLs move and every preview of
+    /// the project reports again (the pull request's links).
+    async fn follow_domain(&self, project_id: &str) -> anyhow::Result<()> {
+        let now = self.store.now_ms()?;
+        if self.domain_read.lock().get(project_id).is_some_and(|at| now - at < DOMAIN_EVERY) {
+            return Ok(());
+        }
+        self.domain_read.lock().insert(project_id.to_string(), now);
+        let new = self.apps.preview_domain(project_id).await;
+        let old = self.store.project_domain(project_id)?;
+        let moved = self.store.set_project_domain(project_id, new.as_ref().map(|(b, h)| (b.as_str(), *h)), &|h| self.cfg.url_in(new.as_ref(), h), &|h| self.cfg.url_in(old.as_ref(), h))?;
+        if moved {
+            let said = match &new {
+                Some((base, _)) => format!("its previews answer on *.{base} (the project's own preview domain)"),
+                None => "its previews answer on roll's preview domain again".to_string(),
+            };
+            info!(project = %project_id, "previews: {said}");
+            for r in self.store.rows(Some(project_id))?.into_iter().filter(|r| r.desired == Desired::Active) {
+                self.store.log(&r.id, &said)?;
+                self.store.update(&r.id, |row| row.next_at = 0)?;
+            }
+        }
+        Ok(())
+    }
+
     pub(super) async fn discover(&self, project_id: &str, s: &Settings) -> anyhow::Result<()> {
         let project = match self.workspace.get(roll_workspace::Scope::All, project_id) {
             Ok(p) => p,
@@ -50,6 +79,7 @@ impl Engine {
             }
             Err(e) => return Err(e.into()),
         };
+        self.follow_domain(project_id).await?;
         // Only repos the project stands for (`Workspace::trusts`): anyone may put any repo on their
         // own canvas, and a preview runs a change's code with the project's secrets.
         let repos: Vec<String> = project.resources.iter().filter(|r| r.kind == roll_workspace::Kind::Repo && self.workspace.trusts(&project, r.kind, &r.r#ref)).map(|r| r.r#ref.clone()).collect();
@@ -75,6 +105,9 @@ impl Engine {
                 continue;
             }
             if existing.iter().any(|r| r.change_id.as_deref() == Some(&c.id)) || self.store.dismissed(&c.id, &c.head)? {
+                continue;
+            }
+            if has_own_preview(&existing, c) {
                 continue;
             }
             let key = match c.github_pr {
@@ -106,6 +139,7 @@ impl Engine {
         // What changed for the previews this project has.
         let rows = self.store.rows(Some(project_id))?;
         let has_changes = rows.iter().any(|x| x.change_id.is_some() && x.desired == Desired::Active);
+        let branch_previews: Vec<Row> = rows.iter().filter(|x| x.change_id.is_none()).cloned().collect();
         for r in rows {
             if r.desired == Desired::Deleted {
                 continue;
@@ -131,6 +165,12 @@ impl Engine {
             let held = r.is_baseline() && has_changes;
             let ttl_ms = s.ttl_hours as i64 * 3_600_000;
             if let Some(change) = &r.change_id {
+                // Made in the moment between `roll preview up`'s push (roll code nudges this on
+                // one) and its branch's preview: that one stands for it.
+                if r.created_by == "roll" && open.get(change).is_some_and(|c| has_own_preview(&branch_previews, c)) {
+                    self.mark_deleted(&r.id, "its branch has a preview of its own")?;
+                    continue;
+                }
                 // One made by hand (`roll preview create --change`) isn't the rules' to delete.
                 let wanted = match open.get(change) {
                     Some(c) => r.created_by != "roll" || self.wanted(s, c).await,
@@ -396,4 +436,13 @@ impl Engine {
         Ok(r)
     }
 
+}
+
+/// Whether `c`'s branch has a preview of its own among `rows` (`roll preview up`'s, or one made by
+/// hand): then that one stands for the change, which gets no second.
+fn has_own_preview(rows: &[Row], c: &ChangeInfo) -> bool {
+    // Only `roll preview up`'s branches (`preview/<who>/<name>`): a preview made by hand of a pull
+    // request's own branch never takes that pull request's preview (and its reports) away.
+    c.branch.as_deref().is_some_and(|b| b.starts_with("preview/"))
+        && rows.iter().any(|r| r.change_id.is_none() && r.desired == Desired::Active && r.repo == c.repo && r.branch.is_some() && r.branch == c.branch)
 }

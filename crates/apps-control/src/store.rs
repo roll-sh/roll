@@ -267,6 +267,24 @@ CREATE TABLE IF NOT EXISTS domains (
     created_at INTEGER NOT NULL
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS domains_env ON domains (service, env);
+-- A project's own preview domain (`*.preview.acme.dev`, roll previews' preview deployment
+-- suffix), and the label each preview environment answers to under it.
+CREATE TABLE IF NOT EXISTS preview_domains (
+    project TEXT PRIMARY KEY,
+    hostname TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL,
+    token TEXT NOT NULL,
+    error TEXT,
+    created_at INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS preview_hosts (
+    service TEXT NOT NULL,
+    env TEXT NOT NULL,
+    project TEXT NOT NULL,
+    label TEXT NOT NULL,
+    PRIMARY KEY (service, env),
+    UNIQUE (project, label)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS runs (
     id TEXT PRIMARY KEY,
     service TEXT NOT NULL,
@@ -550,6 +568,9 @@ pub struct Store {
     sealer: Sealer,
 }
 
+/// A project's preview domain: `(hostname, status, token, error, created_at)`.
+pub type PreviewDomainRow = (String, DomainStatus, String, Option<String>, i64);
+
 const SERVICE_COLS: &str = "id, project, name, source, build, run, created_at";
 /// An environment's (or any row with a `service` column's) service isn't deleted.
 const NOT_DELETED: &str = "service NOT IN (SELECT id FROM services WHERE deleted_at IS NOT NULL)";
@@ -648,7 +669,7 @@ fn drain_of(id: String, project: String, host: String, created_at: i64, sources:
     let list = |j: Option<String>| -> Vec<String> { j.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default() };
     // A drain made before sources were chosen sends its runtime output.
     let sources = sources.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_else(|| vec!["runtime".to_string()]);
-    LogDrain { id, project, host, created_at, sources, environments: list(environments), services: list(services), previews, headers: list(names) }
+    LogDrain { id, project, host, created_at, sources, environments: list(environments), services: list(services), previews, headers: list(names), format: "ndjson".into() }
 }
 
 fn spend_row(r: &code_sql::Row<'_>) -> code_sql::Result<crate::spend::Limits> {
@@ -698,7 +719,7 @@ fn deploy_row(r: &code_sql::Row<'_>) -> code_sql::Result<Deployment> {
     })
 }
 
-const DOMAIN_COLS: &str = "hostname, service, env, kind, status, token, error, created_at, tls, tls_error, redirect_to";
+const DOMAIN_COLS: &str = "hostname, service, env, kind, status, token, error, created_at, tls, tls_error, redirect_to, port";
 
 fn domain_row(r: &code_sql::Row<'_>) -> code_sql::Result<(String, String, Domain)> {
     let kind: String = r.get(3)?;
@@ -717,6 +738,7 @@ fn domain_row(r: &code_sql::Row<'_>) -> code_sql::Result<(String, String, Domain
             tls: TlsStatus::parse(&r.get::<_, String>(8)?),
             tls_error: r.get(9)?,
             redirect_to: r.get(10)?,
+            port: r.get::<_, Option<i64>>(11)?.and_then(|p| u16::try_from(p).ok()),
         },
     ))
 }
@@ -776,6 +798,11 @@ impl Store {
         db.add_column("environments", "egress", "TEXT")?;
         db.add_column("environments", "vitals", "INTEGER NOT NULL DEFAULT 0")?;
         db.add_column("environments", "report", "INTEGER NOT NULL DEFAULT 1")?;
+        // A custom domain sent to another of the app's ports.
+        db.add_column("domains", "port", "INTEGER")?;
+        // The roll login (`ses_…`) a ticket and a visit session came from: its end ends them.
+        db.add_column("visit_tickets", "login", "TEXT")?;
+        db.add_column("visit_sessions", "login", "TEXT")?;
         db.add_column("environments", "routes", "TEXT")?;
         // Drains made before their filters sent every environment's runtime output: still so.
         db.add_column("log_drains", "sources", "TEXT")?;
@@ -785,6 +812,8 @@ impl Store {
         db.add_column("log_drains", "headers_sealed", "TEXT")?;
         // The headers' names, unsealed: a drain lists without opening anything.
         db.add_column("log_drains", "header_names", "TEXT")?;
+        // NULL: NDJSON, as every drain was before formats.
+        db.add_column("log_drains", "format", "TEXT")?;
         db.add_column("domains", "redirect_to", "TEXT")?;
         Ok(Store { db, sealer })
     }
@@ -886,7 +915,7 @@ impl Store {
             )?;
             c.execute("DELETE FROM deploy_steps WHERE deployment IN (SELECT id FROM deployments WHERE service = ?)", [id])?;
             c.execute("DELETE FROM state WHERE key LIKE ?", [format!("%:{id}/%")])?;
-            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "runs", "jobs", "metrics", "usage"] {
+            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "preview_hosts", "runs", "jobs", "metrics", "usage"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ?"), [id])?;
             }
             match c.execute("DELETE FROM services WHERE id = ?", [id])? {
@@ -1002,7 +1031,7 @@ impl Store {
             if n == 0 {
                 return Err(Error::NotFound(format!("service {service} has no environment {env}")));
             }
-            for t in ["variables", "variable_files", "error_groups", "domains", "runs", "jobs", "metrics", "deploy_keys", "env_access", "trace_ingest", "visit_tickets", "visit_sessions"] {
+            for t in ["variables", "variable_files", "error_groups", "domains", "preview_hosts", "runs", "jobs", "metrics", "deploy_keys", "env_access", "trace_ingest", "visit_tickets", "visit_sessions"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ? AND env = ?"), [service, env])?;
             }
             // Its schedules', challenge's and base images' state goes with it.
@@ -1723,6 +1752,105 @@ impl Store {
 
     /// The service and environment a hostname is a custom domain of.
     /// A custom domain's redirect (`None`: it serves the environment).
+    /// A project's preview domain.
+    pub fn preview_domain(&self, project: &str) -> Result<Option<PreviewDomainRow>> {
+        Ok(self
+            .db
+            .query_row("SELECT hostname, status, token, error, created_at FROM preview_domains WHERE project = ?", [project], |r| {
+                Ok((r.get(0)?, DomainStatus::parse(&r.get::<_, String>(1)?), r.get(2)?, r.get(3)?, r.get(4)?))
+            })
+            .optional()?)
+    }
+
+    /// Give `project` its preview domain (pending until verified), replacing one it had; a
+    /// hostname another project's previews or any service's domain has is refused.
+    pub fn set_preview_domain(&self, project: &str, host: &str) -> Result<()> {
+        let (now, token) = (self.now()?, random(24));
+        self.db.write(|c| {
+            let other: Option<String> = c.query_row("SELECT project FROM preview_domains WHERE hostname = ?", [host], |r| r.get(0)).optional()?;
+            if other.is_some_and(|p| p != project) || c.query_row("SELECT 1 FROM domains WHERE hostname = ?", [host], |_| Ok(())).optional()?.is_some() {
+                return Err(Error::Conflict(format!("{host} is already a domain of roll apps")));
+            }
+            c.execute(
+                "INSERT INTO preview_domains (project, hostname, status, token, error, created_at) VALUES (?, ?, 'pending', ?, NULL, ?) \
+                 ON CONFLICT (project) DO UPDATE SET hostname = excluded.hostname, status = 'pending', token = excluded.token, error = NULL, created_at = excluded.created_at",
+                params![project, host, token, now],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Whether `wildcard` is a project's active preview domain.
+    pub fn preview_domain_active(&self, wildcard: &str) -> Result<bool> {
+        Ok(self.db.query_row("SELECT 1 FROM preview_domains WHERE hostname = ? AND status = 'active'", [wildcard], |_| Ok(())).optional()?.is_some())
+    }
+
+    pub fn set_preview_domain_status(&self, project: &str, status: DomainStatus, error: Option<&str>) -> Result<()> {
+        self.db.execute("UPDATE preview_domains SET status = ?, error = ? WHERE project = ?", params![status.as_str(), error, project])?;
+        Ok(())
+    }
+
+    /// Remove the project's preview domain (the labels stay its environments', for another).
+    pub fn delete_preview_domain(&self, project: &str) -> Result<bool> {
+        Ok(self.db.execute("DELETE FROM preview_domains WHERE project = ?", [project])? > 0)
+    }
+
+    /// The service and environment `label` names under `wildcard` (`*.preview.acme.dev`), when
+    /// that's a project's active preview domain and a live service's environment has the label.
+    pub fn preview_target(&self, wildcard: &str, label: &str) -> Result<Option<(String, String)>> {
+        Ok(self
+            .db
+            .query_row(
+                &format!(
+                    "SELECT h.service, h.env FROM preview_domains d JOIN preview_hosts h ON h.project = d.project \
+                     WHERE d.hostname = ? AND d.status = 'active' AND h.label = ? AND h.{NOT_DELETED}"
+                ),
+                [wildcard, label],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?)
+    }
+
+    /// The label an environment answers to under its project's preview domain.
+    pub fn preview_host(&self, service: &str, env: &str) -> Result<Option<String>> {
+        Ok(self.db.query_row("SELECT label FROM preview_hosts WHERE service = ? AND env = ?", [service, env], |r| r.get(0)).optional()?)
+    }
+
+    /// Set (or with `None` clear) the environment's label; one another environment of the
+    /// project has is refused.
+    pub fn set_preview_host(&self, service: &str, env: &str, project: &str, label: Option<&str>) -> Result<()> {
+        self.db.write(|c| {
+            match label {
+                None => {
+                    c.execute("DELETE FROM preview_hosts WHERE service = ? AND env = ?", [service, env])?;
+                }
+                Some(l) => {
+                    let other: Option<(String, String)> = c.query_row("SELECT service, env FROM preview_hosts WHERE project = ? AND label = ?", [project, l], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+                    if other.is_some_and(|(s2, e2)| s2 != service || e2 != env) {
+                        return Err(Error::Conflict(format!("another environment of the project answers to {l}")));
+                    }
+                    c.execute(
+                        "INSERT INTO preview_hosts (service, env, project, label) VALUES (?, ?, ?, ?) ON CONFLICT (service, env) DO UPDATE SET project = excluded.project, label = excluded.label",
+                        params![service, env, project, l],
+                    )?;
+                }
+            }
+            Ok(())
+        })
+    }
+
+    pub fn set_domain_port(&self, host: &str, port: Option<u16>) -> Result<()> {
+        self.db.execute("UPDATE domains SET port = ? WHERE hostname = ?", params![port.map(i64::from), host])?;
+        Ok(())
+    }
+
+    /// The other ports `service`'s environment `env` serves on (its domains' own), sorted.
+    pub fn domain_ports(&self, service: &str, env: &str) -> Result<Vec<u16>> {
+        let mut v: Vec<u16> = self.db.query("SELECT DISTINCT port FROM domains WHERE service = ? AND env = ? AND port IS NOT NULL", [service, env], |r| r.get::<_, i64>(0))?.into_iter().filter_map(|p| u16::try_from(p).ok()).collect();
+        v.sort_unstable();
+        Ok(v)
+    }
+
     pub fn set_redirect(&self, host: &str, to: Option<&str>) -> Result<()> {
         self.db.execute("UPDATE domains SET redirect_to = ? WHERE hostname = ?", params![to, host])?;
         Ok(())
@@ -1779,7 +1907,7 @@ impl Store {
             )?;
             Ok(())
         })?;
-        Ok(Domain { hostname: host.into(), record: "none", kind: DomainKind::Custom, status: DomainStatus::Pending, target: String::new(), token, error: None, tls, tls_error: None, created_at: now, redirect_to: None })
+        Ok(Domain { hostname: host.into(), record: "none", kind: DomainKind::Custom, status: DomainStatus::Pending, target: String::new(), token, error: None, tls, tls_error: None, created_at: now, redirect_to: None, port: None })
     }
 
     /// A domain's DNS state; the first time it's `active` is kept (the claim no longer expires).
@@ -2107,32 +2235,37 @@ impl Store {
 
     // ── signed-in visitors ──
 
-    pub fn put_visit_ticket(&self, hash: &str, service: &str, env: &str, user: &str, expires_at: i64) -> Result<()> {
-        self.db.execute("INSERT INTO visit_tickets (hash, service, env, user_id, expires_at) VALUES (?, ?, ?, ?, ?)", params![hash, service, env, user, expires_at])?;
+    /// A ticket for `user`, asked for by their roll login `login` (`ses_…`).
+    pub fn put_visit_ticket(&self, hash: &str, service: &str, env: &str, user: &str, login: &str, expires_at: i64) -> Result<()> {
+        self.db.execute("INSERT INTO visit_tickets (hash, service, env, user_id, login, expires_at) VALUES (?, ?, ?, ?, ?, ?)", params![hash, service, env, user, login, expires_at])?;
         Ok(())
     }
 
-    /// A ticket used: its person, if it was this environment's and still good. It goes either way.
-    pub fn take_visit_ticket(&self, hash: &str, service: &str, env: &str, now: i64) -> Result<Option<String>> {
+    /// A ticket used: its person and their roll login, if it was this environment's and still
+    /// good. It goes either way.
+    pub fn take_visit_ticket(&self, hash: &str, service: &str, env: &str, now: i64) -> Result<Option<(String, String)>> {
         let h = hash.to_string();
         let (s, e) = (service.to_string(), env.to_string());
         self.db.write(move |c| {
-            let row: Option<(String, String, String, i64)> = c.query_row("SELECT service, env, user_id, expires_at FROM visit_tickets WHERE hash = ?", [&h], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).optional()?;
+            let row: Option<(String, String, String, Option<String>, i64)> =
+                c.query_row("SELECT service, env, user_id, login, expires_at FROM visit_tickets WHERE hash = ?", [&h], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))).optional()?;
             c.execute("DELETE FROM visit_tickets WHERE hash = ? OR expires_at < ?", params![h, now])?;
-            Ok(row.filter(|(rs, re, _, exp)| *rs == s && *re == e && *exp >= now).map(|(_, _, u, _)| u))
+            // One made before logins were kept has none: it opens nothing.
+            Ok(row.filter(|(rs, re, _, l, exp)| *rs == s && *re == e && *exp >= now && l.is_some()).map(|(_, _, u, l, _)| (u, l.unwrap_or_default())))
         })
     }
 
-    pub fn put_visit_session(&self, hash: &str, service: &str, env: &str, user: &str, expires_at: i64) -> Result<()> {
-        self.db.execute("INSERT INTO visit_sessions (hash, service, env, user_id, expires_at) VALUES (?, ?, ?, ?, ?)", params![hash, service, env, user, expires_at])?;
+    pub fn put_visit_session(&self, hash: &str, service: &str, env: &str, user: &str, login: &str, expires_at: i64) -> Result<()> {
+        self.db.execute("INSERT INTO visit_sessions (hash, service, env, user_id, login, expires_at) VALUES (?, ?, ?, ?, ?, ?)", params![hash, service, env, user, login, expires_at])?;
         Ok(())
     }
 
-    /// A visitor's session there: its person and when it ends.
-    pub fn visit_session(&self, hash: &str, service: &str, env: &str) -> Result<Option<(String, i64)>> {
+    /// A visitor's session there: its person, when it ends, and the roll login it came from
+    /// (none for one opened before logins were kept: such a session is ended).
+    pub fn visit_session(&self, hash: &str, service: &str, env: &str) -> Result<Option<(String, i64, Option<String>)>> {
         Ok(self
             .db
-            .query_row("SELECT user_id, expires_at FROM visit_sessions WHERE hash = ? AND service = ? AND env = ?", params![hash, service, env], |r| Ok((r.get(0)?, r.get(1)?)))
+            .query_row("SELECT user_id, expires_at, login FROM visit_sessions WHERE hash = ? AND service = ? AND env = ?", params![hash, service, env], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
             .optional()?)
     }
 
@@ -2525,15 +2658,15 @@ impl Store {
 
     // ── log drains ──
 
-    pub fn add_drain(&self, project: &str, host: &str, url: &str, secret: &str, d: &DrainSettings) -> Result<LogDrain> {
+    pub fn add_drain(&self, project: &str, host: &str, url: &str, secret: &str, format: &str, d: &DrainSettings) -> Result<LogDrain> {
         let id = new_id("lgd");
         let now = self.now()?;
         let (u, s) = (self.sealer.seal(&format!("drain:{id}:url"), url), self.sealer.seal(&format!("drain:{id}:secret"), secret));
         let h = self.seal_drain_headers(&id, &d.headers);
         let names = to_json(&d.headers.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>());
         self.db.execute(
-            "INSERT INTO log_drains (id, project, host, url_sealed, secret_sealed, created_at, sources, environments, services, previews, headers_sealed, header_names) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            params![id, project, host, u, s, now, to_json(&d.sources), to_json(&d.environments), to_json(&d.services), d.previews, h, names],
+            "INSERT INTO log_drains (id, project, host, url_sealed, secret_sealed, created_at, sources, environments, services, previews, headers_sealed, header_names, format) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            params![id, project, host, u, s, now, to_json(&d.sources), to_json(&d.environments), to_json(&d.services), d.previews, h, names, format],
         )?;
         Ok(self.drains(project)?.into_iter().find(|x| x.id == id).expect("just made"))
     }
@@ -2565,13 +2698,16 @@ impl Store {
 
     /// A project's drains, nothing opened (their URLs, secrets and headers stay sealed).
     pub fn drains(&self, project: &str) -> Result<Vec<LogDrain>> {
-        type Row = (String, String, String, i64, Option<String>, Option<String>, Option<String>, bool, Option<String>);
+        type Row = (String, String, String, i64, Option<String>, Option<String>, Option<String>, bool, Option<String>, Option<String>);
         let rows: Vec<Row> = self.db.query(
-            "SELECT id, project, host, created_at, sources, environments, services, previews, header_names FROM log_drains WHERE project = ? ORDER BY created_at",
+            "SELECT id, project, host, created_at, sources, environments, services, previews, header_names, format FROM log_drains WHERE project = ? ORDER BY created_at",
             [project],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get::<_, i64>(7)? != 0, r.get(8)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get::<_, i64>(7)? != 0, r.get(8)?, r.get(9)?)),
         )?;
-        Ok(rows.into_iter().map(|(id, project, host, created_at, sources, environments, services, previews, names)| drain_of(id, project, host, created_at, sources, environments, services, previews, names)).collect())
+        Ok(rows
+            .into_iter()
+            .map(|(id, project, host, created_at, sources, environments, services, previews, names, format)| LogDrain { format: format.unwrap_or_else(|| "ndjson".into()), ..drain_of(id, project, host, created_at, sources, environments, services, previews, names) })
+            .collect())
     }
 
     /// Whether any drain asks for request lines and for build lines (the log tap's gate).
@@ -2587,15 +2723,15 @@ impl Store {
     pub fn drain_secrets(&self, project: &str) -> Result<Vec<OpenedDrain>> {
         // A drain's URL, secret and headers, opened.
         type Opened = (String, String, Vec<(String, String)>);
-        type Row = (String, String, String, i64, String, String, Option<String>, Option<String>, Option<String>, bool, Option<String>, Option<String>);
+        type Row = (String, String, String, i64, String, String, Option<String>, Option<String>, Option<String>, bool, Option<String>, Option<String>, Option<String>);
         let rows: Vec<Row> = self.db.query(
-            "SELECT id, project, host, created_at, url_sealed, secret_sealed, sources, environments, services, previews, headers_sealed, header_names FROM log_drains WHERE project = ? ORDER BY created_at",
+            "SELECT id, project, host, created_at, url_sealed, secret_sealed, sources, environments, services, previews, headers_sealed, header_names, format FROM log_drains WHERE project = ? ORDER BY created_at",
             [project],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get::<_, i64>(9)? != 0, r.get(10)?, r.get(11)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get::<_, i64>(9)? != 0, r.get(10)?, r.get(11)?, r.get(12)?)),
         )?;
         Ok(rows
             .into_iter()
-            .filter_map(|(id, project, host, created_at, u, s, sources, environments, services, previews, h, names)| {
+            .filter_map(|(id, project, host, created_at, u, s, sources, environments, services, previews, h, names, format)| {
                 let opened = (|| -> Result<Opened> {
                     let url = self.sealer.open(&format!("drain:{id}:url"), &u)?;
                     let secret = self.sealer.open(&format!("drain:{id}:secret"), &s)?;
@@ -2608,7 +2744,7 @@ impl Store {
                 match opened {
                     Ok((url, secret, headers)) => {
                         let names = names.or_else(|| Some(to_json(&headers.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>())));
-                        let drain = drain_of(id, project, host, created_at, sources, environments, services, previews, names);
+                        let drain = LogDrain { format: format.unwrap_or_else(|| "ndjson".into()), ..drain_of(id, project, host, created_at, sources, environments, services, previews, names) };
                         Some(OpenedDrain { drain, url, secret, headers })
                     }
                     Err(e) => {

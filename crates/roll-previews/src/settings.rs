@@ -26,6 +26,10 @@ pub struct Settings {
     /// … that none of these match (empty: none ignored). A change's paths are everything since
     /// its merge base with the default branch.
     pub ignore_paths: Vec<String>,
+    /// Globs on a change's author (a pull request's GitHub login: `dependabot[bot]`, `*[bot]`):
+    /// a change by one gets no preview unless its title or a label asks (Netlify's and Vercel's
+    /// ignored builds for dependency bots). Empty: everyone's.
+    pub skip_authors: Vec<String>,
     /// `"<kind>:<ref>"` → `branch`, `schema` or `skip`; resources not listed get `data`.
     pub resources: BTreeMap<String, ResourceRule>,
     pub data: Mode,
@@ -46,7 +50,9 @@ pub struct Settings {
     pub env_for: BTreeMap<String, BTreeMap<String, String>>,
     pub github: GithubRule,
     /// Who may open a preview's URLs: `link` (default) needs the preview's link, which carries
-    /// its access token once and then a cookie; `public` is anyone who can reach the domain.
+    /// its access token once and then a cookie; `team` is people signed in to roll who may open
+    /// the project (`visit.rs`), and the link's token lets nobody in; `public` is anyone who can
+    /// reach the domain. Share links and the CI bypass work under `link` and `team`.
     pub access: Access,
     /// Chromatic's UI Review, with screenshots on: `check` gives a change a visual review (the
     /// `roll/visual` commit status), pending while its pages differ from the baseline's and
@@ -75,8 +81,8 @@ pub struct Settings {
     /// at most 30 days back. Products without history branch as of now and say so.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_at: Option<String>,
-    /// A feedback button on the pages of people who came in through roll (link access): it pins a
-    /// note to an element and posts it on the change, from roll.
+    /// A feedback button on the pages of people who came in through roll (link access, or a team
+    /// session): it pins a note to an element and posts it on the change, from roll.
     pub feedback: bool,
     /// Wake the change's services as soon as a new head is deployed, so the first visit (often
     /// the pull request comment's link) doesn't wait for a cold start.
@@ -151,6 +157,7 @@ pub enum VisualReviewRule {
 pub enum Access {
     #[default]
     Link,
+    Team,
     Public,
 }
 
@@ -329,6 +336,7 @@ impl Default for Settings {
             manual: false,
             paths: Vec::new(),
             ignore_paths: Vec::new(),
+            skip_authors: Vec::new(),
             resources: BTreeMap::new(),
             data: Mode::Branch,
             reset_every_hours: 0,
@@ -402,6 +410,9 @@ impl Settings {
         let bad = |m: String| Err(Error::BadRequest(m));
         if self.branches.is_empty() || self.branches.len() > MAX_BRANCH_GLOBS || self.branches.iter().any(|b| b.is_empty() || b.len() > 200) {
             return bad(format!("branches: 1–{MAX_BRANCH_GLOBS} globs of 1–200 characters"));
+        }
+        if self.skip_authors.len() > MAX_BRANCH_GLOBS || self.skip_authors.iter().any(|a| a.is_empty() || a.len() > 200) {
+            return bad(format!("skip_authors: at most {MAX_BRANCH_GLOBS} globs of 1–200 characters"));
         }
         for (name, list) in [("paths", &self.paths), ("ignore_paths", &self.ignore_paths)] {
             if list.len() > MAX_BRANCH_GLOBS || list.iter().any(|p| p.len() > 200 || code_control::review::pattern::Pattern::new(p).is_none()) {
@@ -480,9 +491,11 @@ impl Settings {
                 return bad(format!("masking: {key}: at most 200 columns"));
             }
             if search {
-                // `index.field` (a nested field's path: `users.address.city`) → a search rule.
+                // `index.field` (a nested field's path: `users.address.city`; a data stream's
+                // backing index starts with a dot: `.ds-logs-….user.email`) → a search rule.
                 for (field, rule) in cols {
-                    let ok = field.len() <= 200 && field.split('.').count() >= 2 && !field.split('.').any(str::is_empty) && !field.contains(['*', ',', '/', ' ', '\\']);
+                    let named = if field.starts_with(".ds-") { &field[1..] } else { field.as_str() };
+                    let ok = field.len() <= 200 && named.split('.').count() >= 2 && !named.split('.').any(str::is_empty) && !field.contains(['*', ',', '/', ' ', '\\']);
                     if !ok || !SEARCH_MASKS.contains(&rule.as_str()) {
                         return bad(format!("masking: {key}: {field:?} → {rule:?} isn't \"index.field\" → one of {}", SEARCH_MASKS.join(", ")));
                     }
@@ -659,8 +672,8 @@ mod tests {
         // Structure-only where a kind can't do it: refused, never a silent full copy.
         assert!(Settings::default().patched(&json!({ "resources": { "bucket:b": "schema" } })).is_err());
         assert!(Settings::default().patched(&json!({ "github": { "hide": ["time", ".clock, #ad"] } })).is_ok());
-        assert!(Settings::default().patched(&json!({ "masking": { "search:catalog": { "users.email": "email", "users.address.city": "redact" } } })).is_ok());
-        for bad in [json!({ "users": "redact" }), json!({ "users.email": "hash" }), json!({ "*.email": "redact" })] {
+        assert!(Settings::default().patched(&json!({ "masking": { "search:catalog": { "users.email": "email", "users.address.city": "redact", ".ds-logs-2026.11.18-000001.user.email": "redact" } } })).is_ok());
+        for bad in [json!({ "users": "redact" }), json!({ "users.email": "hash" }), json!({ "*.email": "redact" }), json!({ ".kibana.email": "redact" })] {
             assert!(Settings::default().patched(&json!({ "masking": { "search:catalog": bad } })).is_err(), "{bad}");
         }
         assert!(Settings::default().patched(&json!({ "github": { "hide": ["a} body {display:none"] } })).is_err());
