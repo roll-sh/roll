@@ -2058,19 +2058,28 @@ Ranked by what a person notices first. Done so far:
    through `Secrets::resolve_for(ResourceRef::new(kind, id).untrusted(), …)` (never a
    protected environment or a sensitive key), and offer to keep a pasted value in the base
    environment's folder.
-2. **An independent review of turns 7 and 8** (a public OTLP intake, an untrusted parser, the
-   gate's WebSocket rule, the sheet's downloads): their findings fixed before anything builds on
-   them, as turn 6's were (#386).
-3. **Slowest routes from traces, in review** (`feature/roll-previews-slow-routes`, on #419;
-   Vercel's Observability, Sentry's performance): `…/routes`, the sheet's route table and
-   `roll preview traces --routes`. Next for it: the slower routes in the verdict strip and the pull
-   request comment.
-4. **An error group opens its trace, in review** (`feature/roll-previews-error-trace`): a group
-   whose newest sample names a trace the preview keeps (`trace_id=…`, a `traceparent`) carries it
-   (`trace`); the Errors tab shows its spans under the sample, `roll preview errors` its id.
+2. **New errors against main** (Sentry's "new issues" in a release): an error group main's
+   preview doesn't have (compared by the unkeyed fingerprint, on the holder) counted as new, in
+   the verdict strip ("2 new errors against main") and the pull request's checks, as
+   `errors_added` does for the page's console.
+3. **Repeated queries in a trace** (Sentry's N+1 detection): a request whose child spans repeat
+   one database statement many times (`db.statement`, numbers and strings taken out) said on the
+   route table and in the trace, with the statement masked.
+4. **An independent review of turns 9 and 10** (slower routes on the record and in the comment,
+   an error's trace from its sample: both put a preview's code's words in roll's own surfaces):
+   their findings fixed before anything builds on them, as turns 6's and 7–8's were.
 5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
 6. **Watch: pg-control's recovery to a time seconds old** (unowned).
+
+In review after turn 9: the routes slower than main's preview on the record, the verdict strip,
+the change page and the pull request's comment (#431); an error group opens its request's trace
+(#433).
+
+Landed in previews' lock turn 9 of 2026-11-19 (main 84d246b60, exactly its gated tree): turns 7
+and 8's review fixes (span bytes bounded, traces off for roll apps, the intake's token first,
+stderr's event order, masks from the store; #419), each route's time from its traces against
+main's (#424), and `roll preview up` putting back the remote-tracking refs a push made (#427).
 
 Landed in previews' lock turns 7 and 8 of 2026-11-19 (main 490b68b75 and 7b4063ef2, each exactly
 its gated tree; turn 7 landed ahead of roll apps' chain4 with apps' and MCP's agreement, turn 8
