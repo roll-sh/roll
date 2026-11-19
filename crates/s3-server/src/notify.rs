@@ -448,6 +448,11 @@ impl Notifier {
         *self.sink.write().unwrap() = Some(sink);
     }
 
+    /// Install roll secrets for replication targets' `roll://` references (rolld does).
+    pub fn set_target_credentials(&self, credentials: Arc<dyn crate::TargetCredentials>) {
+        *self.external.credentials.write().unwrap() = Some(credentials);
+    }
+
     fn sink(&self) -> Option<Arc<dyn EventSink>> {
         self.sink.read().unwrap().clone()
     }
@@ -482,8 +487,9 @@ impl Notifier {
 
     /// Resolve and check a replication configuration's destinations as PutBucketReplication
     /// does (roll buckets, or buckets of replication targets with versioning enabled).
-    pub async fn check_replication(&self, cfg: &mut s3_store::ReplicationConfig, object_lock: bool) -> Result<(), String> {
-        crate::replication::resolve_destinations(self, cfg, object_lock).await
+    /// `source` is the bucket the configuration is for.
+    pub async fn check_replication(&self, cfg: &mut s3_store::ReplicationConfig, source: &str, object_lock: bool) -> Result<(), String> {
+        crate::replication::resolve_destinations(self, cfg, source, object_lock).await
     }
 
     pub fn stats(&self) -> EventStats {
