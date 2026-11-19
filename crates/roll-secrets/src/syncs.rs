@@ -115,6 +115,13 @@ pub trait SyncTarget: Send + Sync {
     }
     /// A target this kind can push to, for this project: on create and before every push.
     fn check(&self, project: &str, resources: &Resources, target: &Json) -> Result<()>;
+    /// Why the platform won't take `name` (prefix applied), if it won't: a name it keeps for
+    /// itself. Asked on create and preview for the names the sync would push then; `push` refuses
+    /// one added later.
+    fn refuses(&self, name: &str) -> Option<String> {
+        let _ = name;
+        None
+    }
     fn push(&self, target: &Json, push: &Push<'_>) -> Result<()>;
 }
 
@@ -321,7 +328,10 @@ impl Secrets {
         let all_creds: BTreeSet<String> = others.iter().filter_map(|(k, t)| self.syncs.get(k).ok().map(|tg| tg.credentials(t))).flatten().chain(creds.iter().cloned()).collect();
         let have: BTreeSet<String> = self.view(project, &n.environment, &path, caller, false, Action::Read)?.into_iter().filter(|e| e.row.owner.is_empty()).map(|e| e.row.key).collect();
         let prefix = n.prefix.clone().unwrap_or_default();
-        let names = have.iter().filter(|k| !all_creds.contains(*k) && n.keys.as_ref().is_none_or(|ks| ks.contains(k))).map(|k| format!("{prefix}{k}")).collect();
+        let names: Vec<String> = have.iter().filter(|k| !all_creds.contains(*k) && n.keys.as_ref().is_none_or(|ks| ks.contains(k))).map(|k| format!("{prefix}{k}")).collect();
+        if let Some(why) = names.iter().find_map(|n| target.refuses(n)) {
+            return Err(Error::BadRequest(why));
+        }
         let unknown_keys = n.keys.iter().flatten().filter(|k| !have.contains(*k)).cloned().collect();
         let missing_credentials = creds.iter().filter(|k| !have.contains(*k)).cloned().collect();
         Ok(SyncPreview { names, credentials: creds.into_iter().collect(), missing_credentials, unknown_keys })
@@ -358,6 +368,15 @@ impl Secrets {
             if keys.as_ref().is_some_and(|ks| ks.contains(&k)) {
                 return Err(Error::BadRequest(format!("{k} is the sync's credential: it's never pushed, so leave it out of keys")));
             }
+        }
+        // Names the platform keeps for itself: the listed keys, else the folder's keys now.
+        let creds = target.credentials(&n.target);
+        let wanted: Vec<String> = match &keys {
+            Some(ks) => ks.clone(),
+            None => self.view(project, &n.environment, &path, caller, false, Action::Read)?.into_iter().filter(|e| e.row.owner.is_empty()).map(|e| e.row.key).collect(),
+        };
+        if let Some(why) = wanted.iter().filter(|k| !creds.contains(*k)).find_map(|k| target.refuses(&format!("{prefix}{k}"))) {
+            return Err(Error::BadRequest(why));
         }
         let id = names::new_id("syn", 16);
         let secret = target.signed().then(|| Value::new(names::new_id("whsec", 40)));
@@ -556,6 +575,7 @@ impl Secrets {
         let (project, id, env, path) = (r.project.as_str(), r.info.id.as_str(), r.info.environment.as_str(), r.info.path.as_str());
         let actor = Caller { principal: format!("sync:{id}"), grants: Arc::new(Everything), ip: None, runtime: false, approval: None };
         let ok = outcome.is_ok();
+        crate::metrics::Counters::add(if ok { &self.counters.syncs_pushed } else { &self.counters.sync_failures }, 1);
         let res = self.db.write(|c| {
             match &outcome {
                 Ok(o) => c.execute(

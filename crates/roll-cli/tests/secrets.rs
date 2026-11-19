@@ -89,10 +89,12 @@ async fn serve() -> (String, Arc<roll_secrets::Secrets>, Arc<roll_workspace::Wor
         people: None,
         clouds: None,
         outside: None,
+        directory: None,
         github: None,
         kms: None,
         sts: None,
         workloads: None,
+        gateways: None,
     };
     let secrets = Arc::new(roll_secrets::Secrets::new(db, ws.clone(), opts).unwrap());
     let served = secrets.clone();
@@ -113,6 +115,11 @@ async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_referen
     let at = ["secrets", "-p", "shop", "-e", "production"];
     ok(&api, &[], &[&at[..], &["set", "HOST=db.internal", "PORT=5432"]].concat(), None).await;
     ok(&api, &[], &[&at[..], &["set", "PASSWORD"]].concat(), Some("s3cret\n")).await;
+    // A key's password policy: `required add` sets it, and `set KEY --generate` follows it.
+    ok(&api, &[], &["secrets", "-p", "shop", "required", "add", "API_SECRET", "--password-length", "20", "--classes", "lower,digit"], None).await;
+    ok(&api, &[], &[&at[..], &["set", "API_SECRET", "--generate"]].concat(), None).await;
+    let made = ok(&api, &[], &[&at[..], &["get", "API_SECRET", "--raw"]].concat(), None).await.trim().to_string();
+    assert!(made.len() == 20 && made.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()) && made.chars().any(|c| c.is_ascii_digit()), "{} characters", made.len());
     ok(&api, &[], &[&at[..], &["import", "-"]].concat(), Some("DATABASE_URL=postgres://app:${PASSWORD}@${HOST}:${PORT}/shop\n")).await;
     let ls = ok(&api, &[], &[&at[..], &["ls"]].concat(), None).await;
     assert!(ls.contains("DATABASE_URL") && !ls.contains("s3cret"), "values are masked: {ls}");

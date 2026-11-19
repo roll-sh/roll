@@ -34,6 +34,14 @@ tracing.workspace = true
 
 [dev-dependencies]
 flate2.workspace = true
+# The `gcs` and `azure` repository tests: a service account's key and its token endpoint, an
+# account SAS, and the log lines they check.
+hmac.workspace = true
+jsonwebtoken.workspace = true
+rand.workspace = true
+rsa.workspace = true
+sha2.workspace = true
+tracing-subscriber.workspace = true
 tempfile.workspace = true
 futures-util.workspace = true
 rusqlite.workspace = true

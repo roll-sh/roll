@@ -78,6 +78,10 @@ pub struct Identity {
     /// How many keys it pins, when it carries its issuer's keys instead of fetching them.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pinned_keys: Option<usize>,
+    /// The gateway it logs in (docs/secrets.md, "Gateways"): its tokens open that gateway's link
+    /// and nothing else.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gateway: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -91,6 +95,7 @@ pub struct NewIdentity {
     pub claims: BTreeMap<String, String>,
     pub environments: Option<Vec<String>>,
     pub paths: Option<Vec<String>>,
+    #[serde(default)]
     pub actions: Vec<Action>,
     pub ttl_minutes: Option<i64>,
     #[serde(default)]
@@ -99,6 +104,10 @@ pub struct NewIdentity {
     /// fetch: a cluster's own. Then `issuer` is only compared with the token's `iss`.
     #[serde(default)]
     pub jwks: Option<String>,
+    /// Log a gateway in (`gw_…`, one of the project's) instead of reading secrets: no
+    /// environments, folders or actions.
+    #[serde(default)]
+    pub gateway: Option<String>,
 }
 
 /// What a login gets: the token (shown once) and when it ends.
@@ -110,7 +119,7 @@ pub struct Login {
     pub identity: String,
 }
 
-const COLUMNS: &str = "id, project_id, name, issuer, audience, subject, claims, environments, paths, actions, ttl_minutes, created_at, created_by, last_used_at, last_subject, allowed_ips, jwks";
+const COLUMNS: &str = "id, project_id, name, issuer, audience, subject, claims, environments, paths, actions, ttl_minutes, created_at, created_by, last_used_at, last_subject, allowed_ips, jwks, gateway";
 
 /// An identity, its project, and its pinned keys.
 fn identity_row(r: &code_sql::Row<'_>) -> code_sql::Result<(Identity, String, Option<String>)> {
@@ -133,6 +142,7 @@ fn identity_row(r: &code_sql::Row<'_>) -> code_sql::Result<(Identity, String, Op
             last_subject: r.get(14)?,
             allowed_ips: r.get::<_, Option<String>>(15)?.and_then(|s| serde_json::from_str(&s).ok()),
             pinned_keys: jwks.as_deref().and_then(|d| crate::oidc::pinned_keys(d).ok()),
+            gateway: r.get(17)?,
         },
         r.get(1)?,
         jwks,
@@ -196,10 +206,16 @@ impl Secrets {
         if !(TTL_MIN..=TTL_MAX).contains(&ttl) {
             return Err(bad(format!("ttl_minutes is {TTL_MIN}–{TTL_MAX}")));
         }
-        let (environments, paths, actions) = crate::caller::scope(project, n.environments, n.paths, n.actions, caller)?;
+        let gateway = self.check_gateway(project, n.gateway)?;
+        let (environments, paths, actions) = match &gateway {
+            // Its rule is the gateway's own (gateways::rule), whatever the identity's scope says.
+            Some(_) if n.environments.is_some() || n.paths.is_some() || !n.actions.is_empty() => return Err(bad("an identity that logs a gateway in has no environments, paths or actions")),
+            Some(_) => (None, None, vec![]),
+            None => crate::caller::scope(project, n.environments, n.paths, n.actions, caller)?,
+        };
         self.project(project)?;
         let now = self.db.now_ms()?;
-        let i = Identity { id: names::new_id("idn", 12), name, issuer, audience, subject, claims: n.claims, environments, paths, actions, ttl_minutes: ttl, created_at: now, created_by: caller.principal.clone(), last_used_at: None, last_subject: None, allowed_ips: crate::caller::allowed(n.allowed_ips)?, pinned_keys };
+        let i = Identity { id: names::new_id("idn", 12), name, issuer, audience, subject, claims: n.claims, environments, paths, actions, ttl_minutes: ttl, created_at: now, created_by: caller.principal.clone(), last_used_at: None, last_subject: None, allowed_ips: crate::caller::allowed(n.allowed_ips)?, pinned_keys, gateway };
         self.db.write(|c| {
             let count: i64 = c.query_row("SELECT COUNT(*) FROM identities WHERE project_id = ?", [project], |r| r.get(0))?;
             if count >= IDENTITIES_MAX {
@@ -211,8 +227,8 @@ impl Secrets {
                 }
             }
             c.execute(
-                &format!("INSERT INTO identities ({COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)"),
-                params![i.id, project, i.name, i.issuer, i.audience, i.subject, json(&i.claims), i.environments.as_ref().map(json), i.paths.as_ref().map(json), json(&i.actions), i.ttl_minutes, now, i.created_by, i.allowed_ips.as_ref().map(json), jwks],
+                &format!("INSERT INTO identities ({COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?)"),
+                params![i.id, project, i.name, i.issuer, i.audience, i.subject, json(&i.claims), i.environments.as_ref().map(json), i.paths.as_ref().map(json), json(&i.actions), i.ttl_minutes, now, i.created_by, i.allowed_ips.as_ref().map(json), jwks, i.gateway],
             )?;
             let keys = i.pinned_keys.map(|n| format!(", {n} pinned key{}", if n == 1 { "" } else { "s" })).unwrap_or_default();
             audit::record(c, self.keys()?, project, caller, "identity.create", None, None, &[], &format!("created identity {} for {} ({}{keys})", i.name, i.issuer, i.subject), now)
@@ -251,6 +267,10 @@ impl Secrets {
                 }
             }
         }
+        // A gateway it logs in closes its link now if one of those opened it.
+        if let Some(g) = identity.gateway.as_deref().filter(|_| !live.is_empty()) {
+            self.recheck_gateway(g);
+        }
         Ok(identity)
     }
 
@@ -259,14 +279,14 @@ impl Secrets {
         caller.need(Action::Admin, &Scope::project(project))?;
         self.project(project)?;
         let now = self.db.now_ms()?;
-        let live: Vec<String> = self.db.write(|c| {
-            let name: Option<String> = c.query_row("SELECT name FROM identities WHERE id = ? AND project_id = ?", [id, project], |r| r.get(0)).optional()?;
-            let name = name.ok_or_else(|| Error::NotFound(format!("no identity {id}")))?;
+        let (live, gateway): (Vec<String>, Option<String>) = self.db.write(|c| {
+            let found: Option<(String, Option<String>)> = c.query_row("SELECT name, gateway FROM identities WHERE id = ? AND project_id = ?", [id, project], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+            let (name, gateway) = found.ok_or_else(|| Error::NotFound(format!("no identity {id}")))?;
             c.execute("DELETE FROM identities WHERE id = ?", [id])?;
             let live: Vec<String> = c.query("SELECT grant_id FROM identity_logins WHERE identity = ? AND expires_at > ?", params![id, now], |r| r.get(0))?;
             let n = live.len();
             audit::record(c, self.keys()?, project, caller, "identity.delete", None, None, &[], &format!("deleted identity {name} ({n} live token{} revoked)", if n == 1 { "" } else { "s" }), now)?;
-            Ok::<_, Error>(live)
+            Ok::<_, Error>((live, gateway))
         })?;
         // What it gave out ends with it (outside the transaction: roll-access's own store).
         if let Some(w) = &self.workloads {
@@ -275,6 +295,10 @@ impl Secrets {
                     tracing::warn!(identity = %id, grant = %g, "revoking a deleted identity's token failed: {e}");
                 }
             }
+        }
+        // A gateway it logged in closes its link now if one of those opened it.
+        if let Some(g) = gateway.as_deref().filter(|_| !live.is_empty()) {
+            self.recheck_gateway(g);
         }
         Ok(())
     }
@@ -312,7 +336,11 @@ impl Secrets {
         let workloads = self.workloads.clone().ok_or_else(|| Error::NotFound("workload identities aren't on this server".into()))?;
         // A roll-access workload token: the identity's scope, its addresses, owned by whoever made
         // the identity (roll-access refuses one whose owner can't sign in any more).
-        let rule = crate::access::rule(&project, i.environments.clone(), i.paths.clone(), &i.actions);
+        let rule = match &i.gateway {
+            Some(g) if self.gateway_project(g)?.as_deref() != Some(project.as_str()) => return Err(denied()),
+            Some(g) => crate::gateways::rule(g),
+            None => crate::access::rule(&project, i.environments.clone(), i.paths.clone(), &i.actions),
+        };
         // Owned by the person behind whoever made it (a person's token is that person).
         let owner = match self.maker(&i.created_by)? {
             crate::caller::Maker::Person(user) => Some(user),
