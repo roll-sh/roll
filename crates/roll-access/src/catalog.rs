@@ -773,10 +773,11 @@ fn apps_create_action(b: &Value) -> Action {
 /// in its instances, and `rollback_on_crash`, which has roll
 /// put an older deployment live by itself), and so does any key apps adds later until it's listed
 /// here: a new setting is never a quiet way into production.
-const APPS_WRITE_RUN: [&str; 25] = [
+const APPS_WRITE_RUN: [&str; 26] = [
     "min_instances",
     "max_instances",
     "concurrency",
+    "queue_s",
     "cpu",
     "memory_mb",
     "health_path",
@@ -1378,7 +1379,8 @@ static ROWS: &[Row] = &[
     // The project's preview domain: which names its preview environments answer under.
     // A public page of the project's checks and heartbeats (names and up or down only).
     row("GET", "/v1/apps/projects/{project}/status-page", "apps", R, one(&["project"], "project")),
-    row("PUT", "/v1/apps/projects/{project}/status-page", "apps", W, one(&["project"], "project")),
+    // Publishing makes the project's service names public: a person's call (MCP's review).
+    row("PUT", "/v1/apps/projects/{project}/status-page", "apps", ADMIN, one(&["project"], "project")),
     row("DELETE", "/v1/apps/projects/{project}/status-page", "apps", W, one(&["project"], "project")),
     row("GET", "/v1/apps/projects/{project}/status-page/incidents", "apps", R, one(&["project"], "project")),
     row("POST", "/v1/apps/projects/{project}/status-page/incidents", "apps", W, one(&["project"], "project")),

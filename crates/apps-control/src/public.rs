@@ -1572,6 +1572,7 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
         Err(WakeError::NoDeployment) => return by("not_deployed", page(StatusCode::NOT_FOUND, "Not deployed yet", "This service has no deployment in this environment yet.")),
         Err(WakeError::NotWeb) => return by("not_deployed", page(StatusCode::NOT_FOUND, "Not a web service", "This service is a worker or a cron job: it doesn't answer HTTP.")),
         Err(WakeError::Busy) => return by("wake", retry_soon(page(StatusCode::SERVICE_UNAVAILABLE, "Busy starting", "Too many requests are waiting for this service to start. Try again in a moment."))),
+        Err(WakeError::Full(_)) => return by("full", retry_soon(page(StatusCode::TOO_MANY_REQUESTS, "Busy", "Every instance of this service is busy. Try again in a moment."))),
         Err(WakeError::Capped) => return by("capped", page(StatusCode::PAYMENT_REQUIRED, "Paused", "This project reached its spending limit for the month. Its owner can raise the limit to bring it back.")),
         Err(WakeError::Paused) => return by("paused", page(StatusCode::SERVICE_UNAVAILABLE, "Paused", "This service is paused. Its owner can resume it.")),
         Err(e) => {
@@ -1635,6 +1636,11 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
     h.insert(HeaderName::from_static("x-forwarded-proto"), HeaderValue::from_static(proto));
     if let Some(c) = client.and_then(|c| HeaderValue::from_str(&c).ok()) {
         h.insert(HeaderName::from_static("x-forwarded-for"), c);
+    }
+    // When roll took the request (Heroku's, unix ms): the app's APM reads the time it queued.
+    let took = code_sql::now_ms() - began.elapsed().as_millis() as i64;
+    if let Ok(v) = HeaderValue::from_str(&took.to_string()) {
+        h.insert(HeaderName::from_static("x-request-start"), v);
     }
     if !h.contains_key("x-request-id")
         && let Ok(v) = HeaderValue::from_str(&crate::model::random(16))

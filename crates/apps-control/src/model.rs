@@ -594,6 +594,11 @@ pub struct Run {
     /// it, for a day (Vercel's skew protection; [`crate::skew`]).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub skew_protection: bool,
+    /// A web service's hard limit (Cloud Run's, Fly's `hard_limit`): with every instance at its
+    /// `concurrency` and `max_instances` of them, a request waits up to this long (1–60 s) for a
+    /// slot, then gets a 429. Without it the least busy instance takes it past its concurrency.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queue_s: Option<u32>,
     /// Commands on a schedule, each a job of the live deployment at its due times (Heroku
     /// Scheduler, Vercel crons): any service's, without a cron service of its own.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -1050,6 +1055,7 @@ impl Default for Run {
             rollback_on_crash: false,
             rebuild_on_base: false,
             skew_protection: false,
+            queue_s: None,
             schedules: Vec::new(),
             sidecars: Vec::new(),
             block_on: None,
@@ -1168,6 +1174,9 @@ impl Run {
             if !(0.1..=2.0).contains(&sc.cpu) || !(64..=4096).contains(&sc.memory_mb) {
                 return bad("a sidecar's cpu is 0.1–2, its memory_mb 64–4096");
             }
+        }
+        if self.queue_s.is_some_and(|q| !(1..=60).contains(&q)) {
+            return bad("queue_s is 1–60 seconds");
         }
         let r = &self.rollout;
         if r.steps.len() > 5 || r.steps.iter().any(|s| !(1..=99).contains(s)) || r.steps.windows(2).any(|w| w[0] >= w[1]) {

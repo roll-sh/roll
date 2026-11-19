@@ -3852,6 +3852,35 @@ async fn a_followed_tag_that_moves_deploys_once() {
     assert!(w.apps.watch_tags().await.is_empty(), "the rollback stays");
 }
 
+/// The hard limit (Cloud Run's, `run.queue_s`): at max_instances with every instance at its
+/// concurrency, a request waits for a slot (and gets it when one frees in time), else a 429; the
+/// app gets `X-Request-Start`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_request_at_the_hard_limit_waits_then_gets_a_429() {
+    let w = world().await;
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "full", "source": {"kind": "image", "image": "nginx:1.27"}, "run": {"port": 80, "concurrency": 1, "max_instances": 1, "queue_s": 1}, "variables": {"FAKE_SLOW_MS": "600"} }))).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    let d = settled(&w, &id, "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await;
+    let host = host(&svc["environments"][0]["url"]);
+    let (_, v) = visit_deployment(&w, &host, d["id"].as_str().unwrap()).await;
+    let start = v["request_start"].as_str().and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+    assert!((code_sql::now_ms() - start).abs() < 60_000, "X-Request-Start is unix ms: {v}");
+    // Four at once on one instance taking one, 600 ms each, a second's queue: the second waits
+    // its turn; the third and fourth would wait past the second.
+    let mut statuses = Vec::new();
+    for _ in 0..5 {
+        visit_deployment(&w, &host, d["id"].as_str().unwrap()).await;
+        statuses = futures::future::join_all((0..4).map(|_| visit(&w, &host, "/"))).await.into_iter().map(|(st, _)| st).collect();
+        if statuses.iter().filter(|s| **s == StatusCode::OK).count() >= 2 && statuses.contains(&StatusCode::TOO_MANY_REQUESTS) {
+            break;
+        }
+    }
+    assert!(statuses.iter().all(|s| *s == StatusCode::OK || *s == StatusCode::TOO_MANY_REQUESTS), "{statuses:?}");
+    assert!(statuses.iter().filter(|s| **s == StatusCode::OK).count() >= 2 && statuses.contains(&StatusCode::TOO_MANY_REQUESTS), "{statuses:?}");
+    assert_eq!(call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"queue_s": 61}}))).await.0, StatusCode::BAD_REQUEST);
+}
+
 /// Skew protection (Vercel's, `run.skew_protection`): a request that names an earlier live
 /// deployment (its header or `?dpl=`) goes to it; a page load gets what's live and a cookie
 /// naming it; a deployment that was never this environment's live one is never reached so.
