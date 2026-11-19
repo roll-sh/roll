@@ -81,7 +81,8 @@ pub(crate) struct Started {
 pub(crate) enum Finished {
     /// Sign the browser in as this user (`new`: made now from an invite, `invite`; by SSO's
     /// provisioning, `provisioned`; or an account linked now by its email, `linked`).
-    SignIn { user: String, return_to: String, new: Option<&'static str> },
+    /// `sid`: an SSO provider's own session id for it (OIDC Back-Channel Logout ends it by that).
+    SignIn { user: String, return_to: String, new: Option<&'static str>, sid: Option<String> },
     /// The identity is now linked to the signed-in user.
     Linked { return_to: String },
 }
@@ -251,12 +252,12 @@ impl Accounts {
             return Ok(Finished::Linked { return_to: st.return_to });
         }
         if let Some(user) = linked_to {
-            return Ok(Finished::SignIn { user, return_to: st.return_to, new: None });
+            return Ok(Finished::SignIn { user, return_to: st.return_to, new: None, sid: None });
         }
         if let Some(invite) = &st.invite_id {
             let hint = (p == Provider::Github).then_some(v.login.as_str());
             let user = self.create_user(NewUser { invite_id: invite, email: &v.email, hint, name: v.name.as_deref(), identity: Some((provider, &v.subject, &v.login)) })?;
-            return Ok(Finished::SignIn { user, return_to: st.return_to, new: Some("invite") });
+            return Ok(Finished::SignIn { user, return_to: st.return_to, new: Some("invite"), sid: None });
         }
         if self.db.read(|c| c.query_row("SELECT 1 FROM users WHERE email = ?", [v.email.as_str()], |_| Ok(())).optional())?.is_some() {
             return Err(Error::BadRequest("an account has this email: sign in another way, then link it in settings".into(), Some("link_required")));

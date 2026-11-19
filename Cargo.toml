@@ -69,6 +69,9 @@ aws-smithy-types = "1"
 # Tests only: an S3 client with a test CA and pinned addresses (crates/rolld/tests/fleet_e2e.rs).
 aws-smithy-http-client = { version = "1", features = ["rustls-aws-lc"] }
 aws-smithy-runtime-api = "1"
+# roll search inference: SigV4 for Amazon Bedrock and SageMaker requests (signing only).
+aws-sigv4 = "1"
+aws-credential-types = "1"
 lambda_http = { version = "1", default-features = false, features = ["apigw_http", "apigw_rest", "alb"] }
 tasks = { path = "crates/tasks" }
 kafka-protocol = { version = "0.18", features = ["messages_enums"] }
@@ -82,6 +85,9 @@ pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
 qrcode = { version = "0.14", default-features = false }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
 rustls-pemfile = "2"
+# Passkey attestation chains (roll accounts): the same webpki rustls already builds.
+rustls-webpki = { version = "0.103", default-features = false, features = ["ring", "std"] }
+rustls-pki-types = "1"
 rdkafka = { version = "0.39", features = ["cmake-build", "ssl-vendored", "zstd"] }
 rcgen = "0.14"
 # roll secrets: certificate lifetimes (rcgen takes time's dates).
@@ -298,6 +304,7 @@ search-es = { path = "crates/search-es" }
 search-server = { path = "crates/search-server" }
 search-control = { path = "crates/search-control" }
 search-yaml = { path = "crates/search-yaml" }
+search-test-support = { path = "crates/search-test-support" }
 
 # kafka-protocol 0.18.0 sizes decode buffers from peer-supplied counts; see vendor/kafka-protocol/ROLL.md.
 [patch.crates-io]
