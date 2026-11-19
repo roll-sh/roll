@@ -47,6 +47,7 @@ pub fn rule(gateway: &str) -> roll_auth::scope::Rule {
         resources: scope::Resources::Some(vec![scope::Selector::id(gateway)]),
         environments: None,
         paths: None,
+        unprotected: false,
         actions: std::collections::BTreeMap::from([(scope::Action::Write, scope::Effect::Allow)]),
     }
 }

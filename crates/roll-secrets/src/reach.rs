@@ -128,7 +128,7 @@ fn here(project: &str, environments: &Option<Vec<String>>, paths: &Option<Vec<St
 
 /// What grant `g` may do at `slug:path`, as roll secrets checks each request of it.
 fn granted(g: &roll_auth::Grant, project: &str, slug: &str, path: &str) -> Vec<Action> {
-    let g = GrantGrants(g.clone());
+    let g = GrantGrants(g.clone(), Default::default());
     ACTIONS.into_iter().filter(|a| g.allows(*a, &Scope::at(project, slug, path))).collect()
 }
 
