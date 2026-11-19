@@ -166,19 +166,6 @@ impl Secrets {
         }
     }
 
-    /// Whether `caller` may reveal the folder `reference` reads for `resource` (in the one project
-    /// that holds and stands for it, as [`Secrets::resolve_for`] finds it): what a product checks
-    /// before it stores a reference a caller wrote, and with [`Secrets::maker_caller`] before each
-    /// resolve after. `Ok(())`, or why not (never a value).
-    pub fn may_reveal_for(&self, resource: &ResourceRef, reference: &str, caller: &Caller) -> Result<(), Refusal> {
-        let r = Reference::required(reference)?;
-        let project = self.project_for(resource, r.project.as_deref())?;
-        if !caller.allows(crate::access::Action::Reveal, &crate::access::Scope::at(&project, &r.env, &r.path)) {
-            return Err(Refusal::NotTrusted(format!("{} may not reveal {}:{}", caller.principal, r.env, r.path)));
-        }
-        Ok(())
-    }
-
     /// The one project whose canvas holds `resource` and stands for it (and is `named`, if given).
     fn project_for(&self, resource: &ResourceRef, named: Option<&str>) -> Result<String, Refusal> {
         let who = resource.consumer();
