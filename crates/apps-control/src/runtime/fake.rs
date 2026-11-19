@@ -103,6 +103,8 @@ pub struct Fake {
     /// Connections each instance's network accepted, and how many are open from other services
     /// ([`Fake::connect`], [`Fake::set_private`]).
     accepted: Mutex<HashMap<String, (u64, u32)>>,
+    /// Lines a test adds to the fake site's `_redirects` (an origin it serves, say).
+    pub site_redirects: Mutex<String>,
 }
 
 impl Fake {
@@ -508,6 +510,7 @@ impl Runtime for Fake {
     /// A static site: an index, a script, and a symlink that must never be served.
     async fn export_files(&self, image: &str, _dir: &str) -> anyhow::Result<super::VolumeStream> {
         let mut b = tar::Builder::new(Vec::new());
+        let redirects = format!("{}/old /assets/app.js 308\n/app/* /index.html 200\n/api/* service:api/v1/:splat 200\n", self.site_redirects.lock());
         let big = "console.log('roll');\n".repeat(200);
         // A fingerprinted chunk of this build's own, as Vite names them.
         let h = image.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, c| (h ^ c as u64).wrapping_mul(0x0100_0000_01b3));
@@ -525,7 +528,7 @@ impl Runtime for Fake {
             // A Netlify-style form, with its honeypot and its thanks page.
             ("./contact.html", br#"<form name="contact" method="POST" data-netlify="true" netlify-honeypot="bot-field" action="/thanks.html"><input name="email"><textarea name="message"></textarea></form>"#),
             ("./thanks.html", b"<h1>thanks</h1>"),
-            ("./_redirects", b"/old /assets/app.js 308\n/app/* /index.html 200\n/api/* service:api/v1/:splat 200\n"),
+            ("./_redirects", redirects.as_bytes()),
             ("./_headers", b"/assets/*\n  Cache-Control: public, max-age=31536000, immutable\n"),
         ];
         for (name, body) in files {
