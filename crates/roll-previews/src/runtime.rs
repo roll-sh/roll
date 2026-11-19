@@ -271,6 +271,18 @@ fn merge_timed(mut out: Vec<(i64, bool, String)>, err: Vec<(i64, bool, String)>,
     out
 }
 
+/// A child's stdout that keeps the child (killed when dropped) for as long as it's read.
+struct ChildOut {
+    _child: tokio::process::Child,
+    out: tokio::process::ChildStdout,
+}
+
+impl tokio::io::AsyncRead for ChildOut {
+    fn poll_read(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>, buf: &mut tokio::io::ReadBuf<'_>) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.out).poll_read(cx, buf)
+    }
+}
+
 /// The container of a service: every one roll previews makes starts with `roll-previews-`.
 pub fn container_name(host: &str) -> String {
     format!("roll-previews-{host}")
@@ -1351,6 +1363,46 @@ impl Apps for Runtime {
     async fn follow(&self, preview: &str, service: &str, lines: usize) -> Option<tokio::sync::mpsc::Receiver<String>> {
         let host = self.store.services(preview).ok()?.into_iter().find(|s| s.name == service)?.host;
         self.iso.follow(&container_name(&host), lines.clamp(1, 2000)).await
+    }
+
+    /// `docker cp <container>:<path> -`, read as it comes; the process goes when the stream does.
+    async fn read_files(&self, preview: &str, service: &str, path: &str) -> anyhow::Result<Option<crate::ports::FileStream>> {
+        let me = self.me.upgrade().ok_or_else(|| anyhow::anyhow!("the preview runtime is stopping"))?;
+        let name = me.shell_container(preview, service).await?;
+        let mut child = tokio::process::Command::new("docker")
+            .args(["cp", &format!("{name}:{path}"), "-"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()?;
+        let out = child.stdout.take().ok_or_else(|| anyhow::anyhow!("docker cp gave no output"))?;
+        self.hold(preview, service);
+        Ok(Some(Box::new(ChildOut { _child: child, out })))
+    }
+
+    /// `docker cp - <container>:<dir>` with the tar on its stdin.
+    async fn write_files(&self, preview: &str, service: &str, dir: &str, tar: bytes::Bytes) -> anyhow::Result<bool> {
+        use tokio::io::AsyncWriteExt;
+        let me = self.me.upgrade().ok_or_else(|| anyhow::anyhow!("the preview runtime is stopping"))?;
+        let name = me.shell_container(preview, service).await?;
+        let mut child = tokio::process::Command::new("docker")
+            .args(["cp", "-", &format!("{name}:{dir}")])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()?;
+        let mut stdin = child.stdin.take().ok_or_else(|| anyhow::anyhow!("docker cp took no input"))?;
+        stdin.write_all(&tar).await?;
+        drop(stdin);
+        let out = tokio::time::timeout(Duration::from_secs(120), child.wait_with_output()).await.map_err(|_| anyhow::anyhow!("writing the files took over 2 minutes"))??;
+        self.hold(preview, service);
+        if !out.status.success() {
+            let said = String::from_utf8_lossy(&out.stderr);
+            anyhow::bail!("{}", said.trim().lines().last().unwrap_or("docker cp failed").chars().take(300).collect::<String>());
+        }
+        Ok(true)
     }
 
     async fn drain_from(&self, preview: &str, service: &str, since: &str) -> Option<tokio::sync::mpsc::Receiver<(bool, String)>> {

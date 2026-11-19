@@ -731,6 +731,21 @@ impl roll_previews::ports::Apps for Services {
         self.runtime.hold(preview, service);
     }
 
+    /// A `roll.toml` service's files (roll apps' services have their own, on `pv-…`).
+    async fn read_files(&self, preview: &str, service: &str, path: &str) -> anyhow::Result<Option<roll_previews::ports::FileStream>> {
+        if self.apps.find(preview, service).await?.is_some() {
+            return Ok(None);
+        }
+        self.runtime.read_files(preview, service, path).await
+    }
+
+    async fn write_files(&self, preview: &str, service: &str, dir: &str, tar: bytes::Bytes) -> anyhow::Result<bool> {
+        if self.apps.find(preview, service).await?.is_some() {
+            return Ok(false);
+        }
+        self.runtime.write_files(preview, service, dir, tar).await
+    }
+
     /// roll apps drains its own instances' output (a drain's `previews`).
     async fn drain_from(&self, preview: &str, service: &str, since: &str) -> Option<tokio::sync::mpsc::Receiver<(bool, String)>> {
         if matches!(self.apps.find(preview, service).await, Ok(Some(_))) { None } else { self.runtime.drain_from(preview, service, since).await }

@@ -56,6 +56,7 @@ pub fn router(engine: Arc<Engine>) -> Router {
                 .route("/v1/previews/{id}/shell/sessions/{sh}/screen", get(shell_screen))
                 .route("/v1/previews/{id}/shell/sessions/{sh}/keys", post(shell_keys))
                 .route("/v1/previews/{id}/shell/sessions/{sh}/resize", post(shell_resize))
+                .route("/v1/previews/{id}/files", get(read_files).put(write_files).layer(axum::extract::DefaultBodyLimit::max(crate::engine::shell::FILES_MAX + (1 << 20))))
                 .route_layer(axum::middleware::from_fn_with_state(engine.clone(), on_leader))
                 .with_state(engine.clone()),
         )
@@ -687,6 +688,45 @@ async fn shell_resize(AxState(e): S, Path((id, sh)): Path<(String, String)>, b: 
     let s: Size = serde_json::from_slice(&b).map_err(|err| Error::BadRequest(format!("bad body: {err}")))?;
     e.shell_resize(&id, &sh, s.cols, s.rows).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FilesQuery {
+    service: Option<String>,
+    path: String,
+}
+
+/// What's at `path` in the service, as a tar (`x-roll-service` says which), as it's read.
+async fn read_files(AxState(e): S, Path(id): Path<String>, Query(q): Query<FilesQuery>, who: Option<axum::Extension<roll_auth::SignedIn>>) -> crate::Result<Response> {
+    check_id(&id)?;
+    let by = who.map_or_else(|| "the operator".to_string(), |w| w.handle.clone());
+    let (svc, stream) = e.read_files(&id, q.service.as_deref(), &q.path, &by).await?;
+    let body = futures::stream::unfold(stream, |mut s| async move {
+        let mut buf = vec![0u8; 64 << 10];
+        match tokio::io::AsyncReadExt::read(&mut s, &mut buf).await {
+            Ok(0) => None,
+            Ok(n) => {
+                buf.truncate(n);
+                Some((Ok::<_, std::io::Error>(Bytes::from(buf)), s))
+            }
+            Err(err) => Some((Err(err), s)),
+        }
+    });
+    let mut r = axum::body::Body::from_stream(body).into_response();
+    r.headers_mut().insert(axum::http::header::CONTENT_TYPE, axum::http::HeaderValue::from_static("application/x-tar"));
+    if let Ok(v) = axum::http::HeaderValue::from_str(&svc) {
+        r.headers_mut().insert("x-roll-service", v);
+    }
+    Ok(r)
+}
+
+/// A tar's files (at most 100 MiB) written under `path` in the service: `{service}`.
+async fn write_files(AxState(e): S, Path(id): Path<String>, Query(q): Query<FilesQuery>, who: Option<axum::Extension<roll_auth::SignedIn>>, b: Bytes) -> crate::Result<Json<Value>> {
+    check_id(&id)?;
+    let by = who.map_or_else(|| "the operator".to_string(), |w| w.handle.clone());
+    let svc = e.write_files(&id, q.service.as_deref(), &q.path, b, &by).await?;
+    Ok(Json(json!({ "service": svc, "path": q.path })))
 }
 
 async fn close_shell(AxState(e): S, Path((id, sh)): Path<(String, String)>) -> crate::Result<StatusCode> {

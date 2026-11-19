@@ -381,6 +381,15 @@ case "$SCREEN" in *"seen $PV"*) ;; *) echo "the shell should run in the service'
 api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d]" | grep -q "opened a shell in web" || { echo "the activity should say a shell was opened"; exit 1; }
 [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://$API/v1/previews/$PV/shell/sessions" -H 'content-type: application/json' -d '{"service":"nope"}')" = 404 ] || { echo "a shell in a service the preview hasn't should be 404"; exit 1; }
 
+say "files in and out of the preview's service (roll preview cp)"
+echo "fixture for $PV" > "$HOME_DIR/fixture.txt"
+rm -f "$HOME_DIR/back.txt"
+ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview cp "$PV" "$HOME_DIR/fixture.txt" :/tmp/ --service web >/dev/null || { echo "roll preview cp should put a file into the service"; exit 1; }
+ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview cp "$PV" :/tmp/fixture.txt "$HOME_DIR/back.txt" --service web >/dev/null || { echo "roll preview cp should bring the file back"; exit 1; }
+[ "$(cat "$HOME_DIR/back.txt" 2>/dev/null)" = "fixture for $PV" ] || { echo "the file brought back should be the one put in: $(cat "$HOME_DIR/back.txt" 2>/dev/null)"; exit 1; }
+[ "$(curl -s -o /dev/null -w '%{http_code}' "http://$API/v1/previews/$PV/files?service=web&path=/nothing/here")" = 404 ] || { echo "nothing at a path should be 404"; exit 1; }
+api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d]" | grep -q "copied files into web at /tmp" || { echo "the activity should say files were copied in"; exit 1; }
+
 say "a screenshot of the service (github.screenshot), once per head"
 # And /pricing, which the test service doesn't have (a 404 page, one failed request).
 api PUT "/v1/previews/projects/$PRJ/settings" '{"github":{"screenshot":true,"pages":["/pricing","web:/","wiki:/"],"widths":[768],"hide":[".clock"],"budget":{"load_ms":60000},"openapi":"/openapi.json","endpoints":["/openapi.json"],"states":[{"name":"tab","page":"/","steps":[{"press":"Tab"}]}],"browsers":["firefox","webkit-phone"]}}' >/dev/null

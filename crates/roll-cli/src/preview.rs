@@ -265,6 +265,16 @@ pub enum Preview {
         #[arg(long, short)]
         service: Option<String>,
     },
+    /// Copy files to or from a running service (as `roll apps cp`): `roll preview cp pv_… ./seed.sql
+    /// :/tmp/` puts a file (or a directory) under a directory there, `roll preview cp pv_… :/app/out.csv .`
+    /// brings one here. `:` marks the service's side. Up to 100 MiB at a time.
+    Cp {
+        preview: String,
+        src: String,
+        dst: String,
+        #[arg(long, short)]
+        service: Option<String>,
+    },
     /// Print a service's link (with its access token when the preview is private); `--browser`
     /// opens it.
     Open {
@@ -1187,6 +1197,38 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
         }
 
         Preview::Shell { preview, service } => return shell(api, &preview, service.as_deref()).await,
+        Preview::Cp { preview, src, dst, service } => {
+            let svc = service.map(|s| format!("&service={}", crate::apps::enc(&s))).unwrap_or_default();
+            let url = |path: &str| format!("/v1/previews/{preview}/files?path={}{svc}", crate::apps::enc(path));
+            match (src.strip_prefix(':'), dst.strip_prefix(':')) {
+                (Some(remote), None) => {
+                    let mut res = api.open_stream(&url(remote)).await?;
+                    let from = res.headers().get("x-roll-service").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+                    // Read as it comes, bounded: a whole filesystem asked for stops at 1 GiB.
+                    let mut bytes = Vec::new();
+                    while let Some(chunk) = res.chunk().await? {
+                        anyhow::ensure!(bytes.len() + chunk.len() <= 1 << 30, "{remote} is more than 1 GiB as a tar: copy something smaller");
+                        bytes.extend_from_slice(&chunk);
+                    }
+                    let here = crate::apps::untar_to(&bytes, &dst)?;
+                    if !as_json {
+                        println!("{from}:{remote} → {}", here.display());
+                        return Ok(());
+                    }
+                    json!({ "service": from, "from": remote, "to": here })
+                }
+                (None, Some(remote)) => {
+                    let body = crate::apps::tar_of(&src)?;
+                    let v = api.put_bytes(&url(remote), "application/x-tar", body).await?;
+                    if !as_json {
+                        println!("{src} → {}:{remote}", v["service"].as_str().unwrap_or(""));
+                        return Ok(());
+                    }
+                    v
+                }
+                _ => anyhow::bail!("one side is the service's, marked with `:` (roll preview cp <preview> ./file :/tmp/ or roll preview cp <preview> :/app/file .)"),
+            }
+        }
         Preview::Metrics { preview } => {
             let v = api.get(&format!("/v1/previews/{preview}/metrics")).await?;
             if !as_json {

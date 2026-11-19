@@ -468,6 +468,29 @@ async fn a_shell_in_a_previews_service_is_said_and_bounded() {
     e.engine.open_shell(&p.id, None, "ana", 80, 24).await.expect("its place is free again");
 }
 
+/// Files in and out of a preview's service (`roll preview cp`): what's written comes back, nothing
+/// at a path is a 404 before any of the answer, a relative path is refused, and the activity says
+/// who copied what.
+#[tokio::test]
+async fn files_go_in_and_out_of_a_previews_service_and_are_said() {
+    use tokio::io::AsyncReadExt;
+    let e = env(json!({ "enabled": true }));
+    e.code.open(change("chg_cp", 15));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_cp").unwrap().unwrap();
+    let web = e.engine.store.services(&p.id).unwrap().into_iter().next().unwrap().name;
+    assert_eq!(e.engine.write_files(&p.id, None, "/tmp", bytes::Bytes::from_static(b"a tar"), "ana").await.unwrap(), web);
+    let (svc, mut got) = e.engine.read_files(&p.id, Some(&web), "/tmp", "ana").await.unwrap();
+    let mut read = Vec::new();
+    got.read_to_end(&mut read).await.unwrap();
+    assert_eq!((svc.as_str(), read.as_slice()), (web.as_str(), &b"a tar"[..]));
+    assert!(matches!(e.engine.read_files(&p.id, None, "/nothing/here", "ana").await, Err(roll_previews::Error::NotFound(_))));
+    assert!(matches!(e.engine.write_files(&p.id, None, "tmp", bytes::Bytes::new(), "ana").await, Err(roll_previews::Error::BadRequest(_))));
+    assert!(matches!(e.engine.read_files(&p.id, Some("nope"), "/tmp", "ana").await, Err(roll_previews::Error::NotFound(_))));
+    let said: Vec<String> = e.engine.store.activity(&p.id).unwrap().into_iter().map(|a| a.message).collect();
+    assert!(said.contains(&format!("ana copied files into {web} at /tmp")) && said.contains(&format!("ana copied /tmp out of {web}")), "{said:?}");
+}
+
 /// A preview's output is read by anyone who can read the preview, and its code (a fork's too) can
 /// print what it was given: its services' logs, its jobs' output and what its page said in a
 /// screenshot run (the pull request's comment) show a secret's value as `***` (as checks'
