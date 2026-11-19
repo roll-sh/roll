@@ -1075,8 +1075,7 @@ impl Apps {
                     Some(p) => self.deps.secrets.resolve(&p, crate::model::PRODUCTION, service).await.ok(),
                     None => None,
                 };
-                // Never a `sensitive` key: those are for runtimes, not for a request roll sends.
-                match read.and_then(|vars| vars.into_iter().find(|v| v.name == key && !v.sensitive)) {
+                match read.and_then(|vars| vars.into_iter().find(|v| v.name == key)) {
                     Some(v) => Some((l.username, v.value)),
                     None => {
                         tracing::warn!(service, secret = %key, "apps: a Git login's secret couldn't be read; fetching without it");

@@ -2635,8 +2635,8 @@ app installed and no roll code mirror. `git_source.rs` is the whole of it:
   access token, or the name of the project's roll secret that holds it, read from its production
   secrets at each fetch so a rotated token, or one roll secrets issues per lease from the project's
   own GitHub App, just works and nothing is kept here; naming a secret is `deploy` in the
-  permissions catalogue, as that production secret then goes to the source's host, and a
-  `sensitive` key is never read for it). A password set here is sealed at rest (`git_auth`, bound to the service) and never returned, never
+  permissions catalogue, as that production secret then goes to the source's host: whoever may
+  change what production runs can already read its secrets, sensitive ones too). A password set here is sealed at rest (`git_auth`, bound to the service) and never returned, never
   in the URL, and sent as Basic auth only to the host it was set for: every fetch
   (`git_source::Remote`) checks the source URL's host against it, and moving the source to
   another repository (host or path) drops it in the same transaction, as a registry login is dropped with its
