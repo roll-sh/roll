@@ -410,7 +410,7 @@ pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Work
     let opts = roll_secrets::Options { keyring, key_source, links: links(api.clone()), syncs: syncs::kinds(api.clone(), allow_private), open, trust_forwarded_for: args.code_trust_forwarded_for, web_url, deliver: Some(Arc::new(syncs::AuditDeliver::new(allow_private, api))),
         // Grants are looked up when a sync made by one pushes; identities' logins mint workload tokens.
         grants: Some(access.clone() as Arc<dyn roll_auth::Grants>),
-        workloads: Some(Arc::new(Workloads(access))),
+        workloads: Some(Arc::new(Workloads(access.clone()))),
         people: Some(Arc::new(people)),
         kms: Some(Arc::new(CustomerKms::new(None))), sts: Some(Arc::new(RollSts::new(None))), outside: Some(Arc::new(outside::Guarded { allow_private })), github: Some(Arc::new(github::RollGitHub::new(allow_private))), clouds: Some(roll_secrets::clouds::Clouds { issuer: issuer_url(args), tokens: Arc::new(clouds::RollClouds::new()) }),
     };
@@ -422,6 +422,7 @@ pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Work
     }
     // Where clients reach rolld: a CA's certificates name its CRL there.
     secrets.set_public_api(args.code_public_url.clone().unwrap_or_else(|| format!("http://{}:{}", args.public_host, args.api.port())));
+    tell_decoys(&access, secrets.clone());
     // A deleted project's secrets go with it.
     let s = secrets.clone();
     workspace.on_delete(Box::new(move |id| {
@@ -454,6 +455,20 @@ pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Work
         }
     });
     Ok(secrets)
+}
+
+/// A decoy key's token was used: roll-access tells roll secrets, which raises `decoy_used` on its
+/// project (off the request's task: it writes).
+fn tell_decoys(access: &roll_access::Access, secrets: Arc<Secrets>) {
+    access.on_decoy(move |used| {
+        let (s, used) = (secrets.clone(), used.clone());
+        let Ok(rt) = tokio::runtime::Handle::try_current() else { return };
+        rt.spawn_blocking(move || {
+            if let Err(e) = s.decoy_used(&used.grant, used.ip.as_deref(), &used.route) {
+                tracing::warn!(grant = %used.grant, "raising a decoy key's alert failed: {e}");
+            }
+        });
+    });
 }
 
 /// roll's OIDC issuer for GCP and Azure (roll-secrets' issuer.rs): where clouds reach rolld.
@@ -1205,6 +1220,20 @@ impl roll_secrets::Workloads for Workloads {
         self.0.revoke_workload(id, "its workload identity was deleted").map(|_| ()).map_err(|e| Error::Internal(format!("revoking a workload token: {e}")))
     }
 
+    /// A decoy token for a decoy key: roll-access's own decoys, owned by whoever planted it.
+    fn mint_decoy(&self, name: &str, rule: roll_auth::scope::Rule, owner: Option<&str>) -> roll_secrets::Result<roll_secrets::Minted> {
+        match self.0.mint_decoy(name, roll_auth::scope::Scope(vec![rule]), owner.unwrap_or("operator"), owner) {
+            Ok((g, secret)) => Ok(roll_secrets::Minted { id: g.id, secret, expires_at: 0 }),
+            Err(roll_access::Error::BadRequest(m)) => Err(Error::BadRequest(m)),
+            Err(roll_access::Error::Conflict(m) | roll_access::Error::TooMany(m)) => Err(Error::TooMany(m)),
+            Err(e) => Err(Error::Internal(format!("minting a decoy token: {e}"))),
+        }
+    }
+
+    fn revoke_decoy(&self, id: &str) -> roll_secrets::Result<()> {
+        self.0.revoke_decoy(id, "its decoy key was changed or deleted").map(|_| ()).map_err(|e| Error::Internal(format!("revoking a decoy token: {e}")))
+    }
+
     /// Each token as roll-access answers it now: gone once revoked or expired, or (a person's own)
     /// once its person can't sign in.
     fn grants(&self) -> roll_secrets::Result<Vec<roll_auth::Grant>> {
@@ -1408,6 +1437,68 @@ mod tests {
         assert!(roll_secrets::router(secrets.clone()).oneshot(set).await.unwrap().status().is_success());
         assert_ne!(apps.digest(&project, "production").await.unwrap(), Some(before));
         assert_eq!(apps.digest(&project, "pr-9").await.unwrap(), None);
+    }
+
+    /// A decoy key's token, used where it was planted: roll-access refuses it and roll secrets
+    /// raises `decoy_used` on the key; deleting the key revokes the token (rolld's wiring).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_decoy_keys_token_raises_decoy_used_and_dies_with_its_key() {
+        use tower::ServiceExt;
+        let dir = tempfile::tempdir().unwrap();
+        let ws_db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("workspace.db")), "workspace").unwrap();
+        let ws = Arc::new(roll_workspace::Workspace::new(ws_db).unwrap());
+        let project = ws.create("", "shop", "", None).unwrap().id;
+        let access = roll_access::Access::with_db(code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("access.db")), "access").unwrap(), Default::default(), Default::default()).unwrap();
+        let db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("secrets.db")), "secrets").unwrap();
+        let opts = roll_secrets::Options {
+            keyring: Ok(roll_secrets::Keyring::new(&"k".repeat(32), None).unwrap()),
+            key_source: roll_secrets::KeySource::Env,
+            links: Default::default(),
+            syncs: Default::default(),
+            open: true,
+            trust_forwarded_for: false,
+            web_url: None,
+            deliver: None,
+            grants: Some(access.clone() as Arc<dyn roll_auth::Grants>),
+            people: None,
+            kms: None,
+            sts: None,
+            outside: None,
+            github: None,
+            clouds: None,
+            workloads: Some(Arc::new(super::Workloads(access.clone()))),
+        };
+        let secrets = Arc::new(roll_secrets::Secrets::new(db, ws, opts).unwrap());
+        super::tell_decoys(&access, secrets.clone());
+        let call = |method: &str, path: &str, body: Option<Json>| {
+            let req = axum::http::Request::builder().method(method).uri(format!("/v1/secrets/projects/{project}/environments/production{path}")).header("content-type", "application/json");
+            let req = req.body(axum::body::Body::from(body.map(|b| b.to_string()).unwrap_or_default())).unwrap();
+            roll_secrets::router(secrets.clone()).oneshot(req)
+        };
+        let made = call("POST", "/decoys", Some(json!({ "key": "OLD_DEPLOY_TOKEN", "kind": "rlt" }))).await.unwrap();
+        assert_eq!(made.status(), axum::http::StatusCode::CREATED);
+        let operator = roll_secrets::Caller::operator();
+        let (value, _) = secrets.reveal(&project, "production", "/", "OLD_DEPLOY_TOKEN", false, &operator).unwrap();
+        // roll-access's own decoy: never a grant a product acts on.
+        let g = access.store.by_secret(value.expose()).unwrap().expect("a decoy grant");
+        assert!(g.decoy);
+        assert!(roll_auth::Grants::grant(&*access, &g.id).is_none());
+        // The gate's decoy path.
+        access.decoy_tripped(&g, Some("198.51.100.4".into()), "/v1/secrets/whoami", None);
+        let mut first = None;
+        for _ in 0..50 {
+            first = secrets.project_health(&project, &operator, false).unwrap().into_iter().next();
+            if first.is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        let first = first.expect("a finding");
+        assert_eq!((first.issue, first.key.as_str()), (roll_secrets::health::Issue::DecoyUsed, "OLD_DEPLOY_TOKEN"));
+        assert!(first.detail.contains("198.51.100.4"), "{}", first.detail);
+        assert!(call("DELETE", "/secrets/OLD_DEPLOY_TOKEN", None).await.unwrap().status().is_success());
+        assert!(access.store.by_secret(value.expose()).unwrap().is_none());
+        assert!(access.store.get(&g.id).unwrap().revoked_at.is_some());
     }
 
     /// A customer's key wraps a project's data key: Encrypt and Decrypt name the key and carry the

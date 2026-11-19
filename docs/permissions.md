@@ -1076,6 +1076,11 @@ look (an old repo, a wiki page, a backup's config):
   hour per decoy and person). A decoy can't be turned into a working token.
 - It's checksummed like any `rlt_`, so scanners report a leaked decoy too (roll revokes it, which
   ends the trap: plant another).
+- roll secrets plants them as decoy keys (docs/secrets.md, "Decoys"). rolld mints each with
+  `Access::mint_decoy`, owned by whoever planted it, and revokes it with `Access::revoke_decoy`
+  when its key changes or goes. A product hears each use through `Access::on_decoy`, after the
+  audit row and the mail. A decoy is never a live grant for a product's background work or for
+  reach (`Grants::grant` answers `None`).
 
 ## Leaked tokens
 

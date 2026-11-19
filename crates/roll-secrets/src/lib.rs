@@ -13,6 +13,7 @@
 pub mod folder_policy;
 pub mod access;
 mod alerts;
+pub mod decoys;
 pub mod api;
 pub mod health;
 pub mod outside;
@@ -72,6 +73,7 @@ pub use metrics::Metrics;
 pub use read::{Followed, Grid, Problem, Secret, Source, Values, Version};
 pub use requests::{Request, RequestValue, Review, Verdict};
 pub use exports::Export;
+pub use decoys::{Decoy, NewDecoy};
 pub use identities::{Identity, Login, NewIdentity};
 pub use required::Required;
 pub use shares::{NewShare, Peek, Share};
@@ -453,6 +455,7 @@ impl Secrets {
         db.add_column("projects", "forgotten_at", "INTEGER")?;
         db.ensure_schema(notices::SCHEMA)?;
         db.ensure_schema(alerts::SCHEMA)?;
+        db.ensure_schema(decoys::SCHEMA)?;
         db.ensure_schema(rotators::SCHEMA)?;
         db.ensure_schema(saas::SCHEMA)?;
         db.ensure_schema(transit::SCHEMA)?;
@@ -636,8 +639,14 @@ impl Secrets {
             c.execute("DELETE FROM exports WHERE to_project = ?", [project])?;
             c.execute("DELETE FROM environments WHERE project_id = ?", [project])?;
             c.execute("UPDATE projects SET forgotten_at = ? WHERE project_id = ?", code_sql::params![now, project])?;
+            // Its decoys end with it: their tokens are revoked next.
+            c.execute("UPDATE decoys SET ended_at = ? WHERE project_id = ? AND ended_at IS NULL", code_sql::params![now, project])?;
             forget_if_done(c, project, now)
-        })
+        })?;
+        if let Err(e) = self.end_decoys() {
+            tracing::warn!(project, "revoking a deleted project's decoys failed (the sweeper retries): {e}");
+        }
+        Ok(())
     }
 
     /// Forgotten projects whose last lease is revoked: their key and registries go.

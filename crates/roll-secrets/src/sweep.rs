@@ -496,6 +496,9 @@ impl Secrets {
         self.sweep_retention()?;
         self.sweep_reminders()?;
         self.sweep_alerts()?;
+        if let Err(e) = self.end_decoys() {
+            tracing::warn!("revoking ended decoys failed: {e}");
+        }
         let cutoff = now - crate::audit::RETENTION_DAYS * 86_400_000;
         self.db.write(|c| c.execute("DELETE FROM audit WHERE at < ?", [cutoff]))?;
         Ok(out)

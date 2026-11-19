@@ -272,6 +272,20 @@ pub trait Workloads: Send + Sync {
     fn grants(&self) -> crate::Result<Vec<roll_auth::Grant>> {
         Ok(vec![])
     }
+    /// A decoy token (docs/secrets.md, "Decoys"; roll-access's decoys): it looks as `rule` says and
+    /// allows nothing, and roll-access tells roll secrets of each use
+    /// ([`crate::Secrets::decoy_used`]). Owned by `owner` (`None`: the operator), who's mailed
+    /// on its use. `expires_at` is 0: a decoy doesn't end on its own.
+    fn mint_decoy(&self, name: &str, rule: roll_auth::scope::Rule, owner: Option<&str>) -> crate::Result<Minted> {
+        let _ = (name, rule, owner);
+        Err(crate::Error::BadRequest("decoys aren't on this server".into()))
+    }
+    /// End a decoy token now (its key was deleted or changed). `Ok` when it's gone, whether or not
+    /// it was live.
+    fn revoke_decoy(&self, id: &str) -> crate::Result<()> {
+        let _ = id;
+        Ok(())
+    }
 }
 
 /// A workload token: its grant's id, the secret (shown once) and when it ends (Unix ms).

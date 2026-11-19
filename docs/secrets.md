@@ -934,7 +934,8 @@ is one click.
 
 `GET …/health` (`roll secrets health`, the dashboard's Health view) is every finding above in
 every standard environment and folder at once, worst first, so none waits on someone opening the
-right folder: `expired`, `rotation_failing` (a managed key's scheduled rotation fails: the
+right folder: `decoy_used` (a decoy key's token was used; only the project's admins see it, see
+Decoys), `expired`, `rotation_failing` (a managed key's scheduled rotation fails: the
 database, vendor, product or rotator refused or didn't answer; the detail says why, the old
 credential keeps working, and the sweeper tries again; cleared by the next rotation that works),
 `revoke_failing` (a credential roll retired, or a lease that ended, that it couldn't revoke yet: it
@@ -2820,6 +2821,70 @@ importing production (it follows 256), each read once, reach takes 5–7 ms on S
 on Postgres. The audit is read once per project and filtered in memory (it was a query per folder:
 55–89 ms and 254–302 ms); what's left on Postgres is the walk's two queries per folder.
 
+### Decoys
+
+A decoy key (a honeytoken, as GitGuardian's are) is a credential made to be found. It's stored
+where an intruder would look, and any use of it raises an alert. `POST …/environments/{env}/decoys
+{key, kind, path?}` (`roll secrets decoy add KEY --kind rlt [--path /ci]`, the folder's menu
+"Add a decoy…") makes a new key whose value is a decoy credential:
+
+- **`rlt`**: a roll token that roll-access made as a decoy (docs/permissions.md, "Decoy tokens").
+  It allows nothing, whatever its rules say. Any use is refused as an unknown token is, so whoever
+  holds it learns nothing. roll-access records the use on the token, writes its own audit row,
+  mails the decoy's owner (whoever planted it) and the admins, and tells roll secrets
+  (`Access::on_decoy`). roll secrets keeps no token store: rolld mints the decoy through
+  `Workloads::mint_decoy`.
+- `postgres` and `aws` aren't here yet. A Postgres decoy needs roll Postgres to report a role's
+  login attempts, which its proxy doesn't do: it relays the SCRAM exchange to the database
+  untouched. An AWS decoy needs an AWS account and CloudTrail.
+
+The key is an ordinary change (as a `PUT` of the key makes), so it reads, resolves, exports and
+syncs like any other key. Only the project's admins (`admin` over the whole project) see that it's
+a decoy:
+- the `decoy` on `Secret` in the folder's list (the dashboard's "decoy" badge, and "used N×" in
+  red once it's been used);
+- `decoy_used` in health;
+- its rows in the audit log (`secrets.decoy` when it's planted, `secrets.alert.decoy_used` on each
+  alert).
+
+Everyone else gets the same answers as for any key, without those fields and rows. Nothing marks it
+in the grid, reach or a sync's target: syncing a decoy into CI, or exporting it into an old config,
+is the point. In a protected environment it lands without a change request. It changes no value
+anyone has, and only an admin (who could lift the protection) may plant one.
+
+**What to plant where.** Put it somewhere only an intruder reads, under a name a real credential
+would have (`LEGACY_DEPLOY_TOKEN`, `ROLL_ADMIN_TOKEN`). For example:
+- a CI system's variables, synced from a folder;
+- an old branch's `.env`, or a backup's config;
+- a wiki page about deploys;
+- a developer laptop's shell profile.
+
+One decoy per place tells you which place leaked.
+
+**When it's used.** roll secrets counts every use and raises `decoy_used` at most once an hour per
+decoy:
+- an audit row (`secrets.alert.decoy_used`, by `roll:decoys`, with the source address), which the
+  environment's Activity shows under Alerts and audit sinks carry to a SIEM;
+- a notice to the environment's notify URL, if it has one (the same outbox and retries as read
+  alerts);
+- `decoy_used` first in health, until the decoy ends.
+
+Each names the key, the environment, the folder, when and the address it came from, and the route
+it called. It never names a value.
+
+**What to do.** Someone has read the place the decoy was planted:
+1. Cut off whatever can reach that place (the CI system's tokens, the repository's deploy keys, the
+   laptop's sessions).
+2. Rotate the real credentials stored beside the decoy (`roll secrets rotations --rotate-due`, the
+   Health view).
+3. Delete the decoy key and plant a new one.
+
+**Ending.** Changing a decoy key's value, linking it, or deleting it (its folder, its environment or
+its project too) ends the decoy. The write marks it ended in its own transaction, and its token is
+revoked right after, outside the transaction (roll-access is another store). The sweeper retries a
+revoke that fails. A copy promoted or rolled back into another key holds a token that stops working
+once the decoy ends.
+
 ### Workload identities (OIDC)
 
 A CI job or a cluster logs in with its own short-lived OpenID Connect token instead of holding a
@@ -3084,6 +3149,7 @@ isn't in the workspace is 404.
 | `PUT /environments/{env}/secrets/{key}?path=` | `SetSecret` | `Written`; 409 `stale` when `if_version` isn't the key's version |
 | `DELETE /environments/{env}/secrets/{key}?path=&type=&if_version=` | | `Written`; 409 `stale` when `if_version` isn't the key's version |
 | `GET /environments/{env}/secrets/{key}/value?path=&resolve=` | | `{value, problems}` |
+| `POST /environments/{env}/decoys` | `NewDecoy` | 201 `Secret` (admin; a new key, never its value; 409 `exists` when the key is there; "Decoys") |
 | `GET /environments/{env}/secrets/{key}/totp?path=` | | `{code, expires_at, period}` (`reveal`; a key that isn't a TOTP key is a 400; audited as `secrets.totp`, without the code) |
 | `GET /environments/{env}/secrets/{key}/versions?path=&type=` | | `Version[]` newest first |
 | `GET /environments/{env}/secrets/{key}/versions/{v}/value?path=&type=` | | `{value}` |
@@ -3241,7 +3307,10 @@ type Secret = {
   updated_at: number; updated_by: string;
   source: { kind: "own" } | { kind: "import"; environment: string; path: string } | { kind: "base"; environment: string };
   overridden: boolean; // a personal value of the caller replaces it
+  decoy?: Decoy; // only for the project's admins ("Decoys"); absent for everyone else, as on any key
 };
+type Decoy = { kind: "rlt"; created_at: number; created_by: string; uses: number; used_at: number | null; used_ip: string | null };
+type NewDecoy = { key: string; kind: "rlt"; path?: string };
 type SetSecret = { value?: string; comment?: string; tags?: string[]; type?: "shared" | "personal"; link?: Link | null; message?: string; expires_at?: number | null; if_version?: number };
 type Op =
   | { op: "set"; key: string; value?: string; comment?: string; tags?: string[]; type?: "shared" | "personal"; link?: Link | null; if_version?: number }
@@ -3263,10 +3332,10 @@ type Insights = { path: string; max_age_days: number | null; reads_since: number
 type Required = { key: string; path: string; comment: string; type?: "url" | "int" | "port" | "bool" | "json" | "email"; pattern?: string; owner?: string /* who supplies it */; password?: { length: number; classes?: ("lower" | "upper" | "digit" | "symbol")[]; symbols?: string } };
 type Sink = { id: string; url: string; status: "new" | "ok" | "error"; error: string | null; cursor: number; delivered_at: number | null; created_at: number; created_by: string };
 type ProjectFindings = { project: string; project_name: string; findings: Finding[] };
-type Finding = { issue: "expired" | "missing" | "exposed" | "weak" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string };
-type Finding = { issue: "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "weak" | "expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string };
+type Finding = { issue: "decoy_used" | "expired" | "missing" | "exposed" | "weak" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string };
+type Finding = { issue: "decoy_used" | "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "weak" | "expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string };
 type Rotation = { environment: string; path: string; keys: string[]; kind: string; ref: string; name: string; rotate_days: number | null; grace_minutes: number; issued_at: number | null; next_due: number | null; last_error: string | null; failed_at: number | null };
-type Finding = { issue: "expired" | "missing" | "exposed" | "public" | "weak" | "expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string };
+type Finding = { issue: "decoy_used" | "expired" | "missing" | "exposed" | "public" | "weak" | "expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string };
 type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };
 type SaasRotator = { id: string; name: string; vendor: "sendgrid" | "twilio" | "okta" | "entra" | "auth0"; target: Record<string, unknown>; created_at: number; created_by: string };
 type KubernetesCluster = { id: string; name: string; api_url: string; has_ca: boolean; created_at: number; created_by: string };
