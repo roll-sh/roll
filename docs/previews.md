@@ -2049,25 +2049,33 @@ Ranked by what a person notices first. Done so far:
    through `Secrets::resolve_for(ResourceRef::new(kind, id).untrusted(), …)` (never a
    protected environment or a sensitive key), and offer to keep a pasted value in the base
    environment's folder.
-2. **WebSocket upgrades checked against the dashboard's origins** (from turn 6's review): a
-   WebSocket upgrade is a GET, which rolld's gate lets past its CSRF and Origin check, so an
-   admin's `SameSite=Lax` cookie opens `…/forward` (and roll apps' tunnel and shell) from any page
-   on the API's own site. It only matters where a preview host shares the API's registrable
-   domain (a self-hosted `api.acme.dev` with `*.preview.acme.dev`). One check in the gate for
-   every product's upgrades, agreed with the apps and MCP threads.
-3. **stderr apart in the sheet's logs**: the followed stream merges a container's stdout and
-   stderr (`docker logs -f` read as one), so the sheet can't show stderr on its own. The drains
-   already tell them apart (`drain_from` tags each line); tag `follow` the same way and carry it
-   to the sheet.
-4. **Traces of a preview's `roll.toml` services, in review** (`feature/roll-previews-traces`;
-   Vercel's preview traces, roll apps' `traces`): see "Traces"; a preview's roll apps services'
-   own on the same list (`feature/roll-previews-apps-traces`, on #403).
-5. **Files and ports from the sheet, in review** (`feature/roll-previews-sheet-files`): under the
-   Shell tab, a path's tar downloaded from `…/files` (the server's own words when nothing's there),
-   and the `roll preview cp`/`forward` lines (roll apps' `cp`/`proxy` for its services).
-6. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+2. **An independent review of turns 7 and 8** (a public OTLP intake, an untrusted parser, the
+   gate's WebSocket rule, the sheet's downloads): their findings fixed before anything builds on
+   them, as turn 6's were (#386).
+3. **Slowest routes from traces** (Vercel's Observability, Sentry's performance): a preview's
+   spans say each route's real time; the sheet's endpoint times read only a few GETs of the
+   OpenAPI's (`github.endpoints`). The routes a change made slower than main's preview, from its
+   traces, in the verdict strip and the pull request comment.
+4. **An error group opens its trace**: a grouped error whose lines carry a trace id (most SDKs
+   log it) links to that trace's spans, so a failing request's path is one click from its error.
+5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-7. **Watch: pg-control's recovery to a time seconds old** (unowned).
+6. **Watch: pg-control's recovery to a time seconds old** (unowned).
+
+Landed in previews' lock turns 7 and 8 of 2026-11-19 (main 490b68b75 and 7b4063ef2, each exactly
+its gated tree; turn 7 landed ahead of roll apps' chain4 with apps' and MCP's agreement, turn 8
+rebuilt on the post-chain4 main and gated again):
+- turn 6's review fixes: drains compare stamps per stream, forward relays swept, the forward
+  WebSocket capped at 1 MiB a message and ended with its preview, the sheet's roll apps shell only
+  for a service with the preview's environment (#386);
+- a session's WebSocket opens only from the dashboard's origins, in rolld's gate, for every
+  product's upgrades (#388, agreed with apps; reviewed by MCP);
+- stderr apart in a followed log: `event: stderr`, the sheet's filter, the CLI's stderr (#390);
+- files and ports from the sheet (#400);
+- traces of a preview's `roll.toml` services, and its roll apps services' on the same list (#403,
+  #404); MCP maps them as `previews_traces` and `previews_get_trace`;
+- holder routing and the visibility check read a preview's id percent-decoded, as its handler does
+  (#405, found by MCP in roll apps).
 
 Landed in previews' lock turn 6 of 2026-11-19 (main 741f8b789, exactly the gated tree; built and
 gated before the lock came, rebuilt on the new main when it did, the stack's own diff checked line
