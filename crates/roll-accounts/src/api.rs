@@ -52,7 +52,7 @@ pub fn router(accounts: Arc<Accounts>) -> Router {
         .route("/v1/accounts/me", get(me).patch(update_me).delete(delete_me))
         .route("/v1/accounts/me/email", post(change_email))
         .route("/v1/accounts/me/email/confirm", post(confirm_email))
-        .route("/v1/accounts/me/sessions", get(my_sessions))
+        .route("/v1/accounts/me/sessions", get(my_sessions).delete(end_other_sessions))
         .route("/v1/accounts/me/activity", get(my_activity))
         .route("/v1/accounts/me/sessions/{id}", delete(revoke_my_session))
         .route("/v1/accounts/me/identities/{provider}", delete(unlink))
@@ -1003,6 +1003,14 @@ async fn my_activity(State(a): S, me: Me, Query(q): Query<ActivityQuery>) -> Res
 async fn my_sessions(State(a): S, me: Me) -> Result<Response> {
     let u = signed_in(me)?;
     Ok(Json(blocking(&a, move |a| a.sessions_of(&u.user, &u.session)).await?).into_response())
+}
+
+/// End every session of yours but this one (Google's "sign out of all other sessions"): what to
+/// do first when Recent activity shows a sign-in you don't recognise.
+async fn end_other_sessions(State(a): S, me: Me) -> Result<Json<Value>> {
+    let u = signed_in(me)?;
+    let ended = blocking(&a, move |a| a.end_other_sessions(&u.user, &u.session)).await?;
+    Ok(Json(json!({ "ended": ended })))
 }
 
 async fn revoke_my_session(State(a): S, me: Me, Path(id): Path<String>) -> Result<StatusCode> {
