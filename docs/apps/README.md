@@ -1415,9 +1415,11 @@ with "Lift the freeze") stops what goes live without stopping work: while it's o
 moves, deploy hooks and the Git watch build to `ready` beside the live deployment, exactly as a
 person's hold ("Holding deploys") does (a service that can't wait beside the live one isn't
 deployed, the log saying why), and a person's deploy, redeploy or promotion is a 409 that says
-the reason, unless its body says `override: true`, which goes through and is written in the
-audit log (`audit.freeze.overridden`, with who). An upload (`roll up`, `--image-file`) says it
-as the header `X-Roll-Override: 1`, and the CLI as `--override`. Rolling back to what was live is
+the reason, unless it carries the header `X-Roll-Override: 1`, which goes through and is written
+in the audit log (`audit.freeze.overridden`, with who). The override is `admin` in the permissions
+catalogue (MCP's review: a freeze is the team saying nothing goes live now, and a token that may
+only deploy can't go past it), so it's a header the gate reads, never a body field (a body's
+`override` is a 400). The CLI says it as `--override`. Rolling back to what was live is
 never frozen: it's the way out of a bad deploy. Putting live a build that never was (one held at
 `ready`, freeze or not) is a deploy, so it needs the override too. A base image's rebuild
 (`rebuild_on_base`) builds to `ready` as a push does. The secrets watch's redeploy waits for the
