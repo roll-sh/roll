@@ -12357,6 +12357,54 @@ warnings, none new in a changed file), 386 tests in 11 binaries, regress 51,148/
 newly differing), isolation 1,647/1,648, pg_dump_tap 14,609 passed. No assertions or catalog
 counts touched (no checked stage).
 
+**Kept (`cand/a255-2`, on `cand/a255`): a block cache hit takes its shard's lock shared.**
+`storage::cache`: the shards are `parking_lot::RwLock`s, a hit takes the read side and sets its
+entry's `referenced` (now an `AtomicBool`, stored only when clear); inserts, evictions and
+`forget_file` take the write side and drop an evicted block at once, as before. With every
+block of the fixture cached, readers never wait on each other, so a reader preempted inside
+the lock holds nobody up (the mutex's spin-then-yield behind such a holder was 70% of the
+32-client `sched_yield` stalls, agent 250). Point selects at 32 clients, plain dist against
+`8fa1154dd`: **p99 lower in all 10 pairs** (2.0-4.2 -> 0.77-1.39 ms; medians 2.73 -> 0.97 over 7
+pairs of the change with the CLOCK fix below, 3.85 -> 1.01 over 3 of the kept one), user
+instructions +0.06% / +0.07%, cycles +1.2% / +0.7% (ranges ±5%), ops/s -1.2% / -1.7% at the
+median (-9.8 to +21.6%: unresolved); 8 clients +0.02% instructions, p99 0.44 -> 0.28 ms (4
+pairs); range reads at 8 clients +0.00% (5 pairs); TPC-H SF1 (lane C, one pair each, q01 and
+q05 dropped where one side's `perf stat` window missed the query) 256 MB +0.13% instructions,
+VmHWM 592 -> 607 MB; 2 GB +0.01% instructions, cycles -3.0%, VmHWM 1,740 -> 1,762 MB; result
+hashes equal. Same day at 32 clients: PostgreSQL 18.6's p99 1.42 ms against 0.86 (2 pairs),
+pgrust's 1.01 against 1.31 (1 pair; the other pair's pgrust did not start): under PostgreSQL's,
+not shown under pgrust's. Throughput at 32 clients is not up.
+
+**Measured and dropped** (patches in `~/.cache/a255/patches/`):
+- A lock-free hit (`cache-epoch-*.patch`): each shard an open-addressed table of slots read
+  under a per-slot seqlock, the block's count taken pinned to crossbeam's epoch, evicted blocks
+  freed through it; CLOCK over the table's slots. p99 at 32 clients the same as the shared lock
+  (2.10 -> 0.91 ms, 7 of 7 pairs) for +0.24-0.42% instructions (the pin), and TPC-H at 256 MB
+  -10 to -14% instructions, but **VmHWM +84 to +154 MB** at 256 MB in every variant: freeing
+  through the epoch (blocks freed after the parallel worker that allocated them exited:
+  mimalloc kept 4.7K abandoned pages against 106), a private collector (cycles +4.9% at 32
+  clients: its global epoch moves more often), a slack for pending frees (fixed an eviction
+  loop that emptied a shard while frees were pending: evicting moves bytes into pending, never
+  out), no flush per eviction. The cache's own count stayed exact (`check()`); the process's
+  did not.
+- Agent 247's CLOCK quirk fix alone (the hand moves past an evicted slot, so the newest block
+  moved into it is not evicted next), with the shared lock (`cache-clock-hand.patch`): TPC-H at
+  256 MB **-15.6% instructions, -14.0% cycles** (q02 -73%, q17 -57%, q09 -27%; q21 +23%, q03
+  +10%), but **VmHWM 576 -> 720 MB** (one pair; off-lane 447 -> 510 MB, anonymous memory). Not
+  the cache's count (it frees at once), and not explained this round: more of the working set
+  stays cached, and the likely cause, not measured, is a block's allocation (size-class
+  rounding, the `Arc` header) exceeding `Block::mem_bytes` (data plus the struct). **Lead**: count
+  a cached block's allocation (size class, the `Arc` header) in `mem_bytes`, then take the hand
+  fix within the same bytes; it is the largest TPC-H win at small caches measured this round.
+
+Left: (1) the CLOCK fix above with an exact block size; (2) format 4's costs on range reads
+(+0.4%, block boundaries) and short transactions (dictionary compression in flushes and
+compactions); (3) PGO gates under 1%: two builds of one commit differ by 0.94% (train twice and
+compare, or gate on plain dist); (4) throughput at 32 clients is flat with the
+shared lock; what limits it now was not measured this round.
+
+Verification of `cand/a255-2`: `tools/quick-check.sh` over `bc9102ebb` (`007c5c7eb`, with `cand/a255`): build and Clippy (16 warnings, none new in a changed file), 443 tests in 26 binaries, the crash step (seeds 1-3 x 2, power cut), regress 51,148/51,150 (none newly differing), isolation 1,647/1,648, pg_dump_tap 14,609 passed. (The dropped epoch version also passed quick-check with the checked stage, over `8fa1154dd`.)
+
 ## Point and range reads, round 6: 32 clients, idle footprint (agent 250)
 
 BENCH.md "Point and range reads, round 6" has the tables. Base `6d3b7e9e5`, built plain dist

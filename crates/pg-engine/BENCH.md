@@ -826,6 +826,39 @@ clients:
 | PGO | 7 | +0.29 [+0.2, +0.3] | +1.85 [-2.1, +4.4] | 0.68 -> 0.76 |
 | plain dist, point selects at 8 clients (the first version, lists without the bit test) | 5 | -0.00 [-0.1, +0.0] | -1.93 [-3.8, +2.6] | 0.35 -> 0.29 |
 
+**The block cache's hit path** (`cand/a255-2`; plain dist against its parent `8fa1154dd`;
+lanes and harness as above; "CLOCK fix" = the shared lock with agent 247's hand fix, dropped;
+the epoch rows with the default collector at 32 clients and "no pending count" are against
+`c4ad9402d`, the others against `8fa1154dd`):
+
+| cell | change | pairs | Δ instr | Δ cycles | Δ ops/s | p99 ms |
+|---|---|---:|---:|---:|---:|---:|
+| point, 32 clients | shared lock (kept) | 3 | +0.07 [-0.1, +0.2] | +0.73 [-1.5, +3.6] | -1.69 [-3.7, +6.0] | 3.85 -> 1.01 |
+| point, 32 clients | shared lock + CLOCK fix | 7 | +0.06 [+0.0, +0.2] | +1.16 [-5.8, +5.5] | -1.18 [-9.8, +21.6] | 2.73 -> 0.97 |
+| point, 8 clients | shared lock + CLOCK fix | 4 | +0.02 [-0.4, +0.0] | -0.90 [-5.5, +1.4] | +15.88 [+10.6, +31.8] | 0.44 -> 0.28 |
+| point, 1 client | shared lock + CLOCK fix | 3 | -1.87 [-2.7, +0.7] | +3.44 [-3.9, +7.3] | -1.64 [-16.1, +4.3] | 0.13 -> 0.15 |
+| range, 8 clients | shared lock + CLOCK fix | 5 | +0.00 [-0.0, +0.1] | +0.90 [-1.7, +1.7] | -5.01 [-9.5, +17.4] | 0.81 -> 0.76 |
+| point, 32 clients | epoch, own collector (dropped) | 7 | +0.38 [+0.3, +0.5] | +4.88 [-3.1, +9.1] | -8.47 [-16.3, +19.9] | 3.31 -> 1.87 |
+| point, 32 clients | epoch, default collector (dropped) | 7 | +0.24 [+0.1, +0.5] | +0.98 [-5.4, +4.4] | -1.54 [-14.4, +17.4] | 2.10 -> 0.91 |
+
+(With every fixture block cached, the shared lock and the shared lock with the CLOCK fix run the
+same code on point and range reads.) Same day, 32 clients, p99: PostgreSQL 18.6 1.42 ms against
+0.86 (2 pairs), pgrust 1.01 against 1.31 (1 pair).
+
+TPC-H SF1, lane C, one pair each (22 queries, a warm-up pass, then 3 runs of each query in one
+`perf stat` window; VmHWM of the engine; result hashes equal in every pair):
+
+| cache | change | Δ instr | Δ cycles | VmHWM MB base -> change |
+|---|---|---:|---:|---:|
+| 256 MB | shared lock (kept; q01 dropped: one window missed it) | +0.13 | +2.32 | 592 -> 607 |
+| 2 GB | shared lock (kept; q05 dropped likewise) | +0.01 | -2.99 | 1,740 -> 1,762 |
+| 256 MB | shared lock + CLOCK fix | -15.59 | -14.01 | 576 -> 720 |
+| 2 GB | shared lock + CLOCK fix | +0.08 | +3.02 | 1,731 -> 1,731 |
+| 256 MB | epoch, slack, default collector | -13.72 | -8.97 | 613 -> 696 |
+| 256 MB | epoch, slack, own collector | -13.29 | -7.59 | 566 -> 720 |
+| 2 GB | epoch, slack, own collector | +0.15 | -3.78 | 1,741 -> 1,725 |
+| 256 MB | epoch, no pending count (c1) | -13.88 | -9.41 | 586 -> 735 |
+
 ## Point and range reads, round 6: the same-day table, 32 clients, idle footprint (2026-11-17/18, agent 250)
 
 HANDOFF.md "Point and range reads, round 6" has what changed and why. Base `6d3b7e9e5`, built
