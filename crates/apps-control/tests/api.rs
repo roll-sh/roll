@@ -2023,6 +2023,48 @@ async fn a_5xx_rate_past_the_alert_is_an_event_once() {
     assert_eq!(resolved[0]["data"]["alert"], "alert.errors");
 }
 
+/// An objective (Cloud Monitoring's SLOs): its budget over its window on `…/slo`, and a burn
+/// 14.4 times as fast as it lasts over an hour and its last five minutes is `alert.slo` once,
+/// resolved when it slows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_slo_shows_its_budget_and_a_fast_burn_alerts() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "api", json!({"port": 80, "alerts": {"error_pct": 0}, "slo": {"objective": 99.0, "window_days": 7}})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let env = format!("/v1/apps/services/{id}/environments/production");
+    assert_eq!(call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"slo": {"objective": 50}}}))).await.0, StatusCode::BAD_REQUEST);
+    let into = code_sql::now_ms() % 60_000;
+    if into > 50_000 {
+        tokio::time::sleep(Duration::from_millis((60_000 - into + 100) as u64)).await;
+    }
+    let minute = |m: i64, errors: i64| apps_control::store::MinuteRow { minute: m, requests: 100, errors, instances: 1, memory_bytes: 64 << 20, ..Default::default() };
+    let live = w.apps.live(&id, "production");
+    let fired = || async { call(&w.api, "GET", "/v1/apps/events?after=0", None).await.1["events"].as_array().unwrap().iter().any(|e| e["kind"] == "alert.slo") };
+    // An hour at 20% errors where 1% may fail.
+    for _ in 0..100 {
+        let now = code_sql::now_ms() / 60_000;
+        w.apps.store.put_minutes(&id, "production", &(1..=60).map(|i| minute(now - i, 20)).collect::<Vec<_>>()).unwrap();
+        w.apps.judge_alerts(&live).await;
+        if fired().await {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    w.apps.judge_alerts(&live).await;
+    let (_, r) = call(&w.api, "GET", &format!("{env}/slo"), None).await;
+    assert_eq!((r["availability"]["sli"].as_f64(), r["burning"]["window"].as_str(), r["latency"].clone()), (Some(80.0), Some("1h"), Value::Null), "{r}");
+    assert!(r["availability"]["budget_left"].as_f64().unwrap() < -18.0, "spent many times over: {r}");
+    // It slowed: resolved once.
+    let now = code_sql::now_ms() / 60_000;
+    w.apps.store.put_minutes(&id, "production", &(0..=60).map(|i| minute(now - i, 0)).collect::<Vec<_>>()).unwrap();
+    w.apps.judge_alerts(&live).await;
+    w.apps.judge_alerts(&live).await;
+    let (_, ev) = call(&w.api, "GET", "/v1/apps/events?after=0", None).await;
+    let kinds: Vec<&str> = ev["events"].as_array().unwrap().iter().filter(|e| e["kind"] == "alert.slo" || e["data"]["alert"] == "alert.slo").map(|e| e["kind"].as_str().unwrap()).collect();
+    assert_eq!(kinds, ["alert.slo", "alert.resolved"], "{ev}");
+    assert_eq!(call(&w.api, "GET", &format!("{env}/slo"), None).await.1["burning"], Value::Null);
+}
+
 /// An instance the kernel killed for its memory says so: in the log and in why it crashed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_instance_killed_for_its_memory_says_so() {
@@ -3042,7 +3084,7 @@ async fn a_failed_deploy_is_sent_to_the_projects_targets_signed_and_retried() {
     let (st, hook) = call(&w.api, "POST", &base, Some(json!({"url": format!("http://{ok_at}/hook")}))).await;
     assert_eq!(st, StatusCode::CREATED, "{hook}");
     let secret = hook["secret"].as_str().unwrap().to_string();
-    assert_eq!(hook["events"], json!(["check.down", "heartbeat.missed", "deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"]), "the default events");
+    assert_eq!(hook["events"], json!(["check.down", "heartbeat.missed", "alert.slo", "deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"]), "the default events");
     let (_, down) = call(&w.api, "POST", &base, Some(json!({"kind": "webhook", "url": format!("http://{bad_at}/x"), "events": ["deploy.failed"]}))).await;
     let (_, list) = call(&w.api, "GET", &base, None).await;
     assert!(!list.to_string().contains(&secret) && !list.to_string().contains("/hook"), "neither the secret nor the URL comes back: {list}");

@@ -106,6 +106,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/variables/values"), get(reveal))
         .route(&format!("{env}/logs"), get(env_logs))
         .route(&format!("{env}/metrics"), get(metrics))
+        .route(&format!("{env}/slo"), get(slo))
         .route(&format!("{env}/routes"), get(routes))
         .route(&format!("{env}/analytics"), get(analytics))
         .route(&format!("{env}/visit"), post(visit))
@@ -1212,6 +1213,10 @@ struct Window {
     days: Option<i64>,
     /// `prometheus`: the metrics as a scraper reads them.
     format: Option<String>,
+}
+
+async fn slo(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {
+    ok(apps.slo_report(&id, &env).await?)
 }
 
 async fn metrics(State(apps): S, Path((id, env)): Path<(String, String)>, Query(w): Query<Window>) -> R {

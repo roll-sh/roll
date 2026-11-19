@@ -55,6 +55,7 @@ pub mod traces;
 pub mod visit;
 pub mod vitals;
 pub mod heartbeats;
+pub mod slo;
 pub mod vulns;
 pub mod checks;
 pub mod forms;
@@ -3409,6 +3410,36 @@ impl Apps {
         gauge("roll_apps_egress_bytes_per_minute", "Bytes answered in the last finished minute.", r.egress_bytes as f64, "");
         gauge("roll_apps_over_capacity_per_minute", "Requests in the last finished minute that found every instance busy at max_instances.", r.over_capacity as f64, "");
         Ok(out)
+    }
+
+    /// `GET …/environments/{env}/slo`: its objective (the live deployment's, else the service's)
+    /// against its window: each indicator's total, failures, share and budget left, and the burn
+    /// alert firing now. Minutes for the last week, hours before (an hour's latency fails whole
+    /// when its slowest minute did). Null when it has none.
+    pub async fn slo_report(self: &Arc<Self>, service: &str, env: &str) -> Result<Value> {
+        let (svc, row) = self.service_env(service, env).await?;
+        let slo = match row.active.clone() {
+            Some(dep) => self.db(move |s| s.deployment(&dep)).await?.run.slo,
+            None => svc.for_env(&row)?.run.slo,
+        };
+        let Some(slo) = slo else { return Ok(json!({ "slo": null })) };
+        let now_min = code_sql::now_ms() / 60_000;
+        let since = now_min - slo.window_days as i64 * 24 * 60;
+        let (sid, e) = (service.to_string(), env.to_string());
+        let (minutes, hours) = self.db(move |s| Ok((s.minutes(&sid, &e, since)?, s.hours(&sid, &e, since / 60)?))).await?;
+        let minutes: Vec<_> = minutes.into_iter().filter(|r| r.minute < now_min).collect();
+        // Hours only before the first minute kept (a rolled-up hour isn't counted twice).
+        let first = minutes.first().map_or(now_min, |r| r.minute);
+        let hours: Vec<_> = hours.into_iter().filter(|h| (h.minute + 1) * 60 <= first).collect();
+        let show = |t: crate::slo::Tally| json!({ "total": t.total, "bad": t.bad, "sli": (t.total > 0).then(|| 100.0 * (t.total - t.bad) as f64 / t.total as f64), "budget_left": t.budget_left(slo.objective) });
+        let avail = crate::slo::availability(&minutes);
+        let avail = crate::slo::Tally { total: avail.total + crate::slo::availability(&hours).total, bad: avail.bad + crate::slo::availability(&hours).bad };
+        let latency = slo.latency_ms.map(|ms| {
+            let (m, h) = (crate::slo::latency(&minutes, ms, 1), crate::slo::latency(&hours, ms, 60));
+            show(crate::slo::Tally { total: m.total + h.total, bad: m.bad + h.bad })
+        });
+        let burning = crate::slo::burning(&slo, &minutes, now_min).map(|(i, rate, w)| json!({ "indicator": i, "burn_rate": (rate * 10.0).round() / 10.0, "window": w }));
+        Ok(json!({ "slo": slo, "availability": show(avail), "latency": latency, "burning": burning }))
     }
 
     /// An environment's metrics over the last `minutes`: a point a minute for up to a week, a

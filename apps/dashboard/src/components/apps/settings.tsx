@@ -62,6 +62,9 @@ interface Form {
   alertMemory: string;
   alertErrors: string;
   alertP95: string;
+  sloObjective: string;
+  sloLatency: string;
+  sloWindow: string;
   alertCapacity: string;
   alertLog: string;
   alertLogCount: string;
@@ -134,6 +137,9 @@ export function formOf(s: Service): Form {
     alertMemory: str(s.run.alerts?.memory_pct),
     alertErrors: str(s.run.alerts?.error_pct),
     alertP95: str(s.run.alerts?.p95_ms),
+    sloObjective: str(s.run.slo?.objective),
+    sloLatency: str(s.run.slo?.latency_ms),
+    sloWindow: str(s.run.slo?.window_days),
     alertCapacity: str(s.run.alerts?.capacity_pct),
     alertLog: s.run.alerts?.log_match ?? "",
     alertLogCount: str(s.run.alerts?.log_count ?? 10),
@@ -229,6 +235,8 @@ export function patchOf(s: Service, f: Form): ServicePatch {
       ...(f.alertLog.trim() ? { log_match: f.alertLog.trim() } : {}),
       log_count: Number(f.alertLogCount) || 10,
     };
+  if (f.sloObjective !== before.sloObjective || f.sloLatency !== before.sloLatency || f.sloWindow !== before.sloWindow)
+    run.slo = f.sloObjective.trim() ? { objective: Number(f.sloObjective), ...(num(f.sloLatency) ? { latency_ms: Number(f.sloLatency) } : {}), ...(num(f.sloWindow) ? { window_days: Number(f.sloWindow) } : {}) } : null;
   if (f.rolloutSteps !== before.rolloutSteps || f.rolloutStep !== before.rolloutStep || f.rolloutErrors !== before.rolloutErrors || f.rolloutManual !== before.rolloutManual)
     run.rollout = { steps: rolloutSteps(f.rolloutSteps) ?? [], step_s: Number(f.rolloutStep) || 120, error_pct: Number(f.rolloutErrors) || 5, ...(f.rolloutManual ? { manual: true } : {}) };
   if (f.h2c !== before.h2c) run.h2c = f.h2c ? true : null;
@@ -255,7 +263,7 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   return patch;
 }
 
-const NUMERIC: (keyof Form)[] = ["scalePer", "port", "timeout", "retries", "min", "max", "concurrency", "healthTimeout", "healthEvery", "healthFailures", "drain", "cpuTarget", "memoryTarget", "suspendAfter", "sleepAfter", "volumeSize", "backupEvery", "backupKeep", "alertMemory", "alertErrors", "alertP95", "alertCapacity", "alertLogCount", "rolloutStep", "rolloutErrors", "restartTries"];
+const NUMERIC: (keyof Form)[] = ["scalePer", "port", "timeout", "retries", "min", "max", "concurrency", "healthTimeout", "healthEvery", "healthFailures", "drain", "cpuTarget", "memoryTarget", "suspendAfter", "sleepAfter", "volumeSize", "backupEvery", "backupKeep", "alertMemory", "alertErrors", "alertP95", "sloObjective", "sloLatency", "sloWindow", "alertCapacity", "alertLogCount", "rolloutStep", "rolloutErrors", "restartTries"];
 
 /** A rollout's steps as typed (`10, 50`): increasing percents 1–99, at most five; null when they aren't. */
 export function rolloutSteps(v: string): number[] | null {
@@ -601,6 +609,19 @@ export function SettingsTab({
                 <Field label="Alert: p95 latency (ms)" hint="in three of five minutes; 0 off">
                   {t("alertP95", "0")}
                 </Field>
+                <Field label="Objective (%)" hint="of requests not 5xx, e.g. 99.9; alerts when its error budget burns fast; empty: none">
+                  {t("sloObjective", "99.9")}
+                </Field>
+                {form.sloObjective.trim() && (
+                  <>
+                    <Field label="Objective: p95 under (ms)" hint="the same share of minutes; empty: requests only">
+                      {t("sloLatency", "300")}
+                    </Field>
+                    <Field label="Objective: window (days)" hint="1–60; empty: 28">
+                      {t("sloWindow", "28")}
+                    </Field>
+                  </>
+                )}
                 <Field label="Alert: over capacity (%)" hint="of five minutes' requests finding every instance busy at max instances; 0 off">
                   {t("alertCapacity", "10")}
                 </Field>

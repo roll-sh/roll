@@ -515,6 +515,10 @@ pub struct Run {
     pub volume: Option<Volume>,
     /// When its metrics notify (`alert.*` events), over five minutes.
     pub alerts: Alerts,
+    /// Its service level objective: `alert.slo` when its error budget burns too fast, and the
+    /// budget left on Metrics (`…/slo`). How it's watched only: changing it is a write.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slo: Option<Slo>,
     /// How a new deployment takes over: at once, or a share of requests at a time.
     pub rollout: Rollout,
     /// The app speaks HTTP/2 without TLS (h2c, prior knowledge), as a gRPC server does: the
@@ -586,6 +590,24 @@ pub struct Run {
     /// the rollout, not beside it. A rollback is never held. Changing it is a deploy.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub block_on: Option<Severity>,
+}
+
+/// A service level objective ([`crate::slo`]): `objective`% of requests succeed (not 5xx) and,
+/// with `latency_ms`, the same share of minutes keep p95 under it, over `window_days`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Slo {
+    pub objective: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_ms: Option<u32>,
+    #[serde(default = "Slo::default_window")]
+    pub window_days: u32,
+}
+
+impl Slo {
+    fn default_window() -> u32 {
+        28
+    }
 }
 
 /// How severe a known vulnerability is, as the scanner reads it (the distribution's, else NVD's).
@@ -938,6 +960,7 @@ impl Default for Run {
             schedules: Vec::new(),
             sidecars: Vec::new(),
             block_on: None,
+            slo: None,
         }
     }
 }
@@ -982,6 +1005,14 @@ impl Run {
         }
         if !self.sidecars.is_empty() && !matches!(self.kind, RunType::Web | RunType::Worker) {
             return bad("sidecars are a web service's or a worker's");
+        }
+        if let Some(s) = &self.slo
+            && (!(90.0..=99.999).contains(&s.objective) || !(1..=60).contains(&s.window_days) || s.latency_ms.is_some_and(|ms| !(1..=60_000).contains(&ms)))
+        {
+            return bad("slo is {objective: 90–99.999, latency_ms?: 1–60000, window_days?: 1–60}");
+        }
+        if self.slo.is_some() && (self.kind != RunType::Web || self.tcp) {
+            return bad("slo is a web service's (it's read from its requests)");
         }
         if self.block_on == Some(Severity::Unknown) {
             return bad("block_on is critical, high, medium or low");

@@ -37,6 +37,7 @@ POST /v1/apps/services/{id}/environments/{env}/rollback
 GET /v1/apps/services/{id}/environments/{env}/routes
 GET /v1/apps/services/{id}/environments/{env}/analytics
 GET /v1/apps/services/{id}/environments/{env}/vitals
+GET /v1/apps/services/{id}/environments/{env}/slo
 GET /v1/apps/services/{id}/environments/{env}/app-metrics
 GET /v1/apps/services/{id}/environments/{env}/errors
 GET /v1/apps/services/{id}/environments/{env}/traces
