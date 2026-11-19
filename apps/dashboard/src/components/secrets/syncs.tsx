@@ -3,22 +3,8 @@ import { useState } from "react";
 import { FOLDER_PATH, SECRET_KEY, type NewSync, type Sync, type SyncKind, type SyncPreview } from "@/lib/secrets-api";
 import { useSecrets } from "./secrets-page";
 import { ActorMark, ago, button, card, dangerButton, ErrorNote, errorText, field, ghost, label, primary, Section, Teach, useLoad } from "./ui";
-import { Cas } from "./cas";
-import { SshCas } from "./ssh-cas";
-import { CloudAccounts } from "./cloud-accounts";
-import { Gateways } from "./gateways";
-import { GitHubApps } from "./github-apps";
-import { KubernetesClusters } from "./kubernetes-clusters";
-import { OutsideDatabases } from "./outside-databases";
-import { Directories } from "./directories";
-import { SnowflakeAccounts } from "./snowflake-accounts";
-import { AtlasProjects } from "./atlas-projects";
-import { AwsRoles } from "./aws-roles";
-import { Rotators } from "./rotators";
-import { SaasRotators } from "./saas-rotators";
-import { TransitKeys } from "./transit-keys";
 
-/** Syncs (docs/secrets.md, "Syncs"): one-way pushes of an environment's values to GitHub, a webhook or a deploy hook. */
+/** Syncs (docs/secrets.md, "Syncs"): one-way pushes of an environment's values to GitHub, a webhook or a deploy hook. The credentials and keys that used to share this tab are in `panels.tsx`. */
 export function SyncsView() {
   const { api } = useSecrets();
   const list = useLoad(() => api.listSyncs(), [api]);
@@ -78,20 +64,6 @@ export function SyncsView() {
           )
         )}
       </Section>
-      <Gateways />
-      <OutsideDatabases />
-      <Directories />
-      <SnowflakeAccounts />
-      <AtlasProjects />
-      <GitHubApps />
-      <Rotators />
-      <SaasRotators />
-      <TransitKeys />
-      <Cas />
-      <SshCas />
-      <CloudAccounts />
-      <KubernetesClusters />
-      <AwsRoles />
     </div>
   );
 }

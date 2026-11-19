@@ -29,7 +29,8 @@ Everything below works the same from the dashboard (a project's **Secrets**) and
 
 1. **Pick a project and its environments.** A workspace project has `development`, `staging` and
    `production` the first time you open its secrets. Add your own (`roll secrets envs add qa`) and
-   remember the project for this directory:
+   remember the project for this directory (a project that doesn't exist yet is offered to you to
+   create; in a script, `--create` makes it):
 
    ```
    roll secrets setup -p shop -e development
@@ -59,10 +60,13 @@ Everything below works the same from the dashboard (a project's **Secrets**) and
    roll secrets envs protect production --approvals 1
    ```
 6. **CI and services** get a roll token (roll-access's, docs/permissions.md) with one rule on the
-   project: some environments, some folders and only the actions they need, with an expiry:
+   project: some environments, some folders and only the actions they need, with an expiry. By
+   default a token reads and reveals one environment for 90 days: the one `--for-env` names, else
+   the directory's own unless it's protected (a protected one only by name). Everywhere
+   (`--all-environments`) and never expiring (`--no-expiry`, with a warning) are asked for:
 
    ```
-   roll secrets tokens create ci --for-env staging --action read --action reveal --ttl-days 90
+   roll secrets tokens create ci --for-env staging
    ROLL_TOKEN=rlt_… roll run -e staging -- make test
    ```
 
@@ -449,7 +453,7 @@ key. The values themselves aren't re-encrypted; only the data key is wrapped.
 ## AWS
 Short-lived AWS credentials for each lease, as Vault's AWS engine and Infisical's dynamic secrets
 give: a project registers a role in its own account (`POST …/aws-roles {name, role_arn, trust?}`,
-`roll secrets aws-roles add`, the Integrations tab; admin), and three keys link to it in `dynamic`
+`roll secrets aws-roles add`, the Credentials tab; admin), and three keys link to it in `dynamic`
 mode (`access_key_id`, `secret_access_key`, `session_token`: one credential, so they share one
 session per resolve). Each resolve assumes the role for the lease's TTL plus five minutes (15
 minutes to 12 hours, within the role's own maximum). The role trusts roll one of two ways:
@@ -472,7 +476,7 @@ minutes to 12 hours, within the role's own maximum). The role trusts roll one of
 **IAM users' access keys**, rotated by roll as Infisical's AWS IAM rotation does, for what can't
 use a role's sessions (a vendor that takes only a key pair, an old CI). A project registers an IAM
 user next to one of its roles (`POST …/aws-users {name, role, user}`, `roll secrets aws-users add
-NAME USER --role ROLE`, the Integrations tab; admin): roll acts as that role (one that trusts roll
+NAME USER --role ROLE`, the Credentials tab; admin): roll acts as that role (one that trusts roll
 by the project's ExternalId), whose policy allows `iam:ListAccessKeys`, `iam:CreateAccessKey` and
 `iam:DeleteAccessKey` on the user, and registering lists the user's keys to check. It's the link kind
 `aws_iam_user`, `managed` (`access_key_id` and `secret_access_key`, one credential `key`).
@@ -1913,7 +1917,7 @@ in a secret.
 A project admin registers the App's installation (`POST …/github-apps {name, app_id,
 installation_id, private_key, repositories, permissions, api_base?}`, `roll secrets github-apps
 add deploy --app-id 123 --installation 456 --repo web --permission contents:write < key.pem`, or
-the Syncs tab): the App's private key, as GitHub gave it, is sealed with the project's key and
+the Credentials tab): the App's private key, as GitHub gave it, is sealed with the project's key and
 bound to its row, and never shown again. `repositories` and `permissions` are the most any token
 may reach, as Vault and Akeyless put the ceiling on the role: a link narrows within them, never
 past them, so an environment's admin can't mint a token the project's admin didn't allow, and no
@@ -1970,7 +1974,7 @@ engine gives, so a pod, a CI job or a person gets cluster access for minutes rat
 that never expires.
 - **Register a cluster** (`POST …/kubernetes {name, api_url, ca_pem?, token}`, `admin`; `roll
   secrets kubernetes-clusters add NAME API_URL [--ca FILE]` with the token on stdin, or the
-  dashboard's Syncs page). `token` is a service account token roll manages the cluster with: for
+  dashboard's Credentials tab). `token` is a service account token roll manages the cluster with: for
   links to existing service accounts it needs `create` on `serviceaccounts/token` in the namespaces
   links name, and nothing more (a ClusterRole with that one rule, bound per namespace); links with
   `role_rules` need more (["Generated roles"](#generated-roles), below). `api_url` is the API server's `https://`
@@ -2116,7 +2120,7 @@ the labels are for an operator's `kubectl delete -l roll.sh/lease=…`.
 A project's own certificate authority, as Vault's PKI engine and Infisical's PKI give: short-lived
 TLS certificates for services (mTLS between them), with no CA to run.
 - `POST …/cas {name, domains, allow_ip?, max_days?}` (admin; `roll secrets cas add NAME --domain
-  svc.internal`, the Integrations tab) makes an ECDSA P-256 key and a self-signed certificate for ten
+  svc.internal`, the Keys & certificates tab) makes an ECDSA P-256 key and a self-signed certificate for ten
   years. The key is sealed with the project's data key, bound to the CA, and never leaves roll; the
   certificate (`GET …/cas`, `roll secrets cas cert NAME`) is what clients trust. It carries name
   constraints: only its domains, and IP addresses only where allowed (otherwise excluded), so a
@@ -2288,7 +2292,7 @@ A project's own SSH CA, as Vault's SSH engine signs them: short-lived user certi
 long-lived public keys on every server. Servers trust one CA key (`TrustedUserCAKeys`).
 
 - `POST …/ssh-cas {name, principals, max_hours?, host_domains?, max_host_days?}` (admin; `roll secrets ssh-cas add NAME --principal
-  deploy`, the Integrations tab) makes an Ed25519 key, sealed with the project's data key and bound to
+  deploy`, the Keys & certificates tab) makes an Ed25519 key, sealed with the project's data key and bound to
   the CA. Its public key (`ssh-ed25519 …`, `roll secrets ssh-cas key NAME`) is what servers trust.
   `principals` are the logins it signs for; `max_hours` (24 by default, a week at most) is the longest
   a certificate lives.
@@ -2330,7 +2334,7 @@ suffix such as `com`, `co.uk` or `github.io` is refused (from a built-in list of
   under a host domain (a `*.` one level under one too), and answers the `…-cert-v01@openssh.com`
   line for sshd's `HostCertificate` and the `known_hosts` line clients add: `@cert-authority
   *.svc.internal,svc.internal ssh-ed25519 …` (`roll secrets ssh-cas known-hosts NAME`, the CA's row
-  in the Integrations tab). The server's key never leaves it. A CA may sign users, hosts or both.
+  in the Keys & certificates tab). The server's key never leaves it. A CA may sign users, hosts or both.
   Checked against OpenSSH 10: `ssh-keygen -L` reads all three key types' certificates as host
   certificates, and `ssh -o StrictHostKeyChecking=yes` with only the `@cert-authority` line accepts
   a real `sshd`'s Ed25519, ECDSA and RSA host certificates and refuses another name (`Host key
@@ -2466,7 +2470,9 @@ roll completions bash|zsh|fish|powershell
   `--path`/`ROLL_SECRETS_PATH`. Without them, `roll secrets setup -p shop -e staging [--path /api]`
   remembers them for the current directory and the ones under it, in the user's own
   `~/.config/roll/secrets.json` (never the repo), so `roll run -- npm start` needs no flags there
-  (`--show`, `--clear`). Then `development` and `/`. A scoped token (`ROLL_TOKEN`) implies its
+  (`--show`, `--clear`). A project of that name that doesn't exist is made first, through the
+  workspace's `POST /v1/workspace/projects` as whoever the CLI is signed in as: after a yes in a
+  terminal (`Create project "shop"? [y/N]`), or with `--create` in a script. Then `development` and `/`. A scoped token (`ROLL_TOKEN`) implies its
   project.
 - `roll secrets doctor` checks that setup in one go, each line ok or FAIL: who the token is (and
   the project it's bound to), the directory's project and environment and how many keys it can
@@ -3491,7 +3497,12 @@ above), an optional expiry and client addresses (up to 20 addresses or CIDRs; fr
 it's refused), made through `POST /v1/access/tokens`: `roll secrets tokens create … --allow-ip
 203.0.113.0/24`, or the project's Access tab, which lists them from `GET
 /v1/access/tokens?product=secrets&resource=<project>` (one at a time: the list also holds tokens
-made in the access builder, so nothing here revokes them in bulk). roll-access stores them hashed,
+made in the access builder, so nothing here revokes them in bulk). The API reads a rule without
+`environments` as every environment and a grant without `expires_at` as one that never expires
+(unless roll's token policy requires one), so both clients always send them: the CLI one
+environment (`--for-env`, else the directory's own, never a protected one unless named) and 90
+days, with `--all-environments` and `--no-expiry` only when asked; the Access tab's form starts from
+`development` (else the first unprotected environment) and 90 days. roll-access stores them hashed,
 looks them up on every request and never caches them; OAuth connections (`rlo_…`) reach secrets
 the same way. rolld's gate classifies each request, and secrets asks the same `Grant` for every
 second check (`GrantGrants`); a read of the project as a whole (its environments' names, health,
