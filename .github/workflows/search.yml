@@ -1,9 +1,13 @@
 name: search
 
-# Extended validation, run manually when needed (ci.yml is the one-minute merge gate):
-# the unit suite, the YAML REST suites, the differential suite against Elasticsearch 9.5.5,
-# the client matrix and the stores on S3.
+# Extended validation (ci.yml is the one-minute merge gate): the unit suite with every flow and
+# regression test, the YAML REST suites, the differential suite against Elasticsearch 9.5.5, the
+# client matrix and the stores on S3. Nightly on main, so a change elsewhere in the repo that
+# breaks search (roll-access, rolld, roll-auth…) shows up within a day: a failed nightly opens an
+# issue (or comments on the open one) labelled `search-nightly`. Also run by hand.
 on:
+  schedule:
+    - cron: "41 2 * * *"
   workflow_dispatch:
   workflow_call:
 
@@ -133,3 +137,25 @@ jobs:
           docker exec seaweed sh -c 'echo "s3.bucket.create -name roll-e2e" | weed shell'
       - name: Storage, server and control plane on S3
         run: cargo test -p search-store -p search-server -p search-control
+
+  # A failed nightly opens an issue, or comments on the one already open, so nobody has to watch
+  # the Actions tab.
+  report:
+    if: failure() && github.event_name == 'schedule'
+    needs: [unit, yaml, differential, clients, s3]
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          body="The nightly search suite failed on main at ${GITHUB_SHA::9}: $RUN"
+          n=$(gh issue list -R "$GITHUB_REPOSITORY" --label search-nightly --state open --json number --jq '.[0].number')
+          if [ -n "$n" ]; then
+            gh issue comment "$n" -R "$GITHUB_REPOSITORY" --body "$body"
+          else
+            gh label create search-nightly -R "$GITHUB_REPOSITORY" --color B60205 --description "The nightly search suite failed" 2>/dev/null || true
+            gh issue create -R "$GITHUB_REPOSITORY" --label search-nightly --title "search: nightly suite failing on main" --body "$body"
+          fi
