@@ -311,6 +311,12 @@ pub trait Sessions: Send + Sync + 'static {
     /// [`Sessions::person`] for callers off the request path (a product's background work checking
     /// a stored grant): blocking, never cached. `None` by default: an implementation that can't
     /// say keeps a person's grants dead there.
+    /// A token of `user`'s was just used (rolld's gate, after [`Sessions::person`]): their last
+    /// activity, for dormant people. Blocking; nothing by default.
+    fn used(&self, user: &str) {
+        let _ = user;
+    }
+
     fn person_now(&self, user: &str) -> Result<Option<SignedIn>, String> {
         let _ = user;
         Ok(None)
