@@ -119,7 +119,7 @@ Infisical's and 1Password's CLIs do, rather than a token pasted into a shell pro
   own login goes with the command: logins are kept and looked up by the URL that issued them.
 - **An `ask` the CLI meets** (an `approval_pending` answer, "Approvals" below) is printed at once
   with its approval, the page to approve it on, and a pointer to remembering it (that page's menu
-  beside Approve: a longer time than "Once", or "Always"; below), so later runs in the same
+  beside Approve: "For 30 days" or "Always"; below), so later runs in the same
   environment and folder stop asking, then sent again with `X-Roll-Approval` until it
   runs, is denied, or its ten minutes end (then it says how to approve and run it again). A request
   of a scoped or signed-in token still unanswered after 5 seconds says it may be held for a person.

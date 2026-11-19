@@ -355,9 +355,10 @@ impl Api {
             }
             match &asked {
                 // A remembered approval (docs/permissions.md, "Remembered approvals"): the approvals
-                // page's menu beside Approve, "Once" by default, then "For an hour" … "Always". It
-                // covers this action in this environment and folder, for this login's grant only.
-                None => eprintln!("roll: this request waits for a person to approve it ({id}). Approve it at\n\n  {url}\n\nor, as the operator, with `roll mcp approve {id}`. So later runs in this environment don't ask again, change \"Once\" in the menu beside Approve to a longer time, or \"Always\" (no longer than this login lasts; `--remember always`). It covers only this action, here, for this login, and can be taken back on the token's page. Waiting (up to 10 minutes; Ctrl-C stops)…"),
+                // page's menu beside Approve, "Once" by default, then "For an hour" … "For 30 days",
+                // "Always". It covers this action in this environment and folder, for this login's
+                // grant only.
+                None => eprintln!("roll: this request waits for a person to approve it ({id}). Approve it at\n\n  {url}\n\nor, as the operator, with `roll mcp approve {id}`. So later runs in this environment don't ask again, change \"Once\" in the menu beside Approve to \"For 30 days\" (`--remember 30d`), or \"Always\" (no longer than this login lasts; `--remember always`). It covers only this action, here, for this login, and can be taken back on the token's page. Waiting (up to 10 minutes; Ctrl-C stops)…"),
                 Some(_) => eprintln!("roll: still waiting for {id} to be approved ({}m so far): {url}", started.elapsed().as_secs() / 60),
             }
             asked = Some((id.clone(), url));

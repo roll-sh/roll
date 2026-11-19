@@ -74,7 +74,7 @@ pub fn chosen() -> anyhow::Result<Option<String>> {
             use std::io::IsTerminal;
             let urls: Vec<&String> = all.keys().collect();
             if !(std::io::stdin().is_terminal() && std::io::stderr().is_terminal()) {
-                bail!("you're signed in to {} rolls ({}): set ROLL_API_URL to the one this command is for", urls.len(), urls.iter().map(|u| u.as_str()).collect::<Vec<_>>().join(", "));
+                bail!("you're signed in to {} rolls ({}): set ROLL_API_URL to the one this command is for, or run `roll login <url>` to make it the one commands use", urls.len(), urls.iter().map(|u| u.as_str()).collect::<Vec<_>>().join(", "));
             }
             eprintln!("You're signed in to {} rolls. Which one is this for?", urls.len());
             for (i, u) in urls.iter().enumerate() {
