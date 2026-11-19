@@ -4,6 +4,7 @@
  */
 
 import { withSession } from "./code-token";
+import { followScreen, type ScreenHandlers } from "./sse";
 import { apiHeaders, call, onApiStatus, ROLL_API } from "./roll-api";
 
 export const PREVIEW_STATES = ["queued", "awaiting_approval", "creating", "ready", "sleeping", "updating", "failed", "deleting"] as const;
@@ -15,7 +16,7 @@ export interface PreviewService {
   name: string;
   repo: string;
   url: string;
-  /** `url` with the preview's access token (link access): the link to open and hand out. */
+  /** `url` with the preview's access token (link access; plain otherwise): the link to open and hand out. */
   share_url: string | null;
   /** The changeset it should run. */
   revision: string | null;
@@ -51,6 +52,25 @@ export function unmaskedNote(kind: string, mode: "branch" | "schema" | "skip", m
     return masks > 0 ? null : "Previews get its data as it is: mask what holds people's data, or use Schema only.";
   if (kind === "stream") return "Previews get its messages as they are (they can't be masked): use Schema only, or skip it.";
   return "Previews get its data as it is (it can't be masked): a seed can replace it with made-up data, or skip it.";
+}
+
+/** A column (or search field) of a project's Postgres, NoSQL or search resource that looks like
+ * people's data and has no mask yet (`GET …/mask-suggestions`), with a rule its type and
+ * constraints take. Every such resource is read, whatever its rule; the dialog shows them under
+ * those on `branch`. */
+export interface MaskSuggestion {
+  /** `"postgres:<ref>"`, `"nosql:<ref>"` or `"search:<ref>"`, as `masking` keys it. */
+  resource: string;
+  path: string;
+  rule: string;
+  why: string;
+}
+
+export interface MaskSuggestions {
+  suggestions: MaskSuggestion[];
+  /** Resources whose columns weren't all read, and why: asleep (not woken for this), not read
+   * within 10 s, couldn't be read, or only the first 2,000 read. */
+  unread: { resource: string; why: string }[];
 }
 
 export interface PreviewCost {
@@ -148,6 +168,13 @@ export interface Preview {
 export interface PreviewActivity {
   at: number;
   message: string;
+}
+
+/** Someone signed in to roll who opened a team-access preview: their handle, and when they were
+ * last in it (as of their session's 5-minute recheck). */
+export interface PreviewVisitor {
+  who: string;
+  last_at: number;
 }
 
 export type ResourceRule = "branch" | "schema" | "skip";
@@ -340,12 +367,14 @@ export interface PreviewSettings {
   /** A patch replaces the whole map. */
   env: Record<string, string>;
   github: { comment: boolean; status: boolean; deployment: boolean; screenshot?: boolean; baseline?: boolean; pages?: string[]; hide?: string[]; budget?: SpeedBudget; visual_threshold?: number; widths?: number[]; openapi?: string | null; endpoints?: string[]; states?: PageState[]; browsers?: ("firefox" | "webkit" | "webkit-phone")[] };
-  /** "link": a preview's URLs need its link (its access token once, then a cookie). */
-  access: "link" | "public";
+  /** "link": a preview's URLs need its link (its access token once, then a cookie). "team": only people signed in to roll who may open the project (they sign in on the way; the link's token lets nobody in). */
+  access: "link" | "team" | "public";
   /** Chromatic's UI Review: `check` posts `roll/visual`; `required` also keeps a change waiting for one from landing in roll. */
   visual_review?: "off" | "check" | "required";
   /** `catch` (default): services send mail to roll's catcher, listed on the preview, never delivered; `deliver`: the project's own mail settings. */
   mail?: "catch" | "deliver";
+  /** Its `roll.toml` services get the OpenTelemetry SDK's variables, their spans kept on the preview a few hours. */
+  traces?: boolean;
   /** What its services' code may reach: `open` (default) anything; `roll` only roll's own products (a network with no route out). */
   egress?: "open" | "roll";
   /** With `egress: "roll"` (or `egress_forks: "roll"`, for forks): hosts outside roll its code may still reach (`api.stripe.com`, `*.sentry.io`), through a proxy that refuses anything else. */
@@ -354,7 +383,7 @@ export interface PreviewSettings {
   egress_forks?: "open" | "roll";
   /** Branch the data as of a point in time where the product keeps history: `-24h`, `-30m`, `-7d`, or an RFC 3339 time (30 days back at most). */
   data_at?: string | null;
-  /** A feedback button on its pages for people who came in through roll (link access). */
+  /** A feedback button on its pages for people who came in through roll (link access, or a team session). */
   feedback: boolean;
   /** Variables for a family of branches: a branch glob → `{name: value}`, over `env`. */
   env_for: Record<string, Record<string, string>>;
@@ -421,6 +450,18 @@ function query(params: Record<string, string | number | undefined>) {
 /** The preview's screenshot as an object URL (the operator's headers, which an <img> can't send);
  * revoke it when done. */
 /** The preview's screenshot as an object URL; `previous`: the one at the head before; `phone`: at a phone's width; `base`: the default branch's preview's; `page`: another of the project's pages. */
+/** What's at `path` (absolute) in a running `roll.toml` service, as a tar (`GET …/files`, admin): a
+ * 404 says nothing is there, in the server's words. */
+export async function downloadFiles(id: string, service: string, path: string): Promise<Blob> {
+  const res = await fetch(`${ROLL_API}${one(id)}/files${query({ service, path })}`, withSession({ headers: apiHeaders(), cache: "no-store" }));
+  onApiStatus(res.status);
+  if (!res.ok) {
+    const data = await res.json().catch(() => null);
+    throw new Error(data?.error ?? `${res.status} ${res.statusText}`.trim());
+  }
+  return res.blob();
+}
+
 /** A service's link with the preview's access as a QR code (an object URL; revoke it when done): a phone opens it by scanning. */
 export async function qrUrl(id: string, service?: string): Promise<string> {
   const res = await fetch(`${ROLL_API}${one(id)}/qr.png${service ? `?service=${encodeURIComponent(service)}` : ""}`, withSession({ headers: apiHeaders(), cache: "no-store" }));
@@ -463,6 +504,8 @@ export const previewsApi = {
   /** `head`: the screenshot's that was looked at (`visual_review.head`): refused (409) once a newer one came in. `path`: that page only (`""` the first), else every page. */
   /** Let one head of a fork's pull request on a Git URL service run (409 once it moved on). */
   approve: (id: string, head: string) => call<Preview>("POST", `${one(id)}/approve`, { head }),
+  /** As the person signed in (a session, never a token): a one-use URL into a team-access preview's page `to` (one of its service URLs), good for a minute. */
+  visit: (id: string, to: string) => call<{ url: string }>("POST", `${one(id)}/visit`, { to }),
   acceptVisual: (id: string, head?: string, path?: string) =>
     call<Preview>("POST", `${one(id)}/visual/accept`, { ...(head ? { head } : {}), ...(path !== undefined ? { path } : {}) }),
   /** Its share links (never their tokens). */
@@ -495,13 +538,29 @@ export const previewsApi = {
   requests: (id: string) => call<{ requests: RequestLine[] }>("GET", `${one(id)}/requests`),
   /** What its running services use right now (cores of CPU, resident memory, the memory each runs with). */
   metrics: (id: string) => call<{ services: ServiceMetrics[] }>("GET", `${one(id)}/metrics`),
+  /** Its services' errors in the last `minutes` (5–1440, 60 by default, rounded up to 15-minute steps), grouped, newest first; masked as its logs are. */
+  errors: (id: string, minutes?: number) => call<{ minutes: number; groups: ErrorGroup[] }>("GET", `${one(id)}/errors${query({ minutes })}`),
+  /** How many errors its services wrote in that span (a list's rows: nothing to mask, so no values are read). */
+  errorCount: (id: string, minutes?: number) => call<{ minutes: number; count: number }>("GET", `${one(id)}/errors/count${query({ minutes })}`),
+  /** A login shell in a running `roll.toml` service (started if it sleeps, kept awake while open; admin). */
+  openShell: (id: string, body: { service?: string; cols: number; rows: number }) => call<{ id: string }>("POST", `${one(id)}/shell/sessions`, body),
+  shellKeys: (id: string, sh: string, data: string) => call<null>("POST", `${one(id)}/shell/sessions/${encodeURIComponent(sh)}/keys`, { data }),
+  resizeShell: (id: string, sh: string, size: { cols: number; rows: number }) => call<null>("POST", `${one(id)}/shell/sessions/${encodeURIComponent(sh)}/resize`, size),
+  closeShell: (id: string, sh: string) => call<null>("DELETE", `${one(id)}/shell/sessions/${encodeURIComponent(sh)}`),
+  /** Its recent traces (the project's `traces`), newest first, masked. */
+  traces: (id: string, minutes?: number) => call<{ minutes: number; traces: TraceSummary[] }>("GET", `${one(id)}/traces${query({ minutes })}`),
+  /** One trace's spans, oldest first, masked. */
+  trace: (id: string, trace: string) => call<{ trace: string; spans: TraceSpan[] }>("GET", `${one(id)}/traces/${encodeURIComponent(trace)}`),
   logs: (id: string, opts: { service?: string; lines?: number } = {}) =>
     call<{ service: string; lines: string[] }>("GET", `${one(id)}/logs${query(opts)}`),
   /** Newest first. */
   activity: (id: string) => call<PreviewActivity[]>("GET", `${one(id)}/activity`),
+  visitors: (id: string) => call<PreviewVisitor[]>("GET", `${one(id)}/visitors`),
   settings: (projectId: string) => call<PreviewSettings>("GET", `${project(projectId)}/settings`),
   putSettings: (projectId: string, patch: SettingsPatch) => call<PreviewSettings>("PUT", `${project(projectId)}/settings`, patch),
   usage: (projectId: string) => call<PreviewUsage>("GET", `${project(projectId)}/usage`),
+  /** Columns of the project's branched data that look like people's data and aren't masked. */
+  maskSuggestions: (projectId: string) => call<MaskSuggestions>("GET", `${project(projectId)}/mask-suggestions`),
   bypass: (projectId: string) => call<PreviewBypass>("GET", `${project(projectId)}/bypass`),
   /** A new secret (the old one stops working), shown only in this answer. */
   rotateBypass: (projectId: string) => call<PreviewBypass>("POST", `${project(projectId)}/bypass`),
@@ -534,8 +593,16 @@ export function parseSse(rest: string, text: string): { events: { event: string;
   return { events, rest: left };
 }
 
+/** One error in a preview's service's output, grouped (a stack trace joined from its lines, or an error line): how many, first and last seen (ms), and the newest one whole. `fingerprint` names the group (keyed per process: not stable across restarts). */
+export type ErrorGroup = { service: string; fingerprint: string; kind: string; title: string; count: number; first_seen: number; last_seen: number; sample: string };
+
 /** A running service's use right now: cores of CPU, resident bytes (an instance's, on roll apps), and the MB it runs with. */
 export type ServiceMetrics = { service: string; cpu: number; memory_bytes: number; memory_mb: number };
+
+/** One of a preview's recent traces: its root span's name and service, when (ms), how long, how many spans, whether any failed. */
+export type TraceSummary = { trace: string; name: string; service: string; start_ms: number; ms: number; spans: number; error: boolean };
+/** A span of a trace (times in Unix nanoseconds), its attributes as name/value pairs. */
+export type TraceSpan = { trace: string; span: string; parent?: string; name: string; service?: string; start: number; end: number; error?: boolean; attrs?: [string, string][] };
 
 /** A request to a preview's service through roll: when (ms), the method, the path (never the query), the status, ms until the answer's headers. */
 export type RequestLine = { at: number; service: string; method: string; path: string; status: number; ms: number };
@@ -543,7 +610,7 @@ export type RequestLine = { at: number; service: string; method: string; path: s
 /** A service's last `lines`, then its output as it comes (`…/logs?follow=1`, read with the
  * operator's headers, which EventSource can't send). Resolves when the stream ends or `signal`
  * aborts it. */
-export async function followLogs(id: string, service: string, lines: number, onLine: (l: string) => void, signal: AbortSignal): Promise<void> {
+export async function followLogs(id: string, service: string, lines: number, onLine: (l: string, stderr: boolean) => void, signal: AbortSignal): Promise<void> {
   const res = await fetch(`${ROLL_API}${one(id)}/logs${query({ service, lines, follow: 1 })}`, withSession({ headers: apiHeaders(), cache: "no-store", signal }));
   onApiStatus(res.status);
   if (!res.ok || !res.body) {
@@ -557,8 +624,14 @@ export async function followLogs(id: string, service: string, lines: number, onL
     if (done) return;
     const parsed = parseSse(rest, value);
     rest = parsed.rest;
-    for (const e of parsed.events) if (e.event === "message") onLine(e.data);
+    // A stderr line is `event: stderr`; a stdout one the default event.
+    for (const e of parsed.events) if (e.event === "message" || e.event === "stderr") onLine(e.data, e.event === "stderr");
   }
+}
+
+/** A preview's shell's screen: base64 chunks, the scrollback first, then `onClosed`. */
+export function followShell(id: string, sh: string, opts: ScreenHandlers): () => void {
+  return followScreen(`${ROLL_API}${one(id)}/shell/sessions/${encodeURIComponent(sh)}/screen`, () => apiHeaders() ?? {}, opts);
 }
 
 /** A resource as the reset body and the settings name it. */

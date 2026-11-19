@@ -125,10 +125,18 @@ impl roll_previews::ports::Apps for RollApps {
         let id = self.service_in(&t.project, &t.service).await?.ok_or_else(|| anyhow::anyhow!("roll apps has no service {} in the project", t.service))?;
         self.ids.lock().unwrap_or_else(|p| p.into_inner()).insert((t.preview.clone(), t.service.clone()), id.clone());
         let path = Self::env_path(&id, &t.environment);
-        // Private like the preview (link access): roll apps' proxy checks the same token.
-        let access = t.access_token.as_ref().map(|token| match &t.bypass_sha256 {
-            Some(hash) => json!({ "token": token, "bypass_sha256": hash }),
-            None => json!({ "token": token }),
+        // Private like the preview: roll apps' proxy checks the same token (link access), or
+        // signs people in through roll's dashboard (team access); the bypass opens either.
+        let access = match (&t.access_token, t.signed_in) {
+            (Some(token), _) => Some(json!({ "token": token })),
+            (None, true) => Some(json!({ "signed_in": true })),
+            (None, false) => None,
+        }
+        .map(|mut a| {
+            if let Some(hash) = &t.bypass_sha256 {
+                a["bypass_sha256"] = json!(hash);
+            }
+            a
         });
         // The project's egress: with `roll`, roll apps runs it on a network with no route out (a
         // runtime that can't is a 409, which fails the deploy rather than running it open).
@@ -137,6 +145,11 @@ impl roll_previews::ports::Apps for RollApps {
         // One voice on a pull request: previews posts `roll/preview` and its comment for the
         // environment, so roll apps posts no commit status or GitHub Deployment of its own (apps' #249).
         let mut body = json!({ "branch": null, "ephemeral": true, "access": access, "egress": egress, "report": false });
+        // The project's traces: roll apps keeps the environment's itself (its own OpenTelemetry
+        // variables), and the preview's sheet reads them from it.
+        if t.traces {
+            body["traces"] = json!(true);
+        }
         if self.feedback {
             body["feedback"] = json!(t.feedback);
         }
@@ -201,7 +214,7 @@ impl roll_previews::ports::Apps for RollApps {
             "{}@{}@{h:016x}{}{}{}{}",
             t.environment,
             t.git.as_deref().unwrap_or("image"),
-            if t.access_token.is_some() { "p" } else { "" },
+            if t.access_token.is_some() { "p" } else if t.signed_in { "s" } else { "" },
             if self.feedback && t.feedback { "f" } else { "" },
             if closed { format!("e{}", t.egress_hosts.join(",")) } else { String::new() },
             t.rebuild.map(|n| format!("#r{n}")).unwrap_or_default()
@@ -320,10 +333,30 @@ impl roll_previews::ports::Apps for RollApps {
         (mem > 0).then_some((cpu, mem / instances))
     }
 
+    /// The `pv-` environment's errors, as roll apps groups them (its 50 most frequent; the engine
+    /// masks them).
+    async fn errors(&self, preview: &str, service: &str, minutes: i64, _masks: Option<&roll_previews::engine::ErrorMasks<'_>>) -> roll_previews::Result<Vec<roll_previews::ErrorGroup>> {
+        let Ok(Some((id, env))) = self.find(preview, service).await else { return Ok(Vec::new()) };
+        let Ok(v) = self.api.get(&format!("{}/errors?minutes={minutes}", Self::env_path(&id, &env))).await else { return Ok(Vec::new()) };
+        Ok(serde_json::from_value(v["groups"].clone()).unwrap_or_default())
+    }
+
     async fn logs(&self, preview: &str, service: &str, lines: usize) -> Vec<String> {
         let Ok(Some((id, env))) = self.find(preview, service).await else { return Vec::new() };
         let v = self.api.get(&format!("{}/logs?tail={lines}", Self::env_path(&id, &env))).await.unwrap_or(Value::Null);
         v.as_array().into_iter().flatten().filter_map(|l| s(&l["text"])).collect()
+    }
+
+    async fn traces(&self, preview: &str, service: &str, minutes: i64) -> Vec<roll_previews::engine::traces::TraceRow> {
+        let Ok(Some((id, env))) = self.find(preview, service).await else { return Vec::new() };
+        let Ok(v) = self.api.get(&format!("{}/traces?minutes={minutes}", Self::env_path(&id, &env))).await else { return Vec::new() };
+        serde_json::from_value(v["traces"].clone()).unwrap_or_default()
+    }
+
+    async fn trace(&self, preview: &str, service: &str, trace: &str) -> Option<Vec<roll_previews::engine::traces::Span>> {
+        let (id, env) = self.find(preview, service).await.ok()??;
+        let v = self.api.get(&format!("{}/traces/{trace}", Self::env_path(&id, &env))).await.ok()?;
+        serde_json::from_value(v["spans"].clone()).ok()
     }
 
     fn status(&self, _preview: &str, _service: &str) -> Option<roll_previews::ServiceState> {
@@ -524,13 +557,25 @@ impl apps_control::integrations::GitPushes for GitPushes {
 
     async fn pushed(&self, push: apps_control::integrations::GitPush) {
         let Some(engine) = self.0.upgrade() else { return };
-        let pull = push.pull.map(|p| roll_previews::ports::GitPull { number: p.number, title: p.title, url: p.url, fork: p.fork });
-        let p = roll_previews::ports::GitPush { service: push.service, url: push.url, branch: push.branch, sha: push.sha, message: push.message, pull };
+        let pull = push.pull.map(|p| roll_previews::ports::GitPull { number: p.number, title: p.title, url: p.url, fork: p.fork, author: p.author });
+        let p = roll_previews::ports::GitPush { service: push.service, url: push.url, branch: push.branch, sha: push.sha, message: push.message, pusher: push.pusher, pull };
         tokio::spawn(async move {
             if let Err(e) = engine.git_push(&p).await {
                 tracing::warn!(service = %p.service, branch = %p.branch, error = %e, "previews: a Git URL service's push");
             }
         });
+    }
+}
+
+/// Names under a project's own preview domain that no roll apps environment holds (a service on
+/// roll's own runtime): roll apps' ingress hands them on, in process, to previews' router, which
+/// answers a 404 for a name it doesn't hold.
+pub struct DomainRouter(pub Arc<roll_previews::runtime::Runtime>);
+
+#[async_trait]
+impl apps_control::integrations::PreviewRouter for DomainRouter {
+    async fn serve(&self, req: axum::extract::Request) -> axum::response::Response {
+        roll_previews::runtime::serve_host(self.0.clone(), req).await
     }
 }
 
@@ -550,6 +595,51 @@ impl apps_control::integrations::FeedbackNotes for Notes {
 }
 
 /// roll apps' own (`Apps::reachable`): the instance's container and port, its lease held.
+/// roll apps' log drains, for previews' services on roll's runtime: whether a project's take
+/// previews' output is read again after [`DRAINS_FOR`].
+pub struct AppsDrains {
+    pub apps: Arc<apps_control::Apps>,
+    pub wanted: std::sync::Mutex<std::collections::HashMap<(String, roll_previews::ports::DrainSource), (std::time::Instant, bool)>>,
+}
+
+const DRAINS_FOR: std::time::Duration = std::time::Duration::from_secs(30);
+
+#[async_trait]
+impl roll_previews::ports::Drains for AppsDrains {
+    async fn wanted(&self, project: &str, source: roll_previews::ports::DrainSource) -> bool {
+        let key = (project.to_string(), source);
+        if let Some((at, w)) = self.wanted.lock().unwrap_or_else(|e| e.into_inner()).get(&key)
+            && at.elapsed() < DRAINS_FOR
+        {
+            return *w;
+        }
+        let w = self.apps.drains_take_previews(project, None, source.as_str()).await.unwrap_or(false);
+        let mut m = self.wanted.lock().unwrap_or_else(|e| e.into_inner());
+        if m.len() > 5000 {
+            m.clear();
+        }
+        m.insert(key, (std::time::Instant::now(), w));
+        w
+    }
+
+    fn send(&self, project: &str, environment: &str, service: &str, source: roll_previews::ports::DrainSource, lines: Vec<roll_previews::ports::DrainLine>) {
+        let lines = lines.into_iter().map(|l| apps_control::drains::PreviewLine { t: l.t, stderr: l.stderr, text: l.text }).collect();
+        self.apps.drain_preview_lines(project, environment, service, source.as_str(), lines);
+    }
+}
+
+/// Previews' OTLP intake reads spans with roll apps' reader.
+pub struct AppsSpans;
+
+impl roll_previews::ports::SpanReader for AppsSpans {
+    fn spans(&self, body: &[u8], json: bool, gzip: bool) -> anyhow::Result<Vec<roll_previews::engine::traces::Span>> {
+        Ok(apps_control::otlp::spans_of_request(body, json, gzip)?
+            .into_iter()
+            .map(|s| roll_previews::engine::traces::Span { trace: s.trace, span: s.span, parent: s.parent, name: s.name, service: s.service, start: s.start, end: s.end, error: s.error, attrs: s.attrs })
+            .collect())
+    }
+}
+
 pub struct AppsReach(pub Arc<apps_control::Apps>);
 
 #[async_trait]
@@ -626,8 +716,84 @@ impl roll_previews::ports::Apps for Services {
         if matches!(self.apps.find(preview, service).await, Ok(Some(_))) { self.apps.metrics(preview, service).await } else { self.runtime.metrics(preview, service).await }
     }
 
-    async fn follow(&self, preview: &str, service: &str, lines: usize) -> Option<tokio::sync::mpsc::Receiver<String>> {
+    /// roll apps groups its own; a `roll.toml` service's are grouped here, from its last
+    /// [`ERROR_LINES`] lines in the span. Grouping cuts a title and a sample, so when there's an
+    /// error (and they're to be shown) its lines are masked first, then grouped again.
+    async fn errors(&self, preview: &str, service: &str, minutes: i64, masks: Option<&roll_previews::engine::ErrorMasks<'_>>) -> roll_previews::Result<Vec<roll_previews::ErrorGroup>> {
+        if matches!(self.apps.find(preview, service).await, Ok(Some(_))) {
+            return self.apps.errors(preview, service, minutes, masks).await;
+        }
+        let lines = self.runtime.timed_lines(preview, service, minutes, ERROR_LINES).await;
+        let groups = group_errors(&lines);
+        let Some(masks) = masks.filter(|_| !groups.is_empty()) else { return Ok(groups) };
+        let values = masks.values().await?;
+        let lines: Vec<_> = lines.into_iter().map(|(t, stderr, text)| (t, stderr, roll_previews::mask_cut(&text, values))).collect();
+        Ok(group_errors(&lines))
+    }
+
+    async fn traces(&self, preview: &str, service: &str, minutes: i64) -> Vec<roll_previews::engine::traces::TraceRow> {
+        self.apps.traces(preview, service, minutes).await
+    }
+
+    async fn trace(&self, preview: &str, service: &str, trace: &str) -> Option<Vec<roll_previews::engine::traces::Span>> {
+        self.apps.trace(preview, service, trace).await
+    }
+
+    async fn follow(&self, preview: &str, service: &str, lines: usize) -> Option<tokio::sync::mpsc::Receiver<(bool, String)>> {
         if matches!(self.apps.find(preview, service).await, Ok(Some(_))) { None } else { self.runtime.follow(preview, service, lines).await }
+    }
+
+    /// A `roll.toml` service's terminal: a login shell exec'd in its container through the Docker
+    /// Engine API, as roll apps' shells are (roll apps' services have their own, on `pv-…`).
+    async fn shell(&self, preview: &str, service: &str, cols: u16, rows: u16) -> anyhow::Result<Option<roll_previews::ports::Shell>> {
+        if self.apps.find(preview, service).await?.is_some() {
+            return Ok(None);
+        }
+        let Some(engine) = apps_control::runtime::engine::Engine::local() else { anyhow::bail!("a shell needs Docker on a local socket") };
+        let container = self.runtime.shell_container(preview, service).await?;
+        // bash when the image has it, else sh; a login shell, so the image's profile applies.
+        let login = "if command -v bash >/dev/null 2>&1; then exec bash -l; else exec sh -l; fi";
+        let (id, io) = engine.exec_tty(&container, &["sh", "-c", login], &["TERM=xterm-256color"], cols, rows).await?;
+        Ok(Some(roll_previews::ports::Shell::upgraded(id, io)))
+    }
+
+    async fn resize_shell(&self, id: &str, cols: u16, rows: u16) -> anyhow::Result<()> {
+        match apps_control::runtime::engine::Engine::local() {
+            Some(e) => e.resize(id, cols, rows).await,
+            None => Ok(()),
+        }
+    }
+
+    fn hold(&self, preview: &str, service: &str) {
+        self.runtime.hold(preview, service);
+    }
+
+    /// A `roll.toml` service's port (roll apps' services have roll apps' own tunnel, on `pv-…`).
+    async fn forward(&self, preview: &str, service: &str, port: u16) -> anyhow::Result<Option<Box<dyn roll_previews::ports::ShellIo>>> {
+        if self.apps.find(preview, service).await?.is_some() {
+            return Ok(None);
+        }
+        self.runtime.forward(preview, service, port).await
+    }
+
+    /// A `roll.toml` service's files (roll apps' services have their own, on `pv-…`).
+    async fn read_files(&self, preview: &str, service: &str, path: &str) -> anyhow::Result<Option<roll_previews::ports::FileStream>> {
+        if self.apps.find(preview, service).await?.is_some() {
+            return Ok(None);
+        }
+        self.runtime.read_files(preview, service, path).await
+    }
+
+    async fn write_files(&self, preview: &str, service: &str, dir: &str, tar: bytes::Bytes) -> anyhow::Result<bool> {
+        if self.apps.find(preview, service).await?.is_some() {
+            return Ok(false);
+        }
+        self.runtime.write_files(preview, service, dir, tar).await
+    }
+
+    /// roll apps drains its own instances' output (a drain's `previews`).
+    async fn drain_from(&self, preview: &str, service: &str, since: &str) -> Option<tokio::sync::mpsc::Receiver<(bool, String)>> {
+        if matches!(self.apps.find(preview, service).await, Ok(Some(_))) { None } else { self.runtime.drain_from(preview, service, since).await }
     }
 
     async fn seed(&self, job: &roll_previews::ports::SeedJob) -> anyhow::Result<(i32, String)> {
@@ -706,6 +872,25 @@ fn already(last: Option<&(String, String)>, key: &str, env: &Value) -> Already {
     }
 }
 
+/// The most lines of a runtime service's output its errors are read from.
+const ERROR_LINES: usize = 2_000;
+
+/// A runtime service's lines (`(ms, from stderr, text)`, oldest first) grouped as roll apps groups
+/// an environment's (traces joined per stream, then by fingerprint), the newest 50 (a new error
+/// seen once isn't dropped for older, more frequent ones). Each read as roll apps' route answers
+/// it, as [`RollApps::errors`] reads that: one shape for both.
+fn group_errors(lines: &[(i64, bool, String)]) -> Vec<roll_previews::ErrorGroup> {
+    use apps_control::logs::{LogLine, Stream, level_of};
+    let lines: Vec<LogLine> = lines
+        .iter()
+        .map(|(t, stderr, text)| LogLine { t: *t, stream: if *stderr { Stream::Stderr } else { Stream::Stdout }, instance: None, deployment: None, level: level_of(text), text: text.clone(), trace: None })
+        .collect();
+    let mut groups = apps_control::errors::groups(&lines);
+    groups.sort_by(|a, b| b.last.cmp(&a.last).then(b.count.cmp(&a.count)));
+    groups.truncate(apps_control::errors::MAX_GROUPS);
+    groups.iter().filter_map(|g| serde_json::to_value(g).ok().and_then(|v| serde_json::from_value(v).ok())).collect()
+}
+
 #[cfg(test)]
 mod tests {
     /// Every variable of a roll apps link to a branched resource comes from the branch, under
@@ -733,6 +918,30 @@ mod tests {
     }
 
     use super::*;
+
+    /// A `roll.toml` service's output is grouped from its stamped lines: a trace on stderr is one
+    /// error however stdout's lines fall between, and the same error again is counted, not listed.
+    /// Each group is read through roll apps' `…/errors` answer's JSON, as `RollApps` reads it.
+    #[test]
+    fn a_runtime_services_errors_are_grouped_from_its_stamped_lines() {
+        let trace = |t: i64, line: u32| {
+            vec![
+                (t, true, "Traceback (most recent call last):".to_string()),
+                (t, false, "GET / 200".to_string()),
+                (t, true, format!("  File \"/app/main.py\", line {line}, in handler")),
+                (t, true, "ZeroDivisionError: division by zero".to_string()),
+            ]
+        };
+        let mut lines = trace(1_000, 10);
+        lines.push((1_500, false, "ERROR payment 42 declined".into()));
+        lines.extend(trace(2_000, 11));
+        let g = group_errors(&lines);
+        assert_eq!(g.len(), 2, "{g:#?}");
+        assert_eq!((g[0].kind.as_str(), g[0].count, g[0].first_seen, g[0].last_seen), ("python", 2, 1_000, 2_000));
+        assert_eq!(g[0].title, "ZeroDivisionError: division by zero");
+        assert_eq!(g[0].sample.lines().count(), 3, "stdout's line isn't in it: {}", g[0].sample);
+        assert_eq!((g[1].kind.as_str(), g[1].count), ("line", 1));
+    }
 
     /// A poll while previews' own deploy is going waits on it, once it's live it's done, and only
     /// a different set of variables (or a deployment that replaced it) starts another: one

@@ -527,6 +527,11 @@ impl LogSink {
         LogSink { instance: Some(instance.into()), deployment: Some(deployment.into()), ..self.clone() }
     }
 
+    /// The same instance's deployment under another name (a sidecar's container).
+    pub fn renamed(&self, instance: &str) -> LogSink {
+        LogSink { instance: Some(instance.into()), ..self.clone() }
+    }
+
     pub fn deployment(&self, deployment: &str) -> LogSink {
         LogSink { deployment: Some(deployment.into()), ..self.clone() }
     }

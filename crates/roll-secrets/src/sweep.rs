@@ -451,6 +451,10 @@ impl Secrets {
         if let Err(e) = self.sweep_forgotten() {
             tracing::warn!("cleaning up deleted projects failed: {e}");
         }
+        // ACME's used nonces, old orders and expired certificates' rows.
+        if let Err(e) = self.sweep_acme() {
+            tracing::warn!("sweeping ACME's nonces and orders failed: {e}");
+        }
         // Expired ephemeral environments.
         let expired: Vec<(String, String)> = self.db.read(|c| {
             c.query("SELECT project_id, slug FROM environments WHERE kind = 'ephemeral' AND expires_at IS NOT NULL AND expires_at <= ? LIMIT 100", [now], |r| Ok((r.get(0)?, r.get(1)?)))

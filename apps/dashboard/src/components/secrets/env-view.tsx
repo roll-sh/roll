@@ -23,7 +23,7 @@ import { BulkBar } from "./bulk";
 import { LinkDialog } from "./link-dialog";
 import { ApprovalOffer, RequestsPanel, type Pending } from "./requests";
 import { secretsHref, useSecrets } from "./secrets-page";
-import { ago, button, Chip, CommentMark, dangerButton, ErrorNote, errorText, ExpiryMark, field, ghost, iconButton, label, LinkChip, PersonalMark, primary, RefMark, Reveal, saveText, TotpCode, sized, SourceMark, Teach, until, useLoad, Warnings } from "./ui";
+import { ago, button, Chip, CommentMark, dangerButton, ErrorNote, errorText, ExpiryMark, field, ghost, iconButton, label, LinkChip, PersonalMark, primary, RefMark, Reveal, saveText, TotpCode, sized, SourceMark, Teach, textareaField, until, useLoad, Warnings } from "./ui";
 
 /** One environment: its folder's secrets (inline edit, reveal, add, delete, overrides), requests and history. */
 export function EnvView({ env }: { env: Environment }) {
@@ -458,7 +458,7 @@ function AddSecret({ path, keys, refs, onAdd, onCancel }: { path: string; keys: 
         </label>
         <div>
           <ValueHead onGenerate={() => setValue(generateValue(48, rule?.password))} />
-          <RefInput aria-label="Value" value={value} onValue={setValue} source={refs} rows={value.includes("\n") ? 4 : 1} placeholder="value, or ${OTHER_KEY}, ${production.KEY}" spellCheck={false} autoComplete="off" className={`${field} h-auto min-h-8 resize-y py-1.5 font-mono`} />
+          <RefInput aria-label="Value" value={value} onValue={setValue} source={refs} rows={value.includes("\n") ? 4 : 1} placeholder="value, or ${OTHER_KEY}, ${production.KEY}" spellCheck={false} autoComplete="off" className={`${textareaField} min-h-8 resize-y font-mono`} />
           {unfit && value && <span className="mt-1 block text-[11px] text-danger">{unfit}</span>}
         </div>
         <label>
@@ -817,7 +817,7 @@ function Editor({
               placeholder={fresh ? "value" : "unchanged: type a new value to replace it"}
               spellCheck={false}
               autoComplete="off"
-              className={`${field} h-auto min-h-8 resize-y py-1.5 font-mono`}
+              className={`${textareaField} min-h-8 resize-y font-mono`}
             />
           )}
           {unfit && <span className="mt-1 block text-[11px] text-danger">{unfit}</span>}

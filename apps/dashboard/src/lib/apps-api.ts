@@ -5,7 +5,7 @@
 
 import { operatorHeaders, withSession } from "./code-token";
 import { apiHeaders, call, onApiStatus, ROLL_API } from "./roll-api";
-import { streamSse } from "./sse";
+import { followScreen, streamSse, type ScreenHandlers } from "./sse";
 
 // ── shapes (docs/apps/http-api.md) ──
 
@@ -45,6 +45,8 @@ export interface Build {
   target?: string;
   /** System packages the generated Dockerfile installs (apt, or apk on Alpine): `ffmpeg`, `chromium`. */
   packages?: string[];
+  /** The longest its build may take, seconds (60–21600, held to the node's own limit); unset: the node's. */
+  timeout_s?: number;
 }
 
 export type ServiceType = "web" | "worker" | "cron";
@@ -82,10 +84,15 @@ export interface Run {
   memory_target?: number;
   suspend_after_s: number;
   sleep_after_s: number;
-  volume?: { mount: string; size_gb: number };
+  /** backups: how often (hours, 0: by hand only) and how many are kept; none: daily, seven. */
+  volume?: { mount: string; size_gb: number; backups?: { every_hours: number; keep: number } };
   /** Metric alerts (`alert.*` events), over five minutes; each 0 is off. */
   /** log_match: text its output holds log_count times in five minutes (alert.log). */
   alerts?: { memory_pct: number; error_pct: number; p95_ms: number; capacity_pct?: number; log_match?: string; log_count?: number };
+  /** Its service level objective: `objective`% of requests not 5xx (and of minutes under `latency_ms` at p95) over `window_days`; `alert.slo` when its budget burns fast. */
+  slo?: Slo;
+  /** Its own Prometheus endpoint, scraped every 15 s on each running instance (port: the app's own by default). */
+  metrics?: { port?: number; path?: string };
   /** A gradual rollout: the new deployment takes each percent of `steps` for `step_s`, rolled
    *  back by a 5xx share of `error_pct` or more (worse than the old one); no steps: at once. */
   rollout?: { steps: number[]; step_s: number; error_pct: number; /** Each step waits for a person once it passes. */ manual?: boolean };
@@ -104,10 +111,31 @@ export interface Run {
   rollback_on_crash?: boolean;
   /** Build the same revision again, without the cache, when one of its base images moves. */
   rebuild_on_base?: boolean;
+  /** A deploy whose image has a known vulnerability this severe or worse fails before it goes live (a rollback never does). */
+  block_on?: Exclude<Severity, "unknown">;
   /** A worker follows `group`'s lag on `stream` (a roll stream of its project): one instance per `per_instance` behind. */
-  scale?: { stream: string; group: string; per_instance?: number };
+  /** A worker follows a stream group's lag, or a gauge of its own (`metric`: the largest series, or their `sum`). */
+  scale?: { stream?: string; group?: string; metric?: string; sum?: boolean; per_instance?: number };
   /** Commands on a schedule, each a job of the live deployment at its due times (Heroku Scheduler); at most 20. */
   schedules?: Scheduled[];
+  /** Containers beside each instance, in its network namespace (a web service's or a worker's); at most 4. */
+  sidecars?: Sidecar[];
+}
+
+/** A container beside each instance: `name` a-z, 0-9 and - (unique, at most 20); its image pinned with each deployment. */
+export interface Sidecar {
+  name: string;
+  image: string;
+  /** Run as `sh -c` instead of the image's own. */
+  command?: string;
+  /** Plain settings, shown as they are: never a secret. */
+  env?: Record<string, string>;
+  /** The environment's own variables it gets, by name (its secrets too). */
+  variables?: string[];
+  /** 0.1–2, default 0.25. */
+  cpu?: number;
+  /** 64–4096, default 128. */
+  memory_mb?: number;
 }
 
 /** A command on a schedule: `name` a-z, 0-9 and - (unique), `schedule` five fields or `@daily`, `timezone` IANA (default UTC). */
@@ -134,6 +162,10 @@ export interface EnvironmentSummary {
   latest: { id: string; status: DeployStatus } | null;
   /** What wants its owner's eye: a crash loop, the project capped by its spend limit, paused, maintenance, its latest deploy failed. */
   attention?: ("crash_loop" | "capped" | "paused" | "held" | "maintenance" | "deploy_failed")[];
+  /** Settings, variables, links or the project's secrets changed since the live deployment: a redeploy applies them. */
+  needs_deploy: boolean;
+  /** A preview's (made for a branch or a pull request). */
+  ephemeral: boolean;
 }
 
 /** A deleted service, kept stopped for a restore until `purge_at` (ms), then deleted for good. */
@@ -300,9 +332,20 @@ export interface FirewallRule {
   methods?: string[];
   /** Text the User-Agent contains. */
   user_agent?: string;
+  /** Clients by address: addresses or networks (`203.0.113.0/24`). */
+  ips?: string[];
+  /** A request header, cookie or query parameter there (and holding `contains`, case aside). */
+  header?: FieldMatch;
+  cookie?: FieldMatch;
+  query?: FieldMatch;
 }
 
-/** Firewall rules as typed, one a line: `deny /admin/*`, `deny method=DELETE,PUT`, `allow /admin/health`, `deny ua=BadBot` (`ua=` last: the rest of the line). */
+export interface FieldMatch {
+  name: string;
+  contains?: string;
+}
+
+/** Firewall rules as typed, one a line: `deny /admin/*`, `deny method=DELETE,PUT`, `allow /admin/health`, `deny ip=203.0.113.0/24`, `deny header=X-Bot`, `deny query=debug:1`, `deny ua=BadBot` (`ua=` last: the rest of the line). */
 export function parseFirewall(text: string): FirewallRule[] {
   return text
     .split("\n")
@@ -325,7 +368,16 @@ export function parseFirewall(text: string): FirewallRule[] {
           rule.user_agent = [t.slice(3), ...rest.slice(i + 1)].join(" ");
           break;
         }
+        // `name[:contains]`: there, or there and holding that.
+        const field = (v: string) => {
+          const at = v.indexOf(":");
+          return at < 0 ? { name: v } : { name: v.slice(0, at), contains: v.slice(at + 1) };
+        };
         if (t.startsWith("method=")) rule.methods = t.slice(7).split(",").filter(Boolean);
+        else if (t.startsWith("ip=")) rule.ips = t.slice(3).split(",").filter(Boolean);
+        else if (t.startsWith("header=")) rule.header = field(t.slice(7));
+        else if (t.startsWith("cookie=")) rule.cookie = field(t.slice(7));
+        else if (t.startsWith("query=")) rule.query = field(t.slice(6));
         else if (t.startsWith("/")) rule.path = t;
       }
       return rule;
@@ -335,7 +387,23 @@ export function parseFirewall(text: string): FirewallRule[] {
 /** The rules as one line each, as `parseFirewall` reads them. */
 export function formatFirewall(rules: FirewallRule[]): string {
   return rules
-    .map((r) => [r.action, r.action === "limit" ? `${r.per_minute ?? 60}${r.burst ? `:${r.burst}` : ""}` : undefined, r.path, r.methods?.length ? `method=${r.methods.join(",")}` : undefined, r.user_agent ? `ua=${r.user_agent}` : undefined].filter(Boolean).join(" "))
+    .map((r) => {
+      const field = (k: string, f?: FieldMatch) => (f ? `${k}=${f.name}${f.contains ? `:${f.contains}` : ""}` : undefined);
+      return [
+        r.action,
+        r.action === "limit" ? `${r.per_minute ?? 60}${r.burst ? `:${r.burst}` : ""}` : undefined,
+        r.path,
+        r.methods?.length ? `method=${r.methods.join(",")}` : undefined,
+        r.ips?.length ? `ip=${r.ips.join(",")}` : undefined,
+        field("header", r.header),
+        field("cookie", r.cookie),
+        field("query", r.query),
+        // Last: it takes the rest of the line.
+        r.user_agent ? `ua=${r.user_agent}` : undefined,
+      ]
+        .filter(Boolean)
+        .join(" ");
+    })
     .join("\n");
 }
 
@@ -438,7 +506,8 @@ export interface EnvironmentPut {
   ephemeral?: boolean;
   /** Private: visitors need `?roll_access=<token>` once; null makes it public again. */
   /** `signed_in`: people signed in to roll who can open the project get in (alone, or with a token). */
-  access?: { token?: string; signed_in?: boolean; bypass_sha256?: string } | null;
+  /** Who gets in: a link's token, people signed in to roll, or a password visitors type (8–200; replaces the whole of access). */
+  access?: { token?: string; signed_in?: boolean; password?: string; bypass_sha256?: string } | null;
   /** Creating it: start with this environment's variables. */
   variables_from?: string;
   wait_for_ci?: boolean;
@@ -471,6 +540,12 @@ export interface EnvironmentPut {
   headers?: HeaderRule[] | null;
   /** Paths another service of the project answers (its environment of the same name); null or [] for none. */
   routes?: RouteRule[] | null;
+  /** Its uptime checks (at most 5), or null for none. */
+  checks?: UptimeCheck[] | null;
+  /** Its split test: `percent` of visitors (1–99) served by `environment`, or null to end it. */
+  split?: { environment: string; percent: number } | null;
+  /** Its heartbeats (at most 10), or null for none; one kept by name keeps its URL. */
+  heartbeats?: Pick<Heartbeat, "name" | "every_s" | "grace_s">[] | null;
   /** Its own size and scale over the service's; a null field goes back to the service's. */
   run?: Partial<Record<EnvRunField, number | null>>;
 }
@@ -504,6 +579,8 @@ export interface Domain {
   created_at: number;
   /** Its requests go, 308, to this hostname of the same environment (www → apex). */
   redirect_to?: string | null;
+  /** The app's port it's sent to, when it isn't the service's own (published from the next deploy). */
+  port?: number;
 }
 
 /** What an environment's code may reach: `roll` keeps it on a network with no route out, the
@@ -516,13 +593,11 @@ export interface Egress {
 export interface Environment extends EnvironmentSummary {
   service: string;
   branch: string | null;
-  ephemeral: boolean;
   instances: Instance[];
   domains: Domain[];
   port: number | null;
   /** A TCP service's address (`host:port`), once it has its port. */
   tcp?: string | null;
-  needs_deploy: boolean;
   /** Its hostnames answer only visitors with its access token (a preview). */
   private: boolean;
   /** A cron service's next scheduled run, once deployed. */
@@ -554,6 +629,8 @@ export interface Environment extends EnvironmentSummary {
   report?: boolean;
   /** People signed in to roll who can open its project get in. */
   signed_in?: boolean;
+  /** Visitors may type its password (`access.password`, never returned). */
+  password?: boolean;
   /** What its code may reach: roll and the listed hosts (`roll`), or anything (`open`). */
   egress?: Egress;
   /** Hosts its egress proxy refused lately: not listed, or (`private`) resolving only to private addresses. */
@@ -586,6 +663,15 @@ export interface Environment extends EnvironmentSummary {
   headers?: HeaderRule[];
   /** Paths another service of the project answers. */
   routes?: RouteRule[];
+  checks?: UptimeCheck[];
+  /** How each check stands on its owner. */
+  check_states?: UptimeCheckState[];
+  heartbeats?: Heartbeat[];
+  heartbeat_states?: HeartbeatState[];
+  /** Its split test: a share of its visitors, kept by their bucket cookie, served by another environment. */
+  split?: { environment: string; percent: number };
+  /** Only in the answer to the PUT that added them: each new heartbeat's ping URL (shown once). */
+  heartbeat_urls?: Record<string, string>;
   created_at: number;
 }
 
@@ -609,7 +695,7 @@ export interface NewDeploy {
 export type DeployTrigger = "push" | "manual" | "rollback" | "upload" | "api" | "settings" | "promote";
 
 export interface Plan {
-  provider: "dockerfile" | "deno" | "node" | "python" | "go" | "rust" | "ruby" | "php" | "java" | "dotnet" | "elixir" | "static" | "functions";
+  provider: "dockerfile" | "deno" | "node" | "python" | "go" | "rust" | "ruby" | "php" | "java" | "dotnet" | "elixir" | "scala" | "clojure" | "gleam" | "shell" | "static" | "functions";
   framework: string | null;
   language_version: string | null;
   install: string | null;
@@ -624,6 +710,8 @@ export interface Plan {
   uses?: ("postgres" | "redis")[];
   /** A static site's function directories (`netlify/functions`, `api`) the `functions` builder runs. */
   functions?: string[];
+  /** A static site's edge functions: run before its files on their paths by its `-fn` service. */
+  edge?: { name: string; kind: "netlify" | "vercel"; file: string; paths: string[]; excluded?: string[] }[];
 }
 
 export interface RootCandidate {
@@ -660,6 +748,57 @@ export interface Deployment {
   pruned_at?: number;
   /** When each step began (`build`, `pre_deploy`, `rollout`, then `live` or `failed`): on a single deployment's GET. */
   steps?: { step: string; at: number }[];
+  /** Its image's last scan for known vulnerabilities, once one ran. */
+  vulnerabilities?: ScanSummary;
+}
+
+export interface Slo {
+  objective: number;
+  latency_ms?: number;
+  window_days?: number;
+}
+
+/** One indicator over the objective's window: `budget_left` is the share of the budget still unspent (negative once spent). */
+export interface SloIndicator {
+  total: number;
+  bad: number;
+  sli: number | null;
+  budget_left: number | null;
+}
+
+/** `…/slo`: the live objective against its window, and the burn alert firing now. */
+export interface SloReport {
+  slo: Slo | null;
+  availability?: SloIndicator;
+  latency?: SloIndicator | null;
+  burning?: { indicator: "availability" | "latency"; burn_rate: number; window: "1h" | "6h" } | null;
+}
+
+export type Severity = "critical" | "high" | "medium" | "low" | "unknown";
+
+/** A deployment's scan: counts by severity (`error`: it didn't finish, and the counts mean nothing). */
+export interface ScanSummary {
+  critical: number;
+  high: number;
+  medium: number;
+  low: number;
+  unknown: number;
+  fixable: number;
+  scanned_at: number;
+  scanner: string;
+  error?: string;
+}
+
+/** One known vulnerability: a package at a version an advisory names. */
+export interface Vulnerability {
+  id: string;
+  severity: Severity;
+  package: string;
+  installed: string;
+  fixed?: string;
+  title?: string;
+  /** Where in the image: the OS's packages or a lockfile. */
+  target: string;
 }
 
 /**
@@ -811,6 +950,44 @@ export interface Vital {
   samples: number;
 }
 export type VitalName = "lcp" | "inp" | "cls" | "fcp" | "ttfb";
+/** An uptime check: GET `path` every `every_s` (30–3600, default 60) through the environment's own proxy; passes on `status` (any 2xx/3xx when none) and, with `contains`, an answer holding it. */
+export interface UptimeCheck {
+  name: string;
+  path: string;
+  every_s?: number;
+  timeout_s?: number;
+  status?: number;
+  contains?: string;
+}
+
+export interface UptimeCheckState {
+  name: string;
+  /** null: not tried yet; false once it failed twice in a row. */
+  up: boolean | null;
+  failures: number;
+  last_at: number | null;
+  status: number | null;
+  ms: number | null;
+  error: string | null;
+  down_since: number | null;
+}
+
+/** A heartbeat: something outside roll pings its URL at least every `every_s` (60–604800); one not come within that and `grace_s` (default 300) is `heartbeat.missed`. */
+export interface Heartbeat {
+  name: string;
+  every_s: number;
+  grace_s?: number;
+  added_at: number;
+}
+
+export interface HeartbeatState {
+  name: string;
+  last_ping_at: number | null;
+  /** When the next ping is due (before the grace). */
+  due_at: number;
+  missed: boolean;
+}
+
 /** What visitors' browsers measured (`vitals: true`): overall and for the busiest routes. */
 export interface Vitals {
   minutes: number;
@@ -832,6 +1009,12 @@ export interface Analytics {
   referrers: { host: string; views: number }[];
   /** The edge's country codes (Cloudflare's), where it said one. */
   countries: { country: string; views: number }[];
+  /** Page views that came with UTM parameters (empty strings where one wasn't given). */
+  campaigns?: { source: string; medium: string; campaign: string; views: number; visitors: number }[];
+  /** From the user agent: browsers, operating systems, and `mobile`/`tablet`/`desktop`/`bot`. */
+  devices?: { browsers: { browser: string; views: number }[]; os: { os: string; views: number }[]; classes: { class: string; views: number }[] };
+  /** Custom events (`roll.track(name, props)` or `POST /__roll/event`), by name, each property's most common values. */
+  events?: { name: string; count: number; props: Record<string, { value: string; count: number }[]> }[];
   series: { t: number; views: number; visitors: number }[];
   cut: boolean;
 }
@@ -879,7 +1062,7 @@ export interface NotifyTarget {
   id: string;
   project: string;
   /** `email`: the project's owner, at their account's address (never an address someone names). */
-  kind: "webhook" | "slack" | "discord" | "email";
+  kind: "webhook" | "slack" | "discord" | "email" | "pagerduty" | "opsgenie";
   /** The URL's host (the URL itself isn't returned); an email target's says who it reaches. */
   host: string;
   events: NotifyEvent[];
@@ -916,7 +1099,11 @@ export type NotifyEvent =
   | "domain.expired"
   | "domain.tls_failed"
   | "volume.backup_failed"
-  | "volume.full";
+  | "volume.full"
+  | "check.down"
+  | "heartbeat.missed"
+  | "deploy.vulnerable"
+  | "alert.slo";
 
 /** An entry of the event log (`GET /v1/apps/events`, a service's `…/activity`). */
 export interface AppEvent {
@@ -952,12 +1139,32 @@ export interface LogDrain {
   environments: string[];
   /** Only these services' (ids; empty: every one). */
   services: string[];
+  /** Preview environments' too, and a preview's services on roll's own runtime (in its `pv-`
+   *  environment, with no service id, so never to a drain narrowed to services). */
   previews: boolean;
   /** The names of the headers it's sent with; their values are sealed, never shown. */
   headers: string[];
+  /** How its lines go: roll's signed NDJSON, OpenTelemetry logs (OTLP/HTTP JSON), or syslog (RFC 5424 over TLS). */
+  format: DrainFormat;
   /** Only in the answer that made it. */
   secret?: string;
 }
+
+/** A static site's form that has kept submissions. */
+export interface SiteForm {
+  name: string;
+  submissions: number;
+  last_at: number;
+}
+
+/** What someone sent through a form: its fields as they came. */
+export interface FormSubmission {
+  id: string;
+  created_at: number;
+  fields: { name: string; value: string }[];
+}
+
+export type DrainFormat = "ndjson" | "otlp" | "syslog";
 
 /** A project's monthly spend limits (US dollars at roll's prices, the calendar month in UTC). */
 export interface SpendLimits {
@@ -1038,6 +1245,11 @@ export const appsApi = {
   /** The folders of a repo's or a Git URL's tree that build on their own (a monorepo's apps). */
   roots: (req: { repo: string } | { git: string; branch?: string; git_login?: { username: string; password: string } }) => call<{ roots: RootCandidate[] }>("POST", "/v1/apps/plan", { ...req, roots: true }),
   /** The project as roll.toml: `databases` names what its services link (`{"postgres:<id>": "db"}`). */
+  /** The project's own preview domain (a wildcard its preview environments answer under). */
+  previewDomain: (project: string) => call<Domain>("GET", `/v1/apps/projects/${enc(project)}/preview-domain`),
+  setPreviewDomain: (project: string, hostname: string) => call<Domain>("POST", `/v1/apps/projects/${enc(project)}/preview-domain`, { hostname }),
+  verifyPreviewDomain: (project: string) => call<Domain>("POST", `/v1/apps/projects/${enc(project)}/preview-domain/verify`),
+  removePreviewDomain: (project: string) => call<null>("DELETE", `/v1/apps/projects/${enc(project)}/preview-domain`),
   exportProject: (project: string, databases: Record<string, string>) => call<{ roll_toml: string; notes: string[] }>("POST", `/v1/apps/projects/${enc(project)}/export`, { databases }),
   /** A roll.toml or Compose file read as a project (nothing made). */
   importProject: (file: ImportFile | { repo: string; revision?: string } | { git: string; branch?: string }) => call<ProjectImport>("POST", "/v1/apps/import", file),
@@ -1063,14 +1275,20 @@ export const appsApi = {
   environment: (id: string, e: string) => call<Environment>("GET", env(id, e)),
   notifyTargets: (project: string) => call<NotifyTarget[]>("GET", `/v1/apps/projects/${enc(project)}/notifications`),
   drains: (project: string) => call<LogDrain[]>("GET", `/v1/apps/projects/${enc(project)}/drains`),
-  addDrain: (project: string, body: { url: string } & DrainSettings) => call<LogDrain>("POST", `/v1/apps/projects/${enc(project)}/drains`, body),
+  addDrain: (project: string, body: { url: string; format?: DrainFormat } & DrainSettings) => call<LogDrain>("POST", `/v1/apps/projects/${enc(project)}/drains`, body),
   /** Its sources, filters and headers (given ones replace; `headers` replaces them all); its URL and secret stay. */
   updateDrain: (project: string, id: string, body: DrainSettings) => call<LogDrain>("PATCH", `/v1/apps/projects/${enc(project)}/drains/${enc(id)}`, body),
   testDrain: (project: string, id: string) => call<{ ok: boolean; code: number | null; error: string | null }>("POST", `/v1/apps/projects/${enc(project)}/drains/${enc(id)}/test`),
+  /** A static site's forms with submissions kept. */
+  forms: (id: string, e: string) => call<SiteForm[]>("GET", `${env(id, e)}/forms`),
+  /** A form's submissions in the clear (a reveal), the newest first. */
+  formSubmissions: (id: string, e: string, form: string, before?: string) => call<FormSubmission[]>("GET", `${env(id, e)}/forms/${encodeURIComponent(form)}/submissions${before ? `?before=${encodeURIComponent(before)}` : ""}`),
+  deleteFormSubmission: (id: string, e: string, form: string, sub: string) => call<null>("DELETE", `${env(id, e)}/forms/${encodeURIComponent(form)}/submissions/${encodeURIComponent(sub)}`),
   removeDrain: (project: string, id: string) => call<null>("DELETE", `/v1/apps/projects/${enc(project)}/drains/${enc(id)}`),
   limits: (project: string) => call<SpendLimits>("GET", `/v1/apps/projects/${enc(project)}/limits`),
   setLimits: (project: string, body: { alert_usd: number | null; hard_usd: number | null }) => call<SpendLimits>("PUT", `/v1/apps/projects/${enc(project)}/limits`, body),
-  addNotifyTarget: (project: string, body: { kind: NotifyTarget["kind"]; url?: string; events?: NotifyEvent[]; environments?: string[]; services?: string[]; previews?: boolean }) => call<NotifyTarget>("POST", `/v1/apps/projects/${enc(project)}/notifications`, body),
+  /** PagerDuty takes its integration's `routing_key`, Opsgenie its `api_key` (sealed, never returned), each with a `region`. */
+  addNotifyTarget: (project: string, body: { kind: NotifyTarget["kind"]; url?: string; routing_key?: string; api_key?: string; region?: "us" | "eu"; events?: NotifyEvent[]; environments?: string[]; services?: string[]; previews?: boolean }) => call<NotifyTarget>("POST", `/v1/apps/projects/${enc(project)}/notifications`, body),
   /** Its events and filters (given ones replace); its URL and secret stay. */
   updateNotifyTarget: (project: string, id: string, body: { events?: NotifyEvent[]; environments?: string[]; services?: string[]; previews?: boolean }) =>
     call<NotifyTarget>("PATCH", `/v1/apps/projects/${enc(project)}/notifications/${enc(id)}`, body),
@@ -1094,6 +1312,8 @@ export const appsApi = {
   deployment: (id: string, e: string, d: string) => call<Deployment>("GET", dep(id, e, d)),
   /** What a repo deployment brings over the live one (for the live one, the one before it). */
   commits: (id: string, e: string, d: string) => call<DeployCommits>("GET", `${dep(id, e, d)}/commits`),
+  slo: (id: string, e: string) => call<SloReport>("GET", `${env(id, e)}/slo`),
+  vulnerabilities: (id: string, e: string, d: string) => call<{ scan: ScanSummary | null; vulnerabilities: Vulnerability[] }>("GET", `${dep(id, e, d)}/vulnerabilities`),
   buildLog: (id: string, e: string, d: string, q: LogQuery = {}) => call<LogLine[]>("GET", `${dep(id, e, d)}/logs${qs({ tail: q.tail })}`),
   /** `keepVariables`: its image with the variables as they are now (after a rotated secret), not as they were then. */
   rollback: (id: string, e: string, d: string, keepVariables = false) => call<Deployment>("POST", `${dep(id, e, d)}/rollback`, keepVariables ? { keep_variables: true } : undefined),
@@ -1108,7 +1328,8 @@ export const appsApi = {
   createHook: async (id: string, e: string) => `${ROLL_API}${(await call<{ path: string }>("POST", `${env(id, e)}/hook`)).path}`,
   removeHook: (id: string, e: string) => call<void>("DELETE", `${env(id, e)}/hook`),
   backUp: (id: string, e: string) => call<Backup>("POST", `${env(id, e)}/volume/backups`),
-  restore: (id: string, e: string, b: string) => call<Backup>("POST", `${env(id, e)}/volume/backups/${encodeURIComponent(b)}/restore`),
+  /** `from`: a backup of another environment of the service (seeding staging from production). */
+  restore: (id: string, e: string, b: string, from?: string) => call<Backup>("POST", `${env(id, e)}/volume/backups/${encodeURIComponent(b)}/restore`, from ? { from } : undefined),
   cancel: (id: string, e: string, d: string) => call<Deployment>("POST", `${dep(id, e, d)}/cancel`),
   /** What a person says to a manual rollout waiting for them. */
   rollout: (id: string, e: string, d: string, action: "advance" | "all" | "abort") => call<{ deployment: string }>("POST", `${dep(id, e, d)}/rollout`, { action }),
@@ -1184,7 +1405,7 @@ export const appsApi = {
 
   /** A shell in a running instance over HTTP (a browser can't send the token on a WebSocket). */
   /** `instance`: that one (default: one that's running, or a woken one). */
-  openShell: (id: string, e: string, body: { cols: number; rows: number; instance?: string }) => call<{ id: string }>("POST", `${env(id, e)}/shell/sessions`, body),
+  openShell: (id: string, e: string, body: { cols: number; rows: number; instance?: string; console?: boolean; command?: string; cpu?: number; memory_mb?: number }) => call<{ id: string }>("POST", `${env(id, e)}/shell/sessions`, body),
   /** The environment's last finished minute as Prometheus text, for a scraper with a token that may read it. */
   prometheusUrl: (id: string, e: string) => `${ROLL_API}${env(id, e)}/metrics?format=prometheus`,
   shellKeys: (id: string, e: string, sh: string, data: string) => call<null>("POST", `${env(id, e)}/shell/sessions/${encodeURIComponent(sh)}/keys`, { data }),
@@ -1196,6 +1417,8 @@ export const appsApi = {
   verifyDomain: (id: string, e: string, host: string) => call<Domain>("POST", `${env(id, e)}/domains/${enc(host)}/verify`),
   removeDomain: (id: string, e: string, host: string) => call<null>("DELETE", `${env(id, e)}/domains/${enc(host)}`),
   redirectDomain: (id: string, e: string, host: string, to: string | null) => call<Domain>("PATCH", `${env(id, e)}/domains/${enc(host)}`, { redirect_to: to }),
+  /** Send a custom domain to another of the app's ports (null: the service's own). */
+  domainPort: (id: string, e: string, host: string, port: number | null) => call<Domain>("PATCH", `${env(id, e)}/domains/${enc(host)}`, { port }),
 };
 
 /**
@@ -1204,32 +1427,8 @@ export const appsApi = {
  * so the caller drops what it had. Returns the function that stops it.
  */
 /** A shell's screen over SSE: base64 chunks (the scrollback first, again after a reconnect: `onReset`), then `onClosed`. */
-export function followShell(
-  service: string,
-  e: string,
-  sh: string,
-  opts: { onChunk: (bytes: Uint8Array) => void; onReset: () => void; onClosed: () => void },
-): () => void {
-  let opened = false;
-  const stop = streamSse(`${ROLL_API}${env(service, e)}/shell/sessions/${encodeURIComponent(sh)}/screen`, {
-    headers: operatorHeaders,
-    onOpen: (open) => {
-      if (open && opened) opts.onReset();
-      if (open) opened = true;
-    },
-    onEvent: (ev) => {
-      if (ev.event === "closed") {
-        stop();
-        opts.onClosed();
-        return;
-      }
-      const bin = atob(ev.data);
-      const out = new Uint8Array(bin.length);
-      for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-      opts.onChunk(out);
-    },
-  });
-  return stop;
+export function followShell(service: string, e: string, sh: string, opts: ScreenHandlers): () => void {
+  return followScreen(`${ROLL_API}${env(service, e)}/shell/sessions/${encodeURIComponent(sh)}/screen`, operatorHeaders, opts);
 }
 
 /** An access line's text (`http` lines). */

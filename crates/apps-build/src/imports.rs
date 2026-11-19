@@ -237,6 +237,21 @@ pub fn fly_to_toml(text: &str) -> Result<(String, Vec<String>), ProjectError> {
         if let Some(c) = f.get("deploy").and_then(|d| d.get("release_command")).and_then(Value::as_str) {
             run_of(t).insert("pre_deploy".into(), Value::String(c.into()));
         }
+        // Its `[metrics]` (one, or one per process): scraped as Fly does.
+        let metrics = match f.get("metrics") {
+            Some(Value::Array(a)) => a.iter().find(|m| m.get("processes").and_then(Value::as_array).is_none_or(|p| p.iter().any(|x| x.as_str() == Some(proc_name)))),
+            other => other,
+        };
+        if let Some(m) = metrics.and_then(Value::as_table) {
+            let mut s = Table::new();
+            if let Some(p) = m.get("port").and_then(Value::as_integer) {
+                s.insert("port".into(), Value::Integer(p));
+            }
+            if let Some(p) = m.get("path").and_then(Value::as_str) {
+                s.insert("path".into(), Value::String(p.into()));
+            }
+            run_of(t).insert("metrics".into(), Value::Table(s));
+        }
         if web && let Some(n) = http.and_then(|h| h.get("min_machines_running")).and_then(Value::as_integer) {
             run_of(t).insert("min_instances".into(), Value::Integer(n));
         }
@@ -252,7 +267,7 @@ pub fn fly_to_toml(text: &str) -> Result<(String, Vec<String>), ProjectError> {
     if f.get("build").and_then(|b| b.get("dockerfile")).is_some() {
         out.notes.push(format!("{app}: its Dockerfile is used as roll finds it (build.dockerfile in its root's roll.toml names another)"));
     }
-    for (k, what) in [("mounts", "a volume: give the service one in its settings"), ("statics", "static files: a static site is its own service"), ("checks", "health checks: run.health_path"), ("metrics", "metrics: roll's own, and OpenTelemetry with traces on")] {
+    for (k, what) in [("mounts", "a volume: give the service one in its settings"), ("statics", "static files: a static site is its own service"), ("checks", "health checks: run.health_path")] {
         if f.get(k).is_some() {
             out.notes.push(format!("{app}: {k} isn't carried over ({what})"));
         }
@@ -411,10 +426,10 @@ mod tests {
         assert!(t.contains("generate = \"secret\"") && t.contains("MODE = \"prod\"") && !t.contains("DATABASE_URL"), "{t}");
         assert_eq!(f.apps["jobs"].image.as_deref(), Some("ghcr.io/acme/jobs:1"));
         assert!(t.contains("[databases.cache]") && notes.iter().any(|n| n.contains("build command")), "{t} {notes:?}");
-        let (t, _) = fly_to_toml("app = \"Shop\"\n[env]\nLOG = \"info\"\n[http_service]\ninternal_port = 3000\nmin_machines_running = 1\n[processes]\napp = \"node server.js\"\nworker = \"node worker.js\"\n[[vm]]\nmemory = \"1gb\"\n[mounts]\nsource = \"data\"\n").unwrap();
+        let (t, _) = fly_to_toml("app = \"Shop\"\n[env]\nLOG = \"info\"\n[http_service]\ninternal_port = 3000\nmin_machines_running = 1\n[processes]\napp = \"node server.js\"\nworker = \"node worker.js\"\n[[vm]]\nmemory = \"1gb\"\n[mounts]\nsource = \"data\"\n[metrics]\nport = 9091\npath = \"/metrics\"\n").unwrap();
         let f = crate::project::parse_project(&t).unwrap();
         assert_eq!((f.apps["shop-app"].port, f.apps["shop-worker"].kind.as_deref()), (Some(3000), Some("worker")), "{t}");
-        assert!(t.contains("memory_mb = 1024"), "{t}");
+        assert!(t.contains("memory_mb = 1024") && t.contains("port = 9091"), "its [metrics] is scraped: {t}");
         let (t, _) = railway_to_toml(r#"{"deploy": {"startCommand": "npm start", "healthcheckPath": "/up", "numReplicas": 2, "preDeployCommand": ["npm run migrate"]}}"#).unwrap();
         assert!(t.contains("pre_deploy = \"npm run migrate\"") && t.contains("min_instances = 2") && t.contains("health_path = \"/up\""), "{t}");
         let (t, notes) = heroku_to_toml(r#"{"name": "blog", "env": {"SECRET_KEY_BASE": {"generator": "secret"}, "SMTP_HOST": {"description": "your mail server", "required": true}, "RACK_ENV": "production"}, "addons": ["heroku-postgresql:essential-0", "papertrail"]}"#, Some("web: bundle exec puma\nworker: bundle exec sidekiq\nrelease: rails db:migrate\n")).unwrap();
