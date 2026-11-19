@@ -521,6 +521,23 @@ roll's week). A session's last use is noted every five minutes, so the timeout h
 that. It applies at once to every session, on its next use. ("Sessions and second factors" on
 the account page; a `PUT` sends the whole policy.)
 
+### Admin alerts
+
+As Google Workspace's alert center and Okta's admin notifications: a change to who's an admin or
+how people sign in mails every other admin (`src/alerts.rs`, at most 50), saying what changed and
+who did it (an admin by handle and address, or "the operator's token"), with links to the audit
+log and People. The admin who made it isn't mailed. A stolen admin session that makes another
+account an admin, or quietly turns enforcement off, is seen at once.
+
+- Someone made an admin, or no longer one; an admin's account turned off; an invite that makes an
+  admin.
+- The sign-in policy (`PUT /policy`: second factor, idle timeout, passkeys), allowed networks,
+  hardware keys only.
+- An SSO connection added, removed or changed (enforcement, provisioning, domains, its client
+  credentials: what changed, never the secret), a SCIM token made or removed.
+
+Without mail configured there are no alerts; the audit log has every change either way.
+
 ### Sudo mode
 
 As GitHub does, a change to how an account is reached needs the person to have proved who they
