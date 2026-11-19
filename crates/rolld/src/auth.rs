@@ -81,11 +81,17 @@ pub const RULES: &[Rule] = &[
     Rule { route: "/v1/secrets", access: Access::UserOrCredential("a roll token (rlt_…), decided by roll-access") },
     // The deployment key's state is about the whole server: never a person's session.
     Rule { route: "/v1/secrets/health", access: Access::Credential("a roll token (rlt_…); the operator's answer") },
+    // A gateway's link (docs/secrets.md, "Gateways"): only its own token or a workload identity's
+    // login opens it, never a person's session (a WebSocket upgrade is a GET with no CSRF check).
+    Rule { route: "/v1/secrets/gateways/{id}/connect", access: Access::Credential("a gateway's own roll token (rlt_…) or a workload identity's login; the operator's token is refused (403)") },
     // A one-time share's link: the value is encrypted with a key only the link holds, and opens
     // a few times at most (docs/secrets.md, "Sharing a value once").
     Rule { route: "/v1/secrets/shares", access: Access::Public("a one-time share's link: ciphertext only, the key stays in the link") },
     Rule { route: "/v1/secrets/ocsp", access: Access::Public("a project CA's OCSP responder, which anyone checking its certificates asks") },
     Rule { route: "/v1/secrets/crl", access: Access::Public("a project CA's certificate revocation list, which anyone checking its certificates fetches") },
+    // ACME (RFC 8555) on a project's CA: the account key's JWS, made with an External Account
+    // Binding an admin of the project issued, and looked up on every request.
+    Rule { route: "/v1/secrets/acme", access: Access::Public("ACME on a project's CA: the account key's signature and its External Account Binding are the credential") },
     Rule { route: "/v1/secrets/login", access: Access::Public("a workload's OIDC token is the credential (workload identities)") },
     Rule { route: "/v1/secrets/oidc", access: Access::Public("roll's OIDC issuer: its discovery document and public keys, which GCP and Azure fetch anonymously") },
     // Tasks: its own token (ROLL_TASKS_TOKEN) and API keys.
@@ -197,6 +203,11 @@ impl Auth {
     }
 
     /// Scoped tokens' evaluator (`access.rs`): set before serving.
+    /// How the gate reads a client's address (roll-access's, with its trusted proxies).
+    pub fn set_client_ip(&self, f: roll_auth::ClientIpFn) {
+        self.gate.set_client_ip(f);
+    }
+
     pub fn set_authorizer(&self, a: std::sync::Arc<dyn roll_auth::Authorizer>) {
         self.gate.set_authorizer(a);
     }

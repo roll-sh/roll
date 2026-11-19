@@ -21,3 +21,4 @@ regex-syntax.workspace = true
 unicode-normalization.workspace = true
 
 [dev-dependencies]
+search-test-support.workspace = true
