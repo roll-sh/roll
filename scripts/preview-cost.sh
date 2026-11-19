@@ -13,6 +13,7 @@
 #
 #   scripts/preview-cost.sh [--keep]     # --keep: leave the daemon running at the end
 #   STOP_BEFORE_LAND=1 scripts/preview-cost.sh --keep   # and the preview with it (to look at it)
+#   STOP_AT=against scripts/preview-cost.sh --keep      # main's preview and the change's running, compared
 set -euo pipefail
 # The ports: <P>070 for the API and so on (27 unless PREVIEW_E2E_PORTS says another two digits).
 P=${PREVIEW_E2E_PORTS:-27}
@@ -850,6 +851,10 @@ done
 # The change's summary (its pull request's comment and status read it) has both.
 SUMMED=$(api GET "/v1/code/changes/$CHG" | jq_ "(lambda e: '%s %s' % (bool((e.get('slower_routes') or {}).get('routes')), (e.get('new_errors') or {}).get('total', 0) > 0))((d.get('preview') or {}).get('environment') or {})")
 [ "$SUMMED" = "True True" ] || { echo "the change's preview summary should carry them: $SUMMED"; exit 1; }
+if [ "${STOP_AT:-}" = against ]; then
+  echo "stopped against main's preview: project $PRJ, preview $PV, main's $MAINPV, change $CHG (run with --keep to leave the daemon up)"
+  exit 0
+fi
 # Turned off, it goes.
 OFF=$(api PUT "/v1/previews/projects/$PRJ/settings" '{"github":{"baseline":false}}'); echo "$OFF" | grep -q "\"baseline\":false" || { echo "turning the baseline off: $OFF"; exit 1; }
 for _ in $(seq 1 120); do
