@@ -1161,7 +1161,8 @@ main's preview's same route, the clearly slower ones first and in red; `roll pre
 main first) onto the preview's record about once a minute (`slower_routes`, kept in the store so
 any node shows them): the sheet's verdict strip says "2 routes slower than main" (opening
 Requests), and the pull request's comment says it in its checks with each route's p50 and
-main's, a route's name in a code span nothing in it can close. A change reports the preview again.
+main's, a route's name in a code span nothing in it can close. A change reports the preview again
+(`a_route_slower_than_mains_reaches_the_record_and_the_report`).
 Read back masked as
 its logs are: a span's name and attributes are its code's words. The intake reads OTLP with roll
 apps' reader (`apps_control::otlp::spans_of_request`). A roll apps service's traces are roll apps'

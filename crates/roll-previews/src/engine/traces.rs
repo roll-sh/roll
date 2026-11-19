@@ -287,6 +287,11 @@ impl Engine {
             }
             *last = Some(std::time::Instant::now());
         }
+        self.read_slower_routes().await;
+    }
+
+    /// What `tend_routes` does each [`ROUTES_EVERY`], now.
+    pub async fn read_slower_routes(&self) {
         let Ok(rows) = self.store.rows(None) else { return };
         for r in rows.into_iter().filter(|r| r.desired == crate::Desired::Active && (r.change_id.is_some() || r.branch.is_some())) {
             if !self.store.settings(&r.project_id).is_ok_and(|s| s.traces) {
