@@ -861,8 +861,9 @@ waits on a sibling PR reaching main is last.
 1. **Next, ranked (now):** apps' forms tools (`apps_list_forms`, and `apps_form_submissions` as a
    reveal) once apps' forms routes land; secrets' request (#277) and cut-off (#304) tools when
    secrets' batch 4 lands; a removed person's repositories handed to someone else (waits for a
-   repository transfer in roll code). Open: the turn-4 follow-ups (#373, this PR; landed by the
-   unit `roll-mcp-land373` after secrets' turn). Not doing: "remember this browser"; a preset
+   repository transfer in roll code). Open, landed together by the unit `roll-mcp-land373` after
+   secrets' turn: the turn-4 follow-ups (#373, this PR), more secrets reads as tools with 10 more
+   search-mode queries (#376), People as CSV (#377). Not doing: "remember this browser"; a preset
    that reveals development's values without asking (#354).
 2. **Landed 2026-11-19, turn 4 (main 97cdd7645, ci green):** steadier timing tests (#348), passkey
    autofill (#322), an admin's per-person security log (#328), admin alerts (#333), search's audit
