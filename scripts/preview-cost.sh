@@ -390,6 +390,19 @@ ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview cp "$PV" :/tmp/fixt
 [ "$(curl -s -o /dev/null -w '%{http_code}' "http://$API/v1/previews/$PV/files?service=web&path=/nothing/here")" = 404 ] || { echo "nothing at a path should be 404"; exit 1; }
 api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d]" | grep -q "copied files into web at /tmp" || { echo "the activity should say files were copied in"; exit 1; }
 
+say "a port of the preview's service on this machine (roll preview forward), from inside it"
+# (`P` is the preview's JSON by now: the port block from the environment.)
+FWD_PORT=${PREVIEW_E2E_PORTS:-27}977
+ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview forward "$PV" 8000 --service web --local-port "$FWD_PORT" 2>/dev/null &
+FWD_PID=$!
+for _ in $(seq 1 50); do ss -ltn | grep -q ":$FWD_PORT " && break; sleep 0.2; done
+FWDED=$(curl -s --max-time 30 "http://127.0.0.1:$FWD_PORT/env.txt" | grep -c "^ROLL_PREVIEW=$PV$" || true)
+kill "$FWD_PID" 2>/dev/null || true; wait "$FWD_PID" 2>/dev/null || true
+[ "$FWDED" = 1 ] || { echo "the forwarded port should reach the service from inside it: $FWDED"; exit 1; }
+api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d]" | grep -q "forwarded port 8000 of web" || { echo "the activity should say the port was forwarded"; exit 1; }
+for _ in $(seq 1 30); do [ "$(docker ps -aq --filter name=roll-previews-fwd- | wc -l)" = 0 ] && break; sleep 0.5; done
+[ "$(docker ps -aq --filter name=roll-previews-fwd- | wc -l)" = 0 ] || { echo "a forward's relay should go with its connection"; exit 1; }
+
 say "a screenshot of the service (github.screenshot), once per head"
 # And /pricing, which the test service doesn't have (a 404 page, one failed request).
 api PUT "/v1/previews/projects/$PRJ/settings" '{"github":{"screenshot":true,"pages":["/pricing","web:/","wiki:/"],"widths":[768],"hide":[".clock"],"budget":{"load_ms":60000},"openapi":"/openapi.json","endpoints":["/openapi.json"],"states":[{"name":"tab","page":"/","steps":[{"press":"Tab"}]}],"browsers":["firefox","webkit-phone"]}}' >/dev/null

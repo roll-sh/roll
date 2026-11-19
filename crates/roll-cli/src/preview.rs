@@ -275,6 +275,17 @@ pub enum Preview {
         #[arg(long, short)]
         service: Option<String>,
     },
+    /// A port of a running service on this machine (a debugger's, an admin's: any port it listens
+    /// on, published or not), until Ctrl-C: `roll preview forward pv_… 9229`.
+    Forward {
+        preview: String,
+        port: u16,
+        #[arg(long, short)]
+        service: Option<String>,
+        /// The port here (the same one by default).
+        #[arg(long)]
+        local_port: Option<u16>,
+    },
     /// Print a service's link (with its access token when the preview is private); `--browser`
     /// opens it.
     Open {
@@ -1197,6 +1208,23 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
         }
 
         Preview::Shell { preview, service } => return shell(api, &preview, service.as_deref()).await,
+        Preview::Forward { preview, port, service, local_port } => {
+            let local = local_port.unwrap_or(port);
+            let l = tokio::net::TcpListener::bind(("127.0.0.1", local)).await.map_err(|e| anyhow::anyhow!("127.0.0.1:{local} is taken ({e}): pick another with --local-port"))?;
+            let base = api.base.strip_prefix("http").map(|rest| format!("ws{rest}")).unwrap_or_else(|| api.base.clone());
+            let svc = service.as_deref().map(|s| format!("&service={}", crate::apps::enc(s))).unwrap_or_default();
+            let url = format!("{base}/v1/previews/{preview}/forward?port={port}{svc}");
+            let mut headers: Vec<(String, String)> = api.headers.clone();
+            if let Some(k) = api.bearer().await? {
+                headers.push(("authorization".into(), format!("Bearer {k}")));
+            }
+            eprintln!("127.0.0.1:{local} → {preview}:{port} (Ctrl-C ends it)");
+            tokio::select! {
+                r = crate::apps::tunnels(url, headers, l) => r?,
+                _ = tokio::signal::ctrl_c() => {}
+            }
+            return Ok(());
+        }
         Preview::Cp { preview, src, dst, service } => {
             let svc = service.map(|s| format!("&service={}", crate::apps::enc(&s))).unwrap_or_default();
             let url = |path: &str| format!("/v1/previews/{preview}/files?path={}{svc}", crate::apps::enc(path));

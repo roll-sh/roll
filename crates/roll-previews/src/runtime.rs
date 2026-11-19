@@ -271,6 +271,45 @@ fn merge_timed(mut out: Vec<(i64, bool, String)>, err: Vec<(i64, bool, String)>,
     out
 }
 
+/// The relay a forwarded connection goes through: busybox's `nc`.
+const FORWARD_IMAGE: &str = "alpine:3.20";
+
+/// A forwarded connection's relay: its stdio, both ways; its container removed when it's dropped
+/// (a killed `docker run` client leaves the container running).
+struct Relay {
+    _child: tokio::process::Child,
+    name: String,
+    stdin: tokio::process::ChildStdin,
+    stdout: tokio::process::ChildStdout,
+}
+
+impl Drop for Relay {
+    fn drop(&mut self) {
+        let name = std::mem::take(&mut self.name);
+        if let Ok(h) = tokio::runtime::Handle::try_current() {
+            h.spawn(async move { code_preview::docker::remove(&name).await });
+        }
+    }
+}
+
+impl tokio::io::AsyncRead for Relay {
+    fn poll_read(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>, buf: &mut tokio::io::ReadBuf<'_>) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.stdout).poll_read(cx, buf)
+    }
+}
+
+impl tokio::io::AsyncWrite for Relay {
+    fn poll_write(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>, buf: &[u8]) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.stdin).poll_write(cx, buf)
+    }
+    fn poll_flush(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.stdin).poll_flush(cx)
+    }
+    fn poll_shutdown(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.stdin).poll_shutdown(cx)
+    }
+}
+
 /// A child's stdout that keeps the child (killed when dropped) for as long as it's read.
 struct ChildOut {
     _child: tokio::process::Child,
@@ -1379,6 +1418,26 @@ impl Apps for Runtime {
         let out = child.stdout.take().ok_or_else(|| anyhow::anyhow!("docker cp gave no output"))?;
         self.hold(preview, service);
         Ok(Some(Box::new(ChildOut { _child: child, out })))
+    }
+
+    /// A relay in the service's network namespace (`--network container:<it>`, as screenshots
+    /// join it): busybox's `nc` to `127.0.0.1:<port>` there, its stdio the connection. Removed
+    /// when the connection is dropped.
+    async fn forward(&self, preview: &str, service: &str, port: u16) -> anyhow::Result<Option<Box<dyn crate::ports::ShellIo>>> {
+        let me = self.me.upgrade().ok_or_else(|| anyhow::anyhow!("the preview runtime is stopping"))?;
+        let name = me.shell_container(preview, service).await?;
+        let relay = format!("roll-previews-fwd-{}", &crate::store::new_token()[..12]);
+        let mut child = tokio::process::Command::new("docker")
+            .args(["run", "--rm", "-i", "--name", &relay, "--network", &format!("container:{name}"), "--memory", "32m", "--cpus", "0.25", "--pids-limit", "16", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", FORWARD_IMAGE, "nc", "127.0.0.1", &port.to_string()])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()?;
+        let (stdin, stdout) = (child.stdin.take(), child.stdout.take());
+        let (Some(stdin), Some(stdout)) = (stdin, stdout) else { anyhow::bail!("the relay took no input") };
+        self.hold(preview, service);
+        Ok(Some(Box::new(Relay { _child: child, name: relay, stdin, stdout })))
     }
 
     /// `docker cp - <container>:<dir>` with the tar on its stdin.
