@@ -695,8 +695,8 @@ impl AvlTreeDigest {
         let mut start = first;
         let mut min_distance = f64::MAX;
         let mut last_neighbor = self.means.len();
-        for nb in first..self.means.len() {
-            let z = (self.means[nb] - x).abs();
+        for (nb, &mean) in self.means.iter().enumerate().skip(first) {
+            let z = (mean - x).abs();
             if z < min_distance {
                 start = nb;
                 min_distance = z;

@@ -16,6 +16,10 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  # The toolchain the dev server's gates use (`rustup run stable rustc --version`), so this
+  # workflow fails only on what a local gate also fails on; a new stable's lints in crates search
+  # depends on (rolld pulls in code, redis, storage) don't break the nightly. Bump with the server.
+  RUST: "1.99.1"
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
   CARGO_PROFILE_TEST_DEBUG: line-tables-only
   CARGO_INCREMENTAL: '0'
@@ -26,8 +30,9 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUST }}
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - uses: ./.github/actions/setup-web
@@ -40,7 +45,9 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST }}
       - uses: Swatinem/rust-cache@v2
       # Elasticsearch's rest-resources zip is downloaded at test time into target/ (never
       # committed: it isn't Apache-licensed); OpenSearch's suite is a sparse clone.
@@ -76,7 +83,9 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST }}
       - uses: Swatinem/rust-cache@v2
       - name: Elasticsearch 9.5.5
         run: |
@@ -106,7 +115,9 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST }}
       - uses: Swatinem/rust-cache@v2
       - name: Client matrix
         run: tests/search/clients/run.sh
@@ -128,7 +139,9 @@ jobs:
       ROLL_E2E_S3_ENDPOINT: http://127.0.0.1:8333
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST }}
       - uses: Swatinem/rust-cache@v2
       - name: S3 object store (SeaweedFS)
         run: |
