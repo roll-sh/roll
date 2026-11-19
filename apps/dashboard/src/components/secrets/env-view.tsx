@@ -1,4 +1,4 @@
-import { Clock, Copy, Dices, Download, Folder, FolderPlus, History, Import as ImportIcon, Link2, Lock, MoreHorizontal, Pencil, Plus, RotateCw, Search, Send, Trash2, Upload, User, Users } from "lucide-react";
+import { Clock, Copy, Dices, Download, Folder, FolderPlus, History, Import as ImportIcon, Link2, Lock, MoreHorizontal, Pencil, Plus, RotateCw, Search, Send, ShieldAlert, Trash2, Upload, User, Users } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "@/components/link";
 import { canRotate, needsApproval, SECRET_KEY, TAG, type Batch, type Environment, type ExportFormat, type Import, type KeyInsight, type Op, type Secret, type SecretType } from "@/lib/secrets-api";
@@ -21,6 +21,7 @@ import { ShareDialog, type ShareSource } from "./share-dialog";
 import { Activity } from "./activity";
 import { BulkBar } from "./bulk";
 import { LinkDialog } from "./link-dialog";
+import { DecoyDialog } from "./decoy-dialog";
 import { ApprovalOffer, RequestsPanel, type Pending } from "./requests";
 import { secretsHref, useSecrets } from "./secrets-page";
 import { ago, button, Chip, CommentMark, dangerButton, ErrorNote, errorText, ExpiryMark, field, ghost, iconButton, label, LinkChip, PersonalMark, primary, RefMark, Reveal, saveText, TotpCode, sized, SourceMark, Teach, textareaField, until, useLoad, Warnings } from "./ui";
@@ -46,6 +47,7 @@ export function EnvView({ env }: { env: Environment }) {
   const [reaching, setReaching] = useState<string | null>(null);
   const [pulling, setPulling] = useState(false);
   const [linking, setLinking] = useState(false);
+  const [decoying, setDecoying] = useState(false);
   const [drawer, setDrawer] = useState<Drawer | null>(null);
   const [sharing, setSharing] = useState<ShareSource | null>(null);
   /** Selected rows (`key:type`), and the last one clicked, for shift-click ranges. */
@@ -185,6 +187,16 @@ export function EnvView({ env }: { env: Environment }) {
             <button className={button} onClick={() => setDrawer({ kind: "changes" })} title="History (h)">
               <History className="size-3.5" /> History
             </button>
+            <Menu>
+              <MenuTrigger className={iconButton} aria-label="More for this folder">
+                <MoreHorizontal className="size-3.5" />
+              </MenuTrigger>
+              <MenuPopup align="end" className="w-56">
+                <MenuItem onClick={() => setDecoying(true)}>
+                  <ShieldAlert className="size-3.5" /> Add a decoy…
+                </MenuItem>
+              </MenuPopup>
+            </Menu>
           </span>
         </header>
 
@@ -377,6 +389,7 @@ export function EnvView({ env }: { env: Environment }) {
       <ImportDialog open={importing} onClose={() => setImporting(false)} env={env} path={path} current={secrets} onImported={(text, w) => (setNote({ text, warnings: w }), refresh(), open.reload())} />
       <ShareDialog source={sharing} onClose={() => setSharing(null)} onShared={() => {}} />
       <LinkDialog open={linking} onClose={() => setLinking(false)} env={env} path={path} taken={keys} onWrite={write} />
+      <DecoyDialog open={decoying} onClose={() => setDecoying(false)} env={env} path={path} taken={keys} onPlanted={(s) => (setNote({ text: `Planted decoy ${s.key}`, warnings: [] }), refresh())} />
     </div>
   );
 }
@@ -565,6 +578,7 @@ function SecretRow({
             {s.key}
           </span>
           {personal && <PersonalMark title="Your personal value: only you see it" />}
+          {s.decoy && <DecoyMark decoy={s.decoy} />}
           {s.overridden && !personal && (
             <span className="text-[10.5px] text-subtle" title="Your personal override replaces this for you">
               overridden for you
@@ -862,6 +876,19 @@ function ValueHead({ onGenerate }: { onGenerate?: () => void }) {
           <Dices className="size-3" /> Generate
         </button>
       )}
+    </span>
+  );
+}
+
+/** A decoy key (docs/secrets.md, "Decoys"), shown to the project's admins only: the API leaves it out for everyone else. */
+function DecoyMark({ decoy }: { decoy: NonNullable<Secret["decoy"]> }) {
+  const used = decoy.uses > 0;
+  const title = used
+    ? `A decoy, used ${decoy.uses === 1 ? "once" : `${decoy.uses} times`}${decoy.used_at ? `, last ${ago(decoy.used_at)}` : ""}${decoy.used_ip ? ` from ${decoy.used_ip}` : ""}. Whoever used it found it where it was planted: cut them off and rotate what sits beside it.`
+    : "A decoy: its value is a roll token that opens nothing, and any use raises an alert. Only admins see this mark.";
+  return (
+    <span className={`shrink-0 rounded border px-1 font-mono text-[10px] ${used ? "border-danger/40 text-danger" : "border-accent/40 text-accent"}`} title={title}>
+      {used ? `decoy · used ${decoy.uses}×` : "decoy"}
     </span>
   );
 }

@@ -468,11 +468,12 @@ impl Apps {
 
     pub async fn deployments(self: &Arc<Self>, service: &str, env: &str, before: Option<i64>) -> Result<Vec<Deployment>> {
         let (sid, e) = (service.to_string(), env.to_string());
-        self.db(move |s| {
+        let deps = self.db(move |s| {
             s.environment(&sid, &e)?;
             s.deployments(&sid, &e, 100, before)
         })
-        .await
+        .await?;
+        self.with_scans(service, deps).await
     }
 
     /// Old deployments of the services this node owns, past what each environment keeps
@@ -525,6 +526,8 @@ impl Apps {
         }
         let id = dep.to_string();
         d.steps = self.db(move |s| s.steps(&id)).await?;
+        let id = dep.to_string();
+        d.vulnerabilities = self.db(move |s| s.scan(&id)).await?.map(|(sum, _)| sum);
         Ok(d)
     }
 
@@ -796,6 +799,30 @@ impl Apps {
             anyhow::bail!("canceled");
         }
         let mut dep = d.clone();
+        // Its sidecars' images pinned with it (a rollback or a redeploy runs the same ones).
+        let mut run = run;
+        // Every one's registry is checked, a pinned one's too (its pull comes at create).
+        for sc in &run.sidecars {
+            self.check_registry(&sc.image).await.map_err(|e| e.context(format!("sidecar {}", sc.name)))?;
+        }
+        if run.sidecars.iter().any(|s| !s.image.contains("@sha256:")) {
+            for sc in run.sidecars.iter_mut().filter(|s| !s.image.contains("@sha256:")) {
+                let pinned = self.deps.runtime.pull(&sc.image, log, None).await.map_err(|e| e.context(format!("sidecar {}", sc.name)))?;
+                log.line(format!("sidecar {}: pinned {pinned}", sc.name));
+                sc.image = pinned;
+            }
+            let (id, img, r) = (d.id.clone(), image.clone(), run.clone());
+            self.db(move |s| s.set_built(&id, &img, None, Some(&r))).await?;
+        }
+        // Its image's known vulnerabilities: before the rollout with `run.block_on` (never a
+        // rollback's: it's how out of a bad deploy), else beside it.
+        match run.block_on.filter(|_| d.trigger != Trigger::Rollback) {
+            Some(floor) => self.hold_on_vulnerabilities(&svc.id, &env.name, &d.id, &image, floor, &log.stream(Stream::System)).await?,
+            None => {
+                let (this, sid, en, did, img, log) = (self.clone(), svc.id.clone(), env.name.clone(), d.id.clone(), image.clone(), log.stream(Stream::System));
+                tokio::spawn(async move { this.scan_deployment(&sid, &en, &did, &img, &log).await });
+            }
+        }
         dep.image = Some(image);
         dep.run = run;
         // The plan the build just stored (a single-page app, say).
@@ -1539,6 +1566,20 @@ impl Apps {
         // Other ports its custom domains send to (Railway's target ports).
         let (sid, en) = (svc.id.clone(), env.name.clone());
         let domain_ports = self.db(move |s| s.domain_ports(&sid, &en)).await?;
+        // Each sidecar gets its own settings and only the variables it names.
+        let sidecars: Vec<crate::runtime::SidecarSpec> = run
+            .sidecars
+            .iter()
+            .filter(|_| matches!(run.kind, RunType::Web | RunType::Worker))
+            .map(|sc| crate::runtime::SidecarSpec {
+                name: sc.name.clone(),
+                image: sc.image.clone(),
+                command: sc.command.clone(),
+                vars: sc.env.iter().map(|(k, v)| (k.clone(), v.clone())).chain(sc.variables.iter().filter_map(|n| vars.iter().find(|(k, _)| k == n).cloned())).collect(),
+                cpu: sc.cpu,
+                memory_mb: sc.memory_mb,
+            })
+            .collect();
         let spec = InstanceSpec {
             name: String::new(),
             service: svc.id.clone(),
@@ -1548,7 +1589,20 @@ impl Apps {
             command: run.start.clone(),
             vars,
             port: if run.kind == RunType::Web { run.port } else { None },
-            ports: if run.kind == RunType::Web && !closed { domain_ports } else { Vec::new() },
+            // Custom domains' own ports, and its metrics endpoint's when that's another (never a
+            // closed instance's: nothing reaches it but through its sandbox).
+            ports: if closed {
+                Vec::new()
+            } else {
+                let mut p = if run.kind == RunType::Web { domain_ports } else { Vec::new() };
+                if let Some(mp) = run.metrics.as_ref().and_then(|m| m.port)
+                    && Some(mp) != run.port.filter(|_| run.kind == RunType::Web)
+                    && !p.contains(&mp)
+                {
+                    p.push(mp);
+                }
+                p
+            },
             cpu: run.cpu,
             memory_mb: run.memory_mb,
             network: Some(network),
@@ -1566,6 +1620,7 @@ impl Apps {
                 failures: run.health_failures.unwrap_or(3),
                 start: Duration::from_secs(run.health_timeout_s as u64),
             }),
+            sidecars,
         };
         let spa = dep.plan.as_ref().is_some_and(|p| p["spa"] == true);
         // A static plan whose files were exported answers from them, with no instance.
@@ -1576,7 +1631,13 @@ impl Apps {
             }
             _ => None,
         };
-        Ok(Template { deployment: dep.id.clone(), spec, run, spa, site })
+        // Its edge functions, run by `<name>-fn` (what Run its functions makes).
+        let edge: Vec<apps_build::edge::EdgeFn> = match &site {
+            Some(_) => dep.plan.as_ref().and_then(|p| serde_json::from_value(p["edge"].clone()).ok()).unwrap_or_default(),
+            None => Vec::new(),
+        };
+        let edge_service: String = format!("{}-fn", svc.name).chars().take(40).collect();
+        Ok(Template { deployment: dep.id.clone(), spec, run, spa, site, edge, edge_service })
     }
 
     // ── the owner's background work ──
@@ -1855,8 +1916,11 @@ impl Apps {
         let (a, limit_mb) = (tpl.run.alerts.clone(), tpl.run.memory_mb);
         let now = code_sql::now_ms() / 60_000;
         let (sid, e) = (l.service.clone(), l.env.clone());
-        let Ok(rows) = self.db(move |s| s.minutes(&sid, &e, now - 5)).await else { return };
-        let rows: Vec<_> = rows.into_iter().filter(|r| r.minute < now).collect();
+        // Five minutes for the alerts; six hours with an objective, for its burn.
+        let back = if tpl.run.slo.is_some() { crate::slo::LONGEST } else { 5 };
+        let Ok(all) = self.db(move |s| s.minutes(&sid, &e, now - back)).await else { return };
+        let all: Vec<_> = all.into_iter().filter(|r| r.minute < now).collect();
+        let rows: Vec<_> = all.iter().filter(|r| r.minute >= now - 5).cloned().collect();
         let mut firing: Vec<(&'static str, serde_json::Value)> = Vec::new();
         if a.memory_pct > 0 && rows.len() >= 5 {
             let share = |r: &crate::store::MinuteRow| r.memory_bytes as f64 / r.instances.max(1) as f64 / (limit_mb as f64 * 1048576.0) * 100.0;
@@ -1891,7 +1955,12 @@ impl Apps {
                 firing.push(("alert.log", serde_json::json!({ "pattern": pat, "count": count, "threshold": a.log_count })));
             }
         }
-        for kind in ["alert.memory", "alert.errors", "alert.latency", "alert.capacity", "alert.log"] {
+        if let Some(slo) = &tpl.run.slo
+            && let Some((indicator, rate, window)) = crate::slo::burning(slo, &all, now)
+        {
+            firing.push(("alert.slo", serde_json::json!({ "indicator": indicator, "burn_rate": (rate * 10.0).round() / 10.0, "window": window, "objective": slo.objective })));
+        }
+        for kind in ["alert.memory", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "alert.slo"] {
             let key = format!("{}/{}/{kind}", l.service, l.env);
             match firing.iter().find(|(k, _)| *k == kind) {
                 Some((_, data)) => {
@@ -1957,6 +2026,9 @@ impl Apps {
                     l.tick().await;
                     l.ticking.store(false, Ordering::SeqCst);
                 });
+            }
+            if n.is_multiple_of(crate::prom::EVERY_S) {
+                self.scrape_pass();
             }
             if n.is_multiple_of(10) {
                 self.flush_meters(false).await;
@@ -2373,6 +2445,9 @@ impl Apps {
     pub async fn cron_pass(self: &Arc<Self>, now: i64) {
         let Ok(services) = self.db(|s| s.services(None)).await else { return };
         self.schedules_pass(&services, now).await;
+        self.checks_pass(&services, now).await;
+        self.heartbeats_pass(&services, now).await;
+        self.rescan_pass(&services, now).await;
         for svc in services.into_iter().filter(|s| s.run.kind == RunType::Cron && self.owns(&s.id) && !self.capped(&s.id)) {
             let Some(schedule) = svc.run.schedule.as_deref().and_then(|s| crate::cron::Schedule::parse(s, svc.run.timezone.as_deref()).ok()) else { continue };
             let sid = svc.id.clone();

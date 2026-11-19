@@ -1075,6 +1075,18 @@ impl Store {
         })
     }
 
+    /// Revoke decoy grant `id` (and only a decoy), with why. Whether it was live.
+    pub fn revoke_decoy(&self, id: &str, why: &str) -> Result<bool> {
+        let now = code_sql::now_ms();
+        self.db.write(|c| {
+            let n = c.execute("UPDATE grants SET revoked_at = ?, revoked_why = ? WHERE id = ? AND decoy = 1 AND revoked_at IS NULL", params![now, why, id])?;
+            if n > 0 {
+                c.execute("DELETE FROM grant_secrets WHERE grant_id = ?", [id])?;
+            }
+            Ok::<_, Error>(n > 0)
+        })
+    }
+
     /// Workload grants, newest first, at most `limit`: a person's own (`user`), or everyone's.
     pub fn workloads(&self, limit: usize, user: Option<&str>) -> Result<Vec<Grant>> {
         Ok(self.db.read(|c| match user {

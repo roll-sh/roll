@@ -53,6 +53,9 @@ impl Row {
 }
 
 const ROW_COLUMNS: &str = "id, env_id, path, key, owner, version, value, fp, comment, tags, link, updated_at, updated_by, refs, project_id, expires_at, weak";
+/// [`ROW_COLUMNS`] as a digest reads them: what goes into its hash (key, id, version, link, the
+/// references), and the value only of a row from before references were kept. The rest are blank.
+const DIGEST_COLUMNS: &str = "id, env_id, path, key, owner, version, CASE WHEN refs IS NULL THEN value END, '', '', '[]', link, updated_at, '', refs, project_id, expires_at, NULL";
 
 fn row(r: &code_sql::Row<'_>) -> code_sql::Result<Row> {
     Ok(Row {
@@ -124,6 +127,10 @@ pub struct Secret {
     /// Why its value is easy to guess: only for a caller who may reveal it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub weak: Option<String>,
+    /// That it's a decoy (docs/secrets.md, "Decoys"): only for the project's admins. Absent for
+    /// everyone else, as on any other key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decoy: Option<crate::Decoy>,
 }
 
 #[derive(Debug, Serialize, Clone, PartialEq)]
@@ -263,16 +270,17 @@ fn unfrozen(c: &Conn<'_>, env: &EnvRow, path: &str, pass: Pass<'_>) -> Result<()
 
 /// The effective entries of `env`/`path` for `principal` (`None`: shared values only). Imports
 /// and the base count only where `through(environment, path)` allows: a caller never reads an
-/// environment through another that it couldn't read itself.
+/// environment through another that it couldn't read itself. `cols`: [`ROW_COLUMNS`], or
+/// [`DIGEST_COLUMNS`] for a digest.
 #[allow(clippy::too_many_arguments)]
-fn view_in(c: &Conn<'_>, env: &EnvRow, path: &str, principal: Option<&str>, through: Through<'_>, pass: Pass<'_>, untrusted: bool, depth: usize, seen: &mut HashSet<(String, String)>) -> Result<Vec<Entry>> {
+fn view_in(c: &Conn<'_>, env: &EnvRow, path: &str, principal: Option<&str>, through: Through<'_>, pass: Pass<'_>, untrusted: bool, cols: &str, depth: usize, seen: &mut HashSet<(String, String)>) -> Result<Vec<Entry>> {
     if depth > DEPTH || !seen.insert((env.id.clone(), path.to_string())) {
         return Ok(vec![]);
     }
     // A frozen folder's values aren't read here, nor through an import or a base.
     unfrozen(c, env, path, pass)?;
     let owner = principal.unwrap_or("");
-    let rows = c.query(&format!("SELECT {ROW_COLUMNS} FROM secrets WHERE env_id = ? AND path = ? AND (owner = '' OR owner = ?) ORDER BY key, owner"), [&env.id, path, owner], row)?;
+    let rows = c.query(&format!("SELECT {cols} FROM secrets WHERE env_id = ? AND path = ? AND (owner = '' OR owner = ?) ORDER BY key, owner"), [&env.id, path, owner], row)?;
     let mut out: Vec<Entry> = vec![];
     for r in rows {
         if !r.owner.is_empty() {
@@ -293,7 +301,7 @@ fn view_in(c: &Conn<'_>, env: &EnvRow, path: &str, principal: Option<&str>, thro
                 if !through(&from.slug, &imp.path) {
                     continue;
                 }
-                view_in(c, &from, &imp.path, principal, through, pass, untrusted, depth + 1, seen)?
+                view_in(c, &from, &imp.path, principal, through, pass, untrusted, cols, depth + 1, seen)?
             }
             // Another project's folder, while it's shared with this one: its own stored values
             // (no personal ones, nothing it imports, no reference or live link, which would
@@ -305,7 +313,7 @@ fn view_in(c: &Conn<'_>, env: &EnvRow, path: &str, principal: Option<&str>, thro
                     continue;
                 }
                 unfrozen(c, &from, &imp.path, pass)?;
-                c.query(&format!("SELECT {ROW_COLUMNS} FROM secrets WHERE env_id = ? AND path = ? AND owner = '' ORDER BY key"), [&from.id, &imp.path], row)?
+                c.query(&format!("SELECT {cols} FROM secrets WHERE env_id = ? AND path = ? AND owner = '' ORDER BY key"), [&from.id, &imp.path], row)?
                     .into_iter()
                     .filter(|r| r.refs.as_ref().is_some_and(|x| x.is_empty()) && r.link.as_ref().is_none_or(|l| l.mode == Mode::Managed))
                     .map(|r| Entry { row: r, env: from.slug.clone(), source: Source::Own, overridden: false })
@@ -323,7 +331,7 @@ fn view_in(c: &Conn<'_>, env: &EnvRow, path: &str, principal: Option<&str>, thro
     }
     if let Some(base) = &env.base_id {
         let base = envs::by_id(c, base)?;
-        let inherited = if through(&base.slug, path) { view_in(c, &base, path, principal, through, pass, untrusted, depth + 1, seen)? } else { vec![] };
+        let inherited = if through(&base.slug, path) { view_in(c, &base, path, principal, through, pass, untrusted, cols, depth + 1, seen)? } else { vec![] };
         for mut e in inherited {
             if have.insert(e.row.key.clone()) {
                 if e.source == Source::Own {
@@ -352,6 +360,154 @@ const LIVE_FP_TTL: std::time::Duration = std::time::Duration::from_secs(10);
 /// watches, syncs and caches poll it.
 #[derive(Default)]
 pub(crate) struct LiveFps(std::sync::Mutex<HashMap<String, (Option<std::time::Instant>, String)>>);
+
+/// A folder's digest as computed, with what it depended on beyond [`digest_state`].
+pub(crate) struct Digested {
+    digest: String,
+    unvouched: Unvouched,
+    /// Every permission asked of the caller (action, environment, folder), with its answer.
+    asked: BTreeMap<(Action, String, String), bool>,
+    /// Every live link stamped, with its generation and its value's fingerprint then.
+    live: Vec<(Link, i64, String)>,
+    /// Whether it may be reused: nothing it read failed.
+    keep: bool,
+}
+
+/// By project, environment, folder, principal and whether the caller is untrusted.
+type DigestKey = (String, String, String, String, bool);
+
+/// Digests as last computed on this node, each with the [`digest_state`] it was computed from:
+/// what turns a poll of 9,900 keys that finds nothing changed into one read. Only ever reused
+/// while the database says the same (every node's writes move it at once) and `still` holds, so
+/// no node's memory decides whether a folder changed.
+#[derive(Default)]
+pub(crate) struct Digests(std::sync::Mutex<DigestCache>);
+
+/// The most digests a node keeps. Past it the least recently used one goes, so readers polling
+/// many folders only push out what nobody polled since, never every poller's at once.
+const DIGESTS_MAX: usize = 10_000;
+
+/// The most digests a node keeps for one reader (a principal). Past it that reader's own least
+/// recently used goes, so one reader cycling through more folders than [`DIGESTS_MAX`] within
+/// another poller's interval only ever pushes out its own.
+const READER_MAX: usize = 500;
+
+/// Digests by key, each with when it was last used, the keys in that order (an LRU), and each
+/// reader's uses (its own LRU).
+#[derive(Default)]
+pub(crate) struct DigestCache {
+    by_key: HashMap<DigestKey, (u64, String, std::sync::Arc<Digested>)>,
+    by_use: BTreeMap<u64, DigestKey>,
+    by_reader: HashMap<String, BTreeSet<u64>>,
+    next: u64,
+}
+
+impl DigestCache {
+    /// A new use of `key`, in place of its last one (`was`).
+    fn stamp(&mut self, key: &DigestKey, was: Option<u64>) -> u64 {
+        let now = self.next;
+        self.next += 1;
+        let uses = self.by_reader.entry(key.3.clone()).or_default();
+        if let Some(was) = was {
+            self.by_use.remove(&was);
+            uses.remove(&was);
+        }
+        uses.insert(now);
+        self.by_use.insert(now, key.clone());
+        now
+    }
+
+    /// `key`'s entry as just used.
+    fn touch(&mut self, key: &DigestKey) -> Option<&(u64, String, std::sync::Arc<Digested>)> {
+        let was = self.by_key.get(key)?.0;
+        let now = self.stamp(key, Some(was));
+        let e = self.by_key.get_mut(key)?;
+        e.0 = now;
+        Some(e)
+    }
+
+    /// Drop the entry last used at `used`.
+    fn evict(&mut self, used: u64) {
+        let Some(key) = self.by_use.remove(&used) else { return };
+        if let Some(uses) = self.by_reader.get_mut(&key.3) {
+            uses.remove(&used);
+            if uses.is_empty() {
+                self.by_reader.remove(&key.3);
+            }
+        }
+        self.by_key.remove(&key);
+    }
+}
+
+impl Digests {
+    fn get(&self, key: &DigestKey, state: &str) -> Option<std::sync::Arc<Digested>> {
+        let mut m = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        m.touch(key).filter(|(_, s, _)| s == state).map(|(_, _, d)| d.clone())
+    }
+
+    fn put(&self, key: DigestKey, state: String, d: Digested) {
+        let mut m = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let was = m.by_key.get(&key).map(|e| e.0);
+        let used = m.stamp(&key, was);
+        let reader = key.3.clone();
+        m.by_key.insert(key, (used, state, std::sync::Arc::new(d)));
+        // The reader's own oldest first, then the node's.
+        while let Some(oldest) = m.by_reader.get(&reader).filter(|u| u.len() > READER_MAX).and_then(|u| u.first().copied()) {
+            m.evict(oldest);
+        }
+        while m.by_key.len() > DIGESTS_MAX {
+            let Some(oldest) = m.by_use.first_key_value().map(|(u, _)| *u) else { break };
+            m.evict(oldest);
+        }
+    }
+}
+
+/// What every digest of `project`'s folders is computed from in the database, as one hash: its
+/// change number (every write of a stored value takes one: `write::apply`), its environments, their
+/// imports, its required keys, and for each folder another project shares into it, that project's
+/// change number and whether it still shares it.
+fn digest_state(c: &Conn<'_>, project: &str) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    let seq = |p: &str| c.query_row("SELECT seq FROM projects WHERE project_id = ?", [p], |r| r.get::<_, i64>(0)).optional();
+    let mut h = Sha256::new();
+    h.update(format!("{:?}\n", seq(project)?));
+    for e in envs::all(c, project)? {
+        h.update(format!("{:?}\n", (e.id, e.slug, e.kind, e.base_id, e.protected, e.trusted, e.branches)));
+    }
+    // Each import as (the project it's from, its environment and folder, the whole row).
+    let imports = c.query(
+        "SELECT i.env_id, i.path, i.position, i.from_env_id, i.from_path, f.project_id, f.slug, f.protected FROM imports i
+         JOIN environments e ON e.id = i.env_id LEFT JOIN environments f ON f.id = i.from_env_id WHERE e.project_id = ? ORDER BY i.env_id, i.path, i.position",
+        [project],
+        |r| {
+            let (from, at, of): (String, String, Option<String>) = (r.get(3)?, r.get(4)?, r.get(5)?);
+            let row = format!("{:?}", (r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?, &from, &at, &of, r.get::<_, Option<String>>(6)?, r.get::<_, Option<i64>>(7)?));
+            Ok((of, from, at, row))
+        },
+    )?;
+    for (of, from, at, row) in imports {
+        if let Some(other) = of.as_deref().filter(|p| *p != project) {
+            h.update(format!("{:?}\0{}\n", seq(other)?, crate::exports::exported(c, &from, &at, project)?));
+        }
+        h.update(format!("{row}\n"));
+    }
+    h.update(format!("{:?}\n", crate::required::of(c, project)?));
+    // Freezes (cutoff.rs) of the project's folders and the folders it imports: a digest read
+    // answers 423 past one, so a freeze or an unfreeze is a new state.
+    let freezes: Vec<(String, String)> = c.query(
+        "SELECT z.env_id, z.path FROM freezes z WHERE z.env_id IN (SELECT id FROM environments WHERE project_id = ?)
+         OR z.env_id IN (SELECT i.from_env_id FROM imports i JOIN environments e ON e.id = i.env_id WHERE e.project_id = ?) ORDER BY z.env_id, z.path",
+        [project, project],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    h.update(format!("{freezes:?}\n"));
+    Ok(h.finalize()[..16].iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// How many times roll rotated a live link's resource (`source_changed`).
+fn generation(c: &Conn<'_>, l: &Link) -> Result<i64> {
+    Ok(c.query_row("SELECT generation FROM source_generations WHERE kind = ? AND ref = ?", [&l.kind, &l.r#ref], |r| r.get(0)).optional()?.unwrap_or(0))
+}
 
 impl Secrets {
     /// A product changed `kind ref`'s credential itself (a password reset, a restore): every folder
@@ -477,7 +633,7 @@ impl Secrets {
         let pass: Pass<'_> = (action == Action::Reveal).then_some(&passes);
         self.db.read(|c| {
             let env = envs::by_slug(c, project, slug)?;
-            view_in(c, &env, path, principal, &through, pass, caller.grants.untrusted(), 0, &mut HashSet::new())
+            view_in(c, &env, path, principal, &through, pass, caller.grants.untrusted(), ROW_COLUMNS, 0, &mut HashSet::new())
         })
     }
 
@@ -504,7 +660,20 @@ impl Secrets {
             overridden: e.overridden,
             expires_at: e.row.expires_at,
             weak: if reveal { e.row.weak } else { None },
+            decoy: None,
         }
+    }
+
+    /// The project's admins see which of `list` are decoys.
+    fn mark_decoys(&self, project: &str, list: &mut [Secret], caller: &Caller) -> Result<()> {
+        if list.is_empty() || !self.sees_decoys(project, caller) {
+            return Ok(());
+        }
+        let decoys = self.decoys_of(project)?;
+        for s in list.iter_mut() {
+            s.decoy = decoys.get(&s.id).cloned();
+        }
+        Ok(())
     }
 
     /// A folder's effective secrets, without values.
@@ -513,7 +682,9 @@ impl Secrets {
         caller.need(Action::Read, &Scope::at(project, slug, &path))?;
         let dek = self.project(project)?;
         let entries = self.view(project, slug, &path, caller, false, Action::Read)?;
-        Ok(entries.into_iter().map(|e| self.secret_of(&dek, project, e, caller)).collect())
+        let mut list: Vec<Secret> = entries.into_iter().map(|e| self.secret_of(&dek, project, e, caller)).collect();
+        self.mark_decoys(project, &mut list, caller)?;
+        Ok(list)
     }
 
     /// One effective secret, without its value. `kind`: the shared one or the caller's personal
@@ -527,7 +698,10 @@ impl Secrets {
         if kind == Some(SecretType::Personal) && e.row.owner.is_empty() {
             return Err(Error::NotFound(format!("no personal value of {key} in {slug}:{path}")));
         }
-        Ok(self.secret_of(&dek, project, e, caller))
+        let mut one = [self.secret_of(&dek, project, e, caller)];
+        self.mark_decoys(project, &mut one, caller)?;
+        let [one] = one;
+        Ok(one)
     }
 
     /// One secret's value, resolved unless `resolve` is false. Audited.
@@ -559,6 +733,61 @@ impl Secrets {
         let (v, problem) = r.entry(e);
         let leases = r.finish(slug)?;
         Ok((v, problem.into_iter().map(|p| Problem { key: key.into(), problem: p }).collect(), leases))
+    }
+
+    /// Where `key` comes from for another roll product (`consumers.rs`), and the caller it reads
+    /// as, deciding everything but the value (so the digest gives the answer the resolve would):
+    /// `caller` (a runtime consumer), or with `untrusted` the caller checks, sandboxes and
+    /// previews resolve as (`Secrets::untrusted`, not a runtime), narrowed again for an untrusted
+    /// ephemeral environment (`caller_for`). What only a protected environment holds is refused as
+    /// protected, a sensitive key for a reader that isn't a runtime, and a dynamic credential.
+    pub(crate) fn consumer_entry(&self, project: &str, slug: &str, path: &str, key: &str, caller: &Caller, untrusted: bool) -> std::result::Result<(Caller, Entry), crate::consumers::Refusal> {
+        use crate::consumers::Refusal;
+        let missing = |e: Error| match e {
+            Error::NotFound(m) => Refusal::NoSuchKey(m),
+            e => Refusal::Failed(e),
+        };
+        let reader = if untrusted { self.untrusted(project, caller)?.not_runtime() } else { caller.clone() };
+        let narrowed = self.caller_for(project, slug, &reader).map_err(missing)?;
+        let why = if untrusted { format!("{} is an untrusted copy", caller.principal.trim_end_matches(" (untrusted)")) } else { format!("{slug} is an ephemeral environment that isn't trusted") };
+        if !narrowed.allows(Action::Reveal, &Scope::at(project, slug, path)) {
+            return Err(Refusal::Protected(format!("{slug} is a protected environment, and {why}")));
+        }
+        let entries = self.view(project, slug, path, &narrowed, false, Action::Reveal).map_err(missing)?;
+        let Some(e) = entries.into_iter().find(|e| e.row.key == key) else {
+            // Set, but only through a protected environment this reader may not read.
+            let through_protected = self.view(project, slug, path, caller, false, Action::Reveal).is_ok_and(|all| all.iter().any(|e| e.row.key == key));
+            return Err(if through_protected {
+                Refusal::Protected(format!("{key} in {slug} comes from a protected environment, and {why}"))
+            } else {
+                Refusal::NoSuchKey(format!("no secret {key} in {slug}:{path}"))
+            });
+        };
+        if names::sensitive(&e.row.tags) && !narrowed.runtime {
+            return Err(Refusal::Unusable(format!("{key} is sensitive, and {why}: only a trusted runtime reads it")));
+        }
+        if e.row.link.as_ref().is_some_and(|l| l.mode == Mode::Dynamic) {
+            return Err(Refusal::Unusable(format!("{key} is a dynamic credential, which ends with its lease: link it as managed or live for another product")));
+        }
+        Ok((narrowed, e))
+    }
+
+    /// One key's value for another roll product, read as [`Secrets::consumer_entry`] decides:
+    /// audited as `secrets.resolve` by `caller` (the resource asking), no dynamic credential.
+    pub(crate) fn resolve_one(&self, project: &str, slug: &str, path: &str, key: &str, caller: &Caller, untrusted: bool) -> std::result::Result<crate::consumers::Resolved, crate::consumers::Refusal> {
+        use crate::consumers::{Refusal, Resolved};
+        let (narrowed, e) = self.consumer_entry(project, slug, path, key, caller, untrusted)?;
+        let dek = self.project(project)?;
+        let consumer = &caller.principal;
+        let mut r = Resolver::new(self, project, slug, &dek, &narrowed, true, consumer)?;
+        r.no_dynamic = true;
+        let (value, problem) = r.entry(&e);
+        r.finish(slug)?;
+        if let Some(p) = problem {
+            return Err(Refusal::Unusable(format!("{key} doesn't resolve: {p}")));
+        }
+        self.audit_now(project, &narrowed, "secrets.resolve", Some(slug), Some(path), &[key.to_string()], &format!("resolved {key} for {consumer}"));
+        Ok(Resolved { value, version: e.row.version, expires_at: e.row.expires_at })
     }
 
     /// Every effective value of a folder (`…/values`, `roll run`, an app's start). Audited as
@@ -733,75 +962,163 @@ impl Secrets {
     /// doesn't move when its lease ends). A live link counts its value's fingerprint as its product answers (at most [`LIVE_FP_TTL`] old), so the digest moves
     /// however the credential changed: roll rotating it, a password reset through the product, SQL.
     pub(crate) fn digest_of(&self, project: &str, slug: &str, path: &str, caller: &Caller) -> Result<(String, Unvouched)> {
-        use sha2::{Digest, Sha256};
         let path = names::path(path)?;
         caller.need(Action::Read, &Scope::at(project, slug, &path))?;
         // As the values are read: an untrusted ephemeral environment's digest leaves its protected
         // base out, so a deploy compares like with like.
         let narrowed = self.caller_for(project, slug, caller)?;
         let caller = &narrowed;
-        self.project(project)?;
-        let entries = self.view(project, slug, &path, caller, false, Action::Reveal)?;
-        let branches = self.db.read(|c| envs::by_slug(c, project, slug))?.branches;
         let dek = self.project(project)?;
+        // Read first: a digest computed after it reflects at least this state, so one kept with it
+        // is never newer than what it vouches for.
+        let state = self.db.read(|c| digest_state(c, project))?;
+        let key = (project.to_string(), slug.to_string(), path.clone(), caller.principal.clone(), caller.grants.untrusted());
+        if let Some(d) = self.digests.get(&key, &state)
+            && self.still(project, &dek, &d, caller)?
+        {
+            return Ok((d.digest.clone(), d.unvouched));
+        }
+        let d = self.compute_digest(project, slug, &path, &dek, caller)?;
+        let out = (d.digest.clone(), d.unvouched);
+        if d.keep {
+            self.digests.put(key, state, d);
+        }
+        Ok(out)
+    }
+
+    /// Whether a digest computed earlier from the same [`digest_state`] would come out the same
+    /// now: every permission it asked answers the same for `caller`, and every live link's
+    /// generation and fingerprint are as they were (the fingerprint read as a digest reads it).
+    fn still(&self, project: &str, dek: &Dek, d: &Digested, caller: &Caller) -> Result<bool> {
+        if !d.asked.iter().all(|((action, env, path), ok)| caller.allows(*action, &Scope::at(project, env, path)) == *ok) {
+            return Ok(false);
+        }
+        if d.live.is_empty() {
+            return Ok(true);
+        }
+        let generations = self.db.read(|c| d.live.iter().map(|(l, _, _)| generation(c, l)).collect::<Result<Vec<i64>>>())?;
+        let members = self.members(project).ok();
+        Ok(d.live.iter().zip(generations).all(|((l, generation, fp), now)| now == *generation && self.live_fp(project, dek, l, members.as_ref()) == *fp))
+    }
+
+    fn compute_digest(&self, project: &str, slug: &str, path: &str, dek: &Dek, caller: &Caller) -> Result<Digested> {
+        use sha2::{Digest, Sha256};
+        use std::cell::{Cell, OnceCell, RefCell};
+        use std::rc::Rc;
+        let principal = caller.personal().then_some(caller.principal.as_str());
+        let untrusted = caller.grants.untrusted();
+        // Every permission the digest depends on, with its answer: a kept digest is reused only
+        // for a caller who gets the same answers (`still`).
+        let asked: RefCell<BTreeMap<(Action, String, String), bool>> = RefCell::default();
+        let ask = |action: Action, env: &str, path: &str| *asked.borrow_mut().entry((action, env.to_string(), path.to_string())).or_insert_with(|| caller.allows(action, &Scope::at(project, env, path)));
+        // Read as `values` reads it: imports and the base where the caller may reveal them. Where
+        // each one it passed answers reading as it does revealing, that's also the folder as a
+        // reference reads it, so a reference into this folder doesn't read it again.
+        let same_for_read = Cell::new(true);
+        let reveal = |env: &str, path: &str| {
+            let reveal = ask(Action::Reveal, env, path);
+            if reveal != ask(Action::Read, env, path) {
+                same_for_read.set(false);
+            }
+            reveal
+        };
+        let read = |env: &str, path: &str| ask(Action::Read, env, path);
+        let passes = |p: &str, e: &str, at: &str| caller.passes_freeze(p, e, at);
+        let (branches, entries) = self.db.read(|c| {
+            let env = envs::by_slug(c, project, slug)?;
+            let entries = view_in(c, &env, path, principal, &reveal, Some(&passes), untrusted, DIGEST_COLUMNS, 0, &mut HashSet::new())?;
+            Ok::<_, Error>((env.branches, entries))
+        })?;
         let mut h = Sha256::new();
-        let dynamic = std::cell::Cell::new(false);
-        let members = std::cell::OnceCell::new();
-        // A live link's value is the resource's credential as it is: it moves when roll rotates it
-        // (at once, on every node), and its fingerprint when anything else changes it.
-        let generations: HashMap<(String, String), i64> = self.db.read(|c| c.query("SELECT kind, ref, generation FROM source_generations", (), |r| Ok(((r.get(0)?, r.get(1)?), r.get(2)?))))?.into_iter().collect();
+        let mut dynamic = false;
+        let mut live: Vec<(Link, i64, String)> = vec![];
+        let mut keep = true;
+        let members = OnceCell::new();
         // No stored value's fingerprint: a digest is readable without reveal, and a version moves
         // with every value. A live value's goes into the hash, which tells nothing of it.
-        let stamp = |h: &mut Sha256, e: &Entry| {
+        let mut stamp = |h: &mut Sha256, e: &Entry| -> Result<()> {
             // A followed key is the same stamp each read: its parent is never asked, issued for or
             // counted (its rotations are no change to the preview).
             if e.row.link.as_ref().is_some_and(|l| follows(&branches, l)) {
                 h.update(format!("{}\0{}\0{}\0{}\0{}\0followed\n", e.row.key, e.env, e.row.id, e.row.version, e.row.link.as_ref().map(json).unwrap_or_default()));
-                return;
+                return Ok(());
             }
-            let live = e.row.link.as_ref().filter(|l| l.mode == Mode::Live);
             if e.row.link.as_ref().is_some_and(|l| l.mode == Mode::Dynamic) {
-                dynamic.set(true);
+                dynamic = true;
             }
-            let generation = live.and_then(|l| generations.get(&(l.kind.clone(), l.r#ref.clone()))).copied().unwrap_or(0);
-            // Only once rotated, so a digest taken before there were generations stays the same.
-            let rotated = if generation > 0 { format!("\0{generation}") } else { String::new() };
-            let now = live.map(|l| format!("\0live:{}", self.live_fp(project, &dek, l, members.get_or_init(|| self.members(project).ok()).as_ref()))).unwrap_or_default();
-            h.update(format!("{}\0{}\0{}\0{}\0{}{rotated}{now}\n", e.row.key, e.env, e.row.id, e.row.version, e.row.link.as_ref().map(json).unwrap_or_default()))
+            // A live link's value is the resource's credential as it is: it moves when roll
+            // rotates it (at once, on every node), and its fingerprint when anything else changes it.
+            let (mut rotated, mut now) = (String::new(), String::new());
+            if let Some(l) = e.row.link.as_ref().filter(|l| l.mode == Mode::Live) {
+                let generation = self.db.read(|c| generation(c, l))?;
+                // Only once rotated, so a digest taken before there were generations stays the same.
+                if generation > 0 {
+                    rotated = format!("\0{generation}");
+                }
+                let fp = self.live_fp(project, dek, l, members.get_or_init(|| self.members(project).ok()).as_ref());
+                now = format!("\0live:{fp}");
+                live.push((l.clone(), generation, fp));
+            }
+            h.update(format!("{}\0{}\0{}\0{}\0{}{rotated}{now}\n", e.row.key, e.env, e.row.id, e.row.version, e.row.link.as_ref().map(json).unwrap_or_default()));
+            Ok(())
         };
         for e in &entries {
-            stamp(&mut h, e);
+            stamp(&mut h, e)?;
         }
-        // What references reach, in this environment or another, moves the digest too.
-        let mut views: HashMap<(String, String), Vec<Entry>> = HashMap::new();
+        // What references reach, in this environment or another, moves the digest too. A view is
+        // sorted by key, each key once.
+        let entries = Rc::new(entries);
+        let mut views: HashMap<(String, String), Rc<Vec<Entry>>> = HashMap::new();
+        if same_for_read.get() {
+            views.insert((slug.to_string(), path.to_string()), entries.clone());
+        }
         let mut seen: HashSet<String> = HashSet::new();
-        let mut todo: Vec<(Entry, usize)> = entries.iter().map(|e| (e.clone(), 0)).collect();
-        while let Some((e, depth)) = todo.pop() {
+        let mut todo: Vec<(Rc<Vec<Entry>>, usize, usize)> = (0..entries.len()).map(|i| (entries.clone(), i, 0)).collect();
+        while let Some((of, i, depth)) = todo.pop() {
             if depth >= DEPTH {
                 continue;
             }
-            for display in e.row.references(&dek, project) {
+            let e = &of[i];
+            for display in e.row.references(dek, project) {
                 let Some(r) = refs::refs(&format!("${{{display}}}")).into_iter().next() else { continue };
                 let (env, at) = match &r.env {
                     None => (e.env.clone(), e.row.path.clone()),
                     Some(x) => (x.clone(), r.path.clone()),
                 };
-                if !seen.insert(format!("{env}:{at}:{}", r.key)) || !caller.allows(Action::Read, &Scope::at(project, &env, &at)) {
+                if !seen.insert(format!("{env}:{at}:{}", r.key)) || !read(&env, &at) {
                     continue;
                 }
-                let view = views.entry((env.clone(), at.clone())).or_insert_with(|| self.view(project, &env, &at, caller, false, Action::Read).unwrap_or_default());
-                if let Some(t) = view.iter().find(|t| t.row.key == r.key) {
+                let view = match views.get(&(env.clone(), at.clone())) {
+                    Some(v) => v.clone(),
+                    None => {
+                        let v = match self.db.read(|c| view_in(c, &envs::by_slug(c, project, &env)?, &at, principal, &read, None, untrusted, DIGEST_COLUMNS, 0, &mut HashSet::new())) {
+                            Ok(v) => v,
+                            // A reference to an environment that isn't there reaches nothing.
+                            Err(Error::NotFound(_)) => vec![],
+                            // Nor does one that couldn't be read this time, and then the digest isn't kept.
+                            Err(_) => {
+                                keep = false;
+                                vec![]
+                            }
+                        };
+                        let v = Rc::new(v);
+                        views.insert((env, at), v.clone());
+                        v
+                    }
+                };
+                if let Ok(i) = view.binary_search_by(|t| t.row.key.as_str().cmp(&r.key)) {
                     h.update(b"ref\0");
-                    stamp(&mut h, t);
-                    todo.push((t.clone(), depth + 1));
+                    stamp(&mut h, &view[i])?;
+                    todo.push((view, i, depth + 1));
                 }
             }
         }
         let have: Vec<String> = entries.iter().map(|e| e.row.key.clone()).collect();
-        for m in self.missing_required(project, &path, &have)? {
+        for m in self.missing_required(project, path, &have)? {
             h.update(format!("required\0{}\n", m.key));
         }
-        Ok((h.finalize()[..16].iter().map(|b| format!("{b:02x}")).collect(), Unvouched { dynamic: dynamic.get() }))
+        let digest = h.finalize()[..16].iter().map(|b| format!("{b:02x}")).collect();
+        Ok(Digested { digest, unvouched: Unvouched { dynamic }, asked: asked.into_inner(), live, keep })
     }
 
     /// A conditional read (`If-None-Match`): `Some(digest)` when the folder's values are as they
@@ -834,7 +1151,7 @@ impl Secrets {
         let keys: Vec<String> = self.view(project, slug, &at, caller, false, Action::Reveal)?.into_iter().map(|e| e.row.key).collect();
         self.db.write(|c| {
             if !seen(c)? {
-                crate::audit::record(c, project, caller, "secrets.revalidate", Some(slug), Some(&at), &keys, &format!("revalidated {} (unchanged since its last read)", crate::write::plural(keys.len(), "value")), now)?;
+                crate::audit::record(c, self.keys()?, project, caller, "secrets.revalidate", Some(slug), Some(&at), &keys, &format!("revalidated {} (unchanged since its last read)", crate::write::plural(keys.len(), "value")), now)?;
             }
             Ok::<_, Error>(())
         })?;
@@ -932,7 +1249,7 @@ impl Secrets {
             let mut folders = BTreeSet::new();
             for e in &envs {
                 let through = |x: &str, p: &str| caller.allows(Action::Read, &Scope::at(project, x, p));
-                views.push(view_in(c, e, &path, principal, &through, None, caller.grants.untrusted(), 0, &mut HashSet::new())?);
+                views.push(view_in(c, e, &path, principal, &through, None, caller.grants.untrusted(), ROW_COLUMNS, 0, &mut HashSet::new())?);
                 for f in c.query("SELECT path FROM folders WHERE env_id = ?", [&e.id], |r| r.get::<_, String>(0))? {
                     if f != path && names::parents(&f).last() == Some(&path) {
                         folders.insert(f);
@@ -1334,5 +1651,41 @@ impl<'a> Resolver<'a> {
             return Err(e);
         }
         Ok(ids)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_full_digest_cache_drops_only_what_nobody_polled_lately() {
+        let key = |who: &str, i: usize| ("prj".to_string(), "env".to_string(), format!("/f{i}"), who.to_string(), false);
+        let digested = || Digested { digest: String::new(), unvouched: Unvouched::default(), asked: BTreeMap::new(), live: Vec::new(), keep: true };
+        let cache = Digests::default();
+        cache.put(key("poller", 0), "s".into(), digested());
+        // One reader cycles through more folders than the node keeps, all between two of the
+        // poller's polls: it only pushes out its own, oldest first.
+        let last = DIGESTS_MAX * 2;
+        for i in 1..=last {
+            cache.put(key("cycler", i), "s".into(), digested());
+        }
+        assert!(cache.get(&key("poller", 0), "s").is_some(), "the poller's digest went");
+        {
+            let m = cache.0.lock().unwrap();
+            assert_eq!((m.by_key.len(), m.by_use.len(), m.by_reader["cycler"].len()), (READER_MAX + 1, READER_MAX + 1, READER_MAX));
+            assert!(!m.by_key.contains_key(&key("cycler", last - READER_MAX)) && m.by_key.contains_key(&key("cycler", last - READER_MAX + 1)));
+        }
+        // Many readers, each within its cap, fill the node: the least recently used goes first,
+        // and a poller that keeps polling stays.
+        for r in 0..DIGESTS_MAX / READER_MAX * 2 {
+            for i in 0..READER_MAX {
+                cache.put(key(&format!("r{r}"), i), "s".into(), digested());
+            }
+            assert!(cache.get(&key("poller", 0), "s").is_some(), "the poller's digest went at reader {r}");
+        }
+        let m = cache.0.lock().unwrap();
+        assert_eq!((m.by_key.len(), m.by_use.len(), m.by_reader.values().map(BTreeSet::len).sum::<usize>()), (DIGESTS_MAX, DIGESTS_MAX, DIGESTS_MAX));
+        assert!(!m.by_reader.contains_key("cycler"), "the least recently used went first");
     }
 }

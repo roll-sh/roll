@@ -1,11 +1,12 @@
 //! Remote clusters (`cluster.remote.<alias>.*`) and cross-cluster search.
 //!
-//! roll nodes don't speak Elasticsearch's transport protocol, so the only remote cluster a node
-//! can reach is itself: a remote whose seeds (sniff mode) or proxy address name the node's own
-//! transport address is a loopback, as in Elasticsearch's own test setups, and searches its
-//! `alias:index` expressions against the local indices, with hits and errors naming the indices
-//! `alias:index`. Any other remote is unavailable: skipped when `skip_unavailable` (the
-//! default) and an error otherwise.
+//! roll nodes don't speak Elasticsearch's transport protocol. A remote reaches either another
+//! roll search cluster of the same owner, a **link** ([`links`]: its seeds or proxy address
+//! name that cluster, it holds a `cross_cluster` API key of it), or the node itself: a remote
+//! whose seeds (sniff mode) or proxy address name the node's own transport address is a
+//! loopback, as in Elasticsearch's own test setups, and searches its `alias:index` expressions
+//! against the local indices, with hits and errors naming the indices `alias:index`. Any other
+//! remote is unavailable: skipped when `skip_unavailable` (the default) and an error otherwise.
 //!
 //! Cross-cluster searches are counted for `_cluster/stats`' `ccs._search` (totals, `took`
 //! maximum, average and 90th percentile per cluster and overall, remotes per search).
@@ -19,6 +20,9 @@ use crate::error::{EsError, EsResult};
 use crate::json::{Map, Value};
 use crate::meta::ClusterState;
 use crate::obj;
+
+pub mod links;
+pub mod merge;
 
 /// A configured remote cluster.
 #[derive(Clone, Debug, PartialEq)]
@@ -66,11 +70,19 @@ impl Remote {
     }
 }
 
-/// `GET _remote/info`.
-pub fn remote_info(cluster: &Cluster, st: &ClusterState) -> Value {
+/// `GET _remote/info`. A link is connected when it holds credentials and still names a
+/// cluster it may link to (asking doesn't wake it); its credentials show redacted.
+pub async fn remote_info(cluster: &Cluster, st: &ClusterState) -> Value {
     let mut m = Map::new();
     for r in remotes(st) {
-        let connected = r.is_loopback(cluster);
+        let mut credentials = false;
+        let connected = match (cluster.config.links.as_deref(), cluster.config.links.as_deref().and_then(|l| r.link(l))) {
+            (Some(l), Some(target)) => {
+                credentials = l.has_credentials(links::local_ref(cluster), &r.alias).await;
+                credentials && l.may_link(links::local_ref(cluster), &target).await
+            }
+            _ => r.is_loopback(cluster),
+        };
         let mut e = Map::new();
         e.insert("connected".into(), Value::Bool(connected));
         e.insert("mode".into(), r.mode().into());
@@ -86,6 +98,9 @@ pub fn remote_info(cluster: &Cluster, st: &ClusterState) -> Value {
         }
         e.insert("initial_connect_timeout".into(), "30s".into());
         e.insert("skip_unavailable".into(), Value::Bool(r.skip_unavailable));
+        if credentials {
+            e.insert("cluster_credentials".into(), "::es_redacted::".into());
+        }
         m.insert(r.alias.clone(), Value::Obj(e));
     }
     Value::Obj(m)
@@ -143,6 +158,10 @@ pub fn plan(cluster: &Cluster, st: &ClusterState, expressions: &[String]) -> EsR
             return Err(EsError::new(404, "no_such_remote_cluster_exception", format!("no such remote cluster: [{pattern}]")));
         }
         for r in matched {
+            // Links are searched by `links::search`, before this plan.
+            if links::is_link(cluster, r) {
+                continue;
+            }
             if r.is_loopback(cluster) {
                 remote.entry(r.alias.clone()).or_default().push(index.to_string());
             } else if r.skip_unavailable {
@@ -247,6 +266,42 @@ impl CcsStats {
         }
         for s in &plan.skipped {
             u.clusters.entry(s.clone()).or_default().skipped += 1;
+        }
+    }
+
+    /// Records one search over linked remotes: each cluster's name (`(local)` for the local
+    /// one) and whether it was skipped.
+    pub fn record_parts<'a>(&self, parts: impl Iterator<Item = (&'a str, bool)>, wildcards: bool, took_ms: u64, ok: bool, minimize_roundtrips: bool) {
+        let parts: Vec<(&str, bool)> = parts.collect();
+        let mut u = self.usage.lock();
+        u.total += 1;
+        if ok {
+            u.success += 1;
+        }
+        if parts.iter().any(|(_, skipped)| *skipped) {
+            u.skipped += 1;
+        }
+        u.took.add(took_ms);
+        if minimize_roundtrips {
+            u.took_mrt_true.add(took_ms);
+            *u.features.entry("mrt_on".into()).or_insert(0) += 1;
+        } else {
+            u.took_mrt_false.add(took_ms);
+        }
+        if wildcards {
+            *u.features.entry("wildcards".into()).or_insert(0) += 1;
+        }
+        let remotes = parts.iter().filter(|(n, _)| *n != "(local)").count() as u64;
+        u.remotes_max = u.remotes_max.max(remotes);
+        u.remotes_sum += remotes;
+        for (name, skipped) in parts {
+            let c = u.clusters.entry(name.to_string()).or_default();
+            if skipped {
+                c.skipped += 1;
+            } else {
+                c.total += 1;
+                c.took.add(took_ms);
+            }
         }
     }
 

@@ -291,7 +291,7 @@ impl Secrets {
         // 5. One audit row for the whole action (revocations write their own as well).
         let keys: Vec<String> = key.map(String::from).into_iter().collect();
         let summary = out.summary();
-        if let Err(e) = self.db.now_ms().map_err(Error::from).and_then(|now| self.db.write(|c| audit::record(c, project, caller, "reach.cut_off", Some(slug), Some(&path), &keys, &summary, now))) {
+        if let Err(e) = self.db.now_ms().map_err(Error::from).and_then(|now| self.db.write(|c| audit::record(c, self.keys()?, project, caller, "reach.cut_off", Some(slug), Some(&path), &keys, &summary, now))) {
             tracing::error!(%project, "recording a cut-off's audit row failed: {e}");
             out.failed.push(Failure { what: "audit", ids: vec![], why: e.to_string() });
         }
@@ -328,7 +328,7 @@ impl Secrets {
                 return Err(Error::NotFound(format!("{slug}:{path} isn't frozen")));
             };
             c.execute("DELETE FROM freezes WHERE env_id = ? AND path = ?", [env.id.as_str(), path.as_str()])?;
-            audit::record(c, project, caller, "reach.unfreeze", Some(slug), Some(&path), &[], &format!("unfroze {slug}:{path} (frozen by {}: {})", f.by, f.why), now)
+            audit::record(c, self.keys()?, project, caller, "reach.unfreeze", Some(slug), Some(&path), &[], &format!("unfroze {slug}:{path} (frozen by {}: {})", f.by, f.why), now)
         })
     }
 }

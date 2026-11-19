@@ -133,7 +133,7 @@ impl Secrets {
                 "INSERT INTO shares (id, project_id, note, ciphertext, views_left, created_by, created_at, expires_at, opened_at, env_id, path, key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)",
                 params![id, project, n.note, raw, views, caller.principal, now, now + ttl * 60_000, env_id, from.as_ref().map(|f| f.path.clone()), from.as_ref().map(|f| f.key.clone())],
             )?;
-            audit::record(c, project, caller, "share.create", None, None, &[], &format!("shared a value ({views} open{}, {ttl} min): {}", if views == 1 { "" } else { "s" }, n.note), now)?;
+            audit::record(c, self.keys()?, project, caller, "share.create", None, None, &[], &format!("shared a value ({views} open{}, {ttl} min): {}", if views == 1 { "" } else { "s" }, n.note), now)?;
             let link = self.web_url.as_ref().map(|w| format!("{}/share/{id}", w.trim_end_matches('/')));
             Ok(Share { id: id.clone(), note: n.note.clone(), views_left: views, created_by: caller.principal.clone(), created_at: now, expires_at: now + ttl * 60_000, opened_at: None, open: true, link, from: from.clone() })
         })
@@ -184,7 +184,7 @@ impl Secrets {
                 return Err(Error::Forbidden("only whoever made a share, or an admin, revokes it".into()));
             }
             c.execute("UPDATE shares SET ciphertext = NULL, views_left = 0 WHERE id = ? AND project_id = ?", [id, project])?;
-            audit::record(c, project, caller, "share.revoke", None, None, &[], &format!("revoked share {}", &id[..12.min(id.len())]), now)
+            audit::record(c, self.keys()?, project, caller, "share.revoke", None, None, &[], &format!("revoked share {}", &id[..12.min(id.len())]), now)
         })
     }
 
@@ -217,7 +217,7 @@ impl Secrets {
             }
             let mut opener = Caller::acting("share-link".into(), std::sync::Arc::new(crate::access::Everything));
             opener.ip = ip.clone();
-            audit::record(c, &project, &opener, "share.open", None, None, &[], &format!("share {} opened ({} left)", &id[..12.min(id.len())], (left - 1).max(0)), now)?;
+            audit::record(c, self.keys()?, &project, &opener, "share.open", None, None, &[], &format!("share {} opened ({} left)", &id[..12.min(id.len())], (left - 1).max(0)), now)?;
             Ok(URL_SAFE_NO_PAD.encode(ct))
         })
     }

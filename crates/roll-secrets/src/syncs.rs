@@ -113,6 +113,14 @@ pub trait SyncTarget: Send + Sync {
         let _ = target;
         vec![]
     }
+    /// A kind a product's own route makes (`Secrets::create_product_sync`), never `POST …/syncs`:
+    /// the product checked its side (roll search: who may change the cluster). It isn't offered
+    /// in `GET …/syncs`, and `reveal` on the folder is enough to make, run or delete one, as
+    /// reading the value and pasting it into the product would be (`admin` may delete one too:
+    /// it doesn't include `reveal`, and stopping a sync sends nothing).
+    fn internal(&self) -> bool {
+        false
+    }
     /// A target this kind can push to, for this project: on create and before every push.
     fn check(&self, project: &str, resources: &Resources, target: &Json) -> Result<()>;
     /// Why the platform won't take `name` (prefix applied), if it won't: a name it keeps for
@@ -312,7 +320,7 @@ struct Outcome {
 
 impl Secrets {
     pub fn sync_kinds(&self) -> Vec<SyncKind> {
-        self.syncs.kinds().map(|t| SyncKind { kind: t.kind().into(), label: t.label().into(), values: t.values(), signed: t.signed(), fields: t.fields().to_vec() }).collect()
+        self.syncs.kinds().filter(|t| !t.internal()).map(|t| SyncKind { kind: t.kind().into(), label: t.label().into(), values: t.values(), signed: t.signed(), fields: t.fields().to_vec() }).collect()
     }
 
     /// The project's syncs in environments the caller can read.
@@ -328,9 +336,12 @@ impl Secrets {
     /// credential of any of the folder's syncs), and what's missing. Names only.
     pub fn preview_sync(&self, project: &str, n: &NewSync, caller: &Caller) -> Result<SyncPreview> {
         let path = names::path(n.path.as_deref().unwrap_or("/"))?;
+        let target = self.syncs.get(&n.kind)?.clone();
+        if target.internal() {
+            return Err(Error::BadRequest(format!("{} syncs are made by the product they push to", n.kind)));
+        }
         caller.need(Action::Admin, &Scope::at(project, &n.environment, &path))?;
         self.project(project)?;
-        let target = self.syncs.get(&n.kind)?.clone();
         target.check(project, &self.members(project)?, &n.target)?;
         let creds: BTreeSet<String> = target.credentials(&n.target).into_iter().collect();
         let others: Vec<(String, Json)> = self.db.read(|c| {
@@ -351,10 +362,35 @@ impl Secrets {
     }
 
     pub fn create_sync(&self, project: &str, n: NewSync, caller: &Caller) -> Result<SecretSync> {
+        self.make_sync(project, n, caller, false)
+    }
+
+    /// A sync of an [`SyncTarget::internal`] kind, made by its product's own route (which
+    /// checked the caller on its side): `reveal` on the folder is enough.
+    pub fn create_product_sync(&self, project: &str, n: NewSync, caller: &Caller) -> Result<SecretSync> {
+        self.make_sync(project, n, caller, true)
+    }
+
+    /// What making or running a sync of `kind` needs: `admin` (it sends values out of roll),
+    /// `reveal` for a product's own kind. Deleting one needs the same, or `admin` for a product's
+    /// own kind too (`admin` doesn't include `reveal`, and stopping a sync sends nothing).
+    fn sync_needs(&self, kind: &str) -> Action {
+        match self.syncs.get(kind) {
+            Ok(t) if t.internal() => Action::Reveal,
+            _ => Action::Admin,
+        }
+    }
+
+    fn make_sync(&self, project: &str, n: NewSync, caller: &Caller, internal: bool) -> Result<SecretSync> {
         let path = names::path(n.path.as_deref().unwrap_or("/"))?;
-        caller.need(Action::Admin, &Scope::at(project, &n.environment, &path))?;
-        let dek = self.project(project)?;
         let target = self.syncs.get(&n.kind)?.clone();
+        match (target.internal(), internal) {
+            (true, false) => return Err(Error::BadRequest(format!("{} syncs are made by the product they push to", n.kind))),
+            (false, true) => return Err(Error::BadRequest(format!("{} syncs are made through roll secrets", n.kind))),
+            _ => {}
+        }
+        caller.need(self.sync_needs(&n.kind), &Scope::at(project, &n.environment, &path))?;
+        let dek = self.project(project)?;
         if !n.target.is_object() || json(&n.target).len() > TARGET_MAX {
             return Err(Error::BadRequest(format!("target is a JSON object of at most {TARGET_MAX} bytes")));
         }
@@ -406,7 +442,7 @@ impl Secrets {
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, '{}', NULL, 0, 0, ?, ?)",
                 params![id, project, env.id, path, n.kind, json(&n.target), keys.as_ref().map(json), prefix, sealed, now, caller.principal],
             )?;
-            audit::record(c, project, caller, "sync.create", Some(&n.environment), Some(&path), keys.as_deref().unwrap_or_default(), &format!("created {} sync {id}", n.kind), now)
+            audit::record(c, self.keys()?, project, caller, "sync.create", Some(&n.environment), Some(&path), keys.as_deref().unwrap_or_default(), &format!("created {} sync {id}", n.kind), now)
         })?;
         Ok(masked(SecretSync {
             id,
@@ -441,11 +477,14 @@ impl Secrets {
         caller.need(Action::Read, &Scope::project(project))?;
         self.project(project)?;
         let r = self.sync_row(project, id)?;
-        caller.need(Action::Admin, &Scope::at(project, &r.info.environment, &r.info.path))?;
+        let scope = Scope::at(project, &r.info.environment, &r.info.path);
+        if !caller.allows(Action::Admin, &scope) {
+            caller.need(self.sync_needs(&r.info.kind), &scope)?;
+        }
         let now = self.db.now_ms()?;
         self.db.write(|c| {
             c.execute("DELETE FROM syncs WHERE id = ?", [id])?;
-            audit::record(c, project, caller, "sync.delete", Some(&r.info.environment), Some(&r.info.path), &[], &format!("deleted {} sync {id}", r.info.kind), now)
+            audit::record(c, self.keys()?, project, caller, "sync.delete", Some(&r.info.environment), Some(&r.info.path), &[], &format!("deleted {} sync {id}", r.info.kind), now)
         })
     }
 
@@ -468,7 +507,7 @@ impl Secrets {
                     "resumed"
                 }
             };
-            audit::record(c, project, caller, "sync.update", Some(&r.info.environment), Some(&r.info.path), &[], &format!("{what} {} sync {id}", r.info.kind), now)
+            audit::record(c, self.keys()?, project, caller, "sync.update", Some(&r.info.environment), Some(&r.info.path), &[], &format!("{what} {} sync {id}", r.info.kind), now)
         })?;
         Ok(masked(self.sync_row(project, id)?.info))
     }
@@ -478,7 +517,7 @@ impl Secrets {
         caller.need(Action::Read, &Scope::project(project))?;
         self.project(project)?;
         let r = self.sync_row(project, id)?;
-        caller.need(Action::Admin, &Scope::at(project, &r.info.environment, &r.info.path))?;
+        caller.need(self.sync_needs(&r.info.kind), &Scope::at(project, &r.info.environment, &r.info.path))?;
         if r.info.paused_at.is_some() {
             return Err(Error::Conflict("paused", format!("sync {id} is paused: resume it first")));
         }
@@ -630,10 +669,10 @@ impl Secrets {
             };
             // The audit row whether or not the hold was still ours: values went out either way.
             match &outcome {
-                Ok(o) if !o.keys.is_empty() || force => audit::record(c, project, &actor, "sync.push", Some(env), Some(path), &o.keys, &o.summary, now)?,
+                Ok(o) if !o.keys.is_empty() || force => audit::record(c, self.keys()?, project, &actor, "sync.push", Some(env), Some(path), &o.keys, &o.summary, now)?,
                 Ok(_) => {}
                 // Which keys reached the target before it failed isn't known: the row says so.
-                Err(e) => audit::record(c, project, &actor, "sync.push", Some(env), Some(path), &[], &clip(format!("{} sync failed (values may have reached the target in part): {e}", r.info.kind)), now)?,
+                Err(e) => audit::record(c, self.keys()?, project, &actor, "sync.push", Some(env), Some(path), &[], &clip(format!("{} sync failed (values may have reached the target in part): {e}", r.info.kind)), now)?,
             }
             Ok::<_, Error>(())
         });

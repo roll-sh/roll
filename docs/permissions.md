@@ -111,6 +111,18 @@ Infisical's and 1Password's CLIs do, rather than a token pasted into a shell pro
   tasks`' own tokens), refreshing it within a minute of its access token's end under a lock
   (`logins.lock`), so two commands never spend one refresh token. A login that can't be refreshed
   says so once (`run roll login`) and the command goes on without it.
+- **Which roll a command goes to**: `--api`, else `ROLL_API_URL`, else the saved login's URL
+  (`roll login <url>` signs in to that one). With several logins it's the one last signed in to or
+  picked, said on stderr; when none is newest (logins kept before this rule), a terminal asks which
+  and remembers it, and anything else is refused with the list. With no login it's a local rolld
+  (`http://127.0.0.1:7070`); roll has no hosted default yet. Whichever URL it is, only that URL's
+  own login goes with the command: logins are kept and looked up by the URL that issued them.
+- **An `ask` the CLI meets** (an `approval_pending` answer, "Approvals" below) is printed at once
+  with its approval, the page to approve it on, and a pointer to remembering it (that page's menu
+  beside Approve: "For 30 days" or "Always"; below), so later runs in the same
+  environment and folder stop asking, then sent again with `X-Roll-Approval` until it
+  runs, is denied, or its ten minutes end (then it says how to approve and run it again). A request
+  of a scoped or signed-in token still unanswered after 5 seconds says it may be held for a person.
 - Logging in again revokes the login it replaces; `roll logout` revokes the connection (its refresh
   token) and forgets it.
 
@@ -1084,6 +1096,11 @@ look (an old repo, a wiki page, a backup's config):
   hour per decoy and person). A decoy can't be turned into a working token.
 - It's checksummed like any `rlt_`, so scanners report a leaked decoy too (roll revokes it, which
   ends the trap: plant another).
+- roll secrets plants them as decoy keys (docs/secrets.md, "Decoys"). rolld mints each with
+  `Access::mint_decoy`, owned by whoever planted it, and revokes it with `Access::revoke_decoy`
+  when its key changes or goes. A product hears each use through `Access::on_decoy`, after the
+  audit row and the mail. A decoy is never a live grant for a product's background work or for
+  reach (`Grants::grant` answers `None`).
 
 ## Leaked tokens
 

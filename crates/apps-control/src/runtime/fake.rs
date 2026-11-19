@@ -103,6 +103,11 @@ pub struct Fake {
     /// Connections each instance's network accepted, and how many are open from other services
     /// ([`Fake::connect`], [`Fake::set_private`]).
     accepted: Mutex<HashMap<String, (u64, u32)>>,
+    /// Lines a test adds to the fake site's `_redirects` (an origin it serves, say).
+    pub site_redirects: Mutex<String>,
+    /// What a scan of any image finds; None: this builder doesn't scan. Each scan is counted.
+    pub scan_findings: Mutex<Option<Vec<crate::model::Vulnerability>>>,
+    pub scans: std::sync::atomic::AtomicUsize,
 }
 
 impl Fake {
@@ -261,6 +266,11 @@ async fn serve(spec: InstanceSpec, listener: tokio::net::TcpListener, log: LogSi
         let (name, dep, echo, sick, missing, killed, cache, answered) = (name.clone(), dep.clone(), echo.clone(), sick.clone(), missing.clone(), kill.clone(), cache.clone(), answered.clone());
         async move {
             use axum::response::IntoResponse;
+            // A Prometheus endpoint, as a client library serves one.
+            if req.uri().path() == "/metrics" {
+                let n = answered.load(std::sync::atomic::Ordering::SeqCst);
+                return format!("# TYPE fake_requests_total counter\nfake_requests_total{{route=\"/\"}} {n}\n# TYPE fake_queue_depth gauge\nfake_queue_depth 3\n").into_response();
+            }
             if req.uri().path() == "/count" {
                 return answered.load(std::sync::atomic::Ordering::SeqCst).to_string().into_response();
             }
@@ -293,7 +303,9 @@ async fn serve(spec: InstanceSpec, listener: tokio::net::TcpListener, log: LogSi
             let version = format!("{:?}", req.version());
             let te = req.headers().get("te").and_then(|h| h.to_str().ok()).unwrap_or("").to_string();
             let traceparent = req.headers().get("traceparent").and_then(|h| h.to_str().ok()).unwrap_or("").to_string();
-            let mut r = (status, axum::Json(serde_json::json!({ "instance": name, "deployment": dep, "port": port, "path": req.uri().path(), "vars": vars, "forwarded_host": host, "cookie": cookie, "version": version, "te": te, "traceparent": traceparent }))).into_response();
+            // What roll hands an edge function (`crate::edge`).
+            let edge: serde_json::Map<String, serde_json::Value> = ["x-edge-path", "x-edge-next"].iter().filter_map(|h| Some((h.to_string(), req.headers().get(*h)?.to_str().ok()?.into()))).collect();
+            let mut r = (status, axum::Json(serde_json::json!({ "instance": name, "deployment": dep, "port": port, "path": req.uri().path(), "vars": vars, "forwarded_host": host, "cookie": cookie, "version": version, "te": te, "traceparent": traceparent, "edge": edge }))).into_response();
             if let Some(c) = cache {
                 r.headers_mut().insert(axum::http::header::CACHE_CONTROL, c);
                 let seg = req.uri().path().trim_start_matches('/').split('/').next().unwrap_or("").to_string();
@@ -379,6 +391,11 @@ impl Runtime for Fake {
             let i = m.get(name).ok_or_else(|| anyhow::anyhow!("no instance {name}"))?;
             i.spec.clone()
         };
+        // Its sidecars, after it, each saying so under its own name (never its variables' values).
+        for sc in &spec.sidecars {
+            let names: Vec<&str> = sc.vars.iter().map(|(k, _)| k.as_str()).collect();
+            log.renamed(&super::sidecar_name(name, &sc.name)).line(format!("sidecar {} running {} with {}", sc.name, sc.image, names.join(",")));
+        }
         // A job: `FAKE_EXIT`, or a command `exit <code>` (a pre-deploy command, a cron run).
         let exit = spec.command.as_deref().and_then(|c| c.strip_prefix("exit ")).and_then(|c| c.trim().parse::<i32>().ok());
         if let Some(code) = exit.or_else(|| var(&spec, "FAKE_EXIT").and_then(|c| c.parse::<i32>().ok())) {
@@ -503,11 +520,12 @@ impl Runtime for Fake {
     /// A static site: an index, a script, and a symlink that must never be served.
     async fn export_files(&self, image: &str, _dir: &str) -> anyhow::Result<super::VolumeStream> {
         let mut b = tar::Builder::new(Vec::new());
+        let redirects = format!("{}/old /assets/app.js 308\n/app/* /index.html 200\n/api/* service:api/v1/:splat 200\n", self.site_redirects.lock());
         let big = "console.log('roll');\n".repeat(200);
         // A fingerprinted chunk of this build's own, as Vite names them.
         let h = image.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, c| (h ^ c as u64).wrapping_mul(0x0100_0000_01b3));
         let chunk = format!("./assets/chunk-{:08x}z9.js", h as u32);
-        let files: [(&str, &[u8]); 10] = [
+        let files: [(&str, &[u8]); 12] = [
             (chunk.as_str(), b"chunk()"),
             // A real image, for image optimization (64×48 PNG).
             ("./assets/hero.png", include_bytes!("fake-hero.png")),
@@ -517,7 +535,10 @@ impl Runtime for Fake {
             ("./index.html", b"<!doctype html><title>fake site</title>"),
             ("./assets/app.js", b"start()"),
             ("./404.html", b"<h1>not here</h1>"),
-            ("./_redirects", b"/old /assets/app.js 308\n/app/* /index.html 200\n/api/* service:api/v1/:splat 200\n"),
+            // A Netlify-style form, with its honeypot and its thanks page.
+            ("./contact.html", br#"<form name="contact" method="POST" data-netlify="true" netlify-honeypot="bot-field" action="/thanks.html"><input name="email"><textarea name="message"></textarea></form>"#),
+            ("./thanks.html", b"<h1>thanks</h1>"),
+            ("./_redirects", redirects.as_bytes()),
             ("./_headers", b"/assets/*\n  Cache-Control: public, max-age=31536000, immutable\n"),
         ];
         for (name, body) in files {
@@ -704,6 +725,13 @@ impl Builder for Fake {
         self.loaded.lock().push(manifest);
         log.line(format!("loaded as {tag}"));
         Ok(tag.to_string())
+    }
+
+    async fn scan(&self, image: &str, _service: &str, log: &LogSink) -> anyhow::Result<Option<super::Scanned>> {
+        let Some(found) = self.scan_findings.lock().clone() else { return Ok(None) };
+        self.scans.fetch_add(1, Ordering::SeqCst);
+        log.line(format!("scanned {image}"));
+        Ok(Some(super::Scanned { scanner: "fake".into(), found }))
     }
 
     async fn build(&self, job: &BuildJob, log: &LogSink, cancel: tokio_util::sync::CancellationToken) -> anyhow::Result<String> {
