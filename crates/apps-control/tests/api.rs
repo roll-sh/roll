@@ -1562,6 +1562,49 @@ async fn roll_toml_sets_run_settings_per_environment() {
     assert_eq!(up(&w), 1, "a redeploy keeps what roll.toml set");
 }
 
+/// A static site's `_redirects` proxies a path to another site (Netlify's 200 proxies, Vercel's
+/// external rewrites): the visitor's request sent on without roll's own headers and cookies, the
+/// answer back as it came; a rule's condition decides whether it applies.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_static_site_proxies_to_another_site() {
+    let w = world().await;
+    let origin = axum::Router::new().fallback(|uri: axum::http::Uri, h: axum::http::HeaderMap| async move {
+        let cookie = h.get("cookie").map(|v| v.to_str().unwrap().to_string()).unwrap_or_default();
+        let roll = h.keys().any(|k| k.as_str().starts_with("x-roll-"));
+        ([("x-origin", "yes")], format!("origin {uri} cookie={cookie} roll={roll}"))
+    });
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let at = l.local_addr().unwrap();
+    tokio::spawn(axum::serve(l, origin).into_future());
+    *w.fake.site_redirects.lock() = format!("/ext/* http://{at}/v2/:splat 200\n/beta/* http://{at}/beta/:splat 200 Cookie=beta\n");
+    w.code.push("f1f1f1f1f1f1", "site", &[("package.json", r#"{"name":"site","scripts":{"build":"vite build"},"devDependencies":{"vite":"5.0.0"}}"#)]);
+    let (_, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "site", "source": {"kind": "repo", "repo": "acme/site"} }))).await;
+    let id = svc["id"].as_str().unwrap_or_else(|| panic!("{svc}")).to_string();
+    settled(&w, &id, "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await;
+    let host = host(&svc["environments"][0]["url"]);
+    let get = |path: &'static str, cookie: Option<&'static str>| {
+        let (public, host) = (w.public.clone(), host.clone());
+        async move {
+            let mut r = Request::builder().uri(path).header("host", &host).header("x-roll-visitor", "forged");
+            if let Some(c) = cookie {
+                r = r.header("cookie", c);
+            }
+            let resp = public.oneshot(r.body(Body::empty()).unwrap()).await.unwrap();
+            let (st, origin) = (resp.status(), resp.headers().get("x-origin").is_some());
+            (st, origin, String::from_utf8(resp.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap())
+        }
+    };
+    let (st, from_origin, body) = get("/ext/users/7?a=1", Some("session=s1; roll_bucket=42")).await;
+    assert_eq!((st, from_origin), (StatusCode::OK, true), "{body}");
+    assert_eq!(body, "origin /v2/users/7?a=1 cookie=session=s1 roll=false", "its path and query; roll's cookie and headers stay here");
+    // A condition: only with the cookie set.
+    assert!(get("/beta/x", Some("beta=1")).await.2.starts_with("origin /beta/x"));
+    assert!(!get("/beta/x", None).await.1, "not without it");
+    // Metered and in the access log, as an external answer.
+    let access: Vec<String> = w.apps.logs.follow(&format!("http:{id}/production"), 50).0.into_iter().map(|l| l.text).collect();
+    assert!(access.iter().any(|l| l.contains("\"external\"")), "{access:?}");
+}
+
 /// A static site's marked form takes submissions (Netlify Forms): kept sealed per environment, a
 /// honeypot's dropped, read back only through the reveal route, each one an event naming its
 /// fields and never their values.

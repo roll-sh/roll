@@ -261,24 +261,104 @@ fn maintenance_page(message: &str) -> Response {
 /// A static site's rewrite of this request to one of the project's services (`service:` in its
 /// `_redirects`): the service's name and the path. Not for a request a rewrite already sent (a
 /// site rewriting to a site that rewrites back).
-fn site_rewrite(apps: &Arc<Apps>, tpl: &crate::live::Template, req: &Request) -> impl std::future::Future<Output = Option<(String, String)>> + Send + use<> {
+fn site_rewrite(apps: &Arc<Apps>, tpl: &crate::live::Template, req: &Request) -> impl std::future::Future<Output = Option<Rewrite>> + Send + use<> {
     // Read off the request here: the future never holds it.
     let args = (!req.headers().contains_key(VIA_SITE)).then(|| tpl.site.clone()).flatten().map(|key| {
-        (key, percent_encoding::percent_decode_str(req.uri().path()).decode_utf8_lossy().into_owned(), req.uri().query().map(str::to_string))
+        (key, percent_encoding::percent_decode_str(req.uri().path()).decode_utf8_lossy().into_owned(), req.uri().query().map(str::to_string), crate::site_rules::Visitor::of(req.headers()))
     });
     let apps = apps.clone();
     async move {
-        let (key, path, query) = args?;
-        rewrite_of(&apps, key, path, query).await
+        let (key, path, query, visitor) = args?;
+        rewrite_of(&apps, key, path, query, visitor).await
     }
 }
 
-async fn rewrite_of(apps: &Arc<Apps>, key: String, path: String, query: Option<String>) -> Option<(String, String)> {
+/// Where a site's rewrite sends a request: one of the project's services (its name and the
+/// path), or another site's URL.
+enum Rewrite {
+    Service(String, String),
+    External(String),
+}
+
+async fn rewrite_of(apps: &Arc<Apps>, key: String, path: String, query: Option<String>, visitor: crate::site_rules::Visitor) -> Option<Rewrite> {
     let site = apps.site(&key).await.ok()?;
-    match site.rules.redirect(&path, query.as_deref(), crate::sites::exists(&site, &path))? {
-        crate::site_rules::Outcome::Proxy { service, path } => Some((service, path)),
+    match site.rules.redirect(&path, query.as_deref(), crate::sites::exists(&site, &path), &visitor)? {
+        crate::site_rules::Outcome::Proxy { service, path } => Some(Rewrite::Service(service, path)),
+        crate::site_rules::Outcome::External(url) => Some(Rewrite::External(url)),
         _ => None,
     }
+}
+
+/// A site's body to another site, and the answer it reads back, at most.
+const EXTERNAL_BODY: usize = 10 << 20;
+const EXTERNAL_ANSWER: usize = 20 << 20;
+
+/// Headers that are one connection's, not the request's or the answer's.
+const HOP: [&str; 9] = ["connection", "keep-alive", "proxy-connection", "transfer-encoding", "te", "trailer", "upgrade", "host", "content-length"];
+
+/// A static site's proxy rewrite to another site (`/api/* https://api.example.com/:splat 200`):
+/// fetched as any URL a tenant chose is (public addresses only, no redirects followed: a 3xx
+/// goes back to the visitor), the visitor's method, headers and body (at most 10 MiB) sent on
+/// without roll's own (`x-roll-*`, its cookies), the answer read whole (at most 20 MiB), metered
+/// and in the access log as `external`.
+async fn proxy_external(apps: &Arc<Apps>, live: &Arc<crate::live::EnvLive>, service: &str, env: &str, url: String, req: Request) -> Response {
+    let began = Instant::now();
+    let access = Access { log: apps.logs.sink(format!("http:{service}/{env}"), crate::logs::Stream::Http), seen: Seen::of(&req), span: None, deployment: Default::default() };
+    let request_id = req.headers().get("x-request-id").and_then(|v| v.to_str().ok()).map(|v| v.chars().take(64).collect::<String>()).unwrap_or_else(|| crate::model::random(16));
+    let done = |status: u16, bytes: u64| {
+        live.meter.lock().request(code_sql::now_ms(), began.elapsed().as_secs_f64() * 1000.0, status, bytes);
+        access.write(status, began, bytes, "external", &request_id, false, 0);
+    };
+    let (parts, body) = req.into_parts();
+    let host = parts.headers.get(header::HOST).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+    let Ok(body) = axum::body::to_bytes(body, EXTERNAL_BODY).await else {
+        done(413, 0);
+        return page(StatusCode::PAYLOAD_TOO_LARGE, "Too much", "This request is bigger than a proxied one may be.");
+    };
+    // HTTPS only, as any URL a tenant chose (plain HTTP where private targets are allowed:
+    // local development and tests).
+    if !url.starts_with("https://") && !apps.cfg.allow_private {
+        done(502, 0);
+        return page(StatusCode::BAD_GATEWAY, "Not proxied", "A site's proxy rewrite goes to an https:// URL.");
+    }
+    let mut out = apps.site_proxy_client.request(parts.method.clone(), &url);
+    for (k, v) in parts.headers.iter() {
+        let name = k.as_str();
+        if HOP.contains(&name) || name.starts_with("x-roll-") || name == "cookie" {
+            continue;
+        }
+        out = out.header(k, v);
+    }
+    // The visitor's cookies but roll's own (`roll_…`: access, the challenge's pass, a rollout's bucket).
+    let jar: Vec<&str> = parts.headers.get_all(header::COOKIE).iter().filter_map(|v| v.to_str().ok()).flat_map(|c| c.split(';')).map(str::trim).filter(|c| !c.is_empty() && !c.starts_with("roll_")).collect();
+    if !jar.is_empty() {
+        out = out.header(header::COOKIE, jar.join("; "));
+    }
+    out = out.header("x-forwarded-host", host).header("x-forwarded-proto", apps.cfg.scheme.as_str());
+    let res = match out.body(body).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            done(502, 0);
+            tracing::debug!(service, error = %e.without_url(), "apps: a site's proxy rewrite didn't answer");
+            return page(StatusCode::BAD_GATEWAY, "Not answering", "The site this page proxies to didn't answer.");
+        }
+    };
+    let status = res.status();
+    let headers = res.headers().clone();
+    let bytes = crate::net::read_bounded(res, EXTERNAL_ANSWER + 1).await;
+    if bytes.len() > EXTERNAL_ANSWER {
+        done(502, 0);
+        return page(StatusCode::BAD_GATEWAY, "Too much", "The site this page proxies to answered more than a proxied answer may be.");
+    }
+    let mut r = Response::new(Body::from(bytes.clone()));
+    *r.status_mut() = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    for (k, v) in headers.iter() {
+        if !HOP.contains(&k.as_str()) && !k.as_str().starts_with("x-roll-") {
+            r.headers_mut().append(k.clone(), v.clone());
+        }
+    }
+    done(status.as_u16(), bytes.len() as u64);
+    r
 }
 
 /// Marks a request a site's rewrite sent on (roll's own: `x-roll-*` never reaches an app, and a
@@ -562,6 +642,8 @@ struct SiteRequest {
     if_range: Option<String>,
     request_id: Option<String>,
     seen: Seen,
+    /// What a `_redirects` rule's conditions read (country, languages, cookies).
+    visitor: crate::site_rules::Visitor,
     /// A POST's content type and body (a form's, at most [`crate::forms::MAX_BODY`]; None past it).
     form: Option<(Option<String>, Option<bytes::Bytes>)>,
 }
@@ -579,7 +661,7 @@ impl SiteRequest {
 
     fn of(req: &Request) -> SiteRequest {
         let h = |n: &str| req.headers().get(n).and_then(|v| v.to_str().ok()).map(str::to_string);
-        SiteRequest { method: req.method().clone(), path: req.uri().path().to_string(), query: req.uri().query().map(str::to_string), if_none_match: h("if-none-match"), accept_encoding: h("accept-encoding"), range: h("range"), if_range: h("if-range"), request_id: h("x-request-id"), seen: Seen::of(req), form: None }
+        SiteRequest { method: req.method().clone(), path: req.uri().path().to_string(), query: req.uri().query().map(str::to_string), if_none_match: h("if-none-match"), accept_encoding: h("accept-encoding"), range: h("range"), if_range: h("if-range"), request_id: h("x-request-id"), seen: Seen::of(req), visitor: crate::site_rules::Visitor::of(req.headers()), form: None }
     }
 }
 
@@ -646,7 +728,7 @@ async fn serve_site(apps: &Arc<Apps>, live: &Arc<crate::live::EnvLive>, tpl: &cr
     // A rule that hides a path (a 404 rule) or sends it elsewhere decides it; a rewrite or no
     // rule at all leaves a missing fingerprinted file to the site's earlier deployments.
     let mut skew_ok = !own;
-    let resolved = match site.rules.redirect(&path, req.query.as_deref(), own) {
+    let resolved = match site.rules.redirect(&path, req.query.as_deref(), own, &req.visitor) {
         Some(crate::site_rules::Outcome::Redirect(status, to)) => {
             done(status, 0);
             let mut r = Response::new(Body::empty());
@@ -657,7 +739,7 @@ async fn serve_site(apps: &Arc<Apps>, live: &Arc<crate::live::EnvLive>, tpl: &cr
             return r;
         }
         // Taken before the site is served ([`site_rewrite`]).
-        Some(crate::site_rules::Outcome::Proxy { .. }) => {
+        Some(crate::site_rules::Outcome::Proxy { .. } | crate::site_rules::Outcome::External(_)) => {
             done(404, 0);
             return not_found();
         }
@@ -1195,7 +1277,10 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
         if let Some(t) = site
             && let Some(to) = site_rewrite(&apps, &t, &req).await
         {
-            return rewrite_to(apps, service, env, to, req).await;
+            return match to {
+                Rewrite::Service(s, p) => rewrite_to(apps, service, env, (s, p), req).await,
+                Rewrite::External(url) => proxy_external(&apps, &live, service, env, url, req).await,
+            };
         }
     }
     // A gradual rollout keeps each visitor on one deployment: their bucket, from the cookie it

@@ -312,6 +312,9 @@ pub struct Apps {
     looping: Mutex<std::collections::HashSet<String>>,
     /// For notification targets: public addresses only, no redirects.
     notify_client: reqwest::Client,
+    /// A static site's proxy rewrites to other sites (`_redirects`' `https://… 200`): public
+    /// addresses only, no redirects followed, 30 s.
+    pub(crate) site_proxy_client: reqwest::Client,
     /// Shells open over HTTP (the dashboard's terminal), by id.
     sessions: Mutex<HashMap<String, Arc<shell::Session>>>,
     /// WebSocket shells open per environment (`env_key`), counted with the HTTP sessions.
@@ -537,6 +540,7 @@ impl Apps {
             ws_shells: Mutex::new(HashMap::new()),
             tunnels: Mutex::new(HashMap::new()),
             notify_client: net::client(cfg_allow, Duration::from_secs(10)),
+            site_proxy_client: net::client(cfg_allow, Duration::from_secs(30)),
             looping: Mutex::new(std::collections::HashSet::new()),
             client: hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new()).pool_idle_timeout(Duration::from_secs(30)).build_http(),
             client_h2: hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new()).pool_idle_timeout(Duration::from_secs(30)).http2_only(true).build_http(),
