@@ -260,6 +260,9 @@ pub struct GitPush {
     pub sha: Option<String>,
     /// The push's commit message (`[skip preview]` in it skips one).
     pub message: String,
+    /// Who pushed or acted, as the provider says (GitHub's `sender.login`): untrusted text, for
+    /// `skip_authors` only (a dependency bot's branch push makes no preview), never for trust.
+    pub pusher: Option<String>,
     /// The pull request the push is of (GitHub's `pull_request`, GitLab's merge request events),
     /// every claim checked against the repository's refs by roll apps first. A fork's is
     /// `branch: "pull/<n>"`; a same-repo one names its real branch. `sha: None` with a pull: it

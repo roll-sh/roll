@@ -1,6 +1,6 @@
 import { Building2, Check, Copy, Fingerprint, KeyRound, LoaderCircle, Monitor, ShieldCheck, UserPlus } from "lucide-react";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { accountsApi, activityText, refreshSession, useSession, type AccountPolicy, type Activity, type Invite, type NetworkPolicy, type Passkey, type PasskeyPolicy, type Provider, type ResetRequest, type Session, type User } from "@/lib/accounts-api";
+import { accountsApi, activityText, phishingResistant, sessionMethod, refreshSession, useSession, findPeople, dormant, DORMANT_DAYS, type AccountPolicy, type Activity, type Invite, type NetworkPolicy, type Passkey, type PasskeyPolicy, type Provider, type ResetRequest, type Session, type User, type PeopleFilter } from "@/lib/accounts-api";
 import { creationOptions, credentialJSON, passkeyProblem, passkeysSupported } from "@/lib/webauthn";
 import { Link } from "./link";
 import { GitHubMark, GoogleMark } from "./agents/brand-icons";
@@ -581,6 +581,21 @@ function EveryoneSecondFactor() {
           </select>
           ends
         </label>
+        <label className="flex items-center gap-2 text-[12.5px]">
+          Every session ends
+          <select
+            value={policy.max_session_hours ?? 0}
+            onChange={(e) => void save({ ...policy, max_session_hours: Number(e.target.value) || undefined })}
+            className="rounded-md border border-line-2 bg-canvas px-1.5 py-0.5 text-[12px]"
+          >
+            {[8, 12, 24, 72, 168, 0, ...(policy.max_session_hours && ![8, 12, 24, 72, 168].includes(policy.max_session_hours) ? [policy.max_session_hours] : [])].map((h) => (
+              <option key={h} value={h}>
+                {h === 0 ? "30 days" : h < 24 ? `${h} hours` : h === 24 ? "a day" : h === 168 ? "a week" : `${h / 24} days`}
+              </option>
+            ))}
+          </select>
+          after its sign-in
+        </label>
         {error && <p className="text-[12px] text-danger">{error}</p>}
       </div>
     </Section>
@@ -658,7 +673,9 @@ function Sessions() {
               <span className="min-w-0 flex-1 leading-tight">
                 <span className="block truncate text-[12.5px]">{browser(s.user_agent)}</span>
                 <span className="block text-[11px] text-subtle">
-                  Signed in {when(s.created_at)} · last seen {when(s.seen_at)}
+                  Signed in {sessionMethod(s) ? `with ${sessionMethod(s)} ` : ""}
+                  {when(s.created_at)} · last seen {when(s.seen_at)}
+                  {phishingResistant(s) && <span className="text-accent"> · phishing-resistant</span>}
                 </span>
               </span>
               {s.current ? (
@@ -672,6 +689,20 @@ function Sessions() {
           ))
         )}
       </div>
+      {list && list.some((s) => !s.current) && (
+        <div className="mt-2 flex flex-wrap items-center gap-3">
+          <button onClick={() => accountsApi.endOtherSessions().then(load)} className={btn}>
+            Sign out of all other sessions
+          </button>
+          <span className="text-[11.5px] text-subtle">
+            Tokens and app connections keep working: check them on{" "}
+            <Link href="/dashboard/access" className="text-accent hover:underline">
+              MCP &amp; access
+            </Link>
+            .
+          </span>
+        </div>
+      )}
     </Section>
   );
 }
@@ -714,6 +745,53 @@ function YourData({ handle }: { handle: string }) {
 }
 
 /** Your security log (GitHub's): sign-ins, refused ones too, and changes to your account. */
+/** Admins: one person's sessions (each can be ended) and security log, as they see it themselves. */
+function PersonLog({ user }: { user: User }) {
+  const [sessions, setSessions] = useState<Session[] | null>(null);
+  const [events, setEvents] = useState<Activity[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const load = useCallback(() => {
+    accountsApi.userSessions(user.id).then(setSessions, (e) => setError(errorText(e)));
+    accountsApi.userActivity(user.id).then(({ events }) => setEvents(events), (e) => setError(errorText(e)));
+  }, [user.id]);
+  useEffect(() => load(), [load]);
+  const who = user.name || user.handle;
+  return (
+    <div className="space-y-3 border-t border-line bg-canvas/40 px-4 py-3 text-[12px]">
+      {error && <p className="text-danger">{error}</p>}
+      <div>
+        <p className="mb-1 text-[11px] font-medium text-subtle">Sessions</p>
+        {sessions && sessions.length === 0 && <p className="text-subtle">{who} isn&apos;t signed in anywhere.</p>}
+        {(sessions ?? []).map((s) => (
+          <div key={s.id} className="flex items-center gap-3 py-1">
+            <span className="min-w-0 flex-1 truncate">{browser(s.user_agent)}</span>
+            <span className="shrink-0 text-[11px] text-subtle">since {when(s.created_at)} · last {when(s.seen_at)}</span>
+            <button onClick={() => accountsApi.endUserSession(user.id, s.id).then(load, (e) => setError(errorText(e)))} className={btn}>
+              End
+            </button>
+          </div>
+        ))}
+      </div>
+      <div>
+        <p className="mb-1 text-[11px] font-medium text-subtle">Recent activity, as {who} sees it</p>
+        {events && events.length === 0 && <p className="text-subtle">Nothing yet.</p>}
+        {(events ?? []).slice(0, 20).map((e, i) => (
+          <div key={`${e.at}-${i}`} className="flex items-baseline gap-3 py-0.5">
+            <span className={`min-w-0 flex-1 ${e.ok ? "" : "text-danger"}`}>{activityText(e, user.id)}</span>
+            <span className="hidden truncate font-mono text-[11px] text-subtle sm:inline">{[e.ip, e.user_agent ? browser(e.user_agent) : null].filter(Boolean).join(" · ")}</span>
+            <span className="shrink-0 text-[11px] text-subtle">{when(e.at)}</span>
+          </div>
+        ))}
+        {events && events.length > 20 && (
+          <Link href={`/dashboard/access/audit?product=accounts&resource=${encodeURIComponent(user.id)}`} className="text-accent hover:underline">
+            Everything in the audit log
+          </Link>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function RecentActivity({ me }: { me: string }) {
   const [list, setList] = useState<Activity[] | null>(null);
   const [more, setMore] = useState(false);
@@ -812,6 +890,22 @@ function Invites() {
                   {i.admin && <span className="ml-2 text-[11px] text-accent">admin</span>}
                 </span>
                 <span className="text-[11px] text-subtle">{state}</span>
+                {state !== "Used" && (
+                  <button
+                    onClick={() =>
+                      accountsApi.resendInvite(i.id).then(
+                        (r) => {
+                          setMade({ email: r.email, url: r.url });
+                          void load();
+                        },
+                        (e) => setError(errorText(e)),
+                      )
+                    }
+                    className={btn}
+                  >
+                    Resend
+                  </button>
+                )}
                 {state === "Waiting" && (
                   <button onClick={() => accountsApi.revokeInvite(i.id).then(load, (e) => setError(errorText(e)))} className={btn}>
                     Revoke
@@ -883,7 +977,12 @@ function Users({ me }: { me: string }) {
     accountsApi.accountPolicy().then((p) => setRequired(p.require_second_factor), () => setRequired(false));
   }, []);
   const act = (p: Promise<unknown>) => p.then(load, (e) => setError(errorText(e)));
+  const [open, setOpen] = useState<string | null>(null);
   const without = (list ?? []).filter((u) => !u.disabled && !u.totp && !u.passkeys).length;
+  const [query, setQuery] = useState("");
+  const [filter, setFilter] = useState<PeopleFilter>("everyone");
+  const shown = findPeople(list ?? [], query, filter);
+  const idle = (list ?? []).filter((u) => dormant(u)).length;
   return (
     <Section title="People" lead="Everyone with an account. Turning someone off signs them out everywhere at once.">
       <p className="-mt-1 mb-2 text-[12px] text-muted">
@@ -894,14 +993,35 @@ function Users({ me }: { me: string }) {
         (the audit log, as CSV for a spreadsheet).
       </p>
       {error && <p className="mb-2 text-[12px] text-danger">{error}</p>}
+      {list && idle > 0 && (
+        <p className="mb-2 text-[12px] text-muted">
+          {idle === 1 ? "One person hasn't" : `${idle} people haven't`} used roll in {DORMANT_DAYS} days: turning off accounts nobody uses closes a way in.
+        </p>
+      )}
       {list && without > 0 && (
         <p className={`mb-2 text-[12px] ${required ? "text-danger" : "text-muted"}`}>
           {without === 1 ? "One person has" : `${without} people have`} no second factor{required ? ": they can use only their account page until they set one up." : "."}
         </p>
       )}
+      {list && list.length > 8 && (
+        <div className="mb-2 flex flex-wrap items-center gap-2">
+          <input id="people-search" type="search" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Find by name, handle or address" aria-label="Find people" className={`${field} min-w-0 flex-1 basis-48`} />
+          <select id="people-filter" value={filter} onChange={(e) => setFilter(e.target.value as PeopleFilter)} aria-label="Show" className={field}>
+            <option value="everyone">Everyone</option>
+            <option value="admins">Admins</option>
+            <option value="no-second-factor">No second factor</option>
+            <option value="turned-off">Turned off</option>
+          </select>
+          <span className="shrink-0 text-[11.5px] tabular-nums text-subtle">
+            {shown.length} of {list.length}
+          </span>
+        </div>
+      )}
+      {list && shown.length === 0 && <p className="mb-2 text-[12.5px] text-subtle">Nobody matches.</p>}
       <div className={card}>
-        {(list ?? []).map((u) => (
-          <div key={u.id} className={`flex items-center gap-3 border-t border-line px-4 py-2.5 first:border-t-0 ${u.disabled ? "opacity-60" : ""}`}>
+        {shown.map((u) => (
+          <div key={u.id} className="border-t border-line first:border-t-0">
+          <div className={`flex flex-wrap items-center gap-3 px-4 py-2.5 ${u.disabled ? "opacity-60" : ""}`}>
             <span className="min-w-0 flex-1 leading-tight">
               <span className="block truncate text-[12.5px]">
                 {u.name || u.handle} <span className="font-mono text-[11px] text-subtle">{u.handle}</span>
@@ -910,10 +1030,16 @@ function Users({ me }: { me: string }) {
                 {u.email}
                 {u.totp || u.passkeys ? ` · ${[u.totp ? "authenticator app" : "", u.passkeys ? `${u.passkeys} passkey${u.passkeys === 1 ? "" : "s"}` : ""].filter(Boolean).join(", ")}` : ""}
                 {!u.totp && !u.passkeys && <span className={required ? "text-danger" : ""}> · no second factor</span>}
+                {" · "}
+                {dormant(u) && <span className="font-medium text-fg">dormant · </span>}
+                {u.last_active_at ? `active ${when(u.last_active_at)}` : "no activity recorded"}
               </span>
             </span>
             {u.id !== me && (
               <>
+                <button onClick={() => setOpen(open === u.id ? null : u.id)} aria-expanded={open === u.id} className={btn}>
+                  Security log
+                </button>
                 <button onClick={() => act(accountsApi.updateUser(u.id, { admin: !u.admin }))} className={btn}>
                   {u.admin ? "Remove admin" : "Make admin"}
                 </button>
@@ -926,6 +1052,8 @@ function Users({ me }: { me: string }) {
               </>
             )}
             {u.id === me && <span className="text-[11px] text-accent">You{u.admin ? " · admin" : ""}</span>}
+          </div>
+          {open === u.id && <PersonLog user={u} />}
           </div>
         ))}
       </div>

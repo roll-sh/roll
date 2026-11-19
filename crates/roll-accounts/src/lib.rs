@@ -9,6 +9,7 @@
 //! - [`api::router`] serves `/v1/accounts`. [`Accounts::sessions`] is what rolld's gate
 //!   (`roll_auth::check`) resolves session cookies with.
 
+mod alerts;
 pub mod api;
 pub mod audit;
 mod deletion;
@@ -379,6 +380,9 @@ pub struct User {
     pub admin: bool,
     pub disabled: bool,
     pub created_at: i64,
+    /// When they last used roll: a sign-in, or a session's use (noted every five minutes).
+    /// `None`: not since roll began keeping it.
+    pub last_active_at: Option<i64>,
     pub totp: bool,
     /// How many passkeys they have (with `totp`: whether they have a second factor).
     pub passkeys: u32,
@@ -393,6 +397,11 @@ pub struct SessionInfo {
     pub expires_at: i64,
     pub user_agent: String,
     pub current: bool,
+    /// How it signed in: `email`, `github`, `google`, `sso` or `passkey` (absent: older sessions).
+    pub method: Option<String>,
+    /// Whether a passkey was used in it (to sign in, as its second factor, or to confirm it's
+    /// you): with `sso`, what phishing-resistant sign-in counts.
+    pub passkey: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -515,6 +524,12 @@ impl Accounts {
         if !db.has_column("users", "deleted_at")? {
             db.add_column("users", "deleted_at", "INTEGER")?;
         }
+        // When each person last used roll (a sign-in, or a session's use): GitHub Enterprise's
+        // dormant users. Started from the sessions still open; unknown (null) for the rest.
+        if !db.has_column("users", "last_active_at")? {
+            db.add_column("users", "last_active_at", "INTEGER")?;
+            db.write(|c| c.execute("UPDATE users SET last_active_at = (SELECT MAX(seen_at) FROM sessions WHERE sessions.user_id = users.id)", ()))?;
+        }
         // How each session began (`sso`, or not): enforcing SSO ends the others.
         if !db.has_column("sessions", "method")? {
             db.add_column("sessions", "method", "TEXT")?;
@@ -554,31 +569,35 @@ impl Accounts {
         let now = self.db.now_ms()?;
         let row = self.db.read(|c| {
             c.query_row(
-                "SELECT s.id, s.user_id, s.level, s.seen_at, s.expires_at, u.handle, u.admin, u.disabled, u.code_owner_id
+                "SELECT s.id, s.user_id, s.level, s.seen_at, s.expires_at, u.handle, u.admin, u.disabled, u.code_owner_id, s.created_at
                  FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ?",
                 [hash.as_str()],
                 |r| {
                     Ok((
                         (r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?),
-                        (r.get::<_, i64>(3)?, r.get::<_, i64>(4)?),
+                        (r.get::<_, i64>(3)?, r.get::<_, i64>(4)?, r.get::<_, i64>(9)?),
                         (r.get::<_, String>(5)?, r.get::<_, bool>(6)?, r.get::<_, bool>(7)?, r.get::<_, Option<String>>(8)?),
                     ))
                 },
             )
             .optional()
         })?;
-        let Some(((id, user, level), (seen_at, expires_at), (handle, admin, disabled, code_owner))) = row else { return Ok(None) };
+        let Some(((id, user, level), (seen_at, expires_at, created_at), (handle, admin, disabled, code_owner))) = row else { return Ok(None) };
         let full = level == "full";
-        // A company's idle timeout (its account policy), else roll's week.
-        let idle = self.account_policy()?.idle_ms();
-        if disabled || expires_at <= now || (full && seen_at + idle <= now) {
+        // A company's idle timeout and longest session (its account policy), else roll's week and
+        // 30 days. Read on every use: a shorter policy ends sessions already open.
+        let policy = self.account_policy()?;
+        if disabled || expires_at <= now || (full && (seen_at + policy.idle_ms() <= now || created_at + policy.max_session_ms() <= now)) {
             return Ok(None);
         }
         if !full {
             return Ok(Some(roll_auth::Session::SecondFactor(roll_auth::SecondFactorOwed { user, session: id })));
         }
         if now - seen_at >= SEEN_EVERY_MS {
-            self.db.write(|c| c.execute("UPDATE sessions SET seen_at = ? WHERE token_hash = ?", params![now, hash]))?;
+            self.db.write(|c| {
+                c.execute("UPDATE sessions SET seen_at = ? WHERE token_hash = ?", params![now, hash])?;
+                c.execute("UPDATE users SET last_active_at = ? WHERE id = ?", params![now, user])
+            })?;
         }
         Ok(Some(roll_auth::Session::Full(roll_auth::SignedIn { user, handle, admin, code_owner, session: id })))
     }
@@ -600,6 +619,16 @@ impl Accounts {
     }
 
     /// A user as they are now, for a token of theirs (roll-access): `None` once disabled or gone.
+    /// `user` used roll just now (a token's use): noted at most every five minutes, as a session's is.
+    pub fn note_active(&self, user: &str) -> Result<()> {
+        let now = self.db.now_ms()?;
+        let last = self.db.read(|c| c.query_row("SELECT last_active_at FROM users WHERE id = ?", [user], |r| r.get::<_, Option<i64>>(0)).optional())?.flatten();
+        if last.is_none_or(|t| now - t >= SEEN_EVERY_MS) {
+            self.db.write(|c| c.execute("UPDATE users SET last_active_at = ? WHERE id = ?", params![now, user]))?;
+        }
+        Ok(())
+    }
+
     pub fn person(&self, user: &str) -> Result<Option<roll_auth::SignedIn>> {
         let row = self.db.read(|c| {
             c.query_row("SELECT handle, admin, disabled, code_owner_id FROM users WHERE id = ?", [user], |r| {
@@ -613,9 +642,10 @@ impl Accounts {
     /// A new session for `user`: full, or owing a second factor when they have one on. Refused
     /// for a person whose domain's SSO connection enforces it ([`Accounts::issue_sso`] signs them
     /// in).
-    pub fn issue(&self, user: &str, user_agent: &str) -> Result<Issued> {
+    /// A session for a person signed in by `method` (`email`, `github`, `google`).
+    pub fn issue(&self, user: &str, user_agent: &str, method: &str) -> Result<Issued> {
         self.sso_not_enforced(user)?;
-        self.issue_session(user, user_agent, None, false)
+        self.issue_session(user, user_agent, Some(method), false)
     }
 
     /// A session for a person their company's SSO provider (connection `connection`) just signed
@@ -663,6 +693,7 @@ impl Accounts {
                 "INSERT INTO sessions (token_hash, id, user_id, level, created_at, seen_at, expires_at, user_agent, method, cap_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 params![sha256_hex(&token), id, user, level, now, now, now + ttl, user_agent, method, cap_ms],
             )?;
+            c.execute("UPDATE users SET last_active_at = ? WHERE id = ?", params![now, user])?;
             Ok(mfa)
         })?;
         Ok(Issued { token, id, second_factor })
@@ -708,26 +739,36 @@ impl Accounts {
 
     pub fn sessions_of(&self, user: &str, current: &str) -> Result<Vec<SessionInfo>> {
         let now = self.db.now_ms()?;
-        Ok(self.db.read(|c| {
+        let all = self.db.read(|c| {
             c.query(
-                "SELECT id, created_at, seen_at, expires_at, user_agent FROM sessions WHERE user_id = ? AND level = 'full' AND expires_at > ? ORDER BY created_at DESC, id",
+                &format!("SELECT {SESSION_COLUMNS} FROM sessions WHERE user_id = ? AND level = 'full' AND expires_at > ? ORDER BY created_at DESC, id"),
                 params![user, now],
-                |r| {
-                    let id: String = r.get(0)?;
-                    Ok(SessionInfo { current: id == current, id, created_at: r.get(1)?, seen_at: r.get(2)?, expires_at: r.get(3)?, user_agent: r.get(4)? })
-                },
+                |r| session_row(r, current),
             )
-        })?)
+        })?;
+        // As `resolve` sees them: the company's idle timeout and longest session end some early.
+        let policy = self.account_policy()?;
+        let (max, idle) = (policy.max_session_ms(), policy.idle_ms());
+        Ok(all
+            .into_iter()
+            .filter(|s| s.created_at + max > now && s.seen_at + idle > now)
+            .map(|mut s| {
+                s.expires_at = s.expires_at.min(s.created_at + max);
+                s
+            })
+            .collect())
     }
 
     pub(crate) fn session_info(&self, id: &str) -> Result<SessionInfo> {
         let row = self.db.read(|c| {
-            c.query_row("SELECT id, created_at, seen_at, expires_at, user_agent FROM sessions WHERE id = ?", [id], |r| {
-                Ok(SessionInfo { id: r.get(0)?, created_at: r.get(1)?, seen_at: r.get(2)?, expires_at: r.get(3)?, user_agent: r.get(4)?, current: true })
-            })
-            .optional()
+            c.query_row(&format!("SELECT {SESSION_COLUMNS} FROM sessions WHERE id = ?"), [id], |r| session_row(r, id)).optional()
         })?;
         row.ok_or_else(Error::signed_out)
+    }
+
+    /// End all of `user`'s sessions but `keep`: how many ended.
+    pub fn end_other_sessions(&self, user: &str, keep: &str) -> Result<usize> {
+        Ok(self.db.write(|c| c.execute("DELETE FROM sessions WHERE user_id = ? AND id <> ?", [user, keep]))?)
     }
 
     pub fn revoke_session(&self, user: &str, id: &str) -> Result<()> {
@@ -974,6 +1015,34 @@ impl Accounts {
         Ok(self.db.read(|c| c.query("SELECT id, email, admin, handle, created_by, created_at, expires_at, used_at, used_by FROM invites ORDER BY created_at DESC, id", (), invite_row))?)
     }
 
+    /// A fresh link for unused invite `id`, valid another 7 days; the old link stops at once (its
+    /// hash is replaced in the same write).
+    pub fn resend_invite(&self, id: &str) -> Result<(Invite, String, String)> {
+        let token = new_token("rli");
+        let now = self.db.now_ms()?;
+        self.db.write(|c| {
+            let used = c.query_row("SELECT used_at FROM invites WHERE id = ?", [id], |r| r.get::<_, Option<i64>>(0)).optional()?;
+            match used {
+                None => Err(Error::NotFound(format!("no invite {id}"))),
+                Some(Some(_)) => Err(Error::Conflict("the invite is used".into())),
+                Some(None) => {
+                    let email: String = c.query_row("SELECT email FROM invites WHERE id = ?", [id], |r| r.get(0))?;
+                    if c.query_row("SELECT 1 FROM users WHERE email = ?", [email.as_str()], |_| Ok(())).optional()?.is_some() {
+                        return Err(Error::Conflict(format!("an account has {email}")));
+                    }
+                    c.execute("UPDATE invites SET token_hash = ?, expires_at = ? WHERE id = ? AND used_at IS NULL", params![sha256_hex(&token), now + INVITE_TTL_MS, id])?;
+                    // Sign-ins already started with the old link stop too: they hold the invite's id.
+                    c.execute("DELETE FROM email_codes WHERE invite_id = ?", [id])?;
+                    c.execute("DELETE FROM oauth_states WHERE invite_id = ?", [id])?;
+                    Ok(())
+                }
+            }
+        })?;
+        let invite = self.invites()?.into_iter().find(|i| i.id == id).ok_or_else(|| Error::NotFound(format!("no invite {id}")))?;
+        let url = format!("{}/signin?invite={token}", self.config.web_url);
+        Ok((invite, token, url))
+    }
+
     pub fn revoke_invite(&self, id: &str) -> Result<()> {
         self.db.write(|c| {
             let used = c.query_row("SELECT used_at FROM invites WHERE id = ?", [id], |r| r.get::<_, Option<i64>>(0)).optional()?;
@@ -1130,6 +1199,12 @@ impl roll_auth::Sessions for Resolver {
         self.0.person(user).map_err(|e| e.to_string())
     }
 
+    fn used(&self, user: &str) {
+        if let Err(e) = self.0.note_active(user) {
+            tracing::warn!(error = %e, "accounts: noting a person's activity");
+        }
+    }
+
     fn handles(&self, ids: &[String]) -> Result<Vec<(String, String)>, String> {
         self.0.handles(ids).map_err(|e| e.to_string())
     }
@@ -1209,9 +1284,27 @@ impl roll_auth::Sessions for Resolver {
     }
 }
 
+/// A session as people see it: [`SessionInfo`]'s columns, in [`session_row`]'s order.
+const SESSION_COLUMNS: &str = "id, created_at, seen_at, expires_at, user_agent, method, passkey_at";
+
+fn session_row(r: &code_sql::Row<'_>, current: &str) -> code_sql::Result<SessionInfo> {
+    let id: String = r.get(0)?;
+    Ok(SessionInfo {
+        current: id == current,
+        id,
+        created_at: r.get(1)?,
+        seen_at: r.get(2)?,
+        expires_at: r.get(3)?,
+        user_agent: r.get(4)?,
+        // An SSO session's method names its connection (`sso`); others say how they began.
+        method: r.get(5)?,
+        passkey: r.get::<_, Option<i64>>(6)?.is_some(),
+    })
+}
+
 fn load_user(c: &code_sql::Conn<'_>, id: &str) -> code_sql::Result<Option<User>> {
     let user = c
-        .query_row("SELECT id, email, handle, name, admin, disabled, created_at FROM users WHERE id = ?", [id], |r| {
+        .query_row("SELECT id, email, handle, name, admin, disabled, created_at, last_active_at FROM users WHERE id = ?", [id], |r| {
             Ok(User {
                 id: r.get(0)?,
                 email: r.get(1)?,
@@ -1220,6 +1313,7 @@ fn load_user(c: &code_sql::Conn<'_>, id: &str) -> code_sql::Result<Option<User>>
                 admin: r.get(4)?,
                 disabled: r.get(5)?,
                 created_at: r.get(6)?,
+                last_active_at: r.get(7)?,
                 totp: false,
                 passkeys: 0,
                 identities: Vec::new(),
