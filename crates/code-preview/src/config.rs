@@ -20,6 +20,9 @@
 //!
 //! [main]
 //! auto_revert = true
+//!
+//! [secrets]              # where teammates' roll secrets are: the `roll` CLI reads it
+//! project = "shop"
 //! ```
 //!
 //! Parsing is strict (unknown keys are errors), and every error names the key at fault, because
@@ -193,6 +196,10 @@ struct RawFile {
     preview: Option<RawPreview>,
     queue: Option<RawQueue>,
     main: Option<RawMain>,
+    /// roll secrets' suggestion for teammates (project, environment, path, branches), read by the
+    /// `roll` CLI (`roll-cli/src/secrets/repo.rs`), which ignores and names keys it doesn't know.
+    #[serde(rename = "secrets")]
+    _secrets: Option<toml::Table>,
     /// roll apps' section (`apps_control::config`): read there; here only its
     /// `previews.screenshots`, roll previews'.
     app: Option<toml::Table>,
