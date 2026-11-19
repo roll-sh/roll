@@ -5,7 +5,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use http_body_util::BodyExt;
-use roll_secrets::links::{Field, Issued, Link, LinkProvider, Links, Mode};
+use roll_secrets::links::{Field, Issued, Link, LinkProvider, Links, Mode, Planted};
 use roll_secrets::syncs::{Push, Resources, SyncField, SyncTarget, Syncs};
 use roll_secrets::{Keyring, Options, Secrets, Value as Secret};
 use serde_json::{Value, json};
@@ -63,6 +63,32 @@ impl LinkProvider for Fake {
     fn rotate_source(&self, _: &str) -> roll_secrets::Result<bool> {
         *self.password.lock().unwrap() += 1;
         Ok(true)
+    }
+}
+
+/// A fake roll Postgres, for decoys: the decoy roles it holds, by handle (`<database>/<role>`).
+#[derive(Default)]
+struct FakePg(Mutex<std::collections::BTreeSet<String>>);
+
+impl LinkProvider for FakePg {
+    fn kind(&self) -> &str {
+        "postgres"
+    }
+    fn fields(&self) -> &[Field] {
+        &[]
+    }
+    fn read(&self, _: &str, _: &str, _: &Link) -> roll_secrets::Result<Secret> {
+        Err(roll_secrets::Error::Link("no live fields here".into()))
+    }
+    fn plant_decoy(&self, r#ref: &str) -> roll_secrets::Result<Planted> {
+        let mut roles = self.0.lock().unwrap();
+        let role = format!("roll_fakedecoy{}", roles.len());
+        roles.insert(format!("{ref}/{role}"));
+        Ok(Planted { value: Secret::new(format!("postgres://{role}:fake-decoy-password@db.example.test:5432/main")), handle: format!("{ref}/{role}") })
+    }
+    fn remove_decoy(&self, handle: &str) -> roll_secrets::Result<()> {
+        self.0.lock().unwrap().remove(handle);
+        Ok(())
     }
 }
 
@@ -779,17 +805,19 @@ fn b64(b: &[u8]) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b)
 }
 
-/// People's accounts: `ada` until disabled, and `root`, an admin.
+/// People's accounts: `ada` until disabled, and `root`, an admin until demoted or disabled.
 #[derive(Default)]
 struct People {
     disabled: std::sync::Mutex<bool>,
+    root_demoted: std::sync::Mutex<bool>,
+    root_disabled: std::sync::Mutex<bool>,
 }
 
 impl roll_secrets::People for People {
     fn person(&self, user: &str) -> Result<Option<roll_secrets::Person>, String> {
         Ok(match user {
             "usr_ada" if !*self.disabled.lock().unwrap() => Some(roll_secrets::Person { admin: false, code_owner: Some("ada".into()) }),
-            "usr_root" => Some(roll_secrets::Person { admin: true, code_owner: None }),
+            "usr_root" if !*self.root_disabled.lock().unwrap() => Some(roll_secrets::Person { admin: !*self.root_demoted.lock().unwrap(), code_owner: None }),
             _ => None,
         })
     }
@@ -1008,7 +1036,7 @@ async fn fake_gate(axum::extract::State(gate): axum::extract::State<Arc<Gate>>, 
         if gate.decoys.lock().unwrap().contains(&*g.id) {
             if let Some(s) = gate.secrets.get().cloned() {
                 let id = g.id.to_string();
-                tokio::task::spawn_blocking(move || s.decoy_used(&id, Some("203.0.113.7"), "/v1/secrets/whoami").unwrap()).await.unwrap();
+                tokio::task::spawn_blocking(move || s.decoy_used("rlt", &id, Some("203.0.113.7"), "/v1/secrets/whoami").unwrap()).await.unwrap();
             }
             return StatusCode::UNAUTHORIZED.into_response();
         }
@@ -1022,12 +1050,15 @@ struct Api {
     gate: Arc<Gate>,
     kms: Arc<FakeKms>,
     ws: Arc<roll_workspace::Workspace>,
+    /// The workspace's own database: a project changing hands, which no route does yet.
+    ws_db: code_sql::Db,
     sts: Arc<FakeSts>,
     people: Arc<People>,
     router: Router,
     secrets: Arc<Secrets>,
     db: code_sql::Db,
     fake: Arc<Fake>,
+    pg: Arc<FakePg>,
     sync: Arc<FakeSync>,
     clouds: Arc<FakeClouds>,
     outside: Arc<Outside>,
@@ -1041,11 +1072,13 @@ impl Api {
     async fn new() -> Api {
         let dir = tempfile::tempdir().unwrap();
         let ws_db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("workspace.db")), "workspace").unwrap();
-        let ws = Arc::new(roll_workspace::Workspace::new(ws_db).unwrap());
+        let ws = Arc::new(roll_workspace::Workspace::new(ws_db.clone()).unwrap());
         let db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("secrets.db")), "secrets").unwrap();
         let fake = Arc::new(Fake::default());
         let mut links = Links::default();
         links.register(fake.clone());
+        let pg = Arc::new(FakePg::default());
+        links.register(pg.clone());
         let sync = Arc::new(FakeSync::default());
         let mut syncs = Syncs::default();
         syncs.register(sync.clone());
@@ -1064,7 +1097,7 @@ impl Api {
         let secrets = Arc::new(Secrets::new(db.clone(), ws.clone(), opts).unwrap());
         let _ = gate.secrets.set(secrets.clone());
         let router = roll_workspace::router(ws.clone()).merge(roll_secrets::router(secrets.clone())).layer(axum::middleware::from_fn_with_state(gate.clone(), fake_gate));
-        let mut api = Api { sent, gate, kms, sts, ws: ws.clone(), people, router, secrets, db, fake, sync, outside, directory, github, clouds, project: String::new(), _dir: dir };
+        let mut api = Api { sent, gate, kms, sts, ws: ws.clone(), ws_db, people, router, secrets, db, fake, pg, sync, outside, directory, github, clouds, project: String::new(), _dir: dir };
         let (_, p) = api.call(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "shop" }))).await;
         api.project = p["id"].as_str().unwrap().to_string();
         api
@@ -3633,6 +3666,42 @@ async fn deleting_a_decoy_key_revokes_its_token() {
     assert!(listed[0].get("decoy").is_none(), "{listed}");
 }
 
+/// A Postgres decoy is a role of a database on the canvas whose logins roll Postgres refuses: a
+/// login (as its proxy reports it) raises `decoy_used` in health and the audit log, and deleting
+/// the key drops the role.
+#[tokio::test]
+async fn a_postgres_decoy_is_a_role_whose_login_is_alerted_and_that_goes_with_its_key() {
+    let api = Api::new().await;
+    let plant = |resource: Option<&str>| json!({ "key": "LEGACY_DATABASE_URL", "kind": "postgres", "resource": resource });
+    let (s, e) = api.call(Method::POST, "/environments/production/decoys", Some(plant(Some("prj_fakepg")))).await;
+    assert_eq!((s, e["error"].as_str()), (StatusCode::BAD_REQUEST, Some("postgres prj_fakepg isn't in this project")));
+    assert_eq!(api.call(Method::POST, "/environments/production/decoys", Some(plant(None))).await.0, StatusCode::BAD_REQUEST);
+    api.ok(Method::PUT, &format!("/v1/workspace/projects/{}/resources/postgres/prj_fakepg", api.project), Some(json!({ "x": 0, "y": 0 }))).await;
+    let made = api.ok(Method::POST, "/environments/production/decoys", Some(plant(Some("prj_fakepg")))).await;
+    assert_eq!(made["decoy"]["kind"], "postgres", "{made}");
+    let value = api.ok(Method::GET, "/environments/production/secrets/LEGACY_DATABASE_URL/value", None).await["value"].as_str().unwrap().to_string();
+    assert!(value.starts_with("postgres://roll_fakedecoy0:"), "{value}");
+    let handle = api.pg.0.lock().unwrap().first().cloned().expect("a decoy role");
+
+    // roll Postgres' proxy refused a login as the role and said so (rolld's `tell_postgres_decoys`).
+    let s = api.secrets.clone();
+    let h = handle.clone();
+    let used = tokio::task::spawn_blocking(move || (s.decoy_used("postgres", &h, Some("198.51.100.23"), "Postgres endpoint ep_fake"), s.decoy_used("rlt", &h, None, "/"))).await.unwrap();
+    assert_eq!((used.0.unwrap(), used.1.unwrap()), (true, false), "another kind's handle isn't this decoy");
+    let health = api.ok(Method::GET, "/health", None).await;
+    assert_eq!((health[0]["issue"].as_str(), health[0]["key"].as_str()), (Some("decoy_used"), Some("LEGACY_DATABASE_URL")), "{health}");
+    assert!(health[0]["detail"].as_str().unwrap().contains("198.51.100.23"), "{health}");
+    let logged = api.ok(Method::GET, "/audit?action=secrets.alert", None).await;
+    assert_eq!((logged[0]["action"].as_str(), logged[0]["ip"].as_str()), (Some("secrets.alert.decoy_used"), Some("198.51.100.23")), "{logged}");
+    assert!(logged[0]["summary"].as_str().unwrap().contains("Postgres endpoint ep_fake"), "{logged}");
+    for told in [logged.to_string(), health.to_string()] {
+        assert!(!told.contains(&value) && !told.contains("fake-decoy-password"), "{told}");
+    }
+
+    api.ok(Method::DELETE, "/environments/production/secrets/LEGACY_DATABASE_URL", None).await;
+    assert!(api.pg.0.lock().unwrap().is_empty(), "the role went with its key");
+}
+
 /// A roll-access rule naming one encryption key (`{id: "prj_…", index: "payments"}`) reaches that
 /// key alone: the list shows it, its operations work, another key's are refused.
 #[tokio::test]
@@ -4661,4 +4730,309 @@ async fn a_frozen_folder_answers_423_to_readers_and_lets_its_admins_through() {
     api.as_ada(Method::PUT, &at("/environments/production/secrets/STRIPE_KEY"), Some(json!({ "value": "sk_test_fake_rotated" }))).await;
     assert_eq!(api.as_ada(Method::DELETE, &at("/environments/production/reach/cut-off?path=/"), None).await.0, StatusCode::NO_CONTENT);
     assert_eq!(api.req(Method::GET, &values, None, Some(&reader)).await.0, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_reference_a_person_chose_reads_only_what_they_may_reveal_now() {
+    use roll_secrets::{Caller, Refusal, ResourceRef};
+    use roll_workspace::Kind;
+    let api = Api::new().await;
+    let s = api.secrets.clone();
+    let session = |user: &str, admin: bool| roll_auth::SignedIn { user: format!("usr_{user}"), handle: user.into(), admin, code_owner: None, session: format!("ses_{user}") };
+    let as_root = s.caller_of(true, Some(&session("root", true)), None).unwrap();
+    api.ok(Method::PUT, &format!("/v1/workspace/projects/{}/resources/search/logs", api.project), Some(json!({ "x": 0, "y": 0 }))).await;
+    let logs = ResourceRef::new(Kind::Search, "logs");
+    api.set("production", "AWS_KEY", "fake-aws").await;
+    api.ok(Method::POST, "/environments/production/changes", Some(json!({ "ops": [{ "op": "set", "key": "STRIPE_KEY", "value": "fake-stripe", "tags": ["sensitive"] }, { "op": "set", "key": "WRAPPED", "value": "Bearer ${STRIPE_KEY}" }] }))).await;
+
+    // A sensitive key is refused when it's chosen, even by an admin, and through a reference in a
+    // value when it's read (a bind decrypts nothing); an operator-written target still reads it.
+    let refused = s.bind_ref(&logs, "roll://production/STRIPE_KEY", &as_root).unwrap_err();
+    assert!(matches!(refused, Refusal::Unusable(_)) && !refused.to_string().contains("fake-"), "{refused}");
+    let wrapped = s.bind_ref(&logs, "roll://production/WRAPPED", &as_root).unwrap();
+    let refused = s.resolve_as(&logs, "roll://production/WRAPPED", &wrapped).unwrap_err();
+    assert!(matches!(refused, Refusal::Unusable(_)) && !refused.to_string().contains("fake-"), "{refused}");
+    assert_eq!(s.resolve_for(&logs, "roll://production/STRIPE_KEY").unwrap().value.expose(), "fake-stripe");
+    // A workload identity's login can't choose one: it ends with its token.
+    let mut login = Caller::operator();
+    login.principal = "identity:idn_1".into();
+    assert!(matches!(s.bind_ref(&logs, "roll://production/AWS_KEY", &login), Err(Refusal::Failed(roll_secrets::Error::BadRequest(_)))));
+
+    // roll apps' git login, named by a deployer of production (apps checked deploy): a sensitive
+    // production key reads as the service's runtime there, audited as that, for them.
+    api.ok(Method::PUT, &format!("/v1/workspace/projects/{}/resources/service/web", api.project), Some(json!({ "x": 1, "y": 0 }))).await;
+    let web = ResourceRef::new(Kind::Service, "web");
+    let git = "roll://production/STRIPE_KEY";
+    let deployer = s.bind_ref_runtime(&web, git, &as_root, "production").unwrap();
+    assert_eq!(serde_json::to_value(&deployer).unwrap(), json!("usr_root@runtime:production"));
+    assert_eq!(s.resolve_as(&web, git, &deployer).unwrap().value.expose(), "fake-stripe");
+    assert!(s.digest_as(&web, git, &deployer).is_ok());
+    let audit = api.ok(Method::GET, "/audit?action=secrets.resolve", None).await;
+    assert_eq!(audit[0]["actor"].as_str(), Some("apps:service:web (runtime read for usr_root)"), "{audit}");
+    assert!(matches!(s.bind_ref_runtime(&web, git, &login, "production"), Err(Refusal::Failed(roll_secrets::Error::BadRequest(_)))));
+    // Any other environment keeps the maker's rules, and a runtime binding reads only its own.
+    api.ok(Method::POST, "/environments/staging/changes", Some(json!({ "ops": [{ "op": "set", "key": "STRIPE_KEY", "value": "fake-stripe-staging", "tags": ["sensitive"] }] }))).await;
+    let refused = s.bind_ref_runtime(&web, "roll://staging/STRIPE_KEY", &as_root, "production").unwrap_err();
+    assert!(matches!(refused, Refusal::Unusable(_)) && !refused.to_string().contains("fake-"), "{refused}");
+    let refused = s.resolve_as(&web, "roll://staging/STRIPE_KEY", &deployer).unwrap_err();
+    assert!(matches!(refused, Refusal::NotAllowed(_)) && !refused.to_string().contains("fake-"), "{refused}");
+
+    // An admin's session is kept as the person, and the read is audited as the resource, for them.
+    let reference = "roll://production/AWS_KEY";
+    let root = s.bind_ref(&logs, reference, &as_root).unwrap();
+    assert_eq!(serde_json::to_value(&root).unwrap(), json!("usr_root"));
+    assert_eq!(s.resolve_as(&logs, reference, &root).unwrap().value.expose(), "fake-aws");
+    let audit = api.ok(Method::GET, "/audit?action=secrets.resolve", None).await;
+    assert_eq!(audit[0]["actor"].as_str(), Some("search:search:logs"), "{audit}");
+    assert!(audit[0].to_string().contains("usr_root"), "{audit}");
+    // Tagged sensitive later: the next read is refused, the digest the same way.
+    api.set("production", "LATER_KEY", "fake-later").await;
+    let later = s.bind_ref(&logs, "roll://production/LATER_KEY", &as_root).unwrap();
+    assert!(s.resolve_as(&logs, "roll://production/LATER_KEY", &later).is_ok());
+    api.ok(Method::PUT, "/environments/production/secrets/LATER_KEY", Some(json!({ "tags": ["sensitive"] }))).await;
+    assert!(matches!(s.resolve_as(&logs, "roll://production/LATER_KEY", &later), Err(Refusal::Unusable(_))));
+    assert!(matches!(s.digest_as(&logs, "roll://production/LATER_KEY", &later), Err(Refusal::Unusable(_))));
+    // Demoted, or unable to sign in: refused until they're an admin again.
+    for flag in [&api.people.root_demoted, &api.people.root_disabled] {
+        *flag.lock().unwrap() = true;
+        let refused = s.resolve_as(&logs, reference, &root).unwrap_err();
+        assert!(matches!(refused, Refusal::NotAllowed(_)), "{refused}");
+        assert!(matches!(s.digest_as(&logs, reference, &root), Err(Refusal::NotAllowed(_))));
+        *flag.lock().unwrap() = false;
+    }
+    assert!(s.resolve_as(&logs, reference, &root).is_ok());
+    // An incident's freeze stops what anyone chose, an admin too (#304): their session reads past
+    // it, a reference they chose doesn't, nor a runtime binding. Unfrozen, both read again.
+    let runtime = s.bind_ref_runtime(&web, reference, &as_root, "production").unwrap();
+    let r = cut_off(&api, "path=/", json!({ "why": "fake incident", "tokens": false, "freeze": true })).await;
+    assert_eq!(r["frozen"], json!(true), "{r}");
+    for (resource, maker) in [(&logs, &root), (&web, &runtime)] {
+        let refused = s.resolve_as(resource, reference, maker).unwrap_err();
+        assert!(matches!(refused, Refusal::Failed(roll_secrets::Error::Frozen(_))) && !refused.to_string().contains("fake-"), "{refused}");
+        assert!(s.digest_as(resource, reference, maker).is_err());
+    }
+    assert_eq!(api.ok(Method::GET, "/environments/production/values", None).await["values"]["AWS_KEY"], "fake-aws");
+    api.ok(Method::DELETE, "/environments/production/reach/cut-off?path=/", None).await;
+    assert!(s.resolve_as(&logs, reference, &root).is_ok() && s.resolve_as(&web, reference, &runtime).is_ok());
+
+    // An untrusted copy (a branch of the cluster) never gets a protected value.
+    api.ok(Method::PUT, "/environments/production/policy", Some(json!({ "protected": true, "approvals": 1 }))).await;
+    assert!(s.resolve_as(&logs, reference, &root).is_ok());
+    let branch = logs.clone().untrusted();
+    assert!(matches!(s.resolve_as(&branch, reference, &root), Err(Refusal::Protected(_))));
+    assert!(matches!(s.bind_ref(&branch, reference, &as_root), Err(Refusal::Protected(_))));
+    // Nor a runtime binding: an untrusted copy of the service reads as an untrusted caller.
+    let runtime = s.bind_ref_runtime(&web, reference, &as_root, "production").unwrap();
+    assert_eq!(s.resolve_as(&web, reference, &runtime).unwrap().value.expose(), "fake-aws");
+    let copy = web.clone().untrusted();
+    assert!(matches!(s.resolve_as(&copy, reference, &runtime), Err(Refusal::Protected(_))));
+    assert!(matches!(s.bind_ref_runtime(&copy, reference, &as_root, "production"), Err(Refusal::Protected(_))));
+    api.ok(Method::PUT, "/environments/production/policy", Some(json!({ "protected": false }))).await;
+
+    // A staging-only token can't reach production through staging's import, though the
+    // resource's runtime would read it there.
+    api.ok(Method::PUT, "/environments/staging/imports?path=/", Some(json!([{ "environment": "production", "path": "/" }]))).await;
+    let staging = "roll://staging/AWS_KEY";
+    assert_eq!(s.resolve_for(&logs, staging).unwrap().value.expose(), "fake-aws");
+    let (secret, _) = api.gate.grant("staging only", roll_secrets::access::rule(&api.project, Some(vec!["staging".into()]), None, &[roll_secrets::Action::Read, roll_secrets::Action::Reveal]), None);
+    let grant = api.gate.tokens.lock().unwrap()[&secret].clone();
+    let token = s.caller_of(false, None, Some(&grant)).unwrap();
+    assert!(matches!(s.bind_ref(&logs, "roll://production/AWS_KEY", &token), Err(Refusal::NotAllowed(_))));
+    let refused = s.bind_ref(&logs, staging, &token).unwrap_err();
+    assert!(matches!(refused, Refusal::NoSuchKey(_)) && !refused.to_string().contains("fake-"), "{refused}");
+    // Set in staging itself, it's the token's to choose; revoked, the reference stops.
+    api.set("staging", "AWS_KEY", "fake-staging").await;
+    let by_token = s.bind_ref(&logs, staging, &token).unwrap();
+    assert_eq!(s.resolve_as(&logs, staging, &by_token).unwrap().value.expose(), "fake-staging");
+    api.gate.tokens.lock().unwrap().remove(&secret);
+    assert!(matches!(s.resolve_as(&logs, staging, &by_token), Err(Refusal::NotAllowed(_))));
+
+    // A person's own project: her reference reads while she owns it, and stops once she doesn't.
+    let (_, mine) = api.as_ada(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "mine" }))).await;
+    let mine = mine["id"].as_str().unwrap().to_string();
+    api.as_ada(Method::PUT, &format!("/v1/workspace/projects/{mine}/resources/repo/ada%2Fsite"), Some(json!({ "x": 0, "y": 0 }))).await;
+    let (st, e) = api.as_ada(Method::PUT, &format!("/v1/secrets/projects/{mine}/environments/production/secrets/DEPLOY_KEY"), Some(json!({ "value": "fake-ada" }))).await;
+    assert!(st.is_success(), "{e}");
+    let site = ResourceRef::new(Kind::Repo, "ada/site");
+    let as_ada = s.caller_of(false, Some(&session("ada", false)), None).unwrap();
+    let ada = s.bind_ref(&site, "roll://production/DEPLOY_KEY", &as_ada).unwrap();
+    assert_eq!(s.resolve_as(&site, "roll://production/DEPLOY_KEY", &ada).unwrap().value.expose(), "fake-ada");
+    let (st, e) = api.as_ada(Method::POST, &format!("/v1/secrets/projects/{mine}/environments/production/changes"), Some(json!({ "ops": [{ "op": "set", "key": "GIT_TOKEN", "value": "fake-git", "tags": ["sensitive"] }] }))).await;
+    assert!(st.is_success(), "{e}");
+    let ada_runtime = s.bind_ref_runtime(&site, "roll://production/GIT_TOKEN", &as_ada, "production").unwrap();
+    assert_eq!(s.resolve_as(&site, "roll://production/GIT_TOKEN", &ada_runtime).unwrap().value.expose(), "fake-git");
+    api.ws_db.write(|c| c.execute("UPDATE projects SET owner = '' WHERE id = ?", [&mine])).unwrap();
+    let refused = s.resolve_as(&site, "roll://production/DEPLOY_KEY", &ada).unwrap_err();
+    assert!(matches!(refused, Refusal::NotAllowed(_)), "{refused}");
+    let refused = s.resolve_as(&site, "roll://production/GIT_TOKEN", &ada_runtime).unwrap_err();
+    assert!(matches!(refused, Refusal::NotAllowed(_)) && !refused.to_string().contains("fake-"), "{refused}");
+}
+
+#[tokio::test]
+async fn a_sync_made_from_an_admins_session_acts_as_them_and_stops_when_theyre_demoted() {
+    let api = Api::new().await;
+    api.set("staging", "PLATFORM_TOKEN", "tok_1").await;
+    let (s, made) = api.signed_in("root", true, Method::POST, &format!("/v1/secrets/projects/{}/syncs", api.project), Some(json!({ "environment": "staging", "kind": "fake", "target": { "name": "x", "token_key": "PLATFORM_TOKEN" } }))).await;
+    assert_eq!((s, made["created_by"].as_str()), (StatusCode::CREATED, Some("usr_root")), "{made}");
+    api.set("staging", "A", "1").await;
+    api.secrets.sweep().unwrap();
+    assert_eq!(api.sync.pushes.lock().unwrap().len(), 1);
+    *api.people.root_demoted.lock().unwrap() = true;
+    api.set("staging", "A", "2").await;
+    api.secrets.sweep().unwrap();
+    assert_eq!(api.sync.pushes.lock().unwrap().len(), 1, "nothing pushed once they're no admin");
+    // One made as the operator account (the deployment's token, or an admin's session before
+    // makers were people) stays as it was, and health says so.
+    let old = api.ok(Method::POST, "/syncs", Some(json!({ "environment": "staging", "kind": "fake", "target": { "name": "y", "token_key": "PLATFORM_TOKEN" } }))).await;
+    assert_eq!(old["created_by"], "operator");
+    let found = api.ok(Method::GET, "/health", None).await;
+    let flagged: Vec<&str> = found.as_array().unwrap().iter().filter(|f| f["issue"] == "operator_made").map(|f| f["key"].as_str().unwrap()).collect();
+    assert_eq!(flagged, [old["id"].as_str().unwrap()], "{found}");
+}
+
+/// An answer as the request's page makes it: each value sealed to the request's public key.
+fn answer(id: &str, public_key: &str, values: &[(&str, &str)]) -> Value {
+    let boxes: serde_json::Map<String, Value> = values
+        .iter()
+        .map(|(k, v)| (k.to_string(), serde_json::to_value(roll_secrets::crypto::seal_to(public_key, &roll_secrets::value_requests::answer_context(id, k), v.as_bytes()).unwrap()).unwrap()))
+        .collect();
+    json!({ "values": boxes })
+}
+
+#[tokio::test]
+async fn a_secret_request_lands_an_outside_value_once_as_a_change() {
+    let api = Api::new().await;
+    // Asking takes `write` on the folder: the answer is written as whoever asked.
+    let reader = api.token(json!({ "name": "reader", "actions": ["read"] }));
+    let (s, _) = api.req(Method::POST, "/environments/staging/value-requests?path=/vendor", Some(json!({ "keys": ["VENDOR_KEY"] })), Some(&reader)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let r = api.ok(Method::POST, "/environments/staging/value-requests?path=/vendor", Some(json!({ "keys": ["VENDOR_KEY", "VENDOR_SECRET"], "note": "the example vendor's sandbox keys" }))).await;
+    let (id, token) = (r["id"].as_str().unwrap().to_string(), r["token"].as_str().unwrap().to_string());
+    assert_eq!((r["open"].as_bool(), r["answers_left"].as_i64(), r["expires_at"].as_i64().unwrap() - r["created_at"].as_i64().unwrap()), (Some(true), Some(1), 7 * 86_400_000));
+    assert!(token.starts_with("rlq_") && roll_auth::credentials::checksum_ok(&token), "{token}");
+
+    // A reader lists the requests but never their tokens, and the id answers nothing: the same 404
+    // as a wrong token or one whose checksum fails, naming none of them.
+    let (s, list) = api.req(Method::GET, "/value-requests", None, Some(&reader)).await;
+    assert_eq!((s, list[0]["id"].as_str()), (StatusCode::OK, Some(id.as_str())));
+    assert!(list[0].get("token").is_none() && list[0].get("link").is_none() && !list.to_string().contains(&token), "{list}");
+    let mut bent = token.clone();
+    bent.replace_range(bent.len() - 1.., if token.ends_with('a') { "b" } else { "a" });
+    let mut misses = Vec::new();
+    for t in [id.clone(), bent, roll_auth::credentials::new_secret("rlq_"), "rlq_fake".into()] {
+        let (s, e) = api.call(Method::POST, &format!("/v1/secrets/value-requests/{t}/answer"), Some(json!({ "values": {} }))).await;
+        let (g, _) = api.call(Method::GET, &format!("/v1/secrets/value-requests/{t}"), None).await;
+        assert!(!e.to_string().contains(&t), "{e}");
+        misses.push((s, g, e));
+    }
+    assert!(misses.iter().all(|m| *m == misses[0]) && misses[0].0 == StatusCode::NOT_FOUND && misses[0].1 == StatusCode::NOT_FOUND, "{misses:?}");
+
+    // The page shows the note and the key names, and the key to seal to; looking uses nothing up.
+    let (s, peek) = api.call(Method::GET, &format!("/v1/secrets/value-requests/{token}"), None).await;
+    assert_eq!((s, peek["id"].as_str(), peek["note"].as_str(), peek["keys"].clone()), (StatusCode::OK, Some(id.as_str()), Some("the example vendor's sandbox keys"), json!(["VENDOR_KEY", "VENDOR_SECRET"])));
+    assert!(peek.get("environment").is_none() && peek.get("created_by").is_none(), "the page names nothing about the project: {peek}");
+    let public = peek["public_key"].as_str().unwrap().to_string();
+    // A box sealed for another key, or a missing key, is refused and uses nothing up.
+    let mut swapped = answer(&id, &public, &[("VENDOR_KEY", "fake-key-1"), ("VENDOR_SECRET", "fake-secret-1")]);
+    swapped["values"]["VENDOR_KEY"] = swapped["values"]["VENDOR_SECRET"].clone();
+    let (s, e) = api.call(Method::POST, &format!("/v1/secrets/value-requests/{token}/answer"), Some(swapped)).await;
+    assert!(s == StatusCode::BAD_REQUEST && !e.to_string().contains("fake-secret-1"), "{s} {e}");
+    let (s, _) = api.call(Method::POST, &format!("/v1/secrets/value-requests/{token}/answer"), Some(answer(&id, &public, &[("VENDOR_KEY", "fake-key-1")]))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+
+    let (s, body) = api.call(Method::POST, &format!("/v1/secrets/value-requests/{token}/answer"), Some(answer(&id, &public, &[("VENDOR_KEY", "fake-key-1"), ("VENDOR_SECRET", "fake-secret-1")]))).await;
+    assert_eq!((s, body), (StatusCode::NO_CONTENT, Value::String(String::new())), "the answer shows nothing back");
+    let values = api.values("staging", "/vendor").await;
+    assert_eq!((values["values"]["VENDOR_KEY"].as_str(), values["values"]["VENDOR_SECRET"].as_str()), (Some("fake-key-1"), Some("fake-secret-1")));
+    let changes = api.ok(Method::GET, "/environments/staging/changes", None).await;
+    assert_eq!(changes[0]["by"], format!("request:{id}"));
+    assert!(changes[0]["message"].as_str().unwrap().contains("asked by operator"), "{}", changes[0]);
+
+    // Answered once: the link is a 410 now, for the page and for another answer.
+    let (s, e) = api.call(Method::POST, &format!("/v1/secrets/value-requests/{token}/answer"), Some(answer(&id, &public, &[("VENDOR_KEY", "fake-key-2"), ("VENDOR_SECRET", "fake-secret-2")]))).await;
+    assert_eq!((s, e["code"].as_str()), (StatusCode::GONE, Some("gone")));
+    assert_eq!(api.call(Method::GET, &format!("/v1/secrets/value-requests/{token}"), None).await.0, StatusCode::GONE);
+    assert_eq!(api.values("staging", "/vendor").await["values"]["VENDOR_KEY"], "fake-key-1");
+    let list = api.ok(Method::GET, "/value-requests", None).await;
+    assert_eq!((list[0]["open"].as_bool(), list[0]["outcome"]["change"].as_i64()), (Some(false), changes[0]["seq"].as_i64()));
+    let audit = api.ok(Method::GET, "/audit?action=value_request", None).await;
+    let actions: Vec<&str> = audit.as_array().unwrap().iter().map(|a| a["action"].as_str().unwrap()).collect();
+    assert_eq!(actions, ["value_request.answer", "value_request.create"]);
+    assert!(!audit.to_string().contains("fake-key-1") && !list.to_string().contains("fake-key-1"));
+
+    // An expired request, and a cancelled one, are 410s too.
+    let late = api.ok(Method::POST, "/environments/staging/value-requests", Some(json!({ "keys": ["LATE"], "ttl_minutes": 60 }))).await;
+    let (late_id, late_token) = (late["id"].as_str().unwrap(), late["token"].as_str().unwrap());
+    api.db.write(|c| c.execute("UPDATE value_requests SET expires_at = 1 WHERE id = ?", [late_id])).unwrap();
+    assert_eq!(api.call(Method::GET, &format!("/v1/secrets/value-requests/{late_token}"), None).await.0, StatusCode::GONE);
+    let gone = api.ok(Method::POST, "/environments/staging/value-requests", Some(json!({ "keys": ["NEVER"] }))).await;
+    let (gone_id, gone_token) = (gone["id"].as_str().unwrap(), gone["token"].as_str().unwrap());
+    let (_, peek) = api.call(Method::GET, &format!("/v1/secrets/value-requests/{gone_token}"), None).await;
+    let (s, _) = api.req(Method::DELETE, &format!("/value-requests/{gone_id}"), None, Some(&reader)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "only whoever asked, or an admin");
+    let (s, _) = api.call(Method::DELETE, &format!("/value-requests/{gone_id}"), None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    let (s, _) = api.call(Method::POST, &format!("/v1/secrets/value-requests/{gone_token}/answer"), Some(answer(gone_id, peek["public_key"].as_str().unwrap(), &[("NEVER", "fake")]))).await;
+    assert_eq!(s, StatusCode::GONE);
+    // A token found leaked (a landing, GitHub's secret scanning) cancels its request.
+    let leaked = api.ok(Method::POST, "/environments/staging/value-requests", Some(json!({ "keys": ["LEAKED"] }))).await;
+    let leaked_token = leaked["token"].as_str().unwrap();
+    assert_eq!(api.secrets.cancel_leaked_value_request(leaked_token, "found in a test"), Some(format!("secret request {}", leaked["id"].as_str().unwrap())));
+    assert_eq!(api.call(Method::GET, &format!("/v1/secrets/value-requests/{leaked_token}"), None).await.0, StatusCode::GONE);
+    assert_eq!(api.secrets.cancel_leaked_value_request(leaked_token, "again"), None, "once");
+}
+
+#[tokio::test]
+async fn a_secret_requests_answer_is_stored_as_sent_and_never_replayed() {
+    let api = Api::new().await;
+    api.set("production", "DB_PASSWORD", "fake-production-password").await;
+    let r = api.ok(Method::POST, "/environments/staging/value-requests?path=/vendor", Some(json!({ "keys": ["VENDOR_KEY"], "answers": 3 }))).await;
+    let (id, token) = (r["id"].as_str().unwrap().to_string(), r["token"].as_str().unwrap().to_string());
+    let (_, peek) = api.call(Method::GET, &format!("/v1/secrets/value-requests/{token}"), None).await;
+    let public = peek["public_key"].as_str().unwrap().to_string();
+    let url = format!("/v1/secrets/value-requests/{token}/answer");
+
+    // An outsider's `${…}` is text, not a reference: a broad reader never gets production's value.
+    let sent = answer(&id, &public, &[("VENDOR_KEY", "${production.DB_PASSWORD}")]);
+    assert_eq!(api.call(Method::POST, &url, Some(sent.clone())).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(api.values("staging", "/vendor").await["values"]["VENDOR_KEY"], "${production.DB_PASSWORD}");
+    let meta = api.ok(Method::GET, "/environments/staging/secrets/VENDOR_KEY?path=/vendor", None).await;
+    assert!(meta["refs"].as_array().is_none_or(|r| r.is_empty()), "{meta}");
+
+    // The same boxes again are refused and use nothing up, with their version changed too.
+    let (s, e) = api.call(Method::POST, &url, Some(sent.clone())).await;
+    assert_eq!((s, e["code"].as_str()), (StatusCode::CONFLICT, Some("conflict")), "{e}");
+    let mut renumbered = sent;
+    renumbered["values"]["VENDOR_KEY"]["v"] = json!(2);
+    assert_eq!(api.call(Method::POST, &url, Some(renumbered)).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(api.ok(Method::GET, "/value-requests", None).await[0]["answers_left"], 2);
+
+    // The request's own count stops a sixth attempt in the minute, whatever else is asked for.
+    for _ in 0..2 {
+        assert_eq!(api.call(Method::POST, &url, Some(json!({ "values": {} }))).await.0, StatusCode::BAD_REQUEST);
+    }
+    assert_eq!(api.call(Method::POST, &url, Some(answer(&id, &public, &[("VENDOR_KEY", "fake-key")]))).await.0, StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
+async fn a_secret_request_into_a_folder_that_needs_approval_opens_a_change_request() {
+    let api = Api::new().await;
+    api.ok(Method::PUT, "/environments/production/folder-policies?path=/payments", Some(json!({ "approvals": 1 }))).await;
+    let r = api.ok(Method::POST, "/environments/production/value-requests?path=/payments", Some(json!({ "keys": ["PSP_KEY"] }))).await;
+    let (id, token) = (r["id"].as_str().unwrap(), r["token"].as_str().unwrap());
+    let (_, peek) = api.call(Method::GET, &format!("/v1/secrets/value-requests/{token}"), None).await;
+    let (s, _) = api.call(Method::POST, &format!("/v1/secrets/value-requests/{token}/answer"), Some(answer(id, peek["public_key"].as_str().unwrap(), &[("PSP_KEY", "fake-psp-key")]))).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    assert!(api.values("production", "/payments").await["values"].get("PSP_KEY").is_none(), "nothing lands before it's approved");
+    let list = api.ok(Method::GET, "/value-requests", None).await;
+    let request = list[0]["outcome"]["request"].as_str().unwrap();
+    let cr = api.ok(Method::GET, &format!("/environments/production/requests/{request}"), None).await;
+    // By whoever asked, so they can't approve their own answer in.
+    assert_eq!((cr["state"].as_str(), cr["by"].as_str(), cr["items"][0]["key"].as_str()), (Some("open"), Some("operator"), Some("PSP_KEY")));
+    let (s, _) = api.call(Method::POST, &format!("/environments/production/requests/{request}/review"), Some(json!({ "verdict": "approve" }))).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let lead = api.token(json!({ "name": "lead", "actions": ["read", "write", "admin"] }));
+    api.req(Method::POST, &format!("/environments/production/requests/{request}/review"), Some(json!({ "verdict": "approve" })), Some(&lead)).await;
+    api.ok(Method::POST, &format!("/environments/production/requests/{request}/apply"), None).await;
+    assert_eq!(api.values("production", "/payments").await["values"]["PSP_KEY"], "fake-psp-key");
 }

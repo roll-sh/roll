@@ -1,7 +1,7 @@
 import { HorizonMark } from "@roll/brand";
-import { ExternalLink, Rocket, RotateCcw, X } from "lucide-react";
+import { CircleHelp, ExternalLink, Rocket, RotateCcw, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { appsApi, FUNCTION_ROUTES, runFunctions, deploymentUrl, followChanges, followLog, formatMs, isPending, shortSha, stepDurations, TRIGGER_LABEL, type Deployment, type DeployCommits, type Environment, type LogLine, type ScanSummary, type Vulnerability } from "@/lib/apps-api";
+import { appsApi, FUNCTION_ROUTES, runFunctions, deploymentUrl, followChanges, followLog, formatMs, isPending, shortSha, stepDurations, TRIGGER_LABEL, type Deployment, type DeployCommits, type Environment, type Explanation, type LogLine, type ScanSummary, type Vulnerability } from "@/lib/apps-api";
 import { btn, panel } from "../ui";
 import { PlanDetails } from "./new-service";
 import { usePageVisible } from "./live";
@@ -50,6 +50,7 @@ export function Deployments({
   runner,
   own = false,
   upload = false,
+  explains = false,
   name,
 }: {
   service: string;
@@ -62,6 +63,8 @@ export function Deployments({
   runner: Runner;
   /** An upload service: a folder dropped here deploys it. */
   upload?: boolean;
+  /** It deploys from a roll code repo, whose owner's model explains a failure. */
+  explains?: boolean;
 }) {
   const [open, setOpen] = useState<string | null>(null);
   // A rollback brings its variables back as they were (Heroku's, Railway's), unless they're kept
@@ -222,7 +225,7 @@ export function Deployments({
           </div>
         )}
       </section>
-      {shown && <BuildLog key={shown.id} service={service} env={env.name} d={shown} />}
+      {shown && <BuildLog key={shown.id} service={service} env={env.name} d={shown} explains={explains} />}
     </div>
     </div>
   );
@@ -270,6 +273,16 @@ function worst(s: ScanSummary) {
 
 const SEVERITY_TONE: Record<Vulnerability["severity"], string> = { critical: "text-danger", high: "text-fg", medium: "text-muted", low: "text-subtle", unknown: "text-subtle" };
 
+/** Its image's SBOM (CycloneDX JSON), saved as a file. */
+async function downloadSbom(service: string, env: string, dep: string) {
+  const body = await appsApi.sbom(service, env, dep);
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([JSON.stringify(body, null, 2)], { type: "application/vnd.cyclonedx+json" }));
+  a.download = `${dep}.cdx.json`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
 /** Its image's known vulnerabilities (Cloud Run's Artifact Analysis), read once opened. */
 function Vulnerabilities({ service, env, d }: { service: string; env: string; d: Deployment }) {
   const s = d.vulnerabilities;
@@ -283,6 +296,11 @@ function Vulnerabilities({ service, env, d }: { service: string; env: string; d:
       <summary className="cursor-pointer text-muted">
         {total} known {total === 1 ? "vulnerability" : "vulnerabilities"}
         {s.critical + s.high > 0 && <span className={s.critical ? "text-danger" : ""}> ({worst(s)})</span>}, {s.fixable} with a fix · {s.scanner}, {since(s.scanned_at, Date.now())}
+        {s.sbom && (
+          <button type="button" className="ml-2 text-accent hover:underline" onClick={(e) => { e.preventDefault(); void downloadSbom(service, env, d.id); }}>
+            SBOM
+          </button>
+        )}
       </summary>
       {items === null ? (
         <p className="mt-1.5 shimmer text-subtle">Reading…</p>
@@ -358,7 +376,62 @@ function RunFunctions({ service, env, dirs }: { service: string; env: string; di
   );
 }
 
-function BuildLog({ service, env, d }: { service: string; env: string; d: Deployment }) {
+/**
+ * "Why did it fail?" (Netlify's, Vercel's): the repo owner's model reads its error, plan and
+ * logs. The first answer is kept, so asking again reads it back; "Ask again" is a new (charged)
+ * answer. The model's words are shown as text.
+ */
+function WhyFailed({ service, env, d }: { service: string; env: string; d: Deployment }) {
+  const [e, setE] = useState<Explanation | null>(null);
+  const [asking, setAsking] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const ask = async (again: boolean) => {
+    setAsking(true);
+    setError(null);
+    try {
+      setE(await appsApi.explain(service, env, d.id, again));
+    } catch (x) {
+      setError(x instanceof Error ? x.message : String(x));
+    } finally {
+      setAsking(false);
+    }
+  };
+  return (
+    <div className="mb-2 rounded-lg border border-line bg-panel p-3 text-[12.5px]" aria-label="Why it failed">
+      {e ? (
+        <>
+          <p className="font-medium">{e.summary}</p>
+          <p className="mt-1 whitespace-pre-wrap text-muted">{e.cause}</p>
+          {e.steps.length > 0 && (
+            <ol className="mt-2 list-decimal space-y-0.5 pl-5">
+              {e.steps.map((s, i) => (
+                <li key={i}>{s}</li>
+              ))}
+            </ol>
+          )}
+          <p className="mt-2 flex flex-wrap items-center gap-x-2 text-[11px] text-subtle">
+            <span className="font-mono">{e.model}</span>
+            <span>{e.confidence} confidence</span>
+            {e.lines_left_out > 0 && <span>{e.lines_left_out.toLocaleString()} older log lines not read</span>}
+            <button type="button" className="ml-auto text-muted hover:text-fg disabled:opacity-50" disabled={asking} onClick={() => void ask(true)}>
+              {asking ? <span className="shimmer">Asking…</span> : "Ask again"}
+            </button>
+          </p>
+        </>
+      ) : (
+        <div className="flex flex-wrap items-center gap-2">
+          <button type="button" className={btn} disabled={asking} onClick={() => void ask(false)} title="Its error, plan and logs, read by the model of the repo's owner (on their usage)">
+            <CircleHelp className="size-3.5" /> Why did it fail?
+          </button>
+          {asking && <span className="shimmer text-muted">Reading its logs…</span>}
+        </div>
+      )}
+      {error && <p className="mt-1 text-danger">{error}</p>}
+    </div>
+  );
+}
+
+function BuildLog({ service, env, d, explains = false }: { service: string; env: string; d: Deployment; explains?: boolean }) {
   const { lines, error } = useBuildLog(service, env, d);
   const steps = useSteps(service, env, d);
   const commits = useCommits(service, env, d);
@@ -371,6 +444,7 @@ function BuildLog({ service, env, d }: { service: string; env: string; d: Deploy
           {d.image ?? ""}
         </span>
       </div>
+      {explains && d.status === "failed" && <WhyFailed service={service} env={env} d={d} />}
       {commits && <Commits c={commits} />}
       <Vulnerabilities key={d.id} service={service} env={env} d={d} />
       {steps.length > 0 && (

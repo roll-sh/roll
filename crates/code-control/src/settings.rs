@@ -14,6 +14,7 @@
 //!
 //! [secrets]
 //! unstored_credentials = "block" # a credential roll secrets doesn't hold blocks (default: "warn")
+//! project = "shop"               # the `roll` CLI's suggestion for teammates (roll-cli secrets/repo.rs)
 //! ```
 //!
 //! code-preview validates the whole file (strictly) and calls [`parse`] for these tables. The
@@ -107,6 +108,17 @@ pub struct RawMain {
 #[serde(deny_unknown_fields)]
 pub struct RawSecrets {
     unstored_credentials: Option<String>,
+    /// roll secrets' suggestion for teammates, which the `roll` CLI reads and checks itself
+    /// (`roll-cli/src/secrets/repo.rs`, which ignores and names what it can't use): allowed here,
+    /// never read, so a table that holds both is no error.
+    #[serde(rename = "project")]
+    _project: Option<toml::Value>,
+    #[serde(rename = "environment")]
+    _environment: Option<toml::Value>,
+    #[serde(rename = "path")]
+    _path: Option<toml::Value>,
+    #[serde(rename = "branches")]
+    _branches: Option<toml::Value>,
 }
 
 /// The landing settings in a `roll.toml`. Other tables are ignored here (code-preview checks

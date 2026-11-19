@@ -22,6 +22,7 @@
 
 use crate::model::{DRAIN_FORMATS, DRAIN_SOURCES, LogDrain};
 use crate::store::{DrainSettings, OpenedDrain};
+use crate::traces::Signal;
 use crate::{Apps, Error, Result};
 use serde_json::{Value, json};
 use std::collections::{HashMap, VecDeque};
@@ -223,8 +224,8 @@ impl Apps {
     async fn drains_changed(self: &Arc<Self>, project: &str) {
         self.drains_dirty.lock().insert(project.to_string());
         // The tap's gate before the answer: a new drain of requests gets the next one.
-        if let Ok((http, build)) = self.db(|s| s.drain_sources_wanted()).await {
-            self.logs.set_tapped(http, build);
+        if let Ok((http, build, traces, metrics)) = self.db(|s| s.drain_sources_wanted()).await {
+            self.logs.set_tapped(http, build, traces, metrics);
         }
     }
 
@@ -234,7 +235,7 @@ impl Apps {
         let p = project.to_string();
         let d = self.db(move |s| s.drain_secrets(&p)).await?.into_iter().find(|d| d.drain.id == id).ok_or_else(|| Error::NotFound(format!("no log drain {id}")))?;
         let line = json!({ "t": code_sql::now_ms(), "source": "test", "text": "a test line from roll apps" });
-        Ok(match self.post_batch(&d, &[line], &format!("lgb_{}", crate::model::random(12))).await {
+        Ok(match self.post_batch(&d, &[line], &format!("lgb_{}", crate::model::random(12)), Signal::Logs).await {
             Ok(code) => json!({ "ok": code.is_none_or(|c| (200..300).contains(&c)), "code": code, "error": Value::Null }),
             Err(e) => json!({ "ok": false, "code": Value::Null, "error": e }),
         })
@@ -284,6 +285,16 @@ impl Apps {
                         ("runtime", s.to_string(), e.to_string())
                     } else if let Some((s, e)) = key.strip_prefix("http:").and_then(|k| k.split_once('/')) {
                         ("http", s.to_string(), e.to_string())
+                    } else if let Some((s, e)) = key.strip_prefix("trace:").and_then(|k| k.split_once('/')) {
+                        ("traces", s.to_string(), e.to_string())
+                    } else if let Some((s, e)) = key.strip_prefix("metric:").and_then(|k| k.split_once('/')) {
+                        ("metrics", s.to_string(), e.to_string())
+                    } else if let Some((s, e)) = key.strip_prefix("audit:").and_then(|k| k.split_once('/')) {
+                        // A deleted service's own entry (`audit.deleted`) is read deleted.
+                        let sid = s.to_string();
+                        let found = self.db(move |st| st.service_any(&sid)).await.ok().map(|(s, _)| (s.project, s.name));
+                        services.insert(s.to_string(), (Instant::now(), found));
+                        ("audit", s.to_string(), e.to_string())
                     } else if let Some(dep) = key.strip_prefix("build:") {
                         if !builds.contains_key(dep) {
                             if builds.len() > 1000 {
@@ -337,8 +348,8 @@ impl Apps {
                 _ = tick.tick() => {
                     if wanted_at.elapsed() >= REFRESH {
                         wanted_at = Instant::now();
-                        if let Ok((http, build)) = self.db(|s| s.drain_sources_wanted()).await {
-                            self.logs.set_tapped(http, build);
+                        if let Ok((http, build, traces, metrics)) = self.db(|s| s.drain_sources_wanted()).await {
+                            self.logs.set_tapped(http, build, traces, metrics);
                         }
                     }
                     for (_, list) in drains.values() {
@@ -394,12 +405,28 @@ impl Apps {
 
     /// One batch, tried three times (1 s, then 5 s apart), then dropped.
     async fn send_batch(&self, o: &OpenedDrain, batch: &[Value]) {
+        // OTLP's signals go apart: logs to the drain's URL, spans and points to its `/v1/traces`
+        // and `/v1/metrics`, each in its own shape.
+        if o.drain.format == "otlp" {
+            let of = |src: &str| batch.iter().filter(|l| l["source"] == src).cloned().collect::<Vec<_>>();
+            let logs: Vec<Value> = batch.iter().filter(|l| !matches!(l["source"].as_str(), Some("traces" | "metrics"))).cloned().collect();
+            for (part, signal) in [(logs, Signal::Logs), (of("traces"), Signal::Traces), (of("metrics"), Signal::Metrics)] {
+                if !part.is_empty() {
+                    self.send_part(o, &part, signal).await;
+                }
+            }
+            return;
+        }
+        self.send_part(o, batch, Signal::Logs).await;
+    }
+
+    async fn send_part(&self, o: &OpenedDrain, batch: &[Value], signal: Signal) {
         let drain = o.drain.id.as_str();
         // One id for the batch, its retries too: a receiver dedupes by it.
         let delivery = format!("lgb_{}", crate::model::random(12));
         for (i, wait) in [0u64, 1, 5].into_iter().enumerate() {
             tokio::time::sleep(Duration::from_secs(wait)).await;
-            match self.post_batch(o, batch, &delivery).await {
+            match self.post_batch(o, batch, &delivery, signal).await {
                 Ok(None) => return,
                 Ok(Some(code)) if (200..300).contains(&code) => return,
                 Ok(Some(code)) if i == 2 => tracing::warn!(drain, status = code, lines = batch.len(), "apps: a log drain refused a batch; it's dropped"),
@@ -412,10 +439,19 @@ impl Apps {
     /// A batch sent once in its drain's format: an HTTP drain's status (signed as webhooks are,
     /// with the drain's own headers), `None` for a syslog server that took it, or why it didn't go
     /// (never the URL).
-    async fn post_batch(&self, o: &OpenedDrain, batch: &[Value], delivery: &str) -> std::result::Result<Option<u16>, String> {
+    async fn post_batch(&self, o: &OpenedDrain, batch: &[Value], delivery: &str, signal: Signal) -> std::result::Result<Option<u16>, String> {
+        let mut url = o.url.clone();
         let (body, content_type) = match o.drain.format.as_str() {
             "syslog" => return self.send_syslog(&o.url, batch).await.map(|()| None),
-            "otlp" => (serde_json::to_vec(&otlp_logs(batch)).expect("JSON"), "application/json"),
+            "otlp" => {
+                url = signal_url(&o.url, signal);
+                let v = match signal {
+                    Signal::Logs => otlp_logs(batch),
+                    Signal::Traces => otlp_traces(batch),
+                    Signal::Metrics => otlp_metrics(batch),
+                };
+                (serde_json::to_vec(&v).expect("JSON"), "application/json")
+            }
             _ => {
                 let mut body = Vec::new();
                 for l in batch {
@@ -436,7 +472,7 @@ impl Apps {
         };
         let mut req = self
             .notify_client
-            .post(&o.url)
+            .post(&url)
             .header("content-type", content_type)
             .header("x-roll-delivery", delivery)
             .header("x-roll-timestamp", ts)
@@ -546,6 +582,95 @@ fn syslog_message(l: &Value) -> String {
 /// A batch as an OTLP/HTTP JSON `ExportLogsServiceRequest`: a resource per service and
 /// environment (`service.name`, `deployment.environment.name`, `roll.service.id`), each line a
 /// log record with its stream, source, instance and deployment as attributes.
+/// An OTLP drain's address for `signal`: its URL is the logs' (`…/v1/logs`), traces and metrics
+/// beside it (`…/v1/traces`, `…/v1/metrics`); any other URL gets the signal's path after it.
+fn signal_url(url: &str, signal: Signal) -> String {
+    let path = match signal {
+        Signal::Logs => return url.to_string(),
+        Signal::Traces => "v1/traces",
+        Signal::Metrics => "v1/metrics",
+    };
+    match url.strip_suffix("v1/logs") {
+        Some(base) => format!("{base}{path}"),
+        None => format!("{}/{path}", url.trim_end_matches('/')),
+    }
+}
+
+/// A resource per service and environment, as [`otlp_logs`] has them.
+fn otlp_resource(batch: &[Value], service: &str, env: &str) -> Value {
+    let attr = |k: &str, v: &Value| v.as_str().filter(|s| !s.is_empty()).map(|s| json!({ "key": k, "value": { "stringValue": s } }));
+    let name = batch.iter().find(|l| l["service"] == service && l["environment"] == env).map(|l| l["service_name"].clone()).unwrap_or(Value::Null);
+    let attributes: Vec<Value> = [attr("service.name", &name), attr("deployment.environment.name", &json!(env)), attr("roll.service.id", &json!(service))].into_iter().flatten().collect();
+    json!({ "attributes": attributes })
+}
+
+/// Lines grouped by their service and environment, each parsed as a `T` (a span, a point).
+fn by_resource<T: serde::de::DeserializeOwned>(batch: &[Value]) -> Vec<((String, String), Vec<T>)> {
+    let mut groups: Vec<((String, String), Vec<T>)> = Vec::new();
+    for l in batch {
+        let Some(item) = l["text"].as_str().and_then(|t| serde_json::from_str::<T>(t).ok()) else { continue };
+        let key = (l["service"].as_str().unwrap_or("").to_string(), l["environment"].as_str().unwrap_or("").to_string());
+        match groups.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, items)) => items.push(item),
+            None => groups.push((key, vec![item])),
+        }
+    }
+    groups
+}
+
+fn otlp_attrs(attrs: &[(String, String)]) -> Vec<Value> {
+    attrs.iter().map(|(k, v)| json!({ "key": k, "value": { "stringValue": v } })).collect()
+}
+
+/// Spans (the `trace:` log's) as OTLP/HTTP JSON traces.
+fn otlp_traces(batch: &[Value]) -> Value {
+    let resource_spans: Vec<Value> = by_resource::<crate::otlp::Span>(batch)
+        .into_iter()
+        .map(|((service, env), spans)| {
+            let spans: Vec<Value> = spans
+                .iter()
+                .map(|s| {
+                    let mut v = json!({ "traceId": s.trace, "spanId": s.span, "name": s.name, "startTimeUnixNano": s.start.to_string(), "endTimeUnixNano": s.end.to_string(), "attributes": otlp_attrs(&s.attrs) });
+                    if !s.parent.is_empty() {
+                        v["parentSpanId"] = json!(s.parent);
+                    }
+                    if s.error {
+                        v["status"] = json!({ "code": 2 });
+                    }
+                    v
+                })
+                .collect();
+            json!({ "resource": otlp_resource(batch, &service, &env), "scopeSpans": [{ "scope": { "name": "roll-apps" }, "spans": spans }] })
+        })
+        .collect();
+    json!({ "resourceSpans": resource_spans })
+}
+
+/// Data points (the `metric:` log's) as OTLP/HTTP JSON metrics: a gauge, a sum (cumulative and
+/// monotonic when it counts up) or a histogram's sum and count.
+fn otlp_metrics(batch: &[Value]) -> Value {
+    let resource_metrics: Vec<Value> = by_resource::<crate::otlp::Point>(batch)
+        .into_iter()
+        .map(|((service, env), points)| {
+            let metrics: Vec<Value> = points
+                .iter()
+                .map(|p| {
+                    let point = json!({ "timeUnixNano": p.time.to_string(), "asDouble": p.value, "attributes": otlp_attrs(&p.attrs) });
+                    let mut m = json!({ "name": p.name, "unit": p.unit });
+                    match p.kind.as_str() {
+                        "sum" => m["sum"] = json!({ "dataPoints": [point], "aggregationTemporality": 2, "isMonotonic": p.counter }),
+                        "histogram" => m["histogram"] = json!({ "dataPoints": [{ "timeUnixNano": p.time.to_string(), "sum": p.value, "count": p.count.unwrap_or(0).to_string(), "attributes": otlp_attrs(&p.attrs) }], "aggregationTemporality": 2 }),
+                        _ => m["gauge"] = json!({ "dataPoints": [point] }),
+                    }
+                    m
+                })
+                .collect();
+            json!({ "resource": otlp_resource(batch, &service, &env), "scopeMetrics": [{ "scope": { "name": "roll-apps" }, "metrics": metrics }] })
+        })
+        .collect();
+    json!({ "resourceMetrics": resource_metrics })
+}
+
 fn otlp_logs(batch: &[Value]) -> Value {
     let attr = |k: &str, v: &Value| v.as_str().filter(|s| !s.is_empty()).map(|s| json!({ "key": k, "value": { "stringValue": s } }));
     let mut groups: Vec<((String, String), Vec<Value>)> = Vec::new();

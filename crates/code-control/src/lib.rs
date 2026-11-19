@@ -29,7 +29,7 @@ pub mod settings;
 pub mod streams;
 pub mod webhooks;
 
-pub use ext::{CredentialValue, PreviewBackend, Runner, SecretEnv, SecretsAsker, StoreCredential, StoreTarget, StoredCredential};
+pub use ext::{Asker, CredentialValue, PreviewBackend, Refused, Revealed, Runner, SecretEnv, SecretsAsker, StoreCredential, StoreTarget, StoredCredential};
 pub use service::{FileWrite, LandOutcome, WriteFiles};
 
 use axum::Json;

@@ -39,6 +39,40 @@ pub trait Runner: Send + Sync {
     async fn remove_leftovers(&self) {}
 }
 
+/// Who asks for an environment's values, as rolld's gate put them on the request: roll secrets
+/// answers as it would a request of theirs to it.
+#[derive(Clone, Copy, Default)]
+pub struct Asker<'a> {
+    pub operator: bool,
+    pub user: Option<&'a roll_auth::SignedIn>,
+    pub grant: Option<&'a roll_auth::Grant>,
+}
+
+impl<'a> Asker<'a> {
+    pub fn on(ext: &'a axum::http::Extensions) -> Asker<'a> {
+        Asker { operator: roll_auth::Operator::on(ext), user: ext.get::<roll_auth::SignedIn>(), grant: roll_auth::Grant::on(ext) }
+    }
+}
+
+/// An environment's values, and who revealed them (roll secrets' principal: `usr_…`,
+/// `token:…`, `operator`).
+pub struct Revealed {
+    pub by: String,
+    pub values: Vec<(String, String)>,
+}
+
+/// The asker may not reveal what they asked for (a 403).
+#[derive(Debug)]
+pub struct Refused(pub String);
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Refused {}
+
 /// An environment's secrets from roll secrets (docs/secrets.md, "Consumption"). Values come back
 /// resolved; the caller puts them in a process's environment and nowhere else (no records, no
 /// logs). Every read is in the project's audit log as `consumer`.
@@ -48,8 +82,10 @@ pub trait SecretEnv: Send + Sync {
     /// `owner/name` on its canvas. Refuses a protected environment and unresolved references.
     async fn for_repo(&self, repo: &str, environment: &str, consumer: &str) -> anyhow::Result<Vec<(String, String)>>;
     /// The same for workspace project `project` (an id or a name), which must have one of
-    /// `owner`'s repos on its canvas (sandboxes).
-    async fn for_owner(&self, owner: &str, project: &str, environment: &str, consumer: &str) -> anyhow::Result<Vec<(String, String)>>;
+    /// `owner`'s repos on its canvas (sandboxes), copied by `who`: they must be able to reveal
+    /// `environment` themselves ([`Refused`] when they can't). The audit row is `consumer` for
+    /// [`Revealed::by`].
+    async fn for_owner(&self, owner: &str, project: &str, environment: &str, consumer: &str, who: Asker<'_>) -> anyhow::Result<Revealed>;
     /// (candidate index, key, environment, folder) for every secret, in any environment of the
     /// projects that have repo `owner/name` on their canvas, whose value is one of `candidates`
     /// (matched by fingerprint; values never come back). Empty for a repo on no project's canvas.

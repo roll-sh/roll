@@ -290,7 +290,7 @@ impl Secrets {
         self.project(project)?;
         let now = self.db.now_ms()?;
         let kind = n.kind;
-        let i = Identity { id: names::new_id("idn", 12), name, kind, arn: (kind == IdentityKind::Aws).then(|| subject.clone()), server_id: None, issuer, audience, subject, claims: n.claims, environments, paths, actions, ttl_minutes: ttl, created_at: now, created_by: caller.principal.clone(), last_used_at: None, last_subject: None, allowed_ips: crate::caller::allowed(n.allowed_ips)?, pinned_keys, gateway, disabled_at: None, disabled_why: None };
+        let i = Identity { id: names::new_id("idn", 12), name, kind, arn: (kind == IdentityKind::Aws).then(|| subject.clone()), server_id: None, issuer, audience, subject, claims: n.claims, environments, paths, actions, ttl_minutes: ttl, created_at: now, created_by: self.maker_of(caller)?, last_used_at: None, last_subject: None, allowed_ips: crate::caller::allowed(n.allowed_ips)?, pinned_keys, gateway, disabled_at: None, disabled_why: None };
         self.db.write(|c| {
             let count: i64 = c.query_row("SELECT COUNT(*) FROM identities WHERE project_id = ?", [project], |r| r.get(0))?;
             if count >= IDENTITIES_MAX {
@@ -362,6 +362,7 @@ impl Secrets {
         let jwks = jwks.trim();
         let n = crate::oidc::pinned_keys(jwks).map_err(bad)?;
         self.project(project)?;
+        let by = self.maker_of(caller)?;
         let now = self.db.now_ms()?;
         let (identity, live) = self.db.write(|c| {
             let found: Option<(String, Option<String>)> = c.query_row("SELECT name, kind FROM identities WHERE id = ? AND project_id = ?", [id, project], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
@@ -369,7 +370,7 @@ impl Secrets {
             if kind.as_deref() == Some("aws") {
                 return Err(bad(format!("{name} is an AWS identity: STS checks its logins, it pins no keys")));
             }
-            c.execute("UPDATE identities SET jwks = ?, created_by = ? WHERE id = ?", params![jwks, caller.principal, id])?;
+            c.execute("UPDATE identities SET jwks = ?, created_by = ? WHERE id = ?", params![jwks, by, id])?;
             let live: Vec<String> = c.query("SELECT grant_id FROM identity_logins WHERE identity = ? AND expires_at > ?", params![id, now], |r| r.get(0))?;
             let revoked = live.len();
             audit::record(c, self.keys()?, project, caller, "identity.keys", None, None, &[], &format!("identity {name} now pins {n} key{} ({revoked} live token{} revoked)", if n == 1 { "" } else { "s" }, if revoked == 1 { "" } else { "s" }), now)?;
@@ -510,9 +511,9 @@ impl Secrets {
         };
         // Owned by the person behind whoever made it (a person's token is that person).
         let owner = match self.maker(&i.created_by)? {
-            crate::caller::Maker::Person(user) => Some(user),
-            crate::caller::Maker::Operator => None,
-            crate::caller::Maker::Gone => return Err(denied()),
+            crate::caller::Origin::Person(user) => Some(user),
+            crate::caller::Origin::Operator => None,
+            crate::caller::Origin::Gone => return Err(denied()),
         };
         let m = workloads.mint(&i.name, rule, i.allowed_ips.clone(), i.ttl_minutes as u32, owner.as_deref())?;
         let mut caller = Caller::acting(format!("identity:{}", i.id), std::sync::Arc::new(crate::access::Everything));
