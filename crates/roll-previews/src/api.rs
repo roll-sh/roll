@@ -57,6 +57,11 @@ pub fn router(engine: Arc<Engine>) -> Router {
                 .route("/v1/previews/{id}/shell/sessions/{sh}/keys", post(shell_keys))
                 .route("/v1/previews/{id}/shell/sessions/{sh}/resize", post(shell_resize))
                 .route("/v1/previews/{id}/forward", get(forward))
+                // A preview's spans, kept on its holder: the intake (its token the credential) and the reads.
+                .route("/v1/previews/{id}/otlp/{token}/v1/traces", post(otlp_traces).layer(axum::extract::DefaultBodyLimit::max(8 << 20)))
+                .route("/v1/previews/{id}/traces", get(traces))
+                .route("/v1/previews/{id}/traces/{trace}", get(trace))
+                .route("/v1/previews/{id}/routes", get(routes))
                 .route("/v1/previews/{id}/files", get(read_files).put(write_files).layer(axum::extract::DefaultBodyLimit::max(crate::engine::shell::FILES_MAX + (1 << 20))))
                 .route_layer(axum::middleware::from_fn_with_state(engine.clone(), on_leader))
                 .with_state(engine.clone()),
@@ -100,8 +105,10 @@ async fn scoped(AxState(e): S, mut req: axum::extract::Request, next: axum::midd
             }
         }
     };
-    let path = req.uri().path().to_string();
-    let rest: Vec<&str> = path.trim_start_matches("/v1/previews").trim_start_matches('/').split('/').filter(|s| !s.is_empty()).collect();
+    // The path's segments as the handlers read them (percent-decoded): a client may encode an id
+    // (`pv%5Fabc`), and a check on the raw one would look up nothing.
+    let segs = segments(req.uri().path().trim_start_matches("/v1/previews"));
+    let rest: Vec<&str> = segs.iter().map(String::as_str).collect();
     let project = match rest.as_slice() {
         ["projects", project, ..] => Some(project.to_string()),
         [_, "screenshot.png"] => None,
@@ -120,9 +127,36 @@ async fn scoped(AxState(e): S, mut req: axum::extract::Request, next: axum::midd
     next.run(req).await
 }
 
+/// A path's non-empty segments, each percent-decoded as axum's `Path` decodes it (`+` is itself:
+/// it's a query's space, not a path's).
+fn segments(path: &str) -> Vec<String> {
+    path.split('/')
+        .filter(|s| !s.is_empty())
+        .map(|seg| {
+            let b = seg.as_bytes();
+            let mut out = Vec::with_capacity(b.len());
+            let mut i = 0;
+            while i < b.len() {
+                let hex = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
+                if b[i] == b'%'
+                    && let (Some(h), Some(l)) = (b.get(i + 1).copied().and_then(hex), b.get(i + 2).copied().and_then(hex))
+                {
+                    out.push(h * 16 + l);
+                    i += 3;
+                    continue;
+                }
+                out.push(b[i]);
+                i += 1;
+            }
+            String::from_utf8_lossy(&out).into_owned()
+        })
+        .collect()
+}
+
 /// Run on the preview's holder (`preview:<id>`), which runs its services, forwarding if need be.
 async fn on_leader(AxState(e): S, req: axum::extract::Request, next: axum::middleware::Next) -> Response {
-    let id = req.uri().path().split('/').nth(3).unwrap_or_default().to_string();
+    // Decoded as the handler's `Path` is, so the lease named is the preview the handler serves.
+    let id = segments(req.uri().path()).into_iter().nth(2).unwrap_or_default();
     match e.cluster.get().cloned() {
         Some(cluster) => {
             cluster
@@ -691,6 +725,44 @@ async fn shell_resize(AxState(e): S, Path((id, sh)): Path<(String, String)>, b: 
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// OTLP/HTTP `…/v1/traces` from a preview's service: protobuf or JSON (its `Content-Type`), gzip
+/// or not (its `Content-Encoding`). OTLP's success answer: an empty partial success.
+async fn otlp_traces(AxState(e): S, Path((id, token)): Path<(String, String)>, headers: axum::http::HeaderMap, body: axum::body::Body) -> crate::Result<Json<Value>> {
+    check_id(&id)?;
+    let Some(reader) = e.span_reader.get().cloned() else { return Err(Error::NotFound("no such trace address".into())) };
+    let h = |k: axum::http::HeaderName| headers.get(k).and_then(|v| v.to_str().ok()).unwrap_or("").to_ascii_lowercase();
+    let json = h(axum::http::header::CONTENT_TYPE).contains("json");
+    let gzip = h(axum::http::header::CONTENT_ENCODING).contains("gzip");
+    // The token first: an address that isn't a live preview's reads none of its body.
+    e.check_trace_token(&id, &token)?;
+    let b = axum::body::to_bytes(body, 8 << 20).await.map_err(|_| Error::BadRequest("traces are at most 8 MiB a request".into()))?;
+    // Parsed off the async workers: a large request is CPU, not waiting.
+    let spans = tokio::task::spawn_blocking(move || reader.spans(&b, json, gzip)).await.map_err(|err| Error::Internal(err.to_string()))?.map_err(|err| Error::BadRequest(err.to_string()))?;
+    e.keep_spans(&id, &token, spans)?;
+    Ok(Json(json!({ "partialSuccess": {} })))
+}
+
+#[derive(serde::Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct TracesQuery {
+    minutes: Option<i64>,
+}
+
+async fn traces(AxState(e): S, Path(id): Path<String>, Query(q): Query<TracesQuery>) -> crate::Result<Json<Value>> {
+    check_id(&id)?;
+    Ok(Json(e.traces(&id, q.minutes.unwrap_or(60)).await?))
+}
+
+async fn routes(AxState(e): S, Path(id): Path<String>, Query(q): Query<TracesQuery>) -> crate::Result<Json<Value>> {
+    check_id(&id)?;
+    Ok(Json(e.routes(&id, q.minutes.unwrap_or(60)).await?))
+}
+
+async fn trace(AxState(e): S, Path((id, t)): Path<(String, String)>) -> crate::Result<Json<Value>> {
+    check_id(&id)?;
+    Ok(Json(e.trace(&id, &t).await?))
+}
+
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ForwardQuery {
@@ -812,8 +884,10 @@ async fn logs(AxState(e): S, Path(id): Path<String>, Query(q): Query<LogsQuery>)
     // A stderr line is `event: stderr`; a stdout one the default event, as before.
     let rest = futures::stream::unfold(rx, |mut rx| async move {
         rx.recv().await.map(|(stderr, l)| {
-            let ev = Event::default().data(l.replace(['\r', '\n'], ""));
-            (Ok(if stderr { ev.event("stderr") } else { ev }), rx)
+            // `event:` before `data:` on the wire (axum writes them in the order they're set): a
+            // client that acts on each `data:` line as it reads it (the CLI) knows the stream.
+            let ev = if stderr { Event::default().event("stderr") } else { Event::default() };
+            (Ok(ev.data(l.replace(['\r', '\n'], ""))), rx)
         })
     });
     let mut r = Sse::new(futures::StreamExt::chain(first, rest)).keep_alive(KeepAlive::default()).into_response();
@@ -1012,4 +1086,15 @@ async fn usage(AxState(e): S, Path(project): Path<String>) -> crate::Result<Json
     })
     .await
     .map(Json)
+}
+
+#[cfg(test)]
+mod tests {
+    /// A route's id read by the middlewares is the one the handler's `Path` reads: a client may
+    /// percent-encode it (`pv%5Fabc`), and a `+` in a path is itself.
+    #[test]
+    fn path_segments_are_read_as_the_handlers_read_them() {
+        assert_eq!(super::segments("/v1/previews/pv%5Fabc/logs"), ["v1", "previews", "pv_abc", "logs"]);
+        assert_eq!(super::segments("/a+b/%2"), ["a+b", "%2"]);
+    }
 }

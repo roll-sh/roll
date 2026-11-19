@@ -36,7 +36,7 @@ impl Secrets {
                 "UPDATE versions SET value = NULL, purged_at = ? WHERE secret_id = ? AND version < ? AND value IS NOT NULL",
                 params![now, id, below],
             )? as i64;
-            audit::record(c, project, caller, "secrets.purge", Some(slug), Some(&path), &[key.to_string()], &format!("purged {n} old value{} of {key}", if n == 1 { "" } else { "s" }), now)?;
+            audit::record(c, self.keys()?, project, caller, "secrets.purge", Some(slug), Some(&path), &[key.to_string()], &format!("purged {n} old value{} of {key}", if n == 1 { "" } else { "s" }), now)?;
             Ok(n)
         })
     }
@@ -55,7 +55,7 @@ impl Secrets {
                 Some(d) => format!("old values are purged after {d} days"),
                 None => "old values are kept".into(),
             };
-            audit::record(c, project, caller, "history.retention", None, None, &[], &summary, now)
+            audit::record(c, self.keys()?, project, caller, "history.retention", None, None, &[], &summary, now)
         })?;
         Ok(days)
     }

@@ -28,6 +28,7 @@ impl IntoResponse for ControlError {
             ControlError::NotFound(_) => StatusCode::NOT_FOUND,
             ControlError::Invalid(_) => StatusCode::BAD_REQUEST,
             ControlError::Conflict(_) => StatusCode::CONFLICT,
+            ControlError::Forbidden(_) => StatusCode::FORBIDDEN,
             ControlError::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             ControlError::Internal(e) => {
                 tracing::error!(error = %e, "storage control plane error");
