@@ -12652,6 +12652,103 @@ failed: all passed.
 Not this round's: roll's `VACUUM (VERBOSE)` sends none of PostgreSQL's INFO lines (agent 205's
 note, still open).
 
+## Short write transactions, round 8: the size model's lock, the transaction object (agent 256)
+
+BENCH.md "Short write transactions, round 8" has every pair. **The host was loaded all round**:
+other sessions' unpinned rustc builds (non-pg-engine crates) kept 5-7.5 of lane A's 8 CPUs busy
+in every lane hold of the night (lane.sh's foreign load), 0.4-2.8 foreign cores on the four
+server CPUs in each run; of 54 short-transaction pairs 14 were clean (at most 1.0 foreign core).
+Throughput and cycles below are agent 243's load-adjusted fits (`adj.py`) unless said otherwise;
+none is a clean seven-pair gate. The same-day three-server table (BENCH) is of the plain dist
+build only (no PGO build this round): in its quietest round roll's plain build did 12,124 tps at 8
+clients against PostgreSQL's 10,747 and 12,582 at 32 against 10,988 and pgrust's 12,531 (pgrust's
+8-client cells ran under ~2 foreign cores); roll's p99 at 32 clients is the worst of the three.
+
+Kept, one commit (handed in as `cand/a256`):
+
+1. *The transaction object's state is boxed, and an ended transaction's box goes to its thread's
+   next one* (`txn::Txn` is `Box<TxnState>`, `SPARE_TXN`). The session and the commit moved the
+   state's ~1.5 kB three or four times a transaction (`ensure_txn`'s begin, `finish_txn`'s take,
+   the `Cluster::commit` and `Txn::commit` calls by value); now they move a pointer, and the
+   allocation is reused (the state is dropped in place, its box kept as `MaybeUninit`). Every
+   field access is the same (`Deref`); `commit` / `rollback` take the box (`commit_in` /
+   `rollback_in` on the state), `Drop` is unchanged. Measured on point reads (8 clients, plain
+   dist, 6 alternating pairs, every pair flagged at 0.8-2.3 foreign cores): user instructions
+   per read -0.84, -1.13, +0.11, -1.16, -2.19, -0.75% (median -0.95%), cycles +0.5% (±2.5%),
+   tps -1.2% (±1.0%). The instruction profile (LBR, 114k samples each) places it:
+   `Session::finish_txn` 11.81% -> 10.38% of a read's samples, `ensure_txn` 4.21% -> 3.86%, the
+   memcpy under them 2.27% -> 0.90% and 1.01% -> 0.50%, `drop_glue<Txn>` 1.00% -> 0.65%. Short
+   transactions carry the same constant work (~1% of their instructions); not resolvable on this
+   host. Verification: `tools/quick-check.sh` with `QC_CHECKED=1` on `92ae57829` (on `99abdc240`):
+   24 test binaries, clippy no new warning, 391 tests in 20 binaries (and again built
+   `--profile verify-checked`), crash_random seeds 1-3 x 2 and `power_cut_at_every_point`
+   (durability unchanged), regress 51,148 / 51,150 (0 newly differing), isolation 1647/1648,
+   pg_dump_tap 14,609.
+
+Dropped (patches in `~/.cache/a256/patches/`):
+
+- *Heap-only updates in a group mode of the size models' lock*
+  (`model-lock-group-hot-updates.patch`, one commit on `99abdc240`; quick-check with
+  `QC_CHECKED=1` green on it: 389 tests in 14 binaries also under verify-checked, regress 0 newly
+  differing, isolation 1647/1648, pg_dump 14,609). The shard lock became a reader-writer lock
+  with a third mode, a group of writers that each change only a heap page of their own (under
+  the page's latch, 64 striped latches a heap; the pages a `CellVec` whose elements a latched
+  writer changes through a shared reference), their own row's current version (the key map's
+  TIDs atomic, `KeyMap::set_tid_shared`) and counts kept atomic or behind small mutexes
+  (versions, writes, the all-visible count, the pending and settle lists). The first member
+  takes the lock exclusively, later ones join, the last lets it go; a reader or exclusive
+  writer waiting closes the group, and writers arriving then wait on a condvar and form the next
+  group together. An UPDATE uses it when it will be heap-only and fits its old version's page
+  (`Heap::update_hot_shared`, PostgreSQL's HOT update under the page's buffer lock); anything
+  else takes the exclusive lock, and a non-heap-only update's index entries go in under its one
+  exclusive hold instead of a second. Exactness: the group's outcome is the same updates one at
+  a time in their pages' latch order (a unit test compares every page, tuple, row version and
+  hint), and an isolation spec, `roll-hot-concurrent` (three writers, an abort, a row updated
+  again and after an aborted update, updates leaving the page), matches PostgreSQL 18.6 on all
+  four permutations; `roll-multixact` and `roll-point-update` match with the group path live.
+  What it did: the off-CPU profile at 32 clients (sched_switch, dwarf, 2 s) went from 3.36
+  thread-s/s asleep in `sizing::updated` (2,536 sleeps/s, 1.3 ms each) to 1.73 (2,278/s, 0.76
+  ms: writers waiting for an exclusive holder, the non-heap-only 11-13% of the UPDATEs), and
+  `identity_nextval` from 1.12 to 5.99 thread-s/s (10 ms a sleep): the threads go to the next
+  queue, as agent 243 predicted. Measured against the same build without the group engaging
+  (`c4`, whose group never ran: accounts has a TOAST relation, which its first condition left
+  out): 32 clients cycles +2.0% (±1.1%), tps -4.8% (three pairs within the fit's 2.5 foreign
+  cores; the two clean pairs +22.6% and -6.2%); 8 clients cycles -1.3% (±0.5%, down in all six
+  pairs), tps +3.4% (±5.4%). Point reads (base against the first build, 5 pairs) -0.45%
+  instructions at the median. No clear win at 32 clients: dropped. What would make it one: the
+  nextval stall (below) first, so the threads freed don't queue there; fewer wakeups (each
+  outsider's release wakes every waiting writer); the non-heap-only updates' exclusive holds
+  (12% of the updates, each closing the group).
+- *nextval's logged-ahead value without its own fsync wait* (agent 235's patch, as agent 243
+  rebased it; `nextval-unwaited-log-on-group-lock.patch` on the group build): re-measured once the
+  model's lock no longer held them (against the group build, plain dist): 32 clients tps +2.2%
+  (±1.7%), cycles -0.4% (±1.1%), one clean pair of six (+11.8%); 8 clients cycles +4.3%
+  (±1.3%), tps not resolved (±25%; the three clean pairs -11.6%, +54.3%, +7.8%). On the build
+  without the group (the group never engaging): 32 clients tps -0.3% (±0.8%), cycles +0.9%
+  (±1.3%); 8 clients tps -1.2% (±10.4%), cycles -0.6% (±1.4%). Not the -8% agent 243 found at
+  32 clients, but no clear win either: dropped again. It lands with the run queue below, or
+  with a nextval whose logged-ahead record its own transaction's commit carries.
+
+What is left, by size:
+
+- The 32-client limit is now a chain of queues, each letting the next one fill: the size
+  model's exclusive holds (non-heap-only updates), nextval's fsync under the database's
+  sequence mutex, the group commit's wait. Taking one away (the group lock, the nextval patch)
+  moved the sleeps to the next without a throughput gain on 4 CPUs at 32 connections; a run
+  queue in front of the executor (agent 235's admission note) is the lever that would let these
+  land.
+- The transaction object's hot/cold split (the brief's second half of item 2): the state's
+  remaining construction copy (0.50% of a point read) and drop glue (0.65%) would shrink with
+  the rarely used fields (~20: savepoints, sub-transactions, deferred triggers, large objects,
+  the undo lists, bulk-load state) in a box made on first use; about 115 field-access sites to
+  move. Not done this round.
+- The session's per-transaction settings (`txn_settings`, `Settings::end_transaction`'s
+  `HashMap<String, String>` writes): 2.0% of a point read's instructions.
+- Harness: `~/.cache/a256/bench` (agent 243's, one pair per lane hold through `tools/lane.sh`:
+  `gate.sh`, `pair.sh`; off-CPU `off.sh` / `offs.sh` / `offsum.sh` with demangling; `lbr.sh` /
+  `lbragg.py` for instruction profiles). The perf container needs `cap_dac_override` on perf
+  for tracepoints when it runs as uid 1000 (`~/.cache/a256/perfimg/Dockerfile`).
+
 ## Short write transactions, round 7 (agent 243)
 
 BENCH.md "Short write transactions, round 7" has the pairs and a same-day three-server table

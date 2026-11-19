@@ -562,6 +562,203 @@ session thread's user instructions by `perf stat --per-thread` over a 14 s run l
 the difference in selects; CPUs 4 and 22): base (`c4ad9402d`) 38,025 / 38,948 / 37,578, the stack
 (`e974a84e1`) 37,624 / 39,504 / 37,995 user instructions a select, alternated.
 
+## Short write transactions, round 8: the size model's lock, the transaction object (2026-11-18/19, agent 256)
+
+Lane A, plain dist builds (`tools/dist.sh`), agent 243's harness (`~/.cache/a256/bench`: one
+alternating pair per `tools/lane.sh` hold, a fresh server and the 100,000-row oltp fixture each
+run, 10 s, counts over the whole run divided by its transactions; `adj.py` fits each series'
+per-pair log ratio against the pairs' foreign-core difference). **Lane A's 8 CPUs had 5-7.5 cores
+of other sessions' unpinned builds in nearly every hold** (0.4-2.8 foreign cores on the server
+CPUs per run; 14 of 54 short-transaction pairs clean at 1.0): tps moved ~40% with it, so the
+adjusted fits and cycles are what these tables can say. Instructions per transaction at 8 and
+32 clients swing ±20% a run (the connection threads' 50 µs polling counts as user work).
+
+Builds: `base` = origin `3d30eb71e`; `c1` = base + the size model lock's group mode (its first
+form, never engaging on `accounts`, whose TOAST relation its condition left out) and the
+non-heap-only update's single exclusive hold; `c2` = c1 + the boxed transaction object (kept:
+`cand/a256`); `c3` = c2 + nextval's unwaited log-ahead; `c4` = c2 with the group's waiting
+writers re-forming a group; `c5` = c4 with tables with a TOAST relation in the group (the group
+engaging: 87-89% of the UPDATEs heap-only); `c6` = c5 + nextval's unwaited log-ahead.
+
+Off-CPU at 32 clients (sched_switch with dwarf stacks for 2 s, thread-seconds asleep per second,
+sleeps per second and mean length; one run each, 5.3-6.3 foreign cores on the lane):
+
+| where | base | c5 (group) |
+|---|---:|---:|
+| `sizing::updated` (the model's lock) | 3.36 s/s, 2,536/s, 1.33 ms | 1.73 s/s, 2,278/s, 0.76 ms |
+| `identity_nextval` (the sequence mutex behind its fsync) | 1.12 s/s, 1,048/s, 1.07 ms | 5.99 s/s, 572/s, 10.5 ms |
+| client wait (`message_loop`) | 7.07 s/s | 4.86 s/s |
+
+c5's `updated` sleeps are writers waiting on the group's condvar while an exclusive holder (a
+non-heap-only update) runs.
+
+Instruction profile of point reads (LBR call graph, instructions:u every 100,003, 8 clients, off
+lane), share of a read's samples: `Session::finish_txn` base 11.81% / c2 10.38%,
+`Session::ensure_txn` 4.21% / 3.86%, the memcpy under them 2.27% / 0.90% and 1.01% / 0.50%,
+`drop_glue<Txn>` 1.00% / 0.65%.
+
+Same-day three-server table (2026-11-19 04:00-05:10 UTC, one sitting, two rounds, the servers'
+order rotated, one server's two cells per lane hold; roll is `cand/a256` plain dist: **no PGO
+build this round**, pgrust's published image is PGO-built; same settings as round 7: fsync on,
+synchronous_commit on, 2 GB shared buffers):
+
+| clients | server | tps (rounds) | median tps | p50 ms | p99 ms | server CPU µs/txn | foreign cores |
+|---:|---|---|---:|---:|---:|---:|---|
+| 8 | roll (plain dist, cand/a256) | 7,898, 12,124 | 10,011 | 0.71 | 2.8 | 323 | 0.89, 0.09 |
+| 8 | PostgreSQL 18.6 | 10,009, 10,747 | 10,378 | 0.68 | 1.8 | 304 | 0.63, 0.41 |
+| 8 | pgrust (published, PGO) | 6,145, 6,592 | 6,368 | 1.07 | 4.9 | 313 | 2.01, 1.72 |
+| 32 | roll (plain dist, cand/a256) | 8,767, 12,582 | 10,674 | 2.45 | 12.8 | 339 | 0.64, 0.12 |
+| 32 | PostgreSQL 18.6 | 10,825, 10,988 | 10,906 | 2.76 | 6.5 | 354 | 0.14, 0.16 |
+| 32 | pgrust (published, PGO) | 8,410, 12,531 | 10,470 | 2.74 | 8.5 | 332 | 0.91, 0.19 |
+
+Round 1 ran at 0.6-2.0 foreign cores. Round 2 was the quietest hold of the night for roll (0.09
+and 0.12 foreign cores) and PostgreSQL (0.41, 0.16); there roll's plain build did 12,124 tps at 8
+clients (PostgreSQL 10,747: 1.13x) and 12,582 at 32 (10,988: 1.15x; pgrust 12,531 at 0.19
+foreign: 1.00x). pgrust's 8-client cells both ran at 1.7-2.0 foreign cores and are not a
+comparison. p99 at 32 clients is roll's worst column (12.8 ms against 6.5 and 8.5).
+
+Pairs (Δ is the second build against the first; instr and cycles are user counts per
+transaction over the run; foreign is each run's foreign cores on the server CPUs; FLAG: over 1.0):
+
+Point reads, 8 clients, c1 against c2 (the boxed transaction object):
+| pair | c1 tps | c2 tps | Δ tps | c1 instr/txn | c2 instr/txn | Δ instr | Δ cycles | Δ CPU | Δ p50 | foreign | flag |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| 1 | 39,834 | 36,664 | -8.0% | 40,346 | 40,007 | -0.84% | +6.8% | +6.3% | -6.0% | 1.83/2.00 | FLAG |
+| 2 | 40,557 | 34,834 | -14.1% | 40,534 | 40,075 | -1.13% | -2.0% | +1.4% | +11.1% | 1.76/2.14 | FLAG |
+| 3 | 34,505 | 33,647 | -2.5% | 39,875 | 39,917 | +0.11% | -4.5% | -4.6% | +10.3% | 2.17/2.31 | FLAG |
+| 4 | 42,992 | 35,735 | -16.9% | 40,356 | 39,887 | -1.16% | -2.1% | -0.6% | +8.7% | 1.66/2.10 | FLAG |
+| 5 | 61,021 | 42,155 | -30.9% | 40,371 | 39,487 | -2.19% | +7.8% | +14.4% | +20.5% | 0.78/1.68 | FLAG |
+| 6 | 40,407 | 49,763 | +23.2% | 40,362 | 40,060 | -0.75% | +1.4% | -3.2% | -10.5% | 1.80/1.18 | FLAG |
+
+no unflagged pair
+tps: 6 pairs, at equal foreign -1.2% (±1.0% s.e.), per foreign core -0.38 log
+user cycles/txn: 6 pairs, at equal foreign +0.5% (±2.5% s.e.), slope +0.03
+
+Point reads, 8 clients, base against c1:
+| pair | base tps | c1 tps | Δ tps | base instr/txn | c1 instr/txn | Δ instr | Δ cycles | Δ CPU | Δ p50 | foreign | flag |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| 1 | 57,963 | 38,156 | -34.2% | 40,577 | 40,700 | +0.30% | +2.1% | +9.2% | +34.1% | 0.83/1.93 | FLAG |
+| 2 | 62,617 | 58,096 | -7.2% | 40,577 | 40,395 | -0.45% | +1.4% | +4.7% | +6.2% | 0.68/0.76 |  |
+| 3 | 71,613 | 70,799 | -1.1% | 40,541 | 40,347 | -0.48% | +1.2% | +0.0% | +0.0% | 0.51/0.56 |  |
+| 4 | 69,949 | 59,633 | -14.7% | 40,237 | 40,514 | +0.69% | +4.3% | +6.9% | +14.6% | 0.38/0.71 |  |
+| 5 | 46,985 | 43,444 | -7.5% | 40,414 | 40,218 | -0.48% | -2.2% | -0.7% | +15.2% | 1.32/1.65 | FLAG |
+
+3 unflagged pairs; medians: tps -7.2%, user instr/txn -0.45%, user cycles/txn +1.4%, connection threads' sampled instr +nan% cycles +nan%, CPU/txn +4.7%, p50 +6.2%; instr down in every pair False, cycles down in every pair False, tps up in every pair False, conn instr down in every pair False, conn cycles down in every pair False
+tps: 5 pairs, at equal foreign -1.1% (±2.6% s.e.), per foreign core -0.36 log
+user cycles/txn: 5 pairs, at equal foreign +1.0% (±1.7% s.e.), slope +0.01
+
+Short transactions, 32 clients, c4 against c5 (the group engaging):
+| pair | c4 tps | c5 tps | Δ tps | c4 instr/txn | c5 instr/txn | Δ instr | Δ cycles | Δ CPU | Δ p50 | foreign | flag |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| 1 | 5,431 | 3,204 | -41.0% | 241,161 | 234,871 | -2.61% | +7.3% | +14.9% | +105.1% | 1.63/2.56 | FLAG |
+| 2 | 3,691 | 7,174 | +94.4% | 228,518 | 255,689 | +11.89% | -3.0% | -0.1% | -42.0% | 2.51/0.73 | FLAG |
+| 3 | 3,507 | 4,101 | +16.9% | 234,652 | 304,327 | +29.69% | +2.2% | +3.6% | -12.5% | 2.54/2.16 | FLAG |
+| 4 | 9,098 | 5,199 | -42.9% | 248,870 | 241,211 | -3.08% | +8.0% | +16.5% | +30.7% | 0.53/1.62 | FLAG |
+| 5 | 7,302 | 8,953 | +22.6% | 252,265 | 274,827 | +8.94% | +0.5% | +0.5% | -4.6% | 0.97/0.44 |  |
+| 6 | 8,405 | 7,886 | -6.2% | 298,578 | 260,939 | -12.61% | +0.6% | +5.6% | +5.6% | 0.59/0.61 |  |
+
+2 unflagged pairs; medians: tps +8.2%, user instr/txn -1.83%, user cycles/txn +0.5%, connection threads' sampled instr +nan% cycles +nan%, CPU/txn +3.0%, p50 +0.5%; instr down in every pair False, cycles down in every pair False, tps up in every pair False, conn instr down in every pair False, conn cycles down in every pair False
+tps: 3 pairs, at equal foreign -4.8% (±0.4% s.e.), per foreign core -0.47 log
+user cycles/txn: 3 pairs, at equal foreign +2.0% (±1.1% s.e.), slope +0.05
+
+Short transactions, 8 clients, c4 against c5:
+| pair | c4 tps | c5 tps | Δ tps | c4 instr/txn | c5 instr/txn | Δ instr | Δ cycles | Δ CPU | Δ p50 | foreign | flag |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| 1 | 4,744 | 4,575 | -3.6% | 242,526 | 235,915 | -2.73% | -2.1% | -1.4% | +5.4% | 2.06/2.23 | FLAG |
+| 2 | 4,767 | 7,381 | +54.8% | 239,481 | 246,141 | +2.78% | -0.5% | -4.9% | -11.9% | 1.69/1.16 | FLAG |
+| 3 | 6,490 | 5,850 | -9.9% | 294,532 | 243,125 | -17.45% | -2.2% | +1.7% | +8.9% | 1.25/1.52 | FLAG |
+| 4 | 6,274 | 4,981 | -20.6% | 299,331 | 234,120 | -21.79% | -0.1% | +4.5% | +17.4% | 1.45/2.03 | FLAG |
+| 5 | 4,519 | 4,416 | -2.3% | 233,316 | 233,378 | +0.03% | -0.9% | +0.1% | +7.3% | 2.26/2.35 | FLAG |
+| 6 | 6,922 | 5,466 | -21.0% | 242,260 | 236,263 | -2.48% | -2.1% | -1.8% | -4.7% | 1.25/1.33 | FLAG |
+
+no unflagged pair
+tps: 6 pairs, at equal foreign +3.4% (±5.4% s.e.), per foreign core -0.60 log
+user cycles/txn: 6 pairs, at equal foreign -1.3% (±0.5% s.e.), slope -0.00
+
+Short transactions, 32 clients, c2 against c3 (nextval's log-ahead, group not engaging):
+| pair | c2 tps | c3 tps | Δ tps | c2 instr/txn | c3 instr/txn | Δ instr | Δ cycles | Δ CPU | Δ p50 | foreign | flag |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| 1 | 9,537 | 10,319 | +8.2% | 255,968 | 297,398 | +16.19% | -1.5% | -7.5% | -9.8% | 0.46/0.30 |  |
+| 2 | 8,167 | 9,712 | +18.9% | 296,118 | 252,744 | -14.65% | -3.9% | -7.8% | -12.8% | 0.76/0.34 |  |
+| 3 | 5,334 | 7,645 | +43.3% | 243,738 | 255,585 | +4.86% | -5.7% | -8.3% | -28.1% | 1.75/0.82 | FLAG |
+| 4 | 8,078 | 5,733 | -29.0% | 249,347 | 243,094 | -2.51% | +4.2% | +4.7% | +24.2% | 0.71/1.57 | FLAG |
+| 5 | 10,037 | 7,989 | -20.4% | 263,450 | 299,542 | +13.70% | +9.6% | +19.6% | +28.8% | 0.35/0.84 |  |
+| 6 | 5,389 | 7,644 | +41.8% | 238,871 | 251,062 | +5.10% | -3.5% | -9.1% | -23.8% | 1.87/1.00 | FLAG |
+
+3 unflagged pairs; medians: tps +8.2%, user instr/txn +13.70%, user cycles/txn -1.5%, connection threads' sampled instr +nan% cycles +nan%, CPU/txn -7.5%, p50 -9.8%; instr down in every pair False, cycles down in every pair False, tps up in every pair False, conn instr down in every pair False, conn cycles down in every pair False
+tps: 6 pairs, at equal foreign -0.3% (±0.8% s.e.), per foreign core -0.41 log
+user cycles/txn: 6 pairs, at equal foreign +0.9% (±1.3% s.e.), slope +0.07
+
+Short transactions, 8 clients, c2 against c3:
+| pair | c2 tps | c3 tps | Δ tps | c2 instr/txn | c3 instr/txn | Δ instr | Δ cycles | Δ CPU | Δ p50 | foreign | flag |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| 1 | 7,306 | 9,591 | +31.3% | 245,803 | 253,838 | +3.27% | -5.2% | -12.1% | -20.9% | 1.05/0.51 | FLAG |
+| 2 | 5,601 | 7,271 | +29.8% | 233,752 | 253,315 | +8.37% | -0.2% | +2.0% | +1.6% | 1.34/1.21 | FLAG |
+| 3 | 6,253 | 4,448 | -28.9% | 295,129 | 238,814 | -19.08% | +0.2% | +5.8% | +24.4% | 1.39/2.23 | FLAG |
+| 4 | 1,656 | 4,132 | +149.5% | 226,009 | 239,050 | +5.77% | -2.8% | -5.4% | -7.4% | 3.28/2.42 | FLAG |
+| 5 | 4,424 | 3,461 | -21.8% | 236,140 | 229,106 | -2.98% | -0.5% | -3.2% | -17.0% | 2.27/2.06 | FLAG |
+| 6 | 5,644 | 7,037 | +24.7% | 234,874 | 244,161 | +3.95% | +1.9% | -1.2% | -6.8% | 1.65/1.13 | FLAG |
+
+no unflagged pair
+tps: 5 pairs, at equal foreign -1.2% (±10.4% s.e.), per foreign core -0.40 log
+user cycles/txn: 5 pairs, at equal foreign -0.6% (±1.4% s.e.), slope +0.01
+
+Short transactions, 32 clients, base against c2:
+| pair | base tps | c2 tps | Δ tps | base instr/txn | c2 instr/txn | Δ instr | Δ cycles | Δ CPU | Δ p50 | foreign | flag |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| 1 | 6,802 | 7,990 | +17.5% | 255,366 | 254,897 | -0.18% | -2.2% | -6.0% | -14.8% | 1.09/0.67 | FLAG |
+| 2 | 7,190 | 6,447 | -10.3% | 252,765 | 298,316 | +18.02% | +7.0% | +4.8% | +9.0% | 0.95/1.12 | FLAG |
+| 3 | 7,483 | 8,910 | +19.1% | 247,531 | 253,883 | +2.57% | -3.9% | -6.6% | -16.0% | 0.82/0.53 |  |
+| 4 | 7,593 | 9,895 | +30.3% | 248,973 | 294,475 | +18.28% | -2.2% | -10.1% | -13.0% | 0.72/0.40 |  |
+| 5 | 11,260 | 7,452 | -33.8% | 255,921 | 261,474 | +2.17% | +6.0% | +15.5% | +26.4% | 0.19/1.15 | FLAG |
+| 6 | 6,825 | 7,744 | +13.5% | 251,500 | 253,571 | +0.82% | -2.4% | -4.6% | -9.2% | 1.12/0.82 | FLAG |
+
+2 unflagged pairs; medians: tps +24.7%, user instr/txn +10.42%, user cycles/txn -3.1%, connection threads' sampled instr +nan% cycles +nan%, CPU/txn -8.3%, p50 -14.5%; instr down in every pair False, cycles down in every pair True, tps up in every pair True, conn instr down in every pair False, conn cycles down in every pair False
+tps: 6 pairs, at equal foreign +1.8% (±2.6% s.e.), per foreign core -0.46 log
+user cycles/txn: 6 pairs, at equal foreign +0.5% (±1.2% s.e.), slope +0.07
+
+Short transactions, 8 clients, base against c2:
+| pair | base tps | c2 tps | Δ tps | base instr/txn | c2 instr/txn | Δ instr | Δ cycles | Δ CPU | Δ p50 | foreign | flag |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| 1 | 6,981 | 4,285 | -38.6% | 243,539 | 242,525 | -0.42% | +11.6% | +15.4% | +36.9% | 1.25/2.14 | FLAG |
+| 2 | 4,652 | 7,679 | +65.1% | 250,983 | 248,749 | -0.89% | -5.8% | -11.5% | -27.1% | 2.14/1.00 | FLAG |
+| 3 | 3,973 | 4,689 | +18.0% | 238,001 | 233,405 | -1.93% | -2.8% | -2.6% | -3.9% | 2.48/2.17 | FLAG |
+| 4 | 4,247 | 4,119 | -3.0% | 300,666 | 306,271 | +1.86% | +3.8% | +2.9% | -2.2% | 2.37/2.34 | FLAG |
+| 5 | 4,476 | 5,971 | +33.4% | 241,948 | 299,622 | +23.84% | -1.8% | -5.8% | -19.8% | 2.10/1.48 | FLAG |
+| 6 | 2,363 | 3,800 | +60.8% | 239,049 | 227,199 | -4.96% | -1.8% | -1.8% | +2.1% | 2.81/2.60 | FLAG |
+| 7 | 4,929 | 4,748 | -3.7% | 240,156 | 232,541 | -3.17% | +1.0% | +0.4% | +0.6% | 1.64/2.06 | FLAG |
+
+no unflagged pair
+tps: 6 pairs, at equal foreign +0.7% (±3.8% s.e.), per foreign core -0.45 log
+user cycles/txn: 6 pairs, at equal foreign +1.8% (±1.2% s.e.), slope +0.07
+
+Short transactions, 32 clients, c5 against c6 (nextval's log-ahead on the group):
+| pair | c5 tps | c6 tps | Δ tps | c5 instr/txn | c6 instr/txn | Δ instr | Δ cycles | Δ CPU | Δ p50 | foreign | flag |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| 1 | 7,293 | 8,150 | +11.8% | 256,509 | 303,716 | +18.40% | +2.6% | -4.0% | -4.3% | 0.75/0.64 |  |
+| 2 | 3,826 | 8,425 | +120.2% | 243,690 | 297,434 | +22.05% | -8.8% | -13.8% | -46.5% | 2.27/0.52 | FLAG |
+| 3 | 4,043 | 3,817 | -5.6% | 312,809 | 241,840 | -22.69% | -3.9% | -0.1% | -3.9% | 2.31/2.34 | FLAG |
+| 4 | 8,044 | 4,388 | -45.5% | 293,127 | 296,842 | +1.27% | +5.8% | +8.9% | +40.6% | 0.60/2.02 | FLAG |
+| 5 | 4,321 | 5,799 | +34.2% | 248,661 | 251,639 | +1.20% | -2.4% | -1.6% | -14.7% | 1.80/1.25 | FLAG |
+| 6 | 5,337 | 4,667 | -12.6% | 250,209 | 286,498 | +14.50% | +2.5% | +3.4% | +16.8% | 1.66/2.03 | FLAG |
+
+1 unflagged pairs; medians: tps +11.8%, user instr/txn +18.40%, user cycles/txn +2.6%, connection threads' sampled instr +nan% cycles +nan%, CPU/txn -4.0%, p50 -4.3%; instr down in every pair False, cycles down in every pair False, tps up in every pair True, conn instr down in every pair False, conn cycles down in every pair False
+tps: 6 pairs, at equal foreign +2.2% (±1.7% s.e.), per foreign core -0.44 log
+user cycles/txn: 6 pairs, at equal foreign -0.4% (±1.1% s.e.), slope +0.05
+
+Short transactions, 8 clients, c5 against c6:
+| pair | c5 tps | c6 tps | Δ tps | c5 instr/txn | c6 instr/txn | Δ instr | Δ cycles | Δ CPU | Δ p50 | foreign | flag |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| 1 | 9,337 | 8,258 | -11.6% | 251,371 | 258,697 | +2.91% | +11.6% | +14.1% | +21.3% | 0.61/0.85 |  |
+| 2 | 7,050 | 10,875 | +54.3% | 249,391 | 255,182 | +2.32% | -5.1% | -14.2% | -17.5% | 0.90/0.38 |  |
+| 3 | 2,162 | 5,825 | +169.4% | 239,989 | 236,130 | -1.61% | +3.8% | +9.7% | +33.5% | 1.75/1.70 | FLAG |
+| 4 | 8,575 | 9,241 | +7.8% | 254,056 | 259,039 | +1.96% | -1.8% | -4.3% | -8.1% | 0.81/0.70 |  |
+| 5 | 6,955 | 9,555 | +37.4% | 251,170 | 249,648 | -0.61% | -5.5% | -12.7% | -18.5% | 1.18/0.71 | FLAG |
+
+3 unflagged pairs; medians: tps +7.8%, user instr/txn +2.32%, user cycles/txn -1.8%, connection threads' sampled instr +nan% cycles +nan%, CPU/txn -4.3%, p50 -8.1%; instr down in every pair False, cycles down in every pair False, tps up in every pair False, conn instr down in every pair False, conn cycles down in every pair False
+tps: 5 pairs, at equal foreign +30.8% (±24.9% s.e.), per foreign core -0.39 log
+user cycles/txn: 5 pairs, at equal foreign +4.3% (±1.3% s.e.), slope +0.21
+
 ## Point and range reads, round 6: the same-day table, 32 clients, idle footprint (2026-11-17/18, agent 250)
 
 HANDOFF.md "Point and range reads, round 6" has what changed and why. Base `6d3b7e9e5`, built
