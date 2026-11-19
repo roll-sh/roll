@@ -1082,7 +1082,7 @@ export interface NotifyTarget {
   id: string;
   project: string;
   /** `email`: the project's owner, at their account's address (never an address someone names). */
-  kind: "webhook" | "slack" | "discord" | "email" | "pagerduty" | "opsgenie";
+  kind: "webhook" | "slack" | "discord" | "teams" | "googlechat" | "email" | "pagerduty" | "opsgenie";
   /** The URL's host (the URL itself isn't returned); an email target's says who it reaches. */
   host: string;
   events: NotifyEvent[];
