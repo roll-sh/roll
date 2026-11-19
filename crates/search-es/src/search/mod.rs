@@ -1820,7 +1820,18 @@ fn cacheable(req: &SearchRequest, t: &Target) -> bool {
         return false;
     }
     let text = format!("{src:?}");
-    !(text.contains("now") || text.contains("Script") || text.contains("random"))
+    if text.contains("now") || text.contains("Script") || text.contains("random") {
+        return false;
+    }
+    // A request that reads other documents (terms lookups, indexed shapes, `percolate` by id)
+    // answers what its reader may read of them, which the key can't hold: a reader whose
+    // security restricts anything isn't served others' answers (nor caches its own).
+    !(reads_other_documents(&text) && t.security.is_some())
+}
+
+/// Whether a request's queries read documents of their own (debug text of its source).
+fn reads_other_documents(text: &str) -> bool {
+    text.contains("Some(TermsLookup") || text.contains("Indexed {") || text.contains("Percolate {")
 }
 
 fn request_cache_key(req: &SearchRequest, t: &Target) -> String {
@@ -1828,8 +1839,8 @@ fn request_cache_key(req: &SearchRequest, t: &Target) -> String {
     // (`MappingLookup.cacheKey()`): an update to either busts the entries.
     let fls = t.security.as_ref().and_then(|s| s.fields(crate::xpack::security::dls::READ, &t.idx.name));
     let mut k = format!("{:?}|{:?}|{:?}|{}|{}.{}", req.source, t.alias_filter, fls, req.typed_keys, t.idx.mapping_version, t.idx.settings_version);
-    // Terms lookups read other indices: key on every refresh anywhere.
-    if k.contains("Some(TermsLookup") {
+    // Lookups read other indices: key on every refresh anywhere.
+    if reads_other_documents(&k) {
         k.push_str(&format!("|{}", crate::engine::refresh_epoch()));
     }
     k
