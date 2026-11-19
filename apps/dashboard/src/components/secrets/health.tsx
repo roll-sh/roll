@@ -7,6 +7,7 @@ import { secretsHref, useSecrets } from "./secrets-page";
 import { card, errorText, ErrorNote, ghost, Section, sized, useLoad } from "./ui";
 
 const ISSUES: { issue: Finding["issue"]; title: string; what: string; serious: boolean }[] = [
+  { issue: "decoy_used", title: "Decoy used", what: "Someone used a decoy key's token: they found it where it was planted. Cut off whatever could reach that place, rotate the real credentials beside it, then delete the decoy and plant a new one.", serious: true },
   { issue: "expired", title: "Expired", what: "Their values stopped working outside roll.", serious: true },
   { issue: "rotation_failing", title: "Rotation failing", what: "Their scheduled rotation fails: the database, vendor or rotator refused or didn't answer. The old credential keeps working; roll tries again.", serious: true },
   { issue: "revoke_failing", title: "Not revoked yet", what: "Credentials roll retired or that expired but couldn't revoke yet: they still work until it can. roll keeps trying.", serious: true },
@@ -184,7 +185,7 @@ function Rotations() {
                 {r.name} · {r.kind}
               </span>
               <span className={`ml-auto text-[11.5px] ${r.last_error ? "text-danger" : "text-subtle"}`}>
-                {r.last_error ? `rotation failing: ${r.last_error}` : r.rotate_days && r.next_due ? `every ${r.rotate_days} days · next ${day(r.next_due)}` : "rotates by hand"}
+                {r.last_error ? `rotation failing: ${r.last_error}` : r.rotate_days && r.next_due ? `every ${r.rotate_days} days${r.rotate_window ? ` in ${r.rotate_window} UTC` : ""} · next ${day(r.next_due)}` : "rotates by hand"}
               </span>
               <button className={`${ghost} h-6`} disabled={!!busy} onClick={() => void rotate(r)} title="Rotate now: a new credential; the old one works through its grace period">
                 <RotateCw className={`size-3.5 ${busy === id ? "motion-safe:animate-spin" : ""}`} /> Rotate
