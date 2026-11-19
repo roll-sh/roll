@@ -136,6 +136,7 @@ reqwest = { workspace = true, features = ["json", "rustls"] }
 rusqlite.workspace = true
 # The Google Secret Manager sync's test signs with a key made then (no key in the repo).
 rsa = { workspace = true, features = ["sha2"] }
+roll-keyshares.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 tokio.workspace = true

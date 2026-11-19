@@ -13,6 +13,8 @@ pub struct Entry {
     pub value: Value,
     /// The comment on the line before, if any.
     pub comment: String,
+    /// Tag it `sensitive` (a JSON array item's `sensitive: true`).
+    pub sensitive: bool,
 }
 
 /// The entries of a `.env` file in order, or the first bad line (1-based) and why.
@@ -69,7 +71,7 @@ pub fn parse(text: &str) -> Result<Vec<Entry>, String> {
             v.trim().to_string()
         };
         crate::names::value(&value).map_err(|e| format!("line {n}: {e}"))?;
-        let entry = Entry { key: key.to_string(), value: Value::new(value), comment: std::mem::take(&mut comment) };
+        let entry = Entry { key: key.to_string(), value: Value::new(value), comment: std::mem::take(&mut comment), sensitive: false };
         match out.iter_mut().find(|e| e.key == entry.key) {
             Some(e) => *e = entry,
             None => out.push(entry),
@@ -92,17 +94,17 @@ pub fn from_json(j: &serde_json::Value) -> Result<Vec<Entry>, String> {
         }
     };
     let mut out: Vec<Entry> = vec![];
-    let mut push = |key: &str, value: String, comment: String| -> Result<(), String> {
+    let mut push = |key: &str, value: String, comment: String, sensitive: bool| -> Result<(), String> {
         crate::names::key(key).map_err(|e| e.to_string())?;
         crate::names::value(&value).map_err(|e| format!("{key}: {e}"))?;
         out.retain(|e| e.key != key);
-        out.push(Entry { key: key.to_string(), value: Value::new(value), comment });
+        out.push(Entry { key: key.to_string(), value: Value::new(value), comment, sensitive });
         Ok(())
     };
     match j {
         J::Object(o) => {
             for (k, v) in o {
-                push(k, text(k, v)?, String::new())?;
+                push(k, text(k, v)?, String::new(), false)?;
             }
         }
         J::Array(a) => {
@@ -110,7 +112,8 @@ pub fn from_json(j: &serde_json::Value) -> Result<Vec<Entry>, String> {
                 let key = item.get("key").and_then(J::as_str).ok_or_else(|| format!("item {n}: needs a key"))?;
                 let value = text(key, item.get("value").unwrap_or(&J::Null))?;
                 let comment = item.get("comment").and_then(J::as_str).unwrap_or_default().to_string();
-                push(key, value, comment)?;
+                let sensitive = item.get("sensitive").and_then(J::as_bool).unwrap_or(false);
+                push(key, value, comment, sensitive)?;
             }
         }
         _ => return Err("json is an object of KEY: value or an array of {key, value}".into()),
