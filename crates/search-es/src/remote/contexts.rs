@@ -6,20 +6,29 @@
 //! cluster keeps them under one opaque id ([`is_ccs`]: a marker and random bytes, nothing a
 //! client can read or forge), together with who opened it: the id answers only on this cluster,
 //! and only to the same caller (anyone else gets the missing-context answer, as Elasticsearch's
-//! `SecuritySearchOperationListener` gives). Parts' ids never leave roll.
+//! `SecuritySearchOperationListener` gives). Parts' ids never leave roll. The local part is the
+//! caller's own scroll or point in time (`search::contexts`, run in process as the caller), so a
+//! search on it is authorized for the caller every time (`security::authorize_pit`).
 //!
 //! - **Scroll**: each part scrolls on its own, `size` hits a page. The coordinator keeps the
-//!   hits a part sent but no page has returned yet, and asks a part for more only when it holds
-//!   fewer than `size`, so every page is the `size` best hits left over all clusters, exactly
-//!   as one cluster's scroll pages through them. `_search/scroll` and `DELETE _search/scroll`
-//!   fan out to the parts.
+//!   hits a part sent but no page has returned yet (held on the request breaker until the
+//!   scroll goes), and asks a part for more only when it holds fewer than `size`, so every page
+//!   is the `size` best hits left over all clusters, exactly as one cluster's scroll pages
+//!   through them. A part it doesn't need is still kept alive as long as the scroll: a remote
+//!   one through the link's keep-alive call ([`links::SCROLL_KEEP_ALIVE_HEADER`]), which
+//!   fetches nothing. `_search/scroll` and `DELETE _search/scroll` fan out to the parts.
 //! - **Point in time**: `POST <local>,<alias>:<index>/_pit` opens one on each cluster; a search
 //!   with the id runs on each part's own point in time and merges as any search over linked
 //!   clusters does. `search_after` pages exactly: the `_shard_doc` tiebreaker of each hit
 //!   carries its part above the shard ([`tag_shard_doc`]), and each part continues after the
 //!   last hit's place in that order. `DELETE _pit` closes every part.
+//!
+//! A context's state is behind a lock of its own: pages of one scroll run one at a time, and a
+//! clear or close waits for the page in flight, then closes the parts with their last ids.
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
@@ -30,6 +39,7 @@ use crate::error::{EsError, EsResult};
 use crate::json::{Map, Value};
 use crate::obj;
 use crate::rest::{Ctx, Reply};
+use crate::search::contexts::owner_of;
 use crate::search::{SearchOutcome, SearchRequest};
 use crate::search_source::{PointInTime, Sort, SortOrder};
 use crate::units::TimeValue;
@@ -53,7 +63,6 @@ fn new_id() -> String {
 }
 
 /// One cluster's part.
-#[derive(Clone)]
 struct Part {
     /// `None`: the local cluster's. Else the remote's alias and the cluster it linked to.
     remote: Option<(String, String)>,
@@ -63,10 +72,17 @@ struct Part {
     buffer: VecDeque<Value>,
     /// Scroll: it has nothing more.
     done: bool,
+    /// When its own scroll expires unless it's called again.
+    expires: Instant,
+}
+
+impl Part {
+    fn new(remote: Option<(String, String)>, id: String, expires: Instant) -> Part {
+        Part { remote, id, buffer: VecDeque::new(), done: false, expires }
+    }
 }
 
 /// A scroll's figures from its first page, which every page reports.
-#[derive(Clone)]
 struct ScrollState {
     req: SearchRequest,
     size: usize,
@@ -75,70 +91,104 @@ struct ScrollState {
     shards: (usize, usize),
 }
 
-#[derive(Clone)]
-struct CcsContext {
-    owner: String,
-    expires: Instant,
+/// What a context's pages change.
+struct State {
     keep_alive: Duration,
     parts: Vec<Part>,
+    /// The parts' buffered hits, held on the request breaker until the context goes.
+    held: Option<crate::breaker::Reservation>,
+}
+
+struct Entry {
+    owner: String,
     /// `None`: a point in time.
-    scroll: Option<ScrollState>,
+    scroll: Option<Arc<ScrollState>>,
+    /// A point in time's local part (it never changes): authorized on every search.
+    local_pit: Option<String>,
+    expires: Mutex<Instant>,
+    /// Taken out of the map: a page that was waiting for the state finds it gone.
+    removed: AtomicBool,
+    state: tokio::sync::Mutex<State>,
+}
+
+impl Entry {
+    fn new(owner: String, scroll: Option<ScrollState>, local_pit: Option<String>, keep_alive: Duration, parts: Vec<Part>, held: Option<crate::breaker::Reservation>) -> Entry {
+        Entry {
+            owner,
+            scroll: scroll.map(Arc::new),
+            local_pit,
+            expires: Mutex::new(Instant::now() + keep_alive),
+            removed: AtomicBool::new(false),
+            state: tokio::sync::Mutex::new(State { keep_alive, parts, held }),
+        }
+    }
 }
 
 /// A cluster's scrolls and points in time over linked clusters.
 #[derive(Default)]
 pub struct CcsContexts {
-    map: Mutex<HashMap<String, CcsContext>>,
+    map: Mutex<HashMap<String, Arc<Entry>>>,
 }
 
 impl CcsContexts {
-    fn purge(map: &mut HashMap<String, CcsContext>) {
+    /// Drops expired contexts (their breaker reservation with them; their parts expire on
+    /// their own clusters).
+    fn purge(map: &mut HashMap<String, Arc<Entry>>) {
         let now = Instant::now();
-        map.retain(|_, c| c.expires > now);
+        map.retain(|_, e| {
+            let live = *e.expires.lock() > now;
+            if !live {
+                e.removed.store(true, AtomicOrdering::Release);
+            }
+            live
+        });
     }
 
-    fn open(&self, c: CcsContext) -> EsResult<String> {
+    fn open(&self, e: Entry) -> EsResult<String> {
         let mut map = self.map.lock();
         Self::purge(&mut map);
         if map.len() >= MAX_CONTEXTS {
             return Err(EsError::new(500, "exception", format!("Trying to create too many scroll contexts. Must be less than or equal to: [{MAX_CONTEXTS}].")));
         }
         let id = new_id();
-        map.insert(id.clone(), c);
+        map.insert(id.clone(), Arc::new(e));
         Ok(id)
     }
 
     /// The context `id` names, when it's `owner`'s and alive.
-    fn get(&self, id: &str, owner: &str) -> Option<CcsContext> {
+    fn get(&self, id: &str, owner: &str) -> Option<Arc<Entry>> {
         let mut map = self.map.lock();
         Self::purge(&mut map);
-        map.get(id).filter(|c| c.owner == owner).cloned()
+        map.get(id).filter(|e| e.owner == owner).cloned()
     }
 
-    fn put(&self, id: &str, c: CcsContext) {
-        self.map.lock().insert(id.to_string(), c);
-    }
-
-    fn remove(&self, id: &str, owner: &str) -> Option<CcsContext> {
+    /// Takes `owner`'s context `id` out (a page in flight finishes, then finds it gone).
+    fn remove(&self, id: &str, owner: &str) -> Option<Arc<Entry>> {
         let mut map = self.map.lock();
         Self::purge(&mut map);
-        if map.get(id).is_some_and(|c| c.owner == owner) { map.remove(id) } else { None }
+        if !map.get(id).is_some_and(|e| e.owner == owner) {
+            return None;
+        }
+        let e = map.remove(id)?;
+        e.removed.store(true, AtomicOrdering::Release);
+        Some(e)
     }
 
     /// Every scroll of `owner` (`DELETE _search/scroll/_all`).
-    fn remove_scrolls(&self, owner: &str) -> Vec<CcsContext> {
+    fn remove_scrolls(&self, owner: &str) -> Vec<Arc<Entry>> {
         let mut map = self.map.lock();
-        let ids: Vec<String> = map.iter().filter(|(_, c)| c.owner == owner && c.scroll.is_some()).map(|(k, _)| k.clone()).collect();
-        ids.iter().filter_map(|k| map.remove(k)).collect()
+        let ids: Vec<String> = map.iter().filter(|(_, e)| e.owner == owner && e.scroll.is_some()).map(|(k, _)| k.clone()).collect();
+        let out: Vec<Arc<Entry>> = ids.iter().filter_map(|k| map.remove(k)).collect();
+        for e in &out {
+            e.removed.store(true, AtomicOrdering::Release);
+        }
+        out
     }
-}
 
-/// Who a context is bound to: the request's user (its realm) or API key.
-fn caller(ctx: &Ctx) -> String {
-    let p = crate::xpack::security::principal(ctx);
-    match &p.kind {
-        crate::xpack::security::AuthKind::ApiKey(a) => format!("api_key:{}", a.id),
-        _ => format!("{}:{}", p.realm_name, p.username),
+    /// The local part of `owner`'s point in time `id` over linked clusters (`None`: no such
+    /// point in time, or it has no local part).
+    pub fn local_pit(&self, id: &str, owner: &str) -> Option<String> {
+        self.get(id, owner).filter(|e| e.scroll.is_none()).and_then(|e| e.local_pit.clone())
     }
 }
 
@@ -148,64 +198,79 @@ fn current_remote(ctx: &Ctx, alias: &str, target: &str) -> Option<Remote> {
     remotes(&ctx.state()).into_iter().find(|r| r.alias == alias && r.link(links).as_deref() == Some(target))
 }
 
-/// Sends a part's request: a leg to its remote, or a call on this cluster as the client.
-fn send_part(ctx: &Ctx, part: &Part, method: &str, uri: &str, body: Option<Value>) -> PartCall {
-    match &part.remote {
-        Some((alias, target)) => match current_remote(ctx, alias, target) {
-            Some(r) => {
-                let rq = links::request(ctx, alias, method, uri, body);
-                PartCall::Remote(r.clone(), links::leg(ctx, &r, target.clone(), rq))
-            }
-            None => PartCall::Gone(alias.clone()),
-        },
-        None => PartCall::Local(method.to_string(), uri.to_string(), body),
-    }
-}
-
+/// A remote part's request, running.
 enum PartCall {
     Remote(Remote, tokio::task::JoinHandle<Answer>),
     /// The remote isn't configured (or linked to that cluster) anymore.
     Gone(String),
-    Local(String, String, Option<Value>),
+}
+
+/// Sends a remote part's request (`header`: one of the link's own).
+fn send_remote(ctx: &Ctx, alias: &str, target: &str, method: &str, uri: &str, body: Option<Value>, header: Option<&str>) -> PartCall {
+    match current_remote(ctx, alias, target) {
+        Some(r) => {
+            let mut rq = links::request(ctx, alias, method, uri, body);
+            if let Some(h) = header {
+                rq.headers.push((h.into(), "1".into()));
+            }
+            PartCall::Remote(r.clone(), links::leg(ctx, &r, target.to_string(), rq))
+        }
+        None => PartCall::Gone(alias.to_string()),
+    }
 }
 
 /// What a part answered: its answer, or the error and whether the search may go on without it.
-async fn finish_part(ctx: &Ctx<'_>, call: PartCall) -> Result<Value, (EsError, bool)> {
+type PartAnswer = Result<Value, (EsError, bool)>;
+
+/// What a remote part answered.
+async fn finish_part(call: PartCall) -> PartAnswer {
     match call {
         PartCall::Remote(r, h) => match links::join(&r.alias, h).await {
             Answer::Ok(v) => Ok(v),
             Answer::Failed(e) | Answer::Unavailable(e) => Err((e, r.skip_unavailable)),
         },
         PartCall::Gone(alias) => Err((EsError::new(404, "no_such_remote_cluster_exception", format!("no such remote cluster: [{alias}]")), true)),
-        PartCall::Local(method, uri, body) => {
-            let caller = crate::xpack::internal::Caller::of(ctx);
-            crate::xpack::internal::as_caller(caller, crate::xpack::internal::call(ctx.cluster, &method, &uri, body.as_ref())).await.map_err(|e| (e, false))
-        }
     }
 }
 
 /// Closes every part (each cluster's scroll or point in time): how many shard contexts went.
 async fn close_parts(ctx: &Ctx<'_>, parts: &[Part], pit: bool) -> usize {
+    let owner = owner_of(ctx);
     let mut calls = Vec::new();
     let mut freed = 0;
     for p in parts {
-        let call = match (pit, &p.remote) {
-            (false, None) => {
-                // This cluster's own scroll.
-                freed += ctx.cluster.contexts.close_shards(&p.id);
-                continue;
-            }
-            (true, _) => send_part(ctx, p, "DELETE", "/_pit", Some(obj! { "id" => p.id.clone() })),
-            (false, Some(_)) => send_part(ctx, p, "DELETE", "/_search/scroll", Some(obj! { "scroll_id" => crate::arr![p.id.clone()] })),
-        };
-        calls.push(call);
+        match &p.remote {
+            // This cluster's own, the caller's.
+            None => freed += ctx.cluster.contexts.close_shards(&p.id, &owner),
+            Some((alias, target)) => calls.push(if pit {
+                send_remote(ctx, alias, target, "DELETE", "/_pit", Some(obj! { "id" => p.id.clone() }), None)
+            } else {
+                send_remote(ctx, alias, target, "DELETE", "/_search/scroll", Some(obj! { "scroll_id" => crate::arr![p.id.clone()] }), None)
+            }),
+        }
     }
     for call in calls {
-        if let Ok(v) = Box::pin(finish_part(ctx, call)).await {
+        if let Ok(v) = Box::pin(finish_part(call)).await {
             freed += v.get("num_freed").and_then(Value::as_i64).unwrap_or(0).max(0) as usize;
         }
     }
     freed
+}
+
+/// Holds the parts' buffered hits on the request breaker (the last reservation released).
+fn hold_buffers(ctx: &Ctx, st: &mut State) -> EsResult<()> {
+    let mut buf = Vec::new();
+    let bytes: u64 = st.parts.iter().flat_map(|p| p.buffer.iter()).map(|h| crate::breaker::estimate_hit(h, &mut buf)).sum();
+    st.held = None;
+    let mut r = crate::breaker::Reservation::new(ctx.cluster.breakers.request(ctx.cluster, &ctx.state()));
+    r.add(bytes, "<cross_cluster_scroll>")?;
+    st.held = Some(r);
+    Ok(())
+}
+
+/// The keep-alive a part's request carries.
+fn ka_text(d: Duration) -> String {
+    format!("{}ms", d.as_millis())
 }
 
 // --- Scroll -------------------------------------------------------------------------------
@@ -215,7 +280,7 @@ async fn close_parts(ctx: &Ctx<'_>, parts: &[Part], pit: bool) -> usize {
 pub async fn start_scroll(ctx: &Ctx<'_>, req: &SearchRequest, body: Option<&Value>, split: Split) -> EsResult<SearchOutcome> {
     let started = Instant::now();
     let ka = crate::search::contexts::check_keep_alive(ctx, req.scroll.unwrap_or(TimeValue::minutes(1)))?;
-    let ka_text = ctx.query("scroll").map(str::to_string).unwrap_or_else(|| format!("{}ms", ka.as_millis()));
+    let ka_text = ctx.query("scroll").map(str::to_string).unwrap_or_else(|| ka_text(ka));
     let size = req.source.size.unwrap_or(10).max(0) as usize;
     let has_aggs = links::has_aggs(req);
     let mut body = links::part_body(body, size as i64);
@@ -245,14 +310,15 @@ pub async fn start_scroll(ctx: &Ctx<'_>, req: &SearchRequest, body: Option<&Valu
     let local_id = local.as_mut().and_then(|o| o.scroll_id.take());
     let m = Box::pin(links::merge(ctx, req, &req.source.sort, None, local, &split.local.join(","), legs, split.wildcards, started)).await?;
     let mut out = m.out;
+    let expires = Instant::now() + ka;
     // Part `k` of the merge: 0 the local one, `i + 1` leg `i`.
     let mut parts: Vec<(usize, Part)> = Vec::new();
     if let Some(id) = local_id {
-        parts.push((0, Part { remote: None, id, buffer: VecDeque::new(), done: false }));
+        parts.push((0, Part::new(None, id, expires)));
     }
     for (i, answer) in m.answers.iter().enumerate() {
         if let Some(id) = answer.as_ref().and_then(|v| v.get("_scroll_id")).and_then(Value::as_str) {
-            parts.push((i + 1, Part { remote: Some(targets[i].clone()), id: id.to_string(), buffer: VecDeque::new(), done: false }));
+            parts.push((i + 1, Part::new(Some(targets[i].clone()), id.to_string(), expires)));
         }
     }
     let mut sent = vec![0usize; m.answers.len() + 1];
@@ -269,9 +335,14 @@ pub async fn start_scroll(ctx: &Ctx<'_>, req: &SearchRequest, body: Option<&Valu
         p.done = sent[*k] < size;
     }
     out.hits = hits;
+    let mut st = State { keep_alive: ka, parts: parts.into_iter().map(|(_, p)| p).collect(), held: None };
+    if let Err(e) = hold_buffers(ctx, &mut st) {
+        Box::pin(close_parts(ctx, &st.parts, false)).await;
+        return Err(e);
+    }
     let state = ScrollState { req: req.clone(), size, total: out.total, max_score: out.max_score, shards: (out.shards_total, out.shards_skipped) };
-    let id = ctx.cluster.ccs_contexts.open(CcsContext { owner: caller(ctx), expires: Instant::now() + ka, keep_alive: ka, parts: parts.into_iter().map(|(_, p)| p).collect(), scroll: Some(state) })?;
-    out.scroll_id = Some(id);
+    let e = Entry::new(owner_of(ctx), Some(state), None, ka, std::mem::take(&mut st.parts), st.held.take());
+    out.scroll_id = Some(ctx.cluster.ccs_contexts.open(e)?);
     Ok(out)
 }
 
@@ -284,37 +355,86 @@ fn scroll_request(ctx: &Ctx) -> EsResult<(Option<String>, Option<String>)> {
     Ok((id, ka))
 }
 
+/// A link's keep-alive call for this cluster's part of a scroll: extends it, fetches nothing.
+fn keep_alive_only(ctx: &Ctx, id: &str, ka: Option<&str>) -> EsResult<Reply> {
+    let keep = crate::search::contexts::check_keep_alive(ctx, TimeValue::parse(ka.unwrap_or("1m"), "scroll")?)?;
+    match ctx.cluster.contexts.with(id, &owner_of(ctx), Some(keep), |_| ()) {
+        Some(()) => Reply::ok(obj! { "_scroll_id" => id.to_string() }),
+        None => Err(crate::search::contexts::missing(id)),
+    }
+}
+
 /// `GET/POST /_search/scroll`: a scroll over linked clusters here, any other one as before.
 pub async fn scroll(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let Ok((Some(id), ka)) = scroll_request(ctx) else { return crate::search::contexts::scroll(ctx) };
     if !is_ccs(&id) {
+        if links::is_link_call(ctx) && ctx.request.header(links::SCROLL_KEEP_ALIVE_HEADER).is_some() {
+            return keep_alive_only(ctx, &id, ka.as_deref());
+        }
         return crate::search::contexts::scroll(ctx);
     }
-    let owner = caller(ctx);
-    let Some(mut c) = ctx.cluster.ccs_contexts.get(&id, &owner).filter(|c| c.scroll.is_some()) else { return Err(crate::search::contexts::missing(&id)) };
+    let owner = owner_of(ctx);
+    let Some(e) = ctx.cluster.ccs_contexts.get(&id, &owner).filter(|e| e.scroll.is_some()) else { return Err(crate::search::contexts::missing(&id)) };
     let keep = match &ka {
         Some(k) => Some(crate::search::contexts::check_keep_alive(ctx, TimeValue::parse(k, "scroll")?)?),
         None => None,
     };
-    let state = c.scroll.clone().expect("a scroll");
+    let state = e.scroll.clone().expect("a scroll");
     let size = state.size;
-    // Each part that holds fewer than a page asks its cluster for its next one.
-    let mut calls = Vec::new();
-    for (k, p) in c.parts.iter().enumerate() {
-        if p.done || p.buffer.len() >= size {
+    // One page at a time; a clear that came first leaves nothing.
+    let mut st = e.state.lock().await;
+    if e.removed.load(AtomicOrdering::Acquire) {
+        return Err(crate::search::contexts::missing(&id));
+    }
+    let last = keep.is_none() && ctx.cluster.dialect == crate::cluster::Dialect::Elasticsearch;
+    let ka_now = keep.unwrap_or(st.keep_alive);
+    let ka_sent = ka.clone().unwrap_or_else(|| ka_text(ka_now));
+    let now = Instant::now();
+    // The scroll lives until `horizon`: a part short of a page fetches its next one, and one
+    // that would expire before then (and isn't fetched) is kept alive without fetching.
+    let horizon = now + ka_now;
+    let mut fetches = Vec::new();
+    let mut local_fetch = None;
+    let mut keep_alives = Vec::new();
+    for (k, p) in st.parts.iter().enumerate() {
+        if p.done {
             continue;
         }
-        let mut body = obj! { "scroll_id" => p.id.clone() };
-        if let (Some(k), Value::Obj(m)) = (&ka, &mut body) {
-            m.insert("scroll".into(), k.clone().into());
+        let fetch = p.buffer.len() < size;
+        if !fetch && (last || p.expires > horizon) {
+            continue;
         }
-        calls.push((k, send_part(ctx, p, "POST", "/_search/scroll", Some(body))));
+        match (&p.remote, fetch) {
+            (None, true) => local_fetch = Some(k),
+            (None, false) => {
+                if ctx.cluster.contexts.with(&p.id, &owner, Some(ka_now), |_| ()).is_none() {
+                    return Err(crate::search::contexts::missing(&id));
+                }
+            }
+            (Some((alias, target)), fetch) => {
+                let mut body = obj! { "scroll_id" => p.id.clone() };
+                if let (false, Value::Obj(m)) = (last, &mut body) {
+                    m.insert("scroll".into(), ka_sent.clone().into());
+                }
+                let header = (!fetch).then_some(links::SCROLL_KEEP_ALIVE_HEADER);
+                let call = send_remote(ctx, alias, target, "POST", "/_search/scroll", Some(body), header);
+                if fetch { fetches.push((k, call)) } else { keep_alives.push((k, call)) }
+            }
+        }
     }
     let mut failures = Vec::new();
-    for (k, call) in calls {
-        match Box::pin(finish_part(ctx, call)).await {
+    let mut answers: Vec<(usize, PartAnswer)> = Vec::new();
+    if let Some(k) = local_fetch {
+        let ka = (!last).then_some(ka_sent.as_str());
+        answers.push((k, crate::search::contexts::scroll_by(ctx, &st.parts[k].id, ka).map_err(|e| (e, false))));
+    }
+    for (k, call) in fetches {
+        answers.push((k, Box::pin(finish_part(call)).await));
+    }
+    for (k, answer) in answers {
+        match answer {
             Ok(mut v) => {
-                let p = &mut c.parts[k];
+                let p = &mut st.parts[k];
                 if let Some(id) = v.get("_scroll_id").and_then(Value::as_str) {
                     p.id = id.to_string();
                 }
@@ -323,6 +443,7 @@ pub async fn scroll(ctx: &Ctx<'_>) -> EsResult<Reply> {
                     _ => Vec::new(),
                 };
                 p.done = hits.len() < size;
+                p.expires = now + ka_now;
                 for mut h in hits {
                     if let Some((alias, _)) = &p.remote {
                         links::prefix_index(&mut h, alias);
@@ -334,14 +455,26 @@ pub async fn scroll(ctx: &Ctx<'_>) -> EsResult<Reply> {
                 if !skip {
                     return Err(e);
                 }
-                c.parts[k].done = true;
+                st.parts[k].done = true;
+                failures.push(obj! { "shard" => -1, "index" => Value::Null, "reason" => e.to_value(false) });
+            }
+        }
+    }
+    for (k, call) in keep_alives {
+        match Box::pin(finish_part(call)).await {
+            Ok(_) => st.parts[k].expires = now + ka_now,
+            Err((e, skip)) => {
+                if !skip {
+                    return Err(e);
+                }
+                st.parts[k].done = true;
                 failures.push(obj! { "shard" => -1, "index" => Value::Null, "reason" => e.to_value(false) });
             }
         }
     }
     // The page: the best `size` hits left over every part (each part's are in order already).
     let mut all: Vec<(usize, Value)> = Vec::new();
-    for (k, p) in c.parts.iter_mut().enumerate() {
+    for (k, p) in st.parts.iter_mut().enumerate() {
         all.extend(p.buffer.drain(..).map(|h| (k, h)));
     }
     links::sort_hits(&mut all, &state.req.source.sort);
@@ -350,7 +483,7 @@ pub async fn scroll(ctx: &Ctx<'_>) -> EsResult<Reply> {
         if page.len() < size {
             page.push(h);
         } else {
-            c.parts[k].buffer.push_back(h);
+            st.parts[k].buffer.push_back(h);
         }
     }
     let mut out = crate::opensearch::can_match::all_skipped(state.shards.0);
@@ -359,20 +492,18 @@ pub async fn scroll(ctx: &Ctx<'_>) -> EsResult<Reply> {
     out.total = state.total;
     out.max_score = state.max_score;
     out.hits = page;
-    // Elasticsearch: a continuation without a keep-alive is the last one.
-    match keep {
-        None if ctx.cluster.dialect == crate::cluster::Dialect::Elasticsearch => {
+    if last {
+        ctx.cluster.ccs_contexts.remove(&id, &owner);
+        Box::pin(close_parts(ctx, &st.parts, false)).await;
+    } else {
+        if let Err(err) = hold_buffers(ctx, &mut st) {
             ctx.cluster.ccs_contexts.remove(&id, &owner);
-            Box::pin(close_parts(ctx, &c.parts, false)).await;
+            Box::pin(close_parts(ctx, &st.parts, false)).await;
+            return Err(err);
         }
-        keep => {
-            if let Some(k) = keep {
-                c.keep_alive = k;
-            }
-            c.expires = Instant::now() + c.keep_alive;
-            ctx.cluster.ccs_contexts.put(&id, c);
-            out.scroll_id = Some(id);
-        }
+        st.keep_alive = ka_now;
+        *e.expires.lock() = now + ka_now;
+        out.scroll_id = Some(id);
     }
     Reply::ok(crate::search::render_take(&mut out, &state.req))
 }
@@ -380,15 +511,17 @@ pub async fn scroll(ctx: &Ctx<'_>) -> EsResult<Reply> {
 /// `DELETE /_search/scroll`: scrolls over linked clusters close each part; any other as before.
 pub async fn clear_scroll(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let ids = crate::search::contexts::clear_scroll_ids(ctx)?;
-    let owner = caller(ctx);
+    let owner = owner_of(ctx);
     let (ccs, plain): (Vec<String>, Vec<String>) = ids.iter().cloned().partition(|i| is_ccs(i));
-    let mut contexts: Vec<CcsContext> = ccs.iter().filter_map(|id| ctx.cluster.ccs_contexts.remove(id, &owner)).filter(|c| c.scroll.is_some()).collect();
+    let mut entries: Vec<Arc<Entry>> = ccs.iter().filter_map(|id| ctx.cluster.ccs_contexts.get(id, &owner).filter(|e| e.scroll.is_some()).and_then(|_| ctx.cluster.ccs_contexts.remove(id, &owner))).collect();
     if ids.iter().any(|i| i == "_all") {
-        contexts.extend(ctx.cluster.ccs_contexts.remove_scrolls(&owner));
+        entries.extend(ctx.cluster.ccs_contexts.remove_scrolls(&owner));
     }
     let mut freed = if plain.is_empty() { 0 } else { crate::search::contexts::free_scrolls(ctx, &plain)? };
-    for c in &contexts {
-        freed += Box::pin(close_parts(ctx, &c.parts, false)).await;
+    for e in &entries {
+        // After the page in flight, with the parts' last ids.
+        let st = e.state.lock().await;
+        freed += Box::pin(close_parts(ctx, &st.parts, false)).await;
     }
     Ok(crate::search::contexts::cleared(freed, &ids))
 }
@@ -403,48 +536,55 @@ pub async fn open_pit(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let body = ctx.body()?;
     let qs = links::query_string(ctx, &["index", "pretty", "human", "error_trace", "filter_path", "format"], &[]);
     let started = Instant::now();
-    // (name in `_clusters`, its expressions, the part, its call)
+    let expires = Instant::now() + ka;
     let mut calls = Vec::new();
-    if !split.local.is_empty() {
-        let part = Part { remote: None, id: String::new(), buffer: VecDeque::new(), done: false };
-        let uri = format!("/{}/_pit{qs}", links::path_segment(&split.local));
-        calls.push(("(local)".to_string(), split.local.join(","), part, PartCall::Local("POST".into(), uri, body.clone())));
-    }
     for (r, target, exprs) in &split.legs {
-        let part = Part { remote: Some((r.alias.clone(), target.clone())), id: String::new(), buffer: VecDeque::new(), done: false };
         let uri = format!("/{}/_pit{qs}", links::path_segment(exprs));
-        let call = send_part(ctx, &part, "POST", &uri, body.clone());
-        calls.push((r.alias.clone(), exprs.join(","), part, call));
+        let call = send_remote(ctx, &r.alias, target, "POST", &uri, body.clone(), None);
+        calls.push((r.alias.clone(), target.clone(), exprs.join(","), call));
     }
     let (mut total, mut successful, mut skipped) = (0i64, 0i64, 0i64);
     let mut parts = Vec::new();
     let mut details = Map::new();
-    for (name, indices, mut part, call) in calls {
-        match Box::pin(finish_part(ctx, call)).await {
+    let mut add = |name: String, indices: String, v: &Value, details: &mut Map| {
+        let n = |k: &str| v.pointer(&["_shards", k]).and_then(Value::as_i64).unwrap_or(0);
+        total += n("total");
+        successful += n("successful");
+        skipped += n("skipped");
+        details.insert(name, obj! {
+            "status" => "successful", "indices" => indices, "took" => started.elapsed().as_millis() as i64, "timed_out" => false,
+            "_shards" => obj! { "total" => n("total"), "successful" => n("successful"), "skipped" => n("skipped"), "failed" => n("failed") },
+        });
+    };
+    // The local part: the caller's own point in time, opened here as the caller.
+    let mut local_pit = None;
+    if !split.local.is_empty() {
+        let mut lreq = crate::search::parse_request(ctx, None, None)?;
+        lreq.indices = split.local.clone();
+        let v = crate::search::contexts::open_pit_for(ctx, lreq, ka, body.as_ref().and_then(|b| b.get("index_filter")))?;
+        add("(local)".into(), split.local.join(","), &v, &mut details);
+        let id = v.get("id").map(Value::to_es_string).unwrap_or_default();
+        local_pit = Some(id.clone());
+        parts.push(Part::new(None, id, expires));
+    }
+    for (alias, target, indices, call) in calls {
+        match Box::pin(finish_part(call)).await {
             Ok(v) => {
-                let n = |k: &str| v.pointer(&["_shards", k]).and_then(Value::as_i64).unwrap_or(0);
-                total += n("total");
-                successful += n("successful");
-                skipped += n("skipped");
-                details.insert(name, obj! {
-                    "status" => "successful", "indices" => indices, "took" => started.elapsed().as_millis() as i64, "timed_out" => false,
-                    "_shards" => obj! { "total" => n("total"), "successful" => n("successful"), "skipped" => n("skipped"), "failed" => n("failed") },
-                });
-                part.id = v.get("id").map(Value::to_es_string).unwrap_or_default();
-                parts.push(part);
+                add(alias.clone(), indices, &v, &mut details);
+                parts.push(Part::new(Some((alias, target)), v.get("id").map(Value::to_es_string).unwrap_or_default(), expires));
             }
             Err((e, skip)) => {
                 if !skip {
                     Box::pin(close_parts(ctx, &parts, true)).await;
                     return Err(e);
                 }
-                details.insert(name, obj! { "status" => "skipped", "indices" => indices, "timed_out" => false, "failures" => crate::arr![obj! { "shard" => -1, "index" => Value::Null, "reason" => e.to_value(false) }] });
+                details.insert(alias, obj! { "status" => "skipped", "indices" => indices, "timed_out" => false, "failures" => crate::arr![obj! { "shard" => -1, "index" => Value::Null, "reason" => e.to_value(false) }] });
             }
         }
     }
     let count = |s: &str| details.values().filter(|d| d.get("status").and_then(Value::as_str) == Some(s)).count() as i64;
     let clusters = obj! { "total" => details.len() as i64, "successful" => count("successful"), "skipped" => count("skipped"), "running" => 0, "partial" => 0, "failed" => 0, "details" => Value::Obj(details.clone()) };
-    let id = ctx.cluster.ccs_contexts.open(CcsContext { owner: caller(ctx), expires: Instant::now() + ka, keep_alive: ka, parts, scroll: None })?;
+    let id = ctx.cluster.ccs_contexts.open(Entry::new(owner_of(ctx), None, local_pit, ka, parts, None))?;
     Reply::ok(obj! { "id" => id, "_shards" => obj! { "total" => total, "successful" => successful, "skipped" => skipped, "failed" => total - successful - skipped }, "_clusters" => clusters })
 }
 
@@ -452,8 +592,12 @@ pub async fn open_pit(ctx: &Ctx<'_>) -> EsResult<Reply> {
 pub async fn close_pit(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let body = ctx.body_map()?.unwrap_or_default();
     let Some(id) = body.get("id").map(Value::to_es_string).filter(|i| is_ccs(i)) else { return crate::search::contexts::close_pit(ctx) };
-    let freed = match ctx.cluster.ccs_contexts.remove(&id, &caller(ctx)).filter(|c| c.scroll.is_none()) {
-        Some(c) => Box::pin(close_parts(ctx, &c.parts, true)).await,
+    let owner = owner_of(ctx);
+    let freed = match ctx.cluster.ccs_contexts.get(&id, &owner).filter(|e| e.scroll.is_none()).and_then(|_| ctx.cluster.ccs_contexts.remove(&id, &owner)) {
+        Some(e) => {
+            let st = e.state.lock().await;
+            Box::pin(close_parts(ctx, &st.parts, true)).await
+        }
         None => 0,
     };
     // As Elasticsearch answers a point in time that's gone.
@@ -504,11 +648,21 @@ pub async fn pit_search(ctx: &Ctx<'_>, req: &SearchRequest, body: Option<&Value>
     if !req.indices.is_empty() {
         return Err(EsError::action_request_validation(&["[indices] cannot be used with point in time. Do not specify any index with point in time.".into()]));
     }
-    let owner = caller(ctx);
-    let Some(mut c) = ctx.cluster.ccs_contexts.get(&pit.id, &owner).filter(|c| c.scroll.is_none()) else { return Err(crate::search::contexts::missing(&pit.id)) };
-    if let Some(k) = pit.keep_alive {
-        c.keep_alive = crate::search::contexts::check_keep_alive(ctx, k)?;
-    }
+    let owner = owner_of(ctx);
+    let Some(e) = ctx.cluster.ccs_contexts.get(&pit.id, &owner).filter(|e| e.scroll.is_none()) else { return Err(crate::search::contexts::missing(&pit.id)) };
+    // As Elasticsearch, a search extends the point in time only when it sends a keep-alive.
+    let keep = match pit.keep_alive {
+        Some(k) => Some(crate::search::contexts::check_keep_alive(ctx, k)?),
+        None => None,
+    };
+    // The parts as they are now (a point in time holds no buffers): searched without the lock.
+    let parts: Vec<(Option<(String, String)>, String)> = {
+        let st = e.state.lock().await;
+        if e.removed.load(AtomicOrdering::Acquire) {
+            return Err(crate::search::contexts::missing(&pit.id));
+        }
+        st.parts.iter().map(|p| (p.remote.clone(), p.id.clone())).collect()
+    };
     // The order every part sorts in, with the tiebreaker a sorted point in time gets.
     let mut source = req.source.clone();
     crate::search::add_pit_tiebreaker(&mut source);
@@ -520,20 +674,20 @@ pub async fn pit_search(ctx: &Ctx<'_>, req: &SearchRequest, body: Option<&Value>
     let has_aggs = links::has_aggs(req);
     let qs = links::query_string(ctx, links::PART_DROP, &[]);
     let keep_alive = pit.keep_alive.map(|k| format!("{}ms", k.as_millis())).or_else(|| body.and_then(|b| b.pointer(&["pit", "keep_alive"])).map(Value::to_es_string));
-    let local_part = c.parts.iter().position(|p| p.remote.is_none());
+    let local_part = parts.iter().position(|(remote, _)| remote.is_none());
     let mut legs = Vec::new();
     let mut remote_parts = Vec::new();
     // Merge part numbers: 0 the local part, then the remote parts in order.
     let mut number = 1;
-    for (i, p) in c.parts.iter().enumerate() {
-        let Some((alias, target)) = &p.remote else { continue };
+    for (i, (remote, part_id)) in parts.iter().enumerate() {
+        let Some((alias, target)) = remote else { continue };
         let part_no = number;
         number += 1;
         let mut b = match links::part_body(body, from + size) {
             Value::Obj(m) => m,
             _ => Map::new(),
         };
-        let mut pit_body = obj! { "id" => p.id.clone() };
+        let mut pit_body = obj! { "id" => part_id.clone() };
         if let (Some(k), Value::Obj(m)) = (&keep_alive, &mut pit_body) {
             m.insert("keep_alive".into(), k.clone().into());
         }
@@ -554,7 +708,7 @@ pub async fn pit_search(ctx: &Ctx<'_>, req: &SearchRequest, body: Option<&Value>
     let local = match local_part {
         Some(i) => {
             let mut lreq = req.clone();
-            lreq.source.pit = Some(PointInTime { id: c.parts[i].id.clone(), keep_alive: pit.keep_alive });
+            lreq.source.pit = Some(PointInTime { id: parts[i].1.clone(), keep_alive: pit.keep_alive });
             lreq.source.from = Some(0);
             lreq.source.size = Some((from + size) as i32);
             lreq.partial_aggs = has_aggs;
@@ -569,13 +723,23 @@ pub async fn pit_search(ctx: &Ctx<'_>, req: &SearchRequest, body: Option<&Value>
     let mut out = m.out;
     out.hits = m.hits.into_iter().skip(from as usize).take(size as usize).map(|(_, h)| h).collect();
     // A part's point in time may come back under a new id.
+    let mut new_ids = Vec::new();
     for (i, answer) in remote_parts.into_iter().zip(m.answers) {
         if let Some(id) = answer.as_ref().and_then(|v| v.get("pit_id")).and_then(Value::as_str) {
-            c.parts[i].id = id.to_string();
+            new_ids.push((i, id.to_string()));
         }
     }
-    c.expires = Instant::now() + c.keep_alive;
-    ctx.cluster.ccs_contexts.put(&pit.id, c);
+    let mut st = e.state.lock().await;
+    for (i, id) in new_ids {
+        if let Some(p) = st.parts.get_mut(i) {
+            p.id = id;
+        }
+    }
+    if let Some(k) = keep {
+        st.keep_alive = k;
+        *e.expires.lock() = Instant::now() + k;
+    }
+    drop(st);
     out.pit_id = Some(pit.id);
     Ok(out)
 }

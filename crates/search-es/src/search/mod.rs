@@ -3993,6 +3993,7 @@ pub(crate) fn analytics_record(ctx: &Ctx, watch: Option<Watch>, req: &SearchRequ
 
 pub async fn search(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let mut body = ctx.body()?;
+    check_pit_without_indices(ctx, body.as_ref().is_some_and(|b| b.get("pit").is_some()))?;
     // A search naming remote clusters keeps the body it was sent for the linked ones.
     // So does one on a point in time over linked clusters.
     let ccs_pit = body.as_ref().and_then(|b| b.pointer(&["pit", "id"])).and_then(Value::as_str).is_some_and(crate::remote::contexts::is_ccs);
@@ -4085,6 +4086,20 @@ pub(crate) fn reduce_clusters(ctx: &Ctx, req: &SearchRequest, parts: Vec<search_
         aggs::render_tsid_keys(a, &mut out, req.typed_keys);
     }
     Ok(Some(out))
+}
+
+/// `SearchRequest.validate`: a search on a point in time names no index (its indices are the
+/// point in time's). Checked before anything reads the request's indices (`has_pit`: the body
+/// names one; else read from it).
+pub(crate) fn check_pit_without_indices(ctx: &Ctx, has_pit: bool) -> EsResult<()> {
+    if ctx.param("index").is_none() || !(has_pit || ctx.body().ok().flatten().is_some_and(|b| b.get("pit").is_some())) {
+        return Ok(());
+    }
+    let msg = match ctx.cluster.dialect {
+        crate::cluster::Dialect::OpenSearch => "[indices] cannot be used with point in time",
+        crate::cluster::Dialect::Elasticsearch => "[indices] cannot be used with point in time. Do not specify any index with point in time.",
+    };
+    Err(EsError::action_request_validation(&[msg.into()]))
 }
 
 /// `SearchRequest.rewrite`: a sorted point-in-time search gets a `_shard_doc` tiebreaker when

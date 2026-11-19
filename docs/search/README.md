@@ -209,7 +209,10 @@ Elasticsearch-flavor.
   the data would. Each cluster reduces its part partially and the local cluster does the final
   reduce from their internal state (`search-aggs` `wire`): HyperLogLog sketches, t-digests and
   HDR histograms, sums with their counts, top hits with their sort keys (fetched on their own
-  cluster), held to `search.max_buckets` by the final reduce as one cluster's are. Only a
+  cluster), held to `search.max_buckets` by the final reduce as one cluster's are. The state is
+  held on the request breaker before it's decoded, its nesting is bounded
+  (`search_aggs::wire::MAX_NESTING`: a document's 1000 JSON levels under 100 aggregation
+  levels), and it's encoded and decoded on a thread with a stack of its own. Only a
   link's own request may ask for that state (`x-roll-partial-aggs`, honored
   for a cross-cluster key's request only); a client asking gets the public answer. A
   `geo_centroid`'s sums add up in another order, so its last digit may differ from one
@@ -222,7 +225,14 @@ Elasticsearch-flavor.
   over all clusters (the coordinator keeps what a part sent ahead and asks it for more only when
   it runs short), so pages go through the documents exactly as one cluster's scroll does.
   `_search/scroll`, `DELETE _search/scroll`, `DELETE _pit` and point-in-time searches fan out
-  to the parts. `search_after` with a point in time pages exactly: each hit's `_shard_doc`
+  to the parts. The hits a part sent ahead are held on the request breaker for as long as the
+  scroll lives. A part with nothing to fetch is kept alive as long as the scroll through the
+  link's keep-alive call, which fetches nothing; a point in time is extended only by a search
+  that sends `keep_alive`. Pages of one scroll run one at a time, and a clear or close waits for
+  the page in flight. Every search on a point in time is authorized for its caller against the
+  point in time's local indices (a role that loses one loses it there too), and one naming
+  indices in its path is refused (400) before anything reads them. A scroll or point in time of
+  one cluster is its opener's alone too. `search_after` with a point in time pages exactly: each hit's `_shard_doc`
   tiebreaker carries its cluster above its shard, and every cluster continues from the last
   hit's place in that order.
 - **OpenSearch-flavor clusters**: `cluster.remote.*` and `_remote/info` answer as OpenSearch

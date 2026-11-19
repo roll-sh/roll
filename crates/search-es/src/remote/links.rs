@@ -56,6 +56,11 @@ pub const PARTIAL_AGGS_HEADER: &str = "x-roll-partial-aggs";
 /// The answer field that carries them (base64).
 pub const PARTIAL_AGGS_FIELD: &str = "__roll_partial_aggs";
 
+/// The header turning a link's `_search/scroll` into a keep-alive call: this cluster's part of a
+/// scroll over linked clusters is kept alive, nothing is fetched (`remote::contexts`). Honored
+/// only on a link's own request ([`is_link_call`]).
+pub const SCROLL_KEEP_ALIVE_HEADER: &str = "x-roll-scroll-keep-alive";
+
 /// Whether the request is a linked remote cluster's (a `cross_cluster` key with the remote
 /// access header, which only roll's own calls carry).
 pub fn is_link_call(ctx: &Ctx) -> bool {
@@ -77,14 +82,33 @@ pub fn attach_partial(v: &mut Value, aggs: &search_aggs::Aggs) -> EsResult<()> {
     Ok(())
 }
 
-/// A remote's partially reduced aggregations from its answer; an error when they're missing
-/// or unreadable (a node of another roll release), which fails the remote's part.
-fn partial_of(alias: &str, v: &Value) -> Result<search_aggs::Aggs, EsError> {
+/// How many times its encoded size a remote's aggregation state is held on the request breaker
+/// before it's decoded (postcard is compact; the decoded tree's vectors and strings aren't).
+const DECODED_PER_ENCODED_BYTE: u64 = 16;
+
+/// A remote's partially reduced aggregations from its answer, held on the request breaker
+/// (`held`) before decoding: the outer error is the breaker's, which fails the search; the inner
+/// one says they're missing or unreadable (a node of another roll release, nesting past
+/// `search_aggs::wire::MAX_NESTING`), which fails the remote's part.
+fn partial_of(alias: &str, v: &Value, held: &mut crate::breaker::Reservation) -> EsResult<Result<search_aggs::Aggs, EsError>> {
     use base64::Engine as _;
     let bad = |why: String| EsError::illegal_state(format!("remote cluster [{alias}] answered no aggregations roll can merge: {why}"));
-    let encoded = v.get(PARTIAL_AGGS_FIELD).and_then(Value::as_str).ok_or_else(|| bad("they're missing".into()))?;
-    let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).map_err(|e| bad(e.to_string()))?;
-    let mut aggs = search_aggs::wire::decode(&bytes, Some(crate::search::aggs::date_factory())).map_err(|e| bad(e.reason))?;
+    let Some(encoded) = v.get(PARTIAL_AGGS_FIELD).and_then(Value::as_str) else { return Ok(Err(bad("they're missing".into()))) };
+    let reserved = encoded.len() as u64 * DECODED_PER_ENCODED_BYTE;
+    held.add(reserved, "<remote_cluster_response>")?;
+    let bytes = match base64::engine::general_purpose::STANDARD.decode(encoded) {
+        Ok(b) => b,
+        Err(e) => return Ok(Err(bad(e.to_string()))),
+    };
+    let mut aggs = match search_aggs::wire::decode(&bytes, Some(crate::search::aggs::date_factory())) {
+        Ok(a) => a,
+        Err(e) => return Ok(Err(bad(e.reason))),
+    };
+    // A tree bigger than estimated holds the rest too.
+    let size = aggs.ram_bytes() as u64;
+    if size > reserved {
+        held.add(size - reserved, "<remote_cluster_response>")?;
+    }
     // Its top hits name their indices `alias:index`, as its search hits do.
     let _ = aggs.visit_top_hits_mut(&mut |t: &mut search_aggs::internal::TopHits| -> Result<(), ()> {
         for h in t.hits.iter_mut() {
@@ -97,7 +121,7 @@ fn partial_of(alias: &str, v: &Value) -> Result<search_aggs::Aggs, EsError> {
         }
         Ok(())
     });
-    Ok(aggs)
+    Ok(Ok(aggs))
 }
 
 /// How long a request waits for a linked remote cluster by default (a sleeping one wakes for
@@ -668,7 +692,7 @@ pub(crate) async fn merge(ctx: &Ctx<'_>, req: &SearchRequest, sort: &[Sort], tie
         let alias = r.alias.clone();
         let answer = join(&alias, h).await;
         let (v, partial, e) = match answer {
-            Answer::Ok(v) if has_aggs => match partial_of(&alias, &v) {
+            Answer::Ok(v) if has_aggs => match partial_of(&alias, &v, &mut held)? {
                 Ok(p) => (v, Some(p), None),
                 Err(e) => (Value::Null, None, Some(e)),
             },
@@ -684,9 +708,6 @@ pub(crate) async fn merge(ctx: &Ctx<'_>, req: &SearchRequest, sort: &[Sort], tie
             continue;
         }
         held.add(crate::breaker::estimate_search_response(&v), "<remote_cluster_response>")?;
-        if let Some(p) = &partial {
-            held.add(p.ram_bytes() as u64, "<remote_cluster_response>")?;
-        }
         let mut v = v;
         let leg_hits = v.as_object_mut().and_then(|m| m.get_mut("hits")).and_then(Value::as_object_mut).and_then(|h| h.shift_remove("hits"));
         let num = |p: &[&str]| v.pointer(p).and_then(Value::as_i64).unwrap_or(0);

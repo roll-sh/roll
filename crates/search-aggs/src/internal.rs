@@ -45,10 +45,23 @@ pub struct Agg {
     pub value: AggValue,
 }
 
-/// The aggregations of one level (the top level or a bucket), in request order.
-#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+/// The aggregations of one level (the top level or a bucket), in request order. Every bucket
+/// holds one, so decoding it from [`crate::wire`] counts the aggregations' nesting.
+#[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct Aggs {
     pub list: Vec<Agg>,
+}
+
+#[derive(serde::Deserialize)]
+struct AggsDe {
+    list: Vec<Agg>,
+}
+
+impl<'de> serde::Deserialize<'de> for Aggs {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        let _level = crate::wire::Nested::enter::<D::Error>()?;
+        Ok(Aggs { list: AggsDe::deserialize(d)?.list })
+    }
 }
 
 impl Aggs {

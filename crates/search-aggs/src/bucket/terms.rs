@@ -1205,13 +1205,33 @@ pub enum TermsKind {
     Multi,
 }
 
-/// A terms bucket key.
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+/// A terms bucket key. Decoding it from [`crate::wire`] counts its nesting.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub enum TermKey {
     Bytes(Vec<u8>),
     Long(i64),
     Double(f64),
     Multi(Vec<TermKey>),
+}
+
+#[derive(serde::Deserialize)]
+enum TermKeyDe {
+    Bytes(Vec<u8>),
+    Long(i64),
+    Double(f64),
+    Multi(Vec<TermKey>),
+}
+
+impl<'de> serde::Deserialize<'de> for TermKey {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        let _level = crate::wire::Nested::enter::<D::Error>()?;
+        Ok(match TermKeyDe::deserialize(d)? {
+            TermKeyDe::Bytes(b) => TermKey::Bytes(b),
+            TermKeyDe::Long(l) => TermKey::Long(l),
+            TermKeyDe::Double(x) => TermKey::Double(x),
+            TermKeyDe::Multi(m) => TermKey::Multi(m),
+        })
+    }
 }
 
 impl TermKey {

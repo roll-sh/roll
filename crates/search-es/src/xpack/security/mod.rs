@@ -747,7 +747,11 @@ fn authorize_action(ctx: &Ctx) -> EsResult<Option<String>> {
         }
         // A search on a point in time names no index: it reads the point in time's, which the
         // caller must be allowed to search (Elasticsearch authorizes it against them).
-        Scope::Index if ctx.api.name() == "search" && pit_of(ctx).is_some() => authorize_pit(ctx, p, &eff, &action, &pit_of(ctx).unwrap_or_default()),
+        Scope::Index if ctx.api.name() == "search" && pit_of(ctx).is_some() => {
+            // `SearchRequest.validate` runs first: a point in time names its own indices.
+            crate::search::check_pit_without_indices(ctx, true)?;
+            authorize_pit(ctx, p, &eff, &action, &pit_of(ctx).unwrap_or_default())
+        }
         Scope::Index if NARROWED.contains(&ctx.api.name()) => narrow(ctx, p, &eff, &action),
         // Composite requests: their items are authorized as they run (`authorize_writes`,
         // `authorize_gets`, each search of an msearch).
@@ -1046,14 +1050,21 @@ fn pit_of(ctx: &Ctx) -> Option<String> {
     ctx.body().ok().flatten()?.pointer(&["pit", "id"]).map(Value::to_es_string)
 }
 
-/// A search on point in time `id`: allowed when the caller may search every index it holds. One
-/// over linked clusters authorizes each part on its own cluster (and answers only its caller);
-/// an id that names nothing is the search's own 404.
+/// A search on point in time `id`: allowed when the caller may search every index it holds, on
+/// every search (a role that lost an index loses it here too). One over linked clusters is
+/// checked here for its local part; each remote part is authorized on its own cluster with the
+/// caller's `remote_indices`. An id that names nothing of the caller's is the search's own 404.
 fn authorize_pit(ctx: &Ctx, p: &Principal, eff: &Effective, action: &str, id: &str) -> EsResult<Option<String>> {
-    if crate::remote::contexts::is_ccs(id) {
-        return Ok(None);
-    }
-    let Some(mut names) = ctx.cluster.contexts.with(id, None, |c| c.targets.iter().map(|t| t.idx.name.clone()).collect::<Vec<String>>()) else { return Ok(None) };
+    let owner = crate::search::contexts::owner_of(ctx);
+    let local = if crate::remote::contexts::is_ccs(id) {
+        match ctx.cluster.ccs_contexts.local_pit(id, &owner) {
+            Some(local) => local,
+            None => return Ok(None),
+        }
+    } else {
+        id.to_string()
+    };
+    let Some(mut names) = ctx.cluster.contexts.with(&local, &owner, None, |c| c.targets.iter().map(|t| t.idx.name.clone()).collect::<Vec<String>>()) else { return Ok(None) };
     names.sort();
     names.dedup();
     let denied_on: Vec<String> = names.into_iter().filter(|n| !eff.allows_index(action, n)).collect();
