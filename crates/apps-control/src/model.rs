@@ -1523,6 +1523,9 @@ pub struct Environment {
     /// Its split test: a share of its visitors served by another environment.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub split: Option<Split>,
+    /// Where a share of its requests is copied, their answers dropped (`mirror`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mirror: Option<Split>,
     /// Its deploy freeze, and whether it's on now ([`crate::freeze`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub freeze: Option<crate::freeze::Freeze>,

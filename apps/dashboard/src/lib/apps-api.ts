@@ -544,6 +544,8 @@ export interface EnvironmentPut {
   checks?: UptimeCheck[] | null;
   /** Its deploy freeze: on until lifted (null), until `until`, or in weekly `windows`; a person's deploy then needs `override: true`. */
   freeze?: Freeze | null;
+  /** Traffic mirroring: copies of `percent` of GET and HEAD requests to `environment`, answers dropped; null ends it. */
+  mirror?: { environment: string; percent: number } | null;
   /** Its split test: `percent` of visitors (1–99) served by `environment`, or null to end it. */
   split?: { environment: string; percent: number } | null;
   /** Its heartbeats (at most 10), or null for none; one kept by name keeps its URL. */
@@ -670,6 +672,8 @@ export interface Environment extends EnvironmentSummary {
   check_states?: UptimeCheckState[];
   heartbeats?: Heartbeat[];
   heartbeat_states?: HeartbeatState[];
+  /** Where a share of its GET and HEAD requests is copied, answers dropped. */
+  mirror?: { environment: string; percent: number };
   freeze?: Freeze;
   /** Its freeze is on now: automatic deploys build to ready, a person's deploy needs override. */
   frozen?: boolean;

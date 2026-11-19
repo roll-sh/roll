@@ -1401,6 +1401,34 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
         getrandom::fill(&mut b).expect("system randomness");
         bucket = Some(b[0] % 100);
     }
+    // Mirroring (Envoy's): a copy of a bodiless request to another environment, its answer
+    // dropped; never roll's own call, an upgrade, or a request another environment sent.
+    if let Some(m) = gate.mirror.as_ref()
+        && deployment.is_none()
+        && !ours
+        && !req.headers().contains_key(VIA_SITE)
+        && matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD)
+        && !is_upgrade(req.headers())
+        && {
+            let mut b = [0u8; 1];
+            getrandom::fill(&mut b).expect("system randomness");
+            (b[0] % 100) < m.percent
+        }
+    {
+        let mut copy = Request::builder().method(req.method().clone()).uri(req.uri().clone());
+        for (k, v) in req.headers() {
+            copy = copy.header(k, v);
+        }
+        if let Ok(mut copy) = copy.body(Body::empty()) {
+            if let Some(c) = roll_cluster::client_addr(&req) {
+                copy.extensions_mut().insert(roll_cluster::ClientAddr(c));
+            }
+            let (apps, service, target) = (apps.clone(), service.to_string(), m.environment.clone());
+            tokio::spawn(async move {
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(30), split_to(apps, &service, &target, copy)).await;
+            });
+        }
+    }
     // In the split's share: the other environment answers, and the cookie keeps them there.
     if let (Some(sp), Some(b)) = (split, bucket)
         && sp.takes(b)
