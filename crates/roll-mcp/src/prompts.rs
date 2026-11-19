@@ -128,6 +128,25 @@ const PROMPTS: &[Prompt] = &[
         },
     },
     Prompt {
+        name: "security_checkup",
+        title: "Security checkup",
+        description: "What needs attention in roll's tokens, most serious first, with a narrower rule set for each over-broad one; changes nothing.",
+        args: &[],
+        needs: &["access_checkup", "access_tighten_token", "access_token_networks"],
+        text: |_| {
+            "Run a security checkup of my roll access. Call access_checkup and go through its tokens most serious \
+             first. For each one flagged everything or narrower, call access_tighten_token and show which rules it \
+             would drop, in plain words. For each one that roams, call access_token_networks and name the networks \
+             it was used from, so I can tell whether one is unexpected. Say which tokens to revoke (unused) and \
+             which need an expiry. If you also have secrets_findings or previews_mask_suggestions, add the secrets \
+             that need fixing and the personal data previews don't mask yet; with storage_list_keys, the S3 access \
+             keys that are admin over every bucket or unused for 90 days. Change nothing yourself: applying a \
+             tighten, revoking or limiting a token is for me or the operator, on the token's page or with roll \
+             token. Never print a secret."
+                .into()
+        },
+    },
+    Prompt {
         name: "debug_failing_service",
         title: "Debug a failing service",
         description: "Why an app service's environment is failing: its last deploys, errors and metrics, then a fix or a rollback.",
