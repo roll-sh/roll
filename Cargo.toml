@@ -21,6 +21,8 @@ reqwest = { version = "0.13", default-features = false, features = ["json"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# roll search: aggregation partial state between linked clusters (search-aggs `wire`).
+postcard = { version = "1", default-features = false, features = ["use-std"] }
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tokio-postgres = "0.7"
@@ -182,6 +184,8 @@ roll-oidc = { path = "crates/roll-oidc" }
 roll-mcp = { path = "crates/roll-mcp" }
 roll-net = { path = "crates/roll-net" }
 roll-secrets = { path = "crates/roll-secrets" }
+roll-secrets-chain = { path = "crates/roll-secrets-chain" }
+roll-keyshares = { path = "crates/roll-keyshares" }
 code-store = { path = "crates/code-store" }
 code-git = { path = "crates/code-git" }
 code-github = { path = "crates/code-github" }

@@ -519,6 +519,32 @@ impl roll_secrets::Deliver for AuditDeliver {
     fn get(&self, url: &str, limit: usize) -> Result<Vec<u8>> {
         self.0.get_bounded(url, limit)
     }
+
+    /// An AWS identity's signed `GetCallerIdentity`, sent on to STS: the URL is rebuilt from a
+    /// host roll_secrets checked (checked again here), never the client's; any status comes back
+    /// with at most `limit` bytes of the answer.
+    fn sts(&self, host: &str, headers: &[(String, String)], body: &str, limit: usize) -> Result<(u16, Vec<u8>)> {
+        if !roll_secrets::aws_identity::sts_host(host) {
+            return Err(bad(format!("{host} isn't an STS endpoint")));
+        }
+        let u = self.0.url(&format!("https://{host}/"))?;
+        block_on(async {
+            let mut req = self.0.client.post(u).body(body.to_string());
+            for (k, v) in headers {
+                req = req.header(k.as_str(), v.as_str());
+            }
+            let mut resp = req.send().await.map_err(|e| Error::Link(format!("{host}: {}", e.without_url())))?;
+            let status = resp.status().as_u16();
+            let mut out = Vec::new();
+            while let Some(c) = resp.chunk().await.map_err(|e| Error::Link(format!("{host}: {}", e.without_url())))? {
+                if out.len() + c.len() > limit {
+                    return Err(Error::Link(format!("{host}: an answer over {limit} bytes")));
+                }
+                out.extend_from_slice(&c);
+            }
+            Ok((status, out))
+        })
+    }
 }
 
 /// The guarded client as roll-oidc's fetcher, for roll-access's trusted machine clients: the same

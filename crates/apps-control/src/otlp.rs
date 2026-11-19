@@ -251,6 +251,27 @@ fn each_item<'a>(b: &'a [u8], mut f: impl FnMut(&str, &'a [u8]) -> anyhow::Resul
 }
 
 /// The spans of a protobuf `ExportTraceServiceRequest`.
+/// An OTLP/HTTP traces request's spans: gzip taken off first (at most 8 MiB after it), then
+/// protobuf or JSON (roll previews' intake reads its services' spans this way).
+pub fn spans_of_request(body: &[u8], json: bool, gzip: bool) -> anyhow::Result<Vec<Span>> {
+    use std::io::Read;
+    const MAX: u64 = 8 << 20;
+    let mut raw = Vec::new();
+    let body: &[u8] = if gzip {
+        flate2::read::GzDecoder::new(body).take(MAX + 1).read_to_end(&mut raw).map_err(|e| anyhow::anyhow!("its gzip: {e}"))?;
+        anyhow::ensure!(raw.len() as u64 <= MAX, "traces are at most 8 MiB a request");
+        &raw
+    } else {
+        body
+    };
+    if json {
+        let v: Value = serde_json::from_slice(body).map_err(|e| anyhow::anyhow!("its JSON: {e}"))?;
+        from_json(&v)
+    } else {
+        from_protobuf(body)
+    }
+}
+
 pub fn from_protobuf(b: &[u8]) -> anyhow::Result<Vec<Span>> {
     let mut out = Vec::new();
     each_item(b, |service, sp| {

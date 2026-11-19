@@ -129,6 +129,14 @@ impl Code {
                 Err(e) => Settings { error: Some(format!("{FILE}: {e}")), ..Settings::default() },
             },
         };
+        let mut s = s;
+        // The allow-list for credentials, from the same head (never the change's).
+        if let Some(h) = &head
+            && let Ok(Some(f)) = self.store.read_file(&r.id, h, roll_auth::credentials::ALLOW_FILE).await
+            && f.mode == code_store::Mode::Regular
+        {
+            s.secrets_allow = roll_auth::credentials::Allow::parse(&String::from_utf8_lossy(&f.data));
+        }
         let s = Arc::new(s);
         self.settings_cache.lock().insert(r.id.clone(), (head, s.clone()));
         s
@@ -146,6 +154,9 @@ impl Code {
         let mut out = Self::base_blockers(r, c, settings);
         out.extend(self.review_blockers(r, c));
         out.extend(self.leak_blockers(r, c));
+        if settings.secrets.unstored_credentials == crate::settings::Unstored::Block {
+            out.extend(self.unstored_findings(r, c, settings));
+        }
         out
     }
 

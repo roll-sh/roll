@@ -17,6 +17,7 @@ pub mod fake;
 pub mod fargate;
 pub mod links;
 pub mod netns;
+pub mod scan;
 
 use crate::logs::LogSink;
 use async_trait::async_trait;
@@ -66,6 +67,39 @@ pub struct InstanceSpec {
     pub registry: Option<RegistryLogin>,
     /// A worker's health check, run by the runtime in the instance ([`Runtime::unhealthy`]).
     pub health: Option<HealthCheck>,
+    /// Containers beside it in its network namespace ([`crate::model::Run::sidecars`]),
+    /// started after it and frozen, stopped and removed with it.
+    pub sidecars: Vec<SidecarSpec>,
+}
+
+/// A sidecar as the runtime starts it: its image pinned, its variables resolved.
+#[derive(Clone, PartialEq)]
+pub struct SidecarSpec {
+    pub name: String,
+    pub image: String,
+    pub command: Option<String>,
+    /// Its env settings and the variables it named. Never in `Debug`.
+    pub vars: Vec<(String, String)>,
+    pub cpu: f64,
+    pub memory_mb: u32,
+}
+
+impl std::fmt::Debug for SidecarSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SidecarSpec").field("name", &self.name).field("image", &self.image).field("vars", &self.vars.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>()).finish_non_exhaustive()
+    }
+}
+
+impl InstanceSpec {
+    /// What its sidecars are given, CPUs and MB: metered and scaled on with the instance.
+    pub fn sidecars_size(&self) -> (f64, u32) {
+        self.sidecars.iter().fold((0.0, 0), |(c, m), s| (c + s.cpu, m + s.memory_mb))
+    }
+}
+
+/// A sidecar's container: `<instance>-sc-<name>`.
+pub fn sidecar_name(instance: &str, sidecar: &str) -> String {
+    format!("{instance}-sc-{sidecar}")
 }
 
 /// A command run in an instance every `every`, healthy on exit 0; `failures` in a row make it
@@ -436,11 +470,24 @@ pub trait Builder: Send + Sync {
     async fn load(&self, _archive: &std::path::Path, _tag: &str, _log: &LogSink) -> anyhow::Result<String> {
         anyhow::bail!("this node's builder can't take an uploaded image yet: push it to a registry and deploy it by name")
     }
+    /// The known vulnerabilities in an image this node has (a pinned scanner, offline, with no
+    /// access to anything but the image): None when this builder doesn't scan.
+    async fn scan(&self, _image: &str, _service: &str, _log: &LogSink) -> anyhow::Result<Option<Scanned>> {
+        Ok(None)
+    }
     /// Whether its builds share one BuildKit, cache mounts and all (one node's Docker): then
     /// each service's mounts are namespaced (`apps_build::isolate_caches`).
     fn shares_caches(&self) -> bool {
         false
     }
+}
+
+/// What a scan found, and what scanned it (`trivy 0.76.1`).
+pub struct Scanned {
+    pub scanner: String,
+    pub found: Vec<crate::model::Vulnerability>,
+    /// Its CycloneDX SBOM (JSON), when the scanner makes one.
+    pub sbom: Option<Vec<u8>>,
 }
 
 /// A free TCP port on loopback (to publish an instance's port on).
