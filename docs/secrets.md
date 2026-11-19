@@ -2413,6 +2413,11 @@ roll holds no AWS credential.
     to use, and the identity shows it as `server_id` (the dashboard's and `roll secrets identities
     add`'s instructions include it when it isn't the API's URL).
   - `X-Amz-Date` is within 5 minutes of roll's clock.
+  - `Authorization` is `AWS4-HMAC-SHA256` with exactly `Credential`, `SignedHeaders` and
+    `Signature`, each once (a component named twice, in any case, is refused), and `Signature` is
+    64 lowercase hex characters. The whole header goes to STS, so the signature roll keys a login on
+    is the one STS checks: each signed request logs in once, and a replay with another `Signature=`
+    in front of the real one is refused, not counted as new.
 
   roll then sends the request through rolld's guarded client: no redirects, a 15 s timeout, and
   at most 64 KiB of the answer read. STS's refusal (a bad signature, an expired session) is a 401

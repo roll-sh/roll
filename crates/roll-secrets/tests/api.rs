@@ -2708,8 +2708,20 @@ async fn a_machine_on_aws_logs_in_with_its_iam_role_through_sts() {
     let (s, l) = login(signed.clone()).await;
     assert_eq!(s, StatusCode::OK, "{l}");
     // A signed request logs in once: replayed while its date is still in the window, it's refused.
-    let (s, e) = login(signed).await;
+    let (s, e) = login(signed.clone()).await;
     assert_eq!(s, StatusCode::UNAUTHORIZED, "{e}");
+    // Nor with a component repeated in front (STS gets the whole header) or a signature that isn't
+    // hex: there's one Signature, the one STS checks, so a replay never gets a new key.
+    let auth = signed["headers"]["Authorization"].as_str().unwrap().to_string();
+    let rest = auth.strip_prefix("AWS4-HMAC-SHA256 ").unwrap();
+    for changed in [format!("AWS4-HMAC-SHA256 Signature={}, {rest}", "0".repeat(64)), format!("AWS4-HMAC-SHA256 signature=junk, {rest}"), auth.replace("Signature=", "Signature=X")] {
+        let mut replay = signed.clone();
+        replay["headers"]["Authorization"] = json!(changed);
+        let before = calls();
+        let (s, e) = login(replay).await;
+        assert!(matches!(s, StatusCode::BAD_REQUEST | StatusCode::UNAUTHORIZED), "{changed}: {s} {e}");
+        assert_eq!(calls(), before, "{changed} never reaches STS");
+    }
     let token = l["token"].as_str().unwrap();
     let (s, v) = api.req(Method::GET, "/environments/staging/values", None, Some(token)).await;
     assert_eq!((s, v["values"]["API_KEY"].as_str()), (StatusCode::OK, Some("staging-key")));

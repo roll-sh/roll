@@ -254,10 +254,24 @@ pub fn check(r: &SignedRequest, server_id: &str, now: i64) -> Result<StsCall> {
         return Err(bad("the signed request's Host isn't its URL's"));
     }
     let auth = headers.get("authorization").and_then(|a| a.strip_prefix("AWS4-HMAC-SHA256 ")).ok_or_else(|| Error::Unauthorized("the request isn't signed with AWS Signature Version 4".into()))?;
-    let field = |name: &str| auth.split(',').map(str::trim).find_map(|p| p.strip_prefix(name).and_then(|p| p.strip_prefix('=')));
+    // Exactly Credential, SignedHeaders and Signature, once each: the whole header goes to STS, so
+    // roll reads the same Signature STS checks (the replay key), never one of two.
+    let shape = || bad("the signed request's Authorization is Credential=…, SignedHeaders=…, Signature=…");
+    let mut parts: BTreeMap<&str, &str> = BTreeMap::new();
+    for p in auth.split(',').map(str::trim) {
+        let (name, value) = p.split_once('=').ok_or_else(shape)?;
+        if parts.keys().any(|n| n.eq_ignore_ascii_case(name)) {
+            return Err(bad(format!("the signed request's Authorization names {name} twice")));
+        }
+        parts.insert(name, value);
+    }
+    if !parts.keys().copied().eq(["Credential", "Signature", "SignedHeaders"]) {
+        return Err(shape());
+    }
+    let field = |name: &str| parts.get(name).copied();
     let signed: Vec<&str> = field("SignedHeaders").map(|s| s.split(';').collect()).unwrap_or_default();
     let scope_ok = field("Credential").is_some_and(|c| c.split('/').nth(3) == Some("sts"));
-    let signature = field("Signature").filter(|s| !s.is_empty()).ok_or_else(|| Error::Unauthorized("the request isn't signed for STS".into()))?;
+    let signature = field("Signature").filter(|s| s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))).ok_or_else(|| Error::Unauthorized("the request's Signature isn't 64 lowercase hex characters".into()))?;
     if !scope_ok {
         return Err(Error::Unauthorized("the request isn't signed for STS".into()));
     }
@@ -280,7 +294,7 @@ pub fn check(r: &SignedRequest, server_id: &str, now: i64) -> Result<StsCall> {
         return Err(Error::Unauthorized(format!("the signed request is dated {}s from roll's clock (at most {SKEW_SECS}s): sign a new one", now - at)));
     }
     let headers = FORWARDED.iter().filter_map(|h| headers.get(*h).map(|v| (h.to_string(), v.to_string()))).collect();
-    let replay_key = Sha256::digest(signature.to_ascii_lowercase().as_bytes()).iter().map(|b| format!("{b:02x}")).collect();
+    let replay_key = Sha256::digest(signature.as_bytes()).iter().map(|b| format!("{b:02x}")).collect();
     Ok(StsCall { host: host.to_ascii_lowercase(), headers, replay_key })
 }
 
