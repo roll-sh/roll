@@ -169,10 +169,14 @@ impl Engine {
         Ok(())
     }
 
-    /// Every shell of a preview that goes (or whose services stop for good).
+    /// Every shell and forwarded connection of a preview that goes (or whose services stop for
+    /// good).
     pub(crate) fn close_shells_of(&self, id: &str) {
         for s in self.shells.lock().values().filter(|s| s.preview == id) {
             s.closed.send_replace(true);
+        }
+        if let Some(end) = self.forwards_end.lock().remove(id) {
+            end.send_replace(true);
         }
     }
 }
@@ -252,6 +256,8 @@ const FORWARD_SAID_MS: i64 = 3_600_000;
 pub struct Forward {
     pub service: String,
     pub io: Box<dyn crate::ports::ShellIo>,
+    /// Turns true when the preview goes (its forwards end with it).
+    pub ended: tokio::sync::watch::Receiver<bool>,
     _held: HeldAwake,
 }
 
@@ -307,6 +313,7 @@ impl Engine {
         if say {
             let _ = self.store.log(id, &format!("{who} forwarded port {port} of {svc}"));
         }
-        Ok(Forward { service: svc, io, _held: held })
+        let ended = self.forwards_end.lock().entry(id.to_string()).or_insert_with(|| tokio::sync::watch::channel(false).0).subscribe();
+        Ok(Forward { service: svc, io, ended, _held: held })
     }
 }
