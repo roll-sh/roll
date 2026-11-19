@@ -29,14 +29,17 @@ import { Templates } from "./templates";
 import { InferenceTab } from "./inference";
 import { ConnectorsTab } from "./connectors";
 import { ApiKeys } from "./api-keys";
+import { AuditLog } from "./audit-log";
 import { SearchConsole } from "./console";
 import { IndexBrowser } from "./index-browser";
 import { PerformanceTab } from "./performance";
 import { Playground } from "./playground";
+import { PipelinesTab } from "./pipelines";
 import { RelevanceTab } from "./relevance";
+import { SnapshotsTab } from "./snapshots";
 import { CredentialsOnce, SearchStateDot, settingsOf, SettingsFields, stateLabel, useAction, useSearchClusters, type Run } from "./shared";
 
-const TABS = ["overview", "indices", "console", "playground", "analyze", "relevance", "inference", "connectors", "branches", "performance", "usage", "settings"] as const;
+const TABS = ["overview", "indices", "console", "playground", "analyze", "relevance", "inference", "pipelines", "snapshots", "connectors", "branches", "performance", "usage", "settings"] as const;
 type Tab = (typeof TABS)[number];
 
 /** Placeholder while the route's params resolve. */
@@ -217,6 +220,26 @@ export function SearchClusterPage({ id }: { id: string }) {
         )}
         {tab === "connectors" && (
           <ConnectorsTab
+            key={cluster.id}
+            cluster={cluster}
+            onOpenConsole={(text) => {
+              setPrefill((p) => ({ text, n: (p?.n ?? 0) + 1 }));
+              setTab("console");
+            }}
+          />
+        )}
+        {tab === "pipelines" && (
+          <PipelinesTab
+            key={cluster.id}
+            cluster={cluster}
+            onOpenConsole={(text) => {
+              setPrefill((p) => ({ text, n: (p?.n ?? 0) + 1 }));
+              setTab("console");
+            }}
+          />
+        )}
+        {tab === "snapshots" && (
+          <SnapshotsTab
             key={cluster.id}
             cluster={cluster}
             onOpenConsole={(text) => {
@@ -1024,6 +1047,8 @@ function SettingsTab({
       <AllowedNetworks cluster={cluster} busy={busy} run={run} />
 
       <ApiKeys cluster={cluster} />
+
+      <AuditLog cluster={cluster} />
 
       <div className="grid gap-4 lg:grid-cols-2">
         <Panel title="Password">

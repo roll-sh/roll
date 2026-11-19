@@ -5,7 +5,7 @@
 
 import { operatorHeaders, withSession } from "./code-token";
 import { apiHeaders, call, onApiStatus, ROLL_API } from "./roll-api";
-import { streamSse } from "./sse";
+import { followScreen, streamSse, type ScreenHandlers } from "./sse";
 
 // ── shapes (docs/apps/http-api.md) ──
 
@@ -45,6 +45,8 @@ export interface Build {
   target?: string;
   /** System packages the generated Dockerfile installs (apt, or apk on Alpine): `ffmpeg`, `chromium`. */
   packages?: string[];
+  /** The longest its build may take, seconds (60–21600, held to the node's own limit); unset: the node's. */
+  timeout_s?: number;
 }
 
 export type ServiceType = "web" | "worker" | "cron";
@@ -82,7 +84,8 @@ export interface Run {
   memory_target?: number;
   suspend_after_s: number;
   sleep_after_s: number;
-  volume?: { mount: string; size_gb: number };
+  /** backups: how often (hours, 0: by hand only) and how many are kept; none: daily, seven. */
+  volume?: { mount: string; size_gb: number; backups?: { every_hours: number; keep: number } };
   /** Metric alerts (`alert.*` events), over five minutes; each 0 is off. */
   /** log_match: text its output holds log_count times in five minutes (alert.log). */
   alerts?: { memory_pct: number; error_pct: number; p95_ms: number; capacity_pct?: number; log_match?: string; log_count?: number };
@@ -134,6 +137,10 @@ export interface EnvironmentSummary {
   latest: { id: string; status: DeployStatus } | null;
   /** What wants its owner's eye: a crash loop, the project capped by its spend limit, paused, maintenance, its latest deploy failed. */
   attention?: ("crash_loop" | "capped" | "paused" | "held" | "maintenance" | "deploy_failed")[];
+  /** Settings, variables, links or the project's secrets changed since the live deployment: a redeploy applies them. */
+  needs_deploy: boolean;
+  /** A preview's (made for a branch or a pull request). */
+  ephemeral: boolean;
 }
 
 /** A deleted service, kept stopped for a restore until `purge_at` (ms), then deleted for good. */
@@ -504,6 +511,8 @@ export interface Domain {
   created_at: number;
   /** Its requests go, 308, to this hostname of the same environment (www → apex). */
   redirect_to?: string | null;
+  /** The app's port it's sent to, when it isn't the service's own (published from the next deploy). */
+  port?: number;
 }
 
 /** What an environment's code may reach: `roll` keeps it on a network with no route out, the
@@ -516,13 +525,11 @@ export interface Egress {
 export interface Environment extends EnvironmentSummary {
   service: string;
   branch: string | null;
-  ephemeral: boolean;
   instances: Instance[];
   domains: Domain[];
   port: number | null;
   /** A TCP service's address (`host:port`), once it has its port. */
   tcp?: string | null;
-  needs_deploy: boolean;
   /** Its hostnames answer only visitors with its access token (a preview). */
   private: boolean;
   /** A cron service's next scheduled run, once deployed. */
@@ -952,12 +959,18 @@ export interface LogDrain {
   environments: string[];
   /** Only these services' (ids; empty: every one). */
   services: string[];
+  /** Preview environments' too, and a preview's services on roll's own runtime (in its `pv-`
+   *  environment, with no service id, so never to a drain narrowed to services). */
   previews: boolean;
   /** The names of the headers it's sent with; their values are sealed, never shown. */
   headers: string[];
+  /** How its lines go: roll's signed NDJSON, OpenTelemetry logs (OTLP/HTTP JSON), or syslog (RFC 5424 over TLS). */
+  format: DrainFormat;
   /** Only in the answer that made it. */
   secret?: string;
 }
+
+export type DrainFormat = "ndjson" | "otlp" | "syslog";
 
 /** A project's monthly spend limits (US dollars at roll's prices, the calendar month in UTC). */
 export interface SpendLimits {
@@ -1038,6 +1051,11 @@ export const appsApi = {
   /** The folders of a repo's or a Git URL's tree that build on their own (a monorepo's apps). */
   roots: (req: { repo: string } | { git: string; branch?: string; git_login?: { username: string; password: string } }) => call<{ roots: RootCandidate[] }>("POST", "/v1/apps/plan", { ...req, roots: true }),
   /** The project as roll.toml: `databases` names what its services link (`{"postgres:<id>": "db"}`). */
+  /** The project's own preview domain (a wildcard its preview environments answer under). */
+  previewDomain: (project: string) => call<Domain>("GET", `/v1/apps/projects/${enc(project)}/preview-domain`),
+  setPreviewDomain: (project: string, hostname: string) => call<Domain>("POST", `/v1/apps/projects/${enc(project)}/preview-domain`, { hostname }),
+  verifyPreviewDomain: (project: string) => call<Domain>("POST", `/v1/apps/projects/${enc(project)}/preview-domain/verify`),
+  removePreviewDomain: (project: string) => call<null>("DELETE", `/v1/apps/projects/${enc(project)}/preview-domain`),
   exportProject: (project: string, databases: Record<string, string>) => call<{ roll_toml: string; notes: string[] }>("POST", `/v1/apps/projects/${enc(project)}/export`, { databases }),
   /** A roll.toml or Compose file read as a project (nothing made). */
   importProject: (file: ImportFile | { repo: string; revision?: string } | { git: string; branch?: string }) => call<ProjectImport>("POST", "/v1/apps/import", file),
@@ -1063,7 +1081,7 @@ export const appsApi = {
   environment: (id: string, e: string) => call<Environment>("GET", env(id, e)),
   notifyTargets: (project: string) => call<NotifyTarget[]>("GET", `/v1/apps/projects/${enc(project)}/notifications`),
   drains: (project: string) => call<LogDrain[]>("GET", `/v1/apps/projects/${enc(project)}/drains`),
-  addDrain: (project: string, body: { url: string } & DrainSettings) => call<LogDrain>("POST", `/v1/apps/projects/${enc(project)}/drains`, body),
+  addDrain: (project: string, body: { url: string; format?: DrainFormat } & DrainSettings) => call<LogDrain>("POST", `/v1/apps/projects/${enc(project)}/drains`, body),
   /** Its sources, filters and headers (given ones replace; `headers` replaces them all); its URL and secret stay. */
   updateDrain: (project: string, id: string, body: DrainSettings) => call<LogDrain>("PATCH", `/v1/apps/projects/${enc(project)}/drains/${enc(id)}`, body),
   testDrain: (project: string, id: string) => call<{ ok: boolean; code: number | null; error: string | null }>("POST", `/v1/apps/projects/${enc(project)}/drains/${enc(id)}/test`),
@@ -1108,7 +1126,8 @@ export const appsApi = {
   createHook: async (id: string, e: string) => `${ROLL_API}${(await call<{ path: string }>("POST", `${env(id, e)}/hook`)).path}`,
   removeHook: (id: string, e: string) => call<void>("DELETE", `${env(id, e)}/hook`),
   backUp: (id: string, e: string) => call<Backup>("POST", `${env(id, e)}/volume/backups`),
-  restore: (id: string, e: string, b: string) => call<Backup>("POST", `${env(id, e)}/volume/backups/${encodeURIComponent(b)}/restore`),
+  /** `from`: a backup of another environment of the service (seeding staging from production). */
+  restore: (id: string, e: string, b: string, from?: string) => call<Backup>("POST", `${env(id, e)}/volume/backups/${encodeURIComponent(b)}/restore`, from ? { from } : undefined),
   cancel: (id: string, e: string, d: string) => call<Deployment>("POST", `${dep(id, e, d)}/cancel`),
   /** What a person says to a manual rollout waiting for them. */
   rollout: (id: string, e: string, d: string, action: "advance" | "all" | "abort") => call<{ deployment: string }>("POST", `${dep(id, e, d)}/rollout`, { action }),
@@ -1146,7 +1165,7 @@ export const appsApi = {
     e: string,
     q: { q?: string; where?: string; since?: number; before?: number; instance?: string; deployment?: string; stream?: string; level?: LogLevel; http?: boolean; by?: string; status?: string; min_ms?: number; tail?: number },
   ): Promise<{ lines: LogLine[]; truncated: boolean }> => {
-    const res = await fetch(`${ROLL_API}${env(id, e)}/logs${qs({ ...q, http: q.http || undefined, tail: q.tail ?? 500 })}`, { headers: apiHeaders(), cache: "no-store" });
+    const res = await fetch(`${ROLL_API}${env(id, e)}/logs${qs({ ...q, http: q.http || undefined, tail: q.tail ?? 500 })}`, withSession({ headers: apiHeaders(), cache: "no-store" }));
     onApiStatus(res.status);
     const data = await res.json().catch(() => null);
     if (!res.ok) throw new Error(data?.error ?? `${res.status} ${res.statusText}`.trim());
@@ -1184,7 +1203,7 @@ export const appsApi = {
 
   /** A shell in a running instance over HTTP (a browser can't send the token on a WebSocket). */
   /** `instance`: that one (default: one that's running, or a woken one). */
-  openShell: (id: string, e: string, body: { cols: number; rows: number; instance?: string }) => call<{ id: string }>("POST", `${env(id, e)}/shell/sessions`, body),
+  openShell: (id: string, e: string, body: { cols: number; rows: number; instance?: string; console?: boolean; command?: string; cpu?: number; memory_mb?: number }) => call<{ id: string }>("POST", `${env(id, e)}/shell/sessions`, body),
   /** The environment's last finished minute as Prometheus text, for a scraper with a token that may read it. */
   prometheusUrl: (id: string, e: string) => `${ROLL_API}${env(id, e)}/metrics?format=prometheus`,
   shellKeys: (id: string, e: string, sh: string, data: string) => call<null>("POST", `${env(id, e)}/shell/sessions/${encodeURIComponent(sh)}/keys`, { data }),
@@ -1196,6 +1215,8 @@ export const appsApi = {
   verifyDomain: (id: string, e: string, host: string) => call<Domain>("POST", `${env(id, e)}/domains/${enc(host)}/verify`),
   removeDomain: (id: string, e: string, host: string) => call<null>("DELETE", `${env(id, e)}/domains/${enc(host)}`),
   redirectDomain: (id: string, e: string, host: string, to: string | null) => call<Domain>("PATCH", `${env(id, e)}/domains/${enc(host)}`, { redirect_to: to }),
+  /** Send a custom domain to another of the app's ports (null: the service's own). */
+  domainPort: (id: string, e: string, host: string, port: number | null) => call<Domain>("PATCH", `${env(id, e)}/domains/${enc(host)}`, { port }),
 };
 
 /**
@@ -1204,32 +1225,8 @@ export const appsApi = {
  * so the caller drops what it had. Returns the function that stops it.
  */
 /** A shell's screen over SSE: base64 chunks (the scrollback first, again after a reconnect: `onReset`), then `onClosed`. */
-export function followShell(
-  service: string,
-  e: string,
-  sh: string,
-  opts: { onChunk: (bytes: Uint8Array) => void; onReset: () => void; onClosed: () => void },
-): () => void {
-  let opened = false;
-  const stop = streamSse(`${ROLL_API}${env(service, e)}/shell/sessions/${encodeURIComponent(sh)}/screen`, {
-    headers: operatorHeaders,
-    onOpen: (open) => {
-      if (open && opened) opts.onReset();
-      if (open) opened = true;
-    },
-    onEvent: (ev) => {
-      if (ev.event === "closed") {
-        stop();
-        opts.onClosed();
-        return;
-      }
-      const bin = atob(ev.data);
-      const out = new Uint8Array(bin.length);
-      for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-      opts.onChunk(out);
-    },
-  });
-  return stop;
+export function followShell(service: string, e: string, sh: string, opts: ScreenHandlers): () => void {
+  return followScreen(`${ROLL_API}${env(service, e)}/shell/sessions/${encodeURIComponent(sh)}/screen`, operatorHeaders, opts);
 }
 
 /** An access line's text (`http` lines). */

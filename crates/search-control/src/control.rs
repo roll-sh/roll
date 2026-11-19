@@ -128,6 +128,9 @@ pub struct SearchConfig {
     /// What a signed-in person who isn't an admin may own (rolld:
     /// `--search-max-clusters-per-person`, `--search-max-always-on-per-person`; 0: no cap).
     pub person_caps: Caps,
+    /// How long and how much each cluster's security audit log keeps (rolld:
+    /// `--search-audit-retention-days`, `--search-audit-max-mb`).
+    pub audit: search_server::audit::AuditConfig,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -177,6 +180,7 @@ impl SearchConfig {
             sealer: None,
             default_repository: Some("found-snapshots".into()),
             person_caps: Caps { clusters: 50, always_on: 2 },
+            audit: search_server::audit::AuditConfig::default(),
         }
     }
 }
@@ -342,6 +346,7 @@ pub fn spec_for(c: &SearchCluster) -> ClusterSpec {
     spec.max_body_bytes = Some((c.max_body_mb.max(1) as usize) << 20);
     spec.destructive_requires_name = c.destructive_requires_name;
     spec.ip_allowlist = allowlist_of(&c.ip_allowlist);
+    spec.catalog_id = Some(c.id.clone());
     spec
 }
 
@@ -551,6 +556,7 @@ impl Control {
         let meter = Meter::new(store.clone());
         let wakes = Arc::new(Wakes::default());
         let hooks = Arc::new(ControlHooks { meter: MeterHooks(meter.clone()), wakes: wakes.clone(), control: OnceLock::new() });
+        let links = Arc::new(crate::remotes::ControlLinks::new(cfg.domain.clone()));
         let node = Node::with_hooks(
             Arc::new(SqlCatalog { store: store.clone(), wakes: wakes.clone() }),
             Arc::new(GuardedStores { inner: ObjectStores::new(data.clone()), store: store.clone(), wakes: wakes.clone() }),
@@ -563,6 +569,8 @@ impl Control {
                 memory_budget: cfg.memory_budget,
                 sealer: cfg.sealer.clone(),
                 default_repository: cfg.default_repository.clone(),
+                links: Some(links.clone()),
+                audit: cfg.audit.clone(),
                 ..NodeConfig::default()
             },
             hooks.clone(),
@@ -583,6 +591,7 @@ impl Control {
         });
         // Nothing can load before the node is handed out, so the hook always finds the control.
         let _ = hooks.control.set(Arc::downgrade(&control));
+        links.set(Arc::downgrade(&control));
         let _ = control.me.set(Arc::downgrade(&control));
         control.start_metering();
         control.start_gc();
@@ -1201,8 +1210,15 @@ impl Control {
         if !self.unload_retrying(&c.name, Duration::from_secs(30)).await {
             return Err(ControlError::Conflict(format!("cluster {} has requests running; retry", c.name)));
         }
+        // Its audit entries still waiting are written now; the stored ones go with its storage
+        // (or move with its kept copy, and back on a restore).
+        self.node.audit.forget(&c.name).await;
         if self.cfg.deleted_retention.is_zero() {
             self.data.delete_cluster(&c.name).await?;
+            // Its remotes' keys roll made go with it (a restorable one keeps them for its restore).
+            if let Err(e) = self.revoke_remote_keys_of(&c.id).await {
+                tracing::warn!(cluster = c.id, error = %e, "revoking a deleted search cluster's remote keys failed");
+            }
             self.store.delete(&c.id).await?;
         } else {
             self.keep_deleted(c).await?;
@@ -1238,6 +1254,9 @@ impl Control {
             // Deleted meanwhile by another call: its copy is the one kept.
             let _ = self.data.delete_cluster(&kept).await;
             return Err(ControlError::NotFound(format!("no search cluster {}", c.id)));
+        }
+        if let Err(e) = self.data.move_audit(&c.name, &kept).await {
+            tracing::warn!(cluster = c.name, kept, error = %e, "moving a deleted search cluster's audit entries to its kept copy failed");
         }
         if let Err(e) = self.data.delete_cluster(&c.name).await {
             // The cluster is deleted; its old commit points only block the name until removed.
@@ -1330,6 +1349,9 @@ impl Control {
         // Credentials revoked while it was deleted, before anything else (the sweep retries a
         // failure).
         self.apply_revokes(&d.cluster.id).await;
+        if let Err(e) = self.data.move_audit(&d.stored_as, target).await {
+            tracing::warn!(cluster = target, kept = d.stored_as, error = %e, "moving a restored search cluster's audit entries back failed");
+        }
         if had_data && let Err(e) = self.data.delete_cluster(&d.stored_as).await {
             tracing::warn!(cluster = target, kept = d.stored_as, error = %e, "removing a restored search cluster's kept copy failed");
         }
@@ -1368,6 +1390,11 @@ impl Control {
                     tracing::warn!(cluster = d.cluster.id, storage = n, error = %e, "purging a deleted search cluster failed; retried later");
                     ok = false;
                 }
+            }
+            // Its remotes' keys roll made are revoked first: a purge that can't is retried.
+            if ok && let Err(e) = self.revoke_remote_keys_of(&d.cluster.id).await {
+                tracing::warn!(cluster = d.cluster.id, error = %e, "revoking a purged search cluster's remote keys failed; retried later");
+                ok = false;
             }
             if ok && self.store.finish_purge(&d.cluster.id, &claim).await? {
                 purged += 1;
@@ -1484,12 +1511,20 @@ impl Control {
     /// Sends a request to the cluster as its owner (through authentication and admission, so
     /// limits apply and it wakes the cluster like any client). On a fleet it runs on the node that
     /// owns the cluster: here, or sent there (an in-process caller on any node, as apps' links).
-    async fn call(&self, c: &SearchCluster, mut req: EsRequest) -> EsResponse {
-        req.headers.retain(|(k, _)| !k.eq_ignore_ascii_case("authorization") && !k.eq_ignore_ascii_case("host"));
+    pub(crate) async fn call(&self, c: &SearchCluster, mut req: EsRequest) -> EsResponse {
+        req.headers.retain(|(k, _)| {
+            !k.eq_ignore_ascii_case("authorization") && !k.eq_ignore_ascii_case("host") && !k.eq_ignore_ascii_case(search_es::remote::links::REMOTE_ACCESS_HEADER)
+        });
         let token = base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", c.name, c.password));
         req.headers.push(("Authorization".into(), format!("Basic {token}")));
-        if self.node.get_loaded(&c.name).is_none()
-            && let Some(resp) = crate::cluster::to_owner(self, &c.name, &req).await
+        self.on_owner(&c.name, req).await
+    }
+
+    /// Runs `req` on cluster `name`'s owner node: here (waking it if it sleeps), or forwarded
+    /// there signed as roll's own request.
+    pub(crate) async fn on_owner(&self, name: &str, req: EsRequest) -> EsResponse {
+        if self.node.get_loaded(name).is_none()
+            && let Some(resp) = crate::cluster::to_owner(self, name, &req).await
         {
             return resp;
         }
@@ -1770,6 +1805,20 @@ impl Control {
             (200 | 404, false) => Err(ControlError::NotFound(format!("no API key {key_id} on cluster {}", c.name))),
             (s, _) => Err(ControlError::Internal(anyhow::anyhow!("revoking an API key of cluster {} failed ({s}): {v}", c.name))),
         }
+    }
+
+    /// The cluster's security audit entries matching `q`, newest first
+    /// ([`search_server::audit`]). Never wakes the cluster: they are in object storage.
+    pub async fn audit(&self, id: &str, q: &search_server::audit::AuditQuery) -> Result<Value> {
+        let c = self.get(id).await?;
+        let page = self.node.audit.read(&c.name, q).await?;
+        let cfg = self.node.audit.config();
+        Ok(json!({
+            "flavor": c.flavor,
+            "retention_days": cfg.retention.as_secs() / 86_400,
+            "entries": page.entries,
+            "more": page.more,
+        }))
     }
 
     /// The cluster's indices (`_cat/indices`): health, status, docs, size. Wakes the cluster.

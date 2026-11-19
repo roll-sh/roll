@@ -53,6 +53,17 @@ impl Sealer {
         format!("{PREFIX}{}", STANDARD.encode(out))
     }
 
+    /// `plain` sealed for `kind` (a secret kept outside a cluster's state: roll's control
+    /// plane binds it to its row through `kind`).
+    pub fn seal_text(&self, kind: &str, plain: &str) -> String {
+        self.seal(kind, plain)
+    }
+
+    /// What [`Sealer::seal_text`] sealed for `kind`; `None` for anything else.
+    pub fn open_text(&self, kind: &str, stored: &str) -> Option<String> {
+        self.open(kind, stored.strip_prefix(PREFIX)?)
+    }
+
     fn open(&self, kind: &str, sealed: &str) -> Option<String> {
         let raw = STANDARD.decode(sealed).ok()?;
         if raw.len() < 12 {

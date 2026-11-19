@@ -452,7 +452,7 @@ mod chunker_tests {
     /// `semantic_text` chunks writers' documents on a shared node.
     #[test]
     fn long_texts_chunk_in_linear_time() {
-        crate::test_support::assert_linear("sentence chunking", 2_000, |n| "Ab cd é😀 gh. ".repeat(n), |text| {
+        search_test_support::assert_linear("sentence chunking", 2_000, |n| "Ab cd é😀 gh. ".repeat(n), |text| {
             let pieces = Chunking::Sentence { max_chunk_size: 20, sentence_overlap: 1 }.pieces(&text);
             assert!(pieces.len() > 300, "{}", pieces.len());
             let (span, piece) = pieces[1];

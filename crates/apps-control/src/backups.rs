@@ -1,7 +1,8 @@
 //! Volume backups (docs/apps/README.md, "Volume backups"; Railway's volume backups, Render's
 //! and Fly's snapshots): a volume's files as a tar in object storage,
-//! `apps/volumes/<service>/<env>/<unix ms>.tar`, made on demand and once a day, the newest
-//! seven kept. A backup streams from a throwaway container that mounts the volume read-only (no
+//! `apps/volumes/<service>/<env>/<unix ms>.tar`, made on demand and on a schedule (once a day,
+//! the newest seven kept, unless `volume.backups` says otherwise); a restore takes one of the
+//! environment's own, or another environment's of the service (seeding staging from production). A backup streams from a throwaway container that mounts the volume read-only (no
 //! network), so it's what's on disk at that moment: an app mid-write may leave a file half
 //! written, as any snapshot of a running disk. A restore holds the environment asleep, empties
 //! the volume, writes the backup's files and lets the next request wake it.
@@ -10,10 +11,6 @@ use crate::{Apps, Error, Result, volume_name};
 use serde::Serialize;
 use std::sync::Arc;
 
-/// Backups kept per environment (the oldest go after a new one).
-const KEEP: usize = 7;
-/// A day between scheduled backups.
-const EVERY_MS: i64 = 24 * 3_600_000;
 /// How long a deleted environment's (or service's) backups are kept to restore from by hand.
 const ORPHAN_MS: i64 = 7 * 24 * 3_600_000;
 
@@ -34,18 +31,26 @@ impl Apps {
         self.deps.objects.as_ref().ok_or_else(|| Error::Conflict("volume backups need object storage on this node".into()))
     }
 
-    async fn volume_of(self: &Arc<Self>, service: &str, env: &str) -> Result<String> {
+    /// The environment's volume, and its backups' schedule and retention (its own run's, else the
+    /// service's).
+    async fn volume_of(self: &Arc<Self>, service: &str, env: &str) -> Result<(String, crate::model::VolumeBackups)> {
         let (sid, e) = (service.to_string(), env.to_string());
-        let (svc, _) = self.db(move |s| Ok((s.service(&sid)?, s.environment(&sid, &e)?))).await?;
-        if svc.run.volume.is_none() {
+        let (svc, row) = self.db(move |s| Ok((s.service(&sid)?, s.environment(&sid, &e)?))).await?;
+        let run = svc.for_env(&row).map(|s| s.run).unwrap_or_else(|_| svc.run.clone());
+        let Some(v) = run.volume else {
             return Err(Error::Conflict(format!("{} has no volume", svc.name)));
-        }
-        Ok(volume_name(service, env))
+        };
+        Ok((volume_name(service, env), v.backups.unwrap_or(crate::model::VolumeBackups::DEFAULT)))
     }
 
     /// `GET …/volume/backups`: newest first.
     pub async fn backups(self: &Arc<Self>, service: &str, env: &str) -> Result<Vec<Backup>> {
         self.volume_of(service, env).await?;
+        self.stored_backups(service, env).await
+    }
+
+    /// The backups kept under an environment's name, newest first (its volume or not).
+    async fn stored_backups(self: &Arc<Self>, service: &str, env: &str) -> Result<Vec<Backup>> {
         let objects = self.backup_store()?;
         let p = prefix(service, env);
         let mut out: Vec<Backup> = objects
@@ -63,16 +68,16 @@ impl Apps {
         Ok(out)
     }
 
-    /// `POST …/volume/backups`: back the volume up now, then keep the newest [`KEEP`].
+    /// `POST …/volume/backups`: back the volume up now, then keep the newest `volume.backups.keep`.
     pub async fn backup_volume(self: &Arc<Self>, service: &str, env: &str) -> Result<Backup> {
-        let volume = self.volume_of(service, env).await?;
+        let (volume, kept) = self.volume_of(service, env).await?;
         let objects = self.backup_store()?;
         let at = code_sql::now_ms();
         let key = format!("{}{at}.tar", prefix(service, env));
         let tar = self.deps.runtime.read_volume(&volume).await.map_err(|e| Error::Internal(format!("reading the volume: {e:#}")))?;
         let size = objects.upload(&key, tar).await.map_err(|e| Error::Internal(format!("storing the backup: {e:#}")))?;
         self.logs.sink(format!("env:{service}/{env}"), crate::logs::Stream::System).line(format!("volume backed up ({} KiB)", size / 1024));
-        for old in self.backups(service, env).await?.into_iter().skip(KEEP) {
+        for old in self.stored_backups(service, env).await?.into_iter().skip(kept.keep as usize) {
             let _ = objects.delete(&format!("{}{}.tar", prefix(service, env), old.id)).await;
         }
         Ok(Backup { id: at.to_string(), at, size })
@@ -96,20 +101,27 @@ impl Apps {
         }
     }
 
-    /// `POST …/volume/backups/{id}/restore`: the volume as it was then. The backup is
+    /// `POST …/volume/backups/{id}/restore {from?}`: the volume as it was then; `from`: a backup
+    /// of another environment of the service (seeding staging from production). The backup is
     /// downloaded whole and checked against its listed size before anything touches the volume;
     /// then the environment is held asleep (requests get a 503 a moment; rollouts and cron runs
     /// wait), and the runtime swaps the volume's files for the backup's only once it extracted
     /// whole. On its own task, so a client that goes away can't leave it half done or held.
-    pub async fn restore_volume(self: &Arc<Self>, service: &str, env: &str, id: &str) -> Result<Backup> {
-        let volume = self.volume_of(service, env).await?;
+    pub async fn restore_volume(self: &Arc<Self>, service: &str, env: &str, id: &str, from: Option<&str>) -> Result<Backup> {
+        let (volume, _) = self.volume_of(service, env).await?;
         let objects = self.backup_store()?.clone();
-        let Some(b) = self.backups(service, env).await?.into_iter().find(|b| b.id == id) else {
-            return Err(Error::NotFound(format!("no backup {id} of {service} in {env}")));
+        // Another environment's: one of the service's that exists (its backups, its volume or not).
+        let source = from.unwrap_or(env).to_string();
+        if source != env {
+            let (sid, f) = (service.to_string(), source.clone());
+            self.db(move |s| s.environment(&sid, &f)).await?;
+        }
+        let Some(b) = self.stored_backups(service, &source).await?.into_iter().find(|b| b.id == id) else {
+            return Err(Error::NotFound(format!("no backup {id} of {service} in {source}")));
         };
         let (this, service, env) = (self.clone(), service.to_string(), env.to_string());
         tokio::spawn(async move {
-            let key = format!("{}{}.tar", prefix(&service, &env), b.id);
+            let key = format!("{}{}.tar", prefix(&service, &source), b.id);
             let dir = this.cfg.home.join("tmp");
             tokio::fs::create_dir_all(&dir).await.map_err(|e| Error::Internal(e.to_string()))?;
             let path = dir.join(format!("restore-{}.tar", crate::model::random(12).to_ascii_lowercase()));
@@ -137,7 +149,8 @@ impl Apps {
             };
             let _ = tokio::fs::remove_file(&path).await;
             restored?;
-            this.logs.sink(format!("env:{service}/{env}"), crate::logs::Stream::System).line(format!("volume restored from the backup of {}", b.id));
+            let whose = if source == env { String::new() } else { format!(" of {source}") };
+            this.logs.sink(format!("env:{service}/{env}"), crate::logs::Stream::System).line(format!("volume restored from the backup{whose} of {}", b.id));
             Ok(b)
         })
         .await
@@ -225,17 +238,20 @@ impl Apps {
         }
         for l in self.lives().into_iter().filter(|l| self.owns(&l.service)) {
             let Some(tpl) = l.template() else { continue };
-            if tpl.run.volume.is_none() {
+            let Some(v) = &tpl.run.volume else { continue };
+            // Its own schedule (0: by hand only), else once a day.
+            let every = v.backups.unwrap_or(crate::model::VolumeBackups::DEFAULT).every_hours;
+            if every == 0 {
                 continue;
             }
             let newest = self.backups(&l.service, &l.env).await.ok().and_then(|b| b.first().map(|b| b.at)).unwrap_or(0);
-            if code_sql::now_ms() - newest < EVERY_MS {
+            if code_sql::now_ms() - newest < i64::from(every) * 3_600_000 {
                 continue;
             }
             if let Err(e) = self.backup_volume(&l.service, &l.env).await {
                 tracing::warn!(service = %l.service, env = %l.env, error = %e, "apps: a scheduled volume backup failed");
                 // Said where the team looks: its log, and an event its targets hear by default.
-                l.log.stream(crate::logs::Stream::System).line(format!("the daily volume backup failed: {e}"));
+                l.log.stream(crate::logs::Stream::System).line(format!("the scheduled volume backup failed: {e}"));
                 let (sid, en, data) = (l.service.clone(), l.env.clone(), serde_json::json!({ "error": e.to_string() }));
                 let _ = self.db(move |s| s.add_event("volume.backup_failed", &sid, &en, None, &data)).await;
             }

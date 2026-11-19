@@ -52,7 +52,9 @@
 //!   ([`crate::metrics`]: requests, responses by class, 429 rejections and latency per kind of
 //!   request, by the minute) and its slow log entries (`search_es::slowlog`), handed to whoever
 //!   meters, and carried over the same way when an instance unloads. Latency is the time from
-//!   taking the cluster's permits (queueing included) to the answer being durable.
+//!   taking the cluster's permits (queueing included) to the answer being durable. Search
+//!   analytics (`search_es::analytics`: the buckets of the indices that turned them on, and the
+//!   indices whose analytics went) travel with them.
 //! - **Live spec changes** ([`Node::update_spec`]): limits and credentials apply to the loaded
 //!   instance at once, and to one still waking (the wake re-reads the catalog before it
 //!   publishes, and updates made after that wait in `pending_specs` for the publishing opener).
@@ -84,6 +86,12 @@ const WAKE_ROOM: u64 = 1 << 20;
 const MEMORY_CHECK: Duration = Duration::from_secs(2);
 /// Response header naming the node that owns a cluster this node refused.
 pub const OWNER_HEADER: &str = "X-Roll-Search-Owner";
+/// Node setting: the clusters, comma-separated, that read service account tokens from
+/// `<path.conf>/service_tokens`. The file is the node's: on a node serving many clusters a
+/// token in it would sign in as `elastic/fleet-server` on every one of them, so only the
+/// clusters named here read it. A dev-mode node ([`NodeConfig::default_cluster`]) serves one
+/// cluster, which reads it as Elasticsearch does. Under `roll.security.`, so no tenant sees it.
+pub const FILE_SERVICE_TOKEN_CLUSTERS: &str = "roll.security.service_token_file.clusters";
 
 #[derive(Clone, Debug)]
 pub struct NodeConfig {
@@ -133,6 +141,11 @@ pub struct NodeConfig {
     /// data is in object storage (`search_es::api::snapshots::install_default_repository`;
     /// `None`: none).
     pub default_repository: Option<String>,
+    /// Reaches other roll search clusters as remote clusters (`search_es::remote::links`; the
+    /// control plane's); `None`: remotes reach only the node itself.
+    pub links: Option<Arc<dyn search_es::remote::links::Links>>,
+    /// How long and how much each cluster's audit log keeps ([`crate::audit`]).
+    pub audit: crate::audit::AuditConfig,
 }
 
 impl Default for NodeConfig {
@@ -154,6 +167,8 @@ impl Default for NodeConfig {
             snapshot_leftover_grace: search_es::api::snapshots::LEFTOVER_GRACE,
             sealer: None,
             default_repository: None,
+            links: None,
+            audit: crate::audit::AuditConfig::default(),
         }
     }
 }
@@ -266,7 +281,7 @@ pub struct Usage {
     pub requests: u64,
 }
 
-/// A cluster's request metrics and slow log entries not handed on yet
+/// A cluster's request metrics, slow log entries and search analytics not handed on yet
 /// ([`Node::take_observations`]).
 #[derive(Debug, Default)]
 pub struct Observed {
@@ -274,23 +289,26 @@ pub struct Observed {
     pub minutes: Vec<(u64, crate::metrics::Stats)>,
     /// Oldest first.
     pub slow: Vec<search_es::slowlog::Entry>,
+    /// Search analytics: buckets, and the indices whose analytics went (their kept rows go).
+    pub analytics: search_es::analytics::Taken,
 }
 
 impl Observed {
     pub fn is_empty(&self) -> bool {
-        self.minutes.is_empty() && self.slow.is_empty()
+        self.minutes.is_empty() && self.slow.is_empty() && self.analytics.is_empty()
     }
 
     /// Adds `o` (newer) to this.
     fn extend(&mut self, o: Observed) {
         self.minutes.extend(o.minutes);
         self.slow.extend(o.slow);
+        self.analytics.extend(o.analytics);
         let over = self.slow.len().saturating_sub(search_es::slowlog::MAX_ENTRIES);
         self.slow.drain(..over);
     }
 
     fn take_from(l: &Loaded) -> Observed {
-        Observed { minutes: l.metrics.take().into_iter().map(|(m, s)| (m, *s)).collect(), slow: l.cluster.engine.slowlog.take() }
+        Observed { minutes: l.metrics.take().into_iter().map(|(m, s)| (m, *s)).collect(), slow: l.cluster.engine.slowlog.take(), analytics: l.cluster.analytics.take() }
     }
 }
 
@@ -327,6 +345,8 @@ pub struct Node {
     /// Wakes and unloads since start.
     pub wakes: AtomicU64,
     pub unloads: AtomicU64,
+    /// Every cluster's security audit log.
+    pub audit: Arc<crate::audit::AuditLogs>,
 }
 
 /// Holds a cluster's transition lock; drops the map entry when nobody else wants it.
@@ -368,6 +388,9 @@ pub struct Lease {
     /// access token, [`auth::native_authorization`]): the `Authorization` header the request
     /// runs with, so search-es authenticates and authorizes it as that principal.
     native_auth: Option<String>,
+    /// A linked remote cluster's request from roll itself ([`search_es::remote::links`]):
+    /// the remote access it carries, the only copy search-es sees.
+    link: Option<String>,
     /// When it started waiting for its permits: its latency is measured from here.
     since: Option<Instant>,
 }
@@ -442,9 +465,14 @@ impl Lease {
 
     /// Runs the request on its cluster and makes its writes durable before answering.
     pub async fn handle(&self, mut req: EsRequest) -> EsResponse {
+        use search_es::remote::links::REMOTE_ACCESS_HEADER;
         use search_es::xpack::security::AUTHENTICATED_HEADER;
-        // Only the node may say who authenticated.
-        req.headers.retain(|(k, _)| !k.eq_ignore_ascii_case(AUTHENTICATED_HEADER));
+        // Only the node may say who authenticated, and only roll's own calls are a remote
+        // cluster's.
+        req.headers.retain(|(k, _)| !k.eq_ignore_ascii_case(AUTHENTICATED_HEADER) && !k.eq_ignore_ascii_case(REMOTE_ACCESS_HEADER));
+        if let Some(a) = &self.link {
+            req.headers.push((REMOTE_ACCESS_HEADER.to_string(), a.clone()));
+        }
         if let Some(u) = &self.user {
             req.headers.push((AUTHENTICATED_HEADER.to_string(), u.to_string()));
         } else if let Some(h) = &self.native_auth {
@@ -766,6 +794,12 @@ fn release_memory() {
 }
 
 impl Node {
+    /// Whether `cluster` reads the node's `service_tokens` file ([`FILE_SERVICE_TOKEN_CLUSTERS`]).
+    fn reads_file_service_tokens(&self, cluster: &str) -> bool {
+        self.cfg.default_cluster.is_some()
+            || self.cfg.node_settings.iter().rev().find(|(k, _)| k == FILE_SERVICE_TOKEN_CLUSTERS).is_some_and(|(_, v)| v.split(',').any(|c| c.trim() == cluster))
+    }
+
     pub fn new(catalog: Arc<dyn Catalog>, stores: Arc<dyn StoreProvider>, cfg: NodeConfig) -> Arc<Node> {
         Node::with_hooks(catalog, stores, cfg, Arc::new(NoHooks))
     }
@@ -780,7 +814,9 @@ impl Node {
             0 => std::thread::available_parallelism().map_or(2, |n| n.get() * 2),
             n => n,
         };
+        let audit = crate::audit::AuditLogs::new(stores.data(), cfg.audit.clone());
         Arc::new(Node {
+            audit,
             catalog,
             stores,
             fair: (running != usize::MAX).then(|| FairScheduler::new(running)),
@@ -1086,8 +1122,12 @@ impl Node {
         cfg.test_features = self.cfg.test_features;
         cfg.host_metrics = self.cfg.host_metrics;
         cfg.sealer = self.cfg.sealer.clone();
+        cfg.links = self.cfg.links.clone();
+        cfg.catalog_id = spec.catalog_id.clone();
         // Snapshot contents are durable only with object storage behind the cluster.
         cfg.default_repository = self.cfg.default_repository.clone().filter(|_| data_store.is_some());
+        cfg.file_service_tokens = self.reads_file_service_tokens(&spec.name);
+        cfg.audit = Some(search_es::xpack::security::audit::AuditLog(self.audit.clone()));
         let mut cluster = Cluster::open(cfg, store).await?;
         cluster.node.id = stable_node_id(&spec.name);
         if cluster.state().version <= 1 {
@@ -1201,6 +1241,8 @@ impl Node {
             l
         };
         self.hooks.unloading(&loaded.cluster).await;
+        // Failed logins the node refuses while it sleeps are recorded as it last asked.
+        self.audit.remember(name, search_es::xpack::security::audit::snapshot(&loaded.cluster));
         if flush
             && loaded.data.is_some()
             && let Err(e) = loaded.cluster.sync_async_results().await
@@ -1367,6 +1409,7 @@ impl Node {
     /// Deletes a cluster's data (unloading it first, without flushing).
     pub async fn delete_cluster(&self, name: &str) -> anyhow::Result<()> {
         self.force_unload(name).await;
+        self.audit.forget(name).await;
         self.stores.delete(name).await
     }
 
@@ -1445,9 +1488,15 @@ impl Node {
         if let Some(o) = self.unobserved.lock().get(name) {
             out.minutes.extend(o.minutes.iter().cloned());
             out.slow.extend(o.slow.iter().cloned());
+            out.analytics.cleared = o.analytics.cleared.clone();
+            out.analytics.enabled = o.analytics.enabled.clone();
+            out.analytics.hours = o.analytics.hours.clone();
         }
         if let Some(l) = self.get_loaded(name) {
-            out.extend(Observed { minutes: l.metrics.peek(), slow: l.cluster.engine.slowlog.peek() });
+            let analytics = search_es::analytics::Taken { hours: l.cluster.analytics.peek(), ..Default::default() };
+            out.extend(Observed { minutes: l.metrics.peek(), slow: l.cluster.engine.slowlog.peek(), analytics });
+            // Loaded here: which indices have analytics on now decides what reads may show.
+            out.analytics.enabled = Some(l.cluster.analytics.enabled_names());
         }
         out
     }
@@ -1526,6 +1575,7 @@ impl Node {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         }
+        self.audit.flush_all().await;
         if let Some(store) = self.stores.data() {
             store.close().await?;
         }
@@ -1742,7 +1792,18 @@ impl Node {
         // Credentials that aren't the cluster's own may be a principal of the cluster's
         // security (native user, API key, access token): checked once the cluster is loaded.
         let native = claim.as_ref().and_then(|c| auth::native_authorization(&presented, c, host_cluster));
-        let native_ok = |loaded: &Loaded| native.as_deref().is_some_and(|h| search_es::xpack::security::authenticate_native(&loaded.cluster, h).is_some());
+        // A linked remote cluster's request (roll's own, never a client's: the header is
+        // ignored from anyone else) authenticates with a cross-cluster key of this cluster.
+        let link = match origin {
+            Origin::Internal => req.header(search_es::remote::links::REMOTE_ACCESS_HEADER).map(str::to_string),
+            _ => None,
+        };
+        let native_ok = |loaded: &Loaded| {
+            native.as_deref().is_some_and(|h| match &link {
+                Some(access) => search_es::xpack::security::authenticate_native_link(&loaded.cluster, h, access).is_some(),
+                None => search_es::xpack::security::authenticate_native(&loaded.cluster, h).is_some(),
+            })
+        };
         // Fast path: a loaded cluster checks against its shared description, no catalog read.
         if let Some(loaded) = self.get_loaded(name) {
             let spec = loaded.spec();
@@ -1754,6 +1815,7 @@ impl Node {
                 && !auth::verify(&spec, c)
             {
                 if !native_ok(&loaded) {
+                    self.audit_refusal(name, spec.dialect, Some(&*loaded), req, &presented, Some(c));
                     return Err(failed().into());
                 }
                 via_native = true;
@@ -1768,6 +1830,7 @@ impl Node {
             if let Ok(mut lease) = self.pin(loaded, spec.dialect) {
                 if via_native {
                     lease.native_auth = native.clone();
+                    lease.link = link.clone();
                 } else {
                     lease.user = claim.as_ref().map(authenticated_user);
                 }
@@ -1787,6 +1850,7 @@ impl Node {
             && !auth::verify(&spec, c)
         {
             if native.is_none() {
+                self.audit_refusal(name, spec.dialect, None, req, &presented, Some(c));
                 return Err(failed().into());
             }
             via_native = true;
@@ -1804,12 +1868,14 @@ impl Node {
                 Refused::Rejected(Rejected { error, dialect })
             })?;
             if via_native && !native_ok(&loaded) {
+                self.audit_refusal(name, dialect, Some(&*loaded), req, &presented, claim.as_ref());
                 return Err(failed().into());
             }
             match self.pin(loaded, dialect) {
                 Ok(mut lease) => {
                     if via_native {
                         lease.native_auth = native.clone();
+                        lease.link = link.clone();
                     } else {
                         lease.user = claim.as_ref().map(authenticated_user);
                     }
@@ -1818,6 +1884,22 @@ impl Node {
                 Err(()) => tokio::task::yield_now().await,
             }
         }
+    }
+
+    /// Records in cluster `name`'s audit log that the node refused `req`'s credentials: as the
+    /// loaded cluster asks, or as it last asked when it was loaded here (its defaults if never).
+    /// Only a Basic user name is read from the credentials.
+    fn audit_refusal(&self, name: &str, dialect: Dialect, loaded: Option<&Loaded>, req: &EsRequest, presented: &Presented, claim: Option<&auth::Claim>) {
+        use search_es::xpack::security::audit;
+        let user = match presented {
+            Presented::Basic { user, .. } => Some(claim.and_then(|c| c.user.clone()).unwrap_or_else(|| user.clone())),
+            _ => None,
+        };
+        let snap = match loaded {
+            Some(l) => audit::snapshot(&l.cluster),
+            None => self.audit.remembered(name).unwrap_or_else(|| Arc::new(audit::Snapshot::defaults(dialect, name, &stable_node_id(name), &self.cfg.node_name))),
+        };
+        audit::failed_login(&audit::AuditLog(self.audit.clone()), &snap, req, user.as_deref());
     }
 
     /// Counts a request in flight on `loaded`, unless it is being unloaded (the residency
@@ -1834,6 +1916,7 @@ impl Node {
             dialect,
             user: None,
             native_auth: None,
+            link: None,
             since: None,
         };
         if lease.loaded.closed.load(Ordering::SeqCst) {

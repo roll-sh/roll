@@ -123,6 +123,14 @@ pub trait SecretSource: Send + Sync {
     async fn digest(&self, _project: &str, _env: &str) -> anyhow::Result<Option<String>> {
         Ok(None)
     }
+
+    /// The digest once it differs from `since`, or as it is after `wait` (at most 25 s): roll
+    /// secrets long-polls it, so a redeploy can follow a change within a second or two. By
+    /// default, the digest at once.
+    async fn wait_digest(&self, project: &str, env: &str, _since: &str, _wait: std::time::Duration) -> anyhow::Result<Option<String>> {
+        self.digest(project, env).await
+    }
+
     /// The project's `env` made in the store if it's missing (an apps environment named
     /// something roll secrets doesn't start with, `qa`), so its secrets have somewhere to go.
     /// Idempotent; never called for a preview's (previews make those, with their base).
@@ -140,6 +148,15 @@ pub struct Note {
     pub note: String,
     pub by: String,
     pub at: i64,
+}
+
+/// What answers a name under a project's preview domain that no roll apps environment holds (a
+/// preview on roll's own runtime, from roll.toml's `[preview]`): rolld fills it with roll
+/// previews' router, called in process with the request as it came (its Host unchanged).
+/// Unset: those names are a 404.
+#[async_trait]
+pub trait PreviewRouter: Send + Sync {
+    async fn serve(&self, req: axum::extract::Request) -> axum::response::Response;
 }
 
 /// roll previews' notes, for a preview environment's own host (rolld fills it with
@@ -165,6 +182,10 @@ pub struct GitPush {
     pub sha: Option<String>,
     /// The pushed commit's message, as the push said it (`[skip ci]` is the receiver's to read).
     pub message: String,
+    /// Who pushed or acted, as the event says (GitHub's and Gitea's `sender.login`, GitLab's
+    /// `user_username` or `user.username`, Bitbucket's `actor.nickname`): untrusted text, at
+    /// most 100 characters, for rules like roll previews' `skip_authors`, never for trust.
+    pub pusher: Option<String>,
     /// A pull request's (or merge request's) push, opening or closing: `branch` is its own for a
     /// same-repository one, `pull/<number>` for a fork's.
     pub pull: Option<GitPull>,
@@ -181,6 +202,11 @@ pub struct GitPull {
     pub url: String,
     /// From another repository (head and base repository ids differ): its code is untrusted.
     pub fork: bool,
+    /// Who opened it, as the event says (GitHub's `pull_request.user.login`; GitLab's
+    /// `user.username` only when that actor is the opener, `author_id`, since GitLab's hook names
+    /// no opener otherwise: None on another person's push to it): untrusted text, for rules like
+    /// roll previews' `skip_authors` (`*[bot]`), never for trust.
+    pub author: Option<String>,
 }
 
 /// Where pushes to branches roll apps doesn't follow go (rolld fills it with roll previews).

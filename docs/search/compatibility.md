@@ -161,7 +161,8 @@ Reproduce the YAML numbers with `scripts/search-yaml-suites.sh roll` (set `ROLL_
   (GET, PUT, DELETE, PATCH with JSON patches), `api/account` (GET, and PUT for one's own
   password), `api/permissionsinfo`, `api/securityconfig` (GET; changes refused, as
   `allow_securityconfig_modification` is off by default), `api/audit` (GET, PUT, PATCH, with
-  `AuditConfig`'s defaults under a PUT and its validation; stored, roll writes no audit log),
+  `AuditConfig`'s defaults under a PUT and its validation; it decides what the cluster's audit
+  log records, below),
   `api/ssl/certs` and `api/ssl/*/reloadcerts` (refused: the plugin's super admin only), `whoami`
   (`No security data`: plain HTTP has no certificate), `api/cache` (DELETE forgets verified
   passwords), `authinfo` and `health`, also under `_opendistro/_security` (but `whoami`). Answers, validation (keys, types,
@@ -460,7 +461,9 @@ and service accounts ignore the header, as in Elasticsearch. Service account tok
 security index and from `config/service_tokens` (`namespace/service/name:hash` lines, the
 `{PBKDF2_STRETCH}` hashes `elasticsearch-service-tokens` writes; read as the file is now, so
 edits take effect without a restart); `_credentials` lists the file's under
-`nodes_credentials.file_tokens`. An API key whose role descriptors
+`nodes_credentials.file_tokens`. The file is the node's, so on a node serving many clusters
+only the clusters named in the node setting `roll.security.service_token_file.clusters` read it
+(a dev-mode `search-dev` node serves one cluster, which always does). An API key whose role descriptors
 carry `restriction.workflows` runs only requests of those workflows (`search_application_query`:
 a search application's `_search`, with the searches it makes), anything else fails with
 `role_restriction_exception` ("access restricted by workflow"), `_authenticate` included. A search with `ignore_unavailable`
@@ -492,6 +495,47 @@ invalidated key never acts again: its jobs need setting up again by a user who c
 transform `_update`, a policy or watch `PUT`, a new rollup job).
 The `watcher` suite's webhooks and `http` inputs call the node itself: its test cluster sets
 `roll.watcher.allow_private_hosts` (a roll-only option in `extended.txt`), which nothing else does.
+
+The security audit log (README, "Audit log") writes Elasticsearch's entries: event names, field
+names and order, and the shapes of `security_config_change` entries (`put_user` with
+`has_password`, `put_role` with the normalized `role_descriptor`, `create_apikey` with its
+`role_descriptors` as a list, `invalidate_apikeys`, `change_password`, `change_disable_user`,
+`put_role_mapping`, `delete_*`), compared with a private Elasticsearch 9.5.5 with
+`xpack.security.audit.enabled`. As there, a Basic user that fails to authenticate is
+`authentication_failed` with `user.name`, while no credentials, or an API key or token that
+fails, is `anonymous_access_denied`; `enabled`, `include` and `exclude` are dynamic and take
+effect at once; event names are checked in any case. Differences:
+- roll records by default (Elasticsearch: `xpack.security.audit.enabled: false`), and its default
+  include list leaves out `access_granted` and `run_as_granted` (Elasticsearch's has them):
+  include them, or `_all`, to record every request. `_cluster/settings?include_defaults` shows
+  roll's defaults.
+- Entries go to roll's per-cluster log (the API and the dashboard), not to a log file; the
+  `logfile.emit_*` settings, `emit_request_body` and `ignore_filters` are accepted and have no
+  effect. A request body is never recorded.
+- Elasticsearch logs one `access_granted` per transport action, shard-level ones included
+  (`indices:data/read/search[phase/query]`); roll logs the request's action once. Requests a
+  cluster makes to itself (`_xpack`/`_system` users' actions, `system_access_granted`) aren't
+  recorded, and `connection_*`, `tampered_request` and `realm_authentication_failed` never
+  occur (no transport layer; one realm answer per request). A request the cluster's IP allowlist
+  refuses isn't `connection_denied`: like Elastic Cloud's traffic filters, which refuse at the
+  proxy, the allowlist turns it away before the cluster sees it.
+- An API key's entries carry `apikey.id` and `apikey.name` with the owner's `user.name`, without
+  the owner's `user.realm` and `user.roles`. `origin.address` is the client's IP without a port
+  (the address the IP allowlist checks), and is left out for roll's own control-plane requests.
+- User profile changes (`activate_user_profile`, `update_user_profile_data`, enable and disable)
+  aren't recorded yet.
+
+On OpenSearch-flavor clusters the entries are OpenSearch Security's (format version 4, compared
+with OpenSearch 3.9.0 writing to `security-auditlog-*`): `FAILED_LOGIN` (REST; the Basic user, or
+`<NONE>`), `MISSING_PRIVILEGES` (TRANSPORT with `audit_request_privilege` and
+`audit_trace_indices`; REST for the security REST API's refusal, with the plugin's reason),
+`COMPLIANCE_INTERNAL_CONFIG_WRITE` and `_READ` (the document: `internalusers`, `roles`,
+`rolesmapping`, `actiongroups`, `tenants`, `audit`), `INDEX_EVENT` for `indices:admin/*`,
+`GRANTED_PRIVILEGES` and `AUTHENTICATED`. The stored audit config takes effect at once.
+Differences: no `audit_rest_request_headers`, `audit_rest_request_params`, `audit_request_body`
+or diffs, whatever `log_request_body`, `exclude_sensitive_headers` and `write_log_diffs` say;
+compliance entries also name the REST method and path; the plugin's `plugins.security.audit.type`
+(where entries go) isn't a setting: they go to roll's log.
 
 ## Differential suite
 
@@ -1026,6 +1070,34 @@ Checked against Elasticsearch 9.5.5 (captures in
   file counts, `uploaded_blobs` and sizes differ from Elasticsearch's for the same index, and
   dangling multipart uploads are also aborted by `_cleanup` (Elasticsearch aborts them only
   after snapshot deletions).
+- `gcs` and `azure` repositories keep snapshots in a tenant's GCS bucket or Azure container,
+  as `s3` ones do, with Elasticsearch 9.5.5's settings, defaults, messages and their order
+  (checked against it): `gcs` checks `bucket` first (`Setting [bucket] is empty for
+  repository`), then `compress`, the throttles and `chunk_size` (1b..5tb); `azure` checks
+  `compress`, the throttles, `chunk_size` (1b..2684354550000b) and `location_mode` (`No enum
+  constant ...LocationMode.<VALUE>`), defaults `container` to `elasticsearch-snapshots`, and
+  `secondary_only` makes it read-only. `compress` and `readonly` are now validated for every
+  blob store type, `compress` before the throttles and `readonly` after the type's settings, as
+  Elasticsearch does. A client is made when the repository is first used, as Elasticsearch
+  makes it, so `PUT` with `verify` and `_verify` answer its errors in its shape: an `azure`
+  repository without an account `Unable to find client with name [default]`, a key and a SAS
+  token together `Both a secret as well as a shared access token were set for account [...]`,
+  an endpoint suffix with an endpoint, a secondary endpoint without a primary one, a secondary
+  `location_mode` without a secondary endpoint (all `settings_exception`); a `gcs` client
+  `cannot create blob store`. Analysis fails with `BlobStoreRepository`'s text on both (not
+  S3's), and on `azure` the register checks need `location_mode: primary_only`, as
+  Elasticsearch's do. Still different: a client's settings (`gcs`: `credentials_file`,
+  `endpoint`, `token_uri`, `project_id`; `azure`: `account`, `key`, `sas_token`,
+  `endpoint_suffix`, `endpoint`, `secondary_endpoint`) come with the repository's settings, as
+  roll has no keystore or node settings a tenant writes, so `client` only names it; the
+  secure ones are never shown, where Elasticsearch never had them in the repository. roll
+  refuses a bucket or container name the store would refuse, and a `base_path` with empty,
+  `.` or `..` segments, at `PUT` (Elasticsearch accepts them and fails on use). Without a
+  service account a `gcs` repository is anonymous (Elasticsearch would use the node's
+  application default credentials; roll never uses its own), as is an `azure` one with an
+  account and neither key nor SAS token. Objects past 8 MiB go up as resumable uploads in
+  8 MiB chunks or in 8 MiB staged blocks (Elasticsearch has no `buffer_size` for either), so an
+  `azure` object holds at most 400,000 MiB whatever `chunk_size` says.
 - Repository analysis (`_analyze`) on an `s3` repository writes, reads, overwrites, lists and
   deletes real blobs with Elasticsearch's blob sizes (`summary.write.total_size` matches it for
   the same parameters), register and overwrite-protection checks, and its failure chain
@@ -1057,6 +1129,20 @@ The inference API of Elasticsearch 9.5.5's inference plugin (`crates/search-es/s
 to run one, `POST …/_stream` (completion and the unified `chat_completion`), `GET _inference/_services[/{task_type}]`,
 the region policy (`_inference/_region_policy`) and the `inference` section of `_xpack/usage`.
 Task types `text_embedding`, `sparse_embedding`, `rerank`, `completion`, `chat_completion`.
+The services after `anthropic` were measured the same way, on a private Elasticsearch 9.5.5 whose
+provider hosts (`*.openai.azure.com`, `bedrock-runtime.*.amazonaws.com` over HTTP/2,
+`*-aiplatform.googleapis.com`, `oauth2.googleapis.com`, `generativelanguage.googleapis.com`,
+`api.mistral.ai`, …) resolved to a mock with a certificate from a CA the node trusted: each
+scenario (create with its validation call, get, run, stream, update, delete, and the error cases:
+missing and malformed settings, the wrong secret, 401, 403, 429, 500, a dimensions mismatch) was
+recorded with Elasticsearch's answers, every request it sent upstream and the mock's answers. The
+recordings are `crates/search-es/tests/fixtures/inference/*.json`, and
+`crates/search-es/tests/inference_services/` replays them against roll with a mock that gives the
+same answers: roll sends the same requests (method, path, body byte for byte, headers apart from
+transport ones (`Host`, `Content-Length`, `User-Agent`, `Accept`, `Accept-Encoding`) and the
+values of signatures, dates and SDK invocation ids) and answers the same. Steps marked `differs`
+compare the status only; their differences are listed below.
+
 Measured against a private Elasticsearch 9.5.5 calling a mock of the services: the OpenAI flows
 (create with its validation call, get, run, stream, update, delete), 42 error and update cases and
 the region policy CRUD answer the same, and the requests sent upstream are byte for byte
@@ -1067,6 +1153,16 @@ Elasticsearch's (headers, `encoding_format: base64`, `n: 1`, `stream_options`).
 | `openai` | `text_embedding`, `completion`, `chat_completion` | `url` points it at any OpenAI-compatible server (vLLM, Ollama, LiteLLM, roll's model gateway). Not supported: OAuth2 client credentials (`client_secret`) and the multimodal `embedding` task type |
 | `cohere` | `text_embedding`, `rerank`, `completion` | the V2 API Elasticsearch uses for new endpoints; `service_settings.url` (Elasticsearch reads it too) or the node's `roll.inference.cohere.url` move the host off `api.cohere.ai` |
 | `anthropic` | `completion`, `chat_completion` | the Messages API; the unified chat stream is translated to and from it. The node's `roll.inference.anthropic.url` moves the host off `api.anthropic.com` |
+| `azureopenai` | `text_embedding`, `completion`, `chat_completion` | `https://<resource_name>.openai.azure.com/openai/deployments/<deployment_id>/…?api-version=…`; `api_key` (sent as `api-key`) or `entra_id` (a Microsoft Entra token, sent as a bearer token), exactly one, and an update replaces it only with one of the same kind. `resource_name` must be a host name label. Not supported: OAuth2 client credentials (`client_secret`, `client_id`, `tenant_id`, `scopes`) |
+| `amazonbedrock` | `text_embedding`, `completion` | Bedrock Runtime's `InvokeModel` (Amazon Titan's and Cohere's embedding bodies) and `Converse` (every provider: `amazontitan`, `cohere`, `anthropic`, `ai21labs`, `meta`, `mistral`), signed with SigV4 by `aws-sigv4` (service `bedrock`) with the AWS SDK's `amz-sdk-*` headers; `access_key` and `secret_key` are secrets and are updated together. Not supported: `chat_completion` and streamed completions (`ConverseStream` answers in AWS's binary event stream) |
+| `googlevertexai` | `text_embedding`, `rerank`, `completion`, `chat_completion` | embeddings (`:predict`), Discovery Engine's ranking API, Gemini (`:generateContent`, `:streamGenerateContent?alt=sse`). The `service_account_json` is a secret; roll signs an RS256 JWT with its key (`jsonwebtoken`) and trades it at `https://oauth2.googleapis.com/token`, never at the JSON's own `token_uri`, keeping the access token per endpoint until five minutes before it expires. Not supported: Model Garden providers (`provider` other than `google`, `url`, `streaming_url`) |
+| `googleaistudio` | `text_embedding`, `completion` | `:batchEmbedContents`, `:generateContent`, `:streamGenerateContent`; the key travels in the `key` query parameter, as Elasticsearch sends it, and errors print URLs without their query |
+| `mistral` | `text_embedding`, `completion`, `chat_completion` | `api.mistral.ai`'s embeddings (`encoding_format: float`) and chat completions |
+| `voyageai` | `text_embedding`, `rerank` | `api.voyageai.com`; `embedding_type` `float`, `int8` or `bit` |
+| `jinaai` | `text_embedding`, `rerank` | `api.jina.ai`; `embedding_type` `float` or `bit`. Not supported: the multimodal `embedding` task type |
+| `deepseek` | `completion`, `chat_completion` | `https://api.deepseek.com/chat/completions` or the endpoint's `url` |
+| `hugging_face` | `text_embedding`, `sparse_embedding`, `rerank`, `completion`, `chat_completion` | the endpoint's `url`: an Inference Endpoint, Text Embeddings Inference or Text Generation Inference server (`{"inputs": …}`, `{"texts": …, "query": …}`, OpenAI-shaped chat) |
+| `custom` | `text_embedding`, `sparse_embedding`, `rerank`, `completion` | Elasticsearch 9's generic service: `url`, `headers`, `query_parameters` and a `request` template filled from `${input}`, `${query}`, `${top_n}`, `${return_documents}`, `${input_type}` (through `input_type.translation`), the task settings' `parameters` and the endpoint's `secret_parameters`; `response.json_parser` JSON paths per task type; `batch_size`. Templates reach only the endpoint's own secrets, and the URL and query parameters are filled only from what the endpoint's manager stored (its secrets and stored `parameters`), never from a caller's per-request `task_settings`, so a caller can't send the endpoint's secrets to a host of its choosing. Not supported: `response.error_parser` (errors are read the OpenAI way). Like Elasticsearch, `_services` doesn't list it |
 | `elasticsearch` | (needs ML nodes) | the three preconfigured endpoints (`.elser-2-elasticsearch`, `.multilingual-e5-small-elasticsearch`, `.rerank-v1-elasticsearch`) are listed, and running them or creating an endpoint of the service answers what a cluster without ML nodes answers (captured: 429, `Could not start deployment because no ML nodes with sufficient capacity were found`; such an endpoint is stored first, as there). roll never makes up their output |
 
 Creating and updating an endpoint calls the service once (`how big`, as Elasticsearch's model
@@ -1076,9 +1172,20 @@ validators do), which also learns a text embedding model's dimensions and simila
 Security: API keys are secrets, stored apart from the endpoint (`.secrets-inference`) and sealed
 with the deployment key (`seal.rs`, kind `inference api key`); nothing prints them (`GET` shows the
 service settings without `api_key`, as Elasticsearch does) and they're opened only to send a
-request. Every URL is fetched through `roll_net::PublicOnly` with no redirects and no proxy,
+request. So are the other credentials: Azure's `entra_id`, Bedrock's `access_key` and
+`secret_key`, Vertex AI's `service_account_json` and `custom`'s `secret_parameters`. Each goes only
+to its provider's host (a resource name, region or location must be a host name label before it
+becomes part of one), and the replay tests check that none appears in a listing, an answer, an
+error or an endpoint's `Debug` form. Every URL is fetched through `roll_net::PublicOnly` with no redirects and no proxy,
 refusing private IP literals and `localhost`, reading at most 32 MiB
-(`roll.inference.allow_private_hosts` lifts the address rule, for test clusters only). Calls are
+(`roll.inference.allow_private_hosts` lifts the address rule, for test clusters only). A call
+waits at most the node's `roll.inference.max_timeout` (default 120s), retries and the rate
+limiter's wait included: a larger `timeout` is accepted and clamped to it. Elasticsearch 9.5.5
+accepts any `timeout` (`1000d`, `9223372036854775807ms`) and waits that long (checked: a `PUT`
+whose validation call went to a server that never answers was still waiting after 100 s), so
+one tenant could hold a shared node's connection and worker with an endpoint that never
+answers. Below the cap nothing differs; above it the call times out sooner, with the same
+`request timed out` error. Calls are
 authorized by the one security evaluator (`monitor_inference`, `manage_inference`). Answers are
 parsed as untrusted data: shapes are checked (a rerank index outside the inputs, a missing field
 or a wrong embedding count fail the call).
@@ -1089,7 +1196,19 @@ one-token bucket per cluster and endpoint, requests waiting their turn, timing o
 would outlast them; a cluster runs on one node at a time, so it is the cluster's limit), and the
 service's own 429s are retried at most twice; `max_input_tokens` doesn't truncate inputs;
 Cohere's settings are read with roll's settings reader, so a malformed one fails with
-`validation_exception` instead of Cohere's object parser's `x_content_parse_exception`.
+`validation_exception` instead of Cohere's object parser's `x_content_parse_exception` (so does
+Azure OpenAI's `task_settings.user`). Amazon Bedrock embeds Titan inputs one request each, where
+Elasticsearch 9.5.5 times out on a request with more than one; Vertex AI fetches a token only when
+the cached one is about to expire (Elasticsearch's client fetched one per call in the recording);
+a service account JSON that isn't JSON fails with roll's message, not Gson's; after an update stores Vertex AI's `auto_truncate`, roll sends it at once (Elasticsearch 9.5.5 left it out of the next request in the recording); Azure's
+`client_secret` and Vertex AI's Model Garden settings answer that roll doesn't support them.
+
+Left: `alibabacloud-ai-search`, `watsonxai` (an IBM Cloud IAM token flow), `amazon_sagemaker`,
+`azureaistudio`, `ai21`, `contextualai`, `fireworksai`, `groq`, `llama`, `nvidia`,
+`openshift_ai`; Bedrock's `chat_completion` and streamed completions; Azure OpenAI's and OpenAI's
+OAuth2 client credentials; Vertex AI's Model Garden providers; Jina AI's and OpenAI's multimodal
+`embedding` task; `custom`'s `error_parser`. Out of scope: `elastic` (the Elastic Inference
+Service needs Elastic Cloud credentials) and running ELSER or E5 models on the cluster.
 
 YAML: `platinum/inference` 22 of the 23 tests that pass on Elasticsearch (the last needs the
 `random_reranker` retriever). The `inference` extended suite runs the
@@ -1098,7 +1217,10 @@ same directory on a cluster with the `inference-service-test` plugin's services,
 `text_embedding_test_service`, `test_reranking_service`, `completion_test_service`,
 `streaming_completion_test_service`, reproduced exactly) and real clusters never have; the plugin
 isn't in Elasticsearch's release, so there is no Elasticsearch baseline (roll 161 of 305).
-Tests: `crates/search-es/tests/inference.rs` runs every service against a mock server.
+Tests: `crates/search-es/tests/inference.rs` runs `openai`, `cohere` and `anthropic` against a
+mock server; `crates/search-es/tests/inference_services/` replays the recorded scenarios of the
+other services, one file per family (Azure OpenAI, Amazon Bedrock, Google, the OpenAI-compatible
+services, `custom`).
 
 ### `semantic_text`
 
@@ -1426,6 +1548,12 @@ the rest are skipped by the tests' own prerequisites.
 
 ## Known gaps in the document and search APIs
 
+- roll adds one index setting Elasticsearch and OpenSearch don't have,
+  `index.roll.analytics.enabled` (search analytics, README "Search analytics"; dynamic, boolean,
+  no default, so `include_defaults` lists nothing new). Elasticsearch refuses it as an unknown
+  setting. A `search_click` behavioral analytics event is indexed as on Elasticsearch, and also
+  counts as a click for the index's analytics when they're on.
+
 - By-query tasks (`wait_for_completion=false`) run to completion before their task id is
   returned (their results are stored in the `.tasks` system index), so they are not
   throttled and `_rethrottle` doesn't reach them; synchronous requests are throttled by
@@ -1434,6 +1562,15 @@ the rest are skipped by the tests' own prerequisites.
   `reindex.remote.whitelist` (node setting, `search-dev --yaml-test-cluster` sets
   `127.0.0.1:*`); an empty whitelist rejects every remote, as in Elasticsearch.
 - Segment generations in `_segments` / `_cat/segments` number the current segments.
+- Remote clusters (`cluster.remote.<alias>.*`) reach another roll search cluster of the same
+  owner with API key based security (README.md, "Cross-cluster search"), or the node itself
+  (the YAML suites' loopback); roll speaks no transport protocol, so a seed or proxy address
+  outside roll is never connected. A remote's `credentials` are set through roll's API, not a
+  keystore. Searches merge as `ccs_minimize_roundtrips: true` does whatever the parameter says;
+  aggregations over several clusters merge from their JSON (bucket aggregations, `min`, `max`,
+  `sum`, `value_count`, `stats`; others are refused with a 400, and `histogram`s with calendar
+  intervals whose clusters' ranges don't overlap). Not across clusters yet: `scroll`, point in
+  time, suggesters, ES|QL `FROM <alias>:<index>`, and remotes of OpenSearch-flavor clusters.
 - Aggregations and sorting on keyed flattened sub-fields, `_index_mode` aggregations,
   nested sorts inside `top_hits`, and shard-level aggregation failures as partial results.
 - Compound retrievers (`rrf`, `linear`, `pinned`, `rule` and `rescorer` over them) follow
@@ -1472,24 +1609,51 @@ the rest are skipped by the tests' own prerequisites.
   time, else the creation time) is past the effective retention (`data_retention` within
   `data_streams.lifecycle.retention.max`/`.default`; failure stores keep 30 days unless
   configured). It never deletes a write index, and leaves `index.lifecycle.skip`, ILM-preferred,
-  still-writable time series and downsampling indices alone. Failures go to the error store that
-  `_lifecycle/explain` (`error`) and `_lifecycle/stats` print. Its force merges and downsampling
-  rounds aren't run. ILM moves managed indices through hot, warm, cold, frozen and delete as
+  still-writable time series and downsampling indices alone. It also gives each other managed
+  backing and failure index (a time series one once its end time has passed) the
+  `data_streams.lifecycle.target.merge.policy.floor_segment`/`merge_factor` settings and one
+  force merge, and runs the `downsampling` rounds: a time series backing index whose round is due
+  (`after` counted from its generation date, not before its end time; only rounds coarser than
+  an index already downsampled) is write-blocked and downsampled with the last due round to
+  `downsample-<interval>-<origin index>`, which takes its place among the backing indices with
+  the source's generation date as `index.lifecycle.origination_date`; the source is deleted.
+  Elasticsearch keeps the force merge in the index's custom metadata
+  (`force_merge_completed_timestamp`, shown by `_cluster/state`); roll keeps it with the
+  lifecycle's own state, so `_cluster/state` doesn't show it. Failures go to the error store that
+  `_lifecycle/explain` (`error`) and `_lifecycle/stats` print. ILM moves managed indices through hot, warm, cold, frozen and delete as
   `min_age` passes (from the creation date, the rollover date, or
   `index.lifecycle.origination_date`), with Elasticsearch's step names and order (`unfollow`
   and `migrate` injected as it injects them). It runs `rollover` (all conditions, `min_*`
   included, with the `min_docs: 1` and `max_primary_shard_docs` defaults; aliases and data
   streams), `set_priority`, `readonly`, `forcemerge` (`index_codec` too), `allocate`,
   `migrate`, `delete` (a data stream's last index deletes the stream) and `freeze` (a no-op, as
-  in Elasticsearch 8 and later). `shrink` completes when the index is already at its target
-  shard count. `_ilm/explain` prints the execution state (`phase_execution` with the cached
+  in Elasticsearch 8 and later), and the actions that make a new index and swap it in for the
+  managed one, with Elasticsearch's steps (`xpack/ilm_targets.rs`): `shrink` (to
+  `shrink-<4 random>-<index>` through `_shrink`, `allow_write_after_shrink` too), `downsample` (to
+  `downsample-<interval>-<origin index>` through `_downsample`) and `searchable_snapshot` (a
+  snapshot named `<yyyy.MM.dd>-<index>-<policy>-<random>` in the action's repository, of the index
+  or, when it has replicas, of a force merged `fm-clone-<4 random>-<index>`, mounted as
+  `restored-<index>`, or `partial-<index>` in the frozen phase). The new index takes the
+  execution state (`is-shrunken-index` after a shrink, else the step after the action) and the
+  policy, then the source's place among its data stream's backing indices (the source is deleted
+  after) or its aliases (without `is_write_index`; shrink and searchable snapshot add one named
+  after the source) in the request that deletes the source. Steps that wait on shard allocation,
+  colours or data tiers go on at once, as on a single green node; the delete action's
+  `cleanup-snapshot` deletes the snapshot a mounted index came from. `_ilm/explain` shows
+  `shrink_index_name`, `repository_name`, `snapshot_name` and `force_merge_clone_index_name`.
+  `_ilm/explain` prints the execution state (`phase_execution` with the cached
   phase, `step_info`, `failed_step`, retry counts; a missing policy reads as `ERROR`). Failed
   steps are retried on each poll; `_ilm/retry`, `_ilm/move` and `_ilm/stop` (`STOPPING`, then
   `STOPPED`) act on that state. A new managed index is initialized in the state change that
   made it managed. Steps run as the user who last put the policy. `wait_for_snapshot` waits until
   its snapshot lifecycle policy has taken a snapshot including the index since the action began
-  (a policy it names must exist when the ILM policy is put). Not run: `shrink` to fewer shards,
-  `downsample` and `searchable_snapshot`. These end in the `ERROR` step with the reason. ILM history (`ilm-history-*`) isn't written. Elasticsearch polls
+  (a policy it names must exist when the ILM policy is put). Each run writes the ILM history to
+  the hidden `ilm-history-7` data stream (Elasticsearch's template, 90 days of data stream
+  lifecycle retention; `indices.lifecycle.history_index_enabled`) where Elasticsearch's runner
+  writes it: an item after each step that runs outside a cluster state update, where a row of
+  cluster state steps stopped, at each phase change, at each failure and retry that fails again
+  (`error_details` without Elasticsearch's stack trace), and when a step deletes the index (its
+  state with the step `complete`). Elasticsearch polls
   every `indices.lifecycle.poll_interval` and `data_streams.lifecycle.poll_interval`. roll runs
   time-based work (a phase's `min_age`, a rollover's `max_age`, a retention running out, a time
   series end time) at its due time, and wakes a sleeping cluster for it. It polls at those
@@ -1529,7 +1693,18 @@ the rest are skipped by the tests' own prerequisites.
   snapshot is in the bucket. Not supported: `chunk_size`, `server_side_encryption`,
   `canned_acl`, `storage_class` (accepted, not applied), throttling of bucket traffic, `gcs` and
   `azure`.
-- Searchable snapshots mount through the snapshot restore API; mounted indices keep the
+- Searchable snapshots mount through the snapshot restore API, so a mounted index holds its own
+  copy of the snapshot's documents (as `full_copy` does), not one that reads the snapshot's
+  segments: roll's snapshots already share segments with the index they were taken of, but a
+  restore indexes the documents again. This is how far roll goes for ILM's `searchable_snapshot`
+  too: it runs the whole action as Elasticsearch does (snapshot, mount, swap, delete the source),
+  so clients see what they see there (`index.store.type: snapshot`, the `index.store.snapshot.*`
+  settings, read-only, `_searchable_snapshots/stats`, the snapshot in the repository), and the
+  mounted index costs one restore, not a cheaper tier. Every roll cluster's data already lives in
+  object storage behind a local cache, which is what Elasticsearch's frozen tier buys, so a
+  zero-copy mount would save the restore only. Elasticsearch gates searchable snapshots behind an
+  enterprise licence; roll's licence is always `enterprise`, so the action never fails for it.
+  Mounted indices keep the
   repository from being unregistered or moved (409 `repository_conflict_exception`). The
   statistics list the mounted shards' files by Lucene extension with their sizes but no blob
   cache traffic (roll reads no blobs through a cache), the shared cache reports its configured

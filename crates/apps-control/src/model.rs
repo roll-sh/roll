@@ -214,7 +214,13 @@ pub struct LogDrain {
     pub previews: bool,
     /// The names of the headers it's sent with (an API key's: their values are sealed).
     pub headers: Vec<String>,
+    /// How its lines go: `ndjson` (roll's own, signed), `otlp` (OpenTelemetry logs over
+    /// OTLP/HTTP JSON) or `syslog` (RFC 5424 over TLS, RFC 5425's framing).
+    pub format: String,
 }
+
+/// How a drain's lines can go ([`LogDrain::format`]).
+pub const DRAIN_FORMATS: [&str; 3] = ["ndjson", "otlp", "syslog"];
 
 /// What a drain can be sent.
 pub const DRAIN_SOURCES: [&str; 3] = ["runtime", "http", "build"];
@@ -358,6 +364,11 @@ pub struct Build {
     /// Aptfile): apt or apk names, in every stage built on an image.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub packages: Option<Vec<String>>,
+    /// The longest its build may take, in seconds (Render's, Cloud Build's): 60 up to the node's
+    /// own limit (`ROLL_APPS_BUILD_TIMEOUT`, in minutes, 30 by default; a longer one is held to
+    /// it); unset: the node's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_s: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -393,6 +404,9 @@ impl Build {
         }
         if let Some(p) = &self.packages {
             apps_build::packages::check(p).map_err(|why| Error::BadRequest(format!("build.{why}")))?;
+        }
+        if self.timeout_s.is_some_and(|t| !(60..=6 * 3600).contains(&t)) {
+            return Err(Error::BadRequest("build.timeout_s is 60–21600 seconds".into()));
         }
         Ok(())
     }
@@ -431,6 +445,24 @@ pub enum RunType {
 pub struct Volume {
     pub mount: String,
     pub size_gb: u32,
+    /// Its backups' schedule and retention (Fly's snapshot retention, Railway's schedules);
+    /// none: one a day, the newest seven kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backups: Option<VolumeBackups>,
+}
+
+/// How often a volume is backed up and how many backups are kept.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VolumeBackups {
+    /// Hours between scheduled backups, 1–168; 0: none on a schedule (by hand only).
+    pub every_hours: u32,
+    /// The newest kept, 1–90 (scheduled and by hand alike).
+    pub keep: u32,
+}
+
+impl VolumeBackups {
+    pub const DEFAULT: VolumeBackups = VolumeBackups { every_hours: 24, keep: 7 };
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -934,6 +966,11 @@ impl Run {
             if !(1..=500).contains(&v.size_gb) {
                 return bad("volume.size_gb is 1–500");
             }
+            if let Some(b) = v.backups
+                && (b.every_hours > 168 || !(1..=90).contains(&b.keep))
+            {
+                return bad("volume.backups is {every_hours: 0–168 (0: by hand only), keep: 1–90}");
+            }
             self.max_instances = 1;
             self.min_instances = self.min_instances.min(1);
             if !self.rollout.steps.is_empty() {
@@ -1076,6 +1113,11 @@ pub struct EnvironmentSummary {
     /// the project capped by its spend limit, maintenance, its latest deploy failed.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub attention: Vec<&'static str>,
+    /// Settings, variables, links or the project's secrets changed since the live deployment:
+    /// a redeploy applies them (Railway's staged changes, on every list and card).
+    pub needs_deploy: bool,
+    /// A preview's (made for a branch or a pull request, deleted with it).
+    pub ephemeral: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -1084,13 +1126,11 @@ pub struct Environment {
     pub summary: EnvironmentSummary,
     pub service: String,
     pub branch: Option<String>,
-    pub ephemeral: bool,
     pub instances: Vec<Instance>,
     pub domains: Vec<Domain>,
     pub port: Option<u16>,
     /// A TCP service's address (`host:port`), once it has its port.
     pub tcp: Option<String>,
-    pub needs_deploy: bool,
     /// Visitors need the environment's access token (`PUT … {access: {token}}`), or to sign in.
     pub private: bool,
     /// People signed in to roll who may open the project get in (`access.signed_in`).
@@ -1126,6 +1166,10 @@ pub struct Environment {
     /// someone else reports them (roll previews, for its `pv-` environments: one voice on a
     /// pull request).
     pub report: bool,
+    /// The label it answers to under its project's preview domain (`<label>.preview.acme.dev`),
+    /// when roll previews gave it one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview_host: Option<String>,
     /// A preview's pages carry roll previews' feedback button for visitors who came in through
     /// its access link.
     pub feedback: bool,
@@ -1755,6 +1799,11 @@ pub struct Domain {
     /// Requests to it are sent, `308`, to this hostname of the same environment (www → apex),
     /// path and query kept.
     pub redirect_to: Option<String>,
+    /// The app's port this hostname is sent to, when it's another than the service's own
+    /// (Railway's target port, Fly's services): an admin UI on 9000 beside the app on 8080.
+    /// Health checks and wakes stay on the main port.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
 }
 
 /// A hostname a user may add: lowercase labels of `[a-z0-9-]`, at least two, at most 253

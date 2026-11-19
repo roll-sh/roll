@@ -16,13 +16,13 @@ use sha2::{Digest, Sha256};
 use std::time::Duration;
 
 /// Read at most this much of an error response.
-const ERROR_BODY_MAX: usize = 64 << 10;
+pub(crate) const ERROR_BODY_MAX: usize = 64 << 10;
 /// Attempts per request: S3 asks clients to retry 500 and 503.
-const ATTEMPTS: u32 = 3;
+pub(crate) const ATTEMPTS: u32 = 3;
 /// A whole request's limit, except streamed reads ([`Client::open`]): a throttled restore reads
 /// a large object for longer, and only [`READ_IDLE`] bounds it.
-const REQUEST_MAX: Duration = Duration::from_secs(600);
-const READ_IDLE: Duration = Duration::from_secs(60);
+pub(crate) const REQUEST_MAX: Duration = Duration::from_secs(600);
+pub(crate) const READ_IDLE: Duration = Duration::from_secs(60);
 /// Bounds on one listing ([`Client::list`]): S3 answers 1,000 keys a page.
 pub const LIST_PAGES_MAX: usize = 10_000;
 pub const LIST_ENTRIES_MAX: usize = 1_000_000;
@@ -60,7 +60,7 @@ impl std::fmt::Display for Error {
     }
 }
 
-fn err(code: &str, message: impl Into<String>) -> Error {
+pub(crate) fn err(code: &str, message: impl Into<String>) -> Error {
     Error { status: None, code: code.into(), message: message.into() }
 }
 
@@ -451,7 +451,7 @@ pub struct Object {
 }
 
 /// An object being read ([`Client::open`]).
-pub struct Download(reqwest::Response);
+pub struct Download(pub(crate) reqwest::Response);
 
 impl Download {
     /// The next bytes, `None` at the end.
@@ -460,19 +460,19 @@ impl Download {
     }
 }
 
-fn etag_of(r: &reqwest::Response) -> String {
+pub(crate) fn etag_of(r: &reqwest::Response) -> String {
     r.headers().get("etag").and_then(|v| v.to_str().ok()).unwrap_or_default().to_string()
 }
 
 /// `host[:port]` of a URL as the `Host` header carries it.
-fn authority(u: &reqwest::Url) -> String {
+pub(crate) fn authority(u: &reqwest::Url) -> String {
     match u.port() {
         Some(p) => format!("{}:{p}", u.host_str().unwrap_or_default()),
         None => u.host_str().unwrap_or_default().to_string(),
     }
 }
 
-fn transport(e: &reqwest::Error) -> String {
+pub(crate) fn transport(e: &reqwest::Error) -> String {
     let mut s = e.to_string();
     let mut src = std::error::Error::source(e);
     while let Some(x) = src {
@@ -482,7 +482,7 @@ fn transport(e: &reqwest::Error) -> String {
     s
 }
 
-async fn read_bounded(mut r: reqwest::Response, max: usize) -> Result<Bytes, Error> {
+pub(crate) async fn read_bounded(mut r: reqwest::Response, max: usize) -> Result<Bytes, Error> {
     if r.content_length().is_some_and(|n| n > max as u64) {
         return Err(err("TooLarge", format!("the object is larger than {max} bytes")));
     }
@@ -507,7 +507,7 @@ async fn failure(r: reqwest::Response) -> Error {
 }
 
 /// The contents of each `<tag>…</tag>` in `xml` (S3's responses have no attributes on these).
-fn elements<'a>(xml: &'a str, tag: &str) -> impl Iterator<Item = &'a str> + 'a {
+pub(crate) fn elements<'a>(xml: &'a str, tag: &str) -> impl Iterator<Item = &'a str> + 'a {
     let (open, close) = (format!("<{tag}>"), format!("</{tag}>"));
     let mut rest = xml;
     std::iter::from_fn(move || {
@@ -519,11 +519,11 @@ fn elements<'a>(xml: &'a str, tag: &str) -> impl Iterator<Item = &'a str> + 'a {
     })
 }
 
-fn xml_escape(s: &str) -> String {
+pub(crate) fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
-fn xml_unescape(s: &str) -> String {
+pub(crate) fn xml_unescape(s: &str) -> String {
     s.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&apos;", "'").replace("&amp;", "&")
 }
 
