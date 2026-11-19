@@ -389,7 +389,12 @@ behind the `Apps` trait:
   3b. the preview's own variables (`PUT /v1/previews/{id}/env`, the sheet, `roll preview env`):
      Vercel's branch-scoped variables. Setting them redeploys its services; names roll or the
      preview's branches set (`ROLL_*`, `PORT`, `DATABASE_URL`, …) are refused, so they can't
-     point a preview at other data;
+     point a preview at other data. With `ROLL_SECRET_KEY` they're sealed at rest (AES-256-GCM,
+     bound to the preview's id: roll's reviewer's sealer), so the previews table holds no value
+     and a copy on another row doesn't open; ones written before a key read as they were and are
+     sealed at their next write. A node without the key that finds them sealed fails the
+     preview's converge rather than start its services without them
+     (`a_previews_own_variables_are_sealed_at_rest_to_it`);
   4. the branched resources' URLs:
 
      | Resource | Variables |

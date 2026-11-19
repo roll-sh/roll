@@ -495,6 +495,14 @@ pub struct BudgetAlert {
 /// What's at a path in a service, as a tar, as it's read.
 pub type FileStream = Box<dyn tokio::io::AsyncRead + Send + Unpin>;
 
+/// Seals a preview's own variables at rest (rolld: AES-256-GCM under `ROLL_SECRET_KEY`), each
+/// bound to its `aad` (the preview's id), so a value copied to another row doesn't open.
+pub trait Sealer: Send + Sync {
+    fn seal(&self, aad: &str, plain: &str) -> String;
+    /// `None`: not one this key sealed for `aad`.
+    fn open(&self, aad: &str, sealed: &str) -> Option<String>;
+}
+
 /// What reads an OpenTelemetry export request (OTLP/HTTP: protobuf or JSON, gzip or not) into
 /// spans (rolld: roll apps' reader). An error is the request's fault.
 pub trait SpanReader: Send + Sync {
