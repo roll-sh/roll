@@ -3097,9 +3097,28 @@ Agent's templates do).
     (`usr_…`), not `operator`. A workload identity's login can't choose one (400): it ends with its
     token. The audit row is still the resource's, naming the maker
     (`resolved KEY for search:search:logs, for usr_… (who chose it)`).
+  - **A deployer, for the resource's own runtime** (roll apps' git login: a person pastes a deploy
+    token, tagged sensitive, and the service's login refers to it):
+    `Secrets::bind_ref_runtime(resource, reference, caller, runtime_env)`. The contract is the
+    product's: it calls this only after its own check that the caller holds deploy on the
+    resource in `runtime_env` (for roll apps, naming the login is already `deploy`); anything else
+    calls `bind_ref`. Whoever may deploy there can already run code that reads that environment's
+    sensitive keys, so this adds no reach:
+    - A reference to exactly `runtime_env` is a *runtime binding*. Its `Maker` serializes as
+      `usr_…@runtime:production` (a plain maker's format is unchanged). It reads that one
+      environment as the resource's runtime: sensitive keys included, imports and bases as the
+      runtime follows them, within the resource's trust (its one trusted project, and an untrusted
+      copy still reads as an untrusted caller, so no protected environment and no sensitive key).
+    - Every `resolve_as` and `digest_as` still checks first that the maker can sign in, still
+      reaches the project and may reveal the folder, and refuses otherwise.
+    - The audit row is `<resource> (runtime read for <maker>)`, e.g.
+      `apps:service:web (runtime read for usr_…)`.
+    - A reference to any other environment binds by the maker's rules above, and a runtime
+      binding refuses any environment but its own. A workload identity's login is refused here
+      too.
   - **The operator** (roll storage's replication targets, which only the operator writes):
     `Secrets::resolve_for` / `digest_for` read as the project's runtime, sensitive keys included.
-    These are the only references a sensitive key reaches.
+    These and runtime bindings are the only references a sensitive key reaches.
 - **Which products.** roll storage's replication targets to buckets outside roll: the access key
   id and the secret (`POST /v1/storage/replication-targets` with
   `"secret_access_key": "roll://prj_…@production/AWS_SECRET_ACCESS_KEY"`). A target's references

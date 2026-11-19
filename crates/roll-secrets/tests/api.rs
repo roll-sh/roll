@@ -4218,6 +4218,25 @@ async fn a_reference_a_person_chose_reads_only_what_they_may_reveal_now() {
     let login = Caller { principal: "identity:idn_1".into(), ..Caller::operator() };
     assert!(matches!(s.bind_ref(&logs, "roll://production/AWS_KEY", &login), Err(Refusal::Failed(roll_secrets::Error::BadRequest(_)))));
 
+    // roll apps' git login, named by a deployer of production (apps checked deploy): a sensitive
+    // production key reads as the service's runtime there, audited as that, for them.
+    api.ok(Method::PUT, &format!("/v1/workspace/projects/{}/resources/service/web", api.project), Some(json!({ "x": 1, "y": 0 }))).await;
+    let web = ResourceRef::new(Kind::Service, "web");
+    let git = "roll://production/STRIPE_KEY";
+    let deployer = s.bind_ref_runtime(&web, git, &as_root, "production").unwrap();
+    assert_eq!(serde_json::to_value(&deployer).unwrap(), json!("usr_root@runtime:production"));
+    assert_eq!(s.resolve_as(&web, git, &deployer).unwrap().value.expose(), "fake-stripe");
+    assert!(s.digest_as(&web, git, &deployer).is_ok());
+    let audit = api.ok(Method::GET, "/audit?action=secrets.resolve", None).await;
+    assert_eq!(audit[0]["actor"].as_str(), Some("apps:service:web (runtime read for usr_root)"), "{audit}");
+    assert!(matches!(s.bind_ref_runtime(&web, git, &login, "production"), Err(Refusal::Failed(roll_secrets::Error::BadRequest(_)))));
+    // Any other environment keeps the maker's rules, and a runtime binding reads only its own.
+    api.ok(Method::POST, "/environments/staging/changes", Some(json!({ "ops": [{ "op": "set", "key": "STRIPE_KEY", "value": "fake-stripe-staging", "tags": ["sensitive"] }] }))).await;
+    let refused = s.bind_ref_runtime(&web, "roll://staging/STRIPE_KEY", &as_root, "production").unwrap_err();
+    assert!(matches!(refused, Refusal::Unusable(_)) && !refused.to_string().contains("fake-"), "{refused}");
+    let refused = s.resolve_as(&web, "roll://staging/STRIPE_KEY", &deployer).unwrap_err();
+    assert!(matches!(refused, Refusal::NotAllowed(_)) && !refused.to_string().contains("fake-"), "{refused}");
+
     // An admin's session is kept as the person, and the read is audited as the resource, for them.
     let reference = "roll://production/AWS_KEY";
     let root = s.bind_ref(&logs, reference, &as_root).unwrap();
@@ -4249,6 +4268,12 @@ async fn a_reference_a_person_chose_reads_only_what_they_may_reveal_now() {
     let branch = logs.clone().untrusted();
     assert!(matches!(s.resolve_as(&branch, reference, &root), Err(Refusal::Protected(_))));
     assert!(matches!(s.bind_ref(&branch, reference, &as_root), Err(Refusal::Protected(_))));
+    // Nor a runtime binding: an untrusted copy of the service reads as an untrusted caller.
+    let runtime = s.bind_ref_runtime(&web, reference, &as_root, "production").unwrap();
+    assert_eq!(s.resolve_as(&web, reference, &runtime).unwrap().value.expose(), "fake-aws");
+    let copy = web.clone().untrusted();
+    assert!(matches!(s.resolve_as(&copy, reference, &runtime), Err(Refusal::Protected(_))));
+    assert!(matches!(s.bind_ref_runtime(&copy, reference, &as_root, "production"), Err(Refusal::Protected(_))));
     api.ok(Method::PUT, "/environments/production/policy", Some(json!({ "protected": false }))).await;
 
     // A staging-only token can't reach production through staging's import, though the
@@ -4279,9 +4304,15 @@ async fn a_reference_a_person_chose_reads_only_what_they_may_reveal_now() {
     let as_ada = s.caller_of(false, Some(&session("ada", false)), None).unwrap();
     let ada = s.bind_ref(&site, "roll://production/DEPLOY_KEY", &as_ada).unwrap();
     assert_eq!(s.resolve_as(&site, "roll://production/DEPLOY_KEY", &ada).unwrap().value.expose(), "fake-ada");
+    let (st, e) = api.as_ada(Method::POST, &format!("/v1/secrets/projects/{mine}/environments/production/changes"), Some(json!({ "ops": [{ "op": "set", "key": "GIT_TOKEN", "value": "fake-git", "tags": ["sensitive"] }] }))).await;
+    assert!(st.is_success(), "{e}");
+    let ada_runtime = s.bind_ref_runtime(&site, "roll://production/GIT_TOKEN", &as_ada, "production").unwrap();
+    assert_eq!(s.resolve_as(&site, "roll://production/GIT_TOKEN", &ada_runtime).unwrap().value.expose(), "fake-git");
     api.ws_db.write(|c| c.execute("UPDATE projects SET owner = '' WHERE id = ?", [&mine])).unwrap();
     let refused = s.resolve_as(&site, "roll://production/DEPLOY_KEY", &ada).unwrap_err();
     assert!(matches!(refused, Refusal::NotAllowed(_)), "{refused}");
+    let refused = s.resolve_as(&site, "roll://production/GIT_TOKEN", &ada_runtime).unwrap_err();
+    assert!(matches!(refused, Refusal::NotAllowed(_)) && !refused.to_string().contains("fake-"), "{refused}");
 }
 
 #[tokio::test]

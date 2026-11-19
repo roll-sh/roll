@@ -719,7 +719,7 @@ impl Secrets {
         };
         let reader = if untrusted { self.untrusted(project, caller)?.not_runtime() } else { caller.clone() };
         let narrowed = self.caller_for(project, slug, &reader).map_err(missing)?;
-        let why = if untrusted { format!("{} is an untrusted copy", caller.principal.trim_end_matches(" (untrusted)")) } else { format!("{slug} is an ephemeral environment that isn't trusted") };
+        let why = if untrusted { format!("{} is an untrusted copy", caller.principal.split(" (").next().unwrap_or_default()) } else { format!("{slug} is an ephemeral environment that isn't trusted") };
         // Read as whoever chose the reference (`Secrets::resolve_as`): never a runtime.
         let not_runtime = match &caller.maker {
             Some(maker) if !caller.runtime => format!("{maker} chose the reference, and a person's or a token's choice never reads a sensitive key (an operator-written target does)"),
