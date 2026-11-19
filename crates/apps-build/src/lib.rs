@@ -14,6 +14,7 @@ mod deno;
 mod df;
 mod docker;
 mod dotnet;
+pub mod edge;
 mod elixir;
 pub mod functions;
 mod gleam;
@@ -136,6 +137,10 @@ pub struct Plan {
     /// `api`): a service of their own beside it does ([`functions`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub functions: Vec<String>,
+    /// A static site's edge functions ([`edge`]): run before its files on their paths, by its
+    /// functions service.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub edge: Vec<edge::EdgeFn>,
 }
 
 /// The images a Dockerfile builds on (its `FROM`s), for watching them move: not its own stages,
@@ -303,7 +308,7 @@ pub fn plan(tree: &dyn Tree, overrides: &Overrides) -> Result<Plan, Error> {
     }
     // A static site's functions (Netlify's, Vercel's `api/`) never run: said, not dropped silently.
     if p.start.as_deref() == Some(static_site::START) {
-        for (dir, what, route) in [("netlify/functions", "Netlify Functions", "/.netlify/functions/*"), ("netlify/edge-functions", "Netlify Edge Functions", "the paths they answer"), ("api", "Vercel functions", "/api/*")] {
+        for (dir, what, route) in [("netlify/functions", "Netlify Functions", "/.netlify/functions/*"), ("api", "Vercel functions", "/api/*")] {
             let n = tree.list(dir).iter().filter(|f| [".js", ".mjs", ".cjs", ".ts", ".mts", ".py", ".go"].iter().any(|e| f.ends_with(e)) || f.ends_with('/')).count();
             if n > 0 {
                 p.notes.push(format!("{dir}/ has {n} {what}, which a static site doesn't run: Run its functions makes a service of them, with {route} routed to it"));
@@ -312,6 +317,18 @@ pub fn plan(tree: &dyn Tree, overrides: &Overrides) -> Result<Plan, Error> {
                 }
             }
         }
+    }
+    // Its edge functions: run before its files once its functions service is (Run its functions).
+    if p.start.as_deref() == Some(static_site::START) {
+        let (found, notes) = edge::find(tree);
+        p.notes.extend(notes);
+        for f in &found {
+            p.notes.push(format!("{}: an edge function on {}, run before the files by its functions service (Run its functions)", f.file, f.paths.join(", ")));
+        }
+        if !found.is_empty() {
+            p.functions.push("edge".into());
+        }
+        p.edge = found;
     }
     // Vercel's crons, whatever builds it (a Next.js app's usually).
     if let Some(text) = tree.read("vercel.json").and_then(|b| String::from_utf8(b).ok()) {
@@ -495,6 +512,7 @@ impl Draft {
             release: None,
             crons: Vec::new(),
             functions: Vec::new(),
+            edge: Vec::new(),
         }
     }
 }

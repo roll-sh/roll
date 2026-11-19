@@ -706,6 +706,8 @@ export interface Plan {
   uses?: ("postgres" | "redis")[];
   /** A static site's function directories (`netlify/functions`, `api`) the `functions` builder runs. */
   functions?: string[];
+  /** A static site's edge functions: run before its files on their paths by its `-fn` service. */
+  edge?: { name: string; kind: "netlify" | "vercel"; file: string; paths: string[]; excluded?: string[] }[];
 }
 
 export interface RootCandidate {
