@@ -2129,19 +2129,20 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Where a slower route's time went, in review** (`feature/roll-previews-route-why`; Sentry's
-   span comparison): the span whose median grew most against main's preview's, with each slower
-   route on `…/routes`, the sheet, the record, the change page and the pull request's comment.
+1. **The comparison with main checked live end to end**: `scripts/preview-cost.sh` posts traces
+   and writes errors to main's preview and the change's (both running), and waits for the record's
+   `slower_routes` (with its `grew`) and `new_errors`, the change's summary and the comment's
+   lines; the holder's rounds read at a test's pace (a config knob, as the engine's tests do).
+   Today unit and engine tests cover each piece, but no live run has both previews at once.
 2. **References a person chooses** (after roll secrets' #407, `bind_ref`/`resolve_as`): a
    preview's own variables take `roll://` too, and the rules' references (who wrote each is kept,
    `env_refs`) move to bindings, so a writer who loses reveal stops theirs.
-3. **New errors that survive per-preview values**: an error line holding the preview's own id
-   or its branch's host reads as new against main's though it's the same error; mask a
-   preview's own values out of a line (as roll apps' grouping takes ids out) before it's
-   fingerprinted, so both previews' groups meet.
-4. **The rules dialog offers to keep a pasted value in roll secrets** (roll secrets' suggestion):
-   a value that looks like a credential pasted into `env` is offered a key in the base
-   environment, and the rule becomes its `roll://` reference.
+3. **The verdict strip and the comment shot with main's preview**: the turn-10 review pack had
+   no main's preview at that point of the script; take the strip ("N new errors", "N routes
+   slower") and the change page on the env item 1 leaves.
+4. **In review**: where a slower route's time went (#459), new errors that see past each
+   preview's own names (#460), keeping a pasted credential in roll secrets from the rules dialog
+   (#461).
 5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
 6. **Watch: pg-control's recovery to a time seconds old** (unowned).
