@@ -207,7 +207,7 @@ pub fn find(all: &[Value], args: &Value) -> Value {
 /// A run tool's call as the tool it names: `Ok((name, arguments))`, or the error result to answer.
 /// `all` is what the connection may use: a run never reaches a tool it isn't offered, and
 /// [`RUN_READ`] only a read-only one.
-pub fn unwrap(all: &[Value], run: &str, args: &Value) -> Result<(String, Value), Value> {
+pub fn unwrap<T: std::borrow::Borrow<Value>>(all: &[T], run: &str, args: &Value) -> Result<(String, Value), Value> {
     let fail = |text: String| json!({ "content": [{ "type": "text", "text": text }], "isError": true });
     let Some(name) = args["tool"].as_str() else { return Err(fail(format!("{run} needs \"tool\": a name {FIND} answered"))) };
     let inner = match args.get("arguments") {
@@ -216,7 +216,7 @@ pub fn unwrap(all: &[Value], run: &str, args: &Value) -> Result<(String, Value),
         Some(_) => return Err(fail("\"arguments\" must be an object".into())),
     };
     // `all` is the connection's own tools: never these three, so a run never runs a run.
-    let Some(t) = all.iter().find(|t| t["name"].as_str() == Some(name)) else {
+    let Some(t) = all.iter().map(std::borrow::Borrow::borrow).find(|t: &&Value| t["name"].as_str() == Some(name)) else {
         return Err(fail(format!("no tool {name:?} on this connection: call {FIND} to see what there is")));
     };
     if run == RUN_READ && !is_read_only(t) {

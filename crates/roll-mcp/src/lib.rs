@@ -625,22 +625,29 @@ impl Ctx {
         self.may(t.product, &t.actions())
     }
 
-    /// Every tool this caller can use, as `tools/list` shows it.
-    fn tools(&self) -> Vec<Value> {
-        let mut out: Vec<Value> = tools::all().iter().filter(|t| self.usable(t)).map(tools::Tool::definition).collect();
+    /// Every tool this caller can use, read in place: roll's own are borrowed (each copy of
+    /// every definition cost ~2 ms a request with every product on), a fronted set's are its own.
+    fn usable_tools(&self) -> Vec<std::borrow::Cow<'static, Value>> {
+        let mut out: Vec<std::borrow::Cow<'static, Value>> = tools::all().iter().filter(|t| self.usable(t)).map(|t| std::borrow::Cow::Borrowed(t.definition_ref())).collect();
         for set in self.m.sets.iter() {
             for t in set.tools() {
                 let product = t["_meta"]["roll/product"].as_str().unwrap_or("code").to_string();
                 let read_only = t["annotations"]["readOnlyHint"].as_bool() == Some(true);
                 let actions: &[Action] = if read_only { &[Action::Read] } else { &[Action::Write, Action::Deploy, Action::Admin] };
                 if self.may(&product, actions) {
-                    out.push(t);
+                    out.push(std::borrow::Cow::Owned(t));
                 }
             }
         }
         if self.readonly {
             out.retain(|t| t["annotations"]["readOnlyHint"].as_bool() == Some(true));
         }
+        out
+    }
+
+    /// Every tool this caller can use, as `tools/list` shows it.
+    fn tools(&self) -> Vec<Value> {
+        let mut out: Vec<Value> = self.usable_tools().into_iter().map(std::borrow::Cow::into_owned).collect();
         // A connection no person is ever asked about has no use for the approval argument (a
         // model reads every tool's schema): the operator's, and a token whose rules only allow.
         // Fronted sets' tools take it too.
@@ -683,7 +690,7 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
                 // the gate and the audit log see that tool.
                 let mut unwrapped = None;
                 if ctx.search && args.is_object() && (name == search::RUN || name == search::RUN_READ) {
-                    match search::unwrap(&ctx.tools(), &name, &args) {
+                    match search::unwrap(&ctx.usable_tools(), &name, &args) {
                         Ok((n, a)) => (name, args) = (n, a),
                         Err(r) => unwrapped = Some(r),
                     }
@@ -976,7 +983,7 @@ async fn listen(ctx: Arc<Ctx>, msg: &Value) -> Response {
 }
 
 fn tool_names(ctx: &Ctx) -> Vec<String> {
-    ctx.names.get_or_init(|| ctx.tools().iter().filter_map(|t| t["name"].as_str().map(str::to_string)).collect()).clone()
+    ctx.names.get_or_init(|| ctx.usable_tools().iter().filter_map(|t| t["name"].as_str().map(str::to_string)).collect()).clone()
 }
 
 /// A call waiting on a person, for a client that opens URLs: open the approval page, then send the

@@ -903,7 +903,7 @@ waits on a sibling PR reaching main is last.
    `apps_deploy_vulnerabilities` (`severity`), `apps_environment_slo`, `apps_list_forms`,
    `apps_form_submissions` (a reveal; in lockdown each submission's `fields` are withheld,
    `Tool::outside`: anyone can submit a site's form) and `apps_delete_form_submission`; then
-   images with critical vulnerabilities in `security_checkup`. Proposed to secrets (their call, #277's doc
+   images with critical vulnerabilities in `security_checkup`. Next unblocked: `tools/list` from borrowed definitions (an approval-less copy worked out once, serialized without cloning ~290 KB a call: about a fifth of its ~10 ms). Later, once secrets #281 lands: `secrets_verify_audit` (`GET …/audit/verify`, where the audit chain breaks) in `security_checkup`; no tools for decoys (#392, an admin's). Proposed to secrets (their call, #277's doc
    says no tool today): `secrets_request_value` (write), `secrets_list_value_requests` and
    `secrets_cancel_value_request`, so an agent that needs a key it doesn't have sends the person a
    link and the value goes from their browser, sealed, into the folder, never through the
