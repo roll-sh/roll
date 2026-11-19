@@ -879,18 +879,22 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **Next, ranked (now):** read tools for secrets' new backends (directories, Snowflake accounts,
-   Atlas projects, gateways with their link's status, a CA's ACME server; secrets' batch 3) and
-   storage's accounts, access keys, IAM roles and replication targets, with four search-mode
-   queries (`feature/roll-mcp-secrets-backends`, this PR). Waiting on a sibling: apps' forms
-   tools (`apps_list_forms`, and `apps_form_submissions` as a reveal; apps #346), image scanning
-   and SLOs (`apps_deploy_vulnerabilities` with `severity`, `apps_environment_slo`; apps #379)
-   once they land; secrets' request (#277) and cut-off (#304) tools when secrets' batch 4 lands;
-   a removed person's repositories handed to someone else (waits for a repository transfer in
-   roll code). Landing now (unit `roll-mcp-land373`): more secrets reads with 10 search-mode
-   queries (#376), People as CSV (#377); the turn-4 follow-ups (#373) are on main. Not doing:
+1. **Next, ranked (now):** an advisor like Supabase's `get_advisors` and GitHub's security
+   overview: the access checkup, tokens, tighten proposals and a token's networks as read tools,
+   and a `security_checkup` workflow that changes nothing (`feature/roll-mcp-next-6`, this PR,
+   stacked on #380). Open: read tools for secrets' new backends and storage's IAM (#380; unit
+   `roll-mcp-land380` lands it after previews' turn). Then, unblocked: queues' users, tasks' apps
+   and API keys and nosql's imports as read tools (each route checked for credentials first). Waiting
+   on a sibling: apps' forms tools (`apps_list_forms`, and `apps_form_submissions` as a reveal;
+   apps #346), image scanning and SLOs (`apps_deploy_vulnerabilities` with `severity`,
+   `apps_environment_slo`; apps #379) and the scan in `security_checkup` once they land; secrets'
+   request (#277) and cut-off (#304) tools when secrets' batch 4 lands; a removed person's
+   repositories handed to someone else (waits for a repository transfer in roll code). Not doing:
    "remember this browser"; a preset that reveals development's values without asking (#354).
-2. **Landed 2026-11-19, turn 4 (main 97cdd7645, ci green):** steadier timing tests (#348), passkey
+2. **Landed 2026-11-19 (main 8ce685ac8, ci green):** the turn-4 follow-ups (#373: the policy alert
+   names the longest session, People's Dormant filter and turning the dormant off in one step),
+   more secrets reads as tools with 10 more search-mode queries (#376), People as CSV (#377).
+3. **Landed 2026-11-19, turn 4 (main 97cdd7645, ci green):** steadier timing tests (#348), passkey
    autofill (#322), an admin's per-person security log (#328), admin alerts (#333), search's audit
    and analytics tools (#334), the longest session (#337), how each session signed in (#338),
    signing out of the others (#342), People's search (#345), dormant people, token use counting
@@ -898,7 +902,7 @@ waits on a sibling PR reaching main is last.
    clients' limits (#355), approvals remembered for a week or 30 days (#360), debugging reads as
    tools (#362). An independent security review fixed six of them before landing; checked in a
    real Chromium (`users-live/review-turn4.sh`).
-3. **Landed 2026-11-18, turn 3 (main e84194b6f, ci green):** a person's own data export (#283),
+4. **Landed 2026-11-18, turn 3 (main e84194b6f, ci green):** a person's own data export (#283),
    hardware keys only (#286), one provider for people and agents (#287), an SSO connection's
    session length (#289) and back-channel logout (#292), allowed networks (#294), a second factor
    for everyone (#298) and who has one (#299), an idle timeout (#302), phishing-resistant sign-in
@@ -908,12 +912,12 @@ waits on a sibling PR reaching main is last.
    Kubernetes clusters (#310), and the audit log naming people by handle (#313). Gated as one tree,
    then landed one per round (`turn3-land.sh`: the queue drops stacked PRs that share anchors once
    a squash breaks their ancestry).
-4. **Landed 2026-11-18 (main 1a60b43be):** passkeys (#256), sudo mode (#257, #260), new-sign-in mail
+5. **Landed 2026-11-18 (main 1a60b43be):** passkeys (#256), sudo mode (#257, #260), new-sign-in mail
    (#258), second-factor resets (#263), refused codes in the security log (#254); for roll secrets,
    `revoke_many` and the public detectors (#267) and decoy tokens (#270).
-5. **Enterprise:** a provider made once in the dashboard for both people and agents (#252 picks
+6. **Enterprise:** a provider made once in the dashboard for both people and agents (#252 picks
    an existing connection today).
-6. **People's accounts, enterprise-grade:** on main since 2026-11-18: SSO (#225), SCIM
+7. **People's accounts, enterprise-grade:** on main since 2026-11-18: SSO (#225), SCIM
    provisioning (#231), an audit trail of accounts in roll's audit log (#236) and a person's own
    security log (#239). Next on it, ranked:
    - **Checksummed `rlp_` SCIM tokens, revoked on a leak** (now; this PR): found by leak scanning
@@ -927,7 +931,7 @@ waits on a sibling PR reaching main is last.
    - Provider groups to roles over SCIM: **blocked.** roll has no org or team membership for people
      yet (docs/accounts.md phase 2, "Orgs"), and its one role, admin, is never SCIM's to grant.
      Groups map to org membership once orgs exist.
-7. **Tools for sibling routes as they reach main** (each a row in tools.rs and the table above).
+8. **Tools for sibling routes as they reach main** (each a row in tools.rs and the table above).
    `secrets_list_github_apps` (secrets #73) is #253; secrets' other routes after batch 1 are admin,
    a credential, a person's review, or an existing tool's (`tool-gaps.py`, 2026-11-18). Waiting on
    open PRs: `secrets_totp` (secrets #194), apps #230 (`apps_restore_service`, deploy,
@@ -935,21 +939,21 @@ waits on a sibling PR reaching main is last.
    #219/#221/#222 (`rebuild_on_base`, firewall `challenge`, `build_closed`), apps #235 (`GET …/diff`,
    and `PATCH …/variables` `copy_from` on its own row with `copies_from`). Apps tells this thread
    as #230 and #235 land (their turn began 2026-11-18 03:00).
-8. **Gate flakes under load, for their owners:** code-sql's `writes_are_serializable_and_retried`
+9. **Gate flakes under load, for their owners:** code-sql's `writes_are_serializable_and_retried`
    and `killed_connections_never_lose_or_repeat_acknowledged_writes` (16 threads on one row exhaust
    the 40 conflict re-runs), and code-control's Linear e2e (30 s for the elicitation). A test-side
    deadline, not more retries in production, is the likely fix. (The 2026-11-18 turn's combined
    gate passed without them: #208, #209, #210, #225, #226, #231, #236 and #239 landed as one gated
    tree, main 53b939213.)
-9. **Enterprise sign-in (#210), what's left:** a live check with a real provider's ID-JAG (Okta's
+10. **Enterprise sign-in (#210), what's left:** a live check with a real provider's ID-JAG (Okta's
    Cross App Access sandbox needs an account: the review pack's decision 5). The draft names the
    tenant `tenant`; a provider whose assertions say it another way (Entra's own tokens use `tid`)
    gets a mapping once its ID-JAGs are checked, never a guess.
-10. **Lockdown by default where roll's own agents act on outside text:** roll code agents and
+11. **Lockdown by default where roll's own agents act on outside text:** roll code agents and
    automations that pick up issues and chat messages (the agents thread's call; no agents thread is
    running to tell), and chat messages that reach an agent marked `outside` (an install's
    non-members can't drive roll, so mostly members' text).
-11. **More MCP Apps views:** a rollback button on a deploy (calling `apps_rollback` through the
+12. **More MCP Apps views:** a rollback button on a deploy (calling `apps_rollback` through the
    host, so through the gate, as deploy), once a host that renders views is confirmed (the review
    pack's decision 4). A preview's screenshot against its baseline needs no view: hosts render
    `previews_screenshot`'s image (`diff=base`) themselves, and accepting a visual change stays a
@@ -957,30 +961,30 @@ waits on a sibling PR reaching main is last.
    (`examples/basic-host` v2.0.4: `users-live/host-shot.mjs`, with its one-line patch declaring
    the extension) and the stand-in; Claude.ai or ChatGPT need a public HTTPS rolld and the user's
    account.
-12. **Everyday routes with no tool:** rechecked on main 2026-11-18 (03:40, after secrets' batch 1
+13. **Everyday routes with no tool:** rechecked on main 2026-11-18 (03:40, after secrets' batch 1
    and search's and previews' turns): secrets' one gap is #253, search and previews have nothing new; what has no tool is a credential, a password, a key's
    material, a deployment key's health, a person's review, or admin by design (tasks, streams,
    storage, queues, postgres, Redis and NoSQL have theirs). Recheck each product after its thread
    lands routes (`tool-gaps.py origin/main <product> <branch>`).
-13. **More tools that wait:** `apps_wait_deploy` is in #108. Rechecked on main (05:50): Postgres
+14. **More tools that wait:** `apps_wait_deploy` is in #108. Rechecked on main (05:50): Postgres
    branch backups and restores answer once done (nothing to wait on); search's reindexes are
    Elasticsearch's own `_tasks` behind the operator's request route. Branch backups and search reindexes
    can use `until` once their routes answer a state to wait on (search's reindex is an
    Elasticsearch task today, with no roll route to watch). Recheck with `mcpc` (`~/.local/share/roll-mcp/live/mcpc-tasks.sh`), and with the
    TypeScript SDK's `client/ext/tasks` once it ships.
-14. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
+15. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
    rolld, and send each thread its conflicts and their resolutions (`sibling-auth.sh`: every
    route classified, per method, with #25; agreed conflicts resolved by `known-conflicts.py`), and
    compare each product's routes with its tools (an everyday route with no tool is a gap: apps'
    were found this way). #24 and #25 are on main, so `feature/mcp-on-landing` is retired:
    secrets' #64 lands on main directly.
-15. **The operator's steps:** only if a load balancer that terminates HTTP sits in front of rolld (not
+16. **The operator's steps:** only if a load balancer that terminates HTTP sits in front of rolld (not
    roll's own edge, which needs nothing), set `ROLL_TRUSTED_PROXIES` to its addresses; and register `rlt_`, `rlo_`, `rlf_`, `rlc_`, `rlk_`, `rlp_` and `rlb_` (`[a-z2-7]{40}` with a
    checksum) with GitHub's secret scanning partner program, so leaks on GitHub reach
    `/v1/access/leaks/github`.
-16. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
+17. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
    reach the daemon on the Docker bridge; run `pnpm test:pg` where they can (CI) before merging.
-17. **Step-up authorization (SEP-835), once clients do it:** a refused call could answer `403`
+18. **Step-up authorization (SEP-835), once clients do it:** a refused call could answer `403`
    `WWW-Authenticate: Bearer error="insufficient_scope", scope=…` so the client reopens roll's
    consent screen for the refused rule (as the refusal's widen link proposes it now). Not yet: today
    it would take the refusal's explanation and `access_request_access` away from the main clients,
