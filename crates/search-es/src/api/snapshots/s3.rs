@@ -1,6 +1,8 @@
 //! The `s3` repository type (Elasticsearch's `repository-s3`): snapshots in an S3-compatible
 //! bucket the tenant names, so they outlive the cluster and another cluster (on any roll
-//! deployment) can restore them.
+//! deployment) can restore them. The `gcs` and `azure` types ([`super::cloud`]) keep the same
+//! layout in a GCS bucket or an Azure container through [`Bucket`]: only how the store is
+//! reached ([`crate::blob::Store`]) and their settings differ.
 //!
 //! Settings: `bucket` (required), `base_path`, `endpoint` (a host, `host:port` or URL; AWS's
 //! regional endpoint by default), `protocol`, `region` (`us-east-1` by default; the signing
@@ -45,13 +47,14 @@ use super::*;
 use crate::s3::{self as client, Credentials, Location};
 use crate::write::{CopyTarget, DocCopy};
 use bytes::Bytes;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 
-/// Node setting that lets `s3` repositories reach private addresses (local development).
+/// Node setting that lets `s3`, `gcs` and `azure` repositories reach private addresses (local
+/// development and tests: MinIO, fake-gcs-server, Azurite).
 pub const ALLOW_PRIVATE: &str = "roll.repository.s3.allow_private_hosts";
 /// Associated data of sealed repository credentials.
-const SECRET_KIND: &str = "s3 repository credential";
+pub(super) const SECRET_KIND: &str = "s3 repository credential";
 /// Settings that are credentials ([`Repository::secrets`]).
 pub const SECRET_SETTINGS: [&str; 3] = ["access_key", "secret_key", "session_token"];
 
@@ -101,10 +104,7 @@ pub(super) fn validate(cluster: &crate::Cluster, name: &str, settings: &Settings
         let why = format!("chunk_size ({}) can't be lower than buffer_size ({}).", shown("chunk_size", chunk), shown("buffer_size", buffer));
         return Err(create(repository_exception(name, why)));
     }
-    let base = settings.get("base_path").unwrap_or_default();
-    if !base.is_empty() && base.trim_end_matches('/').split('/').any(|seg| seg.is_empty() || seg == "." || seg == "..") {
-        return Err(create(EsError::illegal_argument(format!("invalid base_path [{base}]"))));
-    }
+    base_path(settings).map_err(create)?;
     if let Some(v) = settings.get("path_style_access") {
         crate::units::parse_bool(v).map_err(create)?;
     }
@@ -117,20 +117,16 @@ pub(super) fn validate(cluster: &crate::Cluster, name: &str, settings: &Settings
     Ok(())
 }
 
-/// Moves the credentials out of `settings`, as the cluster stores them (sealed when it can).
-pub(super) fn take_secrets(cluster: &crate::Cluster, settings: &mut Settings) -> BTreeMap<String, String> {
-    let mut out = BTreeMap::new();
-    for k in SECRET_SETTINGS {
-        if let Some(v) = settings.remove(k)
-            && let Some(v) = v.as_str().filter(|v| !v.is_empty())
-        {
-            out.insert(k.to_string(), crate::seal::seal_given(cluster, SECRET_KIND, v));
-        }
+/// `base_path`: `/`-separated names, none empty, `.` or `..` (keys are built from it).
+pub(super) fn base_path(settings: &Settings) -> EsResult<()> {
+    let base = settings.get("base_path").unwrap_or_default();
+    if !base.is_empty() && base.trim_end_matches('/').split('/').any(|seg| seg.is_empty() || seg == "." || seg == "..") {
+        return Err(EsError::illegal_argument(format!("invalid base_path [{base}]")));
     }
-    out
+    Ok(())
 }
 
-fn allow_private(cluster: &crate::Cluster) -> bool {
+pub(super) fn allow_private(cluster: &crate::Cluster) -> bool {
     cluster.config.node_setting(ALLOW_PRIVATE).is_some_and(|v| v.eq_ignore_ascii_case("true"))
 }
 
@@ -138,6 +134,38 @@ fn location(cluster: &crate::Cluster, s: &Settings) -> Result<Location, String> 
     let region = s.get("region").filter(|r| !r.is_empty()).unwrap_or("us-east-1").to_string();
     let endpoint = client::endpoint(s.get("endpoint"), s.get("protocol"), &region, allow_private(cluster))?;
     Ok(Location { endpoint, bucket: s.get("bucket").unwrap_or_default().to_string(), region, path_style: s.get("path_style_access").is_some_and(|v| v == "true") })
+}
+
+/// An `s3` repository's client, signing with its credentials when it has them.
+fn s3_client(cluster: &crate::Cluster, name: &str, r: &Repository) -> EsResult<client::Client> {
+    let at = location(cluster, &r.settings).map_err(|e| failed(name, e))?;
+    let creds = match (r.secrets.get("access_key"), r.secrets.get("secret_key")) {
+        (Some(a), Some(s)) => Some(Credentials {
+            access_key: crate::seal::open(cluster, SECRET_KIND, a)?,
+            secret_key: crate::seal::open(cluster, SECRET_KIND, s)?,
+            session_token: r.secrets.get("session_token").map(|t| crate::seal::open(cluster, SECRET_KIND, t)).transpose()?,
+        }),
+        _ => None,
+    };
+    client::Client::new(at, creds, allow_private(cluster)).map_err(|e| failed(name, e))
+}
+
+/// `<base_path>/roll/`: where a repository keeps everything.
+fn prefix(r: &Repository) -> String {
+    let base = r.settings.get("base_path").unwrap_or_default().trim_matches('/');
+    if base.is_empty() { "roll/".to_string() } else { format!("{base}/roll/") }
+}
+
+fn unreachable(name: &str, prefix: &str, cause: EsError) -> EsError {
+    let path = prefix.trim_end_matches('/');
+    EsError::new(500, "repository_verification_exception", format!("[{name}] path [{path}] is not accessible on master node")).caused_by(cause)
+}
+
+/// `_verify`, and `PUT _snapshot` with `verify`: a repository whose client can't be made isn't
+/// accessible, as on Elasticsearch.
+pub(super) async fn verify(cluster: &crate::Cluster, name: &str, r: &Repository) -> EsResult<()> {
+    let bucket = Bucket::open(cluster, name, r).map_err(|e| unreachable(name, &prefix(r), e))?;
+    bucket.verify().await
 }
 
 /// A shard snapshot's contents in the bucket.
@@ -190,10 +218,10 @@ impl ShardBlobs {
     }
 }
 
-/// A registered `s3` repository's bucket.
+/// A registered `s3`, `gcs` or `azure` repository's bucket (or container).
 pub(super) struct Bucket {
     pub(super) name: String,
-    pub(super) s3: client::Client,
+    pub(super) store: crate::blob::Store,
     /// `<base_path>/roll/`.
     pub(super) prefix: String,
     /// The `request` breaker, charged while repository data is parsed and parts are held.
@@ -203,36 +231,30 @@ pub(super) struct Bucket {
     pub(super) sizes: transfer::Sizes,
     /// How many dangling multipart uploads one cleanup aborts.
     upload_cleanup: usize,
+    read_only: bool,
 }
 
 impl Bucket {
     pub(super) fn open(cluster: &crate::Cluster, name: &str, r: &Repository) -> EsResult<Bucket> {
-        let at = location(cluster, &r.settings).map_err(|e| failed(name, e))?;
-        let creds = match (r.secrets.get("access_key"), r.secrets.get("secret_key")) {
-            (Some(a), Some(s)) => Some(Credentials {
-                access_key: crate::seal::open(cluster, SECRET_KIND, a)?,
-                secret_key: crate::seal::open(cluster, SECRET_KIND, s)?,
-                session_token: r.secrets.get("session_token").map(|t| crate::seal::open(cluster, SECRET_KIND, t)).transpose()?,
-            }),
-            _ => None,
+        let (store, sizes) = match r.ty.as_str() {
+            "gcs" => super::cloud::gcs_store(cluster, name, r)?,
+            "azure" => super::cloud::azure_store(cluster, name, r)?,
+            _ => (crate::blob::Store::S3(s3_client(cluster, name, r)?), transfer::sizes(cluster, &r.settings)),
         };
-        let s3 = client::Client::new(at, creds, allow_private(cluster)).map_err(|e| failed(name, e))?;
-        let base = r.settings.get("base_path").unwrap_or_default().trim_matches('/');
-        let prefix = if base.is_empty() { "roll/".to_string() } else { format!("{base}/roll/") };
+        let prefix = prefix(r);
         let st = cluster.state();
         let budget = cluster.breakers.request(cluster, &st);
         let io = cluster.snapshot_data.repo_io(name, r, &st);
-        let sizes = transfer::sizes(cluster, &r.settings);
-        Ok(Bucket { name: name.to_string(), s3, prefix, budget, io, sizes, upload_cleanup: transfer::upload_cleanup_limit(&r.settings) })
+        Ok(Bucket { name: name.to_string(), store, prefix, budget, io, sizes, upload_cleanup: transfer::upload_cleanup_limit(&r.settings), read_only: r.read_only() })
     }
 
-    fn fail(&self, what: &str, e: client::Error) -> EsError {
+    pub(super) fn fail(&self, what: &str, e: client::Error) -> EsError {
         repository_exception(&self.name, format!("{what}: {e}"))
     }
 
     fn failed_upload(&self, f: transfer::Failed) -> EsError {
         match f {
-            transfer::Failed::S3(e) => self.fail("writing snapshot contents", e),
+            transfer::Failed::Store(e) => self.fail("writing snapshot contents", e),
             transfer::Failed::Breaker(e) => e,
         }
     }
@@ -251,7 +273,7 @@ impl Bucket {
 
     async fn data_at(&self, generation: i64) -> EsResult<Option<RepositoryData>> {
         let key = format!("{}index-{generation}", self.prefix);
-        let Some(raw) = self.s3.get(&key, DATA_MAX).await.map_err(|e| self.fail("reading the repository data", e))? else { return Ok(None) };
+        let Some(raw) = self.store.get(&key, DATA_MAX).await.map_err(|e| self.fail("reading the repository data", e))? else { return Ok(None) };
         let damaged = |why: String| {
             let cause = EsError::new(500, "corrupt_state_exception", why);
             failed(&self.name, format!("the repository data [{key}] is damaged")).caused_by(cause)
@@ -283,7 +305,7 @@ impl Bucket {
 
     /// The newest repository data (`None`: no snapshot was ever written here).
     pub(super) async fn read_data(&self) -> EsResult<Option<RepositoryData>> {
-        let latest = self.s3.get(&format!("{}index.latest", self.prefix), 64).await.map_err(|e| self.fail("reading index.latest", e))?;
+        let latest = self.store.get(&format!("{}index.latest", self.prefix), 64).await.map_err(|e| self.fail("reading index.latest", e))?;
         let mut generation = latest.and_then(|b| std::str::from_utf8(&b).ok().and_then(|t| t.trim().parse::<i64>().ok())).unwrap_or(0).max(0);
         let mut found = match generation {
             0 => None,
@@ -311,32 +333,39 @@ impl Bucket {
         let _ = enc.write_all(data.to_stored().to_json().as_bytes());
         let body = Bytes::from(enc.finish().unwrap_or_default());
         let key = format!("{}index-{}", self.prefix, data.generation);
-        if !self.s3.put_new(&key, body).await.map_err(|e| self.fail("writing the repository data", e))? {
+        if !self.store.put_new(&key, body).await.map_err(|e| self.fail("writing the repository data", e))? {
             return Err(repository_exception(
                 &self.name,
                 format!("concurrent modification of the index-N file, expected current generation [{previous}] but it was not found in the repository: another cluster writes to this repository"),
             ));
         }
-        self.s3.put(&format!("{}index.latest", self.prefix), Bytes::from(data.generation.to_string())).await.map_err(|e| self.fail("writing index.latest", e))?;
+        self.store.put(&format!("{}index.latest", self.prefix), Bytes::from(data.generation.to_string())).await.map_err(|e| self.fail("writing index.latest", e))?;
         // Readers racing this one may still read the previous generation.
         if data.generation > 2 {
-            let _ = self.s3.delete(&format!("{}index-{}", self.prefix, data.generation - 2)).await;
+            let _ = self.store.delete(&format!("{}index-{}", self.prefix, data.generation - 2)).await;
         }
         Ok(())
     }
 
-    /// Writes, reads back and deletes a test object (`_verify`, and `PUT` with `verify`).
-    pub(super) async fn verify(&self) -> EsResult<()> {
+    /// Writes, reads back and deletes a test object (`_verify`, and `PUT` with `verify`); a
+    /// read-only repository's is listed instead.
+    async fn verify(&self) -> EsResult<()> {
         let key = format!("{}tests-{}", self.prefix, random_uuid());
         let seed = Bytes::from(random_uuid());
         let check = async {
-            self.s3.put(&key, seed.clone()).await?;
-            let back = self.s3.get(&key, 1024).await?;
-            self.s3.delete(&key).await?;
+            self.store.put(&key, seed.clone()).await?;
+            let back = self.store.get(&key, 1024).await?;
+            self.store.delete(&key).await?;
             Ok::<_, client::Error>(back)
         };
-        let path = self.prefix.trim_end_matches('/').to_string();
-        let unreachable = |cause: EsError| EsError::new(500, "repository_verification_exception", format!("[{}] path [{path}] is not accessible on master node", self.name)).caused_by(cause);
+        let unreachable = |cause: EsError| unreachable(&self.name, &self.prefix, cause);
+        if self.read_only {
+            let path = self.prefix.trim_end_matches('/');
+            return match self.store.list(&format!("{}index-", self.prefix)).await {
+                Ok(_) => Ok(()),
+                Err(e) => Err(unreachable(EsError::new(500, "i_o_exception", format!("Unable to list blobs by prefix [index-] for path [{path}]")).caused_by(self.fail("store location", e)))),
+            };
+        }
         match check.await {
             Ok(Some(b)) if b == seed => Ok(()),
             Ok(_) => Err(unreachable(repository_exception(&self.name, "a test object read back differs from what was written"))),
@@ -349,7 +378,7 @@ impl Bucket {
             return Err(failed(&self.name, format!("invalid index uuid [{index_uuid}] in the repository data")));
         }
         let key = self.shard_file(snapshot, index_uuid, shard);
-        let Some(raw) = self.s3.get(&key, SHARD_FILE_MAX).await.map_err(|e| self.fail("reading a shard snapshot", e))? else { return Ok(None) };
+        let Some(raw) = self.store.get(&key, SHARD_FILE_MAX).await.map_err(|e| self.fail("reading a shard snapshot", e))? else { return Ok(None) };
         ShardBlobs::parse(&raw).map(Some).ok_or_else(|| failed(&self.name, format!("the shard snapshot [{key}] is damaged")))
     }
 
@@ -417,7 +446,7 @@ impl Bucket {
         let body = Bytes::from(blobs.to_json().to_json());
         let key = self.shard_file(snapshot, index_uuid, shard);
         let n = body.len() as u64;
-        self.s3.put(&key, body).await.map_err(|e| self.fail("writing a shard snapshot", e))?;
+        self.store.put(&key, body).await.map_err(|e| self.fail("writing a shard snapshot", e))?;
         uploaded.push(key);
         files.file_count += 1;
         files.size_in_bytes += n;
@@ -445,7 +474,7 @@ impl Bucket {
             let damaged = |key: &str, why: &str| EsError::new(500, "snapshot_restore_exception", format!("[{}] the snapshot contents [{key}] are damaged: {why}", self.name));
             for (n, &size) in seg.chunks.iter().enumerate() {
                 let key = self.chunk(index_uuid, shard, &seg.key, n);
-                let Some(mut body) = self.s3.open(&key, None).await.map_err(|e| self.fail("reading snapshot contents", e))? else {
+                let Some(mut body) = self.store.open(&key, None).await.map_err(|e| self.fail("reading snapshot contents", e))? else {
                     return Err(EsError::new(500, "snapshot_restore_exception", format!("[{}] the snapshot contents [{key}] are missing from the repository", self.name)));
                 };
                 let mut read = 0u64;
@@ -489,10 +518,10 @@ impl Bucket {
                     let keep = &held[&at];
                     for seg in blobs.segments.iter().filter(|seg| !keep.contains(&seg.key)) {
                         for n in 0..seg.chunks.len() {
-                            let _ = self.s3.delete(&self.chunk(&uuid, shard, &seg.key, n)).await;
+                            let _ = self.store.delete(&self.chunk(&uuid, shard, &seg.key, n)).await;
                         }
                     }
-                    let _ = self.s3.delete(&self.shard_file(&s.uuid, &uuid, shard)).await;
+                    let _ = self.store.delete(&self.shard_file(&s.uuid, &uuid, shard)).await;
                 }
             }
         }
@@ -509,10 +538,10 @@ impl Bucket {
             return Ok(0);
         }
         let running = self.io.running_uploads();
-        let uploads = self.s3.list_uploads(&self.prefix, self.upload_cleanup + running.len()).await?;
+        let uploads = self.store.list_uploads(&self.prefix, self.upload_cleanup + running.len()).await?;
         let mut aborted = 0;
         for (key, id) in uploads.into_iter().filter(|(_, id)| !running.contains(id)).take(self.upload_cleanup) {
-            if self.s3.abort_multipart(&key, &id).await.is_ok() {
+            if self.store.abort(&key, &id).await.is_ok() {
                 aborted += 1;
             }
         }
@@ -535,7 +564,7 @@ impl Bucket {
                 }
             }
         }
-        let listed = self.s3.list(&self.prefix).await.map_err(|e| self.fail("listing the repository", e))?;
+        let listed = self.store.list(&self.prefix).await.map_err(|e| self.fail("listing the repository", e))?;
         let (mut bytes, mut count) = (0, 0);
         for (key, size) in listed {
             let Some(rel) = key.strip_prefix(&self.prefix) else { continue };
@@ -543,7 +572,7 @@ impl Bucket {
                 Some(g) => g + 1 < data.generation,
                 None => rel.starts_with("tests-") || (rel.starts_with("indices/") && !referenced.contains(&key)),
             };
-            if stale && self.s3.delete(&key).await.is_ok() {
+            if stale && self.store.delete(&key).await.is_ok() {
                 bytes += size;
                 count += 1;
             }
@@ -555,7 +584,7 @@ impl Bucket {
 
     /// `(snapshot uuid, index uuid, shard)` of every shard snapshot in the bucket.
     async fn shard_snapshots(&self) -> EsResult<HashSet<(String, String, u32)>> {
-        let listed = self.s3.list(&format!("{}indices/", self.prefix)).await.map_err(|e| self.fail("listing the repository", e))?;
+        let listed = self.store.list(&format!("{}indices/", self.prefix)).await.map_err(|e| self.fail("listing the repository", e))?;
         Ok(listed
             .iter()
             .filter_map(|(k, _)| {
@@ -570,7 +599,7 @@ impl Bucket {
 
     async fn delete_keys(&self, keys: &[String]) {
         for k in keys {
-            let _ = self.s3.delete(k).await;
+            let _ = self.store.delete(k).await;
         }
     }
 }
@@ -612,7 +641,7 @@ impl<'a> SegmentUpload<'a> {
             let (index_uuid, shard, seg) = (self.index_uuid, self.shard, &self.seg);
             let up = self.current.get_or_insert_with(|| {
                 let key = bucket.chunk(index_uuid, shard, &seg.key, seg.chunks.len());
-                transfer::Upload::new(&bucket.s3, &bucket.io, bucket.budget.clone(), key, bucket.sizes.buffer)
+                transfer::Upload::new(&bucket.store, &bucket.io, bucket.budget.clone(), key, bucket.sizes.buffer)
             });
             let n = (bucket.sizes.chunk - up.size()).min(data.len() as u64) as usize;
             up.write(&data[..n]).await.map_err(|e| bucket.failed_upload(e))?;
@@ -994,7 +1023,7 @@ pub(super) async fn clone_shards(ctx: &Ctx<'_>, repo: &str, r: &Repository, sour
         for shard in 0..shards {
             let blobs = bucket.read_shard(&src.uuid, &uuid, shard).await?.unwrap_or_default();
             let key = bucket.shard_file(target_uuid, &uuid, shard);
-            if let Err(e) = bucket.s3.put(&key, Bytes::from(blobs.to_json().to_json())).await {
+            if let Err(e) = bucket.store.put(&key, Bytes::from(blobs.to_json().to_json())).await {
                 bucket.delete_keys(&written).await;
                 return Err(bucket.fail("writing a shard snapshot", e));
             }
