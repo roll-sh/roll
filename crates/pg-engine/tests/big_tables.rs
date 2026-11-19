@@ -921,3 +921,63 @@ ALTER TABLE dnn ALTER COLUMN a SET NOT NULL",
         assert_eq!(rows(&mut s, "SELECT count(*) FROM dnn"), ["[Int8(0)]"]);
     });
 }
+
+/// Rewrites of a table too big to model (VACUUM FULL, CLUSTER, ALTER TABLE's rewrite, a
+/// materialized view's load) store each row's TID with it, as a modelled heap's rows have
+/// theirs: the ctids, heap order and sizes PostgreSQL 18.6 gives (its answers below), in the
+/// heap order the rows had (a VACUUM FULL after an update: the new version last), the skipped
+/// free space map's new pages left out (the update after ALTER TABLE goes past them).
+#[test]
+fn rewrites_place_rows_past_the_model() {
+    let steps: [(&str, &[&str]); 7] = [
+        (
+            "CREATE TABLE rk (id int PRIMARY KEY, v int, t text) WITH (autovacuum_enabled = off);
+INSERT INTO rk SELECT g, (g * 7919) % 3001, 'x' || g FROM generate_series(1, 3000) g;
+DELETE FROM rk WHERE id % 7 = 0;
+VACUUM FULL rk;
+SELECT ctid, id FROM rk WHERE id IN (1, 13, 2000, 2999) ORDER BY id",
+            &["[Tid(0, 1), Int4(1)]", "[Tid(0, 12), Int4(13)]", "[Tid(9, 50), Int4(2000)]", "[Tid(13, 166), Int4(2999)]"],
+        ),
+        (
+            "UPDATE rk SET t = 'u' WHERE id = 5;
+VACUUM FULL rk;
+SELECT ctid, id FROM rk WHERE id IN (1, 5, 6, 2999) ORDER BY id",
+            &["[Tid(0, 1), Int4(1)]", "[Tid(13, 167), Int4(5)]", "[Tid(0, 5), Int4(6)]", "[Tid(13, 165), Int4(2999)]"],
+        ),
+        (
+            "CREATE INDEX rk_v ON rk (v);
+CLUSTER rk USING rk_v;
+SELECT ctid, id, v FROM rk ORDER BY v LIMIT 2",
+            &["[Tid(0, 1), Int4(1088), Int4(1)]", "[Tid(0, 2), Int4(2176), Int4(2)]"],
+        ),
+        ("SELECT ctid, id FROM rk LIMIT 2", &["[Tid(0, 1), Int4(1088)]", "[Tid(0, 2), Int4(2176)]"]),
+        (
+            "ALTER TABLE rk ALTER COLUMN t TYPE varchar(20);
+SELECT ctid, id FROM rk WHERE id IN (1, 2999) ORDER BY id",
+            &["[Tid(8, 164), Int4(1)]", "[Tid(10, 9), Int4(2999)]"],
+        ),
+        (
+            "UPDATE rk SET t = 'w' WHERE id = 1;
+SELECT ctid, id, pg_relation_size('rk') / 8192 FROM rk WHERE id = 1",
+            &["[Tid(15, 1), Int4(1), Int8(16)]"],
+        ),
+        (
+            "CREATE MATERIALIZED VIEW rm AS SELECT g AS id FROM generate_series(1, 3000) g;
+SELECT ctid, id, pg_relation_size('rm') / 8192 FROM rm WHERE id IN (1, 3000) ORDER BY id",
+            &["[Tid(0, 1), Int4(1), Int8(16)]", "[Tid(13, 62), Int4(3000), Int8(16)]"],
+        ),
+    ];
+    for big in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let eng = open(dir.path());
+        let go = || {
+            let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+            for (sql, want) in steps {
+                let (setup, q) = sql.rsplit_once(";\n").unwrap_or(("", sql));
+                run(&mut s, setup);
+                assert_eq!(rows(&mut s, q), want, "{q}, too big to model: {big}");
+            }
+        };
+        if big { with_max_versions(1000, go) } else { go() }
+    }
+}

@@ -3008,18 +3008,31 @@ fn describe_msg(c: &mut Conn, s: &mut Session, body: &[u8]) -> Result<()> {
             let Some(p) = s.prepared.get(&name).cloned() else {
                 return Err(crate::session::missing_statement(&name, "exec_describe_statement_message"));
             };
-            let cols = s.describe(&p)?;
+            // (exec_describe_statement_message sends the stored parameter types before
+            // revalidating the statement for its result row: what fails then fails after.)
+            let param_desc = |c: &mut Conn| {
+                c.msg(b't', |o| {
+                    let oids = p.param_type_oids();
+                    o.put_i16(oids.len() as i16);
+                    for t in oids {
+                        o.put_u32(t);
+                    }
+                })
+            };
+            let cols = match s.describe(&p) {
+                Ok(cols) => cols,
+                Err(e) => {
+                    if s.status() != TxnStatus::Failed {
+                        param_desc(c);
+                    }
+                    return Err(e);
+                }
+            };
             // (A statement returning rows isn't described in a failed transaction.)
             if s.status() == TxnStatus::Failed && cols.is_some() {
                 return Err(aborted_txn("exec_describe_statement_message"));
             }
-            c.msg(b't', |o| {
-                let oids = p.param_type_oids();
-                o.put_i16(oids.len() as i16);
-                for t in oids {
-                    o.put_u32(t);
-                }
-            });
+            param_desc(c);
             match cols {
                 Some(cols) => row_description(c, &cols, &[]),
                 None => c.msg(b'n', |_| {}),

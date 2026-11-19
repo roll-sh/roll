@@ -2874,7 +2874,7 @@ impl Session {
                 Some(NodeEnum::SelectStmt(_)) => Ok(Some(match self.bound(p, stmt, &[]) {
                     Ok(b) => b.cols.clone(),
                     Err(e) if is_result_change(&e) => return Err(e),
-
+                    Err(_) if let Some(e) = self.stale_param_error(p, stmt) => return Err(e),
                     Err(e) => {
                         self.generic_failed = true;
                         self.analyzed_params(stmt, &p.param_types, e)?.1.into()
@@ -2886,9 +2886,27 @@ impl Session {
                     | NodeEnum::DeleteStmt(_)
                     | NodeEnum::MergeStmt(_),
                 ) => {
+                    // (One without RETURNING has no result row, PlanCacheComputeResultDesc's
+                    // NULL: exec_describe_statement_message sends NoData without analysing it
+                    // again, whatever the catalog has done since: a parameter's type dropped.)
+                    let no_result = || {
+                        use crate::sql::binder::ast::returning;
+                        match inner(stmt) {
+                            Some(NodeEnum::InsertStmt(s)) => returning(&s.returning_clause).is_empty(),
+                            Some(NodeEnum::UpdateStmt(s)) => returning(&s.returning_clause).is_empty(),
+                            Some(NodeEnum::DeleteStmt(s)) => returning(&s.returning_clause).is_empty(),
+                            Some(NodeEnum::MergeStmt(s)) => returning(&s.returning_clause).is_empty(),
+                            _ => false,
+                        }
+                    };
                     let cols = match self.bound(p, stmt, &[]) {
                         Ok(b) => b.cols.clone(),
                         Err(e) if is_result_change(&e) => return Err(e),
+                        Err(_) if no_result() => {
+                            self.generic_failed = true;
+                            return Ok(None);
+                        }
+                        Err(_) if let Some(e) = self.stale_param_error(p, stmt) => return Err(e),
                         Err(e) => {
                             self.generic_failed = true;
                             self.analyzed_params(stmt, &p.param_types, e)?.1.into()
@@ -2947,6 +2965,31 @@ impl Session {
             self.on_error();
         }
         r
+    }
+
+    /// Describe's analysis of a statement one of whose parameters' types is gone (dropped
+    /// since the Parse, an enum a migration made again): RevalidateCachedQuery's analysis
+    /// fails where it first looks the old oid up (`badparams`), not as the statement
+    /// analysed with the type's namesake does.
+    fn stale_param_error(&self, p: &Prepared, stmt: &Node) -> Option<Error> {
+        let cat = self.visible_catalog();
+        let gone: Vec<(usize, u32)> = p
+            .param_type_oids()
+            .into_iter()
+            .enumerate()
+            .filter(|&(i, o)| {
+                o >= crate::catalog::FIRST_USER_OID
+                    && p.param_types.get(i).is_some_and(|t| t.missing_oid().is_none())
+                    && cat.any_data_type(o).is_none()
+            })
+            .collect();
+        if gone.is_empty() {
+            return None;
+        }
+        match badparams::verdict(stmt, &gone) {
+            badparams::Verdict::Fails(e) => Some(e),
+            _ => None,
+        }
     }
 
     /// Bind message: create a portal. `trailing`: the message has bytes after its result

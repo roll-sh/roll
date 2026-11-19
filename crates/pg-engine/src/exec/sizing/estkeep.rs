@@ -173,7 +173,7 @@ fn scalars(e: &mut Enc, h: &EstHeap) {
         EstOrder::Unplaced => 2,
     });
     e.u64(h.writes);
-    e.u8(h.fill_bulk as u8 | (h.in_place as u8) << 1);
+    e.u8(h.fill_bulk as u8 | (h.in_place as u8) << 1 | (h.skip_fsm as u8) << 2);
     match &h.fill_key {
         Some(k) => {
             e.u8(1);
@@ -208,7 +208,7 @@ fn decode_scalars(d: &mut Dec, h: &mut EstHeap) -> Option<()> {
     };
     h.writes = d.u64()?;
     let f = d.u8()?;
-    (h.fill_bulk, h.in_place) = (f & 1 != 0, f & 2 != 0);
+    (h.fill_bulk, h.in_place, h.skip_fsm) = (f & 1 != 0, f & 2 != 0, f & 4 != 0);
     h.fill_key = match d.u8()? {
         0 => None,
         _ => Some(d.bytes()?),

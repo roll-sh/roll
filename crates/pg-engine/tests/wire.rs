@@ -4915,6 +4915,30 @@ fn protocol_cases() {
                 None => out,
             }
         }),
+        // Describe of such a statement: one without a result row is not analysed again
+        // (exec_describe_statement_message sends the stored parameter types and NoData);
+        // one with RETURNING is (CachedPlanGetTargetList). (The oids masked.)
+        c("a265_stale_describe", |a| {
+            let out = session(a, &[
+                "drop table if exists a265_st",
+                "drop type if exists a265_en",
+                "create type a265_en as enum ('a', 'b')",
+                "create table a265_st (e a265_en)",
+            ], &[
+                [parse("s265", "insert into a265_st values ($1::a265_en)", &[]), parse("r265", "insert into a265_st values ($1::a265_en) returning e", &[]), sync()].concat(),
+                query("drop table a265_st; drop type a265_en; create type a265_en as enum ('x'); create table a265_st (e a265_en)"),
+                [describe(b'S', "s265"), sync()].concat(),
+                [describe(b'S', "r265"), sync()].concat(),
+            ]);
+            let mut s = String::new();
+            let mut rest = out.as_str();
+            while let Some(i) = rest.find(|c: char| c.is_ascii_digit()) {
+                s.push_str(&rest[..i]);
+                s.push('N');
+                rest = rest[i..].trim_start_matches(|c: char| c.is_ascii_digit());
+            }
+            s + rest
+        }),
     ];
     let file = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/protocol_cases.out");
     if let Ok(addr) = std::env::var("PROTOCOL_RECORD") {

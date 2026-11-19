@@ -278,6 +278,10 @@ struct EstHeap {
     /// The pages a bulk extension added at the end and nothing used yet: filled before the
     /// file grows (the free space map has them), as new pages, not as space a VACUUM freed.
     fresh: u32,
+    /// The fresh pages are a bulk insert's that skipped the free space map (a rewrite,
+    /// CREATE TABLE AS): until a VACUUM records them, a writer with no page of its own
+    /// finds none of them but the file's last (RelationGetBufferForTuple's nblocks - 1).
+    skip_fsm: bool,
     order: EstOrder,
     /// Versions placed (`placed`): what a scan that found the order checks is unchanged.
     writes: u64,
@@ -421,6 +425,7 @@ impl EstHeap {
             order,
             writes: 0,
             fill_bulk: fresh > 0,
+            skip_fsm: false,
             fill_owner: None,
             in_place: false,
             fill_key: None,
@@ -491,7 +496,21 @@ impl EstHeap {
             if let Some(key) = self.fill_key.take() {
                 self.tail = Some(Tail { page: self.fill, room: self.room, items: self.items, key });
             }
-            if self.fresh > 0 {
+            if self.skip_fsm && is_bulk {
+                // (A bulk insert of its own goes on as one into fresh pages would.)
+                self.skip_fsm = false;
+            }
+            if self.skip_fsm {
+                // (A writer without a target page: the last page while the load's
+                // extension left it new; else, or one whose target is full, a new one.)
+                if leave && self.fresh > 0 && self.fill + 1 < self.pages {
+                    self.fill = self.pages - 1;
+                    self.fresh -= 1;
+                } else {
+                    self.fill = self.pages;
+                    self.pages += 1;
+                }
+            } else if self.fresh > 0 {
                 // (The next fresh page.)
                 self.fill = self.pages - self.fresh;
                 self.fresh -= 1;
@@ -606,16 +625,6 @@ pub fn estimated_ctid(table: u32, key: &[u8], db: &Database) -> Option<Tid> {
     db.relfiles.of(table).read().estimated.get(&table)?.rowid_tid(key)
 }
 
-/// The estimate for rows written in one go (a load, a rewrite).
-fn estimate_rows<'a>(t: &Table, rows: impl Iterator<Item = &'a [Value]>, ctx: &ExecCtx) -> EstHeap {
-    let ff = heap_fillfactor(t);
-    let mut e = EstHeap::default();
-    for r in rows {
-        e.add(layout(t, r, ctx, &HashSet::new()).0, ff);
-    }
-    e
-}
-
 /// Whether table `t` is too big to model (its sizes are estimates).
 pub fn is_estimated(t: u32, db: &Database) -> bool {
     db.relfiles.maybe_untracked(t) && db.relfiles.of(t).read().untracked.contains(&t)
@@ -636,6 +645,8 @@ pub fn measured_live(t: u32, live: u32, db: &Database) -> Option<u32> {
     let e = rf.estimated.get_mut(&t)?;
     e.pages = e.pages.max(live);
     e.reusable = (e.pages - live) as usize * (heapsim::BLCKSZ - heapsim::PAGE_HEADER);
+    // (Its new pages are in the free space map now.)
+    e.skip_fsm = false;
     estkeep::touched(db, e);
     Some(e.pages)
 }
@@ -4800,7 +4811,7 @@ pub fn invalidated(table: u32, db: &Database) {
 /// A new heap written in one go (CREATE TABLE AS, a refresh, a table rewrite): rows go in
 /// through a bulk insert that skips the free space map (`frozen`: REFRESH MATERIALIZED
 /// VIEW's all-visible pages). The indexes are rebuilt afterwards. Returns the rows' heap
-/// TIDs (none when the table is too big to model).
+/// TIDs (the estimate's when the table is too big to model).
 pub fn loaded(
     t: &Table,
     rows: &[(Vec<u8>, Vec<Value>)],
@@ -4811,9 +4822,32 @@ pub fn loaded(
         note_compression(t, r, Some(k), ctx);
     }
     if rows.len() > max_versions() {
-        let est = estimate_rows(t, rows.iter().map(|(_, r)| r.as_slice()), ctx);
+        // Too big to model: each row's TID as the estimate places it, for the caller to
+        // store with it (as a modelled heap's), so its ctid and heap order are PostgreSQL's
+        // whatever the table's key. Rows in key order are as stored.
+        // (A bulk insert skipping the free space map, as the modelled heap's: its
+        // extensions' pages past the last row stay new.)
+        let ff = heap_fillfactor(t);
+        let mut est = EstHeap {
+            order: if rows.is_sorted_by(|a, b| a.0 < b.0) { EstOrder::InOrder } else { EstOrder::Placed },
+            ..EstHeap::default()
+        };
+        // (Its last page stays the transaction's target: its own writes go on there.)
+        let txn = ctx.txn.borrow().id;
+        let mut bulk: FastMap<(u32, u64), Bulk> = FastMap::default();
+        bulk.insert((t.oid, txn), Bulk { mode: InsertMode::bulk(), defer: None });
+        let tids = rows
+            .iter()
+            .map(|(k, r)| {
+                let len = layout(t, r, ctx, &HashSet::new()).0;
+                let tid = est.add_in(len, ff, Some((&mut bulk, (t.oid, txn))), Put::Row(Some(k)));
+                est.writes += 1;
+                tid.expect("a fresh heap places every row")
+            })
+            .collect();
+        est.skip_fsm = true;
         untrack(&ctx.sess.db, t, Some(est));
-        return Vec::new();
+        return tids;
     }
     let xid = if rows.is_empty() {
         0
@@ -4982,17 +5016,8 @@ pub fn stamp_tids(keys: &[Vec<u8>], tids: &[Tid], ctx: &ExecCtx) -> Result<()> {
 pub fn rewritten(t: &Table, order: Option<&[Vec<u8>]>, ctx: &ExecCtx) -> Result<()> {
     let indexes = crate::sql::binder::bound_indexes(&Arc::new(t.clone()), ctx)?;
     if !ensure(t, &indexes, ctx)? {
-        // Too big to model: the live rows packed afresh (measured a row at a time).
-        let start = index_prefix(t.oid, 0);
-        let mut est = EstHeap::default();
-        let ff = heap_fillfactor(t);
-        let it = ctx.txn.borrow().scan(&start, &prefix_end(&start));
-        for r in it {
-            let (_, v) = r?;
-            est.add(layout(t, &decode_table_row(t, &v)?, ctx, &HashSet::new()).0, ff);
-        }
-        // (The rows keep the TIDs they had: not their places now.)
-        est.order = EstOrder::Unplaced;
+        // Too big to model: the live rows packed afresh (`rewritten_estimated`).
+        let mut est = rewritten_estimated(t, order, ctx)?;
         est.limit = max_limit();
         estlocks::loaded(&ctx.sess.db, t.oid, &mut est);
         let mut rf = ctx.sess.db.relfiles.of(t.oid).write();
@@ -5049,6 +5074,139 @@ pub fn rewritten(t: &Table, order: Option<&[Vec<u8>]>, ctx: &ExecCtx) -> Result<
         }
     }
     Ok(())
+}
+
+/// `rewritten` of a table too big to model: its live rows packed afresh in the order they
+/// are copied (measured a row at a time), each stored with its new TID as a modelled heap's
+/// rows are, when that order is known: the clustering index's, or the heap's where the
+/// estimate places every row (as stored, `EstOrder::InOrder`, or `Placed`: the rows out of
+/// storage order taken apart and merged in by their places). Else the rows keep the TIDs
+/// they had, not their places now.
+fn rewritten_estimated(t: &Table, order: Option<&[Vec<u8>]>, ctx: &ExecCtx) -> Result<EstHeap> {
+    use super::heaporder::{displaced, is_set};
+    let db = &ctx.sess.db;
+    let ff = heap_fillfactor(t);
+    let start = index_prefix(t.oid, 0);
+    let end = prefix_end(&start);
+    let was = db.relfiles.of(t.oid).read().estimated.get(&t.oid).map(|e| e.order);
+    // The heap order's ranks of the rows in storage order, when it isn't storage order.
+    let mut ranks: Option<Vec<u64>> = None;
+    if order.is_none() && was == Some(EstOrder::Placed) {
+        let mut v = Vec::new();
+        let mut last = None;
+        for r in ctx.txn.borrow().scan(&start, &end) {
+            let (k, b) = r?;
+            match estimated_rank(t, &k, &b, &mut last, db) {
+                Some(x) => v.push(x),
+                None => {
+                    v.clear();
+                    break;
+                }
+            }
+        }
+        ranks = (!v.is_empty()).then_some(v);
+    }
+    let placed = order.is_some() || was == Some(EstOrder::InOrder) || ranks.is_some();
+    // (Which rows are out of storage order, by position in it.)
+    let bits = ranks.as_deref().map(|r| displaced(r).0);
+    let out_of_order = bits.as_ref().is_some_and(|b| b.iter().any(|w| *w != 0));
+    let mut est = EstHeap {
+        order: match order {
+            Some(o) if !o.is_sorted() => EstOrder::Placed,
+            _ if out_of_order => EstOrder::Placed,
+            _ if placed => EstOrder::InOrder,
+            _ => EstOrder::Unplaced,
+        },
+        ..EstHeap::default()
+    };
+    let add = |k: &[u8], v: &[u8], est: &mut EstHeap| -> Result<Option<Tid>> {
+        let len = layout(t, &decode_table_row(t, v)?, ctx, &HashSet::new()).0;
+        est.writes += 1;
+        Ok(est.add_in(len, ff, None, Put::Row(Some(k))))
+    };
+    let stamp = |k: &[u8], tid: Tid| -> Result<()> {
+        let cur = ctx.txn.borrow().get_raw(k)?;
+        if let Some(bytes) = cur
+            && super::scan::stored_tid(&bytes) != Some(tid)
+        {
+            let b = super::scan::with_tid(&bytes, tid)?;
+            ctx.txn.borrow_mut().put(k.to_vec(), b)?;
+        }
+        Ok(())
+    };
+    if let Some(keys) = order {
+        for k in keys {
+            let Some(v) = ctx.txn.borrow().get(k)? else { continue };
+            if let Some(tid) = add(k, &v, &mut est)? {
+                stamp(k, tid)?;
+            }
+        }
+        return Ok(est);
+    }
+    // The rows out of storage order (outside the longest run of rising places), by place:
+    // each copied before the first row of the run placed after it.
+    let mut late: Vec<(u64, Vec<u8>)> = Vec::new();
+    if let (Some(r), Some(bits)) = (&ranks, &bits) {
+        for (i, x) in ctx.txn.borrow().scan(&start, &end).enumerate() {
+            if is_set(bits, i) {
+                late.push((r[i], x?.0));
+            }
+        }
+        late.sort_unstable();
+    }
+    let mut late = late.into_iter().peekable();
+    // (In batches: the scan is let go before the batch's rows are stored again.)
+    const BATCH: usize = 4096;
+    let mut from = start;
+    let mut i = 0;
+    loop {
+        let mut batch: Vec<(Vec<u8>, Tid)> = Vec::new();
+        let mut next = None;
+        for r in ctx.txn.borrow().scan(&from, &end) {
+            let (k, v) = r?;
+            let n = i;
+            i += 1;
+            if let (Some(r), Some(bits)) = (&ranks, &bits) {
+                if is_set(bits, n) {
+                    continue;
+                }
+                while let Some((_, lk)) = late.next_if(|(x, _)| *x < r[n]) {
+                    if let Some(lv) = ctx.txn.borrow().get(&lk)?
+                        && let Some(tid) = add(&lk, &lv, &mut est)?
+                    {
+                        batch.push((lk, tid));
+                    }
+                }
+            }
+            let tid = add(&k, &v, &mut est)?;
+            if let Some(tid) = tid.filter(|_| placed) {
+                batch.push((k.clone(), tid));
+                if batch.len() >= BATCH {
+                    next = Some(k);
+                    break;
+                }
+            }
+        }
+        if next.is_none() {
+            for (_, lk) in late.by_ref() {
+                if let Some(lv) = ctx.txn.borrow().get(&lk)?
+                    && let Some(tid) = add(&lk, &lv, &mut est)?
+                {
+                    batch.push((lk, tid));
+                }
+            }
+        }
+        for (k, tid) in &batch {
+            stamp(k, *tid)?;
+        }
+        match next {
+            Some(mut k) => {
+                k.push(0);
+                from = k;
+            }
+            None => return Ok(est),
+        }
+    }
 }
 
 /// A table's models, taken out while its rows are re-keyed in place.

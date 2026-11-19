@@ -1165,8 +1165,10 @@ impl Binder<'_, '_> {
                 (None, Some(o)) => o,
                 _ => continue,
             };
+            // (A materialized view's scan has them too, `sys_table` its oid.)
+            let scanned = r.table.is_some() || r.sys_col.is_some() && col != "tableoid";
             let e = match (sys, r.sys_col) {
-                (Some(i), Some(p)) if r.table.is_some() => {
+                (Some(i), Some(p)) if scanned => {
                     Expr::Col(p + i, crate::exec::scan::SYS_COLS[i].1.clone())
                 }
                 _ if col == "tableoid" => Expr::Const(Value::Oid(oid), DataType::Oid),
@@ -1192,7 +1194,7 @@ impl Binder<'_, '_> {
             }
             // (Its attnum: ctid -1 … tableoid -6.)
             let attnum = -(sys.unwrap_or(5) as i16 + 1);
-            found = Some((e, (if r.table.is_some() { oid } else { 0 }, attnum)));
+            found = Some((e, (if r.table.is_some() || r.sys_col.is_some() { oid } else { 0 }, attnum)));
         }
         Ok(found)
     }

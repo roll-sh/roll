@@ -287,15 +287,11 @@ impl Planner<'_, '_> {
                     k => k.clone(),
                 };
                 let (a, k) = (unwrap(a), unwrap(k).shift_cols(nl as isize));
-                // (An outer join's clause as written; an inner join's from its equivalence
-                // class, the column first.)
-                let (a, k) = if (outer && meta.hash_swapped.get(i) == Some(&true))
-                    || (!outer && const_left)
-                {
-                    (k, a)
-                } else {
-                    (a, k)
-                };
+                // (The clause as written, the constants put in: an inner join's is its
+                // class's one source clause then, which generate_base_implied_equalities_const
+                // gives back as it is (`1 = t1.a`); one sharing its class with others has its
+                // members put first where the filters meet, `ec_const_order`.)
+                let (a, k) = if meta.hash_swapped.get(i) == Some(&true) { (k, a) } else { (a, k) };
                 let eq = b.builtin_binop("=", subst(a), subst(k)).ok()?;
                 conds.push(eq);
             }

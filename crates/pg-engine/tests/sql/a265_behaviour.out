@@ -1,0 +1,87 @@
+> create table a265_t (a int)
+-- CREATE TABLE
+
+> insert into a265_t select generate_series(1, 100)
+-- INSERT 0 100
+
+> analyze a265_t
+-- ANALYZE
+
+> create function a265_f(int) returns setof int language sql immutable as $$ select $1 $$
+-- CREATE FUNCTION
+
+> explain (costs off) select * from a265_f(1) f, a265_t where f = a265_t.a
+QUERY PLAN:text
+Seq Scan on a265_t
+  Filter: (1 = a)
+-- EXPLAIN
+
+> explain (costs off) select * from a265_f(1) f, a265_t where a265_t.a = f
+QUERY PLAN:text
+Seq Scan on a265_t
+  Filter: (a = 1)
+-- EXPLAIN
+
+> explain (costs off) select * from a265_t, a265_f(1) f where f = a265_t.a
+QUERY PLAN:text
+Seq Scan on a265_t
+  Filter: (1 = a)
+-- EXPLAIN
+
+> explain (costs off) select * from (values (1)) v(x), a265_t where x = a265_t.a
+QUERY PLAN:text
+Seq Scan on a265_t
+  Filter: (1 = a)
+-- EXPLAIN
+
+> explain (costs off) select * from a265_f(1) f join a265_t on f = a265_t.a and a265_t.a > 0
+QUERY PLAN:text
+Seq Scan on a265_t
+  Filter: ((a > 0) AND (1 = a))
+-- EXPLAIN
+
+> select * from a265_f(7) f, a265_t where f = a265_t.a
+f:int4 | a:int4
+7 | 7
+-- SELECT 1
+
+> create materialized view a265_mv as select g as id from generate_series(1, 300) g
+-- SELECT 300
+
+> select ctid, id from a265_mv where id in (1, 226, 227, 300) order by id
+ctid:27 | id:int4
+(0,1) | 1
+(0,226) | 226
+(1,1) | 227
+(1,74) | 300
+-- SELECT 4
+
+> select tableoid = 'a265_mv'::regclass as own, xmin = xmin as x from a265_mv limit 1
+own:bool | x:bool
+t | t
+-- SELECT 1
+
+> refresh materialized view a265_mv
+-- REFRESH MATERIALIZED VIEW
+
+> select ctid, id from a265_mv where id in (1, 300) order by id
+ctid:27 | id:int4
+(0,1) | 1
+(1,74) | 300
+-- SELECT 2
+
+> select a265_mv.ctid, t.a from a265_mv join a265_t t on t.a = a265_mv.id where t.a < 3 order by 2
+ctid:27 | a:int4
+(0,1) | 1
+(0,2) | 2
+-- SELECT 2
+
+> drop materialized view a265_mv
+-- DROP MATERIALIZED VIEW
+
+> drop function a265_f(int)
+-- DROP FUNCTION
+
+> drop table a265_t
+-- DROP TABLE
+

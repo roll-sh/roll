@@ -4943,6 +4943,8 @@ impl Binder<'_, '_> {
                     .iter()
                     .map(|(n, t)| OutCol::new(n.clone(), t.clone()))
                     .collect();
+                // (A materialized view's rows have system columns: its storage's.)
+                let mat_sys = v.storage.is_some() && self.want_sys;
                 let plan = match &v.storage {
                     Some(t) => {
                         for (c, tc) in cols.iter_mut().zip(&t.columns) {
@@ -4968,7 +4970,7 @@ impl Binder<'_, '_> {
                             mark,
                             lock_order,
                             limit: None,
-                            sys: false,
+                            sys: mat_sys,
                             alias: written.clone(),
                             current_of: None,
                             sample: None,
@@ -5064,6 +5066,10 @@ impl Binder<'_, '_> {
                     }
                 };
                 let mut rel = derived_rel(&name, &cols, 0);
+                if mat_sys {
+                    rel.sys_col = v.storage.as_ref().map(|t| t.columns.len());
+                    rel.sys_table = Some(v.oid);
+                }
                 for (i, e) in std::mem::take(&mut self.view_raised) {
                     if let Some(c) = rel.cols.get_mut(i) {
                         c.expr = e;
