@@ -76,7 +76,7 @@ pub fn parse(p: &mut XParser<'_>) -> Result<TopMetricsSpec> {
 }
 
 /// A metric value (`SortValue`) with its format.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum MetricVal {
     Long(i64),
     Double(f64),
@@ -98,14 +98,14 @@ fn render_val(v: &MetricVal, f: &DocValueFormat) -> Json {
 }
 
 /// One top document.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct TopMetric {
     pub sort: SortVal,
     pub metrics: Vec<Option<MetricVal>>,
 }
 
 /// `InternalTopMetrics`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct TopMetrics {
     pub size: usize,
     pub reverse: bool,
