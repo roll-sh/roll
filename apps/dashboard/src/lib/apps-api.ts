@@ -548,7 +548,7 @@ export interface EnvironmentPut {
   routes?: RouteRule[] | null;
   /** Its uptime checks (at most 5), or null for none. */
   checks?: UptimeCheck[] | null;
-  /** Its deploy freeze: on until lifted (null), until `until`, or in weekly `windows`; a person's deploy then needs `override: true`. */
+  /** Its deploy freeze: on until lifted (null), until `until`, or in weekly `windows`; a person's deploy then needs the header `X-Roll-Override: 1` (admin). */
   freeze?: Freeze | null;
   /** Paused by the clock: as a window starts it's paused, as it ends resumed; null removes it. */
   pause_schedule?: { windows: { from: string; to: string }[]; timezone?: string } | null;
@@ -688,7 +688,7 @@ export interface Environment extends EnvironmentSummary {
   mirror?: { environment: string; percent: number };
   snippets?: Snippet[];
   freeze?: Freeze;
-  /** Its freeze is on now: automatic deploys build to ready, a person's deploy needs override. */
+  /** Its freeze is on now: automatic deploys build to ready, a person's deploy needs the `X-Roll-Override: 1` header (admin). */
   frozen?: boolean;
   /** Its split test: a share of its visitors, kept by their bucket cookie, served by another environment. */
   split?: { environment: string; percent: number };
