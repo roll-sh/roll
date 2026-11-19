@@ -127,6 +127,10 @@ pub struct Secret {
     /// Why its value is easy to guess: only for a caller who may reveal it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub weak: Option<String>,
+    /// That it's a decoy (docs/secrets.md, "Decoys"): only for the project's admins. Absent for
+    /// everyone else, as on any other key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decoy: Option<crate::Decoy>,
 }
 
 #[derive(Debug, Serialize, Clone, PartialEq)]
@@ -626,7 +630,20 @@ impl Secrets {
             overridden: e.overridden,
             expires_at: e.row.expires_at,
             weak: if reveal { e.row.weak } else { None },
+            decoy: None,
         }
+    }
+
+    /// The project's admins see which of `list` are decoys.
+    fn mark_decoys(&self, project: &str, list: &mut [Secret], caller: &Caller) -> Result<()> {
+        if list.is_empty() || !self.sees_decoys(project, caller) {
+            return Ok(());
+        }
+        let decoys = self.decoys_of(project)?;
+        for s in list.iter_mut() {
+            s.decoy = decoys.get(&s.id).cloned();
+        }
+        Ok(())
     }
 
     /// A folder's effective secrets, without values.
@@ -635,7 +652,9 @@ impl Secrets {
         caller.need(Action::Read, &Scope::at(project, slug, &path))?;
         let dek = self.project(project)?;
         let entries = self.view(project, slug, &path, caller, false, Action::Read)?;
-        Ok(entries.into_iter().map(|e| self.secret_of(&dek, project, e, caller)).collect())
+        let mut list: Vec<Secret> = entries.into_iter().map(|e| self.secret_of(&dek, project, e, caller)).collect();
+        self.mark_decoys(project, &mut list, caller)?;
+        Ok(list)
     }
 
     /// One effective secret, without its value. `kind`: the shared one or the caller's personal
@@ -649,7 +668,10 @@ impl Secrets {
         if kind == Some(SecretType::Personal) && e.row.owner.is_empty() {
             return Err(Error::NotFound(format!("no personal value of {key} in {slug}:{path}")));
         }
-        Ok(self.secret_of(&dek, project, e, caller))
+        let mut one = [self.secret_of(&dek, project, e, caller)];
+        self.mark_decoys(project, &mut one, caller)?;
+        let [one] = one;
+        Ok(one)
     }
 
     /// One secret's value, resolved unless `resolve` is false. Audited.

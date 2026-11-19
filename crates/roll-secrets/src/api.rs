@@ -50,6 +50,7 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/backup/schedule"), get(backup_schedule).put(set_backup_schedule).delete(delete_backup_schedule))
         .route(&format!("{P}/restore"), post(restore))
         .route(&format!("{E}/secrets"), get(secrets))
+        .route(&format!("{E}/decoys"), post(add_decoy))
         .route(K, get(secret).put(set_secret).delete(delete_secret))
         .route(&format!("{K}/value"), get(reveal))
         .route(&format!("{K}/totp"), get(totp))
@@ -1021,6 +1022,12 @@ async fn identities(State(s): S, Who(c): Who, Path(project): Path<String>) -> cr
 async fn create_identity(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
     let n: crate::NewIdentity = body(&b)?;
     Ok(created(blocking(s, move |s| s.create_identity(&project, n, &c)).await?))
+}
+
+/// A decoy key (docs/secrets.md, "Decoys"): answered as the key, never its value.
+async fn add_decoy(State(s): S, Who(c): Who, Path((project, env)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let n: crate::NewDecoy = body(&b)?;
+    Ok(created(blocking(s, move |s| s.add_decoy(&project, &env, n, &c)).await?))
 }
 
 async fn delete_identity(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
