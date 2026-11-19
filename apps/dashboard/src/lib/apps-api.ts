@@ -534,6 +534,8 @@ export interface EnvironmentPut {
   routes?: RouteRule[] | null;
   /** Its uptime checks (at most 5), or null for none. */
   checks?: UptimeCheck[] | null;
+  /** Its heartbeats (at most 10), or null for none; one kept by name keeps its URL. */
+  heartbeats?: Pick<Heartbeat, "name" | "every_s" | "grace_s">[] | null;
   /** Its own size and scale over the service's; a null field goes back to the service's. */
   run?: Partial<Record<EnvRunField, number | null>>;
 }
@@ -652,6 +654,10 @@ export interface Environment extends EnvironmentSummary {
   checks?: UptimeCheck[];
   /** How each check stands on its owner. */
   check_states?: UptimeCheckState[];
+  heartbeats?: Heartbeat[];
+  heartbeat_states?: HeartbeatState[];
+  /** Only in the answer to the PUT that added them: each new heartbeat's ping URL (shown once). */
+  heartbeat_urls?: Record<string, string>;
   created_at: number;
 }
 
@@ -899,6 +905,22 @@ export interface UptimeCheckState {
   down_since: number | null;
 }
 
+/** A heartbeat: something outside roll pings its URL at least every `every_s` (60–604800); one not come within that and `grace_s` (default 300) is `heartbeat.missed`. */
+export interface Heartbeat {
+  name: string;
+  every_s: number;
+  grace_s?: number;
+  added_at: number;
+}
+
+export interface HeartbeatState {
+  name: string;
+  last_ping_at: number | null;
+  /** When the next ping is due (before the grace). */
+  due_at: number;
+  missed: boolean;
+}
+
 /** What visitors' browsers measured (`vitals: true`): overall and for the busiest routes. */
 export interface Vitals {
   minutes: number;
@@ -1011,7 +1033,8 @@ export type NotifyEvent =
   | "domain.tls_failed"
   | "volume.backup_failed"
   | "volume.full"
-  | "check.down";
+  | "check.down"
+  | "heartbeat.missed";
 
 /** An entry of the event log (`GET /v1/apps/events`, a service's `…/activity`). */
 export interface AppEvent {

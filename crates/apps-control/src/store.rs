@@ -465,6 +465,8 @@ pub struct EnvRow {
     pub routes: Vec<crate::model::Route>,
     /// Its uptime checks ([`crate::model::Check`]).
     pub checks: Vec<crate::model::Check>,
+    /// Its heartbeats, with their tokens' hashes ([`crate::model::Heartbeat`]).
+    pub heartbeats: Vec<crate::model::Heartbeat>,
     /// Paused (Render's Suspend): nothing of it runs, wakes, deploys or is scheduled until it's
     /// resumed.
     pub paused: bool,
@@ -593,7 +595,7 @@ fn name_taken(name: &str, deleted: Option<i64>) -> String {
         Some(_) => format!("a deleted service named {name} holds the name: restore it, or delete it again to delete it for good"),
     }
 }
-const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen, feedback, maintenance, allow_ips, rate_limit, tcp_port, firewall, pages, redeploy_on_secrets, secrets_seen, headers, paused, held_by, egress, vitals, routes, report, checks";
+const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen, feedback, maintenance, allow_ips, rate_limit, tcp_port, firewall, pages, redeploy_on_secrets, secrets_seen, headers, paused, held_by, egress, vitals, routes, report, checks, heartbeats";
 /// A deployment [`Store::prune_deployments`] pruned, with its image when nothing else names it.
 pub struct Pruned {
     pub id: String,
@@ -672,6 +674,8 @@ fn env_row(r: &code_sql::Row<'_>) -> code_sql::Result<EnvRow> {
         vitals: r.get::<_, i64>(26)? != 0,
         routes: r.get::<_, Option<String>>(27)?.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default(),
         checks: r.get::<_, Option<String>>(29)?.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default(),
+        // Stored with their hashes (which the model never serializes out): read as written.
+        heartbeats: r.get::<_, Option<String>>(30)?.and_then(|j| serde_json::from_str::<Vec<StoredHeartbeat>>(&j).ok()).unwrap_or_default().into_iter().map(Into::into).collect(),
         report: r.get::<_, i64>(28)? != 0,
     })
 }
@@ -817,6 +821,7 @@ impl Store {
         db.add_column("visit_sessions", "login", "TEXT")?;
         db.add_column("environments", "routes", "TEXT")?;
         db.add_column("environments", "checks", "TEXT")?;
+        db.add_column("environments", "heartbeats", "TEXT")?;
         // Drains made before their filters sent every environment's runtime output: still so.
         db.add_column("log_drains", "sources", "TEXT")?;
         db.add_column("log_drains", "environments", "TEXT")?;
@@ -1027,7 +1032,7 @@ impl Store {
                     None => None,
                 };
                 c.execute(
-                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, 0, NULL, NULL, 0, NULL, 1, NULL)"),
+                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, 0, NULL, NULL, 0, NULL, 1, NULL, NULL)"),
                     params![service, env, branch.flatten(), ephemeral.unwrap_or(false) as i64, slug, port, now],
                 )?;
             }
@@ -2527,6 +2532,13 @@ impl Store {
         Ok(())
     }
 
+    pub fn set_heartbeats(&self, service: &str, env: &str, beats: &[crate::model::Heartbeat]) -> Result<()> {
+        let stored: Vec<StoredHeartbeat> = beats.iter().cloned().map(Into::into).collect();
+        let j = (!stored.is_empty()).then(|| serde_json::to_string(&stored).expect("heartbeats serialize"));
+        self.db.execute("UPDATE environments SET heartbeats = ? WHERE service = ? AND name = ?", params![j, service, env])?;
+        Ok(())
+    }
+
     pub fn set_checks(&self, service: &str, env: &str, checks: &[crate::model::Check]) -> Result<()> {
         let j = (!checks.is_empty()).then(|| serde_json::to_string(checks).expect("checks serialize"));
         self.db.execute("UPDATE environments SET checks = ? WHERE service = ? AND name = ?", params![j, service, env])?;
@@ -2921,6 +2933,11 @@ impl Store {
         Ok(self.db.write(|c| c.execute("INSERT INTO state (key, value) VALUES (?, ?) ON CONFLICT (key) DO NOTHING", [key, value]))? == 1)
     }
 
+    /// `key` removed: whether it was there (one caller gets true, on any node).
+    pub fn take_state(&self, key: &str) -> Result<bool> {
+        Ok(self.db.write(|c| c.execute("DELETE FROM state WHERE key = ?", [key]))? > 0)
+    }
+
     /// `key`'s value, set to `value` first if it has none (two nodes asking at once read the same).
     pub fn state_or(&self, key: &str, value: &str) -> Result<String> {
         self.db.write(|c| {
@@ -2952,6 +2969,28 @@ pub struct DrainSettings {
     pub services: Vec<String>,
     pub previews: bool,
     pub headers: Vec<(String, String)>,
+}
+
+/// A heartbeat as stored: its token's hash included ([`crate::model::Heartbeat`] never writes it out).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct StoredHeartbeat {
+    name: String,
+    every_s: u32,
+    grace_s: u32,
+    added_at: i64,
+    token_hash: String,
+}
+
+impl From<crate::model::Heartbeat> for StoredHeartbeat {
+    fn from(h: crate::model::Heartbeat) -> Self {
+        StoredHeartbeat { name: h.name, every_s: h.every_s, grace_s: h.grace_s, added_at: h.added_at, token_hash: h.token_hash }
+    }
+}
+
+impl From<StoredHeartbeat> for crate::model::Heartbeat {
+    fn from(h: StoredHeartbeat) -> Self {
+        crate::model::Heartbeat { name: h.name, every_s: h.every_s, grace_s: h.grace_s, added_at: h.added_at, token_hash: h.token_hash }
+    }
 }
 
 /// A drain with what sending to it needs, opened.

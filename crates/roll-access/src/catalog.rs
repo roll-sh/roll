@@ -1393,7 +1393,8 @@ static ROWS: &[Row] = &[
     // A restore puts a deleted service's deployments live again, production's too: a deploy.
     row("POST", "/v1/apps/services/{id}/restore", "apps", DEPLOY, one(PG, "service")).env(EnvFrom::Fixed("production")),
     // `variables_from` copies another environment's values into this one: reveal there too.
-    row("*", "/v1/apps/services/{id}/environments/{env}", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")).copies_from(CopyFrom::Body("variables_from")),
+    // A new heartbeat's ping URL (its token) is in the PUT's answer, once: a credential.
+    row("*", "/v1/apps/services/{id}/environments/{env}", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")).copies_from(CopyFrom::Body("variables_from")).reveals(&["heartbeat_urls"]),
     row("GET", "/v1/apps/services/{id}/environments/{env}", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
     row("DELETE", "/v1/apps/services/{id}/environments/{env}", "apps", D, one(PG, "service")).env(EnvFrom::Param("env")),
     row("GET", "/v1/apps/services/{id}/environments/{env}/", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
@@ -1735,6 +1736,7 @@ mod tests {
         let reveals = |m: &str, p: &str| by_path(m, p).unwrap().row.reveals;
         assert!(reveals("GET", "/v1/previews/projects/prj_1/settings").contains(&"env"));
         assert!(reveals("GET", "/v1/tasks/messages/msg_1").contains(&"headers") && reveals("GET", "/v1/tasks/schedules").contains(&"headers"));
+        assert!(reveals("PUT", "/v1/apps/services/svc_1/environments/production").contains(&"heartbeat_urls"), "a heartbeat's ping URL is shown once, to who may reveal");
         assert_eq!(by_path("GET", "/v1/code/agents/acme/shares").unwrap().row.action("GET", &[], None), Action::Reveal);
         // Connecting a GitHub repository, landing over the rules, and dropping a stream's
         // records aren't the plain write or deploy their routes otherwise are.

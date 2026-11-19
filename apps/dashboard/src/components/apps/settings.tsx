@@ -13,6 +13,7 @@ import { useWorkspace } from "@/lib/workspace-store";
 import { CPU, MEMORY, mb, type Runner } from "./shared";
 import { SidecarsPanel } from "./sidecars";
 import { ChecksPanel } from "./checks";
+import { HeartbeatsPanel } from "./heartbeats";
 
 
 /** The form's values, as text (empty: the default). */
@@ -733,6 +734,7 @@ export function SettingsTab({
             <InstancesPanel service={service} env={env} runner={runner} />
             <EnvironmentPanel key={env.name} service={service} env={env} runner={runner} onDeleted={onEnvDeleted} />
             {service.run.type === "web" && <ChecksPanel service={service.id} env={env} runner={runner} />}
+            <HeartbeatsPanel service={service.id} env={env} runner={runner} />
           </Anchor>
         )}
 

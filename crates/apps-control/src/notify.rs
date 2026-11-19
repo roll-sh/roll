@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// What a target can ask for; a new one gets the two that need someone.
-pub const EVENTS: [&str; 24] = [
+pub const EVENTS: [&str; 25] = [
     "deploy.failed",
     "deploy.base_updated",
     "rollout.waiting",
@@ -43,8 +43,9 @@ pub const EVENTS: [&str; 24] = [
     "volume.full",
     "form.submitted",
     "check.down",
+    "heartbeat.missed",
 ];
-const DEFAULT_EVENTS: [&str; 19] = ["check.down", "deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"];
+const DEFAULT_EVENTS: [&str; 20] = ["check.down", "heartbeat.missed", "deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"];
 /// Whether a target with `events` hears an event: its own kind, or for a resolution, the alert's
 /// (whoever heard an alert hears it clear; there's nothing else to ask for).
 fn wants(events: &[String], kind: &str, data: &Value, oncall: bool) -> bool {
@@ -416,6 +417,10 @@ impl Apps {
             "alert.errors" => (format!("{what}: errors"), format!("{}% of its {} requests in five minutes answered 5xx (the alert is at {}%).", e.data["value"], e.data["requests"], e.data["threshold"])),
             "alert.latency" => (format!("{what}: slow"), format!("Its p95 latency reached {} ms (the alert is at {} ms).", e.data["value"], e.data["threshold"])),
             "alert.capacity" => (format!("{what}: at capacity"), format!("{}% of its {} requests in five minutes found all {} instances busy ({} requests each at once). Raise its max instances (`roll apps set --max`) or its concurrency, or make it answer faster (the alert is at {}%).", e.data["value"], e.data["requests"], e.data["max_instances"], e.data["concurrency"], e.data["threshold"])),
+            "heartbeat.missed" => (
+                format!("{what}: heartbeat {} missed", e.data["heartbeat"].as_str().unwrap_or("")),
+                format!("No ping came within {} s{}.", e.data["every_s"], e.data["last_ping_at"].as_i64().map(|t| format!(" of the last ({})", chrono::DateTime::from_timestamp_millis(t).map(|d| d.format("%Y-%m-%d %H:%M UTC").to_string()).unwrap_or_default())).unwrap_or_else(|| " of it being added".into())),
+            ),
             "check.down" => (
                 format!("{what}: {} is down", e.data["path"].as_str().unwrap_or("a page")),
                 format!("Its uptime check {} failed twice in a row: {}.", e.data["check"].as_str().unwrap_or(""), e.data["error"].as_str().unwrap_or("no answer")),
@@ -438,7 +443,10 @@ impl Apps {
                     Some("check.down") => "uptime check",
                     _ => "an",
                 };
-                if e.data["alert"] == "check.down" {
+                if e.data["alert"] == "heartbeat.missed" {
+                    let name = e.data["heartbeat"].as_str().unwrap_or("");
+                    (format!("{what}: heartbeat {name} is back"), format!("Heartbeat {name} pinged again."))
+                } else if e.data["alert"] == "check.down" {
                     let name = e.data["check"].as_str().unwrap_or("");
                     (format!("{what}: uptime check {name} is up"), format!("Its uptime check {name} passes again."))
                 } else {
@@ -533,10 +541,12 @@ impl Apps {
 fn oncall_of(e: &Event) -> Option<(bool, String, &'static str)> {
     let key = |k: &str| format!("roll:{}/{}/{k}", e.service, e.environment);
     Some(match e.kind.as_str() {
-        // A check's own incident, by its name: two checks are two pages.
+        // A check's or heartbeat's own incident, by its name: two checks are two pages.
         "alert.resolved" if e.data["alert"] == "check.down" => (false, key(&format!("check.down/{}", e.data["check"].as_str()?)), "info"),
+        "alert.resolved" if e.data["alert"] == "heartbeat.missed" => (false, key(&format!("heartbeat.missed/{}", e.data["heartbeat"].as_str()?)), "info"),
         "alert.resolved" => (false, key(e.data["alert"].as_str()?), "info"),
         "check.down" => (true, key(&format!("check.down/{}", e.data["check"].as_str()?)), "error"),
+        "heartbeat.missed" => (true, key(&format!("heartbeat.missed/{}", e.data["heartbeat"].as_str()?)), "error"),
         // A deploy that worked closes the failed one's.
         "deploy.active" => (false, key("deploy.failed"), "info"),
         "domain.active" => return None,

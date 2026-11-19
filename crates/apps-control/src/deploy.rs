@@ -2404,6 +2404,7 @@ impl Apps {
         let Ok(services) = self.db(|s| s.services(None)).await else { return };
         self.schedules_pass(&services, now).await;
         self.checks_pass(&services, now).await;
+        self.heartbeats_pass(&services, now).await;
         for svc in services.into_iter().filter(|s| s.run.kind == RunType::Cron && self.owns(&s.id) && !self.capped(&s.id)) {
             let Some(schedule) = svc.run.schedule.as_deref().and_then(|s| crate::cron::Schedule::parse(s, svc.run.timezone.as_deref()).ok()) else { continue };
             let sid = svc.id.clone();
