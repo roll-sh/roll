@@ -671,7 +671,9 @@ pub async fn put_lifecycle(ctx: &Ctx<'_>) -> EsResult<Reply> {
             check_interval(st, str_of(&parsed, "schedule"), now)?;
             // An update keeps the policy's history (`SnapshotLifecyclePolicyMetadata.builder(old)`).
             let mut rec = match st.metadata.xpack.get(POLICIES, &id) {
-                Some(old) if old.get("policy") == Some(&parsed) => return Ok(()),
+                // The same policy again changes nothing, unless it's one a branch inherited:
+                // putting it makes it the branch's own.
+                Some(old) if old.get("policy") == Some(&parsed) && !crate::branch::paused_policy(old) => return Ok(()),
                 Some(Value::Obj(old)) => {
                     let mut r = old.clone();
                     let v = old.get("version").and_then(Value::as_i64).unwrap_or(0) + 1;

@@ -2084,12 +2084,12 @@ async fn a_branch_runs_none_of_its_parents_jobs() {
         (Method::PUT, "/_snapshot/backup/base?wait_for_completion=true", json!({"indices": "docs", "metadata": {"policy": "nightly"}})),
         (Method::PUT, "/_cluster/settings", json!({"persistent": {"slm.minimum_interval": "0s"}})),
         // The parent's SLM is stopped, so only a branch could run the policy.
-        (Method::POST, "/_slm/stop", json!({})),
+        (Method::POST, "/_slm/stop", Value::Null),
         (Method::PUT, "/_slm/policy/nightly", json!({"schedule": "1s", "name": "<nightly-{now/d}>", "repository": "backup", "retention": {"expire_after": "1ms"}})),
         (Method::PUT, "/_watcher/watch/ping", watch),
     ];
     for (m, uri, body) in calls {
-        let (s, v) = e.es(&u, &p, m, uri, Some(body)).await;
+        let (s, v) = e.es(&u, &p, m, uri, Some(body).filter(|b| !b.is_null())).await;
         assert!(s < 300, "{uri}: {v}");
     }
     let objects = bucket.keys("prod/");
@@ -2108,10 +2108,10 @@ async fn a_branch_runs_none_of_its_parents_jobs() {
     assert_eq!(s, 500, "{v}");
 
     // SLM running on the branch neither runs the inherited policy nor applies its retention.
-    let (s, v) = e.es(&bu, &bp, Method::POST, "/_slm/start", Some(json!({}))).await;
+    let (s, v) = e.es(&bu, &bp, Method::POST, "/_slm/start", None).await;
     assert_eq!(s, 200, "{v}");
     tokio::time::sleep(Duration::from_millis(2500)).await;
-    let (s, v) = e.es(&bu, &bp, Method::POST, "/_slm/_execute_retention", Some(json!({}))).await;
+    let (s, v) = e.es(&bu, &bp, Method::POST, "/_slm/_execute_retention", None).await;
     assert_eq!(s, 200, "{v}");
     let (_, v) = e.es(&bu, &bp, Method::GET, "/_slm/policy/nightly", None).await;
     let policy = &v["nightly"];
