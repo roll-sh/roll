@@ -173,6 +173,10 @@
           "type": "boolean",
           "description": "Raw TCP, not HTTP."
         },
+        "schedule_scale": {
+          "type": "array",
+          "description": "Floors by the clock: [{windows: [{from: \"mon 08:00\", to: \"fri 18:00\"}], timezone?, min_instances}]; in a window, its min_instances is the floor when higher."
+        },
         "metrics": {
           "type": "object",
           "description": "Its own Prometheus endpoint, scraped every 15 s on each running instance: port (default the app's), path (default /metrics)."

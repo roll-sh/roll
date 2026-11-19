@@ -105,4 +105,17 @@ mod tests {
         assert!(Freeze { until: None, windows: vec![Window { from: "fri 25:00".into(), to: "mon 09:00".into() }], timezone: None, reason: String::new() }.check().is_err());
         assert_eq!(until.says(), "deploys are frozen: launch");
     }
+
+    #[test]
+    fn a_schedule_raises_the_floor_in_its_window_only() {
+        let ms = |s: &str| chrono::DateTime::parse_from_rfc3339(s).unwrap().timestamp_millis();
+        let run = crate::model::Run {
+            min_instances: 1,
+            max_instances: 3,
+            schedule_scale: vec![crate::model::ScaleWindow { windows: vec![Window { from: "mon 08:00".into(), to: "fri 18:00".into() }], timezone: None, min_instances: 5 }],
+            ..Default::default()
+        };
+        assert_eq!(run.at(ms("2026-11-18T12:00:00Z")).min_instances, 3, "a Wednesday: its floor, never past max_instances");
+        assert_eq!(run.at(ms("2026-11-22T12:00:00Z")).min_instances, 1, "a Sunday: as it says");
+    }
 }
