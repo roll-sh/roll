@@ -1970,7 +1970,9 @@ that and `grace_s` (default five minutes) of its last ping, or of being added, i
 `heartbeat.missed` once, and the next ping is `alert.resolved` for it. Both go to notification
 targets (`heartbeat.missed` is in the defaults), and on-call ones keep an incident per heartbeat.
 At most ten. A token is the heartbeat's only credential: shown once, in the answer to the PUT that
-adds it (`heartbeat_urls`), only its SHA-256 kept, and kept by name when the list is put again.
+adds it (`heartbeat_urls`, a credential in the permissions catalogue: a token that may only write
+or deploy adds the heartbeat but doesn't see it), only its SHA-256 kept, and kept by name when the
+list is put again.
 So a ping gets in where visitors don't (an access token, signing in), but still past the
 environment's allow list, firewall and rate limit, and wakes nothing: an idle service stays idle.
 Pings and misses are kept in the store's state, so a takeover keeps them and two nodes' passes
@@ -2677,6 +2679,17 @@ the node's log, rather than every drain failing. Test (`…/test`, `roll apps dr
 signed and with its headers, and says how it was answered. `roll apps drains --add URL --source
 runtime,http --only-env production --header 'DD-API-KEY: …'`.
 `a_log_drain_gets_the_runtime_output_signed`.
+
+A preview's services that roll's own runtime runs (roll previews' `roll.toml` services, not
+roll apps instances) reach the same drains: previews follows each one on the preview's holder,
+masks its lines and hands them to the drainer (`Apps::drain_preview_lines`, never waiting; past
+256 batches waiting one is dropped, counted in the node's log). They go to drains with
+`previews` and the `runtime` source, in the preview's `pv-` environment (an `environments`
+filter applies), with `service_name` the service's and `service`, `instance` and `deployment`
+null, so a drain narrowed to `services` never gets them. A preview's jobs' output (`release`,
+`seed`, `teardown`) is the `build` source, the job's name its `service_name`.
+docs/previews.md, "Log drains".
+`a_previews_runtime_lines_reach_only_drains_that_take_previews`.
 
 A drain's `format` (Heroku's and Render's syslog drains, every vendor's OpenTelemetry intake)
 picks its wire, fixed when it's made: `ndjson` (the above), `otlp` (each batch an OTLP/HTTP JSON

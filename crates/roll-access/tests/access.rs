@@ -1474,15 +1474,19 @@ async fn approvals_can_be_remembered() {
         async move { d.call(OPERATOR, Method::POST, &format!("/v1/access/approvals/{apr}/approve"), Some(json!({ "remember": remember }))).await }
     };
     assert_eq!(approve(apr.clone(), json!("forever")).await.0, StatusCode::BAD_REQUEST, "nothing is decided");
-    assert_eq!(approve(apr.clone(), json!("1h")).await.0, StatusCode::OK);
+    // For 30 days (a developer's own CLI): the longest a while lasts.
+    assert_eq!(approve(apr.clone(), json!("30d")).await.0, StatusCode::OK);
     // The product is told which approval let the request run, who decided it and, for a
     // remembered rule, until when (its audit names them).
     let (s, ran) = d.send(&token, Method::DELETE, "/v1/projects/pa", None, &[("x-roll-approval", &apr)]).await;
     assert_eq!((s, ran["approved"]["id"].as_str(), ran["approved"]["by"][0].as_str()), (StatusCode::OK, Some(apr.as_str()), Some("operator")), "{ran}");
     let hour = apr.clone();
-    // For an hour: the same request runs without asking; another project still asks.
+    // For 30 days: the same request runs without asking; another project still asks.
     let (s, ran) = ask("pa").await;
-    assert_eq!((s, ran["approved"]["id"].as_str(), ran["approved"]["until"].is_i64()), (StatusCode::OK, Some(hour.as_str()), true), "{ran}");
+    let until = ran["approved"]["until"].as_i64().unwrap_or(0);
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+    assert_eq!((s, ran["approved"]["id"].as_str()), (StatusCode::OK, Some(hour.as_str())), "{ran}");
+    assert!(until > now + 29 * 24 * 3_600_000 && until <= now + 30 * 24 * 3_600_000, "until in 30 days: {ran}");
     let (_, pending) = ask("pb").await;
     assert_eq!(pending["code"], "approval_pending");
     // Approved once: that request alone (no until).
@@ -1500,7 +1504,7 @@ async fn approvals_can_be_remembered() {
     assert_eq!((g["temporary"].as_array().map(Vec::len), g["rules"].as_array().map(Vec::len)), (Some(1), Some(3)), "{g}");
     assert_eq!(g["temporary"][0]["approval"].as_str(), Some(hour.as_str()), "a while names the approval that allowed it");
     assert_eq!(ask("pc").await.0, StatusCode::OK);
-    // Taken back before the hour is up: asking again.
+    // Taken back before it's up: asking again.
     assert_eq!(d.call(&token, Method::DELETE, &format!("/v1/access/tokens/{id}/temporary/{hour}"), None).await.0, StatusCode::FORBIDDEN, "only the operator");
     assert_eq!(d.call(OPERATOR, Method::DELETE, &format!("/v1/access/tokens/{id}/temporary/{hour}"), None).await.0, StatusCode::OK);
     // (The approval itself is taken back too: it never ran the request, the rule did.)
@@ -1884,6 +1888,8 @@ async fn a_rule_can_grant_some_indices() {
         let (d, path) = (&d, format!("/v1/access/audit?{q}"));
         async move { d.call(OPERATOR, Method::GET, &path, None).await.1.as_array().unwrap().iter().map(|e| e["resource"].as_str().unwrap_or("").to_string()).collect::<Vec<_>>() }
     };
+    // The audit writer batches: wait for the searches' rows rather than a fixed time.
+    d.audit_until("/v1/access/audit?resource=cl_1", |l| l.as_array().is_some_and(|a| a.iter().any(|e| e["resource"] == "cl_1/logs-2025"))).await;
     let all = who("resource=cl_1").await;
     assert!(all.contains(&"cl_1".to_string()) && all.contains(&"cl_1/logs-2025".to_string()), "{all:?}");
     assert!(who("resource=cl_1/logs-2025&action=read").await.iter().all(|r| r == "cl_1/logs-2025"));

@@ -740,9 +740,10 @@ mod tests {
         let cases = [("^(\\w+\\s?)+$", format!("{}!", "a".repeat(60))), ("^(a|aa)+$", format!("{}!", "a".repeat(200)))];
         for (expr, text) in cases {
             let g = Grok::new(PatternBank::legacy(), expr).unwrap().with_max_execution_time(Some(Duration::from_millis(50)));
-            let t0 = Instant::now();
-            let e = g.captures(&text).expect_err(expr);
-            assert!(t0.elapsed() < Duration::from_secs(5), "{expr}: {:?}", t0.elapsed());
+            // The match stops near its deadline, not when the backtracking ends: CPU time,
+            // which a loaded host doesn't stretch as it does the wall time around it.
+            let (e, cpu) = search_test_support::cpu_time(|| g.captures(&text).expect_err(expr));
+            assert!(cpu < Duration::from_secs(5), "{expr}: {cpu:?} of CPU");
             assert_eq!(e, MatchError::Interrupted { after_millis: 50 });
             assert_eq!((e.kind(), e.reason().as_str()), ("runtime_exception", "grok pattern matching was interrupted after [50] ms"));
             assert_eq!(g.matches(&text), Err(MatchError::Interrupted { after_millis: 50 }));

@@ -302,6 +302,7 @@ pub const OPERATOR_ONLY: &[(&str, &str)] = &[
     ("/v1/access/audit/sinks", "where the audit log is sent is the operator's choice"),
     ("/v1/access/audit/sinks/{id}", "where the audit log is sent is the operator's choice"),
     ("/v1/access/audit/sinks/{id}/retry", "where the audit log is sent is the operator's choice"),
+    ("/v1/previews/{id}/visit", "a browser session in a team-access preview is a signed-in person's (rolld's gate sees their session), never a token's"),
     ("/v1/apps/services/{id}/environments/{env}/visit", "a browser session in a sign-in-gated environment is a signed-in person's (rolld's gate sees their session), never a token's"),
     ("/v1/apps/services/{id}/github", "roll's GitHub App installations span tenants: connecting a service to one (its tokens fetch any repository the installation sees) is the operator's, as connecting a repo is roll code's admin token's"),
 ];
@@ -1132,6 +1133,10 @@ static ROWS: &[Row] = &[
     // cluster's data.
     row("GET", "/v1/search/clusters/{id}/metrics", "search", R, one(PG, "cluster")),
     row("GET", "/v1/search/clusters/{id}/slowlog", "search", R, one(PG, "cluster")),
+    // The security audit log: a read, not a reveal (entries never hold a credential).
+    row("GET", "/v1/search/clusters/{id}/audit", "search", R, one(PG, "cluster")),
+    // Search analytics: the indices' query text, aggregated; a read of the cluster's data.
+    row("GET", "/v1/search/clusters/{id}/analytics", "search", R, one(PG, "cluster")),
     row("*", "/v1/search/clusters/{id}/", "search", M, one(PG, "cluster")),
     // An index's routes are about those indices (`{index}`: a name, or on reads an expression),
     // so a rule can grant some of a cluster's indices. The console (`request`) and the index list
@@ -1230,6 +1235,13 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/secrets/projects/{project}/cas/{id}/certificates", "secrets", R, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/cas/{id}/revoke", "secrets", W, one(&["project"], "project")),
     row("DELETE", "/v1/secrets/projects/{project}/cas/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    // ACME on a CA: its directory, pre-authorization and External Account Bindings. A binding's
+    // HMAC key is answered once, to who may also reveal; making, revoking and pre-authorizing are
+    // the project admin's (an account acts with its binding's names).
+    row("GET", "/v1/secrets/projects/{project}/cas/{id}/acme", "secrets", R, one(&["project"], "project")),
+    row("PATCH", "/v1/secrets/projects/{project}/cas/{id}/acme", "secrets", ADMIN, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/cas/{id}/acme/eab", "secrets", ADMIN, one(&["project"], "project")).reveals(&["hmac_key"]),
+    row("DELETE", "/v1/secrets/projects/{project}/cas/{id}/acme/eab/{eab}", "secrets", ADMIN, one(&["project"], "project")),
     row("GET", "/v1/secrets/projects/{project}/ssh-cas", "secrets", R, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/ssh-cas", "secrets", ADMIN, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/ssh-cas/{id}/sign-host", "secrets", ADMIN, one(&["project"], "project")),
@@ -1244,6 +1256,26 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/secrets/projects/{project}/outside-databases", "secrets", R, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/outside-databases", "secrets", ADMIN, one(&["project"], "project")),
     row("DELETE", "/v1/secrets/projects/{project}/outside-databases/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    // LDAP and Active Directory: listing never shows the bind password; registering takes one.
+    row("GET", "/v1/secrets/projects/{project}/directories", "secrets", R, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/directories", "secrets", ADMIN, one(&["project"], "project")),
+    row("DELETE", "/v1/secrets/projects/{project}/directories/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    // Snowflake accounts: listing never shows the admin's private key; registering takes one.
+    row("GET", "/v1/secrets/projects/{project}/snowflake-accounts", "secrets", R, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/snowflake-accounts", "secrets", ADMIN, one(&["project"], "project")),
+    row("DELETE", "/v1/secrets/projects/{project}/snowflake-accounts/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    // MongoDB Atlas projects: listing shows the service account's client id, never its secret;
+    // registering takes one.
+    row("GET", "/v1/secrets/projects/{project}/atlas-projects", "secrets", R, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/atlas-projects", "secrets", ADMIN, one(&["project"], "project")),
+    row("DELETE", "/v1/secrets/projects/{project}/atlas-projects/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    // Gateways into private networks (docs/secrets.md, "Gateways"): records are the project's;
+    // a gateway's own link is write on the gateway by its id, which only its token's rule names
+    // (a project-wide rule doesn't reach it).
+    row("GET", "/v1/secrets/projects/{project}/gateways", "secrets", R, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/gateways", "secrets", ADMIN, one(&["project"], "project")).reveals(&["token"]),
+    row("DELETE", "/v1/secrets/projects/{project}/gateways/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    row("GET", "/v1/secrets/gateways/{id}/connect", "secrets", W, one(&["id"], "gateway")),
     row("PATCH", "/v1/secrets/projects/{project}/outside-databases/{id}", "secrets", ADMIN, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/outside-databases/{id}/rotate-admin", "secrets", ADMIN, one(&["project"], "project")),
     row("GET", "/v1/secrets/projects/{project}/kubernetes", "secrets", R, one(&["project"], "project")),
@@ -1350,7 +1382,8 @@ static ROWS: &[Row] = &[
     // A restore puts a deleted service's deployments live again, production's too: a deploy.
     row("POST", "/v1/apps/services/{id}/restore", "apps", DEPLOY, one(PG, "service")).env(EnvFrom::Fixed("production")),
     // `variables_from` copies another environment's values into this one: reveal there too.
-    row("*", "/v1/apps/services/{id}/environments/{env}", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")).copies_from(CopyFrom::Body("variables_from")),
+    // A new heartbeat's ping URL (its token) is in the PUT's answer, once: a credential.
+    row("*", "/v1/apps/services/{id}/environments/{env}", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")).copies_from(CopyFrom::Body("variables_from")).reveals(&["heartbeat_urls"]),
     row("GET", "/v1/apps/services/{id}/environments/{env}", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
     row("DELETE", "/v1/apps/services/{id}/environments/{env}", "apps", D, one(PG, "service")).env(EnvFrom::Param("env")),
     row("GET", "/v1/apps/services/{id}/environments/{env}/", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
@@ -1440,6 +1473,20 @@ static ROWS: &[Row] = &[
     // Each data branch's connection as the preview's services get it (the branches' own
     // credentials, never a parent's; previews-next): reveal, as the preview's env is.
     row("GET", "/v1/previews/{id}/connect", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    // A shell in a preview's running service runs anything with its variables and branches, as
+    // roll apps' shells do: admin, every route of it (what closes an admin's shell is admin).
+    row("POST", "/v1/previews/{id}/shell/sessions", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    row("GET", "/v1/previews/{id}/shell/sessions/{sh}/screen", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    row("POST", "/v1/previews/{id}/shell/sessions/{sh}/keys", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    row("POST", "/v1/previews/{id}/shell/sessions/{sh}/resize", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    row("DELETE", "/v1/previews/{id}/shell/sessions/{sh}", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    // Files in a preview's service (`roll preview cp`): read, anything it keeps (its variables
+    // too); written, anything it runs next: admin, as the shell is.
+    row("GET", "/v1/previews/{id}/files", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    // A port of a preview's service on a laptop (`roll preview forward`): any port it listens on,
+    // past its access: admin, as roll apps' tunnel is.
+    row("GET", "/v1/previews/{id}/forward", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    row("PUT", "/v1/previews/{id}/files", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
     // The mail a preview's services sent, caught and never delivered (previews-next): it can hold
     // copies of production's people, so reveal, as the preview's env is.
     row("GET", "/v1/previews/{id}/mail", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
@@ -1678,6 +1725,7 @@ mod tests {
         let reveals = |m: &str, p: &str| by_path(m, p).unwrap().row.reveals;
         assert!(reveals("GET", "/v1/previews/projects/prj_1/settings").contains(&"env"));
         assert!(reveals("GET", "/v1/tasks/messages/msg_1").contains(&"headers") && reveals("GET", "/v1/tasks/schedules").contains(&"headers"));
+        assert!(reveals("PUT", "/v1/apps/services/svc_1/environments/production").contains(&"heartbeat_urls"), "a heartbeat's ping URL is shown once, to who may reveal");
         assert_eq!(by_path("GET", "/v1/code/agents/acme/shares").unwrap().row.action("GET", &[], None), Action::Reveal);
         // Connecting a GitHub repository, landing over the rules, and dropping a stream's
         // records aren't the plain write or deploy their routes otherwise are.
