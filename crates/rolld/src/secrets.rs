@@ -2013,7 +2013,7 @@ mod tests {
         assert!(frozen(apps.resolve(&project, "staging", "svc_web").await.unwrap_err()), "a service's deploy");
         let code = super::ForCode::default();
         code.set(secrets.clone(), ws);
-        assert!(frozen(code.resolve(project.clone(), "staging", "check:acme/web").await.unwrap_err()), "a check or a sandbox");
+        assert!(frozen(code.resolve(project.clone(), "staging", "check:acme/web", None).await.unwrap_err()), "a check or a sandbox");
     }
 
     /// An incident's cut-off revokes through roll-access's own bulk revoke: every token that
