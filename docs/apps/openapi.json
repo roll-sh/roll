@@ -1722,6 +1722,51 @@
         "x-roll-action": "deploy*"
       }
     },
+    "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/vulnerabilities": {
+      "get": {
+        "description": "Answers `{ scan: ScanSummary | null, vulnerabilities: Vulnerability[] }`: its image's known vulnerabilities, most severe first (then those with a fix), at most 2,000 (the counts are of all); `severity` keeps those at it or worse; a pruned deployment's list is empty, its counts kept.",
+        "operationId": "getServicesIdEnvironmentsEnvDeploysDepVulnerabilities",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "dep",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`{ scan: ScanSummary | null, vulnerabilities: Vulnerability[] }`: its image's known vulnerabilities, most severe first (then those with a fix), at most 2,000 (the counts are of all); `severity` keeps those at it or worse; a pruned deployment's list is empty, its counts kept"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "List vulnerabilities",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "read"
+      }
+    },
     "/v1/apps/services/{id}/environments/{env}/diff": {
       "get": {
         "description": "Answers `{from, to, variables: {missing: {name, sealed}[], extra: string[], differ: string[] | null}, settings: {field, from, to, put}[]}`: how `env` differs from `from` (Railway's environment sync), never a value. `variables`: its own variables' names, `differ` null for a token without reveal on both; `settings`: `run.*`, `wait_for_ci`, `follow_tag`, `redeploy_on_secrets`, `traces`, `vitals`, `report`, `egress`, `allow_ips`, `rate_limit`, `firewall`, `headers`, `routes`, `pages.*` (whether each has its own), each with the `PUT …/environments/{env}` body that makes it `from`'s. A token needs read on `from` too (403).",
@@ -3434,6 +3479,43 @@
           "services"
         ],
         "x-roll-action": "deploy*"
+      }
+    },
+    "/v1/apps/services/{id}/environments/{env}/slo": {
+      "get": {
+        "description": "Answers `SloReport`: its objective (the live deployment's `run.slo`, else the service's) against its window: per indicator the total, the failures, the share that met it and the budget left (1 untouched, below 0 spent); minutes for the last week, hours before (an hour's latency fails whole when its slowest minute did); `burning`: the burn alert firing now; `{ slo: null }` without one.",
+        "operationId": "getServicesIdEnvironmentsEnvSlo",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`SloReport`: its objective (the live deployment's `run.slo`, else the service's) against its window: per indicator the total, the failures, the share that met it and the budget left (1 untouched, below 0 spent); minutes for the last week, hours before (an hour's latency fails whole when its slowest minute did); `burning`: the burn alert firing now; `{ slo: null }` without one"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Get slo",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "read"
       }
     },
     "/v1/apps/services/{id}/environments/{env}/traces": {
