@@ -5125,8 +5125,11 @@ members, the first hour, and the other products' credential inputs. Ranked:
    - `for_owner` only checks owner management and `counts_for_repo`;
    - the fix is to check `Caller::allows(Reveal, env)` and store the maker;
    - S, this side's `for_owner` plus the agents surface.
-4. **Project members and roles for people** (R1, L): no thread owns it; design being drafted here
-   (`docs/members-design`), with the user's decisions to come.
+4. **Project members and roles for people** (R1, L): designed in #445 (`docs/members.md`). A member's
+   session becomes a roll-access `session` grant built on every request; there are four built-in roles
+   and resources have homes, and v1 covers workspace and secrets. It waits on the user's decisions D1–D9
+   (role names, viewers seeing values, developers' defaults, admins and production, invites, homes,
+   removed members' tokens, operator projects, admin accounts); the doc is written with option (a) of each.
 5. **Token defaults** (P13, S):
    - the CLI gives every environment, `reveal` and no expiry; the dashboard pre-picks production and 90
      days;
