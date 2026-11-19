@@ -495,12 +495,12 @@ impl Workspace {
         let now = self.db.now_ms()?;
         let actor = Actor { id: user.into(), user: Some(user.into()), ip, ..Default::default() };
         let project = self.db.write(|c| {
-            let found: Option<(String, String, String, Option<String>, String, i64, String)> = c
+            let found = c
                 .query_row("SELECT id, project_id, role, environments, email, expires_at, created_by FROM project_invites WHERE token_hash = ? AND state = 'pending'", [hash_token(token)], |r| {
-                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))
+                    Ok(Pending { id: r.get(0)?, project: r.get(1)?, role: r.get(2)?, envs: r.get(3)?, email: r.get(4)?, expires_at: r.get(5)?, invited_by: r.get(6)? })
                 })
                 .optional()?;
-            let Some((id, project, role, envs, invited, expires_at, invited_by)) = found else { return Err(gone()) };
+            let Some(Pending { id, project, role, envs, email: invited, expires_at, invited_by }) = found else { return Err(gone()) };
             if invited != email || expires_at <= now {
                 return Err(gone());
             }
@@ -610,6 +610,17 @@ impl Workspace {
         let Some(owners) = self.owners.get() else { return false };
         self.owners_of(project).unwrap_or_default().iter().any(|o| owners.trusts(o, kind, r#ref))
     }
+}
+
+/// A pending invite as `answer` reads it.
+struct Pending {
+    id: String,
+    project: String,
+    role: String,
+    envs: Option<String>,
+    email: String,
+    expires_at: i64,
+    invited_by: String,
 }
 
 fn invite_rows(c: &Conn<'_>, filter: &str, p: impl code_sql::Params) -> Result<Vec<Invite>> {

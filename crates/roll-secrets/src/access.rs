@@ -114,9 +114,14 @@ pub fn owns_repo(code_owner: Option<&str>, repo: &str) -> bool {
 /// default) reaches. Asked once per environment for one request's checks, never kept past it.
 #[derive(Clone, Default)]
 pub struct Protected {
-    lookup: Option<std::sync::Arc<dyn Fn(&str, &str) -> Option<bool> + Send + Sync>>,
-    seen: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<(String, String), Option<bool>>>>,
+    lookup: Option<Lookup>,
+    seen: std::sync::Arc<std::sync::Mutex<Seen>>,
 }
+
+/// Whether `(project, env)` is protected (`None`: not known).
+type Lookup = std::sync::Arc<dyn Fn(&str, &str) -> Option<bool> + Send + Sync>;
+/// What one request asked already, by `(project, env)`.
+type Seen = std::collections::HashMap<(String, String), Option<bool>>;
 
 impl Protected {
     pub fn of(f: impl Fn(&str, &str) -> Option<bool> + Send + Sync + 'static) -> Protected {
