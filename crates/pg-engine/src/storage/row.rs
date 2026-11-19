@@ -772,26 +772,36 @@ pub fn stored_tuple_len(b: &[u8], types: &[DataType], null: &[bool]) -> Option<u
     // them all by a multiple of MAXALIGN, which leaves every value's alignment as it is.)
     let mut off = tuple_header(types.len(), false);
     let mut has_null = false;
-    // Each value: None a null, Some(None) fixed-length, Some(Some(payload)) text.
-    let mut put = |v: Option<Option<usize>>, ty: &DataType| match v {
-        Some(payload) => off += datum_len_at(off, ty, payload),
-        None => has_null = true,
-    };
     for (i, ty) in types.iter().enumerate() {
         let t = *b.get(pos)?;
         pos += 1;
-        // (The encoded payload's size, for a value of the column's own type.)
-        let fixed = |ok: bool, size: usize| ok.then_some(size);
-        let skip = match ty {
-            _ if t == tag::NULL => 0,
-            DataType::Bool => fixed(t == tag::TRUE || t == tag::FALSE, 0)?,
-            DataType::Int2 => fixed(t == tag::INT2, 2)?,
-            DataType::Int4 | DataType::Date => fixed(t == tag::INT4 && matches!(ty, DataType::Int4) || t == tag::DATE && matches!(ty, DataType::Date), 4)?,
-            DataType::Int8 => fixed(t == tag::INT8, 8)?,
-            DataType::Float4 => fixed(t == tag::FLOAT4, 4)?,
-            DataType::Float8 => fixed(t == tag::FLOAT8, 8)?,
-            DataType::Timestamp(_) => fixed(t == tag::TIMESTAMP, 8)?,
-            DataType::Timestamptz(_) => fixed(t == tag::TIMESTAMPTZ, 8)?,
+        let as_null = null.get(i).copied().unwrap_or(false);
+        // (A fixed-size value of the column's own type: its encoded bytes, then its typlen and
+        // typalign, as `relsize::type_layout` has them, the alignment a power of two: no call
+        // and no division a value.)
+        let (skip, len, al) = match ty {
+            _ if t == tag::NULL => {
+                has_null = true;
+                continue;
+            }
+            DataType::Bool if t == tag::TRUE || t == tag::FALSE => (0, 1, 1),
+            DataType::Int2 if t == tag::INT2 => (2, 2, 2),
+            DataType::Int4 if t == tag::INT4 => (4, 4, 4),
+            DataType::Date if t == tag::DATE => (4, 4, 4),
+            DataType::Float4 if t == tag::FLOAT4 => (4, 4, 4),
+            DataType::Int8 if t == tag::INT8 => (8, 8, 8),
+            DataType::Float8 if t == tag::FLOAT8 => (8, 8, 8),
+            DataType::Timestamp(_) if t == tag::TIMESTAMP => (8, 8, 8),
+            DataType::Timestamptz(_) if t == tag::TIMESTAMPTZ => (8, 8, 8),
+            DataType::Bool
+            | DataType::Int2
+            | DataType::Int4
+            | DataType::Date
+            | DataType::Float4
+            | DataType::Int8
+            | DataType::Float8
+            | DataType::Timestamp(_)
+            | DataType::Timestamptz(_) => return None,
             DataType::Text | DataType::Varchar(_) | DataType::Bpchar(_) if t == tag::TEXT => {
                 let len = get_varint(b, &mut pos).ok()? as usize;
                 if !b.get(pos..pos + len)?.is_ascii() {
@@ -803,7 +813,12 @@ pub fn stored_tuple_len(b: &[u8], types: &[DataType], null: &[bool]) -> Option<u
                     DataType::Bpchar(m) if *m > 4 => len.max((*m - 4) as usize),
                     _ => len,
                 };
-                put((!null.get(i).copied().unwrap_or(false)).then_some(Some(payload)), ty);
+                // (`datum_len_at` of a varlena: a short one unaligned, else aligned to 4.)
+                match as_null {
+                    true => has_null = true,
+                    false if payload < 127 => off += payload + 1,
+                    false => off = ((off + 3) & !3) + payload + 4,
+                }
                 continue;
             }
             // (Varlenas sized from their stored form: jsonb's text, tsvector's send format,
@@ -825,19 +840,26 @@ pub fn stored_tuple_len(b: &[u8], types: &[DataType], null: &[bool]) -> Option<u
                     (DataType::Array(e), tag::ARRAY) => stored_array_payload(b, &mut pos, e)?,
                     _ => return None,
                 };
-                put((!null.get(i).copied().unwrap_or(false)).then_some(Some(payload)), ty);
+                match as_null {
+                    true => has_null = true,
+                    false => off += datum_len_at(off, ty, Some(payload)),
+                }
                 continue;
             }
             // (A fixed-size geometric value: its kind, then its floats.)
             DataType::Point | DataType::Lseg | DataType::GBox | DataType::Line | DataType::Circle if t == tag::GEO => {
                 pos += 1;
-                8 * get_varint(b, &mut pos).ok()? as usize
+                let skip = 8 * get_varint(b, &mut pos).ok()? as usize;
+                let (len, al) = crate::catalog::relsize::type_layout(ty);
+                (skip, len.max(0) as usize, al)
             }
             _ => return None,
         };
         pos += skip;
-        let stored = t != tag::NULL && !null.get(i).copied().unwrap_or(false);
-        put(stored.then_some(None), ty);
+        match as_null {
+            true => has_null = true,
+            false => off = ((off + al - 1) & !(al - 1)) + len,
+        }
     }
     if has_null {
         off += tuple_header(types.len(), true) - tuple_header(types.len(), false);
