@@ -76,7 +76,11 @@ impl Engine {
         }
         let branches = self.resource_env(id).await.map_err(|e| Error::Conflict(format!("its logs wait for what they must hide: {e:#}")))?;
         let own = project_env(&s, r.branch.as_deref()).into_iter().chain(self.store.vars(id)?).collect::<Vec<_>>();
-        let values = secret_values(&secrets, &plain, &own, &branches);
+        let mut values = secret_values(&secrets, &plain, &own, &branches);
+        // Roll's own credentials a start gets (its traces intake's token, its SMTP password): from
+        // the store, so they're hidden after a restart or a move as well.
+        values.push(self.store.trace_token(id)?);
+        values.push(self.store.mail_password(id)?);
         let mut all = self.log_masks.lock();
         let m = all.entry(id.to_string()).or_default();
         m.read_at = now;

@@ -545,7 +545,7 @@ impl Secrets {
                 "INSERT INTO saas_rotators (id, project_id, name, vendor, target, credential, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 params![id, project, r.name, r.vendor.name(), target, sealed, now, r.created_by],
             )?;
-            audit::record(c, project, caller, "saas.add", None, None, &[], &format!("added SaaS rotator {} ({}, {})", r.name, r.vendor.name(), r.vendor.label()), now)
+            audit::record(c, self.keys()?, project, caller, "saas.add", None, None, &[], &format!("added SaaS rotator {} ({}, {})", r.name, r.vendor.name(), r.vendor.label()), now)
         })?;
         Ok(r)
     }
@@ -559,7 +559,7 @@ impl Secrets {
             let name: String = c.query_row("SELECT name FROM saas_rotators WHERE id = ? AND project_id = ?", [id, project], |r| r.get(0)).optional()?.ok_or_else(|| Error::NotFound(format!("no SaaS rotator {id}")))?;
             crate::rotators::in_use(c, project, KIND, id, &name)?;
             c.execute("DELETE FROM saas_rotators WHERE id = ?", [id])?;
-            audit::record(c, project, caller, "saas.delete", None, None, &[], &format!("deleted SaaS rotator {name}"), now)
+            audit::record(c, self.keys()?, project, caller, "saas.delete", None, None, &[], &format!("deleted SaaS rotator {name}"), now)
         })
     }
 

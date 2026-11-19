@@ -3047,7 +3047,8 @@ so the next step (a Dockerfile, the root directory) is plain.
   old) and tasks' environment files every ten minutes (`Runtime::sweep`); the bucket's `builds/`
   zips, and every object's noncurrent versions, wait for the stack's lifecycle rule.
 - Links: Postgres, Redis, buckets, streams, NoSQL and search are wired; queues answer "not wired
-  yet" (roll secrets has no queue provider to issue a user with).
+  yet". roll secrets' `queue` provider issues a vhost user of its own now (docs/secrets.md,
+  "Links"); `RollResources` doesn't call it yet (item 16).
 - Private networking is a Docker network per project and environment; it isn't reachable from
   the host's own roll databases on hosts whose firewall drops container-to-host traffic.
 
@@ -3263,7 +3264,7 @@ scanning"), then objectives ("SLOs"), then Prometheus scraping ("The app's Prome
    settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
    warm window or `min_instances` 1 by default there until a wake is fast), and
    allocation-based metering for Fargate.
-15. *Waiting on roll secrets' #274.* **Queues linkable from a service**: buckets, streams and NoSQL are (rolld's `RollResources::link`, through roll secrets' providers); #274 adds the `queue` provider (its own user, `AMQP_URL`, `permission` read, write or configure), then `RollResources` and the one-node relay for the AMQP port here.
+15. **Queues linkable from a service**: buckets, streams and NoSQL are (rolld's `RollResources::link`, through roll secrets' providers), and roll secrets has a `queue` provider that issues a vhost user of its own (`AMQP_URL`, `permission` read, write or configure); left: `queue` in rolld's `secrets::link_provider` and `RollResources`' link arms, and the one-node relay for the AMQP port.
 16. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
    `_acme-challenge.<base>` CNAME into a zone roll writes (`roll_edge::acme`'s DNS solver at
    another name), then `DomainTls::wildcards` true there; the routing and verification are done.

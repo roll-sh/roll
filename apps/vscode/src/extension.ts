@@ -165,7 +165,7 @@ export function activate(context: vscode.ExtensionContext) {
     }),
 
     vscode.commands.registerCommand("roll.signIn", async () => {
-      const token = await vscode.window.showInputBox({ title: "roll secrets", prompt: "A project token (rlst_…): roll secrets tokens create vscode --for-env development", password: true, ignoreFocusOut: true });
+      const token = await vscode.window.showInputBox({ title: "roll secrets", prompt: "A project token (rlt_…): roll secrets tokens create vscode --for-env development", password: true, ignoreFocusOut: true });
       if (!token) return;
       await context.secrets.store(TOKEN, token.trim());
       cached = undefined;

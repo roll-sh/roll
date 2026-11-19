@@ -101,7 +101,7 @@ impl Secrets {
                 c.execute("INSERT INTO exports (env_id, path, to_project, created_at, created_by) VALUES (?, ?, ?, ?, ?)", params![env.id, path, p, now, caller.principal])?;
             }
             let summary = if to.is_empty() { "shared with no project".to_string() } else { format!("shared with {}", to.join(", ")) };
-            audit::record(c, project, caller, "exports.set", Some(slug), Some(&path), &[], &summary, now)?;
+            audit::record(c, self.keys()?, project, caller, "exports.set", Some(slug), Some(&path), &[], &summary, now)?;
             Ok(c.query("SELECT to_project, created_at, created_by FROM exports WHERE env_id = ? AND path = ? ORDER BY created_at", [&env.id, &path], |r| {
                 Ok(Export { project: r.get(0)?, created_at: r.get(1)?, created_by: r.get(2)? })
             })?)

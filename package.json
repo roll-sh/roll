@@ -22,6 +22,7 @@
     "test:s3-conformance": "scripts/test-s3-conformance.sh",
     "test:s3-conformance-localstack": "scripts/test-s3-conformance.sh --backend localstack",
     "test:search": "scripts/test-search.sh",
+    "test:secrets": "scripts/test-secrets.sh",
     "test:mcp-sweep": "scripts/test-mcp-sweep.sh"
   },
   "packageManager": "pnpm@12.10.1",

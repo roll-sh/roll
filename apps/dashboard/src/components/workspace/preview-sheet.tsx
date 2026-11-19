@@ -4,7 +4,7 @@ import { appsApi, followShell as followAppsShell } from "@/lib/apps-api";
 import { codeApi } from "@/lib/code-api";
 import { Confirm } from "@/components/ui";
 import { TerminalScreen } from "@/components/terminal-screen";
-import { endpointSlower, type EndpointTime, a11yWords, checkSummary, seoWords, duration, followLogs, followShell, downloadFiles, openUrl, pageLabel, previewsApi, noteCropUrl, qrUrl, screenshotUrl, resourceId, thanMain, type CaughtMail, type PageCheck, type Preview, type TextDiff, type PreviewActivity, type PreviewVisitor, type PreviewKind, type PreviewShare, type RequestLine, type ServiceMetrics, type ErrorGroup, type TraceSummary, type TraceSpan } from "@/lib/previews-api";
+import { endpointSlower, type EndpointTime, a11yWords, checkSummary, seoWords, duration, followLogs, followShell, downloadFiles, openUrl, pageLabel, previewsApi, noteCropUrl, qrUrl, screenshotUrl, resourceId, thanMain, type CaughtMail, type PageCheck, type Preview, type TextDiff, type PreviewActivity, type PreviewVisitor, type PreviewKind, type PreviewShare, type RequestLine, type ServiceMetrics, type ErrorGroup, type TraceSummary, type TraceSpan, type RouteTime } from "@/lib/previews-api";
 import { verdict, type VerdictTarget } from "@/lib/preview-verdict";
 import { isProblem, logFilter, logLevel } from "@/lib/preview-logs";
 import { formatBytes } from "@/lib/roll-api";
@@ -1421,6 +1421,7 @@ function Requests({ preview: p }: { preview: Preview }) {
  * the trace's time. Masked by the server as its logs are. */
 function Traces({ preview: p, n }: { preview: Preview; n: number }) {
   const [list, setList] = useState<TraceSummary[] | null>(null);
+  const [routes, setRoutes] = useState<RouteTime[]>([]);
   const [open, setOpen] = useState<{ trace: string; spans: TraceSpan[] } | null>(null);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
@@ -1428,6 +1429,10 @@ function Traces({ preview: p, n }: { preview: Preview; n: number }) {
     previewsApi.traces(p.id, 60).then(
       (r) => live && setList(r.traces),
       (e) => live && setError(errorText(e)),
+    );
+    previewsApi.routes(p.id, 60).then(
+      (r) => live && setRoutes(r.routes),
+      () => live && setRoutes([]),
     );
     return () => {
       live = false;
@@ -1446,6 +1451,26 @@ function Traces({ preview: p, n }: { preview: Preview; n: number }) {
     <div className="mt-3 border-t border-line pt-3">
       <Label>Traces</Label>
       {error && <p className="mb-1.5 text-[11.5px] text-danger">{error}</p>}
+      {routes.length > 0 && (
+        <div className="mb-2 rounded-lg border border-line-2 bg-canvas">
+          <div className="flex items-baseline gap-2 border-b border-line px-2.5 py-1 font-mono text-[10px] text-subtle">
+            <span className="min-w-0 flex-1">route</span>
+            <span className="w-10 text-right">n</span>
+            <span className="w-14 text-right">p50</span>
+            <span className="w-14 text-right">p95</span>
+            <span className="w-16 text-right">main p50</span>
+          </div>
+          {routes.slice(0, 12).map((r) => (
+            <div key={r.name} className="flex items-baseline gap-2 border-b border-line px-2.5 py-1 font-mono text-[10.5px] last:border-b-0" title={r.slower ? "clearly slower than main's preview" : undefined}>
+              <span className={`min-w-0 flex-1 truncate ${r.slower ? "text-danger" : "text-soft"}`}>{r.name}</span>
+              <span className="w-10 text-right text-subtle">{r.count}</span>
+              <span className={`w-14 text-right ${r.slower ? "text-danger" : "text-muted"}`}>{r.p50_ms} ms</span>
+              <span className="w-14 text-right text-muted">{r.p95_ms} ms</span>
+              <span className="w-16 text-right text-subtle">{r.main_p50_ms == null ? "—" : `${r.main_p50_ms} ms`}</span>
+            </div>
+          ))}
+        </div>
+      )}
       <div className="max-h-[50vh] overflow-auto rounded-lg border border-line-2 bg-canvas [scrollbar-width:thin]">
         {list.map((t) => (
           <div key={t.trace} className="border-b border-line last:border-b-0">
