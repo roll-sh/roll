@@ -19,11 +19,18 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 use tower::ServiceExt;
+mod acme;
 mod clouds;
+mod directory;
+pub mod gateway;
 mod github;
 
 mod outside;
+mod relay;
 mod syncs;
+
+/// roll search's inference endpoints keyed by a project's secret (`syncs::search`).
+pub use syncs::search::router as search_inference;
 
 /// `X-Roll-Guard` (a credential guard's scan, audited apart as `secrets.guard`) is roll MCP's
 /// alone: kept only on a request its guard tool makes in process (`McpCall` with tool `guard`),
@@ -52,9 +59,17 @@ impl Api {
     /// Call a product's route as the operator: its status and JSON answer, whatever the status.
     /// Runs on the store's blocking threads.
     fn call_status(&self, method: Method, path: &str, body: Option<Json>) -> roll_secrets::Result<(axum::http::StatusCode, Json)> {
+        self.call_status_as(method, path, body, |e| {
+            e.insert(roll_auth::Operator);
+        })
+    }
+
+    /// [`Api::call_status`] as whoever `who` puts on the request (`Operator`, `SignedIn`), so the
+    /// product scopes the answer to them (roll search: a person's own clusters).
+    fn call_status_as(&self, method: Method, path: &str, body: Option<Json>, who: impl FnOnce(&mut axum::http::Extensions)) -> roll_secrets::Result<(axum::http::StatusCode, Json)> {
         let router = self.0.get().ok_or_else(|| Error::Link("the product APIs aren't up yet".into()))?.clone();
         let mut req = Request::builder().method(method).uri(path).header("content-type", "application/json");
-        req.extensions_mut().map(|e| e.insert(roll_auth::Operator));
+        req.extensions_mut().map(who);
         let req = req.body(body.map_or(Body::empty(), |b| Body::from(b.to_string()))).map_err(|e| Error::Internal(e.to_string()))?;
         tokio::runtime::Handle::current().block_on(async move {
             let resp = router.oneshot(req).await.map_err(|e| Error::Link(e.to_string()))?;
@@ -393,7 +408,8 @@ pub fn oidc_fetch(args: &crate::Args, open: bool) -> Arc<dyn roll_oidc::Fetch + 
     Arc::new(syncs::OidcFetch::new(args.code_webhook_allow_private.unwrap_or(open)))
 }
 
-pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Workspace>, open: bool, api: Api, access: Arc<roll_access::Access>, people: People) -> anyhow::Result<Arc<Secrets>> {
+#[allow(clippy::too_many_arguments)]
+pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Workspace>, open: bool, api: Api, access: Arc<roll_access::Access>, people: People, gateways: Arc<gateway::Gateways>) -> anyhow::Result<Arc<Secrets>> {
     let system = args.code.cluster.system_database.as_deref().filter(|u| !u.is_empty());
     let target = match system {
         Some(url) => code_sql::Target::Postgres { url: url.to_string(), schema: "secrets".into() },
@@ -412,16 +428,21 @@ pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Work
         grants: Some(access.clone() as Arc<dyn roll_auth::Grants>),
         workloads: Some(Arc::new(Workloads(access))),
         people: Some(Arc::new(people)),
-        kms: Some(Arc::new(CustomerKms::new(None))), sts: Some(Arc::new(RollSts::new(None))), outside: Some(Arc::new(outside::Guarded { allow_private })), github: Some(Arc::new(github::RollGitHub::new(allow_private))), clouds: Some(roll_secrets::clouds::Clouds { issuer: issuer_url(args), tokens: Arc::new(clouds::RollClouds::new()) }),
+        kms: Some(Arc::new(CustomerKms::new(None))), sts: Some(Arc::new(RollSts::new(None))), outside: Some(Arc::new(outside::Guarded { allow_private, gateways: gateways.clone() })), directory: Some(Arc::new(directory::Guarded { allow_private, gateways: gateways.clone() })), github: Some(Arc::new(github::RollGitHub::new(allow_private))), clouds: Some(roll_secrets::clouds::Clouds { issuer: issuer_url(args), tokens: Arc::new(clouds::RollClouds::new()) }),
+        // A deleted gateway, or a revoked credential that opened one, closes its link at once.
+        gateways: Some(gateways.clone()),
     };
     // Opening blocks on the database.
     let secrets = Arc::new(tokio::task::block_in_place(|| Secrets::open(&target, pg, workspace.clone(), opts))?);
+    gateways.set_secrets(secrets.clone());
     // How many reads of values a token or a person makes a minute on this node (0: no limit).
     if let Ok(n) = std::env::var("ROLL_SECRETS_READS_PER_MINUTE") {
         secrets.set_reads_per_minute(n.trim().parse().map_err(|_| anyhow::anyhow!("ROLL_SECRETS_READS_PER_MINUTE is a number of reads a minute (0: no limit), not {n:?}"))?);
     }
     // Where clients reach rolld: a CA's certificates name its CRL there.
     secrets.set_public_api(args.code_public_url.clone().unwrap_or_else(|| format!("http://{}:{}", args.public_host, args.api.port())));
+    // ACME's http-01 and dns-01 checks: public addresses only, as webhooks.
+    secrets.set_acme_checks(Arc::new(acme::Checks::new(allow_private)));
     // A deleted project's secrets go with it.
     let s = secrets.clone();
     workspace.on_delete(Box::new(move |id| {
@@ -1205,6 +1226,34 @@ impl roll_secrets::Workloads for Workloads {
         self.0.revoke_workload(id, "its workload identity was deleted").map(|_| ()).map_err(|e| Error::Internal(format!("revoking a workload token: {e}")))
     }
 
+    /// A gateway's token, made for the request's caller as `POST /v1/access/tokens` makes one.
+    /// Refusals are said in the gateway form's words: roll-access's are about its own callers and
+    /// fields.
+    fn token(&self, ext: &axum::http::Extensions, name: &str, rule: roll_auth::scope::Rule) -> roll_secrets::Result<roll_secrets::Minted> {
+        let new = roll_access::store::NewGrant { name: name.chars().take(64).collect(), rules: roll_auth::scope::Scope(vec![rule]), ..Default::default() };
+        let (access, ext) = (self.0.clone(), ext.clone());
+        // On the store's blocking threads, as `mint`.
+        match tokio::runtime::Handle::current().block_on(async move { access.create_grant(&ext, new).await }) {
+            Ok((g, secret)) => Ok(roll_secrets::Minted { id: g.id, secret, expires_at: g.expires_at.unwrap_or_default() }),
+            Err(roll_access::Error::Forbidden(_) | roll_access::Error::Unauthorized(_)) => {
+                Err(Error::Forbidden("roll couldn't tell whose this gateway's token would be: sign in, or add the gateway without a token and log it in through a workload identity".into()))
+            }
+            Err(roll_access::Error::BadRequest(m)) if m.starts_with("roll's policy") => {
+                Err(Error::BadRequest("roll's token policy has every token expire, and a gateway's lasts until the gateway is deleted: add the gateway without a token and log it in through a workload identity".into()))
+            }
+            Err(roll_access::Error::BadRequest(m)) => Err(Error::BadRequest(m)),
+            Err(roll_access::Error::Conflict(m) | roll_access::Error::TooMany(m)) => Err(Error::TooMany(m)),
+            Err(e) => Err(Error::Internal(format!("making a gateway's token: {e}"))),
+        }
+    }
+
+    fn revoke_token(&self, id: &str, why: &str) -> roll_secrets::Result<()> {
+        match self.0.store.revoke(id) {
+            Ok(_) | Err(roll_access::Error::NotFound(_)) => Ok(()),
+            Err(e) => Err(Error::Internal(format!("revoking {id} ({why}): {e}"))),
+        }
+    }
+
     /// Each token as roll-access answers it now: gone once revoked or expired, or (a person's own)
     /// once its person can't sign in.
     fn grants(&self) -> roll_secrets::Result<Vec<roll_auth::Grant>> {
@@ -1368,9 +1417,11 @@ mod tests {
             kms: None,
             sts: None,
             outside: None,
+            directory: None,
             github: None,
             clouds: None,
             workloads: None,
+            gateways: None,
         };
         let secrets = Arc::new(roll_secrets::Secrets::new(db, ws.clone(), opts).unwrap());
         let set = axum::http::Request::put(format!("/v1/secrets/projects/{project}/environments/production/secrets/DB_URL"))
