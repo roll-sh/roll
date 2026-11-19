@@ -246,6 +246,14 @@ async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_referen
     let public = ok(&api, &[], &["secrets", "keygen", "--out", key], None).await;
     ok(&api, &[], &["secrets", "-p", "shop", "backup", "--to", public.trim(), "--out", file], None).await;
     assert!(!std::fs::read_to_string(file).unwrap().contains("s3cret"), "sealed at rest");
+    // Its key split 2 of 3 and the key file gone: two holders' shares recover it.
+    let shares = ok(&api, &[], &["secrets", "key", "split", "--shares", "3", "--threshold", "2", "--file", key], None).await;
+    let shares: Vec<&str> = shares.lines().collect();
+    assert!(shares.len() == 3 && shares.iter().all(|s| s.starts_with("rlks_")), "{shares:?}");
+    std::fs::remove_file(key).unwrap();
+    let mixed = roll(&api, &[], &["secrets", "key", "combine"], Some(&format!("{}\n{}\n", shares[0], shares[0]))).await;
+    assert!(mixed.code != Some(0) && mixed.stdout.is_empty() && mixed.stderr.contains("given twice"), "{}", mixed.stderr);
+    ok(&api, &[], &["secrets", "key", "combine", "--out", key], Some(&format!("{}\n{}\n", shares[2], shares[0]))).await;
     projects.create("", "copy", "", None).unwrap();
     ok(&api, &[], &["secrets", "-p", "copy", "restore", file, "--key", key], None).await;
     let restored = ok(&api, &[], &["run", "-p", "copy", "-e", "production", "--allow-unresolved", "--no-mask", "--", "sh", "-c", "echo $HOST $PASSWORD"], None).await;

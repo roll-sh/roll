@@ -428,6 +428,11 @@ pub enum Secrets {
         #[arg(long)]
         key: std::path::PathBuf,
     },
+    /// Split the deployment key (`ROLL_SECRET_KEY`) or a backup's secret key into shares, any
+    /// threshold of which give it back, and combine them again. On this machine only: nothing
+    /// goes to roll.
+    #[command(subcommand)]
+    Key(KeyCmd),
     /// The folders this folder imports (its own project's, or a folder another project shares
     /// with it): list, add, rm.
     #[command(subcommand)]
@@ -1155,6 +1160,32 @@ pub enum Tokens {
 }
 
 #[derive(Subcommand)]
+pub enum KeyCmd {
+    /// Split a key into `--shares` shares (`rlks_…`), any `--threshold` of which recover it. The
+    /// key is read from `--file`, else stdin (asked for without echo on a terminal).
+    Split {
+        #[arg(long)]
+        shares: usize,
+        #[arg(long)]
+        threshold: usize,
+        /// A file holding the key (`<home>/secrets.key`, a backup's secret key).
+        #[arg(long)]
+        file: Option<std::path::PathBuf>,
+        /// Write each share to its own file here (0600, never overwritten) instead of stdout.
+        #[arg(long)]
+        out_dir: Option<std::path::PathBuf>,
+    },
+    /// Combine shares into the key: one share per line on stdin, or asked for one at a time
+    /// without echo on a terminal. A damaged share, one of another split, or one given twice is
+    /// refused; the key is never guessed.
+    Combine {
+        /// Write the key here (0600, never overwritten) instead of stdout.
+        #[arg(long)]
+        out: Option<std::path::PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
 pub enum ImportsCmd {
     #[command(alias = "list")]
     Ls,
@@ -1523,6 +1554,10 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
         println!("{public}");
         eprintln!("The secret key is in {} (0600): keep it apart from the backups. The public key above goes to backup --to.", out.display());
         return Ok(());
+    }
+    // So is a key's split.
+    if let Secrets::Key(cmd) = cmd {
+        return key_shares(cmd);
     }
     let at = args.resolve();
     let c = Client { project: project(api, at.project.as_deref()).await?, api, at };
@@ -2729,7 +2764,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 println!("Revoked {id}");
             }
         },
-        Secrets::Keygen { .. } | Secrets::Find { .. } | Secrets::Doctor | Secrets::Health { all: true, .. } => unreachable!("handled before a project is picked"),
+        Secrets::Keygen { .. } | Secrets::Key(_) | Secrets::Find { .. } | Secrets::Doctor | Secrets::Health { all: true, .. } => unreachable!("handled before a project is picked"),
         Secrets::Backup { to, out } => {
             let v = c.call(Method::POST, &format!("{}/backup", c.base()), Some(json!({ "recipient": to }))).await?;
             let text = serde_json::to_string_pretty(&v)?;
@@ -3523,6 +3558,117 @@ fn random_value(n: usize) -> anyhow::Result<String> {
 }
 
 /// Write `text` to a new file only its owner can read (never over an existing one).
+/// `roll secrets key split` and `combine` (docs/secrets.md, "Splitting the deployment key"). A
+/// share or the key goes only to stdout or a 0600 file, never to stderr or roll.
+fn key_shares(cmd: KeyCmd) -> anyhow::Result<()> {
+    use roll_keyshares as keyshares;
+    use std::io::IsTerminal as _;
+    let terminal = std::io::stdin().is_terminal();
+    match cmd {
+        KeyCmd::Split { shares, threshold, file, out_dir } => {
+            let key = zeroize::Zeroizing::new(match &file {
+                Some(f) => std::fs::read_to_string(f).with_context(|| format!("reading {}", f.display()))?,
+                None if terminal => read_hidden("Key: ")?,
+                None => {
+                    let mut k = String::new();
+                    std::io::stdin().read_to_string(&mut k)?;
+                    k
+                }
+            });
+            // As rolld reads it: surrounding whitespace isn't part of the key.
+            let key = key.trim();
+            if key.len() < 32 {
+                bail!("the key is shorter than 32 characters: not a deployment key (ROLL_SECRET_KEY) or a backup's secret key");
+            }
+            let parts = keyshares::split(key.as_bytes(), shares, threshold)?;
+            match out_dir {
+                Some(dir) => {
+                    for (i, share) in parts.iter().enumerate() {
+                        write_private(&dir.join(format!("roll-key-share-{}-of-{shares}", i + 1)), &format!("{share}\n"))?;
+                    }
+                    eprintln!("Wrote {shares} shares to {} (roll-key-share-N-of-{shares}): any {threshold} recover the key. Give each to a different holder, then delete them here.", dir.display());
+                }
+                None => {
+                    for share in &parts {
+                        println!("{share}");
+                    }
+                    eprintln!("{shares} shares, any {threshold} recover the key: give each to a different holder.");
+                }
+            }
+        }
+        KeyCmd::Combine { out } => {
+            let mut given: Vec<zeroize::Zeroizing<String>> = Vec::new();
+            if terminal {
+                // One at a time, each checked as it's entered, until the split's threshold.
+                loop {
+                    let need = given.first().and_then(|s| keyshares::Share::parse(1, s).ok()).map(|s| s.threshold as usize);
+                    if need.is_some_and(|n| given.len() >= n) {
+                        break;
+                    }
+                    let prompt = match need {
+                        Some(n) => format!("Share {} of {n}: ", given.len() + 1),
+                        None => "Share 1: ".to_string(),
+                    };
+                    let share = zeroize::Zeroizing::new(read_hidden(&prompt)?.trim().to_string());
+                    if share.is_empty() {
+                        bail!("no share entered");
+                    }
+                    let mut next: Vec<&str> = given.iter().map(|s| s.as_str()).collect();
+                    next.push(&share);
+                    match keyshares::combine(&next) {
+                        Ok(_) | Err(keyshares::KeyShareError::TooFew { .. }) => given.push(share),
+                        Err(e @ keyshares::KeyShareError::Mismatch) => return Err(e.into()),
+                        Err(e) => eprintln!("{e}; enter it again"),
+                    }
+                }
+            } else {
+                let mut text = zeroize::Zeroizing::new(String::new());
+                std::io::stdin().read_to_string(&mut text)?;
+                given = text.lines().map(str::trim).filter(|l| !l.is_empty()).map(|l| zeroize::Zeroizing::new(l.to_string())).collect();
+            }
+            let key = keyshares::combine(&given)?;
+            let key = zeroize::Zeroizing::new(String::from_utf8(key.to_vec()).map_err(|_| anyhow::anyhow!("the combined key isn't text"))?);
+            match out {
+                Some(path) => {
+                    write_private(&path, &key)?;
+                    eprintln!("The key is in {} (0600).", path.display());
+                }
+                None => println!("{}", key.as_str()),
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A line read from the terminal on stdin without echoing it.
+fn read_hidden(prompt: &str) -> anyhow::Result<String> {
+    use std::io::{BufRead as _, Write as _};
+    eprint!("{prompt}");
+    std::io::stderr().flush()?;
+    // SAFETY: tcgetattr fills the termios we own; tcsetattr takes it by pointer, and the guard
+    // restores the original on the same descriptor.
+    struct Restore(libc::termios);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &self.0) };
+        }
+    }
+    let _guard = unsafe {
+        let mut t: libc::termios = std::mem::zeroed();
+        if libc::tcgetattr(libc::STDIN_FILENO, &mut t) != 0 {
+            bail!("can't turn off the terminal's echo");
+        }
+        let was = t;
+        t.c_lflag &= !libc::ECHO;
+        t.c_lflag |= libc::ECHONL;
+        libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &t);
+        Restore(was)
+    };
+    let mut line = String::new();
+    std::io::stdin().lock().read_line(&mut line)?;
+    Ok(line.trim_end_matches(['\r', '\n']).to_string())
+}
+
 fn write_private(path: &std::path::Path, text: &str) -> anyhow::Result<()> {
     use std::io::Write;
     #[cfg(unix)]
