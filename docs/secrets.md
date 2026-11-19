@@ -3927,6 +3927,16 @@ inconsistencies are fixed in #264:
     comment on the PR): product-made syncs need `reveal`, every push re-checks its maker, the pin is
     checked before and after `_update`. Follow-up: show "pushes as <maker>" and warn before it fails. Earlier: approved once its pin covers the endpoint's whole destination
    (`service_settings` but the key, rate limit and allocations; `task_settings` where they route).
+11b. *roll search's #361* (snapshot repositories take `roll://` references; on #329): reviewed
+    2026-11-19, blocked. A reference resolves as the cluster, and roll never sees who chose it. So an
+    Elasticsearch admin credential (a native user or the `elastic` password, outside roll-access, alive after
+    its holder leaves) can point an `s3` repository at its own endpoint with a production key as
+    `access_key`. That key goes out in the SigV4 header. Asked of search: a per-cluster allowlist
+    set through a `/v1/search/clusters/{id}/…` route by a caller that `Caller::allows(Reveal)` on
+    each environment, with its maker stored and `maker_reaches` checked before every `resolve_for`.
+    Also asked: bind the resolver to the cluster id, not its name; zeroize held values and drop them
+    with the repository; give one message for protected and missing keys on branches; add a
+    lost-access test through the real `ForSearch`.
 12. *Waits on roll apps:* their redeploys holding `wait_digest` once #79 lands; #191's log
    redaction hiding every value that comes from roll secrets unless #198 marks it `plain`: done
    (apps' #201, a41ac171c), a URL's password hidden even in a plain value.
