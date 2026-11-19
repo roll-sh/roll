@@ -287,17 +287,61 @@ impl Drop for Held {
 }
 
 /// One deployment's answers during a canary step.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Served {
     pub requests: u64,
     pub errors: u64,
     /// Its instances that crashed or failed their health check (no request sees those).
     pub crashes: u64,
+    /// Its answers' times: how many in each of [`LAT_BUCKETS`] buckets of √2 steps (ms).
+    pub lat: [u32; LAT_BUCKETS],
+}
+
+/// Buckets of a step's answer times: bucket `i` holds up to √2^(i+1) ms (the last, the rest).
+pub const LAT_BUCKETS: usize = 48;
+
+impl Default for Served {
+    fn default() -> Self {
+        Served { requests: 0, errors: 0, crashes: 0, lat: [0; LAT_BUCKETS] }
+    }
 }
 
 impl Served {
     pub fn error_pct(&self) -> f64 {
         if self.requests == 0 { 0.0 } else { self.errors as f64 * 100.0 / self.requests as f64 }
+    }
+
+    /// One answer that took `ms`.
+    pub fn took(&mut self, ms: f64) {
+        let i = if ms <= 1.0 { 0 } else { ((ms.log2() * 2.0).ceil() as usize).saturating_sub(1).min(LAT_BUCKETS - 1) };
+        self.lat[i] = self.lat[i].saturating_add(1);
+    }
+
+    /// Its answers' p95 (the bucket's top, ms), when it timed any.
+    pub fn p95_ms(&self) -> Option<f64> {
+        let n: u64 = self.lat.iter().map(|&c| c as u64).sum();
+        if n == 0 {
+            return None;
+        }
+        let want = (n as f64 * 0.95).ceil() as u64;
+        let mut seen = 0;
+        for (i, &c) in self.lat.iter().enumerate() {
+            seen += c as u64;
+            if seen >= want {
+                return Some(2f64.powf((i + 1) as f64 / 2.0));
+            }
+        }
+        None
+    }
+
+    /// Another's counts added in.
+    pub fn add(&mut self, o: &Served) {
+        self.requests += o.requests;
+        self.errors += o.errors;
+        self.crashes += o.crashes;
+        for (a, b) in self.lat.iter_mut().zip(o.lat.iter()) {
+            *a = a.saturating_add(*b);
+        }
     }
 }
 
@@ -611,11 +655,14 @@ impl EnvLive {
 
     /// The proxy's answer to a request `inst` served: counted per deployment while a canary
     /// runs (the rollout judges the new deployment by them).
-    pub fn answered(&self, inst: &Inst, status: u16) {
+    pub fn answered(&self, inst: &Inst, status: u16, ms: Option<f64>) {
         self.count(&inst.deployment, |s| {
             s.requests += 1;
             if status >= 500 {
                 s.errors += 1;
+            }
+            if let Some(ms) = ms {
+                s.took(ms);
             }
         });
     }

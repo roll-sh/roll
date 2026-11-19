@@ -946,11 +946,15 @@ pub struct Rollout {
     /// times as fast as it lasts (Argo Rollouts' analysis); default 14.4, the fast burn alert's.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub slo_burn: Option<f64>,
+    /// A step fails when the new deployment's p95 response time is more than this many percent
+    /// above the old one's (Flagger's request duration check); off unless set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub p95_pct: Option<u32>,
 }
 
 impl Default for Rollout {
     fn default() -> Self {
-        Rollout { steps: Vec::new(), step_s: 120, error_pct: 5, manual: false, slo_burn: None }
+        Rollout { steps: Vec::new(), step_s: 120, error_pct: 5, manual: false, slo_burn: None, p95_pct: None }
     }
 }
 
@@ -1169,6 +1173,9 @@ impl Run {
         }
         if r.slo_burn.is_some_and(|b| !(1.0..=1000.0).contains(&b)) {
             return bad("rollout.slo_burn is 1–1000");
+        }
+        if r.p95_pct.is_some_and(|p| !(1..=1000).contains(&p)) {
+            return bad("rollout.p95_pct is 1–1000");
         }
         if !(1..=100).contains(&r.error_pct) {
             return bad("rollout.error_pct is 1–100");

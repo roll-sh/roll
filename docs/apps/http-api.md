@@ -248,7 +248,7 @@ type Run = {
    *  share reaches error_pct (1–100, default 5) of 20+ requests, and beats the old one's, rolls
    *  back. Web services only; refused with a volume. manual: each step, once it passes, holds
    *  its split until a person says (`…/deploys/{dep}/rollout`), still judged while it waits. */
-  rollout: { steps: number[]; step_s: number; error_pct: number; manual?: boolean; slo_burn?: number /* with run.slo: a step fails when the new deployment spends its budget this many times as fast as it lasts (1–1000, default 14.4) */ };
+  rollout: { steps: number[]; step_s: number; error_pct: number; manual?: boolean; slo_burn?: number /* with run.slo: a step fails when the new deployment spends its budget this many times as fast as it lasts (1–1000, default 14.4) */; p95_pct?: number /* a step fails when the new deployment's p95 response time is more than this many percent above the old one's, with 20 requests on each side (1–1000, off unless set) */ };
   /** The app speaks HTTP/2 without TLS (a gRPC server): the proxy and health checks use h2c,
    *  `te: trailers` passes, trailers come back. A WebSocket upgrade stays HTTP/1.1. Default false. */
   h2c?: boolean;

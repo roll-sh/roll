@@ -1042,11 +1042,9 @@ impl Apps {
                     } else {
                         continue;
                     };
-                    into.requests += s.requests;
-                    into.errors += s.errors;
-                    into.crashes += s.crashes;
+                    into.add(&s);
                 }
-                if let Some(why) = judge(new, old, r.error_pct, tpl.run.slo.as_ref().map(|s| (s, r.slo_burn.unwrap_or(crate::model::Rollout::SLO_BURN)))) {
+                if let Some(why) = judge(new, old, r.error_pct, tpl.run.slo.as_ref().map(|s| (s, r.slo_burn.unwrap_or(crate::model::Rollout::SLO_BURN))), r.p95_pct) {
                     sys.line(format!("canary: rolled back at {share}%: {why}"));
                     anyhow::bail!("rolled back at {share}% of requests: {why}");
                 }
@@ -1087,11 +1085,9 @@ impl Apps {
                     } else {
                         continue;
                     };
-                    into.requests += s.requests;
-                    into.errors += s.errors;
-                    into.crashes += s.crashes;
+                    into.add(&s);
                 }
-                if let Some(why) = judge(new, old, r.error_pct, tpl.run.slo.as_ref().map(|s| (s, r.slo_burn.unwrap_or(crate::model::Rollout::SLO_BURN)))) {
+                if let Some(why) = judge(new, old, r.error_pct, tpl.run.slo.as_ref().map(|s| (s, r.slo_burn.unwrap_or(crate::model::Rollout::SLO_BURN))), r.p95_pct) {
                     sys.line(format!("canary: rolled back at {share}% while held: {why}"));
                     anyhow::bail!("rolled back at {share}% of requests: {why}");
                 }
@@ -2753,7 +2749,16 @@ impl Apps {
 /// Whether a canary step fails: the new deployment answered `error_pct` or more of at least
 /// [`Rollout::MIN_REQUESTS`] requests with a 5xx, and more often than the old one (an outage
 /// both share, a database down, isn't the new code's fault).
-fn judge(new: crate::live::Served, old: crate::live::Served, error_pct: u8, slo: Option<(&crate::model::Slo, f64)>) -> Option<String> {
+fn judge(new: crate::live::Served, old: crate::live::Served, error_pct: u8, slo: Option<(&crate::model::Slo, f64)>, p95_pct: Option<u32>) -> Option<String> {
+    // Slower than the old one by more than it allows (Flagger's request duration), each side
+    // with enough answers timed.
+    if let (Some(pct), Some(n), Some(o)) = (p95_pct, new.p95_ms(), old.p95_ms())
+        && new.requests >= crate::model::Rollout::MIN_REQUESTS
+        && old.requests >= crate::model::Rollout::MIN_REQUESTS
+        && n > o * (1.0 + pct as f64 / 100.0)
+    {
+        return Some(format!("its p95 was about {n:.0} ms, the old deployment's {o:.0} ms (the step allows {pct}% worse)"));
+    }
     // Crashes no request saw (a failed health check, a process that exits).
     if new.crashes >= 2 && new.crashes > old.crashes {
         return Some(format!("its instances crashed {} times (the old deployment's {})", new.crashes, old.crashes));
@@ -2898,11 +2903,25 @@ mod judge_tests {
         let served = |requests: u64, errors: u64| Served { requests, errors, ..Default::default() };
         let slo = crate::model::Slo { objective: 99.0, latency_ms: None, window_days: 28 };
         // 3% of 100 is under the 5% rule, but 3× the 99% objective's budget: past a 2× step.
-        assert_eq!(judge(served(100, 3), served(100, 0), 5, None), None);
-        assert!(judge(served(100, 3), served(100, 0), 5, Some((&slo, 2.0))).unwrap().contains("3.0× as fast"));
-        assert_eq!(judge(served(100, 3), served(100, 0), 5, Some((&slo, 14.4))), None, "under the default burn");
-        assert_eq!(judge(served(100, 3), served(100, 5), 5, Some((&slo, 2.0))), None, "the old one is worse");
-        assert_eq!(judge(served(10, 3), served(100, 0), 5, Some((&slo, 2.0))), None, "too few requests to say");
+        assert_eq!(judge(served(100, 3), served(100, 0), 5, None, None), None);
+        assert!(judge(served(100, 3), served(100, 0), 5, Some((&slo, 2.0)), None).unwrap().contains("3.0× as fast"));
+        assert_eq!(judge(served(100, 3), served(100, 0), 5, Some((&slo, 14.4)), None), None, "under the default burn");
+        assert_eq!(judge(served(100, 3), served(100, 5), 5, Some((&slo, 2.0)), None), None, "the old one is worse");
+        assert_eq!(judge(served(10, 3), served(100, 0), 5, Some((&slo, 2.0)), None), None, "too few requests to say");
+    }
+
+    #[test]
+    fn a_step_much_slower_than_the_old_deployment_fails() {
+        let timed = |ms: f64| {
+            let mut s = Served { requests: 100, ..Default::default() };
+            for _ in 0..100 {
+                s.took(ms);
+            }
+            s
+        };
+        assert!(judge(timed(400.0), timed(100.0), 5, None, Some(50)).unwrap().contains("p95"));
+        assert_eq!(judge(timed(120.0), timed(100.0), 5, None, Some(50)), None, "within 50%");
+        assert_eq!(judge(timed(400.0), timed(100.0), 5, None, None), None, "off unless asked");
     }
 }
 

@@ -1636,7 +1636,7 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
         Some(t) => match tokio::time::timeout(t, send).await {
             Ok(r) => r,
             Err(_) => {
-                live.answered(&lease.inst, 504);
+                live.answered(&lease.inst, 504, None);
                 live.meter.lock().request(code_sql::now_ms(), began.elapsed().as_secs_f64() * 1000.0, 504, 0);
                 access.write(504, began, 0, &instance, &request_id, cold, waited_ms);
                 return page(StatusCode::GATEWAY_TIMEOUT, "Timed out", &format!("The service didn't answer within its {} s.", t.as_secs()));
@@ -1676,7 +1676,7 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
                         Some(t) => match tokio::time::timeout(t, send).await {
                             Ok(r) => r,
                             Err(_) => {
-                                live.answered(&lease.inst, 504);
+                                live.answered(&lease.inst, 504, None);
                                 live.meter.lock().request(code_sql::now_ms(), began.elapsed().as_secs_f64() * 1000.0, 504, 0);
                                 access.write(504, began, 0, &instance, &request_id, cold, waited_ms);
                                 return page(StatusCode::GATEWAY_TIMEOUT, "Timed out", &format!("The service didn't answer within its {} s.", t.as_secs()));
@@ -1699,13 +1699,13 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
             // Nothing listens any more (killed, out of memory): the next request starts a
             // fresh instance.
             live.connect_failed(&lease.inst);
-            live.answered(&lease.inst, 503);
+            live.answered(&lease.inst, 503, None);
             live.meter.lock().request(code_sql::now_ms(), began.elapsed().as_secs_f64() * 1000.0, 503, 0);
             access.write(503, began, 0, &instance, &request_id, cold, waited_ms);
             return retry_soon(page(StatusCode::SERVICE_UNAVAILABLE, "Restarting", "The instance stopped; the next request starts it again."));
         }
         Err(e) => {
-            live.answered(&lease.inst, 502);
+            live.answered(&lease.inst, 502, None);
             live.meter.lock().request(code_sql::now_ms(), began.elapsed().as_secs_f64() * 1000.0, 502, 0);
             access.write(502, began, 0, &instance, &request_id, cold, waited_ms);
             // What went wrong is the owner's to read (the environment's log), not a visitor's.
@@ -1844,7 +1844,7 @@ struct Done {
 impl Drop for Done {
     fn drop(&mut self) {
         let bytes = self.counted.load(Ordering::Relaxed);
-        self.live.answered(&self.lease.inst, self.status);
+        self.live.answered(&self.lease.inst, self.status, Some(self.began.elapsed().as_secs_f64() * 1000.0));
         self.live.meter.lock().request(code_sql::now_ms(), self.began.elapsed().as_secs_f64() * 1000.0, self.status, bytes);
         if let Some((a, instance, id, cold, waited)) = self.access.take() {
             a.write(self.status, self.began, bytes, &instance, &id, cold, waited);
