@@ -1364,6 +1364,22 @@ false` (or "Resume deploys") ends it, as it ends a rollback's hold; a rollback n
 person's hold with its own. `api.rs::a_rollback_holds_the_next_push_until_deploys_resume` holds
 production, pushes (ready, not live), puts it live (still held) and resumes.
 
+## Deploy freezes
+
+An environment's `freeze: {until?, windows?, timezone?, reason?}` (GitLab's deploy freeze
+periods, a change window; the environment panel's "Freeze deploys", the service page's notice
+with "Lift the freeze") stops what goes live without stopping work: while it's on, pushes, tag
+moves, deploy hooks and the Git watch build to `ready` beside the live deployment, exactly as a
+person's hold ("Holding deploys") does (a service that can't wait beside the live one isn't
+deployed, the log saying why), and a person's deploy, redeploy or promotion is a 409 that says
+the reason, unless its body says `override: true`, which goes through and is written in the
+audit log (`audit.freeze.overridden`, with who). A rollback is never frozen: it's the way out of
+a bad deploy. The secrets watch's redeploy waits for it to end (said in the log). It's on until
+lifted (`freeze: null`) when it names no `until` and no `windows`; before `until` (unix ms); or in
+any of its weekly `windows` (`{from: "fri 17:00", to: "mon 09:00"}`, wrapping past Sunday, at
+most 14) in its `timezone` (IANA, UTC by default). `frozen` says whether it's on now.
+`api.rs::a_deploy_freeze_holds_deploys_but_never_a_rollback`, `freeze::tests`.
+
 ## Gradual rollouts
 
 `run.rollout` (Vercel's rolling releases, Cloud Run's traffic splits): `steps` are increasing
@@ -3206,78 +3222,79 @@ dropped `_`, missed `"""…"""` and had no tree of its own without a plugin; a d
 static site into a container. Firewall rules on more than the path were built next, then PagerDuty and Opsgenie targets
 ("Notifications"), then external proxy rewrites and conditional rules ("Static sites"), then uptime
 checks ("Uptime checks"), then heartbeats ("Heartbeats"), then image scans ("Vulnerability
-scanning"), then objectives ("SLOs"), then Prometheus scraping ("The app's Prometheus endpoint"), then split tests ("Split tests"), then edge functions ("Edge functions"). A review that morning (the product against Railway, Render, Fly, Vercel, Netlify, Heroku and Cloud Run, each gap grepped in the code) put items 2–6 in; autoscaling on the app's own gauges was built first ("Workers that follow their work"), then a password ("A password for an environment").
+scanning"), then objectives ("SLOs"), then Prometheus scraping ("The app's Prometheus endpoint"), then split tests ("Split tests"), then edge functions ("Edge functions"). A review that morning (the product against Railway, Render, Fly, Vercel, Netlify, Heroku and Cloud Run, each gap grepped in the code) put items 2–6 in; autoscaling on the app's own gauges was built first ("Workers that follow their work"), then a password ("A password for an environment"), then deploy freezes ("Deploy freezes").
 
 1. **Variables that belong in roll secrets** (roll secrets' review): a secret-looking variable
    pasted into the panel offers "Move to roll secrets" (into the project environment apps
    already injects), and a variable may be `roll://ENV/KEY`, resolved through roll secrets'
    `Secrets::resolve_for(ResourceRef::new(Kind::Service, id), …)` (#329, audited as the service,
    rotation seen through `digest_for`), so values reach its health, leak guard and audit chain.
-2. **Deploy freezes** (GitLab's freeze periods, Render's paused auto-deploys): `freeze: {until?,
-   windows?, reason}` on an environment holds pushes, tags and schedules' deploys (said on the
-   page and in `deploy.held`), never a rollback or an admin's deploy with `override`.
-3. **A status page** (Better Stack's, Instatus'): a project's public page of its uptime checks
+   A Git login's `secret` becomes such a reference too, bound to the person who set it
+   (`Secrets::bind_ref`, checked with `resolve_as` at each fetch, roll secrets'
+   feature/roll-secrets-maker-refs), its read audited as `app:<service> (git login)`; #399 made
+   naming one `deploy` meanwhile.
+2. **A status page** (Better Stack's, Instatus'): a project's public page of its uptime checks
    and heartbeats (up, down since, the last 90 days by day), on the project's preview domain or a
    custom one, with incidents from `check.down` and `heartbeat.missed`; nothing private shown.
-4. **Microsoft Teams and Google Chat targets** beside Slack and Discord (their incoming webhooks;
+3. **Microsoft Teams and Google Chat targets** beside Slack and Discord (their incoming webhooks;
    the URL sealed, public addresses only).
-5. *Waiting on roll secrets' #357 (its batch 4).* **A workload
+4. *Waiting on roll secrets' #357 (its batch 4).* **A workload
    identity token in each instance** (Vercel's OIDC federation, Fly's, Cloud Run's): roll
    secrets' #68 issuer mints `sub = roll-apps:<project>:<service>:<env>` (`SecretSource::issue`,
    at most an hour, rotated keys); apps' half is delivery: a refreshed token per instance read
    from its link endpoint, a per-request header for web services, and `aud` per environment.
-6. *Waiting on the user.* **Signed-in people, not just admins** (every competitor; roll search and
+5. *Waiting on the user.* **Signed-in people, not just admins** (every competitor; roll search and
    secrets do): `roll_auth::SignedIn` scoped through `Workspace::trusts`, others' services 404.
    Letting non-admins run code on a node's Docker is the user's call first.
-7. *Waiting on the fleet's first run.* **Cached answers across nodes and at the edge** (Vercel's, Netlify's): today the owner's
+6. *Waiting on the fleet's first run.* **Cached answers across nodes and at the edge** (Vercel's, Netlify's): today the owner's
    proxy alone keeps them; the storage CDN's purge outbox could carry the purges.
    Across nodes means a node that doesn't own the service answering from its own copy, which
    needs the owner's say that the environment has no gate (access, allow list, firewall, rate
    limit) on each answer, a generation per environment for purges, and hits metered and logged
    where the owner reads them: only worth it once the fleet serves traffic.
-8. **Egress on the fleet** (Fargate): a security group per closed environment's tasks with no
+7. **Egress on the fleet** (Fargate): a security group per closed environment's tasks with no
    outbound rule but the egress proxy's, and the proxy as a task or on the node; until then
    Fargate refuses `egress: roll` (409). *Waiting on the fleet's first run.*
-9. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
+8. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
    follow a stream group's lag now (a queue's project is what keeps another tenant's depth
    unread).
-10. **Region**: the region shown on the overview and each environment, defaulting to the project's
+9. **Region**: the region shown on the overview and each environment, defaulting to the project's
    databases', then a choice per environment once the fleet has a second region (Railway's,
    Fly's). *Waiting on the fleet.*
-11. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
+10. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
    Settings, without stopping services from sleeping (Railway's and Render's). A roll-hosted app
    linked to a search cluster with an IP allowlist (search #243) needs them on the list; until
    then such a cluster stays open (on one node, the link relay's loopback is what it sees). *Waiting on the
    user's first AWS run.*
-12. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
+11. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
    listener offering `h2` (ALPN `h2, http/1.1`; hyper's `http2::Builder` when `h2` is chosen,
    with the same graceful drain) and setting `Host` from `:authority` (HTTP/2 has no `Host`,
    and every product behind the edge routes on it), so Cloudflare's gRPC reaches h2c apps.
    Done here: `run.h2c` to the app, trailers through the proxy. Then TCP services.
-13. **roll secrets as the env store**: the wiring is done (deploys resolve the project's secrets,
+12. **roll secrets as the env store**: the wiring is done (deploys resolve the project's secrets,
    digests mark "needs deploy", roll secrets' reveal rules, linked and sensitive keys, dynamic
    credentials refused, new environments ensured); what's left is service variables kept in roll
    secrets at `/services/<name>` (one store for both), and links as per-environment secrets
    links.
-14. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
+13. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
    settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
    warm window or `min_instances` 1 by default there until a wake is fast), and
    allocation-based metering for Fargate.
-15. *Waiting on roll secrets' #274.* **Queues linkable from a service**: buckets, streams and NoSQL are (rolld's `RollResources::link`, through roll secrets' providers); #274 adds the `queue` provider (its own user, `AMQP_URL`, `permission` read, write or configure), then `RollResources` and the one-node relay for the AMQP port here.
-16. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
+14. *Waiting on roll secrets' #274.* **Queues linkable from a service**: buckets, streams and NoSQL are (rolld's `RollResources::link`, through roll secrets' providers); #274 adds the `queue` provider (its own user, `AMQP_URL`, `permission` read, write or configure), then `RollResources` and the one-node relay for the AMQP port here.
+15. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
    `_acme-challenge.<base>` CNAME into a zone roll writes (`roll_edge::acme`'s DNS solver at
    another name), then `DomainTls::wildcards` true there; the routing and verification are done.
-17. *Waiting on the edge's owner (roll cloud).* **Bring your own certificate** (Vercel's,
+16. *Waiting on the edge's owner (roll cloud).* **Bring your own certificate** (Vercel's,
    Heroku's SNI, Fly's import): `PUT …/domains/{host}/certificate {cert_pem, key_pem}`, sealed,
    served by SNI at the edge (and Cloudflare's custom certificates), expiry through
    `domain.expiring`.
-18. *Waiting on a static build (no musl target on ai-server, and adding one is the shared toolchain's).* **A waker that takes every caller while the app starts**: busybox `nc -l` takes one, so a burst
+17. *Waiting on a static build (no musl target on ai-server, and adding one is the shared toolchain's).* **A waker that takes every caller while the app starts**: busybox `nc -l` takes one, so a burst
    of private calls to a stopped service loses all but the first (refused). A waker of roll's own
    (roll-fetch's `wake` mode, a static binary mounted read-only) that accepts each, holds them,
    and hands them over once the app listens; the cheap accept count already tells rolld.
-19. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
+18. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
     origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
-20. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
+19. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
     restore (CRIU, which needs the host's Docker daemon with checkpoints on: the user's call), or
     Firecracker microVM hosts on the fleet.
-21. EFS volumes and Cloud Map private DNS on the fleet; TCP services on the fleet (the edge carrying TCP to a service's owner).
+20. EFS volumes and Cloud Map private DNS on the fleet; TCP services on the fleet (the edge carrying TCP to a service's owner).

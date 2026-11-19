@@ -448,18 +448,6 @@ function query(params: Record<string, string | number | undefined>) {
 /** The preview's screenshot as an object URL (the operator's headers, which an <img> can't send);
  * revoke it when done. */
 /** The preview's screenshot as an object URL; `previous`: the one at the head before; `phone`: at a phone's width; `base`: the default branch's preview's; `page`: another of the project's pages. */
-/** What's at `path` (absolute) in a running `roll.toml` service, as a tar (`GET …/files`, admin): a
- * 404 says nothing is there, in the server's words. */
-export async function downloadFiles(id: string, service: string, path: string): Promise<Blob> {
-  const res = await fetch(`${ROLL_API}${one(id)}/files${query({ service, path })}`, withSession({ headers: apiHeaders(), cache: "no-store" }));
-  onApiStatus(res.status);
-  if (!res.ok) {
-    const data = await res.json().catch(() => null);
-    throw new Error(data?.error ?? `${res.status} ${res.statusText}`.trim());
-  }
-  return res.blob();
-}
-
 /** A service's link with the preview's access as a QR code (an object URL; revoke it when done): a phone opens it by scanning. */
 export async function qrUrl(id: string, service?: string): Promise<string> {
   const res = await fetch(`${ROLL_API}${one(id)}/qr.png${service ? `?service=${encodeURIComponent(service)}` : ""}`, withSession({ headers: apiHeaders(), cache: "no-store" }));

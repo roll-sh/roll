@@ -72,6 +72,7 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
     setPromoting({ from, deployment: source.id, revision: source.revision, missing });
   };
   const [link, setLink] = useState<string | null>(null);
+  const [freezeWhy, setFreezeWhy] = useState("");
   const [password, setPassword] = useState("");
   const [hook, setHook] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -236,6 +237,35 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
           <button className={btn} disabled={busy} aria-pressed={!!env.held} onClick={() => runner.run("hold", () => appsApi.putEnvironment(service.id, env.name, { held: !env.held }))}>
             {env.held ? "Resume deploys" : "Hold deploys"}
           </button>
+        </div>
+
+        <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
+          <div className="min-w-0 flex-1">
+            <p className="text-[13px] font-medium">Freeze deploys</p>
+            <p className="mt-1 text-[12px] text-muted">
+              {env.freeze
+                ? `${env.frozen ? "Frozen now" : "Not frozen right now"}${env.freeze.reason ? `: ${env.freeze.reason}` : ""}${env.freeze.until ? `, until ${new Date(env.freeze.until).toLocaleString()}` : ""}${env.freeze.windows?.length ? `, ${env.freeze.windows.map((w) => `${w.from}–${w.to}`).join(", ")}` : ""}. A rollback always works.`
+                : "A change window: pushes and hooks build without going live, deploying by hand needs an override, a rollback always works."}
+            </p>
+          </div>
+          {env.freeze ? (
+            <button className={btn} disabled={busy} onClick={() => runner.run("unfreeze", () => appsApi.putEnvironment(service.id, env.name, { freeze: null }))}>
+              Lift the freeze
+            </button>
+          ) : (
+            <form
+              className="flex gap-2"
+              onSubmit={(e) => {
+                e.preventDefault();
+                void runner.run("freeze", () => appsApi.putEnvironment(service.id, env.name, { freeze: freezeWhy.trim() ? { reason: freezeWhy.trim() } : {} })).then((r) => r && setFreezeWhy(""));
+              }}
+            >
+              <input value={freezeWhy} onChange={(e) => setFreezeWhy(e.target.value)} placeholder="why (optional)" aria-label="Why" maxLength={200} className={`${input} w-44 text-[12px]`} />
+              <button type="submit" className={btn} disabled={busy}>
+                Freeze
+              </button>
+            </form>
+          )}
         </div>
 
         <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
