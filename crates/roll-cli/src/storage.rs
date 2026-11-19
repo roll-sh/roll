@@ -494,7 +494,7 @@ impl Api {
         for (k, v) in &self.headers {
             req = req.header(k, v);
         }
-        let res = req.send().await.with_context(|| format!("can't reach {} (is it running?)", self.base))?;
+        let res = req.send().await.with_context(|| crate::unreachable(&self.base))?;
         if !res.status().is_success() {
             let status = res.status();
             let text = res.text().await.unwrap_or_default();
