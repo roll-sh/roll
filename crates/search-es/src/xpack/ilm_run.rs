@@ -21,10 +21,9 @@
 //! last put the policy (Elasticsearch's stored security headers). What has no counterpart in
 //! roll completes at once as it does on a single node without data tiers (`allocate`'s and
 //! `migrate`'s routing checks, `wait-for-active-shards`, the follower steps of `unfollow` on
-//! an index that isn't a follower); `shrink` completes when the index already has the target
-//! shard count (`branch-check-prerequisites`). Steps roll can't run end in the `ERROR` step
-//! with the reason: `shrink` to fewer shards, `downsample` and `searchable_snapshot`.
-//! `wait_for_snapshot` waits for its snapshot lifecycle policy ([`super::slm`]) to have taken a
+//! an index that isn't a follower). `shrink`, `downsample` and `searchable_snapshot` make a new
+//! index and swap it in for the managed one ([`super::ilm_targets`]). Every run records its
+//! moves in the ILM history ([`super::ilm_history`]). `wait_for_snapshot` waits for its snapshot lifecycle policy ([`super::slm`]) to have taken a
 //! snapshot including the index since the action started (`WaitForSnapshotStep`).
 //!
 //! **When runs happen.** Elasticsearch polls every `indices.lifecycle.poll_interval` (10m).
@@ -40,7 +39,7 @@ use crate::error::EsError;
 use crate::json::{Map, Value};
 use crate::meta::{ClusterState, IndexMeta};
 use crate::obj;
-use crate::units::{ByteSize, TimeValue};
+use crate::units::TimeValue;
 use crate::xpack::{enc, internal, store};
 
 /// The per-index execution state family (by index name).
@@ -73,6 +72,15 @@ pub(crate) struct Exec {
     /// When a waiting rollover's time-based condition was found due without the rollover
     /// happening (only a write can complete it now).
     pub checked_at: Option<i64>,
+    /// The generated names an action works with (`snapshot_repository`, `snapshot_name`,
+    /// `shrink_index_name`, `rollup_index_name`, `force_merge_clone_index_name`).
+    pub snapshot_repository: Option<String>,
+    pub snapshot_name: Option<String>,
+    pub shrink_index_name: Option<String>,
+    pub downsample_index_name: Option<String>,
+    pub force_merge_clone_index_name: Option<String>,
+    /// Initialized in a state change, not yet in the history (a run records it).
+    pub unrecorded: bool,
 }
 
 fn s(v: &Map, k: &str) -> Option<String> {
@@ -102,6 +110,12 @@ impl Exec {
             step_info: m.get("step_info").filter(|v| !v.is_null()).cloned(),
             previous_step_info: m.get("previous_step_info").filter(|v| !v.is_null()).cloned(),
             checked_at: n(m, "checked_at"),
+            snapshot_repository: s(m, "snapshot_repository"),
+            snapshot_name: s(m, "snapshot_name"),
+            shrink_index_name: s(m, "shrink_index_name"),
+            downsample_index_name: s(m, "rollup_index_name"),
+            force_merge_clone_index_name: s(m, "force_merge_clone_index_name"),
+            unrecorded: m.get("unrecorded").and_then(Value::as_bool) == Some(true),
         })
     }
 
@@ -127,6 +141,12 @@ impl Exec {
         put("step_info", self.step_info.clone());
         put("previous_step_info", self.previous_step_info.clone());
         put("checked_at", self.checked_at.map(Value::from));
+        put("snapshot_repository", self.snapshot_repository.clone().map(Value::from));
+        put("snapshot_name", self.snapshot_name.clone().map(Value::from));
+        put("shrink_index_name", self.shrink_index_name.clone().map(Value::from));
+        put("rollup_index_name", self.downsample_index_name.clone().map(Value::from));
+        put("force_merge_clone_index_name", self.force_merge_clone_index_name.clone().map(Value::from));
+        put("unrecorded", self.unrecorded.then_some(Value::Bool(true)));
         Value::Obj(m)
     }
 
@@ -233,8 +253,53 @@ fn action_steps(action: &str, conf: &Value) -> Vec<&'static str> {
         ],
         "rollover" => vec!["check-rollover-ready", "attempt-rollover", "wait-for-active-shards", "update-rollover-lifecycle-date", "set-indexing-complete"],
         "readonly" => vec!["check-not-write-index", "check-ts-end-time-passed", "readonly", "set-indexing-complete"],
-        "downsample" => vec!["branch-on-timeseries-check", "check-not-write-index", "wait-for-shard-history-leases", "check-ts-end-time-passed", "readonly", "rollup"],
-        "shrink" => vec!["branch-check-prerequisites", "check-not-write-index", "wait-for-shard-history-leases", "check-ts-end-time-passed", "readonly", "check-target-shards-count", "shrink"],
+        // The steps of the actions that make a new index, in the order a run goes through them
+        // (Elasticsearch's `toSteps` lists the same steps; its branches jump within them, here
+        // [`Outcome::Goto`]). The source index ends at a step that deletes it; the new index
+        // goes on from the step `copy-execution-state` gave it.
+        "downsample" => vec![
+            "branch-on-timeseries-check",
+            "check-not-write-index",
+            "wait-for-shard-history-leases",
+            "check-ts-end-time-passed",
+            "readonly",
+            "cleanup-target-index",
+            "generate-downsampled-index-name",
+            "rollup",
+            "wait-for-index-color",
+            "copy-execution-state",
+            "copy-settings",
+            "branch-on-datastream-check",
+            "replace-datastream-backing-index",
+            "delete",
+            "swap-aliases",
+        ],
+        "shrink" => {
+            let mut v = vec![
+                "branch-check-prerequisites",
+                "check-not-write-index",
+                "wait-for-shard-history-leases",
+                "check-ts-end-time-passed",
+                "readonly",
+                "check-target-shards-count",
+                "cleanup-shrink-index",
+                "generate-index-name",
+                "set-single-node-allocation",
+                "check-shrink-allocation",
+                "shrink",
+                "shrunk-shards-allocated",
+                "copy-execution-state",
+                "branch-on-datastream-check",
+                "replace-datastream-backing-index",
+                "delete",
+                "aliases",
+                "is-shrunken-index",
+            ];
+            if conf.get("allow_write_after_shrink").and_then(Value::as_bool) == Some(true) {
+                v.push("update-settings");
+            }
+            v
+        }
         "forcemerge" => {
             let mut v = vec!["branch-forcemerge-check-prerequisites", "check-not-write-index", "check-ts-end-time-passed", "readonly"];
             if conf.get("index_codec").and_then(Value::as_str) == Some("best_compression") {
@@ -246,7 +311,19 @@ fn action_steps(action: &str, conf: &Value) -> Vec<&'static str> {
         "allocate" => vec!["allocate", "check-allocation"],
         "migrate" if conf.get("enabled").and_then(Value::as_bool) != Some(false) => vec!["branch-check-skip-action", "migrate", "check-migration"],
         "migrate" => vec![],
-        "searchable_snapshot" => vec!["searchable_snapshot"],
+        "searchable_snapshot" => {
+            let merge = conf.get("force_merge_index").and_then(Value::as_bool) != Some(false);
+            let mut v = vec!["branch-check-prerequisites", "check-not-write-index", "wait-for-shard-history-leases", "check-ts-end-time-passed", "branch-check-existing-snapshot"];
+            if merge {
+                v.extend(["branch-skip-clone-check", "readonly", "cleanup-generated-index", "generate-index-name", "clone", "wait-for-index-color-cloned-index", "forcemerge", "segment-count"]);
+            }
+            v.extend(["generate-snapshot-name", "cleanup-snapshot", "create-snapshot", "wait-for-data-tier", "mount-snapshot", "wait-for-index-color", "copy-execution-state", "copy-settings"]);
+            if merge {
+                v.extend(["branch-delete-force-merged-index", "delete-force-merged-index"]);
+            }
+            v.extend(["branch-on-datastream-check", "replace-datastream-backing-index", "delete", "swap-aliases"]);
+            v
+        }
         "freeze" => vec!["branch-freeze-check-prerequisites", "check-not-write-index", "freeze"],
         "wait_for_snapshot" => vec!["wait-for-snapshot"],
         "delete" => {
@@ -348,6 +425,11 @@ fn following(e: &Exec) -> Option<(StepRef, StepRef)> {
     Some((next, skip))
 }
 
+/// The first step after the index's current action.
+pub(super) fn after_action(e: &Exec) -> Option<StepRef> {
+    following(e).map(|(_, skip)| skip)
+}
+
 fn step_conf(e: &Exec) -> Value {
     let Some((_, action, _)) = e.key() else { return Value::Null };
     current_def(e).and_then(|d| d.pointer(&["actions", action])).cloned().unwrap_or_else(Value::object)
@@ -397,6 +479,9 @@ fn index_due(st: &ClusterState, idx: &IndexMeta, rec: Option<&Value>, now: i64) 
     };
     let Some(rec) = rec else { return (None, false) };
     let Some((phase, action, step)) = e.key() else { return (None, false) };
+    if e.unrecorded {
+        return (Some(now), false);
+    }
     match step {
         ERROR => (None, e.auto_retryable == Some(true)),
         COMPLETE if action == COMPLETE => match next_phase(rec, phase) {
@@ -415,6 +500,9 @@ fn index_due(st: &ClusterState, idx: &IndexMeta, rec: Option<&Value>, now: i64) 
         }
         "check-ts-end-time-passed" => (Some(ts_end(idx).filter(|t| *t > now).unwrap_or(now)), false),
         "check-not-write-index" => (write_index_of(st, idx).is_none().then_some(now), false),
+        // Waits that only a change to the index or its policy ends, never time.
+        "check-target-shards-count" if !super::ilm_targets::shards_divide(idx, &step_conf(&e)) => (None, false),
+        "is-shrunken-index" if super::ilm_targets::shrink_source_left(st, idx) => (None, false),
         // Moves on once the snapshot lifecycle policy has run (its run changes the state, which
         // wakes the scheduler): never polled, never a reason to wake a cluster.
         "wait-for-snapshot" => {
@@ -472,6 +560,11 @@ pub fn reconcile(prev: &ClusterState, next: &mut ClusterState, now: i64) {
             continue;
         }
         let Some(policy) = policy_name(i) else { continue };
+        // `IndexLifecycleService` passes over skipped indices (a resized index waiting for
+        // its execution state, among others).
+        if i.settings.get("index.lifecycle.skip") == Some("true") {
+            continue;
+        }
         let needs = match exec_of(next, i) {
             None => true,
             // A missing policy was recorded: initialize once it exists.
@@ -510,15 +603,18 @@ fn initialized(idx: &IndexMeta, policy: &str, rec: &Value, now: i64) -> Exec {
     let mut e = Exec { uuid: idx.uuid.clone(), lifecycle_date: Some(idx.creation_date()), ..Exec::default() };
     e.move_to("new", "init", "init", Some((policy, rec)), false, true, now);
     e.move_to("new", COMPLETE, COMPLETE, Some((policy, rec)), false, true, now);
+    e.unrecorded = true;
     e
 }
 
 // ------------------------------------------------------------------------------ the runner
 
 /// What one step did.
-enum Outcome {
+pub(super) enum Outcome {
     /// Go on with the next step.
     Next,
+    /// Go on with another step of the same action (a branch).
+    Goto(&'static str),
     /// Skip the rest of the action.
     SkipAction,
     /// Stay: the condition isn't met (with its `step_info`).
@@ -529,7 +625,7 @@ enum Outcome {
     Gone,
 }
 
-fn fail_with(reason: impl Into<String>) -> Outcome {
+pub(super) fn fail_with(reason: impl Into<String>) -> Outcome {
     Outcome::Fail(EsError::illegal_state(reason).to_value(false))
 }
 
@@ -538,7 +634,7 @@ fn fail_arg(reason: impl Into<String>) -> Outcome {
 }
 
 /// The data stream `idx` is the write index (or failure store write index) of.
-fn write_index_of<'a>(st: &'a ClusterState, idx: &IndexMeta) -> Option<(&'a str, bool)> {
+pub(super) fn write_index_of<'a>(st: &'a ClusterState, idx: &IndexMeta) -> Option<(&'a str, bool)> {
     let ds = st.metadata.data_stream_of(&idx.name)?;
     if ds.write_index() == Some(idx.name.as_str()) {
         Some((ds.name.as_str(), false))
@@ -566,34 +662,46 @@ fn rollover_skips(st: &ClusterState, idx: &IndexMeta) -> bool {
     !alias.is_empty() && (idx.rollover_info.contains_key(alias) || (idx.settings.get("index.lifecycle.indexing_complete") == Some("true") && idx.aliases.get(alias).and_then(|a| a.is_write_index) != Some(true)))
 }
 
-struct Env<'a> {
-    cluster: &'a Cluster,
-    index: String,
-    policy: String,
-    now: i64,
+pub(super) struct Env<'a> {
+    pub cluster: &'a Cluster,
+    pub index: String,
+    pub policy: String,
+    pub now: i64,
     /// The error a step that would run fails with instead: the user or API key the policy runs
     /// as can no longer act ([`internal::principal_refusal`]).
     refused: Option<Value>,
+    /// The history items this run records ([`super::ilm_history`]).
+    history: parking_lot::Mutex<Vec<Value>>,
 }
 
 impl Env<'_> {
-    fn idx(&self) -> Option<std::sync::Arc<IndexMeta>> {
+    pub(super) fn idx(&self) -> Option<std::sync::Arc<IndexMeta>> {
         self.cluster.state().metadata.indices.get(&self.index).cloned()
     }
 
-    async fn call(&self, method: &str, path: &str, body: Option<Value>) -> Result<Value, Value> {
+    pub(super) async fn call(&self, method: &str, path: &str, body: Option<Value>) -> Result<Value, Value> {
         internal::call(self.cluster, method, path, body.as_ref()).await.map_err(|e| e.to_value(false))
     }
 
-    async fn act(&self, method: &str, path: &str, body: Option<Value>) -> Outcome {
+    pub(super) async fn act(&self, method: &str, path: &str, body: Option<Value>) -> Outcome {
         match self.call(method, path, body).await {
             Ok(_) => Outcome::Next,
             Err(e) => Outcome::Fail(e),
         }
     }
 
-    async fn settings(&self, settings: Value) -> Outcome {
-        self.act("PUT", &format!("/{}/_settings", enc(&self.index)), Some(settings)).await
+    pub(super) async fn settings(&self, settings: Value) -> Outcome {
+        self.settings_of(&self.index, settings).await
+    }
+
+    pub(super) async fn settings_of(&self, index: &str, settings: Value) -> Outcome {
+        self.act("PUT", &format!("/{}/_settings", enc(index)), Some(settings)).await
+    }
+
+    /// Records the index's state in the history (`ILMHistoryItem`).
+    fn record(&self, e: &Exec, error: Option<&Value>) {
+        let date = self.idx().and_then(|i| lifecycle_date(&i, e)).or(e.lifecycle_date);
+        self.history.lock().push(super::ilm_history::item(&self.index, &self.policy, self.now, date, e, error));
     }
 }
 
@@ -610,13 +718,18 @@ async fn execute(env: &Env<'_>, e: &mut Exec) -> Outcome {
             Outcome::Next
         }
         // Nothing to wait for or route on one node without tiers or followers.
-        (_, "wait-for-active-shards" | "check-allocation" | "check-migration" | "wait-for-index-color" | "wait-for-shard-history-leases" | "cleanup-snapshot" | "check-target-shards-count") => Outcome::Next,
+        (_, "wait-for-active-shards" | "check-allocation" | "check-migration" | "wait-for-index-color" | "wait-for-shard-history-leases") => Outcome::Next,
         (_, "branch-check-unfollow-prerequisites") => Outcome::SkipAction,
         (_, "branch-check-skip-action") => Outcome::Next,
         (_, "branch-forcemerge-check-prerequisites" | "branch-freeze-check-prerequisites") => {
             if idx.settings.get("index.store.snapshot.index_name").is_some() { Outcome::SkipAction } else { Outcome::Next }
         }
+        // `forcemerge`'s `readonly` is never run (a no-op Elasticsearch keeps for old states).
         ("forcemerge", "readonly") => Outcome::Next,
+        ("forcemerge", "check-ts-end-time-passed") => match ts_end(&idx) {
+            Some(end) if env.now < end => ts_wait(i, end, &action),
+            _ => Outcome::Goto("forcemerge"),
+        },
         (_, "check-not-write-index") => match write_index_of(&env.cluster.state(), &idx) {
             Some((ds, failure)) => Outcome::Wait(Some(obj! { "message" => format!(
                 "index [{i}] is the{} write index for data stream [{ds}], pausing ILM execution of lifecycle [{}] until this index is no longer the write index for the data stream via manual or automated rollover",
@@ -626,9 +739,7 @@ async fn execute(env: &Env<'_>, e: &mut Exec) -> Outcome {
             None => Outcome::Next,
         },
         (_, "check-ts-end-time-passed") => match ts_end(&idx) {
-            Some(end) if env.now < end => Outcome::Wait(Some(obj! { "message" => format!(
-                "The [index.time_series.end_time] setting for index [{i}] is [{end}]. Waiting until the index's time series end time lapses before proceeding with action [{action}] as the index can still accept writes."
-            ) })),
+            Some(end) if env.now < end => ts_wait(i, end, &action),
             _ => Outcome::Next,
         },
         ("set_priority", "set_priority") => env.settings(obj! { "index.priority" => conf.get("priority").cloned().unwrap_or(Value::Null) }).await,
@@ -656,6 +767,12 @@ async fn execute(env: &Env<'_>, e: &mut Exec) -> Outcome {
             }
         }
         (_, "set-indexing-complete") => env.settings(obj! { "index.lifecycle.indexing_complete" => true }).await,
+        // `downsample`'s `readonly` goes on to name the target (`cleanup-target-index` is a
+        // no-op Elasticsearch keeps for old states).
+        ("downsample", "readonly") => match env.act("PUT", &format!("/{path}/_block/write"), None).await {
+            Outcome::Next => Outcome::Goto("generate-downsampled-index-name"),
+            other => other,
+        },
         (_, "readonly") => env.act("PUT", &format!("/{path}/_block/write"), None).await,
         ("forcemerge", "close-index") => env.act("POST", &format!("/{path}/_close"), None).await,
         ("forcemerge", "update-settings") => env.settings(obj! { "index.codec" => "best_compression" }).await,
@@ -690,27 +807,6 @@ async fn execute(env: &Env<'_>, e: &mut Exec) -> Outcome {
             };
             env.settings(obj! { "index.routing.allocation.include._tier_preference" => tiers }).await
         }
-        ("shrink", "branch-check-prerequisites") => {
-            let shards = idx.number_of_shards() as i64;
-            let target = match conf.get("number_of_shards").and_then(Value::as_i64) {
-                Some(t) => t,
-                None => {
-                    let max = conf.get("max_primary_shard_size").and_then(|v| ByteSize::parse(&v.to_es_string(), "").ok()).map(|b| b.bytes()).unwrap_or(i64::MAX).max(1);
-                    let size = match env.call("GET", &format!("/{path}/_stats/store"), None).await {
-                        Ok(v) => v.pointer(&["_all", "primaries", "store", "size_in_bytes"]).and_then(Value::as_i64).unwrap_or(0),
-                        Err(_) => 0,
-                    };
-                    (size.saturating_add(max - 1) / max).clamp(1, shards.max(1))
-                }
-            };
-            if shards == target || idx.settings.get("index.store.snapshot.index_name").is_some() { Outcome::SkipAction } else { Outcome::Next }
-        }
-        ("shrink", "shrink") => fail_with(format!("roll search does not run the [shrink] action on an index with more shards than the target: index [{i}] has [{}] shards", idx.number_of_shards())),
-        ("downsample", "branch-on-timeseries-check") => {
-            if idx.settings.get("index.mode") == Some("time_series") { Outcome::Next } else { Outcome::SkipAction }
-        }
-        ("downsample", "rollup") => fail_with("roll search does not run the [downsample] action from a lifecycle policy; downsample the index with the downsample API"),
-        ("searchable_snapshot", _) => fail_with("roll search does not run the [searchable_snapshot] action from a lifecycle policy"),
         ("freeze", "freeze") => Outcome::Next,
         ("wait_for_snapshot", "wait-for-snapshot") => {
             let p = conf.get("policy").map(Value::to_es_string).unwrap_or_default();
@@ -723,8 +819,17 @@ async fn execute(env: &Env<'_>, e: &mut Exec) -> Outcome {
             }
         }
         ("delete", "delete") => delete(env).await,
+        // The actions that make a new index and swap it in.
+        ("shrink" | "downsample" | "searchable_snapshot", _) | ("delete", "cleanup-snapshot") => super::ilm_targets::execute(env, e, &idx, &action, &step, &conf).await,
         _ => fail_with(format!("step [{step}] of action [{action}] is not supported by roll search")),
     }
+}
+
+/// `WaitUntilTimeSeriesEndTimePassesStep`'s wait.
+fn ts_wait(index: &str, end: i64, action: &str) -> Outcome {
+    Outcome::Wait(Some(obj! { "message" => format!(
+        "The [index.time_series.end_time] setting for index [{index}] is [{end}]. Waiting until the index's time series end time lapses before proceeding with action [{action}] as the index can still accept writes."
+    ) }))
 }
 
 /// `java.util.Date.toString()` in UTC (`EEE MMM dd HH:mm:ss zzz yyyy`).
@@ -872,15 +977,36 @@ async fn delete(env: &Env<'_>) -> Outcome {
     }
 }
 
+/// Whether Elasticsearch runs the step outside a cluster state update (an `AsyncActionStep`
+/// or `AsyncWaitStep`). Cluster state steps run in a row within one update, and the history
+/// records where that row stopped; an asynchronous step records where it moved the index.
+fn async_step(action: &str, step: &str) -> bool {
+    match step {
+        "branch-check-prerequisites" => action == "shrink",
+        "check-rollover-ready" | "attempt-rollover" | "set-indexing-complete" | "set_priority" | "readonly" | "wait-for-shard-history-leases" | "check-ts-end-time-passed" | "forcemerge"
+        | "segment-count" | "close-index" | "update-settings" | "open-index" | "allocate" | "migrate" | "freeze" | "wait-for-snapshot" | "cleanup-snapshot" | "delete" | "cleanup-shrink-index"
+        | "set-single-node-allocation" | "shrink" | "aliases" | "rollup" | "swap-aliases" | "cleanup-generated-index" | "clone" | "create-snapshot" | "mount-snapshot"
+        | "delete-force-merged-index" | "wait-for-follow-shard-tasks" | "pause-follower-index" | "close-follower-index" | "unfollow-follower-index" | "open-follower-index" => true,
+        _ => false,
+    }
+}
+
 /// Moves one index on from its current step as far as it can go now (`runPeriodicStep` and
 /// `runPolicyAfterStateChange`, which in Elasticsearch follow each other within moments).
-/// Returns the state to store, or `None` when it is unchanged or the index is gone.
+/// Returns the state to store, or `None` when it is unchanged or the index is gone. Records
+/// the history items Elasticsearch's runner records on the way (`ILMHistoryStore`).
 async fn advance(env: &Env<'_>, mut e: Exec) -> Option<Exec> {
     let start = e.clone();
+    if e.unrecorded {
+        e.unrecorded = false;
+        env.record(&e, None);
+    }
     let st = env.cluster.state();
     let rec = ilm::policy(&st, &env.policy)?;
     let stopping = ilm::mode(&st) == "STOPPING";
     drop(st);
+    // A row of cluster state steps moved the index since the last record.
+    let mut moved = false;
     // Enough for every step of a phase and the phase change after it.
     for _ in 0..64 {
         let Some((phase, action, step)) = e.key().map(|(p, a, s)| (p.to_string(), a.to_string(), s.to_string())) else { break };
@@ -910,29 +1036,71 @@ async fn advance(env: &Env<'_>, mut e: Exec) -> Option<Exec> {
             }
             let Some((a, s)) = first_step_of(next, None, &rec) else { break };
             e.move_to(next, &a, s, Some((&env.policy, &rec)), false, true, env.now);
+            // `MoveToNextStepUpdateTask`.
+            env.record(&e, None);
+            moved = false;
             continue;
         }
         // A step the cached phase doesn't have stays where it is.
         let Some((next, skip)) = following(&e) else { break };
+        let is_async = async_step(&action, &step);
+        if is_async && moved {
+            // The row of cluster state steps stopped before this one.
+            env.record(&e, None);
+            moved = false;
+        }
         if let Some(err) = &env.refused {
             e.fail(err.clone(), env.now);
+            env.record(&e, e.step_info.as_ref());
             break;
         }
-        match execute(env, &mut e).await {
-            Outcome::Next => e.move_to(&phase, &next.0, next.1, Some((&env.policy, &rec)), false, true, env.now),
-            Outcome::SkipAction => e.move_to(&phase, &skip.0, skip.1, Some((&env.policy, &rec)), false, true, env.now),
+        let to = match execute(env, &mut e).await {
+            Outcome::Next => Some(next),
+            Outcome::SkipAction => Some(skip),
+            Outcome::Goto(target) => match phase_steps(&phase, current_def(&e)).into_iter().find(|(a, s)| *a == action && *s == target) {
+                Some(t) => Some(t),
+                None => {
+                    e.fail(EsError::illegal_state(format!("step [{target}] of action [{action}] is not in phase [{phase}]")).to_value(false), env.now);
+                    env.record(&e, e.step_info.as_ref());
+                    break;
+                }
+            },
             Outcome::Wait(info) => {
-                if info.is_some() && info != e.step_info {
+                let changed = info.is_some() && info != e.step_info;
+                if changed {
                     e.step_info = info;
+                }
+                if !is_async && (changed || moved) {
+                    env.record(&e, None);
+                    moved = false;
                 }
                 break;
             }
             Outcome::Fail(err) => {
                 e.fail(err, env.now);
+                env.record(&e, e.step_info.as_ref());
+                moved = false;
                 break;
             }
-            Outcome::Gone => return None,
+            Outcome::Gone => {
+                // `registerDeleteOperation`: the state before the deletion, completed.
+                let mut done = e.clone();
+                done.step = Some(COMPLETE.into());
+                env.record(&done, None);
+                return None;
+            }
+        };
+        if let Some((a, s)) = to {
+            e.move_to(&phase, &a, s, Some((&env.policy, &rec)), false, true, env.now);
+            if is_async {
+                env.record(&e, None);
+            } else {
+                moved = true;
+            }
         }
+    }
+    if moved {
+        env.record(&e, None);
     }
     (e != start).then_some(e)
 }
@@ -962,6 +1130,7 @@ async fn pass(cluster: &Cluster, now: i64) {
         .map(|(i, p, _)| (i.name.clone(), i.uuid.clone(), p.to_string(), exec_of(&st, i).filter(|e| e.step.is_some())))
         .collect();
     let mut updates: Vec<(String, String, Exec)> = Vec::new();
+    let mut history: Vec<Value> = Vec::new();
     // Managed indices without a state (kept before ILM ran, or whose policy appeared since)
     // start from the beginning, as `reconcile` starts a newly managed one.
     for (index, uuid, policy, e) in &due {
@@ -976,24 +1145,25 @@ async fn pass(cluster: &Cluster, now: i64) {
         let Some(e) = e else { continue };
         let owner = ilm::policy(&cluster.state(), &policy).and_then(|r| r.pointer(&["_roll", "user"]).and_then(internal::principal_of));
         let refused = internal::principal_refusal(cluster, owner.as_ref()).map(|e| e.to_value(false));
-        let env = Env { cluster, index: index.clone(), policy, now, refused };
+        let env = Env { cluster, index: index.clone(), policy, now, refused, history: Default::default() };
         if let Some(next) = internal::as_principal(owner, advance(&env, e)).await {
             updates.push((index, uuid, next));
         }
+        history.append(&mut env.history.lock());
     }
-    if updates.is_empty() {
-        return;
-    }
-    let _ = cluster
-        .update(|st| {
-            for (index, uuid, e) in &updates {
-                if st.metadata.indices.get(index).is_some_and(|i| &i.uuid == uuid && policy_name(i).is_some()) {
-                    store::family_mut(st, STATE).insert(index.clone(), e.to_value());
+    if !updates.is_empty() {
+        let _ = cluster
+            .update(|st| {
+                for (index, uuid, e) in &updates {
+                    if st.metadata.indices.get(index).is_some_and(|i| &i.uuid == uuid && policy_name(i).is_some()) {
+                        store::family_mut(st, STATE).insert(index.clone(), e.to_value());
+                    }
                 }
-            }
-            Ok(())
-        })
-        .await;
+                Ok(())
+            })
+            .await;
+    }
+    super::ilm_history::write(cluster, history).await;
 }
 
 #[cfg(test)]
@@ -1047,7 +1217,8 @@ mod tests {
         let v = explain(&c, "logs-000001").await;
         assert_eq!(step(&v), "new/complete/complete", "{v}");
         let created = c.state().metadata.indices["logs-000001"].creation_date();
-        assert_eq!(super::next_due(&c.state()), Some(created), "hot's min_age 0 is due at once");
+        // Due at once: hot's min_age is 0 (and the initialization goes in the history).
+        assert!(super::next_due(&c.state()).is_some_and(|t| t >= created && t <= crate::time::now_millis()));
         super::run(&c, created + 1000).await;
         let v = explain(&c, "logs-000001").await;
         assert_eq!(step(&v), "hot/rollover/check-rollover-ready", "{v}");
