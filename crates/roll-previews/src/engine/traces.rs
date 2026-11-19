@@ -296,8 +296,11 @@ impl Engine {
         spans.sort_by_key(|s| s.start);
         let values = self.masks(id).await?;
         for s in &mut spans {
+            // Its code chose all of it: the name, the service (its SDK's resource) and each attribute.
             s.name = code_preview::runner::mask(&s.name, &values);
-            for (_, v) in &mut s.attrs {
+            s.service = code_preview::runner::mask(&s.service, &values);
+            for (k, v) in &mut s.attrs {
+                *k = code_preview::runner::mask(k, &values);
                 *v = code_preview::runner::mask(v, &values);
             }
         }
