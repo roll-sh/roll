@@ -36,6 +36,8 @@ const EVENTS: { value: NotifyEvent; label: string }[] = [
 const KINDS: { value: NotifyTarget["kind"]; label: string; placeholder: string }[] = [
   { value: "slack", label: "Slack", placeholder: "https://hooks.slack.com/services/…" },
   { value: "discord", label: "Discord", placeholder: "https://discord.com/api/webhooks/…" },
+  { value: "teams", label: "Microsoft Teams", placeholder: "A Workflows webhook URL (…logic.azure.com/…)" },
+  { value: "googlechat", label: "Google Chat", placeholder: "https://chat.googleapis.com/v1/spaces/…" },
   { value: "webhook", label: "Webhook", placeholder: "https://example.com/roll-events" },
   { value: "email", label: "Email", placeholder: "" },
   // On-call: each failure an incident, closed when its alert resolves or the next deploy works.

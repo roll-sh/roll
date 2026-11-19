@@ -3268,6 +3268,47 @@ async fn images_are_scanned_and_block_on_holds_a_deploy() {
     assert_eq!(again, [json!(["CVE-9"])], "only what's new since its last scan");
 }
 
+/// Microsoft Teams and Google Chat targets: an Adaptive Card to a Teams workflow, text (no
+/// mentions) to a Google Chat space; each URL only on its platform's hosts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn teams_and_google_chat_targets_get_their_own_formats() {
+    let got: Arc<parking_lot::Mutex<Vec<(String, Value)>>> = Default::default();
+    let g = got.clone();
+    let app = axum::Router::new().fallback(move |uri: axum::http::Uri, b: bytes::Bytes| {
+        let g = g.clone();
+        async move {
+            g.lock().push((uri.path().to_string(), serde_json::from_slice(&b).unwrap_or(Value::Null)));
+            StatusCode::OK
+        }
+    });
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let at = l.local_addr().unwrap();
+    tokio::spawn(axum::serve(l, app).into_future());
+    let w = world().await;
+    let base = format!("/v1/apps/projects/{}/notifications", w.project);
+    let mut ids = Vec::new();
+    for (kind, path) in [("teams", "/workflows/abc"), ("googlechat", "/v1/spaces/AAA/messages")] {
+        let (st, t) = call(&w.api, "POST", &base, Some(json!({"kind": kind, "url": format!("http://{at}{path}")}))).await;
+        assert_eq!(st, StatusCode::CREATED, "{t}");
+        ids.push(t["id"].as_str().unwrap().to_string());
+    }
+    for id in &ids {
+        assert!(call(&w.api, "POST", &format!("{base}/{id}/test"), None).await.0.is_success());
+    }
+    for _ in 0..200 {
+        if got.lock().len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let got = got.lock().clone();
+    let teams = &got.iter().find(|(p, _)| p == "/workflows/abc").expect("teams").1;
+    assert_eq!(teams["attachments"][0]["contentType"], "application/vnd.microsoft.card.adaptive", "{teams}");
+    assert_eq!(teams["attachments"][0]["content"]["body"][0]["weight"], "Bolder", "{teams}");
+    let chat = &got.iter().find(|(p, _)| p.starts_with("/v1/spaces/")).expect("google chat").1;
+    assert!(chat["text"].as_str().unwrap().starts_with('*'), "{chat}");
+}
+
 /// PagerDuty and Opsgenie targets (Heroku's, Cloud Monitoring's): a failure opens an incident
 /// keyed by its service, environment and alert, a resolved alert or the next good deploy closes
 /// it; the key goes with each call and never comes back.

@@ -964,7 +964,7 @@ pub enum AppsCmd {
         #[arg(long)]
         remove: Option<String>,
     },
-    /// The project's notification targets: list them, `--add <url>` (`--kind slack|discord|webhook`,
+    /// The project's notification targets: list them, `--add <url>` (`--kind slack|discord|teams|googlechat|webhook`,
     /// a webhook's secret printed once), or `--remove <id>`.
     Notifications {
         #[command(flatten)]

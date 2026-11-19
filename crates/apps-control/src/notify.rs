@@ -237,10 +237,16 @@ impl Apps {
             "webhook" => {}
             "slack" if host == "hooks.slack.com" => {}
             "discord" if (host == "discord.com" || host == "discordapp.com") && u.path().starts_with("/api/webhooks/") => {}
+            // Teams' Workflows webhooks (and the connectors' old ones), Google Chat's space webhooks.
+            "teams" if host.ends_with(".webhook.office.com") || host.ends_with(".logic.azure.com") || host.ends_with(".powerplatform.com") => {}
+            "googlechat" if host == "chat.googleapis.com" && u.path().starts_with("/v1/spaces/") => {}
+            "teams" if !self.cfg.allow_private => return bad("a Teams webhook is a Workflows (…logic.azure.com, …powerplatform.com) or …webhook.office.com URL"),
+            "googlechat" if !self.cfg.allow_private => return bad("a Google Chat webhook is https://chat.googleapis.com/v1/spaces/…"),
+            "teams" | "googlechat" => {}
             "slack" if !self.cfg.allow_private => return bad("a Slack incoming webhook is on hooks.slack.com"),
             "discord" if !self.cfg.allow_private => return bad("a Discord webhook is https://discord.com/api/webhooks/…"),
             "slack" | "discord" => {}
-            _ => return Err(Error::BadRequest("kind is webhook, slack, discord, email, pagerduty or opsgenie".into())),
+            _ => return Err(Error::BadRequest("kind is webhook, slack, discord, teams, googlechat, email, pagerduty or opsgenie".into())),
         }
         Ok(host)
     }
@@ -533,6 +539,18 @@ impl Apps {
             // a commit author or an error can't ping a channel or hide a link.
             "slack" => json!({ "text": format!("*{}*\n{}{}", slack_escape(title), slack_escape(text), link.as_ref().map(|l| format!("\n<{l}|Open in roll>")).unwrap_or_default()) }),
             "discord" => json!({ "content": format!("**{title}**\n{text}{}", link.as_ref().map(|l| format!("\n{l}")).unwrap_or_default()), "allowed_mentions": { "parse": [] } }),
+            // An Adaptive Card (what Teams' Workflows take): its text is never a mention.
+            "teams" => {
+                let body = [json!({ "type": "TextBlock", "text": title, "weight": "Bolder", "wrap": true }), json!({ "type": "TextBlock", "text": text, "wrap": true })];
+                let actions = link.as_ref().map(|l| vec![json!({ "type": "Action.OpenUrl", "title": "Open in roll", "url": l })]).unwrap_or_default();
+                json!({ "type": "message", "attachments": [{ "contentType": "application/vnd.microsoft.card.adaptive", "content": { "$schema": "http://adaptivecards.io/schemas/adaptive-card.json", "type": "AdaptiveCard", "version": "1.4", "body": body, "actions": actions } }] })
+            }
+            // Google Chat reads `<users/all>` as a mention and `<url|text>` as a link: neither
+            // comes from what an event says.
+            "googlechat" => {
+                let clean = |s: &str| s.replace(['<', '>'], "");
+                json!({ "text": format!("*{}*\n{}{}", clean(title), clean(text), link.as_ref().map(|l| format!("\n<{l}|Open in roll>")).unwrap_or_default()) })
+            }
             _ => json!({ "type": e.kind, "at": e.at, "seq": e.seq, "service": e.service, "environment": e.environment, "deployment": e.deployment, "data": e.data, "title": title, "text": text, "url": link }),
         };
         let bytes = serde_json::to_vec(&body).expect("JSON");

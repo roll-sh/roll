@@ -756,7 +756,7 @@ fn apps_git_login_action(b: &Value) -> Action {
 fn apps_notification_action(b: &Value) -> Action {
     match b["kind"].as_str() {
         // Nothing comes back from these (an on-call key was the caller's to begin with).
-        Some("slack" | "discord" | "email" | "pagerduty" | "opsgenie") => Action::Write,
+        Some("slack" | "discord" | "teams" | "googlechat" | "email" | "pagerduty" | "opsgenie") => Action::Write,
         _ => Action::Reveal,
     }
 }
