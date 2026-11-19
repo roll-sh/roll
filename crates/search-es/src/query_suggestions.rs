@@ -325,8 +325,8 @@ mod tests {
         // Capped at `max`, heaviest first.
         let p = plan(&top, false, &Config { min_hits: 0, min_count: 1, max: 2, ..cfg() });
         assert_eq!(p.iter().map(|s| s.text.as_str()).collect::<Vec<_>>(), ["nothing found", "red shoes"]);
-        // The digest follows the output only.
-        assert_eq!(digest("a", &plan(&top, false, &cfg())), digest("a", &plan(&top, false, &Config { block: vec!["zzz".into()], ..cfg() })));
+        // The digest follows the output only: blocking a term that wasn't suggested changes nothing.
+        assert_eq!(digest("a", &plan(&top, false, &cfg())), digest("a", &plan(&top, false, &Config { block: vec!["bad word".into(), "zzz".into()], ..cfg() })));
         assert_ne!(digest("a", &plan(&top, false, &cfg())), digest("a", &plan(&top, false, &Config { block: vec!["red shoes".into()], ..cfg() })));
         assert_ne!(digest("a", &[]), digest("b", &[]));
     }
