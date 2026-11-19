@@ -8,7 +8,12 @@
 //!   serves `to`'s file instead (a rewrite, only where no file is at the path) and 404 answers
 //!   `to`'s file with a 404. The first rule that matches decides. A 200 whose `to` is
 //!   `service:<name>/<path>` sends the request to the project's service of that name in the
-//!   same environment (Netlify's and Vercel's proxy rewrites, only to the project's own).
+//!   same environment (Netlify's and Vercel's proxy rewrites, only to the project's own); one
+//!   whose `to` is another site's `https://` URL proxies it there (Netlify's 200 proxies,
+//!   Vercel's external rewrites), fetched as roll fetches any URL a tenant chose.
+//! - Conditions after the status (Netlify's): `Country=us,ca` (the edge's country), `Language=en`
+//!   (the browser's `Accept-Language`) and `Cookie=name` (one of them set): each given must hold
+//!   for the rule to match. A rule on something roll doesn't know here (`Role=`) never matches.
 //! - `_headers`: a path (the same patterns) on its own line, then indented `Name: value` lines
 //!   for the responses at it. Every matching block adds its headers, in order.
 
@@ -39,6 +44,54 @@ struct Redirect {
     from: Pattern,
     to: String,
     status: u16,
+    when: Conditions,
+}
+
+/// A rule's conditions ([`Redirect::when`]): each given must hold.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Conditions {
+    countries: Vec<String>,
+    languages: Vec<String>,
+    cookies: Vec<String>,
+}
+
+/// What a rule's conditions read of a request.
+#[derive(Debug, Default)]
+pub struct Visitor {
+    /// The edge's (`CF-IPCountry`), upper case.
+    pub country: Option<String>,
+    /// `Accept-Language`'s languages, lower case, each with its primary tag too (`en-us`, `en`).
+    pub languages: Vec<String>,
+    /// The names of the cookies it sent.
+    pub cookies: Vec<String>,
+}
+
+impl Visitor {
+    pub fn of(headers: &axum::http::HeaderMap) -> Visitor {
+        let text = |h: &str| headers.get_all(h).iter().filter_map(|v| v.to_str().ok()).collect::<Vec<_>>().join(if h == "cookie" { ";" } else { "," });
+        let country = headers.get("cf-ipcountry").and_then(|v| v.to_str().ok()).filter(|c| c.len() == 2 && c.bytes().all(|b| b.is_ascii_alphabetic())).map(|c| c.to_ascii_uppercase());
+        let mut languages = Vec::new();
+        for l in text("accept-language").split(',').take(20) {
+            let tag = l.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+            if tag.is_empty() || tag == "*" || tag.len() > 35 {
+                continue;
+            }
+            if let Some(primary) = tag.split('-').next().filter(|p| *p != tag) {
+                languages.push(primary.to_string());
+            }
+            languages.push(tag);
+        }
+        let cookies = text("cookie").split(';').take(100).filter_map(|kv| kv.trim().split_once('=').map(|(k, _)| k.trim().to_string())).filter(|k| !k.is_empty()).collect();
+        Visitor { country, languages, cookies }
+    }
+}
+
+impl Conditions {
+    fn hold(&self, v: &Visitor) -> bool {
+        (self.countries.is_empty() || v.country.as_ref().is_some_and(|c| self.countries.contains(c)))
+            && (self.languages.is_empty() || v.languages.iter().any(|l| self.languages.contains(l)))
+            && (self.cookies.is_empty() || v.cookies.iter().any(|c| self.cookies.contains(c)))
+    }
 }
 
 /// A path pattern: its segments, each literal or `:name`, and whether a final `*` takes the rest.
@@ -64,6 +117,8 @@ pub enum Outcome {
     /// Send the request to the project's service `service` in this environment, at this path
     /// (its query kept unless the rule names one).
     Proxy { service: String, path: String },
+    /// Fetch this URL on another site and answer with what it says (its query kept likewise).
+    External(String),
 }
 
 /// `service:<name>[/<path>]`: the name, and the path (`/` when none).
@@ -126,21 +181,52 @@ impl SiteRules {
             let line = line.split('#').next().unwrap_or("").trim();
             let mut f = line.split_whitespace();
             let (Some(from), Some(to)) = (f.next(), f.next()) else { continue };
-            let status = match f.next() {
+            // The status, if it's there, then conditions.
+            let mut rest: Vec<&str> = f.collect();
+            let status = match rest.first().filter(|s| !s.contains('=')) {
                 None => 301,
                 Some(s) => match s.trim_end_matches('!').parse::<u16>() {
-                    Ok(n @ (200 | 301 | 302 | 303 | 307 | 308 | 404)) => n,
+                    Ok(n @ (200 | 301 | 302 | 303 | 307 | 308 | 404)) => {
+                        rest.remove(0);
+                        n
+                    }
                     _ => continue,
                 },
             };
-            // A rewrite or a 404 serves one of the site's own files; a redirect may leave it.
+            let mut when = Conditions::default();
+            let mut known = true;
+            for c in rest {
+                let Some((k, v)) = c.split_once('=') else {
+                    known = false;
+                    break;
+                };
+                let list = || v.split(',').map(str::trim).filter(|x| !x.is_empty()).take(50);
+                match k.to_ascii_lowercase().as_str() {
+                    "country" => when.countries = list().map(str::to_ascii_uppercase).collect(),
+                    "language" => when.languages = list().map(str::to_ascii_lowercase).collect(),
+                    "cookie" => when.cookies = list().map(str::to_string).collect(),
+                    // `Role=` (Netlify Identity) and the like: nobody here holds it.
+                    _ => known = false,
+                }
+            }
+            if !known {
+                continue;
+            }
+            // A rewrite or a 404 serves one of the site's own files, a 200 to another site's
+            // https:// URL proxies it, a redirect may leave it.
             let external = to.starts_with("https://") || to.starts_with("http://");
             let service = service_target(to).is_some() && status == 200;
-            if !(to.starts_with('/') || service || external && !matches!(status, 200 | 404)) || to.contains(['\r', '\n']) {
+            // Its host is the rule's: a placeholder there would let a visitor pick it (a port is fine).
+            // (Plain http:// is taken here and refused at the fetch unless private targets are
+            // allowed, as for any URL a tenant chose.)
+            let scheme = ["https://", "http://"].into_iter().find(|s| to.starts_with(s));
+            let proxied = status == 200
+                && scheme.is_some_and(|s| to[s.len()..].split(['/', '?']).next().is_some_and(|host| !host.is_empty() && !host.split(':').skip(1).any(|p| !p.bytes().all(|b| b.is_ascii_digit()))));
+            if !(to.starts_with('/') || service || proxied || external && !matches!(status, 200 | 404)) || to.contains(['\r', '\n']) {
                 continue;
             }
             if let Some(from) = Pattern::parse(from) {
-                rules.redirects.push(Redirect { from, to: to.to_string(), status });
+                rules.redirects.push(Redirect { from, to: to.to_string(), status, when });
             }
         }
         let mut current: Option<(Pattern, Vec<(String, String)>)> = None;
@@ -176,10 +262,10 @@ impl SiteRules {
 
     /// What the first matching redirect rule makes of `path` (its query kept on a redirect that
     /// names none), when `exists` says whether a file answers it (a rewrite only fills a gap).
-    pub fn redirect(&self, path: &str, query: Option<&str>, exists: bool) -> Option<Outcome> {
+    pub fn redirect(&self, path: &str, query: Option<&str>, exists: bool, visitor: &Visitor) -> Option<Outcome> {
         for r in &self.redirects {
             let Some(mut bound) = r.from.matches(path) else { continue };
-            if r.status == 200 && exists {
+            if (r.status == 200 && exists) || !r.when.hold(visitor) {
                 continue;
             }
             // Longer names first, so `:id` doesn't eat `:identity`.
@@ -205,6 +291,12 @@ impl SiteRules {
                     path = format!("{path}?{q}");
                 }
                 return Some(Outcome::Proxy { service: service.to_string(), path });
+            }
+            if r.status == 200 && (to.starts_with("https://") || to.starts_with("http://")) {
+                if let Some(q) = query.filter(|q| !q.is_empty() && !to.contains('?')) {
+                    to = format!("{to}?{q}");
+                }
+                return Some(Outcome::External(to));
             }
             return Some(match r.status {
                 200 | 404 => Outcome::Serve(r.status, to),
@@ -244,26 +336,45 @@ mod tests {
             ),
             None,
         );
-        assert_eq!(r.redirect("/old", Some("a=1"), false), Some(Outcome::Redirect(301, "/new?a=1".into())), "the query goes along");
-        assert_eq!(r.redirect("/blog/2026/hello", None, false), Some(Outcome::Redirect(302, "/posts/hello?y=2026".into())));
-        assert_eq!(r.redirect("/docs/a/b", None, false), Some(Outcome::Redirect(308, "/guide/a/b".into())));
-        assert_eq!(r.redirect("/app/settings", None, false), Some(Outcome::Serve(200, "/index.html".into())));
-        assert_eq!(r.redirect("/app/logo.png", None, true), None, "a rewrite never hides a file");
-        assert_eq!(r.redirect("/gone", None, false), Some(Outcome::Serve(404, "/404.html".into())));
-        assert_eq!(r.redirect("/out", None, false), Some(Outcome::Redirect(307, "https://example.com/x".into())));
-        assert_eq!(r.redirect("/bad", None, false), None, "an unknown status is skipped");
-        assert_eq!(r.redirect("/ext", None, false), None, "a rewrite stays on the site");
-        assert_eq!(r.redirect("/blog/2026", None, false), None);
+        assert_eq!(r.redirect("/old", Some("a=1"), false, &Visitor::default()), Some(Outcome::Redirect(301, "/new?a=1".into())), "the query goes along");
+        assert_eq!(r.redirect("/blog/2026/hello", None, false, &Visitor::default()), Some(Outcome::Redirect(302, "/posts/hello?y=2026".into())));
+        assert_eq!(r.redirect("/docs/a/b", None, false, &Visitor::default()), Some(Outcome::Redirect(308, "/guide/a/b".into())));
+        assert_eq!(r.redirect("/app/settings", None, false, &Visitor::default()), Some(Outcome::Serve(200, "/index.html".into())));
+        assert_eq!(r.redirect("/app/logo.png", None, true, &Visitor::default()), None, "a rewrite never hides a file");
+        assert_eq!(r.redirect("/gone", None, false, &Visitor::default()), Some(Outcome::Serve(404, "/404.html".into())));
+        assert_eq!(r.redirect("/out", None, false, &Visitor::default()), Some(Outcome::Redirect(307, "https://example.com/x".into())));
+        assert_eq!(r.redirect("/bad", None, false, &Visitor::default()), None, "an unknown status is skipped");
+        assert_eq!(r.redirect("/ext", None, false, &Visitor::default()), Some(Outcome::External("https://example.com".into())), "a 200 to another site proxies it");
+        assert_eq!(r.redirect("/blog/2026", None, false, &Visitor::default()), None);
         // A path can't send the visitor to another host, or add a query.
         let open = SiteRules::parse(Some("/go/* /:splat 301\n/u/:name /:name 302\n"), None);
-        assert_eq!(open.redirect("/go/\\evil.com", None, false), Some(Outcome::Redirect(301, "/%5Cevil.com".into())));
-        assert_eq!(open.redirect("/u/a?b=1#x", None, false), Some(Outcome::Redirect(302, "/a%3Fb%3D1%23x".into())));
-        assert_eq!(open.redirect("/go/a/b", None, false), Some(Outcome::Redirect(301, "/a/b".into())));
+        assert_eq!(open.redirect("/go/\\evil.com", None, false, &Visitor::default()), Some(Outcome::Redirect(301, "/%5Cevil.com".into())));
+        assert_eq!(open.redirect("/u/a?b=1#x", None, false, &Visitor::default()), Some(Outcome::Redirect(302, "/a%3Fb%3D1%23x".into())));
+        assert_eq!(open.redirect("/go/a/b", None, false, &Visitor::default()), Some(Outcome::Redirect(301, "/a/b".into())));
         // To the project's own service, its query kept; never another kind of target or status.
         let api = SiteRules::parse(Some("/api/* service:api/v1/:splat 200\n/hc service:api 200\n/bad service:API/x 200\n/moved service:api/x 301\n"), None);
-        assert_eq!(api.redirect("/api/users/7", Some("a=1"), false), Some(Outcome::Proxy { service: "api".into(), path: "/v1/users/7?a=1".into() }));
-        assert_eq!(api.redirect("/hc", None, false), Some(Outcome::Proxy { service: "api".into(), path: "/".into() }));
-        assert_eq!((api.redirect("/bad", None, false), api.redirect("/moved", None, false)), (None, None));
+        assert_eq!(api.redirect("/api/users/7", Some("a=1"), false, &Visitor::default()), Some(Outcome::Proxy { service: "api".into(), path: "/v1/users/7?a=1".into() }));
+        assert_eq!(api.redirect("/hc", None, false, &Visitor::default()), Some(Outcome::Proxy { service: "api".into(), path: "/".into() }));
+        assert_eq!((api.redirect("/bad", None, false, &Visitor::default()), api.redirect("/moved", None, false, &Visitor::default())), (None, None));
+    }
+
+    #[test]
+    fn rules_proxy_to_other_sites_and_hold_their_conditions() {
+        let r = SiteRules::parse(Some("/api/* https://api.example.com/v2/:splat 200\n/x/:host https://:host/ 200\n/fr / 302 Country=fr,be Language=fr\n/beta/* /beta.html 200 Cookie=beta\n/admin /a.html 200 Role=admin\n"), None);
+        assert_eq!(r.redirect("/api/users/7", Some("a=1"), false, &Visitor::default()), Some(Outcome::External("https://api.example.com/v2/users/7?a=1".into())));
+        assert_eq!(r.redirect("/x/evil.com", None, false, &Visitor::default()), None, "a visitor never picks the host");
+        let fr = Visitor { country: Some("BE".into()), languages: vec!["fr-be".into(), "fr".into()], cookies: vec![] };
+        assert_eq!(r.redirect("/fr", None, false, &fr), Some(Outcome::Redirect(302, "/".into())));
+        assert_eq!(r.redirect("/fr", None, false, &Visitor { country: Some("BE".into()), ..Visitor::default() }), None, "every condition holds");
+        assert_eq!(r.redirect("/beta/x", None, false, &Visitor { cookies: vec!["beta".into()], ..Visitor::default() }), Some(Outcome::Serve(200, "/beta.html".into())));
+        assert_eq!(r.redirect("/beta/x", None, false, &Visitor::default()), None);
+        assert_eq!(r.redirect("/admin", None, false, &Visitor { cookies: vec!["nf_jwt".into()], ..Visitor::default() }), None, "a condition roll doesn't know never matches");
+        let mut h = axum::http::HeaderMap::new();
+        h.insert("accept-language", "fr-CH, en;q=0.8".parse().unwrap());
+        h.insert("cookie", "beta=1; roll_b=2".parse().unwrap());
+        h.insert("cf-ipcountry", "ch".parse().unwrap());
+        let v = Visitor::of(&h);
+        assert_eq!((v.country.as_deref(), v.languages, v.cookies), (Some("CH"), vec!["fr".to_string(), "fr-ch".into(), "en".into()], vec!["beta".to_string(), "roll_b".into()]));
     }
 
     #[test]

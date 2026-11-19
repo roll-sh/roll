@@ -76,7 +76,7 @@ impl Secrets {
         caller.ip = self.client_ip(parts);
         // Only with a grant: the gate sets it beside the grant whose request an approval let through.
         if roll_auth::Grant::on(&parts.extensions).is_some() {
-            caller.approval = roll_auth::Approved::on(&parts.extensions).map(Into::into);
+            caller.approval = roll_auth::Approved::on(&parts.extensions).map(crate::access::approval);
         }
         Ok(caller)
     }
@@ -89,12 +89,13 @@ impl Secrets {
         // A roll-access grant first: the gate may put the operator marker beside it, narrowed by
         // its rules, so the marker alone would read as everything.
         if let Some(g) = grant {
-            // A workload token an identity's login got is that identity in the audit log.
-            let principal = match self.login_of(&g.id)? {
-                Some(identity) => format!("identity:{identity}"),
-                None => format!("token:{}", g.id),
-            };
-            return Ok(Caller { principal, grants: self.grant_grants(g)?, ip: None, runtime: false, approval: None });
+            // A workload token an identity's login got is that identity in the audit log, and
+            // reads as one: never past a freeze, whatever its rules.
+            let grants = self.grant_grants(g)?;
+            return Ok(match self.login_of(&g.id)? {
+                Some(identity) => Caller::acting(format!("identity:{identity}"), grants),
+                None => Caller::token(&g.id, grants),
+            });
         }
         // A signed-in person (the gate resolved the session on this request): their own projects.
         // An admin's session is the operator, as their token would be.
@@ -140,7 +141,7 @@ impl Secrets {
         if admin {
             return Ok(Caller::operator());
         }
-        Ok(Caller { principal: user.to_string(), grants: Arc::new(self.own_projects(user)?), ip: None, runtime: false, approval: None })
+        Ok(Caller::person(user, Arc::new(self.own_projects(user)?)))
     }
 
     /// The projects `user` owns, as the workspace has them now, and their roll code owner.
@@ -183,18 +184,16 @@ impl Secrets {
     /// person who can't sign in, a token revoked or expired, anything else.
     pub(crate) fn acting_as(&self, by: &str, principal: String) -> Result<Option<Caller>> {
         if by == "operator" {
-            return Ok(Some(Caller { principal, grants: Arc::new(crate::access::Everything), ip: None, runtime: false, approval: None }));
+            return Ok(Some(Caller::acting(principal, Arc::new(crate::access::Everything))));
         }
         // A person's: as they are now, while their account can sign in.
         if crate::access::is_person(by) {
             let Some(person) = self.person(by)? else { return Ok(None) };
-            let mut c = self.person_caller(by, person.admin)?;
-            c.principal = principal;
-            return Ok(Some(c));
+            return Ok(Some(self.person_caller(by, person.admin)?.acting_as(principal)));
         }
         // A roll-access grant: as it is now (a person's acts as them).
         let Some(g) = by.strip_prefix("token:").and_then(|t| self.grants.as_ref()?.grant(t)) else { return Ok(None) };
-        Ok(Some(Caller { principal, grants: self.grant_grants(&g)?, ip: None, runtime: false, approval: None }))
+        Ok(Some(Caller::acting(principal, self.grant_grants(&g)?)))
     }
 
     /// Who made `by` in the end: an identity's maker, a token's person (a roll-access grant made by

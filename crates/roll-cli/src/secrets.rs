@@ -168,14 +168,18 @@ pub enum Secrets {
         /// A .env or JSON file (`-`: stdin); or `--from` another manager.
         #[arg(required_unless_present = "from")]
         file: Option<String>,
-        /// Read it from another manager's API, with your own token from its usual variable:
-        /// doppler (`DOPPLER_TOKEN`), vault (`VAULT_ADDR`, `VAULT_TOKEN`), infisical (`INFISICAL_TOKEN`),
-        /// aws (Secrets Manager through your `aws` CLI: its profiles and SSO).
+        /// Read it from another manager, signed in as you are there. From its API with your token
+        /// in its usual variable: doppler (`DOPPLER_TOKEN`), vault (`VAULT_ADDR`, `VAULT_TOKEN`),
+        /// infisical (`INFISICAL_TOKEN`). Through its own CLI: aws (Secrets Manager),
+        /// aws-parameter-store, 1password (`op`), bitwarden (`bws`), gcp (`gcloud`), azure (`az`),
+        /// akeyless.
         #[arg(long, conflicts_with = "file", requires = "source")]
         from: Option<String>,
         /// What to read there: doppler `project/config`, vault `mount/path` (KV v2), infisical
-        /// `workspace-id/environment[/path]`, aws a name prefix (`prod/app/`). With `--map`, the
-        /// part before the mapped name.
+        /// `workspace-id/environment[/path]`, aws a name prefix (`prod/app/`),
+        /// aws-parameter-store and akeyless a path (`/prod/app`), 1password `VAULT` or
+        /// `VAULT/ITEM`, bitwarden a project id, gcp `PROJECT[/PREFIX]`, azure a vault's name.
+        /// With `--map`, the part before the mapped name.
         #[arg(long)]
         source: Option<String>,
         /// Several environments at once: `dev=development,prd=production` reads `<source>/dev`
@@ -191,6 +195,14 @@ pub enum Secrets {
         overwrite: bool,
         #[arg(long)]
         request: bool,
+        /// Print the folders and keys it would import (never a value), and import nothing.
+        #[arg(long, requires = "from")]
+        dry_run: bool,
+        /// Tag what the source keeps secret `sensitive` (for good: no person or token reads it
+        /// back): Parameter Store's SecureStrings, 1Password's concealed fields, every value of
+        /// the other managers.
+        #[arg(long, requires = "from")]
+        sensitive: bool,
     },
     /// Fill `${KEY}` in a config file (`-`: stdin) from the environment; a key that isn't set fails.
     /// `\${KEY}` stays as written. Prints it, or writes `--out` (0600).
@@ -242,10 +254,19 @@ pub enum Secrets {
     },
     /// Look for this project's values in files (a directory is walked; `--staged`: what `git
     /// commit` would record, for a pre-commit hook). Says where, never the value; fails if found.
+    /// Also lists credentials roll secrets doesn't hold yet (AWS, GitHub, Stripe… keys; not
+    /// placeholders, not what `.roll/secrets-allow` allows); `--staged` refuses on one.
     Scan {
         paths: Vec<String>,
         #[arg(long, conflicts_with = "paths")]
         staged: bool,
+        /// With `--staged`: commit credentials roll secrets doesn't hold anyway.
+        #[arg(long)]
+        allow_unstored: bool,
+        /// Move one credential roll secrets doesn't hold into the environment as a new key
+        /// (default: a name from its variable or kind) and print what to replace it with.
+        #[arg(long, value_name = "[KEY=]FILE:LINE", conflicts_with_all = ["paths", "staged"])]
+        store: Option<String>,
     },
     /// Pull the environment's folder into Kubernetes with External Secrets Operator: makes a token
     /// for it and prints the token's Secret, a SecretStore and an ExternalSecret (`| kubectl apply -f -`).
@@ -267,7 +288,26 @@ pub enum Secrets {
     },
     /// Who and what can read this folder's values (or one key's): tokens and identities that reach
     /// it, untrusted code, syncs, shares and imports, and who read it in 30 days. A project admin's.
-    Reach { key: Option<String> },
+    /// `--cut-off` cuts all of it at once (an incident): tokens and identities' logins revoked,
+    /// identities disabled, leases ended, shares expired, syncs paused.
+    Reach {
+        key: Option<String>,
+        /// Cut off everything listed (asks first unless --yes).
+        #[arg(long, requires = "why")]
+        cut_off: bool,
+        /// Why (the incident): on every revoked token and in the audit log.
+        #[arg(long)]
+        why: Option<String>,
+        /// With --cut-off: also freeze the folder (reads answer 423 to all but its admins).
+        #[arg(long, requires = "cut_off")]
+        freeze: bool,
+        /// Don't ask before cutting off.
+        #[arg(long)]
+        yes: bool,
+        /// Lift the folder's freeze.
+        #[arg(long, conflicts_with = "cut_off")]
+        unfreeze: bool,
+    },
     /// Print the resolved values: dotenv, json, shell, yaml, docker (`--env-file`) or kubernetes (a Secret manifest).
     Export {
         #[arg(long, default_value = "dotenv")]
@@ -428,6 +468,21 @@ pub enum Secrets {
         #[arg(long)]
         key: std::path::PathBuf,
     },
+    /// Split the deployment key (`ROLL_SECRET_KEY`) or a backup's secret key into shares, any
+    /// threshold of which give it back, and combine them again. On this machine only: nothing
+    /// goes to roll.
+    #[command(subcommand)]
+    Key(KeyCmd),
+    /// Give a sealed node (`ROLL_SECRET_KEY_SEALED`) your share of the deployment key: read
+    /// without echo (or a line on stdin), sent to the node, or to each `--node` of a fleet (every
+    /// node unseals on its own). `--status` only shows how many shares each has.
+    Unseal {
+        #[arg(long)]
+        status: bool,
+        /// A node's API; repeat it for every node of a fleet (default: this CLI's API).
+        #[arg(long = "node", value_name = "URL")]
+        nodes: Vec<String>,
+    },
     /// The folders this folder imports (its own project's, or a folder another project shares
     /// with it): list, add, rm.
     #[command(subcommand)]
@@ -442,6 +497,9 @@ pub enum Secrets {
     /// (`ROLL_IDENTITY`), no stored token: list, add, rm.
     #[command(subcommand)]
     Identities(Identities),
+    /// Decoy keys: a credential planted to be found, whose use raises `decoy_used` (admins only).
+    #[command(subcommand)]
+    Decoy(DecoyCmd),
     /// Hand a value to someone outside roll: a link that opens once (or `--views`) and expires.
     /// The value is encrypted here; the key is only in the link.
     Share {
@@ -512,8 +570,11 @@ pub enum Secrets {
         #[arg(long)]
         revoke: Option<String>,
     },
-    /// Who read and changed what (never values).
+    /// Who read and changed what (never values). `audit verify` checks it wasn't tampered with.
+    #[command(args_conflicts_with_subcommands = true)]
     Audit {
+        #[command(subcommand)]
+        cmd: Option<AuditCmd>,
         #[arg(long)]
         key: Option<String>,
         #[arg(long)]
@@ -523,6 +584,25 @@ pub enum Secrets {
         /// Export instead: `csv` or `jsonl` (up to 10,000 rows).
         #[arg(long)]
         format: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AuditCmd {
+    /// Walk the audit log's hash chain and check roll's signed digests: where it breaks, if it
+    /// does (an edited row, a gap, rows cut from either end).
+    Verify {
+        /// Only from the last digest before this time (RFC 3339 or a date).
+        #[arg(long)]
+        since: Option<String>,
+        /// Check an export (`audit --format jsonl`) of the project (`-p`) on this machine instead,
+        /// with nothing but roll's public keys.
+        #[arg(long, requires = "jwks")]
+        file: Option<std::path::PathBuf>,
+        /// roll's public keys, as saved earlier from `/v1/secrets/oidc/jwks` and kept apart from
+        /// roll: keys fetched from the server being checked would vouch for themselves.
+        #[arg(long, requires = "file")]
+        jwks: Option<std::path::PathBuf>,
     },
 }
 
@@ -1174,6 +1254,32 @@ pub enum Tokens {
 }
 
 #[derive(Subcommand)]
+pub enum KeyCmd {
+    /// Split a key into `--shares` shares (`rlks_…`), any `--threshold` of which recover it. The
+    /// key is read from `--file`, else stdin (asked for without echo on a terminal).
+    Split {
+        #[arg(long)]
+        shares: usize,
+        #[arg(long)]
+        threshold: usize,
+        /// A file holding the key (`<home>/secrets.key`, a backup's secret key).
+        #[arg(long)]
+        file: Option<std::path::PathBuf>,
+        /// Write each share to its own file here (0600, never overwritten) instead of stdout.
+        #[arg(long)]
+        out_dir: Option<std::path::PathBuf>,
+    },
+    /// Combine shares into the key: one share per line on stdin, or asked for one at a time
+    /// without echo on a terminal. A damaged share, one of another split, or one given twice is
+    /// refused; the key is never guessed.
+    Combine {
+        /// Write the key here (0600, never overwritten) instead of stdout.
+        #[arg(long)]
+        out: Option<std::path::PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
 pub enum ImportsCmd {
     #[command(alias = "list")]
     Ls,
@@ -1245,6 +1351,18 @@ pub enum RequiredCmd {
     },
 }
 
+#[derive(Subcommand)]
+pub enum DecoyCmd {
+    /// Plant a decoy key in the environment's folder (`--path`): a new key whose value is a decoy
+    /// credential. It reads like any other key; any use of it raises `decoy_used`.
+    Add {
+        key: String,
+        /// What the value is: `rlt`, a roll token that allows nothing.
+        #[arg(long, default_value = "rlt")]
+        kind: String,
+    },
+}
+
 // Parsed once per run.
 #[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
@@ -1252,13 +1370,19 @@ pub enum Identities {
     #[command(alias = "list")]
     Ls,
     /// Let workloads whose OIDC tokens match log in. For GitHub Actions:
-    /// `add deploy --github acme/web --claim ref=refs/heads/main --for-env production`.
+    /// `add deploy --github acme/web --claim ref=refs/heads/main --for-env production`. For
+    /// machines on AWS: `add web --aws arn:aws:iam::123456789012:role/web --for-env production`.
     Add {
         name: String,
         /// A GitHub repo (`owner/name`): GitHub Actions' issuer, and every workflow of the repo
         /// (narrow with `--claim`).
-        #[arg(long, conflicts_with_all = ["issuer", "subject"])]
+        #[arg(long, conflicts_with_all = ["issuer", "subject", "aws"])]
         github: Option<String>,
+        /// An AWS role or user (`arn:aws:iam::<account>:role/<name>`, any of its sessions; or
+        /// `arn:aws:sts::<account>:assumed-role/<role>/<session prefix>*`): machines log in with
+        /// a signed GetCallerIdentity, checked by STS.
+        #[arg(long, value_name = "ARN", conflicts_with_all = ["issuer", "subject", "audience", "claims", "jwks"])]
+        aws: Option<String>,
         /// The token's issuer (`iss`), for any other OIDC provider.
         #[arg(long, requires = "subject")]
         issuer: Option<String>,
@@ -1416,13 +1540,21 @@ async fn project(api: &Api, given: Option<&str>) -> anyhow::Result<String> {
             let found: Vec<String> = list.as_array().into_iter().flatten().filter(|p| p["name"] == name).filter_map(|p| p["id"].as_str().map(String::from)).collect();
             match found.as_slice() {
                 [one] => Ok(one.clone()),
-                [] => bail!("no project named {name}"),
+                [] => {
+                    let mut seen: Vec<&str> = list.as_array().into_iter().flatten().filter_map(|p| p["name"].as_str()).collect();
+                    seen.sort_unstable();
+                    seen.dedup();
+                    match seen.as_slice() {
+                        [] => bail!("no project named {name}, and this token sees no projects"),
+                        _ => bail!("no project named {name}; the ones you can see: {}", seen.join(", ")),
+                    }
+                }
                 _ => bail!("{} projects are named {name}: give its prj_… id", found.len()),
             }
         }
         None => {
             let who = api.get("/v1/secrets/whoami").await?;
-            who["project"].as_str().map(String::from).context("which project? pass -p <name> or set ROLL_PROJECT")
+            who["project"].as_str().map(String::from).context("which project? pass -p <name>, set ROLL_PROJECT, or remember one for this folder with `roll secrets setup -p <name>`")
         }
     }
 }
@@ -1535,6 +1667,12 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
     if let Secrets::Gateways(GatewaysCmd::Up { gateway, allow, allow_file, token_file, identity, oidc_token_file }) = &cmd {
         return gateway_up(api, gateway.clone(), allow.clone(), allow_file.clone(), token_file.clone(), identity.clone(), oidc_token_file.clone()).await;
     }
+    // An export is checked on this machine, against keys saved earlier. A `prj_…` id needs no
+    // server; a name is looked up.
+    if let Secrets::Audit { cmd: Some(AuditCmd::Verify { file: Some(file), jwks: Some(jwks), .. }), .. } = &cmd {
+        let given = args.resolve().project.context("which project's log is it? pass -p (a prj_… id needs no server)")?;
+        return verify_audit_file(&project(api, Some(&given)).await?, file, jwks, json_out);
+    }
     // A key pair is this machine's, not a project's.
     if let Secrets::Keygen { out } = &cmd {
         let (secret, public) = crate::seal::keypair();
@@ -1542,6 +1680,14 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
         println!("{public}");
         eprintln!("The secret key is in {} (0600): keep it apart from the backups. The public key above goes to backup --to.", out.display());
         return Ok(());
+    }
+    // So is a key's split.
+    if let Secrets::Key(cmd) = cmd {
+        return key_shares(cmd);
+    }
+    // A sealed node has no projects yet.
+    if let Secrets::Unseal { status, nodes } = cmd {
+        return unseal(api, status, nodes).await;
     }
     let at = args.resolve();
     let c = Client { project: project(api, at.project.as_deref()).await?, api, at };
@@ -1667,48 +1813,31 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             write(&c, &env, ops, None, request, json_out).await?;
         }
         Secrets::Edit { request } => edit(&c, &env, request, json_out).await?,
-        Secrets::Import { file, from, source, map, recursive, overwrite, request } => {
-            if recursive {
-                anyhow::ensure!(from.as_deref() == Some("vault") && map.is_empty(), "--recursive reads a Vault KV v2 tree: --from vault --source mount/path");
-                let tree = vault_tree(source.as_deref().unwrap_or_default()).await?;
-                anyhow::ensure!(!tree.is_empty(), "nothing to import under {}", source.as_deref().unwrap_or_default());
-                for (folder, values) in &tree {
-                    let path = format!("{}/{}", c.at.path.trim_end_matches('/'), folder).replace("//", "/");
-                    let path = if path.len() > 1 { path.trim_end_matches('/').to_string() } else { path };
-                    let body = import_body(&serde_json::to_string(values)?, &path, overwrite, request)?;
-                    let v = c.call(Method::POST, &format!("{env}/import"), Some(body)).await.map_err(approval_hint).with_context(|| format!("importing into {path}"))?;
-                    let skipped = v["skipped"].as_array().map_or(0, Vec::len);
-                    match v.get("request").filter(|r| r.is_object()) {
-                        Some(r) => println!("{path}: change request {} ({} values)", s(&r["id"]), values.len()),
-                        None => println!("{path}: {} value{}{}", values.len(), if values.len() == 1 { "" } else { "s" }, if skipped > 0 { format!(", {skipped} existing skipped (use --overwrite)") } else { String::new() }),
-                    }
+        Secrets::Import { file, from, source, map, recursive, overwrite, request, dry_run, sensitive } => {
+            if let Some(from) = from {
+                anyhow::ensure!(!recursive || (from == "vault" && map.is_empty()), "--recursive reads a Vault KV v2 tree: --from vault --source mount/path");
+                let source = source.unwrap_or_default();
+                let o = ImportOpts { overwrite, request, sensitive, dry_run, message: format!("imported from {from} {}", source.chars().take(200).collect::<String>()) };
+                if map.is_empty() {
+                    let folders = read_source(&from, &source, recursive).await?;
+                    return import_folders(&c, &env, &folders, &o, None, json_out).await;
                 }
-                return Ok(());
-            }
-            if let (Some(from), false) = (&from, map.is_empty()) {
-                let base = source.as_deref().unwrap_or_default().trim_end_matches('/');
+                let base = source.trim_end_matches('/');
                 for pair in &map {
                     let (src, dst) = pair.split_once('=').with_context(|| format!("{pair}: --map is source=environment"))?;
-                    let values = import_from(from, &format!("{base}/{src}")).await.with_context(|| format!("reading {base}/{src}"))?;
-                    let body = import_body(&serde_json::to_string(&values)?, &c.at.path, overwrite, request)?;
-                    let v = c.call(Method::POST, &format!("{}/import", c.env(dst)), Some(body)).await.map_err(approval_hint).with_context(|| format!("importing into {dst}"))?;
-                    let skipped = v["skipped"].as_array().map_or(0, Vec::len);
-                    match v.get("request").filter(|r| r.is_object()) {
-                        Some(r) => println!("{src} → {dst}: change request {} ({} values)", s(&r["id"]), values.len()),
-                        None => println!("{src} → {dst}: {} value{}{}", values.len(), if values.len() == 1 { "" } else { "s" }, if skipped > 0 { format!(", {skipped} existing skipped (use --overwrite)") } else { String::new() }),
-                    }
+                    let folders = read_source(&from, &format!("{base}/{src}"), false).await.with_context(|| format!("reading {base}/{src}"))?;
+                    import_folders(&c, &c.env(dst), &folders, &o, Some(&format!("{src} → {dst}")), json_out).await?;
                 }
                 return Ok(());
             }
-            let text = match (file.as_deref(), from) {
-                (_, Some(from)) => serde_json::to_string(&import_from(&from, source.as_deref().unwrap_or_default()).await?)?,
-                (Some("-"), None) => {
+            let text = match file.as_deref() {
+                Some("-") => {
                     let mut t = String::new();
                     std::io::stdin().read_to_string(&mut t)?;
                     t
                 }
-                (Some(f), None) => std::fs::read_to_string(f).with_context(|| format!("reading {f}"))?,
-                (None, None) => bail!("a file, or --from another manager"),
+                Some(f) => std::fs::read_to_string(f).with_context(|| format!("reading {f}"))?,
+                None => bail!("a file, or --from another manager"),
             };
             let v = c
                 .call(Method::POST, &format!("{env}/import"), Some(import_body(&text, &c.at.path, overwrite, request)?))
@@ -1766,7 +1895,10 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 let path = r["path"].as_str().unwrap_or("/");
                 let at = if path == "/" { String::new() } else { format!(" {path}") };
                 let when = match (r["rotate_days"].as_u64(), r["next_due"].as_i64()) {
-                    (Some(d), Some(n)) => format!("every {d} days, next {}", day(n)),
+                    (Some(d), Some(n)) => match r["rotate_window"].as_str() {
+                        Some(w) => format!("every {d} days in {w} UTC, next {}", day(n)),
+                        None => format!("every {d} days, next {}", day(n)),
+                    },
                     _ => "by hand".into(),
                 };
                 println!("{:<12} {}{at}  {} ({})  {when}", r["environment"].as_str().unwrap_or(""), keys.join(","), r["name"].as_str().unwrap_or(""), r["kind"].as_str().unwrap_or(""));
@@ -1843,9 +1975,14 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 bail!("{} doesn't match {template}", c.at.env);
             }
         }
-        Secrets::Scan { paths, staged } => {
+        Secrets::Scan { paths, staged, allow_unstored, store } => {
+            if let Some(spec) = store {
+                return store_credential(&c, &env, &spec, json_out).await;
+            }
             let files = if staged { staged_files()? } else { walk(if paths.is_empty() { vec![".".into()] } else { paths })? };
+            let (root, allow) = allow_list();
             let mut by: std::collections::BTreeMap<String, Vec<(String, usize)>> = Default::default();
+            let mut creds: Vec<(String, Credential)> = vec![];
             for (name, text) in &files {
                 for (n, line) in text.lines().enumerate() {
                     let mut found = std::collections::HashSet::new();
@@ -1854,13 +1991,27 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                         by.entry(c).or_default().push((name.clone(), n + 1));
                     }
                 }
+                // Staged names are the repo's already; a walked file's is made relative to its top.
+                let rel = if staged { name.clone() } else { std::fs::canonicalize(name).ok().and_then(|p| p.strip_prefix(&root).ok().map(|p| p.to_string_lossy().into_owned())).unwrap_or_else(|| name.clone()) };
+                if code_review::glob::any(&allow.paths, &rel) {
+                    continue;
+                }
+                for cred in credentials_in(text) {
+                    if !allow.fingerprints.contains(&cred.fingerprint) {
+                        // Asked about with the candidates: one this project holds is a value, not a credential to store.
+                        by.entry(cred.value.clone()).or_default();
+                        creds.push((name.clone(), cred));
+                    }
+                }
             }
             let all: Vec<String> = by.keys().cloned().collect();
             let mut hits: Vec<(String, usize, String, String, String)> = vec![];
+            let mut stored = std::collections::HashSet::new();
             for chunk in all.chunks(20_000) {
                 let v = c.call(Method::POST, &format!("{}/leaks", c.base()), Some(json!({ "candidates": chunk }))).await?;
                 for f in v.as_array().into_iter().flatten() {
                     let Some(cand) = f["index"].as_u64().and_then(|i| chunk.get(i as usize)) else { continue };
+                    stored.insert(cand.clone());
                     for (file, line) in &by[cand] {
                         hits.push((file.clone(), *line, s(&f["key"]), s(&f["environment"]), s(&f["path"])));
                     }
@@ -1868,18 +2019,36 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             }
             hits.sort();
             hits.dedup();
+            creds.retain(|(_, cred)| !stored.contains(&cred.value));
             if json_out {
-                return print(&json!(hits.iter().map(|h| json!({ "file": h.0, "line": h.1, "key": h.2, "environment": h.3, "path": h.4 })).collect::<Vec<_>>()));
-            }
-            for (file, line, key, env, path) in &hits {
-                println!("{file}:{line}  {key} ({env}{})", if path == "/" { String::new() } else { format!(" {path}") });
+                let mut out: Vec<Value> = hits.iter().map(|h| json!({ "file": h.0, "line": h.1, "key": h.2, "environment": h.3, "path": h.4 })).collect();
+                out.extend(creds.iter().map(|(file, cred)| json!({ "file": file, "line": cred.line, "unstored": true, "kind": cred.kind, "fingerprint": cred.fingerprint, "suggested_key": cred.key })));
+                print(&json!(out))?;
+            } else {
+                for (file, line, key, env, path) in &hits {
+                    println!("{file}:{line}  {key} ({env}{})", if path == "/" { String::new() } else { format!(" {path}") });
+                }
+                for (file, cred) in &creds {
+                    println!("{file}:{}  {}, not in roll secrets: roll secrets scan --store {}={file}:{}  [{}]", cred.line, cred.kind, cred.key, cred.line, cred.fingerprint);
+                }
             }
             if !hits.is_empty() {
                 let files = hits.iter().map(|h| &h.0).collect::<std::collections::BTreeSet<_>>().len();
                 let (what, it) = if hits.len() == 1 { ("a value of this project".to_string(), "it") } else { (format!("{} values of this project", hits.len()), "them") };
                 bail!("{what} in {files} {}: move {it} out of the code (roll run puts values in the environment)", if files == 1 { "file" } else { "files" });
             }
-            eprintln!("No values of this project in {} {}", files.len(), if files.len() == 1 { "file" } else { "files" });
+            if staged && !allow_unstored && !creds.is_empty() {
+                let what = if creds.len() == 1 { "a credential".to_string() } else { format!("{} credentials", creds.len()) };
+                bail!("{what} roll secrets doesn't hold in the staged files: store it in roll (--store), allow it in {}, or commit with --allow-unstored", roll_auth::credentials::ALLOW_FILE);
+            }
+            if json_out {
+                return Ok(());
+            }
+            if !creds.is_empty() {
+                eprintln!("{} credential(s) roll secrets doesn't hold; no values of this project in {} {}", creds.len(), files.len(), if files.len() == 1 { "file" } else { "files" });
+            } else {
+                eprintln!("No values of this project in {} {}", files.len(), if files.len() == 1 { "file" } else { "files" });
+            }
         }
         Secrets::Kubernetes { name, namespace, refresh, url, ttl_days } => {
             let name = name.unwrap_or_else(|| c.at.env.to_ascii_lowercase().replace('_', "-"));
@@ -1936,12 +2105,71 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             );
             eprintln!("Made token {} for {}:{}; it's only in the output above. Apply it with: | kubectl apply -f -", s(&token["grant"]["id"]), c.at.env, c.at.path);
         }
-        Secrets::Reach { key } => {
-            let mut url = format!("{}/reach?{}", c.env(&c.at.env), c.q());
-            if let Some(k) = &key {
-                url.push_str(&format!("&key={}", enc(k)));
+        Secrets::Reach { key, cut_off, why, freeze, yes, unfreeze } => {
+            if unfreeze {
+                c.call(Method::DELETE, &format!("{}/reach/cut-off?{}", c.env(&c.at.env), c.q()), None).await?;
+                println!("Unfroze {}:{}", c.at.env, c.at.path);
+                return Ok(());
             }
+            let key_q = key.as_deref().map(|k| format!("&key={}", enc(k))).unwrap_or_default();
+            let url = format!("{}/reach?{}{key_q}", c.env(&c.at.env), c.q());
             let v = c.call(Method::GET, &url, None).await?;
+            if cut_off {
+                let what = format!("{}{}:{}", key.as_deref().map(|k| format!("{k} in ")).unwrap_or_default(), c.at.env, c.at.path);
+                let lines = cut_off_plan(&v, freeze);
+                if !yes {
+                    use std::io::{BufRead, IsTerminal, Write};
+                    if !std::io::stdin().is_terminal() {
+                        bail!("this cuts off everything that can read {what}: pass --yes to go ahead");
+                    }
+                    eprintln!("This cuts off everything that can read {what}:");
+                    for l in &lines {
+                        eprintln!("  {l}");
+                    }
+                    eprint!("Type cut off to go ahead: ");
+                    std::io::stderr().flush()?;
+                    let mut typed = String::new();
+                    std::io::stdin().lock().read_line(&mut typed)?;
+                    if typed.trim() != "cut off" {
+                        bail!("nothing was cut");
+                    }
+                }
+                let body = json!({ "why": why.unwrap_or_default(), "freeze": freeze });
+                let r = c.call(Method::POST, &format!("{}/reach/cut-off?{}{key_q}", c.env(&c.at.env), c.q()), Some(body)).await?;
+                if json_out {
+                    return print(&r);
+                }
+                let names = |k: &str| r[k].as_array().map(|a| a.iter().map(|x| s(&x["name"])).collect::<Vec<_>>()).unwrap_or_default();
+                for (title, k) in [("revoked token", "tokens"), ("disabled identity", "identities"), ("ended lease", "leases"), ("expired share", "shares"), ("paused sync", "syncs")] {
+                    for n in names(k) {
+                        println!("{title:<18} {n}");
+                    }
+                }
+                for x in r["skipped"].as_array().into_iter().flatten() {
+                    println!("{:<18} {} ({})", "left", s(&x["name"]), s(&x["why"]));
+                }
+                if r["logins"].as_u64().unwrap_or(0) > 0 {
+                    println!("{:<18} {}", "revoked logins", r["logins"]);
+                }
+                for p in r["projects"].as_array().into_iter().flatten() {
+                    println!("{:<18} {}", "unshared from", s(p));
+                }
+                if r["frozen"] == true {
+                    println!("{:<18} {}:{}", "frozen", c.at.env, c.at.path);
+                }
+                if r["batches"].as_u64().unwrap_or(0) > 1 {
+                    eprintln!("Tokens were revoked in {} calls of at most 500.", r["batches"]);
+                }
+                let failed = r["failed"].as_array().cloned().unwrap_or_default();
+                for f in &failed {
+                    eprintln!("failed: {} {}: {}", s(&f["what"]), f["ids"].as_array().map(|a| a.iter().map(s).collect::<Vec<_>>().join(",")).unwrap_or_default(), s(&f["why"]));
+                }
+                if !failed.is_empty() {
+                    bail!("{} part(s) of the cut-off failed: run it again to cut what's left", failed.len());
+                }
+                eprintln!("Now rotate what it held (roll secrets rotate KEY, or set a new value).");
+                return Ok(());
+            }
             if json_out {
                 return print(&v);
             }
@@ -1952,7 +2180,8 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 for h in list.as_array().into_iter().flatten() {
                     let actions = h["actions"].as_array().map(|a| a.iter().map(s).collect::<Vec<_>>().join(",")).unwrap_or_default();
                     let used = h["last_used_at"].as_i64().map(|t| format!("used {}", ago(t))).unwrap_or_else(|| "never used".into());
-                    println!("  {:<10} {:<32} {actions:<22} {used}", &title[..title.len() - 1], s(&h["name"]));
+                    let skipped = h["skipped"].as_str().map(|w| format!(" ({w})")).unwrap_or_default();
+                    println!("  {:<10} {:<32} {actions:<22} {used}{skipped}", &title[..title.len() - 1], s(&h["name"]));
                 }
             }
             for sy in v["syncs"].as_array().into_iter().flatten() {
@@ -2748,7 +2977,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 println!("Revoked {id}");
             }
         },
-        Secrets::Keygen { .. } | Secrets::Find { .. } | Secrets::Doctor | Secrets::Health { all: true, .. } => unreachable!("handled before a project is picked"),
+        Secrets::Keygen { .. } | Secrets::Key(_) | Secrets::Unseal { .. } | Secrets::Find { .. } | Secrets::Doctor | Secrets::Health { all: true, .. } => unreachable!("handled before a project is picked"),
         Secrets::Backup { to, out } => {
             let v = c.call(Method::POST, &format!("{}/backup", c.base()), Some(json!({ "recipient": to }))).await?;
             let text = serde_json::to_string_pretty(&v)?;
@@ -2937,19 +3166,23 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     println!("{}  {:<16} {}{keys}  {}  envs {}  {}  {} min  used {used}", s(&i["id"]), s(&i["name"]), s(&i["issuer"]), s(&i["subject"]), list(&i["environments"]), list(&i["actions"]), i["ttl_minutes"]);
                 }
             }
-            Identities::Add { name, github, issuer, subject, audience, claims, envs, paths, actions, ttl_minutes, allow_ips, jwks, gateway } => {
-                let (issuer, subject) = match (github, issuer, subject) {
-                    (Some(repo), _, _) => ("https://token.actions.githubusercontent.com".to_string(), format!("repo:{repo}:*")),
-                    (None, Some(i), Some(s)) => (i, s),
-                    _ => bail!("give --github owner/repo, or --issuer and --subject"),
-                };
-                let claims: serde_json::Map<String, Value> = claims
-                    .iter()
-                    .map(|c| c.split_once('=').map(|(k, v)| (k.trim().to_string(), json!(v.trim()))).with_context(|| format!("--claim {c}: name=value")))
-                    .collect::<anyhow::Result<_>>()?;
+            Identities::Add { name, github, aws, issuer, subject, audience, claims, envs, paths, actions, ttl_minutes, allow_ips, jwks, gateway } => {
                 let actions = if gateway.is_some() { vec![] } else if actions.is_empty() { vec!["read".to_string(), "reveal".to_string()] } else { actions };
-                let audience = audience.unwrap_or_else(|| c.api.base.clone());
-                let mut body = json!({ "name": name, "issuer": issuer, "audience": audience, "subject": subject, "claims": claims, "actions": actions });
+                let mut body = if let Some(arn) = &aws {
+                    json!({ "name": name, "kind": "aws", "arn": arn, "actions": actions })
+                } else {
+                    let (issuer, subject) = match (github, issuer, subject) {
+                        (Some(repo), _, _) => ("https://token.actions.githubusercontent.com".to_string(), format!("repo:{repo}:*")),
+                        (None, Some(i), Some(s)) => (i, s),
+                        _ => bail!("give --github owner/repo, --aws ARN, or --issuer and --subject"),
+                    };
+                    let claims: serde_json::Map<String, Value> = claims
+                        .iter()
+                        .map(|c| c.split_once('=').map(|(k, v)| (k.trim().to_string(), json!(v.trim()))).with_context(|| format!("--claim {c}: name=value")))
+                        .collect::<anyhow::Result<_>>()?;
+                    let audience = audience.unwrap_or_else(|| c.api.base.clone());
+                    json!({ "name": name, "issuer": issuer, "audience": audience, "subject": subject, "claims": claims, "actions": actions })
+                };
                 if !envs.is_empty() {
                     body["environments"] = json!(envs);
                 }
@@ -2975,6 +3208,10 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 }
                 println!("{}", s(&v["id"]));
                 eprintln!("Created {}. In the workload: ROLL_IDENTITY={} (and ROLL_API_URL), then `roll run …` logs in by itself.", s(&v["name"]), s(&v["id"]));
+                // Signed requests name the server: only worth saying when it isn't the API's URL.
+                if let Some(id) = v["server_id"].as_str().filter(|id| *id != c.api.base.trim_end_matches('/')) {
+                    eprintln!("Its AWS logins name this server as {id}: set ROLL_AWS_SERVER_ID={id} too if the workload reaches roll at another URL.");
+                }
             }
             Identities::Keys { id, jwks } => {
                 let doc = if jwks == "-" { std::io::read_to_string(std::io::stdin().take(1 << 20))? } else { std::fs::read_to_string(&jwks).with_context(|| format!("reading {jwks}"))? };
@@ -2989,6 +3226,14 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 println!("Deleted {id}");
             }
         },
+        Secrets::Decoy(DecoyCmd::Add { key, kind }) => {
+            let v = c.call(Method::POST, &format!("{env}/decoys"), Some(json!({ "key": key, "kind": kind, "path": c.at.path }))).await?;
+            if json_out {
+                return print(&v);
+            }
+            println!("Planted decoy {key} in {}:{}", c.at.env, c.at.path);
+            eprintln!("It reads like any other key: sync it or export it where an intruder would look. Its use shows in `roll secrets health` and the activity, and goes to the environment's notify URL.");
+        }
         Secrets::Share { key, views, ttl, note } => {
             let value = match &key {
                 Some(k) => {
@@ -3003,7 +3248,11 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             };
             let (ciphertext, secret) = share_seal(&value);
             let note = if note.is_empty() { key.clone().unwrap_or_default() } else { note };
-            let body = json!({ "ciphertext": ciphertext, "note": note, "views": views, "ttl_minutes": minutes(&ttl)? });
+            let mut body = json!({ "ciphertext": ciphertext, "note": note, "views": views, "ttl_minutes": minutes(&ttl)? });
+            // A stored key's share says where it came from: a cut-off of the key expires it.
+            if let Some(k) = &key {
+                body["from"] = json!({ "environment": c.at.env, "path": c.at.path, "key": k });
+            }
             let v = c.call(Method::POST, &format!("{}/shares", c.base()), Some(body)).await?;
             let id = s(&v["id"]);
             // The server's link (it knows the dashboard), else ROLL_WEB_URL here, else `<id>#<key>`
@@ -3140,7 +3389,15 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 println!("{}  {:<8} {:<12} {:<24} {}  {state}", s(&l["id"]), s(&l["kind"]), s(&l["environment"]), s(&l["key"]), s(&l["consumer"]));
             }
         }
-        Secrets::Audit { key, actor, limit, format: Some(f) } => {
+        Secrets::Audit { cmd: Some(AuditCmd::Verify { since, .. }), .. } => {
+            let q = since.as_deref().map(parse_time).transpose()?.map(|t| format!("?since={t}")).unwrap_or_default();
+            let v = c.call(Method::GET, &format!("{}/audit/verify{q}", c.base()), None).await?;
+            if json_out {
+                print(&v)?;
+            }
+            report_verification(&v, json_out)?;
+        }
+        Secrets::Audit { cmd: None, key, actor, limit, format: Some(f) } => {
             let mut q = format!("limit={limit}&format={}", enc(&f));
             if let Some(k) = &key {
                 q.push_str(&format!("&key={}", enc(k)));
@@ -3150,7 +3407,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             }
             print!("{}", text_of(c.api, &format!("{}/audit?{q}", c.base())).await?);
         }
-        Secrets::Audit { key, actor, limit, format: None } => {
+        Secrets::Audit { cmd: None, key, actor, limit, format: None } => {
             let mut q = format!("limit={limit}");
             if let Some(k) = &key {
                 q.push_str(&format!("&key={}", enc(k)));
@@ -3170,8 +3427,108 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
     Ok(())
 }
 
+/// What a cut-off would cut, from reach's answer: one line per kind, with counts and names.
+fn cut_off_plan(v: &Value, freeze: bool) -> Vec<String> {
+    let list = |k: &str, name: &dyn Fn(&Value) -> String| v[k].as_array().map(|a| a.iter().map(name).collect::<Vec<_>>()).unwrap_or_default();
+    let mut out = vec![];
+    let mut line = |title: &str, names: Vec<String>| {
+        if !names.is_empty() {
+            out.push(format!("{} {title}: {}", names.len(), names.join(", ")));
+        }
+    };
+    let tokens = |skipped: bool| v["tokens"].as_array().map(|a| a.iter().filter(|h| h["skipped"].is_string() == skipped).map(|h| s(&h["name"])).collect()).unwrap_or_default();
+    line("token(s) revoked", tokens(false));
+    line("token(s) left, reaching beyond this project: the operator revokes them", tokens(true));
+    line("identity(ies) disabled, their logins revoked", list("identities", &|h| s(&h["name"])));
+    line("lease(s) ended", list("leases", &|l| format!("{} for {}", s(&l["key"]), s(&l["consumer"]))));
+    line("share(s) expired", list("shares", &|x| s(&x["id"])));
+    line("project(s) no longer sharing it", list("projects", &s));
+    line("sync(s) paused", v["syncs"].as_array().map(|a| a.iter().filter(|x| x["paused_at"].is_null()).map(|x| s(&x["kind"])).collect()).unwrap_or_default());
+    if freeze {
+        out.push("the folder frozen: reads answer 423 to all but its admins".into());
+    }
+    if out.is_empty() {
+        out.push("nothing reaches it now".into());
+    }
+    out
+}
+
 fn s(v: &Value) -> String {
     crate::s(v)
+}
+
+/// Unix ms of a time given as RFC 3339 or a date (UTC midnight).
+fn parse_time(t: &str) -> anyhow::Result<i64> {
+    if let Ok(at) = chrono::DateTime::parse_from_rfc3339(t) {
+        return Ok(at.timestamp_millis());
+    }
+    let day = chrono::NaiveDate::parse_from_str(t, "%Y-%m-%d").with_context(|| format!("{t} isn't a time (2026-11-01 or 2026-11-01T09:00:00Z)"))?;
+    Ok(day.and_hms_opt(0, 0, 0).expect("midnight").and_utc().timestamp_millis())
+}
+
+/// `audit verify --file`: an export of `project`'s log, its chain and digests checked here against
+/// roll's public keys as saved in `jwks`.
+fn verify_audit_file(project: &str, file: &std::path::Path, jwks: &std::path::Path, json_out: bool) -> anyhow::Result<()> {
+    use roll_secrets_chain::{PublicKey, Walk};
+    let text = std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
+    let mut rows = text.lines().filter(|l| !l.trim().is_empty()).map(serde_json::from_str::<roll_secrets_chain::AuditEntry>).collect::<Result<Vec<_>, _>>().context("that isn't a JSONL export of the audit log (audit --format jsonl)")?;
+    rows.sort_by_key(|r| r.seq);
+    let jwks: Value = serde_json::from_str(&std::fs::read_to_string(jwks).with_context(|| format!("reading {}", jwks.display()))?).context("that isn't a JWKS")?;
+    let keys: std::collections::HashMap<String, PublicKey> = PublicKey::from_jwks(&jwks).into_iter().collect();
+    let opened = |jws: &str| roll_secrets_chain::kid(jws).and_then(|k| keys.get(&k)).and_then(|k| roll_secrets_chain::open(jws, k));
+    // The digests name their project: it must be the one asked about, and only it.
+    let mut named: Vec<String> = rows.iter().filter_map(|r| r.digest.as_deref()).filter_map(opened).map(|d| d.project).collect();
+    named.sort();
+    named.dedup();
+    match named.as_slice() {
+        [] => bail!("no digest in the file is signed by roll's keys: there's nothing to start from"),
+        [one] if one == project => {}
+        [one] => bail!("the file is {one}'s audit log, not {project}'s"),
+        many => bail!("the file mixes the audit logs of {} projects ({}): export one project's", many.len(), many.join(", ")),
+    }
+    let mut walk = Walk::new(project, false);
+    for r in &rows {
+        if !walk.push(r, &mut |k| keys.get(k).cloned()) {
+            break;
+        }
+    }
+    // Rows from before the chain began have no seq; one after the first chained row was added.
+    if let Some(first) = rows.iter().filter(|r| r.seq.is_some()).map(|r| r.id).min() {
+        let late = rows.iter().filter(|r| r.seq.is_none() && r.id > first).count();
+        if late > 0 {
+            walk.broken(None, "unchained", format!("{late} row(s) without a place in the chain were added after it began"));
+        }
+    }
+    let skipped = walk.skipped;
+    let v = walk.finish();
+    if json_out {
+        println!("{}", serde_json::to_string_pretty(&v)?);
+    } else if skipped > 0 {
+        println!("{skipped} rows before the first digest in the file weren't checked");
+    }
+    report_verification(&serde_json::to_value(&v)?, json_out)
+}
+
+/// A verification's answer, as a line; an error (a failed exit) when the log is broken.
+fn report_verification(v: &Value, json_out: bool) -> anyhow::Result<()> {
+    if !json_out {
+        let (from, head) = (v["from"].as_i64(), v["head"].as_i64());
+        match (from, head) {
+            (Some(from), Some(head)) => println!("#{from}–#{head}: {} rows, {} signed digests", v["rows"], v["digests"]),
+            _ => println!("nothing chained yet"),
+        }
+        if let Some(through) = v["through"].as_i64() {
+            println!("signed through #{through} ({})", ago(v["signed_at"].as_i64().unwrap_or(0)));
+        }
+        if v["unchained"].as_i64().unwrap_or(0) > 0 {
+            println!("{} rows from before the chain began have no hash (unchained before #{})", v["unchained"], from.unwrap_or(1));
+        }
+    }
+    if v["ok"] != true {
+        let b = &v["broken"];
+        bail!("the audit log is broken ({}): {}", s(&b["reason"]), s(&b["detail"]));
+    }
+    Ok(())
 }
 
 /// How long ago a time in unix milliseconds was.
@@ -3304,10 +3661,88 @@ async fn envs(c: &Client<'_>, e: Envs, json_out: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// An import's body: a JSON file (an object of `KEY: value` or an array of `{key, value}`, as
-/// other managers export) when it parses as one, else a `.env` file.
-/// An environment's values from another manager's API, as `{KEY: value}`: read here, with the
-/// user's own token, and never through roll's server.
+/// How `import --from` writes what it read.
+struct ImportOpts {
+    overwrite: bool,
+    request: bool,
+    sensitive: bool,
+    dry_run: bool,
+    message: String,
+}
+
+/// What another manager gives, by folder under the import's path: read here, signed in as the
+/// user is there, and never through roll's server.
+async fn read_source(from: &str, source: &str, recursive: bool) -> anyhow::Result<crate::managers::Folders> {
+    let entries = |m: serde_json::Map<String, Value>| m.into_iter().map(|(key, v)| crate::managers::Entry { key, value: s(&v).to_string(), secret: true }).collect::<Vec<_>>();
+    if recursive {
+        return Ok(vault_tree(source).await?.into_iter().map(|(folder, m)| (folder, entries(m))).collect());
+    }
+    if let Some(folders) = crate::managers::read(from, source).await? {
+        return Ok(folders);
+    }
+    Ok(vec![(String::new(), entries(import_from(from, source).await?))])
+}
+
+/// `folder` under the import's path `at`.
+fn under(at: &str, folder: &str) -> String {
+    let path = format!("{}/{}", at.trim_end_matches('/'), folder).replace("//", "/");
+    if path.len() > 1 { path.trim_end_matches('/').to_string() } else { path }
+}
+
+/// What another manager gave, imported into `env` (its API base): one change (or change request)
+/// per folder, or with `dry_run` its folders and keys printed, never a value. `label` names a
+/// `--map` pair.
+async fn import_folders(c: &Client<'_>, env: &str, folders: &crate::managers::Folders, o: &ImportOpts, label: Option<&str>, json_out: bool) -> anyhow::Result<()> {
+    anyhow::ensure!(!folders.is_empty(), "nothing to import");
+    let single = folders.len() == 1 && folders[0].0.is_empty();
+    let plural = |n: usize| if n == 1 { "" } else { "s" };
+    for (folder, entries) in folders {
+        let path = under(&c.at.path, folder);
+        let at = match (label, single) {
+            (Some(l), true) => l.to_string(),
+            (Some(l), false) => format!("{l} {path}"),
+            (None, _) => path.clone(),
+        };
+        if o.dry_run {
+            println!("{at}: {} key{}", entries.len(), plural(entries.len()));
+            for e in entries {
+                println!("  {}{}", e.key, if o.sensitive && e.secret { "  (sensitive)" } else { "" });
+            }
+            continue;
+        }
+        let items: Vec<Value> = entries.iter().map(|e| json!({ "key": e.key, "value": e.value, "sensitive": o.sensitive && e.secret })).collect();
+        let body = json!({ "json": items, "path": path, "overwrite": o.overwrite, "request": o.request, "message": o.message });
+        let v = c.call(Method::POST, &format!("{env}/import"), Some(body)).await.map_err(approval_hint).with_context(|| format!("importing into {path}"))?;
+        if single && label.is_none() {
+            if json_out {
+                println!("{}", serde_json::to_string_pretty(&v)?);
+                return Ok(());
+            }
+            if let Some(r) = v.get("request").filter(|r| r.is_object()) {
+                println!("Opened change request {} on {}", s(&r["id"]), c.at.env);
+            } else {
+                summary(&v);
+            }
+            if let Some(sk) = v["skipped"].as_array().filter(|a| !a.is_empty()) {
+                println!("Skipped {} existing (use --overwrite): {}", sk.len(), sk.iter().map(s).collect::<Vec<_>>().join(", "));
+            }
+            continue;
+        }
+        let skipped = v["skipped"].as_array().map_or(0, Vec::len);
+        match v.get("request").filter(|r| r.is_object()) {
+            Some(r) => println!("{at}: change request {} ({} values)", s(&r["id"]), entries.len()),
+            None => println!("{at}: {} value{}{}", entries.len(), plural(entries.len()), if skipped > 0 { format!(", {skipped} existing skipped (use --overwrite)") } else { String::new() }),
+        }
+    }
+    if o.dry_run {
+        let keys: usize = folders.iter().map(|f| f.1.len()).sum();
+        println!("Dry run: nothing imported ({keys} key{} in {} change{}).", plural(keys), folders.len(), plural(folders.len()));
+    }
+    Ok(())
+}
+
+/// An environment's values from another manager's API (or Secrets Manager through the `aws`
+/// CLI), as `{KEY: value}`.
 async fn import_from(from: &str, source: &str) -> anyhow::Result<serde_json::Map<String, Value>> {
     let env = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
     let need = |k: &str| env(k).with_context(|| format!("set {k}"));
@@ -3386,12 +3821,14 @@ async fn import_from(from: &str, source: &str) -> anyhow::Result<serde_json::Map
                 }
             }
         }
-        other => bail!("{other}: --from is doppler, vault, infisical or aws"),
+        other => bail!("{other}: --from is doppler, vault, infisical, aws, {}", crate::managers::SOURCES.join(", ")),
     }
     anyhow::ensure!(!out.is_empty(), "{from} {source} has no values to import");
     Ok(out)
 }
 
+/// An import's body: a JSON file (an object of `KEY: value` or an array of `{key, value}`, as
+/// other managers export) when it parses as one, else a `.env` file.
 fn import_body(text: &str, path: &str, overwrite: bool, request: bool) -> anyhow::Result<Value> {
     let trimmed = text.trim_start();
     if trimmed.starts_with('{') || trimmed.starts_with('[') {
@@ -3585,6 +4022,177 @@ fn random_value(n: usize) -> anyhow::Result<String> {
 }
 
 /// Write `text` to a new file only its owner can read (never over an existing one).
+/// `roll secrets key split` and `combine` (docs/secrets.md, "Splitting the deployment key"). A
+/// share or the key goes only to stdout or a 0600 file, never to stderr or roll.
+fn key_shares(cmd: KeyCmd) -> anyhow::Result<()> {
+    use roll_keyshares as keyshares;
+    use std::io::IsTerminal as _;
+    let terminal = std::io::stdin().is_terminal();
+    match cmd {
+        KeyCmd::Split { shares, threshold, file, out_dir } => {
+            let key = zeroize::Zeroizing::new(match &file {
+                Some(f) => std::fs::read_to_string(f).with_context(|| format!("reading {}", f.display()))?,
+                None if terminal => read_hidden("Key: ")?,
+                None => {
+                    let mut k = String::new();
+                    std::io::stdin().read_to_string(&mut k)?;
+                    k
+                }
+            });
+            // As rolld reads it: surrounding whitespace isn't part of the key.
+            let key = key.trim();
+            if key.len() < 32 {
+                bail!("the key is shorter than 32 characters: not a deployment key (ROLL_SECRET_KEY) or a backup's secret key");
+            }
+            let parts = keyshares::split(key.as_bytes(), shares, threshold)?;
+            match out_dir {
+                Some(dir) => {
+                    for (i, share) in parts.iter().enumerate() {
+                        write_private(&dir.join(format!("roll-key-share-{}-of-{shares}", i + 1)), &format!("{share}\n"))?;
+                    }
+                    eprintln!("Wrote {shares} shares to {} (roll-key-share-N-of-{shares}): any {threshold} recover the key. Give each to a different holder, then delete them here.", dir.display());
+                }
+                None => {
+                    for share in &parts {
+                        println!("{share}");
+                    }
+                    eprintln!("{shares} shares, any {threshold} recover the key: give each to a different holder.");
+                }
+            }
+            // What a sealed start names, should this be the deployment key: the split, not a share.
+            let set: String = keyshares::Share::parse(1, &parts[0])?.set.iter().map(|b| format!("{b:02x}")).collect();
+            eprintln!("For a deployment key, start rolld sealed with ROLL_SECRET_KEY_SEALED={set}:{threshold} (docs/secrets.md, \"Starting sealed\").");
+        }
+        KeyCmd::Combine { out } => {
+            let mut given: Vec<zeroize::Zeroizing<String>> = Vec::new();
+            if terminal {
+                // One at a time, each checked as it's entered, until the split's threshold.
+                loop {
+                    let need = given.first().and_then(|s| keyshares::Share::parse(1, s).ok()).map(|s| s.threshold as usize);
+                    if need.is_some_and(|n| given.len() >= n) {
+                        break;
+                    }
+                    let prompt = match need {
+                        Some(n) => format!("Share {} of {n}: ", given.len() + 1),
+                        None => "Share 1: ".to_string(),
+                    };
+                    let share = zeroize::Zeroizing::new(read_hidden(&prompt)?.trim().to_string());
+                    if share.is_empty() {
+                        bail!("no share entered");
+                    }
+                    let mut next: Vec<&str> = given.iter().map(|s| s.as_str()).collect();
+                    next.push(&share);
+                    match keyshares::combine(&next) {
+                        Ok(_) | Err(keyshares::KeyShareError::TooFew { .. }) => given.push(share),
+                        Err(e @ keyshares::KeyShareError::Mismatch) => return Err(e.into()),
+                        Err(e) => eprintln!("{e}; enter it again"),
+                    }
+                }
+            } else {
+                let mut text = zeroize::Zeroizing::new(String::new());
+                std::io::stdin().read_to_string(&mut text)?;
+                given = text.lines().map(str::trim).filter(|l| !l.is_empty()).map(|l| zeroize::Zeroizing::new(l.to_string())).collect();
+            }
+            let key = keyshares::combine(&given)?;
+            let key = zeroize::Zeroizing::new(String::from_utf8(key.to_vec()).map_err(|_| anyhow::anyhow!("the combined key isn't text"))?);
+            match out {
+                Some(path) => {
+                    write_private(&path, &key)?;
+                    eprintln!("The key is in {} (0600).", path.display());
+                }
+                None => println!("{}", key.as_str()),
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `roll secrets unseal`: one share to each node (it never goes anywhere else, and nothing prints
+/// it), or each node's progress.
+async fn unseal(api: &Api, status: bool, nodes: Vec<String>) -> anyhow::Result<()> {
+    use std::io::IsTerminal as _;
+    let nodes: Vec<String> = match nodes.is_empty() {
+        true => vec![api.base.clone()],
+        false => nodes.iter().map(|n| n.trim_end_matches('/').to_string()).collect(),
+    };
+    let share = match status {
+        true => None,
+        false => {
+            let line = zeroize::Zeroizing::new(match std::io::stdin().is_terminal() {
+                true => read_hidden("Share: ")?,
+                false => {
+                    let mut l = String::new();
+                    std::io::stdin().read_line(&mut l)?;
+                    l
+                }
+            });
+            let share = zeroize::Zeroizing::new(line.trim().to_string());
+            if share.is_empty() {
+                bail!("no share entered");
+            }
+            Some(share)
+        }
+    };
+    let mut failed = 0;
+    for node in &nodes {
+        let url = format!("{node}/v1/secrets/unseal");
+        let req = match &share {
+            Some(s) => api.http.post(&url).json(&json!({ "share": s.as_str() })),
+            None => api.http.get(&url),
+        };
+        let line = match req.send().await {
+            Err(e) => format!("can't reach it ({})", e.without_url()),
+            Ok(res) => {
+                let code = res.status();
+                let v: Value = res.json().await.unwrap_or(Value::Null);
+                match (v["sealed"].as_bool(), v["error"].as_str()) {
+                    (Some(false), _) => "unsealed".to_string(),
+                    (_, Some(e)) => format!("{e} ({} of {} shares)", v["have"], v["need"]),
+                    (Some(true), None) => format!("sealed, {} of {} shares", v["have"], v["need"]),
+                    (None, None) => format!("answered {code}, not an unseal"),
+                }
+            }
+        };
+        if !line.starts_with("unsealed") && !line.starts_with("sealed,") {
+            failed += 1;
+        }
+        println!("{node}: {line}");
+    }
+    if failed > 0 {
+        bail!("{failed} of {} nodes refused or didn't answer", nodes.len());
+    }
+    Ok(())
+}
+
+/// A line read from the terminal on stdin without echoing it.
+fn read_hidden(prompt: &str) -> anyhow::Result<String> {
+    use std::io::{BufRead as _, Write as _};
+    eprint!("{prompt}");
+    std::io::stderr().flush()?;
+    // SAFETY: tcgetattr fills the termios we own; tcsetattr takes it by pointer, and the guard
+    // restores the original on the same descriptor.
+    struct Restore(libc::termios);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &self.0) };
+        }
+    }
+    let _guard = unsafe {
+        let mut t: libc::termios = std::mem::zeroed();
+        if libc::tcgetattr(libc::STDIN_FILENO, &mut t) != 0 {
+            bail!("can't turn off the terminal's echo");
+        }
+        let was = t;
+        t.c_lflag &= !libc::ECHO;
+        t.c_lflag |= libc::ECHONL;
+        libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &t);
+        Restore(was)
+    };
+    let mut line = String::new();
+    std::io::stdin().lock().read_line(&mut line)?;
+    Ok(line.trim_end_matches(['\r', '\n']).to_string())
+}
+
 fn write_private(path: &std::path::Path, text: &str) -> anyhow::Result<()> {
     use std::io::Write;
     #[cfg(unix)]
@@ -3597,12 +4205,50 @@ fn write_private(path: &std::path::Path, text: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A workload identity's login (`ROLL_IDENTITY`): the workload's own OIDC token, from
-/// `ROLL_OIDC_TOKEN`, `ROLL_OIDC_TOKEN_FILE` (a Kubernetes projected token), GitHub Actions
-/// (`permissions: id-token: write`; audience `ROLL_OIDC_AUDIENCE`, default the server's URL) or
-/// Azure Pipelines (`SYSTEM_ACCESSTOKEN` mapped in), for a short-lived secrets token and when it
-/// ends (ms).
+/// A workload identity's login (`ROLL_IDENTITY`): the workload's own OIDC token (`oidc_token`:
+/// `ROLL_OIDC_TOKEN`, `ROLL_OIDC_TOKEN_FILE`, GitHub Actions or Azure Pipelines); without one (or
+/// with `ROLL_IDENTITY_KIND=aws`), a `GetCallerIdentity` signed with the machine's AWS credentials
+/// (aws_login.rs). A short-lived secrets token and when it ends (ms).
 pub async fn identity_login(api: &Api, identity: &str) -> anyhow::Result<(String, i64)> {
+    let env = |k: &str| std::env::var(k).ok().filter(|t| !t.trim().is_empty());
+    let oidc_source = ["ROLL_OIDC_TOKEN", "ROLL_OIDC_TOKEN_FILE", "ACTIONS_ID_TOKEN_REQUEST_URL", "SYSTEM_OIDCREQUESTURI"].iter().any(|k| env(k).is_some());
+    let aws = match env("ROLL_IDENTITY_KIND").as_deref().map(str::trim) {
+        Some("aws") => true,
+        Some("oidc") => false,
+        Some(k) => anyhow::bail!("ROLL_IDENTITY_KIND is aws or oidc, not {k}"),
+        None => !oidc_source,
+    };
+    let proof = if aws {
+        let signed = crate::aws_login::login_request(&api.http, &api.base)
+            .await
+            .context("ROLL_IDENTITY is set but there's no OIDC token (ROLL_OIDC_TOKEN, ROLL_OIDC_TOKEN_FILE, GitHub Actions with `permissions: id-token: write`, Azure Pipelines with SYSTEM_ACCESSTOKEN) and no AWS credentials to sign with")?;
+        json!({ "identity": identity, "aws": signed })
+    } else {
+        json!({ "identity": identity, "token": oidc_token(api).await?.trim() })
+    };
+    // A request of its own, without a token (never through `Api::call`, which renews logins).
+    let mut req = api.http.post(format!("{}/v1/secrets/login", api.base)).json(&proof);
+    for (k, v) in &api.headers {
+        req = req.header(k, v);
+    }
+    let res = req.send().await.with_context(|| format!("can't reach {} to log in", api.base))?;
+    let status = res.status();
+    let v: Value = res.json().await.unwrap_or(Value::Null);
+    if !status.is_success() {
+        // Kept as a status: a failing server (5xx) is no answer to `--fallback`, a refusal isn't.
+        let message = format!("logging in with the workload identity: {}", v["error"].as_str().map(String::from).unwrap_or_else(|| status.to_string()));
+        return Err(anyhow::Error::new(crate::ApiStatus { status, message }));
+    }
+    let token = v["token"].as_str().map(str::to_string).context("the login answered no token")?;
+    // Without it every request would log in again: an answer that isn't roll's.
+    let ends = v["expires_at"].as_i64().context("the login answered no expiry")?;
+    Ok((token, ends))
+}
+
+/// The workload's OIDC token: `ROLL_OIDC_TOKEN`, `ROLL_OIDC_TOKEN_FILE` (a Kubernetes projected
+/// token), GitHub Actions' (`permissions: id-token: write`; audience `ROLL_OIDC_AUDIENCE`, default the
+/// server's URL) or Azure Pipelines' (`SYSTEM_ACCESSTOKEN` mapped in).
+async fn oidc_token(api: &Api) -> anyhow::Result<String> {
     let env = |k: &str| std::env::var(k).ok().filter(|t| !t.trim().is_empty());
     let oidc = if let Some(t) = env("ROLL_OIDC_TOKEN") {
         t
@@ -3632,23 +4278,7 @@ pub async fn identity_login(api: &Api, identity: &str) -> anyhow::Result<(String
     } else {
         anyhow::bail!("ROLL_IDENTITY is set but there's no OIDC token: set ROLL_OIDC_TOKEN or ROLL_OIDC_TOKEN_FILE, run in GitHub Actions with `permissions: id-token: write`, or in Azure Pipelines with SYSTEM_ACCESSTOKEN: $(System.AccessToken)");
     };
-    // A request of its own, without a token (never through `Api::call`, which renews logins).
-    let mut req = api.http.post(format!("{}/v1/secrets/login", api.base)).json(&json!({ "identity": identity, "token": oidc.trim() }));
-    for (k, v) in &api.headers {
-        req = req.header(k, v);
-    }
-    let res = req.send().await.with_context(|| format!("can't reach {} to log in", api.base))?;
-    let status = res.status();
-    let v: Value = res.json().await.unwrap_or(Value::Null);
-    if !status.is_success() {
-        // Kept as a status: a failing server (5xx) is no answer to `--fallback`, a refusal isn't.
-        let message = format!("logging in with the workload identity: {}", v["error"].as_str().map(String::from).unwrap_or_else(|| status.to_string()));
-        return Err(anyhow::Error::new(crate::ApiStatus { status, message }));
-    }
-    let token = v["token"].as_str().map(str::to_string).context("the login answered no token")?;
-    // Without it every request would log in again: an answer that isn't roll's.
-    let ends = v["expires_at"].as_i64().context("the login answered no expiry")?;
-    Ok((token, ends))
+    Ok(oidc)
 }
 
 /// A workload identity's login that renews itself: a login lasts minutes, and `roll run --watch`
@@ -4087,7 +4717,7 @@ async fn doctor(api: &Api, args: &AtArgs) -> anyhow::Result<()> {
                                     parts.push(format!("{what}: {}", list.join(", ")));
                                 }
                             }
-                            (false, format!(".env is stale against {} ({}); roll secrets export > .env, or roll run", at.env, parts.join("; ")))
+                            (false, format!(".env is stale against {} ({}); run the app with `roll run -- <command>` instead of keeping values in a file", at.env, parts.join("; ")))
                         });
                     }
                     Err(e) => checks.push((false, format!("comparing .env: {e}"))),
@@ -4203,6 +4833,85 @@ fn walk(paths: Vec<String>) -> anyhow::Result<Vec<(String, String)>> {
         }
     }
     Ok(out)
+}
+
+/// A credential in a file roll secrets may not hold (`roll_auth::credentials`), not a placeholder.
+struct Credential {
+    /// 1-based.
+    line: usize,
+    kind: &'static str,
+    value: String,
+    fingerprint: String,
+    /// The key it would be stored as.
+    key: String,
+}
+
+/// The credentials in `text` that aren't placeholders, each with its line.
+fn credentials_in(text: &str) -> Vec<Credential> {
+    let (mut line, mut seen) = (1, 0);
+    let mut out = vec![];
+    for m in roll_auth::credentials::find_all(text) {
+        let value = &text[m.start..m.end];
+        line += text[seen..m.start].matches('\n').count();
+        seen = m.start;
+        if roll_auth::credentials::placeholder(value) {
+            continue;
+        }
+        let line_start = text[..m.start].rfind('\n').map_or(0, |i| i + 1);
+        out.push(Credential { line, kind: m.kind, value: value.to_string(), fingerprint: roll_auth::credentials::fingerprint(value), key: roll_auth::credentials::suggested_key(m.kind, &text[line_start..m.start]) });
+    }
+    out
+}
+
+/// The working tree's top (git's, else this directory) and its `.roll/secrets-allow`.
+fn allow_list() -> (std::path::PathBuf, roll_auth::credentials::Allow) {
+    let top = std::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| std::path::PathBuf::from(String::from_utf8_lossy(&o.stdout).trim()))
+        .unwrap_or_else(|| ".".into());
+    let top = std::fs::canonicalize(&top).unwrap_or(top);
+    let file = top.join(roll_auth::credentials::ALLOW_FILE);
+    let allow = match std::fs::symlink_metadata(&file) {
+        Ok(m) if m.is_file() => std::fs::read_to_string(&file).map(|t| roll_auth::credentials::Allow::parse(&t)).unwrap_or_default(),
+        _ => Default::default(),
+    };
+    (top, allow)
+}
+
+/// `roll secrets scan --store [KEY=]FILE:LINE`: the credential at that line, read from the file
+/// here (never typed or pasted), set as a new key of the environment, and the line to write
+/// instead. Refuses a key the folder already has.
+async fn store_credential(c: &Client<'_>, env: &str, spec: &str, json_out: bool) -> anyhow::Result<()> {
+    let is_key = |k: &str| k.chars().next().is_some_and(|ch| ch.is_ascii_alphabetic() || ch == '_') && k.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_');
+    let (key, at) = match spec.split_once('=') {
+        Some((k, rest)) if is_key(k) => (Some(k.to_string()), rest),
+        _ => (None, spec),
+    };
+    let (file, line) = at.rsplit_once(':').and_then(|(f, l)| Some((f, l.parse::<usize>().ok()?))).context("--store takes [KEY=]FILE:LINE")?;
+    let meta = std::fs::symlink_metadata(file).with_context(|| format!("reading {file}"))?;
+    if !meta.is_file() || meta.len() > 1 << 20 {
+        bail!("{file} isn't a regular file of at most 1 MiB");
+    }
+    let text = std::fs::read_to_string(file).with_context(|| format!("reading {file}"))?;
+    let cred = credentials_in(&text).into_iter().find(|f| f.line == line).with_context(|| format!("{file}:{line} holds no credential to store (placeholders are left out)"))?;
+    let key = key.unwrap_or(cred.key);
+    let list = c.call(Method::GET, &format!("{env}/secrets?{}", c.q()), None).await?;
+    if list.as_array().into_iter().flatten().any(|x| x["key"] == key.as_str()) {
+        bail!("{key} is already set in {}:{}: name another (--store OTHER_KEY={file}:{line})", c.at.env, c.at.path);
+    }
+    let body = json!({ "path": c.at.path, "message": format!("stored {} from {file}:{line}", cred.kind), "ops": [{ "op": "set", "key": key, "value": cred.value }] });
+    let v = c.call(Method::POST, &format!("{env}/changes"), Some(body)).await.map_err(approval_hint)?;
+    let read = roll_auth::credentials::env_read(file, &key);
+    if json_out {
+        println!("{}", serde_json::to_string_pretty(&json!({ "key": key, "environment": c.at.env, "file": file, "line": line, "replacement": read, "change": v }))?);
+        return Ok(());
+    }
+    println!("Stored {} from {file}:{line} as {key} in {}:{}", cred.kind, c.at.env, c.at.path);
+    println!("Replace it with {read} (roll run puts {key} in the environment), and rotate it if it was ever pushed");
+    Ok(())
 }
 
 /// What `git commit` would record: each staged file's staged content.
@@ -4866,16 +5575,9 @@ async fn transit_stdin(c: &Client<'_>, name: &str, route: &str, field: &str) -> 
     Ok(s(&v[field]).to_string())
 }
 
-/// Run the user's `aws` CLI with `args` and read its JSON (errors name the command, never output).
+/// The user's `aws` CLI's JSON (errors name the command, never its output).
 async fn aws(args: &[&str]) -> anyhow::Result<Value> {
-    let out = tokio::process::Command::new(std::env::var("ROLL_AWS_CLI").unwrap_or_else(|_| "aws".into()))
-        .args(args)
-        .stdin(std::process::Stdio::null())
-        .output()
-        .await
-        .context("running the aws CLI (install it, or set ROLL_AWS_CLI)")?;
-    anyhow::ensure!(out.status.success(), "aws {}: {}", args[..2].join(" "), String::from_utf8_lossy(&out.stderr).lines().last().unwrap_or_default().chars().take(200).collect::<String>());
-    serde_json::from_slice(&out.stdout).context("the aws CLI's answer isn't JSON")
+    crate::managers::aws(args).await
 }
 
 /// A Secrets Manager secret as keys: a JSON object's fields as they are; anything else one key
@@ -4885,11 +5587,7 @@ fn aws_entries(name: &str, prefix: &str, text: &str) -> Vec<(String, String)> {
         return fields.into_iter().filter(|(_, v)| !v.is_null()).map(|(k, v)| (k, v.as_str().map(String::from).unwrap_or_else(|| v.to_string()))).collect();
     }
     let last = name.strip_prefix(prefix).unwrap_or(name).rsplit('/').next().unwrap_or(name);
-    let mut key: String = last.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_uppercase() } else { '_' }).collect();
-    if key.chars().next().is_some_and(|c| c.is_ascii_digit()) {
-        key.insert(0, '_');
-    }
-    vec![(key, text.to_string())]
+    vec![(crate::managers::upper_key(last), text.to_string())]
 }
 
 /// Vault answered with this status (matched by the status, never by an error's text).

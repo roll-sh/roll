@@ -525,7 +525,7 @@
               }
             }
           },
-          "description": "`{ kind?: \"webhook\" | \"slack\" | \"discord\" | \"email\", url, events?, environments?, services?, previews? }` (environments: names; services: names or ids, kept as ids; previews: default false; `email` takes no `url`: it's the project's owner, 400 with one, for a project without an owner, or where mail isn't set up)"
+          "description": "`{ kind?: \"webhook\" | \"slack\" | \"discord\" | \"email\" | \"pagerduty\" | \"opsgenie\", url, routing_key?, api_key?, region?, events?, environments?, services?, previews? }` (environments: names; services: names or ids, kept as ids; previews: default false; `email` takes no `url`: it's the project's owner, 400 with one, for a project without an owner, or where mail isn't set up; `pagerduty` takes its integration's `routing_key`, `opsgenie` its `api_key`, each sealed and never returned, and `region` `us` or `eu`, no `url`: the service's own API)"
         },
         "responses": {
           "201": {
@@ -539,7 +539,7 @@
         "tags": [
           "projects"
         ],
-        "x-roll-action": "reveal for a webhook (its secret comes back), write for Slack, Discord and email"
+        "x-roll-action": "reveal for a webhook (its secret comes back), write for Slack, Discord, email, PagerDuty and Opsgenie"
       }
     },
     "/v1/apps/projects/{project}/notifications/{nid}": {
@@ -1722,6 +1722,51 @@
         "x-roll-action": "deploy*"
       }
     },
+    "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/vulnerabilities": {
+      "get": {
+        "description": "Answers `{ scan: ScanSummary | null, vulnerabilities: Vulnerability[] }`: its image's known vulnerabilities, most severe first (then those with a fix), at most 2,000 (the counts are of all); `severity` keeps those at it or worse; a pruned deployment's list is empty, its counts kept.",
+        "operationId": "getServicesIdEnvironmentsEnvDeploysDepVulnerabilities",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "dep",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`{ scan: ScanSummary | null, vulnerabilities: Vulnerability[] }`: its image's known vulnerabilities, most severe first (then those with a fix), at most 2,000 (the counts are of all); `severity` keeps those at it or worse; a pruned deployment's list is empty, its counts kept"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "List vulnerabilities",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "read"
+      }
+    },
     "/v1/apps/services/{id}/environments/{env}/diff": {
       "get": {
         "description": "Answers `{from, to, variables: {missing: {name, sealed}[], extra: string[], differ: string[] | null}, settings: {field, from, to, put}[]}`: how `env` differs from `from` (Railway's environment sync), never a value. `variables`: its own variables' names, `differ` null for a token without reveal on both; `settings`: `run.*`, `wait_for_ci`, `follow_tag`, `redeploy_on_secrets`, `traces`, `vitals`, `report`, `egress`, `allow_ips`, `rate_limit`, `firewall`, `headers`, `routes`, `pages.*` (whether each has its own), each with the `PUT …/environments/{env}` body that makes it `from`'s. A token needs read on `from` too (403).",
@@ -2101,6 +2146,141 @@
           "services"
         ],
         "x-roll-action": "admin (what's written runs next)"
+      }
+    },
+    "/v1/apps/services/{id}/environments/{env}/forms": {
+      "get": {
+        "description": "Answers `{ name, submissions, last_at }[]`: a static site's forms with submissions kept.",
+        "operationId": "getServicesIdEnvironmentsEnvForms",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`{ name, submissions, last_at }[]`: a static site's forms with submissions kept"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "List forms",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "read"
+      }
+    },
+    "/v1/apps/services/{id}/environments/{env}/forms/{form}/submissions": {
+      "get": {
+        "description": "Answers `{ id, created_at, fields: { name, value }[] }[]`, the newest first (limit 1–200, default 50; `before` a submission's id: the page after it); each read is `audit.forms.read`.",
+        "operationId": "getServicesIdEnvironmentsEnvFormsFormSubmissions",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "form",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`{ id, created_at, fields: { name, value }[] }[]`, the newest first (limit 1–200, default 50; `before` a submission's id: the page after it); each read is `audit.forms.read`"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "List submissions",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "reveal (what people sent)"
+      }
+    },
+    "/v1/apps/services/{id}/environments/{env}/forms/{form}/submissions/{sub}": {
+      "delete": {
+        "description": "Answers 204; `audit.forms.deleted`.",
+        "operationId": "deleteServicesIdEnvironmentsEnvFormsFormSubmissionsSub",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "form",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "sub",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "204; `audit.forms.deleted`"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Delete submission",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "delete"
       }
     },
     "/v1/apps/services/{id}/environments/{env}/hook": {
@@ -3299,6 +3479,43 @@
           "services"
         ],
         "x-roll-action": "deploy*"
+      }
+    },
+    "/v1/apps/services/{id}/environments/{env}/slo": {
+      "get": {
+        "description": "Answers `SloReport`: its objective (the live deployment's `run.slo`, else the service's) against its window: per indicator the total, the failures, the share that met it and the budget left (1 untouched, below 0 spent); minutes for the last week, hours before (an hour's latency fails whole when its slowest minute did); `burning`: the burn alert firing now; `{ slo: null }` without one.",
+        "operationId": "getServicesIdEnvironmentsEnvSlo",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`SloReport`: its objective (the live deployment's `run.slo`, else the service's) against its window: per indicator the total, the failures, the share that met it and the budget left (1 untouched, below 0 spent); minutes for the last week, hours before (an hour's latency fails whole when its slowest minute did); `burning`: the burn alert firing now; `{ slo: null }` without one"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Get slo",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "read"
       }
     },
     "/v1/apps/services/{id}/environments/{env}/traces": {

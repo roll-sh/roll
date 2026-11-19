@@ -163,13 +163,14 @@ handlers! { ctx;
     IndicesAddBlock => indices::add_block(ctx).await,
     IndicesRemoveBlock => indices::remove_block(ctx).await,
     IndicesStats => indices::stats(ctx),
-    IndicesResolveIndex => indices::resolve_index(ctx),
+    // Boxed: they may fan out to linked remote clusters, and the request path's stack is tight.
+    IndicesResolveIndex => Box::pin(indices::resolve_index(ctx)).await,
     IndicesRefresh => indices::refresh(ctx),
     IndicesFlush => indices::flush(ctx),
     IndicesForcemerge => indices::forcemerge(ctx),
 
     IndicesAnalyze => analyze::analyze(ctx),
-    FieldCaps => field_caps::field_caps(ctx),
+    FieldCaps => Box::pin(field_caps::field_caps(ctx)).await,
 
     SearchShards => shards::search_shards(ctx),
     IndicesShardStores => shards::shard_stores(ctx),
@@ -302,14 +303,14 @@ handlers! { ctx;
 
     IndicesClearCache => misc::clear_cache(ctx),
     IndicesRecovery => misc::recovery(ctx),
-    ClusterRemoteInfo => misc::remote_info(ctx),
+    ClusterRemoteInfo => Box::pin(misc::remote_info(ctx)).await,
     ClusterReroute => reroute::reroute(ctx),
     FeaturesGetFeatures => misc::get_features(ctx),
     FeaturesResetFeatures => misc::reset_features(ctx).await,
     ClusterPostVotingConfigExclusions => misc::post_voting_exclusions(ctx).await,
     ClusterDeleteVotingConfigExclusions => misc::delete_voting_exclusions(ctx).await,
     NodesHotThreads => misc::hot_threads(ctx),
-    IndicesResolveCluster => misc::resolve_cluster(ctx),
+    IndicesResolveCluster => Box::pin(misc::resolve_cluster(ctx)).await,
     SnapshotCreateRepository => snapshots::put_repository(ctx).await,
     SnapshotGetRepository => snapshots::get_repository(ctx),
     SnapshotDeleteRepository => snapshots::delete_repository(ctx).await,

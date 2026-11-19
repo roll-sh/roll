@@ -251,7 +251,7 @@ impl Secrets {
                 params![id, project, env.id, path, json(&keys), n.note, public_key, sealed, answers, caller.principal, now, expires_at, token_hash(&token)],
             )?;
             let note = if n.note.is_empty() { String::new() } else { format!(": {}", n.note) };
-            audit::record(c, project, caller, "value_request.create", Some(slug), Some(&path), &keys, &format!("asked for {} from outside roll ({answers} answer{}, {ttl} min){note}", keys.join(", "), if answers == 1 { "" } else { "s" }), now)?;
+            audit::record(c, self.keys()?, project, caller, "value_request.create", Some(slug), Some(&path), &keys, &format!("asked for {} from outside roll ({answers} answer{}, {ttl} min){note}", keys.join(", "), if answers == 1 { "" } else { "s" }), now)?;
             Ok(())
         })?;
         Ok(ValueRequest {
@@ -304,7 +304,7 @@ impl Secrets {
             }
             if c.execute("UPDATE value_requests SET seal_key = NULL, answers_left = 0, cancelled_at = ? WHERE id = ? AND seal_key IS NOT NULL", params![now, id])? == 1 {
                 let env = (!r.environment.is_empty()).then_some(r.environment.as_str());
-                audit::record(c, project, caller, "value_request.cancel", env, Some(&r.path), &r.keys, &format!("cancelled secret request {id}"), now)?;
+                audit::record(c, self.keys()?, project, caller, "value_request.cancel", env, Some(&r.path), &r.keys, &format!("cancelled secret request {id}"), now)?;
             }
             Ok(())
         })
@@ -392,9 +392,11 @@ impl Secrets {
         let digests: Vec<String> = a.values.values().map(box_digest).collect();
         // As whoever asked, as they are now: no answer lands where they couldn't write.
         let landing = self.acting_as(&requester, format!("request:{id}"))?.ok_or_else(|| Error::Gone(format!("{requester} asked for this and can't write secrets any more")))?;
-        let landing = Caller { ip: ip.clone(), ..landing };
+        let mut landing = landing;
+        landing.ip = ip.clone();
         self.check_items(&project, &slug, &items, &landing)?;
-        let answerer = Caller { principal: "request-link".into(), grants: Arc::new(Everything), ip, runtime: false, approval: None };
+        let mut answerer = Caller::acting("request-link".into(), Arc::new(Everything));
+        answerer.ip = ip;
         let claim = |c: &Conn<'_>, outcome: Json, summary: String| -> Result<()> {
             let landed: Option<String> = c.query_row("SELECT boxes FROM value_requests WHERE id = ?", [id], |r| r.get(0)).optional()?;
             let mut boxes: Vec<String> = landed.map(|b| from_json(&b)).unwrap_or_default();
@@ -410,10 +412,10 @@ impl Secrets {
             if n != 1 {
                 return Err(gone());
             }
-            audit::record(c, &project, &answerer, "value_request.answer", Some(&slug), Some(&path), &keys, &summary, now)
+            audit::record(c, self.keys()?, &project, &answerer, "value_request.answer", Some(&slug), Some(&path), &keys, &summary, now)
         };
         let message = format!("answer to secret request {id}, asked by {requester}");
-        let landed = self.commit_hooked(&project, &slug, items.clone(), &[], "write", &message, None, false, &landing, &|c, change| {
+        let landed = self.commit_then(&project, &slug, items.clone(), &[], "write", &message, None, false, &landing, &|c, _, change, _| {
             claim(c, serde_json::json!({ "change": change.seq }), format!("answered secret request {id}: change #{} in {slug}", change.seq))?;
             notify_landed(c, self.web_url.as_deref(), &project, &env_id, &slug, &path, id, &requester, &keys, change.seq, now)
         });
@@ -422,7 +424,8 @@ impl Secrets {
             // The folder needs approval: a change request instead, by whoever asked (an approver
             // other than them approves it); its own notice tells the approvers.
             Err(Error::Conflict("approval_required", _)) => {
-                let asker = Caller { principal: requester.clone(), ..landing };
+                let mut asker = landing.clone();
+                asker.principal = requester.clone();
                 self.open_request_hooked(&project, &slug, &path, message, items, &[], &asker, &|c, request| claim(c, serde_json::json!({ "request": request }), format!("answered secret request {id}: change request {request} in {slug}")))?;
                 Ok(())
             }
@@ -435,7 +438,7 @@ impl Secrets {
     pub fn cancel_leaked_value_request(&self, token: &str, why: &str) -> Option<String> {
         let hash = lookup(token).ok()?;
         let now = self.db.now_ms().ok()?;
-        let leak = Caller { principal: "leak".into(), grants: Arc::new(Everything), ip: None, runtime: false, approval: None };
+        let leak = Caller::acting("leak".into(), Arc::new(Everything));
         let r = self.db.write(|c| {
             let found: Option<(String, String, String, String, Option<String>)> = c
                 .query_row(
@@ -449,7 +452,7 @@ impl Secrets {
                 return Ok(None);
             }
             let keys: Vec<String> = from_json(&keys);
-            audit::record(c, &project, &leak, "value_request.cancel", slug.as_deref(), Some(&path), &keys, &format!("cancelled secret request {id}: its link was {why}"), now)?;
+            audit::record(c, self.keys()?, &project, &leak, "value_request.cancel", slug.as_deref(), Some(&path), &keys, &format!("cancelled secret request {id}: its link was {why}"), now)?;
             Ok::<_, Error>(Some(format!("secret request {id}")))
         });
         r.unwrap_or_else(|e| {

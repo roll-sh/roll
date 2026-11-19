@@ -107,9 +107,21 @@ impl SyncTarget for FakeSync {
 }
 
 /// Audit deliveries, kept instead of sent; an OIDC issuer's keys, served; vendors' APIs; a
-/// Snowflake account's SQL API; and MongoDB Atlas's Admin API.
+/// Snowflake account's SQL API; MongoDB Atlas's Admin API; and STS, answering AWS identities'
+/// logins with the caller set in `.8`.
 #[derive(Default)]
-struct Sent(Mutex<Vec<Value>>, Mutex<Option<Value>>, std::sync::atomic::AtomicBool, Mutex<Option<(String, String)>>, Mutex<BTreeMap<(String, String), Value>>, Mutex<Vendors>, FakeSnowflake, FakeAtlas);
+struct Sent(Mutex<Vec<Value>>, Mutex<Option<Value>>, std::sync::atomic::AtomicBool, Mutex<Option<(String, String)>>, Mutex<BTreeMap<(String, String), Value>>, Mutex<Vendors>, FakeSnowflake, FakeAtlas, Mutex<FakeStsLogin>);
+
+/// STS as an AWS identity's login meets it: who signed (`None`: the signature doesn't match), and
+/// what was sent to it.
+#[derive(Default)]
+struct FakeStsLogin {
+    caller: Option<String>,
+    calls: Vec<StsSent>,
+}
+
+/// A request roll sent STS: the host, the headers and the body.
+type StsSent = (String, Vec<(String, String)>, String);
 
 /// A fake Snowflake user: its two key slots (base64 SPKI DER), password, default role, granted
 /// roles and days to expiry.
@@ -341,6 +353,26 @@ impl FakeAtlas {
 }
 
 impl roll_secrets::Deliver for Sent {
+    /// A recorded GetCallerIdentityResponse for the caller set, or STS's refusal.
+    fn sts(&self, host: &str, headers: &[(String, String)], body: &str, _: usize) -> roll_secrets::Result<(u16, Vec<u8>)> {
+        let mut sts = self.8.lock().unwrap();
+        sts.calls.push((host.to_string(), headers.to_vec(), body.to_string()));
+        let Some(arn) = sts.caller.clone() else {
+            return Ok((403, br#"<ErrorResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/"><Error><Type>Sender</Type><Code>SignatureDoesNotMatch</Code><Message>The request signature we calculated does not match the signature you provided.</Message></Error><RequestId>4c8f1fbc-0000-4000-8000-000000000000</RequestId></ErrorResponse>"#.to_vec()));
+        };
+        let account = arn.split(':').nth(4).unwrap();
+        let answer = format!(r#"<GetCallerIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
+  <GetCallerIdentityResult>
+    <Arn>{arn}</Arn>
+    <UserId>AROAEXAMPLEROLEID:session</UserId>
+    <Account>{account}</Account>
+  </GetCallerIdentityResult>
+  <ResponseMetadata>
+    <RequestId>01234567-89ab-cdef-0123-456789abcdef</RequestId>
+  </ResponseMetadata>
+</GetCallerIdentityResponse>"#);
+        Ok((200, answer.into_bytes()))
+    }
     fn check(&self, url: &str) -> roll_secrets::Result<()> {
         if url.starts_with("https://") { Ok(()) } else { Err(roll_secrets::Error::BadRequest("url is a public https:// URL".into())) }
     }
@@ -871,6 +903,12 @@ struct Gate {
     tokens: Mutex<BTreeMap<String, roll_auth::Grant>>,
     /// Grants made so far: ids stay unique after revocations.
     made: std::sync::atomic::AtomicUsize,
+    /// Decoy grants' ids (roll-access's decoys): they allow nothing, and a use is told to secrets.
+    decoys: Mutex<std::collections::BTreeSet<String>>,
+    /// Where a decoy's use is told, as rolld's `on_decoy` hook does.
+    secrets: std::sync::OnceLock<Arc<Secrets>>,
+    /// Workload logins' grants: roll-access's token list leaves them out.
+    workloads: Mutex<std::collections::BTreeSet<String>>,
 }
 
 impl Gate {
@@ -898,6 +936,9 @@ struct Granted {
 
 impl roll_auth::Grants for Granted {
     fn grant(&self, id: &str) -> Option<roll_auth::Grant> {
+        if self.gate.decoys.lock().unwrap().contains(id) {
+            return None;
+        }
         let g = self.gate.tokens.lock().unwrap().values().find(|g| &*g.id == id).cloned()?;
         match &g.user {
             Some(user) if roll_secrets::People::person(&*self.people, user).ok().flatten().is_none() => None,
@@ -909,15 +950,40 @@ impl roll_auth::Grants for Granted {
 impl roll_secrets::Workloads for Gate {
     fn mint(&self, name: &str, rule: roll_auth::scope::Rule, _: Option<Vec<String>>, minutes: u32, owner: Option<&str>) -> roll_secrets::Result<roll_secrets::Minted> {
         let (secret, id) = self.grant(name, rule, owner);
+        self.workloads.lock().unwrap().insert(id.clone());
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
         Ok(roll_secrets::Minted { id, secret, expires_at: now + minutes as i64 * 60_000 })
     }
     fn grants(&self) -> roll_secrets::Result<Vec<roll_auth::Grant>> {
-        Ok(self.tokens.lock().unwrap().values().cloned().collect())
+        let decoys = self.decoys.lock().unwrap().clone();
+        let workloads = self.workloads.lock().unwrap();
+        Ok(self.tokens.lock().unwrap().values().filter(|g| !decoys.contains(&*g.id) && !workloads.contains(&*g.id)).cloned().collect())
     }
     fn revoke(&self, id: &str) -> roll_secrets::Result<()> {
         self.tokens.lock().unwrap().retain(|_, g| &*g.id != id);
         Ok(())
+    }
+    /// All or none, as roll-access's: an id it doesn't know refuses the lot.
+    fn revoke_many(&self, ids: &[String], _: &str, _: &str) -> roll_secrets::Result<()> {
+        let mut tokens = self.tokens.lock().unwrap();
+        if let Some(id) = ids.iter().find(|id| !tokens.values().any(|g| &*g.id == id.as_str())) {
+            return Err(roll_secrets::Error::NotFound(format!("no token {id}: nothing was revoked")));
+        }
+        tokens.retain(|_, g| !ids.iter().any(|id| *id == *g.id));
+        Ok(())
+    }
+    fn mint_decoy(&self, name: &str, rule: roll_auth::scope::Rule, owner: Option<&str>) -> roll_secrets::Result<roll_secrets::Minted> {
+        let (short, id) = self.grant(name, rule, owner);
+        // As long and random as a real token's, so nothing about the value sets it apart.
+        let secret = format!("rlt_fakedecoy{}{short}", "Q7wZ3kP9xR2mV8tL5nB4cY6h");
+        let mut tokens = self.tokens.lock().unwrap();
+        let g = tokens.remove(&short).expect("just made");
+        tokens.insert(secret.clone(), g);
+        self.decoys.lock().unwrap().insert(id.clone());
+        Ok(roll_secrets::Minted { id, secret, expires_at: 0 })
+    }
+    fn revoke_decoy(&self, id: &str) -> roll_secrets::Result<()> {
+        self.revoke(id)
     }
     /// As `POST /v1/access/tokens`: its owner is whoever's request it is. As roll-access's
     /// `create_grant`, extensions that name no one (no operator marker, person or grant) are
@@ -938,6 +1004,14 @@ async fn fake_gate(axum::extract::State(gate): axum::extract::State<Arc<Gate>>, 
     use axum::response::IntoResponse;
     if let Some(t) = roll_auth::bearer(req.headers()).map(str::to_string) {
         let Some(g) = gate.tokens.lock().unwrap().get(&t).cloned() else { return StatusCode::UNAUTHORIZED.into_response() };
+        // A decoy answers as an unknown token does, and roll secrets hears of it.
+        if gate.decoys.lock().unwrap().contains(&*g.id) {
+            if let Some(s) = gate.secrets.get().cloned() {
+                let id = g.id.to_string();
+                tokio::task::spawn_blocking(move || s.decoy_used(&id, Some("203.0.113.7"), "/v1/secrets/whoami").unwrap()).await.unwrap();
+            }
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
         req.extensions_mut().insert(g);
     }
     next.run(req).await
@@ -988,6 +1062,7 @@ impl Api {
         let granted: Arc<dyn roll_auth::Grants> = Arc::new(Granted { gate: gate.clone(), people: people.clone() });
         let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links, syncs, open: true, trust_forwarded_for: false, web_url: None, deliver: Some(sent.clone()), grants: Some(granted), people: Some(people.clone()), workloads: Some(gate.clone()), kms: Some(kms.clone()), sts: Some(sts.clone()), outside: Some(outside.clone()), directory: Some(directory.clone()), github: Some(github.clone()), clouds: Some(roll_secrets::clouds::Clouds { issuer: ISSUER_URL.into(), tokens: clouds.clone() }), gateways: None };
         let secrets = Arc::new(Secrets::new(db.clone(), ws.clone(), opts).unwrap());
+        let _ = gate.secrets.set(secrets.clone());
         let router = roll_workspace::router(ws.clone()).merge(roll_secrets::router(secrets.clone())).layer(axum::middleware::from_fn_with_state(gate.clone(), fake_gate));
         let mut api = Api { sent, gate, kms, sts, ws: ws.clone(), people, router, secrets, db, fake, sync, outside, directory, github, clouds, project: String::new(), _dir: dir };
         let (_, p) = api.call(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "shop" }))).await;
@@ -1886,7 +1961,9 @@ async fn the_audit_log_exports_and_streams_to_a_sink_without_values() {
     let sent = api.sent.0.lock().unwrap().clone();
     assert_eq!(sent.len(), 1, "one batch, not delivered twice");
     let actions: Vec<&str> = sent[0]["events"].as_array().unwrap().iter().map(|e| e["action"].as_str().unwrap()).collect();
-    assert_eq!(actions, ["sink.create", "secrets.write", "secrets.export"]);
+    // The sweep's signed digest of the log goes out as its own event.
+    assert_eq!(actions, ["sink.create", "secrets.write", "secrets.export", "audit.digest"]);
+    assert!(sent[0]["events"][3]["digest"].as_str().is_some_and(|d| d.split('.').count() == 3));
     assert!(!serde_json::to_string(&sent).unwrap().contains("sk_live_never_sent"));
     // A SIEM's own format with its token, sealed: never shown again, sent only with the batch.
     assert_eq!(api.call(Method::POST, "/audit/sinks", Some(json!({ "url": "https://splunk.example:8088/services/collector/event", "format": "splunk" }))).await.0, StatusCode::BAD_REQUEST, "a token is needed");
@@ -1936,6 +2013,134 @@ async fn the_audit_log_exports_and_streams_to_a_sink_without_values() {
     let (_, csv) = api.call(Method::GET, "/audit?format=csv", None).await;
     let csv = csv.as_str().unwrap();
     assert!(csv.starts_with("id,at,actor,action,") && csv.contains("\"secrets.export\"") && !csv.contains("sk_live"));
+}
+
+#[tokio::test]
+async fn the_audit_log_is_a_signed_chain_that_shows_an_edit_and_a_deletion_and_starts_again_at_retentions_anchor() {
+    let api = Api::new().await;
+    for k in ["A", "B", "C", "D"] {
+        api.set("production", k, "v").await;
+    }
+    api.values("production", "/").await;
+    let sweep = |keep_ms: i64| {
+        let s = api.secrets.clone();
+        async move { tokio::task::spawn_blocking(move || s.sweep_audit_chain(keep_ms).unwrap()).await.unwrap() }
+    };
+    assert_eq!(sweep(i64::MAX / 2).await, 1, "a digest of the chain so far");
+    let v = api.ok(Method::GET, "/audit/verify", None).await;
+    assert_eq!((v["ok"].as_bool(), v["from"].as_i64(), v["through"].as_i64(), v["head"].as_i64()), (Some(true), Some(1), Some(5), Some(6)), "{v}");
+
+    // A row edited in the database, and put back.
+    let p = api.project.clone();
+    let summary = |c: &code_sql::Conn<'_>| c.query_row("SELECT summary FROM audit WHERE project_id = ? AND seq = 3", [p.as_str()], |r| r.get::<_, String>(0));
+    let original = api.db.read(summary).unwrap();
+    let edit = |to: &str| api.db.write(|c| c.execute("UPDATE audit SET summary = ? WHERE project_id = ? AND seq = 3", [to, p.as_str()])).unwrap();
+    edit("nothing happened");
+    let v = api.ok(Method::GET, "/audit/verify", None).await;
+    assert_eq!((v["ok"].as_bool(), v["broken"]["seq"].as_i64(), v["broken"]["reason"].as_str()), (Some(false), Some(3), Some("edited")), "{v}");
+    edit(&original);
+    assert_eq!(api.ok(Method::GET, "/audit/verify", None).await["ok"], true);
+    // A row deleted: a gap.
+    api.db.write(|c| c.execute("DELETE FROM audit WHERE project_id = ? AND seq = 4", [p.as_str()])).unwrap();
+    let v = api.ok(Method::GET, "/audit/verify", None).await;
+    assert_eq!((v["broken"]["seq"].as_i64(), v["broken"]["reason"].as_str()), (Some(4), Some("missing")), "{v}");
+
+    // Retention cuts at the digest, which the log then starts from; the cut's own digest says so.
+    api.set("production", "E", "v").await;
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    assert_eq!(sweep(0).await, 1);
+    let v = api.ok(Method::GET, "/audit/verify", None).await;
+    assert_eq!((v["ok"].as_bool(), v["from"].as_i64(), v["through"].as_i64(), v["digests"].as_i64()), (Some(true), Some(6), Some(7), Some(2)), "{v}");
+
+    // Rows cut from the end and the head put back on the digest before them: the head's MAC needs
+    // the deployment key.
+    api.set("production", "F", "v").await;
+    api.db.write(|c| c.execute("DELETE FROM audit WHERE project_id = ? AND seq = 9", [p.as_str()])).unwrap();
+    api.db.write(|c| c.execute("UPDATE audit_heads SET seq = 8, hash = (SELECT hash FROM audit WHERE project_id = ? AND seq = 8) WHERE project_id = ?", [p.as_str(), p.as_str()])).unwrap();
+    let v = api.ok(Method::GET, "/audit/verify", None).await;
+    assert_eq!((v["ok"].as_bool(), v["broken"]["seq"].as_i64(), v["broken"]["reason"].as_str()), (Some(false), Some(8), Some("head")), "{v}");
+}
+
+#[tokio::test]
+async fn an_old_head_put_back_over_cut_rows_leaves_a_gap_that_verify_reports_from_then_on() {
+    let api = Api::new().await;
+    api.set("production", "A", "v").await;
+    let (now, hour) = (api.db.now_ms().unwrap(), 3_600_000);
+    let sweep = |at: i64| {
+        let s = api.secrets.clone();
+        async move { tokio::task::spawn_blocking(move || s.sweep_audit_chain_at(i64::MAX / 2, at).unwrap()).await.unwrap() }
+    };
+    assert_eq!(sweep(now).await, 1);
+    // A database writer copies the head...
+    let p = api.project.clone();
+    type Head = (i64, String, i64, i64, i64, i64, Option<String>);
+    let copy: Head = api.db.read(|c| c.query_row("SELECT seq, hash, at, digest_seq, digest_at, start_seq, mac FROM audit_heads WHERE project_id = ?", [p.as_str()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)))).unwrap();
+    // ...roll writes more and signs it an hour later...
+    api.set("production", "B", "v").await;
+    assert_eq!(sweep(now + hour + 1).await, 1);
+    api.set("production", "C", "v").await;
+    // ...and they delete all of it, the digest too, and put the copy back. Its MAC holds.
+    api.db.write(|c| c.execute("DELETE FROM audit WHERE project_id = ? AND seq > ?", code_sql::params![p, copy.0])).unwrap();
+    let (seq, hash, at, digest_seq, digest_at, start, mac) = copy.clone();
+    api.db.write(|c| c.execute("UPDATE audit_heads SET seq = ?, hash = ?, at = ?, digest_seq = ?, digest_at = ?, start_seq = ?, mac = ? WHERE project_id = ?", code_sql::params![seq, hash, at, digest_seq, digest_at, start, mac, p])).unwrap();
+    assert_eq!(api.ok(Method::GET, "/audit/verify", None).await["ok"], true, "the copy passes until roll signs again");
+
+    // Roll's next digest finds its newest one too old to vouch for what's after it, and says so;
+    // verify reports the gap through later hours and later digests.
+    assert_eq!(sweep(now + 3 * hour).await, 1);
+    for later in [5, 9, 30] {
+        let v = api.ok(Method::GET, "/audit/verify", None).await;
+        assert_eq!((v["ok"].as_bool(), v["broken"]["reason"].as_str()), (Some(false), Some("gap")), "{v}");
+        assert!(v["broken"]["seq"].as_i64().is_some_and(|s| s > copy.0), "{v}");
+        assert_eq!(sweep(now + later * hour).await, 1);
+    }
+    assert_eq!(api.ok(Method::GET, "/audit/verify", None).await["broken"]["reason"], "gap");
+}
+
+#[tokio::test]
+async fn a_signing_key_added_to_the_database_vouches_for_no_digest_and_isnt_published() {
+    use base64::Engine as _;
+    use roll_secrets::chain;
+    use rsa::pkcs8::EncodePrivateKey;
+    use rsa::traits::PublicKeyParts;
+    let api = Api::new().await;
+    api.set("production", "A", "v").await;
+    api.set("production", "B", "v").await;
+    let s = api.secrets.clone();
+    assert_eq!(tokio::task::spawn_blocking(move || s.sweep_audit_chain(i64::MAX / 2).unwrap()).await.unwrap(), 1);
+
+    // A database writer adds a key of their own, older than roll's so roll's still signs...
+    let b64 = |b: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b);
+    let theirs = rsa::RsaPrivateKey::new(&mut rand::thread_rng(), 2048).unwrap();
+    let (n, e) = (b64(&theirs.n().to_bytes_be()), b64(&theirs.e().to_bytes_be()));
+    api.db.write(|c| c.execute("INSERT INTO oidc_keys (kid, sealed_dek, private, n, e, created_at) VALUES ('k_theirs', 'v1:AAAA', ?, ?, ?, 0)", code_sql::params![vec![0u8], n, e])).unwrap();
+    // ...edits row #1, recomputes every hash after it and signs the digest again with that key.
+    let p = api.project.clone();
+    let mut rows: Vec<roll_secrets::AuditEntry> = serde_json::from_value(api.ok(Method::GET, "/audit", None).await).unwrap();
+    rows.sort_by_key(|r| r.seq);
+    let signed = rows.iter().find(|r| r.action == chain::DIGEST).and_then(|r| r.seq);
+    let pair = ring::signature::RsaKeyPair::from_pkcs8(theirs.to_pkcs8_der().unwrap().as_bytes()).unwrap();
+    let mut prev = String::new();
+    for r in &mut rows {
+        if r.seq == Some(1) {
+            r.summary = "nothing happened".into();
+        }
+        if r.action == chain::DIGEST {
+            let d = chain::Digest { project: p.clone(), seq: r.seq.unwrap() - 1, hash: prev.clone(), last_at: r.at, at: r.at, start: 1, gap: None };
+            r.digest = Some(chain::sign("k_theirs", &pair, &d).unwrap());
+        }
+        prev = chain::link(&prev, &p, r);
+        let (seq, hash, digest) = (r.seq.unwrap(), prev.clone(), r.digest.clone());
+        let summary = r.summary.clone();
+        api.db.write(|c| c.execute("UPDATE audit SET summary = ?, hash = ?, digest = ? WHERE project_id = ? AND seq = ?", code_sql::params![summary, hash, digest, p, seq])).unwrap();
+    }
+    let v = api.ok(Method::GET, "/audit/verify", None).await;
+    assert_eq!((v["ok"].as_bool(), v["broken"]["seq"].as_i64(), v["broken"]["reason"].as_str()), (Some(false), signed, Some("signature")), "{v}");
+    // Nor does a cloud see it: the JWKS has roll's key alone.
+    let s = api.secrets.clone();
+    let jwks = tokio::task::spawn_blocking(move || s.oidc_jwks().unwrap()).await.unwrap();
+    let kids: Vec<&str> = jwks["keys"].as_array().unwrap().iter().map(|k| k["kid"].as_str().unwrap()).collect();
+    assert!(kids.len() == 1 && kids[0] != "k_theirs", "{jwks}");
 }
 
 #[tokio::test]
@@ -2142,6 +2347,36 @@ async fn a_rotator_outside_roll_issues_and_rotates_a_keys_value() {
     assert!(!health.to_string().contains("failing"), "both cleared once they succeed: {health}");
     let rot = api.ok(Method::GET, "/rotations", None).await;
     assert!(rot[0]["last_error"].is_null() && rot[0]["next_due"].as_i64().unwrap() > rot[0]["issued_at"].as_i64().unwrap(), "{rot}");
+    // A rotation window: a due rotation waits until it's open (UTC), and says when that is.
+    let (s, _) = api.call(Method::PUT, "/environments/production/secrets/OTHER_KEY", Some(json!({ "link": { "kind": "rotator", "ref": r["id"], "field": "value", "mode": "managed", "options": { "rotate_window": "sun 02:00-04:00" } } }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "a window goes with rotate_days");
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+    let hhmm = |ms: i64| format!("{:02}:{:02}", ms.rem_euclid(86_400_000) / 3_600_000, ms.rem_euclid(3_600_000) / 60_000);
+    let (closed, open) = (format!("daily {}-{}", hhmm(now + 3 * 3_600_000), hhmm(now + 5 * 3_600_000)), format!("daily {}-{}", hhmm(now - 1_800_000), hhmm(now + 5_400_000)));
+    let window = |w: String| {
+        let p = api.project.clone();
+        api.db
+            .write(move |c| {
+                let state: String = c.query_row("SELECT link_state FROM secrets WHERE project_id = ? AND key = 'STRIPE_KEY'", [p.as_str()], |r| r.get(0))?;
+                let mut state: Value = serde_json::from_str(&state).unwrap();
+                state["issued_at"] = json!(0);
+                let link: String = c.query_row("SELECT link FROM secrets WHERE project_id = ? AND key = 'STRIPE_KEY'", [p.as_str()], |r| r.get(0))?;
+                let mut link: Value = serde_json::from_str(&link).unwrap();
+                link["options"]["rotate_window"] = json!(w);
+                c.execute("UPDATE secrets SET link_state = ?, link = ? WHERE project_id = ? AND key = 'STRIPE_KEY'", [state.to_string().as_str(), link.to_string().as_str(), p.as_str()])
+            })
+            .unwrap();
+    };
+    window(closed.clone());
+    let before = api.values("production", "/").await["values"]["STRIPE_KEY"].clone();
+    sweep().await;
+    assert_eq!(api.values("production", "/").await["values"]["STRIPE_KEY"], before, "due, but its window isn't open");
+    let rot = api.ok(Method::GET, "/rotations", None).await;
+    assert_eq!(rot[0]["rotate_window"].as_str(), Some(closed.as_str()));
+    assert!(rot[0]["next_due"].as_i64().unwrap() > now + 2 * 3_600_000, "the window's next opening: {rot}");
+    window(open);
+    sweep().await;
+    assert_ne!(api.values("production", "/").await["values"]["STRIPE_KEY"], before, "rotated inside its window");
 
     // The project goes while the rotator is down: what it issued is still revoked, by the
     // sweeper, which keeps the rotator (and the project's key) until then.
@@ -3318,6 +3553,86 @@ async fn reads_unlike_the_reader_are_alerted() {
     assert_eq!(logged.as_array().map(Vec::len), Some(2), "{logged}");
 }
 
+/// A decoy key (docs/secrets.md, "Decoys") reads like any other key, and using its token raises
+/// `decoy_used`: the audit log, health first, and the environment's notify URL. Never the value.
+#[tokio::test]
+async fn a_decoy_key_reads_as_any_other_and_its_use_is_alerted() {
+    let api = Api::new().await;
+    api.ok(Method::PUT, "/environments/staging/policy", Some(json!({ "protected": false, "notify_url": "https://hooks.example/T0/B0/x" }))).await;
+    let made = api.ok(Method::POST, "/environments/staging/decoys", Some(json!({ "key": "LEGACY_DEPLOY_TOKEN", "kind": "rlt", "path": "/ci" }))).await;
+    assert_eq!((made["key"].as_str(), made["decoy"]["kind"].as_str(), made["decoy"]["uses"].as_i64()), (Some("LEGACY_DEPLOY_TOKEN"), Some("rlt"), Some(0)), "{made}");
+    // Only a new key, and only the kinds roll can watch.
+    assert_eq!(api.call(Method::POST, "/environments/staging/decoys", Some(json!({ "key": "LEGACY_DEPLOY_TOKEN", "kind": "rlt", "path": "/ci" }))).await.0, StatusCode::CONFLICT);
+    assert_eq!(api.call(Method::POST, "/environments/staging/decoys", Some(json!({ "key": "OLD_AWS_KEY", "kind": "aws" }))).await.0, StatusCode::BAD_REQUEST);
+    // Its value is a roll token like any other, in the values a deploy reads.
+    let value = api.ok(Method::GET, "/environments/staging/secrets/LEGACY_DEPLOY_TOKEN/value?path=/ci", None).await["value"].as_str().unwrap().to_string();
+    assert!(value.starts_with("rlt_"), "{value}");
+    assert_eq!(api.ok(Method::GET, "/environments/staging/values?path=/ci", None).await["values"]["LEGACY_DEPLOY_TOKEN"], value);
+    // Whoever found it tries it: refused as an unknown token is.
+    assert_eq!(api.req(Method::GET, "/v1/secrets/whoami", None, Some(&value)).await.0, StatusCode::UNAUTHORIZED);
+    let health = api.ok(Method::GET, "/health", None).await;
+    assert_eq!((health[0]["issue"].as_str(), health[0]["key"].as_str(), health[0]["path"].as_str()), (Some("decoy_used"), Some("LEGACY_DEPLOY_TOKEN"), Some("/ci")), "{health}");
+    assert!(health[0]["detail"].as_str().unwrap().contains("203.0.113.7"), "{health}");
+    let logged = api.ok(Method::GET, "/audit?action=secrets.alert", None).await;
+    assert_eq!((logged[0]["action"].as_str(), logged[0]["ip"].as_str(), logged[0]["environment"].as_str()), (Some("secrets.alert.decoy_used"), Some("203.0.113.7"), Some("staging")), "{logged}");
+    let s = api.secrets.clone();
+    tokio::task::spawn_blocking(move || s.sweep().unwrap()).await.unwrap();
+    let sent = api.sent.0.lock().unwrap().clone();
+    let alert = sent.iter().find(|n| n["alert"]["kind"] == "decoy_used").unwrap_or_else(|| panic!("{sent:?}"));
+    assert_eq!((alert["alert"]["key"].as_str(), alert["alert"]["ip"].as_str()), (Some("LEGACY_DEPLOY_TOKEN"), Some("203.0.113.7")));
+    // Never the value, anywhere it was told.
+    for told in [json!(sent).to_string(), logged.to_string(), health.to_string()] {
+        assert!(!told.contains(&value), "{told}");
+    }
+    // A second try within the hour is counted, not told again.
+    api.req(Method::GET, "/v1/secrets/whoami", None, Some(&value)).await;
+    let listed = api.ok(Method::GET, "/environments/staging/secrets?path=/ci", None).await;
+    assert_eq!(listed[0]["decoy"]["uses"], 2, "{listed}");
+    assert_eq!(api.ok(Method::GET, "/audit?action=secrets.alert", None).await.as_array().map(Vec::len), Some(1));
+}
+
+/// Only the project's admins can tell a key is a decoy: to a reader, writer or revealer it's the
+/// same as any other key, in listings, health and the audit log; and only an admin plants one.
+#[tokio::test]
+async fn only_admins_can_tell_a_key_is_a_decoy() {
+    let api = Api::new().await;
+    api.ok(Method::PUT, "/environments/production/secrets/STRIPE_KEY", Some(json!({ "value": "sk_test_not_a_real_key_0000" }))).await;
+    api.ok(Method::POST, "/environments/production/decoys", Some(json!({ "key": "BACKUP_DB_TOKEN", "kind": "rlt" }))).await;
+    let dev = api.token(json!({ "actions": ["read", "reveal", "write", "delete"] }));
+    assert_eq!(api.req(Method::POST, "/environments/production/decoys", Some(json!({ "key": "OTHER", "kind": "rlt" })), Some(&dev)).await.0, StatusCode::FORBIDDEN);
+    let (_, listed) = api.req(Method::GET, "/environments/production/secrets", None, Some(&dev)).await;
+    let shape = |key: &str| listed.as_array().unwrap().iter().find(|s| s["key"] == key).unwrap().as_object().unwrap().keys().cloned().collect::<Vec<_>>();
+    assert_eq!(shape("BACKUP_DB_TOKEN"), shape("STRIPE_KEY"), "{listed}");
+    let (_, one) = api.req(Method::GET, "/environments/production/secrets/BACKUP_DB_TOKEN", None, Some(&dev)).await;
+    assert!(one.get("decoy").is_none(), "{one}");
+    // Its use is the admins' news.
+    let (_, value) = api.req(Method::GET, "/environments/production/secrets/BACKUP_DB_TOKEN/value", None, Some(&dev)).await;
+    api.req(Method::GET, "/v1/secrets/whoami", None, value["value"].as_str()).await;
+    let (_, health) = api.req(Method::GET, "/health", None, Some(&dev)).await;
+    assert!(!health.to_string().contains("decoy"), "{health}");
+    let (_, audit) = api.req(Method::GET, "/audit", None, Some(&dev)).await;
+    assert!(!audit.to_string().contains("decoy"), "{audit}");
+    assert!(api.ok(Method::GET, "/audit", None).await.to_string().contains("secrets.alert.decoy_used"));
+}
+
+/// Deleting a decoy key, or giving it a value of its own, ends the decoy: its token is revoked
+/// after the write.
+#[tokio::test]
+async fn deleting_a_decoy_key_revokes_its_token() {
+    let api = Api::new().await;
+    let decoys = || api.gate.decoys.lock().unwrap().clone();
+    let live = |id: &str| api.gate.tokens.lock().unwrap().values().any(|g| &*g.id == id);
+    api.ok(Method::POST, "/environments/development/decoys", Some(json!({ "key": "OLD_CI_TOKEN", "kind": "rlt" }))).await;
+    api.ok(Method::POST, "/environments/development/decoys", Some(json!({ "key": "SPARE_TOKEN", "kind": "rlt" }))).await;
+    let ids: Vec<String> = decoys().into_iter().collect();
+    assert!(ids.iter().all(|id| live(id)));
+    api.ok(Method::DELETE, "/environments/development/secrets/OLD_CI_TOKEN", None).await;
+    api.ok(Method::PUT, "/environments/development/secrets/SPARE_TOKEN", Some(json!({ "value": "an-ordinary-value-now" }))).await;
+    assert!(ids.iter().all(|id| !live(id)), "{ids:?}");
+    let listed = api.ok(Method::GET, "/environments/development/secrets", None).await;
+    assert!(listed[0].get("decoy").is_none(), "{listed}");
+}
+
 /// A roll-access rule naming one encryption key (`{id: "prj_…", index: "payments"}`) reaches that
 /// key alone: the list shows it, its operations work, another key's are refused.
 #[tokio::test]
@@ -3714,6 +4029,114 @@ async fn a_workload_logs_in_with_its_oidc_token_for_a_short_lived_scoped_token()
     assert_eq!(s, StatusCode::UNAUTHORIZED);
 }
 
+/// A signed GetCallerIdentity as roll's clients send one (STS checks the signature; roll checks the
+/// rest), dated `age` seconds ago, naming `server` in X-Roll-Server-ID. Each has its own signature.
+fn signed_caller_identity(url: &str, body: &str, server: Option<&str>, age: i64) -> Value {
+    static SIGNED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let signature = format!("{:064x}", SIGNED.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+    let t = time::OffsetDateTime::now_utc() - time::Duration::seconds(age);
+    let date = format!("{:04}{:02}{:02}T{:02}{:02}{:02}Z", t.year(), u8::from(t.month()), t.day(), t.hour(), t.minute(), t.second());
+    let mut headers = json!({
+        "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
+        "X-Amz-Date": date,
+        "X-Amz-Security-Token": "FwoGZXIvYXdzEXAMPLETOKEN",
+        "Authorization": format!("AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/{}/us-east-1/sts/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-security-token;x-roll-server-id, Signature={signature}", &date[..8]),
+    });
+    if let Some(s) = server {
+        headers["X-Roll-Server-ID"] = json!(s);
+    }
+    json!({ "method": "POST", "url": url, "headers": headers, "body": body })
+}
+
+#[tokio::test]
+async fn a_machine_on_aws_logs_in_with_its_iam_role_through_sts() {
+    let api = Api::new().await;
+    api.set("staging", "API_KEY", "staging-key").await;
+    api.set("production", "API_KEY", "prod-key").await;
+    let identity = |arn: &str| json!({ "name": "web", "kind": "aws", "arn": arn, "environments": ["staging"], "actions": ["read", "reveal"] });
+    // One role or user in one account: a wildcard anywhere but a session name is refused.
+    for open in ["arn:aws:iam::*:role/app", "arn:aws:iam::123456789012:role/*", "arn:aws:iam::123456789012:root"] {
+        assert_eq!(api.call(Method::POST, "/identities", Some(identity(open))).await.0, StatusCode::BAD_REQUEST, "{open}");
+    }
+    // Unset, the server ID is derived from the deployment key: never a host and port two
+    // deployments could share.
+    let derived = api.ok(Method::POST, "/identities", Some(json!({ "name": "other", "kind": "aws", "arn": "arn:aws:iam::123456789012:role/other", "actions": ["read"] }))).await;
+    assert!(derived["server_id"].as_str().is_some_and(|s| s.len() == 32 && s.bytes().all(|b| b.is_ascii_hexdigit())), "{derived}");
+    api.secrets.set_aws_server_id("https://roll.test/".into());
+    let i = api.ok(Method::POST, "/identities", Some(identity("arn:aws:iam::123456789012:role/app"))).await;
+    assert_eq!((i["kind"].as_str(), i["server_id"].as_str()), (Some("aws"), Some("https://roll.test")));
+    let id = i["id"].as_str().unwrap().to_string();
+    let sts = "https://sts.us-east-1.amazonaws.com/";
+    const BODY: &str = "Action=GetCallerIdentity&Version=2011-06-15";
+    let login = |aws: Value| api.call(Method::POST, "/v1/secrets/login", Some(json!({ "identity": id, "aws": aws })));
+    let answers = |arn: Option<&str>| api.sent.8.lock().unwrap().caller = arn.map(String::from);
+    let calls = || api.sent.8.lock().unwrap().calls.len();
+
+    // An instance profile's session is its role's.
+    answers(Some("arn:aws:sts::123456789012:assumed-role/app/i-0abcd1234efgh5678"));
+    let signed = signed_caller_identity(sts, BODY, Some("https://roll.test"), 0);
+    let (s, l) = login(signed.clone()).await;
+    assert_eq!(s, StatusCode::OK, "{l}");
+    // A signed request logs in once: replayed while its date is still in the window, it's refused.
+    let (s, e) = login(signed.clone()).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED, "{e}");
+    // Nor with a component repeated in front (STS gets the whole header) or a signature that isn't
+    // hex: there's one Signature, the one STS checks, so a replay never gets a new key.
+    let auth = signed["headers"]["Authorization"].as_str().unwrap().to_string();
+    let rest = auth.strip_prefix("AWS4-HMAC-SHA256 ").unwrap();
+    for changed in [format!("AWS4-HMAC-SHA256 Signature={}, {rest}", "0".repeat(64)), format!("AWS4-HMAC-SHA256 signature=junk, {rest}"), auth.replace("Signature=", "Signature=X")] {
+        let mut replay = signed.clone();
+        replay["headers"]["Authorization"] = json!(changed);
+        let before = calls();
+        let (s, e) = login(replay).await;
+        assert!(matches!(s, StatusCode::BAD_REQUEST | StatusCode::UNAUTHORIZED), "{changed}: {s} {e}");
+        assert_eq!(calls(), before, "{changed} never reaches STS");
+    }
+    let token = l["token"].as_str().unwrap();
+    let (s, v) = api.req(Method::GET, "/environments/staging/values", None, Some(token)).await;
+    assert_eq!((s, v["values"]["API_KEY"].as_str()), (StatusCode::OK, Some("staging-key")));
+    assert_eq!(api.req(Method::GET, "/environments/production/values", None, Some(token)).await.0, StatusCode::FORBIDDEN);
+    // STS got the signed request as signed, at the URL roll rebuilt (its Host from that URL).
+    let (host, headers, body) = api.sent.8.lock().unwrap().calls[0].clone();
+    assert_eq!((host.as_str(), body.as_str()), ("sts.us-east-1.amazonaws.com", BODY));
+    let names: Vec<&str> = headers.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(names, ["authorization", "content-type", "x-amz-date", "x-amz-security-token", "x-roll-server-id"]);
+    let listed = api.ok(Method::GET, "/identities", None).await;
+    let web = listed.as_array().unwrap().iter().find(|x| x["id"] == id.as_str()).unwrap();
+    assert_eq!(web["last_subject"], "arn:aws:sts::123456789012:assumed-role/app/i-0abcd1234efgh5678");
+    let audit = api.ok(Method::GET, &format!("/audit?actor=identity:{id}"), None).await;
+    assert_eq!(audit[1]["action"], "identity.login");
+
+    // Another account's role of the same name, another role, a user: STS says who, roll refuses.
+    for other in ["arn:aws:sts::210987654321:assumed-role/app/i-0abcd1234efgh5678", "arn:aws:sts::123456789012:assumed-role/admin/i-0abcd1234efgh5678", "arn:aws:iam::123456789012:user/app"] {
+        answers(Some(other));
+        assert_eq!(login(signed_caller_identity(sts, BODY, Some("https://roll.test"), 0)).await.0, StatusCode::FORBIDDEN, "{other}");
+    }
+    // A signature STS doesn't accept.
+    answers(None);
+    assert_eq!(login(signed_caller_identity(sts, BODY, Some("https://roll.test"), 0)).await.0, StatusCode::UNAUTHORIZED);
+
+    // Refused before STS is contacted: a request for another server or none, an old one, another
+    // URL (only STS's, never one the client picks), another action.
+    answers(Some("arn:aws:sts::123456789012:assumed-role/app/i-0abcd1234efgh5678"));
+    let before = calls();
+    for (aws, want) in [
+        (signed_caller_identity(sts, BODY, None, 0), StatusCode::UNAUTHORIZED),
+        (signed_caller_identity(sts, BODY, Some("https://vault.example.com"), 0), StatusCode::UNAUTHORIZED),
+        (signed_caller_identity(sts, BODY, Some("https://roll.test"), 900), StatusCode::UNAUTHORIZED),
+        (signed_caller_identity("https://sts.amazonaws.com.attacker.example/", BODY, Some("https://roll.test"), 0), StatusCode::BAD_REQUEST),
+        (signed_caller_identity("http://169.254.169.254/latest/meta-data/", BODY, Some("https://roll.test"), 0), StatusCode::BAD_REQUEST),
+        (signed_caller_identity("https://sts.us-east-1.amazonaws.com/?Action=AssumeRole", BODY, Some("https://roll.test"), 0), StatusCode::BAD_REQUEST),
+        (signed_caller_identity(sts, "Action=AssumeRole&Version=2011-06-15", Some("https://roll.test"), 0), StatusCode::BAD_REQUEST),
+    ] {
+        let (s, e) = login(aws).await;
+        assert_eq!(s, want, "{e}");
+    }
+    assert_eq!(calls(), before, "nothing reached STS");
+    // An OIDC token for an AWS identity.
+    assert_eq!(api.call(Method::POST, "/v1/secrets/login", Some(json!({ "identity": id, "token": "a.b.c" }))).await.0, StatusCode::UNAUTHORIZED);
+}
+
 #[tokio::test]
 async fn a_folder_shared_by_another_project_reads_as_its_own_until_the_share_ends() {
     let api = Api::new().await;
@@ -3993,6 +4416,251 @@ async fn a_gateway_has_one_token_that_opens_only_its_link_and_reaches_its_projec
     assert!(api.secrets.gateway_link(&gw, true, None, None).is_err());
     let audit = api.ok(Method::GET, "/audit?action=gateway.connect", None).await.to_string();
     assert!(audit.contains("node-a") && !audit.contains(&secret), "{audit}");
+}
+
+#[tokio::test]
+async fn another_product_resolves_a_reference_only_for_a_resource_its_project_stands_for() {
+    use roll_secrets::{Refusal, ResourceRef};
+    use roll_workspace::Kind;
+    let api = Api::new().await;
+    api.set("production", "AWS_SECRET_ACCESS_KEY", "fake-secret-one").await;
+    let photos = ResourceRef::new(Kind::Bucket, "photos");
+    let reference = "roll://production/AWS_SECRET_ACCESS_KEY";
+    let s = api.secrets.clone();
+    let resolve = move |r: &ResourceRef, reference: &str| s.resolve_for(r, reference);
+
+    // On no canvas: no project to read from.
+    assert!(matches!(resolve(&photos, reference), Err(Refusal::NoProject(_))));
+    // On a person's canvas that doesn't stand for it (anyone may put any bucket on theirs).
+    let (_, mine) = api.as_ada(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "mine" }))).await;
+    let mine = mine["id"].as_str().unwrap().to_string();
+    let (s, _) = api.as_ada(Method::PUT, &format!("/v1/workspace/projects/{mine}/resources/bucket/photos"), Some(json!({ "x": 0, "y": 0 }))).await;
+    assert!(s.is_success());
+    let refused = resolve(&photos, reference).unwrap_err();
+    assert!(matches!(refused, Refusal::NotTrusted(_)), "{refused}");
+
+    // On the operator's project, which stands for its canvas: resolved as its runtime, protected
+    // environments included (as a service's deploy), and audited as the bucket.
+    api.ok(Method::PUT, &format!("/v1/workspace/projects/{}/resources/bucket/photos", api.project), Some(json!({ "x": 0, "y": 0 }))).await;
+    api.ok(Method::PUT, "/environments/production/policy", Some(json!({ "protected": true, "approvals": 1 }))).await;
+    let got = resolve(&photos, reference).unwrap();
+    assert_eq!((got.value.expose(), got.version), ("fake-secret-one", 1));
+    assert!(!format!("{got:?}").contains("fake-secret-one"), "the value redacts itself");
+    let audit = api.ok(Method::GET, "/audit?action=secrets.resolve", None).await;
+    assert_eq!((audit[0]["actor"].as_str(), audit[0]["keys"].clone()), (Some("storage:bucket:photos"), json!(["AWS_SECRET_ACCESS_KEY"])), "{audit}");
+    assert!(!audit.to_string().contains("fake-secret-one"));
+    // A reference may name only that project.
+    assert!(resolve(&photos, &format!("roll://{}@production/AWS_SECRET_ACCESS_KEY", api.project)).is_ok());
+    assert!(matches!(resolve(&photos, &format!("roll://{mine}@production/AWS_SECRET_ACCESS_KEY")), Err(Refusal::NotTrusted(_))));
+    let missing = resolve(&photos, "roll://production/NOPE").unwrap_err();
+    assert!(matches!(missing, Refusal::NoSuchKey(_)), "{missing}");
+    // An ephemeral environment that isn't trusted never reaches its protected base.
+    api.ok(Method::POST, "/environments", Some(json!({ "slug": "pr-1", "base": "production" }))).await;
+    let refused = resolve(&photos, "roll://pr-1/AWS_SECRET_ACCESS_KEY").unwrap_err();
+    assert!(matches!(refused, Refusal::Protected(_)) && !refused.to_string().contains("fake-secret-one"), "{refused}");
+
+    // The digest moves with the value, without reading it.
+    let before = api.secrets.digest_for(&photos, reference).unwrap();
+    api.ok(Method::PUT, "/environments/production/policy", Some(json!({ "protected": false }))).await;
+    api.set("production", "AWS_SECRET_ACCESS_KEY", "fake-secret-two").await;
+    assert_ne!(api.secrets.digest_for(&photos, reference).unwrap(), before);
+    assert_eq!(resolve(&photos, reference).unwrap().value.expose(), "fake-secret-two");
+}
+
+#[tokio::test]
+async fn an_untrusted_resource_ref_never_reads_a_protected_environment_or_a_sensitive_key() {
+    use roll_secrets::{Refusal, ResourceRef};
+    use roll_workspace::Kind;
+    let api = Api::new().await;
+    api.set("production", "AWS_SECRET_ACCESS_KEY", "fake-protected").await;
+    api.ok(Method::PUT, "/environments/staging/secrets/STRIPE_KEY", Some(json!({ "value": "fake-sensitive", "tags": ["sensitive"] }))).await;
+    api.set("staging", "PLAIN_KEY", "fake-plain").await;
+    api.ok(Method::PUT, "/environments/production/policy", Some(json!({ "protected": true, "approvals": 1 }))).await;
+    api.ok(Method::PUT, &format!("/v1/workspace/projects/{}/resources/bucket/photos", api.project), Some(json!({ "x": 0, "y": 0 }))).await;
+    let (trusted, branch) = (ResourceRef::new(Kind::Bucket, "photos"), ResourceRef::new(Kind::Bucket, "photos").untrusted());
+    let (protected, sensitive, plain) = ("roll://production/AWS_SECRET_ACCESS_KEY", "roll://staging/STRIPE_KEY", "roll://staging/PLAIN_KEY");
+
+    // The resource itself reads as its project's runtime.
+    assert_eq!(api.secrets.resolve_for(&trusted, protected).unwrap().value.expose(), "fake-protected");
+    assert_eq!(api.secrets.resolve_for(&trusted, sensitive).unwrap().value.expose(), "fake-sensitive");
+    // The same ref as an untrusted copy: refused both, the digest refused the same way.
+    for (reference, what) in [(protected, "protected"), (sensitive, "sensitive")] {
+        let refused = api.secrets.resolve_for(&branch, reference).unwrap_err();
+        let ok = match what {
+            "protected" => matches!(refused, Refusal::Protected(_)),
+            _ => matches!(refused, Refusal::Unusable(_)),
+        };
+        assert!(ok && !refused.to_string().contains("fake-"), "{what}: {refused}");
+        let digest = api.secrets.digest_for(&branch, reference).unwrap_err();
+        assert_eq!(std::mem::discriminant(&digest), std::mem::discriminant(&refused), "{what}: {digest}");
+        assert!(api.secrets.digest_for(&trusted, reference).is_ok());
+    }
+    // What an untrusted reader may read still resolves, audited as the untrusted copy.
+    assert_eq!(api.secrets.resolve_for(&branch, plain).unwrap().value.expose(), "fake-plain");
+    assert!(api.secrets.digest_for(&branch, plain).is_ok());
+    let audit = api.ok(Method::GET, "/audit?action=secrets.resolve", None).await;
+    assert_eq!((audit[0]["actor"].as_str(), audit[0]["keys"].clone()), (Some("storage:bucket:photos (untrusted)"), json!(["PLAIN_KEY"])), "{audit}");
+}
+
+/// An incident's cut-off of a folder (`…/reach/cut-off`): what reach lists, cut in one call.
+async fn cut_off(api: &Api, at: &str, body: Value) -> Value {
+    api.ok(Method::POST, &format!("/environments/production/reach/cut-off?{at}"), Some(body)).await
+}
+
+fn ids(v: &Value) -> Vec<&str> {
+    v.as_array().unwrap().iter().map(|c| c["name"].as_str().unwrap()).collect()
+}
+
+#[tokio::test]
+async fn a_cut_off_is_an_admins_and_revokes_the_tokens_that_reach_a_folder_and_no_others() {
+    let api = Api::new().await;
+    api.set("production", "STRIPE_KEY", "sk_test_fake_prod").await;
+    api.set("staging", "STRIPE_KEY", "sk_test_fake_staging").await;
+    let deploy = api.token(json!({ "name": "deploy", "environments": ["production"], "actions": ["read", "reveal", "write"] }));
+    let ci = api.token(json!({ "name": "staging-ci", "environments": ["staging"], "actions": ["read", "reveal"] }));
+    // Reach's own rule: a project admin's (a token that only reads and writes there can't).
+    let (s, _) = api.req(Method::POST, "/environments/production/reach/cut-off?path=/", Some(json!({ "why": "fake incident" })), Some(&deploy)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    assert_eq!(api.call(Method::POST, "/environments/production/reach/cut-off?path=/", Some(json!({ "why": " " }))).await.0, StatusCode::BAD_REQUEST, "it says why");
+    let r = cut_off(&api, "path=/", json!({ "why": "incident 7: a fake leak" })).await;
+    assert_eq!((ids(&r["tokens"]), r["batches"].as_u64(), r["failed"].clone()), (vec!["deploy"], Some(1), json!([])), "{r}");
+    assert_eq!(api.req(Method::GET, "/environments/production/values", None, Some(&deploy)).await.0, StatusCode::UNAUTHORIZED);
+    assert_eq!(api.req(Method::GET, "/environments/staging/values", None, Some(&ci)).await.0, StatusCode::OK, "a token that didn't reach it still works");
+    // One audit row names what was cut and why; a second call finds nothing left.
+    let audit = api.ok(Method::GET, "/audit?action=reach.cut_off", None).await;
+    assert_eq!(audit.as_array().unwrap().len(), 1);
+    assert!(audit[0]["summary"].as_str().unwrap().contains("1 token") && audit[0]["summary"].as_str().unwrap().contains("incident 7"), "{audit}");
+    let again = cut_off(&api, "path=/", json!({ "why": "incident 7: a fake leak" })).await;
+    assert_eq!((again["tokens"].clone(), again["batches"].clone()), (json!([]), json!(0)));
+}
+
+#[tokio::test]
+async fn a_projects_admin_cuts_off_only_its_own_tokens_and_leaves_the_operators_to_the_operator() {
+    let api = Api::new().await;
+    let (_, mine) = api.as_ada(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "ada-shop" }))).await;
+    let mine = mine["id"].as_str().unwrap().to_string();
+    let at = |rest: &str| format!("/v1/secrets/projects/{mine}{rest}");
+    api.as_ada(Method::PUT, &at("/environments/production/secrets/STRIPE_KEY"), Some(json!({ "value": "sk_test_fake" }))).await;
+    // The operator's CI token reaches every project's secrets; hers names only her project.
+    let everywhere = roll_auth::scope::Rule { product: "secrets".into(), resources: roll_auth::scope::Resources::All, environments: None, paths: None, actions: BTreeMap::from([(roll_auth::scope::Action::Read, roll_auth::scope::Effect::Allow)]) };
+    let (_, ops) = api.gate.grant("operator-ci", everywhere, None);
+    let confined = |name: &str| api.gate.grant(name, roll_secrets::access::rule(&mine, None, None, &[roll_secrets::Action::Read]), None).1;
+    let ci = confined("ada-ci");
+    let live = |id: &str| api.gate.tokens.lock().unwrap().values().any(|g| &*g.id == id);
+    let beyond = "reaches beyond this project: the operator revokes it";
+    let (_, reach) = api.as_ada(Method::GET, &at("/environments/production/reach?path=/"), None).await;
+    let marked: Vec<(&str, &Value)> = reach["tokens"].as_array().unwrap().iter().map(|h| (h["name"].as_str().unwrap(), &h["skipped"])).collect();
+    assert_eq!(marked.len(), 2, "{reach}");
+    assert!(marked.contains(&("operator-ci", &json!(beyond))) && marked.contains(&("ada-ci", &Value::Null)), "{reach}");
+    // Her cut-off revokes her project's token and lists the operator's, which keeps working.
+    let (s, r) = api.as_ada(Method::POST, &at("/environments/production/reach/cut-off?path=/"), Some(json!({ "why": "fake incident" }))).await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+    assert_eq!((ids(&r["tokens"]), r["skipped"].clone()), (vec!["ada-ci"], json!([{ "id": ops, "name": "operator-ci", "why": beyond }])), "{r}");
+    assert!(live(&ops) && !live(&ci));
+    // The operator's same cut-off revokes both kinds.
+    let ci = confined("ada-ci-2");
+    let r = api.ok(Method::POST, &at("/environments/production/reach/cut-off?path=/"), Some(json!({ "why": "fake incident" }))).await;
+    let mut cut = ids(&r["tokens"]);
+    cut.sort();
+    assert_eq!((cut, r["skipped"].clone()), (vec!["ada-ci-2", "operator-ci"], json!([])), "{r}");
+    assert!(!live(&ops) && !live(&ci));
+}
+
+#[tokio::test]
+async fn a_cut_off_identity_doesnt_log_in_again_and_its_logins_end() {
+    let api = Api::new().await;
+    api.set("production", "API_KEY", "fake-prod-key").await;
+    let issuer = Issuer::new();
+    *api.sent.1.lock().unwrap() = Some(issuer.jwks());
+    let i = api.ok(Method::POST, "/identities", Some(json!({ "name": "deploy", "issuer": ISSUER, "audience": "roll", "subject": "repo:acme/web:*", "environments": ["production"], "actions": ["read", "reveal"] }))).await;
+    let id = i["id"].as_str().unwrap().to_string();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+    let login = || api.call(Method::POST, "/v1/secrets/login", Some(json!({ "identity": id, "token": issuer.sign(json!({ "iss": ISSUER, "aud": "roll", "sub": "repo:acme/web:ref:refs/heads/main", "exp": now + 300, "iat": now })) })));
+    let (s, l) = login().await;
+    assert_eq!(s, StatusCode::OK, "{l}");
+    let r = cut_off(&api, "path=/", json!({ "why": "fake incident" })).await;
+    assert_eq!((ids(&r["identities"]), r["logins"].as_u64()), (vec!["deploy (https://token.actions.githubusercontent.com repo:acme/web:*)"], Some(1)), "{r}");
+    assert_eq!(api.req(Method::GET, "/environments/production/values", None, l["token"].as_str()).await.0, StatusCode::UNAUTHORIZED);
+    assert_eq!(login().await.0, StatusCode::FORBIDDEN, "it doesn't log in again");
+    // Until an admin enables it again.
+    api.ok(Method::PATCH, &format!("/identities/{id}"), Some(json!({ "disabled": false }))).await;
+    assert_eq!(login().await.0, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_cut_off_ends_the_folders_leases_and_revokes_their_credentials() {
+    let api = Api::new().await;
+    api.ok(Method::PUT, &format!("/v1/workspace/projects/{}/resources/bucket/assets", api.project), Some(json!({ "x": 0, "y": 0 }))).await;
+    api.ok(Method::PUT, "/environments/production/secrets/TEMP_KEY", Some(json!({ "link": { "kind": "bucket", "ref": "assets", "field": "access_key_id", "mode": "dynamic" } }))).await;
+    api.ok(Method::POST, "/environments/production/resolve", Some(json!({ "consumer": "app:web" }))).await;
+    assert_eq!(api.fake.live_keys.lock().unwrap().len(), 1);
+    let r = cut_off(&api, "path=/&key=TEMP_KEY", json!({ "why": "fake incident" })).await;
+    assert_eq!(ids(&r["leases"]), ["TEMP_KEY for app:web"], "{r}");
+    assert!(api.fake.live_keys.lock().unwrap().is_empty(), "the product revoked it");
+    assert!(api.ok(Method::GET, "/leases", None).await[0]["revoked_at"].is_i64());
+}
+
+#[tokio::test]
+async fn a_cut_off_expires_the_keys_shares_and_unshares_the_folder() {
+    let api = Api::new().await;
+    api.set("production", "STRIPE_KEY", "sk_test_fake_prod").await;
+    let share = |from: Value| json!({ "ciphertext": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "note": "fake", "from": from });
+    let made = api.ok(Method::POST, "/shares", Some(share(json!({ "environment": "production", "key": "STRIPE_KEY" })))).await;
+    let other = api.ok(Method::POST, "/shares", Some(share(Value::Null))).await;
+    let (_, p) = api.call(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "platform" }))).await;
+    api.ok(Method::PUT, "/environments/production/exports?path=/", Some(json!([{ "project": p["id"] }]))).await;
+    let reach = api.ok(Method::GET, "/environments/production/reach?path=/&key=STRIPE_KEY", None).await;
+    assert_eq!((reach["shares"].as_array().unwrap().len(), reach["unattributed_shares"].as_u64()), (1, Some(1)), "{reach}");
+    let r = cut_off(&api, "path=/&key=STRIPE_KEY", json!({ "why": "fake incident" })).await;
+    assert_eq!((r["shares"][0]["id"].clone(), r["projects"].clone()), (made["id"].clone(), json!([p["id"]])), "{r}");
+    assert_eq!(api.call(Method::GET, &format!("/v1/secrets/shares/{}", made["id"].as_str().unwrap()), None).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(api.call(Method::GET, &format!("/v1/secrets/shares/{}", other["id"].as_str().unwrap()), None).await.0, StatusCode::OK, "one that doesn't say where it came from stays");
+    assert_eq!(api.ok(Method::GET, "/environments/production/exports?path=/", None).await, json!([]));
+}
+
+#[tokio::test]
+async fn a_cut_off_pauses_the_folders_syncs_until_an_admin_resumes_them() {
+    let api = Api::new().await;
+    api.set("production", "DB_URL", "postgres://fake-db").await;
+    let s = api.ok(Method::POST, "/syncs", Some(json!({ "environment": "production", "kind": "fake", "target": { "name": "x" } }))).await;
+    let id = s["id"].as_str().unwrap().to_string();
+    let r = cut_off(&api, "path=/", json!({ "why": "fake incident", "tokens": false })).await;
+    assert_eq!(r["syncs"][0]["id"], s["id"], "{r}");
+    api.set("production", "DB_URL", "postgres://fake-db-2").await;
+    api.secrets.sweep().unwrap();
+    assert!(api.sync.pushes.lock().unwrap().is_empty(), "a paused sync pushes nothing");
+    let (st, e) = api.call(Method::POST, &format!("/syncs/{id}/run"), None).await;
+    assert_eq!((st, e["code"].as_str()), (StatusCode::CONFLICT, Some("paused")));
+    api.ok(Method::PATCH, &format!("/syncs/{id}"), Some(json!({ "paused": false }))).await;
+    api.secrets.sweep().unwrap();
+    assert_eq!(api.sync.pushes.lock().unwrap().len(), 1, "resumed, what changed goes out");
+}
+
+#[tokio::test]
+async fn a_frozen_folder_answers_423_to_readers_and_lets_its_admins_through() {
+    let api = Api::new().await;
+    // Ada's own project: she administers it as a signed-in person, the operator as everyone's.
+    let (_, mine) = api.as_ada(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "ada-shop" }))).await;
+    let mine = mine["id"].as_str().unwrap().to_string();
+    let at = |rest: &str| format!("/v1/secrets/projects/{mine}{rest}");
+    api.as_ada(Method::PUT, &at("/environments/production/secrets/STRIPE_KEY"), Some(json!({ "value": "sk_test_fake_prod" }))).await;
+    let reader = api.gate.issue("web", roll_secrets::access::rule(&mine, Some(vec!["production".into()]), None, &[roll_secrets::Action::Read, roll_secrets::Action::Reveal]), None);
+    let (s, r) = api.as_ada(Method::POST, &at("/environments/production/reach/cut-off?path=/"), Some(json!({ "why": "fake incident", "tokens": false, "freeze": true }))).await;
+    assert_eq!((s, r["frozen"].clone()), (StatusCode::OK, json!(true)), "{r}");
+    let values = at("/environments/production/values");
+    let (s, e) = api.req(Method::GET, &values, None, Some(&reader)).await;
+    assert_eq!((s, e["code"].as_str()), (StatusCode::LOCKED, Some("frozen")), "{e}");
+    // A sync isn't an admin, whoever made it: one made after the freeze pushes nothing.
+    let (s, sync) = api.as_ada(Method::POST, &at("/syncs"), Some(json!({ "environment": "production", "kind": "fake", "target": { "name": "x" } }))).await;
+    assert!(s.is_success(), "{s} {sync}");
+    api.secrets.sweep().unwrap();
+    assert!(api.sync.pushes.lock().unwrap().is_empty(), "a sync doesn't read past a freeze");
+    // Its admins still read and write, so they can rotate: the person, and the operator.
+    assert_eq!(api.as_ada(Method::GET, &values, None).await.1["values"]["STRIPE_KEY"], "sk_test_fake_prod");
+    assert_eq!(api.ok(Method::GET, &values, None).await["values"]["STRIPE_KEY"], "sk_test_fake_prod");
+    api.as_ada(Method::PUT, &at("/environments/production/secrets/STRIPE_KEY"), Some(json!({ "value": "sk_test_fake_rotated" }))).await;
+    assert_eq!(api.as_ada(Method::DELETE, &at("/environments/production/reach/cut-off?path=/"), None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(api.req(Method::GET, &values, None, Some(&reader)).await.0, StatusCode::OK);
 }
 
 /// An answer as the request's page makes it: each value sealed to the request's public key.

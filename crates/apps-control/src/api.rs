@@ -84,6 +84,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/deploys/{{dep}}"), get(get_deploy))
         .route(&format!("{env}/deploys/{{dep}}/logs"), get(deploy_logs))
         .route(&format!("{env}/deploys/{{dep}}/commits"), get(deploy_commits))
+        .route(&format!("{env}/deploys/{{dep}}/vulnerabilities"), get(deploy_vulnerabilities))
         .route(&format!("{env}/deploys/{{dep}}/rollback"), post(rollback))
         .route(&format!("{env}/deploys/{{dep}}/rollout"), post(rollout_action))
         .route(&format!("{env}/rollback"), post(rollback_previous))
@@ -105,12 +106,16 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/variables/values"), get(reveal))
         .route(&format!("{env}/logs"), get(env_logs))
         .route(&format!("{env}/metrics"), get(metrics))
+        .route(&format!("{env}/slo"), get(slo))
         .route(&format!("{env}/routes"), get(routes))
         .route(&format!("{env}/analytics"), get(analytics))
         .route(&format!("{env}/visit"), post(visit))
         .route(&format!("{env}/vitals"), get(vitals))
         .route(&format!("{env}/app-metrics"), get(app_metrics))
         .route(&format!("{env}/errors"), get(errors))
+        .route(&format!("{env}/forms"), get(forms))
+        .route(&format!("{env}/forms/{{form}}/submissions"), get(form_submissions))
+        .route(&format!("{env}/forms/{{form}}/submissions/{{sub}}"), axum::routing::delete(delete_form_submission))
         .route(&format!("{env}/traces"), get(traces))
         .route(&format!("{env}/traces/{{trace}}"), get(trace))
         .route(&format!("{env}/usage"), get(usage))
@@ -726,6 +731,15 @@ async fn deploy_commits(State(apps): S, Path((id, env, dep)): Path<(String, Stri
     ok(apps.deploy_commits(&id, &env, &dep).await?)
 }
 
+#[derive(Deserialize)]
+struct VulnQuery {
+    severity: Option<String>,
+}
+
+async fn deploy_vulnerabilities(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>, Query(q): Query<VulnQuery>) -> R {
+    ok(apps.vulnerabilities(&id, &env, &dep, q.severity.as_deref()).await?)
+}
+
 async fn get_deploy(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>) -> R {
     ok(apps.deployment(&id, &env, &dep).await?)
 }
@@ -1201,6 +1215,10 @@ struct Window {
     format: Option<String>,
 }
 
+async fn slo(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {
+    ok(apps.slo_report(&id, &env).await?)
+}
+
 async fn metrics(State(apps): S, Path((id, env)): Path<(String, String)>, Query(w): Query<Window>) -> R {
     // For a scraper (Prometheus, Grafana Agent): the last finished minute as gauges.
     if w.format.as_deref() == Some("prometheus") {
@@ -1228,6 +1246,29 @@ struct VitalsQuery {
 
 async fn errors(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q): Query<VitalsQuery>) -> R {
     ok(apps.errors(&id, &env, q.minutes.unwrap_or(1440)).await?)
+}
+
+async fn forms(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {
+    ok(apps.forms(&id, &env).await?)
+}
+
+#[derive(Deserialize)]
+struct SubmissionsQuery {
+    limit: Option<usize>,
+    before: Option<String>,
+}
+
+/// A form's submissions in the clear: what people sent (a reveal, as variables' values are).
+async fn form_submissions(State(apps): S, Path((id, env, form)): Path<(String, String, String)>, Query(q): Query<SubmissionsQuery>, ext: Extensions) -> R {
+    let v = apps.form_submissions(&id, &env, &form, q.limit.unwrap_or(50), q.before).await?;
+    apps.audit("forms.read", &id, &env, actor(&ext), json!({ "form": form })).await;
+    ok(v)
+}
+
+async fn delete_form_submission(State(apps): S, Path((id, env, form, sub)): Path<(String, String, String, String)>, ext: Extensions) -> R {
+    apps.delete_form_submission(&id, &env, &form, &sub).await?;
+    apps.audit("forms.deleted", &id, &env, actor(&ext), json!({ "form": form, "submission": sub })).await;
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 async fn app_metrics(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q): Query<VitalsQuery>) -> R {

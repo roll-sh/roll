@@ -1,6 +1,6 @@
 import { Building2, Check, Copy, Fingerprint, KeyRound, LoaderCircle, Monitor, ShieldCheck, UserPlus } from "lucide-react";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { accountsApi, activityText, phishingResistant, sessionMethod, refreshSession, useSession, findPeople, dormant, DORMANT_DAYS, type AccountPolicy, type Activity, type Invite, type NetworkPolicy, type Passkey, type PasskeyPolicy, type Provider, type ResetRequest, type Session, type User, type PeopleFilter } from "@/lib/accounts-api";
+import { accountsApi, peopleCsv, activityText, phishingResistant, sessionMethod, refreshSession, useSession, findPeople, dormant, DORMANT_DAYS, type AccountPolicy, type Activity, type Invite, type NetworkPolicy, type Passkey, type PasskeyPolicy, type Provider, type ResetRequest, type Session, type User, type PeopleFilter } from "@/lib/accounts-api";
 import { creationOptions, credentialJSON, passkeyProblem, passkeysSupported } from "@/lib/webauthn";
 import { Link } from "./link";
 import { GitHubMark, GoogleMark } from "./agents/brand-icons";
@@ -991,7 +991,22 @@ function Users({ me }: { me: string }) {
         <Link href="/dashboard/access/audit?product=accounts" className="text-accent hover:underline">
           sign-in report
         </Link>{" "}
-        (the audit log, as CSV for a spreadsheet).
+        (the audit log, as CSV for a spreadsheet).{" "}
+        {list && list.length > 0 && (
+          <button
+            onClick={() => {
+              const url = URL.createObjectURL(new Blob([peopleCsv(list)], { type: "text/csv" }));
+              const a = document.createElement("a");
+              a.href = url;
+              a.download = "roll-people.csv";
+              a.click();
+              URL.revokeObjectURL(url);
+            }}
+            className="text-accent hover:underline"
+          >
+            Export people as CSV
+          </button>
+        )}
       </p>
       {error && <p className="mb-2 text-[12px] text-danger">{error}</p>}
       {list && idle > 0 && (
