@@ -25,7 +25,7 @@ fn open(dir: &std::path::Path) -> std::sync::Arc<Engine> {
         outbound: Vec::new(),
         max_prepared_transactions: 0,
         auth_files: Default::default(),
-        settings: vec![("autovacuum".into(), "off".into())],
+        settings: vec![("autovacuum_naptime".into(), "2147483".into())],
     })
     .unwrap()
 }

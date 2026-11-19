@@ -267,3 +267,25 @@ fn index_builds_and_truncates_that_wait_see_the_statistics() {
     drop(s);
     e.shutdown();
 }
+
+/// index_update_stats leaves the table's relpages / reltuples alone when autovacuum isn't
+/// running (AutoVacuumingActive): a new table's stay 0 / -1 (the planner's 10-page guess),
+/// its index's are counted. Recorded from PostgreSQL 18.6 with autovacuum = off.
+#[test]
+fn create_index_without_autovacuum_leaves_table_statistics() {
+    let dir = tempfile::tempdir().unwrap();
+    let e = engine(dir.path(), &[("autovacuum", "off")]);
+    let mut s = e.connect(1, "postgres", "postgres", "t").unwrap();
+    rows(
+        &mut s,
+        "CREATE TABLE ci (a int, b text);
+         INSERT INTO ci SELECT g, 'x' || g FROM generate_series(1, 1000) g;
+         CREATE INDEX ci_a_idx ON ci (a)",
+    );
+    assert_eq!(
+        rows(&mut s, "SELECT relpages, reltuples FROM pg_class WHERE relname IN ('ci', 'ci_a_idx') ORDER BY relname"),
+        ["0 | -1", "5 | 1000"]
+    );
+    drop(s);
+    e.shutdown();
+}

@@ -69,6 +69,24 @@ pub fn initdb_class_sizes() -> &'static HashMap<u32, (u32, f32)> {
     })
 }
 
+/// The system relations with storage of their own and a relminmxid (pg_class relkind r and
+/// t: the catalogs and their TOAST tables), by oid, with each catalog's TOAST table (0: none).
+pub fn catalog_storage() -> &'static [(u32, u32)] {
+    static RELS: OnceLock<Vec<(u32, u32)>> = OnceLock::new();
+    RELS.get_or_init(|| {
+        let raw = source(SysTable::PgClass).expect("pg_class data");
+        raw.lines()
+            .filter_map(|l| {
+                let f: Vec<&str> = l.split('\t').collect();
+                if !matches!(f.get(17).copied(), Some("r" | "t")) {
+                    return None;
+                }
+                Some((f[0].parse().ok()?, f.get(13)?.parse().ok()?))
+            })
+            .collect()
+    })
+}
+
 fn is_reg(ty: &DataType) -> bool {
     use DataType::*;
     matches!(

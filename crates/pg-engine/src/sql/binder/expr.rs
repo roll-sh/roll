@@ -5961,7 +5961,19 @@ impl Binder<'_, '_> {
         };
         if f.agg_distinct && !ordered_set {
             for (a, n) in a2.iter().zip(&f.args) {
-                super::select::require_equality(&a.ty(), super::ast::location(n))?;
+                let ty = a.ty();
+                super::select::require_equality(&ty, super::ast::location(n))?;
+                // (transformDistinctClause for an aggregate: its input is sorted.)
+                if unorderable(&ty) {
+                    return Err(with_pos(
+                        Error::new(
+                            code::UNDEFINED_FUNCTION,
+                            format!("could not identify an ordering operator for type {}", ty.display()),
+                        )
+                        .detail("Aggregates with DISTINCT must be able to sort their inputs."),
+                        super::ast::location(n),
+                    ));
+                }
             }
         }
         if f.agg_distinct && !order_by.is_empty() {
@@ -6602,18 +6614,6 @@ impl Binder<'_, '_> {
                 None
             }
         });
-        fn unorderable(ty: &DataType) -> bool {
-            matches!(
-                ty,
-                DataType::Json
-                    | DataType::Xml
-                    | DataType::Gtsvector
-                    | DataType::PgBrinBloomSummary
-                    | DataType::PgBrinMinmaxMultiSummary
-            ) || ty.category() == crate::types::Category::Geometric
-                // (A composite type orders by its columns: each must have an ordering.)
-                || matches!(ty, DataType::Row(rt) if rt.fields.iter().any(|(_, t)| unorderable(t)))
-        }
         if unorderable(&ty) {
             return Err(with_pos(
                 Error::new(
@@ -10201,5 +10201,24 @@ fn is_arg_ref(e: &Expr) -> bool {
         Expr::Outer(1, ..) => true,
         Expr::Field(r, ..) => is_arg_ref(r),
         _ => false,
+    }
+}
+
+/// A type without a default btree ordering (ORDER BY, a DISTINCT aggregate's input):
+/// get_sort_group_operators finds no `<` for it.
+fn unorderable(ty: &DataType) -> bool {
+    match ty {
+        DataType::Json
+        | DataType::Xml
+        | DataType::Gtsvector
+        | DataType::PgBrinBloomSummary
+        | DataType::PgBrinMinmaxMultiSummary
+        | DataType::Xid
+        | DataType::Cid
+        | DataType::Aclitem => true,
+        DataType::Array(e) => unorderable(e),
+        // (A composite type orders by its columns: each must have an ordering.)
+        DataType::Row(rt) => rt.fields.iter().any(|(_, t)| unorderable(t)),
+        _ => ty.category() == crate::types::Category::Geometric,
     }
 }

@@ -62,6 +62,21 @@ pub trait Cluster: Send + Sync {
     fn set_database_owner(&self, _name: &str, _owner: &str) -> Result<()> {
         Err(crate::error::unsupported("ALTER DATABASE OWNER"))
     }
+    /// pg_database.datminmxid of database `oid` in its own MultiXactIds, with the bound it puts
+    /// on the members the cluster keeps (`multixact::MinMxid`); None: initdb's, FirstMultiXactId.
+    fn database_min_mxid(&self, _oid: u32) -> Option<crate::txn::multixact::MinMxid> {
+        None
+    }
+    /// vac_update_datfrozenxid's new datminmxid of database `oid`.
+    fn set_database_min_mxid(&self, _oid: u32, _m: crate::txn::multixact::MinMxid) -> Result<()> {
+        Ok(())
+    }
+    /// vac_truncate_clog's oldest datminmxid of the databases but `oid`, as the bound it puts
+    /// on `oid`'s multis (`MinMxid::bound`; 0 for one a VACUUM never advanced); None: no other
+    /// database.
+    fn others_min_mxid_bound(&self, _oid: u32) -> Option<u64> {
+        None
+    }
     /// pg_database's datistemplate / datallowconn / datconnlimit of database `oid`.
     fn database_options(&self, _oid: u32) -> DbOptions {
         DbOptions::default()
