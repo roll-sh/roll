@@ -1,0 +1,60 @@
+> CREATE TABLE a267f_o (oid int8, cid int, amt numeric(12,2), tag text, note varchar(79)) WITH (autovacuum_enabled = false)
+-- CREATE TABLE
+
+> INSERT INTO a267f_o SELECT g,
+>   CASE WHEN g % 211 = 0 THEN NULL ELSE (g * 7) % 3600 END,
+>   CASE WHEN g % 13 = 0 THEN NULL ELSE (g % 1000) * 0.5 END,
+>   't' || (g % 5),
+>   CASE WHEN g % 37 = 0 THEN 'very special requests ' || g ELSE 'plain note ' || (g % 101) END
+>   FROM generate_series(1, 40000) g
+-- INSERT 0 40000
+
+> VACUUM ANALYZE a267f_o
+-- VACUUM
+
+> SET parallel_setup_cost = 0
+-- SET
+
+> SET parallel_tuple_cost = 0
+-- SET
+
+> SET min_parallel_table_scan_size = 0
+-- SET
+
+> SELECT count(*), sum(amt) FROM a267f_o WHERE cid > 100 AND amt < 200 AND note NOT LIKE '%special%'
+count:int8 | sum:numeric
+13886 | 1390223.50
+-- SELECT 1
+
+> SELECT count(*), sum(amt) FROM a267f_o WHERE cid > 3000 OR amt < 20 OR note LIKE 'very%'
+count:int8 | sum:numeric
+8593 | 1716651.50
+-- SELECT 1
+
+> SELECT count(*), sum(amt) FROM a267f_o WHERE (cid > 100 AND amt < 200) OR (cid < 50 AND amt > 400)
+count:int8 | sum:numeric
+14363 | 1468978.00
+-- SELECT 1
+
+> SELECT count(*), sum(amt) FROM a267f_o WHERE NOT (cid < 1000 OR amt > 300) AND oid > 5
+count:int8 | sum:numeric
+15880 | 2409241.00
+-- SELECT 1
+
+> SELECT count(*), sum(amt) FROM a267f_o WHERE (cid > 100 OR amt < 200) AND (cid < 3500 OR amt > 100)
+count:int8 | sum:numeric
+38845 | 8964937.00
+-- SELECT 1
+
+> SELECT tag, count(*) FROM a267f_o WHERE NOT (cid > 100 AND amt < 200) OR note LIKE 'very%' GROUP BY tag ORDER BY 1
+tag:text | count:int8
+t0 | 4629
+t1 | 4626
+t2 | 4624
+t3 | 4625
+t4 | 4627
+-- SELECT 5
+
+> DROP TABLE a267f_o
+-- DROP TABLE
+

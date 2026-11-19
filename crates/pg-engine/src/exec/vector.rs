@@ -580,38 +580,34 @@ impl VB {
     pub fn eval(&self, b: &ColBatch, sel: &[u32], out: &mut [Tri]) {
         match self {
             VB::And(args) | VB::Or(args) => {
-                let and = matches!(self, VB::And(_));
-                // (The rows no argument decided yet; `out` holds N for those one was NULL
-                // for.)
-                let mut live: Vec<u32> = sel.to_vec();
-                fill(sel, out, Tri::T);
+                // (A row's outcome so far is the first argument's: F or Out ends an AND, T
+                // or Out an OR; else it is the undecided T (F for OR), or N once an argument
+                // was NULL. The rows not ended, `live`, go to the next argument, and its
+                // outcome is folded in without a branch per row.)
+                let (stop, rest) = if matches!(self, VB::And(_)) { (Tri::F, Tri::T) } else { (Tri::T, Tri::F) };
+                let Some((first, more)) = args.split_first() else { return fill(sel, out, rest) };
+                first.eval(b, sel, out);
+                if more.is_empty() {
+                    return;
+                }
+                let mut live: Vec<u32> = Vec::with_capacity(sel.len());
+                live.extend(sel.iter().copied().filter(|&r| matches!(out[r as usize], Tri::T | Tri::F | Tri::N) && out[r as usize] != stop));
                 let mut tmp = vec![Tri::Out; b.len];
-                for a in args {
+                for a in more {
                     if live.is_empty() {
                         break;
                     }
                     a.eval(b, &live, &mut tmp);
-                    live.retain(|&r| {
-                        let r = r as usize;
-                        match (tmp[r], and) {
-                            (Tri::F, true) | (Tri::T, false) | (Tri::Out, _) => {
-                                out[r] = tmp[r];
-                                false
-                            }
-                            (Tri::N, _) => {
-                                out[r] = Tri::N;
-                                true
-                            }
-                            _ => true,
-                        }
-                    });
-                }
-                // (Undecided: true for AND, false for OR, unless an argument was NULL.)
-                for r in live {
-                    let r = r as usize;
-                    if out[r] != Tri::N {
-                        out[r] = if and { Tri::T } else { Tri::F };
+                    let mut w = 0;
+                    for i in 0..live.len() {
+                        let r = live[i];
+                        let (s, t) = (out[r as usize], tmp[r as usize]);
+                        let ends = t == stop || t == Tri::Out;
+                        out[r as usize] = if t == rest { s } else { t };
+                        live[w] = r;
+                        w += usize::from(!ends);
                     }
+                    live.truncate(w);
                 }
             }
             VB::Not(a) => {
