@@ -115,7 +115,11 @@ secret: by writing it somewhere it's read.
 
 - Found: AWS access keys (not AWS's documentation `…EXAMPLE` keys), GitHub tokens (`ghp_`…, `github_pat_`), Slack tokens, Stripe live keys,
   Google API keys, Anthropic and OpenAI keys, PEM private keys (a block with a base64 body, not
-  a bare header in code that parses keys), and roll's own credentials (`rlt_`,
+  a bare header in code that parses keys), database URLs carrying their password (Postgres,
+  MySQL, MariaDB, Redis, MongoDB, AMQP, SQL Server and ClickHouse URLs whose password is 12 or more
+  characters of two kinds or more, not a placeholder such as `${DB_PASSWORD}`, `<password>` or
+  `password`, and not on loopback: a developer's `postgres:postgres@localhost` passes), a roll
+  secret's share link (`shr_…#` and its key: the id alone is listed to readers), and roll's own credentials (`rlt_`,
   `rlo_`, `rlf_`, `rlc_`, `rlk_`, `rlp_`, `rlb_`, by their checksum, so never a false positive). roll's are refused
   in every product but roll secrets, where keeping one is the point; the others only in the
   products above (a database, a queue or apps' variables are where credentials belong).
