@@ -61,6 +61,7 @@ pub fn router(engine: Arc<Engine>) -> Router {
                 .route("/v1/previews/{id}/otlp/{token}/v1/traces", post(otlp_traces).layer(axum::extract::DefaultBodyLimit::max(8 << 20)))
                 .route("/v1/previews/{id}/traces", get(traces))
                 .route("/v1/previews/{id}/traces/{trace}", get(trace))
+                .route("/v1/previews/{id}/routes", get(routes))
                 .route("/v1/previews/{id}/files", get(read_files).put(write_files).layer(axum::extract::DefaultBodyLimit::max(crate::engine::shell::FILES_MAX + (1 << 20))))
                 .route_layer(axum::middleware::from_fn_with_state(engine.clone(), on_leader))
                 .with_state(engine.clone()),
@@ -726,15 +727,17 @@ async fn shell_resize(AxState(e): S, Path((id, sh)): Path<(String, String)>, b: 
 
 /// OTLP/HTTP `…/v1/traces` from a preview's service: protobuf or JSON (its `Content-Type`), gzip
 /// or not (its `Content-Encoding`). OTLP's success answer: an empty partial success.
-async fn otlp_traces(AxState(e): S, Path((id, token)): Path<(String, String)>, headers: axum::http::HeaderMap, b: Bytes) -> crate::Result<Json<Value>> {
+async fn otlp_traces(AxState(e): S, Path((id, token)): Path<(String, String)>, headers: axum::http::HeaderMap, body: axum::body::Body) -> crate::Result<Json<Value>> {
     check_id(&id)?;
-    let Some(reader) = e.span_reader.get() else { return Err(Error::NotFound("no such trace address".into())) };
+    let Some(reader) = e.span_reader.get().cloned() else { return Err(Error::NotFound("no such trace address".into())) };
     let h = |k: axum::http::HeaderName| headers.get(k).and_then(|v| v.to_str().ok()).unwrap_or("").to_ascii_lowercase();
     let json = h(axum::http::header::CONTENT_TYPE).contains("json");
     let gzip = h(axum::http::header::CONTENT_ENCODING).contains("gzip");
-    // The token first: an address that isn't a live preview's reads nothing.
-    e.keep_spans(&id, &token, Vec::new())?;
-    let spans = reader.spans(&b, json, gzip).map_err(|err| Error::BadRequest(err.to_string()))?;
+    // The token first: an address that isn't a live preview's reads none of its body.
+    e.check_trace_token(&id, &token)?;
+    let b = axum::body::to_bytes(body, 8 << 20).await.map_err(|_| Error::BadRequest("traces are at most 8 MiB a request".into()))?;
+    // Parsed off the async workers: a large request is CPU, not waiting.
+    let spans = tokio::task::spawn_blocking(move || reader.spans(&b, json, gzip)).await.map_err(|err| Error::Internal(err.to_string()))?.map_err(|err| Error::BadRequest(err.to_string()))?;
     e.keep_spans(&id, &token, spans)?;
     Ok(Json(json!({ "partialSuccess": {} })))
 }
@@ -748,6 +751,11 @@ struct TracesQuery {
 async fn traces(AxState(e): S, Path(id): Path<String>, Query(q): Query<TracesQuery>) -> crate::Result<Json<Value>> {
     check_id(&id)?;
     Ok(Json(e.traces(&id, q.minutes.unwrap_or(60)).await?))
+}
+
+async fn routes(AxState(e): S, Path(id): Path<String>, Query(q): Query<TracesQuery>) -> crate::Result<Json<Value>> {
+    check_id(&id)?;
+    Ok(Json(e.routes(&id, q.minutes.unwrap_or(60)).await?))
 }
 
 async fn trace(AxState(e): S, Path((id, t)): Path<(String, String)>) -> crate::Result<Json<Value>> {
@@ -876,8 +884,10 @@ async fn logs(AxState(e): S, Path(id): Path<String>, Query(q): Query<LogsQuery>)
     // A stderr line is `event: stderr`; a stdout one the default event, as before.
     let rest = futures::stream::unfold(rx, |mut rx| async move {
         rx.recv().await.map(|(stderr, l)| {
-            let ev = Event::default().data(l.replace(['\r', '\n'], ""));
-            (Ok(if stderr { ev.event("stderr") } else { ev }), rx)
+            // `event:` before `data:` on the wire (axum writes them in the order they're set): a
+            // client that acts on each `data:` line as it reads it (the CLI) knows the stream.
+            let ev = if stderr { Event::default().event("stderr") } else { Event::default() };
+            (Ok(ev.data(l.replace(['\r', '\n'], ""))), rx)
         })
     });
     let mut r = Sse::new(futures::StreamExt::chain(first, rest)).keep_alive(KeepAlive::default()).into_response();
