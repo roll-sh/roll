@@ -133,7 +133,7 @@ pub fn start(
     let apps_for_notes = apps.clone();
     let shots: Option<Arc<dyn fleet::Shoot>> = apps.clone().map(|a| Arc::new(services::AppsShots { reach: Arc::new(services::AppsReach(a)), runtime: runtime.clone() }) as Arc<dyn fleet::Shoot>);
     let engine = roll_previews::Engine::new(
-        roll_previews::engine::Config { domain, port: Some(args.api.port()), mail: Some(format!("127.0.0.1:{}", args.previews_smtp.port())), ..Default::default() },
+        roll_previews::engine::Config { domain, port: Some(args.api.port()), mail: Some(format!("127.0.0.1:{}", args.previews_smtp.port())), otlp: Some(format!("127.0.0.1:{}", args.api.port())), ..Default::default() },
         store.clone(),
         workspace,
         source.clone(),
@@ -145,6 +145,8 @@ pub fn start(
         leader,
     );
     runtime.attach(&engine);
+    // Its services' spans, read as roll apps reads its own.
+    let _ = engine.span_reader.set(Arc::new(services::AppsSpans));
     // roll apps' proxy lists a preview page's notes from the engine (`Engine::notes_for`).
     if let Some(a) = &apps_for_notes {
         a.set_feedback_notes(Arc::new(services::Notes(Arc::downgrade(&engine))));
