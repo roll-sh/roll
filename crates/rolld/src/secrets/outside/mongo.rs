@@ -1,4 +1,6 @@
-//! MongoDB servers outside roll (Atlas, a replica set of the customer's own): the same guards as
+//! MongoDB servers outside roll (a replica set of the customer's own, a host such as DigitalOcean's;
+//! never Atlas, which refuses these commands on every tier: roll_secrets::atlas speaks its Admin
+//! API instead): the same guards as
 //! Postgres (public addresses resolved here; TLS verified against each host's name). User
 //! management runs on the primary, found with `hello` among the seed hosts only (or, for
 //! `mongodb+srv://`, the SRV record's targets, which must sit inside its domain), so a server can't
@@ -11,12 +13,12 @@
 //! every length by the bytes present, a reply is at most 1 MiB, and the SCRAM iteration count it
 //! asks for is capped.
 
-use super::{TIMEOUT, resolve, tls_config};
+use super::{TIMEOUT, Via, tls_config};
 use base64::Engine as _;
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_rustls::rustls::pki_types::ServerName;
 
 const REPLY_MAX: usize = 1 << 20;
@@ -24,6 +26,8 @@ const DEPTH_MAX: usize = 16;
 /// MongoDB's default is 15,000; a server asking for more than this is refused, not obeyed.
 const ITERATIONS_MAX: u32 = 1_000_000;
 const SEEDS_MAX: usize = 16;
+/// Atlas's cluster domains (commercial, Atlas for Government, and its development cloud).
+const ATLAS_DOMAINS: &[&str] = &[".mongodb.net", ".mongodbgov.net", ".mongodb-dev.net"];
 
 pub(super) struct Url {
     /// Seed hosts and ports (several for a replica set).
@@ -67,6 +71,11 @@ pub(super) fn parse(url: &str, allow_private: bool) -> Result<Url, String> {
     if seeds.is_empty() || seeds.len() > SEEDS_MAX || user.is_empty() || (srv && seeds.len() != 1) {
         return Err(bad());
     }
+    // Atlas refuses createUser, updateUser and dropUser on every tier, and rolls back a user
+    // change made outside its UI, CLI or Admin API.
+    if seeds.iter().any(|(h, _)| ATLAS_DOMAINS.iter().any(|d| h.to_ascii_lowercase().ends_with(d))) {
+        return Err("that's a MongoDB Atlas cluster: Atlas manages database users only through its Admin API, so register its project instead (roll secrets atlas add, POST …/atlas-projects)".into());
+    }
     // `mongodb+srv://` means TLS unless it says otherwise; `mongodb://` only with tls=true.
     let mut tls = srv;
     let mut db = "admin".to_string();
@@ -87,21 +96,14 @@ pub(super) fn parse(url: &str, allow_private: bool) -> Result<Url, String> {
     Ok(Url { srv: srv.then(|| seeds[0].0.clone()), seeds, user, password, db, tls })
 }
 
-/// The SRV record's targets, each inside the record's own domain (the spec's rule: a hostile DNS
-/// answer can't point roll at someone else's servers).
-async fn srv_seeds(name: &str) -> Result<Vec<(String, u16)>, String> {
+/// The SRV record's targets (from roll's DNS, or the gateway's), each inside the record's own
+/// domain (the spec's rule: a hostile DNS answer can't point roll at someone else's servers).
+async fn srv_seeds(name: &str, via: &Via) -> Result<Vec<(String, u16)>, String> {
     let parent = name.split_once('.').map(|(_, p)| p).filter(|p| p.contains('.')).ok_or_else(|| format!("{name} needs at least three labels for mongodb+srv://"))?;
-    let resolver = hickory_resolver::TokioResolver::builder_tokio().map_err(|e| e.to_string())?.build().map_err(|e| e.to_string())?;
-    let found = resolver.srv_lookup(format!("_mongodb._tcp.{name}.")).await.map_err(|_| format!("{name} has no _mongodb._tcp SRV record"))?;
-    let mut out = Vec::new();
-    for r in found.answers() {
-        if let hickory_resolver::proto::rr::RData::SRV(s) = &r.data {
-            let target = s.target.to_ascii().trim_end_matches('.').to_ascii_lowercase();
-            if !target.ends_with(&format!(".{}", parent.to_ascii_lowercase())) {
-                return Err(format!("{name}'s SRV record names {target}, outside {parent}"));
-            }
-            out.push((target, s.port));
-        }
+    let mut out = via.srv(&format!("_mongodb._tcp.{name}")).await?;
+    let under = format!(".{}", parent.to_ascii_lowercase());
+    if let Some((target, _)) = out.iter().find(|(t, _)| !t.ends_with(&under)) {
+        return Err(format!("{name}'s SRV record names {target}, outside {parent}"));
     }
     out.truncate(SEEDS_MAX);
     if out.is_empty() { Err(format!("{name} has no _mongodb._tcp SRV record")) } else { Ok(out) }
@@ -293,8 +295,7 @@ fn document(b: &[u8], depth: usize) -> Result<(Bson, usize), String> {
 
 // ── the wire ──
 
-trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
-impl<T: AsyncRead + AsyncWrite + Unpin + Send> Io for T {}
+use super::Io;
 
 pub(super) struct Conn {
     io: Box<dyn Io>,
@@ -342,9 +343,8 @@ impl Conn {
     }
 }
 
-async fn open(host: &str, port: u16, tls: bool, ca: Option<&str>, allow_private: bool) -> Result<Conn, String> {
-    let addr = resolve(host, port, allow_private).await?;
-    let tcp = tokio::time::timeout(TIMEOUT, tokio::net::TcpStream::connect(addr)).await.map_err(|_| format!("{host}: timed out"))?.map_err(|e| format!("{host}: {e}"))?;
+async fn open(host: &str, port: u16, tls: bool, ca: Option<&str>, via: &Via) -> Result<Conn, String> {
+    let tcp = via.dial(host, port).await?;
     let io: Box<dyn Io> = if tls {
         let name = ServerName::try_from(host.to_string()).map_err(|_| format!("{host} isn't a name TLS can check"))?;
         Box::new(tokio_rustls::TlsConnector::from(Arc::new(tls_config(ca)?)).connect(name, tcp).await.map_err(|e| format!("{host}: {e}"))?)
@@ -355,10 +355,10 @@ async fn open(host: &str, port: u16, tls: bool, ca: Option<&str>, allow_private:
 }
 
 /// The primary, among the seeds: the one `hello` says is writable, or the seed another names.
-async fn primary(seeds: &[(String, u16)], tls: bool, ca: Option<&str>, allow_private: bool) -> Result<Conn, String> {
+async fn primary(seeds: &[(String, u16)], tls: bool, ca: Option<&str>, via: &Via) -> Result<Conn, String> {
     let mut last = "no seed answered".to_string();
     for (host, port) in seeds {
-        let mut c = match open(host, *port, tls, ca, allow_private).await {
+        let mut c = match open(host, *port, tls, ca, via).await {
             Ok(c) => c,
             Err(e) => {
                 last = e;
@@ -379,7 +379,7 @@ async fn primary(seeds: &[(String, u16)], tls: bool, ca: Option<&str>, allow_pri
             // Only a seed: a server can't send roll anywhere the URL (or its SRV record) didn't.
             let found = seeds.iter().find(|(h, p)| format!("{h}:{p}").eq_ignore_ascii_case(named));
             if let Some((h, p)) = found {
-                return open(h, *p, tls, ca, allow_private).await;
+                return open(h, *p, tls, ca, via).await;
             }
             last = format!("{host} names {named} as primary, which isn't in the URL");
         } else {
@@ -430,13 +430,13 @@ async fn login(c: &mut Conn, user: &str, password: &str, db: &str) -> Result<(),
     }
 }
 
-pub(super) async fn run<T>(u: Url, ca: Option<String>, allow_private: bool, work: impl AsyncFnOnce(&mut Conn) -> Result<T, String>) -> Result<T, String> {
+pub(super) async fn run<T>(u: Url, ca: Option<String>, via: Via, work: impl AsyncFnOnce(&mut Conn) -> Result<T, String>) -> Result<T, String> {
     tokio::time::timeout(TIMEOUT, async move {
         let seeds = match &u.srv {
-            Some(name) => srv_seeds(name).await?,
+            Some(name) => srv_seeds(name, &via).await?,
             None => u.seeds.clone(),
         };
-        let mut c = primary(&seeds, u.tls, ca.as_deref(), allow_private).await?;
+        let mut c = primary(&seeds, u.tls, ca.as_deref(), &via).await?;
         login(&mut c, &u.user, &u.password, &u.db).await?;
         c.db = u.db.clone();
         work(&mut c).await

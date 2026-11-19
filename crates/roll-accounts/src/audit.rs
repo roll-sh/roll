@@ -38,6 +38,12 @@ pub trait Audit: Send + Sync {
     /// The events about `user` (their sign-ins and changes to their account), newest first,
     /// before `before` (Unix ms), at most `limit`: a person's own security log.
     fn activity(&self, user: &str, before: Option<i64>, limit: usize) -> Vec<Activity>;
+    /// `user`'s own roll tokens and connections, for their data export: names, rules and dates,
+    /// never a secret or its hint. None by default.
+    fn tokens(&self, user: &str) -> Vec<Value> {
+        let _ = user;
+        Vec::new()
+    }
 }
 
 /// One line of a person's security log.
@@ -121,7 +127,7 @@ impl Accounts {
         *self.audit.write().unwrap_or_else(|e| e.into_inner()) = Some(audit);
     }
 
-    fn audit_hook(&self) -> Option<Arc<dyn Audit>> {
+    pub(crate) fn audit_hook(&self) -> Option<Arc<dyn Audit>> {
         self.audit.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
@@ -139,11 +145,40 @@ impl Accounts {
     /// A sign-in that ended: well (`user`, `refused: None`; `second_factor`: it still owes one) or
     /// not (the error, and the person when they're known).
     pub(crate) fn record_sign_in(&self, user: Option<&str>, method: &str, refused: Option<&Error>, second_factor: bool, who: &Who) {
+        // A whole sign-in (nothing more owed): from somewhere new, the person is mailed.
+        if let (Some(u), None, false) = (user, refused, second_factor) {
+            self.note_sign_in_place(u, who);
+        }
+        self.sign_in_event(user.unwrap_or("anonymous"), user, method, refused, second_factor, who);
+    }
+
+    /// A person confirmed it's them for sudo mode (or failed to).
+    pub(crate) fn record_reauth(&self, user: &str, method: &str, refused: Option<&Error>, who: &Who) {
         self.record(AccountEvent {
-            actor: user.unwrap_or("anonymous").to_string(),
+            actor: user.to_string(),
+            action: "reauth".into(),
+            method: "-".into(),
+            target: Some(user.to_string()),
+            ok: refused.is_none(),
+            status: refused.map(status_of).unwrap_or(200),
+            ip: who.ip,
+            user_agent: who.user_agent.clone(),
+            detail: json!({ "method": clean_id(method), "refused": refused.map(Error::redirect_code) }),
+        });
+    }
+
+    /// A refused code for someone's account (`owner`, when the code was sent to one): in their
+    /// security log, by nobody known, as GitHub shows failed attempts.
+    pub(crate) fn record_code_refused(&self, owner: Option<&str>, method: &str, refused: &Error, who: &Who) {
+        self.sign_in_event("anonymous", owner, method, Some(refused), false, who);
+    }
+
+    fn sign_in_event(&self, actor: &str, target: Option<&str>, method: &str, refused: Option<&Error>, second_factor: bool, who: &Who) {
+        self.record(AccountEvent {
+            actor: actor.to_string(),
             action: "sign_in".into(),
             method: "-".into(),
-            target: user.map(str::to_string),
+            target: target.map(str::to_string),
             ok: refused.is_none(),
             status: refused.map(status_of).unwrap_or(200),
             ip: who.ip,
@@ -178,6 +213,11 @@ fn recorded_elsewhere(route: &str) -> bool {
         || matches!(
             route,
             "/v1/accounts/email/start" | "/v1/accounts/email/verify" | "/v1/accounts/oauth/{provider}/start" | "/v1/accounts/sso/start" | "/v1/accounts/signin/totp" | "/v1/accounts/signin/recovery" | "/v1/accounts/invites/peek"
+                | "/v1/accounts/signin/passkey" | "/v1/accounts/signin/passkey/options" | "/v1/accounts/me/passkeys/options"
+                | "/v1/accounts/me/reauth" | "/v1/accounts/me/reauth/email" | "/v1/accounts/me/reauth/passkey/options"
+                | "/v1/accounts/sso/{id}/backchannel-logout"
+                | "/v1/accounts/signin/reset-request" | "/v1/accounts/reset-requests/{id}/approve" | "/v1/accounts/reset-requests/{id}/deny"
+                | "/v1/accounts/me/export"
         )
 }
 

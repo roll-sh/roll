@@ -87,7 +87,7 @@ impl Secrets {
         let rows: Vec<(i64, String, String)> = self.db.read(|c| {
             c.query(
                 "SELECT at, actor, keys FROM audit WHERE project_id = ? AND env = ? AND path = ? AND at >= ?
-                 AND action IN ('secrets.reveal', 'secrets.export', 'secrets.resolve', 'secrets.revalidate', 'sync.push') ORDER BY id DESC LIMIT ?",
+                 AND action IN ('secrets.reveal', 'secrets.export', 'secrets.resolve', 'secrets.revalidate', 'secrets.totp', 'sync.push') ORDER BY id DESC LIMIT ?",
                 params![project, slug, path, since, ROWS_MAX],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )

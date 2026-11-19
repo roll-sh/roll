@@ -106,11 +106,13 @@ impl EnvSource for Engine {
             vars: Vec::new(),
             branches: Vec::new(),
             access_token: None,
+            signed_in: false,
             bypass_sha256: None,
             // The runtime's proxy adds the button per request (`runtime::Tagger`).
             feedback: false,
             egress: s.egress_for(r.trusted),
             egress_hosts: s.egress_hosts.clone(),
+            rebuild: None,
         };
         Ok((t, env))
     }

@@ -95,6 +95,20 @@ impl roll_accounts::audit::Audit for AccessAudit {
         roll_access::evaluate::client_ip(req, &self.0.config)
     }
 
+    fn tokens(&self, user: &str) -> Vec<serde_json::Value> {
+        let Ok(all) = self.0.store.list() else { return Vec::new() };
+        all.into_iter()
+            .filter(|g| g.user.as_deref() == Some(user))
+            .map(|g| {
+                serde_json::json!({
+                    "id": g.id, "name": g.name, "kind": g.kind, "rules": g.rules, "client": g.client.map(|c| c.name),
+                    "created_at": g.created_at, "expires_at": g.expires_at, "last_used_at": g.last_used_at, "last_used_ip": g.last_used_ip,
+                    "revoked_at": g.revoked_at, "revoked_why": g.revoked_why, "decoy": g.decoy,
+                })
+            })
+            .collect()
+    }
+
     fn activity(&self, user: &str, before: Option<i64>, limit: usize) -> Vec<roll_accounts::audit::Activity> {
         // Rows written in the last moment may still be in the batching writer's queue.
         self.0.store.flush_audit(std::time::Duration::from_millis(200));

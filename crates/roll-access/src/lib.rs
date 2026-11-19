@@ -53,6 +53,9 @@ pub enum Error {
     Conflict(String),
     #[error("{0}")]
     TooMany(String),
+    /// Sudo mode: the session must prove who it is again first (403 `reauth_required`).
+    #[error("{0}")]
+    ReauthRequired(String),
     /// An OAuth error (RFC 6749 §5.2): its code and description.
     #[error("{1}")]
     OAuth(&'static str, String),
@@ -71,6 +74,7 @@ impl IntoResponse for Error {
             Error::NotFound(_) => (StatusCode::NOT_FOUND, "not_found"),
             Error::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
             Error::TooMany(_) => (StatusCode::TOO_MANY_REQUESTS, "too_many"),
+            Error::ReauthRequired(_) => (StatusCode::FORBIDDEN, "reauth_required"),
             Error::OAuth(code, desc) => {
                 let status = if *code == "invalid_client" { StatusCode::UNAUTHORIZED } else { StatusCode::BAD_REQUEST };
                 return (status, [("cache-control", "no-store")], Json(serde_json::json!({ "error": code, "error_description": desc }))).into_response();
@@ -86,17 +90,7 @@ pub fn new_id(prefix: &str) -> String {
     format!("{prefix}_{}", random(16))
 }
 
-/// A secret: `prefix`, 34 random characters of lowercase base32 (170 bits) and 6 of checksum, so a
-/// scanner can tell a real roll token from look-alike text without asking roll ([`checksum_ok`],
-/// as GitHub's tokens carry a CRC32).
-pub fn new_secret(prefix: &str) -> String {
-    let body = format!("{prefix}{}", random(34));
-    let sum = checksum(&body);
-    format!("{body}{sum}")
-}
-
-use roll_auth::credentials::checksum;
-pub use roll_auth::credentials::{SECRET_PREFIXES, checksum_ok};
+pub use roll_auth::credentials::{SECRET_PREFIXES, checksum_ok, new_secret};
 
 /// Every roll grant secret in `text` whose checksum holds (in a pushed file, a paste, a log).
 pub fn find_secrets(text: &str) -> Vec<String> {
@@ -138,6 +132,7 @@ mod policy_tests {
             approved_at: None,
             decided_by: None,
             hint: None,
+            decoy: false,
             ip_allow: vec![],
             created_by: "operator".into(),
             created_at: created,
@@ -571,7 +566,7 @@ impl Access {
         rate.div_ceil(nodes).max(1)
     }
 
-    /// A product's own leaked secrets (apps' deploy hooks, `rlk_`): found wherever roll's are
+    /// A product's own leaked secrets (apps' deploy hooks, `rlk_`; previews', `rlb_`): found wherever roll's are
     /// (roll code's landings, GitHub's secret scanning), revoked by `revoke`, which says what it
     /// revoked (`None`: nothing live).
     pub fn on_leaked(&self, prefix: &'static str, revoke: impl Fn(&str, &str) -> Option<String> + Send + Sync + 'static) {
@@ -599,7 +594,12 @@ impl Access {
                         tool: None,
                         method: "-".into(),
                         route: "leaked".into(),
-                        product: s.get(..4).and_then(|p| (p == "rlk_").then(|| "apps".to_string())),
+                        product: s.get(..4).and_then(|p| match p {
+                            "rlk_" => Some("apps".to_string()),
+                            "rlb_" => Some("previews".to_string()),
+                            "rlp_" => Some("accounts".to_string()),
+                            _ => None,
+                        }),
                         action: Some("admin".into()),
                         resource: Some(format!("{what}, found in {found_at}").chars().take(300).collect()),
                         decision: "revoke".into(),
@@ -850,6 +850,47 @@ impl Access {
                 tracing::warn!(error = %e, "mailing a token's person");
             }
         });
+    }
+
+    /// A decoy token was used (docs/permissions.md, "Decoy tokens"): when and from where on the
+    /// token, an audit row, and its owner and the admins told (once an hour per decoy and person).
+    pub fn decoy_tripped(self: &Arc<Self>, g: &store::Grant, ip: Option<String>, route: &str, client: Option<String>) {
+        tracing::warn!(grant = %g.id, route = %route, "a decoy token was used");
+        if let Err(e) = self.store.tripped(&g.id, ip.as_deref()) {
+            tracing::warn!(error = %e, "noting a decoy's use");
+        }
+        self.store.audit(&store::AuditEvent {
+            id: new_id("aud"),
+            at: code_sql::now_ms(),
+            grant_id: Some(g.id.clone()),
+            grant_name: Some(g.name.clone()),
+            source: "decoy".into(),
+            tool: None,
+            method: "-".into(),
+            route: route.chars().take(200).collect(),
+            product: None,
+            action: None,
+            resource: None,
+            decision: "decoy".into(),
+            approval: None,
+            status: 401,
+            args: None,
+            ip: ip.clone(),
+            duration_ms: 0,
+            client: client.clone(),
+        });
+        let name = mail_name(&g.name);
+        let from = ip.as_deref().map(|i| format!(" from {i}")).unwrap_or_default();
+        let subject = format!("A decoy token was used: \"{name}\"");
+        let text = format!(
+            "Someone used roll's decoy token \"{name}\" ({}){from}, calling {route}. Nobody should ever use it: whoever did found it where it was planted. Nothing was allowed, and they were told it isn't a valid token.\n\nIts page has when and from where: {}/dashboard/access/tokens/{}\n",
+            g.id,
+            self.web_url(),
+            g.id,
+        );
+        let key = format!("decoy:{}", g.id);
+        self.tell(g.user.as_deref(), Some((&key, 3_600_000)), subject.clone(), text.clone());
+        self.tell_admins(&key, subject, text);
     }
 
     /// A token used from a network it hasn't been before, told where approvals go (GitHub and

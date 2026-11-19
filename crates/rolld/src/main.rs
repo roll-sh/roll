@@ -529,6 +529,7 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
     // Workspace projects: always on; the operator's, and each signed-in user's own.
     router = router.merge(roll_workspace::router(workspace.clone()));
     // roll previews: an environment per change of a project's repos (needs roll code).
+    let mut previews_engine: Option<std::sync::Arc<roll_previews::Engine>> = None;
     let preview_hosts = match &code {
         Some(c) => {
             let on_products = previews::Products {
@@ -542,10 +543,11 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
             };
             let p = previews::start(&args, &home, c, workspace.clone(), cluster.clone(), on_products, apps.as_ref().map(|a| a.apps.clone()))?;
             router = router.merge(roll_previews::api::router(p.engine.clone()));
+            previews_engine = Some(p.engine.clone());
             if let Some(internal) = p.internal {
                 router = router.merge(internal);
             }
-            Some(p.runtime)
+            Some((p.runtime, p.engine))
         }
         None => None,
     };
@@ -558,6 +560,10 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
     if let Some(a) = &apps {
         a.apps.set_mailbox(std::sync::Arc::new(apps::AccountsMail(accounts.clone())));
         a.apps.set_visitors(std::sync::Arc::new(apps::AccountsVisitors(accounts.clone())));
+    }
+    // roll previews' team access asks the same accounts, and the workspace for who owns what.
+    if let Some((_, engine)) = &preview_hosts {
+        let _ = engine.visitors.set(std::sync::Arc::new(previews::AccountsVisitors { accounts: accounts.clone(), workspace: workspace.clone() }));
     }
     router = router.merge(roll_accounts::router(accounts.clone()));
     // The products this node runs, as rules name them: MCP lists their tools, the token builder
@@ -593,6 +599,11 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
     )?;
     // People's accounts in the audit log (sign-ins, invites, SSO and SCIM changes).
     accounts.set_audit(std::sync::Arc::new(accounts::AccessAudit(access.clone())));
+    // SSO connections' SCIM tokens found leaked (`rlp_`) stop working, like tokens.
+    {
+        let accounts = accounts.clone();
+        access.on_leaked("rlp_", move |secret, why| accounts.revoke_leaked_scim(secret, why));
+    }
     router = router.merge(roll_access::api::router(access.clone()));
     // Users' own tokens act as them, as they are now (docs/permissions.md, "Users' own tokens").
     let _ = access.people.set(sessions);
@@ -607,14 +618,18 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
     let people = secrets::People { accounts, code: code.as_ref().map(|c| c.code.clone()), search: search.as_ref().map(|s| s.control.clone()) };
     workspace.set_owners(std::sync::Arc::new(people.clone()));
     // Its tokens are roll-access's: grants for syncs a token made, workload tokens for identities.
-    let secrets = secrets::open(&args, &home, workspace.clone(), !auth.enforcing(), products_api.clone(), access.clone(), people)?;
+    // Gateways into private networks: their links follow leases on the node's cluster.
+    let gateways = secrets::gateway::Gateways::new(cluster.clone(), access.clone() as std::sync::Arc<dyn roll_auth::Grants>, args.code_webhook_allow_private.unwrap_or(!auth.enforcing()));
+    let secrets = secrets::open(&args, &home, workspace.clone(), !auth.enforcing(), products_api.clone(), access.clone(), people, gateways.clone())?;
+    // Its counters and gauges, a line a minute beside the cluster's (JSON logs only).
+    let _secrets_metrics = logs::SecretsMetrics::start(cluster.node_id().to_string(), secrets.clone());
     code_secrets.set(secrets.clone(), workspace.clone());
     apps_secrets.set(secrets.clone(), workspace.clone());
     let _ = secrets_envs.0.set(secrets.clone());
     if let Some(c) = &code {
         secrets.set_code_refs(std::sync::Arc::new(secrets::CodeRefs(c.code.clone())));
     }
-    router = router.merge(roll_secrets::router(secrets.clone()));
+    router = router.merge(roll_secrets::router(secrets.clone()).layer(axum::middleware::map_request(secrets::guard_header))).merge(gateways.router());
     // A node that isn't (or no longer is) sealed answers the unseal with nothing to give.
     router = router.merge(roll_secrets::unseal::unsealed_router());
     products_api.set(router.clone());
@@ -625,6 +640,10 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
     if let Some(a) = &apps {
         let apps = a.apps.clone();
         access.on_leaked("rlk_", move |secret, _why| apps.revoke_leaked_hook(secret));
+    }
+    // …and previews' (`rlb_`).
+    if let Some(e) = previews_engine.clone() {
+        access.on_leaked("rlb_", move |secret, _why| e.revoke_leaked_hook(secret));
     }
     // The audit log streamed to SIEMs (it needs ROLL_SECRET_KEY to keep each sink's secret).
     access::sinks(&access, args.secret_key().as_deref().map(String::as_str));
@@ -667,7 +686,7 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
     if let Some(a) = &apps {
         router = apps_control::public::with_forwarded(router, a.apps.clone());
     }
-    if let Some(rt) = &preview_hosts {
+    if let Some((rt, _)) = &preview_hosts {
         router = router.layer(axum::middleware::from_fn_with_state(rt.clone(), roll_previews::runtime::route));
     }
     // In a cluster, requests from other nodes are verified first.
@@ -744,10 +763,15 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
     }
 
     // A sealed start kept its listener: connections waited in its backlog while products started.
-    let listener = match api_listener {
+    let bound = match api_listener {
         Some(l) => l,
         None => tokio::net::TcpListener::bind(args.api).await?,
     };
+    // No Nagle: a WebSocket's small frames (a gateway's `open`, roll code's events) would otherwise
+    // wait for the peer's delayed ACK.
+    let listener = axum::serve::ListenerExt::tap_io(bound, |tcp| {
+        let _ = tcp.set_nodelay(true);
+    });
     info!(addr = %args.api, products = %on, "control API listening");
     let (close, closed) = tokio::sync::oneshot::channel::<()>();
     // Client addresses reach handlers (roll code counts anonymous event streams per address).

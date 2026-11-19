@@ -159,6 +159,23 @@ impl Keyring {
     }
 }
 
+impl Keyring {
+    /// Seal what one node hands another for a moment (a provider call forwarded to the node that
+    /// holds a gateway's link): every node has the deployment key. `context` is bound in.
+    pub fn seal_hop(&self, context: &str, msg: &[u8]) -> Vec<u8> {
+        seal_raw(&self.current, &format!("roll-secrets:hop:{context}"), msg)
+    }
+
+    /// Open [`Keyring::seal_hop`]'s output (with the previous key too, while rotating).
+    pub fn open_hop(&self, context: &str, raw: &[u8]) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
+        let aad = format!("roll-secrets:hop:{context}");
+        open_raw(&self.current, &aad, raw).or_else(|e| match &self.previous {
+            Some(p) => open_raw(p, &aad, raw),
+            None => Err(e),
+        })
+    }
+}
+
 fn dek_aad(project: &str) -> String {
     format!("roll-secrets:dek:{project}")
 }
