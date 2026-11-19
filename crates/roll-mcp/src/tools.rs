@@ -1213,5 +1213,24 @@ mod tests {
         let doc = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/mcp.md")).unwrap();
         let missing: Vec<_> = all().iter().filter(|t| !doc.contains(&format!("| `{}` |", t.name))).map(|t| t.name).collect();
         assert!(missing.is_empty(), "docs/mcp.md doesn't list {missing:?}");
+        // A tool a description or a workflow tells the agent to call is one roll has: a renamed
+        // tool would otherwise send agents after a name that answers "unknown tool".
+        let names: Vec<String> = all().iter().map(|t| t.name.to_string()).chain([crate::search::FIND, crate::search::RUN_READ, crate::search::RUN].map(String::from)).collect();
+        let products = ["access", "workspace", "postgres", "redis", "storage", "streams", "tasks", "queues", "nosql", "search", "secrets", "apps", "previews", "roll"];
+        // Words that look like a tool and aren't one: Elasticsearch's audit event names.
+        let not_tools = ["access_denied"];
+        let mut texts: Vec<(String, String)> = all().iter().map(|t| (t.name.to_string(), std::iter::once(t.title).chain([t.description]).chain(t.params.iter().map(|p| p.desc)).collect::<Vec<_>>().join(" "))).collect();
+        texts.extend(crate::prompts::workflows(&names).into_iter().map(|w| (format!("prompt {}", w.name), w.text)));
+        let mut dangling = Vec::new();
+        for (whose, text) in &texts {
+            for w in text.split(|c: char| !(c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')) {
+                let looks = w.split_once('_').is_some_and(|(p, rest)| products.contains(&p) && !rest.is_empty() && !rest.starts_with('_'));
+                if looks && !names.iter().any(|n| n == w) && !not_tools.contains(&w) {
+                    dangling.push(format!("{whose}: {w}"));
+                }
+            }
+        }
+        dangling.dedup();
+        assert!(dangling.is_empty(), "these name tools roll doesn't have: {dangling:?}");
     }
 }
