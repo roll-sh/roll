@@ -1,0 +1,356 @@
+[
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-cu",
+  "body": "{\"service\":\"custom\",\"service_settings\":{\"secret_parameters\":{\"api_key\":\"cu-key\"},\"url\":\"$M/custom/embed\",\"headers\":{\"Authorization\":\"Bearer ${api_key}\",\"Content-Type\":\"application/json\"},\"request\":\"{\\\"input\\\":${input},\\\"model\\\":\\\"m\\\"}\",\"response\":{\"json_parser\":{\"text_embeddings\":\"$.data[*].embedding\"}}}}",
+  "status": 200,
+  "answer": "{\"inference_id\":\"fx-cu\",\"task_type\":\"text_embedding\",\"service\":\"custom\",\"service_settings\":{\"similarity\":\"dot_product\",\"dimensions\":4,\"url\":\"$M/custom/embed\",\"headers\":{\"Authorization\":\"Bearer ${api_key}\",\"Content-Type\":\"application/json\"},\"request\":\"{\\\"input\\\":${input},\\\"model\\\":\\\"m\\\"}\",\"response\":{\"json_parser\":{\"text_embeddings\":\"$.data[*].embedding\",\"embedding_type\":\"float\"}},\"input_type\":{\"translation\":{},\"default\":\"\"},\"rate_limit\":{\"requests_per_minute\":10000},\"batch_size\":10},\"chunking_settings\":{\"strategy\":\"sentence\",\"max_chunk_size\":250,\"sentence_overlap\":1}}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/custom/embed",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json"
+     ],
+     [
+      "Authorization",
+      "Bearer cu-key"
+     ]
+    ],
+    "body": "{\"input\":[\"how big\"],\"model\":\"m\"}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"data\": [{\"embedding\": [0.427835, 0.35567, 0.283505, 0.21134]}]}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/fx-cu",
+  "body": "{\"input\":[\"hello world\",\"second\"]}",
+  "status": 200,
+  "answer": "{\"text_embedding\":[{\"embedding\":[0.005155,-0.489691,0.015464,-0.479381]},{\"embedding\":[0.056701,-0.386598,0.170103,-0.273196]}]}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/custom/embed",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json"
+     ],
+     [
+      "Authorization",
+      "Bearer cu-key"
+     ]
+    ],
+    "body": "{\"input\":[\"hello world\",\"second\"],\"model\":\"m\"}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"data\": [{\"embedding\": [0.005155, -0.489691, 0.015464, -0.479381]}, {\"embedding\": [0.056701, -0.386598, 0.170103, -0.273196]}]}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "GET",
+  "path": "/_inference/fx-cu",
+  "body": null,
+  "status": 200,
+  "answer": "{\"endpoints\":[{\"inference_id\":\"fx-cu\",\"task_type\":\"text_embedding\",\"service\":\"custom\",\"service_settings\":{\"similarity\":\"dot_product\",\"dimensions\":4,\"url\":\"$M/custom/embed\",\"headers\":{\"Authorization\":\"Bearer ${api_key}\",\"Content-Type\":\"application/json\"},\"request\":\"{\\\"input\\\":${input},\\\"model\\\":\\\"m\\\"}\",\"response\":{\"json_parser\":{\"text_embeddings\":\"$.data[*].embedding\",\"embedding_type\":\"float\"}},\"input_type\":{\"translation\":{},\"default\":\"\"},\"rate_limit\":{\"requests_per_minute\":10000},\"batch_size\":10},\"chunking_settings\":{\"strategy\":\"sentence\",\"max_chunk_size\":250,\"sentence_overlap\":1}}]}",
+  "upstream": []
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/rerank/fx-cur",
+  "body": "{\"service\":\"custom\",\"service_settings\":{\"secret_parameters\":{\"api_key\":\"cu-key\"},\"url\":\"$M/custom/rerank\",\"headers\":{\"Authorization\":\"Bearer ${api_key}\"},\"request\":\"{\\\"query\\\":${query},\\\"documents\\\":${input},\\\"top_n\\\":${top_n}}\",\"response\":{\"json_parser\":{\"reranked_index\":\"$.results[*].index\",\"relevance_score\":\"$.results[*].relevance_score\"}}},\"task_settings\":{\"parameters\":{\"top_n\":2}}}",
+  "status": 200,
+  "answer": "{\"inference_id\":\"fx-cur\",\"task_type\":\"rerank\",\"service\":\"custom\",\"service_settings\":{\"url\":\"$M/custom/rerank\",\"headers\":{\"Authorization\":\"Bearer ${api_key}\"},\"request\":\"{\\\"query\\\":${query},\\\"documents\\\":${input},\\\"top_n\\\":${top_n}}\",\"response\":{\"json_parser\":{\"relevance_score\":\"$.results[*].relevance_score\",\"reranked_index\":\"$.results[*].index\"}},\"input_type\":{\"translation\":{},\"default\":\"\"},\"rate_limit\":{\"requests_per_minute\":10000},\"batch_size\":10},\"task_settings\":{\"parameters\":{\"top_n\":2}}}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/custom/rerank",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer cu-key"
+     ]
+    ],
+    "body": "{\"query\":\"test query\",\"documents\":[\"how big\"],\"top_n\":1}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"results\": [{\"index\": 0, \"relevance_score\": 0.333333}]}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/fx-cur",
+  "body": "{\"input\":[\"a\",\"bb\",\"ccc\"],\"query\":\"q\"}",
+  "status": 200,
+  "answer": "{\"rerank\":[{\"index\":0,\"relevance_score\":0.5},{\"index\":1,\"relevance_score\":0.25},{\"index\":2,\"relevance_score\":0.166667}]}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/custom/rerank",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer cu-key"
+     ]
+    ],
+    "body": "{\"query\":\"q\",\"documents\":[\"a\",\"bb\",\"ccc\"],\"top_n\":2}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"results\": [{\"index\": 0, \"relevance_score\": 0.5}, {\"index\": 1, \"relevance_score\": 0.25}, {\"index\": 2, \"relevance_score\": 0.166667}]}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/completion/fx-cuc",
+  "body": "{\"service\":\"custom\",\"service_settings\":{\"secret_parameters\":{\"api_key\":\"cu-key\"},\"url\":\"$M/custom/complete\",\"headers\":{\"Authorization\":\"Bearer ${api_key}\"},\"request\":\"{\\\"prompt\\\":${input}}\",\"response\":{\"json_parser\":{\"completion_result\":\"$.output.text\"}}}}",
+  "status": 200,
+  "answer": "{\"inference_id\":\"fx-cuc\",\"task_type\":\"completion\",\"service\":\"custom\",\"service_settings\":{\"url\":\"$M/custom/complete\",\"headers\":{\"Authorization\":\"Bearer ${api_key}\"},\"request\":\"{\\\"prompt\\\":${input}}\",\"response\":{\"json_parser\":{\"completion_result\":\"$.output.text\"}},\"input_type\":{\"translation\":{},\"default\":\"\"},\"rate_limit\":{\"requests_per_minute\":10000},\"batch_size\":10}}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/custom/complete",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer cu-key"
+     ]
+    ],
+    "body": "{\"prompt\":\"how big\"}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"output\": {\"text\": \"custom says hi\"}}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/fx-cuc",
+  "body": "{\"input\":\"hi\"}",
+  "status": 200,
+  "answer": "{\"completion\":[{\"result\":\"custom says hi\"}]}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/custom/complete",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer cu-key"
+     ]
+    ],
+    "body": "{\"prompt\":\"hi\"}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"output\": {\"text\": \"custom says hi\"}}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/sparse_embedding/fx-cus",
+  "body": "{\"service\":\"custom\",\"service_settings\":{\"secret_parameters\":{\"api_key\":\"cu-key\"},\"url\":\"$M/custom/sparse\",\"headers\":{\"Authorization\":\"Bearer ${api_key}\"},\"request\":\"{\\\"input\\\":${input}}\",\"response\":{\"json_parser\":{\"token_path\":\"$.result[*].tokens\",\"weight_path\":\"$.result[*].weights\"}}}}",
+  "status": 200,
+  "answer": "{\"inference_id\":\"fx-cus\",\"task_type\":\"sparse_embedding\",\"service\":\"custom\",\"service_settings\":{\"url\":\"$M/custom/sparse\",\"headers\":{\"Authorization\":\"Bearer ${api_key}\"},\"request\":\"{\\\"input\\\":${input}}\",\"response\":{\"json_parser\":{\"token_path\":\"$.result[*].tokens\",\"weight_path\":\"$.result[*].weights\"}},\"input_type\":{\"translation\":{},\"default\":\"\"},\"rate_limit\":{\"requests_per_minute\":10000},\"batch_size\":10},\"chunking_settings\":{\"strategy\":\"sentence\",\"max_chunk_size\":250,\"sentence_overlap\":1}}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/custom/sparse",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer cu-key"
+     ]
+    ],
+    "body": "{\"input\":[\"how big\"]}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"result\": [{\"tokens\": [\"a\", \"b\"], \"weights\": [0.5, 0.25]}]}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/fx-cus",
+  "body": "{\"input\":\"hi\"}",
+  "status": 200,
+  "answer": "{\"sparse_embedding\":[{\"is_truncated\":false,\"embedding\":{\"a\":0.5,\"b\":0.25}}]}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/custom/sparse",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer cu-key"
+     ]
+    ],
+    "body": "{\"input\":[\"hi\"]}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"result\": [{\"tokens\": [\"a\", \"b\"], \"weights\": [0.5, 0.25]}]}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-cuy",
+  "body": "{\"service\":\"custom\",\"service_settings\":{\"secret_parameters\":{\"api_key\":\"cu-key\"},\"url\":\"$M/custom/embed\",\"request\":\"{\\\"input\\\":${input},\\\"x\\\":${nope}}\",\"response\":{\"json_parser\":{\"text_embeddings\":\"$.data[*].embedding\"}}}}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"validation_exception\",\"reason\":\"Validation Failed: 1: Failed to validate model configuration: Found placeholder [${nope}] in field [request] after replacement call, please check that all templates have a corresponding field definition.;\"}],\"type\":\"validation_exception\",\"reason\":\"Validation Failed: 1: Failed to validate model configuration: Found placeholder [${nope}] in field [request] after replacement call, please check that all templates have a corresponding field definition.;\"},\"status\":400}",
+  "upstream": []
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-cuy",
+  "body": "{\"service\":\"custom\",\"service_settings\":{\"url\":\"$M/custom/embed\",\"request\":\"{\\\"input\\\":${input}}\"}}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"validation_exception\",\"reason\":\"Validation Failed: 1: [service_settings] does not contain the required setting [response];2: [service_settings.response] does not contain the required setting [json_parser];\"}],\"type\":\"validation_exception\",\"reason\":\"Validation Failed: 1: [service_settings] does not contain the required setting [response];2: [service_settings.response] does not contain the required setting [json_parser];\"},\"status\":400}",
+  "upstream": []
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/fx-cuc",
+  "body": "{\"input\":[\"hi\",\"two\"]}",
+  "status": 200,
+  "answer": "{\"completion\":[{\"result\":\"custom says hi\"}]}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/custom/complete",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer cu-key"
+     ]
+    ],
+    "body": "{\"prompt\":\"hi\"}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"output\": {\"text\": \"custom says hi\"}}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/fx-cur",
+  "body": "{\"input\":[\"a\"],\"query\":\"q\",\"top_n\":1}",
+  "status": 200,
+  "answer": "{\"rerank\":[{\"index\":0,\"relevance_score\":0.5}]}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/custom/rerank",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer cu-key"
+     ]
+    ],
+    "body": "{\"query\":\"q\",\"documents\":[\"a\"],\"top_n\":1}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"results\": [{\"index\": 0, \"relevance_score\": 0.5}]}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/fx-cus",
+  "body": "{\"input\":[\"hi\",\"x\"]}",
+  "status": 200,
+  "answer": "{\"sparse_embedding\":[{\"is_truncated\":false,\"embedding\":{\"a\":0.5,\"b\":0.25}},{\"is_truncated\":false,\"embedding\":{\"a\":0.5,\"b\":0.25}}]}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/custom/sparse",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer cu-key"
+     ]
+    ],
+    "body": "{\"input\":[\"hi\",\"x\"]}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"result\": [{\"tokens\": [\"a\", \"b\"], \"weights\": [0.5, 0.25]}, {\"tokens\": [\"a\", \"b\"], \"weights\": [0.5, 0.25]}]}"
+    }
+   }
+  ]
+ }
+]

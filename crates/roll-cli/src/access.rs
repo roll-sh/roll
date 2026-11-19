@@ -687,8 +687,9 @@ pub enum Mcp {
     /// Approve a request: it runs.
     Approve {
         id: String,
-        /// Also allow the same action on the same resource without asking: 1h, 8h, 1d or always.
-        #[arg(long, value_parser = ["1h", "8h", "1d", "always"])]
+        /// Also allow the same action on the same resource without asking: 1h, 8h, 1d, 7d, 30d or
+        /// always.
+        #[arg(long, value_parser = ["1h", "8h", "1d", "7d", "30d", "always"])]
         remember: Option<String>,
     },
     /// Deny a request.
