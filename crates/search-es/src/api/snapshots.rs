@@ -722,6 +722,7 @@ pub async fn put_repository(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let maker = refs::check(ctx, &name, &ty, &settings).await?;
     let secrets = cloud::take_secrets(ctx.cluster, &ty, &mut settings);
     let repo = Repository { ty, settings, secrets, refs_by: maker };
+    let registering = name.clone();
     // A bucket is checked once registered (a write, a read and a delete); a repository that
     // fails stays registered, as on Elasticsearch, and the error is the answer.
     let registered = (repo.in_bucket() && verify).then(|| (name.clone(), repo.clone()));
@@ -747,7 +748,7 @@ pub async fn put_repository(ctx: &Ctx<'_>) -> EsResult<Reply> {
             Ok(())
         })
         .await?;
-    refs::forget(ctx.cluster, &name);
+    refs::forget(ctx.cluster, &registering);
     // The snapshots already in the bucket show from now on.
     if let Some((name, repo)) = registered {
         s3::verify(ctx.cluster, &name, &repo).await?;
