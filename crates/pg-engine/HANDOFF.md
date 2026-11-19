@@ -11796,6 +11796,83 @@ at open, a compaction): older builds ignore the manifest's `format` and fail on 
   the probe needs from the OS page cache, as PostgreSQL's 8 kB page), each a format change for
   its own round.
 
+## Analytic CPU, round 7 (agent 267)
+
+TPC-H SF1 on lane C, plain dist builds only (BENCH.md "Analytic CPU, round 7" has the tables).
+Base `dde2faca8`; each change gated against its parent: 2 alternating pairs over the 22, 3 runs a
+query in one `perf stat` window a pass, ONE pair per `tools/lane.sh c` hold (agent 261's harness
+copied to `~/.cache/a267/tpch/`). **Lane C was never quiet**: every pass ran over 1.0 foreign
+core (gpass's reading 1.2-3.1, lane.sh's 4.5-5.4), so the gates are decided on user
+instructions (they repeat within 0.1-0.5% at any load); cycles are in BENCH and mean little.
+Every pass's 22 result hashes are PostgreSQL's. The candidates were rebased without conflict onto
+`915acffbf` (agent 260's merging scan, 266's docs) and stacked, each on the one before it (they
+depend on each other only textually: `exec/parscan.rs`): `cand/a267` (this section and the first
+change), `cand/a267-2`, `cand/a267-3`, `cand/a267-4`.
+
+- **Profile of the plain base** (`perf record -e instructions:u` of 12 queries,
+  `~/.cache/a267/perf/b0-*.syms.txt`; the perf container needs the engine binaries mounted at
+  their own path, else every symbol is an address): row decode is the largest class wherever
+  lineitem is scanned (28-44% of q17, q21, q10, q03; `Pre::decode` alone 53% of q15, 40% of q01,
+  29% of q21), the store's scan read next (14-23%: `fill_batch_with`, agent 260's). q13's 7.15 G
+  was the row path (`Lazy::into_row_passed` 12%, `LazyBuf::read` 11%, `run_stages` 6%,
+  `joined_to` 6%, `decode_value` 4%, `from_utf8` 3.5%), q17's per-row `Pre::fate` and
+  `Built::int_span` 9%, q15's AND of two date comparisons 13% (`VB::eval`'s `retain`: an
+  indirect jump a row).
+- **cand/a267: q13's probe and count from the batch's columns** (`Pre::joined`,
+  `joined_cols`, `AggPlan::joined`). An aggregating parallel scan whose one stage is a hash
+  join's probe of an integer key (inner or right join, no condition beyond the keys, no key
+  column or computed values after the row) decodes the outer columns its joined rows keep
+  (`Probe::keep`, less `Decode::late`) into the batch, and a row the batch passed (not odd, its
+  filter true) is joined and aggregated from them: a row of the scan's width holding those columns
+  (the others NULL, as the joined row has them), each candidate marked matched for a right join
+  and given to the part as `run_stages` gives it (`joined_to`: queued in order when the part can't
+  take it). No stored row is read again or made a row. The outer columns are decoded only where the
+  walk passes them anyway (each before the plan's last column): the first version decoded them
+  past it, and q12's orders (probed by its few lineitem rows, 98% dropped) were walked to
+  o_orderpriority for every row, q12 +3.2% in both pairs; within the walk's reach q12 -2.9% after.
+  Against the base: q13 -41.1 / -41.0% user instructions (7.14 -> 4.21 G; pgrust 3.91,
+  PostgreSQL 6.75), q19 -0.7 / -0.5, q22 -0.6 / -0.4, q12 +0.2% net of the two versions, the 22
+  -2.4% (111.8 -> 109.1 G). Golden `a267_probe_agg` (recorded from PostgreSQL 18.6: q13's shape,
+  inner joins grouped by outer and inner columns, duplicate and missing inner keys, NULL keys and
+  values, a string column kept, rows stored before ADD COLUMN).
+- **cand/a267-2: the typed walk keeps its position in a register** (`walk_row`'s `Step::Any`
+  steps over through a copy): `pos` passed by reference to `skip`, whose fallback
+  (`skip_value_fast`) is out of line, made it a stack slot, stored after and loaded before every
+  step of every row in the plain build too (`mov %rax,0x90(%rsp)` at the steps' common tail);
+  now `%rax` throughout. Against cand/a267's code (2 pairs): q15 -1.8 / -1.8%, q01 -0.8 / -0.8,
+  q06 -0.6 / -0.8, q10 -0.6 / -0.3, q22 -0.9 / -0.3, q04 / q21 -0.4 / -0.4, the 22 -0.30 /
+  -0.36%. Item 2 of the brief (q01's walk under PGO, agent 261's note) has this cause: an
+  escaping local can't be promoted in either build. **Not measured on PGO** (no PGO build this
+  round; the brief's rule: decided on plain and the generated code).
+- **cand/a267-3: an aggregating scan's batch decides its rows' fates a column at a time**
+  (`Pre::fates`, `mark`'s pass with the probe's key filter, now shared): q17 -2.6 / -2.5%, q21
+  -1.1 / -1.2, q13 -0.9 / -0.9, q12 -0.8 / -0.7, q10 -0.6 / -0.9, q04 -0.6 / -0.6, q19 -0.6 /
+  -0.4, q09 +0.2 / +0.2, the 22 -0.39 / -0.37%.
+- **cand/a267-4: AND / OR batch filters fold their outcomes without a branch per row**
+  (`VB::eval`): the first argument evaluated into the outcome itself, the rows it didn't end
+  compacted into `live`, each later argument's outcome folded in (`rest` keeps the row's, `stop`
+  or Out ends it). Against cand/a267-3's code (2 pairs): q15 -2.4 / -2.2%, q04 -0.9 / -0.9, q06
+  -0.8 / -0.8, q12 -0.8 / -0.7, q05 -0.4 / -0.6, q22 +0.5 / +0.6, the 22 -0.25 / -0.23%; then
+  `live` made with its capacity (the filtered collect grew it; 2 pairs over the six queries against the first version): q06 -1.5 / -1.4%, q15 -0.9 / -0.8, q05 -0.9 / -0.3, q04 -0.5 / -0.6, q22 +0.1 / -0.3. q22's +0.5% stays unexplained (its filters' ANDs are two-argument ones over few rows a batch; not looked into further). Golden `a267_and_or`
+  (three and more arguments, nested, under NOT, over NULLs).
+- **The 22, plain dist** (one pair, base against the whole stack, n6): 111.8 -> 107.7 G user
+  instructions (-3.69%): q13 -41.7%, q15 -4.9, q06 -3.0, q17 -2.7, q04 -2.4, q19 -1.9, q12 -1.8,
+  q05 -1.6, q10 -1.5, q21 -1.2, q01 -1.0, q16 +0.5, q07 +0.4 (one pair: within the noise of
+  their gates above), the rest within +-0.5. Against pgrust's 90.4 G (agent 261's, no three-server
+  table this round) 1.19x, from 1.24x; PostgreSQL 159.3 G. Every result hash PostgreSQL's.
+- **Not done**: the brief's item 1 (q02 / q11 / q20's joined rows in the serial executor: a
+  cheaper pick than `Cols::col` per column, with agent 261's dropped projection patch): worth at
+  most 0.1-0.2 G of the 22 against the walk's and probes' gigainstructions, so it went last and
+  wasn't reached; a PGO build (item 2's check under PGO).
+- **Left** (largest first): the typed walk is still 17-53% of the lineitem queries (~10 user
+  instructions a skipped value, ~35 a needed numeric: its tag, scale and length checked, the
+  word load's bounds checked again, the slot's index checked; a column-offset directory per row
+  would make skipped columns free, a format change); scans with two or more stages (q10, q05,
+  q08, q09: `joined` takes only one) and bitmap heap chunks (q14: `FillIter` rows, no batch) still
+  make each passed row; q14's chunks could take the fused probe now that a passed row isn't
+  decoded twice, but its probe columns sit past the walk's reach, so it needs a per-chunk choice
+  of plan by the rows that pass; the store's `fill_batch_with` (agent 260's).
+
 ## Analytic CPU, round 6 (agent 261)
 
 TPC-H SF1 on lane C against PostgreSQL 18.6 and pgrust (2 workers a gather, 8 workers, a 2 GB

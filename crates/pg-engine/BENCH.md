@@ -375,6 +375,123 @@ Foreign load 1.5-3.3 cores in every pass.
 
 Lane A held 3.7-5.2 foreign cores (other agents' runs) through all three: every pair flagged.
 
+## Analytic CPU, round 7 (2026-11-19, agent 267)
+
+HANDOFF "Analytic CPU, round 7" has what changed. Lane C as in round 6 (servers in containers on
+CPUs 14,15,32,33, `--memory 8g`; clients on 16,17,34,35), TPC-H SF1, a 2 GB cache and
+`max_parallel_workers_per_gather=2`, `max_parallel_workers=8`. Harness: agent 261's copied to
+`~/.cache/a267/tpch/` (a pass: a fresh engine on the restored data directory, a warm-up of the 22,
+then per query 3 runs in one `perf stat -e instructions:u,cycles:u` window), each pair in its own
+`tools/lane.sh c` hold. Plain dist builds (`tools/dist.sh`) in a build worktree of their own:
+**b0** origin's `dde2faca8`, **n1** b0 + cand/a267's first version, **n2** n1 + cand/a267-2,
+**n3** n2 + cand/a267-3, **n4** n3 + cand/a267's columns within the walk's reach (n4 is cand/a267's
+code with -2 and -3), **n5** n4 + cand/a267-4's first version, **n6** n5 + its `live` made with
+its capacity (cand/a267-4's code: the whole stack). The lane was never quiet (foreign cores per pass,
+gpass's reading, below; lane.sh's 4.5-5.4): gates are decided on user instructions. No PGO build
+and no three-server table this round (the brief's rule; round 6's PostgreSQL 159.3 G and pgrust
+90.4 G stand).
+
+### The changes, gated (user instructions a run, % per pair against the parent; plain dist, 2 alternating pairs, 3 runs a query a pass; queries within +-0.5% left out)
+
+**cand/a267's first version (n1 against b0)**
+
+| query | instructions % per pair | cycles % per pair |
+|---|---|---|
+| q09 | +0.7 / -0.2 | +13.2 / +1.6 |
+| q12 | +3.2 / +3.2 | +14.9 / +2.2 |
+| q13 | -41.1 / -41.0 | -28.8 / -18.7 |
+| q19 | -0.7 / -0.5 | +16.2 / +1.4 |
+| q22 | -0.6 / -0.4 | +5.0 / +11.2 |
+| all 22 | -2.34 / -2.40 (111.8 -> 109.1 G) | +4.58 / +1.11 |
+
+foreign cores per pass: b0 1.84 1.98; n1 2.60 2.40.
+
+**cand/a267-2 (n2 against n1)**
+
+| query | instructions % per pair | cycles % per pair |
+|---|---|---|
+| q01 | -0.8 / -0.8 | -4.5 / +1.8 |
+| q06 | -0.6 / -0.8 | -14.6 / +9.3 |
+| q07 | -0.0 / -0.6 | -7.7 / +10.4 |
+| q10 | -0.6 / -0.3 | -0.9 / +3.8 |
+| q15 | -1.8 / -1.8 | +1.9 / -12.8 |
+| q22 | -0.9 / -0.3 | -14.7 / +5.3 |
+| all 22 | -0.30 / -0.36 (109.1 -> 108.8 G) | -5.88 / +3.22 |
+
+foreign cores per pass: n1 2.29 1.99; n2 1.85 2.45.
+
+**cand/a267-3 (n3 against n2)**
+
+| query | instructions % per pair | cycles % per pair |
+|---|---|---|
+| q04 | -0.6 / -0.6 | -0.2 / +1.1 |
+| q10 | -0.6 / -0.9 | -0.1 / +16.8 |
+| q12 | -0.8 / -0.7 | -10.1 / +17.0 |
+| q13 | -0.9 / -0.9 | +6.9 / +15.1 |
+| q17 | -2.6 / -2.5 | +1.3 / +34.1 |
+| q19 | -0.6 / -0.4 | +3.9 / +8.9 |
+| q21 | -1.1 / -1.2 | -14.3 / +21.7 |
+| all 22 | -0.39 / -0.37 (108.7 -> 108.3 G) | -3.12 / +13.50 |
+
+foreign cores per pass: n2 1.57 1.51; n3 1.21 3.11.
+
+**cand/a267's outer columns within the walk's reach (n4 against n3)**
+
+| query | instructions % per pair | cycles % per pair |
+|---|---|---|
+| q09 | +0.7 / -0.3 | -0.4 / -4.0 |
+| q12 | -2.9 / -2.9 | -8.8 / -5.7 |
+| all 22 | -0.12 / -0.21 (108.3 -> 108.2 G) | -2.26 / -4.65 |
+
+foreign cores per pass: n3 2.06 2.86; n4 1.94 2.31.
+
+**cand/a267-4's first version (n5 against n4)**
+
+| query | instructions % per pair | cycles % per pair |
+|---|---|---|
+| q04 | -0.9 / -0.9 | +23.7 / -3.2 |
+| q05 | -0.4 / -0.6 | +13.9 / -4.6 |
+| q06 | -0.8 / -0.8 | +7.9 / -8.4 |
+| q12 | -0.8 / -0.7 | -1.0 / +7.3 |
+| q15 | -2.4 / -2.2 | -8.4 / +1.8 |
+| q22 | +0.5 / +0.6 | -12.8 / +13.6 |
+| all 22 | -0.25 / -0.23 (108.1 -> 107.8 G) | -0.24 / +1.73 |
+
+foreign cores per pass: n4 2.48 1.20; n5 2.33 1.21.
+
+**cand/a267-4's `live` with its capacity (n6 against n5, the six queries)**
+
+| query | instructions % per pair | cycles % per pair |
+|---|---|---|
+| q04 | -0.5 / -0.6 | +8.4 / +13.0 |
+| q05 | -0.9 / -0.3 | -13.6 / +3.8 |
+| q06 | -1.5 / -1.4 | -0.4 / +8.8 |
+| q15 | -0.9 / -0.8 | -6.2 / +9.2 |
+| the six | -0.77 / -0.65 (23.5 -> 23.4 G) | -5.28 / +8.76 |
+
+foreign cores per pass: n5 2.81 1.64; n6 2.18 3.05.
+
+**The whole stack against the base (n6 against b0, 1 pair over the 22)**
+
+| query | instructions % per pair | cycles % per pair |
+|---|---|---|
+| q01 | -1.0 | -14.0 |
+| q04 | -2.4 | +10.8 |
+| q05 | -1.6 | -3.7 |
+| q06 | -3.0 | -0.8 |
+| q10 | -1.5 | +11.9 |
+| q12 | -1.8 | +15.3 |
+| q13 | -41.7 | -12.5 |
+| q15 | -4.9 | +0.5 |
+| q17 | -2.7 | +26.8 |
+| q19 | -1.9 | +2.1 |
+| q21 | -1.2 | -1.4 |
+| all 22 | -3.69 (111.8 -> 107.7 G) | +1.32 |
+
+foreign cores per pass: b0 1.86; n6 2.66.
+
+Result hashes: PostgreSQL's in every pass.
+
 ## Analytic CPU, round 6 (2026-11-19, agent 261)
 
 HANDOFF "Analytic CPU, round 6" has what changed. Lane C as in round 5 (servers in containers on
