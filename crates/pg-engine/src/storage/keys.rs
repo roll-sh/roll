@@ -414,6 +414,15 @@ fn encode_range(out: &mut Vec<u8>, r: &crate::types::range::Range, kc: Option<&K
 }
 
 /// Key prefix for an index of a table: `table_oid | index_id`.
+/// The row id of a data key of a table keyed by row ids (`scan::data_key`: the table's prefix
+/// and an int8); None for any other key.
+pub fn rowid_of(key: &[u8]) -> Option<i64> {
+    if key.len() != 17 || key[8] != INT {
+        return None;
+    }
+    Some((u64::from_be_bytes(key[9..17].try_into().ok()?) ^ (1 << 63)) as i64)
+}
+
 pub fn index_prefix(table: u32, index: u32) -> Vec<u8> {
     let mut k = Vec::with_capacity(32);
     put_u32(&mut k, table);

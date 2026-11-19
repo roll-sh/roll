@@ -188,6 +188,8 @@ fn walk(
         && (params.is_empty() || matches!(kind, JoinKind::Inner | JoinKind::Left))
         && *kind != JoinKind::Full
         && leaves.len() < 32
+        // (A function called in FROM: one relation, its Function Scan.)
+        && meta.from_call.is_none()
     {
         let nl = *nleft;
         let (l, li) = walk(left, off, virt, leaves, joins, laterals, phvs, frame, flat);

@@ -27,6 +27,7 @@ use std::sync::Arc;
 
 pub mod btest;
 pub mod estkeep;
+pub mod estlocks;
 pub mod gistlog;
 pub mod kept;
 
@@ -113,6 +114,9 @@ pub struct Models {
     untracked_maybe: [std::sync::atomic::AtomicU64; 16],
     /// An estimate changed since the last commit took them (`estkeep`).
     est_dirty: std::sync::atomic::AtomicBool,
+    /// A bit per group of table oids, set (for good) once one of them, too big to model, may
+    /// keep a row's lock (`estlocks`): writes past the model look no further for the others.
+    locks_maybe: [std::sync::atomic::AtomicU64; 16],
 }
 
 /// (A power of two: hot tables' oids are usually close together, and land in shards of
@@ -127,6 +131,7 @@ impl Default for Models {
             built: Default::default(),
             untracked_maybe: Default::default(),
             est_dirty: Default::default(),
+            locks_maybe: Default::default(),
         }
     }
 }
@@ -153,6 +158,18 @@ impl Models {
     fn note_untracked(&self, table: u32) {
         let (w, b) = Self::untracked_bit(table);
         self.untracked_maybe[w].fetch_or(b, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Table `table`, too big to model, may keep row locks (false: it doesn't).
+    fn maybe_locks(&self, table: u32) -> bool {
+        let (w, b) = Self::untracked_bit(table);
+        self.locks_maybe[w].load(std::sync::atomic::Ordering::Acquire) & b != 0
+    }
+
+    /// Table `table` keeps a row lock past the model (`estlocks`).
+    fn note_locks(&self, table: u32) {
+        let (w, b) = Self::untracked_bit(table);
+        self.locks_maybe[w].fetch_or(b, std::sync::atomic::Ordering::Release);
     }
 
     /// Every shard, one at a time.
@@ -290,6 +307,8 @@ struct EstHeap {
     /// The model's limit the table was too big for (`max_versions` then): a build with a
     /// higher one models it instead of using its kept estimate.
     limit: u32,
+    /// Rows whose latest version has a lock's xmax (`estlocks`), by their keys' hashes.
+    locks: estlocks::Locks,
 }
 
 /// A map keyed by hashes already mixed (`key_hash`): used as they are.
@@ -411,6 +430,7 @@ impl EstHeap {
             dirty: false,
             log: estkeep::Log::default(),
             limit: 0,
+            locks: Default::default(),
         }
     }
 
@@ -554,6 +574,36 @@ impl EstHeap {
         *last = Some(tid);
         Some(tid)
     }
+}
+
+impl EstHeap {
+    /// The TID of row `key` of a table keyed by row ids (its key the table's prefix and an
+    /// int8): a version put out of key order has its own (`moved`); a row of a run is at the
+    /// run's first line pointer plus the row ids between them, as the ids were given in the
+    /// order the rows went in (one sequence a table, no cache) and PostgreSQL never moves a
+    /// line pointer (deleted rows' stay used or unused in place). None: not placed.
+    fn rowid_tid(&self, key: &[u8]) -> Option<Tid> {
+        use crate::storage::keys::rowid_of as rowid;
+        if self.order == EstOrder::Unplaced {
+            return None;
+        }
+        if let Some(t) = self.moved.get(&key_hash(key)) {
+            return Some(*t);
+        }
+        let i = self.runs.partition_point(|r| r.0.as_slice() <= key).checked_sub(1)?;
+        let (first, page, off) = &self.runs[i];
+        let o = i64::from(*off).checked_add(rowid(key)?.checked_sub(rowid(first)?)?)?;
+        (1..=relsize::MAX_HEAP_TUPLES as i64).contains(&o).then_some((*page, o as u16))
+    }
+}
+
+/// The ctid of row `key` of table `table` too big to model, keyed by row ids, when its
+/// estimate places it (`EstHeap::rowid_tid`).
+pub fn estimated_ctid(table: u32, key: &[u8], db: &Database) -> Option<Tid> {
+    if !db.relfiles.maybe_untracked(table) {
+        return None;
+    }
+    db.relfiles.of(table).read().estimated.get(&table)?.rowid_tid(key)
 }
 
 /// The estimate for rows written in one go (a load, a rewrite).
@@ -1910,7 +1960,8 @@ fn ensure(t: &Table, indexes: &[BoundIndex], ctx: &ExecCtx) -> Result<bool> {
     let cold = heap_missing && !db.relfiles.of(t.oid).read().dropped.contains(&t.oid);
     // One whose estimate its records keep (`estkeep`): as it was before the restart or the
     // crash, its versions' places and its btrees' leaves too.
-    if cold && let Some((est, btrees, saved)) = estkeep::restore(t, ctx) {
+    if cold && let Some((mut est, btrees, saved)) = estkeep::restore(t, ctx) {
+        estlocks::loaded(db, t.oid, &mut est);
         let mut rf = db.relfiles.of(t.oid).write();
         db.relfiles.note_untracked(t.oid);
         rf.untracked.insert(t.oid);
@@ -2181,9 +2232,10 @@ fn untrack(db: &Database, t: &Table, est: Option<EstHeap>) {
 /// Returns the estimate's pages.
 fn set_estimated(db: &Database, t: &Table, est: Option<EstHeap>) -> u32 {
     let mut rf = db.relfiles.of(t.oid).write();
-    let est = est
+    let mut est = est
         .or_else(|| rf.heaps.get(&t.oid).map(EstHeap::from_heap))
         .unwrap_or_default();
+    estlocks::loaded(db, t.oid, &mut est);
     db.relfiles.note_untracked(t.oid);
     rf.untracked.insert(t.oid);
     // (Its btrees' shapes go on as estimates: `btest`.)
@@ -2815,7 +2867,9 @@ pub fn updated(
     };
     note_compression_len(t, new, Some(new_key), ctx, Some(tuple));
     if !ensure(t, indexes, ctx)? {
-        return Ok(untracked_write(t, indexes, new_key, new, Some((old_key, old)), None, ctx, Some(tuple))?.map(|tid| (tid, false)));
+        let r = untracked_write(t, indexes, new_key, new, Some((old_key, old)), None, ctx, Some(tuple))?;
+        estlocks::replaced(t, old_key, Some(new_key), ctx)?;
+        return Ok(r.map(|tid| (tid, false)));
     }
     let db = &ctx.sess.db;
     // Out-of-line values the new version keeps as they are (none without a TOAST relation).
@@ -2829,8 +2883,9 @@ pub fn updated(
     };
     let mut known: Option<Vec<Ext>> = (t.toast == 0).then(Vec::new);
     let xids = db.xids();
-    // (The old version's TID, whether it had an xmax, and the one the new version carries.)
-    let mut kept: Option<(Tid, bool, crate::txn::multixact::Xmax)> = None;
+    // (The old version's TID, whether it had an xmax, the one the new version carries, and
+    // the old version's xmin.)
+    let mut kept: Option<(Tid, bool, crate::txn::multixact::Xmax, u64)> = None;
     // (Whether the UPDATE changes a key column, as its executor found: `note_update_keys`.)
     let noted = UPDATE_KEYS.with(|k| k.take());
     let (tid, hot, v, big) = loop {
@@ -2915,7 +2970,7 @@ pub fn updated(
             let mut replace = |at: Tid, o: &heapsim::Tup| {
                 let mode = if key_changed() { RowLockMode::Update } else { RowLockMode::NoKeyUpdate };
                 let r = replaced(o, xid, mode, &v, ctx);
-                kept = Some((at, o.xmax != 0, r.carried));
+                kept = Some((at, o.xmax != 0, r.carried, o.xmin));
                 r
             };
             let r = heap.update_cid(old_key, new_key, len, (xid, cid), hot_ok, &v, &mut replace);
@@ -2927,13 +2982,15 @@ pub fn updated(
     };
     // The kept xmax records (`multixact::XMAX_PREFIX`): the old version's goes, the new one's
     // lockers stay.
-    if let Some((at, had, carried)) = kept
+    if let Some((at, had, carried, old_xmin)) = kept
         && (had || carried.raw != 0)
     {
         use crate::txn::multixact as mx;
         let mut txn = ctx.txn.borrow_mut();
         if had {
             txn.put_state(mx::xmax_key(t.oid, old_key, at), None)?;
+            // (And one kept while the table was too big to model.)
+            txn.put_state(mx::est_xmax_key(t.oid, old_key, old_xmin), None)?;
         }
         if carried.raw != 0 {
             txn.put_state(mx::xmax_key(t.oid, new_key, tid), Some(mx::encode_xmax(carried)))?;
@@ -2981,25 +3038,40 @@ pub fn note_update_keys(keys: bool) {
 }
 
 /// The xmax kept for table `oid`'s versions (`multixact::XMAX_PREFIX`: a lock's, outliving
-/// its transaction): (row key, TID, xmax) each.
-pub(super) fn kept_xmaxes(db: &Database, oid: u32) -> Result<Vec<(Vec<u8>, Tid, crate::txn::multixact::Xmax)>> {
+/// its transaction): (row key, TID, xmax, the version's xmin when kept past the model) each.
+pub(super) fn kept_xmaxes(db: &Database, oid: u32) -> Result<Vec<(Vec<u8>, Tid, crate::txn::multixact::Xmax, u64)>> {
     use crate::txn::multixact as mx;
     let (a, b) = mx::xmax_range(oid);
     let mut out = Vec::new();
     for r in db.store.scan(&a, &b, db.store.visible_ts()) {
         let (k, v) = r?;
         if let (Some((row, at)), Some(x)) = (mx::split_xmax_key(&k), mx::decode_xmax(&v)) {
-            out.push((row.to_vec(), at, x));
+            let (row, xmin) = if at == mx::EST_AT {
+                match mx::split_est_row(row) {
+                    Some(r) => r,
+                    None => continue,
+                }
+            } else {
+                (row, 0)
+            };
+            out.push((row.to_vec(), at, x, xmin));
         }
     }
     Ok(out)
 }
 
 /// A heap laid out afresh gets its versions' kept xmax back (a record of a version since
-/// replaced names a TID that isn't its row's any more: left alone).
-pub(super) fn apply_xmaxes(h: &mut Heap, xmaxes: Vec<(Vec<u8>, Tid, crate::txn::multixact::Xmax)>) {
-    for (row, at, x) in xmaxes {
-        if h.tid_of(&row) == Some(at) {
+/// replaced names a TID that isn't its row's any more: left alone). One kept while the table
+/// was too big to model (`EST_AT`) names the row's version of the xmin it keeps.
+pub(super) fn apply_xmaxes(h: &mut Heap, xmaxes: Vec<(Vec<u8>, Tid, crate::txn::multixact::Xmax, u64)>) {
+    for (row, at, x, xmin) in xmaxes {
+        if at == crate::txn::multixact::EST_AT {
+            if let Some(tid) = h.tid_of(&row)
+                && h.tuple(tid).is_some_and(|t| t.xmin == xmin)
+            {
+                h.set_xmax_at(tid, x);
+            }
+        } else if h.tid_of(&row) == Some(at) {
             h.set_xmax_at(at, x);
         }
     }
@@ -3085,7 +3157,7 @@ fn replaced(o: &heapsim::Tup, xid: u64, mode: RowLockMode, v: &Vis, ctx: &ExecCt
 pub fn row_locked(t: &Table, key: &[u8], mode: RowLockMode, ctx: &ExecCtx) -> Result<()> {
     use crate::txn::multixact as mx;
     if !ensure(t, &[], ctx)? {
-        return Ok(());
+        return estlocks::row_locked(t, key, mode, ctx);
     }
     let db = &ctx.sess.db;
     let xid = ctx.txn.borrow_mut().cur_xid();
@@ -3159,7 +3231,7 @@ pub fn deleted(t: &Table, indexes: &[BoundIndex], key: &[u8], old: &[Value], ctx
         if t.toast != 0 && toast_gone(t, old, None, ctx) {
             lock_toast(t, ctx)?;
         }
-        return Ok(());
+        return estlocks::replaced(t, key, None, ctx);
     }
     let db = &ctx.sess.db;
     // toast_delete: a row with out-of-line values opens the TOAST relation.
@@ -3181,14 +3253,16 @@ pub fn deleted(t: &Table, indexes: &[BoundIndex], key: &[u8], old: &[Value], ctx
         let mut had = None;
         let mut replace = |at: Tid, o: &heapsim::Tup| {
             if o.xmax != 0 {
-                had = Some(at);
+                had = Some((at, o.xmin));
             }
             replaced(o, xid, RowLockMode::Update, &v, ctx)
         };
         heap.delete_cid(key, xid, &v, &mut replace);
-        // (Its kept xmax record goes.)
-        if let Some(at) = had {
-            ctx.txn.borrow_mut().put_state(crate::txn::multixact::xmax_key(t.oid, key, at), None)?;
+        // (Its kept xmax record goes, and one kept while the table was too big to model.)
+        if let Some((at, xmin)) = had {
+            let mut txn = ctx.txn.borrow_mut();
+            txn.put_state(crate::txn::multixact::xmax_key(t.oid, key, at), None)?;
+            txn.put_state(crate::txn::multixact::est_xmax_key(t.oid, key, xmin), None)?;
         }
     }
     if let Some(exts) = toast.get(&t.oid).and_then(|tt| tt.rows.get(key)) {
@@ -4920,6 +4994,7 @@ pub fn rewritten(t: &Table, order: Option<&[Vec<u8>]>, ctx: &ExecCtx) -> Result<
         // (The rows keep the TIDs they had: not their places now.)
         est.order = EstOrder::Unplaced;
         est.limit = max_limit();
+        estlocks::loaded(&ctx.sess.db, t.oid, &mut est);
         let mut rf = ctx.sess.db.relfiles.of(t.oid).write();
         rf.estimated.insert(t.oid, est);
         full_next(&ctx.sess.db, &mut rf, t.oid);
@@ -5341,6 +5416,8 @@ pub fn vacuum(t: &Table, ctx: &ExecCtx) -> Result<Option<Vacuumed>> {
     brin_vacuumed(t, ctx)?;
     let indexes = crate::sql::binder::bound_indexes(&Arc::new(t.clone()), ctx)?;
     if !ensure(t, &indexes, ctx)? {
+        let (skip, freeze) = VACUUM_SKIP.with(|c| c.get());
+        estlocks::vacuumed(t, freeze, skip != heapsim::Skip::AllVisible, ctx)?;
         return Ok(None);
     }
     let db = &ctx.sess.db;

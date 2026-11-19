@@ -925,6 +925,9 @@ pub(crate) fn row_tid(t: &Table, key: &[u8], ctx: &ExecCtx) -> (u32, u16) {
     if let Some(tid) = super::sizing::modelled_tid(t.oid, key, ctx) {
         return tid;
     }
+    if let Some(tid) = super::sizing::estimated_ctid(t.oid, key, &ctx.sess.db) {
+        return tid;
+    }
     match super::scan::ctid_of(key) {
         Value::Tid(b, o) => (b, o),
         _ => (0, 1),

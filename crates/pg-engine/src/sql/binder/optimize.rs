@@ -411,6 +411,14 @@ fn add_filter_as(cat: &Catalog, plan: Plan, pred: Expr, index: bool) -> Plan {
     if parts.is_empty() {
         return plan;
     }
+    // (A function called in FROM: the quals are its Function Scan's, over the call's rows,
+    // not pushed into the join that calls it.)
+    if matches!(&plan, Plan::Join { meta, .. } if meta.from_call.is_some()) {
+        return Plan::Filter {
+            input: Arc::new(plan),
+            pred: and_all(parts).unwrap(),
+        };
+    }
     match plan {
         Plan::Scan(mut s) => {
             // (eval_const_expressions: a COLLATE naming the collation its column already has

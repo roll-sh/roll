@@ -24,8 +24,9 @@ fn open(dir: &std::path::Path) -> std::sync::Arc<Engine> {
         max_prepared_transactions: 0,
         auth_files: Default::default(),
         // (The plans compared follow the statistics the test's ANALYZEs set: autovacuum
-        // re-analyzing mid-test would change them, and float sums with them.)
-        settings: vec![("autovacuum".into(), "off".into())],
+        // re-analyzing mid-test would change them, and float sums with them. A naptime past
+        // the test, not autovacuum off: CREATE INDEX's statistics follow AutoVacuumingActive.)
+        settings: vec![("autovacuum_naptime".into(), "2147483".into())],
     })
     .unwrap()
 }

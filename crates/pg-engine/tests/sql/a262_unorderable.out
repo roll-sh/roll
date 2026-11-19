@@ -1,0 +1,94 @@
+> create table uo (a int)
+-- CREATE TABLE
+
+> insert into uo values (1), (2)
+-- INSERT 0 2
+
+> select count(distinct xmax) from uo
+ERROR 42883: could not identify an ordering operator for type xid (at 23)
+DETAIL: Aggregates with DISTINCT must be able to sort their inputs.
+
+> select array_agg(distinct xmin) from uo
+ERROR 42883: could not identify an ordering operator for type xid (at 27)
+DETAIL: Aggregates with DISTINCT must be able to sort their inputs.
+
+> select count(distinct cmin) from uo
+ERROR 42883: could not identify an ordering operator for type cid (at 23)
+DETAIL: Aggregates with DISTINCT must be able to sort their inputs.
+
+> select xmax from uo order by xmax
+ERROR 42883: could not identify an ordering operator for type xid (at 30)
+HINT: Use an explicit ordering operator or modify the query.
+
+> select rank() over (order by xmin) from uo
+ERROR 42883: could not identify an ordering operator for type xid (at 30)
+HINT: Use an explicit ordering operator or modify the query.
+
+> select percentile_disc(0.5) within group (order by xmax) from uo
+ERROR 42883: could not identify an ordering operator for type xid (at 52)
+HINT: Use an explicit ordering operator or modify the query.
+
+> select a from (values (array['1'::xid])) v(a) order by a
+ERROR 42883: could not identify an ordering operator for type xid[] (at 56)
+HINT: Use an explicit ordering operator or modify the query.
+
+> select a from (values ('=r/postgres'::aclitem)) v(a) order by a
+ERROR 42883: could not identify an ordering operator for type aclitem (at 63)
+HINT: Use an explicit ordering operator or modify the query.
+
+> select count(distinct a) from (values ('=r/postgres'::aclitem)) v(a)
+ERROR 42883: could not identify an ordering operator for type aclitem (at 23)
+DETAIL: Aggregates with DISTINCT must be able to sort their inputs.
+
+> select count(distinct a) from (values ('{}'::json)) v(a)
+ERROR 42883: could not identify an equality operator for type json (at 23)
+
+> select distinct xmax from uo
+xmax:28
+0
+-- SELECT 1
+
+> select xmax, count(*) from uo group by xmax
+xmax:28 | count:int8
+0 | 2
+-- SELECT 1
+
+> select a from (values ('1'::xid8), ('2')) v(a) order by a desc
+a:5069
+2
+1
+-- SELECT 2
+
+> drop table uo
+-- DROP TABLE
+
+> create table uw (a int)
+-- CREATE TABLE
+
+> insert into uw values (1), (2)
+-- INSERT 0 2
+
+> select a, rank() over (order by ctid) from uw
+a:int4 | rank:int8
+1 | 1
+2 | 2
+-- SELECT 2
+
+> select count(*) over w from uw window w as (order by ctid)
+count:int8
+1
+2
+-- SELECT 2
+
+> select percentile_disc(0.5) within group (order by cmin::text::int) from uw
+percentile_disc:int4
+0
+-- SELECT 1
+
+> select a, rank() over (partition by xmin order by a) from uw
+ERROR 0A000: could not implement window PARTITION BY
+DETAIL: Window partitioning columns must be of sortable datatypes.
+
+> drop table uw
+-- DROP TABLE
+

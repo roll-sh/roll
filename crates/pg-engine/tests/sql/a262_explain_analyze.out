@@ -1,0 +1,129 @@
+> create table sa (a int, b int)
+-- CREATE TABLE
+
+> insert into sa select g, g % 10 from generate_series(1, 20000) g
+-- INSERT 0 20000
+
+> create index sa_a on sa (a)
+-- CREATE INDEX
+
+> vacuum analyze sa
+-- VACUUM
+
+> set enable_seqscan = off
+-- SET
+
+> explain (analyze, costs off, timing off, summary off, buffers off) select * from sa where a = any ('{1,2}')
+QUERY PLAN:text
+Index Scan using sa_a on sa (actual rows=2.00 loops=1)
+  Index Cond: (a = ANY ('{1,2}'::integer[]))
+  Index Searches: 1
+-- EXPLAIN
+
+> explain (analyze, costs off, timing off, summary off, buffers off) select * from sa where a = any ('{1,400}')
+QUERY PLAN:text
+Index Scan using sa_a on sa (actual rows=2.00 loops=1)
+  Index Cond: (a = ANY ('{1,400}'::integer[]))
+  Index Searches: 2
+-- EXPLAIN
+
+> explain (analyze, costs off, timing off, summary off, buffers off) select * from sa where a = any ('{1,2,5000,5001,19999}')
+QUERY PLAN:text
+Index Scan using sa_a on sa (actual rows=5.00 loops=1)
+  Index Cond: (a = ANY ('{1,2,5000,5001,19999}'::integer[]))
+  Index Searches: 3
+-- EXPLAIN
+
+> explain (analyze, costs off, timing off, summary off, buffers off) select * from sa where a = any ('{3,1,2,30000}')
+QUERY PLAN:text
+Index Scan using sa_a on sa (actual rows=3.00 loops=1)
+  Index Cond: (a = ANY ('{3,1,2,30000}'::integer[]))
+  Index Searches: 2
+-- EXPLAIN
+
+> set enable_indexscan = off
+-- SET
+
+> explain (analyze, costs off, timing off, summary off, buffers off) select * from sa where a = any ('{1,2}')
+QUERY PLAN:text
+Bitmap Heap Scan on sa (actual rows=2.00 loops=1)
+  Recheck Cond: (a = ANY ('{1,2}'::integer[]))
+  Heap Blocks: exact=1
+  ->  Bitmap Index Scan on sa_a (actual rows=2.00 loops=1)
+        Index Cond: (a = ANY ('{1,2}'::integer[]))
+        Index Searches: 1
+-- EXPLAIN
+
+> explain (analyze, costs off, timing off, summary off, buffers off) select * from sa where a = any ('{1,2,5000,5001,19999}')
+QUERY PLAN:text
+Bitmap Heap Scan on sa (actual rows=5.00 loops=1)
+  Recheck Cond: (a = ANY ('{1,2,5000,5001,19999}'::integer[]))
+  Heap Blocks: exact=3
+  ->  Bitmap Index Scan on sa_a (actual rows=5.00 loops=1)
+        Index Cond: (a = ANY ('{1,2,5000,5001,19999}'::integer[]))
+        Index Searches: 3
+-- EXPLAIN
+
+> drop table sa
+-- DROP TABLE
+
+> reset enable_seqscan
+-- RESET
+
+> reset enable_indexscan
+-- RESET
+
+> create table ti (a int, b int)
+-- CREATE TABLE
+
+> insert into ti select g / 10, g % 7 from generate_series(1, 10000) g
+-- INSERT 0 10000
+
+> create index ti_a on ti (a)
+-- CREATE INDEX
+
+> create table tj (a int, b int)
+-- CREATE TABLE
+
+> insert into tj select g / 1000, g % 7 from generate_series(1, 10000) g
+-- INSERT 0 10000
+
+> create index tj_a on tj (a)
+-- CREATE INDEX
+
+> analyze ti
+-- ANALYZE
+
+> analyze tj
+-- ANALYZE
+
+> explain select * from ti order by a, b limit 10
+QUERY PLAN:text
+Limit  (cost=0.70..1.27 rows=10 width=8)
+  ->  Incremental Sort  (cost=0.70..565.33 rows=10000 width=8)
+        Sort Key: a, b
+        Presorted Key: a
+        ->  Index Scan using ti_a on ti  (cost=0.29..254.28 rows=10000 width=8)
+-- EXPLAIN
+
+> explain select * from tj order by a, b limit 10
+QUERY PLAN:text
+Limit  (cost=41.93..42.47 rows=10 width=8)
+  ->  Incremental Sort  (cost=41.93..583.60 rows=10000 width=8)
+        Sort Key: a, b
+        Presorted Key: a
+        ->  Index Scan using tj_a on tj  (cost=0.29..242.28 rows=10000 width=8)
+-- EXPLAIN
+
+> explain select * from tj order by a, b limit 10 offset 5
+QUERY PLAN:text
+Limit  (cost=44.87..45.44 rows=10 width=8)
+  ->  Incremental Sort  (cost=44.59..612.85 rows=10000 width=8)
+        Sort Key: a, b
+        Presorted Key: a
+        ->  Index Scan using tj_a on tj  (cost=0.29..242.28 rows=10000 width=8)
+-- EXPLAIN
+
+> drop table ti, tj
+-- DROP TABLE
+

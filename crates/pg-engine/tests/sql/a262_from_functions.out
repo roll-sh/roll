@@ -1,0 +1,94 @@
+> create table ff_t1 (a int)
+-- CREATE TABLE
+
+> insert into ff_t1 select generate_series(1, 100)
+-- INSERT 0 100
+
+> analyze ff_t1
+-- ANALYZE
+
+> create function ff_set(int) returns setof int language plpgsql immutable as $$ begin return next $1; end $$
+-- CREATE FUNCTION
+
+> explain (costs off) select * from ff_set(1) f where f > 0
+QUERY PLAN:text
+Function Scan on ff_set f
+  Filter: (f > 0)
+-- EXPLAIN
+
+> explain (costs off) select * from ff_set(1) as f(x) where x > 0
+QUERY PLAN:text
+Function Scan on ff_set f
+  Filter: (x > 0)
+-- EXPLAIN
+
+> explain (costs off, verbose) select * from ff_set(1) f where f > 0
+QUERY PLAN:text
+Function Scan on public.ff_set f
+  Output: f
+  Function Call: ff_set(1)
+  Filter: (f.f > 0)
+-- EXPLAIN
+
+> explain (costs off) select * from ff_set(1) f join ff_t1 on f = ff_t1.a
+QUERY PLAN:text
+Hash Join
+  Hash Cond: (f.f = ff_t1.a)
+  ->  Function Scan on ff_set f
+  ->  Hash
+        ->  Seq Scan on ff_t1
+-- EXPLAIN
+
+> explain (costs off, verbose) select * from ff_set(1) f, ff_t1 where f = ff_t1.a
+QUERY PLAN:text
+Hash Join
+  Output: f.f, ff_t1.a
+  Hash Cond: (f.f = ff_t1.a)
+  ->  Function Scan on public.ff_set f
+        Output: f.f
+        Function Call: ff_set(1)
+  ->  Hash
+        Output: ff_t1.a
+        ->  Seq Scan on public.ff_t1
+              Output: ff_t1.a
+-- EXPLAIN
+
+> select * from ff_set(5) f join ff_t1 on f = ff_t1.a
+f:int4 | a:int4
+5 | 5
+-- SELECT 1
+
+> create table ff_t0 (a int)
+-- CREATE TABLE
+
+> create function ff_div(int) returns setof int language plpgsql immutable as $$ begin raise notice 'ff_div %', $1; return next 10 / $1; end $$
+-- CREATE FUNCTION
+
+> explain select * from ff_t0, ff_div(0)
+QUERY PLAN:text
+Nested Loop  (cost=0.25..31927.12 rows=2550000 width=8)
+  ->  Function Scan on ff_div  (cost=0.25..10.25 rows=1000 width=4)
+  ->  Materialize  (cost=0.00..48.25 rows=2550 width=4)
+        ->  Seq Scan on ff_t0  (cost=0.00..35.50 rows=2550 width=4)
+-- EXPLAIN
+
+> explain select * from ff_div(0), ff_t0
+QUERY PLAN:text
+Nested Loop  (cost=0.25..31927.12 rows=2550000 width=8)
+  ->  Function Scan on ff_div  (cost=0.25..10.25 rows=1000 width=4)
+  ->  Materialize  (cost=0.00..48.25 rows=2550 width=4)
+        ->  Seq Scan on ff_t0  (cost=0.00..35.50 rows=2550 width=4)
+-- EXPLAIN
+
+> select * from ff_t0, ff_div(0)
+NOTICE 00000: ff_div 0
+CONTEXT: PL/pgSQL function ff_div(integer) line 1 at RAISE
+ERROR 22012: division by zero
+CONTEXT: PL/pgSQL function ff_div(integer) line 1 at RETURN NEXT
+
+> drop function ff_set(int), ff_div(int)
+-- DROP FUNCTION
+
+> drop table ff_t0, ff_t1
+-- DROP TABLE
+

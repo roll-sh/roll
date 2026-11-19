@@ -182,11 +182,13 @@ fn searches(bt: &Btree, m: &mut SkipModel) -> u64 {
 /// per range.
 pub fn count(t: &Table, ix: &Index, b: &IndexBounds, ranges: &[(Vec<u8>, Vec<u8>)], ctx: &ExecCtx) -> usize {
     let n = ranges.len();
-    let Some(skip) = b.skip.as_deref() else { return n };
-    if !ctx.instrumented() || ix.method != "btree" {
+    if (b.skip.is_none() && n < 2) || !ctx.instrumented() || ix.method != "btree" {
         return n;
     }
     let pre = index_prefix(t.oid, ix.id);
+    let Some(skip) = b.skip.as_deref() else {
+        return array_searches(t, ix, &pre, ranges, ctx).unwrap_or(n);
+    };
     let k = skip.cols.len();
     let cols: Vec<(DataType, bool, bool)> =
         (0..k).filter_map(|i| ix.columns.get(i).map(|c| (skip.cols[i].clone(), c.desc, c.nulls_first))).collect();
@@ -248,4 +250,26 @@ pub fn count(t: &Table, ix: &Index, b: &IndexBounds, ranges: &[(Vec<u8>, Vec<u8>
         }
     }
     if failed { n } else { total as usize }
+}
+
+/// The primitive index scans of an index scan over several ranges (an array's values,
+/// `= ANY`), from the size model: _bt_advance_array_keys goes on to the next value's matches
+/// on the page the scan is on, and starts a new primitive scan (`_bt_first`) when they begin
+/// on another leaf page. None: not modelled.
+fn array_searches(t: &Table, ix: &Index, pre: &[u8], ranges: &[(Vec<u8>, Vec<u8>)], ctx: &ExecCtx) -> Option<usize> {
+    super::sizing::with_btree(t.oid, ix.oid, &ctx.sess.db, |bt| {
+        let mut searches = 0;
+        let mut at: Option<u32> = None;
+        for (a, z) in ranges {
+            let a = a.strip_prefix(pre)?;
+            let pages = bt.leaf_pages(Some(a), z.strip_prefix(pre));
+            let first = *pages.first()?;
+            if at != Some(first) {
+                searches += 1;
+            }
+            at = pages.last().copied();
+        }
+        Some(searches)
+    })
+    .flatten()
 }

@@ -2840,7 +2840,12 @@ fn mentions_sys_column(n: &pb::Node) -> bool {
             .iter()
             .any(mentions_sys_column)
     };
+    // Nor into window definitions or an aggregate's ORDER BY (WITHIN GROUP too).
+    fn window_sys(w: &pb::WindowDef) -> bool {
+        w.partition_clause.iter().chain(&w.order_clause).any(mentions_sys_column)
+    }
     let own = match ast::inner(n) {
+        Some(pg_query::NodeEnum::WindowDef(w)) => window_sys(w),
         Some(pg_query::NodeEnum::InsertStmt(s)) => returning_sys(&s.returning_clause),
         Some(pg_query::NodeEnum::UpdateStmt(s)) => returning_sys(&s.returning_clause),
         Some(pg_query::NodeEnum::DeleteStmt(s)) => returning_sys(&s.returning_clause),
@@ -2862,6 +2867,11 @@ fn mentions_sys_column(n: &pb::Node) -> bool {
         pg_query::NodeRef::UpdateStmt(s) => returning_sys(&s.returning_clause),
         pg_query::NodeRef::DeleteStmt(s) => returning_sys(&s.returning_clause),
         pg_query::NodeRef::MergeStmt(s) => returning_sys(&s.returning_clause),
+        pg_query::NodeRef::FuncCall(f) => {
+            f.agg_order.iter().any(mentions_sys_column) || f.over.as_deref().is_some_and(window_sys)
+        }
+        pg_query::NodeRef::WindowDef(w) => window_sys(w),
+        pg_query::NodeRef::SelectStmt(s) => s.window_clause.iter().any(mentions_sys_column),
         _ => false,
     })
 }

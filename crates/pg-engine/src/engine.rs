@@ -116,6 +116,9 @@ struct DbEntry {
     /// datconnlimit: DATCONNLIMIT_UNLIMITED, a limit, or DATCONNLIMIT_INVALID_DB.
     #[serde(default = "unlimited")]
     conn_limit: i32,
+    /// datminmxid (None: initdb's, FirstMultiXactId, which bounds no truncation).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    min_mxid: Option<crate::txn::multixact::MinMxid>,
 }
 
 impl DbEntry {
@@ -423,6 +426,7 @@ impl Engine {
                     }),
                     is_template: Some(name != "postgres"),
                     conn_limit: DATCONNLIMIT_UNLIMITED,
+                    min_mxid: None,
                 };
                 let r = Registry {
                     next_oid: 16384,
@@ -2200,6 +2204,24 @@ impl Cluster for Engine {
             .map_or_else(DbOptions::default, DbEntry::options)
     }
 
+    fn database_min_mxid(&self, oid: u32) -> Option<crate::txn::multixact::MinMxid> {
+        self.registry.lock().databases.iter().find(|d| d.oid == oid).and_then(|d| d.min_mxid)
+    }
+
+    fn set_database_min_mxid(&self, oid: u32, m: crate::txn::multixact::MinMxid) -> Result<()> {
+        let mut r = self.registry.lock();
+        let Some(d) = r.databases.iter_mut().find(|d| d.oid == oid) else {
+            return Ok(());
+        };
+        d.min_mxid = Some(m);
+        self.save(&r)
+    }
+
+    fn others_min_mxid_bound(&self, oid: u32) -> Option<u64> {
+        let r = self.registry.lock();
+        r.databases.iter().filter(|d| d.oid != oid).map(|d| d.min_mxid.map_or(0, |m| m.bound)).min()
+    }
+
     fn set_database_options(&self, name: &str, options: DbOptions) -> Result<()> {
         let mut r = self.registry.lock();
         if let Some(d) = r.databases.iter_mut().find(|d| d.name == name) {
@@ -2381,6 +2403,7 @@ impl Cluster for Engine {
             locale: Some(locale.clone()),
             is_template: None,
             conn_limit: DATCONNLIMIT_UNLIMITED,
+            min_mxid: None,
         };
         entry.set_options(options);
         r.databases.push(entry);

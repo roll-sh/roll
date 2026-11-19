@@ -166,14 +166,72 @@ impl MultiXacts {
     }
 
     /// The state a database's store kept (`MULTI_PREFIX`): its last multi's id and the
-    /// member offset after it (None: none made), and how to read the others.
-    pub fn restored(last: Option<(u32, u32)>, load: Loader) -> MultiXacts {
+    /// member offset after it (None: none made), its oldest multi (`OLDEST_KEY`; None: never
+    /// truncated), and how to read the others.
+    pub fn restored(last: Option<(u32, u32)>, oldest: Option<u32>, load: Loader) -> MultiXacts {
         let mut m = MultiXacts { load: Some(load), ..Default::default() };
         if let Some((multi, next_offset)) = last {
             m.next = multi.wrapping_add(1).max(FIRST_MULTI);
             m.next_offset = next_offset;
         }
+        if let Some(o) = oldest {
+            m.oldest = o;
+        }
         m
+    }
+
+    /// When multi `m` was made (its mark), read as asked.
+    fn mark_of(&mut self, m: u32) -> Option<u64> {
+        if let Some(e) = self.members.get(&m) {
+            return Some(e.0);
+        }
+        let (mark, members) = (self.load.as_ref()?)(m)?;
+        self.members.insert(m, (mark, members.into()));
+        Some(mark)
+    }
+
+    /// The datminmxid `multi` (at most `next`) as other databases' multis see it
+    /// (`MinMxid::bound`): a multi made before it was made, or, for the next one (a VACUUM's
+    /// OldestMxact: no older multi is left), before the oldest running transaction
+    /// (`oldest_running`; None: none runs, `next_xid` the next transaction id) got its id.
+    pub fn min_mxid(&mut self, multi: u32, oldest_running: Option<u64>, next_xid: u64) -> MinMxid {
+        let bound = if multi == self.next {
+            oldest_running.unwrap_or(next_xid) + 1
+        } else {
+            self.mark_of(multi).unwrap_or(0)
+        };
+        MinMxid { multi, bound }
+    }
+
+    /// TruncateMultiXact: the multis before `own` (this database's datminmxid) that were made
+    /// before `others` (the other databases' oldest `MinMxid::bound`; None: there are none)
+    /// go. Their members can't be read any more (oldestMultiXactId); returns the range
+    /// whose records the caller deletes, when it moved.
+    pub fn truncate(&mut self, own: u32, others: Option<u64>) -> Option<std::ops::Range<u32>> {
+        let old = self.oldest;
+        if !precedes(old, own) {
+            return None;
+        }
+        // (Marks grow with the ids: the first multi in [old, own) made at or after the
+        // others' bound.)
+        let (mut lo, mut hi) = (old, own);
+        if let Some(b) = others {
+            while lo < hi {
+                let mid = lo + (hi - lo) / 2;
+                if self.mark_of(mid).is_some_and(|m| m < b) {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
+            }
+        }
+        let new = lo;
+        if new == old {
+            return None;
+        }
+        self.oldest = new;
+        self.members.retain(|&m, _| !precedes(m, new));
+        Some(old..new)
     }
 
     /// GetOldestMultiXactId: the oldest multi a running transaction may still be a member of
@@ -220,6 +278,22 @@ pub fn is_state_key(k: &[u8]) -> bool {
     k.len() > 8 && k[..7] == [0; 7] && (k[7] == 0x26 || k[7] == 0x27)
 }
 
+/// The key of the oldest multi left (oldestMultiXactId) once a truncation moved it: multi 0's,
+/// which is never a multi (InvalidMultiXactId).
+pub fn oldest_key() -> Vec<u8> {
+    multi_key(0)
+}
+
+/// A database's datminmxid (pg_database), in its own MultiXactIds, and the bound it puts on the
+/// other databases' truncation: their multis made when the next transaction id was below
+/// `bound` are older than it. (PostgreSQL's MultiXactIds are the cluster's; here each database
+/// has its own, so the cluster's oldest datminmxid is compared by when the multis were made.)
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MinMxid {
+    pub multi: u32,
+    pub bound: u64,
+}
+
 pub fn multi_key(multi: u32) -> Vec<u8> {
     let mut k = MULTI_PREFIX.to_vec();
     k.extend_from_slice(&multi.to_be_bytes());
@@ -261,6 +335,25 @@ pub fn xmax_key(table: u32, row: &[u8], tid: (u32, u16)) -> Vec<u8> {
     k.extend_from_slice(&tid.0.to_be_bytes());
     k.extend_from_slice(&tid.1.to_be_bytes());
     k
+}
+
+/// The TID of a record kept for a version of a table too big to model (`sizing::estlocks`):
+/// no tuple's (a page past any file's). Its row key ends with the version's xmin
+/// (`est_xmax_key`), so each version has a record of its own.
+pub const EST_AT: (u32, u16) = (u32::MAX, u16::MAX);
+
+/// The record key of the xmax of row `row`'s version written by `xmin`, past the model.
+pub fn est_xmax_key(table: u32, row: &[u8], xmin: u64) -> Vec<u8> {
+    let mut r = Vec::with_capacity(row.len() + 8);
+    r.extend_from_slice(row);
+    r.extend_from_slice(&xmin.to_be_bytes());
+    xmax_key(table, &r, EST_AT)
+}
+
+/// The row key and version xmin of an `EST_AT` record's row part (`split_xmax_key`).
+pub fn split_est_row(row: &[u8]) -> Option<(&[u8], u64)> {
+    let n = row.len().checked_sub(8)?;
+    Some((&row[..n], u64::from_be_bytes(row[n..].try_into().ok()?)))
 }
 
 /// The table's xmax records' key range.

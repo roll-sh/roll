@@ -4596,17 +4596,33 @@ fn scan_row_rest(plan: &ScanPlan, key: &[u8], bytes: &[u8], mut row: Row, ctx: &
         row.push(Value::Bytea(Arc::from(key)));
     }
     if plan.sys {
-        let mut sys = sys_values(key, row_xmin(bytes)?, 0, plan.table.oid);
+        let xmin = row_xmin(bytes)?;
+        let mut sys = sys_values(key, xmin, 0, plan.table.oid);
         // The heap TID the version was written at, when it was modelled, and the
         // command id its tuple header holds (cmin and cmax both read t_cid) and its raw
         // xmax (a deleter's, an updater's, a locker's or a MultiXactId).
-        if let Some((b, o)) = stored_tid(bytes) {
-            sys[0] = Value::Tid(b, o);
-            if let Some((c, xmax)) = super::sizing::raw_cid(plan.table.oid, (b, o), &ctx.sess.db) {
-                sys[2] = Value::Oid(c);
-                sys[3] = Value::Oid(xmax as u32);
-                sys[4] = Value::Oid(c);
+        let modelled = match stored_tid(bytes) {
+            Some((b, o)) => {
+                sys[0] = Value::Tid(b, o);
+                super::sizing::raw_cid(plan.table.oid, (b, o), &ctx.sess.db).map(|(c, xmax)| {
+                    sys[2] = Value::Oid(c);
+                    sys[3] = Value::Oid(xmax as u32);
+                    sys[4] = Value::Oid(c);
+                })
             }
+            // (Too big to model: where its estimate placed it, for a table keyed by row ids.)
+            None => {
+                if let Some((b, o)) = super::sizing::estimated_ctid(plan.table.oid, key, &ctx.sess.db) {
+                    sys[0] = Value::Tid(b, o);
+                }
+                None
+            }
+        };
+        // (Too big to model: a lock's xmax is kept apart.)
+        if modelled.is_none()
+            && let Some(x) = super::sizing::estlocks::xmax_of(plan.table.oid, key, xmin, &ctx.sess.db)
+        {
+            sys[3] = Value::Oid(x.raw as u32);
         }
         row.extend(sys);
     }

@@ -7997,6 +7997,7 @@ impl Builder<'_, '_> {
                         groups,
                         None,
                     );
+                    n.presorted_groups = Some(groups);
                     n.rows = c.node.rows;
                     n.width = c.node.width;
                     n.cols = c.node.cols.clone();
@@ -21920,6 +21921,16 @@ fn limit_over(mut c: ExNode, count: f64, off: f64) -> ExNode {
         let (st, tot) = costs::sort_cost(input.total_cost, input.rows, input.width, Some(count + off));
         c.startup_cost = st;
         c.total_cost = tot;
+    }
+    // (An Incremental Sort's groups are sorted bounded too: cost_incremental_sort's
+    // limit_tuples.)
+    if c.node_type == "Incremental Sort"
+        && count > 0.0
+        && off >= 0.0
+        && let (Some(groups), Some(input)) = (c.presorted_groups, c.children.first())
+    {
+        (c.startup_cost, c.total_cost) =
+            costs::incremental_sort_cost(input.startup_cost, input.total_cost, input.rows, input.width, groups, Some(count + off));
     }
     let in_rows = c.rows;
     let run = c.total_cost - c.startup_cost;

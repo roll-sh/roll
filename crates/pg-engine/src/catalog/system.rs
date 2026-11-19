@@ -1122,6 +1122,18 @@ fn pick_dir(m: &super::reldir::DirMap, only: Option<u32>) -> Box<dyn Iterator<It
 
 /// `relations`, or (`only`) the entries of one relation, as `relations` has them: from the
 /// relation maps' directory records (`reldir`), no relation's entry read.
+/// The relations vac_update_datfrozenxid reads (relkind r, m and t: tables, materialized
+/// views and TOAST tables, the system catalogs too), by oid.
+pub fn relminmxid_rels(cat: &Catalog) -> Vec<u32> {
+    let mut out: Vec<u32> = relations_of(cat, None)
+        .into_iter()
+        .filter(|r| matches!(r.kind, 'r' | 'm' | 't'))
+        .map(|r| r.oid)
+        .collect();
+    out.extend(super::static_rows::catalog_storage().iter().map(|r| r.0));
+    out
+}
+
 fn relations_of(cat: &Catalog, only: Option<u32>) -> Vec<RelInfo<'_>> {
     #[cfg(debug_assertions)]
     super::reldir::check(cat, only);
@@ -4579,9 +4591,11 @@ fn generate_raw(table: SysTable, ctx: &ExecCtx, only: Option<u32>, out: &mut Out
                     b(login),
                     i4(opts.conn_limit as i64),
                     Value::Oid(0),
-                    // datminmxid: initdb's, which only a VACUUM of every relation the
-                    // database has (its catalogs too) would advance.
-                    Value::Oid(crate::txn::multixact::FIRST_MULTI),
+                    // datminmxid: initdb's until a VACUUM advanced it (its relations' oldest
+                    // relminmxid, the catalogs' too).
+                    Value::Oid(
+                        ctx.sess.cluster.database_min_mxid(oid).map_or(crate::txn::multixact::FIRST_MULTI, |m| m.multi),
+                    ),
                     o(1663),
                     nm(&l.collate),
                     nm(&l.ctype),

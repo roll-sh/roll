@@ -271,8 +271,10 @@ fn golden_wire() {
                 max_prepared_transactions: max,
                 auth_files: Default::default(),
                 // (The files run for minutes in one engine: autovacuum's naptime ticks would
-                // analyze some files' tables mid-file, at times that vary run to run.)
-                settings: vec![("autovacuum".into(), "off".into())],
+                // analyze some files' tables mid-file, at times that vary run to run. Its
+                // naptime is past the run instead of autovacuum off, as the reference ran
+                // with it on: CREATE INDEX's statistics follow AutoVacuumingActive.)
+                settings: vec![("autovacuum_naptime".into(), "2147483".into())],
             };
             let engine = pg_engine::engine::Engine::open(opts).unwrap();
             let server = pg_engine::server::ServerOptions {

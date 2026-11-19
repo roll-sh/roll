@@ -368,6 +368,16 @@ const MX_KEPT: &str = "Int4(1) Int4(1) multi | Int4(2) Int4(2) xa+0 | Int4(3) In
 
 #[test]
 fn multixact_survives_a_restart() {
+    mx_restart();
+}
+
+/// The same with the table too big to model (its locks kept apart: `sizing::estlocks`).
+#[test]
+fn multixact_past_the_model_survives_a_restart() {
+    pg_engine::exec::sizing::with_max_versions(2, mx_restart);
+}
+
+fn mx_restart() {
     let tmp = tempfile::tempdir().unwrap();
     let eng = open(tmp.path());
     let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
@@ -390,7 +400,12 @@ fn multixact_crash_child() {
     let Ok(dir) = std::env::var("CRASH_MX_DIR") else {
         return;
     };
-    let dir = Path::new(&dir);
+    let limit = std::env::var("CRASH_MX_LIMIT").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+    pg_engine::exec::sizing::with_max_versions(limit, || mx_crash_child(&dir));
+}
+
+fn mx_crash_child(dir: &str) {
+    let dir = Path::new(dir);
     let eng = open(&dir.join("data"));
     let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
     s.query("CREATE EXTENSION pgrowlocks").unwrap();
@@ -403,10 +418,21 @@ fn multixact_crash_child() {
 
 #[test]
 fn multixact_survives_a_crash() {
+    mx_crash(0);
+}
+
+/// The same with the table too big to model.
+#[test]
+fn multixact_past_the_model_survives_a_crash() {
+    pg_engine::exec::sizing::with_max_versions(2, || mx_crash(2));
+}
+
+fn mx_crash(limit: usize) {
     let tmp = tempfile::tempdir().unwrap();
     let st = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "multixact_crash_child", "--nocapture", "--test-threads=1"])
         .env("CRASH_MX_DIR", tmp.path())
+        .env("CRASH_MX_LIMIT", limit.to_string())
         .stdout(std::process::Stdio::null())
         .status()
         .unwrap();

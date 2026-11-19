@@ -9653,7 +9653,19 @@ impl Planner<'_, '_> {
             {
                 est.total += CPU_TUPLE_COST * rows;
             }
+            // (A function called in FROM is a Function Scan, which keeps its rows for a rescan
+            // (ExecMaterializesOutput) whatever node its estimate came from: no Materialize
+            // above it, its rescans at its run cost.)
+            fn function_scan(p: &Plan) -> bool {
+                match p {
+                    Plan::Join { meta, .. } => meta.from_call.is_some(),
+                    Plan::PlCall { .. } | Plan::FunctionScan { .. } => true,
+                    Plan::Filter { input, .. } | Plan::Project { input, .. } => function_scan(input),
+                    _ => false,
+                }
+            }
             let kind = match est.node_type {
+                _ if function_scan(&plan) => InKind::FunctionScan,
                 "Function Scan" => InKind::FunctionScan,
                 "CTE Scan" => InKind::CteScan,
                 "WorkTable Scan" => InKind::WorkTableScan,

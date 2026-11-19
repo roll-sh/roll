@@ -192,6 +192,22 @@ impl Drop for Database {
 }
 
 impl Database {
+    /// TruncateMultiXact of this database's multis (`MultiXacts::truncate`): the records of
+    /// the multis that went are deleted, but the last one made (it gives the next id when the
+    /// database opens), and the oldest one left is kept (`multixact::oldest_key`).
+    pub fn truncate_multis(&self, own: u32, others: Option<u64>) {
+        let mut m = self.multis.lock();
+        let Some(gone) = m.truncate(own, others) else {
+            return;
+        };
+        let last = m.next.wrapping_sub(1);
+        let mut w: Vec<(Vec<u8>, Option<Bytes>)> =
+            vec![(multixact::oldest_key(), Some(Bytes::copy_from_slice(&m.oldest.to_be_bytes())))];
+        w.extend(gone.filter(|&x| x != last).map(|x| (multixact::multi_key(x), None)));
+        drop(m);
+        let _ = self.store.commit_async(w, |_, _| Ok(()), STATE_ONLY_DELAY_MS);
+    }
+
     pub fn open(name: &str, oid: u32, store: Arc<Store>, owner: &str) -> Result<Arc<Database>> {
         let ts = store.visible_ts();
         let catalog = match store.get(CATALOG_KEY, ts)? {
@@ -275,9 +291,13 @@ impl Database {
                 }
                 None => None,
             };
+            let oldest = store
+                .get(&multixact::oldest_key(), ts)?
+                .and_then(|v| Some(u32::from_be_bytes(v.get(..4)?.try_into().ok()?)));
             let s = store.clone();
             multixact::MultiXacts::restored(
                 last,
+                oldest,
                 Box::new(move |m| {
                     let v = s.get(&multixact::multi_key(m), s.visible_ts()).ok()??;
                     let (mark, _, members) = multixact::decode_multi(&v)?;

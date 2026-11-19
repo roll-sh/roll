@@ -178,6 +178,7 @@ impl Ddl<'_, '_> {
         // The relations, each resolved and checked before any is processed.
         let mut targets: Vec<(Arc<Table>, Vec<String>, bool)> = Vec::new();
         let mut catalogs_named: Vec<(crate::catalog::system::SysTable, Vec<String>)> = Vec::new();
+        let mut catalogs_vacuumed: Vec<u32> = Vec::new();
         for r in &rels {
             let Some(rv) = &r.relation else { continue };
             let t = match self.lookup(rv)? {
@@ -256,6 +257,9 @@ impl Ddl<'_, '_> {
                                 format!("column \"{c}\" of relation \"{}\" {what}", st.name()),
                             ));
                         }
+                    }
+                    if vacuum && !st.is_view() {
+                        catalogs_vacuumed.push(st.oid());
                     }
                     if analyze && !st.is_view() {
                         catalogs_named.push((st, cols));
@@ -708,9 +712,13 @@ impl Ddl<'_, '_> {
         // it stores statistics (it found rows).
         // (Then vac_update_datfrozenxid updates the database's pg_database row in place,
         // waiting for a transaction updating it: a GRANT on the database.)
+        if vacuum {
+            self.catalogs_vacuumed(&catalogs_vacuumed, catalogs.0 > 0);
+        }
         if vacuum && !skip_db {
             let db = self.ctx.sess.db.oid;
             self.ctx.txn.borrow_mut().inplace_lock_catalog_row(1262, db)?;
+            self.update_datminmxid(catalogs.0 > 0)?;
         }
         // (vacuum()'s closing StartTransactionCommand.)
         if own_vxids {
@@ -903,10 +911,12 @@ impl Ddl<'_, '_> {
         let found = |r: &crate::catalog::heapsim::VacuumResult| (!r.skipped_all_visible).then_some(r.min_multi).flatten();
         let (heap, toasted) = match self.vacuumed.as_ref().filter(|v| v.0 == t.oid) {
             Some((_, m, tv)) => (main.then(|| found(&m.heap)).flatten(), toast.then(|| tv.as_ref().and_then(|v| found(&v.heap))).flatten()),
-            // (A table not modelled: no version's xmax is known to name a multi.)
+            // (A table not modelled: the multis its kept locks name hold it back,
+            // `sizing::estlocks`.)
             None => {
                 let o = self.oldest_mxact();
-                (main.then_some(o), toast.then_some(o))
+                let held = crate::exec::sizing::estlocks::min_multi(t.oid, &self.ctx.sess.db).filter(|m| precedes(*m, o));
+                (main.then_some(held.unwrap_or(o)), toast.then_some(o))
             }
         };
         let mut set = |rel: u32, new: Option<u32>| {
@@ -919,6 +929,76 @@ impl Ddl<'_, '_> {
             Some((old as u64, new as u64))
         };
         (set(t.oid, heap), set(t.toast, toasted))
+    }
+
+    /// The system catalogs a VACUUM processed (`named`, or every one in a database-wide
+    /// VACUUM), with their TOAST tables: their relminmxid becomes OldestMxact (no version of
+    /// theirs is locked by a multi here).
+    fn catalogs_vacuumed(&mut self, named: &[u32], all: bool) {
+        use crate::txn::multixact::{FIRST_MULTI, precedes};
+        let rels = crate::catalog::static_rows::catalog_storage();
+        let oids: Vec<u32> = if all {
+            rels.iter().map(|r| r.0).collect()
+        } else {
+            rels.iter()
+                .filter(|r| named.contains(&r.0))
+                .flat_map(|r| [r.0, r.1])
+                .filter(|&o| o != 0)
+                .collect()
+        };
+        if oids.is_empty() {
+            return;
+        }
+        let new = self.oldest_mxact();
+        for oid in oids {
+            let old = self.cat.min_mxids.get(&oid).map_or(FIRST_MULTI, |m| *m as u32);
+            if precedes(old, new) {
+                self.cat.min_mxids.insert(oid, new as u64);
+            }
+        }
+    }
+
+    /// vac_update_datfrozenxid's datminmxid: the oldest relminmxid of the database's tables,
+    /// materialized views and TOAST tables, its catalogs' too, never going back; then
+    /// vac_truncate_clog's TruncateMultiXact when it moved (`Database::truncate_multis`). A
+    /// database-wide VACUUM (`all`) of a database with no multi left moves its bound on the
+    /// others' multis (`MinMxid::bound`) though its own ids stay: PostgreSQL's datminmxid
+    /// would be the cluster's OldestMxact.
+    fn update_datminmxid(&mut self, all: bool) -> Result<()> {
+        use crate::txn::multixact::{FIRST_MULTI, precedes};
+        let db = self.ctx.sess.db.clone();
+        let mut min = db.multis.lock().next;
+        for oid in crate::catalog::system::relminmxid_rels(&self.cat) {
+            let m = self.cat.min_mxids.get(&oid).map_or(FIRST_MULTI, |m| *m as u32);
+            if precedes(m, min) {
+                min = m;
+            }
+        }
+        let cluster = &self.ctx.sess.cluster;
+        let stored = cluster.database_min_mxid(db.oid);
+        let advanced = precedes(stored.map_or(FIRST_MULTI, |m| m.multi), min);
+        let none_left = all && min == db.multis.lock().next;
+        if !advanced && !none_left {
+            return Ok(());
+        }
+        let xids = db.xids();
+        let (running, next_xid) = (xids.oldest_running(), xids.next());
+        let m = db.multis.lock().min_mxid(min, (running < next_xid).then_some(running), next_xid);
+        if !advanced && stored.is_some_and(|s| s.bound >= m.bound) {
+            return Ok(());
+        }
+        cluster.set_database_min_mxid(db.oid, m)?;
+        // (The cluster's truncation reaches every open database: another one's multis may
+        // have waited for this one's.)
+        for other in cluster.opened_databases() {
+            if let Some(own) = cluster.database_min_mxid(other.oid) {
+                other.truncate_multis(own.multi, cluster.others_min_mxid_bound(other.oid));
+            }
+        }
+        if !cluster.opened_databases().iter().any(|o| o.oid == db.oid) {
+            db.truncate_multis(m.multi, cluster.others_min_mxid_bound(db.oid));
+        }
+        Ok(())
     }
 
     /// TRUNCATE (and a matview's refill) leave a table and its indexes unmeasured.
@@ -1561,8 +1641,13 @@ impl Ddl<'_, '_> {
             Some(RowMeasure { rows, modelled: Some(heap as i32), live: heap as i32, estimated: false, indexes: vec![(index.oid, pages as i32, tuples as f64)] })
         });
         // index_update_stats leaves the table's statistics alone when autovacuum is off
-        // for it (a dump restoring statistics before its indexes keeps them).
-        let autovacuum_off = t.options.iter().any(|o| {
+        // for it (a dump restoring statistics before its indexes keeps them), or isn't
+        // running at all (AutoVacuumingActive: autovacuum and track_counts).
+        let active = {
+            let s = self.ctx.sess.settings.borrow();
+            s.bool("autovacuum") && s.bool("track_counts")
+        };
+        let autovacuum_off = !active || t.options.iter().any(|o| {
             o.split_once('=').is_some_and(|(k, v)| {
                 k == "autovacuum_enabled"
                     && crate::types::text::parse_bool(v.trim_matches('\'')).is_ok_and(|b| !b)
