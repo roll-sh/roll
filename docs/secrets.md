@@ -4140,23 +4140,58 @@ Alarms worth setting: `SecretsKmsRefusals` above zero (a customer's key policy c
 
 `cargo run -p roll-secrets --release --example bench -- 9000` times the hot paths on one
 environment of 9,000 keys plus 900 references, on SQLite or, with `ROLL_CODE_TEST_DATABASE`, on
-Postgres. Measured 2026-11-13 on ai-server under a load average of about 27 (second run, warm):
+Postgres. Measured 2026-11-18 on ai-server, pinned to 12 CPUs (`taskset -c 0-5,18-23`): the
+medians of three runs each, before (the code as of `42a3bbe1b`) and after the polling path's cache,
+alternated, under load averages of 27 to 73. A poll is 100 calls; its p95 is in brackets.
 
-| | SQLite | Postgres |
-| --- | --- | --- |
-| one change of 9,900 keys | 313 ms | |
-| one key's change | 5 ms | 6 ms |
-| grid (every standard environment) | 38 ms | 48 ms |
-| list | 26 ms | 46 ms |
-| values, resolved | 74 ms | 149 ms |
-| digest | 90 ms | 143 ms |
-| insights | 27 ms | 40 ms |
-| compare | 38 ms | 62 ms |
-| health (the whole project) | 53 ms* | 58 ms* |
+| | SQLite before | SQLite after | Postgres before | Postgres after |
+| --- | --- | --- | --- | --- |
+| a 304 (`If-None-Match`, unchanged) | 99 ms (144) | 0.1 ms (0.1) | 169 ms (241) | 3.0 ms (13) |
+| `…/digest`, unchanged | 108 ms (138) | 0.1 ms (0.1) | 157 ms (213) | 2.5 ms (7) |
+| the first digest after a change | 108 ms | 71 ms (88) | 157 ms | 98 ms* |
+| one change of 9,900 keys | 483 ms | 506 ms | 12.1 s | 11.7 s |
+| one key's change | 13 ms | 8 ms | 12 ms | 10 ms |
+| grid (every standard environment) | 88 ms | 91 ms | 117 ms | 111 ms* |
+| list | 51 ms | 53 ms | 76 ms | 61 ms* |
+| values, resolved | 166 ms | 170 ms | 232 ms | 210 ms* |
+| insights | 54 ms | 56 ms | 66 ms | 65 ms* |
+| compare | 73 ms | 79 ms | 104 ms | 96 ms* |
+| health (the whole project) | 64 ms | 59 ms | 82 ms | 78 ms* |
 
-\* Health was measured later the same day under a load average of about 39, with the grid at 77 ms
-(SQLite) and 65 ms (Postgres) in the same runs: it stays under the grid, which the sidebar's count
-and Home rely on.
+\* Postgres's last two rounds after the change ran under loads of 70 and above, and the paths the
+change doesn't touch then took up to 4× as long in both builds. Those rows give the run without the
+digest cache but with its narrower read (the same code for them), alternated in the same session.
+The test database had 4,650 leftover test schemas, which slows every run a little more than the last.
+
+At 1,000 pods polling every 30 s (~33 calls a second) a folder that didn't change cost about 5.6
+cores on Postgres (3.3 on SQLite) to answer 304s; now it costs about 0.1. A digest is computed
+once after each change and then reused (`Secrets::digest_of`, read.rs):
+- **Narrower and once.** A digest reads only the columns that go into its hash, and reads each
+  folder once: a reference into the folder being digested finds its target in rows already read
+  (when the caller may read every import and base exactly as it may reveal them). Those two changes
+  alone halve the first digest (and were the 304's cost before the cache: 62 ms on SQLite, 71 ms on
+  Postgres).
+- **Reused while the database says nothing changed.** Each node keeps a folder's digest by
+  project, environment, folder, principal and whether the caller is untrusted. It reuses the digest
+  only while one read of the database answers the same: the project's change number (every write
+  of a stored value takes one in its own transaction), its environments, imports and required
+  keys, and the change number and share of any folder another project shares into it. A write on
+  any node moves it at once, and no node's memory decides whether a folder changed. A node keeps
+  at most 10,000 digests, and at most 500 for one principal: past either, the least recently used
+  goes (the principal's own first), so one reader cycling through many folders only ever pushes
+  out its own, never another poller's.
+- **Only for the same answers.** It records every permission the digest asked of the caller (an
+  import's environment, a reference's folder) with its answer, and is reused only when the caller
+  gets the same answers now. Each live link is checked as before: its generation (`source_changed`)
+  is read again, and its value's fingerprint is read the same way, at most 10 s old. A digest
+  where anything failed to read is never kept.
+
+`tests/nodes.rs` (`a_digest_one_node_keeps_moves_at_once_with_what_another_node_changes`) keeps
+a digest on one node and changes things on another: a write, an import, a write to the imported
+folder, roll rotating a live link's credential (though the first node read the product's answer a
+moment before). It also changes what the same caller may read. Each one moves the digest at once.
+`links_read_live_values_issue_managed_credentials_rotate_and_lease_dynamic_ones` (`tests/api.rs`)
+still covers 304s, and a product changing its own password.
 
 Every lookup by key inside a request is a hash map (a grid of ~11k keys over 5 environments took
 3.07 s before that, 0.43 s after, on a debug build).
