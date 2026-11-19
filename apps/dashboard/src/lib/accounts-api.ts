@@ -172,6 +172,29 @@ export function activityText(e: Activity, me: string): string {
   return e.ok ? `${e.action} by ${by}` : `${e.action} by ${by} was refused`;
 }
 
+/** A CSV cell: quoted, and a formula character defused with `'` at its start and after a `;`, tab
+ * or `|` (OWASP's CSV injection advice, as roll's audit export does): names and addresses are
+ * people's own text. */
+function csvCell(v: string): string {
+  let out = "";
+  let start = true;
+  for (const c of v) {
+    if (start && "=+-@\t\r".includes(c)) out += "'";
+    out += c;
+    if (";\t|".includes(c)) start = true;
+    else if (c !== " ") start = false;
+  }
+  return `"${out.replace(/"/g, '""')}"`;
+}
+
+/** People as CSV for a spreadsheet (Okta's and Google Workspace's people export): one row each. */
+export function peopleCsv(list: User[]): string {
+  const iso = (ms?: number | null) => (ms == null ? "" : new Date(ms).toISOString());
+  const head = ["handle", "name", "email", "admin", "turned_off", "authenticator_app", "passkeys", "dormant", "last_active", "created"];
+  const rows = list.map((u) => [u.handle, u.name, u.email, String(u.admin), String(u.disabled), String(u.totp), String(u.passkeys ?? 0), String(dormant(u)), iso(u.last_active_at), iso(u.created_at)]);
+  return [head.join(","), ...rows.map((r) => r.map(csvCell).join(","))].join("\n") + "\n";
+}
+
 /** People's filters in the admin list. */
 export type PeopleFilter = "everyone" | "admins" | "no-second-factor" | "turned-off";
 
