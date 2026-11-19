@@ -16,7 +16,7 @@
 # Environment: PGO_DIR (scratch: target dirs and raw profiles, default <root>/target/pgo; each
 # target dir is deleted once its binary is copied out, PGO_KEEP=1 keeps them), PGO_CLIENT,
 # PGO_BUILD_CPUS (taskset of the builds), and pgo-train.sh's PGO_PORT, PGO_SERVER_CPUS,
-# PGO_CLIENT_CPUS; PGO_BREADTH=1 (pgo-train.sh's breadth phase too, merged PGO_BENCH_SHARE to 1:
+# PGO_CLIENT_CPUS, PGO_TPCH_SF; PGO_BREADTH=1 (pgo-train.sh's breadth phase too, merged PGO_BENCH_SHARE to 1:
 # measured, not the default, HANDOFF "Profile-guided build"), PGO_REGRESS_SRC; PGO_LLVM_ARGS
 # (space-separated LLVM options for the optimised build). Both builds also take the shipped
 # builds' flags (tools/dist-flags.sh, as tools/dist.sh): they go through RUSTFLAGS of these
@@ -71,7 +71,35 @@ if [ -z "$PROF" ]; then
   [ -z "${PGO_BREADTH:-}" ] || { BRAW=$W/braw; mkdir -p "$BRAW"; }
   "$HERE/pgo-train.sh" "$W/roll-engine-instrumented" "$CLIENT" "$W/raw" ${BRAW:+"$BRAW"}
   T3=$(t)
-  "$PROFDATA" merge -o "$W/bench.profdata" "$W/raw"/*.profraw
+  # Each class's raw profiles (pgo-train.sh's <raw dir>/<class>) merged, then the classes
+  # merged with the same weight: each one's counts multiplied by the whole number that brings
+  # its total to the largest class's (TPC-H's). LLVM takes as hot the blocks that make 99% of
+  # the merged counts: unweighted, TPC-H at SF 1 is 76% of them and the short transactions'
+  # paths fall out of that set (93.8% of their counts in hot blocks against 97.5% with SF 0.2);
+  # weighted the same, every class has more of its counts in hot blocks than with SF 0.2
+  # unweighted (HANDOFF "Analytic CPU, round 6", `hotcov`).
+  tot() { "$PROFDATA" show "$1" | awk '/^Total count:/ {print $3}'; }
+  MAX=0; CLASSES=
+  for d in "$W/raw"/*/; do
+    c=$(basename "$d")
+    "$PROFDATA" merge -o "$W/class-$c.profdata" "$d"*.profraw
+    n=$(tot "$W/class-$c.profdata")
+    eval "TOT_$c=$n"
+    [ "$n" -le "$MAX" ] || MAX=$n
+    CLASSES="$CLASSES $c"
+  done
+  set --
+  WEIGHTS=
+  for c in $CLASSES; do
+    eval "n=\$TOT_$c"
+    w=$(awk -v m="$MAX" -v n="$n" 'BEGIN {w = n > 0 ? int(m / n + 0.5) : 1; print (w < 1 ? 1 : w)}')
+    set -- "$@" -weighted-input="$w,$W/class-$c.profdata"
+    WEIGHTS="$WEIGHTS $c=$n*$w"
+  done
+  "$PROFDATA" merge -o "$W/bench.profdata" "$@"
+  note "profile counts:$WEIGHTS"
+  # (PGO_KEEP=1 keeps them, for tools/pgo-hotcov.py.)
+  if [ -n "${PGO_KEEP:-}" ]; then mkdir -p "$OUT/classes" && mv "$W"/class-*.profdata "$OUT/classes/"; else rm -f "$W"/class-*.profdata; fi
   if [ -d "$W/braw" ]; then
     # The benchmark classes keep nearly all the counts: their profile weighted so that its total
     # is PGO_BENCH_SHARE (default 50) times the breadth phase's, about 98% of the merged counts.
@@ -79,7 +107,6 @@ if [ -z "$PROF" ]; then
     # classes about 2% cycles, and at 4x sort queries came out slower than the plain dist build;
     # HANDOFF "Profile-guided build".)
     "$PROFDATA" merge -o "$W/breadth.profdata" "$W/braw"/*.profraw
-    tot() { "$PROFDATA" show "$1" | awk '/^Total count:/ {print $3}'; }
     TB=$(tot "$W/bench.profdata"); TR=$(tot "$W/breadth.profdata")
     WB=$(awk -v b="$TB" -v r="$TR" -v k="${PGO_BENCH_SHARE:-50}" 'BEGIN {w = int(k * r / b) + 1; print (w < 1 ? 1 : w)}')
     "$PROFDATA" merge -o "$OUT/roll-engine.profdata" -weighted-input="$WB,$W/bench.profdata" "$W/breadth.profdata"
