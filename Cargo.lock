@@ -277,6 +277,7 @@ dependencies = [
  "aho-corasick",
  "anyhow",
  "apps-build",
+ "argon2",
  "async-trait",
  "aws-config",
  "aws-sdk-cloudwatchlogs",
@@ -327,6 +328,7 @@ dependencies = [
  "tower",
  "tracing",
  "url",
+ "zeroize",
  "zip",
 ]
 

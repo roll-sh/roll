@@ -138,7 +138,7 @@ const BY: Record<NonNullable<AccessLine["by"]>, string> = {
 };
 
 /** An access line as a person reads it: `GET /path 200 12ms`, a 5xx in red, a cold start's wait. */
-function AccessText({ text }: { text: string }) {
+function AccessText({ text, onBlock }: { text: string; onBlock?: (ip: string) => Promise<unknown> }) {
   let a: AccessLine;
   try {
     a = JSON.parse(text) as AccessLine;
@@ -153,6 +153,11 @@ function AccessText({ text }: { text: string }) {
         {a.by ? ` · ${BY[a.by] ?? a.by}` : ""}
         {a.ip ? ` · ${a.ip}` : ""}
       </span>
+      {a.ip && onBlock && (
+        <SureButton className="ml-2 text-[11px] text-subtle underline-offset-2 hover:text-fg hover:underline select-none" label={`Block ${a.ip}`} sure={`Block ${a.ip}?`} onSure={() => onBlock(a.ip!)}>
+          block
+        </SureButton>
+      )}
     </>
   );
 }
@@ -207,7 +212,22 @@ function TraceMore({ more, onGroup }: { more: LogLine[]; onGroup?: () => void })
  * A log in mono: time, (stream and instance), text. Follows the end while it's scrolled there;
  * scrolling up stops following until the end is reached again. A stack trace is one entry.
  */
-export function LogView({ lines, columns = false, empty, className = "h-[420px]", onGroup }: { lines: LogLine[]; columns?: boolean; empty: ReactNode; className?: string; onGroup?: () => void }) {
+export function LogView({
+  lines,
+  columns = false,
+  empty,
+  className = "h-[420px]",
+  onGroup,
+  onBlock,
+}: {
+  lines: LogLine[];
+  columns?: boolean;
+  empty: ReactNode;
+  className?: string;
+  onGroup?: () => void;
+  /** A request line's address, denied by a firewall rule (shown as "block" beside it). */
+  onBlock?: (ip: string) => Promise<unknown>;
+}) {
   const box = useRef<HTMLDivElement>(null);
   const [stuck, setStuck] = useState(true);
   const entries = useMemo(() => logEntries(lines), [lines]);
@@ -243,7 +263,7 @@ export function LogView({ lines, columns = false, empty, className = "h-[420px]"
                 </span>
               )}
               <span className={`min-w-0 flex-1 [overflow-wrap:anywhere] whitespace-pre-wrap ${lineTone(l)}`}>
-                {l.stream === "http" ? <AccessText text={l.text} /> : l.text}
+                {l.stream === "http" ? <AccessText text={l.text} onBlock={onBlock} /> : l.text}
                 {more.length > 0 && <TraceMore more={more} onGroup={onGroup} />}
               </span>
             </div>
