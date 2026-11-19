@@ -4756,6 +4756,9 @@ struct NestLoopNode {
     /// rescanned for each collection of its rows (they may read the enclosing row), not
     /// opened again.
     right_node: Option<BoxNode>,
+    /// The joined rows' columns a projection above takes (`project_columns`): each row made
+    /// of them alone, from the outer and inner rows where they are.
+    pick: Option<Box<[u32]>>,
 }
 
 /// A nested loop's inner rows for one outer row: collected (a Material's, a memo's, a
@@ -4858,6 +4861,14 @@ fn rescan_snapshot(plan: &Arc<Plan>, instr: &super::Instr, enclosing: bool) -> H
 }
 
 impl NestLoopNode {
+    /// A whole joined row as a projection above takes it (`pick`), its picked values moved.
+    fn picked(&self, mut r: Row) -> Row {
+        match &self.pick {
+            Some(p) => p.iter().map(|&c| r.get_mut(c as usize).map_or(Value::Null, |v| std::mem::replace(v, Value::Null))).collect(),
+            None => r,
+        }
+    }
+
     /// Whether the inner side is read as ExecNestLoop reads it: rescanned per outer row
     /// (ExecReScan with the new parameters) and its rows taken as the join asks, not
     /// collected first (a plan that can't rescan is opened again for each outer row). A
@@ -4929,6 +4940,7 @@ impl NestLoopNode {
             stage: None,
             rescans: 0,
             right_node: None,
+            pick: None,
         }
     }
 
@@ -5180,7 +5192,7 @@ impl NestLoopNode {
                         None => None,
                         Some(Item::Part(p)) => return Ok(Some(Item::Part(p))),
                         // (Joined in the workers already.)
-                        Some(Item::Row(r, l)) if l >= level => return Ok(Some(Item::Row(r, l))),
+                        Some(Item::Row(r, l)) if l >= level => return Ok(Some(Item::Row(self.picked(r), l))),
                         Some(Item::Row(r, _)) => Some(r),
                     },
                 };
@@ -5230,8 +5242,12 @@ impl NestLoopNode {
                 };
                 let pair = Pair(l, r);
                 let early = self.cond_kernel.as_ref().and_then(|k| k.passes(&pair));
-                let combined = match early {
-                    Some(false) => None,
+                // (Columns a projection above picks (`pick`): the row made of them from the
+                // pair in place, unless the condition is evaluated over the whole row.)
+                let whole = self.pick.is_none() || (early.is_none() && self.cond.is_some());
+                let combined = match (early, &self.pick) {
+                    (Some(false), _) => None,
+                    (_, Some(p)) if !whole => Some(p.iter().map(|&c| super::kernel::Cols::col(&pair, c as usize).cloned().unwrap_or(Value::Null)).collect()),
                     _ => Some(concat_rows(l, r)),
                 };
                 let ok = match (&self.cond, early, &combined) {
@@ -5271,6 +5287,7 @@ impl NestLoopNode {
                         self.cur = None;
                         break;
                     }
+                    _ if whole => return Ok(Some(Item::Row(self.picked(combined), level))),
                     _ => return Ok(Some(Item::Row(combined, level))),
                 }
             }
@@ -5282,7 +5299,7 @@ impl NestLoopNode {
                     JoinKind::Left | JoinKind::Full => {
                         let mut out = l;
                         out.extend(std::iter::repeat_n(Value::Null, self.nright));
-                        return Ok(Some(Item::Row(out, level)));
+                        return Ok(Some(Item::Row(self.picked(out), level)));
                     }
                     JoinKind::Anti => return Ok(Some(Item::Row(l, level))),
                     _ => {}
@@ -5337,6 +5354,21 @@ impl Node for NestLoopNode {
 
     fn next_item(&mut self, ctx: &ExecCtx) -> Result<Option<super::pipe::Item>> {
         self.step(ctx)
+    }
+
+    /// (An inner or left join, before its first row, not under EXPLAIN ANALYZE: its rows
+    /// made of columns `cols`, `picked`.)
+    fn project_columns(&mut self, cols: &[u32], ctx: &ExecCtx) -> bool {
+        if !matches!(self.kind, JoinKind::Inner | JoinKind::Left)
+            || self.tried
+            || self.cur.is_some()
+            || ctx.instrumented()
+            || cols.last().is_none_or(|&c| c as usize >= self.nleft + self.nright)
+        {
+            return false;
+        }
+        self.pick = Some(cols.into());
+        true
     }
 
     fn pipeline(
@@ -6082,14 +6114,19 @@ impl HashJoinNode {
                 },
                 _ => None,
             };
+            // (A join below makes the narrowed rows itself, of the columns kept.)
+            let picked = base.is_none()
+                && st.is_none()
+                && matches!(&*inner_plan, Plan::Join { .. })
+                && narrow.as_ref().is_some_and(|(n, ..)| node.project_columns(&n.cols, ctx));
             while let Some(mut r) = node.next(ctx)? {
                 let computed = match base {
                     Some(b) if r.len() > b => Some(r.split_off(b)),
                     _ => None,
                 };
                 let r = match &narrow {
-                    Some((n, ..)) => n.shrink(r),
-                    None => r,
+                    Some((n, ..)) if !picked => n.shrink(r),
+                    _ => r,
                 };
                 if let Some(st) = &mut st {
                     st.add(&r, &self.rkeys, ctx)?;
