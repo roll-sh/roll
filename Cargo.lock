@@ -6991,6 +6991,7 @@ dependencies = [
  "roll-auth",
  "roll-cluster",
  "roll-fetch",
+ "roll-gateway",
  "roll-previews",
  "roll-secrets",
  "roll-workspace",
@@ -7093,6 +7094,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "roll-gateway"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "futures-util",
+ "hickory-resolver",
+ "httpdate",
+ "ipnet",
+ "rand 0.8.8",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite 0.30.0",
+]
+
+[[package]]
 name = "roll-mcp"
 version = "0.1.0"
 dependencies = [
@@ -7185,6 +7203,7 @@ dependencies = [
  "hkdf",
  "hmac 0.12.1",
  "http-body-util",
+ "instant-acme",
  "ipnet",
  "rand 0.8.8",
  "rcgen",
@@ -7201,6 +7220,7 @@ dependencies = [
  "thiserror",
  "time",
  "tokio",
+ "tokio-rustls 0.26.6",
  "tower",
  "tracing",
  "x509-cert",
@@ -7244,6 +7264,7 @@ dependencies = [
  "aws-smithy-runtime-api",
  "axum",
  "base64 0.22.1",
+ "bcrypt",
  "bytes",
  "chrono",
  "clap",
@@ -7260,6 +7281,8 @@ dependencies = [
  "hmac 0.12.1",
  "http-body 1.1.0",
  "http-body-util",
+ "hyper 1.12.0",
+ "hyper-util",
  "ipnet",
  "kafka-protocol",
  "lapin",
@@ -7305,6 +7328,7 @@ dependencies = [
  "roll-auth",
  "roll-cluster",
  "roll-edge",
+ "roll-gateway",
  "roll-mcp",
  "roll-net",
  "roll-oidc",
@@ -7322,6 +7346,7 @@ dependencies = [
  "search-control",
  "search-server",
  "search-store",
+ "serde",
  "serde_json",
  "sha2 0.10.9",
  "stream-broker",
@@ -7338,6 +7363,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "urlencoding",
+ "x509-parser",
  "zeroize",
 ]
 

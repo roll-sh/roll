@@ -329,8 +329,9 @@ pub enum Secrets {
     /// Encryption keys (encryption as a service): encrypt stdin, decrypt stdin, rotate, list.
     #[command(subcommand)]
     Transit(TransitCmd),
-    /// The project's certificate authorities: list, add, print one's certificate, remove.
-    #[command(subcommand)]
+    /// The project's certificate authorities: list, add, print one's certificate, sign, revoke,
+    /// ACME, remove.
+    #[command(subcommand, alias = "ca")]
     Cas(CasCmd),
     /// The project's SSH CAs: list, add, print one's public key (for TrustedUserCAKeys), remove.
     #[command(subcommand, name = "ssh-cas")]
@@ -347,6 +348,19 @@ pub enum Secrets {
     /// add (the bind password on stdin), remove.
     #[command(subcommand)]
     Directories(DirectoriesCmd),
+    /// Snowflake accounts whose service user's key roll rotates, or that make a user per lease:
+    /// list, add (the admin user's private key from a file), remove.
+    #[command(subcommand)]
+    Snowflake(SnowflakeCmd),
+    /// MongoDB Atlas projects whose two database users roll rotates in turn, or that make a user
+    /// per lease, through Atlas's Admin API: list, add (the service account's secret on stdin),
+    /// remove.
+    #[command(subcommand)]
+    Atlas(AtlasCmd),
+    /// Gateways into private networks (docs/secrets.md, "Gateways"): list with their status, add
+    /// (its token printed once), remove, and `up`: run one inside the network.
+    #[command(subcommand)]
+    Gateways(GatewaysCmd),
     /// Vendor credentials roll issues and revokes keys with (SendGrid, Twilio, Okta, Entra,
     /// Auth0): list, add (the credential on stdin), remove.
     #[command(subcommand)]
@@ -666,7 +680,7 @@ pub enum AwsRolesCmd {
 pub enum DatabasesCmd {
     #[command(alias = "list")]
     Ls,
-    /// Register a database: its admin URL (postgres://admin:…@host:5432/db, mysql://…, sqlserver://…, clickhouse://…, rabbitmq://…, rediss://… or mongodb+srv://…) on stdin; two login
+    /// Register a database: its admin URL (postgres://admin:…@host:5432/db, mysql://…, sqlserver://…, clickhouse://…, rabbitmq://…, rediss://…, mongodb+srv://…, elasticsearch://…, opensearch://… or cassandra://…) on stdin; two login
     /// roles that take turns (managed links), a group dynamic logins join, or both.
     Add {
         name: String,
@@ -678,6 +692,9 @@ pub enum DatabasesCmd {
         /// The server's CA certificates (PEM file), when the system's don't cover it (Amazon RDS).
         #[arg(long)]
         ca: Option<std::path::PathBuf>,
+        /// Reach it through one of the project's gateways (gw_…): it may have a private address.
+        #[arg(long)]
+        gateway: Option<String>,
     },
     /// Change a registration in place: its name, its CA, or (--url) its admin URL from stdin,
     /// checked before it's kept.
@@ -780,6 +797,106 @@ pub enum SaasCmd {
 }
 
 #[derive(Subcommand)]
+pub enum SnowflakeCmd {
+    #[command(alias = "list")]
+    Ls,
+    /// Register an account: roll signs in as `--admin-user` with its key pair; a managed user
+    /// (`--user`), the roles dynamic users get (`--role`, the first their default), or both.
+    Add {
+        name: String,
+        /// The account identifier (myorg-myaccount, or a locator such as xy12345.us-east-2.aws).
+        #[arg(long)]
+        account: String,
+        /// Reach it at <account>.privatelink.snowflakecomputing.com.
+        #[arg(long)]
+        privatelink: bool,
+        /// The user roll signs in as (its RSA_PUBLIC_KEY is the key's public half).
+        #[arg(long)]
+        admin_user: String,
+        /// The role roll's statements run as (default: the admin user's default role).
+        #[arg(long)]
+        admin_role: Option<String>,
+        /// The admin user's private key: a PEM file (PKCS#8 unencrypted, or PKCS#1), or - for stdin.
+        #[arg(long)]
+        key: String,
+        /// key_pair (default) or password: how the users roll hands out sign in.
+        #[arg(long, default_value = "key_pair")]
+        auth: String,
+        /// The service user managed links rotate.
+        #[arg(long = "user")]
+        managed_user: Option<String>,
+        /// A role dynamic users are granted.
+        #[arg(long = "role", num_args = 1)]
+        roles: Vec<String>,
+    },
+    Rm { id: String },
+}
+
+#[derive(Subcommand)]
+pub enum AtlasCmd {
+    #[command(alias = "list")]
+    Ls,
+    /// Register an Atlas project: roll takes a token as the organization service account
+    /// `--client-id` (its secret on stdin); two users managed links rotate in turn (`--user`
+    /// twice), the roles dynamic users get (`--role role@db[.collection]`), or both.
+    Add {
+        name: String,
+        /// The Atlas project's id (24 hex digits; the Admin API's groupId).
+        #[arg(long)]
+        group_id: String,
+        /// The service account's client id (mdb_sa_id_…).
+        #[arg(long)]
+        client_id: String,
+        /// A database user managed links rotate (give two: they take turns).
+        #[arg(long = "user", num_args = 1)]
+        managed_users: Vec<String>,
+        /// A role dynamic users get, as role@db or role@db.collection.
+        #[arg(long = "role", num_args = 1)]
+        roles: Vec<String>,
+    },
+    Rm { id: String },
+}
+
+#[derive(Subcommand)]
+pub enum GatewaysCmd {
+    #[command(alias = "list")]
+    Ls,
+    /// Make a gateway; its roll token is printed once (give it to `up` as ROLL_GATEWAY_TOKEN).
+    Add {
+        name: String,
+        /// No token: the gateway logs in through a workload identity made for it instead.
+        #[arg(long)]
+        no_token: bool,
+    },
+    Rm { id: String },
+    /// Run a gateway inside the private network: one WebSocket out to roll, and streams only to
+    /// what --allow lists (the token from ROLL_GATEWAY_TOKEN or --token-file, or --identity with
+    /// --oidc-token-file).
+    Up {
+        /// The gateway's id (gw_…).
+        #[arg(long)]
+        gateway: String,
+        /// HOST:PORT, *.SUFFIX:PORT or CIDR:PORT (IPv6 in brackets), where PORT may also be a range
+        /// LOW-HIGH (both included, 1-65535) or *; repeat it.
+        #[arg(long = "allow", num_args = 1)]
+        allow: Vec<String>,
+        /// A file of allow-list entries, one a line (# comments).
+        #[arg(long)]
+        allow_file: Option<std::path::PathBuf>,
+        /// A file holding the gateway's roll token (else ROLL_GATEWAY_TOKEN).
+        #[arg(long)]
+        token_file: Option<std::path::PathBuf>,
+        /// Log in through this workload identity (idn_…) instead of a token.
+        #[arg(long, requires = "oidc_token_file")]
+        identity: Option<String>,
+        /// The OIDC token file the identity logs in with, read again at each login (Kubernetes'
+        /// projected token).
+        #[arg(long)]
+        oidc_token_file: Option<std::path::PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
 pub enum DirectoriesCmd {
     #[command(alias = "list")]
     Ls,
@@ -804,6 +921,9 @@ pub enum DirectoriesCmd {
         /// A group each dynamic user joins.
         #[arg(long = "group", num_args = 1)]
         groups: Vec<String>,
+        /// Reach it through one of the project's gateways (gw_…): it may have a private address.
+        #[arg(long)]
+        gateway: Option<String>,
         /// The server's CA certificates (PEM file), when the system's don't cover it.
         #[arg(long)]
         ca: Option<std::path::PathBuf>,
@@ -922,7 +1042,47 @@ pub enum CasCmd {
     Certs { id: String },
     /// Revoke a certificate (on the CA's CRL until it expires).
     Revoke { id: String, serial: String },
+    /// ACME on the CA (cert-manager, certbot, lego, Caddy): its directory URL and External Account
+    /// Bindings.
+    #[command(subcommand)]
+    Acme(AcmeCmd),
     Rm { id: String },
+}
+
+#[derive(Subcommand)]
+pub enum AcmeCmd {
+    /// External Account Bindings: the key id and HMAC key an ACME client makes its account with.
+    #[command(subcommand)]
+    Eab(EabCmd),
+    /// Make a binding's names valid without a challenge (on|off): its key is then the whole proof.
+    PreAuthorize {
+        ca: String,
+        #[arg(value_parser = ["on", "off"])]
+        state: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum EabCmd {
+    /// A new binding: prints its key id and HMAC key (shown once), the directory URL and a
+    /// cert-manager ClusterIssuer.
+    Add {
+        ca: String,
+        /// Names its accounts may order (each takes every name under it); the CA's whole policy
+        /// by default.
+        #[arg(long = "name")]
+        names: Vec<String>,
+        /// Days until it stops working (until revoked by default).
+        #[arg(long)]
+        days: Option<u32>,
+        #[arg(long)]
+        label: Option<String>,
+    },
+    /// The CA's directory URL and bindings.
+    #[command(alias = "list")]
+    Ls { ca: String },
+    /// Revoke a binding: every account made with it stops at once.
+    Rm { ca: String, id: String },
 }
 
 #[derive(Subcommand)]
@@ -1110,6 +1270,10 @@ pub enum Identities {
         /// cluster's own (`kubectl get --raw /openid/v1/jwks`). Then the issuer is never fetched.
         #[arg(long, value_name = "FILE")]
         jwks: Option<String>,
+        /// Log a gateway in (gw_…) instead of reading secrets: its tokens open that gateway's link
+        /// only (no --for-env, --for-path or --action).
+        #[arg(long, conflicts_with_all = ["envs", "paths", "actions"])]
+        gateway: Option<String>,
     },
     /// Replace an identity's pinned keys (the cluster rotated its signing key); its id stays.
     Keys {
@@ -1347,6 +1511,10 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             println!("{:<20} {:<14} {:<16} {:<28} v{:<4} {}{}", s(&p["project_name"]), s(&p["environment"]), s(&p["path"]), s(&p["key"]), p["version"], ago(p["updated_at"].as_i64().unwrap_or(0)), if p["linked"] == true { "  linked" } else { "" });
         }
         return Ok(());
+    }
+    // A gateway runs with its own credential, in no project's name.
+    if let Secrets::Gateways(GatewaysCmd::Up { gateway, allow, allow_file, token_file, identity, oidc_token_file }) = &cmd {
+        return gateway_up(api, gateway.clone(), allow.clone(), allow_file.clone(), token_file.clone(), identity.clone(), oidc_token_file.clone()).await;
     }
     // A key pair is this machine's, not a project's.
     if let Secrets::Keygen { out } = &cmd {
@@ -1916,15 +2084,15 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     println!("{}  {:<16} {:<32} {}{group}", s(&d["id"]), s(&d["name"]), s(&d["host"]), roles.join(" "));
                 }
             }
-            DatabasesCmd::Add { name, roles, group, ca } => {
+            DatabasesCmd::Add { name, roles, group, ca, gateway } => {
                 // The admin URL holds a password: never an argument.
                 if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-                    eprint!("Admin URL (postgres://admin:…@host:5432/db, mysql://…, sqlserver://…, clickhouse://…, rabbitmq://…, rediss://… or mongodb+srv://…), then Enter and Ctrl-D: ");
+                    eprint!("Admin URL (postgres://admin:…@host:5432/db, mysql://…, sqlserver://…, clickhouse://…, rabbitmq://…, rediss://…, mongodb+srv://…, elasticsearch://…, opensearch://… or cassandra://…), then Enter and Ctrl-D: ");
                 }
                 let mut url = String::new();
                 std::io::stdin().read_to_string(&mut url).context("reading the admin URL from stdin")?;
                 let ca = ca.map(|p| std::fs::read_to_string(&p).with_context(|| format!("reading {}", p.display()))).transpose()?;
-                let v = c.call(Method::POST, &format!("{}/outside-databases", c.base()), Some(json!({ "name": name, "url": url.trim(), "roles": roles, "group": group, "ca": ca }))).await?;
+                let v = c.call(Method::POST, &format!("{}/outside-databases", c.base()), Some(json!({ "name": name, "url": url.trim(), "roles": roles, "group": group, "ca": ca, "gateway": gateway }))).await?;
                 if json_out {
                     return print(&v);
                 }
@@ -1967,6 +2135,42 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 println!("Removed {id}");
             }
         },
+        Secrets::Gateways(g) => match g {
+            GatewaysCmd::Ls => {
+                let v = c.call(Method::GET, &format!("{}/gateways", c.base()), None).await?;
+                if json_out {
+                    return print(&v);
+                }
+                for g in v.as_array().into_iter().flatten() {
+                    let st = &g["status"];
+                    let state = match (st["online"].as_bool(), st["node"].as_str()) {
+                        (Some(true), Some(node)) => format!("online on {node}, roll {}", s(&st["version"])),
+                        _ => st["last_seen_at"].as_i64().map(|t| format!("offline, last seen {}", ago(t))).unwrap_or_else(|| "never connected".into()),
+                    };
+                    let allow: Vec<&str> = st["allow"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+                    println!("{}  {:<16} {state}{}", s(&g["id"]), s(&g["name"]), if allow.is_empty() { String::new() } else { format!("  allows {}", allow.join(" ")) });
+                }
+            }
+            GatewaysCmd::Add { name, no_token } => {
+                let v = c.call(Method::POST, &format!("{}/gateways", c.base()), Some(json!({ "name": name, "token": !no_token }))).await?;
+                if json_out {
+                    return print(&v);
+                }
+                let id = s(&v["gateway"]["id"]);
+                match v["token"].as_str() {
+                    Some(t) => {
+                        println!("{t}");
+                        eprintln!("Added gateway {name} ({id}). Its token is above, shown once. Inside the network:\n  ROLL_GATEWAY_TOKEN=… roll secrets gateways up --gateway {id} --allow HOST:PORT");
+                    }
+                    None => eprintln!("Added gateway {name} ({id}), without a token: make a workload identity with \"gateway\": \"{id}\" for it to log in."),
+                }
+            }
+            GatewaysCmd::Rm { id } => {
+                c.call(Method::DELETE, &format!("{}/gateways/{}", c.base(), enc(&id)), None).await?;
+                println!("Removed {id} (its token is revoked)");
+            }
+            GatewaysCmd::Up { .. } => unreachable!("handled above"),
+        },
         Secrets::Directories(d) => match d {
             DirectoriesCmd::Ls => {
                 let v = c.call(Method::GET, &format!("{}/directories", c.base()), None).await?;
@@ -1979,7 +2183,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     println!("{}  {:<16} {:<32} {:<16} {}{users}", s(&d["id"]), s(&d["name"]), s(&d["url"]), s(&d["flavor"]), accounts.join(" "));
                 }
             }
-            DirectoriesCmd::Add { name, url, bind_dn, flavor, accounts, user_base_dn, groups, ca } => {
+            DirectoriesCmd::Add { name, url, bind_dn, flavor, accounts, user_base_dn, groups, ca, gateway } => {
                 // The bind password: never an argument.
                 if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
                     eprint!("Bind password for {bind_dn}, then Enter and Ctrl-D: ");
@@ -1988,7 +2192,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 std::io::stdin().read_to_string(&mut password).context("reading the bind password from stdin")?;
                 let password = password.trim_end_matches(['\r', '\n']);
                 let ca = ca.map(|p| std::fs::read_to_string(&p).with_context(|| format!("reading {}", p.display()))).transpose()?;
-                let body = json!({ "name": name, "url": url, "bind_dn": bind_dn, "bind_password": password, "flavor": flavor, "managed_accounts": accounts, "user_base_dn": user_base_dn, "groups": groups, "ca": ca });
+                let body = json!({ "name": name, "url": url, "bind_dn": bind_dn, "bind_password": password, "flavor": flavor, "managed_accounts": accounts, "user_base_dn": user_base_dn, "groups": groups, "ca": ca, "gateway": gateway });
                 let v = c.call(Method::POST, &format!("{}/directories", c.base()), Some(body)).await?;
                 if json_out {
                     return print(&v);
@@ -1997,6 +2201,72 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             }
             DirectoriesCmd::Rm { id } => {
                 c.call(Method::DELETE, &format!("{}/directories/{}", c.base(), enc(&id)), None).await?;
+                println!("Removed {id}");
+            }
+        },
+        Secrets::Atlas(d) => match d {
+            AtlasCmd::Ls => {
+                let v = c.call(Method::GET, &format!("{}/atlas-projects", c.base()), None).await?;
+                if json_out {
+                    return print(&v);
+                }
+                for a in v.as_array().into_iter().flatten() {
+                    let list = |k: &str| a[k].as_array().into_iter().flatten().filter_map(Value::as_str).collect::<Vec<_>>().join(" ");
+                    let (users, roles) = (list("managed_users"), list("roles"));
+                    let roles = if roles.is_empty() { String::new() } else { format!("  dynamic as {roles}") };
+                    println!("{}  {:<16} {}  {:<24} {}{roles}", s(&a["id"]), s(&a["name"]), s(&a["group_id"]), s(&a["client_id"]), if users.is_empty() { "-" } else { &users });
+                }
+            }
+            AtlasCmd::Add { name, group_id, client_id, managed_users, roles } => {
+                // The service account's secret: never an argument.
+                if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                    eprint!("Client secret for {client_id}, then Enter and Ctrl-D: ");
+                }
+                let mut secret = String::new();
+                std::io::stdin().read_to_string(&mut secret).context("reading the client secret from stdin")?;
+                let body = json!({ "name": name, "group_id": group_id, "client_id": client_id, "client_secret": secret.trim(), "managed_users": managed_users, "roles": roles });
+                let v = c.call(Method::POST, &format!("{}/atlas-projects", c.base()), Some(body)).await?;
+                if json_out {
+                    return print(&v);
+                }
+                println!("Added {} ({}): link MONGODB_USERNAME and MONGODB_PASSWORD to it (and MONGODB_CONNECTION_STRING with a cluster), managed (its two users) or dynamic (a user per lease).", s(&v["name"]), s(&v["id"]));
+            }
+            AtlasCmd::Rm { id } => {
+                c.call(Method::DELETE, &format!("{}/atlas-projects/{}", c.base(), enc(&id)), None).await?;
+                println!("Removed {id}");
+            }
+        },
+        Secrets::Snowflake(d) => match d {
+            SnowflakeCmd::Ls => {
+                let v = c.call(Method::GET, &format!("{}/snowflake-accounts", c.base()), None).await?;
+                if json_out {
+                    return print(&v);
+                }
+                for a in v.as_array().into_iter().flatten() {
+                    let roles: Vec<&str> = a["roles"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+                    let managed = a["managed_user"].as_str().unwrap_or("-");
+                    let roles = if roles.is_empty() { String::new() } else { format!("  dynamic as {}", roles.join(" ")) };
+                    println!("{}  {:<16} {:<40} {:<8} {managed}{roles}", s(&a["id"]), s(&a["name"]), s(&a["host"]), s(&a["auth"]));
+                }
+            }
+            SnowflakeCmd::Add { name, account, privatelink, admin_user, admin_role, key, auth, managed_user, roles } => {
+                // The private key: a file or stdin, never an argument.
+                let mut pem = String::new();
+                if key == "-" {
+                    std::io::stdin().read_to_string(&mut pem).context("reading the private key from stdin")?;
+                } else {
+                    pem = std::fs::read_to_string(&key).with_context(|| format!("reading {key}"))?;
+                }
+                let body = json!({ "name": name, "account": account, "privatelink": privatelink, "admin_user": admin_user, "admin_role": admin_role, "admin_private_key": pem, "auth": auth, "managed_user": managed_user, "roles": roles });
+                let v = c.call(Method::POST, &format!("{}/snowflake-accounts", c.base()), Some(body)).await?;
+                if json_out {
+                    return print(&v);
+                }
+                let secret = if v["auth"] == "password" { "SNOWFLAKE_PASSWORD" } else { "SNOWFLAKE_PRIVATE_KEY" };
+                println!("Added {} ({}): link SNOWFLAKE_USER, SNOWFLAKE_ACCOUNT and {secret} to it, managed (its user) or dynamic (a user per lease).", s(&v["name"]), s(&v["id"]));
+            }
+            SnowflakeCmd::Rm { id } => {
+                c.call(Method::DELETE, &format!("{}/snowflake-accounts/{}", c.base(), enc(&id)), None).await?;
                 println!("Removed {id}");
             }
         },
@@ -2334,6 +2604,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 c.call(Method::DELETE, &format!("{}/cas/{}", c.base(), enc(&id)), None).await?;
                 println!("Removed {id}");
             }
+            CasCmd::Acme(cmd) => acme(&c, cmd, json_out).await?,
         },
         Secrets::Transit(t) => match t {
             TransitCmd::Ls => {
@@ -2647,7 +2918,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     println!("{}  {:<16} {}{keys}  {}  envs {}  {}  {} min  used {used}", s(&i["id"]), s(&i["name"]), s(&i["issuer"]), s(&i["subject"]), list(&i["environments"]), list(&i["actions"]), i["ttl_minutes"]);
                 }
             }
-            Identities::Add { name, github, issuer, subject, audience, claims, envs, paths, actions, ttl_minutes, allow_ips, jwks } => {
+            Identities::Add { name, github, issuer, subject, audience, claims, envs, paths, actions, ttl_minutes, allow_ips, jwks, gateway } => {
                 let (issuer, subject) = match (github, issuer, subject) {
                     (Some(repo), _, _) => ("https://token.actions.githubusercontent.com".to_string(), format!("repo:{repo}:*")),
                     (None, Some(i), Some(s)) => (i, s),
@@ -2657,7 +2928,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     .iter()
                     .map(|c| c.split_once('=').map(|(k, v)| (k.trim().to_string(), json!(v.trim()))).with_context(|| format!("--claim {c}: name=value")))
                     .collect::<anyhow::Result<_>>()?;
-                let actions = if actions.is_empty() { vec!["read".to_string(), "reveal".to_string()] } else { actions };
+                let actions = if gateway.is_some() { vec![] } else if actions.is_empty() { vec!["read".to_string(), "reveal".to_string()] } else { actions };
                 let audience = audience.unwrap_or_else(|| c.api.base.clone());
                 let mut body = json!({ "name": name, "issuer": issuer, "audience": audience, "subject": subject, "claims": claims, "actions": actions });
                 if !envs.is_empty() {
@@ -2668,6 +2939,9 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 }
                 if let Some(m) = ttl_minutes {
                     body["ttl_minutes"] = json!(m);
+                }
+                if let Some(g) = &gateway {
+                    body["gateway"] = json!(g);
                 }
                 if !allow_ips.is_empty() {
                     body["allowed_ips"] = json!(allow_ips);
@@ -4384,6 +4658,93 @@ async fn stop(child: &mut tokio::process::Child) {
     let _ = child.kill().await;
 }
 
+/// `roll secrets cas acme …`: a CA's ACME directory, bindings and pre-authorization.
+async fn acme(c: &Client<'_>, cmd: AcmeCmd, json_out: bool) -> anyhow::Result<()> {
+    let at = |ca: &str| format!("{}/cas/{}/acme", c.base(), enc(ca));
+    let print = |v: &Value| -> anyhow::Result<()> {
+        println!("{}", serde_json::to_string_pretty(v)?);
+        Ok(())
+    };
+    match cmd {
+        AcmeCmd::PreAuthorize { ca, state } => {
+            let id = ca_id(c, &ca).await?;
+            let v = c.call(Method::PATCH, &at(&id), Some(json!({ "pre_authorize": state == "on" }))).await?;
+            if json_out {
+                return print(&v);
+            }
+            if state == "on" {
+                println!("{ca}: a binding's names are valid without a challenge; its HMAC key is the whole proof.");
+            } else {
+                println!("{ca}: every name is proven with http-01, dns-01 or tls-alpn-01.");
+            }
+        }
+        AcmeCmd::Eab(EabCmd::Add { ca, names, days, label }) => {
+            let id = ca_id(c, &ca).await?;
+            let body = json!({ "names": (!names.is_empty()).then_some(names), "days": days, "label": label });
+            let v = c.call(Method::POST, &format!("{}/eab", at(&id)), Some(body)).await?;
+            if json_out {
+                return print(&v);
+            }
+            let (key_id, hmac, directory) = (s(&v["key_id"]), s(&v["hmac_key"]), s(&v["directory"]));
+            println!("Directory  {directory}");
+            println!("Key id     {key_id}");
+            println!("HMAC key   {hmac}");
+            eprintln!("The HMAC key isn't shown again. certbot: --server {directory} --eab-kid {key_id} --eab-hmac-key <HMAC key>; lego: --server {directory} --eab --kid {key_id} --hmac <HMAC key>.");
+            println!("\n# cert-manager: kubectl -n cert-manager create secret generic roll-{ca}-eab --from-literal secret=<HMAC key>\n{}", cluster_issuer(&ca, &directory, &key_id));
+        }
+        AcmeCmd::Eab(EabCmd::Ls { ca }) => {
+            let id = ca_id(c, &ca).await?;
+            let v = c.call(Method::GET, &at(&id), None).await?;
+            if json_out {
+                return print(&v);
+            }
+            println!("Directory  {}", s(&v["directory"]));
+            println!("Pre-authorized names: {}", if v["pre_authorize"] == true { "on (a binding's key is the whole proof)" } else { "off" });
+            for b in v["bindings"].as_array().into_iter().flatten() {
+                let names: Vec<&str> = b["names"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+                let state = match (b["revoked_at"].as_i64(), b["expires_at"].as_i64()) {
+                    (Some(t), _) => format!("revoked {}", day(t)),
+                    (None, Some(t)) => format!("until {}", day(t)),
+                    (None, None) => "live".into(),
+                };
+                let scope = if names.is_empty() { "the CA's names".to_string() } else { names.join(",") };
+                println!("{}  {:<16} {}  {} account(s)  {state}", s(&b["id"]), s(&b["label"]), scope, b["accounts"]);
+            }
+        }
+        AcmeCmd::Eab(EabCmd::Rm { ca, id }) => {
+            let ca_id = ca_id(c, &ca).await?;
+            c.call(Method::DELETE, &format!("{}/eab/{}", at(&ca_id), enc(&id)), None).await?;
+            println!("Revoked {id}: its accounts stop at once");
+        }
+    }
+    Ok(())
+}
+
+/// A cert-manager ClusterIssuer for a CA's ACME directory, with a binding's key id (its HMAC key
+/// in the Secret `roll-<ca>-eab`).
+fn cluster_issuer(ca: &str, directory: &str, key_id: &str) -> String {
+    format!(
+        "apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: roll-{ca}
+spec:
+  acme:
+    server: {directory}
+    privateKeySecretRef:
+      name: roll-{ca}-acme-account
+    externalAccountBinding:
+      keyID: {key_id}
+      keySecretRef:
+        name: roll-{ca}-eab
+        key: secret
+    solvers:
+      - http01:
+          ingress:
+            ingressClassName: nginx"
+    )
+}
+
 /// A CA's id from its id or its name.
 async fn ca_id(c: &Client<'_>, id: &str) -> anyhow::Result<String> {
     let list = c.call(Method::GET, &format!("{}/cas", c.base()), None).await?;
@@ -4641,5 +5002,28 @@ mod relogin_tests {
         assert!(no_answer(&api.get("/v1/echo").await.unwrap_err()));
         down.store(false, Ordering::SeqCst);
         assert_eq!(auth(api.get("/v1/echo").await.unwrap()), "Bearer rlt_4");
+    }
+}
+
+/// `roll secrets gateways up`: the gateway's loop (roll-gateway's agent) until its credential
+/// stops working. Log lines go to stderr; never the token or a stream's bytes.
+async fn gateway_up(api: &Api, gateway: String, allow: Vec<String>, allow_file: Option<std::path::PathBuf>, token_file: Option<std::path::PathBuf>, identity: Option<String>, oidc_token_file: Option<std::path::PathBuf>) -> anyhow::Result<()> {
+    use roll_gateway::agent::{Agent, Auth};
+    let mut entries = allow;
+    if let Some(f) = &allow_file {
+        entries.extend(std::fs::read_to_string(f).with_context(|| format!("reading {}", f.display()))?.lines().map(str::to_string));
+    }
+    let allow = roll_gateway::allow::AllowList::parse(entries.iter().map(String::as_str)).map_err(|e| anyhow::anyhow!(e))?;
+    let auth = match (identity, oidc_token_file, token_file) {
+        (Some(identity), Some(oidc_file), _) => Auth::Identity { identity, oidc_file },
+        (_, _, Some(f)) => Auth::Token(std::fs::read_to_string(&f).with_context(|| format!("reading {}", f.display()))?.trim().to_string()),
+        _ => Auth::Token(std::env::var("ROLL_GATEWAY_TOKEN").ok().filter(|t| !t.trim().is_empty()).map(|t| t.trim().to_string()).context("give the gateway's token in ROLL_GATEWAY_TOKEN or --token-file, or --identity with --oidc-token-file")?),
+    };
+    eprintln!("roll gateway {gateway}: allowing {}", allow.entries().join(", "));
+    let log = std::sync::Arc::new(|line: &str| eprintln!("{} {line}", chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ")));
+    let agent = Agent { url: api.base.clone(), gateway, auth, allow, version: env!("CARGO_PKG_VERSION").to_string(), log };
+    tokio::select! {
+        r = roll_gateway::agent::run(agent) => r.map_err(|e| anyhow::anyhow!(e)),
+        _ = tokio::signal::ctrl_c() => Ok(()),
     }
 }
