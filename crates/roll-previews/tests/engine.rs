@@ -548,7 +548,15 @@ async fn a_previews_logs_and_job_output_hide_its_secrets() {
     while followed.len() < 2 {
         followed.push(tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv()).await.unwrap().unwrap());
     }
-    assert_eq!(followed, ["listening on :3000", "charging with ***"]);
+    assert_eq!(followed, [(false, "listening on :3000".to_string()), (false, "charging with ***".to_string())], "a tail doesn't say which stream");
+    // Where the backend follows (Docker), each line says whether it came on stderr, masked too.
+    *e.apps.followed.lock() = Some(vec![(false, "listening on :3000".into()), (true, "charging with sk_test_51Hx9".into())]);
+    let (_, mut rx) = e.engine.follow(&p.id, None, 10).await.unwrap();
+    let mut tagged = Vec::new();
+    while tagged.len() < 2 {
+        tagged.push(tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv()).await.unwrap().unwrap());
+    }
+    assert_eq!(tagged, [(false, "listening on :3000".to_string()), (true, "charging with ***".to_string())]);
     let mut said = None;
     for _ in 0..400 {
         said = e.engine.store.page_health(&p.id).unwrap().and_then(|h| h.first_error);

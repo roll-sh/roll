@@ -335,6 +335,8 @@ for _ in $(seq 1 60); do grep -q "pushed-log-line" "$FOLLOW" && break; sleep 0.2
 kill "$FPID" 2>/dev/null || true
 wait "$FPID" 2>/dev/null || true
 grep -q "event: service" "$FOLLOW" && grep -q "pushed-log-line" "$FOLLOW" || { echo "the followed log should carry the request:"; cat "$FOLLOW"; exit 1; }
+# Python's server writes its request lines on stderr: the followed log says so (`event: stderr`).
+grep -B1 "pushed-log-line" "$FOLLOW" | grep -q "^event: stderr" || { echo "the request's line came on stderr and should say so:"; cat "$FOLLOW"; exit 1; }
 # CI's way in: the project's bypass secret in a header (no cookie); a wrong one is refused.
 BYPASS=$(api POST "/v1/previews/projects/$PRJ/bypass" | jq_ "d['secret']")
 [ "$(curl -s -o /dev/null -w '%{http_code}' -H "Host: $HOST" -H "x-roll-preview-bypass: $BYPASS" "http://$API/")" = 200 ] || { echo "the bypass secret should open the preview"; exit 1; }
