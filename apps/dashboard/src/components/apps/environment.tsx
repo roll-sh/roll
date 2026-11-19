@@ -72,6 +72,8 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
     setPromoting({ from, deployment: source.id, revision: source.revision, missing });
   };
   const [link, setLink] = useState<string | null>(null);
+  const [pauseFrom, setPauseFrom] = useState("fri 19:00");
+  const [pauseTo, setPauseTo] = useState("mon 07:00");
   const [freezeWhy, setFreezeWhy] = useState("");
   const [password, setPassword] = useState("");
   const [hook, setHook] = useState<string | null>(null);
@@ -237,6 +239,36 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
           <button className={btn} disabled={busy} aria-pressed={!!env.held} onClick={() => runner.run("hold", () => appsApi.putEnvironment(service.id, env.name, { held: !env.held }))}>
             {env.held ? "Resume deploys" : "Hold deploys"}
           </button>
+        </div>
+
+        <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
+          <div className="min-w-0 flex-1">
+            <p className="text-[13px] font-medium">Pause on a schedule</p>
+            <p className="mt-1 text-[12px] text-muted">
+              {env.pause_schedule
+                ? `Paused ${env.pause_schedule.windows.map((w) => `${w.from} – ${w.to}`).join(", ")}${env.pause_schedule.timezone ? ` (${env.pause_schedule.timezone})` : " (UTC)"}; resumed as each ends. Pausing or resuming by hand holds until the window ends.`
+                : "Nothing runs in the windows you set (a staging site at night): paused as one starts, resumed as it ends."}
+            </p>
+          </div>
+          {env.pause_schedule ? (
+            <button className={btn} disabled={busy} onClick={() => runner.run("pause-schedule", () => appsApi.putEnvironment(service.id, env.name, { pause_schedule: null }))}>
+              Remove the schedule
+            </button>
+          ) : (
+            <form
+              className="flex gap-2"
+              onSubmit={(e) => {
+                e.preventDefault();
+                void runner.run("pause-schedule", () => appsApi.putEnvironment(service.id, env.name, { pause_schedule: { windows: [{ from: pauseFrom.trim(), to: pauseTo.trim() }], timezone: Intl.DateTimeFormat().resolvedOptions().timeZone } }));
+              }}
+            >
+              <input value={pauseFrom} onChange={(e) => setPauseFrom(e.target.value)} aria-label="From" className={`${input} w-24 font-mono text-[12px]`} />
+              <input value={pauseTo} onChange={(e) => setPauseTo(e.target.value)} aria-label="To" className={`${input} w-24 font-mono text-[12px]`} />
+              <button type="submit" className={btn} disabled={busy}>
+                Pause then
+              </button>
+            </form>
+          )}
         </div>
 
         <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">

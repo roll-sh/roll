@@ -12,6 +12,7 @@ import { SureButton, type Runner } from "./shared";
 export function StatusPagePanel({ project, projectName, runner }: { project: string; projectName: string; runner: Runner }) {
   const [page, setPage] = useState<StatusPage | null | undefined>(undefined);
   const [title, setTitle] = useState("");
+  const [incident, setIncident] = useState({ title: "", text: "" });
   useEffect(() => {
     appsApi.statusPage(project).then(setPage, () => setPage(null));
   }, [project]);
@@ -30,7 +31,24 @@ export function StatusPagePanel({ project, projectName, runner }: { project: str
             Take down
           </SureButton>
         </div>
-      ) : (
+      ) : null}
+      {page && (
+        <form
+          className="flex flex-wrap items-center gap-2 border-t border-line px-5 py-4"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void runner.run("incident", () => appsApi.postIncident(project, incident)).then((r) => r && setIncident({ title: "", text: "" }));
+          }}
+        >
+          <input value={incident.title} onChange={(e) => setIncident({ ...incident, title: e.target.value })} placeholder="An incident's title (slow checkouts)" aria-label="Incident title" maxLength={120} className={`${input} min-w-48 flex-1 text-[12px]`} />
+          <input value={incident.text} onChange={(e) => setIncident({ ...incident, text: e.target.value })} placeholder="What visitors should know" aria-label="Incident text" maxLength={2000} className={`${input} min-w-64 flex-[2] text-[12px]`} />
+          <button type="submit" className={primary} disabled={busy || !incident.title.trim() || !incident.text.trim()}>
+            Post an incident
+          </button>
+          <span className="w-full text-[12px] text-muted">Checks going down and heartbeats missed open and close their own; post updates through the API (`…/incidents/&#123;id&#125;/updates`).</span>
+        </form>
+      )}
+      {!page && (
         <form
           className="flex flex-wrap items-center gap-2 px-5 py-4"
           onSubmit={(e) => {
