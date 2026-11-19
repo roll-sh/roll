@@ -228,6 +228,12 @@ CREATE TABLE IF NOT EXISTS bypass (
     hash TEXT NOT NULL,
     created_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS runtime_facts (
+    preview_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    json TEXT NOT NULL,
+    PRIMARY KEY (preview_id, kind)
+);
 CREATE TABLE IF NOT EXISTS git_reports (
     preview_id TEXT PRIMARY KEY,
     status TEXT,
@@ -1022,7 +1028,7 @@ impl Store {
     /// Remove a preview's rows (after its branches and services are gone).
     pub fn remove(&self, id: &str) -> Result<()> {
         self.db.write(|c| {
-            for t in ["resources", "services", "pinned", "shares", "visit_tickets", "visit_sessions", "visits", "activity", "screenshots", "page_shots", "visual_page_accepts", "mail", "resolved_notes", "base_history", "leases", "note_crops", "git_pulls", "git_reports", "previews"] {
+            for t in ["resources", "services", "pinned", "shares", "visit_tickets", "visit_sessions", "visits", "activity", "screenshots", "page_shots", "visual_page_accepts", "mail", "resolved_notes", "base_history", "leases", "note_crops", "git_pulls", "git_reports", "runtime_facts", "previews"] {
                 let col = if t == "previews" { "id" } else { "preview_id" };
                 c.execute(&format!("DELETE FROM {t} WHERE {col} = ?"), [id])?;
             }
@@ -2354,6 +2360,29 @@ impl Store {
 
     /// What was last posted on a Git URL service's repository for a preview: the status (its sha,
     /// state and description, as one string), the pull request comment's id and its body's hash.
+    /// What its holder last read of a preview's running code against main's preview (`kind`:
+    /// `slower_routes`), kept so any node shows it.
+    pub fn runtime_fact<T: serde::de::DeserializeOwned>(&self, id: &str, kind: &str) -> Result<Option<T>> {
+        let json: Option<String> = self.db.read(|c| c.query_row("SELECT json FROM runtime_facts WHERE preview_id = ? AND kind = ?", [id, kind], |r| r.get(0)).optional())?;
+        Ok(json.and_then(|j| serde_json::from_str(&j).ok()))
+    }
+
+    /// Keep what its holder read (`None`: nothing to say); whether that changed what was kept.
+    pub fn set_runtime_fact<T: serde::Serialize>(&self, id: &str, kind: &str, fact: Option<&T>) -> Result<bool> {
+        let json = fact.map(serde_json::to_string).transpose().map_err(|e| Error::Internal(e.to_string()))?;
+        self.db.write(|c| {
+            let was: Option<String> = c.query_row("SELECT json FROM runtime_facts WHERE preview_id = ? AND kind = ?", [id, kind], |r| r.get(0)).optional()?;
+            if was == json {
+                return Ok::<_, Error>(false);
+            }
+            match &json {
+                Some(j) => c.execute("INSERT INTO runtime_facts (preview_id, kind, json) VALUES (?1, ?2, ?3) ON CONFLICT (preview_id, kind) DO UPDATE SET json = excluded.json", params![id, kind, j])?,
+                None => c.execute("DELETE FROM runtime_facts WHERE preview_id = ? AND kind = ?", [id, kind])?,
+            };
+            Ok(true)
+        })
+    }
+
     pub fn git_report(&self, id: &str) -> Result<(Option<String>, Option<i64>, Option<String>)> {
         Ok(self.db.read(|c| c.query_row("SELECT status, comment_id, comment_hash FROM git_reports WHERE preview_id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional())?.unwrap_or((None, None, None)))
     }
@@ -2679,6 +2708,7 @@ impl Store {
         let first_unstable = page_health.as_ref().is_some_and(|h| h.unstable);
         let visual_review = self.visual_review(&r, settings.visual_review, settings.github.visual_threshold, base_change.as_ref(), &pages, first_unstable, f.head)?;
         let page_speed = f.speed.map(|now| crate::PageSpeedView { now, before: f.prev_speed });
+        let slower_routes = if settings.traces { self.runtime_fact(&r.id, "slower_routes")? } else { None };
         let screenshot_link = screenshot_at.map(|at| self.link_at(&r.id, at, None)).transpose()?;
         let diff_link = match screenshot_at.filter(|_| base_differs) {
             Some(at) => Some(self.link_at(&r.id, at, Some("diff=base"))?),
@@ -2738,6 +2768,7 @@ impl Store {
             pages,
             visual_review,
             page_links,
+            slower_routes,
             page_speed,
             page_health,
             page_a11y,

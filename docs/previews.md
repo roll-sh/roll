@@ -1157,7 +1157,17 @@ Spans are kept on the preview's holder, in memory, its newest 20,000 for six hou
 preview: they're for looking at it now. The sheet lists recent traces under Requests, each opening
 to its spans as bars on the trace's time, and above them each route's time (p50, p95) against
 main's preview's same route, the clearly slower ones first and in red; `roll preview traces
-[--trace <id> | --routes]`. Read back masked as
+[--trace <id> | --routes]`. The holder reads the slower ones (at most five, the most slower than
+main first) onto the preview's record about once a minute, off the reconcile pass and a few
+previews at a time, main's routes once a round and only on main's own holder (where its spans
+are: elsewhere nothing is said rather than everything); only those few names are masked, each
+once (`slower_routes`, kept in the store's
+`runtime_facts` so any node shows them): the sheet's verdict strip says "2 routes slower than main" (opening
+Requests), and the pull request's comment says it in its checks with each route's p50 and
+main's, a route's name in a code span nothing in it can close. A change of which routes are slower
+(not of their times, which drift with every trace) reports the preview again
+(`a_route_slower_than_mains_reaches_the_record_and_the_report`).
+Read back masked as
 its logs are: a span's name and attributes are its code's words. The intake reads OTLP with roll
 apps' reader (`apps_control::otlp::spans_of_request`). A roll apps service's traces are roll apps'
 own: with the project's `traces` the preview's `pv-` environment gets roll apps' `traces: true` (its
@@ -2057,8 +2067,8 @@ Ranked by what a person notices first. Done so far:
    them, as turn 6's were (#386).
 3. **Slowest routes from traces, in review** (`feature/roll-previews-slow-routes`, on #419;
    Vercel's Observability, Sentry's performance): `…/routes`, the sheet's route table and
-   `roll preview traces --routes`. Next for it: the slower routes in the verdict strip and the pull
-   request comment.
+   `roll preview traces --routes`; then the slower ones on the record (`slower_routes`), the
+   verdict strip and the pull request's comment (`feature/roll-previews-routes-verdict`).
 4. **An error group opens its trace**: a grouped error whose lines carry a trace id (most SDKs
    log it) links to that trace's spans, so a failing request's path is one click from its error.
 5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
