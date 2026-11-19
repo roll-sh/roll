@@ -350,3 +350,98 @@ async fn refusals_and_failures() {
     a.client.delete_bucket_replication().bucket("src2").send().await.unwrap();
     a.store.delete_replication_target("second").await.unwrap();
 }
+
+/// roll secrets as rolld hands it to storage: each reference resolves to what it holds now (with a
+/// version the digest follows), anything else is refused, naming why. Only `src` is on project
+/// `prj_shop`'s canvas, so a reference naming it resolves for `src` alone (`project_for`).
+#[derive(Default)]
+struct Refs(std::sync::Mutex<std::collections::HashMap<String, (String, u32)>>, std::sync::atomic::AtomicU32);
+
+impl Refs {
+    fn set(&self, reference: &str, value: &str) {
+        let mut m = self.0.lock().unwrap();
+        let version = m.get(reference).map_or(1, |(_, v)| v + 1);
+        m.insert(reference.into(), (value.into(), version));
+    }
+}
+
+impl s3_server::TargetCredentials for Refs {
+    fn resolve<'a>(&'a self, bucket: &'a str, reference: &'a str) -> futures::future::BoxFuture<'a, Result<s3_store::Secret, String>> {
+        self.1.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let got = stands_for(bucket, reference).and_then(|_| self.0.lock().unwrap().get(reference).map(|(v, _)| s3_store::Secret::new(v.clone())).ok_or_else(|| format!("no such key: {reference}")));
+        Box::pin(async move { got })
+    }
+
+    fn digest<'a>(&'a self, bucket: &'a str, reference: &'a str) -> futures::future::BoxFuture<'a, Result<String, String>> {
+        let got = stands_for(bucket, reference).and_then(|_| self.0.lock().unwrap().get(reference).map(|(_, v)| v.to_string()).ok_or_else(|| format!("no such key: {reference}")));
+        Box::pin(async move { got })
+    }
+}
+
+fn stands_for(bucket: &str, reference: &str) -> Result<(), String> {
+    if bucket == "src" && reference.starts_with("roll://prj_shop@") { Ok(()) } else { Err(format!("not trusted: project prj_shop doesn't hold storage:bucket:{bucket}")) }
+}
+
+/// A target whose credentials are roll:// references replicates with what they resolve to, and
+/// after a rotation in roll the next connection uses the new key; one that doesn't resolve waits.
+#[tokio::test(flavor = "multi_thread")]
+async fn credentials_by_reference_follow_a_rotation() {
+    const KEY_ID: &str = "roll://prj_shop@production/AWS_ACCESS_KEY_ID";
+    const KEY: &str = "roll://prj_shop@production/AWS_SECRET_ACCESS_KEY";
+    let (a, sa) = start_full(|_| {}, |c| c.notify.dispatch_interval = None).await;
+    let b = start().await;
+    versioned(&b.client, "dst").await;
+    b.store.ensure_key("FAKEKEYONE", "fake-secret-one-0123456789", "one").await.unwrap();
+    let refs = std::sync::Arc::new(Refs::default());
+    refs.set(KEY_ID, "FAKEKEYONE");
+    refs.set(KEY, "fake-secret-one-0123456789");
+    sa.notifier.set_target_credentials(refs.clone());
+    let spec = TargetSpec { endpoint: Some(b.endpoint.clone()), region: Some(REGION.into()), access_key_id: Some(KEY_ID.into()), secret_access_key: Some(s3_store::Secret::new(KEY)), path_style: Some(true), buckets: vec!["dst".into()] };
+    let t = a.store.put_replication_target("other-roll", &spec, true).await.unwrap();
+    assert_eq!((t.access_key_id.as_deref(), t.secret_ref.as_deref()), (Some(KEY_ID), Some(KEY)), "the references, never a sealed copy");
+    versioned(&a.client, "src").await;
+    let cfg = ReplicationConfiguration::builder().role("arn:aws:iam::1:role/r").rules(rule("all", "dst", false)).build().unwrap();
+    a.client.put_bucket_replication().bucket("src").replication_configuration(cfg).send().await.unwrap();
+    let put = |key: &'static str| a.client.put_object().bucket("src").key(key).body(ByteStream::from_static(b"by reference")).send();
+    let status = |key: &'static str| {
+        let c = a.client.clone();
+        async move { c.head_object().bucket("src").key(key).send().await.unwrap().replication_status().map(|s| s.as_str().to_string()) }
+    };
+
+    put("one").await.unwrap();
+    sa.dispatch_events().await.unwrap();
+    assert_eq!(status("one").await.as_deref(), Some("COMPLETED"));
+    let resolves = refs.1.load(std::sync::atomic::Ordering::Relaxed);
+
+    // A bucket another project stands for can't replicate through the target with prj_shop's
+    // credential: the references name their project, not whichever bucket replicates. S3 hears
+    // only that they don't resolve, never why (that would say which keys exist where).
+    versioned(&a.client, "other").await;
+    let cfg = ReplicationConfiguration::builder().role("arn:aws:iam::1:role/r").rules(rule("all", "dst", false)).build().unwrap();
+    let e = a.client.put_bucket_replication().bucket("other").replication_configuration(cfg).send().await.unwrap_err();
+    let e = e.as_service_error().unwrap();
+    let message = aws_sdk_s3::error::ProvideErrorMetadata::message(e).unwrap_or_default().to_string();
+    assert_eq!(aws_sdk_s3::error::ProvideErrorMetadata::code(e), Some("InvalidRequest"), "{message}");
+    assert!(message.contains("don't resolve") && !message.contains("not trusted") && !message.contains("prj_shop"), "{message}");
+    // A target's reference names its project by id, never left to the bucket replicating.
+    let unnamed = TargetSpec { endpoint: Some(b.endpoint.clone()), region: Some(REGION.into()), access_key_id: Some("roll://production/AWS_ACCESS_KEY_ID".into()), secret_access_key: Some(s3_store::Secret::new("roll://production/AWS_SECRET_ACCESS_KEY")), path_style: Some(true), buckets: vec![] };
+    assert!(a.store.put_replication_target("unnamed", &unnamed, true).await.is_err());
+
+    // Rotated in roll: the old key stops working on the target, and the next connection resolves
+    // the new one (the digests moved).
+    refs.set(KEY_ID, ACCESS);
+    refs.set(KEY, SECRET);
+    b.store.delete_key("FAKEKEYONE").await.unwrap();
+    put("two").await.unwrap();
+    sa.dispatch_events().await.unwrap();
+    assert_eq!(status("two").await.as_deref(), Some("COMPLETED"));
+    assert!(refs.1.load(std::sync::atomic::Ordering::Relaxed) > resolves);
+    assert_eq!(b.client.get_object().bucket("dst").key("two").send().await.unwrap().body.collect().await.unwrap().into_bytes().as_ref(), b"by reference");
+
+    // A reference that no longer resolves: the row waits (retried), never dropped or failed.
+    refs.0.lock().unwrap().remove(KEY);
+    put("three").await.unwrap();
+    sa.dispatch_events().await.unwrap();
+    assert_eq!(status("three").await.as_deref(), Some("PENDING"));
+    assert!(b.client.head_object().bucket("dst").key("three").send().await.is_err());
+}
