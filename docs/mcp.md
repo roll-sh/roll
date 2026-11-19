@@ -889,10 +889,12 @@ waits on a sibling PR reaching main is last.
    and a `security_checkup` workflow that changes nothing, plus queues' users, tasks' apps and API
    keys, nosql's imports and a stream's keys as read tools, each answer checked for credentials first
    (`feature/roll-mcp-next-6`, this PR, stacked on #380). Open: read tools for secrets' new
-   backends and storage's IAM (#380; unit `roll-mcp-land380` lands both after previews' turn). Waiting
-   on a sibling: apps' forms tools (`apps_list_forms`, and `apps_form_submissions` as a reveal;
-   apps #346), image scanning and SLOs (`apps_deploy_vulnerabilities` with `severity`,
-   `apps_environment_slo`; apps #379) and the scan in `security_checkup` once they land; secrets'
+   backends and storage's IAM (#380; unit `roll-mcp-land380` lands both after previews' turn). Ready,
+   waiting for apps' turn (`feature/roll-mcp-apps-tools-3`, cut from apps #384; its PR opens once
+   apps' stack is on main): `apps_deploy_vulnerabilities` (`severity`), `apps_environment_slo`,
+   `apps_list_forms`, `apps_form_submissions` (a reveal; in lockdown each submission's `fields`
+   are withheld, `Tool::outside`: anyone can submit a site's form) and
+   `apps_delete_form_submission`; then the scan in `security_checkup`. Waiting on a sibling: secrets'
    request (#277) and cut-off (#304) tools when secrets' batch 4 lands; a removed person's
    repositories handed to someone else (waits for a repository transfer in roll code). Not doing:
    "remember this browser"; a preset that reveals development's values without asking (#354).
