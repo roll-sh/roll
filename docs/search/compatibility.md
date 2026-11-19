@@ -1544,7 +1544,8 @@ the rest are skipped by the tests' own prerequisites.
   hits. Not across clusters yet: suggesters and ES|QL `FROM <alias>:<index>`.
 - OpenSearch-flavor clusters' `cluster.remote.*` and `_remote/info` follow OpenSearch 3.9
   (`skip_unavailable` defaults to `false`, a seed or proxy address must be `host:port`, no
-  `cluster_credentials`), and their remotes reach only the node itself. Linking OpenSearch-flavor
+  `cluster_credentials`), but a search naming `alias:index` on them is refused (400), loopback
+  remotes included, where OpenSearch 3.9 searches a loopback. Linking OpenSearch-flavor
   clusters is left: it needs a credential model of its own, since OpenSearch has no
   `cross_cluster` API keys (probably an internal user on the remote with a search-only role,
   issued and sealed as links' keys are).

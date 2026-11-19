@@ -228,7 +228,8 @@ Elasticsearch-flavor.
   same owner check. Linking them is left: OpenSearch has no `cross_cluster` API keys, so links
   between OpenSearch-flavor clusters need a credential model of their own (probably an
   internal user on the remote with a search-only role, issued and sealed as links' keys are).
-  Until then their remotes reach only the node itself.
+  Until then a search naming `alias:index` on them is refused (400), loopback remotes included,
+  where OpenSearch searches a loopback.
 - **Left**: ES|QL `FROM <alias>:<index>`; suggesters over several clusters.
 
 `crates/search-control/tests/control.rs` `cross_cluster_search_between_a_persons_own_clusters`,
