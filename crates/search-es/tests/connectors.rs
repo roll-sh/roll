@@ -322,9 +322,19 @@ async fn postgres_pages_are_bounded_by_bytes() {
     db.batch_execute("DROP TABLE wide").await.unwrap();
 }
 
-/// A fake Postgres: asks for a cleartext password, records what it gets, refuses it. With
-/// `silent`, it accepts connections and never answers.
-async fn fake_postgres(silent: bool) -> (u16, Arc<std::sync::Mutex<Vec<String>>>) {
+/// How a fake Postgres behaves.
+#[derive(Clone, Copy, PartialEq)]
+enum Fake {
+    /// Asks for a cleartext password, records what it gets, refuses it.
+    Password,
+    /// Accepts connections and never answers.
+    Silent,
+    /// Answers the startup with a message header claiming almost 4 GiB.
+    HugeHeader,
+}
+
+/// A fake Postgres server (see [`Fake`]) and the passwords it was sent.
+async fn fake_postgres(mode: Fake) -> (u16, Arc<std::sync::Mutex<Vec<String>>>) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -336,7 +346,7 @@ async fn fake_postgres(silent: bool) -> (u16, Arc<std::sync::Mutex<Vec<String>>>
             let seen = seen.clone();
             tokio::spawn(async move {
                 let mut held = Vec::new();
-                if silent {
+                if mode == Fake::Silent {
                     let _ = s.read_to_end(&mut held).await;
                     return;
                 }
@@ -344,6 +354,11 @@ async fn fake_postgres(silent: bool) -> (u16, Arc<std::sync::Mutex<Vec<String>>>
                 let Ok(len) = s.read_i32().await else { return };
                 let mut rest = vec![0; len as usize - 4];
                 if s.read_exact(&mut rest).await.is_err() {
+                    return;
+                }
+                if mode == Fake::HugeHeader {
+                    let _ = s.write_all(&[b'D', 0xFF, 0xFF, 0xFF, 0xF0]).await;
+                    let _ = s.read_to_end(&mut held).await;
                     return;
                 }
                 let _ = s.write_all(&[b'R', 0, 0, 0, 8, 0, 0, 0, 3]).await;
@@ -367,8 +382,8 @@ async fn fake_postgres(silent: bool) -> (u16, Arc<std::sync::Mutex<Vec<String>>>
 /// never receives the stored one.
 #[tokio::test]
 async fn a_retargeted_connector_never_sends_the_stored_password() {
-    let (first, first_got) = fake_postgres(false).await;
-    let (second, second_got) = fake_postgres(false).await;
+    let (first, first_got) = fake_postgres(Fake::Password).await;
+    let (second, second_got) = fake_postgres(Fake::Password).await;
     let c = cluster(&[]).await;
     pg_connector(&c, &format!("127.0.0.1:{first}"), "pg", "content-rt", "*", "pw-retarget-41").await;
     let job = finished(&c, &start(&c, "pg", "full").await).await;
@@ -388,14 +403,43 @@ async fn a_retargeted_connector_never_sends_the_stored_password() {
     assert_eq!(call(&c, "PUT", "/_connector/pg/_configuration", Some(&body)).await.0, 200);
     finished(&c, &start(&c, "pg", "full").await).await;
     assert_eq!(*second_got.lock().unwrap(), ["pw-retarget-42"]);
+
+    // A detour through another service doesn't carry the password to a new host: switching
+    // starts from the service's own schema, and `host` isn't an s3 field to set aside.
+    let (third, third_got) = fake_postgres(Fake::Password).await;
+    assert_eq!(call(&c, "PUT", "/_connector/pg/_service_type", Some(r#"{"service_type":"s3"}"#)).await.0, 200);
+    let (s, _, t) = call(&c, "PUT", "/_connector/pg/_configuration", Some(&format!(r#"{{"values":{{"host":"127.0.0.1","port":{third}}}}}"#))).await;
+    assert_eq!(s, 400, "an s3 connector has no host: {t}");
+    assert_eq!(call(&c, "PUT", "/_connector/pg/_service_type", Some(r#"{"service_type":"postgresql"}"#)).await.0, 200);
+    let (_, v, _) = call(&c, "GET", "/_connector/pg", None).await;
+    assert_eq!((at(&v, "status").as_str(), at(&v, "configuration.password.value").as_str()), (Some("needs_configuration"), Some("")), "{v:?}");
+    let body = format!(r#"{{"values":{{"host":"127.0.0.1","port":{third},"username":"roll","database":"shop","ssl_enabled":false}}}}"#);
+    assert_eq!(call(&c, "PUT", "/_connector/pg/_configuration", Some(&body)).await.0, 200);
+    let job = finished(&c, &start(&c, "pg", "full").await).await;
+    assert_eq!(at(&job, "status").as_str(), Some("error"), "{job:?}");
+    assert!(third_got.lock().unwrap().is_empty(), "the detour's host got a password: {:?}", third_got.lock().unwrap());
+}
+
+/// A server whose message header claims a huge length fails the sync at the header, before the
+/// client library reserves that much memory.
+#[tokio::test]
+async fn a_huge_message_header_fails_the_sync() {
+    let (port, _) = fake_postgres(Fake::HugeHeader).await;
+    let c = cluster(&[]).await;
+    pg_connector(&c, &format!("127.0.0.1:{port}"), "pg", "content-huge", "*", "pw-huge-1").await;
+    let started = std::time::Instant::now();
+    let job = finished(&c, &start(&c, "pg", "full").await).await;
+    assert_eq!(at(&job, "status").as_str(), Some("error"), "{job:?}");
+    assert!(at(&job, "error").as_str().is_some_and(|e| e.contains("4294967280 bytes")), "{job:?}");
+    assert!(started.elapsed() < Duration::from_secs(10), "took {:?}", started.elapsed());
 }
 
 /// A sealed value copied into a self-managed connector isn't shown, and once the connector is
 /// run by roll it's only text: the sync sends the ciphertext, never what it seals.
 #[tokio::test]
 async fn a_planted_sealed_value_opens_to_nothing() {
-    let (victim_port, _) = fake_postgres(false).await;
-    let (port, got) = fake_postgres(false).await;
+    let (victim_port, _) = fake_postgres(Fake::Password).await;
+    let (port, got) = fake_postgres(Fake::Password).await;
     let c = cluster(&[]).await;
     pg_connector(&c, &format!("127.0.0.1:{victim_port}"), "victim", "content-victim", "*", "victim-pw-77").await;
     let stolen = at(c.state().metadata.xpack.get("connector", "victim").unwrap(), "configuration.password.value").as_str().unwrap().to_string();
@@ -421,7 +465,7 @@ async fn a_planted_sealed_value_opens_to_nothing() {
 /// at once.
 #[tokio::test]
 async fn cancel_stops_a_sync_waiting_on_a_silent_server() {
-    let (port, _) = fake_postgres(true).await;
+    let (port, _) = fake_postgres(Fake::Silent).await;
     let c = cluster(&[]).await;
     pg_connector(&c, &format!("127.0.0.1:{port}"), "pg", "content-silent", "*", "pw-silent-1").await;
     let id = start(&c, "pg", "full").await;

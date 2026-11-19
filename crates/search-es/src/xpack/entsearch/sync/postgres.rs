@@ -15,6 +15,9 @@
 //!   about `PAGE_BYTES + DOC_BYTES_MAX`.
 //! - The connection counts the bytes it reads ([`Counted`]): a query whose answer passes its
 //!   window ([`PAGE_WINDOW`]) fails the sync, so a server ignoring the cut can't grow a page.
+//! - Every message's 5-byte header is read on the plaintext side ([`Framed`], under TLS through
+//!   [`FramedTls`]) before the client library sees it: a length over [`PAGE_WINDOW`] fails the
+//!   connection, since the library reserves a message's whole length from its header.
 //! - Every statement has a client-side timeout a little over the session's `statement_timeout`
 //!   and races the job's cancel, and the socket has TCP keepalives: a silent server or a dead
 //!   network ends the sync instead of holding its slot.
@@ -30,7 +33,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio_postgres::config::SslMode;
-use tokio_postgres::tls::MakeTlsConnect;
+use tokio_postgres::tls::{MakeTlsConnect, TlsConnect, TlsStream};
 use tokio_rustls::rustls;
 use tokio_rustls::rustls::pki_types::CertificateDer;
 use tokio_rustls::rustls::pki_types::pem::PemObject;
@@ -148,6 +151,107 @@ impl AsyncWrite for Counted {
 /// A connection's I/O task, whatever its TLS.
 type ConnTask = Pin<Box<dyn std::future::Future<Output = Result<(), tokio_postgres::Error>> + Send>>;
 
+/// Postgres's framing of server messages: a type byte, then a 4-byte big-endian length that
+/// counts itself.
+#[derive(Default)]
+struct Frames {
+    header: [u8; 5],
+    have: usize,
+    /// Body bytes of the current message still to come.
+    remaining: u64,
+}
+
+impl Frames {
+    fn feed(&mut self, mut bytes: &[u8]) -> std::io::Result<()> {
+        while !bytes.is_empty() {
+            if self.remaining > 0 {
+                let n = (self.remaining.min(bytes.len() as u64)) as usize;
+                self.remaining -= n as u64;
+                bytes = &bytes[n..];
+                continue;
+            }
+            let n = (5 - self.have).min(bytes.len());
+            self.header[self.have..self.have + n].copy_from_slice(&bytes[..n]);
+            self.have += n;
+            bytes = &bytes[n..];
+            if self.have == 5 {
+                self.have = 0;
+                let len = u32::from_be_bytes([self.header[1], self.header[2], self.header[3], self.header[4]]) as u64;
+                if !(4..=PAGE_WINDOW).contains(&len) {
+                    return Err(std::io::Error::other(format!("the server sent a message of {len} bytes: over what one page may hold")));
+                }
+                self.remaining = len - 4;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A plaintext stream of server messages whose headers are checked as they arrive ([`Frames`]).
+struct Framed<S> {
+    inner: S,
+    frames: Frames,
+}
+
+impl<S> Framed<S> {
+    fn new(inner: S) -> Framed<S> {
+        Framed { inner, frames: Frames::default() }
+    }
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for Framed<S> {
+    fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        let before = buf.filled().len();
+        let r = Pin::new(&mut this.inner).poll_read(cx, buf);
+        if let Poll::Ready(Ok(())) = r
+            && let Err(e) = this.frames.feed(&buf.filled()[before..])
+        {
+            buf.set_filled(before);
+            return Poll::Ready(Err(e));
+        }
+        r
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for Framed<S> {
+    fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+impl<S: TlsStream + Unpin> TlsStream for Framed<S> {
+    fn channel_binding(&self) -> tokio_postgres::tls::ChannelBinding {
+        self.inner.channel_binding()
+    }
+}
+
+/// A TLS connector whose sessions are [`Framed`] (the headers are only readable after TLS).
+struct FramedTls<T>(T);
+
+impl<S, T> TlsConnect<S> for FramedTls<T>
+where
+    T: TlsConnect<S>,
+    T::Future: Send + 'static,
+    T::Stream: Send + 'static,
+    T::Error: Send + 'static,
+{
+    type Stream = Framed<T::Stream>;
+    type Error = T::Error;
+    type Future = Pin<Box<dyn std::future::Future<Output = Result<Framed<T::Stream>, T::Error>> + Send>>;
+
+    fn connect(self, stream: S) -> Self::Future {
+        let handshake = self.0.connect(stream);
+        Box::pin(async move { handshake.await.map(Framed::new) })
+    }
+}
+
 struct Conn {
     client: tokio_postgres::Client,
     window: Window,
@@ -188,10 +292,10 @@ async fn connect(v: &Values, allow_private: bool) -> Result<Conn, String> {
             cfg.ssl_mode(SslMode::Require);
             let mut make = tokio_postgres_rustls::MakeRustlsConnect::new(tls_config(v.text("ssl_ca").as_deref())?);
             let tls = MakeTlsConnect::<Counted>::make_tls_connect(&mut make, &host).map_err(|e| format!("TLS: {e}"))?;
-            cfg.connect_raw(stream, tls).await.map(|(c, conn)| (c, spawn(Box::pin(conn))))
+            cfg.connect_raw(stream, FramedTls(tls)).await.map(|(c, conn)| (c, spawn(Box::pin(conn))))
         } else {
             cfg.ssl_mode(SslMode::Disable);
-            cfg.connect_raw(stream, tokio_postgres::NoTls).await.map(|(c, conn)| (c, spawn(Box::pin(conn))))
+            cfg.connect_raw(Framed::new(stream), tokio_postgres::NoTls).await.map(|(c, conn)| (c, spawn(Box::pin(conn))))
         };
         connected.map_err(|e| format!("connecting to [{host}] failed: {}", db_error(e)))
     };
@@ -206,7 +310,7 @@ async fn wait<T>(sink: &Sink<'_>, what: &str, fut: impl std::future::Future<Outp
             Ok(r) => r.map_err(|e| Stop::Failed(format!("{what} failed: {}", db_error(e)))),
             Err(_) => Err(Stop::Failed(format!("{what} timed out: the database didn't answer within {} s", QUERY_TIMEOUT.as_secs()))),
         },
-        _ = sink.canceled() => Err(Stop::Canceled),
+        s = sink.stopped() => Err(s),
     }
 }
 
@@ -285,7 +389,7 @@ pub async fn sync(v: &Values, sink: &mut Sink<'_>, full: bool, cursor: &Value, a
     let fetch = (v.int("fetch_size", 50)?.clamp(1, PAGE_DOCS as i64)) as usize;
     let mut conn = tokio::select! {
         c = connect(v, allow_private) => c?,
-        _ = sink.canceled() => return Err(Stop::Canceled),
+        s = sink.stopped() => return Err(s),
     };
     let (tables, skipped) = tables(&conn, sink, &schema, &v.list("tables"), incremental_col.as_deref()).await?;
     if !skipped.is_empty() {

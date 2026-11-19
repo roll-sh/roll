@@ -169,19 +169,28 @@ fn value_of<'a>(m: &'a Map, field: &str) -> Option<&'a Value> {
 ///   sealed elsewhere (another cluster, another connector) is only ever text here.
 /// - Otherwise a written sensitive value is sealed; [`REDACTED`] or the stored value written back
 ///   keeps the stored one.
-/// - A change to where the credential goes ([`target_fields`]) without giving it again clears it
-///   and puts the connector back to `needs_configuration`, as Elastic's UI asks for the password
-///   again.
+/// - A change to where the credential goes ([`target_fields`]), filling in an empty one too,
+///   without giving it again clears it and puts the connector back to `needs_configuration`, as
+///   Elastic's UI asks for the password again.
+/// - A change of service starts from the new service's schema (`needs_configuration`): nothing
+///   of the old service's configuration, its credentials included, carries over, so fields one
+///   service doesn't guard can't be set aside for the other.
 pub fn protect(m: &mut Map, before: &Map, sealer: Option<&crate::seal::Sealer>) {
     if !runs(&Value::Obj(m.clone())) {
         return;
     }
+    let service = m.get("service_type").and_then(Value::as_str).unwrap_or_default().to_string();
+    if before.get("service_type") != m.get("service_type") {
+        m.insert("configuration".into(), schema(&service));
+        m.insert("status".into(), "needs_configuration".into());
+        return;
+    }
     let started = !runs(&Value::Obj(before.clone()));
     let id = m.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
-    let service = m.get("service_type").and_then(Value::as_str).unwrap_or_default().to_string();
-    // A target that was set and changed (filling one in for the first time moves nothing).
-    let set = |v: Option<&Value>| v.is_some_and(|v| !v.is_null() && v.as_str() != Some(""));
-    let retargeted = !started && target_fields(&service).iter().any(|f| set(value_of(before, f)) && value_of(m, f) != value_of(before, f));
+    let had_secret = before.get("configuration").and_then(Value::as_object).is_some_and(|c| {
+        c.values().any(|e| sensitive(e) && e.get("value").and_then(Value::as_str).is_some_and(|v| !v.is_empty()))
+    });
+    let retargeted = !started && had_secret && target_fields(&service).iter().any(|f| value_of(m, f) != value_of(before, f));
     let old = before.get("configuration").and_then(Value::as_object).cloned().unwrap_or_default();
     let mut cleared = false;
     let Some(Value::Obj(cfg)) = m.get_mut("configuration") else { return };
@@ -244,6 +253,20 @@ fn redact_where(c: &mut Value, hide: impl Fn(&str) -> bool) {
     }
 }
 
+/// A list value of a connector's configuration as stored (an array, or a comma-separated
+/// string): for fields that aren't sensitive.
+pub fn listed(c: &Value, key: &str) -> Vec<String> {
+    list_of(c.get("configuration").and_then(|cfg| cfg.get(key)).and_then(|e| e.get("value")))
+}
+
+fn list_of(v: Option<&Value>) -> Vec<String> {
+    match v {
+        Some(Value::Arr(a)) => a.iter().map(Value::to_es_string).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
+        Some(Value::Str(s)) => s.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).collect(),
+        _ => Vec::new(),
+    }
+}
+
 /// A connector's configuration values, the sensitive ones opened.
 pub struct Values {
     values: Map,
@@ -303,11 +326,7 @@ impl Values {
 
     /// A list value: an array, or a comma-separated string.
     pub fn list(&self, key: &str) -> Vec<String> {
-        match self.values.get(key) {
-            Some(Value::Arr(a)) => a.iter().map(Value::to_es_string).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
-            Some(Value::Str(s)) => s.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).collect(),
-            _ => Vec::new(),
-        }
+        list_of(self.values.get(key))
     }
 
     /// `message` with every secret this configuration holds blanked out.
@@ -317,5 +336,57 @@ impl Values {
             out = out.replace(s.as_str(), "[redacted]");
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn connector(service: &str, values: &[(&str, &str)]) -> Map {
+        let mut cfg = schema(service);
+        if let Value::Obj(c) = &mut cfg {
+            for (k, v) in values {
+                if let Some(Value::Obj(e)) = c.get_mut(*k) {
+                    e.insert("value".into(), Value::from(*v));
+                }
+            }
+        }
+        let c = obj! { "id" => "c", "is_native" => true, "service_type" => service, "status" => "connected", "configuration" => cfg };
+        c.as_object().unwrap().clone()
+    }
+
+    fn secret(m: &Map, field: &str) -> String {
+        value_of(m, field).map(Value::to_es_string).unwrap_or_default()
+    }
+
+    /// Filling in an empty target (an S3 endpoint, a CA) after the secret was stored is a
+    /// retarget too: the stored secret is cleared.
+    #[test]
+    fn filling_a_target_in_clears_a_stored_secret() {
+        let before = connector("s3", &[("buckets", "docs"), ("aws_secret_access_key", "sealed-secret")]);
+        let mut after = before.clone();
+        if let Some(Value::Obj(c)) = after.get_mut("configuration")
+            && let Some(Value::Obj(e)) = c.get_mut("endpoint")
+        {
+            e.insert("value".into(), "https://elsewhere.example".into());
+        }
+        protect(&mut after, &before, None);
+        assert_eq!(secret(&after, "aws_secret_access_key"), "");
+        assert_eq!(after.get("status").and_then(Value::as_str), Some("needs_configuration"));
+        // The same write giving the secret again keeps it (sealed).
+        let mut again = after.clone();
+        if let Some(Value::Obj(c)) = again.get_mut("configuration")
+            && let Some(Value::Obj(e)) = c.get_mut("aws_secret_access_key")
+        {
+            e.insert("value".into(), "new-secret".into());
+        }
+        if let Some(Value::Obj(c)) = again.get_mut("configuration")
+            && let Some(Value::Obj(e)) = c.get_mut("endpoint")
+        {
+            e.insert("value".into(), "https://other.example".into());
+        }
+        protect(&mut again, &after, None);
+        assert_eq!(secret(&again, "aws_secret_access_key"), "new-secret", "no sealer: kept as given");
     }
 }

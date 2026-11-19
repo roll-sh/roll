@@ -497,8 +497,13 @@ both with Elasticsearch 9.5.5's shapes, validation and state machines
   A sleeping cluster records that earliest time as its `wake_at`, so it is loaded only when a
   scheduled sync is due; between syncs it costs nothing. A sync is a task of its own
   (one per connector at a time; others wait as `pending`): the scheduler starts it and goes
-  back to sleep. At most two run at once per cluster and four per node (a node-wide semaphore);
-  while every slot is taken a pending job isn't due (a slot freeing wakes the scheduler). While
+  back to sleep. At most two run at once per cluster, four per node, and two per owner on a node
+  (the person a cluster belongs to; `sync/slots.rs`). A cluster that can't get one of the
+  node's slots waits in a FIFO queue: a slot that frees wakes the first waiter whose owner is
+  under its cap, and nobody behind it (the cluster that freed it included) takes the slot first;
+  a waiter with nothing pending leaves the queue. While every slot of its own is taken a
+  pending job isn't due (a slot freeing wakes the scheduler), and a sync running here isn't
+  due again for its stale time (a long statement can outlast it). While
   one runs the cluster is pinned loaded (`Syncs::busy`), and every write it makes goes through
   the cluster, so a node that lost the cluster fails its next write and the sync stops there. A
   supervisor task runs each sync as a task of its own: however it ends (a panic included) the
@@ -529,7 +534,10 @@ both with Elasticsearch 9.5.5's shapes, validation and state machines
     (skipped and counted), so an honest page is at most about 30 MiB. `n` follows the largest
     row seen, starting from 10 MiB.
   - The connection counts the bytes it reads: a page's answer past 64 MiB (twice the page, plus
-    framing) fails the sync, so a server ignoring the cut can't grow memory.
+    framing) fails the sync, so a server ignoring the cut can't grow memory. Every message's
+    header is read on the plaintext side (after TLS) before the client library sees it, and a
+    length over 64 MiB fails the connection: the library reserves a message's whole length
+    from its header.
   - A bucket is listed a page at a time (4 MiB of listing at most) and a page is indexed once
     its objects' text passes 20 MiB; an object over 10 MiB is indexed without its text
     (Elastic's default extraction limit).
@@ -539,6 +547,9 @@ both with Elasticsearch 9.5.5's shapes, validation and state machines
     races the job's cancel, so a silent server or a dead network can't hold a slot.
   - A full sync keeps the ids it saw as 64-bit hashes (at most 20 million, 160 MB, per sync;
     four syncs per node at most).
+  - Any sync reads at most `roll.connectors.max_docs_per_sync` documents (20 million) and runs
+    at most `roll.connectors.max_sync_duration` (`6h`); past either the job fails, so no sync
+    holds a node slot indefinitely.
 - **`postgresql`** (Elastic's configuration fields: `host`, `port`, `username`, `password`,
   `database`, `schema`, `tables` (`*` or a comma list), `ssl_enabled`, `ssl_ca`, `fetch_size`,
   `retry_count`; plus roll's `incremental_column`). Each table with a primary key is read in
@@ -564,7 +575,7 @@ both with Elasticsearch 9.5.5's shapes, validation and state machines
   of plain text, Markdown, CSV and logs, the string values of JSON, and the visible text of HTML
   (scripts and styles dropped, entities decoded). roll has no `attachment` processor yet, so
   other formats (PDF, Office) are indexed by their metadata only. Advanced sync rules follow
-  Elastic's (`[{"bucket", "prefix", "extension"}]`, replacing `buckets`). Incremental syncs
+  Elastic's (`[{"bucket", "prefix", "extension"}]`, naming only buckets of `buckets`). Incremental syncs
   fetch only objects modified at or after the last sync's newest `LastModified`: listings give
   whole seconds on AWS, so objects in the cursor's own second are read again rather than an
   object written later in that second being missed.
@@ -595,10 +606,13 @@ both with Elasticsearch 9.5.5's shapes, validation and state machines
     sealed elsewhere is only ever text to it, and a password written while the connector was
     self-managed doesn't stay in the clear.
   - Changing where a credential goes (Postgres `host`, `port`, `username`, `database`,
-    `ssl_enabled`, `ssl_ca`; S3 `endpoint`, `region`, `aws_access_key_id`, `buckets`) without
-    giving it again in the same write clears it and puts the connector back to
-    `needs_configuration`, as Elastic's UI asks for the password again: a stored password is
-    never sent to a host its owner didn't pair it with.
+    `ssl_enabled`, `ssl_ca`; S3 `endpoint`, `region`, `aws_access_key_id`, `buckets`), filling
+    in an empty one included, without giving it again in the same write clears it and puts the
+    connector back to `needs_configuration`, as Elastic's UI asks for the password again: a
+    stored password is never sent to a host its owner didn't pair it with. A change of
+    `service_type` starts from the new service's schema, so no configuration (credentials
+    included) carries across services, and fields one service doesn't guard can't be set
+    aside for another. An `s3` connector's advanced rules may only name its `buckets`.
   - Errors never carry them (a source's message is scrubbed of every configured secret before
     it is recorded).
 

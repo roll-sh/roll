@@ -115,6 +115,9 @@ pub struct ClusterConfig {
     /// The cluster's id in roll's catalog (`srch_…`), when it has one: how it names itself to
     /// `links`.
     pub catalog_id: Option<String>,
+    /// Who the cluster belongs to, when the host knows: what node-wide fairness counts by
+    /// (connector syncs: [`crate::xpack::entsearch::sync`]). `None`: the cluster counts alone.
+    pub owner: Option<String>,
     /// Read service account tokens from `<path.conf>/service_tokens` too, as Elasticsearch
     /// does. The file is the node's, so a token in it would sign in to every cluster the node
     /// serves: the host sets this only for a node serving one cluster, or for the clusters its
@@ -139,6 +142,7 @@ impl ClusterConfig {
             default_repository: None,
             links: None,
             catalog_id: None,
+            owner: None,
             file_service_tokens: false,
             audit: None,
         }

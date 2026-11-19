@@ -122,6 +122,16 @@ pub fn advanced(filtering: &Value) -> Option<&Value> {
     }
 }
 
+/// An `s3` connector's advanced rules, which may only name buckets of its `buckets`: they choose
+/// prefixes and extensions, never another bucket the stored key happens to read.
+pub fn s3_rules_within(v: &Value, buckets: &[String]) -> Result<Vec<S3Rule>, String> {
+    let rules = s3_rules(v)?;
+    match rules.iter().find(|r| !buckets.contains(&r.bucket)) {
+        Some(r) => Err(format!("an advanced sync rule names bucket [{}], which isn't in the connector's [buckets]", r.bucket)),
+        None => Ok(rules),
+    }
+}
+
 /// An `s3` connector's advanced rules.
 pub fn s3_rules(v: &Value) -> Result<Vec<S3Rule>, String> {
     let Value::Arr(a) = v else { return Err("advanced sync rules for s3 are an array of {\"bucket\", \"prefix\", \"extension\"}".into()) };
@@ -145,15 +155,16 @@ pub fn s3_rules(v: &Value) -> Result<Vec<S3Rule>, String> {
     Ok(out)
 }
 
-/// The `validation` of a draft filtering of a `service` connector roll runs.
-pub fn validate(service: &str, draft: &Value) -> Value {
+/// The `validation` of a draft filtering of a `service` connector roll runs (`buckets`: an `s3`
+/// connector's configured buckets).
+pub fn validate(service: &str, draft: &Value, buckets: &[String]) -> Value {
     let mut errors: Vec<Value> = match Rules::compile(draft) {
         Ok(_) => Vec::new(),
         Err(p) => p.into_iter().map(|p| obj! { "ids" => crate::arr![p.id], "messages" => crate::arr![p.message] }).collect(),
     };
     if let Some(a) = advanced(draft) {
         let problem = match service {
-            "s3" => s3_rules(a).err(),
+            "s3" => s3_rules_within(a, buckets).err(),
             _ => Some(format!("advanced sync rules aren't supported for {service} connectors yet")),
         };
         if let Some(m) = problem {
@@ -186,5 +197,16 @@ mod tests {
         assert!(!r.includes(&doc("apple", 500)), "numbers compare as numbers");
         assert!(!r.includes(&doc("pear", 5)), "regex anchors at the start");
         assert!(Rules::compile(&crate::json::parse(br#"{"rules":[{"id":"x","rule":"regex","value":"("}]}"#).unwrap().unwrap()).is_err());
+    }
+
+    /// An advanced rule naming a bucket outside the configured ones makes the draft invalid.
+    #[test]
+    fn s3_advanced_rules_stay_within_the_configured_buckets() {
+        let draft = |bucket: &str| crate::json::parse(format!(r#"{{"advanced_snippet":{{"value":[{{"bucket":"{bucket}","prefix":"a/"}}]}},"rules":[]}}"#).as_bytes()).unwrap().unwrap();
+        let buckets = vec!["docs".to_string()];
+        assert_eq!(validate("s3", &draft("docs"), &buckets).get("state").and_then(Value::as_str), Some("valid"));
+        let v = validate("s3", &draft("payroll"), &buckets);
+        assert_eq!(v.get("state").and_then(Value::as_str), Some("invalid"));
+        assert!(v.to_json().contains("payroll"));
     }
 }

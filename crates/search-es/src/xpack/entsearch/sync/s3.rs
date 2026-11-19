@@ -4,7 +4,7 @@
 
 use super::config::Values;
 use super::extract;
-use super::rules::{S3Rule, s3_rules};
+use super::rules::{S3Rule, s3_rules_within};
 use super::{DOC_BYTES_MAX, PAGE_BYTES, Sink, Stop};
 use crate::json::{Map, Value};
 use crate::s3::{Client, Credentials, Location};
@@ -14,7 +14,7 @@ use md5::Digest;
 /// (`{"buckets": {bucket: newest LastModified}}`).
 pub async fn sync(v: &Values, sink: &mut Sink<'_>, full: bool, cursor: &Value, advanced: Option<&Value>, allow_private: bool) -> Result<Value, Stop> {
     let targets: Vec<S3Rule> = match advanced {
-        Some(a) => s3_rules(a)?,
+        Some(a) => s3_rules_within(a, &v.list("buckets"))?,
         None => v.list("buckets").into_iter().map(|bucket| S3Rule { bucket, prefix: String::new(), extensions: Vec::new() }).collect(),
     };
     if targets.is_empty() {
@@ -65,7 +65,7 @@ async fn read_bucket(client: &Client, sink: &mut Sink<'_>, t: &S3Rule, since: Op
     loop {
         let listed = tokio::select! {
             r = client.list_page(&t.prefix, token.as_deref(), page_size) => r,
-            _ = sink.canceled() => return Err(Stop::Canceled),
+            s = sink.stopped() => return Err(s),
         };
         let (objects, next) = listed.map_err(|e| Stop::Failed(format!("listing bucket [{}] failed: {e}", t.bucket)))?;
         let mut docs = Vec::new();
@@ -94,7 +94,7 @@ async fn read_bucket(client: &Client, sink: &mut Sink<'_>, t: &S3Rule, since: Op
             if let Some(kind) = extract::kind_of(&o.key).filter(|_| o.size as usize <= DOC_BYTES_MAX) {
                 let got = tokio::select! {
                     r = client.get(&o.key, DOC_BYTES_MAX) => r,
-                    _ = sink.canceled() => return Err(Stop::Canceled),
+                    s = sink.stopped() => return Err(s),
                 };
                 match got {
                     Ok(Some(body)) => {

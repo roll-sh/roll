@@ -14,6 +14,7 @@ pub mod extract;
 pub mod postgres;
 pub mod rules;
 pub mod s3;
+pub mod slots;
 
 use super::connectors::{CONNECTORS, SYNC_JOBS};
 use super::now_nanos_string;
@@ -34,19 +35,21 @@ pub const RECORDS: &str = "connector.roll";
 pub const ALLOW_PRIVATE: &str = "roll.connectors.allow_private_hosts";
 pub const MAX_DOCS_PER_SECOND: &str = "roll.connectors.max_docs_per_second";
 pub const MAX_BYTES_PER_SECOND: &str = "roll.connectors.max_bytes_per_second";
+/// How long one sync may run (a time value, `6h` by default): past it the job fails.
+pub const MAX_SYNC_DURATION: &str = "roll.connectors.max_sync_duration";
+/// How many documents one sync (full or incremental) may read (20 million by default).
+pub const MAX_DOCS_PER_SYNC: &str = "roll.connectors.max_docs_per_sync";
 
 const HEARTBEAT: Duration = Duration::from_secs(10);
 /// A job roll claimed that hasn't checked in for this long belongs to a node that went away.
 const STALE_MS: i64 = 5 * 60_000;
 /// Syncs running at once on one cluster.
 const MAX_RUNNING: usize = 2;
-/// Syncs running at once on this node (every cluster): each holds a page and, in a full sync,
-/// up to [`MAX_SEEN`] ids' hashes.
-const NODE_MAX_RUNNING: usize = 4;
-static NODE_SYNCS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(NODE_MAX_RUNNING);
-/// How often a pending job is looked at again while the node's syncs are all taken (another
-/// cluster's sync ending doesn't wake this cluster's scheduler).
-const NODE_FULL_RETRY_MS: i64 = 5_000;
+/// How often a pending job waiting for one of the node's slots is looked at again anyway (a
+/// slot that frees wakes the next waiter's scheduler: [`slots`]).
+const SLOT_RETRY_MS: i64 = 60_000;
+const DEFAULT_MAX_DURATION_MS: i64 = 6 * 3_600_000;
+const DEFAULT_MAX_DOCS: u64 = 20_000_000;
 /// Documents a full sync remembers seeing (8 bytes each).
 const MAX_SEEN: usize = 20_000_000;
 /// A page of a source: rows or objects, and bytes.
@@ -59,6 +62,8 @@ pub const DOC_BYTES_MAX: usize = 10 << 20;
 #[derive(Default)]
 pub struct Syncs {
     running: parking_lot::Mutex<HashSet<String>>,
+    /// The cluster's key and owner in the node's [`slots`] (set by its first [`run_due`]).
+    identity: std::sync::OnceLock<(String, String)>,
 }
 
 impl Syncs {
@@ -166,10 +171,15 @@ pub fn next_due(st: &crate::meta::ClusterState, syncs: Option<&Syncs>) -> Option
         match str_of(j, "status") {
             "pending" if runnable.contains(cid) && !busy.contains(cid) && syncs.is_none_or(|s| !s.is_running(cid)) => match syncs {
                 Some(s) if !s.has_room() => {}
-                Some(_) if NODE_SYNCS.available_permits() == 0 => at(crate::time::now_millis() + NODE_FULL_RETRY_MS),
+                // Not this cluster's turn for a node slot: a slot freeing wakes it.
+                Some(s) if s.identity.get().is_some_and(|(k, o)| !slots::node().admits(k, o)) => at(crate::time::now_millis() + SLOT_RETRY_MS),
                 _ => at(0),
             },
-            s if active(s) && str_of(j, "worker_hostname") == WORKER => at(instant_ms(j.get("last_seen")).unwrap_or(0) + STALE_MS),
+            // A job left by a node that went away; one running here checks in by itself (a long
+            // statement can outlast the stale time without waking the scheduler for it).
+            s if active(s) && str_of(j, "worker_hostname") == WORKER && syncs.is_none_or(|x| !x.is_running(cid)) => {
+                at(instant_ms(j.get("last_seen")).unwrap_or(0) + STALE_MS)
+            }
             _ => {}
         }
     }
@@ -199,7 +209,7 @@ pub async fn run_due(cluster: &Cluster, now: i64) {
         .filter(|(_, c)| config::runs(c) && draft_edited(c))
         .map(|(id, c)| {
             let draft = c.get("filtering").and_then(Value::as_array).and_then(|f| f.first()).and_then(|f| f.get("draft")).cloned().unwrap_or(Value::Null);
-            (id.clone(), rules::validate(str_of(c, "service_type"), &draft))
+            (id.clone(), rules::validate(str_of(c, "service_type"), &draft, &config::listed(c, "buckets")))
         })
         .collect();
     // Schedules that came due (or are seen for the first time, which starts their count).
@@ -283,8 +293,26 @@ pub async fn run_due(cluster: &Cluster, now: i64) {
         .collect();
     pending.sort();
     drop(st);
+    // A slot of the node's, in turn with every other cluster ([`slots`]).
+    let key = cluster.name.clone();
+    let owner = cluster.config.owner.clone().unwrap_or_else(|| format!("cluster {key}"));
+    let _ = syncs.identity.set((key.clone(), owner.clone()));
+    if pending.is_empty() {
+        slots::node().leave(&key);
+    }
+    let weak = Arc::downgrade(&handle);
     for (_, job, cid) in pending {
-        let Ok(permit) = NODE_SYNCS.try_acquire() else { break };
+        if !syncs.has_room() {
+            break;
+        }
+        let (alive, woken) = (weak.clone(), weak.clone());
+        let alive: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(move || alive.strong_count() > 0);
+        let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            if let Some(c) = woken.upgrade() {
+                c.jobs.kick(&c);
+            }
+        });
+        let Some(permit) = slots::node().take(&key, &owner, alive, wake) else { break };
         if !syncs.begin(&cid) {
             continue;
         }
@@ -297,7 +325,7 @@ pub async fn run_due(cluster: &Cluster, now: i64) {
 /// Runs a claimed slot's sync (`work`) as a task of its own and, however it ends (a panic
 /// included), frees the slot and the node's permit, settles a job it left unfinished, and wakes
 /// the scheduler for the next pending job.
-async fn supervise(cluster: Arc<Cluster>, job: String, cid: String, permit: Option<tokio::sync::SemaphorePermit<'static>>, work: impl std::future::Future<Output = ()> + Send + 'static) {
+async fn supervise(cluster: Arc<Cluster>, job: String, cid: String, permit: Option<slots::Permit>, work: impl std::future::Future<Output = ()> + Send + 'static) {
     /// Frees the slot even if this task is dropped (the runtime shutting down).
     struct Slot(Arc<Cluster>, String);
     impl Drop for Slot {
@@ -490,6 +518,13 @@ async fn sync(cluster: &Arc<Cluster>, job_id: &str, cid: &str, principal: Option
     };
     let setting = |k: &str, d: u64| cluster.config.node_setting(k).and_then(|v| v.parse::<u64>().ok()).filter(|n| *n > 0).unwrap_or(d);
     let allow_private = cluster.config.node_setting(ALLOW_PRIVATE).is_some_and(|v| v.eq_ignore_ascii_case("true"));
+    let max_ms = cluster
+        .config
+        .node_setting(MAX_SYNC_DURATION)
+        .and_then(|v| crate::units::TimeValue::parse(v, MAX_SYNC_DURATION).ok())
+        .map(|t| t.as_millis())
+        .filter(|m| *m > 0)
+        .unwrap_or(DEFAULT_MAX_DURATION_MS);
     let mut sink = Sink {
         cluster,
         job: job_id.to_string(),
@@ -502,6 +537,8 @@ async fn sync(cluster: &Arc<Cluster>, job_id: &str, cid: &str, principal: Option
         docs_per_second: setting(MAX_DOCS_PER_SECOND, 1_000),
         bytes_per_second: setting(MAX_BYTES_PER_SECOND, 10 << 20),
         started: Instant::now(),
+        deadline: Instant::now() + Duration::from_millis(max_ms as u64),
+        max_docs: setting(MAX_DOCS_PER_SYNC, DEFAULT_MAX_DOCS),
         beat: Instant::now(),
     };
     let cursor = connector.get("sync_cursor").cloned().unwrap_or(Value::Null);
@@ -585,6 +622,10 @@ pub struct Sink<'a> {
     docs_per_second: u64,
     bytes_per_second: u64,
     started: Instant,
+    /// When the sync fails for running too long ([`MAX_SYNC_DURATION`]).
+    deadline: Instant,
+    /// Documents it may read ([`MAX_DOCS_PER_SYNC`]).
+    max_docs: u64,
     beat: Instant,
 }
 
@@ -612,6 +653,9 @@ impl Sink<'_> {
         let mut sizes = Vec::new();
         for mut doc in docs {
             let Some(id) = doc.shift_remove("_id").map(|v| v.to_es_string()) else { continue };
+            if self.counters.processed >= self.max_docs {
+                return Err(Stop::Failed(format!("a sync reads at most {} documents ({MAX_DOCS_PER_SYNC})", self.max_docs)));
+            }
             self.counters.processed += 1;
             if !self.rules.includes(&doc) {
                 continue;
@@ -669,17 +713,30 @@ impl Sink<'_> {
         self.cluster.state().metadata.xpack.get(SYNC_JOBS, &self.job).is_some_and(|j| str_of(j, "status") == "in_progress")
     }
 
-    /// Resolves once the job was canceled (or deleted): sources race their I/O against it.
-    pub async fn canceled(&self) {
-        while self.running() {
+    /// Why the sync must stop now, if it must: canceled (or deleted), or past its time limit.
+    fn stop_reason(&self) -> Option<Stop> {
+        if !self.running() {
+            return Some(Stop::Canceled);
+        }
+        (Instant::now() >= self.deadline).then(|| Stop::Failed(format!("the sync ran past its time limit ({MAX_SYNC_DURATION})")))
+    }
+
+    /// Resolves once the sync must stop ([`Sink::stop_reason`]): sources race their I/O
+    /// against it.
+    pub async fn stopped(&self) -> Stop {
+        loop {
+            if let Some(s) = self.stop_reason() {
+                return s;
+            }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
     }
 
-    /// Stops when the job was canceled (or deleted); writes its counters every [`HEARTBEAT`].
+    /// Stops when the job was canceled (or deleted) or ran too long; writes its counters every
+    /// [`HEARTBEAT`].
     pub async fn check(&mut self) -> Result<(), Stop> {
-        if !self.running() {
-            return Err(Stop::Canceled);
+        if let Some(s) = self.stop_reason() {
+            return Err(s);
         }
         if self.beat.elapsed() < HEARTBEAT {
             return Ok(());
@@ -771,5 +828,26 @@ mod tests {
         assert_eq!(j.get("status").and_then(Value::as_str), Some("error"), "{j:?}");
         let conn = call(&c, "GET", "/_connector/x", "").await;
         assert_eq!(conn.get("last_sync_status").and_then(Value::as_str), Some("error"));
+    }
+
+    /// A sync running here whose statement outlasts the stale time isn't due again (the
+    /// scheduler would wake every few seconds); in the unloaded view it's a dead node's job.
+    #[tokio::test]
+    async fn a_long_statement_of_a_running_sync_isnt_due_again() {
+        let c = Arc::new(Cluster::open(ClusterConfig::new("c"), Arc::new(MemoryStore::new())).await.unwrap());
+        call(&c, "PUT", "/_connector/x", r#"{"index_name":"content-x","is_native":true,"service_type":"s3"}"#).await;
+        let job = call(&c, "POST", "/_connector/_sync_job", r#"{"id":"x"}"#).await.get("id").and_then(Value::as_str).unwrap().to_string();
+        c.update(move |st| {
+            let Some(Value::Obj(mut j)) = st.metadata.xpack.get(SYNC_JOBS, &job).cloned() else { panic!("no job") };
+            j.insert("status".into(), "in_progress".into());
+            j.insert("worker_hostname".into(), WORKER.into());
+            j.insert("last_seen".into(), "2020-01-01T00:00:00Z".into());
+            store::put(st, SYNC_JOBS, &job, Value::Obj(j), 0).map(|_| ())
+        })
+        .await
+        .unwrap();
+        assert!(next_due(&c.state(), None).is_some_and(|t| t <= crate::time::now_millis()), "a dead node's job");
+        assert!(c.xpack.connector_syncs.begin("x"));
+        assert_eq!(next_due(&c.state(), Some(&c.xpack.connector_syncs)), None);
     }
 }

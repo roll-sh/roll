@@ -1124,6 +1124,7 @@ impl Node {
         cfg.sealer = self.cfg.sealer.clone();
         cfg.links = self.cfg.links.clone();
         cfg.catalog_id = spec.catalog_id.clone();
+        cfg.owner = spec.owner.clone();
         // Snapshot contents are durable only with object storage behind the cluster.
         cfg.default_repository = self.cfg.default_repository.clone().filter(|_| data_store.is_some());
         cfg.file_service_tokens = self.reads_file_service_tokens(&spec.name);
