@@ -3815,30 +3815,42 @@ the token it gets carries the same list.
 
 #### People (signed-in accounts)
 
-Project members with roles, replacing `OwnProjects` with a session grant, are designed in
-[members.md](members.md) (R1, not built yet).
+Someone signed in to roll (docs/accounts.md) who isn't an admin reaches the secrets of the
+workspace projects they're a **member** of, as their role there allows (docs/members.md; an
+admin's session is the operator): rolld's gate decides their request from their session's grant
+(`GrantKind::Session`: their memberships' rules, built on every request) exactly as a token's, and
+secrets' second checks ask the same grant (`GrantGrants`). A project they aren't in answers 404 as
+the workspace does (sharing a folder with a project they can't see is refused the same way as with
+one that doesn't exist). Search, findings and `health --all` keep only what they may read. The
+audit log names the person by user id (`usr_…`), and their personal overrides are theirs. The
+deployment key's state (`GET /v1/secrets/health`) is the operator's.
 
+| | viewer | developer | admin and owner |
+| --- | --- | --- | --- |
+| names, versions, history, audit log | yes | yes | yes |
+| values (`reveal`) | no (D2) | in its environments: by default every one without a protection policy, production only when named (D3) | everywhere (D4) |
+| set, change, rollback, promote into | no | in its environments; a protected one takes a change request | yes |
+| delete; protection, approvals, syncs, links, tokens, identities, sinks | no | no | yes |
+| review a change request | no | no | yes, or when named as an approver |
 
-Someone signed in to roll (docs/accounts.md) who isn't an admin manages the secrets of the
-workspace projects they own (an admin's session is the operator):
-rolld's gate lets a session through `/v1/secrets` (`Access::UserOrCredential`: a session, or a
-request carrying a credential secrets checks), with `X-Roll-CSRF` on writes. Their caller is
-`OwnProjects`: everything on their own projects as the workspace has them on this request, nothing
-on anyone else's, which answers 404 as the workspace does (sharing a folder with a project they
-can't see is refused the same way as with one that doesn't exist). Search, findings and
-`health --all` keep only their projects. The audit log names the person by user id (`usr_…`), and
-their personal overrides are theirs. The deployment key's state (`GET /v1/secrets/health`) is the
-operator's.
+Approvers may name roles beside principals (`role:admin`, `role:owner`): a member with that role
+in the project then counts. Approvals count as their approvers are **when the request is
+applied**: one who left the project, or no longer has `admin` where the gate is, doesn't.
+
+A person's own token reaches only what its rules and their session's grant now both allow
+(`Within`): removing them from the project stops it there at once, and roll-access revokes their
+tokens confined to the project (D7).
 
 What a person made acts later only while they can sign in and still reach its project (an admin
-then, or its owner now): their tokens, any token one of those made, their identities' logins and
-their syncs. rolld asks roll-accounts on every use (`People`); a lookup that fails is an error, not
-a disabled account. A sync a person made pushes as them, as they are then.
+then, or a member now: their session's grant reads it): their tokens, any token one of those made,
+their identities' logins, their syncs and references bound to them (`maker_reaches`). rolld asks
+roll-accounts and roll-access on every use; a lookup that fails is an error, not a disabled
+account. A sync a person made pushes as them, as they are then.
 
 Anyone may put any resource on their own canvas, so a project reaches a resource only where the
 workspace trusts it to (`Workspace::trusts`, docs/workspace.md "What a canvas stands for"): the
-operator's and an admin's projects their whole canvas, a person's only repos under their own roll
-code owner (`ada/…`).
+operator's and an admin's projects their whole canvas, a person's only what was made through it
+(its home) and what is one of its owners' (a repo under an owner's roll code owner, `ada/…`).
 
 - **Links, audit sinks and syncs to roll's products** (`members`) take only what the project is
   trusted for: a link reaches a resource's credentials as the operator. A person's project can link
@@ -5208,8 +5220,8 @@ cache waited out. Ranked now:
 **The thirtieth product review** (2026-11-18, against Vault/OpenBao, Infisical, Doppler, AWS, 1Password,
 Akeyless, GitGuardian and Bitwarden SM, open PRs checked first) ranked these gaps; its four doc
 inconsistencies are fixed in #264:
-- R1. **Project members and roles for people** (L; every competitor's unit of sharing): waits on the
-  accounts/workspace and roll-access threads.
+- R1. **Project members and roles for people** (L; every competitor's unit of sharing): v1 built
+  (docs/members.md: workspace and secrets; "What v1 leaves out" lists the rest).
 - R2. **Cut off everything that reaches a folder** (M): reach lists it but can't act; one action to
   revoke its tokens and identities, end leases and shares, pause syncs and optionally freeze reads.
   roll MCP's #267 (on main) has `Access::revoke_many(ids, why, by)` (atomic, ≤500 ids, one audit row

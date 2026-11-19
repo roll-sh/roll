@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 
 mod nosql;
 mod queues;
+mod members;
 mod preview;
 mod search;
 mod storage;
@@ -126,6 +127,12 @@ enum Cmd {
     /// per change or pull request.
     #[command(subcommand, alias = "previews")]
     Preview(preview::Preview),
+    /// Workspace projects' members, invites and roles (docs/members.md).
+    #[command(subcommand, alias = "project")]
+    Projects(members::Projects),
+    /// Invites to projects waiting for you (accepting one takes signing in, in the dashboard).
+    #[command(subcommand, alias = "invite")]
+    Invites(members::Invites),
     /// Scoped tokens: what an agent, a CI job or a script may do (`create`, `list`, `revoke`, …).
     #[command(subcommand, alias = "tokens")]
     Token(access::Token),
@@ -706,6 +713,8 @@ async fn main() -> anyhow::Result<()> {
         }
         Cmd::Ssh(a) => return secrets::ssh_command(&secrets_api(&api).await?, a).await,
         Cmd::Preview(cmd) => return preview::run(&api, cli.json, cmd).await,
+        Cmd::Projects(cmd) => return members::projects(&api, cli.json, cmd).await,
+        Cmd::Invites(cmd) => return members::invites(&api, cli.json, cmd).await,
         Cmd::Token(cmd) => return access::token(&api, cli.json, cmd, &credential).await,
         Cmd::Mcp(cmd) => return access::mcp(&api, cli.json, cmd).await,
         Cmd::Login(l) => return login::login(&api.base, cli.json, l).await,

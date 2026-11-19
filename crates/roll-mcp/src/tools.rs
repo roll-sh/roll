@@ -473,6 +473,28 @@ static TOOLS: &[Tool] = &[
         &[WS, req("kind", "postgres, redis, stream, bucket, nosql or repo"), req("ref", "The resource's id (owner/name for a repo)"), breq("x", Ty::Num, "Canvas x"), breq("y", Ty::Num, "Canvas y")],
     ),
     t("workspace_remove_resource", "Remove a resource from a project", "Take a resource off a project's canvas (the resource itself stays).", "workspace", "DELETE", "/v1/workspace/projects/{id}/resources/{kind}/{ref}", &[WS, req("kind", "Resource kind"), req("ref", "The resource's id")]),
+    // Members (docs/members.md): accepting an invite is a person's own, so it's no tool.
+    t("workspace_list_members", "List a project's members", "Who is in a workspace project: handle, role (viewer, developer, admin, owner), a developer's environments, who added them and when. Emails only for the project's admins.", "workspace", "GET", "/v1/workspace/projects/{id}/members", &[WS]),
+    t(
+        "workspace_invite_member",
+        "Invite a member",
+        "Invite an email address to a project with a role (never more than the caller's own). The answer has the invite link once; the person accepts it by signing in as that address.",
+        "workspace",
+        "POST",
+        "/v1/workspace/projects/{id}/invites",
+        &[WS, breq("email", Ty::Str, "Their email address"), breq("role", Ty::Str, "viewer, developer, admin or owner"), b("environments", Ty::Arr, "A developer's environments, where the role applies in full (default: every environment that isn't protected)")],
+    ),
+    t(
+        "workspace_set_member_role",
+        "Change a member's role",
+        "Change a member's role or a developer's environments. Both the old and the new role must be within the caller's own; the last owner can't be demoted.",
+        "workspace",
+        "PATCH",
+        "/v1/workspace/projects/{id}/members/{user}",
+        &[WS, req("user", "The member (usr_…)"), b("role", Ty::Str, "viewer, developer, admin or owner"), b("environments", Ty::Arr, "A developer's environments (null: the default)")],
+    )
+    .destructive(),
+    t("workspace_remove_member", "Remove a member", "Take a person out of a project: their session and tokens stop reaching it at once, and their tokens confined to it are revoked. The last owner can't be removed.", "workspace", "DELETE", "/v1/workspace/projects/{id}/members/{user}", &[WS, req("user", "The member (usr_…)")]).destructive(),
     // ── Postgres ──
     t("postgres_list_projects", "List Postgres projects", "Postgres projects with their branches and endpoints.", "postgres", "GET", "/v1/projects", &[]),
     t("postgres_get_project", "Get a Postgres project", "A Postgres project with its branches and endpoints (connection strings need reveal).", "postgres", "GET", "/v1/projects/{project}", &[PROJECT]),

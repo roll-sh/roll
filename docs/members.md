@@ -1,10 +1,16 @@
 # Project members and roles (design)
 
-Status: **design, not built.** This is roll secrets' long-standing gap R1 (docs/secrets.md, "Next"),
-and it covers every product whose resources sit on a workspace project. Today a person reaches only
-the projects they made. A team shares only through the operator or through tokens. This document
-is the plan for people sharing a project, each with a role. The decisions the user still has to
-make are listed at the end ([Open decisions](#open-decisions)).
+Status: **v1 built** (workspace and secrets; [Phasing](#phasing), and [What v1 leaves out](#what-v1-leaves-out)).
+This is roll secrets' long-standing gap R1 (docs/secrets.md, "Next"), and it covers every product
+whose resources sit on a workspace project. Before it, a person reached only the projects they
+made, and a team shared only through the operator or through tokens. This document is the plan
+for people sharing a project, each with a role. v1 takes option (a) of every open decision
+([Open decisions](#open-decisions)); each is one constant in `roll_auth::roles::decisions`.
+
+Where v1 differs from the plan below: the roles' templates live in `crates/roll-auth/src/roles.rs`
+(not roll-access), so the workspace checks "nobody grants more than they hold" without depending on
+roll-access; roll-access builds the session grant from them (`Access::session_grant`). An invite's
+link is `<web>/dashboard/invites?token=…` (no new top-level route).
 
 The one rule behind the whole design: **a member's session becomes a roll-access grant**. The
 grant is built from the member's role, on every request, and it goes through the one evaluator
@@ -440,6 +446,27 @@ There is one test per flow, in the files the repo already uses:
 | two nodes | `crates/roll-secrets/tests/nodes.rs` | a removal on one node stops the person on the other at once |
 | the members page | `apps/dashboard/src/lib/workspace-*.test.ts` | which controls each role is offered |
 | the CLI | `crates/roll-cli/tests/` | `roll projects members …` against a live API |
+
+### What v1 leaves out
+
+Built: memberships, invites (mailed when the address has an account), roles, change of role,
+removal and leaving, the last owner, the migration, the session grant through the evaluator for
+workspace and secrets, `unprotected` rules and a developer's `environments`, homes for creates and
+`trusts` over owners and homes, D7's revocation and the audit rows (through the `member_events`
+outbox), approvals by role and counted as applied, a removed member's tokens, syncs, identities and
+bound references stopping (`maker_reaches`), the Members tab and the Invites page, the CLI, the four
+MCP tools.
+
+Not yet:
+- secrets' `on_member_removed` hook (revoking dynamic leases a person holds, ending one-time shares
+  they made, deleting their personal overrides) and **adopt**;
+- reach listing members beside tokens, and health's `maker_gone` findings;
+- one link that makes an account and accepts (D5's waiting invite: an address without an account
+  waits until roll's operator or an admin makes it, then the same link works);
+- the namespace handle beside a shared project's name in the sidebar, the "not trusted here" mark
+  on the canvas, Home's invites badge;
+- the two-node test (`crates/roll-secrets/tests/nodes.rs`): every check reads the shared databases
+  on each request, so nothing is held per node.
 
 ## Open decisions
 
