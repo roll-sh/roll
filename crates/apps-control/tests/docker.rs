@@ -439,6 +439,44 @@ async fn a_static_sites_functions_build_and_answer() {
     assert_eq!(fetch("/api/nope").await.0, StatusCode::NOT_FOUND);
 }
 
+/// A site's edge functions on Deno (Netlify's): one answers its own path, one wraps the site's
+/// answer through `context.next()`, which comes back to the apps listener signed (as instances
+/// reach it for traces) and answers the site's files.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sites_edge_functions_run_on_deno() {
+    // The apps listener, where `next()` comes back: served for real (instances reach it).
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let Some(w) = docker_world_with(None, |c| c.otlp_base = Some(format!("http://127.0.0.1:{port}"))).await else { return };
+    let app = w.public.clone();
+    tokio::spawn(async move { axum::serve(listener, app.into_make_service()).await });
+    let files = [
+        ("index.html", "<h1>site</h1>"),
+        ("netlify/edge-functions/hi.ts", "export default (req: Request) => new Response(`hi from ${typeof Deno}`);\nexport const config = { path: '/hi' };\n"),
+        ("netlify/edge-functions/shout.ts", "export default async (req: Request, ctx: any) => new Response((await (await ctx.next()).text()).toUpperCase(), { headers: { 'x-edge': '1' } });\nexport const config = { path: ['/', '/index.html'] };\n"),
+    ];
+    let (site, host) = deploy_tree(&w, "edgy", &files).await;
+    let (fns, _) = deploy_tree_with(&w, "edgy-fn", &files, json!({"builder": "functions"})).await;
+    let fetch = |path: &'static str| {
+        let req = Request::get(path).header("host", host.as_str()).body(Body::empty()).unwrap();
+        let public = w.public.clone();
+        async move {
+            let resp = public.oneshot(req).await.unwrap();
+            let st = resp.status();
+            (st, String::from_utf8(resp.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap())
+        }
+    };
+    assert_eq!(fetch("/hi").await, (StatusCode::OK, "hi from object".to_string()));
+    let got = fetch("/").await;
+    let (_, log) = call(&w.api, "GET", &format!("/v1/apps/services/{fns}/environments/production/logs?tail=40"), None, "application/json", None).await;
+    assert_eq!(got, (StatusCode::OK, "<H1>SITE</H1>".to_string()), "next() read the site's own file: {log}");
+    for id in [&site, &fns] {
+        assert_eq!(delete_for_good(&w.api, id).await.0, StatusCode::NO_CONTENT);
+    }
+    let _ = apps_control::runtime::docker::docker(&["network", "rm", &apps_control::network_name(&w.project, "production")]).await;
+    w.apps.shutdown().await;
+}
+
 /// What the generated Dockerfiles of Node, Python and Go make actually builds and answers, and a
 /// Node cold start (node started directly, no npm in front) is measured.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

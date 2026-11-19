@@ -25,6 +25,10 @@ pub fn router(apps: Arc<Apps>) -> axum::Router {
             if req.uri().path().starts_with(OTLP) {
                 return otlp(apps, req).await;
             }
+            // An edge function's `context.next()` ([`crate::edge`]): signed, any host.
+            if req.uri().path().starts_with(crate::edge::NEXT) {
+                return crate::edge::next(apps, req).await;
+            }
             let host = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).unwrap_or("").to_string();
             // A domain that redirects (www → apex): a 308 to the same path and query there.
             if let Some(to) = apps.redirect_for_host(&host).await {
@@ -112,7 +116,7 @@ pub fn port_router(apps: Arc<Apps>, service: String, env: String) -> axum::Route
 /// roll's own request headers, off a visitor's request where it comes in: from here on, one is
 /// roll's ([`VIA_SITE`] lets a rewrite past its target's access check).
 fn strip_ours(req: &mut Request) {
-    for h in [VIA_SITE, TARGET, ORIGINAL] {
+    for h in [VIA_SITE, VIA_EDGE, TARGET, ORIGINAL] {
         req.headers_mut().remove(h);
     }
 }
@@ -245,7 +249,7 @@ fn from_internal(mut req: Request) -> Request {
 
 /// The Horizon mark, `@roll/brand`'s export (`packages/brand/assets/horizon-dark.svg`) drawn in
 /// the text's colour; a test keeps the copy equal to it.
-const HORIZON: &str = include_str!("../assets/horizon.svg");
+pub(crate) const HORIZON: &str = include_str!("../assets/horizon.svg");
 
 /// What a visitor sees when roll answers instead of the app: the mark, a title and a line, dark
 /// or light as their system is. A 503 (waking, restarting, busy) looks again by itself.
@@ -391,6 +395,21 @@ async fn proxy_external(apps: &Arc<Apps>, live: &Arc<crate::live::EnvLive>, serv
 /// visitor's is taken off where it came in, [`strip_ours`]).
 const VIA_SITE: &str = "x-roll-via-site";
 
+/// Marks an edge function's `context.next()` ([`crate::edge`]): the site's files answer, no edge
+/// function again (roll's own, as [`VIA_SITE`] is).
+const VIA_EDGE: &str = "x-roll-via-edge";
+
+/// A request roll sends on to another service, past its target's access check ([`VIA_SITE`]).
+pub(crate) fn mark_rewritten(req: &mut Request) {
+    req.headers_mut().insert(HeaderName::from_static(VIA_SITE), HeaderValue::from_static("1"));
+}
+
+/// An edge function's `next()`: past the access check, and no edge function runs on it.
+pub(crate) fn mark_edge_passed(req: &mut Request) {
+    mark_rewritten(req);
+    req.headers_mut().insert(HeaderName::from_static(VIA_EDGE), HeaderValue::from_static("1"));
+}
+
 /// rolld's internal API (where [`Cluster::dispatch`](roll_cluster::Cluster::dispatch) forwards to
 /// a service's owner) with the route roll apps' public traffic is forwarded to ([`INTERNAL`]):
 /// only a request another node signed gets in (`require_signed`), and it's served as the visitor
@@ -475,7 +494,7 @@ enum Again {
 /// Which of roll's pages a response is (never an app's own answer), so an environment's own
 /// page can take its place ([`their_page`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum RollPage {
+pub(crate) enum RollPage {
     Error,
     Maintenance,
 }
@@ -500,7 +519,7 @@ async fn their_page(apps: &Arc<Apps>, service: &str, env: &str, r: Response) -> 
     Response::from_parts(parts, Body::from(html))
 }
 
-fn escape(s: &str) -> String {
+pub(crate) fn escape(s: &str) -> String {
     s.chars()
         .map(|c| match c {
             '&' => "&amp;".to_string(),
@@ -560,8 +579,35 @@ async fn check_access(apps: &Arc<Apps>, service: &str, env: &str, req: &mut Requ
             return Some(sign_in(apps, service, env, req));
         }
     }
+    // A password ([`crate::password`]): its session, or its page's POST.
+    if let Some(ph) = access.password_hash.clone() {
+        if let Some(v) = take_cookie(req, &crate::password::cookie(env))
+            && apps.password_session_ok(service, env, &ph, &v).await
+        {
+            take_cookie(req, &format!("roll_access_{env}"));
+            return None;
+        }
+        if req.uri().path() == crate::password::PATH && req.method() == axum::http::Method::POST {
+            let client = crate::live::client_ip(roll_cluster::client_addr(req).as_deref());
+            let Ok(body) = axum::body::to_bytes(std::mem::take(req.body_mut()), 4096).await else { return Some(StatusCode::PAYLOAD_TOO_LARGE.into_response()) };
+            return Some(apps.password_post(service, env, &ph, client, &body).await);
+        }
+    }
     let signed_in = access.signed_in;
-    let Some(hash) = access.token_hash else { return Some(denied(apps, service, env).await) };
+    // No way in yet: the password's page, signing in, or the 401.
+    let password = access.password_hash.is_some();
+    let turned_away = |req: &Request| {
+        let to = crate::visit::local_path(req.uri().path_and_query().map_or("/", |p| p.as_str()));
+        let page_load = req.method() == axum::http::Method::GET;
+        (to, page_load)
+    };
+    let Some(hash) = access.token_hash else {
+        if password {
+            let (to, page_load) = turned_away(req);
+            return Some(if page_load { crate::password::page(StatusCode::UNAUTHORIZED, &to, "") } else { denied(apps, service, env).await });
+        }
+        return Some(denied(apps, service, env).await);
+    };
     let name = format!("roll_access_{env}");
     let query = req.uri().query().unwrap_or("").to_string();
     let mut token = None;
@@ -604,7 +650,13 @@ async fn check_access(apps: &Arc<Apps>, service: &str, env: &str, req: &mut Requ
         }
     }
     if !ok {
-        // No token, and no session: signing in is the other way in.
+        // No token, and no session: the password, or signing in, is the other way in.
+        if password {
+            let (to, page_load) = turned_away(req);
+            if page_load {
+                return Some(crate::password::page(StatusCode::UNAUTHORIZED, &to, ""));
+            }
+        }
         return Some(if signed_in { sign_in(apps, service, env, req) } else { denied(apps, service, env).await });
     }
     req.headers_mut().remove(header::COOKIE);
@@ -1415,7 +1467,15 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
         // One deployment's own URL: that deployment, whatever is live.
         Some(d) => match apps.deployment_template(service, env, d).await {
             // A deployment's own URL takes no form's submission: only what's live keeps them.
-            Ok(t) if t.site.is_some() => return with_feedback(feedback, serve_site(&apps, &live, &t, SiteRequest::of(&req), service, env, began).await),
+            Ok(t) if t.site.is_some() => {
+                if !t.edge.is_empty()
+                    && !req.headers().contains_key(VIA_EDGE)
+                    && let Some((target, name, next)) = apps.edge_for(service, env, &t, req.uri().path()).await
+                {
+                    return crate::edge::to_function(apps.clone(), target, env.to_string(), name, next, req).await;
+                }
+                return with_feedback(feedback, serve_site(&apps, &live, &t, SiteRequest::of(&req), service, env, began).await);
+            }
             Ok(t) => {
                 again = Some(Again::Deployment(Box::new(t.clone())));
                 live.acquire_deployment(t).await
@@ -1425,6 +1485,13 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
         None => match live.may_wake().map(|_| live.route(bucket)) {
             // A static site's files answer (a gradual rollout's bucket chose which deployment's).
             Ok(Some(t)) if t.site.is_some() => {
+                // Its edge functions first, on the paths they name.
+                if !t.edge.is_empty()
+                    && !req.headers().contains_key(VIA_EDGE)
+                    && let Some((target, name, next)) = apps.edge_for(service, env, &t, req.uri().path()).await
+                {
+                    return crate::edge::to_function(apps.clone(), target, env.to_string(), name, next, req).await;
+                }
                 let mut r = with_feedback(feedback, serve_site(&apps, &live, &t, SiteRequest::read(req).await, service, env, began).await);
                 if let (true, Some(b)) = (fresh, bucket) {
                     let secure = if apps.cfg.scheme == "https" { "; Secure" } else { "" };

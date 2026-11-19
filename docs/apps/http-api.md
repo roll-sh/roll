@@ -248,7 +248,7 @@ type Run = {
   /** A worker only: its instances follow `group`'s lag on `stream` (a roll stream on the
    *  service's project; another's is never read), one per `per_instance` (default 1000) behind,
    *  within min_instances–max_instances; read every 10 s on the owner, scaled in one at a time. */
-  scale?: { stream: string; group: string; per_instance?: number };
+  scale?: { stream: string; group: string; per_instance?: number } | { metric: string /* a gauge of its own, by name */; sum?: boolean /* their sum; default the largest series */; per_instance?: number }; // a worker's: a stream group's lag, or its own gauge (min_instances ≥ 1 for that: a stopped worker reports nothing)
   /** false: no public URL (its up.roll.site names, its deployments' and its custom domains are
    *  404s like an unknown address, at once); the private `<svc>.<env>.internal` still answers.
    *  Default true. Environment.url is null while it's false. */
@@ -365,7 +365,7 @@ type EnvironmentPut = {
    *  person may still open the project (a disabled account is turned away). null: public again. */
   /** `bypass_sha256`: the SHA-256 (hex) of an automation's secret (CI's end-to-end tests): a
    *  request with `X-Roll-Preview-Bypass: <secret>` goes in with no cookie or redirect. */
-  access?: { token?: string; signed_in?: boolean; bypass_sha256?: string } | null;
+  access?: { token?: string; signed_in?: boolean; password?: string /* 8–200: visitors type it on roll's page (its argon2id hash only kept; a session cookie for 7 days, ended by a new password; 10 tries a client every 10 minutes) */; bypass_sha256?: string } | null;
   /** Creating it: start with this environment's variables, except its sealed ones (ignored when it exists). */
   variables_from?: string;
   /** A push deploys only once its commit's checks pass (statuses other than roll apps' own):
@@ -468,6 +468,7 @@ type Environment = EnvironmentSummary & {
   port: number | null;       // locally, the service's own port (ROLL_APPS_PORTS)
   private: boolean;          // its hostnames answer only visitors with its access token, or who signed in
   signed_in?: true;          // people signed in to roll who can open its project get in (access.signed_in)
+  password?: true;           // visitors may type its password (access.password; never returned)
   next_run_at: number | null; // a cron service's next scheduled run, once deployed
   volume_used?: { bytes: number; at: number }; // how full its volume was when last measured (hourly, on its owner), when it has one
   checks?: Check[];         // its uptime checks (as the PUT's)
@@ -591,7 +592,8 @@ type Plan = {
   /** Datastores the root's manifests have client libraries for ("pg in package.json"): New
    *  service offers to make and link them. Absent when none. */
   uses?: ("postgres" | "redis")[];
-  functions?: string[]; // a static site's function directories the functions builder runs (netlify/functions, api)
+  functions?: string[]; // a static site's function directories the functions builder runs (netlify/functions, api; "edge" with edge functions)
+  edge?: { name: string; kind: "netlify" | "vercel"; file: string; paths: string[]; excluded?: string[] }[]; // its edge functions, run before its files on their paths by its <site>-fn service, on Deno
   /** The Procfile's `release:` (Heroku's release phase): the deployment's pre-deploy command when
    *  the service sets none. Absent without one, and for a tree's own Dockerfile. A Procfile's `web:`
    *  (`worker:` for a worker) is `start` when the service names none. */

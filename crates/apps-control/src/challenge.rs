@@ -40,7 +40,7 @@ pub fn network(client: Option<std::net::IpAddr>) -> String {
     }
 }
 
-fn mac(key: &[u8], parts: &[&str]) -> String {
+pub(crate) fn mac(key: &[u8], parts: &[&str]) -> String {
     let mut m = Hmac::<Sha256>::new_from_slice(key).expect("any key length");
     for p in parts {
         m.update(p.as_bytes());

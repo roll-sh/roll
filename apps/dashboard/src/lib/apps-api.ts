@@ -114,7 +114,8 @@ export interface Run {
   /** A deploy whose image has a known vulnerability this severe or worse fails before it goes live (a rollback never does). */
   block_on?: Exclude<Severity, "unknown">;
   /** A worker follows `group`'s lag on `stream` (a roll stream of its project): one instance per `per_instance` behind. */
-  scale?: { stream: string; group: string; per_instance?: number };
+  /** A worker follows a stream group's lag, or a gauge of its own (`metric`: the largest series, or their `sum`). */
+  scale?: { stream?: string; group?: string; metric?: string; sum?: boolean; per_instance?: number };
   /** Commands on a schedule, each a job of the live deployment at its due times (Heroku Scheduler); at most 20. */
   schedules?: Scheduled[];
   /** Containers beside each instance, in its network namespace (a web service's or a worker's); at most 4. */
@@ -505,7 +506,8 @@ export interface EnvironmentPut {
   ephemeral?: boolean;
   /** Private: visitors need `?roll_access=<token>` once; null makes it public again. */
   /** `signed_in`: people signed in to roll who can open the project get in (alone, or with a token). */
-  access?: { token?: string; signed_in?: boolean; bypass_sha256?: string } | null;
+  /** Who gets in: a link's token, people signed in to roll, or a password visitors type (8–200; replaces the whole of access). */
+  access?: { token?: string; signed_in?: boolean; password?: string; bypass_sha256?: string } | null;
   /** Creating it: start with this environment's variables. */
   variables_from?: string;
   wait_for_ci?: boolean;
@@ -627,6 +629,8 @@ export interface Environment extends EnvironmentSummary {
   report?: boolean;
   /** People signed in to roll who can open its project get in. */
   signed_in?: boolean;
+  /** Visitors may type its password (`access.password`, never returned). */
+  password?: boolean;
   /** What its code may reach: roll and the listed hosts (`roll`), or anything (`open`). */
   egress?: Egress;
   /** Hosts its egress proxy refused lately: not listed, or (`private`) resolving only to private addresses. */
@@ -706,6 +710,8 @@ export interface Plan {
   uses?: ("postgres" | "redis")[];
   /** A static site's function directories (`netlify/functions`, `api`) the `functions` builder runs. */
   functions?: string[];
+  /** A static site's edge functions: run before its files on their paths by its `-fn` service. */
+  edge?: { name: string; kind: "netlify" | "vercel"; file: string; paths: string[]; excluded?: string[] }[];
 }
 
 export interface RootCandidate {

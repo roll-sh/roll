@@ -744,6 +744,13 @@ fn secrets_import_sources(b: &Value) -> Sources {
         .collect()
 }
 
+/// A service's Git login: `deploy` when it names a project secret (`secret`): the service's
+/// fetches then send that production secret to its source's host, which only someone who may
+/// change what production runs gets to decide; `write` for a password the caller gives itself.
+fn apps_git_login_action(b: &Value) -> Action {
+    if b.get("secret").is_some() { Action::Deploy } else { Action::Write }
+}
+
 /// A new apps notification: a webhook (the default) answers its signing secret once, so `reveal`;
 /// a Slack, Discord or email one (the project's owner) answers none, so `write`.
 fn apps_notification_action(b: &Value) -> Action {
@@ -1382,7 +1389,7 @@ static ROWS: &[Row] = &[
     row("PUT", "/v1/apps/services/{id}/registry", "apps", W, one(PG, "service")),
     row("DELETE", "/v1/apps/services/{id}/registry", "apps", W, one(PG, "service")),
     // A private Git repository's login (never answered back), as a registry's.
-    row("PUT", "/v1/apps/services/{id}/git-login", "apps", W, one(PG, "service")),
+    row("PUT", "/v1/apps/services/{id}/git-login", "apps", Act::Body(apps_git_login_action), one(PG, "service")),
     row("DELETE", "/v1/apps/services/{id}/git-login", "apps", W, one(PG, "service")),
     // A link puts the linked resource's address and password in the service's variables, where
     // its code reads them: reveal on that resource too.
@@ -1721,6 +1728,8 @@ mod tests {
         assert_eq!(bulk_action(b"{\"index\":{}}\n{\"t\":1}\n{\"delete\":{\"_id\":\"2\"}}\n"), Action::Delete);
         assert_eq!(bulk_action(b"{\"update\":{\"_id\":\"3\"}}\n{\"script\":{\"source\":\"ctx.op = 'delete'\"}}\n"), Action::Delete);
         assert_eq!(apps_notification_action(&serde_json::json!({ "url": "https://example.com/h" })), Action::Reveal);
+        assert_eq!(apps_git_login_action(&serde_json::json!({ "username": "x", "secret": "GIT_TOKEN" })), Action::Deploy, "a project secret sent to the source's host");
+        assert_eq!(apps_git_login_action(&serde_json::json!({ "username": "x", "password": "p" })), Action::Write);
         assert_eq!(apps_notification_action(&serde_json::json!({ "kind": "slack", "url": "https://hooks.slack.com/x" })), Action::Write);
         let dep = find("POST", "/v1/apps/services/{id}/environments/{env}/deploys", "x").unwrap();
         assert_eq!(dep.row.action("POST", &[("env".into(), "production".into())], None), Action::Deploy);

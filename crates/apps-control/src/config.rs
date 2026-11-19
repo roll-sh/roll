@@ -121,7 +121,7 @@ mod tests {
             alerts: Alerts::default(),
             rollout: Rollout::default(),
             h2c: true,
-            scale: Some(Scale { stream: "s".into(), group: "g".into(), per_instance: 1 }),
+            scale: Some(Scale { stream: "s".into(), group: "g".into(), metric: String::new(), sum: false, per_instance: 1 }),
             public: false,
             drain_s: Some(1),
             cpu_target: Some(1),

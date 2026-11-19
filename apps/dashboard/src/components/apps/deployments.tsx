@@ -336,7 +336,7 @@ function RunFunctions({ service, env, dirs }: { service: string; env: string; di
   return (
     <div className="mt-3 flex flex-wrap items-center gap-3 border-t border-line pt-3 text-[12px]">
       <span className="min-w-0 flex-1 text-muted">
-        {state.done ?? state.error ?? `Its ${dirs.join(" and ")} don't run on a static site: a service of them, with their paths routed to it, does.`}
+        {state.done ?? state.error ?? `Its ${dirs.map((d) => (d === "edge" ? "edge functions" : d)).join(" and ")} don't run on a static site: a service of them, with their paths sent to it, does.`}
       </span>
       {!state.done && (
         <button
@@ -346,7 +346,7 @@ function RunFunctions({ service, env, dirs }: { service: string; env: string; di
           onClick={() => {
             setState({ busy: true });
             runFunctions(service, env, dirs).then(
-              (s) => setState({ busy: false, done: `${s.name} runs them; ${dirs.map((d) => FUNCTION_ROUTES[d]).join(" and ")} go to it once it's deployed.` }),
+              (s) => setState({ busy: false, done: `${s.name} runs them; ${dirs.map((d) => FUNCTION_ROUTES[d] ?? "its edge functions' paths").join(" and ")} go to it once it's deployed.` }),
               (e: unknown) => setState({ busy: false, error: e instanceof Error ? e.message : String(e) }),
             );
           }}

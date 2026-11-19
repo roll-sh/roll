@@ -48,6 +48,9 @@ pub struct Template {
     /// A static site whose files were exported (`sites.rs`): the proxy serves them by this key
     /// (the image's digest) and no instance ever runs.
     pub site: Option<String>,
+    /// That site's edge functions ([`crate::edge`]), and the service that runs them.
+    pub edge: Vec<apps_build::edge::EdgeFn>,
+    pub edge_service: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2400,6 +2403,8 @@ mod tests {
             run,
             spa: false,
             site: None,
+            edge: Vec::new(),
+            edge_service: String::new(),
         })
     }
 

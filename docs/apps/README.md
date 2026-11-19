@@ -1265,8 +1265,42 @@ it (the environment's routes). That builder writes a Node 22 image with a small 
 A function is `<name>.mjs|.js|.cjs|.ts|.mts`, or a directory with an `index` of one. TypeScript
 runs as Node strips its types. Its `package.json` dependencies are installed. A request is at most
 6 MiB, an unknown function is a 404, and one that throws is a 500 with its error in the log.
-Edge functions (Deno) aren't run. `docker.rs::a_static_sites_functions_build_and_answer` builds
-one of each style and calls them.
+Edge functions run in the same service, on Deno ("Edge functions", below).
+`docker.rs::a_static_sites_functions_build_and_answer` builds one of each style and calls them.
+
+## Edge functions
+
+A static site's edge functions (Netlify Edge Functions, Vercel's Middleware) run before its files
+on the paths they name, to answer themselves, change the request, or change the file's answer:
+- Netlify's `netlify/edge-functions/<name>.{ts,js,mjs,mts,tsx,jsx}` (or `<name>/index.*`), on
+  their `export const config = { path, excludedPath }` or netlify.toml's `[[edge_functions]]
+  function path`, as `export default (request, context)`: `context.next()` (the site's own
+  answer, to return or change), `rewrite(path)`, `geo.country.code` (the edge's country), `ip`,
+  `cookies`, `json()`, `requestId`, and `Netlify.env`. Nothing returned is the site's answer.
+- Vercel's `middleware.{ts,js}` at the root, on every path or its `config.matcher`: a `Response`
+  answers, `next()` (`x-middleware-next`, with `x-middleware-request-*` headers set on the
+  request) and `rewrite()` (`x-middleware-rewrite`) as `@vercel/edge` makes them.
+
+Paths are patterns: `*` is any rest (`/shop/*`), `:name` one segment, `:name*` any rest, and a
+segment may glob (`*.png`). The first function whose patterns take a path (and whose excluded ones
+don't) runs; at most 20 functions, 20 paths each. The site's plan lists them (`edge`), and Run its
+functions makes the same `<site>-fn` service the site's functions run in; its image adds Deno
+(pinned by digest, its binary only) and a server of edge functions on 127.0.0.1, which the Node
+server hands `/.roll/edge/<name>` to. The build fetches their imports (`deno cache`: URLs,
+`npm:`, Netlify's types), so they start without the network. They run with network, the
+environment and reads of their own files (`--allow-net --allow-env --allow-read=/app,/roll`).
+
+A request on an edge function's path goes to the functions service's environment of the same name
+as `/.roll/edge/<name>`, past its access gate (the site's let the visitor in), with the visitor's
+path in `x-edge-path` and in `x-edge-next` where `context.next()` asks for the site's answer: the
+path `/_roll/edge/{service}/{env}/{deployment}/{until}/{sig}` on the apps listener, which the
+functions service reaches at its `ROLL_EDGE_BASE` (set at its start, as instances reach the
+listener for traces; never an address a request gave it), signed for that deployment for a minute (an HMAC under a key every node shares),
+which answers the same deployment's files and never runs an edge function again. Anything
+unsigned or expired there is a 404. Without the functions service running, the files answer as
+they would, and the environment's log says once which function isn't run.
+`api.rs::a_sites_edge_function_runs_before_its_files`, `apps_build::edge::tests`.
+
 
 ## Base image updates
 
@@ -2165,6 +2199,21 @@ ones up. `a_paused_cron_skips_its_runs_and_pausing_stops_one`. It's the spend li
 environment's live state on its owner, read from the store when that state is loaded, so a
 takeover keeps it paused. `a_paused_worker_stays_stopped_until_its_resumed`.
 
+## A password for an environment
+
+An environment's `access: {password}` (Vercel's and Netlify's password protection; "Who gets in"
+→ Use a password) lets in visitors who type it, for a client or a reviewer without a roll login
+or the link: a page load without a session gets roll's page asking for it (a 401, nothing woken),
+whose form posts to `/__roll/password` on the environment's host. The right password sets a
+host-only `HttpOnly; SameSite=Lax` cookie, `roll_pass_<env>`, signed for seven days under a key
+every node shares and over the password's hash, so a new password ends every session; the cookie
+is taken out of what the app sees, as the access token's is. Only an argon2id hash is kept (the
+same parameters as roll storage's IAM passwords), never returned: the environment says only
+`password: true`. Each client gets ten tries every ten minutes per environment (then a 429 with
+`Retry-After`); the right one clears its count. The token link, signing in and the bypass secret
+still let in whoever they let in; a request that isn't a page load gets the plain 401.
+`api.rs::a_password_lets_visitors_in`.
+
 ## Signing in to an environment
 
 `access: {signed_in: true}` (the environment panel's "Require sign-in", `roll apps env
@@ -2367,6 +2416,14 @@ never a name, and a group by Kafka's characters. It's read only for a stream on 
 own project, and only on a project the operator owns: anyone can put any reference on their own
 canvas and streams don't know their owners yet, so a person's project doesn't follow a stream
 (as roll secrets refuses links there), and roll MCP's gate wants read on the stream to set it.
+Or a worker follows a gauge of its own (KEDA's Prometheus scaler, Cloud Run's custom metrics):
+`run.scale: {metric, sum?, per_instance}` (Settings' "Or follow its own gauge") reads, every ten
+seconds, the newest point of each series of that name from the last minute, from its Prometheus
+endpoint ("The app's Prometheus endpoint") or its OpenTelemetry SDK, the largest of them (each
+instance sees the same queue) or with `sum` their total (jobs in flight per instance), and runs
+one instance per `per_instance` of it. A counter or histogram isn't a level: it's said in the
+log and not followed. A stopped worker reports nothing, so this needs `min_instances` of at least
+one. `api.rs::a_worker_scales_on_its_own_gauge`.
 A deploy starts a scaled-out worker at the instances it wants, not back at its floor; a note
 about scaling is logged when it changes, not every ten seconds; and a web service's `scale` is
 dropped (it scales on its requests); the reaper starts instances at once and
@@ -2577,7 +2634,9 @@ app installed and no roll code mirror. `git_source.rs` is the whole of it:
   `roll apps git-login`, Settings' "Private repository": a deploy token, an app password or an
   access token, or the name of the project's roll secret that holds it, read from its production
   secrets at each fetch so a rotated token, or one roll secrets issues per lease from the project's
-  own GitHub App, just works and nothing is kept here). A password set here is sealed at rest (`git_auth`, bound to the service) and never returned, never
+  own GitHub App, just works and nothing is kept here; naming a secret is `deploy` in the
+  permissions catalogue, as that production secret then goes to the source's host: whoever may
+  change what production runs can already read its secrets, sensitive ones too). A password set here is sealed at rest (`git_auth`, bound to the service) and never returned, never
   in the URL, and sent as Basic auth only to the host it was set for: every fetch
   (`git_source::Remote`) checks the source URL's host against it, and moving the source to
   another repository (host or path) drops it in the same transaction, as a registry login is dropped with its
@@ -3147,73 +3206,78 @@ dropped `_`, missed `"""…"""` and had no tree of its own without a plugin; a d
 static site into a container. Firewall rules on more than the path were built next, then PagerDuty and Opsgenie targets
 ("Notifications"), then external proxy rewrites and conditional rules ("Static sites"), then uptime
 checks ("Uptime checks"), then heartbeats ("Heartbeats"), then image scans ("Vulnerability
-scanning"), then objectives ("SLOs"), then Prometheus scraping ("The app's Prometheus endpoint"), then split tests ("Split tests").
+scanning"), then objectives ("SLOs"), then Prometheus scraping ("The app's Prometheus endpoint"), then split tests ("Split tests"), then edge functions ("Edge functions"). A review that morning (the product against Railway, Render, Fly, Vercel, Netlify, Heroku and Cloud Run, each gap grepped in the code) put items 2–6 in; autoscaling on the app's own gauges was built first ("Workers that follow their work"), then a password ("A password for an environment").
 
 1. **Variables that belong in roll secrets** (roll secrets' review): a secret-looking variable
    pasted into the panel offers "Move to roll secrets" (into the project environment apps
    already injects), and a variable may be `roll://ENV/KEY`, resolved through roll secrets'
    `Secrets::resolve_for(ResourceRef::new(Kind::Service, id), …)` (#329, audited as the service,
    rotation seen through `digest_for`), so values reach its health, leak guard and audit chain.
-2. **Edge functions for static sites** (Netlify Edge Functions, Vercel Middleware):
-   `netlify/edge-functions/` and `middleware.ts` in the site's `-fn` service on Deno, before its
-   files on their `config.path`.
-3. *Waiting on roll secrets' #357 (its batch 4).* **A workload
+2. **Deploy freezes** (GitLab's freeze periods, Render's paused auto-deploys): `freeze: {until?,
+   windows?, reason}` on an environment holds pushes, tags and schedules' deploys (said on the
+   page and in `deploy.held`), never a rollback or an admin's deploy with `override`.
+3. **A status page** (Better Stack's, Instatus'): a project's public page of its uptime checks
+   and heartbeats (up, down since, the last 90 days by day), on the project's preview domain or a
+   custom one, with incidents from `check.down` and `heartbeat.missed`; nothing private shown.
+4. **Microsoft Teams and Google Chat targets** beside Slack and Discord (their incoming webhooks;
+   the URL sealed, public addresses only).
+5. *Waiting on roll secrets' #357 (its batch 4).* **A workload
    identity token in each instance** (Vercel's OIDC federation, Fly's, Cloud Run's): roll
    secrets' #68 issuer mints `sub = roll-apps:<project>:<service>:<env>` (`SecretSource::issue`,
    at most an hour, rotated keys); apps' half is delivery: a refreshed token per instance read
    from its link endpoint, a per-request header for web services, and `aud` per environment.
-4. *Waiting on the user.* **Signed-in people, not just admins** (every competitor; roll search and
+6. *Waiting on the user.* **Signed-in people, not just admins** (every competitor; roll search and
    secrets do): `roll_auth::SignedIn` scoped through `Workspace::trusts`, others' services 404.
    Letting non-admins run code on a node's Docker is the user's call first.
-5. *Waiting on the fleet's first run.* **Cached answers across nodes and at the edge** (Vercel's, Netlify's): today the owner's
+7. *Waiting on the fleet's first run.* **Cached answers across nodes and at the edge** (Vercel's, Netlify's): today the owner's
    proxy alone keeps them; the storage CDN's purge outbox could carry the purges.
    Across nodes means a node that doesn't own the service answering from its own copy, which
    needs the owner's say that the environment has no gate (access, allow list, firewall, rate
    limit) on each answer, a generation per environment for purges, and hits metered and logged
    where the owner reads them: only worth it once the fleet serves traffic.
-6. **Egress on the fleet** (Fargate): a security group per closed environment's tasks with no
+8. **Egress on the fleet** (Fargate): a security group per closed environment's tasks with no
    outbound rule but the egress proxy's, and the proxy as a task or on the node; until then
    Fargate refuses `egress: roll` (409). *Waiting on the fleet's first run.*
-7. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
+9. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
    follow a stream group's lag now (a queue's project is what keeps another tenant's depth
    unread).
-8. **Region**: the region shown on the overview and each environment, defaulting to the project's
+10. **Region**: the region shown on the overview and each environment, defaulting to the project's
    databases', then a choice per environment once the fleet has a second region (Railway's,
    Fly's). *Waiting on the fleet.*
-9. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
+11. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
    Settings, without stopping services from sleeping (Railway's and Render's). A roll-hosted app
    linked to a search cluster with an IP allowlist (search #243) needs them on the list; until
    then such a cluster stays open (on one node, the link relay's loopback is what it sees). *Waiting on the
    user's first AWS run.*
-10. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
+12. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
    listener offering `h2` (ALPN `h2, http/1.1`; hyper's `http2::Builder` when `h2` is chosen,
    with the same graceful drain) and setting `Host` from `:authority` (HTTP/2 has no `Host`,
    and every product behind the edge routes on it), so Cloudflare's gRPC reaches h2c apps.
    Done here: `run.h2c` to the app, trailers through the proxy. Then TCP services.
-11. **roll secrets as the env store**: the wiring is done (deploys resolve the project's secrets,
+13. **roll secrets as the env store**: the wiring is done (deploys resolve the project's secrets,
    digests mark "needs deploy", roll secrets' reveal rules, linked and sensitive keys, dynamic
    credentials refused, new environments ensured); what's left is service variables kept in roll
    secrets at `/services/<name>` (one store for both), and links as per-environment secrets
    links.
-12. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
+14. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
    settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
    warm window or `min_instances` 1 by default there until a wake is fast), and
    allocation-based metering for Fargate.
-13. *Waiting on roll secrets' #274.* **Queues linkable from a service**: buckets, streams and NoSQL are (rolld's `RollResources::link`, through roll secrets' providers); #274 adds the `queue` provider (its own user, `AMQP_URL`, `permission` read, write or configure), then `RollResources` and the one-node relay for the AMQP port here.
-14. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
+15. *Waiting on roll secrets' #274.* **Queues linkable from a service**: buckets, streams and NoSQL are (rolld's `RollResources::link`, through roll secrets' providers); #274 adds the `queue` provider (its own user, `AMQP_URL`, `permission` read, write or configure), then `RollResources` and the one-node relay for the AMQP port here.
+16. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
    `_acme-challenge.<base>` CNAME into a zone roll writes (`roll_edge::acme`'s DNS solver at
    another name), then `DomainTls::wildcards` true there; the routing and verification are done.
-15. *Waiting on the edge's owner (roll cloud).* **Bring your own certificate** (Vercel's,
+17. *Waiting on the edge's owner (roll cloud).* **Bring your own certificate** (Vercel's,
    Heroku's SNI, Fly's import): `PUT …/domains/{host}/certificate {cert_pem, key_pem}`, sealed,
    served by SNI at the edge (and Cloudflare's custom certificates), expiry through
    `domain.expiring`.
-16. *Waiting on a static build (no musl target on ai-server, and adding one is the shared toolchain's).* **A waker that takes every caller while the app starts**: busybox `nc -l` takes one, so a burst
+18. *Waiting on a static build (no musl target on ai-server, and adding one is the shared toolchain's).* **A waker that takes every caller while the app starts**: busybox `nc -l` takes one, so a burst
    of private calls to a stopped service loses all but the first (refused). A waker of roll's own
    (roll-fetch's `wake` mode, a static binary mounted read-only) that accepts each, holds them,
    and hands them over once the app listens; the cheap accept count already tells rolld.
-17. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
+19. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
     origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
-18. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
+20. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
     restore (CRIU, which needs the host's Docker daemon with checkpoints on: the user's call), or
     Firecracker microVM hosts on the fleet.
-19. EFS volumes and Cloud Map private DNS on the fleet; TCP services on the fleet (the edge carrying TCP to a service's owner).
+21. EFS volumes and Cloud Map private DNS on the fleet; TCP services on the fleet (the edge carrying TCP to a service's owner).

@@ -57,6 +57,8 @@ pub mod vitals;
 pub mod heartbeats;
 pub mod slo;
 pub mod prom;
+pub mod edge;
+pub mod password;
 pub mod vulns;
 pub mod checks;
 pub mod forms;
@@ -334,6 +336,12 @@ pub struct Apps {
     /// proxy; and which environments' last scrape failed (said once).
     pub(crate) scrape_client: reqwest::Client,
     pub(crate) scrape_errors: Mutex<std::collections::HashSet<String>>,
+    /// The key edge functions' `next` addresses are signed with ([`edge`]), once read; and which
+    /// edge functions were said not to run (once each).
+    pub(crate) edge_key: Mutex<Option<Vec<u8>>>,
+    pub(crate) edge_noted: Mutex<std::collections::HashSet<String>>,
+    /// Password tries per environment and client, in the last ten minutes ([`password`]).
+    pub(crate) password_tries: Mutex<HashMap<password::Client, (i64, u32)>>,
     /// Shells open over HTTP (the dashboard's terminal), by id.
     sessions: Mutex<HashMap<String, Arc<shell::Session>>>,
     /// WebSocket shells open per environment (`env_key`), counted with the HTTP sessions.
@@ -568,6 +576,9 @@ impl Apps {
             site_proxy_client: net::client(cfg_allow, Duration::from_secs(30)),
             scrape_client: reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).no_proxy().timeout(Duration::from_secs(10)).build().expect("a client"),
             scrape_errors: Mutex::new(Default::default()),
+            edge_key: Mutex::new(None),
+            edge_noted: Mutex::new(Default::default()),
+            password_tries: Mutex::new(HashMap::new()),
             looping: Mutex::new(std::collections::HashSet::new()),
             client: hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new()).pool_idle_timeout(Duration::from_secs(30)).build_http(),
             client_h2: hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new()).pool_idle_timeout(Duration::from_secs(30)).http2_only(true).build_http(),
@@ -1508,7 +1519,7 @@ impl Apps {
             _ => None,
         };
         let gate = self.access(&r.service, &r.name).await?;
-        let (private, signed_in) = (gate.is_some(), gate.is_some_and(|a| a.signed_in));
+        let (private, signed_in, password) = (gate.is_some(), gate.as_ref().is_some_and(|a| a.signed_in), gate.as_ref().is_some_and(|a| a.password_hash.is_some()));
         let (sid, e) = (r.service.clone(), r.name.clone());
         let waiting_for_ci = self.db(move |s| s.ci_waits()).await?.into_iter().find(|(w, _)| w.service == sid && w.env == e).map(|(w, _)| w.sha);
         Ok(Environment {
@@ -1521,6 +1532,7 @@ impl Apps {
             tcp: r.tcp_port.filter(|_| svc.run.tcp && svc.run.public && !private).map(|p| format!("{}:{p}", self.cfg.tcp_host)),
             private,
             signed_in,
+            password,
             next_run_at,
             schedules: self.schedule_states(&svc, &r).await,
             volume_used: match svc.run.volume {
@@ -1874,7 +1886,7 @@ impl Apps {
             None => None,
             Some(Value::Null) => Some(None),
             Some(Value::Object(a)) => {
-                if let Some(k) = a.keys().find(|k| !["token", "bypass_sha256", "signed_in"].contains(&k.as_str())) {
+                if let Some(k) = a.keys().find(|k| !["token", "bypass_sha256", "signed_in", "password"].contains(&k.as_str())) {
                     return Err(Error::BadRequest(format!("access.{k} isn't a field")));
                 }
                 let signed_in = match a.get("signed_in") {
@@ -1882,10 +1894,16 @@ impl Apps {
                     Some(Value::Bool(b)) => *b,
                     Some(_) => return Err(Error::BadRequest("access.signed_in is a boolean".into())),
                 };
+                // A password visitors type (Vercel's password protection): its argon2id hash only.
+                let password = match a.get("password") {
+                    None | Some(Value::Null) => None,
+                    Some(Value::String(p)) if (8..=200).contains(&p.chars().count()) => Some(crate::password::hash(p).await.map_err(Error::Internal)?),
+                    Some(_) => return Err(Error::BadRequest("access.password is 8–200 characters".into())),
+                };
                 let token = match a.get("token") {
-                    None | Some(Value::Null) if signed_in => None,
+                    None | Some(Value::Null) if signed_in || password.is_some() => None,
                     Some(Value::String(t)) if (20..=200).contains(&t.len()) && t.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b)) => Some(t.as_str()),
-                    _ => return Err(Error::BadRequest("access.token is 20–200 of A-Z, a-z, 0-9, - and _ (or access.signed_in is true)".into())),
+                    _ => return Err(Error::BadRequest("access.token is 20–200 of A-Z, a-z, 0-9, - and _ (or access.signed_in is true, or there's a password)".into())),
                 };
                 if signed_in && self.cfg.web_url.is_none() {
                     return Err(Error::Conflict("signing in needs roll's dashboard address on this node (web_url)".into()));
@@ -1895,9 +1913,9 @@ impl Apps {
                     Some(Value::String(h)) if h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()) => Some(h.to_ascii_lowercase()),
                     Some(_) => return Err(Error::BadRequest("access.bypass_sha256 is a SHA-256 in hex".into())),
                 };
-                Some(Some(Access { token_hash: token.map(crate::public::token_hash), bypass_hash: bypass, signed_in }))
+                Some(Some(Access { token_hash: token.map(crate::public::token_hash), bypass_hash: bypass, signed_in, password_hash: password }))
             }
-            Some(_) => return Err(Error::BadRequest("access is {token?, signed_in?, bypass_sha256?} or null".into())),
+            Some(_) => return Err(Error::BadRequest("access is {token?, signed_in?, password?, bypass_sha256?} or null".into())),
         };
         // A new environment may start with another's variables (cloning staging from production).
         let variables_from = match o.get("variables_from") {
@@ -2427,6 +2445,14 @@ impl Apps {
                 // Its token is a credential: never shown, as a sealed variable.
                 trace_endpoint = true;
             }
+        }
+        // A site's functions service: where its edge functions' `context.next()` reaches the
+        // site (this listener, as instances reach it; `crate::edge`), set at start so the runtime
+        // makes it reachable.
+        if svc.build.builder == crate::model::Builder::Functions
+            && let Some(base) = &self.cfg.otlp_base
+        {
+            vars.insert("ROLL_EDGE_BASE".into(), (self.deps.runtime.reach(base.trim_end_matches('/')), "roll"));
         }
         let sid = svc.id.clone();
         let links = self.db(move |s| s.links_minted(&sid)).await?;
