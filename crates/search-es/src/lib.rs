@@ -18,6 +18,7 @@ pub mod analytics;
 pub mod api;
 pub mod azure;
 pub mod blob;
+pub mod branch;
 pub mod breaker;
 pub mod cluster;
 pub mod document;

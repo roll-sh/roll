@@ -711,7 +711,11 @@ pub async fn put_repository(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let mut settings = settings;
     validate_repository(ctx, &name, &ty, &settings)?;
     let secrets = cloud::take_secrets(ctx.cluster, &ty, &mut settings);
-    let repo = Repository { ty, settings, secrets };
+    let mut repo = Repository { ty, settings, secrets };
+    // A branch registers its parent's bucket read-only unless told otherwise.
+    if repo.settings.get("readonly").is_none() && crate::branch::inherited_location(ctx.cluster, &ctx.state(), &repo) {
+        repo.settings.set("readonly", "true");
+    }
     // A bucket is checked once registered (a write, a read and a delete); a repository that
     // fails stays registered, as on Elasticsearch, and the error is the answer.
     let registered = (repo.in_bucket() && verify).then(|| (name.clone(), repo.clone()));
@@ -1547,6 +1551,9 @@ pub async fn clone(ctx: &Ctx<'_>) -> EsResult<Reply> {
     validate_snapshot_name(&repo, &target)?;
     let now = ctx.now_ms;
     let target_uuid = random_uuid();
+    if ctx.state().metadata.repositories.get(&repo).is_some_and(|r| r.read_only()) {
+        return Err(repository_exception(&repo, "cannot create snapshot in a readonly repository"));
+    }
     let bucket = s3::bucket_repository(&ctx.state(), &repo);
     let durable = ctx.cluster.engine.snapshot_storage().filter(|_| bucket.is_none());
     let _taking = durable.as_ref().map(|_| ctx.cluster.snapshot_data.taking(&target_uuid));

@@ -347,6 +347,7 @@ pub fn spec_for(c: &SearchCluster) -> ClusterSpec {
     spec.destructive_requires_name = c.destructive_requires_name;
     spec.ip_allowlist = allowlist_of(&c.ip_allowlist);
     spec.catalog_id = Some(c.id.clone());
+    spec.branch_of = c.parent_id.clone();
     spec
 }
 

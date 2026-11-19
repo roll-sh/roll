@@ -102,8 +102,12 @@ fn str_of<'a>(v: &'a Value, k: &str) -> &'a str {
 }
 
 /// When a policy runs next: the first scheduled time after its last change, its last run and
-/// the last start, whichever is latest.
+/// the last start, whichever is latest. Never for a policy a branch inherited
+/// ([`crate::branch`]).
 fn policy_next(st: &ClusterState, rec: &Value) -> Option<i64> {
+    if crate::branch::paused_policy(rec) {
+        return None;
+    }
     let sched = schedule_of(str_of(policy_body(rec), "schedule"))?;
     let modified = num(rec, "modified_date").unwrap_or(0);
     let reference = modified.max(num(rec, "last_run").unwrap_or(0)).max(started_at(st));
@@ -172,11 +176,13 @@ impl Retention {
     }
 }
 
-/// Policies with a retention, with their repositories.
+/// Policies with a retention, with their repositories (not those a branch inherited: their
+/// snapshots are the parent's).
 fn retained(st: &ClusterState) -> Vec<(String, String, Retention, i64)> {
     st.metadata
         .xpack
         .iter(POLICIES)
+        .filter(|(_, rec)| !crate::branch::paused_policy(rec))
         .filter_map(|(id, rec)| {
             let p = policy_body(rec);
             Retention::of(p).map(|r| (id.clone(), str_of(p, "repository").to_string(), r, num(rec, "modified_date").unwrap_or(0)))
@@ -744,7 +750,8 @@ fn item(ctx: &Ctx, st: &ClusterState, id: &str, rec: &Value) -> Value {
             m.insert(k.into(), invocation(v, human));
         }
     }
-    if let Some(next) = schedule_of(str_of(policy_body(rec), "schedule")).and_then(|s| next_after(&s, modified, ctx.now_ms.max(modified))) {
+    let next = schedule_of(str_of(policy_body(rec), "schedule")).filter(|_| !crate::branch::paused_policy(rec)).and_then(|s| next_after(&s, modified, ctx.now_ms.max(modified)));
+    if let Some(next) = next {
         time_field(&mut m, "next_execution_millis", "next_execution", next, human);
     }
     m.insert("stats".into(), policy_stats(st, id));

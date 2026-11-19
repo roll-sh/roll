@@ -400,9 +400,13 @@ async fn cleanup_generated(env: &Env<'_>, name: Option<&str>) -> Outcome {
     }
 }
 
-/// `CleanupSnapshotStep`: deletes the snapshot the execution state names, if it exists.
+/// `CleanupSnapshotStep`: deletes the snapshot the execution state names, if it exists. On a
+/// branch, one in a repository inherited from the parent is the parent's: it stays.
 async fn cleanup_snapshot(env: &Env<'_>, e: &Exec) -> Outcome {
     let (Some(repo), Some(snap)) = (e.snapshot_repository.as_deref(), e.snapshot_name.as_deref()) else { return Outcome::Next };
+    if crate::branch::inherited_repository(env.cluster, &env.cluster.state(), repo) {
+        return Outcome::Next;
+    }
     match env.call("DELETE", &format!("/_snapshot/{}/{}", enc(repo), enc(snap)), None).await {
         Ok(_) => Outcome::Next,
         Err(err) if matches!(err.get("type").and_then(Value::as_str), Some("snapshot_missing_exception" | "repository_missing_exception")) => Outcome::Next,

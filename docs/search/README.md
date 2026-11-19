@@ -142,6 +142,34 @@ them (`api::Caller`):
 `crates/search-control/tests/control.rs` `people_see_only_their_own_clusters` and
 `people_are_held_to_their_cluster_caps` cover it.
 
+**Branches and what they inherit.** A branch starts from a copy of its parent's state, its
+recurring jobs and outside storage included. So that it never acts as its parent, the first
+time a branch loads (before any job can run) roll marks what it inherited
+(`search_es::branch`; the control plane passes the parent's id as `ClusterConfig::branch_of`):
+
+- Repositories in a bucket the tenant named (`s3`, `gcs`, `azure`) are registered read-only, as
+  Elastic Cloud registers another deployment's repository. The branch lists and restores the
+  parent's snapshots there; creating, cloning and deleting snapshots, `_cleanup` and SLM
+  retention are refused with Elasticsearch's read-only repository errors. Registering a
+  repository at an inherited location again keeps it read-only unless the request says
+  `readonly: false` (the owner's decision); a repository at a new location behaves as on any
+  cluster. roll's default repository (`found-snapshots`) and `fs` repositories keep their
+  contents in the cluster's own storage, which a branch has its own copy of: they stay writable,
+  and the branch's snapshots and deletions there never reach the parent's.
+- SLM policies stay visible but don't run, and their retention deletes nothing:
+  `last_failure` says the policy was inherited, and `next_execution` is left out. Putting the
+  policy again makes it the branch's own.
+- Watches are inactive (`status.state.active: false`, as `_deactivate` leaves them), so a
+  webhook or email isn't sent twice. Activating one is the branch owner's decision.
+- Connectors are recorded too, for syncs that read a source with stored credentials (#318) to
+  stay paused on the branch.
+- ILM, ISM, data stream lifecycles, transforms and rollups work inside the branch's own indices
+  and keep running. A step of theirs that writes to an inherited repository is refused like
+  any write there, and ILM's `cleanup-snapshot` leaves a snapshot in one alone (it is the
+  parent's).
+
+`a_branch_runs_none_of_its_parents_jobs` in the same file covers it.
+
 **IP allowlists** (Elastic Cloud's traffic filters, AWS OpenSearch Service's IP policies). A
 cluster's `ip_allowlist` lists the networks that may reach its endpoint: at most 64 entries,
 each a CIDR or address, IPv4 or IPv6, given as a string or `{cidr, description?}` (as roll

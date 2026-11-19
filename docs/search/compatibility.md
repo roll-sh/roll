@@ -493,6 +493,12 @@ A refused transform or rollup job stays stopped. Watches and SLM policies are ch
 every run, and ILM steps retry, so they resume when a disabled user is enabled again. An
 invalidated key never acts again: its jobs need setting up again by a user who can act (a
 transform `_update`, a policy or watch `PUT`, a new rollup job).
+A branch (README, "Branches and what they inherit") differs from the cluster it copies, which
+Elasticsearch has no counterpart of: its inherited bucket repositories (`s3`, `gcs`, `azure`)
+are registered with `readonly: true`, as Elastic Cloud registers another deployment's
+repository; its inherited SLM policies don't run and record why in `last_failure` (no
+`next_execution`); its inherited watches are inactive. Cloning a snapshot into any read-only
+repository is refused as on Elasticsearch ("cannot create snapshot in a readonly repository").
 The `watcher` suite's webhooks and `http` inputs call the node itself: its test cluster sets
 `roll.watcher.allow_private_hosts` (a roll-only option in `extended.txt`), which nothing else does.
 
