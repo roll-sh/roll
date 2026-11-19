@@ -5076,6 +5076,94 @@ outside roll, on #132), #166 (a gateway into private networks, on #132), #169 (a
 guard's scans audited as `secrets.guard`, for roll MCP), #173 (MongoDB Atlas, on #136), #194
 (TOTP keys).
 
+**State, 2026-11-19 18:40.** Batch 4 is on main (ba8cdc422, ci green): #248, #262, #264, #274, #276,
+#279, #284, #329, #365, #370 and #392 in round 1; #303 and #367; #281; #290; then #304, #86 and #394, in
+one lock turn. Main's tree after it was the combined gate's tree minus #330, exactly. The gate's three
+failures came from outside the batch, and each was checked:
+- redis-server's compat had a flake: green on rerun, and green on main;
+- roll-cluster's Postgres suite had timing failures under load: 3/3 green alone on the tree and on main;
+- `mq-amqp`'s client matrix is blocked by the server's firewall (Docker to host), like four `test:pg`
+  restore tests.
+
+Batch 5 (each gated on its own, none enqueued):
+- #277: secret requests, with an `rlq_` answer token apart from the id, roll MCP's finding, at 7da58b03c;
+- #357: the issuer, with no token for an untrusted preview and an emergency `rotate --now --retire`,
+  at b58f4d2f8; #281 is now on main;
+- #407: references resolved as their maker (`bind_ref`, `bind_ref_runtime`, `resolve_as`,
+  `digest_as`), at 4ea68773a;
+- #330: Store in roll (its own gate was still running at the land);
+- #397: roll.toml's `[secrets]`, which the person approves;
+- #430: least-privilege token defaults, the first hour, and the Syncs tab split in three;
+- #432: Postgres decoy roles (on #392, now main);
+- the agents-sandbox reveal check (`feature/roll-secrets-sandbox-reveal`, gating).
+
+The other threads' work that builds on these:
+- search's #361 builds on #407;
+- previews' #436 (`roll://` in env, approved);
+- apps' git-login and `roll://` variables (on #329, then #407);
+- roll MCP's value-request tools (on #277) and `secrets_verify_audit` (on #281).
+
+roll MCP adds no cut-off tool: #304 is a person's call, since it can revoke the agent's own token.
+
+**The thirty-second product review** (2026-11-19 morning, against Vault/OpenBao, Infisical, Doppler,
+AWS, 1Password, Akeyless, Bitwarden SM and GitGuardian; open PRs and branches checked first). The store
+is still level with or ahead of the category. The real gaps are elsewhere: three places where
+credentials reach someone who was never checked (two on main, one in our own #357), the missing project
+members, the first hour, and the other products' credential inputs. Ranked:
+
+1. **roll apps' Git login by secret name** (on main, the #361 hole live). `PUT …/git-login {secret}`
+   is apps `write`. Each fetch resolves that key from production, sensitive keys included, and sends it
+   as Basic auth to the source URL's host, which the caller chose. Asked of roll apps (2026-11-19): a
+   reference that is reveal-checked when set, a stored maker, and `maker_reaches` before each fetch.
+   Stopgap: `deploy` instead of `write`, and no sensitive keys.
+2. **#357 before it lands** (out of batch 4; fixing):
+   - `ForApps::issue` gave untrusted `pv-…` previews tokens, so a fork's code got a cloud session
+     through a `*` trust;
+   - an emergency `rotate --now --retire KID`;
+   - a separate digest key (planned).
+3. **Agents' sandboxes copy an environment without the person's reveal** (on main):
+   - `for_owner` only checks owner management and `counts_for_repo`;
+   - the fix is to check `Caller::allows(Reveal, env)` and store the maker;
+   - S, this side's `for_owner` plus the agents surface.
+4. **Project members and roles for people** (R1, L): no thread owns it; draft the design here.
+5. **Token defaults** (P13, S):
+   - the CLI gives every environment, `reveal` and no expiry; the dashboard pre-picks production and 90
+     days;
+   - proposal: `--for-env` required (or the directory's setup environment, never a protected one
+     without the flag), 90 days by default, and `--no-expiry` explicit;
+   - the dashboard pre-picks development.
+6. **The first hour after #370:**
+   - create or pick a project from `setup`;
+   - empty states offer `roll login <origin>`;
+   - split the Syncs tab (15 panels) into Syncs, Credentials, and Keys and certificates.
+7. **One `[secrets]` table, three owners:** #303's `RawSecrets` (deny unknown) must accept #397's
+   keys when both land.
+8. **Plaintext credentials in other products' stores:**
+   - search's cluster password, webhook and review-app secrets, and preview vars;
+   - `AiConfig.secret_key` derives `Debug`;
+   - seal each, and write `Debug` by hand (search, code and previews threads).
+9. **`roll://` where other products take keys,** each with a reveal check when set, a maker and
+   `maker_reaches`:
+   - previews' variables;
+   - apps' drains and on-call keys;
+   - registry logins;
+   - search's snapshots (#361, fixed that way) and connectors (#318: pause a branch or restore);
+   - agents' endpoints, through the daemon's own login;
+   - reviewer keys.
+10. **Use without seeing:** a proxy that swaps a placeholder for the key, only for the key's bound host
+    (Infisical Agent Vault, Akeyless SecretlessAI). L; waits on previews, apps and agents' proxies.
+11. **Unmeasured:**
+    - #281's head row under many concurrent writers on Postgres (measure before it lands);
+    - #248's "1,000 pods … 0.1 core" is arithmetic, not a load run.
+12. **Test gap:** rolld booting sealed (#367): no product or lease before the unseal, and every reader
+    gets the key after it.
+
+Doc fixes found:
+- `:70` `secrets = "development"` reads as top-level roll.toml (it's per `[checks.<name>]`);
+- "Done and in PR #20" (merged 2026-11-15);
+- "Open pull requests after this one" lists #30–#63 as open;
+- #357's "same check as `resolve`".
+
 **State, 2026-11-18 13:25.** Built today, each green and mergeable: #248 (the polling path), #262
 (Terraform for batch 1's kinds), #264 (doc fixes), #274 (queue links), #276 (a split deployment key),
 #277 (secret requests), #279 (queues' default-exchange permission), #281 (a tamper-evident audit log),
@@ -5178,7 +5266,7 @@ cache waited out. Ranked now:
      the CLI instead (the approval link at once, then a remembered "allow from now on"); remembered
      approvals are already per environment and folder and tied to the asking client (revocable on the
      token page); roll MCP adds 7- and 30-day choices next.
-   - P7–P8, **tests** (building: `feature/roll-secrets-test-gaps`): `roll run --watch`, the six links
+   - P7–P8, **tests** (#394, on main 2026-11-19): `roll run --watch`, the six links
      to roll's own products, and a `pnpm test:secrets` gate.
      The links test found **an authentication bypass in roll redis**: `AUTH default <db>_<anything>`
      answered +OK (a `nopass` default user behind the platform-secret check), so any password, and any
