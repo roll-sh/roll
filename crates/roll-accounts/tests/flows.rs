@@ -958,6 +958,10 @@ async fn passkeys_sign_people_in_on_their_own_or_as_a_second_factor() {
     let a = env.call(&mut c, Method::POST, "/v1/accounts/signin/passkey", Some(json!({ "id": o["id"], "credential": phone.get(&o, WEB) }))).await;
     assert_eq!((a.status, a.json["status"].as_str(), a.json["user"]["email"].as_str()), (StatusCode::OK, Some("signed_in"), Some("ada@example.com")), "{}", a.json);
     assert_eq!(env.call(&mut c, Method::GET, "/v1/accounts/me", None).await.status, StatusCode::OK);
+    // Her sessions say how each signed in: this one with the passkey, the first by email code.
+    let sessions = env.call(&mut c, Method::GET, "/v1/accounts/me/sessions", None).await.json;
+    let how: Vec<(Value, Value, Value)> = sessions.as_array().unwrap().iter().map(|s| (s["current"].clone(), s["method"].clone(), s["passkey"].clone())).collect();
+    assert_eq!(how, [(json!(true), json!("passkey"), json!(true)), (json!(false), json!("email"), json!(false))], "{sessions}");
     // Refused: another site's origin, an authenticator that didn't verify the person, a copied key.
     let refused = |browser: &mut Browser, credential: Value, id: Value| {
         let env = &env;

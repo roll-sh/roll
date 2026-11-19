@@ -394,6 +394,11 @@ pub struct SessionInfo {
     pub expires_at: i64,
     pub user_agent: String,
     pub current: bool,
+    /// How it signed in: `email`, `github`, `google`, `sso` or `passkey` (absent: older sessions).
+    pub method: Option<String>,
+    /// Whether a passkey was used in it (to sign in, as its second factor, or to confirm it's
+    /// you): with `sso`, what phishing-resistant sign-in counts.
+    pub passkey: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -615,9 +620,10 @@ impl Accounts {
     /// A new session for `user`: full, or owing a second factor when they have one on. Refused
     /// for a person whose domain's SSO connection enforces it ([`Accounts::issue_sso`] signs them
     /// in).
-    pub fn issue(&self, user: &str, user_agent: &str) -> Result<Issued> {
+    /// A session for a person signed in by `method` (`email`, `github`, `google`).
+    pub fn issue(&self, user: &str, user_agent: &str, method: &str) -> Result<Issued> {
         self.sso_not_enforced(user)?;
-        self.issue_session(user, user_agent, None, false)
+        self.issue_session(user, user_agent, Some(method), false)
     }
 
     /// A session for a person their company's SSO provider (connection `connection`) just signed
@@ -712,12 +718,9 @@ impl Accounts {
         let now = self.db.now_ms()?;
         let all = self.db.read(|c| {
             c.query(
-                "SELECT id, created_at, seen_at, expires_at, user_agent FROM sessions WHERE user_id = ? AND level = 'full' AND expires_at > ? ORDER BY created_at DESC, id",
+                &format!("SELECT {SESSION_COLUMNS} FROM sessions WHERE user_id = ? AND level = 'full' AND expires_at > ? ORDER BY created_at DESC, id"),
                 params![user, now],
-                |r| {
-                    let id: String = r.get(0)?;
-                    Ok(SessionInfo { current: id == current, id, created_at: r.get(1)?, seen_at: r.get(2)?, expires_at: r.get(3)?, user_agent: r.get(4)? })
-                },
+                |r| session_row(r, current),
             )
         })?;
         // As `resolve` sees them: the company's idle timeout and longest session end some early.
@@ -735,10 +738,7 @@ impl Accounts {
 
     pub(crate) fn session_info(&self, id: &str) -> Result<SessionInfo> {
         let row = self.db.read(|c| {
-            c.query_row("SELECT id, created_at, seen_at, expires_at, user_agent FROM sessions WHERE id = ?", [id], |r| {
-                Ok(SessionInfo { id: r.get(0)?, created_at: r.get(1)?, seen_at: r.get(2)?, expires_at: r.get(3)?, user_agent: r.get(4)?, current: true })
-            })
-            .optional()
+            c.query_row(&format!("SELECT {SESSION_COLUMNS} FROM sessions WHERE id = ?"), [id], |r| session_row(r, id)).optional()
         })?;
         row.ok_or_else(Error::signed_out)
     }
@@ -1220,6 +1220,24 @@ impl roll_auth::Sessions for Resolver {
                 .map_err(|e| e.to_string())?
         })
     }
+}
+
+/// A session as people see it: [`SessionInfo`]'s columns, in [`session_row`]'s order.
+const SESSION_COLUMNS: &str = "id, created_at, seen_at, expires_at, user_agent, method, passkey_at";
+
+fn session_row(r: &code_sql::Row<'_>, current: &str) -> code_sql::Result<SessionInfo> {
+    let id: String = r.get(0)?;
+    Ok(SessionInfo {
+        current: id == current,
+        id,
+        created_at: r.get(1)?,
+        seen_at: r.get(2)?,
+        expires_at: r.get(3)?,
+        user_agent: r.get(4)?,
+        // An SSO session's method names its connection (`sso`); others say how they began.
+        method: r.get(5)?,
+        passkey: r.get::<_, Option<i64>>(6)?.is_some(),
+    })
 }
 
 fn load_user(c: &code_sql::Conn<'_>, id: &str) -> code_sql::Result<Option<User>> {
