@@ -890,7 +890,7 @@ waits on a sibling PR reaching main is last.
    public buckets, search clusters with no IP allowlist, previews shared outside the team; search's
    cross-cluster remotes (#347) and inference secrets (#134) as read tools (linking stays the
    cluster admin's) (`feature/roll-mcp-next-7`, this PR). Ready, waiting for apps' turn (after search's;
-   `feature/roll-mcp-apps-tools-3`, cut from apps #384, its PR opened once apps' stack is on main):
+   `feature/roll-mcp-apps-tools-4`, on apps #385, its PR opened once apps' stack is on main):
    `apps_deploy_vulnerabilities` (`severity`), `apps_environment_slo`, `apps_list_forms`,
    `apps_form_submissions` (a reveal; in lockdown each submission's `fields` are withheld,
    `Tool::outside`: anyone can submit a site's form) and `apps_delete_form_submission`; then
