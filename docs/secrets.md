@@ -542,6 +542,8 @@ data key encrypts every value                     (aad "roll-secrets:v1:<project
   binds the ciphertext to roll secrets. Rotation works the same with `ROLL_SECRET_KEY_KMS_PREVIOUS`.
   If KMS can't decrypt it, every route answers 503 with KMS's error code (never key material), and
   health reports `"key": "kms"`.
+- **Split into shares.** `roll secrets key split` and `combine` hold the deployment key as N-of-M
+  shares (see "Splitting the deployment key").
 - **Key rotation.** Set the new key as `ROLL_SECRET_KEY` and the old one as
   `ROLL_SECRET_KEY_PREVIOUS`. A data key that opens only with the previous key is resealed with the
   new key on first use, so the previous key can be dropped once `GET /v1/secrets/health` reports
@@ -557,6 +559,45 @@ data key encrypts every value                     (aad "roll-secrets:v1:<project
   zeroized on drop. Error messages name keys, never values.
 - **Pending values** (change requests waiting for approval) are encrypted the same way, with
   `roll-secrets:request:<request id>:<n>` as the associated data.
+
+## Splitting the deployment key
+
+As Vault's Shamir unseal and recovery keys: the deployment key (or a backup's secret key) is split
+into shares held by different people, and any threshold of them give it back, so no one person
+holds it and losing one holder doesn't lose it. Fewer than the threshold reveal nothing about the
+key. It's a ceremony on an operator's machine: `roll secrets key` never talks to roll, and no
+share goes to rolld, the database or a log.
+
+```
+roll secrets key split --shares 5 --threshold 3 --file key        # or the key on stdin
+roll secrets key combine --out key                                 # shares on stdin, or asked for
+```
+
+- **The scheme.** Shamir's secret sharing over GF(2^8) (`crates/roll-keyshares`, with the FIPS-197
+  field vectors in its tests). A share is `rlks_` and base64url of the split's random id, the
+  threshold, the share's index, its bytes and a checksum. A mistyped or cut-short share, a share of
+  another split (an older one, or another key's) and a share given twice are each refused by name
+  (`share 2 is from a different split than share 1`). What's shared carries a check of the key, so
+  shares that don't belong together give an error, never a wrong key.
+- **Splitting.** `split` reads the key from `--file` (`<home>/secrets.key` on one node), else stdin,
+  asked for without echo on a terminal; from KMS, `aws kms decrypt … --query Plaintext --output text
+  | base64 -d | roll secrets key split …`. Surrounding whitespace isn't part of the key, as for rolld.
+  It prints one share per line, or writes `roll-key-share-N-of-M` files (0600) with `--out-dir`.
+- **Who holds them.** One share per person, each kept apart from the others and from the servers:
+  a password manager vault of their own, or a sealed envelope in a safe. Threshold 3 of 5 tolerates
+  two holders being away or gone. Record who holds which index, never a share, in the runbook.
+- **Recovering.** Any threshold of the holders run `combine` on one machine, each typing or pasting
+  their share when asked (nothing echoes; a bad share is refused and asked for again). The key goes
+  to stdout or `--out` (0600), from where it's set as `ROLL_SECRET_KEY` (or encrypted for
+  `ROLL_SECRET_KEY_KMS`) as usual: `ROLL_SECRET_KEY="$(roll secrets key combine)" rolld …`. rolld
+  doesn't start from shares itself.
+- **Rotating.** Shares follow the key: after a rotation (see "Encryption"), split the new key and
+  have holders destroy the old shares once health reports `"resealed": all` and the previous key is
+  dropped. A new split has a new id, so an old share mixed into it is refused, not misread.
+- **Backups without the one holder.** A backup opens only with its secret key (see "Backup and
+  restore"); split that key the same way, so any threshold of holders restore it:
+  `roll secrets keygen --out k && roll secrets key split --shares 5 --threshold 3 --file k --out-dir
+  shares && rm k`, then at restore time `roll secrets key combine --out k` and `restore … --key k`.
 
 ## Model
 
@@ -2907,6 +2948,9 @@ required keys. The archive is sealed to that key (`roll-seal-v1`, associated dat
 opens it; `POST …/backup {recipient}` (admin, audited `project.backup`) is the call. Linked keys
 carry their link and no value: a restore issues its own credentials. Personal values, history,
 leases, tokens and identities aren't in it.
+So that a backup restores without the one person who holds its secret key, split that key into
+shares (`roll secrets key split --file roll-secrets-backup.key`; see "Splitting the deployment
+key").
 
 Environments → Backup downloads the same file from the dashboard, sealed to a public key pasted
 there: the browser never holds the secret key.
