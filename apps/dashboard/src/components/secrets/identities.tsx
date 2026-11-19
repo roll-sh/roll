@@ -7,18 +7,26 @@ import { ago, button, card, Chip, dangerButton, ErrorNote, errorText, field, gho
 
 const GITHUB = "https://token.actions.githubusercontent.com";
 const GITLAB = "https://gitlab.com";
-type Provider = "github" | "gitlab" | "other";
+/** Azure Pipelines' issuer, one per organization (its id: `$(System.CollectionId)`). */
+const AZURE = "https://vstoken.dev.azure.com/";
+/** The audience of every Azure Pipelines token: Azure's own, not this server's. */
+const AZURE_AUDIENCE = "api://AzureADTokenExchange";
+type Provider = "github" | "gitlab" | "azure" | "other";
 
 /** What an identity takes, in a few words: `acme/web · refs/heads/main`. */
 function identitySummary(i: Pick<Identity, "issuer" | "subject" | "claims">): string {
-  const repo = i.issuer === GITHUB ? /^repo:([^:]+):/.exec(i.subject)?.[1] : i.issuer === GITLAB ? /^project_path:([^:]+):/.exec(i.subject)?.[1] : undefined;
+  const repo = i.issuer === GITHUB ? /^repo:([^:]+):/.exec(i.subject)?.[1] : i.issuer === GITLAB ? /^project_path:([^:]+):/.exec(i.subject)?.[1] : i.issuer.startsWith(AZURE) ? i.subject.replace(/^p:\/\//, "") : undefined;
   const claims = Object.entries(i.claims).map(([k, v]) => (k === "ref" ? v : `${k}=${v}`));
   return [repo ?? i.subject, ...claims].join(" · ");
 }
 
-/** The workflow lines a GitHub Actions job needs to log in as `id`. */
-function workflow(id: string, env: string): string {
-  return ["permissions: { id-token: write, contents: read }", `env: { ROLL_API_URL: ${ROLL_API}, ROLL_IDENTITY: ${id} }`, "steps:", `  - run: roll run --env ${env} -- ./deploy.sh`].join("\n");
+/** The workflow lines a GitHub Actions job (or an Azure pipeline) needs to log in as `i`. */
+function workflow(i: Identity, env: string): string {
+  if (i.issuer.startsWith(AZURE)) {
+    // System.AccessToken reaches a script only when mapped: roll asks Azure for the pipeline's token with it.
+    return [`variables: { ROLL_API_URL: ${ROLL_API}, ROLL_IDENTITY: ${i.id} }`, "steps:", `  - script: roll run --env ${env} -- ./deploy.sh`, "    env: { SYSTEM_ACCESSTOKEN: $(System.AccessToken) }"].join("\n");
+  }
+  return ["permissions: { id-token: write, contents: read }", `env: { ROLL_API_URL: ${ROLL_API}, ROLL_IDENTITY: ${i.id} }`, "steps:", `  - run: roll run --env ${env} -- ./deploy.sh`].join("\n");
 }
 
 /**
@@ -43,19 +51,19 @@ export function Identities() {
         </button>
       }
     >
-      <p className="mb-2 text-[11.5px] text-muted">CI jobs and clusters log in with their own OIDC token (GitHub Actions, GitLab, Kubernetes) and get a token for minutes: nothing to store or rotate.</p>
+      <p className="mb-2 text-[11.5px] text-muted">CI jobs and clusters log in with their own OIDC token (GitHub Actions, GitLab, Azure Pipelines, Kubernetes) and get a token for minutes: nothing to store or rotate.</p>
       {made && (
         <div className="fade-in mb-3 rounded-xl border border-accent/40 bg-panel p-3 shadow-card inset-shadow-highlight" role="status">
           <p className="text-[12.5px]">
-            <b className="font-medium">{made.name}</b> <span className="text-muted">is ready.{made.issuer === GITHUB ? " In the workflow:" : ` Set ROLL_IDENTITY=${made.id} and ROLL_OIDC_TOKEN (or ROLL_OIDC_TOKEN_FILE) in the workload.`}</span>
+            <b className="font-medium">{made.name}</b> <span className="text-muted">is ready.{made.issuer === GITHUB ? " In the workflow:" : made.issuer.startsWith(AZURE) ? " In the pipeline:" : ` Set ROLL_IDENTITY=${made.id} and ROLL_OIDC_TOKEN (or ROLL_OIDC_TOKEN_FILE) in the workload.`}</span>
           </p>
-          {made.issuer === GITHUB && (
+          {(made.issuer === GITHUB || made.issuer.startsWith(AZURE)) && (
             <div className="mt-2 flex items-start gap-2">
-              <pre className="min-w-0 flex-1 overflow-x-auto rounded-md border border-line-2 bg-panel-2 px-2 py-1.5 font-mono text-[11.5px] leading-relaxed select-all">{workflow(made.id, made.environments?.[0] ?? "production")}</pre>
+              <pre className="min-w-0 flex-1 overflow-x-auto rounded-md border border-line-2 bg-panel-2 px-2 py-1.5 font-mono text-[11.5px] leading-relaxed select-all">{workflow(made, made.environments?.[0] ?? "production")}</pre>
               <button
                 className={button}
                 onClick={() => {
-                  void navigator.clipboard?.writeText(workflow(made.id, made.environments?.[0] ?? "production"));
+                  void navigator.clipboard?.writeText(workflow(made, made.environments?.[0] ?? "production"));
                   setCopied(true);
                   setTimeout(() => setCopied(false), 1200);
                 }}
@@ -158,6 +166,9 @@ function jwksHasKeys(text: string): boolean {
   }
 }
 const GITLAB_PATH = /^[\w.-]+(\/[\w.-]+)+$/;
+/** An Azure DevOps organization's id (a GUID), and one pipeline: `organization/project/pipeline`. */
+const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const PIPELINE = /^[^/*\s][^/*]*\/[^/*]+\/[^/*]+$/;
 
 function NewIdentityForm({ envs, onCreate, onCancel }: { envs: string[]; onCreate: (n: NewIdentity) => Promise<void>; onCancel: () => void }) {
   const [provider, setProvider] = useState<Provider>("github");
@@ -176,7 +187,13 @@ function NewIdentityForm({ envs, onCreate, onCancel }: { envs: string[]; onCreat
   const [busy, setBusy] = useState(false);
   const ipList = ips.split(/[\s,]+/).filter(Boolean);
   const minutes = Number(ttl);
-  const repoOk = provider === "github" ? REPO.test(repo.trim()) : provider === "gitlab" ? GITLAB_PATH.test(repo.trim()) : true;
+  const repoOk = provider === "github" ? REPO.test(repo.trim()) : provider === "gitlab" ? GITLAB_PATH.test(repo.trim()) : provider === "azure" ? GUID.test(issuer.trim()) && PIPELINE.test(repo.trim()) : true;
+  // Azure's tokens always carry Azure's audience; the others this server's.
+  const pick = (p: Provider) => {
+    setProvider(p);
+    if (p === "azure") setAudience(AZURE_AUDIENCE);
+    else if (audience === AZURE_AUDIENCE) setAudience(ROLL_API);
+  };
   // Pinned keys: the issuer is only compared with iss (a cluster's own needn't be reachable).
   const keysOk = jwks.trim() === "" || jwksHasKeys(jwks);
   const otherOk = provider !== "other" || ((jwks.trim() ? issuer.trim() !== "" : issuer.trim().startsWith("https://")) && keysOk && subject.trim() !== "" && subject.trim() !== "*");
@@ -191,6 +208,7 @@ function NewIdentityForm({ envs, onCreate, onCancel }: { envs: string[]; onCreat
     const ref: Record<string, string> = branch.trim() ? { ref: `refs/heads/${branch.trim()}` } : {};
     if (provider === "github") return { issuer: GITHUB, subject: `repo:${repo.trim()}:*`, claims: ref };
     if (provider === "gitlab") return { issuer: GITLAB, subject: `project_path:${repo.trim()}:*`, claims: branch.trim() ? { ref: branch.trim() } : {} };
+    if (provider === "azure") return { issuer: `${AZURE}${issuer.trim().toLowerCase()}`, subject: `p://${repo.trim()}`, claims: {} };
     return { issuer: issuer.trim().replace(/\/+$/, ""), subject: subject.trim(), claims: {}, ...(jwks.trim() && { jwks: jwks.trim() }) };
   };
   return (
@@ -208,13 +226,16 @@ function NewIdentityForm({ envs, onCreate, onCancel }: { envs: string[]; onCreat
       <div>
         <span className={label}>Who logs in</span>
         <div className="flex flex-wrap gap-1">
-          <Chip on={provider === "github"} onClick={() => setProvider("github")}>
+          <Chip on={provider === "github"} onClick={() => pick("github")}>
             GitHub Actions
           </Chip>
-          <Chip on={provider === "gitlab"} onClick={() => setProvider("gitlab")}>
+          <Chip on={provider === "gitlab"} onClick={() => pick("gitlab")}>
             GitLab CI
           </Chip>
-          <Chip on={provider === "other"} onClick={() => setProvider("other")}>
+          <Chip on={provider === "azure"} onClick={() => pick("azure")}>
+            Azure Pipelines
+          </Chip>
+          <Chip on={provider === "other"} onClick={() => pick("other")}>
             Other OIDC (Kubernetes…)
           </Chip>
         </div>
@@ -224,7 +245,18 @@ function NewIdentityForm({ envs, onCreate, onCancel }: { envs: string[]; onCreat
           <span className={label}>Name</span>
           <input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="deploy" className={field} />
         </label>
-        {provider === "other" ? (
+        {provider === "azure" ? (
+          <>
+            <label>
+              <span className={label}>Organization id ($(System.CollectionId))</span>
+              <input value={issuer} onChange={(e) => setIssuer(e.target.value)} placeholder="00000000-0000-0000-0000-000000000000" className={`${field} font-mono`} aria-invalid={issuer.trim() !== "" && !GUID.test(issuer.trim())} />
+            </label>
+            <label>
+              <span className={label}>Pipeline (organization/project/pipeline)</span>
+              <input value={repo} onChange={(e) => setRepo(e.target.value)} placeholder="acme/shop/deploy" className={`${field} font-mono`} aria-invalid={repo.trim() !== "" && !PIPELINE.test(repo.trim())} />
+            </label>
+          </>
+        ) : provider === "other" ? (
           <label>
             <span className={label}>Issuer (the token's iss)</span>
             <input value={issuer} onChange={(e) => setIssuer(e.target.value)} placeholder="https://oidc.eks.eu-west-1.amazonaws.com/id/…" className={`${field} font-mono`} />
@@ -235,7 +267,7 @@ function NewIdentityForm({ envs, onCreate, onCancel }: { envs: string[]; onCreat
             <input value={repo} onChange={(e) => setRepo(e.target.value)} placeholder={provider === "github" ? "acme/web" : "acme/platform/web"} className={`${field} font-mono`} aria-invalid={repo.trim() !== "" && !repoOk} />
           </label>
         )}
-        {provider === "other" ? (
+        {provider === "azure" ? null : provider === "other" ? (
           <label>
             <span className={label}>Subject (sub; * for any run)</span>
             <input value={subject} onChange={(e) => setSubject(e.target.value)} placeholder="system:serviceaccount:prod:deployer" className={`${field} font-mono`} />

@@ -11,10 +11,16 @@
 
 pub mod api;
 pub mod audit;
+mod deletion;
+mod email_change;
 mod mail;
 mod oauth;
 pub mod passkeys;
+mod export;
+pub mod attestation;
+pub mod networks;
 mod places;
+pub mod policy;
 pub mod recovery;
 mod sudo;
 mod scim;
@@ -138,6 +144,18 @@ CREATE TABLE IF NOT EXISTS sign_in_places (
     last_at INTEGER NOT NULL,
     PRIMARY KEY (user_id, place)
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS passkey_policy (
+    id INTEGER PRIMARY KEY,
+    policy TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS account_policy (
+    id INTEGER PRIMARY KEY,
+    policy TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS network_policy (
+    id INTEGER PRIMARY KEY,
+    policy TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS passkey_challenges (
     id TEXT PRIMARY KEY,
     user_id TEXT,
@@ -149,6 +167,10 @@ CREATE TABLE IF NOT EXISTS throttle (
     key TEXT PRIMARY KEY,
     n INTEGER NOT NULL,
     since INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS logout_tokens (
+    jti_hash TEXT PRIMARY KEY,
+    expires_at INTEGER NOT NULL
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS sso_connections (
     id TEXT PRIMARY KEY,
@@ -162,6 +184,15 @@ CREATE TABLE IF NOT EXISTS sso_connections (
     provision INTEGER NOT NULL,
     created_at INTEGER NOT NULL,
     challenge TEXT NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS email_changes (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    email TEXT NOT NULL,
+    code_hash TEXT NOT NULL,
+    attempts INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS scim_tokens (
     connection_id TEXT PRIMARY KEY,
@@ -349,6 +380,8 @@ pub struct User {
     pub disabled: bool,
     pub created_at: i64,
     pub totp: bool,
+    /// How many passkeys they have (with `totp`: whether they have a second factor).
+    pub passkeys: u32,
     pub identities: Vec<Identity>,
 }
 
@@ -449,6 +482,11 @@ impl Accounts {
         if !db.has_column("scim_tokens", "leaked")? {
             db.add_column("scim_tokens", "leaked", "TEXT")?;
         }
+        // A passkey's model, when a verified attestation proved it (hardware keys only).
+        if !db.has_column("passkeys", "aaguid")? {
+            db.add_column("passkeys", "aaguid", "TEXT")?;
+            db.add_column("passkeys", "model", "TEXT")?;
+        }
         // Whether a passkey is synced to the person's other devices (its authenticator says so).
         if !db.has_column("passkeys", "synced")? {
             db.add_column("passkeys", "synced", "INTEGER")?;
@@ -456,6 +494,26 @@ impl Accounts {
         // When a session last proved who it is (sudo mode): its sign-in until then.
         if !db.has_column("sessions", "verified_at")? {
             db.add_column("sessions", "verified_at", "INTEGER")?;
+        }
+        // An SSO connection's session length, and the cap a session of it carries.
+        if !db.has_column("sso_connections", "session_hours")? {
+            db.add_column("sso_connections", "session_hours", "INTEGER")?;
+        }
+        if !db.has_column("sessions", "cap_ms")? {
+            db.add_column("sessions", "cap_ms", "INTEGER")?;
+        }
+        // Which SSO connection signed a session in, and the provider's session (back-channel logout).
+        if !db.has_column("sessions", "sso_sid")? {
+            db.add_column("sessions", "sso_connection", "TEXT")?;
+            db.add_column("sessions", "sso_sid", "TEXT")?;
+        }
+        // When a session last used a passkey: phishing-resistant sign-in counts it.
+        if !db.has_column("sessions", "passkey_at")? {
+            db.add_column("sessions", "passkey_at", "INTEGER")?;
+        }
+        // A person deleted their own account: the row is a tombstone from then on.
+        if !db.has_column("users", "deleted_at")? {
+            db.add_column("users", "deleted_at", "INTEGER")?;
         }
         // How each session began (`sso`, or not): enforcing SSO ends the others.
         if !db.has_column("sessions", "method")? {
@@ -511,7 +569,9 @@ impl Accounts {
         })?;
         let Some(((id, user, level), (seen_at, expires_at), (handle, admin, disabled, code_owner))) = row else { return Ok(None) };
         let full = level == "full";
-        if disabled || expires_at <= now || (full && seen_at + SESSION_IDLE_MS <= now) {
+        // A company's idle timeout (its account policy), else roll's week.
+        let idle = self.account_policy()?.idle_ms();
+        if disabled || expires_at <= now || (full && seen_at + idle <= now) {
             return Ok(None);
         }
         if !full {
@@ -521,6 +581,22 @@ impl Accounts {
             self.db.write(|c| c.execute("UPDATE sessions SET seen_at = ? WHERE token_hash = ?", params![now, hash]))?;
         }
         Ok(Some(roll_auth::Session::Full(roll_auth::SignedIn { user, handle, admin, code_owner, session: id })))
+    }
+
+    /// Whether session `id` (`ses_…`, not its token) still signs `user` in, as [`Accounts::resolve`]
+    /// would decide for its cookie: full, not expired or idle, its user not disabled. Signing out,
+    /// revoking it and disabling the user all end it. Nothing is cached, and nothing is written.
+    pub fn session_live(&self, user: &str, id: &str) -> Result<bool> {
+        let now = self.db.now_ms()?;
+        let row = self.db.read(|c| {
+            c.query_row(
+                "SELECT s.seen_at, s.expires_at, u.disabled FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.id = ? AND s.user_id = ? AND s.level = 'full'",
+                [id, user],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, bool>(2)?)),
+            )
+            .optional()
+        })?;
+        Ok(row.is_some_and(|(seen_at, expires_at, disabled)| !disabled && expires_at > now && seen_at + SESSION_IDLE_MS > now))
     }
 
     /// A user as they are now, for a token of theirs (roll-access): `None` once disabled or gone.
@@ -542,19 +618,32 @@ impl Accounts {
         self.issue_session(user, user_agent, None, false)
     }
 
-    /// A session for a person their company's SSO provider just signed in.
-    pub(crate) fn issue_sso(&self, user: &str, user_agent: &str) -> Result<Issued> {
-        self.issue_session(user, user_agent, Some("sso"), false)
+    /// A session for a person their company's SSO provider (connection `connection`) just signed
+    /// in: no longer than the connection's session length.
+    pub(crate) fn issue_sso(&self, user: &str, user_agent: &str, connection: &str, sid: Option<&str>) -> Result<Issued> {
+        let cap = self.db.read(|c| c.query_row("SELECT session_hours FROM sso_connections WHERE id = ?", [connection], |r| r.get::<_, Option<i64>>(0)).optional())?.flatten().filter(|h| *h > 0);
+        let issued = self.issue_capped(user, user_agent, Some("sso"), false, cap.map(|h| h * 3_600_000))?;
+        // Which connection, and the provider's own session: its back-channel logout ends this one.
+        self.db.write(|c| c.execute("UPDATE sessions SET sso_connection = ?, sso_sid = ? WHERE id = ?", params![connection, sid, issued.id]))?;
+        Ok(issued)
     }
 
     /// A session for a person a passkey signed in on its own: the authenticator verified them
     /// (a PIN or biometric) and holds the key, so it's both factors, as GitHub counts it.
     pub(crate) fn issue_passkey(&self, user: &str, user_agent: &str) -> Result<Issued> {
         self.sso_not_enforced(user)?;
-        self.issue_session(user, user_agent, Some("passkey"), true)
+        let issued = self.issue_session(user, user_agent, Some("passkey"), true)?;
+        self.mark_passkey(&issued.id)?;
+        Ok(issued)
     }
 
     fn issue_session(&self, user: &str, user_agent: &str, method: Option<&str>, both_factors: bool) -> Result<Issued> {
+        self.issue_capped(user, user_agent, method, both_factors, None)
+    }
+
+    /// [`Self::issue_session`], its whole session lasting at most `cap_ms` (an SSO connection's
+    /// session length), kept on the session so finishing a second factor keeps it.
+    fn issue_capped(&self, user: &str, user_agent: &str, method: Option<&str>, both_factors: bool, cap_ms: Option<i64>) -> Result<Issued> {
         self.provision_owner(user);
         let now = self.db.now_ms()?;
         let token = new_token("rls");
@@ -567,12 +656,12 @@ impl Accounts {
                 Some(false) => {}
             }
             let mfa = !both_factors && c.query_row("SELECT 1 FROM totp WHERE user_id = ? AND enabled = 1", [user], |_| Ok(())).optional()?.is_some();
-            let (level, ttl) = if mfa { ("mfa", SECOND_FACTOR_TTL_MS) } else { ("full", SESSION_TTL_MS) };
+            let (level, ttl) = if mfa { ("mfa", SECOND_FACTOR_TTL_MS) } else { ("full", cap_ms.map_or(SESSION_TTL_MS, |c| c.min(SESSION_TTL_MS))) };
             // The user's sessions that ended go with each new one: no sweeper needed.
             c.execute("DELETE FROM sessions WHERE user_id = ? AND (expires_at <= ? OR (level = 'full' AND seen_at <= ?))", params![user, now, now - SESSION_IDLE_MS])?;
             c.execute(
-                "INSERT INTO sessions (token_hash, id, user_id, level, created_at, seen_at, expires_at, user_agent, method) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                params![sha256_hex(&token), id, user, level, now, now, now + ttl, user_agent, method],
+                "INSERT INTO sessions (token_hash, id, user_id, level, created_at, seen_at, expires_at, user_agent, method, cap_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![sha256_hex(&token), id, user, level, now, now, now + ttl, user_agent, method, cap_ms],
             )?;
             Ok(mfa)
         })?;
@@ -583,7 +672,15 @@ impl Accounts {
     pub(crate) fn complete(&self, owed: &roll_auth::SecondFactorOwed, user_agent: &str) -> Result<Issued> {
         // A sign-in that began some other way while SSO was enforced (or before it was) doesn't
         // finish: the provider signs those people in.
-        let method = self.db.read(|c| c.query_row("SELECT method FROM sessions WHERE id = ?", [owed.session.as_str()], |r| r.get::<_, Option<String>>(0)).optional())?.flatten();
+        let row = self.db.read(|c| {
+            c.query_row("SELECT method, cap_ms, sso_connection, sso_sid FROM sessions WHERE id = ?", [owed.session.as_str()], |r| {
+                Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<i64>>(1)?, r.get::<_, Option<String>>(2)?, r.get::<_, Option<String>>(3)?))
+            })
+            .optional()
+        })?;
+        let (method, cap_ms, sso_connection, sso_sid) = row.unwrap_or((None, None, None, None));
+        // An SSO connection's session length holds past the second factor too.
+        let ttl = cap_ms.map_or(SESSION_TTL_MS, |c| c.min(SESSION_TTL_MS));
         if method.as_deref() != Some("sso") {
             self.sso_not_enforced(&owed.user)?;
         }
@@ -596,8 +693,8 @@ impl Accounts {
                 return Err(Error::signed_out());
             }
             c.execute(
-                "INSERT INTO sessions (token_hash, id, user_id, level, created_at, seen_at, expires_at, user_agent, method) VALUES (?, ?, ?, 'full', ?, ?, ?, ?, ?)",
-                params![sha256_hex(&token), id, owed.user, now, now, now + SESSION_TTL_MS, user_agent, method],
+                "INSERT INTO sessions (token_hash, id, user_id, level, created_at, seen_at, expires_at, user_agent, method, cap_ms, sso_connection, sso_sid) VALUES (?, ?, ?, 'full', ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![sha256_hex(&token), id, owed.user, now, now, now + ttl, user_agent, method, cap_ms, sso_connection, sso_sid],
             )?;
             Ok(())
         })?;
@@ -651,8 +748,18 @@ impl Accounts {
         Ok(self.db.read(|c| c.query_row("SELECT code_owner_id FROM users WHERE id = ?", [user], |r| r.get::<_, Option<String>>(0)).optional())?.flatten())
     }
 
+    /// The handles of the people `ids` name (at most 500), whatever their state.
+    pub fn handles(&self, ids: &[String]) -> Result<Vec<(String, String)>> {
+        let ids = &ids[..ids.len().min(500)];
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let marks = vec!["?"; ids.len()].join(", ");
+        Ok(self.db.read(|c| c.query(&format!("SELECT id, handle FROM users WHERE id IN ({marks})"), ids, |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))))?)
+    }
+
     pub fn users(&self) -> Result<Vec<User>> {
-        let ids = self.db.read(|c| c.query("SELECT id FROM users ORDER BY created_at, id", (), |r| r.get::<_, String>(0)))?;
+        let ids = self.db.read(|c| c.query("SELECT id FROM users WHERE deleted_at IS NULL ORDER BY created_at, id", (), |r| r.get::<_, String>(0)))?;
         ids.iter().map(|id| self.user(id)).collect()
     }
 
@@ -674,7 +781,8 @@ impl Accounts {
     /// lifts only a disable of its own, never an admin's.
     pub(crate) fn update_user_by(&self, id: &str, admin: Option<bool>, disabled: Option<bool>, by: &str) -> Result<User> {
         self.db.write(|c| {
-            if c.query_row("SELECT 1 FROM users WHERE id = ?", [id], |_| Ok(())).optional()?.is_none() {
+            // A deleted account is gone for good: no admin turns it back on.
+            if c.query_row("SELECT 1 FROM users WHERE id = ? AND deleted_at IS NULL", [id], |_| Ok(())).optional()?.is_none() {
                 return Err(Error::NotFound(format!("no user {id}")));
             }
             if let Some(a) = admin {
@@ -1022,6 +1130,10 @@ impl roll_auth::Sessions for Resolver {
         self.0.person(user).map_err(|e| e.to_string())
     }
 
+    fn handles(&self, ids: &[String]) -> Result<Vec<(String, String)>, String> {
+        self.0.handles(ids).map_err(|e| e.to_string())
+    }
+
     fn sso_trust<'a>(&'a self, id: &'a str) -> roll_auth::BoxFuture<'a, Result<Option<roll_auth::SsoTrust>, String>> {
         let (accounts, id) = (self.0.clone(), id.to_string());
         Box::pin(async move {
@@ -1038,6 +1150,18 @@ impl roll_auth::Sessions for Resolver {
         let (accounts, user, session) = (self.0.clone(), user.to_string(), session.to_string());
         Box::pin(async move {
             tokio::task::spawn_blocking(move || accounts.fresh_for(&user, &session).map_err(|e| e.to_string())).await.map_err(|e| e.to_string())?
+        })
+    }
+
+    fn missing<'a>(&'a self, user: &'a str, session: &'a str) -> roll_auth::BoxFuture<'a, Result<Option<roll_auth::Missing>, String>> {
+        let (accounts, user, session) = (self.0.clone(), user.to_string(), session.to_string());
+        Box::pin(async move { tokio::task::spawn_blocking(move || accounts.missing(&user, &session).map_err(|e| e.to_string())).await.map_err(|e| e.to_string())? })
+    }
+
+    fn network_ok<'a>(&'a self, _user: &'a str, ip: Option<std::net::IpAddr>) -> roll_auth::BoxFuture<'a, Result<bool, String>> {
+        let accounts = self.0.clone();
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || accounts.network_policy().map(|p| p.allows(ip)).map_err(|e| e.to_string())).await.map_err(|e| e.to_string())?
         })
     }
 
@@ -1097,12 +1221,14 @@ fn load_user(c: &code_sql::Conn<'_>, id: &str) -> code_sql::Result<Option<User>>
                 disabled: r.get(5)?,
                 created_at: r.get(6)?,
                 totp: false,
+                passkeys: 0,
                 identities: Vec::new(),
             })
         })
         .optional()?;
     let Some(mut user) = user else { return Ok(None) };
     user.totp = c.query_row("SELECT 1 FROM totp WHERE user_id = ? AND enabled = 1", [id], |_| Ok(())).optional()?.is_some();
+    user.passkeys = c.query_row("SELECT COUNT(*) FROM passkeys WHERE user_id = ?", [id], |r| r.get::<_, i64>(0))?.clamp(0, u32::MAX as i64) as u32;
     user.identities = c.query("SELECT provider, login, email FROM identities WHERE user_id = ? ORDER BY provider", [id], |r| {
         Ok(Identity { provider: r.get(0)?, login: r.get(1)?, email: r.get(2)? })
     })?;

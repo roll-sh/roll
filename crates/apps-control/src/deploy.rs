@@ -1406,7 +1406,7 @@ impl Apps {
             tag: format!("roll-apps-{}:{}", svc.id.strip_prefix("svc_").unwrap_or(&svc.id), d.id.strip_prefix("dep_").unwrap_or(&d.id)),
             cpu: 2.0,
             memory_mb: 4096,
-            timeout: self.cfg.build_timeout,
+            timeout: build_timeout(svc.build.timeout_s, self.cfg.build_timeout, log),
             own_dockerfile: plan.provider == apps_build::Provider::Dockerfile,
             env: build_env,
             env_hash,
@@ -1536,6 +1536,9 @@ impl Apps {
             }
             _ => None,
         };
+        // Other ports its custom domains send to (Railway's target ports).
+        let (sid, en) = (svc.id.clone(), env.name.clone());
+        let domain_ports = self.db(move |s| s.domain_ports(&sid, &en)).await?;
         let spec = InstanceSpec {
             name: String::new(),
             service: svc.id.clone(),
@@ -1545,6 +1548,7 @@ impl Apps {
             command: run.start.clone(),
             vars,
             port: if run.kind == RunType::Web { run.port } else { None },
+            ports: if run.kind == RunType::Web && !closed { domain_ports } else { Vec::new() },
             cpu: run.cpu,
             memory_mb: run.memory_mb,
             network: Some(network),
@@ -1725,6 +1729,8 @@ impl Apps {
                 }
             }
         }
+        // Its environments that follow the project's secrets: watched here now.
+        self.watch_secrets_of(service).await;
     }
 
     async fn release_service(self: &Arc<Self>, service: &str) {
@@ -1990,6 +1996,8 @@ impl Apps {
             }
             if n.is_multiple_of(60) && !self.watching_secrets.swap(true, std::sync::atomic::Ordering::SeqCst) {
                 let this = self.clone();
+                // A safety net: each watched environment has a long poll of its own; this starts
+                // any that isn't running (a resumed environment) and checks once.
                 tokio::spawn(async move {
                     this.watch_secrets().await;
                     this.watching_secrets.store(false, std::sync::atomic::Ordering::SeqCst);
@@ -2706,6 +2714,18 @@ fn build_failure(lines: &[String]) -> Option<String> {
     })
 }
 
+
+/// How long a build may take: the service's `build.timeout_s`, held to the node's own limit.
+fn build_timeout(own: Option<u32>, node: Duration, log: &LogSink) -> Duration {
+    match own.map(|s| Duration::from_secs(s.into())) {
+        Some(t) if t > node => {
+            log.line(format!("build.timeout_s is {} minutes; this node builds for at most {}", t.as_secs() / 60, node.as_secs() / 60));
+            node
+        }
+        Some(t) => t,
+        None => node,
+    }
+}
 
 /// A closed environment's proxy variables (`proxy` for its listed hosts): `HTTP_PROXY` and
 /// `HTTPS_PROXY` in both cases, and `NO_PROXY` naming what's reached directly: the host, its
