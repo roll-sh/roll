@@ -1986,7 +1986,9 @@ impl EnvLive {
     }
 
     async fn reap_web(self: &Arc<Self>, tpl: &Arc<Template>) {
-        let run = &tpl.run;
+        // Its floor as its schedule has it now.
+        let scheduled = tpl.run.at(code_sql::now_ms());
+        let run = &scheduled;
         // A deployment's own URL's instances are reap_viewed's, not part of the scale.
         let insts: Vec<Arc<Inst>> = self.instances().into_iter().filter(|i| !self.only_viewed(&i.deployment)).collect();
         let suspend_after = Duration::from_secs(run.suspend_after_s as u64);
@@ -2115,7 +2117,8 @@ impl EnvLive {
     }
 
     async fn keep_workers(self: &Arc<Self>, tpl: &Arc<Template>) {
-        let run = &tpl.run;
+        let scheduled = tpl.run.at(code_sql::now_ms());
+        let run = &scheduled;
         // A worker that follows its work runs what its backlog wants; else its floor.
         let target = match &run.scale {
             Some(_) => self.wanted.load(Ordering::SeqCst).clamp(run.min_instances, run.max_instances.max(run.min_instances)),

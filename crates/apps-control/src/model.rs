@@ -525,6 +525,10 @@ pub struct Run {
     /// `[metrics]`) and shown on Metrics with what an OpenTelemetry SDK sends.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metrics: Option<Scrape>,
+    /// Floors by the clock (AWS's scheduled actions, Azure's autoscale profiles): in any of a
+    /// rule's weekly windows its `min_instances` is the floor, when higher.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub schedule_scale: Vec<ScaleWindow>,
     /// How a new deployment takes over: at once, or a share of requests at a time.
     pub rollout: Rollout,
     /// The app speaks HTTP/2 without TLS (h2c, prior knowledge), as a gRPC server does: the
@@ -596,6 +600,32 @@ pub struct Run {
     /// the rollout, not beside it. A rollback is never held. Changing it is a deploy.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub block_on: Option<Severity>,
+}
+
+/// A floor for some hours of the week ([`Run::schedule_scale`]).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScaleWindow {
+    pub windows: Vec<crate::freeze::Window>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+    pub min_instances: u32,
+}
+
+impl ScaleWindow {
+    fn on(&self, now: i64) -> bool {
+        crate::freeze::Freeze { until: None, windows: self.windows.clone(), timezone: self.timezone.clone(), reason: String::new() }.on(now)
+    }
+}
+
+impl Run {
+    /// These settings with the floor its schedule asks for at `now` (the reaper's view).
+    pub fn at(&self, now: i64) -> Run {
+        let floor = self.schedule_scale.iter().filter(|w| w.on(now)).map(|w| w.min_instances).max().unwrap_or(0);
+        let mut r = self.clone();
+        r.min_instances = r.min_instances.max(floor.min(r.max_instances));
+        r
+    }
 }
 
 /// Where an app's Prometheus endpoint is ([`crate::prom`]): its port (the app's own by default)
@@ -1004,6 +1034,7 @@ impl Default for Run {
             block_on: None,
             slo: None,
             metrics: None,
+            schedule_scale: Vec::new(),
         }
     }
 }
@@ -1053,6 +1084,15 @@ impl Run {
             && (!(90.0..=99.999).contains(&s.objective) || !(1..=60).contains(&s.window_days) || s.latency_ms.is_some_and(|ms| !(1..=60_000).contains(&ms)))
         {
             return bad("slo is {objective: 90–99.999, latency_ms?: 1–60000, window_days?: 1–60}");
+        }
+        if self.schedule_scale.len() > 10 {
+            return bad("schedule_scale is at most 10 rules");
+        }
+        for w in &self.schedule_scale {
+            if w.windows.is_empty() || w.min_instances > self.max_instances.max(1) {
+                return bad("schedule_scale's rules are {windows: [{from, to}], timezone?, min_instances: up to max_instances}");
+            }
+            crate::freeze::Freeze { until: None, windows: w.windows.clone(), timezone: w.timezone.clone(), reason: String::new() }.check().map_err(|e| Error::BadRequest(format!("run.schedule_scale: {e}")))?;
         }
         if let Some(m) = &self.metrics {
             if !matches!(self.kind, RunType::Web | RunType::Worker) {
