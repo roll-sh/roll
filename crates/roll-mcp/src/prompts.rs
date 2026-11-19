@@ -203,6 +203,7 @@ pub fn source(prompt: &str, arg: &str) -> Option<Source> {
         "project" => Some(workspace_projects()),
         "service" => Some(Source { tool: "apps_list_services", args: |_| json!({}), fields: &["id"] }),
         "env" => Some(Source { tool: "apps_list_environments", args: |ctx| json!({ "service": ctx["service"] }), fields: &["name"] }),
+        "branch" => crate::ask::source("postgres", "branch"),
         _ => None,
     }
 }
