@@ -16726,3 +16726,128 @@ hand: all pass. Quick-check's first run found three wire tests (`database_settin
 `databases_open_and_close`, `startup_names_cut_to_namedatalen`) sending `CREATE DATABASE ...;
 ...` in one Query, which PostgreSQL refuses: they send it alone now. The new golden and both
 protocol cases fail on the parent's build (`PROTOCOL_SERVER`) and pass on these commits.
+
+## Behaviour round 6 (agent 265, 2026-11-19)
+
+Recorded against a private PostgreSQL 18.6 (`a265-pg`, the reference image
+`postgres@sha256:77f58511...`, `--locale=C`, autovacuum's naptime an hour). Probes in
+`~/.cache/a265/probe`: `cmp.sh <file> [port]` runs a SQL file in a fresh database on both servers
+and diffs (agent 262's), the engine past the model with `ENGENV=ROLL_MODEL_MAX_VERSIONS=1000
+./eng.sh <binary> <port>`.
+
+### Tables past the model's limit (item 1)
+
+What 262's list had as "ctid for tables with a primary key" is exact already for rows an INSERT
+or COPY put in (each version's TID stored with it, or kept in `EstHeap::moved`): `big3.sql` /
+`big4.sql` (30,000 rows by INSERT ... SELECT and by COPY, a seventh deleted) match row for row.
+Where every row's ctid was wrong was a **rewrite**: a table too big to model rewritten by VACUUM
+FULL, CLUSTER, ALTER TABLE (a type change, a volatile default), CREATE TABLE AS, a materialized
+view's load, then (say) ADD PRIMARY KEY, showed its rows' key stand-ins (`(1906390491,37004)`) and
+had its heap's file at the rows' pages without the bulk extension's (17 pages for PostgreSQL's 32).
+Now (`exec/sizing.rs`):
+- `loaded` (CREATE TABLE AS, a refresh, ALTER TABLE's rewrite) places each row as the estimate's
+  bulk insert would, with the load's `InsertMode::bulk()` state (RelationAddBlocks' extensions),
+  and returns the TIDs, which the callers already store with the rows (`stamp_tids`,
+  `put_row`), as for a modelled heap. Rows in key order are `EstOrder::InOrder`, else `Placed`.
+- `rewritten_estimated` (VACUUM FULL, CLUSTER): the rows in the clustering index's order, or in
+  the heap's: storage order for an `InOrder` table; for a `Placed` one each row's place
+  (`estimated_rank`, 8 bytes a row while it runs, as a heap-order scan of such a table holds), the
+  rows out of storage order (`heaporder::displaced`) taken apart and merged in by place, so a
+  VACUUM FULL after an update puts the new version last as PostgreSQL's does. Each row is stored
+  again with its new TID (batches of 4,096: the scan is let go before they are written), as the
+  modelled path does and as PostgreSQL's rewrite writes the whole heap. An `Unplaced` table keeps
+  the old behaviour (its heap order isn't known).
+- `EstHeap::skip_fsm` (bit 2 of the record's flag byte: no new record tag, an older build ignores
+  it): the new pages a bulk insert that skipped the free space map added are out of another
+  transaction's reach: its writer has no target block and the map nothing, so it takes the file's
+  last page (RelationGetBufferForTuple's `nblocks - 1`, new), then extends; the loading
+  transaction's own writes go on at its target page. A VACUUM records them (cleared in
+  `measured_live`). `UPDATE` after `ALTER TABLE ... TYPE` of 3,000 rows: `(31,1)` as PostgreSQL's
+  (was `(16,23)`), pg_relation_size 32 pages (was 17).
+- Found on the way, modelled tables too: a **materialized view's rows had no system columns**
+  (`column "ctid" does not exist`); its scan now carries its storage's (`ctid`, `xmin`, ...),
+  `tableoid` the view's oid (`binder/select.rs`, `system_column`).
+
+Matched at the limit lowered to 1,000 and at the default: `big5.sql`, `big6.sql`, `big7.sql`,
+`test1.sql` (VACUUM FULL after a delete and after an update, CLUSTER on a non-key index and the
+heap-order scan after it, ALTER TABLE ... TYPE and an update after it, CREATE TABLE AS's size, a
+materialized view and its refresh). Test `big_tables::rewrites_place_rows_past_the_model`
+(PostgreSQL's answers, both limits; its queries differ on the parent's build). Nothing changes
+for the per-row write paths (one flag test where a write takes a new page).
+
+Not done, with reasons:
+- **The xmax old snapshots see on a replaced version** (a running, aborted or committed updater
+  read by an older snapshot; 0 here): past the model there is no old tuple to hold it, so each
+  UPDATE and DELETE would keep an entry (the old version's xmin, the updater) and its store record
+  until no snapshot can see the old version. That is a record write per UPDATE / DELETE on the
+  short-transaction path (pgbench_accounts is past the model from scale 4) and memory without a
+  bound unless a horizon-driven cleanup drops the entries: not taken this round.
+- **FOR KEY SHARE past a running update**: needs the version chain (as 262).
+- **HOT updates on pages with room, placement after VACUUM, a second UPDATE in heap order,
+  TRUNCATE then COPY into an index of repeated values**: as 262 found, each needs the heap model's
+  page state (free space, line pointers and the tuples' visibility for pruning). `big1.sql`'s
+  remaining differences are these: an update's new version on a page a dead version's pruning made
+  room on (`(0,186)`), and rows put in free line pointers after VACUUM.
+- The modelled path: CREATE TABLE AS then an INSERT in a *later* transaction goes on the load's
+  last page (`(16,23)`); PostgreSQL's relcache rebuild at the next transaction drops the
+  insertion target and takes the new last page (`(31,1)`; in the same transaction it is `(16,23)`
+  in both). The estimate does this (`skip_fsm`); the model would need its targets dropped when the
+  creating transaction commits.
+
+### Describe of a statement whose parameter type was dropped (item 2)
+
+`session/mod.rs` `describe_here`, `server.rs` `describe_msg`. A DML statement without RETURNING
+has no result row (PlanCacheComputeResultDesc's NULL): exec_describe_statement_message sends the
+stored parameter types and NoData without analysing it again, so a failing analysis there now
+answers NoData (the Bind that follows plans it, as before, `generic_failed`). One with a result
+row is revalidated: the ParameterDescription goes out first and the error after it (any
+revalidation error, not only this one), and a parameter type the catalog no longer has fails
+where the analysis first looks the old oid up (`badparams::verdict`, the Parse's model of it:
+`$1::t` is getBaseTypeAndTypmod's XX000 "cache lookup failed for type N"), not as roll's analysis with the
+type's namesake (42846). Protocol case `a265_stale_describe` (recorded with `PROTOCOL_RECORD`).
+
+### drizzle-kit's row order (item 3)
+
+Not worked on this round. The rows come from roll's information_schema relations in a nested loop
+in key order; PostgreSQL's order follows its plan (the view's DISTINCT branches sorted, a merge
+join on the namespace oid). No rule short of planning those views as PostgreSQL does was found.
+
+### EXPLAIN details (item 4)
+
+- **An inlined SQL function's equality** (`paths/pullup.rs` `pulled_join`): a one-row FROM item
+  of constants (an inlined `select $1`, a `(values (1))` row) joined in has its constants put into
+  the join's clauses; an inner join's were turned column first, so `f = t1.a` showed `(a = 1)`.
+  The clause keeps its written orientation now (`hash_swapped`): it is its class's one source
+  clause, which generate_base_implied_equalities_const gives back as it is (`(1 = a)`; `t1.a = f`
+  stays `(a = 1)`). Golden `a265_behaviour`. Left: two such clauses at different join levels
+  sharing the constant (`fsql(1) f, t t2, t where f = t.a and t2.a = f`): PostgreSQL's one class
+  generates `(a = 1)` for both; roll gives the outer one `(1 = a)`.
+- **Incremental Sort under LIMIT 1** (449.30 against 449.31): with 1,001 groups of 10 rows,
+  cost_incremental_sort's total is the input's total + 195.02 whatever the group sizes, so the
+  difference is the Index Scan's total below its second decimal (PostgreSQL's in [254.285,
+  254.29), roll's in [254.28, 254.285)), not the sort's formula. Not chased further.
+- **A merge join's inner rows** (an inner Sort shows 20,000 rows for PostgreSQL's 31): needs the
+  inner side built lazily in `HashJoinNode`'s merge mode, the node shared with hash joins, parallel
+  probes and batching (TPC-H's join path, agent 261's area this round): not done.
+
+### Measured
+
+Gate (point reads and short transactions, user instructions per operation): in process, agent
+263's method (`~/.cache/a265/inproc`: the `bench` example with the engine linked in, 1 client on
+lane A's server CPUs 6 and 7 under `tools/lane.sh a`, 100,000 rows loaded once and copied to both
+arms, (I30 s - I10 s) / (ops30 - ops10) of `perf stat -e instructions:u`), plain dist builds of
+the parent `50fd640af` and of this commit on it, three alternating pairs each. No pair counts:
+lane A carried 3.7 to 4.3 foreign cores in the point-select holds and 5.6 to 7.2 in the
+short-transaction ones. For what they show: point selects -10.0%, +0.6%, -16.5% (base 38.9 / 37.7
+/ 48.0 k), short transactions +6.0%, -15.5%, +4.0% (base 278 / 299 / 422 k): the spread of one
+binary between pairs is 25% and 50%, so neither the +0.3% bound nor a change can be read from
+them. What this commit adds on those paths: nothing per row or statement but a flag test when an
+estimated heap's write takes a new page, and closures built only when a Describe's analysis fails;
+system columns cost only where a statement names one. No PGO gate (no inlining or function
+boundary on those paths changed). A later run on a quiet lane should redo the pairs
+(`~/.cache/a265/inproc/pairs.sh point_select 3`, `short_txn 3`).
+
+Verification: quick-check with `QC_CHECKED=1` on this commit on `50fd640af` (the rebase on
+`915acffbf` takes only its HANDOFF and BENCH text): build, clippy (16 warnings, none new in
+changed files), tests 400 passed in 17 binaries and the same with `--profile verify-checked`,
+regress 51,148 / 51,150 with 0 newly differing, isolation 1,647 / 1,648, pg_dump 14,609 passed.
