@@ -1,7 +1,8 @@
 //! Cassandra and ScyllaDB outside roll, over CQL's native protocol (v4, which both speak) with
 //! TLS: the same guards as Postgres (a public address resolved here, one connection to that
-//! address, TLS verified against the URL's host with the system's roots and `ca`), and no driver
-//! that would go looking for the cluster's other nodes. Frames are nosql-proto's (bounded
+//! address, or one stream through a gateway; TLS run here either way, verified against the URL's
+//! host with the system's roots and `ca`), and no driver that would go looking for the cluster's
+//! other nodes. Frames are nosql-proto's (bounded
 //! decoding), capped at [`FRAME_MAX`]; rows are walked lazily, at most [`ROWS_MAX`].
 //!
 //! Roles are `CREATE ROLE … WITH LOGIN = true AND HASHED PASSWORD = '…'` and `ALTER ROLE … WITH
@@ -15,12 +16,11 @@
 //! granted the group. Neither has an expiry for a role: a dynamic login lasts until roll ends its
 //! lease, which drops it. Names roll checked (letters, digits, _) are quoted, so their case holds.
 
-use super::{TIMEOUT, resolve, tls_config};
+use super::{TIMEOUT, Via, tls_config};
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
 use nosql_proto::{ClientCodec, Consistency, Ctx, ErrorBody, Query, QueryParams, Request, RequestFrame, Response, ResponseFrame, ResultBody, Startup, Value, Version, code};
 use std::sync::Arc;
-use tokio::net::TcpStream;
 use tokio_rustls::rustls::pki_types::ServerName;
 use tokio_util::codec::Framed;
 
@@ -112,10 +112,10 @@ async fn hashed_blocking(password: &str) -> Result<String, String> {
     tokio::task::spawn_blocking(move || hashed(&password)).await.map_err(|e| format!("bcrypt: {e}"))?
 }
 
-type Io = tokio_rustls::client::TlsStream<TcpStream>;
+type Tls = tokio_rustls::client::TlsStream<Box<dyn super::Io>>;
 
 pub(super) struct Conn {
-    io: Framed<Io, ClientCodec>,
+    io: Framed<Tls, ClientCodec>,
     ctx: Ctx,
     host: String,
     user: String,
@@ -158,13 +158,13 @@ async fn exchange(c: &mut Conn, req: Request) -> Result<Response, String> {
     }
 }
 
-async fn connect(u: &Url, ca: Option<&str>, allow_private: bool) -> Result<Conn, String> {
-    let addr = resolve(&u.host, u.port, allow_private).await?;
-    let tcp = TcpStream::connect(addr).await.map_err(|e| format!("{}: {e}", u.host))?;
-    let _ = tcp.set_nodelay(true);
+async fn connect(u: &Url, ca: Option<&str>, via: &Via) -> Result<Conn, String> {
     let name = ServerName::try_from(u.host.clone()).map_err(|_| format!("{} isn't a host name", u.host))?;
+    let config = tls_config(ca)?;
+    // From here (an address rolld resolved and checked) or through the gateway, which dials it.
+    let io = via.dial(&u.host, u.port).await?;
     // The certificate is checked against the URL's host, whichever address it was reached at.
-    let tls = tokio_rustls::TlsConnector::from(Arc::new(tls_config(ca)?)).connect(name, tcp).await.map_err(|e| format!("{}: TLS: {e}", u.host))?;
+    let tls = tokio_rustls::TlsConnector::from(Arc::new(config)).connect(name, io).await.map_err(|e| format!("{}: TLS: {e}", u.host))?;
     let mut c = Conn { io: Framed::new(tls, ClientCodec::new().with_max_frame_size(FRAME_MAX)), ctx: Ctx::new(Version::V4), host: u.host.clone(), user: u.user.clone(), keyspace: u.keyspace.clone() };
     let mut resp = exchange(&mut c, Request::Startup(Startup::new("3.0.0"))).await?;
     let mut answered = false;
@@ -189,9 +189,9 @@ async fn connect(u: &Url, ca: Option<&str>, allow_private: bool) -> Result<Conn,
     }
 }
 
-pub(super) async fn run<T>(u: Url, ca: Option<String>, allow_private: bool, work: impl AsyncFnOnce(&mut Conn) -> Result<T, String>) -> Result<T, String> {
+pub(super) async fn run<T>(u: Url, ca: Option<String>, via: Via, work: impl AsyncFnOnce(&mut Conn) -> Result<T, String>) -> Result<T, String> {
     tokio::time::timeout(TIMEOUT, async move {
-        let mut c = connect(&u, ca.as_deref(), allow_private).await?;
+        let mut c = connect(&u, ca.as_deref(), &via).await?;
         work(&mut c).await
     })
     .await
@@ -282,10 +282,10 @@ pub(super) async fn set_own_password(c: &mut Conn, password: &str) -> Result<(),
 /// its old password, not the new one, until they expire: wait, at most [`SETTLE`], until `u` (the
 /// new password) logs in. The change is made either way, so this never fails: a login that still
 /// doesn't work is a warning naming the role.
-pub(super) async fn settled(u: &Url, ca: Option<&str>, allow_private: bool) {
+pub(super) async fn settled(u: &Url, ca: Option<&str>, via: &Via) {
     let until = tokio::time::Instant::now() + SETTLE;
     loop {
-        let why = match tokio::time::timeout(TIMEOUT, connect(u, ca, allow_private)).await {
+        let why = match tokio::time::timeout(TIMEOUT, connect(u, ca, via)).await {
             Ok(Ok(_)) => return,
             Ok(Err(e)) if e.contains("bad credentials") && tokio::time::Instant::now() < until => {
                 tokio::time::sleep(std::time::Duration::from_millis(250)).await;
@@ -331,6 +331,7 @@ fn unknown_password() -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::tests::at;
     use super::*;
     use roll_secrets::outside::OutsideDb;
 
@@ -383,7 +384,7 @@ mod tests {
     /// Statements as whoever `url` names.
     async fn cql(url: &str, ca: &str, statements: &[&str]) -> Result<(), String> {
         let statements: Vec<String> = statements.iter().map(|s| s.to_string()).collect();
-        run(parse(url).unwrap(), Some(ca.to_string()), true, async move |c| {
+        run(parse(url).unwrap(), Some(ca.to_string()), Via::Direct { allow_private: true }, async move |c| {
             for s in statements {
                 query(c, s, &[], None).await?;
             }
@@ -396,7 +397,7 @@ mod tests {
     /// and audit keyspaces' replication outnumbers one node).
     async fn cells(url: &str, ca: &str, select: &str) -> Vec<String> {
         let select = select.to_string();
-        run(parse(url).unwrap(), Some(ca.to_string()), true, async move |c| {
+        run(parse(url).unwrap(), Some(ca.to_string()), Via::Direct { allow_private: true }, async move |c| {
             let req = Request::Query(Query { query: select, params: QueryParams::new(Consistency::One) });
             let Response::Result(ResultBody::Rows(rows)) = exchange(c, req).await? else { return Err("no rows".into()) };
             Ok(rows.rows().flat_map(|row| row.take(rows.column_count()).collect::<Vec<_>>()).flatten().map(|b| String::from_utf8_lossy(&b).into_owned()).collect())
@@ -436,30 +437,30 @@ mod tests {
         let scylla = var == "ROLL_E2E_SCYLLA_URL";
         let (root2, ca2, root) = (root.clone(), ca.clone(), root);
         let sent = tokio::task::spawn_blocking(move || {
-            let g = super::super::Guarded { allow_private: true };
+            let g = super::super::tests::direct();
             let roles = ["app_blue".to_string(), "app_green".to_string()];
             let rt = tokio::runtime::Handle::current();
             let logs_in = |user: &str, password: &str| rt.block_on(cql(&as_user(&admin, user, password, ""), &ca, &[]));
             // Registering: the keyspace, both roles and the group; refusals for what isn't there.
-            g.check(&admin, Some(&ca), &roles, Some("reader")).unwrap();
-            assert!(g.check(&admin, Some(&ca), &["nobody".into()], None).unwrap_err().contains("there's no role nobody"));
-            assert!(g.check(&admin, Some(&ca), &["reader".into()], None).unwrap_err().contains("can log in"), "a role that can't log in");
-            assert!(g.check(&admin, Some(&ca), &[], Some("nope")).unwrap_err().contains("there's no role nope"));
-            assert!(g.check(&as_user(&admin, "roll_admin", &admin_pw, "nope"), Some(&ca), &[], None).unwrap_err().contains("no keyspace nope"));
-            let wrong = g.check(&as_user(&admin, "roll_admin", "fakewrongpw", "app"), Some(&ca), &[], None).unwrap_err();
+            g.check(&at(&admin, Some(&ca)), &roles, Some("reader")).unwrap();
+            assert!(g.check(&at(&admin, Some(&ca)), &["nobody".into()], None).unwrap_err().contains("there's no role nobody"));
+            assert!(g.check(&at(&admin, Some(&ca)), &["reader".into()], None).unwrap_err().contains("can log in"), "a role that can't log in");
+            assert!(g.check(&at(&admin, Some(&ca)), &[], Some("nope")).unwrap_err().contains("there's no role nope"));
+            assert!(g.check(&at(&as_user(&admin, "roll_admin", &admin_pw, "nope"), Some(&ca)), &[], None).unwrap_err().contains("no keyspace nope"));
+            let wrong = g.check(&at(&as_user(&admin, "roll_admin", "fakewrongpw", "app"), Some(&ca)), &[], None).unwrap_err();
             assert!(wrong.contains("bad credentials") && !wrong.contains("fakewrongpw"), "{wrong}");
-            let untrusted = g.check(&admin, None, &[], None).unwrap_err();
+            let untrusted = g.check(&at(&admin, None), &[], None).unwrap_err();
             assert!(untrusted.to_lowercase().contains("certificate"), "{untrusted}");
             // Rotation: the new password logs in and the old one doesn't. Cassandra 5 refuses a
             // role's second password change within 5 s (roll's turns are minutes apart at least).
             let settle = || std::thread::sleep(std::time::Duration::from_millis(5500));
             let (first, second) = (pw(), pw());
             settle();
-            g.set_password(&admin, Some(&ca), "app_blue", &first).unwrap();
+            g.set_password(&at(&admin, Some(&ca)), "app_blue", &first).unwrap();
             logs_in("app_blue", &first).unwrap();
             assert!(logs_in("app_blue", &start).is_err(), "the starting password is refused");
             settle();
-            g.set_password(&admin, Some(&ca), "app_blue", &second).unwrap();
+            g.set_password(&at(&admin, Some(&ca)), "app_blue", &second).unwrap();
             logs_in("app_blue", &second).unwrap();
             assert!(logs_in("app_blue", &first).is_err(), "the old password is refused");
             // A turn hands its password out as soon as the rotation returns, while an app still
@@ -471,14 +472,14 @@ mod tests {
                 let role = roles[i].as_str();
                 settle();
                 logs_in(role, &current[i]).unwrap();
-                g.set_password(&admin, Some(&ca), role, &next).unwrap();
+                g.set_password(&at(&admin, Some(&ca)), role, &next).unwrap();
                 logs_in(role, &next).unwrap_or_else(|e| panic!("turn {turn}: {role}'s handed-out password was refused right after the rotation: {e}"));
                 current[i] = next;
             }
             // A dynamic login: made in the group, reads the keyspace and can't write it, then is
             // gone (twice: gone counts as dropped).
             let (name, upw) = ("roll_fakefakefakefake", pw());
-            g.create_login(&admin, Some(&ca), name, &upw, "reader", 0).unwrap();
+            g.create_login(&at(&admin, Some(&ca)), name, &upw, "reader", 0).unwrap();
             let user = as_user(&admin, name, &upw, "");
             rt.block_on(cql(&user, &ca, &["SELECT v FROM app.t WHERE k = 1"])).unwrap();
             let denied = rt.block_on(cql(&user, &ca, &["INSERT INTO app.t (k, v) VALUES (2, 'two')"])).unwrap_err();
@@ -486,20 +487,20 @@ mod tests {
             // At once, though Cassandra's credentials cache would keep it for 2 s (a lease lasts
             // longer than the 5 s before its password may change).
             settle();
-            g.drop_login(&admin, Some(&ca), name).unwrap();
+            g.drop_login(&at(&admin, Some(&ca)), name).unwrap();
             assert!(logs_in(name, &upw).is_err(), "a dropped role is refused");
-            g.drop_login(&admin, Some(&ca), name).unwrap();
+            g.drop_login(&at(&admin, Some(&ca)), name).unwrap();
             // One made by the superuser, whom ScyllaDB lets send a hashed password.
             let (name, rootpw) = ("roll_fakefakefakeroot", pw());
-            g.create_login(&root, Some(&ca), name, &rootpw, "reader", 0).unwrap();
+            g.create_login(&at(&root, Some(&ca)), name, &rootpw, "reader", 0).unwrap();
             logs_in(name, &rootpw).unwrap();
-            g.drop_login(&root, Some(&ca), name).unwrap();
+            g.drop_login(&at(&root, Some(&ca)), name).unwrap();
             // The admin's own password (rotate-admin): the new one logs in and still manages the
             // roles, the old one is refused.
             let own = pw();
             settle();
-            g.set_own_password(&admin, Some(&ca), &own).unwrap();
-            g.check(&as_user(&admin, "roll_admin", &own, "app"), Some(&ca), &roles, Some("reader")).unwrap();
+            g.set_own_password(&at(&admin, Some(&ca)), &own).unwrap();
+            g.check(&at(&as_user(&admin, "roll_admin", &own, "app"), Some(&ca)), &roles, Some("reader")).unwrap();
             assert!(logs_in("roll_admin", &admin_pw).is_err(), "the admin's old password is refused");
             (first, second, upw, rootpw, own)
         })

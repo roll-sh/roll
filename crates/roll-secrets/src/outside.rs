@@ -43,25 +43,36 @@ CREATE TABLE IF NOT EXISTS outside_dbs (
 
 pub(crate) const KIND: &str = "outside_database";
 
-/// A Postgres, MySQL, SQL Server, ClickHouse, RabbitMQ, Redis, MongoDB, Elasticsearch/OpenSearch or Cassandra/ScyllaDB server outside roll, by the URL's scheme (rolld: TLS to a public address it
-/// resolved itself). Calls block; errors never carry a password.
-/// `ca` is the server's CA certificates (PEM), trusted as well as the system's.
+/// Where a database is: the admin URL, the server's CA certificates (PEM, trusted as well as the
+/// system's), and the gateway it's reached through (docs/secrets.md, "Gateways"), if any. No
+/// `Debug`: the URL holds the admin's password.
+#[derive(Clone, Copy)]
+pub struct Target<'a> {
+    pub url: &'a str,
+    pub ca: Option<&'a str>,
+    pub gateway: Option<&'a str>,
+}
+
+/// A Postgres, MySQL, SQL Server, ClickHouse, RabbitMQ, Redis, MongoDB, Elasticsearch/OpenSearch or
+/// Cassandra/ScyllaDB server outside roll, by
+/// the URL's scheme (rolld: TLS to a public address it resolved itself, or to any address through
+/// the target's gateway). Calls block; errors never carry a password.
 pub trait OutsideDb: Send + Sync {
     /// Connect with the admin URL and check the roles exist and can log in, and the group (for
     /// dynamic logins) exists.
-    fn check(&self, url: &str, ca: Option<&str>, roles: &[String], group: Option<&str>) -> std::result::Result<(), String>;
+    fn check(&self, at: &Target<'_>, roles: &[String], group: Option<&str>) -> std::result::Result<(), String>;
     /// `ALTER ROLE <role> PASSWORD <password>`.
-    fn set_password(&self, url: &str, ca: Option<&str>, role: &str, password: &str) -> std::result::Result<(), String>;
+    fn set_password(&self, at: &Target<'_>, role: &str, password: &str) -> std::result::Result<(), String>;
     /// `CREATE ROLE <name> LOGIN PASSWORD <password> VALID UNTIL <until> IN ROLE <group>`
     /// (`until`: unix ms).
-    fn create_login(&self, url: &str, ca: Option<&str>, name: &str, password: &str, group: &str, until: i64) -> std::result::Result<(), String>;
+    fn create_login(&self, at: &Target<'_>, name: &str, password: &str, group: &str, until: i64) -> std::result::Result<(), String>;
     /// `ALTER ROLE <name> VALID UNTIL <until>`.
-    fn extend_login(&self, url: &str, ca: Option<&str>, name: &str, until: i64) -> std::result::Result<(), String>;
+    fn extend_login(&self, at: &Target<'_>, name: &str, until: i64) -> std::result::Result<(), String>;
     /// End `name`'s sessions and drop it (one that owns objects is left unable to log in). A role
     /// that's gone already is fine.
-    fn drop_login(&self, url: &str, ca: Option<&str>, name: &str) -> std::result::Result<(), String>;
-    /// Set the password of the user `url` logs in as (rotating the admin credential itself).
-    fn set_own_password(&self, url: &str, ca: Option<&str>, password: &str) -> std::result::Result<(), String>;
+    fn drop_login(&self, at: &Target<'_>, name: &str) -> std::result::Result<(), String>;
+    /// Set the password of the user `at.url` logs in as (rotating the admin credential itself).
+    fn set_own_password(&self, at: &Target<'_>, password: &str) -> std::result::Result<(), String>;
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -77,6 +88,9 @@ pub struct OutsideDatabase {
     /// The server's CA certificates (PEM), when the system's don't cover it (Amazon RDS).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ca: Option<String>,
+    /// The gateway it's reached through (a private address), if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gateway: Option<String>,
     pub created_at: i64,
     pub created_by: String,
 }
@@ -112,6 +126,10 @@ pub struct NewOutsideDatabase {
     pub group: Option<String>,
     #[serde(default)]
     pub ca: Option<String>,
+    /// One of the project's gateways (`gw_…`): the database is reached through it and may have a
+    /// private address (docs/secrets.md, "Gateways").
+    #[serde(default)]
+    pub gateway: Option<String>,
 }
 
 /// What a database's provider needs to reach it.
@@ -120,6 +138,13 @@ struct Opened {
     ca: Option<String>,
     roles: Vec<String>,
     group: Option<String>,
+    gateway: Option<String>,
+}
+
+impl Opened {
+    fn at(&self) -> Target<'_> {
+        Target { url: self.url.expose(), ca: self.ca.as_deref(), gateway: self.gateway.as_deref() }
+    }
 }
 
 /// Its two roles take turns (turns.rs), named `role` in a credential's handle.
@@ -243,16 +268,16 @@ pub(crate) struct Provider {
 
 impl Provider {
     fn open(&self, id: &str) -> Result<Opened> {
-        type Row = (String, Vec<u8>, Option<Vec<u8>>, Option<String>, String, Option<String>, String);
+        type Row = (String, Vec<u8>, Option<Vec<u8>>, Option<String>, String, Option<String>, String, Option<String>);
         let row: Option<Row> = self.db.read(|c| {
             Ok::<_, Error>(
-                c.query_row("SELECT o.project_id, o.url, o.url_next, o.ca, o.roles, o.grp, p.dek FROM outside_dbs o JOIN projects p ON p.project_id = o.project_id WHERE o.id = ?", [id], |r| {
-                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))
+                c.query_row("SELECT o.project_id, o.url, o.url_next, o.ca, o.roles, o.grp, p.dek, o.gateway FROM outside_dbs o JOIN projects p ON p.project_id = o.project_id WHERE o.id = ?", [id], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?))
                 })
                 .optional()?,
             )
         })?;
-        let (project, url, next, ca, roles, group, dek) = row.ok_or_else(|| Error::Link(format!("database {id} doesn't exist any more")))?;
+        let (project, url, next, ca, roles, group, dek, gateway) = row.ok_or_else(|| Error::Link(format!("database {id} doesn't exist any more")))?;
         let inner = self.unwrap.inner(&project, &dek)?;
         let (dek, _) = self.keys.open_dek(&project, &inner)?;
         let roles: Vec<String> = serde_json::from_str(&roles).unwrap_or_default();
@@ -261,7 +286,7 @@ impl Provider {
         // logs in, it's the admin URL from now on (only then: the stored one may be fine).
         if let Some(sealed) = next {
             let candidate = dek.open(&next_aad(&project, id), &sealed)?;
-            if self.outside.check(url.expose(), ca.as_deref(), &roles, group.as_deref()).is_err() && self.outside.check(candidate.expose(), ca.as_deref(), &roles, group.as_deref()).is_ok() {
+            if self.outside.check(&Target { url: url.expose(), ca: ca.as_deref(), gateway: gateway.as_deref() }, &roles, group.as_deref()).is_err() && self.outside.check(&Target { url: candidate.expose(), ca: ca.as_deref(), gateway: gateway.as_deref() }, &roles, group.as_deref()).is_ok() {
                 let stored = dek.seal(&aad(&project, id), &candidate);
                 let now = self.db.now_ms()?;
                 self.db.write(|c| {
@@ -273,18 +298,18 @@ impl Provider {
                 url = candidate;
             }
         }
-        Ok(Opened { url, ca, roles, group })
+        Ok(Opened { url, ca, roles, group, gateway })
     }
 
     /// A dynamic login of its own, in the group, valid until the lease ends.
     fn issue_dynamic(&self, r#ref: &str, ttl_minutes: u64) -> Result<Issued> {
         let o = self.open(r#ref)?;
-        let group = o.group.ok_or_else(|| Error::BadRequest(format!("database {ref} has no group role for dynamic logins: register it with one", ref = r#ref)))?;
+        let group = o.group.clone().ok_or_else(|| Error::BadRequest(format!("database {ref} has no group role for dynamic logins: register it with one", ref = r#ref)))?;
         // 21 characters: within MySQL's 32 and Postgres's 63.
         let name = names::new_id("roll", 16);
         let pw = Value::new(password());
         let until = self.db.now_ms()? + ttl_minutes as i64 * 60_000 + SLACK_MS;
-        self.outside.create_login(o.url.expose(), o.ca.as_deref(), &name, pw.expose(), &group, until).map_err(|why| Error::Link(format!("creating a login: {why}")))?;
+        self.outside.create_login(&o.at(), &name, pw.expose(), &group, until).map_err(|why| Error::Link(format!("creating a login: {why}")))?;
         let parts = BTreeMap::from([("username".to_string(), Value::new(name.clone())), ("password".to_string(), pw)]);
         Ok(Issued { parts, handle: json!({ "login": name }) })
     }
@@ -317,11 +342,11 @@ impl LinkProvider for Provider {
         if link.mode == Mode::Dynamic {
             return self.issue_dynamic(r#ref, ttl.unwrap_or(60));
         }
-        let Opened { url, ca, roles, .. } = self.open(r#ref)?;
-        if roles.len() != 2 {
+        let o = self.open(r#ref)?;
+        if o.roles.len() != 2 {
             return Err(Error::Link(format!("database {ref} needs two roles to take turns", ref = r#ref)));
         }
-        let (role, pw, handle) = TURNS.issue(&self.db, r#ref, &roles, password, |role, pw| self.outside.set_password(url.expose(), ca.as_deref(), role, pw))?;
+        let (role, pw, handle) = TURNS.issue(&self.db, r#ref, &o.roles, password, |role, pw| self.outside.set_password(&o.at(), role, pw))?;
         let parts = BTreeMap::from([("username".to_string(), Value::new(role)), ("password".to_string(), pw)]);
         Ok(Issued { parts, handle })
     }
@@ -331,17 +356,17 @@ impl LinkProvider for Provider {
     fn revoke(&self, r#ref: &str, handle: &Json) -> Result<()> {
         if let Some(login) = handle["login"].as_str() {
             let o = self.open(r#ref)?;
-            return self.outside.drop_login(o.url.expose(), o.ca.as_deref(), login).map_err(|why| Error::Link(format!("dropping {login}: {why}")));
+            return self.outside.drop_login(&o.at(), login).map_err(|why| Error::Link(format!("dropping {login}: {why}")));
         }
-        let Opened { url, ca, roles, .. } = self.open(r#ref)?;
-        TURNS.retire(&self.db, r#ref, &roles, handle, password, |role, pw| self.outside.set_password(url.expose(), ca.as_deref(), role, pw))
+        let o = self.open(r#ref)?;
+        TURNS.retire(&self.db, r#ref, &o.roles, handle, password, |role, pw| self.outside.set_password(&o.at(), role, pw))
     }
 
     /// A dynamic login lives as long as its renewed lease.
     fn renew(&self, r#ref: &str, handle: &Json, until: i64) -> Result<()> {
         let Some(login) = handle["login"].as_str() else { return Ok(()) };
         let o = self.open(r#ref)?;
-        self.outside.extend_login(o.url.expose(), o.ca.as_deref(), login, until + SLACK_MS).map_err(|why| Error::Link(format!("extending {login}: {why}")))
+        self.outside.extend_login(&o.at(), login, until + SLACK_MS).map_err(|why| Error::Link(format!("extending {login}: {why}")))
     }
 
     /// One database's managed credential at a time: two environments would hand out each other's
@@ -356,8 +381,8 @@ impl Secrets {
         caller.need(Action::Read, &Scope::project(project))?;
         self.project(project)?;
         self.db.read(|c| {
-            Ok(c.query("SELECT id, name, host, roles, grp, ca, created_at, created_by FROM outside_dbs WHERE project_id = ? ORDER BY name", [project], |r| {
-                Ok(OutsideDatabase { id: r.get(0)?, name: r.get(1)?, host: r.get(2)?, roles: serde_json::from_str(&r.get::<_, String>(3)?).unwrap_or_default(), group: r.get(4)?, ca: r.get(5)?, created_at: r.get(6)?, created_by: r.get(7)? })
+            Ok(c.query("SELECT id, name, host, roles, grp, ca, created_at, created_by, gateway FROM outside_dbs WHERE project_id = ? ORDER BY name", [project], |r| {
+                Ok(OutsideDatabase { id: r.get(0)?, name: r.get(1)?, host: r.get(2)?, roles: serde_json::from_str(&r.get::<_, String>(3)?).unwrap_or_default(), group: r.get(4)?, ca: r.get(5)?, gateway: r.get(8)?, created_at: r.get(6)?, created_by: r.get(7)? })
             })?)
         })
     }
@@ -377,13 +402,19 @@ impl Secrets {
         }
         let host = check_url(&n.url)?;
         let ca = check_ca(n.ca)?;
-        outside.check(&n.url, ca.as_deref(), &n.roles, group.as_deref()).map_err(|why| Error::BadRequest(format!("roll couldn't use the database: {why}")))?;
+        let gateway = self.check_gateway(project, n.gateway)?;
+        outside.check(&Target { url: &n.url, ca: ca.as_deref(), gateway: gateway.as_deref() }, &n.roles, group.as_deref()).map_err(|why| Error::BadRequest(format!("roll couldn't use the database: {why}")))?;
         let dek = self.project(project)?;
         let id = names::new_id("odb", 16);
         let sealed = dek.seal(&aad(project, &id), &Value::new(n.url.clone()));
         let now = self.db.now_ms()?;
-        let d = OutsideDatabase { id: id.clone(), name: n.name, host, roles: n.roles, group, ca, created_at: now, created_by: caller.principal.clone() };
+        let d = OutsideDatabase { id: id.clone(), name: n.name, host, roles: n.roles, group, ca, gateway, created_at: now, created_by: caller.principal.clone() };
         self.db.write(|c| {
+            if let Some(g) = &d.gateway
+                && c.query_row("SELECT 1 FROM gateways WHERE id = ? AND project_id = ?", [g, project], |_| Ok(())).optional()?.is_none()
+            {
+                return Err(Error::BadRequest(format!("gateway {g} was deleted")));
+            }
             if c.query_row("SELECT 1 FROM outside_dbs WHERE project_id = ? AND name = ?", [project, &d.name], |_| Ok(())).optional()?.is_some() {
                 return Err(Error::Conflict("exists", format!("a database named {} exists", d.name)));
             }
@@ -393,10 +424,11 @@ impl Secrets {
                 return Err(Error::Conflict("exists", format!("{other} already takes turns on these roles at {}", d.host)));
             }
             c.execute(
-                "INSERT INTO outside_dbs (id, project_id, name, host, url, ca, roles, grp, state, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                params![id, project, d.name, d.host, sealed, d.ca, serde_json::to_string(&d.roles).expect("roles"), d.group, crate::turns::Turns::initial(), now, d.created_by],
+                "INSERT INTO outside_dbs (id, project_id, name, host, url, ca, roles, grp, state, created_at, created_by, gateway) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![id, project, d.name, d.host, sealed, d.ca, serde_json::to_string(&d.roles).expect("roles"), d.group, crate::turns::Turns::initial(), now, d.created_by, d.gateway],
             )?;
-            audit::record(c, project, caller, "outside_db.add", None, None, &[], &format!("added database {} ({})", d.name, d.host), now)
+            let via = d.gateway.as_deref().map(|g| format!(" through {g}")).unwrap_or_default();
+            audit::record(c, project, caller, "outside_db.add", None, None, &[], &format!("added database {} ({}{via})", d.name, d.host), now)
         })?;
         Ok(d)
     }
@@ -404,8 +436,8 @@ impl Secrets {
     fn outside_database(&self, project: &str, id: &str) -> Result<OutsideDatabase> {
         self.db
             .read(|c| {
-                c.query_row("SELECT id, name, host, roles, grp, ca, created_at, created_by FROM outside_dbs WHERE project_id = ? AND id = ?", [project, id], |r| {
-                    Ok(OutsideDatabase { id: r.get(0)?, name: r.get(1)?, host: r.get(2)?, roles: serde_json::from_str(&r.get::<_, String>(3)?).unwrap_or_default(), group: r.get(4)?, ca: r.get(5)?, created_at: r.get(6)?, created_by: r.get(7)? })
+                c.query_row("SELECT id, name, host, roles, grp, ca, created_at, created_by, gateway FROM outside_dbs WHERE project_id = ? AND id = ?", [project, id], |r| {
+                    Ok(OutsideDatabase { id: r.get(0)?, name: r.get(1)?, host: r.get(2)?, roles: serde_json::from_str(&r.get::<_, String>(3)?).unwrap_or_default(), group: r.get(4)?, ca: r.get(5)?, gateway: r.get(8)?, created_at: r.get(6)?, created_by: r.get(7)? })
                 })
                 .optional()
             })?
@@ -436,7 +468,7 @@ impl Secrets {
                 if moved && self.db.read(|c| in_use(c, project, id))? > 0 {
                     return Err(Error::Conflict("in_use", format!("{} moves to another server only once no key links to it and no lease is live: its logins are on {}", d.name, d.host)));
                 }
-                outside.check(u, ca.as_deref(), &d.roles, d.group.as_deref()).map_err(|why| Error::BadRequest(format!("roll couldn't use the database: {why}")))?;
+                outside.check(&Target { url: u, ca: ca.as_deref(), gateway: d.gateway.as_deref() }, &d.roles, d.group.as_deref()).map_err(|why| Error::BadRequest(format!("roll couldn't use the database: {why}")))?;
                 Some((host, dek.seal(&aad(project, id), &Value::new(u.to_string())), moved))
             }
             None => None,
@@ -491,7 +523,10 @@ impl Secrets {
             return Err(Error::Conflict("conflict", format!("{} is being rotated: try again in a few minutes", d.name)));
         }
         let current = dek.open(&aad(project, id), &url)?;
-        let logs_in = |u: &Value| outside.check(u.expose(), d.ca.as_deref(), &d.roles, d.group.as_deref()).is_ok();
+        fn at<'a>(u: &'a Value, d: &'a OutsideDatabase) -> Target<'a> {
+            Target { url: u.expose(), ca: d.ca.as_deref(), gateway: d.gateway.as_deref() }
+        }
+        let logs_in = |u: &Value| outside.check(&at(u, &d), &d.roles, d.group.as_deref()).is_ok();
         // Every change below is a compare-and-swap on the url_next it read, so two nodes never
         // drop a password the other may have set.
         let promote = |next: &Value, sealed_next: &[u8], what: &str| -> Result<bool> {
@@ -543,7 +578,7 @@ impl Secrets {
         if claimed == 0 {
             return Err(Error::Conflict("conflict", format!("{} is being rotated: try again in a moment", d.name)));
         }
-        if let Err(why) = outside.set_own_password(current.expose(), d.ca.as_deref(), &pw) {
+        if let Err(why) = outside.set_own_password(&at(&current, &d), &pw) {
             // An error doesn't mean the server kept the old one (a reply lost after the change).
             if logs_in(&next) {
                 if !promote(&next, &sealed, "rotated")? {
@@ -562,7 +597,7 @@ impl Secrets {
             keep_working(&next)?;
         }
         outside
-            .check(next.expose(), d.ca.as_deref(), &d.roles, d.group.as_deref())
+            .check(&at(&next, &d), &d.roles, d.group.as_deref())
             .map_err(|why| Error::Link(format!("the admin password was rotated and kept, but logging in with it failed: {why}")))?;
         self.outside_database(project, id)
     }

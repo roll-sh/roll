@@ -6991,6 +6991,7 @@ dependencies = [
  "roll-auth",
  "roll-cluster",
  "roll-fetch",
+ "roll-gateway",
  "roll-previews",
  "roll-secrets",
  "roll-workspace",
@@ -7090,6 +7091,23 @@ dependencies = [
  "tar",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "roll-gateway"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "futures-util",
+ "hickory-resolver",
+ "httpdate",
+ "ipnet",
+ "rand 0.8.8",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite 0.30.0",
 ]
 
 [[package]]
@@ -7261,6 +7279,8 @@ dependencies = [
  "hmac 0.12.1",
  "http-body 1.1.0",
  "http-body-util",
+ "hyper 1.12.0",
+ "hyper-util",
  "ipnet",
  "kafka-protocol",
  "lapin",
@@ -7306,6 +7326,7 @@ dependencies = [
  "roll-auth",
  "roll-cluster",
  "roll-edge",
+ "roll-gateway",
  "roll-mcp",
  "roll-net",
  "roll-oidc",
@@ -7323,6 +7344,7 @@ dependencies = [
  "search-control",
  "search-server",
  "search-store",
+ "serde",
  "serde_json",
  "sha2 0.10.9",
  "stream-broker",

@@ -1534,6 +1534,152 @@ between domain controllers (a user made on one and bound on another right after)
 
 A directory a key links to, or with a retired password or a dynamic user still to delete, can't be
 deleted (409).
+### Gateways (private networks)
+
+A database or directory that only has a private address (inside a VPC, behind a firewall) is reached
+through a **gateway**, as Infisical's and Akeyless' gateways reach them: a small process the team
+runs inside the network. It dials out to roll over one WebSocket, and roll's conversations with
+private hosts travel through it. Nothing listens inside the network, and the gateway decides what
+it may reach, not roll.
+
+**Records.** A gateway is a project resource (`gw_…`): `POST /v1/secrets/projects/{id}/gateways`
+(`admin`; `roll secrets gateways add NAME`, or the dashboard's Gateways panel) makes the record and,
+unless `"token": false`, its credential: a roll token (`rlt_…`, roll-access's) with one rule,
+`{"product": "secrets", "resources": [{"id": "gw_…"}], "actions": ["write"]}`, shown once. That
+rule reaches exactly one route, the gateway's own link; nothing else in roll names a gateway by id.
+It's made through roll-access (`Access::create_grant`, as `POST /v1/access/tokens`), so it's
+listed, revoked and audited with every other token, and roll-access looks it up on every connect.
+roll makes it for people and the operator only, never for a token (a project-wide rule doesn't
+cover a gateway's id), like identities. A gateway on Kubernetes, EC2 or in CI can instead log in
+with its own OIDC token: a workload identity made with `"gateway": "gw_…"` mints exactly that rule
+at each login (its environments, folders and actions are refused, they don't apply), for its
+`ttl_minutes`; the gateway logs in again at four fifths of its token's life (at least a minute
+before the end, timed on roll's clock from the login's `Date`) and opens a new link, which replaces
+the old one: streams in flight finish on the old link, and any asked of it after the switch open on
+the new one. Deleting or re-keying the identity drops the link at once. In the dashboard, the
+identity form's "A login gets" picks the gateway. `GET
+…/gateways` lists them with their status, `DELETE …/gateways/{id}` (`admin`; `roll secrets
+gateways rm`) deletes one no database or directory uses (409 otherwise), revokes the token made
+with it and closes its link at once.
+
+**The binary.** `roll --url https://roll.example.com secrets gateways up --gateway gw_… --allow
+10.0.0.0/8:5432 --allow ldap.corp.internal:636` (or `--allow-file FILE`, one entry a line, `#`
+comments), with the token in `ROLL_GATEWAY_TOKEN` (or `--token-file`), or `--identity idn_…` and
+the OIDC token in a file (`--oidc-token-file`, re-read at each login: Kubernetes' projected token,
+`/var/run/secrets/…`; make the identity with `roll secrets identities add NAME --issuer … --subject
+… --gateway gw_…`). It's a subcommand of `roll` (`crates/roll-cli`) beside the gateway's `ls`,
+`add` and `rm` (`roll gateway` is roll code's model gateway already), over a small crate,
+`crates/roll-gateway`, that holds the wire, the multiplexer, the allow-list and the agent loop:
+rolld and the CLI share the wire, and the crate is tested on its own (no product in it). One
+binary that's already on the machine is the simplest thing to run in a container (`roll secrets
+gateways up` is its whole entrypoint), and it needs no project: its credential names the gateway. It opens one WebSocket to `GET
+/v1/secrets/gateways/{id}/connect` and reconnects with jittered exponential backoff (0.5 s
+doubling to 30 s, ±50%); a 4401 close (credential refused or gateway deleted) stops it, unless it
+logs in through an identity, which logs in again first.
+
+**The allow-list is the gateway's.** Each `--allow` is `HOST:PORT`, `*.SUFFIX:PORT` or `CIDR:PORT`
+(IPv6 in brackets), where `PORT` is one port, a range `LOW-HIGH` (both included, 1–65535, `LOW <=
+HIGH`: `10.0.0.0/8:5432-5439`) or `*`. An entry that doesn't parse stops the gateway at start, saying
+which. The gateway refuses anything else before resolving
+or dialing: a name must match a name entry, or resolve (on the gateway, with the network's DNS) only
+to addresses inside a CIDR entry for that port; an IP literal must be inside a CIDR entry. Without
+an entry it refuses everything. So a compromised or buggy roll can't use it to scan or reach the
+rest of the network: it reaches what the team listed and nothing more. The gateway reports its list
+in its hello (shown in the Gateways panel), but roll never widens or edits it. An SRV lookup
+(`mongodb+srv://`) follows the same list: the gateway looks a record up only when the list could
+allow a target of it (a CIDR entry, or a name or suffix entry under the record's parent domain), and
+answers only when every target passes the check above; otherwise it refuses without naming the
+target to roll, and logs the target itself.
+
+**roll's own check stays.** A database or directory registered with `"gateway": "gw_…"` (a gateway
+of the same project) may name a private address or a name only the network resolves: rolld doesn't
+resolve it, and asks the gateway to open `host:port`. Every other path keeps the public-only rule
+(`ROLL_CODE_WEBHOOK_ALLOW_PRIVATE` for local development only). TLS settings don't change with a
+gateway: TLS still runs end to end from rolld to the server and is verified against the URL's host,
+so the gateway relays ciphertext and never sees a password or a query.
+
+**Wire.** Binary WebSocket messages, each `[type u8][stream u32 BE][payload]`, at most 64 KiB (both
+sides set it as the WebSocket's message limit). The gateway's first message is `hello` (JSON:
+version, its allow-list, its limits) and roll answers `welcome` (the node). Then roll sends `open`
+(JSON `{host, port}`, 1 KiB at most) with a new stream id; the gateway answers `opened` or
+`refused` (a reason: "not in the allow-list", "connection refused"), and both sides send `data`
+(up to 16 KiB), `window` (credit), `fin` (end of that direction) and `reset`. roll may also send
+`resolve` (JSON `{srv}`, an SRV name such as `_mongodb._tcp.cluster0.corp.internal`) with a new
+stream id that never becomes a stream; the gateway looks it up with the network's DNS and answers
+`resolved` (JSON `{targets}`, `host:port` each, 16 at most: more ends the link, and roll reads only
+DNS names and ports from it) or `refused`. Lookups waiting count against a link's 32 streams. Pings
+both ways every 20 s; 60 s of silence ends the link.
+
+**Bounds.** Every stream has a 256 KiB window each way: a side sends only as many bytes as the other
+granted, and grants more only as its reader takes them, so a slow reader holds at most a window,
+and a peer that sends past it ends the link. Buffers grow with the bytes actually received, never
+from a length the peer sent. A link carries at most 32 streams at once (the gateway refuses more),
+each stream lives at most 20 s (a conversation's 15 s, connecting included, plus a margin) on both
+sides, and `open` waits 10 s for an answer. Only the newest link of a gateway opens streams: a new
+connect replaces the older one, which finishes its streams (20 s at most) and closes with 4409.
+
+**Audit, both sides.** roll writes `gateway.connect` and `gateway.disconnect` rows (node, version,
+the token's id) and a `gateway.stream` row per stream (the target `host:port`, and how it ended: bytes each way, or
+the gateway's refusal).
+The gateway logs one line per stream (`stream 7 open db.internal:5432 -> 10.0.3.4:5432`, `stream 7
+closed: 1.2 KiB up, 3.4 KiB down` or `stream 8 refused 10.9.9.9:22: not in the allow-list`). Never
+the bytes, a password or the token.
+
+**Fleet.** Like an owner's agents (docs/code/cluster.md, "An owner's agents"), a gateway's link
+lives on the holder of the lease `secrets:gateway:<id>`, from rolld's roll-cluster handle: the
+connect is dispatched there (`Cluster::dispatch` forwards the upgrade), the link holds the lease's
+guard, and when the lease moves the old holder closes the link with 1012 and the gateway reconnects
+to the new one. A conversation that needs gateway X runs on X's holder: rolld dispatches the whole
+provider call (`check`, `set_password`, `create_login`, `extend_login`, `drop_login`, and a
+directory's) to the internal route `POST /internal/secrets/gateways/{id}/call`, its body sealed with
+the deployment key every node shares (the admin URL and the new password are in it), so bytes never
+stream between nodes and roll-cluster's 4 MiB forward limit holds. On one node all of this is a
+no-op: the link and the call are local.
+The internal route takes only a request another node signed (`roll_cluster::Forwarded`).
+`secrets::gateway`'s `a_gateways_link_follows_its_lease_across_two_nodes` runs two nodes in one
+process on one store and one in-memory roll-cluster backend, behind a load balancer: the link lands on
+the lease's holder, a call made on the other node is dispatched there and rotates a password on an
+HTTPS ClickHouse through the gateway, an unsigned or forged request to the internal route is
+refused (403, 401), and when the holder drains the link closes with 1012 and the gateway comes back
+on the other node, where calls work again.
+`elasticsearch_and_cassandra_are_reached_through_the_gateway_and_only_on_its_allow_list` runs a
+real gateway against an Elasticsearch-shaped HTTPS fake and a CQL fake over TLS: registering and
+rotating through the gateway, the hashed CQL statements (never the password), TLS checked in rolld
+with the database's CA, and a server the allow-list doesn't name refused by the gateway, never
+dialed.
+
+**Status.** Each link writes its status to the gateway's row (shared by every node): `connected`,
+the `node`, `version`, the allow-list it reported, `connected_at`, `last_seen_at` (every 30 s while
+up). It's online when connected and seen within 90 s.
+
+**Revocation takes effect at once.** Before every stream it opens (each provider call through the
+gateway asks for one), the link looks up its token through roll-access, as the connect does, and
+the gateway's record, never cached. If either is gone (the token revoked or expired, its maker no
+longer reaching the project, the gateway deleted), the stream is refused and the link closes with
+4401. `DELETE …/gateways/{id}`, and deleting or re-keying the identity that logged a gateway in,
+also re-check the link on the lease's holder right away, through the same dispatch as the calls
+(`Call::Recheck`), so a link with no stream open closes too. A holder that can't be reached doesn't
+fail the delete: the next stream's check covers it. An idle link still re-checks every 30 s, as a
+backstop.
+
+**Where it plugs in.** Databases outside roll (`gateway` on `POST …/outside-databases`: every
+engine, Postgres, MySQL, SQL Server, ClickHouse, RabbitMQ, Redis, MongoDB, Elasticsearch,
+OpenSearch, Cassandra and ScyllaDB, `mongodb+srv://` included) and directories (`gateway` on `POST
+…/directories`). Postgres, SQL Server, Redis, MongoDB, Cassandra and ScyllaDB take the gateway's
+stream directly (CQL's TLS runs in rolld over it, its frame and row caps as without a gateway).
+ClickHouse, RabbitMQ, Elasticsearch and OpenSearch speak HTTPS through one small
+client (hyper's, `outside/https.rs`) whose only connector is the conversation's way to the server:
+a gateway's stream, or the address rolld resolved and checked, with TLS run in rolld against the
+URL's host (SNI and verification, the engine's `ca`), no redirects, no proxy, answers read up to a
+bound. For `mongodb+srv://` the gateway looks the SRV record up (a private cluster's name usually
+resolves only inside the network); rolld still keeps only targets inside the record's parent
+domain, then opens a stream to each host it needs. MySQL and LDAP clients take a socket, so rolld
+hands them a loopback socket whose other end it relays to the stream, accepting only the connection
+its own process made (directories pin their checked address the same way). `roll secrets
+outside-databases add … --gateway gw_…`, `roll secrets directories add … --gateway gw_…`, and the
+dashboard's forms offer the project's gateways.
+
+
 
 ### Snowflake
 
@@ -3596,12 +3742,12 @@ isn't in the workspace is 404.
 | `POST /saas` | `{name, vendor, target, credential}` | 201 `SaasRotator` (`admin`; never the credential) |
 | `DELETE /saas/{id}` | | 204; 409 while a key links to it or a retired key waits (`admin`) |
 | `GET /outside-databases` | | `OutsideDatabase[]` (`read` on the project; never the URL) |
-| `POST /outside-databases` | `{name, url, roles?: [a, b], group?, ca?}` | 201 `OutsideDatabase` (`admin`; connects and checks the roles first: 400 with the server's reason) |
+| `POST /outside-databases` | `{name, url, roles?: [a, b], group?, ca?, gateway?}` | 201 `OutsideDatabase` (`admin`; connects and checks the roles first: 400 with the server's reason) |
 | `DELETE /outside-databases/{id}` | | 204; 409 while a key links to it or a retired password waits (`admin`) |
 | `PATCH /outside-databases/{id}` | `{name?, url?, ca?}` (`ca: ""` clears it) | `OutsideDatabase` (`admin`; a new URL is checked first: 400 with the server's reason) |
 | `POST /outside-databases/{id}/rotate-admin` | | `OutsideDatabase` (`admin`; 400 when the server refuses, 409 while another rotation runs, 502 when the new password was kept but doesn't log in) |
 | `GET /directories` | | `Directory[]` (`read` on the project; never the bind password) |
-| `POST /directories` | `{name, url, bind_dn, bind_password, flavor: "openldap" \| "active_directory", user_base_dn?, managed_accounts?: [dn, dn?], groups?: [dn], ca?}` | 201 `Directory` (`admin`; binds once and finds the accounts, groups and base first: 400 with the server's reason) |
+| `POST /directories` | `{name, url, bind_dn, bind_password, flavor: "openldap" \| "active_directory", user_base_dn?, managed_accounts?: [dn, dn?], groups?: [dn], ca?, gateway?}` | 201 `Directory` (`admin`; binds once and finds the accounts, groups and base first: 400 with the server's reason) |
 | `DELETE /directories/{id}` | | 204; 409 while a key links to it, or a retired password or a dynamic user waits (`admin`) |
 | `GET /snowflake-accounts` | | `SnowflakeAccount[]` (`read` on the project; never the admin key, only its fingerprint) |
 | `POST /snowflake-accounts` | `{name, account, privatelink?, admin_user, admin_role?, admin_private_key, auth?: "key_pair" \| "password", managed_user?, roles?: [role]}` | 201 `SnowflakeAccount` (`admin`; signs in once and finds the managed user and the roles first: 400 with Snowflake's reason) |
@@ -3609,6 +3755,10 @@ isn't in the workspace is 404.
 | `GET /atlas-projects` | | `AtlasProject[]` (`read` on the project; the client id, never the secret) |
 | `POST /atlas-projects` | `{name, group_id, client_id, client_secret, managed_users?: [a, b], roles?: ["role@db"]}` | 201 `AtlasProject` (`admin`; takes a token and finds the managed users first: 400 with Atlas's status and error code) |
 | `DELETE /atlas-projects/{id}` | | 204; 409 while a key links to it, or a retired password or a dynamic user waits (`admin`) |
+| `GET /gateways` | | `Gateway[]` (`read` on the project), each with its link's status |
+| `POST /gateways` | `{name, token?: false}` | 201 `{gateway: Gateway, token?: "rlt_…"}` (`admin`; the token is shown once, and made only for a person or the operator) |
+| `DELETE /gateways/{id}` | | 204, its token revoked; 409 while a database, directory or identity uses it (`admin`) |
+| `GET /v1/secrets/gateways/{id}/connect` | | The gateway's WebSocket (rolld; its token, or an identity's login made for it) |
 | `GET /cloud-accounts` | | `CloudAccount[]` (`read` on the project) |
 | `POST /cloud-accounts` | `{name, cloud: "gcp", audience, service_account}` or `{name, cloud: "azure", tenant, client_id, scope?}` | 201 `CloudAccount` (`admin`; 400 when a made-up project's token is taken, or this project's isn't) |
 | `DELETE /cloud-accounts/{id}` | | 204; 409 while a key links to it (`admin`) |
@@ -3726,7 +3876,8 @@ type Request = { id: string; environment: string; path: string; message: string;
 type FolderPolicy = { path: string; approvals: number; approvers: string[]; created_at: number; created_by: string };
 type LinkTarget = { kind: string; ref: string; name: string; fields: { field: string; label: string; modes: Link["mode"][]; secret: boolean; suggest: string; credential?: string }[] };
 type Lease = { id: string; environment: string; path: string; key: string; kind: "dynamic" | "retired"; link: Link | null; consumer: string; issued_at: number; expires_at: number; revoked_at: number | null };
-type Identity = { id: string; name: string; issuer: string; audience: string; subject: string; claims: Record<string, string>; environments: string[] | null; paths: string[] | null; actions: Action[]; ttl_minutes: number; created_at: number; created_by: string; last_used_at: number | null; last_subject: string | null; allowed_ips: string[] | null; pinned_keys?: number };
+type Identity = { id: string; name: string; issuer: string; audience: string; subject: string; claims: Record<string, string>; environments: string[] | null; paths: string[] | null; actions: Action[]; ttl_minutes: number; created_at: number; created_by: string; last_used_at: number | null; last_subject: string | null; allowed_ips: string[] | null; pinned_keys?: number; gateway?: string }; // gateway: it logs that gateway in (no environments, paths or actions)
+type Gateway = { id: string; name: string; token_id?: string; created_at: number; created_by: string; status: { online: boolean; node?: string; version?: string; allow: string[]; connected_at?: number; last_seen_at?: number } };
 type NewIdentity = { name: string; issuer: string; audience: string; subject: string; claims?: Record<string, string>; environments?: string[]; paths?: string[]; actions: Action[]; ttl_minutes?: number; allowed_ips?: string[]; jwks?: string };
 type Token = { id: string; name: string; environments: string[] | null; paths: string[] | null; actions: Action[]; expires_at: number | null; created_at: number; created_by: string; last_used_at: number | null; prefix: string; allowed_ips: string[] | null };
 type NewToken = { name: string; environments?: string[]; paths?: string[]; actions: Action[]; expires_at?: number; ttl_days?: number; allowed_ips?: string[] };
@@ -4074,8 +4225,9 @@ rotating a database's admin password and editing registrations in place (#75), s
    own X25519, long-polled watches, the cache, transit, and `AddRollSecrets` for `IConfiguration`).
    The Ansible collection is built (`sdk/ansible`, `roll.secrets`: a lookup and a module, as
    Vault's and 1Password's; `feature/roll-secrets-ansible`).
-10. **A gateway into private networks** (Infisical's and Akeyless' gateways); **ACME on project
-   CAs**.
+10. **A gateway into private networks** (Infisical's and Akeyless' gateways; built on
+   `feature/roll-secrets-gateway`, "Gateways": ClickHouse, RabbitMQ and `mongodb+srv://` through one
+   next); **ACME on project CAs**.
 11. *Landing (approved):* #20 and #62 are on main; the follow-ups go one at a time when the merge
    lock is free (the order is in "Landing").
 12. *Unblocked (#25 is on `main`):* #64 rebuilt on main (#30 onto #62: roll-access's tokens replace `rlst_`;

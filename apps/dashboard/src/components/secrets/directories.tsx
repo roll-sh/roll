@@ -2,6 +2,7 @@ import { Plus, Trash2, Users } from "lucide-react";
 import { useState } from "react";
 import type { Directory, DirectoryFlavor } from "@/lib/secrets-api";
 import { Segmented } from "../agents/ui/toggle-group";
+import { GatewayPicker } from "./gateways";
 import { useSecrets } from "./secrets-page";
 import { ActorMark, ago, button, card, dangerButton, ErrorNote, errorText, field, ghost, primary, Section, textareaField, useLoad } from "./ui";
 
@@ -27,6 +28,7 @@ export function Directories() {
   const [base, setBase] = useState("");
   const [groups, setGroups] = useState("");
   const [ca, setCa] = useState("");
+  const [gateway, setGateway] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
@@ -55,6 +57,7 @@ export function Directories() {
     setBase("");
     setGroups("");
     setCa("");
+    setGateway("");
   };
   const add = async () => {
     setBusy(true);
@@ -70,6 +73,7 @@ export function Directories() {
         user_base_dn: base.trim() || undefined,
         groups: groupList,
         ca: ca.trim() || undefined,
+        gateway: gateway || undefined,
       });
       setAdding(false);
       reset();
@@ -157,6 +161,9 @@ export function Directories() {
               <textarea value={groups} onChange={(e) => setGroups(e.target.value)} rows={2} placeholder="cn=readers,ou=groups,dc=example,dc=com" spellCheck={false} className={`${textareaField} font-mono text-[12px]`} />
             </label>
           </div>
+          <div className="sm:col-start-2 max-w-sm">
+            <GatewayPicker value={gateway} onChange={setGateway} />
+          </div>
           <details className="sm:col-start-2">
             <summary className="cursor-pointer text-[11px] text-subtle select-none">Server CA certificate (a private CA, as most domain controllers have)</summary>
             <textarea value={ca} onChange={(e) => setCa(e.target.value)} rows={4} placeholder="-----BEGIN CERTIFICATE-----" spellCheck={false} className={`${textareaField} mt-1 font-mono text-[11px]`} />
@@ -182,6 +189,7 @@ export function Directories() {
                 <span className="font-mono text-[12px]">{d.name}</span>
                 <span className="min-w-0 truncate font-mono text-[11.5px] text-subtle">{d.url}</span>
                 <span className="rounded border border-line-2 px-1 text-[10px] text-subtle">{d.flavor === "active_directory" ? "Active Directory" : "OpenLDAP"}</span>
+                {d.gateway && <span className="font-mono text-[11px] text-muted">through {d.gateway}</span>}
                 {d.managed_accounts.length > 0 && <span className="min-w-0 truncate font-mono text-[11px] text-muted">{d.managed_accounts.join(" ⇄ ")}</span>}
                 {d.user_base_dn && <span className="min-w-0 truncate font-mono text-[11px] text-muted">dynamic in {d.user_base_dn}</span>}
                 <span className="ml-auto text-[11px] text-subtle">

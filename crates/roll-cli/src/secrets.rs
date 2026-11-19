@@ -356,6 +356,10 @@ pub enum Secrets {
     /// remove.
     #[command(subcommand)]
     Atlas(AtlasCmd),
+    /// Gateways into private networks (docs/secrets.md, "Gateways"): list with their status, add
+    /// (its token printed once), remove, and `up`: run one inside the network.
+    #[command(subcommand)]
+    Gateways(GatewaysCmd),
     /// Vendor credentials roll issues and revokes keys with (SendGrid, Twilio, Okta, Entra,
     /// Auth0): list, add (the credential on stdin), remove.
     #[command(subcommand)]
@@ -687,6 +691,9 @@ pub enum DatabasesCmd {
         /// The server's CA certificates (PEM file), when the system's don't cover it (Amazon RDS).
         #[arg(long)]
         ca: Option<std::path::PathBuf>,
+        /// Reach it through one of the project's gateways (gw_…): it may have a private address.
+        #[arg(long)]
+        gateway: Option<String>,
     },
     /// Change a registration in place: its name, its CA, or (--url) its admin URL from stdin,
     /// checked before it's kept.
@@ -850,6 +857,45 @@ pub enum AtlasCmd {
 }
 
 #[derive(Subcommand)]
+pub enum GatewaysCmd {
+    #[command(alias = "list")]
+    Ls,
+    /// Make a gateway; its roll token is printed once (give it to `up` as ROLL_GATEWAY_TOKEN).
+    Add {
+        name: String,
+        /// No token: the gateway logs in through a workload identity made for it instead.
+        #[arg(long)]
+        no_token: bool,
+    },
+    Rm { id: String },
+    /// Run a gateway inside the private network: one WebSocket out to roll, and streams only to
+    /// what --allow lists (the token from ROLL_GATEWAY_TOKEN or --token-file, or --identity with
+    /// --oidc-token-file).
+    Up {
+        /// The gateway's id (gw_…).
+        #[arg(long)]
+        gateway: String,
+        /// HOST:PORT, *.SUFFIX:PORT or CIDR:PORT (IPv6 in brackets), where PORT may also be a range
+        /// LOW-HIGH (both included, 1-65535) or *; repeat it.
+        #[arg(long = "allow", num_args = 1)]
+        allow: Vec<String>,
+        /// A file of allow-list entries, one a line (# comments).
+        #[arg(long)]
+        allow_file: Option<std::path::PathBuf>,
+        /// A file holding the gateway's roll token (else ROLL_GATEWAY_TOKEN).
+        #[arg(long)]
+        token_file: Option<std::path::PathBuf>,
+        /// Log in through this workload identity (idn_…) instead of a token.
+        #[arg(long, requires = "oidc_token_file")]
+        identity: Option<String>,
+        /// The OIDC token file the identity logs in with, read again at each login (Kubernetes'
+        /// projected token).
+        #[arg(long)]
+        oidc_token_file: Option<std::path::PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
 pub enum DirectoriesCmd {
     #[command(alias = "list")]
     Ls,
@@ -874,6 +920,9 @@ pub enum DirectoriesCmd {
         /// A group each dynamic user joins.
         #[arg(long = "group", num_args = 1)]
         groups: Vec<String>,
+        /// Reach it through one of the project's gateways (gw_…): it may have a private address.
+        #[arg(long)]
+        gateway: Option<String>,
         /// The server's CA certificates (PEM file), when the system's don't cover it.
         #[arg(long)]
         ca: Option<std::path::PathBuf>,
@@ -1180,6 +1229,10 @@ pub enum Identities {
         /// cluster's own (`kubectl get --raw /openid/v1/jwks`). Then the issuer is never fetched.
         #[arg(long, value_name = "FILE")]
         jwks: Option<String>,
+        /// Log a gateway in (gw_…) instead of reading secrets: its tokens open that gateway's link
+        /// only (no --for-env, --for-path or --action).
+        #[arg(long, conflicts_with_all = ["envs", "paths", "actions"])]
+        gateway: Option<String>,
     },
     /// Replace an identity's pinned keys (the cluster rotated its signing key); its id stays.
     Keys {
@@ -1417,6 +1470,10 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             println!("{:<20} {:<14} {:<16} {:<28} v{:<4} {}{}", s(&p["project_name"]), s(&p["environment"]), s(&p["path"]), s(&p["key"]), p["version"], ago(p["updated_at"].as_i64().unwrap_or(0)), if p["linked"] == true { "  linked" } else { "" });
         }
         return Ok(());
+    }
+    // A gateway runs with its own credential, in no project's name.
+    if let Secrets::Gateways(GatewaysCmd::Up { gateway, allow, allow_file, token_file, identity, oidc_token_file }) = &cmd {
+        return gateway_up(api, gateway.clone(), allow.clone(), allow_file.clone(), token_file.clone(), identity.clone(), oidc_token_file.clone()).await;
     }
     // A key pair is this machine's, not a project's.
     if let Secrets::Keygen { out } = &cmd {
@@ -1986,7 +2043,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     println!("{}  {:<16} {:<32} {}{group}", s(&d["id"]), s(&d["name"]), s(&d["host"]), roles.join(" "));
                 }
             }
-            DatabasesCmd::Add { name, roles, group, ca } => {
+            DatabasesCmd::Add { name, roles, group, ca, gateway } => {
                 // The admin URL holds a password: never an argument.
                 if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
                     eprint!("Admin URL (postgres://admin:…@host:5432/db, mysql://…, sqlserver://…, clickhouse://…, rabbitmq://…, rediss://…, mongodb+srv://…, elasticsearch://…, opensearch://… or cassandra://…), then Enter and Ctrl-D: ");
@@ -1994,7 +2051,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 let mut url = String::new();
                 std::io::stdin().read_to_string(&mut url).context("reading the admin URL from stdin")?;
                 let ca = ca.map(|p| std::fs::read_to_string(&p).with_context(|| format!("reading {}", p.display()))).transpose()?;
-                let v = c.call(Method::POST, &format!("{}/outside-databases", c.base()), Some(json!({ "name": name, "url": url.trim(), "roles": roles, "group": group, "ca": ca }))).await?;
+                let v = c.call(Method::POST, &format!("{}/outside-databases", c.base()), Some(json!({ "name": name, "url": url.trim(), "roles": roles, "group": group, "ca": ca, "gateway": gateway }))).await?;
                 if json_out {
                     return print(&v);
                 }
@@ -2037,6 +2094,42 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 println!("Removed {id}");
             }
         },
+        Secrets::Gateways(g) => match g {
+            GatewaysCmd::Ls => {
+                let v = c.call(Method::GET, &format!("{}/gateways", c.base()), None).await?;
+                if json_out {
+                    return print(&v);
+                }
+                for g in v.as_array().into_iter().flatten() {
+                    let st = &g["status"];
+                    let state = match (st["online"].as_bool(), st["node"].as_str()) {
+                        (Some(true), Some(node)) => format!("online on {node}, roll {}", s(&st["version"])),
+                        _ => st["last_seen_at"].as_i64().map(|t| format!("offline, last seen {}", ago(t))).unwrap_or_else(|| "never connected".into()),
+                    };
+                    let allow: Vec<&str> = st["allow"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+                    println!("{}  {:<16} {state}{}", s(&g["id"]), s(&g["name"]), if allow.is_empty() { String::new() } else { format!("  allows {}", allow.join(" ")) });
+                }
+            }
+            GatewaysCmd::Add { name, no_token } => {
+                let v = c.call(Method::POST, &format!("{}/gateways", c.base()), Some(json!({ "name": name, "token": !no_token }))).await?;
+                if json_out {
+                    return print(&v);
+                }
+                let id = s(&v["gateway"]["id"]);
+                match v["token"].as_str() {
+                    Some(t) => {
+                        println!("{t}");
+                        eprintln!("Added gateway {name} ({id}). Its token is above, shown once. Inside the network:\n  ROLL_GATEWAY_TOKEN=… roll secrets gateways up --gateway {id} --allow HOST:PORT");
+                    }
+                    None => eprintln!("Added gateway {name} ({id}), without a token: make a workload identity with \"gateway\": \"{id}\" for it to log in."),
+                }
+            }
+            GatewaysCmd::Rm { id } => {
+                c.call(Method::DELETE, &format!("{}/gateways/{}", c.base(), enc(&id)), None).await?;
+                println!("Removed {id} (its token is revoked)");
+            }
+            GatewaysCmd::Up { .. } => unreachable!("handled above"),
+        },
         Secrets::Directories(d) => match d {
             DirectoriesCmd::Ls => {
                 let v = c.call(Method::GET, &format!("{}/directories", c.base()), None).await?;
@@ -2049,7 +2142,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     println!("{}  {:<16} {:<32} {:<16} {}{users}", s(&d["id"]), s(&d["name"]), s(&d["url"]), s(&d["flavor"]), accounts.join(" "));
                 }
             }
-            DirectoriesCmd::Add { name, url, bind_dn, flavor, accounts, user_base_dn, groups, ca } => {
+            DirectoriesCmd::Add { name, url, bind_dn, flavor, accounts, user_base_dn, groups, ca, gateway } => {
                 // The bind password: never an argument.
                 if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
                     eprint!("Bind password for {bind_dn}, then Enter and Ctrl-D: ");
@@ -2058,7 +2151,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 std::io::stdin().read_to_string(&mut password).context("reading the bind password from stdin")?;
                 let password = password.trim_end_matches(['\r', '\n']);
                 let ca = ca.map(|p| std::fs::read_to_string(&p).with_context(|| format!("reading {}", p.display()))).transpose()?;
-                let body = json!({ "name": name, "url": url, "bind_dn": bind_dn, "bind_password": password, "flavor": flavor, "managed_accounts": accounts, "user_base_dn": user_base_dn, "groups": groups, "ca": ca });
+                let body = json!({ "name": name, "url": url, "bind_dn": bind_dn, "bind_password": password, "flavor": flavor, "managed_accounts": accounts, "user_base_dn": user_base_dn, "groups": groups, "ca": ca, "gateway": gateway });
                 let v = c.call(Method::POST, &format!("{}/directories", c.base()), Some(body)).await?;
                 if json_out {
                     return print(&v);
@@ -2783,7 +2876,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     println!("{}  {:<16} {}{keys}  {}  envs {}  {}  {} min  used {used}", s(&i["id"]), s(&i["name"]), s(&i["issuer"]), s(&i["subject"]), list(&i["environments"]), list(&i["actions"]), i["ttl_minutes"]);
                 }
             }
-            Identities::Add { name, github, issuer, subject, audience, claims, envs, paths, actions, ttl_minutes, allow_ips, jwks } => {
+            Identities::Add { name, github, issuer, subject, audience, claims, envs, paths, actions, ttl_minutes, allow_ips, jwks, gateway } => {
                 let (issuer, subject) = match (github, issuer, subject) {
                     (Some(repo), _, _) => ("https://token.actions.githubusercontent.com".to_string(), format!("repo:{repo}:*")),
                     (None, Some(i), Some(s)) => (i, s),
@@ -2793,7 +2886,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     .iter()
                     .map(|c| c.split_once('=').map(|(k, v)| (k.trim().to_string(), json!(v.trim()))).with_context(|| format!("--claim {c}: name=value")))
                     .collect::<anyhow::Result<_>>()?;
-                let actions = if actions.is_empty() { vec!["read".to_string(), "reveal".to_string()] } else { actions };
+                let actions = if gateway.is_some() { vec![] } else if actions.is_empty() { vec!["read".to_string(), "reveal".to_string()] } else { actions };
                 let audience = audience.unwrap_or_else(|| c.api.base.clone());
                 let mut body = json!({ "name": name, "issuer": issuer, "audience": audience, "subject": subject, "claims": claims, "actions": actions });
                 if !envs.is_empty() {
@@ -2804,6 +2897,9 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 }
                 if let Some(m) = ttl_minutes {
                     body["ttl_minutes"] = json!(m);
+                }
+                if let Some(g) = &gateway {
+                    body["gateway"] = json!(g);
                 }
                 if !allow_ips.is_empty() {
                     body["allowed_ips"] = json!(allow_ips);
@@ -4777,5 +4873,28 @@ mod relogin_tests {
         assert!(no_answer(&api.get("/v1/echo").await.unwrap_err()));
         down.store(false, Ordering::SeqCst);
         assert_eq!(auth(api.get("/v1/echo").await.unwrap()), "Bearer rlt_4");
+    }
+}
+
+/// `roll secrets gateways up`: the gateway's loop (roll-gateway's agent) until its credential
+/// stops working. Log lines go to stderr; never the token or a stream's bytes.
+async fn gateway_up(api: &Api, gateway: String, allow: Vec<String>, allow_file: Option<std::path::PathBuf>, token_file: Option<std::path::PathBuf>, identity: Option<String>, oidc_token_file: Option<std::path::PathBuf>) -> anyhow::Result<()> {
+    use roll_gateway::agent::{Agent, Auth};
+    let mut entries = allow;
+    if let Some(f) = &allow_file {
+        entries.extend(std::fs::read_to_string(f).with_context(|| format!("reading {}", f.display()))?.lines().map(str::to_string));
+    }
+    let allow = roll_gateway::allow::AllowList::parse(entries.iter().map(String::as_str)).map_err(|e| anyhow::anyhow!(e))?;
+    let auth = match (identity, oidc_token_file, token_file) {
+        (Some(identity), Some(oidc_file), _) => Auth::Identity { identity, oidc_file },
+        (_, _, Some(f)) => Auth::Token(std::fs::read_to_string(&f).with_context(|| format!("reading {}", f.display()))?.trim().to_string()),
+        _ => Auth::Token(std::env::var("ROLL_GATEWAY_TOKEN").ok().filter(|t| !t.trim().is_empty()).map(|t| t.trim().to_string()).context("give the gateway's token in ROLL_GATEWAY_TOKEN or --token-file, or --identity with --oidc-token-file")?),
+    };
+    eprintln!("roll gateway {gateway}: allowing {}", allow.entries().join(", "));
+    let log = std::sync::Arc::new(|line: &str| eprintln!("{} {line}", chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ")));
+    let agent = Agent { url: api.base.clone(), gateway, auth, allow, version: env!("CARGO_PKG_VERSION").to_string(), log };
+    tokio::select! {
+        r = roll_gateway::agent::run(agent) => r.map_err(|e| anyhow::anyhow!(e)),
+        _ = tokio::signal::ctrl_c() => Ok(()),
     }
 }

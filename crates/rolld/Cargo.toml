@@ -22,6 +22,8 @@ bytes.workspace = true
 chrono.workspace = true
 clap.workspace = true
 ipnet.workspace = true
+roll-gateway.workspace = true
+serde.workspace = true
 roll-cluster.workspace = true
 code-control.workspace = true
 code-github.workspace = true
@@ -71,6 +73,8 @@ roll-edge.workspace = true
 roll-workspace.workspace = true
 roll-secrets.workspace = true
 http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
 tower.workspace = true
 url.workspace = true
 roll-accounts.workspace = true
@@ -113,6 +117,7 @@ rdkafka = { workspace = true, optional = true }
 fleet-e2e = ["dep:rdkafka"]
 
 [dev-dependencies]
+roll-gateway = { workspace = true, features = ["agent"] }
 aws-sdk-s3.workspace = true
 aws-smithy-http-client.workspace = true
 aws-smithy-runtime-api.workspace = true
