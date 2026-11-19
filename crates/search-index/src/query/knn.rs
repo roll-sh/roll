@@ -109,6 +109,7 @@ impl KnnQuery {
             }
             None => None,
         };
+        let full = num_candidates.max(k);
         let parent_filter = match &self.parent_filter {
             Some(p) => Some(s.rewrite(p)?),
             None => None,
@@ -147,33 +148,33 @@ impl KnnQuery {
                 Some(pf) => Some(segment_bits(s, seg, pf)?),
                 None => None,
             };
-            let beam = num_candidates.max(k);
-            tasks.push(SegmentKnn { seg, vr, q, bits, ords, parents, beam });
+            tasks.push(SegmentKnn { seg, vr, q, bits, ords, parents, beam: full });
         }
         // Lucene's optimistic collection (`AbstractKnnVectorQuery`, Lucene 10.5): a segment's
         // beam is its share of the candidates plus a margin, not all of them, and a segment
         // whose whole beam made the shard's best `num_candidates` is searched again with the
-        // full beam. Only where the graph steers by precise scores (see `segment_beam`).
+        // full beam. Only for unfiltered searches over fields steering by precise scores (see
+        // `segment_beam`).
         let optimistic = tasks.len() > 1 && !self.exact && !self.per_segment && parent_filter.is_none();
         if optimistic {
             let max_doc = s.max_doc();
             for t in &mut tasks {
-                if t.vr.steers_precisely() {
+                if t.bits.is_none() && t.vr.steers_precisely() {
                     t.beam = segment_beam(num_candidates, k, t.seg.max_doc(), max_doc);
                 }
             }
         }
         // A segment's search: its whole beam rescored while it is narrowed, else its best `k`.
-        let first = |t: &SegmentKnn| if t.beam < num_candidates.max(k) { self.search_segment(t, t.beam, t.beam) } else { self.search_segment(t, k, num_candidates) };
+        let first = |t: &SegmentKnn| if t.beam < full { self.search_segment(t, t.beam, t.beam) } else { self.search_segment(t, k, num_candidates) };
         // Largest segments first: workers claim tasks in this order, which balances them.
         tasks.sort_by_key(|t| std::cmp::Reverse(t.cost()));
         let mut found = run_segments(&tasks, &first);
-        if optimistic && tasks.iter().any(|t| t.beam < num_candidates.max(k)) {
-            let bar = nth_best(&found, num_candidates.max(k));
+        if optimistic && tasks.iter().any(|t| t.beam < full) {
+            let bar = nth_best(&found, full);
             let again: Vec<usize> = (0..tasks.len())
                 .filter(|&i| {
                     let t = &tasks[i];
-                    t.beam < num_candidates.max(k) && found[i].len() >= t.beam && found[i].last().is_some_and(|h| h.1 >= bar)
+                    t.beam < full && found[i].len() >= t.beam && found[i].last().is_some_and(|h| h.1 >= bar)
                 })
                 .collect();
             if !again.is_empty() {
@@ -246,17 +247,22 @@ fn nth_best(found: &[Vec<(u32, f32)>], n: usize) -> f32 {
     *nth
 }
 
-/// Margin of a segment's beam in standard deviations (Lucene's `AbstractKnnVectorQuery.LAMBDA`).
-const LAMBDA: f64 = 16.0;
+/// Margin of a segment's beam in standard deviations. Lucene's `AbstractKnnVectorQuery.LAMBDA`
+/// is 16; at 16 a few hits per 10,000 changed (recall 1.0 to 0.9999 on Rally's dense_vector,
+/// 0.991 to 0.9905 on a 1M x 384 float corpus), at 24 recall held on every corpus measured
+/// (docs/benchmarks/search.md, Round 12).
+const LAMBDA: f64 = 24.0;
 
 /// A segment's beam under optimistic collection: Lucene's `perLeafTopKCalculation`, the
 /// segment's expected share of the `num_candidates` best (its share `p` of the shard's docs)
 /// plus `LAMBDA` binomial standard deviations, in Lucene's float and double arithmetic; at
 /// least `k` and at most the full beam.
 ///
-/// Only for fields steering by precise scores: one-bit estimates rank vectors loosely, so the
-/// exact best hits sit deeper in a beam, and on a 1M x 384 `bbq_hnsw` corpus this beam cost
-/// recall (0.9935 to 0.9895 at `k` 10, `num_candidates` 100; docs/benchmarks/search.md, Round 9).
+/// Only for unfiltered searches over fields steering by precise scores. One-bit estimates rank
+/// vectors loosely, so the exact best hits sit deeper in a beam: on a 1M x 384 `bbq_hnsw` corpus
+/// this beam cost recall (0.9935 to 0.9895 at `k` 10, `num_candidates` 100; docs/benchmarks/search.md,
+/// Round 9). A filtered graph search steps over rejected nodes and needs its full beam: with a 1%
+/// filter recall fell from 0.963 to 0.9145 (float, same corpus; Round 12).
 fn segment_beam(num_candidates: usize, k: usize, seg_max_doc: u32, max_doc: u32) -> usize {
     let full = num_candidates.max(k);
     if max_doc == 0 {
