@@ -566,7 +566,7 @@ impl Access {
         rate.div_ceil(nodes).max(1)
     }
 
-    /// A product's own leaked secrets (apps' deploy hooks, `rlk_`): found wherever roll's are
+    /// A product's own leaked secrets (apps' deploy hooks, `rlk_`; previews', `rlb_`): found wherever roll's are
     /// (roll code's landings, GitHub's secret scanning), revoked by `revoke`, which says what it
     /// revoked (`None`: nothing live).
     pub fn on_leaked(&self, prefix: &'static str, revoke: impl Fn(&str, &str) -> Option<String> + Send + Sync + 'static) {
@@ -596,6 +596,7 @@ impl Access {
                         route: "leaked".into(),
                         product: s.get(..4).and_then(|p| match p {
                             "rlk_" => Some("apps".to_string()),
+                            "rlb_" => Some("previews".to_string()),
                             "rlp_" => Some("accounts".to_string()),
                             _ => None,
                         }),

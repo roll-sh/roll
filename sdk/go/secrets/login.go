@@ -17,9 +17,23 @@ import (
 // identity (docs/secrets.md, "Workload identities"): nothing long-lived sits in the workload's
 // settings. The answer's client is limited to the identity's project, environments and folders,
 // and logs in again with the same OIDC token before its roll token ends (FromEnv reads a fresh
-// OIDC token each time).
+// OIDC token each time; LoginWithIdentity takes where to get one).
 func Login(ctx context.Context, api, identity, oidcToken string) (*Client, error) {
-	return login(ctx, api, identity, oidcProof(func(context.Context) (string, error) { return oidcToken, nil }))
+	return LoginWithIdentity(ctx, api, identity, func(context.Context) (string, error) { return oidcToken, nil })
+}
+
+// LoginFunc is Login with the OIDC token from source, asked again for each login: for a token
+// that changes (a file Kubernetes rotates, one a cloud's API mints on demand).
+func LoginFunc(ctx context.Context, api, identity string, source func(context.Context) (string, error)) (*Client, error) {
+	return LoginWithIdentity(ctx, api, identity, source)
+}
+
+// LoginWithIdentity is a client logged in as the workload identity `identity`, as FromEnv makes
+// one: tokenSource is called for a fresh OIDC token at each login (this first one, then before the
+// roll token ends and when the server refuses it), so a token file that's replaced on disk keeps
+// working. OIDCTokenFromEnv is the source FromEnv uses.
+func LoginWithIdentity(ctx context.Context, api, identity string, tokenSource func(context.Context) (string, error)) (*Client, error) {
+	return login(ctx, api, identity, oidcProof(tokenSource))
 }
 
 // LoginAWS logs in as an AWS identity (docs/secrets.md, "AWS IAM") with the machine's own AWS
@@ -147,7 +161,7 @@ func FromEnv(ctx context.Context) (*Client, error) {
 		c = New(api, env("ROLL_TOKEN"))
 	case env("ROLL_IDENTITY") != "":
 		// The OIDC token is read again for each login (a projected token is replaced on disk).
-		source := oidcProof(func(ctx context.Context) (string, error) { return oidcToken(ctx, api, env) })
+		source := oidcProof(func(ctx context.Context) (string, error) { return OIDCTokenFromEnv(ctx, api, env) })
 		aws, err := awsKind(env)
 		if err != nil {
 			return nil, err
@@ -182,7 +196,14 @@ func awsKind(env func(string) string) (bool, error) {
 	}
 }
 
-func oidcToken(ctx context.Context, api string, env func(string) string) (string, error) {
+// OIDCTokenFromEnv is the workload's OIDC token as FromEnv finds it: ROLL_OIDC_TOKEN, the file
+// ROLL_OIDC_TOKEN_FILE names (read now), or GitHub Actions' for the audience ROLL_OIDC_AUDIENCE
+// (default api). getenv reads a setting; nil reads the process's environment, trimmed.
+func OIDCTokenFromEnv(ctx context.Context, api string, getenv func(string) string) (string, error) {
+	env := getenv
+	if env == nil {
+		env = func(k string) string { return strings.TrimSpace(os.Getenv(k)) }
+	}
 	if t := env("ROLL_OIDC_TOKEN"); t != "" {
 		return t, nil
 	}

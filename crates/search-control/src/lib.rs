@@ -14,6 +14,7 @@
 //! control.shutdown().await?;
 //! ```
 
+pub mod analytics;
 pub mod api;
 pub mod cluster;
 pub mod control;

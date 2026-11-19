@@ -243,6 +243,9 @@ ROBOTS_LOCKED=$(curl -sS -o /dev/null -D - -H "Host: $HOST" "http://$API/" | tr 
 RQ=$(curl -sS "http://$API/v1/previews/$PV/requests")
 REQS=$(echo "$RQ" | python3 -c "import json,sys; r=json.load(sys.stdin)['requests']; print('%d; newest: %s; queries: %s' % (len(r), ' '.join(str(r[0][k]) for k in ('method', 'path', 'status')) if r else 'none', any('?' in x['path'] for x in r)))")
 case "$REQS" in *"newest: GET / 200; queries: False") ;; *) echo "the preview's request log should list its visits without their queries: $REQS"; exit 1;; esac
+# What its running service uses (`…/metrics`): some memory, against what it runs with.
+METRICS=$(curl -sS "http://$API/v1/previews/$PV/metrics" | python3 -c "import json,sys; m=json.load(sys.stdin)['services']; print('; '.join('%s %.2f CPU %d of %d MB' % (x['service'], x['cpu'], x['memory_bytes'] >> 20, x['memory_mb']) for x in m) if m and all(x['memory_bytes'] > 0 for x in m) else 'none')")
+[ "$METRICS" != none ] || { echo "a running preview's services should report what they use"; exit 1; }
 # And from the CLI (`roll preview requests`): its visits, and none with --errors.
 ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview requests "$PV" | grep -q " 200 GET    /  " || { echo "roll preview requests should list GET / 200: $(ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview requests "$PV" | head -3)"; exit 1; }
 [ -z "$(ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview requests "$PV" --errors)" ] || { echo "roll preview requests --errors should list only 4xx and 5xx"; exit 1; }
@@ -371,6 +374,13 @@ RSS1=$(ps -o rss= -p "$PID")
 api POST "/v1/previews/$PV/refresh" >/dev/null; sleep 3
 ACTIVE=$(api GET "/v1/previews/$PV" | jq_ "d['cost']")
 
+say "a shell in the preview's service (roll preview shell): what's typed runs in its container, with its variables"
+# Keys from a pipe (no terminal, so no raw mode), the screen on stdout until the shell's `exit`.
+SCREEN=$(printf 'echo "seen $ROLL_PREVIEW"; exit\r' | ROLL_API_URL="http://$API" timeout 60 "$ROOT/target/debug/roll" preview shell "$PV" --service web 2>&1) || { echo "roll preview shell failed: $SCREEN"; exit 1; }
+case "$SCREEN" in *"seen $PV"*) ;; *) echo "the shell should run in the service's container with its variables: $SCREEN"; exit 1;; esac
+api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d]" | grep -q "opened a shell in web" || { echo "the activity should say a shell was opened"; exit 1; }
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://$API/v1/previews/$PV/shell/sessions" -H 'content-type: application/json' -d '{"service":"nope"}')" = 404 ] || { echo "a shell in a service the preview hasn't should be 404"; exit 1; }
+
 say "a screenshot of the service (github.screenshot), once per head"
 # And /pricing, which the test service doesn't have (a 404 page, one failed request).
 api PUT "/v1/previews/projects/$PRJ/settings" '{"github":{"screenshot":true,"pages":["/pricing","web:/","wiki:/"],"widths":[768],"hide":[".clock"],"budget":{"load_ms":60000},"openapi":"/openapi.json","endpoints":["/openapi.json"],"states":[{"name":"tab","page":"/","steps":[{"press":"Tab"}]}],"browsers":["firefox","webkit-phone"]}}' >/dev/null
@@ -419,6 +429,11 @@ SHOT_PATH="/${SHOT_URL#*://*/}"
 case "$SHOT_PATH" in *0) TAMPERED="${SHOT_PATH%?}1";; *) TAMPERED="${SHOT_PATH%?}0";; esac
 [ "$(curl -s -o /dev/null -w '%{http_code}' "http://$API$TAMPERED")" = 403 ] || { echo "a changed signature should be refused"; exit 1; }
 api PUT "/v1/previews/projects/$PRJ/settings" '{"access":"link"}' >/dev/null
+# Leaving link access retired the link handed out: its cookie opens nothing now, and the
+# preview's new link lets its visitor in again.
+[ "$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" -H "Host: $HOST" "http://$API/")" = 401 ] || { echo "a link retired by leaving link access should stop opening the preview"; exit 1; }
+QUERY=$(api GET "/v1/previews/$PV" | jq_ "[x for x in d['services'] if x['name'] == 'web'][0]['share_url'].split('/?')[1]")
+curl -sS -o /dev/null -L -c "$JAR" -b "$JAR" -H "Host: $HOST" "http://$API/?$QUERY" --max-time 120
 
 say "sleep it"
 api POST "/v1/previews/$PV/sleep" >/dev/null
@@ -469,7 +484,7 @@ if [ -n "$PG_BRANCH" ]; then
 fi
 
 say "a preview's own variable reaches its running service; roll's names are refused"
-ROLL_CLI="$ROOT/target/debug/roll"
+ROLL_CLI=${ROLL_CLI:-"$ROOT/target/debug/roll"}
 ROLL_API_URL="http://$API" "$ROLL_CLI" preview env "$PV" FEATURE_FLAG=on >/dev/null
 if ROLL_API_URL="http://$API" "$ROLL_CLI" preview env "$PV" DATABASE_URL=postgres://elsewhere >/dev/null 2>&1; then echo "DATABASE_URL should be refused as a preview variable"; exit 1; fi
 VAR_SEEN=""
@@ -869,6 +884,7 @@ cat <<EOF
 | Visual review under a 5% visual threshold | $UNDER |
 | X-Robots-Tag on the service's page / on the 401 without the link | $ROBOTS / $ROBOTS_LOCKED |
 | Its request log through roll (count; newest; any query kept) | $REQS |
+| What its running services use (`…/metrics`) | $METRICS |
 | The release's time on the preview's data (at its head) / on the change | $RELEASE / $CHG_RELEASE ms |
 | The preview's link as a QR code (PNG, no-store) | $QR |
 | Mail: the provider's key in the service / sent as the preview, caught | gone / $MAIL |
