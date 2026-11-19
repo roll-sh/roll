@@ -540,6 +540,8 @@ export interface EnvironmentPut {
   routes?: RouteRule[] | null;
   /** Its uptime checks (at most 5), or null for none. */
   checks?: UptimeCheck[] | null;
+  /** Its split test: `percent` of visitors (1–99) served by `environment`, or null to end it. */
+  split?: { environment: string; percent: number } | null;
   /** Its heartbeats (at most 10), or null for none; one kept by name keeps its URL. */
   heartbeats?: Pick<Heartbeat, "name" | "every_s" | "grace_s">[] | null;
   /** Its own size and scale over the service's; a null field goes back to the service's. */
@@ -662,6 +664,8 @@ export interface Environment extends EnvironmentSummary {
   check_states?: UptimeCheckState[];
   heartbeats?: Heartbeat[];
   heartbeat_states?: HeartbeatState[];
+  /** Its split test: a share of its visitors, kept by their bucket cookie, served by another environment. */
+  split?: { environment: string; percent: number };
   /** Only in the answer to the PUT that added them: each new heartbeat's ping URL (shown once). */
   heartbeat_urls?: Record<string, string>;
   created_at: number;

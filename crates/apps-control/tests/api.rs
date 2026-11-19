@@ -2090,6 +2090,43 @@ async fn an_apps_prometheus_endpoint_is_scraped() {
     assert!(gauge["attrs"].as_array().unwrap().iter().any(|a| a["key"] == "instance"), "{gauge}");
 }
 
+/// A split test (Netlify's): a share of production's visitors, kept by their bucket cookie, are
+/// served by another environment of the service; the rest by production.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_split_test_serves_its_share_from_another_environment() {
+    let w = world().await;
+    let (svc, d) = image_service(&w, "web", json!({"port": 80, "min_instances": 1})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let h = host(&svc["environments"][0]["url"]);
+    let base = format!("/v1/apps/services/{id}/environments");
+    call(&w.api, "PUT", &format!("{base}/beta"), Some(json!({}))).await;
+    let (_, p) = call(&w.api, "POST", &format!("{base}/beta/promote"), Some(json!({"from": "production", "expect": d["id"]}))).await;
+    let beta = settled(&w, &id, "beta", p["id"].as_str().unwrap()).await["id"].as_str().unwrap().to_string();
+    for bad in [json!({"environment": "beta", "percent": 0}), json!({"environment": "production", "percent": 10}), json!({"environment": "nope", "percent": 10})] {
+        assert_eq!(call(&w.api, "PUT", &format!("{base}/production"), Some(json!({"split": bad}))).await.0, StatusCode::BAD_REQUEST, "{bad}");
+    }
+    let (st, env) = call(&w.api, "PUT", &format!("{base}/production"), Some(json!({"split": {"environment": "beta", "percent": 30}}))).await;
+    assert_eq!((st, env["split"]["percent"].as_u64()), (StatusCode::OK, Some(30)), "{env}");
+    let visit = |cookie: Option<&'static str>| {
+        let mut r = Request::builder().uri("/").header("host", h.clone());
+        if let Some(c) = cookie {
+            r = r.header("cookie", c);
+        }
+        let public = w.public.clone();
+        async move {
+            let resp = public.oneshot(r.body(Body::empty()).unwrap()).await.unwrap();
+            let set = resp.headers().get_all("set-cookie").iter().filter_map(|v| v.to_str().ok()).any(|c| c.starts_with("roll_bucket="));
+            let b: Value = serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap_or(Value::Null);
+            (b["deployment"].as_str().unwrap_or("").to_string(), set)
+        }
+    };
+    assert_eq!(visit(Some("roll_bucket=90")).await, (beta.clone(), false), "the top 30 buckets are beta's");
+    assert_eq!(visit(Some("roll_bucket=10")).await.0, d["id"].as_str().unwrap(), "the rest production's");
+    assert!(visit(None).await.1, "a new visitor gets a bucket to keep");
+    call(&w.api, "PUT", &format!("{base}/production"), Some(json!({"split": null}))).await;
+    assert_eq!(visit(Some("roll_bucket=90")).await.0, d["id"].as_str().unwrap(), "no split: production answers all");
+}
+
 /// An instance the kernel killed for its memory says so: in the log and in why it crashed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_instance_killed_for_its_memory_says_so() {

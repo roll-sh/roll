@@ -1443,6 +1443,9 @@ pub struct Environment {
     /// Only in the PUT's answer that added them: each new heartbeat's ping URL, its token in it.
     #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub heartbeat_urls: std::collections::BTreeMap<String, String>,
+    /// Its split test: a share of its visitors served by another environment.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub split: Option<Split>,
     /// What its code may reach: anything (`open`), or roll and the listed hosts (`roll`).
     pub egress: Egress,
     /// Hosts its egress proxy refused lately (its code tried them; they aren't listed).
@@ -1711,6 +1714,24 @@ pub struct Route {
     pub path: String,
     /// The other service, by its name in the project.
     pub service: String,
+}
+
+/// An environment's split test (Netlify's split testing): `percent` of its visitors, each kept
+/// by their bucket cookie, are served by the same service's `environment`, past that
+/// environment's gates as a route's are (this one's let them in).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Split {
+    pub environment: String,
+    pub percent: u8,
+}
+
+impl Split {
+    /// Whether a visitor's bucket (0–99) is in the split's share: the top of the range, so a
+    /// gradual rollout's (the bottom) and a split's overlap only past 100 together.
+    pub fn takes(&self, bucket: u8) -> bool {
+        bucket >= 100 - self.percent.min(100)
+    }
 }
 
 /// The most routes an environment has.

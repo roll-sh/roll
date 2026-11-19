@@ -420,6 +420,21 @@ async fn forwarded_public(axum::extract::State(apps): axum::extract::State<Arc<A
 
 /// Send `req` to the project's service `to.0` in `env` at `to.1`, where that service lives,
 /// through all of its own gates (access, allow list, firewall, rate limit, maintenance).
+/// A split test's visitor, sent to the same service's other environment: past its gates (this
+/// environment's let them in), the path as it came.
+fn split_to(apps: Arc<Apps>, service: &str, env: &str, mut req: Request) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send>> {
+    let (service, env) = (service.to_string(), env.to_string());
+    Box::pin(async move {
+        req.headers_mut().insert(HeaderName::from_static(VIA_SITE), HeaderValue::from_static("1"));
+        if let Some(f) = req.extensions_mut().remove::<roll_cluster::Forwarded>()
+            && let Some(c) = f.client
+        {
+            req.extensions_mut().insert(roll_cluster::ClientAddr(c));
+        }
+        serve(apps, service, env, None, req).await
+    })
+}
+
 fn rewrite_to(apps: Arc<Apps>, service: &str, env: &str, to: (String, String), mut req: Request) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send>> {
     // A named, boxed future: `serve` comes back here (it's the same proxy), and the compiler
     // proves it `Send` only through a type it can see.
@@ -1319,11 +1334,27 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
     // gave them (never passed to the app), or a new one while a canary runs.
     let mut bucket = take_bucket(&mut req);
     let affine = take_cookie(&mut req, AFFINITY);
-    let fresh = deployment.is_none() && bucket.is_none() && live.canary().is_some();
+    // A split test's visitors are bucketed as a rollout's are (roll's own call never splits, nor
+    // a request another environment sent here).
+    let split = gate.split.as_ref().filter(|_| deployment.is_none() && !ours && !req.headers().contains_key(VIA_SITE));
+    let fresh = deployment.is_none() && bucket.is_none() && (live.canary().is_some() || split.is_some());
     if fresh {
         let mut b = [0u8; 1];
         getrandom::fill(&mut b).expect("system randomness");
         bucket = Some(b[0] % 100);
+    }
+    // In the split's share: the other environment answers, and the cookie keeps them there.
+    if let (Some(sp), Some(b)) = (split, bucket)
+        && sp.takes(b)
+    {
+        let mut r = split_to(apps.clone(), service, &sp.environment, req).await;
+        if fresh {
+            let secure = if apps.cfg.scheme == "https" { "; Secure" } else { "" };
+            if let Ok(c) = HeaderValue::from_str(&format!("{BUCKET}={b}; Path=/; Max-Age=86400; HttpOnly; SameSite=Lax{secure}")) {
+                r.headers_mut().append(header::SET_COOKIE, c);
+            }
+        }
+        return r;
     }
     // A shared cache's answer (`resp_cache`), before anything wakes: a GET or HEAD of the live
     // deployment (no gradual rollout, no preview's feedback tag), without `Authorization`.
