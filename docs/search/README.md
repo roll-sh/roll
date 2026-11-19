@@ -625,6 +625,18 @@ a worker's 2 MiB, so the six above could land together).
    (`_plugins/_sm`) aren't served, so OpenSearch-flavor clusters take snapshots by hand or from an
    ISM `snapshot` action; their snapshots show no size (OpenSearch has no `index_details`); `fs`
    repositories need `path.repo`, which roll's clusters don't set.
+   And a Pipelines tab, as Kibana's Ingest Pipelines does it: every pipeline with its processors
+   and the indices whose `default_pipeline` or `final_pipeline` names it (built-in ones on
+   request); a pipeline edited as a list of processors (the type, the options of the 26 types
+   people use most, any other type's as JSON, `if`, `tag`, `ignore_failure`, `on_failure` per
+   processor and for the pipeline, reordered in place) or as JSON a toggle away, every option it
+   doesn't know kept; tested with a verbose `_simulate` on sample documents or five fetched from
+   an index, read back per processor (ran, skipped, failed, failed and ignored, dropped; the
+   fields each one changed) with the result before and after; and set as an index's
+   `default_pipeline` or taken off it. Checked against Elasticsearch 9.5.5: a pipeline as `GET`
+   gives it (with `created_date_millis`/`modified_date_millis`) now simulates as Elasticsearch's
+   `Pipeline.create` reads it, and `PUT` refuses those dates as a `parse_exception`. Left: an
+   OpenSearch-flavor cluster's `_nodes/ingest` lists Elasticsearch's processors, not OpenSearch's.
 8. **Compatibility gaps** from the extended suites (5,083 of the 5,541 Elasticsearch passes, 5,244 in all, 46 suites at 100%; #187),
    largest first. Landed: ent-search's last 5 (a `rule` retriever over `rrf`/`linear`, inference
    inside a rule query's organic, workflow-restricted API keys), ES|QL's last 5 (`TOP_SNIPPETS`,
