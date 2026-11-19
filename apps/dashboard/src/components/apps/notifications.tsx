@@ -31,6 +31,7 @@ const EVENTS: { value: NotifyEvent; label: string }[] = [
   { value: "check.down", label: "Uptime check down" },
   { value: "heartbeat.missed", label: "Heartbeat missed" },
   { value: "deploy.vulnerable", label: "New known vulnerabilities" },
+  { value: "audit", label: "Every change people make (audit log)" },
 ];
 
 const KINDS: { value: NotifyTarget["kind"]; label: string; placeholder: string }[] = [

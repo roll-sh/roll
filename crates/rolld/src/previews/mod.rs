@@ -21,7 +21,7 @@ mod services;
 pub mod fleet;
 
 pub use data::*;
-pub use secrets::Secrets;
+pub use secrets::{Secrets, SecretsReveal};
 pub use services::{RollApps, Services};
 
 /// Which products run here (an adapter for each).

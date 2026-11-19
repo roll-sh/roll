@@ -223,7 +223,7 @@ pub struct LogDrain {
 pub const DRAIN_FORMATS: [&str; 3] = ["ndjson", "otlp", "syslog"];
 
 /// What a drain can be sent.
-pub const DRAIN_SOURCES: [&str; 3] = ["runtime", "http", "build"];
+pub const DRAIN_SOURCES: [&str; 4] = ["runtime", "http", "build", "audit"];
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct NotifyTarget {
@@ -529,6 +529,10 @@ pub struct Run {
     /// rule's weekly windows its `min_instances` is the floor, when higher.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub schedule_scale: Vec<ScaleWindow>,
+    /// Counts of its log lines (Cloud Logging's log-based metrics): each minute, the lines of its
+    /// output matching `pattern` (any case) as a gauge named `name`, on Metrics and for `scale`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub log_metrics: Vec<LogMetric>,
     /// How a new deployment takes over: at once, or a share of requests at a time.
     pub rollout: Rollout,
     /// The app speaks HTTP/2 without TLS (h2c, prior knowledge), as a gRPC server does: the
@@ -586,6 +590,15 @@ pub struct Run {
     /// patches). Without it the environment only says so (`base_updated`).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub rebuild_on_base: bool,
+    /// A web service's page loaded before a deploy keeps talking to the deployment that served
+    /// it, for a day (Vercel's skew protection; [`crate::skew`]).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub skew_protection: bool,
+    /// A web service's hard limit (Cloud Run's, Fly's `hard_limit`): with every instance at its
+    /// `concurrency` and `max_instances` of them, a request waits up to this long (1–60 s) for a
+    /// slot, then gets a 429. Without it the least busy instance takes it past its concurrency.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queue_s: Option<u32>,
     /// Commands on a schedule, each a job of the live deployment at its due times (Heroku
     /// Scheduler, Vercel crons): any service's, without a cron service of its own.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -600,6 +613,14 @@ pub struct Run {
     /// the rollout, not beside it. A rollback is never held. Changing it is a deploy.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub block_on: Option<Severity>,
+}
+
+/// A count of matching log lines a minute ([`Run::log_metrics`]).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LogMetric {
+    pub name: String,
+    pub pattern: String,
 }
 
 /// A floor for some hours of the week ([`Run::schedule_scale`]).
@@ -934,11 +955,15 @@ pub struct Rollout {
     /// times as fast as it lasts (Argo Rollouts' analysis); default 14.4, the fast burn alert's.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub slo_burn: Option<f64>,
+    /// A step fails when the new deployment's p95 response time is more than this many percent
+    /// above the old one's (Flagger's request duration check); off unless set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub p95_pct: Option<u32>,
 }
 
 impl Default for Rollout {
     fn default() -> Self {
-        Rollout { steps: Vec::new(), step_s: 120, error_pct: 5, manual: false, slo_burn: None }
+        Rollout { steps: Vec::new(), step_s: 120, error_pct: 5, manual: false, slo_burn: None, p95_pct: None }
     }
 }
 
@@ -1029,12 +1054,15 @@ impl Default for Run {
             tcp: false,
             rollback_on_crash: false,
             rebuild_on_base: false,
+            skew_protection: false,
+            queue_s: None,
             schedules: Vec::new(),
             sidecars: Vec::new(),
             block_on: None,
             slo: None,
             metrics: None,
             schedule_scale: Vec::new(),
+            log_metrics: Vec::new(),
         }
     }
 }
@@ -1084,6 +1112,15 @@ impl Run {
             && (!(90.0..=99.999).contains(&s.objective) || !(1..=60).contains(&s.window_days) || s.latency_ms.is_some_and(|ms| !(1..=60_000).contains(&ms)))
         {
             return bad("slo is {objective: 90–99.999, latency_ms?: 1–60000, window_days?: 1–60}");
+        }
+        if self.log_metrics.len() > 10 {
+            return bad("log_metrics is at most 10");
+        }
+        for (i, m) in self.log_metrics.iter().enumerate() {
+            let name_ok = !m.name.is_empty() && m.name.len() <= 100 && m.name.bytes().enumerate().all(|(j, b)| b.is_ascii_alphabetic() || b == b'_' || (j > 0 && (b.is_ascii_digit() || b == b'.')));
+            if !name_ok || m.pattern.is_empty() || m.pattern.chars().count() > 200 || self.log_metrics[..i].iter().any(|o| o.name == m.name) {
+                return bad("log_metrics are {name: a metric's name (unique), pattern: 1–200 characters}");
+            }
         }
         if self.schedule_scale.len() > 10 {
             return bad("schedule_scale is at most 10 rules");
@@ -1138,6 +1175,9 @@ impl Run {
                 return bad("a sidecar's cpu is 0.1–2, its memory_mb 64–4096");
             }
         }
+        if self.queue_s.is_some_and(|q| !(1..=60).contains(&q)) {
+            return bad("queue_s is 1–60 seconds");
+        }
         let r = &self.rollout;
         if r.steps.len() > 5 || r.steps.iter().any(|s| !(1..=99).contains(s)) || r.steps.windows(2).any(|w| w[0] >= w[1]) {
             return bad("rollout.steps is up to five increasing percents, 1–99");
@@ -1147,6 +1187,9 @@ impl Run {
         }
         if r.slo_burn.is_some_and(|b| !(1.0..=1000.0).contains(&b)) {
             return bad("rollout.slo_burn is 1–1000");
+        }
+        if r.p95_pct.is_some_and(|p| !(1..=1000).contains(&p)) {
+            return bad("rollout.p95_pct is 1–1000");
         }
         if !(1..=100).contains(&r.error_pct) {
             return bad("rollout.error_pct is 1–100");
@@ -1523,6 +1566,9 @@ pub struct Environment {
     /// Its split test: a share of its visitors served by another environment.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub split: Option<Split>,
+    /// When it's paused by the clock (`pause_schedule`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pause_schedule: Option<crate::freeze::PauseSchedule>,
     /// Where a share of its requests is copied, their answers dropped (`mirror`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mirror: Option<Split>,
