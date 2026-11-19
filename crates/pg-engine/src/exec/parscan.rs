@@ -1069,6 +1069,14 @@ pub(super) struct LazyBuf {
     nums: Vec<std::cell::OnceCell<Option<Option<(i128, u32)>>>>,
     /// The columns walked: up to the last one the scan reads.
     upto: usize,
+    /// Of a row the filter passed already (`read_passed`): up to the last one read after the
+    /// filter (`Decode::late`'s left out).
+    upto_passed: usize,
+    /// The row read now: the columns walked (`offs` set), where the walk ended, and how many
+    /// columns it has stored. A column past the walk is walked to when read (`Lazy::off`).
+    walked: usize,
+    end: u32,
+    stored: usize,
     /// The worker's reader of the rows' out-of-line values (`Decode::toast`).
     reader: std::cell::RefCell<Option<crate::txn::toast::Reader>>,
 }
@@ -1080,11 +1088,22 @@ impl LazyBuf {
             Some(n) => n.iter().take(ncols).rposition(|b| *b).map_or(0, |i| i + 1),
             None => ncols,
         };
+        let upto_passed = match (&d.need, &d.late) {
+            (Some(n), Some(late)) => {
+                let read = |i: usize| n.get(i).copied().unwrap_or(false) && !late.get(i).copied().unwrap_or(false);
+                (0..upto).rposition(read).map_or(0, |i| i + 1)
+            }
+            _ => upto,
+        };
         LazyBuf {
             offs: vec![u32::MAX; upto],
             cells: (0..ncols + d.with_key as usize).map(|_| Default::default()).collect(),
             nums: (0..upto).map(|_| Default::default()).collect(),
             upto,
+            upto_passed,
+            walked: 0,
+            end: 0,
+            stored: 0,
             reader: std::cell::RefCell::new(d.toast.clone().map(crate::txn::toast::Reader::new)),
         }
     }
@@ -1110,11 +1129,24 @@ impl LazyBuf {
     /// The stored row `bytes` (under `key`) to be read in place: where its columns start,
     /// nothing decoded yet.
     pub(super) fn read<'a>(&'a mut self, d: &'a Decode, key: &'a [u8], bytes: &'a [u8]) -> Result<Lazy<'a>> {
+        let upto = self.upto;
+        self.read_to(d, key, bytes, upto)
+    }
+
+    /// `read` of a row the filter passed already (the batch's `Pre::fate`): the walk stops at
+    /// the last column read after the filter, not at the filter's columns after it (TPC-H
+    /// q13's o_comment, the row's last).
+    pub(super) fn read_passed<'a>(&'a mut self, d: &'a Decode, key: &'a [u8], bytes: &'a [u8]) -> Result<Lazy<'a>> {
+        let upto = self.upto_passed;
+        self.read_to(d, key, bytes, upto)
+    }
+
+    fn read_to<'a>(&'a mut self, d: &'a Decode, key: &'a [u8], bytes: &'a [u8], upto: usize) -> Result<Lazy<'a>> {
         use crate::storage::{cols::skip, sst::get_varint};
         let data = super::scan::row_data(bytes)?;
         let mut pos = 0;
         let n = get_varint(data, &mut pos)? as usize;
-        for (i, off) in self.offs.iter_mut().enumerate() {
+        for (i, off) in self.offs.iter_mut().enumerate().take(upto) {
             if i < n {
                 *off = pos as u32;
                 skip(data, &mut pos)?;
@@ -1122,6 +1154,9 @@ impl LazyBuf {
                 *off = u32::MAX;
             }
         }
+        self.walked = upto.min(self.offs.len());
+        self.end = pos as u32;
+        self.stored = n;
         for c in &mut self.cells {
             c.take();
         }
@@ -1150,6 +1185,22 @@ impl Lazy<'_> {
         self.d.need.as_ref().is_none_or(|n| n.get(i).copied().unwrap_or(false))
     }
 
+    /// Where column `i` (< `upto`) starts (`u32::MAX`: not stored): walked on from where the
+    /// read's walk stopped when it is past it.
+    fn off(&self, i: usize) -> Result<u32> {
+        if i < self.buf.walked {
+            return Ok(self.buf.offs[i]);
+        }
+        if i >= self.buf.stored {
+            return Ok(u32::MAX);
+        }
+        let mut pos = self.buf.end as usize;
+        for _ in self.buf.walked..i {
+            crate::storage::cols::skip(self.data, &mut pos)?;
+        }
+        Ok(pos as u32)
+    }
+
     /// Column `i` of the scan's row, as `Decode::row` makes it.
     fn decode(&self, i: usize) -> Result<Value> {
         let ncols = self.d.missing.len();
@@ -1159,7 +1210,7 @@ impl Lazy<'_> {
         if i >= self.buf.upto || !self.needed(i) {
             return Ok(Value::Null);
         }
-        match self.buf.offs[i] {
+        match self.off(i)? {
             u32::MAX => Ok(self.d.missing[i].clone().unwrap_or(Value::Null)),
             off if !self.ext => crate::storage::row::decode_value(self.data, &mut (off as usize)),
             off => {
@@ -1215,8 +1266,12 @@ impl super::kernel::Cols for Lazy<'_> {
     fn text(&self, i: usize) -> Option<Option<&str>> {
         use crate::storage::row::tag;
         let cell = self.buf.cells.get(i)?;
-        if cell.get().is_none() && i < self.buf.upto && self.needed(i) && self.buf.offs[i] != u32::MAX && !self.ext {
-            let p = self.buf.offs[i] as usize;
+        if cell.get().is_none()
+            && i < self.buf.upto
+            && self.needed(i)
+            && !self.ext
+            && let Some(p) = self.off(i).ok().filter(|&o| o != u32::MAX).map(|o| o as usize)
+        {
             match self.data.get(p) {
                 Some(&tag::NULL) => return Some(None),
                 Some(&tag::TEXT) => {
@@ -1239,9 +1294,8 @@ impl super::kernel::Cols for Lazy<'_> {
         if cell.get().is_none()
             && i < self.buf.upto
             && self.needed(i)
-            && self.buf.offs[i] != u32::MAX
-            && let Some(r) = self.buf.nums[i]
-                .get_or_init(|| crate::storage::row::peek_num(self.data, self.buf.offs[i] as usize))
+            && let Some(o) = self.off(i).ok().filter(|&o| o != u32::MAX)
+            && let Some(r) = self.buf.nums[i].get_or_init(|| crate::storage::row::peek_num(self.data, o as usize))
         {
             return Some(*r);
         }
@@ -1490,7 +1544,8 @@ fn run_rows<'d>(
             } else {
                 match (&d.filter, in_place) {
                     (Some(f), true) => {
-                        let made = lazy.read(d, key, bytes).and_then(|lz| match if passed { Some(true) } else { f.passes(&lz) } {
+                        let read = if passed { lazy.read_passed(d, key, bytes) } else { lazy.read(d, key, bytes) };
+                        let made = read.and_then(|lz| match if passed { Some(true) } else { f.passes(&lz) } {
                             Some(false) => Ok(None),
                             Some(_) => Ok(Some((lz.into_row_passed()?, true))),
                             None => Ok(Some((lz.into_row()?, false))),
@@ -1875,7 +1930,7 @@ fn partial_row(
 ) -> Result<()> {
     // (Read in place: a row the filter rejects or the part takes is never made.)
     let row = match &d.ios {
-        None => lazy.read(d, k, v).and_then(|lazy| {
+        None => if passed { lazy.read_passed(d, k, v) } else { lazy.read(d, k, v) }.and_then(|lazy| {
             let pass = if passed { Some(true) } else { filter_pass(d, &lazy) };
             match pass {
                 Some(false) => Ok(None),
