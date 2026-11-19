@@ -127,7 +127,16 @@ struct P<'a> {
     /// `params` for the `?` placeholders, in order.
     params: &'a [V],
     next_param: usize,
+    /// Nesting of the expression being parsed ([`P::nest`]).
+    depth: usize,
+    /// Operators and casts folded in the current top-level expression ([`P::fold`]).
+    folds: usize,
 }
+
+/// `SqlParser.MAX_EXPRESSION_DEPTH`: parsing recurses once per nesting level and what runs the
+/// tree once per level of it, which grows with every operator a chain folds; a stack overflow
+/// aborts the whole node, so nesting plus the folds of a top-level expression are bounded.
+const MAX_EXPRESSION_DEPTH: usize = 250;
 
 /// What may start a select item (ANTLR's expected set after `SELECT`).
 const SELECT_ITEM_START: &str = "'ALL', 'ANALYZE', 'ANALYZED', 'CASE', 'CAST', 'CATALOGS', 'COLUMNS', 'CONVERT', 'CURRENT_DATE', 'CURRENT_TIME', 'CURRENT_TIMESTAMP', 'DAY', 'DEBUG', 'DISTINCT', 'EXECUTABLE', 'EXISTS', 'EXPLAIN', 'EXTRACT', 'FALSE', 'FIRST', 'FORMAT', 'FULL', 'FUNCTIONS', 'GRAPHVIZ', 'HOUR', 'INTERVAL', 'LAST', 'LEFT', 'LIMIT', 'MAPPED', 'MATCH', 'MINUTE', 'MONTH', 'NOT', 'NULL', 'OPTIMIZED', 'PARSED', 'PHYSICAL', 'PIVOT', 'PLAN', 'RIGHT', 'RLIKE', 'QUERY', 'SCHEMAS', 'SECOND', 'SHOW', 'SYS', 'TABLES', 'TEXT', 'TRUE', 'TOP', 'TYPE', 'TYPES', 'VERIFY', 'YEAR', FUNCTION_ESC, DATE_ESC, TIME_ESC, TIMESTAMP_ESC, GUID_ESC, '(', '+', '-', '*', '?', STRING, INTEGER_VALUE, DECIMAL_VALUE, IDENTIFIER, DIGIT_IDENTIFIER, QUOTED_IDENTIFIER, BACKQUOTED_IDENTIFIER";
@@ -225,12 +234,34 @@ impl P<'_> {
         Ok(self.src[start..end].to_string())
     }
 
+    fn too_deep(&self) -> EsError {
+        parsing(self.src, self.pos(), &format!("SQL statement exceeded the maximum expression depth allowed ({MAX_EXPRESSION_DEPTH})"))
+    }
+    /// Runs `f` one nesting level deeper (on a fresh stack segment when this one runs low).
+    fn nest<R>(&mut self, f: impl FnOnce(&mut Self) -> EsResult<R>) -> EsResult<R> {
+        if self.depth + self.folds >= MAX_EXPRESSION_DEPTH {
+            return Err(self.too_deep());
+        }
+        self.depth += 1;
+        let r = crate::stack::maybe_grow(|| f(self));
+        self.depth -= 1;
+        r
+    }
+    /// One more node on top of a chain (`a + b + c` is as deep as it is long).
+    fn fold(&mut self) -> EsResult<()> {
+        self.folds += 1;
+        if self.depth + self.folds > MAX_EXPRESSION_DEPTH { Err(self.too_deep()) } else { Ok(()) }
+    }
     fn expr(&mut self) -> EsResult<Expr> {
+        if self.depth == 0 {
+            self.folds = 0;
+        }
         self.or()
     }
     fn or(&mut self) -> EsResult<Expr> {
         let mut l = self.and()?;
         while self.eat_kw("OR") {
+            self.fold()?;
             let r = self.and()?;
             l = bin(BinOp::Or, l, r);
         }
@@ -239,6 +270,7 @@ impl P<'_> {
     fn and(&mut self) -> EsResult<Expr> {
         let mut l = self.not()?;
         while self.eat_kw("AND") {
+            self.fold()?;
             let r = self.not()?;
             l = bin(BinOp::And, l, r);
         }
@@ -247,7 +279,7 @@ impl P<'_> {
     fn not(&mut self) -> EsResult<Expr> {
         let s = self.pos();
         if self.eat_kw("NOT") {
-            let e = self.not()?;
+            let e = self.nest(Self::not)?;
             let end = e.end;
             return Ok(Expr { kind: ExprKind::Not(Box::new(e)), start: s, end });
         }
@@ -292,7 +324,7 @@ impl P<'_> {
             }
             let mut list = Vec::new();
             loop {
-                list.push(self.expr()?);
+                list.push(self.nest(Self::expr)?);
                 if !self.eat_op(",") {
                     break;
                 }
@@ -324,6 +356,7 @@ impl P<'_> {
                 _ => return Ok(l),
             };
             self.bump();
+            self.fold()?;
             let r = self.mul()?;
             l = bin(op, l, r);
         }
@@ -338,6 +371,7 @@ impl P<'_> {
                 _ => return Ok(l),
             };
             self.bump();
+            self.fold()?;
             let r = self.unary()?;
             l = bin(op, l, r);
         }
@@ -345,7 +379,7 @@ impl P<'_> {
     fn unary(&mut self) -> EsResult<Expr> {
         let s = self.pos();
         if self.eat_op("-") {
-            let e = self.unary()?;
+            let e = self.nest(Self::unary)?;
             let end = e.end;
             return Ok(match e.kind {
                 ExprKind::Lit(V::Int(i)) => Expr { kind: ExprKind::Lit(V::Int(-i)), start: s, end },
@@ -356,6 +390,7 @@ impl P<'_> {
         }
         let mut e = self.primary()?;
         while self.eat_op("::") {
+            self.fold()?;
             let ty = self.ident()?;
             let end = self.t[self.i - 1].2;
             e = Expr { kind: ExprKind::Cast(Box::new(e), sql_type(&ty)), start: s, end };
@@ -363,6 +398,9 @@ impl P<'_> {
         Ok(e)
     }
     fn primary(&mut self) -> EsResult<Expr> {
+        self.nest(Self::primary_at)
+    }
+    fn primary_at(&mut self) -> EsResult<Expr> {
         let (t, s, e) = self.t[self.i].clone();
         let lit = |v: V| Expr { kind: ExprKind::Lit(v), start: s, end: e };
         match t {
@@ -636,7 +674,7 @@ fn sql_like(pattern: &str, text: &str) -> bool {
 
 fn parse_with(src: &str, params: &[V]) -> EsResult<Stmt> {
     let t = lex(src)?;
-    let mut p = P { src, t, i: 0, params, next_param: 0 };
+    let mut p = P { src, t, i: 0, params, next_param: 0, depth: 0, folds: 0 };
     if p.eat_kw("SHOW") {
         if p.eat_kw("TABLES") {
             let like = if p.eat_kw("LIKE") {

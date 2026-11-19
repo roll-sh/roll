@@ -169,14 +169,12 @@ fn indexed_document(ctx: &QueryCtx, p: &Percolate) -> EsResult<Value> {
     let id = p.id.clone().unwrap_or_default();
     let missing = || EsError::resource_not_found(format!("indexed document [{index}/{id}] couldn't be found"));
     let Some(meta) = crate::write::resolve_existing(ctx.st, &index) else { return Err(EsError::index_not_found(&index)) };
-    let engine = ctx.cluster.engine.index(ctx.cluster, ctx.st, &meta)?;
-    let shard = crate::meta::routing::shard_for(&meta, &id, p.routing.as_deref());
-    let doc = engine.shard(shard).shard.get(id.as_bytes(), true).map_err(crate::engine::convert::index_error)?.ok_or_else(missing)?;
-    if p.version.is_some_and(|v| v != doc.version) {
-        return Err(EsError::new(409, "version_conflict_engine_exception", format!("[{id}]: version conflict, current version [{}] is different than the one provided [{}]", doc.version, p.version.unwrap_or(0))));
+    // Read as the request's reader may read it (its document and field level security).
+    let (version, src) = super::lookup_source(ctx, &meta, &id, p.routing.as_deref())?.ok_or_else(missing)?;
+    if p.version.is_some_and(|v| v != version) {
+        return Err(EsError::new(409, "version_conflict_engine_exception", format!("[{id}]: version conflict, current version [{version}] is different than the one provided [{}]", p.version.unwrap_or(0))));
     }
-    let src = crate::fetch::source_bytes(&doc.fields).ok_or_else(missing)?;
-    crate::fetch::parse_source(src)
+    src.ok_or_else(missing)
 }
 
 /// `PercolateQueryBuilder.doToQuery`: the stored queries matching the documents.

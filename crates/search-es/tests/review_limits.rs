@@ -139,3 +139,25 @@ async fn concurrent_dynamic_fields_are_all_indexed() {
         assert_eq!(at(&v, &["count"]).as_i64(), Some(1), "f{i}: {}", v.to_json());
     }
 }
+
+/// Points in time are bounded per cluster: each keeps its searchers for up to a day on a node
+/// other tenants share.
+#[tokio::test]
+async fn open_points_in_time_are_bounded() {
+    let c = Cluster::in_memory("limits").await;
+    call(&c, "PUT", "/idx/_doc/1?refresh=true", r#"{"a":1}"#).await;
+    let mut first = String::new();
+    for i in 0..1000 {
+        let (status, v) = call(&c, "POST", "/idx/_pit?keep_alive=1h", "").await;
+        assert_eq!(status, 200, "#{i}: {}", v.to_json());
+        if i == 0 {
+            first = at(&v, &["id"]).as_str().unwrap().to_string();
+        }
+    }
+    let (status, v) = call(&c, "POST", "/idx/_pit?keep_alive=1h", "").await;
+    assert_eq!(status, 500, "{}", v.to_json());
+    assert_eq!(at(&v, &["error", "reason"]).as_str(), Some("Trying to create too many Point In Time contexts. Must be less than or equal to: [1000]."));
+    // Closing one makes room.
+    assert_eq!(call(&c, "DELETE", "/_pit", &format!(r#"{{"id":"{first}"}}"#)).await.0, 200);
+    assert_eq!(call(&c, "POST", "/idx/_pit?keep_alive=1h", "").await.0, 200);
+}

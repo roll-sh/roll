@@ -616,7 +616,12 @@ impl Compiler<'_> {
         }
     }
 
+    /// Recurses once per level of `e` (bounded by the parser's expression depth).
     fn compile(&mut self, e: &Expr) -> EsResult<(CE, DataType)> {
+        crate::stack::maybe_grow(|| self.compile_at(e))
+    }
+
+    fn compile_at(&mut self, e: &Expr) -> EsResult<(CE, DataType)> {
         Ok(match &e.kind {
             ExprKind::Lit(v) => (CE::Lit(v.clone()), v.type_of()),
             ExprKind::Col(c) => {
@@ -1088,7 +1093,12 @@ impl Compiler<'_> {
     }
 }
 
+/// Recurses once per level of `c` (bounded by the parser's expression depth).
 fn eval(c: &CE, row: &[V], aggs: &[V], w: &mut Warnings) -> EsResult<V> {
+    crate::stack::maybe_grow(|| eval_at(c, row, aggs, w))
+}
+
+fn eval_at(c: &CE, row: &[V], aggs: &[V], w: &mut Warnings) -> EsResult<V> {
     Ok(match c {
         CE::Lit(v) => v.clone(),
         CE::Col(i) => row.get(*i).cloned().unwrap_or(V::Null),
@@ -3338,7 +3348,7 @@ fn expand_views(st: &crate::meta::ClusterState, mut q: Query) -> EsResult<Query>
     }
     let text: std::sync::Arc<str> = q.src.as_str().into();
     if let Some(first) = q.cmds.first_mut() {
-        expand_source(st, first, &text, &mut Vec::new())?;
+        expand_source(st, first, &text, &mut Vec::new(), 0, &mut 0)?;
     }
     Ok(q)
 }
@@ -3348,13 +3358,22 @@ fn is_index_abstraction(st: &crate::meta::ClusterState, name: &str) -> bool {
     st.metadata.indices.contains_key(name) || st.has_alias(name) || st.metadata.data_streams.contains_key(name)
 }
 
-fn expand_source(st: &crate::meta::ClusterState, cmd: &mut Cmd, text: &std::sync::Arc<str>, chain: &mut Vec<String>) -> EsResult<()> {
+/// Views a query may splice in all (a view's wildcard may name every other view at each level).
+const MAX_SPLICED_VIEWS: usize = 1000;
+
+/// `depth`: unions (subqueries and views) around `cmd`, which run as nested queries
+/// ([`run_query`] recurses once per level, on the request's stack); `spliced`: views spliced so
+/// far.
+fn expand_source(st: &crate::meta::ClusterState, cmd: &mut Cmd, text: &std::sync::Arc<str>, chain: &mut Vec<String>, depth: usize, spliced: &mut usize) -> EsResult<()> {
+    if depth > super::parser::MAX_NESTED_QUERIES {
+        return Err(verification_plain(&format!("views and subqueries nest deeper than {} levels", super::parser::MAX_NESTED_QUERIES)));
+    }
     match cmd {
         Cmd::Union { branches, .. } => {
             for b in branches.iter_mut().filter(|b| b.view.is_none()) {
                 let src = b.src.clone();
                 if let Some(first) = b.cmds.first_mut() {
-                    expand_source(st, first, &src, chain)?;
+                    expand_source(st, first, &src, chain, depth + 1, spliced)?;
                 }
             }
             Ok(())
@@ -3403,13 +3422,17 @@ fn expand_source(st: &crate::meta::ClusterState, cmd: &mut Cmd, text: &std::sync
                         if chain.contains(&v) {
                             return Err(verification_plain(&format!("circular view reference '{v}': {}", chain.join(" -> "))));
                         }
+                        *spliced += 1;
+                        if *spliced > MAX_SPLICED_VIEWS {
+                            return Err(verification_plain(&format!("the query expands more than {MAX_SPLICED_VIEWS} views")));
+                        }
                         let body = st.metadata.xpack.get(super::VIEWS, &v).and_then(|x| x.get("query")).map(Value::to_es_string).unwrap_or_default();
                         let vq = super::parser::parse(&body, &[], &[])?;
                         let vtext: std::sync::Arc<str> = body.as_str().into();
                         let mut cmds = vq.cmds;
                         chain.push(v.clone());
                         if let Some(first) = cmds.first_mut() {
-                            expand_source(st, first, &vtext, chain)?;
+                            expand_source(st, first, &vtext, chain, depth + 1, spliced)?;
                         }
                         chain.pop();
                         // `METADATA` fields of the outer `FROM` are null over a view.

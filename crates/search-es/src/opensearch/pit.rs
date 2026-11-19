@@ -42,6 +42,7 @@ pub fn create(ctx: &Ctx) -> EsResult<Reply> {
     };
     let ka_value = TimeValue::parse(ka, "keep_alive")?;
     let ka = check_keep_alive(ctx, ka_value)?;
+    crate::search::contexts::check_pit_room(ctx)?;
     let mut req = crate::search::parse_request(ctx, None, None)?;
     req.source = Default::default();
     let st = ctx.state();

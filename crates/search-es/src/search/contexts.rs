@@ -210,6 +210,11 @@ impl Contexts {
         self.map.lock().values().filter(|c| !c.pit).count()
     }
 
+    fn count_pits(&self) -> usize {
+        self.purge();
+        self.map.lock().values().filter(|c| c.pit).count()
+    }
+
     /// Runs `f` on a live context (extending its expiry by `keep_alive`).
     pub fn with<R>(&self, id: &str, keep_alive: Option<Duration>, f: impl FnOnce(&mut SearchContext) -> R) -> Option<R> {
         self.purge();
@@ -447,12 +452,34 @@ pub fn clear_scroll(ctx: &Ctx) -> EsResult<Reply> {
     Ok(Reply::Body(status, obj! { "succeeded" => true, "num_freed" => freed as i64 }))
 }
 
+/// Points in time an Elasticsearch-flavor cluster may hold open. Each keeps its searchers (and
+/// the segments they read) for up to `search.max_keep_alive` on a node other tenants share, and
+/// Elasticsearch has no limit of its own (its heap is the cluster's alone): roll's own, as
+/// OpenSearch's `search.max_open_pit_context`.
+const MAX_OPEN_PITS: usize = 1000;
+
+/// Refuses a new point in time past the limit (OpenSearch: `search.max_open_pit_context`).
+pub fn check_pit_room(ctx: &Ctx) -> EsResult<()> {
+    let (max, setting) = match ctx.cluster.dialect {
+        crate::cluster::Dialect::OpenSearch => {
+            (ctx.state().metadata.cluster_setting("search.max_open_pit_context").and_then(|v| v.parse::<usize>().ok()).unwrap_or(300), "search.max_open_pit_context")
+        }
+        crate::cluster::Dialect::Elasticsearch => (MAX_OPEN_PITS, ""),
+    };
+    if ctx.cluster.contexts.count_pits() < max {
+        return Ok(());
+    }
+    let change = if setting.is_empty() { String::new() } else { format!(" This limit can be set by changing the [{setting}] setting.") };
+    Err(EsError::new(500, "exception", format!("Trying to create too many Point In Time contexts. Must be less than or equal to: [{max}].{change}")))
+}
+
 /// `POST /{index}/_pit`.
 pub fn open_pit(ctx: &Ctx) -> EsResult<Reply> {
     let Some(ka) = ctx.query("keep_alive") else {
         return Err(EsError::action_request_validation(&["[keep_alive] is not specified".into()]));
     };
     let ka = check_keep_alive(ctx, TimeValue::parse(ka, "keep_alive")?)?;
+    check_pit_room(ctx)?;
     let body = ctx.body_map()?.unwrap_or_default();
     let mut req = super::parse_request(ctx, None, None)?;
     // `index_filter`: shards it can't match are left out of the point in time (can_match),

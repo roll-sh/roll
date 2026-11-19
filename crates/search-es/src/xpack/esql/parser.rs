@@ -479,13 +479,51 @@ struct P<'a> {
     i: usize,
     params: &'a [V],
     named: &'a [(String, V)],
+    /// Nesting of the expression being parsed ([`P::nest`]).
+    depth: usize,
+    /// Binary operators, casts and pattern lists folded in the current top-level expression
+    /// ([`P::fold`]).
+    folds: usize,
+    /// `FROM` subqueries around the command being parsed.
+    subqueries: usize,
 }
+
+/// `ExpressionBuilder.MAX_EXPRESSION_DEPTH`. Parsing recurses once per nesting level, and the
+/// planner, the evaluator and dropping the tree recurse once per level of the tree, which also
+/// grows with every operator a chain folds: a stack overflow aborts the whole node, so both are
+/// bounded (nesting plus the folds of the top-level expression: at most twice this deep).
+const MAX_EXPRESSION_DEPTH: usize = 300;
+
+/// Subqueries (and views, which run as subqueries) nested in one another: each level runs as a
+/// nested query on the request's stack. roll's own limit.
+pub(super) const MAX_NESTED_QUERIES: usize = 16;
 
 fn kw(t: &Tok, k: &str) -> bool {
     matches!(t, Tok::Ident(s) if s.eq_ignore_ascii_case(k))
 }
 
 impl<'a> P<'a> {
+    fn too_deep(&self) -> EsError {
+        parse_error(self.src, self.peek().start, &format!("ES|QL statement exceeded the maximum expression depth allowed ({MAX_EXPRESSION_DEPTH})"))
+    }
+
+    /// Runs `f` one nesting level deeper (on a fresh stack segment when this one runs low).
+    fn nest<T>(&mut self, f: impl FnOnce(&mut Self) -> EsResult<T>) -> EsResult<T> {
+        if self.depth + self.folds >= MAX_EXPRESSION_DEPTH {
+            return Err(self.too_deep());
+        }
+        self.depth += 1;
+        let r = crate::stack::maybe_grow(|| f(self));
+        self.depth -= 1;
+        r
+    }
+
+    /// One more node on top of a chain (`a + b + c` is as deep as it is long).
+    fn fold(&mut self, n: usize) -> EsResult<()> {
+        self.folds += n;
+        if self.depth + self.folds > MAX_EXPRESSION_DEPTH { Err(self.too_deep()) } else { Ok(()) }
+    }
+
     fn peek(&self) -> &Token {
         &self.toks[self.i]
     }
@@ -592,6 +630,16 @@ impl<'a> P<'a> {
 
     /// The query inside a `FROM` subquery, after its `(`, up to and including its `)`.
     fn subquery(&mut self) -> EsResult<Vec<Cmd>> {
+        if self.subqueries >= MAX_NESTED_QUERIES {
+            return Err(parse_error(self.src, self.peek().start, &format!("views and subqueries nest deeper than {MAX_NESTED_QUERIES} levels")));
+        }
+        self.subqueries += 1;
+        let r = crate::stack::maybe_grow(|| self.subquery_cmds());
+        self.subqueries -= 1;
+        r
+    }
+
+    fn subquery_cmds(&mut self) -> EsResult<Vec<Cmd>> {
         let first = self.command()?;
         if !matches!(first, Cmd::From { .. } | Cmd::Ts { .. } | Cmd::Row(_) | Cmd::Show(_) | Cmd::Union { .. }) {
             return Err(parse_error(self.src, 0, "mismatched input expecting {'from', 'row', 'show'}"));
@@ -1018,6 +1066,9 @@ impl<'a> P<'a> {
     }
 
     fn expr(&mut self) -> EsResult<Expr> {
+        if self.depth == 0 {
+            self.folds = 0;
+        }
         self.or()
     }
 
@@ -1040,6 +1091,7 @@ impl<'a> P<'a> {
     fn or(&mut self) -> EsResult<Expr> {
         let mut l = self.and()?;
         while self.eat_kw("OR") {
+            self.fold(1)?;
             let r = self.and()?;
             l = bin(BinOp::Or, l, r);
         }
@@ -1049,6 +1101,7 @@ impl<'a> P<'a> {
     fn and(&mut self) -> EsResult<Expr> {
         let mut l = self.not()?;
         while self.eat_kw("AND") {
+            self.fold(1)?;
             let r = self.not()?;
             l = bin(BinOp::And, l, r);
         }
@@ -1058,7 +1111,7 @@ impl<'a> P<'a> {
     fn not(&mut self) -> EsResult<Expr> {
         let start = self.peek().start;
         if self.eat_kw("NOT") {
-            let e = self.not()?;
+            let e = self.nest(Self::not)?;
             let end = e.end;
             return Ok(Expr { kind: ExprKind::Not(Box::new(e)), start, end });
         }
@@ -1127,6 +1180,7 @@ impl<'a> P<'a> {
                 end = self.peek().end;
                 self.expect_op(")")?;
             }
+            self.fold(pats.len())?;
             let mut it = pats.into_iter();
             let (p, _) = it.next().expect("one pattern");
             let mut e = Expr { kind: ExprKind::Like(Box::new(l.clone()), p, rlike, false), start, end };
@@ -1147,7 +1201,7 @@ impl<'a> P<'a> {
             self.expect_op("(")?;
             let mut list = Vec::new();
             loop {
-                list.push(self.expr()?);
+                list.push(self.nest(Self::expr)?);
                 if !self.eat_op(",") {
                     break;
                 }
@@ -1191,6 +1245,7 @@ impl<'a> P<'a> {
                 _ => return Ok(l),
             };
             self.bump();
+            self.fold(1)?;
             let r = self.operand(l.start, Self::multiplicative)?;
             l = bin(op, l, r);
         }
@@ -1206,6 +1261,7 @@ impl<'a> P<'a> {
                 _ => return Ok(l),
             };
             self.bump();
+            self.fold(1)?;
             let r = self.operand(l.start, Self::unary)?;
             l = bin(op, l, r);
         }
@@ -1214,7 +1270,7 @@ impl<'a> P<'a> {
     fn unary(&mut self) -> EsResult<Expr> {
         let start = self.peek().start;
         if self.eat_op("-") {
-            let e = self.unary()?;
+            let e = self.nest(Self::unary)?;
             let end = e.end;
             if let ExprKind::Lit(V::Long(n)) = e.kind {
                 return Ok(Expr { kind: ExprKind::Lit(V::Long(-n)), start, end });
@@ -1228,10 +1284,11 @@ impl<'a> P<'a> {
             return Ok(Expr { kind: ExprKind::Neg(Box::new(e)), start, end });
         }
         if self.eat_op("+") {
-            return self.unary();
+            return self.nest(Self::unary);
         }
         let mut e = self.primary()?;
         while self.eat_op("::") {
+            self.fold(1)?;
             let (ty, ty_at) = self.ident()?;
             let end = self.toks[self.i - 1].end;
             let ty = ty.to_ascii_lowercase();
@@ -1277,6 +1334,10 @@ impl<'a> P<'a> {
     }
 
     fn primary(&mut self) -> EsResult<Expr> {
+        self.nest(Self::primary_at)
+    }
+
+    fn primary_at(&mut self) -> EsResult<Expr> {
         let t = self.peek().clone();
         let lit = |v: V| Expr { kind: ExprKind::Lit(v), start: t.start, end: t.end };
         match &t.tok {
@@ -1510,7 +1571,7 @@ fn parse_tokens(src: &str, all: &[(Option<String>, Param)]) -> EsResult<Query> {
     let named = named_values;
     let params = &positional[..];
     let named = &named[..];
-    let mut p = P { src, toks, i: 0, params, named };
+    let mut p = P { src, toks, i: 0, params, named, depth: 0, folds: 0, subqueries: 0 };
     let mut settings = Settings::default();
     // Settings are validated once the whole query parses (syntax errors come first).
     let mut sets: Vec<(usize, String, SetValue)> = Vec::new();

@@ -244,7 +244,13 @@ struct P<'a> {
     toks: Vec<Lexed>,
     i: usize,
     params: &'a [(Option<String>, Param)],
+    /// Functions and aggregations around the expression being parsed.
+    depth: usize,
 }
+
+/// Functions and aggregations nested in one another: parsing recurses once per level, and a
+/// stack overflow aborts the whole node (ES|QL's expression depth).
+const MAX_DEPTH: usize = 300;
 
 impl P<'_> {
     fn peek(&self) -> &Tok {
@@ -308,6 +314,16 @@ impl P<'_> {
     }
 
     fn expr(&mut self) -> EsResult<Node> {
+        if self.depth >= MAX_DEPTH {
+            return Err(parse_error(self.src, self.at(), &format!("ES|QL statement exceeded the maximum expression depth allowed ({MAX_DEPTH})")));
+        }
+        self.depth += 1;
+        let r = crate::stack::maybe_grow(|| self.expr_at());
+        self.depth -= 1;
+        r
+    }
+
+    fn expr_at(&mut self) -> EsResult<Node> {
         let at = self.at();
         let Tok::Ident(name) = self.peek().clone() else {
             let found = &self.src[at..self.toks[self.i].end];
@@ -381,7 +397,7 @@ impl P<'_> {
 /// The commands `src[start..end]` (a `PROMQL` command) stands for.
 pub fn desugar(src: &str, start: usize, end: usize, params: &[(Option<String>, Param)]) -> EsResult<Vec<Cmd>> {
     let toks = lex(src, start + "PROMQL".len(), end)?;
-    let mut p = P { src, toks, i: 0, params };
+    let mut p = P { src, toks, i: 0, params, depth: 0 };
     let (mut index, mut step) = (None, None);
     let mut name = None;
     // Settings (`index=test`), then `name=(expression)` or the expression.

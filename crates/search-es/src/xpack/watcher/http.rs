@@ -96,7 +96,10 @@ pub fn normalize(v: &Value, previous: Option<&Value>) -> EsResult<Map> {
             return Err(parse_err("found a sealed value in field [password]"));
         }
         if pass == REDACTED {
-            match previous.and_then(|p| p.pointer(&["auth", "basic", "password"])).map(Value::to_es_string) {
+            // The stored password goes only where it went: a template sent elsewhere needs it
+            // given again.
+            let same_place = |p: &&Value| ["scheme", "host", "port"].iter().all(|k| p.get(k) == out.get(*k));
+            match previous.filter(same_place).and_then(|p| p.pointer(&["auth", "basic", "password"])).map(Value::to_es_string) {
                 Some(old) => pass = old,
                 None => return Err(parse_err("found redacted password in field [password]")),
             }
@@ -413,10 +416,14 @@ mod tests {
         let e = normalize(&obj! { "url" => "" }, None).unwrap_err();
         assert_eq!(e.reason(), "Configured URL is empty, please configure a valid URL");
         assert_eq!(normalize(&obj! { "url" => "https://" }, None).unwrap_err().reason(), "Malformed URL [https://]");
-        let again = obj! { "host" => "h", "port" => 1, "auth" => obj! { "basic" => obj! { "username" => "u", "password" => REDACTED } } };
-        assert_eq!(normalize(&again, None).unwrap_err().reason(), "found redacted password in field [password]");
-        let kept = normalize(&again, Some(&Value::Obj(t))).unwrap();
+        let again = |url: &str| obj! { "url" => url, "auth" => obj! { "basic" => obj! { "username" => "u", "password" => REDACTED } } };
+        assert_eq!(normalize(&again("http://h.example/q"), None).unwrap_err().reason(), "found redacted password in field [password]");
+        let kept = normalize(&again("http://h.example/q"), Some(&Value::Obj(t.clone()))).unwrap();
         assert_eq!(kept.get("auth").and_then(|a| a.pointer(&["basic", "password"])), Some(&Value::from("s")));
+        // A redacted password doesn't follow the request to another host, port or scheme.
+        for moved in ["http://attacker.example/q", "http://h.example:8080/q", "https://h.example/q"] {
+            assert_eq!(normalize(&again(moved), Some(&Value::Obj(t.clone()))).unwrap_err().reason(), "found redacted password in field [password]", "{moved}");
+        }
         let r = Request {
             scheme: "http".into(),
             host: "h".into(),

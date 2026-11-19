@@ -440,7 +440,16 @@ struct Parser<'a> {
     src: &'a str,
     toks: Vec<Token>,
     pos: usize,
+    /// Nesting of the expression being parsed ([`Parser::nest`]).
+    depth: usize,
+    /// Operators folded in the current top-level expression ([`Parser::fold`]).
+    folds: usize,
 }
+
+/// `EqlParser.MAX_EXPRESSION_DEPTH`: parsing recurses once per nesting level and what runs the
+/// tree once per level of it, which grows with every operator a chain folds; a stack overflow
+/// aborts the whole node, so nesting plus the folds of a top-level expression are bounded.
+const MAX_EXPRESSION_DEPTH: usize = 250;
 
 /// How a token reads in `mismatched input '...'` messages.
 fn tok_text(src: &str, t: &Token) -> String {
@@ -910,11 +919,36 @@ impl<'a> Parser<'a> {
         Ok(EventFilter { category, condition })
     }
 
+    fn too_deep(&self) -> EsError {
+        error_at(self.src, self.start(), format!("EQL statement exceeded the maximum expression depth allowed ({MAX_EXPRESSION_DEPTH})"))
+    }
+
+    /// Runs `f` one nesting level deeper (on a fresh stack segment when this one runs low).
+    fn nest<R>(&mut self, f: impl FnOnce(&mut Self) -> Result<R, EsError>) -> Result<R, EsError> {
+        if self.depth + self.folds >= MAX_EXPRESSION_DEPTH {
+            return Err(self.too_deep());
+        }
+        self.depth += 1;
+        let r = crate::stack::maybe_grow(|| f(self));
+        self.depth -= 1;
+        r
+    }
+
+    /// One more node on top of a chain (`a + b + c` is as deep as it is long).
+    fn fold(&mut self) -> Result<(), EsError> {
+        self.folds += 1;
+        if self.depth + self.folds > MAX_EXPRESSION_DEPTH { Err(self.too_deep()) } else { Ok(()) }
+    }
+
     // booleanExpression: OR < AND < NOT.
     fn boolean(&mut self) -> Result<Expr, EsError> {
+        if self.depth == 0 {
+            self.folds = 0;
+        }
         let mut left = self.and_expr()?;
         while self.is_kw("or") {
             self.bump();
+            self.fold()?;
             let right = self.and_expr()?;
             let (start, end) = (left.start, right.end);
             left = Expr { kind: ExprKind::Or(Box::new(left), Box::new(right)), start, end };
@@ -926,6 +960,7 @@ impl<'a> Parser<'a> {
         let mut left = self.not_expr()?;
         while self.is_kw("and") {
             self.bump();
+            self.fold()?;
             let right = self.not_expr()?;
             let (start, end) = (left.start, right.end);
             left = Expr { kind: ExprKind::And(Box::new(left), Box::new(right)), start, end };
@@ -937,7 +972,7 @@ impl<'a> Parser<'a> {
         if self.is_kw("not") {
             let start = self.start();
             self.bump();
-            let inner = self.not_expr()?;
+            let inner = self.nest(Self::not_expr)?;
             let end = inner.end;
             return Ok(Expr { kind: ExprKind::Not(Box::new(inner)), start, end });
         }
@@ -983,6 +1018,7 @@ impl<'a> Parser<'a> {
                 _ => return Ok(left),
             };
             self.bump();
+            self.fold()?;
             let right = self.mul_expr()?;
             let (start, end) = (left.start, right.end);
             left = Expr { kind: ExprKind::Arith(op, Box::new(left), Box::new(right)), start, end };
@@ -999,6 +1035,7 @@ impl<'a> Parser<'a> {
                 _ => return Ok(left),
             };
             self.bump();
+            self.fold()?;
             let right = self.unary_expr()?;
             let (start, end) = (left.start, right.end);
             left = Expr { kind: ExprKind::Arith(op, Box::new(left), Box::new(right)), start, end };
@@ -1010,7 +1047,7 @@ impl<'a> Parser<'a> {
             let start = self.start();
             let neg = self.is_op("-");
             self.bump();
-            let inner = self.unary_expr()?;
+            let inner = self.nest(Self::unary_expr)?;
             let end = inner.end;
             if !neg {
                 return Ok(Expr { kind: inner.kind, start, end });
@@ -1025,8 +1062,9 @@ impl<'a> Parser<'a> {
             }
             return Ok(Expr { kind: ExprKind::Neg(Box::new(inner)), start, end });
         }
-        let primary = self.primary()?;
-        self.predicate(primary)
+        // Both a level deeper: a predicate's list holds whole expressions.
+        let primary = self.nest(Self::primary)?;
+        self.nest(|p| p.predicate(primary))
     }
 
     fn predicate(&mut self, expr: Expr) -> Result<Expr, EsError> {
@@ -1225,7 +1263,7 @@ fn levenshtein(a: &str, b: &str) -> usize {
 /// Parses an EQL statement.
 pub fn parse(src: &str) -> Result<Statement, EsError> {
     let toks = lex(src)?;
-    let mut p = Parser { src, toks, pos: 0 };
+    let mut p = Parser { src, toks, pos: 0, depth: 0, folds: 0 };
     p.statement()
 }
 

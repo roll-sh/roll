@@ -992,7 +992,12 @@ fn arith(op: ArithOp, a: V, b: V) -> EsResult<V> {
     }))
 }
 
+/// Recurses once per level of `e` (bounded by the parser's expression depth).
 fn eval(e: &Expr, doc: &Doc) -> EsResult<V> {
+    crate::stack::maybe_grow(|| eval_at(e, doc))
+}
+
+fn eval_at(e: &Expr, doc: &Doc) -> EsResult<V> {
     Ok(match &e.kind {
         ExprKind::Lit(l) => match l {
             Lit::Null => V::Null,

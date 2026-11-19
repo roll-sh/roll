@@ -3469,7 +3469,7 @@ fn runtime_fields_of_hit(cluster: &Cluster, st: &ClusterState, src: &SearchSourc
     }
     let Some((seg, local)) = searcher.segment_of(doc) else { return Ok(()) };
     let mut out = Map::new();
-    lookup_fields_of_hit(cluster, src, table, searcher, doc, &mut out)?;
+    lookup_fields_of_hit(cluster, src, table, searcher, doc, t.security.as_ref(), &mut out)?;
     // Runtime fields shadowing a concrete field the concrete fetch already printed: their
     // own values (or none) replace those.
     let mut shadowed_empty = Vec::new();
@@ -3540,8 +3540,10 @@ fn runtime_fields_of_hit(cluster: &Cluster, st: &ClusterState, src: &SearchSourc
 
 /// `lookup` runtime fields (`LookupRuntimeFieldType`) of the request's `fields`: per value of
 /// `input_field`, the `fetch_fields` of the first document of `target_index` whose
-/// `target_field` holds it; values without a match are left out.
-fn lookup_fields_of_hit(cluster: &Cluster, src: &SearchSource, table: &Arc<crate::engine::fields::FieldTable>, searcher: &Searcher, doc: u32, out: &mut Map) -> EsResult<()> {
+/// `target_field` holds it; values without a match are left out. The lookups read as the
+/// search's reader (`security`: its document and field level security over `target_index`).
+#[allow(clippy::too_many_arguments)]
+fn lookup_fields_of_hit(cluster: &Cluster, src: &SearchSource, table: &Arc<crate::engine::fields::FieldTable>, searcher: &Searcher, doc: u32, security: Option<&crate::xpack::security::dls::ReadSecurity>, out: &mut Map) -> EsResult<()> {
     let Some(rm) = &src.runtime_mappings else { return Ok(()) };
     let lookups: Vec<(&String, &Map)> = rm.iter().filter_map(|(k, d)| d.as_object().filter(|m| m.get("type").and_then(Value::as_str) == Some("lookup")).map(|m| (k, m))).collect();
     if lookups.is_empty() {
@@ -3592,7 +3594,7 @@ fn lookup_fields_of_hit(cluster: &Cluster, src: &SearchSource, table: &Arc<crate
                 now_ms: crate::time::now_millis(),
                 fused: None,
                 rank_only: false,
-                security: None,
+                security: security.cloned(),
             };
             let o = execute(cluster, &req)?;
             if let Some(Value::Obj(f)) = o.hits.first().and_then(|h| h.get("fields")) {
@@ -4455,17 +4457,25 @@ pub fn explain(ctx: &Ctx) -> EsResult<Reply> {
     let shard = engine.shard(crate::meta::routing::shard_for(&idx, &id, routing.as_deref())).clone();
     shard.before_search(IndexEngine::refresh_interval(&idx))?;
     let searcher = shard.searcher();
-    let table = engine.table();
-    let qctx = QueryCtx::new(ctx.cluster, &st, &idx, &table, &searcher, ctx.now_ms);
     let security = crate::xpack::security::dls::ReadSecurity::of(ctx);
     let alias_filter = match &security {
         Some(s) => s.documents(ctx.cluster, crate::xpack::security::dls::READ, &idx.name)?,
         None => None,
     };
+    let fls = security.as_ref().and_then(|s| s.fields(crate::xpack::security::dls::READ, &idx.name));
     let t = Target { idx: idx.clone(), engine: engine.clone(), shard: shard.clone(), alias_filter, boost: 1.0, searcher: Some(searcher.clone()), security };
+    // The reader's fields only: those its field level security hides are unmapped.
+    let table = t.table();
+    let mut qctx = QueryCtx::new(ctx.cluster, &st, &idx, &table, &searcher, ctx.now_ms);
+    qctx.security = t.security.clone();
     // `TransportExplainAction.shardOperation` looks the document up before it builds the
-    // query: a missing document answers 404 whatever the query.
-    let doc = find_doc(&searcher, &id);
+    // query: a missing document answers 404 whatever the query, and so does one the reader's
+    // document level security hides (its reader doesn't hold it).
+    let hidden = match &t.alias_filter {
+        Some(q) => !matches_doc(ctx.cluster, &st, &idx, &engine, &shard, &id, q)?,
+        None => false,
+    };
+    let doc = find_doc(&searcher, &id).filter(|_| !hidden);
     let mut m = Map::new();
     m.insert("_index".into(), Value::Str(idx.name.clone()));
     m.insert("_id".into(), Value::Str(id.clone()));
@@ -4490,10 +4500,16 @@ pub fn explain(ctx: &Ctx) -> EsResult<Reply> {
         g.insert("found".into(), Value::Bool(true));
         let view = crate::fetch::SourceView { idx: &idx, table: &table, force_synthetic: false, search: true };
         if let Some(src) = crate::fetch::render_source_view(&stored, &fs2, &view)? {
-            g.insert("_source".into(), src);
+            g.insert("_source".into(), match &fls {
+                Some(f) => f.filter_source(src),
+                None => src,
+            });
         }
         if let Some(s) = &sf {
-            let f = crate::fetch::stored_fields(&table, &stored, s);
+            let mut f = crate::fetch::stored_fields(&table, &stored, s);
+            if let Some(fls) = &fls {
+                f = fls.filter_fields(f);
+            }
             if !f.is_empty() {
                 g.insert("fields".into(), Value::Obj(f));
             }
@@ -4573,6 +4589,29 @@ fn complete_completion_options(cluster: &Cluster, st: &ClusterState, req: &Searc
 
 /// Whether document `id` of `shard` matches `q` (document level security of a get): the shard
 /// is refreshed first, so a realtime get of a document not yet searchable is judged too.
+/// Document `id` of `idx` as a query reads it on behalf of its request (a `percolate` query's
+/// or an `indexed_shape`'s document): `None` when it's missing or the reader's document level
+/// security hides it, else its version and `_source` (`None`: not stored) without the fields
+/// the reader's field level security hides, as a get by the reader answers.
+pub(crate) fn lookup_source(ctx: &QueryCtx, idx: &Arc<IndexMeta>, id: &str, routing: Option<&str>) -> EsResult<Option<(i64, Option<Value>)>> {
+    use crate::xpack::security::dls::READ;
+    let engine = ctx.cluster.engine.index(ctx.cluster, ctx.st, idx)?;
+    let shard = engine.shard(crate::meta::routing::shard_for(idx, id, routing));
+    let Some(doc) = shard.shard.get(id.as_bytes(), true).map_err(crate::engine::convert::index_error)? else { return Ok(None) };
+    if let Some(sec) = &ctx.security
+        && let Some(q) = sec.documents(ctx.cluster, READ, &idx.name)?
+        && !matches_doc(ctx.cluster, ctx.st, idx, &engine, shard, id, &q)?
+    {
+        return Ok(None);
+    }
+    let Some(src) = crate::fetch::source_bytes(&doc.fields) else { return Ok(Some((doc.version, None))) };
+    let src = crate::fetch::parse_source(src)?;
+    Ok(Some((doc.version, Some(match ctx.security.as_ref().and_then(|s| s.fields(READ, &idx.name)) {
+        Some(f) => f.filter_source(src),
+        None => src,
+    }))))
+}
+
 pub fn matches_doc(cluster: &Cluster, st: &ClusterState, idx: &Arc<IndexMeta>, engine: &Arc<IndexEngine>, shard: &Arc<ShardEngine>, id: &str, q: &crate::query::Query) -> EsResult<bool> {
     shard.refresh()?;
     let searcher = shard.searcher();
