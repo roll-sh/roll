@@ -289,8 +289,8 @@ limits. Their results have not been reverified on the current source.
 
 HANDOFF "Bulk writes, round 18" has what changed. Lane C, the 1M-row bulk script with joined
 windows (agent 246's `bulkx.sh` with `JOIN=1`, copied to `~/.cache/a260/bench`), plain dist builds
-(`tools/dist.sh`) of **b0**, origin's `bc9102ebb`, and **d1**, `cand/a260`'s code (built as
-`c8943e5fb` on b0). G
+(`tools/dist.sh`) of **b0**, origin's `bc9102ebb`, **d1**, `cand/a260`'s code (built as
+`c8943e5fb` on b0), and **d3**, d1 with `cand/a260-2`'s commit. G
 user instructions of the server's cgroup; every counter ran 100% of its window. Each pair held
 lane C through `tools/lane.sh` alone. **Foreign load was over 1.0 core in every run** (wall-weighted
 1.8-3.0 cores: other agents' builds and runs, host load 40-55); the instruction counts repeat
@@ -320,10 +320,20 @@ b0: DELETE -17.5%, all steps -3.2%, but the single-source scans +1.1% (count(*) 
 seq sum +0.6%, `count(*), sum(c)` +0.5%, COPY +0.3%, INSERT … SELECT +0.3%, UPDATE +0.2%: kept
 out of line in d1 (HANDOFF).
 
+### d1 against d3: a stored row's size (2 alternating pairs, % per pair)
+
+| step | d1 | d3 | % per pair |
+|---|---|---|---|
+| CREATE INDEX | 5.292 | 5.210 | -1.4 / -1.7 |
+| INSERT … SELECT | 6.678 | 6.640 | -0.5 / -0.6 |
+| VACUUM | 1.785 | 1.724 | -3.4 / -3.4 |
+| every other step | | | -0.0 to +0.0 |
+| **all steps** | 50.89 | 50.70 | -0.3 / -0.4 |
+
 ### The same day, same lane and settings (all steps, G; two runs each of PostgreSQL and pgrust, foreign load 3.5-3.8 cores)
 
-PostgreSQL 18.6 52.33 (52.336, 52.325), pgrust 44.92 (44.917, 44.923), b0 52.56, d1 50.88:
-d1 0.972x PostgreSQL, 1.13x pgrust. PostgreSQL's steps in these runs: COPY in 6.48,
+PostgreSQL 18.6 52.33 (52.336, 52.325), pgrust 44.92 (44.917, 44.923), b0 52.56, d1 50.88, d3 50.70:
+d3 0.969x PostgreSQL, 1.13x pgrust. PostgreSQL's steps in these runs: COPY in 6.48,
 CREATE INDEX 3.13, INSERT … SELECT 4.31, UPDATE 27.60, DELETE 1.67, VACUUM 2.63.
 
 ### PGO: `pbo` against `d1p` (one pair each; G user instructions)

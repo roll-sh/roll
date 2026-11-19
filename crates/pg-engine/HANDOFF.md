@@ -10629,7 +10629,8 @@ Agent 218's short-transaction stack (ten steps, `wip/a218`) was gated this way a
 
 BENCH.md "Bulk writes, round 18" has the measurements (lane C, the 1M-row bulk script with joined
 windows, plain dist builds). `cand/a260`: one commit on origin's `17042101b` (measured on
-`bc9102ebb`; the commits between touch none of its files). No format change.
+`bc9102ebb`; the commits between touch none of its files); `cand/a260-2`: one commit on it (a
+stored row's size, below). No format change.
 
 **Where a merging scan's entries went** (b0 = `bc9102ebb`; an instruction profile of `count(*)`
 over the bulk table after its UPDATE, whose 500,000 new versions sit in an L0 file over the table
@@ -10672,8 +10673,8 @@ code placement). Out of line, the scans and q01 are level again; COPY's +0.3% st
 
 Results (BENCH "Bulk writes, round 18"; plain dist, five alternating pairs against b0): DELETE with
 its compaction 9.99 -> 8.25 G (-17.4% in every pair: the statement's scan and the compaction's
-merge, about -0.9 G each), all steps 52.56 -> 50.88 G (-3.1 to -3.3% in every pair; 0.972x PostgreSQL's 52.33 the same
-day, 1.13x pgrust's 44.92); COPY in +0.3%,
+merge, about -0.9 G each), all steps 52.56 -> 50.88 G (-3.1 to -3.3% in every pair; with `cand/a260-2` 50.70: 0.969x
+PostgreSQL's 52.33 the same day, 1.13x pgrust's 44.92); COPY in +0.3%,
 UPDATE +0.2% (-0.1 to +0.4), INSERT ... SELECT +0.1%, VACUUM +0.1%, every other step level (the
 scans exactly). Rows equal in every run. Peak memory the same (VmHWM b0 268-290, d1 269-298 MB);
 bytes written the same. TPC-H SF1 q01 / q06 (2 GB cache, 3 runs of each query a pass, two
@@ -10687,6 +10688,15 @@ change on a single-source scan is one comparison of the ranked sources' count pe
 checkout, its own profile, against agent 261's `pbo`, the same script on `bc9102ebb`; one pair each,
 the steps the change touches): DELETE with its compaction 6.15 -> 5.14 G (-16.5%), COPY in -0.4%,
 UPDATE level, the four scans -0.6 to +0.0%; TPC-H q01 -0.8%, q06 -0.9%.
+
+**A stored row's size without a second match** (`cand/a260-2`, `storage::row::stored_tuple_len`:
+what CREATE INDEX's build, VACUUM's measure and INSERT ... SELECT's stored rows size each row by).
+A fixed-size value's typlen and typalign come from the one match on its tag, aligned by a mask;
+before, every value went through `datum_len_at`, which matched the type again in `type_layout`
+and aligned by a division. Same sizes (the arms accept the same tags; `storage::row`'s sizing
+test and `big_tables` under `verify-checked`). Two pairs against d1: CREATE INDEX -1.4 / -1.7%,
+VACUUM -3.4 / -3.4%, INSERT ... SELECT -0.5 / -0.6%, all steps 50.89 -> 50.70 G (-0.3 / -0.4%),
+every other step level.
 
 **Measured and dropped: a COPY into a new table keeps its measure** (the brief's item for CREATE
 INDEX's 6% of re-sizing; `~/.cache/a260/patches/copy-new-table-measure*.patch`). A COPY into a
@@ -10726,11 +10736,10 @@ three L0 files with every snapshot pinned (`zip_entries`), each read every way a
    deletions' sort and `SstWriter::add`, decoding and filtering the deleted rows) and the
    compaction's table rewrite with the UPDATE's versions (zstd with the file's dictionary).
 2. COPY in 9.47 against 6.48: parsing, zstd of its runs, the size model's per-row calls.
-3. CREATE INDEX 5.29 against 3.13: sizing every row again (`stored_tuple_len`, about 330
-   instructions a row of the bulk table: a second match through `datum_len_at` and
-   `type_layout`, alignment by division, the varints through `Result`); cheaper, the kept
-   measure above may win.
-4. INSERT ... SELECT 6.68 against 4.31.
+3. CREATE INDEX 5.21 against 3.13: sizing every row again; `stored_tuple_len` is still about
+   250 instructions a row of the bulk table after `cand/a260-2` (the varints through `Result`,
+   bounds checks, `is_ascii` a text value): cheaper still, the kept measure above may win.
+4. INSERT ... SELECT 6.64 against 4.31.
 5. Memtable sources still merge a row at a time: `Cursor::Mem` copies each entry's key into a
    `Vec` (an allocation an entry), and `zip_rows` takes files' blocks only. An UPDATE's versions
    small enough to stay in the memtable cost a scan what they did before this round.
