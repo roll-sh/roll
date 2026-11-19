@@ -12,8 +12,8 @@ use serde_json::{Value, json};
 const MCP: &str = "/v1/code/mcp";
 
 /// The tools docs/code/mcp.md lists.
-const TOOLS: [&str; 37] = [
-    "search_code", "read_file", "list_tree", "log", "blame", "get_changeset", "compare", "create_change", "revise_change", "land", "get_change",
+const TOOLS: [&str; 38] = [
+    "list_repos", "search_code", "read_file", "list_tree", "log", "blame", "get_changeset", "compare", "create_change", "revise_change", "land", "get_change",
     "list_changes", "claim_work", "heartbeat_work", "release_work", "complete_work", "list_work", "create_work", "comment", "review", "queue_status",
     "request_ai_review", "list_agent_machines", "list_agent_threads", "create_agent_thread", "send_agent_message", "respond_agent_request",
     "interrupt_agent_thread", "publish_agent_thread", "create_agent_project", "claim_agent_work", "list_agent_automations", "save_agent_automation",
@@ -23,8 +23,8 @@ const TOOLS: [&str; 37] = [
 /// `agent_tools_work_in_roll_code_like_their_routes` and `automation_tools_map_onto_their_routes`).
 const AGENT_TOOLS: usize = 15;
 /// The ones that only read (`readOnlyHint`).
-const READ_ONLY: [&str; 16] = [
-    "search_code", "read_file", "list_tree", "log", "blame", "get_changeset", "compare", "get_change", "list_changes", "list_work", "queue_status",
+const READ_ONLY: [&str; 17] = [
+    "list_repos", "search_code", "read_file", "list_tree", "log", "blame", "get_changeset", "compare", "get_change", "list_changes", "list_work", "queue_status",
     "list_agent_machines", "list_agent_threads", "list_agent_automations", "list_agent_automation_runs", "get_agent_automation_run",
 ];
 
@@ -589,6 +589,8 @@ async fn tools_map_onto_their_routes() {
     assert_eq!(gc["change"], a.ok("GET", &format!("/v1/code/changes/{id}"), None).await);
     assert_eq!(gc["review_status"], a.ok("GET", &format!("/v1/code/changes/{id}/review-status"), None).await);
     assert_eq!(gc["threads"], a.ok("GET", &format!("/v1/code/changes/{id}/threads"), None).await);
+    same(c.tool("list_repos", json!({})).await, a.ok("GET", "/v1/code/repos", None).await);
+    same(c.tool("list_repos", json!({ "owner": "acme" })).await, a.ok("GET", "/v1/code/repos?owner=acme", None).await);
     same(c.tool("list_changes", json!({ "repo": repo })).await, a.ok("GET", &format!("{p}/changes"), None).await);
     same(c.tool("list_changes", json!({ "repo": repo, "state": "closed" })).await, a.ok("GET", &format!("{p}/changes?state=closed"), None).await);
     same(c.tool("list_work", json!({ "repo": repo, "state": "done", "label": "feat" })).await, a.ok("GET", &format!("{p}/work?state=done&label=feat"), None).await);
@@ -861,8 +863,12 @@ async fn every_tool_is_authorized_like_its_route() {
                     _ => assert!(text.starts_with("not found"), "{ctx}"),
                 }
             }
-            assert_eq!(seen.len(), TOOLS.len() - AGENT_TOOLS, "every repo tool is checked");
+            assert_eq!(seen.len(), TOOLS.len() - AGENT_TOOLS - 1, "every repo tool is checked (and list_repos below)");
         }
+        // The list is the route's: only what the caller may read, so the private repo isn't in it.
+        let listed = c.tool("list_repos", json!({})).await;
+        let names: Vec<&str> = listed["items"].as_array().unwrap().iter().filter_map(|r| r["full_name"].as_str()).collect();
+        assert_eq!(names, ["acme/pub"], "{who}: {listed}");
     }
     // The owner's own token and the admin read and write the private repo.
     let (_, t) = a.req("POST", "/v1/code/owners/acme/tokens", Some(json!({ "name": "t" })), root).await;

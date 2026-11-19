@@ -370,10 +370,11 @@ roll implements the MCP authorization spec (2025-06-18 and 2025-11-25) with OAut
     person; completions use the same ones). Every id a tool lists has choices: a workspace or
     Postgres project, a branch, an apps service or environment, a secrets environment, a preview,
     a token, a bucket, a stream or topic, a NoSQL or Redis database, a search cluster or index, a
-    vhost or queue. `pnpm test:mcp-sweep` checks each against a live rolld: the form must offer
+    vhost or queue, and for roll code's tools (fronted from `code_control::mcp`) a repo as
+    `owner/name` or its owner. `pnpm test:mcp-sweep` checks each against a live rolld: the form must offer
     the fixture's id, so a list answer of another shape can't offer nothing unnoticed, and a new
-    kind of id fails it until it has choices or a reason not to (`NO_CHOICES`: a repo's
-    `owner/name`, tasks' `id`, which names four things). The
+    kind of id fails it until it has choices or a reason not to (`NO_CHOICES`: tasks' `id`, which
+    names four things; a Postgres endpoint, which sits inside its branch). The
     retry's `inputResponses` fills the id in, and the call runs as if the client had sent it, so
     the gate decides it as usual and there's no `requestState` to trust. A declined form stops the
     call; a value that isn't an id is refused. Other clients get the call's own answer. Checked
