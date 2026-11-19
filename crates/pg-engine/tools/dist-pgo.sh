@@ -16,8 +16,7 @@
 # Environment: PGO_DIR (scratch: target dirs and raw profiles, default <root>/target/pgo; each
 # target dir is deleted once its binary is copied out, PGO_KEEP=1 keeps them), PGO_CLIENT,
 # PGO_BUILD_CPUS (taskset of the builds), and pgo-train.sh's PGO_PORT, PGO_SERVER_CPUS,
-# PGO_CLIENT_CPUS, PGO_TPCH_SF; PGO_TPCH_SHARE (TPC-H's percent of the merged counts, default
-# 45: the classes' weighting, below); PGO_BREADTH=1 (pgo-train.sh's breadth phase too, merged PGO_BENCH_SHARE to 1:
+# PGO_CLIENT_CPUS, PGO_TPCH_SF; PGO_BREADTH=1 (pgo-train.sh's breadth phase too, merged PGO_BENCH_SHARE to 1:
 # measured, not the default, HANDOFF "Profile-guided build"), PGO_REGRESS_SRC; PGO_LLVM_ARGS
 # (space-separated LLVM options for the optimised build). Both builds also take the shipped
 # builds' flags (tools/dist-flags.sh, as tools/dist.sh): they go through RUSTFLAGS of these
@@ -73,26 +72,34 @@ if [ -z "$PROF" ]; then
   "$HERE/pgo-train.sh" "$W/roll-engine-instrumented" "$CLIENT" "$W/raw" ${BRAW:+"$BRAW"}
   T3=$(t)
   # Each class's raw profiles (pgo-train.sh's <raw dir>/<class>) merged, then the classes
-  # merged with TPC-H's class at PGO_TPCH_SHARE percent (default 45) of the counts: every
-  # other class weighted by the same whole number. TPC-H trains at SF 1 (the benchmarked
-  # scale), where its counts are 76% of the total unweighted and the point reads' paths fall
-  # out of what LLVM takes as hot; 45% is TPC-H's share in the SF 0.2 training before
-  # (HANDOFF "Analytic CPU, round 6").
+  # merged with the same weight: each one's counts multiplied by the whole number that brings
+  # its total to the largest class's (TPC-H's). LLVM takes as hot the blocks that make 99% of
+  # the merged counts: unweighted, TPC-H at SF 1 is 76% of them and the short transactions'
+  # paths fall out of that set (93.8% of their counts in hot blocks against 97.5% with SF 0.2);
+  # weighted the same, every class has more of its counts in hot blocks than with SF 0.2
+  # unweighted (HANDOFF "Analytic CPU, round 6", `hotcov`).
   tot() { "$PROFDATA" show "$1" | awk '/^Total count:/ {print $3}'; }
-  TT=0; TO=0; CLASSES=
+  MAX=0; CLASSES=
   for d in "$W/raw"/*/; do
     c=$(basename "$d")
     "$PROFDATA" merge -o "$W/class-$c.profdata" "$d"*.profraw
     n=$(tot "$W/class-$c.profdata")
-    if [ "$c" = tpch ]; then TT=$n; else TO=$((TO + n)); CLASSES="$CLASSES $c"; fi
+    eval "TOT_$c=$n"
+    [ "$n" -le "$MAX" ] || MAX=$n
+    CLASSES="$CLASSES $c"
   done
-  WO=$(awk -v t="$TT" -v o="$TO" -v s="${PGO_TPCH_SHARE:-45}" 'BEGIN {w = (t > 0 && o > 0) ? int(t * (100 - s) / (s * o) + 0.5) : 1; print (w < 1 ? 1 : w)}')
   set --
-  for c in $CLASSES; do set -- "$@" -weighted-input="$WO,$W/class-$c.profdata"; done
-  [ ! -f "$W/class-tpch.profdata" ] || set -- "$@" "$W/class-tpch.profdata"
+  WEIGHTS=
+  for c in $CLASSES; do
+    eval "n=\$TOT_$c"
+    w=$(awk -v m="$MAX" -v n="$n" 'BEGIN {w = n > 0 ? int(m / n + 0.5) : 1; print (w < 1 ? 1 : w)}')
+    set -- "$@" -weighted-input="$w,$W/class-$c.profdata"
+    WEIGHTS="$WEIGHTS $c=$n*$w"
+  done
   "$PROFDATA" merge -o "$W/bench.profdata" "$@"
-  note "profile counts: tpch $TT, the other classes $TO x$WO"
-  rm -f "$W"/class-*.profdata
+  note "profile counts:$WEIGHTS"
+  # (PGO_KEEP=1 keeps them, for tools/pgo-hotcov.py.)
+  if [ -n "${PGO_KEEP:-}" ]; then mkdir -p "$OUT/classes" && mv "$W"/class-*.profdata "$OUT/classes/"; else rm -f "$W"/class-*.profdata; fi
   if [ -d "$W/braw" ]; then
     # The benchmark classes keep nearly all the counts: their profile weighted so that its total
     # is PGO_BENCH_SHARE (default 50) times the breadth phase's, about 98% of the merged counts.
