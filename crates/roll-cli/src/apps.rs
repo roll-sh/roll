@@ -1456,8 +1456,9 @@ async fn ssh(api: &Api, env: &str, query: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The local terminal: its size, and raw mode for as long as a guard lives.
-mod term {
+/// The local terminal: its size, and raw mode for as long as a guard lives (`roll preview shell`
+/// uses it too).
+pub(crate) mod term {
     /// Columns and rows of the terminal on stdout.
     pub fn size() -> Option<(u16, u16)> {
         let mut ws = libc::winsize { ws_row: 0, ws_col: 0, ws_xpixel: 0, ws_ypixel: 0 };

@@ -62,7 +62,8 @@ impl Engine {
         let (cols, rows) = (cols.clamp(10, 1000), rows.clamp(2, 500));
         let shell = match self.apps.shell(id, &svc.name, cols, rows).await {
             Ok(Some(s)) => s,
-            Ok(None) => return Err(Error::Conflict(format!("{} runs on roll apps: open its shell from its pv- environment there", svc.name))),
+            // roll apps' services have roll apps' own shell; a backend without one has none.
+            Ok(None) => return Err(Error::Conflict(format!("{} has no shell here: a service on roll apps has roll apps' own, on its pv- environment", svc.name))),
             Err(e) => return Err(Error::Conflict(format!("the shell didn't start: {}", self.mask_text(id, &format!("{e:#}")).await?))),
         };
         let sid = format!("pvsh_{}", &crate::store::new_token()[..16]);

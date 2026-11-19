@@ -1129,8 +1129,10 @@ opened it. Every route of it is `admin` (rolld's catalogue), as roll apps' shell
 anything with the preview's variables and branches, so its output isn't masked. A roll apps
 service's shell is roll apps' own, on its `pv-` environment. A redeploy ends a shell with the
 container it was in; a preview that goes ends its shells first.
-`a_shell_in_a_previews_service_is_said_and_bounded`; `scripts/preview-cost.sh` types in a live
-preview's container and reads its `ROLL_PREVIEW` back.
+`roll preview shell <preview> [--service]` makes this terminal the shell's (raw mode, its size
+followed) until it exits. `a_shell_in_a_previews_service_is_said_and_bounded`;
+`scripts/preview-cost.sh` types into a live preview's container through `roll preview shell` and
+reads its `ROLL_PREVIEW` back.
 
 ### Feedback on the preview page
 
@@ -1657,7 +1659,7 @@ type Settings = {
   last seen, the service and its title, opening to its newest sample; the last hour, 6 or 24),
   plus a "Previews" overlay on the canvas that draws each
   preview's branches next to their parents.
-- **CLI**: `roll preview ls|show|open|create|rm|sleep|wake|refresh|reset|keep|logs [-f]|activity|visitors|settings|usage|bypass|wait|up|down|masks|errors|metrics|hooks`.
+- **CLI**: `roll preview ls|show|open|create|rm|sleep|wake|refresh|reset|keep|logs [-f]|activity|visitors|settings|usage|bypass|wait|up|down|masks|errors|metrics|hooks|shell`.
   - `roll preview up [--project P] [--repo owner/name] [--name N] [--no-wait] [--timeout S] [--force]`
     previews a checkout's working tree as it is, as `netlify deploy` and `vercel deploy` do from a
     directory: uncommitted and untracked files included, what `.gitignore` leaves out left out.
@@ -2004,8 +2006,8 @@ Every feature in review has its `roll preview` command too: `metrics`, `hooks` (
 
 0a. **A shell in a preview's service** (`feature/roll-previews-shell`, on the drains branch;
    Render's shell, `heroku run`): the API, the engine's sessions and the exec are in (see "A
-   shell in a preview"); next, the sheet's terminal (roll apps' terminal component) and
-   `roll preview shell`.
+   shell in a preview") and `roll preview shell`; next, the sheet's terminal (roll apps' terminal
+   component).
 0. **A preview's `roll.toml` services in the project's log drains, in review**
    (`feature/roll-previews-drains`): roll apps' drains with `previews: true` got only roll apps'
    own `pv-` environments, so a team with Datadog on a drain saw half of a preview's output.
