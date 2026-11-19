@@ -18,11 +18,11 @@ only = sys.argv[sys.argv.index("--tool") + 1] if "--tool" in sys.argv else None
 n = 0
 
 
-def rpc(method, params):
+def rpc(method, params, token=None):
     global n
     n += 1
     req = urllib.request.Request(f"{api}/v1/mcp", data=json.dumps({"jsonrpc": "2.0", "id": n, "method": method, "params": params}).encode(),
-                                 headers={"authorization": f"Bearer {tok}", "content-type": "application/json", "accept": "application/json"})
+                                 headers={"authorization": f"Bearer {token or tok}", "content-type": "application/json", "accept": "application/json"})
     with urllib.request.urlopen(req, timeout=60) as r:
         return json.load(r)
 
@@ -60,8 +60,31 @@ def judge(name, res):
 
 
 # Fixtures, made with the write tools a person's agent would use, so tools that need an id have one.
+# Every credential the fixtures are answered with (a token's secret, a database's or cluster's
+# password, a connection string's): no read tool may show one to a token that can't reveal.
+SECRET_KEYS = {"password", "secret", "token", "secret_access_key", "api_key", "connection_string", "connection_uri", "dsn"}
+secrets = {tok}
+origin = {}  # a credential's value -> where it was seen (a key path, never printed with the value)
+def collect(v, at="", where=""):
+    if isinstance(v, dict):
+        for k, x in v.items():
+            if isinstance(x, str) and k in SECRET_KEYS and len(x) >= 10:
+                secrets.add(x)
+                origin.setdefault(x, f"{where} {at}.{k}")
+            collect(x, f"{at}.{k}", where)
+    elif isinstance(v, list):
+        for x in v:
+            collect(x, f"{at}[]", where)
+    elif isinstance(v, str) and "://" in v:
+        userinfo = v.split("://", 1)[1].split("/", 1)[0].rsplit("@", 1)
+        if len(userinfo) == 2 and ":" in userinfo[0] and len(userinfo[0].split(":", 1)[1]) >= 10:
+            pw = userinfo[0].split(":", 1)[1]
+            secrets.add(pw)
+            origin.setdefault(pw, f"{where} {at} (a URL's password)")
 def call(name, args):
     r = rpc("tools/call", {"name": name, "arguments": args}).get("result", {})
+    if not r.get("isError"):
+        collect(r.get("structuredContent"), "", name)
     return None if r.get("isError") else r.get("structuredContent")
 made = {}
 for name, args in [("workspace_create_project", {"name": "sweep"}), ("storage_create_bucket", {"name": "sweep-bkt"}), ("streams_create", {"name": "sweep"}),
@@ -109,7 +132,9 @@ def rest(method, path, body):
     req = urllib.request.Request(f"{api}{path}", method=method, data=json.dumps(body).encode(), headers={"authorization": f"Bearer {tok}", "content-type": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=30) as r:
-            return json.load(r)
+            answer = json.load(r)
+            collect(answer, "", f"{method} {path}")
+            return answer
     except urllib.error.HTTPError as e:
         # A fixture that isn't made leaves its tools skipped: say why (an id or a message, never a secret).
         print(f"fixture {method} {path}: {e.code} {e.read()[:200].decode(errors='replace')}")
@@ -190,6 +215,47 @@ for pass_ in (0, 1):
                     if key and (prod, key) not in seen and t["name"].split("_")[1] == "list":
                         seen[(prod, key)] = it["id"]
 print(f"{len(reads)} read-only tools, {ran} called, {len(skipped)} skipped for want of an id, {len(fails)} failed")
+
+# Leaks: every read tool that isn't a reveal, called by a token that may read everything and
+# reveal nothing. Any credential the fixtures made, or anything shaped like a roll token or a
+# private key, in its answer is a read showing what only reveal may (a missing `.reveals` field in
+# the catalogue, or a product answering more than its row says). The values are never printed.
+import re
+reader = (rest("POST", "/v1/access/tokens", {"name": "sweep-reader", "rules": [{"product": "*", "resources": "*", "actions": {"read": "allow"}}]}) or {}).get("token")
+SHAPES = [("a roll token", re.compile(r"\brl[a-z]_[a-z2-7]{40}\b")), ("a private key", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"))]
+leaks, checked, shown = [], 0, 0
+if reader:
+    secrets.discard(reader)
+    for t in reads:
+        prod = t.get("_meta", {}).get("roll/product", "")
+        req = t["inputSchema"].get("required", [])
+        if any((prod, a) not in seen for a in req):
+            continue
+        args = {a: seen[(prod, a)] for a in req}
+        reveal = "reveal" in (t.get("_meta", {}).get("roll/actions") or [])
+        # The operator first: what this tool shows to someone who may see everything.
+        as_operator = json.dumps(rpc("tools/call", {"name": t["name"], "arguments": args}))
+        known = [x for x in secrets if x != tok and x in as_operator]
+        shown += bool(known)
+        if reveal:
+            continue  # a reveal tool shows credentials by design; the reader is refused it
+        text = json.dumps(rpc("tools/call", {"name": t["name"], "arguments": args}, token=reader))
+        checked += 1
+        why = next((f"a credential the operator sees here too ({len(x)} characters, from {origin.get(x, '?').strip()})" for x in secrets if x in text), None)
+        why = why or next((kind for kind, rx in SHAPES if rx.search(text)), None)
+        if why:
+            leaks.append(f"{t['name']}: {why}")
+        if "-v" in sys.argv and known:
+            print(f"redacted for the reader: {t['name']} ({len(known)} credential(s) the operator sees)")
+if "-v" in sys.argv:
+    for x, w in origin.items():
+        print(f"credential from {w.strip()} ({len(x)} characters)")
+print(f"leaks: {checked} read tools called as a reader that can't reveal, {len(secrets)} known credentials, {shown} tools showed the operator one, {len(leaks)} showed the reader one")
+for l in leaks:
+    print("LEAK", l)
+if reader and shown == 0:
+    leaks.append("no tool showed even the operator a known credential: the check sees nothing (are the fixtures' secrets collected?)")
+fails += [f"leak {l}" for l in leaks]
 if "--writes" in sys.argv:
     def fake(name, schema, prod):
         if (prod, name) in seen:

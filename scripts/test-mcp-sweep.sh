@@ -15,12 +15,13 @@ cd "$(dirname "$0")/.."
 PATHS=(crates Cargo.toml Cargo.lock scripts/test-mcp-sweep.sh scripts/mcp-sweep.py)
 STAMP=target/.test-mcp-sweep.hash
 
-force=0 writes=--writes
+force=0 writes=--writes verbose=
 for a in "$@"; do
   case "$a" in
     --force) force=1 ;;
     --reads) writes= ;;
-    *) echo "unknown argument $a (--force, --reads)" >&2; exit 2 ;;
+    --verbose) verbose=-v ;;
+    *) echo "unknown argument $a (--force, --reads, --verbose)" >&2; exit 2 ;;
   esac
 done
 
@@ -87,7 +88,7 @@ for _ in $(seq 120); do
   sleep 1
 done
 
-if python3 -I scripts/mcp-sweep.py "$api" "$home/token" $writes; then
+if python3 -I scripts/mcp-sweep.py "$api" "$home/token" $writes $verbose; then
   mkdir -p target && echo "$hash" > "$STAMP"
 else
   mkdir -p target && cp "$home/rolld.log" target/mcp-sweep-rolld.log
