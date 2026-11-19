@@ -635,6 +635,74 @@ pub struct OperInfo {
     pub right: DataType,
 }
 
+/// The built-in binary operators whose `rest` (oprrest) a filter keeps, by name and argument
+/// types: a short list an estimate looks an operator up in without hashing its name, where
+/// `oper_row` would (an estimate runs for every clause of every plan, and a prepared
+/// statement's custom plan is made at each execution). `lefts` has a bit for each left
+/// argument type oid below 4096 the list has, so most operators are passed over by one test.
+struct OperList {
+    lefts: [u64; 64],
+    opers: Vec<(&'static str, u32, u32, u32)>,
+}
+
+impl OperList {
+    fn new(keep: fn(&str, u32) -> bool) -> OperList {
+        let mut opers: Vec<_> = registry()
+            .opers
+            .iter()
+            .filter(|((name, l, _), row)| *l != 0 && keep(name, row.rest))
+            .map(|(&(name, l, r), row)| (name, l, r, row.rest))
+            .collect();
+        opers.sort_unstable();
+        let mut lefts = [0u64; 64];
+        for &(_, l, _, _) in &opers {
+            if l < 4096 {
+                lefts[l as usize / 64] |= 1 << (l % 64);
+            }
+        }
+        OperList { lefts, opers }
+    }
+
+    /// `oper_row(name, def).rest` of a binary operator the list has (the same rows), else None.
+    fn rest(&self, name: &str, def: &FuncDef) -> Option<u32> {
+        if def.args.len() != 2 {
+            return None;
+        }
+        let l = param_oid(&def.args[0]);
+        if l < 4096 && self.lefts[l as usize / 64] >> (l % 64) & 1 == 0 {
+            return None;
+        }
+        let r = param_oid(&def.args[1]);
+        self.opers.iter().find(|&&(n, a, b, _)| (a, b) == (l, r) && n == name).map(|o| o.3)
+    }
+}
+
+/// A comparison a range clause pairs (`<`, `<=`, `>`, `>=` and the pattern ones) whose
+/// estimator is not scalarltsel, scalarlesel, scalargtsel or scalargesel (a box's `<=` is
+/// areasel's): `oper_row(name, def).rest` when it is one, None for the rest.
+pub fn ineq_rest_unlike_scalar(name: &str, def: &FuncDef) -> Option<u32> {
+    static L: OnceLock<OperList> = OnceLock::new();
+    let list = L.get_or_init(|| {
+        OperList::new(|name, rest| {
+            matches!(name, "<" | "<=" | ">" | ">=" | "~<~" | "~<=~" | "~>~" | "~>=~")
+                && rest != 0
+                && !matches!(rest, 103 | 104 | 336 | 337)
+        })
+    });
+    list.rest(name, def)
+}
+
+/// An operator other than `=` or `<>` that eqsel (101) or neqsel (102) estimates (point `~=`):
+/// `oper_row(name, def).rest` when it is one, None for the rest (`=` and `<>` among them).
+pub fn eq_rest_under_other_name(name: &str, def: &FuncDef) -> Option<u32> {
+    static L: OnceLock<OperList> = OnceLock::new();
+    if matches!(name, "=" | "<>") {
+        return None;
+    }
+    let list = L.get_or_init(|| OperList::new(|name, rest| matches!(rest, 101 | 102) && !matches!(name, "=" | "<>")));
+    list.rest(name, def)
+}
+
 /// A built-in operator definition's pg_operator row.
 pub fn oper_row(name: &str, def: &FuncDef) -> OperRow {
     let r = registry();
@@ -1575,4 +1643,29 @@ pub fn display_def(f: &crate::catalog::Function) -> Arc<FuncDef> {
         defaults: vec![],
         coll: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The estimates' short lists answer as `oper_row` does for every built-in binary operator.
+    #[test]
+    fn estimate_lists_match_oper_row() {
+        for (name, defs) in &registry().binops {
+            for d in defs.iter().filter(|d| d.args.len() == 2) {
+                let rest = oper_row(name, d).rest;
+                let ineq = matches!(*name, "<" | "<=" | ">" | ">=" | "~<~" | "~<=~" | "~>~" | "~>=~")
+                    && rest != 0
+                    && !matches!(rest, 103 | 104 | 336 | 337);
+                assert_eq!(ineq_rest_unlike_scalar(name, d).is_some(), ineq, "{name} {:?}", d.args);
+                let eq = match rest {
+                    101 if *name != "=" => 101,
+                    102 if *name != "<>" => 102,
+                    _ => 0,
+                };
+                assert_eq!(eq_rest_under_other_name(name, d).unwrap_or(0), eq, "{name} {:?}", d.args);
+            }
+        }
+    }
 }
