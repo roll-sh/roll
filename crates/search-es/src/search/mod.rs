@@ -1829,9 +1829,15 @@ fn cacheable(req: &SearchRequest, t: &Target) -> bool {
     !(reads_other_documents(&text) && t.security.is_some())
 }
 
-/// Whether a request's queries read documents of their own (debug text of its source).
+/// Whether a request's queries read documents of their own (debug text of its source): parsed
+/// queries, and aggregations' queries, which the source keeps as JSON.
 fn reads_other_documents(text: &str) -> bool {
-    text.contains("Some(TermsLookup") || text.contains("Indexed {") || text.contains("Percolate {")
+    text.contains("Some(TermsLookup")
+        || text.contains("Indexed {")
+        || text.contains("Percolate {")
+        || text.contains("\"indexed_shape\"")
+        || text.contains("\"percolate\"")
+        || (text.contains("\"path\"") && text.contains("\"id\""))
 }
 
 fn request_cache_key(req: &SearchRequest, t: &Target) -> String {
