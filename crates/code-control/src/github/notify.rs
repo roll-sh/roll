@@ -609,6 +609,11 @@ fn page_checks(e: &crate::model::PreviewEnvironment) -> Option<String> {
             details.push_str(&format!("![Where it differs from {}]({url})\n\n", branch_name(&b.branch)));
         }
     }
+    if let Some(s) = e.slower_routes.as_ref().filter(|s| !s.routes.is_empty()) {
+        let branch = branch_name(&s.branch);
+        summary.push(format!("{} slower than {branch}", plural(s.routes.len() as u64, "route", "routes")));
+        details.push_str(&routes_line(s, &branch));
+    }
     if let Some(v) = &e.visual_change {
         summary.push(if v.percent <= 0.0 { "unchanged since the push before".into() } else { format!("changed {} since the push before", pct(v.percent)) });
         details.push_str(&visual_line(v));
@@ -866,6 +871,20 @@ pub fn preview_comment_for(p: Option<&Preview>, marker: &str, teardown: Option<&
     out
 }
 
+/// Its routes slower than the branch's preview's, from their traces: each name the preview's
+/// code gave it, in a code span nothing in it can close or break out of (at most 80 characters).
+fn routes_line(s: &crate::model::PreviewSlowerRoutes, branch: &str) -> String {
+    let each: Vec<String> = s
+        .routes
+        .iter()
+        .map(|x| {
+            let name: String = x.name.chars().map(|c| if c == '`' || c.is_control() { '\'' } else { c }).take(80).collect();
+            format!("`{name}` {} ms ({branch} {} ms)", x.p50_ms, x.main_p50_ms)
+        })
+        .collect();
+    format!("Routes slower than on `{branch}`'s preview (the median of the last hour's traces): {}.\n\n", each.join("; "))
+}
+
 /// The endpoints' times against the branch's (`github.endpoints`): each path the project named,
 /// timed on the preview's data, the slower ones said so.
 fn endpoints_line(endpoints: &[crate::model::PreviewEndpoint], branch: &str) -> String {
@@ -1024,6 +1043,7 @@ mod preview_tests {
             page_health: None,
             page_a11y: None,
             page_links: None,
+            slower_routes: None,
             base_change: None,
             diff_url: None,
             pages: Vec::new(),
@@ -1136,6 +1156,13 @@ mod preview_tests {
         timed.speed_budget = None;
         timed.base_change = Some(crate::model::PreviewBaseChange { branch: "main".into(), percent: 0.0, phone_percent: None, load_ms: Some(900), lcp_ms: None, a11y_added: None, errors_added: None, text: None, links_added: None, seo_added: None, api: None, api_breaking: Vec::new(), api_unread: false, endpoints: Vec::new() });
         assert!(page_checks(&timed).unwrap().contains("loads in 1.2 s, 300 ms slower than main</summary>"));
+        // Routes slower than main's preview's: in the summary, and named where nothing in a name
+        // can close its code span.
+        timed.slower_routes = Some(crate::model::PreviewSlowerRoutes { branch: "main".into(), routes: vec![crate::model::PreviewSlowerRoute { name: "GET /a`b\n".into(), p50_ms: 420, main_p50_ms: 120 }] });
+        let checks = page_checks(&timed).unwrap();
+        assert!(checks.contains("1 route slower than main"), "{checks}");
+        assert!(checks.contains("`GET /a'b'` 420 ms (main 120 ms)"), "{checks}");
+        timed.slower_routes = None;
         // Core Web Vitals: in the line, against main's paint, and in the budget.
         let ps = timed.page_speed.as_mut().unwrap();
         (ps.lcp_ms, ps.cls) = (Some(1300), Some(0.123));

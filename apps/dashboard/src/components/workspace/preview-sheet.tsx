@@ -175,7 +175,7 @@ export function PreviewSheet({
                 Reaches roll only: a pull request from a fork can't call anything outside roll but the project&apos;s allowed hosts, so a call to an outside API fails here. The project&apos;s rules can open it (A fork&apos;s preview reaches: Anything).
               </p>
             )}
-            <VerdictStrip p={p} />
+            <VerdictStrip p={p} onRoutes={() => setTab("Requests")} />
             <span data-section="services" />
             <Label>Services</Label>
             {p.services.length ? (
@@ -1000,11 +1000,15 @@ export function Endpoints({ items, branch }: { items: EndpointTime[]; branch: st
 /** What the sheet leads with: what changed against main and what waits on someone, most serious
  * first, each jumping to its section below (Vercel's deployment summary). Says nothing new when
  * there's nothing, once the preview has been compared. */
-function VerdictStrip({ p }: { p: Preview }) {
+function VerdictStrip({ p, onRoutes }: { p: Preview; onRoutes: () => void }) {
   const items = verdict(p);
   const jump = (target: VerdictTarget) => {
     const reduce = typeof window !== "undefined" && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
-    document.querySelector(`[data-section="${target}"]`)?.scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "start" });
+    const go = () => document.querySelector(`[data-section="${target}"]`)?.scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "start" });
+    if (target !== "routes") return go();
+    // The routes are on the Requests tab, read once it opens: there when they've come.
+    onRoutes();
+    for (const ms of [50, 300, 900]) setTimeout(go, ms);
   };
   if (!items.length) {
     return p.base_change ? <p className="mb-3 text-[11.5px] text-subtle">Nothing new against {p.base_change.branch}: its pages, API and checks are as they were.</p> : null;
@@ -1448,7 +1452,7 @@ function Traces({ preview: p, n }: { preview: Preview; n: number }) {
   };
   if (!list || (!list.length && !error)) return null;
   return (
-    <div className="mt-3 border-t border-line pt-3">
+    <div className="mt-3 border-t border-line pt-3" data-section="routes">
       <Label>Traces</Label>
       {error && <p className="mb-1.5 text-[11.5px] text-danger">{error}</p>}
       {routes.length > 0 && (

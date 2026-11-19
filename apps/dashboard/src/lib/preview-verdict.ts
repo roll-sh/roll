@@ -1,7 +1,7 @@
 import { checkSummary, endpointSlower, type Preview } from "./previews-api";
 
 /** A section of the preview's sheet a verdict item jumps to. */
-export type VerdictTarget = "services" | "visual" | "api" | "schema" | "checks" | "endpoints";
+export type VerdictTarget = "services" | "visual" | "api" | "schema" | "checks" | "endpoints" | "routes";
 
 export interface VerdictItem {
   target: VerdictTarget;
@@ -33,6 +33,8 @@ export function verdict(p: Preview): VerdictItem[] {
   }
   const slower = p.base_change?.endpoints?.filter(endpointSlower).length ?? 0;
   if (slower) out.push({ target: "endpoints", text: `${plural(slower, "endpoint")} slower than ${p.base_change?.branch ?? "main"}`, tone: "note" });
+  const routes = p.slower_routes?.routes.length ?? 0;
+  if (routes) out.push({ target: "routes", text: `${plural(routes, "route")} slower than ${p.slower_routes?.branch}`, tone: "note" });
   const moving = v?.pages.filter((x) => x.unstable).length ?? 0;
   if (moving) out.push({ target: "visual", text: `${plural(moving, "page")} ${moving === 1 ? "moves" : "move"} by itself`, tone: "note" });
   return out;

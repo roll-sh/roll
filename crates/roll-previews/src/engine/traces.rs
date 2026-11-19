@@ -122,6 +122,8 @@ pub struct RouteCompared {
 }
 
 pub const MIN_SAMPLES: usize = 5;
+/// How often the holder reads its previews' slower routes onto their records.
+pub const ROUTES_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
 pub const SLOWER_MS: u64 = 100;
 
 /// Each of the preview's routes with main's same one; the slower ones first.
@@ -245,8 +247,18 @@ impl Engine {
     /// default branch's, else the project's baseline), the slower ones said (Vercel's
     /// Observability, Sentry's performance). Names masked.
     pub async fn routes(&self, id: &str, minutes: i64) -> Result<Value> {
-        let r = self.store.row(id)?;
         let minutes = minutes.clamp(5, KEEP_MS / 60_000);
+        let (base, compared) = self.compared_routes(id, minutes).await?;
+        let routes: Vec<Value> = compared
+            .into_iter()
+            .map(|c| json!({ "name": c.name, "count": c.count, "p50_ms": c.p50, "p95_ms": c.p95, "main_p50_ms": c.main_p50, "main_count": c.main_count, "slower": c.slower }))
+            .collect();
+        Ok(json!({ "minutes": minutes, "main": base.map(|b| b.id), "routes": routes }))
+    }
+
+    /// Its routes against main's preview's (that preview's row), names masked.
+    async fn compared_routes(&self, id: &str, minutes: i64) -> Result<(Option<crate::store::Row>, Vec<RouteCompared>)> {
+        let r = self.store.row(id)?;
         let mine = route_stats(&self.trace_rows(id, minutes).await?);
         // Main's preview, as a change's screenshot finds it.
         let rows: Vec<crate::store::Row> = self.store.rows(Some(&r.project_id))?.into_iter().filter(|x| x.change_id.is_none() && x.desired == crate::Desired::Active && x.id != r.id).collect();
@@ -256,14 +268,48 @@ impl Engine {
             Some(b) => route_stats(&self.trace_rows(&b.id, minutes).await?),
             None => Vec::new(),
         };
-        let compared = compare_routes(&mine, &main);
+        let mut compared = compare_routes(&mine, &main);
         let names = self.masked(id, compared.iter().map(|c| c.name.clone()).collect()).await?;
-        let routes: Vec<Value> = compared
-            .into_iter()
-            .zip(names)
-            .map(|(c, name)| json!({ "name": name, "count": c.count, "p50_ms": c.p50, "p95_ms": c.p95, "main_p50_ms": c.main_p50, "main_count": c.main_count, "slower": c.slower }))
-            .collect();
-        Ok(json!({ "minutes": minutes, "main": base.map(|b| b.id.clone()), "routes": routes }))
+        for (c, name) in compared.iter_mut().zip(names) {
+            c.name = name;
+        }
+        Ok((base.cloned(), compared))
+    }
+
+    /// The previews this node holds, while their project keeps traces: their routes slower than
+    /// main's kept on the record (the verdict strip, the pull request's comment), read at most
+    /// once a [`ROUTES_EVERY`]; a change reports the preview again.
+    pub(super) async fn tend_routes(&self) {
+        {
+            let mut last = self.routes_read.lock();
+            if last.is_some_and(|at| at.elapsed() < ROUTES_EVERY) {
+                return;
+            }
+            *last = Some(std::time::Instant::now());
+        }
+        let Ok(rows) = self.store.rows(None) else { return };
+        for r in rows.into_iter().filter(|r| r.desired == crate::Desired::Active && (r.change_id.is_some() || r.branch.is_some())) {
+            if !self.store.settings(&r.project_id).is_ok_and(|s| s.traces) {
+                continue;
+            }
+            if let Some(c) = self.cluster.get()
+                && !matches!(c.route_async(&super::preview_key(&r.id)).await, Ok(roll_cluster::Route::Local(_)))
+            {
+                continue;
+            }
+            let Ok((Some(base), compared)) = self.compared_routes(&r.id, 60).await else { continue };
+            let mut slower: Vec<crate::SlowerRoute> = compared
+                .into_iter()
+                .filter(|c| c.slower)
+                .map(|c| crate::SlowerRoute { name: c.name, count: c.count, p50_ms: c.p50, main_p50_ms: c.main_p50.unwrap_or_default() })
+                .collect();
+            slower.sort_by_key(|s| std::cmp::Reverse(s.p50_ms.saturating_sub(s.main_p50_ms)));
+            slower.truncate(crate::SlowerRoutes::MAX);
+            let kept = (!slower.is_empty()).then(|| crate::SlowerRoutes { branch: base.branch.clone().unwrap_or_else(|| "main".into()), routes: slower });
+            if self.store.set_slower_routes(&r.id, kept.as_ref()).unwrap_or(false) {
+                self.report(r).await;
+            }
+        }
     }
 
     /// `GET …/{id}/traces/{trace}`: one trace's spans, oldest first, names and attributes masked.

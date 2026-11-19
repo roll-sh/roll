@@ -137,6 +137,12 @@ export function PreviewEnvironmentView({ env, compact = false }: { env: PreviewE
       {env.base_change?.api_breaking && <ApiBreaking items={env.base_change.api_breaking} />}
       {env.base_change?.api_unread && <p className="text-[12px] text-danger">Its OpenAPI document couldn't be read: its API isn't compared with {env.base_change.branch}'s.</p>}
       {env.base_change?.endpoints && <Endpoints items={env.base_change.endpoints} branch={env.base_change.branch} />}
+      {!!env.slower_routes?.routes.length && (
+        <p className="break-words text-[12px] text-muted">
+          {env.slower_routes.routes.length} {env.slower_routes.routes.length === 1 ? "route" : "routes"} slower than on {env.slower_routes.branch}'s preview:{" "}
+          <span className="font-mono text-[11.5px] tabular-nums">{env.slower_routes.routes.map((r) => `${r.name} ${r.p50_ms} ms (${r.main_p50_ms})`).join(", ")}</span>
+        </p>
+      )}
       {env.visual_review && env.visual_review.state !== "unchanged" && <VisualReview previewId={env.id} review={env.visual_review} />}
       {env.release_ms != null && (
         <p className="font-mono text-[11px] text-subtle tabular-nums" title="The project's release (migrations), run on the preview's data">

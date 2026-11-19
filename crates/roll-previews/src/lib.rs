@@ -185,6 +185,27 @@ impl State {
     }
 }
 
+/// A preview's routes slower than the same routes on main's preview (`branch`), the slowest
+/// against main first, at most [`SlowerRoutes::MAX`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SlowerRoutes {
+    pub branch: String,
+    pub routes: Vec<SlowerRoute>,
+}
+
+impl SlowerRoutes {
+    pub const MAX: usize = 5;
+}
+
+/// One route (a trace's root span's name, masked) with its p50 and main's, over the last hour.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SlowerRoute {
+    pub name: String,
+    pub count: usize,
+    pub p50_ms: u64,
+    pub main_p50_ms: u64,
+}
+
 /// A preview as the API shows it (docs/previews.md, "HTTP contract").
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Preview {
@@ -266,6 +287,10 @@ pub struct Preview {
     pub page_a11y: Option<PageA11y>,
     /// Its first page's own links that are broken, of those checked (with the screenshot).
     pub page_links: Option<PageLinks>,
+    /// Its traces' routes clearly slower than main's preview's same routes (`…/routes`), as its
+    /// holder last read them (about once a minute, while the project keeps traces).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slower_routes: Option<SlowerRoutes>,
     /// The screenshot's signed link (`(expiry, signature)`), for roll code's summary; never in
     /// API answers.
     #[serde(skip)]

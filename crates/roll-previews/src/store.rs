@@ -228,6 +228,10 @@ CREATE TABLE IF NOT EXISTS bypass (
     hash TEXT NOT NULL,
     created_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS slower_routes (
+    preview_id TEXT PRIMARY KEY,
+    json TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS git_reports (
     preview_id TEXT PRIMARY KEY,
     status TEXT,
@@ -1022,7 +1026,7 @@ impl Store {
     /// Remove a preview's rows (after its branches and services are gone).
     pub fn remove(&self, id: &str) -> Result<()> {
         self.db.write(|c| {
-            for t in ["resources", "services", "pinned", "shares", "visit_tickets", "visit_sessions", "visits", "activity", "screenshots", "page_shots", "visual_page_accepts", "mail", "resolved_notes", "base_history", "leases", "note_crops", "git_pulls", "git_reports", "previews"] {
+            for t in ["resources", "services", "pinned", "shares", "visit_tickets", "visit_sessions", "visits", "activity", "screenshots", "page_shots", "visual_page_accepts", "mail", "resolved_notes", "base_history", "leases", "note_crops", "git_pulls", "git_reports", "slower_routes", "previews"] {
                 let col = if t == "previews" { "id" } else { "preview_id" };
                 c.execute(&format!("DELETE FROM {t} WHERE {col} = ?"), [id])?;
             }
@@ -2354,6 +2358,28 @@ impl Store {
 
     /// What was last posted on a Git URL service's repository for a preview: the status (its sha,
     /// state and description, as one string), the pull request comment's id and its body's hash.
+    /// A preview's routes slower than main's, as its holder last read them.
+    pub fn slower_routes(&self, id: &str) -> Result<Option<crate::SlowerRoutes>> {
+        let json: Option<String> = self.db.read(|c| c.query_row("SELECT json FROM slower_routes WHERE preview_id = ?", [id], |r| r.get(0)).optional())?;
+        Ok(json.and_then(|j| serde_json::from_str(&j).ok()))
+    }
+
+    /// Keep what its holder read (`None`: none slower); whether that changed what was kept.
+    pub fn set_slower_routes(&self, id: &str, routes: Option<&crate::SlowerRoutes>) -> Result<bool> {
+        let json = routes.map(serde_json::to_string).transpose().map_err(|e| Error::Internal(e.to_string()))?;
+        self.db.write(|c| {
+            let was: Option<String> = c.query_row("SELECT json FROM slower_routes WHERE preview_id = ?", [id], |r| r.get(0)).optional()?;
+            if was == json {
+                return Ok::<_, Error>(false);
+            }
+            match &json {
+                Some(j) => c.execute("INSERT INTO slower_routes (preview_id, json) VALUES (?1, ?2) ON CONFLICT (preview_id) DO UPDATE SET json = excluded.json", params![id, j])?,
+                None => c.execute("DELETE FROM slower_routes WHERE preview_id = ?", [id])?,
+            };
+            Ok(true)
+        })
+    }
+
     pub fn git_report(&self, id: &str) -> Result<(Option<String>, Option<i64>, Option<String>)> {
         Ok(self.db.read(|c| c.query_row("SELECT status, comment_id, comment_hash FROM git_reports WHERE preview_id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional())?.unwrap_or((None, None, None)))
     }
@@ -2679,6 +2705,7 @@ impl Store {
         let first_unstable = page_health.as_ref().is_some_and(|h| h.unstable);
         let visual_review = self.visual_review(&r, settings.visual_review, settings.github.visual_threshold, base_change.as_ref(), &pages, first_unstable, f.head)?;
         let page_speed = f.speed.map(|now| crate::PageSpeedView { now, before: f.prev_speed });
+        let slower_routes = if settings.traces { self.slower_routes(&r.id)? } else { None };
         let screenshot_link = screenshot_at.map(|at| self.link_at(&r.id, at, None)).transpose()?;
         let diff_link = match screenshot_at.filter(|_| base_differs) {
             Some(at) => Some(self.link_at(&r.id, at, Some("diff=base"))?),
@@ -2738,6 +2765,7 @@ impl Store {
             pages,
             visual_review,
             page_links,
+            slower_routes,
             page_speed,
             page_health,
             page_a11y,

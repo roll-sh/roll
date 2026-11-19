@@ -174,6 +174,8 @@ pub struct Engine {
     /// Each preview's recent spans (`traces.rs`), and what reads an OTLP request into them
     /// (rolld: roll apps' reader); unset, the intake answers 404.
     traces: Mutex<traces::Kept>,
+    /// When `tend_routes` last read the slower routes.
+    routes_read: Mutex<Option<std::time::Instant>>,
     pub span_reader: std::sync::OnceLock<Arc<dyn crate::ports::SpanReader>>,
     /// Open shells in previews' services (`shell.rs`), by id.
     shells: Mutex<HashMap<String, Arc<shell::ShellSession>>>,
@@ -301,6 +303,7 @@ impl Engine {
             draining: Mutex::new(HashMap::new()),
             shells: Mutex::new(HashMap::new()),
             traces: Mutex::new(HashMap::new()),
+            routes_read: Mutex::new(None),
             span_reader: std::sync::OnceLock::new(),
             forwards: Mutex::new(HashMap::new()),
             forwards_said: Mutex::new(HashMap::new()),
@@ -403,6 +406,7 @@ impl Engine {
         while set.join_next().await.is_some() {}
         self.tend_leases().await;
         self.tend_drains().await;
+        self.tend_routes().await;
         self.note_refused_egress().await;
         // Services those converges deployed at a new head, woken so their first visit is warm (a
         // few at a time, off the pass).
