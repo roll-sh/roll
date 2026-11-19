@@ -248,7 +248,7 @@ type Run = {
   /** A worker only: its instances follow `group`'s lag on `stream` (a roll stream on the
    *  service's project; another's is never read), one per `per_instance` (default 1000) behind,
    *  within min_instances–max_instances; read every 10 s on the owner, scaled in one at a time. */
-  scale?: { stream: string; group: string; per_instance?: number };
+  scale?: { stream: string; group: string; per_instance?: number } | { metric: string /* a gauge of its own, by name */; sum?: boolean /* their sum; default the largest series */; per_instance?: number }; // a worker's: a stream group's lag, or its own gauge (min_instances ≥ 1 for that: a stopped worker reports nothing)
   /** false: no public URL (its up.roll.site names, its deployments' and its custom domains are
    *  404s like an unknown address, at once); the private `<svc>.<env>.internal` still answers.
    *  Default true. Environment.url is null while it's false. */

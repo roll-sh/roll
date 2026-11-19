@@ -2177,6 +2177,32 @@ async fn a_sites_edge_function_runs_before_its_files() {
     assert_eq!(get("/assets/app.js".into(), h.clone()).await.1, "start()", "other paths are its files");
 }
 
+/// A worker that follows a gauge of its own (KEDA's Prometheus scaler): the newest point of each
+/// series of the last minute, the largest, one instance per `per_instance`, within its bounds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_worker_scales_on_its_own_gauge() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "jobs", json!({"type": "worker", "min_instances": 1, "max_instances": 5, "scale": {"metric": "queue.depth", "per_instance": 10}})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let env = format!("/v1/apps/services/{id}/environments/production");
+    assert_eq!(call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"min_instances": 0}}))).await.0, StatusCode::BAD_REQUEST, "a stopped worker reports nothing");
+    call(&w.api, "PUT", &env, Some(json!({"traces": true}))).await;
+    let token = w.apps.store.trace_token(&id, "production").unwrap().unwrap();
+    let now = code_sql::now_ms() as u64 * 1_000_000;
+    let gauge = |name: &str, v: u64, host: &str| json!({ "resourceMetrics": [{ "scopeMetrics": [{ "metrics": [{ "name": name, "gauge": { "dataPoints": [{ "asInt": v.to_string(), "timeUnixNano": now.to_string(), "attributes": [{ "key": "host", "value": { "stringValue": host } }] }] } }] }] }] });
+    let post = |body: Value| {
+        let req = Request::builder().method("POST").uri(format!("/_roll/otlp/{id}/production/{token}/v1/metrics")).header("host", "x").header("content-type", "application/json").body(Body::from(body.to_string())).unwrap();
+        let public = w.public.clone();
+        async move { public.oneshot(req).await.unwrap().status() }
+    };
+    // Two series of it (two instances see the same queue): the largest, 35, wants 4.
+    assert_eq!(post(gauge("queue.depth", 35, "a")).await, StatusCode::OK);
+    assert_eq!(post(gauge("queue.depth", 20, "b")).await, StatusCode::OK);
+    w.apps.scale_workers().await;
+    let s = call(&w.api, "GET", &env, None).await.1["scaling"].clone();
+    assert_eq!((s["backlog"].as_u64(), s["wanted"].as_u64()), (Some(35), Some(4)), "{s}");
+}
+
 /// An instance the kernel killed for its memory says so: in the log and in why it crashed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_instance_killed_for_its_memory_says_so() {

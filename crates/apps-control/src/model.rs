@@ -846,12 +846,20 @@ fn is_true(b: &bool) -> bool {
 }
 
 /// What a worker scales on: `group`'s lag on `stream` (a roll stream in the service's project),
-/// one instance per `per_instance` messages behind.
+/// or `metric`, a gauge of its own (its Prometheus endpoint's or its OpenTelemetry SDK's: a
+/// queue's depth, jobs in flight; the largest any series of it says, or their `sum`): one
+/// instance per `per_instance` of it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Scale {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub stream: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub group: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub metric: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sum: bool,
     #[serde(default = "Scale::default_per_instance")]
     pub per_instance: u64,
 }
@@ -1092,7 +1100,17 @@ impl Run {
             // backlog (dropped, so a worker can become a web service).
             self.scale = None;
         }
-        if let Some(sc) = &self.scale {
+        if let Some(sc) = self.scale.as_ref().filter(|s| !s.metric.is_empty()) {
+            // The app's own gauge, by its name (Prometheus' rules); read from running instances,
+            // so at least one runs.
+            let name_ok = sc.metric.len() <= 200 && sc.metric.bytes().enumerate().all(|(i, b)| b.is_ascii_alphabetic() || b == b'_' || b == b':' || (i > 0 && (b.is_ascii_digit() || b == b'.')));
+            if !name_ok || !sc.stream.is_empty() || !sc.group.is_empty() || !(1..=1_000_000_000).contains(&sc.per_instance) {
+                return bad("scale is { metric: a gauge's name, sum?: bool, per_instance: 1–1e9 }, or a stream's group");
+            }
+            if self.min_instances == 0 {
+                return bad("scaling on a metric needs min_instances of at least 1: a stopped worker reports nothing");
+            }
+        } else if let Some(sc) = &self.scale {
             // A stream by its id (`st_…`), never a name; a group as Kafka names one.
             let stream_ok = sc.stream.strip_prefix("st_").is_some_and(|r| r.len() == 12 && r.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()));
             let group_ok = !sc.group.is_empty() && sc.group.len() <= 249 && sc.group != "." && sc.group != ".." && sc.group.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b));

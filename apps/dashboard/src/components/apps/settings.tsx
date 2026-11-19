@@ -86,6 +86,7 @@ interface Form {
   blockOn: "" | "critical" | "high" | "medium" | "low";
   scaleStream: string;
   scaleGroup: string;
+  scaleMetric: string;
   scalePer: string;
   suspendAfter: string;
   sleepAfter: string;
@@ -163,6 +164,7 @@ export function formOf(s: Service): Form {
     blockOn: s.run.block_on ?? "",
     scaleStream: s.run.scale?.stream ?? "",
     scaleGroup: s.run.scale?.group ?? "",
+    scaleMetric: s.run.scale?.metric ?? "",
     scalePer: str(s.run.scale?.per_instance),
     suspendAfter: str(s.run.suspend_after_s),
     sleepAfter: str(s.run.sleep_after_s),
@@ -257,8 +259,10 @@ export function patchOf(s: Service, f: Form): ServicePatch {
     run.restart = f.restart === "always" ? null : f.restart;
     run.restart_tries = f.restart === "on_failure" ? num(f.restartTries) : null;
   }
-  if (f.scaleStream !== before.scaleStream || f.scaleGroup !== before.scaleGroup || f.scalePer !== before.scalePer)
-    run.scale = f.scaleStream && f.scaleGroup.trim() ? { stream: f.scaleStream, group: f.scaleGroup.trim(), ...(f.scalePer.trim() ? { per_instance: Number(f.scalePer) } : {}) } : null;
+  if (f.scaleStream !== before.scaleStream || f.scaleGroup !== before.scaleGroup || f.scalePer !== before.scalePer || f.scaleMetric !== before.scaleMetric) {
+    const per = f.scalePer.trim() ? { per_instance: Number(f.scalePer) } : {};
+    run.scale = f.scaleMetric.trim() ? { metric: f.scaleMetric.trim(), ...per } : f.scaleStream && f.scaleGroup.trim() ? { stream: f.scaleStream, group: f.scaleGroup.trim(), ...per } : null;
+  }
   if (f.suspendAfter !== before.suspendAfter) run.suspend_after_s = num(f.suspendAfter);
   if (f.sleepAfter !== before.sleepAfter) run.sleep_after_s = num(f.sleepAfter);
   if (f.volumeMount !== before.volumeMount || f.volumeSize !== before.volumeSize || f.backupEvery !== before.backupEvery || f.backupKeep !== before.backupKeep) {
@@ -569,11 +573,16 @@ export function SettingsTab({
                       ))}
                     </select>
                   </Field>
-                  {form.scaleStream && (
+                  {!form.scaleStream && (
+                    <Field label="Or follow its own gauge" hint="a metric it reports (Prometheus or OpenTelemetry): a queue's depth, jobs in flight">
+                      {t("scaleMetric", "queue_depth")}
+                    </Field>
+                  )}
+                  {(form.scaleStream || form.scaleMetric.trim()) && (
                     <>
-                      <Field label="Consumer group">{t("scaleGroup", "billing")}</Field>
-                      <Field label="Messages per instance" hint="behind, before another starts">
-                        {t("scalePer", "1000")}
+                      {form.scaleStream && <Field label="Consumer group">{t("scaleGroup", "billing")}</Field>}
+                      <Field label={form.scaleStream ? "Messages per instance" : "Per instance"} hint={form.scaleStream ? "behind, before another starts" : "of the gauge, before another starts"}>
+                        {t("scalePer", form.scaleStream ? "1000" : "10")}
                       </Field>
                     </>
                   )}
