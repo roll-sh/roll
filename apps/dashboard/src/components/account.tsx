@@ -689,6 +689,20 @@ function Sessions() {
           ))
         )}
       </div>
+      {list && list.some((s) => !s.current) && (
+        <div className="mt-2 flex flex-wrap items-center gap-3">
+          <button onClick={() => accountsApi.endOtherSessions().then(load)} className={btn}>
+            Sign out of all other sessions
+          </button>
+          <span className="text-[11.5px] text-subtle">
+            Tokens and app connections keep working: check them on{" "}
+            <Link href="/dashboard/access" className="text-accent hover:underline">
+              MCP &amp; access
+            </Link>
+            .
+          </span>
+        </div>
+      )}
     </Section>
   );
 }
