@@ -145,6 +145,11 @@ impl roll_previews::ports::Apps for RollApps {
         // One voice on a pull request: previews posts `roll/preview` and its comment for the
         // environment, so roll apps posts no commit status or GitHub Deployment of its own (apps' #249).
         let mut body = json!({ "branch": null, "ephemeral": true, "access": access, "egress": egress, "report": false });
+        // The project's traces: roll apps keeps the environment's itself (its own OpenTelemetry
+        // variables), and the preview's sheet reads them from it.
+        if t.traces {
+            body["traces"] = json!(true);
+        }
         if self.feedback {
             body["feedback"] = json!(t.feedback);
         }
@@ -340,6 +345,18 @@ impl roll_previews::ports::Apps for RollApps {
         let Ok(Some((id, env))) = self.find(preview, service).await else { return Vec::new() };
         let v = self.api.get(&format!("{}/logs?tail={lines}", Self::env_path(&id, &env))).await.unwrap_or(Value::Null);
         v.as_array().into_iter().flatten().filter_map(|l| s(&l["text"])).collect()
+    }
+
+    async fn traces(&self, preview: &str, service: &str, minutes: i64) -> Vec<roll_previews::engine::traces::TraceRow> {
+        let Ok(Some((id, env))) = self.find(preview, service).await else { return Vec::new() };
+        let Ok(v) = self.api.get(&format!("{}/traces?minutes={minutes}", Self::env_path(&id, &env))).await else { return Vec::new() };
+        serde_json::from_value(v["traces"].clone()).unwrap_or_default()
+    }
+
+    async fn trace(&self, preview: &str, service: &str, trace: &str) -> Option<Vec<roll_previews::engine::traces::Span>> {
+        let (id, env) = self.find(preview, service).await.ok()??;
+        let v = self.api.get(&format!("{}/traces/{trace}", Self::env_path(&id, &env))).await.ok()?;
+        serde_json::from_value(v["spans"].clone()).ok()
     }
 
     fn status(&self, _preview: &str, _service: &str) -> Option<roll_previews::ServiceState> {
@@ -712,6 +729,14 @@ impl roll_previews::ports::Apps for Services {
         let values = masks.values().await?;
         let lines: Vec<_> = lines.into_iter().map(|(t, stderr, text)| (t, stderr, roll_previews::mask_cut(&text, values))).collect();
         Ok(group_errors(&lines))
+    }
+
+    async fn traces(&self, preview: &str, service: &str, minutes: i64) -> Vec<roll_previews::engine::traces::TraceRow> {
+        self.apps.traces(preview, service, minutes).await
+    }
+
+    async fn trace(&self, preview: &str, service: &str, trace: &str) -> Option<Vec<roll_previews::engine::traces::Span>> {
+        self.apps.trace(preview, service, trace).await
     }
 
     async fn follow(&self, preview: &str, service: &str, lines: usize) -> Option<tokio::sync::mpsc::Receiver<(bool, String)>> {

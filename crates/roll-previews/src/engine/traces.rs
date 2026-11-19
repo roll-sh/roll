@@ -38,6 +38,21 @@ pub struct Span {
     pub attrs: Vec<(String, String)>,
 }
 
+/// A trace as its list says it: its id, its root span's name and service, when (ms), how long,
+/// how many spans, whether any failed.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct TraceRow {
+    pub trace: String,
+    pub name: String,
+    #[serde(default)]
+    pub service: String,
+    pub start_ms: u64,
+    pub ms: u64,
+    pub spans: usize,
+    #[serde(default)]
+    pub error: bool,
+}
+
 /// A preview's spans, oldest first.
 pub(crate) type Kept = HashMap<String, VecDeque<Span>>;
 
@@ -89,24 +104,30 @@ impl Engine {
         for s in &spans {
             by.entry(s.trace.as_str()).or_default().push(s);
         }
-        let mut out: Vec<(u64, String, String, u64, usize, bool, String)> = by
+        let mut out: Vec<TraceRow> = by
             .into_iter()
             .filter_map(|(t, ss)| {
                 let start = ss.iter().map(|s| s.start).min()?;
                 let end = ss.iter().map(|s| s.end).max()?;
                 let root = ss.iter().find(|s| s.parent.is_empty()).or_else(|| ss.iter().min_by_key(|s| s.start))?;
-                Some((start, root.name.clone(), root.service.clone(), end.saturating_sub(start) / 1_000_000, ss.len(), ss.iter().any(|s| s.error), t.to_string()))
+                Some(TraceRow { trace: t.to_string(), name: root.name.clone(), service: root.service.clone(), start_ms: start / 1_000_000, ms: end.saturating_sub(start) / 1_000_000, spans: ss.len(), error: ss.iter().any(|s| s.error) })
             })
             .collect();
-        out.sort_by_key(|o| std::cmp::Reverse(o.0));
+        // A service on roll apps keeps its own (its `pv-` environment's), each once.
+        for svc in self.store.services(id)? {
+            for row in self.apps.traces(id, &svc.name, minutes).await {
+                if !out.iter().any(|o| o.trace == row.trace) {
+                    out.push(row);
+                }
+            }
+        }
+        out.sort_by_key(|o| std::cmp::Reverse(o.start_ms));
         out.truncate(100);
-        let names = self.masked(id, out.iter().map(|o| o.1.clone()).collect()).await?;
-        let traces: Vec<Value> = out
-            .into_iter()
-            .zip(names)
-            .map(|((start, _, service, ms, n, error, trace), name)| json!({ "trace": trace, "name": name, "service": service, "start_ms": start / 1_000_000, "ms": ms, "spans": n, "error": error }))
-            .collect();
-        Ok(json!({ "minutes": minutes, "traces": traces }))
+        let names = self.masked(id, out.iter().map(|o| o.name.clone()).collect()).await?;
+        for (o, name) in out.iter_mut().zip(names) {
+            o.name = name;
+        }
+        Ok(json!({ "minutes": minutes, "traces": out }))
     }
 
     /// `GET …/{id}/traces/{trace}`: one trace's spans, oldest first, names and attributes masked.
@@ -117,6 +138,15 @@ impl Engine {
             return Err(Error::BadRequest("a trace id is 32 hex characters".into()));
         }
         let mut spans: Vec<Span> = self.traces.lock().get(id).map(|l| l.iter().filter(|s| s.trace == trace).cloned().collect()).unwrap_or_default();
+        // Not the runtime's: one of its roll apps services' own.
+        if spans.is_empty() {
+            for svc in self.store.services(id)? {
+                if let Some(found) = self.apps.trace(id, &svc.name, &trace).await.filter(|f| !f.is_empty()) {
+                    spans = found;
+                    break;
+                }
+            }
+        }
         if spans.is_empty() {
             return Err(Error::NotFound(format!("no trace {trace} in this preview")));
         }
