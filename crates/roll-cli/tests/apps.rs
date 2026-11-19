@@ -169,6 +169,31 @@ async fn settings_through_the_cli() {
     assert!(code != Some(0) && err.contains("roll deploy"), "{err}");
 }
 
+/// The newer environment settings and the status page: a freeze (and a deploy that overrides
+/// it), any setting as JSON, a page with an incident and its update.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn freezes_settings_and_a_status_page_through_the_cli() {
+    let t = start().await;
+    t.ok(&["create", "web", "-p", "acme", "--image", "nginx:1.27", "--port", "80"]).await;
+    let env = t.json(&["env", "-s", "web", "-p", "acme", "--freeze", "the launch", "--set", r#"heartbeats=[{"name":"backup","every_s":86400}]"#]).await;
+    assert_eq!((env["frozen"].as_bool(), env["heartbeats"][0]["name"].as_str()), (Some(true), Some("backup")), "{env}");
+    let (code, _, err) = t.run(&["redeploy", "-s", "web", "-p", "acme"]).await;
+    assert!(code != Some(0) && err.contains("frozen: the launch"), "{err}");
+    let dep = t.json(&["redeploy", "-s", "web", "-p", "acme", "--override"]).await;
+    assert!(dep["id"].as_str().is_some_and(|d| d.starts_with("dep_")), "{dep}");
+    let (code, _, err) = t.run(&["env", "-s", "web", "-p", "acme", "--set", "heartbeats"]).await;
+    assert!(code != Some(0) && err.contains("FIELD=JSON"), "{err}");
+    let env = t.json(&["env", "-s", "web", "-p", "acme", "--unfreeze"]).await;
+    assert!(env["frozen"] != true && env["freeze"].is_null(), "{env}");
+    let page = t.json(&["status-page", "-s", "web", "-p", "acme", "--title", "Acme"]).await;
+    assert!(page["url"].as_str().is_some_and(|u| u.contains("status-")), "{page}");
+    let inc = t.json(&["status-page", "-s", "web", "-p", "acme", "--incident", "Slow checkouts", "--text", "Looking into it."]).await;
+    let id = inc["id"].as_str().unwrap();
+    t.ok(&["status-page", "-s", "web", "-p", "acme", "--update", id, "--state", "resolved", "--text", "Fixed."]).await;
+    let shown = t.ok(&["status-page", "-s", "web", "-p", "acme"]).await;
+    assert!(shown.contains("Acme") && shown.contains(&format!("{id}  resolved  Slow checkouts")), "{shown}");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_local_tree_is_planned_before_anything_is_made() {
     let t = start().await;

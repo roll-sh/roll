@@ -508,7 +508,7 @@ async fn a_previews_traces_are_kept_by_its_token_and_read_masked() {
     // A service on roll apps keeps its own (its pv- environment's, turned on by the deploy): on the
     // same list, and one opens from it, masked the same way.
     assert_eq!(e.apps.traces_asked.lock().get(&(p.id.clone(), web.clone())), Some(&true), "the deploy asks for the environment's traces");
-    let row = roll_previews::engine::traces::TraceRow { trace: "b".repeat(32), name: "POST /pay sk_test_51Hx9".into(), service: "api".into(), start_ms: now / 1_000_000 + 5, ms: 12, spans: 1, error: false };
+    let row = roll_previews::engine::traces::TraceRow { trace: "b".repeat(32), name: "POST /pay sk_test_51Hx9".into(), service: "api".into(), start_ms: now / 1_000_000 + 5, ms: 12, spans: 1, error: false, repeated: None };
     *e.apps.app_traces.lock() = vec![(row, vec![span("0000000000000009", "", "POST /pay sk_test_51Hx9", false, vec![])])];
     let list = e.engine.traces(&p.id, 60).await.unwrap();
     assert_eq!(list["traces"].as_array().map(Vec::len), Some(2), "{list}");
@@ -536,6 +536,62 @@ async fn a_previews_traces_are_kept_by_its_token_and_read_masked() {
     let got = e.engine.errors(&p.id, 60).await.unwrap();
     let trace_of = |title: &str| got.iter().find(|g| g.title == title).and_then(|g| g.trace.clone());
     assert_eq!((trace_of("kept"), trace_of("not kept")), (Some(kept), None), "{got:?}");
+}
+
+/// A route clearly slower than on main's preview (from both previews' traces) goes on the change's
+/// record, and the change is reported again with it (its pull request's comment).
+#[tokio::test]
+async fn a_route_slower_than_mains_reaches_the_record_and_the_report() {
+    use roll_previews::engine::traces::Span;
+    let e = env(json!({ "enabled": true, "traces": true, "github": { "screenshot": true } }));
+    let mut png = Vec::new();
+    image::RgbaImage::new(4, 4).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+    *e.apps.shot.lock() = Some(png);
+    e.code.open(change("chg_sr", 18));
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    let base = e.engine.store.rows(Some(&e.project)).unwrap().into_iter().find(|r| r.is_baseline()).expect("main's preview");
+    let p = e.engine.store.row_by_change("chg_sr").unwrap().unwrap();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as u64;
+    let keep = |id: &str, n: u64, ms: u64| {
+        let spans = (0..n).map(|i| Span { trace: format!("{:016x}{i:016x}", ms), span: "0000000000000001".into(), parent: String::new(), name: "GET /orders".into(), service: "web".into(), start: now - ms * 1_000_000, end: now, error: false, attrs: vec![] }).collect();
+        e.engine.keep_spans(id, &e.engine.store.trace_token(id).unwrap(), spans).unwrap();
+    };
+    keep(&base.id, 5, 100);
+    keep(&p.id, 5, 400);
+    e.engine.read_slower_routes().await;
+    let s = e.engine.store.preview(&p.id).unwrap().slower_routes.expect("slower than main's");
+    assert_eq!((s.branch.as_str(), s.routes.len(), s.routes[0].name.as_str(), s.routes[0].p50_ms, s.routes[0].main_p50_ms), ("main", 1, "GET /orders", 400, 100));
+    assert_eq!(e.code.last_report("chg_sr").slower_routes, Some(s), "reported again with it");
+    assert!(e.engine.store.preview(&base.id).unwrap().slower_routes.is_none(), "main isn't slower than itself");
+}
+
+/// An error group main's preview doesn't have goes on the change's record (masked, the most
+/// frequent first), and the change is reported again with it; one main has too doesn't count.
+#[tokio::test]
+async fn an_error_mains_preview_doesnt_have_reaches_the_record_and_the_report() {
+    let e = env(json!({ "enabled": true, "github": { "screenshot": true } }));
+    e.secrets.values.lock().push(("STRIPE_KEY".into(), "sk_test_51Hx9".into()));
+    let mut png = Vec::new();
+    image::RgbaImage::new(4, 4).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+    *e.apps.shot.lock() = Some(png);
+    e.code.open(change("chg_ne", 19));
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    let base = e.engine.store.rows(Some(&e.project)).unwrap().into_iter().find(|r| r.is_baseline()).expect("main's preview");
+    let p = e.engine.store.row_by_change("chg_ne").unwrap().unwrap();
+    let web = e.engine.store.services(&p.id).unwrap().into_iter().next().unwrap().name;
+    let group = |f: &str, title: &str, count: u64| roll_previews::ErrorGroup { fingerprint: f.into(), kind: "line".into(), title: title.into(), count, first_seen: 1, last_seen: 2, sample: title.into(), ..Default::default() };
+    e.apps.errors.lock().insert(format!("{}/{web}", base.id), vec![group("old", "a flaky upstream", 3)]);
+    e.apps.errors.lock().insert(format!("{}/{web}", p.id), vec![group("old", "a flaky upstream", 4), group("rare", "RangeError", 1), group("new", "Stripe rejected sk_test_51Hx9", 9)]);
+    e.engine.read_new_errors().await;
+    let n = e.engine.store.preview(&p.id).unwrap().new_errors.expect("new against main's");
+    assert_eq!((n.branch.as_str(), n.total, n.errors.iter().map(|x| x.title.as_str()).collect::<Vec<_>>()), ("main", 2, vec!["Stripe rejected ***", "RangeError"]));
+    assert_eq!(e.code.last_report("chg_ne").new_errors, Some(n), "reported again with it");
+    // Fixed (gone from its output): it goes.
+    e.apps.errors.lock().insert(format!("{}/{web}", p.id), vec![group("old", "a flaky upstream", 5)]);
+    e.engine.read_new_errors().await;
+    assert!(e.engine.store.preview(&p.id).unwrap().new_errors.is_none());
 }
 
 /// A port of a preview's service on a laptop (`roll preview forward`): bytes go both ways, port 0

@@ -1157,7 +1157,38 @@ Spans are kept on the preview's holder, in memory, its newest 20,000 for six hou
 preview: they're for looking at it now. The sheet lists recent traces under Requests, each opening
 to its spans as bars on the trace's time, and above them each route's time (p50, p95) against
 main's preview's same route, the clearly slower ones first and in red; `roll preview traces
-[--trace <id> | --routes]`. Read back masked as
+[--trace <id> | --routes]`. The holder reads the slower ones (at most five, the most slower than
+main first) onto the preview's record about once a minute, off the reconcile pass and a few
+previews at a time, main's routes once a round and only on main's own holder (where its spans
+are: elsewhere nothing is said rather than everything); only those few names are masked, each
+once (`slower_routes`, kept in the store's
+`runtime_facts` so any node shows them): the sheet's verdict strip says "2 routes slower than main" (opening
+Requests), and the pull request's comment says it in its checks with each route's p50 and
+main's, a route's name in a code span nothing in it can close. A change of which routes are slower
+(not of their times, which drift with every trace) reports the preview again
+(`a_route_slower_than_mains_reaches_the_record_and_the_report`).
+
+New errors against main (Sentry's new issues in a release): every five minutes, in the same round
+off the reconcile pass, the holder reads each running change's or branch's error groups of the
+last hour and main's preview's (once a round, and only while main's runs on this node: otherwise
+nothing is said rather than everything), compares them by service and fingerprint (the
+backends' own, before previews key them), and keeps the ones main's doesn't have on the record
+(`new_errors`: how many, and the most frequent five by service and title, masked and shown to
+120 characters; their values are read only when that set moved). The verdict strip leads with
+"2 new errors against main" (opening Errors) and the change page lists them; the pull request's
+comment only counts them by service (their lines can hold a branch's data, and anyone reading the
+pull request reads its comment). A change reports the preview again; an error fixed (gone from
+the last hour) goes. A preview asleep keeps what it last said. An error whose line holds a
+per-preview value (its id, its branch's host) can read as new where main's has the same one.
+`an_error_mains_preview_doesnt_have_reaches_the_record_and_the_report`.
+
+Repeated queries (Sentry's N+1 detection): a trace whose spans run one database statement
+(`db.statement`, or the newer `db.query.text`) ten times or more says it as `repeated`
+(`{statement, count}`), the statement's shape with its literals taken out (`SELECT … WHERE id = ?`,
+an `IN` list as one) and masked as its names are. The trace list and the route table (`…/routes`,
+a route's worst trace) tag it N+1, an opened trace says what it runs, and `roll preview traces
+--routes` prints it under the route. `a_statement_run_many_times_in_a_trace_is_said_by_its_shape`.
+Read back masked as
 its logs are: a span's name and attributes are its code's words. The intake reads OTLP with roll
 apps' reader (`apps_control::otlp::spans_of_request`). A roll apps service's traces are roll apps'
 own: with the project's `traces` the preview's `pv-` environment gets roll apps' `traces: true` (its
@@ -2058,13 +2089,12 @@ Ranked by what a person notices first. Done so far:
    through `Secrets::resolve_for(ResourceRef::new(kind, id).untrusted(), …)` (never a
    protected environment or a sensitive key), and offer to keep a pasted value in the base
    environment's folder.
-2. **New errors against main** (Sentry's "new issues" in a release): an error group main's
-   preview doesn't have (compared by the unkeyed fingerprint, on the holder) counted as new, in
-   the verdict strip ("2 new errors against main") and the pull request's checks, as
-   `errors_added` does for the page's console.
-3. **Repeated queries in a trace** (Sentry's N+1 detection): a request whose child spans repeat
-   one database statement many times (`db.statement`, numbers and strings taken out) said on the
-   route table and in the trace, with the statement masked.
+2. **New errors against main, in review** (#438, on #431; Sentry's new issues in a release): an
+   error group main's preview doesn't have on the record (`new_errors`), the verdict strip, the
+   change page and a count in the pull request's checks.
+3. **Repeated queries in a trace, in review** (#441, on #438; Sentry's N+1 detection): a trace
+   running one database statement ten times or more says it (`repeated`) on the trace list, the
+   route table, the trace and `roll preview traces --routes`.
 4. **A preview's own variables only in roll secrets** (roll secrets' review, 2026-11-19): `PUT
    …/{id}/env` keeps their values as plain JSON in the previews table though they go to the
    preview's ephemeral environment anyway; keep only their names there (roll secrets the one copy,

@@ -174,6 +174,16 @@ pub struct Engine {
     /// Each preview's recent spans (`traces.rs`), and what reads an OTLP request into them
     /// (rolld: roll apps' reader); unset, the intake answers 404.
     traces: Mutex<traces::Kept>,
+    /// When `tend_routes` last read the slower routes.
+    routes_read: Mutex<Option<std::time::Instant>>,
+    /// When `read_new_errors` last ran, and what each preview's new errors were then (no values
+    /// are read again for the same).
+    new_errors_read: Mutex<Option<std::time::Instant>>,
+    new_errors_seen: Mutex<HashMap<String, Vec<String>>>,
+    /// A round of `read_slower_routes` runs (off the pass), and each held preview's slower routes'
+    /// names masked so far (raw → masked: its values aren't read again for the same).
+    routes_running: std::sync::atomic::AtomicBool,
+    routes_masked: Mutex<HashMap<String, HashMap<String, String>>>,
     pub span_reader: std::sync::OnceLock<Arc<dyn crate::ports::SpanReader>>,
     /// Open shells in previews' services (`shell.rs`), by id.
     shells: Mutex<HashMap<String, Arc<shell::ShellSession>>>,
@@ -301,6 +311,11 @@ impl Engine {
             draining: Mutex::new(HashMap::new()),
             shells: Mutex::new(HashMap::new()),
             traces: Mutex::new(HashMap::new()),
+            routes_read: Mutex::new(None),
+            new_errors_read: Mutex::new(None),
+            new_errors_seen: Mutex::new(HashMap::new()),
+            routes_running: std::sync::atomic::AtomicBool::new(false),
+            routes_masked: Mutex::new(HashMap::new()),
             span_reader: std::sync::OnceLock::new(),
             forwards: Mutex::new(HashMap::new()),
             forwards_said: Mutex::new(HashMap::new()),
@@ -403,6 +418,7 @@ impl Engine {
         while set.join_next().await.is_some() {}
         self.tend_leases().await;
         self.tend_drains().await;
+        self.tend_routes();
         self.note_refused_egress().await;
         // Services those converges deployed at a new head, woken so their first visit is warm (a
         // few at a time, off the pass).
