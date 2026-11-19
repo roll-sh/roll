@@ -83,8 +83,7 @@ pub fn parse(p: &mut XParser<'_>, name: &str) -> Result<AutoDateHistogramSpec> {
 
 /// `RoundingInfo`: a rounding and the multiples of it the histogram may use. It travels as
 /// its rounding and unit ([`crate::wire`]); the rest comes from [`ROUNDINGS`].
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-#[serde(into = "RoundingInfoWire", try_from = "RoundingInfoWire")]
+#[derive(Debug)]
 pub struct RoundingInfo {
     pub rounding: Rounding,
     pub inner: &'static [i32],
@@ -104,16 +103,17 @@ struct RoundingInfoWire {
     abbreviation: String,
 }
 
-impl From<RoundingInfo> for RoundingInfoWire {
-    fn from(r: RoundingInfo) -> Self {
-        RoundingInfoWire { rounding: r.rounding, abbreviation: r.abbreviation.to_string() }
+impl serde::Serialize for RoundingInfo {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        RoundingInfoWire { rounding: self.rounding.clone(), abbreviation: self.abbreviation.to_string() }.serialize(s)
     }
 }
 
-impl TryFrom<RoundingInfoWire> for RoundingInfo {
-    type Error = String;
-    fn try_from(w: RoundingInfoWire) -> std::result::Result<Self, String> {
-        let &(_, _, rough_millis, abbreviation, inner) = ROUNDINGS.iter().find(|r| r.3 == w.abbreviation).ok_or_else(|| format!("unknown rounding [{}]", w.abbreviation))?;
+impl<'de> serde::Deserialize<'de> for RoundingInfo {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        let w = RoundingInfoWire::deserialize(d)?;
+        let &(_, _, rough_millis, abbreviation, inner) =
+            ROUNDINGS.iter().find(|r| r.3 == w.abbreviation).ok_or_else(|| serde::de::Error::custom(format!("unknown rounding [{}]", w.abbreviation)))?;
         Ok(RoundingInfo { rounding: w.rounding, inner, rough_millis, abbreviation })
     }
 }

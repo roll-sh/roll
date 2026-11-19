@@ -2622,7 +2622,8 @@ async fn a_sleeping_remote_wakes_and_a_gone_one_is_skipped() {
 /// Cross-cluster tests' data: `items` documents `0..n`, with values whose sums are exact in
 /// binary, so every reduce order gives the same numbers.
 fn ccs_doc(i: i64) -> Value {
-    json!({ "n": i, "price": i as f64 * 1.5, "w": 1 + i % 4, "tag": ["a", "b", "c", "d"][(i % 4) as usize], "at": 1_704_067_200_000i64 + i * 86_400_000 * 3, "loc": { "lat": (i % 40) as f64 - 20.0, "lon": (i % 90) as f64 * 2.0 - 90.0 } })
+    let tag = ["a", "b", "c", "d"][(i % 4) as usize];
+    json!({ "n": i, "price": i as f64 * 1.5, "w": 1 + i % 4, "tag": tag, "at": 1_704_067_200_000i64 + i * 86_400_000 * 3, "loc": { "lat": (i % 40) as f64 - 20.0, "lon": (i % 90) as f64 * 2.0 - 90.0 } })
 }
 
 /// Creates `items` on a cluster and indexes the documents `ids` names.

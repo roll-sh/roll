@@ -325,7 +325,7 @@ pub fn parse_bounds(p: &mut XParser<'_>) -> Result<GeoBounds> {
 }
 
 /// One part of a composite key (`Comparable`: `BytesRef`, `Long` or `Double`; `None` missing).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum KeyPart {
     Null,
     Long(i64),

@@ -687,7 +687,7 @@ impl Aggregator for RangeAgg {
 }
 
 /// Which range result.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RangeResultKind {
     Range,
     DateRange,
@@ -696,7 +696,7 @@ pub enum RangeResultKind {
 }
 
 /// One range bucket.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct RangeBucket {
     pub key: Option<String>,
     pub from: f64,
