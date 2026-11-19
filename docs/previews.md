@@ -1127,7 +1127,9 @@ screen as server-sent events, keys and resizes posted). It runs on the preview's
 or thaws a sleeping service and keeps it awake while it's open, and the activity says who
 opened it. Every route of it is `admin` (rolld's catalogue), as roll apps' shells: it runs
 anything with the preview's variables and branches, so its output isn't masked. A roll apps
-service's shell is roll apps' own, on its `pv-` environment. A redeploy ends a shell with the
+service's shell is roll apps' own, on its `pv-` environment: the sheet's Shell tab opens that one
+for it (the project's roll apps service of that name, as Promote finds it), so every service of
+a preview has its shell in the same place. A redeploy ends a shell with the
 container it was in; a preview that goes ends its shells first.
 `roll preview shell <preview> [--service]` makes this terminal the shell's (raw mode, its size
 followed) until it exits. `a_shell_in_a_previews_service_is_said_and_bounded`;

@@ -1,6 +1,6 @@
 import { Boxes, Check, Copy, Database, ExternalLink, Eye, Inbox, ListChecks, Moon, Package, Pin, RefreshCw, RotateCcw, Search, Smartphone, SquareTerminal, Sun, Trash2, Waves, X, Zap, type LucideIcon } from "lucide-react";
 import { useEffect, useState } from "react";
-import { appsApi } from "@/lib/apps-api";
+import { appsApi, followShell as followAppsShell } from "@/lib/apps-api";
 import { codeApi } from "@/lib/code-api";
 import { Confirm } from "@/components/ui";
 import { TerminalScreen } from "@/components/terminal-screen";
@@ -1498,21 +1498,37 @@ function Errors({ preview: p }: { preview: Preview }) {
   );
 }
 
-/** A shell in one of the preview's `roll.toml` services (Render's shell, `heroku run`): opened on
- * request, its screen in a terminal, closed when it ends or the tab goes. A roll apps service's is
- * roll apps' own. */
+/** A shell in one of the preview's services (Render's shell, `heroku run`): opened on request, its
+ * screen in a terminal, closed when it ends or the tab goes. A `roll.toml` service's is previews'
+ * (`…/previews/{id}/shell`); a roll apps service's is roll apps' own, on the preview's `pv-`
+ * environment, as Promote finds it (the project's roll apps service of that name). */
 function Shell({ preview: p }: { preview: Preview }) {
   const [service, setService] = useState(p.services[0]?.name ?? "");
-  const [session, setSession] = useState<string | null>(null);
+  // The session, and the roll apps service it's on (null: previews' own).
+  const [session, setSession] = useState<{ id: string; apps: string | null } | null>(null);
   const [state, setState] = useState<"idle" | "opening" | "ended">("idle");
   const [error, setError] = useState<string | null>(null);
+  // The preview's services that roll apps runs: name → roll apps service id.
+  const [onApps, setOnApps] = useState<Record<string, string>>({});
+  useEffect(() => {
+    let live = true;
+    appsApi.services(p.project).then(
+      (all) => live && setOnApps(Object.fromEntries(all.filter((s) => s.project === p.project).map((s) => [s.name, s.id]))),
+      () => live && setOnApps({}),
+    );
+    return () => {
+      live = false;
+    };
+  }, [p.project]);
+  const env = `pv-${p.id.replace(/^pv_/, "")}`;
   if (!p.services.length) return <p className="text-[11.5px] text-subtle">No services, so no shell.</p>;
+  const apps = onApps[service] ?? null;
   const open = async () => {
     setError(null);
     setState("opening");
     try {
-      const { id } = await previewsApi.openShell(p.id, { service, cols: 80, rows: 24 });
-      setSession(id);
+      const { id } = apps ? await appsApi.openShell(apps, env, { cols: 80, rows: 24 }) : await previewsApi.openShell(p.id, { service, cols: 80, rows: 24 });
+      setSession({ id, apps });
       setState("idle");
     } catch (e) {
       setError(errorText(e));
@@ -1536,7 +1552,7 @@ function Shell({ preview: p }: { preview: Preview }) {
           ))}
         </select>
         {session ? (
-          <button onClick={() => setSession(null)} className="flex h-7 items-center gap-1.5 rounded-md border border-line-2 px-2.5 text-[11.5px] text-soft hover:bg-white/[0.06] hover:text-fg">
+          <button onClick={() => setSession(null)} aria-label="Close the shell" className="flex h-7 items-center gap-1.5 rounded-md border border-line-2 px-2.5 text-[11.5px] text-soft hover:bg-white/[0.06] hover:text-fg">
             <X className="size-3.5" /> Close
           </button>
         ) : (
@@ -1547,15 +1563,24 @@ function Shell({ preview: p }: { preview: Preview }) {
       </div>
       {session ? (
         <TerminalScreen
-          key={session}
-          session={session}
+          key={session.id}
+          session={session.id}
           className="h-[52vh] rounded-lg border border-line-2 bg-canvas p-1.5"
-          link={{
-            follow: (h) => followShell(p.id, session, h),
-            keys: (data) => previewsApi.shellKeys(p.id, session, data),
-            resize: (size) => previewsApi.resizeShell(p.id, session, size),
-            close: () => previewsApi.closeShell(p.id, session),
-          }}
+          link={
+            session.apps
+              ? {
+                  follow: (h) => followAppsShell(session.apps!, env, session.id, h),
+                  keys: (data) => appsApi.shellKeys(session.apps!, env, session.id, data),
+                  resize: (size) => appsApi.resizeShell(session.apps!, env, session.id, size),
+                  close: () => appsApi.closeShell(session.apps!, env, session.id),
+                }
+              : {
+                  follow: (h) => followShell(p.id, session.id, h),
+                  keys: (data) => previewsApi.shellKeys(p.id, session.id, data),
+                  resize: (size) => previewsApi.resizeShell(p.id, session.id, size),
+                  close: () => previewsApi.closeShell(p.id, session.id),
+                }
+          }
           onEnded={() => {
             setSession(null);
             setState("ended");
@@ -1566,7 +1591,7 @@ function Shell({ preview: p }: { preview: Preview }) {
           {error && <p className="mb-1.5 text-[11.5px] leading-relaxed text-danger">{error}</p>}
           <p className="text-[11.5px] leading-relaxed text-subtle">
             {state === "ended" ? "The shell ended." : "bash (or sh) in the running service, with the preview's variables and its branches' data, never production's. A service that's asleep is started and kept awake while the shell is open; the activity says who opened it."}{" "}
-            From a terminal: <code className="font-mono text-soft">roll preview shell {p.id} -s {service}</code>.
+            From a terminal: <code className="font-mono text-soft">{apps ? `roll apps ssh -s ${service} -e ${env}` : `roll preview shell ${p.id} -s ${service}`}</code>.
           </p>
         </>
       )}
