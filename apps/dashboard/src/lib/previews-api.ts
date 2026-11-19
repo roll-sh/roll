@@ -53,6 +53,25 @@ export function unmaskedNote(kind: string, mode: "branch" | "schema" | "skip", m
   return "Previews get its data as it is (it can't be masked): a seed can replace it with made-up data, or skip it.";
 }
 
+/** A column (or search field) of a project's Postgres, NoSQL or search resource that looks like
+ * people's data and has no mask yet (`GET …/mask-suggestions`), with a rule its type and
+ * constraints take. Every such resource is read, whatever its rule; the dialog shows them under
+ * those on `branch`. */
+export interface MaskSuggestion {
+  /** `"postgres:<ref>"`, `"nosql:<ref>"` or `"search:<ref>"`, as `masking` keys it. */
+  resource: string;
+  path: string;
+  rule: string;
+  why: string;
+}
+
+export interface MaskSuggestions {
+  suggestions: MaskSuggestion[];
+  /** Resources whose columns weren't all read, and why: asleep (not woken for this), not read
+   * within 10 s, couldn't be read, or only the first 2,000 read. */
+  unread: { resource: string; why: string }[];
+}
+
 export interface PreviewCost {
   sleeping_usd_month: number;
   active_usd_hour: number;
@@ -504,6 +523,10 @@ export const previewsApi = {
   requests: (id: string) => call<{ requests: RequestLine[] }>("GET", `${one(id)}/requests`),
   /** What its running services use right now (cores of CPU, resident memory, the memory each runs with). */
   metrics: (id: string) => call<{ services: ServiceMetrics[] }>("GET", `${one(id)}/metrics`),
+  /** Its services' errors in the last `minutes` (5–1440, 60 by default, rounded up to 15-minute steps), grouped, newest first; masked as its logs are. */
+  errors: (id: string, minutes?: number) => call<{ minutes: number; groups: ErrorGroup[] }>("GET", `${one(id)}/errors${query({ minutes })}`),
+  /** How many errors its services wrote in that span (a list's rows: nothing to mask, so no values are read). */
+  errorCount: (id: string, minutes?: number) => call<{ minutes: number; count: number }>("GET", `${one(id)}/errors/count${query({ minutes })}`),
   logs: (id: string, opts: { service?: string; lines?: number } = {}) =>
     call<{ service: string; lines: string[] }>("GET", `${one(id)}/logs${query(opts)}`),
   /** Newest first. */
@@ -512,6 +535,8 @@ export const previewsApi = {
   settings: (projectId: string) => call<PreviewSettings>("GET", `${project(projectId)}/settings`),
   putSettings: (projectId: string, patch: SettingsPatch) => call<PreviewSettings>("PUT", `${project(projectId)}/settings`, patch),
   usage: (projectId: string) => call<PreviewUsage>("GET", `${project(projectId)}/usage`),
+  /** Columns of the project's branched data that look like people's data and aren't masked. */
+  maskSuggestions: (projectId: string) => call<MaskSuggestions>("GET", `${project(projectId)}/mask-suggestions`),
   bypass: (projectId: string) => call<PreviewBypass>("GET", `${project(projectId)}/bypass`),
   /** A new secret (the old one stops working), shown only in this answer. */
   rotateBypass: (projectId: string) => call<PreviewBypass>("POST", `${project(projectId)}/bypass`),
@@ -543,6 +568,9 @@ export function parseSse(rest: string, text: string): { events: { event: string;
   });
   return { events, rest: left };
 }
+
+/** One error in a preview's service's output, grouped (a stack trace joined from its lines, or an error line): how many, first and last seen (ms), and the newest one whole. `fingerprint` names the group (keyed per process: not stable across restarts). */
+export type ErrorGroup = { service: string; fingerprint: string; kind: string; title: string; count: number; first_seen: number; last_seen: number; sample: string };
 
 /** A running service's use right now: cores of CPU, resident bytes (an instance's, on roll apps), and the MB it runs with. */
 export type ServiceMetrics = { service: string; cpu: number; memory_bytes: number; memory_mb: number };

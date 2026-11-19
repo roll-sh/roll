@@ -35,6 +35,19 @@ impl Branched {
     }
 }
 
+/// What [`Brancher::columns`] fails with when the parent sleeps: reading its columns would wake
+/// it (and keep it awake), which suggestions aren't worth.
+#[derive(Debug)]
+pub struct Asleep;
+
+impl std::fmt::Display for Asleep {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("asleep")
+    }
+}
+
+impl std::error::Error for Asleep {}
+
 /// One data product's branches. Every method is idempotent: the engine may call it again after
 /// a crash, a timeout or a retry.
 #[async_trait]
@@ -100,6 +113,13 @@ pub trait Brancher: Send + Sync {
     /// out): `None` from products whose branches need none.
     async fn credentials(&self, _parent: &str, _branch: &str, _name: &str) -> anyhow::Result<Option<String>> {
         Ok(None)
+    }
+
+    /// The parent's columns (or a search cluster's fields) with their types, at most `max`, for
+    /// mask suggestions ([`crate::mask::suggest`]). None from products without columns to mask.
+    /// A parent that sleeps isn't woken for it: [`Asleep`].
+    async fn columns(&self, _parent: &str, _max: usize) -> anyhow::Result<Vec<crate::mask::Column>> {
+        Ok(Vec::new())
     }
 
     /// The parent's schema and the branch's, one line per object, for [`crate::schema::diff`].
@@ -282,6 +302,9 @@ pub struct GitPull {
     pub url: String,
     /// From another repository (its head repo isn't the base's): it runs only once approved.
     pub fork: bool,
+    /// Who opened it, as the provider says (GitHub's `user.login`): untrusted text, for
+    /// `skip_authors` only, never for trust.
+    pub author: Option<String>,
 }
 
 /// A note's element to crop in a screenshot run: its page and its selector, both checked.
@@ -527,6 +550,13 @@ pub trait Apps: Send + Sync {
     /// (or the backend can't tell).
     async fn metrics(&self, _preview: &str, _service: &str) -> Option<(f64, u64)> {
         None
+    }
+    /// Its errors in the last `minutes`, grouped (none where the backend can't tell when a line
+    /// was written). Text the backend cuts before grouping it is masked first with `masks`' values
+    /// (`crate::mask_cut`), read only when there's an error; the engine masks every title and
+    /// sample again. `None`: only the counts are used, nothing is masked and no text leaves.
+    async fn errors(&self, _preview: &str, _service: &str, _minutes: i64, _masks: Option<&crate::engine::ErrorMasks<'_>>) -> crate::Result<Vec<crate::ErrorGroup>> {
+        Ok(Vec::new())
     }
     /// The service's output as it comes, after its last `lines`: `None` where it can't be
     /// followed (the engine reads `logs` again every few seconds instead).

@@ -71,8 +71,8 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
   - With `skip_authors` set (globs on who opened the change: a pull request's GitHub login, so
     `dependabot[bot]`, or `*[bot]` for every bot account), a change by one of them gets no
     preview, as Netlify's and Vercel's users skip dependency bots with an ignored build step. A
-    `[preview]` title or a `preview` label still asks for one. A Git URL service's pull requests
-    on roll apps carry no author yet, so the rule doesn't reach them.
+    `[preview]` title or a `preview` label still asks for one (a Git URL service's pull requests carry no labels, so there only the title asks). A Git URL service's pull requests
+    on roll apps carry their opener too (roll apps' `GitPull.author`: GitHub's `user.login`, GitLab's `user.username`; Bitbucket's none yet), so the rule reaches them as well. A bot pushes its branch before it opens the pull request, so the pull request takes back the preview that push made, and the branch's later pushes make none until the pull request closes, the branch is deleted or its title asks.
   - With `paths` or `ignore_paths` set (gitignore-style patterns, as CODEOWNERS and
     `.roll/review.yaml` read them), a change also has to touch a path that `paths` matches (any
     path, when it's empty) and `ignore_paths` doesn't: Render's build filters, Vercel's ignored
@@ -743,6 +743,64 @@ as a private address.
     reads `[masked]` and its `_terms_enum` finds nothing, the parent reads `parent`; roll
     search's `expunging_a_branch_rewrites_the_segments_it_shares` pins the sequence).
   - Other products: a `seed` anonymises the rows instead.
+  - **Suggestions** (as Tonic's and Neon's anonymisation tools name columns that look personal):
+    `GET /v1/previews/projects/{project}/mask-suggestions` reads the columns of every Postgres,
+    NoSQL and search resource on the project's canvas that the project stands for
+    (`Workspace::trusts`), whatever its rule (the rules dialog shows them under those on
+    `branch`, as the rule being edited says, so switching one to `branch` shows them at once),
+    and names those that look like people's data and have no mask yet, each with a rule
+    (`mask::suggest`). A scoped token sees only the resources its grant lets it read
+    (`Grant::allows`, `read` on `postgres:<ref>` and the rest): column names are the product's
+    metadata. The promise: **a suggested rule never fails the masking**, since a failed mask fails
+    the whole preview and "Add all" applies every one.
+    - What's read, and what isn't. At most 2,000 columns per resource (`SUGGEST_COLUMNS_MAX`),
+      each resource for at most 10 s (`SUGGEST_READ_FOR`). A Postgres parent whose compute
+      sleeps isn't woken for it (reading would start it and reset its idle timer), and the rules
+      dialog reads them only when asked ("Look for personal data that isn't masked"), so opening
+      it never resets a running parent's idle timer either; a sleeping one is named in
+      `unread` ("asleep: open it to read its columns"), as is one that wasn't read in time,
+      couldn't be read, or has more columns than are read. The dialog shows that under the
+      resource.
+    - Postgres reads the parent's `main` as the superuser with only the catalog's names in reach
+      and `statement_timeout` 10 s (its tables' columns, a partitioned table's once). Generated
+      columns and `GENERATED ALWAYS` identities can't be written, so they're left out. For each
+      column it reads what holds it, across the table's partitions:
+      - nothing is suggested for a column that a foreign key of another table points at, that a
+        CHECK or an exclusion constraint names, that a unique index's expression or predicate
+        uses (`UNIQUE (lower(email))`), that is a partition key, or whose domain has constraints;
+      - only `null` (on a nullable column) for a foreign key's own column, an array, a range, an
+        enum or a composite;
+      - a unique index's column is unique (`hash`, not one value for every row), and one
+        `NULLS NOT DISTINCT` can't take a null either.
+
+      NoSQL reads the parent's `/schema`, leaving out key columns (a table's or a view's of it),
+      which can't be masked. Search reads the parent's indices' mappings one index at a time,
+      leaves only (a multi-field is masked with its field), and a data stream's backing indices
+      (`.ds-…`, which a mask can name) but not system indices.
+    - Names are split into words (`snake_case`, `camelCase`, `IPAddress`, dots, and a strong word
+      glued to others in one lowercase word, as Postgres folds `EmailAddress`: `emailaddress`,
+      `homephone`, `useremail`) and matched case-insensitively: an email (`email`); a name,
+      phone, postal address, date of birth (`born_on` too), IP address, bank account or card
+      number (`redact`, or `hash` where a unique index covers the column, since one value for
+      every row would fail it); a national id, tax id or passport number (`hash`: unique, and
+      joined on; a `*_id` only when it holds text, since a number is another row's reference); a
+      secret, token or API key (`null`, or `redact` on a `NOT NULL` column).
+    - A rule the column's type can take: `redact`, `hash` and `email` write text (3, 32 and 33
+      characters), so in a `varchar(n)` or `char(n)` the first that fits (`email`, then `redact`
+      or `hash`), else `null` on a nullable column, else nothing; a Postgres column of another
+      type gets `null`, or, `NOT NULL`, a `fixed:` value of its type (`1970-01-01`, `0.0.0.0`,
+      `0`), or nothing. Types are matched by their whole name. A search field that isn't text-like
+      is `remove`d (`redact` and `email` write strings), and a search secret is `remove`d; NoSQL
+      gets `mask_default()` (`mask_null()` for a secret), which any type takes (`mask_hash`
+      changes the type a client reads). Booleans are never suggested.
+    - Left out on purpose: usernames, logins and handles, and passwords and their hashes,
+      salts and digests (a preview's test accounts sign in with them: masking them locks those
+      accounts out; a password reset token is a token, and suggested), the names of things
+      (`filename`, `hostname`, `company_name`), a bare `name` on a table that isn't about people
+      (`products.name`; `users.name` and `customers.name` are suggested), machines' addresses
+      (`mac_address`, `wallet_address`), a mail server, another row's id number
+      (`order_id_number`), times (`*_at`, `*_on`), references (`*_id`, but a national or tax id),
+      counts, kinds and flags (`is_*`, `has_*`, `email_verified`).
 - **Data as of a point in time** (Neon's time-travel branches): `data_at` (`-24h`, `-30m`, `-7d`
   or an RFC 3339 time, 30 days back at most) makes each branching and reset start from the
   parent as it was then, where the product keeps history: Postgres (pg-control's point in time;
@@ -1179,10 +1237,13 @@ and admins see every project.
 | `GET /v1/previews/{id}/logs?service=&lines=&follow=1` | | `text/event-stream`: `event: service` (its name), then one event per line, the last `lines` first and then as they come. `docker logs -f` for `roll.toml` services; for others the tail is read every 2 s (2,000 lines wide after the first read) and only new lines are sent, with a line saying so when some were missed. Runs on the preview's holder; the stream ends when the client goes |
 | `GET /v1/previews/{id}/requests` | | `{requests: [{at, service, method, path, status, ms}]}`: its latest 200 requests through roll's runtime, newest first (Vercel's request log): never the query, which can carry a token, and the path masked as its logs are (a path is its code's to choose); `ms` until the answer's headers. Kept in memory on the preview's holder (runs there) and gone with its last service; a roll apps instance's requests are roll apps' own. The sheet's Requests tab, errors at a glance; `roll preview requests <id> [--errors]` |
 | `GET /v1/previews/{id}/metrics` | | `{services: [{service, cpu, memory_bytes, memory_mb}]}`: what its running services use right now (Render's and Railway's metrics): cores of CPU and resident memory, against the memory each runs with. It comes from `docker stats` for roll's runtime. For roll apps' instances it's their last finished minute (`…/environments/pv-…/metrics`), with memory per instance. A sleeping service isn't listed. 404 for no such preview. It runs on the preview's holder, and is read again at most every 10 s, however many sheets ask. The sheet shows it on each running service, read every 15 s while it's open |
+| `GET /v1/previews/{id}/errors?minutes=` | | `{minutes, groups: [{service, fingerprint, kind, title, count, first_seen, last_seen, sample}]}`: its services' errors in the last `minutes` (5–1,440, 60 by default, rounded up to a 15-minute step), grouped as roll apps groups an environment's (Sentry's issues and Vercel's runtime logs, from the output alone; docs/apps/http-api.md): a stack trace (Python, JVM, Node, Go) joined from its lines, or an error line, by what it is (its type and first frames with numbers and ids taken out). `fingerprint` names a group (keyed under a random key per process, so it says nothing of the error and changes on a restart); `kind` is `python`, `java`, `node`, `go` or `line`; `sample` is the newest one whole (8 KiB at most); newest first. Title and sample are masked as its logs are, a value a cut split included (its start at a line's end is `***` too): its code can print its secrets. Its values are read (an audited read) only when there's an error. A roll apps service's are roll apps' own (`…/environments/pv-…/errors`, its 50 most frequent); a `roll.toml` service's are read from its container's last 2,000 lines in the span (`docker logs --timestamps --since`, at most 4 MiB a stream for at most 10 s), masked before they're grouped, its newest 50. A runtime that doesn't stamp lines gives none (its tail's old crash would read as new). 404 for no such preview. It runs on the preview's holder and is read again at most every 10 s for a span, however many ask. The sheet's Errors tab |
+| `GET /v1/previews/{id}/errors/count?minutes=` | | `{minutes, count}`: how many errors those groups hold. Nothing in them leaves, so nothing is masked and no values are read. Kept as long. A row of the Previews tab shows the last hour's once it's on screen, three rows at a time |
 | `GET /v1/previews/{id}/activity` | | `Activity[]`, newest first |
 | `GET /v1/previews/{id}/visitors` | | `[{who, last_at}]`: the last 8 people signed in to roll who opened it (`access: "team"`), by their handle, latest first; `last_at` is as of their session's last 5-minute recheck. Share links and the CI bypass aren't people and aren't listed |
 | `GET /v1/previews/projects/{project}/settings` | | `Settings` |
 | `PUT /v1/previews/projects/{project}/settings` | `Settings` (partial) | `Settings` |
+| `GET /v1/previews/projects/{project}/mask-suggestions` | | `{suggestions: [{resource, path, rule, why}], unread: [{resource, why}]}`: columns of the project's Postgres, NoSQL and search resources (whatever their rule) that look like people's data and have no mask yet, with a rule their type and constraints take ("Masked columns", Suggestions); `resource` is `masking`'s key (`postgres:<ref>`). At most 2,000 columns read per resource, each for at most 10 s; one asleep (not woken), not read in time, unreadable or with more columns is in `unread`. As the settings are: the operator and whoever sees the project; a scoped token only sees resources its grant lets it read |
 | `GET /v1/previews/projects/{project}/usage` | | `{previews, sleeping_usd_month, active_usd_hour, month_to_date_usd, bytes, spent_usd_month, max_usd_month}` |
 | `GET /v1/previews/projects/{project}/bypass` | | `{enabled, created_at, header}` (never the secret) |
 | `POST /v1/previews/projects/{project}/bypass` | | 201 `{enabled, created_at, header, secret}`: a new secret, shown only here; the old one stops working |
@@ -1551,10 +1612,14 @@ type Settings = {
     It wakes the service once per push, so it's off by default.
 - **Dashboard**: a Previews tab on each project, with the list (a filter once there are four or
   more: every word against title, branch, slug, repo or `#number`, and All, Needs you, Failed,
-  Awake, Asleep with their counts; `lib/preview-filter.ts`), status, cost, logs, and open,
-  sleep, wake, reset and delete actions, plus a "Previews" overlay on the canvas that draws each
+  Awake, Asleep with their counts; `lib/preview-filter.ts`), status, cost, how many errors
+  its services wrote in the last hour, logs, and open, sleep, wake, reset and delete
+  actions. A preview's sheet has its Overview, Activity, Logs (live while a service runs),
+  Requests and Errors (its services' errors grouped, newest first, each with how many times, when
+  last seen, the service and its title, opening to its newest sample; the last hour, 6 or 24),
+  plus a "Previews" overlay on the canvas that draws each
   preview's branches next to their parents.
-- **CLI**: `roll preview ls|show|open|create|rm|sleep|wake|refresh|reset|keep|logs [-f]|activity|visitors|settings|usage|bypass|wait|up|down`.
+- **CLI**: `roll preview ls|show|open|create|rm|sleep|wake|refresh|reset|keep|logs [-f]|activity|visitors|settings|usage|bypass|wait|up|down|masks|errors|metrics|hooks`.
   - `roll preview up [--project P] [--repo owner/name] [--name N] [--no-wait] [--timeout S] [--force]`
     previews a checkout's working tree as it is, as `netlify deploy` and `vercel deploy` do from a
     directory: uncommitted and untracked files included, what `.gitignore` leaves out left out.

@@ -270,3 +270,47 @@ fn up_previews_the_working_tree_and_down_removes_it() {
     assert!(s.pushed("preview/ana/feat-x").is_none(), "the branch is gone");
     assert_eq!(s.git(&work, false, &["rev-parse", "HEAD"]), head);
 }
+
+/// `roll preview masks` lists a project's mask suggestions (none here: its canvas holds only a
+/// repo), and `--apply` with none changes nothing.
+#[test]
+fn mask_suggestions_from_the_cli() {
+    let s = server();
+    s.ok(&["settings", "shop", "--set", "enabled=true"]);
+    assert!(s.ok(&["masks", "shop"]).contains("nothing unmasked looks like personal data"));
+    s.ok(&["masks", "shop", "--apply"]);
+    assert_eq!(s.json(&["masks", "shop"])["suggestions"].as_array().map(Vec::len), Some(0));
+}
+
+/// `roll preview errors` answers a preview's grouped errors (none here: nothing runs in this
+/// harness), and a preview that isn't one is an error.
+#[test]
+fn errors_from_the_cli() {
+    let s = server();
+    s.ok(&["settings", "shop", "--set", "enabled=true"]);
+    let created = s.json(&["create", "--project", "shop", "--repo", "acme/web", "--branch", "main"]);
+    let id = created["id"].as_str().unwrap();
+    assert!(s.ok(&["errors", id]).contains("no errors in the last 60 minutes"));
+    assert_eq!(s.json(&["errors", id, "--minutes", "1440"])["groups"].as_array().map(Vec::len), Some(0));
+    assert!(!s.roll(&["errors", "pv_nope"]).0);
+}
+
+/// `roll preview hooks` makes a deploy hook (its URL printed once), lists it without its
+/// secret and deletes it; `roll preview metrics` answers a preview's running services (none
+/// here: the reconciler doesn't run).
+#[test]
+fn deploy_hooks_and_metrics_from_the_cli() {
+    let s = server();
+    s.ok(&["settings", "shop", "--set", "enabled=true"]);
+    let url = s.ok(&["hooks", "shop", "--add", "CMS", "--branches", "feat/*"]);
+    assert!(url.trim().contains("/v1/previews/hooks/rlb_"), "{url}");
+    let hooks = s.json(&["hooks", "shop"]);
+    let hook = &hooks["hooks"][0];
+    assert_eq!((hook["name"].as_str(), hook["branches"][0].as_str()), (Some("CMS"), Some("feat/*")));
+    assert!(!hooks.to_string().contains("rlb_"), "never the secret again");
+    s.ok(&["hooks", "shop", "--rm", hook["id"].as_str().unwrap()]);
+    assert_eq!(s.json(&["hooks", "shop"])["hooks"].as_array().map(Vec::len), Some(0));
+    let created = s.json(&["create", "--project", "shop", "--repo", "acme/web", "--branch", "main"]);
+    let id = created["id"].as_str().unwrap();
+    assert!(s.ok(&["metrics", id]).contains("no service is running"));
+}
