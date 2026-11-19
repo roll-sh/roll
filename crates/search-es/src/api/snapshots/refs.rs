@@ -65,6 +65,12 @@ fn resource(cluster: &crate::Cluster) -> &str {
     cluster.config.resource_id.as_deref().unwrap_or(&cluster.name)
 }
 
+/// Drops what's kept for repository `name` (registered again: its new references, or none,
+/// resolve afresh).
+pub(super) fn forget(cluster: &crate::Cluster, name: &str) {
+    cluster.snapshot_data.refs.lock().remove(name);
+}
+
 /// Drops what's kept for repositories that are no longer registered (`DELETE _snapshot`).
 pub(super) fn forget_unregistered(cluster: &crate::Cluster, st: &ClusterState) {
     cluster.snapshot_data.refs.lock().retain(|n, _| st.metadata.repositories.contains_key(n));

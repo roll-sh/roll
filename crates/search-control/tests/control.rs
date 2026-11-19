@@ -2092,7 +2092,12 @@ fn refused(r: search_control::secret_refs::Refused) -> String {
 #[async_trait::async_trait]
 impl search_control::secret_refs::ResourceSecrets for FakeSecrets {
     async fn may_write(&self, who: &search_control::secret_refs::Who, h: &search_control::secret_refs::Holder, reference: &str) -> Result<String, search_control::secret_refs::Refused> {
-        let principal = who.user.as_ref().map_or_else(|| "operator".to_string(), |u| u.user.clone());
+        // As roll secrets' `caller_of`: the operator, an admin's session or an open daemon is the
+        // operator; a signed-in person is themselves.
+        let principal = match &who.user {
+            Some(u) if !u.admin && !who.operator => u.user.clone(),
+            _ => "operator".to_string(),
+        };
         self.check(h, &principal, reference).map(|_| principal)
     }
 
@@ -2127,21 +2132,33 @@ async fn an_s3_repository_takes_its_keys_from_roll_secrets() {
     let (access, secret) = ("roll://production/AWS_ACCESS_KEY_ID", "roll://production/AWS_SECRET_ACCESS_KEY");
     let fake = Arc::new(FakeSecrets { protected: vec![access.into(), secret.into()], ..Default::default() });
     fake.canvas.lock().unwrap().push(id.clone());
-    fake.revealers.lock().unwrap().push("usr_ada".into());
     fake.set(access, "AKIDONE");
     fake.set(secret, "fake-secret-one");
     e.control.set_secrets(fake.clone());
     let repo = json!({"type": "s3", "settings": {"bucket": "backups", "base_path": "refs", "endpoint": endpoint, "path_style_access": true, "access_key": access, "secret_key": secret}});
     let route = |cluster: &str| format!("/v1/search/clusters/{cluster}/repositories/backup");
 
-    // The cluster's own endpoint (its password: a cluster admin) can't name a reference.
-    let (s, v) = e.es(&u, &p, reqwest::Method::PUT, "/_snapshot/backup", Some(repo.clone())).await;
+    // The cluster's own endpoint (its password: a cluster admin) can't name a reference, not
+    // even saying who wrote it: a client's maker header is dropped, there and through the console.
+    let forged = reqwest::Client::new()
+        .put(format!("{}/_snapshot/backup", e.es))
+        .basic_auth(&u, Some(&p))
+        .header(search_es::secret_refs::MAKER_HEADER, "usr_ada")
+        .json(&repo)
+        .send()
+        .await
+        .unwrap();
+    let (s, v) = (forged.status().as_u16(), forged.json::<Value>().await.unwrap());
     assert_eq!((s, v["error"]["type"].as_str()), (400, Some("settings_exception")), "{v}");
     assert!(v["error"]["reason"].as_str().unwrap().contains("roll's API"), "{v}");
+    let console = json!({"method": "PUT", "path": "/_snapshot/backup", "body": repo.clone(), "headers": [[search_es::secret_refs::MAKER_HEADER, "usr_ada"]]});
+    let (s, v) = e.call_as("ada", reqwest::Method::POST, &format!("/v1/search/clusters/{id}/request"), Some(console)).await;
+    assert!(s == 200 && v["status"] == 400 && v["body"].as_str().unwrap().contains("roll's API"), "{v}");
     // Through roll's API: someone who may not reveal it is refused, and so is a cluster no
     // project holds.
-    let (s, v) = e.call_as("admin", reqwest::Method::PUT, &route(&id), Some(repo.clone())).await;
+    let (s, v) = e.call_as("ada", reqwest::Method::PUT, &route(&id), Some(repo.clone())).await;
     assert_eq!(s, 403, "{v}");
+    fake.revealers.lock().unwrap().push("usr_ada".into());
     let (s, v) = e.call_as("ada", reqwest::Method::PUT, &route(loose["id"].as_str().unwrap()), Some(repo.clone())).await;
     assert!(s == 400 && v.to_string().contains("isn't on any project's canvas"), "{v}");
 

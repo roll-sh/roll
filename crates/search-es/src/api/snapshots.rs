@@ -747,6 +747,7 @@ pub async fn put_repository(ctx: &Ctx<'_>) -> EsResult<Reply> {
             Ok(())
         })
         .await?;
+    refs::forget(ctx.cluster, &name);
     // The snapshots already in the bucket show from now on.
     if let Some((name, repo)) = registered {
         s3::verify(ctx.cluster, &name, &repo).await?;
