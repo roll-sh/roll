@@ -11712,6 +11712,39 @@ hashes are PostgreSQL's.
   +-0.5; the 22 -1.43 / -1.38 / -1.42% (113.4 -> 111.8 G). Golden `a261_int_in` (recorded from
   PostgreSQL 18.6: NULL items, NOT IN, mixed widths, lists past eight items, an IN sub-select put
   in as a list under a parallel scan, with and without a NULL row).
+- **cand/a261-2 (on cand/a261: the docs only): a nested loop makes its rows of the columns a
+  projection above takes, and a hash join's build asks its join input for its narrowed rows**
+  (`NestLoopNode::project_columns`, `picked`: an inner or left join, before its first row, not
+  under EXPLAIN ANALYZE; the row made of the picked columns from the outer and inner rows in
+  place, or, when the join's condition is evaluated over the whole row, the whole row's picked
+  values moved; `build_hashed` asks a `Plan::Join` input for `Narrow`'s columns and skips
+  `Narrow::shrink` when it agrees). Against cand/a261's b1 (3 pairs): q02 -3.0 / -2.9 / -3.0%
+  user instructions (its 158,720 hash rows of nation, supplier and partsupp no longer made of 16
+  columns and shrunk), q08 -1.1 / -1.1 (one pass's count lost), q05 -0.6 / -0.6 / -0.5, q03 +0.4
+  / +0.2 / +0.3, the rest within +-0.5; the 22 -0.09 / -0.05%. q11 doesn't take it: the
+  projection under its aggregation computes `ps_supplycost * ps_availqty::numeric`, so it isn't
+  one of plain columns.
+- Dropped (`~/.cache/a261/patches/dropped-project-narrowed-exprs.patch`): a projection of
+  expressions over some of its input's columns (kernels' only) asking the input for those, the
+  expressions remapped onto the narrowed row (`ProjectNode::planned`), for q11: against b1 (3
+  pairs) q11 +3.0 / +3.4 / +2.9% user instructions though cycles -7.0 / -12.0 / -13.2% and wall
+  0.265 -> 0.205 s (the pick from the pair in `NestLoopNode::step` and its clones cost more
+  instructions than `concat_rows` did, and `project_moving` still evaluates the product), q02
+  -2.9 / -2.8 / -2.9 (as cand/a261-2 alone). Gated on instructions: not kept; the cycles say
+  the narrow rows are cheaper to carry, so a version without the per-column `Cols::col` pick (a
+  copy loop over the outer columns, then the inner's) is the next thing to try.
+- Dropped (`~/.cache/a261/patches/dropped-lazy-read-passed.patch`): a row the batch filter
+  passed walked only up to the last column read after the filter (`LazyBuf::read_passed`), for
+  q13: against cand/a261-2's b2 (1 pair) q13 +1.1%, q20 +1.2, q22 +1.2, q19 +0.9, q14 +0.8, the
+  22 +0.21% (the offset indirection on every lazy read, and no row it could help: below).
+  **Why q13 runs the row path**: its 1.5 million orders nearly all pass `o_comment NOT LIKE
+  '%special%requests%'`, and below stages (the customer hash probe) the batch only filters, so
+  `Pre::worth` counts only the 1.4% it drops as its work and switches the batch off after 2,048
+  rows of each chunk: the row path then walks every row to o_comment and evaluates the LIKE
+  through `Lazy::text` (`from_utf8`). A row whose filter the batch decided counted as its work,
+  with the shorter walk, is built (`b4`, `~/.cache/a261/dev` branch `gate-b4`) and not yet
+  gated; the real fix is the brief's: the probe and the partial count as one batch kernel over
+  the decoded columns.
 
 ## Analytic CPU, round 5 (agent 258)
 

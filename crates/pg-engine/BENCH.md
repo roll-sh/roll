@@ -312,6 +312,33 @@ decided on user instructions.
 foreign cores per pass: b0 1.44 1.37 2.49; b1 1.35 1.03 2.07. Result hashes: PostgreSQL's in
 every pass.
 
+**cand/a261-2 (b2 against b1)** (pair 3's b1 pass lost its counts for q07-q18: those have 2 pairs)
+
+| query | instructions % per pair | cycles % per pair |
+|---|---|---|
+| q02 | -3.0 / -2.9 / -3.0 | -5.9 / +5.5 / -0.2 |
+| q03 | +0.4 / +0.2 / +0.3 | -6.0 / -2.9 / -2.2 |
+| q05 | -0.6 / -0.6 / -0.5 | -14.7 / -6.8 / -9.3 |
+| q08 | -1.1 / -1.1 | -15.6 / -1.8 |
+| q09 | +0.2 / +0.5 | -13.4 / -4.1 |
+| q14 | -0.5 / -0.1 | +1.7 / -0.5 |
+| q19 | +0.0 / +0.3 / +0.9 | +1.6 / +16.1 / -13.1 |
+| all 22 | -0.09 / -0.05 (111.8 -> 111.7 G) | -3.96 / -2.26 |
+
+foreign cores per pass: b1 1.69 1.03 2.07; b2 1.29 0.96 1.45.
+
+**Dropped: a projection of expressions asking its input for their columns (b2p against b1)**
+
+| query | instructions % per pair | cycles % per pair |
+|---|---|---|
+| q02 | -2.9 / -2.8 / -2.9 | -22.9 / -15.0 / -34.3 |
+| q08 | -1.0 / -0.8 / -1.2 | -4.3 / -6.9 / -7.2 |
+| q11 | +3.0 / +3.4 / +2.9 | -7.0 / -12.0 / -13.2 |
+| all 22 | -0.11 / -0.08 / -0.07 | -5.43 / -5.20 / -6.05 |
+
+**Dropped: the shorter walk of a passed row (b3 against b2, 1 pair)**: q13 +1.1, q20 +1.2, q22
++1.2, q19 +0.9, q14 +0.8, the 22 +0.21%.
+
 ## Analytic CPU, round 5 (2026-11-18/19, agent 258)
 
 HANDOFF "Analytic CPU, round 5" has what changed. Lane C (servers in containers on CPUs
