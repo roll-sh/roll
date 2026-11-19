@@ -363,6 +363,12 @@ reviews, threads, web}}` with headers `X-Roll-Event`, `X-Roll-Delivery`, `X-Roll
 are retried with backoff (8 attempts), then the delivery is `failed`. `urls.diff` is
 `GET …/compare/{base}...{head}?format=diff` (text/plain unified diffs).
 
+Signing secrets (review apps' and repo webhooks') are shown once, when made or rotated. With
+`ROLL_SECRET_KEY` on the server they're kept sealed with it, bound to their app or webhook, and
+secrets kept in the clear before the server had the key are sealed when it starts. Without the key
+they're kept in the clear, as before. Once sealed, a server started without the key (or with
+another one) can't sign: its deliveries fail with that error until the key is back.
+
 ## roll's reviewer
 
 The design is in [reviews.md](reviews.md#rolls-reviewer-code-review-crate). Its reviews are
@@ -555,7 +561,8 @@ GET    /v1/code/repos/{owner}/{repo}/statuses/{rev} → {changeset, git_commit, 
   `X-Roll-Delivery`, `X-Roll-Timestamp` and `X-Roll-Signature-256: sha256=<hex HMAC-SHA256(secret,
   "{timestamp}.{body}")>`; anything but a 2xx is retried with backoff (8 attempts), then `failed`.
   The body is `{event, delivery, webhook, repo: {id, full_name, default_branch, visibility},
-  data /* the event's data, as on /events */}`; `ping` is sent on creation and on request.
+  data /* the event's data, as on /events */}`; `ping` is sent on creation and on request. The
+  secret is kept as review apps' are (sealed with `ROLL_SECRET_KEY` when the server has it).
 - **`landed` never drops one.** Landings are read from the store's land log (written in each
   landing's own transaction) after a cursor kept in the control database, not from the in-memory
   broadcast: a burst larger than the broadcast channel, or a daemon that stopped between a landing
