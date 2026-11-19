@@ -254,10 +254,19 @@ pub enum Secrets {
     },
     /// Look for this project's values in files (a directory is walked; `--staged`: what `git
     /// commit` would record, for a pre-commit hook). Says where, never the value; fails if found.
+    /// Also lists credentials roll secrets doesn't hold yet (AWS, GitHub, Stripe… keys; not
+    /// placeholders, not what `.roll/secrets-allow` allows); `--staged` refuses on one.
     Scan {
         paths: Vec<String>,
         #[arg(long, conflicts_with = "paths")]
         staged: bool,
+        /// With `--staged`: commit credentials roll secrets doesn't hold anyway.
+        #[arg(long)]
+        allow_unstored: bool,
+        /// Move one credential roll secrets doesn't hold into the environment as a new key
+        /// (default: a name from its variable or kind) and print what to replace it with.
+        #[arg(long, value_name = "[KEY=]FILE:LINE", conflicts_with_all = ["paths", "staged"])]
+        store: Option<String>,
     },
     /// Pull the environment's folder into Kubernetes with External Secrets Operator: makes a token
     /// for it and prints the token's Secret, a SecretStore and an ExternalSecret (`| kubectl apply -f -`).
@@ -1877,9 +1886,14 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 bail!("{} doesn't match {template}", c.at.env);
             }
         }
-        Secrets::Scan { paths, staged } => {
+        Secrets::Scan { paths, staged, allow_unstored, store } => {
+            if let Some(spec) = store {
+                return store_credential(&c, &env, &spec, json_out).await;
+            }
             let files = if staged { staged_files()? } else { walk(if paths.is_empty() { vec![".".into()] } else { paths })? };
+            let (root, allow) = allow_list();
             let mut by: std::collections::BTreeMap<String, Vec<(String, usize)>> = Default::default();
+            let mut creds: Vec<(String, Credential)> = vec![];
             for (name, text) in &files {
                 for (n, line) in text.lines().enumerate() {
                     let mut found = std::collections::HashSet::new();
@@ -1888,13 +1902,27 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                         by.entry(c).or_default().push((name.clone(), n + 1));
                     }
                 }
+                // Staged names are the repo's already; a walked file's is made relative to its top.
+                let rel = if staged { name.clone() } else { std::fs::canonicalize(name).ok().and_then(|p| p.strip_prefix(&root).ok().map(|p| p.to_string_lossy().into_owned())).unwrap_or_else(|| name.clone()) };
+                if code_review::glob::any(&allow.paths, &rel) {
+                    continue;
+                }
+                for cred in credentials_in(text) {
+                    if !allow.fingerprints.contains(&cred.fingerprint) {
+                        // Asked about with the candidates: one this project holds is a value, not a credential to store.
+                        by.entry(cred.value.clone()).or_default();
+                        creds.push((name.clone(), cred));
+                    }
+                }
             }
             let all: Vec<String> = by.keys().cloned().collect();
             let mut hits: Vec<(String, usize, String, String, String)> = vec![];
+            let mut stored = std::collections::HashSet::new();
             for chunk in all.chunks(20_000) {
                 let v = c.call(Method::POST, &format!("{}/leaks", c.base()), Some(json!({ "candidates": chunk }))).await?;
                 for f in v.as_array().into_iter().flatten() {
                     let Some(cand) = f["index"].as_u64().and_then(|i| chunk.get(i as usize)) else { continue };
+                    stored.insert(cand.clone());
                     for (file, line) in &by[cand] {
                         hits.push((file.clone(), *line, s(&f["key"]), s(&f["environment"]), s(&f["path"])));
                     }
@@ -1902,18 +1930,36 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             }
             hits.sort();
             hits.dedup();
+            creds.retain(|(_, cred)| !stored.contains(&cred.value));
             if json_out {
-                return print(&json!(hits.iter().map(|h| json!({ "file": h.0, "line": h.1, "key": h.2, "environment": h.3, "path": h.4 })).collect::<Vec<_>>()));
-            }
-            for (file, line, key, env, path) in &hits {
-                println!("{file}:{line}  {key} ({env}{})", if path == "/" { String::new() } else { format!(" {path}") });
+                let mut out: Vec<Value> = hits.iter().map(|h| json!({ "file": h.0, "line": h.1, "key": h.2, "environment": h.3, "path": h.4 })).collect();
+                out.extend(creds.iter().map(|(file, cred)| json!({ "file": file, "line": cred.line, "unstored": true, "kind": cred.kind, "fingerprint": cred.fingerprint, "suggested_key": cred.key })));
+                print(&json!(out))?;
+            } else {
+                for (file, line, key, env, path) in &hits {
+                    println!("{file}:{line}  {key} ({env}{})", if path == "/" { String::new() } else { format!(" {path}") });
+                }
+                for (file, cred) in &creds {
+                    println!("{file}:{}  {}, not in roll secrets: roll secrets scan --store {}={file}:{}  [{}]", cred.line, cred.kind, cred.key, cred.line, cred.fingerprint);
+                }
             }
             if !hits.is_empty() {
                 let files = hits.iter().map(|h| &h.0).collect::<std::collections::BTreeSet<_>>().len();
                 let (what, it) = if hits.len() == 1 { ("a value of this project".to_string(), "it") } else { (format!("{} values of this project", hits.len()), "them") };
                 bail!("{what} in {files} {}: move {it} out of the code (roll run puts values in the environment)", if files == 1 { "file" } else { "files" });
             }
-            eprintln!("No values of this project in {} {}", files.len(), if files.len() == 1 { "file" } else { "files" });
+            if staged && !allow_unstored && !creds.is_empty() {
+                let what = if creds.len() == 1 { "a credential".to_string() } else { format!("{} credentials", creds.len()) };
+                bail!("{what} roll secrets doesn't hold in the staged files: store it in roll (--store), allow it in {}, or commit with --allow-unstored", roll_auth::credentials::ALLOW_FILE);
+            }
+            if json_out {
+                return Ok(());
+            }
+            if !creds.is_empty() {
+                eprintln!("{} credential(s) roll secrets doesn't hold; no values of this project in {} {}", creds.len(), files.len(), if files.len() == 1 { "file" } else { "files" });
+            } else {
+                eprintln!("No values of this project in {} {}", files.len(), if files.len() == 1 { "file" } else { "files" });
+            }
         }
         Secrets::Kubernetes { name, namespace, refresh, url, ttl_days } => {
             let name = name.unwrap_or_else(|| c.at.env.to_ascii_lowercase().replace('_', "-"));
@@ -4393,6 +4439,85 @@ fn walk(paths: Vec<String>) -> anyhow::Result<Vec<(String, String)>> {
         }
     }
     Ok(out)
+}
+
+/// A credential in a file roll secrets may not hold (`roll_auth::credentials`), not a placeholder.
+struct Credential {
+    /// 1-based.
+    line: usize,
+    kind: &'static str,
+    value: String,
+    fingerprint: String,
+    /// The key it would be stored as.
+    key: String,
+}
+
+/// The credentials in `text` that aren't placeholders, each with its line.
+fn credentials_in(text: &str) -> Vec<Credential> {
+    let (mut line, mut seen) = (1, 0);
+    let mut out = vec![];
+    for m in roll_auth::credentials::find_all(text) {
+        let value = &text[m.start..m.end];
+        line += text[seen..m.start].matches('\n').count();
+        seen = m.start;
+        if roll_auth::credentials::placeholder(value) {
+            continue;
+        }
+        let line_start = text[..m.start].rfind('\n').map_or(0, |i| i + 1);
+        out.push(Credential { line, kind: m.kind, value: value.to_string(), fingerprint: roll_auth::credentials::fingerprint(value), key: roll_auth::credentials::suggested_key(m.kind, &text[line_start..m.start]) });
+    }
+    out
+}
+
+/// The working tree's top (git's, else this directory) and its `.roll/secrets-allow`.
+fn allow_list() -> (std::path::PathBuf, roll_auth::credentials::Allow) {
+    let top = std::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| std::path::PathBuf::from(String::from_utf8_lossy(&o.stdout).trim()))
+        .unwrap_or_else(|| ".".into());
+    let top = std::fs::canonicalize(&top).unwrap_or(top);
+    let file = top.join(roll_auth::credentials::ALLOW_FILE);
+    let allow = match std::fs::symlink_metadata(&file) {
+        Ok(m) if m.is_file() => std::fs::read_to_string(&file).map(|t| roll_auth::credentials::Allow::parse(&t)).unwrap_or_default(),
+        _ => Default::default(),
+    };
+    (top, allow)
+}
+
+/// `roll secrets scan --store [KEY=]FILE:LINE`: the credential at that line, read from the file
+/// here (never typed or pasted), set as a new key of the environment, and the line to write
+/// instead. Refuses a key the folder already has.
+async fn store_credential(c: &Client<'_>, env: &str, spec: &str, json_out: bool) -> anyhow::Result<()> {
+    let is_key = |k: &str| k.chars().next().is_some_and(|ch| ch.is_ascii_alphabetic() || ch == '_') && k.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_');
+    let (key, at) = match spec.split_once('=') {
+        Some((k, rest)) if is_key(k) => (Some(k.to_string()), rest),
+        _ => (None, spec),
+    };
+    let (file, line) = at.rsplit_once(':').and_then(|(f, l)| Some((f, l.parse::<usize>().ok()?))).context("--store takes [KEY=]FILE:LINE")?;
+    let meta = std::fs::symlink_metadata(file).with_context(|| format!("reading {file}"))?;
+    if !meta.is_file() || meta.len() > 1 << 20 {
+        bail!("{file} isn't a regular file of at most 1 MiB");
+    }
+    let text = std::fs::read_to_string(file).with_context(|| format!("reading {file}"))?;
+    let cred = credentials_in(&text).into_iter().find(|f| f.line == line).with_context(|| format!("{file}:{line} holds no credential to store (placeholders are left out)"))?;
+    let key = key.unwrap_or(cred.key);
+    let list = c.call(Method::GET, &format!("{env}/secrets?{}", c.q()), None).await?;
+    if list.as_array().into_iter().flatten().any(|x| x["key"] == key.as_str()) {
+        bail!("{key} is already set in {}:{}: name another (--store OTHER_KEY={file}:{line})", c.at.env, c.at.path);
+    }
+    let body = json!({ "path": c.at.path, "message": format!("stored {} from {file}:{line}", cred.kind), "ops": [{ "op": "set", "key": key, "value": cred.value }] });
+    let v = c.call(Method::POST, &format!("{env}/changes"), Some(body)).await.map_err(approval_hint)?;
+    let read = roll_auth::credentials::env_read(file, &key);
+    if json_out {
+        println!("{}", serde_json::to_string_pretty(&json!({ "key": key, "environment": c.at.env, "file": file, "line": line, "replacement": read, "change": v }))?);
+        return Ok(());
+    }
+    println!("Stored {} from {file}:{line} as {key} in {}:{}", cred.kind, c.at.env, c.at.path);
+    println!("Replace it with {read} (roll run puts {key} in the environment), and rotate it if it was ever pushed");
+    Ok(())
 }
 
 /// What `git commit` would record: each staged file's staged content.
