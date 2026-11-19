@@ -17,6 +17,7 @@ pub mod fake;
 pub mod fargate;
 pub mod links;
 pub mod netns;
+pub mod scan;
 
 use crate::logs::LogSink;
 use async_trait::async_trait;
@@ -469,11 +470,22 @@ pub trait Builder: Send + Sync {
     async fn load(&self, _archive: &std::path::Path, _tag: &str, _log: &LogSink) -> anyhow::Result<String> {
         anyhow::bail!("this node's builder can't take an uploaded image yet: push it to a registry and deploy it by name")
     }
+    /// The known vulnerabilities in an image this node has (a pinned scanner, offline, with no
+    /// access to anything but the image): None when this builder doesn't scan.
+    async fn scan(&self, _image: &str, _service: &str, _log: &LogSink) -> anyhow::Result<Option<Scanned>> {
+        Ok(None)
+    }
     /// Whether its builds share one BuildKit, cache mounts and all (one node's Docker): then
     /// each service's mounts are namespaced (`apps_build::isolate_caches`).
     fn shares_caches(&self) -> bool {
         false
     }
+}
+
+/// What a scan found, and what scanned it (`trivy 0.76.1`).
+pub struct Scanned {
+    pub scanner: String,
+    pub found: Vec<crate::model::Vulnerability>,
 }
 
 /// A free TCP port on loopback (to publish an instance's port on).

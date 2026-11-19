@@ -329,6 +329,17 @@ async fn a_static_sites_files_answer_without_a_container() {
     let running = apps_control::runtime::docker::docker(&["ps", "-q", "--filter", &format!("label=sh.roll.apps={id}")]).await.unwrap();
     assert!(running.is_empty(), "no container serves it: {running}");
     eprintln!("MEASURED static site from its files: first request {} ms (reads its index), warm median {} ms", first[0].as_millis(), median(warm).as_millis());
+    // Its image was scanned beside the rollout by the pinned Trivy, offline (the database's
+    // volume, `roll-apps-trivy-db`, stays: it's the node's, as BuildKit's cache is).
+    let deps = format!("/v1/apps/services/{id}/environments/production/deploys");
+    let began = Instant::now();
+    let mut scan = Value::Null;
+    while began.elapsed() < Duration::from_secs(300) && scan.is_null() {
+        scan = call(&w.api, "GET", &deps, None, "application/json", None).await.1[0]["vulnerabilities"].clone();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(scan["scanner"] == "trivy 0.76.1" && scan["error"].is_null(), "{scan}");
+    eprintln!("MEASURED image scan beside the rollout: done {} ms after it went live (the first downloads the database)", began.elapsed().as_millis());
     assert_eq!(delete_for_good(&w.api, &id).await.0, StatusCode::NO_CONTENT);
     let _ = apps_control::runtime::docker::docker(&["network", "rm", &apps_control::network_name(&w.project, "production")]).await;
     w.apps.shutdown().await;

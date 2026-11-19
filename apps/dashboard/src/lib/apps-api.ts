@@ -107,6 +107,8 @@ export interface Run {
   rollback_on_crash?: boolean;
   /** Build the same revision again, without the cache, when one of its base images moves. */
   rebuild_on_base?: boolean;
+  /** A deploy whose image has a known vulnerability this severe or worse fails before it goes live (a rollback never does). */
+  block_on?: Exclude<Severity, "unknown">;
   /** A worker follows `group`'s lag on `stream` (a roll stream of its project): one instance per `per_instance` behind. */
   scale?: { stream: string; group: string; per_instance?: number };
   /** Commands on a schedule, each a job of the live deployment at its due times (Heroku Scheduler); at most 20. */
@@ -732,6 +734,35 @@ export interface Deployment {
   pruned_at?: number;
   /** When each step began (`build`, `pre_deploy`, `rollout`, then `live` or `failed`): on a single deployment's GET. */
   steps?: { step: string; at: number }[];
+  /** Its image's last scan for known vulnerabilities, once one ran. */
+  vulnerabilities?: ScanSummary;
+}
+
+export type Severity = "critical" | "high" | "medium" | "low" | "unknown";
+
+/** A deployment's scan: counts by severity (`error`: it didn't finish, and the counts mean nothing). */
+export interface ScanSummary {
+  critical: number;
+  high: number;
+  medium: number;
+  low: number;
+  unknown: number;
+  fixable: number;
+  scanned_at: number;
+  scanner: string;
+  error?: string;
+}
+
+/** One known vulnerability: a package at a version an advisory names. */
+export interface Vulnerability {
+  id: string;
+  severity: Severity;
+  package: string;
+  installed: string;
+  fixed?: string;
+  title?: string;
+  /** Where in the image: the OS's packages or a lockfile. */
+  target: string;
 }
 
 /**
@@ -1034,7 +1065,8 @@ export type NotifyEvent =
   | "volume.backup_failed"
   | "volume.full"
   | "check.down"
-  | "heartbeat.missed";
+  | "heartbeat.missed"
+  | "deploy.vulnerable";
 
 /** An entry of the event log (`GET /v1/apps/events`, a service's `…/activity`). */
 export interface AppEvent {
@@ -1243,6 +1275,7 @@ export const appsApi = {
   deployment: (id: string, e: string, d: string) => call<Deployment>("GET", dep(id, e, d)),
   /** What a repo deployment brings over the live one (for the live one, the one before it). */
   commits: (id: string, e: string, d: string) => call<DeployCommits>("GET", `${dep(id, e, d)}/commits`),
+  vulnerabilities: (id: string, e: string, d: string) => call<{ scan: ScanSummary | null; vulnerabilities: Vulnerability[] }>("GET", `${dep(id, e, d)}/vulnerabilities`),
   buildLog: (id: string, e: string, d: string, q: LogQuery = {}) => call<LogLine[]>("GET", `${dep(id, e, d)}/logs${qs({ tail: q.tail })}`),
   /** `keepVariables`: its image with the variables as they are now (after a rotated secret), not as they were then. */
   rollback: (id: string, e: string, d: string, keepVariables = false) => call<Deployment>("POST", `${dep(id, e, d)}/rollback`, keepVariables ? { keep_variables: true } : undefined),

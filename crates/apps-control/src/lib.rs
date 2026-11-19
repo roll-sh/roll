@@ -55,6 +55,7 @@ pub mod traces;
 pub mod visit;
 pub mod vitals;
 pub mod heartbeats;
+pub mod vulns;
 pub mod checks;
 pub mod forms;
 pub mod track;
@@ -275,6 +276,10 @@ pub struct Apps {
     pub(crate) forms_seen: Mutex<HashMap<String, (i64, u32)>>,
     /// Uptime checks' last results here, on the owner ([`checks`]), by environment and name.
     pub(crate) check_states: Mutex<HashMap<String, checks::Run>>,
+    /// A pass of daily rescans is running, and when live deployments were last looked at for
+    /// one ([`vulns`]).
+    pub(crate) rescanning: std::sync::atomic::AtomicBool,
+    pub(crate) rescan_looked: std::sync::atomic::AtomicI64,
     /// When each environment's log was last looked at for new errors ([`errors`]).
     pub(crate) errors_seen: Mutex<HashMap<String, i64>>,
     /// Manual rollouts waiting for a person, by deployment: what they say, and the wake.
@@ -529,6 +534,8 @@ impl Apps {
             events_seen: Mutex::new(HashMap::new()),
             forms_seen: Mutex::new(HashMap::new()),
             check_states: Mutex::new(HashMap::new()),
+            rescanning: Default::default(),
+            rescan_looked: Default::default(),
             errors_seen: Mutex::new(HashMap::new()),
             rollout_waits: Mutex::new(HashMap::new()),
             calling: Mutex::new(std::collections::HashSet::new()),

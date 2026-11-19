@@ -29,6 +29,7 @@ const EVENTS: { value: NotifyEvent; label: string }[] = [
   { value: "volume.full", label: "Volume 90% full" },
   { value: "check.down", label: "Uptime check down" },
   { value: "heartbeat.missed", label: "Heartbeat missed" },
+  { value: "deploy.vulnerable", label: "New known vulnerabilities" },
 ];
 
 const KINDS: { value: NotifyTarget["kind"]; label: string; placeholder: string }[] = [

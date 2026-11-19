@@ -1528,11 +1528,12 @@ impl tokio::io::AsyncRead for ChildReader {
 /// burst of pushes queues instead of taking every CPU and all memory of the node.
 pub struct DockerBuilder {
     slots: tokio::sync::Semaphore,
+    scanner: super::scan::Scanner,
 }
 
 impl DockerBuilder {
     pub fn new(at_once: usize) -> DockerBuilder {
-        DockerBuilder { slots: tokio::sync::Semaphore::new(at_once) }
+        DockerBuilder { slots: tokio::sync::Semaphore::new(at_once), scanner: Default::default() }
     }
 }
 
@@ -1644,6 +1645,11 @@ impl Builder for DockerBuilder {
         if image.starts_with(super::PREFIX) {
             let _ = docker(&["image", "rm", image]).await;
         }
+    }
+
+    async fn scan(&self, image: &str, service: &str, log: &LogSink) -> anyhow::Result<Option<super::Scanned>> {
+        let found = self.scanner.scan(image, service, |n| log.line(n)).await?;
+        Ok(Some(super::Scanned { scanner: super::scan::SCANNER.to_string(), found }))
     }
 
     async fn load(&self, archive: &std::path::Path, tag: &str, log: &LogSink) -> anyhow::Result<String> {

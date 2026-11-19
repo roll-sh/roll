@@ -173,6 +173,11 @@
           "type": "boolean",
           "description": "Raw TCP, not HTTP."
         },
+        "block_on": {
+          "type": "string",
+          "enum": ["critical", "high", "medium", "low"],
+          "description": "Fail a deploy whose image has a known vulnerability this severe or worse, before it goes live (never a rollback)."
+        },
         "rebuild_on_base": {
           "type": "boolean",
           "description": "Build again (same revision, no cache) when a base image moves."

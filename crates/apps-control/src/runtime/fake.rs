@@ -105,6 +105,9 @@ pub struct Fake {
     accepted: Mutex<HashMap<String, (u64, u32)>>,
     /// Lines a test adds to the fake site's `_redirects` (an origin it serves, say).
     pub site_redirects: Mutex<String>,
+    /// What a scan of any image finds; None: this builder doesn't scan. Each scan is counted.
+    pub scan_findings: Mutex<Option<Vec<crate::model::Vulnerability>>>,
+    pub scans: std::sync::atomic::AtomicUsize,
 }
 
 impl Fake {
@@ -715,6 +718,13 @@ impl Builder for Fake {
         self.loaded.lock().push(manifest);
         log.line(format!("loaded as {tag}"));
         Ok(tag.to_string())
+    }
+
+    async fn scan(&self, image: &str, _service: &str, log: &LogSink) -> anyhow::Result<Option<super::Scanned>> {
+        let Some(found) = self.scan_findings.lock().clone() else { return Ok(None) };
+        self.scans.fetch_add(1, Ordering::SeqCst);
+        log.line(format!("scanned {image}"));
+        Ok(Some(super::Scanned { scanner: "fake".into(), found }))
     }
 
     async fn build(&self, job: &BuildJob, log: &LogSink, cancel: tokio_util::sync::CancellationToken) -> anyhow::Result<String> {

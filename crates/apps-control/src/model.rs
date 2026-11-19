@@ -581,6 +581,94 @@ pub struct Run {
     /// stopped and removed with it. A web service's or a worker's; at most four.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub sidecars: Vec<Sidecar>,
+    /// A deploy whose image has a known vulnerability this severe or worse fails before it goes
+    /// live (Cloud Run's Binary Authorization on Artifact Analysis): the scan then runs before
+    /// the rollout, not beside it. A rollback is never held. Changing it is a deploy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub block_on: Option<Severity>,
+}
+
+/// How severe a known vulnerability is, as the scanner reads it (the distribution's, else NVD's).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Severity {
+    Unknown,
+    Low,
+    Medium,
+    High,
+    Critical,
+}
+
+impl Severity {
+    pub fn parse(s: &str) -> Severity {
+        match s.to_ascii_lowercase().as_str() {
+            "critical" => Severity::Critical,
+            "high" => Severity::High,
+            "medium" => Severity::Medium,
+            "low" => Severity::Low,
+            _ => Severity::Unknown,
+        }
+    }
+}
+
+/// One known vulnerability in a deployment's image: a package at a version an advisory names.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Vulnerability {
+    /// The advisory: `CVE-2024-…`, `GHSA-…`, a distribution's.
+    pub id: String,
+    pub severity: Severity,
+    pub package: String,
+    pub installed: String,
+    /// The first version that fixes it, when there is one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fixed: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Where in the image: the OS's packages (`debian 12.15`) or a lockfile's path.
+    pub target: String,
+}
+
+/// The most of a scan's findings kept (the most severe first); the counts are of all of them.
+pub const MAX_VULNERABILITIES: usize = 2000;
+
+/// A deployment's last scan ([`Deployment::vulnerabilities`]): counts by severity.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ScanSummary {
+    pub critical: u32,
+    pub high: u32,
+    pub medium: u32,
+    pub low: u32,
+    pub unknown: u32,
+    /// How many have a fixed version to upgrade to.
+    pub fixable: u32,
+    pub scanned_at: i64,
+    /// What scanned it (`trivy 0.76.1`).
+    pub scanner: String,
+    /// Why the scan didn't finish (the counts are then zero and mean nothing).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl ScanSummary {
+    pub fn of(found: &[Vulnerability], scanner: &str, at: i64) -> ScanSummary {
+        let mut s = ScanSummary { scanned_at: at, scanner: scanner.to_string(), ..Default::default() };
+        for v in found {
+            *match v.severity {
+                Severity::Critical => &mut s.critical,
+                Severity::High => &mut s.high,
+                Severity::Medium => &mut s.medium,
+                Severity::Low => &mut s.low,
+                Severity::Unknown => &mut s.unknown,
+            } += 1;
+            s.fixable += v.fixed.is_some() as u32;
+        }
+        s
+    }
+
+    /// How many are at `floor` or worse.
+    pub fn at_least(&self, floor: Severity) -> u32 {
+        [(Severity::Critical, self.critical), (Severity::High, self.high), (Severity::Medium, self.medium), (Severity::Low, self.low)].iter().filter(|(s, _)| *s >= floor).map(|(_, n)| n).sum()
+    }
 }
 
 /// A container beside each instance ([`Run::sidecars`]): a proxy, an agent, a collector.
@@ -849,6 +937,7 @@ impl Default for Run {
             rebuild_on_base: false,
             schedules: Vec::new(),
             sidecars: Vec::new(),
+            block_on: None,
         }
     }
 }
@@ -893,6 +982,9 @@ impl Run {
         }
         if !self.sidecars.is_empty() && !matches!(self.kind, RunType::Web | RunType::Worker) {
             return bad("sidecars are a web service's or a worker's");
+        }
+        if self.block_on == Some(Severity::Unknown) {
+            return bad("block_on is critical, high, medium or low");
         }
         if self.sidecars.len() > 4 {
             return bad("sidecars is at most 4");
@@ -1988,6 +2080,9 @@ pub struct Deployment {
     /// When it was pruned (unix ms): out of what's kept, its image gone; history only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pruned_at: Option<i64>,
+    /// Its image's last scan for known vulnerabilities, once one ran (`…/vulnerabilities` lists them).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vulnerabilities: Option<ScanSummary>,
     /// The settings this deployment runs with (frozen when it was made).
     #[serde(skip)]
     pub run: Run,

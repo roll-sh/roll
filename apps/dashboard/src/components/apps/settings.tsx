@@ -77,6 +77,7 @@ interface Form {
   tcp: boolean;
   rollbackOnCrash: boolean;
   rebuildOnBase: boolean;
+  blockOn: "" | "critical" | "high" | "medium" | "low";
   scaleStream: string;
   scaleGroup: string;
   scalePer: string;
@@ -148,6 +149,7 @@ export function formOf(s: Service): Form {
     tcp: !!s.run.tcp,
     rollbackOnCrash: !!s.run.rollback_on_crash,
     rebuildOnBase: !!s.run.rebuild_on_base,
+    blockOn: s.run.block_on ?? "",
     scaleStream: s.run.scale?.stream ?? "",
     scaleGroup: s.run.scale?.group ?? "",
     scalePer: str(s.run.scale?.per_instance),
@@ -235,6 +237,7 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   if (f.tcp !== before.tcp) run.tcp = f.tcp ? true : null;
   if (f.rollbackOnCrash !== before.rollbackOnCrash) run.rollback_on_crash = f.rollbackOnCrash ? true : null;
   if (f.rebuildOnBase !== before.rebuildOnBase) run.rebuild_on_base = f.rebuildOnBase ? true : null;
+  if (f.blockOn !== before.blockOn) run.block_on = f.blockOn || null;
   if (f.restart !== before.restart || f.restartTries !== before.restartTries) {
     run.restart = f.restart === "always" ? null : f.restart;
     run.restart_tries = f.restart === "on_failure" ? num(f.restartTries) : null;
@@ -620,6 +623,13 @@ export function SettingsTab({
                 </select>
               </Field>
             )}
+            <Field label="Known vulnerabilities" hint="its image is scanned each deploy and daily; a hold scans before it goes live">
+              <select value={form.blockOn} onChange={(e) => set("blockOn", e.target.value as Form["blockOn"])} className={`${input} w-full`}>
+                <option value="">Never hold a deploy</option>
+                <option value="critical">Hold a deploy with a critical one</option>
+                <option value="high">Hold one with a high or critical</option>
+              </select>
+            </Field>
             <Field label="Alert: its log says" hint="text in its output (any case); empty: off">
               {t("alertLog", "panic")}
             </Field>
