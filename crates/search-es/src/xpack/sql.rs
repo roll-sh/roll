@@ -349,7 +349,7 @@ impl P<'_> {
             self.expect_kw("AND")?;
             let hi = self.add()?;
             let e = bin(BinOp::And, bin(BinOp::Gte, l.clone(), lo), bin(BinOp::Lte, l, hi));
-            return Ok(if neg { Expr::new(ExprKind::Not(Box::new(e)), e.start, e.end) } else { e });
+            return Ok(if neg { let (start, end) = (e.start, e.end); Expr::new(ExprKind::Not(Box::new(e)), start, end) } else { e });
         }
         if neg {
             return Err(self.err("{'BETWEEN', 'IN', 'LIKE', 'RLIKE'}"));
