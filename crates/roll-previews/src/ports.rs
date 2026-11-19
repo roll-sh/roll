@@ -685,6 +685,12 @@ pub trait Apps: Send + Sync {
     async fn read_files(&self, _preview: &str, _service: &str, _path: &str) -> anyhow::Result<Option<FileStream>> {
         Ok(None)
     }
+    /// One TCP connection to `port` inside the running service (started if it sleeps), from its
+    /// own network namespace, so any port it listens on is reachable, published or not. `None`
+    /// where this backend has none here (roll apps' services: roll apps' own tunnel).
+    async fn forward(&self, _preview: &str, _service: &str, _port: u16) -> anyhow::Result<Option<Box<dyn ShellIo>>> {
+        Ok(None)
+    }
     /// A tar's files written under `dir` in the running service (started if it sleeps). `false`
     /// where this backend has none here.
     async fn write_files(&self, _preview: &str, _service: &str, _dir: &str, _tar: bytes::Bytes) -> anyhow::Result<bool> {

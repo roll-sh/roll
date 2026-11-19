@@ -1338,7 +1338,7 @@ fn tunnel_to(api: &Api, env: &str) -> (String, Vec<(String, String)>) {
 }
 
 /// Every connection to `l` carried through a tunnel of its own (`tunnel_to`).
-async fn tunnels(url: String, headers: Vec<(String, String)>, l: tokio::net::TcpListener) -> anyhow::Result<()> {
+pub(crate) async fn tunnels(url: String, headers: Vec<(String, String)>, l: tokio::net::TcpListener) -> anyhow::Result<()> {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
     loop {
         let (conn, _) = l.accept().await?;

@@ -1118,7 +1118,7 @@ The rebuild is a number on the preview, part of what each service was deployed w
 rebuild that's asked while a deploy is under way still runs once it's done, and converging again
 builds nothing more.
 
-### A shell and files in a preview
+### A shell, files and ports in a preview
 
 Render's shell on a preview environment and `heroku run -a <review app>`: a login shell in a
 preview's running `roll.toml` service, through the Docker Engine API (an exec with a TTY, as
@@ -1134,10 +1134,16 @@ container it was in; a preview that goes ends its shells first.
 `roll preview shell <preview> [--service]` makes this terminal the shell's (raw mode, its size
 followed) until it exits. Files go in and out the same way (`…/files`, `roll preview cp <preview>
 ./seed.sql :/tmp/`, `roll preview cp <preview> :/app/out.csv .`, as `roll apps cp`: `docker cp`
-in the service's container, at most 100 MiB a time, admin, said in the activity). `a_shell_in_a_previews_service_is_said_and_bounded`;
-`files_go_in_and_out_of_a_previews_service_and_are_said`; `scripts/preview-cost.sh` types into a
-live preview's container through `roll preview shell` and reads its `ROLL_PREVIEW` back, and puts a
-file in with `roll preview cp` and brings it back.
+in the service's container, at most 100 MiB a time, admin, said in the activity). A port it
+listens on comes to a laptop the same way (`…/forward`, `roll preview forward <preview> 9229`, as
+`roll apps proxy`): a relay in the service's network namespace (`--network container:`, as
+screenshots join it) reaches `127.0.0.1:<port>` there whatever network the preview has, Roll-only
+egress included, removed with each connection. `a_shell_in_a_previews_service_is_said_and_bounded`;
+`files_go_in_and_out_of_a_previews_service_and_are_said`,
+`a_forwarded_port_carries_bytes_is_said_once_and_is_bounded`; `scripts/preview-cost.sh` types into a
+live preview's container through `roll preview shell` and reads its `ROLL_PREVIEW` back, puts a
+file in with `roll preview cp` and brings it back, and reads the service through `roll preview
+forward` (no relay left after).
 
 ### Feedback on the preview page
 
@@ -1281,6 +1287,7 @@ and admins see every project.
 | `POST /v1/previews/{id}/shell/sessions/{sh}/resize` | `{ cols, rows }` | 204 |
 | `DELETE /v1/previews/{id}/shell/sessions/{sh}` | | 204 |
 | `GET /v1/previews/{id}/files?service=&path=` | | `application/x-tar`: what's at `path` (absolute) in the running `roll.toml` service, started if it sleeps (`docker cp`), `x-roll-service` naming it; 404 before any of the answer when nothing is there; said in the activity ("ana copied /app/out.csv out of web"). Admin, as the shell is (it reads anything the service keeps); a roll apps service's is 409 (roll apps' own `…/files` on `pv-`). Runs on the preview's holder |
+| `GET /v1/previews/{id}/forward?service=&port=` | WebSocket | one TCP connection to `port` in the running `roll.toml` service, any port it listens on (a debugger's, an admin's), published or not: a relay (busybox `nc`, `alpine:3.20`, 32 MiB, no capabilities) in the service's network namespace, removed with the connection; binary both ways, an empty message a half-close, as roll apps' tunnel (`roll preview forward`). The service is held awake while connections are open; at most 32 a preview (409); said in the activity once an hour per person, service and port. Admin; a roll apps service's is 409 (roll apps' own tunnel). Runs on the preview's holder (roll-cluster forwards the upgrade) |
 | `PUT /v1/previews/{id}/files?service=&path=` | a tar, at most 100 MiB | `{ service, path }`: its files written under the directory `path`, said in the activity. Admin |
 | `GET /v1/previews/{id}/requests` | | `{requests: [{at, service, method, path, status, ms}]}`: its latest 200 requests through roll's runtime, newest first (Vercel's request log): never the query, which can carry a token, and the path masked as its logs are (a path is its code's to choose); `ms` until the answer's headers. Kept in memory on the preview's holder (runs there) and gone with its last service; a roll apps instance's requests are roll apps' own. The sheet's Requests tab, errors at a glance; `roll preview requests <id> [--errors]` |
 | `GET /v1/previews/{id}/metrics` | | `{services: [{service, cpu, memory_bytes, memory_mb}]}`: what its running services use right now (Render's and Railway's metrics): cores of CPU and resident memory, against the memory each runs with. It comes from `docker stats` for roll's runtime. For roll apps' instances it's their last finished minute (`…/environments/pv-…/metrics`), with memory per instance. A sleeping service isn't listed. 404 for no such preview. It runs on the preview's holder, and is read again at most every 10 s, however many sheets ask. The sheet shows it on each running service, read every 15 s while it's open |
@@ -1667,7 +1674,7 @@ type Settings = {
   last seen, the service and its title, opening to its newest sample; the last hour, 6 or 24),
   plus a "Previews" overlay on the canvas that draws each
   preview's branches next to their parents.
-- **CLI**: `roll preview ls|show|open|create|rm|sleep|wake|refresh|reset|keep|logs [-f]|activity|visitors|settings|usage|bypass|wait|up|down|masks|errors|metrics|hooks|shell|cp`.
+- **CLI**: `roll preview ls|show|open|create|rm|sleep|wake|refresh|reset|keep|logs [-f]|activity|visitors|settings|usage|bypass|wait|up|down|masks|errors|metrics|hooks|shell|cp|forward`.
   - `roll preview up [--project P] [--repo owner/name] [--name N] [--no-wait] [--timeout S] [--force]`
     previews a checkout's working tree as it is, as `netlify deploy` and `vercel deploy` do from a
     directory: uncommitted and untracked files included, what `.gitignore` leaves out left out.
@@ -2034,9 +2041,10 @@ Every feature in review has its `roll preview` command too: `shell` (#364).
    through `Secrets::resolve_for(ResourceRef::new(kind, id).untrusted(), …)` (never a
    protected environment or a sensitive key), and offer to keep a pasted value in the base
    environment's folder.
-6. **A port of a preview's service on a laptop** (`roll preview forward web 9229`, roll apps'
-   tunnel): a debugger or an admin port the preview doesn't publish, admin, on the preview's
-   holder.
+6. **A port of a preview's service on a laptop, in review** (`feature/roll-previews-forward`, on
+   #372; `roll preview forward`, roll apps' tunnel): any port the service listens on, through a
+   relay in its network namespace (so Roll-only egress's `--internal` networks don't stop it),
+   admin, on the preview's holder.
 7. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
 8. **Watch: pg-control's recovery to a time seconds old** (unowned).

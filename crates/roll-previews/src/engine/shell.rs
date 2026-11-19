@@ -240,3 +240,73 @@ impl Engine {
         Ok(svc)
     }
 }
+
+/// Forwarded connections open at once in one preview.
+pub const MAX_FORWARDS: usize = 32;
+/// How often a forward is said in the activity, per person, service and port (a debugger opens
+/// many connections).
+const FORWARD_SAID_MS: i64 = 3_600_000;
+
+/// A forwarded connection: its stream, its place in the preview's count, and what holds its
+/// service awake, until it's dropped.
+pub struct Forward {
+    pub service: String,
+    pub io: Box<dyn crate::ports::ShellIo>,
+    _held: HeldAwake,
+}
+
+/// Holds a service awake (every [`TICK`]) while it lives, and gives back its forward's place.
+struct HeldAwake {
+    task: tokio::task::JoinHandle<()>,
+    count: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Drop for HeldAwake {
+    fn drop(&mut self) {
+        self.task.abort();
+        self.count.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl Engine {
+    /// `GET …/{id}/forward?service=&port=` (`roll preview forward`): one TCP connection to `port`
+    /// in the service, from inside it, by `who` (said once an hour per person, service and port).
+    pub async fn forward(self: &Arc<Self>, id: &str, service: Option<&str>, port: u16, who: &str) -> Result<Forward> {
+        if port == 0 {
+            return Err(Error::BadRequest("port is 1 to 65535".into()));
+        }
+        let svc = self.files_service(id, service)?;
+        let count = self.forwards.lock().entry(id.to_string()).or_default().clone();
+        if count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= MAX_FORWARDS {
+            count.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            return Err(Error::Conflict(format!("{MAX_FORWARDS} connections are forwarded in this preview: close some first")));
+        }
+        let (this, p, s) = (self.clone(), id.to_string(), svc.clone());
+        let held = HeldAwake {
+            task: tokio::spawn(async move {
+                let mut tick = tokio::time::interval(TICK);
+                loop {
+                    tick.tick().await;
+                    this.apps.hold(&p, &s);
+                }
+            }),
+            count,
+        };
+        let io = match self.apps.forward(id, &svc, port).await {
+            Ok(Some(io)) => io,
+            Ok(None) => return Err(Error::Conflict(format!("{svc} has no forwarding here: a service on roll apps has roll apps' own tunnel, on its pv- environment"))),
+            Err(e) => return Err(Error::Conflict(self.mask_text(id, &format!("{e:#}")).await?)),
+        };
+        let now = self.store.now_ms()?;
+        let key = (id.to_string(), who.to_string(), svc.clone(), port);
+        let say = {
+            let mut said = self.forwards_said.lock();
+            said.retain(|_, at| now - *at < FORWARD_SAID_MS);
+            said.insert(key.clone(), now).is_none()
+        };
+        if say {
+            let _ = self.store.log(id, &format!("{who} forwarded port {port} of {svc}"));
+        }
+        Ok(Forward { service: svc, io, _held: held })
+    }
+}

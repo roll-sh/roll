@@ -56,6 +56,7 @@ pub fn router(engine: Arc<Engine>) -> Router {
                 .route("/v1/previews/{id}/shell/sessions/{sh}/screen", get(shell_screen))
                 .route("/v1/previews/{id}/shell/sessions/{sh}/keys", post(shell_keys))
                 .route("/v1/previews/{id}/shell/sessions/{sh}/resize", post(shell_resize))
+                .route("/v1/previews/{id}/forward", get(forward))
                 .route("/v1/previews/{id}/files", get(read_files).put(write_files).layer(axum::extract::DefaultBodyLimit::max(crate::engine::shell::FILES_MAX + (1 << 20))))
                 .route_layer(axum::middleware::from_fn_with_state(engine.clone(), on_leader))
                 .with_state(engine.clone()),
@@ -688,6 +689,66 @@ async fn shell_resize(AxState(e): S, Path((id, sh)): Path<(String, String)>, b: 
     let s: Size = serde_json::from_slice(&b).map_err(|err| Error::BadRequest(format!("bad body: {err}")))?;
     e.shell_resize(&id, &sh, s.cols, s.rows).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ForwardQuery {
+    service: Option<String>,
+    port: u16,
+}
+
+/// A WebSocket carrying one TCP connection to `port` in the service, from inside it: binary both
+/// ways, an empty message the end of a direction (a half-close), as roll apps' tunnel.
+async fn forward(AxState(e): S, Path(id): Path<String>, Query(q): Query<ForwardQuery>, who: Option<axum::Extension<roll_auth::SignedIn>>, ws: axum::extract::ws::WebSocketUpgrade) -> crate::Result<Response> {
+    check_id(&id)?;
+    let by = who.map_or_else(|| "the operator".to_string(), |w| w.handle.clone());
+    let f = e.forward(&id, q.service.as_deref(), q.port, &by).await?;
+    Ok(ws.on_upgrade(move |socket| bridge(socket, f)))
+}
+
+async fn bridge(socket: axum::extract::ws::WebSocket, f: crate::engine::shell::Forward) {
+    use axum::extract::ws::Message;
+    use futures::{SinkExt, StreamExt};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (mut tx, mut rx) = socket.split();
+    let (mut rd, mut wr) = tokio::io::split(f.io);
+    let mut buf = vec![0u8; 64 << 10];
+    let (mut from_client, mut from_service) = (true, true);
+    while from_client || from_service {
+        tokio::select! {
+            m = rx.next() => match m {
+                Some(Ok(Message::Binary(b))) if b.is_empty() => {
+                    if from_client {
+                        let _ = wr.shutdown().await;
+                        from_client = false;
+                    }
+                }
+                Some(Ok(Message::Binary(_))) if !from_client => {}
+                Some(Ok(Message::Binary(b))) => {
+                    if wr.write_all(&b).await.is_err() || wr.flush().await.is_err() {
+                        break;
+                    }
+                }
+                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                Some(Ok(_)) => {}
+            },
+            n = rd.read(&mut buf), if from_service => match n {
+                Ok(0) | Err(_) => {
+                    if tx.send(Message::Binary(Bytes::new())).await.is_err() {
+                        break;
+                    }
+                    from_service = false;
+                }
+                Ok(n) => {
+                    if tx.send(Message::Binary(Bytes::copy_from_slice(&buf[..n]))).await.is_err() {
+                        break;
+                    }
+                }
+            },
+        }
+    }
+    let _ = tx.send(Message::Close(None)).await;
 }
 
 #[derive(serde::Deserialize)]

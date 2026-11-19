@@ -360,6 +360,15 @@ impl Apps for FakeApps {
         self.files.lock().insert(dir.to_string(), tar.to_vec());
         Ok(true)
     }
+    /// A forwarded port that echoes what it's sent.
+    async fn forward(&self, _: &str, _: &str, _: u16) -> anyhow::Result<Option<Box<dyn roll_previews::ports::ShellIo>>> {
+        let (ours, theirs) = tokio::io::duplex(1 << 16);
+        tokio::spawn(async move {
+            let (mut r, mut w) = tokio::io::split(theirs);
+            let _ = tokio::io::copy(&mut r, &mut w).await;
+        });
+        Ok(Some(Box::new(ours)))
+    }
     /// A terminal that echoes what it's sent.
     async fn shell(&self, _: &str, service: &str, _: u16, _: u16) -> anyhow::Result<Option<roll_previews::ports::Shell>> {
         let (ours, theirs) = tokio::io::duplex(1 << 16);

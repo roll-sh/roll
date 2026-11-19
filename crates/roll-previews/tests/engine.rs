@@ -468,6 +468,33 @@ async fn a_shell_in_a_previews_service_is_said_and_bounded() {
     e.engine.open_shell(&p.id, None, "ana", 80, 24).await.expect("its place is free again");
 }
 
+/// A port of a preview's service on a laptop (`roll preview forward`): bytes go both ways, port 0
+/// is refused, a debugger's many connections are said once, and a preview holds a bounded number.
+#[tokio::test]
+async fn a_forwarded_port_carries_bytes_is_said_once_and_is_bounded() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let e = env(json!({ "enabled": true }));
+    e.code.open(change("chg_fw", 16));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_fw").unwrap().unwrap();
+    let mut f = e.engine.forward(&p.id, None, 9229, "ana").await.unwrap();
+    f.io.write_all(b"ping").await.unwrap();
+    let mut got = [0u8; 4];
+    f.io.read_exact(&mut got).await.unwrap();
+    assert_eq!(&got, b"ping");
+    let again = e.engine.forward(&p.id, None, 9229, "ana").await.unwrap();
+    let said = e.engine.store.activity(&p.id).unwrap().into_iter().filter(|a| a.message == format!("ana forwarded port 9229 of {}", f.service)).count();
+    assert_eq!(said, 1, "a debugger's connections are said once");
+    assert!(matches!(e.engine.forward(&p.id, None, 0, "ana").await, Err(roll_previews::Error::BadRequest(_))));
+    let mut open = vec![f, again];
+    while open.len() < roll_previews::engine::shell::MAX_FORWARDS {
+        open.push(e.engine.forward(&p.id, None, 5432, "ana").await.unwrap());
+    }
+    assert!(matches!(e.engine.forward(&p.id, None, 5432, "ana").await, Err(roll_previews::Error::Conflict(_))), "a preview holds a bounded number");
+    open.pop();
+    e.engine.forward(&p.id, None, 5432, "ana").await.expect("a closed one gives its place back");
+}
+
 /// Files in and out of a preview's service (`roll preview cp`): what's written comes back, nothing
 /// at a path is a 404 before any of the answer, a relative path is refused, and the activity says
 /// who copied what.

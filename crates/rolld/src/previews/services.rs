@@ -731,6 +731,14 @@ impl roll_previews::ports::Apps for Services {
         self.runtime.hold(preview, service);
     }
 
+    /// A `roll.toml` service's port (roll apps' services have roll apps' own tunnel, on `pv-…`).
+    async fn forward(&self, preview: &str, service: &str, port: u16) -> anyhow::Result<Option<Box<dyn roll_previews::ports::ShellIo>>> {
+        if self.apps.find(preview, service).await?.is_some() {
+            return Ok(None);
+        }
+        self.runtime.forward(preview, service, port).await
+    }
+
     /// A `roll.toml` service's files (roll apps' services have their own, on `pv-…`).
     async fn read_files(&self, preview: &str, service: &str, path: &str) -> anyhow::Result<Option<roll_previews::ports::FileStream>> {
         if self.apps.find(preview, service).await?.is_some() {
