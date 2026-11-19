@@ -68,8 +68,35 @@ async fn gate(axum::extract::State(tokens): axum::extract::State<Tokens>, mut re
     next.run(req).await
 }
 
-#[tokio::test]
-async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_references() {
+/// The digest route's requests, and whether it fails (503) for now: what `roll run --watch` polls.
+#[derive(Default)]
+struct Polls {
+    failing: std::sync::atomic::AtomicBool,
+    asked: std::sync::atomic::AtomicUsize,
+}
+
+async fn flaky_digest(axum::extract::State(p): axum::extract::State<Arc<Polls>>, req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    use std::sync::atomic::Ordering;
+    if req.uri().path().ends_with("/digest") {
+        p.asked.fetch_add(1, Ordering::SeqCst);
+        if p.failing.load(Ordering::SeqCst) {
+            return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
+    }
+    next.run(req).await
+}
+
+/// The workspace (with a project `shop`) and secrets routers on a loopback port, as `roll` reaches
+/// rolld.
+struct Server {
+    api: String,
+    projects: Arc<roll_workspace::Workspace>,
+    polls: Arc<Polls>,
+    dir: tempfile::TempDir,
+}
+
+async fn serve() -> Server {
     let dir = tempfile::tempdir().unwrap();
     let ws_db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("workspace.db")), "workspace").unwrap();
     let ws = Arc::new(roll_workspace::Workspace::new(ws_db).unwrap());
@@ -98,11 +125,21 @@ async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_referen
     let secrets = Arc::new(roll_secrets::Secrets::new(db, ws.clone(), opts).unwrap());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let api = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
-    let projects = ws.clone();
     let tokens = Tokens::default();
+    let polls = Arc::new(Polls::default());
     let access = axum::Router::new().route("/v1/access/tokens", axum::routing::post(create_token)).with_state(tokens.clone());
-    let router = roll_workspace::router(ws).merge(roll_secrets::router(secrets)).merge(access).layer(axum::middleware::from_fn_with_state(tokens, gate));
+    let router = roll_workspace::router(ws.clone())
+        .merge(roll_secrets::router(secrets))
+        .merge(access)
+        .layer(axum::middleware::from_fn_with_state(tokens, gate))
+        .layer(axum::middleware::from_fn_with_state(polls.clone(), flaky_digest));
     tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    Server { api, projects: ws, polls, dir }
+}
+
+#[tokio::test]
+async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_references() {
+    let Server { api, projects, dir, .. } = serve().await;
 
     let at = ["secrets", "-p", "shop", "-e", "production"];
     ok(&api, &[], &[&at[..], &["set", "HOST=db.internal", "PORT=5432"]].concat(), None).await;
@@ -250,4 +287,63 @@ async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_referen
     ok(&api, &[], &["secrets", "-p", "copy", "restore", file, "--key", key], None).await;
     let restored = ok(&api, &[], &["run", "-p", "copy", "-e", "production", "--allow-unresolved", "--no-mask", "--", "sh", "-c", "echo $HOST $PASSWORD"], None).await;
     assert_eq!(restored.trim(), "db.internal s3cret");
+}
+
+/// `roll run --watch`: a write restarts the command with the new value, a poll that fails waits its
+/// interval and keeps the command running (never spins), and SIGTERM to roll reaches the command,
+/// roll exiting as it did.
+#[cfg(unix)]
+#[tokio::test]
+async fn roll_run_watch_restarts_on_a_write_waits_out_failures_and_passes_sigterm_on() {
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+    let s = serve().await;
+    let at = ["secrets", "-p", "shop", "-e", "production"];
+    ok(&s.api, &[], &[&at[..], &["set", "GREETING=one"]].concat(), None).await;
+    let seen_at = s.dir.path().join("seen");
+    let seen = || std::fs::read_to_string(&seen_at).unwrap_or_default();
+    let wait_for = |want: &'static str| {
+        let seen = &seen;
+        async move {
+            let started = std::time::Instant::now();
+            while seen() != want {
+                assert!(started.elapsed() < Duration::from_secs(20), "waited for {want:?}, the command wrote {:?}", seen());
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+    };
+    // Each start writes its value; SIGTERM writes `term` and exits 7.
+    let script = r#"trap 'echo term >> "$SEEN"; exit 7' TERM; echo "$GREETING" >> "$SEEN"; while :; do sleep 0.05; done"#;
+    // Every poll fails from the start: the first read (values, not the digest) still starts it.
+    s.polls.failing.store(true, Ordering::SeqCst);
+    let mut roll = tokio::process::Command::new(env!("CARGO_BIN_EXE_roll"))
+        .args(["run", "-p", "shop", "-e", "production", "--watch", "--interval", "1", "--no-mask", "--", "sh", "-c", script])
+        .env("ROLL_API_URL", &s.api)
+        .env("SEEN", &seen_at)
+        .env_remove("ROLL_TOKEN")
+        .env_remove("ROLL_PROJECT")
+        .env_remove("ROLL_ENV")
+        .env_remove("ROLL_ADMIN_TOKEN")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    wait_for("one\n").await;
+    let before = s.polls.asked.load(Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let polls = s.polls.asked.load(Ordering::SeqCst) - before;
+    assert!((2..=6).contains(&polls), "{polls} failing polls in 3 s at a 1 s interval");
+    assert_eq!(seen(), "one\n", "a failing poll keeps the running command");
+
+    s.polls.failing.store(false, Ordering::SeqCst);
+    ok(&s.api, &[], &[&at[..], &["set", "GREETING=two"]].concat(), None).await;
+    wait_for("one\nterm\ntwo\n").await;
+
+    // SAFETY: kill(2) on the roll process this test started.
+    unsafe { libc::kill(roll.id().unwrap() as libc::pid_t, libc::SIGTERM) };
+    let status = tokio::time::timeout(Duration::from_secs(10), roll.wait()).await.expect("roll exits with its command").unwrap();
+    assert_eq!(status.code(), Some(7));
+    assert_eq!(seen(), "one\nterm\ntwo\nterm\n");
 }

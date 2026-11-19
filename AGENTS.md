@@ -387,9 +387,13 @@ The product should feel alive: dots react to the cursor and the marks "think". E
   - Read-then-writes are one `code_sql` write (SQLite or the system database's `secrets` schema,
     shared by every node); background work claims each item in a write before acting on it.
   - Tests: flows in `crates/roll-secrets/tests/api.rs` (also on Postgres with
-    `ROLL_CODE_TEST_DATABASE`), two nodes in `tests/nodes.rs`, the CLI in
-    `crates/roll-cli/tests/secrets.rs`, dashboard logic in `apps/dashboard/src/lib/secrets-*.test.ts`.
-    No test calls a real product or platform: use fake providers.
+    `ROLL_CODE_TEST_DATABASE`), two nodes in `tests/nodes.rs`, the CLI (`roll run --watch` too) in
+    `crates/roll-cli/tests/secrets.rs`, rolld's link providers against its own products in
+    `crates/rolld/tests/secrets.rs`, dashboard logic in `apps/dashboard/src/lib/secrets-*.test.ts`.
+    No test calls an outside product or platform: use fake providers.
+  - After touching anything secrets-related, run `pnpm test:secrets` (it skips itself when nothing
+    relevant changed). `--docker` adds roll-secrets on Postgres and the Postgres link (its computes
+    run in Docker): run it after touching SQL, `code-sql` or the Postgres provider.
 - **Agents (roll code agents: the agent harness on a canvas):**
   - The design is in `docs/code/agents.md`. It works like T3 Code (MIT; behavioural reference
     for threads, runs, the execution-node tree, requests, checkpoints, forks, handoffs and
