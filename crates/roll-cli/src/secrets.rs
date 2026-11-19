@@ -1876,7 +1876,10 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 let path = r["path"].as_str().unwrap_or("/");
                 let at = if path == "/" { String::new() } else { format!(" {path}") };
                 let when = match (r["rotate_days"].as_u64(), r["next_due"].as_i64()) {
-                    (Some(d), Some(n)) => format!("every {d} days, next {}", day(n)),
+                    (Some(d), Some(n)) => match r["rotate_window"].as_str() {
+                        Some(w) => format!("every {d} days in {w} UTC, next {}", day(n)),
+                        None => format!("every {d} days, next {}", day(n)),
+                    },
                     _ => "by hand".into(),
                 };
                 println!("{:<12} {}{at}  {} ({})  {when}", r["environment"].as_str().unwrap_or(""), keys.join(","), r["name"].as_str().unwrap_or(""), r["kind"].as_str().unwrap_or(""));

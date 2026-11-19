@@ -66,6 +66,7 @@ pub mod sinks;
 pub mod suggestions;
 mod sweep;
 pub mod totp;
+pub mod window;
 pub mod syncs;
 mod caller;
 pub mod consumers;
