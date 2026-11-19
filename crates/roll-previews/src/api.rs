@@ -809,7 +809,13 @@ async fn logs(AxState(e): S, Path(id): Path<String>, Query(q): Query<LogsQuery>)
     use axum::response::sse::{Event, KeepAlive, Sse};
     let (service, rx) = e.follow(&id, q.service.as_deref(), lines).await?;
     let first = futures::stream::once(async move { Ok::<_, std::convert::Infallible>(Event::default().event("service").data(service)) });
-    let rest = futures::stream::unfold(rx, |mut rx| async move { rx.recv().await.map(|l| (Ok(Event::default().data(l.replace(['\r', '\n'], ""))), rx)) });
+    // A stderr line is `event: stderr`; a stdout one the default event, as before.
+    let rest = futures::stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|(stderr, l)| {
+            let ev = Event::default().data(l.replace(['\r', '\n'], ""));
+            (Ok(if stderr { ev.event("stderr") } else { ev }), rx)
+        })
+    });
     let mut r = Sse::new(futures::StreamExt::chain(first, rest)).keep_alive(KeepAlive::default()).into_response();
     // Proxies pass it on as it comes.
     r.headers_mut().insert("x-accel-buffering", axum::http::HeaderValue::from_static("no"));
