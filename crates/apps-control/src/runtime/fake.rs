@@ -279,7 +279,7 @@ async fn serve(spec: InstanceSpec, listener: tokio::net::TcpListener, log: LogSi
                 return (axum::http::StatusCode::NOT_FOUND, axum::Json(serde_json::json!({ "path": req.uri().path() }))).into_response();
             }
             if req.uri().path() == "/page" {
-                return ([(axum::http::header::CONTENT_TYPE, "text/html")], format!("<html><body><h1>{dep}</h1></body></html>")).into_response();
+                return ([(axum::http::header::CONTENT_TYPE, "text/html")], format!("<html><head><title>{dep}</title></head><body><h1>{dep}</h1></body></html>")).into_response();
             }
             // As a gRPC server answers: data, then its status in a trailer.
             if req.uri().path() == "/trailers" {

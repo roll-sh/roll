@@ -1572,6 +1572,9 @@ pub struct Environment {
     /// Where a share of its requests is copied, their answers dropped (`mirror`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mirror: Option<Split>,
+    /// HTML of its own in every page (Netlify's snippet injection).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub snippets: Vec<Snippet>,
     /// Its deploy freeze, and whether it's on now ([`crate::freeze`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub freeze: Option<crate::freeze::Freeze>,
@@ -1845,6 +1848,33 @@ pub struct Route {
     pub path: String,
     /// The other service, by its name in the project.
     pub service: String,
+}
+
+/// HTML of an environment's own in every page the proxy answers (Netlify's snippet injection):
+/// an analytics or chat tag without a code change. Only the owner's text, in a 200 HTML page.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Snippet {
+    pub at: SnippetAt,
+    pub html: String,
+}
+
+/// Where a snippet goes in each page: before `</head>`, or before `</body>`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SnippetAt {
+    Head,
+    BodyEnd,
+}
+
+impl Snippet {
+    /// At most five, each 1 byte to 16 KiB of text.
+    pub fn check(all: &[Snippet]) -> Result<()> {
+        if all.len() > 5 || all.iter().any(|s| s.html.trim().is_empty() || s.html.len() > 16 << 10 || s.html.contains('\0')) {
+            return Err(Error::BadRequest("snippets are at most 5 of {at: head | body_end, html: 1 byte to 16 KiB}".into()));
+        }
+        Ok(())
+    }
 }
 
 /// An environment's split test (Netlify's split testing): `percent` of its visitors, each kept

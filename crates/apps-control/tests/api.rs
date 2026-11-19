@@ -441,6 +441,31 @@ async fn traces_sent_by_instances_read_back() {
 /// Web Vitals: turned on, an environment's pages carry roll's tag and its script is served from
 /// its own host; the browser's beacons are kept checked (a route, bounded numbers) and read back
 /// as p75s rated by web.dev's thresholds, overall and by route; turned off, nothing is tagged.
+/// Snippets (Netlify's snippet injection): an environment's own HTML before `</head>` and
+/// before `</body>` of every page, never in what isn't one; bounded.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_environments_snippets_go_in_every_page() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "site", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let h = host(&svc["environments"][0]["url"]);
+    let env = format!("/v1/apps/services/{id}/environments/production");
+    let get = |path: &str, accept: &str| {
+        let r = Request::builder().uri(path).header("host", h.clone()).header("accept", accept).body(Body::empty()).unwrap();
+        let public = w.public.clone();
+        async move { String::from_utf8(public.oneshot(r).await.unwrap().into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap() }
+    };
+    let (st, e) = call(&w.api, "PUT", &env, Some(json!({"snippets": [{"at": "head", "html": "<meta name=x>"}, {"at": "body_end", "html": "<script>chat()</script>"}]}))).await;
+    assert_eq!((st, e["snippets"].as_array().map(Vec::len)), (StatusCode::OK, Some(2)), "{e}");
+    let page = get("/page", "text/html").await;
+    assert!(page.contains("<meta name=x></head>") && page.contains("<script>chat()</script></body>"), "{page}");
+    assert!(!get("/api", "application/json").await.contains("chat()"), "a page only");
+    let six = (0..6).map(|_| json!({"at": "head", "html": "x"})).collect::<Vec<_>>();
+    assert_eq!(call(&w.api, "PUT", &env, Some(json!({"snippets": six}))).await.0, StatusCode::BAD_REQUEST);
+    call(&w.api, "PUT", &env, Some(json!({"snippets": null}))).await;
+    assert!(!get("/page", "text/html").await.contains("chat()"), "gone");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn web_vitals_from_visitors_read_back_as_p75s() {
     let w = world().await;
