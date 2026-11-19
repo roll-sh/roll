@@ -541,6 +541,8 @@ impl Engine {
             let fingerprint = config_fingerprint(&vars, (access_token.is_some() || signed_in) && on_apps, bypass.as_deref().filter(|_| on_apps), trusted, feedback && on_apps)
                 + if signed_in && on_apps { "s" } else { "" }
                 + &if s.egress_for(r.trusted) == crate::settings::EgressRule::Roll { format!("e{}", s.egress_hosts.join(",")) } else { String::new() }
+                // Traces: a runtime service takes the OpenTelemetry variables when it starts.
+                + if s.traces && !on_apps { "o" } else { "" }
                 + &rebuilt;
             let was = self.store.service_config(&r.id, &spec.name)?;
             let config_moved = was.as_deref() != Some(fingerprint.as_str());
@@ -1190,8 +1192,9 @@ impl Engine {
             }
             self.store.set_ran_head(&r.id, None)?;
         }
-        // Its shells end with it.
+        // Its shells end with it, and its traces go.
         self.close_shells_of(&r.id);
+        self.forget_traces(&r.id);
         for p in self.store.pinned(&r.id)? {
             let name = format!("{}@{}", p.service, p.revision);
             self.apps.remove(&r.id, &name).await.map_err(|e| anyhow::anyhow!("removing {name}: {e:#}"))?;

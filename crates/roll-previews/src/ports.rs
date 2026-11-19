@@ -492,6 +492,12 @@ pub struct BudgetAlert {
 /// What's at a path in a service, as a tar, as it's read.
 pub type FileStream = Box<dyn tokio::io::AsyncRead + Send + Unpin>;
 
+/// What reads an OpenTelemetry export request (OTLP/HTTP: protobuf or JSON, gzip or not) into
+/// spans (rolld: roll apps' reader). An error is the request's fault.
+pub trait SpanReader: Send + Sync {
+    fn spans(&self, body: &[u8], json: bool, gzip: bool) -> anyhow::Result<Vec<crate::engine::traces::Span>>;
+}
+
 /// A terminal's stream, both ways (a hijacked Docker exec).
 pub trait ShellIo: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
 impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> ShellIo for T {}

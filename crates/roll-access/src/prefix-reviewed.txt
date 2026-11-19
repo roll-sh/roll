@@ -264,3 +264,5 @@ GET /v1/secrets/projects/{project}/suggestions
 POST /v1/secrets/projects/{project}/syncs/preview
 DELETE /v1/secrets/projects/{project}/syncs/{id}
 POST /v1/secrets/projects/{project}/syncs/{id}/run
+GET /v1/previews/{id}/traces
+GET /v1/previews/{id}/traces/{trace}

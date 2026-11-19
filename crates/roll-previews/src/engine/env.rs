@@ -81,6 +81,15 @@ impl EnvSource for Engine {
         if s.mail == crate::settings::MailRule::Catch {
             self.catch_mail(&r.id, &mut env)?;
         }
+        if s.traces
+            && let Some(vars) = self.otlp_vars(&r.id, service)?
+        {
+            // Its token is a credential (its traces' only lock): out of what the preview shows.
+            self.add_masks(preview, vec![self.store.trace_token(&r.id)?]);
+            for (k, v) in vars {
+                set(&mut env, k, v);
+            }
+        }
         set(&mut env, "ROLL_PREVIEW", r.id.clone());
         set(&mut env, "ROLL_PREVIEW_URL", url);
         for other in &services {

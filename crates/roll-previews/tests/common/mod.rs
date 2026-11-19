@@ -599,7 +599,7 @@ pub fn env(settings: serde_json::Value) -> Env {
     let apps = Arc::new(FakeApps::default());
     let secrets = Arc::new(FakeSecrets::default());
     let engine = Engine::new(
-        Config { domain: "preview.test".into(), ..Config::default() },
+        Config { domain: "preview.test".into(), otlp: Some("127.0.0.1:7070".into()), ..Config::default() },
         store,
         ws.clone(),
         code.clone(),

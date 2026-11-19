@@ -611,6 +611,18 @@ impl roll_previews::ports::Drains for AppsDrains {
     }
 }
 
+/// Previews' OTLP intake reads spans with roll apps' reader.
+pub struct AppsSpans;
+
+impl roll_previews::ports::SpanReader for AppsSpans {
+    fn spans(&self, body: &[u8], json: bool, gzip: bool) -> anyhow::Result<Vec<roll_previews::engine::traces::Span>> {
+        Ok(apps_control::otlp::spans_of_request(body, json, gzip)?
+            .into_iter()
+            .map(|s| roll_previews::engine::traces::Span { trace: s.trace, span: s.span, parent: s.parent, name: s.name, service: s.service, start: s.start, end: s.end, error: s.error, attrs: s.attrs })
+            .collect())
+    }
+}
+
 pub struct AppsReach(pub Arc<apps_control::Apps>);
 
 #[async_trait]
