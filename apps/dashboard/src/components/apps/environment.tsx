@@ -72,6 +72,7 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
     setPromoting({ from, deployment: source.id, revision: source.revision, missing });
   };
   const [link, setLink] = useState<string | null>(null);
+  const [password, setPassword] = useState("");
   const [hook, setHook] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [notice, setNotice] = useState(env.maintenance?.message ?? "");
@@ -410,11 +411,13 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
         <div className="space-y-3 px-5 py-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
-              <p className="text-[13px] font-medium">{env.signed_in ? "Signed in to roll" : env.private ? "Private" : "Public"}</p>
+              <p className="text-[13px] font-medium">{env.signed_in ? "Signed in to roll" : env.password ? "Password" : env.private ? "Private" : "Public"}</p>
               <p className="mt-1 text-[12px] text-muted">
                 {env.signed_in
                   ? "Only people signed in to roll who can open this project get in: anyone else is sent to sign in first, before anything wakes."
-                  : env.private
+                  : env.password
+                    ? "Visitors type its password on roll's page (a session for seven days); nothing wakes before they do."
+                    : env.private
                     ? "Only visitors with its link get in; everyone else gets a 401 before anything wakes."
                     : "Anyone with its URL can open it."}
               </p>
@@ -439,6 +442,24 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
               </button>
             </div>
           </div>
+          {!env.signed_in && (
+            <form
+              className="flex flex-wrap items-center gap-2"
+              onSubmit={(e) => {
+                e.preventDefault();
+                void runner.run("access", () => appsApi.putEnvironment(service.id, env.name, { access: { password } })).then((r) => {
+                  if (!r) return;
+                  setPassword("");
+                  setLink(null);
+                });
+              }}
+            >
+              <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder={env.password ? "a new password (ends every session)" : "a password visitors type (8 or more)"} aria-label="Password" autoComplete="new-password" className={`${input} min-w-48 flex-1 text-[12px]`} />
+              <button type="submit" className={btn} disabled={busy || password.length < 8}>
+                {env.password ? "Change password" : "Use a password"}
+              </button>
+            </form>
+          )}
           {link && (
             <div className="rise rounded-lg border border-line bg-bg px-3 py-2">
               <p className="text-[11px] text-subtle">The private link, shown once (only its hash is kept):</p>
@@ -777,28 +798,47 @@ function Backups({ service, env, runner }: { service: Service; env: Environment;
   const [list, setList] = useState<Backup[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [restoring, setRestoring] = useState<Backup | null>(null);
+  // Whose backups are listed: this environment's, or another's to seed it from.
+  const [of, setOf] = useState(env.name);
   const busy = runner.busy !== null;
   const load = useCallback(() => {
-    appsApi.backups(service.id, env.name).then(
+    appsApi.backups(service.id, of).then(
       (l) => {
         setList(l);
         setError(null);
       },
       (e: unknown) => setError(e instanceof Error ? e.message : String(e)),
     );
-  }, [service.id, env.name]);
+  }, [service.id, of]);
+  const schedule = service.run.volume?.backups ?? { every_hours: 24, keep: 7 };
+  const others = service.environments.filter((e) => e.name !== env.name);
   useEffect(load, [load]);
   return (
     <div className="space-y-3 px-5 py-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <p className="text-[13px] font-medium">Volume backups</p>
-          <p className="mt-1 text-[12px] text-muted">{service.run.volume!.mount} is copied to object storage once a day; the newest seven are kept.</p>
+          <p className="mt-1 text-[12px] text-muted">
+            {service.run.volume!.mount} is copied to object storage{" "}
+            {schedule.every_hours === 0 ? "when asked" : schedule.every_hours === 24 ? "once a day" : `every ${schedule.every_hours} hours`}; the newest {schedule.keep} are kept.
+          </p>
           {env.volume_used && <VolumeMeter used={env.volume_used} sizeGb={service.run.volume!.size_gb} />}
         </div>
-        <button className={btn} disabled={busy} onClick={() => runner.run("backup", () => appsApi.backUp(service.id, env.name)).then(load)}>
-          {runner.busy === "backup" ? <span className="shimmer">Backing up…</span> : "Back up now"}
-        </button>
+        <span className="flex flex-wrap items-center gap-2">
+          {others.length > 0 && (
+            <select value={of} onChange={(e) => setOf(e.target.value)} className={`${input} font-mono text-[12px]`} aria-label="Whose backups">
+              <option value={env.name}>{env.name}'s backups</option>
+              {others.map((e) => (
+                <option key={e.name} value={e.name}>
+                  {e.name}'s backups
+                </option>
+              ))}
+            </select>
+          )}
+          <button className={btn} disabled={busy} onClick={() => runner.run("backup", () => appsApi.backUp(service.id, env.name)).then(load)}>
+            {runner.busy === "backup" ? <span className="shimmer">Backing up…</span> : "Back up now"}
+          </button>
+        </span>
       </div>
       {error ? (
         <p className="text-[12px] text-muted">{error}</p>
@@ -824,12 +864,12 @@ function Backups({ service, env, runner }: { service: Service; env: Environment;
           busy={runner.busy === "restore"}
           onCancel={() => setRestoring(null)}
           onConfirm={() =>
-            runner.run("restore", () => appsApi.restore(service.id, env.name, restoring.id)).then((ok) => {
+            runner.run("restore", () => appsApi.restore(service.id, env.name, restoring.id, of === env.name ? undefined : of)).then((ok) => {
               if (ok) setRestoring(null);
             })
           }
         >
-          {env.name}'s volume becomes what it was on {new Date(restoring.at).toLocaleString()}: what's on it now is replaced. It sleeps meanwhile and wakes on the next request. Type <span className="font-mono text-fg">{env.name}</span> to restore.
+          {env.name}'s volume becomes {of === env.name ? "what it was" : `${of}'s as it was`} on {new Date(restoring.at).toLocaleString()}: what's on it now is replaced (backed up first). It sleeps meanwhile and wakes on the next request. Type <span className="font-mono text-fg">{env.name}</span> to restore.
         </Confirm>
       )}
     </div>

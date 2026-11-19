@@ -53,6 +53,9 @@ pub enum Error {
     Conflict(String),
     #[error("{0}")]
     TooMany(String),
+    /// Sudo mode: the session must prove who it is again first (403 `reauth_required`).
+    #[error("{0}")]
+    ReauthRequired(String),
     /// An OAuth error (RFC 6749 §5.2): its code and description.
     #[error("{1}")]
     OAuth(&'static str, String),
@@ -71,6 +74,7 @@ impl IntoResponse for Error {
             Error::NotFound(_) => (StatusCode::NOT_FOUND, "not_found"),
             Error::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
             Error::TooMany(_) => (StatusCode::TOO_MANY_REQUESTS, "too_many"),
+            Error::ReauthRequired(_) => (StatusCode::FORBIDDEN, "reauth_required"),
             Error::OAuth(code, desc) => {
                 let status = if *code == "invalid_client" { StatusCode::UNAUTHORIZED } else { StatusCode::BAD_REQUEST };
                 return (status, [("cache-control", "no-store")], Json(serde_json::json!({ "error": code, "error_description": desc }))).into_response();
@@ -86,17 +90,7 @@ pub fn new_id(prefix: &str) -> String {
     format!("{prefix}_{}", random(16))
 }
 
-/// A secret: `prefix`, 34 random characters of lowercase base32 (170 bits) and 6 of checksum, so a
-/// scanner can tell a real roll token from look-alike text without asking roll ([`checksum_ok`],
-/// as GitHub's tokens carry a CRC32).
-pub fn new_secret(prefix: &str) -> String {
-    let body = format!("{prefix}{}", random(34));
-    let sum = checksum(&body);
-    format!("{body}{sum}")
-}
-
-use roll_auth::credentials::checksum;
-pub use roll_auth::credentials::{SECRET_PREFIXES, checksum_ok};
+pub use roll_auth::credentials::{SECRET_PREFIXES, checksum_ok, new_secret};
 
 /// Every roll grant secret in `text` whose checksum holds (in a pushed file, a paste, a log).
 pub fn find_secrets(text: &str) -> Vec<String> {
@@ -138,6 +132,7 @@ mod policy_tests {
             approved_at: None,
             decided_by: None,
             hint: None,
+            decoy: false,
             ip_allow: vec![],
             created_by: "operator".into(),
             created_at: created,
@@ -362,6 +357,21 @@ pub trait ApprovalChat: Send + Sync + 'static {
 
 type IdFn = Box<dyn Fn(&str) -> Option<String> + Send + Sync>;
 type Revoker = Box<dyn Fn(&str, &str) -> Option<String> + Send + Sync>;
+
+/// What a product hears when a decoy token is used ([`Access::on_decoy`]).
+#[derive(Clone, Debug)]
+pub struct DecoyUse {
+    /// The decoy's grant id.
+    pub grant: String,
+    /// Where the request came from.
+    pub ip: Option<String>,
+    /// The route it called (a pattern, never a path).
+    pub route: String,
+    /// Unix ms.
+    pub at: i64,
+}
+
+type DecoyHook = Box<dyn Fn(&DecoyUse) + Send + Sync>;
 type EnvFn = Box<dyn Fn(&str, &str) -> Option<String> + Send + Sync>;
 
 /// A name a person or a client chose, fit for a chat message: letters, digits, spaces and plain
@@ -497,6 +507,8 @@ pub struct Access {
     pub nodes: std::sync::OnceLock<Box<dyn Fn() -> usize + Send + Sync>>,
     /// How other products revoke their own leaked secrets, by prefix ([`Access::on_leaked`]).
     revokers: std::sync::RwLock<Vec<(&'static str, Revoker)>>,
+    /// Who else hears a decoy's use ([`Access::on_decoy`]).
+    decoy_hooks: std::sync::RwLock<Vec<DecoyHook>>,
     /// Grants' request limits on this node.
     pub limiter: rate::Limiter,
     /// Delivers audit sinks, when rolld can (it needs `ROLL_SECRET_KEY`).
@@ -539,7 +551,7 @@ impl Access {
 
     /// On a database already open (tests: `code_sql::Db::open_or_test`, so they run on Postgres too).
     pub fn with_db(db: code_sql::Db, config: Config, resolvers: Resolvers) -> Result<Arc<Access>> {
-        Ok(Arc::new(Access { store: Store::new(db)?, config, resolvers, chat: Default::default(), nodes: Default::default(), revokers: Default::default(), limiter: Default::default(), sinks: Default::default(), people: Default::default(), mail_gate: Default::default(), github_keys: Default::default(), registrations: Default::default(), oidc_fetch: Default::default(), oidc_keys: Default::default(), sign_ins: Default::default(), device_starts: Default::default(), device_guesses: Default::default(), policy_cache: Default::default() }))
+        Ok(Arc::new(Access { store: Store::new(db)?, config, resolvers, chat: Default::default(), nodes: Default::default(), revokers: Default::default(), decoy_hooks: Default::default(), limiter: Default::default(), sinks: Default::default(), people: Default::default(), mail_gate: Default::default(), github_keys: Default::default(), registrations: Default::default(), oidc_fetch: Default::default(), oidc_keys: Default::default(), sign_ins: Default::default(), device_starts: Default::default(), device_guesses: Default::default(), policy_cache: Default::default() }))
     }
 
     /// The resource of `kind` named `id`, with its project and environment filled in.
@@ -571,11 +583,78 @@ impl Access {
         rate.div_ceil(nodes).max(1)
     }
 
-    /// A product's own leaked secrets (apps' deploy hooks, `rlk_`): found wherever roll's are
+    /// A product's own leaked secrets (apps' deploy hooks, `rlk_`; previews', `rlb_`): found wherever roll's are
     /// (roll code's landings, GitHub's secret scanning), revoked by `revoke`, which says what it
     /// revoked (`None`: nothing live).
     pub fn on_leaked(&self, prefix: &'static str, revoke: impl Fn(&str, &str) -> Option<String> + Send + Sync + 'static) {
         self.revokers.write().unwrap_or_else(|e| e.into_inner()).push((prefix, Box::new(revoke)));
+    }
+
+    /// A product that plants decoys of its own (roll secrets' decoy keys) hears each use, after the
+    /// audit row and the mail. `f` is called on the request's task: it hands any blocking work off.
+    pub fn on_decoy(&self, f: impl Fn(&DecoyUse) + Send + Sync + 'static) {
+        self.decoy_hooks.write().unwrap_or_else(|e| e.into_inner()).push(Box::new(f));
+    }
+
+    /// A decoy made in process (roll secrets' decoy keys, docs/secrets.md "Decoys"): a token that
+    /// allows nothing whatever `rules` say, so nobody approves it and the token policy's limits
+    /// for working tokens don't apply. `user`: whose it is (they're mailed on its use), `None`
+    /// for the operator's. The secret is returned this once. Blocking.
+    pub fn mint_decoy(&self, name: &str, rules: Scope, created_by: &str, user: Option<&str>) -> Result<(store::Grant, String)> {
+        let new = store::NewGrant { name: name.chars().take(64).collect(), rules, decoy: true, ..Default::default() };
+        let made = self.store.create(&new, roll_auth::GrantKind::Token, created_by, None, user)?;
+        self.store.audit(&store::AuditEvent {
+            id: new_id("aud"),
+            at: code_sql::now_ms(),
+            grant_id: Some(made.0.id.clone()),
+            grant_name: Some(made.0.name.clone()),
+            source: "decoy".into(),
+            tool: None,
+            method: "-".into(),
+            route: "minted".into(),
+            product: Some("access".into()),
+            action: Some("write".into()),
+            resource: Some(plain(created_by).chars().take(200).collect()),
+            decision: "allow".into(),
+            approval: None,
+            status: 201,
+            args: None,
+            ip: None,
+            duration_ms: 0,
+            client: None,
+        });
+        Ok(made)
+    }
+
+    /// End decoy `id` (and only a decoy), with why and an audit row: what planted it is gone.
+    /// Whether it was live.
+    pub fn revoke_decoy(&self, id: &str, why: &str) -> Result<bool> {
+        let why: String = plain(why).chars().take(200).collect();
+        let revoked = self.store.revoke_decoy(id, &why)?;
+        if revoked {
+            let g = self.store.get(id).ok();
+            self.store.audit(&store::AuditEvent {
+                id: new_id("aud"),
+                at: code_sql::now_ms(),
+                grant_id: Some(id.to_string()),
+                grant_name: g.map(|g| g.name),
+                source: "decoy".into(),
+                tool: None,
+                method: "-".into(),
+                route: "revoked".into(),
+                product: Some("access".into()),
+                action: Some("write".into()),
+                resource: Some(why),
+                decision: "revoke".into(),
+                approval: None,
+                status: 200,
+                args: None,
+                ip: None,
+                duration_ms: 0,
+                client: None,
+            });
+        }
+        Ok(revoked)
     }
 
     /// Secrets found where they shouldn't be (a pushed file, a public repo, a report from GitHub's
@@ -599,7 +678,12 @@ impl Access {
                         tool: None,
                         method: "-".into(),
                         route: "leaked".into(),
-                        product: s.get(..4).and_then(|p| (p == "rlk_").then(|| "apps".to_string())),
+                        product: s.get(..4).and_then(|p| match p {
+                            "rlk_" => Some("apps".to_string()),
+                            "rlb_" => Some("previews".to_string()),
+                            "rlp_" => Some("accounts".to_string()),
+                            _ => None,
+                        }),
                         action: Some("admin".into()),
                         resource: Some(format!("{what}, found in {found_at}").chars().take(300).collect()),
                         decision: "revoke".into(),
@@ -850,6 +934,51 @@ impl Access {
                 tracing::warn!(error = %e, "mailing a token's person");
             }
         });
+    }
+
+    /// A decoy token was used (docs/permissions.md, "Decoy tokens"): when and from where on the
+    /// token, an audit row, and its owner and the admins told (once an hour per decoy and person).
+    pub fn decoy_tripped(self: &Arc<Self>, g: &store::Grant, ip: Option<String>, route: &str, client: Option<String>) {
+        tracing::warn!(grant = %g.id, route = %route, "a decoy token was used");
+        if let Err(e) = self.store.tripped(&g.id, ip.as_deref()) {
+            tracing::warn!(error = %e, "noting a decoy's use");
+        }
+        self.store.audit(&store::AuditEvent {
+            id: new_id("aud"),
+            at: code_sql::now_ms(),
+            grant_id: Some(g.id.clone()),
+            grant_name: Some(g.name.clone()),
+            source: "decoy".into(),
+            tool: None,
+            method: "-".into(),
+            route: route.chars().take(200).collect(),
+            product: None,
+            action: None,
+            resource: None,
+            decision: "decoy".into(),
+            approval: None,
+            status: 401,
+            args: None,
+            ip: ip.clone(),
+            duration_ms: 0,
+            client: client.clone(),
+        });
+        let name = mail_name(&g.name);
+        let from = ip.as_deref().map(|i| format!(" from {i}")).unwrap_or_default();
+        let subject = format!("A decoy token was used: \"{name}\"");
+        let text = format!(
+            "Someone used roll's decoy token \"{name}\" ({}){from}, calling {route}. Nobody should ever use it: whoever did found it where it was planted. Nothing was allowed, and they were told it isn't a valid token.\n\nIts page has when and from where: {}/dashboard/access/tokens/{}\n",
+            g.id,
+            self.web_url(),
+            g.id,
+        );
+        let key = format!("decoy:{}", g.id);
+        self.tell(g.user.as_deref(), Some((&key, 3_600_000)), subject.clone(), text.clone());
+        self.tell_admins(&key, subject, text);
+        let used = DecoyUse { grant: g.id.clone(), ip, route: route.chars().take(200).collect(), at: code_sql::now_ms() };
+        for hook in self.decoy_hooks.read().unwrap_or_else(|e| e.into_inner()).iter() {
+            hook(&used);
+        }
     }
 
     /// A token used from a network it hasn't been before, told where approvals go (GitHub and
@@ -1221,6 +1350,10 @@ impl roll_auth::Grants for Access {
     /// evaluator answers their requests. Blocking; looked up on every call.
     fn grant(&self, id: &str) -> Option<roll_auth::Grant> {
         let g = self.store.get(id).ok()?;
+        // A decoy never allows anything, so it reaches nothing (reach doesn't list it).
+        if g.decoy {
+            return None;
+        }
         // Stopped for being idle (the token policy), as the evaluator answers its requests.
         if self.policy_now().idle(&g, code_sql::now_ms()) {
             return None;

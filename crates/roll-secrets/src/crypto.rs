@@ -91,10 +91,13 @@ pub struct Keyring {
     /// What tells the current key from others without revealing it (a customer-wrapped data key
     /// records which deployment key sealed it inside: kms.rs).
     current_id: String,
+    previous_id: Option<String>,
     /// The audit chain's head MAC keys (audit.rs), current and previous: a database writer without
     /// the deployment key can't move the head.
     audit: Zeroizing<[u8; 32]>,
     audit_previous: Option<Zeroizing<[u8; 32]>>,
+    /// This deployment's AWS login server ID, when no other is configured (identities.rs).
+    aws_server_id: String,
 }
 
 impl std::fmt::Debug for Keyring {
@@ -105,8 +108,13 @@ impl std::fmt::Debug for Keyring {
 
 /// A deployment key's id: 12 hex characters derived from it (it reveals nothing of the key).
 fn kek_id(secret: &str) -> String {
-    let mut id = [0u8; 6];
-    hkdf::Hkdf::<Sha256>::new(Some(b"roll-secrets"), secret.trim().as_bytes()).expand(b"kek:id:v1", &mut id).expect("6 bytes");
+    derived_hex::<6>(secret, b"kek:id:v1")
+}
+
+/// `N` bytes derived from a deployment key under `label`, as hex.
+fn derived_hex<const N: usize>(secret: &str, label: &[u8]) -> String {
+    let mut id = [0u8; N];
+    hkdf::Hkdf::<Sha256>::new(Some(b"roll-secrets"), secret.trim().as_bytes()).expand(label, &mut id).expect("at most 8160 bytes");
     id.iter().map(|b| format!("{b:02x}")).collect()
 }
 
@@ -136,7 +144,7 @@ fn mac(key: &[u8; 32], msg: &[u8]) -> Hmac<Sha256> {
 impl Keyring {
     pub fn new(current: &str, previous: Option<&str>) -> Result<Keyring, CryptoError> {
         let previous = previous.filter(|p| !p.trim().is_empty());
-        Ok(Keyring { current: kek(current)?, previous: previous.map(kek).transpose()?, current_id: kek_id(current), audit: audit_key(current), audit_previous: previous.map(audit_key) })
+        Ok(Keyring { current: kek(current)?, previous: previous.map(kek).transpose()?, current_id: kek_id(current), previous_id: previous.map(kek_id), audit: audit_key(current), audit_previous: previous.map(audit_key), aws_server_id: derived_hex::<16>(current, b"aws:server-id:v1") })
     }
 
     /// The audit chain's head MAC of `msg` (audit.rs), with the current deployment key.
@@ -153,6 +161,17 @@ impl Keyring {
     /// The current deployment key's id.
     pub fn current_id(&self) -> &str {
         &self.current_id
+    }
+
+    /// The previous deployment key's id, during a rotation.
+    pub fn previous_id(&self) -> Option<&str> {
+        self.previous_id.as_deref()
+    }
+
+    /// An AWS login server ID unique to this deployment: 32 hex characters derived from the
+    /// current deployment key under its own label (it reveals nothing of the key).
+    pub fn aws_server_id(&self) -> &str {
+        &self.aws_server_id
     }
 
     /// A fresh data key for `project`, and its sealed form to store.
@@ -178,6 +197,23 @@ impl Keyring {
         let prev = self.previous.as_ref().ok_or(CryptoError::Dek)?;
         let k = open_raw(prev, &aad, &raw).map_err(|_| CryptoError::Dek)?;
         Ok((Dek::from_raw(&k), Some(self.seal_dek(project, &k))))
+    }
+}
+
+impl Keyring {
+    /// Seal what one node hands another for a moment (a provider call forwarded to the node that
+    /// holds a gateway's link): every node has the deployment key. `context` is bound in.
+    pub fn seal_hop(&self, context: &str, msg: &[u8]) -> Vec<u8> {
+        seal_raw(&self.current, &format!("roll-secrets:hop:{context}"), msg)
+    }
+
+    /// Open [`Keyring::seal_hop`]'s output (with the previous key too, while rotating).
+    pub fn open_hop(&self, context: &str, raw: &[u8]) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
+        let aad = format!("roll-secrets:hop:{context}");
+        open_raw(&self.current, &aad, raw).or_else(|e| match &self.previous {
+            Some(p) => open_raw(p, &aad, raw),
+            None => Err(e),
+        })
     }
 }
 

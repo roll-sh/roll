@@ -121,6 +121,7 @@ pub fn all_skipped(shards: usize) -> crate::search::SearchOutcome {
         pit_id: None,
         ranked: Vec::new(),
         clusters: None,
+        reduce_phases: None,
     }
 }
 
@@ -289,6 +290,7 @@ mod tests {
         let v = crate::json::parse::parse(body.as_bytes()).unwrap().unwrap();
         let source = crate::search_source::SearchSource::parse(&v, None).unwrap();
         SearchRequest {
+            slowlog: Default::default(),
             indices: Vec::new(),
             opts: crate::meta::resolve::IndicesOptions::STRICT_EXPAND_OPEN_FORBID_CLOSED,
             source,

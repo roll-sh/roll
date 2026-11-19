@@ -44,6 +44,8 @@ pub struct Rotation {
     credential: String,
     /// Days between scheduled rotations; none: only by hand.
     pub rotate_days: Option<u64>,
+    /// When a due rotation may run (UTC), as set; none: as soon as it's due.
+    pub rotate_window: Option<String>,
     pub grace_minutes: u64,
     pub issued_at: Option<i64>,
     pub next_due: Option<i64>,
@@ -89,6 +91,7 @@ impl Secrets {
     pub fn rotations(&self, project: &str, caller: &Caller) -> Result<Vec<Rotation>> {
         caller.need(Action::Read, &Scope::project(project))?;
         self.project(project)?;
+        let now = self.db.now_ms()?;
         type Row = (String, String, String, String, String, Option<String>, Option<i64>);
         let rows: Vec<Row> = self.db.read(|c| {
             c.query(
@@ -122,9 +125,10 @@ impl Secrets {
                 r#ref: link.r#ref.clone(),
                 credential,
                 rotate_days,
+                rotate_window: link.options.get("rotate_window").and_then(Json::as_str).map(str::to_string),
                 grace_minutes: link.grace_minutes(),
                 issued_at,
-                next_due: issued_at.zip(rotate_days).map(|(at, d)| at + d as i64 * 86_400_000),
+                next_due: issued_at.and_then(|at| link.next_rotation(at, now)),
                 last_error: error,
                 failed_at,
             });
@@ -210,9 +214,14 @@ impl Secrets {
                 return Err(Error::Forbidden(format!("{id} wasn't issued to you: ending another's lease needs delete on {env}")));
             }
         }
+        // A credential the product can't end early (a bound Kubernetes token) keeps working.
+        let note = match &l.link {
+            Some(link) if self.links.get(&link.kind).is_ok_and(|p| !p.revocable(link)) => format!(" (a {} credential can't be ended early: it works until it expires)", link.kind),
+            _ => String::new(),
+        };
         match self.revoke_one(id)? {
             true => {
-                self.audit_now(project, caller, "lease.revoke", Some(&env), None, &[], &format!("revoked {id}"));
+                self.audit_now(project, caller, "lease.revoke", Some(&env), None, &[], &format!("revoked {id}{note}"));
                 Ok(())
             }
             false => Err(Error::Conflict("conflict", format!("{id} is already revoked"))),
@@ -220,7 +229,7 @@ impl Secrets {
     }
 
     /// Claim and revoke one lease. `Ok(false)`: someone else did.
-    fn revoke_one(&self, id: &str) -> Result<bool> {
+    pub(crate) fn revoke_one(&self, id: &str) -> Result<bool> {
         let now = self.db.now_ms()?;
         let claimed: Option<(String, String)> = self.db.write(|c| {
             let row = c.query_row("SELECT link, handle FROM leases WHERE id = ? AND revoked_at IS NULL", [id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))).optional()?;
@@ -236,9 +245,11 @@ impl Secrets {
             // Give it back to the sweeper, which tries again.
             // Kept for health (`revoke_failing`) while the sweeper retries.
             let why: String = e.to_string().chars().take(300).collect();
+            crate::metrics::Counters::add(&self.counters.revoke_failures, 1);
             self.db.write(|c| c.execute("UPDATE leases SET revoked_at = NULL, expires_at = ?, revoke_error = ? WHERE id = ?", params![now + 60_000, why, id]))?;
             return Err(Error::Link(format!("revoking {id}: {e}")));
         }
+        crate::metrics::Counters::add(&self.counters.leases_revoked, 1);
         Ok(true)
     }
 
@@ -315,6 +326,7 @@ impl Secrets {
     /// A scheduled rotation's failure, kept on the key for health (`rotation_failing`) until one
     /// succeeds; `None` clears it.
     fn note_rotation(&self, project: &str, slug: &str, path: &str, key: &str, failure: Option<&str>) {
+        crate::metrics::Counters::add(if failure.is_some() { &self.counters.rotation_failures } else { &self.counters.rotations }, 1);
         let now = self.db.now_ms().unwrap_or_default();
         let failure = failure.map(|f| f.chars().take(300).collect::<String>());
         let at = failure.as_ref().map(|_| now);
@@ -423,6 +435,9 @@ impl Secrets {
     /// retention and old audit rows.
     pub fn sweep_local(&self) -> Result<Swept> {
         let mut out = Swept::default();
+        if let Err(e) = self.forget_read_counts() {
+            tracing::warn!("forgetting old read counts failed: {e}");
+        }
         let now = self.db.now_ms()?;
         // Expired leases: dynamic credentials and retired managed ones.
         let due = self.db.read(|c| c.query("SELECT id FROM leases WHERE revoked_at IS NULL AND expires_at <= ? LIMIT 200", [now], |r| r.get::<_, String>(0)))?;
@@ -439,6 +454,10 @@ impl Secrets {
         // Deleted projects whose last credential is revoked now.
         if let Err(e) = self.sweep_forgotten() {
             tracing::warn!("cleaning up deleted projects failed: {e}");
+        }
+        // ACME's used nonces, old orders and expired certificates' rows.
+        if let Err(e) = self.sweep_acme() {
+            tracing::warn!("sweeping ACME's nonces and orders failed: {e}");
         }
         // Expired ephemeral environments.
         let expired: Vec<(String, String)> = self.db.read(|c| {
@@ -465,9 +484,10 @@ impl Secrets {
         let mut seen = std::collections::BTreeSet::new();
         for (project, slug, path, key, link, state) in managed {
             let (Ok(link), Ok(state)) = (serde_json::from_str::<Link>(&link), serde_json::from_str::<Json>(&state)) else { continue };
-            let (Some(days), Some(issued)) = (link.rotate_days(), state.get("issued_at").and_then(Json::as_i64)) else { continue };
+            let Some(next) = state.get("issued_at").and_then(Json::as_i64).and_then(|at| link.next_rotation(at, now)) else { continue };
             let cred = state.get("credential").and_then(Json::as_str).unwrap_or_default().to_string();
-            if issued + days as i64 * 86_400_000 > now || !seen.insert(cred) {
+            // Due, and with a window, inside it now (`next_rotation` is its next opening otherwise).
+            if next > now || !seen.insert(cred) {
                 continue;
             }
             match self.rotate(&project, &slug, &path, &key, &Caller::consumer("roll:rotation")) {
@@ -485,6 +505,9 @@ impl Secrets {
         self.sweep_retention()?;
         self.sweep_reminders()?;
         self.sweep_alerts()?;
+        if let Err(e) = self.end_decoys() {
+            tracing::warn!("revoking ended decoys failed: {e}");
+        }
         // The issuer key's rotation, before the digests it signs (issuer.rs).
         if let Err(e) = self.sweep_issuer() {
             tracing::warn!("rotating roll's OIDC issuer key failed: {e}");
@@ -506,6 +529,8 @@ impl Secrets {
         out.synced += synced;
         out.failed += failed;
         let (_, failed) = self.sweep_sinks()?;
+        out.failed += failed;
+        let (_, failed) = self.sweep_backups()?;
         out.failed += failed;
         Ok(out)
     }

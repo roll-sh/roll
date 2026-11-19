@@ -1,8 +1,10 @@
+import base64
 import json
 import os
 import threading
 import time
 import unittest
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
@@ -18,6 +20,16 @@ CONTEXT = "roll-secrets:prj_a:production:app:web"
 BOX = {"v": 1, "epk": "aAGjVaESpknkSH_uG48K1a_unnp97Gh4uRwOYWrjHkk", "nonce": "yct4_uAUdnUKxskR", "ct": "-UbR7dzvRmoXgBHnbyoW00qyGY07tIB_0vx6VrXQhPPRNns7PU3irIJq5M5Xjto"}
 
 
+class Printing(unittest.TestCase):
+    def test_printing_never_shows_a_value_or_the_token(self):
+        v = roll_secrets.Values(values={"DB_PASSWORD": "fake-pw-not-real"})
+        c = roll_secrets.Client("https://api.roll.example", "rlt_fake_token_not_real", project="prj_1")
+        for s in (repr(v), str(v), repr(c), str(c), f"{v!r} {c!r}"):
+            self.assertNotIn("fake-pw-not-real", s)
+            self.assertNotIn("rlt_fake_token_not_real", s)
+        self.assertIn("DB_PASSWORD", repr(v))
+
+
 class SealedBoxes(unittest.TestCase):
     def test_a_box_sealed_by_roll_opens_only_for_its_context(self):
         self.assertEqual(roll_secrets.open_sealed(BOX, KEY, CONTEXT), b'{"DB_URL":"postgres://db/shop"}')
@@ -25,6 +37,23 @@ class SealedBoxes(unittest.TestCase):
             roll_secrets.open_sealed(BOX, KEY, "roll-secrets:prj_a:staging:app:web")
         with self.assertRaises(ValueError):
             roll_secrets.open_sealed(BOX, roll_secrets.generate_key(), CONTEXT)
+
+
+class Totp(unittest.TestCase):
+    def test_codes_match_rfc_6238(self):
+        # RFC 6238, Appendix B: each algorithm's own test seed, 8 digits, 30 s steps.
+        seeds = {"SHA1": b"12345678901234567890", "SHA256": b"12345678901234567890123456789012", "SHA512": b"1234567890" * 6 + b"1234"}
+        vectors = [(59, ("94287082", "46119246", "90693936")), (1111111109, ("07081804", "68084774", "25091201")), (1234567890, ("89005924", "91819424", "93441116")), (20000000000, ("65353130", "77737706", "47863826"))]
+        for i, (alg, seed) in enumerate(seeds.items()):
+            uri = f"otpauth://totp/roll:test?secret={base64.b32encode(seed).decode()}&algorithm={alg}&digits=8"
+            for at, codes in vectors:
+                self.assertEqual(roll_secrets.totp_at(uri, at).code, codes[i], f"{alg} at {at}")
+        # Bare base32: SHA1, 6 digits, 30 s.
+        self.assertEqual(roll_secrets.totp_at("gezd gnbv gy3t qojq gezd gnbv gy3t qojq", 59), roll_secrets.Totp("287082", 60_000, 30))
+        with self.assertRaises(ValueError) as e:
+            roll_secrets.totp_at("otpauth://totp/x?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&digits=9")
+        self.assertNotIn("GEZD", str(e.exception))
+        self.assertNotIn("287082", repr(roll_secrets.totp_at("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ", 59)))
 
 
 class Rolld(BaseHTTPRequestHandler):
@@ -67,7 +96,7 @@ class Rolld(BaseHTTPRequestHandler):
         env = "/v1/secrets/projects/prj_a/environments/production"
         if self.headers.get("Authorization") != "Bearer " + Rolld.state["token"]:
             return self.answer(401)
-        if self.path == env + "/digest":
+        if self.path.split("?")[0] == env + "/digest":
             return self.answer(200, {"digest": Rolld.state["digest"]})
         if self.path == env + "/values":
             return self.answer(200, {"values": {"A": Rolld.state["value"]}, "problems": [], "leases": []})
@@ -115,6 +144,49 @@ class AWorkload(unittest.TestCase):
         Rolld.state.update(digest="d3", value="three", token="rlt_workload2")
         self.assertTrue(relogged.wait(5))
         self.assertEqual((seen[-1], Rolld.state["logins"]), ("three", 2))
+
+
+class Login(BaseHTTPRequestHandler):
+    """roll's login route: keeps what it was sent."""
+
+    sent: list = []
+
+    def log_message(self, *_):
+        pass
+
+    def do_POST(self):
+        Login.sent.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+        body = json.dumps({"token": "rlt_aws", "project": "prj_shop", "expires_at": 0}).encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class AnAWSIdentity(unittest.TestCase):
+    def test_signs_as_aws_published_example(self):
+        # The IAM ListUsers request in AWS's "Examples of the complete Signature Version 4 signing
+        # process", with its documented example keys.
+        creds = {"key": "AKIDEXAMPLE", "secret": "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY"}
+        headers = {"content-type": "application/x-www-form-urlencoded; charset=utf-8", "host": "iam.amazonaws.com", "x-amz-date": "20150830T123600Z"}
+        auth = roll_secrets._sigv4(creds, "us-east-1", "iam", "GET", "/", "Action=ListUsers&Version=2010-05-08", headers, "", "20150830T123600Z")
+        self.assertEqual(auth, "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/iam/aws4_request, SignedHeaders=content-type;host;x-amz-date, Signature=5d672d79c15b13162d9279b0855cfba6789a8edb4c82c400e06b5924a6f2b5d7")
+
+    def test_logs_in_with_a_signed_get_caller_identity(self):
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Login)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        api = f"http://127.0.0.1:{server.server_address[1]}"
+        env = {"ROLL_API_URL": api, "ROLL_IDENTITY": "idn_web", "AWS_ACCESS_KEY_ID": "AKIAIOSFODNN7EXAMPLE", "AWS_SECRET_ACCESS_KEY": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", "AWS_SESSION_TOKEN": "EXAMPLETOKEN", "AWS_REGION": "eu-west-1"}
+        unset = ["ROLL_TOKEN", "ROLL_OIDC_TOKEN", "ROLL_OIDC_TOKEN_FILE", "ACTIONS_ID_TOKEN_REQUEST_URL", "ROLL_IDENTITY_KIND", "ROLL_AWS_SERVER_ID"]
+        with mock.patch.dict(os.environ, {**env, **{k: "" for k in unset}}, clear=False):
+            c = roll_secrets.from_env()
+        self.assertEqual(c.token, "rlt_aws")
+        sent = Login.sent[-1]
+        aws = sent["aws"]
+        self.assertEqual((sent["identity"], aws["url"], aws["body"]), ("idn_web", "https://sts.eu-west-1.amazonaws.com/", "Action=GetCallerIdentity&Version=2011-06-15"))
+        self.assertEqual((aws["headers"]["x-roll-server-id"], aws["headers"]["x-amz-security-token"]), (api, "EXAMPLETOKEN"))
+        self.assertIn("/eu-west-1/sts/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-security-token;x-roll-server-id, ", aws["headers"]["authorization"])
 
 
 if __name__ == "__main__":
@@ -193,3 +265,144 @@ class ATransitKey(unittest.TestCase):
         self.assertEqual(Echo.sent[0], {"path": "/v1/secrets/projects/prj_1/transit/cards/encrypt", "plaintext": "aMOpbGxvIOKckw==", "context": "order:42"})
         self.assertEqual(cards.decrypt(ct, "order:42").decode(), "héllo ✓")
         self.assertEqual(cards.decrypt(cards.encrypt(bytes([0, 255, 128, 7]))), bytes([0, 255, 128, 7]))
+
+
+class Writes(BaseHTTPRequestHandler):
+    """rolld's one-key writes and a values route with a dynamic key (PW) that dynamic=false leaves
+    out; a protected environment answers approval_required."""
+
+    state = {"stored": {"A": "1"}, "generation": 0, "reads": 0, "protected": False, "writes": []}
+
+    def log_message(self, *_):
+        pass
+
+    def answer(self, code, body):
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("ETag", '"g%d"' % Writes.state["generation"])
+        self.end_headers()
+        self.wfile.write(json.dumps(body).encode())
+
+    def do_GET(self):
+        s, q = Writes.state, urllib.parse.urlsplit(self.path).query
+        s["reads"] += 1
+        no_dynamic = "dynamic=false" in q
+        values = dict(s["stored"]) if no_dynamic else {**s["stored"], "PW": "fake-issued"}
+        self.answer(200, {"values": values, "problems": [], "leases": [] if no_dynamic else ["lse_1"], "dynamic": ["PW"], "linked": []})
+
+    def write(self):
+        s, u = Writes.state, urllib.parse.urlsplit(self.path)
+        assert urllib.parse.parse_qs(u.query) == {"path": ["/api"]}, u.query
+        if s["protected"]:
+            return None, self.answer(409, {"error": "production is protected: open a change request", "code": "approval_required"})
+        s["generation"] += 1
+        return u.path.rsplit("/", 1)[1], {"seq": s["generation"], "environment": "production", "path": "/api", "kind": "write"}
+
+    def do_PUT(self):
+        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        key, change = self.write()
+        if key:
+            Writes.state["writes"].append(body)
+            Writes.state["stored"][key] = body["value"]
+            self.answer(200, {"change": change, "secret": {"key": key, "version": 2}, "warnings": []})
+
+    def do_DELETE(self):
+        key, change = self.write()
+        if key and key not in Writes.state["stored"]:
+            self.answer(404, {"error": f"no secret {key} in production:/api"})
+        elif key:
+            del Writes.state["stored"][key]
+            self.answer(200, {"change": change, "secret": None, "warnings": []})
+
+
+class OneKeyWrites(unittest.TestCase):
+    def test_set_and_delete_write_one_key_and_drop_the_cache(self):
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Writes)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        c = roll_secrets.Client(f"http://127.0.0.1:{server.server_address[1]}", "rlt_x", project="prj_1", cache_ttl=3600)
+        s = Writes.state
+
+        v = c.values("production", dynamic=False)
+        self.assertEqual((v.values, v.dynamic, v.leases), ({"A": "1"}, ["PW"], []), "dynamic=false leaves the dynamic key out")
+        c.values("production", dynamic=False)
+        self.assertEqual(s["reads"], 1, "and holds no credential, so it's kept")
+
+        w = c.set("production", "B", "fake-value-1", path="/api", comment="made up")
+        self.assertEqual((w["secret"]["version"], s["writes"]), (2, [{"value": "fake-value-1", "link": None, "comment": "made up"}]))
+        self.assertEqual(c.values("production", dynamic=False).values.get("B"), "fake-value-1", "a set drops the cache")
+
+        self.assertEqual(c.delete("production", "B", path="/api"), {"deleted": True, "change": {"seq": 2, "environment": "production", "path": "/api", "kind": "write"}})
+        self.assertNotIn("B", c.values("production", dynamic=False).values, "a delete drops the cache")
+        self.assertEqual(c.delete("production", "B", path="/api"), {"deleted": False, "change": None}, "a missing key is no change")
+
+        s["protected"] = True
+        with self.assertRaises(roll_secrets.SecretsError) as e:
+            c.set("production", "C", "fake-value-2", path="/api")
+        self.assertEqual((e.exception.code, e.exception.status), ("approval_required", 409))
+        self.assertNotIn("fake-value-2", repr(e.exception) + str(e.exception) + repr(e.exception.__cause__) + repr(e.exception.__context__))
+
+
+class Reads(BaseHTTPRequestHandler):
+    """rolld's one-key reads after a workload identity's login: a key's record (A its own, B a
+    link's through the base) and A's value, stored as a reference that resolve=true follows."""
+
+    state = {"logins": 0, "values": 0}
+    prefix = "/v1/secrets/projects/prj_a/environments/staging/secrets/"
+    records = {
+        "A": {"key": "A", "path": "/api", "type": "shared", "version": 3, "comment": "made up", "tags": [], "link": None, "source": {"kind": "own"}, "updated_at": 1, "updated_by": "rlt_x", "expires_at": None},
+        "B": {"key": "B", "path": "/api", "type": "shared", "version": 1, "comment": "", "tags": [], "link": {"kind": "postgres", "ref": "pg_1", "field": "url", "mode": "live"}, "source": {"kind": "base", "environment": "development"}, "updated_at": 2, "updated_by": "rlt_x", "expires_at": None},
+    }
+
+    def log_message(self, *_):
+        pass
+
+    def answer(self, code, body):
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(body).encode())
+
+    def do_POST(self):
+        b = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        if (self.path, b) != ("/v1/secrets/login", {"identity": "idn_ci", "token": "fake-oidc"}):
+            return self.answer(401, {"error": "no identity idn_ci takes this token"})
+        Reads.state["logins"] += 1
+        self.answer(200, {"token": "rlt_reads", "project": "prj_a", "expires_at": int(time.time() * 1000) + 3_600_000})
+
+    def do_GET(self):
+        u = urllib.parse.urlsplit(self.path)
+        q = urllib.parse.parse_qs(u.query)
+        key = u.path[len(Reads.prefix):]
+        if self.headers.get("Authorization") != "Bearer rlt_reads" or q.get("path") != ["/api"]:
+            return self.answer(401, {"error": "who"})
+        if key == "A/value":
+            Reads.state["values"] += 1
+            return self.answer(200, {"value": "fake-resolved" if q.get("resolve") != ["false"] else "${development.FAKE_URL}", "problems": []})
+        if key in Reads.records:
+            return self.answer(200, Reads.records[key])
+        self.answer(404, {"error": f"no secret {key} in staging:/api"})
+
+
+class OneKeyReads(unittest.TestCase):
+    def test_a_keys_record_and_stored_value_after_a_login_from_a_token_source(self):
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Reads)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        sourced = []
+        c = roll_secrets.login_with_identity(f"http://127.0.0.1:{server.server_address[1]}", "idn_ci", lambda: sourced.append(1) or "fake-oidc", cache_ttl=3600)
+        self.assertEqual((len(sourced), Reads.state["logins"], c.project), (1, 1, "prj_a"), "the source gives the login its OIDC token")
+        self.assertIs(roll_secrets._logged_in, roll_secrets.login_with_identity)
+
+        a = c.secret("staging", "A", path="/api")
+        self.assertEqual((a.version, a.comment, a.link_kind, a.source.kind), (3, "made up", None, "own"))
+        b = c.secret("staging", "B", path="/api")
+        self.assertEqual((b.link_kind, b.source), ("postgres", roll_secrets.Source("base", "development")), "a link shows its kind only")
+        self.assertIsNone(c.secret("staging", "NOPE", path="/api"), "a missing key is None")
+
+        self.assertEqual(c.stored_value("staging", "A", path="/api"), "${development.FAKE_URL}", "the reference as written")
+        c.stored_value("staging", "A", path="/api")
+        self.assertEqual(Reads.state["values"], 2, "never kept, whatever cache_ttl says")
+        with self.assertRaises(roll_secrets.SecretsError) as e:
+            c.stored_value("staging", "NOPE", path="/api")
+        self.assertEqual(e.exception.status, 404)

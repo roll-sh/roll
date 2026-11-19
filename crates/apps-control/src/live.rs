@@ -48,6 +48,9 @@ pub struct Template {
     /// A static site whose files were exported (`sites.rs`): the proxy serves them by this key
     /// (the image's digest) and no instance ever runs.
     pub site: Option<String>,
+    /// That site's edge functions ([`crate::edge`]), and the service that runs them.
+    pub edge: Vec<apps_build::edge::EdgeFn>,
+    pub edge_service: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -84,6 +87,12 @@ pub struct Inst {
     /// Its last hour by minute (Railway's per replica): `(minute, CPU seconds, seconds measured,
     /// peak memory bytes)`, from the reaper's samples.
     minutes: Mutex<std::collections::VecDeque<(i64, f64, f64, u64)>>,
+    /// Its template's other ports (custom domains' own), and where they answer, learned at each
+    /// start.
+    wanted: Vec<u16>,
+    ports: Mutex<HashMap<u16, SocketAddr>>,
+    /// A scrape of its metrics endpoint is out ([`crate::prom`]).
+    scraping: AtomicBool,
 }
 
 /// An instance's last hour by minute ([`EnvLive::by_instance`]).
@@ -144,7 +153,41 @@ impl Inst {
             health_fails: AtomicU32::new(0),
             stopping: Mutex::new(None),
             minutes: Mutex::new(std::collections::VecDeque::new()),
+            wanted: Vec::new(),
+            ports: Mutex::new(HashMap::new()),
+            scraping: AtomicBool::new(false),
         })
+    }
+
+    /// An instance of `tpl`'s deployment, knowing the other ports it publishes.
+    fn of(name: String, tpl: &Template) -> Arc<Inst> {
+        let mut i = Inst::new(name, tpl.deployment.clone());
+        if let Some(i) = Arc::get_mut(&mut i) {
+            i.wanted = tpl.spec.ports.clone();
+        }
+        i
+    }
+
+    /// Where it answers while it runs (never while suspended or stopped).
+    pub fn running_addr(&self) -> Option<SocketAddr> {
+        match *self.phase.lock() {
+            Phase::Running(a) => a,
+            _ => None,
+        }
+    }
+
+    /// Whether this scrape may start (none other is out).
+    pub fn begin_scrape(&self) -> bool {
+        !self.scraping.swap(true, Ordering::SeqCst)
+    }
+
+    pub fn end_scrape(&self) {
+        self.scraping.store(false, Ordering::SeqCst);
+    }
+
+    /// Where it answers on `port` (a custom domain's own), if it publishes it.
+    pub fn port_addr(&self, port: u16) -> Option<SocketAddr> {
+        self.ports.lock().get(&port).copied()
     }
 
     fn phase(&self) -> Phase {
@@ -284,6 +327,8 @@ pub struct Gate {
     pub vitals: bool,
     /// Its challenge rules' key ([`crate::challenge`]), when it has such a rule.
     pub challenge_key: Option<Vec<u8>>,
+    /// Its split test.
+    pub split: Option<crate::model::Split>,
 }
 
 /// A rate-limit bucket: which (0 the environment's, 1 + i firewall rule i's) and whose.
@@ -307,8 +352,8 @@ impl Gate {
     /// matching, it does.
     /// What its firewall says of the request: the first rule that matches decides; none lets it
     /// in.
-    pub fn firewall_verdict(&self, method: &str, path: &str, user_agent: &str) -> Verdict {
-        match self.firewall.iter().enumerate().find(|(_, r)| r.matches(method, path, user_agent)) {
+    pub fn firewall_verdict(&self, asked: &crate::model::Asked<'_>) -> Verdict {
+        match self.firewall.iter().enumerate().find(|(_, r)| r.matches(asked)) {
             None => Verdict::Allow,
             Some((_, r)) if r.action == crate::model::FirewallAction::Allow => Verdict::Allow,
             Some((i, r)) if r.action == crate::model::FirewallAction::Limit => Verdict::Limit(i as u16 + 1, crate::model::RateLimit { per_minute: r.per_minute.unwrap_or(60), burst: r.burst }),
@@ -627,7 +672,7 @@ impl EnvLive {
         };
         spec.vars.push(("ROLL_INSTANCE".into(), spec.name.clone()));
         self.runtime.create(&spec).await?;
-        Ok(Inst::new(spec.name, tpl.deployment.clone()))
+        Ok(Inst::of(spec.name, tpl))
     }
 
     async fn make(&self, tpl: &Template) -> anyhow::Result<Arc<Inst>> {
@@ -639,7 +684,7 @@ impl EnvLive {
         spec.vars.push(("ROLL_INSTANCE".into(), spec.name.clone()));
         self.mine.lock().insert(spec.name.clone());
         self.runtime.create(&spec).await?;
-        Ok(Inst::new(spec.name, tpl.deployment.clone()))
+        Ok(Inst::of(spec.name, tpl))
     }
 
     /// Whether something answers HTTP at `addr` (`path`: a 2xx or 3xx there; none: any answer,
@@ -721,6 +766,14 @@ impl EnvLive {
                 }
             }
         }
+        // Its other ports (custom domains' own) answer where the runtime published them.
+        let mut found = HashMap::new();
+        for p in inst.wanted.iter().copied() {
+            if let Some(a) = self.runtime.port_address(&inst.name, p).await {
+                found.insert(p, a);
+            }
+        }
+        *inst.ports.lock() = found;
         *inst.phase.lock() = Phase::Running(addr);
         *inst.last_used.lock() = Instant::now();
         // Up: from here it runs within its CPU limit (it started with a boost).
@@ -1496,7 +1549,14 @@ impl EnvLive {
                 self.runtime.remove(&name).await;
                 continue;
             };
-            let i = Inst::new(name.clone(), tpl.deployment.clone());
+            let i = Inst::of(name.clone(), tpl);
+            let mut found = HashMap::new();
+            for p in i.wanted.iter().copied() {
+                if let Some(a) = self.runtime.port_address(&name, p).await {
+                    found.insert(p, a);
+                }
+            }
+            *i.ports.lock() = found;
             *i.phase.lock() = phase;
             *i.started_at.lock() = Some(now_ms());
             self.insts.lock().push(i);
@@ -1804,16 +1864,17 @@ impl EnvLive {
                         let d = u.cpu_ns.saturating_sub(prev) as f64 / 1e9;
                         i.record(now_ms() / 60_000, d, elapsed, u.memory_bytes);
                         cpu += d;
+                        // Its sidecars' use is the instance's (usage adds it): so is their size.
                         if let Some(tpl) = self.serving(&i.deployment) {
                             used += d;
-                            capacity += tpl.run.cpu * elapsed;
+                            capacity += (tpl.run.cpu + tpl.spec.sidecars_size().0) * elapsed;
                         }
                     }
                     *seen = Some(u.cpu_ns);
                     mem += u.memory_bytes;
                     if let Some(tpl) = self.serving(&i.deployment) {
                         mem_used += u.memory_bytes as f64;
-                        mem_cap += ((tpl.run.memory_mb as u64) << 20) as f64;
+                        mem_cap += (((tpl.run.memory_mb + tpl.spec.sidecars_size().1) as u64) << 20) as f64;
                     }
                 }
                 // A runtime that can't say what an instance uses (Fargate, which bills by size ×
@@ -2233,10 +2294,64 @@ impl EnvLive {
         let _ = self.runtime.stop(&inst.name, Duration::from_secs(10)).await;
         let secs = began.elapsed().as_secs_f64();
         // A run is metered at its allocation: it's short, and the container is gone after.
-        self.meter.lock().sample(now_ms(), secs * tpl.run.cpu * 0.5, (tpl.run.memory_mb as u64) << 20, secs, 1);
+        // With its sidecars' size: they run beside it.
+        let (side_cpu, side_mb) = tpl.spec.sidecars_size();
+        self.meter.lock().sample(now_ms(), secs * (tpl.run.cpu + side_cpu) * 0.5, ((tpl.run.memory_mb + side_mb) as u64) << 20, secs, 1);
         self.runtime.remove(&inst.name).await;
         let (code, timed_out, canceled) = ran?;
         Ok(Exit { deployment: tpl.deployment.clone(), container: inst.name.clone(), code, timed_out, canceled })
+    }
+}
+
+/// A one-off console's container ([`EnvLive::start_console`]): what to meter and remove at its end.
+pub struct ConsoleBox {
+    pub name: String,
+    began: Instant,
+    cpu: f64,
+    memory_mb: u32,
+}
+
+impl EnvLive {
+    /// A one-off console (`roll apps run -it`, Heroku's `heroku run bash`): a fresh container of
+    /// the live deployment, with its variables and on its network, no port and no volume, its own
+    /// `cpu` and `memory_mb` when asked; it waits (`sleep`) for the terminal opened in it.
+    pub async fn start_console(self: &Arc<Self>, cpu: Option<f64>, memory_mb: Option<u32>) -> anyhow::Result<ConsoleBox> {
+        let mut tpl = (*self.template().ok_or_else(|| anyhow::anyhow!("no deployment"))?).clone();
+        // Kept up while the terminal is open (a day at most: the shell's idle limit ends it first).
+        tpl.spec.command = Some("exec sleep 86400".into());
+        tpl.spec.port = None;
+        tpl.spec.ports.clear();
+        tpl.spec.volume = None;
+        tpl.spec.aliases.clear();
+        tpl.spec.health = None;
+        if let Some(c) = cpu {
+            tpl.spec.cpu = c;
+            tpl.run.cpu = c;
+        }
+        if let Some(m) = memory_mb {
+            tpl.spec.memory_mb = m;
+            tpl.run.memory_mb = m;
+        }
+        let n = self.seq.fetch_add(1, Ordering::SeqCst);
+        let name = format!("{}console{n}", instance_prefix(&self.service, &self.env, &tpl.deployment));
+        let inst = self.make_run(&tpl, Some(name)).await?;
+        let log = self.log.instance(&inst.name, &inst.deployment);
+        if let Err(e) = self.runtime.start(&inst.name, log).await {
+            self.runtime.remove(&inst.name).await;
+            return Err(e);
+        }
+        self.runtime.settle(&inst.name).await;
+        // Metered with its sidecars, which run beside it.
+        let (side_cpu, side_mb) = tpl.spec.sidecars_size();
+        Ok(ConsoleBox { name: inst.name.clone(), began: Instant::now(), cpu: tpl.run.cpu + side_cpu, memory_mb: tpl.run.memory_mb + side_mb })
+    }
+
+    /// A console ended: its container stops and goes, metered at its allocation as a run is.
+    pub async fn end_console(&self, c: ConsoleBox) {
+        let _ = self.runtime.stop(&c.name, Duration::from_secs(5)).await;
+        let secs = c.began.elapsed().as_secs_f64();
+        self.meter.lock().sample(now_ms(), secs * c.cpu * 0.5, (c.memory_mb as u64) << 20, secs, 1);
+        self.runtime.remove(&c.name).await;
     }
 }
 
@@ -2272,6 +2387,7 @@ mod tests {
                 command: None,
                 vars: vars.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
                 port: Some(8080),
+                ports: vec![],
                 cpu: 0.5,
                 memory_mb: 512,
                 network: None,
@@ -2282,10 +2398,13 @@ mod tests {
                 registry: None,
                 files: vec![],
                 health: None,
+                sidecars: vec![],
             },
             run,
             spa: false,
             site: None,
+            edge: Vec::new(),
+            edge_service: String::new(),
         })
     }
 
@@ -2359,7 +2478,7 @@ mod tests {
     async fn a_volume_rollout_never_starts_the_old_deployment_on_the_volume() {
         let fake = Fake::new();
         let live = live(&fake);
-        let run = Run { volume: Some(crate::model::Volume { mount: "/data".into(), size_gb: 1 }), min_instances: 1, ..Run::default() };
+        let run = Run { volume: Some(crate::model::Volume { mount: "/data".into(), size_gb: 1, backups: None }), min_instances: 1, ..Run::default() };
         let old = template_of("dep_aaaaaaaaaaaa", run.clone(), &[]);
         let prepared = live.prepare(&old, None).await.unwrap();
         live.commit(old, prepared).await;

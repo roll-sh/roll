@@ -647,8 +647,9 @@ pub struct PreviewResourceLink {
 pub struct Blocker {
     /// `state`, `draft`, `untrusted`, `checks`, `needs_approval`, `needs_codeowner`,
     /// `changes_requested`, `unresolved_threads`, `review_pending`, `review_required` or
-    /// `secret_leak` (the change adds a roll secrets value; docs/secrets.md) (more kinds may be
-    /// added; show unknown ones by their message).
+    /// `secret_leak` (the change adds a roll secrets value; docs/secrets.md) or `secret_unstored`
+    /// (a credential roll secrets doesn't hold, when the repo's `roll.toml` blocks them; a notice
+    /// otherwise) (more kinds may be added; show unknown ones by their message).
     pub kind: String,
     pub message: String,
     /// The roll secrets key a `secret_leak` blocker or `secret_missing` notice is about, and the
@@ -657,11 +658,19 @@ pub struct Blocker {
     pub key: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub environments: Vec<String>,
+    /// `secret_unstored`: where the credential is (path and 1-based line) and its fingerprint (what
+    /// `.roll/secrets-allow` names to keep it); never its value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
 }
 
 impl Blocker {
     pub fn new(kind: &str, message: impl Into<String>) -> Blocker {
-        Blocker { kind: kind.into(), message: message.into(), key: None, environments: Vec::new() }
+        Blocker { kind: kind.into(), message: message.into(), key: None, environments: Vec::new(), path: None, line: None, fingerprint: None }
     }
 
     /// One about roll secrets key `key` in `environments`.

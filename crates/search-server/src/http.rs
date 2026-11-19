@@ -3,6 +3,13 @@
 //! `GET` response's length and no body, and `http.max_content_length` enforced before the body
 //! is buffered.
 //!
+//! A request's client address is the connection's peer: the PROXY header's source when
+//! [`ListenOptions::proxy_protocol`] is on (a `LOCAL` header, a load balancer's health check,
+//! leaves the socket's peer), and from a peer among the operator's trusted proxies the address
+//! in the header they name ([`ListenOptions::client`]). A cluster with an IP allowlist answers a
+//! request from elsewhere with Elastic Cloud's traffic-filter 403 before anything else
+//! ([`crate::allow`]).
+//!
 //! A request is authenticated and pins its cluster first ([`Node::enter`], which also applies
 //! the cluster's request rate), reserves its `Content-Length` from the cluster's in-flight byte
 //! budget (a chunked body reserves each frame as it arrives, and a compressed body its output
@@ -29,8 +36,9 @@
 //! cancellation instead of holding the stop), and the stop goes ahead after as long again. The
 //! caller then shuts the node down ([`Node::shutdown`]), which flushes.
 
+use crate::allow::{ClientAddresses, Origin};
 use crate::net::read_proxy_header;
-use crate::node::{Node, Rejected};
+use crate::node::{Node, Refused, Rejected};
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full, Limited};
 use hyper::body::Incoming;
@@ -39,7 +47,7 @@ use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use search_es::{EsError, EsRequest, EsResponse};
 use std::io::{Read, Write};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -64,6 +72,8 @@ pub struct ListenOptions {
     pub tls: Option<TlsAcceptor>,
     /// Expect a PROXY protocol header on every connection (behind an NLB / HAProxy).
     pub proxy_protocol: bool,
+    /// Whose header names the client's address (a trusted proxy's; nobody's by default).
+    pub client: ClientAddresses,
     /// Overrides [`BODY_IDLE_TIMEOUT`] and [`BODY_TIMEOUT`] (tests).
     pub body_timeouts: Option<(Duration, Duration)>,
     /// Overrides [`DRAIN_TIMEOUT`] (tests).
@@ -139,7 +149,7 @@ pub async fn serve_until(listener: TcpListener, node: Arc<Node>, opts: ListenOpt
             a = listener.accept() => a,
             _ = stop.changed() => break,
         };
-        let (mut sock, _peer) = match accepted {
+        let (mut sock, peer) = match accepted {
             Ok(x) => x,
             Err(e) => {
                 // Out of file descriptors and similar: back off instead of spinning.
@@ -156,19 +166,15 @@ pub async fn serve_until(listener: TcpListener, node: Arc<Node>, opts: ListenOpt
         let stop = shutdown.subscribe();
         tokio::spawn(async move {
             let _guard = guard;
-            if opts.proxy_protocol {
-                match tokio::time::timeout(Duration::from_secs(5), read_proxy_header(&mut sock)).await {
-                    Ok(Ok(_)) => {}
-                    _ => return,
-                }
-            }
+            let Some(peer) = connection_peer(&mut sock, peer.ip(), opts.proxy_protocol).await else { return };
+            let conn = Conn { peer, client: opts.client.clone(), body_timeouts: opts.body_timeouts };
             match opts.tls {
                 Some(acceptor) => {
                     let Ok(Ok(tls)) = tokio::time::timeout(Duration::from_secs(10), acceptor.accept(sock)).await else { return };
                     let sni = tls.get_ref().1.server_name().map(str::to_string);
-                    serve_connection(tls, node, sni, opts.body_timeouts, stop).await;
+                    serve_connection(tls, node, sni, conn, stop).await;
                 }
-                None => serve_connection(sock, node, None, opts.body_timeouts, stop).await,
+                None => serve_connection(sock, node, None, conn, stop).await,
             }
         });
     }
@@ -184,6 +190,27 @@ pub async fn serve_until(listener: TcpListener, node: Arc<Node>, opts: ListenOpt
         }
     }
     Ok(())
+}
+
+/// Who sent a connection's requests: the socket's peer, or with `proxy_protocol` the PROXY
+/// header's source (a `LOCAL` or `UNKNOWN` header leaves the socket's peer). `None`: the header
+/// was missing, malformed or late, and the connection is dropped.
+pub async fn connection_peer<R: AsyncRead + Unpin>(sock: &mut R, peer: IpAddr, proxy_protocol: bool) -> Option<IpAddr> {
+    if !proxy_protocol {
+        return Some(peer);
+    }
+    match tokio::time::timeout(Duration::from_secs(5), read_proxy_header(sock)).await {
+        Ok(Ok(source)) => Some(source.map_or(peer, |s| s.ip())),
+        _ => None,
+    }
+}
+
+/// What a connection's requests share.
+#[derive(Clone)]
+struct Conn {
+    peer: IpAddr,
+    client: ClientAddresses,
+    body_timeouts: Option<(Duration, Duration)>,
 }
 
 /// Waits until every connection has closed, at most `timeout`; whether they all did.
@@ -214,7 +241,7 @@ pub async fn spawn(addr: &str, node: Arc<Node>, opts: ListenOptions) -> anyhow::
     Ok((local, task))
 }
 
-async fn serve_connection<S>(io: S, node: Arc<Node>, sni: Option<String>, body_timeouts: Option<(Duration, Duration)>, mut stop: tokio::sync::watch::Receiver<bool>)
+async fn serve_connection<S>(io: S, node: Arc<Node>, sni: Option<String>, conn: Conn, mut stop: tokio::sync::watch::Receiver<bool>)
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -222,8 +249,9 @@ where
     let svc = hyper::service::service_fn(move |req: Request<Incoming>| {
         let node = node.clone();
         let sni = sni.clone();
-        let timeouts = body_timeouts.unwrap_or((BODY_IDLE_TIMEOUT, BODY_TIMEOUT));
-        async move { respond(node, req, sni.as_deref(), timeouts).await }
+        let timeouts = conn.body_timeouts.unwrap_or((BODY_IDLE_TIMEOUT, BODY_TIMEOUT));
+        let origin = Origin::Client(conn.client.client(conn.peer, req.headers()));
+        async move { respond(node, req, sni.as_deref(), origin, timeouts).await }
     });
     let mut builder = hyper::server::conn::http1::Builder::new();
     // A client gets 30 s to send each request's headers (slowloris protection).
@@ -399,13 +427,31 @@ async fn read_body<B: RequestBody>(
 
 /// Serves one request as this node's REST port does, for a request another server accepted
 /// (a fleet node's front, which runs it on its cluster's owner): the same limits, decoding and
-/// answers. `Err`: close the connection without answering.
-pub async fn serve_request<B: RequestBody>(node: Arc<Node>, req: Request<B>) -> Result<Response<Full<Bytes>>, DropConnection> {
-    respond(node, req, None, (BODY_IDLE_TIMEOUT, BODY_TIMEOUT)).await
+/// answers. `origin`: who the request comes from, as that server decided (the cluster's IP
+/// allowlist checks it). `Err`: close the connection without answering.
+pub async fn serve_request<B: RequestBody>(node: Arc<Node>, req: Request<B>, origin: Origin) -> Result<Response<Full<Bytes>>, DropConnection> {
+    respond(node, req, None, origin, (BODY_IDLE_TIMEOUT, BODY_TIMEOUT)).await
 }
 
-async fn respond<B: RequestBody>(node: Arc<Node>, req: Request<B>, sni: Option<&str>, timeouts: (Duration, Duration)) -> Result<Response<Full<Bytes>>, DropConnection> {
+/// The answer to a request a cluster's IP allowlist refuses: Elastic Cloud's traffic filter's
+/// 403, the same for every cluster and dialect.
+pub fn filtered() -> Response<Full<Bytes>> {
+    let mut r = Response::new(Full::new(Bytes::from_static(crate::allow::REFUSED_BODY.as_bytes())));
+    *r.status_mut() = StatusCode::FORBIDDEN;
+    r.headers_mut().insert(hyper::header::CONTENT_TYPE, HeaderValue::from_static("application/json; charset=UTF-8"));
+    r.headers_mut().insert(hyper::header::CONTENT_LENGTH, HeaderValue::from(crate::allow::REFUSED_BODY.len()));
+    r
+}
+
+async fn respond<B: RequestBody>(node: Arc<Node>, req: Request<B>, sni: Option<&str>, origin: Origin, timeouts: (Duration, Duration)) -> Result<Response<Full<Bytes>>, DropConnection> {
     let mut es = head_of(&req);
+    // The client's address for audit entries is the one the allowlist checks: only the node
+    // says it, never a client.
+    use search_es::xpack::security::audit::CLIENT_ADDRESS_HEADER;
+    es.headers.retain(|(k, _)| !k.eq_ignore_ascii_case(CLIENT_ADDRESS_HEADER));
+    if let Origin::Client(ip) = origin {
+        es.headers.push((CLIENT_ADDRESS_HEADER.to_string(), crate::allow::canonical(ip).to_string()));
+    }
     let gzip_ok = accepts_gzip(es.header("accept-encoding")) && es.method != "HEAD";
     if let Some(e) = head_too_long(&req) {
         return Ok(closing(to_hyper(search_es::rest::error_response(&e, &es, search_es::Dialect::Elasticsearch), gzip_ok).await));
@@ -414,9 +460,10 @@ async fn respond<B: RequestBody>(node: Arc<Node>, req: Request<B>, sni: Option<&
     if es.header("expect").is_some_and(|v| !v.trim().eq_ignore_ascii_case("100-continue")) {
         return Ok(expectation_failed());
     }
-    let mut lease = match node.enter(&es, sni).await {
+    let mut lease = match node.enter_from(&es, sni, origin).await {
         Ok(l) => l,
-        Err(r) => return Ok(to_hyper(search_es::rest::error_response(&r.error, &es, r.dialect), gzip_ok).await),
+        Err(Refused::Filtered) => return Ok(filtered()),
+        Err(Refused::Rejected(r)) => return Ok(to_hyper(search_es::rest::error_response(&r.error, &es, r.dialect), gzip_ok).await),
     };
     let max = lease.max_body_bytes(&node);
     let declared = es.header("content-length").and_then(|v| v.trim().parse::<u64>().ok());

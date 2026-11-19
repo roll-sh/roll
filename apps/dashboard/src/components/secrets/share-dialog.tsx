@@ -5,7 +5,7 @@ import { sealShare, shareLink } from "@/lib/secrets-share";
 import { Dialog } from "../agents/ui/dialog";
 import { Select } from "../agents/ui/select";
 import { useSecrets } from "./secrets-page";
-import { button, ErrorNote, errorText, field, ghost, label, primary, until } from "./ui";
+import { button, ErrorNote, errorText, field, ghost, label, primary, textareaField, until } from "./ui";
 
 /** What's shared: a secret (revealed through the audited value route) or a value typed here. */
 export type ShareSource = { kind: "secret"; env: string; key: string; path: string } | { kind: "value" };
@@ -64,7 +64,9 @@ function Form({ source, onClose, onShared }: { source: ShareSource; onClose: () 
         plain = r.value;
       }
       const sealed = sealShare(plain);
-      const share = await api.createShare({ ciphertext: sealed.ciphertext, note: note.trim() || undefined, views: Number(views), ttl_minutes: Number(expiry) });
+      // A stored key's share says where it came from: a cut-off of the key expires it.
+      const from = source.kind === "secret" ? { environment: source.env, path: source.path, key: source.key } : undefined;
+      const share = await api.createShare({ ciphertext: sealed.ciphertext, note: note.trim() || undefined, views: Number(views), ttl_minutes: Number(expiry), from });
       setValue("");
       setMade({ link: shareLink(location.origin, share.id, sealed.key), share });
       onShared(share);
@@ -116,7 +118,7 @@ function Form({ source, onClose, onShared }: { source: ShareSource; onClose: () 
       {source.kind === "value" && (
         <label className="mb-3 block">
           <span className={label}>Value</span>
-          <textarea autoFocus value={value} onChange={(e) => setValue(e.target.value)} rows={3} spellCheck={false} autoComplete="off" className={`${field} h-auto resize-y py-1.5 font-mono`} />
+          <textarea autoFocus value={value} onChange={(e) => setValue(e.target.value)} rows={3} spellCheck={false} autoComplete="off" className={`${textareaField} resize-y font-mono`} />
         </label>
       )}
       {source.kind === "secret" && (

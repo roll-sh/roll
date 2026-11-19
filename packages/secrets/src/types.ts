@@ -84,7 +84,13 @@ export type Secret = {
   expires_at: number | null;
   /** Why a credential's value is easy to guess; only for a caller who may reveal it. */
   weak?: string;
+  /** That it's a decoy (docs/secrets.md, "Decoys"): only for the project's admins. */
+  decoy?: Decoy;
 };
+/** A decoy key's mark: what it is, and its uses (each refused). */
+export type Decoy = { kind: "rlt"; created_at: number; created_by: string; uses: number; used_at: number | null; used_ip: string | null };
+/** `POST …/environments/{env}/decoys`: a new key whose value is a decoy credential. */
+export type NewDecoy = { key: string; kind: "rlt"; path?: string };
 /** `expires_at`: null clears it; absent keeps it. */
 export type SetSecret = { value?: string; comment?: string; tags?: string[]; type?: SecretType; link?: Link | null; message?: string; expires_at?: number | null; if_version?: number };
 /** `path`: another folder for this one operation (default: the batch's). */
@@ -97,6 +103,14 @@ export type Change = { seq: number; environment: string; path: string; message: 
 /** `what`: added | changed | deleted | comment | tags | link | rotated */
 export type Item = { key: string; path: string; type: SecretType; what: string[]; from_fp: string | null; to_fp: string | null };
 export type Written = { change: Change | null; secret: Secret | null; warnings: string[] };
+/** The client's `delete`: `deleted` is false when the key wasn't there. */
+export type Deleted = { deleted: boolean; change: Change | null };
+/**
+ * The client's `secret`: one key's record as a folder sees it, never its value. `link_kind` is the
+ * kind of the link the value comes from (`postgres`, `github`…), null for a value stored in roll;
+ * `source` says where it's set (its own, a base's or an import's).
+ */
+export type SecretInfo = Pick<Secret, "key" | "path" | "type" | "version" | "comment" | "tags" | "source" | "updated_at" | "updated_by" | "expires_at"> & { link_kind: string | null };
 /** `change` is null when nothing changed. */
 /** `request`: the change request opened instead (a promotion into a protected environment). */
 export type Applied = { change: Change | null; items: Item[]; warnings: string[]; request?: ChangeRequest };
@@ -111,6 +125,8 @@ export type Problem = { key: string; problem: string };
 /** `digest` (with `?digest=1`): the folder's `…/digest`, taken just before this read (a watch compares from it). */
 /** `followed`: keys linked to a resource the ephemeral environment's preview branched, left out of `values`. */
 /** `plain`: of `linked`, keys whose link field isn't a credential (a host, a port): logs may show them; every other value is a secret. */
+/** `GET …/secrets/{key}/totp`: a TOTP key's code (a credential), valid until `expires_at` (ms: the end of its step). */
+export type Totp = { code: string; expires_at: number; period: number };
 export type Values = { values: Record<string, string>; problems: Problem[]; leases: string[]; dynamic: string[]; linked: string[]; plain?: string[]; withheld?: string[]; sensitive?: string[]; followed?: Followed[]; digest?: string };
 export type CellSource = "own" | "import" | "base";
 /** `misfit`: the typed-key rule the stored value breaks (shown only to whoever may reveal it). */
@@ -136,9 +152,54 @@ export type KeyInsight = { key: string; version: number; updated_at: number; upd
   weak?: string;
 };
 /** A token or identity that reaches a folder, with what it may do there. */
-export type Holder = { id: string; name: string; actions: Action[]; expires_at: number | null; last_used_at: number | null; created_by: string };
+/** `disabled_at`: an identity a cut-off disabled (it doesn't log in). `skipped`: why the caller's cut-off would leave this token (it reaches beyond the project: only the operator revokes it). */
+export type Holder = { id: string; name: string; actions: Action[]; expires_at: number | null; last_used_at: number | null; created_by: string; disabled_at?: number; skipped?: string };
+/** A frozen folder: reads of its values answer 423 `frozen` to all but its admins. */
+export type Freeze = { why: string; at: number; by: string };
 /** `GET …/reach` (a project admin's): every way a folder's (or one key's) values can leave roll. Names only. */
-export type Reach = { environment: string; path: string; key: string | null; protected: boolean; untrusted: boolean; tokens: Holder[]; identities: Holder[]; syncs: { id: string; kind: string; target: unknown; last_synced_at: number | null }[]; projects: string[]; imported_by: string[]; truncated: boolean; readers: { actor: string; last_at: number; reads: number }[]; uncounted: string };
+export type Reach = {
+  environment: string;
+  path: string;
+  key: string | null;
+  protected: boolean;
+  untrusted: boolean;
+  tokens: Holder[];
+  identities: Holder[];
+  syncs: { id: string; kind: string; target: unknown; last_synced_at: number | null; paused_at: number | null }[];
+  /** Live dynamic credentials issued for its keys. */
+  leases: { id: string; key: string; consumer: string; issued_at: number; expires_at: number }[];
+  /** Open one-time shares made from its keys, as their makers said (`from`). */
+  shares: { id: string; note: string; key: string; created_by: string; expires_at: number }[];
+  /** Open shares of the project that don't say where their value came from. */
+  unattributed_shares: number;
+  projects: string[];
+  imported_by: string[];
+  truncated: boolean;
+  readers: { actor: string; last_at: number; reads: number }[];
+  uncounted: string;
+  frozen: Freeze | null;
+};
+/** `POST …/reach/cut-off`: what to cut (each on unless false; `freeze` off unless true), and why. */
+export type CutOffRequest = { why: string; tokens?: boolean; identities?: boolean; leases?: boolean; shares?: boolean; syncs?: boolean; freeze?: boolean };
+export type Cut = { id: string; name: string };
+/** What a cut-off did: what was cut, and what couldn't be with why (the rest went on). `skipped`: tokens that reach beyond the project, left for the operator to revoke. `batches`: calls to roll-access, 500 grants each at most. */
+export type CutOff = {
+  environment: string;
+  path: string;
+  key: string | null;
+  why: string;
+  tokens: Cut[];
+  skipped: (Cut & { why: string })[];
+  identities: Cut[];
+  logins: number;
+  batches: number;
+  leases: Cut[];
+  shares: Cut[];
+  projects: string[];
+  syncs: Cut[];
+  frozen: boolean;
+  failed: { what: "tokens" | "identities" | "logins" | "leases" | "shares" | "syncs" | "freeze" | "audit"; ids: string[]; why: string }[];
+};
 export type Insights = { path: string; max_age_days: number | null; reads_since: number; keys: KeyInsight[] };
 
 export type ChangeRequest = {
@@ -190,17 +251,29 @@ export type Token = {
   keys?: string | null;
 };
 /** A one-time share (never its ciphertext): `open` until its last open, expiry or revocation. */
-export type Share = { id: string; note: string; views_left: number; created_by: string; created_at: number; expires_at: number; opened_at: number | null; open: boolean };
+export type Share = { id: string; note: string; views_left: number; created_by: string; created_at: number; expires_at: number; opened_at: number | null; open: boolean; from?: ShareFrom };
+/** The key a share's value came from (a cut-off of it expires the share). */
+export type ShareFrom = { environment: string; path?: string; key: string };
 /** `ciphertext`: base64url(nonce ‖ AES-256-GCM ciphertext) with `roll-share-v1` as associated data; `views` 1–10, `ttl_minutes` 5–10080. */
-export type NewShare = { ciphertext: string; note?: string; views?: number; ttl_minutes?: number };
-export type KeyType = "url" | "int" | "port" | "bool" | "json" | "email";
+export type NewShare = { ciphertext: string; note?: string; views?: number; ttl_minutes?: number; from?: ShareFrom };
+export type KeyType = "url" | "int" | "port" | "bool" | "json" | "email" | "totp";
 /** A key every standard environment must define in a folder; typed keys also say what its value must be. */
 /** `owner`: who supplies it (a person or team), named in health and the daily notice. */
-export type Required = { key: string; path: string; comment: string; type?: KeyType; pattern?: string; owner?: string };
+export type PasswordClass = "lower" | "upper" | "digit" | "symbol";
+/** What a key's values must be made of, and what generators make (`classes` defaults to letters and digits; `symbols` to `!#%&*+-=?^_~`). */
+export type PasswordPolicy = { length: number; classes?: PasswordClass[]; symbols?: string };
+export type Required = { key: string; path: string; comment: string; type?: KeyType; pattern?: string; owner?: string; password?: PasswordPolicy };
 /** A workload identity: CI jobs and clusters whose OIDC tokens match log in for a short-lived token. */
+/** What a login proves itself with: an OIDC token, or a signed AWS `GetCallerIdentity`. */
+export type IdentityKind = "oidc" | "aws";
 export type Identity = {
   id: string;
   name: string;
+  kind: IdentityKind;
+  /** An `aws` identity's role or user (also its `subject`; its `issuer` is `aws`). */
+  arn?: string;
+  /** What an `aws` identity's signed requests name in `X-Roll-Server-ID` (`ROLL_AWS_SERVER_ID`). */
+  server_id?: string;
   /** The token's `iss`. */
   issuer: string;
   audience: string;
@@ -220,14 +293,24 @@ export type Identity = {
   allowed_ips: string[] | null;
   /** How many keys it pins, when it carries its issuer's keys (a cluster roll can't reach). */
   pinned_keys?: number;
+  /** The gateway it logs in (its tokens open that gateway's link and nothing else). */
+  gateway?: string;
+  /** When a cut-off disabled it, and why: it doesn't log in until an admin enables it. */
+  disabled_at: number | null;
+  disabled_why: string | null;
 };
-/** `jwks`: the issuer's keys (a JWKS document as text); then the issuer is never fetched. */
-export type NewIdentity = { name: string; issuer: string; audience: string; subject: string; claims?: Record<string, string>; environments?: string[]; paths?: string[]; actions: Action[]; ttl_minutes?: number; allowed_ips?: string[]; jwks?: string };
+type IdentityScope = { name: string; environments?: string[]; paths?: string[]; actions: Action[]; ttl_minutes?: number; allowed_ips?: string[]; gateway?: string };
+/**
+ * `jwks`: the issuer's keys (a JWKS document as text); then the issuer is never fetched. An `aws`
+ * identity takes one role or user instead (`arn:aws:iam::<account>:role/<name>`, or
+ * `arn:aws:sts::<account>:assumed-role/<role>/<session prefix>*`).
+ */
+export type NewIdentity = IdentityScope & ({ kind?: "oidc"; issuer: string; audience: string; subject: string; claims?: Record<string, string>; jwks?: string } | { kind: "aws"; arn: string });
 export type NewToken = { name: string; environments?: string[]; paths?: string[]; actions: Action[]; expires_at?: number; ttl_days?: number; allowed_ips?: string[] };
 /** `approval`: the approval that let the request through roll-access's gate (an `ask` approved; `until` when a rule it remembered allowed it). */
 /** `seq` and `hash` place a row in its project's chain (absent on rows from before it); an `audit.digest` row's `digest` is roll's signed JWS of it. */
 export type AuditEntry = { id: number; seq?: number; hash?: string; at: number; actor: string; action: string; environment: string | null; path: string | null; keys: string[]; summary: string; ip: string | null; approval?: Approval; digest?: string };
-/** Where the chain breaks: `edited`, `missing`, `rewritten`, `signature`, `truncated`, `cut`, `unchained`, `head` or `stale`. */
+/** Where the chain breaks: `edited`, `missing`, `rewritten`, `signature`, `truncated`, `cut`, `unchained`, `gap`, `head` or `stale`. */
 export type AuditBreak = { seq?: number; reason: string; detail: string };
 /** `GET …/audit/verify`: rows `from`–`head` walked, signed by a digest `through` a row. */
 export type AuditVerification = { ok: boolean; from: number | null; through: number | null; signed_at: number | null; head: number | null; rows: number; digests: number; unchained: number; broken: AuditBreak | null };
@@ -264,6 +347,9 @@ export type Sync = {
   signed: boolean;
   created_at: number;
   created_by: string;
+  /** When a cut-off paused it, and why: it pushes nothing until an admin resumes it. */
+  paused_at: number | null;
+  paused_why: string | null;
 };
 /** What a sync would push before it exists (`POST …/syncs/preview`): names only. */
 export type SyncPreview = { names: string[]; credentials: string[]; missing_credentials: string[]; unknown_keys: string[] };
@@ -283,12 +369,12 @@ export type AwsRole = { id: string; name: string; role_arn: string; trust: "exte
 /** Where a key is set (`GET /v1/secrets/search?key=`): names and versions, never a value. */
 export type Place = { project: string; project_name: string; environment: string; path: string; key: string; version: number; updated_at: number; linked: boolean };
 /** One thing to fix (`GET …/health`), worst first: where, never a value. */
-export type Finding = { issue: "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "public" | "weak" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string; owner?: string };
+export type Finding = { issue: "decoy_used" | "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "public" | "weak" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string; owner?: string };
 /** One project's findings (`GET /v1/secrets/findings`). */
 export type ProjectFindings = { project: string; project_name: string; findings: Finding[] };
 /** A URL roll calls to issue and revoke a value that lives outside roll (`rotator` links). */
 /** A managed credential and its rotation: its keys, resource, schedule, and why its last scheduled rotation failed. */
-export type Rotation = { environment: string; path: string; keys: string[]; kind: string; ref: string; name: string; rotate_days: number | null; grace_minutes: number; issued_at: number | null; next_due: number | null; last_error: string | null; failed_at: number | null };
+export type Rotation = { environment: string; path: string; keys: string[]; kind: string; ref: string; name: string; rotate_days: number | null; rotate_window: string | null; grace_minutes: number; issued_at: number | null; next_due: number | null; last_error: string | null; failed_at: number | null };
 /** An encryption key (encryption as a service): its versions, never its material. */
 /** A transit key version's public signing key (Ed25519): raw base64, PEM (SPKI) and a JWK. */
 export type TransitPublicKey = { version: number; public_key: string; pem: string; jwk: { kty: "OKP"; crv: "Ed25519"; x: string; kid: string; alg: "EdDSA"; use: "sig" } };
@@ -296,9 +382,15 @@ export type TransitKey = { id: string; name: string; latest_version: number; min
 /** A project's certificate authority: what it signs for, and its certificate (PEM) for clients to trust. */
 /** A certificate a CA signed for a CSR (`POST …/cas/{id}/sign`): the device keeps its key. */
 /** A certificate a CA signed and that hasn't expired (`GET …/cas/{id}/certificates`). */
-export type CaCertificate = { serial: string; names: string[]; source: "csr" | "link"; not_after: number; issued_at: number; issued_by: string; revoked_at?: number };
+export type CaCertificate = { serial: string; names: string[]; source: "csr" | "link" | "acme"; not_after: number; issued_at: number; issued_by: string; revoked_at?: number };
 export type SignedCertificate = { certificate: string; ca: string; serial: string; names: string[]; not_after: number };
 export type Ca = { id: string; name: string; certificate: string; domains: string[]; allow_ip: boolean; max_days: number; created_at: number; created_by: string };
+/** An ACME External Account Binding on a CA: what an account made with it may order (`names`: each takes every name under it; none: the CA's whole policy). */
+export type AcmeBinding = { id: string; label: string; names: string[] | null; expires_at: number | null; created_at: number; created_by: string; revoked_at: number | null; revoked_by: string | null; used_at: number | null; accounts: number };
+/** A CA's ACME directory, whether its bindings' names are pre-authorized (no challenge), the challenges it validates and its bindings (`GET …/cas/{id}/acme`). */
+export type AcmeSettings = { directory: string; pre_authorize: boolean; challenges: ("http-01" | "dns-01")[]; bindings: AcmeBinding[] };
+/** A new binding and its HMAC key (base64url), shown this once. */
+export type NewAcmeKey = AcmeBinding & { key_id: string; hmac_key: string; directory: string };
 /** A project's SSH CA: the principals it signs for, and its public key for servers' TrustedUserCAKeys. */
 export type SshCa = { id: string; name: string; public_key: string; principals: string[]; max_hours: number; host_domains?: string[]; max_host_days: number; known_hosts?: string; created_at: number; created_by: string };
 /** A person's own key certified by an SSH CA (`POST …/ssh-cas/{id}/sign-user`). */
@@ -311,10 +403,41 @@ export type CloudAccount =
   | { id: string; name: string; cloud: "azure"; tenant: string; client_id: string; scope: string; created_at: number; created_by: string };
 export type NewCloudAccount = { name: string } & ({ cloud: "gcp"; audience: string; service_account: string } | { cloud: "azure"; tenant: string; client_id: string; scope?: string });
 /** A Postgres, MySQL, Redis or MongoDB server outside roll: two login roles that take turns (managed), a group dynamic logins join, or both; the admin URL stays sealed. */
-export type OutsideDatabase = { id: string; name: string; host: string; roles: string[]; group?: string; ca?: string; created_at: number; created_by: string };
+export type OutsideDatabase = { id: string; name: string; host: string; roles: string[]; group?: string; ca?: string; gateway?: string; created_at: number; created_by: string };
+/** An LDAP or Active Directory server outside roll: one or two managed accounts (two take turns), a base dynamic users are made under (in `groups`), or both; the bind password stays sealed. */
+export type DirectoryFlavor = "openldap" | "active_directory";
+export type Directory = { id: string; name: string; url: string; flavor: DirectoryFlavor; bind_dn: string; user_base_dn?: string; managed_accounts: string[]; groups: string[]; ca?: string; gateway?: string; created_at: number; created_by: string };
+/** A Snowflake account: a service user whose key slots take turns (managed), roles a user per lease is granted (dynamic), or both; the admin user's private key stays sealed. */
+export type SnowflakeAuth = "key_pair" | "password";
+export type SnowflakeAccount = { id: string; name: string; account: string; host: string; admin_user: string; admin_role?: string; admin_key_fp: string; auth: SnowflakeAuth; managed_user?: string; roles: string[]; created_at: number; created_by: string };
+/** A MongoDB Atlas project, reached through its Admin API: two database users that take turns (managed), roles a user per lease gets (dynamic), or both; the service account's secret stays sealed. */
+export type AtlasProject = { id: string; name: string; group_id: string; client_id: string; managed_users: string[]; roles: string[]; created_at: number; created_by: string };
+export type NewAtlasProject = { name: string; group_id: string; client_id: string; client_secret: string; managed_users?: string[]; roles?: string[] };
+export type NewSnowflakeAccount = { name: string; account: string; privatelink?: boolean; admin_user: string; admin_role?: string; admin_private_key: string; auth?: SnowflakeAuth; managed_user?: string; roles?: string[] };
+export type NewDirectory = { name: string; url: string; bind_dn: string; bind_password: string; flavor: DirectoryFlavor; user_base_dn?: string; managed_accounts?: string[]; groups?: string[]; ca?: string; gateway?: string };
+/** A gateway into a private network (docs/secrets.md, "Gateways"): a process inside it dials out to roll and relays roll's conversations with private databases and directories. `status` is what its link last reported; `allow` is the gateway's own allow-list, which it enforces. */
+export type Gateway = {
+  id: string;
+  name: string;
+  token_id?: string;
+  created_at: number;
+  created_by: string;
+  status: { online: boolean; node?: string; version?: string; allow: string[]; connected_at?: number; last_seen_at?: number };
+};
+/** A new gateway and its roll token, shown once (none with `token: false`). */
+export type MadeGateway = { gateway: Gateway; token?: string };
 /** A GitHub App's installation; `repositories` and `permissions` are the most its tokens may reach. */
 export type GitHubApp = { id: string; name: string; app_id: number; installation_id: number; api_base: string; repositories: string[]; permissions: Record<string, string>; created_at: number; created_by: string };
 export type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };
+/** A vendor roll issues and revokes keys at itself (`saas` links): its account, never the credential. */
+export type SaasVendor = "sendgrid" | "twilio" | "okta" | "entra" | "auth0";
+export type SaasRotator = { id: string; name: string; vendor: SaasVendor; target: Record<string, unknown>; created_at: number; created_by: string };
+/** `credential` is sealed at once and never answered. */
+export type NewSaasRotator = { name: string; vendor: SaasVendor; target: Record<string, unknown>; credential: string };
+/** A Kubernetes cluster whose service accounts get short-lived tokens per lease (dynamic `kubernetes` links); the admin token and the CA stay sealed. */
+export type KubernetesCluster = { id: string; name: string; api_url: string; has_ca: boolean; created_at: number; created_by: string };
+/** `token`: a service account token that may create tokens; `ca_pem`: the cluster's CA, when it isn't publicly trusted. */
+export type NewKubernetesCluster = { name: string; api_url: string; ca_pem?: string; token: string };
 export type WhoAmI = { principal: string; project?: string | null; scopes?: unknown };
 
 /** A `roll-seal-v1` box (base64url fields): X25519 to the recipient, HKDF-SHA256, AES-256-GCM. */

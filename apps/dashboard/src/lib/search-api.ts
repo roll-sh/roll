@@ -8,6 +8,9 @@
 
 import { apiHeaders, call, onApiStatus, ROLL_API } from "./roll-api";
 import { withSession } from "./code-token";
+import { analyticsQuery, type AnalyticsRange, type SearchAnalytics } from "./search-analytics";
+import type { MetricsRange, SearchMetrics, SearchSlowLog } from "./search-performance";
+import type { AuditPage } from "./search-audit";
 
 export type Flavor = "elasticsearch" | "opensearch";
 
@@ -82,6 +85,19 @@ export interface SearchSettings {
   destructive_requires_name: boolean;
 }
 
+/** One entry of a cluster's IP allowlist (roll apps' `allow_ips` have the same shape). */
+export interface IpRule {
+  /** Canonical: `203.0.113.7/32`, `10.0.0.0/8`, `2001:db8::/32`. */
+  cidr: string;
+  description?: string;
+}
+
+/** What `PATCH /v1/search/clusters/{id}` takes. */
+export type SearchClusterPatch = Partial<SearchSettings> & {
+  /** Only these networks reach the cluster's endpoint ([]: anyone). */
+  ip_allowlist?: (string | IpRule)[];
+};
+
 export interface BranchRef {
   id: string;
   name: string;
@@ -106,6 +122,8 @@ export interface SearchCluster extends SearchSettings {
   own_bytes: number;
   /** The signed-in person (`usr_…`) whose cluster it is; null for the operator's and admins'. */
   owner?: string | null;
+  /** Only these networks reach its endpoint ([]: anyone). The dashboard and API aren't filtered. */
+  ip_allowlist: IpRule[];
   url: string;
   host: string;
   port: number;
@@ -217,7 +235,7 @@ export const searchApi = {
   get: (id: string) => call<SearchCluster>("GET", cl(id)),
   create: (name: string, settings: Partial<SearchSettings>) =>
     call<SearchCluster>("POST", "/v1/search/clusters", { name, ...settings }),
-  update: (id: string, settings: Partial<SearchSettings>) => call<SearchCluster>("PATCH", cl(id), settings),
+  update: (id: string, settings: SearchClusterPatch) => call<SearchCluster>("PATCH", cl(id), settings),
   remove: (id: string) => call<{ deleted: string; name: string }>("DELETE", cl(id)),
   deleted: () => call<DeletedSearchCluster[]>("GET", "/v1/search/clusters?deleted=true"),
   /** Without `name` it comes back under its own (409 when another cluster took it). */
@@ -230,10 +248,52 @@ export const searchApi = {
   request: (id: string, method: string, path: string, body?: unknown) =>
     call<ConsoleResponse>("POST", `${cl(id)}/request`, { method, path, body }),
   usage: (id: string, days = 30) => call<SearchUsage>("GET", `${cl(id)}/usage?days=${days}`),
+  metrics: (id: string, range: MetricsRange) => call<SearchMetrics>("GET", `${cl(id)}/metrics?range=${range}`),
+  slowlog: (id: string) => call<SearchSlowLog>("GET", `${cl(id)}/slowlog`),
+  analytics: (id: string, index: string | null, range: AnalyticsRange) => call<SearchAnalytics>("GET", `${cl(id)}/analytics?${analyticsQuery(index, range)}`),
   createKey: (id: string, name: string, access: KeyAccess, expiresInS?: number) =>
     call<NewSearchKey>("POST", `${cl(id)}/keys`, { name, access, expires_in_s: expiresInS }),
   revokeKey: (id: string, key: string) => call<null>("DELETE", `${cl(id)}/keys/${encodeURIComponent(key)}`),
+  /** The endpoints whose key comes from a roll secret, and the projects whose secrets may key one. */
+  inferenceSecrets: (id: string) => call<InferenceSecrets>("GET", `${cl(id)}/inference/secrets`),
+  /** An endpoint keyed by a roll secret: `config` is the `_inference` body without `api_key`. */
+  createInferenceFromSecret: (id: string, e: NewInferenceFromSecret) =>
+    call<{ endpoint: unknown; binding: InferenceBinding }>("POST", `${cl(id)}/inference/secrets`, e),
+  /** The cluster's security audit log, newest first (never wakes it). `from`/`to`: Unix ms. */
+  audit: (id: string, q: { from?: number; to?: number; event?: string; size?: number } = {}) => {
+    const params = new URLSearchParams();
+    for (const [k, v] of Object.entries(q)) if (v !== undefined && v !== "") params.set(k, String(v));
+    const qs = params.toString();
+    return call<AuditPage>("GET", `${cl(id)}/audit${qs ? `?${qs}` : ""}`);
+  },
 };
+
+/** An inference endpoint whose key follows a roll secret (a `search-inference` sync). */
+export interface InferenceBinding {
+  endpoint: string;
+  project: string;
+  environment: string;
+  path: string;
+  key: string;
+  /** The sync (roll secrets' `…/syncs/{id}`: run it to push the key now, delete it to stop). */
+  sync: string;
+  status: "pending" | "ok" | "error";
+  error: string | null;
+  last_synced_at: number | null;
+}
+
+export interface InferenceSecrets {
+  /** The projects whose canvas holds the cluster (and stands for it) that the caller may read. */
+  projects: { id: string; name: string }[];
+  bindings: InferenceBinding[];
+}
+
+export interface NewInferenceFromSecret {
+  inference_id: string;
+  task_type?: string;
+  config: Record<string, unknown>;
+  secret: { project?: string; environment: string; path?: string; key: string };
+}
 
 /**
  * An Elasticsearch error body's reason (`error.reason`, or the first root cause's), followed by

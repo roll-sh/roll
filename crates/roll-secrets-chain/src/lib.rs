@@ -82,6 +82,21 @@ pub struct Digest {
     pub at: i64,
     /// Where the log starts: 1, or the digest retention cut it at (rows before it were removed).
     pub start: i64,
+    /// Set when roll couldn't vouch for the log just before this digest: its newest digest was
+    /// older than `verify` allows, or wasn't the one roll last wrote. Rows written in that span may
+    /// have been removed and an old head put back, so `verify` reports it for as long as this
+    /// digest is in the log.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gap: Option<Gap>,
+}
+
+/// A span roll signed nothing for ([`Digest::gap`]).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Gap {
+    /// The newest digest the chain held then (0: none).
+    pub after: i64,
+    /// When that digest was signed (with none, the chain's first row's time).
+    pub since: i64,
 }
 
 /// An RSA public key (a JWKS entry's `n` and `e`, big-endian).
@@ -114,8 +129,9 @@ pub struct Break {
     /// `edited` (a row doesn't hash to what's stored), `missing` (a gap: rows deleted),
     /// `rewritten` (the chain doesn't match what a digest signed), `signature` (a digest that
     /// doesn't verify), `truncated` (rows deleted from the end), `cut` (rows deleted from the
-    /// start other than by retention), `unchained` (a row added outside the chain); the server
-    /// also says `head` (the head lacks roll's MAC) and `stale` (no digest for over two hours).
+    /// start other than by retention), `unchained` (a row added outside the chain), `gap` (a digest
+    /// roll signed after a span it couldn't vouch for: [`Digest::gap`]); the server also says `head`
+    /// (the head lacks roll's MAC) and `stale` (no digest for over two hours).
     pub reason: String,
     pub detail: String,
 }
@@ -251,12 +267,15 @@ pub struct Walk<'a> {
     start: Option<i64>,
     /// Rows skipped before the first anchor.
     pub skipped: i64,
+    /// The first gap a digest records: reported when nothing else breaks, so an old gap never
+    /// hides a later edit.
+    gap: Option<Break>,
     pub v: Verification,
 }
 
 impl<'a> Walk<'a> {
     pub fn new(project: &'a str, whole: bool) -> Walk<'a> {
-        Walk { project, whole, prev: None, start: None, skipped: 0, v: Verification::default() }
+        Walk { project, whole, prev: None, start: None, skipped: 0, gap: None, v: Verification::default() }
     }
 
     fn fail(&mut self, seq: Option<i64>, reason: &str, detail: String) -> bool {
@@ -305,6 +324,11 @@ impl<'a> Walk<'a> {
             if d.project != self.project || d.seq != seq - 1 || d.hash != prev {
                 return self.fail(Some(seq - 1), "rewritten", format!("the log through #{} isn't what roll signed at #{seq}", seq - 1));
             }
+            if let (Some(g), None) = (&d.gap, &self.gap) {
+                let from = if g.after > 0 { format!("digest #{}", g.after) } else { "the chain's start".into() };
+                let hours = (d.at - g.since) / 3_600_000;
+                self.gap = Some(Break { seq: Some(seq), reason: "gap".into(), detail: format!("roll signed nothing for {hours} hours between {from} and digest #{seq}: rows written then may have been removed and an old head put back, or the signer was stopped") });
+            }
             self.v.digests += 1;
             self.v.through = Some(d.seq);
             self.v.signed_at = Some(d.at);
@@ -334,6 +358,9 @@ impl<'a> Walk<'a> {
             && from != start
         {
             self.broken(Some(from), "cut", format!("the log starts at #{from}, but roll signed that it starts at #{start}"));
+        }
+        if let Some(gap) = self.gap.take() {
+            self.broken(gap.seq, &gap.reason, gap.detail);
         }
         self.v.ok = self.v.broken.is_none();
         self.v

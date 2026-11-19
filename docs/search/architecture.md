@@ -192,8 +192,17 @@ Lucene can (the FSTs, smartcn's serialized tables), the FSTs are rebuilt with th
   `job_wake_interval` (15 s) the node a due cluster's lease is placed on loads it, the scheduler
   runs what came due, and the idle unload puts it back to sleep, billed as loaded time. A
   cluster without jobs is never woken: the only standing cost is one catalog query per node.
+- **Search analytics** (README, "Search analytics") cost a search one relaxed load while no index
+  has them on. Recorded buckets wait on the cluster (`search_es::analytics`) for the 60 s metering
+  pass, which already runs, with the request metrics and slow logs (`Node::take_observations`);
+  an unloading cluster hands them to the node's carry-over, so a sleeping cluster holds and
+  writes nothing.
 - **Local disk** is a cache with a byte budget (`--search-cache-bytes`). Evicting a segment is
   always safe: every segment in a manifest is already in object storage.
+- **The audit log** (README, "Audit log") writes nothing for a cluster nothing happens to: a
+  node's flusher runs only while entries wait (5 s batches, one object each, under
+  `search/c/<cluster>/audit/`), reading it never wakes the cluster, and a wrong cluster password
+  is recorded without waking it.
 
 ## Branching
 
@@ -278,6 +287,92 @@ without naming either. With no key they are stored as given, as Elasticsearch do
 Elasticsearch does without cluster state encryption. Users' passwords are hashes and API keys
 are kept as hashes, never sealed.
 
+## Client addresses and IP allowlists
+
+A cluster can have an IP allowlist (`ip_allowlist`: at most 64 CIDRs, IPv4 or IPv6, each with an
+optional description; empty means open). It works like Elastic Cloud's traffic filters and AWS
+OpenSearch Service's IP-based policies. It filters the **data plane**: every request to the
+cluster's Elasticsearch/OpenSearch endpoint, on any node and through the edge. The node checks it
+in `Node::enter_from` as soon as it knows which cluster the request names (`search-server`
+`allow.rs`). It runs before the credentials are looked at and before a sleeping cluster wakes. A
+refused request gets Elastic Cloud's answer, 403
+`{"ok":false,"message":"Forbidden due to traffic filtering"}`, the same for every cluster and
+dialect. Wrong credentials from a refused address get that 403, not a 401, so a scanner can't
+probe credentials or learn the flavor or version. A name that isn't a cluster still gets the
+401 it gets today: whether a cluster exists can be told from outside, as on Elastic Cloud (404
+from its proxy), and cluster names are DNS labels anyway.
+
+The **control plane** isn't filtered: `/v1/search` and the dashboard sit behind roll's own
+sign-in and tokens, as Elastic Cloud's console and API aren't subject to traffic filters. Its
+own requests to a cluster (the console, the per-index routes, links' API keys, previews'
+masking) run in process (`Control::call`, `Origin::Internal`). On a fleet they are forwarded to
+the owner signed with `INTERNAL_CLIENT` in place of an address. So the dashboard's console keeps
+working from anywhere, also on a cluster whose allowlist admits nobody the person is at.
+A linked remote cluster's part of a cross-cluster search (README.md, "Cross-cluster search") is
+such a request too: it goes from the local cluster's node to the remote's owner in process or
+signed, never through the public endpoint, so the remote's allowlist doesn't apply to it (and
+the local cluster's has already admitted the client): a client the local cluster admits reads the
+remote's data within the key's access, whatever the remote's own allowlist says. Only these calls may carry the link's
+`x-roll-remote-access` header, which lets a `cross_cluster` key authenticate: the node drops it
+from every request with another origin (`Lease::handle`), as it drops `x-roll-authenticated-user`.
+
+**The client address** is decided by the node that accepted the connection, by one rule
+(`ClientAddresses`, rolld's flags):
+
+1. The connection's peer: the socket's peer, or with `--search-proxy-protocol` the PROXY header's
+   source. The NLB is transparent: a v1/v2 header is read before anything else, within 5 s,
+   and a connection without a valid one is dropped. A `LOCAL` header (a health check) leaves
+   the socket's peer.
+2. When the operator names a header (`--search-client-ip-header`, e.g. `CF-Connecting-IP`), its
+   address replaces the peer's only when that peer is inside `--search-trusted-proxies`. The
+   last value is used (a proxy appends its own). A header from any other peer is ignored, and an
+   unreadable one leaves the peer. Neither flag works without the other, and naming
+   `X-Forwarded-For` or `Forwarded` is refused: those carry what the client wrote itself.
+3. IPv4-mapped IPv6 addresses (`::ffff:a.b.c.d`, from a dual-stack socket) are the IPv4 address
+   they carry, for the trusted-proxy check and for the allowlist. A mapped CIDR in an allowlist
+   is stored as its IPv4 CIDR.
+
+Nothing else is believed: a client's own `X-Forwarded-For`, `X-Real-IP` or `x-roll-code-client`
+never decides its address.
+
+**On the fleet** the node a client reached decides the address. It is roll-edge's HTTPS
+listener for `<cluster>.search.…`, which puts it in `ConnectInfo`, or a node's REST port
+(`cluster::serve_front`, the same rule as above). A forward to the owner carries it in
+`x-roll-code-client`, which the HMAC over the forward covers (roll-cluster `sign.rs`). The owner
+takes the address only from that signed field (`cluster::origin_of`). The owner's check is the
+one that counts; the forwarding node doesn't check first, since it doesn't hold the cluster. The
+internal route forwards arrive on (`/internal/search/rest`, which rolld's gate lets in without
+a token) takes signed requests only (`roll_cluster::require_signed`). So a client can't reach the
+owner with an address it chose, or with none. A forward that carries no address, or one that
+doesn't parse, is refused by any allowlist.
+
+**roll cloud** (docs/cloud/README.md) needs no search flags for this. Clients reach clusters at
+`https://<cluster>.search.<region>.<domain>` through the NLB, which sends PROXY v2 to the edge
+(`--edge-proxy-protocol`). These hostnames are DNS only, not proxied by Cloudflare, so the
+edge's client is the PROXY source, the client's own address. The REST port (`--search-http`)
+isn't behind the NLB there. A deployment that puts the REST port itself behind a load balancer
+sets `--search-proxy-protocol` for an NLB or HAProxy. Behind an HTTP proxy that writes the
+client's address, it names that header with the proxy's addresses as trusted: for Cloudflare,
+`--search-client-ip-header CF-Connecting-IP --search-trusted-proxies <cloudflare.com/ips>`, with
+the PROXY header first when an NLB sits between them.
+
+**What an owner must allow.** Anything that uses the cluster over its endpoint is a client like
+any other, and roll apps' instances and roll previews' services are no exception. They connect
+from the addresses roll's hosts send from, which every tenant on those hosts shares. On one node
+an app instance reaches a linked cluster through roll apps' link relay on the host's loopback, so
+the address search sees is the node's own (`127.0.0.1`, or `::1`), not the container's; an
+instance that calls the REST port directly comes from the container bridge's gateway (`172.17.0.1`
+on Docker's default network).
+On roll cloud today it is per-task public IPs. There is no NAT gateway (docs/cloud/README.md,
+"Isolated work"), and fixed outbound addresses are roll apps' Next item "Static outbound IPs".
+Until then, a cluster that a roll-hosted app or preview uses stays open, or lists those
+addresses as they change. As on Elastic Cloud, where other deployments can't connect through a
+traffic filter unless admitted, roll doesn't let its own hosted workloads through implicitly:
+that would let every tenant's app past every allowlist. Credentials still decide who gets in
+after that. What roll does for a link itself (making and revoking its API key, a preview
+branch's masking) is the control plane and needs nothing. A branch starts with its parent's
+allowlist (a preview's branch included); change it like any setting.
+
 ## Snapshots
 
 - **Where they live.** A repository's snapshots are recorded with the cluster's metadata, keyed
@@ -308,14 +403,70 @@ are kept as hashes, never sealed.
   `http.max_content_length` (charged to the breakers as its write was), listings by pages and
   objects, and a restore checks names and global state as the APIs that set them do. Taking a snapshot reads the open shards' searchers (a closed index's last commit,
   pinned only while it is read), so nothing stays in roll's storage.
-- **Credentials.** Elasticsearch takes an `s3` client's keys from its keystore; a roll tenant
-  has none, so `access_key`, `secret_key` and `session_token` come with the repository's
-  settings and are moved out of them at once into the repository's sealed secrets (`seal.rs`,
-  the deployment's `ROLL_SECRET_KEY`), opened only to sign a request (SigV4), never returned by
-  `GET _snapshot` or the cluster state and never logged. Without credentials requests are
-  anonymous: roll's own credentials are never used for a tenant's bucket. The endpoint is a URL
-  the tenant chose: public addresses only (`roll_net::PublicOnly`, `literal_private_host`), no
-  redirects, no proxy, bounded reads (`--search-repository-allow-private` for local MinIO).
+- **Objects and parts** (`api/snapshots/transfer.rs`). A segment's records are one gzip stream
+  cut into objects of `chunk_size` (default and most 5tb, least 5mb, never more than
+  `buffer_size` × `max_multipart_parts`); an object larger than `buffer_size` (5mb to 5gb;
+  default 100mb or 5% of the node's heap, whichever is less) goes up as a multipart upload of
+  `buffer_size` parts, the settings validated with Elasticsearch's messages. One part at a time is
+  held, charged to the `request` breaker, and a restore inflates and indexes records as the
+  bytes arrive, so neither side holds a whole file. An upload that fails is aborted; one a crash
+  left is aborted by `_cleanup` and after snapshot deletions (as Elasticsearch does then), listed
+  by `ListMultipartUploads` under the repository's prefix, at most
+  `max_multipart_upload_cleanup_size` (1,000) at a time, never one running on this node. MinIO
+  lists uploads by exact key only, so it gets none listed and relies on its own 24 h stale-upload
+  expiry. Snapshots written before `chunk_size` (a gzip member per ~8 MiB chunk) read the same.
+- **Throttling.** `max_snapshot_bytes_per_sec` (default 40mb) paces uploads and
+  `max_restore_bytes_per_sec` (default unlimited) a restore's reads, each through one limiter
+  per repository on the node that every transfer shares (as Lucene's `SimpleRateLimiter`, which
+  Elasticsearch uses: bytes pay as they are produced, each payment due one byte-time after the
+  previous one, so producing them overlaps the wait and a burst is at most one payment). A
+  restore also pays the cluster's `indices.recovery.max_bytes_per_sec` (default 40mb), as
+  Elasticsearch's restores do: roll has no peer recovery, so this is the setting's only effect.
+  Repository analysis pays the same limits. `_nodes/stats/repositories` reports
+  Elasticsearch's counters: throttled read and write time, shard snapshots started, completed and
+  in progress, blobs and bytes uploaded, upload and read time. Elasticsearch has no throttle time
+  in `_snapshot/_status` and none from repositories in `_recovery`, and neither has roll.
+- **Analysis** (`POST _snapshot/<repo>/_analyze`, `api/snapshots/analyze.rs`). On an `s3`
+  repository it exercises the bucket under `roll/temp-analysis-<id>/`: a contended register
+  (`register_operation_count` compare-and-exchange increments by `If-Match`, all of which must
+  land) and an uncontended one, overwrite protection (of concurrent `If-None-Match: *` writers
+  exactly one wins), then Elasticsearch's blob sizes (`getBlobSizes`, ported), each blob written
+  (in parts past `buffer_size`), sometimes read early, overwritten or written and aborted
+  (`rare_action_probability`), and read back whole or as a range against a regenerated
+  checksum; then listed with their sizes and deleted. A failed check answers
+  Elasticsearch's `repository_verification_exception` chain after removing what it wrote. It
+  writes no more than `max_total_data_size`, runs at most 16 blobs at once, holds a part per
+  blob in flight (breaker-charged), pays the repository's throttles and stops at `timeout`. On
+  roll's own repositories it plans and answers without storage, as before.
+- **`gcs` and `azure` repositories** (`api/snapshots/cloud.rs`, clients `gcs.rs` and `azure.rs`
+  behind `blob.rs`'s `Store`) keep exactly the `s3` layout above in a GCS bucket (the JSON API)
+  or an Azure container (block blobs): the same repository data, shard files, records, chunks,
+  throttles, counters, cleanup and analysis, through one `Bucket`. Only writing in parts
+  differs: an object past 8 MiB goes up as a GCS resumable upload (8 MiB chunks, the last one
+  naming the size and completing it; a failed upload's session is cancelled) or as staged
+  Azure blocks committed by one block list (uncommitted blocks are invisible and expire, so a
+  failed upload leaves nothing to find); one 8 MiB part is held at a time, breaker-charged.
+  Conditional writes are `ifGenerationMatch` (GCS generations stand for ETags) and
+  `If-Match`/`If-None-Match`. Only S3 lists dangling uploads. An `azure` repository's reads go
+  where `location_mode` says (primary, secondary, either first), writes to the primary;
+  `secondary_only` is read-only.
+- **Credentials.** Elasticsearch takes a client's secure settings from its keystore; a roll
+  tenant has none, so they come with the repository's settings (`s3`: `access_key`,
+  `secret_key`, `session_token`; `gcs`: `credentials_file`, the service account key file's
+  JSON as a string; `azure`: `account`, `key`, `sas_token`) and are moved out of them at once
+  into the repository's sealed secrets (`seal.rs`, the deployment's `ROLL_SECRET_KEY`), opened
+  only to sign a request (SigV4, an RS256 JWT exchanged for a GCS access token, Shared Key) or
+  to carry it (a SAS token), never returned by `GET _snapshot` or the cluster state, and never
+  logged or put in an error (clients drop URLs from transport errors: a SAS token or a GCS
+  upload session is in them). A credential given as an object is refused rather than kept
+  flattened in the settings. GCS access tokens are cached in memory until five minutes before
+  they expire, keyed by a digest of the account. Without credentials requests are anonymous:
+  roll's own credentials are never used for a tenant's bucket. Endpoints, a key file's
+  `token_uri` and a GCS session URL (which must be on the endpoint's origin) are URLs the
+  tenant chose: public addresses only (`roll_net::PublicOnly`, `literal_private_host`), no
+  redirects, no proxy, bounded reads (`--search-repository-allow-private` for local MinIO,
+  fake-gcs-server and Azurite; `scripts/search-repo-emulators.sh` runs the `gcs` and `azure`
+  tests against those two in Docker).
 
 ## On the fleet (roll cloud)
 
@@ -353,6 +504,54 @@ applies: every cluster is this node's.
   the WAL after them.
 - **Metering** per cluster: loaded GB-hours, requests, stored GB-months; the dashboard compares the
   cost with Elastic Cloud and Amazon OpenSearch Service for the same workload.
+
+## Observability
+
+Per cluster, as Elastic Cloud's Performance tab and logs show them: request metrics and the
+search and indexing slow logs, in the dashboard's Performance tab and through
+`GET /v1/search/clusters/{id}/metrics` and `/slowlog`.
+
+- **Recording** (`search-server` `metrics.rs`). Each request admitted to a cluster is counted
+  by kind, from its path (`search`: `_search`, `_msearch`, `_count`, async search, kNN, EQL,
+  ES|QL, SQL, terms enum; `index`: writes through `_bulk`, `_doc`, `_create`, `_update`,
+  by-query; `other`), by response class (below 400, 4xx, 5xx, and 429 apart: the cluster's
+  rate, in-flight and byte limits, which never ran the request, and its thread pools) and by
+  latency, from taking the cluster's permits (queueing included) to the answer being durable.
+  Latency goes into a log histogram of 256 buckets (8 per power of two of microseconds, up to
+  about 4.5 hours: percentiles within about 6%), which merges exactly, so any range's
+  percentiles come from its buckets. A loaded cluster's recorder is a lock and the minute in
+  progress (3 KiB, allocated by its first request of the minute); a request bumps a few
+  counters under the lock and allocates nothing.
+- **Slow logs** (`search-es` `slowlog.rs`). The thresholds are index settings, cached per shard
+  as atomics when the index's settings apply, so with none set a phase costs one relaxed load
+  and is not timed. Entries wait in the cluster's ring (500 entries, 1 MiB), each with its
+  source cut at 1,000 characters (`index.indexing.slowlog.source` for documents) and the
+  client's `X-Opaque-Id`; never a header or credential.
+- **Where it's kept: the catalog, with the metering.** Every metering pass (60 s) takes each
+  cluster's finished and current minutes and new slow log entries
+  (`Node::take_observations`) and writes them to the catalog: `search_metrics` holds two fixed
+  rings per cluster, one row per slot (1,440 one-minute buckets for 24 hours, 336 one-hour
+  buckets for 14 days; a slot's bucket adds up within its minute or hour and is replaced when
+  its time comes round), and `search_slowlog` the newest 500 entries. A cluster that unloads
+  hands its recorder to the node's carry-over, which the next pass empties, so a sleeping
+  cluster holds nothing in memory, has no timer, and writes no row: an idle minute costs
+  nothing anywhere. The routes read the catalog and add what the owner recorded since the
+  last pass.
+- **On a fleet** the owner records (requests run there), and every node's pass writes to the
+  shared catalog, so a cluster that moves (a drain, a takeover) keeps its history: the old
+  owner's last minutes go in with its next pass, or its shutdown's. Two owners writing the same
+  minute during a handoff add up in one transaction. A node killed without a shutdown loses at
+  most the minute or so it hadn't handed on.
+- **Cost.** Memory: nothing for a sleeping cluster; about 3 KiB per loaded cluster with traffic
+  in the current minute (16 finished minutes at most if no pass takes them), plus its slow log
+  ring (empty unless thresholds are set; 1 MiB at most). Catalog: at most 1,776 metric rows and
+  500 slow log rows per cluster, a few hundred bytes each. CPU, on a release `search-dev`
+  answering a `term` search on a 10,000-document index over keep-alive HTTP (2026-11-17,
+  three alternating rounds of 20,000 requests, `perf stat` user instructions of the server):
+  483.3k instructions per request before (480.3k-485.4k) and 485.6k after (484.5k-486.9k),
+  +0.5%, within the rounds' own spread; the recording path alone (classifying the request, the
+  clock reads, the recorder) is 112 ns per request (`metrics::tests::record_cost`, release),
+  about 0.05% of the request's ~600k cycles.
 
 ## Testing
 

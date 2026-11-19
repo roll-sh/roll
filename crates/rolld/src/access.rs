@@ -112,6 +112,9 @@ pub fn open(args: &crate::Args, home: &std::path::Path, auth: &crate::auth::Auth
     let resolvers = resolvers(products, workspace);
     let access = tokio::task::block_in_place(|| Access::open(&target, pg, config, resolvers))?;
     auth.set_authorizer(Arc::new(roll_access::evaluate::Evaluator(access.clone())));
+    // People's sessions from allowed networks only: the same client address the evaluator reads.
+    let a = access.clone();
+    auth.set_client_ip(Arc::new(move |req| roll_access::evaluate::client_ip(req, &a.config)));
     // Old audit rows, decided approvals, spent codes and expired secrets go once an hour.
     let a = access.clone();
     tokio::spawn(async move {
@@ -135,15 +138,15 @@ pub fn open(args: &crate::Args, home: &std::path::Path, auth: &crate::auth::Auth
 
 /// Audit sinks (roll_access::sinks): delivered through roll-net's private-address guard, without
 /// redirects, in 10 seconds, reading at most 64 KiB of the answer; each sink's secret sealed with
-/// `ROLL_SECRET_KEY`. Every node sweeps; a claim in the store keeps a batch to one of them.
+/// the deployment key (`Args::secret_key`). Every node sweeps; a claim in the store keeps a batch to one of them.
 /// `ROLL_ACCESS_SINK_ALLOW_PRIVATE` lets a sink be plain http on a private address (local
 /// development only).
-pub fn sinks(access: &Arc<Access>) {
-    let Some(key) = std::env::var("ROLL_SECRET_KEY").ok().filter(|k| !k.trim().is_empty()) else {
+pub fn sinks(access: &Arc<Access>, secret_key: Option<&str>) {
+    let Some(key) = secret_key else {
         tracing::info!("audit sinks are off: they need ROLL_SECRET_KEY");
         return;
     };
-    let sealer = match code_review::secret::Sealer::new(&key) {
+    let sealer = match code_review::secret::Sealer::new(key) {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(error = %e, "audit sinks are off");

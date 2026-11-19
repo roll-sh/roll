@@ -13,7 +13,7 @@ const svc = (env: Partial<EnvironmentSummary>, id = "svc_a"): Service => ({
   git_login: null,
   github: null,
   created_at: 1,
-  environments: [{ name: "production", state: "running", url: "https://web-shop.up.roll.site", active: null, latest: null, ...env }],
+  environments: [{ name: "production", state: "running", url: "https://web-shop.up.roll.site", active: null, latest: null, needs_deploy: false, ephemeral: false, ...env }],
 });
 
 const latest = (status: DeployStatus, id = "dep_1") => ({ latest: { id, status } });
@@ -90,12 +90,14 @@ describe("a deployment's steps", () => {
 
 describe("firewall rules as typed", () => {
   it("read one a line and come back the same", () => {
-    const text = "allow /admin/health\ndeny /admin/*\ndeny method=DELETE,PUT\n# a note\ndeny ua=Bad Bot/2";
+    const text = "allow /admin/health\ndeny /admin/*\ndeny method=DELETE,PUT\n# a note\ndeny ip=203.0.113.0/24,2001:db8::/32\ndeny /api/* header=X-Bot query=debug:1\ndeny ua=Bad Bot/2";
     const rules = parseFirewall(text);
     expect(rules).toEqual([
       { action: "allow", path: "/admin/health" },
       { action: "deny", path: "/admin/*" },
       { action: "deny", methods: ["DELETE", "PUT"] },
+      { action: "deny", ips: ["203.0.113.0/24", "2001:db8::/32"] },
+      { action: "deny", path: "/api/*", query: { name: "debug", contains: "1" }, header: { name: "X-Bot" } },
       { action: "deny", user_agent: "Bad Bot/2" },
     ]);
     expect(formatFirewall(rules)).toBe(text.replace("# a note\n", ""));

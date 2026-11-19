@@ -6,10 +6,16 @@ import { ActorMark, ago, button, card, dangerButton, ErrorNote, errorText, field
 import { Cas } from "./cas";
 import { SshCas } from "./ssh-cas";
 import { CloudAccounts } from "./cloud-accounts";
+import { Gateways } from "./gateways";
 import { GitHubApps } from "./github-apps";
+import { KubernetesClusters } from "./kubernetes-clusters";
 import { OutsideDatabases } from "./outside-databases";
+import { Directories } from "./directories";
+import { SnowflakeAccounts } from "./snowflake-accounts";
+import { AtlasProjects } from "./atlas-projects";
 import { AwsRoles } from "./aws-roles";
 import { Rotators } from "./rotators";
+import { SaasRotators } from "./saas-rotators";
 import { TransitKeys } from "./transit-keys";
 
 /** Syncs (docs/secrets.md, "Syncs"): one-way pushes of an environment's values to GitHub, a webhook or a deploy hook. */
@@ -72,13 +78,19 @@ export function SyncsView() {
           )
         )}
       </Section>
+      <Gateways />
       <OutsideDatabases />
+      <Directories />
+      <SnowflakeAccounts />
+      <AtlasProjects />
       <GitHubApps />
       <Rotators />
+      <SaasRotators />
       <TransitKeys />
       <Cas />
       <SshCas />
       <CloudAccounts />
+      <KubernetesClusters />
       <AwsRoles />
     </div>
   );
@@ -86,9 +98,10 @@ export function SyncsView() {
 
 /** The kind picker's groups, in order; `[]`: every kind no group names. */
 const GROUPS: [string, string[]][] = [
-  ["CI", ["github", "gitlab", "circleci", "bitbucket"]],
+  ["CI", ["github", "gitlab", "azure-devops", "circleci", "bitbucket"]],
   ["Hosting", ["vercel", "netlify", "render", "fly", "railway", "heroku", "digitalocean", "cloudflare"]],
-  ["Clouds and clusters", ["aws-ssm", "aws-secrets-manager", "google-secret-manager", "azure-key-vault", "kubernetes", "terraform-cloud"]],
+  ["Pages and backends", ["cloudflare-pages", "supabase"]],
+  ["Clouds and clusters", ["aws-ssm", "aws-secrets-manager", "google-secret-manager", "azure-key-vault", "azure-app-configuration", "vault-kv", "kubernetes", "terraform-cloud"]],
   ["Anything else", []],
 ];
 
@@ -100,6 +113,10 @@ function targetSummary(s: Sync): string {
   if (s.kind === "kubernetes") return `${str("namespace")}/${str("secret")}`;
   if (s.kind === "gitlab") return `${str("project")} · ${str("environment_scope") || "*"}`;
   if (s.kind === "render") return str("service");
+  if (s.kind === "supabase") return str("project_ref");
+  if (s.kind === "cloudflare-pages") return `${str("project")} · ${str("environment")}`;
+  if (s.kind === "azure-app-configuration") return `${str("store")}${str("label") ? ` · ${str("label")}` : ""}${str("prefix") ? ` · ${str("prefix")}…` : ""}`;
+  if (s.kind === "vault-kv") return `${str("mount") || "secret"}/${str("path")}`;
   if (s.kind === "netlify") return `${str("site")} · ${str("context") || "all"}`;
   if (s.kind === "fly") return str("app");
   if (s.kind === "railway") return `${str("project")} · ${str("environment")}${str("service") ? ` · ${str("service")}` : ""}`;
@@ -111,6 +128,7 @@ function targetSummary(s: Sync): string {
   if (s.kind === "aws-secrets-manager") return `${str("region")} · ${str("secret_name")}`;
   if (s.kind === "google-secret-manager") return `${str("project")}${str("prefix") ? ` · ${str("prefix")}…` : ""}`;
   if (s.kind === "azure-key-vault") return str("vault");
+  if (s.kind === "azure-devops") return `${str("organization")}/${str("project")} · ${str("group")}`;
   if (s.kind === "terraform-cloud") return `${str("workspace_id")} · ${str("category") || "env"}`;
   if (str("url")) {
     try {
@@ -165,12 +183,18 @@ function SyncRow({ sync: s, kind, onChanged, onError }: { sync: Sync; kind?: Syn
           </span>
         )}
         <span className="ml-auto flex items-center gap-2 text-right text-[11px] text-subtle">
-          <span className={running ? "shimmer" : status.tone}>{running ? "pushing…" : status.text}</span>
+          {s.paused_at ? <span className="text-muted" title={s.paused_why ?? undefined}>paused {ago(s.paused_at)}</span> : <span className={running ? "shimmer" : status.tone}>{running ? "pushing…" : status.text}</span>}
           <span>{s.last_synced_at ? `${ago(s.last_synced_at)} · ${s.synced} at the target` : "never synced"}</span>
         </span>
-        <button className={ghost} onClick={run} disabled={running} title="Push every key now">
-          <RefreshCw className={`size-3.5 ${running ? "animate-spin motion-reduce:animate-none" : ""}`} /> Run now
-        </button>
+        {s.paused_at ? (
+          <button className={ghost} onClick={() => api.setSyncPaused(s.id, false).then(onChanged, (e) => onError(errorText(e)))} title="Push again; what changed while it was paused goes out">
+            <RefreshCw className="size-3.5" /> Resume
+          </button>
+        ) : (
+          <button className={ghost} onClick={run} disabled={running} title="Push every key now">
+            <RefreshCw className={`size-3.5 ${running ? "animate-spin motion-reduce:animate-none" : ""}`} /> Run now
+          </button>
+        )}
         {sure ? (
           <span className="flex gap-1">
             <button className={dangerButton} onClick={() => api.deleteSync(s.id).then(onChanged, (e) => onError(errorText(e)))}>

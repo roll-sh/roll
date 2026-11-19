@@ -47,6 +47,10 @@ pub struct AppsArgs {
     /// BuildKit asks for, which `docker build` can't limit per build).
     #[arg(id = "apps_builds", long = "apps-builds", env = "ROLL_APPS_BUILDS", default_value_t = 2)]
     pub builds: usize,
+    /// The longest a build may take on this node, in minutes: a service's own `build.timeout_s`
+    /// is held to it.
+    #[arg(id = "apps_build_timeout", long = "apps-build-timeout", env = "ROLL_APPS_BUILD_TIMEOUT", default_value_t = 30)]
+    pub build_timeout_min: u64,
     /// Custom domains' certificates (docs/apps/README.md, "Networking").
     #[arg(id = "apps_tls", long = "apps-tls", env = "ROLL_APPS_TLS", value_enum, default_value_t = AppsTls::None)]
     pub tls: AppsTls,
@@ -522,10 +526,11 @@ pub struct AppsNode {
     ports_host: std::net::IpAddr,
 }
 
-/// The variable-sealing key: `ROLL_SECRET_KEY`, else a key of this node's own made once.
-fn sealer(home: &Path) -> anyhow::Result<Sealer> {
-    if let Some(k) = std::env::var("ROLL_SECRET_KEY").ok().filter(|k| k.trim().len() >= 32) {
-        return Sealer::new(&k);
+/// The variable-sealing key: the deployment key (`Args::secret_key`), else a key of this node's
+/// own made once.
+fn sealer(home: &Path, secret_key: Option<&str>) -> anyhow::Result<Sealer> {
+    if let Some(k) = secret_key.filter(|k| k.trim().len() >= 32) {
+        return Sealer::new(k);
     }
     let path = home.join("apps").join("key");
     if let Ok(k) = std::fs::read_to_string(&path) {
@@ -567,8 +572,9 @@ pub async fn start(
             tokio::task::block_in_place(|| code_sql::Db::connect(url, schema, pg))?
         }
     };
-    let store = tokio::task::block_in_place(|| Store::new(db, sealer(home)?).map_err(|e| anyhow::anyhow!("{e}")))?;
+    let store = tokio::task::block_in_place(|| Store::new(db, sealer(home, args.secret_key().as_deref().map(String::as_str))?).map_err(|e| anyhow::anyhow!("{e}")))?;
     let mut cfg = AppsConfig::new(home.to_path_buf());
+    cfg.build_timeout = std::time::Duration::from_secs(a.build_timeout_min.clamp(1, 24 * 60) * 60);
     cfg.web_url = Some(args.web_url.trim_end_matches('/').to_string()).filter(|u| !u.is_empty());
     // Traces' address: `ROLL_APPS_OTLP_URL` (a fleet's public apps address), else the apps
     // listener on loopback, which the runtime makes reachable from instances. Never the API:
@@ -764,6 +770,11 @@ pub struct AccountsVisitors(pub Arc<roll_accounts::Accounts>);
 impl apps_control::integrations::Visitors for AccountsVisitors {
     fn may_open(&self, user: &str, _project: &str) -> bool {
         matches!(self.0.user(user), Ok(u) if !u.disabled && u.admin)
+    }
+
+    /// The login is one of the person's live (unexpired, not signed out, not revoked) sessions.
+    fn session_live(&self, user: &str, session: &str) -> bool {
+        self.0.sessions_of(user, "").is_ok_and(|all| all.iter().any(|s| s.id == session))
     }
 }
 

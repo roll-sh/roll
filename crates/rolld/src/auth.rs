@@ -48,6 +48,8 @@ pub const RULES: &[Rule] = &[
     // Version, node and which products are on: the dashboard's sidebar reads it before sign-in.
     // It (and the 404s of products that are off) is merged in front of the gate in main.rs.
     Rule { route: "/v1/info", access: Access::Public("version, node and products on, for the dashboard before sign-in") },
+    Rule { route: "/v1/previews/hooks", access: Access::Public("previews' deploy hooks: the secret in the URL (`rlb_`, a hash kept); anything but a live hook is a 404") },
+    Rule { route: "/v1/previews/{id}/otlp", access: Access::Public("a preview's OpenTelemetry intake: its services' SDKs post spans with the token in the path (derived per preview, masked in what it shows); anything but a live preview's token is a 404") },
     Rule { route: "/v1/previews/{id}/screenshot.png", access: Access::Public("a public preview's screenshot behind a signed, expiring link (GitHub fetches the pull request comment's image anonymously)") },
     // roll code has owners and tokens of its own (docs/code/http-api.md "Auth"): public repos and
     // pages read anonymously, git per its own rules, GitHub/Slack/Discord/Linear webhooks verify
@@ -82,11 +84,21 @@ pub const RULES: &[Rule] = &[
     Rule { route: "/v1/secrets/health", access: Access::Credential("a roll token (rlt_…); the operator's answer") },
     // roll's issuer key signs for every project: rotating it is the operator's.
     Rule { route: "/v1/secrets/issuer", access: Access::Operator },
+    // A gateway's link (docs/secrets.md, "Gateways"): only its own token or a workload identity's
+    // login opens it, never a person's session (a WebSocket upgrade is a GET with no CSRF check).
+    Rule { route: "/v1/secrets/gateways/{id}/connect", access: Access::Credential("a gateway's own roll token (rlt_…) or a workload identity's login; the operator's token is refused (403)") },
     // A one-time share's link: the value is encrypted with a key only the link holds, and opens
     // a few times at most (docs/secrets.md, "Sharing a value once").
+    // A sealed node's unseal (docs/secrets.md, "Starting sealed"): nothing exists to authenticate
+    // against until the key does; the key's shares are the credential, limited per address and
+    // per split. An unsealed node answers that it isn't sealed.
+    Rule { route: "/v1/secrets/unseal", access: Access::Public("unsealing a sealed node: the deployment key's shares are the credential") },
     Rule { route: "/v1/secrets/shares", access: Access::Public("a one-time share's link: ciphertext only, the key stays in the link") },
     Rule { route: "/v1/secrets/ocsp", access: Access::Public("a project CA's OCSP responder, which anyone checking its certificates asks") },
     Rule { route: "/v1/secrets/crl", access: Access::Public("a project CA's certificate revocation list, which anyone checking its certificates fetches") },
+    // ACME (RFC 8555) on a project's CA: the account key's JWS, made with an External Account
+    // Binding an admin of the project issued, and looked up on every request.
+    Rule { route: "/v1/secrets/acme", access: Access::Public("ACME on a project's CA: the account key's signature and its External Account Binding are the credential") },
     Rule { route: "/v1/secrets/login", access: Access::Public("a workload's OIDC token is the credential (workload identities)") },
     Rule { route: "/v1/secrets/oidc", access: Access::Public("roll's OIDC issuer: its discovery document and public keys, which GCP and Azure fetch anonymously") },
     // Tasks: its own token (ROLL_TASKS_TOKEN) and API keys.
@@ -198,6 +210,11 @@ impl Auth {
     }
 
     /// Scoped tokens' evaluator (`access.rs`): set before serving.
+    /// How the gate reads a client's address (roll-access's, with its trusted proxies).
+    pub fn set_client_ip(&self, f: roll_auth::ClientIpFn) {
+        self.gate.set_client_ip(f);
+    }
+
     pub fn set_authorizer(&self, a: std::sync::Arc<dyn roll_auth::Authorizer>) {
         self.gate.set_authorizer(a);
     }
