@@ -100,7 +100,7 @@ pub struct SearchCluster {
 
 /// A remote cluster's credentials: a `cross_cluster` API key of cluster `target_id` that
 /// cluster `cluster_id` reaches it with as its remote `alias` (`cluster.remote.<alias>.credentials`).
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Serialize)]
 pub struct RemoteLink {
     #[serde(skip)]
     pub cluster_id: String,
@@ -114,6 +114,20 @@ pub struct RemoteLink {
     /// roll made the key (revoked when the link goes); else the person gave it.
     pub minted: bool,
     pub created_at: i64,
+}
+
+impl std::fmt::Debug for RemoteLink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemoteLink")
+            .field("cluster_id", &self.cluster_id)
+            .field("alias", &self.alias)
+            .field("target_id", &self.target_id)
+            .field("key_id", &self.key_id)
+            .field("credentials", &"<redacted>")
+            .field("minted", &self.minted)
+            .field("created_at", &self.created_at)
+            .finish()
+    }
 }
 
 const REMOTE_COLS: &str = "cluster_id, alias, target_id, key_id, credentials, minted, created_at";

@@ -516,6 +516,7 @@ pub async fn pit_search(ctx: &Ctx<'_>, req: &SearchRequest, body: Option<&Value>
     let desc = tiebreaker.is_some_and(|p| matches!(&source.sort[p], Sort::Field { order: Some(SortOrder::Desc), .. }));
     let from = req.source.from.unwrap_or(0).max(0) as i64;
     let size = req.source.size.unwrap_or(10).max(0) as i64;
+    links::check_window(from + size)?;
     let has_aggs = links::has_aggs(req);
     let qs = links::query_string(ctx, links::PART_DROP, &[]);
     let keep_alive = pit.keep_alive.map(|k| format!("{}ms", k.as_millis())).or_else(|| body.and_then(|b| b.pointer(&["pit", "keep_alive"])).map(Value::to_es_string));

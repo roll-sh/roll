@@ -311,7 +311,8 @@ working from anywhere, also on a cluster whose allowlist admits nobody the perso
 A linked remote cluster's part of a cross-cluster search (README.md, "Cross-cluster search") is
 such a request too: it goes from the local cluster's node to the remote's owner in process or
 signed, never through the public endpoint, so the remote's allowlist doesn't apply to it (and
-the local cluster's has already admitted the client). Only these calls may carry the link's
+the local cluster's has already admitted the client): a client the local cluster admits reads the
+remote's data within the key's access, whatever the remote's own allowlist says. Only these calls may carry the link's
 `x-roll-remote-access` header, which lets a `cross_cluster` key authenticate: the node drops it
 from every request with another origin (`Lease::handle`), as it drops `x-roll-authenticated-user`.
 A link's search may ask for its aggregations partially reduced (`x-roll-partial-aggs`, honored

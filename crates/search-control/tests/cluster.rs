@@ -337,8 +337,9 @@ async fn a_scroll_over_clusters_on_two_nodes_pages_through_either_front() {
         let name = format!("away-{i}");
         let (s, c) = call(&http, reqwest::Method::POST, format!("{}/v1/search/clusters", a.api), None, Some(json!({"name": name}))).await;
         assert_eq!(s, 200, "{c}");
+        // Writing loads it on its owner.
+        index(name.clone(), c["password"].as_str().unwrap().to_string(), vec![0, 2, 4, 6, 8]).await;
         if owner_of(&name) != owner_of("home") {
-            index(name.clone(), c["password"].as_str().unwrap().to_string(), vec![0, 2, 4, 6, 8]).await;
             away = Some(name);
             break;
         }

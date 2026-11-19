@@ -745,6 +745,9 @@ fn authorize_action(ctx: &Ctx) -> EsResult<Option<String>> {
             }
             Err(denied(p, &action, None))
         }
+        // A search on a point in time names no index: it reads the point in time's, which the
+        // caller must be allowed to search (Elasticsearch authorizes it against them).
+        Scope::Index if ctx.api.name() == "search" && pit_of(ctx).is_some() => authorize_pit(ctx, p, &eff, &action, &pit_of(ctx).unwrap_or_default()),
         Scope::Index if NARROWED.contains(&ctx.api.name()) => narrow(ctx, p, &eff, &action),
         // Composite requests: their items are authorized as they run (`authorize_writes`,
         // `authorize_gets`, each search of an msearch).
@@ -1038,6 +1041,25 @@ fn check_all(ctx: &Ctx, p: &Principal, eff: &Effective, action: &str, exprs: Vec
 /// names given explicitly must be authorized, unless `ignore_unavailable` drops the ones that
 /// aren't (`IndexAbstractionResolver`). `-*` (no index) when nothing is left, as
 /// Elasticsearch's resolver does.
+/// The point in time a search body names.
+fn pit_of(ctx: &Ctx) -> Option<String> {
+    ctx.body().ok().flatten()?.pointer(&["pit", "id"]).map(Value::to_es_string)
+}
+
+/// A search on point in time `id`: allowed when the caller may search every index it holds. One
+/// over linked clusters authorizes each part on its own cluster (and answers only its caller);
+/// an id that names nothing is the search's own 404.
+fn authorize_pit(ctx: &Ctx, p: &Principal, eff: &Effective, action: &str, id: &str) -> EsResult<Option<String>> {
+    if crate::remote::contexts::is_ccs(id) {
+        return Ok(None);
+    }
+    let Some(mut names) = ctx.cluster.contexts.with(id, None, |c| c.targets.iter().map(|t| t.idx.name.clone()).collect::<Vec<String>>()) else { return Ok(None) };
+    names.sort();
+    names.dedup();
+    let denied_on: Vec<String> = names.into_iter().filter(|n| !eff.allows_index(action, n)).collect();
+    if denied_on.is_empty() { Ok(None) } else { Err(denied(p, action, Some(&denied_on))) }
+}
+
 fn narrow(ctx: &Ctx, p: &Principal, eff: &Effective, action: &str) -> EsResult<Option<String>> {
     use crate::meta::resolve::IndicesOptions;
     let defaults = narrow_defaults(ctx.api.name());

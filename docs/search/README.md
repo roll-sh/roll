@@ -180,24 +180,34 @@ Elasticsearch-flavor.
   key's access intersected with the local user's `remote_indices` privileges for the alias (the
   cluster's own password is a superuser: everything the key allows), as Elasticsearch does.
   Revoking the key on the remote (`DELETE _security/api_key`) cuts the link; `DELETE …/remotes/
-  {alias}` removes the settings and credentials and revokes a key roll made.
+  {alias}` removes the settings and credentials and revokes a key roll made, and so does deleting
+  the cluster for good (at once with no retention, else when its restore window ends). A cluster
+  holds credentials for at most 20 remotes (409 past that). Without `ROLL_SECRET_KEY` (local
+  development) credentials are stored as given, as every secret search keeps.
 - **Execution**: the remote's part runs on the remote cluster's owner node through roll's own
   in-process call or signed fleet forward (`Control::on_owner`, `cluster::to_owner`), never over
-  the public endpoint, so neither cluster's IP allowlist applies to it. The link's header
+  the public endpoint, so neither cluster's IP allowlist applies to it: a client the local
+  cluster's allowlist admits reaches the remote's data within the key's access even when the
+  remote's own allowlist wouldn't admit that client directly. Link only clusters whose data may
+  be read from wherever the local one may be. The link's header
   (`x-roll-remote-access`) is honored only on those calls; a client sending it, or presenting a
   cross-cluster key, gets 401. A sleeping remote wakes for it, for at most
   `cluster.remote.initial_connect_timeout` (30 s); one that can't be reached, or answers an error
   (a revoked key, an index outside the key's access), is skipped with its failure in `_clusters`
   when `skip_unavailable` (the default) and fails the search otherwise.
 - **What reaches remotes**: `_search` and `_msearch` (merged as `ccs_minimize_roundtrips` does:
-  hits by score or sort values, totals, shards and failures, a `_clusters` section),
-  `_field_caps` (each remote index's capabilities merged as local ones are), `_resolve/index`,
-  `_resolve/cluster` and `_remote/info`.
+  hits by score or sort values, totals, shards and failures, a `_clusters` section; remotes'
+  answers are held on the request circuit breaker while they merge), `_field_caps` (each remote
+  index's capabilities merged as local ones are), `_resolve/index`, `_resolve/cluster` and
+  `_remote/info`. An expression is authorized on the remotes only when every remote its alias
+  pattern matches is a link; `*:index` over a link and a loopback remote is authorized locally,
+  whole.
 - **Aggregations**: every aggregation, pipelines included, answers what one cluster holding all
   the data would. Each cluster reduces its part partially and the local cluster does the final
   reduce from their internal state (`search-aggs` `wire`): HyperLogLog sketches, t-digests and
   HDR histograms, sums with their counts, top hits with their sort keys (fetched on their own
-  cluster). Only a link's own request may ask for that state (`x-roll-partial-aggs`, honored
+  cluster), held to `search.max_buckets` by the final reduce as one cluster's are. Only a
+  link's own request may ask for that state (`x-roll-partial-aggs`, honored
   for a cross-cluster key's request only); a client asking gets the public answer. A
   `geo_centroid`'s sums add up in another order, so its last digit may differ from one
   cluster's, as Elasticsearch's does.
