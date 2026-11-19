@@ -459,6 +459,9 @@ pub enum Secrets {
     /// (`ROLL_IDENTITY`), no stored token: list, add, rm.
     #[command(subcommand)]
     Identities(Identities),
+    /// Decoy keys: a credential planted to be found, whose use raises `decoy_used` (admins only).
+    #[command(subcommand)]
+    Decoy(DecoyCmd),
     /// Hand a value to someone outside roll: a link that opens once (or `--views`) and expires.
     /// The value is encrypted here; the key is only in the link.
     Share {
@@ -1266,6 +1269,18 @@ pub enum RequiredCmd {
         key: String,
         #[arg(long, default_value = "/")]
         path: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum DecoyCmd {
+    /// Plant a decoy key in the environment's folder (`--path`): a new key whose value is a decoy
+    /// credential. It reads like any other key; any use of it raises `decoy_used`.
+    Add {
+        key: String,
+        /// What the value is: `rlt`, a roll token that allows nothing.
+        #[arg(long, default_value = "rlt")]
+        kind: String,
     },
 }
 
@@ -3008,6 +3023,14 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 println!("Deleted {id}");
             }
         },
+        Secrets::Decoy(DecoyCmd::Add { key, kind }) => {
+            let v = c.call(Method::POST, &format!("{env}/decoys"), Some(json!({ "key": key, "kind": kind, "path": c.at.path }))).await?;
+            if json_out {
+                return print(&v);
+            }
+            println!("Planted decoy {key} in {}:{}", c.at.env, c.at.path);
+            eprintln!("It reads like any other key: sync it or export it where an intruder would look. Its use shows in `roll secrets health` and the activity, and goes to the environment's notify URL.");
+        }
         Secrets::Share { key, views, ttl, note } => {
             let value = match &key {
                 Some(k) => {

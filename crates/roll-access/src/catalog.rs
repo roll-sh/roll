@@ -1186,6 +1186,8 @@ static ROWS: &[Row] = &[
     row("DELETE", "/v1/secrets/projects/{project}/", "secrets", D, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     row("PATCH", "/v1/secrets/projects/{project}/environments/{env}", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")),
     row("PUT", "/v1/secrets/projects/{project}/environments/order", "secrets", ADMIN, one(&["project"], "project")),
+    // A decoy key (docs/secrets.md, "Decoys"): an admin's, and it answers the key, never its value.
+    row("POST", "/v1/secrets/projects/{project}/environments/{env}/decoys", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")),
     // Imports: write, reveal on each in-project source, admin for another project's folder.
     row("PUT", "/v1/secrets/projects/{project}/environments/{env}/imports", "secrets", Act::Body(secrets_imports_action), one(&["project"], "project"))
         .env(EnvFrom::Param("env"))
