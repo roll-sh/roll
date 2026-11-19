@@ -512,7 +512,7 @@ impl Runtime for Fake {
         // A fingerprinted chunk of this build's own, as Vite names them.
         let h = image.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, c| (h ^ c as u64).wrapping_mul(0x0100_0000_01b3));
         let chunk = format!("./assets/chunk-{:08x}z9.js", h as u32);
-        let files: [(&str, &[u8]); 10] = [
+        let files: [(&str, &[u8]); 12] = [
             (chunk.as_str(), b"chunk()"),
             // A real image, for image optimization (64×48 PNG).
             ("./assets/hero.png", include_bytes!("fake-hero.png")),
@@ -522,6 +522,9 @@ impl Runtime for Fake {
             ("./index.html", b"<!doctype html><title>fake site</title>"),
             ("./assets/app.js", b"start()"),
             ("./404.html", b"<h1>not here</h1>"),
+            // A Netlify-style form, with its honeypot and its thanks page.
+            ("./contact.html", br#"<form name="contact" method="POST" data-netlify="true" netlify-honeypot="bot-field" action="/thanks.html"><input name="email"><textarea name="message"></textarea></form>"#),
+            ("./thanks.html", b"<h1>thanks</h1>"),
             ("./_redirects", b"/old /assets/app.js 308\n/app/* /index.html 200\n/api/* service:api/v1/:splat 200\n"),
             ("./_headers", b"/assets/*\n  Cache-Control: public, max-age=31536000, immutable\n"),
         ];

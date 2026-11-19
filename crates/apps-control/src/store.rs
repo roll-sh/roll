@@ -162,6 +162,15 @@ CREATE TABLE IF NOT EXISTS ci_waits (
     since INTEGER NOT NULL,
     PRIMARY KEY (service, env)
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS form_submissions (
+    id TEXT PRIMARY KEY,
+    service TEXT NOT NULL,
+    env TEXT NOT NULL,
+    form TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    fields_sealed TEXT NOT NULL
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS form_submissions_by_form ON form_submissions (service, env, form, created_at);
 CREATE TABLE IF NOT EXISTS log_drains (
     id TEXT PRIMARY KEY,
     project TEXT NOT NULL,
@@ -915,7 +924,7 @@ impl Store {
             )?;
             c.execute("DELETE FROM deploy_steps WHERE deployment IN (SELECT id FROM deployments WHERE service = ?)", [id])?;
             c.execute("DELETE FROM state WHERE key LIKE ?", [format!("%:{id}/%")])?;
-            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "preview_hosts", "runs", "jobs", "metrics", "usage"] {
+            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "preview_hosts", "runs", "jobs", "metrics", "usage", "form_submissions"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ?"), [id])?;
             }
             match c.execute("DELETE FROM services WHERE id = ?", [id])? {
@@ -1031,7 +1040,7 @@ impl Store {
             if n == 0 {
                 return Err(Error::NotFound(format!("service {service} has no environment {env}")));
             }
-            for t in ["variables", "variable_files", "error_groups", "domains", "preview_hosts", "runs", "jobs", "metrics", "deploy_keys", "env_access", "trace_ingest", "visit_tickets", "visit_sessions"] {
+            for t in ["variables", "variable_files", "error_groups", "domains", "preview_hosts", "runs", "jobs", "metrics", "deploy_keys", "env_access", "trace_ingest", "visit_tickets", "visit_sessions", "form_submissions"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ? AND env = ?"), [service, env])?;
             }
             // Its schedules', challenge's and base images' state goes with it.
@@ -2654,6 +2663,60 @@ impl Store {
     pub fn end_ci_wait(&self, service: &str, env: &str, landing: i64) -> Result<()> {
         self.db.execute("DELETE FROM ci_waits WHERE service = ? AND env = ? AND landing = ?", params![service, env, landing])?;
         Ok(())
+    }
+
+    // ── form submissions ──
+
+    /// A form's submission, sealed and bound to its row; the oldest past [`crate::forms::KEEP`]
+    /// go in the same write. Its id.
+    pub fn add_form_submission(&self, service: &str, env: &str, form: &str, fields: &[(String, String)]) -> Result<String> {
+        let id = new_id("fsb");
+        let now = self.now()?;
+        let sealed = self.sealer.seal(&format!("form:{service}/{env}/{form}/{id}"), &serde_json::to_string(fields).expect("fields serialize"));
+        self.db.write(|c| {
+            c.execute("INSERT INTO form_submissions (id, service, env, form, created_at, fields_sealed) VALUES (?, ?, ?, ?, ?, ?)", params![id, service, env, form, now, sealed])?;
+            c.execute(
+                "DELETE FROM form_submissions WHERE service = ? AND env = ? AND form = ? AND id NOT IN \
+                 (SELECT id FROM form_submissions WHERE service = ? AND env = ? AND form = ? ORDER BY created_at DESC, id DESC LIMIT ?)",
+                params![service, env, form, service, env, form, crate::forms::KEEP as i64],
+            )?;
+            Ok::<_, code_sql::Error>(())
+        })?;
+        Ok(id)
+    }
+
+    /// An environment's forms with submissions: name, how many, the newest's time.
+    pub fn form_counts(&self, service: &str, env: &str) -> Result<Vec<(String, i64, i64)>> {
+        Ok(self.db.query("SELECT form, COUNT(*), MAX(created_at) FROM form_submissions WHERE service = ? AND env = ? GROUP BY form ORDER BY form", [service, env], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?)
+    }
+
+    /// A form's submissions, newest first, before `before` (ms) when given, opened. One whose
+    /// seal won't open is left out.
+    pub fn form_submissions(&self, service: &str, env: &str, form: &str, limit: usize, before: Option<String>) -> Result<Vec<crate::forms::Submission>> {
+        // After `before` in (created_at, id) order: two in one millisecond are both listed.
+        let (at, id) = match &before {
+            Some(id) => {
+                let at: Option<i64> = self.db.query_row("SELECT created_at FROM form_submissions WHERE service = ? AND env = ? AND form = ? AND id = ?", [service, env, form, id.as_str()], |r| r.get(0)).optional()?;
+                (at.ok_or_else(|| Error::NotFound(format!("no submission {id}")))?, id.clone())
+            }
+            None => (i64::MAX, String::new()),
+        };
+        let rows: Vec<(String, i64, String)> = self.db.query(
+            "SELECT id, created_at, fields_sealed FROM form_submissions WHERE service = ? AND env = ? AND form = ? AND (created_at < ? OR (created_at = ? AND id < ?)) ORDER BY created_at DESC, id DESC LIMIT ?",
+            params![service, env, form, at, at, id, limit as i64],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|(id, at, sealed)| {
+                let fields = self.sealer.open(&format!("form:{service}/{env}/{form}/{id}"), &sealed).ok().and_then(|j| serde_json::from_str(&j).ok())?;
+                Some((id, at, fields))
+            })
+            .collect())
+    }
+
+    pub fn delete_form_submission(&self, service: &str, env: &str, form: &str, id: &str) -> Result<bool> {
+        Ok(self.db.execute("DELETE FROM form_submissions WHERE service = ? AND env = ? AND form = ? AND id = ?", [service, env, form, id])? > 0)
     }
 
     // ── log drains ──

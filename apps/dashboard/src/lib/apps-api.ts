@@ -994,6 +994,20 @@ export interface LogDrain {
   secret?: string;
 }
 
+/** A static site's form that has kept submissions. */
+export interface SiteForm {
+  name: string;
+  submissions: number;
+  last_at: number;
+}
+
+/** What someone sent through a form: its fields as they came. */
+export interface FormSubmission {
+  id: string;
+  created_at: number;
+  fields: { name: string; value: string }[];
+}
+
 export type DrainFormat = "ndjson" | "otlp" | "syslog";
 
 /** A project's monthly spend limits (US dollars at roll's prices, the calendar month in UTC). */
@@ -1109,6 +1123,11 @@ export const appsApi = {
   /** Its sources, filters and headers (given ones replace; `headers` replaces them all); its URL and secret stay. */
   updateDrain: (project: string, id: string, body: DrainSettings) => call<LogDrain>("PATCH", `/v1/apps/projects/${enc(project)}/drains/${enc(id)}`, body),
   testDrain: (project: string, id: string) => call<{ ok: boolean; code: number | null; error: string | null }>("POST", `/v1/apps/projects/${enc(project)}/drains/${enc(id)}/test`),
+  /** A static site's forms with submissions kept. */
+  forms: (id: string, e: string) => call<SiteForm[]>("GET", `${env(id, e)}/forms`),
+  /** A form's submissions in the clear (a reveal), the newest first. */
+  formSubmissions: (id: string, e: string, form: string, before?: string) => call<FormSubmission[]>("GET", `${env(id, e)}/forms/${encodeURIComponent(form)}/submissions${before ? `?before=${encodeURIComponent(before)}` : ""}`),
+  deleteFormSubmission: (id: string, e: string, form: string, sub: string) => call<null>("DELETE", `${env(id, e)}/forms/${encodeURIComponent(form)}/submissions/${encodeURIComponent(sub)}`),
   removeDrain: (project: string, id: string) => call<null>("DELETE", `/v1/apps/projects/${enc(project)}/drains/${enc(id)}`),
   limits: (project: string) => call<SpendLimits>("GET", `/v1/apps/projects/${enc(project)}/limits`),
   setLimits: (project: string, body: { alert_usd: number | null; hard_usd: number | null }) => call<SpendLimits>("PUT", `/v1/apps/projects/${enc(project)}/limits`, body),
