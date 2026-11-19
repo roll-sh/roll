@@ -390,6 +390,39 @@ behind the `Apps` trait:
      Vercel's branch-scoped variables. Setting them redeploys its services; names roll or the
      preview's branches set (`ROLL_*`, `PORT`, `DATABASE_URL`, …) are refused, so they can't
      point a preview at other data;
+
+  A value of `env` or `env_for` can name a key in roll secrets instead of holding it (Doppler's
+  and 1Password's references): `roll://ENV/KEY` or `roll://ENV/folder/KEY`, in the project's own
+  environments (no `PROJECT@`: 400). It goes into the preview's environment as roll secrets' own
+  reference (`${ENV.folder.KEY}`) and is read there, with the environment, as the preview reads
+  everything: untrusted, so a protected environment or a sensitive key never resolves (it's left
+  out and logged as a secret that doesn't resolve), a branched parent's link is followed as any,
+  and the value is masked in what the preview shows. A payment provider's test key then stays in
+  roll secrets (its health, leak scanning, reach and rotation) rather than in the project's rules.
+  A rule naming an environment other than the one the previews follow (`secrets.base`) routes
+  its values into code whoever pushes a branch controls, so a person choosing that reach must be
+  able to reveal it: saving a new or changed reference needs its writer's reveal on that
+  environment's folder in roll secrets (roll secrets' own answer for the request's caller, as roll
+  apps asks it; 403 otherwise), and who wrote each is kept (`env_refs`) for roll secrets'
+  maker-checked binding (`bind_ref`, its #407), which will stop a reference whose writer lost
+  access. A reference to the base needs none of this, but changing the base needs its writer's
+  reveal on the new one (every preview's code then reads it). The rules are written only as they
+  were checked: another request's change in between is a 409.
+  Moving the base checks the references that named the old one as new. A value that reads as a
+  reference only once trimmed or lowercased (` roll://…`) is refused. Who wrote each reference
+  is kept, not yet checked again later: a writer who loses reveal leaves their reference working
+  until roll secrets' `bind_ref` binds it to them (its #407).
+  Only the rules' own references (checked when saved) go to roll secrets as references, as their
+  own input to rolld's ensure; every other value previews write, a preview's own variables and
+  anything stored before included, is plain text: its `${` is escaped, so it's never a reference
+  by accident and reads back as written. A
+  preview's own variables refuse a reference (400) until roll secrets' maker-checked binding for
+  references a person chooses (`bind_ref`, its #407). Renaming an environment rewrites roll
+  secrets' references, not these rules: the next converge logs the old name as one that doesn't
+  resolve. `a_roll_reference_becomes_roll_secrets_own_and_a_plain_value_stays_plain`,
+  `a_rules_reference_to_another_environment_needs_its_writers_reveal_there`;
+  `scripts/preview-cost.sh` reads a staging key through `roll://staging/…` in the live service's
+  environment, and a `${USER}` left as it is;
   4. the branched resources' URLs:
 
      | Resource | Variables |
@@ -2082,13 +2115,11 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Secret references in previews' variables** (roll secrets' suggestion, after its #329):
-   `env`, `env_for` and a preview's own variables are plain values outside roll secrets
-   (redacted on read, but outside health, leak scanning, reach and the cut-off), and a payment
-   provider's test key is just what teams put there. Take `roll://ENV/KEY` there, resolved
-   through `Secrets::resolve_for(ResourceRef::new(kind, id).untrusted(), …)` (never a
-   protected environment or a sensitive key), and offer to keep a pasted value in the base
-   environment's folder.
+1. **Secret references in previews' variables, in review** (#436;
+   roll secrets' suggestion): `roll://ENV[/folder]/KEY` in `env` and `env_for` becomes roll
+   secrets' own reference in the preview's environment, read there untrusted; a plain value's
+   `${` is escaped. Next for it: a preview's own variables once roll secrets' `bind_ref` lands
+   (#407), and the rules dialog offering to keep a pasted value in the base environment.
 2. **New errors against main, in review** (#438, on #431; Sentry's new issues in a release): an
    error group main's preview doesn't have on the record (`new_errors`), the verdict strip, the
    change page and a count in the pull request's checks.

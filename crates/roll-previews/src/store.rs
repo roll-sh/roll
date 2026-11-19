@@ -234,6 +234,15 @@ CREATE TABLE IF NOT EXISTS runtime_facts (
     json TEXT NOT NULL,
     PRIMARY KEY (preview_id, kind)
 );
+CREATE TABLE IF NOT EXISTS env_refs (
+    project_id TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    name TEXT NOT NULL,
+    reference TEXT NOT NULL,
+    by TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    PRIMARY KEY (project_id, scope, name)
+);
 CREATE TABLE IF NOT EXISTS git_reports (
     preview_id TEXT PRIMARY KEY,
     status TEXT,
@@ -855,6 +864,25 @@ impl Store {
     pub fn set_service_config(&self, id: &str, name: &str, config: &str) -> Result<()> {
         self.db.write(|c| {
             c.execute("UPDATE services SET config = ? WHERE preview_id = ? AND name = ?", params![config, id, name])?;
+            Ok::<_, Error>(())
+        })
+    }
+
+    /// Who wrote each of a project's rules' references (`(scope, name, reference)`): one kept as
+    /// it was keeps its writer, a new or changed one is `by`'s, one gone goes.
+    pub fn set_env_refs(&self, project: &str, refs: &[(String, String, String)], by: &str) -> Result<()> {
+        let now = self.now_ms()?;
+        self.db.write(|c| {
+            let kept: Vec<(String, String, String)> = c.query("SELECT scope, name, reference FROM env_refs WHERE project_id = ?", [project], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            for k in kept.iter().filter(|k| !refs.contains(k)) {
+                c.execute("DELETE FROM env_refs WHERE project_id = ? AND scope = ? AND name = ?", params![project, k.0, k.1])?;
+            }
+            for (scope, name, reference) in refs.iter().filter(|r| !kept.contains(r)) {
+                c.execute(
+                    "INSERT INTO env_refs (project_id, scope, name, reference, by, at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (project_id, scope, name) DO UPDATE SET reference = excluded.reference, by = excluded.by, at = excluded.at",
+                    params![project, scope, name, reference, by, now],
+                )?;
+            }
             Ok::<_, Error>(())
         })
     }
