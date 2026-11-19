@@ -183,7 +183,7 @@ pub fn create(def: &AggDef, spec: &TimeSeriesSpec, ctx: &mut BindCtx<'_>) -> Res
     }))
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct TsConfig {
     pub keyed: bool,
     pub size: i32,
@@ -318,7 +318,7 @@ impl Aggregator for TimeSeriesAgg {
 }
 
 /// A series bucket.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct TsBucket {
     /// The legacy `_tsid` bytes.
     pub key: Vec<u8>,
@@ -327,7 +327,7 @@ pub struct TsBucket {
 }
 
 /// `InternalTimeSeries`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct TimeSeries {
     pub cfg: Arc<TsConfig>,
     pub keyed: bool,

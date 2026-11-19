@@ -73,7 +73,7 @@ fn decode_index(encoded: u32, p: u32) -> usize {
 }
 
 /// One bucket's HyperLogLog++ state.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Hll {
     p: u32,
     /// Linear counting: an open-addressing set of encoded hashes (0 = empty).
@@ -714,7 +714,7 @@ impl Aggregator for CardinalityAgg {
 }
 
 /// `InternalCardinality`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Cardinality {
     /// `None` for an unmapped field.
     pub hll: Option<Hll>,
