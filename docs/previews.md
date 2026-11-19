@@ -1673,7 +1673,8 @@ type Settings = {
   level, `lib/preview-logs.ts`; "stderr" while it follows, the lines the service wrote there; errors
   in red; all in the browser on the masked lines), Shell
   (a terminal on a `roll.toml` service's shell: "A shell in a preview"; it shares roll apps'
-  terminal, `components/terminal-screen.tsx`), Requests and Errors (its services' errors grouped, newest first, each with how many times, when
+  terminal, `components/terminal-screen.tsx`; under it, a path in the service downloaded as a tar,
+  and the `roll preview cp` and `forward` lines), Requests and Errors (its services' errors grouped, newest first, each with how many times, when
   last seen, the service and its title, opening to its newest sample; the last hour, 6 or 24),
   plus a "Previews" overlay on the canvas that draws each
   preview's branches next to their parents.
@@ -2040,8 +2041,9 @@ Ranked by what a person notices first. Done so far:
    roll apps keeps an environment's spans when it sets the OpenTelemetry SDK's variables; a
    preview's services on roll's runtime get none. Give them `OTEL_EXPORTER_OTLP_ENDPOINT` to a
    preview-scoped intake and show its recent traces on the sheet, beside its errors.
-5. **Files and ports from the sheet**: a download for a path (the shell's `…/files`) and the
-   `roll preview forward` line for a port, so the sheet covers what the CLI does.
+5. **Files and ports from the sheet, in review** (`feature/roll-previews-sheet-files`): under the
+   Shell tab, a path's tar downloaded from `…/files` (the server's own words when nothing's there),
+   and the `roll preview cp`/`forward` lines (roll apps' `cp`/`proxy` for its services).
 6. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
 7. **Watch: pg-control's recovery to a time seconds old** (unowned).
