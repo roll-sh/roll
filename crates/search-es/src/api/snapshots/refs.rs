@@ -26,7 +26,7 @@
 //! back to anonymous access, and no error carries a value.
 
 use super::*;
-use crate::secret_refs::{MAKER_HEADER, Revealed, is_reference};
+use crate::secret_refs::{MAKER_HEADER, Revealed, Setting, classify};
 use std::collections::{BTreeMap, HashMap};
 
 /// A repository's credentials, opened: sealed ones from [`Repository::secrets`] and resolved
@@ -51,9 +51,24 @@ pub(super) struct Kept {
 /// Repositories' kept references, by repository name (in memory only).
 pub(super) type KeptRefs = parking_lot::Mutex<HashMap<String, Kept>>;
 
-/// The references among type `ty`'s credential settings.
-pub(super) fn references(ty: &str, settings: &Settings) -> Vec<(&'static str, String)> {
-    cloud::secret_names(ty).iter().filter_map(|k| settings.get(k).filter(|v| is_reference(v)).map(|v| (*k, v.trim().to_string()))).collect()
+/// The references among type `ty`'s credential settings, exactly as written; `Err`: a setting
+/// written like a reference that isn't one, and why.
+pub(super) fn references(cluster: &crate::Cluster, ty: &str, settings: &Settings) -> Result<Vec<(&'static str, String)>, (&'static str, String)> {
+    let mut out = Vec::new();
+    for k in cloud::secret_names(ty) {
+        let Some(v) = settings.get(k) else { continue };
+        match classify(cluster, v) {
+            Setting::Value => {}
+            Setting::Reference => out.push((*k, v.to_string())),
+            Setting::Malformed(why) => return Err((*k, why)),
+        }
+    }
+    Ok(out)
+}
+
+/// A setting written like a reference that isn't one (never its value: it may be a credential).
+fn malformed(setting: &str, why: &str) -> String {
+    format!("[{setting}] is written like a roll secrets reference but isn't one, so it's neither read nor used as a value: {why}")
 }
 
 fn why(setting: &str, reference: &str, why: &str) -> String {
@@ -83,7 +98,7 @@ const NO_RESOLVER: &str = "this node resolves no roll secrets references";
 pub(super) async fn check(ctx: &Ctx<'_>, name: &str, ty: &str, settings: &Settings) -> EsResult<Option<String>> {
     let cluster = ctx.cluster;
     let id = resource(cluster);
-    let refs = references(ty, settings);
+    let refs = references(cluster, ty, settings).map_err(|(k, e)| EsError::new(400, "settings_exception", malformed(k, &e)))?;
     let Some((first, first_ref)) = refs.first() else { return Ok(None) };
     let bad = |setting: &str, reference: &str, reason: &str| EsError::new(400, "settings_exception", why(setting, reference, reason));
     let Some(maker) = ctx.request.header(MAKER_HEADER).filter(|m| !m.is_empty()) else {
@@ -108,7 +123,7 @@ pub(super) async fn credentials(cluster: &crate::Cluster, name: &str, r: &Reposi
             creds.0.insert(k, Revealed::new(crate::seal::open(cluster, cloud::secret_kind(&r.ty), v)?));
         }
     }
-    let refs = references(&r.ty, &r.settings);
+    let refs = references(cluster, &r.ty, &r.settings).map_err(|(k, e)| repository_exception(name, malformed(k, &e)))?;
     let Some((first, first_ref)) = refs.first() else { return Ok(creds) };
     let refused = |setting: &str, reference: &str, reason: &str| repository_exception(name, why(setting, reference, reason));
     let Some(resolver) = &cluster.config.secret_refs else { return Err(refused(first, first_ref, NO_RESOLVER)) };

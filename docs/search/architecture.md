@@ -470,7 +470,12 @@ allowlist (a preview's branch included); change it like any setting.
 - **Credentials by reference** (`api/snapshots/refs.rs`). Any of those settings may hold a roll
   secrets reference (`roll://ENV/KEY`) instead. It isn't a secret: it stays in the settings as
   written (the cluster state, `GET _snapshot` and branches show it), and the value is never
-  stored.
+  stored. Whether a setting is a reference is roll secrets' own parser's to say
+  (`roll_secrets::Reference::parse`, through the cluster's resolver), never a check of search's:
+  exactly `roll://…` is one, and a near miss (a space before or after it, `ROLL://`) is a 400 on
+  both routes, never kept as a value. A node without roll's control plane (a dev node, the YAML
+  clusters) has no resolver and no references: every value there is a value, and a `roll://…`
+  one is sent as that literal string, never resolved.
   - *Who writes one.* Only roll's control plane:
     `PUT /v1/search/clusters/{id}/repositories/{name}` (Elasticsearch's body) asks roll secrets
     whether the caller may choose each reference (`Secrets::bind_ref`, the caller as a

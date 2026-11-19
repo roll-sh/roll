@@ -1563,16 +1563,24 @@ impl Control {
         let v: serde_json::Value = serde_json::from_slice(&body).map_err(|e| ControlError::Invalid(format!("invalid body: {e}")))?;
         let ty = v["type"].as_str().unwrap_or_default();
         let settings = v["settings"].as_object();
-        let refs: Vec<&str> = search_es::api::snapshots::credential_settings(ty)
-            .iter()
-            .filter_map(|k| settings.and_then(|s| s.get(*k)).and_then(serde_json::Value::as_str))
-            .filter(|v| search_es::secret_refs::is_reference(v))
-            .collect();
+        // Whether a setting is a reference is roll secrets' parser's to say: exactly `roll://…` is
+        // one, anything written like one but not exactly is refused, never kept as a value.
+        let mut refs: Vec<&str> = Vec::new();
+        for k in search_es::api::snapshots::credential_settings(ty) {
+            let Some(v) = settings.and_then(|s| s.get(*k)).and_then(serde_json::Value::as_str) else { continue };
+            match crate::secret_refs::classify(v) {
+                search_es::secret_refs::Setting::Value => {}
+                search_es::secret_refs::Setting::Reference => refs.push(v),
+                search_es::secret_refs::Setting::Malformed(why) => {
+                    return Err(ControlError::Invalid(format!("[{k}] is written like a roll secrets reference but isn't one: {why}")));
+                }
+            }
+        }
         let mut maker = None;
         if !refs.is_empty() {
             let (holder, secrets) = self.secret_refs.holder(&c.id, "").await.map_err(ControlError::Invalid)?;
             for r in refs {
-                let by = secrets.may_write(who, &holder, r.trim()).await.map_err(|e| match e {
+                let by = secrets.may_write(who, &holder, r).await.map_err(|e| match e {
                     crate::secret_refs::Refused::Forbidden(m) => ControlError::Forbidden(format!("{r}: {m}")),
                     crate::secret_refs::Refused::Invalid(m) => ControlError::Invalid(format!("{r}: {m}")),
                 })?;

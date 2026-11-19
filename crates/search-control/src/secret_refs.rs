@@ -100,8 +100,23 @@ impl CatalogRefs {
     }
 }
 
+/// What a setting's value is, by roll secrets' own parser (`Reference::parse`): exactly
+/// `roll://…` is a reference, a near miss (a space around it, another case) is refused.
+pub fn classify(value: &str) -> search_es::secret_refs::Setting {
+    use search_es::secret_refs::Setting;
+    match roll_secrets::Reference::parse(value) {
+        Ok(Some(_)) => Setting::Reference,
+        Ok(None) => Setting::Value,
+        Err(e) => Setting::Malformed(e.to_string()),
+    }
+}
+
 #[async_trait]
 impl SecretRefs for CatalogRefs {
+    fn classify(&self, value: &str) -> search_es::secret_refs::Setting {
+        classify(value)
+    }
+
     async fn resolve(&self, cluster: &str, maker: &str, reference: &str) -> Result<Revealed, String> {
         let (holder, secrets) = self.holder(cluster, maker).await?;
         secrets.resolve(&holder, reference).await

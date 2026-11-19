@@ -2,13 +2,12 @@
 //! instead of copied values: a snapshot repository's credential setting may name one
 //! ([`crate::api::snapshots`], "Credentials by reference"). This crate knows only the seam: the
 //! node hands each cluster a [`SecretRefs`] (rolld's resolves through roll secrets, for the
-//! cluster as a workspace resource), and a cluster without one refuses references.
+//! cluster as a workspace resource). Whether a setting is a reference is the resolver's to say
+//! ([`classify`], roll secrets' own parser), never guessed here: a cluster without one has no
+//! references, only values.
 
 use async_trait::async_trait;
 use std::sync::Arc;
-
-/// The scheme a reference starts with.
-pub const SCHEME: &str = "roll://";
 
 /// The header with which roll's control plane names who wrote a request's references (a roll
 /// principal: `operator`, `usr_…`, `token:…`), after checking they may reveal what each names.
@@ -16,9 +15,24 @@ pub const SCHEME: &str = "roll://";
 /// the control plane drops it from whatever it relays (its console).
 pub const MAKER_HEADER: &str = "x-roll-repository-maker";
 
-/// Whether a setting's value is a reference rather than a value.
-pub fn is_reference(value: &str) -> bool {
-    value.trim_start().starts_with(SCHEME)
+/// What a setting's value is, as the resolver parses it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Setting {
+    /// A value, used as given.
+    Value,
+    /// A reference, resolved when it's used.
+    Reference,
+    /// Written like a reference but not one (a leading or trailing space, another case): refused,
+    /// never used as a value. Why, without the value.
+    Malformed(String),
+}
+
+/// `value` as cluster `cluster`'s resolver reads it (no resolver: a value).
+pub fn classify(cluster: &crate::Cluster, value: &str) -> Setting {
+    match &cluster.config.secret_refs {
+        Some(r) => r.0.classify(value),
+        None => Setting::Value,
+    }
 }
 
 /// A resolved value: never printed (`Debug` redacts it), opened only to build a client, wiped
@@ -54,6 +68,8 @@ impl std::fmt::Debug for Revealed {
 /// Errors say why (the reference, the part that failed), never with a value.
 #[async_trait]
 pub trait SecretRefs: Send + Sync {
+    /// Whether `value` is a reference (the referenced system's own parser).
+    fn classify(&self, value: &str) -> Setting;
     /// `reference`'s value now (read, and audited, by the system that holds it).
     async fn resolve(&self, cluster: &str, maker: &str, reference: &str) -> Result<Revealed, String>;
     /// A digest that moves when the value would, read without the value: cheap enough to ask

@@ -80,7 +80,7 @@ pub(super) fn secret_shapes(ty: &str, settings: &Settings) -> EsResult<()> {
 pub(super) fn take_secrets(cluster: &crate::Cluster, ty: &str, settings: &mut Settings) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
     for k in secret_names(ty) {
-        if settings.get(k).is_some_and(crate::secret_refs::is_reference) {
+        if settings.get(k).is_some_and(|v| crate::secret_refs::classify(cluster, v) != crate::secret_refs::Setting::Value) {
             continue;
         }
         if let Some(v) = settings.remove(k)
@@ -112,7 +112,7 @@ pub(super) fn validate_gcs(cluster: &crate::Cluster, name: &str, settings: &Sett
     s3::base_path(settings).map_err(create)?;
     let allow = s3::allow_private(cluster);
     gcs::endpoint(settings.get("endpoint"), allow).map_err(|e| create(EsError::illegal_argument(e)))?;
-    if let Some(json) = settings.get("credentials_file").filter(|j| !j.is_empty() && !crate::secret_refs::is_reference(j)) {
+    if let Some(json) = settings.get("credentials_file").filter(|j| !j.is_empty() && crate::secret_refs::classify(cluster, j) == crate::secret_refs::Setting::Value) {
         gcs::ServiceAccount::parse(json, settings.get("token_uri"), allow).map_err(|e| create(EsError::illegal_argument(e)))?;
     }
     Ok(())

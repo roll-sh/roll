@@ -2156,6 +2156,15 @@ async fn an_s3_repository_takes_its_keys_from_roll_secrets() {
     let (s, v) = e.call_as("ada", reqwest::Method::PUT, &route(&id), Some(repo.clone())).await;
     assert_eq!(s, 403, "{v}");
     fake.revealers.lock().unwrap().push("usr_ada".into());
+    // Only exactly `roll://…` is a reference (roll secrets' parser): a near miss is refused, never
+    // kept as a value.
+    for near in [" roll://production/KEY", "ROLL://production/KEY"] {
+        let mut bad = repo.clone();
+        bad["settings"]["access_key"] = json!(near);
+        bad["settings"]["secret_key"] = json!(near);
+        let (s, v) = e.call_as("ada", reqwest::Method::PUT, &route(&id), Some(bad)).await;
+        assert!(s == 400 && v.to_string().contains("written like a roll secrets reference"), "{near:?}: {v}");
+    }
     let (s, v) = e.call_as("ada", reqwest::Method::PUT, &route(loose["id"].as_str().unwrap()), Some(repo.clone())).await;
     assert!(s == 400 && v.to_string().contains("isn't on any project's canvas"), "{v}");
 
