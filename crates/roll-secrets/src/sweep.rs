@@ -500,6 +500,7 @@ impl Secrets {
             }
         }
         self.expire_shares()?;
+        self.expire_value_requests()?;
         self.reseal_wrapped();
         self.sweep_identity_logins()?;
         self.sweep_retention()?;

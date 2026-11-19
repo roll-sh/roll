@@ -508,7 +508,7 @@ fn index_due(st: &ClusterState, idx: &IndexMeta, rec: Option<&Value>, now: i64) 
         "wait-for-snapshot" => {
             let p = step_conf(&e).get("policy").map(Value::to_es_string).unwrap_or_default();
             let since = e.action_time.unwrap_or(0);
-            let waiting = matches!(super::slm::snapshot_since(st, &p, &idx.name, since), super::slm::Since::NotYet);
+            let waiting = matches!(super::slm::snapshot_since(st, &p, &idx.name, since), super::slm::Since::NotYet | super::slm::Since::Paused);
             ((!waiting).then_some(now), false)
         }
         // A step the runner can't move on from (one its cached phase lacks, the terminal
@@ -814,6 +814,10 @@ async fn execute(env: &Env<'_>, e: &mut Exec) -> Outcome {
             match super::slm::snapshot_since(&env.cluster.state(), &p, i, since) {
                 super::slm::Since::NoPolicy => fail_with(format!("configured policy '{p}' not found")),
                 super::slm::Since::NotYet => Outcome::Wait(Some(obj! { "message" => format!("waiting for policy '{p}' to be executed since {}", java_date(since)) })),
+                // Names why it may wait for good (roll's wording; the branch's owner decides).
+                super::slm::Since::Paused => Outcome::Wait(Some(obj! {
+                    "message" => format!("waiting for policy '{p}' to be executed since {}; {}", java_date(since), crate::branch::SLM_PAUSED)
+                })),
                 super::slm::Since::Without => fail_with(format!("the last successful snapshot of policy '{p}' does not include index '{i}'")),
                 super::slm::Since::Taken => Outcome::Next,
             }

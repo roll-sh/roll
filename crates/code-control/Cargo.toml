@@ -55,6 +55,9 @@ agent-host.workspace = true
 hyper = { workspace = true, features = ["server", "http1"] }
 hyper-util = { workspace = true, features = ["service", "tokio"] }
 rand = "0.8"
+# `tests/queue.rs`: "Store in roll" against roll secrets in process.
+roll-secrets.workspace = true
+roll-workspace.workspace = true
 rsa = { version = "0.9", features = ["pem"] }
 tempfile.workspace = true
 tokio-tungstenite.workspace = true

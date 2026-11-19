@@ -39,6 +39,7 @@ pub mod dotenv;
 mod envs;
 pub mod exports;
 pub mod find;
+mod found;
 pub mod identities;
 pub mod insights;
 pub mod leaks;
@@ -63,6 +64,7 @@ mod purge;
 mod requests;
 mod required;
 mod shares;
+pub mod value_requests;
 pub mod sinks;
 pub mod suggestions;
 mod sweep;
@@ -80,10 +82,11 @@ pub use api::router;
 pub use crypto::{Keyring, Value};
 pub use audit::{AuditEntry, AuditFilter, VerifyQuery};
 pub use chain::Verification;
-pub use consumers::{Reference, Refusal, Resolved, ResourceRef};
+pub use consumers::{Maker, Reference, Refusal, Resolved, ResourceRef};
 pub use envs::{Branch, EnvChange, Ensure, Ensured, Environment, Folder, Import, Kind as EnvironmentKind, NewEnvironment, Policy};
 pub use leaks::Leak;
-pub use links::{Link, LinkProvider, Links, Mode};
+pub use found::{FoundStored, FoundTarget};
+pub use links::{Link, LinkProvider, Links, Mode, Planted};
 pub use metrics::Metrics;
 pub use read::{Followed, Grid, Problem, Secret, Source, Values, Version};
 pub use requests::{Request, RequestValue, Review, Verdict};
@@ -93,6 +96,7 @@ pub use identities::{Identity, IdentityKind, Login, NewIdentity, Proof};
 pub use issuer::Subject;
 pub use required::Required;
 pub use shares::{NewShare, Peek, Share};
+pub use value_requests::{Answer, NewValueRequest, ValuePeek, ValueRequest};
 pub use sweep::{Lease, Swept};
 pub use sinks::{Deliver, NewSink, Sink};
 pub use syncs::{NewSync, Push, SecretSync, SyncField, SyncKind, SyncTarget, Syncs};
@@ -289,6 +293,9 @@ pub enum Error {
     /// outage: `roll run --fallback` doesn't start from its file on it.
     #[error("{0}")]
     KeyDenied(String),
+    /// 410 `gone`: a secret request already answered, expired or cancelled.
+    #[error("{0}")]
+    Gone(String),
     /// 423 `frozen`: an admin froze the folder during an incident (`…/reach/cut-off`); only its
     /// admins (people and tokens, never roll's own readers: `Caller::reads_frozen`) read it until
     /// one unfreezes it. Never an outage either.
@@ -405,6 +412,8 @@ pub struct Secrets {
     oidc: oidc::Keys,
     /// Logins per identity and per client address in the last minute.
     logins: oidc::Window,
+    /// Answers to secret requests per request and per client address in the last minute.
+    answers: oidc::Window,
     /// How many reads of values a principal may make a minute (read.rs, `read_quota`; 0: no limit).
     reads_per_minute: std::sync::atomic::AtomicU32,
     /// roll code's search, once rolld has it (health's `code` check).
@@ -450,6 +459,11 @@ impl Secrets {
     pub fn new(db: Db, workspace: Arc<roll_workspace::Workspace>, opts: Options) -> Result<Secrets> {
         db.ensure_schema(SCHEMA)?;
         db.ensure_schema(shares::SCHEMA)?;
+        db.ensure_schema(value_requests::SCHEMA)?;
+        // Secret requests' answer tokens (value_requests.rs), by digest; requests made before
+        // them have none and can't be answered.
+        db.add_column("value_requests", "token_hash", "TEXT")?;
+        db.ensure_schema("CREATE UNIQUE INDEX IF NOT EXISTS value_requests_token ON value_requests (token_hash);")?;
         db.ensure_schema(read::READS_SCHEMA)?;
         db.ensure_schema(syncs::SCHEMA)?;
         db.ensure_schema(sinks::SCHEMA)?;
@@ -625,7 +639,7 @@ impl Secrets {
         if let (Some(github), Ok(keys)) = (&opts.github, &opts.keyring) {
             links.register(Arc::new(github_app::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone(), github: github.clone() }));
         }
-        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, workloads: opts.workloads, gateway_links: opts.gateways, unwrap: unwrap.clone(), open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, outside: opts.outside, directory: opts.directory, github: opts.github, oidc: Default::default(), logins: Default::default(), reads_per_minute: read::READS_PER_MINUTE.into(), code_refs: Default::default(), sts: opts.sts.clone(), clouds: opts.clouds, public_api, aws_server_id: Default::default(), crls, live_fps: Default::default(), issuer_keys: Default::default(), issuer_rotate_days: issuer::ROTATE_DAYS.into(), audit_keys: Default::default(), audit_rotate_days: audit_key::ROTATE_DAYS.into(), digests: Default::default(), counters: Default::default(), acme: Default::default(), recorder: Default::default() })
+        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, workloads: opts.workloads, gateway_links: opts.gateways, unwrap: unwrap.clone(), open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, outside: opts.outside, directory: opts.directory, github: opts.github, oidc: Default::default(), logins: Default::default(), answers: Default::default(), reads_per_minute: read::READS_PER_MINUTE.into(), code_refs: Default::default(), sts: opts.sts.clone(), clouds: opts.clouds, public_api, aws_server_id: Default::default(), crls, live_fps: Default::default(), issuer_keys: Default::default(), issuer_rotate_days: issuer::ROTATE_DAYS.into(), audit_keys: Default::default(), audit_rotate_days: audit_key::ROTATE_DAYS.into(), digests: Default::default(), counters: Default::default(), acme: Default::default(), recorder: Default::default() })
     }
 
     pub fn links(&self) -> &Links {
@@ -733,7 +747,7 @@ impl Secrets {
         let failed = self.revoke_managed(self.managed_where("project_id = ?", project));
         let now = self.db.now_ms()?;
         self.db.write(|c| {
-            for t in ["secrets", "versions", "changes", "requests", "audit", "required", "shares", "syncs", "audit_sinks", "notices", "identities", "identity_logins", "transit_keys", "oidc_issued"] {
+            for t in ["secrets", "versions", "changes", "requests", "audit", "required", "shares", "value_requests", "syncs", "audit_sinks", "notices", "identities", "identity_logins", "transit_keys", "oidc_issued"] {
                 c.execute(&format!("DELETE FROM {t} WHERE project_id = ?"), [project])?;
             }
             c.execute("DELETE FROM leases WHERE project_id = ? AND revoked_at IS NOT NULL", [project])?;

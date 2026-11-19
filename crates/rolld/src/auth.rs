@@ -97,6 +97,11 @@ pub const RULES: &[Rule] = &[
     // per split. An unsealed node answers that it isn't sealed.
     Rule { route: "/v1/secrets/unseal", access: Access::Public("unsealing a sealed node: the deployment key's shares are the credential") },
     Rule { route: "/v1/secrets/shares", access: Access::Public("a one-time share's link: ciphertext only, the key stays in the link") },
+    // A secret request's link: for someone outside roll, who has no roll credential. It shows
+    // only the note and key names, takes values sealed to the request's own key, is answered a
+    // set number of times before it expires, and lands as whoever asked could write
+    // (docs/secrets.md, "Asking for a value").
+    Rule { route: "/v1/secrets/value-requests", access: Access::Public("a secret request's link: someone outside roll sends sealed values in, as whoever asked") },
     Rule { route: "/v1/secrets/ocsp", access: Access::Public("a project CA's OCSP responder, which anyone checking its certificates asks") },
     Rule { route: "/v1/secrets/crl", access: Access::Public("a project CA's certificate revocation list, which anyone checking its certificates fetches") },
     // ACME (RFC 8555) on a project's CA: the account key's JWS, made with an External Account

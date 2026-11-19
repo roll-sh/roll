@@ -592,6 +592,7 @@ pub fn change(id: &str, n: i64) -> ChangeInfo {
         approved: false,
         author: "carol".into(),
         github_pr: Some(100 + n),
+        owner_id: "own_acme".into(),
     }
 }
 
