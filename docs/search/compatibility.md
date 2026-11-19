@@ -1533,6 +1533,17 @@ the rest are skipped by the tests' own prerequisites.
   setting. A `search_click` behavioral analytics event is indexed as on Elasticsearch, and also
   counts as a click for the index's analytics when they're on.
 
+- Query languages nest only so deep, because a stack overflow aborts a node every tenant
+  shares:
+  - **ES|QL, SQL and EQL:** Elasticsearch's own expression depths (300, 250 and 250), with its
+    messages. roll counts the nesting plus the operators a top-level expression chains.
+  - **ES|QL subqueries and views:** these nest at most 16 levels, and one query splices at
+    most 1,000 views (roll's own).
+  - **KQL, PPL, PromQL, `query_string` and `simple_query_string`:** 300 levels (roll's own;
+    Elasticsearch and OpenSearch fail with a `StackOverflowError` somewhere deeper).
+- An Elasticsearch-flavor cluster holds at most 1,000 open points in time (roll's own;
+  Elasticsearch has no limit). The 1,001st fails as OpenSearch's `search.max_open_pit_context`
+  does, which OpenSearch-flavor clusters now enforce.
 - By-query tasks (`wait_for_completion=false`) run to completion before their task id is
   returned (their results are stored in the `.tasks` system index), so they are not
   throttled and `_rethrottle` doesn't reach them; synchronous requests are throttled by
