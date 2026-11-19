@@ -95,6 +95,10 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
+/// The name the default exchange (`""`) is checked as in resource permissions, as RabbitMQ's
+/// `rabbit_access_control` does: an empty pattern (`^$`) doesn't let a user publish to it.
+pub const DEFAULT_EXCHANGE: &str = "amq.default";
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Permission {
     pub configure: String,
