@@ -450,6 +450,12 @@ pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Work
     }
     // Where clients reach rolld: a CA's certificates name its CRL there.
     secrets.set_public_api(args.code_public_url.clone().unwrap_or_else(|| format!("http://{}:{}", args.public_host, args.api.port())));
+    // What AWS identities' signed requests name (X-Roll-Server-ID): ROLL_SECRETS_AWS_SERVER_ID, or
+    // the configured public URL. Never the host and port made up above, which two deployments can
+    // share: unset, roll-secrets derives one from the deployment key.
+    if let Some(id) = std::env::var("ROLL_SECRETS_AWS_SERVER_ID").ok().filter(|v| !v.trim().is_empty()).or_else(|| args.code_public_url.clone()) {
+        secrets.set_aws_server_id(id);
+    }
     tell_decoys(&access, secrets.clone());
     // ACME's http-01 and dns-01 checks: public addresses only, as webhooks.
     secrets.set_acme_checks(Arc::new(acme::Checks::new(allow_private)));

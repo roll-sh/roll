@@ -217,9 +217,16 @@ export type PasswordClass = "lower" | "upper" | "digit" | "symbol";
 export type PasswordPolicy = { length: number; classes?: PasswordClass[]; symbols?: string };
 export type Required = { key: string; path: string; comment: string; type?: KeyType; pattern?: string; owner?: string; password?: PasswordPolicy };
 /** A workload identity: CI jobs and clusters whose OIDC tokens match log in for a short-lived token. */
+/** What a login proves itself with: an OIDC token, or a signed AWS `GetCallerIdentity`. */
+export type IdentityKind = "oidc" | "aws";
 export type Identity = {
   id: string;
   name: string;
+  kind: IdentityKind;
+  /** An `aws` identity's role or user (also its `subject`; its `issuer` is `aws`). */
+  arn?: string;
+  /** What an `aws` identity's signed requests name in `X-Roll-Server-ID` (`ROLL_AWS_SERVER_ID`). */
+  server_id?: string;
   /** The token's `iss`. */
   issuer: string;
   audience: string;
@@ -242,8 +249,13 @@ export type Identity = {
   /** The gateway it logs in (its tokens open that gateway's link and nothing else). */
   gateway?: string;
 };
-/** `jwks`: the issuer's keys (a JWKS document as text); then the issuer is never fetched. */
-export type NewIdentity = { name: string; issuer: string; audience: string; subject: string; claims?: Record<string, string>; environments?: string[]; paths?: string[]; actions: Action[]; ttl_minutes?: number; allowed_ips?: string[]; jwks?: string; gateway?: string };
+type IdentityScope = { name: string; environments?: string[]; paths?: string[]; actions: Action[]; ttl_minutes?: number; allowed_ips?: string[]; gateway?: string };
+/**
+ * `jwks`: the issuer's keys (a JWKS document as text); then the issuer is never fetched. An `aws`
+ * identity takes one role or user instead (`arn:aws:iam::<account>:role/<name>`, or
+ * `arn:aws:sts::<account>:assumed-role/<role>/<session prefix>*`).
+ */
+export type NewIdentity = IdentityScope & ({ kind?: "oidc"; issuer: string; audience: string; subject: string; claims?: Record<string, string>; jwks?: string } | { kind: "aws"; arn: string });
 export type NewToken = { name: string; environments?: string[]; paths?: string[]; actions: Action[]; expires_at?: number; ttl_days?: number; allowed_ips?: string[] };
 /** `approval`: the approval that let the request through roll-access's gate (an `ask` approved; `until` when a rule it remembered allowed it). */
 /** `seq` and `hash` place a row in its project's chain (absent on rows from before it); an `audit.digest` row's `digest` is roll's signed JWS of it. */

@@ -25,6 +25,7 @@ pub mod gateways;
 mod turns;
 pub mod github_app;
 pub mod aws;
+pub mod aws_identity;
 pub mod iam;
 pub mod rotators;
 pub mod saas;
@@ -85,7 +86,7 @@ pub use read::{Followed, Grid, Problem, Secret, Source, Values, Version};
 pub use requests::{Request, RequestValue, Review, Verdict};
 pub use exports::Export;
 pub use decoys::{Decoy, NewDecoy};
-pub use identities::{Identity, Login, NewIdentity};
+pub use identities::{Identity, IdentityKind, Login, NewIdentity, Proof};
 pub use required::Required;
 pub use shares::{NewShare, Peek, Share};
 pub use sweep::{Lease, Swept};
@@ -401,6 +402,9 @@ pub struct Secrets {
     code_refs: std::sync::OnceLock<Arc<dyn health::CodeRefs>>,
     /// Where clients reach rolld's API, once rolld says (certificates' CRL distribution point).
     public_api: Arc<std::sync::OnceLock<String>>,
+    /// What AWS identities' logins must name in `X-Roll-Server-ID` (`ROLL_SECRETS_AWS_SERVER_ID`,
+    /// or the configured public URL); unset, one derived from the deployment key.
+    aws_server_id: std::sync::OnceLock<String>,
     /// Signed CRLs by CA, with when they were made (pki.rs): the public route signs one a minute.
     crls: pki::Crls,
     /// What rolld's metrics count (metrics.rs).
@@ -462,6 +466,8 @@ impl Secrets {
         db.ensure_schema(exports::SCHEMA)?;
         // An identity's pinned keys: a JWKS, for an issuer roll doesn't fetch (identities.rs).
         db.add_column("identities", "jwks", "TEXT")?;
+        // An identity's kind: NULL is OIDC, `aws` takes a signed GetCallerIdentity (aws_identity.rs).
+        db.add_column("identities", "kind", "TEXT")?;
         // Typed keys (required.rs).
         db.add_column("required", "type", "TEXT")?;
         db.add_column("required", "pattern", "TEXT")?;
@@ -580,7 +586,7 @@ impl Secrets {
         if let (Some(github), Ok(keys)) = (&opts.github, &opts.keyring) {
             links.register(Arc::new(github_app::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone(), github: github.clone() }));
         }
-        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, workloads: opts.workloads, gateway_links: opts.gateways, unwrap: unwrap.clone(), open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, outside: opts.outside, directory: opts.directory, github: opts.github, oidc: Default::default(), logins: Default::default(), reads_per_minute: read::READS_PER_MINUTE.into(), code_refs: Default::default(), sts: opts.sts.clone(), clouds: opts.clouds, public_api, crls, live_fps: Default::default(), issuer_keys: Default::default(), digests: Default::default(), counters: Default::default(), acme: Default::default() })
+        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, workloads: opts.workloads, gateway_links: opts.gateways, unwrap: unwrap.clone(), open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, outside: opts.outside, directory: opts.directory, github: opts.github, oidc: Default::default(), logins: Default::default(), reads_per_minute: read::READS_PER_MINUTE.into(), code_refs: Default::default(), sts: opts.sts.clone(), clouds: opts.clouds, public_api, aws_server_id: Default::default(), crls, live_fps: Default::default(), issuer_keys: Default::default(), digests: Default::default(), counters: Default::default(), acme: Default::default() })
     }
 
     pub fn links(&self) -> &Links {
