@@ -294,6 +294,11 @@ type Run = {
    *  stays under it) over window_days (1–60, default 28). A burn 14.4× as fast as the budget lasts over an hour and its
    *  last five minutes, or 6× over six hours and their last half hour, is alert.slo; a web service's. Changing it is a write. */
   slo?: { objective: number /* 90–99.999 */; latency_ms?: number /* 1–60000 */; window_days?: number };
+  /** Its own Prometheus endpoint (Fly's [metrics]): GET'd on each running instance every 15 s by the owner (never one
+   *  asleep), at most 4 MiB and 2,000 series a scrape; counters, gauges, and histograms' and summaries' sum and count,
+   *  each with an `instance` label, on …/app-metrics. port: the app's own by default (a worker's must say); not in a
+   *  closed environment. Changing it is a write. */
+  metrics?: { port?: number; path?: string /* default /metrics */ };
   /** Commands on a schedule on any service: each a job of the live deployment at its due times, skipped while its
    *  last job runs; at most 20; name a-z, 0-9 and - (unique, 32 at most), command 1–2000, timeout_s 1–86400. */
   schedules?: { name: string; schedule: string; command?: string; path?: string /* a web service's path GET'd instead of a command (Vercel's crons): through its own proxy on the owner, past its allow list, firewall, rate limit and access gate, with Authorization: Bearer $CRON_SECRET when the environment has one; a call still out skips the next; a non-2xx/3xx or no answer is cron.failed (data.path, http_status or error); timeout_s default 300 */; timezone?: string; timeout_s?: number }[];

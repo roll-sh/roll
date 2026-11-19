@@ -136,6 +136,7 @@ mod tests {
             sidecars: vec![crate::model::Sidecar { name: "a".into(), image: "x".into(), command: None, env: Default::default(), variables: vec![], cpu: 0.25, memory_mb: 128 }],
             block_on: Some(crate::model::Severity::Critical),
             slo: Some(crate::model::Slo { objective: 99.9, latency_ms: None, window_days: 28 }),
+            metrics: Some(crate::model::Scrape { port: Some(9091), path: "/metrics".into() }),
         };
         let keys: std::collections::BTreeSet<String> = serde_json::to_value(&all).unwrap().as_object().unwrap().keys().filter(|k| *k != "volume").cloned().collect();
         let file: std::collections::BTreeSet<String> = apps_build::app::RUN_KEYS.iter().map(|k| k.to_string()).collect();

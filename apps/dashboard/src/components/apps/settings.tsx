@@ -63,6 +63,8 @@ interface Form {
   alertErrors: string;
   alertP95: string;
   sloObjective: string;
+  metricsPath: string;
+  metricsPort: string;
   sloLatency: string;
   sloWindow: string;
   alertCapacity: string;
@@ -138,6 +140,8 @@ export function formOf(s: Service): Form {
     alertErrors: str(s.run.alerts?.error_pct),
     alertP95: str(s.run.alerts?.p95_ms),
     sloObjective: str(s.run.slo?.objective),
+    metricsPath: s.run.metrics ? (s.run.metrics.path ?? "/metrics") : "",
+    metricsPort: str(s.run.metrics?.port),
     sloLatency: str(s.run.slo?.latency_ms),
     sloWindow: str(s.run.slo?.window_days),
     alertCapacity: str(s.run.alerts?.capacity_pct),
@@ -235,6 +239,8 @@ export function patchOf(s: Service, f: Form): ServicePatch {
       ...(f.alertLog.trim() ? { log_match: f.alertLog.trim() } : {}),
       log_count: Number(f.alertLogCount) || 10,
     };
+  if (f.metricsPath !== before.metricsPath || f.metricsPort !== before.metricsPort)
+    run.metrics = f.metricsPath.trim() ? { path: f.metricsPath.trim(), ...(num(f.metricsPort) ? { port: Number(f.metricsPort) } : {}) } : null;
   if (f.sloObjective !== before.sloObjective || f.sloLatency !== before.sloLatency || f.sloWindow !== before.sloWindow)
     run.slo = f.sloObjective.trim() ? { objective: Number(f.sloObjective), ...(num(f.sloLatency) ? { latency_ms: Number(f.sloLatency) } : {}), ...(num(f.sloWindow) ? { window_days: Number(f.sloWindow) } : {}) } : null;
   if (f.rolloutSteps !== before.rolloutSteps || f.rolloutStep !== before.rolloutStep || f.rolloutErrors !== before.rolloutErrors || f.rolloutManual !== before.rolloutManual)
@@ -263,7 +269,7 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   return patch;
 }
 
-const NUMERIC: (keyof Form)[] = ["scalePer", "port", "timeout", "retries", "min", "max", "concurrency", "healthTimeout", "healthEvery", "healthFailures", "drain", "cpuTarget", "memoryTarget", "suspendAfter", "sleepAfter", "volumeSize", "backupEvery", "backupKeep", "alertMemory", "alertErrors", "alertP95", "sloObjective", "sloLatency", "sloWindow", "alertCapacity", "alertLogCount", "rolloutStep", "rolloutErrors", "restartTries"];
+const NUMERIC: (keyof Form)[] = ["scalePer", "port", "timeout", "retries", "min", "max", "concurrency", "healthTimeout", "healthEvery", "healthFailures", "drain", "cpuTarget", "memoryTarget", "suspendAfter", "sleepAfter", "volumeSize", "backupEvery", "backupKeep", "alertMemory", "alertErrors", "alertP95", "sloObjective", "sloLatency", "sloWindow", "metricsPort", "alertCapacity", "alertLogCount", "rolloutStep", "rolloutErrors", "restartTries"];
 
 /** A rollout's steps as typed (`10, 50`): increasing percents 1–99, at most five; null when they aren't. */
 export function rolloutSteps(v: string): number[] | null {
@@ -609,6 +615,14 @@ export function SettingsTab({
                 <Field label="Alert: p95 latency (ms)" hint="in three of five minutes; 0 off">
                   {t("alertP95", "0")}
                 </Field>
+                <Field label="Metrics endpoint" hint="its Prometheus path, scraped every 15 s while it runs; empty: none">
+                  {t("metricsPath", "/metrics")}
+                </Field>
+                {form.metricsPath.trim() && (
+                  <Field label="Metrics port" hint="empty: its own port">
+                    {t("metricsPort", "9091")}
+                  </Field>
+                )}
                 <Field label="Objective (%)" hint="of requests not 5xx, e.g. 99.9; alerts when its error budget burns fast; empty: none">
                   {t("sloObjective", "99.9")}
                 </Field>

@@ -88,6 +88,8 @@ pub struct Inst {
     /// start.
     wanted: Vec<u16>,
     ports: Mutex<HashMap<u16, SocketAddr>>,
+    /// A scrape of its metrics endpoint is out ([`crate::prom`]).
+    scraping: AtomicBool,
 }
 
 /// An instance's last hour by minute ([`EnvLive::by_instance`]).
@@ -150,6 +152,7 @@ impl Inst {
             minutes: Mutex::new(std::collections::VecDeque::new()),
             wanted: Vec::new(),
             ports: Mutex::new(HashMap::new()),
+            scraping: AtomicBool::new(false),
         })
     }
 
@@ -160,6 +163,23 @@ impl Inst {
             i.wanted = tpl.spec.ports.clone();
         }
         i
+    }
+
+    /// Where it answers while it runs (never while suspended or stopped).
+    pub fn running_addr(&self) -> Option<SocketAddr> {
+        match *self.phase.lock() {
+            Phase::Running(a) => a,
+            _ => None,
+        }
+    }
+
+    /// Whether this scrape may start (none other is out).
+    pub fn begin_scrape(&self) -> bool {
+        !self.scraping.swap(true, Ordering::SeqCst)
+    }
+
+    pub fn end_scrape(&self) {
+        self.scraping.store(false, Ordering::SeqCst);
     }
 
     /// Where it answers on `port` (a custom domain's own), if it publishes it.

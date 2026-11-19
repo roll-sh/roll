@@ -2065,6 +2065,31 @@ async fn an_slo_shows_its_budget_and_a_fast_burn_alerts() {
     assert_eq!(call(&w.api, "GET", &format!("{env}/slo"), None).await.1["burning"], Value::Null);
 }
 
+/// The app's own Prometheus endpoint (Fly's `[metrics]`): scraped on each running instance,
+/// its counters and gauges on `…/app-metrics` with the instance named, as an SDK's would be.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_apps_prometheus_endpoint_is_scraped() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "api", json!({"port": 80, "min_instances": 1, "metrics": {}})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let env = format!("/v1/apps/services/{id}/environments/production");
+    assert_eq!(call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"metrics": {"path": "metrics"}}}))).await.0, StatusCode::BAD_REQUEST);
+    let mut series = Value::Null;
+    for _ in 0..200 {
+        w.apps.scrape_pass();
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        series = call(&w.api, "GET", &format!("{env}/app-metrics?minutes=5"), None).await.1["series"].clone();
+        if series.as_array().is_some_and(|a| a.len() >= 2) {
+            break;
+        }
+    }
+    let names: std::collections::BTreeSet<&str> = series.as_array().unwrap().iter().map(|s| s["name"].as_str().unwrap()).collect();
+    assert_eq!(names, ["fake_queue_depth", "fake_requests_total"].into(), "{series}");
+    let gauge = series.as_array().unwrap().iter().find(|s| s["name"] == "fake_queue_depth").unwrap();
+    assert_eq!((gauge["shows"].as_str(), gauge["points"][0][1].as_f64()), (Some("value"), Some(3.0)), "{gauge}");
+    assert!(gauge["attrs"].as_array().unwrap().iter().any(|a| a["key"] == "instance"), "{gauge}");
+}
+
 /// An instance the kernel killed for its memory says so: in the log and in why it crashed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_instance_killed_for_its_memory_says_so() {

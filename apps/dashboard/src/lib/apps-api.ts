@@ -91,6 +91,8 @@ export interface Run {
   alerts?: { memory_pct: number; error_pct: number; p95_ms: number; capacity_pct?: number; log_match?: string; log_count?: number };
   /** Its service level objective: `objective`% of requests not 5xx (and of minutes under `latency_ms` at p95) over `window_days`; `alert.slo` when its budget burns fast. */
   slo?: Slo;
+  /** Its own Prometheus endpoint, scraped every 15 s on each running instance (port: the app's own by default). */
+  metrics?: { port?: number; path?: string };
   /** A gradual rollout: the new deployment takes each percent of `steps` for `step_s`, rolled
    *  back by a 5xx share of `error_pct` or more (worse than the old one); no steps: at once. */
   rollout?: { steps: number[]; step_s: number; error_pct: number; /** Each step waits for a person once it passes. */ manual?: boolean };
