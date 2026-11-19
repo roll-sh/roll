@@ -241,6 +241,26 @@ async fn endpoints_cannot_reach_private_addresses_unless_the_node_allows_it() {
 }
 
 #[tokio::test]
+async fn a_request_waits_no_longer_than_the_nodes_cap_whatever_timeout_it_asks_for() {
+    // An endpoint that takes the request and never answers.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let silent = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((sock, _)) = listener.accept().await {
+            held.push(sock);
+        }
+    });
+    let c = cluster(&silent, &[("roll.inference.max_timeout", "300ms")]).await;
+    let put = format!(r#"{{"service":"openai","service_settings":{{"api_key":"k","model_id":"m","url":"{silent}/v1/chat/completions"}}}}"#);
+    let started = std::time::Instant::now();
+    let (s, v, _) = call(&c, "PUT", "/_inference/completion/slow?timeout=1h", &put).await;
+    assert!(started.elapsed() < std::time::Duration::from_secs(10), "waited {:?}", started.elapsed());
+    assert_eq!(s, 400, "{v:?}");
+    assert_eq!(v.pointer(&["error", "caused_by", "reason"]).and_then(Value::as_str), Some("Inference endpoint [slow]: request timed out"), "{v:?}");
+}
+
+#[tokio::test]
 async fn the_test_plugin_services_exist_only_on_test_clusters() {
     let (m, _) = mock().await;
     let put = r#"{"service":"test_service","service_settings":{"model":"my_model","api_key":"abc64"}}"#;

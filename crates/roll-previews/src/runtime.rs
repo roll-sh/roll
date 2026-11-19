@@ -287,7 +287,13 @@ impl Drop for Relay {
     fn drop(&mut self) {
         let name = std::mem::take(&mut self.name);
         if let Ok(h) = tokio::runtime::Handle::try_current() {
-            h.spawn(async move { code_preview::docker::remove(&name).await });
+            // Again a moment later: a connection dropped before Docker had made the container
+            // removed nothing the first time.
+            h.spawn(async move {
+                code_preview::docker::remove(&name).await;
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                code_preview::docker::remove(&name).await;
+            });
         }
     }
 }
@@ -1399,7 +1405,7 @@ impl Apps for Runtime {
         self.iso.logs_tail(&container_name(&host), lines.clamp(1, 2000)).await.lines().map(str::to_string).collect()
     }
 
-    async fn follow(&self, preview: &str, service: &str, lines: usize) -> Option<tokio::sync::mpsc::Receiver<String>> {
+    async fn follow(&self, preview: &str, service: &str, lines: usize) -> Option<tokio::sync::mpsc::Receiver<(bool, String)>> {
         let host = self.store.services(preview).ok()?.into_iter().find(|s| s.name == service)?.host;
         self.iso.follow(&container_name(&host), lines.clamp(1, 2000)).await
     }
@@ -1427,8 +1433,14 @@ impl Apps for Runtime {
         let me = self.me.upgrade().ok_or_else(|| anyhow::anyhow!("the preview runtime is stopping"))?;
         let name = me.shell_container(preview, service).await?;
         let relay = format!("roll-previews-fwd-{}", &crate::store::new_token()[..12]);
+        // Labelled as the runtime's other helpers: a crash's leftovers go with them.
+        let mut args: Vec<String> = vec!["run".into(), "--rm".into(), "-i".into(), "--name".into(), relay.clone(), "--label".into(), format!("{}=preview", code_preview::docker::LABEL)];
+        if let Some(l) = code_preview::docker::home_label() {
+            args.extend(["--label".into(), l]);
+        }
+        args.extend(["--network", &format!("container:{name}"), "--memory", "32m", "--cpus", "0.25", "--pids-limit", "16", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", FORWARD_IMAGE, "nc", "127.0.0.1", &port.to_string()].map(String::from));
         let mut child = tokio::process::Command::new("docker")
-            .args(["run", "--rm", "-i", "--name", &relay, "--network", &format!("container:{name}"), "--memory", "32m", "--cpus", "0.25", "--pids-limit", "16", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", FORWARD_IMAGE, "nc", "127.0.0.1", &port.to_string()])
+            .args(&args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())

@@ -2471,6 +2471,154 @@ async fn the_sweep_purges_after_the_window_and_branches_keep_their_data() {
     e.control.shutdown().await.unwrap();
 }
 
+/// Cross-cluster search between one person's clusters (docs/search/README.md, "Cross-cluster
+/// search"): linked through roll's API with a cross-cluster key of the remote, which roll keeps
+/// sealed and never shows; a search, `_msearch`, `_field_caps`, `_resolve/cluster` and
+/// `_resolve/index` reach the remote's indices as `alias:index`, within the key's access; another
+/// person's cluster can't be named, and answers as a missing one; revoking the key cuts the link.
+#[tokio::test]
+async fn cross_cluster_search_between_a_persons_own_clusters() {
+    use reqwest::Method;
+    let e = env().await;
+    let mk = |name: &'static str, who: &'static str| {
+        let e = &e;
+        async move {
+            let (s, c) = e.call_as(who, Method::POST, "/v1/search/clusters", Some(json!({ "name": name }))).await;
+            assert_eq!(s, 200, "{c}");
+            creds(&c)
+        }
+    };
+    let (app, app_pw) = mk("ann-app", "ann").await;
+    let (logs, logs_pw) = mk("ann-logs", "ann").await;
+    mk("bob-vault", "bob").await;
+    for (u, p, path, doc) in [
+        (&app, &app_pw, "/app/_doc/1", json!({ "level": "info", "msg": "app up" })),
+        (&logs, &logs_pw, "/logs-1/_doc/1", json!({ "level": "error", "msg": "disk full" })),
+        (&logs, &logs_pw, "/logs-1/_doc/2", json!({ "level": "info", "msg": "disk ok" })),
+        (&logs, &logs_pw, "/private/_doc/1", json!({ "level": "secret" })),
+    ] {
+        let (s, v) = e.es(u, p, Method::PUT, &format!("{path}?refresh=true"), Some(doc)).await;
+        assert_eq!(s, 201, "{v}");
+    }
+
+    // Another person's cluster can't be linked, and answers like one that doesn't exist; so does
+    // naming it in the settings.
+    for target in ["bob-vault", "nope"] {
+        let (s, v) = e.call_as("ann", Method::PUT, "/v1/search/clusters/ann-app/remotes/r", Some(json!({ "cluster": target }))).await;
+        assert_eq!((s, v["error"].as_str()), (404, Some(&*format!("no search cluster {target}"))), "{v}");
+    }
+    let refused: Vec<(u16, Value)> = futures::future::join_all(["bob-vault", "nope"].map(|t| {
+        e.es(&app, &app_pw, Method::PUT, "/_cluster/settings", Some(json!({ "persistent": { "cluster.remote.r.mode": "proxy", "cluster.remote.r.proxy_address": t } })))
+    }))
+    .await;
+    assert_eq!(refused[0].0, 400, "{:?}", refused[0]);
+    assert_eq!(refused[0].1["error"]["reason"].as_str().map(|r| r.replace("bob-vault", "X")), refused[1].1["error"]["reason"].as_str().map(|r| r.replace("nope", "X")));
+
+    // Her own: linked with a key that may search `logs-*` only.
+    let (s, link) = e.call_as("ann", Method::PUT, "/v1/search/clusters/ann-app/remotes/logs", Some(json!({ "cluster": "ann-logs", "access": { "search": [{ "names": ["logs-*"] }] } }))).await;
+    assert_eq!((s, link["cluster"].as_str(), link["minted"].as_bool()), (200, Some("ann-logs"), Some(true)), "{link}");
+    let key_id = link["key_id"].as_str().unwrap().to_string();
+    let (_, listed) = e.call_as("ann", Method::GET, "/v1/search/clusters/ann-app/remotes", None).await;
+    assert_eq!(listed["remotes"][0]["alias"], "logs", "{listed}");
+    assert!(!listed.to_string().contains("encoded") && !link.to_string().contains("api_key"), "credentials never shown: {listed} {link}");
+    let (_, info) = e.es(&app, &app_pw, Method::GET, "/_remote/info", None).await;
+    assert_eq!((info["logs"]["connected"].as_bool(), info["logs"]["cluster_credentials"].as_str()), (Some(true), Some("::es_redacted::")), "{info}");
+
+    // One search over both: hits named by cluster, aggregations merged, a `_clusters` section.
+    let q = json!({ "query": { "match_all": {} }, "aggs": { "levels": { "terms": { "field": "level.keyword" } } }, "sort": [{ "_index": "asc" }] });
+    let (s, v) = e.es(&app, &app_pw, Method::POST, "/app,logs:logs-*/_search", Some(q.clone())).await;
+    assert_eq!(s, 200, "{v}");
+    let indices: Vec<&str> = v["hits"]["hits"].as_array().unwrap().iter().map(|h| h["_index"].as_str().unwrap()).collect();
+    assert_eq!(indices, ["app", "logs:logs-1", "logs:logs-1"], "{v}");
+    assert_eq!(v["hits"]["total"]["value"], 3, "{v}");
+    let buckets: Vec<(String, i64)> = v["aggregations"]["levels"]["buckets"].as_array().unwrap().iter().map(|b| (b["key"].as_str().unwrap().into(), b["doc_count"].as_i64().unwrap())).collect();
+    assert_eq!(buckets, [("info".to_string(), 2), ("error".to_string(), 1)], "{v}");
+    assert_eq!((v["_clusters"]["total"].as_i64(), v["_clusters"]["successful"].as_i64()), (Some(2), Some(2)), "{v}");
+    assert_eq!(v["_clusters"]["details"]["logs"]["indices"], "logs-*", "{v}");
+    // `_msearch` items too.
+    let r = e.http.post(format!("{}/_msearch", e.es)).basic_auth(&app, Some(&app_pw)).header("content-type", "application/x-ndjson").body("{\"index\":\"logs:logs-1\"}\n{\"query\":{\"match\":{\"msg\":\"disk\"}}}\n").send().await.unwrap();
+    let m: Value = r.json().await.unwrap();
+    assert_eq!(m["responses"][0]["hits"]["total"]["value"], 2, "{m}");
+
+    // The key's access is all the link reaches: `private` isn't in it (skipped, the default).
+    let (s, v) = e.es(&app, &app_pw, Method::GET, "/logs:private/_search", None).await;
+    assert_eq!((s, v["_clusters"]["details"]["logs"]["status"].as_str()), (200, Some("skipped")), "{v}");
+    assert_eq!(v["_clusters"]["details"]["logs"]["failures"][0]["reason"]["type"], "security_exception", "{v}");
+    assert_eq!(v["hits"]["total"]["value"], 0, "{v}");
+
+    // Field capabilities, `_resolve/cluster` and `_resolve/index` across the link.
+    let (_, fc) = e.es(&app, &app_pw, Method::GET, "/app,logs:*/_field_caps?fields=level", None).await;
+    assert_eq!(fc["indices"], json!(["app", "logs:logs-1"]), "{fc}");
+    assert_eq!(fc["fields"]["level"]["text"]["searchable"], true, "{fc}");
+    let (_, rc) = e.es(&app, &app_pw, Method::GET, "/_resolve/cluster/app,logs:logs-*", None).await;
+    assert_eq!((rc["(local)"]["matching_indices"].as_bool(), rc["logs"]["connected"].as_bool(), rc["logs"]["matching_indices"].as_bool()), (Some(true), Some(true), Some(true)), "{rc}");
+    let (_, ri) = e.es(&app, &app_pw, Method::GET, "/_resolve/index/logs:logs-*", None).await;
+    assert_eq!(ri["indices"][0]["name"], "logs:logs-1", "{ri}");
+
+    // A user of the local cluster reaches the remote only through `remote_indices` naming it.
+    let role = json!({ "indices": [{ "names": ["app"], "privileges": ["read"] }], "remote_indices": [{ "clusters": ["logs"], "names": ["logs-*"], "privileges": ["read"] }] });
+    assert_eq!(e.es(&app, &app_pw, Method::PUT, "/_security/role/reader", Some(role)).await.0, 200);
+    assert_eq!(e.es(&app, &app_pw, Method::PUT, "/_security/role/local_only", Some(json!({ "indices": [{ "names": ["*"], "privileges": ["read"] }] }))).await.0, 200);
+    for (user, role) in [("reader", "reader"), ("local", "local_only")] {
+        let u = json!({ "password": "pass-word-1", "roles": [role] });
+        assert_eq!(e.es(&app, &app_pw, Method::PUT, &format!("/_security/user/{user}"), Some(u)).await.0, 200);
+    }
+    let (s, v) = e.es(&format!("reader@{app}"), "pass-word-1", Method::GET, "/app,logs:logs-1/_search", None).await;
+    assert_eq!((s, v["hits"]["total"]["value"].as_i64()), (200, Some(3)), "{v}");
+    let (s, v) = e.es(&format!("local@{app}"), "pass-word-1", Method::GET, "/logs:logs-1/_search", None).await;
+    assert_eq!((s, v["_clusters"]["details"]["logs"]["failures"][0]["reason"]["type"].as_str()), (200, Some("security_exception")), "{v}");
+
+    // A cross-cluster key is no REST credential, also with the header only roll's own calls
+    // may carry.
+    let (s, k) = e.es(&logs, &logs_pw, Method::POST, "/_security/cross_cluster/api_key", Some(json!({ "name": "mine", "access": { "search": [{ "names": ["*"] }] } }))).await;
+    assert_eq!(s, 200, "{k}");
+    use base64::Engine;
+    let key = base64::engine::general_purpose::STANDARD.encode(format!("{}@{logs}:{}", k["id"].as_str().unwrap(), k["api_key"].as_str().unwrap()));
+    let r = e.http.get(format!("{}/logs-1/_search", e.es)).header("Authorization", format!("ApiKey {key}")).header("x-roll-remote-access", r#"{"cluster":"ann-app","roles":[{"x":{"indices":[{"names":["*"],"privileges":["all"]}]}}]}"#).send().await.unwrap();
+    assert_eq!(r.status(), 401, "{}", r.text().await.unwrap());
+
+    // Revoking the key on the remote cuts the link: skipped, or an error once it may not be.
+    let (s, v) = e.es(&logs, &logs_pw, Method::DELETE, "/_security/api_key", Some(json!({ "ids": [key_id] }))).await;
+    assert_eq!(s, 200, "{v}");
+    let (_, v) = e.es(&app, &app_pw, Method::GET, "/app,logs:logs-1/_search", None).await;
+    assert_eq!((v["hits"]["total"]["value"].as_i64(), v["_clusters"]["details"]["logs"]["status"].as_str()), (Some(1), Some("skipped")), "{v}");
+    assert_eq!(e.es(&app, &app_pw, Method::PUT, "/_cluster/settings", Some(json!({ "persistent": { "cluster.remote.logs.skip_unavailable": false } }))).await.0, 200);
+    let (s, v) = e.es(&app, &app_pw, Method::GET, "/app,logs:logs-1/_search", None).await;
+    assert_eq!((s, v["error"]["type"].as_str()), (401, Some("security_exception")), "{v}");
+
+    // Unlinked: the remote's settings and credentials go.
+    assert_eq!(e.call_as("ann", Method::DELETE, "/v1/search/clusters/ann-app/remotes/logs", None).await.0, 204);
+    let (_, info) = e.es(&app, &app_pw, Method::GET, "/_remote/info", None).await;
+    assert!(info.get("logs").is_none(), "{info}");
+}
+
+/// A linked remote that sleeps wakes for the search; one that's gone is skipped (the default),
+/// or fails the search when it may not be.
+#[tokio::test]
+async fn a_sleeping_remote_wakes_and_a_gone_one_is_skipped() {
+    use reqwest::Method;
+    let e = env().await;
+    let (near, near_pw) = creds(&e.post("/v1/search/clusters", json!({ "name": "near" })).await);
+    let (far, far_pw) = creds(&e.post("/v1/search/clusters", json!({ "name": "far" })).await);
+    let (s, v) = e.es(&far, &far_pw, Method::PUT, "/items/_doc/1?refresh=true", Some(json!({ "n": 1 }))).await;
+    assert_eq!(s, 201, "{v}");
+    let (s, v) = e.call(Method::PUT, "/v1/search/clusters/near/remotes/far", Some(json!({ "cluster": "far" }))).await;
+    assert_eq!(s, 200, "{v}");
+    e.post("/v1/search/clusters/far/unload", json!({})).await;
+    assert!(!e.control.node.loaded().iter().any(|n| &**n == "far"), "asleep");
+    let (s, v) = e.es(&near, &near_pw, Method::GET, "/far:items/_search", None).await;
+    assert_eq!((s, v["hits"]["total"]["value"].as_i64()), (200, Some(1)), "{v}");
+    assert!(e.control.node.loaded().iter().any(|n| &**n == "far"), "woken for it");
+
+    assert_eq!(e.call(Method::DELETE, "/v1/search/clusters/far", None).await.0, 200);
+    let (s, v) = e.es(&near, &near_pw, Method::GET, "/far:items/_search", None).await;
+    assert_eq!((s, v["_clusters"]["skipped"].as_i64(), v["_clusters"]["details"]["far"]["failures"][0]["reason"]["type"].as_str()), (200, Some(1), Some("connect_transport_exception")), "{v}");
+    assert_eq!(e.es(&near, &near_pw, Method::PUT, "/_cluster/settings", Some(json!({ "persistent": { "cluster.remote.far.skip_unavailable": false } }))).await.0, 200);
+    let (s, v) = e.es(&near, &near_pw, Method::GET, "/far:items/_search", None).await;
+    assert_eq!((s, v["error"]["type"].as_str()), (500, Some("connect_transport_exception")), "{v}");
+}
+
+
 /// Search analytics: off until an index turns them on; then searches (with and without results)
 /// and `search_click` events come back as top queries, no-result queries and click-through,
 /// before and after the metering pass; turning them off deletes what's kept; another person's
@@ -2559,4 +2707,38 @@ async fn search_analytics() {
     assert!(e.control.store.analytics_indices(id).await.unwrap().is_empty());
     search("shoes").await;
     assert_eq!(analytics("24h").await["totals"]["searches"].as_u64(), Some(0));
+}
+
+/// An alias pattern matching a link and a loopback remote (whose seed is the node's own address,
+/// which any tenant may set) is authorized locally, whole: a user who may read `app` alone gets
+/// nothing of `secret` through `*:secret`, as through `secret` and `me:secret` (the review of
+/// #347 found `*:secret` skipped the local check while the loopback searched it).
+#[tokio::test]
+async fn an_alias_pattern_over_a_link_and_a_loopback_is_authorized_locally() {
+    use reqwest::Method;
+    let e = env().await;
+    let (app, app_pw) = creds(&e.post("/v1/search/clusters", json!({ "name": "wild-app" })).await);
+    e.post("/v1/search/clusters", json!({ "name": "wild-logs" })).await;
+    for path in ["/app/_doc/1", "/secret/_doc/1"] {
+        let (s, v) = e.es(&app, &app_pw, Method::PUT, &format!("{path}?refresh=true"), Some(json!({ "msg": "secret doc" }))).await;
+        assert_eq!(s, 201, "{v}");
+    }
+    let (s, v) = e.call(Method::PUT, "/v1/search/clusters/wild-app/remotes/logs", Some(json!({ "cluster": "wild-logs" }))).await;
+    assert_eq!(s, 200, "{v}");
+    let (_, nodes) = e.es(&app, &app_pw, Method::GET, "/_nodes/_local", None).await;
+    let me = nodes["nodes"].as_object().unwrap().values().next().unwrap()["transport_address"].as_str().unwrap().to_string();
+    let (s, v) = e.es(&app, &app_pw, Method::PUT, "/_cluster/settings", Some(json!({ "persistent": { "cluster.remote.me.seeds": me } }))).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(e.es(&app, &app_pw, Method::PUT, "/_security/role/app_only", Some(json!({ "indices": [{ "names": ["app"], "privileges": ["read"] }] }))).await.0, 200);
+    assert_eq!(e.es(&app, &app_pw, Method::PUT, "/_security/user/u", Some(json!({ "password": "pass-word-1", "roles": ["app_only"] }))).await.0, 200);
+    let user = format!("u@{app}");
+    for path in ["/secret/_search", "/me:secret/_search"] {
+        assert_eq!(e.es(&user, "pass-word-1", Method::GET, path, None).await.0, 403, "{path}");
+    }
+    let (s, v) = e.es(&user, "pass-word-1", Method::GET, "/*:secret/_search", None).await;
+    assert!(s != 200 || v["hits"]["hits"].as_array().is_some_and(|h| h.is_empty()), "{s} {v}");
+    assert!(!v.to_string().contains("secret doc"), "{v}");
+    let r = e.http.post(format!("{}/_msearch", e.es)).basic_auth(&user, Some("pass-word-1")).header("content-type", "application/x-ndjson").body("{\"index\":\"*:secret\"}\n{}\n").send().await.unwrap();
+    let m = r.text().await.unwrap();
+    assert!(!m.contains("secret doc"), "{m}");
 }
