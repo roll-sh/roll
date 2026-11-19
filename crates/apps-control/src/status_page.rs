@@ -105,6 +105,56 @@ impl Apps {
         self.status_page_view(page)
     }
 
+    /// `GET …/status-page/incidents`: the last 90 days' and the open ones, newest first.
+    pub async fn incidents(self: &Arc<Self>, project: &str) -> Result<Value> {
+        let (p, since) = (project.to_string(), code_sql::now_ms() - DAYS * 86_400_000);
+        Ok(json!({ "incidents": self.db(move |s| s.incidents(&p, since)).await? }))
+    }
+
+    /// `POST …/status-page/incidents {title, state?, text}`: a person's incident on the page.
+    pub async fn post_incident(self: &Arc<Self>, project: &str, body: Value) -> Result<Value> {
+        let p = project.to_string();
+        if self.db(move |s| s.status_page(&p)).await?.is_none() {
+            return Err(Error::NotFound(format!("{project} has no status page")));
+        }
+        let (title, state, text) = incident_fields(&body, true)?;
+        let (p, at) = (project.to_string(), code_sql::now_ms());
+        let id = self.db(move |s| s.open_incident(&p, &title, &state, &text, None, at)).await?.expect("a person's always opens");
+        Ok(json!({ "id": id }))
+    }
+
+    /// `POST …/status-page/incidents/{id}/updates {state, text}`: what's happened since;
+    /// `resolved` closes it.
+    pub async fn update_incident(self: &Arc<Self>, project: &str, id: &str, body: Value) -> Result<()> {
+        let (_, state, text) = incident_fields(&body, false)?;
+        let (p, i, at) = (project.to_string(), id.to_string(), code_sql::now_ms());
+        match self.db(move |s| s.update_incident(&p, Some(&i), None, &state, &text, at)).await? {
+            true => Ok(()),
+            false => Err(Error::NotFound(format!("no incident {id}"))),
+        }
+    }
+
+    /// A check going down or a heartbeat missed (`open`), or either back: the incident of its
+    /// key on the project's status page, if it has one.
+    pub(crate) async fn status_incident(self: &Arc<Self>, service: &str, key: String, label: String, open: bool) {
+        let sid = service.to_string();
+        let Ok(svc) = self.db(move |s| s.service(&sid)).await else { return };
+        let p = svc.project.clone();
+        if !matches!(self.db(move |s| s.status_page(&p)).await, Ok(Some(_))) {
+            return;
+        }
+        let (p, at) = (svc.project.clone(), code_sql::now_ms());
+        let r = if open {
+            let title = format!("{} · {label} is down", svc.name);
+            self.db(move |s| s.open_incident(&p, &title, "investigating", "Our checks found it down.", Some(&key), at)).await.map(|_| ())
+        } else {
+            self.db(move |s| s.update_incident(&p, None, Some(&key), "resolved", "It's back up.", at)).await.map(|_| ())
+        };
+        if let Err(e) = r {
+            tracing::warn!(service, error = %e, "apps: a status page's incident wasn't kept");
+        }
+    }
+
     pub async fn delete_status_page(self: &Arc<Self>, project: &str) -> Result<()> {
         let p = project.to_string();
         self.db(move |s| s.delete_status_page(&p)).await
@@ -156,22 +206,58 @@ impl Apps {
     }
 }
 
+/// An incident's or update's fields: `title` (a new one's), `state` (investigating, identified,
+/// monitoring, resolved) and `text`, each bounded, as text.
+fn incident_fields(body: &Value, new: bool) -> Result<(String, String, String)> {
+    let o = body.as_object().cloned().unwrap_or_default();
+    let allowed: &[&str] = if new { &["title", "state", "text"] } else { &["state", "text"] };
+    if let Some(k) = o.keys().find(|k| !allowed.contains(&k.as_str())) {
+        return Err(Error::BadRequest(format!("unknown field {k}")));
+    }
+    let text_of = |k: &str, max: usize, need: bool| -> Result<String> {
+        match o.get(k) {
+            Some(Value::String(t)) if !t.trim().is_empty() && t.chars().count() <= max => Ok(t.trim().to_string()),
+            None if !need => Ok(String::new()),
+            _ => Err(Error::BadRequest(format!("{k} is 1–{max} characters"))),
+        }
+    };
+    let title = if new { text_of("title", 120, true)? } else { String::new() };
+    let state = match o.get("state").and_then(Value::as_str) {
+        None if new => "investigating".to_string(),
+        Some(s @ ("investigating" | "identified" | "monitoring" | "resolved")) => s.to_string(),
+        _ => return Err(Error::BadRequest("state is investigating, identified, monitoring or resolved".into())),
+    };
+    Ok((title, state, text_of("text", 2000, true)?))
+}
+
 /// The page on its own host: its HTML, or `/status.json`.
 pub(crate) async fn serve(apps: Arc<Apps>, page: Page, path: &str) -> Response {
     let rows = apps.status_rows(&page).await;
     let since = today() - DAYS + 1;
+    let p = page.project.clone();
+    let incidents = apps.db(move |s| s.incidents(&p, code_sql::now_ms() - DAYS * 86_400_000)).await.unwrap_or_default();
+    if path == "/feed.xml" {
+        return feed(&page, &incidents);
+    }
     let uptime = |days: &[(i64, i64, i64)]| {
         let (ok, all) = days.iter().fold((0, 0), |(o, a), (_, g, b)| (o + g, a + g + b));
         (all > 0).then(|| (ok as f64 * 1000.0 / all as f64).round() / 10.0)
     };
     if path == "/status.json" {
         let items: Vec<Value> = rows.iter().map(|r| json!({ "name": r.label, "up": r.up, "uptime": uptime(&r.days), "days": (since..=today()).map(|d| r.day(d)).collect::<Vec<_>>() })).collect();
-        return (StatusCode::OK, [(header::CACHE_CONTROL, "public, max-age=30")], axum::Json(json!({ "title": page.title, "up": rows.iter().all(|r| r.up != Some(false)), "items": items }))).into_response();
+        return (StatusCode::OK, [(header::CACHE_CONTROL, "public, max-age=30")], axum::Json(json!({ "title": page.title, "up": rows.iter().all(|r| r.up != Some(false)), "items": items, "incidents": incidents }))).into_response();
     }
     if path != "/" {
         return (StatusCode::NOT_FOUND, "").into_response();
     }
     let all_up = rows.iter().all(|r| r.up != Some(false));
+    let clock = |ms: i64| chrono::DateTime::from_timestamp_millis(ms).map(|d| d.format("%Y-%m-%d %H:%M UTC").to_string()).unwrap_or_default();
+    let mut history = String::new();
+    for i in &incidents {
+        let open = i["resolved_at"].is_null();
+        let ups: String = i["updates"].as_array().into_iter().flatten().rev().map(|u| format!("<p><b>{}</b> · {}<br>{}</p>", crate::public::escape(u["state"].as_str().unwrap_or("")), clock(u["at"].as_i64().unwrap_or(0)), crate::public::escape(u["text"].as_str().unwrap_or("")))).collect();
+        history.push_str(&format!("<article class=\"{}\"><h2>{}</h2>{ups}</article>", if open { "inc open" } else { "inc" }, crate::public::escape(i["title"].as_str().unwrap_or(""))));
+    }
     let esc = crate::public::escape;
     let mut list = String::new();
     for r in &rows {
@@ -199,7 +285,9 @@ pub(crate) async fn serve(apps: Arc<Apps>, page: Page, path: &str) -> Response {
          li{{border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin:0 0 12px}}.row{{display:flex;justify-content:space-between;gap:12px;margin:0 0 10px}}\
          .up{{color:var(--accent)}}.down{{color:var(--danger)}}.none{{color:var(--muted)}}.bars{{display:flex;gap:2px}}.bars i{{flex:1;height:28px;border-radius:2px;background:var(--none)}}\
          .bars i.g{{background:var(--accent)}}.bars i.b{{background:var(--danger)}}.foot{{display:flex;justify-content:space-between;color:var(--muted);font-size:12px;margin-top:6px}}\
-         footer{{color:var(--muted);font-size:12px;margin-top:24px}}</style><main><h1>{t}</h1><p class=all>{all}</p><ul>{list}</ul><footer>Kept by roll</footer></main>",
+         .inc{{border:1px solid var(--line);border-radius:10px;padding:12px 16px;margin:0 0 12px}}.inc.open{{border-color:var(--danger)}}.inc h2{{font-size:14px;margin:0 0 6px}}.inc p{{color:var(--muted);margin:6px 0 0}}\
+         h3{{font-size:13px;font-weight:600;margin:28px 0 10px}}footer{{color:var(--muted);font-size:12px;margin-top:24px}}</style><link rel=alternate type=application/atom+xml href=/feed.xml><main><h1>{t}</h1><p class=all>{all}</p><ul>{list}</ul>{hist}<footer>Kept by roll · <a href=/feed.xml style=color:inherit>feed</a></footer></main>",
+        hist = if history.is_empty() { String::new() } else { format!("<h3>Incidents</h3>{history}") },
         t = esc(&page.title),
         all = if rows.is_empty() { "Nothing to show yet." } else if all_up { "Everything is up." } else { "Something is down." },
     );
@@ -211,4 +299,27 @@ impl Row {
     fn day(&self, d: i64) -> Value {
         self.days.iter().find(|x| x.0 == d).map_or(Value::Null, |(_, ok, bad)| json!({ "ok": ok, "bad": bad }))
     }
+}
+
+/// The page's incidents as an Atom feed (`/feed.xml`): one entry per update, newest first.
+fn feed(page: &Page, incidents: &[Value]) -> Response {
+    let esc = crate::public::escape;
+    let iso = |ms: i64| chrono::DateTime::from_timestamp_millis(ms).map(|d| d.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)).unwrap_or_default();
+    let mut entries: Vec<(i64, String)> = Vec::new();
+    for i in incidents {
+        for (n, u) in i["updates"].as_array().into_iter().flatten().enumerate() {
+            let at = u["at"].as_i64().unwrap_or(0);
+            let id = format!("{}-{n}", i["id"].as_str().unwrap_or(""));
+            entries.push((at, format!("<entry><id>urn:roll:status:{id}</id><title>{}: {}</title><updated>{}</updated><content type=\"text\">{}</content></entry>", esc(i["title"].as_str().unwrap_or("")), esc(u["state"].as_str().unwrap_or("")), iso(at), esc(u["text"].as_str().unwrap_or("")))));
+        }
+    }
+    entries.sort_by_key(|e| std::cmp::Reverse(e.0));
+    let updated = entries.first().map_or_else(|| iso(code_sql::now_ms()), |e| iso(e.0));
+    let body = format!(
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?><feed xmlns=\"http://www.w3.org/2005/Atom\"><id>urn:roll:status:{}</id><title>{}</title><updated>{updated}</updated>{}</feed>",
+        page.slug,
+        esc(&page.title),
+        entries.into_iter().map(|e| e.1).collect::<String>()
+    );
+    (StatusCode::OK, [(header::CONTENT_TYPE, "application/atom+xml; charset=utf-8"), (header::CACHE_CONTROL, "public, max-age=60")], body).into_response()
 }

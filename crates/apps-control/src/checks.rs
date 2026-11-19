@@ -112,6 +112,9 @@ impl Apps {
         // Its day on a status page: a pass or a failure.
         self.status_count(crate::status_page::check_key(service, env, &c.name), verdict.is_ok()).await;
         let (sid, e) = (service.to_string(), env.to_string());
+        if went_down || came_up {
+            self.status_incident(service, crate::status_page::check_key(service, env, &c.name), if env == crate::model::PRODUCTION { c.name.clone() } else { format!("{} ({env})", c.name) }, went_down).await;
+        }
         if went_down {
             let why = verdict.as_ref().err().cloned().unwrap_or_default();
             log.line(format!("uptime check {}: GET {} is down: {why}", c.name, c.path));

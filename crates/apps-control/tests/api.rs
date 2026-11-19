@@ -2454,6 +2454,52 @@ async fn a_pause_schedule_pauses_and_resumes_an_environment() {
     assert!(!call(&w.api, "GET", &base, None).await.1["paused"].as_bool().unwrap_or(false));
 }
 
+/// A status page's incidents (Better Stack's, Instatus'): a missed heartbeat opens one and its next
+/// ping resolves it; a person posts their own and updates it; the page, `/status.json` and the
+/// Atom feed say so.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn status_page_incidents_open_and_close() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "web", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let env = format!("/v1/apps/services/{id}/environments/production");
+    let (_, e) = call(&w.api, "PUT", &env, Some(json!({"heartbeats": [{"name": "backup", "every_s": 3600}]}))).await;
+    let ping = format!("/__roll/{}", e["heartbeat_urls"]["backup"].as_str().unwrap().split_once("/__roll/").unwrap().1);
+    let page = format!("/v1/apps/projects/{}/status-page", w.project);
+    let (_, p) = call(&w.api, "PUT", &page, Some(json!({"title": "Acme"}))).await;
+    let h = host(&p["url"]);
+    let get = |path: String, host: String| {
+        let public = w.public.clone();
+        async move {
+            let resp = public.oneshot(Request::builder().uri(path).header("host", host).body(Body::empty()).unwrap()).await.unwrap();
+            String::from_utf8_lossy(&resp.into_body().collect().await.unwrap().to_bytes()).into_owned()
+        }
+    };
+    // Missed: an incident opens (once however many passes), its next ping resolves it.
+    let late = code_sql::now_ms() + 3_900_000;
+    w.apps.cron_pass(late).await;
+    w.apps.cron_pass(late + 60_000).await;
+    let (_, list) = call(&w.api, "GET", &format!("{page}/incidents"), None).await;
+    let open: Vec<&Value> = list["incidents"].as_array().unwrap().iter().filter(|i| i["resolved_at"].is_null()).collect();
+    assert_eq!((open.len(), open[0]["title"].as_str(), open[0]["automatic"].as_bool()), (1, Some("web · heartbeat backup is down"), Some(true)), "{list}");
+    get(ping, host(&svc["environments"][0]["url"])).await;
+    let (_, list) = call(&w.api, "GET", &format!("{page}/incidents"), None).await;
+    assert!(list["incidents"][0]["resolved_at"].is_i64(), "{list}");
+    // A person's own, and its update.
+    assert_eq!(call(&w.api, "POST", &format!("{page}/incidents"), Some(json!({"title": "x", "state": "nope", "text": "y"}))).await.0, StatusCode::BAD_REQUEST);
+    let (st, inc) = call(&w.api, "POST", &format!("{page}/incidents"), Some(json!({"title": "Slow checkouts", "text": "We're looking into slow checkouts."}))).await;
+    assert_eq!(st, StatusCode::CREATED, "{inc}");
+    let iid = inc["id"].as_str().unwrap();
+    assert_eq!(call(&w.api, "POST", &format!("{page}/incidents/{iid}/updates"), Some(json!({"state": "resolved", "text": "Fixed: a slow query."}))).await.0, StatusCode::NO_CONTENT);
+    let j: Value = serde_json::from_str(&get("/status.json".into(), h.clone()).await).unwrap();
+    let mine = j["incidents"].as_array().unwrap().iter().find(|i| i["id"] == iid).unwrap();
+    assert_eq!((mine["state"].as_str(), mine["updates"].as_array().map(Vec::len)), (Some("resolved"), Some(2)), "{j}");
+    let html = get("/".into(), h.clone()).await;
+    assert!(html.contains("Slow checkouts") && html.contains("Fixed: a slow query."), "{html}");
+    let feed = get("/feed.xml".into(), h).await;
+    assert!(feed.starts_with("<?xml") && feed.contains("Slow checkouts: resolved"), "{feed}");
+}
+
 /// An instance the kernel killed for its memory says so: in the log and in why it crashed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_instance_killed_for_its_memory_says_so() {
