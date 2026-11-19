@@ -2687,8 +2687,15 @@ cluster, instead of a key pasted into it: the Inference tab's "A roll secret", o
   (`DOCKER_*`, `PATH`, proxies…) go in a private env file. On Fargate the env travels in the run's
   bundle, as before.
 - **Sandboxes**: `POST /v1/code/agents/{owner}/sandboxes` takes `secrets: {project, environment}`.
-  The project must have one of the owner's repos on its canvas. The values are sealed with the rest
-  of the sandbox's env until the backend has them. The consumer is `sandbox:<id>`.
+  The project must have one of the owner's repos on its canvas. Managing the code owner isn't
+  enough: whoever creates the sandbox must be able to reveal the environment (or the folder asked
+  for) themselves, as roll secrets answers them (`Secrets::caller_of`: their session, a roll token's
+  rules, or the operator). Their rules also decide references and imports. Anyone else gets a 403
+  and nothing is copied. A roll code owner token isn't anyone to roll secrets, so it can't copy
+  secrets, and an agent token never manages the owner. The values are sealed with the rest of the
+  sandbox's env until the backend has them. The sandbox records who copied them (`secrets_by`, the
+  principal), and the read is theirs in the audit log (its actor), resolved for `sandbox:<id> for
+  <principal>`.
 - **Previews**: roll previews (docs/previews.md) makes an ephemeral environment per change (see
   "Ephemeral environments") and resolves it as `preview:<slug>`. A preview runs a change's code, so
   it resolves with `"untrusted": true`: an ephemeral environment based on a protected one gets its
