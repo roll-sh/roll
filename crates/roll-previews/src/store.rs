@@ -2979,11 +2979,19 @@ mod tests {
         let (a, _) = store.create(&new("chg_va")).unwrap();
         let (b, _) = store.create(&new("chg_vb")).unwrap();
         let raw = |id: &str| store.db.read(|c| c.query_row("SELECT vars FROM previews WHERE id = ?", [id], |r| r.get::<_, Option<String>>(0))).unwrap().unwrap_or_default();
-        store.update_vars(&a.id, |v| Ok(drop(v.insert("STRIPE_KEY".into(), "sk_test_51Hx9".into())))).unwrap();
+        store.update_vars(&a.id, |v| {
+            v.insert("STRIPE_KEY".into(), "sk_test_51Hx9".into());
+            Ok(())
+        })
+        .unwrap();
         assert!(raw(&a.id).contains("sk_test_51Hx9"), "no key: kept as written");
         let _ = store.sealer.set(std::sync::Arc::new(Rot));
         assert_eq!(store.vars(&a.id).unwrap()["STRIPE_KEY"], "sk_test_51Hx9", "a plain one from before still reads");
-        store.update_vars(&a.id, |v| Ok(drop(v.insert("MODE".into(), "test".into())))).unwrap();
+        store.update_vars(&a.id, |v| {
+            v.insert("MODE".into(), "test".into());
+            Ok(())
+        })
+        .unwrap();
         assert!(raw(&a.id).starts_with("v1:") && !raw(&a.id).contains("sk_test_51Hx9"), "sealed at its next write");
         assert_eq!(store.vars(&a.id).unwrap().len(), 2);
         // Copied onto another preview's row, it doesn't open there.
