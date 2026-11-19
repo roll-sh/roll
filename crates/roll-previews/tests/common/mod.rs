@@ -132,6 +132,8 @@ pub struct FakeData {
     pub masks: Mutex<Vec<(String, std::collections::BTreeMap<String, String>)>>,
     /// Branched from history at (Postgres's fake keeps history; the others don't).
     pub at: Mutex<Vec<i64>>,
+    /// What `columns` answers, by parent (`Err`: it sleeps).
+    pub columns: Mutex<std::collections::HashMap<String, Result<Vec<roll_previews::mask::Column>, roll_previews::ports::Asleep>>>,
 }
 
 impl FakeData {
@@ -145,6 +147,7 @@ impl FakeData {
             schema: Mutex::new(None),
             masks: Mutex::new(Vec::new()),
             at: Mutex::new(Vec::new()),
+            columns: Mutex::new(Default::default()),
         })
     }
 }
@@ -179,6 +182,13 @@ impl Brancher for FakeData {
     }
     async fn schema(&self, _parent: &str, _branch: &str) -> anyhow::Result<Option<(Vec<String>, Vec<String>)>> {
         Ok(self.schema.lock().clone())
+    }
+    async fn columns(&self, parent: &str, max: usize) -> anyhow::Result<Vec<roll_previews::mask::Column>> {
+        match self.columns.lock().get(parent) {
+            Some(Err(_)) => Err(roll_previews::ports::Asleep.into()),
+            Some(Ok(c)) => Ok(c.iter().take(max).cloned().collect()),
+            None => Ok(Vec::new()),
+        }
     }
     async fn reset(&self, parent: &str, branch: &str, _kept: Option<&str>, name: &str, mode: Mode) -> anyhow::Result<Branched> {
         self.delete(parent, branch, name).await?;
@@ -229,6 +239,8 @@ pub struct FakeApps {
     pub removed: Mutex<Vec<(String, String)>>,
     /// What each service uses, by name (unset: not running).
     pub metrics: Mutex<HashMap<String, (f64, u64)>>,
+    /// Each service's errors, by name.
+    pub errors: Mutex<HashMap<String, Vec<roll_previews::ErrorGroup>>>,
     /// What every service's log holds.
     pub log: Mutex<Vec<String>>,
     /// What each seed or release job was run able to reach.
@@ -326,6 +338,9 @@ impl Apps for FakeApps {
     }
     async fn metrics(&self, _: &str, service: &str) -> Option<(f64, u64)> {
         self.metrics.lock().get(service).copied()
+    }
+    async fn errors(&self, _: &str, service: &str, _: i64, _: Option<&roll_previews::engine::ErrorMasks<'_>>) -> roll_previews::Result<Vec<roll_previews::ErrorGroup>> {
+        Ok(self.errors.lock().get(service).cloned().unwrap_or_default())
     }
     async fn logs(&self, _: &str, _: &str, _: usize) -> Vec<String> {
         self.log.lock().clone()
@@ -426,6 +441,8 @@ pub struct FakeSecrets {
     pub own: Mutex<Vec<(String, String)>>,
     /// Values every resolve answers (static secrets).
     pub values: Mutex<Vec<(String, String)>>,
+    /// Why each resolve was asked for (`logs`: values read to mask output).
+    pub reasons: Mutex<Vec<String>>,
 }
 
 #[async_trait]
@@ -436,7 +453,8 @@ impl roll_previews::ports::Secrets for FakeSecrets {
         *self.own.lock() = vars.to_vec();
         Ok(())
     }
-    async fn resolve(&self, _: &str, _: &str, _: bool, dynamic: bool, _: &str) -> anyhow::Result<roll_previews::ports::Resolved> {
+    async fn resolve(&self, _: &str, _: &str, _: bool, dynamic: bool, reason: &str) -> anyhow::Result<roll_previews::ports::Resolved> {
+        self.reasons.lock().push(reason.to_string());
         let followed = self.followed.lock().clone();
         let values = self.values.lock().clone();
         if !dynamic || !self.dynamic.load(Ordering::SeqCst) {

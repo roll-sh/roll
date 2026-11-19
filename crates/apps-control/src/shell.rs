@@ -14,13 +14,67 @@ use std::sync::atomic::Ordering;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Where a shell goes: the instance, and the lease that keeps a web service from going back to
-/// sleep under it.
+/// sleep under it; or a console's own container, which goes when the target does.
 pub struct Target {
     pub instance: String,
+    /// What runs in the terminal (none: a login shell).
+    pub command: Option<String>,
     _lease: Option<Lease>,
+    console: Option<(Arc<crate::live::EnvLive>, Option<crate::live::ConsoleBox>)>,
+}
+
+impl Drop for Target {
+    fn drop(&mut self) {
+        // A console's container stops, is metered and goes when its terminal does.
+        if let Some((live, Some(c))) = self.console.as_mut().map(|(l, c)| (l.clone(), c.take())) {
+            tokio::spawn(async move { live.end_console(c).await });
+        }
+    }
+}
+
+/// A one-off console instead of a running instance (`roll apps run -it`): its own size, and what
+/// runs in it.
+#[derive(Clone, Debug, Default)]
+pub struct ConsoleAsk {
+    pub command: Option<String>,
+    pub cpu: Option<f64>,
+    pub memory_mb: Option<u32>,
+}
+
+impl ConsoleAsk {
+    pub fn check(&self) -> Result<()> {
+        if self.command.as_deref().is_some_and(|c| c.trim().is_empty() || c.len() > 2000 || c.contains('\0')) {
+            return Err(Error::BadRequest("command is a command of 1–2000 characters".into()));
+        }
+        if self.cpu.is_some_and(|c| !(0.25..=8.0).contains(&c)) {
+            return Err(Error::BadRequest("cpu is 0.25–8 vCPU".into()));
+        }
+        if self.memory_mb.is_some_and(|m| !(256..=16384).contains(&m)) {
+            return Err(Error::BadRequest("memory_mb is 256–16384".into()));
+        }
+        Ok(())
+    }
 }
 
 impl Apps {
+    /// A console's target: a fresh container of the live deployment (any kind of service, a cron
+    /// one too), made now and gone with the target.
+    pub async fn console_target(self: &Arc<Self>, service: &str, env: &str, ask: ConsoleAsk) -> Result<Target> {
+        ask.check()?;
+        if self.capped(service) {
+            return Err(Error::Conflict("this project reached its spending limit for the month".into()));
+        }
+        let live = self.load_live(service, env).await?;
+        if live.paused() {
+            return Err(Error::Conflict("this environment is paused: resume it to open a console".into()));
+        }
+        if live.template().is_none() {
+            return Err(Error::Conflict(format!("nothing is deployed in {env} yet")));
+        }
+        let c = live.start_console(ask.cpu, ask.memory_mb).await.map_err(|e| Error::Conflict(format!("the console didn't start: {e:#}")))?;
+        Ok(Target { instance: c.name.clone(), command: ask.command, _lease: None, console: Some((live, Some(c))) })
+    }
+
     pub async fn shell_target(self: &Arc<Self>, service: &str, env: &str, instance: Option<&str>) -> Result<Target> {
         let live = self.load_live(service, env).await?;
         let tpl = live.template().ok_or_else(|| Error::Conflict(format!("nothing is deployed in {env} yet")))?;
@@ -29,16 +83,16 @@ impl Apps {
         }
         if let Some(name) = instance {
             let up = live.instances().into_iter().any(|i| i.name == name && i.state() == crate::model::InstanceState::Running);
-            return if up { Ok(Target { instance: name.to_string(), _lease: None }) } else { Err(Error::NotFound(format!("no running instance {name}"))) };
+            return if up { Ok(Target { instance: name.to_string(), command: None, _lease: None, console: None }) } else { Err(Error::NotFound(format!("no running instance {name}"))) };
         }
         if tpl.run.kind == RunType::Web {
             let lease = live.acquire().await.map_err(|e| Error::Conflict(e.to_string()))?;
-            return Ok(Target { instance: lease.inst.name.clone(), _lease: Some(lease) });
+            return Ok(Target { instance: lease.inst.name.clone(), command: None, _lease: Some(lease), console: None });
         }
         live.instances()
             .into_iter()
             .find(|i| i.state() == crate::model::InstanceState::Running)
-            .map(|i| Target { instance: i.name.clone(), _lease: None })
+            .map(|i| Target { instance: i.name.clone(), command: None, _lease: None, console: None })
             .ok_or_else(|| Error::Conflict("no instance of this worker is running".into()))
     }
 
@@ -58,7 +112,7 @@ impl Apps {
     /// Copy between the WebSocket and the shell until either closes or nothing crosses it for
     /// [`IDLE`].
     pub async fn bridge_shell(self: Arc<Self>, socket: WebSocket, target: Target, slot: Slot, cols: u16, rows: u16) {
-        let shell = match self.deps.runtime.shell(&target.instance, cols, rows).await {
+        let shell = match self.deps.runtime.shell(&target.instance, target.command.as_deref(), cols, rows).await {
             Ok(s) => s,
             Err(e) => {
                 let (mut tx, _) = socket.split();
@@ -164,14 +218,17 @@ impl Session {
 }
 
 impl Apps {
-    pub async fn open_session(self: &Arc<Self>, service: &str, env: &str, instance: Option<&str>, cols: u16, rows: u16) -> Result<String> {
+    pub async fn open_session(self: &Arc<Self>, service: &str, env: &str, instance: Option<&str>, console: Option<ConsoleAsk>, cols: u16, rows: u16) -> Result<String> {
         let open = self.sessions.lock().values().filter(|s| s.service == service && s.env == env).count();
         let ws = self.ws_shells.lock().get(&crate::env_key(service, env)).map_or(0, |c| c.load(Ordering::SeqCst));
         if open + ws >= MAX_SESSIONS {
             return Err(Error::Conflict(format!("{MAX_SESSIONS} shells are open in {env}: close one first")));
         }
-        let target = self.shell_target(service, env, instance).await?;
-        let shell = self.deps.runtime.shell(&target.instance, cols, rows).await.map_err(|e| Error::Conflict(format!("the shell didn't start: {e:#}")))?;
+        let target = match console {
+            Some(ask) => self.console_target(service, env, ask).await?,
+            None => self.shell_target(service, env, instance).await?,
+        };
+        let shell = self.deps.runtime.shell(&target.instance, target.command.as_deref(), cols, rows).await.map_err(|e| Error::Conflict(format!("the shell didn't start: {e:#}")))?;
         let id = crate::model::new_id("sh");
         let (keys_tx, mut keys) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
         let (screen, _) = tokio::sync::broadcast::channel(256);
