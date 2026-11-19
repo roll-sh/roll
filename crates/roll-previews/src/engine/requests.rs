@@ -742,19 +742,20 @@ impl Engine {
         Ok((svc.name.clone(), self.masked(id, got).await?))
     }
 
-    /// A service's last `lines` and then its output as it comes. Where the product can't follow,
-    /// its tail is read every [`FOLLOW_POLL`] and what's new passed on. Ends when the receiver is
-    /// dropped (or the service's output does).
-    pub async fn follow(self: &Arc<Self>, id: &str, service: Option<&str>, lines: usize) -> Result<(String, tokio::sync::mpsc::Receiver<String>)> {
+    /// A service's last `lines` and then its output as it comes, each line with whether it came on
+    /// stderr. Where the product can't follow, its tail is read every [`FOLLOW_POLL`] and what's
+    /// new passed on (as stdout: a tail doesn't say). Ends when the receiver is dropped (or the
+    /// service's output does).
+    pub async fn follow(self: &Arc<Self>, id: &str, service: Option<&str>, lines: usize) -> Result<(String, tokio::sync::mpsc::Receiver<(bool, String)>)> {
         let (name, _) = self.logs(id, service, 1).await?;
         let (tx, rx) = tokio::sync::mpsc::channel(256);
         let (me, id, svc) = (self.clone(), id.to_string(), name.clone());
         // Every line masked on its way out (`masks.rs`), with the masks read again as they age.
         if let Some(mut from) = self.apps.follow(&id, &name, lines).await {
             tokio::spawn(async move {
-                while let Some(l) = from.recv().await {
+                while let Some((stderr, l)) = from.recv().await {
                     let Ok(l) = me.masked(&id, vec![l]).await else { return };
-                    if tx.send(l.into_iter().next().unwrap_or_default()).await.is_err() {
+                    if tx.send((stderr, l.into_iter().next().unwrap_or_default())).await.is_err() {
                         return;
                     }
                 }
@@ -770,13 +771,13 @@ impl Engine {
                 let from = match resume_at(&seen, &now) {
                     Some(i) => i,
                     None => {
-                        let _ = tx.send("… (lines skipped: more came between two reads than a read sees)".into()).await;
+                        let _ = tx.send((false, "… (lines skipped: more came between two reads than a read sees)".into())).await;
                         0
                     }
                 };
                 let Ok(shown) = me.masked(&id, now[from..].to_vec()).await else { return };
                 for l in shown {
-                    if tx.send(l).await.is_err() {
+                    if tx.send((false, l)).await.is_err() {
                         return;
                     }
                 }
