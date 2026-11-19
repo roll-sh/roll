@@ -285,6 +285,86 @@ The current checked measurements compare release engine builds and PostgreSQL 18
 the wire. Older rounds below are historical records, with their original methods and
 limits. Their results have not been reverified on the current source.
 
+## Bulk writes, round 18: the merging scan (2026-11-19, agent 260)
+
+HANDOFF "Bulk writes, round 18" has what changed. Lane C, the 1M-row bulk script with joined
+windows (agent 246's `bulkx.sh` with `JOIN=1`, copied to `~/.cache/a260/bench`), plain dist builds
+(`tools/dist.sh`) of **b0**, origin's `bc9102ebb`, and **d1**, `cand/a260`'s code (built as
+`c8943e5fb` on b0). G
+user instructions of the server's cgroup; every counter ran 100% of its window. Each pair held
+lane C through `tools/lane.sh` alone. **Foreign load was over 1.0 core in every run** (wall-weighted
+1.8-3.0 cores: other agents' builds and runs, host load 40-55); the instruction counts repeat
+within 0.1% regardless. Rows equal in every run (count and sums of every column of both tables).
+
+### b0 against d1 (5 alternating pairs, % per pair)
+
+| step | b0 | d1 | % per pair |
+|---|---|---|---|
+| COPY in | 9.444 | 9.470 | +0.3 x5 |
+| CREATE INDEX | 5.286 | 5.287 | -0.0 to +0.0 |
+| CREATE UNIQUE INDEX | 3.468 | 3.469 | +0.0 to +0.2 |
+| COPY out | 3.088 | 3.089 | +0.0 x5 |
+| INSERT … SELECT | 6.674 | 6.682 | +0.1 to +0.2 |
+| UPDATE half | 11.986 | 12.006 | -0.1 to +0.4 |
+| DELETE a quarter, with its compaction | 9.988 | 8.248 | -17.4 x4, -17.5 |
+| VACUUM | 1.783 | 1.785 | +0.1 x5 |
+| ANALYZE, `count(*), sum(c)` | 0.472, 0.367 | 0.472, 0.367 | +0.0 x5 |
+| Seq Scan count(*), sum(a); count(*), sum(a) | 0.180, 0.334 | 0.180, 0.334 | +0.0 (one +0.3: 1 M) |
+| **all steps** | 52.56 | 50.88 | -3.2 / -3.1 / -3.2 / -3.2 / -3.3 |
+
+Bytes written the same (DELETE 54.0 MB). Peak memory: VmHWM b0 268-290, d1 269-298 MB; cgroup peak
+b0 335-401, d1 285-404 MB.
+
+The first build (c2, `zip_rows` and `zip_entries` inlined into their callers), five pairs against
+b0: DELETE -17.5%, all steps -3.2%, but the single-source scans +1.1% (count(*) 0.180 -> 0.182 G),
+seq sum +0.6%, `count(*), sum(c)` +0.5%, COPY +0.3%, INSERT … SELECT +0.3%, UPDATE +0.2%: kept
+out of line in d1 (HANDOFF).
+
+### The same day, same lane and settings (all steps, G; two runs each of PostgreSQL and pgrust, foreign load 3.5-3.8 cores)
+
+PostgreSQL 18.6 52.33 (52.336, 52.325), pgrust 44.92 (44.917, 44.923), b0 52.56, d1 50.88:
+d1 0.972x PostgreSQL, 1.13x pgrust. PostgreSQL's steps in these runs: COPY in 6.48,
+CREATE INDEX 3.13, INSERT … SELECT 4.31, UPDATE 27.60, DELETE 1.67, VACUUM 2.63.
+
+### PGO: `pbo` against `d1p` (one pair each; G user instructions)
+
+`pbo` is agent 261's `tools/dist-pgo.sh` build of `bc9102ebb` (origin's training), `d1p` the same
+script on d1's checkout (its own profile). Bulk steps (only those the change touches, joined
+windows): COPY in 7.750 -> 7.719 (-0.4%), UPDATE half 8.580 -> 8.579, DELETE with its compaction
+6.152 -> 5.137 (-16.5%), Seq Scan count(*) 0.724 -> 0.721, sum(a) 0.339 both, count(*) 0.176 ->
+0.175, sum(a) 0.339 both. TPC-H SF1 (2 GB, 3 runs a query): q01 8.105 -> 8.039 (-0.8%), q06 5.677 ->
+5.625 (-0.9%). Foreign load 3.1-3.7 cores.
+
+### In process: a full scan's user instructions a row
+
+`storage::a260_merge_cost` (`~/.cache/a260/patches/merge_cost_test.rs`, verify build, one CPU;
+REPS=5 minus REPS=0, a 1M-row table of 16-byte keys and 44-byte rows):
+
+| sources | base | zip_rows | |
+|---|---|---|---|
+| L1 only (compacted) | 212 | 212 | |
+| L1 and every other row's new version in an L0 file | 1,715 | 562 | -67% |
+| that and every fourth row deleted in a second L0 file (750k rows) | 2,110 | 681 | -68% |
+
+### TPC-H SF1 q01 / q06 (2 GB cache, lane C, `gpass.sh` from agent 261's harness: a fresh engine on the restored data, a warm-up pass, 3 runs of each query in one perf stat window)
+
+| pass | b0 q01 | arm q01 | b0 q06 | arm q06 |
+|---|---|---|---|---|
+| c2, three pairs | 7.8306-7.8325 G | 7.8367-7.8403 (+0.06 to +0.11%) | 5.6304-5.6340 | 5.6323-5.6340 (-0.03 to +0.05%) |
+| d1, two valid pairs (a third lost its counter) | 7.8302, 7.8305 | 7.8339, 7.8321 (+0.05, +0.02%) | 5.6332, 5.6232 | 5.6284, 5.6242 (-0.09, +0.02%) |
+
+Foreign load 1.5-3.3 cores in every pass.
+
+### Point selects (pgbench -S, 8 clients, lane A, agent 257's harness; three pairs b0 / c2)
+
+| pair | b0 ops/s | c2 ops/s | instr/op b0 / c2 | foreign cores |
+|---|---|---|---|---|
+| 1 | 53,947 | 47,524 | 48,512 / 47,415 (-2.3%) | 1.21 FLAG |
+| 2 | 62,855 | 46,651 | 48,506 / 45,799 (-5.6%) | 1.33 FLAG |
+| 3 | 62,756 | 58,902 | 48,186 / 47,792 (-0.8%) | 1.07 FLAG |
+
+Lane A held 3.7-5.2 foreign cores (other agents' runs) through all three: every pair flagged.
+
 ## Analytic CPU, round 6 (2026-11-19, agent 261)
 
 HANDOFF "Analytic CPU, round 6" has what changed. Lane C as in round 5 (servers in containers on

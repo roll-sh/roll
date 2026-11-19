@@ -10625,6 +10625,116 @@ and confirm on PGO:
 Agent 218's short-transaction stack (ten steps, `wip/a218`) was gated this way and landed: BENCH
 "Profile-guided build", part 2.
 
+## Bulk writes, round 18: the merging scan merges interleaved blocks in one loop (agent 260)
+
+BENCH.md "Bulk writes, round 18" has the measurements (lane C, the 1M-row bulk script with joined
+windows, plain dist builds). `cand/a260`: one commit on origin's `17042101b` (measured on
+`bc9102ebb`; the commits between touch none of its files). No format change.
+
+**Where a merging scan's entries went** (b0 = `bc9102ebb`; an instruction profile of `count(*)`
+over the bulk table after its UPDATE, whose 500,000 new versions sit in an L0 file over the table
+in L1): `Cursor::head` 16%, `Block::read` 11%, `Merge::min` 9%, `Scan::position` 7%,
+`fill_batch_with` 6%, `RowBatch::push_in` 5% with the `Bytes` clones and drops of its buffer
+references 7% (two sources take turns, so every row referenced a block again), libc `memcmp` /
+`bcmp` ~12%: about three quarters of the scan. The sources take turns at every row, so `min`'s
+fast path (the source chosen last, below the others' smallest head) held for one entry at a time:
+each switch re-ranked the sources, copied the new bound, compared it, and `position` compared and
+copied the decided key again. In process (`~/.cache/a260/patches/merge_cost_test.rs`: a 1M-row
+table compacted, then every other row's new version in an L0 file; verify build, user
+instructions of a full `fill_batch` scan): 1,715 a row on b0 against 212 on the compacted table.
+
+**`sst::zip_rows`** (from `Scan::fill_batch_with`, through `Merge::with_zip`): when the merge's
+two to four smallest heads are files' blocks whose entries are all in the scan's range, their
+blocks are merged in one loop. Each side keeps its entry decoded in a fixed buffer (the key's
+bytes after those it shares with the entry before moved in as one 16-byte copy, the block's
+version put after it), the smallest head is found by comparing keys 8 bytes at a time
+(`cmp_words`: user keys are prefix-free, so two sources' keys differ within the shorter one), its
+row pushed into the batch under the batch's index of its block (one reference a block a call, not
+one a row), and the key's older versions passed on every side (on its own side by `shared`, the
+key stored whole at a restart compared). It stops where the general merge has work: a version
+newer than the snapshot, a derived value (an index entry's), an out-of-line value when the scan
+resolves them, a key past the next source's head (the bound), a key over 32 bytes, the end of a
+block or the batch's size; each position is handed back as `Block::step` leaves it, the decided key
+and version too, and the merge ranks its sources again. In process: 1,715 -> 562 instructions a
+row (-67%); with the DELETE's tombstones in a second L0 file as well (three sources), 2,110 ->
+681 a scan row (-68%); rows and a hash of every key and value equal.
+
+**`sst::zip_entries`** (from `Store::compact_within`): a compaction's inputs the same way, every
+entry in key order to the compaction's per-entry decision (now one closure, called through one
+`&mut dyn FnMut` on both paths: what is dropped, where outputs end, `SstWriter::add`).
+
+**Kept out of line** (`#[inline(never)]` on `Scan::zip`, `zip_rows`, `zip_entries`; both zips tried
+only with two sources ranked): the first build inlined them into `fill_batch_with` and the
+compaction loop, and every single-source scan paid for it, count(*) and `SELECT count(*)` by Seq
+Scan +1.1%, TPC-H q01 +0.1% (three pairs), while COPY, INSERT ... SELECT and UPDATE moved +0.2 to
++0.4% (`parse_copy_data`'s share of COPY's profile 5.8 -> 7.2%, code the change didn't touch:
+code placement). Out of line, the scans and q01 are level again; COPY's +0.3% stayed (below).
+
+Results (BENCH "Bulk writes, round 18"; plain dist, five alternating pairs against b0): DELETE with
+its compaction 9.99 -> 8.25 G (-17.4% in every pair: the statement's scan and the compaction's
+merge, about -0.9 G each), all steps 52.56 -> 50.88 G (-3.1 to -3.3% in every pair; 0.972x PostgreSQL's 52.33 the same
+day, 1.13x pgrust's 44.92); COPY in +0.3%,
+UPDATE +0.2% (-0.1 to +0.4), INSERT ... SELECT +0.1%, VACUUM +0.1%, every other step level (the
+scans exactly). Rows equal in every run. Peak memory the same (VmHWM b0 268-290, d1 269-298 MB);
+bytes written the same. TPC-H SF1 q01 / q06 (2 GB cache, 3 runs of each query a pass, two
+valid pairs): q01 +0.05 / +0.02%, q06 -0.09 / +0.02%, level. Point selects (pgbench -S, 8 clients, lane A, three pairs): user
+instructions a select -0.8 to -5.6%, but every pair over 1.0 foreign core (lane A at 3.7-5.2
+cores, other agents' runs) and throughput -6 to -26% with it: not a clean reading either way.
+pgbench -S's primary-key lookups go through the point reader, not the merging scan; the only
+change on a single-source scan is one comparison of the ranked sources' count per block.
+
+**On the PGO build** (the boundaries moved, so gated there too; `tools/dist-pgo.sh` of d1's
+checkout, its own profile, against agent 261's `pbo`, the same script on `bc9102ebb`; one pair each,
+the steps the change touches): DELETE with its compaction 6.15 -> 5.14 G (-16.5%), COPY in -0.4%,
+UPDATE level, the four scans -0.6 to +0.0%; TPC-H q01 -0.8%, q06 -0.9%.
+
+**Measured and dropped: a COPY into a new table keeps its measure** (the brief's item for CREATE
+INDEX's 6% of re-sizing; `~/.cache/a260/patches/copy-new-table-measure*.patch`). A COPY into a
+table no one has written (no version of a row in the store, nothing written by the transaction,
+no savepoint) measured its rows as it went in, as one after TRUNCATE does: the store's watch of
+the table armed at the COPY's start (`Store::watch_untouched` with `changed_since(.., 0)`) and
+checked in the commit's `check` under the commit lock, before the commit's own writes drop it; a
+commit of another session into the table between them loses the measure (tested:
+`vacuum_skips_unchanged_tables`, with a load under a savepoint read as the baseline, and a
+mixed-type ASCII data set kept and read alike). It works: CREATE INDEX 5.29 -> 4.69 G (-11.3%,
+-0.60 G). But measuring costs COPY more: `stored_tuple_len` alone is about 330 instructions a row
+of the bulk table, with the row's header parse and `Load::row` COPY +7.6% (+0.72 G): all steps
++0.3% (two pairs). The first form fed the size model's row lengths (`row_len`) to the load
+instead of sizing the stored bytes, limited to rows the stored bytes size alike (fixed-size values,
+ASCII text): the type check, the transaction's borrow and the queue cost COPY +5.0%, and an INSERT
+... SELECT into a new table measured too (+8.9%, nothing reads its measure in the script): all
+steps +0.9%. What it needs to win: a per-row measure well under 600 instructions, so a cheaper
+`stored_tuple_len` first (below), or the measure from the size model's own per-row bookkeeping.
+
+**Considered, not built: zstd at a negative level for a statement's runs** (COPY's, INSERT ...
+SELECT's, an index build's: 7-18% of those steps in zstd). Level -1 compresses about a third
+faster but writes 19% more for the bulk files (agent 231's study), and an index build's linked
+runs stay in L1 as written until a compaction or a clean close: disk a table keeps, for ~1% of
+the script.
+
+Verification: `tools/quick-check.sh` with `QC_CHECKED=1` on `cb322090b` (both commits on
+`17042101b`): Clippy 16 warnings, none new in a changed file; 378 tests in 19 binaries, again built
+`--profile verify-checked`; crash_random seeds 1-3 x 2, power_cut_at_every_point; regress 51,148 /
+51,150, 0 newly differing; isolation 1,647 / 1,648; pg_dump_tap 14,609 passed. Before the rebase
+the scan commit alone passed the same on `bc9102ebb` (`c8943e5fb`, 375 tests). Tests:
+`storage::tests::updated_rows_read_once_across_sources` now has 3,000 rows (blocks end inside both
+files), keys past `zip_rows`' 32 bytes, a third file and a memtable over L1, and a compaction of
+three L0 files with every snapshot pinned (`zip_entries`), each read every way against the model.
+
+**Left (largest first, G user instructions against PostgreSQL 18.6's):**
+1. DELETE with its compaction 8.25 against 1.67: the statement (row locks, the deferred
+   deletions' sort and `SstWriter::add`, decoding and filtering the deleted rows) and the
+   compaction's table rewrite with the UPDATE's versions (zstd with the file's dictionary).
+2. COPY in 9.47 against 6.48: parsing, zstd of its runs, the size model's per-row calls.
+3. CREATE INDEX 5.29 against 3.13: sizing every row again (`stored_tuple_len`, about 330
+   instructions a row of the bulk table: a second match through `datum_len_at` and
+   `type_layout`, alignment by division, the varints through `Result`); cheaper, the kept
+   measure above may win.
+4. INSERT ... SELECT 6.68 against 4.31.
+5. Memtable sources still merge a row at a time: `Cursor::Mem` copies each entry's key into a
+   `Vec` (an allocation an entry), and `zip_rows` takes files' blocks only. An UPDATE's versions
+   small enough to stay in the memtable cost a scan what they did before this round.
+
 ## Bulk writes, round 17: VACUUM leaves marked files to compaction, three per-row costs (agent 257)
 
 BENCH.md "Bulk writes, round 17" has the measurements (joined windows, plain dist, lane C).
