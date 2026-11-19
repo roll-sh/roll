@@ -331,6 +331,7 @@ mod finds {
             ("acme external account binding", "secrets_ca_acme"),
             ("why is assume role refused", "storage_list_roles"),
             ("list s3 access keys", "storage_list_keys"),
+            ("traces of a preview", "previews_traces"),
         ]
         .iter()
         .filter_map(|(q, want)| {

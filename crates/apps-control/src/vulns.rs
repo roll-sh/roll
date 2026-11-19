@@ -20,10 +20,10 @@ impl Apps {
     /// scan. A scan that fails is kept as its error.
     pub(crate) async fn scan_deployment(self: &Arc<Self>, service: &str, env: &str, dep: &str, image: &str, log: &LogSink) -> Option<ScanSummary> {
         let now = code_sql::now_ms();
-        let (summary, mut found) = match self.deps.builder.scan(image, service, log).await {
+        let (summary, mut found, sbom) = match self.deps.builder.scan(image, service, log).await {
             Ok(None) => return None,
-            Ok(Some(s)) => (ScanSummary::of(&s.found, &s.scanner, now), s.found),
-            Err(e) => (ScanSummary { scanned_at: now, scanner: crate::runtime::scan::SCANNER.into(), error: Some(format!("{e:#}").chars().take(300).collect()), ..Default::default() }, Vec::new()),
+            Ok(Some(s)) => (ScanSummary { sbom: s.sbom.is_some(), ..ScanSummary::of(&s.found, &s.scanner, now) }, s.found, s.sbom),
+            Err(e) => (ScanSummary { scanned_at: now, scanner: crate::runtime::scan::SCANNER.into(), error: Some(format!("{e:#}").chars().take(300).collect()), ..Default::default() }, Vec::new(), None),
         };
         found.truncate(MAX_VULNERABILITIES);
         let worst = |v: &&Vulnerability| v.severity >= Severity::High;
@@ -45,7 +45,7 @@ impl Apps {
                         }
                     }
                 }
-                s.set_scan(&sid, &d, &s2, &f2)?;
+                s.set_scan(&sid, &d, &s2, &f2, sbom.as_deref())?;
                 Ok(known.unwrap_or_default())
             })
             .await;
@@ -148,6 +148,13 @@ impl Apps {
             None => json!({ "scan": null, "vulnerabilities": [] }),
             Some((sum, items)) => json!({ "scan": sum, "vulnerabilities": items.into_iter().filter(|v| v.severity >= floor).collect::<Vec<_>>() }),
         })
+    }
+
+    /// `GET …/deploys/{dep}/sbom`: its image's SBOM (CycloneDX JSON), as its last scan kept it.
+    pub async fn sbom(self: &Arc<Self>, service: &str, env: &str, dep: &str) -> Result<String> {
+        self.deployment(service, env, dep).await?;
+        let d = dep.to_string();
+        self.db(move |s| s.scan_sbom(&d)).await?.ok_or_else(|| Error::NotFound(format!("{dep} has no SBOM (not scanned, or pruned)")))
     }
 
     /// Deployments with their scans' counts.
