@@ -137,7 +137,11 @@ PRJ=$(api POST /v1/workspace/projects '{"name":"shop"}' | jq_ "d['id']")
 for r in "repo/acme%2Fweb" "repo/acme%2Fwiki" "postgres/$PG" "redis/$REDIS" "bucket/assets" "nosql/$NOSQL" "queue/jobs" "stream/$STREAM" "tasks/work" "search/$SEARCH"; do
   api PUT "/v1/workspace/projects/$PRJ/resources/$r" '{"x":0,"y":0}' >/dev/null
 done
-api PUT "/v1/previews/projects/$PRJ/settings" "{\"env\":{\"SENDGRID_API_KEY\":\"SG.from-production\",\"SMTP_HOST\":\"smtp.sendgrid.net\"},\"enabled\":true,\"sleep_after_s\":60,\"release\":{\"image\":\"$IMAGE\",\"run\":\"true\"},\"masking\":{\"nosql:$NOSQL\":{\"app.users.email\":\"mask_default()\"},\"postgres:$PG\":{\"public.users.email\":\"email\"},\"search:$SEARCH\":{\"products.name\":\"redact\",\"products.owner.email\":\"redact\",\"logs.2024.user.email\":\"redact\"}}}" >/dev/null
+# A project rule can name a key in roll secrets instead of holding its value (roll://ENV/KEY): the
+# preview's environment reads it there (untrusted), and a plain value's `${` stays as it is.
+REFD=$(curl -s -o /dev/null -w '%{http_code}' -X PUT "http://$API/v1/secrets/projects/$PRJ/environments/staging/secrets/PAYMENTS_TEST_KEY" -H 'content-type: application/json' -d '{"value":"sk_test_from_staging_42"}')
+case "$REFD" in 200|201) ;; *) echo "setting staging's PAYMENTS_TEST_KEY: HTTP $REFD"; exit 1;; esac
+api PUT "/v1/previews/projects/$PRJ/settings" "{\"env\":{\"SENDGRID_API_KEY\":\"SG.from-production\",\"SMTP_HOST\":\"smtp.sendgrid.net\",\"PAYMENTS_KEY\":\"roll://staging/PAYMENTS_TEST_KEY\",\"GREETING\":\"hello \${USER}\"},\"enabled\":true,\"sleep_after_s\":60,\"release\":{\"image\":\"$IMAGE\",\"run\":\"true\"},\"masking\":{\"nosql:$NOSQL\":{\"app.users.email\":\"mask_default()\"},\"postgres:$PG\":{\"public.users.email\":\"email\"},\"search:$SEARCH\":{\"products.name\":\"redact\",\"products.owner.email\":\"redact\",\"logs.2024.user.email\":\"redact\"}}}" >/dev/null
 # A mask on a key column can't hide it (the engine refuses to read such a table): the settings
 # name it instead of letting a preview's pages fail.
 KEY_MASK=$(curl -s -o /tmp/roll-previews-keymask.json -w '%{http_code}' -X PUT "http://$API/v1/previews/projects/$PRJ/settings" -H 'content-type: application/json' \
@@ -259,6 +263,10 @@ PG_NAMES=$(python3 -c 'import sys,urllib.parse as u; e=dict(l.split("=",1) for l
 [ "$PG_NAMES" = ok ] || { echo "the service's PGUSER/PGPASSWORD should be the branch's: $PG_NAMES"; exit 1; }
 FOLLOWED=$(python3 -c 'import sys,urllib.parse as u; e=dict(l.split("=",1) for l in sys.stdin.read().splitlines() if "=" in l); p=u.urlsplit(e.get("DATABASE_URL","")); s=e.get("STAGING_PGPASS"); print("ok" if s and s==u.unquote(p.password or "") else "STAGING_PGPASS is %s" % ("unset" if s is None else "not the branch'"'"'s password"))' <<<"$APP_ENV")
 [ "$FOLLOWED" = ok ] || { echo "a secrets link to the branched parent should give the branch's password: $FOLLOWED"; exit 1; }
+echo "$APP_ENV" | grep -qx 'PAYMENTS_KEY=sk_test_from_staging_42' || { echo "roll://staging/PAYMENTS_TEST_KEY should be staging's value: $(echo "$APP_ENV" | grep '^PAYMENTS_KEY=' | cut -c1-40)"; exit 1; }
+echo "$APP_ENV" | grep -qxF 'GREETING=hello ${USER}' || { echo "a plain value's \${ should stay as it is: $(echo "$APP_ENV" | grep '^GREETING=')"; exit 1; }
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X PUT "http://$API/v1/previews/projects/$PRJ/settings" -H 'content-type: application/json' -d '{"env":{"X":"roll://other@staging/KEY"}}')" = 400 ] || { echo "a reference into another project should be refused"; exit 1; }
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X PUT "http://$API/v1/previews/$PV/env" -H 'content-type: application/json' -d '{"vars":{"X":"roll://staging/PAYMENTS_TEST_KEY"}}')" = 400 ] || { echo "a preview's own variable can't be a reference yet"; exit 1; }
 case "$APP_DB" in postgres://br_*) ;; *) echo "the service's DATABASE_URL should be the branch's own role, not ${APP_DB%%@*}…"; exit 1;; esac
 # Its mail goes to roll's catcher, signed in as the preview, never to the provider production
 # uses: the key is gone, and what it sends is caught and listed (sent here as its service would).

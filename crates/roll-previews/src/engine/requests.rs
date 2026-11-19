@@ -533,6 +533,11 @@ impl Engine {
             if v.as_ref().is_some_and(|v| v.len() > MAX_VAR_BYTES) {
                 return Err(Error::BadRequest(format!("{k}: at most {MAX_VAR_BYTES} bytes")));
             }
+            // A person's own reference into roll secrets waits for its maker-checked binding
+            // (roll secrets' `bind_ref`); the project's rules (`env`, `env_for`) take one now.
+            if v.as_deref().is_some_and(crate::settings::is_reference) {
+                return Err(Error::BadRequest(format!("{k}: a preview's own variable can't be a roll:// reference yet; put it in the project's env rules")));
+            }
         }
         // Masked from now on, before its services (or roll apps) are given it.
         self.add_masks(id, masks::secret_values(&[], &[], &changes.values().flatten().map(|v| (String::new(), v.clone())).collect::<Vec<_>>(), &[]));

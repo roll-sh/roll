@@ -1030,7 +1030,8 @@ impl Engine {
         let own: Vec<(String, String)> = project_env(s, r.branch.as_deref()).into_iter().chain(self.store.vars(&r.id)?).collect();
         let hide = super::masks::secret_values(&env, &plain, &own, vars);
         self.add_masks(&r.id, hide.clone());
-        for (k, v) in vars {
+        // A reference is resolved in `env` already (roll secrets'): never set as its text.
+        for (k, v) in vars.iter().filter(|(_, v)| !crate::settings::is_reference(v)) {
             set(&mut env, k, v.clone());
         }
         set(&mut env, "ROLL_PREVIEW", r.id.clone());

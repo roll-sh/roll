@@ -387,6 +387,26 @@ impl Default for GithubRule {
 /// Whether an environment name is production's.
 /// Whether an environment name looks like production's. Errs on the side of yes: `prod`,
 /// `production-eu`, `prd`, `live`, `main`, `master`.
+/// Whether a variable's value is a reference into roll secrets (`roll://ENV[/folder…]/KEY`).
+pub fn is_reference(v: &str) -> bool {
+    v.starts_with("roll://")
+}
+
+/// A reference's shape: `roll://ENV[/folder…]/KEY` in the preview's own project (no `PROJECT@`:
+/// a preview reads its own project's environments). roll secrets checks the rest when it reads it.
+pub fn check_reference(v: &str) -> std::result::Result<(), String> {
+    let rest = v.strip_prefix("roll://").unwrap_or(v);
+    if rest.contains('@') {
+        return Err("a preview reads its own project's environments: roll://ENV/KEY, without PROJECT@".into());
+    }
+    let parts: Vec<&str> = rest.split('/').collect();
+    let ok = |p: &str| !p.is_empty() && p.len() <= 128 && p.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'));
+    if parts.len() < 2 || !parts.iter().all(|p| ok(p)) {
+        return Err("a reference is roll://ENV/KEY or roll://ENV/folder/KEY".into());
+    }
+    Ok(())
+}
+
 pub fn is_production(env: &str) -> bool {
     let e = env.to_ascii_lowercase();
     e.contains("prod") || e.split(['-', '_']).any(|w| matches!(w, "prd" | "live" | "main" | "master"))
@@ -468,6 +488,17 @@ impl Settings {
         let base = &self.secrets.base;
         if base.is_empty() || base.len() > 64 || !base.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
             return bad("secrets.base: an environment name (1–64 of a-z, 0-9, - and _)".into());
+        }
+        // A `roll://ENV[/folder]/KEY` value is a reference into roll secrets, read there with the
+        // preview's environment (untrusted: never a protected environment or a sensitive key).
+        for (glob, vars) in std::iter::once(("env", &self.env)).chain(self.env_for.iter().map(|(g, v)| (g.as_str(), v))) {
+            for (k, v) in vars {
+                if is_reference(v)
+                    && let Err(m) = check_reference(v)
+                {
+                    return bad(format!("{glob}: {k}: {m}"));
+                }
+            }
         }
         if is_production(base) && !self.secrets.allow_production {
             return bad(format!("secrets.base {base:?} is production's: set secrets.allow_production to inherit it"));

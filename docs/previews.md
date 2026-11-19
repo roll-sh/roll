@@ -390,6 +390,22 @@ behind the `Apps` trait:
      Vercel's branch-scoped variables. Setting them redeploys its services; names roll or the
      preview's branches set (`ROLL_*`, `PORT`, `DATABASE_URL`, …) are refused, so they can't
      point a preview at other data;
+
+  A value of `env` or `env_for` can name a key in roll secrets instead of holding it (Doppler's
+  and 1Password's references): `roll://ENV/KEY` or `roll://ENV/folder/KEY`, in the project's own
+  environments (no `PROJECT@`: 400). It goes into the preview's environment as roll secrets' own
+  reference (`${ENV.folder.KEY}`) and is read there, with the environment, as the preview reads
+  everything: untrusted, so a protected environment or a sensitive key never resolves (it's left
+  out and logged as a secret that doesn't resolve), a branched parent's link is followed as any,
+  and the value is masked in what the preview shows. A payment provider's test key then stays in
+  roll secrets (its health, leak scanning, reach and rotation) rather than in the project's rules.
+  A plain value is kept as it is: its `${` is escaped, so it's never a reference by accident. A
+  preview's own variables refuse a reference (400) until roll secrets' maker-checked binding for
+  references a person chooses (`bind_ref`, its #407). Renaming an environment rewrites roll
+  secrets' references, not these rules: the next converge logs the old name as one that doesn't
+  resolve. `a_roll_reference_becomes_roll_secrets_own_and_a_plain_value_stays_plain`;
+  `scripts/preview-cost.sh` reads a staging key through `roll://staging/…` in the live service's
+  environment, and a `${USER}` left as it is;
   4. the branched resources' URLs:
 
      | Resource | Variables |
@@ -2045,13 +2061,11 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Secret references in previews' variables** (roll secrets' suggestion, after its #329):
-   `env`, `env_for` and a preview's own variables are plain values outside roll secrets
-   (redacted on read, but outside health, leak scanning, reach and the cut-off), and a payment
-   provider's test key is just what teams put there. Take `roll://ENV/KEY` there, resolved
-   through `Secrets::resolve_for(ResourceRef::new(kind, id).untrusted(), …)` (never a
-   protected environment or a sensitive key), and offer to keep a pasted value in the base
-   environment's folder.
+1. **Secret references in previews' variables, in review** (`feature/roll-previews-secret-refs`;
+   roll secrets' suggestion): `roll://ENV[/folder]/KEY` in `env` and `env_for` becomes roll
+   secrets' own reference in the preview's environment, read there untrusted; a plain value's
+   `${` is escaped. Next for it: a preview's own variables once roll secrets' `bind_ref` lands
+   (#407), and the rules dialog offering to keep a pasted value in the base environment.
 2. **An independent review of turns 7 and 8** (a public OTLP intake, an untrusted parser, the
    gate's WebSocket rule, the sheet's downloads): their findings fixed before anything builds on
    them, as turn 6's were (#386).
