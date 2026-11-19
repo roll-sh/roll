@@ -20,8 +20,10 @@ environments that inherit from a base environment instead of copying it.
 - CLI: `roll secrets …` and `roll run` in `crates/roll-cli/src/secrets.rs`.
 - Tests: `crates/roll-secrets/tests/api.rs` (the router in process, on SQLite or Postgres),
   `crates/roll-secrets/tests/nodes.rs` (two stores racing on one database),
-  `crates/roll-cli/tests/secrets.rs` (`roll run` against a live rolld),
-  `apps/dashboard/src/lib/secrets-*.test.ts`.
+  `crates/roll-cli/tests/secrets.rs` (`roll run`, with `--watch`, against roll secrets in process),
+  `crates/rolld/tests/secrets.rs` (each product's link against the real rolld),
+  `apps/dashboard/src/lib/secrets-*.test.ts`. `pnpm test:secrets` runs them (`--docker`: on
+  Postgres, and the Postgres link).
 
 ## Getting started
 
