@@ -164,13 +164,15 @@ export interface Tightened {
 }
 
 /** How long an approval also allows the same action on the same resource. */
-export type Remember = "once" | "1h" | "8h" | "1d" | "always";
+export type Remember = "once" | "1h" | "8h" | "1d" | "7d" | "30d" | "always";
 
 export const REMEMBER: { value: Remember; label: string }[] = [
   { value: "once", label: "Once" },
   { value: "1h", label: "For an hour" },
   { value: "8h", label: "For 8 hours" },
   { value: "1d", label: "For a day" },
+  { value: "7d", label: "For a week" },
+  { value: "30d", label: "For 30 days" },
   { value: "always", label: "Always" },
 ];
 

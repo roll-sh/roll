@@ -4,7 +4,7 @@ import { parseDotenv, previewImport } from "@/lib/secrets-dotenv";
 import { Dialog } from "../agents/ui/dialog";
 import { Switch } from "../agents/ui/switch";
 import { useSecrets } from "./secrets-page";
-import { ErrorNote, errorText, field, ghost, primary } from "./ui";
+import { ErrorNote, errorText, ghost, primary, textareaField } from "./ui";
 
 const ACTION_TONE = { new: "text-ok", replace: "text-accent", skip: "text-subtle" } as const;
 
@@ -86,7 +86,7 @@ function Form({ env, path, current, onClose, onImported }: { env: Environment; p
         autoComplete="off"
         placeholder={"# the database\nDATABASE_URL=postgres://…\nSTRIPE_KEY=sk_live_…"}
         aria-label=".env contents"
-        className={`${field} h-auto resize-y py-2 font-mono text-[12px] leading-relaxed`}
+        className={`${textareaField} resize-y font-mono text-[12px] leading-relaxed`}
       />
       {parsed.error && <p className="text-[11.5px] text-danger">{parsed.error}</p>}
       {!text && (
