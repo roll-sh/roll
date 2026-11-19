@@ -303,7 +303,9 @@ async fn serve(spec: InstanceSpec, listener: tokio::net::TcpListener, log: LogSi
             let version = format!("{:?}", req.version());
             let te = req.headers().get("te").and_then(|h| h.to_str().ok()).unwrap_or("").to_string();
             let traceparent = req.headers().get("traceparent").and_then(|h| h.to_str().ok()).unwrap_or("").to_string();
-            let mut r = (status, axum::Json(serde_json::json!({ "instance": name, "deployment": dep, "port": port, "path": req.uri().path(), "vars": vars, "forwarded_host": host, "cookie": cookie, "version": version, "te": te, "traceparent": traceparent }))).into_response();
+            // What roll hands an edge function (`crate::edge`).
+            let edge: serde_json::Map<String, serde_json::Value> = ["x-edge-path", "x-edge-next"].iter().filter_map(|h| Some((h.to_string(), req.headers().get(*h)?.to_str().ok()?.into()))).collect();
+            let mut r = (status, axum::Json(serde_json::json!({ "instance": name, "deployment": dep, "port": port, "path": req.uri().path(), "vars": vars, "forwarded_host": host, "cookie": cookie, "version": version, "te": te, "traceparent": traceparent, "edge": edge }))).into_response();
             if let Some(c) = cache {
                 r.headers_mut().insert(axum::http::header::CACHE_CONTROL, c);
                 let seg = req.uri().path().trim_start_matches('/').split('/').next().unwrap_or("").to_string();

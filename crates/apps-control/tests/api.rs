@@ -2127,6 +2127,56 @@ async fn a_split_test_serves_its_share_from_another_environment() {
     assert_eq!(visit(Some("roll_bucket=90")).await.0, d["id"].as_str().unwrap(), "no split: production answers all");
 }
 
+/// A static site's edge functions (Netlify's, Vercel's middleware): a request on one's path goes
+/// to the site's functions service as `/.roll/edge/<name>`, the visitor's path and a signed
+/// `context.next()` address with it; that address answers the site's own files (no edge function
+/// again), and nothing unsigned does. Other paths are the files as ever.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sites_edge_function_runs_before_its_files() {
+    let w = world().await;
+    let (_, site) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "shop", "source": {"kind": "upload"} }))).await;
+    let id = site["id"].as_str().unwrap().to_string();
+    let tree = tempfile::tempdir().unwrap();
+    std::fs::write(tree.path().join("index.html"), "<h1>hi</h1>").unwrap();
+    std::fs::create_dir_all(tree.path().join("netlify/edge-functions")).unwrap();
+    std::fs::write(tree.path().join("netlify/edge-functions/auth.ts"), "export default (req, ctx) => ctx.next();\nexport const config = { path: \"/admin/*\" };\n").unwrap();
+    let mut bundle = Vec::new();
+    roll_fetch::pack(&mut bundle, &Default::default(), Some(tree.path()), roll_fetch::Limits::default()).unwrap();
+    let req = Request::post(format!("/v1/apps/services/{id}/environments/production/deploys")).header("content-type", "application/gzip").body(Body::from(bundle)).unwrap();
+    let d: Value = serde_json::from_slice(&w.api.clone().oneshot(req).await.unwrap().into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let d = settled(&w, &id, "production", d["id"].as_str().unwrap()).await;
+    assert_eq!(d["plan"]["edge"][0]["paths"], json!(["/admin/*"]), "{d}");
+    let h = host(&call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None).await.1["url"]);
+    let get = |path: String, host: String| {
+        let public = w.public.clone();
+        async move {
+            let resp = public.oneshot(Request::builder().uri(path).header("host", host).body(Body::empty()).unwrap()).await.unwrap();
+            let st = resp.status();
+            (st, String::from_utf8_lossy(&resp.into_body().collect().await.unwrap().to_bytes()).into_owned())
+        }
+    };
+    // Its functions service isn't there yet: the files answer.
+    assert_eq!(get("/admin/users".into(), h.clone()).await, (StatusCode::NOT_FOUND, "<h1>not here</h1>".to_string()), "the site's own 404 page");
+    image_service(&w, "shop-fn", json!({"port": 80, "min_instances": 1})).await;
+    let mut sent = Value::Null;
+    for _ in 0..100 {
+        sent = serde_json::from_str(&get("/admin/users?q=1".into(), h.clone()).await.1).unwrap_or(Value::Null);
+        if !sent.is_null() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!((sent["path"].as_str(), sent["edge"]["x-edge-path"].as_str()), (Some("/.roll/edge/auth"), Some("/admin/users?q=1")), "{sent}");
+    let next_path = sent["edge"]["x-edge-next"].as_str().unwrap().to_string();
+    assert!(next_path.starts_with("/_roll/edge/"), "a path only: the service prefixes its own ROLL_EDGE_BASE: {next_path}");
+    // context.next(): the site's own answer for the path after it, on any host, no edge again.
+    assert_eq!(get(format!("{next_path}/index.html"), "127.0.0.1".into()).await, (StatusCode::OK, "<!doctype html><title>fake site</title>".to_string()));
+    assert!(!get(format!("{next_path}/admin/users"), "127.0.0.1".into()).await.1.contains("/.roll/edge"), "next never runs the edge function again");
+    let forged = next_path.rsplit_once('/').unwrap().0.to_string() + "/00000000000000000000000000000000";
+    assert_eq!(get(format!("{forged}/index.html"), "127.0.0.1".into()).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(get("/assets/app.js".into(), h.clone()).await.1, "start()", "other paths are its files");
+}
+
 /// An instance the kernel killed for its memory says so: in the log and in why it crashed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_instance_killed_for_its_memory_says_so() {

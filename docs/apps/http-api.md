@@ -591,7 +591,8 @@ type Plan = {
   /** Datastores the root's manifests have client libraries for ("pg in package.json"): New
    *  service offers to make and link them. Absent when none. */
   uses?: ("postgres" | "redis")[];
-  functions?: string[]; // a static site's function directories the functions builder runs (netlify/functions, api)
+  functions?: string[]; // a static site's function directories the functions builder runs (netlify/functions, api; "edge" with edge functions)
+  edge?: { name: string; kind: "netlify" | "vercel"; file: string; paths: string[]; excluded?: string[] }[]; // its edge functions, run before its files on their paths by its <site>-fn service, on Deno
   /** The Procfile's `release:` (Heroku's release phase): the deployment's pre-deploy command when
    *  the service sets none. Absent without one, and for a tree's own Dockerfile. A Procfile's `web:`
    *  (`worker:` for a worker) is `start` when the service names none. */

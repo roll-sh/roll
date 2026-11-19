@@ -1265,8 +1265,42 @@ it (the environment's routes). That builder writes a Node 22 image with a small 
 A function is `<name>.mjs|.js|.cjs|.ts|.mts`, or a directory with an `index` of one. TypeScript
 runs as Node strips its types. Its `package.json` dependencies are installed. A request is at most
 6 MiB, an unknown function is a 404, and one that throws is a 500 with its error in the log.
-Edge functions (Deno) aren't run. `docker.rs::a_static_sites_functions_build_and_answer` builds
-one of each style and calls them.
+Edge functions run in the same service, on Deno ("Edge functions", below).
+`docker.rs::a_static_sites_functions_build_and_answer` builds one of each style and calls them.
+
+## Edge functions
+
+A static site's edge functions (Netlify Edge Functions, Vercel's Middleware) run before its files
+on the paths they name, to answer themselves, change the request, or change the file's answer:
+- Netlify's `netlify/edge-functions/<name>.{ts,js,mjs,mts,tsx,jsx}` (or `<name>/index.*`), on
+  their `export const config = { path, excludedPath }` or netlify.toml's `[[edge_functions]]
+  function path`, as `export default (request, context)`: `context.next()` (the site's own
+  answer, to return or change), `rewrite(path)`, `geo.country.code` (the edge's country), `ip`,
+  `cookies`, `json()`, `requestId`, and `Netlify.env`. Nothing returned is the site's answer.
+- Vercel's `middleware.{ts,js}` at the root, on every path or its `config.matcher`: a `Response`
+  answers, `next()` (`x-middleware-next`, with `x-middleware-request-*` headers set on the
+  request) and `rewrite()` (`x-middleware-rewrite`) as `@vercel/edge` makes them.
+
+Paths are patterns: `*` is any rest (`/shop/*`), `:name` one segment, `:name*` any rest, and a
+segment may glob (`*.png`). The first function whose patterns take a path (and whose excluded ones
+don't) runs; at most 20 functions, 20 paths each. The site's plan lists them (`edge`), and Run its
+functions makes the same `<site>-fn` service the site's functions run in; its image adds Deno
+(pinned by digest, its binary only) and a server of edge functions on 127.0.0.1, which the Node
+server hands `/.roll/edge/<name>` to. The build fetches their imports (`deno cache`: URLs,
+`npm:`, Netlify's types), so they start without the network. They run with network, the
+environment and reads of their own files (`--allow-net --allow-env --allow-read=/app,/roll`).
+
+A request on an edge function's path goes to the functions service's environment of the same name
+as `/.roll/edge/<name>`, past its access gate (the site's let the visitor in), with the visitor's
+path in `x-edge-path` and in `x-edge-next` where `context.next()` asks for the site's answer: the
+path `/_roll/edge/{service}/{env}/{deployment}/{until}/{sig}` on the apps listener, which the
+functions service reaches at its `ROLL_EDGE_BASE` (set at its start, as instances reach the
+listener for traces; never an address a request gave it), signed for that deployment for a minute (an HMAC under a key every node shares),
+which answers the same deployment's files and never runs an edge function again. Anything
+unsigned or expired there is a 404. Without the functions service running, the files answer as
+they would, and the environment's log says once which function isn't run.
+`api.rs::a_sites_edge_function_runs_before_its_files`, `apps_build::edge::tests`.
+
 
 ## Base image updates
 
@@ -3147,73 +3181,70 @@ dropped `_`, missed `"""…"""` and had no tree of its own without a plugin; a d
 static site into a container. Firewall rules on more than the path were built next, then PagerDuty and Opsgenie targets
 ("Notifications"), then external proxy rewrites and conditional rules ("Static sites"), then uptime
 checks ("Uptime checks"), then heartbeats ("Heartbeats"), then image scans ("Vulnerability
-scanning"), then objectives ("SLOs"), then Prometheus scraping ("The app's Prometheus endpoint"), then split tests ("Split tests").
+scanning"), then objectives ("SLOs"), then Prometheus scraping ("The app's Prometheus endpoint"), then split tests ("Split tests"), then edge functions ("Edge functions").
 
 1. **Variables that belong in roll secrets** (roll secrets' review): a secret-looking variable
    pasted into the panel offers "Move to roll secrets" (into the project environment apps
    already injects), and a variable may be `roll://ENV/KEY`, resolved through roll secrets'
    `Secrets::resolve_for(ResourceRef::new(Kind::Service, id), …)` (#329, audited as the service,
    rotation seen through `digest_for`), so values reach its health, leak guard and audit chain.
-2. **Edge functions for static sites** (Netlify Edge Functions, Vercel Middleware):
-   `netlify/edge-functions/` and `middleware.ts` in the site's `-fn` service on Deno, before its
-   files on their `config.path`.
-3. *Waiting on roll secrets' #357 (its batch 4).* **A workload
+2. *Waiting on roll secrets' #357 (its batch 4).* **A workload
    identity token in each instance** (Vercel's OIDC federation, Fly's, Cloud Run's): roll
    secrets' #68 issuer mints `sub = roll-apps:<project>:<service>:<env>` (`SecretSource::issue`,
    at most an hour, rotated keys); apps' half is delivery: a refreshed token per instance read
    from its link endpoint, a per-request header for web services, and `aud` per environment.
-4. *Waiting on the user.* **Signed-in people, not just admins** (every competitor; roll search and
+3. *Waiting on the user.* **Signed-in people, not just admins** (every competitor; roll search and
    secrets do): `roll_auth::SignedIn` scoped through `Workspace::trusts`, others' services 404.
    Letting non-admins run code on a node's Docker is the user's call first.
-5. *Waiting on the fleet's first run.* **Cached answers across nodes and at the edge** (Vercel's, Netlify's): today the owner's
+4. *Waiting on the fleet's first run.* **Cached answers across nodes and at the edge** (Vercel's, Netlify's): today the owner's
    proxy alone keeps them; the storage CDN's purge outbox could carry the purges.
    Across nodes means a node that doesn't own the service answering from its own copy, which
    needs the owner's say that the environment has no gate (access, allow list, firewall, rate
    limit) on each answer, a generation per environment for purges, and hits metered and logged
    where the owner reads them: only worth it once the fleet serves traffic.
-6. **Egress on the fleet** (Fargate): a security group per closed environment's tasks with no
+5. **Egress on the fleet** (Fargate): a security group per closed environment's tasks with no
    outbound rule but the egress proxy's, and the proxy as a task or on the node; until then
    Fargate refuses `egress: roll` (409). *Waiting on the fleet's first run.*
-7. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
+6. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
    follow a stream group's lag now (a queue's project is what keeps another tenant's depth
    unread).
-8. **Region**: the region shown on the overview and each environment, defaulting to the project's
+7. **Region**: the region shown on the overview and each environment, defaulting to the project's
    databases', then a choice per environment once the fleet has a second region (Railway's,
    Fly's). *Waiting on the fleet.*
-9. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
+8. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
    Settings, without stopping services from sleeping (Railway's and Render's). A roll-hosted app
    linked to a search cluster with an IP allowlist (search #243) needs them on the list; until
    then such a cluster stays open (on one node, the link relay's loopback is what it sees). *Waiting on the
    user's first AWS run.*
-10. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
+9. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
    listener offering `h2` (ALPN `h2, http/1.1`; hyper's `http2::Builder` when `h2` is chosen,
    with the same graceful drain) and setting `Host` from `:authority` (HTTP/2 has no `Host`,
    and every product behind the edge routes on it), so Cloudflare's gRPC reaches h2c apps.
    Done here: `run.h2c` to the app, trailers through the proxy. Then TCP services.
-11. **roll secrets as the env store**: the wiring is done (deploys resolve the project's secrets,
+10. **roll secrets as the env store**: the wiring is done (deploys resolve the project's secrets,
    digests mark "needs deploy", roll secrets' reveal rules, linked and sensitive keys, dynamic
    credentials refused, new environments ensured); what's left is service variables kept in roll
    secrets at `/services/<name>` (one store for both), and links as per-environment secrets
    links.
-12. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
+11. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
    settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
    warm window or `min_instances` 1 by default there until a wake is fast), and
    allocation-based metering for Fargate.
-13. *Waiting on roll secrets' #274.* **Queues linkable from a service**: buckets, streams and NoSQL are (rolld's `RollResources::link`, through roll secrets' providers); #274 adds the `queue` provider (its own user, `AMQP_URL`, `permission` read, write or configure), then `RollResources` and the one-node relay for the AMQP port here.
-14. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
+12. *Waiting on roll secrets' #274.* **Queues linkable from a service**: buckets, streams and NoSQL are (rolld's `RollResources::link`, through roll secrets' providers); #274 adds the `queue` provider (its own user, `AMQP_URL`, `permission` read, write or configure), then `RollResources` and the one-node relay for the AMQP port here.
+13. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
    `_acme-challenge.<base>` CNAME into a zone roll writes (`roll_edge::acme`'s DNS solver at
    another name), then `DomainTls::wildcards` true there; the routing and verification are done.
-15. *Waiting on the edge's owner (roll cloud).* **Bring your own certificate** (Vercel's,
+14. *Waiting on the edge's owner (roll cloud).* **Bring your own certificate** (Vercel's,
    Heroku's SNI, Fly's import): `PUT …/domains/{host}/certificate {cert_pem, key_pem}`, sealed,
    served by SNI at the edge (and Cloudflare's custom certificates), expiry through
    `domain.expiring`.
-16. *Waiting on a static build (no musl target on ai-server, and adding one is the shared toolchain's).* **A waker that takes every caller while the app starts**: busybox `nc -l` takes one, so a burst
+15. *Waiting on a static build (no musl target on ai-server, and adding one is the shared toolchain's).* **A waker that takes every caller while the app starts**: busybox `nc -l` takes one, so a burst
    of private calls to a stopped service loses all but the first (refused). A waker of roll's own
    (roll-fetch's `wake` mode, a static binary mounted read-only) that accepts each, holds them,
    and hands them over once the app listens; the cheap accept count already tells rolld.
-17. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
+16. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
     origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
-18. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
+17. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
     restore (CRIU, which needs the host's Docker daemon with checkpoints on: the user's call), or
     Firecracker microVM hosts on the fleet.
-19. EFS volumes and Cloud Map private DNS on the fleet; TCP services on the fleet (the edge carrying TCP to a service's owner).
+18. EFS volumes and Cloud Map private DNS on the fleet; TCP services on the fleet (the edge carrying TCP to a service's owner).

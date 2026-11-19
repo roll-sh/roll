@@ -57,6 +57,7 @@ pub mod vitals;
 pub mod heartbeats;
 pub mod slo;
 pub mod prom;
+pub mod edge;
 pub mod vulns;
 pub mod checks;
 pub mod forms;
@@ -334,6 +335,10 @@ pub struct Apps {
     /// proxy; and which environments' last scrape failed (said once).
     pub(crate) scrape_client: reqwest::Client,
     pub(crate) scrape_errors: Mutex<std::collections::HashSet<String>>,
+    /// The key edge functions' `next` addresses are signed with ([`edge`]), once read; and which
+    /// edge functions were said not to run (once each).
+    pub(crate) edge_key: Mutex<Option<Vec<u8>>>,
+    pub(crate) edge_noted: Mutex<std::collections::HashSet<String>>,
     /// Shells open over HTTP (the dashboard's terminal), by id.
     sessions: Mutex<HashMap<String, Arc<shell::Session>>>,
     /// WebSocket shells open per environment (`env_key`), counted with the HTTP sessions.
@@ -568,6 +573,8 @@ impl Apps {
             site_proxy_client: net::client(cfg_allow, Duration::from_secs(30)),
             scrape_client: reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).no_proxy().timeout(Duration::from_secs(10)).build().expect("a client"),
             scrape_errors: Mutex::new(Default::default()),
+            edge_key: Mutex::new(None),
+            edge_noted: Mutex::new(Default::default()),
             looping: Mutex::new(std::collections::HashSet::new()),
             client: hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new()).pool_idle_timeout(Duration::from_secs(30)).build_http(),
             client_h2: hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new()).pool_idle_timeout(Duration::from_secs(30)).http2_only(true).build_http(),
@@ -2427,6 +2434,14 @@ impl Apps {
                 // Its token is a credential: never shown, as a sealed variable.
                 trace_endpoint = true;
             }
+        }
+        // A site's functions service: where its edge functions' `context.next()` reaches the
+        // site (this listener, as instances reach it; `crate::edge`), set at start so the runtime
+        // makes it reachable.
+        if svc.build.builder == crate::model::Builder::Functions
+            && let Some(base) = &self.cfg.otlp_base
+        {
+            vars.insert("ROLL_EDGE_BASE".into(), (self.deps.runtime.reach(base.trim_end_matches('/')), "roll"));
         }
         let sid = svc.id.clone();
         let links = self.db(move |s| s.links_minted(&sid)).await?;

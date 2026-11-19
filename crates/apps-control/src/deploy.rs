@@ -1631,7 +1631,13 @@ impl Apps {
             }
             _ => None,
         };
-        Ok(Template { deployment: dep.id.clone(), spec, run, spa, site })
+        // Its edge functions, run by `<name>-fn` (what Run its functions makes).
+        let edge: Vec<apps_build::edge::EdgeFn> = match &site {
+            Some(_) => dep.plan.as_ref().and_then(|p| serde_json::from_value(p["edge"].clone()).ok()).unwrap_or_default(),
+            None => Vec::new(),
+        };
+        let edge_service: String = format!("{}-fn", svc.name).chars().take(40).collect();
+        Ok(Template { deployment: dep.id.clone(), spec, run, spa, site, edge, edge_service })
     }
 
     // ── the owner's background work ──
