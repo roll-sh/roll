@@ -629,19 +629,26 @@ async fn shell_screen(AxState(e): S, Path((id, sh)): Path<(String, String)>) -> 
         if done {
             return None;
         }
+        let end = |rx, closed| Some((Ok(Event::default().event("closed").data("")), (rx, closed, true)));
         loop {
+            // Ended: what it wrote last (still waiting for this viewer) first, then `closed`.
             if *closed.borrow() {
-                return Some((Ok(Event::default().event("closed").data("")), (rx, closed, true)));
+                match rx.try_recv() {
+                    Ok(chunk) => return Some((Ok(Event::default().data(b64(&chunk))), (rx, closed, false))),
+                    Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,
+                    Err(_) => return end(rx, closed),
+                }
             }
             tokio::select! {
+                biased;
                 got = rx.recv() => match got {
                     Ok(chunk) => return Some((Ok(Event::default().data(b64(&chunk))), (rx, closed, false))),
                     // A viewer that fell behind misses what it missed (the shell goes on).
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return Some((Ok(Event::default().event("closed").data("")), (rx, closed, true))),
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return end(rx, closed),
                 },
                 c = closed.changed() => if c.is_err() {
-                    return Some((Ok(Event::default().event("closed").data("")), (rx, closed, true)));
+                    return end(rx, closed);
                 },
             }
         }
