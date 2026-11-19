@@ -95,7 +95,7 @@ export interface Run {
   metrics?: { port?: number; path?: string };
   /** A gradual rollout: the new deployment takes each percent of `steps` for `step_s`, rolled
    *  back by a 5xx share of `error_pct` or more (worse than the old one); no steps: at once. */
-  rollout?: { steps: number[]; step_s: number; error_pct: number; /** Each step waits for a person once it passes. */ manual?: boolean };
+  rollout?: { steps: number[]; step_s: number; error_pct: number; /** Each step waits for a person once it passes. */ manual?: boolean; /** With run.slo: a step fails past this burn rate (default 14.4). */ slo_burn?: number };
   /** The app speaks HTTP/2 without TLS (a gRPC server). */
   h2c?: boolean;
   /** false: no public URL, only the project's private network (absent: public). */
