@@ -11,7 +11,7 @@ made-up value and a product that's off are fine.
 
     mcp-sweep.py <api> <operator token file> [--writes] [-v] [--tool NAME]
 """
-import json, sys, urllib.request
+import json, sys, urllib.error, urllib.request
 
 api, tok = sys.argv[1], open(sys.argv[2]).read().strip()
 only = sys.argv[sys.argv.index("--tool") + 1] if "--tool" in sys.argv else None
@@ -110,17 +110,36 @@ def rest(method, path, body):
     try:
         with urllib.request.urlopen(req, timeout=30) as r:
             return json.load(r)
-    except Exception:
+    except urllib.error.HTTPError as e:
+        # A fixture that isn't made leaves its tools skipped: say why (an id or a message, never a secret).
+        print(f"fixture {method} {path}: {e.code} {e.read()[:200].decode(errors='replace')}")
+        return None
+    except Exception as e:
+        print(f"fixture {method} {path}: {e}")
         return None
 # roll code: an owner and a repo (code's and agents' tools name them).
 rest("POST", "/v1/code/owners", {"name": "sweep"})
 repo_made = rest("POST", "/v1/code/repos", {"owner": "sweep", "name": "app"}) is not None or call("code_list_repos", {}) is not None
+# A first commit on the repo's main, pushed over git as a person would (the token in git's
+# environment, never its command line).
+if repo_made:
+    import os, subprocess, tempfile
+    with tempfile.TemporaryDirectory() as d:
+        env = dict(os.environ, GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="http.extraHeader", GIT_CONFIG_VALUE_0=f"Authorization: Bearer {tok}",
+                   GIT_AUTHOR_NAME="sweep", GIT_AUTHOR_EMAIL="sweep@example.invalid", GIT_COMMITTER_NAME="sweep", GIT_COMMITTER_EMAIL="sweep@example.invalid", GIT_TERMINAL_PROMPT="0")
+        open(os.path.join(d, "README.md"), "w").write("sweep\n")
+        for cmd in (["git", "init", "-q", "-b", "main"], ["git", "add", "README.md"], ["git", "commit", "-q", "-m", "sweep"], ["git", "push", "-q", f"{api}/git/sweep/app.git", "main"]):
+            r = subprocess.run(cmd, cwd=d, env=env, capture_output=True, text=True, timeout=60)
+            if r.returncode != 0:
+                print(f"fixture {' '.join(cmd[:2])}: {r.stderr.strip()[:200]}")
+                break
 # previews: the repo on the workspace project's canvas, then a preview of it (its deploy needs
 # Docker and fails, but the preview and its reads answer).
 pv_id = None
 if repo_made and ws:
     rest("PUT", f"/v1/workspace/projects/{ws}/resources/repo/sweep%2Fapp", {"x": 0, "y": 0})
-    pv = rest("POST", "/v1/previews", {"project": ws, "repo": "sweep/app"}) or {}
+    rest("PUT", f"/v1/previews/projects/{ws}/settings", {"enabled": True})
+    pv = rest("POST", "/v1/previews", {"project": ws, "repo": "sweep/app", "branch": "main"}) or {}
     pv_id = pv.get("id") or (pv.get("preview") or {}).get("id")
 # tasks: a message (its delivery to an address that never resolves fails, which is fine).
 msg = call("tasks_publish", {"url": "https://example.invalid/sweep", "body": "{}"}) or {}
