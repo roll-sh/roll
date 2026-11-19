@@ -321,6 +321,9 @@ mod finds {
             ("roll back secrets", "secrets_rollback"),
             ("which secrets nobody reads", "secrets_insights"),
             ("one-time code", "secrets_totp"),
+            ("vulnerabilities in my image", "apps_deploy_vulnerabilities"),
+            ("error budget", "apps_environment_slo"),
+            ("contact form submissions", "apps_form_submissions"),
         ]
         .iter()
         .filter_map(|(q, want)| {

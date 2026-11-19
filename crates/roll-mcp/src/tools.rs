@@ -70,6 +70,9 @@ pub struct Tool {
     /// its answer says the wait is over. As an MCP task, an answer that isn't is asked again, so
     /// the task waits as long as it takes (tasks::run).
     pub until: Option<fn(&Value) -> bool>,
+    /// Fields of its answer that anyone outside can write (a site's form submissions): withheld in
+    /// lockdown wherever they sit, as an outside record's text is (lockdown::withhold_fields).
+    pub outside: &'static [&'static str],
 }
 
 pub enum Built {
@@ -265,7 +268,7 @@ const IDEMPOTENCY: P = P { name: "idempotency_key", ty: Ty::Str, at: At::Header(
 const IN_PROJECT: P = P { name: "workspace_project", ty: Ty::Str, at: At::Header("x-roll-project"), required: false, desc: "Workspace project (prj_…) to put the new resource in" };
 
 const fn t(name: &'static str, title: &'static str, description: &'static str, product: &'static str, method: &'static str, path: &'static str, params: &'static [P]) -> Tool {
-    Tool { name, title, description, product, method, path, params, fixed: None, wrap: None, hint: Hint::Auto, until: None }
+    Tool { name, title, description, product, method, path, params, fixed: None, wrap: None, hint: Hint::Auto, until: None, outside: &[] }
 }
 
 /// A tasks run that's over (`completed`, `failed` or `canceled`).
@@ -305,6 +308,10 @@ impl Tool {
     }
     const fn until(mut self, f: fn(&Value) -> bool) -> Tool {
         self.until = Some(f);
+        self
+    }
+    const fn outside(mut self, fields: &'static [&'static str]) -> Tool {
+        self.outside = fields;
         self
     }
 }
@@ -1060,6 +1067,11 @@ static TOOLS: &[Tool] = &[
     t("apps_test_drain", "Test a log drain", "Send one signed test line now (not retried): whether it arrived.", "apps", "POST", "/v1/apps/projects/{project}/drains/{did}/test", &[req("project", "Workspace project"), req("did", "Drain id")]),
     t("apps_pending", "What the next deploy changes", "Before deploying: which variables (names, never values), run settings and project secrets the next deploy changes against what's live.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/pending", &[SERVICE, ENV]),
     t("apps_deploy_commits", "A deploy's commits", "The commits a deploy brings over the one live before it, newest first (at most 50).", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/deploys/{deploy}/commits", &[SERVICE, ENV, req("deploy", "Deploy id")]),
+    t("apps_deploy_vulnerabilities", "A deploy's vulnerabilities", "Known vulnerabilities in a deploy's image, most severe first, then those with a fix: id (CVE-…, GHSA-…), severity, package, installed and fixed versions, and where (the OS's packages or a lockfile), at most 2,000, with the scan's counts. Use it before promoting a deploy, or to find what to upgrade.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/deploys/{deploy}/vulnerabilities", &[SERVICE, ENV, req("deploy", "Deploy id"), q("severity", Ty::Str, "Only this severity or worse: critical, high, medium or low")]),
+    t("apps_environment_slo", "SLO and error budget", "An environment's objective against its window: per indicator (availability, latency) the total, the failures, the share that met it and the error budget left (1 untouched, below 0 spent), and whether it's burning now.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/slo", &[SERVICE, ENV]),
+    t("apps_list_forms", "List a site's forms", "A static site's forms with their submission counts and the last one's time (never what people sent; apps_form_submissions reads that).", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/forms", &[SERVICE, ENV]),
+    t("apps_form_submissions", "Read form submissions", "What people sent through a site's form, newest first: each submission's id, time and fields. People's own data: every read is audited.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/forms/{form}/submissions", &[SERVICE, ENV, req("form", "Form name"), q("limit", Ty::Int, "At most (1-200, default 50)"), q("before", Ty::Str, "A submission's id: the page after it")]).outside(&["fields"]),
+    t("apps_delete_form_submission", "Delete a form submission", "Delete one submission for good (someone asked to be forgotten, or spam). Audited.", "apps", "DELETE", "/v1/apps/services/{service}/environments/{env}/forms/{form}/submissions/{submission}", &[SERVICE, ENV, req("form", "Form name"), req("submission", "Submission id")]),
     t("apps_rollback", "Roll back a deployment", "Roll an environment back to an earlier deploy, with the variables it went live with (keep_variables: true keeps today's).", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/deploys/{deploy}/rollback", &[SERVICE, ENV, req("deploy", "Deploy id"), b("keep_variables", Ty::Bool, "Keep the variables as they are now")]),
     t("apps_rollback_previous", "Roll back to the last deploy", "Put back the deploy that was live before this one, with its variables (keep_variables: true keeps today's).", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/rollback", &[SERVICE, ENV, b("keep_variables", Ty::Bool, "Keep the variables as they are now")]),
     t("apps_logs", "Service logs", "Recent logs of a service's environment, or with http its requests (method, path, status, ms): the quickest way to find failing or slow ones.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/logs", &[

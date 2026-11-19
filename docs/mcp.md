@@ -164,6 +164,9 @@ How it works:
     repo's reader).
 - In lockdown, every result has the `title`, `body`, `description`, `message` and `text` of those
   records replaced with a notice, wherever they sit in the answer.
+- A tool whose answer anyone outside can write names those fields itself (`Tool::outside`):
+  `apps_form_submissions` withholds every submission's `fields`, since anyone can submit a site's
+  form. Ids and times stay.
 - A tool's text block is then rebuilt from what's left, because a tool set may have written its
   own text block.
 - Ids and states stay, so the agent can still say what's there. The instructions tell it not to
@@ -823,6 +826,11 @@ previews are listed once those products are on.
 | `apps_test_drain` | Send one signed test line now (not retried): whether it arrived. | `POST /v1/apps/projects/{project}/drains/{did}/test` |
 | `apps_pending` | What the next deploy changes: variables (names), run settings, project secrets. | `GET /v1/apps/services/{service}/environments/{env}/pending` |
 | `apps_deploy_commits` | The commits a deploy brings over the one live before it. | `GET /v1/apps/services/{service}/environments/{env}/deploys/{deploy}/commits` |
+| `apps_deploy_vulnerabilities` | Known vulnerabilities in a deploy's image, most severe first (`severity` keeps that or worse), with the scan's counts. | `GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}/vulnerabilities` |
+| `apps_environment_slo` | An environment's SLO: per indicator, the share that met it, the error budget left, and whether it's burning. | `GET /v1/apps/services/{id}/environments/{env}/slo` |
+| `apps_list_forms` | A static site's forms with their counts (never what people sent). | `GET /v1/apps/services/{id}/environments/{env}/forms` |
+| `apps_form_submissions` | What people sent through a form, newest first (reveal; every read audited). | `GET /v1/apps/services/{id}/environments/{env}/forms/{form}/submissions` |
+| `apps_delete_form_submission` | Delete one submission for good. | `DELETE /v1/apps/services/{id}/environments/{env}/forms/{form}/submissions/{sub}` |
 | `apps_rollback` | Roll an environment back to an earlier deploy, with the variables it went live with. | `POST /v1/apps/services/{service}/environments/{env}/deploys/{deploy}/rollback` |
 | `apps_rollback_previous` | Put back the deploy that was live before this one. | `POST /v1/apps/services/{service}/environments/{env}/rollback` |
 | `apps_logs` | Recent logs of a service's environment, or with `http` its requests (filter by `status`, `min_ms`). | `GET /v1/apps/services/{service}/environments/{env}/logs` |
