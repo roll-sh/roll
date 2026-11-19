@@ -325,16 +325,19 @@ async fn shell(api: &Api, preview: &str, service: Option<&str>) -> anyhow::Resul
     let raw = crate::apps::term::Raw::enter();
     let mut winch = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())?;
     let mut screen = screen;
+    // The shell ends when its screen does (its `exit`); the end of stdin (keys from a pipe) only
+    // stops the keys.
+    let mut typing = true;
     let ended: anyhow::Result<()> = loop {
         tokio::select! {
             _ = &mut screen => break Ok(()),
-            k = keys.recv() => match k {
+            k = keys.recv(), if typing => match k {
                 Some(b) => {
                     if let Err(e) = api.post(&format!("{base}/keys"), json!({ "data": base64::engine::general_purpose::STANDARD.encode(&b) })).await {
                         break Err(e);
                     }
                 }
-                None => break Ok(()),
+                None => typing = false,
             },
             _ = winch.recv() => {
                 if let Some((c, r)) = crate::apps::term::size() {
