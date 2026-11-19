@@ -143,7 +143,8 @@ const PROMPTS: &[Prompt] = &[
              keys that are admin over every bucket or unused for 90 days. Then what's open to the internet, with \
              whichever of these you have: buckets that are public (storage_list_buckets), search clusters with no \
              IP allowlist (search_list_clusters), and previews shared outside the team (previews_list, then \
-             previews_list_shares for who and until when), and the live deploys whose images have critical or \
+             previews_list_shares for who and until when), a project's public status page (apps_status_page: \
+             what it shows), and the live deploys whose images have critical or \
              high vulnerabilities with a fix (apps_deploy_vulnerabilities with severity high). Change nothing \
              yourself: applying a \
              tighten, revoking or limiting a token is for me or the operator, on the token's page or with roll \
