@@ -1197,13 +1197,21 @@ async fn project(api: &Api, given: Option<&str>) -> anyhow::Result<String> {
             let found: Vec<String> = list.as_array().into_iter().flatten().filter(|p| p["name"] == name).filter_map(|p| p["id"].as_str().map(String::from)).collect();
             match found.as_slice() {
                 [one] => Ok(one.clone()),
-                [] => bail!("no project named {name}"),
+                [] => {
+                    let mut seen: Vec<&str> = list.as_array().into_iter().flatten().filter_map(|p| p["name"].as_str()).collect();
+                    seen.sort_unstable();
+                    seen.dedup();
+                    match seen.as_slice() {
+                        [] => bail!("no project named {name}, and this token sees no projects"),
+                        _ => bail!("no project named {name}; the ones you can see: {}", seen.join(", ")),
+                    }
+                }
                 _ => bail!("{} projects are named {name}: give its prj_… id", found.len()),
             }
         }
         None => {
             let who = api.get("/v1/secrets/whoami").await?;
-            who["project"].as_str().map(String::from).context("which project? pass -p <name> or set ROLL_PROJECT")
+            who["project"].as_str().map(String::from).context("which project? pass -p <name>, set ROLL_PROJECT, or remember one for this folder with `roll secrets setup -p <name>`")
         }
     }
 }
@@ -3682,7 +3690,7 @@ async fn doctor(api: &Api, args: &AtArgs) -> anyhow::Result<()> {
                                     parts.push(format!("{what}: {}", list.join(", ")));
                                 }
                             }
-                            (false, format!(".env is stale against {} ({}); roll secrets export > .env, or roll run", at.env, parts.join("; ")))
+                            (false, format!(".env is stale against {} ({}); run the app with `roll run -- <command>` instead of keeping values in a file", at.env, parts.join("; ")))
                         });
                     }
                     Err(e) => checks.push((false, format!("comparing .env: {e}"))),

@@ -27,30 +27,42 @@ environments that inherit from a base environment instead of copying it.
 
 Everything below works the same from the dashboard (a project's **Secrets**) and the CLI.
 
-1. **Pick a project and its environments.** A workspace project has `development`, `staging` and
+1. **Install the CLI and sign it in** to your roll. `roll login` opens the browser (or shows a code
+   to enter there, over SSH), and later commands go to that roll without `ROLL_API_URL` (with
+   several logins, to the one you signed in to last; `ROLL_API_URL` always wins). roll has no hosted
+   address yet, so give yours:
+
+   ```
+   curl -fsSL https://roll.sh/install.sh | sh
+   roll login https://roll.example.com
+   ```
+
+   The consent screen starts from the `development` preset, where revealing a value asks you first:
+   the first `roll run` prints where to approve it and waits.
+2. **Pick a project and its environments.** A workspace project has `development`, `staging` and
    `production` the first time you open its secrets. Add your own (`roll secrets envs add qa`) and
    remember the project for this directory:
 
    ```
    roll secrets setup -p shop -e development
    ```
-2. **Add values**, one by one or from a `.env` file (one change, which you can roll back):
+3. **Add values**, one by one or from a `.env` file (one change, which you can roll back):
 
    ```
    roll secrets set STRIPE_KEY=sk_test_… LOG_LEVEL=debug
    roll secrets import .env
    roll secrets set DATABASE_URL='postgres://app:${PASSWORD}@${staging.DB_HOST}/shop'   # references
    ```
-3. **Link roll resources** instead of pasting their credentials. A linked value follows the
+4. **Link roll resources** instead of pasting their credentials. A linked value follows the
    resource: a rotated password, a new key. In the dashboard, **Link a resource**: a Postgres
    branch's URL, a Redis URL, a bucket's own access key, a stream's API key, a search API key.
-4. **Run with them.** Nothing is written to disk; `--watch` restarts on a change:
+5. **Run with them.** Nothing is written to disk; `--watch` restarts on a change:
 
    ```
    roll run -- npm run dev
    roll run -e production --watch -- ./server
    ```
-5. **Promote** what changed from one environment to the next, and **protect** production so writes
+6. **Promote** what changed from one environment to the next, and **protect** production so writes
    become change requests someone else approves:
 
    ```
@@ -58,7 +70,7 @@ Everything below works the same from the dashboard (a project's **Secrets**) and
    roll secrets promote --from staging --to production STRIPE_KEY
    roll secrets envs protect production --approvals 1
    ```
-6. **CI and services** get a roll token (roll-access's, docs/permissions.md) with one rule on the
+7. **CI and services** get a roll token (roll-access's, docs/permissions.md) with one rule on the
    project: some environments, some folders and only the actions they need, with an expiry:
 
    ```
@@ -69,7 +81,7 @@ Everything below works the same from the dashboard (a project's **Secrets**) and
    Or push an environment out with a **sync** (GitHub Actions secrets, a sealed webhook, a deploy
    notification). roll's own checks (`secrets = "development"` in `roll.toml`), previews, apps and
    sandboxes read their environment directly.
-7. **From code**, a service reads its environment with `@roll/secrets` (`packages/secrets`) and the
+8. **From code**, a service reads its environment with `@roll/secrets` (`packages/secrets`) and the
    same token. `resolve` with `sealTo` returns the values sealed to a key only that process holds,
    and `watch` follows the digest and renews dynamic credentials' leases, as `roll run --watch` does:
 
@@ -174,7 +186,7 @@ Everything below works the same from the dashboard (a project's **Secrets**) and
    c = RollSecrets.from_env
    c.watch("production") { |v| reload(v.values) }
    ```
-8. **When something goes wrong**: `roll secrets history`, `roll secrets rollback --at 2h`, the
+9. **When something goes wrong**: `roll secrets history`, `roll secrets rollback --at 2h`, the
    audit log (`roll secrets audit`, or streamed to your SIEM), and `roll secrets share KEY` to hand
    one value to someone outside roll through a link that works once.
 

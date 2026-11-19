@@ -410,7 +410,7 @@ async fn index_call(api: &Api, as_json: bool, method: reqwest::Method, cluster: 
     if let Some((ct, b)) = body {
         req = req.header("content-type", ct).body(b);
     }
-    let res = req.send().await.with_context(|| format!("can't reach {} (is it running?)", api.base))?;
+    let res = req.send().await.with_context(|| crate::unreachable(&api.base))?;
     let status = res.status();
     let text = res.text().await?;
     if !text.is_empty() {

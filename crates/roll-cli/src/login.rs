@@ -17,6 +17,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[derive(clap::Args)]
 pub struct Login {
+    /// The roll to sign in to (default: `ROLL_API_URL`, else your last login's). Commands then go
+    /// to it when `ROLL_API_URL` isn't set.
+    pub url: Option<String>,
     /// The preset the consent screen starts from (you choose what it may do there): read-only,
     /// agent, project, development, previews.
     #[arg(long, default_value = "development")]
@@ -38,6 +41,10 @@ struct Saved {
     expires_at: i64,
     token_endpoint: String,
     revocation_endpoint: String,
+    /// When it was last signed in to or picked (ms): with several logins and no `ROLL_API_URL`,
+    /// commands go to the newest.
+    #[serde(default)]
+    used_at: i64,
 }
 
 fn logins_path() -> anyhow::Result<PathBuf> {
@@ -46,6 +53,46 @@ fn logins_path() -> anyhow::Result<PathBuf> {
         None => PathBuf::from(std::env::var_os("HOME").filter(|h| !h.is_empty()).context("HOME isn't set")?).join(".config"),
     };
     Ok(base.join("roll").join("logins.json"))
+}
+
+/// The roll commands go to when neither `ROLL_API_URL` nor `--api` names one: the only login's
+/// URL, else the one last signed in to or picked (said on stderr), else the one picked here in a
+/// terminal. `None` with no login (the local default then). Whichever it is, only that URL's own
+/// token goes with the command: tokens are kept, and looked up, by the URL that issued them.
+pub fn chosen() -> anyhow::Result<Option<String>> {
+    let Ok(all) = load() else { return Ok(None) };
+    let mut newest: Vec<(&String, &Saved)> = all.iter().collect();
+    newest.sort_by_key(|(_, s)| std::cmp::Reverse(s.used_at));
+    match newest.as_slice() {
+        [] => Ok(None),
+        [(url, _)] => Ok(Some(url.to_string())),
+        [(url, a), (_, b), ..] if a.used_at > b.used_at => {
+            eprintln!("note: using {url}, your last roll login of {} (ROLL_API_URL or `roll login <url>` picks another)", all.len());
+            Ok(Some(url.to_string()))
+        }
+        _ => {
+            use std::io::IsTerminal;
+            let urls: Vec<&String> = all.keys().collect();
+            if !(std::io::stdin().is_terminal() && std::io::stderr().is_terminal()) {
+                bail!("you're signed in to {} rolls ({}): set ROLL_API_URL to the one this command is for", urls.len(), urls.iter().map(|u| u.as_str()).collect::<Vec<_>>().join(", "));
+            }
+            eprintln!("You're signed in to {} rolls. Which one is this for?", urls.len());
+            for (i, u) in urls.iter().enumerate() {
+                eprintln!("  {}) {u}", i + 1);
+            }
+            eprint!("Number (it's remembered; ROLL_API_URL picks another): ");
+            let mut line = String::new();
+            std::io::stdin().read_line(&mut line)?;
+            let url = line.trim().parse::<usize>().ok().and_then(|n| urls.get(n.wrapping_sub(1))).with_context(|| format!("{:?} isn't one of 1 to {}", line.trim(), urls.len()))?.to_string();
+            let _lock = Lock::take()?;
+            let mut all = load()?;
+            if let Some(s) = all.get_mut(&url) {
+                s.used_at = now_ms();
+                save(&all)?;
+            }
+            Ok(Some(url))
+        }
+    }
 }
 
 /// Where this API's login is kept, when there is one (for `roll token whoami`).
@@ -301,6 +348,7 @@ fn saved(v: &Value, client_id: String, server: &Server) -> anyhow::Result<Saved>
         expires_at: now_ms() + v["expires_in"].as_i64().unwrap_or(3600) * 1000,
         token_endpoint: server.token.clone(),
         revocation_endpoint: server.revocation.clone(),
+        used_at: now_ms(),
     })
 }
 
@@ -498,7 +546,7 @@ async fn finish(api: &str, http: &reqwest::Client, json_out: bool, saved: Saved)
     if g["pending"] == true {
         println!("It waits for an admin's approval (they're mailed): commands work once one approves it.");
     }
-    println!("Commands use it when ROLL_TOKEN, ROLL_IDENTITY and ROLL_ADMIN_TOKEN aren't set. `roll logout` ends it.");
+    println!("Commands use it when ROLL_TOKEN, ROLL_IDENTITY and ROLL_ADMIN_TOKEN aren't set, and go to {api} when ROLL_API_URL isn't. `roll logout` ends it.");
     Ok(())
 }
 
