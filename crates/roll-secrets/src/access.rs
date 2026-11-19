@@ -95,6 +95,12 @@ pub trait Grants: Send + Sync + std::fmt::Debug {
     fn everything(&self) -> bool {
         false
     }
+    /// Whether the caller may `action` encryption key `name` of `project` (roll-access's rules
+    /// can name one key: `{id: "prj_…", index: "<name>"}`). Others answer for the whole project.
+    fn reaches_key(&self, action: Action, project: &str, name: &str) -> bool {
+        let _ = name;
+        self.allows(action, &Scope::project(project))
+    }
 }
 
 /// A signed-in person who isn't an admin (docs/accounts.md): everything on the projects they own,
@@ -241,6 +247,17 @@ pub fn rule(project: &str, environments: Option<Vec<String>>, paths: Option<Vec<
     }
 }
 
+fn scope_action(action: Action) -> roll_auth::scope::Action {
+    use roll_auth::scope;
+    match action {
+        Action::Read => scope::Action::Read,
+        Action::Reveal => scope::Action::Reveal,
+        Action::Write => scope::Action::Write,
+        Action::Delete => scope::Action::Delete,
+        Action::Admin => scope::Action::Admin,
+    }
+}
+
 /// Whether grant `g` stays inside `project`: every rule, of any product, names only this project
 /// (`{project}`, or secrets' own `{id}`, which is the project's id), never `*` or another project,
 /// and nothing it isn't allowed asks a person instead (`ask_otherwise`). Read from the rules as
@@ -272,6 +289,17 @@ pub trait Workloads: Send + Sync {
     fn grants(&self) -> crate::Result<Vec<roll_auth::Grant>> {
         Ok(vec![])
     }
+    /// A long-lived roll token with `rule`, made for the request `ext` belongs to as `POST
+    /// /v1/access/tokens` makes one (its owner the caller; a gateway's). Blocking.
+    fn token(&self, ext: &axum::http::Extensions, name: &str, rule: roll_auth::scope::Rule) -> crate::Result<Minted> {
+        let _ = (ext, name, rule);
+        Err(crate::Error::BadRequest("roll tokens aren't on this server".into()))
+    }
+    /// Revoke a token [`Workloads::token`] made, saying why. Blocking.
+    fn revoke_token(&self, id: &str, why: &str) -> crate::Result<()> {
+        let _ = (id, why);
+        Ok(())
+    }
     /// Revoke these grants at once, with why and who (an incident's cut-off: rolld calls
     /// `Access::revoke_many`). All or none: an id roll-access doesn't know refuses the lot. At most
     /// [`REVOKE_MAX`] ids. Blocking.
@@ -297,13 +325,7 @@ pub struct GrantGrants(pub roll_auth::Grant);
 impl Grants for GrantGrants {
     fn allows(&self, action: Action, at: &Scope<'_>) -> bool {
         use roll_auth::scope;
-        let action = match action {
-            Action::Read => scope::Action::Read,
-            Action::Reveal => scope::Action::Reveal,
-            Action::Write => scope::Action::Write,
-            Action::Delete => scope::Action::Delete,
-            Action::Admin => scope::Action::Admin,
-        };
+        let action = scope_action(action);
         // A project-wide read that answers per environment and folder (its environments' names,
         // health, findings, the audit log) answers only what the grant reaches in each: a rule
         // limited to some of them takes part in it, as roll-access's `filters_itself` routes do.
@@ -315,6 +337,13 @@ impl Grants for GrantGrants {
         let r = scope::Resource { product: "secrets".into(), id: Some(at.project.into()), project: Some(at.project.into()), environment: at.env.map(Into::into), path: at.path.map(Into::into), filters_itself: filtered, ..Default::default() };
         // `ask` pauses a whole request at the gate; inside the product it's a no.
         self.0.allows(&r, action) == scope::Outcome::Allow
+    }
+
+    /// One key, as rolld's gate judges a request naming it (the project's id, the key as its index).
+    fn reaches_key(&self, action: Action, project: &str, name: &str) -> bool {
+        use roll_auth::scope;
+        let r = scope::Resource { product: "secrets".into(), id: Some(project.into()), project: Some(project.into()), index: Some(name.into()), ..Default::default() };
+        self.allows(action, &Scope::project(project)) || self.0.allows(&r, scope_action(action)) == scope::Outcome::Allow
     }
 
     /// Code read on the repository, as it sits on `project`'s canvas.
@@ -451,6 +480,15 @@ impl Caller {
 
     pub fn allows(&self, action: Action, at: &Scope<'_>) -> bool {
         self.grants.allows(action, at)
+    }
+
+    /// As [`Caller::need`], for encryption key `name` of `project`: a grant limited to that key
+    /// reaches it too.
+    pub fn need_key(&self, action: Action, project: &str, name: &str) -> crate::Result<()> {
+        if self.grants.reaches_key(action, project, name) {
+            return Ok(());
+        }
+        self.need(action, &Scope::project(project))
     }
 
     pub fn need(&self, action: Action, at: &Scope<'_>) -> crate::Result<()> {

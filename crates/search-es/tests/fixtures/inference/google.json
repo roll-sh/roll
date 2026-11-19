@@ -1,0 +1,1871 @@
+[
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-vx",
+  "body": "{\"service\":\"googlevertexai\",\"service_settings\":{\"service_account_json\":$SA,\"project_id\":\"rinf-proj\",\"location\":\"us-central1\",\"model_id\":\"text-embedding-005\"}}",
+  "status": 200,
+  "answer": "{\"inference_id\":\"fx-vx\",\"task_type\":\"text_embedding\",\"service\":\"googlevertexai\",\"service_settings\":{\"location\":\"us-central1\",\"project_id\":\"rinf-proj\",\"model_id\":\"text-embedding-005\",\"dimensions\":4,\"similarity\":\"dot_product\",\"rate_limit\":{\"requests_per_minute\":30000}},\"chunking_settings\":{\"strategy\":\"sentence\",\"max_chunk_size\":250,\"sentence_overlap\":1}}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/token",
+    "headers": [
+     [
+      "Content-Type",
+      "application/x-www-form-urlencoded; charset=UTF-8"
+     ],
+     [
+      "Accept",
+      "*/*"
+     ]
+    ],
+    "body": "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=eyJhbGciOiJSUzI1NiIsImtpZCI6ImFiYzEyMyIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJodHRwczovL29hdXRoMi5nb29nbGVhcGlzLmNvbS90b2tlbiIsImV4cCI6MTc5NDk2ODg1OCwiaWF0IjoxNzk0OTY1MjU4LCJpc3MiOiJyaW5mQHJpbmYtcHJvai5pYW0uZ3NlcnZpY2VhY2NvdW50LmNvbSIsInNjb3BlIjoiaHR0cHM6Ly93d3cuZ29vZ2xlYXBpcy5jb20vYXV0aC9jbG91ZC1wbGF0Zm9ybSJ9.dFAzilYTumBVcL4XINMeJj-oMjLZraQYXmWd3weGQgTnBv4tqg6OVmfC0e7D_t3nk9cubN9G2WR8cyxT0CYVpm6Yu3CEnUgV41sB-wPTYdJjewJHLbHTpwcTKWyidA32U2bONPOuKG5Z_R2dUiOr8L-OR4GkSJq6kUOLJ0yniOjjrivTAsHXeOLecQz6MK55kCe9jHcHUfYFxaNa2RxOxVMFHBy-URtZXj_Z5ujhLv3UX-nvBsGSUB506kyiyysaNLEcO5cO0eVECuwAwJI9s6FGtGqf3B--yl9Eon376hQ1UKcLT8w4K3wQ-bZ3JXXKwWufJm4VJXU3awF35LQYDQ",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"access_token\": \"ya29.mock-token\", \"expires_in\": 3599, \"token_type\": \"Bearer\"}"
+    }
+   },
+   {
+    "method": "POST",
+    "path": "/v1/projects/rinf-proj/locations/us-central1/publishers/google/models/text-embedding-005:predict",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer ya29.mock-token"
+     ]
+    ],
+    "body": "{\"instances\":[{\"content\":\"how big\",\"task_type\":\"RETRIEVAL_DOCUMENT\"}],\"parameters\":{}}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"predictions\": [{\"embeddings\": {\"values\": [0.427835, 0.35567, 0.283505, 0.21134], \"statistics\": {\"token_count\": 3, \"truncated\": false}}}]}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "GET",
+  "path": "/_inference/fx-vx",
+  "body": null,
+  "status": 200,
+  "answer": "{\"endpoints\":[{\"inference_id\":\"fx-vx\",\"task_type\":\"text_embedding\",\"service\":\"googlevertexai\",\"service_settings\":{\"location\":\"us-central1\",\"project_id\":\"rinf-proj\",\"model_id\":\"text-embedding-005\",\"dimensions\":4,\"similarity\":\"dot_product\",\"rate_limit\":{\"requests_per_minute\":30000}},\"chunking_settings\":{\"strategy\":\"sentence\",\"max_chunk_size\":250,\"sentence_overlap\":1}}]}",
+  "upstream": []
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/text_embedding/fx-vx",
+  "body": "{\"input\":[\"hello world\",\"second\"]}",
+  "status": 200,
+  "answer": "{\"text_embedding\":[{\"embedding\":[0.005155,-0.489691,0.015464,-0.479381]},{\"embedding\":[0.056701,-0.386598,0.170103,-0.273196]}]}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/token",
+    "headers": [
+     [
+      "Content-Type",
+      "application/x-www-form-urlencoded; charset=UTF-8"
+     ],
+     [
+      "Accept",
+      "*/*"
+     ]
+    ],
+    "body": "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=eyJhbGciOiJSUzI1NiIsImtpZCI6ImFiYzEyMyIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJodHRwczovL29hdXRoMi5nb29nbGVhcGlzLmNvbS90b2tlbiIsImV4cCI6MTc5NDk2ODg1OSwiaWF0IjoxNzk0OTY1MjU5LCJpc3MiOiJyaW5mQHJpbmYtcHJvai5pYW0uZ3NlcnZpY2VhY2NvdW50LmNvbSIsInNjb3BlIjoiaHR0cHM6Ly93d3cuZ29vZ2xlYXBpcy5jb20vYXV0aC9jbG91ZC1wbGF0Zm9ybSJ9.I8Fl7SiYcDjxdDuG88ascmMOdVupluP8K3YRWeOzpntkEuSJyohMGcNPG4LSOE4sEo-6H0sxUisbrWuvojx_I-h1blGFPpUotwgBqBhsF7wl33j6Ev7i9MwAbZLKZXL1ff5fECFkPCfYZBYC0vQzxRIDWuTJmxrdu37y6meIVKgluLJriBmAmrQc8Ek0fMSQCr-WJejF0fMdrmEMKjPCYbJMRcRsYJnhXA8uxiWC-fuhA5mWxzZKRdvZ5l8LNPvXI7W_Pw_3J22wjVAH-pNfAYppSTW2QQvpDiQ3MizKnS65Sh354do79ufH89p4gesW1eBVGBsbqQ0vnHJOe69bbQ",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"access_token\": \"ya29.mock-token\", \"expires_in\": 3599, \"token_type\": \"Bearer\"}"
+    }
+   },
+   {
+    "method": "POST",
+    "path": "/v1/projects/rinf-proj/locations/us-central1/publishers/google/models/text-embedding-005:predict",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer ya29.mock-token"
+     ]
+    ],
+    "body": "{\"instances\":[{\"content\":\"hello world\"},{\"content\":\"second\"}],\"parameters\":{}}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"predictions\": [{\"embeddings\": {\"values\": [0.005155, -0.489691, 0.015464, -0.479381], \"statistics\": {\"token_count\": 3, \"truncated\": false}}}, {\"embeddings\": {\"values\": [0.056701, -0.386598, 0.170103, -0.273196], \"statistics\": {\"token_count\": 3, \"truncated\": false}}}]}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/text_embedding/fx-vx",
+  "body": "{\"input\":\"q\",\"input_type\":\"search\"}",
+  "status": 200,
+  "answer": "{\"text_embedding\":[{\"embedding\":[-0.335052,-0.170103,-0.005155,0.159794]}]}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/token",
+    "headers": [
+     [
+      "Content-Type",
+      "application/x-www-form-urlencoded; charset=UTF-8"
+     ],
+     [
+      "Accept",
+      "*/*"
+     ]
+    ],
+    "body": "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=eyJhbGciOiJSUzI1NiIsImtpZCI6ImFiYzEyMyIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJodHRwczovL29hdXRoMi5nb29nbGVhcGlzLmNvbS90b2tlbiIsImV4cCI6MTc5NDk2ODg1OSwiaWF0IjoxNzk0OTY1MjU5LCJpc3MiOiJyaW5mQHJpbmYtcHJvai5pYW0uZ3NlcnZpY2VhY2NvdW50LmNvbSIsInNjb3BlIjoiaHR0cHM6Ly93d3cuZ29vZ2xlYXBpcy5jb20vYXV0aC9jbG91ZC1wbGF0Zm9ybSJ9.I8Fl7SiYcDjxdDuG88ascmMOdVupluP8K3YRWeOzpntkEuSJyohMGcNPG4LSOE4sEo-6H0sxUisbrWuvojx_I-h1blGFPpUotwgBqBhsF7wl33j6Ev7i9MwAbZLKZXL1ff5fECFkPCfYZBYC0vQzxRIDWuTJmxrdu37y6meIVKgluLJriBmAmrQc8Ek0fMSQCr-WJejF0fMdrmEMKjPCYbJMRcRsYJnhXA8uxiWC-fuhA5mWxzZKRdvZ5l8LNPvXI7W_Pw_3J22wjVAH-pNfAYppSTW2QQvpDiQ3MizKnS65Sh354do79ufH89p4gesW1eBVGBsbqQ0vnHJOe69bbQ",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"access_token\": \"ya29.mock-token\", \"expires_in\": 3599, \"token_type\": \"Bearer\"}"
+    }
+   },
+   {
+    "method": "POST",
+    "path": "/v1/projects/rinf-proj/locations/us-central1/publishers/google/models/text-embedding-005:predict",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer ya29.mock-token"
+     ]
+    ],
+    "body": "{\"instances\":[{\"content\":\"q\",\"task_type\":\"RETRIEVAL_QUERY\"}],\"parameters\":{}}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"predictions\": [{\"embeddings\": {\"values\": [-0.335052, -0.170103, -0.005155, 0.159794], \"statistics\": {\"token_count\": 3, \"truncated\": false}}}]}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/text_embedding/fx-vx",
+  "body": "{\"input\":\"q\",\"task_settings\":{\"auto_truncate\":true}}",
+  "status": 200,
+  "answer": "{\"text_embedding\":[{\"embedding\":[-0.335052,-0.170103,-0.005155,0.159794]}]}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/token",
+    "headers": [
+     [
+      "Content-Type",
+      "application/x-www-form-urlencoded; charset=UTF-8"
+     ],
+     [
+      "Accept",
+      "*/*"
+     ]
+    ],
+    "body": "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=eyJhbGciOiJSUzI1NiIsImtpZCI6ImFiYzEyMyIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJodHRwczovL29hdXRoMi5nb29nbGVhcGlzLmNvbS90b2tlbiIsImV4cCI6MTc5NDk2ODg1OSwiaWF0IjoxNzk0OTY1MjU5LCJpc3MiOiJyaW5mQHJpbmYtcHJvai5pYW0uZ3NlcnZpY2VhY2NvdW50LmNvbSIsInNjb3BlIjoiaHR0cHM6Ly93d3cuZ29vZ2xlYXBpcy5jb20vYXV0aC9jbG91ZC1wbGF0Zm9ybSJ9.I8Fl7SiYcDjxdDuG88ascmMOdVupluP8K3YRWeOzpntkEuSJyohMGcNPG4LSOE4sEo-6H0sxUisbrWuvojx_I-h1blGFPpUotwgBqBhsF7wl33j6Ev7i9MwAbZLKZXL1ff5fECFkPCfYZBYC0vQzxRIDWuTJmxrdu37y6meIVKgluLJriBmAmrQc8Ek0fMSQCr-WJejF0fMdrmEMKjPCYbJMRcRsYJnhXA8uxiWC-fuhA5mWxzZKRdvZ5l8LNPvXI7W_Pw_3J22wjVAH-pNfAYppSTW2QQvpDiQ3MizKnS65Sh354do79ufH89p4gesW1eBVGBsbqQ0vnHJOe69bbQ",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"access_token\": \"ya29.mock-token\", \"expires_in\": 3599, \"token_type\": \"Bearer\"}"
+    }
+   },
+   {
+    "method": "POST",
+    "path": "/v1/projects/rinf-proj/locations/us-central1/publishers/google/models/text-embedding-005:predict",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer ya29.mock-token"
+     ]
+    ],
+    "body": "{\"instances\":[{\"content\":\"q\"}],\"parameters\":{\"autoTruncate\":true}}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"predictions\": [{\"embeddings\": {\"values\": [-0.335052, -0.170103, -0.005155, 0.159794], \"statistics\": {\"token_count\": 3, \"truncated\": false}}}]}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-vx2",
+  "body": "{\"service\":\"googlevertexai\",\"service_settings\":{\"service_account_json\":$SA,\"project_id\":\"rinf-proj\",\"location\":\"europe-west1\",\"model_id\":\"gemini-embedding-001\",\"dimensions\":3,\"similarity\":\"cosine\",\"max_input_tokens\":256,\"rate_limit\":{\"requests_per_minute\":10},\"dimensions_set_by_user\":true},\"task_settings\":{\"auto_truncate\":false,\"input_type\":\"clustering\"}}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"validation_exception\",\"reason\":\"Validation Failed: 1: [service_settings] does not allow the setting [dimensions_set_by_user];\"}],\"type\":\"validation_exception\",\"reason\":\"Validation Failed: 1: [service_settings] does not allow the setting [dimensions_set_by_user];\"},\"status\":400}",
+  "upstream": []
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-vx2",
+  "body": "{\"service\":\"googlevertexai\",\"service_settings\":{\"service_account_json\":$SA,\"project_id\":\"rinf-proj\",\"location\":\"europe-west1\",\"model_id\":\"gemini-embedding-001\",\"dimensions\":3,\"similarity\":\"cosine\",\"max_input_tokens\":256,\"rate_limit\":{\"requests_per_minute\":10}},\"task_settings\":{\"auto_truncate\":false,\"input_type\":\"clustering\"}}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"status_exception\",\"reason\":\"The retrieved embeddings size [4] does not match the size specified in the settings [3]. Please recreate the [fx-vx2] configuration with the correct dimensions\"}],\"type\":\"status_exception\",\"reason\":\"The retrieved embeddings size [4] does not match the size specified in the settings [3]. Please recreate the [fx-vx2] configuration with the correct dimensions\"},\"status\":400}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/token",
+    "headers": [
+     [
+      "Content-Type",
+      "application/x-www-form-urlencoded; charset=UTF-8"
+     ],
+     [
+      "Accept",
+      "*/*"
+     ]
+    ],
+    "body": "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=eyJhbGciOiJSUzI1NiIsImtpZCI6ImFiYzEyMyIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJodHRwczovL29hdXRoMi5nb29nbGVhcGlzLmNvbS90b2tlbiIsImV4cCI6MTc5NDk2ODg1OSwiaWF0IjoxNzk0OTY1MjU5LCJpc3MiOiJyaW5mQHJpbmYtcHJvai5pYW0uZ3NlcnZpY2VhY2NvdW50LmNvbSIsInNjb3BlIjoiaHR0cHM6Ly93d3cuZ29vZ2xlYXBpcy5jb20vYXV0aC9jbG91ZC1wbGF0Zm9ybSJ9.I8Fl7SiYcDjxdDuG88ascmMOdVupluP8K3YRWeOzpntkEuSJyohMGcNPG4LSOE4sEo-6H0sxUisbrWuvojx_I-h1blGFPpUotwgBqBhsF7wl33j6Ev7i9MwAbZLKZXL1ff5fECFkPCfYZBYC0vQzxRIDWuTJmxrdu37y6meIVKgluLJriBmAmrQc8Ek0fMSQCr-WJejF0fMdrmEMKjPCYbJMRcRsYJnhXA8uxiWC-fuhA5mWxzZKRdvZ5l8LNPvXI7W_Pw_3J22wjVAH-pNfAYppSTW2QQvpDiQ3MizKnS65Sh354do79ufH89p4gesW1eBVGBsbqQ0vnHJOe69bbQ",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"access_token\": \"ya29.mock-token\", \"expires_in\": 3599, \"token_type\": \"Bearer\"}"
+    }
+   },
+   {
+    "method": "POST",
+    "path": "/v1/projects/rinf-proj/locations/europe-west1/publishers/google/models/gemini-embedding-001:predict",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer ya29.mock-token"
+     ]
+    ],
+    "body": "{\"instances\":[{\"content\":\"how big\",\"task_type\":\"RETRIEVAL_DOCUMENT\"}],\"parameters\":{\"autoTruncate\":false,\"outputDimensionality\":3}}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"predictions\": [{\"embeddings\": {\"values\": [0.427835, 0.35567, 0.283505, 0.21134], \"statistics\": {\"token_count\": 3, \"truncated\": false}}}]}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "GET",
+  "path": "/_inference/fx-vx2",
+  "body": null,
+  "status": 404,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"resource_not_found_exception\",\"reason\":\"Inference endpoint not found [fx-vx2]\"}],\"type\":\"resource_not_found_exception\",\"reason\":\"Inference endpoint not found [fx-vx2]\"},\"status\":404}",
+  "upstream": []
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/fx-vx2",
+  "body": "{\"input\":\"z\"}",
+  "status": 404,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"resource_not_found_exception\",\"reason\":\"Inference endpoint not found [fx-vx2]\"}],\"type\":\"resource_not_found_exception\",\"reason\":\"Inference endpoint not found [fx-vx2]\"},\"status\":404}",
+  "upstream": []
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/rerank/fx-vxr",
+  "body": "{\"service\":\"googlevertexai\",\"service_settings\":{\"service_account_json\":$SA,\"project_id\":\"rinf-proj\"}}",
+  "status": 200,
+  "answer": "{\"inference_id\":\"fx-vxr\",\"task_type\":\"rerank\",\"service\":\"googlevertexai\",\"service_settings\":{\"project_id\":\"rinf-proj\",\"rate_limit\":{\"requests_per_minute\":300}}}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/token",
+    "headers": [
+     [
+      "Content-Type",
+      "application/x-www-form-urlencoded; charset=UTF-8"
+     ],
+     [
+      "Accept",
+      "*/*"
+     ]
+    ],
+    "body": "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=eyJhbGciOiJSUzI1NiIsImtpZCI6ImFiYzEyMyIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJodHRwczovL29hdXRoMi5nb29nbGVhcGlzLmNvbS90b2tlbiIsImV4cCI6MTc5NDk2ODg1OSwiaWF0IjoxNzk0OTY1MjU5LCJpc3MiOiJyaW5mQHJpbmYtcHJvai5pYW0uZ3NlcnZpY2VhY2NvdW50LmNvbSIsInNjb3BlIjoiaHR0cHM6Ly93d3cuZ29vZ2xlYXBpcy5jb20vYXV0aC9jbG91ZC1wbGF0Zm9ybSJ9.I8Fl7SiYcDjxdDuG88ascmMOdVupluP8K3YRWeOzpntkEuSJyohMGcNPG4LSOE4sEo-6H0sxUisbrWuvojx_I-h1blGFPpUotwgBqBhsF7wl33j6Ev7i9MwAbZLKZXL1ff5fECFkPCfYZBYC0vQzxRIDWuTJmxrdu37y6meIVKgluLJriBmAmrQc8Ek0fMSQCr-WJejF0fMdrmEMKjPCYbJMRcRsYJnhXA8uxiWC-fuhA5mWxzZKRdvZ5l8LNPvXI7W_Pw_3J22wjVAH-pNfAYppSTW2QQvpDiQ3MizKnS65Sh354do79ufH89p4gesW1eBVGBsbqQ0vnHJOe69bbQ",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"access_token\": \"ya29.mock-token\", \"expires_in\": 3599, \"token_type\": \"Bearer\"}"
+    }
+   },
+   {
+    "method": "POST",
+    "path": "/v1/projects/rinf-proj/locations/global/rankingConfigs/default_ranking_config:rank",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer ya29.mock-token"
+     ]
+    ],
+    "body": "{\"query\":\"test query\",\"records\":[{\"id\":\"0\",\"content\":\"how big\"}]}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"records\": [{\"id\": \"0\", \"score\": 0.333333, \"content\": \"how big\"}]}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "GET",
+  "path": "/_inference/fx-vxr",
+  "body": null,
+  "status": 200,
+  "answer": "{\"endpoints\":[{\"inference_id\":\"fx-vxr\",\"task_type\":\"rerank\",\"service\":\"googlevertexai\",\"service_settings\":{\"project_id\":\"rinf-proj\",\"rate_limit\":{\"requests_per_minute\":300}}}]}",
+  "upstream": []
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/rerank/fx-vxr",
+  "body": "{\"input\":[\"a\",\"bb\",\"ccc\"],\"query\":\"q\"}",
+  "status": 200,
+  "answer": "{\"rerank\":[{\"index\":0,\"relevance_score\":0.5,\"text\":\"a\"},{\"index\":1,\"relevance_score\":0.25,\"text\":\"bb\"},{\"index\":2,\"relevance_score\":0.166667,\"text\":\"ccc\"}]}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/token",
+    "headers": [
+     [
+      "Content-Type",
+      "application/x-www-form-urlencoded; charset=UTF-8"
+     ],
+     [
+      "Accept",
+      "*/*"
+     ]
+    ],
+    "body": "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=eyJhbGciOiJSUzI1NiIsImtpZCI6ImFiYzEyMyIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJodHRwczovL29hdXRoMi5nb29nbGVhcGlzLmNvbS90b2tlbiIsImV4cCI6MTc5NDk2ODg1OSwiaWF0IjoxNzk0OTY1MjU5LCJpc3MiOiJyaW5mQHJpbmYtcHJvai5pYW0uZ3NlcnZpY2VhY2NvdW50LmNvbSIsInNjb3BlIjoiaHR0cHM6Ly93d3cuZ29vZ2xlYXBpcy5jb20vYXV0aC9jbG91ZC1wbGF0Zm9ybSJ9.I8Fl7SiYcDjxdDuG88ascmMOdVupluP8K3YRWeOzpntkEuSJyohMGcNPG4LSOE4sEo-6H0sxUisbrWuvojx_I-h1blGFPpUotwgBqBhsF7wl33j6Ev7i9MwAbZLKZXL1ff5fECFkPCfYZBYC0vQzxRIDWuTJmxrdu37y6meIVKgluLJriBmAmrQc8Ek0fMSQCr-WJejF0fMdrmEMKjPCYbJMRcRsYJnhXA8uxiWC-fuhA5mWxzZKRdvZ5l8LNPvXI7W_Pw_3J22wjVAH-pNfAYppSTW2QQvpDiQ3MizKnS65Sh354do79ufH89p4gesW1eBVGBsbqQ0vnHJOe69bbQ",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"access_token\": \"ya29.mock-token\", \"expires_in\": 3599, \"token_type\": \"Bearer\"}"
+    }
+   },
+   {
+    "method": "POST",
+    "path": "/v1/projects/rinf-proj/locations/global/rankingConfigs/default_ranking_config:rank",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer ya29.mock-token"
+     ]
+    ],
+    "body": "{\"query\":\"q\",\"records\":[{\"id\":\"0\",\"content\":\"a\"},{\"id\":\"1\",\"content\":\"bb\"},{\"id\":\"2\",\"content\":\"ccc\"}]}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"records\": [{\"id\": \"0\", \"score\": 0.5, \"content\": \"a\"}, {\"id\": \"1\", \"score\": 0.25, \"content\": \"bb\"}, {\"id\": \"2\", \"score\": 0.166667, \"content\": \"ccc\"}]}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/rerank/fx-vxr",
+  "body": "{\"input\":[\"a\",\"bb\",\"ccc\"],\"query\":\"q\",\"top_n\":1,\"return_documents\":false}",
+  "status": 200,
+  "answer": "{\"rerank\":[{\"index\":0,\"relevance_score\":0.5}]}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/token",
+    "headers": [
+     [
+      "Content-Type",
+      "application/x-www-form-urlencoded; charset=UTF-8"
+     ],
+     [
+      "Accept",
+      "*/*"
+     ]
+    ],
+    "body": "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=eyJhbGciOiJSUzI1NiIsImtpZCI6ImFiYzEyMyIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJodHRwczovL29hdXRoMi5nb29nbGVhcGlzLmNvbS90b2tlbiIsImV4cCI6MTc5NDk2ODg1OSwiaWF0IjoxNzk0OTY1MjU5LCJpc3MiOiJyaW5mQHJpbmYtcHJvai5pYW0uZ3NlcnZpY2VhY2NvdW50LmNvbSIsInNjb3BlIjoiaHR0cHM6Ly93d3cuZ29vZ2xlYXBpcy5jb20vYXV0aC9jbG91ZC1wbGF0Zm9ybSJ9.I8Fl7SiYcDjxdDuG88ascmMOdVupluP8K3YRWeOzpntkEuSJyohMGcNPG4LSOE4sEo-6H0sxUisbrWuvojx_I-h1blGFPpUotwgBqBhsF7wl33j6Ev7i9MwAbZLKZXL1ff5fECFkPCfYZBYC0vQzxRIDWuTJmxrdu37y6meIVKgluLJriBmAmrQc8Ek0fMSQCr-WJejF0fMdrmEMKjPCYbJMRcRsYJnhXA8uxiWC-fuhA5mWxzZKRdvZ5l8LNPvXI7W_Pw_3J22wjVAH-pNfAYppSTW2QQvpDiQ3MizKnS65Sh354do79ufH89p4gesW1eBVGBsbqQ0vnHJOe69bbQ",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"access_token\": \"ya29.mock-token\", \"expires_in\": 3599, \"token_type\": \"Bearer\"}"
+    }
+   },
+   {
+    "method": "POST",
+    "path": "/v1/projects/rinf-proj/locations/global/rankingConfigs/default_ranking_config:rank",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer ya29.mock-token"
+     ]
+    ],
+    "body": "{\"query\":\"q\",\"records\":[{\"id\":\"0\",\"content\":\"a\"},{\"id\":\"1\",\"content\":\"bb\"},{\"id\":\"2\",\"content\":\"ccc\"}],\"topN\":1,\"ignoreRecordDetailsInResponse\":true}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"records\": [{\"id\": \"0\", \"score\": 0.5}]}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/rerank/fx-vxr2",
+  "body": "{\"service\":\"googlevertexai\",\"service_settings\":{\"service_account_json\":$SA,\"project_id\":\"rinf-proj\",\"model_id\":\"semantic-ranker-512@latest\"},\"task_settings\":{\"top_n\":2}}",
+  "status": 200,
+  "answer": "{\"inference_id\":\"fx-vxr2\",\"task_type\":\"rerank\",\"service\":\"googlevertexai\",\"service_settings\":{\"project_id\":\"rinf-proj\",\"model_id\":\"semantic-ranker-512@latest\",\"rate_limit\":{\"requests_per_minute\":300}},\"task_settings\":{\"top_n\":2}}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/token",
+    "headers": [
+     [
+      "Content-Type",
+      "application/x-www-form-urlencoded; charset=UTF-8"
+     ],
+     [
+      "Accept",
+      "*/*"
+     ]
+    ],
+    "body": "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=eyJhbGciOiJSUzI1NiIsImtpZCI6ImFiYzEyMyIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJodHRwczovL29hdXRoMi5nb29nbGVhcGlzLmNvbS90b2tlbiIsImV4cCI6MTc5NDk2ODg1OSwiaWF0IjoxNzk0OTY1MjU5LCJpc3MiOiJyaW5mQHJpbmYtcHJvai5pYW0uZ3NlcnZpY2VhY2NvdW50LmNvbSIsInNjb3BlIjoiaHR0cHM6Ly93d3cuZ29vZ2xlYXBpcy5jb20vYXV0aC9jbG91ZC1wbGF0Zm9ybSJ9.I8Fl7SiYcDjxdDuG88ascmMOdVupluP8K3YRWeOzpntkEuSJyohMGcNPG4LSOE4sEo-6H0sxUisbrWuvojx_I-h1blGFPpUotwgBqBhsF7wl33j6Ev7i9MwAbZLKZXL1ff5fECFkPCfYZBYC0vQzxRIDWuTJmxrdu37y6meIVKgluLJriBmAmrQc8Ek0fMSQCr-WJejF0fMdrmEMKjPCYbJMRcRsYJnhXA8uxiWC-fuhA5mWxzZKRdvZ5l8LNPvXI7W_Pw_3J22wjVAH-pNfAYppSTW2QQvpDiQ3MizKnS65Sh354do79ufH89p4gesW1eBVGBsbqQ0vnHJOe69bbQ",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"access_token\": \"ya29.mock-token\", \"expires_in\": 3599, \"token_type\": \"Bearer\"}"
+    }
+   },
+   {
+    "method": "POST",
+    "path": "/v1/projects/rinf-proj/locations/global/rankingConfigs/default_ranking_config:rank",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer ya29.mock-token"
+     ]
+    ],
+    "body": "{\"model\":\"semantic-ranker-512@latest\",\"query\":\"test query\",\"records\":[{\"id\":\"0\",\"content\":\"how big\"}],\"topN\":2}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"records\": [{\"id\": \"0\", \"score\": 0.333333, \"content\": \"how big\"}]}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "GET",
+  "path": "/_inference/fx-vxr2",
+  "body": null,
+  "status": 200,
+  "answer": "{\"endpoints\":[{\"inference_id\":\"fx-vxr2\",\"task_type\":\"rerank\",\"service\":\"googlevertexai\",\"service_settings\":{\"project_id\":\"rinf-proj\",\"model_id\":\"semantic-ranker-512@latest\",\"rate_limit\":{\"requests_per_minute\":300}},\"task_settings\":{\"top_n\":2}}]}",
+  "upstream": []
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/rerank/fx-vxr2",
+  "body": "{\"input\":[\"a\",\"bb\",\"ccc\"],\"query\":\"q\"}",
+  "status": 200,
+  "answer": "{\"rerank\":[{\"index\":0,\"relevance_score\":0.5,\"text\":\"a\"},{\"index\":1,\"relevance_score\":0.25,\"text\":\"bb\"}]}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/token",
+    "headers": [
+     [
+      "Content-Type",
+      "application/x-www-form-urlencoded; charset=UTF-8"
+     ],
+     [
+      "Accept",
+      "*/*"
+     ]
+    ],
+    "body": "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=eyJhbGciOiJSUzI1NiIsImtpZCI6ImFiYzEyMyIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJodHRwczovL29hdXRoMi5nb29nbGVhcGlzLmNvbS90b2tlbiIsImV4cCI6MTc5NDk2ODg2MCwiaWF0IjoxNzk0OTY1MjYwLCJpc3MiOiJyaW5mQHJpbmYtcHJvai5pYW0uZ3NlcnZpY2VhY2NvdW50LmNvbSIsInNjb3BlIjoiaHR0cHM6Ly93d3cuZ29vZ2xlYXBpcy5jb20vYXV0aC9jbG91ZC1wbGF0Zm9ybSJ9.SDIK5Mfz20oftVh5G261UUy-Uuq8P-s7Diuifta9qBssFuIfnkNl87rsQpfSSRQv5jrkOTmlpfRkK1lLrTeZekb0KuD3npp4jJUhHrjubvdj5USQCIPtOuW0QMZe5HguEj3Qd1jcS4P5UPSQVtUnm6NBdHklGKfBr5GcUD4sCNF1l19xasKVh8K30aVUnDZ6OD7zs9f6vtA33_GH-cq9WogrdOLzltC2EN365TT04f0-Bx6cvuauc94Uo1SL7ZJzWeha-Vw-U9tsRoa7qD-9qVy3-vh_SJinn35I4YdR-s7RM1Nw3Az99UtufRunYCREUdl9CAErFWyA958qQdaAfw",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"access_token\": \"ya29.mock-token\", \"expires_in\": 3599, \"token_type\": \"Bearer\"}"
+    }
+   },
+   {
+    "method": "POST",
+    "path": "/v1/projects/rinf-proj/locations/global/rankingConfigs/default_ranking_config:rank",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer ya29.mock-token"
+     ]
+    ],
+    "body": "{\"model\":\"semantic-ranker-512@latest\",\"query\":\"q\",\"records\":[{\"id\":\"0\",\"content\":\"a\"},{\"id\":\"1\",\"content\":\"bb\"},{\"id\":\"2\",\"content\":\"ccc\"}],\"topN\":2}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"records\": [{\"id\": \"0\", \"score\": 0.5, \"content\": \"a\"}, {\"id\": \"1\", \"score\": 0.25, \"content\": \"bb\"}]}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-vxy",
+  "body": "{\"service\":\"googlevertexai\",\"service_settings\":{\"project_id\":\"rinf-proj\",\"location\":\"us-central1\",\"model_id\":\"m\"}}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"validation_exception\",\"reason\":\"Validation Failed: 1: [service_settings] does not contain the required setting [service_account_json];\"}],\"type\":\"validation_exception\",\"reason\":\"Validation Failed: 1: [service_settings] does not contain the required setting [service_account_json];\"},\"status\":400}",
+  "upstream": []
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-vxy",
+  "body": "{\"service\":\"googlevertexai\",\"service_settings\":{\"service_account_json\":\"not json\",\"project_id\":\"rinf-proj\",\"location\":\"us-central1\",\"model_id\":\"m\"}}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"status_exception\",\"reason\":\"Use JsonReader.setLenient(true) to accept malformed JSON at line 1 column 1 path $\"}],\"type\":\"status_exception\",\"reason\":\"Could not complete inference endpoint creation as validation call to service threw an exception.\",\"caused_by\":{\"type\":\"status_exception\",\"reason\":\"Use JsonReader.setLenient(true) to accept malformed JSON at line 1 column 1 path $\",\"caused_by\":{\"type\":\"malformed_json_exception\",\"reason\":\"Use JsonReader.setLenient(true) to accept malformed JSON at line 1 column 1 path $\"}}},\"status\":400}",
+  "upstream": [],
+  "differs": true
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-vxy",
+  "body": "{\"service\":\"googlevertexai\",\"service_settings\":{\"service_account_json\":\"{}\",\"project_id\":\"rinf-proj\",\"location\":\"us-central1\",\"model_id\":\"m\"}}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"status_exception\",\"reason\":\"Error reading credentials from stream, 'type' field not specified.\"}],\"type\":\"status_exception\",\"reason\":\"Could not complete inference endpoint creation as validation call to service threw an exception.\",\"caused_by\":{\"type\":\"status_exception\",\"reason\":\"Error reading credentials from stream, 'type' field not specified.\",\"caused_by\":{\"type\":\"i_o_exception\",\"reason\":\"Error reading credentials from stream, 'type' field not specified.\"}}},\"status\":400}",
+  "upstream": []
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-vxy",
+  "body": "{\"service\":\"googlevertexai\",\"service_settings\":{\"service_account_json\":$SA}}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"validation_exception\",\"reason\":\"Validation Failed: 1: [service_settings] does not contain the required setting [project_id];2: [service_settings] does not contain the required setting [model_id];\"}],\"type\":\"validation_exception\",\"reason\":\"Validation Failed: 1: [service_settings] does not contain the required setting [project_id];2: [service_settings] does not contain the required setting [model_id];\"},\"status\":400}",
+  "upstream": []
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/sparse_embedding/fx-vxy",
+  "body": "{\"service\":\"googlevertexai\",\"service_settings\":{\"service_account_json\":$SA,\"project_id\":\"p\",\"location\":\"l\",\"model_id\":\"m\"}}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"status_exception\",\"reason\":\"The [googlevertexai] service does not support task type [sparse_embedding]\"}],\"type\":\"status_exception\",\"reason\":\"The [googlevertexai] service does not support task type [sparse_embedding]\"},\"status\":400}",
+  "upstream": []
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-vxy",
+  "body": "{\"service\":\"googlevertexai\",\"service_settings\":{\"service_account_json\":$SA,\"project_id\":\"rinf-proj\",\"location\":\"us-central1\",\"model_id\":\"fail403\"}}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"status_exception\",\"reason\":\"Received a permission denied error status code for request from inference entity id [fx-vxy] status [403]. Error message: [denied]\"}],\"type\":\"status_exception\",\"reason\":\"Could not complete inference endpoint creation as validation call to service threw an exception.\",\"caused_by\":{\"type\":\"status_exception\",\"reason\":\"Received a permission denied error status code for request from inference entity id [fx-vxy] status [403]. Error message: [denied]\"}},\"status\":400}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/token",
+    "headers": [
+     [
+      "Content-Type",
+      "application/x-www-form-urlencoded; charset=UTF-8"
+     ],
+     [
+      "Accept",
+      "*/*"
+     ]
+    ],
+    "body": "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=eyJhbGciOiJSUzI1NiIsImtpZCI6ImFiYzEyMyIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJodHRwczovL29hdXRoMi5nb29nbGVhcGlzLmNvbS90b2tlbiIsImV4cCI6MTc5NDk2ODg2MCwiaWF0IjoxNzk0OTY1MjYwLCJpc3MiOiJyaW5mQHJpbmYtcHJvai5pYW0uZ3NlcnZpY2VhY2NvdW50LmNvbSIsInNjb3BlIjoiaHR0cHM6Ly93d3cuZ29vZ2xlYXBpcy5jb20vYXV0aC9jbG91ZC1wbGF0Zm9ybSJ9.SDIK5Mfz20oftVh5G261UUy-Uuq8P-s7Diuifta9qBssFuIfnkNl87rsQpfSSRQv5jrkOTmlpfRkK1lLrTeZekb0KuD3npp4jJUhHrjubvdj5USQCIPtOuW0QMZe5HguEj3Qd1jcS4P5UPSQVtUnm6NBdHklGKfBr5GcUD4sCNF1l19xasKVh8K30aVUnDZ6OD7zs9f6vtA33_GH-cq9WogrdOLzltC2EN365TT04f0-Bx6cvuauc94Uo1SL7ZJzWeha-Vw-U9tsRoa7qD-9qVy3-vh_SJinn35I4YdR-s7RM1Nw3Az99UtufRunYCREUdl9CAErFWyA958qQdaAfw",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"access_token\": \"ya29.mock-token\", \"expires_in\": 3599, \"token_type\": \"Bearer\"}"
+    }
+   },
+   {
+    "method": "POST",
+    "path": "/v1/projects/rinf-proj/locations/us-central1/publishers/google/models/fail403:predict",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer ya29.mock-token"
+     ]
+    ],
+    "body": "{\"instances\":[{\"content\":\"how big\",\"task_type\":\"RETRIEVAL_DOCUMENT\"}],\"parameters\":{}}",
+    "response": {
+     "status": 403,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"error\": {\"code\": 403, \"message\": \"denied\", \"status\": \"PERMISSION_DENIED\"}}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-vxy",
+  "body": "{\"service\":\"googlevertexai\",\"service_settings\":{\"service_account_json\":$SA,\"project_id\":\"rinf-proj\",\"location\":\"us-central1\",\"model_id\":\"fail429\"}}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"status_exception\",\"reason\":\"Received a rate limit status code for request from inference entity id [fx-vxy] status [429]. Error message: [Rate limit reached]\"}],\"type\":\"status_exception\",\"reason\":\"Could not complete inference endpoint creation as validation call to service threw an exception.\",\"caused_by\":{\"type\":\"status_exception\",\"reason\":\"Received a rate limit status code for request from inference entity id [fx-vxy] status [429]. Error message: [Rate limit reached]\"}},\"status\":400}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/token",
+    "headers": [
+     [
+      "Content-Type",
+      "application/x-www-form-urlencoded; charset=UTF-8"
+     ],
+     [
+      "Accept",
+      "*/*"
+     ]
+    ],
+    "body": "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=eyJhbGciOiJSUzI1NiIsImtpZCI6ImFiYzEyMyIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJodHRwczovL29hdXRoMi5nb29nbGVhcGlzLmNvbS90b2tlbiIsImV4cCI6MTc5NDk2ODg2MCwiaWF0IjoxNzk0OTY1MjYwLCJpc3MiOiJyaW5mQHJpbmYtcHJvai5pYW0uZ3NlcnZpY2VhY2NvdW50LmNvbSIsInNjb3BlIjoiaHR0cHM6Ly93d3cuZ29vZ2xlYXBpcy5jb20vYXV0aC9jbG91ZC1wbGF0Zm9ybSJ9.SDIK5Mfz20oftVh5G261UUy-Uuq8P-s7Diuifta9qBssFuIfnkNl87rsQpfSSRQv5jrkOTmlpfRkK1lLrTeZekb0KuD3npp4jJUhHrjubvdj5USQCIPtOuW0QMZe5HguEj3Qd1jcS4P5UPSQVtUnm6NBdHklGKfBr5GcUD4sCNF1l19xasKVh8K30aVUnDZ6OD7zs9f6vtA33_GH-cq9WogrdOLzltC2EN365TT04f0-Bx6cvuauc94Uo1SL7ZJzWeha-Vw-U9tsRoa7qD-9qVy3-vh_SJinn35I4YdR-s7RM1Nw3Az99UtufRunYCREUdl9CAErFWyA958qQdaAfw",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"access_token\": \"ya29.mock-token\", \"expires_in\": 3599, \"token_type\": \"Bearer\"}"
+    }
+   },
+   {
+    "method": "POST",
+    "path": "/v1/projects/rinf-proj/locations/us-central1/publishers/google/models/fail429:predict",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer ya29.mock-token"
+     ]
+    ],
+    "body": "{\"instances\":[{\"content\":\"how big\",\"task_type\":\"RETRIEVAL_DOCUMENT\"}],\"parameters\":{}}",
+    "response": {
+     "status": 429,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"error\": {\"code\": 429, \"message\": \"Rate limit reached\", \"status\": \"PERMISSION_DENIED\"}}"
+    }
+   },
+   {
+    "method": "POST",
+    "path": "/token",
+    "headers": [
+     [
+      "Content-Type",
+      "application/x-www-form-urlencoded; charset=UTF-8"
+     ],
+     [
+      "Accept",
+      "*/*"
+     ]
+    ],
+    "body": "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=eyJhbGciOiJSUzI1NiIsImtpZCI6ImFiYzEyMyIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJodHRwczovL29hdXRoMi5nb29nbGVhcGlzLmNvbS90b2tlbiIsImV4cCI6MTc5NDk2ODg2MCwiaWF0IjoxNzk0OTY1MjYwLCJpc3MiOiJyaW5mQHJpbmYtcHJvai5pYW0uZ3NlcnZpY2VhY2NvdW50LmNvbSIsInNjb3BlIjoiaHR0cHM6Ly93d3cuZ29vZ2xlYXBpcy5jb20vYXV0aC9jbG91ZC1wbGF0Zm9ybSJ9.SDIK5Mfz20oftVh5G261UUy-Uuq8P-s7Diuifta9qBssFuIfnkNl87rsQpfSSRQv5jrkOTmlpfRkK1lLrTeZekb0KuD3npp4jJUhHrjubvdj5USQCIPtOuW0QMZe5HguEj3Qd1jcS4P5UPSQVtUnm6NBdHklGKfBr5GcUD4sCNF1l19xasKVh8K30aVUnDZ6OD7zs9f6vtA33_GH-cq9WogrdOLzltC2EN365TT04f0-Bx6cvuauc94Uo1SL7ZJzWeha-Vw-U9tsRoa7qD-9qVy3-vh_SJinn35I4YdR-s7RM1Nw3Az99UtufRunYCREUdl9CAErFWyA958qQdaAfw",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"access_token\": \"ya29.mock-token\", \"expires_in\": 3599, \"token_type\": \"Bearer\"}"
+    }
+   },
+   {
+    "method": "POST",
+    "path": "/v1/projects/rinf-proj/locations/us-central1/publishers/google/models/fail429:predict",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer ya29.mock-token"
+     ]
+    ],
+    "body": "{\"instances\":[{\"content\":\"how big\",\"task_type\":\"RETRIEVAL_DOCUMENT\"}],\"parameters\":{}}",
+    "response": {
+     "status": 429,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"error\": {\"code\": 429, \"message\": \"Rate limit reached\", \"status\": \"PERMISSION_DENIED\"}}"
+    }
+   },
+   {
+    "method": "POST",
+    "path": "/token",
+    "headers": [
+     [
+      "Content-Type",
+      "application/x-www-form-urlencoded; charset=UTF-8"
+     ],
+     [
+      "Accept",
+      "*/*"
+     ]
+    ],
+    "body": "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=eyJhbGciOiJSUzI1NiIsImtpZCI6ImFiYzEyMyIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJodHRwczovL29hdXRoMi5nb29nbGVhcGlzLmNvbS90b2tlbiIsImV4cCI6MTc5NDk2ODg2MCwiaWF0IjoxNzk0OTY1MjYwLCJpc3MiOiJyaW5mQHJpbmYtcHJvai5pYW0uZ3NlcnZpY2VhY2NvdW50LmNvbSIsInNjb3BlIjoiaHR0cHM6Ly93d3cuZ29vZ2xlYXBpcy5jb20vYXV0aC9jbG91ZC1wbGF0Zm9ybSJ9.SDIK5Mfz20oftVh5G261UUy-Uuq8P-s7Diuifta9qBssFuIfnkNl87rsQpfSSRQv5jrkOTmlpfRkK1lLrTeZekb0KuD3npp4jJUhHrjubvdj5USQCIPtOuW0QMZe5HguEj3Qd1jcS4P5UPSQVtUnm6NBdHklGKfBr5GcUD4sCNF1l19xasKVh8K30aVUnDZ6OD7zs9f6vtA33_GH-cq9WogrdOLzltC2EN365TT04f0-Bx6cvuauc94Uo1SL7ZJzWeha-Vw-U9tsRoa7qD-9qVy3-vh_SJinn35I4YdR-s7RM1Nw3Az99UtufRunYCREUdl9CAErFWyA958qQdaAfw",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"access_token\": \"ya29.mock-token\", \"expires_in\": 3599, \"token_type\": \"Bearer\"}"
+    }
+   },
+   {
+    "method": "POST",
+    "path": "/v1/projects/rinf-proj/locations/us-central1/publishers/google/models/fail429:predict",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer ya29.mock-token"
+     ]
+    ],
+    "body": "{\"instances\":[{\"content\":\"how big\",\"task_type\":\"RETRIEVAL_DOCUMENT\"}],\"parameters\":{}}",
+    "response": {
+     "status": 429,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"error\": {\"code\": 429, \"message\": \"Rate limit reached\", \"status\": \"PERMISSION_DENIED\"}}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-vxy",
+  "body": "{\"service\":\"googlevertexai\",\"service_settings\":{\"service_account_json\":$SA,\"project_id\":\"rinf-proj\",\"location\":\"us-central1\",\"model_id\":\"fail500\"}}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"status_exception\",\"reason\":\"Received a server error status code for request from inference entity id [fx-vxy] status [500]. Error message: [boom]\"}],\"type\":\"status_exception\",\"reason\":\"Could not complete inference endpoint creation as validation call to service threw an exception.\",\"caused_by\":{\"type\":\"status_exception\",\"reason\":\"Received a server error status code for request from inference entity id [fx-vxy] status [500]. Error message: [boom]\"}},\"status\":400}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/token",
+    "headers": [
+     [
+      "Content-Type",
+      "application/x-www-form-urlencoded; charset=UTF-8"
+     ],
+     [
+      "Accept",
+      "*/*"
+     ]
+    ],
+    "body": "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=eyJhbGciOiJSUzI1NiIsImtpZCI6ImFiYzEyMyIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJodHRwczovL29hdXRoMi5nb29nbGVhcGlzLmNvbS90b2tlbiIsImV4cCI6MTc5NDk2ODg2MCwiaWF0IjoxNzk0OTY1MjYwLCJpc3MiOiJyaW5mQHJpbmYtcHJvai5pYW0uZ3NlcnZpY2VhY2NvdW50LmNvbSIsInNjb3BlIjoiaHR0cHM6Ly93d3cuZ29vZ2xlYXBpcy5jb20vYXV0aC9jbG91ZC1wbGF0Zm9ybSJ9.SDIK5Mfz20oftVh5G261UUy-Uuq8P-s7Diuifta9qBssFuIfnkNl87rsQpfSSRQv5jrkOTmlpfRkK1lLrTeZekb0KuD3npp4jJUhHrjubvdj5USQCIPtOuW0QMZe5HguEj3Qd1jcS4P5UPSQVtUnm6NBdHklGKfBr5GcUD4sCNF1l19xasKVh8K30aVUnDZ6OD7zs9f6vtA33_GH-cq9WogrdOLzltC2EN365TT04f0-Bx6cvuauc94Uo1SL7ZJzWeha-Vw-U9tsRoa7qD-9qVy3-vh_SJinn35I4YdR-s7RM1Nw3Az99UtufRunYCREUdl9CAErFWyA958qQdaAfw",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"access_token\": \"ya29.mock-token\", \"expires_in\": 3599, \"token_type\": \"Bearer\"}"
+    }
+   },
+   {
+    "method": "POST",
+    "path": "/v1/projects/rinf-proj/locations/us-central1/publishers/google/models/fail500:predict",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer ya29.mock-token"
+     ]
+    ],
+    "body": "{\"instances\":[{\"content\":\"how big\",\"task_type\":\"RETRIEVAL_DOCUMENT\"}],\"parameters\":{}}",
+    "response": {
+     "status": 500,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"error\": {\"code\": 500, \"message\": \"boom\", \"status\": \"PERMISSION_DENIED\"}}"
+    }
+   },
+   {
+    "method": "POST",
+    "path": "/token",
+    "headers": [
+     [
+      "Content-Type",
+      "application/x-www-form-urlencoded; charset=UTF-8"
+     ],
+     [
+      "Accept",
+      "*/*"
+     ]
+    ],
+    "body": "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=eyJhbGciOiJSUzI1NiIsImtpZCI6ImFiYzEyMyIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJodHRwczovL29hdXRoMi5nb29nbGVhcGlzLmNvbS90b2tlbiIsImV4cCI6MTc5NDk2ODg2MCwiaWF0IjoxNzk0OTY1MjYwLCJpc3MiOiJyaW5mQHJpbmYtcHJvai5pYW0uZ3NlcnZpY2VhY2NvdW50LmNvbSIsInNjb3BlIjoiaHR0cHM6Ly93d3cuZ29vZ2xlYXBpcy5jb20vYXV0aC9jbG91ZC1wbGF0Zm9ybSJ9.SDIK5Mfz20oftVh5G261UUy-Uuq8P-s7Diuifta9qBssFuIfnkNl87rsQpfSSRQv5jrkOTmlpfRkK1lLrTeZekb0KuD3npp4jJUhHrjubvdj5USQCIPtOuW0QMZe5HguEj3Qd1jcS4P5UPSQVtUnm6NBdHklGKfBr5GcUD4sCNF1l19xasKVh8K30aVUnDZ6OD7zs9f6vtA33_GH-cq9WogrdOLzltC2EN365TT04f0-Bx6cvuauc94Uo1SL7ZJzWeha-Vw-U9tsRoa7qD-9qVy3-vh_SJinn35I4YdR-s7RM1Nw3Az99UtufRunYCREUdl9CAErFWyA958qQdaAfw",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"access_token\": \"ya29.mock-token\", \"expires_in\": 3599, \"token_type\": \"Bearer\"}"
+    }
+   },
+   {
+    "method": "POST",
+    "path": "/v1/projects/rinf-proj/locations/us-central1/publishers/google/models/fail500:predict",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer ya29.mock-token"
+     ]
+    ],
+    "body": "{\"instances\":[{\"content\":\"how big\",\"task_type\":\"RETRIEVAL_DOCUMENT\"}],\"parameters\":{}}",
+    "response": {
+     "status": 500,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"error\": {\"code\": 500, \"message\": \"boom\", \"status\": \"PERMISSION_DENIED\"}}"
+    }
+   },
+   {
+    "method": "POST",
+    "path": "/token",
+    "headers": [
+     [
+      "Content-Type",
+      "application/x-www-form-urlencoded; charset=UTF-8"
+     ],
+     [
+      "Accept",
+      "*/*"
+     ]
+    ],
+    "body": "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=eyJhbGciOiJSUzI1NiIsImtpZCI6ImFiYzEyMyIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJodHRwczovL29hdXRoMi5nb29nbGVhcGlzLmNvbS90b2tlbiIsImV4cCI6MTc5NDk2ODg2MCwiaWF0IjoxNzk0OTY1MjYwLCJpc3MiOiJyaW5mQHJpbmYtcHJvai5pYW0uZ3NlcnZpY2VhY2NvdW50LmNvbSIsInNjb3BlIjoiaHR0cHM6Ly93d3cuZ29vZ2xlYXBpcy5jb20vYXV0aC9jbG91ZC1wbGF0Zm9ybSJ9.SDIK5Mfz20oftVh5G261UUy-Uuq8P-s7Diuifta9qBssFuIfnkNl87rsQpfSSRQv5jrkOTmlpfRkK1lLrTeZekb0KuD3npp4jJUhHrjubvdj5USQCIPtOuW0QMZe5HguEj3Qd1jcS4P5UPSQVtUnm6NBdHklGKfBr5GcUD4sCNF1l19xasKVh8K30aVUnDZ6OD7zs9f6vtA33_GH-cq9WogrdOLzltC2EN365TT04f0-Bx6cvuauc94Uo1SL7ZJzWeha-Vw-U9tsRoa7qD-9qVy3-vh_SJinn35I4YdR-s7RM1Nw3Az99UtufRunYCREUdl9CAErFWyA958qQdaAfw",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"access_token\": \"ya29.mock-token\", \"expires_in\": 3599, \"token_type\": \"Bearer\"}"
+    }
+   },
+   {
+    "method": "POST",
+    "path": "/v1/projects/rinf-proj/locations/us-central1/publishers/google/models/fail500:predict",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer ya29.mock-token"
+     ]
+    ],
+    "body": "{\"instances\":[{\"content\":\"how big\",\"task_type\":\"RETRIEVAL_DOCUMENT\"}],\"parameters\":{}}",
+    "response": {
+     "status": 500,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"error\": {\"code\": 500, \"message\": \"boom\", \"status\": \"PERMISSION_DENIED\"}}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-vxy",
+  "body": "{\"service\":\"googlevertexai\",\"service_settings\":{\"service_account_json\":$SA,\"project_id\":\"rinf-proj\",\"location\":\"us-central1\",\"model_id\":\"m\"},\"task_settings\":{\"input_type\":\"bogus\",\"auto_truncate\":\"x\"}}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"validation_exception\",\"reason\":\"Validation Failed: 1: [task_settings] Invalid value [bogus] received. [input_type] must be one of [classification, clustering, ingest, internal_ingest, internal_search, search];2: field [auto_truncate] is not of the expected type. The value [x] cannot be converted to a [Boolean];\"}],\"type\":\"validation_exception\",\"reason\":\"Validation Failed: 1: [task_settings] Invalid value [bogus] received. [input_type] must be one of [classification, clustering, ingest, internal_ingest, internal_search, search];2: field [auto_truncate] is not of the expected type. The value [x] cannot be converted to a [Boolean];\"},\"status\":400}",
+  "upstream": []
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-vx/_update",
+  "body": "{\"service_settings\":{\"service_account_json\":$SA},\"task_settings\":{\"auto_truncate\":true}}",
+  "status": 200,
+  "answer": "{\"inference_id\":\"fx-vx\",\"task_type\":\"text_embedding\",\"service\":\"googlevertexai\",\"service_settings\":{\"location\":\"us-central1\",\"project_id\":\"rinf-proj\",\"model_id\":\"text-embedding-005\",\"dimensions\":4,\"similarity\":\"dot_product\",\"rate_limit\":{\"requests_per_minute\":30000}},\"task_settings\":{\"auto_truncate\":true},\"chunking_settings\":{\"strategy\":\"sentence\",\"max_chunk_size\":250,\"sentence_overlap\":1}}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/token",
+    "headers": [
+     [
+      "Content-Type",
+      "application/x-www-form-urlencoded; charset=UTF-8"
+     ],
+     [
+      "Accept",
+      "*/*"
+     ]
+    ],
+    "body": "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=eyJhbGciOiJSUzI1NiIsImtpZCI6ImFiYzEyMyIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJodHRwczovL29hdXRoMi5nb29nbGVhcGlzLmNvbS90b2tlbiIsImV4cCI6MTc5NDk2ODg2MCwiaWF0IjoxNzk0OTY1MjYwLCJpc3MiOiJyaW5mQHJpbmYtcHJvai5pYW0uZ3NlcnZpY2VhY2NvdW50LmNvbSIsInNjb3BlIjoiaHR0cHM6Ly93d3cuZ29vZ2xlYXBpcy5jb20vYXV0aC9jbG91ZC1wbGF0Zm9ybSJ9.SDIK5Mfz20oftVh5G261UUy-Uuq8P-s7Diuifta9qBssFuIfnkNl87rsQpfSSRQv5jrkOTmlpfRkK1lLrTeZekb0KuD3npp4jJUhHrjubvdj5USQCIPtOuW0QMZe5HguEj3Qd1jcS4P5UPSQVtUnm6NBdHklGKfBr5GcUD4sCNF1l19xasKVh8K30aVUnDZ6OD7zs9f6vtA33_GH-cq9WogrdOLzltC2EN365TT04f0-Bx6cvuauc94Uo1SL7ZJzWeha-Vw-U9tsRoa7qD-9qVy3-vh_SJinn35I4YdR-s7RM1Nw3Az99UtufRunYCREUdl9CAErFWyA958qQdaAfw",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"access_token\": \"ya29.mock-token\", \"expires_in\": 3599, \"token_type\": \"Bearer\"}"
+    }
+   },
+   {
+    "method": "POST",
+    "path": "/v1/projects/rinf-proj/locations/us-central1/publishers/google/models/text-embedding-005:predict",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer ya29.mock-token"
+     ]
+    ],
+    "body": "{\"instances\":[{\"content\":\"how big\",\"task_type\":\"RETRIEVAL_DOCUMENT\"}],\"parameters\":{\"autoTruncate\":true}}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"predictions\": [{\"embeddings\": {\"values\": [0.427835, 0.35567, 0.283505, 0.21134], \"statistics\": {\"token_count\": 3, \"truncated\": false}}}]}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/fx-vx",
+  "body": "{\"input\":\"after\"}",
+  "status": 200,
+  "answer": "{\"text_embedding\":[{\"embedding\":[-0.036082,0.427835,-0.108247,0.35567]}]}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/token",
+    "headers": [
+     [
+      "Content-Type",
+      "application/x-www-form-urlencoded; charset=UTF-8"
+     ],
+     [
+      "Accept",
+      "*/*"
+     ]
+    ],
+    "body": "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=eyJhbGciOiJSUzI1NiIsImtpZCI6ImFiYzEyMyIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJodHRwczovL29hdXRoMi5nb29nbGVhcGlzLmNvbS90b2tlbiIsImV4cCI6MTc5NDk2ODg2MSwiaWF0IjoxNzk0OTY1MjYxLCJpc3MiOiJyaW5mQHJpbmYtcHJvai5pYW0uZ3NlcnZpY2VhY2NvdW50LmNvbSIsInNjb3BlIjoiaHR0cHM6Ly93d3cuZ29vZ2xlYXBpcy5jb20vYXV0aC9jbG91ZC1wbGF0Zm9ybSJ9.zCX_tdSuL2xfptteopDZgcvKYR2IzYhYQnUBPmNJjwNNM7JHpsLdDlySEBJsqpUJG5Zu4k-2rWCOg7mnX2Umv1fl3St5mK7NDTRWOjE_pK5JB091Sv-zZBxsK9ZHUOemfRwQn2KFqbKL-ynSuptDg6GA7_T9r0UmKpGgboUafLfZIlAR0yPGYseJAIR3oba8KCZm9HOE8lYwbFk0DWMx3wIvC4hk7-q4cYi4s-rNykQns_8IkqXba9ygSrzsgBoZs1xtki7Jx6UJXY8dOMBIZQ9MFJYniD1LVPPLnAybUHGDbrQ7EYJFpWEE76Fs6HTGnWPj4_E4Ny1WRHD--G-lwg",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"access_token\": \"ya29.mock-token\", \"expires_in\": 3599, \"token_type\": \"Bearer\"}"
+    }
+   },
+   {
+    "method": "POST",
+    "path": "/v1/projects/rinf-proj/locations/us-central1/publishers/google/models/text-embedding-005:predict",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer ya29.mock-token"
+     ]
+    ],
+    "body": "{\"instances\":[{\"content\":\"after\"}],\"parameters\":{}}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"predictions\": [{\"embeddings\": {\"values\": [-0.036082, 0.427835, -0.108247, 0.35567], \"statistics\": {\"token_count\": 3, \"truncated\": false}}}]}"
+    }
+   }
+  ],
+  "upstream_differs": true,
+  "note": "Elasticsearch 9.5.5 drops auto_truncate here, right after the update stored it; roll sends what the endpoint stores"
+ },
+ {
+  "method": "DELETE",
+  "path": "/_inference/fx-vx",
+  "body": null,
+  "status": 200,
+  "answer": "{\"acknowledged\":true,\"pipelines\":[],\"indexes\":[]}",
+  "upstream": []
+ },
+ {
+  "method": "DELETE",
+  "path": "/_inference/fx-vx2",
+  "body": null,
+  "status": 404,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"resource_not_found_exception\",\"reason\":\"Inference endpoint not found [fx-vx2]\"}],\"type\":\"resource_not_found_exception\",\"reason\":\"Inference endpoint not found [fx-vx2]\"},\"status\":404}",
+  "upstream": []
+ },
+ {
+  "method": "DELETE",
+  "path": "/_inference/fx-vxr",
+  "body": null,
+  "status": 200,
+  "answer": "{\"acknowledged\":true,\"pipelines\":[],\"indexes\":[]}",
+  "upstream": []
+ },
+ {
+  "method": "DELETE",
+  "path": "/_inference/fx-vxr2",
+  "body": null,
+  "status": 200,
+  "answer": "{\"acknowledged\":true,\"pipelines\":[],\"indexes\":[]}",
+  "upstream": []
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/completion/fx-vxc",
+  "body": "{\"service\":\"googlevertexai\",\"service_settings\":{\"service_account_json\":$SA,\"project_id\":\"rinf-proj\",\"location\":\"us-central1\",\"model_id\":\"gemini-2.5-flash\"}}",
+  "status": 200,
+  "answer": "{\"inference_id\":\"fx-vxc\",\"task_type\":\"completion\",\"service\":\"googlevertexai\",\"service_settings\":{\"project_id\":\"rinf-proj\",\"location\":\"us-central1\",\"model_id\":\"gemini-2.5-flash\",\"provider\":\"GOOGLE\",\"rate_limit\":{\"requests_per_minute\":1000}}}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/token",
+    "headers": [
+     [
+      "Content-Type",
+      "application/x-www-form-urlencoded; charset=UTF-8"
+     ],
+     [
+      "Accept",
+      "*/*"
+     ]
+    ],
+    "body": "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=eyJhbGciOiJSUzI1NiIsImtpZCI6ImFiYzEyMyIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJodHRwczovL29hdXRoMi5nb29nbGVhcGlzLmNvbS90b2tlbiIsImV4cCI6MTc5NDk2ODg2MSwiaWF0IjoxNzk0OTY1MjYxLCJpc3MiOiJyaW5mQHJpbmYtcHJvai5pYW0uZ3NlcnZpY2VhY2NvdW50LmNvbSIsInNjb3BlIjoiaHR0cHM6Ly93d3cuZ29vZ2xlYXBpcy5jb20vYXV0aC9jbG91ZC1wbGF0Zm9ybSJ9.zCX_tdSuL2xfptteopDZgcvKYR2IzYhYQnUBPmNJjwNNM7JHpsLdDlySEBJsqpUJG5Zu4k-2rWCOg7mnX2Umv1fl3St5mK7NDTRWOjE_pK5JB091Sv-zZBxsK9ZHUOemfRwQn2KFqbKL-ynSuptDg6GA7_T9r0UmKpGgboUafLfZIlAR0yPGYseJAIR3oba8KCZm9HOE8lYwbFk0DWMx3wIvC4hk7-q4cYi4s-rNykQns_8IkqXba9ygSrzsgBoZs1xtki7Jx6UJXY8dOMBIZQ9MFJYniD1LVPPLnAybUHGDbrQ7EYJFpWEE76Fs6HTGnWPj4_E4Ny1WRHD--G-lwg",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"access_token\": \"ya29.mock-token\", \"expires_in\": 3599, \"token_type\": \"Bearer\"}"
+    }
+   },
+   {
+    "method": "POST",
+    "path": "/v1/projects/rinf-proj/locations/global/publishers/google/models/gemini-2.5-flash:generateContent",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer ya29.mock-token"
+     ]
+    ],
+    "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"how big\"}]}]}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"candidates\": [{\"content\": {\"role\": \"model\", \"parts\": [{\"text\": \"gemini: how big\"}]}, \"finishReason\": \"STOP\", \"index\": 0}], \"usageMetadata\": {\"promptTokenCount\": 3, \"candidatesTokenCount\": 2, \"totalTokenCount\": 5}, \"modelVersion\": \"g\", \"responseId\": \"resp-1\"}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "GET",
+  "path": "/_inference/fx-vxc",
+  "body": null,
+  "status": 200,
+  "answer": "{\"endpoints\":[{\"inference_id\":\"fx-vxc\",\"task_type\":\"completion\",\"service\":\"googlevertexai\",\"service_settings\":{\"project_id\":\"rinf-proj\",\"location\":\"us-central1\",\"model_id\":\"gemini-2.5-flash\",\"provider\":\"GOOGLE\",\"rate_limit\":{\"requests_per_minute\":1000}}}]}",
+  "upstream": []
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/completion/fx-vxc",
+  "body": "{\"input\":\"what is up\"}",
+  "status": 200,
+  "answer": "{\"completion\":[{\"result\":\"gemini: what is up\"}]}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/token",
+    "headers": [
+     [
+      "Content-Type",
+      "application/x-www-form-urlencoded; charset=UTF-8"
+     ],
+     [
+      "Accept",
+      "*/*"
+     ]
+    ],
+    "body": "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=eyJhbGciOiJSUzI1NiIsImtpZCI6ImFiYzEyMyIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJodHRwczovL29hdXRoMi5nb29nbGVhcGlzLmNvbS90b2tlbiIsImV4cCI6MTc5NDk2ODg2MSwiaWF0IjoxNzk0OTY1MjYxLCJpc3MiOiJyaW5mQHJpbmYtcHJvai5pYW0uZ3NlcnZpY2VhY2NvdW50LmNvbSIsInNjb3BlIjoiaHR0cHM6Ly93d3cuZ29vZ2xlYXBpcy5jb20vYXV0aC9jbG91ZC1wbGF0Zm9ybSJ9.zCX_tdSuL2xfptteopDZgcvKYR2IzYhYQnUBPmNJjwNNM7JHpsLdDlySEBJsqpUJG5Zu4k-2rWCOg7mnX2Umv1fl3St5mK7NDTRWOjE_pK5JB091Sv-zZBxsK9ZHUOemfRwQn2KFqbKL-ynSuptDg6GA7_T9r0UmKpGgboUafLfZIlAR0yPGYseJAIR3oba8KCZm9HOE8lYwbFk0DWMx3wIvC4hk7-q4cYi4s-rNykQns_8IkqXba9ygSrzsgBoZs1xtki7Jx6UJXY8dOMBIZQ9MFJYniD1LVPPLnAybUHGDbrQ7EYJFpWEE76Fs6HTGnWPj4_E4Ny1WRHD--G-lwg",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"access_token\": \"ya29.mock-token\", \"expires_in\": 3599, \"token_type\": \"Bearer\"}"
+    }
+   },
+   {
+    "method": "POST",
+    "path": "/v1/projects/rinf-proj/locations/global/publishers/google/models/gemini-2.5-flash:generateContent",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer ya29.mock-token"
+     ]
+    ],
+    "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"what is up\"}]}]}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"candidates\": [{\"content\": {\"role\": \"model\", \"parts\": [{\"text\": \"gemini: what is up\"}]}, \"finishReason\": \"STOP\", \"index\": 0}], \"usageMetadata\": {\"promptTokenCount\": 3, \"candidatesTokenCount\": 2, \"totalTokenCount\": 5}, \"modelVersion\": \"g\", \"responseId\": \"resp-1\"}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/completion/fx-vxc",
+  "body": "{\"input\":[\"a\",\"b\"]}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"status_exception\",\"reason\":\"Google VertexAI chat completion only accepts 1 input\"}],\"type\":\"status_exception\",\"reason\":\"Google VertexAI chat completion only accepts 1 input\"},\"status\":400}",
+  "upstream": []
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/completion/fx-vxc/_stream",
+  "body": "{\"input\":\"stream me\"}",
+  "status": 200,
+  "answer": "\ufeffevent: message\ndata: {\"completion\":[{\"delta\":\"gemini\"},{\"delta\":\": stream me\"}]}\n\n\ufeffevent: message\ndata: [DONE]\n\n",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/token",
+    "headers": [
+     [
+      "Content-Type",
+      "application/x-www-form-urlencoded; charset=UTF-8"
+     ],
+     [
+      "Accept",
+      "*/*"
+     ]
+    ],
+    "body": "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=eyJhbGciOiJSUzI1NiIsImtpZCI6ImFiYzEyMyIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJodHRwczovL29hdXRoMi5nb29nbGVhcGlzLmNvbS90b2tlbiIsImV4cCI6MTc5NDk2ODg2MSwiaWF0IjoxNzk0OTY1MjYxLCJpc3MiOiJyaW5mQHJpbmYtcHJvai5pYW0uZ3NlcnZpY2VhY2NvdW50LmNvbSIsInNjb3BlIjoiaHR0cHM6Ly93d3cuZ29vZ2xlYXBpcy5jb20vYXV0aC9jbG91ZC1wbGF0Zm9ybSJ9.zCX_tdSuL2xfptteopDZgcvKYR2IzYhYQnUBPmNJjwNNM7JHpsLdDlySEBJsqpUJG5Zu4k-2rWCOg7mnX2Umv1fl3St5mK7NDTRWOjE_pK5JB091Sv-zZBxsK9ZHUOemfRwQn2KFqbKL-ynSuptDg6GA7_T9r0UmKpGgboUafLfZIlAR0yPGYseJAIR3oba8KCZm9HOE8lYwbFk0DWMx3wIvC4hk7-q4cYi4s-rNykQns_8IkqXba9ygSrzsgBoZs1xtki7Jx6UJXY8dOMBIZQ9MFJYniD1LVPPLnAybUHGDbrQ7EYJFpWEE76Fs6HTGnWPj4_E4Ny1WRHD--G-lwg",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"access_token\": \"ya29.mock-token\", \"expires_in\": 3599, \"token_type\": \"Bearer\"}"
+    }
+   },
+   {
+    "method": "POST",
+    "path": "/v1/projects/rinf-proj/locations/global/publishers/google/models/gemini-2.5-flash:streamGenerateContent?alt=sse",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer ya29.mock-token"
+     ]
+    ],
+    "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"stream me\"}]}]}",
+    "response": {
+     "status": 200,
+     "ctype": "text/event-stream",
+     "headers": [],
+     "body": "data: {\"candidates\": [{\"content\": {\"role\": \"model\", \"parts\": [{\"text\": \"gemini\"}]}, \"finishReason\": \"STOP\", \"index\": 0}], \"usageMetadata\": {\"promptTokenCount\": 3, \"candidatesTokenCount\": 2, \"totalTokenCount\": 5}, \"modelVersion\": \"g\", \"responseId\": \"resp-1\"}\r\n\r\ndata: {\"candidates\": [{\"content\": {\"role\": \"model\", \"parts\": [{\"text\": \": stream me\"}]}, \"finishReason\": \"STOP\", \"index\": 0}], \"usageMetadata\": {\"promptTokenCount\": 3, \"candidatesTokenCount\": 2, \"totalTokenCount\": 5}, \"modelVersion\": \"g\", \"responseId\": \"resp-1\"}\r\n\r\n"
+    }
+   }
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/chat_completion/fx-vxcc",
+  "body": "{\"service\":\"googlevertexai\",\"service_settings\":{\"service_account_json\":$SA,\"project_id\":\"rinf-proj\",\"location\":\"us-central1\",\"model_id\":\"gemini-2.5-flash\"},\"task_settings\":{\"thinking_config\":{\"thinking_budget\":64}}}",
+  "status": 200,
+  "answer": "{\"inference_id\":\"fx-vxcc\",\"task_type\":\"chat_completion\",\"service\":\"googlevertexai\",\"service_settings\":{\"project_id\":\"rinf-proj\",\"location\":\"us-central1\",\"model_id\":\"gemini-2.5-flash\",\"provider\":\"GOOGLE\",\"rate_limit\":{\"requests_per_minute\":1000}},\"task_settings\":{\"thinking_config\":{\"thinking_budget\":64},\"max_tokens\":null}}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/token",
+    "headers": [
+     [
+      "Content-Type",
+      "application/x-www-form-urlencoded; charset=UTF-8"
+     ],
+     [
+      "Accept",
+      "*/*"
+     ]
+    ],
+    "body": "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=eyJhbGciOiJSUzI1NiIsImtpZCI6ImFiYzEyMyIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJodHRwczovL29hdXRoMi5nb29nbGVhcGlzLmNvbS90b2tlbiIsImV4cCI6MTc5NDk2ODg2MSwiaWF0IjoxNzk0OTY1MjYxLCJpc3MiOiJyaW5mQHJpbmYtcHJvai5pYW0uZ3NlcnZpY2VhY2NvdW50LmNvbSIsInNjb3BlIjoiaHR0cHM6Ly93d3cuZ29vZ2xlYXBpcy5jb20vYXV0aC9jbG91ZC1wbGF0Zm9ybSJ9.zCX_tdSuL2xfptteopDZgcvKYR2IzYhYQnUBPmNJjwNNM7JHpsLdDlySEBJsqpUJG5Zu4k-2rWCOg7mnX2Umv1fl3St5mK7NDTRWOjE_pK5JB091Sv-zZBxsK9ZHUOemfRwQn2KFqbKL-ynSuptDg6GA7_T9r0UmKpGgboUafLfZIlAR0yPGYseJAIR3oba8KCZm9HOE8lYwbFk0DWMx3wIvC4hk7-q4cYi4s-rNykQns_8IkqXba9ygSrzsgBoZs1xtki7Jx6UJXY8dOMBIZQ9MFJYniD1LVPPLnAybUHGDbrQ7EYJFpWEE76Fs6HTGnWPj4_E4Ny1WRHD--G-lwg",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"access_token\": \"ya29.mock-token\", \"expires_in\": 3599, \"token_type\": \"Bearer\"}"
+    }
+   },
+   {
+    "method": "POST",
+    "path": "/v1/projects/rinf-proj/locations/global/publishers/google/models/gemini-2.5-flash:streamGenerateContent?alt=sse",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer ya29.mock-token"
+     ]
+    ],
+    "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"how big\"}]}],\"generationConfig\":{\"thinkingConfig\":{\"thinkingBudget\":64}}}",
+    "response": {
+     "status": 200,
+     "ctype": "text/event-stream",
+     "headers": [],
+     "body": "data: {\"candidates\": [{\"content\": {\"role\": \"model\", \"parts\": [{\"text\": \"gemini\"}]}, \"finishReason\": \"STOP\", \"index\": 0}], \"usageMetadata\": {\"promptTokenCount\": 3, \"candidatesTokenCount\": 2, \"totalTokenCount\": 5}, \"modelVersion\": \"g\", \"responseId\": \"resp-1\"}\r\n\r\ndata: {\"candidates\": [{\"content\": {\"role\": \"model\", \"parts\": [{\"text\": \": how big\"}]}, \"finishReason\": \"STOP\", \"index\": 0}], \"usageMetadata\": {\"promptTokenCount\": 3, \"candidatesTokenCount\": 2, \"totalTokenCount\": 5}, \"modelVersion\": \"g\", \"responseId\": \"resp-1\"}\r\n\r\n"
+    }
+   }
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/chat_completion/fx-vxcc/_stream",
+  "body": "{\"messages\":[{\"role\":\"system\",\"content\":\"be brief\"},{\"role\":\"user\",\"content\":\"hi there\"}],\"max_completion_tokens\":5,\"temperature\":0.2}",
+  "status": 200,
+  "answer": "\ufeffevent: message\ndata: {\"id\":\"resp-1\",\"choices\":[{\"delta\":{\"content\":\"gemini\",\"role\":\"model\"},\"finish_reason\":\"STOP\",\"index\":0}],\"model\":\"g\",\"object\":\"chat.completion.chunk\",\"usage\":{\"completion_tokens\":2,\"prompt_tokens\":3,\"total_tokens\":5}}\n\n\ufeffevent: message\ndata: {\"id\":\"resp-1\",\"choices\":[{\"delta\":{\"content\":\": hi there\",\"role\":\"model\"},\"finish_reason\":\"STOP\",\"index\":0}],\"model\":\"g\",\"object\":\"chat.completion.chunk\",\"usage\":{\"completion_tokens\":2,\"prompt_tokens\":3,\"total_tokens\":5}}\n\n\ufeffevent: message\ndata: [DONE]\n\n",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/token",
+    "headers": [
+     [
+      "Content-Type",
+      "application/x-www-form-urlencoded; charset=UTF-8"
+     ],
+     [
+      "Accept",
+      "*/*"
+     ]
+    ],
+    "body": "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=eyJhbGciOiJSUzI1NiIsImtpZCI6ImFiYzEyMyIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJodHRwczovL29hdXRoMi5nb29nbGVhcGlzLmNvbS90b2tlbiIsImV4cCI6MTc5NDk2ODg2MSwiaWF0IjoxNzk0OTY1MjYxLCJpc3MiOiJyaW5mQHJpbmYtcHJvai5pYW0uZ3NlcnZpY2VhY2NvdW50LmNvbSIsInNjb3BlIjoiaHR0cHM6Ly93d3cuZ29vZ2xlYXBpcy5jb20vYXV0aC9jbG91ZC1wbGF0Zm9ybSJ9.zCX_tdSuL2xfptteopDZgcvKYR2IzYhYQnUBPmNJjwNNM7JHpsLdDlySEBJsqpUJG5Zu4k-2rWCOg7mnX2Umv1fl3St5mK7NDTRWOjE_pK5JB091Sv-zZBxsK9ZHUOemfRwQn2KFqbKL-ynSuptDg6GA7_T9r0UmKpGgboUafLfZIlAR0yPGYseJAIR3oba8KCZm9HOE8lYwbFk0DWMx3wIvC4hk7-q4cYi4s-rNykQns_8IkqXba9ygSrzsgBoZs1xtki7Jx6UJXY8dOMBIZQ9MFJYniD1LVPPLnAybUHGDbrQ7EYJFpWEE76Fs6HTGnWPj4_E4Ny1WRHD--G-lwg",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"access_token\": \"ya29.mock-token\", \"expires_in\": 3599, \"token_type\": \"Bearer\"}"
+    }
+   },
+   {
+    "method": "POST",
+    "path": "/v1/projects/rinf-proj/locations/global/publishers/google/models/gemini-2.5-flash:streamGenerateContent?alt=sse",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer ya29.mock-token"
+     ]
+    ],
+    "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"hi there\"}]}],\"generationConfig\":{\"temperature\":0.2,\"maxOutputTokens\":5,\"thinkingConfig\":{\"thinkingBudget\":64}},\"systemInstruction\":{\"parts\":[{\"text\":\"be brief\"}]}}",
+    "response": {
+     "status": 200,
+     "ctype": "text/event-stream",
+     "headers": [],
+     "body": "data: {\"candidates\": [{\"content\": {\"role\": \"model\", \"parts\": [{\"text\": \"gemini\"}]}, \"finishReason\": \"STOP\", \"index\": 0}], \"usageMetadata\": {\"promptTokenCount\": 3, \"candidatesTokenCount\": 2, \"totalTokenCount\": 5}, \"modelVersion\": \"g\", \"responseId\": \"resp-1\"}\r\n\r\ndata: {\"candidates\": [{\"content\": {\"role\": \"model\", \"parts\": [{\"text\": \": hi there\"}]}, \"finishReason\": \"STOP\", \"index\": 0}], \"usageMetadata\": {\"promptTokenCount\": 3, \"candidatesTokenCount\": 2, \"totalTokenCount\": 5}, \"modelVersion\": \"g\", \"responseId\": \"resp-1\"}\r\n\r\n"
+    }
+   }
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/completion/fx-vxc2",
+  "body": "{\"service\":\"googlevertexai\",\"service_settings\":{\"service_account_json\":$SA,\"project_id\":\"rinf-proj\",\"location\":\"us-central1\",\"model_id\":\"gemini-2.5-flash\"},\"task_settings\":{\"max_tokens\":12}}",
+  "status": 200,
+  "answer": "{\"inference_id\":\"fx-vxc2\",\"task_type\":\"completion\",\"service\":\"googlevertexai\",\"service_settings\":{\"project_id\":\"rinf-proj\",\"location\":\"us-central1\",\"model_id\":\"gemini-2.5-flash\",\"provider\":\"GOOGLE\",\"rate_limit\":{\"requests_per_minute\":1000}},\"task_settings\":{\"max_tokens\":12}}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/token",
+    "headers": [
+     [
+      "Content-Type",
+      "application/x-www-form-urlencoded; charset=UTF-8"
+     ],
+     [
+      "Accept",
+      "*/*"
+     ]
+    ],
+    "body": "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=eyJhbGciOiJSUzI1NiIsImtpZCI6ImFiYzEyMyIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJodHRwczovL29hdXRoMi5nb29nbGVhcGlzLmNvbS90b2tlbiIsImV4cCI6MTc5NDk2ODg2MSwiaWF0IjoxNzk0OTY1MjYxLCJpc3MiOiJyaW5mQHJpbmYtcHJvai5pYW0uZ3NlcnZpY2VhY2NvdW50LmNvbSIsInNjb3BlIjoiaHR0cHM6Ly93d3cuZ29vZ2xlYXBpcy5jb20vYXV0aC9jbG91ZC1wbGF0Zm9ybSJ9.zCX_tdSuL2xfptteopDZgcvKYR2IzYhYQnUBPmNJjwNNM7JHpsLdDlySEBJsqpUJG5Zu4k-2rWCOg7mnX2Umv1fl3St5mK7NDTRWOjE_pK5JB091Sv-zZBxsK9ZHUOemfRwQn2KFqbKL-ynSuptDg6GA7_T9r0UmKpGgboUafLfZIlAR0yPGYseJAIR3oba8KCZm9HOE8lYwbFk0DWMx3wIvC4hk7-q4cYi4s-rNykQns_8IkqXba9ygSrzsgBoZs1xtki7Jx6UJXY8dOMBIZQ9MFJYniD1LVPPLnAybUHGDbrQ7EYJFpWEE76Fs6HTGnWPj4_E4Ny1WRHD--G-lwg",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"access_token\": \"ya29.mock-token\", \"expires_in\": 3599, \"token_type\": \"Bearer\"}"
+    }
+   },
+   {
+    "method": "POST",
+    "path": "/v1/projects/rinf-proj/locations/global/publishers/google/models/gemini-2.5-flash:generateContent",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer ya29.mock-token"
+     ]
+    ],
+    "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"how big\"}]}],\"generationConfig\":{\"maxOutputTokens\":12}}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"candidates\": [{\"content\": {\"role\": \"model\", \"parts\": [{\"text\": \"gemini: how big\"}]}, \"finishReason\": \"STOP\", \"index\": 0}], \"usageMetadata\": {\"promptTokenCount\": 3, \"candidatesTokenCount\": 2, \"totalTokenCount\": 5}, \"modelVersion\": \"g\", \"responseId\": \"resp-1\"}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/completion/fx-vxc2",
+  "body": "{\"input\":\"what is up\"}",
+  "status": 200,
+  "answer": "{\"completion\":[{\"result\":\"gemini: what is up\"}]}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/token",
+    "headers": [
+     [
+      "Content-Type",
+      "application/x-www-form-urlencoded; charset=UTF-8"
+     ],
+     [
+      "Accept",
+      "*/*"
+     ]
+    ],
+    "body": "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=eyJhbGciOiJSUzI1NiIsImtpZCI6ImFiYzEyMyIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJodHRwczovL29hdXRoMi5nb29nbGVhcGlzLmNvbS90b2tlbiIsImV4cCI6MTc5NDk2ODg2MSwiaWF0IjoxNzk0OTY1MjYxLCJpc3MiOiJyaW5mQHJpbmYtcHJvai5pYW0uZ3NlcnZpY2VhY2NvdW50LmNvbSIsInNjb3BlIjoiaHR0cHM6Ly93d3cuZ29vZ2xlYXBpcy5jb20vYXV0aC9jbG91ZC1wbGF0Zm9ybSJ9.zCX_tdSuL2xfptteopDZgcvKYR2IzYhYQnUBPmNJjwNNM7JHpsLdDlySEBJsqpUJG5Zu4k-2rWCOg7mnX2Umv1fl3St5mK7NDTRWOjE_pK5JB091Sv-zZBxsK9ZHUOemfRwQn2KFqbKL-ynSuptDg6GA7_T9r0UmKpGgboUafLfZIlAR0yPGYseJAIR3oba8KCZm9HOE8lYwbFk0DWMx3wIvC4hk7-q4cYi4s-rNykQns_8IkqXba9ygSrzsgBoZs1xtki7Jx6UJXY8dOMBIZQ9MFJYniD1LVPPLnAybUHGDbrQ7EYJFpWEE76Fs6HTGnWPj4_E4Ny1WRHD--G-lwg",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"access_token\": \"ya29.mock-token\", \"expires_in\": 3599, \"token_type\": \"Bearer\"}"
+    }
+   },
+   {
+    "method": "POST",
+    "path": "/v1/projects/rinf-proj/locations/global/publishers/google/models/gemini-2.5-flash:generateContent",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer ya29.mock-token"
+     ]
+    ],
+    "body": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"what is up\"}]}],\"generationConfig\":{\"maxOutputTokens\":12}}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"candidates\": [{\"content\": {\"role\": \"model\", \"parts\": [{\"text\": \"gemini: what is up\"}]}, \"finishReason\": \"STOP\", \"index\": 0}], \"usageMetadata\": {\"promptTokenCount\": 3, \"candidatesTokenCount\": 2, \"totalTokenCount\": 5}, \"modelVersion\": \"g\", \"responseId\": \"resp-1\"}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "DELETE",
+  "path": "/_inference/fx-vxc",
+  "body": null,
+  "status": 200,
+  "answer": "{\"acknowledged\":true,\"pipelines\":[],\"indexes\":[]}",
+  "upstream": []
+ },
+ {
+  "method": "DELETE",
+  "path": "/_inference/fx-vxcc",
+  "body": null,
+  "status": 200,
+  "answer": "{\"acknowledged\":true,\"pipelines\":[],\"indexes\":[]}",
+  "upstream": []
+ },
+ {
+  "method": "DELETE",
+  "path": "/_inference/fx-vxc2",
+  "body": null,
+  "status": 200,
+  "answer": "{\"acknowledged\":true,\"pipelines\":[],\"indexes\":[]}",
+  "upstream": []
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-gs",
+  "body": "{\"service\":\"googleaistudio\",\"service_settings\":{\"api_key\":\"gs-key-1\",\"model_id\":\"text-embedding-004\"}}",
+  "status": 200,
+  "answer": "{\"inference_id\":\"fx-gs\",\"task_type\":\"text_embedding\",\"service\":\"googleaistudio\",\"service_settings\":{\"model_id\":\"text-embedding-004\",\"dimensions\":4,\"similarity\":\"dot_product\",\"rate_limit\":{\"requests_per_minute\":360}},\"chunking_settings\":{\"strategy\":\"sentence\",\"max_chunk_size\":250,\"sentence_overlap\":1}}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/v1/models/text-embedding-004:batchEmbedContents?key=gs-key-1",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ]
+    ],
+    "body": "{\"requests\":[{\"model\":\"models/text-embedding-004\",\"content\":{\"parts\":[{\"text\":\"how big\"}]},\"taskType\":\"RETRIEVAL_DOCUMENT\"}]}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"embeddings\": [{\"values\": [0.427835, 0.35567, 0.283505, 0.21134]}]}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "GET",
+  "path": "/_inference/fx-gs",
+  "body": null,
+  "status": 200,
+  "answer": "{\"endpoints\":[{\"inference_id\":\"fx-gs\",\"task_type\":\"text_embedding\",\"service\":\"googleaistudio\",\"service_settings\":{\"model_id\":\"text-embedding-004\",\"dimensions\":4,\"similarity\":\"dot_product\",\"rate_limit\":{\"requests_per_minute\":360}},\"chunking_settings\":{\"strategy\":\"sentence\",\"max_chunk_size\":250,\"sentence_overlap\":1}}]}",
+  "upstream": []
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/text_embedding/fx-gs",
+  "body": "{\"input\":[\"hello world\",\"second\"]}",
+  "status": 200,
+  "answer": "{\"text_embedding\":[{\"embedding\":[0.005155,-0.489691,0.015464,-0.479381]},{\"embedding\":[0.056701,-0.386598,0.170103,-0.273196]}]}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/v1/models/text-embedding-004:batchEmbedContents?key=gs-key-1",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ]
+    ],
+    "body": "{\"requests\":[{\"model\":\"models/text-embedding-004\",\"content\":{\"parts\":[{\"text\":\"hello world\"}]},\"outputDimensionality\":4},{\"model\":\"models/text-embedding-004\",\"content\":{\"parts\":[{\"text\":\"second\"}]},\"outputDimensionality\":4}]}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"embeddings\": [{\"values\": [0.005155, -0.489691, 0.015464, -0.479381]}, {\"values\": [0.056701, -0.386598, 0.170103, -0.273196]}]}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/text_embedding/fx-gs",
+  "body": "{\"input\":\"q\",\"input_type\":\"search\"}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"validation_exception\",\"reason\":\"Validation Failed: 1: Invalid value [search] received. [input_type] is not allowed for model [text-embedding-004];\"}],\"type\":\"validation_exception\",\"reason\":\"Validation Failed: 1: Invalid value [search] received. [input_type] is not allowed for model [text-embedding-004];\"},\"status\":400}",
+  "upstream": []
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-gs2",
+  "body": "{\"service\":\"googleaistudio\",\"service_settings\":{\"api_key\":\"gs-key-2\",\"model_id\":\"gemini-embedding-001\",\"dimensions\":3,\"similarity\":\"cosine\",\"max_input_tokens\":100,\"rate_limit\":{\"requests_per_minute\":5}}}",
+  "status": 200,
+  "answer": "{\"inference_id\":\"fx-gs2\",\"task_type\":\"text_embedding\",\"service\":\"googleaistudio\",\"service_settings\":{\"model_id\":\"gemini-embedding-001\",\"max_input_tokens\":100,\"dimensions\":4,\"similarity\":\"cosine\",\"rate_limit\":{\"requests_per_minute\":5}},\"chunking_settings\":{\"strategy\":\"sentence\",\"max_chunk_size\":250,\"sentence_overlap\":1}}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/v1/models/gemini-embedding-001:batchEmbedContents?key=gs-key-2",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ]
+    ],
+    "body": "{\"requests\":[{\"model\":\"models/gemini-embedding-001\",\"content\":{\"parts\":[{\"text\":\"how big\"}]},\"outputDimensionality\":3,\"taskType\":\"RETRIEVAL_DOCUMENT\"}]}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"embeddings\": [{\"values\": [0.427835, 0.35567, 0.283505, 0.21134]}]}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-gs2",
+  "body": "{\"service\":\"googleaistudio\",\"service_settings\":{\"api_key\":\"gs-key-2\",\"model_id\":\"gemini-embedding-001\",\"similarity\":\"cosine\",\"max_input_tokens\":100,\"rate_limit\":{\"requests_per_minute\":5}}}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"resource_already_exists_exception\",\"reason\":\"Inference endpoint [fx-gs2] already exists\"}],\"type\":\"resource_already_exists_exception\",\"reason\":\"Inference endpoint [fx-gs2] already exists\"},\"status\":400}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/v1/models/gemini-embedding-001:batchEmbedContents?key=gs-key-2",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ]
+    ],
+    "body": "{\"requests\":[{\"model\":\"models/gemini-embedding-001\",\"content\":{\"parts\":[{\"text\":\"how big\"}]},\"taskType\":\"RETRIEVAL_DOCUMENT\"}]}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"embeddings\": [{\"values\": [0.427835, 0.35567, 0.283505, 0.21134]}]}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "GET",
+  "path": "/_inference/fx-gs2",
+  "body": null,
+  "status": 200,
+  "answer": "{\"endpoints\":[{\"inference_id\":\"fx-gs2\",\"task_type\":\"text_embedding\",\"service\":\"googleaistudio\",\"service_settings\":{\"model_id\":\"gemini-embedding-001\",\"max_input_tokens\":100,\"dimensions\":4,\"similarity\":\"cosine\",\"rate_limit\":{\"requests_per_minute\":5}},\"chunking_settings\":{\"strategy\":\"sentence\",\"max_chunk_size\":250,\"sentence_overlap\":1}}]}",
+  "upstream": []
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/completion/fx-gsc",
+  "body": "{\"service\":\"googleaistudio\",\"service_settings\":{\"api_key\":\"gs-key-3\",\"model_id\":\"gemini-2.5-flash\"}}",
+  "status": 200,
+  "answer": "{\"inference_id\":\"fx-gsc\",\"task_type\":\"completion\",\"service\":\"googleaistudio\",\"service_settings\":{\"model_id\":\"gemini-2.5-flash\",\"rate_limit\":{\"requests_per_minute\":360}}}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/v1/models/gemini-2.5-flash:generateContent?key=gs-key-3",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ]
+    ],
+    "body": "{\"contents\":[{\"parts\":[{\"text\":\"how big\"}],\"role\":\"user\"}],\"generationConfig\":{\"candidateCount\":1}}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"candidates\": [{\"content\": {\"role\": \"model\", \"parts\": [{\"text\": \"gemini: how big\"}]}, \"finishReason\": \"STOP\", \"index\": 0}], \"usageMetadata\": {\"promptTokenCount\": 3, \"candidatesTokenCount\": 2, \"totalTokenCount\": 5}, \"modelVersion\": \"g\", \"responseId\": \"resp-1\"}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "GET",
+  "path": "/_inference/fx-gsc",
+  "body": null,
+  "status": 200,
+  "answer": "{\"endpoints\":[{\"inference_id\":\"fx-gsc\",\"task_type\":\"completion\",\"service\":\"googleaistudio\",\"service_settings\":{\"model_id\":\"gemini-2.5-flash\",\"rate_limit\":{\"requests_per_minute\":360}}}]}",
+  "upstream": []
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/completion/fx-gsc",
+  "body": "{\"input\":\"what is up\"}",
+  "status": 200,
+  "answer": "{\"completion\":[{\"result\":\"gemini: what is up\"}]}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/v1/models/gemini-2.5-flash:generateContent?key=gs-key-3",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ]
+    ],
+    "body": "{\"contents\":[{\"parts\":[{\"text\":\"what is up\"}],\"role\":\"user\"}],\"generationConfig\":{\"candidateCount\":1}}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"candidates\": [{\"content\": {\"role\": \"model\", \"parts\": [{\"text\": \"gemini: what is up\"}]}, \"finishReason\": \"STOP\", \"index\": 0}], \"usageMetadata\": {\"promptTokenCount\": 3, \"candidatesTokenCount\": 2, \"totalTokenCount\": 5}, \"modelVersion\": \"g\", \"responseId\": \"resp-1\"}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/completion/fx-gsc",
+  "body": "{\"input\":[\"a\",\"b\"]}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"status_exception\",\"reason\":\"Google AI Studio completion only accepts 1 input\"}],\"type\":\"status_exception\",\"reason\":\"Google AI Studio completion only accepts 1 input\"},\"status\":400}",
+  "upstream": []
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/completion/fx-gsc/_stream",
+  "body": "{\"input\":\"stream me\"}",
+  "status": 200,
+  "answer": "\ufeffevent: message\ndata: {\"completion\":[{\"delta\":\"gemini\"},{\"delta\":\": stream me\"}]}\n\n\ufeffevent: message\ndata: [DONE]\n\n",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/v1/models/gemini-2.5-flash:streamGenerateContent?key=gs-key-3&alt=sse",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ]
+    ],
+    "body": "{\"contents\":[{\"parts\":[{\"text\":\"stream me\"}],\"role\":\"user\"}],\"generationConfig\":{\"candidateCount\":1}}",
+    "response": {
+     "status": 200,
+     "ctype": "text/event-stream",
+     "headers": [],
+     "body": "data: {\"candidates\": [{\"content\": {\"role\": \"model\", \"parts\": [{\"text\": \"gemini\"}]}, \"finishReason\": \"STOP\", \"index\": 0}], \"usageMetadata\": {\"promptTokenCount\": 3, \"candidatesTokenCount\": 2, \"totalTokenCount\": 5}, \"modelVersion\": \"g\", \"responseId\": \"resp-1\"}\r\n\r\ndata: {\"candidates\": [{\"content\": {\"role\": \"model\", \"parts\": [{\"text\": \": stream me\"}]}, \"finishReason\": \"STOP\", \"index\": 0}], \"usageMetadata\": {\"promptTokenCount\": 3, \"candidatesTokenCount\": 2, \"totalTokenCount\": 5}, \"modelVersion\": \"g\", \"responseId\": \"resp-1\"}\r\n\r\n"
+    }
+   }
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/chat_completion/fx-gscc",
+  "body": "{\"service\":\"googleaistudio\",\"service_settings\":{\"api_key\":\"k\",\"model_id\":\"m\"}}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"status_exception\",\"reason\":\"The [googleaistudio] service does not support task type [chat_completion]\"}],\"type\":\"status_exception\",\"reason\":\"The [googleaistudio] service does not support task type [chat_completion]\"},\"status\":400}",
+  "upstream": []
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-gsy",
+  "body": "{\"service\":\"googleaistudio\",\"service_settings\":{\"model_id\":\"m\"}}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"validation_exception\",\"reason\":\"Validation Failed: 1: [service_settings] does not contain the required setting [api_key];\"}],\"type\":\"validation_exception\",\"reason\":\"Validation Failed: 1: [service_settings] does not contain the required setting [api_key];\"},\"status\":400}",
+  "upstream": []
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-gsy",
+  "body": "{\"service\":\"googleaistudio\",\"service_settings\":{\"api_key\":\"k\",\"model_id\":\"fail401\"}}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"status_exception\",\"reason\":\"Received an unsuccessful status code for request from inference entity id [fx-gsy] status [401]. Error message: [Incorrect API key provided]\"}],\"type\":\"status_exception\",\"reason\":\"Could not complete inference endpoint creation as validation call to service threw an exception.\",\"caused_by\":{\"type\":\"status_exception\",\"reason\":\"Received an unsuccessful status code for request from inference entity id [fx-gsy] status [401]. Error message: [Incorrect API key provided]\"}},\"status\":400}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/v1/models/fail401:batchEmbedContents?key=k",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ]
+    ],
+    "body": "{\"requests\":[{\"model\":\"models/fail401\",\"content\":{\"parts\":[{\"text\":\"how big\"}]},\"taskType\":\"RETRIEVAL_DOCUMENT\"}]}",
+    "response": {
+     "status": 401,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"error\": {\"code\": 401, \"message\": \"Incorrect API key provided\", \"status\": \"PERMISSION_DENIED\"}}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-gsy",
+  "body": "{\"service\":\"googleaistudio\",\"service_settings\":{\"api_key\":\"k\",\"model_id\":\"fail429\"}}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"status_exception\",\"reason\":\"Received a rate limit status code for request from inference entity id [fx-gsy] status [429]. Error message: [Rate limit reached]\"}],\"type\":\"status_exception\",\"reason\":\"Could not complete inference endpoint creation as validation call to service threw an exception.\",\"caused_by\":{\"type\":\"status_exception\",\"reason\":\"Received a rate limit status code for request from inference entity id [fx-gsy] status [429]. Error message: [Rate limit reached]\"}},\"status\":400}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/v1/models/fail429:batchEmbedContents?key=k",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ]
+    ],
+    "body": "{\"requests\":[{\"model\":\"models/fail429\",\"content\":{\"parts\":[{\"text\":\"how big\"}]},\"taskType\":\"RETRIEVAL_DOCUMENT\"}]}",
+    "response": {
+     "status": 429,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"error\": {\"code\": 429, \"message\": \"Rate limit reached\", \"status\": \"PERMISSION_DENIED\"}}"
+    }
+   },
+   {
+    "method": "POST",
+    "path": "/v1/models/fail429:batchEmbedContents?key=k",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ]
+    ],
+    "body": "{\"requests\":[{\"model\":\"models/fail429\",\"content\":{\"parts\":[{\"text\":\"how big\"}]},\"taskType\":\"RETRIEVAL_DOCUMENT\"}]}",
+    "response": {
+     "status": 429,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"error\": {\"code\": 429, \"message\": \"Rate limit reached\", \"status\": \"PERMISSION_DENIED\"}}"
+    }
+   },
+   {
+    "method": "POST",
+    "path": "/v1/models/fail429:batchEmbedContents?key=k",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ]
+    ],
+    "body": "{\"requests\":[{\"model\":\"models/fail429\",\"content\":{\"parts\":[{\"text\":\"how big\"}]},\"taskType\":\"RETRIEVAL_DOCUMENT\"}]}",
+    "response": {
+     "status": 429,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"error\": {\"code\": 429, \"message\": \"Rate limit reached\", \"status\": \"PERMISSION_DENIED\"}}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-gsy",
+  "body": "{\"service\":\"googleaistudio\",\"service_settings\":{\"api_key\":\"k\",\"model_id\":\"m\"},\"task_settings\":{\"x\":1}}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"status_exception\",\"reason\":\"Configuration contains settings [{x=1}] unknown to the [googleaistudio] service\"}],\"type\":\"status_exception\",\"reason\":\"Configuration contains settings [{x=1}] unknown to the [googleaistudio] service\"},\"status\":400}",
+  "upstream": []
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-gs/_update",
+  "body": "{\"service_settings\":{\"api_key\":\"gs-new\",\"rate_limit\":{\"requests_per_minute\":9}}}",
+  "status": 200,
+  "answer": "{\"inference_id\":\"fx-gs\",\"task_type\":\"text_embedding\",\"service\":\"googleaistudio\",\"service_settings\":{\"model_id\":\"text-embedding-004\",\"dimensions\":4,\"similarity\":\"dot_product\",\"rate_limit\":{\"requests_per_minute\":9}},\"chunking_settings\":{\"strategy\":\"sentence\",\"max_chunk_size\":250,\"sentence_overlap\":1}}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/v1/models/text-embedding-004:batchEmbedContents?key=gs-new",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ]
+    ],
+    "body": "{\"requests\":[{\"model\":\"models/text-embedding-004\",\"content\":{\"parts\":[{\"text\":\"how big\"}]},\"outputDimensionality\":4,\"taskType\":\"RETRIEVAL_DOCUMENT\"}]}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"embeddings\": [{\"values\": [0.427835, 0.35567, 0.283505, 0.21134]}]}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/fx-gs",
+  "body": "{\"input\":\"after\"}",
+  "status": 200,
+  "answer": "{\"text_embedding\":[{\"embedding\":[-0.036082,0.427835,-0.108247,0.35567]}]}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/v1/models/text-embedding-004:batchEmbedContents?key=gs-new",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ]
+    ],
+    "body": "{\"requests\":[{\"model\":\"models/text-embedding-004\",\"content\":{\"parts\":[{\"text\":\"after\"}]},\"outputDimensionality\":4}]}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"embeddings\": [{\"values\": [-0.036082, 0.427835, -0.108247, 0.35567]}]}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "DELETE",
+  "path": "/_inference/fx-gs",
+  "body": null,
+  "status": 200,
+  "answer": "{\"acknowledged\":true,\"pipelines\":[],\"indexes\":[]}",
+  "upstream": []
+ },
+ {
+  "method": "DELETE",
+  "path": "/_inference/fx-gs2",
+  "body": null,
+  "status": 200,
+  "answer": "{\"acknowledged\":true,\"pipelines\":[],\"indexes\":[]}",
+  "upstream": []
+ },
+ {
+  "method": "DELETE",
+  "path": "/_inference/fx-gsc",
+  "body": null,
+  "status": 200,
+  "answer": "{\"acknowledged\":true,\"pipelines\":[],\"indexes\":[]}",
+  "upstream": []
+ }
+]

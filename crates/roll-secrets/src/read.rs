@@ -416,6 +416,57 @@ impl Secrets {
     }
 }
 
+/// Value reads a principal may make in a minute across every node unless the operator says otherwise
+/// (`ROLL_SECRETS_READS_PER_MINUTE`), as Vault's rate-limit quotas: a token or a person in a loop is
+/// told to slow down (429) before it decrypts, audits and issues without end. roll's own runtimes
+/// (apps, previews, checks, syncs, workload identities' logins) and the operator aren't held to it.
+pub(crate) const READS_PER_MINUTE: u32 = 600;
+
+impl Secrets {
+    /// How many reads of values a principal may make in a minute on this node; 0: no limit.
+    pub fn set_reads_per_minute(&self, n: u32) {
+        self.reads_per_minute.store(n, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Count one read of values for `caller`; past the limit in this minute, refused.
+    pub(crate) fn read_quota(&self, caller: &Caller) -> Result<()> {
+        let max = self.reads_per_minute.load(std::sync::atomic::Ordering::Relaxed);
+        if max == 0 || caller.runtime || caller.principal == "operator" {
+            return Ok(());
+        }
+        // Counted in the database every node shares, so a fleet allows the limit, not N times it.
+        let minute = self.db.now_ms()? / 60_000;
+        let n: i64 = self.db.write(|c| {
+            c.query_row(
+                "INSERT INTO read_counts (principal, minute, n) VALUES (?, ?, 1) ON CONFLICT (principal, minute) DO UPDATE SET n = read_counts.n + 1 RETURNING n",
+                params![caller.principal, minute],
+                |r| r.get(0),
+            )
+        })?;
+        if n > max as i64 {
+            return Err(Error::TooMany(format!("more than {max} reads of values a minute: slow down, or cache them (watches follow the digest)")));
+        }
+        Ok(())
+    }
+
+    /// Minutes of read counts that have passed (the sweeper).
+    pub(crate) fn forget_read_counts(&self) -> Result<()> {
+        let minute = self.db.now_ms()? / 60_000;
+        self.db.write(|c| c.execute("DELETE FROM read_counts WHERE minute < ?", [minute - 1]))?;
+        Ok(())
+    }
+}
+
+/// Reads of values per principal and minute, for the read quota.
+pub(crate) const READS_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS read_counts (
+    principal TEXT NOT NULL,
+    minute INTEGER NOT NULL,
+    n INTEGER NOT NULL,
+    PRIMARY KEY (principal, minute)
+) WITHOUT ROWID;
+";
+
 impl Secrets {
     /// The effective entries of a folder; `shared` leaves out the caller's personal values.
     /// Imports and the base show through only where the caller may `action` them.
@@ -483,10 +534,20 @@ impl Secrets {
     pub fn reveal(&self, project: &str, slug: &str, path: &str, key: &str, resolve: bool, caller: &Caller) -> Result<(Value, Vec<Problem>)> {
         let path = names::path(path)?;
         caller.need(Action::Reveal, &Scope::at(project, slug, &path))?;
+        self.read_quota(caller)?;
         let narrowed = self.caller_for(project, slug, caller)?;
-        let caller = &narrowed;
+        let (v, problems, leases) = self.reveal_entry(project, slug, &path, key, resolve, &narrowed)?;
+        self.audit_now(project, &narrowed, "secrets.reveal", Some(slug), Some(&path), &[key.to_string()], &format!("revealed {key}{}", lease_note(&leases)));
+        Ok((v, problems))
+    }
+
+    /// One secret's value for a reveal-like read, unaudited (the caller audits it): `caller` is
+    /// already narrowed ([`Secrets::caller_for`]) and `path` normalized. A sensitive key is a
+    /// runtime's only. Also answers the leases the read issued.
+    pub(crate) fn reveal_entry(&self, project: &str, slug: &str, path: &str, key: &str, resolve: bool, caller: &Caller) -> Result<(Value, Vec<Problem>, Vec<String>)> {
         let dek = self.project(project)?;
-        let entries = self.view(project, slug, &path, caller, false, Action::Reveal)?;
+        crate::metrics::Counters::add(&self.counters.reads, 1);
+        let entries = self.view(project, slug, path, caller, false, Action::Reveal)?;
         let e = entries.iter().find(|e| e.row.key == key).ok_or_else(|| Error::NotFound(format!("no secret {key} in {slug}:{path}")))?;
         if names::sensitive(&e.row.tags) && !caller.runtime {
             return Err(Error::Forbidden(format!("{key} is sensitive: its value reaches only roll's runtimes and syncs, never a person or a token")));
@@ -497,8 +558,7 @@ impl Secrets {
         }
         let (v, problem) = r.entry(e);
         let leases = r.finish(slug)?;
-        self.audit_now(project, caller, "secrets.reveal", Some(slug), Some(&path), &[key.to_string()], &format!("revealed {key}{}", lease_note(&leases)));
-        Ok((v, problem.into_iter().map(|p| Problem { key: key.into(), problem: p }).collect()))
+        Ok((v, problem.into_iter().map(|p| Problem { key: key.into(), problem: p }).collect(), leases))
     }
 
     /// Every effective value of a folder (`…/values`, `roll run`, an app's start). Audited as
@@ -514,9 +574,11 @@ impl Secrets {
     pub fn values_for(&self, project: &str, slug: &str, path: &str, resolve: bool, consumer: Option<&str>, dynamic: bool, caller: &Caller) -> Result<Values> {
         let path = names::path(path)?;
         caller.need(Action::Reveal, &Scope::at(project, slug, &path))?;
+        self.read_quota(caller)?;
         let narrowed = self.caller_for(project, slug, caller)?;
         let caller = &narrowed;
         let dek = self.project(project)?;
+        crate::metrics::Counters::add(&self.counters.reads, 1);
         let entries = self.view(project, slug, &path, caller, false, Action::Reveal)?;
         let who = consumer.unwrap_or(&caller.principal).to_string();
         let mut r = Resolver::new(self, project, slug, &dek, caller, resolve, &who)?;
@@ -646,6 +708,16 @@ impl Secrets {
         let keys: Vec<String> = values.keys().cloned().collect();
         self.audit_now(project, caller, "secrets.export", Some(slug), Some(&path), &keys, &format!("exported {} as of change #{seq}", crate::write::plural(keys.len(), "value")));
         Ok((seq, Values { values, problems, leases: vec![], dynamic: vec![], linked, plain, withheld, sensitive: vec![], followed }))
+    }
+
+    /// What moves when the project's values may have: its change counter and its resources'
+    /// rotation generations (a long-polled digest is worked out again only when this moves).
+    pub(crate) fn change_marker(&self, project: &str) -> Result<(i64, i64)> {
+        self.db.read(|c| {
+            let seq: i64 = c.query_row("SELECT seq FROM projects WHERE project_id = ?", [project], |r| r.get(0)).optional()?.unwrap_or(0);
+            let generations: i64 = c.query_row("SELECT COALESCE(SUM(generation), 0) FROM source_generations", (), |r| r.get(0))?;
+            Ok::<_, Error>((seq, generations))
+        })
     }
 
     /// A digest of a folder's effective secrets (keys, where they come from, versions,
@@ -1012,15 +1084,16 @@ impl Secrets {
     }
 }
 
-fn lease_note(leases: &[String]) -> String {
+pub(crate) fn lease_note(leases: &[String]) -> String {
     match leases.len() {
         0 => String::new(),
         n => format!(" ({} issued)", crate::write::plural(n, "lease")),
     }
 }
 
-/// A dynamic credential issued during one resolve: its parts, its handle, its link.
-type IssuedDynamic = (BTreeMap<String, Value>, Json, Link, (String, String));
+/// A dynamic credential issued during one resolve: its parts, its handle, its link, its key, and
+/// its lease's id (chosen before the issue: a provider can name what it makes after it).
+type IssuedDynamic = (BTreeMap<String, Value>, Json, Link, (String, String), String);
 
 /// Resolves values: decrypts, reads live links, issues dynamic ones (once per credential), and
 /// follows references with cycle detection.
@@ -1155,17 +1228,18 @@ impl<'a> Resolver<'a> {
                 let group = (e.row.env_id.clone(), l.kind.clone(), l.r#ref.clone(), format!("{cred}:{}", json(&l.options)));
                 if !self.issued.contains_key(&group) {
                     let label = format!("roll secrets {} {} for {}", e.env, e.row.key, self.consumer);
+                    let lease = names::new_id("lse", 16);
                     let r = self
                         .s
                         .links
                         .get(&l.kind)
-                        .and_then(|p| p.issue(&l.r#ref, &cred, l, &label, Some(l.ttl_minutes())))
-                        .map(|i| (i.parts, i.handle, l.clone(), (e.row.key.clone(), e.row.path.clone())))
+                        .and_then(|p| p.issue_lease(&l.r#ref, &cred, l, &label, l.ttl_minutes(), &lease))
+                        .map(|i| (i.parts, i.handle, l.clone(), (e.row.key.clone(), e.row.path.clone()), lease))
                         .map_err(|err| format!("{} {}: {err}", l.kind, l.r#ref));
                     self.issued.insert(group.clone(), r);
                 }
                 match &self.issued[&group] {
-                    Ok((parts, _, _, _)) => parts.get(&l.field).cloned().ok_or_else(|| format!("{} didn't issue {}", l.kind, l.field)),
+                    Ok((parts, ..)) => parts.get(&l.field).cloned().ok_or_else(|| format!("{} didn't issue {}", l.kind, l.field)),
                     Err(p) => Err(p.clone()),
                 }
             }
@@ -1232,7 +1306,7 @@ impl<'a> Resolver<'a> {
     /// Record the leases of the dynamic credentials this resolve issued; revoke them if that
     /// fails. Returns their ids.
     pub fn finish(self, _slug: &str) -> Result<Vec<String>> {
-        let issued: Vec<_> = self.issued.into_iter().filter_map(|((env_id, _, _, _), r)| r.ok().map(|(_, handle, link, at)| (env_id, handle, link, at))).collect();
+        let issued: Vec<_> = self.issued.into_iter().filter_map(|((env_id, _, _, _), r)| r.ok().map(|(_, handle, link, at, id)| (env_id, handle, link, at, id))).collect();
         if issued.is_empty() {
             return Ok(vec![]);
         }
@@ -1240,9 +1314,10 @@ impl<'a> Resolver<'a> {
         let consumer = self.consumer.clone();
         let by = self.caller.principal.clone();
         let project = self.project.to_string();
-        let ids: Vec<String> = issued.iter().map(|_| names::new_id("lse", 16)).collect();
+        let ids: Vec<String> = issued.iter().map(|i| i.4.clone()).collect();
+        crate::metrics::Counters::add(&self.s.counters.dynamic_issued, ids.len() as u64);
         let res = self.s.db.write(|c| {
-            for ((env_id, handle, link, (key, path)), id) in issued.iter().zip(&ids) {
+            for (env_id, handle, link, (key, path), id) in &issued {
                 c.execute(
                     "INSERT INTO leases (id, project_id, env_id, key, path, kind, link, handle, consumer, issued_at, expires_at, revoked_at, issued_by) VALUES (?, ?, ?, ?, ?, 'dynamic', ?, ?, ?, ?, ?, NULL, ?)",
                     params![id, project, env_id, key, path, json(link), json(handle), consumer, now, now + link.ttl_minutes() as i64 * 60_000, by],
@@ -1251,7 +1326,7 @@ impl<'a> Resolver<'a> {
             Ok::<_, Error>(())
         });
         if let Err(e) = res {
-            for (_, handle, link, _) in &issued {
+            for (_, handle, link, _, _) in &issued {
                 if let Ok(p) = self.s.links.get(&link.kind) {
                     let _ = p.revoke(&link.r#ref, handle);
                 }

@@ -35,6 +35,11 @@ cleanup() {
     for v in $(docker volume ls -q | grep "^roll-apps-vol-$s-" || true); do docker volume rm -f "$v" >/dev/null || true; done
   done
   if [ -n "$PRJ" ]; then
+    # A closed environment's egress proxy, and the project's closed builder (buildx, named as its
+    # network) with its proxy: left running when rolld stops before the environment's delete.
+    for c in $(docker ps -aq --filter "name=roll-apps-egress-closed-${PRJ#prj_}" --filter "name=roll-apps-build-${PRJ#prj_}"); do docker rm -f "$c" >/dev/null; done
+    docker buildx rm -f "roll-apps-build-${PRJ#prj_}" >/dev/null 2>&1 || true
+    docker network rm "roll-apps-build-${PRJ#prj_}" >/dev/null 2>&1 || true
     for n in $(docker network ls --format '{{.Name}}' | grep "^roll-apps-net-${PRJ#prj_}-" || true); do docker network rm "$n" >/dev/null || true; done
   fi
 }
@@ -142,6 +147,8 @@ for _ in $(seq 1 600); do
   sleep 1
 done
 [ "$(echo "$E" | jq_ "(d.get('egress') or {}).get('mode')")" = roll ] || { echo "the pv- environment should be closed: $(echo "$E" | jq_ "d.get('egress')")"; exit 1; }
+# One voice on the pull request: previews reports the pv- environment, roll apps doesn't (#249).
+[ "$(echo "$E" | jq_ "d.get('report')")" = False ] || { echo "the pv- environment should leave reporting to previews (report: false): $(echo "$E" | jq_ "d.get('report')")"; exit 1; }
 curl -sS -o /dev/null -H "Host: $HOSTPART" "http://127.0.0.1:${PORTS}080/" --max-time 120
 INST=""
 for _ in $(seq 1 60); do INST=$(docker ps --format '{{.Names}}' | grep "^roll-apps-${SVC#svc_}-$ENV-" | head -1); [ -n "$INST" ] && break; sleep 1; done
@@ -411,11 +418,8 @@ for _ in $(seq 1 60); do gh_log | grep -q '"roll/preview"' && break; sleep 0.5; 
 [ "$(api GET "/v1/previews/$FORK_ID" | jq_ "any(s.get('deployed') for s in d['services'])")" = False ] || { echo "nothing of a fork's should be deployed before an approval: $(api GET "/v1/previews/$FORK_ID" | jq_ "[(s['name'], s.get('deployed')) for s in d['services']]")"; exit 1; }
 STALE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://$API/v1/previews/$FORK_ID/approve" -H 'content-type: application/json' -d '{"head":"0000000000000000000000000000000000000000"}')
 [ "$STALE" = 409 ] || { echo "approving another head should be refused: $STALE"; exit 1; }
-# A fork's preview reaches roll only by default (egress_forks), and roll apps' build of its head
-# isn't held to that: not approved until the project opens forks' egress.
-HELD=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://$API/v1/previews/$FORK_ID/approve" -H 'content-type: application/json' -d "{\"head\":\"$CART\"}")
-[ "$HELD" = 409 ] || { echo "a fork's head on roll apps should wait while forks reach roll only: $HELD"; exit 1; }
-api PUT "/v1/previews/projects/$PRJ/settings" '{"egress_forks":"open"}' >/dev/null
+# A fork's preview reaches roll only by default (egress_forks): roll apps runs it closed, its
+# build without its secrets (build_closed, apps' #222).
 api POST "/v1/previews/$FORK_ID/approve" "{\"head\":\"$CART\"}" >/dev/null
 for _ in $(seq 1 600); do
   [ "$(api GET "/v1/previews/$FORK_ID" | jq_ "d['state']")" = ready ] && break
