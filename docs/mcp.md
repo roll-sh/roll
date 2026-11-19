@@ -105,6 +105,15 @@ anything but `1`, `true`, `0` or `false`, or the key spelled another way (`read_
 so a typo never means "not read-only". The connect panel has a checkbox
 for it, and it goes with toolsets (`?toolsets=postgres&readonly=1`).
 
+### Reaching outside roll
+
+A tool that has roll reach an address the caller chose says so with MCP's `openWorldHint: true`
+(`Tool::open_world`): publishing a task to a URL, a topic's endpoints, schedules and retries that
+deliver, running the app's own functions, adding or testing a notification or a log drain, a
+service from a Git URL or an image and its deploys, and a managed secret's rotation at its vendor.
+Every other tool's domain is roll's own (`false`). Search mode's `roll_run` is open-world when any
+tool it may run is; `roll_run_read` never is.
+
 ### Credentials kept out of what agents write
 
 As GitHub's MCP server's secret protection does (push protection for agents), a tool call that would

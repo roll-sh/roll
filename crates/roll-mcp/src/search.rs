@@ -64,6 +64,7 @@ pub fn listed(all: &[Value]) -> Vec<Value> {
         "annotations": { "title": "Find roll tools", "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false },
         "_meta": { "roll/product": "access" },
     }));
+    let open_world = rest.iter().any(|t| t["annotations"]["openWorldHint"] == true);
     let run = |name: &str, title: &str, what: &str, read_only: bool| {
         json!({
             "name": name,
@@ -73,7 +74,8 @@ pub fn listed(all: &[Value]) -> Vec<Value> {
                 "tool": { "type": "string", "description": format!("The tool's name, as {FIND} answered it") },
                 "arguments": { "type": "object", "description": "The tool's arguments, as its input schema asks" },
             }, "required": ["tool"], "additionalProperties": false },
-            "annotations": { "title": title, "readOnlyHint": read_only, "destructiveHint": !read_only, "idempotentHint": read_only, "openWorldHint": false },
+            // A run reaches outside roll when a tool it may run does (none read-only does).
+            "annotations": { "title": title, "readOnlyHint": read_only, "destructiveHint": !read_only, "idempotentHint": read_only, "openWorldHint": !read_only && open_world },
             "_meta": { "roll/product": "access" },
         })
     };
