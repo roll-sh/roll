@@ -1837,9 +1837,58 @@ fn shard_stats(ctx: &Ctx, idx: &IndexMeta, metrics: &[String]) -> Value {
     Value::Obj(shards)
 }
 
-pub fn resolve_index(ctx: &Ctx) -> EsResult<Reply> {
-    let st = ctx.state();
+/// `GET _resolve/index/<name>`: the local indices, aliases and data streams, and those of the
+/// linked remote clusters the expressions name (asked there, named `alias:name`). A remote that
+/// can't be reached is left out when its `skip_unavailable` says so, and fails the request
+/// otherwise.
+pub async fn resolve_index(ctx: &Ctx<'_>) -> EsResult<Reply> {
+    use crate::remote::links;
     let exprs = ctx.list_param("name").unwrap_or_default();
+    let Some(split) = links::split(ctx, &exprs)? else { return resolve_index_local(ctx, exprs).map(|v| Reply::Body(200, v)) };
+    let qs = links::query_string(ctx, &["name", "pretty", "human", "error_trace", "filter_path"], &[]);
+    let mut legs = Vec::new();
+    for (r, target, remote_exprs) in &split.legs {
+        let rq = links::request(ctx, &r.alias, "GET", &format!("/_resolve/index/{}{qs}", links::path_segment(remote_exprs)), None);
+        legs.push((r.clone(), links::leg(ctx, r, target.clone(), rq)));
+    }
+    let mut out = match split.local.is_empty() {
+        true => obj! { "indices" => Value::Arr(Vec::new()), "aliases" => Value::Arr(Vec::new()), "data_streams" => Value::Arr(Vec::new()) },
+        false => resolve_index_local(ctx, split.local.clone())?,
+    };
+    for (r, h) in legs {
+        let v = match links::join(&r.alias, h).await {
+            links::Answer::Ok(v) => v,
+            links::Answer::Failed(e) | links::Answer::Unavailable(e) => {
+                if r.skip_unavailable {
+                    continue;
+                }
+                return Err(e);
+            }
+        };
+        for k in ["indices", "aliases", "data_streams"] {
+            let add: Vec<Value> = v
+                .get(k)
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .map(|e| {
+                    let mut e = e.clone();
+                    if let Some(Value::Str(n)) = e.as_object_mut().and_then(|m| m.get_mut("name")) {
+                        *n = format!("{}:{n}", r.alias);
+                    }
+                    e
+                })
+                .collect();
+            if let Some(Value::Arr(list)) = out.as_object_mut().and_then(|m| m.get_mut(k)) {
+                list.extend(add);
+            }
+        }
+    }
+    Reply::ok(out)
+}
+
+fn resolve_index_local(ctx: &Ctx, exprs: Vec<String>) -> EsResult<Value> {
+    let st = ctx.state();
     let opts = ctx.indices_options(IndicesOptions::STRICT_EXPAND_OPEN)?;
     resolve::reject_remote(&exprs)?;
     // Aliases are listed as aliases, not expanded into the indices they point at; a concrete
@@ -1940,7 +1989,7 @@ pub fn resolve_index(ctx: &Ctx) -> EsResult<Reply> {
         m.insert("timestamp_field".into(), Value::from(crate::meta::data_streams::TIMESTAMP_FIELD));
         data_streams.push(Value::Obj(m));
     }
-    Reply::ok(obj! { "indices" => Value::Arr(indices), "aliases" => Value::Arr(aliases), "data_streams" => Value::Arr(data_streams) })
+    Ok(obj! { "indices" => Value::Arr(indices), "aliases" => Value::Arr(aliases), "data_streams" => Value::Arr(data_streams) })
 }
 
 /// `_flush`: parameter validation, then the broadcast shape.
