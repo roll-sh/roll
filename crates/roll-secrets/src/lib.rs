@@ -469,6 +469,8 @@ impl Secrets {
         // The issuer key's rotation (issuer.rs): when a key signs from, and when it left the JWKS.
         db.add_column("oidc_keys", "signs_from", "INTEGER")?;
         db.add_column("oidc_keys", "retired_at", "INTEGER")?;
+        // An emergency rotation pulled it out of the JWKS at once (health names it a while).
+        db.add_column("oidc_keys", "pulled_at", "INTEGER")?;
         db.ensure_schema(clouds::SCHEMA)?;
         db.ensure_schema(iam::SCHEMA)?;
         // Rotators are a link kind of roll secrets' own: they call out through rolld.
@@ -599,7 +601,12 @@ impl Secrets {
             Err(_) => serde_json::Value::Null,
         };
         let customer_managed = self.db.read(|c| c.query_row("SELECT COUNT(*) FROM projects WHERE dek LIKE 'kms:%'", (), |r| r.get::<_, i64>(0)))?;
-        Ok(serde_json::json!({ "ok": self.keys.is_ok(), "key": self.key_source, "resealed": resealed, "customer_managed": customer_managed, "links": self.links.kinds().map(|p| p.kind().to_string()).collect::<Vec<_>>(), "syncs": self.syncs.kinds().map(|t| t.kind().to_string()).collect::<Vec<_>>() }))
+        // Issuer keys an emergency rotation pulled: what still trusted them needs to know.
+        let pulled: Vec<serde_json::Value> = issuer::pulled(&self.db)?
+            .into_iter()
+            .map(|(kid, at)| serde_json::json!({ "kid": kid, "pulled_at": at, "detail": format!("roll's issuer key {kid} was pulled: tokens it signed no longer verify, and a cloud trust or verifier that pinned it (not roll's JWKS) needs the new key") }))
+            .collect();
+        Ok(serde_json::json!({ "ok": self.keys.is_ok(), "key": self.key_source, "resealed": resealed, "customer_managed": customer_managed, "issuer_pulled": pulled, "links": self.links.kinds().map(|p| p.kind().to_string()).collect::<Vec<_>>(), "syncs": self.syncs.kinds().map(|t| t.kind().to_string()).collect::<Vec<_>>() }))
     }
 
     /// Forget everything about a project (its workspace project was deleted). What it issued is

@@ -877,9 +877,24 @@ async fn oidc_jwks(State(s): S) -> crate::Result<Response> {
     Ok(ok(blocking(s, |s| s.oidc_jwks()).await?))
 }
 
-/// Start a rotation of roll's issuer key now (the operator's).
-async fn rotate_issuer(State(s): S, Who(c): Who) -> crate::Result<Response> {
-    Ok(ok(blocking(s, move |s| s.rotate_issuer(&c)).await?))
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RotateIssuer {
+    #[serde(default)]
+    now: bool,
+    retire: Option<String>,
+}
+
+/// Start a rotation of roll's issuer key now (the operator's). `{"now": true, "retire": kid}` is
+/// an emergency: a new key signs at once and `kid` leaves the JWKS now.
+async fn rotate_issuer(State(s): S, Who(c): Who, b: Bytes) -> crate::Result<Response> {
+    let r: RotateIssuer = if b.is_empty() { RotateIssuer::default() } else { body(&b)? };
+    let pull = match (r.now, r.retire) {
+        (false, None) => None,
+        (true, Some(kid)) if !kid.is_empty() => Some(kid),
+        _ => return Err(Error::BadRequest("an emergency rotation takes both now: true and retire: the kid to pull".into())),
+    };
+    Ok(ok(blocking(s, move |s| s.rotate_issuer(pull.as_deref(), &c)).await?))
 }
 
 async fn cloud_accounts(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {

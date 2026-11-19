@@ -1127,8 +1127,11 @@ impl apps_control::integrations::SecretSource for ForApps {
         .await?
     }
 
-    /// An instance's token from roll's issuer, only for a service its project stands for (the
-    /// same check as `resolve`). None where the issuer isn't (no public URL).
+    /// An instance's token from roll's issuer, only for a service its project stands for
+    /// (`Workspace::trusts`, as `resolve`), and only for an environment roll secrets has that
+    /// isn't an untrusted preview (`Secrets::issue` refuses one: where `resolve` gives a fork's
+    /// preview a narrowed read, it gets no token at all). None where the issuer isn't (no public
+    /// URL).
     async fn issue(&self, project: &str, service: &str, env: &str, aud: &str, ttl: std::time::Duration) -> anyhow::Result<Option<String>> {
         let (secrets, ws) = self.0.get().cloned().ok_or_else(|| anyhow::anyhow!("roll secrets is starting: try again in a moment"))?;
         let subject = roll_secrets::Subject::App { project: project.to_string(), service: service.to_string(), env: env.to_string() };
@@ -1374,10 +1377,12 @@ mod tests {
         assert_eq!(apps.digest(&project, "pr-9").await.unwrap(), None);
     }
 
-    /// An instance's token from roll's issuer goes only to a service its project stands for.
+    /// An instance's token from roll's issuer goes only to a service its project stands for, in an
+    /// environment roll secrets has, and never to an untrusted preview (a fork's code).
     #[tokio::test(flavor = "multi_thread")]
     async fn a_service_gets_an_issuer_token_only_from_a_project_that_stands_for_it() {
         use apps_control::integrations::SecretSource;
+        use tower::ServiceExt;
         struct Nobody;
         impl roll_workspace::Owners for Nobody {
             fn trusts(&self, _: &str, _: roll_workspace::Kind, _: &str) -> bool {
@@ -1392,8 +1397,9 @@ mod tests {
         let db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("secrets.db")), "secrets").unwrap();
         let clouds = roll_secrets::clouds::Clouds { issuer: "https://roll.example/v1/secrets/oidc".into(), tokens: Arc::new(super::clouds::RollClouds::new()) };
         let opts = roll_secrets::Options { keyring: Ok(roll_secrets::Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None, kms: None, sts: None, outside: None, github: None, clouds: Some(clouds), workloads: None };
+        let secrets = Arc::new(roll_secrets::Secrets::new(db, ws.clone(), opts).unwrap());
         let apps = super::ForApps::default();
-        apps.set(Arc::new(roll_secrets::Secrets::new(db, ws.clone(), opts).unwrap()), ws);
+        apps.set(secrets.clone(), ws);
         let ttl = std::time::Duration::from_secs(900);
         let token = apps.issue(&operators, "svc_web", "production", "sts.amazonaws.com", ttl).await.unwrap().expect("a token");
         use base64::Engine as _;
@@ -1401,6 +1407,18 @@ mod tests {
         assert_eq!(claims["sub"], json!(format!("roll-apps:{operators}:svc_web:production")));
         // A person's project stands only for their own services.
         assert!(apps.issue(&adas, "svc_theirs", "production", "sts.amazonaws.com", ttl).await.is_err());
+        // Previews: a fork's (untrusted) gets no token, a vetted one does, under its own slug; an
+        // environment roll secrets doesn't have gets none either.
+        for (slug, trusted) in [("pv-fork", false), ("pv-vetted", true)] {
+            let new = axum::http::Request::post(format!("/v1/secrets/projects/{operators}/environments")).header("content-type", "application/json").body(axum::body::Body::from(json!({ "slug": slug, "base": "production", "trusted": trusted }).to_string())).unwrap();
+            assert!(roll_secrets::router(secrets.clone()).oneshot(new).await.unwrap().status().is_success());
+        }
+        let refused = apps.issue(&operators, "svc_web", "pv-fork", "sts.amazonaws.com", ttl).await.unwrap_err();
+        assert!(refused.to_string().contains("untrusted preview"), "{refused}");
+        let token = apps.issue(&operators, "svc_web", "pv-vetted", "sts.amazonaws.com", ttl).await.unwrap().expect("a vetted preview's token");
+        let claims: Json = serde_json::from_slice(&base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(token.split('.').nth(1).unwrap()).unwrap()).unwrap();
+        assert_eq!((claims["sub"].clone(), claims["environment"].clone()), (json!(format!("roll-apps:{operators}:svc_web:pv-vetted")), json!("pv-vetted")));
+        assert!(apps.issue(&operators, "svc_web", "nowhere", "sts.amazonaws.com", ttl).await.is_err());
     }
 
     /// A customer's key wraps a project's data key: Encrypt and Decrypt name the key and carry the

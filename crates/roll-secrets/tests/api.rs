@@ -3005,6 +3005,40 @@ async fn the_issuers_key_rotates_published_a_day_before_it_signs_and_retires_aft
     assert_eq!(v["ok"], true, "{v}");
 }
 
+/// A leaked key is pulled at once: a new key signs now and the old one leaves the JWKS, so its
+/// tokens stop verifying; health names it, and the project's log has the rotation.
+#[tokio::test]
+async fn an_emergency_rotation_signs_with_a_new_key_now_and_pulls_the_old_one() {
+    let api = Api::new().await;
+    let issue = || {
+        let (s, p) = (api.secrets.clone(), api.project.clone());
+        async move { tokio::task::spawn_blocking(move || s.issue(app(&p, "svc_web", "production"), "roll", std::time::Duration::from_secs(3600)).unwrap()).await.unwrap() }
+    };
+    let jwks = || api.ok(Method::GET, "/v1/secrets/oidc/jwks", None);
+    let kids = |jwks: &Value| jwks["keys"].as_array().unwrap().iter().map(|k| k["kid"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+    let old_token = issue().await;
+    let old = roll_token(&jwks().await, &old_token).0["kid"].as_str().unwrap().to_string();
+    // Half an emergency is refused, and so is a key that isn't in the JWKS.
+    let rotate = "/v1/secrets/issuer/rotate";
+    for (body, status) in [(json!({ "now": true }), StatusCode::BAD_REQUEST), (json!({ "retire": old }), StatusCode::BAD_REQUEST), (json!({ "now": true, "retire": "k_nope" }), StatusCode::NOT_FOUND)] {
+        assert_eq!(api.call(Method::POST, rotate, Some(body)).await.0, status);
+    }
+    let r = api.ok(Method::POST, rotate, Some(json!({ "now": true, "retire": old }))).await;
+    let new = r["kid"].as_str().unwrap().to_string();
+    assert_ne!(new, old);
+    let s = api.secrets.clone();
+    tokio::task::spawn_blocking(move || s.sweep().unwrap()).await.unwrap();
+    let jwks = jwks().await;
+    assert_eq!(kids(&jwks), [new.as_str()], "the pulled key is out of the JWKS at once");
+    assert!(!roll_token(&jwks, &old_token).2, "a token the pulled key signed no longer verifies");
+    let (header, _, signed) = roll_token(&jwks, &issue().await);
+    assert!(signed && header["kid"] == json!(new), "{header}");
+    let health = api.ok(Method::GET, "/v1/secrets/health", None).await;
+    assert_eq!(health["issuer_pulled"][0]["kid"], json!(old), "{health}");
+    let audit = api.ok(Method::GET, "/audit", None).await;
+    assert!(audit.as_array().unwrap().iter().any(|a| a["action"] == "issuer.rotate" && a["actor"] == "operator"), "{audit}");
+}
+
 #[tokio::test]
 async fn an_apps_instance_logs_in_with_rolls_own_token_for_its_own_project_only() {
     let api = Api::new().await;

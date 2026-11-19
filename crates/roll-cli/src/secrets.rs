@@ -454,6 +454,26 @@ pub enum Secrets {
         #[arg(long)]
         format: Option<String>,
     },
+    /// roll's OIDC issuer key (the operator's): it signs clouds' and apps' tokens and the audit
+    /// log's digests.
+    Issuer {
+        #[command(subcommand)]
+        cmd: IssuerCmd,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum IssuerCmd {
+    /// Start a rotation: the next key is published now and signs two days later. With `--now
+    /// --retire KID` (a key that may have leaked): a new key signs at once and KID leaves the JWKS
+    /// now, so tokens it signed stop verifying.
+    Rotate {
+        #[arg(long, requires = "retire")]
+        now: bool,
+        /// The kid to pull from the JWKS at once.
+        #[arg(long, requires = "now", value_name = "KID")]
+        retire: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1199,6 +1219,19 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
     // Health across projects spans them too.
     if let Secrets::Doctor = &cmd {
         return doctor(api, &args).await;
+    }
+    // The issuer's key is the server's, not a project's.
+    if let Secrets::Issuer { cmd: IssuerCmd::Rotate { now, retire } } = &cmd {
+        let body = if *now { json!({ "now": true, "retire": retire }) } else { json!({}) };
+        let v = api.call(Method::POST, "/v1/secrets/issuer/rotate", Some(body)).await?;
+        if json_out {
+            println!("{}", serde_json::to_string_pretty(&v)?);
+        } else if let Some(pulled) = v["pulled"].as_str() {
+            println!("{} signs now; {pulled} left the JWKS. Update any cloud trust or verifier that pinned {pulled}.", s(&v["kid"]));
+        } else {
+            println!("{} is published and signs from {}", s(&v["kid"]), chrono::DateTime::from_timestamp_millis(v["signs_from"].as_i64().unwrap_or(0)).map(|t| t.to_rfc3339()).unwrap_or_default());
+        }
+        return Ok(());
     }
     if let Secrets::Health { all: true, .. } = &cmd {
         let v = api.get("/v1/secrets/findings").await?;
@@ -2221,7 +2254,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 println!("Revoked {id}");
             }
         },
-        Secrets::Keygen { .. } | Secrets::Find { .. } | Secrets::Doctor | Secrets::Health { all: true, .. } => unreachable!("handled before a project is picked"),
+        Secrets::Keygen { .. } | Secrets::Find { .. } | Secrets::Doctor | Secrets::Health { all: true, .. } | Secrets::Issuer { .. } => unreachable!("handled before a project is picked"),
         Secrets::Backup { to, out } => {
             let v = c.call(Method::POST, &format!("{}/backup", c.base()), Some(json!({ "recipient": to }))).await?;
             let text = serde_json::to_string_pretty(&v)?;

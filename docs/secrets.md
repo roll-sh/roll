@@ -271,7 +271,8 @@ minutes to 12 hours, within the role's own maximum). The role trusts roll one of
 - **roll's issuer** (`trust: "oidc"`, the dashboard's default), as GCP and Azure work: an IAM OIDC
   identity provider for roll's issuer (`/v1/secrets/oidc`, audience `sts.amazonaws.com`), and a
   trust policy with the conditions `aud = sts.amazonaws.com` and `sub = roll-secrets:<project>`.
-  Each session is `AssumeRoleWithWebIdentity` with a token roll's issuer signs for the project:
+  A role for an app's instances instead (`roll-apps:…`, "roll's tokens for other products") pins
+  the exact `sub`, environment included (`StringEquals`, never `StringLike` with `*`). Each session is `AssumeRoleWithWebIdentity` with a token roll's issuer signs for the project:
   roll holds no AWS credential at all. The issuer must be public over HTTPS
   (`ROLL_CODE_PUBLIC_URL`).
 - **ExternalId** (`trust: "external_id"`, the API's default): roll's own AWS role assumes it (STS
@@ -1084,15 +1085,21 @@ cloud trusts roll's token for one project the way it trusts GitHub Actions' toke
   public routes read only public halves. After a deployment-key rotation it's resealed like
   projects' keys (health's `resealed` counts it). The signing key itself rotates too (below,
   "Rotating the issuer's key"), and roll's other products get tokens of their own from it (below,
-  "roll's tokens for other products").
+  "roll's tokens for other products"). One key signs all three: clouds' tokens, apps' tokens and
+  the audit log's digests. A separate key for the digests is planned (not built yet), so pulling a
+  leaked signing key won't touch what checks the log.
 - **GCP**: a workload identity pool provider for roll's issuer whose attribute condition pins
   `assertion.sub == "roll-secrets:<project>"`, and a service account that lets that principal
-  impersonate it (`roles/iam.workloadIdentityUser`). Register it with `POST …/cloud-accounts {name,
+  impersonate it (`roles/iam.workloadIdentityUser`). For an app's instances, pin the whole
+  `roll-apps:<project>:<service>:<env>` subject (or `assertion.environment == "production"` next to
+  the service), never a prefix match. Register it with `POST …/cloud-accounts {name,
   cloud: "gcp", audience: "//iam.googleapis.com/projects/<number>/locations/global/workloadIdentityPools/<pool>/providers/<provider>",
   service_account}`. Each lease: STS token exchange, then `generateAccessToken` for the service
   account, for the lease's TTL plus five minutes (an hour at most).
 - **Azure**: an Entra app with a federated credential for roll's issuer, subject
-  `roll-secrets:<project>`, audience `api://AzureADTokenExchange`. Register it with `{name, cloud:
+  `roll-secrets:<project>`, audience `api://AzureADTokenExchange` (for an app's instances, one
+  federated credential per exact `roll-apps:…:<env>` subject; flexible credentials' wildcards on
+  the environment are the same mistake as `*`). Register it with `{name, cloud:
   "azure", tenant, client_id, scope?}` (`https://management.azure.com/.default` by default). Each
   lease: client credentials with roll's token as the assertion.
 - **The trust must name this project.** Registering an account (admin) first exchanges a token for a
@@ -1124,6 +1131,16 @@ secrets, with no key of its own (docs/apps/README.md; apps delivers the token to
   `SecretSource::issue`) asks the workspace's trust, as a deploy's secrets do
   (`Workspace::trusts`): the operator's projects stand for their services, a person's only for
   their own. Otherwise it's an error, and no token.
+- **Never for an untrusted preview.** `Secrets::issue` signs only for an environment the project
+  has (not expired), and refuses an ephemeral one that isn't `trusted`: previews of a fork's pull
+  request or other outside code (`pv-…`). Where a deploy's secrets give such a preview a narrowed
+  read, the issuer gives it nothing, so fork code never holds a token that says roll vouches for
+  the service. A trusted (vetted) preview gets one, under its own slug.
+- **Trust the exact environment.** The `env` part of `sub` and the `environment` claim are the
+  environment's real slug, so a preview's token never reads as production's. Write a cloud's trust
+  on the exact subject (`roll-apps:<project>:<service>:production`), never
+  `roll-apps:<project>:<service>:*`: a wildcard takes every trusted preview's token too. The AWS,
+  GCP and Azure examples above say how.
 - **Audit.** An app refreshes its token often, from every instance, so a row per token would bury
   the log: the first token per subject, audience and hour is an `oidc.issue` row in the project's
   log (actor `app:<service>`, the environment, the audience and the lifetime), and the rest of the
@@ -1153,9 +1170,22 @@ sweeper:
   (save it again when a new key appears, as below).
 - **Only roll's keys.** As before, only a row whose sealed private key opens with the deployment
   key and matches its public half signs, is published, or holds a rotation back.
-- **Now.** `POST /v1/secrets/issuer/rotate` (the operator's) starts a rotation at once: the next
-  key is published now and signs two days later, as a scheduled one. With a key already waiting,
-  it answers that one. `{kid, signs_from}`.
+- **Now.** `POST /v1/secrets/issuer/rotate` (the operator's; `roll secrets issuer rotate`) starts
+  a rotation at once: the next key is published now and signs two days later, as a scheduled one.
+  With a key already waiting, it answers that one. `{kid, signs_from}`.
+- **An emergency.** For a key that may have leaked, `{"now": true, "retire": "<kid>"}` (`roll
+  secrets issuer rotate --now --retire KID`; the operator's, and both or neither) makes a new key
+  that signs at once and takes `<kid>` out of the JWKS in the same write (`retired_at`,
+  `pulled_at`): tokens it signed stop verifying as soon as a verifier fetches the JWKS again, and
+  it never signs again. A kid that isn't one of roll's keys in the JWKS is a 404. The cost is the
+  two days' notice: a cloud that cached the JWKS refuses the new key's tokens until it fetches
+  again (Azure: up to a day). `GET /v1/secrets/health`'s `issuer_pulled` names each key pulled in
+  the last 30 days (`{kid, pulled_at, detail}`), and a cloud trust or verifier that pinned it
+  rather than reading the JWKS must be given the new key. The digests it signed still check (the
+  chain's head is MACed under `ROLL_SECRET_KEY` as well); the separate digest key above is what
+  will keep them apart.
+- **Audited.** Each operator's rotation, either kind, is an `issuer.rotate` row (actor
+  `operator`) in every project's audit log: the key signs for all of them.
 ### Certificates
 A project's own certificate authority, as Vault's PKI engine and Infisical's PKI give: short-lived
 TLS certificates for services (mTLS between them), with no CA to run.
@@ -1373,6 +1403,7 @@ roll secrets leases  [--renew ID | --revoke ID]
 roll secrets databases ls | add NAME [--role A --role B] [--group G] [--ca FILE] (admin URL on stdin) | rm ID
 roll secrets aws-users ls | add NAME USER --role ROLE | rm ID
 roll secrets clouds  ls | add-gcp NAME --audience A --service-account SA | add-azure NAME --tenant T --client-id C [--scope S] | rm ID
+roll secrets issuer rotate [--now --retire KID]   # the operator's: the next key now; --now --retire pulls a leaked one
 roll secrets cas     ls | add NAME --domain D… [--allow-ip] [--max-days N] | cert ID | sign ID [CSR|-] [--days N] [--chain]
                      | certs ID | revoke ID SERIAL | rm ID
 roll secrets ssh-cas ls | add NAME [--principal P…] [--max-hours N] [--host-domain D…] [--max-host-days N] | key ID
@@ -2593,7 +2624,7 @@ isn't in the workspace is 404.
 
 | Route | Body | Answer |
 | --- | --- | --- |
-| `GET /v1/secrets/health` | | `{ok, key: "env"\|"kms"\|"file"\|"missing", resealed: "all"\|number\|null, links: string[], syncs: string[]}` (`links`, `syncs`: the kinds registered) |
+| `GET /v1/secrets/health` | | `{ok, key: "env"\|"kms"\|"file"\|"missing", resealed: "all"\|number\|null, customer_managed, issuer_pulled: {kid, pulled_at, detail}[], links: string[], syncs: string[]}` (`links`, `syncs`: the kinds registered; `issuer_pulled`: issuer keys an emergency rotation pulled in the last 30 days) |
 | `GET` | | `{project, environments: Environment[], previews: number, history_days: number \| null}` |
 | `PATCH` | `{history_days}` | `{history_days}` (`admin`) |
 | `GET /grid?path=` | | `Grid` |
@@ -2708,7 +2739,7 @@ isn't in the workspace is 404.
 | `DELETE /github-apps/{id}` | | 204; 409 while a key links to it or a lease holds a token (`admin`) |
 | `GET /v1/secrets/oidc/.well-known/openid-configuration` | | roll's issuer's discovery document (public) |
 | `GET /v1/secrets/oidc/jwks` | | roll's issuer's public keys (public; they verify the audit log's digests, so served without clouds too): the key signing, the next one before it signs, the one it replaced until that one's tokens expire |
-| `POST /v1/secrets/issuer/rotate` | | `{kid, signs_from}` (the operator's): the next issuer key, published now, signing two days later; the one already waiting, if any |
+| `POST /v1/secrets/issuer/rotate` | `{now?, retire?}` | `{kid, signs_from, pulled}` (the operator's): the next issuer key, published now, signing two days later; the one already waiting, if any. `{now: true, retire: kid}` (both or neither): a new key signs now and `kid` leaves the JWKS at once (`pulled`); 404 for a kid not in it |
 | `GET /cas` | | `Ca[]` (`read` on the project; certificates, never keys) |
 | `POST /cas` | `{name, domains, allow_ip?, max_days?}` | 201 `Ca` (`admin`) |
 | `DELETE /cas/{id}` | | 204; 409 while a key links to it (`admin`) |

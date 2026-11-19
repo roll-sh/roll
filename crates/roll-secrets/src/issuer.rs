@@ -15,7 +15,10 @@
 //!   default): the next key is published [`PUBLISH_AHEAD_MS`] before it starts signing (clouds
 //!   cache JWKS), and the one it replaces leaves the JWKS [`RETIRE_AFTER_MS`] after that, once its
 //!   last token has expired. A retired key never signs again, but stays (sealed) to check the
-//!   audit log's digests it signed.
+//!   audit log's digests it signed. An emergency ([`rotate_now`], the operator's) skips the notice:
+//!   a new key signs at once and a named one leaves the JWKS in the same write.
+//! - Apps' tokens are only for an environment the project has that isn't an untrusted preview
+//!   (`Secrets::issue`): fork code never gets roll's word.
 //! - The same key signs the audit log's digests (roll-secrets-chain), so the JWKS is served even on a server
 //!   without a public URL for the issuer: it's what an export is verified with offline.
 //! - Only a row whose sealed private key opens with the deployment key, and whose public half is
@@ -361,6 +364,37 @@ pub(crate) fn rotate(db: &Db, keys: &Keyring, checked: &Checked, every_ms: i64, 
     Ok(Some(waiting))
 }
 
+/// An emergency rotation (the operator's, for a key that may have leaked): a new key that signs
+/// at once, and `pull`, one of roll's live keys, out of the JWKS now (`retired_at` and
+/// `pulled_at`): tokens it signed stop verifying, and clouds that cached it drop it at their next
+/// fetch. One write with `audit(c, new kid, now)`, so no token is signed by `pull` after it and the
+/// rotation isn't without its audit rows. Answers (kid, signs_from).
+pub(crate) fn rotate_now(db: &Db, keys: &Keyring, checked: &Checked, pull: &str, audit: impl Fn(&code_sql::Conn<'_>, &str, i64) -> Result<()>) -> Result<(String, i64)> {
+    let now = db.now_ms()?;
+    let (row, _) = new_key(keys, now)?;
+    db.write(|c| {
+        let live = only_rolls(read_rows(c)?, keys, checked);
+        if !live.iter().any(|r| r.kid == pull && r.retired_at.is_none()) {
+            return Err(Error::NotFound(format!("{pull} isn't one of roll's keys in the JWKS")));
+        }
+        insert(c, &row, now)?;
+        c.execute("UPDATE oidc_keys SET retired_at = ?, pulled_at = ? WHERE kid = ? AND retired_at IS NULL", params![now, now, pull])?;
+        audit(c, &row.kid, now)
+    })?;
+    tracing::warn!(kid = %row.kid, pulled = pull, "roll's OIDC issuer: an emergency rotation: a new key signs now, and the pulled key left the JWKS");
+    Ok((row.kid, row.signs_from))
+}
+
+/// How long health names a pulled key ([`rotate_now`]).
+pub const PULLED_FINDING_MS: i64 = 30 * 86_400_000;
+
+/// Keys pulled in the last [`PULLED_FINDING_MS`] (health's `issuer_pulled`): (kid, pulled_at),
+/// the latest first.
+pub(crate) fn pulled(db: &Db) -> Result<Vec<(String, i64)>> {
+    let since = db.now_ms()? - PULLED_FINDING_MS;
+    Ok(db.read(|c| c.query("SELECT kid, pulled_at FROM oidc_keys WHERE pulled_at >= ? ORDER BY pulled_at DESC, kid", [since], |r| Ok((r.get(0)?, r.get(1)?))))?)
+}
+
 /// Retire every live key a later key replaced at least [`RETIRE_AFTER_MS`] ago: its tokens have all
 /// expired, so it leaves the JWKS. How many.
 pub(crate) fn retire(db: &Db, keys: &Keyring, checked: &Checked) -> Result<usize> {
@@ -439,9 +473,20 @@ impl crate::Secrets {
         let keys = self.keys()?;
         let project = subject.project().to_string();
         self.project(&project)?;
-        let token = Issuer { url }.sign_subject(&self.db, keys, &subject, aud, ttl_s)?;
-        let (sub, now) = (subject.sub(), self.db.now_ms()?);
         let Subject::App { service, env, .. } = &subject;
+        // Only an environment the project has, live, and never one running code nobody vetted (an
+        // untrusted preview: a fork's pull request, outside code). Its `pv-…` subject would
+        // otherwise be roll's word, and a cloud trust on `…:<service>:*` would hand it a session.
+        let e = self.db.read(|c| crate::envs::by_slug(c, &project, env))?;
+        let now = self.db.now_ms()?;
+        if e.expires_at.is_some_and(|t| t <= now) {
+            return Err(Error::NotFound(format!("no environment {env}")));
+        }
+        if e.kind == crate::envs::Kind::Ephemeral && !e.trusted {
+            return Err(Error::Forbidden(format!("{env} is an untrusted preview (code nobody vetted): roll signs no token for it")));
+        }
+        let token = Issuer { url }.sign_subject(&self.db, keys, &subject, aud, ttl_s)?;
+        let sub = subject.sub();
         let caller = crate::Caller::consumer(&format!("app:{service}"));
         self.db.write(|c| {
             let first = c.execute(
@@ -475,13 +520,31 @@ impl crate::Secrets {
 
     /// `POST /v1/secrets/issuer/rotate` (the operator's): start a rotation now. The next key is
     /// published at once and signs from [`PUBLISH_AHEAD_MS`] later, as a scheduled one; a key
-    /// already waiting is answered instead.
-    pub fn rotate_issuer(&self, caller: &crate::Caller) -> Result<Json> {
+    /// already waiting is answered instead. With `pull` (an emergency, `{"now": true, "retire":
+    /// kid}`), [`rotate_now`]: a new key signs at once and `pull` leaves the JWKS now (health's
+    /// `issuer_pulled` says so for 30 days). Either is an `issuer.rotate` row in every project's
+    /// audit log: the key signs each one's digests, cloud tokens and apps' tokens.
+    pub fn rotate_issuer(&self, pull: Option<&str>, caller: &crate::Caller) -> Result<Json> {
         if !caller.grants.everything() || caller.principal != "operator" {
             return Err(Error::Forbidden("roll's issuer key is the operator's".into()));
         }
-        let (kid, signs_from) = rotate(&self.db, self.keys()?, &self.issuer_keys, self.issuer_rotate_ms(), true)?.ok_or_else(|| Error::Internal("no key to rotate".into()))?;
-        Ok(json!({ "kid": kid, "signs_from": signs_from }))
+        let keys = self.keys()?;
+        let audit = |c: &code_sql::Conn<'_>, summary: &str, now: i64| -> Result<()> {
+            for project in c.query("SELECT project_id FROM projects WHERE forgotten_at IS NULL", (), |r| r.get::<_, String>(0))? {
+                crate::audit::record(c, keys, &project, caller, "issuer.rotate", None, None, &[], summary, now)?;
+            }
+            Ok(())
+        };
+        let (kid, signs_from) = match pull {
+            Some(pull) => rotate_now(&self.db, keys, &self.issuer_keys, pull, |c, kid, now| audit(c, &format!("an emergency rotation of roll's issuer key: {kid} signs now, and {pull} left the JWKS (tokens it signed no longer verify)"), now))?,
+            None => {
+                let (kid, signs_from) = rotate(&self.db, keys, &self.issuer_keys, self.issuer_rotate_ms(), true)?.ok_or_else(|| Error::Internal("no key to rotate".into()))?;
+                let now = self.db.now_ms()?;
+                self.db.write(|c| audit(c, &format!("a rotation of roll's issuer key: {kid}, published, signs from {signs_from}"), now))?;
+                (kid, signs_from)
+            }
+        };
+        Ok(json!({ "kid": kid, "signs_from": signs_from, "pulled": pull }))
     }
 
     /// The sweeper: a rotation when one is due, replaced keys out of the JWKS once their tokens
