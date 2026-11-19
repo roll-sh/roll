@@ -4,7 +4,7 @@ import { appsApi, followShell as followAppsShell } from "@/lib/apps-api";
 import { codeApi } from "@/lib/code-api";
 import { Confirm } from "@/components/ui";
 import { TerminalScreen } from "@/components/terminal-screen";
-import { endpointSlower, type EndpointTime, a11yWords, checkSummary, seoWords, duration, followLogs, followShell, downloadFiles, openUrl, pageLabel, previewsApi, noteCropUrl, qrUrl, screenshotUrl, resourceId, thanMain, type CaughtMail, type PageCheck, type Preview, type TextDiff, type PreviewActivity, type PreviewVisitor, type PreviewKind, type PreviewShare, type RequestLine, type ServiceMetrics, type ErrorGroup, type TraceSummary, type TraceSpan, type RouteTime, type Repeated } from "@/lib/previews-api";
+import { endpointSlower, type EndpointTime, a11yWords, checkSummary, seoWords, duration, followLogs, followShell, downloadFiles, openUrl, pageLabel, previewsApi, noteCropUrl, qrUrl, screenshotUrl, resourceId, thanMain, type CaughtMail, type PageCheck, type Preview, type TextDiff, type PreviewActivity, type PreviewVisitor, type PreviewKind, type PreviewShare, type RequestLine, type ServiceMetrics, type ErrorGroup, type TraceSummary, type TraceSpan, type RouteTime } from "@/lib/previews-api";
 import { verdict, type VerdictTarget } from "@/lib/preview-verdict";
 import { isProblem, logFilter, logLevel } from "@/lib/preview-logs";
 import { formatBytes } from "@/lib/roll-api";

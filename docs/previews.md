@@ -1158,20 +1158,28 @@ preview: they're for looking at it now. The sheet lists recent traces under Requ
 to its spans as bars on the trace's time, and above them each route's time (p50, p95) against
 main's preview's same route, the clearly slower ones first and in red; `roll preview traces
 [--trace <id> | --routes]`. The holder reads the slower ones (at most five, the most slower than
-main first) onto the preview's record about once a minute (`slower_routes`, kept in the store's
+main first) onto the preview's record about once a minute, off the reconcile pass and a few
+previews at a time, main's routes once a round and only on main's own holder (where its spans
+are: elsewhere nothing is said rather than everything); only those few names are masked, each
+once (`slower_routes`, kept in the store's
 `runtime_facts` so any node shows them): the sheet's verdict strip says "2 routes slower than main" (opening
 Requests), and the pull request's comment says it in its checks with each route's p50 and
-main's, a route's name in a code span nothing in it can close. A change reports the preview again
+main's, a route's name in a code span nothing in it can close. A change of which routes are slower
+(not of their times, which drift with every trace) reports the preview again
 (`a_route_slower_than_mains_reaches_the_record_and_the_report`).
 
-New errors against main (Sentry's new issues in a release): every five minutes the holder reads
-each running change's or branch's error groups of the last hour and main's preview's, compares
-them by service and fingerprint (the backends' own, before previews key them), and keeps the ones
-main's doesn't have on the record (`new_errors`: how many, and the most frequent five by service
-and title, masked; their values are read only when that set moved). The verdict strip leads with
-"2 new errors against main" (opening Errors), the change page lists them, and the pull request's
-comment counts them in its checks with each title in a code span nothing in it can close. A
-change reports the preview again; an error fixed (gone from the last hour) goes.
+New errors against main (Sentry's new issues in a release): every five minutes, in the same round
+off the reconcile pass, the holder reads each running change's or branch's error groups of the
+last hour and main's preview's (once a round, and only while main's runs on this node: otherwise
+nothing is said rather than everything), compares them by service and fingerprint (the
+backends' own, before previews key them), and keeps the ones main's doesn't have on the record
+(`new_errors`: how many, and the most frequent five by service and title, masked and shown to
+120 characters; their values are read only when that set moved). The verdict strip leads with
+"2 new errors against main" (opening Errors) and the change page lists them; the pull request's
+comment only counts them by service (their lines can hold a branch's data, and anyone reading the
+pull request reads its comment). A change reports the preview again; an error fixed (gone from
+the last hour) goes. A preview asleep keeps what it last said. An error whose line holds a
+per-preview value (its id, its branch's host) can read as new where main's has the same one.
 `an_error_mains_preview_doesnt_have_reaches_the_record_and_the_report`.
 
 Repeated queries (Sentry's N+1 detection): a trace whose spans run one database statement
