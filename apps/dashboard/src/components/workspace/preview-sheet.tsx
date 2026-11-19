@@ -6,6 +6,7 @@ import { Confirm } from "@/components/ui";
 import { TerminalScreen } from "@/components/terminal-screen";
 import { endpointSlower, type EndpointTime, a11yWords, checkSummary, seoWords, duration, followLogs, followShell, openUrl, pageLabel, previewsApi, noteCropUrl, qrUrl, screenshotUrl, resourceId, thanMain, type CaughtMail, type PageCheck, type Preview, type TextDiff, type PreviewActivity, type PreviewVisitor, type PreviewKind, type PreviewShare, type RequestLine, type ServiceMetrics, type ErrorGroup } from "@/lib/previews-api";
 import { verdict, type VerdictTarget } from "@/lib/preview-verdict";
+import { isProblem, logFilter, logLevel } from "@/lib/preview-logs";
 import { formatBytes } from "@/lib/roll-api";
 import { Head, Label, Rows, Stat, Tabs } from "./inspector";
 import { FeedbackForm, replyBody, replyOf, type PreviewFeedback } from "./preview-feedback";
@@ -1604,6 +1605,10 @@ function Logs({ preview: p }: { preview: Preview }) {
   const [lines, setLines] = useState<string[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [n, setN] = useState(0);
+  // A filter over what's shown (text, or `/regex/`) and warnings-and-worse only: in the browser,
+  // on the masked lines, never sent anywhere.
+  const [q, setQ] = useState("");
+  const [problems, setProblems] = useState(false);
   // A running service's log follows as it comes (pushed) while the page is in view; any other
   // is read once.
   const running = p.services.some((x) => x.name === service && x.state === "running");
@@ -1642,6 +1647,8 @@ function Logs({ preview: p }: { preview: Preview }) {
       abort.abort();
     };
   }, [p.id, service, running, visible, n]);
+  const filter = logFilter(q);
+  const shown = (lines ?? []).map((line) => ({ line, level: logLevel(line) })).filter((l) => (filter ? filter(l.line) : true) && (!problems || isProblem(l.level)));
   if (!p.services.length) return <p className="text-[11.5px] text-subtle">No services, so no logs.</p>;
   return (
     <>
@@ -1662,14 +1669,43 @@ function Logs({ preview: p }: { preview: Preview }) {
           <RefreshCw className="size-3.5" />
         </button>
       </div>
+      <div className="mb-2 flex items-center gap-2">
+        <input
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="Filter (text or /regex/)"
+          aria-label="Filter the log"
+          className={`h-7 min-w-0 flex-1 rounded-md border bg-canvas px-2 font-mono text-[11.5px] outline-none focus:border-accent/60 ${filter ? "border-line-2" : "border-danger/60"}`}
+        />
+        <label className="flex shrink-0 items-center gap-1.5 text-[11.5px] text-soft">
+          <input type="checkbox" checked={problems} onChange={(e) => setProblems(e.target.checked)} className="accent-[var(--color-accent)]" />
+          Problems only
+        </label>
+      </div>
       {error ? (
         <p className="text-[11.5px] text-danger">{error}</p>
       ) : !lines ? (
         <p className="text-[11.5px] text-subtle">Loading…</p>
       ) : (
-        <pre className="max-h-[60vh] overflow-auto rounded-lg border border-line-2 bg-canvas p-2.5 font-mono text-[10.5px] leading-relaxed whitespace-pre-wrap text-soft [scrollbar-width:thin]">
-          {lines.length ? lines.join("\n") : "No output yet."}
-        </pre>
+        <>
+          {(q.trim() || problems) && lines.length > 0 && (
+            <p className="mb-1.5 font-mono text-[10.5px] text-subtle">
+              {filter ? `${shown.length} of ${lines.length} lines` : "That regex doesn't read: fix it to filter."}
+            </p>
+          )}
+          <pre className="max-h-[60vh] overflow-auto rounded-lg border border-line-2 bg-canvas p-2.5 font-mono text-[10.5px] leading-relaxed whitespace-pre-wrap text-soft [scrollbar-width:thin]">
+            {!lines.length
+              ? "No output yet."
+              : !shown.length
+                ? "No lines match."
+                : shown.map(({ line, level }, i) => (
+                    <span key={i} className={level === "error" || level === "fatal" ? "text-danger" : level === "warn" ? "text-fg" : undefined}>
+                      {line}
+                      {"\n"}
+                    </span>
+                  ))}
+          </pre>
+        </>
       )}
     </>
   );

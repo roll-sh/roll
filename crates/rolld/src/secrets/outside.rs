@@ -1,20 +1,28 @@
-//! Databases outside roll (roll-secrets' outside.rs), Postgres, MySQL, SQL Server, ClickHouse, RabbitMQ, Redis or MongoDB by the URL's scheme: the
+//! Databases outside roll (roll-secrets' outside.rs), Postgres, MySQL, SQL Server, ClickHouse, RabbitMQ, Redis, MongoDB,
+//! Elasticsearch/OpenSearch or Cassandra/ScyllaDB by the URL's scheme: the
 //! address is the tenant's, so the host is resolved here, private addresses are refused (unless
 //! rolld allows them for local development), and the connection goes to the address that was
-//! checked. TLS is required off private addresses. Postgres gets a new password as a SCRAM
+//! checked; through a gateway (docs/secrets.md, "Gateways") the gateway dials it instead, and TLS
+//! still runs from here to the server. TLS is required off private addresses. Postgres gets a new password as a SCRAM
 //! verifier, so neither the wire nor the server's statement log ever sees it (MySQL: mysql.rs;
-//! SQL Server: mssql.rs; ClickHouse: clickhouse.rs; RabbitMQ: rabbitmq.rs; Redis: redis.rs; MongoDB: mongo.rs).
+//! SQL Server: mssql.rs; ClickHouse: clickhouse.rs; RabbitMQ: rabbitmq.rs; Redis: redis.rs; MongoDB: mongo.rs;
+//! Elasticsearch and OpenSearch: search.rs; Cassandra and ScyllaDB: cql.rs).
 
 mod clickhouse;
+mod cql;
+mod https;
 mod mongo;
 mod mssql;
 mod mysql;
 mod rabbitmq;
 mod redis;
+mod search;
 
+use roll_secrets::outside::Target;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_postgres::config::{Host, SslMode};
 use tokio_rustls::rustls;
 use tokio_rustls::rustls::pki_types::CertificateDer;
@@ -23,12 +31,124 @@ use tokio_rustls::rustls::pki_types::pem::PemObject;
 /// One connection's whole conversation, connecting included.
 const TIMEOUT: Duration = Duration::from_secs(15);
 
+/// A byte stream to a server: a TCP connection, or a stream through a gateway.
+pub(crate) trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> Io for T {}
+
+/// How a conversation reaches a server.
+#[derive(Clone)]
+pub(crate) enum Via {
+    /// From rolld: an address it resolved and checked (public, unless private ones are allowed).
+    Direct { allow_private: bool },
+    /// Through a gateway's link, held on this node: the gateway resolves and dials, and decides
+    /// what it may reach.
+    Gateway(Arc<super::gateway::Link>),
+}
+
+impl Via {
+    /// A stream to `host:port`.
+    pub(super) async fn dial(&self, host: &str, port: u16) -> Result<Box<dyn Io>, String> {
+        match self {
+            Via::Direct { allow_private } => {
+                let addr = resolve(host, port, *allow_private).await?;
+                let tcp = tokio::time::timeout(TIMEOUT, tokio::net::TcpStream::connect(addr)).await.map_err(|_| format!("{host}: timed out connecting"))?.map_err(|e| format!("{host}: {e}"))?;
+                let _ = tcp.set_nodelay(true);
+                Ok(Box::new(tcp))
+            }
+            Via::Gateway(link) => Ok(Box::new(link.open(host, port).await?)),
+        }
+    }
+
+    /// The targets of `srv`'s SRV record (`mongodb+srv://`): from roll's DNS, or looked up by the
+    /// gateway with the network's (a private cluster's name usually resolves only inside it).
+    /// Each target is still dialed through [`Via::dial`], so its address is checked there.
+    pub(super) async fn srv(&self, srv: &str) -> Result<Vec<(String, u16)>, String> {
+        match self {
+            Via::Direct { .. } => {
+                let resolver = hickory_resolver::TokioResolver::builder_tokio().map_err(|e| e.to_string())?.build().map_err(|e| e.to_string())?;
+                let found = resolver.srv_lookup(format!("{srv}.")).await.map_err(|_| format!("{srv} has no SRV record"))?;
+                Ok(found
+                    .answers()
+                    .iter()
+                    .filter_map(|r| match &r.data {
+                        hickory_resolver::proto::rr::RData::SRV(s) => Some((s.target.to_ascii().trim_end_matches('.').to_ascii_lowercase(), s.port)),
+                        _ => None,
+                    })
+                    .take(roll_gateway::proto::MAX_TARGETS)
+                    .collect())
+            }
+            Via::Gateway(link) => link.resolve_srv(srv).await,
+        }
+    }
+}
+
+/// The provider roll-secrets calls: a database behind a gateway runs where the gateway's link is
+/// ([`super::gateway::Gateways::call`]); any other runs here.
 pub(crate) struct Guarded {
     pub allow_private: bool,
+    pub gateways: Arc<super::gateway::Gateways>,
+}
+
+impl Guarded {
+    fn here(&self) -> Engine {
+        Engine { allow_private: self.allow_private, via: Via::Direct { allow_private: self.allow_private } }
+    }
 }
 
 impl roll_secrets::outside::OutsideDb for Guarded {
-    fn check(&self, url: &str, ca: Option<&str>, roles: &[String], group: Option<&str>) -> Result<(), String> {
+    fn check(&self, at: &Target<'_>, roles: &[String], group: Option<&str>) -> Result<(), String> {
+        match at.gateway {
+            Some(g) => self.gateways.call(g, super::gateway::Call::DbCheck { url: at.url.into(), ca: at.ca.map(Into::into), roles: roles.to_vec(), group: group.map(Into::into) }).map(drop),
+            None => self.here().check(at, roles, group),
+        }
+    }
+
+    fn set_password(&self, at: &Target<'_>, role: &str, password: &str) -> Result<(), String> {
+        match at.gateway {
+            Some(g) => self.gateways.call(g, super::gateway::Call::DbSetPassword { url: at.url.into(), ca: at.ca.map(Into::into), role: role.into(), password: password.into() }).map(drop),
+            None => self.here().set_password(at, role, password),
+        }
+    }
+
+    fn create_login(&self, at: &Target<'_>, name: &str, password: &str, group: &str, until: i64) -> Result<(), String> {
+        match at.gateway {
+            Some(g) => self.gateways.call(g, super::gateway::Call::DbCreateLogin { url: at.url.into(), ca: at.ca.map(Into::into), name: name.into(), password: password.into(), group: group.into(), until }).map(drop),
+            None => self.here().create_login(at, name, password, group, until),
+        }
+    }
+
+    fn extend_login(&self, at: &Target<'_>, name: &str, until: i64) -> Result<(), String> {
+        match at.gateway {
+            Some(g) => self.gateways.call(g, super::gateway::Call::DbExtendLogin { url: at.url.into(), ca: at.ca.map(Into::into), name: name.into(), until }).map(drop),
+            None => self.here().extend_login(at, name, until),
+        }
+    }
+
+    fn drop_login(&self, at: &Target<'_>, name: &str) -> Result<(), String> {
+        match at.gateway {
+            Some(g) => self.gateways.call(g, super::gateway::Call::DbDropLogin { url: at.url.into(), ca: at.ca.map(Into::into), name: name.into() }).map(drop),
+            None => self.here().drop_login(at, name),
+        }
+    }
+
+    fn set_own_password(&self, at: &Target<'_>, password: &str) -> Result<(), String> {
+        match at.gateway {
+            Some(g) => self.gateways.call(g, super::gateway::Call::DbSetOwnPassword { url: at.url.into(), ca: at.ca.map(Into::into), password: password.into() }).map(drop),
+            None => self.here().set_own_password(at, password),
+        }
+    }
+}
+
+/// One conversation's way to the server, and the deployment's rule on plain text
+/// (`allow_private`: local development only, gateway or not).
+pub(crate) struct Engine {
+    pub allow_private: bool,
+    pub via: Via,
+}
+
+impl roll_secrets::outside::OutsideDb for Engine {
+    fn check(&self, at: &Target<'_>, roles: &[String], group: Option<&str>) -> Result<(), String> {
+        let (url, ca) = (at.url, at.ca);
         let (roles, group) = (roles.to_vec(), group.map(str::to_string));
         if let Some(u) = self.mysql(url)? {
             return self.my(u, ca, async move |c| mysql::check(c, &roles, group.as_deref()).await);
@@ -48,6 +168,12 @@ impl roll_secrets::outside::OutsideDb for Guarded {
         if let Some(u) = self.rabbitmq(url)? {
             return self.rq(u, ca, async move |c| rabbitmq::check(c, &roles, group.as_deref()).await);
         }
+        if let Some(u) = self.search(url)? {
+            return self.es(u, ca, async move |c| search::check(c, &roles, group.as_deref()).await);
+        }
+        if let Some(u) = self.cql(url)? {
+            return self.cq(u, ca, async move |c| cql::check(c, &roles, group.as_deref()).await);
+        }
         self.run(url, ca, move |c| {
             Box::pin(async move {
                 let rows = c.query("SELECT rolname FROM pg_roles WHERE rolname = ANY($1) AND rolcanlogin", &[&roles]).await.map_err(db_error)?;
@@ -65,7 +191,8 @@ impl roll_secrets::outside::OutsideDb for Guarded {
         })
     }
 
-    fn set_password(&self, url: &str, ca: Option<&str>, role: &str, password: &str) -> Result<(), String> {
+    fn set_password(&self, at: &Target<'_>, role: &str, password: &str) -> Result<(), String> {
+        let (url, ca) = (at.url, at.ca);
         if let Some(u) = self.mysql(url)? {
             return self.my(u, ca, async move |c| mysql::set_password(c, role, password).await);
         }
@@ -84,12 +211,24 @@ impl roll_secrets::outside::OutsideDb for Guarded {
         if let Some(u) = self.rabbitmq(url)? {
             return self.rq(u, ca, async move |c| rabbitmq::set_password(c, role, password).await);
         }
+        if let Some(u) = self.search(url)? {
+            return self.es(u, ca, async move |c| search::set_password(c, role, password).await);
+        }
+        if let Some(u) = self.cql(url)? {
+            // Handed out (or retired) as soon as this returns: wait out Cassandra's credentials
+            // cache, which refuses the new password for up to 2 s (cql::settled).
+            let next = u.as_user(role, password);
+            self.cq(u, ca, async move |c| cql::set_password(c, role, password).await)?;
+            tokio::runtime::Handle::current().block_on(cql::settled(&next, ca, &self.via));
+            return Ok(());
+        }
         // Checked by roll-secrets (lowercase letters, digits, _), quoted anyway.
         let sql = format!("ALTER ROLE {} PASSWORD '{}'", ident(role), postgres_protocol::password::scram_sha_256(password.as_bytes()));
         self.run(url, ca, move |c| Box::pin(async move { c.batch_execute(&sql).await.map_err(db_error) }))
     }
 
-    fn create_login(&self, url: &str, ca: Option<&str>, name: &str, password: &str, group: &str, until: i64) -> Result<(), String> {
+    fn create_login(&self, at: &Target<'_>, name: &str, password: &str, group: &str, until: i64) -> Result<(), String> {
+        let (url, ca) = (at.url, at.ca);
         if let Some(u) = self.mysql(url)? {
             return self.my(u, ca, async move |c| mysql::create_login(c, name, password, group).await);
         }
@@ -108,20 +247,30 @@ impl roll_secrets::outside::OutsideDb for Guarded {
         if let Some(u) = self.rabbitmq(url)? {
             return self.rq(u, ca, async move |c| rabbitmq::create_login(c, name, password, group).await);
         }
+        if let Some(u) = self.search(url)? {
+            return self.es(u, ca, async move |c| search::create_login(c, name, password, group).await);
+        }
+        if let Some(u) = self.cql(url)? {
+            return self.cq(u, ca, async move |c| cql::create_login(c, name, password, group).await);
+        }
         let sql = format!("CREATE ROLE {} LOGIN PASSWORD '{}' VALID UNTIL '{}' IN ROLE {}", ident(name), postgres_protocol::password::scram_sha_256(password.as_bytes()), stamp(until)?, ident(group));
         self.run(url, ca, move |c| Box::pin(async move { c.batch_execute(&sql).await.map_err(db_error) }))
     }
 
-    fn extend_login(&self, url: &str, ca: Option<&str>, name: &str, until: i64) -> Result<(), String> {
-        // MySQL, SQL Server, ClickHouse, RabbitMQ, Redis and MongoDB have no expiry for a login: it lasts until roll ends the lease.
-        if self.mysql(url)?.is_some() || self.mssql(url)?.is_some() || self.clickhouse(url)?.is_some() || self.rabbitmq(url)?.is_some() || self.redis(url)?.is_some() || self.mongo(url)?.is_some() {
+    fn extend_login(&self, at: &Target<'_>, name: &str, until: i64) -> Result<(), String> {
+        let (url, ca) = (at.url, at.ca);
+        // MySQL, SQL Server, ClickHouse, RabbitMQ, Redis, MongoDB, Elasticsearch, OpenSearch, Cassandra and ScyllaDB have
+        // no expiry for a login: it lasts until roll ends the lease.
+        let none = self.mysql(url)?.is_some() || self.mssql(url)?.is_some() || self.clickhouse(url)?.is_some() || self.rabbitmq(url)?.is_some();
+        if none || self.redis(url)?.is_some() || self.mongo(url)?.is_some() || self.search(url)?.is_some() || self.cql(url)?.is_some() {
             return Ok(());
         }
         let sql = format!("ALTER ROLE {} VALID UNTIL '{}'", ident(name), stamp(until)?);
         self.run(url, ca, move |c| Box::pin(async move { c.batch_execute(&sql).await.map_err(db_error) }))
     }
 
-    fn drop_login(&self, url: &str, ca: Option<&str>, name: &str) -> Result<(), String> {
+    fn drop_login(&self, at: &Target<'_>, name: &str) -> Result<(), String> {
+        let (url, ca) = (at.url, at.ca);
         if let Some(u) = self.mysql(url)? {
             return self.my(u, ca, async move |c| mysql::drop_login(c, name).await);
         }
@@ -140,6 +289,12 @@ impl roll_secrets::outside::OutsideDb for Guarded {
         if let Some(u) = self.rabbitmq(url)? {
             return self.rq(u, ca, async move |c| rabbitmq::drop_login(c, name).await);
         }
+        if let Some(u) = self.search(url)? {
+            return self.es(u, ca, async move |c| search::drop_login(c, name).await);
+        }
+        if let Some(u) = self.cql(url)? {
+            return self.cq(u, ca, async move |c| cql::drop_login(c, name).await);
+        }
         let name = name.to_string();
         self.run(url, ca, move |c| {
             Box::pin(async move {
@@ -155,7 +310,8 @@ impl roll_secrets::outside::OutsideDb for Guarded {
         })
     }
 
-    fn set_own_password(&self, url: &str, ca: Option<&str>, password: &str) -> Result<(), String> {
+    fn set_own_password(&self, at: &Target<'_>, password: &str) -> Result<(), String> {
+        let (url, ca) = (at.url, at.ca);
         // MySQL's account carries a host the URL doesn't say: the server knows which it is.
         if let Some(u) = self.mysql(url)? {
             return self.my(u, ca, async move |c| mysql::set_own_password(c, password).await);
@@ -179,8 +335,31 @@ impl roll_secrets::outside::OutsideDb for Guarded {
         if let Some(u) = self.rabbitmq(url)? {
             return self.rq(u, ca, async move |c| rabbitmq::set_password(c, &user, password).await);
         }
+        if let Some(u) = self.search(url)? {
+            return self.es(u, ca, async move |c| search::set_own_password(c, password).await);
+        }
+        if let Some(u) = self.cql(url)? {
+            let next = u.with_password(password);
+            self.cq(u, ca, async move |c| cql::set_own_password(c, password).await)?;
+            tokio::runtime::Handle::current().block_on(cql::settled(&next, ca, &self.via));
+            return Ok(());
+        }
+        if !(url.starts_with("postgres://") || url.starts_with("postgresql://")) {
+            return Err(unrotatable(url));
+        }
         let sql = format!("ALTER ROLE CURRENT_USER PASSWORD '{}'", postgres_protocol::password::scram_sha_256(password.as_bytes()));
         self.run(url, ca, move |c| Box::pin(async move { c.batch_execute(&sql).await.map_err(db_error) }))
+    }
+}
+
+/// A URL no engine here rotates its own password for: named by its scheme alone (the rest holds
+/// the password).
+fn unrotatable(url: &str) -> String {
+    match url.split_once("://") {
+        Some((scheme, _)) if !scheme.is_empty() && scheme.len() <= 32 && scheme.bytes().all(|b| b.is_ascii_alphanumeric() || b"+.-".contains(&b)) => {
+            format!("roll can't rotate a {scheme}:// admin URL's own password")
+        }
+        _ => "roll can't rotate this admin URL's own password".into(),
     }
 }
 
@@ -203,7 +382,7 @@ fn stamp(ms: i64) -> Result<String, String> {
 
 type Done = std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>>;
 
-impl Guarded {
+impl Engine {
     /// A `mysql://` URL's settings; `None` for Postgres.
     fn mysql(&self, url: &str) -> Result<Option<mysql::Url>, String> {
         if url.starts_with("mysql://") { mysql::parse(url, self.allow_private).map(Some) } else { Ok(None) }
@@ -220,18 +399,18 @@ impl Guarded {
     }
 
     fn mg<T>(&self, u: mongo::Url, ca: Option<&str>, work: impl AsyncFnOnce(&mut mongo::Conn) -> Result<T, String>) -> Result<T, String> {
-        tokio::runtime::Handle::current().block_on(mongo::run(u, ca.map(str::to_string), self.allow_private, work))
+        tokio::runtime::Handle::current().block_on(mongo::run(u, ca.map(str::to_string), self.via.clone(), work))
     }
 
     fn rd<T>(&self, u: redis::Url, ca: Option<&str>, work: impl AsyncFnOnce(&mut redis::Conn) -> Result<T, String>) -> Result<T, String> {
-        tokio::runtime::Handle::current().block_on(redis::run(u, ca.map(str::to_string), self.allow_private, work))
+        tokio::runtime::Handle::current().block_on(redis::run(u, ca.map(str::to_string), self.via.clone(), work))
     }
 
     fn my<T>(&self, u: mysql::Url, ca: Option<&str>, work: impl AsyncFnOnce(&mut mysql_async::Conn) -> Result<T, String>) -> Result<T, String> {
         // mysql_async builds its TLS config with the process's provider; rolld has two compiled
         // in, so name one (as roll-edge does).
         let _ = rustls::crypto::ring::default_provider().install_default();
-        tokio::runtime::Handle::current().block_on(mysql::run(u, ca.map(str::to_string), self.allow_private, work))
+        tokio::runtime::Handle::current().block_on(mysql::run(u, ca.map(str::to_string), self.via.clone(), work))
     }
 
     /// A `sqlserver://` URL's settings; `None` for the others.
@@ -242,7 +421,7 @@ impl Guarded {
     fn ms<T>(&self, u: mssql::Url, ca: Option<&str>, work: impl AsyncFnOnce(&mut mssql::Conn) -> Result<T, String>) -> Result<T, String> {
         // tiberius builds its TLS config with the process's provider: name one, as for MySQL.
         let _ = rustls::crypto::ring::default_provider().install_default();
-        tokio::runtime::Handle::current().block_on(mssql::run(u, ca.map(str::to_string), self.allow_private, work))
+        tokio::runtime::Handle::current().block_on(mssql::run(u, ca.map(str::to_string), self.via.clone(), work))
     }
 
     /// A `clickhouse://` URL's settings; `None` for the others.
@@ -251,7 +430,7 @@ impl Guarded {
     }
 
     fn ch<T>(&self, u: clickhouse::Url, ca: Option<&str>, work: impl AsyncFnOnce(&clickhouse::Conn) -> Result<T, String>) -> Result<T, String> {
-        tokio::runtime::Handle::current().block_on(clickhouse::run(u, ca.map(str::to_string), self.allow_private, work))
+        tokio::runtime::Handle::current().block_on(clickhouse::run(u, ca.map(str::to_string), self.via.clone(), work))
     }
 
     /// A `rabbitmq://` URL's settings; `None` for the others.
@@ -260,26 +439,44 @@ impl Guarded {
     }
 
     fn rq<T>(&self, u: rabbitmq::Url, ca: Option<&str>, work: impl AsyncFnOnce(&rabbitmq::Conn) -> Result<T, String>) -> Result<T, String> {
-        tokio::runtime::Handle::current().block_on(rabbitmq::run(u, ca.map(str::to_string), self.allow_private, work))
+        tokio::runtime::Handle::current().block_on(rabbitmq::run(u, ca.map(str::to_string), self.via.clone(), work))
+    }
+
+    /// An `elasticsearch://` or `opensearch://` URL's settings; `None` for the others.
+    fn search(&self, url: &str) -> Result<Option<search::Url>, String> {
+        if url.starts_with("elasticsearch://") || url.starts_with("opensearch://") { search::parse(url).map(Some) } else { Ok(None) }
+    }
+
+    fn es<T>(&self, u: search::Url, ca: Option<&str>, work: impl AsyncFnOnce(&search::Conn) -> Result<T, String>) -> Result<T, String> {
+        tokio::runtime::Handle::current().block_on(search::run(u, ca.map(str::to_string), self.via.clone(), work))
+    }
+
+    /// A `cassandra://` URL's settings; `None` for the others.
+    fn cql(&self, url: &str) -> Result<Option<cql::Url>, String> {
+        if url.starts_with("cassandra://") { cql::parse(url).map(Some) } else { Ok(None) }
+    }
+
+    fn cq<T>(&self, u: cql::Url, ca: Option<&str>, work: impl AsyncFnOnce(&mut cql::Conn) -> Result<T, String>) -> Result<T, String> {
+        tokio::runtime::Handle::current().block_on(cql::run(u, ca.map(str::to_string), self.via.clone(), work))
     }
 
     fn run(&self, url: &str, ca: Option<&str>, work: impl FnOnce(tokio_postgres::Client) -> Done + Send + 'static) -> Result<(), String> {
         let (config, host, tls) = self.config(url, ca)?;
-        let allow_private = self.allow_private;
+        let via = self.via.clone();
         let go = async move {
-            let mut config = config;
-            let addr = resolve(&host, port(&config), allow_private).await?;
-            config.hostaddr(addr.ip());
-            config.connect_timeout(TIMEOUT);
+            // The stream comes from here or through a gateway; TLS runs over it to the server,
+            // checked against the URL's host either way.
+            let stream = via.dial(&host, port(&config)).await?;
             let client = match tls {
-                Some(tls) => {
-                    let (client, conn) = config.connect(tls).await.map_err(|e| connect_error(&host, e))?;
+                Some(mut tls) => {
+                    let tls = tokio_postgres::tls::MakeTlsConnect::<Box<dyn Io>>::make_tls_connect(&mut tls, &host).map_err(|e| format!("{host}: {e}"))?;
+                    let (client, conn) = config.connect_raw(stream, tls).await.map_err(|e| connect_error(&host, e))?;
                     // The connection's task ends with the conversation's timeout, whatever the server does.
                     tokio::spawn(tokio::time::timeout(TIMEOUT, conn));
                     client
                 }
                 None => {
-                    let (client, conn) = config.connect(tokio_postgres::NoTls).await.map_err(|e| connect_error(&host, e))?;
+                    let (client, conn) = config.connect_raw(stream, tokio_postgres::NoTls).await.map_err(|e| connect_error(&host, e))?;
                     tokio::spawn(tokio::time::timeout(TIMEOUT, conn));
                     client
                 }
@@ -330,7 +527,7 @@ fn port(c: &tokio_postgres::Config) -> u16 {
 }
 
 /// The host's first address, refusing a private one.
-async fn resolve(host: &str, port: u16, allow_private: bool) -> Result<SocketAddr, String> {
+pub(super) async fn resolve(host: &str, port: u16, allow_private: bool) -> Result<SocketAddr, String> {
     let addrs: Vec<SocketAddr> = match host.parse::<IpAddr>() {
         Ok(ip) => vec![SocketAddr::new(ip, port)],
         Err(_) => tokio::net::lookup_host((host, port)).await.map_err(|_| format!("{host} doesn't resolve"))?.collect(),
@@ -342,7 +539,7 @@ async fn resolve(host: &str, port: u16, allow_private: bool) -> Result<SocketAdd
     Ok(addr)
 }
 
-fn tls_config(ca: Option<&str>) -> Result<rustls::ClientConfig, String> {
+pub(super) fn tls_config(ca: Option<&str>) -> Result<rustls::ClientConfig, String> {
     let mut roots = rustls::RootCertStore::empty();
     for c in rustls_native_certs::load_native_certs().certs {
         let _ = roots.add(c);
@@ -374,10 +571,21 @@ fn connect_error(host: &str, e: tokio_postgres::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use roll_secrets::outside::OutsideDb;
+
+    /// An engine reaching the servers the real-server tests start (on loopback) from here.
+    pub(super) fn direct() -> Engine {
+        Engine { allow_private: true, via: Via::Direct { allow_private: true } }
+    }
+
+    /// Where a server is, with no gateway.
+    pub(super) fn at<'a>(url: &'a str, ca: Option<&'a str>) -> Target<'a> {
+        Target { url, ca, gateway: None }
+    }
 
     #[tokio::test]
     async fn a_tenants_url_reaches_only_a_public_database_over_tls() {
-        let g = Guarded { allow_private: false };
+        let g = Engine { allow_private: false, via: Via::Direct { allow_private: false } };
         let refused = |url: &str| g.config(url, None).err().unwrap_or_else(|| panic!("{url} was taken"));
         assert!(refused("postgres://a:b@db.example.com/x?sslrootcert=/etc/shadow").contains("sslrootcert"));
         assert!(refused("postgres://a:b@db.example.com/x?sslmode=disable").contains("TLS"));
@@ -394,11 +602,13 @@ mod tests {
         assert!(g.redis("redis://:pw@cache.example.com").err().unwrap().contains("rediss://"));
         assert!(g.redis("rediss://admin:pw@cache.example.com:6380").unwrap().is_some());
         // MongoDB: tls=true (mongodb+srv:// implies it), and nothing but what Atlas's strings carry.
+        // Atlas itself is refused: its users are managed only through its Admin API.
         assert!(g.mongo("mongodb://a:b@db.example.com:27017/").err().unwrap().contains("tls=true"));
         assert!(g.mongo("mongodb://a:b@db.example.com/?tls=true&tlsInsecure=true").err().unwrap().contains("tlsInsecure"));
-        assert!(g.mongo("mongodb+srv://a:b@cluster0.abcde.mongodb.net/?retryWrites=true&w=majority&appName=c").unwrap().is_some());
+        assert!(g.mongo("mongodb+srv://a:b@mongo.db.example.com/?retryWrites=true&w=majority&appName=c").unwrap().is_some());
+        assert!(g.mongo("mongodb+srv://a:b@cluster0.abcde.mongodb.net/").err().unwrap().contains("atlas-projects"));
         // SQL Server: TLS always (encrypt=false is refused even where private addresses are allowed).
-        assert!(Guarded { allow_private: true }.mssql("sqlserver://a:b@db.example.com/x?encrypt=false").err().unwrap().contains("TLS"));
+        assert!(Engine { allow_private: true, via: Via::Direct { allow_private: true } }.mssql("sqlserver://a:b@db.example.com/x?encrypt=false").err().unwrap().contains("TLS"));
         assert!(g.mssql("sqlserver://a:b@db.example.com/x?trustServerCertificate=true").err().unwrap().contains("trustServerCertificate"));
         assert!(g.mssql("sqlserver://a:b@db.example.com/x?encrypt=true").unwrap().is_some());
         // ClickHouse: its HTTPS interface, no settings.
@@ -407,6 +617,16 @@ mod tests {
         // RabbitMQ: the management HTTPS API, a vhost, no settings.
         assert!(g.rabbitmq("rabbitmq://a:b@mq.example.com:15671/%2F?x=1").err().unwrap().contains("settings"));
         assert!(g.rabbitmq("rabbitmq://a:b@mq.example.com/").unwrap().is_some());
+        // Elasticsearch and OpenSearch: the HTTPS port, no path or settings.
+        assert!(g.search("elasticsearch://a:b@es.example.com:9200/?scheme=http").err().unwrap().contains("scheme"));
+        assert!(g.search("opensearch://a:b@os.example.com/index").is_err());
+        assert!(g.search("elasticsearch://a:b@es.example.com").unwrap().is_some());
+        // Cassandra and ScyllaDB: CQL over TLS, an optional keyspace, no settings.
+        assert!(g.cql("cassandra://a:b@db.example.com:9142/app?ssl=false").err().unwrap().contains("ssl"));
+        assert!(g.cql("cassandra://a:b@db.example.com/app").unwrap().is_some());
+        // A scheme no engine rotates is refused by name, never tried as Postgres.
+        assert_eq!(g.set_own_password(&at("snowflake://a:fake-pw@x.example.com/db", None), "x").unwrap_err(), "roll can't rotate a snowflake:// admin URL's own password");
+        assert!(!g.set_own_password(&at("user=a password=fake-pw", None), "x").unwrap_err().contains("fake-pw"));
         assert!(resolve("127.0.0.1", 5432, false).await.unwrap_err().contains("private"));
         assert!(resolve("10.1.2.3", 5432, false).await.unwrap_err().contains("private"));
     }

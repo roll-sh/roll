@@ -1661,7 +1661,9 @@ type Settings = {
   more: every word against title, branch, slug, repo or `#number`, and All, Needs you, Failed,
   Awake, Asleep with their counts; `lib/preview-filter.ts`), status, cost, how many errors
   its services wrote in the last hour, logs, and open, sleep, wake, reset and delete
-  actions. A preview's sheet has its Overview, Activity, Logs (live while a service runs), Shell
+  actions. A preview's sheet has its Overview, Activity, Logs (live while a service runs; a filter
+  box, text or `/regex/`, and "Problems only", warnings and worse read as roll apps reads a line's
+  level, `lib/preview-logs.ts`; errors in red; all in the browser on the masked lines), Shell
   (a terminal on a `roll.toml` service's shell: "A shell in a preview"; it shares roll apps'
   terminal, `components/terminal-screen.tsx`), Requests and Errors (its services' errors grouped, newest first, each with how many times, when
   last seen, the service and its title, opening to its newest sample; the last hour, 6 or 24),
@@ -2020,10 +2022,10 @@ Every feature in review has its `roll preview` command too: `shell` (#364).
 2. **A preview's `roll.toml` services and jobs in the project's log drains, in review** (#363):
    roll apps' drains with `previews: true` got only roll apps' own `pv-` environments, so a team
    with Datadog on a drain saw half of a preview's output. See "Log drains" under Services.
-3. **Search and levels in the sheet's logs** (Vercel's runtime logs, Render's log explorer): the
-   Logs tab is a plain tail. A filter box (matched on the masked lines, never sent anywhere),
-   stderr apart, and errors' lines marked, so a person finds the failing request in a busy log
-   without `roll preview logs | grep`.
+3. **Search and levels in the sheet's logs, in review** (`feature/roll-previews-log-search`, on
+   #364; Vercel's runtime logs, Render's log explorer): a filter box (text or `/regex/`, on the
+   masked lines, in the browser), "Problems only", and errors marked, read as roll apps reads a
+   line's level. Next for it: stderr apart (the followed stream doesn't say which yet).
 4. **Files in and out of a preview's service, in review** (`feature/roll-previews-files`, on
    #364; `roll preview cp`, as roll apps' `…/files`): a dump taken in the shell, a fixture put
    in, `docker cp` in the service's container, admin as the shell is, 100 MiB a time.
