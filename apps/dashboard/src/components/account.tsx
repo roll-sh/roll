@@ -714,6 +714,53 @@ function YourData({ handle }: { handle: string }) {
 }
 
 /** Your security log (GitHub's): sign-ins, refused ones too, and changes to your account. */
+/** Admins: one person's sessions (each can be ended) and security log, as they see it themselves. */
+function PersonLog({ user }: { user: User }) {
+  const [sessions, setSessions] = useState<Session[] | null>(null);
+  const [events, setEvents] = useState<Activity[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const load = useCallback(() => {
+    accountsApi.userSessions(user.id).then(setSessions, (e) => setError(errorText(e)));
+    accountsApi.userActivity(user.id).then(({ events }) => setEvents(events), (e) => setError(errorText(e)));
+  }, [user.id]);
+  useEffect(() => load(), [load]);
+  const who = user.name || user.handle;
+  return (
+    <div className="space-y-3 border-t border-line bg-canvas/40 px-4 py-3 text-[12px]">
+      {error && <p className="text-danger">{error}</p>}
+      <div>
+        <p className="mb-1 text-[11px] font-medium text-subtle">Sessions</p>
+        {sessions && sessions.length === 0 && <p className="text-subtle">{who} isn&apos;t signed in anywhere.</p>}
+        {(sessions ?? []).map((s) => (
+          <div key={s.id} className="flex items-center gap-3 py-1">
+            <span className="min-w-0 flex-1 truncate">{browser(s.user_agent)}</span>
+            <span className="shrink-0 text-[11px] text-subtle">since {when(s.created_at)} · last {when(s.seen_at)}</span>
+            <button onClick={() => accountsApi.endUserSession(user.id, s.id).then(load, (e) => setError(errorText(e)))} className={btn}>
+              End
+            </button>
+          </div>
+        ))}
+      </div>
+      <div>
+        <p className="mb-1 text-[11px] font-medium text-subtle">Recent activity, as {who} sees it</p>
+        {events && events.length === 0 && <p className="text-subtle">Nothing yet.</p>}
+        {(events ?? []).slice(0, 20).map((e, i) => (
+          <div key={`${e.at}-${i}`} className="flex items-baseline gap-3 py-0.5">
+            <span className={`min-w-0 flex-1 ${e.ok ? "" : "text-danger"}`}>{activityText(e, user.id)}</span>
+            <span className="hidden truncate font-mono text-[11px] text-subtle sm:inline">{[e.ip, e.user_agent ? browser(e.user_agent) : null].filter(Boolean).join(" · ")}</span>
+            <span className="shrink-0 text-[11px] text-subtle">{when(e.at)}</span>
+          </div>
+        ))}
+        {events && events.length > 20 && (
+          <Link href={`/dashboard/access/audit?product=accounts&resource=${encodeURIComponent(user.id)}`} className="text-accent hover:underline">
+            Everything in the audit log
+          </Link>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function RecentActivity({ me }: { me: string }) {
   const [list, setList] = useState<Activity[] | null>(null);
   const [more, setMore] = useState(false);
@@ -883,6 +930,7 @@ function Users({ me }: { me: string }) {
     accountsApi.accountPolicy().then((p) => setRequired(p.require_second_factor), () => setRequired(false));
   }, []);
   const act = (p: Promise<unknown>) => p.then(load, (e) => setError(errorText(e)));
+  const [open, setOpen] = useState<string | null>(null);
   const without = (list ?? []).filter((u) => !u.disabled && !u.totp && !u.passkeys).length;
   return (
     <Section title="People" lead="Everyone with an account. Turning someone off signs them out everywhere at once.">
@@ -901,7 +949,8 @@ function Users({ me }: { me: string }) {
       )}
       <div className={card}>
         {(list ?? []).map((u) => (
-          <div key={u.id} className={`flex items-center gap-3 border-t border-line px-4 py-2.5 first:border-t-0 ${u.disabled ? "opacity-60" : ""}`}>
+          <div key={u.id} className="border-t border-line first:border-t-0">
+          <div className={`flex flex-wrap items-center gap-3 px-4 py-2.5 ${u.disabled ? "opacity-60" : ""}`}>
             <span className="min-w-0 flex-1 leading-tight">
               <span className="block truncate text-[12.5px]">
                 {u.name || u.handle} <span className="font-mono text-[11px] text-subtle">{u.handle}</span>
@@ -914,6 +963,9 @@ function Users({ me }: { me: string }) {
             </span>
             {u.id !== me && (
               <>
+                <button onClick={() => setOpen(open === u.id ? null : u.id)} aria-expanded={open === u.id} className={btn}>
+                  Security log
+                </button>
                 <button onClick={() => act(accountsApi.updateUser(u.id, { admin: !u.admin }))} className={btn}>
                   {u.admin ? "Remove admin" : "Make admin"}
                 </button>
@@ -926,6 +978,8 @@ function Users({ me }: { me: string }) {
               </>
             )}
             {u.id === me && <span className="text-[11px] text-accent">You{u.admin ? " · admin" : ""}</span>}
+          </div>
+          {open === u.id && <PersonLog user={u} />}
           </div>
         ))}
       </div>
