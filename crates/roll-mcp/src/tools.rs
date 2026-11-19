@@ -73,6 +73,9 @@ pub struct Tool {
     /// Fields of its answer that anyone outside can write (a site's form submissions): withheld in
     /// lockdown wherever they sit, as an outside record's text is (lockdown::withhold_fields).
     pub outside: &'static [&'static str],
+    /// It makes roll reach outside it, to an address the caller chose (a task's URL, a webhook, a log
+    /// drain, a Git URL or image, a vendor's API): MCP's `openWorldHint`, so a client can say so.
+    pub open_world: bool,
 }
 
 pub enum Built {
@@ -184,7 +187,7 @@ impl Tool {
             "title": self.title,
             "description": self.description,
             "inputSchema": { "type": "object", "properties": props, "required": required, "additionalProperties": false },
-            "annotations": { "readOnlyHint": read_only, "destructiveHint": destructive, "idempotentHint": idempotent, "openWorldHint": false },
+            "annotations": { "readOnlyHint": read_only, "destructiveHint": destructive, "idempotentHint": idempotent, "openWorldHint": self.open_world },
             "_meta": { "roll/product": self.product, "roll/route": format!("{} {}", self.method, self.path), "roll/actions": actions },
         })
     }
@@ -279,7 +282,7 @@ const IDEMPOTENCY: P = P { name: "idempotency_key", ty: Ty::Str, at: At::Header(
 const IN_PROJECT: P = P { name: "workspace_project", ty: Ty::Str, at: At::Header("x-roll-project"), required: false, desc: "Workspace project (prj_…) to put the new resource in" };
 
 const fn t(name: &'static str, title: &'static str, description: &'static str, product: &'static str, method: &'static str, path: &'static str, params: &'static [P]) -> Tool {
-    Tool { name, title, description, product, method, path, params, fixed: None, wrap: None, hint: Hint::Auto, until: None, outside: &[] }
+    Tool { name, title, description, product, method, path, params, fixed: None, wrap: None, hint: Hint::Auto, until: None, outside: &[], open_world: false }
 }
 
 /// A tasks run that's over (`completed`, `failed` or `canceled`).
@@ -319,6 +322,10 @@ impl Tool {
     }
     const fn until(mut self, f: fn(&Value) -> bool) -> Tool {
         self.until = Some(f);
+        self
+    }
+    const fn open_world(mut self) -> Tool {
+        self.open_world = true;
         self
     }
     const fn outside(mut self, fields: &'static [&'static str]) -> Tool {
@@ -691,20 +698,20 @@ static TOOLS: &[Tool] = &[
         "POST",
         "/v1/tasks/publish",
         &[b("url", Ty::Str, "Destination URL"), b("topic", Ty::Str, "Or a topic"), b("queue", Ty::Str, "Or a queue"), b("body", Ty::Str, "Body"), b("headers", Ty::Obj, "Headers"), b("delay", Ty::Str, "e.g. 10s, 5m"), b("retries", Ty::Int, "Retries")],
-    ),
+    ).open_world(),
     t("tasks_list_messages", "List task messages", "Messages by state, queue or topic.", "tasks", "GET", "/v1/tasks/messages", &[q("state", Ty::Str, "pending, delivered, failed…"), q("queue", Ty::Str, "Queue"), q("limit", Ty::Int, "At most")]),
     t("tasks_get_message", "Get a task message", "A message and its delivery attempts.", "tasks", "GET", "/v1/tasks/messages/{id}", &[req("id", "Message id (msg_…)")]),
     t("tasks_cancel_message", "Cancel a task message", "Cancel a message (purge=true deletes it).", "tasks", "DELETE", "/v1/tasks/messages/{id}", &[req("id", "Message id"), q("purge", Ty::Bool, "Delete it for good")]),
     t("tasks_list_schedules", "List schedules", "Cron schedules.", "tasks", "GET", "/v1/tasks/schedules", &[]),
-    t("tasks_create_schedule", "Create a schedule", "A cron schedule that publishes a task.", "tasks", "POST", "/v1/tasks/schedules", &[breq("cron", Ty::Str, "Cron expression"), b("tz", Ty::Str, "Time zone"), breq("publish", Ty::Obj, "What to publish (as tasks_publish)")]),
+    t("tasks_create_schedule", "Create a schedule", "A cron schedule that publishes a task.", "tasks", "POST", "/v1/tasks/schedules", &[breq("cron", Ty::Str, "Cron expression"), b("tz", Ty::Str, "Time zone"), breq("publish", Ty::Obj, "What to publish (as tasks_publish)")]).open_world(),
     t("tasks_delete_schedule", "Delete a schedule", "Delete a schedule.", "tasks", "DELETE", "/v1/tasks/schedules/{id}", &[req("id", "Schedule id")]),
     t("tasks_list_runs", "List function runs", "Durable function runs.", "tasks", "GET", "/v1/tasks/runs", &[q("function", Ty::Str, "Function"), q("status", Ty::Str, "Status"), q("limit", Ty::Int, "At most")]),
     t("tasks_get_run", "Get a function run", "A run with its steps.", "tasks", "GET", "/v1/tasks/runs/{id}", &[req("id", "Run id (run_…)")]),
-    t("tasks_invoke", "Invoke a function", "Start a durable function run.", "tasks", "POST", "/v1/tasks/functions/{id}/invoke", &[req("id", "Function id"), b("data", Ty::Obj, "Input"), b("wait", Ty::Bool, "Wait for the result")]),
-    t("tasks_retry_message", "Retry a message", "Deliver a failed or dead-lettered message again now.", "tasks", "POST", "/v1/tasks/messages/{id}/retry", &[req("id", "Message id")]),
-    t("tasks_retry_dead_letters", "Retry dead letters", "Deliver dead-lettered messages again: these ids, a queue's, or all.", "tasks", "POST", "/v1/tasks/dlq/retry", &[b("ids", Ty::Arr, "Message ids"), b("queue", Ty::Str, "Only this queue's"), b("all", Ty::Bool, "Every dead letter")]),
+    t("tasks_invoke", "Invoke a function", "Start a durable function run.", "tasks", "POST", "/v1/tasks/functions/{id}/invoke", &[req("id", "Function id"), b("data", Ty::Obj, "Input"), b("wait", Ty::Bool, "Wait for the result")]).open_world(),
+    t("tasks_retry_message", "Retry a message", "Deliver a failed or dead-lettered message again now.", "tasks", "POST", "/v1/tasks/messages/{id}/retry", &[req("id", "Message id")]).open_world(),
+    t("tasks_retry_dead_letters", "Retry dead letters", "Deliver dead-lettered messages again: these ids, a queue's, or all.", "tasks", "POST", "/v1/tasks/dlq/retry", &[b("ids", Ty::Arr, "Message ids"), b("queue", Ty::Str, "Only this queue's"), b("all", Ty::Bool, "Every dead letter")]).open_world(),
     t("tasks_cancel_run", "Cancel a run", "Stop a durable function run (its finished steps stay done).", "tasks", "POST", "/v1/tasks/runs/{id}/cancel", &[req("id", "Run id")]),
-    t("tasks_rerun", "Rerun a run", "Run a function again with the same input as a past run.", "tasks", "POST", "/v1/tasks/runs/{id}/rerun", &[req("id", "Run id")]),
+    t("tasks_rerun", "Rerun a run", "Run a function again with the same input as a past run.", "tasks", "POST", "/v1/tasks/runs/{id}/rerun", &[req("id", "Run id")]).open_world(),
     t("tasks_list_functions", "List functions", "Durable functions: their triggers and URLs.", "tasks", "GET", "/v1/tasks/functions", &[]),
     t("tasks_list_apps", "List synced apps", "The apps whose functions tasks runs: each one's URL, functions, SDK and when it last synced. Use it when a function is missing or stale.", "tasks", "GET", "/v1/tasks/apps", &[]),
     t("tasks_list_api_keys", "List tasks API keys", "Tasks' API keys: name, prefix, when made and last used (never the key itself).", "tasks", "GET", "/v1/tasks/api-keys", &[]),
@@ -726,7 +733,7 @@ static TOOLS: &[Tool] = &[
     t("tasks_resume_queue", "Resume a task queue", "Deliver a paused queue's messages again.", "tasks", "POST", "/v1/tasks/queues/{name}/resume", &[req("name", "Queue")]),
     t("tasks_list_topics", "List topics", "Topics: a message published to one goes to each of its endpoints.", "tasks", "GET", "/v1/tasks/topics", &[]),
     t("tasks_get_topic", "Get a topic", "A topic and its endpoints.", "tasks", "GET", "/v1/tasks/topics/{name}", &[req("name", "Topic")]),
-    t("tasks_set_topic", "Create or replace a topic", "A topic with exactly these endpoints.", "tasks", "PUT", "/v1/tasks/topics/{name}", &[req("name", "Topic"), breq("endpoints", Ty::Arr, "URLs, or {\"url\", \"name\"} objects")]),
+    t("tasks_set_topic", "Create or replace a topic", "A topic with exactly these endpoints.", "tasks", "PUT", "/v1/tasks/topics/{name}", &[req("name", "Topic"), breq("endpoints", Ty::Arr, "URLs, or {\"url\", \"name\"} objects")]).open_world(),
     t("tasks_delete_topic", "Delete a topic", "Delete a topic; its pending messages stay.", "tasks", "DELETE", "/v1/tasks/topics/{name}", &[req("name", "Topic")]),
     t("tasks_delete_queue", "Delete a task queue", "Delete a queue. One with unfinished messages is refused unless force=true, which cancels them.", "tasks", "DELETE", "/v1/tasks/queues/{name}", &[req("name", "Queue"), q("force", Ty::Bool, "Cancel its unfinished messages too")]),
     t(
@@ -738,7 +745,7 @@ static TOOLS: &[Tool] = &[
         "/v1/tasks/messages/cancel",
         &[b("ids", Ty::Arr, "Message ids"), b("queue", Ty::Str, "A queue's"), b("url", Ty::Str, "Those to this URL"), b("topic", Ty::Str, "A topic's"), b("label", Ty::Str, "Those with this label"), b("schedule_id", Ty::Str, "A schedule's"), b("all", Ty::Bool, "Every message")],
     ),
-    t("tasks_send_event", "Send an event", "An event that starts the functions it triggers (an id makes it idempotent).", "tasks", "POST", "/v1/tasks/events", &[breq("name", Ty::Str, "Event name, e.g. user.signup"), b("data", Ty::Any, "Its data"), b("id", Ty::Str, "Idempotency id")]),
+    t("tasks_send_event", "Send an event", "An event that starts the functions it triggers (an id makes it idempotent).", "tasks", "POST", "/v1/tasks/events", &[breq("name", Ty::Str, "Event name, e.g. user.signup"), b("data", Ty::Any, "Its data"), b("id", Ty::Str, "Idempotency id")]).open_world(),
     t("tasks_list_events", "List events", "Events received, newest first.", "tasks", "GET", "/v1/tasks/events", &[q("name", Ty::Str, "Only this event"), q("cursor", Ty::Str, "From a page's cursor"), q("limit", Ty::Int, "At most (50)")]),
     t("tasks_get_event", "Get an event", "An event and the runs it started.", "tasks", "GET", "/v1/tasks/events/{id}", &[req("id", "Event id")]),
     t("tasks_get_function", "Get a function", "A durable function: its triggers, concurrency, retries and whether it's paused.", "tasks", "GET", "/v1/tasks/functions/{id}", &[req("id", "Function id")]),
@@ -755,10 +762,10 @@ static TOOLS: &[Tool] = &[
         "PATCH",
         "/v1/tasks/schedules/{id}",
         &[req("id", "Schedule id"), b("cron", Ty::Str, "Cron expression"), b("tz", Ty::Str, "Time zone"), b("publish", Ty::Obj, "What to publish (as tasks_publish)"), b("label", Ty::Str, "Label")],
-    ),
+    ).open_world(),
     t("tasks_pause_schedule", "Pause a schedule", "Stop a schedule firing until it's resumed.", "tasks", "POST", "/v1/tasks/schedules/{id}/pause", &[req("id", "Schedule id")]),
     t("tasks_resume_schedule", "Resume a schedule", "Fire a paused schedule again.", "tasks", "POST", "/v1/tasks/schedules/{id}/resume", &[req("id", "Schedule id")]),
-    t("tasks_trigger_schedule", "Fire a schedule now", "Publish what a schedule publishes once, now.", "tasks", "POST", "/v1/tasks/schedules/{id}/trigger", &[req("id", "Schedule id")]),
+    t("tasks_trigger_schedule", "Fire a schedule now", "Publish what a schedule publishes once, now.", "tasks", "POST", "/v1/tasks/schedules/{id}/trigger", &[req("id", "Schedule id")]).open_world(),
     t("tasks_usage", "Tasks usage", "Messages, deliveries and runs by day, and what they cost.", "tasks", "GET", "/v1/tasks/usage", &[q("days", Ty::Int, "Days back (30)")]),
     // ── search (roll search) ──
     t("search_list_clusters", "List search clusters", "Elasticsearch-compatible search clusters; deleted=true lists those deleted recently instead (each with deleted_at, purge_at and its name), which search_restore_cluster brings back.", "search", "GET", "/v1/search/clusters", &[q("deleted", Ty::Bool, "Recently deleted clusters instead")]),
@@ -850,7 +857,7 @@ static TOOLS: &[Tool] = &[
     t("secrets_suggestions", "Suggested links", "Links roll suggests for a project's resources (a database, a bucket…): which keys each would fill and where, for secrets_link.", "secrets", "GET", "/v1/secrets/projects/{project}/suggestions", &[SECRET_PROJECT]),
     t("secrets_versions", "A secret's versions", "A secret's history, newest first (fingerprints, who and when; never values).", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/versions", &[SECRET_PROJECT, ENV, req("name", "Secret name"), q("path", Ty::Str, "Folder")]),
     t("secrets_compare", "Compare environments", "Which keys differ between two environments (missing, or a different value by fingerprint; never values).", "secrets", "GET", "/v1/secrets/projects/{project}/compare", &[SECRET_PROJECT, qreq("from", "Environment"), qreq("to", "Environment"), q("path", Ty::Str, "Folder")]),
-    t("secrets_rotate", "Rotate a secret", "Make a new value for a secret and switch to it: a generated one, or a managed link's (a database user's password, a cloud key) made where it lives.", "secrets", "POST", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/rotate", &[SECRET_PROJECT, ENV, req("name", "Secret name"), q("path", Ty::Str, "Folder")]),
+    t("secrets_rotate", "Rotate a secret", "Make a new value for a secret and switch to it: a generated one, or a managed link's (a database user's password, a cloud key) made where it lives.", "secrets", "POST", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/rotate", &[SECRET_PROJECT, ENV, req("name", "Secret name"), q("path", Ty::Str, "Folder")]).open_world(),
     t("secrets_promote", "Promote secrets", "Copy an environment's secrets into this one (all, or some keys). Into a protected environment it opens a change request for a person instead.", "secrets", "POST", "/v1/secrets/projects/{project}/environments/{env}/promote", &[SECRET_PROJECT, ENV, qreq("from", "The environment to copy from"), b("keys", Ty::Arr, "Only these keys"), b("path", Ty::Str, "Folder"), b("message", Ty::Str, "Why")]),
     t("secrets_list_requests", "Change requests", "An environment's change requests (proposed changes waiting on review).", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/requests", &[SECRET_PROJECT, ENV, q("state", Ty::Str, "open, applied or closed")]),
     t("secrets_propose", "Propose a change", "Propose changes to an environment for a person to review and apply: ops [{op: set, key, value?, if_version?} or {op: delete, key, if_version?}]; if_version keeps each op from applying over a change made meanwhile. The way to change a protected environment.", "secrets", "POST", "/v1/secrets/projects/{project}/environments/{env}/requests", &[SECRET_PROJECT, ENV, breq("ops", Ty::Arr, "[{op: set|delete, key, value?, comment?, if_version?}]"), b("message", Ty::Str, "Why"), b("path", Ty::Str, "Folder")]),
@@ -905,7 +912,7 @@ static TOOLS: &[Tool] = &[
         "POST",
         "/v1/apps/projects/{project}/services",
         &[req("project", "Workspace project"), breq("name", Ty::Str, "Service name"), breq("source", Ty::Obj, "Where the code comes from"), b("branch", Ty::Str, "A repo source's branch for production (default: the repo's default)"), b("variables", Ty::Obj, "{NAME: value}, set before the first deploy"), b("run", Ty::Obj, "Run settings: start, port, scale, size"), b("links", Ty::Arr, "[{kind: postgres|redis|bucket|stream|queue|nosql, ref, prefix?}]: connection variables, before the first deploy (reveal on each)")],
-    ),
+    ).open_world(),
     t("apps_list_environments", "List environments", "A service's environments.", "apps", "GET", "/v1/apps/services/{service}/environments", &[SERVICE]),
     t("apps_get_service", "Get a service", "A service with its environments' summaries (apps_list_deploys lists an environment's deploys).", "apps", "GET", "/v1/apps/services/{service}", &[SERVICE]),
     t("apps_set_environment", "Set up an environment", "Create an environment or change one: the branch it deploys, its own run settings, following an image tag, waiting for CI, and who gets in (maintenance, allowed addresses, a rate limit, firewall rules). Production changes are \"deploy\" actions; copying another environment's variables needs reveal there.", "apps", "PUT", "/v1/apps/services/{service}/environments/{env}", &[
@@ -960,7 +967,7 @@ static TOOLS: &[Tool] = &[
             b("closed", Ty::Bool, "Refuse (409) unless the environment builds closed (its builds get no secret value)"),
             IDEMPOTENCY,
         ],
-    ),
+    ).open_world(),
     t("apps_list_deploys", "List deploys", "An environment's deploys, newest first.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/deploys", &[SERVICE, ENV]),
     t("apps_deploy_logs", "Deploy logs", "A deploy's build and release log.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/deploys/{deploy}/logs", &[SERVICE, ENV, req("deploy", "Deploy id"), q("tail", Ty::Int, "Last lines")]),
     t(
@@ -1080,10 +1087,10 @@ static TOOLS: &[Tool] = &[
         "POST",
         "/v1/apps/projects/{project}/notifications",
         &[req("project", "Workspace project"), b("kind", Ty::Str, "webhook (default), slack, discord or email"), breq("url", Ty::Str, "Where to send (an address for email)"), b("events", Ty::Arr, "Which events (default: deploys and crashes)"), b("environments", Ty::Arr, "Only these environments"), b("services", Ty::Arr, "Only these services"), b("previews", Ty::Bool, "Previews' events too")],
-    ),
+    ).open_world(),
     t("apps_update_notification", "Change a notification", "Change which events, environments and services a notification gets: given ones replace.", "apps", "PATCH", "/v1/apps/projects/{project}/notifications/{nid}", &[req("project", "Workspace project"), req("nid", "Notification id"), b("events", Ty::Arr, "Events"), b("environments", Ty::Arr, "Environments"), b("services", Ty::Arr, "Services"), b("previews", Ty::Bool, "Previews' events too")]),
     t("apps_delete_notification", "Delete a notification", "Stop sending a project's events there.", "apps", "DELETE", "/v1/apps/projects/{project}/notifications/{nid}", &[req("project", "Workspace project"), req("nid", "Notification id")]),
-    t("apps_test_notification", "Test a notification", "Send a test event now (not retried): whether it arrived.", "apps", "POST", "/v1/apps/projects/{project}/notifications/{nid}/test", &[req("project", "Workspace project"), req("nid", "Notification id")]),
+    t("apps_test_notification", "Test a notification", "Send a test event now (not retried): whether it arrived.", "apps", "POST", "/v1/apps/projects/{project}/notifications/{nid}/test", &[req("project", "Workspace project"), req("nid", "Notification id")]).open_world(),
     t("apps_notification_deliveries", "Notification deliveries", "A notification's last 50 deliveries, newest first: what was sent and whether it arrived.", "apps", "GET", "/v1/apps/projects/{project}/notifications/{nid}/deliveries", &[req("project", "Workspace project"), req("nid", "Notification id")]),
     t("apps_list_drains", "List log drains", "Where a project's logs are sent (the URL's host only).", "apps", "GET", "/v1/apps/projects/{project}/drains", &[req("project", "Workspace project")]),
     t(
@@ -1094,10 +1101,10 @@ static TOOLS: &[Tool] = &[
         "POST",
         "/v1/apps/projects/{project}/drains",
         &[req("project", "Workspace project"), breq("url", Ty::Str, "https URL on a public host"), b("sources", Ty::Arr, "runtime (default), http, build"), b("environments", Ty::Arr, "Only these environments"), b("services", Ty::Arr, "Only these services"), b("previews", Ty::Bool, "Previews' logs too"), b("headers", Ty::Obj, "Headers sent with each batch")],
-    ),
-    t("apps_update_drain", "Change a log drain", "Change what a drain sends or its headers: given ones replace (a new URL is a new drain).", "apps", "PATCH", "/v1/apps/projects/{project}/drains/{did}", &[req("project", "Workspace project"), req("did", "Drain id"), b("sources", Ty::Arr, "Sources"), b("environments", Ty::Arr, "Environments"), b("services", Ty::Arr, "Services"), b("previews", Ty::Bool, "Previews' logs too"), b("headers", Ty::Obj, "Headers (all of them)")]),
+    ).open_world(),
+    t("apps_update_drain", "Change a log drain", "Change what a drain sends or its headers: given ones replace (a new URL is a new drain).", "apps", "PATCH", "/v1/apps/projects/{project}/drains/{did}", &[req("project", "Workspace project"), req("did", "Drain id"), b("sources", Ty::Arr, "Sources"), b("environments", Ty::Arr, "Environments"), b("services", Ty::Arr, "Services"), b("previews", Ty::Bool, "Previews' logs too"), b("headers", Ty::Obj, "Headers (all of them)")]).open_world(),
     t("apps_delete_drain", "Delete a log drain", "Stop sending a project's logs there.", "apps", "DELETE", "/v1/apps/projects/{project}/drains/{did}", &[req("project", "Workspace project"), req("did", "Drain id")]),
-    t("apps_test_drain", "Test a log drain", "Send one signed test line now (not retried): whether it arrived.", "apps", "POST", "/v1/apps/projects/{project}/drains/{did}/test", &[req("project", "Workspace project"), req("did", "Drain id")]),
+    t("apps_test_drain", "Test a log drain", "Send one signed test line now (not retried): whether it arrived.", "apps", "POST", "/v1/apps/projects/{project}/drains/{did}/test", &[req("project", "Workspace project"), req("did", "Drain id")]).open_world(),
     t("apps_pending", "What the next deploy changes", "Before deploying: which variables (names, never values), run settings and project secrets the next deploy changes against what's live.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/pending", &[SERVICE, ENV]),
     t("apps_deploy_commits", "A deploy's commits", "The commits a deploy brings over the one live before it, newest first (at most 50).", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/deploys/{deploy}/commits", &[SERVICE, ENV, req("deploy", "Deploy id")]),
     t("apps_deploy_vulnerabilities", "A deploy's vulnerabilities", "Known vulnerabilities in a deploy's image, most severe first, then those with a fix: id (CVE-…, GHSA-…), severity, package, installed and fixed versions, and where (the OS's packages or a lockfile), at most 2,000, with the scan's counts. Use it before promoting a deploy, or to find what to upgrade.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/deploys/{deploy}/vulnerabilities", &[SERVICE, ENV, req("deploy", "Deploy id"), q("severity", Ty::Str, "Only this severity or worse: critical, high, medium or low")]),
@@ -1222,6 +1229,13 @@ mod tests {
         assert_eq!(def("postgres_delete_project")["annotations"]["destructiveHint"], true);
         assert_eq!(def("postgres_create_branch")["annotations"]["readOnlyHint"], false);
         assert_eq!(def("apps_deploy")["annotations"]["destructiveHint"], true);
+        // A tool that has roll reach an address the caller chose says so (MCP's openWorldHint); the rest don't.
+        for n in ["tasks_publish", "apps_add_drain", "apps_deploy", "secrets_rotate"] {
+            assert_eq!(def(n)["annotations"]["openWorldHint"], true, "{n}");
+        }
+        for n in ["storage_list_buckets", "postgres_execute", "apps_delete_drain", "secrets_set"] {
+            assert_eq!(def(n)["annotations"]["openWorldHint"], false, "{n}");
+        }
         let r = all().iter().find(|t| t.name == "storage_write_object").unwrap().request(&json!({ "bucket": "a b", "key": "x/y.txt", "content": "hi" })).unwrap();
         assert_eq!(r.uri, "/v1/storage/buckets/a%20b/upload?key=x%2Fy.txt");
         assert!(matches!(r.body, Built::Raw(ref b, _) if b == b"hi"));
