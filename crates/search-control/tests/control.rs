@@ -334,6 +334,22 @@ async fn lifecycle() {
 /// Signed-in people's own clusters (docs/accounts.md, "Phase 2"): each person lists and reaches
 /// only theirs (another's is a 404, as if it didn't exist), what they create and branch is theirs,
 /// a branch keeps its parent's owner whoever cuts it, and admins and the operator see everything.
+/// With the deployment's key, passwords are sealed in the catalog and still authenticate: a
+/// cluster's, its branch's (sealed under its own id) and a rotated one.
+#[tokio::test]
+async fn sealed_passwords_authenticate() {
+    let e = env_with(|c| c.sealer = search_control::Sealer::from_secret("0123456789abcdef0123456789abcdef")).await;
+    let c = e.post("/v1/search/clusters", json!({"name": "app"})).await;
+    let id = c["id"].as_str().unwrap().to_string();
+    let (user, pw) = creds(&c);
+    assert_eq!(e.es(&user, &pw, reqwest::Method::GET, "/", None).await.0, 200);
+    let (bu, bp) = creds(&e.post(&format!("/v1/search/clusters/{id}/branches"), json!({"name": "app-dev"})).await);
+    assert_eq!(e.es(&bu, &bp, reqwest::Method::GET, "/", None).await.0, 200);
+    let (_, rotated) = creds(&e.post(&format!("/v1/search/clusters/{id}/password"), json!({})).await);
+    assert_eq!(e.es(&user, &rotated, reqwest::Method::GET, "/", None).await.0, 200);
+    assert_eq!(e.es(&user, &pw, reqwest::Method::GET, "/", None).await.0, 401);
+}
+
 #[tokio::test]
 async fn people_see_only_their_own_clusters() {
     use reqwest::Method;
