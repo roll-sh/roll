@@ -311,7 +311,7 @@ impl Engine {
             slower.sort_by_key(|s| std::cmp::Reverse(s.p50_ms.saturating_sub(s.main_p50_ms)));
             slower.truncate(crate::SlowerRoutes::MAX);
             let kept = (!slower.is_empty()).then(|| crate::SlowerRoutes { branch: base.branch.clone().unwrap_or_else(|| "main".into()), routes: slower });
-            if self.store.set_slower_routes(&r.id, kept.as_ref()).unwrap_or(false) {
+            if self.store.set_runtime_fact(&r.id, "slower_routes", kept.as_ref()).unwrap_or(false) {
                 self.report(r).await;
             }
         }

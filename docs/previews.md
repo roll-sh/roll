@@ -1158,8 +1158,8 @@ preview: they're for looking at it now. The sheet lists recent traces under Requ
 to its spans as bars on the trace's time, and above them each route's time (p50, p95) against
 main's preview's same route, the clearly slower ones first and in red; `roll preview traces
 [--trace <id> | --routes]`. The holder reads the slower ones (at most five, the most slower than
-main first) onto the preview's record about once a minute (`slower_routes`, kept in the store so
-any node shows them): the sheet's verdict strip says "2 routes slower than main" (opening
+main first) onto the preview's record about once a minute (`slower_routes`, kept in the store's
+`runtime_facts` so any node shows them): the sheet's verdict strip says "2 routes slower than main" (opening
 Requests), and the pull request's comment says it in its checks with each route's p50 and
 main's, a route's name in a code span nothing in it can close. A change reports the preview again
 (`a_route_slower_than_mains_reaches_the_record_and_the_report`).
