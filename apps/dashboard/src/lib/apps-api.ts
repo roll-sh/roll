@@ -93,6 +93,8 @@ export interface Run {
   slo?: Slo;
   /** Its own Prometheus endpoint, scraped every 15 s on each running instance (port: the app's own by default). */
   metrics?: { port?: number; path?: string };
+  /** Counts of its own log lines as gauges (Cloud Logging's log-based metrics): each minute, the lines holding `pattern` (any case). At most ten. */
+  log_metrics?: { name: string; pattern: string }[];
   /** A gradual rollout: the new deployment takes each percent of `steps` for `step_s`, rolled
    *  back by a 5xx share of `error_pct` or more (worse than the old one); no steps: at once. */
   rollout?: { steps: number[]; step_s: number; error_pct: number; /** Each step waits for a person once it passes. */ manual?: boolean; /** With run.slo: a step fails past this burn rate (default 14.4). */ slo_burn?: number; /** A step fails when the new deployment's p95 is this many percent above the old one's. */ p95_pct?: number };
@@ -1414,6 +1416,26 @@ export const appsApi = {
     if (!res.ok) throw new Error(data?.error ?? `${res.status} ${res.statusText}`.trim());
     return { lines: data as LogLine[], truncated: res.headers.get("x-roll-search-truncated") === "1" };
   },
+  /** What's at `path` (absolute) in a running instance, as a tar (`GET …/files`, admin); the instance answering is `X-Roll-Instance`. */
+  downloadFiles: async (id: string, e: string, path: string, instance?: string): Promise<{ tar: Blob; instance: string | null }> => {
+    const res = await fetch(`${ROLL_API}${env(id, e)}/files${qs({ path, instance })}`, withSession({ headers: apiHeaders(), cache: "no-store" }));
+    onApiStatus(res.status);
+    if (!res.ok) {
+      const data = await res.json().catch(() => null);
+      throw new Error(data?.error ?? `${res.status} ${res.statusText}`.trim());
+    }
+    return { tar: await res.blob(), instance: res.headers.get("x-roll-instance") };
+  },
+  /** A tar written under the directory `path` in a running instance (`PUT …/files`, admin: what's written runs next). */
+  uploadFiles: async (id: string, e: string, path: string, tar: Blob, instance?: string): Promise<{ instance: string; path: string }> => {
+    const res = await fetch(`${ROLL_API}${env(id, e)}/files${qs({ path, instance })}`, withSession({ method: "PUT", headers: { ...apiHeaders(), "content-type": "application/x-tar" }, body: tar }));
+    onApiStatus(res.status);
+    const data = await res.json().catch(() => null);
+    if (!res.ok) throw new Error(data?.error ?? `${res.status} ${res.statusText}`.trim());
+    return data as { instance: string; path: string };
+  },
+  /** Drops kept answers (`POST …/cache/purge`): some paths (a trailing `*` a prefix), some tags, or (neither) all of them. */
+  purgeCache: (id: string, e: string, body: { paths?: string[]; tags?: string[] }) => call<{ purged: number }>("POST", `${env(id, e)}/cache/purge`, body),
   /** A folder's bundle (`lib/bundle.ts`, what `roll up` sends) deployed to an upload service. */
   uploadDeploy: async (id: string, e: string, body: Blob, message?: string): Promise<Deployment> => {
     const headers: Record<string, string> = { ...apiHeaders(), "content-type": "application/gzip" };
