@@ -901,6 +901,7 @@ previews are listed once those products are on.
 | `previews_refresh` | Redeploy a preview now. | `POST /v1/previews/{id}/refresh` |
 | `previews_errors` | A preview's errors, grouped (masked as logs are). | `GET /v1/previews/{id}/errors` |
 | `previews_traces` | A preview's recent traces: root span, service, duration, spans, failed (masked). | `GET /v1/previews/{id}/traces` |
+| `previews_routes` | Each route's p50/p95 in a preview against main's preview, the slower ones first (masked). | `GET /v1/previews/{id}/routes` |
 | `previews_get_trace` | One trace's spans, oldest first (masked). | `GET /v1/previews/{id}/traces/{trace}` |
 | `previews_mask_suggestions` | Columns that look like people's data and aren't masked in previews, with the rule each would take. | `GET /v1/previews/projects/{project}/mask-suggestions` |
 | `previews_metrics` | Each of a preview's services' CPU and memory now. | `GET /v1/previews/{id}/metrics` |
