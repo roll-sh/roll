@@ -133,11 +133,13 @@ fn key_aad(project: &str, id: &str) -> String {
     format!("roll-secrets:value-request:{project}:{id}")
 }
 
-/// A box's digest, kept on its request once it lands: each box has its own ephemeral key, so an
-/// answer sealed afresh never repeats one.
+/// A box's digest, kept on its request once it lands. It's taken over the decoded ephemeral key
+/// alone: each box has its own, bound into the box's key, so an answer sealed afresh never repeats
+/// one, and nothing else a sender changes (`v`, an encoding) makes a replay look new. Only called
+/// on boxes that opened.
 fn box_digest(b: &Sealed) -> String {
     use sha2::{Digest, Sha256};
-    URL_SAFE_NO_PAD.encode(&Sha256::digest(format!("{}\0{}\0{}\0{}", b.v, b.epk, b.nonce, b.ct))[..16])
+    URL_SAFE_NO_PAD.encode(&Sha256::digest(crypto::sealed_epk(b).unwrap_or_default())[..16])
 }
 
 /// A value as an answer stores it: literal, with every `${` escaped (refs.rs), so it holds no

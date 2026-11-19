@@ -1842,8 +1842,10 @@ request` alone lists them, `roll secrets request --cancel ID` cancels one.
   escape (`$${`), so `${production.DB_PASSWORD}` sent for `VENDOR_KEY` resolves to that text,
   never to production's password, and a vendor's value that happens to hold `${` arrives intact.
 - **No replays.** A request keeps a digest of every box it has landed and refuses an answer that
-  repeats one (409). Each box has its own ephemeral key, so an answer sealed afresh never does,
-  and boxes seen on the way can't be sent again to use up the answers left.
+  repeats one (409). The digest is of the box's decoded ephemeral key alone: each box has its own,
+  bound into its key, so an answer sealed afresh never repeats one, boxes seen on the way can't be
+  sent again to use up the answers left, and changing anything around the key (an encoding, the
+  version) doesn't make a replay look new. Only `"v": 1` boxes open, everywhere roll opens one.
 - **Audited** when it's asked for (`value_request.create`), answered (`value_request.answer`, with
   the answerer's address) and cancelled (`value_request.cancel`); the change or change request is
   audited as any other. The environment's notify URL hears that it landed (key names and the

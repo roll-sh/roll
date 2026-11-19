@@ -241,10 +241,14 @@ pub fn seal_to(recipient: &str, context: &str, plain: &[u8]) -> Result<Sealed, S
 }
 
 /// Open a `roll-seal-v1` box with the recipient's secret key (tests and in-process consumers).
+/// Only version 1 opens: `v` is outside the box, so any other value is a box nobody made.
 pub fn open_sealed(secret: &[u8; 32], context: &str, b: &Sealed) -> Result<Zeroizing<Vec<u8>>, String> {
     use curve25519_dalek::montgomery::MontgomeryPoint;
     let bad = || "the box doesn't open".to_string();
-    let epk: [u8; 32] = URL_SAFE_NO_PAD.decode(&b.epk).ok().and_then(|v| v.try_into().ok()).ok_or_else(bad)?;
+    if b.v != 1 {
+        return Err(bad());
+    }
+    let epk = sealed_epk(b).ok_or_else(bad)?;
     let nonce: [u8; 12] = URL_SAFE_NO_PAD.decode(&b.nonce).ok().and_then(|v| v.try_into().ok()).ok_or_else(bad)?;
     let ct = URL_SAFE_NO_PAD.decode(&b.ct).map_err(|_| bad())?;
     let public = MontgomeryPoint::mul_base_clamped(*secret).to_bytes();
@@ -255,6 +259,12 @@ pub fn open_sealed(secret: &[u8; 32], context: &str, b: &Sealed) -> Result<Zeroi
     let mut okm = Zeroizing::new([0u8; 32]);
     hkdf::Hkdf::<Sha256>::new(Some(&salt), shared.as_ref()).expand(b"roll-seal-v1", okm.as_mut()).expect("32 bytes");
     cipher(okm.as_ref()).decrypt(Nonce::from_slice(&nonce), Payload { msg: &ct, aad: context.as_bytes() }).map(Zeroizing::new).map_err(|_| bad())
+}
+
+/// A box's ephemeral public key, decoded: fresh for every box and bound into its key, so it names
+/// the box whatever else a sender changes around it.
+pub fn sealed_epk(b: &Sealed) -> Option<[u8; 32]> {
+    URL_SAFE_NO_PAD.decode(&b.epk).ok().and_then(|v| v.try_into().ok())
 }
 
 /// A fresh X25519 key pair: the secret key (zeroized on drop) and its public key, base64url.
@@ -302,5 +312,6 @@ mod tests {
         assert_eq!(&*open_sealed(&sk, "ctx", &b).unwrap(), b"A=1");
         assert!(open_sealed(&sk, "other", &b).is_err());
         assert!(open_sealed(&[8u8; 32], "ctx", &b).is_err());
+        assert!(open_sealed(&sk, "ctx", &Sealed { v: 2, ..b }).is_err(), "only version 1 opens");
     }
 }

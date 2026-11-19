@@ -2892,13 +2892,16 @@ async fn a_secret_requests_answer_is_stored_as_sent_and_never_replayed() {
     let meta = api.ok(Method::GET, "/environments/staging/secrets/VENDOR_KEY?path=/vendor", None).await;
     assert!(meta["refs"].as_array().is_none_or(|r| r.is_empty()), "{meta}");
 
-    // The same boxes again are refused and use nothing up.
-    let (s, e) = api.call(Method::POST, &url, Some(sent)).await;
+    // The same boxes again are refused and use nothing up, with their version changed too.
+    let (s, e) = api.call(Method::POST, &url, Some(sent.clone())).await;
     assert_eq!((s, e["code"].as_str()), (StatusCode::CONFLICT, Some("conflict")), "{e}");
+    let mut renumbered = sent;
+    renumbered["values"]["VENDOR_KEY"]["v"] = json!(2);
+    assert_eq!(api.call(Method::POST, &url, Some(renumbered)).await.0, StatusCode::BAD_REQUEST);
     assert_eq!(api.ok(Method::GET, "/value-requests", None).await[0]["answers_left"], 2);
 
     // The request's own count stops a sixth attempt in the minute, whatever else is asked for.
-    for _ in 0..3 {
+    for _ in 0..2 {
         assert_eq!(api.call(Method::POST, &url, Some(json!({ "values": {} }))).await.0, StatusCode::BAD_REQUEST);
     }
     assert_eq!(api.call(Method::POST, &url, Some(answer(&id, &public, &[("VENDOR_KEY", "fake-key")]))).await.0, StatusCode::TOO_MANY_REQUESTS);
