@@ -502,7 +502,10 @@ pub struct Control {
     pub data: search_store::Store,
     pub meter: Arc<Meter>,
     /// Wakes in progress and clusters being deleted ([`crate::wake`]).
-    wakes: Arc<Wakes>,
+    pub(crate) wakes: Arc<Wakes>,
+    /// One query suggestions build at a time per index (`crate::suggestions`), by cluster id and
+    /// index.
+    pub(crate) suggest_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Serializes changes of a cluster's description with applying it to the node, so the node
     /// never ends up with an older one than the catalog's.
     specs: tokio::sync::Mutex<()>,
@@ -579,6 +582,7 @@ impl Control {
             data,
             meter,
             wakes,
+            suggest_locks: Mutex::new(HashMap::new()),
             specs: tokio::sync::Mutex::new(()),
             reloads: Mutex::new(HashSet::new()),
             reloader: AtomicBool::new(false),
@@ -659,6 +663,7 @@ impl Control {
                     }
                     Err(e) => tracing::warn!(error = %e, "listing search clusters with due jobs failed"),
                 }
+                c.wake_for_suggestions().await;
             }
         });
     }
@@ -677,6 +682,12 @@ impl Control {
             tracing::info!(cluster = c.name, error = %e, "waking a search cluster for its due jobs failed");
             self.note_wake_at(&c.name, Some(crate::meter::now_ms() + 60_000)).await;
         }
+    }
+
+    /// Whether this node is the one to wake sleeping cluster `name` for its background work:
+    /// always on a single node; on a fleet, the node its lease is placed on.
+    pub(crate) fn wakes_here(&self, name: &str) -> bool {
+        self.cluster_leases().is_none_or(|l| l.cluster().preferred(&crate::cluster::key(name)).is_some_and(|n| n.id == l.cluster().node_id()))
     }
 
     /// The fleet's leases, when this node is in one ([`Control::join`]).
@@ -1498,7 +1509,7 @@ impl Control {
     /// Sends a request to the cluster as its owner (through authentication and admission, so
     /// limits apply and it wakes the cluster like any client). On a fleet it runs on the node that
     /// owns the cluster: here, or sent there (an in-process caller on any node, as apps' links).
-    async fn call(&self, c: &SearchCluster, mut req: EsRequest) -> EsResponse {
+    pub(crate) async fn call(&self, c: &SearchCluster, mut req: EsRequest) -> EsResponse {
         req.headers.retain(|(k, _)| !k.eq_ignore_ascii_case("authorization") && !k.eq_ignore_ascii_case("host"));
         let token = base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", c.name, c.password));
         req.headers.push(("Authorization".into(), format!("Basic {token}")));
@@ -1966,6 +1977,8 @@ impl Control {
                 self.meter.mark_dirty(&name);
             }
         }
+        // After the analytics above are in the catalog.
+        Box::pin(self.run_suggestions()).await;
         Ok(())
     }
 
