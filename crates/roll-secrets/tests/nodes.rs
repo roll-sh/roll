@@ -129,7 +129,8 @@ fn a_digest_one_node_keeps_moves_at_once_with_what_another_node_changes() {
     b.source_changed("bucket", "assets").unwrap();
     moved("a rotation", &mut last);
     // The same caller, now unable to read staging, doesn't get the digest it had.
-    let narrowed = Caller { principal: "operator".into(), grants: Arc::new(AllBut("staging")), ip: None, runtime: false, approval: None };
+    let mut narrowed = Caller::operator();
+    narrowed.grants = Arc::new(AllBut("staging"));
     assert_ne!(digest(&narrowed), last, "what the caller may read is part of it");
     assert_eq!(digest(&op), last);
 }

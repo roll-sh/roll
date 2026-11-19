@@ -156,6 +156,11 @@ export function Identities() {
                 <span className="ml-auto truncate text-right font-mono text-[10.5px] text-subtle" title={i.last_subject ?? undefined}>
                   {i.last_used_at ? `logged in ${ago(i.last_used_at)}` : "never used"} · {i.id}
                 </span>
+                {i.disabled_at && (
+                  <button className={button} onClick={() => api.setIdentityDisabled(i.id, false).then(identities.reload, (e) => setError(errorText(e)))} title={`Disabled ${ago(i.disabled_at)} by a cut-off${i.disabled_why ? `: ${i.disabled_why}` : ""}`}>
+                    Enable
+                  </button>
+                )}
                 <Delete onDelete={() => api.deleteIdentity(i.id).then(identities.reload, (e) => setError(errorText(e)))} />
               </div>
             ))}

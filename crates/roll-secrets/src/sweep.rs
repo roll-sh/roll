@@ -225,7 +225,7 @@ impl Secrets {
     }
 
     /// Claim and revoke one lease. `Ok(false)`: someone else did.
-    fn revoke_one(&self, id: &str) -> Result<bool> {
+    pub(crate) fn revoke_one(&self, id: &str) -> Result<bool> {
         let now = self.db.now_ms()?;
         let claimed: Option<(String, String)> = self.db.write(|c| {
             let row = c.query_row("SELECT link, handle FROM leases WHERE id = ? AND revoked_at IS NULL", [id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))).optional()?;

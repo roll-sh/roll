@@ -148,7 +148,7 @@ fn row(now: i64) -> impl Fn(&code_sql::Row<'_>) -> code_sql::Result<Gateway> {
 
 /// The audit log's name for a gateway's link.
 fn link_caller(id: &str) -> Caller {
-    Caller { principal: format!("gateway:{id}"), grants: Arc::new(Everything), ip: None, runtime: false, approval: None }
+    Caller::acting(format!("gateway:{id}"), Arc::new(Everything))
 }
 
 impl Secrets {
