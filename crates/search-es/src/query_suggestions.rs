@@ -20,7 +20,6 @@ use crate::meta::IndexMeta;
 use crate::units::TimeValue;
 
 pub const ENABLED: &str = "index.roll.suggestions.enabled";
-pub const INDEX: &str = "index.roll.suggestions.index";
 pub const MIN_COUNT: &str = "index.roll.suggestions.min_count";
 pub const MIN_HITS: &str = "index.roll.suggestions.min_hits";
 pub const LOOKBACK: &str = "index.roll.suggestions.lookback";
@@ -51,11 +50,6 @@ pub const DEFAULT_CLICK_BOOST: f64 = 1.0;
 /// Entries one block list holds.
 pub const MAX_BLOCKED: usize = 1_000;
 
-/// `index.roll.suggestions.index`: a valid index name (it becomes an alias).
-pub fn check_target(s: &str) -> Result<(), String> {
-    crate::meta::names::validate_index_name(s).map_err(|e| e.reason().to_string())
-}
-
 fn time_between(s: &str, key: &str, min: i64, max: i64) -> Result<(), String> {
     let ms = TimeValue::parse(s, key).map_err(|e| e.reason().to_string())?.as_millis();
     if ms < min {
@@ -80,7 +74,8 @@ pub fn check_lookback(s: &str) -> Result<(), String> {
 /// One index's suggestion settings, defaults filled in.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
-    /// The alias clients query (default `<index>-suggestions`).
+    /// The alias clients query: always `<index>-suggestions` ([`default_target`]), never a
+    /// setting, so an index's settings can't aim a rebuild at a name outside its own.
     pub index: String,
     pub min_count: u64,
     pub min_hits: u64,
@@ -114,7 +109,7 @@ impl Config {
         let num = |k: &str, d: u64| s.get(k).and_then(|v| v.parse::<u64>().ok()).unwrap_or(d);
         let ms = |k: &str, d: i64, lo: i64, hi: i64| s.get(k).and_then(|v| TimeValue::parse(v, k).ok()).map_or(d, |t| t.as_millis().clamp(lo, hi));
         Config {
-            index: s.get(INDEX).filter(|v| !v.is_empty()).map_or_else(|| default_target(&idx.name), str::to_string),
+            index: default_target(&idx.name),
             min_count: num(MIN_COUNT, DEFAULT_MIN_COUNT).max(1),
             min_hits: num(MIN_HITS, DEFAULT_MIN_HITS),
             lookback_ms: ms(LOOKBACK, DEFAULT_LOOKBACK_MS, MIN_LOOKBACK_MS, MAX_LOOKBACK_MS),
@@ -172,7 +167,7 @@ pub fn built_from(idx: &IndexMeta, source: &IndexMeta) -> bool {
     idx.settings.get(SOURCE) == Some(source.name.as_str()) && idx.settings.get(SOURCE_UUID) == Some(source.uuid.as_str())
 }
 
-/// The suggestions index of `index` when `index.roll.suggestions.index` doesn't name one.
+/// The alias of `index`'s suggestions: `<index>-suggestions`.
 pub fn default_target(index: &str) -> String {
     format!("{index}-suggestions")
 }
@@ -337,6 +332,5 @@ mod tests {
         assert_eq!(Config::from_json(&c.to_json()), Some(c));
         assert!(check_interval("30m").is_err() && check_interval("1h").is_ok());
         assert!(check_lookback("31d").is_err() && check_lookback("7d").is_ok());
-        assert!(check_target("Products").is_err() && check_target("products-suggestions").is_ok());
     }
 }

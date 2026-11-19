@@ -395,7 +395,6 @@ build, blocks a term in one click and tries a prefix.
   | setting | default | |
   | --- | --- | --- |
   | `index.roll.suggestions.enabled` | off | |
-  | `index.roll.suggestions.index` | `<index>-suggestions` | the alias clients query |
   | `index.roll.suggestions.min_count` | 5 | searches a query needs in the window |
   | `index.roll.suggestions.min_hits` | 1 | results its searches found on average (0 lets queries that found nothing through) |
   | `index.roll.suggestions.lookback` | `30d` | the window, 1h to the 30 days analytics keep |
@@ -420,8 +419,16 @@ build, blocks a term in one click and tries a prefix.
   suggestions or the new, never half of them or none. A build that fails partway deletes what it
   wrote; the alias never moved. When the suggestions come out exactly as the last build's (a
   fingerprint of each suggestion and weight), nothing is written. Builds of one index run one at
-  a time. A concrete index or someone else's alias under the alias name is never touched: the
-  build fails and says to name another.
+  a time.
+- **Only its own names.** A build runs on the owner as the system, so what it may touch is fixed
+  by construction, never by a setting: the alias is always `<index>-suggestions` (not
+  configurable, so an index's settings can't aim a rebuild at another name), and each build is
+  marked at creation with `index.roll.suggestions.source` and `source_uuid` (the source's name
+  and uuid; creation-only settings, so no one can add them to an index that already exists). A
+  build refuses, records the error and writes nothing when the alias name is already a concrete
+  index, a data stream or a data stream's alias, or an alias over any index without this source's
+  mark. Moving the alias removes only indices carrying the mark of this very source index, and
+  so does the privacy cleanup below.
 - **When.** The catalog (`search_suggestions`) keeps, per index, the settings it was last built
   with, when it's next due, the last build (when, how many, how long, any error) and its 50
   heaviest suggestions. The metering pass builds what's due on the clusters loaded on its node,
@@ -440,8 +447,7 @@ build, blocks a term in one click and tries a prefix.
   build, next due, heaviest suggestions; never wakes the cluster) and `POST
   …/suggestions/rebuild` (a write: builds now and answers with `changed`). Both are about
   `{index}` for roll-access and are MCP tools (`search_suggestions`,
-  `search_rebuild_suggestions`). A rebuild writes the suggestions index named by the source
-  index's settings, which only someone who may change those settings could point elsewhere.
+  `search_rebuild_suggestions`).
 
 **Privacy.** Query text is the tenant's users' data. Suggestions only ever come from that index's
 own analytics, and a query searched fewer than `min_count` times in the window (default 5) never

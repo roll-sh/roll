@@ -7,14 +7,13 @@
 /** roll's index settings for suggestions (off by default; analytics must be on too). */
 export const SUGGEST = {
   enabled: "index.roll.suggestions.enabled",
-  index: "index.roll.suggestions.index",
   minCount: "index.roll.suggestions.min_count",
   block: "index.roll.suggestions.block",
   blockPrefix: "index.roll.suggestions.block_prefix",
 } as const;
 
 export interface SuggestionsConfig {
-  /** The alias clients query. */
+  /** The alias clients query: always `<index>-suggestions`. */
   index: string;
   min_count: number;
   min_hits: number;

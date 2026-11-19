@@ -197,7 +197,6 @@ pub static OS_INDEX_SETTINGS: &[IndexSetting] = &[
     s!("index.roll.suggestions.block_prefix", Dflt::None, List, Dynamic),
     s!("index.roll.suggestions.click_boost", Dflt::None, Double(0.0, 100.0), Dynamic),
     s!("index.roll.suggestions.enabled", Dflt::None, Bool, Dynamic),
-    s!("index.roll.suggestions.index", Dflt::None, Check(&Str, crate::query_suggestions::check_target), Dynamic),
     s!("index.roll.suggestions.interval", Dflt::None, Check(&Time(0), crate::query_suggestions::check_interval), Dynamic),
     s!("index.roll.suggestions.lookback", Dflt::None, Check(&Time(0), crate::query_suggestions::check_lookback), Dynamic),
     s!("index.roll.suggestions.max", Dflt::None, Int(1, crate::query_suggestions::MAX_SUGGESTIONS as i64), Dynamic),

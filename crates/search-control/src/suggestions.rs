@@ -214,13 +214,20 @@ impl Control {
         let list = qs::plan(&total.top, total.clicks > 0, cfg);
         drop(total);
         let digest = qs::digest(&cfg.index, &list);
+        // The alias is always `<index>-suggestions`. Whatever already holds that name and isn't
+        // roll's build from this very index (its uuid in the build's creation-only settings) is
+        // never touched: the build stops before writing anything.
         let target = cfg.index.as_str();
+        let refuse = |what: String| ControlError::Conflict(format!("{what}, so [{}]'s suggestions can't be built there: rename or delete it", src.name));
         if st.metadata.indices.contains_key(target) {
-            return Err(ControlError::Conflict(format!("[{target}] is an index roll didn't build: name another with {}", qs::INDEX)));
+            return Err(refuse(format!("[{target}] is an index roll didn't build")));
+        }
+        if st.metadata.data_streams.contains_key(target) || st.metadata.data_stream_aliases.contains_key(target) {
+            return Err(refuse(format!("[{target}] is a data stream or a data stream's alias")));
         }
         let behind: Vec<&Arc<IndexMeta>> = st.metadata.indices.values().filter(|i| i.aliases.contains_key(target)).collect();
         if let Some(other) = behind.iter().find(|i| !qs::built_from(i, src)) {
-            return Err(ControlError::Conflict(format!("the alias [{target}] points at [{}], which roll didn't build from [{}]: name another with {}", other.name, src.name, qs::INDEX)));
+            return Err(refuse(format!("the alias [{target}] points at [{}], which roll didn't build from [{}]", other.name, src.name)));
         }
         if let Some(r) = row
             && r.digest.as_deref() == Some(digest.as_str())
@@ -234,8 +241,9 @@ impl Control {
             name.push('0');
         }
         if name.len() > 255 {
-            return Err(ControlError::Invalid(format!("[{target}] is too long to build under (the built index adds -<ms>): name a shorter one with {}", qs::INDEX)));
+            return Err(ControlError::Invalid(format!("[{}] is too long a name to build suggestions for ([{target}-<ms>] would be over 255 bytes)", src.name)));
         }
+        // Only roll's earlier builds from this index go: each carries its uuid from creation.
         let previous: Vec<String> = st.metadata.indices.values().filter(|i| qs::built_from(i, src)).map(|i| i.name.clone()).collect();
         let create = json!({
             "settings": { "index": { "number_of_shards": 1, "number_of_replicas": 0, "roll.suggestions.source": src.name, "roll.suggestions.source_uuid": src.uuid } },

@@ -2715,3 +2715,61 @@ async fn query_suggestions_from_search_analytics() {
     assert_eq!(s, 404, "{v}");
     assert!(e.control.store.suggestion(&id, "products").await.unwrap().is_none());
 }
+
+/// A suggestions build touches only its own names: the alias is always `<index>-suggestions`
+/// (no setting names another), and when that name is already someone else's index, or an alias
+/// over an index roll didn't build from this source, the build records the error and writes
+/// nothing: the index keeps its documents, the alias keeps pointing where it did, and no build
+/// is left behind.
+#[tokio::test]
+async fn suggestions_never_touch_a_name_they_did_not_build() {
+    use reqwest::Method;
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({"name": "mall"})).await;
+    let (user, pw) = creds(&c);
+    let es = |m: Method, p: &str, b: Option<Value>| {
+        let (user, pw, p, e) = (user.clone(), pw.clone(), p.to_string(), &e);
+        async move { e.es(&user, &pw, m, &p, b).await }
+    };
+    let ok = async |m: Method, p: &str, b: Option<Value>| {
+        let (s, v) = es(m, p, b).await;
+        assert!(s < 300, "{p}: {s} {v}");
+        v
+    };
+    // The alias can't be set to another name.
+    ok(Method::PUT, "/orders", Some(json!({"mappings": {"properties": {"title": {"type": "text"}}}}))).await;
+    let (s, v) = es(Method::PUT, "/orders/_settings", Some(json!({"index.roll.suggestions.index": "accounts"}))).await;
+    assert_eq!(s, 400, "{v}");
+    // Someone else's index under `orders-suggestions`, and an alias `crm-suggestions` over theirs.
+    ok(Method::PUT, "/orders-suggestions/_doc/1?refresh=true", Some(json!({"theirs": true}))).await;
+    ok(Method::PUT, "/accounts/_doc/1?refresh=true", Some(json!({"theirs": true}))).await;
+    ok(Method::POST, "/_aliases", Some(json!({"actions": [{"add": {"index": "accounts", "alias": "crm-suggestions"}}]}))).await;
+    for index in ["orders", "crm"] {
+        ok(Method::PUT, &format!("/{index}/_doc/1?refresh=true"), Some(json!({"title": "blue bag"}))).await;
+        ok(Method::PUT, &format!("/{index}/_settings"), Some(json!({"index.roll.analytics.enabled": true, "index.roll.suggestions.enabled": true}))).await;
+        for _ in 0..5 {
+            ok(Method::POST, &format!("/{index}/_search"), Some(json!({"query": {"match": {"title": "blue bag"}}}))).await;
+        }
+    }
+    // The scheduled build and a rebuild both refuse, and say why.
+    e.control.sample().await.unwrap();
+    for (index, why) in [("orders", "[orders-suggestions] is an index roll didn't build"), ("crm", "the alias [crm-suggestions] points at [accounts]")] {
+        let st = e.get(&format!("/v1/search/clusters/mall/indices/{index}/suggestions")).await;
+        assert!(st["last_build"]["error"].as_str().is_some_and(|m| m.contains(why)), "{st}");
+        assert!(st["last_build"]["at"].is_null(), "{st}");
+        let (s, v) = e.call(Method::POST, &format!("/v1/search/clusters/mall/indices/{index}/suggestions/rebuild"), None).await;
+        assert!(s == 409 && v["error"].as_str().is_some_and(|m| m.contains(why)), "{s} {v}");
+    }
+    // Untouched: their documents, where the alias points, and no build left behind.
+    for index in ["orders-suggestions", "accounts"] {
+        let v = ok(Method::GET, &format!("/{index}/_doc/1"), None).await;
+        assert_eq!(v["_source"], json!({"theirs": true}), "{v}");
+    }
+    let v = ok(Method::GET, "/_alias/crm-suggestions", None).await;
+    assert_eq!(v.as_object().unwrap().keys().collect::<Vec<_>>(), ["accounts"], "{v}");
+    let v = ok(Method::GET, "/orders-suggestions/_alias", None).await;
+    assert_eq!(v["orders-suggestions"]["aliases"], json!({}), "{v}");
+    let v = ok(Method::GET, "/_cat/indices?format=json&h=index", None).await;
+    let names: Vec<&str> = v.as_array().unwrap().iter().filter_map(|r| r["index"].as_str()).collect();
+    assert!(!names.iter().any(|n| n.starts_with("orders-suggestions-") || n.starts_with("crm-suggestions-")), "{names:?}");
+}
