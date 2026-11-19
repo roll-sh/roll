@@ -1274,6 +1274,11 @@ pub struct Environment {
     /// Paths another service of the project answers ([]: none).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub routes: Vec<Route>,
+    /// Its uptime checks ([]: none), and how each stands on its owner.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub checks: Vec<Check>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub check_states: Vec<CheckState>,
     /// What its code may reach: anything (`open`), or roll and the listed hosts (`roll`).
     pub egress: Egress,
     /// Hosts its egress proxy refused lately (its code tried them; they aren't listed).
@@ -1546,6 +1551,73 @@ pub struct Route {
 
 /// The most routes an environment has.
 pub const MAX_ROUTES: usize = 20;
+
+/// An environment's uptime checks, at most ([`Check`]).
+pub const MAX_CHECKS: usize = 5;
+
+/// An uptime check (`checks` on an environment; `crate::checks`): GET `path` every `every_s`
+/// through the environment's own proxy, passing on `status` (any 2xx or 3xx when none) and, when
+/// it says, an answer that contains `contains`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Check {
+    /// Unique in the environment: a-z, 0-9 and -, at most 32.
+    pub name: String,
+    pub path: String,
+    /// 30–3600 (default 60).
+    #[serde(default = "Check::default_every")]
+    pub every_s: u32,
+    /// 1–60 (default 10).
+    #[serde(default = "Check::default_timeout")]
+    pub timeout_s: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+    /// At most 200 characters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contains: Option<String>,
+}
+
+impl Check {
+    fn default_every() -> u32 {
+        60
+    }
+
+    fn default_timeout() -> u32 {
+        10
+    }
+
+    pub fn check(self) -> Result<Check> {
+        let bad = |m: &str| Err(Error::BadRequest(format!("checks: {m}")));
+        if self.name.is_empty() || self.name.len() > 32 || !self.name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') {
+            return bad("a check's name is a-z, 0-9 and -, at most 32");
+        }
+        if !self.path.starts_with('/') || self.path.starts_with("//") || self.path.len() > 2000 || !self.path.bytes().all(|b| b.is_ascii_graphic()) {
+            return bad("a check's path is an absolute path, like /healthz");
+        }
+        if !(30..=3600).contains(&self.every_s) || !(1..=60).contains(&self.timeout_s) {
+            return bad("every_s is 30–3600, timeout_s 1–60");
+        }
+        if self.status.is_some_and(|s| !(100..=599).contains(&s)) || self.contains.as_ref().is_some_and(|c| c.is_empty() || c.len() > 200) {
+            return bad("status is an HTTP status, contains 1–200 characters");
+        }
+        Ok(self)
+    }
+}
+
+/// A check as it stands on the environment's owner ([`Environment::check_states`]).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct CheckState {
+    pub name: String,
+    /// None: not tried yet. False once it has failed twice in a row.
+    pub up: Option<bool>,
+    /// Failures in a row.
+    pub failures: u32,
+    pub last_at: Option<i64>,
+    pub status: Option<u16>,
+    pub ms: Option<u64>,
+    pub error: Option<String>,
+    pub down_since: Option<i64>,
+}
 
 impl Route {
     pub fn check(self) -> Result<Route> {

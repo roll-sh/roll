@@ -532,6 +532,8 @@ export interface EnvironmentPut {
   headers?: HeaderRule[] | null;
   /** Paths another service of the project answers (its environment of the same name); null or [] for none. */
   routes?: RouteRule[] | null;
+  /** Its uptime checks (at most 5), or null for none. */
+  checks?: UptimeCheck[] | null;
   /** Its own size and scale over the service's; a null field goes back to the service's. */
   run?: Partial<Record<EnvRunField, number | null>>;
 }
@@ -647,6 +649,9 @@ export interface Environment extends EnvironmentSummary {
   headers?: HeaderRule[];
   /** Paths another service of the project answers. */
   routes?: RouteRule[];
+  checks?: UptimeCheck[];
+  /** How each check stands on its owner. */
+  check_states?: UptimeCheckState[];
   created_at: number;
 }
 
@@ -872,6 +877,28 @@ export interface Vital {
   samples: number;
 }
 export type VitalName = "lcp" | "inp" | "cls" | "fcp" | "ttfb";
+/** An uptime check: GET `path` every `every_s` (30–3600, default 60) through the environment's own proxy; passes on `status` (any 2xx/3xx when none) and, with `contains`, an answer holding it. */
+export interface UptimeCheck {
+  name: string;
+  path: string;
+  every_s?: number;
+  timeout_s?: number;
+  status?: number;
+  contains?: string;
+}
+
+export interface UptimeCheckState {
+  name: string;
+  /** null: not tried yet; false once it failed twice in a row. */
+  up: boolean | null;
+  failures: number;
+  last_at: number | null;
+  status: number | null;
+  ms: number | null;
+  error: string | null;
+  down_since: number | null;
+}
+
 /** What visitors' browsers measured (`vitals: true`): overall and for the busiest routes. */
 export interface Vitals {
   minutes: number;
@@ -983,7 +1010,8 @@ export type NotifyEvent =
   | "domain.expired"
   | "domain.tls_failed"
   | "volume.backup_failed"
-  | "volume.full";
+  | "volume.full"
+  | "check.down";
 
 /** An entry of the event log (`GET /v1/apps/events`, a service's `…/activity`). */
 export interface AppEvent {

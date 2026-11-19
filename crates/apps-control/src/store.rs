@@ -463,6 +463,8 @@ pub struct EnvRow {
     pub firewall: Vec<crate::model::FirewallRule>,
     pub headers: Vec<crate::model::HeaderRule>,
     pub routes: Vec<crate::model::Route>,
+    /// Its uptime checks ([`crate::model::Check`]).
+    pub checks: Vec<crate::model::Check>,
     /// Paused (Render's Suspend): nothing of it runs, wakes, deploys or is scheduled until it's
     /// resumed.
     pub paused: bool,
@@ -591,7 +593,7 @@ fn name_taken(name: &str, deleted: Option<i64>) -> String {
         Some(_) => format!("a deleted service named {name} holds the name: restore it, or delete it again to delete it for good"),
     }
 }
-const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen, feedback, maintenance, allow_ips, rate_limit, tcp_port, firewall, pages, redeploy_on_secrets, secrets_seen, headers, paused, held_by, egress, vitals, routes, report";
+const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen, feedback, maintenance, allow_ips, rate_limit, tcp_port, firewall, pages, redeploy_on_secrets, secrets_seen, headers, paused, held_by, egress, vitals, routes, report, checks";
 /// A deployment [`Store::prune_deployments`] pruned, with its image when nothing else names it.
 pub struct Pruned {
     pub id: String,
@@ -669,6 +671,7 @@ fn env_row(r: &code_sql::Row<'_>) -> code_sql::Result<EnvRow> {
         },
         vitals: r.get::<_, i64>(26)? != 0,
         routes: r.get::<_, Option<String>>(27)?.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default(),
+        checks: r.get::<_, Option<String>>(29)?.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default(),
         report: r.get::<_, i64>(28)? != 0,
     })
 }
@@ -813,6 +816,7 @@ impl Store {
         db.add_column("visit_tickets", "login", "TEXT")?;
         db.add_column("visit_sessions", "login", "TEXT")?;
         db.add_column("environments", "routes", "TEXT")?;
+        db.add_column("environments", "checks", "TEXT")?;
         // Drains made before their filters sent every environment's runtime output: still so.
         db.add_column("log_drains", "sources", "TEXT")?;
         db.add_column("log_drains", "environments", "TEXT")?;
@@ -1023,7 +1027,7 @@ impl Store {
                     None => None,
                 };
                 c.execute(
-                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, 0, NULL, NULL, 0, NULL, 1)"),
+                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, 0, NULL, NULL, 0, NULL, 1, NULL)"),
                     params![service, env, branch.flatten(), ephemeral.unwrap_or(false) as i64, slug, port, now],
                 )?;
             }
@@ -2520,6 +2524,12 @@ impl Store {
     pub fn set_egress(&self, service: &str, env: &str, egress: &crate::model::Egress) -> Result<()> {
         let j = egress.closed().then(|| serde_json::to_string(egress).expect("JSON"));
         self.db.execute("UPDATE environments SET egress = ? WHERE service = ? AND name = ?", params![j, service, env])?;
+        Ok(())
+    }
+
+    pub fn set_checks(&self, service: &str, env: &str, checks: &[crate::model::Check]) -> Result<()> {
+        let j = (!checks.is_empty()).then(|| serde_json::to_string(checks).expect("checks serialize"));
+        self.db.execute("UPDATE environments SET checks = ? WHERE service = ? AND name = ?", params![j, service, env])?;
         Ok(())
     }
 

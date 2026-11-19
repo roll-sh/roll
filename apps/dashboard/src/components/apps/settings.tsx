@@ -12,6 +12,7 @@ import { resourceKey } from "@/lib/workspace-resources";
 import { useWorkspace } from "@/lib/workspace-store";
 import { CPU, MEMORY, mb, type Runner } from "./shared";
 import { SidecarsPanel } from "./sidecars";
+import { ChecksPanel } from "./checks";
 
 
 /** The form's values, as text (empty: the default). */
@@ -731,6 +732,7 @@ export function SettingsTab({
           <Anchor id="environment" className="space-y-6">
             <InstancesPanel service={service} env={env} runner={runner} />
             <EnvironmentPanel key={env.name} service={service} env={env} runner={runner} onDeleted={onEnvDeleted} />
+            {service.run.type === "web" && <ChecksPanel service={service.id} env={env} runner={runner} />}
           </Anchor>
         )}
 

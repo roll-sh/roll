@@ -54,6 +54,7 @@ pub mod store;
 pub mod traces;
 pub mod visit;
 pub mod vitals;
+pub mod checks;
 pub mod forms;
 pub mod track;
 pub mod traffic;
@@ -271,6 +272,8 @@ pub struct Apps {
     pub(crate) events_seen: Mutex<HashMap<String, (i64, u32)>>,
     /// Form submissions taken this minute, per environment ([`forms`]).
     pub(crate) forms_seen: Mutex<HashMap<String, (i64, u32)>>,
+    /// Uptime checks' last results here, on the owner ([`checks`]), by environment and name.
+    pub(crate) check_states: Mutex<HashMap<String, checks::Run>>,
     /// When each environment's log was last looked at for new errors ([`errors`]).
     pub(crate) errors_seen: Mutex<HashMap<String, i64>>,
     /// Manual rollouts waiting for a person, by deployment: what they say, and the wake.
@@ -524,6 +527,7 @@ impl Apps {
             vitals_seen: Mutex::new(HashMap::new()),
             events_seen: Mutex::new(HashMap::new()),
             forms_seen: Mutex::new(HashMap::new()),
+            check_states: Mutex::new(HashMap::new()),
             errors_seen: Mutex::new(HashMap::new()),
             rollout_waits: Mutex::new(HashMap::new()),
             calling: Mutex::new(std::collections::HashSet::new()),
@@ -1534,6 +1538,8 @@ impl Apps {
             firewall: r.firewall.clone(),
             headers: r.headers.clone(),
             routes: r.routes.clone(),
+            check_states: self.check_states_of(&r.service, &r.name, &r.checks),
+            checks: r.checks.clone(),
             egress_refused: if r.egress.closed() { self.deps.runtime.egress_refused(&closed_network_name(&svc.project, &r.name), &r.egress.hosts) } else { Vec::new() },
             egress: r.egress.clone(),
             scaling,
@@ -1607,7 +1613,7 @@ impl Apps {
                 settings.push(json!({ "field": format!("run.{k}"), "from": x, "to": y, "put": { "run": { k: x } } }));
             }
         }
-        for k in ["wait_for_ci", "follow_tag", "redeploy_on_secrets", "traces", "vitals", "report", "egress", "allow_ips", "rate_limit", "firewall", "headers", "routes"] {
+        for k in ["wait_for_ci", "follow_tag", "redeploy_on_secrets", "traces", "vitals", "report", "egress", "allow_ips", "rate_limit", "firewall", "headers", "routes", "checks"] {
             let (x, y) = (a.get(k).cloned().unwrap_or(Value::Null), b.get(k).cloned().unwrap_or(Value::Null));
             if x != y {
                 settings.push(json!({ "field": k, "from": x, "to": y, "put": { k: x } }));
@@ -1651,7 +1657,7 @@ impl Apps {
     pub async fn put_environment(self: &Arc<Self>, service: &str, env: &str, body: Value) -> Result<Environment> {
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "paused", "held", "hostname", "traces", "egress", "vitals", "report", "preview_host"].contains(&k.as_str()) {
+            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "checks", "paused", "held", "hostname", "traces", "egress", "vitals", "report", "preview_host"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
@@ -1775,6 +1781,22 @@ impl Apps {
                 Some(rs)
             }
             Some(_) => return Err(Error::BadRequest(format!("routes is at most {} routes, or null", crate::model::MAX_ROUTES))),
+        };
+        // Uptime checks: unique names, at most MAX_CHECKS.
+        let checks = match o.get("checks") {
+            None => None,
+            Some(Value::Null) => Some(Vec::new()),
+            Some(Value::Array(a)) if a.len() <= crate::model::MAX_CHECKS => {
+                let cs = a
+                    .iter()
+                    .map(|c| serde_json::from_value::<crate::model::Check>(c.clone()).map_err(|e| Error::BadRequest(format!("checks: {e}"))).and_then(crate::model::Check::check))
+                    .collect::<Result<Vec<_>>>()?;
+                if cs.iter().enumerate().any(|(i, c)| cs[..i].iter().any(|o| o.name == c.name)) {
+                    return Err(Error::BadRequest("checks: names are unique".into()));
+                }
+                Some(cs)
+            }
+            Some(_) => return Err(Error::BadRequest(format!("checks is at most {} checks, or null", crate::model::MAX_CHECKS))),
         };
         // What its code may reach: `{mode: "roll", hosts?}` closes its network, null or
         // `{mode: "open"}` opens it.
@@ -2024,6 +2046,14 @@ impl Apps {
             let (sid, e) = (service.to_string(), env.to_string());
             self.db(move |s| s.set_routes(&sid, &e, &routes)).await?;
             self.live(service, env).forget_gate();
+            self.changed(service);
+        }
+        if let Some(checks) = checks {
+            let (sid, e, names) = (service.to_string(), env.to_string(), checks.iter().map(|c| c.name.clone()).collect::<Vec<_>>());
+            self.db(move |s| s.set_checks(&sid, &e, &checks)).await?;
+            // A removed check's state goes with it.
+            let prefix = format!("{}/", crate::env_key(service, env));
+            self.check_states.lock().retain(|k, _| !k.strip_prefix(&prefix).is_some_and(|n| !names.iter().any(|x| x == n)));
             self.changed(service);
         }
         if let Some(limit) = rate_limit {
