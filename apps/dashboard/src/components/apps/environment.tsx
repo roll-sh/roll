@@ -315,6 +315,7 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
         </div>
 
         <SnippetsRow service={service.id} env={env} runner={runner} busy={busy} />
+        <ConfigRow service={service.id} env={env} runner={runner} busy={busy} />
 
         {(service.source.kind === "repo" || service.source.kind === "git") && (
           <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
@@ -965,6 +966,54 @@ function SnippetsRow({ service, env, runner, busy }: { service: string; env: Env
       </div>
       <textarea value={head} onChange={(e) => setHead(e.target.value)} rows={2} aria-label="Before </head>" placeholder="Before </head>: <script defer src=…></script>" className={`${input} w-full font-mono text-[12px]`} spellCheck={false} />
       <textarea value={body} onChange={(e) => setBody(e.target.value)} rows={2} aria-label="Before </body>" placeholder="Before </body>" className={`${input} w-full font-mono text-[12px]`} spellCheck={false} />
+    </div>
+  );
+}
+
+/** Its runtime config as JSON: saved as a whole; its instances have it at their next read (the
+ *  first one needs a deploy, to give them `ROLL_CONFIG_URL`). */
+function ConfigRow({ service, env, runner, busy }: { service: string; env: Environment; runner: Runner; busy: boolean }) {
+  const shown = env.config ? JSON.stringify(env.config, null, 2) : "";
+  const [text, setText] = useState(shown);
+  let parsed: Record<string, unknown> | null = null;
+  let bad: string | null = null;
+  if (text.trim()) {
+    try {
+      const v = JSON.parse(text);
+      if (v && typeof v === "object" && !Array.isArray(v)) parsed = v;
+      else bad = "an object of keys and values";
+    } catch (e) {
+      bad = e instanceof Error ? e.message : "not JSON";
+    }
+  }
+  const save = () => void runner.run("config", () => appsApi.putEnvironment(service, env.name, { config: parsed }));
+  return (
+    <div className="space-y-2 px-5 py-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <p className="text-[13px] font-medium">Runtime config{env.config_version ? <span className="ml-2 font-mono text-[11.5px] text-subtle">v{env.config_version}</span> : null}</p>
+          <p className="mt-1 text-[12px] text-muted">Values its instances read at <code className="font-mono">$ROLL_CONFIG_URL</code> while they run (a flag, a banner): a change needs no deploy.</p>
+        </div>
+        <div className="flex gap-2">
+          {env.config_version != null && (
+            <SureButton
+              className={btn}
+              disabled={busy}
+              sure="Sure? Redeploy to finish"
+              onSure={() => void runner.run("config-rotate", () => appsApi.rotateConfig(service, env.name))}
+              title="A new address, if the old one leaked: the old one keeps working until a deploy made after this is live"
+            >
+              Rotate address
+            </SureButton>
+          )}
+          <button className={btn} disabled={busy || text === shown || bad !== null} onClick={save}>
+            Save config
+          </button>
+        </div>
+      </div>
+      {env.config_rotated_at != null && <p className="text-[11.5px] text-subtle">Address rotated {since(env.config_rotated_at, Date.now())}: the one before works until a deploy made after that is live.</p>}
+      <textarea value={text} onChange={(e) => setText(e.target.value)} rows={4} aria-label="Runtime config (JSON)" placeholder='{ "new_checkout": true }' className={`${input} w-full font-mono text-[12px]`} spellCheck={false} />
+      {bad && <p className="text-[12px] text-danger">{bad}</p>}
     </div>
   );
 }

@@ -88,9 +88,9 @@ pub async fn serve<R: pg_proxy::Router>(listener: TcpListener, tls: Arc<ServerCo
                         Host::Pg(id) => Some(id),
                         _ => None,
                     });
-                    proxy.serve_connection(stream, named).await
+                    proxy.serve_connection(stream, named, Some(peer)).await
                 }
-                Ok(Ok(Some(Negotiated::Cancel(stream)))) => proxy.serve_connection(stream, None).await,
+                Ok(Ok(Some(Negotiated::Cancel(stream)))) => proxy.serve_connection(stream, None, Some(peer)).await,
                 Ok(Ok(None)) => Ok(()),
                 Ok(Err(e)) => Err(e.into()),
                 Err(_) => Ok(()),

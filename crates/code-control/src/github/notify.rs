@@ -197,9 +197,10 @@ pub(super) async fn preview(code: &Code, hub: &Hub, c: &Change) -> Result<()> {
     let (status, deploy, description) = preview_states(c.preview.as_ref());
     let visual = env.and_then(|e| e.visual_review.as_ref()).map(visual_status);
     let speed = env.and_then(speed_status);
+    let regressions = env.and_then(regressions_status);
     // Statuses go out when they change for this head, not on every wake and sleep.
     let state_key = format!("pv-state:{}", c.id);
-    let state_now = format!("{sha}:{status:?}:{deploy:?}:{description}:{visual:?}:{speed:?}");
+    let state_now = format!("{sha}:{status:?}:{deploy:?}:{description}:{visual:?}:{speed:?}:{regressions:?}");
     if mark(code, &state_key)?.as_deref() == Some(state_now.as_str()) {
         return Ok(());
     }
@@ -259,6 +260,13 @@ pub(super) async fn preview(code: &Code, hub: &Hub, c: &Change) -> Result<()> {
         && let Some((state, why)) = &speed
     {
         hub.client.create_status(l.installation_id, &l.owner, &l.repo, &sha, state, "roll/speed", Some(why), log_url.as_deref()).await.map_err(gh)?;
+    }
+    // Regressions against main's preview (Lighthouse CI's budgets, Sentry's regression gates): fails
+    // while routes are slower or errors are new.
+    if rules.status
+        && let Some((state, why)) = &regressions
+    {
+        hub.client.create_status(l.installation_id, &l.owner, &l.repo, &sha, state, "roll/regressions", Some(why), log_url.as_deref()).await.map_err(gh)?;
     }
     // The deployment: one per head, its status following the preview; the last one goes
     // inactive when the preview is removed.
@@ -445,6 +453,33 @@ fn release_line(e: &crate::model::PreviewEnvironment) -> Option<String> {
     Some(format!("Its release (migrations) took {} on the preview's data{}.\n\n", ms_words(ms), before.map(|w| format!(", {w}")).unwrap_or_default()))
 }
 
+/// The `roll/regressions` status, with the project's `regressions` rule: how many routes are
+/// slower and how many errors are new against main's preview (counts only: a status is public).
+fn regressions_status(e: &crate::model::PreviewEnvironment) -> Option<(&'static str, String)> {
+    e.regressions.as_ref()?;
+    // Nothing is said clean before it was compared at this head (main's preview asleep elsewhere,
+    // or the first read still to come).
+    // A route over its budget fails without main's preview; anything else waits for the comparison.
+    // (Accepted, it's back to waiting for the comparison: nothing is said clean before it.)
+    let over_budget = e.slower_routes.as_ref().is_some_and(|s| s.routes.iter().any(|x| x.budget_ms.is_some()));
+    if !e.regressions_compared && !(over_budget && e.regressions_accepted_by.is_none()) {
+        return Some(("pending", "Comparing with main's preview (a few minutes after the preview is ready)".into()));
+    }
+    let routes = e.slower_routes.as_ref().map_or(0, |s| s.routes.len());
+    let errors = e.new_errors.as_ref().map_or(0, |n| n.total);
+    let branch = branch_name(e.slower_routes.as_ref().map(|s| s.branch.as_str()).or(e.new_errors.as_ref().map(|n| n.branch.as_str())).unwrap_or("main"));
+    let count = |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+    let by = e.regressions_accepted_by.as_deref().map(|b| b.chars().filter(|c| c.is_ascii_alphanumeric() || "-_.:".contains(*c)).take(40).collect::<String>());
+    Some(match (routes, errors) {
+        (0, 0) => ("success", format!("No route slower and no new error against {branch}")),
+        (r, e) if by.is_some() => ("success", format!("Accepted by {}: {} slower, {} against {branch}", by.unwrap_or_default(), count(r, "route", "routes"), count(e, "new error", "new errors"))),
+        (r, 0) if e.slower_routes.as_ref().is_some_and(|s| s.routes.iter().any(|x| x.budget_ms.is_some())) => ("failure", format!("{} slower than {branch} or over budget", count(r, "route", "routes"))),
+        (r, 0) => ("failure", format!("{} slower than {branch}", count(r, "route", "routes"))),
+        (0, e) => ("failure", format!("{} against {branch}", count(e, "new error", "new errors"))),
+        (r, e) => ("failure", format!("{} slower, {} against {branch}", count(r, "route", "routes"), count(e, "new error", "new errors"))),
+    })
+}
+
 /// The `roll/speed` status, once the first page was timed under a budget.
 fn speed_status(e: &crate::model::PreviewEnvironment) -> Option<(&'static str, String)> {
     let (b, s) = (e.speed_budget.as_ref()?, e.page_speed.as_ref()?);
@@ -611,7 +646,8 @@ fn page_checks(e: &crate::model::PreviewEnvironment) -> Option<String> {
     }
     if let Some(s) = e.slower_routes.as_ref().filter(|s| !s.routes.is_empty()) {
         let branch = branch_name(&s.branch);
-        summary.push(format!("{} slower than {branch}", plural(s.routes.len() as u64, "route", "routes")));
+        let budgeted = s.routes.iter().any(|x| x.budget_ms.is_some());
+        summary.push(format!("{} slower than {branch}{}", plural(s.routes.len() as u64, "route", "routes"), if budgeted { " or over budget" } else { "" }));
         details.push_str(&routes_line(s, &branch));
     }
     if let Some(n) = e.new_errors.as_ref().filter(|n| n.total > 0) {
@@ -900,10 +936,15 @@ fn routes_line(s: &crate::model::PreviewSlowerRoutes, branch: &str) -> String {
             let span = |s: &str| -> String { s.chars().map(|c| if c == '`' || c.is_control() { '\'' } else { c }).take(80).collect() };
             // Where its time went: the span that grew most against the branch's.
             let why = x.grew.as_ref().map(|(s, ms, main)| format!(", `{}` {ms} ms ({branch} {main} ms)", span(s))).unwrap_or_default();
-            format!("`{}` {} ms ({branch} {} ms{why})", span(&x.name), x.p50_ms, x.main_p50_ms)
+            let budget = x.budget_ms.map(|b| format!(", budget {b} ms")).unwrap_or_default();
+            if x.main_p50_ms == 0 {
+                return format!("`{}` {} ms ({}{why})", span(&x.name), x.p50_ms, budget.trim_start_matches(", "));
+            }
+            format!("`{}` {} ms ({branch} {} ms{budget}{why})", span(&x.name), x.p50_ms, x.main_p50_ms)
         })
         .collect();
-    format!("Routes slower than on `{branch}`'s preview (the median of the last hour's traces): {}.\n\n", each.join("; "))
+    let what = if s.routes.iter().any(|x| x.budget_ms.is_some()) { format!("Routes slower than on `{branch}`'s preview or over their budget") } else { format!("Routes slower than on `{branch}`'s preview") };
+    format!("{what} (the median of the last hour's traces): {}.\n\n", each.join("; "))
 }
 
 /// The endpoints' times against the branch's (`github.endpoints`): each path the project named,
@@ -1070,6 +1111,9 @@ mod preview_tests {
             diff_url: None,
             pages: Vec::new(),
             speed_budget: None,
+            regressions: None,
+            regressions_accepted_by: None,
+            regressions_compared: false,
             visual_review: None,
             notes: Vec::new(),
             issues: Vec::new(),
@@ -1180,11 +1224,28 @@ mod preview_tests {
         assert!(page_checks(&timed).unwrap().contains("loads in 1.2 s, 300 ms slower than main</summary>"));
         // Routes slower than main's preview's: in the summary, and named where nothing in a name
         // can close its code span.
-        timed.slower_routes = Some(crate::model::PreviewSlowerRoutes { branch: "main".into(), routes: vec![crate::model::PreviewSlowerRoute { name: "GET /a`b\n".into(), p50_ms: 420, main_p50_ms: 120, grew: Some(("SELECT items".into(), 300, 0)) }] });
+        timed.slower_routes = Some(crate::model::PreviewSlowerRoutes { branch: "main".into(), routes: vec![crate::model::PreviewSlowerRoute { name: "GET /a`b\n".into(), p50_ms: 420, main_p50_ms: 120, grew: Some(("SELECT items".into(), 300, 0)), budget_ms: None }] });
         let checks = page_checks(&timed).unwrap();
         assert!(checks.contains("1 route slower than main"), "{checks}");
         assert!(checks.contains("`GET /a'b'` 420 ms (main 120 ms, `SELECT items` 300 ms (main 0 ms))"), "{checks}");
+        // With the project's `regressions` rule, a failing `roll/regressions` while any of them stays.
+        assert_eq!(regressions_status(&timed), None, "no rule, no status");
+        timed.regressions = Some("check".into());
+        assert_eq!(regressions_status(&timed).map(|s| s.0), Some("pending"), "not compared at this head yet");
+        // Over a budget fails without main's preview, said without a main time it hasn't got.
+        let budgeted = crate::model::PreviewSlowerRoutes { branch: "main".into(), routes: vec![crate::model::PreviewSlowerRoute { name: "GET /new".into(), p50_ms: 400, main_p50_ms: 0, grew: None, budget_ms: Some(300) }] };
+        let mut over = timed.clone();
+        over.slower_routes = Some(budgeted.clone());
+        assert_eq!(regressions_status(&over).map(|s| s.0), Some("failure"), "over budget without a comparison");
+        assert_eq!(routes_line(&budgeted, "main"), "Routes slower than on `main`'s preview or over their budget (the median of the last hour's traces): `GET /new` 400 ms (budget 300 ms).\n\n");
+        timed.regressions_compared = true;
+        assert_eq!(regressions_status(&timed), Some(("failure", "1 route slower than main".into())));
+        timed.regressions_accepted_by = Some("ada".into());
+        assert_eq!(regressions_status(&timed), Some(("success", "Accepted by ada: 1 route slower, 0 new errors against main".into())));
+        timed.regressions_accepted_by = None;
         timed.slower_routes = None;
+        assert_eq!(regressions_status(&timed), Some(("success", "No route slower and no new error against main".into())));
+        timed.regressions = None;
         // New errors against main's preview: counted in the summary and by service, never their lines.
         timed.new_errors = Some(crate::model::PreviewNewErrors { branch: "main".into(), total: 7, errors: vec![crate::model::PreviewNewError { service: "web".into(), title: "TypeError: x`y".into() }] });
         let checks = page_checks(&timed).unwrap();

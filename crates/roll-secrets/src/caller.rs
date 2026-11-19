@@ -59,7 +59,7 @@ pub(crate) fn ip_allowed(list: &[String], ip: Option<&str>) -> bool {
 }
 
 /// Who made something, in the end ([`Secrets::maker`]).
-pub(crate) enum Maker {
+pub(crate) enum Origin {
     /// A person (`usr_…`): it acts while they can sign in and reach the project.
     Person(String),
     /// The operator (or a token of theirs).
@@ -98,11 +98,12 @@ impl Secrets {
             });
         }
         // A signed-in person (the gate resolved the session on this request): their own projects.
-        // An admin's session is the operator, as their token would be.
-        if let Some(u) = user.filter(|u| !u.admin) {
-            return self.person_caller(&u.user, false);
+        // An admin's session is the operator, as their token would be, but what it makes is
+        // theirs (`Caller::maker`): it acts only while they're still an admin or own the project.
+        if let Some(u) = user {
+            return self.person_caller(&u.user, u.admin);
         }
-        if self.open || operator || user.is_some() {
+        if self.open || operator {
             return Ok(Caller::operator());
         }
         Err(Error::Unauthorized("roll secrets needs the operator token, a roll token (rlt_…) or a session".into()))
@@ -135,11 +136,11 @@ impl Secrets {
         if self.trust_forwarded_for { forwarded().or_else(peer) } else { peer() }
     }
 
-    /// A person as a caller: an admin is the operator; anyone else, the projects they own as the
-    /// workspace has them now, named by their user id.
+    /// A person as a caller: an admin is the operator (with them as its maker); anyone else, the
+    /// projects they own as the workspace has them now, named by their user id.
     pub(crate) fn person_caller(&self, user: &str, admin: bool) -> Result<Caller> {
         if admin {
-            return Ok(Caller::operator());
+            return Ok(Caller::admin(user));
         }
         Ok(Caller::person(user, Arc::new(self.own_projects(user)?)))
     }
@@ -170,45 +171,80 @@ impl Secrets {
     /// reach the project (an admin then, or its owner now); the operator always.
     pub(crate) fn maker_reaches(&self, by: &str, project: &str) -> Result<bool> {
         match self.maker(by)? {
-            Maker::Gone => Ok(false),
-            Maker::Operator => Ok(true),
-            Maker::Person(user) => {
+            Origin::Gone => Ok(false),
+            Origin::Operator => Ok(true),
+            Origin::Person(user) => {
                 let Some(p) = self.person(&user)? else { return Ok(false) };
                 Ok(p.admin || self.workspace.ids_of(&user).map_err(|e| Error::Internal(e.to_string()))?.iter().any(|x| x == project))
             }
         }
     }
 
+    /// Who to record as the maker of something that acts later as `caller` (a sync, an identity,
+    /// a product's reference): the person behind an admin's session, else the principal. A
+    /// workload identity's login is refused (400): nothing it made could act once its token ends.
+    pub(crate) fn maker_of(&self, caller: &Caller) -> Result<String> {
+        let by = caller.made_by();
+        if by.starts_with("identity:") {
+            return Err(Error::BadRequest(format!("{by} is a workload identity's login: what acts later as its maker is made by a person, a token or the operator")));
+        }
+        Ok(by.to_string())
+    }
+
+    /// What `by` (a maker as [`Secrets::maker_of`] recorded it: `operator`, a person's `usr_…`,
+    /// `token:…`) may do now, named `name` in the audit log, not a runtime: the operator
+    /// everything; a person while their account can sign in (an admin only while they still are
+    /// one, else the projects they own now); a roll-access grant while it lives (a person's acting
+    /// as them). Anything else, or a maker that's gone, is `Forbidden`. Looked up on every use,
+    /// never cached.
+    pub(crate) fn maker_caller(&self, by: &str, name: &str) -> Result<Caller> {
+        let gone = || Error::Forbidden(format!("{by} made this and can't reach secrets any more"));
+        let mut c = if by == "operator" {
+            Caller::operator()
+        } else if crate::access::is_person(by) {
+            let person = self.person(by)?.ok_or_else(gone)?;
+            self.person_caller(by, person.admin)?
+        } else {
+            let token = by.strip_prefix("token:").ok_or_else(gone)?;
+            let g = self.grants.as_ref().and_then(|g| g.grant(token)).ok_or_else(gone)?;
+            Caller::token(&g.id, self.grant_grants(&g)?)
+        };
+        // As something roll runs for them (`Caller::acting_as`): never past a freeze, whoever chose it.
+        c = c.acting_as(name.to_string());
+        c.maker = Some(by.to_string());
+        Ok(c)
+    }
+
     /// Who made `by` in the end: an identity's maker, a token's person (a roll-access grant made by
     /// someone acts as them), up the chain. A token that's gone (revoked, expired, its person
     /// unable to sign in) or an identity that's gone ends it.
-    pub(crate) fn maker(&self, by: &str) -> Result<Maker> {
+    pub(crate) fn maker(&self, by: &str) -> Result<Origin> {
         let mut by = by.to_string();
         for _ in 0..16 {
             if crate::access::is_person(&by) {
-                return Ok(Maker::Person(by));
+                return Ok(Origin::Person(by));
             }
             let parent: Option<String> = if let Some(id) = by.strip_prefix("token:") {
                 match &self.grants {
                     // roll-access as it answers now: a person's token continues with them.
                     Some(grants) => match grants.grant(id) {
-                        None => return Ok(Maker::Gone),
+                        None => return Ok(Origin::Gone),
                         Some(g) => match &g.user {
                             Some(user) => Some(user.to_string()),
-                            None => return Ok(Maker::Operator),
+                            None => return Ok(Origin::Operator),
                         },
                     },
-                    None => return Ok(Maker::Operator),
+                    None => return Ok(Origin::Operator),
                 }
             } else if let Some(i) = by.strip_prefix("identity:") {
                 self.db.read(|c| c.query_row("SELECT created_by FROM identities WHERE id = ?", [i], |r| r.get::<_, String>(0)).optional())?
             } else {
-                return Ok(Maker::Operator);
+                return Ok(Origin::Operator);
             };
-            let Some(parent) = parent else { return Ok(Maker::Gone) };
+            let Some(parent) = parent else { return Ok(Origin::Gone) };
             by = parent;
         }
-        Ok(Maker::Gone)
+        Ok(Origin::Gone)
     }
 
     /// Who the caller is, for `roll secrets` to find its project.

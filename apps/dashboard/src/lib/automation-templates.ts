@@ -394,6 +394,31 @@ export const TEMPLATES: AutomationTemplate[] = [
     },
   },
   {
+    id: "preview-regressed",
+    title: "Tell me when a change's preview regresses against main",
+    description: "A notice once a push when a change's preview has routes slower than main's preview or errors main's doesn't have (roll previews), with how many and a link to accept or look at them.",
+    trigger: "code",
+    steps: ["notify"],
+    build: (ctx) => {
+      const p = ctx.projects.find((x) => x.repo) ?? ctx.projects[0];
+      return spec(
+        "Regressions against main",
+        "A notice once a push when a change's preview regresses against main's.",
+        { type: "code", events: ["preview"], repos: p?.repo ? [p.repo] : [] },
+        [
+          step("tell", "notify", {
+            title: "{{ event.data.change }} regressed against main",
+            body: '{{ event.data.preview.environment.slower_routes.routes | length | default:"0" }} route(s) slower, {{ event.data.preview.environment.new_errors.total | default:"0" }} new error(s) against main\'s preview.',
+            level: "warning",
+            link: "{{ event.data.preview.environment.dashboard_url }}",
+          }),
+        ],
+        // `became` names what an update reached that the preview wasn't already at: once a push.
+        { filters: [{ field: "event.data.became", op: "contains", value: "regressions" }] },
+      );
+    },
+  },
+  {
     id: "preview-failed",
     title: "Tell me when a change's preview fails",
     description: "A notice once a push when a change's preview fails (a build, its seed or release, a health check), with what went wrong and a link to the preview.",

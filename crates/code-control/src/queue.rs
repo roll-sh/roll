@@ -187,6 +187,25 @@ impl Code {
                 _ => {}
             }
         }
+        // The project's previews keep regressions against main from landing (`regressions =
+        // "required"`): routes slower or errors new, until someone other than the author accepts them.
+        if let Some(e) = c.preview.as_ref().and_then(|p| p.environment.as_ref()).filter(|e| e.regressions.as_deref() == Some("required")) {
+            let routes = e.slower_routes.as_ref().map_or(0, |s| s.routes.len());
+            let errors = e.new_errors.as_ref().map_or(0, |n| n.total);
+            let own = e.regressions_accepted_by.as_deref().is_some_and(|by| by.eq_ignore_ascii_case(&c.author) || by.eq_ignore_ascii_case(c.author.trim_start_matches('@')));
+            let over_budget = e.slower_routes.as_ref().is_some_and(|s| s.routes.iter().any(|x| x.budget_ms.is_some()));
+            let accepted = e.regressions_accepted_by.is_some() && !own;
+            let current = e.head.as_deref().is_none_or(|h| h == c.head);
+            // A route over its budget needs no comparison with main: it waits now.
+            if over_budget && current && !accepted {
+                out.push(Blocker::new("regressions", format!("against its budgets and main's preview: {routes} route(s) over budget or slower, {errors} new error(s): fix them, or someone else accepts them on its preview")));
+            // Not compared at the change's own head isn't clean: it waits for the comparison.
+            } else if !e.regressions_compared || !current {
+                out.push(Blocker::new("regressions", "not compared with main's preview at its head yet (a few minutes after its preview is ready, while main's preview is kept)"));
+            } else if routes + errors > 0 && (e.regressions_accepted_by.is_none() || own) {
+                out.push(Blocker::new("regressions", format!("against main's preview: {routes} route(s) slower, {errors} new error(s): fix them, or someone else accepts them on its preview")));
+            }
+        }
         if r.land_policy == LandPolicy::Queue {
             let pending: Vec<String> = settings
                 .change_checks(&r.required_checks)

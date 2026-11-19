@@ -25,6 +25,10 @@ pub fn router(apps: Arc<Apps>) -> axum::Router {
             if req.uri().path().starts_with(OTLP) {
                 return otlp(apps, req).await;
             }
+            // An environment's runtime config, read by its instances with its token.
+            if req.uri().path().starts_with(CONFIG) {
+                return runtime_config(apps, req).await;
+            }
             // An edge function's `context.next()` ([`crate::edge`]): signed, any host.
             if req.uri().path().starts_with(crate::edge::NEXT) {
                 return crate::edge::next(apps, req).await;
@@ -74,6 +78,73 @@ struct TargetPort(u16);
 
 /// Where instances send traces: `/_roll/otlp/{service}/{env}/{token}/v1/traces`, any host.
 pub const OTLP: &str = "/_roll/otlp/";
+
+/// Where an environment's instances read its runtime config (`ROLL_CONFIG_URL`):
+/// `/_roll/config/<service>/<env>/<token>`.
+pub const CONFIG: &str = "/_roll/config/";
+
+/// `GET …/_roll/config/<service>/<env>/<token>[?wait=S]`: `{version, config}` with the version as
+/// its ETag; `If-None-Match` the version it has answers 304, or with `wait` (at most 25 s) waits
+/// for the next version first. Read from the store, so any node answers; a wrong token or none
+/// is a 404, as a path that isn't one.
+async fn runtime_config(apps: Arc<Apps>, req: Request) -> Response {
+    let parts: Vec<String> = req.uri().path()[CONFIG.len()..].split('/').map(|s| percent_encoding::percent_decode_str(s).decode_utf8_lossy().into_owned()).collect();
+    let [id, env, token] = parts.as_slice() else { return (StatusCode::NOT_FOUND, "").into_response() };
+    if req.method() != axum::http::Method::GET || !id.starts_with("svc_") || !token.starts_with("rlc_") {
+        return (StatusCode::NOT_FOUND, "").into_response();
+    }
+    // A deleted service's (kept for a restore) answers nothing, whatever its token.
+    let (sid, e, t) = (id.clone(), env.clone(), token.clone());
+    let reads = move |s: &crate::store::Store| Ok(s.service(&sid).is_ok() && s.runtime_config_tokens(&sid, &e)?.is_some_and(|(now, before)| same(&now, &t) || before.is_some_and(|b| same(&b, &t))));
+    if !apps.db(reads).await.unwrap_or(false) {
+        return (StatusCode::NOT_FOUND, "").into_response();
+    }
+    let has = req.headers().get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()).map(|v| v.trim_start_matches("W/").trim_matches('"').to_string());
+    let wait = req.uri().query().and_then(|q| url::form_urlencoded::parse(q.as_bytes()).find(|(k, _)| k == "wait")).and_then(|(_, v)| v.parse::<u64>().ok()).unwrap_or(0).min(25);
+    // At most CONFIG_WAITERS long polls an environment on a node; past that, an answer at once.
+    let key = crate::env_key(id, env);
+    let waiting = wait > 0 && {
+        let mut w = apps.config_waiters.lock();
+        let n = w.entry(key.clone()).or_default();
+        (*n < CONFIG_WAITERS).then(|| *n += 1).is_some()
+    };
+    let _left = Waiting(waiting.then(|| (apps.clone(), key)));
+    let until = Instant::now() + std::time::Duration::from_secs(if waiting { wait } else { 0 });
+    loop {
+        let (sid, e) = (id.clone(), env.clone());
+        let Ok(Some(version)) = apps.db(move |s| s.runtime_config_version(&sid, &e)).await else { return (StatusCode::NOT_FOUND, "").into_response() };
+        let tag = format!("\"{version}\"");
+        if has.as_deref() != Some(version.to_string().as_str()) {
+            let (sid, e) = (id.clone(), env.clone());
+            let Ok(Some((config, version))) = apps.db(move |s| s.runtime_config(&sid, &e)).await else { return (StatusCode::NOT_FOUND, "").into_response() };
+            return (StatusCode::OK, [(header::ETAG, format!("\"{version}\"")), (header::CACHE_CONTROL, "no-store".to_string())], axum::Json(serde_json::json!({ "version": version, "config": config }))).into_response();
+        }
+        if Instant::now() >= until {
+            return (StatusCode::NOT_MODIFIED, [(header::ETAG, tag)]).into_response();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+}
+
+/// Long polls of one environment's runtime config a node holds at once.
+const CONFIG_WAITERS: usize = 64;
+
+/// A long poll's place, given back when it answers.
+struct Waiting(Option<(Arc<Apps>, String)>);
+
+impl Drop for Waiting {
+    fn drop(&mut self) {
+        if let Some((apps, key)) = self.0.take() {
+            let mut w = apps.config_waiters.lock();
+            if let Some(n) = w.get_mut(&key) {
+                *n = n.saturating_sub(1);
+                if *n == 0 {
+                    w.remove(&key);
+                }
+            }
+        }
+    }
+}
 
 /// OTLP/HTTP from an environment's instances, on the service's owner: the token in the path is
 /// the credential (anything else is the same 404). Answered as OTLP expects: an empty export
@@ -1170,7 +1241,7 @@ fn strip_roll_headers(h: &mut axum::http::HeaderMap) {
 
 /// The waking proxy on the owner: an instance (woken if need be), the request forwarded, the
 /// answer metered.
-async fn proxy(apps: Arc<Apps>, service: &str, env: &str, deployment: Option<&str>, req: Request) -> Response {
+pub(crate) async fn proxy(apps: Arc<Apps>, service: &str, env: &str, deployment: Option<&str>, req: Request) -> Response {
     let (began, seen) = (Instant::now(), Seen::of(&req));
     let path = crate::model::normal_path(&seen.path);
     let r = proxy_inner(apps.clone(), service, env, deployment, req).await;
@@ -1361,9 +1432,14 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
         return apps.event_beacon(service, env, &body, country).into_response();
     }
     let feedback = Tags { feedback: target.is_some() && page_load, vitals: gate.vitals && page_load, snippets: gate.snippets.clone().filter(|_| page_load) };
-    if feedback.feedback || feedback.vitals {
+    if feedback.feedback || feedback.vitals || feedback.snippets.is_some() {
         // The page as the app wrote it, so the tag can go in as it streams.
         req.headers_mut().insert(header::ACCEPT_ENCODING, HeaderValue::from_static("identity"));
+    }
+    if feedback.snippets.is_some() {
+        // Never a 304 for a page with snippets: one kept from before a snippet changed would
+        // keep the old one (its bytes aren't the file's, nor its ETag).
+        req.headers_mut().remove(header::IF_NONE_MATCH);
     }
     let live = match apps.load_live(service, env).await {
         Ok(l) => l,
