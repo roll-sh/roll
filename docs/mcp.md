@@ -571,6 +571,11 @@ previews are listed once those products are on.
 | `storage_restore_object` | An object back from the trash. | `POST /v1/storage/buckets/{name}/trash/restore` |
 | `storage_usage` | A bucket's usage. | `GET /v1/storage/buckets/{bucket}/usage` |
 | `storage_usage_all` | Storage and requests across every bucket. | `GET /v1/storage/usage` |
+| `storage_list_accounts` | Storage's accounts (12-digit ids): name, alias, the default. | `GET /v1/storage/accounts` |
+| `storage_list_keys` | An account's access keys: permission, buckets, IAM user, last use (never a secret). | `GET /v1/storage/keys` |
+| `storage_list_roles` | An account's IAM roles: ARN, trust, permissions policy, session length. | `GET /v1/storage/roles` |
+| `storage_get_role` | One IAM role. | `GET /v1/storage/roles/{name}` |
+| `storage_list_replication_targets` | Buckets outside roll that replication copies to (never the secret). | `GET /v1/storage/replication-targets` |
 | `storage_update_bucket` | Change a bucket's versioning, lifecycle rules, CORS, trash days, tags or whether it's public: what's left out stays. | `PATCH /v1/storage/buckets/{bucket}` |
 | `storage_delete_objects` | Delete these keys, or every object under a prefix (to the trash). | `POST /v1/storage/buckets/{bucket}/delete` |
 | `streams_list` | Kafka-compatible streams. | `GET /v1/streams` |
@@ -718,6 +723,11 @@ previews are listed once those products are on.
 | `secrets_list_saas` | A project's rotators for third-party API keys: vendor and the account each rotates for (never a credential). | `GET /v1/secrets/projects/{project}/saas` |
 | `secrets_list_kubernetes` | The Kubernetes clusters a project issues service-account tokens for: names and API servers (never a token). | `GET /v1/secrets/projects/{project}/kubernetes` |
 | `secrets_list_github_apps` | A project's GitHub Apps for short-lived installation tokens (ids, repositories, permissions; never the private key; adding one is admin). | `GET /v1/secrets/projects/{project}/github-apps` |
+| `secrets_list_directories` | A project's LDAP and Active Directory servers: URL, flavor, bind DN, managed accounts, groups, gateway (never the bind password; adding one is admin). | `GET /v1/secrets/projects/{project}/directories` |
+| `secrets_list_snowflake_accounts` | A project's Snowflake accounts: host, admin user and role, the admin key's fingerprint, managed user, roles (never the key; adding one is admin). | `GET /v1/secrets/projects/{project}/snowflake-accounts` |
+| `secrets_list_atlas_projects` | A project's MongoDB Atlas projects: group id, client id, managed users, roles (never the client secret; adding one is admin). | `GET /v1/secrets/projects/{project}/atlas-projects` |
+| `secrets_list_gateways` | A project's gateways into private networks with each link's status (online, node, version, allow-list, last seen; never a token; making one is admin). | `GET /v1/secrets/projects/{project}/gateways` |
+| `secrets_ca_acme` | A CA's ACME server: directory, pre-authorization, challenges, external account bindings (never an HMAC key; making one is admin). | `GET /v1/secrets/projects/{project}/cas/{id}/acme` |
 | `secrets_changes` | What changed in an environment (who, when, which keys; never values). | `GET …/environments/{env}/changes` |
 | `secrets_get_change` | One change: what it did to each key (fingerprints, never values). | `GET /v1/secrets/projects/{project}/environments/{env}/changes/{seq}` |
 | `secrets_insights` | Each key's version, last change and read, reads in 30 days, staleness. | `GET /v1/secrets/projects/{project}/environments/{env}/insights` |
@@ -869,13 +879,17 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **Next, ranked (now):** apps' forms tools (`apps_list_forms`, and `apps_form_submissions` as a
-   reveal) once apps' forms routes land; secrets' request (#277) and cut-off (#304) tools when
-   secrets' batch 4 lands; a removed person's repositories handed to someone else (waits for a
-   repository transfer in roll code). Open, landed together by the unit `roll-mcp-land373` after
-   secrets' turn: the turn-4 follow-ups (#373, this PR), more secrets reads as tools with 10 more
-   search-mode queries (#376), People as CSV (#377). Not doing: "remember this browser"; a preset
-   that reveals development's values without asking (#354).
+1. **Next, ranked (now):** read tools for secrets' new backends (directories, Snowflake accounts,
+   Atlas projects, gateways with their link's status, a CA's ACME server; secrets' batch 3) and
+   storage's accounts, access keys, IAM roles and replication targets, with four search-mode
+   queries (`feature/roll-mcp-secrets-backends`, this PR). Waiting on a sibling: apps' forms
+   tools (`apps_list_forms`, and `apps_form_submissions` as a reveal; apps #346), image scanning
+   and SLOs (`apps_deploy_vulnerabilities` with `severity`, `apps_environment_slo`; apps #379)
+   once they land; secrets' request (#277) and cut-off (#304) tools when secrets' batch 4 lands;
+   a removed person's repositories handed to someone else (waits for a repository transfer in
+   roll code). Landing now (unit `roll-mcp-land373`): more secrets reads with 10 search-mode
+   queries (#376), People as CSV (#377); the turn-4 follow-ups (#373) are on main. Not doing:
+   "remember this browser"; a preset that reveals development's values without asking (#354).
 2. **Landed 2026-11-19, turn 4 (main 97cdd7645, ci green):** steadier timing tests (#348), passkey
    autofill (#322), an admin's per-person security log (#328), admin alerts (#333), search's audit
    and analytics tools (#334), the longest session (#337), how each session signed in (#338),
