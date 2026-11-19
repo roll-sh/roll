@@ -152,9 +152,54 @@ export type KeyInsight = { key: string; version: number; updated_at: number; upd
   weak?: string;
 };
 /** A token or identity that reaches a folder, with what it may do there. */
-export type Holder = { id: string; name: string; actions: Action[]; expires_at: number | null; last_used_at: number | null; created_by: string };
+/** `disabled_at`: an identity a cut-off disabled (it doesn't log in). `skipped`: why the caller's cut-off would leave this token (it reaches beyond the project: only the operator revokes it). */
+export type Holder = { id: string; name: string; actions: Action[]; expires_at: number | null; last_used_at: number | null; created_by: string; disabled_at?: number; skipped?: string };
+/** A frozen folder: reads of its values answer 423 `frozen` to all but its admins. */
+export type Freeze = { why: string; at: number; by: string };
 /** `GET …/reach` (a project admin's): every way a folder's (or one key's) values can leave roll. Names only. */
-export type Reach = { environment: string; path: string; key: string | null; protected: boolean; untrusted: boolean; tokens: Holder[]; identities: Holder[]; syncs: { id: string; kind: string; target: unknown; last_synced_at: number | null }[]; projects: string[]; imported_by: string[]; truncated: boolean; readers: { actor: string; last_at: number; reads: number }[]; uncounted: string };
+export type Reach = {
+  environment: string;
+  path: string;
+  key: string | null;
+  protected: boolean;
+  untrusted: boolean;
+  tokens: Holder[];
+  identities: Holder[];
+  syncs: { id: string; kind: string; target: unknown; last_synced_at: number | null; paused_at: number | null }[];
+  /** Live dynamic credentials issued for its keys. */
+  leases: { id: string; key: string; consumer: string; issued_at: number; expires_at: number }[];
+  /** Open one-time shares made from its keys, as their makers said (`from`). */
+  shares: { id: string; note: string; key: string; created_by: string; expires_at: number }[];
+  /** Open shares of the project that don't say where their value came from. */
+  unattributed_shares: number;
+  projects: string[];
+  imported_by: string[];
+  truncated: boolean;
+  readers: { actor: string; last_at: number; reads: number }[];
+  uncounted: string;
+  frozen: Freeze | null;
+};
+/** `POST …/reach/cut-off`: what to cut (each on unless false; `freeze` off unless true), and why. */
+export type CutOffRequest = { why: string; tokens?: boolean; identities?: boolean; leases?: boolean; shares?: boolean; syncs?: boolean; freeze?: boolean };
+export type Cut = { id: string; name: string };
+/** What a cut-off did: what was cut, and what couldn't be with why (the rest went on). `skipped`: tokens that reach beyond the project, left for the operator to revoke. `batches`: calls to roll-access, 500 grants each at most. */
+export type CutOff = {
+  environment: string;
+  path: string;
+  key: string | null;
+  why: string;
+  tokens: Cut[];
+  skipped: (Cut & { why: string })[];
+  identities: Cut[];
+  logins: number;
+  batches: number;
+  leases: Cut[];
+  shares: Cut[];
+  projects: string[];
+  syncs: Cut[];
+  frozen: boolean;
+  failed: { what: "tokens" | "identities" | "logins" | "leases" | "shares" | "syncs" | "freeze" | "audit"; ids: string[]; why: string }[];
+};
 export type Insights = { path: string; max_age_days: number | null; reads_since: number; keys: KeyInsight[] };
 
 export type ChangeRequest = {
@@ -206,9 +251,11 @@ export type Token = {
   keys?: string | null;
 };
 /** A one-time share (never its ciphertext): `open` until its last open, expiry or revocation. */
-export type Share = { id: string; note: string; views_left: number; created_by: string; created_at: number; expires_at: number; opened_at: number | null; open: boolean };
+export type Share = { id: string; note: string; views_left: number; created_by: string; created_at: number; expires_at: number; opened_at: number | null; open: boolean; from?: ShareFrom };
+/** The key a share's value came from (a cut-off of it expires the share). */
+export type ShareFrom = { environment: string; path?: string; key: string };
 /** `ciphertext`: base64url(nonce ‖ AES-256-GCM ciphertext) with `roll-share-v1` as associated data; `views` 1–10, `ttl_minutes` 5–10080. */
-export type NewShare = { ciphertext: string; note?: string; views?: number; ttl_minutes?: number };
+export type NewShare = { ciphertext: string; note?: string; views?: number; ttl_minutes?: number; from?: ShareFrom };
 export type KeyType = "url" | "int" | "port" | "bool" | "json" | "email" | "totp";
 /** A key every standard environment must define in a folder; typed keys also say what its value must be. */
 /** `owner`: who supplies it (a person or team), named in health and the daily notice. */
@@ -248,6 +295,9 @@ export type Identity = {
   pinned_keys?: number;
   /** The gateway it logs in (its tokens open that gateway's link and nothing else). */
   gateway?: string;
+  /** When a cut-off disabled it, and why: it doesn't log in until an admin enables it. */
+  disabled_at: number | null;
+  disabled_why: string | null;
 };
 type IdentityScope = { name: string; environments?: string[]; paths?: string[]; actions: Action[]; ttl_minutes?: number; allowed_ips?: string[]; gateway?: string };
 /**
@@ -297,6 +347,9 @@ export type Sync = {
   signed: boolean;
   created_at: number;
   created_by: string;
+  /** When a cut-off paused it, and why: it pushes nothing until an admin resumes it. */
+  paused_at: number | null;
+  paused_why: string | null;
 };
 /** What a sync would push before it exists (`POST …/syncs/preview`): names only. */
 export type SyncPreview = { names: string[]; credentials: string[]; missing_credentials: string[]; unknown_keys: string[] };
@@ -320,7 +373,7 @@ export type Finding = { issue: "decoy_used" | "expired" | "rotation_failing" | "
 export type ProjectFindings = { project: string; project_name: string; findings: Finding[] };
 /** A URL roll calls to issue and revoke a value that lives outside roll (`rotator` links). */
 /** A managed credential and its rotation: its keys, resource, schedule, and why its last scheduled rotation failed. */
-export type Rotation = { environment: string; path: string; keys: string[]; kind: string; ref: string; name: string; rotate_days: number | null; grace_minutes: number; issued_at: number | null; next_due: number | null; last_error: string | null; failed_at: number | null };
+export type Rotation = { environment: string; path: string; keys: string[]; kind: string; ref: string; name: string; rotate_days: number | null; rotate_window: string | null; grace_minutes: number; issued_at: number | null; next_due: number | null; last_error: string | null; failed_at: number | null };
 /** An encryption key (encryption as a service): its versions, never its material. */
 /** A transit key version's public signing key (Ed25519): raw base64, PEM (SPKI) and a JWK. */
 export type TransitPublicKey = { version: number; public_key: string; pem: string; jwk: { kty: "OKP"; crv: "Ed25519"; x: string; kid: string; alg: "EdDSA"; use: "sig" } };

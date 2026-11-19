@@ -56,6 +56,7 @@ mod read;
 mod metrics;
 pub mod backup_schedule;
 pub mod reach;
+pub mod cutoff;
 pub mod refs;
 mod notices;
 mod purge;
@@ -66,6 +67,7 @@ pub mod sinks;
 pub mod suggestions;
 mod sweep;
 pub mod totp;
+pub mod window;
 pub mod syncs;
 mod caller;
 pub mod consumers;
@@ -287,6 +289,11 @@ pub enum Error {
     /// outage: `roll run --fallback` doesn't start from its file on it.
     #[error("{0}")]
     KeyDenied(String),
+    /// 423 `frozen`: an admin froze the folder during an incident (`…/reach/cut-off`); only its
+    /// admins (people and tokens, never roll's own readers: `Caller::reads_frozen`) read it until
+    /// one unfreezes it. Never an outage either.
+    #[error("{0}")]
+    Frozen(String),
     /// 429: too many attempts (`rate_limited`).
     #[error("{0}")]
     TooMany(String),
@@ -520,6 +527,16 @@ impl Secrets {
         db.ensure_schema(issuer::SCHEMA)?;
         db.ensure_schema(clouds::SCHEMA)?;
         db.ensure_schema(iam::SCHEMA)?;
+        // An incident's cut-off (cutoff.rs): frozen folders, disabled identities, paused syncs,
+        // and where a one-time share's value came from.
+        db.ensure_schema(cutoff::SCHEMA)?;
+        db.add_column("identities", "disabled_at", "INTEGER")?;
+        db.add_column("identities", "disabled_why", "TEXT")?;
+        db.add_column("syncs", "paused_at", "INTEGER")?;
+        db.add_column("syncs", "paused_why", "TEXT")?;
+        db.add_column("shares", "env_id", "TEXT")?;
+        db.add_column("shares", "path", "TEXT")?;
+        db.add_column("shares", "key", "TEXT")?;
         // The deployment key's id, for a sealed start's check (unseal.rs).
         db.ensure_schema(unseal::SCHEMA)?;
         if let Ok(keys) = &opts.keyring {

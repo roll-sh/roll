@@ -117,6 +117,17 @@ pub struct Identity {
     /// and nothing else.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gateway: Option<String>,
+    /// When an incident's cut-off disabled it (`…/reach/cut-off`): it doesn't log in until an admin
+    /// enables it again (`PATCH …/identities/{id}`).
+    pub disabled_at: Option<i64>,
+    pub disabled_why: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IdentityChange {
+    /// `false` enables a disabled identity again; `true` disables it (no reason given).
+    pub disabled: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -162,7 +173,7 @@ pub struct Login {
     pub identity: String,
 }
 
-const COLUMNS: &str = "id, project_id, name, issuer, audience, subject, claims, environments, paths, actions, ttl_minutes, created_at, created_by, last_used_at, last_subject, allowed_ips, jwks, kind, gateway";
+const COLUMNS: &str = "id, project_id, name, issuer, audience, subject, claims, environments, paths, actions, ttl_minutes, created_at, created_by, last_used_at, last_subject, allowed_ips, jwks, kind, gateway, disabled_at, disabled_why";
 
 /// An identity, its project, and its pinned keys.
 fn identity_row(r: &code_sql::Row<'_>) -> code_sql::Result<(Identity, String, Option<String>)> {
@@ -191,6 +202,8 @@ fn identity_row(r: &code_sql::Row<'_>) -> code_sql::Result<(Identity, String, Op
             allowed_ips: r.get::<_, Option<String>>(15)?.and_then(|s| serde_json::from_str(&s).ok()),
             pinned_keys: jwks.as_deref().and_then(|d| crate::oidc::pinned_keys(d).ok()),
             gateway: r.get(18)?,
+            disabled_at: r.get(19)?,
+            disabled_why: r.get(20)?,
         },
         r.get(1)?,
         jwks,
@@ -277,7 +290,7 @@ impl Secrets {
         self.project(project)?;
         let now = self.db.now_ms()?;
         let kind = n.kind;
-        let i = Identity { id: names::new_id("idn", 12), name, kind, arn: (kind == IdentityKind::Aws).then(|| subject.clone()), server_id: None, issuer, audience, subject, claims: n.claims, environments, paths, actions, ttl_minutes: ttl, created_at: now, created_by: caller.principal.clone(), last_used_at: None, last_subject: None, allowed_ips: crate::caller::allowed(n.allowed_ips)?, pinned_keys, gateway };
+        let i = Identity { id: names::new_id("idn", 12), name, kind, arn: (kind == IdentityKind::Aws).then(|| subject.clone()), server_id: None, issuer, audience, subject, claims: n.claims, environments, paths, actions, ttl_minutes: ttl, created_at: now, created_by: caller.principal.clone(), last_used_at: None, last_subject: None, allowed_ips: crate::caller::allowed(n.allowed_ips)?, pinned_keys, gateway, disabled_at: None, disabled_why: None };
         self.db.write(|c| {
             let count: i64 = c.query_row("SELECT COUNT(*) FROM identities WHERE project_id = ?", [project], |r| r.get(0))?;
             if count >= IDENTITIES_MAX {
@@ -290,7 +303,7 @@ impl Secrets {
             }
             let kind = (i.kind == IdentityKind::Aws).then_some("aws");
             c.execute(
-                &format!("INSERT INTO identities ({COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?)"),
+                &format!("INSERT INTO identities ({COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, NULL, NULL)"),
                 params![i.id, project, i.name, i.issuer, i.audience, i.subject, json(&i.claims), i.environments.as_ref().map(json), i.paths.as_ref().map(json), json(&i.actions), i.ttl_minutes, now, i.created_by, i.allowed_ips.as_ref().map(json), jwks, kind, i.gateway],
             )?;
             let keys = i.pinned_keys.map(|n| format!(", {n} pinned key{}", if n == 1 { "" } else { "s" })).unwrap_or_default();
@@ -378,6 +391,42 @@ impl Secrets {
         Ok(identity)
     }
 
+    /// Enable a disabled identity again, or disable one (`PATCH …/identities/{id}`). Enabling lets
+    /// it mint tokens again, so it's a person's, as making it is.
+    pub fn update_identity(&self, project: &str, id: &str, change: IdentityChange, caller: &Caller) -> Result<Identity> {
+        caller.need(Action::Admin, &Scope::project(project))?;
+        if caller.principal.starts_with("identity:") || caller.principal.starts_with("token:") {
+            return Err(Error::Forbidden("identities are enabled by people, not tokens or logins".into()));
+        }
+        self.project(project)?;
+        let now = self.db.now_ms()?;
+        let (identity, live) = self.db.write(|c| {
+            let name: Option<String> = c.query_row("SELECT name FROM identities WHERE id = ? AND project_id = ?", [id, project], |r| r.get(0)).optional()?;
+            let name = name.ok_or_else(|| Error::NotFound(format!("no identity {id}")))?;
+            let live: Vec<String> = match change.disabled {
+                true => {
+                    c.execute("UPDATE identities SET disabled_at = ?, disabled_why = NULL WHERE id = ? AND disabled_at IS NULL", params![now, id])?;
+                    c.query("SELECT grant_id FROM identity_logins WHERE identity = ? AND expires_at > ?", params![id, now], |r| r.get(0))?
+                }
+                false => {
+                    c.execute("UPDATE identities SET disabled_at = NULL, disabled_why = NULL WHERE id = ?", [id])?;
+                    vec![]
+                }
+            };
+            let what = if change.disabled { "disabled" } else { "enabled" };
+            audit::record(c, self.keys()?, project, caller, "identity.update", None, None, &[], &format!("{what} identity {name}"), now)?;
+            Ok::<_, Error>((c.query_row(&format!("SELECT {COLUMNS} FROM identities WHERE id = ?"), [id], identity_row)?.0, live))
+        })?;
+        if let Some(w) = &self.workloads {
+            for g in &live {
+                if let Err(e) = w.revoke(g) {
+                    tracing::warn!(identity = %id, grant = %g, "revoking a disabled identity's token failed: {e}");
+                }
+            }
+        }
+        Ok(identity)
+    }
+
     /// Delete an identity and revoke the tokens it gave out.
     pub fn delete_identity(&self, project: &str, id: &str, caller: &Caller) -> Result<()> {
         caller.need(Action::Admin, &Scope::project(project))?;
@@ -418,6 +467,10 @@ impl Secrets {
         let denied = || Error::Unauthorized(format!("no identity {identity} takes this token"));
         let found = self.db.read(|c| c.query_row(&format!("SELECT {COLUMNS} FROM identities WHERE id = ?"), [identity], identity_row).optional())?;
         let (i, project, jwks) = found.ok_or_else(denied)?;
+        // Disabled by an incident's cut-off. Why is the admins' (the login is public).
+        if i.disabled_at.is_some() {
+            return Err(Error::Forbidden(format!("identity {} is disabled: an admin of its project enables it again", i.name)));
+        }
         if !self.maker_reaches(&i.created_by, &project)? {
             return Err(denied());
         }
@@ -462,13 +515,14 @@ impl Secrets {
             crate::caller::Maker::Gone => return Err(denied()),
         };
         let m = workloads.mint(&i.name, rule, i.allowed_ips.clone(), i.ttl_minutes as u32, owner.as_deref())?;
-        let caller = Caller { principal: format!("identity:{}", i.id), grants: std::sync::Arc::new(crate::access::Everything), ip, runtime: false, approval: None };
+        let mut caller = Caller::acting(format!("identity:{}", i.id), std::sync::Arc::new(crate::access::Everything));
+        caller.ip = ip;
         let kept = self.db.write(|c| {
-            // Deleted meanwhile, or its keys replaced (and so its maker changed): the token goes
-            // too. A login verified against the old keys mustn't keep one after the replacement
+            // Deleted or disabled meanwhile, or its keys replaced (and so its maker changed): the
+            // token goes too (a cut-off revokes only the logins it saw). A login verified against the old keys mustn't keep one after the replacement
             // revoked theirs.
             let changed = c.execute(
-                "UPDATE identities SET last_used_at = ?, last_subject = ? WHERE id = ? AND COALESCE(jwks, '') = ? AND created_by = ?",
+                "UPDATE identities SET last_used_at = ?, last_subject = ? WHERE id = ? AND COALESCE(jwks, '') = ? AND created_by = ? AND disabled_at IS NULL",
                 params![now, sub, i.id, jwks.clone().unwrap_or_default(), i.created_by],
             )?;
             if changed == 0 {

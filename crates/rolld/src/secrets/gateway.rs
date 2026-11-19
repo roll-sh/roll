@@ -621,6 +621,10 @@ mod tests {
             self.0.lock().unwrap().retain(|_, g| &*g.id != id);
             Ok(())
         }
+        fn revoke_many(&self, ids: &[String], _: &str, _: &str) -> roll_secrets::Result<()> {
+            self.0.lock().unwrap().retain(|_, g| !ids.iter().any(|id| *id == *g.id));
+            Ok(())
+        }
         fn token(&self, _: &axum::http::Extensions, name: &str, rule: roll_auth::scope::Rule) -> roll_secrets::Result<roll_secrets::Minted> {
             let (secret, id) = self.add("tok", name, rule);
             Ok(roll_secrets::Minted { id, secret, expires_at: 0 })

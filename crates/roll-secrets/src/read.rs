@@ -252,15 +252,33 @@ pub struct Version {
 /// Whether entries of another environment's folder may show through an import or a base.
 type Through<'a> = &'a dyn Fn(&str, &str) -> bool;
 
+/// For a read of values: whether the caller reads past a freeze at (project, environment,
+/// folder) ([`Caller::passes_freeze`], `cutoff.rs`). `None`: names only, which a freeze doesn't
+/// stop.
+type Pass<'a> = Option<&'a dyn Fn(&str, &str, &str) -> bool>;
+
+/// 423 `frozen` when `env`'s `path` is frozen and the caller can't read past it.
+fn unfrozen(c: &Conn<'_>, env: &EnvRow, path: &str, pass: Pass<'_>) -> Result<()> {
+    if let Some(pass) = pass
+        && let Some(why) = crate::cutoff::frozen(c, &env.id, path)?
+        && !pass(&env.project_id, &env.slug, path)
+    {
+        return Err(Error::Frozen(format!("{}:{path} is frozen ({why}): only its admins read it until one unfreezes it", env.slug)));
+    }
+    Ok(())
+}
+
 /// The effective entries of `env`/`path` for `principal` (`None`: shared values only). Imports
 /// and the base count only where `through(environment, path)` allows: a caller never reads an
 /// environment through another that it couldn't read itself. `cols`: [`ROW_COLUMNS`], or
 /// [`DIGEST_COLUMNS`] for a digest.
 #[allow(clippy::too_many_arguments)]
-fn view_in(c: &Conn<'_>, env: &EnvRow, path: &str, principal: Option<&str>, through: Through<'_>, untrusted: bool, cols: &str, depth: usize, seen: &mut HashSet<(String, String)>) -> Result<Vec<Entry>> {
+fn view_in(c: &Conn<'_>, env: &EnvRow, path: &str, principal: Option<&str>, through: Through<'_>, pass: Pass<'_>, untrusted: bool, cols: &str, depth: usize, seen: &mut HashSet<(String, String)>) -> Result<Vec<Entry>> {
     if depth > DEPTH || !seen.insert((env.id.clone(), path.to_string())) {
         return Ok(vec![]);
     }
+    // A frozen folder's values aren't read here, nor through an import or a base.
+    unfrozen(c, env, path, pass)?;
     let owner = principal.unwrap_or("");
     let rows = c.query(&format!("SELECT {cols} FROM secrets WHERE env_id = ? AND path = ? AND (owner = '' OR owner = ?) ORDER BY key, owner"), [&env.id, path, owner], row)?;
     let mut out: Vec<Entry> = vec![];
@@ -283,7 +301,7 @@ fn view_in(c: &Conn<'_>, env: &EnvRow, path: &str, principal: Option<&str>, thro
                 if !through(&from.slug, &imp.path) {
                     continue;
                 }
-                view_in(c, &from, &imp.path, principal, through, untrusted, cols, depth + 1, seen)?
+                view_in(c, &from, &imp.path, principal, through, pass, untrusted, cols, depth + 1, seen)?
             }
             // Another project's folder, while it's shared with this one: its own stored values
             // (no personal ones, nothing it imports, no reference or live link, which would
@@ -294,6 +312,7 @@ fn view_in(c: &Conn<'_>, env: &EnvRow, path: &str, principal: Option<&str>, thro
                 if (untrusted && from.protected) || !crate::exports::exported(c, &from.id, &imp.path, &env.project_id)? {
                     continue;
                 }
+                unfrozen(c, &from, &imp.path, pass)?;
                 c.query(&format!("SELECT {cols} FROM secrets WHERE env_id = ? AND path = ? AND owner = '' ORDER BY key"), [&from.id, &imp.path], row)?
                     .into_iter()
                     .filter(|r| r.refs.as_ref().is_some_and(|x| x.is_empty()) && r.link.as_ref().is_none_or(|l| l.mode == Mode::Managed))
@@ -312,7 +331,7 @@ fn view_in(c: &Conn<'_>, env: &EnvRow, path: &str, principal: Option<&str>, thro
     }
     if let Some(base) = &env.base_id {
         let base = envs::by_id(c, base)?;
-        let inherited = if through(&base.slug, path) { view_in(c, &base, path, principal, through, untrusted, cols, depth + 1, seen)? } else { vec![] };
+        let inherited = if through(&base.slug, path) { view_in(c, &base, path, principal, through, pass, untrusted, cols, depth + 1, seen)? } else { vec![] };
         for mut e in inherited {
             if have.insert(e.row.key.clone()) {
                 if e.source == Source::Own {
@@ -473,6 +492,15 @@ fn digest_state(c: &Conn<'_>, project: &str) -> Result<String> {
         h.update(format!("{row}\n"));
     }
     h.update(format!("{:?}\n", crate::required::of(c, project)?));
+    // Freezes (cutoff.rs) of the project's folders and the folders it imports: a digest read
+    // answers 423 past one, so a freeze or an unfreeze is a new state.
+    let freezes: Vec<(String, String)> = c.query(
+        "SELECT z.env_id, z.path FROM freezes z WHERE z.env_id IN (SELECT id FROM environments WHERE project_id = ?)
+         OR z.env_id IN (SELECT i.from_env_id FROM imports i JOIN environments e ON e.id = i.env_id WHERE e.project_id = ?) ORDER BY z.env_id, z.path",
+        [project, project],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    h.update(format!("{freezes:?}\n"));
     Ok(h.finalize()[..16].iter().map(|b| format!("{b:02x}")).collect())
 }
 
@@ -601,9 +629,11 @@ impl Secrets {
     pub(crate) fn view(&self, project: &str, slug: &str, path: &str, caller: &Caller, shared: bool, action: Action) -> Result<Vec<Entry>> {
         let principal = (!shared && caller.personal()).then_some(caller.principal.as_str());
         let through = |e: &str, p: &str| caller.allows(action, &Scope::at(project, e, p));
+        let passes = |p: &str, e: &str, at: &str| caller.passes_freeze(p, e, at);
+        let pass: Pass<'_> = (action == Action::Reveal).then_some(&passes);
         self.db.read(|c| {
             let env = envs::by_slug(c, project, slug)?;
-            view_in(c, &env, path, principal, &through, caller.grants.untrusted(), ROW_COLUMNS, 0, &mut HashSet::new())
+            view_in(c, &env, path, principal, &through, pass, caller.grants.untrusted(), ROW_COLUMNS, 0, &mut HashSet::new())
         })
     }
 
@@ -850,8 +880,10 @@ impl Secrets {
         let path = names::path(path)?;
         caller.need(Action::Reveal, &Scope::at(project, slug, &path))?;
         let dek = self.project(project)?;
+        let passes = |p: &str, e: &str, at: &str| caller.passes_freeze(p, e, at);
         let (seq, state, branches) = self.db.read(|c| {
             let env = envs::by_slug(c, project, slug)?;
+            unfrozen(c, &env, &path, Some(&passes))?;
             let seq = match (seq, at) {
                 (Some(s), None) => s,
                 (None, Some(at)) => c.query_row("SELECT COALESCE(MAX(seq), 0) FROM changes WHERE project_id = ? AND at <= ?", params![project, at], |r| r.get(0))?,
@@ -991,9 +1023,10 @@ impl Secrets {
             reveal
         };
         let read = |env: &str, path: &str| ask(Action::Read, env, path);
+        let passes = |p: &str, e: &str, at: &str| caller.passes_freeze(p, e, at);
         let (branches, entries) = self.db.read(|c| {
             let env = envs::by_slug(c, project, slug)?;
-            let entries = view_in(c, &env, path, principal, &reveal, untrusted, DIGEST_COLUMNS, 0, &mut HashSet::new())?;
+            let entries = view_in(c, &env, path, principal, &reveal, Some(&passes), untrusted, DIGEST_COLUMNS, 0, &mut HashSet::new())?;
             Ok::<_, Error>((env.branches, entries))
         })?;
         let mut h = Sha256::new();
@@ -1058,7 +1091,7 @@ impl Secrets {
                 let view = match views.get(&(env.clone(), at.clone())) {
                     Some(v) => v.clone(),
                     None => {
-                        let v = match self.db.read(|c| view_in(c, &envs::by_slug(c, project, &env)?, &at, principal, &read, untrusted, DIGEST_COLUMNS, 0, &mut HashSet::new())) {
+                        let v = match self.db.read(|c| view_in(c, &envs::by_slug(c, project, &env)?, &at, principal, &read, None, untrusted, DIGEST_COLUMNS, 0, &mut HashSet::new())) {
                             Ok(v) => v,
                             // A reference to an environment that isn't there reaches nothing.
                             Err(Error::NotFound(_)) => vec![],
@@ -1166,8 +1199,10 @@ impl Secrets {
         caller.need(Action::Reveal, &Scope::at(project, slug, &path))?;
         let dek = self.project(project)?;
         let owner = self.owner_of(kind, caller);
+        let passes = |p: &str, e: &str, at: &str| caller.passes_freeze(p, e, at);
         let (id, ct, link, tags): (String, Option<Vec<u8>>, Option<String>, String) = self.db.read(|c| {
             let env = envs::by_slug(c, project, slug)?;
+            unfrozen(c, &env, &path, Some(&passes))?;
             c.query_row(
                 "SELECT secret_id, value, link, tags FROM versions WHERE env_id = ? AND path = ? AND key = ? AND owner = ? AND version = ?",
                 params![env.id, path, key, owner, version],
@@ -1214,7 +1249,7 @@ impl Secrets {
             let mut folders = BTreeSet::new();
             for e in &envs {
                 let through = |x: &str, p: &str| caller.allows(Action::Read, &Scope::at(project, x, p));
-                views.push(view_in(c, e, &path, principal, &through, caller.grants.untrusted(), ROW_COLUMNS, 0, &mut HashSet::new())?);
+                views.push(view_in(c, e, &path, principal, &through, None, caller.grants.untrusted(), ROW_COLUMNS, 0, &mut HashSet::new())?);
                 for f in c.query("SELECT path FROM folders WHERE env_id = ?", [&e.id], |r| r.get::<_, String>(0))? {
                     if f != path && names::parents(&f).last() == Some(&path) {
                         folders.insert(f);
