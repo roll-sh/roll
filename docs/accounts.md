@@ -145,6 +145,17 @@ API's own. A missing or wrong header or origin is:
 403 {"error": "this request needs the X-Roll-CSRF header from GET /v1/accounts/session", "code": "csrf"}
 ```
 
+A WebSocket upgrade is a `GET`, so the header doesn't guard it, and `SameSite=Lax` sends the
+cookie from any page on the API's own site: a preview or an app served under the same domain
+could otherwise open a shell, a tunnel or a forwarded port as the person. A browser always sends
+`Origin` on one, so an upgrade (`Upgrade: websocket`) that rides a session cookie must come from
+one of the dashboard's origins or the API's own; one with an `Authorization` header (the CLIs')
+is judged by its token alone. Anything else is:
+
+```
+403 {"error": "a WebSocket with a roll session opens only from roll's dashboard", "code": "origin"}
+```
+
 Signing in has no session yet, so the header can't guard it. Instead, a write to `/v1/accounts`
 without an `Authorization` header must send its body as `Content-Type: application/json` (else
 `415`). A form on another site can post any text as its body, and the browser keeps the cookie the
