@@ -18,6 +18,7 @@ pub mod health;
 pub mod outside;
 pub mod directories;
 pub mod snowflake;
+pub mod atlas;
 mod turns;
 pub mod github_app;
 pub mod aws;
@@ -311,7 +312,7 @@ pub struct Options {
     /// The kinds of outside platforms syncs push to (docs/secrets.md, "Syncs").
     pub syncs: Syncs,
     /// Posts audit rows to sinks (docs/secrets.md, "Audit log"), and calls rotators, OIDC issuers
-    /// and Snowflake accounts' SQL API through rolld's guarded client; `None`: none of them.
+    /// Snowflake accounts' SQL API and MongoDB Atlas's Admin API through rolld's guarded client; `None`: none of them.
     pub deliver: Option<std::sync::Arc<dyn sinks::Deliver>>,
     /// roll-access's grants, looked up when a sync made by one pushes (never cached).
     pub grants: Option<std::sync::Arc<dyn roll_auth::Grants>>,
@@ -522,6 +523,10 @@ impl Secrets {
         if let (Some(deliver), Ok(keys)) = (&opts.deliver, &opts.keyring) {
             links.register(Arc::new(snowflake::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone(), deliver: deliver.clone() }));
         }
+        db.ensure_schema(atlas::SCHEMA)?;
+        if let (Some(deliver), Ok(keys)) = (&opts.deliver, &opts.keyring) {
+            links.register(Arc::new(atlas::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone(), deliver: deliver.clone(), tokens: Default::default() }));
+        }
         db.ensure_schema(github_app::SCHEMA)?;
         // An App's ceiling: the repositories and permissions its tokens may reach at most.
         db.add_column("github_apps", "repositories", "TEXT")?;
@@ -675,7 +680,7 @@ impl Secrets {
 }
 
 /// Registries of the project's own resources (rotators…): a lease's revocation reads them.
-const REGISTRIES: &[&str] = &["rotators", "saas_rotators", "outside_dbs", "directories", "snowflake_accounts", "aws_users", "aws_roles", "cloud_accounts", "kubernetes_clusters", "cas", "ca_certs", "ssh_cas", "github_apps", "backup_schedules"];
+const REGISTRIES: &[&str] = &["rotators", "saas_rotators", "outside_dbs", "directories", "snowflake_accounts", "atlas_projects", "aws_users", "aws_roles", "cloud_accounts", "kubernetes_clusters", "cas", "ca_certs", "ssh_cas", "github_apps", "backup_schedules"];
 
 /// Drop a forgotten project's key and registries once no lease of its waits to be revoked, and no
 /// certificate its CAs revoked is still within its lifetime (their CRLs, signed with the CA's key,

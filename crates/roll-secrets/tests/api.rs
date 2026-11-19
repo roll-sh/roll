@@ -106,10 +106,10 @@ impl SyncTarget for FakeSync {
     }
 }
 
-/// Audit deliveries, kept instead of sent; an OIDC issuer's keys, served; vendors' APIs; and a
-/// Snowflake account's SQL API.
+/// Audit deliveries, kept instead of sent; an OIDC issuer's keys, served; vendors' APIs; a
+/// Snowflake account's SQL API; and MongoDB Atlas's Admin API.
 #[derive(Default)]
-struct Sent(Mutex<Vec<Value>>, Mutex<Option<Value>>, std::sync::atomic::AtomicBool, Mutex<Option<(String, String)>>, Mutex<BTreeMap<(String, String), Value>>, Mutex<Vendors>, FakeSnowflake);
+struct Sent(Mutex<Vec<Value>>, Mutex<Option<Value>>, std::sync::atomic::AtomicBool, Mutex<Option<(String, String)>>, Mutex<BTreeMap<(String, String), Value>>, Mutex<Vendors>, FakeSnowflake, FakeAtlas);
 
 /// A fake Snowflake user: its two key slots (base64 SPKI DER), password, default role, granted
 /// roles and days to expiry.
@@ -215,6 +215,131 @@ struct Vendors {
 const TWILIO_SID: &str = concat!("AC", "0123456789abcdef", "0123456789abcdef");
 const TWILIO_KEYS: &str = concat!("https://api.twilio.com/2010-04-01/Accounts/", "AC", "0123456789abcdef", "0123456789abcdef", "/Keys");
 
+const ATLAS_GROUP: &str = "5f1d3c2b4a6e7f8091a2b3c4";
+const ATLAS_CLIENT: &str = "mdb_sa_id_0123456789abcdef";
+
+/// MongoDB Atlas's Admin API for one project, as its docs describe it: the service account's
+/// secret, the access tokens it gave, its database users (as the API shows them, with the
+/// password kept aside), every call (method and path) and every request body.
+#[derive(Default)]
+struct FakeAtlas {
+    secret: Mutex<String>,
+    tokens: Mutex<Vec<String>>,
+    token_requests: std::sync::atomic::AtomicUsize,
+    users: Mutex<BTreeMap<String, (Value, String)>>,
+    calls: Mutex<Vec<String>>,
+    bodies: Mutex<Vec<String>>,
+}
+
+impl FakeAtlas {
+    fn password(&self, user: &str) -> Option<String> {
+        self.users.lock().unwrap().get(user).map(|(_, pw)| pw.clone())
+    }
+
+    /// An ISO 8601 date in UTC (`2026-11-17T12:00:00Z`), as unix ms.
+    fn date_ms(d: &Value) -> Option<i64> {
+        let c = regex::Regex::new(r"^(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d):(\d\d)Z$").unwrap().captures(d.as_str()?)?;
+        let n = |i: usize| c[i].parse::<u16>().unwrap();
+        let date = time::Date::from_calendar_date(i32::from(n(1)), time::Month::try_from(n(2) as u8).ok()?, n(3) as u8).ok()?;
+        Some(date.with_hms(n(4) as u8, n(5) as u8, n(6) as u8).ok()?.assume_utc().unix_timestamp() * 1000)
+    }
+
+    /// A date Atlas takes for `deleteAfterDate`: in the future, within a week of the request.
+    fn check_date(&self, d: &Value, now_ms: i64) -> bool {
+        Self::date_ms(d).is_some_and(|ms| ms > now_ms && ms <= now_ms + 7 * 24 * 3_600_000)
+    }
+
+    fn answer(&self, method: &str, url: &str, headers: &[(&str, &str)], body: Option<(&str, &str)>) -> (u16, Value) {
+        use base64::Engine;
+        let header = |k: &str| headers.iter().find(|(h, _)| h.eq_ignore_ascii_case(k)).map(|(_, v)| *v);
+        let path = url.strip_prefix("https://cloud.mongodb.com").unwrap();
+        self.calls.lock().unwrap().push(format!("{method} {path}"));
+        if path == "/api/oauth/token" {
+            self.token_requests.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let basic = format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("{ATLAS_CLIENT}:{}", self.secret.lock().unwrap())));
+            if method != "POST" || body != Some(("application/x-www-form-urlencoded", "grant_type=client_credentials")) || header("authorization") != Some(basic.as_str()) {
+                return (401, json!({ "error": "invalid_client", "error_description": "Invalid client credentials" }));
+            }
+            let token = format!("eyJ.fake-{}", self.tokens.lock().unwrap().len());
+            self.tokens.lock().unwrap().push(token.clone());
+            return (200, json!({ "access_token": token, "expires_in": 3600, "token_type": "Bearer" }));
+        }
+        let bearer = header("authorization").and_then(|a| a.strip_prefix("Bearer ")).unwrap_or_default();
+        if !self.tokens.lock().unwrap().iter().any(|t| t == bearer) {
+            return (401, json!({ "error": 401, "errorCode": "NOT_AUTHORIZED", "reason": "Unauthorized" }));
+        }
+        let Some(rest) = path.strip_prefix(&format!("/api/atlas/v2/groups/{ATLAS_GROUP}")) else {
+            return (404, json!({ "error": 404, "errorCode": "GROUP_NOT_FOUND", "detail": "No group with ID found." }));
+        };
+        // Each resource answers only its own versions (406 otherwise), and a body is that version.
+        let version = match rest {
+            r if r.starts_with("/clusters/") => "application/vnd.atlas.2024-08-05+json",
+            r if r.starts_with("/flexClusters/") => "application/vnd.atlas.2024-11-13+json",
+            _ => "application/vnd.atlas.2023-01-01+json",
+        };
+        if header("accept") != Some(version) || body.is_some_and(|(t, _)| t != version) {
+            return (406, json!({ "error": 406, "errorCode": "INVALID_VERSION_DATE" }));
+        }
+        let body: Value = body.map(|(_, b)| serde_json::from_str(b).unwrap()).unwrap_or_default();
+        if body.is_object() {
+            self.bodies.lock().unwrap().push(body.to_string());
+        }
+        let now = code_sql::now_ms();
+        let mut users = self.users.lock().unwrap();
+        let shown = |u: &Value| {
+            let mut u = u.clone();
+            u["links"] = json!([{ "href": "https://cloud.mongodb.com/x", "rel": "self" }]);
+            u
+        };
+        match (method, rest) {
+            ("GET", "/databaseUsers?itemsPerPage=1") => (200, json!({ "results": users.values().take(1).map(|(u, _)| shown(u)).collect::<Vec<_>>(), "totalCount": users.len() })),
+            ("GET", "/clusters/Cluster0") => (200, json!({ "name": "Cluster0", "connectionStrings": { "standard": "mongodb://x", "standardSrv": "mongodb+srv://cluster0.abcde.mongodb.net" } })),
+            ("GET", "/flexClusters/Flex0") => (200, json!({ "name": "Flex0", "connectionStrings": { "standardSrv": "mongodb+srv://flex0.fghij.mongodb.net" } })),
+            ("GET", r) if r.starts_with("/clusters/") => (404, json!({ "error": 404, "errorCode": "CLUSTER_NOT_FOUND" })),
+            ("GET", r) if r.starts_with("/flexClusters/") => (404, json!({ "error": 404, "errorCode": "FLEX_CLUSTER_NOT_FOUND" })),
+            ("POST", "/databaseUsers") => {
+                let name = body["username"].as_str().unwrap_or_default().to_string();
+                let roles_ok = body["roles"].as_array().is_some_and(|r| !r.is_empty() && r.iter().all(|r| r["roleName"].is_string() && r["databaseName"].is_string()));
+                if body["groupId"] != ATLAS_GROUP || body["databaseName"] != "admin" || !roles_ok || !body["password"].is_string() || body.get("deleteAfterDate").is_some_and(|d| !self.check_date(d, now)) {
+                    return (400, json!({ "error": 400, "errorCode": "INVALID_ATTRIBUTE" }));
+                }
+                if users.contains_key(&name) {
+                    return (409, json!({ "error": 409, "errorCode": "USER_ALREADY_EXISTS" }));
+                }
+                let mut u = body.clone();
+                let pw = u.as_object_mut().unwrap().remove("password").unwrap().as_str().unwrap().to_string();
+                u.as_object_mut().unwrap().remove("groupId");
+                users.insert(name, (u.clone(), pw));
+                (201, shown(&u))
+            }
+            (m, r) => {
+                let Some(name) = r.strip_prefix("/databaseUsers/admin/") else { return (404, json!({ "error": 404, "errorCode": "RESOURCE_NOT_FOUND" })) };
+                let name = name.replace("%40", "@");
+                let Some((user, pw)) = users.get(&name).cloned() else { return (404, json!({ "error": 404, "errorCode": "USERNAME_NOT_FOUND" })) };
+                match m {
+                    "GET" => (200, shown(&user)),
+                    "DELETE" => {
+                        users.remove(&name);
+                        (204, Value::Null)
+                    }
+                    "PATCH" => {
+                        // The whole user comes back as read, with what changed.
+                        if body["groupId"] != ATLAS_GROUP || body["username"] != name.as_str() || body.get("links").is_some() || body["roles"] != user["roles"] || body.get("scopes") != user.get("scopes") || body.get("deleteAfterDate").is_some_and(|d| !self.check_date(d, now)) {
+                            return (400, json!({ "error": 400, "errorCode": "INVALID_ATTRIBUTE" }));
+                        }
+                        let mut u = body.clone();
+                        let pw = u.as_object_mut().unwrap().remove("password").and_then(|p| p.as_str().map(String::from)).unwrap_or(pw);
+                        u.as_object_mut().unwrap().remove("groupId");
+                        users.insert(name, (u.clone(), pw));
+                        (200, shown(&u))
+                    }
+                    _ => (405, json!({ "error": 405 })),
+                }
+            }
+        }
+    }
+}
+
 impl roll_secrets::Deliver for Sent {
     fn check(&self, url: &str) -> roll_secrets::Result<()> {
         if url.starts_with("https://") { Ok(()) } else { Err(roll_secrets::Error::BadRequest("url is a public https:// URL".into())) }
@@ -310,8 +435,13 @@ impl roll_secrets::Deliver for Sent {
         Ok(answer.to_string().into_bytes().into())
     }
     /// SendGrid's and Twilio's key APIs, matched on the URL, each taking only its credential;
-    /// Snowflake's SQL API apart ([`Sent::snowflake`]).
+    /// Snowflake's SQL API ([`Sent::snowflake`]) and MongoDB Atlas's Admin API ([`FakeAtlas`]) apart.
     fn request(&self, method: &str, url: &str, headers: &[(&str, &Secret)], body: Option<(&str, &Secret)>, _: usize) -> roll_secrets::Result<(u16, zeroize::Zeroizing<Vec<u8>>)> {
+        if url.starts_with("https://cloud.mongodb.com/") {
+            let headers: Vec<(&str, &str)> = headers.iter().map(|(k, v)| (*k, v.expose())).collect();
+            let (status, v) = self.7.answer(method, url, &headers, body.map(|(t, b)| (t, b.expose())));
+            return Ok((status, if v.is_null() { Vec::new() } else { v.to_string().into_bytes() }.into()));
+        }
         if url.starts_with("https://myorg-acct.snowflakecomputing.com") {
             return self.snowflake(method, url, headers, body);
         }
@@ -2539,6 +2669,124 @@ async fn a_snowflake_account_rotates_key_slots_in_turn_and_makes_a_user_per_leas
     assert!(audit.to_string().contains("snowflake.add") && !format!("{listed}{audit}{rows:?}{statements}").contains("PRIVATE KEY"));
     // In use, it can't go.
     let (s, _) = api.call(Method::DELETE, &format!("/snowflake-accounts/{id}"), None).await;
+    assert_eq!(s, StatusCode::CONFLICT, "its keys keep it");
+}
+
+#[tokio::test]
+async fn an_atlas_project_rotates_two_users_in_turn_and_makes_a_user_per_lease() {
+    let api = Api::new().await;
+    let atlas = &api.sent.7;
+    // A throwaway secret for the fake service account.
+    const SECRET: &str = "mdb_sa_sk_FakeOnlyForThisTest0123456789";
+    *atlas.secret.lock().unwrap() = SECRET.into();
+    for u in ["app_a", "app_b"] {
+        let user = json!({ "username": u, "databaseName": "admin", "roles": [{ "roleName": "readWrite", "databaseName": "shop" }], "scopes": [{ "name": "Cluster0", "type": "CLUSTER" }] });
+        atlas.users.lock().unwrap().insert(u.into(), (user, "set-by-hand".into()));
+    }
+    let tokens = || atlas.token_requests.load(std::sync::atomic::Ordering::Relaxed);
+    let new = |secret: &str, users: Value, roles: Value| json!({ "name": "shop-atlas", "group_id": ATLAS_GROUP, "client_id": ATLAS_CLIENT, "client_secret": secret, "managed_users": users, "roles": roles });
+    // Every name is checked before anything is sent.
+    for (body, why) in [
+        (new(SECRET, json!(["app_a"]), json!([])), "two"),
+        (new(SECRET, json!(["app_a", "app_b"]), json!(["atlasAdmin@admin"])), "atlasAdmin"),
+        (new(SECRET, json!(["app_a", "app_b"]), json!(["read"])), "role@db"),
+        (json!({ "name": "x", "group_id": "../../orgs", "client_id": ATLAS_CLIENT, "client_secret": SECRET, "roles": ["read@shop"] }), "group_id"),
+    ] {
+        let (s, e) = api.call(Method::POST, "/atlas-projects", Some(body)).await;
+        assert!(s == StatusCode::BAD_REQUEST && e.to_string().contains(why), "{e}");
+    }
+    assert!(atlas.calls.lock().unwrap().is_empty());
+    // A wrong secret gets no token: the answer has Atlas's code, never a secret.
+    let (s, e) = api.call(Method::POST, "/atlas-projects", Some(new("mdb_sa_sk_wrong", json!(["app_a", "app_b"]), json!(["read@shop"])))).await;
+    assert!(s == StatusCode::BAD_REQUEST && e.to_string().contains("invalid_client") && !e.to_string().contains("mdb_sa_sk_wrong"), "{e}");
+    let (s, e) = api.call(Method::POST, "/atlas-projects", Some(new(SECRET, json!(["app_a", "app_c"]), json!(["read@shop"])))).await;
+    assert!(s == StatusCode::BAD_REQUEST && e.to_string().contains("no database user app_c"), "{e}");
+    let a = api.ok(Method::POST, "/atlas-projects", Some(new(SECRET, json!(["app_a", "app_b"]), json!(["read@shop", "readWrite@shop.orders"])))).await;
+    let id = a["id"].as_str().unwrap().to_string();
+    assert!(id.starts_with("atl_") && a.get("client_secret").is_none() && a["client_id"] == ATLAS_CLIENT && a["group_id"] == ATLAS_GROUP && a["managed_users"] == json!(["app_a", "app_b"]), "{a}");
+    assert_eq!(tokens(), 3, "each registration took a token of its own, kept nowhere");
+
+    // Managed: the two users take turns, each rotation setting the idle one's password.
+    let link = |field: &str, options: Value| json!({ "kind": "mongodb_atlas", "ref": id, "field": field, "mode": "managed", "options": options });
+    let set = |ops: Vec<(&str, Value)>| json!({ "ops": ops.into_iter().map(|(k, l)| json!({ "op": "set", "key": k, "link": l })).collect::<Vec<_>>() });
+    for (l, why) in [(link("password", json!({ "grace_minutes": 1 })), "grace_minutes"), (link("connection_string", json!({})), "cluster option"), (link("password", json!({ "cluster": "Nope" })), "CLUSTER_NOT_FOUND")] {
+        let (s, e) = api.call(Method::POST, "/environments/production/changes", Some(set(vec![("MONGODB_PASSWORD", l)]))).await;
+        assert!(s == StatusCode::BAD_REQUEST && e.to_string().contains(why), "{e}");
+    }
+    // A Flex cluster isn't under clusters: its own route gives the connection string.
+    let on = json!({ "cluster": "Flex0" });
+    api.ok(Method::POST, "/environments/production/changes", Some(set(vec![("MONGODB_USERNAME", link("username", on.clone())), ("MONGODB_PASSWORD", link("password", on.clone())), ("MONGODB_URL", link("connection_string", on.clone()))]))).await;
+    let login = || async {
+        let v = api.values("production", "/").await["values"].clone();
+        assert_eq!(v["MONGODB_URL"], "mongodb+srv://flex0.fghij.mongodb.net");
+        (v["MONGODB_USERNAME"].as_str().unwrap().to_string(), v["MONGODB_PASSWORD"].as_str().unwrap().to_string())
+    };
+    let (user, first) = login().await;
+    assert!(user == "app_a" && atlas.password("app_a") == Some(first.clone()) && first.len() == 32 && first.bytes().all(|b| b.is_ascii_alphanumeric()), "{user}");
+    let rotate = || api.call(Method::POST, "/environments/production/secrets/MONGODB_PASSWORD/rotate", None);
+    assert!(rotate().await.0.is_success());
+    let (user, second) = login().await;
+    assert!(user == "app_b" && atlas.password("app_b") == Some(second.clone()), "{user}");
+    assert_eq!(atlas.password("app_a"), Some(first.clone()), "the first login keeps working through its grace");
+    // The rotation's hold on its user ends (it lasts two minutes).
+    let unhold = id.clone();
+    api.db
+        .write(move |c| {
+            let s: String = c.query_row("SELECT state FROM atlas_projects WHERE id = ?", [unhold.as_str()], |r| r.get(0))?;
+            let mut v: Value = serde_json::from_str(&s).unwrap();
+            v["held"] = json!({});
+            c.execute("UPDATE atlas_projects SET state = ? WHERE id = ?", [v.to_string().as_str(), unhold.as_str()])
+        })
+        .unwrap();
+    assert_eq!(rotate().await.0, StatusCode::CONFLICT, "app_a is still in its grace");
+    let p = api.project.clone();
+    api.db.write(move |c| c.execute("UPDATE leases SET expires_at = 0 WHERE project_id = ? AND kind = 'retired'", [p.as_str()])).unwrap();
+    let s = api.secrets.clone();
+    tokio::task::spawn_blocking(move || s.sweep().unwrap()).await.unwrap();
+    let retired = atlas.password("app_a").unwrap();
+    assert!(retired != first && retired != second, "its grace over, app_a's password is one nobody knows");
+    assert_eq!(atlas.users.lock().unwrap()["app_a"].0["scopes"], json!([{ "name": "Cluster0", "type": "CLUSTER" }]), "a rotation keeps the user's scopes");
+    assert_eq!(tokens(), 4, "one token served every call since");
+
+    // Dynamic: a user per lease with the link's roles, on the link's cluster only, which Atlas
+    // deletes after the lease (plus ten minutes) even if roll doesn't.
+    let dynamic = |field: &str, roles: Value| json!({ "kind": "mongodb_atlas", "ref": id, "field": field, "mode": "dynamic", "options": { "ttl_minutes": 15, "roles": roles, "cluster": "Cluster0" } });
+    let (s, e) = api.call(Method::POST, "/environments/staging/changes", Some(set(vec![("TMP_USER", dynamic("username", json!(["dbAdmin@shop"])))]))).await;
+    assert!(s == StatusCode::BAD_REQUEST && e.to_string().contains("dbAdmin@shop"), "only the project's roles: {e}");
+    let orders = json!(["readWrite@shop.orders"]);
+    api.ok(Method::POST, "/environments/staging/changes", Some(set(vec![("TMP_USER", dynamic("username", orders.clone())), ("TMP_PASSWORD", dynamic("password", orders.clone())), ("TMP_URL", dynamic("connection_string", orders.clone()))]))).await;
+    // Atlas revokes the cached token: roll takes a new one, once.
+    atlas.tokens.lock().unwrap().clear();
+    let r = api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "job:sync" }))).await;
+    assert_eq!(tokens(), 5);
+    let lease = r["leases"][0].as_str().unwrap().to_string();
+    let user = r["values"]["TMP_USER"].as_str().unwrap().to_string();
+    assert!(user == format!("roll_{lease}") && r["values"]["TMP_URL"] == "mongodb+srv://cluster0.abcde.mongodb.net", "{r}");
+    let (made, pw) = atlas.users.lock().unwrap()[&user].clone();
+    assert_eq!(Some(pw.as_str()), r["values"]["TMP_PASSWORD"].as_str());
+    assert_eq!((made["roles"].clone(), made["scopes"].clone()), (json!([{ "roleName": "readWrite", "databaseName": "shop", "collectionName": "orders" }]), json!([{ "name": "Cluster0", "type": "CLUSTER" }])));
+    let after = |u: &str| FakeAtlas::date_ms(&atlas.users.lock().unwrap()[u].0["deleteAfterDate"]).unwrap() - code_sql::now_ms();
+    assert!((24 * 60_000..=26 * 60_000).contains(&after(&user)), "the lease's 15 minutes and ten more");
+    // Renewing moves Atlas's date too.
+    api.ok(Method::POST, &format!("/leases/{lease}/renew"), Some(json!({ "ttl_minutes": 120 }))).await;
+    assert!((129 * 60_000..=131 * 60_000).contains(&after(&user)));
+    // Ending the lease deletes the user.
+    api.ok(Method::DELETE, &format!("/leases/{lease}"), None).await;
+    assert!(!atlas.users.lock().unwrap().contains_key(&user));
+    // Code nobody vetted gets no user at all.
+    let check = api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "check:fork#1", "untrusted": true }))).await;
+    assert!(check["values"].get("TMP_PASSWORD").is_none() && check["leases"] == json!([]), "{check}");
+    assert!(!atlas.users.lock().unwrap().keys().any(|u| u.starts_with("roll_")));
+
+    // The service account's secret is in no answer, audit row, request body to the API, or path.
+    let listed = api.ok(Method::GET, "/atlas-projects", None).await;
+    let audit = api.ok(Method::GET, "/audit", None).await;
+    let p = api.project.clone();
+    let rows: Vec<String> = api.db.read(move |c| c.query("SELECT summary || keys || action FROM audit WHERE project_id = ?", [p.as_str()], |r| r.get(0))).unwrap();
+    let sent = format!("{:?}{:?}", atlas.bodies.lock().unwrap(), atlas.calls.lock().unwrap());
+    assert!(audit.to_string().contains("atlas.add") && !format!("{listed}{audit}{rows:?}{sent}").contains(SECRET));
+    // In use, it can't go.
+    let (s, _) = api.call(Method::DELETE, &format!("/atlas-projects/{id}"), None).await;
     assert_eq!(s, StatusCode::CONFLICT, "its keys keep it");
 }
 

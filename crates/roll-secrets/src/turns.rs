@@ -1,5 +1,5 @@
 //! Logins that take turns for one managed credential: a database's two roles (outside.rs), a
-//! directory's accounts (directories.rs). Each issue sets a new password on the login not handed
+//! directory's accounts (directories.rs), an Atlas project's two users (atlas.rs). Each issue sets a new password on the login not handed
 //! out last and hands it out, while the other keeps working through the grace period; then its
 //! password is replaced by one nobody knows. A login's generation travels in each issued
 //! credential's handle, so a late retirement never undoes the login's next issue.
