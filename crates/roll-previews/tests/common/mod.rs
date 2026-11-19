@@ -240,6 +240,7 @@ pub struct FakeApps {
     /// What each service uses, by name (unset: not running).
     pub metrics: Mutex<HashMap<String, (f64, u64)>>,
     /// Each service's errors, by name.
+    /// Each service's error groups, by `preview/service` or by service for every preview.
     pub errors: Mutex<HashMap<String, Vec<roll_previews::ErrorGroup>>>,
     /// What every service's log holds.
     pub log: Mutex<Vec<String>>,
@@ -353,8 +354,10 @@ impl Apps for FakeApps {
     async fn metrics(&self, _: &str, service: &str) -> Option<(f64, u64)> {
         self.metrics.lock().get(service).copied()
     }
-    async fn errors(&self, _: &str, service: &str, _: i64, _: Option<&roll_previews::engine::ErrorMasks<'_>>) -> roll_previews::Result<Vec<roll_previews::ErrorGroup>> {
-        Ok(self.errors.lock().get(service).cloned().unwrap_or_default())
+    async fn errors(&self, preview: &str, service: &str, _: i64, _: Option<&roll_previews::engine::ErrorMasks<'_>>) -> roll_previews::Result<Vec<roll_previews::ErrorGroup>> {
+        // `pv_…/web` (one preview's) over `web` (every preview's).
+        let errors = self.errors.lock();
+        Ok(errors.get(&format!("{preview}/{service}")).or_else(|| errors.get(service)).cloned().unwrap_or_default())
     }
     async fn logs(&self, _: &str, _: &str, _: usize) -> Vec<String> {
         self.log.lock().clone()

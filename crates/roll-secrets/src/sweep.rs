@@ -44,6 +44,8 @@ pub struct Rotation {
     credential: String,
     /// Days between scheduled rotations; none: only by hand.
     pub rotate_days: Option<u64>,
+    /// When a due rotation may run (UTC), as set; none: as soon as it's due.
+    pub rotate_window: Option<String>,
     pub grace_minutes: u64,
     pub issued_at: Option<i64>,
     pub next_due: Option<i64>,
@@ -89,6 +91,7 @@ impl Secrets {
     pub fn rotations(&self, project: &str, caller: &Caller) -> Result<Vec<Rotation>> {
         caller.need(Action::Read, &Scope::project(project))?;
         self.project(project)?;
+        let now = self.db.now_ms()?;
         type Row = (String, String, String, String, String, Option<String>, Option<i64>);
         let rows: Vec<Row> = self.db.read(|c| {
             c.query(
@@ -122,9 +125,10 @@ impl Secrets {
                 r#ref: link.r#ref.clone(),
                 credential,
                 rotate_days,
+                rotate_window: link.options.get("rotate_window").and_then(Json::as_str).map(str::to_string),
                 grace_minutes: link.grace_minutes(),
                 issued_at,
-                next_due: issued_at.zip(rotate_days).map(|(at, d)| at + d as i64 * 86_400_000),
+                next_due: issued_at.and_then(|at| link.next_rotation(at, now)),
                 last_error: error,
                 failed_at,
             });
@@ -225,7 +229,7 @@ impl Secrets {
     }
 
     /// Claim and revoke one lease. `Ok(false)`: someone else did.
-    fn revoke_one(&self, id: &str) -> Result<bool> {
+    pub(crate) fn revoke_one(&self, id: &str) -> Result<bool> {
         let now = self.db.now_ms()?;
         let claimed: Option<(String, String)> = self.db.write(|c| {
             let row = c.query_row("SELECT link, handle FROM leases WHERE id = ? AND revoked_at IS NULL", [id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))).optional()?;
@@ -400,7 +404,7 @@ impl Secrets {
                         let v = issued.parts.get(&l.field).cloned().ok_or_else(|| Error::Link(format!("{} didn't issue {}", l.kind, l.field)))?;
                         items.push(Item { path: p, key: k, owner: String::new(), action: ItemAction::Set { value: Some(v), comment: None, tags: None, link: None, link_state: Some(new_state.clone()), expires_at: None } });
                     }
-                    let r = crate::write::apply(c, &dek, &env, &items, "rotate", &format!("rotated {} {}", link.kind, link.r#ref), caller, now)?;
+                    let r = crate::write::apply(c, &dek, self.keys()?, &env, &items, "rotate", &format!("rotated {} {}", link.kind, link.r#ref), caller, now)?;
                     if let (None, Some(h)) = (&old, state.as_ref().and_then(|s| s.get("handle"))) {
                         retire(c, &env, &link, h, &caller.principal, now + link.grace_minutes() as i64 * 60_000, now)?;
                     }
@@ -480,9 +484,10 @@ impl Secrets {
         let mut seen = std::collections::BTreeSet::new();
         for (project, slug, path, key, link, state) in managed {
             let (Ok(link), Ok(state)) = (serde_json::from_str::<Link>(&link), serde_json::from_str::<Json>(&state)) else { continue };
-            let (Some(days), Some(issued)) = (link.rotate_days(), state.get("issued_at").and_then(Json::as_i64)) else { continue };
+            let Some(next) = state.get("issued_at").and_then(Json::as_i64).and_then(|at| link.next_rotation(at, now)) else { continue };
             let cred = state.get("credential").and_then(Json::as_str).unwrap_or_default().to_string();
-            if issued + days as i64 * 86_400_000 > now || !seen.insert(cred) {
+            // Due, and with a window, inside it now (`next_rotation` is its next opening otherwise).
+            if next > now || !seen.insert(cred) {
                 continue;
             }
             match self.rotate(&project, &slug, &path, &key, &Caller::consumer("roll:rotation")) {
@@ -503,8 +508,10 @@ impl Secrets {
         if let Err(e) = self.end_decoys() {
             tracing::warn!("revoking ended decoys failed: {e}");
         }
-        let cutoff = now - crate::audit::RETENTION_DAYS * 86_400_000;
-        self.db.write(|c| c.execute("DELETE FROM audit WHERE at < ?", [cutoff]))?;
+        // Digests of the audit log, and its retention (at a digest: audit.rs).
+        if let Err(e) = self.sweep_audit_chain(crate::audit::RETENTION_DAYS * 86_400_000) {
+            tracing::warn!("signing the audit log's digests failed: {e}");
+        }
         Ok(out)
     }
 

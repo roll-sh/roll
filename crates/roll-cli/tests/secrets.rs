@@ -68,10 +68,31 @@ async fn gate(axum::extract::State(tokens): axum::extract::State<Tokens>, mut re
     next.run(req).await
 }
 
+/// The digest route's requests, and whether it fails (503) for now: what `roll run --watch` polls.
+#[derive(Default)]
+struct Polls {
+    failing: std::sync::atomic::AtomicBool,
+    asked: std::sync::atomic::AtomicUsize,
+}
+
+async fn flaky_digest(axum::extract::State(p): axum::extract::State<Arc<Polls>>, req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    use std::sync::atomic::Ordering;
+    if req.uri().path().ends_with("/digest") {
+        p.asked.fetch_add(1, Ordering::SeqCst);
+        if p.failing.load(Ordering::SeqCst) {
+            return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
+    }
+    next.run(req).await
+}
+
 /// The workspace, secrets and access routers on a local port, with the project `shop`.
 struct Server {
     api: String,
+    secrets: Arc<roll_secrets::Secrets>,
     projects: Arc<roll_workspace::Workspace>,
+    polls: Arc<Polls>,
     _dir: tempfile::TempDir,
 }
 
@@ -102,19 +123,21 @@ async fn start() -> Server {
         gateways: None,
     };
     let secrets = Arc::new(roll_secrets::Secrets::new(db, ws.clone(), opts).unwrap());
+    let served = secrets.clone();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let api = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
     let projects = ws.clone();
     let tokens = Tokens::default();
+    let polls = Arc::new(Polls::default());
     let access = axum::Router::new().route("/v1/access/tokens", axum::routing::post(create_token)).with_state(tokens.clone());
-    let router = roll_workspace::router(ws).merge(roll_secrets::router(secrets)).merge(access).layer(axum::middleware::from_fn_with_state(tokens, gate));
+    let router = roll_workspace::router(ws).merge(roll_secrets::router(served)).merge(access).layer(axum::middleware::from_fn_with_state(tokens, gate)).layer(axum::middleware::from_fn_with_state(polls.clone(), flaky_digest));
     tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-    Server { api, projects, _dir: dir }
+    Server { api, secrets, projects, polls, _dir: dir }
 }
 
 #[tokio::test]
 async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_references() {
-    let Server { api, projects, _dir: dir } = start().await;
+    let Server { api, projects, _dir: dir, .. } = start().await;
     let at = ["secrets", "-p", "shop", "-e", "production"];
     ok(&api, &[], &[&at[..], &["set", "HOST=db.internal", "PORT=5432"]].concat(), None).await;
     ok(&api, &[], &[&at[..], &["set", "PASSWORD"]].concat(), Some("s3cret\n")).await;
@@ -213,6 +236,23 @@ async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_referen
     std::fs::write(repo.path().join("config.yml"), "name: shop\ndb:\n  host: db.internal\n").unwrap();
     let scanned = roll(&api, &[], &["secrets", "-p", "shop", "scan", repo.path().to_str().unwrap()], None).await;
     assert!(scanned.code != Some(0) && scanned.stdout.contains("config.yml:3  HOST (production)"), "{}{}", scanned.stdout, scanned.stderr);
+
+    // A credential roll secrets doesn't hold: a pre-commit scan refuses it, `--store` moves it in
+    // from the file and says what to write instead. (Built from pieces: push protection scans
+    // this repo.)
+    let git = |args: &[&str]| assert!(std::process::Command::new("git").args(args).current_dir(repo.path()).status().unwrap().success());
+    git(&["init", "-q"]);
+    let aws = ["AKIA", "ROLLFIXTURE", "23456"].concat();
+    std::fs::write(repo.path().join("deploy.ts"), format!("// deploys\nexport const awsKey = \"{aws}\";\n")).unwrap();
+    git(&["add", "deploy.ts"]);
+    let cwd = [("ROLL_TEST_CWD", repo.path().to_str().unwrap())];
+    let refused = roll(&api, &cwd, &["secrets", "-p", "shop", "scan", "--staged"], None).await;
+    assert!(refused.code != Some(0) && refused.stdout.contains("deploy.ts:2  an AWS access key, not in roll secrets: roll secrets scan --store AWS_KEY=deploy.ts:2") && !refused.stdout.contains(&aws), "{}{}", refused.stdout, refused.stderr);
+    ok(&api, &cwd, &["secrets", "-p", "shop", "scan", "--staged", "--allow-unstored"], None).await;
+    let stored = ok(&api, &cwd, &[&at[..], &["scan", "--store", "deploy.ts:2"]].concat(), None).await;
+    assert!(stored.contains("as AWS_KEY in production:/") && stored.contains("Replace it with process.env.AWS_KEY") && !stored.contains(&aws), "{stored}");
+    let again = roll(&api, &cwd, &["secrets", "-p", "shop", "scan", "--staged"], None).await;
+    assert!(again.code != Some(0) && again.stdout.contains("deploy.ts:2  AWS_KEY (production)") && !again.stdout.contains("not in roll secrets"), "now it's the project's value: {}", again.stdout);
 
     // A config file filled from the environment: `\${…}` and shell syntax stay as written.
     let tpl = "url: http://${HOST}:${PORT}\nliteral: \\${HOST} ${HOME:-x} $PORT\n";
@@ -457,4 +497,122 @@ async fn import_from_other_managers_through_their_clis() {
     }
     let argv = std::fs::read_to_string(dir.join("argv.log")).unwrap();
     assert!(argv.contains("gcloud secrets versions access latest --secret fake-db-url") && !argv.contains("fakevalue"), "{argv}");
+}
+
+/// A sealed start's ceremony: `key split` names the split rolld starts sealed with, and `unseal`
+/// gives a sealed node one share at a time (read from stdin, printed nowhere) until it unseals.
+#[tokio::test(flavor = "multi_thread")]
+async fn roll_secrets_unseal_gives_a_sealed_node_its_shares() {
+    const KEY: &str = "fake-deployment-key-for-the-cli-test-000";
+    let split = roll("http://127.0.0.1:9", &[], &["secrets", "key", "split", "--shares", "3", "--threshold", "2"], Some(KEY)).await;
+    assert_eq!(split.code, Some(0), "{}", split.stderr);
+    let shares: Vec<&str> = split.stdout.lines().collect();
+    let named = split.stderr.split("ROLL_SECRET_KEY_SEALED=").nth(1).and_then(|s| s.split_whitespace().next()).unwrap_or_else(|| panic!("{}", split.stderr));
+    let sealed = roll_secrets::unseal::Sealed::parse(named).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("secrets.db")), "secrets").unwrap();
+    let (unsealer, unsealed) = roll_secrets::unseal::Unsealer::new(sealed, db).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api = format!("http://{}", listener.local_addr().unwrap());
+    let node = roll_secrets::unseal::sealed_router(unsealer).into_make_service_with_connect_info::<std::net::SocketAddr>();
+    tokio::spawn(async move { axum::serve(listener, node).await.unwrap() });
+
+    assert!(ok(&api, &[], &["secrets", "unseal", "--status"], None).await.contains("sealed, 0 of 2 shares"));
+    let one = roll(&api, &[], &["secrets", "unseal"], Some(&format!("{}\n", shares[2]))).await;
+    assert!(one.code == Some(0) && one.stdout.contains("sealed, 1 of 2 shares"), "{}{}", one.stdout, one.stderr);
+    assert!(!format!("{}{}", one.stdout, one.stderr).contains("rlks_"), "a share was printed");
+    let done = ok(&api, &[], &["secrets", "unseal", "--node", &api], Some(&format!("{}\n", shares[0]))).await;
+    assert_eq!(done.trim(), format!("{api}: unsealed"));
+    assert_eq!(unsealed.await.unwrap().as_str(), KEY);
+}
+
+#[tokio::test]
+async fn an_exported_audit_log_verifies_offline_with_saved_keys_for_its_own_project_and_an_edit_fails_it() {
+    let Server { api, secrets, projects, _dir, .. } = start().await;
+    let shop = projects.list(roll_workspace::Scope::All).unwrap().into_iter().find(|p| p.name == "shop").unwrap().id;
+    let at = ["secrets", "-p", "shop", "-e", "production"];
+    ok(&api, &[], &[&at[..], &["set", "HOST=db.internal", "PORT=5432"]].concat(), None).await;
+    let s = secrets.clone();
+    tokio::task::spawn_blocking(move || s.sweep_audit_chain(i64::MAX / 2).unwrap()).await.unwrap();
+    ok(&api, &[], &[&at[..], &["set", "PORT=6543"]].concat(), None).await;
+    let export = ok(&api, &[], &["secrets", "-p", "shop", "audit", "--format", "jsonl", "--limit", "10000"], None).await;
+    let files = tempfile::tempdir().unwrap();
+    let (log, keys) = (files.path().join("audit.jsonl"), files.path().join("jwks.json"));
+    std::fs::write(&keys, secrets.oidc_jwks().unwrap().to_string()).unwrap();
+    std::fs::write(&log, &export).unwrap();
+    // Nothing but the file, the keys and the project's id: the API isn't there.
+    let offline = "http://127.0.0.1:9";
+    let verify = ["secrets", "-p", shop.as_str(), "audit", "verify", "--file", log.to_str().unwrap(), "--jwks", keys.to_str().unwrap()];
+    let out = ok(offline, &[], &verify, None).await;
+    assert!(out.contains("signed through #"), "{out}");
+    // Keys fetched from the server being checked would vouch for themselves: saved ones only.
+    let o = roll(offline, &[], &verify[..7], None).await;
+    assert!(o.code != Some(0) && o.stderr.contains("--jwks"), "{}", o.stderr);
+    // Another project's log isn't this one's, however well it verifies.
+    let mut other = verify;
+    other[2] = "prj_someoneelse";
+    let o = roll(offline, &[], &other, None).await;
+    assert!(o.code != Some(0) && o.stderr.contains("not prj_someoneelse's"), "{}", o.stderr);
+    std::fs::write(&log, export.replacen("\"summary\":\"", "\"summary\":\"not ", 1)).unwrap();
+    let o = roll(offline, &[], &verify, None).await;
+    assert!(o.code != Some(0) && o.stderr.contains("edited"), "{}{}", o.stdout, o.stderr);
+}
+
+/// `roll run --watch`: a write restarts the command with the new value, a poll that fails waits its
+/// interval and keeps the command running (never spins), and SIGTERM to roll reaches the command,
+/// roll exiting as it did.
+#[cfg(unix)]
+#[tokio::test]
+async fn roll_run_watch_restarts_on_a_write_waits_out_failures_and_passes_sigterm_on() {
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+    let s = start().await;
+    let at = ["secrets", "-p", "shop", "-e", "production"];
+    ok(&s.api, &[], &[&at[..], &["set", "GREETING=one"]].concat(), None).await;
+    let seen_at = s._dir.path().join("seen");
+    let seen = || std::fs::read_to_string(&seen_at).unwrap_or_default();
+    let wait_for = |want: &'static str| {
+        let seen = &seen;
+        async move {
+            let started = std::time::Instant::now();
+            while seen() != want {
+                assert!(started.elapsed() < Duration::from_secs(20), "waited for {want:?}, the command wrote {:?}", seen());
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+    };
+    // Each start writes its value; SIGTERM writes `term` and exits 7.
+    let script = r#"trap 'echo term >> "$SEEN"; exit 7' TERM; echo "$GREETING" >> "$SEEN"; while :; do sleep 0.05; done"#;
+    // Every poll fails from the start: the first read (values, not the digest) still starts it.
+    s.polls.failing.store(true, Ordering::SeqCst);
+    let mut roll = tokio::process::Command::new(env!("CARGO_BIN_EXE_roll"))
+        .args(["run", "-p", "shop", "-e", "production", "--watch", "--interval", "1", "--no-mask", "--", "sh", "-c", script])
+        .env("ROLL_API_URL", &s.api)
+        .env("SEEN", &seen_at)
+        .env_remove("ROLL_TOKEN")
+        .env_remove("ROLL_PROJECT")
+        .env_remove("ROLL_ENV")
+        .env_remove("ROLL_ADMIN_TOKEN")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    wait_for("one\n").await;
+    let before = s.polls.asked.load(Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let polls = s.polls.asked.load(Ordering::SeqCst) - before;
+    assert!((2..=6).contains(&polls), "{polls} failing polls in 3 s at a 1 s interval");
+    assert_eq!(seen(), "one\n", "a failing poll keeps the running command");
+
+    s.polls.failing.store(false, Ordering::SeqCst);
+    ok(&s.api, &[], &[&at[..], &["set", "GREETING=two"]].concat(), None).await;
+    wait_for("one\nterm\ntwo\n").await;
+
+    // SAFETY: kill(2) on the roll process this test started.
+    unsafe { libc::kill(roll.id().unwrap() as libc::pid_t, libc::SIGTERM) };
+    let status = tokio::time::timeout(Duration::from_secs(10), roll.wait()).await.expect("roll exits with its command").unwrap();
+    assert_eq!(status.code(), Some(7));
+    assert_eq!(seen(), "one\nterm\ntwo\nterm\n");
 }
