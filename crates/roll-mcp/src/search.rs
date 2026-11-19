@@ -64,6 +64,7 @@ pub fn listed(all: &[Value]) -> Vec<Value> {
         "annotations": { "title": "Find roll tools", "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false },
         "_meta": { "roll/product": "access" },
     }));
+    let open_world = rest.iter().any(|t| t["annotations"]["openWorldHint"] == true);
     let run = |name: &str, title: &str, what: &str, read_only: bool| {
         json!({
             "name": name,
@@ -73,7 +74,8 @@ pub fn listed(all: &[Value]) -> Vec<Value> {
                 "tool": { "type": "string", "description": format!("The tool's name, as {FIND} answered it") },
                 "arguments": { "type": "object", "description": "The tool's arguments, as its input schema asks" },
             }, "required": ["tool"], "additionalProperties": false },
-            "annotations": { "title": title, "readOnlyHint": read_only, "destructiveHint": !read_only, "idempotentHint": read_only, "openWorldHint": false },
+            // A run reaches outside roll when a tool it may run does (none read-only does).
+            "annotations": { "title": title, "readOnlyHint": read_only, "destructiveHint": !read_only, "idempotentHint": read_only, "openWorldHint": !read_only && open_world },
             "_meta": { "roll/product": "access" },
         })
     };
@@ -320,6 +322,7 @@ mod finds {
             ("import a .env file", "secrets_import"),
             ("roll back secrets", "secrets_rollback"),
             ("which secrets nobody reads", "secrets_insights"),
+            ("was the secrets audit log tampered with", "secrets_verify_audit"),
             ("one-time code", "secrets_totp"),
             ("vulnerabilities in my image", "apps_deploy_vulnerabilities"),
             ("slo error budget", "apps_environment_slo"),
@@ -332,6 +335,7 @@ mod finds {
             ("list s3 access keys", "storage_list_keys"),
             ("post an incident on the status page", "apps_create_incident"),
             ("sbom of my image", "apps_deploy_sbom"),
+            ("traces of a preview", "previews_traces"),
         ]
         .iter()
         .filter_map(|(q, want)| {
