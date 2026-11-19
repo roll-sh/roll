@@ -652,8 +652,12 @@ impl Code {
             Some(e) => Some(self.queue_info(&e)?),
             None => None,
         };
-        c.blockers = self.blockers(&r, &c, &self.settings_cached(&r.id));
+        let settings = self.settings_cached(&r.id);
+        c.blockers = self.blockers(&r, &c, &settings);
         c.notices = self.env_notices(&r, &c);
+        if settings.secrets.unstored_credentials == crate::settings::Unstored::Warn {
+            c.notices.extend(self.unstored_findings(&r, &c, &settings));
+        }
         c.review = self.review_summary(&r, &c);
         Ok(c)
     }
@@ -940,22 +944,26 @@ impl Code {
             self.prepare_leaks(r, c).await;
             let blockers: Vec<Blocker> =
                 self.blockers(r, c, &settings).into_iter().filter(|b| b.kind != "untrusted" && b.kind != "checks").collect();
-            // An admin may land over reviews and over a `secret_leak` that's a false positive
-            // (a value that only looks like a secret's); each is audited.
-            let bypassable = |k: &str| crate::review::REVIEW_BLOCKERS.contains(&k) || k == "secret_leak";
+            // An admin may land over reviews, over a `secret_leak` that's a false positive (a
+            // value that only looks like a secret's) and over a `secret_unstored` (a repo's
+            // `roll.toml` blocking credentials roll doesn't hold); each is audited.
+            const SECRET: [&str; 2] = ["secret_leak", "secret_unstored"];
+            let bypassable = |k: &str| crate::review::REVIEW_BLOCKERS.contains(&k) || SECRET.contains(&k);
             let (review, other): (Vec<Blocker>, Vec<Blocker>) = blockers.into_iter().partition(|b| bypassable(&b.kind));
             if !other.is_empty() || (!review.is_empty() && !bypass) {
                 return Err(Error::Blocked(other.into_iter().chain(review).collect()));
             }
-            if review.iter().any(|b| b.kind == "secret_leak") {
-                if *caller != Caller::Admin {
-                    return Err(Error::Forbidden("landing a change that adds a secret's value needs the admin token".into()));
-                }
-                let keys: Vec<&str> = review.iter().filter(|b| b.kind == "secret_leak").map(|b| b.message.as_str()).collect();
-                self.db.audit(&r.id, "admin", "secret_leak_bypass", &json!({ "change": c.id, "changeset": cs_id(&head), "blockers": keys }))?;
-                tracing::warn!(repo = %r.full_name(), change = %c.id, "landed a change that adds a secret's value (admin bypass)");
+            if review.iter().any(|b| SECRET.contains(&b.kind.as_str())) && *caller != Caller::Admin {
+                return Err(Error::Forbidden("landing a change that adds a secret's value or a credential needs the admin token".into()));
             }
-            if review.iter().any(|b| b.kind != "secret_leak") {
+            for kind in SECRET {
+                let found: Vec<&str> = review.iter().filter(|b| b.kind == kind).map(|b| b.message.as_str()).collect();
+                if !found.is_empty() {
+                    self.db.audit(&r.id, "admin", &format!("{kind}_bypass"), &json!({ "change": c.id, "changeset": cs_id(&head), "blockers": found }))?;
+                    tracing::warn!(repo = %r.full_name(), change = %c.id, blocker = kind, "landed over a secrets blocker (admin bypass)");
+                }
+            }
+            if review.iter().any(|b| !SECRET.contains(&b.kind.as_str())) {
                 self.audit_review_bypass(r, caller, Some(&c.id), &head)?;
             }
         }

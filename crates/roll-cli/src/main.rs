@@ -20,15 +20,18 @@ mod seal;
 mod mask;
 mod secret_refs;
 mod fallback;
+mod managers;
 mod secrets;
 mod apps;
+mod aws_login;
 mod login;
 
 /// roll — serverless infrastructure.
 #[derive(Parser)]
 #[command(version)]
 struct Cli {
-    /// Control-plane API.
+    /// Control-plane API. When neither this nor `ROLL_API_URL` is set, commands go to your `roll
+    /// login`'s (the last one, with several), else to a local rolld. roll has no hosted default yet.
     #[arg(long, env = "ROLL_API_URL", default_value = "http://127.0.0.1:7070", global = true)]
     api: String,
     /// roll tasks API (default: `<api>/v1/tasks`, served by rolld).
@@ -266,6 +269,22 @@ struct Api {
     login: Option<std::sync::Arc<secrets::Relogin>>,
 }
 
+/// An `approval_pending` answer's approval and where a person approves it.
+fn approval_pending(text: &str) -> Option<(String, String)> {
+    let v: Value = serde_json::from_str(text).ok()?;
+    if v["code"] != "approval_pending" {
+        return None;
+    }
+    let id = v["approval"].as_str()?.to_string();
+    let url = v["url"].as_str().filter(|u| !u.is_empty()).map(str::to_string).unwrap_or_else(|| format!("roll's approvals page (`roll mcp approvals`), {id}"));
+    Some((id, url))
+}
+
+/// No answer from `base`: how to point the CLI at another roll.
+pub(crate) fn unreachable(base: &str) -> String {
+    format!("can't reach {base} (is it running?). To use another roll, set ROLL_API_URL or run `roll login <url>`")
+}
+
 /// Once a run: the token used expires within a week (`Roll-Token-Expiration`, as GitHub's), so
 /// its holder renews it before scripts start failing.
 fn warn_expiry(h: &reqwest::header::HeaderMap) {
@@ -296,7 +315,7 @@ impl Api {
         for (k, v) in &self.headers {
             req = req.header(k, v);
         }
-        let res = req.send().await.with_context(|| format!("can't reach {} (is it running?)", self.base))?;
+        let res = req.send().await.with_context(|| unreachable(&self.base))?;
         if !res.status().is_success() {
             let status = res.status();
             let text = res.text().await.unwrap_or_default();
@@ -336,14 +355,41 @@ impl Api {
     /// What `call` answers, telling no answer at all (the outer error: rolld unreachable) from an
     /// answer that wasn't a success (its status and message).
     async fn answer(&self, method: reqwest::Method, path: &str, body: Option<Value>) -> anyhow::Result<Result<Value, (reqwest::StatusCode, String)>> {
-        let (mut status, mut text, used) = self.send(method.clone(), path, body.as_ref()).await?;
+        let (mut status, mut text, used) = self.send(method.clone(), path, body.as_ref(), None).await?;
         // A workload identity's login the server no longer takes (its clock ran ahead of ours, or
         // it was revoked): log in again, once.
         if status == reqwest::StatusCode::UNAUTHORIZED
             && let Some(l) = &self.login
         {
             l.refused(used.as_deref().unwrap_or_default()).await;
-            (status, text, _) = self.send(method, path, body.as_ref()).await?;
+            (status, text, _) = self.send(method.clone(), path, body.as_ref(), None).await?;
+        }
+        // The token's rules ask a person about this request (docs/permissions.md, "Approvals"):
+        // say where to approve it, then send it again with its approval, which waits on it once
+        // more, until it runs, is denied, or its ten minutes are up.
+        let started = std::time::Instant::now();
+        let mut asked: Option<(String, String)> = None;
+        while status == reqwest::StatusCode::FORBIDDEN
+            && let Some((id, url)) = approval_pending(&text)
+        {
+            if started.elapsed() > std::time::Duration::from_secs(11 * 60) {
+                bail!("no one approved {id} in time: approve it at {url}, then run this again");
+            }
+            match &asked {
+                // A remembered approval (docs/permissions.md, "Remembered approvals"): the approvals
+                // page's menu beside Approve, "Once" by default, then "For an hour" … "For 30 days",
+                // "Always". It covers this action in this environment and folder, for this login's
+                // grant only.
+                None => eprintln!("roll: this request waits for a person to approve it ({id}). Approve it at\n\n  {url}\n\nor, as the operator, with `roll mcp approve {id}`. So later runs in this environment don't ask again, change \"Once\" in the menu beside Approve to \"For 30 days\" (`--remember 30d`), or \"Always\" (no longer than this login lasts; `--remember always`). It covers only this action, here, for this login, and can be taken back on the token's page. Waiting (up to 10 minutes; Ctrl-C stops)…"),
+                Some(_) => eprintln!("roll: still waiting for {id} to be approved ({}m so far): {url}", started.elapsed().as_secs() / 60),
+            }
+            asked = Some((id.clone(), url));
+            (status, text, _) = self.send(method.clone(), path, body.as_ref(), Some(&id)).await?;
+        }
+        if let Some((id, url)) = &asked
+            && serde_json::from_str::<Value>(&text).is_ok_and(|v| v["code"] == "approval_expired")
+        {
+            bail!("no one approved {id} in its 10 minutes ({url}): run this again, and approve the new request on roll (or `roll mcp approvals`)");
         }
         if !status.is_success() {
             // Errors are `{"error": ...}`, but whatever answered may not be the roll API at all.
@@ -362,8 +408,9 @@ impl Api {
         }
         Ok(Ok(serde_json::from_str(&text).with_context(|| format!("{} didn't answer with JSON: {}", self.base, text.chars().take(200).collect::<String>()))?))
     }
-    /// One request; its status, its body, and the token it carried.
-    async fn send(&self, method: reqwest::Method, path: &str, body: Option<&Value>) -> anyhow::Result<(reqwest::StatusCode, String, Option<String>)> {
+    /// One request (waiting on `approval`, when it's sent again for one); its status, its body,
+    /// and the token it carried.
+    async fn send(&self, method: reqwest::Method, path: &str, body: Option<&Value>, approval: Option<&str>) -> anyhow::Result<(reqwest::StatusCode, String, Option<String>)> {
         let mut req = self.http.request(method, format!("{}{path}", self.base));
         let used = self.bearer().await?;
         if let Some(k) = &used {
@@ -372,10 +419,25 @@ impl Api {
         for (k, v) in &self.headers {
             req = req.header(k, v);
         }
+        if let Some(a) = approval {
+            req = req.header("x-roll-approval", a);
+        }
         if let Some(b) = body {
             req = req.json(b);
         }
-        let res = req.send().await.with_context(|| format!("can't reach {} (is it running?)", self.base))?;
+        // Only a scoped or signed-in token can be asked about, and the gate holds such a request
+        // up to a minute before it answers: say so rather than sit silent (a long poll waits anyway).
+        let may_ask = approval.is_none() && !path.contains("wait=") && used.as_deref().is_some_and(|t| t.starts_with("rlt_") || t.starts_with("rlo_"));
+        let res = req.send();
+        tokio::pin!(res);
+        let res = tokio::select! {
+            r = &mut res => r,
+            _ = tokio::time::sleep(std::time::Duration::from_secs(5)), if may_ask => {
+                eprintln!("roll: still waiting on {} (a request your token's rules ask a person about is held up to a minute, then roll says where to approve it)…", self.base);
+                res.await
+            }
+        };
+        let res = res.with_context(|| unreachable(&self.base))?;
         let status = res.status();
         warn_expiry(res.headers());
         Ok((status, res.text().await?, used))
@@ -398,6 +460,12 @@ impl Api {
         }
         Api { base: base.to_string(), http: self.http.clone(), key: self.key.clone(), headers: self.headers.clone(), login: self.login.clone() }
     }
+    /// The same API, with one more header on each request when given (apps' `X-Roll-Override`).
+    fn with_header(&self, header: Option<(&str, &str)>) -> Api {
+        let mut headers = self.headers.clone();
+        headers.extend(header.map(|(n, v)| (n.to_string(), v.to_string())));
+        Api { base: self.base.clone(), http: self.http.clone(), key: self.key.clone(), headers, login: self.login.clone() }
+    }
     async fn get(&self, p: &str) -> anyhow::Result<Value> {
         self.call(reqwest::Method::GET, p, None).await
     }
@@ -410,7 +478,7 @@ impl Api {
         for (k, v) in &self.headers {
             req = req.header(k, v);
         }
-        let res = req.send().await.with_context(|| format!("can't reach {} (is it running?)", self.base))?;
+        let res = req.send().await.with_context(|| unreachable(&self.base))?;
         let status = res.status();
         let text = res.text().await?;
         if !status.is_success() {
@@ -557,10 +625,17 @@ async fn main() -> anyhow::Result<()> {
         Err(e) => e.exit(),
     };
     let token_flag = matches.value_source("token") == Some(ValueSource::CommandLine);
+    let api_named = matches.value_source("api") != Some(ValueSource::DefaultValue);
     let cli = Cli::from_arg_matches(&matches)?;
     // A scoped token, when set, is what everything uses: the narrower credential wins.
     let admin = cli.roll_token.clone().filter(|t| !t.trim().is_empty()).or(cli.admin_token.clone().filter(|t| !t.trim().is_empty()));
-    let base = cli.api.trim_end_matches('/').to_string();
+    let base = match &cli.cmd {
+        Cmd::Login(login::Login { url: Some(url), .. }) => url.clone(),
+        Cmd::Completions { .. } | Cmd::Gateway(_) => cli.api,
+        _ if api_named => cli.api,
+        _ => login::chosen()?.unwrap_or(cli.api),
+    };
+    let base = base.trim_end_matches('/').to_string();
     let http = reqwest::Client::new();
     // `roll login`'s, last: any credential set for this run wins over it (a workload's identity, a
     // streams key too).
