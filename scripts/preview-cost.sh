@@ -251,7 +251,10 @@ case "$REQS" in *"newest: GET / 200; queries: False") ;; *) echo "the preview's 
 METRICS=$(curl -sS "http://$API/v1/previews/$PV/metrics" | python3 -c "import json,sys; m=json.load(sys.stdin)['services']; print('; '.join('%s %.2f CPU %d of %d MB' % (x['service'], x['cpu'], x['memory_bytes'] >> 20, x['memory_mb']) for x in m) if m and all(x['memory_bytes'] > 0 for x in m) else 'none')")
 [ "$METRICS" != none ] || { echo "a running preview's services should report what they use"; exit 1; }
 # And from the CLI (`roll preview requests`): its visits, and none with --errors.
-ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview requests "$PV" | grep -q " 200 GET    /  " || { echo "roll preview requests should list GET / 200: $(ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview requests "$PV" | head -3)"; exit 1; }
+# (Read whole first: `grep -q` stops at its match, and with pipefail the CLI's next write to the
+# closed pipe would fail the step once there are enough requests.)
+REQS=$(ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview requests "$PV")
+echo "$REQS" | grep -q " 200 GET    /  " || { echo "roll preview requests should list GET / 200: $(echo "$REQS" | head -3)"; exit 1; }
 [ -z "$(ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview requests "$PV" --errors)" ] || { echo "roll preview requests --errors should list only 4xx and 5xx"; exit 1; }
 # The service's DATABASE_URL is the branch's own role, which can't read the WAL (where the pages
 # from before the mask are) and isn't a superuser.
@@ -573,7 +576,8 @@ DOCS_HEAD=$(api GET "/v1/code/changes/$CHG" | jq_ "d['head']")
 until_head "$DOCS_HEAD"
 # (What it runs is set by the converge just after it reports the new head: waited for.)
 RUNS=""
-for _ in $(seq 1 120); do
+# (Up to 2 minutes: at a load of 80 one converge has taken over one.)
+for _ in $(seq 1 240); do
   RUNS=$(api GET "/v1/previews/$PV" | jq_ "d.get('runs') or ''")
   [ -n "$RUNS" ] && break
   sleep 0.5
