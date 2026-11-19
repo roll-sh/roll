@@ -2379,6 +2379,32 @@ async fn a_mirror_copies_requests_to_another_environment() {
     assert!(beta.iter().any(|l| l.contains("/mirrored")) && !beta.iter().any(|l| l.contains("/posted")), "{beta:?}");
 }
 
+/// Log-based metrics (Cloud Logging's): each minute, the lines of its output matching a pattern
+/// become a gauge beside its own metrics (`…/app-metrics`), which `scale` can follow too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn matching_log_lines_are_a_metric() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "api", json!({"port": 80, "min_instances": 1, "log_metrics": [{"name": "payments_failed", "pattern": "Payment failed"}]})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    assert_eq!(call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"log_metrics": [{"name": "9bad", "pattern": "x"}]}}))).await.0, StatusCode::BAD_REQUEST);
+    let out = w.apps.logs.sink(format!("env:{id}/production"), apps_control::logs::Stream::Stdout);
+    for line in ["payment failed: card declined", "PAYMENT FAILED: timeout", "payment ok", "payment failed: fraud"] {
+        out.line(line);
+    }
+    let live = w.apps.live(&id, "production");
+    let mut series = Value::Null;
+    for _ in 0..100 {
+        w.apps.judge_alerts(&live).await;
+        series = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/app-metrics?minutes=5"), None).await.1["series"].clone();
+        if series.as_array().is_some_and(|a| !a.is_empty()) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let s = series.as_array().unwrap().iter().find(|s| s["name"] == "payments_failed").unwrap_or_else(|| panic!("{series}"));
+    assert_eq!((s["shows"].as_str(), s["points"][0][1].as_f64()), (Some("value"), Some(3.0)), "{s}");
+}
+
 /// An instance the kernel killed for its memory says so: in the log and in why it crashed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_instance_killed_for_its_memory_says_so() {

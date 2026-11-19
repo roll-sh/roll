@@ -306,6 +306,10 @@ type Run = {
   /** Floors by the clock: in any of a rule's weekly windows (as a freeze's, in its timezone), its min_instances (up to
    *  max_instances) is the floor when higher; at most 10 rules. Changing it is a write. */
   schedule_scale?: { windows: { from: string; to: string }[]; timezone?: string; min_instances: number }[];
+  /** Counts of its log lines: each minute, the lines of its output (stdout, stderr) matching pattern (any case, at most
+   *  200 characters) as a gauge named name (a metric's name, unique), on …/app-metrics with source=log and for scale; at
+   *  most 10. Changing it is a write. */
+  log_metrics?: { name: string; pattern: string }[];
   /** Commands on a schedule on any service: each a job of the live deployment at its due times, skipped while its
    *  last job runs; at most 20; name a-z, 0-9 and - (unique, 32 at most), command 1–2000, timeout_s 1–86400. */
   schedules?: { name: string; schedule: string; command?: string; path?: string /* a web service's path GET'd instead of a command (Vercel's crons): through its own proxy on the owner, past its allow list, firewall, rate limit and access gate, with Authorization: Bearer $CRON_SECRET when the environment has one; a call still out skips the next; a non-2xx/3xx or no answer is cron.failed (data.path, http_status or error); timeout_s default 300 */; timezone?: string; timeout_s?: number }[];

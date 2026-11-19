@@ -173,6 +173,10 @@
           "type": "boolean",
           "description": "Raw TCP, not HTTP."
         },
+        "log_metrics": {
+          "type": "array",
+          "description": "Counts of its log lines: [{name, pattern}]; each minute, the lines of its output matching pattern (any case) as a gauge named name, on Metrics and for scale."
+        },
         "schedule_scale": {
           "type": "array",
           "description": "Floors by the clock: [{windows: [{from: \"mon 08:00\", to: \"fri 18:00\"}], timezone?, min_instances}]; in a window, its min_instances is the floor when higher."
