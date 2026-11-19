@@ -137,7 +137,7 @@ impl Secrets {
         self.db.write(|c| {
             c.execute("UPDATE cas SET acme_preauthorize = ? WHERE id = ?", params![i64::from(pre_authorize), ca])?;
             let what = if pre_authorize { "turned on pre-authorized ACME names (a binding's key is the whole proof)" } else { "turned off pre-authorized ACME names" };
-            audit::record(c, project, caller, "ca.acme", None, None, &[], &format!("{name}: {what}"), now)
+            audit::record(c, self.keys()?, project, caller, "ca.acme", None, None, &[], &format!("{name}: {what}"), now)
         })?;
         self.acme_settings(project, ca, caller)
     }
@@ -188,7 +188,7 @@ impl Secrets {
             )?;
             let scope = names.as_ref().map_or_else(|| "the CA's whole policy".to_string(), |n| n.join(", "));
             let label = if label.is_empty() { String::new() } else { format!(" ({label})") };
-            audit::record(c, project, caller, "ca.acme.eab.add", None, None, &[], &format!("{ca_name}: made ACME binding {id}{label} for {scope}"), now)
+            audit::record(c, self.keys()?, project, caller, "ca.acme.eab.add", None, None, &[], &format!("{ca_name}: made ACME binding {id}{label} for {scope}"), now)
         })?;
         let binding = Binding { id: id.clone(), label, names, expires_at, created_at: now, created_by: caller.principal.clone(), revoked_at: None, revoked_by: None, used_at: None, accounts: 0 };
         Ok(NewKey { binding, key_id: id, hmac_key: key.expose().to_string(), directory: format!("{}/directory", self.acme_base(ca)?) })
@@ -207,7 +207,7 @@ impl Secrets {
                 Some(Some(_)) => Ok(()),
                 Some(None) => {
                     c.execute("UPDATE acme_bindings SET revoked_at = ?, revoked_by = ? WHERE id = ?", params![now, caller.principal, id])?;
-                    audit::record(c, project, caller, "ca.acme.eab.revoke", None, None, &[], &format!("{ca_name}: revoked ACME binding {id}; its accounts stop"), now)
+                    audit::record(c, self.keys()?, project, caller, "ca.acme.eab.revoke", None, None, &[], &format!("{ca_name}: revoked ACME binding {id}; its accounts stop"), now)
                 }
             }
         })

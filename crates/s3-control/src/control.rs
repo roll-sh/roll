@@ -18,6 +18,8 @@ pub enum ControlError {
     #[error("{0}")]
     Conflict(String),
     #[error("{0}")]
+    Forbidden(String),
+    #[error("{0}")]
     Unavailable(String),
     #[error(transparent)]
     Internal(#[from] anyhow::Error),

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { accountsApi, activityText, onReauthRequired, phishingResistant, sessionMethod, findPeople, dormant, type Activity } from "./accounts-api";
+import { accountsApi, activityText, peopleCsv, onReauthRequired, phishingResistant, sessionMethod, findPeople, dormant, type Activity } from "./accounts-api";
 
 describe("activityText", () => {
   const e = (a: Partial<Activity>): Activity => ({ at: 0, action: "sign_in", actor: "usr_me", ok: true, status: 200, ...a });
@@ -105,5 +105,15 @@ describe("dormant", () => {
     expect(dormant({ last_active_at: now - 91 * day, created_at: 0, disabled: false }, now)).toBe(true);
     expect(dormant({ last_active_at: null, created_at: now - 91 * day, disabled: false }, now)).toBe(false);
     expect(dormant({ last_active_at: now - 91 * day, created_at: 0, disabled: true }, now)).toBe(false);
+  });
+});
+
+describe("peopleCsv", () => {
+  it("is a row each, with formulas defused", () => {
+    const u = { id: "usr_1", handle: "eve", name: "=HYPERLINK(\"x\")", email: "eve@acme.test", admin: false, disabled: false, created_at: 0, last_active_at: null, totp: true, passkeys: 2, identities: [] };
+    const csv = peopleCsv([u]);
+    const [head, row] = csv.trim().split("\n");
+    expect(head).toBe("handle,name,email,admin,turned_off,authenticator_app,passkeys,dormant,last_active,created");
+    expect(row).toBe(`"eve","'=HYPERLINK(""x"")","eve@acme.test","false","false","true","2","false","","1970-01-01T00:00:00.000Z"`);
   });
 });

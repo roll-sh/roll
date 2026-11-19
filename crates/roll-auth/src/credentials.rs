@@ -178,6 +178,156 @@ fn kind_of(w: &str) -> Option<&'static str> {
     None
 }
 
+/// The prefixes the detectors know a credential by: what [`placeholder`] looks past.
+const KNOWN_PREFIXES: &[&str] = &[
+    "github_pat_", "sk_live_", "rk_live_", "sk-proj-", "sk-ant-", "ghp_", "gho_", "ghu_", "ghs_", "ghr_", "xoxb-", "xoxp-", "xoxa-", "xoxr-", "xoxs-", "AKIA", "ASIA", "AIza", "rlt_", "rlo_", "rlf_", "rlc_", "rlk_", "rlp_",
+];
+
+/// The words that make a match a placeholder when one starts or ends a part of it.
+const PLACEHOLDER_WORDS: &[&str] = &["example", "fake", "dummy", "test", "sample", "placeholder", "redacted", "changeme"];
+
+/// Whether a match ([`find_all`]) is obviously a placeholder rather than a credential, so a
+/// landing or a scan doesn't warn about it. With its known prefix (`sk_live_`, `AKIA`…) set
+/// aside, a placeholder:
+///
+/// - has a part (split at `_` and `-`) that starts or ends with `example`, `fake`, `dummy`,
+///   `test`, `sample`, `placeholder`, `redacted` or `changeme`, in any case
+///   (`sk_live_FAKE0123…`, `ghp_…_test`); or
+/// - repeats one character 8 times in a row (`sk_live_xxxxxxxx…`, `AKIA0000…`).
+///
+/// AWS's documented `AKIAIOSFODNN7EXAMPLE` never matches in the first place, and values like
+/// `x`, `***`, `<your key>` or `${KEY}` don't have a credential's shape. A private key's block is
+/// never a placeholder (its base64 repeats `A` for zeros): an allow-list covers test fixtures.
+pub fn placeholder(value: &str) -> bool {
+    if value.starts_with("-----BEGIN ") {
+        return false;
+    }
+    let body = KNOWN_PREFIXES.iter().find_map(|p| value.strip_prefix(p)).unwrap_or(value).to_ascii_lowercase();
+    let worded = body.split(['_', '-']).any(|part| PLACEHOLDER_WORDS.iter().any(|w| part.starts_with(w) || part.ends_with(w)));
+    let mut run = (0usize, '\0');
+    let repeated = body.chars().any(|c| {
+        run = if c == run.1 { (run.0 + 1, c) } else { (1, c) };
+        run.0 >= 8
+    });
+    worded || repeated
+}
+
+/// A match's fingerprint as an allow-list names it: `sha256:` and the first 24 hex digits of the
+/// SHA-256 of its text. It says nothing usable about a credential (what's matched is long and
+/// random), so a landing's warning and a scan show it.
+pub fn fingerprint(value: &str) -> String {
+    use sha2::Digest;
+    let d = sha2::Sha256::digest(value.as_bytes());
+    format!("sha256:{}", d.iter().take(12).map(|b| format!("{b:02x}")).collect::<String>())
+}
+
+/// Where a repo says which credentials it means to keep: `.roll/secrets-allow`.
+pub const ALLOW_FILE: &str = ".roll/secrets-allow";
+/// The most of an allow-list read, and the most entries kept.
+const ALLOW_BYTES: usize = 64 << 10;
+const ALLOW_ENTRIES: usize = 1000;
+
+/// A repo's allow-list ([`ALLOW_FILE`]): one entry a line, `#` starts a comment. A
+/// [`fingerprint`] (`sha256:…`) allows that value anywhere; anything else is a path glob (as
+/// `.roll/review.yaml`'s: `*` within a segment, `**` across them, no `/` matches the name at any
+/// depth) whose files' matches are allowed. Callers match the globs with roll code's shared
+/// table (`code_review::glob`), never recursively.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Allow {
+    pub paths: Vec<String>,
+    pub fingerprints: std::collections::BTreeSet<String>,
+}
+
+impl Allow {
+    /// The first 64 KiB and 1,000 entries of `text`; globs over 200 bytes are dropped.
+    pub fn parse(text: &str) -> Allow {
+        let mut end = text.len().min(ALLOW_BYTES);
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        let mut a = Allow::default();
+        for line in text[..end].lines().map(|l| l.split('#').next().unwrap_or_default().trim()).filter(|l| !l.is_empty()).take(ALLOW_ENTRIES) {
+            match line.strip_prefix("sha256:") {
+                Some(hex) if hex.len() == 24 && hex.bytes().all(|b| b.is_ascii_hexdigit()) => {
+                    a.fingerprints.insert(format!("sha256:{}", hex.to_ascii_lowercase()));
+                }
+                Some(_) => {}
+                None if line.len() <= 200 => a.paths.push(line.to_string()),
+                None => {}
+            }
+        }
+        a
+    }
+}
+
+/// A name for the roll secrets key a match would be stored as: the variable it's assigned to on
+/// its line (`before`, the line up to the match: `const stripeKey = "` gives `STRIPE_KEY`), with
+/// the vendor added to a generic one (`token:` holding a GitHub token gives `GITHUB_TOKEN`), else
+/// one for its kind (`AWS_ACCESS_KEY_ID`).
+pub fn suggested_key(kind: &str, before: &str) -> String {
+    let (vendor, default) = match kind {
+        "an AWS access key" => ("AWS", "AWS_ACCESS_KEY_ID"),
+        "a GitHub token" => ("GITHUB", "GITHUB_TOKEN"),
+        "a Slack token" => ("SLACK", "SLACK_TOKEN"),
+        "a Stripe live key" => ("STRIPE", "STRIPE_SECRET_KEY"),
+        "a Google API key" => ("GOOGLE", "GOOGLE_API_KEY"),
+        "an Anthropic API key" => ("ANTHROPIC", "ANTHROPIC_API_KEY"),
+        "an OpenAI API key" => ("OPENAI", "OPENAI_API_KEY"),
+        "a private key" => ("", "PRIVATE_KEY"),
+        _ => ("ROLL", "ROLL_TOKEN"),
+    };
+    // `name = "`, `name: '`, `"name": "`, `name := `, `name => `, `NAME=`.
+    let mut s = before.trim_end().trim_end_matches(['"', '\'', '`']).trim_end();
+    let assigned = ["=>", ":=", "=", ":"].iter().find_map(|op| s.strip_suffix(op));
+    let Some(lhs) = assigned else { return default.to_string() };
+    s = lhs.trim_end().trim_end_matches(['"', '\'', '`', ']']).trim_end();
+    let ident: String = s.chars().rev().take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-').collect::<Vec<_>>().into_iter().rev().collect();
+    let mut name = String::new();
+    let mut prev_lower = false;
+    for c in ident.chars() {
+        if c == '-' || c == '_' {
+            if !name.ends_with('_') {
+                name.push('_');
+            }
+            prev_lower = false;
+            continue;
+        }
+        if c.is_ascii_uppercase() && prev_lower {
+            name.push('_');
+        }
+        prev_lower = c.is_ascii_lowercase() || c.is_ascii_digit();
+        name.push(c.to_ascii_uppercase());
+    }
+    let name = name.trim_start_matches(|c: char| c.is_ascii_digit() || c == '_').trim_end_matches('_').to_string();
+    if name.len() < 3 || name.len() > 64 {
+        return default.to_string();
+    }
+    const GENERIC: &[&str] = &["KEY", "TOKEN", "SECRET", "VALUE", "API_KEY", "APIKEY", "PASSWORD", "AUTH", "CREDENTIAL", "CREDENTIALS", "ACCESS_KEY", "SECRET_KEY"];
+    if GENERIC.contains(&name.as_str()) && !vendor.is_empty() {
+        return format!("{vendor}_{name}");
+    }
+    name
+}
+
+/// How code at `path` reads environment variable `key`, by the file's language
+/// (`process.env.KEY`, `os.environ["KEY"]`…), `${KEY}` for configuration (`roll secrets render`,
+/// Compose): the replacement a "store it in roll" fix offers.
+pub fn env_read(path: &str, key: &str) -> String {
+    let ext = path.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
+    match ext.as_str() {
+        "js" | "mjs" | "cjs" | "jsx" | "ts" | "tsx" | "mts" | "cts" => format!("process.env.{key}"),
+        "py" => format!("os.environ[\"{key}\"]"),
+        "rs" => format!("std::env::var(\"{key}\")"),
+        "go" => format!("os.Getenv(\"{key}\")"),
+        "rb" => format!("ENV[\"{key}\"]"),
+        "java" | "kt" | "kts" | "scala" => format!("System.getenv(\"{key}\")"),
+        "php" => format!("getenv('{key}')"),
+        "cs" => format!("Environment.GetEnvironmentVariable(\"{key}\")"),
+        "sh" | "bash" | "zsh" => format!("\"${key}\""),
+        _ => format!("${{{key}}}"),
+    }
+}
+
 /// Whether a product's writes are read by people and other agents.
 pub fn read_by_others(product: &str) -> bool {
     READ_BY_OTHERS.contains(&product)
@@ -321,6 +471,43 @@ mod prefix_tests {
             assert!(super::checksum_ok(&s), "{p}");
             assert_eq!(super::kind_in(&format!("token: {s}")), Some(super::ROLL), "{p}");
         }
+    }
+}
+
+#[cfg(test)]
+mod unstored_tests {
+    use super::*;
+
+    #[test]
+    fn placeholders_are_told_from_credentials() {
+        // Built from pieces: push protection scans the repo.
+        let live = ["sk_", "live_"].concat();
+        for fake in [format!("{live}{}", "x".repeat(24)), format!("{live}FAKE{}", "9aZ".repeat(7)), format!("ghp_{}test", "Ab1".repeat(10) + "Ab"), ["AKIA", "0000", "0000", "1234", "5678"].concat()] {
+            assert!(find_all(&fake).len() == 1 && placeholder(&fake), "{fake}");
+        }
+        let real_looking = ["AKIA", "ROLLFIXTURE", "23456"].concat();
+        assert!(find_all(&real_looking).len() == 1 && !placeholder(&real_looking));
+        assert!(!placeholder(&format!("{live}51Hx9Q2aB7cD3eF5gH8jK")));
+    }
+
+    #[test]
+    fn an_allow_list_holds_globs_and_fingerprints() {
+        let fp = fingerprint("anything");
+        assert!(fp.starts_with("sha256:") && fp.len() == 31);
+        let a = Allow::parse(&format!("# fixtures\ntests/fixtures/**\n*.pem  # keys for tests\n{}\nsha256:nothex\n", fp.to_uppercase().replace("SHA256", "sha256")));
+        assert_eq!(a.paths, ["tests/fixtures/**", "*.pem"]);
+        assert!(a.fingerprints.contains(&fp));
+        assert_eq!(a.fingerprints.len(), 1);
+    }
+
+    #[test]
+    fn a_key_is_named_from_its_variable_or_its_kind() {
+        assert_eq!(suggested_key("a Stripe live key", "const stripeKey = \""), "STRIPE_KEY");
+        assert_eq!(suggested_key("a GitHub token", "  \"token\": \""), "GITHUB_TOKEN");
+        assert_eq!(suggested_key("an AWS access key", "aws_access_key_id = "), "AWS_ACCESS_KEY_ID");
+        assert_eq!(suggested_key("an AWS access key", "curl -u "), "AWS_ACCESS_KEY_ID");
+        assert_eq!(env_read("src/pay.ts", "STRIPE_KEY"), "process.env.STRIPE_KEY");
+        assert_eq!(env_read("config.yml", "STRIPE_KEY"), "${STRIPE_KEY}");
     }
 }
 
