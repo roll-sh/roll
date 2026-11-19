@@ -322,7 +322,7 @@ mod finds {
             ("which secrets nobody reads", "secrets_insights"),
             ("one-time code", "secrets_totp"),
             ("vulnerabilities in my image", "apps_deploy_vulnerabilities"),
-            ("error budget", "apps_environment_slo"),
+            ("slo error budget", "apps_environment_slo"),
             ("contact form submissions", "apps_form_submissions"),
         ]
         .iter()
