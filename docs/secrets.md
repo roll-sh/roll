@@ -3728,8 +3728,11 @@ cache waited out. Ranked now:
      reference; proposed: the desktop app moves to a scheme of its own, e.g. `roll-app://`, since
      `roll://ENV/KEY` references are in the CLI, VS Code, the clients and #329 already; the agents
      owner's call), `doctor` suggests `export > .env`, GitLab is listed without a snippet.
-6. **R10, decoy keys** (building: `feature/roll-secrets-decoys`): a key holding a decoy `rlt_` token
-   (#270) or a Postgres role, alerting `decoy_used` on any use; IAM users need an account;
+6. **R10, decoy keys** (#392, gated green; merges main after batch 4, re-gated, batch 5): a key
+   holding a decoy `rlt_` token (#270), minted in process by `Access::mint_decoy`, alerting
+   `decoy_used` (audit, notify URL, top health finding; at most hourly) through `Access::on_decoy`. Only
+   admins see it's a decoy. A Postgres decoy role needs a login hook in pg-proxy, designed in #392's
+   body. IAM users need an account;
    **R4** (GCP KMS, Azure Key Vault, HSM) and confirming #290, #284, #227, #229 on real accounts: the
    user's call.
 
