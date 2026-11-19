@@ -478,7 +478,7 @@ a worker's 2 MiB, so the six above could land together).
    Elasticsearch's `_application/search_application/{name}/_search` as the safe surface, and a
    quickstart that works with Elastic's Search UI and InstantSearch through Searchkit. An IP
    allowlist still applies to browsers; the docs say how the two combine.
-2. **The Rally losses left by the full rerun** (Round 10, vectors, #268: Elasticsearch 9.1+ runs no merge while less than ~93.5 GB of disk is free, and this host was 91-98% full, so Round 9's Elasticsearch races were held on vectors, noaa (4 of 6) and nyc_taxis (2 of 3); the harness now sets `indices.merge.disk.check_interval=0`. With merges flowing, the force-merged vector losses are gone and dense_vector `100-1000_multiple_segments` (2.30x) is the one loss with ranges apart. Round 9's noaa and nyc_taxis wins may flatter roll until those tracks are rerun under the fixed harness: Round 11 reruns them now) (docs/benchmarks/search.md: Round 8, every Rally
+2. **The Rally losses left by the full rerun** (Round 10, vectors, #268: Elasticsearch 9.1+ runs no merge while less than ~93.5 GB of disk is free, and this host was 91-98% full, so Round 9's Elasticsearch races were held on vectors, noaa (4 of 6) and nyc_taxis (2 of 3); the harness now sets `indices.merge.disk.check_interval=0`. With merges flowing, the force-merged vector losses are gone and dense_vector `100-1000_multiple_segments` (2.30x) was the one loss with ranges apart; Round 12 makes it a tie (0.97, 6.13 against 6.35 ms; 0.83 at equal foreign load): each segment now searches a beam sized to its share of the shard, as Lucene 10.5 does, −33% instructions per query, recall unchanged. Round 9's noaa and nyc_taxis wins may flatter roll until those tracks are rerun under the fixed harness: Round 11 reruns them now) (docs/benchmarks/search.md: Round 8, every Rally
    track against Elasticsearch 9.5.5 and OpenSearch 3.9 at `83fac5982`; Round 9, the four tracks
    #29 fixed rerun at `c2b47b251`, three alternating rounds each, noaa six). Roll leads most tasks
    1.3-4x (percolator up to 300x) and indexes as many or more docs/s than Elasticsearch on every
@@ -583,7 +583,16 @@ a worker's 2 MiB, so the six above could land together).
    default `rescore_vector.oversample` isn't applied to queries (no change to hits while every
    candidate is rescored); float construction on CPUs without AVX-512 downclocking.
    Decided 2026-11-17: concurrent knn segments stay on (lower latency for 3-25% more CPU on
-   unmerged indices); the vector rerun under Rally (in progress) decides what to cut next.
+   unmerged indices). Round 12 (docs/benchmarks/search.md) sizes each unmerged segment's beam to
+   its share of the shard, as Lucene 10.5's optimistic collection does (a margin of 24 standard
+   deviations, not Lucene's 16, which lost a few hits per 10,000), and searches a segment again
+   with the full beam when its whole beam made the shard's best `num_candidates`: dense_vector
+   `100-1000` on 4 segments per shard 43.7M → 29.4M instructions and 15.1 → 11.1 ms CPU per
+   query, recall unchanged on Rally's queries and the 1M corpus, Rally's last vector loss now a
+   tie. Only unfiltered searches over float and int8 fields narrow: filtered graph searches and
+   one-bit estimates lost recall with narrow beams. Left: a filtered search's beam (a narrow
+   one strands the filtered graph search), and the 6% of `100-1000` that zstd spends reading the
+   hits' `_id`.
 7. **The dashboard against Elastic Cloud and OpenSearch Dashboards** (in progress: Snapshot and
    Restore, then Ingest Pipelines, as Kibana's Stack Management has them). Landed: the
    index browser and console on the per-index routes, an API keys panel in Settings, the mapping
