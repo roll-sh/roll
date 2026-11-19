@@ -83,7 +83,7 @@ impl Apps {
             Err(e) => (None, Err(e.clone())),
         };
         let now = code_sql::now_ms();
-        let (went_down, came_up) = {
+        let (went_down, came_up, up) = {
             let mut runs = self.check_states.lock();
             let r = runs.entry(key).or_default();
             r.running = false;
@@ -95,7 +95,7 @@ impl Apps {
                 Ok(()) => {
                     r.error = None;
                     r.failures = 0;
-                    (false, r.down_since.take().is_some())
+                    (false, r.down_since.take().is_some(), true)
                 }
                 Err(e) => {
                     r.error = Some(e.clone());
@@ -104,16 +104,18 @@ impl Apps {
                     if down {
                         r.down_since = Some(now);
                     }
-                    (down, false)
+                    (down, false, r.down_since.is_none())
                 }
             }
         };
         let log = self.logs.sink(format!("env:{service}/{env}"), crate::logs::Stream::System);
         // Its day on a status page: a pass or a failure.
-        self.status_count(crate::status_page::check_key(service, env, &c.name), verdict.is_ok()).await;
+        // Back up is what the store last said too: a restart or a takeover forgets `down_since`.
+        let was_down = self.status_count(crate::status_page::check_key(service, env, &c.name), verdict.is_ok(), up).await;
+        let came_up = came_up || (up && was_down);
         let (sid, e) = (service.to_string(), env.to_string());
         if went_down || came_up {
-            self.status_incident(service, crate::status_page::check_key(service, env, &c.name), if env == crate::model::PRODUCTION { c.name.clone() } else { format!("{} ({env})", c.name) }, went_down).await;
+            self.status_incident(service, crate::status_page::check_key(service, env, &c.name), went_down).await;
         }
         if went_down {
             let why = verdict.as_ref().err().cloned().unwrap_or_default();

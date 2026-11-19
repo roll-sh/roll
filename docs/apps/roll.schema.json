@@ -198,6 +198,16 @@
           "type": "boolean",
           "description": "Build again (same revision, no cache) when a base image moves."
         },
+        "queue_s": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 60,
+          "description": "A web service at max_instances with every instance at its concurrency: a request waits this long for a slot, then gets a 429."
+        },
+        "skew_protection": {
+          "type": "boolean",
+          "description": "A web service: a page loaded before a deploy keeps talking to the deployment that served it, for a day."
+        },
         "rollback_on_crash": {
           "type": "boolean",
           "description": "Roll back when a new deployment crash-loops."

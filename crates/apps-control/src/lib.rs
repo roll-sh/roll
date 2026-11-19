@@ -18,6 +18,7 @@ pub mod backups;
 pub mod hooks;
 pub mod tags;
 pub mod sites;
+pub mod skew;
 pub mod site_rules;
 pub mod tunnel;
 pub mod tcp;
@@ -267,6 +268,10 @@ pub struct Apps {
     /// its end of the channel until it starts.
     pub(crate) preview_lines: tokio::sync::mpsc::Sender<drains::PreviewBatch>,
     pub(crate) preview_lines_rx: Mutex<Option<tokio::sync::mpsc::Receiver<drains::PreviewBatch>>>,
+    /// Status pages' rows and incidents as last read ([`status_page::serve`]).
+    pub(crate) status_cache: status_page::StatusCache,
+    /// When this node last swept status pages' stale incidents (unix ms).
+    status_swept: std::sync::atomic::AtomicI64,
     /// Private environments' token hashes, by environment, as the owner last read or set them.
     access: Mutex<HashMap<String, Option<Access>>>,
     /// Bumped by every change to the access cache: a cold read caches what it read only if
@@ -323,6 +328,8 @@ pub struct Apps {
     sites: Mutex<HashMap<String, Arc<sites::Site>>>,
     /// Per environment, for the live site's key: its earlier static deployments' site keys.
     earlier_sites: Mutex<HashMap<String, sites::EarlierSites>>,
+    /// Each environment's deployments a request may name ([`skew`]), by its live one.
+    pub(crate) skew: Mutex<HashMap<String, skew::Earlier>>,
     /// `(service, name)` → the id of the service of that name in its project, as of when.
     service_names: Mutex<HashMap<(String, String), NameLookup>>,
     /// A site being loaded, per key: one load at a time (the rest wait for it).
@@ -543,6 +550,8 @@ impl Apps {
             drains_dirty: Mutex::new(Default::default()),
             preview_lines,
             preview_lines_rx: Mutex::new(Some(preview_lines_rx)),
+            status_cache: Default::default(),
+            status_swept: std::sync::atomic::AtomicI64::new(0),
             access: Mutex::new(HashMap::new()),
             access_gen: std::sync::atomic::AtomicU64::new(0),
             visits: Mutex::new(HashMap::new()),
@@ -569,6 +578,7 @@ impl Apps {
             images: images::ImageCache::default(),
             sites: Mutex::new(HashMap::new()),
             earlier_sites: Mutex::new(HashMap::new()),
+            skew: Mutex::new(HashMap::new()),
             site_loads: Mutex::new(HashMap::new()),
             service_names: Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
@@ -3291,8 +3301,14 @@ impl Apps {
     pub async fn audit(self: &Arc<Self>, what: &str, service: &str, env: &str, actor: Option<String>, mut data: Value) {
         data["actor"] = json!(actor);
         let (kind, sid, e) = (format!("audit.{what}"), service.to_string(), env.to_string());
+        // To the drains that take `audit` too, as it's written (a SIEM's copy; best effort as
+        // drains are: webhooks follow the event log, durably).
+        let text = json!({ "event": kind, "data": data }).to_string();
         if let Err(err) = self.db(move |s| s.add_event(&kind, &sid, &e, None, &data)).await {
             tracing::warn!(service, error = %err, "apps: an audit entry wasn't written");
+        } else {
+            let line = crate::logs::LogLine { t: code_sql::now_ms(), stream: crate::logs::Stream::System, instance: None, deployment: None, text, level: None, trace: None };
+            self.logs.to_drains(&format!("audit:{service}/{env}"), line);
         }
         self.changed(service);
     }

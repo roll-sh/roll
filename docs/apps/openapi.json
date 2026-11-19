@@ -235,7 +235,7 @@
               }
             }
           },
-          "description": "`{ url, format?, sources?, environments?, services?, previews?, headers? }` (https, a public host, or `syslog+tls://host:port` for `format: \"syslog\"`, which takes no headers; `sources` some of `runtime` (default), `http`, `build`; services by name or id; `headers` `{name: value}`, at most 10, sealed, never roll's own or `content-type`)"
+          "description": "`{ url, format?, sources?, environments?, services?, previews?, headers? }` (https, a public host, or `syslog+tls://host:port` for `format: \"syslog\"`, which takes no headers; `sources` some of `runtime` (default), `http`, `build`, `audit`; services by name or id; `headers` `{name: value}`, at most 10, sealed, never roll's own or `content-type`)"
         },
         "responses": {
           "201": {
@@ -976,7 +976,7 @@
         "tags": [
           "projects"
         ],
-        "x-roll-action": "write"
+        "x-roll-action": "admin (it makes the project's service names public: a person's call, not a token's write)"
       }
     },
     "/v1/apps/projects/{project}/status-page/incidents": {
@@ -1856,7 +1856,7 @@
               }
             }
           },
-          "description": "`{ keep_variables? }` (default false: the variables come back as they were when it was live)"
+          "description": "`{ keep_variables?, override? }` (default false: the variables come back as they were when it was live; `override` puts a never-live `ready` build live during a freeze, audited)"
         },
         "responses": {
           "202": {

@@ -248,7 +248,7 @@ impl Secrets {
                 return Err(Error::Conflict("exists", format!("an AWS role named {} exists", r.name)));
             }
             c.execute("INSERT INTO aws_roles (id, project_id, name, role_arn, trust, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)", params![r.id, project, r.name, r.role_arn, r.trust, now, r.created_by])?;
-            audit::record(c, project, caller, "aws_role.add", None, None, &[], &format!("added AWS role {} ({})", r.name, r.role_arn), now)
+            audit::record(c, self.keys()?, project, caller, "aws_role.add", None, None, &[], &format!("added AWS role {} ({})", r.name, r.role_arn), now)
         })?;
         Ok(r)
     }
@@ -287,7 +287,7 @@ impl Secrets {
             if c.execute("UPDATE aws_roles SET name = ?, role_arn = ?, trust = ? WHERE id = ? AND project_id = ?", params![name, role_arn, trust, id, project])? == 0 {
                 return Err(Error::NotFound(format!("no AWS role {id}")));
             }
-            audit::record(c, project, caller, "aws_role.update", None, None, &[], &format!("changed AWS role {name} ({role_arn}, trust {trust})"), now)
+            audit::record(c, self.keys()?, project, caller, "aws_role.update", None, None, &[], &format!("changed AWS role {name} ({role_arn}, trust {trust})"), now)
         })?;
         Ok(AwsRole { name, role_arn, trust, ..old })
     }
@@ -339,7 +339,7 @@ impl Secrets {
                 return Err(Error::Conflict("in_use", format!("{name} still rotates the keys of {}: delete those first", users.join(", "))));
             }
             c.execute("DELETE FROM aws_roles WHERE id = ?", [id])?;
-            audit::record(c, project, caller, "aws_role.delete", None, None, &[], &format!("deleted AWS role {name}"), now)
+            audit::record(c, self.keys()?, project, caller, "aws_role.delete", None, None, &[], &format!("deleted AWS role {name}"), now)
         })
     }
 

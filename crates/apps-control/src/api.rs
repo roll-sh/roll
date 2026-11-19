@@ -743,16 +743,18 @@ async fn create_deploy(State(apps): S, Path((id, env)): Path<(String, String)>, 
         Some(v) => Some(v.to_str().map_err(|_| Error::BadRequest("Idempotency-Key is printable ASCII".into()))?),
         None => None,
     };
+    // An upload's body is the tree or the image: a freeze's override comes as a header.
+    let over = headers.get("x-roll-override").is_some_and(|v| v == "1");
     let d = if ct.starts_with("application/gzip") || ct.starts_with("application/x-gzip") {
         // Percent-encoded UTF-8 (a commit subject isn't ASCII): `roll up` sends it so.
         let message = headers.get("x-roll-message").and_then(|v| v.to_str().ok()).map(|m| percent_encoding::percent_decode_str(m).decode_utf8_lossy().into_owned()).unwrap_or_default();
         let revision = headers.get("x-roll-revision").and_then(|v| v.to_str().ok()).filter(|r| (7..=64).contains(&r.len()) && r.bytes().all(|b| b.is_ascii_hexdigit()));
         let no_cache = headers.get("x-roll-no-cache").is_some_and(|v| v == "1");
-        apps.deploy(&id, &env, json!({ "message": message, "revision": revision, "no_cache": no_cache }), By { trigger: Trigger::Upload, actor }, Some(b), key).await?
+        apps.deploy(&id, &env, json!({ "message": message, "revision": revision, "no_cache": no_cache, "override": over }), By { trigger: Trigger::Upload, actor }, Some(b), key).await?
     } else if ct.starts_with("application/x-docker-image") {
         // An image built elsewhere (`docker save`'s archive, `roll apps deploy --image-file`).
         let message = headers.get("x-roll-message").and_then(|v| v.to_str().ok()).map(|m| percent_encoding::percent_decode_str(m).decode_utf8_lossy().into_owned()).unwrap_or_default();
-        apps.deploy(&id, &env, json!({ "message": message, "image_upload": true }), By { trigger: Trigger::Upload, actor }, Some(b), key).await?
+        apps.deploy(&id, &env, json!({ "message": message, "image_upload": true, "override": over }), By { trigger: Trigger::Upload, actor }, Some(b), key).await?
     } else {
         apps.deploy(&id, &env, body(&b)?, By { trigger: Trigger::Manual, actor }, None, key).await?
     };
@@ -1132,8 +1134,9 @@ async fn promote(State(apps): S, Path((id, env)): Path<(String, String)>, ext: E
 }
 
 async fn rollback(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>, ext: Extensions, b: Bytes) -> R {
-    let keep = body(&b)?.get("keep_variables").and_then(Value::as_bool).unwrap_or(false);
-    let d = apps.rollback(&id, &env, &dep, actor(&ext), keep).await?;
+    let o = body(&b)?;
+    let (keep, over) = (o.get("keep_variables").and_then(Value::as_bool).unwrap_or(false), o.get("override").and_then(Value::as_bool).unwrap_or(false));
+    let d = apps.rollback(&id, &env, &dep, actor(&ext), keep, over).await?;
     Ok((StatusCode::ACCEPTED, Json(d)).into_response())
 }
 

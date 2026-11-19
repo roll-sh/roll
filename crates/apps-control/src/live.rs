@@ -232,6 +232,8 @@ pub struct Lease {
     pub timeout: Option<Duration>,
     /// Its deployment keeps visitors on one instance ([`crate::model::Run::affinity`]).
     pub affinity: bool,
+    /// Its environment's "a slot is free", for a request queued at the hard limit.
+    freed: Arc<tokio::sync::Notify>,
 }
 
 /// What a visitor's affinity cookie holds for an instance: a short digest of its name (the name
@@ -244,6 +246,7 @@ impl Drop for Lease {
     fn drop(&mut self) {
         self.inst.in_flight.fetch_sub(1, Ordering::SeqCst);
         *self.inst.last_used.lock() = Instant::now();
+        self.freed.notify_one();
     }
 }
 
@@ -268,6 +271,9 @@ pub enum WakeError {
     Timeout(Duration),
     #[error("too many requests are waiting for this service to start")]
     Busy,
+    /// Every instance at its concurrency, at max_instances, for all of `run.queue_s`.
+    #[error("every instance was busy for {0:?}")]
+    Full(Duration),
     #[error("this project reached its spending limit for the month")]
     Capped,
     #[error("this environment is paused")]
@@ -293,12 +299,14 @@ pub struct Served {
     pub errors: u64,
     /// Its instances that crashed or failed their health check (no request sees those).
     pub crashes: u64,
-    /// Its answers' times: how many in each of [`LAT_BUCKETS`] buckets of √2 steps (ms).
+    /// Its answers' times (to their headers): how many in each of [`LAT_BUCKETS`] buckets of
+    /// 2^¼ steps (ms, about 19% each).
     pub lat: [u32; LAT_BUCKETS],
 }
 
-/// Buckets of a step's answer times: bucket `i` holds up to √2^(i+1) ms (the last, the rest).
-pub const LAT_BUCKETS: usize = 48;
+/// Buckets of a step's answer times: bucket `i` holds up to 2^((i+1)/4) ms (the last, the
+/// rest: past 16 s).
+pub const LAT_BUCKETS: usize = 96;
 
 impl Default for Served {
     fn default() -> Self {
@@ -313,11 +321,11 @@ impl Served {
 
     /// One answer that took `ms`.
     pub fn took(&mut self, ms: f64) {
-        let i = if ms <= 1.0 { 0 } else { ((ms.log2() * 2.0).ceil() as usize).saturating_sub(1).min(LAT_BUCKETS - 1) };
+        let i = if ms <= 1.0 { 0 } else { ((ms.log2() * 4.0).ceil() as usize).saturating_sub(1).min(LAT_BUCKETS - 1) };
         self.lat[i] = self.lat[i].saturating_add(1);
     }
 
-    /// Its answers' p95 (the bucket's top, ms), when it timed any.
+    /// Its answers' p95 (ms, read between its bucket's ends by rank), when it timed any.
     pub fn p95_ms(&self) -> Option<f64> {
         let n: u64 = self.lat.iter().map(|&c| c as u64).sum();
         if n == 0 {
@@ -326,10 +334,11 @@ impl Served {
         let want = (n as f64 * 0.95).ceil() as u64;
         let mut seen = 0;
         for (i, &c) in self.lat.iter().enumerate() {
-            seen += c as u64;
-            if seen >= want {
-                return Some(2f64.powf((i + 1) as f64 / 2.0));
+            if c > 0 && seen + c as u64 >= want {
+                let (lo, hi) = (if i == 0 { 0.0 } else { 2f64.powf(i as f64 / 4.0) }, 2f64.powf((i + 1) as f64 / 4.0));
+                return Some(lo + (hi - lo) * (want - seen) as f64 / c as f64);
             }
+            seen += c as u64;
         }
         None
     }
@@ -521,6 +530,8 @@ pub struct EnvLive {
     viewed: Mutex<HashMap<String, (Arc<Template>, Instant)>>,
     /// Requests waiting on a wake.
     waiters: AtomicU32,
+    /// A lease ended: a request queued at the hard limit ([`crate::model::Run::queue_s`]) looks again.
+    freed: Arc<tokio::sync::Notify>,
     /// The last failed wake, of which deployment, and how many failed in a row: the requests
     /// behind it get its error instead of each trying again, for a backoff that grows from 1 s to
     /// 30 s. A canary's failures don't hold back the active deployment's wakes.
@@ -590,6 +601,7 @@ impl EnvLive {
             served: Mutex::new(HashMap::new()),
             viewed: Mutex::new(HashMap::new()),
             waiters: AtomicU32::new(0),
+            freed: Arc::new(tokio::sync::Notify::new()),
             failed: Mutex::new(None),
             crashes: Mutex::new(std::collections::VecDeque::new()),
             seq: AtomicU64::new(0),
@@ -862,7 +874,7 @@ impl EnvLive {
         if best.0.in_flight.fetch_add(1, Ordering::SeqCst) >= concurrency {
             self.meter.lock().over_capacity(code_sql::now_ms());
         }
-        Some(Lease { addr: best.1, inst: best.0.clone(), waited: Duration::ZERO, cold: false, h2c: false, timeout: None, affinity: false })
+        Some(Lease { addr: best.1, inst: best.0.clone(), waited: Duration::ZERO, cold: false, h2c: false, timeout: None, affinity: false, freed: self.freed.clone() })
     }
 
     /// The instance a visitor's affinity cookie names, if it's up with room.
@@ -873,7 +885,7 @@ impl EnvLive {
             _ => None,
         })?;
         i.in_flight.fetch_add(1, Ordering::SeqCst);
-        Some(Lease { addr: a, inst: i.clone(), waited: Duration::ZERO, cold: false, h2c: false, timeout: None, affinity: false })
+        Some(Lease { addr: a, inst: i.clone(), waited: Duration::ZERO, cold: false, h2c: false, timeout: None, affinity: false, freed: self.freed.clone() })
     }
 
     /// Take an idle instance out of rotation before stopping or suspending it: under the lock
@@ -989,6 +1001,13 @@ impl EnvLive {
         if let Some(l) = self.pick(dep, run.concurrency, false) {
             return Ok(l);
         }
+        // The hard limit: at max_instances, wait for a slot rather than go past concurrency.
+        if let Some(q) = run.queue_s
+            && self.running_count(dep) > 0
+            && self.awake_of(dep) as u32 >= run.max_instances
+        {
+            return self.queued(dep, run.concurrency, Duration::from_secs(q as u64), began).await;
+        }
         // Everything is busy but something's running: scale out behind it, and go to the least
         // busy.
         if self.running_count(dep) > 0 && (self.awake_of(dep) as u32) < run.max_instances {
@@ -1022,6 +1041,26 @@ impl EnvLive {
             });
         }
         r
+    }
+
+    /// Wait up to `wait` for an instance of `dep` with room under `concurrency`; counted over
+    /// capacity when none comes (`alert.capacity` reads it).
+    async fn queued(&self, dep: &str, concurrency: u32, wait: Duration, began: Instant) -> Result<Lease, WakeError> {
+        let deadline = tokio::time::Instant::now() + wait;
+        loop {
+            // Listening before looking: a slot freed in between still wakes it.
+            let freed = self.freed.notified();
+            tokio::pin!(freed);
+            freed.as_mut().enable();
+            if let Some(mut l) = self.pick(dep, concurrency, false) {
+                l.waited = began.elapsed();
+                return Ok(l);
+            }
+            if tokio::time::timeout_at(deadline, freed).await.is_err() {
+                self.meter.lock().over_capacity(now_ms());
+                return Err(WakeError::Full(wait));
+            }
+        }
     }
 
     async fn wake_slow(self: &Arc<Self>, began: Instant, routed: Arc<Template>, pinned: bool) -> Result<Lease, WakeError> {

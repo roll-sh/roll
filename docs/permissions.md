@@ -1074,7 +1074,12 @@ An incident's cut-off revokes many tokens in one write: `POST /v1/access/tokens/
 (the operator's; at most 500 ids) revokes every listed token or none (an unknown id refuses the
 lot), puts `why` on each (`revoked_why`), and writes an audit row per token naming who and why.
 roll secrets' reach chooses the ids (the tokens and identities that can read a folder) and calls
-`Access::revoke_many` in process; roll-access never matches scopes a second way for it.
+`Access::revoke_many` in process; roll-access never matches scopes a second way for it. That's
+`POST /v1/secrets/projects/{project}/environments/{env}/reach/cut-off` (docs/secrets.md, "Cutting
+it off"), a project admin's: it revokes only the tokens reach lists for that folder, as its caller
+sees them, 500 a call, and of those only the ones whose every rule names that project alone. A
+token that reaches beyond it (the operator's `*`, another project) is left to the operator and
+listed as `skipped`; the operator's cut-off revokes them too.
 
 ## Decoy tokens
 

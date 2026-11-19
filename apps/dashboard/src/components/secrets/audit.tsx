@@ -1,4 +1,4 @@
-import { Check, Copy, Download, Plus, Radio, Trash2 } from "lucide-react";
+import { Check, Copy, Download, Plus, Radio, ShieldAlert, ShieldCheck, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { AuditEntry, AuditFilter, AuditFormat, Sink, SinkFormat } from "@/lib/secrets-api";
 import { Select } from "../agents/ui/select";
@@ -14,6 +14,27 @@ const SINCE = [
   { value: "30", label: "Last 30 days" },
 ] as const;
 type Since = (typeof SINCE)[number]["value"];
+
+/** One line on the log's hash chain: how far roll's signed digests vouch for it, or where it breaks. */
+function Integrity() {
+  const { api } = useSecrets();
+  const { data: v } = useLoad(() => api.verifyAudit(), [api]);
+  if (!v || v.head === null) return null;
+  if (!v.ok && v.broken) {
+    return (
+      <p className="mb-3 flex items-center gap-1.5 text-[12px] text-danger" role="alert">
+        <ShieldAlert className="size-3.5" strokeWidth={1.5} /> The audit log doesn't verify{v.broken.seq ? ` at #${v.broken.seq}` : ""}: {v.broken.detail}
+      </p>
+    );
+  }
+  return (
+    <p className="mb-3 flex items-center gap-1.5 text-[12px] text-muted" title="Each row is hashed with the one before it, and roll signs the chain hourly; roll secrets audit verify checks an export offline">
+      <ShieldCheck className="size-3.5" strokeWidth={1.5} />
+      {v.through !== null && v.signed_at !== null ? `Verified through #${v.through}, signed ${ago(v.signed_at)}` : `Chained through #${v.head}, not signed yet`}
+      {v.unchained > 0 && <span className="text-subtle">· {v.unchained} older rows unchained</span>}
+    </p>
+  );
+}
 
 /** Every reveal, export, resolve and write, newest first (values never appear here). */
 export function AuditView() {
@@ -37,12 +58,15 @@ export function AuditView() {
     limit: PAGE,
   };
   const sig = JSON.stringify(filter);
+  // The list leaves out roll's hourly signed digests unless asked for by action; exports keep them
+  // (an export is verified with them).
+  const listed: AuditFilter = { ...filter, digests: filter.action ? undefined : false };
 
   // Filters typed into fields settle for a moment before they load.
   useEffect(() => {
     let live = true;
     const t = setTimeout(() => {
-      api.audit(filter).then(
+      api.audit(listed).then(
         (r) => {
           if (!live) return;
           setRows(r);
@@ -61,7 +85,7 @@ export function AuditView() {
   const older = () => {
     const last = rows?.[rows.length - 1];
     if (!last) return;
-    api.audit({ ...filter, before: last.id }).then(
+    api.audit({ ...listed, before: last.id }).then(
       (r) => {
         setRows((x) => [...(x ?? []), ...r]);
         setEnd(r.length < PAGE);
@@ -87,6 +111,7 @@ export function AuditView() {
     <div className="mx-auto max-w-5xl space-y-8 px-4 py-5">
       <Streams />
       <div>
+        <Integrity />
         <div className="flex flex-wrap items-center gap-2">
           <Select label="Environment" value={env} onChange={setEnv} options={[{ value: ALL, label: "All environments" }, ...envs.map((e) => ({ value: e.slug, label: e.name }))]} className="w-44" />
           <input value={key} onChange={(e) => setKey(e.target.value)} placeholder="Key" aria-label="Key" className={`${sized} w-40 font-mono`} />

@@ -773,10 +773,11 @@ fn apps_create_action(b: &Value) -> Action {
 /// in its instances, and `rollback_on_crash`, which has roll
 /// put an older deployment live by itself), and so does any key apps adds later until it's listed
 /// here: a new setting is never a quiet way into production.
-const APPS_WRITE_RUN: [&str; 25] = [
+const APPS_WRITE_RUN: [&str; 26] = [
     "min_instances",
     "max_instances",
     "concurrency",
+    "queue_s",
     "cpu",
     "memory_mb",
     "health_path",
@@ -1327,6 +1328,8 @@ static ROWS: &[Row] = &[
     row("*", "/v1/secrets/projects/{project}/syncs", "secrets", ADMIN, one(&["project"], "project")).reveals(&["signing_secret"]),
     row("GET", "/v1/secrets/projects/{project}/syncs", "secrets", R, one(&["project"], "project")),
     row("*", "/v1/secrets/projects/{project}/syncs/", "secrets", ADMIN, one(&["project"], "project")),
+    // Checking the audit log's chain answers where it breaks, never what a row says.
+    row("GET", "/v1/secrets/projects/{project}/audit/verify", "secrets", R, one(&["project"], "project")),
     row("*", "/v1/secrets/projects/{project}/audit/sinks", "secrets", ADMIN, one(&["project"], "project")).reveals(&["secret"]),
     row("*", "/v1/secrets/projects/{project}/audit/sinks/", "secrets", ADMIN, one(&["project"], "project")),
     row("PUT", "/v1/secrets/projects/{project}/required", "secrets", ADMIN, one(&["project"], "project")),
@@ -1343,6 +1346,10 @@ static ROWS: &[Row] = &[
     row("PUT", "/v1/secrets/projects/{project}/environments/{env}/exports", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")),
     // Who and what can read a folder: the project's credentials, as the tokens list (a project admin's).
     row("GET", "/v1/secrets/projects/{project}/environments/{env}/reach", "secrets", ADMIN, one(&["project"], "project")),
+    // An incident's cut-off revokes the project's credentials that reach a folder, and its freeze
+    // locks readers out until an admin lifts it: both the project admin's, as reach is.
+    row("POST", "/v1/secrets/projects/{project}/environments/{env}/reach/cut-off", "secrets", ADMIN, one(&["project"], "project")),
+    row("DELETE", "/v1/secrets/projects/{project}/environments/{env}/reach/cut-off", "secrets", ADMIN, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/shares", "secrets", REVEAL, one(&["project"], "project")),
     // Purging a secret's history can't be undone.
     row("POST", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/purge", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
@@ -1380,7 +1387,8 @@ static ROWS: &[Row] = &[
     // The project's preview domain: which names its preview environments answer under.
     // A public page of the project's checks and heartbeats (names and up or down only).
     row("GET", "/v1/apps/projects/{project}/status-page", "apps", R, one(&["project"], "project")),
-    row("PUT", "/v1/apps/projects/{project}/status-page", "apps", W, one(&["project"], "project")),
+    // Publishing makes the project's service names public: a person's call (MCP's review).
+    row("PUT", "/v1/apps/projects/{project}/status-page", "apps", ADMIN, one(&["project"], "project")),
     row("DELETE", "/v1/apps/projects/{project}/status-page", "apps", W, one(&["project"], "project")),
     row("GET", "/v1/apps/projects/{project}/status-page/incidents", "apps", R, one(&["project"], "project")),
     row("POST", "/v1/apps/projects/{project}/status-page/incidents", "apps", W, one(&["project"], "project")),

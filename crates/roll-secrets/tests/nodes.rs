@@ -88,6 +88,9 @@ fn two_nodes_racing_on_one_environment_lose_no_change_and_share_no_number() {
     let show = |v: &roll_secrets::Values| v.values.iter().map(|(k, x)| format!("{k}={}", x.expose())).collect::<Vec<_>>();
     assert_eq!(show(&va), show(&vb));
     assert_eq!((va.values["ONLY_A"].expose(), va.values["ONLY_B"].expose()), ("19", "19"));
+    // Their audit rows form one chain: every number once, each row after the one before it.
+    let chain = b.verify_audit(&project, Default::default(), &caller).unwrap();
+    assert!(chain.ok && chain.from == Some(1) && chain.rows >= 40, "{chain:?}");
 }
 
 #[test]
@@ -126,7 +129,8 @@ fn a_digest_one_node_keeps_moves_at_once_with_what_another_node_changes() {
     b.source_changed("bucket", "assets").unwrap();
     moved("a rotation", &mut last);
     // The same caller, now unable to read staging, doesn't get the digest it had.
-    let narrowed = Caller { principal: "operator".into(), grants: Arc::new(AllBut("staging")), ip: None, runtime: false, approval: None };
+    let mut narrowed = Caller::operator();
+    narrowed.grants = Arc::new(AllBut("staging"));
     assert_ne!(digest(&narrowed), last, "what the caller may read is part of it");
     assert_eq!(digest(&op), last);
 }
