@@ -3679,7 +3679,8 @@ cache waited out. Ranked now:
      keeps 127.0.0.1:7070 after `roll login`; the first `roll run` waits silently on an `ask` approval
      it can't handle; the quick start has no install or login; the dashboard's commands dead-end.
      Then a committed `[secrets]` in `roll.toml` and an interactive `setup` (Doppler's `doppler.yaml`).
-   - P5, CI snippets that work on a fresh runner (the GitHub Action, GitLab's `id_tokens`).
+   - P5 + P14 (building: `feature/roll-secrets-ci-snippets`): CI snippets that work on a fresh runner
+     (the GitHub Action, GitLab's `id_tokens`) and a dashboard write-flow component test.
    - P6, MCP tools: import, rollback (destructive), create environment, link and link targets in roll
      MCP's #353 (rollback's `bypass` left out); secret requests and cut-off when batch 4 lands; the
      development preset change (#354) was closed after roll MCP's review: `roll login` is an ordinary
