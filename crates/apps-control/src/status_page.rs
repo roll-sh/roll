@@ -75,8 +75,24 @@ fn shown(page: &Page, services: &[crate::store::ServiceRow], envs: &[crate::stor
 /// How long a page's rows and incidents are kept between reads (any change forgets them).
 const CACHED: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// A page's rows and incidents as last read, by project.
-pub(crate) type StatusCache = parking_lot::Mutex<std::collections::HashMap<String, (std::time::Instant, Arc<(Vec<Row>, Vec<Value>)>)>>;
+/// Pages' rows and incidents as last read, by project, and a generation each change moves: a
+/// read that a change overtook keeps nothing (it may have read before the change).
+#[derive(Default)]
+pub(crate) struct StatusCache {
+    generation: std::sync::atomic::AtomicU64,
+    pages: parking_lot::Mutex<std::collections::HashMap<String, (std::time::Instant, Arc<Shown>)>>,
+}
+
+/// A page's rows and its incidents.
+type Shown = (Vec<Row>, Vec<Value>);
+
+impl StatusCache {
+    /// Something a page shows changed: every page is read again.
+    pub(crate) fn forget(&self) {
+        self.generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.pages.lock().clear();
+    }
+}
 
 /// One thing shown, as the page has it: who it is, whether it's up now, and its days.
 pub(crate) struct Row {
@@ -95,7 +111,7 @@ impl Apps {
         match self.db(move |s| s.status_day_add(&key, day, ok, up)).await {
             Ok(None) => false,
             Ok(Some(was)) => {
-                self.status_cache.lock().clear();
+                self.status_cache.forget();
                 was.as_deref() == Some("down")
             }
             Err(e) => {
@@ -139,7 +155,7 @@ impl Apps {
                 }
                 let (p, at) = (p.clone(), code_sql::now_ms());
                 if self.db(move |s| s.update_incident(&p, None, Some(&k), "resolved", "It's no longer checked.", at)).await.unwrap_or(false) {
-                    self.status_cache.lock().clear();
+                    self.status_cache.forget();
                 }
             }
         }
@@ -173,7 +189,7 @@ impl Apps {
         }
         let (p, slug, j) = (project.to_string(), crate::model::random(10).to_ascii_lowercase(), serde_json::to_string(&items).expect("items serialize"));
         let page = self.db(move |s| s.put_status_page(&p, &slug, &title, &j)).await?;
-        self.status_cache.lock().clear();
+        self.status_cache.forget();
         self.status_page_view(page)
     }
 
@@ -198,7 +214,7 @@ impl Apps {
         let (title, state, text) = incident_fields(&body, true)?;
         let (p, at) = (project.to_string(), code_sql::now_ms());
         let id = self.db(move |s| s.open_incident(&p, &title, &state, &text, None, at)).await?.expect("a person's always opens");
-        self.status_cache.lock().clear();
+        self.status_cache.forget();
         Ok(json!({ "id": id }))
     }
 
@@ -209,7 +225,7 @@ impl Apps {
         let (p, i, at) = (project.to_string(), id.to_string(), code_sql::now_ms());
         match self.db(move |s| s.update_incident(&p, Some(&i), None, &state, &text, at)).await? {
             true => {
-                self.status_cache.lock().clear();
+                self.status_cache.forget();
                 Ok(())
             }
             false => Err(Error::NotFound(format!("no incident {id}"))),
@@ -240,7 +256,7 @@ impl Apps {
         } else {
             self.db(move |s| s.update_incident(&p, None, Some(&key), "resolved", "It's back up.", at)).await.map(|_| ())
         };
-        self.status_cache.lock().clear();
+        self.status_cache.forget();
         if let Err(e) = r {
             tracing::warn!(service, error = %e, "apps: a status page's incident wasn't kept");
         }
@@ -249,7 +265,7 @@ impl Apps {
     pub async fn delete_status_page(self: &Arc<Self>, project: &str) -> Result<()> {
         let p = project.to_string();
         self.db(move |s| s.delete_status_page(&p)).await?;
-        self.status_cache.lock().clear();
+        self.status_cache.forget();
         Ok(())
     }
 
@@ -269,12 +285,13 @@ impl Apps {
 
     /// What a page shows now (each up or down and its days) and its incidents: read again
     /// after [`CACHED`] or any change, so a flood of visitors reads the store once.
-    async fn status_now(self: &Arc<Self>, page: &Page) -> Arc<(Vec<Row>, Vec<Value>)> {
-        if let Some((at, v)) = self.status_cache.lock().get(&page.project)
+    async fn status_now(self: &Arc<Self>, page: &Page) -> Arc<Shown> {
+        if let Some((at, v)) = self.status_cache.pages.lock().get(&page.project)
             && at.elapsed() < CACHED
         {
             return v.clone();
         }
+        let generation = self.status_cache.generation.load(std::sync::atomic::Ordering::SeqCst);
         let (pg, since) = (page.clone(), today() - DAYS + 1);
         let v = self
             .db(move |s| {
@@ -293,11 +310,13 @@ impl Apps {
             .await
             .unwrap_or_default();
         let v = Arc::new(v);
-        let mut cache = self.status_cache.lock();
-        if cache.len() >= 1000 {
-            cache.clear();
+        let mut cache = self.status_cache.pages.lock();
+        if self.status_cache.generation.load(std::sync::atomic::Ordering::SeqCst) == generation {
+            if cache.len() >= 1000 {
+                cache.clear();
+            }
+            cache.insert(page.project.clone(), (std::time::Instant::now(), v.clone()));
         }
-        cache.insert(page.project.clone(), (std::time::Instant::now(), v.clone()));
         v
     }
 }
