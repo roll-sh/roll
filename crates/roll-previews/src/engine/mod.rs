@@ -176,6 +176,10 @@ pub struct Engine {
     traces: Mutex<traces::Kept>,
     /// When `tend_routes` last read the slower routes.
     routes_read: Mutex<Option<std::time::Instant>>,
+    /// When `read_new_errors` last ran, and what each preview's new errors were then (no values
+    /// are read again for the same).
+    new_errors_read: Mutex<Option<std::time::Instant>>,
+    new_errors_seen: Mutex<HashMap<String, Vec<String>>>,
     pub span_reader: std::sync::OnceLock<Arc<dyn crate::ports::SpanReader>>,
     /// Open shells in previews' services (`shell.rs`), by id.
     shells: Mutex<HashMap<String, Arc<shell::ShellSession>>>,
@@ -304,6 +308,8 @@ impl Engine {
             shells: Mutex::new(HashMap::new()),
             traces: Mutex::new(HashMap::new()),
             routes_read: Mutex::new(None),
+            new_errors_read: Mutex::new(None),
+            new_errors_seen: Mutex::new(HashMap::new()),
             span_reader: std::sync::OnceLock::new(),
             forwards: Mutex::new(HashMap::new()),
             forwards_said: Mutex::new(HashMap::new()),

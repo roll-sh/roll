@@ -124,6 +124,8 @@ pub struct RouteCompared {
 pub const MIN_SAMPLES: usize = 5;
 /// How often the holder reads its previews' slower routes onto their records.
 pub const ROUTES_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
+/// How often the holder reads its previews' errors against main's (each a read of their logs).
+pub const NEW_ERRORS_EVERY: std::time::Duration = std::time::Duration::from_secs(300);
 pub const SLOWER_MS: u64 = 100;
 
 /// Each of the preview's routes with main's same one; the slower ones first.
@@ -260,11 +262,8 @@ impl Engine {
     async fn compared_routes(&self, id: &str, minutes: i64) -> Result<(Option<crate::store::Row>, Vec<RouteCompared>)> {
         let r = self.store.row(id)?;
         let mine = route_stats(&self.trace_rows(id, minutes).await?);
-        // Main's preview, as a change's screenshot finds it.
-        let rows: Vec<crate::store::Row> = self.store.rows(Some(&r.project_id))?.into_iter().filter(|x| x.change_id.is_none() && x.desired == crate::Desired::Active && x.id != r.id).collect();
-        let default = self.source.default_branch(&r.repo).await.ok().flatten();
-        let base = rows.iter().find(|x| x.repo == r.repo && default.is_some() && x.branch == default).or_else(|| rows.iter().find(|x| x.is_baseline()));
-        let main = match base {
+        let base = self.main_preview(&r).await?;
+        let main = match &base {
             Some(b) => route_stats(&self.trace_rows(&b.id, minutes).await?),
             None => Vec::new(),
         };
@@ -273,7 +272,15 @@ impl Engine {
         for (c, name) in compared.iter_mut().zip(names) {
             c.name = name;
         }
-        Ok((base.cloned(), compared))
+        Ok((base, compared))
+    }
+
+    /// Main's preview, as a change's screenshot finds it: the repo's default branch's, else the
+    /// project's baseline.
+    pub(super) async fn main_preview(&self, r: &crate::store::Row) -> Result<Option<crate::store::Row>> {
+        let rows: Vec<crate::store::Row> = self.store.rows(Some(&r.project_id))?.into_iter().filter(|x| x.change_id.is_none() && x.desired == crate::Desired::Active && x.id != r.id).collect();
+        let default = self.source.default_branch(&r.repo).await.ok().flatten();
+        Ok(rows.iter().find(|x| x.repo == r.repo && default.is_some() && x.branch == default).or_else(|| rows.iter().find(|x| x.is_baseline())).cloned())
     }
 
     /// The previews this node holds, while their project keeps traces: their routes slower than
@@ -288,6 +295,17 @@ impl Engine {
             *last = Some(std::time::Instant::now());
         }
         self.read_slower_routes().await;
+        let due = {
+            let mut last = self.new_errors_read.lock();
+            let due = last.is_none_or(|at| at.elapsed() >= NEW_ERRORS_EVERY);
+            if due {
+                *last = Some(std::time::Instant::now());
+            }
+            due
+        };
+        if due {
+            self.read_new_errors().await;
+        }
     }
 
     /// What `tend_routes` does each [`ROUTES_EVERY`], now.

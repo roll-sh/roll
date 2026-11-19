@@ -1163,6 +1163,16 @@ main first) onto the preview's record about once a minute (`slower_routes`, kept
 Requests), and the pull request's comment says it in its checks with each route's p50 and
 main's, a route's name in a code span nothing in it can close. A change reports the preview again
 (`a_route_slower_than_mains_reaches_the_record_and_the_report`).
+
+New errors against main (Sentry's new issues in a release): every five minutes the holder reads
+each running change's or branch's error groups of the last hour and main's preview's, compares
+them by service and fingerprint (the backends' own, before previews key them), and keeps the ones
+main's doesn't have on the record (`new_errors`: how many, and the most frequent five by service
+and title, masked; their values are read only when that set moved). The verdict strip leads with
+"2 new errors against main" (opening Errors), the change page lists them, and the pull request's
+comment counts them in its checks with each title in a code span nothing in it can close. A
+change reports the preview again; an error fixed (gone from the last hour) goes.
+`an_error_mains_preview_doesnt_have_reaches_the_record_and_the_report`.
 Read back masked as
 its logs are: a span's name and attributes are its code's words. The intake reads OTLP with roll
 apps' reader (`apps_control::otlp::spans_of_request`). A roll apps service's traces are roll apps'

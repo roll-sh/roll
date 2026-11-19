@@ -175,7 +175,7 @@ export function PreviewSheet({
                 Reaches roll only: a pull request from a fork can't call anything outside roll but the project&apos;s allowed hosts, so a call to an outside API fails here. The project&apos;s rules can open it (A fork&apos;s preview reaches: Anything).
               </p>
             )}
-            <VerdictStrip p={p} onRoutes={() => setTab("Requests")} />
+            <VerdictStrip p={p} onTab={setTab} />
             <span data-section="services" />
             <Label>Services</Label>
             {p.services.length ? (
@@ -1000,14 +1000,16 @@ export function Endpoints({ items, branch }: { items: EndpointTime[]; branch: st
 /** What the sheet leads with: what changed against main and what waits on someone, most serious
  * first, each jumping to its section below (Vercel's deployment summary). Says nothing new when
  * there's nothing, once the preview has been compared. */
-function VerdictStrip({ p, onRoutes }: { p: Preview; onRoutes: () => void }) {
+function VerdictStrip({ p, onTab }: { p: Preview; onTab: (tab: "Requests" | "Errors") => void }) {
   const items = verdict(p);
   const jump = (target: VerdictTarget) => {
     const reduce = typeof window !== "undefined" && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
     const go = () => document.querySelector(`[data-section="${target}"]`)?.scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "start" });
+    // Its errors are their own tab.
+    if (target === "errors") return onTab("Errors");
     if (target !== "routes") return go();
     // The routes are on the Requests tab, read once it opens: there when they've come.
-    onRoutes();
+    onTab("Requests");
     for (const ms of [50, 300, 900]) setTimeout(go, ms);
   };
   if (!items.length) {

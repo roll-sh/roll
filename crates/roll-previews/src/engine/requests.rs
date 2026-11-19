@@ -690,6 +690,54 @@ impl Engine {
         Ok(groups)
     }
 
+    /// The previews this node holds that run (a change's or a branch's): their error groups of
+    /// the last hour that main's preview doesn't have (by service and fingerprint, unkeyed), kept
+    /// on the record (the verdict strip, the pull request's comment), the most frequent first. Its
+    /// values are read to mask the titles only when that set moved; a change reports the preview
+    /// again.
+    pub async fn read_new_errors(&self) {
+        let Ok(rows) = self.store.rows(None) else { return };
+        for r in rows.into_iter().filter(|r| r.desired == Desired::Active && r.state == crate::State::Ready && (r.change_id.is_some() || r.branch.is_some())) {
+            if let Some(c) = self.cluster.get()
+                && !matches!(c.route_async(&super::preview_key(&r.id)).await, Ok(roll_cluster::Route::Local(_)))
+            {
+                continue;
+            }
+            let Ok(Some(base)) = self.main_preview(&r).await else { continue };
+            let (Ok(mine), Ok(main)) = (self.raw_errors(&r.id).await, self.raw_errors(&base.id).await) else { continue };
+            let theirs: std::collections::HashSet<(&str, &str)> = main.iter().map(|g| (g.service.as_str(), g.fingerprint.as_str())).collect();
+            let mut new: Vec<&crate::ErrorGroup> = mine.iter().filter(|g| !theirs.contains(&(g.service.as_str(), g.fingerprint.as_str()))).collect();
+            new.sort_by(|a, b| b.count.cmp(&a.count).then(b.last_seen.cmp(&a.last_seen)));
+            let total = new.len();
+            new.truncate(crate::NewErrors::MAX);
+            let seen: Vec<String> = new.iter().map(|g| format!("{}\0{}", g.service, g.fingerprint)).chain([total.to_string()]).collect();
+            if self.new_errors_seen.lock().get(&r.id) == Some(&seen) {
+                continue;
+            }
+            let kept = if total == 0 {
+                None
+            } else {
+                let Ok(values) = super::ErrorMasks::new(self, &r.id).values().await.map(<[String]>::to_vec) else { continue };
+                let errors = new.iter().map(|g| crate::NewError { service: g.service.clone(), title: crate::mask_cut(&g.title, &values) }).collect();
+                Some(crate::NewErrors { branch: base.branch.clone().unwrap_or_else(|| "main".into()), total, errors })
+            };
+            self.new_errors_seen.lock().insert(r.id.clone(), seen);
+            if self.store.set_runtime_fact(&r.id, "new_errors", kept.as_ref()).unwrap_or(false) {
+                self.report(r).await;
+            }
+        }
+    }
+
+    /// Its services' error groups of the last hour as the backends group them: fingerprints
+    /// unkeyed (to compare with another preview's), titles unmasked (never shown as they are).
+    async fn raw_errors(&self, id: &str) -> Result<Vec<crate::ErrorGroup>> {
+        let mut groups = Vec::new();
+        for s in self.store.services(id)? {
+            groups.extend(self.apps.errors(id, &s.name, 60, None).await?.into_iter().map(|g| crate::ErrorGroup { service: s.name.clone(), ..g }));
+        }
+        Ok(groups)
+    }
+
     /// How many errors its services wrote in the last `minutes` ([`error_span`]): a list's rows.
     /// Counted from the groups [`Engine::errors`] lists, but nothing they say leaves, so nothing is
     /// masked and no values are read. Kept as long.

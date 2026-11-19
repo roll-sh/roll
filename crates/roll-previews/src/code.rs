@@ -179,6 +179,11 @@ impl CodeSource {
                     branch: s.branch.clone(),
                     routes: s.routes.iter().map(|x| code_control::model::PreviewSlowerRoute { name: x.name.clone(), p50_ms: x.p50_ms, main_p50_ms: x.main_p50_ms }).collect(),
                 }),
+                new_errors: p.new_errors.as_ref().map(|n| code_control::model::PreviewNewErrors {
+                    branch: n.branch.clone(),
+                    total: n.total,
+                    errors: n.errors.iter().map(|x| code_control::model::PreviewNewError { service: x.service.clone(), title: x.title.clone() }).collect(),
+                }),
                 page_links: p.page_links.as_ref().map(|l| code_control::model::PreviewPageLinks {
                     checked: l.checked,
                     broken: l.broken.iter().map(|b| code_control::model::PreviewBrokenLink { path: b.path.clone(), status: b.status }).collect(),
