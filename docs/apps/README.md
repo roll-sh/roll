@@ -841,6 +841,20 @@ whole. The environment's log
   one needs what reading them would (a token's `reveal` on that service); once set, the value is
   part of this service's own (its reveal shows it, as with a link). The listing shows the
   template (names, never a value), and the dashboard edits that, not what it resolves to.
+- A variable may name one of roll secrets' keys in its own environment
+  (`DATABASE_URL=roll://production/db/URL`). Each deploy, it's read as the service
+  (`SecretSource::resolve_ref`, which is roll secrets' `resolve_for` with
+  `ResourceRef::new(Kind::Service, id)`, audited as the service) and sealed. It's never kept,
+  and it's shown only as roll secrets reveals it. This is how a key gets its own name or comes
+  from a folder; it reaches nothing the service's environment doesn't already. Setting one that
+  names another environment, or a project (`roll://acme@production/…`), is a 400, and so is one
+  that reads as a reference only once trimmed or lowercased (` roll://…`, `ROLL://…`): roll
+  secrets' parser trims, so only the exact form is let through, read the same everywhere. Naming
+  another environment needs the
+  person who set it bound to it (roll secrets' maker references, #407). A reference that doesn't
+  resolve fails the deploy, naming the variable. A preview copies its base's variables, so a
+  reference there names the base and is left out, as an untrusted preview's secrets are.
+  `api.rs::a_roll_reference_variable_reads_its_environments_secret`.
 - The variables panel edits one at a time, stages a pasted `.env` for review, copies another
   environment's (as a reveal there), or edits them all as one `.env` text (Railway's raw editor:
   `toEnv` writes what `parseEnv` reads back exactly, quotes and line breaks included; saved as
@@ -3397,15 +3411,17 @@ scanning"), then objectives ("SLOs"), then Prometheus scraping ("The app's Prome
    watch paths already skip a deploy that touches nothing relevant, and the usual command
    (`git diff --quiet HEAD^ HEAD ./`) needs git history, which a deploy's fetched tree doesn't
    have. It needs a sandboxed run of the command on a checkout with the previous revision.
-4. *Waiting on roll secrets' #329 (`resolve_for`) and feature/roll-secrets-maker-refs.* **Variables that belong in roll secrets** (roll secrets' review): a secret-looking variable
-   pasted into the panel offers "Move to roll secrets" (into the project environment apps
-   already injects), and a variable may be `roll://ENV/KEY`, resolved through roll secrets'
-   `Secrets::resolve_for(ResourceRef::new(Kind::Service, id), …)` (#329, audited as the service,
-   rotation seen through `digest_for`), so values reach its health, leak guard and audit chain.
-   A Git login's `secret` becomes such a reference too, bound to the person who set it
-   (`Secrets::bind_ref`, checked with `resolve_as` at each fetch, roll secrets'
-   feature/roll-secrets-maker-refs), its read audited as `app:<service> (git login)`; #399 made
-   naming one `deploy` meanwhile.
+4. **Variables that belong in roll secrets** (roll secrets' review): `roll://` references to the
+   service's own environment are built ("Secrets and environments"). Left: a secret-looking
+   variable pasted into the panel offers "Move to roll secrets" (into the project environment,
+   leaving a reference behind). *Waiting on roll secrets' #407 (maker references, head
+   4ea68773a, batch 5):* a reference into another environment, and a Git login's `secret` as
+   one. Both are bound to the person who set it, through `bind_ref` for another environment, or
+   `bind_ref_runtime(resource, reference, caller, runtime_env)` once apps has checked that the
+   caller holds `deploy` there (a sensitive key, in exactly that environment; the maker must also
+   be able to reveal the folder). The `Maker` string (`usr_…@runtime:production`) is kept
+   beside it and is never a tenant's to write. Each fetch reads it with `resolve_as`
+   (`digest_as` for "needs deploy"), which re-checks the maker every time.
 5. *Waiting on roll secrets' #357 (its batch 4).* **A workload
    identity token in each instance** (Vercel's OIDC federation, Fly's, Cloud Run's): roll
    secrets' #68 issuer mints `sub = roll-apps:<project>:<service>:<env>` (`SecretSource::issue`,

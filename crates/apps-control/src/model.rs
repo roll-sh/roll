@@ -2569,6 +2569,28 @@ pub struct Link {
     pub vars: Vec<String>,
 }
 
+/// The environment a `roll://ENV[/folder…]/KEY` value names (roll secrets' references; its
+/// own syntax is checked where it resolves): None when it isn't one; an error when it's
+/// malformed, or names a project (a service's references are its own project's).
+pub fn secret_ref_env(v: &str) -> Option<Result<String>> {
+    let bad = |m: &str| Some(Err(Error::BadRequest(m.into())));
+    // What roll secrets' parser would take for one (it trims) is one; only its exact form is
+    // accepted, so no check here or elsewhere reads it differently.
+    if !v.trim().to_ascii_lowercase().starts_with("roll://") {
+        return None;
+    }
+    let Some(rest) = v.strip_prefix("roll://").filter(|_| v.trim() == v) else {
+        return bad("a roll:// reference is written exactly: roll://ENV/KEY, lowercase, with nothing around it");
+    };
+    if rest.contains('@') {
+        return bad("a service's roll:// reference names its own project's secrets: roll://ENV/KEY, without a project");
+    }
+    match rest.split_once('/') {
+        Some((env, key)) if !env.is_empty() && !key.is_empty() && !key.ends_with('/') => Some(Ok(env.to_string())),
+        _ => bad("a roll:// reference is roll://ENV/KEY or roll://ENV/folder/KEY"),
+    }
+}
+
 /// An environment variable's name: `[A-Za-z_][A-Za-z0-9_]*`, at most 128 characters.
 pub fn check_var_name(n: &str) -> Result<()> {
     let mut b = n.bytes();
