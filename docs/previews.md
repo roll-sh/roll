@@ -2003,7 +2003,9 @@ Every feature in review has its `roll preview` command too: `metrics`, `hooks` (
 8. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
 9. **Watch: pg-control's recovery to a time seconds old** (unowned).
-10. **Watch: a cold start on a Docker name conflict.**
+10. **A cold start on a Docker name conflict, in review** (`feature/roll-previews-name-retry`): a start
+    whose container name is still being removed (a stop just before it) removes it again and tries
+    twice more, half a second apart, before it fails.
 
 Landed in previews' lock turn of 2026-11-18 (main 440e13ebf; one combined tree, each step
 tagged and gated once with both live checks, then landed one at a time, each identical to its
