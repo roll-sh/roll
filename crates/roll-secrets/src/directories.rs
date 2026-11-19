@@ -75,6 +75,8 @@ pub struct Bind<'a> {
     pub bind_password: &'a str,
     /// The server's CA certificates (PEM), trusted as well as the system's.
     pub ca: Option<&'a str>,
+    /// The gateway it's reached through (docs/secrets.md, "Gateways"), if any.
+    pub gateway: Option<&'a str>,
 }
 
 /// An LDAP or Active Directory server outside roll (rolld: TLS to a public address it resolved
@@ -134,6 +136,9 @@ pub struct RegisteredDirectory {
     pub groups: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ca: Option<String>,
+    /// The gateway it's reached through (a private address), if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gateway: Option<String>,
     pub created_at: i64,
     pub created_by: String,
 }
@@ -154,6 +159,10 @@ pub struct NewDirectory {
     pub groups: Vec<String>,
     #[serde(default)]
     pub ca: Option<String>,
+    /// One of the project's gateways (`gw_…`): the directory is reached through it and may have
+    /// a private address.
+    #[serde(default)]
+    pub gateway: Option<String>,
 }
 
 /// What the provider needs to reach one directory.
@@ -166,11 +175,12 @@ struct Opened {
     user_base_dn: Option<String>,
     accounts: Vec<String>,
     groups: Vec<String>,
+    gateway: Option<String>,
 }
 
 impl Opened {
     fn bind(&self) -> Bind<'_> {
-        Bind { url: &self.url, flavor: self.flavor, bind_dn: &self.bind_dn, bind_password: self.bind_password.expose(), ca: self.ca.as_deref() }
+        Bind { url: &self.url, flavor: self.flavor, bind_dn: &self.bind_dn, bind_password: self.bind_password.expose(), ca: self.ca.as_deref(), gateway: self.gateway.as_deref() }
     }
 }
 
@@ -206,7 +216,7 @@ fn check_url(url: &str) -> Option<&str> {
 /// A password nobody chose, to the flavor's rules: 32 characters with upper- and lowercase
 /// letters and digits, and on Active Directory a symbol too (its complexity policy). The symbols
 /// need no quoting in LDIF, a shell or a URL's query.
-fn password(flavor: Flavor) -> String {
+pub(crate) fn password(flavor: Flavor) -> String {
     const ALNUM: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
     const SYMBOLS: &[u8] = b"!#%+-.:=?@^_~";
     let alphabet: Vec<u8> = match flavor {
@@ -256,18 +266,18 @@ impl Provider {
     }
 
     fn open(&self, id: &str) -> Result<Opened> {
-        type Row = (String, String, String, String, Vec<u8>, Option<String>, String, String, Option<String>, String);
+        type Row = (String, String, String, String, Vec<u8>, Option<String>, String, String, Option<String>, String, Option<String>);
         let row: Option<Row> = self.db.read(|c| {
             Ok::<_, Error>(
                 c.query_row(
-                    "SELECT d.project_id, d.url, d.flavor, d.bind_dn, d.bind_password, d.user_base_dn, d.accounts, d.groups, d.ca, p.dek FROM directories d JOIN projects p ON p.project_id = d.project_id WHERE d.id = ?",
+                    "SELECT d.project_id, d.url, d.flavor, d.bind_dn, d.bind_password, d.user_base_dn, d.accounts, d.groups, d.ca, p.dek, d.gateway FROM directories d JOIN projects p ON p.project_id = d.project_id WHERE d.id = ?",
                     [id],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?)),
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?, r.get(10)?)),
                 )
                 .optional()?,
             )
         })?;
-        let (project, url, flavor, bind_dn, sealed, user_base_dn, accounts, groups, ca, dek) = row.ok_or_else(|| Error::Link(format!("directory {id} doesn't exist any more")))?;
+        let (project, url, flavor, bind_dn, sealed, user_base_dn, accounts, groups, ca, dek, gateway) = row.ok_or_else(|| Error::Link(format!("directory {id} doesn't exist any more")))?;
         let inner = self.unwrap.inner(&project, &dek)?;
         let (dek, _) = self.keys.open_dek(&project, &inner)?;
         Ok(Opened {
@@ -279,6 +289,7 @@ impl Provider {
             user_base_dn,
             accounts: serde_json::from_str(&accounts).unwrap_or_default(),
             groups: serde_json::from_str(&groups).unwrap_or_default(),
+            gateway,
         })
     }
 
@@ -390,7 +401,7 @@ impl Secrets {
         caller.need(Action::Read, &Scope::project(project))?;
         self.project(project)?;
         self.db.read(|c| {
-            Ok(c.query("SELECT id, name, url, flavor, bind_dn, user_base_dn, accounts, groups, ca, created_at, created_by FROM directories WHERE project_id = ? ORDER BY name", [project], |r| {
+            Ok(c.query("SELECT id, name, url, flavor, bind_dn, user_base_dn, accounts, groups, ca, created_at, created_by, gateway FROM directories WHERE project_id = ? ORDER BY name", [project], |r| {
                 Ok(RegisteredDirectory {
                     id: r.get(0)?,
                     name: r.get(1)?,
@@ -401,6 +412,7 @@ impl Secrets {
                     managed_accounts: serde_json::from_str(&r.get::<_, String>(6)?).unwrap_or_default(),
                     groups: serde_json::from_str(&r.get::<_, String>(7)?).unwrap_or_default(),
                     ca: r.get(8)?,
+                    gateway: r.get(11)?,
                     created_at: r.get(9)?,
                     created_by: r.get(10)?,
                 })
@@ -440,14 +452,20 @@ impl Secrets {
             return Err(Error::BadRequest("ca is the server's CA certificates, PEM (64 KiB at most)".into()));
         }
         // One bind proves the credentials (outside any transaction).
-        let bind = Bind { url: &url, flavor: n.flavor, bind_dn: &n.bind_dn, bind_password: n.bind_password.expose(), ca: ca.as_deref() };
+        let gateway = self.check_gateway(project, n.gateway)?;
+        let bind = Bind { url: &url, flavor: n.flavor, bind_dn: &n.bind_dn, bind_password: n.bind_password.expose(), ca: ca.as_deref(), gateway: gateway.as_deref() };
         directory.check(&bind, &n.managed_accounts, &n.groups, user_base_dn.as_deref()).map_err(|why| Error::BadRequest(format!("roll couldn't use the directory: {why}")))?;
         let dek = self.project(project)?;
         let id = names::new_id("dir", 16);
         let sealed = dek.seal(&aad(project, &id), &n.bind_password);
         let now = self.db.now_ms()?;
-        let d = RegisteredDirectory { id: id.clone(), name: n.name, url, flavor: n.flavor, bind_dn: n.bind_dn, user_base_dn, managed_accounts: n.managed_accounts, groups: n.groups, ca, created_at: now, created_by: caller.principal.clone() };
+        let d = RegisteredDirectory { id: id.clone(), name: n.name, url, flavor: n.flavor, bind_dn: n.bind_dn, user_base_dn, managed_accounts: n.managed_accounts, groups: n.groups, ca, gateway, created_at: now, created_by: caller.principal.clone() };
         self.db.write(|c| {
+            if let Some(g) = &d.gateway
+                && c.query_row("SELECT 1 FROM gateways WHERE id = ? AND project_id = ?", [g, project], |_| Ok(())).optional()?.is_none()
+            {
+                return Err(Error::BadRequest(format!("gateway {g} was deleted")));
+            }
             if c.query_row("SELECT 1 FROM directories WHERE project_id = ? AND name = ?", [project, &d.name], |_| Ok(())).optional()?.is_some() {
                 return Err(Error::Conflict("exists", format!("a directory named {} exists", d.name)));
             }
@@ -460,7 +478,7 @@ impl Secrets {
                 return Err(Error::Conflict("exists", format!("{other} already rotates these accounts at {host}")));
             }
             c.execute(
-                "INSERT INTO directories (id, project_id, name, url, flavor, bind_dn, bind_password, user_base_dn, accounts, groups, ca, state, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO directories (id, project_id, name, url, flavor, bind_dn, bind_password, user_base_dn, accounts, groups, ca, state, created_at, created_by, gateway) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 params![
                     id,
                     project,
@@ -475,7 +493,8 @@ impl Secrets {
                     d.ca,
                     crate::turns::Turns::initial(),
                     now,
-                    d.created_by
+                    d.created_by,
+                    d.gateway
                 ],
             )?;
             audit::record(c, project, caller, "directory.add", None, None, &[], &format!("added directory {} ({host}, {})", d.name, d.flavor.as_str()), now)
