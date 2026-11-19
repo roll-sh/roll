@@ -178,7 +178,7 @@ impl Secrets {
                 "INSERT INTO aws_users (id, project_id, name, role_id, user_name, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 params![u.id, project, u.name, u.role, u.user, now, u.created_by],
             )?;
-            audit::record(c, project, caller, "aws_user.add", None, None, &[], &format!("added AWS user {} ({})", u.name, u.user), now)
+            audit::record(c, self.keys()?, project, caller, "aws_user.add", None, None, &[], &format!("added AWS user {} ({})", u.name, u.user), now)
         })?;
         Ok(u)
     }
@@ -217,7 +217,7 @@ impl Secrets {
             if c.execute("UPDATE aws_users SET name = ?, role_id = ? WHERE id = ? AND project_id = ?", params![name, role, id, project])? == 0 {
                 return Err(Error::NotFound(format!("no AWS user {id}")));
             }
-            audit::record(c, project, caller, "aws_user.update", None, None, &[], &format!("changed AWS user {name} ({}, through role {role})", old.user), now)
+            audit::record(c, self.keys()?, project, caller, "aws_user.update", None, None, &[], &format!("changed AWS user {name} ({}, through role {role})", old.user), now)
         })?;
         Ok(AwsUser { name, role, ..old })
     }
@@ -239,7 +239,7 @@ impl Secrets {
                 return Err(Error::Conflict("in_use", format!("{name} has {waiting} retired key(s) still to delete after their grace period: delete it once they're done")));
             }
             c.execute("DELETE FROM aws_users WHERE id = ?", [id])?;
-            audit::record(c, project, caller, "aws_user.delete", None, None, &[], &format!("deleted AWS user {name}"), now)
+            audit::record(c, self.keys()?, project, caller, "aws_user.delete", None, None, &[], &format!("deleted AWS user {name}"), now)
         })
     }
 

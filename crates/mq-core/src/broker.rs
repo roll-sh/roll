@@ -1,7 +1,7 @@
 //! The broker: vhosts, users, permissions, policies, parameters and the connection registry,
 //! persisted to the metadata store and recovered on start.
 
-use crate::auth::{Access, Permission, RegexCache, TopicPermission, User, expand_vars};
+use crate::auth::{Access, DEFAULT_EXCHANGE, Permission, RegexCache, TopicPermission, User, expand_vars};
 use crate::error::{ACCESS_REFUSED, AmqpError, INTERNAL_ERROR, NOT_ALLOWED, Result};
 use crate::exchange::{Binding, Dest, DestKind, Exchange, ExchangeKind};
 use crate::log::LogStore;
@@ -806,8 +806,10 @@ impl Broker {
         Ok(())
     }
 
-    /// Resource permission check (`configure`/`write`/`read` regexes).
+    /// Resource permission check (`configure`/`write`/`read` regexes). The default exchange is
+    /// checked as `amq.default`, whichever protocol asks.
     pub fn check(&self, user: &User, vhost: &str, access: Access, kind: &str, name: &str) -> Result<()> {
+        let name = if kind == "exchange" && name.is_empty() { DEFAULT_EXCHANGE } else { name };
         let ok = self.permission(vhost, &user.name).is_some_and(|p| {
             let pattern = match access {
                 Access::Configure => &p.configure,
