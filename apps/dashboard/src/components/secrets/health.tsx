@@ -186,7 +186,7 @@ function Rotations() {
                 {r.name} · {r.kind}
               </span>
               <span className={`ml-auto text-[11.5px] ${r.last_error ? "text-danger" : "text-subtle"}`}>
-                {r.last_error ? `rotation failing: ${r.last_error}` : r.rotate_days && r.next_due ? `every ${r.rotate_days} days · next ${day(r.next_due)}` : "rotates by hand"}
+                {r.last_error ? `rotation failing: ${r.last_error}` : r.rotate_days && r.next_due ? `every ${r.rotate_days} days${r.rotate_window ? ` in ${r.rotate_window} UTC` : ""} · next ${day(r.next_due)}` : "rotates by hand"}
               </span>
               <button className={`${ghost} h-6`} disabled={!!busy} onClick={() => void rotate(r)} title="Rotate now: a new credential; the old one works through its grace period">
                 <RotateCw className={`size-3.5 ${busy === id ? "motion-safe:animate-spin" : ""}`} /> Rotate

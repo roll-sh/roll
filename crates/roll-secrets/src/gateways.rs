@@ -148,7 +148,7 @@ fn row(now: i64) -> impl Fn(&code_sql::Row<'_>) -> code_sql::Result<Gateway> {
 
 /// The audit log's name for a gateway's link.
 fn link_caller(id: &str) -> Caller {
-    Caller { principal: format!("gateway:{id}"), grants: Arc::new(Everything), ip: None, runtime: false, approval: None, maker: None }
+    Caller::acting(format!("gateway:{id}"), Arc::new(Everything))
 }
 
 impl Secrets {
@@ -190,7 +190,7 @@ impl Secrets {
                 return Err(Error::TooMany(format!("a project has at most {GATEWAYS_MAX} gateways")));
             }
             c.execute("INSERT INTO gateways (id, project_id, name, created_at, created_by) VALUES (?, ?, ?, ?, ?)", params![id, project, n.name, now, caller.principal])?;
-            audit::record(c, project, caller, "gateway.add", None, None, &[], &format!("added gateway {} ({id})", n.name), now)
+            audit::record(c, self.keys()?, project, caller, "gateway.add", None, None, &[], &format!("added gateway {} ({id})", n.name), now)
         })?;
         // Issued outside the transaction; a failure takes the record back out.
         let mut secret = None;
@@ -235,7 +235,7 @@ impl Secrets {
                 return Err(Error::Conflict("in_use", format!("{name} is used by {}: delete those first", users.join(", "))));
             }
             c.execute("DELETE FROM gateways WHERE id = ?", [id])?;
-            audit::record(c, project, caller, "gateway.delete", None, None, &[], &format!("deleted gateway {name} ({id})"), now)?;
+            audit::record(c, self.keys()?, project, caller, "gateway.delete", None, None, &[], &format!("deleted gateway {name} ({id})"), now)?;
             Ok::<_, Error>(token)
         })?;
         if let (Some(t), Some(w)) = (token, &self.workloads)
@@ -301,7 +301,7 @@ impl Secrets {
                 params![h.conn, h.node, h.version.chars().take(64).collect::<String>(), crate::json(&allow), now, now, id],
             )?;
             let by = h.grant.map(|g| format!(", token {g}")).unwrap_or_default();
-            audit::record(c, &project, &link_caller(id), "gateway.connect", None, None, &[], &format!("connected to node {} (roll {}{by}), allowing {}", h.node, h.version, allow.len()), now)
+            audit::record(c, self.keys()?, &project, &link_caller(id), "gateway.connect", None, None, &[], &format!("connected to node {} (roll {}{by}), allowing {}", h.node, h.version, allow.len()), now)
         })
     }
 
@@ -317,7 +317,7 @@ impl Secrets {
         self.db.write(|c| {
             let Some(project) = c.query_row("SELECT project_id FROM gateways WHERE id = ?", [id], |r| r.get::<_, String>(0)).optional()? else { return Ok(()) };
             c.execute("UPDATE gateways SET conn = NULL WHERE id = ? AND conn = ?", params![id, conn])?;
-            audit::record(c, &project, &link_caller(id), "gateway.disconnect", None, None, &[], why, now)
+            audit::record(c, self.keys()?, &project, &link_caller(id), "gateway.disconnect", None, None, &[], why, now)
         })
     }
 

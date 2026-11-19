@@ -132,7 +132,7 @@ impl Secrets {
                 "INSERT INTO decoys (id, project_id, env_id, secret_id, path, key, kind, ref, created_by, created_at, uses) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
                 params![names::new_id("dcy", 16), project, e.id, id, path, key, kind, grant, by, now],
             )?;
-            audit::record(c, project, caller, "secrets.decoy", Some(&e.slug), Some(&path), std::slice::from_ref(&key), &format!("planted decoy {key} ({kind})"), now)
+            audit::record(c, self.keys()?, project, caller, "secrets.decoy", Some(&e.slug), Some(&path), std::slice::from_ref(&key), &format!("planted decoy {key} ({kind})"), now)
         });
         if let Err(e) = written {
             if let Err(r) = workloads.revoke_decoy(&minted.id) {
@@ -173,7 +173,7 @@ impl Secrets {
             let text = format!("decoy {key} in {slug}:{path} was used{from}, calling {route}");
             let mut who = Caller::consumer("roll:decoys");
             who.ip = ip.clone();
-            audit::record(c, &project, &who, "secrets.alert.decoy_used", Some(&slug), Some(&path), std::slice::from_ref(&key), &text, now)?;
+            audit::record(c, self.keys()?, &project, &who, "secrets.alert.decoy_used", Some(&slug), Some(&path), std::slice::from_ref(&key), &text, now)?;
             if notify {
                 let link = web.as_ref().map(|w| format!("{}/dashboard/projects/{project}/secrets?env={slug}&tab=activity", w.trim_end_matches('/')));
                 let mut said = format!("roll secrets: {text}. Whoever used it found it where it was planted: cut them off and rotate what sits beside it.");

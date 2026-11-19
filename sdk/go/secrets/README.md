@@ -9,7 +9,8 @@ writes. Standard library only.
 ```go
 // ROLL_API_URL and ROLL_TOKEN (a roll token with a rule on the project), or ROLL_IDENTITY
 // for a workload identity's login with the workload's own OIDC token (GitHub Actions,
-// ROLL_OIDC_TOKEN or ROLL_OIDC_TOKEN_FILE): no long-lived token in CI.
+// ROLL_OIDC_TOKEN or ROLL_OIDC_TOKEN_FILE) or, on AWS, its own IAM role (a signed
+// GetCallerIdentity; docs/secrets.md, "AWS IAM"): no long-lived token in CI.
 c, err := secrets.FromEnv(ctx)
 
 v, err := c.Values(ctx, "production", "")          // v.Values["DATABASE_URL"]
