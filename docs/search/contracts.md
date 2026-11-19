@@ -1209,7 +1209,8 @@ pub struct MemoryStore;                                                         
 pub struct ClusterConfig { pub name, pub dialect: Dialect /* Elasticsearch|OpenSearch */, pub node_name, pub destructive_requires_name: bool,
                           pub node_settings: Vec<(String, String)> /* -E k=v: node.attr.*, node.processors, .. */, pub test_features: bool,
                           pub host_metrics: bool /* false: node stats report synthetic figures (shared nodes must not leak the host) */,
-                          pub default_repository: Option<String> /* roll's default snapshot repository's name (api::snapshots::install_default_repository) */ }
+                          pub default_repository: Option<String> /* roll's default snapshot repository's name (api::snapshots::install_default_repository) */,
+                          pub file_service_tokens: bool /* read <path.conf>/service_tokens; search-server sets it in dev mode or for clusters named in roll.security.service_token_file.clusters */ }
                           // + fn node_setting(key) -> Option<&str>; fn processors() -> usize
 impl Cluster { async fn open(ClusterConfig, Arc<dyn MetaStore>) -> Result<Cluster>; async fn in_memory(name) -> Cluster;
                fn state(&self) -> Arc<meta::ClusterState>;                        // published metadata (immutable snapshot)

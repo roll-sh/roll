@@ -248,3 +248,55 @@ async fn a_forward_carries_the_clients_address_to_the_owner() {
     let r = http.get(format!("{}/internal/search/rest/", owner.api)).basic_auth("vault", Some(&pw)).header("x-roll-code-client", "203.0.113.5").send().await.unwrap();
     assert_eq!(r.status(), 401, "a client's own x-roll-code-client");
 }
+
+/// A linked remote owned by another node is searched on that node through the signed forward:
+/// roll's own request, which the remote's IP allowlist doesn't filter, and which loads the
+/// remote only on its owner.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_remote_on_another_node_is_searched_through_the_signed_forward() {
+    let leases = MemoryStore::new();
+    let objects = search_store::test_objects("fleet-ccs");
+    let catalog = Arc::new(search_control::store::Store::memory().unwrap());
+    let a = node("a", &leases, &objects, &catalog).await;
+    let b = node("b", &leases, &objects, &catalog).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while a.cluster.nodes().len() != 2 || b.cluster.nodes().len() != 2 {
+        assert!(tokio::time::Instant::now() < deadline, "the nodes never saw each other");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let http = reqwest::Client::new();
+    let owner_of = |name: &str| if a.cluster.owns(&search_control::cluster::key(name)) { "a" } else { "b" };
+    let (s, c) = call(&http, reqwest::Method::POST, format!("{}/v1/search/clusters", a.api), None, Some(json!({"name": "near"}))).await;
+    assert_eq!(s, 200, "{c}");
+    let near_pw = c["password"].as_str().unwrap().to_string();
+    assert_eq!(call(&http, reqwest::Method::GET, format!("{}/", a.rest), Some(("near", &near_pw)), None).await.0, 200);
+    // A remote that lands on the other node, with an allowlist no client is on.
+    let mut far = None;
+    for i in 0..16 {
+        let name = format!("far-{i}");
+        let (s, c) = call(&http, reqwest::Method::POST, format!("{}/v1/search/clusters", a.api), None, Some(json!({"name": name, "ip_allowlist": ["203.0.113.0/24"]}))).await;
+        assert_eq!(s, 200, "{c}");
+        let pw = c["password"].as_str().unwrap().to_string();
+        let (s, v) = call(&http, reqwest::Method::PUT, format!("{}/items/_doc/1?refresh=true", a.rest), Some((&name, &pw)), Some(json!({"n": i}))).await;
+        assert_eq!(s, 403, "filtered: {v}");
+        // Written as roll itself (the console), which loads it on its owner.
+        let (s, v) = call(&http, reqwest::Method::POST, format!("{}/v1/search/clusters/{name}/request", a.api), None, Some(json!({"method": "PUT", "path": "/items/_doc/1?refresh=true", "body": {"n": i}}))).await;
+        assert_eq!(s, 200, "{v}");
+        if owner_of(&name) != owner_of("near") {
+            far = Some(name);
+            break;
+        }
+    }
+    let far = far.expect("some cluster lands on the other node");
+    let (s, v) = call(&http, reqwest::Method::PUT, format!("{}/v1/search/clusters/near/remotes/far", b.api), None, Some(json!({"cluster": far}))).await;
+    assert_eq!(s, 200, "{v}");
+    let (near_node, far_node) = if owner_of("near") == "a" { (&a, &b) } else { (&b, &a) };
+    // Through either front: the remote part runs on the remote's owner, never loaded elsewhere.
+    for front in [&a, &b] {
+        let (s, v) = call(&http, reqwest::Method::GET, format!("{}/far:items/_search", front.rest), Some(("near", &near_pw)), None).await;
+        assert_eq!((s, v["hits"]["total"]["value"].as_i64(), v["_clusters"]["details"]["far"]["status"].as_str()), (200, Some(1), Some("successful")), "{v}");
+        assert_eq!(v["hits"]["hits"][0]["_index"], "far:items", "{v}");
+    }
+    assert!(!near_node.control.node.loaded().iter().any(|n| **n == *far), "the remote isn't loaded on the local cluster's node");
+    assert!(far_node.control.node.loaded().iter().any(|n| **n == *far), "it runs on its owner");
+}
