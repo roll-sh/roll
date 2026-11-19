@@ -1045,6 +1045,15 @@ fn check_all(ctx: &Ctx, p: &Principal, eff: &Effective, action: &str, exprs: Vec
 /// names given explicitly must be authorized, unless `ignore_unavailable` drops the ones that
 /// aren't (`IndexAbstractionResolver`). `-*` (no index) when nothing is left, as
 /// Elasticsearch's resolver does.
+/// An `_msearch` item on point in time `id`, authorized as `_search` authorizes one
+/// ([`authorize_pit`]): its indices are the point in time's, never narrowed to the caller's.
+pub fn authorize_search_pit(ctx: &Ctx, id: &str) -> EsResult<()> {
+    const SEARCH: &str = "indices:data/read/search";
+    let Some(p) = ctx.principal.get().filter(|p| !p.is_superuser()) else { return Ok(()) };
+    let eff = effective(&file_roles(ctx.cluster), &ctx.state(), p);
+    authorize_pit(ctx, p, &eff, SEARCH, id).map(|_| ())
+}
+
 /// The point in time a search body names.
 fn pit_of(ctx: &Ctx) -> Option<String> {
     ctx.body().ok().flatten()?.pointer(&["pit", "id"]).map(Value::to_es_string)

@@ -67,10 +67,15 @@ impl Drop for Nested {
     }
 }
 
-/// Runs `f` on a thread of its own with a [`STACK`] stack, and waits for it.
-fn on_stack<R: Send>(f: impl FnOnce() -> R + Send) -> R {
+/// Runs `f` on a thread of its own with a [`STACK`] stack, and waits for it; a thread that
+/// can't be started is the request's `es_rejected_execution_exception`, never a panic.
+fn on_stack<R: Send>(f: impl FnOnce() -> Result<R> + Send) -> Result<R> {
     std::thread::scope(|s| {
-        let handle = std::thread::Builder::new().name("search-aggs-wire".into()).stack_size(STACK).spawn_scoped(s, f).expect("spawning the aggregation wire thread");
+        let handle = std::thread::Builder::new()
+            .name("search-aggs-wire".into())
+            .stack_size(STACK)
+            .spawn_scoped(s, f)
+            .map_err(|e| AggError::new(429, "es_rejected_execution_exception", format!("rejected execution of aggregation results across clusters: {e}")))?;
         match handle.join() {
             Ok(r) => r,
             Err(panic) => std::panic::resume_unwind(panic),

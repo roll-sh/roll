@@ -2828,9 +2828,18 @@ async fn scroll_and_point_in_time_across_clusters() {
     let pit = v["id"].as_str().unwrap().to_string();
     let (s, v) = e.es(&shrinks, "pass-word-1", Method::POST, "/_search", Some(json!({ "pit": { "id": pit }, "size": 0 }))).await;
     assert_eq!((s, v["hits"]["total"]["value"].as_i64()), (200, Some(92)), "{v}");
+    // `_msearch` items on a point in time are authorized the same way.
+    let msearch = |pit: &str| {
+        let body = format!("{{}}\n{}\n", json!({ "pit": { "id": pit }, "size": 0 }));
+        e.http.post(format!("{}/_msearch", e.es)).basic_auth(&shrinks, Some("pass-word-1")).header("content-type", "application/x-ndjson").body(body).send()
+    };
+    let m: Value = msearch(&pit).await.unwrap().json().await.unwrap();
+    assert_eq!(m["responses"][0]["hits"]["total"]["value"].as_i64(), Some(92), "{m}");
     assert_eq!(e.es(&near, &near_pw, Method::PUT, "/_security/role/shrinking", Some(role(&["other-*"]))).await.0, 200);
     let (s, v) = e.es(&shrinks, "pass-word-1", Method::POST, "/_search", Some(json!({ "pit": { "id": pit }, "size": 0 }))).await;
     assert_eq!((s, v["error"]["type"].as_str()), (403, Some("security_exception")), "{v}");
+    let m: Value = msearch(&pit).await.unwrap().json().await.unwrap();
+    assert_eq!((m["responses"][0]["status"].as_i64(), m["responses"][0]["error"]["type"].as_str()), (Some(403), Some("security_exception")), "{m}");
     // A point in time names its own indices: naming others is refused before anything reads them.
     let (s, v) = e.es(&shrinks, "pass-word-1", Method::POST, "/items/_search", Some(json!({ "pit": { "id": pit } }))).await;
     assert_eq!((s, v["error"]["type"].as_str()), (400, Some("action_request_validation_exception")), "{v}");

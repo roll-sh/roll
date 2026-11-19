@@ -1550,7 +1550,10 @@ the rest are skipped by the tests' own prerequisites.
   `geo_centroid` may differ in its last digit, as Elasticsearch's does). A scroll over several
   clusters is a set of per-cluster scrolls under one id, paged as one cluster's would be, where
   Elasticsearch scrolls across clusters without minimizing round trips; the pages hold the same
-  hits. Not across clusters yet: suggesters and ES|QL `FROM <alias>:<index>`.
+  hits. A remote that fails a later scroll page while it may not be skipped
+  (`skip_unavailable: false`) fails that page, and the hits the clusters after it sent for that
+  page are lost to the scroll (Elasticsearch fails the shards' parts alike). Not across clusters
+  yet: suggesters and ES|QL `FROM <alias>:<index>`.
 - OpenSearch-flavor clusters' `cluster.remote.*` and `_remote/info` follow OpenSearch 3.9
   (`skip_unavailable` defaults to `false`, a seed or proxy address must be `host:port`, no
   `cluster_credentials`), but a search naming `alias:index` on them is refused (400), loopback

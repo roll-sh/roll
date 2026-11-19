@@ -4421,8 +4421,13 @@ pub async fn msearch(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let mut held = (ctx.cluster.dialect != crate::cluster::Dialect::OpenSearch)
         .then(|| crate::breaker::Reservation::new(ctx.cluster.breakers.request(ctx.cluster, &ctx.state())));
     for ((mut req, body), watch) in reqs.into_iter().zip(watches) {
-        // Each search is authorized as a search request of its own.
-        let r = match crate::xpack::security::authorize_search(ctx, &req.indices, &req.opts) {
+        // Each search is authorized as a search request of its own: one on a point in time
+        // against the point in time's indices (its own stay empty, or `run` refuses them).
+        let authorized = match &req.source.pit {
+            Some(pit) => crate::xpack::security::authorize_search_pit(ctx, &pit.id).map(|()| None),
+            None => crate::xpack::security::authorize_search(ctx, &req.indices, &req.opts),
+        };
+        let r = match authorized {
             Ok(narrowed) => {
                 if let Some(n) = narrowed {
                     req.indices = n;

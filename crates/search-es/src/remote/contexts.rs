@@ -151,7 +151,11 @@ impl CcsContexts {
             return Err(EsError::new(500, "exception", format!("Trying to create too many scroll contexts. Must be less than or equal to: [{MAX_CONTEXTS}].")));
         }
         let id = new_id();
-        map.insert(id.clone(), Arc::new(e));
+        let e = Arc::new(e);
+        if e.scroll.is_some() {
+            release_at_expiry(&e);
+        }
+        map.insert(id.clone(), e);
         Ok(id)
     }
 
@@ -190,6 +194,29 @@ impl CcsContexts {
     pub fn local_pit(&self, id: &str, owner: &str) -> Option<String> {
         self.get(id, owner).filter(|e| e.scroll.is_none()).and_then(|e| e.local_pit.clone())
     }
+}
+
+/// Releases a scroll's buffered hits from the request breaker when it expires (each page moves
+/// its expiry), not at the next call that purges: an abandoned scroll mustn't hold the breaker
+/// against other searches. Holds the context only while checking.
+fn release_at_expiry(e: &Arc<Entry>) {
+    let weak = Arc::downgrade(e);
+    tokio::spawn(async move {
+        loop {
+            let Some(e) = weak.upgrade() else { return };
+            if e.removed.load(AtomicOrdering::Acquire) {
+                return;
+            }
+            let at = *e.expires.lock();
+            if at <= Instant::now() {
+                e.removed.store(true, AtomicOrdering::Release);
+                e.state.lock().await.held = None;
+                return;
+            }
+            drop(e);
+            tokio::time::sleep_until(at.into()).await;
+        }
+    });
 }
 
 /// The remote `alias` as the cluster has it now, when it still links to `target`.
@@ -735,9 +762,10 @@ pub async fn pit_search(ctx: &Ctx<'_>, req: &SearchRequest, body: Option<&Value>
             p.id = id;
         }
     }
+    // Kept alive from when the search started, as each part's own point in time is.
     if let Some(k) = keep {
         st.keep_alive = k;
-        *e.expires.lock() = Instant::now() + k;
+        *e.expires.lock() = started + k;
     }
     drop(st);
     out.pit_id = Some(pit.id);

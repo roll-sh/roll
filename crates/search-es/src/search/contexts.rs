@@ -250,17 +250,17 @@ impl Contexts {
         self.take(id, owner).map_or(0, |c| if c.pit { c.targets.len().max(1) } else { c.targets.len() })
     }
 
-    /// The live points in time as `(id, created_ms, keep_alive_ms)`, oldest first.
-    pub fn pits(&self) -> Vec<(String, i64, i64)> {
+    /// `owner`'s live points in time as `(id, created_ms, keep_alive_ms)`, oldest first.
+    pub fn pits(&self, owner: &str) -> Vec<(String, i64, i64)> {
         self.purge();
-        let mut out: Vec<(String, i64, i64)> = self.map.lock().iter().filter(|(_, c)| c.pit).map(|(id, c)| (id.clone(), c.created_ms, c.keep_alive_ms)).collect();
+        let mut out: Vec<(String, i64, i64)> = self.map.lock().iter().filter(|(_, c)| c.pit && c.owner == owner).map(|(id, c)| (id.clone(), c.created_ms, c.keep_alive_ms)).collect();
         out.sort_by(|a, b| (a.1, &a.0).cmp(&(b.1, &b.0)));
         out
     }
 
-    /// Closes every point in time, returning their ids (oldest first).
-    pub fn close_pits(&self) -> Vec<String> {
-        let ids: Vec<String> = self.pits().into_iter().map(|(id, _, _)| id).collect();
+    /// Closes every point in time of `owner`'s, returning their ids (oldest first).
+    pub fn close_pits(&self, owner: &str) -> Vec<String> {
+        let ids: Vec<String> = self.pits(owner).into_iter().map(|(id, _, _)| id).collect();
         let mut g = self.map.lock();
         for id in &ids {
             g.remove(id);

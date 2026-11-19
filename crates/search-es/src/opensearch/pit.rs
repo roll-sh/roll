@@ -77,7 +77,7 @@ pub fn list(ctx: &Ctx) -> EsResult<Reply> {
     let pits: Vec<Value> = ctx
         .cluster
         .contexts
-        .pits()
+        .pits(&crate::search::contexts::owner_of(ctx))
         .into_iter()
         .map(|(id, created, keep_alive)| obj! { "pit_id" => id, "creation_time" => created, "keep_alive" => keep_alive })
         .collect();
@@ -111,7 +111,7 @@ pub fn delete(ctx: &Ctx) -> EsResult<Reply> {
 
 /// `DELETE /_search/point_in_time/_all`.
 pub fn delete_all(ctx: &Ctx) -> EsResult<Reply> {
-    let pits: Vec<Value> = ctx.cluster.contexts.close_pits().into_iter().map(|id| obj! { "successful" => true, "pit_id" => id }).collect();
+    let pits: Vec<Value> = ctx.cluster.contexts.close_pits(&crate::search::contexts::owner_of(ctx)).into_iter().map(|id| obj! { "successful" => true, "pit_id" => id }).collect();
     Reply::ok(obj! { "pits" => Value::Arr(pits) })
 }
 
