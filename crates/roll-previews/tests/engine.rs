@@ -421,12 +421,19 @@ async fn a_previews_runtime_output_goes_to_the_projects_log_drains_masked() {
     *e.apps.drain_tx.lock() = None;
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     e.engine.pass().await.unwrap();
-    assert_eq!(e.apps.drain_since.lock().last().map(String::as_str), Some("2026-11-18T10:00:00.000000002Z"));
+    // From the earlier of the two streams' last lines: stdout's (stderr's own last is skipped as it comes again).
+    assert_eq!(e.apps.drain_since.lock().last().map(String::as_str), Some("2026-11-18T10:00:00.000000001Z"));
     say(true, "2026-11-18T10:00:00.000000002Z charging with sk_test_51Hx9").await;
     say(false, "2026-11-18T10:00:01.000000000Z ready").await;
     let all = sent(3).await;
     assert_eq!(all.len(), 3, "{all:?}");
     assert_eq!(all[2].3, "ready");
+    // stdout and stderr come through pipes of their own: a stderr line may come before an earlier
+    // stdout one, and both are sent.
+    say(true, "2026-11-18T10:00:03.000000000Z card declined").await;
+    say(false, "2026-11-18T10:00:02.000000000Z charging order 42").await;
+    let all = sent(5).await;
+    assert_eq!(all.iter().skip(3).map(|l| l.3.as_str()).collect::<Vec<_>>(), ["card declined", "charging order 42"], "{all:?}");
 }
 
 /// A shell in a preview's running service (Render's shell, `heroku run`): what's typed reaches its
@@ -468,6 +475,56 @@ async fn a_shell_in_a_previews_service_is_said_and_bounded() {
     e.engine.open_shell(&p.id, None, "ana", 80, 24).await.expect("its place is free again");
 }
 
+/// A port of a preview's service on a laptop (`roll preview forward`): bytes go both ways, port 0
+/// is refused, a debugger's many connections are said once, and a preview holds a bounded number.
+#[tokio::test]
+async fn a_forwarded_port_carries_bytes_is_said_once_and_is_bounded() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let e = env(json!({ "enabled": true }));
+    e.code.open(change("chg_fw", 16));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_fw").unwrap().unwrap();
+    let mut f = e.engine.forward(&p.id, None, 9229, "ana").await.unwrap();
+    f.io.write_all(b"ping").await.unwrap();
+    let mut got = [0u8; 4];
+    f.io.read_exact(&mut got).await.unwrap();
+    assert_eq!(&got, b"ping");
+    let again = e.engine.forward(&p.id, None, 9229, "ana").await.unwrap();
+    let said = e.engine.store.activity(&p.id).unwrap().into_iter().filter(|a| a.message == format!("ana forwarded port 9229 of {}", f.service)).count();
+    assert_eq!(said, 1, "a debugger's connections are said once");
+    assert!(matches!(e.engine.forward(&p.id, None, 0, "ana").await, Err(roll_previews::Error::BadRequest(_))));
+    let mut open = vec![f, again];
+    while open.len() < roll_previews::engine::shell::MAX_FORWARDS {
+        open.push(e.engine.forward(&p.id, None, 5432, "ana").await.unwrap());
+    }
+    assert!(matches!(e.engine.forward(&p.id, None, 5432, "ana").await, Err(roll_previews::Error::Conflict(_))), "a preview holds a bounded number");
+    open.pop();
+    e.engine.forward(&p.id, None, 5432, "ana").await.expect("a closed one gives its place back");
+}
+
+/// Files in and out of a preview's service (`roll preview cp`): what's written comes back, nothing
+/// at a path is a 404 before any of the answer, a relative path is refused, and the activity says
+/// who copied what.
+#[tokio::test]
+async fn files_go_in_and_out_of_a_previews_service_and_are_said() {
+    use tokio::io::AsyncReadExt;
+    let e = env(json!({ "enabled": true }));
+    e.code.open(change("chg_cp", 15));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_cp").unwrap().unwrap();
+    let web = e.engine.store.services(&p.id).unwrap().into_iter().next().unwrap().name;
+    assert_eq!(e.engine.write_files(&p.id, None, "/tmp", bytes::Bytes::from_static(b"a tar"), "ana").await.unwrap(), web);
+    let (svc, mut got) = e.engine.read_files(&p.id, Some(&web), "/tmp", "ana").await.unwrap();
+    let mut read = Vec::new();
+    got.read_to_end(&mut read).await.unwrap();
+    assert_eq!((svc.as_str(), read.as_slice()), (web.as_str(), &b"a tar"[..]));
+    assert!(matches!(e.engine.read_files(&p.id, None, "/nothing/here", "ana").await, Err(roll_previews::Error::NotFound(_))));
+    assert!(matches!(e.engine.write_files(&p.id, None, "tmp", bytes::Bytes::new(), "ana").await, Err(roll_previews::Error::BadRequest(_))));
+    assert!(matches!(e.engine.read_files(&p.id, Some("nope"), "/tmp", "ana").await, Err(roll_previews::Error::NotFound(_))));
+    let said: Vec<String> = e.engine.store.activity(&p.id).unwrap().into_iter().map(|a| a.message).collect();
+    assert!(said.contains(&format!("ana copied files into {web} at /tmp")) && said.contains(&format!("ana copied /tmp out of {web}")), "{said:?}");
+}
+
 /// A preview's output is read by anyone who can read the preview, and its code (a fork's too) can
 /// print what it was given: its services' logs, its jobs' output and what its page said in a
 /// screenshot run (the pull request's comment) show a secret's value as `***` (as checks'
@@ -498,7 +555,15 @@ async fn a_previews_logs_and_job_output_hide_its_secrets() {
     while followed.len() < 2 {
         followed.push(tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv()).await.unwrap().unwrap());
     }
-    assert_eq!(followed, ["listening on :3000", "charging with ***"]);
+    assert_eq!(followed, [(false, "listening on :3000".to_string()), (false, "charging with ***".to_string())], "a tail doesn't say which stream");
+    // Where the backend follows (Docker), each line says whether it came on stderr, masked too.
+    *e.apps.followed.lock() = Some(vec![(false, "listening on :3000".into()), (true, "charging with sk_test_51Hx9".into())]);
+    let (_, mut rx) = e.engine.follow(&p.id, None, 10).await.unwrap();
+    let mut tagged = Vec::new();
+    while tagged.len() < 2 {
+        tagged.push(tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv()).await.unwrap().unwrap());
+    }
+    assert_eq!(tagged, [(false, "listening on :3000".to_string()), (true, "charging with ***".to_string())]);
     let mut said = None;
     for _ in 0..400 {
         said = e.engine.store.page_health(&p.id).unwrap().and_then(|h| h.first_error);

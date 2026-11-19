@@ -56,6 +56,8 @@ pub fn router(engine: Arc<Engine>) -> Router {
                 .route("/v1/previews/{id}/shell/sessions/{sh}/screen", get(shell_screen))
                 .route("/v1/previews/{id}/shell/sessions/{sh}/keys", post(shell_keys))
                 .route("/v1/previews/{id}/shell/sessions/{sh}/resize", post(shell_resize))
+                .route("/v1/previews/{id}/forward", get(forward))
+                .route("/v1/previews/{id}/files", get(read_files).put(write_files).layer(axum::extract::DefaultBodyLimit::max(crate::engine::shell::FILES_MAX + (1 << 20))))
                 .route_layer(axum::middleware::from_fn_with_state(engine.clone(), on_leader))
                 .with_state(engine.clone()),
         )
@@ -689,6 +691,108 @@ async fn shell_resize(AxState(e): S, Path((id, sh)): Path<(String, String)>, b: 
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ForwardQuery {
+    service: Option<String>,
+    port: u16,
+}
+
+/// A WebSocket carrying one TCP connection to `port` in the service, from inside it: binary both
+/// ways, an empty message the end of a direction (a half-close), as roll apps' tunnel.
+async fn forward(AxState(e): S, Path(id): Path<String>, Query(q): Query<ForwardQuery>, who: Option<axum::Extension<roll_auth::SignedIn>>, ws: axum::extract::ws::WebSocketUpgrade) -> crate::Result<Response> {
+    check_id(&id)?;
+    let by = who.map_or_else(|| "the operator".to_string(), |w| w.handle.clone());
+    let f = e.forward(&id, q.service.as_deref(), q.port, &by).await?;
+    Ok(ws.max_message_size(1 << 20).max_frame_size(1 << 20).on_upgrade(move |socket| bridge(socket, f)))
+}
+
+async fn bridge(socket: axum::extract::ws::WebSocket, f: crate::engine::shell::Forward) {
+    use axum::extract::ws::Message;
+    use futures::{SinkExt, StreamExt};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (mut tx, mut rx) = socket.split();
+    let mut ended = f.ended.clone();
+    let (mut rd, mut wr) = tokio::io::split(f.io);
+    let mut buf = vec![0u8; 64 << 10];
+    let (mut from_client, mut from_service) = (true, true);
+    while from_client || from_service {
+        tokio::select! {
+            m = rx.next() => match m {
+                Some(Ok(Message::Binary(b))) if b.is_empty() => {
+                    if from_client {
+                        let _ = wr.shutdown().await;
+                        from_client = false;
+                    }
+                }
+                Some(Ok(Message::Binary(_))) if !from_client => {}
+                Some(Ok(Message::Binary(b))) => {
+                    if wr.write_all(&b).await.is_err() || wr.flush().await.is_err() {
+                        break;
+                    }
+                }
+                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                Some(Ok(_)) => {}
+            },
+            // The preview went: its forwards end with it.
+            _ = ended.changed() => break,
+            n = rd.read(&mut buf), if from_service => match n {
+                Ok(0) | Err(_) => {
+                    if tx.send(Message::Binary(Bytes::new())).await.is_err() {
+                        break;
+                    }
+                    from_service = false;
+                }
+                Ok(n) => {
+                    if tx.send(Message::Binary(Bytes::copy_from_slice(&buf[..n]))).await.is_err() {
+                        break;
+                    }
+                }
+            },
+        }
+    }
+    let _ = tx.send(Message::Close(None)).await;
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FilesQuery {
+    service: Option<String>,
+    path: String,
+}
+
+/// What's at `path` in the service, as a tar (`x-roll-service` says which), as it's read.
+async fn read_files(AxState(e): S, Path(id): Path<String>, Query(q): Query<FilesQuery>, who: Option<axum::Extension<roll_auth::SignedIn>>) -> crate::Result<Response> {
+    check_id(&id)?;
+    let by = who.map_or_else(|| "the operator".to_string(), |w| w.handle.clone());
+    let (svc, stream) = e.read_files(&id, q.service.as_deref(), &q.path, &by).await?;
+    let body = futures::stream::unfold(stream, |mut s| async move {
+        let mut buf = vec![0u8; 64 << 10];
+        match tokio::io::AsyncReadExt::read(&mut s, &mut buf).await {
+            Ok(0) => None,
+            Ok(n) => {
+                buf.truncate(n);
+                Some((Ok::<_, std::io::Error>(Bytes::from(buf)), s))
+            }
+            Err(err) => Some((Err(err), s)),
+        }
+    });
+    let mut r = axum::body::Body::from_stream(body).into_response();
+    r.headers_mut().insert(axum::http::header::CONTENT_TYPE, axum::http::HeaderValue::from_static("application/x-tar"));
+    if let Ok(v) = axum::http::HeaderValue::from_str(&svc) {
+        r.headers_mut().insert("x-roll-service", v);
+    }
+    Ok(r)
+}
+
+/// A tar's files (at most 100 MiB) written under `path` in the service: `{service}`.
+async fn write_files(AxState(e): S, Path(id): Path<String>, Query(q): Query<FilesQuery>, who: Option<axum::Extension<roll_auth::SignedIn>>, b: Bytes) -> crate::Result<Json<Value>> {
+    check_id(&id)?;
+    let by = who.map_or_else(|| "the operator".to_string(), |w| w.handle.clone());
+    let svc = e.write_files(&id, q.service.as_deref(), &q.path, b, &by).await?;
+    Ok(Json(json!({ "service": svc, "path": q.path })))
+}
+
 async fn close_shell(AxState(e): S, Path((id, sh)): Path<(String, String)>) -> crate::Result<StatusCode> {
     check_id(&id)?;
     e.close_shell(&id, &sh)?;
@@ -705,7 +809,13 @@ async fn logs(AxState(e): S, Path(id): Path<String>, Query(q): Query<LogsQuery>)
     use axum::response::sse::{Event, KeepAlive, Sse};
     let (service, rx) = e.follow(&id, q.service.as_deref(), lines).await?;
     let first = futures::stream::once(async move { Ok::<_, std::convert::Infallible>(Event::default().event("service").data(service)) });
-    let rest = futures::stream::unfold(rx, |mut rx| async move { rx.recv().await.map(|l| (Ok(Event::default().data(l.replace(['\r', '\n'], ""))), rx)) });
+    // A stderr line is `event: stderr`; a stdout one the default event, as before.
+    let rest = futures::stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|(stderr, l)| {
+            let ev = Event::default().data(l.replace(['\r', '\n'], ""));
+            (Ok(if stderr { ev.event("stderr") } else { ev }), rx)
+        })
+    });
     let mut r = Sse::new(futures::StreamExt::chain(first, rest)).keep_alive(KeepAlive::default()).into_response();
     // Proxies pass it on as it comes.
     r.headers_mut().insert("x-accel-buffering", axum::http::HeaderValue::from_static("no"));

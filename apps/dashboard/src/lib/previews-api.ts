@@ -587,7 +587,7 @@ export type RequestLine = { at: number; service: string; method: string; path: s
 /** A service's last `lines`, then its output as it comes (`…/logs?follow=1`, read with the
  * operator's headers, which EventSource can't send). Resolves when the stream ends or `signal`
  * aborts it. */
-export async function followLogs(id: string, service: string, lines: number, onLine: (l: string) => void, signal: AbortSignal): Promise<void> {
+export async function followLogs(id: string, service: string, lines: number, onLine: (l: string, stderr: boolean) => void, signal: AbortSignal): Promise<void> {
   const res = await fetch(`${ROLL_API}${one(id)}/logs${query({ service, lines, follow: 1 })}`, withSession({ headers: apiHeaders(), cache: "no-store", signal }));
   onApiStatus(res.status);
   if (!res.ok || !res.body) {
@@ -601,7 +601,8 @@ export async function followLogs(id: string, service: string, lines: number, onL
     if (done) return;
     const parsed = parseSse(rest, value);
     rest = parsed.rest;
-    for (const e of parsed.events) if (e.event === "message") onLine(e.data);
+    // A stderr line is `event: stderr`; a stdout one the default event.
+    for (const e of parsed.events) if (e.event === "message" || e.event === "stderr") onLine(e.data, e.event === "stderr");
   }
 }
 

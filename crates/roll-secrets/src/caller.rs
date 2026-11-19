@@ -76,7 +76,7 @@ impl Secrets {
         caller.ip = self.client_ip(parts);
         // Only with a grant: the gate sets it beside the grant whose request an approval let through.
         if roll_auth::Grant::on(&parts.extensions).is_some() {
-            caller.approval = roll_auth::Approved::on(&parts.extensions).map(Into::into);
+            caller.approval = roll_auth::Approved::on(&parts.extensions).map(crate::access::approval);
         }
         Ok(caller)
     }

@@ -278,6 +278,8 @@ pub struct Access {
     pub token_hash: Option<String>,
     pub bypass_hash: Option<String>,
     pub signed_in: bool,
+    /// Its password's argon2id hash ([`crate::password`]), never returned.
+    pub password_hash: Option<String>,
 }
 
 /// A private registry's login for a service's image (`PUT …/registry`); the password is sealed
@@ -515,6 +517,14 @@ pub struct Run {
     pub volume: Option<Volume>,
     /// When its metrics notify (`alert.*` events), over five minutes.
     pub alerts: Alerts,
+    /// Its service level objective: `alert.slo` when its error budget burns too fast, and the
+    /// budget left on Metrics (`…/slo`). How it's watched only: changing it is a write.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slo: Option<Slo>,
+    /// Its own Prometheus endpoint, scraped every 15 s on each running instance (Fly's
+    /// `[metrics]`) and shown on Metrics with what an OpenTelemetry SDK sends.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metrics: Option<Scrape>,
     /// How a new deployment takes over: at once, or a share of requests at a time.
     pub rollout: Rollout,
     /// The app speaks HTTP/2 without TLS (h2c, prior knowledge), as a gRPC server does: the
@@ -576,6 +586,170 @@ pub struct Run {
     /// Scheduler, Vercel crons): any service's, without a cron service of its own.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub schedules: Vec<Scheduled>,
+    /// Containers beside each instance (Cloud Run's sidecars, Fly's multi-container machines):
+    /// in its network namespace (they reach each other on localhost), started after it, frozen,
+    /// stopped and removed with it. A web service's or a worker's; at most four.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sidecars: Vec<Sidecar>,
+    /// A deploy whose image has a known vulnerability this severe or worse fails before it goes
+    /// live (Cloud Run's Binary Authorization on Artifact Analysis): the scan then runs before
+    /// the rollout, not beside it. A rollback is never held. Changing it is a deploy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub block_on: Option<Severity>,
+}
+
+/// Where an app's Prometheus endpoint is ([`crate::prom`]): its port (the app's own by default)
+/// and path (`/metrics`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Scrape {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    #[serde(default = "Scrape::default_path")]
+    pub path: String,
+}
+
+impl Scrape {
+    fn default_path() -> String {
+        "/metrics".into()
+    }
+}
+
+/// A service level objective ([`crate::slo`]): `objective`% of requests succeed (not 5xx) and,
+/// with `latency_ms`, the same share of minutes keep p95 under it, over `window_days`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Slo {
+    pub objective: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_ms: Option<u32>,
+    #[serde(default = "Slo::default_window")]
+    pub window_days: u32,
+}
+
+impl Slo {
+    fn default_window() -> u32 {
+        28
+    }
+}
+
+/// How severe a known vulnerability is, as the scanner reads it (the distribution's, else NVD's).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Severity {
+    Unknown,
+    Low,
+    Medium,
+    High,
+    Critical,
+}
+
+impl Severity {
+    pub fn parse(s: &str) -> Severity {
+        match s.to_ascii_lowercase().as_str() {
+            "critical" => Severity::Critical,
+            "high" => Severity::High,
+            "medium" => Severity::Medium,
+            "low" => Severity::Low,
+            _ => Severity::Unknown,
+        }
+    }
+}
+
+/// One known vulnerability in a deployment's image: a package at a version an advisory names.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Vulnerability {
+    /// The advisory: `CVE-2024-…`, `GHSA-…`, a distribution's.
+    pub id: String,
+    pub severity: Severity,
+    pub package: String,
+    pub installed: String,
+    /// The first version that fixes it, when there is one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fixed: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Where in the image: the OS's packages (`debian 12.15`) or a lockfile's path.
+    pub target: String,
+}
+
+/// The most of a scan's findings kept (the most severe first); the counts are of all of them.
+pub const MAX_VULNERABILITIES: usize = 2000;
+
+/// A deployment's last scan ([`Deployment::vulnerabilities`]): counts by severity.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ScanSummary {
+    pub critical: u32,
+    pub high: u32,
+    pub medium: u32,
+    pub low: u32,
+    pub unknown: u32,
+    /// How many have a fixed version to upgrade to.
+    pub fixable: u32,
+    pub scanned_at: i64,
+    /// What scanned it (`trivy 0.76.1`).
+    pub scanner: String,
+    /// Why the scan didn't finish (the counts are then zero and mean nothing).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl ScanSummary {
+    pub fn of(found: &[Vulnerability], scanner: &str, at: i64) -> ScanSummary {
+        let mut s = ScanSummary { scanned_at: at, scanner: scanner.to_string(), ..Default::default() };
+        for v in found {
+            *match v.severity {
+                Severity::Critical => &mut s.critical,
+                Severity::High => &mut s.high,
+                Severity::Medium => &mut s.medium,
+                Severity::Low => &mut s.low,
+                Severity::Unknown => &mut s.unknown,
+            } += 1;
+            s.fixable += v.fixed.is_some() as u32;
+        }
+        s
+    }
+
+    /// How many are at `floor` or worse.
+    pub fn at_least(&self, floor: Severity) -> u32 {
+        [(Severity::Critical, self.critical), (Severity::High, self.high), (Severity::Medium, self.medium), (Severity::Low, self.low)].iter().filter(|(s, _)| *s >= floor).map(|(_, n)| n).sum()
+    }
+}
+
+/// A container beside each instance ([`Run::sidecars`]): a proxy, an agent, a collector.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Sidecar {
+    /// Unique in the service: a-z, 0-9 and -, at most 20.
+    pub name: String,
+    /// Any image a registry this node may pull from has; pinned to its digest with each
+    /// deployment, so a rollback runs the same one.
+    pub image: String,
+    /// Run as `sh -c <command>` instead of the image's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// Plain settings for it, shown as they are (at most 50): never a secret.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub env: std::collections::BTreeMap<String, String>,
+    /// The environment's own variables it gets, by name (its secrets too): none unless named.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub variables: Vec<String>,
+    /// 0.1–2 (default 0.25), metered with the instance.
+    #[serde(default = "Sidecar::default_cpu")]
+    pub cpu: f64,
+    /// 64–4096 (default 128), metered with the instance.
+    #[serde(default = "Sidecar::default_memory")]
+    pub memory_mb: u32,
+}
+
+impl Sidecar {
+    fn default_cpu() -> f64 {
+        0.25
+    }
+
+    fn default_memory() -> u32 {
+        128
+    }
 }
 
 /// A schedule's state in an environment ([`Environment::schedules`]).
@@ -674,12 +848,20 @@ fn is_true(b: &bool) -> bool {
 }
 
 /// What a worker scales on: `group`'s lag on `stream` (a roll stream in the service's project),
-/// one instance per `per_instance` messages behind.
+/// or `metric`, a gauge of its own (its Prometheus endpoint's or its OpenTelemetry SDK's: a
+/// queue's depth, jobs in flight; the largest any series of it says, or their `sum`): one
+/// instance per `per_instance` of it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Scale {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub stream: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub group: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub metric: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sum: bool,
     #[serde(default = "Scale::default_per_instance")]
     pub per_instance: u64,
 }
@@ -807,6 +989,10 @@ impl Default for Run {
             rollback_on_crash: false,
             rebuild_on_base: false,
             schedules: Vec::new(),
+            sidecars: Vec::new(),
+            block_on: None,
+            slo: None,
+            metrics: None,
         }
     }
 }
@@ -849,6 +1035,58 @@ impl Run {
                 return bad("schedules' timeout_s is 1–86400");
             }
         }
+        if !self.sidecars.is_empty() && !matches!(self.kind, RunType::Web | RunType::Worker) {
+            return bad("sidecars are a web service's or a worker's");
+        }
+        if let Some(s) = &self.slo
+            && (!(90.0..=99.999).contains(&s.objective) || !(1..=60).contains(&s.window_days) || s.latency_ms.is_some_and(|ms| !(1..=60_000).contains(&ms)))
+        {
+            return bad("slo is {objective: 90–99.999, latency_ms?: 1–60000, window_days?: 1–60}");
+        }
+        if let Some(m) = &self.metrics {
+            if !matches!(self.kind, RunType::Web | RunType::Worker) {
+                return bad("metrics is a web service's or a worker's (it's read from its running instances)");
+            }
+            if !m.path.starts_with('/') || m.path.len() > 200 || !m.path.bytes().all(|b| b.is_ascii_graphic()) {
+                return bad("metrics.path is an absolute path, like /metrics");
+            }
+            if m.port == Some(0) || (m.port.is_none() && (self.kind != RunType::Web || self.tcp)) {
+                return bad("metrics.port is the port its endpoint listens on (a worker's or a TCP service's has no other)");
+            }
+        }
+        if self.slo.is_some() && (self.kind != RunType::Web || self.tcp) {
+            return bad("slo is a web service's (it's read from its requests)");
+        }
+        if self.block_on == Some(Severity::Unknown) {
+            return bad("block_on is critical, high, medium or low");
+        }
+        if self.sidecars.len() > 4 {
+            return bad("sidecars is at most 4");
+        }
+        let var_name = |k: &str| !k.is_empty() && k.len() <= 128 && !k.as_bytes()[0].is_ascii_digit() && k.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
+        for (i, sc) in self.sidecars.iter().enumerate() {
+            if sc.name.is_empty() || sc.name.len() > 20 || !sc.name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') || self.sidecars[..i].iter().any(|o| o.name == sc.name) {
+                return bad("sidecars' names are unique: a-z, 0-9 and -, at most 20");
+            }
+            if sc.image.is_empty() || sc.image.len() > 255 || !sc.image.bytes().all(|b| b.is_ascii_graphic()) {
+                return bad("a sidecar's image is an image reference");
+            }
+            if sc.command.as_ref().is_some_and(|c| c.trim().is_empty() || c.len() > 2000 || c.contains('\0')) {
+                return bad("a sidecar's command is 1–2000 characters");
+            }
+            if sc.env.len() > 50 || sc.variables.len() > 50 {
+                return bad("a sidecar has at most 50 env settings and 50 variables");
+            }
+            if let Some(k) = sc.env.keys().chain(sc.variables.iter()).find(|k| !var_name(k)) {
+                return Err(Error::BadRequest(format!("run.sidecars.{}: {k:?} isn't a variable name", sc.name)));
+            }
+            if sc.env.values().any(|v| v.len() > 4096 || v.contains('\0') || v.contains('\n')) {
+                return bad("a sidecar's env values are one line of at most 4096 characters");
+            }
+            if !(0.1..=2.0).contains(&sc.cpu) || !(64..=4096).contains(&sc.memory_mb) {
+                return bad("a sidecar's cpu is 0.1–2, its memory_mb 64–4096");
+            }
+        }
         let r = &self.rollout;
         if r.steps.len() > 5 || r.steps.iter().any(|s| !(1..=99).contains(s)) || r.steps.windows(2).any(|w| w[0] >= w[1]) {
             return bad("rollout.steps is up to five increasing percents, 1–99");
@@ -864,7 +1102,17 @@ impl Run {
             // backlog (dropped, so a worker can become a web service).
             self.scale = None;
         }
-        if let Some(sc) = &self.scale {
+        if let Some(sc) = self.scale.as_ref().filter(|s| !s.metric.is_empty()) {
+            // The app's own gauge, by its name (Prometheus' rules); read from running instances,
+            // so at least one runs.
+            let name_ok = sc.metric.len() <= 200 && sc.metric.bytes().enumerate().all(|(i, b)| b.is_ascii_alphabetic() || b == b'_' || b == b':' || (i > 0 && (b.is_ascii_digit() || b == b'.')));
+            if !name_ok || !sc.stream.is_empty() || !sc.group.is_empty() || !(1..=1_000_000_000).contains(&sc.per_instance) {
+                return bad("scale is { metric: a gauge's name, sum?: bool, per_instance: 1–1e9 }, or a stream's group");
+            }
+            if self.min_instances == 0 {
+                return bad("scaling on a metric needs min_instances of at least 1: a stopped worker reports nothing");
+            }
+        } else if let Some(sc) = &self.scale {
             // A stream by its id (`st_…`), never a name; a group as Kafka names one.
             let stream_ok = sc.stream.strip_prefix("st_").is_some_and(|r| r.len() == 12 && r.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()));
             let group_ok = !sc.group.is_empty() && sc.group.len() <= 249 && sc.group != "." && sc.group != ".." && sc.group.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b));
@@ -1136,6 +1384,9 @@ pub struct Environment {
     /// People signed in to roll who may open the project get in (`access.signed_in`).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub signed_in: bool,
+    /// Visitors may type its password (`access.password`; never returned).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub password: bool,
     /// A cron service's next scheduled run (unix ms), once it has a deployment.
     pub next_run_at: Option<i64>,
     /// Its schedules (`run.schedules`) as they stand: the next due time and the job each last
@@ -1202,6 +1453,22 @@ pub struct Environment {
     /// Paths another service of the project answers ([]: none).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub routes: Vec<Route>,
+    /// Its uptime checks ([]: none), and how each stands on its owner.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub checks: Vec<Check>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub check_states: Vec<CheckState>,
+    /// Its heartbeats ([]: none; their tokens never), and how each stands.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub heartbeats: Vec<Heartbeat>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub heartbeat_states: Vec<HeartbeatState>,
+    /// Only in the PUT's answer that added them: each new heartbeat's ping URL, its token in it.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub heartbeat_urls: std::collections::BTreeMap<String, String>,
+    /// Its split test: a share of its visitors served by another environment.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub split: Option<Split>,
     /// What its code may reach: anything (`open`), or roll and the listed hosts (`roll`).
     pub egress: Egress,
     /// Hosts its egress proxy refused lately (its code tried them; they aren't listed).
@@ -1249,12 +1516,70 @@ pub struct FirewallRule {
     /// Text the `User-Agent` contains (case aside).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_agent: Option<String>,
+    /// Clients by the address the fleet vouches for: addresses or networks (`203.0.113.7`,
+    /// `203.0.113.0/24`, an IPv6 `/n`), at most 100, kept canonical.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ips: Vec<String>,
+    /// A request header, cookie or query parameter there (and containing `contains`, case aside).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<FieldMatch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cookie: Option<FieldMatch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<FieldMatch>,
     /// `limit`'s: each client's requests a minute through this rule, and how many at once
     /// (default: a minute's worth).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub per_minute: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub burst: Option<u32>,
+}
+
+/// A named part of a request a firewall rule reads ([`FirewallRule::header`]): there, or there
+/// and containing `contains` (case aside).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FieldMatch {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contains: Option<String>,
+}
+
+impl FieldMatch {
+    fn check(&mut self, what: &str, lower_name: bool) -> Result<()> {
+        let n = self.name.trim();
+        if n.is_empty() || n.len() > 128 || !n.bytes().all(|b| b.is_ascii_graphic() && !b";,=\"".contains(&b)) {
+            return Err(Error::BadRequest(format!("firewall: a {what}'s name is 1–128 characters, no spaces")));
+        }
+        self.name = if lower_name { n.to_ascii_lowercase() } else { n.to_string() };
+        if let Some(c) = &self.contains {
+            if c.is_empty() || c.len() > 256 {
+                return Err(Error::BadRequest(format!("firewall: a {what}'s contains is 1–256 characters")));
+            }
+            self.contains = Some(c.to_ascii_lowercase());
+        }
+        Ok(())
+    }
+
+    /// Whether `values` (the request's under this name) has one, holding `contains` if it says.
+    fn takes<'a>(&self, mut values: impl Iterator<Item = &'a str>) -> bool {
+        match &self.contains {
+            None => values.next().is_some(),
+            Some(c) => values.any(|v| v.to_ascii_lowercase().contains(c.as_str())),
+        }
+    }
+}
+
+/// What a firewall rule reads of a request ([`FirewallRule::matches`]).
+pub struct Asked<'a> {
+    pub method: &'a str,
+    /// As [`normal_path`] gives it.
+    pub path: &'a str,
+    pub user_agent: &'a str,
+    /// The address the fleet vouches for.
+    pub ip: Option<std::net::IpAddr>,
+    pub headers: &'a axum::http::HeaderMap,
+    pub query: Option<&'a str>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1314,8 +1639,27 @@ impl FirewallRule {
             }
             self.user_agent = Some(ua.trim().to_ascii_lowercase());
         }
-        if self.path.is_none() && self.methods.is_empty() && self.user_agent.is_none() {
-            return bad("a rule matches on a path, methods or a user agent");
+        if self.ips.len() > 100 {
+            return bad("a rule names at most 100 addresses or networks");
+        }
+        let mut ips = Vec::with_capacity(self.ips.len());
+        for c in &self.ips {
+            let c = c.trim();
+            let net = c
+                .parse::<ipnet::IpNet>()
+                .or_else(|_| c.parse::<std::net::IpAddr>().map(ipnet::IpNet::from))
+                .map_err(|_| Error::BadRequest(format!("firewall: {c:?} isn't an address or a network (a.b.c.d/n, an IPv6 /n)")))?;
+            ips.push(net.trunc().to_string());
+        }
+        self.ips = ips;
+        // Header names are any case; a cookie's and a query parameter's are as written.
+        for (m, what, lower) in [(&mut self.header, "header", true), (&mut self.cookie, "cookie", false), (&mut self.query, "query parameter", false)] {
+            if let Some(m) = m {
+                m.check(what, lower)?;
+            }
+        }
+        if self.path.is_none() && self.methods.is_empty() && self.user_agent.is_none() && self.ips.is_empty() && self.header.is_none() && self.cookie.is_none() && self.query.is_none() {
+            return bad("a rule matches on a path, methods, a user agent, addresses, a header, a cookie or a query parameter");
         }
         if self.action == FirewallAction::Challenge && !self.methods.is_empty() && self.methods.iter().any(|m| m != "GET") {
             return bad("a challenge is a page a browser opens: GET only");
@@ -1329,14 +1673,26 @@ impl FirewallRule {
         Ok(self)
     }
 
-    /// `path` as [`normal_path`] gives it. Paths compare in any case and without a trailing
-    /// slash (`/admin/*` takes `/admin` too); HEAD is a GET.
-    pub fn matches(&self, method: &str, path: &str, user_agent: &str) -> bool {
-        let path_ok = self.path.as_deref().is_none_or(|p| path_matches(p, path));
-        let method = if method.eq_ignore_ascii_case("HEAD") { "GET" } else { method };
+    /// Whether every field it gives matches. Paths compare in any case and without a trailing
+    /// slash (`/admin/*` takes `/admin` too); HEAD is a GET; addresses by the one the fleet
+    /// vouches for (none: no address rule matches); a cookie and a query parameter as the
+    /// request carries them, decoded.
+    pub fn matches(&self, a: &Asked<'_>) -> bool {
+        let path_ok = self.path.as_deref().is_none_or(|p| path_matches(p, a.path));
+        let method = if a.method.eq_ignore_ascii_case("HEAD") { "GET" } else { a.method };
         let method_ok = self.methods.is_empty() || self.methods.iter().any(|m| m.eq_ignore_ascii_case(method));
-        let ua_ok = self.user_agent.as_deref().is_none_or(|u| user_agent.to_ascii_lowercase().contains(u));
-        path_ok && method_ok && ua_ok
+        let ua_ok = self.user_agent.as_deref().is_none_or(|u| a.user_agent.to_ascii_lowercase().contains(u));
+        let ip_ok = self.ips.is_empty() || a.ip.is_some_and(|ip| self.ips.iter().any(|n| n.parse::<ipnet::IpNet>().is_ok_and(|n| n.contains(&ip))));
+        let header_ok = self.header.as_ref().is_none_or(|m| m.takes(a.headers.get_all(m.name.as_str()).iter().filter_map(|v| v.to_str().ok())));
+        let cookie_ok = self.cookie.as_ref().is_none_or(|m| {
+            let jar: Vec<&str> = a.headers.get_all(axum::http::header::COOKIE).iter().filter_map(|v| v.to_str().ok()).flat_map(|c| c.split(';')).collect();
+            m.takes(jar.iter().filter_map(|kv| kv.trim().split_once('=')).filter(|(k, _)| *k == m.name).map(|(_, v)| v))
+        });
+        let query_ok = self.query.as_ref().is_none_or(|m| {
+            let pairs: Vec<(String, String)> = url::form_urlencoded::parse(a.query.unwrap_or("").as_bytes()).map(|(k, v)| (k.into_owned(), v.into_owned())).collect();
+            m.takes(pairs.iter().filter(|(k, _)| *k == m.name).map(|(_, v)| v.as_str()))
+        });
+        path_ok && method_ok && ua_ok && ip_ok && header_ok && cookie_ok && query_ok
     }
 }
 
@@ -1383,8 +1739,144 @@ pub struct Route {
     pub service: String,
 }
 
+/// An environment's split test (Netlify's split testing): `percent` of its visitors, each kept
+/// by their bucket cookie, are served by the same service's `environment`, past that
+/// environment's gates as a route's are (this one's let them in).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Split {
+    pub environment: String,
+    pub percent: u8,
+}
+
+impl Split {
+    /// Whether a visitor's bucket (0–99) is in the split's share: the top of the range, so a
+    /// gradual rollout's (the bottom) and a split's overlap only past 100 together.
+    pub fn takes(&self, bucket: u8) -> bool {
+        bucket >= 100 - self.percent.min(100)
+    }
+}
+
 /// The most routes an environment has.
 pub const MAX_ROUTES: usize = 20;
+
+/// An environment's uptime checks, at most ([`Check`]).
+pub const MAX_CHECKS: usize = 5;
+
+/// An uptime check (`checks` on an environment; `crate::checks`): GET `path` every `every_s`
+/// through the environment's own proxy, passing on `status` (any 2xx or 3xx when none) and, when
+/// it says, an answer that contains `contains`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Check {
+    /// Unique in the environment: a-z, 0-9 and -, at most 32.
+    pub name: String,
+    pub path: String,
+    /// 30–3600 (default 60).
+    #[serde(default = "Check::default_every")]
+    pub every_s: u32,
+    /// 1–60 (default 10).
+    #[serde(default = "Check::default_timeout")]
+    pub timeout_s: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+    /// At most 200 characters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contains: Option<String>,
+}
+
+impl Check {
+    fn default_every() -> u32 {
+        60
+    }
+
+    fn default_timeout() -> u32 {
+        10
+    }
+
+    pub fn check(self) -> Result<Check> {
+        let bad = |m: &str| Err(Error::BadRequest(format!("checks: {m}")));
+        if self.name.is_empty() || self.name.len() > 32 || !self.name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') {
+            return bad("a check's name is a-z, 0-9 and -, at most 32");
+        }
+        if !self.path.starts_with('/') || self.path.starts_with("//") || self.path.len() > 2000 || !self.path.bytes().all(|b| b.is_ascii_graphic()) {
+            return bad("a check's path is an absolute path, like /healthz");
+        }
+        if !(30..=3600).contains(&self.every_s) || !(1..=60).contains(&self.timeout_s) {
+            return bad("every_s is 30–3600, timeout_s 1–60");
+        }
+        if self.status.is_some_and(|s| !(100..=599).contains(&s)) || self.contains.as_ref().is_some_and(|c| c.is_empty() || c.len() > 200) {
+            return bad("status is an HTTP status, contains 1–200 characters");
+        }
+        Ok(self)
+    }
+}
+
+/// An environment's heartbeats, at most ([`Heartbeat`]).
+pub const MAX_HEARTBEATS: usize = 10;
+
+/// A heartbeat (`heartbeats` on an environment; `crate::heartbeats`, Healthchecks'): something
+/// outside roll (a job, a backup, a device) pings `/__roll/heartbeat/<token>` on the
+/// environment's host at least every `every_s`; past that and `grace_s`, it's
+/// `heartbeat.missed`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Heartbeat {
+    /// Unique in the environment: a-z, 0-9 and -, at most 32.
+    pub name: String,
+    /// 60–604800 (a week).
+    pub every_s: u32,
+    /// 0–86400 (default 300).
+    #[serde(default = "Heartbeat::default_grace")]
+    pub grace_s: u32,
+    /// When it was added (ms): the first ping is due from then.
+    #[serde(default)]
+    pub added_at: i64,
+    /// Its token's SHA-256 (the token itself is shown once).
+    #[serde(default, skip_serializing)]
+    pub token_hash: String,
+}
+
+impl Heartbeat {
+    fn default_grace() -> u32 {
+        300
+    }
+
+    pub fn check(&self) -> Result<()> {
+        let bad = |m: &str| Err(Error::BadRequest(format!("heartbeats: {m}")));
+        if self.name.is_empty() || self.name.len() > 32 || !self.name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') {
+            return bad("a heartbeat's name is a-z, 0-9 and -, at most 32");
+        }
+        if !(60..=604_800).contains(&self.every_s) || self.grace_s > 86_400 {
+            return bad("every_s is 60–604800, grace_s 0–86400");
+        }
+        Ok(())
+    }
+}
+
+/// A heartbeat as it stands ([`Environment::heartbeat_states`]).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct HeartbeatState {
+    pub name: String,
+    pub last_ping_at: Option<i64>,
+    /// When the next ping is due by (past it and the grace: missed).
+    pub due_at: i64,
+    pub missed: bool,
+}
+
+/// A check as it stands on the environment's owner ([`Environment::check_states`]).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct CheckState {
+    pub name: String,
+    /// None: not tried yet. False once it has failed twice in a row.
+    pub up: Option<bool>,
+    /// Failures in a row.
+    pub failures: u32,
+    pub last_at: Option<i64>,
+    pub status: Option<u16>,
+    pub ms: Option<u64>,
+    pub error: Option<String>,
+    pub down_since: Option<i64>,
+}
 
 impl Route {
     pub fn check(self) -> Result<Route> {
@@ -1696,6 +2188,9 @@ pub struct Deployment {
     /// When it was pruned (unix ms): out of what's kept, its image gone; history only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pruned_at: Option<i64>,
+    /// Its image's last scan for known vulnerabilities, once one ran (`…/vulnerabilities` lists them).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vulnerabilities: Option<ScanSummary>,
     /// The settings this deployment runs with (frozen when it was made).
     #[serde(skip)]
     pub run: Run,

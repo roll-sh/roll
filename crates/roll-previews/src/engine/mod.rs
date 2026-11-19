@@ -161,6 +161,12 @@ pub struct Engine {
     pub git_report: std::sync::OnceLock<Arc<dyn crate::ports::GitReport>>,
     /// The projects' log drains (roll apps'); unset, previews' runtime output goes to none.
     pub drains: std::sync::OnceLock<Arc<dyn crate::ports::Drains>>,
+    /// Forwarded connections open per preview, and when each (preview, person, service, port)
+    /// was last said in the activity (`shell.rs`).
+    forwards: Mutex<HashMap<String, Arc<std::sync::atomic::AtomicUsize>>>,
+    forwards_said: Mutex<HashMap<(String, String, String, u16), i64>>,
+    /// What ends a preview's forwarded connections when it goes, by preview.
+    forwards_end: Mutex<HashMap<String, tokio::sync::watch::Sender<bool>>>,
     /// Open shells in previews' services (`shell.rs`), by id.
     shells: Mutex<HashMap<String, Arc<shell::ShellSession>>>,
     /// Each running service's follower to the drains (`drains.rs`), by preview and service.
@@ -286,6 +292,9 @@ impl Engine {
             drains: std::sync::OnceLock::new(),
             draining: Mutex::new(HashMap::new()),
             shells: Mutex::new(HashMap::new()),
+            forwards: Mutex::new(HashMap::new()),
+            forwards_said: Mutex::new(HashMap::new()),
+            forwards_end: Mutex::new(HashMap::new()),
             started_stamp: drains::now_stamp(),
         })
     }

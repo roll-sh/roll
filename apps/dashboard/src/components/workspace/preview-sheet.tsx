@@ -6,6 +6,7 @@ import { Confirm } from "@/components/ui";
 import { TerminalScreen } from "@/components/terminal-screen";
 import { endpointSlower, type EndpointTime, a11yWords, checkSummary, seoWords, duration, followLogs, followShell, openUrl, pageLabel, previewsApi, noteCropUrl, qrUrl, screenshotUrl, resourceId, thanMain, type CaughtMail, type PageCheck, type Preview, type TextDiff, type PreviewActivity, type PreviewVisitor, type PreviewKind, type PreviewShare, type RequestLine, type ServiceMetrics, type ErrorGroup } from "@/lib/previews-api";
 import { verdict, type VerdictTarget } from "@/lib/preview-verdict";
+import { isProblem, logFilter, logLevel } from "@/lib/preview-logs";
 import { formatBytes } from "@/lib/roll-api";
 import { Head, Label, Rows, Stat, Tabs } from "./inspector";
 import { FeedbackForm, replyBody, replyOf, type PreviewFeedback } from "./preview-feedback";
@@ -1508,19 +1509,25 @@ function Shell({ preview: p }: { preview: Preview }) {
   const [session, setSession] = useState<{ id: string; apps: string | null } | null>(null);
   const [state, setState] = useState<"idle" | "opening" | "ended">("idle");
   const [error, setError] = useState<string | null>(null);
-  // The preview's services that roll apps runs: name → roll apps service id.
+  // The preview's services that roll apps runs: name → roll apps service id, for a service of
+  // that name with this preview's `pv-` environment (a production service that shares a
+  // `roll.toml` service's name isn't it), as previews' own `find` decides.
+  const env = `pv-${p.id.replace(/^pv_/, "")}`;
   const [onApps, setOnApps] = useState<Record<string, string>>({});
   useEffect(() => {
     let live = true;
     appsApi.services(p.project).then(
-      (all) => live && setOnApps(Object.fromEntries(all.filter((s) => s.project === p.project).map((s) => [s.name, s.id]))),
+      async (all) => {
+        const mine = all.filter((s) => s.project === p.project);
+        const has = await Promise.all(mine.map((s) => appsApi.environments(s.id).then((es) => es.some((e) => e.name === env), () => false)));
+        if (live) setOnApps(Object.fromEntries(mine.filter((_, i) => has[i]).map((s) => [s.name, s.id])));
+      },
       () => live && setOnApps({}),
     );
     return () => {
       live = false;
     };
-  }, [p.project]);
-  const env = `pv-${p.id.replace(/^pv_/, "")}`;
+  }, [p.project, env]);
   if (!p.services.length) return <p className="text-[11.5px] text-subtle">No services, so no shell.</p>;
   const apps = onApps[service] ?? null;
   const open = async () => {
@@ -1601,9 +1608,15 @@ function Shell({ preview: p }: { preview: Preview }) {
 
 function Logs({ preview: p }: { preview: Preview }) {
   const [service, setService] = useState(p.services[0]?.name ?? "");
-  const [lines, setLines] = useState<string[] | null>(null);
+  // Each line, and whether it came on stderr (known while it's followed; a tail read once doesn't say).
+  const [lines, setLines] = useState<{ text: string; stderr: boolean }[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [n, setN] = useState(0);
+  // A filter over what's shown (text, or `/regex/`), warnings-and-worse only and stderr only: in
+  // the browser, on the masked lines, never sent anywhere.
+  const [q, setQ] = useState("");
+  const [problems, setProblems] = useState(false);
+  const [stderrOnly, setStderrOnly] = useState(false);
   // A running service's log follows as it comes (pushed) while the page is in view; any other
   // is read once.
   const running = p.services.some((x) => x.name === service && x.state === "running");
@@ -1614,7 +1627,7 @@ function Logs({ preview: p }: { preview: Preview }) {
     setError(null);
     if (!running) {
       previewsApi.logs(p.id, { service, lines: 300 }).then(
-        (l) => live && setLines(l.lines),
+        (l) => live && setLines(l.lines.map((text) => ({ text, stderr: false }))),
         (e) => live && setError(errorText(e)),
       );
       return () => {
@@ -1622,14 +1635,14 @@ function Logs({ preview: p }: { preview: Preview }) {
       };
     }
     const abort = new AbortController();
-    let got: string[] = [];
+    let got: { text: string; stderr: boolean }[] = [];
     setLines(null);
     followLogs(
       p.id,
       service,
       300,
-      (l) => {
-        got = [...got.slice(-(LOG_KEEP - 1)), l];
+      (text, stderr) => {
+        got = [...got.slice(-(LOG_KEEP - 1)), { text, stderr }];
         if (live) setLines(got);
       },
       abort.signal,
@@ -1642,6 +1655,8 @@ function Logs({ preview: p }: { preview: Preview }) {
       abort.abort();
     };
   }, [p.id, service, running, visible, n]);
+  const filter = logFilter(q);
+  const shown = (lines ?? []).map(({ text, stderr }) => ({ line: text, stderr, level: logLevel(text) })).filter((l) => (filter ? filter(l.line) : true) && (!problems || isProblem(l.level)) && (!stderrOnly || l.stderr));
   if (!p.services.length) return <p className="text-[11.5px] text-subtle">No services, so no logs.</p>;
   return (
     <>
@@ -1662,14 +1677,49 @@ function Logs({ preview: p }: { preview: Preview }) {
           <RefreshCw className="size-3.5" />
         </button>
       </div>
+      <div className="mb-2 flex items-center gap-2">
+        <input
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="Filter (text or /regex/)"
+          aria-label="Filter the log"
+          className={`h-7 min-w-0 flex-1 rounded-md border bg-canvas px-2 font-mono text-[11.5px] outline-none focus:border-accent/60 ${filter ? "border-line-2" : "border-danger/60"}`}
+        />
+        <label className="flex shrink-0 items-center gap-1.5 text-[11.5px] text-soft">
+          <input type="checkbox" checked={problems} onChange={(e) => setProblems(e.target.checked)} className="accent-[var(--color-accent)]" />
+          Problems only
+        </label>
+        {running && (
+          <label className="flex shrink-0 items-center gap-1.5 text-[11.5px] text-soft">
+            <input type="checkbox" checked={stderrOnly} onChange={(e) => setStderrOnly(e.target.checked)} className="accent-[var(--color-accent)]" />
+            stderr
+          </label>
+        )}
+      </div>
       {error ? (
         <p className="text-[11.5px] text-danger">{error}</p>
       ) : !lines ? (
         <p className="text-[11.5px] text-subtle">Loading…</p>
       ) : (
-        <pre className="max-h-[60vh] overflow-auto rounded-lg border border-line-2 bg-canvas p-2.5 font-mono text-[10.5px] leading-relaxed whitespace-pre-wrap text-soft [scrollbar-width:thin]">
-          {lines.length ? lines.join("\n") : "No output yet."}
-        </pre>
+        <>
+          {(q.trim() || problems || stderrOnly) && lines.length > 0 && (
+            <p className="mb-1.5 font-mono text-[10.5px] text-subtle">
+              {filter ? `${shown.length} of ${lines.length} lines` : "That regex doesn't read: fix it to filter."}
+            </p>
+          )}
+          <pre className="max-h-[60vh] overflow-auto rounded-lg border border-line-2 bg-canvas p-2.5 font-mono text-[10.5px] leading-relaxed whitespace-pre-wrap text-soft [scrollbar-width:thin]">
+            {!lines.length
+              ? "No output yet."
+              : !shown.length
+                ? "No lines match."
+                : shown.map(({ line, level, stderr }, i) => (
+                    <span key={i} title={stderr ? "stderr" : undefined} className={level === "error" || level === "fatal" ? "text-danger" : level === "warn" || stderr ? "text-fg" : undefined}>
+                      {line}
+                      {"\n"}
+                    </span>
+                  ))}
+          </pre>
+        </>
       )}
     </>
   );

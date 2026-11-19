@@ -243,6 +243,9 @@ pub struct FakeApps {
     pub errors: Mutex<HashMap<String, Vec<roll_previews::ErrorGroup>>>,
     /// What every service's log holds.
     pub log: Mutex<Vec<String>>,
+    /// What a followed log gives, each line with whether it came on stderr (unset: the backend
+    /// can't follow, so the engine reads `log` again and again).
+    pub followed: Mutex<Option<Vec<(bool, String)>>>,
     /// What each seed or release job was run able to reach.
     pub seed_egress: Mutex<Vec<roll_previews::settings::EgressRule>>,
     /// What each service was deployed able to reach.
@@ -268,6 +271,8 @@ pub struct FakeApps {
     /// writes the followed container's lines into (`(stderr, "<stamp> <text>")`).
     pub drain_since: Mutex<Vec<String>>,
     pub drain_tx: Mutex<Option<tokio::sync::mpsc::Sender<(bool, String)>>>,
+    /// Tars written into services, by the directory they were written under.
+    pub files: Mutex<HashMap<String, Vec<u8>>>,
     /// Services the runtime says run on this node, and those put to sleep.
     pub running: Mutex<std::collections::HashSet<(String, String)>>,
     pub slept: Mutex<Vec<(String, String)>>,
@@ -348,6 +353,32 @@ impl Apps for FakeApps {
     }
     async fn logs(&self, _: &str, _: &str, _: usize) -> Vec<String> {
         self.log.lock().clone()
+    }
+    async fn follow(&self, _: &str, _: &str, _: usize) -> Option<tokio::sync::mpsc::Receiver<(bool, String)>> {
+        let lines = self.followed.lock().clone()?;
+        let (tx, rx) = tokio::sync::mpsc::channel(lines.len().max(1));
+        for l in lines {
+            let _ = tx.try_send(l);
+        }
+        Some(rx)
+    }
+    /// What was written under `path` (nothing: an empty stream, as `docker cp` of a missing path).
+    async fn read_files(&self, _: &str, _: &str, path: &str) -> anyhow::Result<Option<roll_previews::ports::FileStream>> {
+        let got = self.files.lock().get(path).cloned().unwrap_or_default();
+        Ok(Some(Box::new(std::io::Cursor::new(got))))
+    }
+    async fn write_files(&self, _: &str, _: &str, dir: &str, tar: bytes::Bytes) -> anyhow::Result<bool> {
+        self.files.lock().insert(dir.to_string(), tar.to_vec());
+        Ok(true)
+    }
+    /// A forwarded port that echoes what it's sent.
+    async fn forward(&self, _: &str, _: &str, _: u16) -> anyhow::Result<Option<Box<dyn roll_previews::ports::ShellIo>>> {
+        let (ours, theirs) = tokio::io::duplex(1 << 16);
+        tokio::spawn(async move {
+            let (mut r, mut w) = tokio::io::split(theirs);
+            let _ = tokio::io::copy(&mut r, &mut w).await;
+        });
+        Ok(Some(Box::new(ours)))
     }
     /// A terminal that echoes what it's sent.
     async fn shell(&self, _: &str, service: &str, _: u16, _: u16) -> anyhow::Result<Option<roll_previews::ports::Shell>> {

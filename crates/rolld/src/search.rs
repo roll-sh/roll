@@ -99,6 +99,10 @@ pub struct SearchArgs {
     /// Let `s3` snapshot repositories reach private addresses (local development with MinIO).
     #[arg(long = "search-repository-allow-private", env = "ROLL_SEARCH_REPOSITORY_ALLOW_PRIVATE", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
     pub search_repository_allow_private: bool,
+    /// Let inference endpoints reach private addresses (local development with a model server
+    /// on this machine, tests).
+    #[arg(long = "search-inference-allow-private", env = "ROLL_SEARCH_INFERENCE_ALLOW_PRIVATE", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
+    pub search_inference_allow_private: bool,
     /// Search clusters a signed-in person may own, branches included (0: no cap). The operator
     /// and admins aren't capped.
     #[arg(long = "search-max-clusters-per-person", env = "ROLL_SEARCH_MAX_CLUSTERS_PER_PERSON", default_value_t = 50)]
@@ -135,7 +139,7 @@ impl Search {
     /// cluster is served by the holder of its lease (`search_control::cluster`), with the catalog
     /// in the system database and acknowledgements once writes are in object storage.
     #[allow(clippy::too_many_arguments)]
-    pub async fn start(home: &Path, args: &SearchArgs, storage: &StorageConfig, public_host: &str, node: &str, cluster: &Arc<roll_cluster::Cluster>, system_database: Option<&str>, db_connections: usize, public: Option<&crate::edge::Public>) -> anyhow::Result<Self> {
+    pub async fn start(home: &Path, args: &SearchArgs, storage: &StorageConfig, public_host: &str, node: &str, cluster: &Arc<roll_cluster::Cluster>, system_database: Option<&str>, db_connections: usize, public: Option<&crate::edge::Public>, secret_key: Option<&str>) -> anyhow::Result<Self> {
         let mut cfg = SearchConfig::local(home.join("search"));
         let fleet = (cluster.backend_name() != "memory").then(|| cluster.clone());
         cfg.node_name = node.to_string();
@@ -171,9 +175,12 @@ impl Search {
         if args.search_repository_allow_private {
             cfg.node_settings.push((search_control::S3_ALLOW_PRIVATE.to_string(), "true".to_string()));
         }
+        if args.search_inference_allow_private {
+            cfg.node_settings.push((search_control::INFERENCE_ALLOW_PRIVATE.to_string(), "true".to_string()));
+        }
         // Watch passwords, connector and Fleet secrets are sealed in cluster state under the
         // deployment's key; without one they're stored as given (as on Elasticsearch).
-        cfg.sealer = std::env::var("ROLL_SECRET_KEY").ok().and_then(|k| search_control::Sealer::from_secret(&k));
+        cfg.sealer = secret_key.and_then(search_control::Sealer::from_secret);
         // Behind the edge, cluster URLs name `<cluster>.search.<region>.<domain>` over HTTPS.
         if let Some(p) = public {
             p.search(&mut cfg);

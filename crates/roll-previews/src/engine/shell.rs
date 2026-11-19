@@ -169,10 +169,151 @@ impl Engine {
         Ok(())
     }
 
-    /// Every shell of a preview that goes (or whose services stop for good).
+    /// Every shell and forwarded connection of a preview that goes (or whose services stop for
+    /// good).
     pub(crate) fn close_shells_of(&self, id: &str) {
         for s in self.shells.lock().values().filter(|s| s.preview == id) {
             s.closed.send_replace(true);
         }
+        if let Some(end) = self.forwards_end.lock().remove(id) {
+            end.send_replace(true);
+        }
+    }
+}
+
+/// The largest tar `PUT …/files` takes (a seed database, a fixture), as roll apps' `…/files`.
+pub const FILES_MAX: usize = 100 << 20;
+
+/// A path in a service's container: absolute, at most 1024 bytes, no NUL.
+fn container_path(p: &str) -> Result<&str> {
+    if !p.starts_with('/') || p.len() > 1024 || p.contains('\0') {
+        return Err(Error::BadRequest("path is an absolute path in the service (at most 1024 characters)".into()));
+    }
+    Ok(p)
+}
+
+impl Engine {
+    /// The service `files` reach: the one named, or the preview's first.
+    fn files_service(&self, id: &str, service: Option<&str>) -> Result<String> {
+        let r = self.store.row(id)?;
+        if r.desired != Desired::Active {
+            return Err(Error::Conflict("the preview is being deleted".into()));
+        }
+        let services = self.store.services(id)?;
+        match service {
+            Some(name) => services.into_iter().find(|s| s.name == name).map(|s| s.name).ok_or_else(|| Error::NotFound(format!("the preview has no service {name}"))),
+            None => services.into_iter().next().map(|s| s.name).ok_or_else(|| Error::NotFound("the preview has no services".into())),
+        }
+    }
+
+    /// `GET …/{id}/files?service=&path=` (`roll preview cp <preview> :/path .`): what's at `path`
+    /// in the service, as a tar, read by `who` (said in the activity). Nothing there is a 404
+    /// before the answer starts, not a broken body after a 200.
+    pub async fn read_files(&self, id: &str, service: Option<&str>, path: &str, who: &str) -> Result<(String, crate::ports::FileStream)> {
+        let path = container_path(path)?;
+        let svc = self.files_service(id, service)?;
+        let mut inner = match self.apps.read_files(id, &svc, path).await {
+            Ok(Some(s)) => s,
+            Ok(None) => return Err(Error::Conflict(format!("{svc} has no files here: a service on roll apps has roll apps' own, on its pv- environment"))),
+            Err(e) => return Err(Error::Conflict(self.mask_text(id, &format!("{e:#}")).await?)),
+        };
+        let mut first = vec![0u8; 8192];
+        let n = inner.read(&mut first).await.map_err(|e| Error::Internal(e.to_string()))?;
+        if n == 0 {
+            return Err(Error::NotFound(format!("nothing at {path} in {svc}")));
+        }
+        first.truncate(n);
+        let _ = self.store.log(id, &format!("{who} copied {} out of {svc}", self.mask_text(id, path).await?));
+        Ok((svc, Box::new(tokio::io::AsyncReadExt::chain(std::io::Cursor::new(first), inner))))
+    }
+
+    /// `PUT …/{id}/files?service=&path=` (`roll preview cp ./seed.sql <preview> :/tmp/`): a tar's
+    /// files written under `dir` in the service by `who` (said in the activity). Its name.
+    pub async fn write_files(&self, id: &str, service: Option<&str>, dir: &str, tar: bytes::Bytes, who: &str) -> Result<String> {
+        let dir = container_path(dir)?;
+        if tar.len() > FILES_MAX {
+            return Err(Error::BadRequest(format!("at most {} MiB at a time", FILES_MAX >> 20)));
+        }
+        let svc = self.files_service(id, service)?;
+        match self.apps.write_files(id, &svc, dir, tar).await {
+            Ok(true) => {}
+            Ok(false) => return Err(Error::Conflict(format!("{svc} has no files here: a service on roll apps has roll apps' own, on its pv- environment"))),
+            Err(e) => return Err(Error::Conflict(self.mask_text(id, &format!("{e:#}")).await?)),
+        }
+        let _ = self.store.log(id, &format!("{who} copied files into {svc} at {}", self.mask_text(id, dir).await?));
+        Ok(svc)
+    }
+}
+
+/// Forwarded connections open at once in one preview.
+pub const MAX_FORWARDS: usize = 32;
+/// How often a forward is said in the activity, per person, service and port (a debugger opens
+/// many connections).
+const FORWARD_SAID_MS: i64 = 3_600_000;
+
+/// A forwarded connection: its stream, its place in the preview's count, and what holds its
+/// service awake, until it's dropped.
+pub struct Forward {
+    pub service: String,
+    pub io: Box<dyn crate::ports::ShellIo>,
+    /// Turns true when the preview goes (its forwards end with it).
+    pub ended: tokio::sync::watch::Receiver<bool>,
+    _held: HeldAwake,
+}
+
+/// Holds a service awake (every [`TICK`]) while it lives, and gives back its forward's place.
+struct HeldAwake {
+    task: tokio::task::JoinHandle<()>,
+    count: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Drop for HeldAwake {
+    fn drop(&mut self) {
+        self.task.abort();
+        self.count.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl Engine {
+    /// `GET …/{id}/forward?service=&port=` (`roll preview forward`): one TCP connection to `port`
+    /// in the service, from inside it, by `who` (said once an hour per person, service and port).
+    pub async fn forward(self: &Arc<Self>, id: &str, service: Option<&str>, port: u16, who: &str) -> Result<Forward> {
+        if port == 0 {
+            return Err(Error::BadRequest("port is 1 to 65535".into()));
+        }
+        let svc = self.files_service(id, service)?;
+        let count = self.forwards.lock().entry(id.to_string()).or_default().clone();
+        if count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= MAX_FORWARDS {
+            count.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            return Err(Error::Conflict(format!("{MAX_FORWARDS} connections are forwarded in this preview: close some first")));
+        }
+        let (this, p, s) = (self.clone(), id.to_string(), svc.clone());
+        let held = HeldAwake {
+            task: tokio::spawn(async move {
+                let mut tick = tokio::time::interval(TICK);
+                loop {
+                    tick.tick().await;
+                    this.apps.hold(&p, &s);
+                }
+            }),
+            count,
+        };
+        let io = match self.apps.forward(id, &svc, port).await {
+            Ok(Some(io)) => io,
+            Ok(None) => return Err(Error::Conflict(format!("{svc} has no forwarding here: a service on roll apps has roll apps' own tunnel, on its pv- environment"))),
+            Err(e) => return Err(Error::Conflict(self.mask_text(id, &format!("{e:#}")).await?)),
+        };
+        let now = self.store.now_ms()?;
+        let key = (id.to_string(), who.to_string(), svc.clone(), port);
+        let say = {
+            let mut said = self.forwards_said.lock();
+            said.retain(|_, at| now - *at < FORWARD_SAID_MS);
+            said.insert(key.clone(), now).is_none()
+        };
+        if say {
+            let _ = self.store.log(id, &format!("{who} forwarded port {port} of {svc}"));
+        }
+        let ended = self.forwards_end.lock().entry(id.to_string()).or_insert_with(|| tokio::sync::watch::channel(false).0).subscribe();
+        Ok(Forward { service: svc, io, ended, _held: held })
     }
 }

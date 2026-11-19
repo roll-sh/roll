@@ -1,17 +1,13 @@
 import { Check, Copy, Fingerprint, Plus } from "lucide-react";
 import { useState } from "react";
+import { useInstallLine } from "@/lib/install-line";
 import { ROLL_API } from "@/lib/roll-api";
+import { AZURE, AZURE_AUDIENCE, ciSnippets, GITHUB, GITLAB, type CiSnippet } from "@/lib/secrets-ci";
 import { ACTIONS, type Action, type Identity, type NewIdentity } from "@/lib/secrets-api";
 import { GatewayPicker } from "./gateways";
 import { useSecrets } from "./secrets-page";
 import { ago, button, card, Chip, dangerButton, ErrorNote, errorText, field, ghost, label, primary, Section, textareaField, useLoad } from "./ui";
 
-const GITHUB = "https://token.actions.githubusercontent.com";
-const GITLAB = "https://gitlab.com";
-/** Azure Pipelines' issuer, one per organization (its id: `$(System.CollectionId)`). */
-const AZURE = "https://vstoken.dev.azure.com/";
-/** The audience of every Azure Pipelines token: Azure's own, not this server's. */
-const AZURE_AUDIENCE = "api://AzureADTokenExchange";
 type Provider = "github" | "gitlab" | "azure" | "aws" | "other";
 /** One role or user in one account; a `*` only ends a session name (the server checks it too). */
 const AWS_ARN = /^arn:aws(-cn|-us-gov)?:(iam::\d{12}:(role|user)\/([\w+=,.@-]+\/)*[\w+=,.@-]+|sts::\d{12}:assumed-role\/[\w+=,.@-]+\/[\w+=,.@-]*\*?)$/;
@@ -23,29 +19,42 @@ function identitySummary(i: Pick<Identity, "issuer" | "subject" | "claims">): st
   return [repo ?? i.subject, ...claims].join(" · ");
 }
 
-/** The workflow lines a GitHub Actions job (or an Azure pipeline) needs to log in as `i`. */
-function workflow(i: Identity, env: string): string {
-  if (i.issuer.startsWith(AZURE)) {
-    // System.AccessToken reaches a script only when mapped: roll asks Azure for the pipeline's token with it.
-    return [`variables: { ROLL_API_URL: ${ROLL_API}, ROLL_IDENTITY: ${i.id} }`, "steps:", `  - script: roll run --env ${env} -- ./deploy.sh`, "    env: { SYSTEM_ACCESSTOKEN: $(System.AccessToken) }"].join("\n");
-  }
-  return ["permissions: { id-token: write, contents: read }", `env: { ROLL_API_URL: ${ROLL_API}, ROLL_IDENTITY: ${i.id} }`, "steps:", `  - run: roll run --env ${env} -- ./deploy.sh`].join("\n");
+/** One CI snippet with its copy button. */
+function Snippet({ snippet }: { snippet: CiSnippet }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <div className="mt-2">
+      <span className="mb-1 block text-[11px] text-muted">{snippet.title}</span>
+      <div className="flex items-start gap-2">
+        <pre className="min-w-0 flex-1 overflow-x-auto rounded-md border border-line-2 bg-panel-2 px-2 py-1.5 font-mono text-[11.5px] leading-relaxed select-all">{snippet.text}</pre>
+        <button
+          className={button}
+          onClick={() => {
+            void navigator.clipboard?.writeText(snippet.text);
+            setCopied(true);
+            setTimeout(() => setCopied(false), 1200);
+          }}
+        >
+          {copied ? <Check className="size-3.5 text-ok" /> : <Copy className="size-3.5" />} Copy
+        </button>
+      </div>
+    </div>
+  );
 }
 
-/** What a workload needs to log in as `i`: a GitHub Actions job's or an Azure pipeline's lines, or an AWS machine's environment. */
-function setup(i: Identity): string | null {
-  const env = i.environments?.[0] ?? "production";
-  if (i.issuer === GITHUB || i.issuer.startsWith(AZURE)) return workflow(i, env);
-  if (i.kind !== "aws") return null;
+/** An AWS machine's environment to log in as `i` (CI's are `ciSnippets`). */
+function awsSetup(i: Identity, env: string): CiSnippet[] {
+  if (i.kind !== "aws") return [];
   // Signed requests name the server; only worth setting when the API's URL isn't that name.
   const named = i.server_id && i.server_id !== ROLL_API.replace(/\/+$/, "") ? [`ROLL_AWS_SERVER_ID=${i.server_id}`] : [];
-  return [`ROLL_API_URL=${ROLL_API}`, `ROLL_IDENTITY=${i.id}`, ...named, `roll run --env ${env} -- ./server`].join("\n");
+  return [{ title: "The machine's environment", text: [`ROLL_API_URL=${ROLL_API}`, `ROLL_IDENTITY=${i.id}`, ...named, `roll run --env ${env} -- ./server`].join("\n") }];
 }
 
 /** The sentence under a new identity: where it goes. */
 function readyText(i: Identity): string {
   if (i.gateway) return ` Inside the network: roll secrets gateways up --gateway ${i.gateway} --identity ${i.id} --oidc-token-file FILE --allow HOST:PORT`;
   if (i.issuer === GITHUB) return " In the workflow:";
+  if (i.issuer === GITLAB) return " In the job:";
   if (i.issuer.startsWith(AZURE)) return " In the pipeline:";
   if (i.kind === "aws") return " On the machine (its instance profile, task role, IRSA or Pod Identity signs the login):";
   return ` Set ROLL_IDENTITY=${i.id} and ROLL_OIDC_TOKEN (or ROLL_OIDC_TOKEN_FILE) in the workload.`;
@@ -61,7 +70,9 @@ export function Identities() {
   const [creating, setCreating] = useState(false);
   const [made, setMade] = useState<Identity | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
+  const install = useInstallLine();
+  const env = made?.environments?.[0] ?? "production";
+  const snippets = made ? [...ciSnippets(made, { api: ROLL_API, env, install }), ...awsSetup(made, env)] : [];
   const rows = identities.data ?? [];
 
   return (
@@ -83,21 +94,10 @@ export function Identities() {
               {readyText(made)}
             </span>
           </p>
-          {setup(made) && !made.gateway && (
-            <div className="mt-2 flex items-start gap-2">
-              <pre className="min-w-0 flex-1 overflow-x-auto rounded-md border border-line-2 bg-panel-2 px-2 py-1.5 font-mono text-[11.5px] leading-relaxed select-all">{setup(made)}</pre>
-              <button
-                className={button}
-                onClick={() => {
-                  void navigator.clipboard?.writeText(setup(made) ?? "");
-                  setCopied(true);
-                  setTimeout(() => setCopied(false), 1200);
-                }}
-              >
-                {copied ? <Check className="size-3.5 text-ok" /> : <Copy className="size-3.5" />} Copy
-              </button>
-            </div>
-          )}
+          {!made.gateway &&
+            snippets.map((snippet) => (
+              <Snippet key={snippet.title} snippet={snippet} />
+            ))}
           <div className="mt-2 flex justify-end">
             <button className={ghost} onClick={() => setMade(null)}>
               Done

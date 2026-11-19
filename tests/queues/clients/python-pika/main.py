@@ -1,10 +1,13 @@
 """roll queues compatibility scenarios for Python pika (BlockingConnection)."""
 
+import base64
 import hashlib
+import json
 import os
 import sys
 import time
 import traceback
+import urllib.request
 import uuid
 
 import pika
@@ -415,6 +418,55 @@ def heartbeat():
     ch.queue_declare("", exclusive=True)
     c.close()
     return "2s heartbeat, idle 7s"
+
+
+def mgmt(method, path, body=None):
+    req = urllib.request.Request(
+        os.environ["MGMT_URL"] + path,
+        method=method,
+        data=None if body is None else json.dumps(body).encode(),
+        headers={"content-type": "application/json", "authorization": "Basic " + base64.b64encode(b"guest:guest").decode()},
+    )
+    urllib.request.urlopen(req, timeout=10).read()
+
+
+@scenario
+def default_exchange_permission():
+    # The default exchange is checked as amq.default: an empty write pattern doesn't let a user
+    # publish to it, and binding to it is refused before the read check.
+    q = f"{P}.amq-default"
+    c = connect()
+    ch = c.channel()
+    ch.queue_declare(q)
+    users = []
+    try:
+        for kind, write, allowed in (("empty", "", False), ("all", ".*", True), ("named", r"^amq\.default$", True)):
+            user = f"{P}-{kind}"
+            users.append(user)
+            mgmt("PUT", f"/api/users/{user}", {"password": "pw", "tags": ""})
+            mgmt("PUT", f"/api/permissions/%2F/{user}", {"configure": "", "write": write, "read": ""})
+            uc = connect(credentials=pika.PlainCredentials(user, "pw"))
+            uch = uc.channel()
+            uch.confirm_delivery()
+            if allowed:
+                uch.basic_publish("", q, kind.encode())
+                _, _, got = get_wait(ch, q)
+                check(got == kind.encode(), f"{kind}: got {got!r}")
+            else:
+                text = expect_close(lambda: uch.basic_publish("", q, b"x"), 403)
+                want = f"ACCESS_REFUSED - write access to exchange 'amq.default' in vhost '/' refused for user '{user}'"
+                check(text == want, f"{kind}: {text}")
+            uc.close()
+        uc = connect(credentials=pika.PlainCredentials(f"{P}-all", "pw"))
+        text = expect_close(lambda: uc.channel().queue_bind(q, "", "k"), 403)
+        check(text == "ACCESS_REFUSED - operation not permitted on the default exchange", f"bind: {text}")
+        uc.close()
+    finally:
+        for user in users:
+            mgmt("DELETE", f"/api/users/{user}")
+        ch.queue_delete(q)
+        c.close()
+    return "write '' denied, '.*' and '^amq\\.default$' allowed"
 
 
 @scenario

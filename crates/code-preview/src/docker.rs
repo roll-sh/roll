@@ -171,8 +171,8 @@ const FOLLOW_LINE_MAX: usize = 16 << 10;
 
 /// `docker logs -f` of a container, stdout and stderr, as lines (each at most
 /// [`FOLLOW_LINE_MAX`]). The process goes when the receiver is dropped or the container ends.
-pub fn follow(name: &str, tail: usize) -> Option<tokio::sync::mpsc::Receiver<String>> {
-    followed(&["logs", "--follow", "--tail", &tail.to_string(), name], |_, l| l)
+pub fn follow(name: &str, tail: usize) -> Option<tokio::sync::mpsc::Receiver<(bool, String)>> {
+    followed(&["logs", "--follow", "--tail", &tail.to_string(), name], |stderr, l| (stderr, l))
 }
 
 /// `docker logs -f --timestamps --since <since>` of a container (`since` an RFC 3339 stamp or
@@ -368,7 +368,21 @@ impl Isolation for Docker {
         }
         args.extend(["--entrypoint".into(), "sh".into(), job.image.clone(), "-c".into(), job.run.clone()]);
         let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-        docker_with_env(&argv, &by_name).await?;
+        // The name can still be taken by a container whose removal is under way (a stop just
+        // before this start: `rm -f` returns while Docker is still removing it): removed again
+        // and tried twice more, a moment apart, before the start fails.
+        let mut tries = 0;
+        loop {
+            match docker_with_env(&argv, &by_name).await {
+                Ok(_) => break,
+                Err(e) if tries < 2 && e.to_string().contains("is already in use") => {
+                    tries += 1;
+                    remove(&job.name).await;
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
         drop(file);
         docker(&["cp", &format!("{}/.", tree.display()), &format!("{}:{workdir}", job.name)]).await?;
         Ok(())
@@ -407,7 +421,7 @@ impl Isolation for Docker {
         logs_tail(name, lines).await
     }
 
-    async fn follow(&self, name: &str, tail: usize) -> Option<tokio::sync::mpsc::Receiver<String>> {
+    async fn follow(&self, name: &str, tail: usize) -> Option<tokio::sync::mpsc::Receiver<(bool, String)>> {
         follow(name, tail)
     }
 

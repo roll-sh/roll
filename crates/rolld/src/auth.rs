@@ -86,6 +86,10 @@ pub const RULES: &[Rule] = &[
     Rule { route: "/v1/secrets/gateways/{id}/connect", access: Access::Credential("a gateway's own roll token (rlt_…) or a workload identity's login; the operator's token is refused (403)") },
     // A one-time share's link: the value is encrypted with a key only the link holds, and opens
     // a few times at most (docs/secrets.md, "Sharing a value once").
+    // A sealed node's unseal (docs/secrets.md, "Starting sealed"): nothing exists to authenticate
+    // against until the key does; the key's shares are the credential, limited per address and
+    // per split. An unsealed node answers that it isn't sealed.
+    Rule { route: "/v1/secrets/unseal", access: Access::Public("unsealing a sealed node: the deployment key's shares are the credential") },
     Rule { route: "/v1/secrets/shares", access: Access::Public("a one-time share's link: ciphertext only, the key stays in the link") },
     Rule { route: "/v1/secrets/ocsp", access: Access::Public("a project CA's OCSP responder, which anyone checking its certificates asks") },
     Rule { route: "/v1/secrets/crl", access: Access::Public("a project CA's certificate revocation list, which anyone checking its certificates fetches") },
