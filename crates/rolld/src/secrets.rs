@@ -132,9 +132,13 @@ impl Api {
     }
 }
 
-/// The deployment key: `ROLL_SECRET_KEY_KMS` (a KMS ciphertext, decrypted at startup), else
-/// `ROLL_SECRET_KEY`, else (one node) a generated key file.
-fn keyring(home: &Path, shared: bool) -> (Result<Keyring, String>, KeySource) {
+/// The deployment key: the one a sealed start's shares gave (`ROLL_SECRET_KEY_SEALED`),
+/// `ROLL_SECRET_KEY_KMS` (a KMS ciphertext, decrypted at startup), `ROLL_SECRET_KEY`, else (one
+/// node) a generated key file.
+fn keyring(args: &crate::Args, home: &Path, shared: bool) -> (Result<Keyring, String>, KeySource) {
+    if let Some(k) = &args.unsealed_key {
+        return (Keyring::new(k, None).map_err(|e| e.to_string()), KeySource::Shares);
+    }
     let env = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
     if let Some(ct) = env("ROLL_SECRET_KEY_KMS") {
         let run = async {
@@ -149,7 +153,7 @@ fn keyring(home: &Path, shared: bool) -> (Result<Keyring, String>, KeySource) {
         let keyring = tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(run));
         return (keyring, KeySource::Kms);
     }
-    if let Some(k) = env("ROLL_SECRET_KEY") {
+    if let Some(k) = args.secret_key() {
         return (Keyring::new(&k, env("ROLL_SECRET_KEY_PREVIOUS").as_deref()).map_err(|e| e.to_string()), KeySource::Env);
     }
     if shared {
@@ -408,18 +412,23 @@ pub fn oidc_fetch(args: &crate::Args, open: bool) -> Arc<dyn roll_oidc::Fetch + 
     Arc::new(syncs::OidcFetch::new(args.code_webhook_allow_private.unwrap_or(open)))
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Workspace>, open: bool, api: Api, access: Arc<roll_access::Access>, people: People, gateways: Arc<gateway::Gateways>) -> anyhow::Result<Arc<Secrets>> {
-    let system = args.code.cluster.system_database.as_deref().filter(|u| !u.is_empty());
-    let target = match system {
+/// Where roll secrets keeps its data: the system database's `secrets` schema, else
+/// `<home>/secrets.db`.
+pub fn store(args: &crate::Args, home: &Path) -> anyhow::Result<(code_sql::Target, code_sql::PgOptions)> {
+    let target = match args.code.cluster.system_database.as_deref().filter(|u| !u.is_empty()) {
         Some(url) => code_sql::Target::Postgres { url: url.to_string(), schema: "secrets".into() },
         None => code_sql::Target::Sqlite(home.join("secrets.db")),
     };
-    let (keyring, key_source) = keyring(home, system.is_some());
+    Ok((target, code_sql::PgOptions { max_connections: args.db_budget()?.secrets, ca: args.code.code_db_ca.clone(), ..Default::default() }))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Workspace>, open: bool, api: Api, access: Arc<roll_access::Access>, people: People, gateways: Arc<gateway::Gateways>) -> anyhow::Result<Arc<Secrets>> {
+    let (target, pg) = store(args, home)?;
+    let (keyring, key_source) = keyring(args, home, matches!(target, code_sql::Target::Postgres { .. }));
     if let Err(why) = &keyring {
         tracing::error!("roll secrets is unavailable: {why}");
     }
-    let pg = code_sql::PgOptions { max_connections: args.db_budget()?.secrets, ca: args.code.code_db_ca.clone(), ..Default::default() };
     let web_url = std::env::var("ROLL_WEB_URL").ok().filter(|u| !u.trim().is_empty());
     // Syncs' webhooks go to private addresses only where roll code's may (local development).
     let allow_private = args.code_webhook_allow_private.unwrap_or(open);
@@ -441,6 +450,12 @@ pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Work
     }
     // Where clients reach rolld: a CA's certificates name its CRL there.
     secrets.set_public_api(args.code_public_url.clone().unwrap_or_else(|| format!("http://{}:{}", args.public_host, args.api.port())));
+    // What AWS identities' signed requests name (X-Roll-Server-ID): ROLL_SECRETS_AWS_SERVER_ID, or
+    // the configured public URL. Never the host and port made up above, which two deployments can
+    // share: unset, roll-secrets derives one from the deployment key.
+    if let Some(id) = std::env::var("ROLL_SECRETS_AWS_SERVER_ID").ok().filter(|v| !v.trim().is_empty()).or_else(|| args.code_public_url.clone()) {
+        secrets.set_aws_server_id(id);
+    }
     tell_decoys(&access, secrets.clone());
     // ACME's http-01 and dns-01 checks: public addresses only, as webhooks.
     secrets.set_acme_checks(Arc::new(acme::Checks::new(allow_private)));
@@ -1436,6 +1451,18 @@ impl roll_secrets::Workloads for Workloads {
         self.0.revoke_decoy(id, "its decoy key was changed or deleted").map(|_| ()).map_err(|e| Error::Internal(format!("revoking a decoy token: {e}")))
     }
 
+    /// An incident's cut-off: `Access::revoke_many`, one write, all or none, an audit row per grant
+    /// with why and who. Called from roll secrets' blocking threads, as `mint` is.
+    fn revoke_many(&self, ids: &[String], why: &str, by: &str) -> roll_secrets::Result<()> {
+        let (access, ids, why, by) = (self.0.clone(), ids.to_vec(), why.to_string(), by.to_string());
+        match tokio::runtime::Handle::current().block_on(async move { access.revoke_many(ids, &why, &by).await }) {
+            Ok(_) => Ok(()),
+            Err(roll_access::Error::NotFound(m)) => Err(Error::NotFound(m)),
+            Err(roll_access::Error::BadRequest(m)) => Err(Error::BadRequest(m)),
+            Err(e) => Err(Error::Internal(format!("revoking tokens: {e}"))),
+        }
+    }
+
     /// Each token as roll-access answers it now: gone once revoked or expired, or (a person's own)
     /// once its person can't sign in.
     fn grants(&self) -> roll_secrets::Result<Vec<roll_auth::Grant>> {
@@ -1896,6 +1923,108 @@ mod tests {
         assert!(call("DELETE", "/secrets/OLD_DEPLOY_TOKEN", None).await.unwrap().status().is_success());
         assert!(access.store.by_secret(value.expose()).unwrap().is_none());
         assert!(access.store.get(&g.id).unwrap().revoked_at.is_some());
+    }
+
+    /// A frozen folder stops roll's own readers, which do everything in-process: a service's
+    /// deploy (`ForApps`) and a check or sandbox (`ForCode`, untrusted) both get 423 `frozen`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_frozen_folder_stops_services_checks_and_sandboxes() {
+        use apps_control::integrations::SecretSource;
+        use tower::ServiceExt;
+        let dir = tempfile::tempdir().unwrap();
+        let ws_db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("workspace.db")), "workspace").unwrap();
+        let ws = Arc::new(roll_workspace::Workspace::new(ws_db).unwrap());
+        let project = ws.create("", "shop", "", None).unwrap().id;
+        let db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("secrets.db")), "secrets").unwrap();
+        let opts = roll_secrets::Options {
+            keyring: Ok(roll_secrets::Keyring::new(&"k".repeat(32), None).unwrap()),
+            key_source: roll_secrets::KeySource::Env,
+            links: Default::default(),
+            syncs: Default::default(),
+            open: true,
+            trust_forwarded_for: false,
+            web_url: None,
+            deliver: None,
+            grants: None,
+            people: None,
+            kms: None,
+            sts: None,
+            outside: None,
+            directory: None,
+            github: None,
+            clouds: None,
+            workloads: None,
+            gateways: None,
+        };
+        let secrets = Arc::new(roll_secrets::Secrets::new(db, ws.clone(), opts).unwrap());
+        let post = |method: &str, path: &str, body: Json| {
+            axum::http::Request::builder().method(method).uri(format!("/v1/secrets/projects/{project}/environments/staging{path}")).header("content-type", "application/json").body(axum::body::Body::from(body.to_string())).unwrap()
+        };
+        let set = roll_secrets::router(secrets.clone()).oneshot(post("PUT", "/secrets/STRIPE_KEY", json!({ "value": "sk_test_fake_staging" }))).await.unwrap();
+        assert!(set.status().is_success());
+        let cut = roll_secrets::router(secrets.clone()).oneshot(post("POST", "/reach/cut-off?path=/", json!({ "why": "fake incident", "tokens": false, "freeze": true }))).await.unwrap();
+        assert!(cut.status().is_success(), "{}", cut.status());
+        let frozen = |e: anyhow::Error| matches!(e.downcast_ref::<roll_secrets::Error>(), Some(roll_secrets::Error::Frozen(_)));
+        let apps = super::ForApps::default();
+        apps.set(secrets.clone(), ws.clone());
+        assert!(frozen(apps.resolve(&project, "staging", "svc_web").await.unwrap_err()), "a service's deploy");
+        let code = super::ForCode::default();
+        code.set(secrets.clone(), ws);
+        assert!(frozen(code.resolve(project.clone(), "staging", "check:acme/web").await.unwrap_err()), "a check or a sandbox");
+    }
+
+    /// An incident's cut-off revokes through roll-access's own bulk revoke: every token that
+    /// reaches the folder, 500 a call (one write each, all or none), each with why; none other.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_cut_off_revokes_tokens_through_roll_access_500_at_a_time() {
+        use tower::ServiceExt;
+        let dir = tempfile::tempdir().unwrap();
+        let ws_db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("workspace.db")), "workspace").unwrap();
+        let ws = Arc::new(roll_workspace::Workspace::new(ws_db).unwrap());
+        let project = ws.create("", "shop", "", None).unwrap().id;
+        let access = roll_access::Access::open(&code_sql::Target::Sqlite(dir.path().join("access.db")), Default::default(), Default::default(), Default::default()).unwrap();
+        let db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("secrets.db")), "secrets").unwrap();
+        let opts = roll_secrets::Options {
+            keyring: Ok(roll_secrets::Keyring::new(&"k".repeat(32), None).unwrap()),
+            key_source: roll_secrets::KeySource::Env,
+            links: Default::default(),
+            syncs: Default::default(),
+            open: true,
+            trust_forwarded_for: false,
+            web_url: None,
+            deliver: None,
+            grants: Some(access.clone() as Arc<dyn roll_auth::Grants>),
+            people: None,
+            kms: None,
+            sts: None,
+            outside: None,
+            directory: None,
+            github: None,
+            clouds: None,
+            workloads: Some(Arc::new(super::Workloads(access.clone()))),
+            gateways: None,
+        };
+        let secrets = Arc::new(roll_secrets::Secrets::new(db, ws, opts).unwrap());
+        let token = |env: &str, n: usize| {
+            let rule = roll_secrets::access::rule(&project, Some(vec![env.into()]), None, &[roll_secrets::Action::Read, roll_secrets::Action::Reveal]);
+            let new = roll_access::store::NewGrant { name: format!("fake-{env}-{n}"), rules: roll_auth::scope::Scope(vec![rule]), ..Default::default() };
+            access.store.create(&new, roll_auth::GrantKind::Token, "operator", None, None).unwrap().0.id
+        };
+        let reaching: Vec<String> = (0..501).map(|n| token("production", n)).collect();
+        let other = token("staging", 0);
+        let cut = axum::http::Request::post(format!("/v1/secrets/projects/{project}/environments/production/reach/cut-off?path=/"))
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(json!({ "why": "incident 9: a fake leak" }).to_string()))
+            .unwrap();
+        let resp = roll_secrets::router(secrets).oneshot(cut).await.unwrap();
+        assert!(resp.status().is_success(), "{}", resp.status());
+        let r: Json = serde_json::from_slice(&http_body_util::BodyExt::collect(resp.into_body()).await.unwrap().to_bytes()).unwrap();
+        assert_eq!((r["tokens"].as_array().unwrap().len(), r["batches"].as_u64(), r["failed"].clone()), (501, Some(2), json!([])));
+        for id in [&reaching[0], &reaching[500]] {
+            let g = access.store.get(id).unwrap();
+            assert!(g.revoked_at.is_some() && g.revoked_why.as_deref().is_some_and(|w| w.contains("incident 9")), "{g:?}");
+        }
+        assert!(access.store.get(&other).unwrap().revoked_at.is_none(), "a token that doesn't reach it stays");
     }
 
     /// A customer's key wraps a project's data key: Encrypt and Decrypt name the key and carry the

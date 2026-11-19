@@ -573,7 +573,7 @@ impl Secrets {
             )? == 1;
             if made {
                 c.execute("UPDATE acme_bindings SET used_at = ? WHERE id = ?", params![now, live.id])?;
-                audit::record(c, &live.project, &caller, "ca.acme.account", None, None, &[], &format!("{}: ACME account {id} made with binding {} (made by {})", live.ca_name, live.id, live.created_by), now)?;
+                audit::record(c, self.keys()?, &live.project, &caller, "ca.acme.account", None, None, &[], &format!("{}: ACME account {id} made with binding {} (made by {})", live.ca_name, live.id, live.created_by), now)?;
             }
             Ok(made)
         })?;
@@ -756,7 +756,7 @@ impl Secrets {
             c.execute("UPDATE acme_orders SET status = 'valid', serial = ?, claimed_at = NULL WHERE id = ?", params![s.serial, id])?;
             let label = if live.label.is_empty() { String::new() } else { format!(" {}", live.label) };
             let summary = format!("{} issued {} over ACME for {} (binding {}{label}, made by {})", live.ca_name, s.serial, s.names.join(", "), live.id, live.created_by);
-            audit::record(c, &live.project, &caller, "ca.acme.issue", None, None, &[], &summary, at)
+            audit::record(c, self.keys()?, &live.project, &caller, "ca.acme.issue", None, None, &[], &summary, at)
         });
         if let Err(e) = signed {
             // Let go of the order: it can be finalized again.
@@ -925,7 +925,7 @@ impl Secrets {
                 Some(Some(_)) => Ok(Some(false)),
                 Some(None) => {
                     c.execute("UPDATE ca_certs SET revoked_at = ?, revoked_by = ? WHERE ca_id = ? AND serial = ?", params![now, by, req.ca, serial])?;
-                    audit::record(c, &project, &caller, "ca.revoke", None, None, &[], &format!("{ca_name} revoked {serial} over ACME (binding {binding})"), now)?;
+                    audit::record(c, self.keys()?, &project, &caller, "ca.revoke", None, None, &[], &format!("{ca_name} revoked {serial} over ACME (binding {binding})"), now)?;
                     Ok(Some(true))
                 }
             }

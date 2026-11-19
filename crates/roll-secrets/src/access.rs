@@ -258,6 +258,23 @@ fn scope_action(action: Action) -> roll_auth::scope::Action {
     }
 }
 
+/// Whether grant `g` stays inside `project`: every rule, of any product, names only this project
+/// (`{project}`, or secrets' own `{id}`, which is the project's id), never `*` or another project,
+/// and nothing it isn't allowed asks a person instead (`ask_otherwise`). Read from the rules as
+/// data, not evaluated: anything it can't prove confined reaches further. An incident's cut-off
+/// leaves those to the operator, so one project's admin can't cut off another's.
+pub fn confined_to(g: &roll_auth::Grant, project: &str) -> bool {
+    use roll_auth::scope::{Resources, Selector};
+    !g.ask_otherwise
+        && g.scope.0.iter().all(|r| match &r.resources {
+            Resources::All => false,
+            Resources::Some(sel) => sel.iter().all(|s| match s {
+                Selector::Project { project: p } => p == project,
+                Selector::Id { id, .. } => r.product == "secrets" && id == project,
+            }),
+        })
+}
+
 /// Short-lived roll-access tokens for workload identities' logins (rolld: `Access::mint_workload`).
 /// The login is the proof, so there's no caller to gate: roll-access checks the rule is within the
 /// identity's scope and that its owner can still sign in.
@@ -297,7 +314,14 @@ pub trait Workloads: Send + Sync {
         let _ = id;
         Ok(())
     }
+    /// Revoke these grants at once, with why and who (an incident's cut-off: rolld calls
+    /// `Access::revoke_many`). All or none: an id roll-access doesn't know refuses the lot. At most
+    /// [`REVOKE_MAX`] ids. Blocking.
+    fn revoke_many(&self, ids: &[String], why: &str, by: &str) -> crate::Result<()>;
 }
+
+/// The most grants one [`Workloads::revoke_many`] takes (roll-access's `MAX_REVOKE`).
+pub const REVOKE_MAX: usize = 500;
 
 /// A workload token: its grant's id, the secret (shown once) and when it ends (Unix ms).
 pub struct Minted {
@@ -379,27 +403,19 @@ pub struct Caller {
     /// maker of something that acts later (a sync, an identity, a product's reference), so it
     /// stops when they're demoted or can't sign in. `None`: the principal is the maker.
     pub maker: Option<String>,
+    /// Who it is may read past an incident's freeze, where it has Admin ([`Caller::reads_frozen`]):
+    /// the operator, a signed-in person, a roll-access token. Private, so only their constructors
+    /// set it: a consumer, an untrusted caller, a sync, a login or a share link never has it.
+    frozen: bool,
 }
 
-/// An approval from roll-access's gate (`roll_auth::Approved`), as the audit log records it.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct Approval {
-    /// `apr_…`
-    pub id: String,
-    /// Who approved it, in order (`operator`, a person's `usr_…`, a chat approver's `slack:U…`):
-    /// more than one when a policy asks for two people. Empty when it wasn't recorded.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub by: Vec<String>,
-    /// Unix ms: the remembered rule that allowed it lasts until then; absent when it was approved
-    /// for this request alone.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub until: Option<i64>,
-}
+/// An approval from roll-access's gate, as the audit log records it (roll-secrets-chain, so an
+/// export is verified with the same type).
+pub use roll_secrets_chain::Approval;
 
-impl From<&roll_auth::Approved> for Approval {
-    fn from(a: &roll_auth::Approved) -> Approval {
-        Approval { id: a.id.to_string(), by: a.by.iter().map(|b| b.to_string()).collect(), until: a.until }
-    }
+/// The audit log's record of roll-access's approval.
+pub(crate) fn approval(a: &roll_auth::Approved) -> Approval {
+    Approval { id: a.id.to_string(), by: a.by.iter().map(|b| b.to_string()).collect(), until: a.until }
 }
 
 /// roll previews' in-process consumer: the operator's equal for an environment's branches.
@@ -407,13 +423,51 @@ pub const PREVIEWS: &str = "roll:previews";
 
 impl Caller {
     pub fn operator() -> Caller {
-        Caller { principal: "operator".into(), grants: std::sync::Arc::new(Everything), ip: None, runtime: false, approval: None, maker: None }
+        Caller { principal: "operator".into(), grants: std::sync::Arc::new(Everything), ip: None, runtime: false, approval: None, maker: None, frozen: true }
+    }
+
+    /// An admin's session: the operator, with the person (`usr_…`) as the maker of what it makes.
+    pub(crate) fn admin(user: &str) -> Caller {
+        Caller { maker: Some(user.into()), ..Caller::operator() }
     }
 
     /// An in-process consumer (roll apps, previews, sandboxes, tasks): everything the caller
-    /// handing out the call may do, named for the audit log.
+    /// handing out the call may do, named for the audit log. Never past a freeze: the services,
+    /// checks and previews reading a leaked folder are what a freeze stops.
     pub fn consumer(name: &str) -> Caller {
-        Caller { principal: name.into(), grants: std::sync::Arc::new(Everything), ip: None, runtime: true, approval: None, maker: None }
+        Caller { principal: name.into(), grants: std::sync::Arc::new(Everything), ip: None, runtime: true, approval: None, maker: None, frozen: false }
+    }
+
+    /// A signed-in person (`usr_…`), with what they may do.
+    pub(crate) fn person(user: &str, grants: std::sync::Arc<dyn Grants>) -> Caller {
+        Caller { principal: user.into(), grants, ip: None, runtime: false, approval: None, maker: None, frozen: true }
+    }
+
+    /// A roll-access token (`token:<id>`), with what its rules allow here.
+    pub(crate) fn token(id: &str, grants: std::sync::Arc<dyn Grants>) -> Caller {
+        Caller { principal: format!("token:{id}"), grants, ip: None, runtime: false, approval: None, maker: None, frozen: true }
+    }
+
+    /// Something roll runs on someone's behalf that isn't a person or their token (a sync, a
+    /// workload identity's login, a share link): not a runtime, never past a freeze.
+    pub(crate) fn acting(principal: String, grants: std::sync::Arc<dyn Grants>) -> Caller {
+        Caller { principal, grants, ip: None, runtime: false, approval: None, maker: None, frozen: false }
+    }
+
+    /// This caller's access, acting as `principal` ([`Caller::acting`]): a sync runs as its maker.
+    pub(crate) fn acting_as(self, principal: String) -> Caller {
+        Caller { principal, frozen: false, ..self }
+    }
+
+    /// Whether it reads past an incident's freeze where it's an admin: the operator, a signed-in
+    /// person, a roll-access token, never a runtime, code nobody vetted, a sync, a login or a link.
+    pub fn reads_frozen(&self) -> bool {
+        self.frozen && !self.runtime && !self.grants.untrusted()
+    }
+
+    /// Whether it reads `env`'s `path` of `project` while it's frozen (`cutoff.rs`).
+    pub(crate) fn passes_freeze(&self, project: &str, env: &str, path: &str) -> bool {
+        self.reads_frozen() && self.allows(Action::Admin, &Scope::at(project, env, path))
     }
 
     /// Whether this caller may learn anything of a row's value: reveal it, see its fingerprint, or
@@ -429,9 +483,10 @@ impl Caller {
     }
 
     /// This caller, kept out of `except` (a project's protected environments) whatever it may
-    /// otherwise do.
+    /// otherwise do: an untrusted one ([`Secrets::untrusted`](crate::Secrets::untrusted)), which
+    /// never reads past a freeze.
     pub fn without(&self, except: Vec<String>) -> Caller {
-        Caller { principal: self.principal.clone(), grants: std::sync::Arc::new(Narrowed(self.grants.clone(), Except(except))), ip: self.ip.clone(), runtime: self.runtime, approval: self.approval.clone(), maker: self.maker.clone() }
+        Caller { principal: self.principal.clone(), grants: std::sync::Arc::new(Narrowed(self.grants.clone(), Except(except))), ip: self.ip.clone(), runtime: self.runtime, approval: self.approval.clone(), maker: self.maker.clone(), frozen: false }
     }
 
     pub fn allows(&self, action: Action, at: &Scope<'_>) -> bool {
