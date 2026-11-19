@@ -25,7 +25,7 @@
 //! Parsing is strict (unknown keys are errors), and every error names the key at fault, because
 //! it ends up as the summary of a failed check or preview.
 
-use code_control::settings::{MainSettings, QueueSettings, RawMain, RawQueue};
+use code_control::settings::{MainSettings, QueueSettings, RawMain, RawQueue, RawSecrets};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -193,6 +193,8 @@ struct RawFile {
     preview: Option<RawPreview>,
     queue: Option<RawQueue>,
     main: Option<RawMain>,
+    /// roll code's landing settings for credentials (`code_control::settings::secrets`).
+    secrets: Option<RawSecrets>,
     /// roll apps' section (`apps_control::config`): read there; here only its
     /// `previews.screenshots`, roll previews'.
     app: Option<toml::Table>,
@@ -337,6 +339,7 @@ impl RollToml {
             return Err(format!("{FILE} [queue]: checks names {missing:?}, which isn't a [checks.{missing}] table"));
         }
         let main = raw.main.map(code_control::settings::main).unwrap_or_default();
+        raw.secrets.map(code_control::settings::secrets).transpose()?;
         // roll apps' `[app.previews.screenshots]`, the rest of `[app]` left to roll apps.
         let app_screenshots = match raw.app.as_ref().and_then(|a| a.get("previews")).and_then(|p| p.get("screenshots")) {
             None => None,

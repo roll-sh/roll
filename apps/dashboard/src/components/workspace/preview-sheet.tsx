@@ -4,7 +4,7 @@ import { appsApi, followShell as followAppsShell } from "@/lib/apps-api";
 import { codeApi } from "@/lib/code-api";
 import { Confirm } from "@/components/ui";
 import { TerminalScreen } from "@/components/terminal-screen";
-import { endpointSlower, type EndpointTime, a11yWords, checkSummary, seoWords, duration, followLogs, followShell, openUrl, pageLabel, previewsApi, noteCropUrl, qrUrl, screenshotUrl, resourceId, thanMain, type CaughtMail, type PageCheck, type Preview, type TextDiff, type PreviewActivity, type PreviewVisitor, type PreviewKind, type PreviewShare, type RequestLine, type ServiceMetrics, type ErrorGroup } from "@/lib/previews-api";
+import { endpointSlower, type EndpointTime, a11yWords, checkSummary, seoWords, duration, followLogs, followShell, downloadFiles, openUrl, pageLabel, previewsApi, noteCropUrl, qrUrl, screenshotUrl, resourceId, thanMain, type CaughtMail, type PageCheck, type Preview, type TextDiff, type PreviewActivity, type PreviewVisitor, type PreviewKind, type PreviewShare, type RequestLine, type ServiceMetrics, type ErrorGroup, type TraceSummary, type TraceSpan, type RouteTime } from "@/lib/previews-api";
 import { verdict, type VerdictTarget } from "@/lib/preview-verdict";
 import { isProblem, logFilter, logLevel } from "@/lib/preview-logs";
 import { formatBytes } from "@/lib/roll-api";
@@ -1412,7 +1412,102 @@ function Requests({ preview: p }: { preview: Preview }) {
           ))}
         </div>
       )}
+      <Traces preview={p} n={n} />
     </>
+  );
+}
+
+/** Its recent traces (the project's `traces`), newest first; one opens to its spans as bars on
+ * the trace's time. Masked by the server as its logs are. */
+function Traces({ preview: p, n }: { preview: Preview; n: number }) {
+  const [list, setList] = useState<TraceSummary[] | null>(null);
+  const [routes, setRoutes] = useState<RouteTime[]>([]);
+  const [open, setOpen] = useState<{ trace: string; spans: TraceSpan[] } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    previewsApi.traces(p.id, 60).then(
+      (r) => live && setList(r.traces),
+      (e) => live && setError(errorText(e)),
+    );
+    previewsApi.routes(p.id, 60).then(
+      (r) => live && setRoutes(r.routes),
+      () => live && setRoutes([]),
+    );
+    return () => {
+      live = false;
+    };
+  }, [p.id, n]);
+  const show = async (trace: string) => {
+    if (open?.trace === trace) return setOpen(null);
+    try {
+      setOpen(await previewsApi.trace(p.id, trace));
+    } catch (e) {
+      setError(errorText(e));
+    }
+  };
+  if (!list || (!list.length && !error)) return null;
+  return (
+    <div className="mt-3 border-t border-line pt-3">
+      <Label>Traces</Label>
+      {error && <p className="mb-1.5 text-[11.5px] text-danger">{error}</p>}
+      {routes.length > 0 && (
+        <div className="mb-2 rounded-lg border border-line-2 bg-canvas">
+          <div className="flex items-baseline gap-2 border-b border-line px-2.5 py-1 font-mono text-[10px] text-subtle">
+            <span className="min-w-0 flex-1">route</span>
+            <span className="w-10 text-right">n</span>
+            <span className="w-14 text-right">p50</span>
+            <span className="w-14 text-right">p95</span>
+            <span className="w-16 text-right">main p50</span>
+          </div>
+          {routes.slice(0, 12).map((r) => (
+            <div key={r.name} className="flex items-baseline gap-2 border-b border-line px-2.5 py-1 font-mono text-[10.5px] last:border-b-0" title={r.slower ? "clearly slower than main's preview" : undefined}>
+              <span className={`min-w-0 flex-1 truncate ${r.slower ? "text-danger" : "text-soft"}`}>{r.name}</span>
+              <span className="w-10 text-right text-subtle">{r.count}</span>
+              <span className={`w-14 text-right ${r.slower ? "text-danger" : "text-muted"}`}>{r.p50_ms} ms</span>
+              <span className="w-14 text-right text-muted">{r.p95_ms} ms</span>
+              <span className="w-16 text-right text-subtle">{r.main_p50_ms == null ? "—" : `${r.main_p50_ms} ms`}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="max-h-[50vh] overflow-auto rounded-lg border border-line-2 bg-canvas [scrollbar-width:thin]">
+        {list.map((t) => (
+          <div key={t.trace} className="border-b border-line last:border-b-0">
+            <button onClick={() => void show(t.trace)} className="flex w-full items-baseline gap-2 px-2.5 py-1 text-left font-mono text-[10.5px] hover:bg-white/[0.04]">
+              <span className="text-subtle">{new Date(t.start_ms).toLocaleTimeString()}</span>
+              <span className={`min-w-0 flex-1 truncate ${t.error ? "text-danger" : "text-soft"}`} title={t.name}>
+                {t.name}
+              </span>
+              <span className="text-subtle">{t.spans} spans</span>
+              <span className="text-muted">{t.ms} ms</span>
+            </button>
+            {open?.trace === t.trace && <Waterfall spans={open.spans} />}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** A trace's spans as bars on its own time, nested by their parents' order. */
+function Waterfall({ spans }: { spans: TraceSpan[] }) {
+  const t0 = Math.min(...spans.map((s) => s.start));
+  const total = Math.max(1, Math.max(...spans.map((s) => s.end)) - t0);
+  return (
+    <div className="space-y-0.5 px-2.5 pt-0.5 pb-2">
+      {spans.map((s) => (
+        <div key={s.span} className="font-mono text-[10px]" title={(s.attrs ?? []).map(([k, v]) => `${k}=${v}`).join("\n")}>
+          <div className="flex items-baseline gap-2">
+            <span className={`min-w-0 flex-1 truncate ${s.error ? "text-danger" : "text-muted"}`}>{s.name}</span>
+            <span className="text-subtle">{Math.round((s.end - s.start) / 1e6)} ms</span>
+          </div>
+          <div className="relative h-1 rounded-full bg-line">
+            <div className={`absolute h-1 rounded-full ${s.error ? "bg-danger" : "bg-accent/70"}`} style={{ left: `${((s.start - t0) / total) * 100}%`, width: `${Math.max(0.5, ((s.end - s.start) / total) * 100)}%` }} />
+          </div>
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -1602,7 +1697,65 @@ function Shell({ preview: p }: { preview: Preview }) {
           </p>
         </>
       )}
+      <FilesAndPorts preview={p} service={service} apps={apps} env={env} />
     </>
+  );
+}
+
+/** Files out of a service (a dump the shell made, a report), as a tar from `…/files`, and the
+ * terminal lines for files in and for a port on this machine (`roll preview cp`/`forward`; a roll
+ * apps service's are roll apps' own). */
+function FilesAndPorts({ preview: p, service, apps, env }: { preview: Preview; service: string; apps: string | null; env: string }) {
+  const [path, setPath] = useState("/app/");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const download = async () => {
+    setError(null);
+    setBusy(true);
+    try {
+      const blob = await downloadFiles(p.id, service, path.trim());
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${service}-${path.trim().replace(/\/+$/, "").split("/").pop() || "root"}.tar`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="mt-3 border-t border-line pt-3">
+      <Label>Files and ports</Label>
+      {!apps && (
+        <div className="mb-1.5 flex items-center gap-2">
+          <input
+            value={path}
+            onChange={(e) => setPath(e.target.value)}
+            aria-label="A path in the service"
+            placeholder="/app/report.csv"
+            className="h-7 min-w-0 flex-1 rounded-md border border-line-2 bg-canvas px-2 font-mono text-[11.5px] outline-none focus:border-accent/60"
+          />
+          <button onClick={() => void download()} disabled={busy || !path.trim().startsWith("/")} className="flex h-7 shrink-0 items-center rounded-md border border-line-2 px-2.5 text-[11.5px] text-soft hover:bg-white/[0.06] hover:text-fg disabled:opacity-50">
+            {busy ? "Reading…" : "Download"}
+          </button>
+        </div>
+      )}
+      {error && <p className="mb-1.5 text-[11.5px] text-danger">{error}</p>}
+      <p className="text-[11.5px] leading-relaxed text-subtle">
+        {apps ? (
+          <>
+            Files: <code className="font-mono text-soft">roll apps cp -s {service} -e {env} ./file :/tmp/</code>. A port here: <code className="font-mono text-soft">roll apps proxy -s {service} -e {env}</code>.
+          </>
+        ) : (
+          <>
+            A tar of what's there, read as the shell would. Files in: <code className="font-mono text-soft">roll preview cp {p.id} ./file :/tmp/ -s {service}</code>. Any port it listens on, here (a debugger's): <code className="font-mono text-soft">roll preview forward {p.id} 9229 -s {service}</code>.
+          </>
+        )}
+      </p>
+    </div>
   );
 }
 
