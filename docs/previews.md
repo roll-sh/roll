@@ -1225,7 +1225,8 @@ name's median time under it (a trace's spans of one name summed, so an N+1's que
 trace without the span counts as 0) here and on main's preview, and the one that grew most, by
 20 ms or more, is said with it (`grew: {span, ms, main_ms}`): on `…/routes`' slower rows, the
 sheet's route table ("SELECT orders +280 ms"), the record's `slower_routes`, the change page and
-the pull request's comment. Only spans this node keeps compare (main's on its holder); a roll
+the pull request's comment (checked live in `scripts/preview-cost.sh`, against main's preview
+running beside the change's, with `ROLL_PREVIEWS_COMPARE_EVERY=5`). Only spans this node keeps compare (main's on its holder); a roll
 apps service's traces have no spans here, so its routes say no reason.
 `a_slower_routes_time_is_put_on_the_span_that_grew`.
 
@@ -2129,11 +2130,11 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **The comparison with main checked live end to end**: `scripts/preview-cost.sh` posts traces
-   and writes errors to main's preview and the change's (both running), and waits for the record's
-   `slower_routes` (with its `grew`) and `new_errors`, the change's summary and the comment's
-   lines; the holder's rounds read at a test's pace (a config knob, as the engine's tests do).
-   Today unit and engine tests cover each piece, but no live run has both previews at once.
+1. **The comparison with main checked live end to end, in review**
+   (`feature/roll-previews-live-against`): `scripts/preview-cost.sh` posts traces to main's
+   preview and the change's (both running) and writes an error only the change's has, then waits
+   for the record's `slower_routes` (with `grew`) and `new_errors`, and the change's summary;
+   `ROLL_PREVIEWS_COMPARE_EVERY` sets the holder's rounds to a test's pace.
 2. **References a person chooses** (after roll secrets' #407, `bind_ref`/`resolve_as`): a
    preview's own variables take `roll://` too, and the rules' references (who wrote each is kept,
    `env_refs`) move to bindings, so a writer who loses reveal stops theirs.
