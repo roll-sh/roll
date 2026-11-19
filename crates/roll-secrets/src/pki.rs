@@ -106,7 +106,7 @@ fn aad(project: &str, id: &str) -> String {
     format!("roll-secrets:pki:{project}:{id}:key")
 }
 
-fn is_domain(d: &str) -> bool {
+pub(crate) fn is_domain(d: &str) -> bool {
     let d = d.strip_prefix("*.").unwrap_or(d);
     (1..=253).contains(&d.len())
         && d.split('.').all(|l| (1..=63).contains(&l.len()) && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') && !l.starts_with('-') && !l.ends_with('-'))
@@ -127,7 +127,7 @@ impl Policy {
     }
 
     /// Whether the CA signs for `name` (a DNS name, a wildcard one level under a domain, or an IP).
-    fn allows(&self, name: &str) -> bool {
+    pub(crate) fn allows(&self, name: &str) -> bool {
         if name.parse::<std::net::IpAddr>().is_ok() {
             return self.allow_ip;
         }
@@ -310,7 +310,7 @@ fn record_in(c: &code_sql::Conn<'_>, ca: &str, project: &str, serial: &str, name
 pub struct Certificate {
     pub serial: String,
     pub names: Vec<String>,
-    /// `csr` or `link`.
+    /// `csr`, `link` or `acme`.
     pub source: String,
     pub not_after: i64,
     pub issued_at: i64,
@@ -354,7 +354,7 @@ fn serial_of(p: &rcgen::CertificateParams) -> Vec<u8> {
     p.serial_number.as_ref().map(|s| s.to_bytes()).unwrap_or_default()
 }
 
-fn hex(b: &[u8]) -> String {
+pub(crate) fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
@@ -371,7 +371,7 @@ pub(crate) struct CrlCache {
 }
 
 impl CrlCache {
-    fn revoked(&mut self, ca: &str) {
+    pub(crate) fn revoked(&mut self, ca: &str) {
         *self.revoked.entry(ca.to_string()).or_default() += 1;
         self.signed.remove(ca);
         self.ocsp.retain(|(c, _), _| c != ca);
@@ -407,6 +407,29 @@ fn key_matches(pem: &str, alg: &rcgen::SignatureAlgorithm) -> Result<()> {
         return Err(Error::BadRequest("the CSR's signature doesn't match its key: sign a P-256 key with SHA-256 and a P-384 key with SHA-384 (openssl req -sha384)".into()));
     }
     Ok(())
+}
+
+/// A CSR (PEM, 64 KiB at most) read: its signature checked (whoever asks holds the key it names),
+/// its key's type matching the signature, and its subjectAltName names (DNS names and IP
+/// addresses; the subject's CN isn't read).
+pub(crate) fn read_csr(pem: &str) -> Result<(rcgen::CertificateSigningRequestParams, Vec<String>)> {
+    if pem.len() > 64 * 1024 {
+        return Err(Error::BadRequest("a CSR is 64 KiB at most".into()));
+    }
+    let csr = rcgen::CertificateSigningRequestParams::from_pem(pem.trim()).map_err(|e| Error::BadRequest(format!("not a CSR this CA signs: {e}")))?;
+    key_matches(pem.trim(), csr.public_key.algorithm())?;
+    let mut names = vec![];
+    for san in &csr.params.subject_alt_names {
+        names.push(match san {
+            rcgen::SanType::DnsName(d) => d.as_str().to_ascii_lowercase(),
+            rcgen::SanType::IpAddress(ip) => ip.to_string(),
+            _ => return Err(Error::BadRequest("a CSR's names are DNS names and IP addresses (subjectAltName), nothing else".into())),
+        });
+    }
+    if names.is_empty() {
+        return Err(Error::BadRequest("a CSR names what it's for in subjectAltName (DNS names, or IP addresses where the CA allows them); the subject's CN isn't read".into()));
+    }
+    Ok((csr, names))
 }
 
 fn unhex(s: &str) -> Option<Vec<u8>> {
@@ -496,6 +519,7 @@ impl Secrets {
             }
             c.execute("DELETE FROM cas WHERE id = ?", [id])?;
             c.execute("DELETE FROM ca_certs WHERE ca_id = ?", [id])?;
+            crate::acme::forget_ca(c, id)?;
             audit::record(c, project, caller, "ca.delete", None, None, &[], &format!("deleted CA {name}"), now)
         })
     }
@@ -507,38 +531,45 @@ impl Secrets {
         self.project(project)?;
         let mine: Option<String> = self.db.read(|c| c.query_row("SELECT name FROM cas WHERE id = ? AND project_id = ?", [id, project], |r| r.get(0)).optional())?;
         let ca_name = mine.ok_or_else(|| Error::NotFound(format!("no CA {id}")))?;
-        if req.csr.len() > 64 * 1024 {
-            return Err(Error::BadRequest("a CSR is 64 KiB at most".into()));
-        }
-        // Parsed and its signature checked: whoever asks holds the key it names.
-        let csr = rcgen::CertificateSigningRequestParams::from_pem(req.csr.trim()).map_err(|e| Error::BadRequest(format!("not a CSR this CA signs: {e}")))?;
-        key_matches(req.csr.trim(), csr.public_key.algorithm())?;
-        let mut names = vec![];
-        for san in &csr.params.subject_alt_names {
-            names.push(match san {
-                rcgen::SanType::DnsName(d) => d.as_str().to_ascii_lowercase(),
-                rcgen::SanType::IpAddress(ip) => ip.to_string(),
-                _ => return Err(Error::BadRequest("a CSR's names are DNS names and IP addresses (subjectAltName), nothing else".into())),
-            });
-        }
-        let (ca_pem, ca_key, policy) = self.pki()?.open(id)?;
-        if names.is_empty() {
-            return Err(Error::BadRequest("a CSR names what it's for in subjectAltName (DNS names, or IP addresses where the CA allows them); the subject's CN isn't read".into()));
-        }
-        allowed(&names, &policy)?;
-        let longest = u64::from(policy.max_days) * 24 * 60;
+        let (csr, names) = read_csr(&req.csr)?;
         let minutes = match (req.days, req.ttl_minutes) {
             (Some(_), Some(_)) => return Err(Error::BadRequest("days or ttl_minutes, not both".into())),
-            (Some(d), None) => u64::from(d) * 24 * 60,
-            (None, Some(m)) => m,
-            (None, None) => (30 * 24 * 60).min(longest),
+            (Some(d), None) => Some(u64::from(d) * 24 * 60),
+            (None, m) => m,
         };
+        self.sign_read(project, id, csr, names, minutes, "csr", &caller.principal, |c, signed, now| {
+            let summary = format!("{ca_name} signed a CSR for {} (serial {})", signed.names.join(", "), signed.serial);
+            audit::record(c, project, caller, "ca.sign", None, None, &[], &summary, now)
+        })
+    }
+
+    /// Sign a CSR [`read_csr`] read for `names`, every one within the CA's policy, for `minutes`
+    /// (30 days, or the CA's longest if that's shorter, by default). The certificate is recorded
+    /// (`source`, `by`) and `commit` runs in the same write, before it's handed out: no audit, no
+    /// certificate.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn sign_read(
+        &self,
+        project: &str,
+        id: &str,
+        csr: rcgen::CertificateSigningRequestParams,
+        names: Vec<String>,
+        minutes: Option<u64>,
+        source: &str,
+        by: &str,
+        mut commit: impl FnMut(&code_sql::Conn<'_>, &Signed, i64) -> Result<()>,
+    ) -> Result<Signed> {
+        let ca_name: String = self.db.read(|c| c.query_row("SELECT name FROM cas WHERE id = ? AND project_id = ?", [id, project], |r| r.get(0)).optional())?.ok_or_else(|| Error::NotFound(format!("no CA {id}")))?;
+        let (ca_pem, ca_key, policy) = self.pki()?.open(id)?;
+        allowed(&names, &policy)?;
+        let longest = u64::from(policy.max_days) * 24 * 60;
+        let minutes = minutes.unwrap_or((30 * 24 * 60).min(longest));
         if !(5..=longest).contains(&minutes) {
             return Err(Error::BadRequest(format!("a certificate from {ca_name} lives 5 minutes to {} days", policy.max_days)));
         }
         let ca_key = rcgen::KeyPair::from_pem(ca_key.expose()).map_err(|e| Error::Internal(format!("the CA's key: {e}")))?;
         let issuer = rcgen::Issuer::from_ca_cert_pem(&ca_pem, &ca_key).map_err(|e| Error::Internal(format!("the CA's certificate: {e}")))?;
-        let live: i64 = self.db.read(|c| c.query_row("SELECT COUNT(*) FROM ca_certs WHERE ca_id = ? AND source = 'csr' AND not_after >= ?", params![id, self.db.now_ms()?], |r| r.get(0)))?;
+        let live: i64 = self.db.read(|c| c.query_row("SELECT COUNT(*) FROM ca_certs WHERE ca_id = ? AND source IN ('csr', 'acme') AND not_after >= ?", params![id, self.db.now_ms()?], |r| r.get(0)))?;
         if live >= CSR_MAX {
             return Err(Error::Conflict("limit", format!("{ca_name} has {CSR_MAX} certificates from CSRs still valid: that's the most one CA keeps")));
         }
@@ -546,14 +577,13 @@ impl Secrets {
         let not_after = (params.not_after.unix_timestamp_nanos() / 1_000_000) as i64;
         let serial = hex(&serial_of(&params));
         let cert = rcgen::CertificateSigningRequestParams { params, public_key: csr.public_key }.signed_by(&issuer).map_err(|e| Error::BadRequest(format!("signing the CSR: {e}")))?;
-        // Recorded and audited in one write before the certificate is handed out: no audit, no certificate.
+        let signed = Signed { certificate: cert.pem(), ca: ca_pem, serial, names, not_after };
         let now = self.db.now_ms()?;
-        let summary = format!("{ca_name} signed a CSR for {} (serial {serial})", names.join(", "));
         self.db.write(|c| {
-            record_in(c, id, project, &serial, &names, "csr", not_after, &caller.principal, now)?;
-            audit::record(c, project, caller, "ca.sign", None, None, &[], &summary, now)
+            record_in(c, id, project, &signed.serial, &signed.names, source, not_after, by, now)?;
+            commit(c, &signed, now)
         })?;
-        Ok(Signed { certificate: cert.pem(), ca: ca_pem, serial, names, not_after })
+        Ok(signed)
     }
 
     pub(crate) fn pki(&self) -> Result<Provider> {
