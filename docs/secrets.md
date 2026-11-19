@@ -5158,6 +5158,8 @@ members, the first hour, and the other products' credential inputs. Ranked:
    - reviewer keys.
 10. **Use without seeing:** a proxy that swaps a placeholder for the key, only for the key's bound host
     (Infisical Agent Vault, Akeyless SecretlessAI). L; waits on previews, apps and agents' proxies.
+    roll secrets' half (host-bound keys, `rlph_` placeholders, `substitute`, a reference filter) is
+    building on `feature/roll-secrets-placeholders`.
 11. **Unmeasured:**
     - #281's head row under many concurrent writers on Postgres (measure before it lands);
     - #248's "1,000 pods … 0.1 core" is arithmetic, not a load run.
