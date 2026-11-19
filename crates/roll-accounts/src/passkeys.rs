@@ -207,6 +207,8 @@ pub(crate) struct AuthData {
     pub sign_count: u32,
     /// With `AT`: the new credential's id and COSE public key.
     pub credential: Option<(Vec<u8>, Vec<u8>)>,
+    /// With `AT`: the authenticator's model (AAGUID), its own say-so unless an attestation proves it.
+    pub aaguid: Option<[u8; 16]>,
 }
 
 pub(crate) fn auth_data(b: &[u8]) -> R<AuthData> {
@@ -216,8 +218,10 @@ pub(crate) fn auth_data(b: &[u8]) -> R<AuthData> {
     let rp_id_hash: [u8; 32] = b[..32].try_into().unwrap();
     let flags = b[32];
     let sign_count = u32::from_be_bytes(b[33..37].try_into().unwrap());
+    let mut aaguid = None;
     let credential = if flags & AT != 0 {
-        let mut at = 37 + 16; // the AAGUID: not trusted, not kept
+        aaguid = b.get(37..53).map(|a| <[u8; 16]>::try_from(a).unwrap());
+        let mut at = 37 + 16; // past the AAGUID: trusted only when an attestation proves it
         let len = u16::from_be_bytes(take(b, &mut at, 2).map_err(|_| Refused("the authenticator data is too short"))?.try_into().unwrap()) as usize;
         if len == 0 || len > MAX_CREDENTIAL_ID {
             return Err(Refused("a credential id of the wrong length"));
@@ -228,7 +232,7 @@ pub(crate) fn auth_data(b: &[u8]) -> R<AuthData> {
     } else {
         None
     };
-    Ok(AuthData { rp_id_hash, flags, sign_count, credential })
+    Ok(AuthData { rp_id_hash, flags, sign_count, credential, aaguid })
 }
 
 // ── the ceremonies ──
@@ -276,6 +280,13 @@ pub(crate) struct NewKey {
     pub public_key: Vec<u8>,
     pub sign_count: u32,
     pub flags: u8,
+    /// What the attestation needs, when a policy asks (hardware keys only): the model, the
+    /// statement's format and contents, the authenticator data, the client data's hash.
+    pub aaguid: [u8; 16],
+    pub fmt: String,
+    pub stmt: Cbor,
+    pub auth_raw: Vec<u8>,
+    pub client_hash: [u8; 32],
 }
 
 /// Check a registration (`navigator.credentials.create`'s response) for `rp_id` at `origin`.
@@ -297,7 +308,22 @@ pub(crate) fn register(response: &Value, challenge: &str, rp_id: &str, origin: &
     }
     let (credential_id, public_key) = data.credential.ok_or(Refused("the attestation has no new credential"))?;
     key_alg(&public_key)?;
-    Ok(NewKey { credential_id, public_key, sign_count: data.sign_count, flags: data.flags })
+    let fmt = match obj.get(&Cbor::Text("fmt".into())) {
+        Some(Cbor::Text(f)) => f.clone(),
+        _ => String::new(),
+    };
+    let stmt = obj.get(&Cbor::Text("attStmt".into())).cloned().unwrap_or(Cbor::Map(Vec::new()));
+    Ok(NewKey {
+        credential_id,
+        public_key,
+        sign_count: data.sign_count,
+        flags: data.flags,
+        aaguid: data.aaguid.unwrap_or([0; 16]),
+        fmt,
+        stmt,
+        auth_raw: raw,
+        client_hash: Sha256::digest(&client).into(),
+    })
 }
 
 /// Check an assertion (`navigator.credentials.get`'s response) against the stored key; its new
@@ -353,6 +379,9 @@ pub struct Passkey {
     pub last_used_at: Option<i64>,
     /// Synced to the person's other devices (the authenticator says it's backed up).
     pub synced: bool,
+    /// Its model, when a verified attestation proved it (hardware keys only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 fn refused(r: Refused) -> Error {
@@ -423,7 +452,8 @@ impl Accounts {
                 "user": { "id": encode(u.id.as_bytes()), "name": u.email, "displayName": if u.name.is_empty() { u.handle.clone() } else { u.name.clone() } },
                 "pubKeyCredParams": [{ "type": "public-key", "alg": EDDSA }, { "type": "public-key", "alg": ES256 }, { "type": "public-key", "alg": RS256 }],
                 "timeout": CHALLENGE_TTL_MS,
-                "attestation": "none",
+                // A company that requires hardware keys needs the authenticator to prove its model.
+                "attestation": if self.passkey_policy()?.require { "direct" } else { "none" },
                 "authenticatorSelection": { "residentKey": "required", "requireResidentKey": true, "userVerification": "preferred" },
                 "excludeCredentials": existing.iter().map(|c| json!({ "type": "public-key", "id": c })).collect::<Vec<_>>(),
             }
@@ -439,6 +469,20 @@ impl Accounts {
             return Err(Error::BadRequest("that passkey request is someone else's".into(), Some("passkey")));
         }
         let key = register(&credential["response"], &challenge, &rp, &origin).map_err(refused)?;
+        // Hardware keys only: a listed model, proved by a verified attestation.
+        let policy = self.passkey_policy()?;
+        let model = if policy.require {
+            let m = policy.model(&key.aaguid).ok_or_else(|| refused(Refused("your company only allows the hardware keys it lists, and this authenticator isn't one")))?;
+            if key.fmt != "packed" {
+                return Err(refused(Refused("this authenticator doesn't prove its model in a way roll checks (packed attestation): your company requires a hardware key it lists")));
+            }
+            let now_s = (self.db.now_ms()? / 1000).max(0) as u64;
+            crate::attestation::verify_packed(&key.stmt, &key.auth_raw, &key.client_hash, &key.aaguid, m, now_s).map_err(refused)?;
+            Some(m.name.clone())
+        } else {
+            None
+        };
+        let aaguid = model.as_ref().map(|_| crate::attestation::uuid(&key.aaguid));
         let credential_id = encode(&key.credential_id);
         if credential["id"].as_str().map(|s| s.trim_end_matches('=')) != Some(credential_id.as_str()) {
             return Err(refused(Refused("the credential's id doesn't match its authenticator data")));
@@ -456,20 +500,34 @@ impl Accounts {
                 return Err(Error::Conflict("that passkey is already registered".into()));
             }
             c.execute(
-                "INSERT INTO passkeys (id, user_id, credential_id, public_key, sign_count, name, created_at, last_used_at, synced) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)",
-                params![id, user, credential_id, public_key, key.sign_count as i64, name, now, synced],
+                "INSERT INTO passkeys (id, user_id, credential_id, public_key, sign_count, name, created_at, last_used_at, synced, aaguid, model) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)",
+                params![id, user, credential_id, public_key, key.sign_count as i64, name, now, synced, aaguid, model],
             )?;
             Ok(())
         })?;
-        Ok(Passkey { id, name, created_at: now, last_used_at: None, synced })
+        Ok(Passkey { id, name, created_at: now, last_used_at: None, synced, model })
     }
 
     pub fn passkeys(&self, user: &str) -> Result<Vec<Passkey>> {
         Ok(self.db.read(|c| {
-            c.query("SELECT id, name, created_at, last_used_at, synced FROM passkeys WHERE user_id = ? ORDER BY created_at", [user], |r| {
-                Ok(Passkey { id: r.get(0)?, name: r.get(1)?, created_at: r.get(2)?, last_used_at: r.get(3)?, synced: r.get::<_, Option<bool>>(4)?.unwrap_or(false) })
+            c.query("SELECT id, name, created_at, last_used_at, synced, model FROM passkeys WHERE user_id = ? ORDER BY created_at", [user], |r| {
+                Ok(Passkey { id: r.get(0)?, name: r.get(1)?, created_at: r.get(2)?, last_used_at: r.get(3)?, synced: r.get::<_, Option<bool>>(4)?.unwrap_or(false), model: r.get(5)? })
             })
         })?)
+    }
+
+    /// The hardware-keys-only policy (off unless an admin set one).
+    pub fn passkey_policy(&self) -> Result<crate::attestation::Policy> {
+        let raw = self.db.read(|c| c.query_row("SELECT policy FROM passkey_policy WHERE id = 1", (), |r| r.get::<_, String>(0)).optional())?;
+        Ok(raw.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default())
+    }
+
+    /// An admin sets the policy (checked: UUIDs, names, roots that parse).
+    pub fn set_passkey_policy(&self, p: crate::attestation::Policy) -> Result<crate::attestation::Policy> {
+        let p = p.checked().map_err(|r| Error::BadRequest(r.0.to_string(), Some("policy")))?;
+        let s = serde_json::to_string(&p).map_err(|e| Error::Internal(e.to_string()))?;
+        self.db.write(|c| c.execute("INSERT INTO passkey_policy (id, policy) VALUES (1, ?) ON CONFLICT (id) DO UPDATE SET policy = excluded.policy", [s.as_str()]))?;
+        Ok(p)
     }
 
     pub fn passkey_rename(&self, user: &str, id: &str, name: &str) -> Result<Passkey> {
@@ -539,15 +597,20 @@ impl Accounts {
         }
         let credential_id = credential["id"].as_str().map(|s| s.trim_end_matches('=').to_string()).filter(|s| !s.is_empty() && s.len() <= 2048).ok_or_else(|| refused(Refused("no credential id")))?;
         let row = self.db.read(|c| {
-            c.query_row("SELECT id, user_id, public_key, sign_count FROM passkeys WHERE credential_id = ?", [credential_id.as_str()], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?))
+            c.query_row("SELECT id, user_id, public_key, sign_count, aaguid FROM passkeys WHERE credential_id = ?", [credential_id.as_str()], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?, r.get::<_, Option<String>>(4)?))
             })
             .optional()
         })?;
         let unknown = || Error::BadRequest("roll doesn't know this passkey".into(), Some("passkey"));
-        let (pk, user, public_key, stored) = row.ok_or_else(unknown)?;
+        let (pk, user, public_key, stored, aaguid) = row.ok_or_else(unknown)?;
         if owed.is_some_and(|o| o != user) {
             return Err(unknown());
+        }
+        // Hardware keys only: a passkey whose model wasn't proved, or isn't listed any more, doesn't count.
+        let policy = self.passkey_policy()?;
+        if policy.require && !aaguid.as_deref().is_some_and(|a| policy.models.iter().any(|m| m.aaguid == a)) {
+            return Err(refused(Refused("your company only allows the hardware keys it lists, and this passkey isn't on one: sign in another way and add one")));
         }
         let key = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(&public_key).map_err(|_| Error::Internal("a stored passkey isn't base64url".into()))?;
         let (count, flags) = assert(&credential["response"], &challenge, &rp, &origin, &key, stored.clamp(0, u32::MAX as i64) as u32).map_err(refused)?;

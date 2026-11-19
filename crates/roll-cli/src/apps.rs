@@ -1162,7 +1162,7 @@ pub enum AppsCmd {
 
 const LINK: &str = ".roll/app.json";
 
-fn enc(s: &str) -> String {
+pub(crate) fn enc(s: &str) -> String {
     urlencoding::encode(s).into_owned()
 }
 
@@ -1338,7 +1338,7 @@ fn tunnel_to(api: &Api, env: &str) -> (String, Vec<(String, String)>) {
 }
 
 /// Every connection to `l` carried through a tunnel of its own (`tunnel_to`).
-async fn tunnels(url: String, headers: Vec<(String, String)>, l: tokio::net::TcpListener) -> anyhow::Result<()> {
+pub(crate) async fn tunnels(url: String, headers: Vec<(String, String)>, l: tokio::net::TcpListener) -> anyhow::Result<()> {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
     loop {
         let (conn, _) = l.accept().await?;
@@ -1456,8 +1456,45 @@ async fn ssh(api: &Api, env: &str, query: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The local terminal: its size, and raw mode for as long as a guard lives.
-mod term {
+/// A tar read from a service (`roll apps cp`, `roll preview cp`) written at `dst`: one file to a
+/// path that isn't a directory is written there, as `cp` does; anything else is unpacked inside it
+/// (`unpack` keeps every entry inside: no `..`, no absolute paths). Where it went.
+pub(crate) fn untar_to(bytes: &[u8], dst: &str) -> anyhow::Result<PathBuf> {
+    let here = PathBuf::from(dst);
+    let files = tar::Archive::new(std::io::Cursor::new(bytes)).entries()?.filter_map(Result::ok).filter(|e| e.header().entry_type().is_file()).count();
+    if files == 1 && !here.is_dir() && !dst.ends_with('/') {
+        let mut a = tar::Archive::new(std::io::Cursor::new(bytes));
+        let mut e = a.entries()?.filter_map(Result::ok).find(|e| e.header().entry_type().is_file()).context("no file in it")?;
+        let mut out = std::fs::File::create(&here).with_context(|| here.display().to_string())?;
+        std::io::copy(&mut e, &mut out)?;
+    } else {
+        std::fs::create_dir_all(&here)?;
+        tar::Archive::new(std::io::Cursor::new(bytes)).unpack(&here).with_context(|| format!("unpacking into {}", here.display()))?;
+    }
+    Ok(here)
+}
+
+/// `src` (a file, or a directory with what's in it; links kept as links) as a tar of at most
+/// 100 MiB, named by its last part.
+pub(crate) fn tar_of(src: &str) -> anyhow::Result<Vec<u8>> {
+    let local = PathBuf::from(src);
+    let meta = std::fs::symlink_metadata(&local).with_context(|| local.display().to_string())?;
+    let name = local.file_name().map(|n| n.to_owned()).ok_or_else(|| anyhow::anyhow!("{src}: name a file or a directory"))?;
+    let mut b = tar::Builder::new(Vec::new());
+    b.follow_symlinks(false);
+    if meta.is_dir() {
+        b.append_dir_all(&name, &local)?;
+    } else {
+        b.append_path_with_name(&local, &name)?;
+    }
+    let body = b.into_inner()?;
+    anyhow::ensure!(body.len() <= 100 << 20, "{src} is more than 100 MiB as a tar");
+    Ok(body)
+}
+
+/// The local terminal: its size, and raw mode for as long as a guard lives (`roll preview shell`
+/// uses it too).
+pub(crate) mod term {
     /// Columns and rows of the terminal on stdout.
     pub fn size() -> Option<(u16, u16)> {
         let mut ws = libc::winsize { ws_row: 0, ws_col: 0, ws_xpixel: 0, ws_ypixel: 0 };
@@ -3053,34 +3090,12 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                         anyhow::ensure!(bytes.len() + chunk.len() <= 1 << 30, "{remote} is more than 1 GiB as a tar: copy something smaller");
                         bytes.extend_from_slice(&chunk);
                     }
-                    let here = PathBuf::from(&dst);
-                    // One file to a path that isn't a directory: written there, as `cp` does.
-                    let files: Vec<_> = tar::Archive::new(std::io::Cursor::new(&bytes)).entries()?.filter_map(Result::ok).filter(|e| e.header().entry_type().is_file()).map(|_| ()).collect();
-                    if files.len() == 1 && !here.is_dir() && !dst.ends_with('/') {
-                        let mut a = tar::Archive::new(std::io::Cursor::new(&bytes));
-                        let mut e = a.entries()?.filter_map(Result::ok).find(|e| e.header().entry_type().is_file()).context("no file in it")?;
-                        let mut out = std::fs::File::create(&here).with_context(|| here.display().to_string())?;
-                        std::io::copy(&mut e, &mut out)?;
-                    } else {
-                        std::fs::create_dir_all(&here)?;
-                        // `unpack` keeps every entry inside `here` (no `..`, no absolute paths).
-                        tar::Archive::new(std::io::Cursor::new(&bytes)).unpack(&here).with_context(|| format!("unpacking into {}", here.display()))?;
-                    }
+                    let here = untar_to(&bytes, &dst)?;
                     (format!("{from}:{remote} → {}", here.display()), json!({ "instance": from, "from": remote, "to": here }))
                 }
                 (None, Some(remote)) => {
                     let local = PathBuf::from(&src);
-                    let meta = std::fs::symlink_metadata(&local).with_context(|| local.display().to_string())?;
-                    let name = local.file_name().map(|n| n.to_owned()).ok_or_else(|| anyhow::anyhow!("{src}: name a file or a directory"))?;
-                    let mut b = tar::Builder::new(Vec::new());
-                    b.follow_symlinks(false);
-                    if meta.is_dir() {
-                        b.append_dir_all(&name, &local)?;
-                    } else {
-                        b.append_path_with_name(&local, &name)?;
-                    }
-                    let body = b.into_inner()?;
-                    anyhow::ensure!(body.len() <= 100 << 20, "{src} is more than 100 MiB as a tar");
+                    let body = tar_of(&src)?;
                     let res = send(api.http.put(url(remote)).header("content-type", "application/x-tar").body(body)).await?;
                     let v: Value = res.json().await.unwrap_or(Value::Null);
                     (format!("{} → {}:{remote}", local.display(), s(&v["instance"])), v)

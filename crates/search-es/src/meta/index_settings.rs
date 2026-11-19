@@ -240,6 +240,9 @@ pub static INDEX_SETTINGS: &[IndexSetting] = &[
     s!("index.requests.cache.enable", D("true"), B, Dynamic),
     s!("index.resize.source.name", Dflt::None, Str, Internal),
     s!("index.resize.source.uuid", Dflt::None, Str, Internal),
+    // roll's own: search analytics (`crate::analytics`). No default, so `include_defaults` is
+    // Elasticsearch's.
+    s!("index.roll.analytics.enabled", Dflt::None, B, Dynamic),
     s!("index.rollup.source.name", D(""), Str, Private),
     s!("index.rollup.source.uuid", D(""), Str, Private),
     s!("index.routing.allocation.disk.watermark.ignore", D("false"), B, Dynamic),
@@ -372,8 +375,10 @@ pub fn unknown_setting(key: &str) -> EsError {
 /// similar (Lucene's `LevenshteinDistance`) are suggested, best first; ties keep the order the
 /// Java `HashMap` of registered keys iterates in.
 pub fn unknown_setting_in(d: Dialect, key: &str) -> EsError {
-    // List settings match `key.N` too, so they aren't among the plain keys suggestions come from.
-    let keys: Vec<&str> = registry(d).iter().filter(|s| !matches!(s.ty, Ty::List)).map(|s| s.key).collect();
+    // List settings match `key.N` too, so they aren't among the plain keys suggestions come from;
+    // nor are roll's own (`index.roll.*`), so the text and its Java hash order stay
+    // Elasticsearch's.
+    let keys: Vec<&str> = registry(d).iter().filter(|s| !matches!(s.ty, Ty::List) && !s.key.starts_with("index.roll.")).map(|s| s.key).collect();
     EsError::illegal_argument(format!("unknown setting [{key}]{}", suggestion(keys.into_iter(), key)))
 }
 
