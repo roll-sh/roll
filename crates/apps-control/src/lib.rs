@@ -461,6 +461,12 @@ pub type HostTarget = (String, String, Option<String>, Option<u16>);
 /// Another service's values a reference may read, and which of them are sealed.
 type ServiceValues = (HashMap<String, String>, BTreeSet<String>);
 
+/// An environment's snippets joined for the proxy: before `</head>`, before `</body>`.
+fn snippets_of(all: &[model::Snippet]) -> Option<(bytes::Bytes, bytes::Bytes)> {
+    let join = |at: model::SnippetAt| bytes::Bytes::from(all.iter().filter(|s| s.at == at).map(|s| s.html.as_str()).collect::<String>());
+    (!all.is_empty()).then(|| (join(model::SnippetAt::Head), join(model::SnippetAt::BodyEnd)))
+}
+
 pub struct ResolvedVars {
     pub vars: Vec<(String, String)>,
     pub sources: HashMap<String, &'static str>,
@@ -1584,6 +1590,7 @@ impl Apps {
             heartbeats: r.heartbeats.clone(),
             split: r.split.clone(),
             mirror: r.mirror.clone(),
+            snippets: r.snippets.clone(),
             pause_schedule: r.pause_schedule.clone(),
             frozen: r.freeze.as_ref().is_some_and(|f| f.on(code_sql::now_ms())),
             freeze: r.freeze.clone(),
@@ -1705,7 +1712,7 @@ impl Apps {
     pub async fn put_environment(self: &Arc<Self>, service: &str, env: &str, body: Value) -> Result<Environment> {
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "checks", "heartbeats", "split", "mirror", "freeze", "pause_schedule", "paused", "held", "hostname", "traces", "egress", "vitals", "report", "preview_host"].contains(&k.as_str()) {
+            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "checks", "heartbeats", "split", "mirror", "snippets", "freeze", "pause_schedule", "paused", "held", "hostname", "traces", "egress", "vitals", "report", "preview_host"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
@@ -1839,6 +1846,16 @@ impl Apps {
                 let p: crate::freeze::PauseSchedule = serde_json::from_value(v.clone()).map_err(|e| Error::BadRequest(format!("pause_schedule: {e}")))?;
                 p.check()?;
                 Some(Some(p))
+            }
+        };
+        // Snippets: HTML of its own in every page (null or []: none).
+        let snippets = match o.get("snippets") {
+            None => None,
+            Some(Value::Null) => Some(Vec::new()),
+            Some(v) => {
+                let all: Vec<crate::model::Snippet> = serde_json::from_value(v.clone()).map_err(|e| Error::BadRequest(format!("snippets: {e}")))?;
+                crate::model::Snippet::check(&all)?;
+                Some(all)
             }
         };
         // Traffic mirroring: another environment of this service, as a split names one.
@@ -2144,6 +2161,12 @@ impl Apps {
         if let Some(p) = pause_schedule {
             let (sid, e) = (service.to_string(), env.to_string());
             self.db(move |s| s.set_pause_schedule(&sid, &e, p.as_ref())).await?;
+            self.changed(service);
+        }
+        if let Some(all) = snippets {
+            let (sid, e) = (service.to_string(), env.to_string());
+            self.db(move |s| s.set_snippets(&sid, &e, &all)).await?;
+            self.live(service, env).forget_gate();
             self.changed(service);
         }
         if let Some(m) = mirror {
@@ -3404,7 +3427,7 @@ impl Apps {
             }
             false => None,
         };
-        let g = Arc::new(live::Gate { maintenance: row.maintenance, allow, rate: row.rate_limit, firewall: row.firewall, pages: row.pages, preview: row.ephemeral, headers: row.headers, routes: row.routes, traces, vitals: row.vitals, challenge_key, split: row.split, mirror: row.mirror });
+        let g = Arc::new(live::Gate { maintenance: row.maintenance, allow, rate: row.rate_limit, firewall: row.firewall, pages: row.pages, preview: row.ephemeral, headers: row.headers, routes: row.routes, traces, vitals: row.vitals, challenge_key, split: row.split, mirror: row.mirror, snippets: snippets_of(&row.snippets) });
         live.set_gate(g.clone(), seen);
         Ok(g)
     }

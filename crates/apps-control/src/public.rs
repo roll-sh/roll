@@ -1360,7 +1360,7 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
         let Ok(body) = axum::body::to_bytes(req.into_body(), crate::track::MAX_BODY).await else { return StatusCode::PAYLOAD_TOO_LARGE.into_response() };
         return apps.event_beacon(service, env, &body, country).into_response();
     }
-    let feedback = Tags { feedback: target.is_some() && page_load, vitals: gate.vitals && page_load };
+    let feedback = Tags { feedback: target.is_some() && page_load, vitals: gate.vitals && page_load, snippets: gate.snippets.clone().filter(|_| page_load) };
     if feedback.feedback || feedback.vitals {
         // The page as the app wrote it, so the tag can go in as it streams.
         req.headers_mut().insert(header::ACCEPT_ENCODING, HeaderValue::from_static("identity"));
@@ -1860,14 +1860,20 @@ fn refresh_cached(apps: Arc<Apps>, service: String, env: String, req: Request, h
     })
 }
 
-/// roll's own scripts a page gets: the feedback button (a preview's link visitors), Web Vitals.
-#[derive(Clone, Copy)]
+/// What a page gets put in: the environment's snippets, and roll's own scripts (the feedback
+/// button for a preview's link visitors, Web Vitals).
+#[derive(Clone)]
 struct Tags {
     feedback: bool,
     vitals: bool,
+    snippets: Option<(bytes::Bytes, bytes::Bytes)>,
 }
 
 fn with_feedback(t: Tags, r: Response) -> Response {
+    let r = match &t.snippets {
+        Some((head, body)) => crate::feedback::snippets(r, head, body),
+        None => r,
+    };
     let r = if t.feedback { crate::feedback::add(r) } else { r };
     if t.vitals { crate::feedback::tag(r, crate::vitals::TAG, false) } else { r }
 }
