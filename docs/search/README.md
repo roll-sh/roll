@@ -186,6 +186,9 @@ applications). A web page calls a cluster directly, with no backend of its own i
 - *A preflight names its cluster by host*: it has no credentials, so the cluster is the `Host`
   label under `--search-domain` (`<name>.<domain>`). A node without a domain serves every cluster
   at one address, and browsers can't call its clusters; the dashboard says so.
+- *Allowed origins bind browsers, not keys.* Only a browser enforces CORS: curl, a server or a
+  script sends a browser key from anywhere, within its rate limits. A key a page ships is public;
+  what it may read, its filter and its limits are what protect the cluster.
 - *The IP allowlist comes first*, preflights included: a cluster with an allowlist refuses
   browsers outside it with the traffic-filter 403 before anything else, so a public site needs
   its visitors' networks allowed (usually: no allowlist).
@@ -198,16 +201,33 @@ applications). A web page calls a cluster directly, with no backend of its own i
   document-level `query` (Algolia's secured-key filters), and `expires_in_s` its `expiration`.
   The encoded key (`base64(<key id>@<cluster>:<key>)`, `Authorization: ApiKey …`) is in the
   create answer only; the list shows what each reaches, its filter, expiry and limit, never a
-  secret; revoking refuses any key that isn't a browser key. Hidden and system indices (`.…`)
-  can't be named.
-- *Rate limits per key* (Algolia's `maxQueriesPerIPPerHour`): `rate_limit: {per_minute,
-  per_ip_per_minute?}` (default 600 a minute, at most 1,000,000), kept in the key's
-  `metadata.roll_browser`, so they travel with the cluster. The cluster's owner node counts each
-  request a browser key authenticates (token buckets: the key's, and the key's per client
-  address), and an empty bucket answers 429 `es_rejected_execution_exception` (as Elasticsearch
+  secret; revoking refuses any key that isn't a browser key (404), and on a deleted cluster
+  answers 404 (restore it, then revoke). Names starting with `.` and a bare `*` are refused; a
+  pattern reads every index whose name it matches, hidden ones (`index.hidden`) included, as an
+  Elasticsearch role's pattern does. At most 20 browser keys per cluster (409 past it).
+- *A browser key works only on its own cluster.* Its `metadata.roll_browser.cluster` is the
+  cluster's id, and the node refuses it (401, as an unknown key) on any other: a branch copies its
+  parent's security, keys included, and a point-in-time branch from before a revoke would bring a
+  revoked key back. A restore keeps the cluster's id, so its keys keep working. A branch lists none
+  of its parent's browser keys.
+- *A point-in-time branch takes its parent's security as it is now*, whatever key: users and their
+  passwords, API keys, tokens, service tokens, roles, mappings and profiles (OpenSearch Security's
+  configuration on an OpenSearch-flavor cluster) are copied from the parent's latest state into
+  the branch's before it is in the catalog, so every revocation, invalidation, deletion and
+  password change made after `at` holds there; only the data goes back in time. A branch made now
+  starts from the parent's security of now anyway; changes made to the parent after that stay the
+  parent's.
+- *Rate limits* (Algolia's `maxQueriesPerIPPerHour`): per key `rate_limit: {per_minute?,
+  per_ip_per_minute?}` (defaults 600 and 60 a minute, at most 100,000), kept in the key's
+  `metadata.roll_browser`, so they travel with the cluster; a key's limit is shared by all its
+  visitors, and the per-address one keeps a single visitor from using it up. Per cluster,
+  `browser_per_minute` (`PATCH`; `null`: 6,000) is a ceiling every browser key draws from. The
+  cluster's owner node counts each request a browser key authenticates against three token
+  buckets (the cluster's, the key's, and the key's per client address; an IPv6 client counts by
+  its /64), and an empty bucket answers 429 `es_rejected_execution_exception` (as Elasticsearch
   rejects work it can't take) with `Retry-After` in seconds (exposed to the page through `Access-Control-Expose-Headers`); a refused request takes nothing from
-  the other bucket. The buckets are in memory on the owner and bounded (50,000 addresses per
-  cluster, idle ones forgotten first): a takeover, a drain or an unload starts them full again.
+  the other buckets. The buckets are in memory on the owner and bounded (50,000 addresses per
+  cluster; past it the fullest are forgotten first, so a drained address keeps its debt): a takeover, a drain or an unload starts them full again.
   roll's own requests (the console) aren't counted.
 - *The safe surface* is `_application/search_application/{name}/_search` with a key limited to
   that application: a page sends only the template's `params`. Search UI's
@@ -230,7 +250,7 @@ Searchkit and InstantSearch in Chromium is in the review pack (`94-browser-*`).
 | GET | `/v1/search/clusters` | list (a person: their own); `?deleted=true`: recently deleted clusters kept for restoring, newest first, with `deleted_at` and `purge_at` (Unix seconds), the name each had and its last figures (`stored_bytes` is still billed) |
 | POST | `/v1/search/clusters` | create `{name, flavor?, parent?, at?, idle_timeout_s?, max_in_flight?, max_body_mb?, destructive_requires_name?}`; answers with `url`, `username`, `password` (once) and `id` — the shape `search-yaml run --cluster-hook` expects; `owner` is the signed-in person who isn't an admin, and a branch's is its parent's |
 | GET | `/v1/search/clusters/{id or name}` | settings, `status` (`loaded` with live index count and requests in flight, and live `docs` once every index is open, or `asleep` with `wakes_at`, unix seconds, when a background job is due to wake it), last metered `indices`/`docs`/`stored_bytes` and `own_bytes` (what a branch references that its parent's latest commit points don't; all of `stored_bytes` for a cluster that isn't a branch), `url`, `branches` |
-| PATCH | `/v1/search/clusters/{id}` | `flavor`, `idle_timeout_s` (0: always loaded), `max_in_flight`, `max_body_mb`, `destructive_requires_name`, `ip_allowlist` (below), `cors` (above: browser search); the idle timeout, body limit, `max_in_flight`, allowlist and CORS apply at once (also to a cluster that is waking up); a new flavor or `destructive_requires_name` needs a reload: the cluster is put to sleep now, or as soon as no request runs (always-on clusters included), and keeps its current ones until then |
+| PATCH | `/v1/search/clusters/{id}` | `flavor`, `idle_timeout_s` (0: always loaded), `max_in_flight`, `max_body_mb`, `destructive_requires_name`, `ip_allowlist` (below), `cors` and `browser_per_minute` (above: browser search); the idle timeout, body limit, `max_in_flight`, allowlist and CORS apply at once (also to a cluster that is waking up); a new flavor or `destructive_requires_name` needs a reload: the cluster is put to sleep now, or as soon as no request runs (always-on clusters included), and keeps its current ones until then |
 | DELETE | `/v1/search/clusters/{id}` | waits for running requests and for a wake in progress (which is locked out and unloaded, never left serving); the cluster leaves the list, its REST endpoint answers as for a missing cluster and its name is free at once, but its storage is kept for `--search-deleted-retention-days` (7) and billed as storage, for `restore` (0 days: removed at once); branches keep working |
 | POST | `/v1/search/clusters/{id}/restore` | a deleted cluster (by its id) back as it was within its window: data, snapshots, settings, owner, password and API keys; under its own name, else 409 and `{"name": "…"}` restores it under another (the new name is its Basic auth user, API key id suffix and host label; the password stays). Scoped like every per-cluster route (owner, admins, the operator); 404 once purged |
 | GET, POST | `/v1/search/clusters/{id}/branches` | list; branch `{name, at?}` (`at`: Unix seconds within `--search-history`) |
@@ -245,8 +265,8 @@ Searchkit and InstantSearch in Chromium is in the review pack (`94-browser-*`).
 | POST | `/v1/search/clusters/{id}/keys` | a new API key of the cluster `{name, expires_in_s?, access?}` (`access`: `admin`, the default, or `data`: a link's role, data, templates, pipelines and lifecycle policies without security) → `{id, name, access, api_key, url, expires_at?}` (`access`: the access the key was made with): `api_key` is `base64(<key id>@<cluster>:<key>)` for `Authorization: ApiKey …`, in this answer only (roll secrets' managed links use it instead of sharing the password); on an OpenSearch-flavor cluster (whose clients sign in with a user) the key is an internal user of its own: `{id, name, access, username, password, url, expires_at?}` without `api_key`, `username` being `<user>@<cluster>`, refused once `expires_in_s` passes |
 | DELETE | `/v1/search/clusters/{id}/keys/{key}` | revoke it (204; 404 when it's gone). On a deleted cluster (by its id) the revoke is kept and applied by its restore (204) |
 | GET | `/v1/search/clusters/{id}/browser-keys` | `{keys}`: the browser keys that still work, newest first, each `{id, name, indices or application, filter?, rate_limit, created_at, expires_at}` (no secret). Wakes the cluster |
-| POST | `/v1/search/clusters/{id}/browser-keys` | a key a web page ships (above) `{name, indices or application, filter?, expires_in_s?, rate_limit?: {per_minute?, per_ip_per_minute?}}` → the same fields plus `api_key` (once) and `url`. 400 on an OpenSearch-flavor cluster |
-| DELETE | `/v1/search/clusters/{id}/browser-keys/{key}` | revoke a browser key (204; 404 for any other key of the cluster). On a deleted cluster it is kept for the restore, as `keys/{key}` |
+| POST | `/v1/search/clusters/{id}/browser-keys` | a key a web page ships (above) `{name, indices or application, filter?, expires_in_s?, rate_limit?: {per_minute?, per_ip_per_minute?}}` → the same fields plus `api_key` (once) and `url`. 400 on an OpenSearch-flavor cluster; 409 past 20 browser keys |
+| DELETE | `/v1/search/clusters/{id}/browser-keys/{key}` | revoke a browser key (204; 404 for any other key of the cluster, and on a deleted cluster: restore it first) |
 | GET, PUT, DELETE | `/v1/search/clusters/{id}/indices/{index}` | Elasticsearch's `GET`/`PUT`/`DELETE /<index>`: mappings, settings and aliases; create (body: `mappings`, `settings`); delete |
 | GET, PUT | `/v1/search/clusters/{id}/indices/{index}/mapping` | `GET`/`PUT /<index>/_mapping` |
 | GET | `/v1/search/clusters/{id}/indices/{index}/settings` | `GET /<index>/_settings` |

@@ -177,7 +177,7 @@ async fn per_cluster(State(c): State<AppState>, req: Request, next: Next) -> Res
         Ok(d) => d,
         // A key revoked while its cluster is deleted is kept for the restore
         // (`Control::delete_key`): it too runs where it lands, for whoever may see the cluster.
-        Err(ControlError::NotFound(_)) if req.method() == Method::DELETE && rest.is_some_and(|(_, r)| r.starts_with("keys/") || r.starts_with("browser-keys/")) => {
+        Err(ControlError::NotFound(_)) if req.method() == Method::DELETE && rest.is_some_and(|(_, r)| r.starts_with("keys/")) => {
             return match c.get_deleted(&id).await {
                 Ok(d) if Caller::of(req.extensions()).sees(&d.cluster) => next.run(req).await,
                 _ => no_such(&id).into_response(),

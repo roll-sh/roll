@@ -108,6 +108,8 @@ export type SearchClusterPatch = Partial<SearchSettings> & {
   ip_allowlist?: (string | IpRule)[];
   /** null (or no origins) turns CORS off. */
   cors?: CorsSettings | null;
+  /** Requests per minute all browser keys may make together; null: the node's default. */
+  browser_per_minute?: number | null;
 };
 
 /** A key a web page ships (`/v1/search/clusters/{id}/browser-keys`): read-only and rate limited. */
@@ -169,6 +171,8 @@ export interface SearchCluster extends SearchSettings {
   ip_allowlist: IpRule[];
   /** Which web pages may call it from a browser (null: CORS off). */
   cors?: CorsSettings | null;
+  /** Requests per minute all its browser keys may make together (null: the node's default). */
+  browser_per_minute?: number | null;
   url: string;
   host: string;
   port: number;

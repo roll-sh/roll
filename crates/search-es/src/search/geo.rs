@@ -158,9 +158,13 @@ fn indexed_shape(ctx: &QueryCtx, id: &str, index: Option<&str>, path: Option<&st
     let engine = ctx.cluster.engine.index(ctx.cluster, st, &idx)?;
     let shard = crate::meta::routing::shard_for(&idx, id, routing);
     let doc = engine.shard(shard).shard.get(id.as_bytes(), true).map_err(index_err)?;
+    let doc = match doc {
+        Some(_) if ctx.reader_hides(&idx, &engine, engine.shard(shard), id)? => None,
+        d => d,
+    };
     let Some(doc) = doc else { return Err(EsError::resource_not_found(format!("Shape with ID [{id}] not found"))) };
     let src = crate::fetch::source_bytes(&doc.fields).ok_or_else(|| EsError::illegal_state("no source"))?;
-    let Value::Obj(m) = crate::fetch::parse_source(src)? else { return Err(EsError::illegal_state("bad source")) };
+    let Value::Obj(m) = ctx.reader_source(&idx, crate::fetch::parse_source(src)?) else { return Err(EsError::illegal_state("bad source")) };
     let mut vals = Vec::new();
     crate::engine::source::extract_values(&m, path, &mut vals);
     let v = vals.first().ok_or_else(|| EsError::illegal_state(format!("Shape with name [{id}] found but missing {path} field")))?;
@@ -566,7 +570,7 @@ pub fn more_like_this(ctx: &QueryCtx, m: &crate::query::specialized::MoreLikeThi
                     Some(idx) => {
                         let engine = ctx.cluster.engine.index(ctx.cluster, st, &idx)?;
                         let sh = crate::meta::routing::shard_for(&idx, id, item.routing.as_deref());
-                        engine.shard(sh).shard.get(id.as_bytes(), true).map_err(index_err)?.and_then(|d| crate::fetch::source_bytes(&d.fields).map(crate::fetch::parse_source)).transpose()?
+                        like_source(ctx, &idx, &engine, sh, id)?
                     }
                     None => None,
                 }
@@ -610,7 +614,7 @@ pub fn more_like_this(ctx: &QueryCtx, m: &crate::query::specialized::MoreLikeThi
                     Some(idx) => {
                         let engine = ctx.cluster.engine.index(ctx.cluster, ctx.st, &idx)?;
                         let sh = crate::meta::routing::shard_for(&idx, id, item.routing.as_deref());
-                        engine.shard(sh).shard.get(id.as_bytes(), true).map_err(index_err)?.and_then(|d| crate::fetch::source_bytes(&d.fields).map(crate::fetch::parse_source)).transpose()?
+                        like_source(ctx, &idx, &engine, sh, id)?
                     }
                     None => None,
                 }
@@ -676,6 +680,16 @@ impl search_index::query::LeafSourceValues for SourceTextLeaf {
 /// The index a like/unlike document is read from: its `_index` (an index or an alias of one
 /// index, as for a multi term vectors item) or the searched index. An item that can't be
 /// resolved is skipped, as Elasticsearch skips failed term vectors responses.
+/// A `more_like_this` item's document as the reader may see it (`None`: missing, or hidden by
+/// the reader's document level security).
+fn like_source(ctx: &QueryCtx, idx: &std::sync::Arc<crate::meta::IndexMeta>, engine: &std::sync::Arc<crate::engine::IndexEngine>, sh: u32, id: &str) -> EsResult<Option<Value>> {
+    let Some(d) = engine.shard(sh).shard.get(id.as_bytes(), true).map_err(index_err)? else { return Ok(None) };
+    if ctx.reader_hides(idx, engine, engine.shard(sh), id)? {
+        return Ok(None);
+    }
+    crate::fetch::source_bytes(&d.fields).map(|s| crate::fetch::parse_source(s).map(|v| ctx.reader_source(idx, v))).transpose()
+}
+
 fn like_item_index(ctx: &QueryCtx, index: Option<&str>) -> Option<std::sync::Arc<crate::meta::IndexMeta>> {
     match index {
         None => ctx.st.metadata.indices.get(&ctx.idx.name).cloned(),

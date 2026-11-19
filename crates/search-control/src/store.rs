@@ -99,6 +99,9 @@ pub struct SearchCluster {
     /// Which web pages may call it from a browser (`http.cors.*`, checked after the
     /// allowlist); `None`: CORS off. Branches start with their parent's.
     pub cors: Option<CorsSettings>,
+    /// Requests per minute all its browser keys may make together (`None`: the node's default,
+    /// `search_server::browser::DEFAULT_CLUSTER_PER_MINUTE`).
+    pub browser_per_minute: Option<i64>,
 }
 
 /// A cluster's `http.cors.*` (docs/search/README.md, "Search from the browser"): as checked by
@@ -267,10 +270,10 @@ CREATE TABLE IF NOT EXISTS search_analytics (
 "#;
 
 const COLS: &str = "id, name, region, flavor, password, idle_timeout_s, max_in_flight, max_body_mb, destructive_requires_name, \
-                    parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, owner, ip_allowlist, cors";
+                    parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, owner, ip_allowlist, cors, browser_per_minute";
 /// What lookups read: [`COLS`] and where the cluster is loaded.
 const READ_COLS: &str = "id, name, region, flavor, password, idle_timeout_s, max_in_flight, max_body_mb, destructive_requires_name, \
-                         parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, owner, loaded_on, own_bytes, wake_at, restored_at, ip_allowlist, cors";
+                         parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, owner, loaded_on, own_bytes, wake_at, restored_at, ip_allowlist, cors, browser_per_minute";
 /// What deleted clusters' reads add to [`READ_COLS`].
 const DELETED_COLS: &str = "deleted_name, deleted_at, purge_at, stored_as, name";
 
@@ -303,15 +306,16 @@ fn row(r: &Row) -> code_sql::Result<SearchCluster> {
             Some(j) => Some(serde_json::from_str(&j).map_err(|e| code_sql::Error::Conversion(format!("cors: {e}")))?),
             None => None,
         },
+        browser_per_minute: r.get(23)?,
     })
 }
 
 fn deleted_row(r: &Row) -> code_sql::Result<DeletedCluster> {
     let mut c = row(r)?;
-    c.name = r.get(23)?;
+    c.name = r.get(24)?;
     c.loaded_on = None;
     c.wake_at = None;
-    Ok(DeletedCluster { cluster: c, deleted_at: r.get(24)?, purge_at: r.get(25)?, stored_as: r.get(26)?, reserved: r.get(27)? })
+    Ok(DeletedCluster { cluster: c, deleted_at: r.get(25)?, purge_at: r.get(26)?, stored_as: r.get(27)?, reserved: r.get(28)? })
 }
 
 /// One-minute buckets a cluster keeps: 24 hours.
@@ -378,6 +382,7 @@ impl Store {
         db.add_column("search_clusters", "ip_allowlist", "TEXT NOT NULL DEFAULT '[]'")?;
         // Clusters made before browser search have CORS off, as Elasticsearch does.
         db.add_column("search_clusters", "cors", "TEXT")?;
+        db.add_column("search_clusters", "browser_per_minute", "INTEGER")?;
         db.ensure_schema("CREATE INDEX IF NOT EXISTS search_clusters_owner ON search_clusters (owner, created_at)")?;
         // Deleted clusters kept for restoring.
         db.add_column("search_clusters", "deleted_at", "INTEGER")?;
@@ -407,7 +412,7 @@ impl Store {
                 return Ok(Inserted::Over(over));
             }
             x.execute(
-                &format!("INSERT INTO search_clusters ({COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)"),
+                &format!("INSERT INTO search_clusters ({COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)"),
                 params![
                     c.id,
                     c.name,
@@ -427,7 +432,8 @@ impl Store {
                     c.stored_bytes,
                     c.owner,
                     allowlist_json(&c.ip_allowlist),
-                    cors_json(&c.cors)
+                    cors_json(&c.cors),
+                    c.browser_per_minute
                 ],
             )
             .map(|_| Inserted::Yes)
@@ -456,7 +462,7 @@ impl Store {
             }
             x.execute(
                 "UPDATE search_clusters SET flavor = ?2, password = ?3, idle_timeout_s = ?4, max_in_flight = ?5, max_body_mb = ?6,
-                 destructive_requires_name = ?7, password_rotated_at = ?8, ip_allowlist = ?9, cors = ?10 WHERE id = ?1",
+                 destructive_requires_name = ?7, password_rotated_at = ?8, ip_allowlist = ?9, cors = ?10, browser_per_minute = ?11 WHERE id = ?1",
                 params![
                     c.id,
                     c.flavor,
@@ -467,7 +473,8 @@ impl Store {
                     c.destructive_requires_name,
                     c.password_rotated_at,
                     allowlist_json(&c.ip_allowlist),
-                    cors_json(&c.cors)
+                    cors_json(&c.cors),
+                    c.browser_per_minute
                 ],
             )?;
             Ok::<_, code_sql::Error>(Ok(()))
@@ -1036,6 +1043,7 @@ mod tests {
             restored_at: None,
             ip_allowlist: Vec::new(),
             cors: None,
+            browser_per_minute: None,
         }
     }
 

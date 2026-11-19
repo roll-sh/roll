@@ -61,6 +61,9 @@ pub fn secret_hash(secret: &str) -> [u8; 32] {
 #[derive(Clone, Debug)]
 pub struct ClusterSpec {
     pub name: String,
+    /// The catalog's id for it (it stays across a restore under another name; a branch has its
+    /// own). Browser keys are bound to it ([`crate::browser`]).
+    pub id: Option<String>,
     pub dialect: Dialect,
     /// Accepted secrets. Empty means no authentication (local development only).
     pub credentials: Vec<Credential>,
@@ -85,12 +88,16 @@ pub struct ClusterSpec {
     /// Which web pages may call the cluster from a browser (`http.cors.*`; `None`: CORS off,
     /// Elasticsearch's default). Checked after the IP allowlist.
     pub cors: Option<Arc<crate::cors::Cors>>,
+    /// Requests per minute all its browser keys may make together (`None`:
+    /// [`crate::browser::DEFAULT_CLUSTER_PER_MINUTE`]).
+    pub browser_per_minute: Option<u64>,
 }
 
 impl ClusterSpec {
     pub fn new(name: impl Into<String>) -> ClusterSpec {
         ClusterSpec {
             name: name.into(),
+            id: None,
             dialect: Dialect::Elasticsearch,
             credentials: Vec::new(),
             idle_unload: None,
@@ -102,6 +109,7 @@ impl ClusterSpec {
             max_resident_bytes: None,
             ip_allowlist: Default::default(),
             cors: None,
+            browser_per_minute: None,
         }
     }
 

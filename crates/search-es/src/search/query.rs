@@ -178,6 +178,25 @@ impl<'a> QueryCtx<'a> {
         }
     }
 
+    /// Whether the reader's document level security hides document `id` of `idx` (a terms
+    /// lookup's, an indexed shape's, a `more_like_this` item's, a percolated document): those
+    /// documents are read as the user, as Elasticsearch's lookups run with the caller's
+    /// permissions, so one the reader can't see is missing (and can't be probed for).
+    pub fn reader_hides(&self, idx: &Arc<IndexMeta>, engine: &Arc<crate::engine::IndexEngine>, shard: &Arc<crate::engine::ShardEngine>, id: &str) -> EsResult<bool> {
+        let Some(sec) = &self.security else { return Ok(false) };
+        let Some(q) = sec.documents(self.cluster, crate::xpack::security::dls::READ, &idx.name)? else { return Ok(false) };
+        Ok(!super::matches_doc(self.cluster, self.st, idx, engine, shard, id, &q)?)
+    }
+
+    /// Such a document's source as the reader may see it: fields its field level security hides
+    /// are left out.
+    pub fn reader_source(&self, idx: &IndexMeta, source: Value) -> Value {
+        match self.security.as_ref().and_then(|s| s.fields(crate::xpack::security::dls::READ, &idx.name)) {
+            Some(f) => f.filter_source(source),
+            None => source,
+        }
+    }
+
     /// The runtime field `name`: the mapping's `runtime` section shadows concrete fields of
     /// the same name, a request's `runtime_mappings` shadow both.
     pub fn runtime_field(&self, name: &str) -> Option<Arc<super::runtime::RtField>> {

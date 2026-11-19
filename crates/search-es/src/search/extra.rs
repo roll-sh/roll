@@ -1067,7 +1067,10 @@ pub fn terms_lookup(ctx: &QueryCtx, l: &crate::query::term_level::TermsLookup) -
             let engine = ctx.cluster.engine.index(ctx.cluster, st, &idx)?;
             let shard = engine.shard(crate::meta::routing::shard_for(&idx, &l.id, l.routing.as_deref()));
             let t = std::time::Instant::now();
-            let doc = shard.shard.get(l.id.as_bytes(), true).map_err(index_err)?;
+            let mut doc = shard.shard.get(l.id.as_bytes(), true).map_err(index_err)?;
+            if doc.is_some() && ctx.reader_hides(&idx, &engine, shard, &l.id)? {
+                doc = None;
+            }
             // The lookup is a real get (`TermsQueryBuilder.fetch`): the shard's get stats count it.
             let c = &shard.counters;
             c.get_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1075,7 +1078,7 @@ pub fn terms_lookup(ctx: &QueryCtx, l: &crate::query::term_level::TermsLookup) -
             let counter = if doc.is_some() { &c.get_exists } else { &c.get_missing };
             counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let source = match doc.as_ref().and_then(|d| crate::fetch::source_bytes(&d.fields)) {
-                Some(src) => match crate::fetch::parse_source(src)? {
+                Some(src) => match ctx.reader_source(&idx, crate::fetch::parse_source(src)?) {
                     Value::Obj(m) => Some(std::sync::Arc::new(m)),
                     _ => None,
                 },

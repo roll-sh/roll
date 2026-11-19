@@ -52,6 +52,7 @@ export function BrowserSearch({ cluster, busy, run }: { cluster: SearchCluster; 
           )}
         </p>
         <Origins cluster={cluster} busy={busy} run={run} />
+        <Ceiling cluster={cluster} busy={busy} run={run} />
         <Keys cluster={cluster} />
       </div>
     </Panel>
@@ -104,6 +105,46 @@ function Origins({ cluster, busy, run }: { cluster: SearchCluster; busy: string 
   );
 }
 
+/** The cluster's ceiling: requests per minute all its browser keys may make together. */
+function Ceiling({ cluster, busy, run }: { cluster: SearchCluster; busy: string | null; run: Run }) {
+  const saved = cluster.browser_per_minute ? String(cluster.browser_per_minute) : "";
+  const [text, setText] = useState(saved);
+  useEffect(() => setText(saved), [saved]);
+  const n = Number(text);
+  const valid = text.trim() === "" || (Number.isInteger(n) && n >= 1 && n <= 100_000);
+  return (
+    <div className="flex flex-wrap items-end justify-between gap-3 px-5 py-4">
+      <div>
+        <h3 className="text-[13px] font-medium">Cluster ceiling</h3>
+        <p className="mt-1 max-w-[60ch] text-[12px] text-muted">
+          Requests a minute all browser keys together may make, whatever each key allows; past it they get 429. Empty: {DEFAULT_CEILING.toLocaleString("en-US")}.
+        </p>
+      </div>
+      <div className="flex items-center gap-2">
+        <input
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          inputMode="numeric"
+          placeholder={String(DEFAULT_CEILING)}
+          aria-label="Browser requests per minute, all keys together"
+          className={`${input} w-28 font-mono`}
+        />
+        <button
+          type="button"
+          className={btn}
+          disabled={busy !== null || text === saved || !valid}
+          onClick={() => run("ceiling", () => searchApi.update(cluster.id, { browser_per_minute: text.trim() ? n : null }))}
+        >
+          {busy === "ceiling" ? <span className="shimmer">Saving…</span> : "Save"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** The node's ceiling when a cluster sets none (`search_server::browser::DEFAULT_CLUSTER_PER_MINUTE`). */
+const DEFAULT_CEILING = 6000;
+
 function Keys({ cluster }: { cluster: SearchCluster }) {
   const { copied, copy } = useCopy();
   const [keys, setKeys] = useState<BrowserKey[] | null>(null);
@@ -113,7 +154,7 @@ function Keys({ cluster }: { cluster: SearchCluster }) {
   const [filter, setFilter] = useState("");
   const [expiry, setExpiry] = useState(0);
   const [perMinute, setPerMinute] = useState("600");
-  const [perIp, setPerIp] = useState("");
+  const [perIp, setPerIp] = useState("60");
   const [made, setMade] = useState<NewBrowserKey | null>(null);
   const [revoking, setRevoking] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -187,6 +228,8 @@ function Keys({ cluster }: { cluster: SearchCluster }) {
             <h3 className="text-[13px] font-medium">Browser keys</h3>
             <p className="mt-1 max-w-[60ch] text-[12px] text-muted">
               Safe to put in a page: they only search, never write, manage or see other keys. One limited to a search application can only run its template.
+              A key&apos;s limit is shared by every visitor: the per-address limit keeps one of them from using it all up. The allowed origins only bind
+              browsers: anyone can send the key from elsewhere, within its limits.
             </p>
           </div>
           <button onClick={load} disabled={busy !== null} className={btn} title="Lists the cluster's browser keys (wakes it)">
@@ -236,7 +279,7 @@ function Keys({ cluster }: { cluster: SearchCluster }) {
               <input value={perMinute} onChange={(e) => setPerMinute(e.target.value)} inputMode="numeric" className={`${input} w-full font-mono`} />
             </Field>
             <Field label="Per address">
-              <input value={perIp} onChange={(e) => setPerIp(e.target.value)} inputMode="numeric" placeholder="any" className={`${input} w-full font-mono`} />
+              <input value={perIp} onChange={(e) => setPerIp(e.target.value)} inputMode="numeric" placeholder="60" className={`${input} w-full font-mono`} />
             </Field>
             <Field label="Expires">
               <select value={expiry} onChange={(e) => setExpiry(Number(e.target.value))} className={`${input} w-full`}>

@@ -808,10 +808,39 @@ async fn browsers_search_with_browser_keys() {
     let other = e.post(&format!("{path}/keys"), json!({"name": "ingest", "access": "data"})).await;
     let (s, _) = e.call(reqwest::Method::DELETE, &format!("{path}/browser-keys/{}", other["id"].as_str().unwrap()), None).await;
     assert_eq!(s, 404);
+    // A branch copies the cluster's keys with its security; a browser key works only where it
+    // was made: not on a branch made before its revoke, nor on one cut from a point before it.
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    let before_revoke = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    e.post(&format!("{path}/branches"), json!({"name": "shop-staging"})).await;
     let (s, _) = e.call(reqwest::Method::DELETE, &format!("{path}/browser-keys/{}", reader["id"].as_str().unwrap()), None).await;
     assert_eq!(s, 204);
     let r = browser(&reader, reqwest::Method::POST, "/products/_search", Some(json!({}))).await.unwrap();
     assert_eq!(r.status().as_u16(), 401);
+    // Any key revoked after the point stays revoked on a point-in-time branch: it takes its
+    // parent's security as it is now.
+    let (s, _) = e.call(reqwest::Method::DELETE, &format!("{path}/keys/{}", other["id"].as_str().unwrap()), None).await;
+    assert_eq!(s, 204);
+    e.post(&format!("{path}/branches"), json!({"name": "shop-before", "at": before_revoke})).await;
+    {
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let shipped = String::from_utf8(b64.decode(other["api_key"].as_str().unwrap()).unwrap()).unwrap();
+        let on_branch = b64.encode(shipped.replace("@shop:", "@shop-before:"));
+        let r = e.http.get(format!("{}/", e.es)).header("authorization", format!("ApiKey {on_branch}")).send().await.unwrap();
+        assert_eq!(r.status().as_u16(), 401, "a regular key revoked after the point, on the point-in-time branch");
+    }
+    for branch in ["shop-staging", "shop-before"] {
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let shipped = String::from_utf8(b64.decode(reader["api_key"].as_str().unwrap()).unwrap()).unwrap();
+        let moved = json!({ "api_key": b64.encode(shipped.replace("@shop:", &format!("@{branch}:"))) });
+        let r = browser(&moved, reqwest::Method::POST, "/products/_search", Some(json!({}))).await.unwrap();
+        assert_eq!(r.status().as_u16(), 401, "the parent's browser key on {branch}");
+        let listed = e.get(&format!("/v1/search/clusters/{branch}/browser-keys")).await;
+        assert_eq!(listed["keys"], json!([]), "a branch lists no browser keys of its parent");
+    }
 
     // The IP allowlist comes first, preflights included.
     let (s, _) = e.call(reqwest::Method::PATCH, &path, Some(json!({"ip_allowlist": ["203.0.113.0/24"]}))).await;
@@ -827,6 +856,106 @@ async fn browsers_search_with_browser_keys() {
         .unwrap();
     assert_eq!(r.status().as_u16(), 403);
     assert_eq!(r.text().await.unwrap(), r#"{"ok":false,"message":"Forbidden due to traffic filtering"}"#);
+}
+
+/// A cluster where a browser key's filter (`public: true`) hides document 2 of `products`, and an
+/// index `other` the key can't read: the key, for [`as_key`].
+async fn filtered_key(e: &Env) -> String {
+    let c = e.post("/v1/search/clusters", json!({"name": "shop"})).await;
+    let path = format!("/v1/search/clusters/{}", c["id"].as_str().unwrap());
+    let bulk = "{\"index\":{\"_index\":\"products\",\"_id\":\"1\"}}\n{\"title\":\"trail shoes\",\"public\":true,\"color\":\"red\"}\n\
+                {\"index\":{\"_index\":\"products\",\"_id\":\"2\"}}\n{\"title\":\"secret shoes\",\"public\":false,\"color\":\"red\"}\n\
+                {\"index\":{\"_index\":\"other\",\"_id\":\"1\"}}\n{\"title\":\"other shoes\",\"color\":\"red\"}\n";
+    let r = e.post(&format!("{path}/request"), json!({"method": "POST", "path": "/_bulk?refresh=true", "body": bulk})).await;
+    assert_eq!(r["status"], 200, "{r}");
+    let k = e.post(&format!("{path}/browser-keys"), json!({"name": "page", "indices": ["products"], "filter": {"term": {"public": true}}})).await;
+    k["api_key"].as_str().unwrap().to_string()
+}
+
+/// A request to the cluster with a browser key.
+async fn as_key(e: &Env, key: &str, method: reqwest::Method, p: &str, body: Option<Value>) -> (u16, Value) {
+    let mut r = e.http.request(method, format!("{}{p}", e.es)).header("authorization", format!("ApiKey {key}"));
+    if let Some(b) = body {
+        r = r.json(&b);
+    }
+    let r = r.send().await.unwrap();
+    let s = r.status().as_u16();
+    let t = r.text().await.unwrap();
+    (s, serde_json::from_str(&t).unwrap_or(Value::String(t)))
+}
+
+fn total(v: &Value) -> i64 {
+    v["hits"]["total"]["value"].as_i64().unwrap_or(-1)
+}
+
+/// Suggesters read the terms of every document, and a profile shows the filter: neither runs
+/// for a key whose documents are filtered (Elasticsearch's `DlsFlsRequestValidator`).
+#[tokio::test]
+async fn a_filtered_key_gets_no_suggestions_from_hidden_documents() {
+    let e = env().await;
+    let key = filtered_key(&e).await;
+    let suggest = json!({"size": 0, "suggest": {"s": {"text": "secrat", "term": {"field": "title", "suggest_mode": "always"}}}});
+    let (s, v) = as_key(&e, &key, reqwest::Method::POST, "/products/_search", Some(suggest)).await;
+    assert_eq!(s, 400, "{v}");
+    assert!(v["error"]["reason"].as_str().unwrap().contains("Suggest isn't supported if document level security is enabled"), "{v}");
+    let (s, _) = as_key(&e, &key, reqwest::Method::POST, "/products/_search", Some(json!({"profile": true}))).await;
+    assert_eq!(s, 400);
+}
+
+/// A terms lookup reads its document as the key: one its filter hides is as missing as one that
+/// doesn't exist, and an index it can't read is refused.
+#[tokio::test]
+async fn a_terms_lookup_reads_as_the_filtered_key() {
+    let e = env().await;
+    let key = filtered_key(&e).await;
+    let lookup = |id: &str, index: &str| json!({"query": {"terms": {"color.keyword": {"index": index, "id": id, "path": "color"}}}});
+    for id in ["2", "99"] {
+        let (s, v) = as_key(&e, &key, reqwest::Method::POST, "/products/_search", Some(lookup(id, "products"))).await;
+        assert_eq!((s, total(&v)), (200, 0), "lookup of {id}: {v}");
+    }
+    let (s, v) = as_key(&e, &key, reqwest::Method::POST, "/products/_search", Some(lookup("1", "other"))).await;
+    assert_eq!(s, 403, "{v}");
+}
+
+/// `more_like_this` reads its `like` documents as the key, as a terms lookup does.
+#[tokio::test]
+async fn more_like_this_reads_its_documents_as_the_filtered_key() {
+    let e = env().await;
+    let key = filtered_key(&e).await;
+    let mlt = |id: &str, index: &str| json!({"query": {"more_like_this": {"fields": ["title"], "like": [{"_index": index, "_id": id}], "min_term_freq": 1, "min_doc_freq": 1}}});
+    for id in ["2", "99"] {
+        let (s, v) = as_key(&e, &key, reqwest::Method::POST, "/products/_search", Some(mlt(id, "products"))).await;
+        assert_eq!((s, total(&v)), (200, 0), "like {id}: {v}");
+    }
+    let (s, v) = as_key(&e, &key, reqwest::Method::POST, "/products/_search", Some(mlt("1", "other"))).await;
+    assert_eq!(s, 403, "{v}");
+}
+
+/// Term vectors of a document the key's filter hides are "not found", as its get is.
+#[tokio::test]
+async fn term_vectors_of_a_hidden_document_are_not_found() {
+    let e = env().await;
+    let key = filtered_key(&e).await;
+    let (s, v) = as_key(&e, &key, reqwest::Method::GET, "/products/_termvectors/2", None).await;
+    assert_eq!((s, &v["found"]), (200, &json!(false)), "{v}");
+    let (s, v) = as_key(&e, &key, reqwest::Method::GET, "/products/_termvectors/1", None).await;
+    assert_eq!((s, &v["found"]), (200, &json!(true)), "{v}");
+}
+
+/// An async search's stored result is its opener's: anyone else (here a browser key with the
+/// id of the cluster owner's search) gets 404 for it, its status and its delete.
+#[tokio::test]
+async fn async_search_results_belong_to_their_opener() {
+    let e = env().await;
+    let key = filtered_key(&e).await;
+    let r = e.post("/v1/search/clusters/shop/request", json!({"method": "POST", "path": "/products/_async_search?keep_on_completion=true", "body": {"query": {"match_all": {}}}})).await;
+    let id = body(&r)["id"].as_str().unwrap().to_string();
+    for (m, p) in [(reqwest::Method::GET, format!("/_async_search/{id}")), (reqwest::Method::GET, format!("/_async_search/status/{id}")), (reqwest::Method::DELETE, format!("/_async_search/{id}"))] {
+        let (s, v) = as_key(&e, &key, m.clone(), &p, None).await;
+        assert_eq!(s, 404, "{m} {p}: {v}");
+    }
+    let r = e.post("/v1/search/clusters/shop/request", json!({"method": "GET", "path": format!("/_async_search/{id}")})).await;
+    assert_eq!((r["status"].as_i64(), total(&body(&r)["response"])), (Some(200), 2), "{r}");
 }
 
 #[tokio::test]

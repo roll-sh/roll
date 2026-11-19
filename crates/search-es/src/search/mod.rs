@@ -481,6 +481,20 @@ pub fn resolve_targets(cluster: &Cluster, st: &ClusterState, req: &SearchRequest
             Some(sec) => sec.documents(cluster, crate::xpack::security::dls::READ, &idx.name)?,
             None => None,
         };
+        // `DlsFlsRequestValidator`: suggesters read the terms of every document, and a profile
+        // shows the restriction's query, so neither runs where documents are restricted.
+        if dls.is_some() {
+            let mut errors = Vec::new();
+            if req.source.suggest.is_some() {
+                errors.push("Suggest isn't supported if document level security is enabled".to_string());
+            }
+            if req.source.profile {
+                errors.push("A search request cannot be profiled if document level security is enabled".to_string());
+            }
+            if !errors.is_empty() {
+                return Err(EsError::action_request_validation(&errors));
+            }
+        }
         let filter = match (filter, dls) {
             (Some(a), Some(d)) => Some(crate::query::Query::from(crate::query::compound::Bool { filter: vec![a, d], ..Default::default() })),
             (a, d) => a.or(d),

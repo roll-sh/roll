@@ -1037,6 +1037,13 @@ Checked against Elasticsearch 9.5.5 (captures in
   `Date` (roll sends none anywhere), `allow-credentials` can't be turned on, and the settings
   apply per cluster without a restart. A browser key's rate limit answers 429
   `es_rejected_execution_exception` with `Retry-After`, which Elasticsearch has no setting for.
+- Document level security around a filter, as Elasticsearch keeps it: documents another query
+  reads (a terms lookup, an indexed shape, `more_like_this` items, `percolate`'s stored
+  document) are read as the caller, so one its filter hides is missing and hidden fields are left
+  out; term vectors of a hidden document are `found: false`; `suggest` and `profile` are refused
+  (400 `action_request_validation_exception`) where the caller's documents are restricted. An
+  async search's stored result is its opener's (the API key, or the user and realm): anyone else
+  gets 404 for it, its status and its delete, except that `cancel_task` may delete it.
 - Slow logs: `index.search.slowlog.threshold.{query,fetch}.*` and
   `index.indexing.slowlog.threshold.index.*` log a shard's query or fetch phase, or an index
   operation on the primary, that took longer than a threshold (`took > threshold`, the highest

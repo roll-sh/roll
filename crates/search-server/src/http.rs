@@ -555,7 +555,9 @@ async fn answer<B: RequestBody>(
     if es.header("expect").is_some_and(|v| !v.trim().eq_ignore_ascii_case("100-continue")) {
         return Ok(expectation_failed());
     }
-    let mut lease = match node.enter_from(&es, sni, origin).await {
+    let mut seen = None;
+    let entered = node.enter_seeing(&es, sni, origin, &mut seen).await;
+    let mut lease = match entered {
         Ok(l) => l,
         Err(refused) => {
             let (r, retry_after) = match refused {
@@ -563,9 +565,10 @@ async fn answer<B: RequestBody>(
                 Refused::Throttled(r, s) => (r, Some(s)),
                 Refused::Rejected(r) => (r, None),
             };
-            // Past the allowlist: a page may read why it was turned away (a 401, a 429).
+            // Past the allowlist: a page may read why it was turned away (a 401, a 429), from
+            // the settings the refusal already read.
             if let Some(x) = cross.as_deref_mut() {
-                x.allow(Box::pin(node.cors_of(&es, sni, origin)).await.ok().flatten());
+                x.allow(seen);
             }
             let mut resp = search_es::rest::error_response(&r.error, &es, r.dialect);
             if let Some(s) = retry_after {

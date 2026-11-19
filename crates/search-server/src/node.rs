@@ -683,14 +683,23 @@ pub enum Refused {
     Throttled(Rejected, u64),
 }
 
-/// The rate limit of a browser key `p` authenticated as (`None`: not an API key, or one
-/// without a limit), with the key's id.
-fn browser_limit(cluster: &Cluster, p: &search_es::xpack::security::Principal) -> Option<(String, crate::browser::KeyLimit)> {
-    let search_es::xpack::security::AuthKind::ApiKey(k) = &p.kind else { return None };
-    let meta = search_es::xpack::security::api_keys::metadata(cluster, &k.id)?;
-    let r = meta.get(crate::browser::METADATA)?.get("rate_limit")?;
-    let limit = crate::browser::KeyLimit::new(r.get("per_minute").and_then(|v| v.as_i64()), r.get("per_ip_per_minute").and_then(|v| v.as_i64()))?;
-    Some((k.id.clone(), limit))
+/// What a browser key `p` authenticated as may do on `loaded` (`Ok(None)`: not a browser key):
+/// its id and rate limit. `Err`: a browser key of another cluster, which a branch (or a
+/// point-in-time branch from before a revoke) copied with its security: refused as an unknown key.
+fn browser_key(loaded: &Loaded, p: &search_es::xpack::security::Principal) -> Result<Option<(String, crate::browser::KeyLimit)>, ()> {
+    let search_es::xpack::security::AuthKind::ApiKey(k) = &p.kind else { return Ok(None) };
+    let Some(meta) = search_es::xpack::security::api_keys::metadata(&loaded.cluster, &k.id) else { return Ok(None) };
+    let Some(b) = meta.get(crate::browser::METADATA) else { return Ok(None) };
+    let spec = loaded.spec();
+    match (b.get("cluster").and_then(|v| v.as_str()), spec.id.as_deref()) {
+        (Some(made_for), Some(id)) if made_for == id => {}
+        _ => return Err(()),
+    }
+    let r = b.get("rate_limit");
+    let n = |f: &str| r.and_then(|r| r.get(f)).and_then(|v| v.as_i64());
+    let limit = crate::browser::KeyLimit::new(n("per_minute"), n("per_ip_per_minute"))
+        .unwrap_or(crate::browser::KeyLimit { per_minute: crate::browser::MAX_PER_MINUTE, per_ip_per_minute: None });
+    Ok(Some((k.id.clone(), limit)))
 }
 
 /// The `http.cors.*` node settings a cluster shows for its spec (none with CORS off).
@@ -1775,6 +1784,13 @@ impl Node {
     /// and costs nothing ([`Refused::Filtered`]). A request that names no cluster that exists is
     /// refused (401) as before.
     pub async fn enter_from(self: &Arc<Self>, req: &EsRequest, sni: Option<&str>, origin: Origin) -> Result<Lease, Refused> {
+        self.enter_seeing(req, sni, origin, &mut None).await
+    }
+
+    /// [`Node::enter_from`], also handing back the CORS settings of the cluster it found
+    /// (`seen`, once its IP allowlist admitted `origin`), so a refusal can carry CORS headers
+    /// without reading the catalog again.
+    pub async fn enter_seeing(self: &Arc<Self>, req: &EsRequest, sni: Option<&str>, origin: Origin, seen: &mut Option<Arc<crate::cors::Cors>>) -> Result<Lease, Refused> {
         crate::process::note_activity();
         let reject = |error: EsError| Rejected { error, dialect: Dialect::Elasticsearch };
         let presented;
@@ -1826,16 +1842,17 @@ impl Node {
             if !spec.ip_allowlist.admits(origin) {
                 return Err(Refused::Filtered);
             }
+            *seen = spec.cors.clone();
             let mut via_native = false;
             let mut key_limit = None;
             if let Some(c) = &claim
                 && !auth::verify(&spec, c)
             {
-                let Some(p) = native_principal(&loaded) else {
+                let Some(Ok(k)) = native_principal(&loaded).map(|p| browser_key(&loaded, &p)) else {
                     self.audit_refusal(name, spec.dialect, Some(&*loaded), req, &presented, Some(c));
                     return Err(failed().into());
                 };
-                key_limit = browser_limit(&loaded.cluster, &p);
+                key_limit = k;
                 via_native = true;
             }
             // Draining (SIGTERM): nothing new starts, so the requests in flight finish and the
@@ -1862,6 +1879,7 @@ impl Node {
         if !spec.ip_allowlist.admits(origin) {
             return Err(Refused::Filtered);
         }
+        *seen = spec.cors.clone();
         let mut via_native = false;
         if let Some(c) = &claim
             && !auth::verify(&spec, c)
@@ -1886,11 +1904,11 @@ impl Node {
             })?;
             let mut key_limit = None;
             if via_native {
-                let Some(p) = native_principal(&loaded) else {
+                let Some(Ok(k)) = native_principal(&loaded).map(|p| browser_key(&loaded, &p)) else {
                     self.audit_refusal(name, dialect, Some(&*loaded), req, &presented, claim.as_ref());
                     return Err(failed().into());
                 };
-                key_limit = browser_limit(&loaded.cluster, &p);
+                key_limit = k;
             }
             match self.pin(loaded, dialect) {
                 Ok(mut lease) => {
@@ -1977,7 +1995,8 @@ impl Node {
                 Origin::Internal => return Ok(lease),
                 Origin::Unknown => None,
             };
-            if let Err(retry_after) = lease.loaded.browser.check(&id, ip, limit) {
+            let ceiling = lease.loaded.spec().browser_per_minute.unwrap_or(crate::browser::DEFAULT_CLUSTER_PER_MINUTE);
+            if let Err(retry_after) = lease.loaded.browser.check(&id, ip, limit, ceiling) {
                 Lease::refused(&lease.loaded, req);
                 let error = EsError::too_many_requests(format!(
                     "rejected execution of REST request [{} {}]: API key [{id}] exceeds its rate of [{}] requests per minute{}",

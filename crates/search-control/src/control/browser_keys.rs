@@ -16,7 +16,7 @@
 //! The encoded key is in the create answer only. Listing reads the cluster's keys back; revoking
 //! invalidates one, refusing any key that isn't a browser key.
 
-use super::{Control, ControlError, OS_KEY_PREFIX, Result, connection_of};
+use super::{Control, ControlError, Result, connection_of};
 use base64::Engine;
 use search_es::EsRequest;
 use search_server::browser::{MAX_PER_MINUTE, METADATA};
@@ -25,6 +25,10 @@ use serde_json::{Value, json};
 
 /// A key's rate limit when none is given: ten requests a second, from all its pages together.
 pub const DEFAULT_PER_MINUTE: u64 = 600;
+/// A key's limit per client address when none is given: one visitor can't use up the key.
+pub const DEFAULT_PER_IP_PER_MINUTE: u64 = 60;
+/// The most browser keys a cluster may have.
+pub const MAX_KEYS: usize = 20;
 /// The most indices one key may name.
 const MAX_INDICES: usize = 64;
 /// The largest filter, as JSON.
@@ -74,6 +78,9 @@ fn reach(k: &NewBrowserKey) -> Result<Value> {
                 if n.is_empty() || n.len() > 255 || n.contains([',', ' ', '"', '\\', '/', '?', '#']) || n.starts_with(['-', '+', '_']) {
                     return Err(ControlError::Invalid(format!("indices: {n:?} isn't an index name or pattern")));
                 }
+                if n.chars().all(|c| c == '*') {
+                    return Err(ControlError::Invalid(format!("indices: {n:?} would reach every index, hidden ones included: name the indices or a pattern of them")));
+                }
                 if n.starts_with('.') {
                     return Err(ControlError::Invalid(format!("indices: {n:?} is a hidden or system index: a browser key can't reach those")));
                 }
@@ -100,18 +107,15 @@ fn reach(k: &NewBrowserKey) -> Result<Value> {
     };
     let r = k.rate_limit.unwrap_or(RateLimit { per_minute: None, per_ip_per_minute: None });
     let per_minute = r.per_minute.unwrap_or(DEFAULT_PER_MINUTE);
+    let per_ip = r.per_ip_per_minute.unwrap_or(DEFAULT_PER_IP_PER_MINUTE);
     let ok = |n: u64| (1..=MAX_PER_MINUTE).contains(&n);
-    if !ok(per_minute) || r.per_ip_per_minute.is_some_and(|n| !ok(n)) {
+    if !ok(per_minute) || !ok(per_ip) {
         return Err(ControlError::Invalid(format!("rate_limit: 1 to {MAX_PER_MINUTE} requests per minute")));
     }
     if k.expires_in_s.is_some_and(|s| s <= 0) {
         return Err(ControlError::Invalid("expires_in_s must be positive".into()));
     }
-    let mut rate = json!({ "per_minute": per_minute });
-    if let Some(n) = r.per_ip_per_minute {
-        rate["per_ip_per_minute"] = json!(n);
-    }
-    let mut out = json!({ "rate_limit": rate });
+    let mut out = json!({ "rate_limit": { "per_minute": per_minute, "per_ip_per_minute": per_ip } });
     match (indices, application) {
         (Some(i), _) => out["indices"] = json!(i),
         (_, Some(a)) => out["application"] = json!(a),
@@ -142,8 +146,12 @@ fn role(reach: &Value) -> Value {
 
 /// A key of the cluster's `_security/api_key` answer as the route lists it (`None`: not a
 /// browser key).
-fn listed(k: &Value) -> Option<Value> {
+fn listed(k: &Value, cluster_id: &str) -> Option<Value> {
     let meta = k.get("metadata")?.get(METADATA)?;
+    // A branch holds its parent's keys, which work only on the parent.
+    if meta.get("cluster")?.as_str()? != cluster_id {
+        return None;
+    }
     let mut out = json!({
         "id": k.get("id")?,
         "name": k.get("name").cloned().unwrap_or(Value::Null),
@@ -168,10 +176,19 @@ impl Control {
             return Err(ControlError::Invalid("browser keys are API keys: make them on an Elasticsearch-flavor cluster (OpenSearch clients don't send API keys)".into()));
         }
         let reach = reach(&k)?;
+        // Counted before the create, so two racing creates may pass one over: a bound on keys
+        // left lying around, not a quota.
+        if self.browser_keys(id).await?.len() >= MAX_KEYS {
+            return Err(ControlError::Conflict(format!("cluster {} has {MAX_KEYS} browser keys already: revoke one first", c.name)));
+        }
+        // Bound to this cluster's id: a branch (or a restore of an earlier state) copies the
+        // cluster's keys, and the node refuses a browser key anywhere but where it was made.
+        let mut meta = reach.clone();
+        meta["cluster"] = json!(c.id);
         let mut body = json!({
             "name": k.name.trim(),
             "role_descriptors": { "roll_browser": role(&reach) },
-            "metadata": { METADATA: reach },
+            "metadata": { METADATA: meta },
         });
         if let Some(s) = k.expires_in_s {
             body["expiration"] = json!(format!("{s}s"));
@@ -212,27 +229,23 @@ impl Control {
         if resp.status != 200 {
             return Err(ControlError::Internal(anyhow::anyhow!("listing the API keys of cluster {} failed ({})", c.name, resp.status)));
         }
-        let mut keys: Vec<Value> = v["api_keys"].as_array().into_iter().flatten().filter_map(listed).collect();
+        let mut keys: Vec<Value> = v["api_keys"].as_array().into_iter().flatten().filter_map(|k| listed(k, &c.id)).collect();
         keys.sort_by_key(|k| std::cmp::Reverse(k["created_at"].as_i64().unwrap_or(0)));
         Ok(keys)
     }
 
-    /// Revokes browser key `key_id` of cluster `id` (`NotFound`: no such browser key, or any
-    /// other key of the cluster). On a deleted cluster it is kept for the restore, as
-    /// [`Control::delete_key`] keeps it.
+    /// Revokes browser key `key_id` of cluster `id` (`NotFound`: no such browser key, any other
+    /// key of the cluster, or a deleted cluster, whose keys can't be told apart until it is
+    /// restored).
     pub async fn revoke_browser_key(&self, id: &str, key_id: &str) -> Result<()> {
-        let c = match self.get(id).await {
-            Ok(c) => c,
-            Err(ControlError::NotFound(_)) if !key_id.starts_with(OS_KEY_PREFIX) => return self.delete_key(id, key_id).await,
-            Err(e) => return Err(e),
-        };
+        let c = self.get(id).await?;
         let none = || ControlError::NotFound(format!("no browser key {key_id} on cluster {}", c.name));
         if c.flavor == "opensearch" {
             return Err(none());
         }
         let resp = self.call(&c, EsRequest::new("GET", &format!("/_security/api_key?id={}", urlencoding::encode(key_id)))).await;
         let v: Value = serde_json::from_slice(&resp.body).unwrap_or(Value::Null);
-        let is_browser = v["api_keys"].as_array().into_iter().flatten().any(|k| k["id"].as_str() == Some(key_id) && listed(k).is_some());
+        let is_browser = v["api_keys"].as_array().into_iter().flatten().any(|k| k["id"].as_str() == Some(key_id) && listed(k, &c.id).is_some());
         if !is_browser {
             return Err(none());
         }

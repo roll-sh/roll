@@ -321,6 +321,7 @@ mod tests {
                     restored_at: None,
                     ip_allowlist: Vec::new(),
                     cors: None,
+                    browser_per_minute: None,
                 },
                 crate::store::Caps::NONE,
             )

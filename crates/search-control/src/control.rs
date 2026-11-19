@@ -205,6 +205,9 @@ pub struct ClusterOptions {
     /// `allow_origin` turns CORS off.
     #[serde(default, deserialize_with = "present")]
     pub cors: Option<Option<CorsSettings>>,
+    /// Requests per minute all its browser keys may make together; `null`: the node's default.
+    #[serde(default, deserialize_with = "present")]
+    pub browser_per_minute: Option<Option<i64>>,
 }
 
 /// A field that was given, `null` included (`Some(None)`), apart from one left out (`None`).
@@ -366,6 +369,8 @@ pub fn spec_for(c: &SearchCluster) -> ClusterSpec {
     spec.max_body_bytes = Some((c.max_body_mb.max(1) as usize) << 20);
     spec.destructive_requires_name = c.destructive_requires_name;
     spec.ip_allowlist = allowlist_of(&c.ip_allowlist);
+    spec.id = Some(c.id.clone());
+    spec.browser_per_minute = c.browser_per_minute.and_then(|n| u64::try_from(n).ok());
     spec.cors = c.cors.as_ref().and_then(|g| match search_server::cors::Cors::new(&g.allow_origin, g.allow_methods.as_deref(), g.allow_headers.as_deref(), g.max_age) {
         Ok(c) => Some(Arc::new(c)),
         // Checked when written; one that no longer parses (a hand-edited catalog) allows nobody.
@@ -777,6 +782,12 @@ impl Control {
         if let Some(v) = o.cors {
             c.cors = cors_settings(v)?;
         }
+        if let Some(v) = o.browser_per_minute {
+            if v.is_some_and(|n| !(1..=search_server::browser::MAX_PER_MINUTE as i64).contains(&n)) {
+                return Err(ControlError::Invalid(format!("browser_per_minute: 1 to {}", search_server::browser::MAX_PER_MINUTE)));
+            }
+            c.browser_per_minute = v;
+        }
         if let Some(v) = o.flavor {
             c.flavor = v.to_ascii_lowercase();
         }
@@ -845,6 +856,7 @@ impl Control {
             restored_at: None,
             ip_allowlist: Vec::new(),
             cors: None,
+            browser_per_minute: None,
         }
     }
 
@@ -954,6 +966,15 @@ impl Control {
                     return Err(if msg.contains("already exists") { ControlError::Conflict(msg) } else { ControlError::Internal(e) });
                 }
             }
+            if at.is_some()
+                && let Err(e) = self.adopt_current_security(&p, &c).await
+            {
+                // Never left with security older than its parent's: a revoked key would work.
+                if let Err(e2) = self.data.delete_cluster(&c.name).await {
+                    tracing::warn!(cluster = c.name, error = %e2, "removing a branch whose security couldn't be brought up to date failed");
+                }
+                return Err(ControlError::Internal(e));
+            }
         }
         if let Err(e) = self.insert(&c, caps).await {
             // Lost a race for the name, or the owner is at a cap: don't leave the branch's
@@ -979,6 +1000,19 @@ impl Control {
             }
         }
         Ok(c)
+    }
+
+    /// A point-in-time branch `c` of `p` takes `p`'s security as it is now, not as it was at the
+    /// point: keys revoked, tokens invalidated, users deleted and passwords changed since stay
+    /// so (`search_es::xpack::security::adopt_current_security`). Written to the branch's
+    /// stored state before it is in the catalog, so nothing can load the older one meanwhile.
+    async fn adopt_current_security(&self, p: &SearchCluster, c: &SearchCluster) -> anyhow::Result<()> {
+        let Some(branch) = self.data.read_cluster(&c.name).await? else { return Ok(()) };
+        let Some(current) = self.data.read_cluster(&p.name).await? else { return Ok(()) };
+        let dialect = dialect(&c.flavor).unwrap_or(Dialect::Elasticsearch);
+        let json = search_es::xpack::security::adopt_current_security(&branch.json, &current.json, dialect, now_ms())?;
+        self.data.write_cluster(&c.name, &search_store::ClusterState::new(json)).await?;
+        Ok(())
     }
 
     fn check_window(&self, p: &SearchCluster, at: i64, now: i64) -> Result<()> {
@@ -2204,6 +2238,7 @@ mod tests {
             restored_at: None,
             ip_allowlist: vec![IpRule { cidr: "203.0.113.0/24".into(), description: None }],
             cors: None,
+            browser_per_minute: None,
         };
         let s = spec_for(&c);
         assert!(s.ip_allowlist.contains("::ffff:203.0.113.9".parse().unwrap()) && !s.ip_allowlist.is_open());
