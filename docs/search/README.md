@@ -787,9 +787,18 @@ Built 2026-11-19 (in review): Terraform for search clusters (#350's item 3): clu
    given already sealed is sealed again (it was opened and sent to the client's `url`; watches
    already refuse one, connector and Fleet secrets always seal), and chunking, the semantic
    highlighter and `TOP_SNIPPETS` are linear in the text. Sealing binds the kind, not the
-   cluster: branches copy a cluster's state under a new id. Left, low (in progress): file service tokens are
-   node-wide (off unless the operator sets `path.conf`), the inference `timeout` has no upper
-   bound. (A simplified `rrf`/`linear` now expands only against indices the caller may read.)
+   cluster: branches copy a cluster's state under a new id. The two low leftovers are closed: a
+   node serving many clusters reads `<path.conf>/service_tokens` only for the clusters its
+   operator names in `roll.security.service_token_file.clusters` (the file is the node's, so a
+   token in it signed in as `elastic/fleet-server` on every tenant's cluster; a dev-mode node
+   serves one cluster and keeps Elasticsearch's behaviour; `search-server` `tests/http.rs`
+   `the_nodes_service_token_file_signs_in_only_to_the_clusters_it_names`), and an inference
+   call waits at most the node's `roll.inference.max_timeout` (default 120s) whatever `timeout`
+   it asks for, retries and the rate limiter's wait included (Elasticsearch waits as long as
+   asked; compatibility.md, "Inference"; `search-es` `tests/inference.rs`
+   `a_request_waits_no_longer_than_the_nodes_cap_whatever_timeout_it_asks_for`). `roll.security.*`
+   node settings are now kept out of `_cluster/settings?include_defaults` as node info already
+   kept them. (A simplified `rrf`/`linear` now expands only against indices the caller may read.)
    A third review, of the analysis plugins, found five ways for one tenant to crash or exhaust a
    shared node, and all five are fixed. A deeply nested `UnicodeSet` overflowed the stack: sets
    now nest at most 101 deep, ICU's limit, checked before ICU4X parses them. Beider-Morse
