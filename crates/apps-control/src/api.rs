@@ -1249,7 +1249,7 @@ async fn visit(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Ext
     let Some(user) = ext.get::<roll_auth::SignedIn>() else {
         return Err(Error::Forbidden("signing in to an environment is for a person signed in to roll, not a token".into()));
     };
-    ok(json!({ "url": apps.visit_ticket(&id, &env, &user.user, &b.to).await? }))
+    ok(json!({ "url": apps.visit_ticket(&id, &env, &user.user, &user.session, &b.to).await? }))
 }
 
 async fn trace(State(apps): S, Path((id, env, trace)): Path<(String, String, String)>) -> R {
@@ -1274,6 +1274,12 @@ struct ShellQuery {
     instance: Option<String>,
     cols: Option<u16>,
     rows: Option<u16>,
+    /// A one-off console (a fresh container) instead of a running instance, with what to run in
+    /// it and its own size.
+    console: Option<bool>,
+    command: Option<String>,
+    cpu: Option<f64>,
+    memory_mb: Option<u32>,
 }
 
 /// `GET …/shell` (a WebSocket): a shell in a running instance; see `crate::shell`.
@@ -1281,7 +1287,17 @@ async fn shell(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q)
     // A shell reads every variable: roll secrets' reveal rule, as for their values.
     apps.check_secret_reveal(&id, &env, asker(&ext)).await?;
     let slot = apps.shell_slot(&id, &env)?;
-    let target = apps.shell_target(&id, &env, q.instance.as_deref()).await?;
+    let target = if q.console == Some(true) {
+        let t = apps.console_target(&id, &env, crate::shell::ConsoleAsk { command: q.command.clone(), cpu: q.cpu, memory_mb: q.memory_mb }).await?;
+        // What it runs stays out of the trail (a command line can hold a credential).
+        apps.audit("console.opened", &id, &env, actor(&ext), json!({ "command": q.command.is_some(), "cpu": q.cpu, "memory_mb": q.memory_mb })).await;
+        t
+    } else {
+        if q.command.is_some() || q.cpu.is_some() || q.memory_mb.is_some() {
+            return Err(Error::BadRequest("command, cpu and memory_mb are a console's (console=true)".into()));
+        }
+        apps.shell_target(&id, &env, q.instance.as_deref()).await?
+    };
     let (cols, rows) = (q.cols.unwrap_or(80).clamp(10, 1000), q.rows.unwrap_or(24).clamp(2, 500));
     // Keys and resizes are small: nothing near axum's 64 MiB default is held for a peer.
     let ws = ws.max_message_size(1 << 20).max_frame_size(1 << 20);
@@ -1327,13 +1343,25 @@ struct OpenSession {
     instance: Option<String>,
     cols: Option<u16>,
     rows: Option<u16>,
+    #[serde(default)]
+    console: bool,
+    command: Option<String>,
+    cpu: Option<f64>,
+    memory_mb: Option<u32>,
 }
 
 /// `POST …/shell/sessions`: a shell over HTTP (the dashboard's terminal); see `crate::shell`.
 async fn open_session(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, b: Bytes) -> R {
     apps.check_secret_reveal(&id, &env, asker(&ext)).await?;
-    let o: OpenSession = if b.is_empty() { OpenSession { instance: None, cols: None, rows: None } } else { serde_json::from_slice(&b).map_err(|e| Error::BadRequest(e.to_string()))? };
-    let sh = apps.open_session(&id, &env, o.instance.as_deref(), o.cols.unwrap_or(80).clamp(10, 1000), o.rows.unwrap_or(24).clamp(2, 500)).await?;
+    let o: OpenSession = if b.is_empty() { OpenSession { instance: None, cols: None, rows: None, console: false, command: None, cpu: None, memory_mb: None } } else { serde_json::from_slice(&b).map_err(|e| Error::BadRequest(e.to_string()))? };
+    let console = o.console.then(|| crate::shell::ConsoleAsk { command: o.command.clone(), cpu: o.cpu, memory_mb: o.memory_mb });
+    if console.is_none() && (o.command.is_some() || o.cpu.is_some() || o.memory_mb.is_some()) {
+        return Err(Error::BadRequest("command, cpu and memory_mb are a console's (console: true)".into()));
+    }
+    if console.is_some() {
+        apps.audit("console.opened", &id, &env, actor(&ext), json!({ "command": o.command.is_some(), "cpu": o.cpu, "memory_mb": o.memory_mb })).await;
+    }
+    let sh = apps.open_session(&id, &env, o.instance.as_deref(), console, o.cols.unwrap_or(80).clamp(10, 1000), o.rows.unwrap_or(24).clamp(2, 500)).await?;
     Ok((StatusCode::CREATED, Json(json!({ "id": sh }))).into_response())
 }
 

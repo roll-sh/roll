@@ -47,10 +47,12 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/shared"), get(shared_with))
         .route(&format!("{P}/suggestions"), get(suggestions))
         .route(&format!("{P}/backup"), post(backup))
+        .route(&format!("{P}/backup/schedule"), get(backup_schedule).put(set_backup_schedule).delete(delete_backup_schedule))
         .route(&format!("{P}/restore"), post(restore))
         .route(&format!("{E}/secrets"), get(secrets))
         .route(K, get(secret).put(set_secret).delete(delete_secret))
         .route(&format!("{K}/value"), get(reveal))
+        .route(&format!("{K}/totp"), get(totp))
         .route(&format!("{K}/versions"), get(versions))
         .route(&format!("{K}/versions/{{version}}/value"), get(version_value))
         .route(&format!("{K}/rotate"), post(rotate))
@@ -97,6 +99,8 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/rotators"), get(rotators).post(add_rotator))
         .route(&format!("{P}/rotators/{{id}}"), axum::routing::delete(delete_rotator).patch(update_rotator))
         .route(&format!("{P}/rotators/{{id}}/rotate-secret"), post(rotate_rotator_secret))
+        .route(&format!("{P}/saas"), get(saas_rotators).post(add_saas_rotator))
+        .route(&format!("{P}/saas/{{id}}"), axum::routing::delete(delete_saas_rotator))
         .route(&format!("{P}/transit"), get(transit_keys).post(add_transit_key))
         .route(&format!("{P}/transit/{{name}}"), axum::routing::patch(config_transit_key).delete(delete_transit_key))
         .route(&format!("{P}/transit/{{name}}/rotate"), post(rotate_transit_key))
@@ -128,6 +132,8 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/outside-databases"), get(outside_databases).post(add_outside_database))
         .route(&format!("{P}/outside-databases/{{id}}"), axum::routing::delete(delete_outside_database).patch(update_outside_database))
         .route(&format!("{P}/outside-databases/{{id}}/rotate-admin"), post(rotate_outside_admin))
+        .route(&format!("{P}/kubernetes"), get(kubernetes_clusters).post(add_kubernetes_cluster))
+        .route(&format!("{P}/kubernetes/{{id}}"), axum::routing::delete(delete_kubernetes_cluster))
         .route(&format!("{P}/required"), get(required).put(set_required))
         .route(&format!("{P}/shares"), get(shares).post(create_share))
         .route(&format!("{P}/shares/{{id}}"), axum::routing::delete(revoke_share))
@@ -392,6 +398,20 @@ struct BackupBody {
 }
 
 /// Every value of the project, sealed to the caller's key (admin).
+async fn backup_schedule(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.backup_schedule(&project, &c)).await?))
+}
+
+async fn set_backup_schedule(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
+    let n: crate::backup_schedule::NewBackupSchedule = body(&b)?;
+    Ok(ok(blocking(s, move |s| s.set_backup_schedule(&project, n, &c)).await?))
+}
+
+async fn delete_backup_schedule(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<StatusCode> {
+    blocking(s, move |s| s.delete_backup_schedule(&project, &c)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn backup(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
     let body: BackupBody = body(&b)?;
     let context = crate::backup::context(&project);
@@ -482,6 +502,12 @@ async fn reveal(State(s): S, Who(c): Who, Path((project, env, key)): Path<(Strin
     Ok(secret_response(ok(json!({ "value": value, "problems": problems }))))
 }
 
+/// A TOTP key's current code (docs/secrets.md, "TOTP keys").
+async fn totp(State(s): S, Who(c): Who, Path((project, env, key)): Path<(String, String, String)>, Query(q): Q) -> crate::Result<Response> {
+    let code = blocking(s, move |s| s.totp(&project, &env, &path_of(&q), &key, &c)).await?;
+    Ok(secret_response(ok(code)))
+}
+
 async fn versions(State(s): S, Who(c): Who, Path((project, env, key)): Path<(String, String, String)>, Query(q): Q) -> crate::Result<Response> {
     let kind = kind_of(&q)?;
     Ok(ok(blocking(s, move |s| s.versions(&project, &env, &path_of(&q), &key, kind, &c)).await?))
@@ -529,7 +555,10 @@ async fn values(State(s): S, Who(c): Who, Path((project, env)): Path<(String, St
         // so a write landing after it is a change. Asked for, since it costs about a read.
         // A conditional read (`If-None-Match`, a cache revalidating): unchanged is a 304 that
         // decrypts nothing, issues nothing and writes no audit row.
-        let etag = if_none_match(&headers);
+        // `codes=1` (`roll run --totp-codes`): `<KEY>_CODE` beside each TOTP key. A code moves
+        // without the digest, so such a read is never a 304.
+        let codes = flag(&q, "codes", false);
+        let etag = if_none_match(&headers).filter(|_| !codes);
         let want = flag(&q, "digest", false) || etag.is_some();
         let dynamic = flag(&q, "dynamic", true);
         if let Some(tag) = etag.clone() {
@@ -541,7 +570,10 @@ async fn values(State(s): S, Who(c): Who, Path((project, env)): Path<(String, St
         blocking(s, move |s| {
             let path = path_of(&q);
             let digest = if want { s.digest(&project, &env, &path, &c).ok() } else { None };
-            let v = s.values_for(&project, &env, &path, resolve, None, dynamic, &c)?;
+            let mut v = s.values_for(&project, &env, &path, resolve, None, dynamic, &c)?;
+            if codes {
+                s.add_codes(&project, &path, &mut v)?;
+            }
             if strict && !v.problems.is_empty() {
                 // Nothing is answered, so nothing this read issued may outlive it.
                 for lease in &v.leases {
@@ -592,9 +624,118 @@ async fn insights(State(s): S, Who(c): Who, Path((project, env)): Path<(String, 
     Ok(ok(blocking(s, move |s| s.insights(&project, &env, &path_of(&q), &c)).await?))
 }
 
+/// Long polls held at once: by principal, and on this node. Past either, a poll answers at once
+/// (watchers then ask again after their interval).
+static HELD: std::sync::LazyLock<std::sync::Mutex<HashMap<String, usize>>> = std::sync::LazyLock::new(Default::default);
+const HELD_PER_PRINCIPAL: usize = 32;
+const HELD_PER_NODE: usize = 4096;
+
+/// One held poll, counted until it's dropped.
+struct Held(String);
+
+impl Held {
+    fn take(principal: &str) -> Option<Held> {
+        let mut m = HELD.lock().unwrap_or_else(|e| e.into_inner());
+        if m.values().sum::<usize>() >= HELD_PER_NODE || m.get(principal).copied().unwrap_or(0) >= HELD_PER_PRINCIPAL {
+            return None;
+        }
+        *m.entry(principal.to_string()).or_default() += 1;
+        Some(Held(principal.to_string()))
+    }
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        let mut m = HELD.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(n) = m.get_mut(&self.0) {
+            *n -= 1;
+            if *n == 0 {
+                m.remove(&self.0);
+            }
+        }
+    }
+}
+
+/// `GET …/digest[?since=&wait=]`: the folder's digest, long-polled with `since` (`wait_digest`).
 async fn digest(State(s): S, Who(c): Who, Path((project, env)): Path<(String, String)>, Query(q): Q) -> crate::Result<Response> {
-    let d = blocking(s, move |s| s.digest(&project, &env, &path_of(&q), &c)).await?;
+    let wait = q.get("wait").and_then(|w| w.parse::<u64>().ok()).unwrap_or(0);
+    let d = wait_digest(s, project, env, path_of(&q), q.get("since").cloned(), wait, c).await?;
     Ok(ok(json!({ "digest": d })))
+}
+
+/// A folder's digest, long-polled: with `since` (the digest the caller has) and `wait` (seconds,
+/// at most 25: under a load balancer's idle timeout, and as long as a revoked token keeps a held
+/// answer), it answers as soon as the digest differs from `since`, or with the same digest
+/// when `wait` runs out (`GET …/digest?since=&wait=`, and roll apps' redeploys in process). It
+/// reads the project's change counter each second (cheap) and works the digest out again only
+/// when that moved (one reader per node and project, `subscribe`), or every 10 s (what the counter
+/// can't see: a live link's value, a folder another project shares). At most 32 held per principal and 4096 per node; past that it answers
+/// at once.
+pub async fn wait_digest(s: Arc<Secrets>, project: String, env: String, path: String, since: Option<String>, wait: u64, c: Caller) -> crate::Result<String> {
+    let wait = wait.min(25);
+    let read = |s: Arc<Secrets>| {
+        let (project, env, path, c) = (project.clone(), env.clone(), path.clone(), c.clone());
+        blocking(s, move |s| s.digest(&project, &env, &path, &c))
+    };
+    let mut d = read(s.clone()).await?;
+    if wait == 0 || since.as_deref() != Some(d.as_str()) {
+        return Ok(d);
+    }
+    let Some(_held) = Held::take(&c.principal) else { return Ok(d) };
+    let first = {
+        let project = project.clone();
+        blocking(s.clone(), move |s| s.change_marker(&project)).await?
+    };
+    let mut marker = subscribe(&s, &project, first);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(wait);
+    while tokio::time::Instant::now() < deadline {
+        // Woken when the project's counter moves, else every 10 s (what it can't see).
+        let next = deadline.min(tokio::time::Instant::now() + std::time::Duration::from_secs(10));
+        if let Ok(Err(_)) = tokio::time::timeout_at(next, marker.changed()).await {
+            tokio::time::sleep_until(next).await; // no reader (can't happen while subscribed): wait, never spin
+        }
+        d = read(s.clone()).await?;
+        if since.as_deref() != Some(d.as_str()) {
+            break;
+        }
+    }
+    Ok(d)
+}
+
+/// One reader per node and project of a project's change counter, for every poll held on it: it
+/// reads the counter each second while anyone's subscribed and wakes them when it moves, then
+/// ends (4096 held polls cost a query a second per project, not 4096).
+type Markers = std::sync::Mutex<HashMap<String, tokio::sync::watch::Sender<(i64, i64)>>>;
+static MARKERS: std::sync::LazyLock<Markers> = std::sync::LazyLock::new(Default::default);
+
+fn subscribe(s: &Arc<Secrets>, project: &str, first: (i64, i64)) -> tokio::sync::watch::Receiver<(i64, i64)> {
+    // Keyed by the store too: tests run several in one process.
+    let key = format!("{:p}/{project}", Arc::as_ptr(s));
+    let mut m = MARKERS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(tx) = m.get(&key) {
+        return tx.subscribe();
+    }
+    let (tx, rx) = tokio::sync::watch::channel(first);
+    m.insert(key.clone(), tx.clone());
+    let (s, project) = (s.clone(), project.to_string());
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            {
+                // Under the map's lock, so a subscriber arriving now finds no stale reader.
+                let mut m = MARKERS.lock().unwrap_or_else(|e| e.into_inner());
+                if tx.receiver_count() == 0 {
+                    m.remove(&key);
+                    return;
+                }
+            }
+            let p = project.clone();
+            if let Ok(now) = blocking(s.clone(), move |s| s.change_marker(&p)).await {
+                tx.send_if_modified(|v| std::mem::replace(v, now) != now);
+            }
+        }
+    });
+    rx
 }
 
 #[derive(Deserialize)]
@@ -614,6 +755,9 @@ struct ResolveBody {
     /// credential; such keys are left out and named in `dynamic`.
     #[serde(default = "yes")]
     dynamic: bool,
+    /// `true`: `<KEY>_CODE` beside each TOTP key, the one-time code when the values were read.
+    #[serde(default)]
+    codes: bool,
 }
 
 fn yes() -> bool {
@@ -630,10 +774,14 @@ async fn resolve(State(s): S, Who(c): Who, Path((project, env)): Path<(String, S
     }
     let path = r.path.unwrap_or_else(|| "/".into());
     let (p, e, cons) = (project.clone(), env.clone(), consumer.clone());
-    let (untrusted, dynamic) = (r.untrusted, r.dynamic);
+    let (untrusted, dynamic, codes) = (r.untrusted, r.dynamic, r.codes);
     let v = blocking(s, move |s| {
         let c = if untrusted { s.untrusted(&p, &c)? } else { c };
-        s.values_for(&p, &e, &path, true, Some(&cons), dynamic, &c)
+        let mut v = s.values_for(&p, &e, &path, true, Some(&cons), dynamic, &c)?;
+        if codes {
+            s.add_codes(&p, &path, &mut v)?;
+        }
+        Ok::<_, Error>(v)
     })
     .await?;
     let out = match r.seal_to {
@@ -965,9 +1113,11 @@ struct Scan {
     candidates: Vec<String>,
 }
 
-async fn scan_leaks(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
+async fn scan_leaks(State(s): S, Who(c): Who, Path(project): Path<String>, headers: HeaderMap, b: Bytes) -> crate::Result<Response> {
     let Scan { candidates } = body(&b)?;
-    Ok(ok(blocking(s, move |s| s.scan(&project, &candidates, &c)).await?))
+    // A credential guard's check of what a tool call would write (roll MCP): audited apart.
+    let guard = headers.get("x-roll-guard").is_some_and(|v| v.as_bytes() == b"1");
+    Ok(ok(blocking(s, move |s| s.scan_as(&project, &candidates, &c, guard)).await?))
 }
 
 async fn all_health(State(s): S, Who(c): Who) -> crate::Result<Response> {
@@ -1085,6 +1235,20 @@ async fn delete_github_app(State(s): S, Who(c): Who, Path((project, id)): Path<(
     Ok(StatusCode::NO_CONTENT)
 }
 
+async fn saas_rotators(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.saas_rotators(&project, &c)).await?))
+}
+
+async fn add_saas_rotator(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
+    let n: crate::saas::NewSaasRotator = body(&b)?;
+    Ok(created(blocking(s, move |s| s.add_saas_rotator(&project, n, &c)).await?))
+}
+
+async fn delete_saas_rotator(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
+    blocking(s, move |s| s.delete_saas_rotator(&project, &id, &c)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn outside_databases(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
     Ok(ok(blocking(s, move |s| s.outside_databases(&project, &c)).await?))
 }
@@ -1105,6 +1269,20 @@ async fn rotate_outside_admin(State(s): S, Who(c): Who, Path((project, id)): Pat
 
 async fn delete_outside_database(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
     blocking(s, move |s| s.delete_outside_database(&project, &id, &c)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn kubernetes_clusters(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.kubernetes_clusters(&project, &c)).await?))
+}
+
+async fn add_kubernetes_cluster(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
+    let n: crate::kubernetes::NewKubernetesCluster = body(&b)?;
+    Ok(created(blocking(s, move |s| s.add_kubernetes_cluster(&project, n, &c)).await?))
+}
+
+async fn delete_kubernetes_cluster(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
+    blocking(s, move |s| s.delete_kubernetes_cluster(&project, &id, &c)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

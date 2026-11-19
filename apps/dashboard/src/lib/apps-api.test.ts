@@ -13,7 +13,7 @@ const svc = (env: Partial<EnvironmentSummary>, id = "svc_a"): Service => ({
   git_login: null,
   github: null,
   created_at: 1,
-  environments: [{ name: "production", state: "running", url: "https://web-shop.up.roll.site", active: null, latest: null, ...env }],
+  environments: [{ name: "production", state: "running", url: "https://web-shop.up.roll.site", active: null, latest: null, needs_deploy: false, ephemeral: false, ...env }],
 });
 
 const latest = (status: DeployStatus, id = "dep_1") => ({ latest: { id, status } });

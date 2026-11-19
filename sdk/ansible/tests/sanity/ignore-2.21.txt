@@ -1,0 +1,2 @@
+plugins/lookup/secret.py validate-modules:missing-gplv3-license # the collection takes the repository's licence
+plugins/modules/secret.py validate-modules:missing-gplv3-license # the collection takes the repository's licence

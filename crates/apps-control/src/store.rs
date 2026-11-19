@@ -669,7 +669,7 @@ fn drain_of(id: String, project: String, host: String, created_at: i64, sources:
     let list = |j: Option<String>| -> Vec<String> { j.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default() };
     // A drain made before sources were chosen sends its runtime output.
     let sources = sources.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_else(|| vec!["runtime".to_string()]);
-    LogDrain { id, project, host, created_at, sources, environments: list(environments), services: list(services), previews, headers: list(names) }
+    LogDrain { id, project, host, created_at, sources, environments: list(environments), services: list(services), previews, headers: list(names), format: "ndjson".into() }
 }
 
 fn spend_row(r: &code_sql::Row<'_>) -> code_sql::Result<crate::spend::Limits> {
@@ -800,6 +800,9 @@ impl Store {
         db.add_column("environments", "report", "INTEGER NOT NULL DEFAULT 1")?;
         // A custom domain sent to another of the app's ports.
         db.add_column("domains", "port", "INTEGER")?;
+        // The roll login (`ses_…`) a ticket and a visit session came from: its end ends them.
+        db.add_column("visit_tickets", "login", "TEXT")?;
+        db.add_column("visit_sessions", "login", "TEXT")?;
         db.add_column("environments", "routes", "TEXT")?;
         // Drains made before their filters sent every environment's runtime output: still so.
         db.add_column("log_drains", "sources", "TEXT")?;
@@ -809,6 +812,8 @@ impl Store {
         db.add_column("log_drains", "headers_sealed", "TEXT")?;
         // The headers' names, unsealed: a drain lists without opening anything.
         db.add_column("log_drains", "header_names", "TEXT")?;
+        // NULL: NDJSON, as every drain was before formats.
+        db.add_column("log_drains", "format", "TEXT")?;
         db.add_column("domains", "redirect_to", "TEXT")?;
         Ok(Store { db, sealer })
     }
@@ -2230,32 +2235,37 @@ impl Store {
 
     // ── signed-in visitors ──
 
-    pub fn put_visit_ticket(&self, hash: &str, service: &str, env: &str, user: &str, expires_at: i64) -> Result<()> {
-        self.db.execute("INSERT INTO visit_tickets (hash, service, env, user_id, expires_at) VALUES (?, ?, ?, ?, ?)", params![hash, service, env, user, expires_at])?;
+    /// A ticket for `user`, asked for by their roll login `login` (`ses_…`).
+    pub fn put_visit_ticket(&self, hash: &str, service: &str, env: &str, user: &str, login: &str, expires_at: i64) -> Result<()> {
+        self.db.execute("INSERT INTO visit_tickets (hash, service, env, user_id, login, expires_at) VALUES (?, ?, ?, ?, ?, ?)", params![hash, service, env, user, login, expires_at])?;
         Ok(())
     }
 
-    /// A ticket used: its person, if it was this environment's and still good. It goes either way.
-    pub fn take_visit_ticket(&self, hash: &str, service: &str, env: &str, now: i64) -> Result<Option<String>> {
+    /// A ticket used: its person and their roll login, if it was this environment's and still
+    /// good. It goes either way.
+    pub fn take_visit_ticket(&self, hash: &str, service: &str, env: &str, now: i64) -> Result<Option<(String, String)>> {
         let h = hash.to_string();
         let (s, e) = (service.to_string(), env.to_string());
         self.db.write(move |c| {
-            let row: Option<(String, String, String, i64)> = c.query_row("SELECT service, env, user_id, expires_at FROM visit_tickets WHERE hash = ?", [&h], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).optional()?;
+            let row: Option<(String, String, String, Option<String>, i64)> =
+                c.query_row("SELECT service, env, user_id, login, expires_at FROM visit_tickets WHERE hash = ?", [&h], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))).optional()?;
             c.execute("DELETE FROM visit_tickets WHERE hash = ? OR expires_at < ?", params![h, now])?;
-            Ok(row.filter(|(rs, re, _, exp)| *rs == s && *re == e && *exp >= now).map(|(_, _, u, _)| u))
+            // One made before logins were kept has none: it opens nothing.
+            Ok(row.filter(|(rs, re, _, l, exp)| *rs == s && *re == e && *exp >= now && l.is_some()).map(|(_, _, u, l, _)| (u, l.unwrap_or_default())))
         })
     }
 
-    pub fn put_visit_session(&self, hash: &str, service: &str, env: &str, user: &str, expires_at: i64) -> Result<()> {
-        self.db.execute("INSERT INTO visit_sessions (hash, service, env, user_id, expires_at) VALUES (?, ?, ?, ?, ?)", params![hash, service, env, user, expires_at])?;
+    pub fn put_visit_session(&self, hash: &str, service: &str, env: &str, user: &str, login: &str, expires_at: i64) -> Result<()> {
+        self.db.execute("INSERT INTO visit_sessions (hash, service, env, user_id, login, expires_at) VALUES (?, ?, ?, ?, ?, ?)", params![hash, service, env, user, login, expires_at])?;
         Ok(())
     }
 
-    /// A visitor's session there: its person and when it ends.
-    pub fn visit_session(&self, hash: &str, service: &str, env: &str) -> Result<Option<(String, i64)>> {
+    /// A visitor's session there: its person, when it ends, and the roll login it came from
+    /// (none for one opened before logins were kept: such a session is ended).
+    pub fn visit_session(&self, hash: &str, service: &str, env: &str) -> Result<Option<(String, i64, Option<String>)>> {
         Ok(self
             .db
-            .query_row("SELECT user_id, expires_at FROM visit_sessions WHERE hash = ? AND service = ? AND env = ?", params![hash, service, env], |r| Ok((r.get(0)?, r.get(1)?)))
+            .query_row("SELECT user_id, expires_at, login FROM visit_sessions WHERE hash = ? AND service = ? AND env = ?", params![hash, service, env], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
             .optional()?)
     }
 
@@ -2648,15 +2658,15 @@ impl Store {
 
     // ── log drains ──
 
-    pub fn add_drain(&self, project: &str, host: &str, url: &str, secret: &str, d: &DrainSettings) -> Result<LogDrain> {
+    pub fn add_drain(&self, project: &str, host: &str, url: &str, secret: &str, format: &str, d: &DrainSettings) -> Result<LogDrain> {
         let id = new_id("lgd");
         let now = self.now()?;
         let (u, s) = (self.sealer.seal(&format!("drain:{id}:url"), url), self.sealer.seal(&format!("drain:{id}:secret"), secret));
         let h = self.seal_drain_headers(&id, &d.headers);
         let names = to_json(&d.headers.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>());
         self.db.execute(
-            "INSERT INTO log_drains (id, project, host, url_sealed, secret_sealed, created_at, sources, environments, services, previews, headers_sealed, header_names) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            params![id, project, host, u, s, now, to_json(&d.sources), to_json(&d.environments), to_json(&d.services), d.previews, h, names],
+            "INSERT INTO log_drains (id, project, host, url_sealed, secret_sealed, created_at, sources, environments, services, previews, headers_sealed, header_names, format) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            params![id, project, host, u, s, now, to_json(&d.sources), to_json(&d.environments), to_json(&d.services), d.previews, h, names, format],
         )?;
         Ok(self.drains(project)?.into_iter().find(|x| x.id == id).expect("just made"))
     }
@@ -2688,13 +2698,16 @@ impl Store {
 
     /// A project's drains, nothing opened (their URLs, secrets and headers stay sealed).
     pub fn drains(&self, project: &str) -> Result<Vec<LogDrain>> {
-        type Row = (String, String, String, i64, Option<String>, Option<String>, Option<String>, bool, Option<String>);
+        type Row = (String, String, String, i64, Option<String>, Option<String>, Option<String>, bool, Option<String>, Option<String>);
         let rows: Vec<Row> = self.db.query(
-            "SELECT id, project, host, created_at, sources, environments, services, previews, header_names FROM log_drains WHERE project = ? ORDER BY created_at",
+            "SELECT id, project, host, created_at, sources, environments, services, previews, header_names, format FROM log_drains WHERE project = ? ORDER BY created_at",
             [project],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get::<_, i64>(7)? != 0, r.get(8)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get::<_, i64>(7)? != 0, r.get(8)?, r.get(9)?)),
         )?;
-        Ok(rows.into_iter().map(|(id, project, host, created_at, sources, environments, services, previews, names)| drain_of(id, project, host, created_at, sources, environments, services, previews, names)).collect())
+        Ok(rows
+            .into_iter()
+            .map(|(id, project, host, created_at, sources, environments, services, previews, names, format)| LogDrain { format: format.unwrap_or_else(|| "ndjson".into()), ..drain_of(id, project, host, created_at, sources, environments, services, previews, names) })
+            .collect())
     }
 
     /// Whether any drain asks for request lines and for build lines (the log tap's gate).
@@ -2710,15 +2723,15 @@ impl Store {
     pub fn drain_secrets(&self, project: &str) -> Result<Vec<OpenedDrain>> {
         // A drain's URL, secret and headers, opened.
         type Opened = (String, String, Vec<(String, String)>);
-        type Row = (String, String, String, i64, String, String, Option<String>, Option<String>, Option<String>, bool, Option<String>, Option<String>);
+        type Row = (String, String, String, i64, String, String, Option<String>, Option<String>, Option<String>, bool, Option<String>, Option<String>, Option<String>);
         let rows: Vec<Row> = self.db.query(
-            "SELECT id, project, host, created_at, url_sealed, secret_sealed, sources, environments, services, previews, headers_sealed, header_names FROM log_drains WHERE project = ? ORDER BY created_at",
+            "SELECT id, project, host, created_at, url_sealed, secret_sealed, sources, environments, services, previews, headers_sealed, header_names, format FROM log_drains WHERE project = ? ORDER BY created_at",
             [project],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get::<_, i64>(9)? != 0, r.get(10)?, r.get(11)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get::<_, i64>(9)? != 0, r.get(10)?, r.get(11)?, r.get(12)?)),
         )?;
         Ok(rows
             .into_iter()
-            .filter_map(|(id, project, host, created_at, u, s, sources, environments, services, previews, h, names)| {
+            .filter_map(|(id, project, host, created_at, u, s, sources, environments, services, previews, h, names, format)| {
                 let opened = (|| -> Result<Opened> {
                     let url = self.sealer.open(&format!("drain:{id}:url"), &u)?;
                     let secret = self.sealer.open(&format!("drain:{id}:secret"), &s)?;
@@ -2731,7 +2744,7 @@ impl Store {
                 match opened {
                     Ok((url, secret, headers)) => {
                         let names = names.or_else(|| Some(to_json(&headers.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>())));
-                        let drain = drain_of(id, project, host, created_at, sources, environments, services, previews, names);
+                        let drain = LogDrain { format: format.unwrap_or_else(|| "ndjson".into()), ..drain_of(id, project, host, created_at, sources, environments, services, previews, names) };
                         Some(OpenedDrain { drain, url, secret, headers })
                     }
                     Err(e) => {

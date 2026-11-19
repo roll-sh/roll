@@ -282,10 +282,9 @@ mod tests {
         ] {
             assert_eq!(plain(&text), memo(&text), "{text}");
         }
-        // 400 KB of `a-`: Lucene (and the plain scan) take minutes.
-        let text = "a-".repeat(200_000);
-        let t = std::time::Instant::now();
-        assert_eq!(tokens(&text).len(), 200_000);
-        assert!(t.elapsed() < std::time::Duration::from_secs(10), "{:?}", t.elapsed());
+        // Up to 400 KB of `a-`: Lucene (and the plain scan) take minutes, quadratic in the length.
+        search_test_support::assert_linear("a run of `a-`", 25_000, |n| "a-".repeat(n), |text| {
+            assert_eq!(tokens(&text).len(), text.len() / 2);
+        });
     }
 }

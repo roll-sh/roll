@@ -530,6 +530,9 @@ pub async fn explain(ctx: &Ctx<'_>) -> EsResult<Reply> {
         field("failed_step", e.failed_step.clone().filter(|f| !f.is_empty()).map(Value::from));
         field("is_auto_retryable_error", e.auto_retryable.map(Value::from));
         field("failed_step_retry_count", e.retry_count.map(Value::from));
+        field("repository_name", e.snapshot_repository.clone().map(Value::from));
+        field("snapshot_name", e.snapshot_name.clone().map(Value::from));
+        field("shrink_index_name", e.shrink_index_name.clone().map(Value::from));
         field("step_info", e.step_info.clone());
         field("previous_step_info", e.previous_step_info.clone());
         // The phase as cached, with the rollover's default conditions shown.
@@ -544,6 +547,9 @@ pub async fn explain(ctx: &Ctx<'_>) -> EsResult<Reply> {
         });
         field("phase_execution", phase_execution);
         m.insert("skip".into(), (idx.settings.get("index.lifecycle.skip") == Some("true")).into());
+        if let Some(c) = &e.force_merge_clone_index_name {
+            m.insert("force_merge_clone_index_name".into(), c.clone().into());
+        }
         out.insert(n, Value::Obj(m));
     }
     Reply::ok(obj! { "indices" => Value::Obj(out) })
