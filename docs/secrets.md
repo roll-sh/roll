@@ -5105,6 +5105,44 @@ The other threads' work that builds on these:
 
 roll MCP adds no cut-off tool: #304 is a person's call, since it can revoke the agent's own token.
 
+**Ranked, 2026-11-19 20:45** (the thirty-second review's list as it stands, plus what today's
+work found). First what can be built now:
+
+1. **A key of its own for audit digests** (security, M; on #357 and #281). The issuer's key signs
+   cloud federation, apps' instance tokens and #281's hourly digests. One leak forges all three, and
+   since #357's emergency rotation, digests signed by a pulled key still verify (their only other
+   protection is the chain head's signature under `ROLL_SECRET_KEY`). CloudTrail signs digests with
+   keys of their own. Building: `feature/roll-secrets-digest-key`.
+2. **Validity checks for found credentials** (M; #303 on main; GitGuardian's validity checks). A
+   `secret_unstored` notice or a scan finding says whether the credential is live, checked once,
+   bounded and audited. AWS uses `sts:GetCallerIdentity` signed with the found pair, GitHub `GET /user`,
+   Stripe `GET /v1/balance` and Slack `auth.test`; each goes through `roll_net::PublicOnly` with no
+   redirects, and the request carries nothing but the credential. A live one ranks first and offers
+   rotate-on-leak where roll has a rotator for its kind. Opt-in per project, since it contacts the
+   provider.
+3. **Postgres decoys in the dashboard** (S; #432): the "Add a decoy" dialog offers only `rlt`.
+4. **Members v1** (building, `feature/roll-members` on #445; decisions D1–D9 with the user, (a) for now).
+5. **Use without seeing** (building, `feature/roll-secrets-placeholders`): host-bound keys,
+   `rlph_` placeholders, `substitute`, and a filter that previews', apps' and the agents sandbox's
+   proxies embed.
+6. **The audit chain under concurrency, and a sealed-start rolld test** (building, `feature/roll-secrets-chain-load`).
+7. **`Reference::parse` exact** (gating, `fix/secrets-strict-reference`): the trim bypass.
+8. **roll code's secrets out of `Debug`, and its signing secrets sealed** (gating, `fix/code-no-secret-debug`).
+
+Waiting on another thread or on a merge:
+- **Batch 5:** #407, #430, #440; #277, #397, #432; #357, #330 (being levelled and gated); the strict
+  parse joins it.
+- **apps:**
+  - the git login and `roll://` variables through #407, with the #399 stopgap on main;
+  - queue links on #274.
+- **search:** #361 on #407 and the strict parse; the cluster password sealed (`fix/search-cluster-password-sealed`).
+- **previews:**
+  - #436 approved;
+  - preview variables kept only in roll secrets (their Next 4);
+  - a proxy hook for placeholders.
+- **roll MCP:** value-request tools on #277; `secrets_verify_audit` on #281.
+- **The user's call:** members D1–D9, R4 (GCP KMS, Azure Key Vault, HSM), and the real-account checks.
+
 **The thirty-second product review** (2026-11-19 morning, against Vault/OpenBao, Infisical, Doppler,
 AWS, 1Password, Akeyless, Bitwarden SM and GitGuardian; open PRs and branches checked first). The store
 is still level with or ahead of the category. The real gaps are elsewhere: three places where
