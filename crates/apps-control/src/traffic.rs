@@ -129,6 +129,11 @@ impl Apps {
         let mut pages: HashMap<String, Counted> = HashMap::new();
         let mut referrers: HashMap<String, u64> = HashMap::new();
         let mut countries: HashMap<String, u64> = HashMap::new();
+        // Campaigns (UTM), and devices from the user agent: a page view each, a visitor once.
+        let mut campaigns: HashMap<(String, String, String), Counted> = HashMap::new();
+        let mut browsers: HashMap<&'static str, u64> = HashMap::new();
+        let mut systems: HashMap<&'static str, u64> = HashMap::new();
+        let mut classes: HashMap<&'static str, u64> = HashMap::new();
         let buckets = (minutes / step) as usize + 1;
         let mut series: Vec<Counted> = (0..buckets).map(|_| (0, Default::default())).collect();
         let mut views = 0u64;
@@ -154,6 +159,19 @@ impl Apps {
             if let Some(c) = v["country"].as_str() {
                 *countries.entry(c.to_string()).or_default() += 1;
             }
+            if v["utm"].is_object() {
+                let part = |k: &str| v["utm"][k].as_str().unwrap_or("").to_string();
+                let k = (part("source"), part("medium"), part("campaign"));
+                if campaigns.len() < MAX_GROUPS || campaigns.contains_key(&k) {
+                    let c = campaigns.entry(k).or_default();
+                    c.0 += 1;
+                    c.1.insert(who.clone());
+                }
+            }
+            let (browser, os, class) = crate::track::device_of(v["ua"].as_str().unwrap_or(""));
+            *browsers.entry(browser).or_default() += 1;
+            *systems.entry(os).or_default() += 1;
+            *classes.entry(class).or_default() += 1;
             let b = (((l.t - since).max(0) / 60_000) / step) as usize;
             if let Some(s) = series.get_mut(b) {
                 s.0 += 1;
@@ -169,6 +187,12 @@ impl Apps {
         let mut page_rows: Vec<(String, u64, usize)> = pages.into_iter().map(|(p, (n, w))| (p, n, w.len())).collect();
         page_rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         let series: Vec<Value> = series.into_iter().enumerate().map(|(i, (n, w))| json!({ "t": since + i as i64 * step * 60_000, "views": n, "visitors": w.len() })).collect();
+        let mut campaign_rows: Vec<((String, String, String), u64, usize)> = campaigns.into_iter().map(|(k, (n, w))| (k, n, w.len())).collect();
+        campaign_rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        let campaigns: Vec<Value> = campaign_rows.into_iter().take(TOP).map(|((s, m, c), n, w)| json!({ "source": s, "medium": m, "campaign": c, "views": n, "visitors": w })).collect();
+        let named = |m: HashMap<&'static str, u64>, key: &str| top(m.into_iter().map(|(k, n)| (k.to_string(), n)).collect(), key);
+        let devices = json!({ "browsers": named(browsers, "browser"), "os": named(systems, "os"), "classes": named(classes, "class") });
+        let (events, events_cut) = self.tracked(service, env, since).await?;
         Ok(json!({
             "minutes": minutes,
             "step": step,
@@ -177,8 +201,11 @@ impl Apps {
             "pages": page_rows.into_iter().take(TOP).map(|(p, n, w)| json!({ "path": p, "views": n, "visitors": w })).collect::<Vec<_>>(),
             "referrers": top(referrers, "host"),
             "countries": top(countries, "country"),
+            "campaigns": campaigns,
+            "devices": devices,
+            "events": events,
             "series": series,
-            "cut": cut,
+            "cut": cut || events_cut,
         }))
     }
 }

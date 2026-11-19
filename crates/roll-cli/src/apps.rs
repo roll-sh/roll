@@ -426,6 +426,10 @@ pub enum AppsCmd {
         /// in its registry (`true`), or only say so (`false`).
         #[arg(long)]
         rebuild_on_base: Option<bool>,
+        /// Fail a deploy whose image has a known vulnerability this severe or worse, before it
+        /// goes live (`critical`, `high`, `medium`, `low`); `none`: never.
+        #[arg(long, value_parser = ["critical", "high", "medium", "low", "none"])]
+        block_on: Option<String>,
     },
     /// A copy of the service in its project (Railway's Duplicate): its source, build and run
     /// settings, links and production's own variables. Sealed variables are never shown, so
@@ -466,12 +470,17 @@ pub enum AppsCmd {
         list: bool,
     },
     /// Deployments, newest first; `--commits DEP`: what a repo deployment brings over the one
-    /// live before it, newest first.
+    /// live before it, newest first; `--vulnerabilities DEP`: its image's known vulnerabilities,
+    /// most severe first (`--severity high`: high or worse).
     Deploys {
         #[command(flatten)]
         target: Target,
-        #[arg(long, value_name = "DEPLOYMENT")]
+        #[arg(long, value_name = "DEPLOYMENT", conflicts_with = "vulnerabilities")]
         commits: Option<String>,
+        #[arg(long, value_name = "DEPLOYMENT")]
+        vulnerabilities: Option<String>,
+        #[arg(long, requires = "vulnerabilities", value_parser = ["critical", "high", "medium", "low", "unknown"])]
+        severity: Option<String>,
     },
     /// What the next deploy changes (Railway's staged changes): variables added, removed or
     /// changed (names, never values), run settings the live deployment doesn't run with, and the
@@ -960,10 +969,16 @@ pub enum AppsCmd {
     Notifications {
         #[command(flatten)]
         target: Target,
+        /// A webhook's, Slack's or Discord's URL; PagerDuty's integration key or Opsgenie's API key
+        /// for those kinds (read from stdin when it's `-`, so it stays out of the shell's history).
         #[arg(long, conflicts_with = "remove")]
         add: Option<String>,
+        /// `webhook`, `slack`, `discord`, `pagerduty` or `opsgenie`.
         #[arg(long, default_value = "webhook")]
         kind: String,
+        /// With `--kind pagerduty` or `opsgenie`: its region, `us` (the default) or `eu`.
+        #[arg(long, requires = "add")]
+        region: Option<String>,
         /// With `--add` or `--edit`: what it's sent, comma-separated (`deploy.failed,deploy.active`;
         /// default for a new one: what needs someone). A resolved alert goes to whoever gets the alert.
         #[arg(long, value_name = "EVENTS")]
@@ -1106,8 +1121,9 @@ pub enum AppsCmd {
         #[arg(long)]
         no_rate_limit: bool,
         /// A firewall rule, in order (the first match decides): `deny /admin/*`,
-        /// `deny method=DELETE,PUT`, `allow /admin/health`, `deny ua=BadBot`. Repeatable; the
-        /// rules replace the ones it has.
+        /// `deny method=DELETE,PUT`, `allow /admin/health`, `deny ip=203.0.113.0/24`,
+        /// `deny header=X-Bot`, `deny cookie=beta:1`, `deny query=debug`, `deny ua=BadBot` (ua=
+        /// last). Repeatable; the rules replace the ones it has.
         #[arg(long = "firewall", value_name = "RULE", conflicts_with = "no_firewall")]
         firewall: Vec<String>,
         /// No firewall rules.
@@ -2606,7 +2622,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Set { target, name, repo, root, image, upload, builder, dockerfile, stage, install, build_command, build_start, health_timeout, health_every, health_failures, health_command, alert_memory, alert_errors, alert_p95, alert_log, alert_log_count, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, retries, volume, watch, packages, build_timeout, rollout, rollout_step, rollout_errors, rollout_manual, h2c, scale, public, drain, cpu_target, memory_target, restart, restart_tries, affinity, tcp, rollback_on_crash, rebuild_on_base } => {
+        AppsCmd::Set { target, name, repo, root, image, upload, builder, dockerfile, stage, install, build_command, build_start, health_timeout, health_every, health_failures, health_command, alert_memory, alert_errors, alert_p95, alert_log, alert_log_count, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, retries, volume, watch, packages, build_timeout, rollout, rollout_step, rollout_errors, rollout_manual, h2c, scale, public, drain, cpu_target, memory_target, restart, restart_tries, affinity, tcp, rollback_on_crash, rebuild_on_base, block_on } => {
             let svc = service(api, &target).await?;
             // The service's rollout with what was given replaced (the API takes it whole).
             let rollout = if rollout.is_some() || rollout_step.is_some() || rollout_errors.is_some() || rollout_manual.is_some() {
@@ -2754,6 +2770,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 ("tcp", tcp.map(Value::from)),
                 ("rollback_on_crash", rollback_on_crash.map(Value::from)),
                 ("rebuild_on_base", rebuild_on_base.map(Value::from)),
+                ("block_on", block_on.map(|b| if b == "none" { Value::Null } else { Value::from(b) })),
                 ("scale", match scale.as_deref() {
                     None => None,
                     Some("none") => Some(Value::Null),
@@ -3006,7 +3023,30 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             };
             api.post(&format!("/v1/apps/services/{}/restore", enc(&s(&d["id"]))), json!({})).await?
         }
-        AppsCmd::Deploys { target, commits: Some(dep) } => {
+        AppsCmd::Deploys { target, vulnerabilities: Some(dep), severity, .. } => {
+            let svc = service(api, &target).await?;
+            let q = severity.map(|s| format!("?severity={s}")).unwrap_or_default();
+            let v = api.get(&format!("{}/deploys/{}/vulnerabilities{q}", env_path(&svc, &target.env), enc(&dep))).await?;
+            if !json_out {
+                let sc = &v["scan"];
+                if sc.is_null() {
+                    println!("not scanned (this node's builder doesn't scan, or the scan hasn't finished)");
+                    return Ok(());
+                }
+                if let Some(e) = sc["error"].as_str() {
+                    println!("the scan didn't finish: {e}");
+                    return Ok(());
+                }
+                println!("{} critical, {} high, {} medium, {} low ({} with a fix; {})", sc["critical"], sc["high"], sc["medium"], sc["low"], sc["fixable"], s(&sc["scanner"]));
+                for x in v["vulnerabilities"].as_array().into_iter().flatten() {
+                    let fix = x["fixed"].as_str().map(|f| format!(" -> {f}")).unwrap_or_else(|| " (no fix yet)".into());
+                    println!("{:<9} {:<20} {} {}{fix}  [{}]", s(&x["severity"]), s(&x["id"]), s(&x["package"]), s(&x["installed"]), s(&x["target"]));
+                }
+                return Ok(());
+            }
+            v
+        }
+        AppsCmd::Deploys { target, commits: Some(dep), .. } => {
             let svc = service(api, &target).await?;
             let c = api.get(&format!("{}/deploys/{}/commits", env_path(&svc, &target.env), enc(&dep))).await?;
             if !json_out {
@@ -3126,7 +3166,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             json!({ "url": url })
         }
-        AppsCmd::Deploys { target, commits: None } => {
+        AppsCmd::Deploys { target, commits: None, .. } => {
             let svc = service(api, &target).await?;
             let v = api.get(&format!("{}/deploys", env_path(&svc, &target.env))).await?;
             if !json_out {
@@ -3136,7 +3176,12 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                     // A pruned one is history only (its image is gone): nothing to roll back to.
                     let status = if d["pruned_at"].is_i64() { "pruned".to_string() } else { s(&d["status"]) };
                     let age = d["created_at"].as_i64().map(|t| ago(chrono::Utc::now().timestamp_millis() - t)).unwrap_or_default();
-                    println!("{}  {status:<10} {:<8} {rev:<8} {age:>8}  {}{by}", s(&d["id"]), s(&d["trigger"]), s(&d["message"]));
+                    // Its scan's worst, when it has any.
+                    let vulns = match (d["vulnerabilities"]["critical"].as_u64(), d["vulnerabilities"]["high"].as_u64()) {
+                        (Some(c), Some(h)) if c + h > 0 => format!("  [{c} critical, {h} high]"),
+                        _ => String::new(),
+                    };
+                    println!("{}  {status:<10} {:<8} {rev:<8} {age:>8}  {}{by}{vulns}", s(&d["id"]), s(&d["trigger"]), s(&d["message"]));
                     if let Some(f) = d["fix"].as_str() {
                         println!("    fix: {f}");
                     }
@@ -3468,7 +3513,13 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             let a = api.get(&format!("{}/analytics?minutes={minutes}", env_path(&svc, &target.env))).await?;
             if !json_out {
                 println!("{} visitors, {} page views over {} minutes{}", a["visitors"], a["page_views"], a["minutes"], if a["cut"] == true { " (the newest requests read)" } else { "" });
-                for (title, list, key) in [("pages", &a["pages"], "path"), ("referrers", &a["referrers"], "host"), ("countries", &a["countries"], "country")] {
+                for (title, list, key) in [
+                    ("pages", &a["pages"], "path"),
+                    ("referrers", &a["referrers"], "host"),
+                    ("countries", &a["countries"], "country"),
+                    ("devices", &a["devices"]["classes"], "class"),
+                    ("browsers", &a["devices"]["browsers"], "browser"),
+                ] {
                     let rows = list.as_array().cloned().unwrap_or_default();
                     if rows.is_empty() {
                         continue;
@@ -3476,6 +3527,19 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                     println!("\n{title}");
                     for r in rows.iter().take(10) {
                         println!("  {:>7}  {}", r["views"], s(&r[key]));
+                    }
+                }
+                if let Some(rows) = a["campaigns"].as_array().filter(|r| !r.is_empty()) {
+                    println!("\ncampaigns (source / medium / campaign)");
+                    for r in rows.iter().take(10) {
+                        println!("  {:>7}  {} / {} / {}", r["views"], s(&r["source"]), s(&r["medium"]), s(&r["campaign"]));
+                    }
+                }
+                if let Some(rows) = a["events"].as_array().filter(|r| !r.is_empty()) {
+                    println!("\nevents");
+                    for r in rows.iter().take(10) {
+                        let props: Vec<String> = r["props"].as_object().into_iter().flatten().filter_map(|(k, v)| Some(format!("{k}: {}", s(&v.as_array()?.first()?["value"])))).collect();
+                        println!("  {:>7}  {}{}", r["count"], s(&r["name"]), if props.is_empty() { String::new() } else { format!("  ({})", props.join(", ")) });
                     }
                 }
                 return Ok(());
@@ -3908,7 +3972,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 v
             }
         }
-        AppsCmd::Notifications { target, add, kind, events, only_env, only_service, previews, every_env, every_service, remove, test, edit, deliveries, email } => {
+        AppsCmd::Notifications { target, add, kind, region, events, only_env, only_service, previews, every_env, every_service, remove, test, edit, deliveries, email } => {
             if add.is_none() && edit.is_none() && !email && (events.is_some() || !only_env.is_empty() || !only_service.is_empty() || previews.is_some()) {
                 bail!("--events, --only-env, --only-service and --previews go with --add, --email or --edit");
             }
@@ -3947,6 +4011,20 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 t
             } else if let Some(url) = add {
                 let mut body = json!({ "kind": kind, "url": url, "environments": only_env, "services": only_service, "previews": previews.unwrap_or(false) });
+                // An on-call service's key, not a URL.
+                if let Some(field) = match kind.as_str() {
+                    "pagerduty" => Some("routing_key"),
+                    "opsgenie" => Some("api_key"),
+                    _ => None,
+                } {
+                    let key = if url == "-" { secret_from_stdin("the integration's key")? } else { url.clone() };
+                    let o = body.as_object_mut().expect("object");
+                    o.remove("url");
+                    o.insert(field.into(), json!(key));
+                    if let Some(r) = &region {
+                        o.insert("region".into(), json!(r));
+                    }
+                }
                 if kind == "email" {
                     body.as_object_mut().expect("object").remove("url");
                 }
@@ -4267,10 +4345,18 @@ fn firewall_rule(line: &str) -> anyhow::Result<Value> {
             break;
         } else if let Some(m) = w.strip_prefix("method=") {
             rule["methods"] = json!(m.split(',').filter(|m| !m.is_empty()).collect::<Vec<_>>());
+        } else if let Some(ips) = w.strip_prefix("ip=") {
+            rule["ips"] = json!(ips.split(',').filter(|m| !m.is_empty()).collect::<Vec<_>>());
+        } else if let Some((k, v)) = ["header=", "cookie=", "query="].iter().find_map(|p| w.strip_prefix(p).map(|v| (p.trim_end_matches('='), v))) {
+            // `name[:contains]`: there, or there and holding that.
+            rule[k] = match v.split_once(':') {
+                Some((name, contains)) => json!({ "name": name, "contains": contains }),
+                None => json!({ "name": v }),
+            };
         } else if w.starts_with('/') {
             rule["path"] = json!(w);
         } else {
-            anyhow::bail!("{w:?} in {line:?}: a path (/…), method=…, or ua=…");
+            anyhow::bail!("{w:?} in {line:?}: a path (/…), method=…, ip=…, header=…, cookie=…, query=…, or ua=…");
         }
     }
     Ok(rule)
