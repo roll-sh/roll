@@ -7,6 +7,11 @@
 //! at most [`MAX_RESPONSE`] bytes. The node setting [`ALLOW_PRIVATE`] lifts the address check, for
 //! test clusters whose endpoints call a mock on the same host; it is off unless set.
 //!
+//! A request waits at most [`max_timeout`] (the node setting [`MAX_TIMEOUT`], 120s unless set),
+//! whatever `timeout` its caller asked for: retries, the rate limiter's wait and reading the
+//! answer included. Elasticsearch takes any `timeout` and waits that long, so one tenant could
+//! hold a shared node's connection and worker for as long as an endpoint they run stays silent.
+//!
 //! Like Elasticsearch's `RetryingHttpSender`, a request that fails to connect or gets a
 //! retryable status (the service's handler decides: 429, 500, 503) is sent again, here at most
 //! twice, within the request's timeout. Answers are untrusted data: services parse them with
@@ -18,6 +23,21 @@ use std::time::{Duration, Instant};
 
 /// Lets inference endpoints reach private addresses (loopback, private ranges, `localhost`).
 pub const ALLOW_PRIVATE: &str = "roll.inference.allow_private_hosts";
+
+/// The longest any inference request may wait, as a time value (`2m`).
+pub const MAX_TIMEOUT: &str = "roll.inference.max_timeout";
+
+/// [`MAX_TIMEOUT`]'s default: four times the API's default `timeout` (30s), room for a long
+/// completion.
+const DEFAULT_MAX_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// The node's cap on a request's `timeout` ([`MAX_TIMEOUT`]).
+pub fn max_timeout(cluster: &Cluster) -> Duration {
+    match cluster.config.node_setting(MAX_TIMEOUT).and_then(|v| crate::units::TimeValue::parse(v, MAX_TIMEOUT).ok()) {
+        Some(t) => Duration::from_millis(t.as_millis().max(1) as u64),
+        None => DEFAULT_MAX_TIMEOUT,
+    }
+}
 
 /// The most an answer may hold (a batch of 3072-dimension embeddings is a few MiB).
 pub const MAX_RESPONSE: usize = 32 * 1024 * 1024;
@@ -122,17 +142,18 @@ pub async fn post_limited(cluster: &Cluster, call: &Call<'_>, max: usize) -> EsR
             ),
         ));
     }
+    let timeout = call.timeout.min(max_timeout(cluster));
     let mut b = reqwest::Client::builder()
-        .connect_timeout(call.timeout.min(Duration::from_secs(10)))
-        .timeout(call.timeout)
+        .connect_timeout(timeout.min(Duration::from_secs(10)))
+        .timeout(timeout)
         .redirect(reqwest::redirect::Policy::none())
         .no_proxy();
     if !allow_private {
         b = b.dns_resolver(std::sync::Arc::new(roll_net::PublicOnly));
     }
     let client = b.build().map_err(|e| EsError::illegal_state(e.to_string()))?;
-    let deadline = Instant::now() + call.timeout;
-    super::rate::acquire(&cluster.config.name, call.inference_id, call.per_minute, call.timeout).await?;
+    let deadline = Instant::now() + timeout;
+    super::rate::acquire(&cluster.config.name, call.inference_id, call.per_minute, timeout).await?;
     let mut attempt = 0;
     loop {
         let mut rb = client.post(url.clone());
