@@ -338,6 +338,25 @@ behind the `Apps` trait:
     A converge waits for it a few seconds at most: one still installing or booting is asked
     again on a later pass (for up to 20 minutes), so no converge slot waits on a build. roll
     apps services are checked by roll apps.
+  - **Log drains.** A project that sends its logs to a drain (roll apps' log drains,
+    `previews: true`: Datadog, Better Stack, a collector) gets its previews' `roll.toml` services
+    there too, as Vercel's and Render's drains take previews' output. roll apps sends its own
+    `pv-` environments' instances' output itself; for a `roll.toml` service the preview's holder
+    follows its container (`docker logs -f --timestamps --since`), masks each batch as the
+    sheet's logs are, and hands it to roll apps' drainer (`Apps::drain_preview_lines`), so the
+    lines get the drain's queue, signature, format and limits. A line's `environment` is the
+    preview's `pv-` one, `service_name` the service, and `service`, `instance` and `deployment`
+    are null: a drain narrowed to roll apps services never gets one. Each running service has
+    one follower, only while a drain wants previews' output (asked every pass, read again
+    every 30 s). A follower after a restart or a redeploy starts at the stamp of the last line
+    sent and drops what Docker gives again, so nothing is lost or sent twice. A process's first
+    follower starts when the process did, and lines whose masks can't be read aren't sent.
+    A preview's jobs (`release`, `seed`, `teardown`) go to drains of builds (`sources`
+    `build`, where Render and Vercel put deploy-time commands): each job's output tail once it
+    ends, masked with what it was given and then as logs are, the job's name its
+    `service_name`.
+    `a_previews_runtime_output_goes_to_the_projects_log_drains_masked`,
+    `a_previews_runtime_lines_reach_only_drains_that_take_previews`.
 - The tree is copied into the container, never bind-mounted.
 - Each service answers at `<service>-<slug>.<domain>`.
   - `<slug>` is `pr<number>` for a GitHub PR, `c<number>` for a roll code change, or the branch
@@ -1964,6 +1983,11 @@ Ranked by what a person notices first. Done so far:
 Every feature in review has its `roll preview` command too: `metrics`, `hooks` (#344), `errors`
 (on #326), `visitors` (on #335), `masks [--apply]` (on #324), `up`/`down` (#314).
 
+0. **A preview's `roll.toml` services in the project's log drains, in review**
+   (`feature/roll-previews-drains`): roll apps' drains with `previews: true` got only roll apps'
+   own `pv-` environments, so a team with Datadog on a drain saw half of a preview's output.
+   Followed per running service from its last line, masked, through roll apps' drainer (see
+   "Log drains" under Services); its jobs' output to drains of builds.
 1. **Sign-in access, in review** (#285): `access: "team"` (Vercel Authentication, Netlify's team
    access), so only people signed in to roll who can open the project open its previews, not
    whoever has the link. On roll apps the `pv-` environment gets apps' `access: {signed_in:
@@ -2000,6 +2024,13 @@ Every feature in review has its `roll preview` command too: `metrics`, `hooks` (
 7. **Bots on Git URL services** (draft #305, on apps' #282; and draft #343 on apps' #317: a bot's branch push makes no preview at all, by its pusher): previews' own `GitPull` carries the
    opener and `skip_authors` reaches a Git URL service's pull requests. Undraft once #282 is on
    main.
+7a. **Secret references in previews' variables** (roll secrets' suggestion, after its #329):
+   `env`, `env_for` and a preview's own variables are plain values outside roll secrets
+   (redacted on read, but outside health, leak scanning, reach and the cut-off), and a payment
+   provider's test key is just what teams put there. Take `roll://ENV/KEY` there, resolved
+   through `Secrets::resolve_for(ResourceRef::new(kind, id).untrusted(), …)` (never a
+   protected environment or a sensitive key), and offer to keep a pasted value in the base
+   environment's folder.
 8. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
 9. **Watch: pg-control's recovery to a time seconds old** (unowned).

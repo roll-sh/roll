@@ -959,6 +959,8 @@ export interface LogDrain {
   environments: string[];
   /** Only these services' (ids; empty: every one). */
   services: string[];
+  /** Preview environments' too, and a preview's services on roll's own runtime (in its `pv-`
+   *  environment, with no service id, so never to a drain narrowed to services). */
   previews: boolean;
   /** The names of the headers it's sent with; their values are sealed, never shown. */
   headers: string[];

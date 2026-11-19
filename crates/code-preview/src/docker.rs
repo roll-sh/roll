@@ -172,8 +172,20 @@ const FOLLOW_LINE_MAX: usize = 16 << 10;
 /// `docker logs -f` of a container, stdout and stderr, as lines (each at most
 /// [`FOLLOW_LINE_MAX`]). The process goes when the receiver is dropped or the container ends.
 pub fn follow(name: &str, tail: usize) -> Option<tokio::sync::mpsc::Receiver<String>> {
+    followed(&["logs", "--follow", "--tail", &tail.to_string(), name], |_, l| l)
+}
+
+/// `docker logs -f --timestamps --since <since>` of a container (`since` an RFC 3339 stamp or
+/// Unix seconds, as Docker takes it), each line `(stderr, "<stamp> <text>")`, each at most
+/// [`FOLLOW_LINE_MAX`]. The process goes when the receiver is dropped or the container ends.
+pub fn follow_since(name: &str, since: &str) -> Option<tokio::sync::mpsc::Receiver<(bool, String)>> {
+    followed(&["logs", "--follow", "--timestamps", "--since", since, name], |stderr, l| (stderr, l))
+}
+
+/// A `docker logs --follow` run's lines, each made by `tag` from whether it came on stderr.
+fn followed<T: Send + 'static>(args: &[&str], tag: fn(bool, String) -> T) -> Option<tokio::sync::mpsc::Receiver<T>> {
     let mut child = Command::new("docker")
-        .args(["logs", "--follow", "--tail", &tail.to_string(), name])
+        .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -182,8 +194,8 @@ pub fn follow(name: &str, tail: usize) -> Option<tokio::sync::mpsc::Receiver<Str
         .ok()?;
     let (tx, rx) = tokio::sync::mpsc::channel(256);
     let (out, err) = (child.stdout.take()?, child.stderr.take()?);
-    tokio::spawn(lines_to(out, tx.clone()));
-    tokio::spawn(lines_to(err, tx.clone()));
+    tokio::spawn(lines_to(out, tx.clone(), move |l| tag(false, l)));
+    tokio::spawn(lines_to(err, tx.clone(), move |l| tag(true, l)));
     tokio::spawn(async move {
         tokio::select! {
             _ = child.wait() => {}
@@ -193,8 +205,9 @@ pub fn follow(name: &str, tail: usize) -> Option<tokio::sync::mpsc::Receiver<Str
     Some(rx)
 }
 
-/// Lines from `r` into `tx`, a long line cut at [`FOLLOW_LINE_MAX`], until either end goes.
-async fn lines_to(mut r: impl AsyncRead + Unpin, tx: tokio::sync::mpsc::Sender<String>) {
+/// Lines from `r` into `tx` (each through `f`), a long line cut at [`FOLLOW_LINE_MAX`], until
+/// either end goes.
+async fn lines_to<T>(mut r: impl AsyncRead + Unpin, tx: tokio::sync::mpsc::Sender<T>, f: impl Fn(String) -> T) {
     let (mut buf, mut line) = ([0u8; 8192], Vec::new());
     loop {
         let n = match r.read(&mut buf).await {
@@ -203,7 +216,7 @@ async fn lines_to(mut r: impl AsyncRead + Unpin, tx: tokio::sync::mpsc::Sender<S
         };
         for &b in &buf[..n] {
             if b == b'\n' {
-                if tx.send(String::from_utf8_lossy(&line).trim_end_matches('\r').to_string()).await.is_err() {
+                if tx.send(f(String::from_utf8_lossy(&line).trim_end_matches('\r').to_string())).await.is_err() {
                     return;
                 }
                 line.clear();
@@ -213,7 +226,7 @@ async fn lines_to(mut r: impl AsyncRead + Unpin, tx: tokio::sync::mpsc::Sender<S
         }
     }
     if !line.is_empty() {
-        let _ = tx.send(String::from_utf8_lossy(&line).into_owned()).await;
+        let _ = tx.send(f(String::from_utf8_lossy(&line).into_owned())).await;
     }
 }
 
@@ -396,6 +409,10 @@ impl Isolation for Docker {
 
     async fn follow(&self, name: &str, tail: usize) -> Option<tokio::sync::mpsc::Receiver<String>> {
         follow(name, tail)
+    }
+
+    async fn follow_since(&self, name: &str, since: &str) -> Option<tokio::sync::mpsc::Receiver<(bool, String)>> {
+        follow_since(name, since)
     }
 
     async fn remove(&self, name: &str) {

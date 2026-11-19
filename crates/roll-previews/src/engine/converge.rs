@@ -1049,6 +1049,7 @@ impl Engine {
             }
         }
         let (code, tail) = ran.map_err(|e| anyhow::anyhow!("{what}: {}", code_preview::runner::mask(&format!("{e:#}"), &hide)))?;
+        self.drain_job(&r.project_id, &r.id, what, &code_preview::runner::mask(&tail, &hide)).await;
         if code != 0 {
             anyhow::bail!("the {what} command failed with exit code {code}\n\n{}", code_preview::runner::mask(tail.trim_end(), &hide));
         }

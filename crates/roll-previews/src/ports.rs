@@ -524,6 +524,44 @@ pub trait EnvSource: Send + Sync {
     fn touched(&self, preview: &str);
 }
 
+/// A line a preview's service wrote, masked, for a log drain: when (ms), whether on stderr, what.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DrainLine {
+    pub t: i64,
+    pub stderr: bool,
+    pub text: String,
+}
+
+/// Which of a drain's sources a preview's lines are: a running service's output, or a job's
+/// (`release`, `seed`, `teardown`: roll apps' `build`, where deploy-time commands go).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum DrainSource {
+    Runtime,
+    Build,
+}
+
+impl DrainSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DrainSource::Runtime => "runtime",
+            DrainSource::Build => "build",
+        }
+    }
+}
+
+/// A project's log drains (roll apps' `…/projects/{project}/drains`): the ones that take
+/// previews' runtime output get a preview's services on roll's runtime too, in its `pv-`
+/// environment, as roll apps' own preview environments' output.
+#[async_trait]
+pub trait Drains: Send + Sync {
+    /// Whether any of the project's drains takes previews' lines of `source` (cheap: asked each
+    /// pass).
+    async fn wanted(&self, project: &str, source: DrainSource) -> bool;
+    /// A service's (or a job's) lines, masked, oldest first. Never waits (a drain that can't keep
+    /// up loses lines).
+    fn send(&self, project: &str, environment: &str, service: &str, source: DrainSource, lines: Vec<DrainLine>);
+}
+
 /// Where services run: roll apps once it lands, [`crate::runtime::Runtime`] until then.
 #[async_trait]
 pub trait Apps: Send + Sync {
@@ -564,6 +602,12 @@ pub trait Apps: Send + Sync {
     /// The service's output as it comes, after its last `lines`: `None` where it can't be
     /// followed (the engine reads `logs` again every few seconds instead).
     async fn follow(&self, _preview: &str, _service: &str, _lines: usize) -> Option<tokio::sync::mpsc::Receiver<String>> {
+        None
+    }
+    /// The service's output from `since` (a Docker stamp, RFC 3339, or Unix seconds) as it comes,
+    /// each line `(stderr, "<RFC 3339 stamp> <text>")`, for the project's log drains. `None`
+    /// where this backend doesn't run it (roll apps drains its own instances' output).
+    async fn drain_from(&self, _preview: &str, _service: &str, _since: &str) -> Option<tokio::sync::mpsc::Receiver<(bool, String)>> {
         None
     }
     /// Run a project's seed command to its end: `Ok((exit code, the output's tail))`.

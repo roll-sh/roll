@@ -368,6 +368,67 @@ async fn a_previews_errors_are_its_services_groups_masked() {
     assert!(matches!(e.engine.errors("pv_nope", 60).await, Err(roll_previews::Error::NotFound(_))));
 }
 
+/// A project that sends its logs to a drain (roll apps' drains with `previews`) gets its previews'
+/// services on roll's runtime there too, masked, in the preview's `pv-` environment: one
+/// follower a running service while a drain wants it, and a follower after a restart starts at
+/// the last line sent, so nothing is sent twice. Its jobs' output is the `build` source.
+#[tokio::test]
+async fn a_previews_runtime_output_goes_to_the_projects_log_drains_masked() {
+    let e = env(json!({ "enabled": true, "seed": { "image": "node:22", "run": "node seed.js" } }));
+    e.secrets.values.lock().push(("STRIPE_KEY".into(), "sk_test_51Hx9".into()));
+    let drains = Arc::new(common::FakeDrains::default());
+    let _ = e.engine.drains.set(drains.clone());
+    e.code.open(change("chg_d", 12));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_d").unwrap().unwrap();
+    let web = e.engine.store.services(&p.id).unwrap().into_iter().next().unwrap().name;
+    e.apps.running.lock().insert((p.id.clone(), web.clone()));
+    e.engine.pass().await.unwrap();
+    assert!(e.apps.drain_since.lock().is_empty() && drains.sent.lock().is_empty(), "no drain wants previews' output: nothing followed, the seed's output not sent");
+    drains.wanted.store(true, Ordering::SeqCst);
+    // A reset seeds again: the job's output, masked, as the `build` source.
+    e.engine.reset(&p.id, Vec::new()).unwrap();
+    e.engine.pass().await.unwrap();
+    let seeded: Vec<_> = drains.sent.lock().drain(..).map(|(env, svc, source, l)| (env, svc, source, l.text)).collect();
+    assert_eq!(seeded, [(format!("pv-{}", p.id.trim_start_matches("pv_")), "seed".to_string(), "build", "seed output, STRIPE_KEY=***".to_string())]);
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    assert_eq!(e.apps.drain_since.lock().len(), 1, "one follower a service");
+    let say = |stderr: bool, l: &str| {
+        let tx = e.apps.drain_tx.lock().clone().unwrap();
+        let l = l.to_string();
+        async move { tx.send((stderr, l)).await.unwrap() }
+    };
+    say(false, "2026-11-18T10:00:00.000000001Z listening on :3000").await;
+    say(true, "2026-11-18T10:00:00.000000002Z charging with sk_test_51Hx9").await;
+    let sent = |n: usize| {
+        let drains = drains.clone();
+        async move {
+        for _ in 0..200 {
+            if drains.sent.lock().len() >= n {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        drains.sent.lock().iter().map(|(env, svc, _, l)| (env.clone(), svc.clone(), l.stderr, l.text.clone())).collect::<Vec<_>>()
+        }
+    };
+    let env_name = format!("pv-{}", p.id.trim_start_matches("pv_"));
+    assert_eq!(sent(2).await, [(env_name.clone(), web.clone(), false, "listening on :3000".to_string()), (env_name.clone(), web.clone(), true, "charging with ***".to_string())]);
+    assert_eq!(drains.sent.lock()[0].3.t, 1_794_996_000_000);
+    // The container goes (a redeploy): the next follower starts at the last line sent, and the
+    // line Docker gives again from there isn't sent twice.
+    *e.apps.drain_tx.lock() = None;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    e.engine.pass().await.unwrap();
+    assert_eq!(e.apps.drain_since.lock().last().map(String::as_str), Some("2026-11-18T10:00:00.000000002Z"));
+    say(true, "2026-11-18T10:00:00.000000002Z charging with sk_test_51Hx9").await;
+    say(false, "2026-11-18T10:00:01.000000000Z ready").await;
+    let all = sent(3).await;
+    assert_eq!(all.len(), 3, "{all:?}");
+    assert_eq!(all[2].3, "ready");
+}
+
 /// A preview's output is read by anyone who can read the preview, and its code (a fork's too) can
 /// print what it was given: its services' logs, its jobs' output and what its page said in a
 /// screenshot run (the pull request's comment) show a secret's value as `***` (as checks'
