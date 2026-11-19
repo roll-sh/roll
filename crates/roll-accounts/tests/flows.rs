@@ -1467,6 +1467,15 @@ async fn a_company_can_require_a_second_factor() {
     let people = env.operator(Method::GET, "/v1/accounts/users", json!({})).await.json;
     let factors = |email: &str| people.as_array().unwrap().iter().find(|u| u["email"] == email).map(|u| (u["totp"].as_bool().unwrap(), u["passkeys"].as_u64().unwrap())).unwrap();
     assert_eq!((factors("ada@example.com"), factors("bob@example.com")), ((true, 0), (false, 0)), "{people}");
+    // And when each last used roll (signing in counts).
+    assert!(people.as_array().unwrap().iter().all(|u| u["last_active_at"].as_i64().is_some_and(|t| t > 0)), "{people}");
+    // A token's use counts too (rolld's gate notes it): Bob, idle for months, is active again.
+    let bob_id = people.as_array().unwrap().iter().find(|u| u["email"] == "bob@example.com").unwrap()["id"].as_str().unwrap().to_string();
+    let db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(env._dir.path().join("accounts.db")), "accounts").unwrap();
+    db.write(|c| c.execute("UPDATE users SET last_active_at = 1 WHERE id = ?", [bob_id.as_str()])).unwrap();
+    env.accounts.note_active(&bob_id).unwrap();
+    let again = env.operator(Method::GET, "/v1/accounts/users", json!({})).await.json;
+    assert!(again.as_array().unwrap().iter().any(|u| u["id"] == bob_id.as_str() && u["last_active_at"].as_i64().is_some_and(|t| t > 1)), "{again}");
     assert_eq!(env.call(&mut bob, Method::GET, "/v1/workspace/projects", None).await.status, StatusCode::FORBIDDEN);
     env.operator(Method::PUT, "/v1/accounts/policy", json!({ "require_second_factor": false })).await;
     assert_eq!(env.call(&mut bob, Method::GET, "/v1/workspace/projects", None).await.status, StatusCode::OK);
