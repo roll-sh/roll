@@ -976,7 +976,7 @@
         "tags": [
           "projects"
         ],
-        "x-roll-action": "write"
+        "x-roll-action": "admin (it makes the project's service names public: a person's call, not a token's write)"
       }
     },
     "/v1/apps/projects/{project}/status-page/incidents": {

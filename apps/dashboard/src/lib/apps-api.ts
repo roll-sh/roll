@@ -113,6 +113,8 @@ export interface Run {
   rebuild_on_base?: boolean;
   /** A web service's page loaded before a deploy keeps talking to the deployment that served it, for a day (`x-deployment-id`, `?dpl=`, or the `__roll_dpl` cookie). */
   skew_protection?: boolean;
+  /** At max_instances with every instance at its concurrency, a request waits this long (1–60 s) for a slot, then gets a 429; unset, the least busy takes it past its concurrency. */
+  queue_s?: number;
   /** A deploy whose image has a known vulnerability this severe or worse fails before it goes live (a rollback never does). */
   block_on?: Exclude<Severity, "unknown">;
   /** A worker follows `group`'s lag on `stream` (a roll stream of its project): one instance per `per_instance` behind. */

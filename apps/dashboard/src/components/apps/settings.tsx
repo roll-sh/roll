@@ -50,6 +50,7 @@ interface Form {
   min: string;
   max: string;
   concurrency: string;
+  queue: string;
   cpu: number;
   memory: number;
   healthPath: string;
@@ -129,6 +130,7 @@ export function formOf(s: Service): Form {
     min: str(s.run.min_instances),
     max: str(s.run.max_instances),
     concurrency: str(s.run.concurrency),
+    queue: str(s.run.queue_s),
     cpu: s.run.cpu,
     memory: s.run.memory_mb,
     healthPath: str(s.run.health_path),
@@ -225,6 +227,7 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   if (f.min !== before.min) run.min_instances = num(f.min);
   if (f.max !== before.max) run.max_instances = num(f.max);
   if (f.concurrency !== before.concurrency) run.concurrency = num(f.concurrency);
+  if (f.queue !== before.queue) run.queue_s = num(f.queue);
   if (f.cpu !== before.cpu) run.cpu = f.cpu;
   if (f.memory !== before.memory) run.memory_mb = f.memory;
   if (f.healthPath !== before.healthPath) run.health_path = text(f.healthPath);
@@ -277,7 +280,7 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   return patch;
 }
 
-const NUMERIC: (keyof Form)[] = ["scalePer", "port", "timeout", "retries", "min", "max", "concurrency", "healthTimeout", "healthEvery", "healthFailures", "drain", "cpuTarget", "memoryTarget", "suspendAfter", "sleepAfter", "volumeSize", "backupEvery", "backupKeep", "alertMemory", "alertErrors", "alertP95", "sloObjective", "sloLatency", "sloWindow", "metricsPort", "alertCapacity", "alertLogCount", "rolloutStep", "rolloutErrors", "restartTries"];
+const NUMERIC: (keyof Form)[] = ["scalePer", "port", "timeout", "retries", "min", "max", "concurrency", "queue", "healthTimeout", "healthEvery", "healthFailures", "drain", "cpuTarget", "memoryTarget", "suspendAfter", "sleepAfter", "volumeSize", "backupEvery", "backupKeep", "alertMemory", "alertErrors", "alertP95", "sloObjective", "sloLatency", "sloWindow", "metricsPort", "alertCapacity", "alertLogCount", "rolloutStep", "rolloutErrors", "restartTries"];
 
 /** A rollout's steps as typed (`10, 50`): increasing percents 1–99, at most five; null when they aren't. */
 export function rolloutSteps(v: string): number[] | null {
@@ -549,6 +552,9 @@ export function SettingsTab({
                 <>
                   <Field label="Concurrency" hint="requests in flight per instance">
                     {t("concurrency", "50")}
+                  </Field>
+                  <Field label="Queue at the limit (s)" hint="all at max and busy: wait this long, then 429; empty: past concurrency">
+                    {t("queue", "")}
                   </Field>
                   <Field label="CPU target (%)" hint="another instance while they average over it for a minute; empty: requests only">
                     {t("cpuTarget", "70")}
