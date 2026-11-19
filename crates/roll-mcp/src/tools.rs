@@ -114,7 +114,12 @@ impl Tool {
 
     /// Its MCP definition, as `tools/list` shows it.
     pub fn definition(&self) -> Value {
-        PREPARED.get(self.name).map_or_else(|| self.build_definition(), |p| p.definition.clone())
+        self.definition_ref().clone()
+    }
+
+    /// Its definition, worked out once: read it without copying (filtering, names).
+    pub fn definition_ref(&self) -> &'static Value {
+        &PREPARED[self.name].definition
     }
 
     fn find_actions(&self) -> Vec<Action> {
@@ -434,6 +439,11 @@ static TOOLS: &[Tool] = &[
     ),
     t("access_list_approvals", "List approvals", "Approvals, newest first: pending ones wait for the operator.", "access", "GET", "/v1/access/approvals", &[q("state", Ty::Str, "pending, approved, denied, used")]),
     t("access_audit_log", "Audit log", "Every request made with a token and every MCP tool call, newest first.", "access", "GET", "/v1/access/audit", &[q("grant", Ty::Str, "Only this token (tok_…)"), q("product", Ty::Str, "Only this product"), q("decision", Ty::Str, "allow, deny or ask"), q("limit", Ty::Int, "At most (default 100)")]),
+    t("access_checkup", "Checkup: which tokens need attention", "The live tokens that need attention, most serious first, each with its findings and fix: everything (delete, reveal or admin on every resource without asking: tighten), never_expires (give it an expiry), unused (nothing in 30 days: revoke), narrower (its requests needed less than its rules: tighten), roams (five or more networks and no address limit). A person's checkup is of their own tokens; fixing one is theirs or the operator's, on the token's page or with roll token.", "access", "GET", "/v1/access/checkup", &[]),
+    t("access_list_tokens", "List tokens", "Scoped tokens and OAuth connections you may see: name, rules, expiry, address limits, who made it and when it was last used (never a secret). A person sees their own.", "access", "GET", "/v1/access/tokens", &[q("product", Ty::Str, "Only tokens made for this product"), q("resource", Ty::Str, "Only tokens made for this resource (with product)"), q("kind", Ty::Str, "workload: CI and cluster logins (the latest 500) instead")]),
+    t("access_get_token", "Get a token", "One token's rules, expiry, address limits, approvals for a while and last use (never its secret).", "access", "GET", "/v1/access/tokens/{id}", &[req("id", "Token id (tok_…)")]),
+    t("access_tighten_token", "Propose narrower rules for a token", "A token's rules narrowed to what its requests used in the last days (never wider): the proposal, what it went by and the rules it's from. Proposing changes nothing; applying it is the operator's (the token's page, or roll token tighten --apply).", "access", "GET", "/v1/access/tokens/{id}/tighten", &[req("id", "Token id (tok_…)"), q("days", Ty::Int, "Days of activity to go by (1-90; default 30)")]),
+    t("access_token_networks", "Where a token was used from", "The networks (an IPv4 /24 or IPv6 /48) a token was used from, with the first and last time: a leaked token shows up somewhere new.", "access", "GET", "/v1/access/tokens/{id}/networks", &[req("id", "Token id (tok_…)")]),
     // ── workspace ──
     t("workspace_list_projects", "List projects", "Workspace projects, each with the resources on its canvas (kind, ref, position).", "workspace", "GET", "/v1/workspace/projects", &[]),
     t("workspace_get_project", "Get a project", "A workspace project and its resources.", "workspace", "GET", "/v1/workspace/projects/{id}", &[WS]),
@@ -535,6 +545,11 @@ static TOOLS: &[Tool] = &[
     t("storage_restore_object", "Restore a deleted object", "Bring an object back from the trash (key and deleted_at from storage_list_trash).", "storage", "POST", "/v1/storage/buckets/{bucket}/trash/restore", &[BUCKET, breq("key", Ty::Str, "Object key"), breq("deleted_at", Ty::Int, "When it was deleted, as listed")]),
     t("storage_usage", "Storage usage", "A bucket's usage.", "storage", "GET", "/v1/storage/buckets/{bucket}/usage", &[BUCKET, DAYS]),
     t("storage_usage_all", "Storage usage, every bucket", "Storage and requests across every bucket.", "storage", "GET", "/v1/storage/usage", &[DAYS]),
+    t("storage_list_accounts", "List storage accounts", "Storage's accounts (AWS-style, 12-digit ids): name, alias, and which is the default (creating one is the operator's).", "storage", "GET", "/v1/storage/accounts", &[]),
+    t("storage_list_keys", "List S3 access keys", "An account's access keys: id, name, permission, the buckets it's limited to, the IAM user it belongs to and when it was last used (never a secret).", "storage", "GET", "/v1/storage/keys", &[q("account", Ty::Str, "Account id (12 digits; the default account when left out)")]),
+    t("storage_list_roles", "List IAM roles", "An account's IAM roles: ARN, trust, permissions policy and session length. Use it when an assumed role is refused.", "storage", "GET", "/v1/storage/roles", &[q("account", Ty::Str, "Account id (12 digits; the default account when left out)")]),
+    t("storage_get_role", "Get an IAM role", "One IAM role: its ARN, trust, permissions policy and session length.", "storage", "GET", "/v1/storage/roles/{name}", &[req("name", "Role name"), q("account", Ty::Str, "Account id (12 digits; the default account when left out)")]),
+    t("storage_list_replication_targets", "List replication targets", "Buckets outside roll that replication copies to: endpoint, region, access key id, buckets (never the secret; adding one is admin).", "storage", "GET", "/v1/storage/replication-targets", &[]),
     t(
         "storage_update_bucket",
         "Change a bucket",
@@ -578,6 +593,7 @@ static TOOLS: &[Tool] = &[
     t("streams_get_group", "Get a consumer group", "A group's members and its committed offset and lag on each partition.", "streams", "GET", "/v1/streams/{stream}/groups/{group}", &[STREAM, req("group", "Group id")]),
     t("streams_branch", "Branch a stream", "A new stream with this one's topics, records (shared, not copied) and committed offsets; its first key's secret comes back once (reveal).", "streams", "POST", "/v1/streams/{stream}/branches", &[STREAM, breq("name", Ty::Str, "Branch name")]),
     t("streams_usage", "Stream usage", "A stream's usage and throughput.", "streams", "GET", "/v1/streams/{stream}/usage", &[STREAM, q("hours", Ty::Int, "Hours of history")]),
+    t("streams_list_keys", "List a stream's keys", "The SASL users a stream's Kafka clients sign in as: username, label and when made (never a password; a new key is a reveal, in the dashboard or roll stream).", "streams", "GET", "/v1/streams/{stream}/keys", &[STREAM]),
     t("streams_update", "Change a stream's settings", "Change some of a stream's settings (as streams_get shows them: retention, throughput limits…); the rest stay.", "streams", "PATCH", "/v1/streams/{stream}", &[STREAM, breq("settings", Ty::Obj, "The settings to change")]),
     t(
         "streams_update_topic",
@@ -620,6 +636,7 @@ static TOOLS: &[Tool] = &[
         ],
     ),
     t("nosql_activity", "NoSQL activity", "What a database is doing now: connected clients, slow queries, warnings and metrics.", "nosql", "GET", "/v1/nosql/databases/{database}/activity", &[NOSQL]),
+    t("nosql_list_imports", "List imports into a database", "A database's imports from another cluster (cql://) or a backup (s3://, file://): state, keyspaces, rows, tables done, errors, the schedule and the next run (the source's password hidden).", "nosql", "GET", "/v1/nosql/databases/{database}/imports", &[NOSQL]),
     // ── queues ──
     t("queues_overview", "Queues overview", "The broker's totals and listeners.", "queues", "GET", "/v1/queues/overview", &[]),
     t("queues_list_vhosts", "List virtual hosts", "RabbitMQ-compatible virtual hosts.", "queues", "GET", "/v1/queues/vhosts", &[]),
@@ -639,6 +656,7 @@ static TOOLS: &[Tool] = &[
     t("queues_close_connection", "Close a connection", "Close a client's connection (it may reconnect).", "queues", "DELETE", "/v1/queues/connections/{id}", &[req("id", "Connection id or name")]).destructive(),
     t("queues_list_channels", "List channels", "Open channels with their prefetch and unacknowledged messages.", "queues", "GET", "/v1/queues/channels", &[]),
     t("queues_list_policies", "List policies", "Policies (message TTL, dead-lettering, length limits) and the queues they match.", "queues", "GET", "/v1/queues/policies", &[]),
+    t("queues_list_users", "List queue users", "The broker's users: tags, each vhost's configure, write and read permissions, and limits (never a password). Use it when a client is refused (ACCESS_REFUSED).", "queues", "GET", "/v1/queues/users", &[]),
     t(
         "queues_set_policy",
         "Set a policy",
@@ -675,6 +693,8 @@ static TOOLS: &[Tool] = &[
     t("tasks_cancel_run", "Cancel a run", "Stop a durable function run (its finished steps stay done).", "tasks", "POST", "/v1/tasks/runs/{id}/cancel", &[req("id", "Run id")]),
     t("tasks_rerun", "Rerun a run", "Run a function again with the same input as a past run.", "tasks", "POST", "/v1/tasks/runs/{id}/rerun", &[req("id", "Run id")]),
     t("tasks_list_functions", "List functions", "Durable functions: their triggers and URLs.", "tasks", "GET", "/v1/tasks/functions", &[]),
+    t("tasks_list_apps", "List synced apps", "The apps whose functions tasks runs: each one's URL, functions, SDK and when it last synced. Use it when a function is missing or stale.", "tasks", "GET", "/v1/tasks/apps", &[]),
+    t("tasks_list_api_keys", "List tasks API keys", "Tasks' API keys: name, prefix, when made and last used (never the key itself).", "tasks", "GET", "/v1/tasks/api-keys", &[]),
     t("tasks_list_queues", "List task queues", "Queues with their parallelism, rate and backlog.", "tasks", "GET", "/v1/tasks/queues", &[]),
     t("tasks_stats", "Tasks stats", "Nodes, queue stats, dead letters, schedules and functions.", "tasks", "GET", "/v1/tasks/stats", &[]),
     t("tasks_list_dead_letters", "List dead letters", "Messages that ran out of retries, newest first.", "tasks", "GET", "/v1/tasks/dlq", &[q("queue", Ty::Str, "Only this queue's"), q("topic", Ty::Str, "Only this topic's"), q("cursor", Ty::Str, "From a page's cursor"), q("limit", Ty::Int, "At most")]),
@@ -740,6 +760,8 @@ static TOOLS: &[Tool] = &[
         &[breq("name", Ty::Str, "Name"), b("flavor", Ty::Str, "elasticsearch or opensearch"), b("parent", Ty::Str, "Branch this cluster"), b("at", Ty::Int, "Unix seconds to branch at"), IN_PROJECT],
     ),
     t("search_list_branches", "List a cluster's branches", "A search cluster's copy-on-write branches: names, when each was taken, and their state.", "search", "GET", "/v1/search/clusters/{cluster}/branches", &[req("cluster", "Cluster id or name")]),
+    t("search_list_remotes", "List a cluster's remotes", "The clusters this one searches across (cross-cluster search, alias:index): each remote's alias, cluster, the cross-cluster key's id and whether it still connects (never the key). Linking one is the cluster admin's.", "search", "GET", "/v1/search/clusters/{cluster}/remotes", &[req("cluster", "Cluster id or name")]),
+    t("search_list_inference_secrets", "Inference endpoints keyed by a roll secret", "A cluster's inference endpoints whose API key comes from a roll secret, with the project and key each follows (a rotated value reaches the endpoint within seconds; never the value), and the projects whose secrets it could use.", "search", "GET", "/v1/search/clusters/{cluster}/inference/secrets", &[req("cluster", "Cluster id or name")]),
     t("search_branch_cluster", "Branch a search cluster", "A copy-on-write branch of a cluster, now or at a time within its history.", "search", "POST", "/v1/search/clusters/{cluster}/branches", &[req("cluster", "Cluster id or name"), breq("name", Ty::Str, "Branch name"), b("at", Ty::Int, "Unix seconds")]),
     t("search_update_cluster", "Update a search cluster", "Change a cluster's settings: idle_timeout_s (0: always loaded), max_in_flight, max_body_mb at once; flavor or destructive_requires_name put it to sleep to reload once no request runs; ip_allowlist replaces the networks its endpoint answers (up to 64 CIDRs, each a string or {cidr, description}; [] answers everyone; this API isn't filtered by it).", "search", "PATCH", "/v1/search/clusters/{cluster}", &[req("cluster", "Cluster id or name"), b("idle_timeout_s", Ty::Int, "Seconds idle before it sleeps (0: never)"), b("max_in_flight", Ty::Int, "Requests at once"), b("max_body_mb", Ty::Int, "Largest request body"), b("destructive_requires_name", Ty::Bool, "Refuse wildcard deletes"), b("flavor", Ty::Str, "elasticsearch or opensearch"), b("ip_allowlist", Ty::Arr, "CIDRs its endpoint answers (strings or {cidr, description})")]),
     t("search_delete_cluster", "Delete a search cluster", "Delete a cluster and its indices (its branches keep working). It's kept for the deployment's restore window (7 days by default) and search_restore_cluster brings it back until then.", "search", "DELETE", "/v1/search/clusters/{cluster}", &[req("cluster", "Cluster id or name")]),
@@ -802,6 +824,11 @@ static TOOLS: &[Tool] = &[
     t("secrets_list_saas", "List SaaS rotators", "A project's rotators for third-party API keys: each one's vendor (SendGrid, Twilio, Okta, Entra, Auth0) and the account or app it rotates for (never a credential; adding one is the project admin's).", "secrets", "GET", "/v1/secrets/projects/{project}/saas", &[SECRET_PROJECT]),
     t("secrets_list_kubernetes", "List Kubernetes clusters", "The Kubernetes clusters a project issues service-account tokens for: names, API servers, and whether calls trust the cluster's own CA (never a token or the CA; adding one is the project admin's).", "secrets", "GET", "/v1/secrets/projects/{project}/kubernetes", &[SECRET_PROJECT]),
     t("secrets_list_github_apps", "List GitHub Apps", "A project's GitHub Apps that short-lived installation tokens come from: app and installation ids, repositories and permissions (never the private key; adding one is the project admin's, in the dashboard).", "secrets", "GET", "/v1/secrets/projects/{project}/github-apps", &[req("project", "Workspace project")]),
+    t("secrets_list_directories", "List LDAP and Active Directory servers", "A project's directories whose account passwords roll rotates and where dynamic users are made: URL, flavor, bind DN, managed accounts, groups and the gateway it's reached through (never the bind password; adding one is the project admin's, in the dashboard).", "secrets", "GET", "/v1/secrets/projects/{project}/directories", &[SECRET_PROJECT]),
+    t("secrets_list_snowflake_accounts", "List Snowflake accounts", "A project's Snowflake accounts that rotated keys and dynamic users come from: account, host, admin user and role, the admin key's public fingerprint, the managed user and roles (never the key; adding one is the project admin's).", "secrets", "GET", "/v1/secrets/projects/{project}/snowflake-accounts", &[SECRET_PROJECT]),
+    t("secrets_list_atlas_projects", "List MongoDB Atlas projects", "A project's MongoDB Atlas projects that rotated passwords and dynamic database users come from: the Atlas group id, the service account's client id, managed users and roles (never the client secret; adding one is the project admin's).", "secrets", "GET", "/v1/secrets/projects/{project}/atlas-projects", &[SECRET_PROJECT]),
+    t("secrets_list_gateways", "Gateways: is a private network reachable", "A project's gateways into private networks, each with its link's status: online, the node holding it, its version, the allow-list it reported, when it connected and was last seen. Use it when a directory or outside database behind one fails (never a token; making one is the project admin's).", "secrets", "GET", "/v1/secrets/projects/{project}/gateways", &[SECRET_PROJECT]),
+    t("secrets_ca_acme", "A CA's ACME server", "A certificate authority's ACME directory URL, whether names are pre-authorized, the challenges it checks, and its external account bindings (label, names, expiry, last use, accounts; never an HMAC key; making one is the project admin's).", "secrets", "GET", "/v1/secrets/projects/{project}/cas/{id}/acme", &[SECRET_PROJECT, req("id", "Certificate authority id")]),
     t("secrets_changes", "Secret changes", "What changed in an environment, newest first: who, when, which keys (fingerprints, never values).", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/changes", &[SECRET_PROJECT, ENV, q("before", Ty::Int, "Changes before this sequence number"), q("limit", Ty::Int, "How many")]),
     t("secrets_get_change", "Get a secrets change", "One change of an environment (seq, from secrets_changes): who, when, why, and what it did to each key (fingerprints, never values); state: true adds every key as it was after it.", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/changes/{seq}", &[SECRET_PROJECT, ENV, req("seq", "The change's seq"), q("state", Ty::Bool, "Every key as it was after it")]),
     t("secrets_insights", "Secret insights", "Each key in a folder: its version, who changed it and when, its last read and reads in 30 days, and whether it's stale (unchanged past the environment's max age) or expiring. Which keys nobody uses, which to rotate.", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/insights", &[SECRET_PROJECT, ENV, q("path", Ty::Str, "Folder")]),
@@ -1191,5 +1218,24 @@ mod tests {
         let doc = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/mcp.md")).unwrap();
         let missing: Vec<_> = all().iter().filter(|t| !doc.contains(&format!("| `{}` |", t.name))).map(|t| t.name).collect();
         assert!(missing.is_empty(), "docs/mcp.md doesn't list {missing:?}");
+        // A tool a description or a workflow tells the agent to call is one roll has: a renamed
+        // tool would otherwise send agents after a name that answers "unknown tool".
+        let names: Vec<String> = all().iter().map(|t| t.name.to_string()).chain([crate::search::FIND, crate::search::RUN_READ, crate::search::RUN].map(String::from)).collect();
+        let products = ["access", "workspace", "postgres", "redis", "storage", "streams", "tasks", "queues", "nosql", "search", "secrets", "apps", "previews", "roll"];
+        // Words that look like a tool and aren't one: Elasticsearch's audit event names.
+        let not_tools = ["access_denied"];
+        let mut texts: Vec<(String, String)> = all().iter().map(|t| (t.name.to_string(), std::iter::once(t.title).chain([t.description]).chain(t.params.iter().map(|p| p.desc)).collect::<Vec<_>>().join(" "))).collect();
+        texts.extend(crate::prompts::workflows(&names).into_iter().map(|w| (format!("prompt {}", w.name), w.text)));
+        let mut dangling = Vec::new();
+        for (whose, text) in &texts {
+            for w in text.split(|c: char| !(c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')) {
+                let looks = w.split_once('_').is_some_and(|(p, rest)| products.contains(&p) && !rest.is_empty() && !rest.starts_with('_'));
+                if looks && !names.iter().any(|n| n == w) && !not_tools.contains(&w) {
+                    dangling.push(format!("{whose}: {w}"));
+                }
+            }
+        }
+        dangling.dedup();
+        assert!(dangling.is_empty(), "these name tools roll doesn't have: {dangling:?}");
     }
 }
