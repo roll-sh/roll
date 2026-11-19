@@ -3643,6 +3643,17 @@ async fn secret_values_are_revealed_only_as_roll_secrets_allows() {
         async fn digest(&self, _: &str, _: &str) -> anyhow::Result<Option<String>> {
             Ok(Some(format!("v{}", VERSION.load(std::sync::atomic::Ordering::SeqCst))))
         }
+        // roll secrets' long poll: the digest once it differs from `since`.
+        async fn wait_digest(&self, p: &str, e: &str, since: &str, wait: Duration) -> anyhow::Result<Option<String>> {
+            let until = std::time::Instant::now() + wait;
+            loop {
+                let now = self.digest(p, e).await?;
+                if now.as_deref() != Some(since) || std::time::Instant::now() >= until {
+                    return Ok(now);
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
         async fn resolve(&self, _: &str, _: &str, _: &str) -> anyhow::Result<Vec<apps_control::integrations::SecretVar>> {
             let pw = match VERSION.load(std::sync::atomic::Ordering::SeqCst) {
                 1 => "s3cret".to_string(),
@@ -3696,27 +3707,39 @@ async fn secret_values_are_revealed_only_as_roll_secrets_allows() {
     VERSION.store(2, std::sync::atomic::Ordering::SeqCst);
     assert_eq!(call(&w.api, "GET", &format!("{base}/pending"), None).await.1["secrets"], true);
     assert_eq!(call(&w.api, "GET", &base, None).await.1["needs_deploy"], true, "not after the minute's cache");
-    // Set to redeploy on a change: the owner's minute's watch does it, once.
+    // Set to redeploy on a change: its own long poll on the owner does it, once, within moments.
     assert!(w.apps.watch_secrets().await.is_empty(), "off by default");
     let (st, env) = call(&w.api, "PUT", &base, Some(json!({"redeploy_on_secrets": true}))).await;
     assert_eq!((st, &env["redeploy_on_secrets"]), (StatusCode::OK, &json!(true)), "{env}");
-    let started = w.apps.watch_secrets().await;
-    assert_eq!(started.len(), 1);
-    let d = settled(&w, svc["id"].as_str().unwrap(), "production", &started[0]).await;
-    assert_eq!((d["status"].as_str(), d["trigger"].as_str()), (Some("active"), Some("settings")), "{d}");
+    // The redeploys the watch made, newest first, each once it's live.
+    let sid = svc["id"].as_str().unwrap().to_string();
+    let redeploys = |n: usize| {
+        let (api, base) = (w.api.clone(), base.clone());
+        async move {
+            for _ in 0..300 {
+                let (_, list) = call(&api, "GET", &format!("{base}/deploys"), None).await;
+                let made: Vec<Value> = list.as_array().unwrap().iter().filter(|d| d["message"] == "the project's secrets changed").cloned().collect();
+                if made.len() >= n && made.iter().all(|d| !["queued", "building", "deploying"].contains(&d["status"].as_str().unwrap_or(""))) {
+                    return made;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            panic!("{n} redeploys never came");
+        }
+    };
+    let made = redeploys(1).await;
+    assert_eq!((made.len(), made[0]["status"].as_str(), made[0]["trigger"].as_str()), (1, Some("active"), Some("settings")), "{made:?}");
     assert_eq!(call(&w.api, "GET", &format!("{base}/pending"), None).await.1["secrets"], false);
-    assert!(w.apps.watch_secrets().await.is_empty(), "nothing moved since");
+    assert!(w.apps.watch_secrets().await.is_empty(), "nothing moved since: the minute's pass adds nothing");
     // Back to the first set: a new redeploy (not the first one's, long superseded).
     VERSION.store(1, std::sync::atomic::Ordering::SeqCst);
-    let again = w.apps.watch_secrets().await;
-    assert!(again.len() == 1 && again[0] != started[0], "{again:?}");
-    let d = settled(&w, svc["id"].as_str().unwrap(), "production", &again[0]).await;
-    assert_eq!(d["status"], "active", "{d}");
+    let made = redeploys(2).await;
+    assert_eq!((made.len(), made[0]["status"].as_str()), (2, Some("active")), "{made:?}");
     // And to the second set again: its key once answered the first redeploy; now a new one.
     VERSION.store(2, std::sync::atomic::Ordering::SeqCst);
-    let third = w.apps.watch_secrets().await;
-    assert!(third.len() == 1 && third[0] != started[0] && third[0] != again[0], "{third:?}");
-    assert_eq!(settled(&w, svc["id"].as_str().unwrap(), "production", &third[0]).await["status"], "active");
+    let made = redeploys(3).await;
+    assert_eq!((made.len(), made[0]["status"].as_str()), (3, Some("active")), "{made:?}");
+    settled(&w, &sid, "production", made[0]["id"].as_str().unwrap()).await;
     assert_eq!(call(&w.api, "POST", &format!("{base}/shell/sessions"), None).await.0, StatusCode::FORBIDDEN);
     let (_, job) = call(&w.api, "POST", &format!("{base}/jobs"), Some(json!({"command": "exit 0"}))).await;
     assert_eq!(call(&w.api, "GET", &format!("{base}/jobs/{}/logs", job["id"].as_str().unwrap()), None).await.0, StatusCode::FORBIDDEN);

@@ -302,6 +302,7 @@ pub const OPERATOR_ONLY: &[(&str, &str)] = &[
     ("/v1/access/audit/sinks", "where the audit log is sent is the operator's choice"),
     ("/v1/access/audit/sinks/{id}", "where the audit log is sent is the operator's choice"),
     ("/v1/access/audit/sinks/{id}/retry", "where the audit log is sent is the operator's choice"),
+    ("/v1/previews/{id}/visit", "a browser session in a team-access preview is a signed-in person's (rolld's gate sees their session), never a token's"),
     ("/v1/apps/services/{id}/environments/{env}/visit", "a browser session in a sign-in-gated environment is a signed-in person's (rolld's gate sees their session), never a token's"),
     ("/v1/apps/services/{id}/github", "roll's GitHub App installations span tenants: connecting a service to one (its tokens fetch any repository the installation sees) is the operator's, as connecting a repo is roll code's admin token's"),
 ];
@@ -1129,6 +1130,10 @@ static ROWS: &[Row] = &[
     // cluster's data.
     row("GET", "/v1/search/clusters/{id}/metrics", "search", R, one(PG, "cluster")),
     row("GET", "/v1/search/clusters/{id}/slowlog", "search", R, one(PG, "cluster")),
+    // The security audit log: a read, not a reveal (entries never hold a credential).
+    row("GET", "/v1/search/clusters/{id}/audit", "search", R, one(PG, "cluster")),
+    // Search analytics: the indices' query text, aggregated; a read of the cluster's data.
+    row("GET", "/v1/search/clusters/{id}/analytics", "search", R, one(PG, "cluster")),
     row("*", "/v1/search/clusters/{id}/", "search", M, one(PG, "cluster")),
     // An index's routes are about those indices (`{index}`: a name, or on reads an expression),
     // so a rule can grant some of a cluster's indices. The console (`request`) and the index list
