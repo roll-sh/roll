@@ -264,6 +264,10 @@ impl Tool {
 const fn req(name: &'static str, desc: &'static str) -> P {
     P { name, ty: Ty::Str, at: At::Path, required: true, desc }
 }
+/// A path parameter the route parses as a number (a change's seq, a version).
+const fn req_int(name: &'static str, desc: &'static str) -> P {
+    P { name, ty: Ty::Int, at: At::Path, required: true, desc }
+}
 const fn q(name: &'static str, ty: Ty, desc: &'static str) -> P {
     P { name, ty, at: At::Query, required: false, desc }
 }
@@ -850,7 +854,7 @@ static TOOLS: &[Tool] = &[
     t("secrets_list_gateways", "Gateways: is a private network reachable", "A project's gateways into private networks, each with its link's status: online, the node holding it, its version, the allow-list it reported, when it connected and was last seen. Use it when a directory or outside database behind one fails (never a token; making one is the project admin's).", "secrets", "GET", "/v1/secrets/projects/{project}/gateways", &[SECRET_PROJECT]),
     t("secrets_ca_acme", "A CA's ACME server", "A certificate authority's ACME directory URL, whether names are pre-authorized, the challenges it checks, and its external account bindings (label, names, expiry, last use, accounts; never an HMAC key; making one is the project admin's).", "secrets", "GET", "/v1/secrets/projects/{project}/cas/{id}/acme", &[SECRET_PROJECT, req("id", "Certificate authority id")]),
     t("secrets_changes", "Secret changes", "What changed in an environment, newest first: who, when, which keys (fingerprints, never values).", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/changes", &[SECRET_PROJECT, ENV, q("before", Ty::Int, "Changes before this sequence number"), q("limit", Ty::Int, "How many")]),
-    t("secrets_get_change", "Get a secrets change", "One change of an environment (seq, from secrets_changes): who, when, why, and what it did to each key (fingerprints, never values); state: true adds every key as it was after it.", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/changes/{seq}", &[SECRET_PROJECT, ENV, req("seq", "The change's seq"), q("state", Ty::Bool, "Every key as it was after it")]),
+    t("secrets_get_change", "Get a secrets change", "One change of an environment (seq, from secrets_changes): who, when, why, and what it did to each key (fingerprints, never values); state: true adds every key as it was after it.", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/changes/{seq}", &[SECRET_PROJECT, ENV, req_int("seq", "The change's seq"), q("state", Ty::Bool, "Every key as it was after it")]),
     t("secrets_insights", "Secret insights", "Each key in a folder: its version, who changed it and when, its last read and reads in 30 days, and whether it's stale (unchanged past the environment's max age) or expiring. Which keys nobody uses, which to rotate.", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/insights", &[SECRET_PROJECT, ENV, q("path", Ty::Str, "Folder")]),
     t("secrets_verify_audit", "Is a project's secrets audit log intact", "Walk a project's secrets audit chain and say whether it holds: the rows walked, how far roll's signed digests vouch for them, and the first break (edited, missing, rewritten, signature, truncated, cut, unchained, head, stale or gap) with where. Use it after an incident, or before trusting the log's history.", "secrets", "GET", "/v1/secrets/projects/{project}/audit/verify", &[SECRET_PROJECT, q("since", Ty::Int, "From the last digest before this time (unix ms; the chain's start when left out)")]),
     t("secrets_required", "Required keys", "The keys every standard environment of a project must define (and their types or patterns, when set): what an environment is missing before it runs.", "secrets", "GET", "/v1/secrets/projects/{project}/required", &[SECRET_PROJECT]),
@@ -879,7 +883,7 @@ static TOOLS: &[Tool] = &[
         "secrets",
         "GET",
         "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/versions/{v}/value",
-        &[SECRET_PROJECT, ENV, req("name", "Secret name"), req("v", "Version number"), q("path", Ty::Str, "Folder")],
+        &[SECRET_PROJECT, ENV, req("name", "Secret name"), req_int("v", "Version number"), q("path", Ty::Str, "Folder")],
     ),
     t("secrets_renew_lease", "Renew a lease", "Push a dynamic credential's expiry out, as a long-running consumer does instead of restarting.", "secrets", "POST", "/v1/secrets/projects/{project}/leases/{id}/renew", &[SECRET_PROJECT, req("id", "Lease id"), b("ttl_minutes", Ty::Int, "Minutes from now")]),
     t("secrets_reach", "Who reaches a secret", "Which tokens and identities reach an environment's folder or key, whether code nobody vetted can, where it flows (syncs, shares, imports) and who read it in 30 days: names only. Who has to rotate what after a leak (the project admin's).", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/reach", &[SECRET_PROJECT, ENV, q("path", Ty::Str, "Folder"), q("key", Ty::Str, "One key")]),
