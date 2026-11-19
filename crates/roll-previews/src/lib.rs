@@ -574,6 +574,10 @@ pub struct ErrorGroup {
     pub first_seen: i64,
     pub last_seen: i64,
     pub sample: String,
+    /// The trace its newest sample names, when the preview keeps that trace (most OpenTelemetry
+    /// SDKs log the request's trace id with its error): its spans are one click from it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace: Option<String>,
 }
 
 /// `text` with every secret value replaced by `***` (`code_preview::runner::mask`), and then, on

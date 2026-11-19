@@ -596,7 +596,7 @@ export function parseSse(rest: string, text: string): { events: { event: string;
 }
 
 /** One error in a preview's service's output, grouped (a stack trace joined from its lines, or an error line): how many, first and last seen (ms), and the newest one whole. `fingerprint` names the group (keyed per process: not stable across restarts). */
-export type ErrorGroup = { service: string; fingerprint: string; kind: string; title: string; count: number; first_seen: number; last_seen: number; sample: string };
+export type ErrorGroup = { service: string; fingerprint: string; kind: string; title: string; count: number; first_seen: number; last_seen: number; sample: string; /** The trace its newest sample names, when the preview keeps it. */ trace?: string };
 
 /** A running service's use right now: cores of CPU, resident bytes (an instance's, on roll apps), and the MB it runs with. */
 export type ServiceMetrics = { service: string; cpu: number; memory_bytes: number; memory_mb: number };

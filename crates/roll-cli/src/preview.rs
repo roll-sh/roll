@@ -1248,6 +1248,10 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
                 }
                 for g in groups {
                     println!("{:>5}x  {:>8}  {:<12} {}", g["count"], ago(g["last_seen"].as_i64().unwrap_or(0) / 1000), s(&g["service"]), s(&g["title"]));
+                    // Its request's trace: `roll preview traces --trace <id>` opens it.
+                    if let Some(t) = g["trace"].as_str() {
+                        println!("{:>17}trace {t}", "");
+                    }
                 }
                 return Ok(());
             }

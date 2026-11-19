@@ -80,6 +80,12 @@ fn size(s: &Span) -> usize {
     64 + s.trace.len() + s.span.len() + s.parent.len() + s.name.len() + s.service.len() + s.attrs.iter().map(|(k, v)| 16 + k.len() + v.len()).sum::<usize>()
 }
 
+/// The trace ids a text names: each run of exactly 32 hex digits between characters that aren't
+/// letters or digits (`trace_id=…`, `"traceId":"…"`, a `traceparent`'s `00-…-…-01`), lowercased.
+pub fn trace_ids_in(text: &str) -> impl Iterator<Item = String> + '_ {
+    text.split(|c: char| !c.is_ascii_alphanumeric()).filter(|w| w.len() == 32 && w.bytes().all(|b| b.is_ascii_hexdigit())).map(str::to_ascii_lowercase)
+}
+
 /// A route's times: how many traces, their p50 and p95 (ms).
 #[derive(Clone, Debug, PartialEq)]
 pub struct RouteStat {
@@ -207,7 +213,7 @@ impl Engine {
 
     /// Every trace of the preview in the last `minutes`, newest first, unmasked: the runtime's kept
     /// spans summed, and its roll apps services' own while the project's traces are on.
-    async fn trace_rows(&self, id: &str, minutes: i64) -> Result<Vec<TraceRow>> {
+    pub(super) async fn trace_rows(&self, id: &str, minutes: i64) -> Result<Vec<TraceRow>> {
         self.store.row(id)?;
         let since = (self.store.now_ms()? - minutes * 60_000).max(0) as u64 * 1_000_000;
         // Summed under the lock without copying the spans (only each trace's row leaves it).
@@ -314,6 +320,13 @@ mod tests {
 
     /// A route is slower than main's only past the noise: enough traces on both sides, half again
     /// main's p50 and 100 ms more; a route main hasn't seen isn't compared.
+    #[test]
+    fn a_texts_trace_ids_are_whole_runs_of_32_hex_digits() {
+        let id = "4bf92f3577b34da6a3ce929d0e0e4736";
+        let found: Vec<String> = trace_ids_in(&format!("trace_id={id} traceparent=00-{}-00f067aa0ba902b7-01 x{id}0 {}", id.to_ascii_uppercase(), &id[..31])).collect();
+        assert_eq!(found, [id, id]);
+    }
+
     #[test]
     fn a_route_is_slower_than_mains_only_past_the_noise() {
         let mine: Vec<TraceRow> = (0..10).map(|_| row("GET /checkout", 400)).chain((0..10).map(|_| row("GET /", 30))).chain((0..3).map(|_| row("GET /new", 900))).collect();
