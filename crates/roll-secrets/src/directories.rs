@@ -497,7 +497,7 @@ impl Secrets {
                     d.gateway
                 ],
             )?;
-            audit::record(c, project, caller, "directory.add", None, None, &[], &format!("added directory {} ({host}, {})", d.name, d.flavor.as_str()), now)
+            audit::record(c, self.keys()?, project, caller, "directory.add", None, None, &[], &format!("added directory {} ({host}, {})", d.name, d.flavor.as_str()), now)
         })?;
         Ok(d)
     }
@@ -519,7 +519,7 @@ impl Secrets {
                 return Err(Error::Conflict("in_use", format!("{name} has {waiting} password(s) or user(s) still to retire (a grace period, or a dynamic lease): delete it once they're done")));
             }
             c.execute("DELETE FROM directories WHERE id = ?", [id])?;
-            audit::record(c, project, caller, "directory.delete", None, None, &[], &format!("deleted directory {name}"), now)
+            audit::record(c, self.keys()?, project, caller, "directory.delete", None, None, &[], &format!("deleted directory {name}"), now)
         })
     }
 

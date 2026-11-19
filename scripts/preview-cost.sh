@@ -336,8 +336,8 @@ kill "$FPID" 2>/dev/null || true
 wait "$FPID" 2>/dev/null || true
 grep -q "event: service" "$FOLLOW" && grep -q "pushed-log-line" "$FOLLOW" || { echo "the followed log should carry the request:"; cat "$FOLLOW"; exit 1; }
 # Python's server writes its request lines on stderr: the followed log says so (`event: stderr`,
-# which axum writes after the event's `data:` line).
-grep -A1 "pushed-log-line" "$FOLLOW" | grep -q "^event: stderr" || { echo "the request's line came on stderr and should say so:"; cat "$FOLLOW"; exit 1; }
+# before the event's `data:` line, so a client acting on each line knows its stream).
+grep -B1 "pushed-log-line" "$FOLLOW" | grep -q "^event: stderr" || { echo "the request's line came on stderr and should say so:"; cat "$FOLLOW"; exit 1; }
 # CI's way in: the project's bypass secret in a header (no cookie); a wrong one is refused.
 BYPASS=$(api POST "/v1/previews/projects/$PRJ/bypass" | jq_ "d['secret']")
 [ "$(curl -s -o /dev/null -w '%{http_code}' -H "Host: $HOST" -H "x-roll-preview-bypass: $BYPASS" "http://$API/")" = 200 ] || { echo "the bypass secret should open the preview"; exit 1; }
@@ -425,6 +425,8 @@ SPANS="{\"resourceSpans\":[{\"resource\":{\"attributes\":[{\"key\":\"service.nam
 [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' -d "$SPANS" "$OTEL_HERE/v1/traces")" = 200 ] || { echo "the service's OpenTelemetry endpoint should take its spans: $OTEL_HERE"; exit 1; }
 TRACES=$(api GET "/v1/previews/$PV/traces" | jq_ "[(t['name'], t['spans'], t['error']) for t in d['traces']]")
 case "$TRACES" in *"('GET /checkout', 2, True)"*) ;; *) echo "the span posted should be the preview's trace: $TRACES"; exit 1;; esac
+ROUTES=$(api GET "/v1/previews/$PV/routes" | jq_ "[(r['name'], r['count']) for r in d['routes']]")
+case "$ROUTES" in *"('GET /checkout', 1)"*) ;; *) echo "the trace should be its route's: $ROUTES"; exit 1;; esac
 [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' -d '{}' "http://$API/v1/previews/$PV/otlp/not-the-token/v1/traces")" = 404 ] || { echo "another token should be 404"; exit 1; }
 
 say "a screenshot of the service (github.screenshot), once per head"

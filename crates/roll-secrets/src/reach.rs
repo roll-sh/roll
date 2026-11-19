@@ -27,6 +27,14 @@ pub struct Reach {
     pub tokens: Vec<Holder>,
     pub identities: Vec<Holder>,
     pub syncs: Vec<SyncReach>,
+    /// Live dynamic credentials issued for its keys (or the key): their holders keep them until
+    /// they end.
+    pub leases: Vec<LeaseReach>,
+    /// Open one-time shares made from its keys (or the key), as their makers said (`from`).
+    pub shares: Vec<ShareReach>,
+    /// Open one-time shares of the project that don't say where their value came from: they may
+    /// hold one of its values too (only their makers know).
+    pub unattributed_shares: usize,
     /// Other projects this folder is shared with (their importing folders read it).
     pub projects: Vec<String>,
     /// Folders that import it (`env:/path`) and environments based on it, and theirs; another
@@ -39,6 +47,26 @@ pub struct Reach {
     /// in another key are recorded where they were read, and aren't counted ([`UNCOUNTED`]).
     pub readers: Vec<Reader>,
     pub uncounted: &'static str,
+    /// The folder is frozen (`…/reach/cut-off` with `freeze`): only its admins read it.
+    pub frozen: Option<crate::cutoff::Freeze>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LeaseReach {
+    pub id: String,
+    pub key: String,
+    pub consumer: String,
+    pub issued_at: i64,
+    pub expires_at: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ShareReach {
+    pub id: String,
+    pub note: String,
+    pub key: String,
+    pub created_by: String,
+    pub expires_at: i64,
 }
 
 /// How many steps away a reading folder is followed (an importer's importer is two).
@@ -59,7 +87,18 @@ pub struct Holder {
     pub expires_at: Option<i64>,
     pub last_used_at: Option<i64>,
     pub created_by: String,
+    /// An identity an incident's cut-off disabled: it doesn't log in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disabled_at: Option<i64>,
+    /// Why this caller's cut-off would leave it: a token that reaches beyond this project is only
+    /// the operator's to revoke ([`BEYOND`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skipped: Option<&'static str>,
 }
+
+/// Why a cut-off leaves a token to the operator: its rules reach past this project
+/// ([`crate::access::confined_to`]), so revoking it would cut off other projects too.
+pub const BEYOND: &str = "reaches beyond this project: the operator revokes it";
 
 #[derive(Debug, Serialize)]
 pub struct SyncReach {
@@ -67,6 +106,8 @@ pub struct SyncReach {
     pub kind: String,
     pub target: serde_json::Value,
     pub last_synced_at: Option<i64>,
+    /// Paused by an incident's cut-off: it pushes nothing.
+    pub paused_at: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -103,6 +144,8 @@ impl Secrets {
             Some(w) => w.grants()?,
             None => vec![],
         };
+        // A project's admin cuts off only what stays inside the project; the operator, anything.
+        let operator = caller.grants.everything();
         let tokens = all
             .into_iter()
             .filter_map(|g| {
@@ -110,15 +153,18 @@ impl Secrets {
                 // projects (a token that reaches nothing here isn't listed, nor its name or person).
                 let grants = self.grant_grants(&g).ok()?;
                 let actions: Vec<Action> = ACTIONS.into_iter().filter(|a| grants.allows(*a, &Scope::at(project, slug, &path))).collect();
-                (!actions.is_empty()).then(|| Holder { id: g.id.to_string(), name: g.name.to_string(), actions, expires_at: None, last_used_at: None, created_by: g.user.as_deref().unwrap_or("operator").to_string() })
+                let skipped = (!operator && !crate::access::confined_to(&g, project)).then_some(BEYOND);
+                (!actions.is_empty()).then(|| Holder { id: g.id.to_string(), name: g.name.to_string(), actions, expires_at: None, last_used_at: None, created_by: g.user.as_deref().unwrap_or("operator").to_string(), disabled_at: None, skipped })
             })
             .collect();
         let identities = self
             .identities(project, caller)?
             .into_iter()
+            // The project's own rows, and their logins carry one rule naming this project
+            // (`access::rule`): always confined, so any of its admins cuts them off.
             .filter_map(|i| {
                 let actions = here(project, &i.environments, &i.paths, &i.actions, slug, &path);
-                (!actions.is_empty()).then_some(Holder { id: i.id, name: format!("{} ({} {})", i.name, i.issuer, i.subject), actions, expires_at: None, last_used_at: i.last_used_at, created_by: i.created_by })
+                (!actions.is_empty()).then_some(Holder { id: i.id, name: format!("{} ({} {})", i.name, i.issuer, i.subject), actions, expires_at: None, last_used_at: i.last_used_at, created_by: i.created_by, disabled_at: i.disabled_at, skipped: None })
             })
             .collect();
         let projects = self.exports(project, slug, &path, caller)?.into_iter().map(|e| e.project).collect();
@@ -126,8 +172,32 @@ impl Secrets {
         // shared with) and environments based on it (previews). Reads are recorded where they
         // happen, so each of those is looked at too.
         type Source = (String, String, String);
-        let (env, sources, reads, truncated) = self.db.read(|c| {
+        type Held = (Vec<LeaseReach>, Vec<ShareReach>, usize, Option<crate::cutoff::Freeze>);
+        let (env, sources, reads, truncated, (leases, shares, unattributed_shares, frozen)) = self.db.read(|c| {
             let env = envs::by_slug(c, project, slug)?;
+            // What it handed out that's still out: dynamic credentials not yet revoked (one past
+            // its end still works until the sweeper revokes it), and shares not yet used up.
+            let leases: Vec<LeaseReach> = c
+                .query(
+                    "SELECT id, key, consumer, issued_at, expires_at FROM leases WHERE revoked_at IS NULL AND env_id = ? AND path = ? AND kind = 'dynamic' ORDER BY issued_at, id",
+                    params![env.id, path],
+                    |r| Ok(LeaseReach { id: r.get(0)?, key: r.get(1)?, consumer: r.get(2)?, issued_at: r.get(3)?, expires_at: r.get(4)? }),
+                )?
+                .into_iter()
+                .filter(|l| key.is_none_or(|k| l.key == k))
+                .collect();
+            let shares: Vec<ShareReach> = c
+                .query(
+                    "SELECT id, note, key, created_by, expires_at FROM shares WHERE env_id = ? AND path = ? AND ciphertext IS NOT NULL AND expires_at > ? ORDER BY created_at, id",
+                    params![env.id, path, now],
+                    |r| Ok(ShareReach { id: r.get(0)?, note: r.get(1)?, key: r.get::<_, Option<String>>(2)?.unwrap_or_default(), created_by: r.get(3)?, expires_at: r.get(4)? }),
+                )?
+                .into_iter()
+                .filter(|s| key.is_none_or(|k| s.key == k))
+                .collect();
+            let unattributed: i64 = c.query_row("SELECT COUNT(*) FROM shares WHERE project_id = ? AND env_id IS NULL AND ciphertext IS NOT NULL AND expires_at > ?", params![project, now], |r| r.get(0))?;
+            let frozen = crate::cutoff::freeze_of(c, &env.id, &path)?;
+            let held: Held = (leases, shares, unattributed as usize, frozen);
             // As reads resolve them: an importer's importers, an environment based on one, and so
             // on, up to SOURCE_DEPTH steps and SOURCES_MAX folders. A read crosses into another
             // project once, from this project's folder to the one it's shared with (while it's
@@ -192,14 +262,14 @@ impl Secrets {
                     }
                 }
             }
-            Ok::<_, Error>((env, sources, reads, truncated))
+            Ok::<_, Error>((env, sources, reads, truncated, held))
         })?;
         let here = |e: &str, p: &str| (e == slug && p == path) || sources.iter().any(|(sp, se, spath)| sp == project && se == e && spath == p);
         let syncs = self
             .list_syncs(project, caller)?
             .into_iter()
             .filter(|s| here(&s.environment, &s.path) && key.is_none_or(|k| s.keys.as_ref().is_none_or(|ks| ks.iter().any(|x| x == k))))
-            .map(|s| SyncReach { id: s.id, kind: s.kind, target: s.target, last_synced_at: s.last_synced_at })
+            .map(|s| SyncReach { id: s.id, kind: s.kind, target: s.target, last_synced_at: s.last_synced_at, paused_at: s.paused_at })
             .collect();
         // Another project's folders and environments are its own: named by the project only.
         let mut imported_by: Vec<String> = vec![];
@@ -228,6 +298,6 @@ impl Secrets {
         }
         let mut readers: Vec<Reader> = readers.into_values().collect();
         readers.sort_by_key(|r| std::cmp::Reverse(r.last_at));
-        Ok(Reach { environment: slug.to_string(), path, key: key.map(String::from), protected: env.protected, untrusted: !env.protected, tokens, identities, syncs, projects, imported_by, truncated, readers, uncounted: UNCOUNTED })
+        Ok(Reach { environment: slug.to_string(), path, key: key.map(String::from), protected: env.protected, untrusted: !env.protected, tokens, identities, syncs, leases, shares, unattributed_shares, projects, imported_by, truncated, readers, uncounted: UNCOUNTED, frozen })
     }
 }

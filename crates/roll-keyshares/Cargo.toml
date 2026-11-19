@@ -1,0 +1,14 @@
+[package]
+name = "roll-keyshares"
+description = "Shamir shares of a key (rlks_…): roll secrets key split and combine, no I/O"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+base64.workspace = true
+getrandom.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true
