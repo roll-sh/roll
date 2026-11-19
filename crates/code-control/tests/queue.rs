@@ -543,10 +543,15 @@ async fn blockers_keep_changes_out_of_the_queue() {
             page_health: None,
             page_a11y: None,
             page_links: None,
+            slower_routes: None,
+            new_errors: None,
             base_change: None,
             diff_url: None,
             pages: Vec::new(),
             speed_budget: None,
+            regressions: None,
+            regressions_accepted_by: None,
+            regressions_compared: false,
             visual_review: Some(code_control::model::PreviewVisualReview { state: state.into(), branch: "main".into(), percent: 8.0, by: by.map(Into::into), required: true, head: None, pages: Vec::new() }),
             notes: Vec::new(),
             issues: Vec::new(),
@@ -561,6 +566,27 @@ async fn blockers_keep_changes_out_of_the_queue() {
     let v = a.ok("GET", &format!("/v1/code/changes/{}", id(&c)), None).await;
     assert_eq!(kinds(&v), ["visual"], "{v}");
     a.code.report_environment(&id(&c), Some(&preview("accepted", Some("someone-else")))).unwrap();
+    let c = a.ok("GET", &format!("/v1/code/changes/{}", id(&c)), None).await;
+    assert_eq!(c["blockers"], json!([]));
+    // Required regressions against main's preview wait the same way: its author's acceptance
+    // doesn't count, someone else's does.
+    let regressed = |by: Option<&str>| {
+        let mut p = preview("accepted", Some("someone-else"));
+        let e = p.environment.as_mut().unwrap();
+        e.regressions = Some("required".into());
+        e.regressions_compared = by != Some("not compared");
+        e.new_errors = Some(code_control::model::PreviewNewErrors { branch: "main".into(), total: 1, errors: Vec::new() });
+        e.regressions_accepted_by = by.map(Into::into);
+        p
+    };
+    a.code.report_environment(&id(&c), Some(&regressed(None))).unwrap();
+    assert_eq!(kinds(&a.ok("GET", &format!("/v1/code/changes/{}", id(&c)), None).await), ["regressions"]);
+    // Not compared at its head isn't clean: it waits too.
+    a.code.report_environment(&id(&c), Some(&regressed(Some("not compared")))).unwrap();
+    assert_eq!(kinds(&a.ok("GET", &format!("/v1/code/changes/{}", id(&c)), None).await), ["regressions"]);
+    a.code.report_environment(&id(&c), Some(&regressed(Some(&author)))).unwrap();
+    assert_eq!(kinds(&a.ok("GET", &format!("/v1/code/changes/{}", id(&c)), None).await), ["regressions"]);
+    a.code.report_environment(&id(&c), Some(&regressed(Some("someone-else")))).unwrap();
     let c = a.ok("GET", &format!("/v1/code/changes/{}", id(&c)), None).await;
     assert_eq!(c["blockers"], json!([]));
     enqueue(&a, &c, "normal").await;
@@ -606,7 +632,7 @@ impl code_control::SecretEnv for FakeSecrets {
     async fn for_repo(&self, _: &str, _: &str, _: &str) -> anyhow::Result<Vec<(String, String)>> {
         anyhow::bail!("not in this test")
     }
-    async fn for_owner(&self, _: &str, _: &str, _: &str, _: &str) -> anyhow::Result<Vec<(String, String)>> {
+    async fn for_owner(&self, _: &str, _: &str, _: &str, _: &str, _: code_control::Asker<'_>) -> anyhow::Result<code_control::Revealed> {
         anyhow::bail!("not in this test")
     }
     async fn leaks(&self, repo: &str, candidates: Vec<String>) -> anyhow::Result<Vec<(usize, String, String, String)>> {
@@ -702,7 +728,7 @@ impl code_control::SecretEnv for DownSecrets {
     async fn for_repo(&self, _: &str, _: &str, _: &str) -> anyhow::Result<Vec<(String, String)>> {
         anyhow::bail!("roll secrets is down")
     }
-    async fn for_owner(&self, _: &str, _: &str, _: &str, _: &str) -> anyhow::Result<Vec<(String, String)>> {
+    async fn for_owner(&self, _: &str, _: &str, _: &str, _: &str, _: code_control::Asker<'_>) -> anyhow::Result<code_control::Revealed> {
         anyhow::bail!("roll secrets is down")
     }
     async fn leaks(&self, _: &str, _: Vec<String>) -> anyhow::Result<Vec<(usize, String, String, String)>> {

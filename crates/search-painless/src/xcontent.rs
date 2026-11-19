@@ -37,6 +37,8 @@ pub fn parse_source_unordered(json: &str) -> Result<Value, XContentError> {
 }
 
 fn parse_json(json: &str, map_class: crate::types::ClassId) -> Result<Value, XContentError> {
+    // Hosts call this on ordinary threads: the reader recurses once per level, within a bound.
+    let _scope = crate::guard::OuterScope::enter();
     crate::es::misc::json_parse(json, map_class).map_err(|t| XContentError {
         kind: if t.es_type == Some("x_content_e_o_f_exception") { "x_content_e_o_f_exception" } else { "x_content_parse_exception" },
         reason: t.message.clone().unwrap_or_default(),

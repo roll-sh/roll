@@ -4,7 +4,7 @@ import { appsApi, followShell as followAppsShell } from "@/lib/apps-api";
 import { codeApi } from "@/lib/code-api";
 import { Confirm } from "@/components/ui";
 import { TerminalScreen } from "@/components/terminal-screen";
-import { endpointSlower, type EndpointTime, a11yWords, checkSummary, seoWords, duration, followLogs, followShell, downloadFiles, openUrl, pageLabel, previewsApi, noteCropUrl, qrUrl, screenshotUrl, resourceId, thanMain, type CaughtMail, type PageCheck, type Preview, type TextDiff, type PreviewActivity, type PreviewVisitor, type PreviewKind, type PreviewShare, type RequestLine, type ServiceMetrics, type ErrorGroup, type TraceSummary, type TraceSpan, type RouteTime } from "@/lib/previews-api";
+import { endpointSlower, type EndpointTime, a11yWords, checkSummary, seoWords, duration, followLogs, followShell, downloadFiles, openUrl, pageLabel, previewsApi, noteCropUrl, qrUrl, screenshotUrl, resourceId, thanMain, type CaughtMail, type PageCheck, type Preview, type TextDiff, type PreviewActivity, type PreviewVisitor, type PreviewKind, type PreviewShare, type RequestLine, type ServiceMetrics, type ErrorGroup, type TraceSummary, type TraceSpan, type RouteTime, type Repeated } from "@/lib/previews-api";
 import { verdict, type VerdictTarget } from "@/lib/preview-verdict";
 import { isProblem, logFilter, logLevel } from "@/lib/preview-logs";
 import { formatBytes } from "@/lib/roll-api";
@@ -175,7 +175,8 @@ export function PreviewSheet({
                 Reaches roll only: a pull request from a fork can't call anything outside roll but the project&apos;s allowed hosts, so a call to an outside API fails here. The project&apos;s rules can open it (A fork&apos;s preview reaches: Anything).
               </p>
             )}
-            <VerdictStrip p={p} />
+            <VerdictStrip p={p} onTab={setTab} />
+            <RegressionsAccept p={p} />
             <span data-section="services" />
             <Label>Services</Label>
             {p.services.length ? (
@@ -997,14 +998,51 @@ export function Endpoints({ items, branch }: { items: EndpointTime[]; branch: st
   );
 }
 
+/** With the project's regressions rule, a change's regressions against main wait for someone other
+ * than its author to accept them at this head (as its visual review does). */
+function RegressionsAccept({ p }: { p: Preview }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const routes = p.slower_routes?.routes.length ?? 0;
+  const errors = p.new_errors?.total ?? 0;
+  if (!p.regressions || !p.change || routes + errors === 0) return null;
+  if (p.regressions_accepted) return <p className="mb-3 text-[11.5px] text-subtle">Its regressions against main were accepted by {p.regressions_accepted.by} at this push.</p>;
+  const accept = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await previewsApi.acceptRegressions(p.id, p.head);
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="mb-3 flex flex-wrap items-center gap-2 text-[11.5px]">
+      <span className="text-muted">{p.regressions === "required" ? "They keep it from landing until they're fixed or accepted." : "They fail roll/regressions until they're fixed or accepted."}</span>
+      <button type="button" disabled={busy} onClick={() => void accept()} className="h-6 rounded-md border border-line-2 px-2 hover:bg-white/[0.05] disabled:opacity-50">
+        Accept them
+      </button>
+      {error && <span className="text-danger">{error}</span>}
+    </div>
+  );
+}
+
 /** What the sheet leads with: what changed against main and what waits on someone, most serious
  * first, each jumping to its section below (Vercel's deployment summary). Says nothing new when
  * there's nothing, once the preview has been compared. */
-function VerdictStrip({ p }: { p: Preview }) {
+function VerdictStrip({ p, onTab }: { p: Preview; onTab: (tab: "Requests" | "Errors") => void }) {
   const items = verdict(p);
   const jump = (target: VerdictTarget) => {
     const reduce = typeof window !== "undefined" && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
-    document.querySelector(`[data-section="${target}"]`)?.scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "start" });
+    const go = () => document.querySelector(`[data-section="${target}"]`)?.scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "start" });
+    // Its errors are their own tab.
+    if (target === "errors") return onTab("Errors");
+    if (target !== "routes") return go();
+    // The routes are on the Requests tab, read once it opens: there when they've come.
+    onTab("Requests");
+    for (const ms of [50, 300, 900]) setTimeout(go, ms);
   };
   if (!items.length) {
     return p.base_change ? <p className="mb-3 text-[11.5px] text-subtle">Nothing new against {p.base_change.branch}: its pages, API and checks are as they were.</p> : null;
@@ -1422,7 +1460,7 @@ function Requests({ preview: p }: { preview: Preview }) {
 function Traces({ preview: p, n }: { preview: Preview; n: number }) {
   const [list, setList] = useState<TraceSummary[] | null>(null);
   const [routes, setRoutes] = useState<RouteTime[]>([]);
-  const [open, setOpen] = useState<{ trace: string; spans: TraceSpan[] } | null>(null);
+  const [open, setOpen] = useState<{ trace: string; spans: TraceSpan[]; repeated?: Repeated | null } | null>(null);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
     let live = true;
@@ -1448,25 +1486,32 @@ function Traces({ preview: p, n }: { preview: Preview; n: number }) {
   };
   if (!list || (!list.length && !error)) return null;
   return (
-    <div className="mt-3 border-t border-line pt-3">
+    <div className="mt-3 border-t border-line pt-3" data-section="routes">
       <Label>Traces</Label>
       {error && <p className="mb-1.5 text-[11.5px] text-danger">{error}</p>}
       {routes.length > 0 && (
         <div className="mb-2 rounded-lg border border-line-2 bg-canvas">
-          <div className="flex items-baseline gap-2 border-b border-line px-2.5 py-1 font-mono text-[10px] text-subtle">
-            <span className="min-w-0 flex-1">route</span>
-            <span className="w-10 text-right">n</span>
-            <span className="w-14 text-right">p50</span>
-            <span className="w-14 text-right">p95</span>
-            <span className="w-16 text-right">main p50</span>
-          </div>
+          {/* A route a row of its own: its name the full width (a sheet is narrow), its times under it. */}
           {routes.slice(0, 12).map((r) => (
-            <div key={r.name} className="flex items-baseline gap-2 border-b border-line px-2.5 py-1 font-mono text-[10.5px] last:border-b-0" title={r.slower ? "clearly slower than main's preview" : undefined}>
-              <span className={`min-w-0 flex-1 truncate ${r.slower ? "text-danger" : "text-soft"}`}>{r.name}</span>
-              <span className="w-10 text-right text-subtle">{r.count}</span>
-              <span className={`w-14 text-right ${r.slower ? "text-danger" : "text-muted"}`}>{r.p50_ms} ms</span>
-              <span className="w-14 text-right text-muted">{r.p95_ms} ms</span>
-              <span className="w-16 text-right text-subtle">{r.main_p50_ms == null ? "—" : `${r.main_p50_ms} ms`}</span>
+            <div key={r.name} className="border-b border-line px-2.5 py-1 font-mono last:border-b-0" title={r.slower ? "clearly slower than main's preview" : undefined}>
+              <div className="flex items-baseline gap-2 text-[10.5px]">
+                <span className={`min-w-0 flex-1 truncate ${r.slower || r.over_budget ? "text-danger" : "text-soft"}`} title={r.name}>
+                  {r.name}
+                </span>
+                {r.repeated && <RepeatedTag repeated={r.repeated} />}
+              </div>
+              <div className="flex flex-wrap gap-x-3 text-[10px] text-subtle tabular-nums">
+                <span>{r.count}×</span>
+                <span className={r.slower || r.over_budget ? "text-danger" : "text-muted"}>p50 {r.p50_ms} ms</span>
+                {r.budget_ms != null && <span className={r.over_budget ? "text-danger" : ""}>budget {r.budget_ms} ms</span>}
+                <span>p95 {r.p95_ms} ms</span>
+                <span>main {r.main_p50_ms == null ? "—" : `${r.main_p50_ms} ms`}</span>
+                {r.grew && (
+                  <span className="min-w-0 truncate text-danger" title={`${r.grew.span}: ${r.grew.ms} ms here, ${r.grew.main_ms} ms on main's preview`}>
+                    {r.grew.span} +{r.grew.ms - r.grew.main_ms} ms
+                  </span>
+                )}
+              </div>
             </div>
           ))}
         </div>
@@ -1479,14 +1524,29 @@ function Traces({ preview: p, n }: { preview: Preview; n: number }) {
               <span className={`min-w-0 flex-1 truncate ${t.error ? "text-danger" : "text-soft"}`} title={t.name}>
                 {t.name}
               </span>
+              {t.repeated && <RepeatedTag repeated={t.repeated} />}
               <span className="text-subtle">{t.spans} spans</span>
               <span className="text-muted">{t.ms} ms</span>
             </button>
+            {open?.trace === t.trace && open.repeated && (
+              <p className="px-2.5 pt-1 font-mono text-[10px] text-danger">
+                runs {open.repeated.count}× <span className="text-soft">{open.repeated.statement}</span>. One query a row is an N+1: batch it, or join.
+              </p>
+            )}
             {open?.trace === t.trace && <Waterfall spans={open.spans} />}
           </div>
         ))}
       </div>
     </div>
+  );
+}
+
+/** A statement a trace runs many times (Sentry's N+1), the statement in its title. */
+function RepeatedTag({ repeated }: { repeated: Repeated }) {
+  return (
+    <span className="shrink-0 rounded border border-danger/40 px-1 text-[9.5px] text-danger" title={`${repeated.count}× ${repeated.statement}`}>
+      N+1
+    </span>
   );
 }
 
@@ -1507,6 +1567,31 @@ function Waterfall({ spans }: { spans: TraceSpan[] }) {
           </div>
         </div>
       ))}
+    </div>
+  );
+}
+
+/** The trace an error's sample names: its request's spans, under the sample. */
+function ErrorTrace({ preview: p, trace }: { preview: Preview; trace: string }) {
+  const [spans, setSpans] = useState<TraceSpan[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    previewsApi.trace(p.id, trace).then(
+      (r) => live && setSpans(r.spans),
+      (e) => live && setError(errorText(e)),
+    );
+    return () => {
+      live = false;
+    };
+  }, [p.id, trace]);
+  const ms = spans?.length ? Math.round((Math.max(...spans.map((s) => s.end)) - Math.min(...spans.map((s) => s.start))) / 1e6) : 0;
+  return (
+    <div className="rise border-t border-line pt-1.5">
+      <p className="px-2.5 font-mono text-[10px] text-subtle">
+        {error ? <span className="text-danger">{error}</span> : spans ? `its request's trace: ${spans.length} spans, ${ms} ms` : "its request's trace…"}
+      </p>
+      {spans && <Waterfall spans={spans} />}
     </div>
   );
 }
@@ -1585,6 +1670,7 @@ function Errors({ preview: p }: { preview: Preview }) {
                 {shown && (
                   <pre className="rise max-h-[40vh] overflow-auto border-t border-line px-2.5 py-2 font-mono text-[10.5px] leading-relaxed whitespace-pre-wrap text-soft [scrollbar-width:thin]">{g.sample}</pre>
                 )}
+                {shown && g.trace && <ErrorTrace preview={p} trace={g.trace} />}
               </li>
             );
           })}

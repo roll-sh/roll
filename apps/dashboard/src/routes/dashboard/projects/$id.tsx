@@ -10,7 +10,7 @@ export const Route = createFileRoute("/dashboard/projects/$id")({
 
 function Page() {
   const { id } = Route.useParams();
-  const tab = useLocation({ select: (l) => (/\/previews\/?$/.test(l.pathname) ? "previews" : /\/logs\/?$/.test(l.pathname) ? "logs" : "canvas") });
+  const tab = useLocation({ select: (l) => (/\/previews\/?$/.test(l.pathname) ? "previews" : /\/logs\/?$/.test(l.pathname) ? "logs" : /\/metrics\/?$/.test(l.pathname) ? "metrics" : "canvas") });
   return (
     <ProjectPage id={id} tab={tab}>
       <Outlet />

@@ -12,7 +12,7 @@
 //! fails).
 
 use crate::access::{Action, Caller, Scope};
-use crate::caller::Maker;
+use crate::caller::Origin;
 use crate::envs;
 use crate::write::{Item, ItemAction, SecretType, current};
 use crate::{Error, Planted, Result, Secret, Secrets, Value, audit, names};
@@ -122,9 +122,9 @@ impl Secrets {
         }
         // Whose it is: they're mailed when it's used, as the admins are.
         let owner = match self.maker(&caller.principal)? {
-            Maker::Person(u) => Some(u),
-            Maker::Operator => None,
-            Maker::Gone => return Err(Error::Forbidden("whoever made this token can't make decoys any more".into())),
+            Origin::Person(u) => Some(u),
+            Origin::Operator => None,
+            Origin::Gone => return Err(Error::Forbidden("whoever made this token can't make decoys any more".into())),
         };
         let planted = match &n.resource {
             None => {

@@ -805,17 +805,19 @@ fn b64(b: &[u8]) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b)
 }
 
-/// People's accounts: `ada` until disabled, and `root`, an admin.
+/// People's accounts: `ada` until disabled, and `root`, an admin until demoted or disabled.
 #[derive(Default)]
 struct People {
     disabled: std::sync::Mutex<bool>,
+    root_demoted: std::sync::Mutex<bool>,
+    root_disabled: std::sync::Mutex<bool>,
 }
 
 impl roll_secrets::People for People {
     fn person(&self, user: &str) -> Result<Option<roll_secrets::Person>, String> {
         Ok(match user {
             "usr_ada" if !*self.disabled.lock().unwrap() => Some(roll_secrets::Person { admin: false, code_owner: Some("ada".into()) }),
-            "usr_root" => Some(roll_secrets::Person { admin: true, code_owner: None }),
+            "usr_root" if !*self.root_disabled.lock().unwrap() => Some(roll_secrets::Person { admin: !*self.root_demoted.lock().unwrap(), code_owner: None }),
             _ => None,
         })
     }
@@ -1048,6 +1050,8 @@ struct Api {
     gate: Arc<Gate>,
     kms: Arc<FakeKms>,
     ws: Arc<roll_workspace::Workspace>,
+    /// The workspace's own database: a project changing hands, which no route does yet.
+    ws_db: code_sql::Db,
     sts: Arc<FakeSts>,
     people: Arc<People>,
     router: Router,
@@ -1068,7 +1072,7 @@ impl Api {
     async fn new() -> Api {
         let dir = tempfile::tempdir().unwrap();
         let ws_db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("workspace.db")), "workspace").unwrap();
-        let ws = Arc::new(roll_workspace::Workspace::new(ws_db).unwrap());
+        let ws = Arc::new(roll_workspace::Workspace::new(ws_db.clone()).unwrap());
         let db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("secrets.db")), "secrets").unwrap();
         let fake = Arc::new(Fake::default());
         let mut links = Links::default();
@@ -1093,7 +1097,7 @@ impl Api {
         let secrets = Arc::new(Secrets::new(db.clone(), ws.clone(), opts).unwrap());
         let _ = gate.secrets.set(secrets.clone());
         let router = roll_workspace::router(ws.clone()).merge(roll_secrets::router(secrets.clone())).layer(axum::middleware::from_fn_with_state(gate.clone(), fake_gate));
-        let mut api = Api { sent, gate, kms, sts, ws: ws.clone(), people, router, secrets, db, fake, pg, sync, outside, directory, github, clouds, project: String::new(), _dir: dir };
+        let mut api = Api { sent, gate, kms, sts, ws: ws.clone(), ws_db, people, router, secrets, db, fake, pg, sync, outside, directory, github, clouds, project: String::new(), _dir: dir };
         let (_, p) = api.call(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "shop" }))).await;
         api.project = p["id"].as_str().unwrap().to_string();
         api
@@ -4726,4 +4730,162 @@ async fn a_frozen_folder_answers_423_to_readers_and_lets_its_admins_through() {
     api.as_ada(Method::PUT, &at("/environments/production/secrets/STRIPE_KEY"), Some(json!({ "value": "sk_test_fake_rotated" }))).await;
     assert_eq!(api.as_ada(Method::DELETE, &at("/environments/production/reach/cut-off?path=/"), None).await.0, StatusCode::NO_CONTENT);
     assert_eq!(api.req(Method::GET, &values, None, Some(&reader)).await.0, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_reference_a_person_chose_reads_only_what_they_may_reveal_now() {
+    use roll_secrets::{Caller, Refusal, ResourceRef};
+    use roll_workspace::Kind;
+    let api = Api::new().await;
+    let s = api.secrets.clone();
+    let session = |user: &str, admin: bool| roll_auth::SignedIn { user: format!("usr_{user}"), handle: user.into(), admin, code_owner: None, session: format!("ses_{user}") };
+    let as_root = s.caller_of(true, Some(&session("root", true)), None).unwrap();
+    api.ok(Method::PUT, &format!("/v1/workspace/projects/{}/resources/search/logs", api.project), Some(json!({ "x": 0, "y": 0 }))).await;
+    let logs = ResourceRef::new(Kind::Search, "logs");
+    api.set("production", "AWS_KEY", "fake-aws").await;
+    api.ok(Method::POST, "/environments/production/changes", Some(json!({ "ops": [{ "op": "set", "key": "STRIPE_KEY", "value": "fake-stripe", "tags": ["sensitive"] }, { "op": "set", "key": "WRAPPED", "value": "Bearer ${STRIPE_KEY}" }] }))).await;
+
+    // A sensitive key is refused when it's chosen, even by an admin, and through a reference in a
+    // value when it's read (a bind decrypts nothing); an operator-written target still reads it.
+    let refused = s.bind_ref(&logs, "roll://production/STRIPE_KEY", &as_root).unwrap_err();
+    assert!(matches!(refused, Refusal::Unusable(_)) && !refused.to_string().contains("fake-"), "{refused}");
+    let wrapped = s.bind_ref(&logs, "roll://production/WRAPPED", &as_root).unwrap();
+    let refused = s.resolve_as(&logs, "roll://production/WRAPPED", &wrapped).unwrap_err();
+    assert!(matches!(refused, Refusal::Unusable(_)) && !refused.to_string().contains("fake-"), "{refused}");
+    assert_eq!(s.resolve_for(&logs, "roll://production/STRIPE_KEY").unwrap().value.expose(), "fake-stripe");
+    // A workload identity's login can't choose one: it ends with its token.
+    let mut login = Caller::operator();
+    login.principal = "identity:idn_1".into();
+    assert!(matches!(s.bind_ref(&logs, "roll://production/AWS_KEY", &login), Err(Refusal::Failed(roll_secrets::Error::BadRequest(_)))));
+
+    // roll apps' git login, named by a deployer of production (apps checked deploy): a sensitive
+    // production key reads as the service's runtime there, audited as that, for them.
+    api.ok(Method::PUT, &format!("/v1/workspace/projects/{}/resources/service/web", api.project), Some(json!({ "x": 1, "y": 0 }))).await;
+    let web = ResourceRef::new(Kind::Service, "web");
+    let git = "roll://production/STRIPE_KEY";
+    let deployer = s.bind_ref_runtime(&web, git, &as_root, "production").unwrap();
+    assert_eq!(serde_json::to_value(&deployer).unwrap(), json!("usr_root@runtime:production"));
+    assert_eq!(s.resolve_as(&web, git, &deployer).unwrap().value.expose(), "fake-stripe");
+    assert!(s.digest_as(&web, git, &deployer).is_ok());
+    let audit = api.ok(Method::GET, "/audit?action=secrets.resolve", None).await;
+    assert_eq!(audit[0]["actor"].as_str(), Some("apps:service:web (runtime read for usr_root)"), "{audit}");
+    assert!(matches!(s.bind_ref_runtime(&web, git, &login, "production"), Err(Refusal::Failed(roll_secrets::Error::BadRequest(_)))));
+    // Any other environment keeps the maker's rules, and a runtime binding reads only its own.
+    api.ok(Method::POST, "/environments/staging/changes", Some(json!({ "ops": [{ "op": "set", "key": "STRIPE_KEY", "value": "fake-stripe-staging", "tags": ["sensitive"] }] }))).await;
+    let refused = s.bind_ref_runtime(&web, "roll://staging/STRIPE_KEY", &as_root, "production").unwrap_err();
+    assert!(matches!(refused, Refusal::Unusable(_)) && !refused.to_string().contains("fake-"), "{refused}");
+    let refused = s.resolve_as(&web, "roll://staging/STRIPE_KEY", &deployer).unwrap_err();
+    assert!(matches!(refused, Refusal::NotAllowed(_)) && !refused.to_string().contains("fake-"), "{refused}");
+
+    // An admin's session is kept as the person, and the read is audited as the resource, for them.
+    let reference = "roll://production/AWS_KEY";
+    let root = s.bind_ref(&logs, reference, &as_root).unwrap();
+    assert_eq!(serde_json::to_value(&root).unwrap(), json!("usr_root"));
+    assert_eq!(s.resolve_as(&logs, reference, &root).unwrap().value.expose(), "fake-aws");
+    let audit = api.ok(Method::GET, "/audit?action=secrets.resolve", None).await;
+    assert_eq!(audit[0]["actor"].as_str(), Some("search:search:logs"), "{audit}");
+    assert!(audit[0].to_string().contains("usr_root"), "{audit}");
+    // Tagged sensitive later: the next read is refused, the digest the same way.
+    api.set("production", "LATER_KEY", "fake-later").await;
+    let later = s.bind_ref(&logs, "roll://production/LATER_KEY", &as_root).unwrap();
+    assert!(s.resolve_as(&logs, "roll://production/LATER_KEY", &later).is_ok());
+    api.ok(Method::PUT, "/environments/production/secrets/LATER_KEY", Some(json!({ "tags": ["sensitive"] }))).await;
+    assert!(matches!(s.resolve_as(&logs, "roll://production/LATER_KEY", &later), Err(Refusal::Unusable(_))));
+    assert!(matches!(s.digest_as(&logs, "roll://production/LATER_KEY", &later), Err(Refusal::Unusable(_))));
+    // Demoted, or unable to sign in: refused until they're an admin again.
+    for flag in [&api.people.root_demoted, &api.people.root_disabled] {
+        *flag.lock().unwrap() = true;
+        let refused = s.resolve_as(&logs, reference, &root).unwrap_err();
+        assert!(matches!(refused, Refusal::NotAllowed(_)), "{refused}");
+        assert!(matches!(s.digest_as(&logs, reference, &root), Err(Refusal::NotAllowed(_))));
+        *flag.lock().unwrap() = false;
+    }
+    assert!(s.resolve_as(&logs, reference, &root).is_ok());
+    // An incident's freeze stops what anyone chose, an admin too (#304): their session reads past
+    // it, a reference they chose doesn't, nor a runtime binding. Unfrozen, both read again.
+    let runtime = s.bind_ref_runtime(&web, reference, &as_root, "production").unwrap();
+    let r = cut_off(&api, "path=/", json!({ "why": "fake incident", "tokens": false, "freeze": true })).await;
+    assert_eq!(r["frozen"], json!(true), "{r}");
+    for (resource, maker) in [(&logs, &root), (&web, &runtime)] {
+        let refused = s.resolve_as(resource, reference, maker).unwrap_err();
+        assert!(matches!(refused, Refusal::Failed(roll_secrets::Error::Frozen(_))) && !refused.to_string().contains("fake-"), "{refused}");
+        assert!(s.digest_as(resource, reference, maker).is_err());
+    }
+    assert_eq!(api.ok(Method::GET, "/environments/production/values", None).await["values"]["AWS_KEY"], "fake-aws");
+    api.ok(Method::DELETE, "/environments/production/reach/cut-off?path=/", None).await;
+    assert!(s.resolve_as(&logs, reference, &root).is_ok() && s.resolve_as(&web, reference, &runtime).is_ok());
+
+    // An untrusted copy (a branch of the cluster) never gets a protected value.
+    api.ok(Method::PUT, "/environments/production/policy", Some(json!({ "protected": true, "approvals": 1 }))).await;
+    assert!(s.resolve_as(&logs, reference, &root).is_ok());
+    let branch = logs.clone().untrusted();
+    assert!(matches!(s.resolve_as(&branch, reference, &root), Err(Refusal::Protected(_))));
+    assert!(matches!(s.bind_ref(&branch, reference, &as_root), Err(Refusal::Protected(_))));
+    // Nor a runtime binding: an untrusted copy of the service reads as an untrusted caller.
+    let runtime = s.bind_ref_runtime(&web, reference, &as_root, "production").unwrap();
+    assert_eq!(s.resolve_as(&web, reference, &runtime).unwrap().value.expose(), "fake-aws");
+    let copy = web.clone().untrusted();
+    assert!(matches!(s.resolve_as(&copy, reference, &runtime), Err(Refusal::Protected(_))));
+    assert!(matches!(s.bind_ref_runtime(&copy, reference, &as_root, "production"), Err(Refusal::Protected(_))));
+    api.ok(Method::PUT, "/environments/production/policy", Some(json!({ "protected": false }))).await;
+
+    // A staging-only token can't reach production through staging's import, though the
+    // resource's runtime would read it there.
+    api.ok(Method::PUT, "/environments/staging/imports?path=/", Some(json!([{ "environment": "production", "path": "/" }]))).await;
+    let staging = "roll://staging/AWS_KEY";
+    assert_eq!(s.resolve_for(&logs, staging).unwrap().value.expose(), "fake-aws");
+    let (secret, _) = api.gate.grant("staging only", roll_secrets::access::rule(&api.project, Some(vec!["staging".into()]), None, &[roll_secrets::Action::Read, roll_secrets::Action::Reveal]), None);
+    let grant = api.gate.tokens.lock().unwrap()[&secret].clone();
+    let token = s.caller_of(false, None, Some(&grant)).unwrap();
+    assert!(matches!(s.bind_ref(&logs, "roll://production/AWS_KEY", &token), Err(Refusal::NotAllowed(_))));
+    let refused = s.bind_ref(&logs, staging, &token).unwrap_err();
+    assert!(matches!(refused, Refusal::NoSuchKey(_)) && !refused.to_string().contains("fake-"), "{refused}");
+    // Set in staging itself, it's the token's to choose; revoked, the reference stops.
+    api.set("staging", "AWS_KEY", "fake-staging").await;
+    let by_token = s.bind_ref(&logs, staging, &token).unwrap();
+    assert_eq!(s.resolve_as(&logs, staging, &by_token).unwrap().value.expose(), "fake-staging");
+    api.gate.tokens.lock().unwrap().remove(&secret);
+    assert!(matches!(s.resolve_as(&logs, staging, &by_token), Err(Refusal::NotAllowed(_))));
+
+    // A person's own project: her reference reads while she owns it, and stops once she doesn't.
+    let (_, mine) = api.as_ada(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "mine" }))).await;
+    let mine = mine["id"].as_str().unwrap().to_string();
+    api.as_ada(Method::PUT, &format!("/v1/workspace/projects/{mine}/resources/repo/ada%2Fsite"), Some(json!({ "x": 0, "y": 0 }))).await;
+    let (st, e) = api.as_ada(Method::PUT, &format!("/v1/secrets/projects/{mine}/environments/production/secrets/DEPLOY_KEY"), Some(json!({ "value": "fake-ada" }))).await;
+    assert!(st.is_success(), "{e}");
+    let site = ResourceRef::new(Kind::Repo, "ada/site");
+    let as_ada = s.caller_of(false, Some(&session("ada", false)), None).unwrap();
+    let ada = s.bind_ref(&site, "roll://production/DEPLOY_KEY", &as_ada).unwrap();
+    assert_eq!(s.resolve_as(&site, "roll://production/DEPLOY_KEY", &ada).unwrap().value.expose(), "fake-ada");
+    let (st, e) = api.as_ada(Method::POST, &format!("/v1/secrets/projects/{mine}/environments/production/changes"), Some(json!({ "ops": [{ "op": "set", "key": "GIT_TOKEN", "value": "fake-git", "tags": ["sensitive"] }] }))).await;
+    assert!(st.is_success(), "{e}");
+    let ada_runtime = s.bind_ref_runtime(&site, "roll://production/GIT_TOKEN", &as_ada, "production").unwrap();
+    assert_eq!(s.resolve_as(&site, "roll://production/GIT_TOKEN", &ada_runtime).unwrap().value.expose(), "fake-git");
+    api.ws_db.write(|c| c.execute("UPDATE projects SET owner = '' WHERE id = ?", [&mine])).unwrap();
+    let refused = s.resolve_as(&site, "roll://production/DEPLOY_KEY", &ada).unwrap_err();
+    assert!(matches!(refused, Refusal::NotAllowed(_)), "{refused}");
+    let refused = s.resolve_as(&site, "roll://production/GIT_TOKEN", &ada_runtime).unwrap_err();
+    assert!(matches!(refused, Refusal::NotAllowed(_)) && !refused.to_string().contains("fake-"), "{refused}");
+}
+
+#[tokio::test]
+async fn a_sync_made_from_an_admins_session_acts_as_them_and_stops_when_theyre_demoted() {
+    let api = Api::new().await;
+    api.set("staging", "PLATFORM_TOKEN", "tok_1").await;
+    let (s, made) = api.signed_in("root", true, Method::POST, &format!("/v1/secrets/projects/{}/syncs", api.project), Some(json!({ "environment": "staging", "kind": "fake", "target": { "name": "x", "token_key": "PLATFORM_TOKEN" } }))).await;
+    assert_eq!((s, made["created_by"].as_str()), (StatusCode::CREATED, Some("usr_root")), "{made}");
+    api.set("staging", "A", "1").await;
+    api.secrets.sweep().unwrap();
+    assert_eq!(api.sync.pushes.lock().unwrap().len(), 1);
+    *api.people.root_demoted.lock().unwrap() = true;
+    api.set("staging", "A", "2").await;
+    api.secrets.sweep().unwrap();
+    assert_eq!(api.sync.pushes.lock().unwrap().len(), 1, "nothing pushed once they're no admin");
+    // One made as the operator account (the deployment's token, or an admin's session before
+    // makers were people) stays as it was, and health says so.
+    let old = api.ok(Method::POST, "/syncs", Some(json!({ "environment": "staging", "kind": "fake", "target": { "name": "y", "token_key": "PLATFORM_TOKEN" } }))).await;
+    assert_eq!(old["created_by"], "operator");
+    let found = api.ok(Method::GET, "/health", None).await;
+    let flagged: Vec<&str> = found.as_array().unwrap().iter().filter(|f| f["issue"] == "operator_made").map(|f| f["key"].as_str().unwrap()).collect();
+    assert_eq!(flagged, [old["id"].as_str().unwrap()], "{found}");
 }

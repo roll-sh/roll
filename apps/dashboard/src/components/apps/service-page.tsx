@@ -233,6 +233,16 @@ function Conditions({ service, env, runner, go }: { service: Service; env: Envir
         </button>
       ),
     });
+  if (env.frozen)
+    lines.push({
+      key: "frozen",
+      text: `Deploys are frozen${env.freeze?.reason ? `: ${env.freeze.reason}` : ""}. Pushes and hooks build without going live; deploying by hand needs an override; a rollback always works.`,
+      action: (
+        <button type="button" className={btn} disabled={runner.busy !== null} onClick={() => runner.run("unfreeze", () => appsApi.putEnvironment(service.id, env.name, { freeze: null }))}>
+          Lift the freeze
+        </button>
+      ),
+    });
   if (env.held)
     lines.push({
       key: "held-by-you",
@@ -689,7 +699,7 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
             )}
           </p>
         ) : tab === "deployments" ? (
-          <Deployments service={service.id} name={service.name} env={env!} deploys={data.deploys} runner={runner} own={service.run.type === "web" && !service.run.volume} upload={service.source.kind === "upload"} />
+          <Deployments service={service.id} name={service.name} env={env!} deploys={data.deploys} runner={runner} own={service.run.type === "web" && !service.run.volume} upload={service.source.kind === "upload"} explains={service.source.kind === "repo"} />
         ) : tab === "logs" ? (
           <RuntimeLogs service={service.id} env={envName} onGroup={() => go({ tab: "metrics" })} />
         ) : tab === "metrics" ? (
