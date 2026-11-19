@@ -2626,6 +2626,53 @@ unresolved reference or a dynamic credential fails the deploy, saying which. It 
   data `roll-secrets:<project>:<env>:<consumer>`), so the values are never in the clear outside the
   process that holds the private key. Without `seal_to` it is plain JSON over the internal API.
 
+### roll search's inference endpoints
+
+A roll search cluster's inference endpoint (the model a `semantic_text` field embeds with, a
+reranker, a completion) can take its provider key from a key of the project whose canvas holds the
+cluster, instead of a key pasted into it: the Inference tab's "A roll secret", or
+`roll search inference create … --secret OPENAI_API_KEY` (`--environment`, or a
+`roll://ENV[/folder]/KEY` reference). Rotating the key then updates every endpoint keyed by it.
+
+- `POST /v1/search/clusters/{id}/inference/secrets` `{inference_id, task_type?, config, secret:
+  {project?, environment, path?, key}}` (`config`: the `_inference` body without
+  `service_settings.api_key`; `project` only when the cluster is on several canvases) reads the key
+  as the caller (`reveal`, audited `secrets.reveal`; a protected environment's rules apply, a
+  sensitive key is refused, and so is a dynamic credential, which ends with its lease), creates the
+  endpoint with it through the cluster's own `_inference` API (which seals it, as any key), and
+  makes a `search-inference` sync as the caller. The route needs `admin` on the cluster (it changes
+  the cluster as the console does) and the project must stand for the cluster
+  (`Workspace::trusts`). `GET` on the same route lists the endpoints that follow a secret and the
+  projects whose secrets may key one.
+- The sync pushes the key whenever its value changes (the sweeper; `POST …/syncs/{id}/run` pushes
+  it now, the tab's refresh), as its maker. It pins where the endpoint sends the key: a SHA-256 of
+  canonical JSON of its service, task type, service settings (all but `api_key`, `rate_limit`,
+  `num_allocations` and `adaptive_allocations`: a URL, an Azure resource and deployment, a target,
+  a host) and all of its task settings (they can carry headers, and `custom`'s request). On any
+  difference the push refuses, so someone who may change the cluster but not reveal the key can't
+  recreate or repoint the endpoint and wait for the next rotation; creating it again from the
+  Inference tab binds it anew. One window stays: the endpoint recreated in the milliseconds
+  between the push's check and its `_update`, which calls the service with the key before it
+  answers. The push compares the answer's pin too, so that case fails loudly (an error log line
+  and the sync's error say to rotate the key) rather than passing unseen. Its errors name
+  the endpoint and Elasticsearch's error type, never the provider's message (it can quote part of
+  a key).
+- The secret is the endpoint's `api_key`, so it keys the services that take one (OpenAI, Azure
+  OpenAI by key, Cohere, Anthropic, Google AI Studio, Mistral, Voyage AI, Jina AI, DeepSeek, Hugging
+  Face). A service with other credentials (Amazon Bedrock's access keys, Vertex AI's service
+  account) refuses an `api_key` when the endpoint is made (`unknown to the [service] service`), so
+  no sync is made; the tab offers "A roll secret" only for the others.
+- Deleting the endpoint from the tab deletes its sync; one deleted another way leaves the sync,
+  whose next push says the endpoint is gone. Deleting the key leaves the endpoint its last value.
+- The sync names the cluster by its id (`srch_…`, never a name: a name has no `_`) and pushes
+  through roll search's control plane (`/v1/search/clusters/{id}/request`, on the cluster's owner
+  on a fleet), not the cluster's endpoint, so its Basic auth user and IP allowlist don't apply. A
+  deleted cluster (kept for restoring or not) is no cluster: a push fails, the sync shows the
+  error and keeps its last digest, and nothing goes out. A restore, under its own name or another,
+  keeps the id, so the next try (or `POST …/syncs/{id}/run`) pushes the current value to it; a
+  cluster that took the old name never gets it.
+  The Elasticsearch `_inference` API is unchanged: clients there send keys.
+
 ### Checks, sandboxes and previews
 
 - **Checks**: `secrets = "development"` (or `"staging:/api"`) on a `[checks.<name>]` table in
@@ -3015,6 +3062,12 @@ last_synced_at, error}`:
   `DB_URL: ${staging.X} doesn't exist`. A failed push keeps the previous `last_digest` and is tried
   again after 5 minutes. Deleting a sync leaves what it pushed at the target. Deleting its
   environment or project deletes the sync.
+- **A product's own kinds** (`SyncTarget::internal`: `search-inference`) are made by that
+  product's route (`Secrets::create_product_sync`), never `POST …/syncs` (400), and aren't offered
+  in `GET …/syncs`'s `kinds`; they're listed, run and deleted like any sync. The product checks its
+  own side (roll search: who may change the cluster), and `reveal` on the folder is enough to make,
+  run or delete one, as reading the value and pasting it there would be; `admin` may delete one
+  too (it doesn't include `reveal`, and stopping a sync sends nothing).
 - **Who.** Creating, deleting and running a sync need `admin` on its environment: it sends values
   out of roll. Listing needs `read` and shows the syncs of environments the caller can read.
 
@@ -3030,6 +3083,7 @@ last_synced_at, error}`:
 | `azure-key-vault` | `{vault, tenant_id, client_id, client_secret_key}` | one Key Vault secret per key (`_` becomes `-`) |
 | `azure-devops` | `{organization, project, group, token_key}`, or `tenant_id, client_id, client_secret_key` instead of `token_key` | an Azure Pipelines variable group's variables, all secret |
 | `aws-secrets-manager` | `{region, secret_name: "shop/production", access_key_id_key, secret_access_key_key, kms_key_id?}` | one Secrets Manager secret: the environment's values as a JSON object |
+| `search-inference` | `{cluster, endpoint, service, pin}` (made by roll search, see "roll search's inference endpoints") | one key: a roll search inference endpoint's `api_key` (`PUT _inference/{task}/{endpoint}/_update`) |
 | `supabase` | `{project_ref, token_key}` | a Supabase project's Edge Function secrets |
 | `cloudflare-pages` | `{account, project, environment: "production" \| "preview", token_key}` | a Pages project's environment variables, as `secret_text` |
 | `azure-app-configuration` | `{store, label?, prefix?, tenant_id, client_id, client_secret_key}` | one App Configuration key-value per key, `<prefix><KEY>` under `label` |
