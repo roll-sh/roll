@@ -551,7 +551,37 @@ impl Working {
             env.push((format!("GIT_CONFIG_VALUE_{i}"), (*v).into()));
         }
         let env: Vec<(&str, std::ffi::OsString)> = env.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
-        git(dir, &["push", "--quiet", &self.clone_url, refspec], &env).map(|_| ()).map_err(|e| anyhow::anyhow!("pushing {} to {}: {e:#}", self.branch, self.clone_url))
+        // A push to a URL updates the remote-tracking ref of any configured remote with that URL
+        // (newer git does; older didn't). Those refs are the user's: what the push made goes, what it
+        // moved goes back.
+        let tracking = |d: &std::path::Path| -> std::collections::HashMap<String, String> {
+            git(d, &["for-each-ref", "--format=%(refname) %(objectname)", "refs/remotes"], &[])
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|l| l.split_once(' '))
+                .filter(|(r, _)| r.rsplit_once(&format!("/{}", self.branch)).is_some_and(|(_, rest)| rest.is_empty()))
+                .map(|(r, o)| (r.to_string(), o.to_string()))
+                .collect()
+        };
+        let before = tracking(dir);
+        let pushed = git(dir, &["push", "--quiet", &self.clone_url, refspec], &env).map(|_| ()).map_err(|e| anyhow::anyhow!("pushing {} to {}: {e:#}", self.branch, self.clone_url));
+        let after = tracking(dir);
+        // One the push removed (a delete's) is put back too.
+        for (r, was) in before.iter().filter(|(r, _)| !after.contains_key(*r)) {
+            let _ = git(dir, &["update-ref", r, was], &[]);
+        }
+        for (r, now) in after {
+            match before.get(&r) {
+                None => {
+                    let _ = git(dir, &["update-ref", "-d", &r, &now], &[]);
+                }
+                Some(was) if *was != now => {
+                    let _ = git(dir, &["update-ref", &r, was, &now], &[]);
+                }
+                Some(_) => {}
+            }
+        }
+        pushed
     }
 }
 
