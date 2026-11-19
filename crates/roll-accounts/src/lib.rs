@@ -555,24 +555,25 @@ impl Accounts {
         let now = self.db.now_ms()?;
         let row = self.db.read(|c| {
             c.query_row(
-                "SELECT s.id, s.user_id, s.level, s.seen_at, s.expires_at, u.handle, u.admin, u.disabled, u.code_owner_id
+                "SELECT s.id, s.user_id, s.level, s.seen_at, s.expires_at, u.handle, u.admin, u.disabled, u.code_owner_id, s.created_at
                  FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ?",
                 [hash.as_str()],
                 |r| {
                     Ok((
                         (r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?),
-                        (r.get::<_, i64>(3)?, r.get::<_, i64>(4)?),
+                        (r.get::<_, i64>(3)?, r.get::<_, i64>(4)?, r.get::<_, i64>(9)?),
                         (r.get::<_, String>(5)?, r.get::<_, bool>(6)?, r.get::<_, bool>(7)?, r.get::<_, Option<String>>(8)?),
                     ))
                 },
             )
             .optional()
         })?;
-        let Some(((id, user, level), (seen_at, expires_at), (handle, admin, disabled, code_owner))) = row else { return Ok(None) };
+        let Some(((id, user, level), (seen_at, expires_at, created_at), (handle, admin, disabled, code_owner))) = row else { return Ok(None) };
         let full = level == "full";
-        // A company's idle timeout (its account policy), else roll's week.
-        let idle = self.account_policy()?.idle_ms();
-        if disabled || expires_at <= now || (full && seen_at + idle <= now) {
+        // A company's idle timeout and longest session (its account policy), else roll's week and
+        // 30 days. Read on every use: a shorter policy ends sessions already open.
+        let policy = self.account_policy()?;
+        if disabled || expires_at <= now || (full && (seen_at + policy.idle_ms() <= now || created_at + policy.max_session_ms() <= now)) {
             return Ok(None);
         }
         if !full {
@@ -709,7 +710,7 @@ impl Accounts {
 
     pub fn sessions_of(&self, user: &str, current: &str) -> Result<Vec<SessionInfo>> {
         let now = self.db.now_ms()?;
-        Ok(self.db.read(|c| {
+        let all = self.db.read(|c| {
             c.query(
                 "SELECT id, created_at, seen_at, expires_at, user_agent FROM sessions WHERE user_id = ? AND level = 'full' AND expires_at > ? ORDER BY created_at DESC, id",
                 params![user, now],
@@ -718,7 +719,18 @@ impl Accounts {
                     Ok(SessionInfo { current: id == current, id, created_at: r.get(1)?, seen_at: r.get(2)?, expires_at: r.get(3)?, user_agent: r.get(4)? })
                 },
             )
-        })?)
+        })?;
+        // As `resolve` sees them: the company's idle timeout and longest session end some early.
+        let policy = self.account_policy()?;
+        let (max, idle) = (policy.max_session_ms(), policy.idle_ms());
+        Ok(all
+            .into_iter()
+            .filter(|s| s.created_at + max > now && s.seen_at + idle > now)
+            .map(|mut s| {
+                s.expires_at = s.expires_at.min(s.created_at + max);
+                s
+            })
+            .collect())
     }
 
     pub(crate) fn session_info(&self, id: &str) -> Result<SessionInfo> {

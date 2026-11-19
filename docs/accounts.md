@@ -538,6 +538,11 @@ account an admin, or quietly turns enforcement off, is seen at once.
 
 Without mail configured there are no alerts; the audit log has every change either way.
 
+`max_session_hours` (1 to 720; absent: roll's 30 days) is the longest a session lasts after its
+sign-in, however much it's used, as Okta's maximum session lifetime: a company that wants its
+people to sign in every working day sets 8 or 12. It applies to sessions already open too, on
+their next use. An SSO connection's own session length still holds when it's shorter.
+
 ### Sudo mode
 
 As GitHub does, a change to how an account is reached needs the person to have proved who they
@@ -689,8 +694,8 @@ same callback; on success it redirects to `return_to` (default `/dashboard/accou
 | --- | --- | --- |
 | `GET /v1/accounts/passkey-policy` | | `{require, models: [{aaguid, name, roots}]}` (hardware keys only) |
 | `PUT /v1/accounts/passkey-policy` | `{require, models}` | the policy, checked (UUIDs, names, PEM roots; a model when required); sudo mode; 400 `{code: "policy"}` |
-| `GET /v1/accounts/policy` | | `{require_second_factor, idle_minutes?, phishing_resistant?}` |
-| `PUT /v1/accounts/policy` | `{require_second_factor, idle_minutes?, phishing_resistant?: "admins" \| "everyone"}` | the policy (sudo mode; the whole of it); 400 `policy`; 409 turning on phishing-resistant sign-in from a session that hasn't used a passkey |
+| `GET /v1/accounts/policy` | | `{require_second_factor, idle_minutes?, max_session_hours?, phishing_resistant?}` |
+| `PUT /v1/accounts/policy` | `{require_second_factor, idle_minutes?, max_session_hours?, phishing_resistant?: "admins" \| "everyone"}` | the policy (sudo mode; the whole of it); 400 `policy`; 409 turning on phishing-resistant sign-in from a session that hasn't used a passkey |
 | `GET /v1/accounts/network-policy` | | `{on, networks}` (allowed networks) |
 | `PUT /v1/accounts/network-policy` | `{on, networks}` | the policy, networks normalised; sudo mode; 400 `networks` or `lockout` |
 | `GET /v1/accounts/reset-requests` | | `ResetRequest[]`: `{id, user, email, handle, reason, ip, user_agent, created_at, state, decided_by, decided_at}`, pending first |
