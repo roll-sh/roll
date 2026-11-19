@@ -478,18 +478,22 @@ a worker's 2 MiB, so the six above could land together).
    Elasticsearch's `_application/search_application/{name}/_search` as the safe surface, and a
    quickstart that works with Elastic's Search UI and InstantSearch through Searchkit. An IP
    allowlist still applies to browsers; the docs say how the two combine.
-2. **The Rally losses left by the full rerun** (Round 10, vectors, #268: Elasticsearch 9.1+ runs no merge while less than ~93.5 GB of disk is free, and this host was 91-98% full, so Round 9's Elasticsearch races were held on vectors, noaa (4 of 6) and nyc_taxis (2 of 3); the harness now sets `indices.merge.disk.check_interval=0`. With merges flowing, the force-merged vector losses are gone and dense_vector `100-1000_multiple_segments` (2.30x) is the one loss with ranges apart. Round 9's noaa and nyc_taxis wins may flatter roll until those tracks are rerun under the fixed harness: Round 11 reruns them now) (docs/benchmarks/search.md: Round 8, every Rally
+2. **The Rally losses left by the full rerun** (Round 10, vectors, #268: Elasticsearch 9.1+ runs no merge while less than ~93.5 GB of disk is free, and this host was 91-98% full, so Round 9's Elasticsearch races were held on vectors and noaa (4 of 6); the harness now sets `indices.merge.disk.check_interval=0`. With merges flowing, the force-merged vector losses are gone and dense_vector `100-1000_multiple_segments` (2.30x) is the one loss with ranges apart. Round 11, noaa and nyc_taxis rerun with merges flowing at `769dd6744` (#340): Round 9's noaa claims held (every range-field query ahead in median, all ties; `conjunction_big_range_big_term` 7.4 against 12.2 ms, faster in 6 of 6 rounds; indexing 0.75, ahead in 6 of 6), and nyc_taxis wasn't held at all (its 0-merge races are Elasticsearch's merge policy). What changed: nyc_taxis `distance_amount_agg` leads by less (46 against 78 ms, 0.59; Round 9's 118 was load), its `range` now leads (0.88), and Elasticsearch now indexes nyc_taxis faster in median (1.03 docs/s, bulk p50 1.04, ties)) (docs/benchmarks/search.md: Round 8, every Rally
    track against Elasticsearch 9.5.5 and OpenSearch 3.9 at `83fac5982`; Round 9, the four tracks
-   #29 fixed rerun at `c2b47b251`, three alternating rounds each, noaa six). Roll leads most tasks
+   #29 fixed rerun at `c2b47b251`, three alternating rounds each, noaa six; Round 11, noaa and
+   nyc_taxis again at `769dd6744`). Roll leads most tasks
    1.3-4x (percolator up to 300x) and indexes as many or more docs/s than Elasticsearch on every
-   track (noaa now included), on less server CPU per race than Elasticsearch wherever it was
-   measured. Round 9 confirmed #29's fixes under
+   track but nyc_taxis (a tie, Elasticsearch 1.03x ahead in median), on less server CPU per race
+   than Elasticsearch wherever it was measured (on noaa only in median: 347 against 360 s). Round 9
+   confirmed #29's fixes under
    Rally: noaa `range_field_conjunction_big_range_big_term_query` 5.12x → 0.67 (6.8 against 10.2
-   ms), noaa indexing 1.29x → 0.86 (tie; server CPU per race -23%), nested inner hits `big_size`
+   ms; Round 11 0.60, 7.4 against 12.2), noaa indexing 1.29x → 0.86 (tie; server CPU per race
+   -23%; Round 11 0.75), nested inner hits `big_size`
    2.25x → 0.52 and `_default` 1.20x → 0.74, nyc_taxis `distance_amount_agg` 1.27x → 0.50 (59
-   against 118 ms, still on one thread), `date_histogram_agg` → 0.39, geonames
+   against 118 ms, still on one thread; Round 11 0.59, 46 against 78), `date_histogram_agg` →
+   0.39 (Round 11 0.37), geonames
    `desc_sort_population` → 0.64 and `asc_sort_population` → 0.83 (ties); `autohisto_agg` is still
-   a tie with OpenSearch (0.87). Round 9's vector rerun (`807396e0b`, against Elasticsearch
+   a tie with OpenSearch (0.87; Round 11 0.93). Round 9's vector rerun (`807396e0b`, against Elasticsearch
    only): Round 8's so_vector `css` 1.92x and dense_vector `_multiple_segments` 2.09x are ties now
    (1.13x, 1.51x), so_vector `concurrency` and `random-10-percent` lead (0.81, 0.74, ties), and
    roll indexes dense_vector at 3x Elasticsearch's docs/s on less server CPU. Where roll still
@@ -510,11 +514,11 @@ a worker's 2 MiB, so the six above could land together).
    child of which can beat the queue: 3.5-4.3 against OpenSearch's 8.5-9.7 ms on the same CPUs,
    a third of its server CPU, identical hits; Rally rerun pending); nested `nested-date-histo` 1.17x
    Elasticsearch (tie); the nested bulk p50 1.16x (tie, docs/s ahead); http_logs
-   `sort-size-desc-after-force-merge-1-seg` 1.12x OpenSearch (Round 8, tie); noaa
-   `range_field_disjunction_big_range_small_term_query` 1.06x Elasticsearch (tie, lost in roll's
-   rounds under heavy foreign load; a direct A/B has this binary 35% faster than Round 8's);
-   nyc_taxis `range` 1.05x OpenSearch (tie); http_logs `scroll` 1.03x OpenSearch and the pmc and so
-   bulk p50s (Round 8, ties). Rerun next: so_vector with #156, http_logs (its indexing regression
+   `sort-size-desc-after-force-merge-1-seg` 1.12x OpenSearch (Round 8, tie); nyc_taxis' bulk p50
+   1.04x Elasticsearch (Round 11, tie; slower in 3 of 3 rounds, 1.10 at equal foreign load) and its
+   docs/s 1.03x (tie, undecided at equal load); http_logs `scroll` 1.03x OpenSearch and the pmc and
+   so bulk p50s (Round 8, ties). Round 9's noaa `range_field_disjunction_big_range_small_term_query`
+   1.06x and nyc_taxis `range` 1.05x are gone in Round 11 (0.93, a tie; 0.88). Rerun next: so_vector with #156, http_logs (its indexing regression
    since `dbe79f8f7` is fixed by `6c2834a3e`, not yet measured under Rally), so, pmc and
    percolator at the current head. Not a loss: `terms_enum` (OpenSearch has no such API; its
    "0.57 ms" was an error). Still open from before: one-client indexing CPU (51.8 against 34.6
