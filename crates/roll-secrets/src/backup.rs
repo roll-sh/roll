@@ -260,7 +260,7 @@ impl Secrets {
         }
         warnings.extend(self.transit_import(project, archive.encryption_keys, caller)?);
         let now = self.db.now_ms()?;
-        self.db.write(|c| audit::record(c, project, caller, "project.restore", None, None, &[], &format!("restored {environments} environments and {secrets} keys from {}'s backup", archive.project), now))?;
+        self.db.write(|c| audit::record(c, self.keys()?, project, caller, "project.restore", None, None, &[], &format!("restored {environments} environments and {secrets} keys from {}'s backup", archive.project), now))?;
         Ok(Restored { environments, secrets, warnings })
     }
 }

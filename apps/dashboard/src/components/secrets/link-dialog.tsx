@@ -75,6 +75,14 @@ const MODE_HELP: Record<LinkMode, string> = {
   dynamic: "Every resolve (roll run, an app's start) issues a short-lived credential, revoked when its lease ends.",
 };
 
+/** What a queue link's own user may do on its vhost (rolld's `Queue` provider, option `permission`). */
+type QueueAccess = "read" | "write" | "configure";
+const QUEUE_ACCESS: readonly { value: QueueAccess; label: string; title: string }[] = [
+  { value: "read", label: "Read", title: "Consume only" },
+  { value: "write", label: "Write", title: "Publish and consume" },
+  { value: "configure", label: "Configure", title: "Also declare and delete queues, exchanges and bindings" },
+];
+
 type Pick = { on: boolean; key: string; mode: LinkMode };
 type WriteFn = (run: () => Promise<{ warnings?: string[]; change?: { seq: number } | null }>, batch: Batch, done: string) => Promise<boolean>;
 
@@ -112,6 +120,7 @@ function Form({ env, path, taken, onWrite, onClose }: { env: Environment; path: 
   const [account, setAccount] = useState<"existing" | "generated">("existing");
   const [ruleText, setRuleText] = useState("");
   const [clusterWide, setClusterWide] = useState(false);
+  const [queueAccess, setQueueAccess] = useState<QueueAccess>("configure");
   const [busy, setBusy] = useState(false);
 
   const pickOf = (t: LinkTarget, f: LinkField): Pick => picks[`${t.kind}:${t.ref}:${f.field}`] ?? { on: false, key: f.suggest, mode: f.modes[0] };
@@ -163,6 +172,9 @@ function Form({ env, path, taken, onWrite, onClose }: { env: Environment; path: 
   const accountOk = !needsAccount || (K8S_LABEL.test(namespace) && saOk && auds.length <= 10);
   const k8sAccount = account === "generated" ? { role_rules: rules, ...(clusterWide && { cluster_wide: true }) } : { service_account: serviceAccount };
   const k8sTtlOk = !needsAccount || ttlMinutes <= K8S_TTL_MAX;
+  // A queue's issued user gets only the access asked for.
+  const queueUser = (c: { t: LinkTarget; p: Pick }) => c.t.kind === "queue" && c.p.mode !== "live";
+  const needsQueueAccess = chosen.some(queueUser);
 
   const submit = async () => {
     const ops: Op[] = chosen.map((c) => ({
@@ -173,11 +185,12 @@ function Form({ env, path, taken, onWrite, onClose }: { env: Environment; path: 
         ref: c.t.ref,
         field: c.f.field,
         mode: c.p.mode,
-        ...((c.p.mode === "dynamic" || c.t.kind === "pki" || c.t.kind === "ssh" || (c.t.kind === "mongodb_atlas" && clusterName !== "")) && {
+        ...((c.p.mode === "dynamic" || c.t.kind === "pki" || c.t.kind === "ssh" || (c.t.kind === "mongodb_atlas" && clusterName !== "") || queueUser(c)) && {
           options: {
             ...(c.p.mode === "dynamic" && { ttl_minutes: ttlMinutes }),
             ...(c.t.kind === "pki" && { names, ...(c.p.mode === "managed" && { rotate_days: rotate }) }),
             ...(c.t.kind === "ssh" && { principals: logins }),
+            ...(queueUser(c) && { permission: queueAccess }),
             ...((c.t.kind === "snowflake" || c.t.kind === "mongodb_atlas") && c.p.mode === "dynamic" && roles.length > 0 && { roles }),
             ...(c.t.kind === "mongodb_atlas" && clusterName !== "" && { cluster: clusterName }),
             ...(c.t.kind === "kubernetes" && { namespace, ...k8sAccount, ...(auds.length > 0 && { audiences: auds }) }),
@@ -202,7 +215,7 @@ function Form({ env, path, taken, onWrite, onClose }: { env: Environment; path: 
   if (!targets.data.length)
     return (
       <p className="py-6 text-center text-[12.5px] text-muted">
-        {project.name} has no linkable resources yet. Add a database, a bucket or a stream to its canvas, then link its credentials here.
+        {project.name} has no linkable resources yet. Add a database, a bucket, a stream or a queue to its canvas, then link its credentials here.
       </p>
     );
 
@@ -331,6 +344,12 @@ function Form({ env, path, taken, onWrite, onClose }: { env: Environment; path: 
               </div>
             )}
           </>
+        )}
+        {needsQueueAccess && (
+          <span className="flex items-center gap-1.5 text-[12px] text-muted">
+            Access
+            <Segmented label="Queue access" value={queueAccess} onChange={setQueueAccess} options={QUEUE_ACCESS.map((a) => ({ value: a.value, label: <span className="px-1 text-[11px]">{a.label}</span>, title: a.title }))} />
+          </span>
         )}
         {needsRotation && (
           <label className="flex items-center gap-1.5 text-[12px] text-muted">

@@ -189,6 +189,15 @@ const DEATH_HEADERS: [&str; 7] = [
     "x-last-death-exchange",
 ];
 
+/// RabbitMQ refuses to declare, delete or bind the default exchange before it checks any
+/// permission (`rabbit_channel:check_not_default_exchange`).
+fn not_default(exchange: &str) -> Result<()> {
+    if exchange.is_empty() {
+        return Err(AmqpError::access_refused("operation not permitted on the default exchange"));
+    }
+    Ok(())
+}
+
 /// RabbitMQ strips CR and LF from exchange and queue names on declare.
 fn strip_cr_lf(name: String) -> String {
     if name.contains(['\r', '\n']) { name.replace(['\r', '\n'], "") } else { name }
@@ -491,6 +500,7 @@ impl Channel {
             Method::ExchangeDeclare { exchange, kind, passive, durable, auto_delete, internal, nowait, arguments, .. } => {
                 let exchange = strip_cr_lf(exchange);
                 if !passive {
+                    not_default(&exchange)?;
                     self.check(Access::Configure, false, &exchange)?;
                     if let Some(ae) = arguments.get_str("alternate-exchange") {
                         // RabbitMQ requires write on the exchange and read on the AE.
@@ -504,6 +514,7 @@ impl Channel {
                 }
             }
             Method::ExchangeDelete { exchange, if_unused, nowait, .. } => {
+                not_default(&exchange)?;
                 self.check(Access::Configure, false, &exchange)?;
                 match vh.delete_exchange(&exchange, if_unused).await {
                     // Deleting a missing exchange succeeds (RabbitMQ 3.x+).
@@ -516,6 +527,8 @@ impl Channel {
             }
             Method::ExchangeBind { destination, source, routing_key, nowait, arguments, .. } => {
                 self.check(Access::Write, false, &destination)?;
+                not_default(&destination)?;
+                not_default(&source)?;
                 self.check(Access::Read, false, &source)?;
                 vh.bind(&source, Dest::exchange(&destination), &routing_key, arguments, self.conn_id()).await?;
                 if !nowait {
@@ -524,6 +537,8 @@ impl Channel {
             }
             Method::ExchangeUnbind { destination, source, routing_key, nowait, arguments, .. } => {
                 self.check(Access::Write, false, &destination)?;
+                not_default(&destination)?;
+                not_default(&source)?;
                 self.check(Access::Read, false, &source)?;
                 vh.unbind(&source, Dest::exchange(&destination), &routing_key, arguments, self.conn_id()).await?;
                 if !nowait {
@@ -603,6 +618,7 @@ impl Channel {
                 let routing_key = if queue.is_empty() && routing_key.is_empty() { self.queue_name(String::new())? } else { routing_key };
                 let queue = self.queue_name(queue)?;
                 self.check(Access::Write, true, &queue)?;
+                not_default(&exchange)?;
                 self.check(Access::Read, false, &exchange)?;
                 vh.bind(&exchange, Dest::queue(&queue), &routing_key, arguments, self.conn_id()).await?;
                 if !nowait {
@@ -613,6 +629,7 @@ impl Channel {
                 let routing_key = if queue.is_empty() && routing_key.is_empty() { self.queue_name(String::new())? } else { routing_key };
                 let queue = self.queue_name(queue)?;
                 self.check(Access::Write, true, &queue)?;
+                not_default(&exchange)?;
                 self.check(Access::Read, false, &exchange)?;
                 match vh.unbind(&exchange, Dest::queue(&queue), &routing_key, arguments, self.conn_id()).await {
                     // Unbinding a missing queue, exchange or binding succeeds (RabbitMQ 3.x+).
