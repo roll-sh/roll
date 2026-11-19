@@ -45,6 +45,8 @@ pub fn router(control: Arc<Control>) -> Router {
         .route("/v1/projects/{id}/branches/{branch}/backup", post(backup_branch))
         .route("/v1/projects/{id}/branches/{branch}/evict", post(evict_branch))
         .route("/v1/projects/{id}/branches/{branch}/replicas", post(create_replica))
+        .route("/v1/projects/{id}/decoy-roles", post(create_decoy_role))
+        .route("/v1/projects/{id}/decoy-roles/{role}", axum::routing::delete(drop_decoy_role))
         .route("/v1/projects/{id}/usage", get(usage))
         .route("/v1/endpoints/{id}", get(get_endpoint).patch(update_endpoint).delete(delete_endpoint))
         .route("/v1/endpoints/{id}/start", post(start_endpoint))
@@ -311,6 +313,22 @@ async fn app_role(State(c): State<AppState>, Path((id, branch)): Path<(String, S
     let branch = c.ensure_app_role(&id, &branch.id).await?;
     let ep = c.store.endpoint_for_branch(&branch.id)?.ok_or_else(|| ControlError::NotFound("primary endpoint".into()))?;
     Ok(Json(json!({ "branch": branch, "app_connection_uri": c.app_connection_uri(&branch, &ep.id) })))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NewDecoyRole {
+    role: String,
+}
+
+/// A decoy role (roll secrets' Postgres decoys): refused by the proxy on every endpoint.
+async fn create_decoy_role(State(c): State<AppState>, Path(id): Path<String>, Json(b): Json<NewDecoyRole>) -> Result<Response, ControlError> {
+    Ok((StatusCode::CREATED, Json(c.create_decoy_role(&id, &b.role).await?)).into_response())
+}
+
+async fn drop_decoy_role(State(c): State<AppState>, Path((id, role)): Path<(String, String)>) -> Result<StatusCode, ControlError> {
+    c.drop_decoy_role(&id, &role).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn backup_branch(

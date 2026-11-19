@@ -68,7 +68,7 @@ pub use crypto::{Keyring, Value};
 pub use audit::{AuditEntry, AuditFilter};
 pub use envs::{Branch, EnvChange, Ensure, Ensured, Environment, Folder, Import, Kind as EnvironmentKind, NewEnvironment, Policy};
 pub use leaks::Leak;
-pub use links::{Link, LinkProvider, Links, Mode};
+pub use links::{Link, LinkProvider, Links, Mode, Planted};
 pub use metrics::Metrics;
 pub use read::{Followed, Grid, Problem, Secret, Source, Values, Version};
 pub use requests::{Request, RequestValue, Review, Verdict};

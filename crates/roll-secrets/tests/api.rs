@@ -5,7 +5,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use http_body_util::BodyExt;
-use roll_secrets::links::{Field, Issued, Link, LinkProvider, Links, Mode};
+use roll_secrets::links::{Field, Issued, Link, LinkProvider, Links, Mode, Planted};
 use roll_secrets::syncs::{Push, Resources, SyncField, SyncTarget, Syncs};
 use roll_secrets::{Keyring, Options, Secrets, Value as Secret};
 use serde_json::{Value, json};
@@ -63,6 +63,32 @@ impl LinkProvider for Fake {
     fn rotate_source(&self, _: &str) -> roll_secrets::Result<bool> {
         *self.password.lock().unwrap() += 1;
         Ok(true)
+    }
+}
+
+/// A fake roll Postgres, for decoys: the decoy roles it holds, by handle (`<database>/<role>`).
+#[derive(Default)]
+struct FakePg(Mutex<std::collections::BTreeSet<String>>);
+
+impl LinkProvider for FakePg {
+    fn kind(&self) -> &str {
+        "postgres"
+    }
+    fn fields(&self) -> &[Field] {
+        &[]
+    }
+    fn read(&self, _: &str, _: &str, _: &Link) -> roll_secrets::Result<Secret> {
+        Err(roll_secrets::Error::Link("no live fields here".into()))
+    }
+    fn plant_decoy(&self, r#ref: &str) -> roll_secrets::Result<Planted> {
+        let mut roles = self.0.lock().unwrap();
+        let role = format!("roll_fakedecoy{}", roles.len());
+        roles.insert(format!("{ref}/{role}"));
+        Ok(Planted { value: Secret::new(format!("postgres://{role}:fake-decoy-password@db.example.test:5432/main")), handle: format!("{ref}/{role}") })
+    }
+    fn remove_decoy(&self, handle: &str) -> roll_secrets::Result<()> {
+        self.0.lock().unwrap().remove(handle);
+        Ok(())
     }
 }
 
@@ -619,7 +645,7 @@ async fn fake_gate(axum::extract::State(gate): axum::extract::State<Arc<Gate>>, 
         if gate.decoys.lock().unwrap().contains(&*g.id) {
             if let Some(s) = gate.secrets.get().cloned() {
                 let id = g.id.to_string();
-                tokio::task::spawn_blocking(move || s.decoy_used(&id, Some("203.0.113.7"), "/v1/secrets/whoami").unwrap()).await.unwrap();
+                tokio::task::spawn_blocking(move || s.decoy_used("rlt", &id, Some("203.0.113.7"), "/v1/secrets/whoami").unwrap()).await.unwrap();
             }
             return StatusCode::UNAUTHORIZED.into_response();
         }
@@ -639,6 +665,7 @@ struct Api {
     secrets: Arc<Secrets>,
     db: code_sql::Db,
     fake: Arc<Fake>,
+    pg: Arc<FakePg>,
     sync: Arc<FakeSync>,
     clouds: Arc<FakeClouds>,
     outside: Arc<Outside>,
@@ -656,6 +683,8 @@ impl Api {
         let fake = Arc::new(Fake::default());
         let mut links = Links::default();
         links.register(fake.clone());
+        let pg = Arc::new(FakePg::default());
+        links.register(pg.clone());
         let sync = Arc::new(FakeSync::default());
         let mut syncs = Syncs::default();
         syncs.register(sync.clone());
@@ -673,7 +702,7 @@ impl Api {
         let secrets = Arc::new(Secrets::new(db.clone(), ws.clone(), opts).unwrap());
         let _ = gate.secrets.set(secrets.clone());
         let router = roll_workspace::router(ws.clone()).merge(roll_secrets::router(secrets.clone())).layer(axum::middleware::from_fn_with_state(gate.clone(), fake_gate));
-        let mut api = Api { sent, gate, kms, sts, ws: ws.clone(), people, router, secrets, db, fake, sync, outside, github, clouds, project: String::new(), _dir: dir };
+        let mut api = Api { sent, gate, kms, sts, ws: ws.clone(), people, router, secrets, db, fake, pg, sync, outside, github, clouds, project: String::new(), _dir: dir };
         let (_, p) = api.call(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "shop" }))).await;
         api.project = p["id"].as_str().unwrap().to_string();
         api
@@ -2755,6 +2784,42 @@ async fn deleting_a_decoy_key_revokes_its_token() {
     assert!(ids.iter().all(|id| !live(id)), "{ids:?}");
     let listed = api.ok(Method::GET, "/environments/development/secrets", None).await;
     assert!(listed[0].get("decoy").is_none(), "{listed}");
+}
+
+/// A Postgres decoy is a role of a database on the canvas whose logins roll Postgres refuses: a
+/// login (as its proxy reports it) raises `decoy_used` in health and the audit log, and deleting
+/// the key drops the role.
+#[tokio::test]
+async fn a_postgres_decoy_is_a_role_whose_login_is_alerted_and_that_goes_with_its_key() {
+    let api = Api::new().await;
+    let plant = |resource: Option<&str>| json!({ "key": "LEGACY_DATABASE_URL", "kind": "postgres", "resource": resource });
+    let (s, e) = api.call(Method::POST, "/environments/production/decoys", Some(plant(Some("prj_fakepg")))).await;
+    assert_eq!((s, e["error"].as_str()), (StatusCode::BAD_REQUEST, Some("postgres prj_fakepg isn't in this project")));
+    assert_eq!(api.call(Method::POST, "/environments/production/decoys", Some(plant(None))).await.0, StatusCode::BAD_REQUEST);
+    api.ok(Method::PUT, &format!("/v1/workspace/projects/{}/resources/postgres/prj_fakepg", api.project), Some(json!({ "x": 0, "y": 0 }))).await;
+    let made = api.ok(Method::POST, "/environments/production/decoys", Some(plant(Some("prj_fakepg")))).await;
+    assert_eq!(made["decoy"]["kind"], "postgres", "{made}");
+    let value = api.ok(Method::GET, "/environments/production/secrets/LEGACY_DATABASE_URL/value", None).await["value"].as_str().unwrap().to_string();
+    assert!(value.starts_with("postgres://roll_fakedecoy0:"), "{value}");
+    let handle = api.pg.0.lock().unwrap().first().cloned().expect("a decoy role");
+
+    // roll Postgres' proxy refused a login as the role and said so (rolld's `tell_postgres_decoys`).
+    let s = api.secrets.clone();
+    let h = handle.clone();
+    let used = tokio::task::spawn_blocking(move || (s.decoy_used("postgres", &h, Some("198.51.100.23"), "Postgres endpoint ep_fake"), s.decoy_used("rlt", &h, None, "/"))).await.unwrap();
+    assert_eq!((used.0.unwrap(), used.1.unwrap()), (true, false), "another kind's handle isn't this decoy");
+    let health = api.ok(Method::GET, "/health", None).await;
+    assert_eq!((health[0]["issue"].as_str(), health[0]["key"].as_str()), (Some("decoy_used"), Some("LEGACY_DATABASE_URL")), "{health}");
+    assert!(health[0]["detail"].as_str().unwrap().contains("198.51.100.23"), "{health}");
+    let logged = api.ok(Method::GET, "/audit?action=secrets.alert", None).await;
+    assert_eq!((logged[0]["action"].as_str(), logged[0]["ip"].as_str()), (Some("secrets.alert.decoy_used"), Some("198.51.100.23")), "{logged}");
+    assert!(logged[0]["summary"].as_str().unwrap().contains("Postgres endpoint ep_fake"), "{logged}");
+    for told in [logged.to_string(), health.to_string()] {
+        assert!(!told.contains(&value) && !told.contains("fake-decoy-password"), "{told}");
+    }
+
+    api.ok(Method::DELETE, "/environments/production/secrets/LEGACY_DATABASE_URL", None).await;
+    assert!(api.pg.0.lock().unwrap().is_empty(), "the role went with its key");
 }
 
 /// A roll-access rule naming one encryption key (`{id: "prj_…", index: "payments"}`) reaches that

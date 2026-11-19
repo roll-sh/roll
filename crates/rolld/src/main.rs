@@ -584,6 +584,9 @@ async fn run() -> anyhow::Result<()> {
     workspace.set_owners(std::sync::Arc::new(people.clone()));
     // Its tokens are roll-access's: grants for syncs a token made, workload tokens for identities.
     let secrets = secrets::open(&args, &home, workspace.clone(), !auth.enforcing(), products_api.clone(), access.clone(), people)?;
+    if let Some(p) = &postgres {
+        secrets::tell_postgres_decoys(&p.control, secrets.clone());
+    }
     // Its counters and gauges, a line a minute beside the cluster's (JSON logs only).
     let _secrets_metrics = logs::SecretsMetrics::start(cluster.node_id().to_string(), secrets.clone());
     code_secrets.set(secrets.clone(), workspace.clone());

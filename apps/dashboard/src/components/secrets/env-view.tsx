@@ -885,7 +885,7 @@ function DecoyMark({ decoy }: { decoy: NonNullable<Secret["decoy"]> }) {
   const used = decoy.uses > 0;
   const title = used
     ? `A decoy, used ${decoy.uses === 1 ? "once" : `${decoy.uses} times`}${decoy.used_at ? `, last ${ago(decoy.used_at)}` : ""}${decoy.used_ip ? ` from ${decoy.used_ip}` : ""}. Whoever used it found it where it was planted: cut them off and rotate what sits beside it.`
-    : "A decoy: its value is a roll token that opens nothing, and any use raises an alert. Only admins see this mark.";
+    : `A decoy: its value is ${decoy.kind === "postgres" ? "a database login that never logs in" : "a roll token that opens nothing"}, and any use raises an alert. Only admins see this mark.`;
   return (
     <span className={`shrink-0 rounded border px-1 font-mono text-[10px] ${used ? "border-danger/40 text-danger" : "border-accent/40 text-accent"}`} title={title}>
       {used ? `decoy · used ${decoy.uses}×` : "decoy"}

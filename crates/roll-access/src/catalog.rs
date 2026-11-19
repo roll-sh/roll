@@ -914,6 +914,9 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/projects/{id}/branches/{branch}/backup", "postgres", W, one(PG, "postgres-project")),
     row("POST", "/v1/projects/{id}/branches/{branch}/evict", "postgres", W, one(PG, "postgres-project")),
     row("POST", "/v1/projects/{id}/branches/{branch}/replicas", "postgres", W, one(PG, "postgres-project")).reveals(PG_SECRETS),
+    // Decoy roles (roll secrets' Postgres decoys): the proxy refuses their logins; no password.
+    row("POST", "/v1/projects/{id}/decoy-roles", "postgres", W, one(PG, "postgres-project")),
+    row("DELETE", "/v1/projects/{id}/decoy-roles/{role}", "postgres", W, one(PG, "postgres-project")),
     row("GET", "/v1/projects/{id}/usage", "postgres", R, one(PG, "postgres-project")),
     row("GET", "/v1/endpoints/{id}", "postgres", R, one(PG, "endpoint")).reveals(PG_SECRETS),
     row("PATCH", "/v1/endpoints/{id}", "postgres", W, one(PG, "endpoint")),
