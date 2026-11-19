@@ -1970,7 +1970,9 @@ that and `grace_s` (default five minutes) of its last ping, or of being added, i
 `heartbeat.missed` once, and the next ping is `alert.resolved` for it. Both go to notification
 targets (`heartbeat.missed` is in the defaults), and on-call ones keep an incident per heartbeat.
 At most ten. A token is the heartbeat's only credential: shown once, in the answer to the PUT that
-adds it (`heartbeat_urls`), only its SHA-256 kept, and kept by name when the list is put again.
+adds it (`heartbeat_urls`, a credential in the permissions catalogue: a token that may only write
+or deploy adds the heartbeat but doesn't see it), only its SHA-256 kept, and kept by name when the
+list is put again.
 So a ping gets in where visitors don't (an access token, signing in), but still past the
 environment's allow list, firewall and rate limit, and wakes nothing: an idle service stays idle.
 Pings and misses are kept in the store's state, so a takeover keeps them and two nodes' passes

@@ -459,7 +459,7 @@ type Environment = EnvironmentSummary & {
   check_states?: { name: string; up: boolean | null /* null: not tried yet; false once down */; failures: number; last_at: number | null; status: number | null; ms: number | null; error: string | null; down_since: number | null }[]; // on its owner
   heartbeats?: { name: string; every_s: number; grace_s: number; added_at: number }[]; // as the PUT's (never a token)
   heartbeat_states?: { name: string; last_ping_at: number | null; due_at: number /* before the grace */; missed: boolean }[];
-  heartbeat_urls?: Record<string, string>; // only in the answer to the PUT that added them: each new heartbeat's ping URL, shown once
+  heartbeat_urls?: Record<string, string>; // only in the answer to the PUT that added them: each new heartbeat's ping URL, shown once (a credential: left out for a caller that may not reveal)
   schedules?: { name: string; next_run_at: number | null; last: { job: string; status: RunStatus; started_at: number } | null; last_call?: { at: number; status?: number; ms: number; error?: string } /* a path schedule's last call */ }[]; // run.schedules as they stand: next due (none paused, in a preview or undeployed) and the job each last started
   crash_loop: { crashes: number; last_at: number; last_error: string } | null; // 3+ crashes in 10 minutes
   canary: { deployment: string; share: number; waiting?: true } | null; // a gradual rollout under way: the percent of requests the new deployment takes; waiting: a manual rollout's step passed and it waits for a person
