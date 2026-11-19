@@ -223,7 +223,7 @@ pub struct LogDrain {
 pub const DRAIN_FORMATS: [&str; 3] = ["ndjson", "otlp", "syslog"];
 
 /// What a drain can be sent.
-pub const DRAIN_SOURCES: [&str; 3] = ["runtime", "http", "build"];
+pub const DRAIN_SOURCES: [&str; 4] = ["runtime", "http", "build", "audit"];
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct NotifyTarget {

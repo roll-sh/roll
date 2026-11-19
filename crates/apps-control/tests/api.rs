@@ -4087,6 +4087,67 @@ async fn rolling_back_again_goes_further_back() {
     assert_eq!(back(&w).await.0, StatusCode::CONFLICT, "nothing before d1");
 }
 
+/// The audit trail streams out (Vercel's audit log streams): a drain with the `audit` source gets
+/// each entry as it's written, and a target with the `audit` event gets it through the event
+/// log; names, never a value.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn audit_entries_stream_to_drains_and_webhooks() {
+    let w = world().await;
+    let got: Arc<Mutex<Vec<(&'static str, String)>>> = Default::default();
+    let (g, h) = (got.clone(), got.clone());
+    let app = axum::Router::new()
+        .route("/logs", axum::routing::post(move |b: bytes::Bytes| {
+            let g = g.clone();
+            async move {
+                g.lock().push(("drain", String::from_utf8_lossy(&b).into_owned()));
+                StatusCode::OK
+            }
+        }))
+        .route("/hook", axum::routing::post(move |b: bytes::Bytes| {
+            let h = h.clone();
+            async move {
+                h.lock().push(("hook", String::from_utf8_lossy(&b).into_owned()));
+                StatusCode::OK
+            }
+        }));
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let at = l.local_addr().unwrap();
+    tokio::spawn(axum::serve(l, app).into_future());
+    let (st, d) = call(&w.api, "POST", &format!("/v1/apps/projects/{}/drains", w.project), Some(json!({"url": format!("http://{at}/logs"), "sources": ["audit"]}))).await;
+    assert_eq!(st, StatusCode::CREATED, "{d}");
+    let (st, t) = call(&w.api, "POST", &format!("/v1/apps/projects/{}/notifications", w.project), Some(json!({"url": format!("http://{at}/hook"), "events": ["audit"]}))).await;
+    assert_eq!(st, StatusCode::CREATED, "{t}");
+    let (svc, _) = image_service(&w, "api", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let (st, v) = call(&w.api, "PATCH", &format!("/v1/apps/services/{id}/environments/production/variables"), Some(json!({"set": {"API_TOKEN": "s3cret-value"}}))).await;
+    assert!(st.is_success(), "{v}");
+    let (mut drain, mut hook) = (None, None);
+    for _ in 0..200 {
+        for (to, body) in got.lock().iter() {
+            for l in body.lines() {
+                let v: Value = serde_json::from_str(l).unwrap();
+                if *to == "drain" && v["source"] == "audit" {
+                    let entry: Value = serde_json::from_str(v["text"].as_str().unwrap()).unwrap();
+                    if entry["event"] == "audit.variables" {
+                        drain = Some((v.clone(), entry));
+                    }
+                } else if *to == "hook" && v["type"] == "audit.variables" {
+                    hook = Some(v);
+                }
+            }
+        }
+        if drain.is_some() && hook.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let (line, entry) = drain.unwrap_or_else(|| panic!("no audit line: {:?}", got.lock()));
+    assert_eq!((line["service_name"].as_str(), line["environment"].as_str(), line["stream"].as_str()), (Some("api"), Some("production"), Some("system")), "{line}");
+    assert_eq!(entry["data"]["set"], json!(["API_TOKEN"]), "{entry}");
+    assert!(hook.is_some(), "no audit webhook: {:?}", got.lock());
+    assert!(!got.lock().iter().any(|(_, b)| b.contains("s3cret-value")), "never a value");
+}
+
 /// A worker that keeps crashing is restarted each time (backing off), and three crashes in ten
 /// minutes are a crash loop: on the environment with why, and one event, sent to the project's
 /// targets.

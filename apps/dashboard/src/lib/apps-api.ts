@@ -1133,7 +1133,9 @@ export type NotifyEvent =
   | "check.down"
   | "heartbeat.missed"
   | "deploy.vulnerable"
-  | "alert.slo";
+  | "alert.slo"
+  /** Every `audit.*` entry: who changed what (never paged). */
+  | "audit";
 
 /** An entry of the event log (`GET /v1/apps/events`, a service's `…/activity`). */
 export interface AppEvent {
@@ -1147,7 +1149,7 @@ export interface AppEvent {
 }
 
 /** A project's log drain: where its services' runtime output is POSTed (NDJSON). */
-export type DrainSource = "runtime" | "http" | "build";
+export type DrainSource = "runtime" | "http" | "build" | "audit";
 
 export interface DrainSettings {
   sources?: DrainSource[];
