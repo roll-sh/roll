@@ -81,7 +81,7 @@ Everything below works the same from the dashboard (a project's **Secrets**) and
    ```
 
    Or push an environment out with a **sync** (GitHub Actions secrets, a sealed webhook, a deploy
-   notification). roll's own checks (`secrets = "development"` in `roll.toml`), previews, apps and
+   notification). roll's own checks (`secrets = "development"` on a `[checks.<name>]` table in `roll.toml`), previews, apps and
    sandboxes read their environment directly.
 8. **From code**, a service reads its environment with `@roll/secrets` (`packages/secrets`) and the
    same token. `resolve` with `sealTo` returns the values sealed to a key only that process holds,
@@ -4847,7 +4847,7 @@ Every lookup by key inside a request is a hash map (a grid of ~11k keys over 5 e
 
 ## Next
 
-Done and in PR #20:
+Done in #20 (merged 2026-11-15 as 1ad248420):
 - the store and its crypto (the deployment key from the environment, a file, or AWS KMS);
 - rolld's mount and link providers (Postgres, Redis, streams, buckets, NoSQL, search: checked
   live against a real roll search cluster), and
@@ -5169,11 +5169,8 @@ plain text but resolved as a reference (previews' #436 review, fixed there in 7c
 is building: parse is exact, and a value that's a reference only once trimmed or lowercased is an error
 (`fix/secrets-strict-reference`). Apps and search were told to decide "is a reference" only through it.
 
-Doc fixes found:
-- `:70` `secrets = "development"` reads as top-level roll.toml (it's per `[checks.<name>]`);
-- "Done and in PR #20" (merged 2026-11-15);
-- "Open pull requests after this one" lists #30–#63 as open;
-- #357's "same check as `resolve`".
+Doc fixes found: all made (the checks' `secrets =` line, #20's heading, the old open-PR list; #357's
+"same check as `resolve`" in #357 itself).
 
 **State, 2026-11-18 13:25.** Built today, each green and mergeable: #248 (the polling path), #262
 (Terraform for batch 1's kinds), #264 (doc fixes), #274 (queue links), #276 (a split deployment key),
@@ -5654,7 +5651,8 @@ The landing branch passes roll-secrets' tests (SQLite and Postgres), roll-cli's,
 secrets tests, roll-access's, clippy with `-D warnings`, `pnpm typecheck`, the dashboard's 719
 tests, `@roll/secrets`' and the VS Code extension's.
 
-Open pull requests after this one:
+The pull requests that followed #20 (history: by 2026-11-19 each one below is on main, closed, or
+replaced; the open ones are in the ranked list and "State" above):
 
 - **#63, a Secrets Store CSI Driver provider** (after #62): `sdk/csi-provider`, a pod's volume
   gets an environment's values as files with no Secret in etcd, each pod logged in with its own
