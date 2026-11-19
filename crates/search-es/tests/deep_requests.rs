@@ -29,7 +29,9 @@ fn run(reqs: Vec<(&'static str, String, String, &'static str)>) -> Vec<(u16, Val
                         r.headers = vec![("content-type".into(), ct.into())];
                     }
                     let resp = search_es::handle(&c, r).await;
-                    out.push((resp.status, parse(&resp.body).ok().flatten().unwrap_or(Value::Null)));
+                    // A YAML request is answered in YAML: its text then.
+                    let body = parse(&resp.body).ok().flatten().unwrap_or_else(|| Value::Str(String::from_utf8_lossy(&resp.body).into_owned()));
+                    out.push((resp.status, body));
                 }
                 out
             })

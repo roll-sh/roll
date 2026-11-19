@@ -1354,6 +1354,17 @@ fn parse_subobjects(v: &Value) -> Result<bool, EsError> {
 /// Parent objects a dotted field name may spell out (a request body nests at most 1000 levels).
 const MAX_DOTTED_PARENTS: usize = 1000;
 
+/// A document field name with more parts than [`MAX_DOTTED_PARENTS`]: each part is an object
+/// level that resolving and mapping the name walk through all prefixes of, so it is refused
+/// before either starts (roll's own). The message names the start of the field.
+pub(crate) fn too_many_parts(name: &str) -> Option<String> {
+    if name.bytes().filter(|&b| b == b'.').count() < MAX_DOTTED_PARENTS {
+        return None;
+    }
+    let shown = &name[..name.char_indices().nth(64).map_or(name.len(), |(i, _)| i)];
+    Some(format!("field name [{shown}...] has more than {MAX_DOTTED_PARENTS} parts"))
+}
+
 fn validate_field_name(name: &str) -> Result<(), EsError> {
     if name.is_empty() {
         return Err(EsError::illegal_argument("field name cannot be an empty string"));

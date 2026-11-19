@@ -463,8 +463,7 @@ impl Kind {
                 let Some(Value::Obj(p)) = cfg.get("processor") else {
                     return Err(config_error(ptype, tag, "processor", "required property is missing"));
                 };
-                let compiled = super::pipeline::compile_list(cluster, &Value::Arr(vec![Value::Obj(p.clone())]))?;
-                let one = compiled.into_iter().next().ok_or_else(|| config_error(ptype, tag, "processor", "required property is missing"))?;
+                let one = crate::stack::maybe_grow(|| super::pipeline::compile_one(cluster, p))?.ok_or_else(|| config_error(ptype, tag, "processor", "required property is missing"))?;
                 Kind::Foreach { field: f, processor: Box::new(one), ignore_missing: im }
             }
             "pipeline" => Kind::Pipeline { name: Template::new(&req(cfg, ptype, tag, "name")?)?, ignore_missing: b(cfg, "ignore_missing_pipeline", false) },

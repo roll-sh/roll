@@ -117,11 +117,24 @@ fn compile_list_at(cluster: &Cluster, v: &Value) -> EsResult<Vec<Compiled>> {
     let mut out = Vec::with_capacity(a.len());
     for item in a {
         let Value::Obj(m) = item else { continue };
-        let Some((ptype, cfg)) = m.iter().next() else { continue };
-        let cfg = match cfg {
-            Value::Obj(c) => c.clone(),
-            _ => Map::new(),
-        };
+        if let Some(c) = compile_one(cluster, m)? {
+            out.push(c);
+        }
+    }
+    Ok(out)
+}
+
+/// Compiles one processor (`{type: config}`), reading its configuration in place: a nested
+/// processor's (`foreach`) is part of it, and copying it per level would copy (and drop) the
+/// rest of the tree at every level.
+pub fn compile_one(cluster: &Cluster, m: &Map) -> EsResult<Option<Compiled>> {
+    let Some((ptype, cfg)) = m.iter().next() else { return Ok(None) };
+    let empty = Map::new();
+    let cfg = match cfg {
+        Value::Obj(c) => c,
+        _ => &empty,
+    };
+    {
         let tag = cfg.get("tag").map(|v| v.to_es_string());
         let (cond, cond_src) = match cfg.get("if") {
             Some(c) => {
@@ -137,8 +150,8 @@ fn compile_list_at(cluster: &Cluster, v: &Value) -> EsResult<Vec<Compiled>> {
             Some(of) => compile_list(cluster, of)?,
             None => Vec::new(),
         };
-        let kind = Kind::compile(cluster, ptype, &cfg, tag.as_deref())?;
-        out.push(Compiled {
+        let kind = Kind::compile(cluster, ptype, cfg, tag.as_deref())?;
+        Ok(Some(Compiled {
             slot: usize::MAX,
             ptype: ptype.clone(),
             tag,
@@ -148,9 +161,8 @@ fn compile_list_at(cluster: &Cluster, v: &Value) -> EsResult<Vec<Compiled>> {
             ignore_failure: matches!(cfg.get("ignore_failure"), Some(Value::Bool(true))),
             on_failure,
             kind,
-        });
+        }))
     }
-    Ok(out)
 }
 
 /// Compiles a pipeline definition.
