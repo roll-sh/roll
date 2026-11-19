@@ -86,6 +86,12 @@ const WAKE_ROOM: u64 = 1 << 20;
 const MEMORY_CHECK: Duration = Duration::from_secs(2);
 /// Response header naming the node that owns a cluster this node refused.
 pub const OWNER_HEADER: &str = "X-Roll-Search-Owner";
+/// Node setting: the clusters, comma-separated, that read service account tokens from
+/// `<path.conf>/service_tokens`. The file is the node's: on a node serving many clusters a
+/// token in it would sign in as `elastic/fleet-server` on every one of them, so only the
+/// clusters named here read it. A dev-mode node ([`NodeConfig::default_cluster`]) serves one
+/// cluster, which reads it as Elasticsearch does. Under `roll.security.`, so no tenant sees it.
+pub const FILE_SERVICE_TOKEN_CLUSTERS: &str = "roll.security.service_token_file.clusters";
 
 #[derive(Clone, Debug)]
 pub struct NodeConfig {
@@ -775,6 +781,12 @@ fn release_memory() {
 }
 
 impl Node {
+    /// Whether `cluster` reads the node's `service_tokens` file ([`FILE_SERVICE_TOKEN_CLUSTERS`]).
+    fn reads_file_service_tokens(&self, cluster: &str) -> bool {
+        self.cfg.default_cluster.is_some()
+            || self.cfg.node_settings.iter().rev().find(|(k, _)| k == FILE_SERVICE_TOKEN_CLUSTERS).is_some_and(|(_, v)| v.split(',').any(|c| c.trim() == cluster))
+    }
+
     pub fn new(catalog: Arc<dyn Catalog>, stores: Arc<dyn StoreProvider>, cfg: NodeConfig) -> Arc<Node> {
         Node::with_hooks(catalog, stores, cfg, Arc::new(NoHooks))
     }
@@ -1099,6 +1111,7 @@ impl Node {
         cfg.sealer = self.cfg.sealer.clone();
         // Snapshot contents are durable only with object storage behind the cluster.
         cfg.default_repository = self.cfg.default_repository.clone().filter(|_| data_store.is_some());
+        cfg.file_service_tokens = self.reads_file_service_tokens(&spec.name);
         cfg.audit = Some(search_es::xpack::security::audit::AuditLog(self.audit.clone()));
         let mut cluster = Cluster::open(cfg, store).await?;
         cluster.node.id = stable_node_id(&spec.name);
