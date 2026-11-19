@@ -2489,6 +2489,15 @@ with signed digests, so such a change shows:
   one twice. Sinks get digests like any other row, so a SIEM or a locked bucket holds roll's
   signatures outside the database: recomputing every hash after an edit no longer matches what
   roll signed.
+- **Gaps.** Before signing, the sweeper reads the newest digest the chain itself holds (with none,
+  its first row). When that's over two hours old, or isn't the digest the head says roll last
+  wrote, the rows after it can't be vouched for: a head put back from a copy passes its MAC, since
+  nothing in the database can't be put back with it. The new digest then carries
+  `gap: {after, since}` (that digest's seq, or 0, and its time), and `verify` reports the `gap` for
+  as long as the digest is in the log, after any other break, so an old gap never hides a newer one.
+  The head's own `digest_seq`/`digest_at` aren't MACed: they're only the sweeper's schedule, and a
+  MAC over them would pass on a copy too. A signer stopped for over two hours (every node down)
+  shows as a gap the same way: roll can't tell the two apart.
 - **Verifying.** `GET …/audit/verify?since=` (`read`) walks the chain from its start, or from the
   last digest before `since`, and answers `AuditVerification`: the rows walked (`from`–`head`), how
   far a valid digest vouches for them (`through`, `signed_at`), and the first thing that doesn't
@@ -2496,8 +2505,9 @@ with signed digests, so such a change shows:
   gap), `rewritten` (the chain isn't what a digest signed), `signature` (a digest no key of roll's
   signed), `truncated` (rows gone from the end; the head still counts them), `cut` (rows gone from
   the start other than by retention), `unchained` (a row added outside the chain), `head` (the
-  head doesn't carry roll's MAC) or `stale` (the newest digest is over two hours old: the signer
-  stopped, or rows after it were cut and the head put back from a copy). The dashboard's audit log
+  head doesn't carry roll's MAC), `stale` (the newest digest is over two hours old: the signer
+  stopped, or rows after it were cut and the head put back from a copy) or `gap` (a digest roll
+  signed after such a span). The dashboard's audit log
   shows "Verified through #N" or the break. `roll secrets audit verify [--since TIME]` asks the
   same.
 - **Whose keys.** A row in `oidc_keys` is roll's only when its sealed private key opens with the
@@ -2521,10 +2531,13 @@ with signed digests, so such a change shows:
   chain starts at the first row after them, and they're dropped by age as before. A row written by
   a node still running an older roll during an upgrade shows as `unchained` too.
 - **What it can't show without a sink**: someone holding both the database and `ROLL_SECRET_KEY`
-  can rewrite anything and sign it again, MAC and digests alike. So can someone who puts back a copy
-  of the database (or its rows and head) from earlier, once the signer has signed it again within
-  the hour. Only a copy held outside roll tells: a sink (a SIEM, a locked bucket) that already
-  received the digests, or a saved `--jwks` file for a key roll never made.
+  can rewrite anything and sign it again, MAC and digests alike. Someone who can write only the
+  database can put back a copy of its rows and head from earlier: once that copy's newest digest is
+  over two hours old, roll's next digest records the gap for good, but rows written in the two hours
+  after it (digests included) can be cut and the copy put back before then, and roll signs on
+  without a trace in the database. Only a copy held outside it catches that: a sink (a SIEM, a
+  locked bucket) that already received the digests the copy lacks, or a saved `--jwks` file for a
+  key roll never made.
 
 
 ## HTTP API

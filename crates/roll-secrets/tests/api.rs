@@ -1473,6 +1473,42 @@ async fn the_audit_log_is_a_signed_chain_that_shows_an_edit_and_a_deletion_and_s
 }
 
 #[tokio::test]
+async fn an_old_head_put_back_over_cut_rows_leaves_a_gap_that_verify_reports_from_then_on() {
+    let api = Api::new().await;
+    api.set("production", "A", "v").await;
+    let (now, hour) = (api.db.now_ms().unwrap(), 3_600_000);
+    let sweep = |at: i64| {
+        let s = api.secrets.clone();
+        async move { tokio::task::spawn_blocking(move || s.sweep_audit_chain_at(i64::MAX / 2, at).unwrap()).await.unwrap() }
+    };
+    assert_eq!(sweep(now).await, 1);
+    // A database writer copies the head...
+    let p = api.project.clone();
+    type Head = (i64, String, i64, i64, i64, i64, Option<String>);
+    let copy: Head = api.db.read(|c| c.query_row("SELECT seq, hash, at, digest_seq, digest_at, start_seq, mac FROM audit_heads WHERE project_id = ?", [p.as_str()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)))).unwrap();
+    // ...roll writes more and signs it an hour later...
+    api.set("production", "B", "v").await;
+    assert_eq!(sweep(now + hour + 1).await, 1);
+    api.set("production", "C", "v").await;
+    // ...and they delete all of it, the digest too, and put the copy back. Its MAC holds.
+    api.db.write(|c| c.execute("DELETE FROM audit WHERE project_id = ? AND seq > ?", code_sql::params![p, copy.0])).unwrap();
+    let (seq, hash, at, digest_seq, digest_at, start, mac) = copy.clone();
+    api.db.write(|c| c.execute("UPDATE audit_heads SET seq = ?, hash = ?, at = ?, digest_seq = ?, digest_at = ?, start_seq = ?, mac = ? WHERE project_id = ?", code_sql::params![seq, hash, at, digest_seq, digest_at, start, mac, p])).unwrap();
+    assert_eq!(api.ok(Method::GET, "/audit/verify", None).await["ok"], true, "the copy passes until roll signs again");
+
+    // Roll's next digest finds its newest one too old to vouch for what's after it, and says so;
+    // verify reports the gap through later hours and later digests.
+    assert_eq!(sweep(now + 3 * hour).await, 1);
+    for later in [5, 9, 30] {
+        let v = api.ok(Method::GET, "/audit/verify", None).await;
+        assert_eq!((v["ok"].as_bool(), v["broken"]["reason"].as_str()), (Some(false), Some("gap")), "{v}");
+        assert!(v["broken"]["seq"].as_i64().is_some_and(|s| s > copy.0), "{v}");
+        assert_eq!(sweep(now + later * hour).await, 1);
+    }
+    assert_eq!(api.ok(Method::GET, "/audit/verify", None).await["broken"]["reason"], "gap");
+}
+
+#[tokio::test]
 async fn a_signing_key_added_to_the_database_vouches_for_no_digest_and_isnt_published() {
     use base64::Engine as _;
     use roll_secrets::chain;
@@ -1501,7 +1537,7 @@ async fn a_signing_key_added_to_the_database_vouches_for_no_digest_and_isnt_publ
             r.summary = "nothing happened".into();
         }
         if r.action == chain::DIGEST {
-            let d = chain::Digest { project: p.clone(), seq: r.seq.unwrap() - 1, hash: prev.clone(), last_at: r.at, at: r.at, start: 1 };
+            let d = chain::Digest { project: p.clone(), seq: r.seq.unwrap() - 1, hash: prev.clone(), last_at: r.at, at: r.at, start: 1, gap: None };
             r.digest = Some(chain::sign("k_theirs", &pair, &d).unwrap());
         }
         prev = chain::link(&prev, &p, r);

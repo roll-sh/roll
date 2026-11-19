@@ -227,7 +227,7 @@ export type NewToken = { name: string; environments?: string[]; paths?: string[]
 /** `approval`: the approval that let the request through roll-access's gate (an `ask` approved; `until` when a rule it remembered allowed it). */
 /** `seq` and `hash` place a row in its project's chain (absent on rows from before it); an `audit.digest` row's `digest` is roll's signed JWS of it. */
 export type AuditEntry = { id: number; seq?: number; hash?: string; at: number; actor: string; action: string; environment: string | null; path: string | null; keys: string[]; summary: string; ip: string | null; approval?: Approval; digest?: string };
-/** Where the chain breaks: `edited`, `missing`, `rewritten`, `signature`, `truncated`, `cut`, `unchained`, `head` or `stale`. */
+/** Where the chain breaks: `edited`, `missing`, `rewritten`, `signature`, `truncated`, `cut`, `unchained`, `gap`, `head` or `stale`. */
 export type AuditBreak = { seq?: number; reason: string; detail: string };
 /** `GET …/audit/verify`: rows `from`–`head` walked, signed by a digest `through` a row. */
 export type AuditVerification = { ok: boolean; from: number | null; through: number | null; signed_at: number | null; head: number | null; rows: number; digests: number; unchained: number; broken: AuditBreak | null };

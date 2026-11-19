@@ -3,7 +3,7 @@
 //! (roll-secrets-chain, docs/secrets.md "Tamper evidence").
 
 use crate::access::{Action, Caller, Scope};
-use crate::chain::{self, Digest, Verification, Walk};
+use crate::chain::{self, Digest, Gap, Verification, Walk};
 use crate::crypto::Keyring;
 use crate::{Error, Result, Secrets, from_json, json};
 use code_sql::{Conn, OptionalExtension, params};
@@ -280,7 +280,12 @@ impl Secrets {
     /// transaction. Returns the digests written.
     #[doc(hidden)]
     pub fn sweep_audit_chain(&self, keep_ms: i64) -> Result<usize> {
-        let now = self.db.now_ms()?;
+        self.sweep_audit_chain_at(keep_ms, self.db.now_ms()?)
+    }
+
+    /// [`Secrets::sweep_audit_chain`] at `now` (tests move the clock).
+    #[doc(hidden)]
+    pub fn sweep_audit_chain_at(&self, keep_ms: i64, now: i64) -> Result<usize> {
         let cutoff = now - keep_ms;
         // Rows from before the chain began go by age, as every row did.
         self.db.write(|c| c.execute("DELETE FROM audit WHERE seq IS NULL AND at < ?", [cutoff]))?;
@@ -301,9 +306,9 @@ impl Secrets {
         for project in due {
             // The write is the claim: a node that comes second finds nothing due.
             let wrote = self.db.write(|c| {
-                type Head = (i64, String, i64, i64, i64, Option<String>);
-                let (seq, hash, last_at, digest_at, start, tag): Head =
-                    c.query_row("SELECT seq, hash, at, digest_at, start_seq, mac FROM audit_heads WHERE project_id = ?", [&project], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?;
+                type Head = (i64, String, i64, i64, i64, i64, Option<String>);
+                let (seq, hash, last_at, digest_seq, digest_at, start, tag): Head =
+                    c.query_row("SELECT seq, hash, at, digest_seq, digest_at, start_seq, mac FROM audit_heads WHERE project_id = ?", [&project], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)))?;
                 let cut: Option<i64> = c.query_row("SELECT MAX(seq) FROM audit WHERE project_id = ? AND action = ? AND at < ? AND seq > ?", params![project, chain::DIGEST, cutoff, start], |r| r.get(0))?;
                 if cut.is_none() && digest_at > now - chain::DIGEST_EVERY_MS {
                     return Ok(false);
@@ -315,6 +320,20 @@ impl Secrets {
                     c.execute("UPDATE audit_heads SET digest_at = ? WHERE project_id = ?", params![now, project])?;
                     return Ok(false);
                 }
+                // The newest digest the chain itself holds (signed, so a database writer can't make
+                // one up), or with none the chain's first row. Older than `verify` allows, or not
+                // the one the head says roll last wrote, and the rows after it can't be vouched
+                // for: an old head put back from a copy passes its MAC. This digest says so, and
+                // `verify` reports the gap for as long as it's in the log.
+                let last: Option<(i64, i64)> = c.query("SELECT seq, at FROM audit WHERE project_id = ? AND action = ? AND seq <= ? ORDER BY seq DESC LIMIT 1", params![project, chain::DIGEST, seq], |r| Ok((r.get(0)?, r.get(1)?)))?.pop();
+                let (after, since) = match last {
+                    Some(d) => d,
+                    None => (0, c.query_row("SELECT MIN(at) FROM audit WHERE project_id = ? AND seq IS NOT NULL", [&project], |r| r.get::<_, Option<i64>>(0))?.unwrap_or(0)),
+                };
+                let gap = (now - since > STALE_MS || after != digest_seq).then_some(Gap { after, since });
+                if gap.is_some() {
+                    tracing::warn!(project, after, "the audit log went unsigned past the stale limit, or its last digest is gone: the next digest records the gap");
+                }
                 let start = match cut {
                     Some(at) => {
                         c.execute("DELETE FROM audit WHERE project_id = ? AND seq < ?", params![project, at])?;
@@ -322,12 +341,16 @@ impl Secrets {
                     }
                     None => start,
                 };
-                let d = Digest { project: project.clone(), seq, hash, last_at, at: now, start };
+                let summary = match &gap {
+                    Some(_) => format!("signed the log through #{seq} after a gap"),
+                    None => format!("signed the log through #{seq}"),
+                };
+                let d = Digest { project: project.clone(), seq, hash, last_at, at: now, start, gap };
                 let e = AuditEntry {
                     at: now,
                     actor: chain::DIGEST_ACTOR.into(),
                     action: chain::DIGEST.into(),
-                    summary: format!("signed the log through #{seq}"),
+                    summary,
                     digest: Some(chain::sign(&kid, &key, &d).map_err(|_| Error::Internal("signing a digest failed".into()))?),
                     ..AuditEntry::default()
                 };
