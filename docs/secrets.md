@@ -3688,7 +3688,20 @@ cache waited out. Ranked now:
      resent with `X-Roll-Approval`, the quick start and dashboard dead ends fixed): the CLI
      keeps 127.0.0.1:7070 after `roll login`; the first `roll run` waits silently on an `ask` approval
      it can't handle; the quick start has no install or login; the dashboard's commands dead-end.
-     Then a committed `[secrets]` in `roll.toml` and an interactive `setup` (Doppler's `doppler.yaml`).
+     Then a committed `[secrets]` in `roll.toml` and an interactive `setup` (Doppler's `doppler.yaml`),
+     designed (2026-11-19) so a repo suggests and the person approves, as direnv's `allow`:
+     - `roll.toml` may hold `[secrets] project = "shop"`, `environment = "development"`, `path`, and
+       `branches = { "release/*" = "staging" }`; never an API URL, a token or a value (the #58 lesson:
+       a repository never chooses where a token goes).
+     - It's only a suggestion. `roll run` uses it once the person has approved that exact table for
+       that directory (`roll secrets setup` with no flags shows it and asks; the approval, with a hash
+       of the table, goes in `~/.config/roll/secrets.json`, so a changed table asks again). Until then
+       `roll run` says what the repo suggests and how to approve it, and uses nothing.
+     - A protected environment is never taken from the file, even approved: `-e`, `ROLL_ENV` or the
+       person's own setup only (a cloned repo can't route production values to code it ships).
+     - Precedence: flags, then env vars, then the person's own setup, then the approved table, then
+       `development` and `/`. `doctor` names which one was used.
+     - `setup` in a terminal picks from the projects and environments the login can see.
    - P5 + P14 (#365): CI snippets that work on a fresh runner (the GitHub Action, or the install step
      plus `roll run`; GitLab's `id_tokens`; Azure's install step) and the write-flow component tests
      (a pasted `.env` as one change, a protected edit becoming a change request, a stale edit reloading).
