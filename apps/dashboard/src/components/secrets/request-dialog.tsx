@@ -63,7 +63,7 @@ function Form({ target, onClose, onCreated }: { target: RequestTarget; onClose: 
     setError(null);
     try {
       const request = await api.createValueRequest(target.env, target.path, { keys: list, note: note.trim() || undefined, ttl_minutes: Number(expiry), answers: Number(answers) });
-      setMade({ link: request.link ?? requestLink(location.origin, request.id), request });
+      setMade({ link: request.link ?? requestLink(location.origin, request.token), request });
       onCreated?.(request);
     } catch (e) {
       setError(errorText(e));

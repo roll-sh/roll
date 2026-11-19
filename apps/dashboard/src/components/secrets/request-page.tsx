@@ -1,5 +1,5 @@
 /**
- * `/request/<id>`: someone asked for values through roll secrets (docs/secrets.md, "Asking for a
+ * `/request/<token>`: someone asked for values through roll secrets (docs/secrets.md, "Asking for a
  * value"). Public, with no sign-in and no operator headers. It shows the asker's note and the key
  * names, nothing else about the project. The browser seals each value to the request's own key
  * before anything is sent, and the page shows nothing back: once sent, the fields are cleared.
@@ -15,7 +15,7 @@ import { until } from "./ui";
 const primaryBtn = "inline-flex h-9 items-center gap-2 rounded-lg bg-fg px-3.5 text-[13px] font-medium text-bg transition hover:opacity-85 disabled:pointer-events-none disabled:opacity-40";
 const fieldCls = "w-full resize-y rounded-lg border border-line bg-bg px-3 py-2 font-mono text-[13px] leading-relaxed outline-none transition-colors placeholder:text-subtle focus:border-line-3";
 
-export function RequestPage({ id, peek, now }: { id: string; peek: ValuePeek; now: number }) {
+export function RequestPage({ token, peek, now }: { token: string; peek: ValuePeek; now: number }) {
   const [values, setValues] = useState<Record<string, string>>(() => Object.fromEntries(peek.keys.map((k) => [k, ""])));
   const [busy, setBusy] = useState(false);
   const [sent, setSent] = useState(false);
@@ -28,7 +28,7 @@ export function RequestPage({ id, peek, now }: { id: string; peek: ValuePeek; no
     setBusy(true);
     setError(null);
     try {
-      await answerRequest(id, await sealAnswer(id, peek.public_key, values));
+      await answerRequest(token, await sealAnswer(peek.id, peek.public_key, values));
       setValues({});
       setSent(true);
     } catch (e) {

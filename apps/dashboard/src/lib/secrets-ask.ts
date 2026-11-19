@@ -1,6 +1,7 @@
 /**
  * Secret requests (docs/secrets.md, "Asking for a value"): a link that asks someone outside roll
- * for a folder's values. The page shows the request's note and key names and its public key; the
+ * for a folder's values. The link carries the request's answer token (`rlq_…`), its only
+ * capability; the boxes are bound to the request's id, which the page reads from the peek. The page shows the request's note and key names and its public key; the
  * browser seals each value to that key (`roll-seal-v1`, `roll-secret-request:<id>:<KEY>` as the
  * associated data, so a box only opens as that key of that request) and sends only the boxes.
  * roll opens them in the write that lands them.
@@ -12,8 +13,8 @@ import type { SealedSecret } from "./agents-api";
 import { type SealFixed, sealTo } from "./agents-seal";
 import { ROLL_API } from "./roll-api";
 
-/** What a request's page shows (`GET /v1/secrets/value-requests/{id}`). */
-export type ValuePeek = { note: string; keys: string[]; expires_at: number; public_key: string };
+/** What a request's page shows (`GET /v1/secrets/value-requests/{token}`); `id` is what the boxes are bound to. */
+export type ValuePeek = { id: string; note: string; keys: string[]; expires_at: number; public_key: string };
 
 /** The associated data of `key`'s box for request `id` (`value_requests::answer_context`). */
 export const answerContext = (id: string, key: string) => `roll-secret-request:${id}:${key}`;
@@ -25,8 +26,8 @@ export async function sealAnswer(id: string, publicKey: string, values: Record<s
   return out;
 }
 
-/** The link handed to someone outside roll. */
-export const requestLink = (origin: string, id: string) => `${origin}/request/${encodeURIComponent(id)}`;
+/** The link handed to someone outside roll: the dashboard's own address when rolld doesn't know it. */
+export const requestLink = (origin: string, token: string) => `${origin}/request/${encodeURIComponent(token)}`;
 
 /** A request that can't be answered: unknown (404), or answered, expired or cancelled (410). */
 export class RequestGone extends Error {
@@ -57,9 +58,9 @@ async function call<T>(method: "GET" | "POST", path: string, base: string, body?
 }
 
 /** The note, key names and public key; uses nothing up. `base` is rolld (its own address on the server). */
-export const peekRequest = (id: string, base = ROLL_API) => call<ValuePeek>("GET", `/v1/secrets/value-requests/${encodeURIComponent(id)}`, base) as Promise<ValuePeek>;
+export const peekRequest = (token: string, base = ROLL_API) => call<ValuePeek>("GET", `/v1/secrets/value-requests/${encodeURIComponent(token)}`, base) as Promise<ValuePeek>;
 
 /** Sends the sealed values; nothing comes back. */
-export const answerRequest = async (id: string, values: Record<string, SealedSecret>) => {
-  await call<null>("POST", `/v1/secrets/value-requests/${encodeURIComponent(id)}/answer`, ROLL_API, { values });
+export const answerRequest = async (token: string, values: Record<string, SealedSecret>) => {
+  await call<null>("POST", `/v1/secrets/value-requests/${encodeURIComponent(token)}/answer`, ROLL_API, { values });
 };

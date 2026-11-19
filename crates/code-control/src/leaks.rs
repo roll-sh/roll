@@ -25,8 +25,6 @@ const MAX_FILE: u64 = 1 << 20;
 const MAX_STACK: usize = 50;
 const MAX_FILES: usize = 500;
 const MAX_BYTES: u64 = 64 << 20;
-/// A roll grant secret starts with one of these.
-const PREFIXES: [&[u8]; 3] = [b"rlt_", b"rlo_", b"rlf_"];
 
 /// What a file that may hold a roll token goes to: its text and where it is ("acme/site .env at
 /// 1a2b3c4d5e6f"); answers how many live tokens it revoked.
@@ -128,7 +126,9 @@ impl Code {
                         continue;
                     }
                 };
-                if !PREFIXES.iter().any(|p| bytes.windows(p.len()).any(|w| w == *p)) {
+                // Any roll secret (`roll_auth::credentials::SECRET_PREFIXES`): grants, and other
+                // products' that revoke through `Access::on_leaked`.
+                if !roll_auth::credentials::SECRET_PREFIXES.iter().any(|p| bytes.windows(p.len()).any(|w| w == p.as_bytes())) {
                     continue;
                 }
                 let text = String::from_utf8_lossy(&bytes).into_owned();

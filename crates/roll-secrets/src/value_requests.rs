@@ -2,6 +2,12 @@
 //! (a vendor, a contractor) to send a value in, as Infisical's secret requests do. The other way
 //! round from a share.
 //!
+//! A request has an id (`vrq_…`), for listing and cancelling, and an answer token (`rlq_…`, a
+//! checksummed roll secret, so the credential guard and leak scanning know it): the token is the
+//! link's capability, returned once by `create` and never stored (only its SHA-256) or listed, so
+//! reading a project's requests can't answer one. A leaked token cancels its request
+//! ([`Secrets::cancel_leaked_value_request`]). Boxes are bound to the id, not the token.
+//!
 //! Each request has its own X25519 key pair, made here. The public key is on the request's public
 //! page; the secret key is kept sealed with the project's data key (as every value is) and dropped
 //! when the request closes. The answerer's browser seals each value to the public key
@@ -54,11 +60,33 @@ CREATE TABLE IF NOT EXISTS value_requests (
     outcome TEXT,
     attempts INTEGER NOT NULL DEFAULT 0,
     attempts_from INTEGER NOT NULL DEFAULT 0,
-    boxes TEXT NOT NULL DEFAULT '[]'
+    boxes TEXT NOT NULL DEFAULT '[]',
+    token_hash TEXT
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS value_requests_project ON value_requests (project_id, created_at);
 CREATE INDEX IF NOT EXISTS value_requests_expiry ON value_requests (expires_at);
 ";
+
+/// A request's answer token starts with this (`roll_auth::credentials::SECRET_PREFIXES`).
+pub const TOKEN_PREFIX: &str = "rlq_";
+
+/// The answer token's digest, the only form of it kept. The token is 170 random bits, so looking
+/// the digest up by index leaks nothing a constant-time compare would keep.
+fn token_hash(token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    URL_SAFE_NO_PAD.encode(Sha256::digest(token.as_bytes()))
+}
+
+/// Not a live token's request: the same 404 for an unknown token, a request's id, or text that
+/// isn't shaped like a token, naming none of them.
+fn unknown() -> Error {
+    Error::NotFound("no such secret request".into())
+}
+
+/// The digest to look `token` up by, or the 404 when it isn't shaped like an answer token.
+fn lookup(token: &str) -> Result<String> {
+    if token.starts_with(TOKEN_PREFIX) && roll_auth::credentials::checksum_ok(token) { Ok(token_hash(token)) } else { Err(unknown()) }
+}
 
 /// Keys one request asks for.
 const KEYS_MAX: usize = 20;
@@ -100,7 +128,12 @@ pub struct ValueRequest {
     pub open: bool,
     /// What the last answer became: `{"change": seq}` or `{"request": id}`.
     pub outcome: Option<Json>,
-    /// `<dashboard>/request/<id>` when the server knows the dashboard's address (`ROLL_WEB_URL`).
+    /// The answer token (`rlq_…`): only in `create`'s answer, never listed. Whoever holds it can
+    /// answer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+    /// `<dashboard>/request/<token>` when the server knows the dashboard's address
+    /// (`ROLL_WEB_URL`); only in `create`'s answer.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub link: Option<String>,
 }
@@ -108,6 +141,8 @@ pub struct ValueRequest {
 /// What a request's public page shows: the note, the key names, and the key to seal to.
 #[derive(Debug, Serialize)]
 pub struct ValuePeek {
+    /// The request's id: what each box is bound to ([`answer_context`]).
+    pub id: String,
     pub note: String,
     pub keys: Vec<String>,
     pub expires_at: i64,
@@ -171,6 +206,7 @@ fn row(r: &code_sql::Row<'_>, now: i64) -> code_sql::Result<ValueRequest> {
         answered_at: r.get(9)?,
         cancelled_at: r.get(10)?,
         outcome: r.get::<_, Option<String>>(12)?.and_then(|o| serde_json::from_str(&o).ok()),
+        token: None,
         link: None,
     })
 }
@@ -199,6 +235,7 @@ impl Secrets {
         let dek = self.project(project)?;
         let now = self.db.now_ms()?;
         let id = names::new_id("vrq", 24);
+        let token = roll_auth::credentials::new_secret(TOKEN_PREFIX);
         let (secret, public_key) = crypto::keypair();
         let sealed = dek.seal(&key_aad(project, &id), &Value::new(URL_SAFE_NO_PAD.encode(*secret)));
         let expires_at = now + ttl * 60_000;
@@ -209,16 +246,17 @@ impl Secrets {
                 return Err(Error::Conflict("conflict", format!("{OPEN_MAX} secret requests are open: cancel some first")));
             }
             c.execute(
-                "INSERT INTO value_requests (id, project_id, env_id, path, keys, note, public_key, seal_key, answers_left, created_by, created_at, expires_at, answered_at, cancelled_at, outcome)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)",
-                params![id, project, env.id, path, json(&keys), n.note, public_key, sealed, answers, caller.principal, now, expires_at],
+                "INSERT INTO value_requests (id, project_id, env_id, path, keys, note, public_key, seal_key, answers_left, created_by, created_at, expires_at, answered_at, cancelled_at, outcome, token_hash)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?)",
+                params![id, project, env.id, path, json(&keys), n.note, public_key, sealed, answers, caller.principal, now, expires_at, token_hash(&token)],
             )?;
             let note = if n.note.is_empty() { String::new() } else { format!(": {}", n.note) };
             audit::record(c, project, caller, "value_request.create", Some(slug), Some(&path), &keys, &format!("asked for {} from outside roll ({answers} answer{}, {ttl} min){note}", keys.join(", "), if answers == 1 { "" } else { "s" }), now)?;
             Ok(())
         })?;
         Ok(ValueRequest {
-            link: self.web_url.as_ref().map(|w| format!("{}/request/{id}", w.trim_end_matches('/'))),
+            link: self.web_url.as_ref().map(|w| format!("{}/request/{token}", w.trim_end_matches('/'))),
+            token: Some(token),
             id,
             environment: slug.to_string(),
             path,
@@ -272,43 +310,47 @@ impl Secrets {
         })
     }
 
-    /// What a request's page shows (public): 404 for none, 410 once it can't be answered.
-    pub fn peek_value_request(&self, id: &str) -> Result<ValuePeek> {
+    /// What a request's page shows (public, by its answer token): 404 for none, 410 once it can't
+    /// be answered.
+    pub fn peek_value_request(&self, token: &str) -> Result<ValuePeek> {
+        let hash = lookup(token)?;
         let now = self.db.now_ms()?;
         let found = self.db.read(|c| {
             c.query_row(
-                "SELECT r.note, r.keys, r.expires_at, r.public_key, r.seal_key IS NOT NULL AND r.answers_left > 0 AND e.id IS NOT NULL FROM value_requests r LEFT JOIN environments e ON e.id = r.env_id WHERE r.id = ?",
-                [id],
-                |r| Ok((ValuePeek { note: r.get(0)?, keys: from_json(&r.get::<_, String>(1)?), expires_at: r.get(2)?, public_key: r.get(3)? }, r.get::<_, i64>(4)? != 0)),
+                "SELECT r.id, r.note, r.keys, r.expires_at, r.public_key, r.seal_key IS NOT NULL AND r.answers_left > 0 AND e.id IS NOT NULL FROM value_requests r LEFT JOIN environments e ON e.id = r.env_id WHERE r.token_hash = ?",
+                [&hash],
+                |r| Ok((ValuePeek { id: r.get(0)?, note: r.get(1)?, keys: from_json(&r.get::<_, String>(2)?), expires_at: r.get(3)?, public_key: r.get(4)? }, r.get::<_, i64>(5)? != 0)),
             )
             .optional()
         })?;
-        let (peek, live) = found.ok_or_else(|| Error::NotFound(format!("no secret request {id}")))?;
+        let (peek, live) = found.ok_or_else(unknown)?;
         if !live || peek.expires_at <= now {
             return Err(gone());
         }
         Ok(peek)
     }
 
-    /// Answer a request (public): every key it asks for, each in a box sealed to its key. It lands
-    /// as a change, or a change request where the folder needs approval, with the answer claimed
-    /// in that transaction.
-    pub fn answer_value_request(&self, id: &str, a: Answer, ip: Option<String>) -> Result<()> {
+    /// Answer a request (public, by its answer token): every key it asks for, each in a box sealed
+    /// to its key. It lands as a change, or a change request where the folder needs approval, with
+    /// the answer claimed in that transaction.
+    pub fn answer_value_request(&self, token: &str, a: Answer, ip: Option<String>) -> Result<()> {
         // Before any work: answering is public.
         if ip.as_ref().is_some_and(|ip| !self.answers.allow(&format!("ip:{ip}"), ANSWERS_PER_IP)) {
             return Err(Error::TooMany("too many answers: try again in a minute".into()));
         }
+        let hash = lookup(token)?;
         let now = self.db.now_ms()?;
-        type Found = (String, String, String, String, String, Option<Vec<u8>>, i64, i64, Option<String>);
+        type Found = (String, String, String, String, String, String, Option<Vec<u8>>, i64, i64, Option<String>);
         let found: Option<Found> = self.db.read(|c| {
             c.query_row(
-                "SELECT r.project_id, r.env_id, r.path, r.keys, r.created_by, r.seal_key, r.answers_left, r.expires_at, e.slug FROM value_requests r LEFT JOIN environments e ON e.id = r.env_id WHERE r.id = ?",
-                [id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?)),
+                "SELECT r.id, r.project_id, r.env_id, r.path, r.keys, r.created_by, r.seal_key, r.answers_left, r.expires_at, e.slug FROM value_requests r LEFT JOIN environments e ON e.id = r.env_id WHERE r.token_hash = ?",
+                [&hash],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?)),
             )
             .optional()
         })?;
-        let (project, env_id, path, keys, requester, sealed_key, left, expires_at, slug) = found.ok_or_else(|| Error::NotFound(format!("no secret request {id}")))?;
+        let (id, project, env_id, path, keys, requester, sealed_key, left, expires_at, slug) = found.ok_or_else(unknown)?;
+        let id = id.as_str();
         let (Some(sealed_key), Some(slug)) = (sealed_key, slug) else { return Err(gone()) };
         if left <= 0 || expires_at <= now {
             return Err(gone());
@@ -386,6 +428,34 @@ impl Secrets {
             }
             Err(e) => Err(e),
         }
+    }
+
+    /// A leaked answer token (found in a landing, or reported by GitHub's secret scanning): its
+    /// request is cancelled, as a leaked grant is revoked. Says which request, if one was open.
+    pub fn cancel_leaked_value_request(&self, token: &str, why: &str) -> Option<String> {
+        let hash = lookup(token).ok()?;
+        let now = self.db.now_ms().ok()?;
+        let leak = Caller { principal: "leak".into(), grants: Arc::new(Everything), ip: None, runtime: false, approval: None };
+        let r = self.db.write(|c| {
+            let found: Option<(String, String, String, String, Option<String>)> = c
+                .query_row(
+                    "SELECT r.id, r.project_id, r.path, r.keys, e.slug FROM value_requests r LEFT JOIN environments e ON e.id = r.env_id WHERE r.token_hash = ? AND r.seal_key IS NOT NULL",
+                    [&hash],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                )
+                .optional()?;
+            let Some((id, project, path, keys, slug)) = found else { return Ok(None) };
+            if c.execute("UPDATE value_requests SET seal_key = NULL, answers_left = 0, cancelled_at = ? WHERE id = ? AND seal_key IS NOT NULL", params![now, id])? != 1 {
+                return Ok(None);
+            }
+            let keys: Vec<String> = from_json(&keys);
+            audit::record(c, &project, &leak, "value_request.cancel", slug.as_deref(), Some(&path), &keys, &format!("cancelled secret request {id}: its link was {why}"), now)?;
+            Ok::<_, Error>(Some(format!("secret request {id}")))
+        });
+        r.unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "cancelling a leaked secret request");
+            None
+        })
     }
 
     /// Drop the keys of expired requests (the sweeper).

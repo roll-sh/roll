@@ -598,6 +598,11 @@ async fn run() -> anyhow::Result<()> {
     if let Some(c) = &code {
         secrets.set_code_refs(std::sync::Arc::new(secrets::CodeRefs(c.code.clone())));
     }
+    // Secret requests' answer tokens found leaked (`rlq_`) cancel their requests.
+    {
+        let secrets = secrets.clone();
+        access.on_leaked("rlq_", move |token, why| secrets.cancel_leaked_value_request(token, why));
+    }
     router = router.merge(roll_secrets::router(secrets.clone()).layer(axum::middleware::map_request(secrets::guard_header))).merge(gateways.router());
     products_api.set(router.clone());
     // A product's own credential changes (a password reset, a restore) move live links' digests

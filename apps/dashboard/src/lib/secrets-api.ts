@@ -201,8 +201,8 @@ export function secretsApi(project: string) {
     revokeShare: (id: string) => req<null>("DELETE", `${P}/shares/${enc(id)}`),
 
     valueRequests: () => req<ValueRequest[]>("GET", `${P}/value-requests`),
-    /** Ask someone outside roll for `env`'s `path` values (`write` there); the link is `/request/<id>`. */
-    createValueRequest: (env: string, path: string, r: NewValueRequest) => req<ValueRequest>("POST", `${P}/environments/${enc(env)}/value-requests${qs({ path })}`, r),
+    /** Ask someone outside roll for `env`'s `path` values (`write` there); the link is `/request/<token>`, and only this answer has the token. */
+    createValueRequest: (env: string, path: string, r: NewValueRequest) => req<ValueRequest & { token: string }>("POST", `${P}/environments/${enc(env)}/value-requests${qs({ path })}`, r),
     cancelValueRequest: (id: string) => req<null>("DELETE", `${P}/value-requests/${enc(id)}`),
 
     listSyncs: () => req<{ syncs: Sync[]; kinds: SyncKind[] }>("GET", `${P}/syncs`),

@@ -4012,23 +4012,40 @@ async fn a_secret_request_lands_an_outside_value_once_as_a_change() {
     let (s, _) = api.req(Method::POST, "/environments/staging/value-requests?path=/vendor", Some(json!({ "keys": ["VENDOR_KEY"] })), Some(&reader)).await;
     assert_eq!(s, StatusCode::FORBIDDEN);
     let r = api.ok(Method::POST, "/environments/staging/value-requests?path=/vendor", Some(json!({ "keys": ["VENDOR_KEY", "VENDOR_SECRET"], "note": "the example vendor's sandbox keys" }))).await;
-    let id = r["id"].as_str().unwrap().to_string();
+    let (id, token) = (r["id"].as_str().unwrap().to_string(), r["token"].as_str().unwrap().to_string());
     assert_eq!((r["open"].as_bool(), r["answers_left"].as_i64(), r["expires_at"].as_i64().unwrap() - r["created_at"].as_i64().unwrap()), (Some(true), Some(1), 7 * 86_400_000));
+    assert!(token.starts_with("rlq_") && roll_auth::credentials::checksum_ok(&token), "{token}");
+
+    // A reader lists the requests but never their tokens, and the id answers nothing: the same 404
+    // as a wrong token or one whose checksum fails, naming none of them.
+    let (s, list) = api.req(Method::GET, "/value-requests", None, Some(&reader)).await;
+    assert_eq!((s, list[0]["id"].as_str()), (StatusCode::OK, Some(id.as_str())));
+    assert!(list[0].get("token").is_none() && list[0].get("link").is_none() && !list.to_string().contains(&token), "{list}");
+    let mut bent = token.clone();
+    bent.replace_range(bent.len() - 1.., if token.ends_with('a') { "b" } else { "a" });
+    let mut misses = Vec::new();
+    for t in [id.clone(), bent, roll_auth::credentials::new_secret("rlq_"), "rlq_fake".into()] {
+        let (s, e) = api.call(Method::POST, &format!("/v1/secrets/value-requests/{t}/answer"), Some(json!({ "values": {} }))).await;
+        let (g, _) = api.call(Method::GET, &format!("/v1/secrets/value-requests/{t}"), None).await;
+        assert!(!e.to_string().contains(&t), "{e}");
+        misses.push((s, g, e));
+    }
+    assert!(misses.iter().all(|m| *m == misses[0]) && misses[0].0 == StatusCode::NOT_FOUND && misses[0].1 == StatusCode::NOT_FOUND, "{misses:?}");
 
     // The page shows the note and the key names, and the key to seal to; looking uses nothing up.
-    let (s, peek) = api.call(Method::GET, &format!("/v1/secrets/value-requests/{id}"), None).await;
-    assert_eq!((s, peek["note"].as_str(), peek["keys"].clone()), (StatusCode::OK, Some("the example vendor's sandbox keys"), json!(["VENDOR_KEY", "VENDOR_SECRET"])));
+    let (s, peek) = api.call(Method::GET, &format!("/v1/secrets/value-requests/{token}"), None).await;
+    assert_eq!((s, peek["id"].as_str(), peek["note"].as_str(), peek["keys"].clone()), (StatusCode::OK, Some(id.as_str()), Some("the example vendor's sandbox keys"), json!(["VENDOR_KEY", "VENDOR_SECRET"])));
     assert!(peek.get("environment").is_none() && peek.get("created_by").is_none(), "the page names nothing about the project: {peek}");
     let public = peek["public_key"].as_str().unwrap().to_string();
     // A box sealed for another key, or a missing key, is refused and uses nothing up.
     let mut swapped = answer(&id, &public, &[("VENDOR_KEY", "fake-key-1"), ("VENDOR_SECRET", "fake-secret-1")]);
     swapped["values"]["VENDOR_KEY"] = swapped["values"]["VENDOR_SECRET"].clone();
-    let (s, e) = api.call(Method::POST, &format!("/v1/secrets/value-requests/{id}/answer"), Some(swapped)).await;
+    let (s, e) = api.call(Method::POST, &format!("/v1/secrets/value-requests/{token}/answer"), Some(swapped)).await;
     assert!(s == StatusCode::BAD_REQUEST && !e.to_string().contains("fake-secret-1"), "{s} {e}");
-    let (s, _) = api.call(Method::POST, &format!("/v1/secrets/value-requests/{id}/answer"), Some(answer(&id, &public, &[("VENDOR_KEY", "fake-key-1")]))).await;
+    let (s, _) = api.call(Method::POST, &format!("/v1/secrets/value-requests/{token}/answer"), Some(answer(&id, &public, &[("VENDOR_KEY", "fake-key-1")]))).await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
 
-    let (s, body) = api.call(Method::POST, &format!("/v1/secrets/value-requests/{id}/answer"), Some(answer(&id, &public, &[("VENDOR_KEY", "fake-key-1"), ("VENDOR_SECRET", "fake-secret-1")]))).await;
+    let (s, body) = api.call(Method::POST, &format!("/v1/secrets/value-requests/{token}/answer"), Some(answer(&id, &public, &[("VENDOR_KEY", "fake-key-1"), ("VENDOR_SECRET", "fake-secret-1")]))).await;
     assert_eq!((s, body), (StatusCode::NO_CONTENT, Value::String(String::new())), "the answer shows nothing back");
     let values = api.values("staging", "/vendor").await;
     assert_eq!((values["values"]["VENDOR_KEY"].as_str(), values["values"]["VENDOR_SECRET"].as_str()), (Some("fake-key-1"), Some("fake-secret-1")));
@@ -4037,9 +4054,9 @@ async fn a_secret_request_lands_an_outside_value_once_as_a_change() {
     assert!(changes[0]["message"].as_str().unwrap().contains("asked by operator"), "{}", changes[0]);
 
     // Answered once: the link is a 410 now, for the page and for another answer.
-    let (s, e) = api.call(Method::POST, &format!("/v1/secrets/value-requests/{id}/answer"), Some(answer(&id, &public, &[("VENDOR_KEY", "fake-key-2"), ("VENDOR_SECRET", "fake-secret-2")]))).await;
+    let (s, e) = api.call(Method::POST, &format!("/v1/secrets/value-requests/{token}/answer"), Some(answer(&id, &public, &[("VENDOR_KEY", "fake-key-2"), ("VENDOR_SECRET", "fake-secret-2")]))).await;
     assert_eq!((s, e["code"].as_str()), (StatusCode::GONE, Some("gone")));
-    assert_eq!(api.call(Method::GET, &format!("/v1/secrets/value-requests/{id}"), None).await.0, StatusCode::GONE);
+    assert_eq!(api.call(Method::GET, &format!("/v1/secrets/value-requests/{token}"), None).await.0, StatusCode::GONE);
     assert_eq!(api.values("staging", "/vendor").await["values"]["VENDOR_KEY"], "fake-key-1");
     let list = api.ok(Method::GET, "/value-requests", None).await;
     assert_eq!((list[0]["open"].as_bool(), list[0]["outcome"]["change"].as_i64()), (Some(false), changes[0]["seq"].as_i64()));
@@ -4050,19 +4067,24 @@ async fn a_secret_request_lands_an_outside_value_once_as_a_change() {
 
     // An expired request, and a cancelled one, are 410s too.
     let late = api.ok(Method::POST, "/environments/staging/value-requests", Some(json!({ "keys": ["LATE"], "ttl_minutes": 60 }))).await;
-    let late_id = late["id"].as_str().unwrap();
+    let (late_id, late_token) = (late["id"].as_str().unwrap(), late["token"].as_str().unwrap());
     api.db.write(|c| c.execute("UPDATE value_requests SET expires_at = 1 WHERE id = ?", [late_id])).unwrap();
-    assert_eq!(api.call(Method::GET, &format!("/v1/secrets/value-requests/{late_id}"), None).await.0, StatusCode::GONE);
+    assert_eq!(api.call(Method::GET, &format!("/v1/secrets/value-requests/{late_token}"), None).await.0, StatusCode::GONE);
     let gone = api.ok(Method::POST, "/environments/staging/value-requests", Some(json!({ "keys": ["NEVER"] }))).await;
-    let gone_id = gone["id"].as_str().unwrap();
-    let (_, peek) = api.call(Method::GET, &format!("/v1/secrets/value-requests/{gone_id}"), None).await;
+    let (gone_id, gone_token) = (gone["id"].as_str().unwrap(), gone["token"].as_str().unwrap());
+    let (_, peek) = api.call(Method::GET, &format!("/v1/secrets/value-requests/{gone_token}"), None).await;
     let (s, _) = api.req(Method::DELETE, &format!("/value-requests/{gone_id}"), None, Some(&reader)).await;
     assert_eq!(s, StatusCode::FORBIDDEN, "only whoever asked, or an admin");
     let (s, _) = api.call(Method::DELETE, &format!("/value-requests/{gone_id}"), None).await;
     assert_eq!(s, StatusCode::NO_CONTENT);
-    let (s, _) = api.call(Method::POST, &format!("/v1/secrets/value-requests/{gone_id}/answer"), Some(answer(gone_id, peek["public_key"].as_str().unwrap(), &[("NEVER", "fake")]))).await;
+    let (s, _) = api.call(Method::POST, &format!("/v1/secrets/value-requests/{gone_token}/answer"), Some(answer(gone_id, peek["public_key"].as_str().unwrap(), &[("NEVER", "fake")]))).await;
     assert_eq!(s, StatusCode::GONE);
-    assert_eq!(api.call(Method::GET, "/v1/secrets/value-requests/vrq_nosuchrequest", None).await.0, StatusCode::NOT_FOUND);
+    // A token found leaked (a landing, GitHub's secret scanning) cancels its request.
+    let leaked = api.ok(Method::POST, "/environments/staging/value-requests", Some(json!({ "keys": ["LEAKED"] }))).await;
+    let leaked_token = leaked["token"].as_str().unwrap();
+    assert_eq!(api.secrets.cancel_leaked_value_request(leaked_token, "found in a test"), Some(format!("secret request {}", leaked["id"].as_str().unwrap())));
+    assert_eq!(api.call(Method::GET, &format!("/v1/secrets/value-requests/{leaked_token}"), None).await.0, StatusCode::GONE);
+    assert_eq!(api.secrets.cancel_leaked_value_request(leaked_token, "again"), None, "once");
 }
 
 #[tokio::test]
@@ -4070,10 +4092,10 @@ async fn a_secret_requests_answer_is_stored_as_sent_and_never_replayed() {
     let api = Api::new().await;
     api.set("production", "DB_PASSWORD", "fake-production-password").await;
     let r = api.ok(Method::POST, "/environments/staging/value-requests?path=/vendor", Some(json!({ "keys": ["VENDOR_KEY"], "answers": 3 }))).await;
-    let id = r["id"].as_str().unwrap().to_string();
-    let (_, peek) = api.call(Method::GET, &format!("/v1/secrets/value-requests/{id}"), None).await;
+    let (id, token) = (r["id"].as_str().unwrap().to_string(), r["token"].as_str().unwrap().to_string());
+    let (_, peek) = api.call(Method::GET, &format!("/v1/secrets/value-requests/{token}"), None).await;
     let public = peek["public_key"].as_str().unwrap().to_string();
-    let url = format!("/v1/secrets/value-requests/{id}/answer");
+    let url = format!("/v1/secrets/value-requests/{token}/answer");
 
     // An outsider's `${…}` is text, not a reference: a broad reader never gets production's value.
     let sent = answer(&id, &public, &[("VENDOR_KEY", "${production.DB_PASSWORD}")]);
@@ -4102,9 +4124,9 @@ async fn a_secret_request_into_a_folder_that_needs_approval_opens_a_change_reque
     let api = Api::new().await;
     api.ok(Method::PUT, "/environments/production/folder-policies?path=/payments", Some(json!({ "approvals": 1 }))).await;
     let r = api.ok(Method::POST, "/environments/production/value-requests?path=/payments", Some(json!({ "keys": ["PSP_KEY"] }))).await;
-    let id = r["id"].as_str().unwrap();
-    let (_, peek) = api.call(Method::GET, &format!("/v1/secrets/value-requests/{id}"), None).await;
-    let (s, _) = api.call(Method::POST, &format!("/v1/secrets/value-requests/{id}/answer"), Some(answer(id, peek["public_key"].as_str().unwrap(), &[("PSP_KEY", "fake-psp-key")]))).await;
+    let (id, token) = (r["id"].as_str().unwrap(), r["token"].as_str().unwrap());
+    let (_, peek) = api.call(Method::GET, &format!("/v1/secrets/value-requests/{token}"), None).await;
+    let (s, _) = api.call(Method::POST, &format!("/v1/secrets/value-requests/{token}/answer"), Some(answer(id, peek["public_key"].as_str().unwrap(), &[("PSP_KEY", "fake-psp-key")]))).await;
     assert_eq!(s, StatusCode::NO_CONTENT);
     assert!(api.values("production", "/payments").await["values"].get("PSP_KEY").is_none(), "nothing lands before it's approved");
     let list = api.ok(Method::GET, "/value-requests", None).await;

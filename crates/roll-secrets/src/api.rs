@@ -159,8 +159,8 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route("/v1/secrets/shares/{id}", get(peek_share))
         .route("/v1/secrets/shares/{id}/open", post(open_share))
         // Public: a secret request's link (docs/secrets.md, "Asking for a value").
-        .route("/v1/secrets/value-requests/{id}", get(peek_value_request))
-        .route("/v1/secrets/value-requests/{id}/answer", post(answer_value_request))
+        .route("/v1/secrets/value-requests/{token}", get(peek_value_request))
+        .route("/v1/secrets/value-requests/{token}/answer", post(answer_value_request))
         .merge(crate::acme::routes())
         .with_state(s)
 }
@@ -1110,15 +1110,15 @@ async fn cancel_value_request(State(s): S, Who(c): Who, Path((project, id)): Pat
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn peek_value_request(State(s): S, Path(id): Path<String>) -> crate::Result<Response> {
-    Ok(secret_response(ok(blocking(s, move |s| s.peek_value_request(&id)).await?)))
+async fn peek_value_request(State(s): S, Path(token): Path<String>) -> crate::Result<Response> {
+    Ok(secret_response(ok(blocking(s, move |s| s.peek_value_request(&token)).await?)))
 }
 
 /// The answer's body is sealed boxes; nothing comes back but the status.
-async fn answer_value_request(State(s): S, Path(id): Path<String>, parts: Parts, b: Bytes) -> crate::Result<StatusCode> {
+async fn answer_value_request(State(s): S, Path(token): Path<String>, parts: Parts, b: Bytes) -> crate::Result<StatusCode> {
     let ip = s.client_ip(&parts);
     let a: crate::Answer = body(&b)?;
-    blocking(s, move |s| s.answer_value_request(&id, a, ip)).await?;
+    blocking(s, move |s| s.answer_value_request(&token, a, ip)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

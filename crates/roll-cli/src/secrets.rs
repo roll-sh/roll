@@ -3044,14 +3044,13 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             if json_out {
                 return print(&v);
             }
-            let id = s(&v["id"]);
-            match v["link"].as_str().map(String::from).or_else(|| std::env::var("ROLL_WEB_URL").ok().filter(|u| !u.is_empty()).map(|w| format!("{}/request/{id}", w.trim_end_matches('/')))) {
-                Some(link) => println!("{link}"),
-                None => println!("{id}"),
-            }
+            // The link's token is shown only now; the id (in the list) is for cancelling.
+            let (id, token) = (s(&v["id"]), s(&v["token"]));
+            let link = v["link"].as_str().map(String::from).or_else(|| std::env::var("ROLL_WEB_URL").ok().filter(|u| !u.is_empty()).map(|w| format!("{}/request/{token}", w.trim_end_matches('/'))));
+            println!("{}", link.as_deref().unwrap_or(&format!("/request/{token}")));
             eprintln!(
-                "Send the link to whoever has the value{}. It takes {} answer{} until {}; each lands in {}{} as a change (a change request where the folder needs approval).",
-                if v["link"].is_string() { "" } else { " (the dashboard's /request/<id>: set ROLL_WEB_URL to print it)" },
+                "Send the link to whoever has the value{}; it's shown only now. It takes {} answer{} until {}; each lands in {}{} as a change (a change request where the folder needs approval). Cancel it with `roll secrets request --cancel {id}`.",
+                if link.is_some() { "" } else { " (the dashboard's address is unknown here: open that path on your dashboard, or set ROLL_WEB_URL to print the whole link)" },
                 answers,
                 if answers == 1 { "" } else { "s" },
                 chrono::DateTime::from_timestamp_millis(v["expires_at"].as_i64().unwrap_or(0)).map(|t| t.to_rfc3339()).unwrap_or_default(),

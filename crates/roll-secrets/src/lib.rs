@@ -420,6 +420,10 @@ impl Secrets {
         db.ensure_schema(SCHEMA)?;
         db.ensure_schema(shares::SCHEMA)?;
         db.ensure_schema(value_requests::SCHEMA)?;
+        // Secret requests' answer tokens (value_requests.rs), by digest; requests made before
+        // them have none and can't be answered.
+        db.add_column("value_requests", "token_hash", "TEXT")?;
+        db.ensure_schema("CREATE UNIQUE INDEX IF NOT EXISTS value_requests_token ON value_requests (token_hash);")?;
         db.ensure_schema(read::READS_SCHEMA)?;
         db.ensure_schema(syncs::SCHEMA)?;
         db.ensure_schema(sinks::SCHEMA)?;

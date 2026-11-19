@@ -2951,7 +2951,8 @@ open it.
 
 The other way round, as Infisical's secret requests: a link that asks someone outside roll (a
 vendor, a contractor) to send a value in. `roll secrets request VENDOR_KEY [VENDOR_SECRET…]
-[--note …] [--expires 7d] [--answers 1]` prints the link; in the dashboard, a folder's **Request a
+[--note …] [--expires 7d] [--answers 1]` prints the link (only `/request/<token>` when neither
+rolld nor the CLI knows the dashboard's address: open that path on the dashboard); in the dashboard, a folder's **Request a
 value…** makes one, and Access → Secret requests lists them with **Cancel**. `roll secrets
 request` alone lists them, `roll secrets request --cancel ID` cancels one.
 
@@ -2960,8 +2961,16 @@ request` alone lists them, `roll secrets request --cancel ID` cancels one.
   in any more, or a revoked token, and the link is a 410). 1–20 key names, a note (shown on the
   page), an expiry from 5 minutes to 30 days (7 days by default), and how many times it may be
   answered (1 to 10, once by default). A project has at most 200 open at once.
-- **The page** (`<dashboard>/request/<id>`, `link` when rolld has `ROLL_WEB_URL`) shows only the
-  note and the key names: never the project, the environment or who asked. Whoever has the link
+- **The link's token is the capability, not the id.** Asking makes an answer token (`rlq_` and 40
+  characters, the last 6 a checksum, as roll's other secrets): `create` answers it once (`token`,
+  and `link` as `<dashboard>/request/<token>` when rolld has `ROLL_WEB_URL`; the dashboard makes the
+  link from its own address otherwise). roll keeps only its SHA-256; the list and the record never
+  carry it, so reading a project's requests (`read`) can't answer one. The id (`vrq_…`) stays for
+  listing and cancelling, and is what the boxes are bound to. The token is a roll credential to
+  the MCP guard and leak scanning: one written where others read it is refused, and one found in a
+  landing or reported by GitHub's secret scanning cancels its request at once (audited as
+  `value_request.cancel` by `leak`).
+- **The page** (`<dashboard>/request/<token>`) shows only the note and the key names: never the project, the environment or who asked. Whoever has the link
   pastes the values and sends them; the page shows nothing back.
 - **Sealed from their browser.** Each request has its own X25519 key pair, made by roll. The page
   seals each value to its public key (`roll-seal-v1`, as backups and endpoint keys are, with
@@ -2989,11 +2998,12 @@ request` alone lists them, `roll secrets request --cancel ID` cancels one.
   the answerer's address) and cancelled (`value_request.cancel`); the change or change request is
   audited as any other. The environment's notify URL hears that it landed (key names and the
   change, never a value); a change request's own notice goes to its approvers.
-- **The public routes** are `GET /v1/secrets/value-requests/{id}` (`{note, keys, expires_at,
-  public_key}`) and `POST /v1/secrets/value-requests/{id}/answer` (`{values: {KEY: box}}`, 204).
-  An unknown id is a 404; one answered as often as allowed, expired or cancelled is a 410 `gone`.
+- **The public routes** are `GET /v1/secrets/value-requests/{token}` (`{id, note, keys,
+  expires_at, public_key}`) and `POST /v1/secrets/value-requests/{token}/answer` (`{values: {KEY:
+  box}}`, 204). An unknown token, a request's id, or text whose checksum fails is the same 404
+  naming nothing; one answered as often as allowed, expired or cancelled is a 410 `gone`.
   Answers are capped at 5 a minute per request (counted in the request's row, so every node
-  shares it and attempts at other ids never reset it) and 10 per client address (429), and a
+  shares it and attempts at other requests never reset it) and 10 per client address (429), and a
   value at 64 KiB, as a share's.
 - **MCP**: there's no tool for it. The link is for a person outside roll, and an agent that may
   write a folder can already set its values; `GET …/value-requests` is readable through the API
@@ -3880,11 +3890,11 @@ isn't in the workspace is 404.
 | `POST /syncs/{id}/run` | | `Sync` after pushing every key (`admin`; 409 `running` while another push holds it) |
 | `GET /v1/secrets/shares/{id}` (public) | | `{note, views_left, expires_at}` |
 | `POST /v1/secrets/shares/{id}/open` (public) | | `{ciphertext}` (one open used) |
-| `POST /environments/{env}/value-requests?path=` | `NewValueRequest` | 201 `ValueRequest` (`write` on the folder) |
-| `GET /value-requests` | | `ValueRequest[]` newest first (never a key) |
+| `POST /environments/{env}/value-requests?path=` | `NewValueRequest` | 201 `ValueRequest` with its `token` (`rlq_…`, only here) and `link` (`write` on the folder) |
+| `GET /value-requests` | | `ValueRequest[]` newest first (never a key or a token) |
 | `DELETE /value-requests/{id}` | | 204 (whoever asked, or an admin of the folder) |
-| `GET /v1/secrets/value-requests/{id}` (public) | | `{note, keys, expires_at, public_key}`; 410 `gone` once answered, expired or cancelled |
-| `POST /v1/secrets/value-requests/{id}/answer` (public) | `{values: Record<string, Sealed>}` | 204; 410 `gone`; 429 past 5 a minute per request or 10 per address |
+| `GET /v1/secrets/value-requests/{token}` (public) | | `{id, note, keys, expires_at, public_key}`; 404 for anything but a live token; 410 `gone` once answered, expired or cancelled |
+| `POST /v1/secrets/value-requests/{token}/answer` (public) | `{values: Record<string, Sealed>}` | 204; 410 `gone`; 429 past 5 a minute per request or 10 per address |
 | `GET /audit/sinks` | | `Sink[]` (`admin`) |
 | `POST /audit/sinks` | `{url, from_start?, format?, token?}` (an HTTPS endpoint, or on the canvas `bucket:<name>`, `search:<cluster>/<index>` or `stream:<id>/<topic>`; `format` `splunk`, `datadog` or `bearer` takes an HTTPS endpoint and its `token`, sealed) | 201 `Sink & {secret}` (shown once; a `Sink` names its `format`, never its token) |
 | `DELETE /audit/sinks/{id}` | | 204 |
