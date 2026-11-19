@@ -112,6 +112,9 @@ pub fn open(args: &crate::Args, home: &std::path::Path, auth: &crate::auth::Auth
     let resolvers = resolvers(products, workspace);
     let access = tokio::task::block_in_place(|| Access::open(&target, pg, config, resolvers))?;
     auth.set_authorizer(Arc::new(roll_access::evaluate::Evaluator(access.clone())));
+    // People's sessions from allowed networks only: the same client address the evaluator reads.
+    let a = access.clone();
+    auth.set_client_ip(Arc::new(move |req| roll_access::evaluate::client_ip(req, &a.config)));
     // Old audit rows, decided approvals, spent codes and expired secrets go once an hour.
     let a = access.clone();
     tokio::spawn(async move {

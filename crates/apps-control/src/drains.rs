@@ -6,8 +6,14 @@
 //! `<timestamp>.<body>`, `X-Roll-Delivery` the batch's id). Best effort, as drains are: a batch
 //! is tried three times, then dropped and counted; a drain that can't keep up loses its oldest
 //! lines, never a writer's time or the node's memory.
+//!
+//! A drain's `format` picks the wire: `ndjson` (the above), `otlp` (OpenTelemetry logs as
+//! OTLP/HTTP JSON to a collector's or a vendor's `/v1/logs`, a resource per service and
+//! environment) or `syslog` (RFC 5424 messages over TLS with RFC 5425's octet counting, to
+//! `syslog+tls://host:port`, as Heroku's and Papertrail's drains take them; a connection a batch,
+//! public addresses only, checked as the HTTP client's resolver checks them).
 
-use crate::model::{DRAIN_SOURCES, LogDrain};
+use crate::model::{DRAIN_FORMATS, DRAIN_SOURCES, LogDrain};
 use crate::store::{DrainSettings, OpenedDrain};
 use crate::{Apps, Error, Result};
 use serde_json::{Value, json};
@@ -30,12 +36,26 @@ impl Apps {
     /// this once.
     pub async fn add_drain(self: &Arc<Self>, project: &str, body: Value) -> Result<Value> {
         let o = body.as_object().cloned().unwrap_or_default();
-        if let Some(k) = o.keys().find(|k| !["url", "sources", "environments", "services", "previews", "headers"].contains(&k.as_str())) {
+        if let Some(k) = o.keys().find(|k| !["url", "sources", "environments", "services", "previews", "headers", "format"].contains(&k.as_str())) {
             return Err(Error::BadRequest(format!("unknown field {k}")));
         }
+        let format = match o.get("format") {
+            None | Some(Value::Null) => "ndjson",
+            Some(Value::String(f)) if DRAIN_FORMATS.contains(&f.as_str()) => f.as_str(),
+            Some(_) => return Err(Error::BadRequest(format!("format is one of {}", DRAIN_FORMATS.join(", ")))),
+        }
+        .to_string();
         let settings = self.drain_settings(project, &o, None).await?;
         let url = o.get("url").and_then(Value::as_str).ok_or_else(|| Error::BadRequest("url is required".into()))?.trim().to_string();
-        let host = self.check_target("webhook", &url)?;
+        let host = if format == "syslog" {
+            // A syslog server takes no headers: a vendor's token goes in its host or port.
+            if !settings.headers.is_empty() {
+                return Err(Error::BadRequest("headers: a syslog drain is sent none".into()));
+            }
+            self.syslog_target(&url)?.0
+        } else {
+            self.check_target("webhook", &url)?
+        };
         {
             let (this, p) = (self.clone(), project.to_string());
             tokio::task::spawn_blocking(move || this.project_name(&p)).await.map_err(|e| Error::Internal(e.to_string()))??;
@@ -46,7 +66,7 @@ impl Apps {
         }
         let secret = format!("whsec_{}", crate::model::random(32));
         let (p, s2) = (project.to_string(), secret.clone());
-        let d = self.db(move |s| s.add_drain(&p, &host, &url, &s2, &settings)).await?;
+        let d = self.db(move |s| s.add_drain(&p, &host, &url, &s2, &format, &settings)).await?;
         self.drains_changed(project).await;
         let mut v = serde_json::to_value(&d).expect("JSON");
         v["secret"] = json!(secret);
@@ -126,11 +146,14 @@ impl Apps {
     pub async fn update_drain(self: &Arc<Self>, project: &str, id: &str, body: Value) -> Result<LogDrain> {
         let o = body.as_object().cloned().unwrap_or_default();
         if let Some(k) = o.keys().find(|k| !["sources", "environments", "services", "previews", "headers"].contains(&k.as_str())) {
-            return Err(Error::BadRequest(format!("{k} can't be changed (a new URL is a new drain)")));
+            return Err(Error::BadRequest(format!("{k} can't be changed (a new URL or format is a new drain)")));
         }
         let p = project.to_string();
         let current = self.db(move |s| s.drain_secrets(&p)).await?.into_iter().find(|d| d.drain.id == id).ok_or_else(|| Error::NotFound(format!("no log drain {id}")))?;
         let settings = self.drain_settings(project, &o, Some(&current)).await?;
+        if current.drain.format == "syslog" && !settings.headers.is_empty() {
+            return Err(Error::BadRequest("headers: a syslog drain is sent none".into()));
+        }
         let (p, i, headers) = (project.to_string(), id.to_string(), o.contains_key("headers"));
         let d = self.db(move |s| s.update_drain(&p, &i, &settings, headers)).await?;
         self.drains_changed(project).await;
@@ -154,7 +177,7 @@ impl Apps {
         let d = self.db(move |s| s.drain_secrets(&p)).await?.into_iter().find(|d| d.drain.id == id).ok_or_else(|| Error::NotFound(format!("no log drain {id}")))?;
         let line = json!({ "t": code_sql::now_ms(), "source": "test", "text": "a test line from roll apps" });
         Ok(match self.post_batch(&d, &[line], &format!("lgb_{}", crate::model::random(12))).await {
-            Ok(code) => json!({ "ok": (200..300).contains(&code), "code": code, "error": Value::Null }),
+            Ok(code) => json!({ "ok": code.is_none_or(|c| (200..300).contains(&c)), "code": code, "error": Value::Null }),
             Err(e) => json!({ "ok": false, "code": Value::Null, "error": e }),
         })
     }
@@ -308,22 +331,31 @@ impl Apps {
         for (i, wait) in [0u64, 1, 5].into_iter().enumerate() {
             tokio::time::sleep(Duration::from_secs(wait)).await;
             match self.post_batch(o, batch, &delivery).await {
-                Ok(code) if (200..300).contains(&code) => return,
-                Ok(code) if i == 2 => tracing::warn!(drain, status = code, lines = batch.len(), "apps: a log drain refused a batch; it's dropped"),
+                Ok(None) => return,
+                Ok(Some(code)) if (200..300).contains(&code) => return,
+                Ok(Some(code)) if i == 2 => tracing::warn!(drain, status = code, lines = batch.len(), "apps: a log drain refused a batch; it's dropped"),
                 Err(e) if i == 2 => tracing::warn!(drain, error = %e, lines = batch.len(), "apps: a log drain didn't answer; the batch is dropped"),
                 _ => {}
             }
         }
     }
 
-    /// A batch POSTed once, signed as webhooks are and with the drain's own headers: its status,
-    /// or why there was none (never the URL).
-    async fn post_batch(&self, o: &OpenedDrain, batch: &[Value], delivery: &str) -> std::result::Result<u16, String> {
-        let mut body = Vec::new();
-        for l in batch {
-            serde_json::to_writer(&mut body, l).expect("JSON");
-            body.push(b'\n');
-        }
+    /// A batch sent once in its drain's format: an HTTP drain's status (signed as webhooks are,
+    /// with the drain's own headers), `None` for a syslog server that took it, or why it didn't go
+    /// (never the URL).
+    async fn post_batch(&self, o: &OpenedDrain, batch: &[Value], delivery: &str) -> std::result::Result<Option<u16>, String> {
+        let (body, content_type) = match o.drain.format.as_str() {
+            "syslog" => return self.send_syslog(&o.url, batch).await.map(|()| None),
+            "otlp" => (serde_json::to_vec(&otlp_logs(batch)).expect("JSON"), "application/json"),
+            _ => {
+                let mut body = Vec::new();
+                for l in batch {
+                    serde_json::to_writer(&mut body, l).expect("JSON");
+                    body.push(b'\n');
+                }
+                (body, "application/x-ndjson")
+            }
+        };
         let ts = (code_sql::now_ms() / 1000).to_string();
         let sig = {
             use hmac::Mac;
@@ -336,7 +368,7 @@ impl Apps {
         let mut req = self
             .notify_client
             .post(&o.url)
-            .header("content-type", "application/x-ndjson")
+            .header("content-type", content_type)
             .header("x-roll-delivery", delivery)
             .header("x-roll-timestamp", ts)
             .header("x-roll-signature-256", format!("sha256={sig}"));
@@ -344,10 +376,130 @@ impl Apps {
             req = req.header(k.as_str(), v.as_str());
         }
         match req.body(body).send().await {
-            Ok(r) => Ok(r.status().as_u16()),
+            Ok(r) => Ok(Some(r.status().as_u16())),
             Err(e) => Err(e.without_url().to_string()),
         }
     }
+
+    /// A syslog drain's URL: `syslog+tls://host:port` (`syslog://`, plain TCP, only where private
+    /// targets are allowed: local development and tests). Its host, port and whether it's TLS.
+    fn syslog_target(&self, url: &str) -> Result<(String, u16, bool)> {
+        let bad = |why: &str| Err(Error::BadRequest(format!("url: {why}")));
+        let u = url::Url::parse(url).map_err(|e| Error::BadRequest(format!("url: {e}")))?;
+        let tls = match u.scheme() {
+            "syslog+tls" => true,
+            "syslog" if self.cfg.allow_private => false,
+            _ => return bad("a syslog drain is syslog+tls://host:port"),
+        };
+        let Some(host) = u.host_str().map(str::to_ascii_lowercase) else { return bad("no host") };
+        let Some(port) = u.port() else { return bad("a syslog drain names its port") };
+        if !self.cfg.allow_private && crate::net::literal_private(&host) {
+            return bad("a private address");
+        }
+        if (!u.path().is_empty() && u.path() != "/") || u.query().is_some() || !u.username().is_empty() {
+            return bad("a syslog drain is only syslog+tls://host:port");
+        }
+        Ok((host, port, tls))
+    }
+
+    /// A batch as RFC 5424 messages on one connection, each framed by its length (RFC 5425).
+    async fn send_syslog(&self, url: &str, batch: &[Value]) -> std::result::Result<(), String> {
+        use tokio::io::AsyncWriteExt;
+        let (host, port, tls) = self.syslog_target(url).map_err(|e| e.to_string())?;
+        let mut frames = Vec::new();
+        for l in batch {
+            let m = syslog_message(l);
+            frames.extend_from_slice(format!("{} ", m.len()).as_bytes());
+            frames.extend_from_slice(m.as_bytes());
+        }
+        let host_ = host.clone();
+        let send = async move {
+            // Public addresses only, as the HTTP drains' resolver allows (IP literals checked above).
+            let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host_.as_str(), port)).await.map_err(|e| format!("{host_}: {e}"))?.collect();
+            let addr = addrs.into_iter().find(|a| self.cfg.allow_private || !crate::model::private_ip(a.ip())).ok_or_else(|| format!("{host_} resolves to a private address"))?;
+            let tcp = tokio::net::TcpStream::connect(addr).await.map_err(|e| format!("{host_}: {e}"))?;
+            if tls {
+                let name = tokio_rustls::rustls::pki_types::ServerName::try_from(host_.clone()).map_err(|e| format!("{host_}: {e}"))?;
+                let mut s = tokio_rustls::TlsConnector::from(syslog_tls()).connect(name, tcp).await.map_err(|e| format!("{host_}: TLS: {e}"))?;
+                s.write_all(&frames).await.map_err(|e| e.to_string())?;
+                s.shutdown().await.map_err(|e| e.to_string())
+            } else {
+                let mut s = tcp;
+                s.write_all(&frames).await.map_err(|e| e.to_string())?;
+                s.shutdown().await.map_err(|e| e.to_string())
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(10), send).await.map_err(|_| format!("{host}: timed out"))?
+    }
+}
+
+/// The TLS settings syslog drains connect with: the system's roots, ring, TLS 1.2 and up.
+fn syslog_tls() -> Arc<tokio_rustls::rustls::ClientConfig> {
+    use tokio_rustls::rustls;
+    static CONFIG: std::sync::OnceLock<Arc<rustls::ClientConfig>> = std::sync::OnceLock::new();
+    CONFIG
+        .get_or_init(|| {
+            let mut roots = rustls::RootCertStore::empty();
+            for c in rustls_native_certs::load_native_certs().certs {
+                let _ = roots.add(c);
+            }
+            let provider = Arc::new(rustls::crypto::ring::default_provider());
+            Arc::new(rustls::ClientConfig::builder_with_provider(provider).with_safe_default_protocol_versions().expect("ring's TLS versions").with_root_certificates(roots).with_no_client_auth())
+        })
+        .clone()
+}
+
+/// A drain's line as an RFC 5424 message: facility user, `err` for stderr and `info` otherwise;
+/// the service as HOSTNAME, its environment as APP-NAME, the instance as PROCID, the source
+/// (`runtime`, `http`, `build`) as MSGID.
+fn syslog_message(l: &Value) -> String {
+    // A header field: printable ASCII without spaces, at most `max` characters, `-` when empty.
+    let field = |v: &Value, max: usize| -> String {
+        let s: String = v.as_str().unwrap_or("").chars().filter(|c| c.is_ascii_graphic()).take(max).collect();
+        if s.is_empty() { "-".into() } else { s }
+    };
+    let severity = if l["stream"] == "stderr" { 3 } else { 6 };
+    let t = l["t"].as_i64().and_then(chrono::DateTime::from_timestamp_millis).unwrap_or_else(chrono::Utc::now);
+    // The message itself is one line: a newline would end it for most receivers.
+    let text = l["text"].as_str().unwrap_or("").replace(['\r', '\n'], " ");
+    format!(
+        "<{}>1 {} {} {} {} {} - {}",
+        8 + severity,
+        t.format("%Y-%m-%dT%H:%M:%S%.3fZ"),
+        field(&l["service_name"], 255),
+        field(&l["environment"], 48),
+        field(&l["instance"], 128),
+        field(&l["source"], 32),
+        text
+    )
+}
+
+/// A batch as an OTLP/HTTP JSON `ExportLogsServiceRequest`: a resource per service and
+/// environment (`service.name`, `deployment.environment.name`, `roll.service.id`), each line a
+/// log record with its stream, source, instance and deployment as attributes.
+fn otlp_logs(batch: &[Value]) -> Value {
+    let attr = |k: &str, v: &Value| v.as_str().filter(|s| !s.is_empty()).map(|s| json!({ "key": k, "value": { "stringValue": s } }));
+    let mut groups: Vec<((String, String), Vec<Value>)> = Vec::new();
+    for l in batch {
+        let key = (l["service"].as_str().unwrap_or("").to_string(), l["environment"].as_str().unwrap_or("").to_string());
+        let nanos = (l["t"].as_i64().unwrap_or(0).max(0) as u128 * 1_000_000).to_string();
+        let attributes: Vec<Value> = [attr("log.iostream", &l["stream"]), attr("roll.source", &l["source"]), attr("roll.instance", &l["instance"]), attr("roll.deployment", &l["deployment"])].into_iter().flatten().collect();
+        let record = json!({ "timeUnixNano": nanos, "observedTimeUnixNano": nanos, "body": { "stringValue": l["text"].as_str().unwrap_or("") }, "attributes": attributes });
+        match groups.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, records)) => records.push(record),
+            None => groups.push((key, vec![record])),
+        }
+    }
+    let resource_logs: Vec<Value> = groups
+        .into_iter()
+        .map(|((service, env), records)| {
+            let first = batch.iter().find(|l| l["service"] == service.as_str() && l["environment"] == env.as_str());
+            let name = first.map(|l| l["service_name"].clone()).unwrap_or(Value::Null);
+            let attributes: Vec<Value> = [attr("service.name", &name), attr("deployment.environment.name", &json!(env)), attr("roll.service.id", &json!(service))].into_iter().flatten().collect();
+            json!({ "resource": { "attributes": attributes }, "scopeLogs": [{ "scope": { "name": "roll-apps" }, "logRecords": records }] })
+        })
+        .collect();
+    json!({ "resourceLogs": resource_logs })
 }
 
 /// One drain's lines waiting for their batch.

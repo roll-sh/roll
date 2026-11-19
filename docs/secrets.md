@@ -1180,14 +1180,15 @@ key links to it or a retired key waits out its grace period, as with rotators.
 
 ### Databases outside roll
 
-A Postgres, MySQL, Redis or MongoDB server roll doesn't run (Amazon RDS, Supabase, Neon, PlanetScale, ElastiCache, Upstash, MongoDB Atlas, a server of the customer's own)
+A Postgres, MySQL, SQL Server, ClickHouse, RabbitMQ, Redis, MongoDB, Elasticsearch, OpenSearch, Cassandra or ScyllaDB server roll doesn't run (Amazon RDS, Supabase, Neon, PlanetScale, ElastiCache, Upstash, Elastic Cloud, Amazon OpenSearch Service, a server of the customer's own)
 has its logins rotated by roll itself, with no rotator to write, as Infisical's secret rotation
 does, and issues a login per lease, as Vault's database engine does. A project registers it
 (`POST …/outside-databases {name, url, roles?, group?, ca?}`, `admin`; `roll secrets databases add
 NAME --role a --role b --group g`, the URL on stdin): `url` is an admin connection
 (`postgres://admin:…@host:5432/db`, `mysql://admin:…@host:3306/db`,
-`sqlserver://admin:…@host:1433/db`, `clickhouse://admin:…@host:8443/db` or
-`rabbitmq://admin:…@host:15671/vhost`, a user that may alter both
+`sqlserver://admin:…@host:1433/db`, `clickhouse://admin:…@host:8443/db`,
+`rabbitmq://admin:…@host:15671/vhost`, `elasticsearch://admin:…@host:9200`,
+`opensearch://admin:…@host:9200` or `cassandra://admin:…@host:9142/keyspace`, a user that may alter both
 roles and create roles in the group), sealed with the project's data key like a rotator's (only `host:port` is shown); `roles` are
 two login roles that take turns (managed links); `group` is a role whose grants dynamic logins get;
 one or both. `ca` is the server's CA certificates (PEM) when the system's don't cover it (RDS).
@@ -1197,7 +1198,11 @@ The admin credential rotates too, as Vault's `rotate-root` does (`POST …/outsi
 `roll secrets databases rotate-admin ID`, or the key button in the dashboard): roll sets a password
 nobody chose on the user the admin URL logs in as (`ALTER ROLE CURRENT_USER`, MySQL's
 `ALTER USER CURRENT_USER()`, SQL Server's `ALTER LOGIN`, Redis' `ACL SETUSER`, MongoDB's
-`updateUser`, ClickHouse's `ALTER USER`, RabbitMQ's user API) and keeps it sealed, so after it
+`updateUser`, ClickHouse's `ALTER USER`, RabbitMQ's user API, Elasticsearch's
+`_security/user/_password` as that user, OpenSearch's account API with the URL's password as the
+current one, Cassandra's and ScyllaDB's `ALTER ROLE` on the URL's role, hashed where the server
+takes it, then up to 5 s until the new password logs in past Cassandra's credentials cache; any
+other URL is refused, never tried as Postgres) and keeps it sealed, so after it
 nobody knows the admin password but roll. Whatever else uses that admin login breaks: give roll
 an admin of its own. Redis' `default` user is refused (its password is every client's
 `requirepass`), and so is a Redis server that can't keep an ACL change across a restart. The new
@@ -1263,9 +1268,16 @@ ends its lease. Every change is kept across a restart the way the server keeps i
 SAVE` with an ACL file (a failure fails the change, or a restart would bring back a retired
 password), else `CONFIG REWRITE` where there's a config file.
 
-**MongoDB** (`mongodb+srv://user:password@cluster.example.net`, Atlas's form, or
+**MongoDB** (`mongodb+srv://user:password@cluster.example.net` or
 `mongodb://user:password@host1,host2/?tls=true&authSource=admin`; `tls=true` is required unless
-private addresses are allowed, and the URL may carry what Atlas's strings do, nothing else). User
+private addresses are allowed, and the URL may carry what Atlas-style strings do, nothing else)
+works on a replica set or sharded cluster of the customer's own, or a host that lets the admin run
+MongoDB's user commands. **It doesn't work on MongoDB Atlas, on any tier.** Atlas's "Unsupported
+Commands" table marks `createUser`, `updateUser`, `usersInfo`, `grantRolesToUser` and
+`revokeRolesFromUser` unsupported on Free and Flex, M10+ Core and M10+ Infinite clusters alike
+(`dropUser` on M10+ only), and Atlas rolls back a user change made other than through its UI, CLI or
+Admin API. A URL whose host is an Atlas domain (`*.mongodb.net`, `*.mongodbgov.net`) is refused when
+it's registered, pointing to "MongoDB Atlas" below, which goes through the Admin API instead. User
 management runs on the primary, found with `hello` among the seed hosts only: a server naming a
 primary outside them is refused, and a `mongodb+srv://` name's SRV targets must sit inside its own
 domain (the spec's rule), so a server or a DNS answer can't send roll anywhere else. roll logs in with
@@ -1327,6 +1339,575 @@ rotation (the rotated login signs in), a dynamic login that signs in with the gr
 can't once dropped, and an untrusted certificate refused. With TLS 1.3 enabled on the server as
 well (`tlsprotocols = 1.2,1.3`), SQL Server 2022 on Linux refused TDS 7.4 logins, Microsoft's own
 `sqlcmd` included: such a server needs TLS 1.2 allowed.
+
+**Elasticsearch and OpenSearch** too, as Vault's Elasticsearch plugin, through their security REST
+APIs over HTTPS (`elasticsearch://admin:…@host:9200` or `opensearch://admin:…@host:9200`; Elastic
+Cloud's `…es.io:443` works too; no path or settings), with the same guards as ClickHouse (the
+checked address pinned, the certificate verified against the URL's host, no redirects or proxy,
+answers read up to 64 KiB). Elasticsearch's users are the native realm's: rotation is `POST
+_security/user/<name>/_password`, a dynamic user `PUT _security/user/<name>` with `roles:
+[<group>]`, and ending the lease deletes it. OpenSearch's are the security plugin's internal
+users: rotation is a JSON patch of the password alone (`PATCH
+_plugins/_security/api/internalusers/<name>`), so the user's roles, backend roles and attributes
+stay, and a dynamic user gets the group in `opendistro_security_roles`. `group` is a role. Both
+clear a user's cached credentials when it changes, so the old password is refused at once and a
+deleted user's next request fails; neither has an expiry for a user, so a dynamic one lasts until
+roll ends its lease. The password goes in the request body over TLS; a refusal of a request with a
+body is reported by its status and `error.type` alone, since Elasticsearch quotes request bodies
+in some errors. The admin needs, on Elasticsearch, the `manage_security` cluster privilege (a role
+with only that is enough; there's no narrower one for users), and on OpenSearch a user mapped to a
+role in `plugins.security.restapi.roles_enabled` (`security_rest_api_access` on a default
+install, or the domain's master user on Amazon OpenSearch Service). OpenSearch's reserved and
+hidden users (its `admin`) can't be changed through the API, so they can't take turns. For example:
+
+```sh
+# Elasticsearch: a role for roll, two users that take turns, a role dynamic users get.
+PUT _security/role/roll_admin   {"cluster": ["manage_security"]}
+PUT _security/user/roll_admin   {"password": "…", "roles": ["roll_admin"]}
+PUT _security/role/reader       {"indices": [{"names": ["app"], "privileges": ["read"]}]}
+echo 'elasticsearch://roll_admin:…@es.example.com:9200' |
+  roll secrets databases add search --role app_blue --role app_green --group reader
+```
+
+**Cassandra and ScyllaDB** too, as Vault's Cassandra engine, over CQL's native protocol v4 with
+TLS (`cassandra://admin:…@host:9142/keyspace`; the keyspace is optional and checked at
+registration; no settings). rolld speaks the protocol itself through nosql-proto's bounded frames
+(capped at 256 KiB), on one connection to the address it checked, with the certificate verified
+against the URL's host: no driver goes looking for the cluster's other nodes. Rotation is `ALTER
+ROLE "<name>" WITH HASHED PASSWORD = '…'` on two roles that take turns, then up to 5 s until the
+role logs in with the new password before it's handed out (Cassandra's credentials cache, warm from
+an app's logins, refuses it for up to `credentials_validity`, 2 s by default; ScyllaDB takes it at
+once), kept with a warning naming the role if it never does; a dynamic login is `CREATE
+ROLE "<name>" WITH LOGIN = true AND HASHED PASSWORD = '…'` and `GRANT "<group>" TO "<name>"` (the
+group is a role), dropped if the grant fails. Neither database takes a password as a bound value,
+and both keep a traced statement whole (`system_traces.sessions`, for a client that asks or under
+`nodetool settraceprobability`), so the statement holds rolld's bcrypt of the password, never the
+password: `$2a$` at cost 10, Cassandra's default and the only prefix it takes (`$2b$` and `$2y$` are
+"Invalid hashed password value. Please use jBcrypt."; ScyllaDB takes all three, at any cost).
+Cassandra 5.0.9 takes the hashed form in both statements, from the narrower admin below too.
+ScyllaDB 2026.3.3 takes it only from a superuser ("Only superusers can create a role with a hashed
+password.") and only in `CREATE ROLE`: it answers `ALTER ROLE … WITH HASHED PASSWORD` with a server
+error (`std::get: wrong index for variant`, nothing changed) even then. So a refusal, a server error
+or a syntax error (a server without `HASHED PASSWORD`) sends the statement again with `PASSWORD =
+'…'`, over TLS: on ScyllaDB rotations and a lease's end always go plain, and dynamic logins do
+unless the admin is a superuser. Its audit log (`audit: "table"` with DCL, on by default) masks that as
+`PASSWORD = '***'`, as Cassandra's audit and full-query logs do; its traces don't. roll's passwords
+are letters and digits, so nothing needs escaping, and names are quoted (their case holds). A
+refused statement holding a password reports a syntax error by its kind alone (the server quotes
+the statement in one) and any other with the password, or its hash, cut out.
+Neither has an expiry for a role: ending the lease gives the role a password nobody knows, then
+`DROP ROLE IF EXISTS`. Cassandra caches each role's credentials on each node for up to
+`credentials_validity` (2 s by default), so a login with an ended lease's password can still work
+for that long, however the lease ends; set `credentials_validity` lower on the servers to shorten
+it (ScyllaDB took a new password at once in roll's live checks). Registering checks that
+both roles exist and can log in (`LIST ROLES OF`) and that the group exists; a server that lets
+anyone in (`AllowAllAuthenticator`) is refused. The admin needs a superuser, or `CREATE`, `ALTER`,
+`DROP`, `AUTHORIZE` and `DESCRIBE` on `ALL ROLES` and `SELECT` on `system_schema` for the keyspace check; the server needs `PasswordAuthenticator`,
+and `CassandraAuthorizer` for the group's grants to mean anything. Differences seen: Cassandra 5.0
+refuses a second password change on one role within 5 s (`Password for role … can only be changed
+every 5000ms`; roll's turns are at least minutes apart, and a lease's end tries the unknown
+password, then drops anyway); ScyllaDB 2026.3 makes no default `cassandra` superuser with a known
+password (name one with `auth_superuser_name` and `auth_superuser_salted_password`) and its `LIST
+ROLES` has no `datacenters` column. For example:
+
+```sql
+CREATE ROLE roll_admin WITH LOGIN = true AND PASSWORD = '…';
+GRANT CREATE ON ALL ROLES TO roll_admin;  GRANT ALTER ON ALL ROLES TO roll_admin;
+GRANT DROP ON ALL ROLES TO roll_admin;    GRANT AUTHORIZE ON ALL ROLES TO roll_admin;
+GRANT DESCRIBE ON ALL ROLES TO roll_admin; GRANT SELECT ON KEYSPACE system_schema TO roll_admin;
+CREATE ROLE reader;  GRANT SELECT ON KEYSPACE app TO reader;
+-- echo 'cassandra://roll_admin:…@db.example.com:9142/app' |
+--   roll secrets databases add cql --role app_blue --role app_green --group reader
+```
+
+`scripts/secrets-outside-check.sh [es] [os] [cassandra] [scylla]` checks all four live in Docker
+(Elasticsearch 9.5.5, OpenSearch 3.9.0, Cassandra 5.0.9 and ScyllaDB 2026.3.3, each with
+authentication on and TLS from a CA it makes): registering as the narrower admin above, refusals
+for a missing user, role or keyspace, a wrong admin password (never echoed) and an untrusted
+certificate; rotation (the new password logs in, the old one is refused, the user keeps its roles);
+a dynamic login that reads with the group's grants and can't write or read elsewhere; and its
+deletion (refused at once, twice is fine). For CQL it traces every request and checks what the
+servers kept: no password roll sent in Cassandra's traces, none of a login the superuser made in
+ScyllaDB's, and ScyllaDB's audit log masking the rest.
+
+### Directories (LDAP and Active Directory)
+
+An OpenLDAP or Active Directory server roll doesn't run has its accounts' passwords rotated by roll
+itself, as Infisical's LDAP rotation does, and makes a user per lease, as Vault's LDAP secrets
+engine does. A project registers it (`POST …/directories`, `admin`; `roll secrets directories add
+NAME --url URL --bind-dn DN [--flavor active_directory] [--account DN…] [--user-base-dn DN]
+[--group DN…] [--ca FILE]`, the bind password on stdin; or the dashboard, next to databases outside roll):
+
+- `url` is `ldaps://host[:636]`, or `ldap://host[:389]`, which always starts with StartTLS: nothing
+  is ever sent in plain text, even where private addresses are allowed. Nothing follows the host
+  (no base DN, scope or filter).
+- `bind_dn` and `bind_password` are the account roll binds as. The password is sealed with the
+  project's data key, bound to the directory's row (only the DN is shown), and never returned,
+  logged or audited. The bind account can't be one of the managed accounts (rotating it would lock
+  roll out).
+- `flavor` is `openldap` (the default) or `active_directory`.
+- `managed_accounts` are one or two accounts' DNs (managed links); `user_base_dn` is where dynamic
+  users are made and `groups` the groups they join (dynamic links). One or both.
+- `ca` is the server's CA certificates (PEM), trusted as well as the system's: most domain
+  controllers have a certificate from the domain's own CA. The certificate must name the URL's
+  host in its subjectAltName (a name only in the subject's CN is refused): a Windows domain
+  controller's from AD CS does, but the one Samba makes for itself doesn't, so give Samba one
+  (`tls certfile`, `tls keyfile`).
+
+Registering binds once, outside any transaction, and finds every account, group and the base (a
+base search for each): a refusal is a 400 with the server's reason, never the password. One project
+can't register the same account on one host twice (the two would undo each other's passwords).
+
+It's the link kind `directory`, with fields `username` (the account's DN) and `password`, one
+credential (`login`), `managed` or `dynamic`; the dashboard suggests `LDAP_BIND_DN` and
+`LDAP_PASSWORD`. An Active Directory login also has `upn` (`LDAP_UPN`: its `userPrincipalName`,
+else the implicit `sAMAccountName@domain` every account has, the domain being its DN's `DC=`
+parts) and `account_name` (`LDAP_USERNAME`: its `sAMAccountName`), for applications that log in
+with those rather than a DN; a managed account's are read before its password changes. Linking
+them to an OpenLDAP directory is refused.
+
+**Managed.** With two accounts, they take turns exactly as a database's two roles do (above): each
+issue (linking, every `rotate_days`, `…/rotate`) sets a new password on the account not handed out
+last and hands it out, so the one in use keeps working until its grace period ends; then its
+password is replaced by one nobody knows. Rotating again within the grace period is a 409. **With one
+account there is no grace:** each rotation replaces its password at once, so whatever still holds
+the old one fails from that moment, and a second rotation within two minutes of the first is a 409
+(the first is still being stored). Either way a directory's managed credential serves one
+environment (409 elsewhere).
+
+**Dynamic.** Each lease gets `cn=roll-<lease>,<user_base_dn>` with a random password, its
+`description` naming the lease (`roll secrets lease lse_… (roll secrets staging LDAP_PASSWORD for
+job:sync)`), and membership of every group (`member`). Ending the lease (expiry, `DELETE
+…/leases/{id}`) deletes it; a user that's gone already counts as deleted. If making it fails midway
+(a group refused it), what was made is deleted before the resolve answers. On Active Directory the
+user is made disabled, given its password, then enabled; its `sAMAccountName` is `roll-` and 15
+characters of the lease id, its `userPrincipalName` that name at `user_base_dn`'s domain, and its
+`accountExpires` the lease's end plus five minutes, moved by each renewal, so the domain refuses it
+after the lease even if roll is down. OpenLDAP has no expiry
+for an entry: a user lasts until roll ends its lease. Checks, sandboxes and previews (untrusted)
+never get a dynamic user. Dynamic links work in any number of environments.
+
+**Passwords** are 32 characters with upper- and lowercase letters and digits; Active Directory's
+also hold a symbol from `!#%+-.:=?@^_~`, for its complexity policy. On OpenLDAP a password is set
+with the Password Modify extended operation (RFC 3062) where the root DSE lists it, so slapd hashes
+it as configured (`olcPasswordHash`), else by replacing `userPassword`. On Active Directory it's a
+replace of `unicodePwd` with the password in double quotes as UTF-16LE, which the domain accepts
+only over TLS. A domain keeps taking an account's previous password for a while after a reset
+(NTLM's old password allowed period, an hour by default; Samba accepts it for simple binds too), so
+roll sets a throwaway password first and then the new one: the password it replaces stops working
+at once, as above.
+
+rolld connects the way it reaches a database outside roll: it resolves the host itself, refuses a
+private address (`ROLL_CODE_WEBHOOK_ALLOW_PRIVATE` allows them for local development), connects to
+the address it checked, and verifies the certificate against the URL's host. A conversation has 15
+seconds, connecting included, and reads at most 1 MiB from the server; searches are base searches
+for one entry.
+
+The bind account needs, at least:
+
+| Flavor | Managed accounts | Dynamic users |
+| --- | --- | --- |
+| `openldap` | `write` on each account's `userPassword` (`olcAccess: to dn.exact="cn=app-blue,…" attrs=userPassword by dn.exact="cn=roll,…" write`), and `read` on the root DSE's `supportedExtension` | `write` on `entry` and `children` of `user_base_dn` (to add and delete users) and on the new users' attributes, and `write` on each group's `member` |
+| `active_directory` | the *Reset Password* extended right on each account (Delegate Control, "Reset user passwords and force password change at next logon") | *Create* and *Delete User objects* on the `user_base_dn` OU, *Reset Password* and write `userAccountControl` and `accountExpires` on its users (inherited, for `User` objects), and write `member` on each group. The attributes a user is made with (`description`, `sAMAccountName`, `userPrincipalName`) need nothing more: creating it covers them |
+
+Checked against OpenLDAP 2.4 (`osixia/openldap:1.5.0`, a certificate from a private CA) over
+LDAPS and StartTLS, bound as an account with only the `openldap` row's rights (`olcAccess` above):
+the bind proof and a missing account refused, a new password that binds while the old one is
+refused (stored `{SSHA}` through Password Modify), a dynamic user that binds and is in its group,
+then deleted and out of the group, a second delete that's fine, and an untrusted certificate
+refused (`a_real_openldap_sets_passwords_and_makes_and_deletes_users` in
+`crates/rolld/src/secrets/directory.rs`, ignored: run by hand with `ROLL_E2E_LDAP_*`).
+
+Checked against Samba's AD DC 4.22 (Debian trixie's `samba-ad-dc`, a domain provisioned with
+`samba-tool domain provision`, its default policies) over LDAPS with a certificate from a private
+CA, bound as an account given only the `active_directory` row's rights (`samba-tool dsacl set`,
+the ACEs `CR` Reset Password on the account; `CCDC` for `User` on the OU plus inherited `CR` Reset
+Password and `WP` on `userAccountControl` and `accountExpires`; `WP` on the group's `member`): the
+bind proof, a missing account and a wrong bind password refused, a certificate from a CA that isn't
+trusted refused (and Samba's own certificate, which has no subjectAltName); a managed account's new
+password binds and its old one is refused at once, under Samba's default hour of old passwords; its
+`sAMAccountName` and implicit UPN read, and the UPN binds; a dynamic user made disabled then
+enabled (`userAccountControl` 512), with its `sAMAccountName`, UPN (which binds) and
+`accountExpires`, in its group, its expiry moved by a renewal; one whose `accountExpires` has passed
+refused; deleting it, and deleting it again
+(`a_real_active_directory_sets_passwords_and_makes_expires_and_deletes_users`, ignored: run by hand
+with `ROLL_E2E_AD_*`). Samba isn't Windows Server: not yet run against one are Windows' password
+policy and fine-grained password policies with roll's passwords, its old-password period after a
+reset, an AD CS certificate, LDAP signing and channel binding requirements, and replication
+between domain controllers (a user made on one and bound on another right after).
+
+A directory a key links to, or with a retired password or a dynamic user still to delete, can't be
+deleted (409).
+### Gateways (private networks)
+
+A database or directory that only has a private address (inside a VPC, behind a firewall) is reached
+through a **gateway**, as Infisical's and Akeyless' gateways reach them: a small process the team
+runs inside the network. It dials out to roll over one WebSocket, and roll's conversations with
+private hosts travel through it. Nothing listens inside the network, and the gateway decides what
+it may reach, not roll.
+
+**Records.** A gateway is a project resource (`gw_…`): `POST /v1/secrets/projects/{id}/gateways`
+(`admin`; `roll secrets gateways add NAME`, or the dashboard's Gateways panel) makes the record and,
+unless `"token": false`, its credential: a roll token (`rlt_…`, roll-access's) with one rule,
+`{"product": "secrets", "resources": [{"id": "gw_…"}], "actions": ["write"]}`, shown once. That
+rule reaches exactly one route, the gateway's own link; nothing else in roll names a gateway by id.
+It's made through roll-access (`Access::create_grant`, as `POST /v1/access/tokens`), so it's
+listed, revoked and audited with every other token, and roll-access looks it up on every connect.
+roll makes it for people and the operator only, never for a token (a project-wide rule doesn't
+cover a gateway's id), like identities. A gateway on Kubernetes, EC2 or in CI can instead log in
+with its own OIDC token: a workload identity made with `"gateway": "gw_…"` mints exactly that rule
+at each login (its environments, folders and actions are refused, they don't apply), for its
+`ttl_minutes`; the gateway logs in again at four fifths of its token's life (at least a minute
+before the end, timed on roll's clock from the login's `Date`) and opens a new link, which replaces
+the old one: streams in flight finish on the old link, and any asked of it after the switch open on
+the new one. Deleting or re-keying the identity drops the link at once. In the dashboard, the
+identity form's "A login gets" picks the gateway. `GET
+…/gateways` lists them with their status, `DELETE …/gateways/{id}` (`admin`; `roll secrets
+gateways rm`) deletes one no database or directory uses (409 otherwise), revokes the token made
+with it and closes its link at once.
+
+**The binary.** `roll --url https://roll.example.com secrets gateways up --gateway gw_… --allow
+10.0.0.0/8:5432 --allow ldap.corp.internal:636` (or `--allow-file FILE`, one entry a line, `#`
+comments), with the token in `ROLL_GATEWAY_TOKEN` (or `--token-file`), or `--identity idn_…` and
+the OIDC token in a file (`--oidc-token-file`, re-read at each login: Kubernetes' projected token,
+`/var/run/secrets/…`; make the identity with `roll secrets identities add NAME --issuer … --subject
+… --gateway gw_…`). It's a subcommand of `roll` (`crates/roll-cli`) beside the gateway's `ls`,
+`add` and `rm` (`roll gateway` is roll code's model gateway already), over a small crate,
+`crates/roll-gateway`, that holds the wire, the multiplexer, the allow-list and the agent loop:
+rolld and the CLI share the wire, and the crate is tested on its own (no product in it). One
+binary that's already on the machine is the simplest thing to run in a container (`roll secrets
+gateways up` is its whole entrypoint), and it needs no project: its credential names the gateway. It opens one WebSocket to `GET
+/v1/secrets/gateways/{id}/connect` and reconnects with jittered exponential backoff (0.5 s
+doubling to 30 s, ±50%); a 4401 close (credential refused or gateway deleted) stops it, unless it
+logs in through an identity, which logs in again first.
+
+**The allow-list is the gateway's.** Each `--allow` is `HOST:PORT`, `*.SUFFIX:PORT` or `CIDR:PORT`
+(IPv6 in brackets), where `PORT` is one port, a range `LOW-HIGH` (both included, 1–65535, `LOW <=
+HIGH`: `10.0.0.0/8:5432-5439`) or `*`. An entry that doesn't parse stops the gateway at start, saying
+which. The gateway refuses anything else before resolving
+or dialing: a name must match a name entry, or resolve (on the gateway, with the network's DNS) only
+to addresses inside a CIDR entry for that port; an IP literal must be inside a CIDR entry. Without
+an entry it refuses everything. So a compromised or buggy roll can't use it to scan or reach the
+rest of the network: it reaches what the team listed and nothing more. The gateway reports its list
+in its hello (shown in the Gateways panel), but roll never widens or edits it. An SRV lookup
+(`mongodb+srv://`) follows the same list: the gateway looks a record up only when the list could
+allow a target of it (a CIDR entry, or a name or suffix entry under the record's parent domain), and
+answers only when every target passes the check above; otherwise it refuses without naming the
+target to roll, and logs the target itself.
+
+**roll's own check stays.** A database or directory registered with `"gateway": "gw_…"` (a gateway
+of the same project) may name a private address or a name only the network resolves: rolld doesn't
+resolve it, and asks the gateway to open `host:port`. Every other path keeps the public-only rule
+(`ROLL_CODE_WEBHOOK_ALLOW_PRIVATE` for local development only). TLS settings don't change with a
+gateway: TLS still runs end to end from rolld to the server and is verified against the URL's host,
+so the gateway relays ciphertext and never sees a password or a query.
+
+**Wire.** Binary WebSocket messages, each `[type u8][stream u32 BE][payload]`, at most 64 KiB (both
+sides set it as the WebSocket's message limit). The gateway's first message is `hello` (JSON:
+version, its allow-list, its limits) and roll answers `welcome` (the node). Then roll sends `open`
+(JSON `{host, port}`, 1 KiB at most) with a new stream id; the gateway answers `opened` or
+`refused` (a reason: "not in the allow-list", "connection refused"), and both sides send `data`
+(up to 16 KiB), `window` (credit), `fin` (end of that direction) and `reset`. roll may also send
+`resolve` (JSON `{srv}`, an SRV name such as `_mongodb._tcp.cluster0.corp.internal`) with a new
+stream id that never becomes a stream; the gateway looks it up with the network's DNS and answers
+`resolved` (JSON `{targets}`, `host:port` each, 16 at most: more ends the link, and roll reads only
+DNS names and ports from it) or `refused`. Lookups waiting count against a link's 32 streams. Pings
+both ways every 20 s; 60 s of silence ends the link.
+
+**Bounds.** Every stream has a 256 KiB window each way: a side sends only as many bytes as the other
+granted, and grants more only as its reader takes them, so a slow reader holds at most a window,
+and a peer that sends past it ends the link. Buffers grow with the bytes actually received, never
+from a length the peer sent. A link carries at most 32 streams at once (the gateway refuses more),
+each stream lives at most 20 s (a conversation's 15 s, connecting included, plus a margin) on both
+sides, and `open` waits 10 s for an answer. Only the newest link of a gateway opens streams: a new
+connect replaces the older one, which finishes its streams (20 s at most) and closes with 4409.
+
+**Audit, both sides.** roll writes `gateway.connect` and `gateway.disconnect` rows (node, version,
+the token's id) and a `gateway.stream` row per stream (the target `host:port`, and how it ended: bytes each way, or
+the gateway's refusal).
+The gateway logs one line per stream (`stream 7 open db.internal:5432 -> 10.0.3.4:5432`, `stream 7
+closed: 1.2 KiB up, 3.4 KiB down` or `stream 8 refused 10.9.9.9:22: not in the allow-list`). Never
+the bytes, a password or the token.
+
+**Fleet.** Like an owner's agents (docs/code/cluster.md, "An owner's agents"), a gateway's link
+lives on the holder of the lease `secrets:gateway:<id>`, from rolld's roll-cluster handle: the
+connect is dispatched there (`Cluster::dispatch` forwards the upgrade), the link holds the lease's
+guard, and when the lease moves the old holder closes the link with 1012 and the gateway reconnects
+to the new one. A conversation that needs gateway X runs on X's holder: rolld dispatches the whole
+provider call (`check`, `set_password`, `create_login`, `extend_login`, `drop_login`, and a
+directory's) to the internal route `POST /internal/secrets/gateways/{id}/call`, its body sealed with
+the deployment key every node shares (the admin URL and the new password are in it), so bytes never
+stream between nodes and roll-cluster's 4 MiB forward limit holds. On one node all of this is a
+no-op: the link and the call are local.
+The internal route takes only a request another node signed (`roll_cluster::Forwarded`).
+`secrets::gateway`'s `a_gateways_link_follows_its_lease_across_two_nodes` runs two nodes in one
+process on one store and one in-memory roll-cluster backend, behind a load balancer: the link lands on
+the lease's holder, a call made on the other node is dispatched there and rotates a password on an
+HTTPS ClickHouse through the gateway, an unsigned or forged request to the internal route is
+refused (403, 401), and when the holder drains the link closes with 1012 and the gateway comes back
+on the other node, where calls work again.
+`elasticsearch_and_cassandra_are_reached_through_the_gateway_and_only_on_its_allow_list` runs a
+real gateway against an Elasticsearch-shaped HTTPS fake and a CQL fake over TLS: registering and
+rotating through the gateway, the hashed CQL statements (never the password), TLS checked in rolld
+with the database's CA, and a server the allow-list doesn't name refused by the gateway, never
+dialed.
+
+**Status.** Each link writes its status to the gateway's row (shared by every node): `connected`,
+the `node`, `version`, the allow-list it reported, `connected_at`, `last_seen_at` (every 30 s while
+up). It's online when connected and seen within 90 s.
+
+**Revocation takes effect at once.** Before every stream it opens (each provider call through the
+gateway asks for one), the link looks up its token through roll-access, as the connect does, and
+the gateway's record, never cached. If either is gone (the token revoked or expired, its maker no
+longer reaching the project, the gateway deleted), the stream is refused and the link closes with
+4401. `DELETE …/gateways/{id}`, and deleting or re-keying the identity that logged a gateway in,
+also re-check the link on the lease's holder right away, through the same dispatch as the calls
+(`Call::Recheck`), so a link with no stream open closes too. A holder that can't be reached doesn't
+fail the delete: the next stream's check covers it. An idle link still re-checks every 30 s, as a
+backstop.
+
+**Where it plugs in.** Databases outside roll (`gateway` on `POST …/outside-databases`: every
+engine, Postgres, MySQL, SQL Server, ClickHouse, RabbitMQ, Redis, MongoDB, Elasticsearch,
+OpenSearch, Cassandra and ScyllaDB, `mongodb+srv://` included) and directories (`gateway` on `POST
+…/directories`). Postgres, SQL Server, Redis, MongoDB, Cassandra and ScyllaDB take the gateway's
+stream directly (CQL's TLS runs in rolld over it, its frame and row caps as without a gateway).
+ClickHouse, RabbitMQ, Elasticsearch and OpenSearch speak HTTPS through one small
+client (hyper's, `outside/https.rs`) whose only connector is the conversation's way to the server:
+a gateway's stream, or the address rolld resolved and checked, with TLS run in rolld against the
+URL's host (SNI and verification, the engine's `ca`), no redirects, no proxy, answers read up to a
+bound. For `mongodb+srv://` the gateway looks the SRV record up (a private cluster's name usually
+resolves only inside the network); rolld still keeps only targets inside the record's parent
+domain, then opens a stream to each host it needs. MySQL and LDAP clients take a socket, so rolld
+hands them a loopback socket whose other end it relays to the stream, accepting only the connection
+its own process made (directories pin their checked address the same way). `roll secrets
+outside-databases add … --gateway gw_…`, `roll secrets directories add … --gateway gw_…`, and the
+dashboard's forms offer the project's gateways.
+
+
+
+### Snowflake
+
+A Snowflake account has a service user's key rotated by roll, with no downtime, and makes a user
+per lease, as Vault's Snowflake database plugin does. A project registers the account (`POST
+…/snowflake-accounts`, `admin`; `roll secrets snowflake add NAME --account A [--privatelink]
+--admin-user U [--admin-role R] --key FILE|- [--auth password] [--user U] [--role R…]`; or the
+dashboard, next to directories):
+
+- `account` is the account identifier: `myorg-myaccount`, or a locator such as
+  `xy12345.us-east-2.aws`. Only letters, digits, `-`, `_` and `.` are accepted, with no
+  `.snowflakecomputing.com`. Statements go to `https://<account>.snowflakecomputing.com`, or to
+  `<account>.privatelink.snowflakecomputing.com` with `privatelink: true`. No other host is ever
+  contacted.
+- `admin_user` is the user roll signs in as, with key-pair JWT auth. `admin_private_key` is its RSA
+  private key: PEM, PKCS#8 unencrypted or PKCS#1, 2048 to 4096 bits. The key is sealed with the
+  project's data key, bound to the account's row, and never returned, logged or audited. Only its
+  public fingerprint is shown (`admin_key_fp`, as `DESC USER` shows `RSA_PUBLIC_KEY_FP`).
+  `admin_role` is the role statements run as (default: the admin user's default role).
+- `auth` is how the credentials roll hands out sign in: `key_pair` (the default) or `password`, for
+  users that can't use keys.
+- `managed_user` is the user managed links rotate. It can't be the admin user, because rotating it
+  would lock roll out.
+- `roles` are the roles dynamic users may be granted, at most 16. `ACCOUNTADMIN`, `ORGADMIN`,
+  `GLOBALORGADMIN` and `SECURITYADMIN` are refused.
+- At least one of `managed_user` and `roles` must be set.
+
+User and role names are names Snowflake reads unquoted: letters, digits, `_` and `$`, not starting
+with a digit. roll upper-cases them and always quotes them in statements, so a role created with a
+quoted lower-case name can't be used. No other text a tenant sends goes into a statement. A
+`COMMENT` keeps only letters, digits and `_-.:#/@` and spaces.
+
+Registering signs in once, outside any transaction. It runs `DESCRIBE USER` on the managed user and
+`SHOW ROLES LIKE` for each role. A refusal is a 400 with Snowflake's code and message, never the
+key. One project can't register the same managed user on one host twice, because the two
+registrations would undo each other's keys.
+
+It's the link kind `snowflake`, with one credential (`login`) of three fields: `user`, `account`, and
+`private_key` (PKCS#8 PEM) or `password`, whichever the account's `auth` gives. A link to the other
+one is a 400 when it's written. The links are `managed` or `dynamic`. The dashboard suggests
+`SNOWFLAKE_USER`, `SNOWFLAKE_ACCOUNT` and `SNOWFLAKE_PRIVATE_KEY` (or `SNOWFLAKE_PASSWORD`). The
+`account` field is the identifier as registered, with `.privatelink` appended when it's reached
+over PrivateLink. That's what Snowflake's connectors take.
+
+**Managed, key pairs.** A Snowflake user has two key slots, `RSA_PUBLIC_KEY` and
+`RSA_PUBLIC_KEY_2`, and they take turns as a database's two roles do (above). Each issue (linking,
+every `rotate_days`, `…/rotate`) makes a new 2048-bit key pair and sets its public half in the slot
+not handed out last (`ALTER USER … SET RSA_PUBLIC_KEY_2 = '…'`). It then hands out the private
+half. The other slot's key keeps working until its grace period ends, and then the slot is cleared
+(`ALTER USER … UNSET RSA_PUBLIC_KEY`). Rotating again within the grace period is a 409.
+
+If only the first slot holds a key when the account is registered (a key set by hand), roll's first
+key goes in the second slot. The hand-set key keeps working until the second rotation.
+
+**Managed, passwords.** One user has no second slot, so there is no grace: each rotation replaces
+the password at once (`ALTER USER … SET PASSWORD = '…' MUST_CHANGE_PASSWORD = FALSE`). A second
+rotation within two minutes of the first is a 409. A `TYPE = SERVICE` user can't have a password,
+so the managed user must be `LEGACY_SERVICE` or `PERSON`.
+
+Either way, an account's managed credential serves one environment (409 elsewhere).
+
+**Dynamic.** Each lease gets the user `ROLL_<LEASE>` (for example `ROLL_LSE_…`). It is created by
+these statements:
+
+```sql
+CREATE USER "ROLL_LSE_…" TYPE = SERVICE RSA_PUBLIC_KEY = '…' DEFAULT_ROLE = "LOADER"
+  DAYS_TO_EXPIRY = 1 COMMENT = 'roll secrets lease lse_… (…)';
+GRANT ROLE "LOADER" TO USER "ROLL_LSE_…";
+```
+
+With `auth: password` the user is `TYPE = LEGACY_SERVICE` with a random password. The roles are the
+link's `roles` option, a subset of the account's (default: all of them), and the first is its
+`DEFAULT_ROLE`. A link that names another role is a 400 when it's written.
+
+`DAYS_TO_EXPIRY` is the lease's end plus five minutes, rounded up to whole days. Each renewal moves
+it (`ALTER USER … SET DAYS_TO_EXPIRY`), so Snowflake refuses the user within a day of its lease
+even if roll is down.
+
+Ending the lease (expiry, `DELETE …/leases/{id}`) runs `DROP USER IF EXISTS`. If making the user
+fails midway (a grant refused), the user is dropped before the resolve answers. Checks, sandboxes
+and previews (untrusted) never get a dynamic user. Dynamic links work in any number of
+environments.
+
+**Passwords** are 32 characters with upper- and lowercase letters, digits and a symbol from
+`!#%+-.:=?@^_~`, which fits Snowflake's default password policy and needs no quoting. A statement
+that holds a password is never in an error: a refusal then says only Snowflake's code and SQLSTATE,
+never its message. Snowflake's own query history may keep that statement's text. Key pairs put
+nothing secret in a statement, so prefer them.
+
+rolld sends each statement to the SQL API (`POST /api/v2/statements`) with a key-pair JWT for the
+admin user (`X-Snowflake-Authorization-Token-Type: KEYPAIR_JWT`; it lives ten minutes). The request
+goes through the same guarded client as webhooks and syncs: https only, a public address it resolved
+itself (`ROLL_CODE_WEBHOOK_ALLOW_PRIVATE` allows private ones for local development), no redirects,
+15 seconds per request, and at most 1 MiB read from an answer. A statement still running (202) is
+polled once a second for up to 30 seconds. An account with a network policy must allow roll's
+egress addresses for the admin user.
+
+The admin role needs, at least:
+
+```sql
+CREATE ROLE ROLL_ADMIN;
+GRANT ROLE ROLL_ADMIN TO ROLE SYSADMIN;  -- or wherever your role hierarchy keeps it
+CREATE USER ROLL_ADMIN TYPE = SERVICE DEFAULT_ROLE = ROLL_ADMIN RSA_PUBLIC_KEY = '…';
+GRANT ROLE ROLL_ADMIN TO USER ROLL_ADMIN;
+-- Managed: DESCRIBE and ALTER the service user (its key slots or its password).
+GRANT OWNERSHIP ON USER SVC_APP TO ROLE ROLL_ADMIN COPY CURRENT GRANTS;
+-- Dynamic: make users (it owns them, so it can renew and drop them) and grant them its roles.
+GRANT CREATE USER ON ACCOUNT TO ROLE ROLL_ADMIN;
+GRANT OWNERSHIP ON ROLE LOADER TO ROLE ROLL_ADMIN COPY CURRENT GRANTS;
+```
+
+`GRANT ROLE` needs ownership of the role being granted. Owning the listed roles is the narrow way.
+The alternative, `GRANT MANAGE GRANTS ON ACCOUNT`, lets the admin role grant any role, so avoid it.
+
+The flow is tested against a fake SQL API that checks the JWT's signature and claims
+(`a_snowflake_account_rotates_key_slots_in_turn_and_makes_a_user_per_lease`). The statements, the
+JWT's `iss`/`sub` form, the SQL API's answers and the grants above follow Snowflake's documentation
+and haven't been run against a real account yet.
+
+An account a key links to, or with a retired key or a dynamic user still to drop, can't be deleted
+(409).
+### MongoDB Atlas
+
+Atlas manages database users only through its UI, CLI and Admin API ("Databases outside roll"
+explains why its clusters can't be reached the other way), so roll rotates an Atlas project's users
+and makes a user per lease through the Admin API, as Vault's MongoDB Atlas database plugin does. A
+project registers the Atlas project (`POST …/atlas-projects`, `admin`; `roll secrets atlas add NAME
+--group-id ID --client-id ID [--user A --user B] [--role R…]`, the client secret on stdin; or the
+dashboard, next to Snowflake):
+
+- `group_id` is the Atlas project's id (24 hex digits; the Admin API calls it `groupId`).
+- `client_id` and `client_secret` are an organization service account's (`mdb_sa_id_…`,
+  `mdb_sa_sk_…`). The secret is sealed with the project's data key, bound to the registration's row,
+  and never returned, logged or audited. Answers show only the client id.
+- `managed_users` are two database users (password users on `admin`) that managed links rotate in
+  turn. Both must exist when the project is registered.
+- `roles` are what dynamic users get, as the Atlas CLI writes them: `role@db` or
+  `role@db.collection` (`readWrite@shop`, `read@shop.orders`), built-in or custom, 16 at most.
+  `atlasAdmin` is refused. Atlas checks a custom role when it creates a user.
+- At least one of `managed_users` and `roles` must be set. One project can't register a user
+  another of its registrations already rotates in the same Atlas project (409).
+
+Registering takes a token and reads the managed users (or, with none, lists the project's users)
+once, outside any transaction. A refusal is a 400 with Atlas's status and error code, never its
+message or the secret.
+
+**Calls.** The service account's token comes from `POST https://cloud.mongodb.com/api/oauth/token`
+(client credentials: `Authorization: Basic <client_id:client_secret>`,
+`grant_type=client_credentials`). It is kept in rolld's memory per registration until a minute
+before its `expires_in` (an hour), never stored or logged, and a 401 from the API takes one new
+token and retries once. A wrong secret is Atlas's `invalid_client`. The calls are:
+
+| Call | Version (`Accept`, and `Content-Type` with a body) |
+| --- | --- |
+| `GET /api/atlas/v2/groups/{groupId}/databaseUsers?itemsPerPage=1` (registering with no managed users) | `application/vnd.atlas.2023-01-01+json` |
+| `GET …/databaseUsers/admin/{username}` | `application/vnd.atlas.2023-01-01+json` |
+| `PATCH …/databaseUsers/admin/{username}` (a password, or a dynamic user's `deleteAfterDate`) | `application/vnd.atlas.2023-01-01+json` |
+| `POST …/databaseUsers` (a dynamic user) | `application/vnd.atlas.2023-01-01+json` |
+| `DELETE …/databaseUsers/admin/{username}` (a lease's end) | `application/vnd.atlas.2023-01-01+json` |
+| `GET …/clusters/{name}`, else `GET …/flexClusters/{name}` (a link's cluster) | `application/vnd.atlas.2024-08-05+json`, `application/vnd.atlas.2024-11-13+json` |
+
+`databaseUsers` has one resource version in the Admin API's specification (the 2025-03-12 release):
+`2023-01-01`. Atlas answers 406 to a version a resource doesn't have, so no 2025 date is sent there.
+A `PATCH` sends the user back as Atlas returned it, with only the password (or the date) changed,
+as Vault's plugin does, so its roles and scopes stay as they are. Every call goes through the same
+guarded client as Snowflake's: HTTPS to `cloud.mongodb.com` only (no other host is ever built into
+a URL), a public address rolld resolved itself, no redirects, 15 seconds a request, and at most
+256 KiB read from an answer. An error carries Atlas's status and `errorCode`, never a request body
+or Atlas's message.
+
+It's the link kind `mongodb_atlas`, with one credential (`login`) of three fields: `username`,
+`password` (32 letters and digits: the API calls the field alphanumeric, and nothing needs escaping
+in a connection string) and `connection_string`. The links are `managed` or `dynamic`. Two options:
+
+- `cluster` names a cluster (dedicated or Flex). `connection_string` is then its public
+  `mongodb+srv://…` string as Atlas gives it (`connectionStrings.standardSrv`; no credentials), and a
+  dynamic user can reach only that cluster (`scopes`). A `connection_string` link without it is a
+  400, and so is a cluster Atlas doesn't know (checked when the link is written).
+- `roles` (dynamic only) picks some of the registration's roles (default: all of them).
+
+The dashboard suggests `MONGODB_USERNAME` and `MONGODB_PASSWORD` (and `MONGODB_CONNECTION_STRING`).
+
+**Managed.** The two users take turns as a database's two roles do ("Databases outside roll"): each
+issue (linking, every `rotate_days`, `…/rotate`) sets a new password on the user not handed out
+last and hands it out. The user in use keeps its password until its grace period ends; then its
+password is replaced by one nobody knows. Rotating again within the grace is a 409, and an Atlas
+project's managed credential serves one environment (409 elsewhere).
+
+**Atlas applies a user change asynchronously.** Its API answers at once, and the cluster takes the
+change when Atlas deploys it, about a minute in practice; Atlas's documentation gives no figure. So a
+new password can be refused for a minute or so after a rotation, while the old login keeps working
+through the grace. The grace is 60 minutes by default and a managed link can't set `grace_minutes`
+below 5. Something that reads the new value right after a rotation should retry a refused login for
+a minute or two.
+
+**Dynamic.** Each lease gets the user `roll_<lease>` (`roll_lse_…`), made by `POST …/databaseUsers`
+with its password, the link's roles, `deleteAfterDate` (the lease's end plus ten minutes), a
+`description` and the label `roll-secrets-lease`. So Atlas deletes the user even if roll is down.
+Atlas takes a date at most a week ahead, so for a lease of nearly a week the date is capped at a week
+from the call, less five minutes: Atlas may then remove the user a few minutes before the lease
+ends. A renewal moves the date (`PATCH`). Ending the lease (expiry, `DELETE …/leases/{id}`) deletes the
+user; one Atlas already removed counts as deleted. If making the user fails, it's deleted again
+before the resolve answers. Like a new password, a new user can take a minute to work. Checks,
+sandboxes and previews (untrusted) never get a dynamic user. Dynamic users count against the Atlas
+project's database user limit (100 by default, 900 at most).
+
+**The service account's role.** Give it the organization role Organization Member and, on the one
+project, **Project Database Access Admin** (`GROUP_DATABASE_ACCESS_ADMIN`). The Admin API's
+specification requires that role for creating, updating and deleting database users, and Project
+Read Only for reading users and clusters; every project role includes Project Read Only. No
+narrower role manages database users (Project Stream Processing Owner can too, but it's deprecated
+and grants much more). If the organization requires an API access list, add roll's egress
+addresses to the service account's: Atlas checks a token's use, not its creation, against the list.
+
+The flow is tested against a fake Admin API that checks the token, the versions and the bodies
+(`an_atlas_project_rotates_two_users_in_turn_and_makes_a_user_per_lease`). The calls, the token
+flow, the versions and the role follow Atlas's documentation and OpenAPI specification and haven't
+been run against a real Atlas account yet.
+
+A project a key links to, or with a retired password or a dynamic user still to delete, can't be
+deleted (409).
+
+
+
 ### GitHub App tokens
 A short-lived GitHub token per lease, from the project's own GitHub App, as Akeyless and Vault's
 GitHub plugin give: a release job gets `GITHUB_TOKEN` that reads one repository and opens pull
@@ -1564,7 +2145,7 @@ TLS certificates for services (mTLS between them), with no CA to run.
   not SHA-256). It answers `{certificate, ca, serial, names, not_after}`. Checked with
   OpenSSL's CSRs (P-256 and RSA): `openssl verify -x509_strict` passes against the CA.
 - Every certificate a CA signs is listed until it expires (`GET …/cas/{id}/certificates`: serial,
-  names, `csr` or `link`, its end, who asked, when it was revoked; `roll secrets cas certs NAME`).
+  names, `csr`, `link` or `acme`, its end, who asked, when it was revoked; `roll secrets cas certs NAME`).
   `…/cas/{id}/revoke {serial}` (`write`, audited; `roll secrets cas revoke NAME SERIAL`, the
   dashboard's Revoke) takes one back, a lost device's, say; roll revokes a lease's certificate
   when the lease ends and a managed one's when its grace runs out. The CA signs a CRL of the
@@ -1593,6 +2174,117 @@ TLS certificates for services (mTLS between them), with no CA to run.
   it expires. One CA keeps at most 10,000 certificates from CSRs valid at once. Serials are
   random, positive and never start with a zero byte, so the serial a client shows is the one to
   revoke.
+
+### ACME
+Each CA is an ACME server (RFC 8555), as Vault's PKI is: cert-manager, certbot, Caddy and lego get
+its certificates with no roll client and no roll token. Its directory is
+`<ROLL_CODE_PUBLIC_URL>/v1/secrets/acme/{ca}/directory` (the CA's ACME panel, `roll secrets cas acme
+eab ls NAME`).
+- **External Account Binding, always.** An admin of the CA's project makes a binding (`POST
+  …/cas/{id}/acme/eab {label?, names?, days?}`, audited; `roll secrets cas acme eab add NAME
+  [--name D…] [--days N] [--label L]`, the ACME panel's New binding): a key id (`eab_…`) and an
+  HMAC key, shown once and kept sealed with the project's data key. A binding is tied to its CA and
+  optionally to narrower `names` (each takes itself and every name under it, within the CA's
+  domains) and an end. An account is made only with a binding's MAC over its own key, and acts with
+  that binding's names. Every request of an account looks its binding up, never cached: revoking it
+  (`DELETE …/acme/eab/{id}`, `roll secrets cas acme eab rm NAME ID`, the panel's Revoke), its end,
+  or its maker no longer reaching the project (as with tokens they made) stops the account at once.
+  One binding makes at most 50 accounts (the same key in several clusters is fine); a CA has at most
+  200 live bindings.
+- **Names.** Every name of an order is within the CA's policy and the binding's names, or the order is
+  refused (`rejectedIdentifier`). Then each is proven:
+  - `http-01`: roll fetches `http://<name>/.well-known/acme-challenge/<token>` through rolld's
+    guarded client: public addresses only (`roll_net::PublicOnly` and the literal-address check; a
+    deployment with `ROLL_CODE_WEBHOOK_ALLOW_PRIVATE` reaches private ones), port 80, no redirects
+    followed, no proxy, 10 seconds, 8 KiB read at most. Not for wildcards.
+  - `dns-01`: roll looks up `_acme-challenge.<name>` TXT through public DNS (Cloudflare's resolvers,
+    not the fleet's own, so a private zone can't answer for a name; the system resolver where
+    private addresses are allowed), nothing cached, 10 seconds, 32 records read at most.
+  - `tls-alpn-01` (RFC 8737): roll resolves the name through the same guard as `http-01` (public
+    addresses only, unless `ROLL_CODE_WEBHOOK_ALLOW_PRIVATE`), connects to that address on port 443
+    only and makes one TLS 1.2+ handshake with SNI the name and ALPN `acme-tls/1`, all within 10
+    seconds. The server must choose `acme-tls/1`; its certificate (self-signed by design, so any is
+    taken that parses and is 16 KiB at most, while the handshake's own signatures are still
+    checked) must have exactly one subjectAltName, the name, and the critical
+    `id-pe-acmeIdentifier` extension (1.3.6.1.5.5.7.1.31) holding an OCTET STRING of SHA-256 of the
+    key authorization. Not for wildcards or IP addresses.
+  - **Reused authorizations.** A new order for a name the account already proved reuses that
+    authorization, as Let's Encrypt does (cert-manager expects it): the same account, CA and
+    identifier, the same `wildcard`, valid, with an hour or more left. The order lists it in
+    `authorizations` and is `ready` without a challenge. Reusing never extends an authorization (a
+    day from when it was made); the order ends with the earliest of its authorizations.
+  - **Pre-authorized names** (`PATCH …/cas/{id}/acme {pre_authorize: true}`, `roll secrets cas acme
+    pre-authorize NAME on`, the panel's checkbox; off by default, audited): every name an account's
+    binding takes is valid at once, with no challenge. Most internal names resolve to private
+    addresses roll's fleet can't reach, so this is the mode internal clusters (cert-manager inside a
+    VPC) use. **The binding's HMAC key is then the whole proof**: whoever holds it gets certificates
+    for every name the binding takes. Give each cluster its own binding with only its names, and an
+    end.
+- **Finalize** first checks the order's names against the CA's policy and the account's binding again
+  (`unauthorized` if either no longer takes one: an order, or an authorization it reuses, may
+  predate the change; a revoked binding stops every request), then goes through the same path as
+  `…/cas/{id}/sign`: the CSR's signature is checked and only its public key and names are taken
+  (exactly the order's names); usages and lifetime (30 days, or the
+  CA's `max_days` if shorter) are the CA's. The certificate is recorded with `source: "acme"` (the
+  CA's list, its CRL and OCSP have it) and `issued_by: "acme:<binding>"`, and audited
+  (`ca.acme.issue`, naming the binding and its maker) in the write that makes the order valid.
+  `revoke-cert` takes a certificate issued over ACME, signed by the account that ordered it or with
+  the certificate's own key (`ca.revoke`, audited); it's on the CRL at once.
+- **What's checked.** Requests are flattened JWS signed with ES256 (P-256) or RS256 (2048 bits or
+  more); `none`, HMAC and anything else are refused (`badSignatureAlgorithm`). The `url` in the
+  protected header must be the request's own; each request carries a nonce roll made within the hour
+  (a MAC with a deployment-wide key, so handing one out writes nothing) and used once (stored until it
+  would expire). `key-change` takes the old key's request wrapping the new key's. A request is 64 KiB
+  at most, an order 100 names, an account 300 orders a day. Orders and their authorizations last a
+  day (an order reusing an authorization ends with it); used nonces, old orders, authorizations no
+  live order lists and expired certificates' rows go in the sweep. Errors are RFC 8555
+  problem documents (`urn:ietf:params:acme:error:*`) and never hold key material. State lives in the
+  database: any node of a fleet answers any request; claiming a challenge or an order, using a nonce
+  and issuing are each one write, and challenges are checked outside any transaction.
+- The routes are outside the gate (`/v1/secrets/acme` is public in rolld's auth rules, as the CRL is):
+  `directory` (GET), `new-nonce` (HEAD, GET), and POSTs to `new-account`, `acct/{id}`,
+  `acct/{id}/orders`, `new-order`, `order/{id}`, `order/{id}/finalize`, `authz/{id}`, `chall/{id}`,
+  `cert/{serial}`, `revoke-cert` and `key-change`.
+
+cert-manager (inside the cluster, pre-authorized names), after `roll secrets cas acme eab add
+internal --name svc.internal --label cluster-a` printed the key:
+
+```sh
+kubectl -n cert-manager create secret generic roll-internal-eab --from-literal secret=<HMAC key>
+```
+
+```yaml
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: roll-internal
+spec:
+  acme:
+    server: https://api.roll.example/v1/secrets/acme/ca_example/directory
+    privateKeySecretRef:
+      name: roll-internal-acme-account
+    externalAccountBinding:
+      keyID: eab_example
+      keySecretRef:
+        name: roll-internal-eab
+        key: secret
+    solvers:            # cert-manager needs one; pre-authorized names never use it
+      - http01:
+          ingress:
+            ingressClassName: nginx
+```
+
+certbot and lego:
+
+```sh
+certbot certonly --server https://api.roll.example/v1/secrets/acme/ca_example/directory \
+  --eab-kid eab_example --eab-hmac-key <HMAC key> --standalone -d api.svc.internal
+lego --server https://api.roll.example/v1/secrets/acme/ca_example/directory --eab --kid eab_example \
+  --hmac <HMAC key> --email ops@svc.internal --domains api.svc.internal --http run
+```
+
+Clients that check revocation (and TLS to the directory) trust rolld's public address as any HTTPS
+client does; the certificates themselves chain to the CA's certificate (`roll secrets cas cert NAME`).
 
 ### SSH certificates
 
@@ -1751,11 +2443,16 @@ roll secrets purge   KEY [--before N]        roll secrets retention 365|forever
 roll secrets insights [--unused]             roll secrets shares [--revoke ID]
 roll secrets leases  [--renew ID | --revoke ID]
 roll secrets databases ls | add NAME [--role A --role B] [--group G] [--ca FILE] (admin URL on stdin) | rm ID
+roll secrets directories ls | add NAME --url URL --bind-dn DN [--flavor F] [--account DN…] [--user-base-dn DN] [--group DN…] [--ca FILE] (bind password on stdin) | rm ID
+roll secrets snowflake ls | add NAME --account A [--privatelink] --admin-user U [--admin-role R] --key FILE|- [--auth password] [--user U] [--role R…] | rm ID
+roll secrets atlas   ls | add NAME --group-id ID --client-id ID [--user A --user B] [--role role@db…] (client secret on stdin) | rm ID
 roll secrets aws-users ls | add NAME USER --role ROLE | rm ID
 roll secrets clouds  ls | add-gcp NAME --audience A --service-account SA | add-azure NAME --tenant T --client-id C [--scope S] | rm ID
 roll secrets kubernetes-clusters ls | add NAME API_URL [--ca FILE] (admin token on stdin) | rm ID
 roll secrets cas     ls | add NAME --domain D… [--allow-ip] [--max-days N] | cert ID | sign ID [CSR|-] [--days N] [--chain]
                      | certs ID | revoke ID SERIAL | rm ID
+                     | acme eab add ID [--name D…] [--days N] [--label L] | acme eab ls ID | acme eab rm ID EAB
+                     | acme pre-authorize ID on|off                       (`ca` is the same command)
 roll secrets ssh-cas ls | add NAME [--principal P…] [--max-hours N] [--host-domain D…] [--max-host-days N] | key ID
                      | sign-host ID [KEY.pub|-] --host H… [--days N] | known-hosts ID
                      | sign-user ID KEY.pub --principal P… [--ttl-minutes N] | rm ID
@@ -3162,10 +3859,23 @@ isn't in the workspace is 404.
 | `POST /saas` | `{name, vendor, target, credential}` | 201 `SaasRotator` (`admin`; never the credential) |
 | `DELETE /saas/{id}` | | 204; 409 while a key links to it or a retired key waits (`admin`) |
 | `GET /outside-databases` | | `OutsideDatabase[]` (`read` on the project; never the URL) |
-| `POST /outside-databases` | `{name, url, roles?: [a, b], group?, ca?}` | 201 `OutsideDatabase` (`admin`; connects and checks the roles first: 400 with the server's reason) |
+| `POST /outside-databases` | `{name, url, roles?: [a, b], group?, ca?, gateway?}` | 201 `OutsideDatabase` (`admin`; connects and checks the roles first: 400 with the server's reason) |
 | `DELETE /outside-databases/{id}` | | 204; 409 while a key links to it or a retired password waits (`admin`) |
 | `PATCH /outside-databases/{id}` | `{name?, url?, ca?}` (`ca: ""` clears it) | `OutsideDatabase` (`admin`; a new URL is checked first: 400 with the server's reason) |
 | `POST /outside-databases/{id}/rotate-admin` | | `OutsideDatabase` (`admin`; 400 when the server refuses, 409 while another rotation runs, 502 when the new password was kept but doesn't log in) |
+| `GET /directories` | | `Directory[]` (`read` on the project; never the bind password) |
+| `POST /directories` | `{name, url, bind_dn, bind_password, flavor: "openldap" \| "active_directory", user_base_dn?, managed_accounts?: [dn, dn?], groups?: [dn], ca?, gateway?}` | 201 `Directory` (`admin`; binds once and finds the accounts, groups and base first: 400 with the server's reason) |
+| `DELETE /directories/{id}` | | 204; 409 while a key links to it, or a retired password or a dynamic user waits (`admin`) |
+| `GET /snowflake-accounts` | | `SnowflakeAccount[]` (`read` on the project; never the admin key, only its fingerprint) |
+| `POST /snowflake-accounts` | `{name, account, privatelink?, admin_user, admin_role?, admin_private_key, auth?: "key_pair" \| "password", managed_user?, roles?: [role]}` | 201 `SnowflakeAccount` (`admin`; signs in once and finds the managed user and the roles first: 400 with Snowflake's reason) |
+| `DELETE /snowflake-accounts/{id}` | | 204; 409 while a key links to it, or a retired key or a dynamic user waits (`admin`) |
+| `GET /atlas-projects` | | `AtlasProject[]` (`read` on the project; the client id, never the secret) |
+| `POST /atlas-projects` | `{name, group_id, client_id, client_secret, managed_users?: [a, b], roles?: ["role@db"]}` | 201 `AtlasProject` (`admin`; takes a token and finds the managed users first: 400 with Atlas's status and error code) |
+| `DELETE /atlas-projects/{id}` | | 204; 409 while a key links to it, or a retired password or a dynamic user waits (`admin`) |
+| `GET /gateways` | | `Gateway[]` (`read` on the project), each with its link's status |
+| `POST /gateways` | `{name, token?: false}` | 201 `{gateway: Gateway, token?: "rlt_…"}` (`admin`; the token is shown once, and made only for a person or the operator) |
+| `DELETE /gateways/{id}` | | 204, its token revoked; 409 while a database, directory or identity uses it (`admin`) |
+| `GET /v1/secrets/gateways/{id}/connect` | | The gateway's WebSocket (rolld; its token, or an identity's login made for it) |
 | `GET /cloud-accounts` | | `CloudAccount[]` (`read` on the project) |
 | `POST /cloud-accounts` | `{name, cloud: "gcp", audience, service_account}` or `{name, cloud: "azure", tenant, client_id, scope?}` | 201 `CloudAccount` (`admin`; 400 when a made-up project's token is taken, or this project's isn't) |
 | `DELETE /cloud-accounts/{id}` | | 204; 409 while a key links to it (`admin`) |
@@ -3186,6 +3896,23 @@ isn't in the workspace is 404.
 | `POST /v1/secrets/ocsp/{id}` | an OCSP request (DER) | an OCSP response (`application/ocsp-response`); no token |
 | `GET /v1/secrets/ocsp/{id}/{request}` | | the same, the request base64 and URL-encoded (RFC 6960 A.1); no token |
 | `POST /cas/{id}/sign` | `{csr, days?, ttl_minutes?}` | `{certificate, ca, serial, names, not_after}` (`write`, audited); 400 for a name outside the policy or a lifetime past `max_days` |
+| `GET /cas/{id}/acme` | | `{directory, pre_authorize, challenges, bindings: AcmeBinding[]}` (`read`; `challenges` is `http-01`, `dns-01` and `tls-alpn-01`, or none without rolld's checks); a binding is `{id, label, names, expires_at, created_at, created_by, revoked_at, revoked_by, used_at, accounts}` |
+| `PATCH /cas/{id}/acme` | `{pre_authorize}` | the same (`admin`, audited) |
+| `POST /cas/{id}/acme/eab` | `{label?, names?, days?}` | 201 `AcmeBinding` with `key_id`, `hmac_key` (base64url, this answer only) and `directory` (`admin`, audited) |
+| `DELETE /cas/{id}/acme/eab/{eab}` | | 204: its accounts stop at once (`admin`, audited) |
+| `GET /v1/secrets/acme/{ca}/directory` | | the directory (RFC 8555 §7.1.1), `externalAccountRequired: true`; no token ("ACME") |
+| `HEAD /v1/secrets/acme/{ca}/new-nonce` | | 200 with `Replay-Nonce` (`GET`: 204); no token |
+| `POST /v1/secrets/acme/{ca}/new-account` | JWS (`jwk`) of `{contact?, termsOfServiceAgreed?, onlyReturnExisting?, externalAccountBinding}` | 201 and `Location` (200 for the key's existing account); `externalAccountRequired` without a binding |
+| `POST /v1/secrets/acme/{ca}/acct/{id}` | JWS (`kid`): empty, `{contact}` or `{status: "deactivated"}` | the account |
+| `POST /v1/secrets/acme/{ca}/acct/{id}/orders` | JWS, empty | `{orders}`: its orders that haven't expired |
+| `POST /v1/secrets/acme/{ca}/new-order` | JWS of `{identifiers}` (`dns`, `ip`) | 201 order (a name the account proved reuses its valid authorization); `rejectedIdentifier` outside the CA's policy or the binding's names; `rateLimited` past 300 a day |
+| `POST /v1/secrets/acme/{ca}/order/{id}` | JWS, empty | the order: `pending`, `ready`, `processing`, `valid` (with `certificate`) or `invalid` |
+| `POST /v1/secrets/acme/{ca}/order/{id}/finalize` | JWS of `{csr}` | the order, `valid`; `orderNotReady`, `badCSR` (names other than the order's), `unauthorized` (a name the CA's policy or the binding no longer takes) |
+| `POST /v1/secrets/acme/{ca}/authz/{id}` | JWS: empty or `{status: "deactivated"}` | the authorization and its challenges |
+| `POST /v1/secrets/acme/{ca}/chall/{id}` | JWS: empty, or `{}` to validate now | the challenge, `valid` or `invalid` with its `error` |
+| `POST /v1/secrets/acme/{ca}/cert/{serial}` | JWS, empty | `application/pem-certificate-chain`: the certificate, then the CA's |
+| `POST /v1/secrets/acme/{ca}/revoke-cert` | JWS (`kid`, or the certificate's key as `jwk`) of `{certificate, reason?}` | 200; on the CRL at once; `alreadyRevoked` |
+| `POST /v1/secrets/acme/{ca}/key-change` | JWS wrapping the new key's JWS of `{account, oldKey}` | the account; 409 and `Location` if another account has the new key |
 | `GET /ssh-cas` | | `SshCa[]` (`read` on the project; public keys, never private ones) |
 | `POST /ssh-cas` | `{name, principals, max_hours?, host_domains?, max_host_days?}` | 201 `SshCa` (`admin`) |
 | `DELETE /ssh-cas/{id}` | | 204; 409 while a key links to it (`admin`) |
@@ -3283,7 +4010,8 @@ type Request = { id: string; environment: string; path: string; message: string;
 type FolderPolicy = { path: string; approvals: number; approvers: string[]; created_at: number; created_by: string };
 type LinkTarget = { kind: string; ref: string; name: string; fields: { field: string; label: string; modes: Link["mode"][]; secret: boolean; suggest: string; credential?: string }[] };
 type Lease = { id: string; environment: string; path: string; key: string; kind: "dynamic" | "retired"; link: Link | null; consumer: string; issued_at: number; expires_at: number; revoked_at: number | null };
-type Identity = { id: string; name: string; issuer: string; audience: string; subject: string; claims: Record<string, string>; environments: string[] | null; paths: string[] | null; actions: Action[]; ttl_minutes: number; created_at: number; created_by: string; last_used_at: number | null; last_subject: string | null; allowed_ips: string[] | null; pinned_keys?: number };
+type Identity = { id: string; name: string; issuer: string; audience: string; subject: string; claims: Record<string, string>; environments: string[] | null; paths: string[] | null; actions: Action[]; ttl_minutes: number; created_at: number; created_by: string; last_used_at: number | null; last_subject: string | null; allowed_ips: string[] | null; pinned_keys?: number; gateway?: string }; // gateway: it logs that gateway in (no environments, paths or actions)
+type Gateway = { id: string; name: string; token_id?: string; created_at: number; created_by: string; status: { online: boolean; node?: string; version?: string; allow: string[]; connected_at?: number; last_seen_at?: number } };
 type NewIdentity = { name: string; issuer: string; audience: string; subject: string; claims?: Record<string, string>; environments?: string[]; paths?: string[]; actions: Action[]; ttl_minutes?: number; allowed_ips?: string[]; jwks?: string };
 type Token = { id: string; name: string; environments: string[] | null; paths: string[] | null; actions: Action[]; expires_at: number | null; created_at: number; created_by: string; last_used_at: number | null; prefix: string; allowed_ips: string[] | null };
 type NewToken = { name: string; environments?: string[]; paths?: string[]; actions: Action[]; expires_at?: number; ttl_days?: number; allowed_ips?: string[] };
@@ -4159,8 +4887,8 @@ Open pull requests after this one:
 - **#43, dynamic GCP and Azure credentials** (after #20): roll as an OIDC issuer
   (`/v1/secrets/oidc`); GCP's workload identity federation and Azure's federated credentials trust
   its token for one project, checked with a decoy project at registration.
-- **#42, MongoDB outside roll** (after #41): rotation and a user per lease for Atlas and replica
-  sets; the primary only among the seeds, SRV targets inside their domain, SCRAM with the server's
+- **#42, MongoDB outside roll** (after #41): rotation and a user per lease for replica sets (not
+  Atlas, which refuses the user commands on every tier: "MongoDB Atlas" uses its Admin API); the primary only among the seeds, SRV targets inside their domain, SCRAM with the server's
   signature checked.
 - **#41, Redis outside roll** (after #39): two ACL users take turns (`#<sha256>` passwords), or a
   user per lease copying a template user's rules; the tenant's replies read by a bounded parser.

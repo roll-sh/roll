@@ -71,12 +71,17 @@ pub struct Connection {
     pub created_at: i64,
     /// What to register at the provider as the sign-in redirect.
     pub redirect_uri: String,
+    /// What to register at the provider as its back-channel logout URI (OIDC Back-Channel Logout).
+    pub backchannel_logout_uri: String,
     /// The TXT record that proves a domain: `name` with the domain in place of `<domain>`.
     pub dns: DnsRecord,
     /// Its provider provisions people over SCIM (it has a live token).
     pub scim: bool,
     /// Its SCIM token was found leaked and revoked: where (until an admin makes a new one).
     pub scim_leaked: Option<String>,
+    /// How long a session it signs in lasts at most, in hours (none: roll's 30 days), as Okta's
+    /// and Google Workspace's session lengths: then the person signs in through it again.
+    pub session_hours: Option<u32>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -115,6 +120,9 @@ pub struct ConnectionChange {
     pub enforce: Option<bool>,
     #[serde(default)]
     pub provision: Option<bool>,
+    /// The longest a session it signs in lasts, in hours (1 to 720); 0 takes the cap off.
+    #[serde(default)]
+    pub session_hours: Option<u32>,
 }
 
 /// TXT records, for proving domains (DNS over HTTPS by default; a table in tests).
@@ -196,7 +204,7 @@ fn is_entra(issuer: &str) -> bool {
     url::Url::parse(issuer).ok().and_then(|u| u.host_str().map(str::to_ascii_lowercase)).is_some_and(|h| h == "login.microsoftonline.com" || h == "sts.windows.net")
 }
 
-const COLUMNS: &str = "id, name, issuer, client_id, domains, verified, enforce, provision, created_at, challenge, (SELECT COUNT(*) FROM scim_tokens t WHERE t.connection_id = sso_connections.id AND t.leaked IS NULL) AS scim, (SELECT leaked FROM scim_tokens t WHERE t.connection_id = sso_connections.id) AS scim_leaked";
+const COLUMNS: &str = "id, name, issuer, client_id, domains, verified, enforce, provision, created_at, challenge, (SELECT COUNT(*) FROM scim_tokens t WHERE t.connection_id = sso_connections.id AND t.leaked IS NULL) AS scim, (SELECT leaked FROM scim_tokens t WHERE t.connection_id = sso_connections.id) AS scim_leaked, session_hours";
 
 impl Accounts {
     fn sso_redirect_uri(&self, id: &str) -> String {
@@ -209,6 +217,7 @@ impl Accounts {
         let challenge: String = r.get(9)?;
         Ok(Connection {
             redirect_uri: self.sso_redirect_uri(&id),
+            backchannel_logout_uri: format!("{}/v1/accounts/sso/{id}/backchannel-logout", self.config.api_url),
             id,
             name: r.get(1)?,
             issuer: r.get(2)?,
@@ -221,6 +230,7 @@ impl Accounts {
             dns: DnsRecord { name: "_roll-sso.<domain>".into(), value: format!("roll-sso={challenge}") },
             scim: r.get::<_, i64>(10)? > 0,
             scim_leaked: r.get(11)?,
+            session_hours: r.get::<_, Option<i64>>(12)?.and_then(|h| u32::try_from(h).ok()).filter(|h| *h > 0),
         })
     }
 
@@ -346,6 +356,21 @@ impl Accounts {
             }
             if let Some(p) = ch.provision {
                 c.execute("UPDATE sso_connections SET provision = ? WHERE id = ?", params![p, id])?;
+            }
+            if let Some(h) = ch.session_hours {
+                if h > 720 {
+                    return Err(Error::BadRequest("a session lasts 1 to 720 hours (0 takes the cap off)".into(), None));
+                }
+                c.execute("UPDATE sso_connections SET session_hours = ? WHERE id = ?", params![(h > 0).then_some(h as i64), id])?;
+                // A shorter cap applies to the sessions it already signed in, now.
+                if h > 0 {
+                    let cap = h as i64 * 3_600_000;
+                    c.execute(
+                        "UPDATE sessions SET cap_ms = ?, expires_at = CASE WHEN created_at + ? < expires_at THEN created_at + ? ELSE expires_at END \
+                         WHERE method = 'sso' AND user_id IN (SELECT user_id FROM identities WHERE provider = ?)",
+                        params![cap, cap, cap, provider],
+                    )?;
+                }
             }
             if let Some(e) = ch.enforce {
                 c.execute("UPDATE sso_connections SET enforce = ? WHERE id = ?", params![e, id])?;
@@ -596,9 +621,15 @@ impl Accounts {
             return Err(Error::BadRequest("that Google account isn't one of the company's Workspace accounts".into(), Some("domain")));
         }
         let subject = jwt.str("sub").filter(|s| !s.is_empty() && s.len() <= 255).ok_or_else(|| failed("no subject"))?.to_string();
+        // The provider's session, for its back-channel logout to end this one by.
+        let sid = jwt.str("sid").filter(|s| !s.is_empty() && s.len() <= 255).map(str::to_string);
         let name = jwt.str("name").map(|n| n.chars().filter(|c| !c.is_control()).take(100).collect::<String>());
         let id = id.to_string();
-        blocking(self, move |a| a.sso_finish(&id, st, &email, &subject, name.as_deref())).await
+        let finished = blocking(self, move |a| a.sso_finish(&id, st, &email, &subject, name.as_deref())).await?;
+        Ok(match finished {
+            Finished::SignIn { user, return_to, new, .. } => Finished::SignIn { user, return_to, new, sid },
+            other => other,
+        })
     }
 
     fn sso_finish(&self, id: &str, st: crate::oauth::State, email: &str, subject: &str, name: Option<&str>) -> Result<Finished> {
@@ -660,7 +691,7 @@ impl Accounts {
         match next {
             Next::SignIn(user, new) => {
                 tracing::info!(user = %user, connection = %id, "accounts: SSO sign-in");
-                Ok(Finished::SignIn { user, return_to: st.return_to, new })
+                Ok(Finished::SignIn { user, return_to: st.return_to, new, sid: None })
             }
             Next::Linked => Ok(Finished::Linked { return_to: st.return_to }),
             Next::Create { provision } => {
@@ -669,9 +700,76 @@ impl Accounts {
                     None if provision => (self.provision_user(email, name, Some((&provider, subject)), &provider)?, "provisioned"),
                     None => return Err(Error::BadRequest("no account has this email, and there was no invite".into(), Some("not_invited"))),
                 };
-                Ok(Finished::SignIn { user, return_to: st.return_to, new: Some(new) })
+                Ok(Finished::SignIn { user, return_to: st.return_to, new: Some(new), sid: None })
             }
         }
+    }
+
+    /// OIDC Back-Channel Logout 1.0: the connection's provider says a person signed out there (or
+    /// an admin ended their sessions). The logout token is verified as an ID token is (the
+    /// provider's keys, issuer, roll's client as audience, its times), carries the back-channel
+    /// logout event and no nonce, names a `sid` or a `sub`, and is used once (`jti`). The sessions
+    /// this connection signed in for it end: the provider's session by `sid`, else the person's.
+    /// How many ended.
+    pub async fn backchannel_logout(self: &Arc<Self>, id: &str, logout_token: &str) -> Result<usize> {
+        let bad = |what: &str| Error::BadRequest(format!("the logout token: {what}"), Some("logout_token"));
+        let (id2, conn) = (id.to_string(), self.sso_connection(id)?);
+        let ep = self.discover(&conn.issuer).await.map_err(|e| bad(&e))?;
+        let jwt = roll_oidc::Jwt::parse(logout_token).map_err(|e| bad(&e.to_string()))?;
+        let now_s = chrono_now_s();
+        let check = |jwks: &str| roll_oidc::Keys::default().verify(None, Some(jwks), &jwt, &ep.issuer, &conn.client_id, now_s);
+        let jwks = self.keys(&conn.issuer, &ep, false).await.map_err(|e| bad(&e))?;
+        if let Err(first) = check(&jwks) {
+            let fresh = self.keys(&conn.issuer, &ep, true).await.map_err(|e| bad(&e))?;
+            check(&fresh).map_err(|_| bad(&first.to_string()))?;
+        }
+        if !jwt.claims.get("events").and_then(Value::as_object).is_some_and(|e| e.get("http://schemas.openid.net/event/backchannel-logout").is_some_and(Value::is_object)) {
+            return Err(bad("it isn't a back-channel logout (its events)"));
+        }
+        if jwt.claims.contains_key("nonce") {
+            return Err(bad("a logout token has no nonce"));
+        }
+        let sid = jwt.str("sid").filter(|s| !s.is_empty() && s.len() <= 255).map(str::to_string);
+        let sub = jwt.str("sub").filter(|s| !s.is_empty() && s.len() <= 255).map(str::to_string);
+        if sid.is_none() && sub.is_none() {
+            return Err(bad("it names no session (sid) and no person (sub)"));
+        }
+        let jti = jwt.str("jti").filter(|j| !j.is_empty() && j.len() <= 255).ok_or_else(|| bad("it has no jti"))?.to_string();
+        let exp = jwt.claims.get("exp").and_then(Value::as_i64).unwrap_or(now_s + 300);
+        let jti_hash = sha256_hex(&format!("{id2}:{jti}"));
+        let provider = format!("sso:{id2}");
+        let p2 = provider.clone();
+        let (ended, user) = blocking(self, move |a| {
+            let now = a.db.now_ms()?;
+            a.db.write(|c| {
+                c.execute("DELETE FROM logout_tokens WHERE expires_at <= ?", [now])?;
+                if c.query_row("SELECT 1 FROM logout_tokens WHERE jti_hash = ?", [jti_hash.as_str()], |_| Ok(())).optional()?.is_some() {
+                    return Err(Error::BadRequest("the logout token: it was used already".into(), Some("logout_token")));
+                }
+                c.execute("INSERT INTO logout_tokens (jti_hash, expires_at) VALUES (?, ?)", params![jti_hash, (exp + 60) * 1000])?;
+                let user: Option<String> = match &sub {
+                    Some(s) => c.query_row("SELECT user_id FROM identities WHERE provider = ? AND subject = ?", [p2.as_str(), s.as_str()], |r| r.get(0)).optional()?,
+                    None => None,
+                };
+                // The provider's session by its sid; else (no sid, or one roll never saw) the person's.
+                let mut n = match &sid {
+                    Some(sid) => c.execute("DELETE FROM sessions WHERE sso_connection = ? AND sso_sid = ?", [id2.as_str(), sid.as_str()])?,
+                    None => 0,
+                };
+                if n == 0
+                    && let Some(u) = &user
+                {
+                    n = c.execute("DELETE FROM sessions WHERE sso_connection = ? AND user_id = ?", [id2.as_str(), u.as_str()])?;
+                }
+                Ok::<_, Error>((n, user))
+            })
+        })
+        .await?;
+        if let Some(u) = &user {
+            self.record(crate::audit::AccountEvent { actor: provider.clone(), action: "session.end".into(), method: "-".into(), target: Some(u.clone()), ok: true, status: 200, ip: None, user_agent: None, detail: json!({ "via": "backchannel_logout", "ended": ended }) });
+        }
+        tracing::info!(connection = %id, ended, "accounts: an SSO provider's back-channel logout");
+        Ok(ended)
     }
 }
 
