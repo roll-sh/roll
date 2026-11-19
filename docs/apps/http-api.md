@@ -61,7 +61,7 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `POST /v1/apps/projects/{project}/notifications/{nid}/test` | | `{ ok, code, error }` (sent now, not retried) | write |
 | `GET /v1/apps/projects/{project}/notifications/{nid}/deliveries` | | `Delivery[]`, newest first (50) | read |
 | `GET /v1/apps/projects/{project}/drains` | | `LogDrain[]` (the URL never returned, only its host) | read |
-| `POST /v1/apps/projects/{project}/drains` | `{ url, format?, sources?, environments?, services?, previews?, headers? }` (https, a public host, or `syslog+tls://host:port` for `format: "syslog"`, which takes no headers; `sources` some of `runtime` (default), `http`, `build`; services by name or id; `headers` `{name: value}`, at most 10, sealed, never roll's own or `content-type`) | 201 `LogDrain` + `secret` once | reveal (its secret comes back) |
+| `POST /v1/apps/projects/{project}/drains` | `{ url, format?, sources?, environments?, services?, previews?, headers? }` (https, a public host, or `syslog+tls://host:port` for `format: "syslog"`, which takes no headers; `sources` some of `runtime` (default), `http`, `build`, `audit`; services by name or id; `headers` `{name: value}`, at most 10, sealed, never roll's own or `content-type`) | 201 `LogDrain` + `secret` once | reveal (its secret comes back) |
 | `PATCH /v1/apps/projects/{project}/drains/{did}` | `{ sources?, environments?, services?, previews?, headers? }` (given ones replace, `headers` all of them; a new URL or format is a new drain) | `LogDrain` | reveal (it can send more out) |
 | `POST /v1/apps/projects/{project}/drains/{did}/test` | | `{ ok, code, error }` (one line sent now, signed and with its headers, not retried; `code` null for syslog) | write |
 | `DELETE /v1/apps/projects/{project}/drains/{did}` | | 204 | write |
@@ -700,7 +700,7 @@ type SpendLimits = { alert_usd: number | null; hard_usd: number | null; month_us
  *  oldest lines. At most 5 a project. */
 type LogDrain = {
   id: string; project: string; host: string; created_at: number; secret?: string;
-  sources: ("runtime" | "http" | "build")[]; // runtime: the instances' output and roll's lines about them; http: the access log, a request a line (text: an AccessLine); build: each deploy's build
+  sources: ("runtime" | "http" | "build" | "audit")[]; // runtime: the instances' output and roll's lines about them; http: the access log, a request a line (text: an AccessLine); audit: each audit entry as it's written (stream "system", text JSON {event: "audit.<what>", data: {actor, …}}; a service's own, such as audit.deleted, has environment ""); build: each deploy's build
   environments: string[];     // only these environments' (empty: every one)
   services: string[];         // only these services' (ids; empty: every one)
   previews: boolean;          // preview environments' too (a drain made before this field: true), and a preview's services on roll's own runtime (its `pv-` environment, `service` null: never to a drain narrowed to `services`)
@@ -719,7 +719,7 @@ type AccessLine = {
 };
 /** A volume's backup: a tar in object storage (`apps/volumes/<service>/<env>/<id>.tar`). */
 type Backup = { id: string; at: number; size: number };
-type NotifyTarget = { id: string; project: string; kind: "webhook" | "slack" | "discord" | "teams" /* a Workflows (…logic.azure.com, …powerplatform.com) or …webhook.office.com URL: an Adaptive Card */ | "googlechat" /* https://chat.googleapis.com/v1/spaces/…: text, no mentions */ | "email" | "pagerduty" | "opsgenie"; host: string /* an email target's: "the project's owner" */; events: ("deploy.failed" | "deploy.base_updated" | "rollout.waiting" | "deploy.ready" | "crash_loop" | "deploy.active" | "spend.alert" | "spend.limit" | "alert.memory" | "alert.errors" | "alert.latency" | "alert.capacity" | "alert.log" | "error.new" | "cron.failed" | "job.failed" | "domain.active" | "domain.expiring" | "domain.expired" | "domain.tls_failed" | "volume.backup_failed" | "volume.full" | "form.submitted" | "check.down" | "heartbeat.missed" | "deploy.vulnerable" | "alert.slo")[];
+type NotifyTarget = { id: string; project: string; kind: "webhook" | "slack" | "discord" | "teams" /* a Workflows (…logic.azure.com, …powerplatform.com) or …webhook.office.com URL: an Adaptive Card */ | "googlechat" /* https://chat.googleapis.com/v1/spaces/…: text, no mentions */ | "email" | "pagerduty" | "opsgenie"; host: string /* an email target's: "the project's owner" */; events: ("deploy.failed" | "deploy.base_updated" | "rollout.waiting" | "deploy.ready" | "crash_loop" | "deploy.active" | "spend.alert" | "spend.limit" | "alert.memory" | "alert.errors" | "alert.latency" | "alert.capacity" | "alert.log" | "error.new" | "cron.failed" | "job.failed" | "domain.active" | "domain.expiring" | "domain.expired" | "domain.tls_failed" | "volume.backup_failed" | "volume.full" | "form.submitted" | "check.down" | "heartbeat.missed" | "deploy.vulnerable" | "alert.slo" | "audit" /* every audit.* entry, as the event log has it (never on pagerduty or opsgenie) */)[];
   environments: string[];  // only these environments' events; empty: every one's
   services: string[];      // only these services' (ids); empty: every one's
   previews: boolean;       // preview (ephemeral) environments' events too (an environment named in `environments` always)

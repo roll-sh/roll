@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// What a target can ask for; a new one gets the two that need someone.
-pub const EVENTS: [&str; 27] = [
+pub const EVENTS: [&str; 28] = [
     "deploy.failed",
     "deploy.base_updated",
     "rollout.waiting",
@@ -46,6 +46,8 @@ pub const EVENTS: [&str; 27] = [
     "heartbeat.missed",
     "deploy.vulnerable",
     "alert.slo",
+    // Every `audit.*` entry (who changed what), for a SIEM's webhook; never an on-call page.
+    "audit",
 ];
 const DEFAULT_EVENTS: [&str; 21] = ["check.down", "heartbeat.missed", "alert.slo", "deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"];
 /// Whether a target with `events` hears an event: its own kind, or for a resolution, the alert's
@@ -55,6 +57,7 @@ fn wants(events: &[String], kind: &str, data: &Value, oncall: bool) -> bool {
         "alert.resolved" => data["alert"].as_str().is_some_and(|a| events.iter().any(|e| e == a)),
         // An on-call target that pages on failed deploys hears the next good one: it closes them.
         "deploy.active" if oncall => events.iter().any(|e| e == "deploy.failed" || e == "deploy.active"),
+        k if k.starts_with("audit.") => !oncall && events.iter().any(|e| e == "audit"),
         k => events.iter().any(|e| e == k),
     }
 }
@@ -317,8 +320,9 @@ impl Apps {
             let p = match e.data["project"].as_str().filter(|_| e.service.is_empty()) {
                 Some(p) => p.to_string(),
                 None => {
-                    let sid = e.service.clone();
-                    let Ok(svc) = self.db(move |s| s.service(&sid)).await else { continue };
+                    // A deleted service's own entry (`audit.deleted`) is still its project's.
+                    let (sid, audit) = (e.service.clone(), e.kind.starts_with("audit."));
+                    let Ok(svc) = self.db(move |s| if audit { s.service_any(&sid).map(|(s, _)| s) } else { s.service(&sid) }).await else { continue };
                     svc.project
                 }
             };
@@ -385,7 +389,7 @@ impl Apps {
     /// An event for a person: a title and a line.
     async fn describe(self: &Arc<Self>, e: &Event) -> (String, String) {
         let sid = e.service.clone();
-        let name = self.db(move |s| s.service(&sid)).await.map(|s| s.name).unwrap_or_else(|_| e.service.clone());
+        let name = self.db(move |s| s.service_any(&sid)).await.map(|(s, _)| s.name).unwrap_or_else(|_| e.service.clone());
         let what = format!("{name} in {}", e.environment);
         let rev = e.data["revision"].as_str().map(|r| format!(" ({})", &r[..r.len().min(8)])).unwrap_or_default();
         // Who asked for the deploy, when someone did.
@@ -405,6 +409,14 @@ impl Apps {
         };
         let rev = format!("{rev}{by}");
         match e.kind.as_str() {
+            k if k.starts_with("audit.") => {
+                let what = if e.environment.is_empty() { name.clone() } else { what };
+                let who = e.data["actor"].as_str().unwrap_or("someone");
+                let mut fields = e.data.as_object().cloned().unwrap_or_default();
+                fields.remove("actor");
+                let said = if fields.is_empty() { String::new() } else { format!(" {}", Value::Object(fields)) };
+                (format!("{what}: {}", &k[6..]), format!("{who} did {}{said}.", &k[6..]))
+            }
             "deploy.failed" => (format!("{what}: deploy failed"), format!("The deploy{rev} failed: {}. The live deployment keeps serving.", e.data["error"].as_str().unwrap_or("no reason given"))),
             "deploy.active" => (format!("{what}: deployed"), format!("A new deployment{rev} is live.")),
             "rollout.waiting" => (
@@ -658,6 +670,15 @@ fn slack_escape(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn audit_entries_go_to_who_asks_and_never_page() {
+        let ev = |e: &[&str]| e.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let data = serde_json::json!({});
+        assert!(super::wants(&ev(&["audit"]), "audit.variables", &data, false));
+        assert!(!super::wants(&ev(&["audit"]), "audit.variables", &data, true), "never an on-call page");
+        assert!(!super::wants(&super::DEFAULT_EVENTS.map(String::from), "audit.variables", &data, false), "not by default");
+    }
+
     #[test]
     fn slack_text_can_not_mention_or_link() {
         assert_eq!(super::slack_escape("<!channel> <https://evil|Approve> & co"), "&lt;!channel&gt; &lt;https://evil|Approve&gt; &amp; co");
