@@ -549,6 +549,8 @@ export const previewsApi = {
   closeShell: (id: string, sh: string) => call<null>("DELETE", `${one(id)}/shell/sessions/${encodeURIComponent(sh)}`),
   /** Its recent traces (the project's `traces`), newest first, masked. */
   traces: (id: string, minutes?: number) => call<{ minutes: number; traces: TraceSummary[] }>("GET", `${one(id)}/traces${query({ minutes })}`),
+  /** Each route's time from its traces against main's preview's same route, the slower ones first. */
+  routes: (id: string, minutes?: number) => call<{ minutes: number; main: string | null; routes: RouteTime[] }>("GET", `${one(id)}/routes${query({ minutes })}`),
   /** One trace's spans, oldest first, masked. */
   trace: (id: string, trace: string) => call<{ trace: string; spans: TraceSpan[] }>("GET", `${one(id)}/traces/${encodeURIComponent(trace)}`),
   logs: (id: string, opts: { service?: string; lines?: number } = {}) =>
@@ -601,6 +603,8 @@ export type ServiceMetrics = { service: string; cpu: number; memory_bytes: numbe
 
 /** One of a preview's recent traces: its root span's name and service, when (ms), how long, how many spans, whether any failed. */
 export type TraceSummary = { trace: string; name: string; service: string; start_ms: number; ms: number; spans: number; error: boolean };
+/** A route's time from a preview's traces (a root span's name): how many, p50 and p95 (ms), main's preview's p50 for it, and whether it's clearly slower. */
+export type RouteTime = { name: string; count: number; p50_ms: number; p95_ms: number; main_p50_ms: number | null; main_count: number; slower: boolean };
 /** A span of a trace (times in Unix nanoseconds), its attributes as name/value pairs. */
 export type TraceSpan = { trace: string; span: string; parent?: string; name: string; service?: string; start: number; end: number; error?: boolean; attrs?: [string, string][] };
 
