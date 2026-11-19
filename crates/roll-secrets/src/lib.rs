@@ -90,6 +90,7 @@ pub use requests::{Request, RequestValue, Review, Verdict};
 pub use exports::Export;
 pub use decoys::{Decoy, NewDecoy};
 pub use identities::{Identity, IdentityKind, Login, NewIdentity, Proof};
+pub use issuer::Subject;
 pub use required::Required;
 pub use shares::{NewShare, Peek, Share};
 pub use value_requests::{Answer, NewValueRequest, ValuePeek, ValueRequest};
@@ -427,6 +428,8 @@ pub struct Secrets {
     live_fps: read::LiveFps,
     /// Which issuer key rows are roll's, as last checked (issuer.rs).
     issuer_keys: issuer::Checked,
+    /// Days between the issuer key's scheduled rotations (issuer.rs).
+    issuer_rotate_days: std::sync::atomic::AtomicU32,
     /// Folders' digests as last computed, each with the database state it came from (read.rs).
     digests: read::Digests,
     /// ACME's challenge checks and nonce key (acme.rs).
@@ -537,6 +540,11 @@ impl Secrets {
         // How a role trusts roll (aws.rs): absent is the ExternalId, as before there were two.
         db.add_column("aws_roles", "trust", "TEXT")?;
         db.ensure_schema(issuer::SCHEMA)?;
+        // The issuer key's rotation (issuer.rs): when a key signs from, and when it left the JWKS.
+        db.add_column("oidc_keys", "signs_from", "INTEGER")?;
+        db.add_column("oidc_keys", "retired_at", "INTEGER")?;
+        // An emergency rotation pulled it out of the JWKS at once (health names it a while).
+        db.add_column("oidc_keys", "pulled_at", "INTEGER")?;
         db.ensure_schema(clouds::SCHEMA)?;
         db.ensure_schema(iam::SCHEMA)?;
         // An incident's cut-off (cutoff.rs): frozen folders, disabled identities, paused syncs,
@@ -617,7 +625,7 @@ impl Secrets {
         if let (Some(github), Ok(keys)) = (&opts.github, &opts.keyring) {
             links.register(Arc::new(github_app::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone(), github: github.clone() }));
         }
-        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, workloads: opts.workloads, gateway_links: opts.gateways, unwrap: unwrap.clone(), open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, outside: opts.outside, directory: opts.directory, github: opts.github, oidc: Default::default(), logins: Default::default(), answers: Default::default(), reads_per_minute: read::READS_PER_MINUTE.into(), code_refs: Default::default(), sts: opts.sts.clone(), clouds: opts.clouds, public_api, aws_server_id: Default::default(), crls, live_fps: Default::default(), issuer_keys: Default::default(), digests: Default::default(), counters: Default::default(), acme: Default::default(), recorder: Default::default() })
+        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, workloads: opts.workloads, gateway_links: opts.gateways, unwrap: unwrap.clone(), open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, outside: opts.outside, directory: opts.directory, github: opts.github, oidc: Default::default(), logins: Default::default(), answers: Default::default(), reads_per_minute: read::READS_PER_MINUTE.into(), code_refs: Default::default(), sts: opts.sts.clone(), clouds: opts.clouds, public_api, aws_server_id: Default::default(), crls, live_fps: Default::default(), issuer_keys: Default::default(), issuer_rotate_days: issuer::ROTATE_DAYS.into(), digests: Default::default(), counters: Default::default(), acme: Default::default(), recorder: Default::default() })
     }
 
     pub fn links(&self) -> &Links {
@@ -707,7 +715,12 @@ impl Secrets {
             Err(_) => serde_json::Value::Null,
         };
         let customer_managed = self.db.read(|c| c.query_row("SELECT COUNT(*) FROM projects WHERE dek LIKE 'kms:%'", (), |r| r.get::<_, i64>(0)))?;
-        Ok(serde_json::json!({ "ok": self.keys.is_ok(), "key": self.key_source, "resealed": resealed, "customer_managed": customer_managed, "links": self.links.kinds().map(|p| p.kind().to_string()).collect::<Vec<_>>(), "syncs": self.syncs.kinds().map(|t| t.kind().to_string()).collect::<Vec<_>>() }))
+        // Issuer keys an emergency rotation pulled: what still trusted them needs to know.
+        let pulled: Vec<serde_json::Value> = issuer::pulled(&self.db)?
+            .into_iter()
+            .map(|(kid, at)| serde_json::json!({ "kid": kid, "pulled_at": at, "detail": format!("roll's issuer key {kid} was pulled: tokens it signed no longer verify, and a cloud trust or verifier that pinned it (not roll's JWKS) needs the new key") }))
+            .collect();
+        Ok(serde_json::json!({ "ok": self.keys.is_ok(), "key": self.key_source, "resealed": resealed, "customer_managed": customer_managed, "issuer_pulled": pulled, "links": self.links.kinds().map(|p| p.kind().to_string()).collect::<Vec<_>>(), "syncs": self.syncs.kinds().map(|t| t.kind().to_string()).collect::<Vec<_>>() }))
     }
 
     /// Forget everything about a project (its workspace project was deleted). What it issued is
@@ -719,7 +732,7 @@ impl Secrets {
         let failed = self.revoke_managed(self.managed_where("project_id = ?", project));
         let now = self.db.now_ms()?;
         self.db.write(|c| {
-            for t in ["secrets", "versions", "changes", "requests", "audit", "required", "shares", "value_requests", "syncs", "audit_sinks", "notices", "identities", "identity_logins", "transit_keys"] {
+            for t in ["secrets", "versions", "changes", "requests", "audit", "required", "shares", "value_requests", "syncs", "audit_sinks", "notices", "identities", "identity_logins", "transit_keys", "oidc_issued"] {
                 c.execute(&format!("DELETE FROM {t} WHERE project_id = ?"), [project])?;
             }
             c.execute("DELETE FROM leases WHERE project_id = ? AND revoked_at IS NOT NULL", [project])?;
