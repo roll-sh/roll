@@ -516,7 +516,7 @@ async fn run() -> anyhow::Result<()> {
             if let Some(internal) = p.internal {
                 router = router.merge(internal);
             }
-            Some(p.runtime)
+            Some((p.runtime, p.engine))
         }
         None => None,
     };
@@ -529,6 +529,10 @@ async fn run() -> anyhow::Result<()> {
     if let Some(a) = &apps {
         a.apps.set_mailbox(std::sync::Arc::new(apps::AccountsMail(accounts.clone())));
         a.apps.set_visitors(std::sync::Arc::new(apps::AccountsVisitors(accounts.clone())));
+    }
+    // roll previews' team access asks the same accounts, and the workspace for who owns what.
+    if let Some((_, engine)) = &preview_hosts {
+        let _ = engine.visitors.set(std::sync::Arc::new(previews::AccountsVisitors { accounts: accounts.clone(), workspace: workspace.clone() }));
     }
     router = router.merge(roll_accounts::router(accounts.clone()));
     // The products this node runs, as rules name them: MCP lists their tools, the token builder
@@ -649,7 +653,7 @@ async fn run() -> anyhow::Result<()> {
     if let Some(a) = &apps {
         router = apps_control::public::with_forwarded(router, a.apps.clone());
     }
-    if let Some(rt) = &preview_hosts {
+    if let Some((rt, _)) = &preview_hosts {
         router = router.layer(axum::middleware::from_fn_with_state(rt.clone(), roll_previews::runtime::route));
     }
     // In a cluster, requests from other nodes are verified first.
