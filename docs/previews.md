@@ -2050,7 +2050,9 @@ Every feature in review has its `roll preview` command too: `shell` (#364).
 7. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
 8. **Watch: pg-control's recovery to a time seconds old** (unowned).
-9. **Watch: a cold start on a Docker name conflict.**
+9. **A cold start on a Docker name conflict, in review** (#374): a start whose container name is
+   still being removed (a stop just before it) removes it again and tries twice more, half a
+   second apart, before it fails.
 
 Landed in previews' lock turn of 2026-11-19 (main 5eb41bf5f, exactly the gated tree: one
 combined tree, each step tagged, gated once with both live checks, landing simulated with
