@@ -3920,7 +3920,9 @@ inconsistencies are fixed in #264:
    oracle), marked `X-Roll-Guard: 1` (#169 audits it apart). *Waits on roll MCP:* #114 (`roll-oidc`, approved here), the GitHub Action's `client-id` mode
    (their diff, reviewed here), and their `roll_machine_client` Terraform resource (their diff
    comes here first).
-11. *roll search's #134* (inference keys from roll secrets): re-reviewed and approved 2026-11-18 (a
+11. *roll search's #134* (inference keys from roll secrets): on main (e7d0389af, 2026-11-19); offered for
+    services taking an `api_key` or Entra ID; Bedrock's access keys and Vertex's service account (several
+    fields) are a later step. Re-reviewed and approved 2026-11-18 (a
     comment on the PR): product-made syncs need `reveal`, every push re-checks its maker, the pin is
     checked before and after `_update`. Follow-up: show "pushes as <maker>" and warn before it fails. Earlier: approved once its pin covers the endpoint's whole destination
    (`service_settings` but the key, rate limit and allocations; `task_settings` where they route).
