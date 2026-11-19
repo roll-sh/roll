@@ -1,5 +1,7 @@
 //! roll search node: HTTP listener, tenants, auth, wake-on-request, idle unload, TLS.
 //!
+//! - [`allow`]: a cluster's IP allowlist, checked before authentication, and how a listener
+//!   decides a request's client address (PROXY protocol, a trusted proxy's header).
 //! - [`node::Node`] holds the loaded clusters: it authenticates and routes requests
 //!   ([`auth`]), wakes clusters from their [`catalog::StoreProvider`], enforces per-cluster
 //!   limits and unloads idle clusters.
@@ -9,6 +11,7 @@
 //!   as cluster states, shards through [`persist`] (WAL cut records, segments, manifests).
 //!   [`catalog::MemoryStores`] keeps everything in memory.
 //! - [`lease`]: cluster ownership for several nodes on one bucket (epochs fence deposed nodes).
+//! - [`audit`]: each cluster's security audit log, kept next to its data.
 //! - [`limits`]: per-tenant rate and byte budgets and the node-wide fair scheduler.
 //! - [`meta_guard`]: cluster states are saved only if they load again (no unwakeable clusters).
 //! - [`process`]: allocator and kernel tuning so idle nodes stay small (`tune_memory`).
@@ -17,6 +20,8 @@
 //!
 //! See `docs/search/architecture.md` and `docs/search/contracts.md`.
 
+pub mod allow;
+pub mod audit;
 pub mod auth;
 pub mod catalog;
 pub mod http;
@@ -31,6 +36,7 @@ pub mod persist;
 pub mod process;
 pub mod store;
 
+pub use allow::{ClientAddresses, IpAllowlist, Origin};
 pub use catalog::{Catalog, ClusterSpec, Credential, MemoryStores, StaticCatalog, StoreProvider, secret_hash};
 pub use http::{ListenOptions, Shutdown, serve, serve_until, spawn};
 pub use lease::{Leases, MemoryLeases, Owner};

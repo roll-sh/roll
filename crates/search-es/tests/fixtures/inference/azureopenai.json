@@ -1,0 +1,782 @@
+[
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-az",
+  "body": "{\"service\":\"azureopenai\",\"service_settings\":{\"api_key\":\"az-key-1\",\"resource_name\":\"rinf\",\"deployment_id\":\"emb-dep\",\"api_version\":\"2024-02-01\"}}",
+  "status": 200,
+  "answer": "{\"inference_id\":\"fx-az\",\"task_type\":\"text_embedding\",\"service\":\"azureopenai\",\"service_settings\":{\"resource_name\":\"rinf\",\"deployment_id\":\"emb-dep\",\"api_version\":\"2024-02-01\",\"rate_limit\":{\"requests_per_minute\":1440},\"dimensions\":4,\"similarity\":\"dot_product\"},\"chunking_settings\":{\"strategy\":\"sentence\",\"max_chunk_size\":250,\"sentence_overlap\":1}}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/openai/deployments/emb-dep/embeddings?api-version=2024-02-01",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "api-key",
+      "az-key-1"
+     ]
+    ],
+    "body": "{\"input\":[\"how big\"],\"input_type\":\"internal_ingest\",\"encoding_format\":\"base64\"}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"object\": \"list\", \"data\": [{\"object\": \"embedding\", \"index\": 0, \"embedding\": \"MA3bPmEatj6RJ5E+g2lYPg==\"}], \"model\": \"m\", \"usage\": {\"prompt_tokens\": 3, \"total_tokens\": 3}}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "GET",
+  "path": "/_inference/fx-az",
+  "body": null,
+  "status": 200,
+  "answer": "{\"endpoints\":[{\"inference_id\":\"fx-az\",\"task_type\":\"text_embedding\",\"service\":\"azureopenai\",\"service_settings\":{\"resource_name\":\"rinf\",\"deployment_id\":\"emb-dep\",\"api_version\":\"2024-02-01\",\"rate_limit\":{\"requests_per_minute\":1440},\"dimensions\":4,\"similarity\":\"dot_product\"},\"chunking_settings\":{\"strategy\":\"sentence\",\"max_chunk_size\":250,\"sentence_overlap\":1}}]}",
+  "upstream": []
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/text_embedding/fx-az",
+  "body": "{\"input\":[\"hello world\",\"second\"]}",
+  "status": 200,
+  "answer": "{\"text_embedding\":[{\"embedding\":[0.005155,-0.489691,0.015464,-0.479381]},{\"embedding\":[0.056701,-0.386598,0.170103,-0.273196]}]}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/openai/deployments/emb-dep/embeddings?api-version=2024-02-01",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "api-key",
+      "az-key-1"
+     ]
+    ],
+    "body": "{\"input\":[\"hello world\",\"second\"],\"encoding_format\":\"base64\"}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"object\": \"list\", \"data\": [{\"object\": \"embedding\", \"index\": 0, \"embedding\": \"RuuoO8e4+r64XH08bXH1vg==\"}, {\"object\": \"embedding\", \"index\": 1, \"embedding\": \"Tz9oPSzwxb57Ly4+WeCLvg==\"}], \"model\": \"m\", \"usage\": {\"prompt_tokens\": 3, \"total_tokens\": 3}}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/fx-az",
+  "body": "{\"input\":\"one\",\"task_settings\":{\"user\":\"u1\"}}",
+  "status": 200,
+  "answer": "{\"text_embedding\":[{\"embedding\":[-0.180412,0.139175,0.458763,-0.221649]}]}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/openai/deployments/emb-dep/embeddings?api-version=2024-02-01",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "api-key",
+      "az-key-1"
+     ]
+    ],
+    "body": "{\"input\":[\"one\"],\"user\":\"u1\",\"encoding_format\":\"base64\"}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"object\": \"list\", \"data\": [{\"object\": \"embedding\", \"index\": 0, \"embedding\": \"7L04vuSDDj784uo+9fdivg==\"}], \"model\": \"m\", \"usage\": {\"prompt_tokens\": 3, \"total_tokens\": 3}}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/fx-az",
+  "body": "{\"input\":\"one\",\"input_type\":\"ingest\"}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"validation_exception\",\"reason\":\"Validation Failed: 1: Invalid input_type [ingest]. The input_type option is not supported by this service;\"}],\"type\":\"validation_exception\",\"reason\":\"Validation Failed: 1: Invalid input_type [ingest]. The input_type option is not supported by this service;\"},\"status\":400}",
+  "upstream": []
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-az2",
+  "body": "{\"service\":\"azureopenai\",\"service_settings\":{\"entra_id\":\"entra-tok-1\",\"resource_name\":\"rinf\",\"deployment_id\":\"emb-dep\",\"api_version\":\"2024-02-01\",\"dimensions\":3,\"similarity\":\"cosine\",\"max_input_tokens\":512,\"rate_limit\":{\"requests_per_minute\":100}},\"task_settings\":{\"user\":\"me\",\"headers\":{\"x-extra\":\"v\"}}}",
+  "status": 200,
+  "answer": "{\"inference_id\":\"fx-az2\",\"task_type\":\"text_embedding\",\"service\":\"azureopenai\",\"service_settings\":{\"resource_name\":\"rinf\",\"deployment_id\":\"emb-dep\",\"api_version\":\"2024-02-01\",\"rate_limit\":{\"requests_per_minute\":100},\"dimensions\":3,\"max_input_tokens\":512,\"similarity\":\"cosine\"},\"task_settings\":{\"user\":\"me\",\"headers\":{\"x-extra\":\"v\"}},\"chunking_settings\":{\"strategy\":\"sentence\",\"max_chunk_size\":250,\"sentence_overlap\":1}}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/openai/deployments/emb-dep/embeddings?api-version=2024-02-01",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "x-extra",
+      "v"
+     ],
+     [
+      "Authorization",
+      "Bearer entra-tok-1"
+     ]
+    ],
+    "body": "{\"input\":[\"how big\"],\"user\":\"me\",\"input_type\":\"internal_ingest\",\"dimensions\":3,\"encoding_format\":\"base64\"}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"object\": \"list\", \"data\": [{\"object\": \"embedding\", \"index\": 0, \"embedding\": \"MA3bPmEatj6RJ5E+\"}], \"model\": \"m\", \"usage\": {\"prompt_tokens\": 3, \"total_tokens\": 3}}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "GET",
+  "path": "/_inference/fx-az2",
+  "body": null,
+  "status": 200,
+  "answer": "{\"endpoints\":[{\"inference_id\":\"fx-az2\",\"task_type\":\"text_embedding\",\"service\":\"azureopenai\",\"service_settings\":{\"resource_name\":\"rinf\",\"deployment_id\":\"emb-dep\",\"api_version\":\"2024-02-01\",\"rate_limit\":{\"requests_per_minute\":100},\"dimensions\":3,\"max_input_tokens\":512,\"similarity\":\"cosine\"},\"task_settings\":{\"user\":\"me\",\"headers\":{\"x-extra\":\"v\"}},\"chunking_settings\":{\"strategy\":\"sentence\",\"max_chunk_size\":250,\"sentence_overlap\":1}}]}",
+  "upstream": []
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-az2/_update",
+  "body": "{\"service_settings\":{\"api_key\":\"az-new\",\"rate_limit\":{\"requests_per_minute\":7}},\"task_settings\":{\"user\":\"bob\"}}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"validation_exception\",\"reason\":\"Validation Failed: 1: [service_settings] only the field [entra_id] can be updated for this secret, received: [api_key];\"}],\"type\":\"validation_exception\",\"reason\":\"Validation Failed: 1: [service_settings] only the field [entra_id] can be updated for this secret, received: [api_key];\"},\"status\":400}",
+  "upstream": []
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/fx-az2",
+  "body": "{\"input\":\"z\"}",
+  "status": 200,
+  "answer": "{\"text_embedding\":[{\"embedding\":[-0.242268,0.015464,0.273196]}]}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/openai/deployments/emb-dep/embeddings?api-version=2024-02-01",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "x-extra",
+      "v"
+     ],
+     [
+      "Authorization",
+      "Bearer entra-tok-1"
+     ]
+    ],
+    "body": "{\"input\":[\"z\"],\"user\":\"me\",\"dimensions\":3,\"encoding_format\":\"base64\"}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"object\": \"list\", \"data\": [{\"object\": \"embedding\", \"index\": 0, \"embedding\": \"GhV4vrhcfTxZ4Is+\"}], \"model\": \"m\", \"usage\": {\"prompt_tokens\": 3, \"total_tokens\": 3}}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/completion/fx-azc",
+  "body": "{\"service\":\"azureopenai\",\"service_settings\":{\"api_key\":\"az-key-2\",\"resource_name\":\"rinf\",\"deployment_id\":\"gpt-dep\",\"api_version\":\"2024-02-01\"}}",
+  "status": 200,
+  "answer": "{\"inference_id\":\"fx-azc\",\"task_type\":\"completion\",\"service\":\"azureopenai\",\"service_settings\":{\"resource_name\":\"rinf\",\"deployment_id\":\"gpt-dep\",\"api_version\":\"2024-02-01\",\"rate_limit\":{\"requests_per_minute\":120}}}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/openai/deployments/gpt-dep/chat/completions?api-version=2024-02-01",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "api-key",
+      "az-key-2"
+     ]
+    ],
+    "body": "{\"messages\":[{\"role\":\"user\",\"content\":\"how big\"}],\"n\":1}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"id\": \"chatcmpl-1\", \"object\": \"chat.completion\", \"created\": 1, \"model\": \"m\", \"choices\": [{\"index\": 0, \"message\": {\"role\": \"assistant\", \"content\": \"echo: how big\"}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 3, \"completion_tokens\": 2, \"total_tokens\": 5}}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "GET",
+  "path": "/_inference/fx-azc",
+  "body": null,
+  "status": 200,
+  "answer": "{\"endpoints\":[{\"inference_id\":\"fx-azc\",\"task_type\":\"completion\",\"service\":\"azureopenai\",\"service_settings\":{\"resource_name\":\"rinf\",\"deployment_id\":\"gpt-dep\",\"api_version\":\"2024-02-01\",\"rate_limit\":{\"requests_per_minute\":120}}}]}",
+  "upstream": []
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/completion/fx-azc",
+  "body": "{\"input\":[\"what is up\"]}",
+  "status": 200,
+  "answer": "{\"completion\":[{\"result\":\"echo: what is up\"}]}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/openai/deployments/gpt-dep/chat/completions?api-version=2024-02-01",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "api-key",
+      "az-key-2"
+     ]
+    ],
+    "body": "{\"messages\":[{\"role\":\"user\",\"content\":\"what is up\"}],\"n\":1}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"id\": \"chatcmpl-1\", \"object\": \"chat.completion\", \"created\": 1, \"model\": \"m\", \"choices\": [{\"index\": 0, \"message\": {\"role\": \"assistant\", \"content\": \"echo: what is up\"}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 3, \"completion_tokens\": 2, \"total_tokens\": 5}}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/completion/fx-azc",
+  "body": "{\"input\":[\"what is up\",\"two\"]}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"status_exception\",\"reason\":\"Azure OpenAI completion only accepts 1 input\"}],\"type\":\"status_exception\",\"reason\":\"Azure OpenAI completion only accepts 1 input\"},\"status\":400}",
+  "upstream": []
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/completion/fx-azc",
+  "body": "{\"input\":\"x\",\"task_settings\":{\"user\":\"u2\"}}",
+  "status": 200,
+  "answer": "{\"completion\":[{\"result\":\"echo: x\"}]}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/openai/deployments/gpt-dep/chat/completions?api-version=2024-02-01",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "api-key",
+      "az-key-2"
+     ]
+    ],
+    "body": "{\"messages\":[{\"role\":\"user\",\"content\":\"x\"}],\"n\":1,\"user\":\"u2\"}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"id\": \"chatcmpl-1\", \"object\": \"chat.completion\", \"created\": 1, \"model\": \"m\", \"choices\": [{\"index\": 0, \"message\": {\"role\": \"assistant\", \"content\": \"echo: x\"}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 3, \"completion_tokens\": 2, \"total_tokens\": 5}}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/completion/fx-azc/_stream",
+  "body": "{\"input\":\"stream me\"}",
+  "status": 200,
+  "answer": "\ufeffevent: message\ndata: {\"completion\":[{\"delta\":\"echo: s\"},{\"delta\":\"tream me\"}]}\n\n\ufeffevent: message\ndata: [DONE]\n\n",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/openai/deployments/gpt-dep/chat/completions?api-version=2024-02-01",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "api-key",
+      "az-key-2"
+     ]
+    ],
+    "body": "{\"messages\":[{\"role\":\"user\",\"content\":\"stream me\"}],\"n\":1,\"stream\":true}",
+    "response": {
+     "status": 200,
+     "ctype": "text/event-stream",
+     "headers": [],
+     "body": "data: {\"id\": \"c1\", \"object\": \"chat.completion.chunk\", \"created\": 1, \"model\": \"m\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": \"echo: s\"}, \"finish_reason\": null}]}\n\ndata: {\"id\": \"c1\", \"object\": \"chat.completion.chunk\", \"created\": 1, \"model\": \"m\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"tream me\"}, \"finish_reason\": null}]}\n\ndata: {\"id\": \"c1\", \"object\": \"chat.completion.chunk\", \"created\": 1, \"model\": \"m\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 3, \"completion_tokens\": 2, \"total_tokens\": 5}}\n\ndata: [DONE]\n\n"
+    }
+   }
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/chat_completion/fx-azcc",
+  "body": "{\"service\":\"azureopenai\",\"service_settings\":{\"api_key\":\"az-key-3\",\"resource_name\":\"rinf\",\"deployment_id\":\"gpt-dep\",\"api_version\":\"2025-01-01-preview\"},\"task_settings\":{\"user\":\"cu\"}}",
+  "status": 200,
+  "answer": "{\"inference_id\":\"fx-azcc\",\"task_type\":\"chat_completion\",\"service\":\"azureopenai\",\"service_settings\":{\"resource_name\":\"rinf\",\"deployment_id\":\"gpt-dep\",\"api_version\":\"2025-01-01-preview\",\"rate_limit\":{\"requests_per_minute\":120}},\"task_settings\":{\"user\":\"cu\"}}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/openai/deployments/gpt-dep/chat/completions?api-version=2025-01-01-preview",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "api-key",
+      "az-key-3"
+     ]
+    ],
+    "body": "{\"messages\":[{\"content\":\"how big\",\"role\":\"user\"}],\"n\":1,\"stream\":true,\"stream_options\":{\"include_usage\":true},\"user\":\"cu\"}",
+    "response": {
+     "status": 200,
+     "ctype": "text/event-stream",
+     "headers": [],
+     "body": "data: {\"id\": \"c1\", \"object\": \"chat.completion.chunk\", \"created\": 1, \"model\": \"m\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": \"echo: \"}, \"finish_reason\": null}]}\n\ndata: {\"id\": \"c1\", \"object\": \"chat.completion.chunk\", \"created\": 1, \"model\": \"m\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"how big\"}, \"finish_reason\": null}]}\n\ndata: {\"id\": \"c1\", \"object\": \"chat.completion.chunk\", \"created\": 1, \"model\": \"m\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 3, \"completion_tokens\": 2, \"total_tokens\": 5}}\n\ndata: [DONE]\n\n"
+    }
+   }
+  ]
+ },
+ {
+  "method": "GET",
+  "path": "/_inference/fx-azcc",
+  "body": null,
+  "status": 200,
+  "answer": "{\"endpoints\":[{\"inference_id\":\"fx-azcc\",\"task_type\":\"chat_completion\",\"service\":\"azureopenai\",\"service_settings\":{\"resource_name\":\"rinf\",\"deployment_id\":\"gpt-dep\",\"api_version\":\"2025-01-01-preview\",\"rate_limit\":{\"requests_per_minute\":120}},\"task_settings\":{\"user\":\"cu\"}}]}",
+  "upstream": []
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/chat_completion/fx-azcc/_stream",
+  "body": "{\"messages\":[{\"role\":\"system\",\"content\":\"be brief\"},{\"role\":\"user\",\"content\":\"hi there\"}],\"max_completion_tokens\":5,\"temperature\":0.2}",
+  "status": 200,
+  "answer": "\ufeffevent: message\ndata: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"content\":\"echo: h\",\"role\":\"assistant\"},\"index\":0}],\"model\":\"m\",\"object\":\"chat.completion.chunk\"}\n\n\ufeffevent: message\ndata: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"content\":\"i there\"},\"index\":0}],\"model\":\"m\",\"object\":\"chat.completion.chunk\"}\n\n\ufeffevent: message\ndata: {\"id\":\"c1\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\",\"index\":0}],\"model\":\"m\",\"object\":\"chat.completion.chunk\",\"usage\":{\"completion_tokens\":2,\"prompt_tokens\":3,\"total_tokens\":5}}\n\n\ufeffevent: message\ndata: [DONE]\n\n",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/openai/deployments/gpt-dep/chat/completions?api-version=2025-01-01-preview",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "api-key",
+      "az-key-3"
+     ]
+    ],
+    "body": "{\"messages\":[{\"content\":\"be brief\",\"role\":\"system\"},{\"content\":\"hi there\",\"role\":\"user\"}],\"temperature\":0.2,\"max_completion_tokens\":5,\"n\":1,\"stream\":true,\"stream_options\":{\"include_usage\":true},\"user\":\"cu\"}",
+    "response": {
+     "status": 200,
+     "ctype": "text/event-stream",
+     "headers": [],
+     "body": "data: {\"id\": \"c1\", \"object\": \"chat.completion.chunk\", \"created\": 1, \"model\": \"m\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": \"echo: h\"}, \"finish_reason\": null}]}\n\ndata: {\"id\": \"c1\", \"object\": \"chat.completion.chunk\", \"created\": 1, \"model\": \"m\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"i there\"}, \"finish_reason\": null}]}\n\ndata: {\"id\": \"c1\", \"object\": \"chat.completion.chunk\", \"created\": 1, \"model\": \"m\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 3, \"completion_tokens\": 2, \"total_tokens\": 5}}\n\ndata: [DONE]\n\n"
+    }
+   }
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/rerank/fx-azx",
+  "body": "{\"service\":\"azureopenai\",\"service_settings\":{\"api_key\":\"k\",\"resource_name\":\"rinf\",\"deployment_id\":\"d\",\"api_version\":\"v\"}}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"status_exception\",\"reason\":\"The [azureopenai] service does not support task type [rerank]\"}],\"type\":\"status_exception\",\"reason\":\"The [azureopenai] service does not support task type [rerank]\"},\"status\":400}",
+  "upstream": []
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-azy",
+  "body": "{\"service\":\"azureopenai\",\"service_settings\":{\"resource_name\":\"rinf\",\"deployment_id\":\"d\",\"api_version\":\"v\"}}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"validation_exception\",\"reason\":\"Validation Failed: 1: [service_settings] must have exactly one field of [api_key, client_secret, entra_id] set;\"}],\"type\":\"validation_exception\",\"reason\":\"Validation Failed: 1: [service_settings] must have exactly one field of [api_key, client_secret, entra_id] set;\"},\"status\":400}",
+  "upstream": []
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-azy",
+  "body": "{\"service\":\"azureopenai\",\"service_settings\":{\"api_key\":\"k\",\"entra_id\":\"e\",\"resource_name\":\"rinf\",\"deployment_id\":\"d\",\"api_version\":\"v\"}}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"validation_exception\",\"reason\":\"Validation Failed: 1: [service_settings] must have exactly one field of [api_key, client_secret, entra_id] set, received: [api_key, entra_id];\"}],\"type\":\"validation_exception\",\"reason\":\"Validation Failed: 1: [service_settings] must have exactly one field of [api_key, client_secret, entra_id] set, received: [api_key, entra_id];\"},\"status\":400}",
+  "upstream": []
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-azy",
+  "body": "{\"service\":\"azureopenai\",\"service_settings\":{\"api_key\":\"\",\"resource_name\":\"\",\"deployment_id\":1,\"dimensions\":0,\"similarity\":\"x\"}}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"validation_exception\",\"reason\":\"Validation Failed: 1: [service_settings] Invalid value empty string. [resource_name] must be a non-empty string;2: field [deployment_id] is not of the expected type. The value [1] cannot be converted to a [String];3: [service_settings] does not contain the required setting [api_version];4: [service_settings] Invalid value [0]. [dimensions] must be a positive integer;5: [service_settings] Invalid value [x] received. [similarity] must be one of [cosine, dot_product, l2_norm];\"}],\"type\":\"validation_exception\",\"reason\":\"Validation Failed: 1: [service_settings] Invalid value empty string. [resource_name] must be a non-empty string;2: field [deployment_id] is not of the expected type. The value [1] cannot be converted to a [String];3: [service_settings] does not contain the required setting [api_version];4: [service_settings] Invalid value [0]. [dimensions] must be a positive integer;5: [service_settings] Invalid value [x] received. [similarity] must be one of [cosine, dot_product, l2_norm];\"},\"status\":400}",
+  "upstream": []
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-azy",
+  "body": "{\"service\":\"azureopenai\",\"service_settings\":{\"api_key\":\"k\",\"resource_name\":\"rinf\",\"deployment_id\":\"d\",\"api_version\":\"v\",\"bogus\":1}}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"status_exception\",\"reason\":\"Configuration contains settings [{bogus=1}] unknown to the [azureopenai] service\"}],\"type\":\"status_exception\",\"reason\":\"Configuration contains settings [{bogus=1}] unknown to the [azureopenai] service\"},\"status\":400}",
+  "upstream": []
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-azy",
+  "body": "{\"service\":\"azureopenai\",\"service_settings\":{\"api_key\":\"k\",\"resource_name\":\"rinf\",\"deployment_id\":\"d\",\"api_version\":\"v\",\"dimensions_set_by_user\":true}}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"validation_exception\",\"reason\":\"Validation Failed: 1: [service_settings] does not allow the setting [dimensions_set_by_user];\"}],\"type\":\"validation_exception\",\"reason\":\"Validation Failed: 1: [service_settings] does not allow the setting [dimensions_set_by_user];\"},\"status\":400}",
+  "upstream": []
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-azy",
+  "body": "{\"service\":\"azureopenai\",\"service_settings\":{\"api_key\":\"k\",\"resource_name\":\"rinf\",\"deployment_id\":\"d\",\"api_version\":\"v\",\"dimensions\":5}}",
+  "status": 200,
+  "answer": "{\"inference_id\":\"fx-azy\",\"task_type\":\"text_embedding\",\"service\":\"azureopenai\",\"service_settings\":{\"resource_name\":\"rinf\",\"deployment_id\":\"d\",\"api_version\":\"v\",\"rate_limit\":{\"requests_per_minute\":1440},\"dimensions\":5,\"similarity\":\"dot_product\"},\"chunking_settings\":{\"strategy\":\"sentence\",\"max_chunk_size\":250,\"sentence_overlap\":1}}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/openai/deployments/d/embeddings?api-version=v",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "api-key",
+      "k"
+     ]
+    ],
+    "body": "{\"input\":[\"how big\"],\"input_type\":\"internal_ingest\",\"dimensions\":5,\"encoding_format\":\"base64\"}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"object\": \"list\", \"data\": [{\"object\": \"embedding\", \"index\": 0, \"embedding\": \"MA3bPmEatj6RJ5E+g2lYPuSDDj4=\"}], \"model\": \"m\", \"usage\": {\"prompt_tokens\": 3, \"total_tokens\": 3}}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-azy",
+  "body": "{\"service\":\"azureopenai\",\"service_settings\":{\"api_key\":\"k\",\"resource_name\":\"fail401\",\"deployment_id\":\"d\",\"api_version\":\"v\"}}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"status_exception\",\"reason\":\"Received an authentication error status code for request from inference entity id [fx-azy] status [401]. Error message: [Incorrect API key provided]\"}],\"type\":\"status_exception\",\"reason\":\"Could not complete inference endpoint creation as validation call to service threw an exception.\",\"caused_by\":{\"type\":\"status_exception\",\"reason\":\"Received an authentication error status code for request from inference entity id [fx-azy] status [401]. Error message: [Incorrect API key provided]\"}},\"status\":400}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/openai/deployments/d/embeddings?api-version=v",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "api-key",
+      "k"
+     ]
+    ],
+    "body": "{\"input\":[\"how big\"],\"input_type\":\"internal_ingest\",\"encoding_format\":\"base64\"}",
+    "response": {
+     "status": 401,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"error\": {\"message\": \"Incorrect API key provided\", \"type\": \"invalid_request_error\", \"code\": \"x\"}, \"message\": \"Incorrect API key provided\", \"detail\": \"Incorrect API key provided\"}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-azy",
+  "body": "{\"service\":\"azureopenai\",\"service_settings\":{\"api_key\":\"k\",\"resource_name\":\"rinf\",\"deployment_id\":\"fail429\",\"api_version\":\"v\"}}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"status_exception\",\"reason\":\"Received a rate limit status code. Remaining tokens [unknown]. Remaining requests [unknown]. for request from inference entity id [fx-azy] status [429]. Error message: [Rate limit reached]\"}],\"type\":\"status_exception\",\"reason\":\"Could not complete inference endpoint creation as validation call to service threw an exception.\",\"caused_by\":{\"type\":\"status_exception\",\"reason\":\"Received a rate limit status code. Remaining tokens [unknown]. Remaining requests [unknown]. for request from inference entity id [fx-azy] status [429]. Error message: [Rate limit reached]\"}},\"status\":400}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/openai/deployments/fail429/embeddings?api-version=v",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "api-key",
+      "k"
+     ]
+    ],
+    "body": "{\"input\":[\"how big\"],\"input_type\":\"internal_ingest\",\"encoding_format\":\"base64\"}",
+    "response": {
+     "status": 429,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"error\": {\"message\": \"Rate limit reached\", \"type\": \"invalid_request_error\", \"code\": \"x\"}, \"message\": \"Rate limit reached\", \"detail\": \"Rate limit reached\"}"
+    }
+   },
+   {
+    "method": "POST",
+    "path": "/openai/deployments/fail429/embeddings?api-version=v",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "api-key",
+      "k"
+     ]
+    ],
+    "body": "{\"input\":[\"how big\"],\"input_type\":\"internal_ingest\",\"encoding_format\":\"base64\"}",
+    "response": {
+     "status": 429,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"error\": {\"message\": \"Rate limit reached\", \"type\": \"invalid_request_error\", \"code\": \"x\"}, \"message\": \"Rate limit reached\", \"detail\": \"Rate limit reached\"}"
+    }
+   },
+   {
+    "method": "POST",
+    "path": "/openai/deployments/fail429/embeddings?api-version=v",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "api-key",
+      "k"
+     ]
+    ],
+    "body": "{\"input\":[\"how big\"],\"input_type\":\"internal_ingest\",\"encoding_format\":\"base64\"}",
+    "response": {
+     "status": 429,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"error\": {\"message\": \"Rate limit reached\", \"type\": \"invalid_request_error\", \"code\": \"x\"}, \"message\": \"Rate limit reached\", \"detail\": \"Rate limit reached\"}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-azy",
+  "body": "{\"service\":\"azureopenai\",\"service_settings\":{\"api_key\":\"k\",\"resource_name\":\"rinf\",\"deployment_id\":\"fail500\",\"api_version\":\"v\"}}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"status_exception\",\"reason\":\"Received a server error status code for request from inference entity id [fx-azy] status [500]. Error message: [boom]\"}],\"type\":\"status_exception\",\"reason\":\"Could not complete inference endpoint creation as validation call to service threw an exception.\",\"caused_by\":{\"type\":\"status_exception\",\"reason\":\"Received a server error status code for request from inference entity id [fx-azy] status [500]. Error message: [boom]\"}},\"status\":400}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/openai/deployments/fail500/embeddings?api-version=v",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "api-key",
+      "k"
+     ]
+    ],
+    "body": "{\"input\":[\"how big\"],\"input_type\":\"internal_ingest\",\"encoding_format\":\"base64\"}",
+    "response": {
+     "status": 500,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"error\": {\"message\": \"boom\", \"type\": \"invalid_request_error\", \"code\": \"x\"}, \"message\": \"boom\", \"detail\": \"boom\"}"
+    }
+   },
+   {
+    "method": "POST",
+    "path": "/openai/deployments/fail500/embeddings?api-version=v",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "api-key",
+      "k"
+     ]
+    ],
+    "body": "{\"input\":[\"how big\"],\"input_type\":\"internal_ingest\",\"encoding_format\":\"base64\"}",
+    "response": {
+     "status": 500,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"error\": {\"message\": \"boom\", \"type\": \"invalid_request_error\", \"code\": \"x\"}, \"message\": \"boom\", \"detail\": \"boom\"}"
+    }
+   },
+   {
+    "method": "POST",
+    "path": "/openai/deployments/fail500/embeddings?api-version=v",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "api-key",
+      "k"
+     ]
+    ],
+    "body": "{\"input\":[\"how big\"],\"input_type\":\"internal_ingest\",\"encoding_format\":\"base64\"}",
+    "response": {
+     "status": 500,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"error\": {\"message\": \"boom\", \"type\": \"invalid_request_error\", \"code\": \"x\"}, \"message\": \"boom\", \"detail\": \"boom\"}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-azy",
+  "body": "{\"service\":\"azureopenai\",\"service_settings\":{\"api_key\":\"k\",\"resource_name\":\"rinf\",\"deployment_id\":\"fail400\",\"api_version\":\"v\"}}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"status_exception\",\"reason\":\"Received a bad request status code for request from inference entity id [fx-azy] status [400]. Error message: [bad thing]\"}],\"type\":\"status_exception\",\"reason\":\"Could not complete inference endpoint creation as validation call to service threw an exception.\",\"caused_by\":{\"type\":\"status_exception\",\"reason\":\"Received a bad request status code for request from inference entity id [fx-azy] status [400]. Error message: [bad thing]\"}},\"status\":400}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/openai/deployments/fail400/embeddings?api-version=v",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "api-key",
+      "k"
+     ]
+    ],
+    "body": "{\"input\":[\"how big\"],\"input_type\":\"internal_ingest\",\"encoding_format\":\"base64\"}",
+    "response": {
+     "status": 400,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"error\": {\"message\": \"bad thing\", \"type\": \"invalid_request_error\", \"code\": \"x\"}, \"message\": \"bad thing\", \"detail\": \"bad thing\"}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-azy",
+  "body": "{\"service\":\"azureopenai\",\"service_settings\":{\"client_secret\":\"cs\",\"resource_name\":\"rinf\",\"deployment_id\":\"d\",\"api_version\":\"v\"}}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"validation_exception\",\"reason\":\"Validation Failed: 1: OAuth2 requires the fields [client_id, scopes, tenant_id], to be set.;\"}],\"type\":\"validation_exception\",\"reason\":\"Validation Failed: 1: OAuth2 requires the fields [client_id, scopes, tenant_id], to be set.;\"},\"status\":400}",
+  "upstream": [],
+  "differs": true
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/completion/fx-azy",
+  "body": "{\"service\":\"azureopenai\",\"service_settings\":{\"api_key\":\"k\",\"resource_name\":\"rinf\",\"deployment_id\":\"d\",\"api_version\":\"v\",\"dimensions\":3}}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"status_exception\",\"reason\":\"Configuration contains settings [{dimensions=3}] unknown to the [azureopenai] service\"}],\"type\":\"status_exception\",\"reason\":\"Configuration contains settings [{dimensions=3}] unknown to the [azureopenai] service\"},\"status\":400}",
+  "upstream": []
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/completion/fx-azy",
+  "body": "{\"service\":\"azureopenai\",\"service_settings\":{\"api_key\":\"k\",\"resource_name\":\"rinf\",\"deployment_id\":\"d\",\"api_version\":\"v\"},\"task_settings\":{\"user\":1}}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"x_content_parse_exception\",\"reason\":\"[1:9] [azure_openai_task_settings_parser] user doesn't support values of type: VALUE_NUMBER\"}],\"type\":\"x_content_parse_exception\",\"reason\":\"[1:9] [azure_openai_task_settings_parser] user doesn't support values of type: VALUE_NUMBER\"},\"status\":400}",
+  "upstream": [],
+  "differs": true
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-az/_update",
+  "body": "{\"service_settings\":{\"resource_name\":\"other\"}}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"status_exception\",\"reason\":\"Configuration contains settings [{resource_name=other}] unknown to the [azureopenai] service\"}],\"type\":\"status_exception\",\"reason\":\"Configuration contains settings [{resource_name=other}] unknown to the [azureopenai] service\"},\"status\":400}",
+  "upstream": []
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-az/_update",
+  "body": "{\"service_settings\":{\"entra_id\":\"ent-2\"}}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"validation_exception\",\"reason\":\"Validation Failed: 1: [service_settings] only the field [api_key] can be updated for this secret, received: [entra_id];\"}],\"type\":\"validation_exception\",\"reason\":\"Validation Failed: 1: [service_settings] only the field [api_key] can be updated for this secret, received: [entra_id];\"},\"status\":400}",
+  "upstream": []
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/fx-az",
+  "body": "{\"input\":\"after entra\"}",
+  "status": 200,
+  "answer": "{\"text_embedding\":[{\"embedding\":[-0.159794,0.180412,-0.479381,-0.139175]}]}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/openai/deployments/emb-dep/embeddings?api-version=2024-02-01",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "api-key",
+      "az-key-1"
+     ]
+    ],
+    "body": "{\"input\":[\"after entra\"],\"encoding_format\":\"base64\"}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"object\": \"list\", \"data\": [{\"object\": \"embedding\", \"index\": 0, \"embedding\": \"CqEjvuy9OD5tcfW+5IMOvg==\"}], \"model\": \"m\", \"usage\": {\"prompt_tokens\": 3, \"total_tokens\": 3}}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "DELETE",
+  "path": "/_inference/fx-az",
+  "body": null,
+  "status": 200,
+  "answer": "{\"acknowledged\":true,\"pipelines\":[],\"indexes\":[]}",
+  "upstream": []
+ },
+ {
+  "method": "DELETE",
+  "path": "/_inference/fx-az2",
+  "body": null,
+  "status": 200,
+  "answer": "{\"acknowledged\":true,\"pipelines\":[],\"indexes\":[]}",
+  "upstream": []
+ },
+ {
+  "method": "DELETE",
+  "path": "/_inference/fx-azc",
+  "body": null,
+  "status": 200,
+  "answer": "{\"acknowledged\":true,\"pipelines\":[],\"indexes\":[]}",
+  "upstream": []
+ },
+ {
+  "method": "DELETE",
+  "path": "/_inference/fx-azcc",
+  "body": null,
+  "status": 200,
+  "answer": "{\"acknowledged\":true,\"pipelines\":[],\"indexes\":[]}",
+  "upstream": []
+ }
+]

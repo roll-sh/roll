@@ -27,7 +27,7 @@
 
 use crate::meter::{Meter, MeterHooks, engine_figures, index_figures, now_ms};
 use crate::pricing::{Cost, Pricing};
-use crate::store::{Caps, DeletedCluster, Inserted, Over, Recorded, SearchCluster, Store, UsageTotals};
+use crate::store::{Caps, DeletedCluster, Inserted, IpRule, Over, Recorded, SearchCluster, Store, UsageTotals};
 pub use crate::wake::SqlCatalog;
 use crate::wake::{ControlHooks, GuardedStores, LOAD_WAIT, Wakes};
 use base64::Engine;
@@ -128,6 +128,9 @@ pub struct SearchConfig {
     /// What a signed-in person who isn't an admin may own (rolld:
     /// `--search-max-clusters-per-person`, `--search-max-always-on-per-person`; 0: no cap).
     pub person_caps: Caps,
+    /// How long and how much each cluster's security audit log keeps (rolld:
+    /// `--search-audit-retention-days`, `--search-audit-max-mb`).
+    pub audit: search_server::audit::AuditConfig,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -177,6 +180,7 @@ impl SearchConfig {
             sealer: None,
             default_repository: Some("found-snapshots".into()),
             person_caps: Caps { clusters: 50, always_on: 2 },
+            audit: search_server::audit::AuditConfig::default(),
         }
     }
 }
@@ -191,6 +195,50 @@ pub struct ClusterOptions {
     pub max_in_flight: Option<i64>,
     pub max_body_mb: Option<i64>,
     pub destructive_requires_name: Option<bool>,
+    /// Who may reach the data plane: CIDRs or addresses, each a string or `{cidr, description?}`
+    /// (at most [`search_server::allow::MAX_ENTRIES`]); `[]` opens the cluster to anyone again.
+    pub ip_allowlist: Option<Vec<IpRuleInput>>,
+}
+
+/// An allowlist entry as given (roll apps' `allow_ips` take the same).
+#[derive(Clone, Debug, Deserialize)]
+#[serde(untagged)]
+pub enum IpRuleInput {
+    Cidr(String),
+    Rule(IpRuleFields),
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IpRuleFields {
+    pub cidr: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+/// The most characters an allowlist entry's description may have.
+const DESCRIPTION_CHARS: usize = 200;
+
+/// An allowlist as given, checked and made canonical.
+fn ip_rules(given: Vec<IpRuleInput>) -> Result<Vec<IpRule>> {
+    if given.len() > search_server::allow::MAX_ENTRIES {
+        return Err(ControlError::Invalid(format!("ip_allowlist: at most {} entries", search_server::allow::MAX_ENTRIES)));
+    }
+    given
+        .into_iter()
+        .map(|g| {
+            let (cidr, description) = match g {
+                IpRuleInput::Cidr(c) => (c, None),
+                IpRuleInput::Rule(r) => (r.cidr, r.description),
+            };
+            let net = search_server::allow::parse_cidr(&cidr).map_err(|e| ControlError::Invalid(format!("ip_allowlist: {e}")))?;
+            let description = description.map(|d| d.trim().to_string()).filter(|d| !d.is_empty());
+            if description.as_ref().is_some_and(|d| d.chars().count() > DESCRIPTION_CHARS || d.chars().any(char::is_control)) {
+                return Err(ControlError::Invalid(format!("ip_allowlist: a description is one line of at most {DESCRIPTION_CHARS} characters")));
+            }
+            Ok(IpRule { cidr: net.to_string(), description })
+        })
+        .collect()
 }
 
 /// One REST request through the console.
@@ -297,7 +345,25 @@ pub fn spec_for(c: &SearchCluster) -> ClusterSpec {
     spec.max_in_flight = c.max_in_flight.max(1) as usize;
     spec.max_body_bytes = Some((c.max_body_mb.max(1) as usize) << 20);
     spec.destructive_requires_name = c.destructive_requires_name;
+    spec.ip_allowlist = allowlist_of(&c.ip_allowlist);
     spec
+}
+
+/// The node's allowlist for the catalog's rules. They were checked when written; one that no
+/// longer parses (a hand-edited catalog) is logged and closes the list rather than opening it.
+fn allowlist_of(rules: &[IpRule]) -> search_server::IpAllowlist {
+    let mut nets = Vec::with_capacity(rules.len());
+    for r in rules {
+        match search_server::allow::parse_cidr(&r.cidr) {
+            Ok(n) => nets.push(n),
+            Err(e) => tracing::error!(cidr = r.cidr, error = e, "an IP allowlist entry in the catalog doesn't parse: it admits nobody"),
+        }
+    }
+    if nets.is_empty() && !rules.is_empty() {
+        // 0.0.0.0 is never a client's address.
+        nets.push(std::net::IpAddr::from([0, 0, 0, 0]).into());
+    }
+    search_server::IpAllowlist::new(nets)
 }
 
 /// `target` as a loaded instance can take it now, and whether it needs a reload: the dialect
@@ -501,6 +567,7 @@ impl Control {
                 memory_budget: cfg.memory_budget,
                 sealer: cfg.sealer.clone(),
                 default_repository: cfg.default_repository.clone(),
+                audit: cfg.audit.clone(),
                 ..NodeConfig::default()
             },
             hooks.clone(),
@@ -675,7 +742,10 @@ impl Control {
         Ok(())
     }
 
-    fn apply(mut c: SearchCluster, o: ClusterOptions) -> SearchCluster {
+    fn apply(mut c: SearchCluster, o: ClusterOptions) -> Result<SearchCluster> {
+        if let Some(v) = o.ip_allowlist {
+            c.ip_allowlist = ip_rules(v)?;
+        }
         if let Some(v) = o.flavor {
             c.flavor = v.to_ascii_lowercase();
         }
@@ -691,7 +761,7 @@ impl Control {
         if let Some(v) = o.destructive_requires_name {
             c.destructive_requires_name = v;
         }
-        c
+        Ok(c)
     }
 
     /// Fails when the name is taken, by a cluster or by data left in object storage.
@@ -742,6 +812,7 @@ impl Control {
             wake_at: None,
             owner: None,
             restored_at: None,
+            ip_allowlist: Vec::new(),
         }
     }
 
@@ -749,7 +820,7 @@ impl Control {
     /// Past one of `caps` for the owner it is refused (409). Nothing is written to object storage
     /// until it is first used.
     pub async fn create(&self, name: &str, o: ClusterOptions, owner: Option<&str>, caps: Caps) -> Result<SearchCluster> {
-        let c = Self::apply(SearchCluster { owner: owner.map(str::to_string), ..self.fresh(name) }, o);
+        let c = Self::apply(SearchCluster { owner: owner.map(str::to_string), ..self.fresh(name) }, o)?;
         self.check(&c)?;
         self.check_free(name).await?;
         self.insert(&c, caps).await?;
@@ -827,7 +898,7 @@ impl Control {
                 ..p.clone()
             },
             o,
-        );
+        )?;
         self.check(&c)?;
         self.check_free(name).await?;
         // Refused by a cap before anything is copied (the insert's count, in its transaction,
@@ -902,7 +973,7 @@ impl Control {
     pub async fn update(&self, id: &str, o: ClusterOptions, caps: Caps) -> Result<SearchCluster> {
         let c = {
             let _g = self.specs.lock().await;
-            let c = Self::apply(self.get(id).await?, o);
+            let c = Self::apply(self.get(id).await?, o)?;
             self.check(&c)?;
             self.save(&c, caps).await?;
             self.apply_spec(&c.name).await;
@@ -1135,6 +1206,9 @@ impl Control {
         if !self.unload_retrying(&c.name, Duration::from_secs(30)).await {
             return Err(ControlError::Conflict(format!("cluster {} has requests running; retry", c.name)));
         }
+        // Its audit entries still waiting are written now; the stored ones go with its storage
+        // (or move with its kept copy, and back on a restore).
+        self.node.audit.forget(&c.name).await;
         if self.cfg.deleted_retention.is_zero() {
             self.data.delete_cluster(&c.name).await?;
             self.store.delete(&c.id).await?;
@@ -1172,6 +1246,9 @@ impl Control {
             // Deleted meanwhile by another call: its copy is the one kept.
             let _ = self.data.delete_cluster(&kept).await;
             return Err(ControlError::NotFound(format!("no search cluster {}", c.id)));
+        }
+        if let Err(e) = self.data.move_audit(&c.name, &kept).await {
+            tracing::warn!(cluster = c.name, kept, error = %e, "moving a deleted search cluster's audit entries to its kept copy failed");
         }
         if let Err(e) = self.data.delete_cluster(&c.name).await {
             // The cluster is deleted; its old commit points only block the name until removed.
@@ -1264,6 +1341,9 @@ impl Control {
         // Credentials revoked while it was deleted, before anything else (the sweep retries a
         // failure).
         self.apply_revokes(&d.cluster.id).await;
+        if let Err(e) = self.data.move_audit(&d.stored_as, target).await {
+            tracing::warn!(cluster = target, kept = d.stored_as, error = %e, "moving a restored search cluster's audit entries back failed");
+        }
         if had_data && let Err(e) = self.data.delete_cluster(&d.stored_as).await {
             tracing::warn!(cluster = target, kept = d.stored_as, error = %e, "removing a restored search cluster's kept copy failed");
         }
@@ -1706,6 +1786,20 @@ impl Control {
         }
     }
 
+    /// The cluster's security audit entries matching `q`, newest first
+    /// ([`search_server::audit`]). Never wakes the cluster: they are in object storage.
+    pub async fn audit(&self, id: &str, q: &search_server::audit::AuditQuery) -> Result<Value> {
+        let c = self.get(id).await?;
+        let page = self.node.audit.read(&c.name, q).await?;
+        let cfg = self.node.audit.config();
+        Ok(json!({
+            "flavor": c.flavor,
+            "retention_days": cfg.retention.as_secs() / 86_400,
+            "entries": page.entries,
+            "more": page.more,
+        }))
+    }
+
     /// The cluster's indices (`_cat/indices`): health, status, docs, size. Wakes the cluster.
     pub async fn indices(&self, id: &str) -> Result<Vec<Value>> {
         let c = self.get(id).await?;
@@ -2076,8 +2170,10 @@ mod tests {
             wake_at: None,
             owner: None,
             restored_at: None,
+            ip_allowlist: vec![IpRule { cidr: "203.0.113.0/24".into(), description: None }],
         };
         let s = spec_for(&c);
+        assert!(s.ip_allowlist.contains("::ffff:203.0.113.9".parse().unwrap()) && !s.ip_allowlist.is_open());
         assert_eq!(s.name, "app");
         assert_eq!(s.dialect, Dialect::OpenSearch);
         assert_eq!(s.credentials.len(), 1);

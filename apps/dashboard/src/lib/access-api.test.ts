@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { installLink, accessRequest, approversText, parseApprovers, deciderName, describeApprovalRule, gateProgress, rememberable, proposedRule, approvableTogether, byConcern, catalogFor, denyRedirect, draftOf, expiringSoon, grantMatches, mcpConfig, parseAuthorize, githubIdentity, githubStep, presetFor, presetRules, publicJwk, rulesOf, trustedLabel, statusOf, toolsetCost, waitsForAdmin, withToolsets, type Approval, type Preset, idpFromForm } from "./access-api";
+import { installLink, accessRequest, approversText, parseApprovers, deciderName, describeApprovalRule, gateProgress, rememberable, proposedRule, approvableTogether, byConcern, catalogFor, denyRedirect, draftOf, expiringSoon, grantMatches, mcpConfig, parseAuthorize, githubIdentity, githubStep, presetFor, presetRules, publicJwk, rulesOf, trustedLabel, statusOf, toolsetCost, waitsForAdmin, withToolsets, type Approval, type Preset, idpFromForm, tieForAgents, untieForAgents } from "./access-api";
 
 const presets: Preset[] = [
   { id: "read-only", name: "Read only", description: "", rules: [{ product: "*", resources: "*", actions: { read: "allow" } }] },
@@ -229,5 +229,18 @@ describe("idpFromForm", () => {
       idp: { issuer: "https://acme.okta.com", matching: "email", domains: ["acme.com", "acme.co.uk"], admins: true, name: "Okta" },
     });
     expect(idpFromForm({ ...form, matching: "aud_sub" })).toEqual({ idp: { issuer: "https://acme.okta.com", matching: "aud_sub", name: "Okta" } });
+    // Tied to an SSO connection: its proven domains, never typed ones.
+    expect(idpFromForm({ ...form, domains: "evil.com", sso: "sso_1" })).toEqual({ idp: { issuer: "https://acme.okta.com", matching: "email", name: "Okta", sso: "sso_1" } });
+  });
+});
+
+describe("an SSO connection for agents too", () => {
+  const c = { id: "sso_okta", name: "Okta", issuer: "https://acme.okta.com" };
+  it("adds it once, in place of a hand-made one for the same issuer, and takes it away", () => {
+    const typed = [{ issuer: "https://acme.okta.com/", domains: ["acme.com"] }, { issuer: "https://other.example", domains: ["x.com"] }];
+    const tied = tieForAgents(typed, c);
+    expect(tied).toEqual([{ issuer: "https://other.example", domains: ["x.com"] }, { issuer: "https://acme.okta.com", name: "Okta", matching: "email", sso: "sso_okta" }]);
+    expect(tieForAgents(tied, c)).toBe(tied);
+    expect(untieForAgents(tied, "sso_okta")).toEqual([{ issuer: "https://other.example", domains: ["x.com"] }]);
   });
 });

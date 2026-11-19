@@ -39,6 +39,8 @@ export interface ResourceView {
   /** The product's own page for everything else. */
   href: string;
   facts: [string, string][];
+  /** A service's environments (not previews) with changes their live deployment doesn't run with: a redeploy applies them. */
+  toDeploy?: string[];
 }
 
 export const KIND_LABEL: Record<ResourceKind, string> = {
@@ -273,6 +275,7 @@ export function service(s: Service): ResourceView {
     meta: latest && !pending ? latest.label : `${instances} ${instances === "1" ? "instance" : "instances"}`,
     connect: env?.url ?? undefined,
     href: `/dashboard/apps/${encodeURIComponent(s.id)}`,
+    toDeploy: s.environments.filter((e) => e.needs_deploy && e.active && !e.ephemeral).map((e) => e.name),
     facts: [
       ["source", sourceLabel(s.source)],
       ["type", s.run.type],

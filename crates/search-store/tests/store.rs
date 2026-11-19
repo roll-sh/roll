@@ -234,6 +234,17 @@ async fn cache_survives_restart() {
     assert_eq!(a.stats().cache.used, 50_000);
 }
 
+/// Waits until `n` cached files are mapped. A download's task hands the map to its readers,
+/// then drops its own copy: right after `open_segment` returns that may not have happened
+/// yet, and until it has the file counts as in use, which eviction skips.
+async fn mapped_settles(store: &Store, n: u64) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while store.stats().cache.mapped_files != n {
+        assert!(std::time::Instant::now() < deadline, "{n} files should be mapped: {:?}", store.stats().cache);
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cache_evicts_lru_under_budget_but_never_mapped_files() {
     let objects = test_objects("seg-evict");
@@ -251,6 +262,9 @@ async fn cache_evicts_lru_under_budget_but_never_mapped_files() {
     for (id, data) in &segs[2..] {
         let d = reader.open_segment(id).await.unwrap();
         assert_eq!(&*d, &data[..]);
+        drop(d);
+        // Only the held two stay in use: the next download can evict this one.
+        mapped_settles(&reader, 2).await;
     }
     let st = reader.stats().cache;
     assert!(st.used <= 3 << 20, "used {} over budget", st.used);
@@ -267,8 +281,9 @@ async fn cache_evicts_lru_under_budget_but_never_mapped_files() {
     assert!(reader.stats().cache.over_budget > 0);
     drop(all);
     drop(held);
+    mapped_settles(&reader, 0).await;
     reader.set_cache_budget(1 << 20);
-    assert!(reader.stats().cache.used <= 1 << 20);
+    assert!(reader.stats().cache.used <= 1 << 20, "{:?}", reader.stats().cache);
     // Shrinking the budget again keeps working on re-open.
     assert_eq!(&*reader.open_segment(&segs[5].0).await.unwrap(), &segs[5].1[..]);
 }
@@ -1233,10 +1248,13 @@ async fn reads_outrun_a_slow_progressive_download() {
     assert_eq!(f.len(), LEN as u64);
     // The first response brought the last part only.
     assert_eq!(f.downloaded(), PART, "one part per round trip");
-    let mid = LEN as u64 / 2;
-    let got = f.read(mid..mid + 100).await.unwrap();
-    let first_read = started.elapsed();
-    assert_eq!(&got[..], &data[mid as usize..mid as usize + 100]);
+    // A read of the part before the tail, which file order would download second to last,
+    // moves it to the front: it lands with a few parts in flight before it (about 10 of 49),
+    // not after nearly all of them. Counted in bytes, not timed: a reader woken late on a
+    // loaded host sees a few more parts, not a different order.
+    let at = LEN as u64 - 2 * PART + 50;
+    let got = f.read(at..at + 100).await.unwrap();
+    assert_eq!(&got[..], &data[at as usize..at as usize + 100]);
     assert!(f.data().is_none() && f.downloaded() < LEN as u64 / 2, "the read came before most of the segment: {} of {LEN}", f.downloaded());
     // A range across a part boundary near the start: both parts come next.
     let r = PART * 3 - 10..PART * 3 + 10;
@@ -1246,7 +1264,6 @@ async fn reads_outrun_a_slow_progressive_download() {
     let total = started.elapsed();
     assert_eq!(&whole[..], &data[..]);
     assert!(total >= std::time::Duration::from_millis(1200), "the throttle holds: {total:?}");
-    assert!(first_read * 4 < total, "the first read took {first_read:?} of {total:?}");
     // Cached now: no more waiting.
     b.set_download_throttle(0);
     assert_eq!(&b.open_segment(&id).await.unwrap()[..10], &data[..10]);

@@ -28,6 +28,11 @@
 //!   request in a minute writes nothing for it.
 //! - `slowlog`: the newest [`search_es::slowlog::MAX_ENTRIES`] slow log entries per cluster, as
 //!   Elasticsearch's JSON lines.
+//! - `analytics`: search analytics ([`search_es::analytics::Bucket`]) of the indices that turned
+//!   them on, in two fixed rings per index, a row per slot: [`ANALYTICS_HOUR_SLOTS`] one-hour
+//!   buckets (7 days) and [`ANALYTICS_DAY_SLOTS`] one-day buckets (30 days), each a bounded
+//!   list of top queries and of queries with no results. A slot is replaced when its time comes
+//!   round again; an index whose analytics go off or that is deleted loses its rows.
 //!
 //! The schema is created with `CREATE … IF NOT EXISTS` (`Db::ensure_schema`: on Postgres under
 //! an advisory lock, since nodes start together); it reads the `search.db` files the earlier
@@ -38,7 +43,8 @@
 
 use code_sql::{Db, OptionalExtension, Row, params};
 use search_server::metrics::Stats;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+
 use std::path::Path;
 
 #[derive(Clone, Debug, Serialize)]
@@ -87,6 +93,18 @@ pub struct SearchCluster {
     /// starts again there.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub restored_at: Option<i64>,
+    /// Who may reach its data plane (Elastic Cloud's traffic filters): canonical CIDRs, each with
+    /// an optional description; empty: anyone. Branches start with their parent's.
+    pub ip_allowlist: Vec<IpRule>,
+}
+
+/// One entry of a cluster's IP allowlist.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IpRule {
+    /// Canonical: `203.0.113.7/32`, `10.0.0.0/8`, `2001:db8::/32`.
+    pub cidr: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 /// One metering interval of a loaded cluster.
@@ -221,13 +239,17 @@ CREATE TABLE IF NOT EXISTS search_metrics (
 );
 CREATE TABLE IF NOT EXISTS search_slowlog (cluster_id TEXT NOT NULL, at INTEGER NOT NULL, data TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS search_slowlog_cluster ON search_slowlog (cluster_id, at);
+CREATE TABLE IF NOT EXISTS search_analytics (
+  cluster_id TEXT NOT NULL, idx TEXT NOT NULL, res INTEGER NOT NULL, slot INTEGER NOT NULL, at INTEGER NOT NULL, data TEXT NOT NULL,
+  PRIMARY KEY (cluster_id, idx, res, slot)
+);
 "#;
 
 const COLS: &str = "id, name, region, flavor, password, idle_timeout_s, max_in_flight, max_body_mb, destructive_requires_name, \
-                    parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, owner";
+                    parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, owner, ip_allowlist";
 /// What lookups read: [`COLS`] and where the cluster is loaded.
 const READ_COLS: &str = "id, name, region, flavor, password, idle_timeout_s, max_in_flight, max_body_mb, destructive_requires_name, \
-                         parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, owner, loaded_on, own_bytes, wake_at, restored_at";
+                         parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, owner, loaded_on, own_bytes, wake_at, restored_at, ip_allowlist";
 /// What deleted clusters' reads add to [`READ_COLS`].
 const DELETED_COLS: &str = "deleted_name, deleted_at, purge_at, stored_as, name";
 
@@ -254,21 +276,41 @@ fn row(r: &Row) -> code_sql::Result<SearchCluster> {
         own_bytes: r.get(18)?,
         wake_at: r.get(19)?,
         restored_at: r.get(20)?,
+        // Unreadable, the cluster can't be looked up (and so can't be reached), never opened up.
+        ip_allowlist: serde_json::from_str(&r.get::<_, String>(21)?).map_err(|e| code_sql::Error::Conversion(format!("ip_allowlist: {e}")))?,
     })
 }
 
 fn deleted_row(r: &Row) -> code_sql::Result<DeletedCluster> {
     let mut c = row(r)?;
-    c.name = r.get(21)?;
+    c.name = r.get(22)?;
     c.loaded_on = None;
     c.wake_at = None;
-    Ok(DeletedCluster { cluster: c, deleted_at: r.get(22)?, purge_at: r.get(23)?, stored_as: r.get(24)?, reserved: r.get(25)? })
+    Ok(DeletedCluster { cluster: c, deleted_at: r.get(23)?, purge_at: r.get(24)?, stored_as: r.get(25)?, reserved: r.get(26)? })
 }
 
 /// One-minute buckets a cluster keeps: 24 hours.
 pub const MINUTE_SLOTS: i64 = 1440;
 /// One-hour buckets a cluster keeps: 14 days.
 pub const HOUR_SLOTS: i64 = 336;
+
+/// One-hour analytics buckets an index keeps: 7 days.
+pub const ANALYTICS_HOUR_SLOTS: i64 = 168;
+/// One-day analytics buckets an index keeps: 30 days and the day in progress.
+pub const ANALYTICS_DAY_SLOTS: i64 = 31;
+/// Queries (and queries with no results) an hour's bucket keeps.
+pub const ANALYTICS_HOUR_TOP: (usize, usize) = (100, 50);
+/// Queries (and queries with no results) a day's bucket keeps.
+pub const ANALYTICS_DAY_TOP: (usize, usize) = (300, 100);
+
+/// The list sizes a bucket of `res` seconds keeps.
+pub fn analytics_caps(res: i64) -> (usize, usize) {
+    if res >= 86_400 { ANALYTICS_DAY_TOP } else { ANALYTICS_HOUR_TOP }
+}
+
+fn allowlist_json(rules: &[IpRule]) -> String {
+    serde_json::to_string(rules).expect("rules serialize")
+}
 
 /// Seconds in the 30-day month the GB-month figures use (AWS bills storage per 730-hour month;
 /// a 30-day month keeps `days / 30` exact in the dashboard).
@@ -303,6 +345,8 @@ impl Store {
         db.add_column("search_clusters", "wake_at", "INTEGER")?;
         // Clusters made before owners stay the operator's (none).
         db.add_column("search_clusters", "owner", "TEXT")?;
+        // Clusters made before allowlists are open, as they were.
+        db.add_column("search_clusters", "ip_allowlist", "TEXT NOT NULL DEFAULT '[]'")?;
         db.ensure_schema("CREATE INDEX IF NOT EXISTS search_clusters_owner ON search_clusters (owner, created_at)")?;
         // Deleted clusters kept for restoring.
         db.add_column("search_clusters", "deleted_at", "INTEGER")?;
@@ -332,7 +376,7 @@ impl Store {
                 return Ok(Inserted::Over(over));
             }
             x.execute(
-                &format!("INSERT INTO search_clusters ({COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)"),
+                &format!("INSERT INTO search_clusters ({COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)"),
                 params![
                     c.id,
                     c.name,
@@ -350,7 +394,8 @@ impl Store {
                     c.indices,
                     c.docs,
                     c.stored_bytes,
-                    c.owner
+                    c.owner,
+                    allowlist_json(&c.ip_allowlist)
                 ],
             )
             .map(|_| Inserted::Yes)
@@ -379,8 +424,18 @@ impl Store {
             }
             x.execute(
                 "UPDATE search_clusters SET flavor = ?2, password = ?3, idle_timeout_s = ?4, max_in_flight = ?5, max_body_mb = ?6,
-                 destructive_requires_name = ?7, password_rotated_at = ?8 WHERE id = ?1",
-                params![c.id, c.flavor, c.password, c.idle_timeout_s, c.max_in_flight, c.max_body_mb, c.destructive_requires_name, c.password_rotated_at],
+                 destructive_requires_name = ?7, password_rotated_at = ?8, ip_allowlist = ?9 WHERE id = ?1",
+                params![
+                    c.id,
+                    c.flavor,
+                    c.password,
+                    c.idle_timeout_s,
+                    c.max_in_flight,
+                    c.max_body_mb,
+                    c.destructive_requires_name,
+                    c.password_rotated_at,
+                    allowlist_json(&c.ip_allowlist)
+                ],
             )?;
             Ok::<_, code_sql::Error>(Ok(()))
         })?)
@@ -597,6 +652,7 @@ impl Store {
             x.execute("DELETE FROM search_revokes WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_metrics WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_slowlog WHERE cluster_id = ?1", params![id])?;
+            x.execute("DELETE FROM search_analytics WHERE cluster_id = ?1", params![id])?;
             Ok(true)
         })?)
     }
@@ -659,10 +715,77 @@ impl Store {
             x.execute("DELETE FROM search_usage WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_metrics WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_slowlog WHERE cluster_id = ?1", params![id])?;
+            x.execute("DELETE FROM search_analytics WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_storage WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_revokes WHERE cluster_id = ?1", params![id])
         })?;
         Ok(())
+    }
+
+    /// Stores what a node handed on of a cluster's search analytics, in one transaction: the
+    /// rows of `cleared` indices go (and, when `enabled` lists the indices with analytics on,
+    /// those of every other index), then each (index, unix hour, bucket) adds up in the index's
+    /// hour and day rings. A slot holding the same bucket adds up; one holding an older bucket is
+    /// replaced; one holding a newer one (a node whose clock is behind) is kept.
+    pub async fn record_analytics(&self, id: &str, cleared: &[String], enabled: Option<&[String]>, hours: &[(String, u64, search_es::analytics::Bucket)]) -> anyhow::Result<()> {
+        if cleared.is_empty() && enabled.is_none() && hours.is_empty() {
+            return Ok(());
+        }
+        self.db.write(|x| {
+            for i in cleared {
+                x.execute("DELETE FROM search_analytics WHERE cluster_id = ?1 AND idx = ?2", params![id, i])?;
+            }
+            if let Some(on) = enabled {
+                let kept: Vec<String> = x.query("SELECT DISTINCT idx FROM search_analytics WHERE cluster_id = ?1", params![id], |r| r.get(0))?;
+                for i in kept.iter().filter(|i| !on.contains(i)) {
+                    x.execute("DELETE FROM search_analytics WHERE cluster_id = ?1 AND idx = ?2", params![id, i])?;
+                }
+            }
+            for (idx, hour, bucket) in hours {
+                let t = (*hour).min(i64::MAX as u64 / 3600) as i64 * 3600;
+                for (res, slots) in [(3600, ANALYTICS_HOUR_SLOTS), (86_400, ANALYTICS_DAY_SLOTS)] {
+                    let at = t - t.rem_euclid(res);
+                    let slot = (at / res).rem_euclid(slots);
+                    let (top, empty) = analytics_caps(res);
+                    let kept: Option<(i64, String)> = x
+                        .query_row("SELECT at, data FROM search_analytics WHERE cluster_id = ?1 AND idx = ?2 AND res = ?3 AND slot = ?4", params![id, idx, res, slot], |r| Ok((r.get(0)?, r.get(1)?)))
+                        .optional()?;
+                    let mut merged = match kept {
+                        Some((a, data)) if a == at => search_es::analytics::Bucket::decode(&data, top, empty),
+                        Some((a, _)) if a > at => continue,
+                        _ => search_es::analytics::Bucket::new(top, empty),
+                    };
+                    merged.merge(bucket);
+                    x.execute(
+                        "INSERT INTO search_analytics (cluster_id, idx, res, slot, at, data) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                         ON CONFLICT (cluster_id, idx, res, slot) DO UPDATE SET at = excluded.at, data = excluded.data",
+                        params![id, idx, res, slot, at, merged.encode()],
+                    )?;
+                }
+            }
+            Ok::<_, code_sql::Error>(())
+        })?;
+        Ok(())
+    }
+
+    /// A cluster's analytics buckets of `res` seconds (3600 or 86400) from `since` (unix
+    /// seconds), of index `idx` or of every index: (index, start, bucket), oldest first.
+    pub async fn analytics_since(&self, id: &str, idx: Option<&str>, res: i64, since: i64) -> anyhow::Result<Vec<(String, i64, search_es::analytics::Bucket)>> {
+        let rows: Vec<(String, i64, String)> = self.db.read(|x| match idx {
+            Some(i) => x.query(
+                "SELECT idx, at, data FROM search_analytics WHERE cluster_id = ?1 AND idx = ?2 AND res = ?3 AND at >= ?4 ORDER BY at",
+                params![id, i, res, since],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            ),
+            None => x.query("SELECT idx, at, data FROM search_analytics WHERE cluster_id = ?1 AND res = ?2 AND at >= ?3 ORDER BY at", params![id, res, since], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))),
+        })?;
+        let (top, empty) = analytics_caps(res);
+        Ok(rows.into_iter().map(|(i, at, d)| (i, at, search_es::analytics::Bucket::decode(&d, top, empty))).collect())
+    }
+
+    /// The indices a cluster keeps analytics of.
+    pub async fn analytics_indices(&self, id: &str) -> anyhow::Result<Vec<String>> {
+        Ok(self.db.read(|x| x.query("SELECT DISTINCT idx FROM search_analytics WHERE cluster_id = ?1 ORDER BY idx", params![id], |r| r.get(0)))?)
     }
 
     /// The latest figures metering saw. A change of `stored_bytes` is logged at `at` for the
@@ -878,6 +1001,7 @@ mod tests {
             wake_at: None,
             owner: None,
             restored_at: None,
+            ip_allowlist: Vec::new(),
         }
     }
 
@@ -1022,12 +1146,41 @@ mod tests {
         assert!(s.metrics_since("srch_r", 60, 0).await.unwrap().is_empty() && s.slowlog("srch_r").await.unwrap().is_empty());
     }
 
+    async fn analytics_rings(s: &Store) {
+        use search_es::analytics::Bucket;
+        assert_eq!(s.insert(&cluster("srch_a", "analytics"), Caps::NONE).await.unwrap(), Inserted::Yes);
+        let hour = |n: u64| {
+            let mut b = Bucket::new(4, 4);
+            b.searches = n;
+            b
+        };
+        let h0 = 1_000_000_000 / 86_400 * 24;
+        s.record_analytics("srch_a", &[], None, &[("a".into(), h0, hour(2)), ("b".into(), h0, hour(1))]).await.unwrap();
+        s.record_analytics("srch_a", &[], None, &[("a".into(), h0, hour(3)), ("a".into(), h0 + 1, hour(1))]).await.unwrap();
+        let hours = s.analytics_since("srch_a", Some("a"), 3600, 0).await.unwrap();
+        assert_eq!(hours.iter().map(|(_, at, b)| (*at, b.searches)).collect::<Vec<_>>(), [(h0 as i64 * 3600, 5), (h0 as i64 * 3600 + 3600, 1)]);
+        let days = s.analytics_since("srch_a", None, 86_400, 0).await.unwrap();
+        assert_eq!(days.iter().map(|(_, _, b)| b.searches).sum::<u64>(), 7);
+        // A week later the hour's slot is replaced; the day ring still has the day.
+        s.record_analytics("srch_a", &[], None, &[("a".into(), h0 + 168, hour(9))]).await.unwrap();
+        assert_eq!(s.analytics_since("srch_a", Some("a"), 3600, 0).await.unwrap().iter().map(|(_, _, b)| b.searches).collect::<Vec<_>>(), [1, 9]);
+        // A clear drops the index's rows; an enabled list drops every other index's.
+        s.record_analytics("srch_a", &["a".into()], None, &[]).await.unwrap();
+        assert_eq!(s.analytics_indices("srch_a").await.unwrap(), ["b"]);
+        s.record_analytics("srch_a", &[], Some(&[]), &[]).await.unwrap();
+        assert!(s.analytics_indices("srch_a").await.unwrap().is_empty());
+        s.record_analytics("srch_a", &[], None, &[("c".into(), h0, hour(1))]).await.unwrap();
+        s.delete("srch_a").await.unwrap();
+        assert!(s.analytics_indices("srch_a").await.unwrap().is_empty());
+    }
+
     async fn all(s: &Store) {
         crud(s).await;
         deleted_claims(s).await;
         usage_totals(s).await;
         storage_is_a_step_function(s).await;
         metrics_and_slowlog_rings(s).await;
+        analytics_rings(s).await;
     }
 
     #[tokio::test]

@@ -1,0 +1,16 @@
+namespace: roll
+name: secrets
+version: 0.1.0
+readme: README.md
+authors:
+  - roll
+description: roll secrets in Ansible, a lookup that reads an environment's values and a module that sets or deletes one key.
+tags:
+  - secrets
+  - roll
+dependencies: {}
+repository: https://github.com/roll-sh/roll
+documentation: https://github.com/roll-sh/roll/blob/main/sdk/ansible/README.md
+build_ignore:
+  - tests
+  - "*.tar.gz"

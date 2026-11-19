@@ -27,6 +27,8 @@ export function describe(e: AppEvent): string {
       return `removed ${String(d.hostname)}${where}`;
     case "audit.domain.redirect":
       return d.redirect_to ? `redirected ${String(d.hostname)} to ${String(d.redirect_to)}` : `stopped redirecting ${String(d.hostname)}`;
+    case "audit.domain.port":
+      return d.port ? `sent ${String(d.hostname)} to port ${String(d.port)}` : `sent ${String(d.hostname)} back to the service's port`;
     case "audit.link.added":
       return `linked ${String(d.kind)} ${String(d.ref)}`;
     case "audit.link.removed":
@@ -35,6 +37,8 @@ export function describe(e: AppEvent): string {
       return `set the registry login${d.server ? ` for ${String(d.server)}` : ""}`;
     case "audit.registry.removed":
       return "removed the registry login";
+    case "audit.console.opened":
+      return `opened a console${where}`;
     case "audit.deleted":
       return "deleted the service";
     case "audit.restored":

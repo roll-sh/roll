@@ -192,8 +192,17 @@ Lucene can (the FSTs, smartcn's serialized tables), the FSTs are rebuilt with th
   `job_wake_interval` (15 s) the node a due cluster's lease is placed on loads it, the scheduler
   runs what came due, and the idle unload puts it back to sleep, billed as loaded time. A
   cluster without jobs is never woken: the only standing cost is one catalog query per node.
+- **Search analytics** (README, "Search analytics") cost a search one relaxed load while no index
+  has them on. Recorded buckets wait on the cluster (`search_es::analytics`) for the 60 s metering
+  pass, which already runs, with the request metrics and slow logs (`Node::take_observations`);
+  an unloading cluster hands them to the node's carry-over, so a sleeping cluster holds and
+  writes nothing.
 - **Local disk** is a cache with a byte budget (`--search-cache-bytes`). Evicting a segment is
   always safe: every segment in a manifest is already in object storage.
+- **The audit log** (README, "Audit log") writes nothing for a cluster nothing happens to: a
+  node's flusher runs only while entries wait (5 s batches, one object each, under
+  `search/c/<cluster>/audit/`), reading it never wakes the cluster, and a wrong cluster password
+  is recorded without waking it.
 
 ## Branching
 
@@ -278,6 +287,85 @@ without naming either. With no key they are stored as given, as Elasticsearch do
 Elasticsearch does without cluster state encryption. Users' passwords are hashes and API keys
 are kept as hashes, never sealed.
 
+## Client addresses and IP allowlists
+
+A cluster can have an IP allowlist (`ip_allowlist`: at most 64 CIDRs, IPv4 or IPv6, each with an
+optional description; empty means open). It works like Elastic Cloud's traffic filters and AWS
+OpenSearch Service's IP-based policies. It filters the **data plane**: every request to the
+cluster's Elasticsearch/OpenSearch endpoint, on any node and through the edge. The node checks it
+in `Node::enter_from` as soon as it knows which cluster the request names (`search-server`
+`allow.rs`). It runs before the credentials are looked at and before a sleeping cluster wakes. A
+refused request gets Elastic Cloud's answer, 403
+`{"ok":false,"message":"Forbidden due to traffic filtering"}`, the same for every cluster and
+dialect. Wrong credentials from a refused address get that 403, not a 401, so a scanner can't
+probe credentials or learn the flavor or version. A name that isn't a cluster still gets the
+401 it gets today: whether a cluster exists can be told from outside, as on Elastic Cloud (404
+from its proxy), and cluster names are DNS labels anyway.
+
+The **control plane** isn't filtered: `/v1/search` and the dashboard sit behind roll's own
+sign-in and tokens, as Elastic Cloud's console and API aren't subject to traffic filters. Its
+own requests to a cluster (the console, the per-index routes, links' API keys, previews'
+masking) run in process (`Control::call`, `Origin::Internal`). On a fleet they are forwarded to
+the owner signed with `INTERNAL_CLIENT` in place of an address. So the dashboard's console keeps
+working from anywhere, also on a cluster whose allowlist admits nobody the person is at.
+
+**The client address** is decided by the node that accepted the connection, by one rule
+(`ClientAddresses`, rolld's flags):
+
+1. The connection's peer: the socket's peer, or with `--search-proxy-protocol` the PROXY header's
+   source. The NLB is transparent: a v1/v2 header is read before anything else, within 5 s,
+   and a connection without a valid one is dropped. A `LOCAL` header (a health check) leaves
+   the socket's peer.
+2. When the operator names a header (`--search-client-ip-header`, e.g. `CF-Connecting-IP`), its
+   address replaces the peer's only when that peer is inside `--search-trusted-proxies`. The
+   last value is used (a proxy appends its own). A header from any other peer is ignored, and an
+   unreadable one leaves the peer. Neither flag works without the other, and naming
+   `X-Forwarded-For` or `Forwarded` is refused: those carry what the client wrote itself.
+3. IPv4-mapped IPv6 addresses (`::ffff:a.b.c.d`, from a dual-stack socket) are the IPv4 address
+   they carry, for the trusted-proxy check and for the allowlist. A mapped CIDR in an allowlist
+   is stored as its IPv4 CIDR.
+
+Nothing else is believed: a client's own `X-Forwarded-For`, `X-Real-IP` or `x-roll-code-client`
+never decides its address.
+
+**On the fleet** the node a client reached decides the address. It is roll-edge's HTTPS
+listener for `<cluster>.search.…`, which puts it in `ConnectInfo`, or a node's REST port
+(`cluster::serve_front`, the same rule as above). A forward to the owner carries it in
+`x-roll-code-client`, which the HMAC over the forward covers (roll-cluster `sign.rs`). The owner
+takes the address only from that signed field (`cluster::origin_of`). The owner's check is the
+one that counts; the forwarding node doesn't check first, since it doesn't hold the cluster. The
+internal route forwards arrive on (`/internal/search/rest`, which rolld's gate lets in without
+a token) takes signed requests only (`roll_cluster::require_signed`). So a client can't reach the
+owner with an address it chose, or with none. A forward that carries no address, or one that
+doesn't parse, is refused by any allowlist.
+
+**roll cloud** (docs/cloud/README.md) needs no search flags for this. Clients reach clusters at
+`https://<cluster>.search.<region>.<domain>` through the NLB, which sends PROXY v2 to the edge
+(`--edge-proxy-protocol`). These hostnames are DNS only, not proxied by Cloudflare, so the
+edge's client is the PROXY source, the client's own address. The REST port (`--search-http`)
+isn't behind the NLB there. A deployment that puts the REST port itself behind a load balancer
+sets `--search-proxy-protocol` for an NLB or HAProxy. Behind an HTTP proxy that writes the
+client's address, it names that header with the proxy's addresses as trusted: for Cloudflare,
+`--search-client-ip-header CF-Connecting-IP --search-trusted-proxies <cloudflare.com/ips>`, with
+the PROXY header first when an NLB sits between them.
+
+**What an owner must allow.** Anything that uses the cluster over its endpoint is a client like
+any other, and roll apps' instances and roll previews' services are no exception. They connect
+from the addresses roll's hosts send from, which every tenant on those hosts shares. On one node
+an app instance reaches a linked cluster through roll apps' link relay on the host's loopback, so
+the address search sees is the node's own (`127.0.0.1`, or `::1`), not the container's; an
+instance that calls the REST port directly comes from the container bridge's gateway (`172.17.0.1`
+on Docker's default network).
+On roll cloud today it is per-task public IPs. There is no NAT gateway (docs/cloud/README.md,
+"Isolated work"), and fixed outbound addresses are roll apps' Next item "Static outbound IPs".
+Until then, a cluster that a roll-hosted app or preview uses stays open, or lists those
+addresses as they change. As on Elastic Cloud, where other deployments can't connect through a
+traffic filter unless admitted, roll doesn't let its own hosted workloads through implicitly:
+that would let every tenant's app past every allowlist. Credentials still decide who gets in
+after that. What roll does for a link itself (making and revoking its API key, a preview
+branch's masking) is the control plane and needs nothing. A branch starts with its parent's
+allowlist (a preview's branch included); change it like any setting.
+
 ## Snapshots
 
 - **Where they live.** A repository's snapshots are recorded with the cluster's metadata, keyed
@@ -343,14 +431,35 @@ are kept as hashes, never sealed.
   writes no more than `max_total_data_size`, runs at most 16 blobs at once, holds a part per
   blob in flight (breaker-charged), pays the repository's throttles and stops at `timeout`. On
   roll's own repositories it plans and answers without storage, as before.
-- **Credentials.** Elasticsearch takes an `s3` client's keys from its keystore; a roll tenant
-  has none, so `access_key`, `secret_key` and `session_token` come with the repository's
-  settings and are moved out of them at once into the repository's sealed secrets (`seal.rs`,
-  the deployment's `ROLL_SECRET_KEY`), opened only to sign a request (SigV4), never returned by
-  `GET _snapshot` or the cluster state and never logged. Without credentials requests are
-  anonymous: roll's own credentials are never used for a tenant's bucket. The endpoint is a URL
-  the tenant chose: public addresses only (`roll_net::PublicOnly`, `literal_private_host`), no
-  redirects, no proxy, bounded reads (`--search-repository-allow-private` for local MinIO).
+- **`gcs` and `azure` repositories** (`api/snapshots/cloud.rs`, clients `gcs.rs` and `azure.rs`
+  behind `blob.rs`'s `Store`) keep exactly the `s3` layout above in a GCS bucket (the JSON API)
+  or an Azure container (block blobs): the same repository data, shard files, records, chunks,
+  throttles, counters, cleanup and analysis, through one `Bucket`. Only writing in parts
+  differs: an object past 8 MiB goes up as a GCS resumable upload (8 MiB chunks, the last one
+  naming the size and completing it; a failed upload's session is cancelled) or as staged
+  Azure blocks committed by one block list (uncommitted blocks are invisible and expire, so a
+  failed upload leaves nothing to find); one 8 MiB part is held at a time, breaker-charged.
+  Conditional writes are `ifGenerationMatch` (GCS generations stand for ETags) and
+  `If-Match`/`If-None-Match`. Only S3 lists dangling uploads. An `azure` repository's reads go
+  where `location_mode` says (primary, secondary, either first), writes to the primary;
+  `secondary_only` is read-only.
+- **Credentials.** Elasticsearch takes a client's secure settings from its keystore; a roll
+  tenant has none, so they come with the repository's settings (`s3`: `access_key`,
+  `secret_key`, `session_token`; `gcs`: `credentials_file`, the service account key file's
+  JSON as a string; `azure`: `account`, `key`, `sas_token`) and are moved out of them at once
+  into the repository's sealed secrets (`seal.rs`, the deployment's `ROLL_SECRET_KEY`), opened
+  only to sign a request (SigV4, an RS256 JWT exchanged for a GCS access token, Shared Key) or
+  to carry it (a SAS token), never returned by `GET _snapshot` or the cluster state, and never
+  logged or put in an error (clients drop URLs from transport errors: a SAS token or a GCS
+  upload session is in them). A credential given as an object is refused rather than kept
+  flattened in the settings. GCS access tokens are cached in memory until five minutes before
+  they expire, keyed by a digest of the account. Without credentials requests are anonymous:
+  roll's own credentials are never used for a tenant's bucket. Endpoints, a key file's
+  `token_uri` and a GCS session URL (which must be on the endpoint's origin) are URLs the
+  tenant chose: public addresses only (`roll_net::PublicOnly`, `literal_private_host`), no
+  redirects, no proxy, bounded reads (`--search-repository-allow-private` for local MinIO,
+  fake-gcs-server and Azurite; `scripts/search-repo-emulators.sh` runs the `gcs` and `azure`
+  tests against those two in Docker).
 
 ## On the fleet (roll cloud)
 
