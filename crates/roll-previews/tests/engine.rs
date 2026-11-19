@@ -514,6 +514,16 @@ async fn a_previews_traces_are_kept_by_its_token_and_read_masked() {
     assert_eq!(list["traces"][0]["name"].as_str(), Some("POST /pay ***"), "the newest first, masked");
     let apps_one = e.engine.trace(&p.id, &"b".repeat(32)).await.unwrap();
     assert_eq!(apps_one["spans"][0]["name"].as_str(), Some("POST /pay ***"));
+    // Turned off, what roll apps kept isn't the preview's to show.
+    let mut s = e.engine.store.settings(&e.project).unwrap();
+    s.traces = false;
+    e.engine.store.put_settings(&e.project, &s).unwrap();
+    assert_eq!(e.engine.traces(&p.id, 60).await.unwrap()["traces"].as_array().map(Vec::len), Some(1), "only the runtime's kept spans");
+    // A preview's spans are bounded by bytes (16 MiB), not only by count: big spans push the oldest out.
+    let big = |i: usize| Span { trace: format!("{i:032x}"), span: "0000000000000001".into(), parent: String::new(), name: "big".into(), service: web.clone(), start: now - 1_000_000, end: now, error: false, attrs: vec![("blob".into(), "x".repeat(1 << 20))] };
+    e.engine.keep_spans(&p.id, &token, (0..20).map(big).collect()).unwrap();
+    let n = e.engine.traces(&p.id, 60).await.unwrap()["traces"].as_array().map(Vec::len).unwrap();
+    assert!(n <= 16, "{n} traces of 1 MiB spans kept");
 }
 
 /// A port of a preview's service on a laptop (`roll preview forward`): bytes go both ways, port 0
