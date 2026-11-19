@@ -402,6 +402,28 @@ nothing in the round runs on their paths but a branch in the model's update and 
 version has an xmax (none here) and one atomic load of `Models::locks_maybe` for tables past the
 model (none here).
 
+### Gate: the 1M-row bulk script (lane C, plain dist)
+
+**b1** (`bc9102ebb`) against **n3** (`82e455a26`, `cand/a262`), agent 246's `bulkx.sh` with joined
+windows (`join.steps`), five alternating pairs, one per `tools/lane.sh c` hold (lane.sh's foreign
+load 5.8-7.8 cores in every hold, 1.5-4.1 per step by the harness: over the 1.0 rule again; the
+counts repeat within 0.1% regardless). G user instructions of the server's cgroup, medians:
+
+| step | b1 | n3 | % per pair |
+|---|---|---|---|
+| COPY in | 9.470 | 9.471 | +0.01 x5 |
+| CREATE INDEX / UNIQUE INDEX | 5.288 / 3.467 | 5.286 / 3.469 | -0.23 to +0.17 |
+| INSERT ... SELECT | 6.682 | 6.683 | -0.03 to +0.22 |
+| UPDATE half | 12.004 | 12.022 | +0.02, +0.17, +0.17, +0.15, +0.15 |
+| DELETE a quarter | 9.994 | 10.002 | +0.07 to +0.10 |
+| VACUUM | 1.785 | 1.787 | +0.11 x5 |
+| COPY out, ANALYZE, counts and sums | | | +0.00 |
+| **all steps** | 53.651 | 53.678 | +0.03, +0.05, +0.05, +0.06, +0.07 |
+
+The UPDATE's and DELETE's ~35 instructions a row past the model are `estlocks::replaced`'s call and
+its `locks_maybe` test; VACUUM's ~2 M datminmxid's pass over the database's relations. Rows equal in
+every run; peaks (cgroup / VmHWM) b1 303-398 / 269-294 MB, n3 342-396 / 269-288 MB.
+
 ## Analytic CPU, round 5 (2026-11-18/19, agent 258)
 
 HANDOFF "Analytic CPU, round 5" has what changed. Lane C (servers in containers on CPUs

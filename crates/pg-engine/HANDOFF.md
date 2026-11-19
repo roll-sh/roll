@@ -16295,8 +16295,10 @@ and short transactions, plain dist builds, base `bc9102ebb` against the round: o
 clients, five pairs each) every run had 0.85-10.9 foreign cores, so no pair counts (medians -0.16% and
 -2.72% user instructions a transaction); in process (the `bench` example, 1 client, five pairs each,
 (I30 - I10) / (ops30 - ops10)) point selects **+0.01%** (every pair within -0.12..+0.17%), short
-transactions -1.24% (+-2% a pair). Bulk script: not re-measured against base (nothing on its paths
-changed for tables without row locks but one atomic load a row on UPDATE / DELETE past the model).
+transactions -1.24% (+-2% a pair). The 1M-row bulk script (lane C, five pairs, over the foreign-load
+rule too, counts within 0.1%): all steps **+0.05%** (+0.03..+0.07), UPDATE of half +0.15%, DELETE
++0.08% (`estlocks::replaced`'s test a row past the model), VACUUM +0.11% (datminmxid), the rest
++-0.0.
 
 Verification: quick-check with `QC_CHECKED=1` on `2478ed62e` (the round on `bc9102ebb`): build,
 clippy (16 warnings, none new in changed files), tests 490 passed in 41 binaries and the same with
