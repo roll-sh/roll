@@ -335,6 +335,30 @@ impl<'a> Inner<'a> {
     }
 }
 
+/// `joined` of `l`'s own row: its values moved, not copied (those `keep` leaves out made NULL),
+/// then `r`'s.
+pub fn joined_from(mut l: Row, r: Inner, keep: Option<&[bool]>) -> Row {
+    let n = l.len();
+    l.reserve(r.width());
+    match (keep, r.map) {
+        (None, None) => l.extend_from_slice(r.vals),
+        (None, Some(_)) => l.extend((0..r.width()).map(|i| r.get(i).cloned().unwrap_or(Value::Null))),
+        (Some(k), _) => {
+            let kept = |i: usize| k.get(i).copied().unwrap_or(false);
+            for (i, v) in l.iter_mut().enumerate() {
+                if !kept(i) {
+                    *v = Value::Null;
+                }
+            }
+            l.extend((0..r.width()).map(|i| match r.get(i) {
+                Some(v) if kept(n + i) => v.clone(),
+                _ => Value::Null,
+            }));
+        }
+    }
+    l
+}
+
 /// A row of `l`'s columns then `r`'s, copying only the columns in `keep` (None: all;
 /// the others are NULL: nothing above reads them).
 pub fn joined(l: &[Value], r: Inner, keep: Option<&[bool]>) -> Row {
@@ -468,8 +492,10 @@ impl Probe {
         true
     }
 
-    /// The join's rows for outer row `l` and its `matches`, in order, to `f`.
-    pub fn emit(&self, l: Row, matches: &[u32], f: &mut dyn FnMut(Joined)) {
+    /// The join's rows for outer row `l` and its `matches`, in order, to `f`. `own_last`: the
+    /// next stage makes each a row of its own, so the last match's is made now by moving `l`'s
+    /// values (`joined_from`), not by copying them.
+    pub fn emit(&self, l: Row, matches: &[u32], own_last: bool, f: &mut dyn FnMut(Joined)) {
         let t = &*self.built;
         match self.kind {
             JoinKind::Semi if !matches.is_empty() => f(Joined::Row(l)),
@@ -481,9 +507,16 @@ impl Probe {
                 f(Joined::Row(o));
             }
             _ => {
-                for &j in matches {
+                let Some((&last, rest)) = matches.split_last().filter(|_| own_last) else {
+                    for &j in matches {
+                        f(Joined::Pair { l: &l, r: t.inner(j as usize), keep: self.keep.as_deref() });
+                    }
+                    return;
+                };
+                for &j in rest {
                     f(Joined::Pair { l: &l, r: t.inner(j as usize), keep: self.keep.as_deref() });
                 }
+                f(Joined::Row(joined_from(l, t.inner(last as usize), self.keep.as_deref())));
             }
         }
     }
@@ -570,7 +603,7 @@ pub fn run_stages(stages: &[Arc<Stage>], from: usize, row: Row, s: &mut Scratch,
                     drain_from(stages, from + 1, s, emit);
                     emit(Joined::Row(row), from as u8)
                 }
-                true => p.emit(row, &matches, &mut |j| onward(stages, from, j, s, emit)),
+                true => p.emit(row, &matches, from + 1 < stages.len(), &mut |j| onward(stages, from, j, s, emit)),
             }
             s.matches[from] = matches;
         }
@@ -587,7 +620,7 @@ pub fn run_stages(stages: &[Arc<Stage>], from: usize, row: Row, s: &mut Scratch,
                     drain_from(stages, from + 1, s, emit);
                     emit(Joined::Row(row), from as u8)
                 }
-                true => lk.emit(row, &rows, &mut |j| onward(stages, from, j, s, emit)),
+                true => lk.emit(row, &rows, from + 1 < stages.len(), &mut |j| onward(stages, from, j, s, emit)),
             }
             s.rows[from] = rows;
         }
@@ -623,7 +656,7 @@ fn lookup_batch(stages: &[Arc<Stage>], from: usize, s: &mut Scratch, emit: &mut 
                 drain_from(stages, from + 1, s, emit);
                 emit(Joined::Row(l), from as u8)
             }
-            super::lookup::Got::Rows(a, b) => lk.emit(l, &rows[a as usize..b as usize], &mut |j| onward(stages, from, j, s, emit)),
+            super::lookup::Got::Rows(a, b) => lk.emit(l, &rows[a as usize..b as usize], from + 1 < stages.len(), &mut |j| onward(stages, from, j, s, emit)),
         }
     }
     s.held[from] = ls;

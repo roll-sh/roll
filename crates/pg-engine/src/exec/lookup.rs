@@ -645,8 +645,9 @@ impl Lookup {
         self.fetched.fetch_add(std::mem::take(&mut sc.fetched), Ordering::Relaxed);
     }
 
-    /// The join's rows for outer row `l` and its inner `rows`, in order, to `f`.
-    pub fn emit(&self, l: Row, rows: &[Row], f: &mut dyn FnMut(Joined)) {
+    /// The join's rows for outer row `l` and its inner `rows`, in order, to `f` (`own_last`:
+    /// `Probe::emit`'s).
+    pub fn emit(&self, l: Row, rows: &[Row], own_last: bool, f: &mut dyn FnMut(Joined)) {
         match self.kind {
             JoinKind::Semi if !rows.is_empty() => f(Joined::Row(l)),
             JoinKind::Anti if rows.is_empty() => f(Joined::Row(l)),
@@ -657,9 +658,16 @@ impl Lookup {
                 f(Joined::Row(o));
             }
             _ => {
-                for r in rows {
+                let Some((last, rest)) = rows.split_last().filter(|_| own_last) else {
+                    for r in rows {
+                        f(Joined::Pair { l: &l, r: super::pipe::Inner::plain(r), keep: self.keep.as_deref() });
+                    }
+                    return;
+                };
+                for r in rest {
                     f(Joined::Pair { l: &l, r: super::pipe::Inner::plain(r), keep: self.keep.as_deref() });
                 }
+                f(Joined::Row(super::pipe::joined_from(l, super::pipe::Inner::plain(last), self.keep.as_deref())));
             }
         }
     }
