@@ -15,6 +15,7 @@ GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}/commits
 GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}/logs
 POST /v1/apps/services/{id}/environments/{env}/deploys/{dep}/rollback
 POST /v1/apps/services/{id}/environments/{env}/deploys/{dep}/rollout
+GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}/vulnerabilities
 GET /v1/apps/services/{id}/environments/{env}/domains
 POST /v1/apps/services/{id}/environments/{env}/domains
 PATCH /v1/apps/services/{id}/environments/{env}/domains/{host}
@@ -36,6 +37,7 @@ POST /v1/apps/services/{id}/environments/{env}/rollback
 GET /v1/apps/services/{id}/environments/{env}/routes
 GET /v1/apps/services/{id}/environments/{env}/analytics
 GET /v1/apps/services/{id}/environments/{env}/vitals
+GET /v1/apps/services/{id}/environments/{env}/slo
 GET /v1/apps/services/{id}/environments/{env}/app-metrics
 GET /v1/apps/services/{id}/environments/{env}/errors
 GET /v1/apps/services/{id}/environments/{env}/traces
@@ -264,3 +266,5 @@ GET /v1/secrets/projects/{project}/suggestions
 POST /v1/secrets/projects/{project}/syncs/preview
 DELETE /v1/secrets/projects/{project}/syncs/{id}
 POST /v1/secrets/projects/{project}/syncs/{id}/run
+GET /v1/previews/{id}/traces
+GET /v1/previews/{id}/traces/{trace}

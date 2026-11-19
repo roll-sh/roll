@@ -335,6 +335,9 @@ for _ in $(seq 1 60); do grep -q "pushed-log-line" "$FOLLOW" && break; sleep 0.2
 kill "$FPID" 2>/dev/null || true
 wait "$FPID" 2>/dev/null || true
 grep -q "event: service" "$FOLLOW" && grep -q "pushed-log-line" "$FOLLOW" || { echo "the followed log should carry the request:"; cat "$FOLLOW"; exit 1; }
+# Python's server writes its request lines on stderr: the followed log says so (`event: stderr`,
+# which axum writes after the event's `data:` line).
+grep -A1 "pushed-log-line" "$FOLLOW" | grep -q "^event: stderr" || { echo "the request's line came on stderr and should say so:"; cat "$FOLLOW"; exit 1; }
 # CI's way in: the project's bypass secret in a header (no cookie); a wrong one is refused.
 BYPASS=$(api POST "/v1/previews/projects/$PRJ/bypass" | jq_ "d['secret']")
 [ "$(curl -s -o /dev/null -w '%{http_code}' -H "Host: $HOST" -H "x-roll-preview-bypass: $BYPASS" "http://$API/")" = 200 ] || { echo "the bypass secret should open the preview"; exit 1; }
@@ -373,6 +376,56 @@ STATS=$(docker stats --no-stream --format '{{.MemUsage}} {{.CPUPerc}}' "$CONTAIN
 RSS1=$(ps -o rss= -p "$PID")
 api POST "/v1/previews/$PV/refresh" >/dev/null; sleep 3
 ACTIVE=$(api GET "/v1/previews/$PV" | jq_ "d['cost']")
+
+say "a shell in the preview's service (roll preview shell): what's typed runs in its container, with its variables"
+# Keys from a pipe (no terminal, so no raw mode), the screen on stdout until the shell's `exit`.
+SCREEN=$(printf 'echo "seen $ROLL_PREVIEW"; exit\r' | ROLL_API_URL="http://$API" timeout 60 "$ROOT/target/debug/roll" preview shell "$PV" --service web 2>&1) || { echo "roll preview shell failed: $SCREEN"; exit 1; }
+case "$SCREEN" in *"seen $PV"*) ;; *) echo "the shell should run in the service's container with its variables: $SCREEN"; exit 1;; esac
+api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d]" | grep -q "opened a shell in web" || { echo "the activity should say a shell was opened"; exit 1; }
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://$API/v1/previews/$PV/shell/sessions" -H 'content-type: application/json' -d '{"service":"nope"}')" = 404 ] || { echo "a shell in a service the preview hasn't should be 404"; exit 1; }
+
+say "files in and out of the preview's service (roll preview cp)"
+echo "fixture for $PV" > "$HOME_DIR/fixture.txt"
+rm -f "$HOME_DIR/back.txt"
+ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview cp "$PV" "$HOME_DIR/fixture.txt" :/tmp/ --service web >/dev/null || { echo "roll preview cp should put a file into the service"; exit 1; }
+ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview cp "$PV" :/tmp/fixture.txt "$HOME_DIR/back.txt" --service web >/dev/null || { echo "roll preview cp should bring the file back"; exit 1; }
+[ "$(cat "$HOME_DIR/back.txt" 2>/dev/null)" = "fixture for $PV" ] || { echo "the file brought back should be the one put in: $(cat "$HOME_DIR/back.txt" 2>/dev/null)"; exit 1; }
+[ "$(curl -s -o /dev/null -w '%{http_code}' "http://$API/v1/previews/$PV/files?service=web&path=/nothing/here")" = 404 ] || { echo "nothing at a path should be 404"; exit 1; }
+api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d]" | grep -q "copied files into web at /tmp" || { echo "the activity should say files were copied in"; exit 1; }
+
+say "a port of the preview's service on this machine (roll preview forward), from inside it"
+# (`P` is the preview's JSON by now: the port block from the environment.)
+FWD_PORT=${PREVIEW_E2E_PORTS:-27}977
+ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview forward "$PV" 8000 --service web --local-port "$FWD_PORT" 2>/dev/null &
+FWD_PID=$!
+for _ in $(seq 1 50); do ss -ltn | grep -q ":$FWD_PORT " && break; sleep 0.2; done
+FWDED=$(curl -s --max-time 30 "http://127.0.0.1:$FWD_PORT/env.txt" | grep -c "^ROLL_PREVIEW=$PV$" || true)
+kill "$FWD_PID" 2>/dev/null || true; wait "$FWD_PID" 2>/dev/null || true
+[ "$FWDED" = 1 ] || { echo "the forwarded port should reach the service from inside it: $FWDED"; exit 1; }
+api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d]" | grep -q "forwarded port 8000 of web" || { echo "the activity should say the port was forwarded"; exit 1; }
+for _ in $(seq 1 30); do [ "$(docker ps -aq --filter name=roll-previews-fwd- | wc -l)" = 0 ] && break; sleep 0.5; done
+[ "$(docker ps -aq --filter name=roll-previews-fwd- | wc -l)" = 0 ] || { echo "a forward's relay should go with its connection"; exit 1; }
+
+say "traces: with the project's traces on, the service gets OpenTelemetry's variables, and spans it posts are the preview's traces"
+api PUT "/v1/previews/projects/$PRJ/settings" '{"traces":true}' >/dev/null
+# It restarts with them (its deploy's fingerprint): the env it writes at start says so.
+OTEL=""
+for _ in $(seq 1 120); do
+  OTEL=$(curl -sS -b "$JAR" -H "Host: $HOST" "http://$API/env.txt" | sed -n 's/^OTEL_EXPORTER_OTLP_ENDPOINT=//p')
+  [ -n "$OTEL" ] && break
+  sleep 1
+done
+[ -n "$OTEL" ] || { echo "the service should get OTEL_EXPORTER_OTLP_ENDPOINT with traces on"; exit 1; }
+# The span an SDK in it would send, to the endpoint and token it was given. Posted from this host:
+# on ai-server the firewall keeps containers from the host (as with the mail catcher and host
+# Postgres), so the container's own `host.docker.internal` hop can't be checked here.
+OTEL_HERE=$(echo "$OTEL" | sed 's#host.docker.internal#127.0.0.1#')
+NOW_NS=$(date +%s%N)
+SPANS="{\"resourceSpans\":[{\"resource\":{\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"web\"}}]},\"scopeSpans\":[{\"spans\":[{\"traceId\":\"abababababababababababababababab\",\"spanId\":\"0101010101010101\",\"name\":\"GET /checkout\",\"startTimeUnixNano\":\"$((NOW_NS - 40000000))\",\"endTimeUnixNano\":\"$NOW_NS\"},{\"traceId\":\"abababababababababababababababab\",\"spanId\":\"0202020202020202\",\"parentSpanId\":\"0101010101010101\",\"name\":\"charge card\",\"startTimeUnixNano\":\"$((NOW_NS - 30000000))\",\"endTimeUnixNano\":\"$((NOW_NS - 5000000))\",\"status\":{\"code\":2}}]}]}]}"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' -d "$SPANS" "$OTEL_HERE/v1/traces")" = 200 ] || { echo "the service's OpenTelemetry endpoint should take its spans: $OTEL_HERE"; exit 1; }
+TRACES=$(api GET "/v1/previews/$PV/traces" | jq_ "[(t['name'], t['spans'], t['error']) for t in d['traces']]")
+case "$TRACES" in *"('GET /checkout', 2, True)"*) ;; *) echo "the span posted should be the preview's trace: $TRACES"; exit 1;; esac
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' -d '{}' "http://$API/v1/previews/$PV/otlp/not-the-token/v1/traces")" = 404 ] || { echo "another token should be 404"; exit 1; }
 
 say "a screenshot of the service (github.screenshot), once per head"
 # And /pricing, which the test service doesn't have (a 404 page, one failed request).

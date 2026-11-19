@@ -21,6 +21,8 @@ export const field =
   "h-8 w-full min-w-0 rounded-md border border-line-2 bg-panel-2 px-2.5 text-[12.5px] text-fg outline-none transition-colors placeholder:text-subtle focus:border-accent/60";
 /** A field with its own width (`w-40`): `field` without `w-full`, which would win. */
 export const sized = field.replace(" w-full", "");
+/** A multi-line field: `field` without the fixed height, which would win over `rows`. */
+export const textareaField = field.replace("h-8 ", "h-auto py-1.5 ");
 export const label = "mb-1 block text-[11px] font-medium text-subtle";
 
 export const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));

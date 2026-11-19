@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { accountsApi, activityText, onReauthRequired, type Activity } from "./accounts-api";
+import { accountsApi, activityText, peopleCsv, onReauthRequired, phishingResistant, sessionMethod, findPeople, dormant, type Activity } from "./accounts-api";
 
 describe("activityText", () => {
   const e = (a: Partial<Activity>): Activity => ({ at: 0, action: "sign_in", actor: "usr_me", ok: true, status: 200, ...a });
@@ -74,5 +74,46 @@ describe("sudo mode", () => {
 describe("a provider's logout in the security log", () => {
   it("says the provider signed the person out", () => {
     expect(activityText({ at: 0, action: "session.end", actor: "sso:sso_okta", ok: true, status: 200 }, "usr_me")).toBe("Your company's provider signed you out (its back-channel logout)");
+  });
+});
+
+describe("sessions", () => {
+  it("say how they signed in, and which are phishing-resistant", () => {
+    expect(sessionMethod({ method: "github" })).toBe("GitHub");
+    expect(sessionMethod({ method: null })).toBeNull();
+    expect([{ method: "email" }, { method: "email", passkey: true }, { method: "sso" }, { method: "passkey" }].map((s) => phishingResistant(s as never))).toEqual([false, true, true, true]);
+  });
+});
+
+describe("findPeople", () => {
+  const p = (handle: string, o: Partial<{ admin: boolean; disabled: boolean; totp: boolean; passkeys: number; last_active_at: number }> = {}) => ({ name: handle.toUpperCase(), handle, email: `${handle}@acme.test`, admin: false, disabled: false, totp: false, passkeys: 0, created_at: 0, last_active_at: Date.now(), ...o });
+  const all = [p("ada", { admin: true, totp: true }), p("bob"), p("cy", { disabled: true }), p("dee", { passkeys: 1, last_active_at: 0 })];
+  it("finds by name, handle or address, and filters", () => {
+    expect(findPeople(all, "ACME.test", "everyone").length).toBe(4);
+    expect(findPeople(all, "bo", "everyone").map((u) => u.handle)).toEqual(["bob"]);
+    expect(findPeople(all, "", "admins").map((u) => u.handle)).toEqual(["ada"]);
+    expect(findPeople(all, "", "no-second-factor").map((u) => u.handle)).toEqual(["bob"]);
+    expect(findPeople(all, "", "turned-off").map((u) => u.handle)).toEqual(["cy"]);
+    expect(findPeople(all, "", "dormant").map((u) => u.handle)).toEqual(["dee"]);
+  });
+});
+
+describe("dormant", () => {
+  it("is 90 days without using roll; unknown activity isn't dormant", () => {
+    const day = 24 * 3600 * 1000, now = 1000 * day;
+    expect(dormant({ last_active_at: now - 89 * day, created_at: 0, disabled: false }, now)).toBe(false);
+    expect(dormant({ last_active_at: now - 91 * day, created_at: 0, disabled: false }, now)).toBe(true);
+    expect(dormant({ last_active_at: null, created_at: now - 91 * day, disabled: false }, now)).toBe(false);
+    expect(dormant({ last_active_at: now - 91 * day, created_at: 0, disabled: true }, now)).toBe(false);
+  });
+});
+
+describe("peopleCsv", () => {
+  it("is a row each, with formulas defused", () => {
+    const u = { id: "usr_1", handle: "eve", name: "=HYPERLINK(\"x\")", email: "eve@acme.test", admin: false, disabled: false, created_at: 0, last_active_at: null, totp: true, passkeys: 2, identities: [] };
+    const csv = peopleCsv([u]);
+    const [head, row] = csv.trim().split("\n");
+    expect(head).toBe("handle,name,email,admin,turned_off,authenticator_app,passkeys,dormant,last_active,created");
+    expect(row).toBe(`"eve","'=HYPERLINK(""x"")","eve@acme.test","false","false","true","2","false","","1970-01-01T00:00:00.000Z"`);
   });
 });
