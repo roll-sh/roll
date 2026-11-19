@@ -141,6 +141,12 @@ fn search_parent(b: &Value) -> Vec<Lent> {
     b.get("parent").and_then(Value::as_str).map(|p| Lent { kind: "search".into(), r#ref: p.into(), action: Action::Write }).into_iter().collect()
 }
 
+/// A search cluster linked as another's remote (`cluster`): roll issues a cross-cluster API key
+/// of it, so the link needs `admin` on it too, as making its keys does.
+fn search_remote(b: &Value) -> Vec<Lent> {
+    b.get("cluster").and_then(Value::as_str).map(|p| Lent { kind: "search".into(), r#ref: p.into(), action: Action::Admin }).into_iter().collect()
+}
+
 /// What an apps link's kind is, as a rule names it: its product and the resource kind its ids are.
 pub fn link_target(kind: &str) -> Option<(&'static str, &'static str)> {
     Some(match kind {
@@ -302,6 +308,7 @@ pub const OPERATOR_ONLY: &[(&str, &str)] = &[
     ("/v1/access/audit/sinks", "where the audit log is sent is the operator's choice"),
     ("/v1/access/audit/sinks/{id}", "where the audit log is sent is the operator's choice"),
     ("/v1/access/audit/sinks/{id}/retry", "where the audit log is sent is the operator's choice"),
+    ("/v1/previews/{id}/visit", "a browser session in a team-access preview is a signed-in person's (rolld's gate sees their session), never a token's"),
     ("/v1/apps/services/{id}/environments/{env}/visit", "a browser session in a sign-in-gated environment is a signed-in person's (rolld's gate sees their session), never a token's"),
     ("/v1/apps/services/{id}/github", "roll's GitHub App installations span tenants: connecting a service to one (its tokens fetch any repository the installation sees) is the operator's, as connecting a repo is roll code's admin token's"),
 ];
@@ -1125,6 +1132,13 @@ static ROWS: &[Row] = &[
     // An API key: its secret is in the answer.
     row("POST", "/v1/search/clusters/{id}/keys", "search", REVEAL, one(PG, "cluster")),
     row("DELETE", "/v1/search/clusters/{id}/keys/{key}", "search", ADMIN, one(PG, "cluster")),
+    row("GET", "/v1/search/clusters/{id}/remotes", "search", R, one(PG, "cluster")),
+    row("PUT", "/v1/search/clusters/{id}/remotes/{alias}", "search", ADMIN, one(PG, "cluster")).lends(Lend::Each(search_remote)),
+    row("DELETE", "/v1/search/clusters/{id}/remotes/{alias}", "search", ADMIN, one(PG, "cluster")),
+    // Inference endpoints keyed by a project's secret: making one changes the cluster as the
+    // console does; roll secrets checks `reveal` on the secret itself, as the caller.
+    row("GET", "/v1/search/clusters/{id}/inference/secrets", "search", R, one(PG, "cluster")),
+    row("POST", "/v1/search/clusters/{id}/inference/secrets", "search", ADMIN, one(PG, "cluster")),
     // Request metrics and the slow logs (queries' and documents' sources, cut): reads of the
     // cluster's data.
     row("GET", "/v1/search/clusters/{id}/metrics", "search", R, one(PG, "cluster")),
@@ -1231,6 +1245,13 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/secrets/projects/{project}/cas/{id}/certificates", "secrets", R, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/cas/{id}/revoke", "secrets", W, one(&["project"], "project")),
     row("DELETE", "/v1/secrets/projects/{project}/cas/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    // ACME on a CA: its directory, pre-authorization and External Account Bindings. A binding's
+    // HMAC key is answered once, to who may also reveal; making, revoking and pre-authorizing are
+    // the project admin's (an account acts with its binding's names).
+    row("GET", "/v1/secrets/projects/{project}/cas/{id}/acme", "secrets", R, one(&["project"], "project")),
+    row("PATCH", "/v1/secrets/projects/{project}/cas/{id}/acme", "secrets", ADMIN, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/cas/{id}/acme/eab", "secrets", ADMIN, one(&["project"], "project")).reveals(&["hmac_key"]),
+    row("DELETE", "/v1/secrets/projects/{project}/cas/{id}/acme/eab/{eab}", "secrets", ADMIN, one(&["project"], "project")),
     row("GET", "/v1/secrets/projects/{project}/ssh-cas", "secrets", R, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/ssh-cas", "secrets", ADMIN, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/ssh-cas/{id}/sign-host", "secrets", ADMIN, one(&["project"], "project")),
@@ -1245,6 +1266,26 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/secrets/projects/{project}/outside-databases", "secrets", R, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/outside-databases", "secrets", ADMIN, one(&["project"], "project")),
     row("DELETE", "/v1/secrets/projects/{project}/outside-databases/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    // LDAP and Active Directory: listing never shows the bind password; registering takes one.
+    row("GET", "/v1/secrets/projects/{project}/directories", "secrets", R, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/directories", "secrets", ADMIN, one(&["project"], "project")),
+    row("DELETE", "/v1/secrets/projects/{project}/directories/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    // Snowflake accounts: listing never shows the admin's private key; registering takes one.
+    row("GET", "/v1/secrets/projects/{project}/snowflake-accounts", "secrets", R, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/snowflake-accounts", "secrets", ADMIN, one(&["project"], "project")),
+    row("DELETE", "/v1/secrets/projects/{project}/snowflake-accounts/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    // MongoDB Atlas projects: listing shows the service account's client id, never its secret;
+    // registering takes one.
+    row("GET", "/v1/secrets/projects/{project}/atlas-projects", "secrets", R, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/atlas-projects", "secrets", ADMIN, one(&["project"], "project")),
+    row("DELETE", "/v1/secrets/projects/{project}/atlas-projects/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    // Gateways into private networks (docs/secrets.md, "Gateways"): records are the project's;
+    // a gateway's own link is write on the gateway by its id, which only its token's rule names
+    // (a project-wide rule doesn't reach it).
+    row("GET", "/v1/secrets/projects/{project}/gateways", "secrets", R, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/gateways", "secrets", ADMIN, one(&["project"], "project")).reveals(&["token"]),
+    row("DELETE", "/v1/secrets/projects/{project}/gateways/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    row("GET", "/v1/secrets/gateways/{id}/connect", "secrets", W, one(&["id"], "gateway")),
     row("PATCH", "/v1/secrets/projects/{project}/outside-databases/{id}", "secrets", ADMIN, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/outside-databases/{id}/rotate-admin", "secrets", ADMIN, one(&["project"], "project")),
     row("GET", "/v1/secrets/projects/{project}/kubernetes", "secrets", R, one(&["project"], "project")),
@@ -1437,6 +1478,20 @@ static ROWS: &[Row] = &[
     // Each data branch's connection as the preview's services get it (the branches' own
     // credentials, never a parent's; previews-next): reveal, as the preview's env is.
     row("GET", "/v1/previews/{id}/connect", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    // A shell in a preview's running service runs anything with its variables and branches, as
+    // roll apps' shells do: admin, every route of it (what closes an admin's shell is admin).
+    row("POST", "/v1/previews/{id}/shell/sessions", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    row("GET", "/v1/previews/{id}/shell/sessions/{sh}/screen", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    row("POST", "/v1/previews/{id}/shell/sessions/{sh}/keys", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    row("POST", "/v1/previews/{id}/shell/sessions/{sh}/resize", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    row("DELETE", "/v1/previews/{id}/shell/sessions/{sh}", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    // Files in a preview's service (`roll preview cp`): read, anything it keeps (its variables
+    // too); written, anything it runs next: admin, as the shell is.
+    row("GET", "/v1/previews/{id}/files", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    // A port of a preview's service on a laptop (`roll preview forward`): any port it listens on,
+    // past its access: admin, as roll apps' tunnel is.
+    row("GET", "/v1/previews/{id}/forward", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    row("PUT", "/v1/previews/{id}/files", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
     // The mail a preview's services sent, caught and never delivered (previews-next): it can hold
     // copies of production's people, so reveal, as the preview's env is.
     row("GET", "/v1/previews/{id}/mail", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
