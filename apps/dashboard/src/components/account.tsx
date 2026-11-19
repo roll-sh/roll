@@ -581,6 +581,21 @@ function EveryoneSecondFactor() {
           </select>
           ends
         </label>
+        <label className="flex items-center gap-2 text-[12.5px]">
+          Every session ends
+          <select
+            value={policy.max_session_hours ?? 0}
+            onChange={(e) => void save({ ...policy, max_session_hours: Number(e.target.value) || undefined })}
+            className="rounded-md border border-line-2 bg-canvas px-1.5 py-0.5 text-[12px]"
+          >
+            {[8, 12, 24, 72, 168, 0, ...(policy.max_session_hours && ![8, 12, 24, 72, 168].includes(policy.max_session_hours) ? [policy.max_session_hours] : [])].map((h) => (
+              <option key={h} value={h}>
+                {h === 0 ? "30 days" : h < 24 ? `${h} hours` : h === 24 ? "a day" : h === 168 ? "a week" : `${h / 24} days`}
+              </option>
+            ))}
+          </select>
+          after its sign-in
+        </label>
         {error && <p className="text-[12px] text-danger">{error}</p>}
       </div>
     </Section>

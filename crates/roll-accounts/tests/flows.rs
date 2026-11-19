@@ -1492,7 +1492,8 @@ async fn sessions_are_used_only_from_allowed_networks() {
     assert_eq!(env.call(&mut cafe, Method::GET, "/v1/accounts/me", None).await.status, StatusCode::OK);
 }
 
-/// An idle timeout (docs/accounts.md): a session unused longer than the company's minutes ends;
+/// An idle timeout and a longest session (docs/accounts.md): a session unused longer than the
+/// company's minutes ends, and so does one older than its hours, however much it's used;
 /// out-of-range values are refused.
 #[tokio::test]
 async fn a_company_sets_an_idle_timeout() {
@@ -1508,6 +1509,21 @@ async fn a_company_sets_an_idle_timeout() {
     let db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(env._dir.path().join("accounts.db")), "accounts").unwrap();
     db.write(|c| c.execute("UPDATE sessions SET seen_at = seen_at - 31 * 60000", ())).unwrap();
     assert_eq!(env.call(&mut b, Method::GET, "/v1/accounts/me", None).await.status, StatusCode::UNAUTHORIZED);
+
+    // The longest session (Okta's maximum session lifetime): 8 hours after its sign-in, however
+    // much it's used.
+    assert_eq!(env.operator(Method::PUT, "/v1/accounts/policy", json!({ "max_session_hours": 721 })).await.json["code"], "policy");
+    assert_eq!(env.operator(Method::PUT, "/v1/accounts/policy", json!({ "idle_minutes": 30, "max_session_hours": 8 })).await.json["max_session_hours"], 8);
+    let mut c = Browser::default();
+    env.email_sign_in(&mut c, "ada@example.com", None).await;
+    db.write(|c| c.execute("UPDATE sessions SET created_at = created_at - 7 * 3600000", ())).unwrap();
+    assert_eq!(env.call(&mut c, Method::GET, "/v1/accounts/me", None).await.status, StatusCode::OK, "7 hours in, in use");
+    // The session list says when it ends: 8 hours after its sign-in, not roll's 30 days.
+    let listed = env.call(&mut c, Method::GET, "/v1/accounts/me/sessions", None).await.json;
+    let s = &listed.as_array().unwrap()[0];
+    assert_eq!(s["expires_at"].as_i64().unwrap() - s["created_at"].as_i64().unwrap(), 8 * 3600000, "{listed}");
+    db.write(|c| c.execute("UPDATE sessions SET created_at = created_at - 3600000", ())).unwrap();
+    assert_eq!(env.call(&mut c, Method::GET, "/v1/accounts/me", None).await.status, StatusCode::UNAUTHORIZED, "8 hours in");
 }
 
 /// Phishing-resistant sign-in (docs/accounts.md): on for admins, an admin's session that hasn't
