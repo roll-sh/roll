@@ -1173,6 +1173,13 @@ and title, masked; their values are read only when that set moved). The verdict 
 comment counts them in its checks with each title in a code span nothing in it can close. A
 change reports the preview again; an error fixed (gone from the last hour) goes.
 `an_error_mains_preview_doesnt_have_reaches_the_record_and_the_report`.
+
+Repeated queries (Sentry's N+1 detection): a trace whose spans run one database statement
+(`db.statement`, or the newer `db.query.text`) ten times or more says it as `repeated`
+(`{statement, count}`), the statement's shape with its literals taken out (`SELECT … WHERE id = ?`,
+an `IN` list as one) and masked as its names are. The trace list and the route table (`…/routes`,
+a route's worst trace) tag it N+1, an opened trace says what it runs, and `roll preview traces
+--routes` prints it under the route. `a_statement_run_many_times_in_a_trace_is_said_by_its_shape`.
 Read back masked as
 its logs are: a span's name and attributes are its code's words. The intake reads OTLP with roll
 apps' reader (`apps_control::otlp::spans_of_request`). A roll apps service's traces are roll apps'

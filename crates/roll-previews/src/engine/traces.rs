@@ -55,6 +55,67 @@ pub struct TraceRow {
     pub spans: usize,
     #[serde(default)]
     pub error: bool,
+    /// One database statement its spans run many times (an N+1), if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeated: Option<Repeated>,
+}
+
+/// A statement a trace runs many times, its literals taken out (`SELECT … WHERE id = ?`).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Repeated {
+    pub statement: String,
+    pub count: usize,
+}
+
+/// How many times one statement must run in a trace to be said (Sentry's N+1 detection).
+pub const REPEATED_MIN: usize = 10;
+
+/// A statement's shape: quoted strings and numbers as `?`, a list of them as one, whitespace as
+/// one space, at most 200 characters.
+pub fn statement_shape(s: &str) -> String {
+    let mut out = String::new();
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' | '"' => {
+                for d in chars.by_ref() {
+                    if d == c {
+                        break;
+                    }
+                }
+                out.push('?');
+            }
+            '0'..='9' if !out.ends_with(|p: char| p.is_ascii_alphanumeric() || p == '_') => {
+                while chars.peek().is_some_and(|d| d.is_ascii_digit() || *d == '.') {
+                    chars.next();
+                }
+                out.push('?');
+            }
+            c if c.is_whitespace() => {
+                if !out.ends_with(' ') {
+                    out.push(' ');
+                }
+            }
+            c => out.push(c),
+        }
+    }
+    // `IN (?, ?, ?)` is one shape whatever its length.
+    while let Some(i) = out.find("?, ?") {
+        out.replace_range(i..i + 4, "?");
+    }
+    out.trim().chars().take(200).collect()
+}
+
+/// The statement a trace's spans run most often (`db.statement`, `db.query.text`), when it's
+/// [`REPEATED_MIN`] times or more.
+pub fn repeated_query<'a>(spans: impl IntoIterator<Item = &'a Span>) -> Option<Repeated> {
+    let mut by: HashMap<String, usize> = HashMap::new();
+    for s in spans {
+        if let Some((_, q)) = s.attrs.iter().find(|(k, _)| k == "db.statement" || k == "db.query.text") {
+            *by.entry(statement_shape(q)).or_default() += 1;
+        }
+    }
+    by.into_iter().filter(|(_, n)| *n >= REPEATED_MIN).max_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.cmp(&a.0))).map(|(statement, count)| Repeated { statement, count })
 }
 
 /// A preview's spans, oldest first, each with its size, and their bytes.
@@ -87,20 +148,26 @@ pub struct RouteStat {
     pub count: usize,
     pub p50: u64,
     pub p95: u64,
+    /// The most a trace of it repeats one statement, if any does.
+    pub repeated: Option<Repeated>,
 }
 
 /// Each route's (a trace's root span's name) count, p50 and p95, the busiest first.
 pub fn route_stats(rows: &[TraceRow]) -> Vec<RouteStat> {
-    let mut by: HashMap<&str, Vec<u64>> = HashMap::new();
+    let mut by: HashMap<&str, (Vec<u64>, Option<&Repeated>)> = HashMap::new();
     for r in rows {
-        by.entry(r.name.as_str()).or_default().push(r.ms);
+        let e = by.entry(r.name.as_str()).or_default();
+        e.0.push(r.ms);
+        if r.repeated.as_ref().is_some_and(|x| e.1.is_none_or(|y| x.count > y.count)) {
+            e.1 = r.repeated.as_ref();
+        }
     }
     let pct = |v: &[u64], p: usize| v[((v.len() - 1) * p) / 100];
     let mut out: Vec<RouteStat> = by
         .into_iter()
-        .map(|(name, mut ms)| {
+        .map(|(name, (mut ms, repeated))| {
             ms.sort_unstable();
-            RouteStat { name: name.to_string(), count: ms.len(), p50: pct(&ms, 50), p95: pct(&ms, 95) }
+            RouteStat { name: name.to_string(), count: ms.len(), p50: pct(&ms, 50), p95: pct(&ms, 95), repeated: repeated.cloned() }
         })
         .collect();
     out.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.name.cmp(&b.name)));
@@ -116,6 +183,7 @@ pub struct RouteCompared {
     pub p95: u64,
     pub main_p50: Option<u64>,
     pub main_count: usize,
+    pub repeated: Option<Repeated>,
     /// Clearly slower than main's: at least [`MIN_SAMPLES`] traces on both sides, its p50 at least
     /// half again main's and [`SLOWER_MS`] more (the noise a few requests make otherwise).
     pub slower: bool,
@@ -135,7 +203,7 @@ pub fn compare_routes(mine: &[RouteStat], main: &[RouteStat]) -> Vec<RouteCompar
         .map(|m| {
             let b = main.iter().find(|b| b.name == m.name);
             let slower = b.is_some_and(|b| m.count >= MIN_SAMPLES && b.count >= MIN_SAMPLES && m.p50 >= b.p50 + SLOWER_MS && m.p50 * 2 >= b.p50 * 3);
-            RouteCompared { name: m.name.clone(), count: m.count, p50: m.p50, p95: m.p95, main_p50: b.map(|b| b.p50), main_count: b.map_or(0, |b| b.count), slower }
+            RouteCompared { name: m.name.clone(), count: m.count, p50: m.p50, p95: m.p95, main_p50: b.map(|b| b.p50), main_count: b.map_or(0, |b| b.count), repeated: m.repeated.clone(), slower }
         })
         .collect();
     out.sort_by_key(|c| !c.slower);
@@ -202,9 +270,14 @@ impl Engine {
         let minutes = minutes.clamp(5, KEEP_MS / 60_000);
         let mut out = self.trace_rows(id, minutes).await?;
         out.truncate(100);
-        let names = self.masked(id, out.iter().map(|o| o.name.clone()).collect()).await?;
-        for (o, name) in out.iter_mut().zip(names) {
-            o.name = name;
+        // Names and repeated statements are its code's words: masked as its logs are.
+        let words: Vec<String> = out.iter().map(|o| o.name.clone()).chain(out.iter().filter_map(|o| o.repeated.as_ref().map(|r| r.statement.clone()))).collect();
+        let mut masked = self.masked(id, words).await?.into_iter();
+        for o in out.iter_mut() {
+            o.name = masked.next().unwrap_or_default();
+        }
+        for r in out.iter_mut().filter_map(|o| o.repeated.as_mut()) {
+            r.statement = masked.next().unwrap_or_default();
         }
         Ok(json!({ "minutes": minutes, "traces": out }))
     }
@@ -226,7 +299,7 @@ impl Engine {
                     let start = ss.iter().map(|s| s.start).min()?;
                     let end = ss.iter().map(|s| s.end).max()?;
                     let root = ss.iter().find(|s| s.parent.is_empty()).or_else(|| ss.iter().min_by_key(|s| s.start))?;
-                    Some(TraceRow { trace: t.to_string(), name: root.name.clone(), service: root.service.clone(), start_ms: start / 1_000_000, ms: end.saturating_sub(start) / 1_000_000, spans: ss.len(), error: ss.iter().any(|s| s.error) })
+                    Some(TraceRow { trace: t.to_string(), name: root.name.clone(), service: root.service.clone(), start_ms: start / 1_000_000, ms: end.saturating_sub(start) / 1_000_000, spans: ss.len(), error: ss.iter().any(|s| s.error), repeated: repeated_query(ss.iter().copied()) })
                 })
                 .collect()
         };
@@ -253,7 +326,7 @@ impl Engine {
         let (base, compared) = self.compared_routes(id, minutes).await?;
         let routes: Vec<Value> = compared
             .into_iter()
-            .map(|c| json!({ "name": c.name, "count": c.count, "p50_ms": c.p50, "p95_ms": c.p95, "main_p50_ms": c.main_p50, "main_count": c.main_count, "slower": c.slower }))
+            .map(|c| json!({ "name": c.name, "count": c.count, "p50_ms": c.p50, "p95_ms": c.p95, "main_p50_ms": c.main_p50, "main_count": c.main_count, "slower": c.slower, "repeated": c.repeated }))
             .collect();
         Ok(json!({ "minutes": minutes, "main": base.map(|b| b.id), "routes": routes }))
     }
@@ -268,9 +341,13 @@ impl Engine {
             None => Vec::new(),
         };
         let mut compared = compare_routes(&mine, &main);
-        let names = self.masked(id, compared.iter().map(|c| c.name.clone()).collect()).await?;
-        for (c, name) in compared.iter_mut().zip(names) {
-            c.name = name;
+        let words: Vec<String> = compared.iter().map(|c| c.name.clone()).chain(compared.iter().filter_map(|c| c.repeated.as_ref().map(|r| r.statement.clone()))).collect();
+        let mut masked = self.masked(id, words).await?.into_iter();
+        for c in compared.iter_mut() {
+            c.name = masked.next().unwrap_or_default();
+        }
+        for r in compared.iter_mut().filter_map(|c| c.repeated.as_mut()) {
+            r.statement = masked.next().unwrap_or_default();
         }
         Ok((base, compared))
     }
@@ -364,7 +441,9 @@ impl Engine {
                 *v = code_preview::runner::mask(v, &values);
             }
         }
-        Ok(json!({ "trace": trace, "spans": spans }))
+        // Its N+1, read from the masked statements.
+        let repeated = repeated_query(&spans);
+        Ok(json!({ "trace": trace, "spans": spans, "repeated": repeated }))
     }
 
     /// A preview that goes takes its traces with it.
@@ -378,11 +457,21 @@ mod tests {
     use super::*;
 
     fn row(name: &str, ms: u64) -> TraceRow {
-        TraceRow { trace: String::new(), name: name.into(), service: String::new(), start_ms: 0, ms, spans: 1, error: false }
+        TraceRow { trace: String::new(), name: name.into(), service: String::new(), start_ms: 0, ms, spans: 1, error: false, repeated: None }
     }
 
     /// A route is slower than main's only past the noise: enough traces on both sides, half again
     /// main's p50 and 100 ms more; a route main hasn't seen isn't compared.
+    #[test]
+    fn a_statement_run_many_times_in_a_trace_is_said_by_its_shape() {
+        let span = |q: &str| Span { trace: "a".repeat(32), span: "0000000000000002".into(), parent: "0000000000000001".into(), name: "SELECT".into(), service: "web".into(), start: 0, end: 1, error: false, attrs: vec![("db.statement".into(), q.into())] };
+        assert_eq!(statement_shape("SELECT *  FROM items\n WHERE id = 42 AND name = 'ab' AND v2 IN (1, 2, 3)"), "SELECT * FROM items WHERE id = ? AND name = ? AND v2 IN (?)");
+        let mut spans: Vec<Span> = (0..REPEATED_MIN).map(|i| span(&format!("SELECT * FROM items WHERE order_id = {i}"))).collect();
+        assert_eq!(repeated_query(&spans), Some(Repeated { statement: "SELECT * FROM items WHERE order_id = ?".into(), count: REPEATED_MIN }));
+        spans.pop();
+        assert_eq!(repeated_query(&spans), None, "fewer than {REPEATED_MIN} isn't said");
+    }
+
     #[test]
     fn a_route_is_slower_than_mains_only_past_the_noise() {
         let mine: Vec<TraceRow> = (0..10).map(|_| row("GET /checkout", 400)).chain((0..10).map(|_| row("GET /", 30))).chain((0..3).map(|_| row("GET /new", 900))).collect();

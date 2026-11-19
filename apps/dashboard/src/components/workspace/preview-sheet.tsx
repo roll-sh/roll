@@ -4,7 +4,7 @@ import { appsApi, followShell as followAppsShell } from "@/lib/apps-api";
 import { codeApi } from "@/lib/code-api";
 import { Confirm } from "@/components/ui";
 import { TerminalScreen } from "@/components/terminal-screen";
-import { endpointSlower, type EndpointTime, a11yWords, checkSummary, seoWords, duration, followLogs, followShell, downloadFiles, openUrl, pageLabel, previewsApi, noteCropUrl, qrUrl, screenshotUrl, resourceId, thanMain, type CaughtMail, type PageCheck, type Preview, type TextDiff, type PreviewActivity, type PreviewVisitor, type PreviewKind, type PreviewShare, type RequestLine, type ServiceMetrics, type ErrorGroup, type TraceSummary, type TraceSpan, type RouteTime } from "@/lib/previews-api";
+import { endpointSlower, type EndpointTime, a11yWords, checkSummary, seoWords, duration, followLogs, followShell, downloadFiles, openUrl, pageLabel, previewsApi, noteCropUrl, qrUrl, screenshotUrl, resourceId, thanMain, type CaughtMail, type PageCheck, type Preview, type TextDiff, type PreviewActivity, type PreviewVisitor, type PreviewKind, type PreviewShare, type RequestLine, type ServiceMetrics, type ErrorGroup, type TraceSummary, type TraceSpan, type RouteTime, type Repeated } from "@/lib/previews-api";
 import { verdict, type VerdictTarget } from "@/lib/preview-verdict";
 import { isProblem, logFilter, logLevel } from "@/lib/preview-logs";
 import { formatBytes } from "@/lib/roll-api";
@@ -1428,7 +1428,7 @@ function Requests({ preview: p }: { preview: Preview }) {
 function Traces({ preview: p, n }: { preview: Preview; n: number }) {
   const [list, setList] = useState<TraceSummary[] | null>(null);
   const [routes, setRoutes] = useState<RouteTime[]>([]);
-  const [open, setOpen] = useState<{ trace: string; spans: TraceSpan[] } | null>(null);
+  const [open, setOpen] = useState<{ trace: string; spans: TraceSpan[]; repeated?: Repeated | null } | null>(null);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
     let live = true;
@@ -1469,6 +1469,7 @@ function Traces({ preview: p, n }: { preview: Preview; n: number }) {
           {routes.slice(0, 12).map((r) => (
             <div key={r.name} className="flex items-baseline gap-2 border-b border-line px-2.5 py-1 font-mono text-[10.5px] last:border-b-0" title={r.slower ? "clearly slower than main's preview" : undefined}>
               <span className={`min-w-0 flex-1 truncate ${r.slower ? "text-danger" : "text-soft"}`}>{r.name}</span>
+              {r.repeated && <RepeatedTag repeated={r.repeated} />}
               <span className="w-10 text-right text-subtle">{r.count}</span>
               <span className={`w-14 text-right ${r.slower ? "text-danger" : "text-muted"}`}>{r.p50_ms} ms</span>
               <span className="w-14 text-right text-muted">{r.p95_ms} ms</span>
@@ -1485,14 +1486,29 @@ function Traces({ preview: p, n }: { preview: Preview; n: number }) {
               <span className={`min-w-0 flex-1 truncate ${t.error ? "text-danger" : "text-soft"}`} title={t.name}>
                 {t.name}
               </span>
+              {t.repeated && <RepeatedTag repeated={t.repeated} />}
               <span className="text-subtle">{t.spans} spans</span>
               <span className="text-muted">{t.ms} ms</span>
             </button>
+            {open?.trace === t.trace && open.repeated && (
+              <p className="px-2.5 pt-1 font-mono text-[10px] text-danger">
+                runs {open.repeated.count}× <span className="text-soft">{open.repeated.statement}</span>: one query a row is an N+1 (batch it, or join)
+              </p>
+            )}
             {open?.trace === t.trace && <Waterfall spans={open.spans} />}
           </div>
         ))}
       </div>
     </div>
+  );
+}
+
+/** A statement a trace runs many times (Sentry's N+1), the statement in its title. */
+function RepeatedTag({ repeated }: { repeated: Repeated }) {
+  return (
+    <span className="shrink-0 rounded border border-danger/40 px-1 text-[9.5px] text-danger" title={`${repeated.count}× ${repeated.statement}`}>
+      N+1
+    </span>
   );
 }
 
