@@ -587,6 +587,17 @@ async fn tools_list_cost() {
     }
     lat.sort_unstable();
     println!("tools/list p50 {} µs  p99 {} µs", lat[lat.len() / 2], lat[lat.len() * 99 / 100]);
+    // What a call pays for the connection's tools before it runs (names, the prompts' check).
+    for (method, params) in [("prompts/list", json!({})), ("tools/call", json!({ "name": "access_whoami", "arguments": {} }))] {
+        let mut lat = Vec::new();
+        for _ in 0..300 {
+            let start = std::time::Instant::now();
+            d.rpc(OPERATOR, method, params.clone()).await;
+            lat.push(start.elapsed().as_micros() as u64);
+        }
+        lat.sort_unstable();
+        println!("{method} p50 {} µs", lat[lat.len() / 2]);
+    }
 }
 
 /// A prompt's arguments complete from what the connection may list (MCP `completion/complete`,

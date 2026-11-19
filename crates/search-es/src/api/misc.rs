@@ -124,9 +124,10 @@ pub fn recovery(ctx: &Ctx) -> EsResult<Reply> {
     Reply::ok(v)
 }
 
-/// `GET _remote/info`: no remote clusters.
-pub fn remote_info(ctx: &Ctx) -> EsResult<Reply> {
-    Reply::ok(crate::remote::remote_info(ctx.cluster, &ctx.state()))
+/// `GET _remote/info`.
+pub async fn remote_info(ctx: &Ctx<'_>) -> EsResult<Reply> {
+    let st = ctx.state();
+    Reply::ok(crate::remote::remote_info(ctx.cluster, &st).await)
 }
 
 /// The feature states roll clusters have (none of the system features of a full Elasticsearch
@@ -240,11 +241,86 @@ pub fn hot_threads(ctx: &Ctx) -> EsResult<Reply> {
     Ok(Reply::Raw(200, super::cat::TEXT_PLAIN.to_string(), bytes::Bytes::from(text)))
 }
 
-/// `GET _resolve/cluster/{name}`: only the local cluster.
-pub fn resolve_cluster(ctx: &Ctx) -> EsResult<Reply> {
+/// `GET _resolve/cluster[/{name}]`: the local cluster and the linked remote clusters the
+/// expressions name (each asked for its own part); without expressions, every linked remote's
+/// connection.
+pub async fn resolve_cluster(ctx: &Ctx<'_>) -> EsResult<Reply> {
+    use crate::remote::links;
     let Some(exprs) = ctx.list_param("name") else {
-        return Reply::ok(obj! {});
+        let mut out = Map::new();
+        if let Some(l) = ctx.cluster.config.links.clone() {
+            for r in crate::remote::remotes(&ctx.state()) {
+                let Some(target) = r.link(&*l) else { continue };
+                let rq = links::request(ctx, &r.alias, "GET", "/_resolve/index/*", None);
+                let answer = links::join(&r.alias, links::leg(ctx, &r, target, rq)).await;
+                out.insert(r.alias.clone(), remote_resolution(&r, answer, false));
+            }
+        }
+        return Reply::ok(Value::Obj(out));
     };
+    let Some(split) = links::split(ctx, &exprs)? else { return resolve_local(ctx, &exprs).map(|v| Reply::Body(200, v)) };
+    let mut legs = Vec::new();
+    for (r, target, remote_exprs) in &split.legs {
+        // The remote's own `_resolve/index` (what a cross-cluster key's `view_index_metadata`
+        // grants; `indices:admin/resolve/cluster` it doesn't) says whether anything matches.
+        let uri = format!("/_resolve/index/{}{}", links::path_segment(remote_exprs), links::query_string(ctx, &["name", "pretty", "human", "error_trace", "filter_path", "timeout"], &[]));
+        let rq = links::request(ctx, &r.alias, "GET", &uri, None);
+        legs.push((r.clone(), links::leg(ctx, r, target.clone(), rq)));
+    }
+    let mut out = match split.local.is_empty() {
+        true => Map::new(),
+        false => match resolve_local(ctx, &split.local)? {
+            Value::Obj(m) => m,
+            _ => Map::new(),
+        },
+    };
+    for (r, h) in legs {
+        let answer = links::join(&r.alias, h).await;
+        out.insert(r.alias.clone(), remote_resolution(&r, answer, true));
+    }
+    Reply::ok(Value::Obj(out))
+}
+
+/// A linked remote's entry in `_resolve/cluster`, from its `_resolve/index` answer (every
+/// roll cluster runs this version), or why it couldn't be asked.
+fn remote_resolution(r: &crate::remote::Remote, answer: crate::remote::links::Answer, with_indices: bool) -> Value {
+    use crate::remote::links::Answer;
+    let mut m = Map::new();
+    match answer {
+        Answer::Ok(v) => {
+            m.insert("connected".into(), true.into());
+            m.insert("skip_unavailable".into(), r.skip_unavailable.into());
+            if with_indices {
+                let any = ["indices", "aliases", "data_streams"].iter().any(|k| v.get(k).and_then(Value::as_array).is_some_and(|a| !a.is_empty()));
+                m.insert("matching_indices".into(), any.into());
+            }
+            m.insert(
+                "version".into(),
+                obj! {
+                    "number" => crate::version::ES_VERSION,
+                    "build_flavor" => "default",
+                    "minimum_wire_compatibility_version" => crate::version::MIN_WIRE_COMPAT,
+                    "minimum_index_compatibility_version" => crate::version::MIN_INDEX_COMPAT,
+                },
+            );
+        }
+        Answer::Failed(e) => {
+            m.insert("connected".into(), true.into());
+            m.insert("skip_unavailable".into(), r.skip_unavailable.into());
+            m.insert("error".into(), e.reason().into());
+        }
+        Answer::Unavailable(e) => {
+            m.insert("connected".into(), false.into());
+            m.insert("skip_unavailable".into(), r.skip_unavailable.into());
+            m.insert("error".into(), format!("Request failed for cluster [{}]: {}", r.alias, e.reason()).into());
+        }
+    }
+    Value::Obj(m)
+}
+
+/// `_resolve/cluster` of the local cluster's expressions.
+fn resolve_local(ctx: &Ctx, exprs: &[String]) -> EsResult<Value> {
+    let exprs = exprs.to_vec();
     crate::meta::resolve::reject_remote(&exprs)?;
     let opts = ctx.indices_options(IndicesOptions::STRICT_EXPAND_OPEN)?;
     let st = ctx.state();
@@ -277,6 +353,6 @@ pub fn resolve_cluster(ctx: &Ctx) -> EsResult<Reply> {
             local.insert("error".into(), e.reason().into());
         }
     }
-    Reply::ok(obj! { "(local)" => Value::Obj(local) })
+    Ok(obj! { "(local)" => Value::Obj(local) })
 }
 
