@@ -1897,8 +1897,11 @@ impl Apps {
         let (a, limit_mb) = (tpl.run.alerts.clone(), tpl.run.memory_mb);
         let now = code_sql::now_ms() / 60_000;
         let (sid, e) = (l.service.clone(), l.env.clone());
-        let Ok(rows) = self.db(move |s| s.minutes(&sid, &e, now - 5)).await else { return };
-        let rows: Vec<_> = rows.into_iter().filter(|r| r.minute < now).collect();
+        // Five minutes for the alerts; six hours with an objective, for its burn.
+        let back = if tpl.run.slo.is_some() { crate::slo::LONGEST } else { 5 };
+        let Ok(all) = self.db(move |s| s.minutes(&sid, &e, now - back)).await else { return };
+        let all: Vec<_> = all.into_iter().filter(|r| r.minute < now).collect();
+        let rows: Vec<_> = all.iter().filter(|r| r.minute >= now - 5).cloned().collect();
         let mut firing: Vec<(&'static str, serde_json::Value)> = Vec::new();
         if a.memory_pct > 0 && rows.len() >= 5 {
             let share = |r: &crate::store::MinuteRow| r.memory_bytes as f64 / r.instances.max(1) as f64 / (limit_mb as f64 * 1048576.0) * 100.0;
@@ -1933,7 +1936,12 @@ impl Apps {
                 firing.push(("alert.log", serde_json::json!({ "pattern": pat, "count": count, "threshold": a.log_count })));
             }
         }
-        for kind in ["alert.memory", "alert.errors", "alert.latency", "alert.capacity", "alert.log"] {
+        if let Some(slo) = &tpl.run.slo
+            && let Some((indicator, rate, window)) = crate::slo::burning(slo, &all, now)
+        {
+            firing.push(("alert.slo", serde_json::json!({ "indicator": indicator, "burn_rate": (rate * 10.0).round() / 10.0, "window": window, "objective": slo.objective })));
+        }
+        for kind in ["alert.memory", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "alert.slo"] {
             let key = format!("{}/{}/{kind}", l.service, l.env);
             match firing.iter().find(|(k, _)| *k == kind) {
                 Some((_, data)) => {

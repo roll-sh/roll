@@ -89,6 +89,8 @@ export interface Run {
   /** Metric alerts (`alert.*` events), over five minutes; each 0 is off. */
   /** log_match: text its output holds log_count times in five minutes (alert.log). */
   alerts?: { memory_pct: number; error_pct: number; p95_ms: number; capacity_pct?: number; log_match?: string; log_count?: number };
+  /** Its service level objective: `objective`% of requests not 5xx (and of minutes under `latency_ms` at p95) over `window_days`; `alert.slo` when its budget burns fast. */
+  slo?: Slo;
   /** A gradual rollout: the new deployment takes each percent of `steps` for `step_s`, rolled
    *  back by a 5xx share of `error_pct` or more (worse than the old one); no steps: at once. */
   rollout?: { steps: number[]; step_s: number; error_pct: number; /** Each step waits for a person once it passes. */ manual?: boolean };
@@ -738,6 +740,28 @@ export interface Deployment {
   vulnerabilities?: ScanSummary;
 }
 
+export interface Slo {
+  objective: number;
+  latency_ms?: number;
+  window_days?: number;
+}
+
+/** One indicator over the objective's window: `budget_left` is the share of the budget still unspent (negative once spent). */
+export interface SloIndicator {
+  total: number;
+  bad: number;
+  sli: number | null;
+  budget_left: number | null;
+}
+
+/** `…/slo`: the live objective against its window, and the burn alert firing now. */
+export interface SloReport {
+  slo: Slo | null;
+  availability?: SloIndicator;
+  latency?: SloIndicator | null;
+  burning?: { indicator: "availability" | "latency"; burn_rate: number; window: "1h" | "6h" } | null;
+}
+
 export type Severity = "critical" | "high" | "medium" | "low" | "unknown";
 
 /** A deployment's scan: counts by severity (`error`: it didn't finish, and the counts mean nothing). */
@@ -1066,7 +1090,8 @@ export type NotifyEvent =
   | "volume.full"
   | "check.down"
   | "heartbeat.missed"
-  | "deploy.vulnerable";
+  | "deploy.vulnerable"
+  | "alert.slo";
 
 /** An entry of the event log (`GET /v1/apps/events`, a service's `…/activity`). */
 export interface AppEvent {
@@ -1273,6 +1298,7 @@ export const appsApi = {
   deployment: (id: string, e: string, d: string) => call<Deployment>("GET", dep(id, e, d)),
   /** What a repo deployment brings over the live one (for the live one, the one before it). */
   commits: (id: string, e: string, d: string) => call<DeployCommits>("GET", `${dep(id, e, d)}/commits`),
+  slo: (id: string, e: string) => call<SloReport>("GET", `${env(id, e)}/slo`),
   vulnerabilities: (id: string, e: string, d: string) => call<{ scan: ScanSummary | null; vulnerabilities: Vulnerability[] }>("GET", `${dep(id, e, d)}/vulnerabilities`),
   buildLog: (id: string, e: string, d: string, q: LogQuery = {}) => call<LogLine[]>("GET", `${dep(id, e, d)}/logs${qs({ tail: q.tail })}`),
   /** `keepVariables`: its image with the variables as they are now (after a rotated secret), not as they were then. */

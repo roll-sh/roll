@@ -173,6 +173,10 @@
           "type": "boolean",
           "description": "Raw TCP, not HTTP."
         },
+        "slo": {
+          "type": "object",
+          "description": "Its service level objective: objective (90-99.999) percent of requests not 5xx, and with latency_ms of minutes under it at p95, over window_days (default 28); alert.slo when the error budget burns fast."
+        },
         "block_on": {
           "type": "string",
           "enum": ["critical", "high", "medium", "low"],

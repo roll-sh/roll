@@ -759,7 +759,7 @@ fn apps_create_action(b: &Value) -> Action {
 /// in its instances, and `rollback_on_crash`, which has roll
 /// put an older deployment live by itself), and so does any key apps adds later until it's listed
 /// here: a new setting is never a quiet way into production.
-const APPS_WRITE_RUN: [&str; 21] = [
+const APPS_WRITE_RUN: [&str; 22] = [
     "min_instances",
     "max_instances",
     "concurrency",
@@ -772,6 +772,7 @@ const APPS_WRITE_RUN: [&str; 21] = [
     "suspend_after_s",
     "sleep_after_s",
     "alerts",
+    "slo",
     "rollout",
     "scale",
     "drain_s",

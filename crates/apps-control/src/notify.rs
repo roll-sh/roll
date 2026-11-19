@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// What a target can ask for; a new one gets the two that need someone.
-pub const EVENTS: [&str; 26] = [
+pub const EVENTS: [&str; 27] = [
     "deploy.failed",
     "deploy.base_updated",
     "rollout.waiting",
@@ -45,8 +45,9 @@ pub const EVENTS: [&str; 26] = [
     "check.down",
     "heartbeat.missed",
     "deploy.vulnerable",
+    "alert.slo",
 ];
-const DEFAULT_EVENTS: [&str; 20] = ["check.down", "heartbeat.missed", "deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"];
+const DEFAULT_EVENTS: [&str; 21] = ["check.down", "heartbeat.missed", "alert.slo", "deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"];
 /// Whether a target with `events` hears an event: its own kind, or for a resolution, the alert's
 /// (whoever heard an alert hears it clear; there's nothing else to ask for).
 fn wants(events: &[String], kind: &str, data: &Value, oncall: bool) -> bool {
@@ -426,6 +427,16 @@ impl Apps {
                 }
             }
             "alert.memory" => (format!("{what}: memory"), format!("Its instances used {}% of their {} MB limit for five minutes (the alert is at {}%).", e.data["value"], e.data["limit_mb"], e.data["threshold"])),
+            "alert.slo" => (
+                format!("{what}: its error budget is burning"),
+                format!(
+                    "Its {} objective ({}%) is spending its error budget {}× as fast as it lasts, over the last {} and the minutes since.",
+                    e.data["indicator"].as_str().unwrap_or("availability"),
+                    e.data["objective"],
+                    e.data["burn_rate"],
+                    if e.data["window"] == "1h" { "hour" } else { "six hours" }
+                ),
+            ),
             "alert.errors" => (format!("{what}: errors"), format!("{}% of its {} requests in five minutes answered 5xx (the alert is at {}%).", e.data["value"], e.data["requests"], e.data["threshold"])),
             "alert.latency" => (format!("{what}: slow"), format!("Its p95 latency reached {} ms (the alert is at {} ms).", e.data["value"], e.data["threshold"])),
             "alert.capacity" => (format!("{what}: at capacity"), format!("{}% of its {} requests in five minutes found all {} instances busy ({} requests each at once). Raise its max instances (`roll apps set --max`) or its concurrency, or make it answer faster (the alert is at {}%).", e.data["value"], e.data["requests"], e.data["max_instances"], e.data["concurrency"], e.data["threshold"])),
@@ -449,6 +460,7 @@ impl Apps {
                 let which = match e.data["alert"].as_str() {
                     Some("alert.memory") => "memory",
                     Some("alert.errors") => "errors",
+                    Some("alert.slo") => "error budget burn",
                     Some("alert.latency") => "latency",
                     Some("alert.capacity") => "capacity",
                     Some("alert.log") => "log",
@@ -563,7 +575,7 @@ fn oncall_of(e: &Event) -> Option<(bool, String, &'static str)> {
         "deploy.active" => (false, key("deploy.failed"), "info"),
         "domain.active" => return None,
         "crash_loop" | "spend.limit" => (true, key(&e.kind), "critical"),
-        "deploy.failed" | "alert.errors" | "cron.failed" | "job.failed" | "volume.backup_failed" | "domain.tls_failed" | "domain.expired" => (true, key(&e.kind), "error"),
+        "deploy.failed" | "alert.errors" | "alert.slo" | "cron.failed" | "job.failed" | "volume.backup_failed" | "domain.tls_failed" | "domain.expired" => (true, key(&e.kind), "error"),
         "form.submitted" => (true, format!("{}/{}", key(&e.kind), e.data["submission"].as_str().unwrap_or("")), "info"),
         "test" => (true, format!("roll:test:{}", e.at), "info"),
         _ => (true, key(&e.kind), "warning"),

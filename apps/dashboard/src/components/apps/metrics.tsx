@@ -12,7 +12,7 @@
 
 import { Table2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { appsApi, formatMs, type Analytics, type Deployment, type Metrics as MetricsData, type RouteStat, type RouteStats, type Span, type TraceSummary, type Vital, type VitalName, type Vitals, type AppMetrics, type AppSeries, type ErrorGroup, type SplitStat, type InstanceSeries } from "@/lib/apps-api";
+import { appsApi, formatMs, type Analytics, type Deployment, type Metrics as MetricsData, type RouteStat, type RouteStats, type Span, type TraceSummary, type Vital, type VitalName, type Vitals, type AppMetrics, type AppSeries, type ErrorGroup, type SplitStat, type InstanceSeries, type SloIndicator, type SloReport } from "@/lib/apps-api";
 import { formatBytes } from "@/lib/roll-api";
 import { btn, CopyButton, panel, useCopy } from "../ui";
 import { usePageVisible } from "./live";
@@ -324,6 +324,44 @@ function shown(s: AppSeries) {
 }
 
 /** Its errors, grouped from its log (Cloud Run's Error Reporting): the newest of each opens whole. */
+/** Its objective against its window (Cloud Monitoring's SLO view): each indicator's share and the budget left. */
+function Budget({ r }: { r: SloReport }) {
+  if (!r.slo) return null;
+  const row = (label: string, i: SloIndicator | null | undefined) => {
+    if (!i) return null;
+    const left = i.budget_left;
+    const pct = left == null ? null : Math.round(left * 1000) / 10;
+    return (
+      <li className="flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2.5 text-[12px]">
+        <span className="w-24 text-muted">{label}</span>
+        <span className="w-20 font-mono tabular-nums">{i.sli == null ? "–" : `${i.sli.toFixed(3)}%`}</span>
+        <span className="h-1.5 min-w-24 flex-1 overflow-hidden rounded-full bg-fg/[0.08]" aria-hidden>
+          <span className={`block h-full rounded-full ${pct != null && pct < 0 ? "bg-danger" : "bg-accent"}`} style={{ width: `${Math.max(0, Math.min(100, pct ?? 0))}%` }} />
+        </span>
+        <span className={`w-36 text-right font-mono tabular-nums ${pct != null && pct < 0 ? "text-danger" : "text-subtle"}`}>{pct == null ? "no requests yet" : pct < 0 ? `budget spent (${pct}%)` : `${pct}% of budget left`}</span>
+      </li>
+    );
+  };
+  return (
+    <section className={`${panel} overflow-hidden`} aria-label="Error budget">
+      <div className="flex flex-wrap items-center gap-x-3 border-b border-line px-4 py-2.5">
+        <p className="text-[12px] text-muted">
+          Error budget <span className="text-subtle">· {r.slo.objective}% over {r.slo.window_days ?? 28} days{r.slo.latency_ms ? `, p95 under ${r.slo.latency_ms} ms` : ""}</span>
+        </p>
+        {r.burning && (
+          <span className="ml-auto text-[12px] text-danger">
+            burning {r.burning.burn_rate}× over the last {r.burning.window === "1h" ? "hour" : "six hours"} ({r.burning.indicator})
+          </span>
+        )}
+      </div>
+      <ul className="divide-y divide-line">
+        {row("Availability", r.availability)}
+        {row("Latency", r.latency)}
+      </ul>
+    </section>
+  );
+}
+
 function Errors({ groups }: { groups: ErrorGroup[] }) {
   return (
     <section className={`${panel} overflow-hidden`} aria-label="Errors">
@@ -625,6 +663,7 @@ export function MetricsTab({
   const [speed, setSpeed] = useState<Vitals | null>(null);
   const [appMetrics, setAppMetrics] = useState<AppMetrics | null>(null);
   const [errorGroups, setErrorGroups] = useState<ErrorGroup[]>([]);
+  const [budget, setBudget] = useState<SloReport | null>(null);
   const [traces, setTraces] = useState<TraceSummary[] | null>(null);
   const size = raw ? Math.max(1, Math.ceil(raw.minutes.length / MAX_POINTS)) : 1;
   const m = useMemo(() => (raw ? bucketed(raw, size) : null), [raw, size]);
@@ -641,6 +680,7 @@ export function MetricsTab({
   useEffect(() => {
     setDeploys([]);
     setRoutes(null);
+    setBudget(null);
   }, [service, env]);
   useEffect(() => {
     if (!visible) return;
@@ -649,7 +689,7 @@ export function MetricsTab({
     const load = async () => {
       try {
         // The deploys only mark the charts: metrics still show without them.
-        const [next, deps, byRoute, seen, traced, measured, own, errs] = await Promise.all([
+        const [next, deps, byRoute, seen, traced, measured, own, errs, slo] = await Promise.all([
           appsApi.metrics(service, env, range.minutes),
           appsApi.deploys(service, env).catch(() => null),
           appsApi.routes(service, env).catch(() => null),
@@ -658,6 +698,7 @@ export function MetricsTab({
           appsApi.vitals(service, env, Math.min(Math.max(range.minutes, 60), 10_080)).catch(() => null),
           appsApi.appMetrics(service, env, Math.min(Math.max(range.minutes, 5), 10_080)).catch(() => null),
           appsApi.errors(service, env, Math.min(Math.max(range.minutes, 5), 10_080)).catch(() => null),
+          appsApi.slo(service, env).catch(() => null),
         ]);
         if (alive) {
           setM(next);
@@ -668,6 +709,7 @@ export function MetricsTab({
           if (measured) setSpeed(measured);
           if (own) setAppMetrics(own);
           if (errs) setErrorGroups(errs.groups);
+          setBudget(slo);
           setError(null);
         }
       } catch (e) {
@@ -803,6 +845,7 @@ export function MetricsTab({
           {marks.length > 6 && <p className="mt-0.5">and {marks.length - 6} earlier (the table marks them)</p>}
         </div>
       )}
+      {budget?.slo && <Budget r={budget} />}
       {routes && <Routes stats={routes} />}
       {routes && <Splits stats={routes} />}
       {(raw?.by_instance?.length ?? 0) > 0 && <Instances rows={raw!.by_instance!} cpus={cpus} memoryMb={memoryMb} />}
