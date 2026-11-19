@@ -20,11 +20,12 @@ const LINGER: Duration = Duration::from_secs(1);
 const RECHECK: Duration = Duration::from_secs(30);
 
 /// One service's follower: whether it runs, where the last one stopped (the stamp of the last line
-/// sent), and whether its backend can't be followed (roll apps' own, which drains itself).
+/// sent on each stream, stdout then stderr: the two come through pipes of their own, in no order
+/// between them), and whether its backend can't be followed (roll apps' own, which drains itself).
 #[derive(Default)]
 pub(crate) struct Draining {
     alive: AtomicBool,
-    last: parking_lot::Mutex<Option<String>>,
+    last: parking_lot::Mutex<[Option<String>; 2]>,
     elsewhere: AtomicBool,
 }
 
@@ -59,9 +60,10 @@ impl Engine {
                 if d.elsewhere.load(Ordering::Relaxed) || d.alive.swap(true, Ordering::AcqRel) {
                     continue;
                 }
-                // From the last line sent, or from when this process started (what an earlier one
-                // ran was its to send).
-                let since = d.last.lock().clone().unwrap_or_else(|| self.started_stamp.clone());
+                // From the earlier of the two streams' last lines sent (the other's lines up to its
+                // own last are skipped as they come again), or from when this process started
+                // (what an earlier one ran was its to send).
+                let since = d.last.lock().iter().flatten().min().cloned().unwrap_or_else(|| self.started_stamp.clone());
                 let Some(rx) = self.apps.drain_from(&r.id, &s.name, &since).await else {
                     d.elsewhere.store(true, Ordering::Relaxed);
                     d.alive.store(false, Ordering::Release);
@@ -81,8 +83,9 @@ impl Engine {
     /// project's drains stop wanting it, or its masks can't be read (nothing goes unmasked).
     async fn drain_service(&self, drains: &dyn Drains, project: &str, id: &str, service: &str, d: &Draining, mut rx: tokio::sync::mpsc::Receiver<(bool, String)>) {
         let env = crate::branch_name(id);
-        // Lines waiting: their stamp, ms, stream and text.
+        // Lines waiting: their stamp, ms, stream and text; and each stream's last stamp taken.
         let mut batch: Vec<(String, i64, bool, String)> = Vec::new();
+        let mut taken: [Option<String>; 2] = d.last.lock().clone();
         let mut first = Instant::now();
         let mut checked = Instant::now();
         let mut tick = tokio::time::interval(LINGER / 4);
@@ -91,12 +94,14 @@ impl Engine {
                 got = rx.recv() => match got {
                     Some((stderr, line)) => {
                         let (stamp, text) = line.split_once(' ').unwrap_or((&line, ""));
-                        // Docker's `--since` starts at the stamp itself; its fixed width orders as text.
-                        let sent = d.last.lock().clone();
-                        let last_queued = batch.last().map(|l| l.0.clone()).or(sent);
-                        if last_queued.is_some_and(|l| stamp <= l.as_str()) {
+                        // Docker's `--since` starts at the stamp itself; its fixed width orders as
+                        // text. Compared within the line's own stream only: a stderr line can come
+                        // before an earlier stdout one.
+                        let last = &mut taken[stderr as usize];
+                        if last.as_deref().is_some_and(|l| stamp <= l) {
                             continue;
                         }
+                        *last = Some(stamp.to_string());
                         let Ok(t) = humantime::parse_rfc3339(stamp) else { continue };
                         let t = t.duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
                         if batch.is_empty() {
@@ -127,9 +132,8 @@ impl Engine {
                         return;
                     }
                 };
-                let last = lines.last().map(|l| l.0.clone());
                 drains.send(project, &env, service, DrainSource::Runtime, lines.into_iter().zip(masked).map(|((_, t, stderr, _), text)| DrainLine { t, stderr, text }).collect());
-                *d.last.lock() = last;
+                *d.last.lock() = taken.clone();
             }
             if ended {
                 return;

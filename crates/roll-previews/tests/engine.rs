@@ -421,12 +421,19 @@ async fn a_previews_runtime_output_goes_to_the_projects_log_drains_masked() {
     *e.apps.drain_tx.lock() = None;
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     e.engine.pass().await.unwrap();
-    assert_eq!(e.apps.drain_since.lock().last().map(String::as_str), Some("2026-11-18T10:00:00.000000002Z"));
+    // From the earlier of the two streams' last lines: stdout's (stderr's own last is skipped as it comes again).
+    assert_eq!(e.apps.drain_since.lock().last().map(String::as_str), Some("2026-11-18T10:00:00.000000001Z"));
     say(true, "2026-11-18T10:00:00.000000002Z charging with sk_test_51Hx9").await;
     say(false, "2026-11-18T10:00:01.000000000Z ready").await;
     let all = sent(3).await;
     assert_eq!(all.len(), 3, "{all:?}");
     assert_eq!(all[2].3, "ready");
+    // stdout and stderr come through pipes of their own: a stderr line may come before an earlier
+    // stdout one, and both are sent.
+    say(true, "2026-11-18T10:00:03.000000000Z card declined").await;
+    say(false, "2026-11-18T10:00:02.000000000Z charging order 42").await;
+    let all = sent(5).await;
+    assert_eq!(all.iter().skip(3).map(|l| l.3.as_str()).collect::<Vec<_>>(), ["card declined", "charging order 42"], "{all:?}");
 }
 
 /// A shell in a preview's running service (Render's shell, `heroku run`): what's typed reaches its
