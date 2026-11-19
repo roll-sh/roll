@@ -324,6 +324,12 @@ mod finds {
             ("vulnerabilities in my image", "apps_deploy_vulnerabilities"),
             ("slo error budget", "apps_environment_slo"),
             ("contact form submissions", "apps_form_submissions"),
+            ("why is my queue client refused", "queues_list_users"),
+            ("is my nosql import done", "nosql_list_imports"),
+            ("is the gateway to my private network online", "secrets_list_gateways"),
+            ("acme external account binding", "secrets_ca_acme"),
+            ("why is assume role refused", "storage_list_roles"),
+            ("list s3 access keys", "storage_list_keys"),
         ]
         .iter()
         .filter_map(|(q, want)| {
