@@ -4,7 +4,7 @@ import { appsApi, followShell as followAppsShell } from "@/lib/apps-api";
 import { codeApi } from "@/lib/code-api";
 import { Confirm } from "@/components/ui";
 import { TerminalScreen } from "@/components/terminal-screen";
-import { endpointSlower, type EndpointTime, a11yWords, checkSummary, seoWords, duration, followLogs, followShell, downloadFiles, openUrl, pageLabel, previewsApi, noteCropUrl, qrUrl, screenshotUrl, resourceId, thanMain, type CaughtMail, type PageCheck, type Preview, type TextDiff, type PreviewActivity, type PreviewVisitor, type PreviewKind, type PreviewShare, type RequestLine, type ServiceMetrics, type ErrorGroup } from "@/lib/previews-api";
+import { endpointSlower, type EndpointTime, a11yWords, checkSummary, seoWords, duration, followLogs, followShell, downloadFiles, openUrl, pageLabel, previewsApi, noteCropUrl, qrUrl, screenshotUrl, resourceId, thanMain, type CaughtMail, type PageCheck, type Preview, type TextDiff, type PreviewActivity, type PreviewVisitor, type PreviewKind, type PreviewShare, type RequestLine, type ServiceMetrics, type ErrorGroup, type TraceSummary, type TraceSpan } from "@/lib/previews-api";
 import { verdict, type VerdictTarget } from "@/lib/preview-verdict";
 import { isProblem, logFilter, logLevel } from "@/lib/preview-logs";
 import { formatBytes } from "@/lib/roll-api";
@@ -1412,7 +1412,77 @@ function Requests({ preview: p }: { preview: Preview }) {
           ))}
         </div>
       )}
+      <Traces preview={p} n={n} />
     </>
+  );
+}
+
+/** Its recent traces (the project's `traces`), newest first; one opens to its spans as bars on
+ * the trace's time. Masked by the server as its logs are. */
+function Traces({ preview: p, n }: { preview: Preview; n: number }) {
+  const [list, setList] = useState<TraceSummary[] | null>(null);
+  const [open, setOpen] = useState<{ trace: string; spans: TraceSpan[] } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    previewsApi.traces(p.id, 60).then(
+      (r) => live && setList(r.traces),
+      (e) => live && setError(errorText(e)),
+    );
+    return () => {
+      live = false;
+    };
+  }, [p.id, n]);
+  const show = async (trace: string) => {
+    if (open?.trace === trace) return setOpen(null);
+    try {
+      setOpen(await previewsApi.trace(p.id, trace));
+    } catch (e) {
+      setError(errorText(e));
+    }
+  };
+  if (!list || (!list.length && !error)) return null;
+  return (
+    <div className="mt-3 border-t border-line pt-3">
+      <Label>Traces</Label>
+      {error && <p className="mb-1.5 text-[11.5px] text-danger">{error}</p>}
+      <div className="max-h-[50vh] overflow-auto rounded-lg border border-line-2 bg-canvas [scrollbar-width:thin]">
+        {list.map((t) => (
+          <div key={t.trace} className="border-b border-line last:border-b-0">
+            <button onClick={() => void show(t.trace)} className="flex w-full items-baseline gap-2 px-2.5 py-1 text-left font-mono text-[10.5px] hover:bg-white/[0.04]">
+              <span className="text-subtle">{new Date(t.start_ms).toLocaleTimeString()}</span>
+              <span className={`min-w-0 flex-1 truncate ${t.error ? "text-danger" : "text-soft"}`} title={t.name}>
+                {t.name}
+              </span>
+              <span className="text-subtle">{t.spans} spans</span>
+              <span className="text-muted">{t.ms} ms</span>
+            </button>
+            {open?.trace === t.trace && <Waterfall spans={open.spans} />}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** A trace's spans as bars on its own time, nested by their parents' order. */
+function Waterfall({ spans }: { spans: TraceSpan[] }) {
+  const t0 = Math.min(...spans.map((s) => s.start));
+  const total = Math.max(1, Math.max(...spans.map((s) => s.end)) - t0);
+  return (
+    <div className="space-y-0.5 px-2.5 pt-0.5 pb-2">
+      {spans.map((s) => (
+        <div key={s.span} className="font-mono text-[10px]" title={(s.attrs ?? []).map(([k, v]) => `${k}=${v}`).join("\n")}>
+          <div className="flex items-baseline gap-2">
+            <span className={`min-w-0 flex-1 truncate ${s.error ? "text-danger" : "text-muted"}`}>{s.name}</span>
+            <span className="text-subtle">{Math.round((s.end - s.start) / 1e6)} ms</span>
+          </div>
+          <div className="relative h-1 rounded-full bg-line">
+            <div className={`absolute h-1 rounded-full ${s.error ? "bg-danger" : "bg-accent/70"}`} style={{ left: `${((s.start - t0) / total) * 100}%`, width: `${Math.max(0.5, ((s.end - s.start) / total) * 100)}%` }} />
+          </div>
+        </div>
+      ))}
+    </div>
   );
 }
 

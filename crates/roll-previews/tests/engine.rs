@@ -475,6 +475,37 @@ async fn a_shell_in_a_previews_service_is_said_and_bounded() {
     e.engine.open_shell(&p.id, None, "ana", 80, 24).await.expect("its place is free again");
 }
 
+/// A preview's traces (the project's `traces: true`): its services get the OpenTelemetry SDK's
+/// variables, its intake keeps spans only with the preview's own token (anything else is a 404),
+/// and they're read back as traces, masked as its logs are.
+#[tokio::test]
+async fn a_previews_traces_are_kept_by_its_token_and_read_masked() {
+    use roll_previews::engine::traces::Span;
+    let e = env(json!({ "enabled": true, "traces": true }));
+    e.secrets.values.lock().push(("STRIPE_KEY".into(), "sk_test_51Hx9".into()));
+    e.code.open(change("chg_tr", 17));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_tr").unwrap().unwrap();
+    let web = e.engine.store.services(&p.id).unwrap().into_iter().next().unwrap().name;
+    // What a start of the service gets (the runtime reads it then, as its `EnvSource`).
+    let (_, vars) = roll_previews::ports::EnvSource::env(e.engine.as_ref(), &p.id, &web).await.unwrap();
+    let var = |k: &str| vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone()).unwrap_or_default();
+    let endpoint = var("OTEL_EXPORTER_OTLP_ENDPOINT");
+    assert!(endpoint.starts_with(&format!("http://127.0.0.1:7070/v1/previews/{}/otlp/", p.id)), "{endpoint}");
+    assert_eq!(var("OTEL_SERVICE_NAME"), web);
+    let token = endpoint.rsplit('/').next().unwrap().to_string();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as u64;
+    let span = |id: &str, parent: &str, name: &str, error: bool, attrs: Vec<(String, String)>| Span { trace: "a".repeat(32), span: id.into(), parent: parent.into(), name: name.into(), service: web.clone(), start: now - 30_000_000, end: now, error, attrs };
+    assert!(matches!(e.engine.keep_spans(&p.id, "not-the-token", vec![span("0000000000000001", "", "GET /", false, vec![])]), Err(roll_previews::Error::NotFound(_))));
+    let kept = e.engine.keep_spans(&p.id, &token, vec![span("0000000000000001", "", "GET /checkout?key=sk_test_51Hx9", false, vec![]), span("0000000000000002", "0000000000000001", "charge", true, vec![("stripe.key".into(), "sk_test_51Hx9".into())])]).unwrap();
+    assert_eq!(kept, 2);
+    let list = e.engine.traces(&p.id, 60).await.unwrap();
+    assert_eq!((list["traces"][0]["name"].as_str(), list["traces"][0]["spans"].as_u64(), list["traces"][0]["error"].as_bool()), (Some("GET /checkout?key=***"), Some(2), Some(true)), "{list}");
+    let one = e.engine.trace(&p.id, &"a".repeat(32)).await.unwrap();
+    assert_eq!(one["spans"][1]["attrs"][0][1].as_str(), Some("***"), "{one}");
+    assert!(!one.to_string().contains("sk_test_51Hx9"));
+}
+
 /// A port of a preview's service on a laptop (`roll preview forward`): bytes go both ways, port 0
 /// is refused, a debugger's many connections are said once, and a preview holds a bounded number.
 #[tokio::test]

@@ -1860,6 +1860,16 @@ impl Store {
         Ok(hex::encode(&m.finalize().into_bytes()[..16]))
     }
 
+    /// The token in a preview's OpenTelemetry intake's path (`…/otlp/{token}`), derived as its SMTP
+    /// password is (nothing kept; a new signing key changes them all).
+    pub fn trace_token(&self, id: &str) -> Result<String> {
+        use hmac::Mac;
+        let mut m = hmac::Hmac::<sha2::Sha256>::new_from_slice(&self.signing_key()?).map_err(|e| Error::Internal(e.to_string()))?;
+        m.update(b"otlp:");
+        m.update(id.as_bytes());
+        Ok(hex::encode(&m.finalize().into_bytes()[..16]))
+    }
+
     /// Whether `user`/`password` are a live preview's SMTP sign-in (compared in constant time).
     pub fn mail_signs_in(&self, user: &str, password: &str) -> Result<bool> {
         let Ok(r) = self.row(user) else { return Ok(false) };
