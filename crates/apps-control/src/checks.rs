@@ -19,6 +19,9 @@ const MAX_BODY: usize = 64 << 10;
 /// One check's last result in memory, on the owner ([`Apps::check_states`]).
 #[derive(Clone, Debug, Default)]
 pub struct Run {
+    /// When its last try started (what the schedule counts from), and when the last one that came
+    /// back started (what its answer is of).
+    pub started_at: i64,
     pub last_at: i64,
     pub status: Option<u16>,
     pub ms: u64,
@@ -57,21 +60,21 @@ impl Apps {
                     {
                         let mut runs = self.check_states.lock();
                         let r = runs.entry(key.clone()).or_default();
-                        if r.running || now - r.last_at < c.every_s as i64 * 1000 {
+                        if r.running || now - r.started_at < c.every_s as i64 * 1000 {
                             continue;
                         }
                         r.running = true;
-                        r.last_at = now;
+                        r.started_at = now;
                     }
                     let host = url::Url::parse(&self.url(&e.slug)).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_default();
                     let (this, sid, en, c) = (self.clone(), svc.id.clone(), e.name.clone(), c.clone());
-                    tokio::spawn(async move { this.run_check(&sid, &en, &host, &c, key).await });
+                    tokio::spawn(async move { this.run_check(&sid, &en, &host, &c, key, now).await });
                 }
             }
         }
     }
 
-    async fn run_check(self: &Arc<Self>, service: &str, env: &str, host: &str, c: &Check, key: String) {
+    async fn run_check(self: &Arc<Self>, service: &str, env: &str, host: &str, c: &Check, key: String, started: i64) {
         let began = std::time::Instant::now();
         let got = crate::public::call_check(self.clone(), service, env, host, &c.path, Duration::from_secs(c.timeout_s as u64), MAX_BODY).await;
         let ms = began.elapsed().as_millis() as u64;
@@ -84,6 +87,8 @@ impl Apps {
             let mut runs = self.check_states.lock();
             let r = runs.entry(key).or_default();
             r.running = false;
+            // Its answer and the time it's of, together: never one try's answer at another's time.
+            r.last_at = started;
             r.status = status;
             r.ms = ms;
             match &verdict {

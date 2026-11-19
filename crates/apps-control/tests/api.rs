@@ -2420,6 +2420,40 @@ async fn an_encoded_service_id_has_the_same_owner() {
     assert_ne!(st, StatusCode::SERVICE_UNAVAILABLE, "{r}");
 }
 
+/// Paused by the clock (Railway's app sleeping): an environment's `pause_schedule` pauses it as a
+/// window starts and resumes it as the window ends; a person's resume inside a window holds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_pause_schedule_pauses_and_resumes_an_environment() {
+    use chrono::Timelike;
+    let w = world().await;
+    let (svc, _) = image_service(&w, "web", json!({"port": 80, "min_instances": 1})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    let at = |t: chrono::DateTime<chrono::Utc>| format!("{} {:02}:{:02}", t.format("%a").to_string().to_lowercase(), t.hour(), t.minute());
+    let now = chrono::Utc::now();
+    let around = json!({"windows": [{"from": at(now - chrono::Duration::hours(1)), "to": at(now + chrono::Duration::hours(1))}]});
+    let elsewhere = json!({"windows": [{"from": at(now + chrono::Duration::hours(3)), "to": at(now + chrono::Duration::hours(4))}]});
+    assert_eq!(call(&w.api, "PUT", &base, Some(json!({"pause_schedule": {"windows": []}}))).await.0, StatusCode::BAD_REQUEST);
+    call(&w.api, "PUT", &base, Some(json!({"pause_schedule": around}))).await;
+    let ms = code_sql::now_ms();
+    w.apps.cron_pass(ms).await;
+    assert!(call(&w.api, "GET", &base, None).await.1["paused"].as_bool().unwrap_or(false), "its window: paused");
+    // A person resumes it inside the window: theirs holds.
+    call(&w.api, "PUT", &base, Some(json!({"paused": false}))).await;
+    w.apps.cron_pass(ms + 60_000).await;
+    assert!(!call(&w.api, "GET", &base, None).await.1["paused"].as_bool().unwrap_or(false), "a person's resume holds");
+    // The window over (a schedule elsewhere now): the mark goes; the next window pauses again.
+    call(&w.api, "PUT", &base, Some(json!({"pause_schedule": elsewhere}))).await;
+    w.apps.cron_pass(ms + 120_000).await;
+    call(&w.api, "PUT", &base, Some(json!({"pause_schedule": around}))).await;
+    w.apps.cron_pass(ms + 180_000).await;
+    assert!(call(&w.api, "GET", &base, None).await.1["paused"].as_bool().unwrap_or(false));
+    // Its window ends: resumed by the schedule that paused it.
+    call(&w.api, "PUT", &base, Some(json!({"pause_schedule": elsewhere}))).await;
+    w.apps.cron_pass(ms + 240_000).await;
+    assert!(!call(&w.api, "GET", &base, None).await.1["paused"].as_bool().unwrap_or(false));
+}
+
 /// An instance the kernel killed for its memory says so: in the log and in why it crashed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_instance_killed_for_its_memory_says_so() {
