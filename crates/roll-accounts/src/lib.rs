@@ -9,6 +9,7 @@
 //! - [`api::router`] serves `/v1/accounts`. [`Accounts::sessions`] is what rolld's gate
 //!   (`roll_auth::check`) resolves session cookies with.
 
+mod alerts;
 pub mod api;
 pub mod audit;
 mod deletion;
