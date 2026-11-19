@@ -31,6 +31,11 @@ pub enum K {
     },
     /// `x [NOT] IN (…)`: each item with its `=` (called as `call2` calls it).
     InList(Box<K>, Vec<(K, PureFn)>, bool),
+    /// `x [NOT] IN (…)` of an integer `x` and integer constants under the built-in `=`
+    /// (int2, int4, int8 in any mix: equal as numbers): the items sorted and each once,
+    /// whether one is NULL, NOT. (An IN sub-select's rows put in as a list, TPC-H q16's
+    /// `ps_suppkey NOT IN (…)`: a row tested without an `=` call per item.)
+    IntIn(Box<K>, Box<[i64]>, bool, bool),
     /// `x op ANY / ALL (array)` (`array_op`).
     ArrayOp(Box<[K; 2]>, PureFn, bool),
     /// numeric + − × (`NumOp`): computed exactly in an i128 at the operands' scales where
@@ -513,13 +518,16 @@ fn compile_node(e: &Expr) -> Option<K> {
                 None => None,
             },
         },
-        Expr::InList(x, list, neg) => K::InList(
-            Box::new(compile(x)?),
-            list.iter()
-                .map(|(item, eq)| Some((compile(item)?, pure_call(eq, &DataType::Bool)?)))
-                .collect::<Option<_>>()?,
-            *neg,
-        ),
+        Expr::InList(x, list, neg) => match int_in(x, list, *neg) {
+            Some(k) => k,
+            None => K::InList(
+                Box::new(compile(x)?),
+                list.iter()
+                    .map(|(item, eq)| Some((compile(item)?, pure_call(eq, &DataType::Bool)?)))
+                    .collect::<Option<_>>()?,
+                *neg,
+            ),
+        },
         Expr::ArrayOp { left, right, op, all } => K::ArrayOp(
             Box::new([compile(left)?, compile(right)?]),
             pure_call(op, &DataType::Bool)?,
@@ -527,6 +535,32 @@ fn compile_node(e: &Expr) -> Option<K> {
         ),
         _ => return None,
     })
+}
+
+/// `x [NOT] IN (…)` as `K::IntIn`: an integer `x`, every item an integer constant (or NULL)
+/// compared by the built-in `=` of two integer types.
+fn int_in(x: &Expr, list: &[(Expr, std::sync::Arc<crate::sql::func::FuncDef>)], neg: bool) -> Option<K> {
+    let int = |t: &DataType| matches!(t, DataType::Int2 | DataType::Int4 | DataType::Int8);
+    if list.is_empty() || !int(&x.ty()) {
+        return None;
+    }
+    let mut vals = Vec::with_capacity(list.len());
+    let mut null = false;
+    for (item, eq) in list {
+        if eq.name != "=" || eq.oid >= crate::catalog::FIRST_USER_OID || eq.args.len() != 2 || !eq.args.iter().all(int) {
+            return None;
+        }
+        match item {
+            Expr::Const(Value::Int2(v), _) => vals.push(*v as i64),
+            Expr::Const(Value::Int4(v), _) => vals.push(*v as i64),
+            Expr::Const(Value::Int8(v), _) => vals.push(*v),
+            Expr::Const(Value::Null, _) => null = true,
+            _ => return None,
+        }
+    }
+    vals.sort_unstable();
+    vals.dedup();
+    Some(K::IntIn(Box::new(compile(x)?), vals.into(), null, neg))
 }
 
 impl K {
@@ -769,6 +803,23 @@ impl K {
                     }
                 }
                 if saw_null { Value::Null } else { Value::Bool(*neg) }
+            }
+            K::IntIn(x, vals, null, neg) => {
+                let mut t = Value::Null;
+                let v = match x.arg(row, &mut t)? {
+                    Value::Int2(v) => *v as i64,
+                    Value::Int4(v) => *v as i64,
+                    Value::Int8(v) => *v,
+                    Value::Null => return Some(Value::Null),
+                    _ => return None,
+                };
+                // (A few items: compared in turn; more: by halves.)
+                let hit = if vals.len() <= 8 { vals.contains(&v) } else { vals.binary_search(&v).is_ok() };
+                match (hit, *null) {
+                    (true, _) => Value::Bool(!*neg),
+                    (false, true) => Value::Null,
+                    (false, false) => Value::Bool(*neg),
+                }
             }
             K::ArrayOp(args, op, all) => {
                 let (mut t0, mut t1) = (Value::Null, Value::Null);
