@@ -2257,8 +2257,9 @@ impl Store {
         // (The first 8 bytes of the last key the writer took: `part_ends`.)
         let mut part: Vec<u8> = Vec::new();
         let mut discarded = self.discard.filter();
-        while let Some(i) = merge.min()? {
-            let (k, v) = merge.sources[i].head().expect("a head entry");
+        // (Each entry in key order, every version: what is written of it. One body, called
+        // through the reference on both paths.)
+        let entry: &mut dyn FnMut(&[u8], Option<&[u8]>) -> Result<()> = &mut |k: &[u8], v: Option<&[u8]>| -> Result<()> {
             let uk = user_key(k);
             let ts = key_ts(k);
             let first_version = !started || cur_user.as_slice() != uk;
@@ -2270,24 +2271,20 @@ impl Store {
             }
             // (Discarded: no one reads it any more.)
             if discarded.drops(uk) {
-                merge.sources[i].advance();
-                continue;
+                return Ok(());
             }
             // (Deleted with its range before anyone still reading: its older versions too.)
             if !view.rdels.is_empty() && view.rdels.covering(uk, ts, horizon).is_some() {
-                merge.sources[i].advance();
-                continue;
+                return Ok(());
             }
             if ts <= horizon {
                 if kept_old {
-                    merge.sources[i].advance();
-                    continue;
+                    return Ok(());
                 }
                 kept_old = true;
                 // L1 is the bottom level, so a tombstone nobody can see past can go.
                 if v.is_none() {
-                    merge.sources[i].advance();
-                    continue;
+                    return Ok(());
                 }
             }
             // Only split between user keys: a key's versions all in one L1 file, as point
@@ -2315,6 +2312,16 @@ impl Store {
                 part.clear();
                 part.extend_from_slice(&uk[..uk.len().min(8)]);
             }
+            Ok(())
+        };
+        while let Some(i) = merge.min()? {
+            // (Interleaved files, an UPDATE's versions over the table, a block at a time.)
+            if merge.rank.len() > 1 && merge.with_zip(|srcs, bound| sst::zip_entries(srcs, bound, &mut *entry)).transpose()? == Some(true) {
+                merge.cur = None;
+                continue;
+            }
+            let (k, v) = merge.sources[i].head().expect("a head entry");
+            entry(k, v)?;
             merge.sources[i].advance();
         }
         if let Some(w) = writer {
@@ -3163,11 +3170,13 @@ struct Merge {
     /// comparing them all again (two sources taking turns, a table's rows and an UPDATE's
     /// new versions of every other one, switch at every row).
     rank: Vec<usize>,
+    /// The head of the source after those `with_zip` merges, their bound (a buffer kept).
+    zbound: Vec<u8>,
 }
 
 impl Merge {
     fn new(sources: Vec<Cursor>, end: Vec<u8>) -> Merge {
-        Merge { sources, end, cur: None, bound: Vec::new(), bounded: false, rank: Vec::new() }
+        Merge { sources, end, cur: None, bound: Vec::new(), bounded: false, rank: Vec::new(), zbound: Vec::new() }
     }
 
     /// The source holding the smallest raw entry left (None: none below the end). Identical
@@ -3218,6 +3227,40 @@ impl Merge {
         }
         self.cur = Some(i);
         Ok(Some(i))
+    }
+
+    /// `g` over the blocks the smallest heads are in, while their sources are files' blocks
+    /// whose entries are all in range, up to `sst::ZIP_MAX` (at least two: else None), with the
+    /// next source's head as their bound (`sst::zip_rows`, `sst::zip_entries`). Only the source
+    /// `min` chose last may have moved since; a `g` that moves any makes the ranks stale: the
+    /// caller then sets `cur` to None.
+    fn with_zip<R>(&mut self, g: impl FnOnce(&mut [(&sst::Block, &mut sst::BlockPos)], Option<&[u8]>) -> R) -> Option<R> {
+        let zippable = |c: &Cursor| matches!(c, Cursor::Level { block: Some(_), end, whole, .. } if *whole || end.is_empty());
+        let n = self.rank.iter().take(sst::ZIP_MAX).take_while(|&&i| zippable(&self.sources[i])).count();
+        if n < 2 {
+            return None;
+        }
+        let bound = match self.rank.get(n) {
+            Some(&ic) => {
+                let (k, _) = self.sources[ic].head().expect("a ranked head");
+                self.zbound.clear();
+                self.zbound.extend_from_slice(k);
+                Some(self.zbound.as_slice())
+            }
+            None => None,
+        };
+        let picked = &self.rank[..n];
+        let mut srcs: smallvec::SmallVec<[(&sst::Block, &mut sst::BlockPos); sst::ZIP_MAX]> = self
+            .sources
+            .iter_mut()
+            .enumerate()
+            .filter(|(i, _)| picked.contains(i))
+            .filter_map(|(_, c)| match c {
+                Cursor::Level { block: Some(b), pos, .. } => Some((&**b, pos)),
+                Cursor::Mem { .. } | Cursor::Level { .. } => None,
+            })
+            .collect();
+        Some(g(&mut srcs, bound))
     }
 
     /// Every source on to its first entry >= `target`.
@@ -3630,7 +3673,13 @@ impl Scan {
                 batch.push(&k, v);
                 continue;
             }
-            c.push_head(k.len().saturating_sub(8), batch);
+            let ulen = k.len().saturating_sub(8);
+            // (Two sources or more with a head: their blocks may interleave.)
+            if self.rdels.is_empty() && self.merge.rank.len() > 1 && self.zip(resolve, batch, target - batch.len()) {
+                continue;
+            }
+            let c = &mut self.merge.sources[i];
+            c.push_head(ulen, batch);
             c.advance();
             // (The rows after it in its block that need no other source: a block at a time;
             // under range deletions a row at a time, each checked.)
@@ -3647,6 +3696,27 @@ impl Scan {
             }
         }
         Ok(())
+    }
+
+    /// The rows from the merge's head on while two sources' blocks interleave (`sst::zip_rows`:
+    /// an UPDATE's versions in L0 over the table in L1 take turns at every row), up to `max`.
+    /// The head is the next visible row (`position`). Whether it moved: the merge's ranks are
+    /// then made again at the next `min`. (A call of its own: `fill_batch_with`'s loop compiles
+    /// as without it.)
+    #[inline(never)]
+    fn zip(&mut self, resolve: bool, batch: &mut batch::RowBatch, max: usize) -> bool {
+        let (ts, decided) = (self.ts, self.decided.get_or_insert_with(Vec::new));
+        let Some(z) = self.merge.with_zip(|srcs, bound| sst::zip_rows(srcs, bound, ts, max, resolve, batch, decided)) else {
+            return false;
+        };
+        if !z.moved {
+            return false;
+        }
+        self.merge.cur = None;
+        self.decided_ts = z.decided_ts;
+        self.skipped = 0;
+        self.dead_run += z.deleted;
+        true
     }
 }
 
@@ -5105,39 +5175,66 @@ mod tests {
 
     /// Rows updated after their source was written have their versions in two sources (and
     /// deleted ones a tombstone): batched scans read each once, at every snapshot, the
-    /// newer source's rows and the older's interleaved, in memtables and files.
+    /// newer source's rows and the older's interleaved, in memtables and files (files' blocks
+    /// merged a block at a time, `sst::zip_rows`, a memtable their bound; keys too long for
+    /// its buffers).
     #[test]
     fn updated_rows_read_once_across_sources() {
         let dir = tempfile::tempdir().unwrap();
         let s = Store::open(dir.path(), StoreOptions { background: false, ..opts() }).unwrap();
         let mut model = Model::new();
         let write = |s: &Arc<Store>, model: &mut Model, i: u32, v: Option<String>| {
-            let k = format!("row{i:05}");
+            let mut k = format!("row{i:05}");
+            if i % 37 == 5 {
+                k.push_str(&"x".repeat(40));
+            }
             let ts = put(s, &k, v.as_deref());
             model.entry(k.into_bytes()).or_default().push((ts, v.map(Bytes::from)));
             ts
         };
-        for i in 0..400 {
+        let n = 3000;
+        for i in 0..n {
             write(&s, &mut model, i, Some(format!("v0-{i}")));
         }
         s.rotate().unwrap();
         s.flush_all().unwrap();
+        s.compact().unwrap();
         let t0 = s.visible_ts();
         // Every other row updated (one in seven deleted), into a second file, then every third
-        // in the memtable.
-        for i in (0..400).step_by(2) {
+        // in the memtable, then that in a third file and every fifth in the memtable.
+        for i in (0..n).step_by(2) {
             write(&s, &mut model, i, (i % 7 != 0).then(|| format!("v1-{i}")));
         }
         s.rotate().unwrap();
         s.flush_all().unwrap();
         let t1 = s.visible_ts();
-        for i in (0..400).step_by(3) {
+        for i in (0..n).step_by(3) {
             write(&s, &mut model, i, Some(format!("v2-{i}")));
         }
         let t2 = s.visible_ts();
         for (ts, what) in [(t0, "first file"), (t1, "two files"), (t2, "files and memtable")] {
             check_at(&s, &model, ts, what);
         }
+        s.rotate().unwrap();
+        s.flush_all().unwrap();
+        for i in (0..n).step_by(5) {
+            write(&s, &mut model, i, (i % 3 != 0).then(|| format!("v3-{i}")));
+        }
+        let t3 = s.visible_ts();
+        for (ts, what) in [(t1, "three files, two seen"), (t2, "three files"), (t3, "three files and memtable")] {
+            check_at(&s, &model, ts, what);
+        }
+        // Compacted, the files' blocks merged a pair or more at a time (`sst::zip_entries`):
+        // every snapshot still pinned reads the same.
+        let pins: Vec<_> = [t0, t1, t2].map(|t| s.pin(t)).into();
+        s.rotate().unwrap();
+        s.flush_all().unwrap();
+        s.compact().unwrap();
+        assert!(s.view().l0.is_empty());
+        for (ts, what) in [(t0, "compacted, first"), (t1, "compacted, second"), (t2, "compacted, third"), (t3, "compacted")] {
+            check_at(&s, &model, ts, what);
+        }
+        drop(pins);
     }
 
     /// Every version written: key -> [(ts, value)].

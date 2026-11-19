@@ -1676,6 +1676,320 @@ impl Block {
         self.step(pos);
         (n, !u64::from_be_bytes(ver))
     }
+}
+
+/// A key `zip_rows` makes in a buffer of its own: up to `KEY` bytes of user key and its version,
+/// with room for a 16-byte move past them.
+const ZK: usize = KEY + 8 + 16;
+
+/// One block's side of `zip_rows`: the entry it is on, decoded, its whole key in `k`.
+struct ZipSide<'a> {
+    blk: &'a Block,
+    i: usize,
+    /// Where the entry and its value start (`at`, `vat`), where the next ones do (`p`, `v`).
+    at: usize,
+    vat: usize,
+    p: usize,
+    v: usize,
+    k: [u8; ZK],
+    klen: usize,
+    shared: usize,
+    /// The entry's value: `TOMBSTONE`, `DERIVED` or its length (at `vat`).
+    vlen: u32,
+    /// A derived value's key tail (`DERIVED`: the value is the key's first 4 bytes, 4 zero
+    /// bytes and the user key's last `dtail` bytes).
+    dtail: usize,
+    /// Moved off the entry `pos` was on.
+    moved: bool,
+    /// On an entry whose key is too long for `k` (`k` still the entry before's): ended here.
+    stuck: bool,
+    /// The batch's index of the block's bytes (`RowBatch::buf_index`).
+    buf: u32,
+}
+
+impl<'a> ZipSide<'a> {
+    /// On `pos`'s entry (None: its key is too long for `k`).
+    fn new(blk: &'a Block, pos: &BlockPos, buf: u32) -> Option<ZipSide<'a>> {
+        let klen = pos.key.len();
+        if !(8..=KEY + 8).contains(&klen) || pos.i >= blk.len {
+            return None;
+        }
+        let mut k = [0u8; ZK];
+        k[..klen].copy_from_slice(&pos.key);
+        let vlen = pos.val_len;
+        let vat = if vlen == TOMBSTONE || vlen == DERIVED { pos.vnext as usize } else { pos.val_off as usize };
+        let (p, v, shared) = (pos.next as usize, pos.vnext as usize, pos.shared as usize);
+        let dtail = if vlen == DERIVED { pos.dval.len().saturating_sub(8) } else { 0 };
+        Some(ZipSide { blk, i: pos.i, at: 0, vat, p, v, k, klen, shared, vlen, dtail, moved: false, stuck: false, buf })
+    }
+
+    #[inline(always)]
+    fn ended(&self) -> bool {
+        self.i >= self.blk.len || self.stuck
+    }
+
+    #[inline(always)]
+    fn ver(&self) -> u64 {
+        !u64::from_be_bytes(self.k[self.klen - 8..self.klen].try_into().unwrap())
+    }
+
+    /// On to the next entry; false when it is past the block or its key is too long for `k`
+    /// (the side ends there: `stuck`).
+    #[inline(always)]
+    fn step(&mut self) -> bool {
+        self.moved = true;
+        self.i += 1;
+        if self.i >= self.blk.len {
+            return false;
+        }
+        let b = &self.blk.data[..];
+        let mut p = self.p;
+        let (shared, us, vf) = head(b, &mut p);
+        let unshared = us >> 2;
+        let klen = shared + unshared + if us & F_TS != 0 { 8 } else { 0 };
+        (self.at, self.vat) = (self.p, self.v);
+        if !(8..=KEY + 8).contains(&klen) {
+            self.stuck = true;
+            return false;
+        }
+        match b.get(p..p + 16) {
+            Some(w) if unshared <= 16 => self.k[shared..shared + 16].copy_from_slice(w),
+            _ => self.k[shared..shared + unshared].copy_from_slice(&b[p..p + unshared]),
+        }
+        if us & F_TS != 0 {
+            self.k[klen - 8..klen].copy_from_slice(&self.blk.ts);
+        }
+        self.p = p + unshared;
+        self.vlen = if us & F_DERIVED != 0 {
+            self.dtail = vf;
+            DERIVED
+        } else if vf == 0 {
+            TOMBSTONE
+        } else {
+            self.v += vf - 1;
+            (vf - 1) as u32
+        };
+        self.klen = klen;
+        self.shared = shared;
+        true
+    }
+
+    /// `pos` on the entry this side is on, as `Block::step` would have left it.
+    fn hand_back(&self, pos: &mut BlockPos) {
+        if !self.moved {
+            return;
+        }
+        if self.i >= self.blk.len {
+            pos.i = self.blk.len;
+            return;
+        }
+        // (`read` keeps the key's first `shared` bytes, which the entry before's has too: `k`
+        // holds this entry's key, or the one before's when stuck.)
+        pos.key.clear();
+        pos.key.extend_from_slice(&self.k[..self.klen]);
+        (pos.next, pos.vnext, pos.i) = (self.at as u32, self.vat as u32, self.i);
+        self.blk.read(pos);
+    }
+}
+
+/// `a`'s first `n` bytes compared with `b`'s, 8 bytes at a time.
+#[inline(always)]
+fn cmp_words(a: &[u8; ZK], b: &[u8; ZK], n: usize) -> std::cmp::Ordering {
+    let n = n.min(ZK);
+    let mut i = 0;
+    while i + 8 <= n {
+        let x = u64::from_be_bytes(a[i..i + 8].try_into().unwrap());
+        let y = u64::from_be_bytes(b[i..i + 8].try_into().unwrap());
+        if x != y {
+            return x.cmp(&y);
+        }
+        i += 8;
+    }
+    a[i..n].cmp(&b[i..n])
+}
+
+/// What `zip_rows` did: the rows it pushed, whether it moved either side, and the user key it
+/// decided last (`Scan::decided`: in `decided`) with that version's commit ts, and the deleted
+/// keys it passed.
+pub struct Zipped {
+    pub rows: usize,
+    pub moved: bool,
+    pub decided_ts: u64,
+    pub deleted: u32,
+}
+
+/// The most sources `zip_rows` merges.
+pub const ZIP_MAX: usize = 4;
+
+/// Blocks' entries merged into `batch` (up to `ZIP_MAX` blocks), from the entries their
+/// positions are on (each the head of its source; together a scan's smallest heads, below
+/// `bound`, the next source's head, if any): a key's newest version at or before `ts` as a row
+/// (not a deletion), each of its versions in these blocks passed. Every entry of the blocks is
+/// in the scan's range. It stops, the general merge left to read the entry, at a version newer
+/// than `ts`, a derived value, an out-of-line value (`resolve`), a key at or past `bound`, a key
+/// too long for its buffer, the end of any block, or `max` rows. The positions are left on each
+/// side's first entry not passed, as `Block::step` leaves them. (A call of its own: the
+/// single-source loops it sits beside compile as without it.)
+#[inline(never)]
+pub fn zip_rows(
+    srcs: &mut [(&Block, &mut BlockPos)],
+    bound: Option<&[u8]>,
+    ts: u64,
+    max: usize,
+    resolve: bool,
+    batch: &mut super::batch::RowBatch,
+    decided: &mut Vec<u8>,
+) -> Zipped {
+    let mut z = Zipped { rows: 0, moved: false, decided_ts: 0, deleted: 0 };
+    let mut s: smallvec::SmallVec<[ZipSide; ZIP_MAX]> = smallvec::SmallVec::new();
+    for (b, p) in srcs.iter() {
+        let buf = batch.buf_index(&b.data);
+        match ZipSide::new(b, p, buf) {
+            Some(side) => s.push(side),
+            None => return z,
+        }
+    }
+    let a = (bound, ts, max, resolve);
+    let (u, ulen) = match s.len() {
+        2 => zip_n::<2>((&mut s[..]).try_into().unwrap(), a, batch, &mut z),
+        3 => zip_n::<3>((&mut s[..]).try_into().unwrap(), a, batch, &mut z),
+        4 => zip_n::<4>((&mut s[..]).try_into().unwrap(), a, batch, &mut z),
+        _ => return z,
+    };
+    if z.moved {
+        decided.clear();
+        decided.extend_from_slice(&u[..ulen]);
+    }
+    for (side, (_, p)) in s.iter().zip(srcs.iter_mut()) {
+        side.hand_back(p);
+    }
+    z
+}
+
+/// `zip_rows`' merge of `N` sides (`bound`, `ts`, `max`, `resolve` its own): the user key it
+/// decided last and its length.
+#[inline(always)]
+fn zip_n<const N: usize>(
+    s: &mut [ZipSide; N],
+    (bound, ts, max, resolve): (Option<&[u8]>, u64, usize, bool),
+    batch: &mut super::batch::RowBatch,
+    z: &mut Zipped,
+) -> ([u8; ZK], usize) {
+    let mut u = [0u8; ZK];
+    let mut ulen = 0;
+    while z.rows < max {
+        let mut m = 0;
+        for j in 1..N {
+            if cmp_words(&s[j].k, &s[m].k, s[j].klen.min(s[m].klen)).is_lt() {
+                m = j;
+            }
+        }
+        let x = &mut s[m];
+        if bound.is_some_and(|bd| &x.k[..x.klen] >= bd) {
+            break;
+        }
+        let ver = x.ver();
+        let xl = x.klen - 8;
+        if ver > ts || x.vlen == DERIVED || xl > KEY {
+            break;
+        }
+        if x.vlen == TOMBSTONE {
+            z.deleted += 1;
+        } else {
+            let (off, len) = (x.vat, x.vlen as usize);
+            if resolve && super::toast::has_external(&x.blk.data[off..off + len]) {
+                break;
+            }
+            batch.push_key::<KEY>(x.k[..KEY].try_into().unwrap(), xl, x.buf, off, len);
+            z.rows += 1;
+        }
+        z.moved = true;
+        z.decided_ts = ver;
+        u[..xl].copy_from_slice(&x.k[..xl]);
+        ulen = xl;
+        // The key's older versions passed: on its own side those sharing the whole user key
+        // (stored whole at a restart: compared), on the others the same user key.
+        while x.step() && (x.shared >= ulen || (x.shared == 0 && x.klen - 8 == ulen && cmp_words(&x.k, &u, ulen).is_eq())) {}
+        let mut ended = false;
+        for y in s.iter_mut() {
+            while !y.ended() && y.klen - 8 == ulen && cmp_words(&y.k, &u, ulen).is_eq() {
+                y.step();
+            }
+            ended |= y.ended();
+        }
+        if ended {
+            break;
+        }
+    }
+    (u, ulen)
+}
+
+/// Blocks' entries in key order, every version and deletion (a compaction's merge; up to
+/// `ZIP_MAX` blocks), each passed to `f` (storage key, value: None for a deletion), from the
+/// entries their positions are on (each the head of its source; together the smallest heads,
+/// below `bound`, the next source's head, if any), while every block has one, below `bound`,
+/// whose key fits a buffer. The positions are left on each side's first entry not passed, as
+/// `Block::step` leaves them. Whether it passed any.
+#[inline(never)]
+pub fn zip_entries(srcs: &mut [(&Block, &mut BlockPos)], bound: Option<&[u8]>, f: &mut dyn FnMut(&[u8], Option<&[u8]>) -> Result<()>) -> Result<bool> {
+    let mut s: smallvec::SmallVec<[ZipSide; ZIP_MAX]> = smallvec::SmallVec::new();
+    for (b, p) in srcs.iter() {
+        match ZipSide::new(b, p, 0) {
+            Some(side) => s.push(side),
+            None => return Ok(false),
+        }
+    }
+    let moved = match s.len() {
+        2 => entries_n::<2>((&mut s[..]).try_into().unwrap(), bound, f)?,
+        3 => entries_n::<3>((&mut s[..]).try_into().unwrap(), bound, f)?,
+        4 => entries_n::<4>((&mut s[..]).try_into().unwrap(), bound, f)?,
+        _ => false,
+    };
+    for (side, (_, p)) in s.iter().zip(srcs.iter_mut()) {
+        side.hand_back(p);
+    }
+    Ok(moved)
+}
+
+/// `zip_entries`' merge of `N` sides.
+#[inline(always)]
+fn entries_n<const N: usize>(s: &mut [ZipSide; N], bound: Option<&[u8]>, f: &mut dyn FnMut(&[u8], Option<&[u8]>) -> Result<()>) -> Result<bool> {
+    let mut moved = false;
+    let mut dval = [0u8; ZK];
+    loop {
+        let mut m = 0;
+        for j in 1..N {
+            if cmp_words(&s[j].k, &s[m].k, s[j].klen.min(s[m].klen)).is_lt() {
+                m = j;
+            }
+        }
+        let x = &mut s[m];
+        let k = &x.k[..x.klen];
+        if bound.is_some_and(|bd| k >= bd) {
+            break;
+        }
+        let v = match x.vlen {
+            TOMBSTONE => None,
+            DERIVED => {
+                let ulen = x.klen - 8;
+                let n = 8 + x.dtail;
+                dval[..4].copy_from_slice(&k[..4]);
+                dval[4..8].fill(0);
+                dval[8..n].copy_from_slice(&k[ulen - x.dtail..ulen]);
+                Some(&dval[..n])
+            }
+            n => Some(&x.blk.data[x.vat..x.vat + n as usize]),
+        };
+        f(k, v)?;
+        moved = true;
+        if !x.step() {
+            break;
+        }
+    }
+    Ok(moved)
+}
+
+impl Block {
 
     /// The bytes it holds (what the block cache counts).
     pub fn mem_bytes(&self) -> usize {
