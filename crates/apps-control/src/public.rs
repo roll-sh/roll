@@ -25,6 +25,10 @@ pub fn router(apps: Arc<Apps>) -> axum::Router {
             if req.uri().path().starts_with(OTLP) {
                 return otlp(apps, req).await;
             }
+            // An edge function's `context.next()` ([`crate::edge`]): signed, any host.
+            if req.uri().path().starts_with(crate::edge::NEXT) {
+                return crate::edge::next(apps, req).await;
+            }
             let host = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).unwrap_or("").to_string();
             // A domain that redirects (www → apex): a 308 to the same path and query there.
             if let Some(to) = apps.redirect_for_host(&host).await {
@@ -112,7 +116,7 @@ pub fn port_router(apps: Arc<Apps>, service: String, env: String) -> axum::Route
 /// roll's own request headers, off a visitor's request where it comes in: from here on, one is
 /// roll's ([`VIA_SITE`] lets a rewrite past its target's access check).
 fn strip_ours(req: &mut Request) {
-    for h in [VIA_SITE, TARGET, ORIGINAL] {
+    for h in [VIA_SITE, VIA_EDGE, TARGET, ORIGINAL] {
         req.headers_mut().remove(h);
     }
 }
@@ -180,6 +184,32 @@ pub(crate) async fn call_scheduled(apps: Arc<Apps>, service: &str, env: &str, ho
     Ok(r)
 }
 
+/// GET `path` of an environment on its owner for an uptime check (`crate::checks`), as `host`
+/// asks and past its gates as a schedule's call is: the status and at most `max` bytes of the
+/// answer, or why it never answered.
+pub(crate) async fn call_check(apps: Arc<Apps>, service: &str, env: &str, host: &str, path: &str, timeout: std::time::Duration, max: usize) -> std::result::Result<(u16, Vec<u8>), String> {
+    let mut req = Request::builder().method(axum::http::Method::GET).uri(path).header(header::HOST, host).header(header::USER_AGENT, "roll-uptime/1.0").body(Body::empty()).map_err(|e| e.to_string())?;
+    req.extensions_mut().insert(Scheduled);
+    tokio::time::timeout(timeout, async {
+        let r = proxy(apps, service, env, None, req).await;
+        let status = r.status().as_u16();
+        // At most `max` read; the rest dropped, so its instance's lease and meter end with it.
+        let mut body = r.into_body().into_data_stream();
+        let mut out = Vec::new();
+        use futures::StreamExt;
+        while let Some(Ok(chunk)) = body.next().await {
+            let room = max.saturating_sub(out.len());
+            out.extend_from_slice(&chunk[..chunk.len().min(room)]);
+            if out.len() >= max {
+                break;
+            }
+        }
+        (status, out)
+    })
+    .await
+    .map_err(|_| format!("it didn't answer within {} s", timeout.as_secs()))
+}
+
 /// The owner's route for public traffic another node sends it ([`serve`]).
 const INTERNAL: &str = "/internal/apps/public";
 /// On it: the service, environment and deployment (`<service>/<env>[/<deployment>]`), and the
@@ -219,7 +249,7 @@ fn from_internal(mut req: Request) -> Request {
 
 /// The Horizon mark, `@roll/brand`'s export (`packages/brand/assets/horizon-dark.svg`) drawn in
 /// the text's colour; a test keeps the copy equal to it.
-const HORIZON: &str = include_str!("../assets/horizon.svg");
+pub(crate) const HORIZON: &str = include_str!("../assets/horizon.svg");
 
 /// What a visitor sees when roll answers instead of the app: the mark, a title and a line, dark
 /// or light as their system is. A 503 (waking, restarting, busy) looks again by itself.
@@ -261,29 +291,124 @@ fn maintenance_page(message: &str) -> Response {
 /// A static site's rewrite of this request to one of the project's services (`service:` in its
 /// `_redirects`): the service's name and the path. Not for a request a rewrite already sent (a
 /// site rewriting to a site that rewrites back).
-fn site_rewrite(apps: &Arc<Apps>, tpl: &crate::live::Template, req: &Request) -> impl std::future::Future<Output = Option<(String, String)>> + Send + use<> {
+fn site_rewrite(apps: &Arc<Apps>, tpl: &crate::live::Template, req: &Request) -> impl std::future::Future<Output = Option<Rewrite>> + Send + use<> {
     // Read off the request here: the future never holds it.
     let args = (!req.headers().contains_key(VIA_SITE)).then(|| tpl.site.clone()).flatten().map(|key| {
-        (key, percent_encoding::percent_decode_str(req.uri().path()).decode_utf8_lossy().into_owned(), req.uri().query().map(str::to_string))
+        (key, percent_encoding::percent_decode_str(req.uri().path()).decode_utf8_lossy().into_owned(), req.uri().query().map(str::to_string), crate::site_rules::Visitor::of(req.headers()))
     });
     let apps = apps.clone();
     async move {
-        let (key, path, query) = args?;
-        rewrite_of(&apps, key, path, query).await
+        let (key, path, query, visitor) = args?;
+        rewrite_of(&apps, key, path, query, visitor).await
     }
 }
 
-async fn rewrite_of(apps: &Arc<Apps>, key: String, path: String, query: Option<String>) -> Option<(String, String)> {
+/// Where a site's rewrite sends a request: one of the project's services (its name and the
+/// path), or another site's URL.
+enum Rewrite {
+    Service(String, String),
+    External(String),
+}
+
+async fn rewrite_of(apps: &Arc<Apps>, key: String, path: String, query: Option<String>, visitor: crate::site_rules::Visitor) -> Option<Rewrite> {
     let site = apps.site(&key).await.ok()?;
-    match site.rules.redirect(&path, query.as_deref(), crate::sites::exists(&site, &path))? {
-        crate::site_rules::Outcome::Proxy { service, path } => Some((service, path)),
+    match site.rules.redirect(&path, query.as_deref(), crate::sites::exists(&site, &path), &visitor)? {
+        crate::site_rules::Outcome::Proxy { service, path } => Some(Rewrite::Service(service, path)),
+        crate::site_rules::Outcome::External(url) => Some(Rewrite::External(url)),
         _ => None,
     }
+}
+
+/// A site's body to another site, and the answer it reads back, at most.
+const EXTERNAL_BODY: usize = 10 << 20;
+const EXTERNAL_ANSWER: usize = 20 << 20;
+
+/// Headers that are one connection's, not the request's or the answer's.
+const HOP: [&str; 9] = ["connection", "keep-alive", "proxy-connection", "transfer-encoding", "te", "trailer", "upgrade", "host", "content-length"];
+
+/// A static site's proxy rewrite to another site (`/api/* https://api.example.com/:splat 200`):
+/// fetched as any URL a tenant chose is (public addresses only, no redirects followed: a 3xx
+/// goes back to the visitor), the visitor's method, headers and body (at most 10 MiB) sent on
+/// without roll's own (`x-roll-*`, its cookies), the answer read whole (at most 20 MiB), metered
+/// and in the access log as `external`.
+async fn proxy_external(apps: &Arc<Apps>, live: &Arc<crate::live::EnvLive>, service: &str, env: &str, url: String, req: Request) -> Response {
+    let began = Instant::now();
+    let access = Access { log: apps.logs.sink(format!("http:{service}/{env}"), crate::logs::Stream::Http), seen: Seen::of(&req), span: None, deployment: Default::default() };
+    let request_id = req.headers().get("x-request-id").and_then(|v| v.to_str().ok()).map(|v| v.chars().take(64).collect::<String>()).unwrap_or_else(|| crate::model::random(16));
+    let done = |status: u16, bytes: u64| {
+        live.meter.lock().request(code_sql::now_ms(), began.elapsed().as_secs_f64() * 1000.0, status, bytes);
+        access.write(status, began, bytes, "external", &request_id, false, 0);
+    };
+    let (parts, body) = req.into_parts();
+    let host = parts.headers.get(header::HOST).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+    let Ok(body) = axum::body::to_bytes(body, EXTERNAL_BODY).await else {
+        done(413, 0);
+        return page(StatusCode::PAYLOAD_TOO_LARGE, "Too much", "This request is bigger than a proxied one may be.");
+    };
+    // HTTPS only, as any URL a tenant chose (plain HTTP where private targets are allowed:
+    // local development and tests).
+    if !url.starts_with("https://") && !apps.cfg.allow_private {
+        done(502, 0);
+        return page(StatusCode::BAD_GATEWAY, "Not proxied", "A site's proxy rewrite goes to an https:// URL.");
+    }
+    let mut out = apps.site_proxy_client.request(parts.method.clone(), &url);
+    for (k, v) in parts.headers.iter() {
+        let name = k.as_str();
+        if HOP.contains(&name) || name.starts_with("x-roll-") || name == "cookie" {
+            continue;
+        }
+        out = out.header(k, v);
+    }
+    // The visitor's cookies but roll's own (`roll_…`: access, the challenge's pass, a rollout's bucket).
+    let jar: Vec<&str> = parts.headers.get_all(header::COOKIE).iter().filter_map(|v| v.to_str().ok()).flat_map(|c| c.split(';')).map(str::trim).filter(|c| !c.is_empty() && !c.starts_with("roll_")).collect();
+    if !jar.is_empty() {
+        out = out.header(header::COOKIE, jar.join("; "));
+    }
+    out = out.header("x-forwarded-host", host).header("x-forwarded-proto", apps.cfg.scheme.as_str());
+    let res = match out.body(body).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            done(502, 0);
+            tracing::debug!(service, error = %e.without_url(), "apps: a site's proxy rewrite didn't answer");
+            return page(StatusCode::BAD_GATEWAY, "Not answering", "The site this page proxies to didn't answer.");
+        }
+    };
+    let status = res.status();
+    let headers = res.headers().clone();
+    let bytes = crate::net::read_bounded(res, EXTERNAL_ANSWER + 1).await;
+    if bytes.len() > EXTERNAL_ANSWER {
+        done(502, 0);
+        return page(StatusCode::BAD_GATEWAY, "Too much", "The site this page proxies to answered more than a proxied answer may be.");
+    }
+    let mut r = Response::new(Body::from(bytes.clone()));
+    *r.status_mut() = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    for (k, v) in headers.iter() {
+        if !HOP.contains(&k.as_str()) && !k.as_str().starts_with("x-roll-") {
+            r.headers_mut().append(k.clone(), v.clone());
+        }
+    }
+    done(status.as_u16(), bytes.len() as u64);
+    r
 }
 
 /// Marks a request a site's rewrite sent on (roll's own: `x-roll-*` never reaches an app, and a
 /// visitor's is taken off where it came in, [`strip_ours`]).
 const VIA_SITE: &str = "x-roll-via-site";
+
+/// Marks an edge function's `context.next()` ([`crate::edge`]): the site's files answer, no edge
+/// function again (roll's own, as [`VIA_SITE`] is).
+const VIA_EDGE: &str = "x-roll-via-edge";
+
+/// A request roll sends on to another service, past its target's access check ([`VIA_SITE`]).
+pub(crate) fn mark_rewritten(req: &mut Request) {
+    req.headers_mut().insert(HeaderName::from_static(VIA_SITE), HeaderValue::from_static("1"));
+}
+
+/// An edge function's `next()`: past the access check, and no edge function runs on it.
+pub(crate) fn mark_edge_passed(req: &mut Request) {
+    mark_rewritten(req);
+    req.headers_mut().insert(HeaderName::from_static(VIA_EDGE), HeaderValue::from_static("1"));
+}
 
 /// rolld's internal API (where [`Cluster::dispatch`](roll_cluster::Cluster::dispatch) forwards to
 /// a service's owner) with the route roll apps' public traffic is forwarded to ([`INTERNAL`]):
@@ -314,6 +439,21 @@ async fn forwarded_public(axum::extract::State(apps): axum::extract::State<Arc<A
 
 /// Send `req` to the project's service `to.0` in `env` at `to.1`, where that service lives,
 /// through all of its own gates (access, allow list, firewall, rate limit, maintenance).
+/// A split test's visitor, sent to the same service's other environment: past its gates (this
+/// environment's let them in), the path as it came.
+fn split_to(apps: Arc<Apps>, service: &str, env: &str, mut req: Request) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send>> {
+    let (service, env) = (service.to_string(), env.to_string());
+    Box::pin(async move {
+        req.headers_mut().insert(HeaderName::from_static(VIA_SITE), HeaderValue::from_static("1"));
+        if let Some(f) = req.extensions_mut().remove::<roll_cluster::Forwarded>()
+            && let Some(c) = f.client
+        {
+            req.extensions_mut().insert(roll_cluster::ClientAddr(c));
+        }
+        serve(apps, service, env, None, req).await
+    })
+}
+
 fn rewrite_to(apps: Arc<Apps>, service: &str, env: &str, to: (String, String), mut req: Request) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send>> {
     // A named, boxed future: `serve` comes back here (it's the same proxy), and the compiler
     // proves it `Send` only through a type it can see.
@@ -354,7 +494,7 @@ enum Again {
 /// Which of roll's pages a response is (never an app's own answer), so an environment's own
 /// page can take its place ([`their_page`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum RollPage {
+pub(crate) enum RollPage {
     Error,
     Maintenance,
 }
@@ -379,7 +519,7 @@ async fn their_page(apps: &Arc<Apps>, service: &str, env: &str, r: Response) -> 
     Response::from_parts(parts, Body::from(html))
 }
 
-fn escape(s: &str) -> String {
+pub(crate) fn escape(s: &str) -> String {
     s.chars()
         .map(|c| match c {
             '&' => "&amp;".to_string(),
@@ -439,8 +579,35 @@ async fn check_access(apps: &Arc<Apps>, service: &str, env: &str, req: &mut Requ
             return Some(sign_in(apps, service, env, req));
         }
     }
+    // A password ([`crate::password`]): its session, or its page's POST.
+    if let Some(ph) = access.password_hash.clone() {
+        if let Some(v) = take_cookie(req, &crate::password::cookie(env))
+            && apps.password_session_ok(service, env, &ph, &v).await
+        {
+            take_cookie(req, &format!("roll_access_{env}"));
+            return None;
+        }
+        if req.uri().path() == crate::password::PATH && req.method() == axum::http::Method::POST {
+            let client = crate::live::client_ip(roll_cluster::client_addr(req).as_deref());
+            let Ok(body) = axum::body::to_bytes(std::mem::take(req.body_mut()), 4096).await else { return Some(StatusCode::PAYLOAD_TOO_LARGE.into_response()) };
+            return Some(apps.password_post(service, env, &ph, client, &body).await);
+        }
+    }
     let signed_in = access.signed_in;
-    let Some(hash) = access.token_hash else { return Some(denied(apps, service, env).await) };
+    // No way in yet: the password's page, signing in, or the 401.
+    let password = access.password_hash.is_some();
+    let turned_away = |req: &Request| {
+        let to = crate::visit::local_path(req.uri().path_and_query().map_or("/", |p| p.as_str()));
+        let page_load = req.method() == axum::http::Method::GET;
+        (to, page_load)
+    };
+    let Some(hash) = access.token_hash else {
+        if password {
+            let (to, page_load) = turned_away(req);
+            return Some(if page_load { crate::password::page(StatusCode::UNAUTHORIZED, &to, "") } else { denied(apps, service, env).await });
+        }
+        return Some(denied(apps, service, env).await);
+    };
     let name = format!("roll_access_{env}");
     let query = req.uri().query().unwrap_or("").to_string();
     let mut token = None;
@@ -483,7 +650,13 @@ async fn check_access(apps: &Arc<Apps>, service: &str, env: &str, req: &mut Requ
         }
     }
     if !ok {
-        // No token, and no session: signing in is the other way in.
+        // No token, and no session: the password, or signing in, is the other way in.
+        if password {
+            let (to, page_load) = turned_away(req);
+            if page_load {
+                return Some(crate::password::page(StatusCode::UNAUTHORIZED, &to, ""));
+            }
+        }
         return Some(if signed_in { sign_in(apps, service, env, req) } else { denied(apps, service, env).await });
     }
     req.headers_mut().remove(header::COOKIE);
@@ -562,17 +735,33 @@ struct SiteRequest {
     if_range: Option<String>,
     request_id: Option<String>,
     seen: Seen,
+    /// What a `_redirects` rule's conditions read (country, languages, cookies).
+    visitor: crate::site_rules::Visitor,
+    /// A POST's content type and body (a form's, at most [`crate::forms::MAX_BODY`]; None past it).
+    form: Option<(Option<String>, Option<bytes::Bytes>)>,
 }
 
 impl SiteRequest {
+    /// [`Self::of`], with a POST's body read (a static site takes one only for its forms).
+    async fn read(req: Request) -> SiteRequest {
+        let mut r = SiteRequest::of(&req);
+        if req.method() == axum::http::Method::POST {
+            let ct = req.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).map(str::to_string);
+            r.form = Some((ct, axum::body::to_bytes(req.into_body(), crate::forms::MAX_BODY).await.ok()));
+        }
+        r
+    }
+
     fn of(req: &Request) -> SiteRequest {
         let h = |n: &str| req.headers().get(n).and_then(|v| v.to_str().ok()).map(str::to_string);
-        SiteRequest { method: req.method().clone(), path: req.uri().path().to_string(), query: req.uri().query().map(str::to_string), if_none_match: h("if-none-match"), accept_encoding: h("accept-encoding"), range: h("range"), if_range: h("if-range"), request_id: h("x-request-id"), seen: Seen::of(req) }
+        SiteRequest { method: req.method().clone(), path: req.uri().path().to_string(), query: req.uri().query().map(str::to_string), if_none_match: h("if-none-match"), accept_encoding: h("accept-encoding"), range: h("range"), if_range: h("if-range"), request_id: h("x-request-id"), seen: Seen::of(req), visitor: crate::site_rules::Visitor::of(req.headers()), form: None }
     }
 }
 
 async fn serve_site(apps: &Arc<Apps>, live: &Arc<crate::live::EnvLive>, tpl: &crate::live::Template, req: SiteRequest, service: &str, env: &str, began: Instant) -> Response {
     let key = tpl.site.clone().unwrap_or_default();
+    // Who sent a form (its limit is per sender), before the access line takes what was seen.
+    let client = req.seen.ip.clone();
     let access = Access { log: apps.logs.sink(format!("http:{service}/{env}"), crate::logs::Stream::Http), seen: req.seen, span: None, deployment: Default::default() };
     let request_id = req.request_id.as_deref().map(|v| v.chars().take(64).collect()).unwrap_or_else(|| crate::model::random(16));
     let done = |status: u16, bytes: u64| {
@@ -580,6 +769,33 @@ async fn serve_site(apps: &Arc<Apps>, live: &Arc<crate::live::EnvLive>, tpl: &cr
         access.write(status, began, bytes, "site", &request_id, false, 0);
     };
     let head = req.method == axum::http::Method::HEAD;
+    // A POST to one of its forms ([`crate::forms`]): kept, and the sender sent on.
+    if let Some((ct, body)) = &req.form
+        && let Ok(site) = apps.site(&key).await
+        && !site.forms.is_empty()
+    {
+        let path = percent_encoding::percent_decode_str(&req.path).decode_utf8_lossy().into_owned();
+        match apps.form_post(&site.forms, service, env, &path, client.as_deref(), ct.as_deref(), body.as_deref()).await {
+            Some(Ok(next)) => {
+                // Its action's page when the site has it; else roll's thanks.
+                if let Some(to) = next.filter(|n| crate::sites::exists(&site, n)) {
+                    done(303, 0);
+                    let mut r = StatusCode::SEE_OTHER.into_response();
+                    if let Ok(v) = HeaderValue::from_str(&to) {
+                        r.headers_mut().insert(header::LOCATION, v);
+                    }
+                    return r;
+                }
+                done(200, 0);
+                return page(StatusCode::OK, "Thanks", "Your submission was received.");
+            }
+            Some(Err((status, why))) => {
+                done(status, 0);
+                return page(StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_REQUEST), "Not sent", &why);
+            }
+            None => {}
+        }
+    }
     if req.method != axum::http::Method::GET && !head {
         done(405, 0);
         let mut r = StatusCode::METHOD_NOT_ALLOWED.into_response();
@@ -605,7 +821,7 @@ async fn serve_site(apps: &Arc<Apps>, live: &Arc<crate::live::EnvLive>, tpl: &cr
     // A rule that hides a path (a 404 rule) or sends it elsewhere decides it; a rewrite or no
     // rule at all leaves a missing fingerprinted file to the site's earlier deployments.
     let mut skew_ok = !own;
-    let resolved = match site.rules.redirect(&path, req.query.as_deref(), own) {
+    let resolved = match site.rules.redirect(&path, req.query.as_deref(), own, &req.visitor) {
         Some(crate::site_rules::Outcome::Redirect(status, to)) => {
             done(status, 0);
             let mut r = Response::new(Body::empty());
@@ -616,7 +832,7 @@ async fn serve_site(apps: &Arc<Apps>, live: &Arc<crate::live::EnvLive>, tpl: &cr
             return r;
         }
         // Taken before the site is served ([`site_rewrite`]).
-        Some(crate::site_rules::Outcome::Proxy { .. }) => {
+        Some(crate::site_rules::Outcome::Proxy { .. } | crate::site_rules::Outcome::External(_)) => {
             done(404, 0);
             return not_found();
         }
@@ -1022,7 +1238,10 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
         return by("challenge", r);
     }
     if !ours && !gate.firewall.is_empty() {
-        match gate.firewall_verdict(req.method().as_str(), &crate::model::normal_path(req.uri().path()), &ua) {
+        let path = crate::model::normal_path(req.uri().path());
+        let asked = crate::model::Asked { method: req.method().as_str(), path: &path, user_agent: &ua, ip: crate::live::client_ip(client.as_deref()), headers: req.headers(), query: req.uri().query() };
+        let verdict = gate.firewall_verdict(&asked);
+        match verdict {
             crate::live::Verdict::Allow => {}
             // A browser with this hour's pass goes on (the cookie is roll's: the app never sees it);
             // anything else gets the page that earns one.
@@ -1061,6 +1280,12 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
             r.headers_mut().insert(header::RETRY_AFTER, v);
         }
         return by("rate_limit", r);
+    }
+    // Heartbeats (`crate::heartbeats`): a ping from outside, any method, on its own host. Its token is
+    // its credential, so a private environment's pings come in too; nothing wakes.
+    if let Some(token) = req.uri().path().strip_prefix(crate::heartbeats::PATH).filter(|t| !t.is_empty() && t.len() <= 64 && !t.contains('/')) {
+        let token = token.to_string();
+        return if apps.heartbeat_ping(service, env, &token).await { (StatusCode::OK, "ok\n").into_response() } else { page(StatusCode::NOT_FOUND, "Not found", "There's no heartbeat with this address.") };
     }
     // A private environment answers only visitors with its token, before anything wakes. A
     // site's rewrite (a header only roll sets) was let in by the site, by the project's own rule.
@@ -1111,6 +1336,15 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
         let Ok(body) = axum::body::to_bytes(req.into_body(), crate::vitals::MAX_BODY).await else { return StatusCode::PAYLOAD_TOO_LARGE.into_response() };
         return apps.vitals_beacon(service, env, &body, country).into_response();
     }
+    // Custom events: on every environment's own host, as its access log's page views are.
+    if req.uri().path() == crate::track::SCRIPT_PATH && req.method() == axum::http::Method::GET {
+        return crate::track::script();
+    }
+    if req.uri().path() == crate::track::BEACON && req.method() == axum::http::Method::POST {
+        let country = req.headers().get("cf-ipcountry").and_then(|v| v.to_str().ok()).filter(|c| c.len() == 2 && c.bytes().all(|b| b.is_ascii_alphabetic())).map(|c| c.to_ascii_uppercase());
+        let Ok(body) = axum::body::to_bytes(req.into_body(), crate::track::MAX_BODY).await else { return StatusCode::PAYLOAD_TOO_LARGE.into_response() };
+        return apps.event_beacon(service, env, &body, country).into_response();
+    }
     let feedback = Tags { feedback: target.is_some() && page_load, vitals: gate.vitals && page_load };
     if feedback.feedback || feedback.vitals {
         // The page as the app wrote it, so the tag can go in as it streams.
@@ -1142,18 +1376,37 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
         if let Some(t) = site
             && let Some(to) = site_rewrite(&apps, &t, &req).await
         {
-            return rewrite_to(apps, service, env, to, req).await;
+            return match to {
+                Rewrite::Service(s, p) => rewrite_to(apps, service, env, (s, p), req).await,
+                Rewrite::External(url) => proxy_external(&apps, &live, service, env, url, req).await,
+            };
         }
     }
     // A gradual rollout keeps each visitor on one deployment: their bucket, from the cookie it
     // gave them (never passed to the app), or a new one while a canary runs.
     let mut bucket = take_bucket(&mut req);
     let affine = take_cookie(&mut req, AFFINITY);
-    let fresh = deployment.is_none() && bucket.is_none() && live.canary().is_some();
+    // A split test's visitors are bucketed as a rollout's are (roll's own call never splits, nor
+    // a request another environment sent here).
+    let split = gate.split.as_ref().filter(|_| deployment.is_none() && !ours && !req.headers().contains_key(VIA_SITE));
+    let fresh = deployment.is_none() && bucket.is_none() && (live.canary().is_some() || split.is_some());
     if fresh {
         let mut b = [0u8; 1];
         getrandom::fill(&mut b).expect("system randomness");
         bucket = Some(b[0] % 100);
+    }
+    // In the split's share: the other environment answers, and the cookie keeps them there.
+    if let (Some(sp), Some(b)) = (split, bucket)
+        && sp.takes(b)
+    {
+        let mut r = split_to(apps.clone(), service, &sp.environment, req).await;
+        if fresh {
+            let secure = if apps.cfg.scheme == "https" { "; Secure" } else { "" };
+            if let Ok(c) = HeaderValue::from_str(&format!("{BUCKET}={b}; Path=/; Max-Age=86400; HttpOnly; SameSite=Lax{secure}")) {
+                r.headers_mut().append(header::SET_COOKIE, c);
+            }
+        }
+        return r;
     }
     // A shared cache's answer (`resp_cache`), before anything wakes: a GET or HEAD of the live
     // deployment (no gradual rollout, no preview's feedback tag), without `Authorization`.
@@ -1213,7 +1466,16 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
     let acquired = match deployment {
         // One deployment's own URL: that deployment, whatever is live.
         Some(d) => match apps.deployment_template(service, env, d).await {
-            Ok(t) if t.site.is_some() => return with_feedback(feedback, serve_site(&apps, &live, &t, SiteRequest::of(&req), service, env, began).await),
+            // A deployment's own URL takes no form's submission: only what's live keeps them.
+            Ok(t) if t.site.is_some() => {
+                if !t.edge.is_empty()
+                    && !req.headers().contains_key(VIA_EDGE)
+                    && let Some((target, name, next)) = apps.edge_for(service, env, &t, req.uri().path()).await
+                {
+                    return crate::edge::to_function(apps.clone(), target, env.to_string(), name, next, req).await;
+                }
+                return with_feedback(feedback, serve_site(&apps, &live, &t, SiteRequest::of(&req), service, env, began).await);
+            }
             Ok(t) => {
                 again = Some(Again::Deployment(Box::new(t.clone())));
                 live.acquire_deployment(t).await
@@ -1223,7 +1485,14 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
         None => match live.may_wake().map(|_| live.route(bucket)) {
             // A static site's files answer (a gradual rollout's bucket chose which deployment's).
             Ok(Some(t)) if t.site.is_some() => {
-                let mut r = with_feedback(feedback, serve_site(&apps, &live, &t, SiteRequest::of(&req), service, env, began).await);
+                // Its edge functions first, on the paths they name.
+                if !t.edge.is_empty()
+                    && !req.headers().contains_key(VIA_EDGE)
+                    && let Some((target, name, next)) = apps.edge_for(service, env, &t, req.uri().path()).await
+                {
+                    return crate::edge::to_function(apps.clone(), target, env.to_string(), name, next, req).await;
+                }
+                let mut r = with_feedback(feedback, serve_site(&apps, &live, &t, SiteRequest::read(req).await, service, env, began).await);
                 if let (true, Some(b)) = (fresh, bucket) {
                     let secure = if apps.cfg.scheme == "https" { "; Secure" } else { "" };
                     if let Ok(c) = HeaderValue::from_str(&format!("{BUCKET}={b}; Path=/; Max-Age=86400; HttpOnly; SameSite=Lax{secure}")) {
@@ -1656,6 +1925,28 @@ struct Seen {
     referrer: Option<String>,
     /// The visitor's country as the edge saw it (Cloudflare's `CF-IPCountry`), when there is one.
     country: Option<String>,
+    /// A page view's campaign: its `utm_source`, `utm_medium` and `utm_campaign` (nothing else
+    /// of the query, which can carry tokens), when it has one.
+    utm: Option<[Option<String>; 3]>,
+}
+
+/// A query's UTM campaign parameters, each at most 100 printable characters.
+fn utm_of(query: Option<&str>) -> Option<[Option<String>; 3]> {
+    let q = query?;
+    let mut out: [Option<String>; 3] = Default::default();
+    for (k, v) in url::form_urlencoded::parse(q.as_bytes()) {
+        let i = match k.as_ref() {
+            "utm_source" => 0,
+            "utm_medium" => 1,
+            "utm_campaign" => 2,
+            _ => continue,
+        };
+        let v: String = v.trim().chars().filter(|c| !c.is_control()).take(100).collect();
+        if !v.is_empty() && out[i].is_none() {
+            out[i] = Some(v.to_ascii_lowercase());
+        }
+    }
+    out.iter().any(Option::is_some).then_some(out)
 }
 
 impl Seen {
@@ -1669,6 +1960,9 @@ impl Seen {
         }
         if let Some(c) = &self.country {
             line["country"] = c.clone().into();
+        }
+        if let (true, Some([source, medium, campaign])) = (self.page, &self.utm) {
+            line["utm"] = serde_json::json!({ "source": source, "medium": medium, "campaign": campaign });
         }
     }
 
@@ -1698,6 +1992,7 @@ impl Seen {
                     own.as_deref() != Some(h.as_str()) && h.len() <= 255
                 }),
             country: req.headers().get("cf-ipcountry").and_then(|v| v.to_str().ok()).filter(|c| c.len() == 2 && c.bytes().all(|b| b.is_ascii_alphabetic()) && *c != "XX" && *c != "T1").map(|c| c.to_ascii_uppercase()),
+            utm: utm_of(req.uri().query()),
         }
     }
 }

@@ -9,12 +9,15 @@
 pub mod app;
 mod caches;
 mod cargo;
+mod clojure;
 mod deno;
 mod df;
 mod docker;
 mod dotnet;
+pub mod edge;
 mod elixir;
 pub mod functions;
+mod gleam;
 mod golang;
 mod java;
 mod node;
@@ -25,6 +28,8 @@ pub mod project;
 mod python;
 pub mod site_configs;
 mod ruby;
+mod scala;
+mod shell;
 mod static_site;
 #[cfg(test)]
 mod tests;
@@ -132,6 +137,10 @@ pub struct Plan {
     /// `api`): a service of their own beside it does ([`functions`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub functions: Vec<String>,
+    /// A static site's edge functions ([`edge`]): run before its files on their paths, by its
+    /// functions service.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub edge: Vec<edge::EdgeFn>,
 }
 
 /// The images a Dockerfile builds on (its `FROM`s), for watching them move: not its own stages,
@@ -182,6 +191,12 @@ pub enum Provider {
     Java,
     Dotnet,
     Elixir,
+    /// sbt ([`scala`]).
+    Scala,
+    Clojure,
+    Gleam,
+    /// A root `start.sh` ([`shell`]).
+    Shell,
     Static,
     /// A static site's functions ([`functions`]).
     Functions,
@@ -192,7 +207,8 @@ pub enum Error {
     #[error(
         "couldn't tell how to build this: found no Dockerfile, package.json, deno.json, \
          requirements.txt, pyproject.toml, go.mod, Cargo.toml, Gemfile, composer.json, index.php, \
-         pom.xml, build.gradle, a .csproj, mix.exs or index.html at the root{0}; add a Dockerfile or set the \
+         pom.xml, build.gradle, a .csproj, mix.exs, build.sbt, project.clj, deps.edn, gleam.toml, \
+         index.html or start.sh at the root{0}; add a Dockerfile or set the \
          root directory"
     )]
     NothingDetected(String),
@@ -292,7 +308,7 @@ pub fn plan(tree: &dyn Tree, overrides: &Overrides) -> Result<Plan, Error> {
     }
     // A static site's functions (Netlify's, Vercel's `api/`) never run: said, not dropped silently.
     if p.start.as_deref() == Some(static_site::START) {
-        for (dir, what, route) in [("netlify/functions", "Netlify Functions", "/.netlify/functions/*"), ("netlify/edge-functions", "Netlify Edge Functions", "the paths they answer"), ("api", "Vercel functions", "/api/*")] {
+        for (dir, what, route) in [("netlify/functions", "Netlify Functions", "/.netlify/functions/*"), ("api", "Vercel functions", "/api/*")] {
             let n = tree.list(dir).iter().filter(|f| [".js", ".mjs", ".cjs", ".ts", ".mts", ".py", ".go"].iter().any(|e| f.ends_with(e)) || f.ends_with('/')).count();
             if n > 0 {
                 p.notes.push(format!("{dir}/ has {n} {what}, which a static site doesn't run: Run its functions makes a service of them, with {route} routed to it"));
@@ -301,6 +317,18 @@ pub fn plan(tree: &dyn Tree, overrides: &Overrides) -> Result<Plan, Error> {
                 }
             }
         }
+    }
+    // Its edge functions: run before its files once its functions service is (Run its functions).
+    if p.start.as_deref() == Some(static_site::START) {
+        let (found, notes) = edge::find(tree);
+        p.notes.extend(notes);
+        for f in &found {
+            p.notes.push(format!("{}: an edge function on {}, run before the files by its functions service (Run its functions)", f.file, f.paths.join(", ")));
+        }
+        if !found.is_empty() {
+            p.functions.push("edge".into());
+        }
+        p.edge = found;
     }
     // Vercel's crons, whatever builds it (a Next.js app's usually).
     if let Some(text) = tree.read("vercel.json").and_then(|b| String::from_utf8(b).ok()) {
@@ -335,7 +363,7 @@ fn detect(tree: &dyn Tree, overrides: &Overrides) -> Result<Plan, Error> {
         return docker::plan(tree, &o);
     }
     type Detect = fn(&dyn Tree, &Overrides) -> Result<Option<Draft>, Error>;
-    const PROVIDERS: [Detect; 11] = [
+    const PROVIDERS: [Detect; 15] = [
         // Before Node: a Deno project's deno.json decides, a package.json beside it notwithstanding.
         deno::detect,
         node::detect,
@@ -347,7 +375,14 @@ fn detect(tree: &dyn Tree, overrides: &Overrides) -> Result<Plan, Error> {
         java::detect,
         dotnet::detect,
         elixir::detect,
+        scala::detect,
+        clojure::detect,
+        gleam::detect,
+        // A static site first: one with a dev-only start.sh beside its index.html stays served
+        // as files (no instance), as it was before start.sh was built.
         static_site::detect,
+        // Last: a start.sh runs when nothing else says how to build the tree.
+        shell::detect,
     ];
     for detect in PROVIDERS {
         if let Some(draft) = detect(tree, &o)? {
@@ -376,14 +411,12 @@ fn detect(tree: &dyn Tree, overrides: &Overrides) -> Result<Plan, Error> {
 /// What the root holds that roll doesn't build yet, said with the error: `" (found mix.exs:
 /// Elixir)"`, or nothing.
 fn found(tree: &dyn Tree) -> String {
-    const KNOWN: [(&str, &str); 8] = [
+    const KNOWN: [(&str, &str); 6] = [
         ("pubspec.yaml", "Dart"),
         ("Package.swift", "Swift"),
-        ("build.sbt", "Scala (sbt)"),
         ("stack.yaml", "Haskell"),
         ("CMakeLists.txt", "C or C++ (CMake)"),
         ("Makefile", "make"),
-        ("deps.edn", "Clojure"),
         ("dune-project", "OCaml"),
     ];
     let mut seen: Vec<String> = KNOWN.iter().filter(|(f, _)| tree.exists(f)).map(|(f, what)| format!("{f}: {what}")).collect();
@@ -479,6 +512,7 @@ impl Draft {
             release: None,
             crons: Vec::new(),
             functions: Vec::new(),
+            edge: Vec::new(),
         }
     }
 }

@@ -162,6 +162,15 @@ CREATE TABLE IF NOT EXISTS ci_waits (
     since INTEGER NOT NULL,
     PRIMARY KEY (service, env)
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS form_submissions (
+    id TEXT PRIMARY KEY,
+    service TEXT NOT NULL,
+    env TEXT NOT NULL,
+    form TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    fields_sealed TEXT NOT NULL
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS form_submissions_by_form ON form_submissions (service, env, form, created_at);
 CREATE TABLE IF NOT EXISTS log_drains (
     id TEXT PRIMARY KEY,
     project TEXT NOT NULL,
@@ -205,6 +214,12 @@ CREATE TABLE IF NOT EXISTS deploy_no_traffic (
 CREATE TABLE IF NOT EXISTS deploy_secrets (
     deployment TEXT PRIMARY KEY,
     digest TEXT NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS deploy_scans (
+    deployment TEXT PRIMARY KEY,
+    service TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    items TEXT NOT NULL
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS deploy_no_cache (
     deployment TEXT PRIMARY KEY
@@ -454,6 +469,12 @@ pub struct EnvRow {
     pub firewall: Vec<crate::model::FirewallRule>,
     pub headers: Vec<crate::model::HeaderRule>,
     pub routes: Vec<crate::model::Route>,
+    /// Its uptime checks ([`crate::model::Check`]).
+    pub checks: Vec<crate::model::Check>,
+    /// Its heartbeats, with their tokens' hashes ([`crate::model::Heartbeat`]).
+    pub heartbeats: Vec<crate::model::Heartbeat>,
+    /// Its split test ([`crate::model::Split`]).
+    pub split: Option<crate::model::Split>,
     /// Paused (Render's Suspend): nothing of it runs, wakes, deploys or is scheduled until it's
     /// resumed.
     pub paused: bool,
@@ -582,7 +603,7 @@ fn name_taken(name: &str, deleted: Option<i64>) -> String {
         Some(_) => format!("a deleted service named {name} holds the name: restore it, or delete it again to delete it for good"),
     }
 }
-const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen, feedback, maintenance, allow_ips, rate_limit, tcp_port, firewall, pages, redeploy_on_secrets, secrets_seen, headers, paused, held_by, egress, vitals, routes, report";
+const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen, feedback, maintenance, allow_ips, rate_limit, tcp_port, firewall, pages, redeploy_on_secrets, secrets_seen, headers, paused, held_by, egress, vitals, routes, report, checks, heartbeats, split";
 /// A deployment [`Store::prune_deployments`] pruned, with its image when nothing else names it.
 pub struct Pruned {
     pub id: String,
@@ -660,7 +681,11 @@ fn env_row(r: &code_sql::Row<'_>) -> code_sql::Result<EnvRow> {
         },
         vitals: r.get::<_, i64>(26)? != 0,
         routes: r.get::<_, Option<String>>(27)?.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default(),
+        checks: r.get::<_, Option<String>>(29)?.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default(),
+        // Stored with their hashes (which the model never serializes out): read as written.
+        heartbeats: r.get::<_, Option<String>>(30)?.and_then(|j| serde_json::from_str::<Vec<StoredHeartbeat>>(&j).ok()).unwrap_or_default().into_iter().map(Into::into).collect(),
         report: r.get::<_, i64>(28)? != 0,
+        split: r.get::<_, Option<String>>(31)?.and_then(|j| serde_json::from_str(&j).ok()),
     })
 }
 
@@ -713,6 +738,7 @@ fn deploy_row(r: &code_sql::Row<'_>) -> code_sql::Result<Deployment> {
         vars_hash: r.get(16)?,
         actor: r.get(17)?,
         pruned_at: r.get(18)?,
+        vulnerabilities: None,
         error_detail,
         fix,
         steps: Vec::new(),
@@ -755,6 +781,7 @@ impl Store {
         db.add_column("domains", "verified_at", "INTEGER")?;
         db.add_column("env_access", "bypass_hash", "TEXT")?;
         db.add_column("env_access", "signed_in", "INTEGER NOT NULL DEFAULT 0")?;
+        db.add_column("env_access", "password_hash", "TEXT")?;
         // Bytes answered a minute (what egress is billed by), for Metrics.
         db.add_column("metrics", "egress_bytes", "INTEGER NOT NULL DEFAULT 0")?;
         // Requests past every instance's concurrency at max_instances a minute (saturation).
@@ -804,6 +831,9 @@ impl Store {
         db.add_column("visit_tickets", "login", "TEXT")?;
         db.add_column("visit_sessions", "login", "TEXT")?;
         db.add_column("environments", "routes", "TEXT")?;
+        db.add_column("environments", "checks", "TEXT")?;
+        db.add_column("environments", "heartbeats", "TEXT")?;
+        db.add_column("environments", "split", "TEXT")?;
         // Drains made before their filters sent every environment's runtime output: still so.
         db.add_column("log_drains", "sources", "TEXT")?;
         db.add_column("log_drains", "environments", "TEXT")?;
@@ -915,7 +945,7 @@ impl Store {
             )?;
             c.execute("DELETE FROM deploy_steps WHERE deployment IN (SELECT id FROM deployments WHERE service = ?)", [id])?;
             c.execute("DELETE FROM state WHERE key LIKE ?", [format!("%:{id}/%")])?;
-            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "preview_hosts", "runs", "jobs", "metrics", "usage"] {
+            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "preview_hosts", "runs", "jobs", "metrics", "usage", "form_submissions", "deploy_scans"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ?"), [id])?;
             }
             match c.execute("DELETE FROM services WHERE id = ?", [id])? {
@@ -1014,7 +1044,7 @@ impl Store {
                     None => None,
                 };
                 c.execute(
-                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, 0, NULL, NULL, 0, NULL, 1)"),
+                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, 0, NULL, NULL, 0, NULL, 1, NULL, NULL, NULL)"),
                     params![service, env, branch.flatten(), ephemeral.unwrap_or(false) as i64, slug, port, now],
                 )?;
             }
@@ -1031,7 +1061,7 @@ impl Store {
             if n == 0 {
                 return Err(Error::NotFound(format!("service {service} has no environment {env}")));
             }
-            for t in ["variables", "variable_files", "error_groups", "domains", "preview_hosts", "runs", "jobs", "metrics", "deploy_keys", "env_access", "trace_ingest", "visit_tickets", "visit_sessions"] {
+            for t in ["variables", "variable_files", "error_groups", "domains", "preview_hosts", "runs", "jobs", "metrics", "deploy_keys", "env_access", "trace_ingest", "visit_tickets", "visit_sessions", "form_submissions"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ? AND env = ?"), [service, env])?;
             }
             // Its schedules', challenge's and base images' state goes with it.
@@ -1205,8 +1235,12 @@ impl Store {
     pub fn due_deliveries(&self, limit: usize, claim_ms: i64) -> Result<Vec<(String, String, i64, u32)>> {
         let now = self.now()?;
         self.db.write(|c| {
+            // An on-call target's in event order, one at a time: a resolve never overtakes its
+            // trigger (a page left open for good), a retry included. Others go side by side.
             let due: Vec<(String, String, i64, u32)> = c.query(
-                "SELECT id, target, event, attempts FROM notify_deliveries WHERE status = 'pending' AND next_at <= ? ORDER BY next_at LIMIT ?",
+                "SELECT d.id, d.target, d.event, d.attempts FROM notify_deliveries d LEFT JOIN notify_targets t ON t.id = d.target \
+                 WHERE d.status = 'pending' AND d.next_at <= ? AND (t.kind IS NULL OR t.kind NOT IN ('pagerduty', 'opsgenie') OR NOT EXISTS \
+                 (SELECT 1 FROM notify_deliveries e WHERE e.target = d.target AND e.status = 'pending' AND e.event < d.event)) ORDER BY d.next_at LIMIT ?",
                 params![now, limit as i64],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get::<_, i64>(3)? as u32)),
             )?;
@@ -1461,6 +1495,8 @@ impl Store {
                     continue;
                 }
                 c.execute("UPDATE deployments SET pruned_at = ? WHERE id = ?", params![now, id])?;
+                // History keeps its counts; its findings went with its image.
+                c.execute("UPDATE deploy_scans SET items = '[]' WHERE deployment = ?", [&id])?;
                 out.push(Pruned { id, image });
             }
             for p in &mut out {
@@ -1536,6 +1572,27 @@ impl Store {
 
     /// The project's secrets' digest ([`crate::integrations::SecretSource::digest`]) a deployment
     /// went live with.
+    /// A deployment's scan: its counts and its findings (most severe first, at most [`crate::model::MAX_VULNERABILITIES`]).
+    pub fn set_scan(&self, service: &str, deployment: &str, summary: &crate::model::ScanSummary, items: &[crate::model::Vulnerability]) -> Result<()> {
+        let (s, i) = (serde_json::to_string(summary).expect("a scan serializes"), serde_json::to_string(items).expect("findings serialize"));
+        self.db.execute(
+            "INSERT INTO deploy_scans (deployment, service, summary, items) VALUES (?, ?, ?, ?) ON CONFLICT (deployment) DO UPDATE SET summary = excluded.summary, items = excluded.items",
+            params![deployment, service, s, i],
+        )?;
+        Ok(())
+    }
+
+    pub fn scan(&self, deployment: &str) -> Result<Option<(crate::model::ScanSummary, Vec<crate::model::Vulnerability>)>> {
+        let row: Option<(String, String)> = self.db.query_row("SELECT summary, items FROM deploy_scans WHERE deployment = ?", [deployment], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+        row.map(|(s, i)| Ok((json(&s)?, json(&i)?))).transpose()
+    }
+
+    /// The scans' counts of a service's deployments, by deployment.
+    pub fn scan_summaries(&self, service: &str) -> Result<HashMap<String, crate::model::ScanSummary>> {
+        let rows: Vec<(String, String)> = self.db.query("SELECT deployment, summary FROM deploy_scans WHERE service = ?", [service], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.into_iter().map(|(d, s)| Ok((d, json(&s)?))).collect()
+    }
+
     pub fn set_secrets_digest(&self, deployment: &str, digest: &str) -> Result<()> {
         self.db.execute("INSERT INTO deploy_secrets (deployment, digest) VALUES (?, ?) ON CONFLICT (deployment) DO UPDATE SET digest = excluded.digest", params![deployment, digest])?;
         Ok(())
@@ -2212,10 +2269,10 @@ impl Store {
     pub fn access(&self, service: &str, env: &str) -> Result<Option<Access>> {
         Ok(self
             .db
-            .query_row("SELECT token_hash, bypass_hash, signed_in FROM env_access WHERE service = ? AND env = ?", params![service, env], |r| {
+            .query_row("SELECT token_hash, bypass_hash, signed_in, password_hash FROM env_access WHERE service = ? AND env = ?", params![service, env], |r| {
                 // No token: an empty one (the column was made required), which no digest matches.
                 let token: String = r.get(0)?;
-                Ok(Access { token_hash: Some(token).filter(|t| !t.is_empty()), bypass_hash: r.get(1)?, signed_in: r.get::<_, i64>(2)? != 0 })
+                Ok(Access { token_hash: Some(token).filter(|t| !t.is_empty()), bypass_hash: r.get(1)?, signed_in: r.get::<_, i64>(2)? != 0, password_hash: r.get(3)? })
             })
             .optional()?)
     }
@@ -2223,8 +2280,8 @@ impl Store {
     pub fn set_access(&self, service: &str, env: &str, access: Option<&Access>) -> Result<()> {
         match access {
             Some(a) => self.db.execute(
-                "INSERT INTO env_access (service, env, token_hash, bypass_hash, signed_in) VALUES (?, ?, ?, ?, ?) ON CONFLICT (service, env) DO UPDATE SET token_hash = excluded.token_hash, bypass_hash = excluded.bypass_hash, signed_in = excluded.signed_in",
-                params![service, env, a.token_hash.as_deref().unwrap_or(""), a.bypass_hash, a.signed_in as i64],
+                "INSERT INTO env_access (service, env, token_hash, bypass_hash, signed_in, password_hash) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (service, env) DO UPDATE SET token_hash = excluded.token_hash, bypass_hash = excluded.bypass_hash, signed_in = excluded.signed_in, password_hash = excluded.password_hash",
+                params![service, env, a.token_hash.as_deref().unwrap_or(""), a.bypass_hash, a.signed_in as i64, a.password_hash],
             )?,
             None => self.db.execute("DELETE FROM env_access WHERE service = ? AND env = ?", params![service, env])?,
         };
@@ -2510,6 +2567,25 @@ impl Store {
         Ok(())
     }
 
+    pub fn set_heartbeats(&self, service: &str, env: &str, beats: &[crate::model::Heartbeat]) -> Result<()> {
+        let stored: Vec<StoredHeartbeat> = beats.iter().cloned().map(Into::into).collect();
+        let j = (!stored.is_empty()).then(|| serde_json::to_string(&stored).expect("heartbeats serialize"));
+        self.db.execute("UPDATE environments SET heartbeats = ? WHERE service = ? AND name = ?", params![j, service, env])?;
+        Ok(())
+    }
+
+    pub fn set_split(&self, service: &str, env: &str, split: Option<&crate::model::Split>) -> Result<()> {
+        let j = split.map(|s| serde_json::to_string(s).expect("a split serializes"));
+        self.db.execute("UPDATE environments SET split = ? WHERE service = ? AND name = ?", params![j, service, env])?;
+        Ok(())
+    }
+
+    pub fn set_checks(&self, service: &str, env: &str, checks: &[crate::model::Check]) -> Result<()> {
+        let j = (!checks.is_empty()).then(|| serde_json::to_string(checks).expect("checks serialize"));
+        self.db.execute("UPDATE environments SET checks = ? WHERE service = ? AND name = ?", params![j, service, env])?;
+        Ok(())
+    }
+
     pub fn set_routes(&self, service: &str, env: &str, routes: &[crate::model::Route]) -> Result<()> {
         let j = (!routes.is_empty()).then(|| serde_json::to_string(routes).expect("routes serialize"));
         self.db.execute("UPDATE environments SET routes = ? WHERE service = ? AND name = ?", params![j, service, env])?;
@@ -2654,6 +2730,60 @@ impl Store {
     pub fn end_ci_wait(&self, service: &str, env: &str, landing: i64) -> Result<()> {
         self.db.execute("DELETE FROM ci_waits WHERE service = ? AND env = ? AND landing = ?", params![service, env, landing])?;
         Ok(())
+    }
+
+    // ── form submissions ──
+
+    /// A form's submission, sealed and bound to its row; the oldest past [`crate::forms::KEEP`]
+    /// go in the same write. Its id.
+    pub fn add_form_submission(&self, service: &str, env: &str, form: &str, fields: &[(String, String)]) -> Result<String> {
+        let id = new_id("fsb");
+        let now = self.now()?;
+        let sealed = self.sealer.seal(&format!("form:{service}/{env}/{form}/{id}"), &serde_json::to_string(fields).expect("fields serialize"));
+        self.db.write(|c| {
+            c.execute("INSERT INTO form_submissions (id, service, env, form, created_at, fields_sealed) VALUES (?, ?, ?, ?, ?, ?)", params![id, service, env, form, now, sealed])?;
+            c.execute(
+                "DELETE FROM form_submissions WHERE service = ? AND env = ? AND form = ? AND id NOT IN \
+                 (SELECT id FROM form_submissions WHERE service = ? AND env = ? AND form = ? ORDER BY created_at DESC, id DESC LIMIT ?)",
+                params![service, env, form, service, env, form, crate::forms::KEEP as i64],
+            )?;
+            Ok::<_, code_sql::Error>(())
+        })?;
+        Ok(id)
+    }
+
+    /// An environment's forms with submissions: name, how many, the newest's time.
+    pub fn form_counts(&self, service: &str, env: &str) -> Result<Vec<(String, i64, i64)>> {
+        Ok(self.db.query("SELECT form, COUNT(*), MAX(created_at) FROM form_submissions WHERE service = ? AND env = ? GROUP BY form ORDER BY form", [service, env], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?)
+    }
+
+    /// A form's submissions, newest first, before `before` (ms) when given, opened. One whose
+    /// seal won't open is left out.
+    pub fn form_submissions(&self, service: &str, env: &str, form: &str, limit: usize, before: Option<String>) -> Result<Vec<crate::forms::Submission>> {
+        // After `before` in (created_at, id) order: two in one millisecond are both listed.
+        let (at, id) = match &before {
+            Some(id) => {
+                let at: Option<i64> = self.db.query_row("SELECT created_at FROM form_submissions WHERE service = ? AND env = ? AND form = ? AND id = ?", [service, env, form, id.as_str()], |r| r.get(0)).optional()?;
+                (at.ok_or_else(|| Error::NotFound(format!("no submission {id}")))?, id.clone())
+            }
+            None => (i64::MAX, String::new()),
+        };
+        let rows: Vec<(String, i64, String)> = self.db.query(
+            "SELECT id, created_at, fields_sealed FROM form_submissions WHERE service = ? AND env = ? AND form = ? AND (created_at < ? OR (created_at = ? AND id < ?)) ORDER BY created_at DESC, id DESC LIMIT ?",
+            params![service, env, form, at, at, id, limit as i64],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|(id, at, sealed)| {
+                let fields = self.sealer.open(&format!("form:{service}/{env}/{form}/{id}"), &sealed).ok().and_then(|j| serde_json::from_str(&j).ok())?;
+                Some((id, at, fields))
+            })
+            .collect())
+    }
+
+    pub fn delete_form_submission(&self, service: &str, env: &str, form: &str, id: &str) -> Result<bool> {
+        Ok(self.db.execute("DELETE FROM form_submissions WHERE service = ? AND env = ? AND form = ? AND id = ?", [service, env, form, id])? > 0)
     }
 
     // ── log drains ──
@@ -2844,6 +2974,11 @@ impl Store {
         Ok(self.db.write(|c| c.execute("INSERT INTO state (key, value) VALUES (?, ?) ON CONFLICT (key) DO NOTHING", [key, value]))? == 1)
     }
 
+    /// `key` removed: whether it was there (one caller gets true, on any node).
+    pub fn take_state(&self, key: &str) -> Result<bool> {
+        Ok(self.db.write(|c| c.execute("DELETE FROM state WHERE key = ?", [key]))? > 0)
+    }
+
     /// `key`'s value, set to `value` first if it has none (two nodes asking at once read the same).
     pub fn state_or(&self, key: &str, value: &str) -> Result<String> {
         self.db.write(|c| {
@@ -2875,6 +3010,28 @@ pub struct DrainSettings {
     pub services: Vec<String>,
     pub previews: bool,
     pub headers: Vec<(String, String)>,
+}
+
+/// A heartbeat as stored: its token's hash included ([`crate::model::Heartbeat`] never writes it out).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct StoredHeartbeat {
+    name: String,
+    every_s: u32,
+    grace_s: u32,
+    added_at: i64,
+    token_hash: String,
+}
+
+impl From<crate::model::Heartbeat> for StoredHeartbeat {
+    fn from(h: crate::model::Heartbeat) -> Self {
+        StoredHeartbeat { name: h.name, every_s: h.every_s, grace_s: h.grace_s, added_at: h.added_at, token_hash: h.token_hash }
+    }
+}
+
+impl From<StoredHeartbeat> for crate::model::Heartbeat {
+    fn from(h: StoredHeartbeat) -> Self {
+        crate::model::Heartbeat { name: h.name, every_s: h.every_s, grace_s: h.grace_s, added_at: h.added_at, token_hash: h.token_hash }
+    }
 }
 
 /// A drain with what sending to it needs, opened.
