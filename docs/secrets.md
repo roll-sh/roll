@@ -5125,7 +5125,8 @@ members, the first hour, and the other products' credential inputs. Ranked:
    - `for_owner` only checks owner management and `counts_for_repo`;
    - the fix is to check `Caller::allows(Reveal, env)` and store the maker;
    - S, this side's `for_owner` plus the agents surface.
-4. **Project members and roles for people** (R1, L): no thread owns it; draft the design here.
+4. **Project members and roles for people** (R1, L): no thread owns it; design being drafted here
+   (`docs/members-design`), with the user's decisions to come.
 5. **Token defaults** (P13, S):
    - the CLI gives every environment, `reveal` and no expiry; the dashboard pre-picks production and 90
      days;
@@ -5141,7 +5142,8 @@ members, the first hour, and the other products' credential inputs. Ranked:
 8. **Plaintext credentials in other products' stores:**
    - search's cluster password, webhook and review-app secrets, and preview vars;
    - `AiConfig.secret_key` derives `Debug`;
-   - seal each, and write `Debug` by hand (search, code and previews threads).
+   - seal each, and write `Debug` by hand. Asked of search and previews (2026-11-19); roll code's
+     share is building here (`fix/code-no-secret-debug`).
 9. **`roll://` where other products take keys,** each with a reveal check when set, a maker and
    `maker_reaches`:
    - previews' variables;
