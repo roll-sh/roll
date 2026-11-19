@@ -2341,6 +2341,44 @@ async fn a_status_page_shows_the_projects_checks() {
     assert_eq!(get("/status.json").await.0, StatusCode::NOT_FOUND);
 }
 
+/// Traffic mirroring (Envoy's): a copy of a share of bodiless requests goes to another
+/// environment of the service, in its own access log, while the visitor gets production's answer;
+/// a POST is never copied.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_mirror_copies_requests_to_another_environment() {
+    let w = world().await;
+    let (svc, d) = image_service(&w, "web", json!({"port": 80, "min_instances": 1})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let h = host(&svc["environments"][0]["url"]);
+    let base = format!("/v1/apps/services/{id}/environments");
+    call(&w.api, "PUT", &format!("{base}/beta"), Some(json!({}))).await;
+    let (_, p) = call(&w.api, "POST", &format!("{base}/beta/promote"), Some(json!({"from": "production", "expect": d["id"]}))).await;
+    settled(&w, &id, "beta", p["id"].as_str().unwrap()).await;
+    assert_eq!(call(&w.api, "PUT", &format!("{base}/production"), Some(json!({"mirror": {"environment": "production", "percent": 100}}))).await.0, StatusCode::BAD_REQUEST);
+    let (st, env) = call(&w.api, "PUT", &format!("{base}/production"), Some(json!({"mirror": {"environment": "beta", "percent": 100}}))).await;
+    assert_eq!((st, env["mirror"]["environment"].as_str()), (StatusCode::OK, Some("beta")), "{env}");
+    let send = |method: &'static str, path: &'static str| {
+        let public = w.public.clone();
+        let req = Request::builder().method(method).uri(path).header("host", h.clone()).body(Body::empty()).unwrap();
+        async move {
+            let resp = public.oneshot(req).await.unwrap();
+            let b: Value = serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap_or(Value::Null);
+            b["deployment"].as_str().unwrap_or("").to_string()
+        }
+    };
+    assert_eq!(send("GET", "/mirrored").await, d["id"].as_str().unwrap(), "the visitor gets production's");
+    send("POST", "/posted").await;
+    let mut beta = Vec::new();
+    for _ in 0..100 {
+        beta = w.apps.logs.follow(&format!("http:{id}/beta"), 50).0.into_iter().map(|l| l.text).collect::<Vec<_>>();
+        if beta.iter().any(|l| l.contains("/mirrored")) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(beta.iter().any(|l| l.contains("/mirrored")) && !beta.iter().any(|l| l.contains("/posted")), "{beta:?}");
+}
+
 /// An instance the kernel killed for its memory says so: in the log and in why it crashed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_instance_killed_for_its_memory_says_so() {

@@ -1573,6 +1573,7 @@ impl Apps {
             heartbeat_states: self.heartbeat_states_of(&r.service, &r.name, &r.heartbeats).await,
             heartbeats: r.heartbeats.clone(),
             split: r.split.clone(),
+            mirror: r.mirror.clone(),
             frozen: r.freeze.as_ref().is_some_and(|f| f.on(code_sql::now_ms())),
             freeze: r.freeze.clone(),
             heartbeat_urls: Default::default(),
@@ -1693,7 +1694,7 @@ impl Apps {
     pub async fn put_environment(self: &Arc<Self>, service: &str, env: &str, body: Value) -> Result<Environment> {
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "checks", "heartbeats", "split", "freeze", "paused", "held", "hostname", "traces", "egress", "vitals", "report", "preview_host"].contains(&k.as_str()) {
+            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "checks", "heartbeats", "split", "mirror", "freeze", "paused", "held", "hostname", "traces", "egress", "vitals", "report", "preview_host"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
@@ -1819,6 +1820,22 @@ impl Apps {
             Some(_) => return Err(Error::BadRequest(format!("routes is at most {} routes, or null", crate::model::MAX_ROUTES))),
         };
         // Uptime checks: unique names, at most MAX_CHECKS.
+        // Traffic mirroring: another environment of this service, as a split names one.
+        let mirror = match o.get("mirror") {
+            None => None,
+            Some(Value::Null) => Some(None),
+            Some(v) => {
+                let m: crate::model::Split = serde_json::from_value(v.clone()).map_err(|e| Error::BadRequest(format!("mirror: {e}")))?;
+                if !(1..=100).contains(&m.percent) || m.environment == env {
+                    return Err(Error::BadRequest("mirror is {environment: another environment, percent: 1–100}".into()));
+                }
+                let (sid, other) = (service.to_string(), m.environment.clone());
+                if self.db(move |s| s.environment(&sid, &other)).await.is_err() {
+                    return Err(Error::BadRequest(format!("mirror: this service has no environment {}", m.environment)));
+                }
+                Some(Some(m))
+            }
+        };
         // A deploy freeze: on until lifted, until a time, or in weekly windows.
         let freeze = match o.get("freeze") {
             None => None,
@@ -2119,6 +2136,12 @@ impl Apps {
         if let Some(rules) = headers {
             let (sid, e) = (service.to_string(), env.to_string());
             self.db(move |s| s.set_headers(&sid, &e, &rules)).await?;
+            self.live(service, env).forget_gate();
+            self.changed(service);
+        }
+        if let Some(m) = mirror {
+            let (sid, e) = (service.to_string(), env.to_string());
+            self.db(move |s| s.set_mirror(&sid, &e, m.as_ref())).await?;
             self.live(service, env).forget_gate();
             self.changed(service);
         }
@@ -3368,7 +3391,7 @@ impl Apps {
             }
             false => None,
         };
-        let g = Arc::new(live::Gate { maintenance: row.maintenance, allow, rate: row.rate_limit, firewall: row.firewall, pages: row.pages, preview: row.ephemeral, headers: row.headers, routes: row.routes, traces, vitals: row.vitals, challenge_key, split: row.split });
+        let g = Arc::new(live::Gate { maintenance: row.maintenance, allow, rate: row.rate_limit, firewall: row.firewall, pages: row.pages, preview: row.ephemeral, headers: row.headers, routes: row.routes, traces, vitals: row.vitals, challenge_key, split: row.split, mirror: row.mirror });
         live.set_gate(g.clone(), seen);
         Ok(g)
     }

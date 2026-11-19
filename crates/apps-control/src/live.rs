@@ -329,6 +329,8 @@ pub struct Gate {
     pub challenge_key: Option<Vec<u8>>,
     /// Its split test.
     pub split: Option<crate::model::Split>,
+    /// Where a share of its bodiless requests is copied.
+    pub mirror: Option<crate::model::Split>,
 }
 
 /// A rate-limit bucket: which (0 the environment's, 1 + i firewall rule i's) and whose.
