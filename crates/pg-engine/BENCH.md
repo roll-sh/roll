@@ -753,6 +753,79 @@ session thread's user instructions by `perf stat --per-thread` over a 14 s run l
 the difference in selects; CPUs 4 and 22): base (`c4ad9402d`) 38,025 / 38,948 / 37,578, the stack
 (`e974a84e1`) 37,624 / 39,504 / 37,995 user instructions a select, alternated.
 
+## Short write transactions, round 9: a run queue, locks without sched_yield (2026-11-19, agent 259)
+
+HANDOFF.md has the design and the reading. short_txn at 32 clients (and point reads), lane A,
+plain dist builds of `bc9102ebb` and changes on it, alternating pairs (one lane hold each, agent
+243's harness). The host was loaded all day; the tables list the pairs with at most 1.0 foreign
+core on the server CPUs in both runs (1.3 where said), each run's own numbers: tps, p99, user
+cycles a transaction (perf, the whole run, every server thread) and the server's CPU a
+transaction (cgroup, user + system). `c1@RUNQ=K`: one binary with the run queue off (0) or at K
+slots; `r4@RUNQ=K` the same for v3; `ny` the experiment build without sched_yield; `nyl` the
+same change as it would ship (not countable: every pair over 1.6 foreign cores).
+
+Run queue v1, K = 4, 5, 6, 8 against off (same binary):
+
+```
+pair           frgn a/b   tps a   tps b    Δtps  p99 a  p99 b    Δp99    Δp50    Δcyc    ΔCPU
+x32/p6       0.91/0.80    6675    7300   +9.4%  50.13  14.69  -70.7%  +18.9%   +3.4%   +0.7%
+k5/p1        0.80/0.66    7826    7893   +0.9%  18.30  13.11  -28.4%  +14.9%  +10.1%   +3.7%
+k5/p4        0.32/0.53    9859    7881  -20.1%  13.55  14.05   +3.7%  +32.6%  +12.5%  +14.1%
+k6/p2        0.54/0.84    8417    7312  -13.1%  15.75  12.12  -23.0%  +27.4%   +1.2%   +6.5%
+k6/p3        0.44/0.81    9449    6654  -29.6%  13.01  23.55  +81.0%  +25.0%   +7.3%   +5.6%
+k8/p1        0.46/0.17   10309   10224   -0.8%  11.76   8.26  -29.7%  +15.3%   +3.7%   +4.5%
+k8/p2        0.46/0.27   11944   10023  -16.1%  10.26   9.42   -8.2%  +26.3%   +5.2%  +14.2%
+k8/p3        0.38/0.74   10410    7608  -26.9%  11.32  13.65  +20.6%  +41.6%   +9.4%  +19.7%
+k8/p4        0.56/0.78    8815    7080  -19.7%  15.80  14.68   -7.1%  +24.7%   +6.4%  +10.7%
+cst/p1       0.37/0.29    9839    9337   -5.1%  12.83   8.85  -31.1%  +14.4%   +5.8%   -3.9%
+10 pairs at <= 1.0 foreign cores: median tps -14.6% (up in 2), p99 -15.6% (up in 3), p50 +24.9%, user cycles/txn +6.1% (up in 10), CPU/txn +6.1% (up in 9)
+```
+
+Run queue v3, K=4 and K=8 against off:
+
+```
+pair           frgn a/b   tps a   tps b    Δtps  p99 a  p99 b    Δp99    Δp50    Δcyc    ΔCPU
+v4k4/p1      0.51/0.93    8747    6659  -23.9%  13.75  17.68  +28.6%  +23.4%   +4.7%   +3.5%
+v4k4/p3      0.47/0.49    8929    8925   -0.0%  15.22   9.95  -34.6%   +7.6%   +2.1%   -6.4%
+v4k4/p6      0.72/0.93    7872    6686  -15.1%  16.77  16.74   -0.1%  +21.4%   +9.1%   +2.8%
+v4k8/p4      0.54/0.93    9013    7229  -19.8%  13.94  14.91   +7.0%  +17.3%   +2.4%   +4.7%
+4 pairs at <= 1.0 foreign cores: median tps -17.4% (up in 0), p99 +3.4% (up in 2), p50 +19.4%, user cycles/txn +3.5% (up in 4), CPU/txn +3.2% (up in 3)
+```
+
+nextval's log-ahead and the group mode (agent 256's patches) on the base, no run queue:
+
+```
+pair           frgn a/b   tps a   tps b    Δtps  p99 a  p99 b    Δp99    Δp50    Δcyc    ΔCPU
+ng32/p2      0.81/0.72    8507    7268  -14.6%  15.07  18.78  +24.6%   +8.5%   +0.5%  +10.8%
+ng32/p3      0.86/0.85    7725    6942  -10.1%  16.34  17.88   +9.4%  +15.6%   +5.1%   +9.4%
+ng32/p6      0.69/0.32    8314    9938  +19.5%  17.61  13.21  -25.0%   -3.9%   -2.6%   -0.1%
+3 pairs at <= 1.0 foreign cores: median tps -10.1% (up in 1), p99 +9.4% (up in 2), p50 +8.5%, user cycles/txn +0.5% (up in 2), CPU/txn +9.4% (up in 2)
+```
+
+Locks without sched_yield (experiment build), at most 1.3 foreign cores:
+
+```
+pair           frgn a/b   tps a   tps b    Δtps  p99 a  p99 b    Δp99    Δp50    Δcyc    ΔCPU
+ny32/p1      0.61/1.03    8038    6650  -17.3%  26.96  15.79  -41.4%  +29.3%  +10.7%  +13.2%
+ny32/p2      0.92/0.36    6371    9609  +50.8%  45.91   9.41  -79.5%   +0.6%   +0.7%   -3.0%
+ny32/p4      0.84/0.48    7585    9028  +19.0%  18.84  10.62  -43.6%   -4.1%   -3.0%   -6.2%
+ny32/p9      1.00/1.19    7175    6894   -3.9%  32.50  14.05  -56.8%  +28.1%   +8.9%   +4.8%
+ny32/p11     0.93/1.09    6849    5966  -12.9%  27.27  50.77  +86.2%   +9.9%   +1.9%   +1.0%
+ny32/p12     1.18/1.08    6739    6837   +1.5%  24.29  20.25  -16.6%   +6.7%   +0.9%   +0.5%
+ny32b/p9     1.15/0.79    6671    7656  +14.8%  21.38  16.93  -20.8%   -7.1%   -2.4%   -4.2%
+7 pairs at <= 1.3 foreign cores: median tps +1.5% (up in 4), p99 -41.4% (up in 1), p50 +6.7%, user cycles/txn +0.9% (up in 5), CPU/txn +0.5% (up in 4)
+```
+
+The patches of agent 256 on top of the locks without sched_yield, at most 1.3:
+
+```
+pair           frgn a/b   tps a   tps b    Δtps  p99 a  p99 b    Δp99    Δp50    Δcyc    ΔCPU
+nyng32/p2    1.02/0.50    7505    9121  +21.5%  15.30  10.66  -30.4%  -10.9%   +1.2%   -3.4%
+nyng32/p4    0.58/0.97    9067    7247  -20.1%  11.37  15.96  +40.4%  +20.2%   +8.6%  +13.4%
+nyng32/p8    1.09/1.26    6670    6168   -7.5%  15.25  16.17   +6.0%  +13.5%   +5.3%   +4.2%
+3 pairs at <= 1.3 foreign cores: median tps -7.5% (up in 1), p99 +6.0% (up in 2), p50 +13.5%, user cycles/txn +5.3% (up in 3), CPU/txn +4.2% (up in 2)
+```
+
 ## Short write transactions, round 8: the size model's lock, the transaction object (2026-11-18/19, agent 256)
 
 Lane A, plain dist builds (`tools/dist.sh`), agent 243's harness (`~/.cache/a256/bench`: one

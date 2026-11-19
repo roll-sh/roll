@@ -12887,6 +12887,86 @@ failed: all passed.
 Not this round's: roll's `VACUUM (VERBOSE)` sends none of PostgreSQL's INFO lines (agent 205's
 note, still open).
 
+## Short write transactions, round 9: a run queue in front of the executor, locks without sched_yield (agent 259)
+
+BENCH.md "Short write transactions, round 9" has the pairs. Base `bc9102ebb`, plain dist builds
+(`tools/dist.sh`), short_txn on lane A through `tools/lane.sh` (one pair a hold), agent 243's
+harness as agent 256 left it (`~/.cache/a259/bench`; `clean.py` lists the pairs within a foreign
+limit with tps, p50, p99, user cycles and CPU a transaction). **Nothing landed: no change won
+clearly.** The host was loaded all day (3-7 foreign cores on the lane's 8 CPUs in every hold,
+load averages 40-100); of ~100 pairs about 20 had both runs at or under 1.0 foreign core. The
+measuring stopped under the coordinator's rule of 2026-11-19 (short checks, no long series, no
+three-server table): no same-day three-server table this round.
+
+**Measuring note: on this host the in-run foreign load depends on the arm.** Before each run the
+server CPUs were 55-85% busy with other tenants' work (waitidle's reading, our server idle);
+during the runs the same CPUs showed 0.3-2.5 foreign cores. The containers (system.slice) and the
+other sessions' builds (user.slice) share each CPU by cgroup weight, and the load balancer puts
+the builds where the run queues are short: a server whose 32 threads are all runnable (queued,
+spinning, yielding) repels them, one whose waiting threads sleep attracts them. Every change here
+that lowers the runnable count (a run queue, locks that park instead of yielding) ran with more
+foreign load, and `adj.py`'s fit against that load credits the arm's own effect to the load; it
+is right only for changes that don't move the runnable count. `bench/adj2.py` fits against the
+pre-run reading instead (exogenous, but it has no slope on this host). Compare such changes on
+clean pairs, or on a quiet host.
+
+Dropped (patches in `~/.cache/a259/patches/`):
+
+1. *A run queue in front of the executor* (`run-queue-v1.patch`, `run-queue-v3.patch`: `src/runq.rs`,
+   the reader in `server.rs`, `runq::Blocked` around every long wait: the group commit's fsync
+   and its wait, heavyweight and row lock waits, SSI's safe-snapshot wait, pg_sleep, VACUUM's
+   cost delay, the size models' build waits, a database's reopen waits; `ROLL_EXP_RUNQ=K` turns
+   it on). At most K connection threads run statements, the others sleep without being runnable.
+   Design (c) with epoll readiness: every connection's socket is in one epoll set, its ready list
+   is the run queue; a thread that gives up its slot (its client's next message isn't there, or a
+   long wait) takes the next ready session and hands the slot over directly (one futex wake where
+   the socket's data would have woken that thread: no thread wakes only to sleep again, the
+   failure of agent 243's admission limit). While slots are free a thread waits in its socket's
+   read as before, and a poller hands free slots to sessions armed while all were taken; a
+   thread back from a long wait takes a slot without waiting (lent, repaid by the next release); a
+   watchdog lends one when none was given up for 2 ms while sessions wait. v3: edge-triggered
+   registration once per connection, grants prefer a waiter that last ran on the releasing CPU,
+   the idle trim's wake from the poller (no futex timer a wait). Session behaviour is untouched
+   (the slot is taken before a message is read; cancels and terminations come through other
+   connections or the socket; idle NOTIFY is written by the notifier; an idle timeout reads a
+   message that came in time but waited for a slot). (a) and (b) proper were not built: the
+   session's state lives on its thread (thread-locals, the stack). pgrust's `max_active_queries`
+   (ideas only) admits at transaction grain, which would hold a slot through each of short_txn's
+   five client round trips.
+   What it does: the lock convoys go. Off-CPU at 32 clients: sleeps in the size model's lock
+   (`sizing::updated`) 4.22 -> 0.016 thread-s/s, in `identity_nextval` 0.96 -> 0.08;
+   `sched_yield` 1.75 -> 0.62 a transaction. In the cleanest pairs p99 fell by a third (14.69 ->
+   8.84, 12.83 -> 8.85, 15.22 -> 9.95 ms) at equal throughput (8,572 -> 8,503, 9,839 -> 9,337,
+   8,929 -> 8,925 tps). What it costs: **user cycles a transaction +6.1% at the median of 10
+   clean pairs (up in all 10), tps -14.6% (up in 2)** (v1, K = 4, 5, 6, 8); v3 (K = 4 and 8)
+   +3.5% (up in all 4 clean pairs), tps -17.4%. By symbol per transaction: epoll_ctl and the
+   socket poll it does ~6k cycles, the futex timer ~3.7k, the queue's own path ~5k (v3 removed
+   these), and ~8-10k in the engine's code running colder (allocator, heap model, the memtable's
+   skiplist): a statement handed to a thread that last ran on another core (migrations 38k ->
+   162k in 7 s; 37% of v3's grants found a waiter of the releasing CPU). It would need sessions
+   that stay on one CPU (a thread per CPU running many sessions: (b), with the session's state
+   off its thread) for the handoffs to stay warm.
+2. *nextval's logged-ahead value without its own fsync wait and the size model's group mode*
+   (agent 256's patches, unchanged): on the run queue nextval's saved 3.1% user cycles (±0.7%, 4
+   pairs), but without it the two cost CPU (3 clean pairs: tps -10.1%, CPU/txn +9.4%, system
+   time +20-45 µs a transaction), and on top of the locks below +5.3% cycles (3 pairs).
+3. *Contended locks spin and park without sched_yield* (`locks-no-sched-yield.patch`, branch
+   shape: `vendor/parking_lot_core` with `set_spin_yield(false)`, off for every other binary,
+   turned off by roll-engine). The yields of a short transaction at 32 clients by call site (perf
+   on `sys_enter_sched_yield`, dwarf): the size model's exclusive lock in UPDATE 36%, nextval's
+   sequence mutex 23%, the commit lock 13%, the size model in INSERT 9%, the durable wait's lock
+   6%; parking_lot spins three rounds then yields up to seven times, each behind the run queue.
+   Measured (experiment build, same change): 2 clean pairs tps +51% and +19%, p99 -80% and -44%,
+   CPU/txn -3% and -6%; 7 pairs under 1.3 foreign cores tps +1.5% (4 up), p99 -41.4% (down in 6),
+   user cycles +0.9%; the shipped-shape build's 6 pairs all ran at 1.6-2.4 foreign cores (p99
+   lower in 4). A p99 win, throughput not resolved: not handed in. It is the one to re-measure
+   first on a quieter lane (three clean pairs at 32 clients, then 8; point reads' instructions
+   are unchanged).
+
+Left, by size: the size model's exclusive lock in UPDATE and nextval's fsync under the
+sequence mutex are where 32 clients wait (59% of the yields); the run queue showed that removing
+the waits doesn't pay while each handoff moves a statement to a cold core.
+
 ## Short write transactions, round 8: the size model's lock, the transaction object (agent 256)
 
 BENCH.md "Short write transactions, round 8" has every pair. **The host was loaded all round**:
