@@ -33,6 +33,22 @@ export interface Session {
   expires_at: number;
   user_agent: string;
   current: boolean;
+  /** How it signed in (absent: sessions from before roll recorded it). */
+  method?: "email" | "github" | "google" | "sso" | "passkey" | null;
+  /** Whether a passkey was used in it: with `sso`, a phishing-resistant session. */
+  passkey?: boolean;
+}
+
+const SIGNED_IN_WITH: Record<string, string> = { email: "an email code", github: "GitHub", google: "Google", sso: "your company's sign-in", passkey: "a passkey" };
+
+/** How a session signed in, in words (`null`: not recorded). */
+export function sessionMethod(s: Pick<Session, "method">): string | null {
+  return s.method ? (SIGNED_IN_WITH[s.method] ?? s.method) : null;
+}
+
+/** Whether a session is phishing-resistant (docs/accounts.md): it used a passkey, or came from SSO. */
+export function phishingResistant(s: Pick<Session, "method" | "passkey">): boolean {
+  return Boolean(s.passkey) || s.method === "sso" || s.method === "passkey";
 }
 
 export interface Invite {

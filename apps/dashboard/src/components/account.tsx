@@ -1,6 +1,6 @@
 import { Building2, Check, Copy, Fingerprint, KeyRound, LoaderCircle, Monitor, ShieldCheck, UserPlus } from "lucide-react";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { accountsApi, activityText, refreshSession, useSession, type AccountPolicy, type Activity, type Invite, type NetworkPolicy, type Passkey, type PasskeyPolicy, type Provider, type ResetRequest, type Session, type User } from "@/lib/accounts-api";
+import { accountsApi, activityText, phishingResistant, sessionMethod, refreshSession, useSession, type AccountPolicy, type Activity, type Invite, type NetworkPolicy, type Passkey, type PasskeyPolicy, type Provider, type ResetRequest, type Session, type User } from "@/lib/accounts-api";
 import { creationOptions, credentialJSON, passkeyProblem, passkeysSupported } from "@/lib/webauthn";
 import { Link } from "./link";
 import { GitHubMark, GoogleMark } from "./agents/brand-icons";
@@ -673,7 +673,9 @@ function Sessions() {
               <span className="min-w-0 flex-1 leading-tight">
                 <span className="block truncate text-[12.5px]">{browser(s.user_agent)}</span>
                 <span className="block text-[11px] text-subtle">
-                  Signed in {when(s.created_at)} · last seen {when(s.seen_at)}
+                  Signed in {sessionMethod(s) ? `with ${sessionMethod(s)} ` : ""}
+                  {when(s.created_at)} · last seen {when(s.seen_at)}
+                  {phishingResistant(s) && <span className="text-accent"> · phishing-resistant</span>}
                 </span>
               </span>
               {s.current ? (
