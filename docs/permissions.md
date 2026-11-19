@@ -708,11 +708,14 @@ what a person said yes to.
 ### Remembered approvals
 
 Approving can also allow what's asked again, as Claude Code's and Cursor's "allow for this
-session" or "always" do (`POST …/approve {remember: "1h" | "8h" | "1d" | "always"}`, the approvals
+session" or "always" do (`POST …/approve {remember: "1h" | "8h" | "1d" | "7d" | "30d" | "always"}`, the approvals
 page's "Once ▾", `roll mcp approve --remember 1h`):
 
 - It allows the request's action on its one resource (`{product, resources: [{id}], actions:
-  {<action>: "allow"}}`); nothing broader. A request about the product as a whole or about
+  {<action>: "allow"}}`); nothing broader. It keeps the environment and folder the request was about (an
+  approval in development never reaches production) and belongs to the grant that asked: another
+  client the person approved doesn't inherit it, and it ends with that grant. A week or 30 days
+  suits a developer's own CLI (`roll run` in development asks once). A request about the product as a whole or about
   something new ("new in a project") can only be approved once.
 - For a while, the rule is the grant's `temporary`: it lapses by itself, and decisions read the
   grant's rules plus the live temporary ones. For good, it's added to the grant's `rules`, and the
@@ -1179,7 +1182,7 @@ Under `/v1/access`. Bodies are JSON; errors are `{"error": string, "code"?: stri
 | `POST /v1/access/tokens/{id}/rotate` | access admin | `{keep_old_for_s?}`: a new secret with the same rules; the old one stops at once, or works that long (at most 604800, a week: Stripe's roll key); in its grace the old one calls products but manages no tokens (403 `rotated_secret` on `/v1/access`) → `{grant, token}`; not for OAuth connections |
 | `GET /v1/access/approvals` | access read | newest first; `?state=pending`, `?grant=<id>` (one token's), `?limit=` (at most 500) |
 | `GET /v1/access/approvals/{id}` | the grant that asked, or access read | an approval; `?wait=55` waits for a decision |
-| `POST /v1/access/approvals/{id}/approve` | operator | `{remember?: "1h" \| "8h" \| "1d" \| "always"}`: also allow the same action on the same resource ("Remembered approvals") |
+| `POST /v1/access/approvals/{id}/approve` | operator | `{remember?: "1h" \| "8h" \| "1d" \| "7d" \| "30d" \| "always"}`: also allow the same action on the same resource ("Remembered approvals") |
 | `POST /v1/access/approvals/{id}/deny` | operator | `{reason?}` |
 | `GET /v1/access/audit` | access read | `?grant=&product=&action=&decision=&source=&resource=&before=&limit=`; `resource` is who touched it: that resource or anything under it (`cl_1` finds `cl_1/logs-a`); `&format=jsonl` answers one event per line and `&format=csv` a row each (UTC times, every cell quoted; a formula character is defused with `'` at a cell's start and after a `;`, tab or `|` inside it, which some spreadsheets split on), as a download (the audit page and `roll mcp audit --format csv` or `jsonl`). Rows that name people (`usr_` ids: an account event's actor, a change's `by`, a resource) carry `actor_handle` and `resource_handle`, disabled and deleted people too, looked up for each answer; the CSV has them as its last two columns |
 | `POST /v1/access/leaks/github` | public (GitHub's signature) | GitHub secret scanning reports: `[{token, type, url, source}]` → `[{token_hash, token_type, label}]`; live tokens are revoked |

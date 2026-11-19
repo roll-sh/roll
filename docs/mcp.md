@@ -408,7 +408,8 @@ roll implements the MCP authorization spec (2025-06-18 and 2025-11-25) with OAut
 - Requests with an `Origin` header must come from the dashboard's or the API's origin (DNS
   rebinding).
 - Results come back as `structuredContent` (the route's JSON; arrays as `{"items": […]}`) and a
-  `text` block, cut at 256 KiB. Binary content comes back base64 (`content_b64`). An image (a preview's screenshot: PNG, JPEG or WebP, up to
+  `text` block, cut at 48 KiB (inside Claude Code's default 25,000-token limit even for dense JSON;
+  it refuses a longer answer rather than cutting it), saying so and that the tool can be asked for less. Binary content comes back base64 (`content_b64`). An image (a preview's screenshot: PNG, JPEG or WebP, up to
   4 MiB) comes back as MCP image content the agent can look at.
 - Characters a person can't see but a model reads are escaped in the `text` block: tag characters
   (ASCII smuggled as U+E0000–E007F), zero-width and bidi controls, and variation selectors. They
@@ -605,6 +606,10 @@ previews are listed once those products are on.
 | `queues_declare_queue` | Create a queue. | `POST /v1/queues/vhosts/{vhost}/queues` |
 | `queues_delete_queue` | Delete a queue and its messages. | `DELETE /v1/queues/vhosts/{vhost}/queues/{queue}` |
 | `queues_purge_queue` | Drop every message in a queue. | `POST /v1/queues/vhosts/{vhost}/queues/{queue}/purge` |
+| `queues_get_queue` | One queue: messages, consumers, prefetch, arguments, dead-letter queues. | `GET /v1/queues/vhosts/{vhost}/queues/{queue}` |
+| `queues_queue_rates` | One queue's rates and depth over the last minutes (`queues_rates` is the broker's). | `GET /v1/queues/vhosts/{vhost}/queues/{queue}/rates` |
+| `queues_list_exchanges` | A virtual host's exchanges. | `GET /v1/queues/vhosts/{vhost}/exchanges` |
+| `queues_list_bindings` | Which exchange routes to which queue by which key. | `GET /v1/queues/vhosts/{vhost}/bindings` |
 | `queues_peek` | Messages in a queue, without consuming them. | `GET /v1/queues/vhosts/{vhost}/queues/{queue}/messages` |
 | `queues_publish` | Publish to an exchange with a routing key. | `POST /v1/queues/vhosts/{vhost}/publish` |
 | `queues_list_connections` | Open client connections: who, from where, and their channels. | `GET /v1/queues/connections` |
@@ -661,12 +666,15 @@ previews are listed once those products are on.
 | `search_list_clusters` | Elasticsearch-compatible search clusters. | `GET /v1/search/clusters` |
 | `search_get_cluster` | A cluster's settings, state, indices, size, URL and branches. | `GET /v1/search/clusters/{cluster}` |
 | `search_create_cluster` | A new cluster, or a branch of one (its password once, to tokens that may reveal). | `POST /v1/search/clusters` |
+| `search_list_branches` | A cluster's branches. | `GET /v1/search/clusters/{id}/branches` |
 | `search_branch_cluster` | A copy-on-write branch of a cluster. | `POST /v1/search/clusters/{cluster}/branches` |
 | `search_update_cluster` | A cluster's idle timeout, request limits, flavor, IP allowlist (admin). | `PATCH /v1/search/clusters/{id}` |
 | `search_delete_cluster` | Delete a cluster (its branches keep working); kept for the restore window. | `DELETE /v1/search/clusters/{id}` |
 | `search_restore_cluster` | A deleted cluster back as it was, within its restore window (write). | `POST /v1/search/clusters/{id}/restore` |
 | `search_cluster_metrics` | A cluster's request rate, latency percentiles and answers by kind (`range` 1h, 24h, 14d). | `GET /v1/search/clusters/{id}/metrics` |
 | `search_slowlog` | A cluster's slowest recent requests. | `GET /v1/search/clusters/{id}/slowlog` |
+| `search_audit` | A cluster's security audit log (failed logins, access denials, changes to users, roles and keys; never a secret). | `GET /v1/search/clusters/{id}/audit` |
+| `search_analytics` | What a cluster's users search for: top queries, queries with no results, click-through (indices that opt in). | `GET /v1/search/clusters/{id}/analytics` |
 | `search_usage` | A cluster's metering and cost against Elastic Cloud and Amazon OpenSearch. | `GET /v1/search/clusters/{cluster}/usage` |
 | `search_get_index` | An index's mappings, settings and aliases. | `GET /v1/search/clusters/{cluster}/indices/{index}` |
 | `search_create_index` | Create an index with mappings and settings. | `PUT /v1/search/clusters/{cluster}/indices/{index}` |
@@ -688,6 +696,11 @@ previews are listed once those products are on.
 | `secrets_list` | Secret names and metadata in an environment (never values). | `GET /v1/secrets/projects/{project}/environments/{env}/secrets` |
 | `secrets_reveal` | Read a secret's value. | `GET /v1/secrets/projects/{project}/environments/{env}/secrets/{name}/value` |
 | `secrets_set` | Create or change a secret's value. | `PUT /v1/secrets/projects/{project}/environments/{env}/secrets/{name}` |
+| `secrets_import` | A .env file (or JSON) into an environment as one change; a change request on a protected one. | `POST /v1/secrets/projects/{project}/environments/{env}/import` |
+| `secrets_rollback` | An environment's values back to a change or a time, as a new change (destructive). | `POST /v1/secrets/projects/{project}/environments/{env}/rollback` |
+| `secrets_create_environment` | A new environment (project admin). | `POST /v1/secrets/projects/{project}/environments` |
+| `secrets_link_targets` | The resources a key can link to, with their fields. | `GET /v1/secrets/projects/{project}/links` |
+| `secrets_link` | Link a key to a resource (or unlink it). | `PUT /v1/secrets/projects/{project}/environments/{env}/secrets/{name}` |
 | `secrets_delete` | Delete a secret. | `DELETE /v1/secrets/projects/{project}/environments/{env}/secrets/{name}` |
 | `secrets_list_aws_roles` | A project's registered AWS roles for dynamic AWS keys (registering is admin, in the dashboard). | `GET /v1/secrets/projects/{project}/aws-roles` |
 | `secrets_list_outside_databases` | Servers roll doesn't run (Postgres, MySQL, SQL Server, ClickHouse, RabbitMQ, Redis, MongoDB) whose users a project rotates (never the admin URL; adding one is admin, in the dashboard). | `GET /v1/secrets/projects/{project}/outside-databases` |
@@ -764,6 +777,11 @@ previews are listed once those products are on.
 | `apps_diff_environments` | How an environment differs from another: variables missing, extra or different (names only; `differ` needs reveal on both) and settings with the body that matches each. | `GET /v1/apps/services/{service}/environments/{env}/diff` |
 | `apps_metrics` | CPU, memory and requests of an environment, and each instance's own last hour (`by_instance`). | `GET /v1/apps/services/{service}/environments/{env}/metrics` |
 | `apps_plan` | How roll would build and run a repo, before making a service (a dry run). | `POST /v1/apps/plan` |
+| `apps_errors` | An environment's errors, grouped, the most frequent first. | `GET /v1/apps/services/{service}/environments/{env}/errors` |
+| `apps_traces` | Recent traces (root span, duration, failures); `min_ms` keeps the slow ones. | `GET /v1/apps/services/{service}/environments/{env}/traces` |
+| `apps_get_trace` | One trace's spans, in start order. | `GET /v1/apps/services/{service}/environments/{env}/traces/{trace}` |
+| `apps_app_metrics` | The app's own OpenTelemetry metrics, as series. | `GET /v1/apps/services/{service}/environments/{env}/app-metrics` |
+| `apps_analytics` | Page views, visitors, top pages, referrers, countries. | `GET /v1/apps/services/{service}/environments/{env}/analytics` |
 | `apps_vitals` | What visitors' browsers measured on an environment's pages: Web Vitals p75s, rated, overall and per route. | `GET /v1/apps/services/{service}/environments/{env}/vitals` |
 | `apps_route_stats` | An environment's routes over the last minutes: requests, errors, p50/p95/max latency (apps-next). | `GET /v1/apps/services/{id}/environments/{env}/routes` |
 | `apps_import` | What a roll.toml or compose file would make, making nothing (apps-next). | `POST /v1/apps/import` |
@@ -810,6 +828,8 @@ previews are listed once those products are on.
 | `previews_get` | A preview with its branched resources and its schema changes. | `GET /v1/previews/{id}` |
 | `previews_create` | A preview environment for a change or a branch: the project's resources branched, its services deployed. | `POST /v1/previews` |
 | `previews_refresh` | Redeploy a preview now. | `POST /v1/previews/{id}/refresh` |
+| `previews_errors` | A preview's errors, grouped (masked as logs are). | `GET /v1/previews/{id}/errors` |
+| `previews_mask_suggestions` | Columns that look like people's data and aren't masked in previews, with the rule each would take. | `GET /v1/previews/projects/{project}/mask-suggestions` |
 | `previews_metrics` | Each of a preview's services' CPU and memory now. | `GET /v1/previews/{id}/metrics` |
 | `previews_logs` | A preview's deploy and service logs. | `GET /v1/previews/{id}/logs` |
 | `previews_requests` | A preview's latest 200 requests through roll (service, method, path, status, time), to find the one that failed. | `GET /v1/previews/{id}/requests` |
@@ -838,24 +858,35 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **Built 2026-11-18, for the next turn (after secrets #79 and search's turn):** a person's own
-   data export (#283, this PR), hardware keys only (#286), one provider for people and agents
-   (#287), an SSO connection's session length (#289) with back-channel logout on it (#292),
-   allowed networks (#294) with a second factor for everyone (#298), who has one (#299) and an
-   idle timeout (#302) on it; moving an account to another address (#306) with deleting your own
-   account on it (#309); downloads that send the session (signed-in people got 401s on the audit
-   export, apps' logs and previews' QR codes, screenshots, mail and logs) and the sign-in report
-   link (#307); the audit log naming people by handle, the CSV too (#313); tools for search's
-   metrics, slow log and IP allowlist and previews' metrics (#310). #306, #307 and #309 were
-   checked together in a real Chromium (`users-live/review306-shot.sh`). Conflicts: appended
-   tests (keep both), #287×#289 in `account-sso.tsx`, #306/#309×#302's stack in `account.tsx`,
-   `api.rs` and docs/accounts.md, #307×#313 in the audit page; build land commits up front as the
-   last turn did.
-2. **Next, ranked (now):** the email change's and deletion's SCIM and SSO refusals in the SSO and
-   SCIM flow tests; what a removed person owned (their roll code owner's repositories) handed to
-   someone else when an admin disables or a person deletes the account (GitHub's transfer on
-   removal; roll code's routes, so asked of no thread until a code thread runs); tools for
-   search's audit and analytics once #247 and #291 are on main.
+1. **Next, ranked (now):** land turn 4 (15 PRs below, after previews), then open its follow-ups
+   (`feature/roll-mcp-turn4-followups`: the policy alert naming the longest session, People's
+   Dormant filter and turning the dormant off in one step); `previews_errors` and a
+   mask-suggestions tool once previews' #326 and #324 land (landing now); secrets' request (#277)
+   and cut-off (#304) tools when secrets' batch 4 lands; apps' forms tools once their routes land;
+   a removed person's repositories handed to someone else (waits for a repository transfer in roll
+   code). Not doing: "remember this browser"; `roll login`'s preset revealing development's values
+   without asking (#354, closed after review: a client's name proves nothing, so any approved
+   client would read them; #360 lets a CLI's approval be remembered for 30 days instead).
+   An independent security review of turn 4's account PRs (2026-11-19) found, and these fix:
+   token use counting as activity for dormant people (#349); resending an invite ending sign-ins
+   begun with the old link (#351); alerts naming every SSO change and everything a change to a
+   person did (#333); the session list ending sessions as the policy does (#337); signing out of
+   the others pointing to tokens and connections (#342); a 48 KiB cut for dense JSON (#355).
+   Open for the next turn (landed by the unit `roll-mcp-turn4-auto` once previews releases: a
+   fresh chain on main, one gate, one PR a round): #348, #322, #323, #328, #333, #334, #337, #338,
+   #342, #345, #349, #351, #353, #355, #360 (approvals remembered for a week or 30 days), #362
+   (debugging reads as tools: apps' errors, traces and metrics, queue internals, preview errors
+   and unmasked personal data, search branches).
+2. **Landed 2026-11-18, turn 3 (main e84194b6f, ci green):** a person's own data export (#283),
+   hardware keys only (#286), one provider for people and agents (#287), an SSO connection's
+   session length (#289) and back-channel logout (#292), allowed networks (#294), a second factor
+   for everyone (#298) and who has one (#299), an idle timeout (#302), phishing-resistant sign-in
+   (#316), moving an account to another address (#306), deleting your own account (#309),
+   downloads that send the session plus the sign-in report link (#307), tools for search's
+   metrics, slow log and IP allowlist, previews' metrics and secrets' TOTP, SaaS rotators and
+   Kubernetes clusters (#310), and the audit log naming people by handle (#313). Gated as one tree,
+   then landed one per round (`turn3-land.sh`: the queue drops stacked PRs that share anchors once
+   a squash breaks their ancestry).
 3. **Landed 2026-11-18 (main 1a60b43be):** passkeys (#256), sudo mode (#257, #260), new-sign-in mail
    (#258), second-factor resets (#263), refused codes in the security log (#254); for roll secrets,
    `revoke_many` and the public detectors (#267) and decoy tokens (#270).

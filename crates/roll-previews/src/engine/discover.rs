@@ -107,6 +107,9 @@ impl Engine {
             if existing.iter().any(|r| r.change_id.as_deref() == Some(&c.id)) || self.store.dismissed(&c.id, &c.head)? {
                 continue;
             }
+            if has_own_preview(&existing, c) {
+                continue;
+            }
             let key = match c.github_pr {
                 Some(n) => format!("pr{n}"),
                 None => format!("c{}", c.number),
@@ -136,6 +139,7 @@ impl Engine {
         // What changed for the previews this project has.
         let rows = self.store.rows(Some(project_id))?;
         let has_changes = rows.iter().any(|x| x.change_id.is_some() && x.desired == Desired::Active);
+        let branch_previews: Vec<Row> = rows.iter().filter(|x| x.change_id.is_none()).cloned().collect();
         for r in rows {
             if r.desired == Desired::Deleted {
                 continue;
@@ -161,6 +165,12 @@ impl Engine {
             let held = r.is_baseline() && has_changes;
             let ttl_ms = s.ttl_hours as i64 * 3_600_000;
             if let Some(change) = &r.change_id {
+                // Made in the moment between `roll preview up`'s push (roll code nudges this on
+                // one) and its branch's preview: that one stands for it.
+                if r.created_by == "roll" && open.get(change).is_some_and(|c| has_own_preview(&branch_previews, c)) {
+                    self.mark_deleted(&r.id, "its branch has a preview of its own")?;
+                    continue;
+                }
                 // One made by hand (`roll preview create --change`) isn't the rules' to delete.
                 let wanted = match open.get(change) {
                     Some(c) => r.created_by != "roll" || self.wanted(s, c).await,
@@ -426,4 +436,13 @@ impl Engine {
         Ok(r)
     }
 
+}
+
+/// Whether `c`'s branch has a preview of its own among `rows` (`roll preview up`'s, or one made by
+/// hand): then that one stands for the change, which gets no second.
+fn has_own_preview(rows: &[Row], c: &ChangeInfo) -> bool {
+    // Only `roll preview up`'s branches (`preview/<who>/<name>`): a preview made by hand of a pull
+    // request's own branch never takes that pull request's preview (and its reports) away.
+    c.branch.as_deref().is_some_and(|b| b.starts_with("preview/"))
+        && rows.iter().any(|r| r.change_id.is_none() && r.desired == Desired::Active && r.repo == c.repo && r.branch.is_some() && r.branch == c.branch)
 }

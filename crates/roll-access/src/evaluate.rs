@@ -397,7 +397,12 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
         Some(user) => {
             let Some(people) = access.people.get().cloned() else { return invalid_token(&access) };
             match people.person(&user).await {
-                Ok(Some(p)) => Some(p),
+                Ok(Some(p)) => {
+                    // Their token's use counts as their activity (dormant people), off the request.
+                    let (people, user) = (people.clone(), user.clone());
+                    drop(tokio::task::spawn_blocking(move || people.used(&user)));
+                    Some(p)
+                }
                 Ok(None) => return invalid_token(&access),
                 Err(e) => {
                     tracing::warn!(error = %e, "looking up a token's user");
