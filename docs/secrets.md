@@ -3694,6 +3694,10 @@ cache waited out. Ranked now:
      token page); roll MCP adds 7- and 30-day choices next.
    - P7–P8, **tests** (building: `feature/roll-secrets-test-gaps`): `roll run --watch`, the six links
      to roll's own products, and a `pnpm test:secrets` gate.
+     The links test found **an authentication bypass in roll redis**: `AUTH default <db>_<anything>`
+     answered +OK (a `nopass` default user behind the platform-secret check), so any password, and any
+     rotated-out one, logged in. Being fixed on its own (`fix/redis-auth-default-user`), to land ahead
+     of the batches.
    - P9–P11, apps' variables, search's connectors and previews' variables as `roll://` references
      (each with its thread; search's is building on #329).
    - P12 members (R1, waits); P13 a CI token's defaults (all environments, no expiry: the user's call);
