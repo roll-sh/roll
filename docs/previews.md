@@ -1118,7 +1118,7 @@ The rebuild is a number on the preview, part of what each service was deployed w
 rebuild that's asked while a deploy is under way still runs once it's done, and converging again
 builds nothing more.
 
-### A shell in a preview
+### A shell and files in a preview
 
 Render's shell on a preview environment and `heroku run -a <review app>`: a login shell in a
 preview's running `roll.toml` service, through the Docker Engine API (an exec with a TTY, as
@@ -1132,9 +1132,12 @@ for it (the project's roll apps service of that name, as Promote finds it), so e
 a preview has its shell in the same place. A redeploy ends a shell with the
 container it was in; a preview that goes ends its shells first.
 `roll preview shell <preview> [--service]` makes this terminal the shell's (raw mode, its size
-followed) until it exits. `a_shell_in_a_previews_service_is_said_and_bounded`;
-`scripts/preview-cost.sh` types into a live preview's container through `roll preview shell` and
-reads its `ROLL_PREVIEW` back.
+followed) until it exits. Files go in and out the same way (`…/files`, `roll preview cp <preview>
+./seed.sql :/tmp/`, `roll preview cp <preview> :/app/out.csv .`, as `roll apps cp`: `docker cp`
+in the service's container, at most 100 MiB a time, admin, said in the activity). `a_shell_in_a_previews_service_is_said_and_bounded`;
+`files_go_in_and_out_of_a_previews_service_and_are_said`; `scripts/preview-cost.sh` types into a
+live preview's container through `roll preview shell` and reads its `ROLL_PREVIEW` back, and puts a
+file in with `roll preview cp` and brings it back.
 
 ### Feedback on the preview page
 
@@ -1277,6 +1280,8 @@ and admins see every project.
 | `POST /v1/previews/{id}/shell/sessions/{sh}/keys` | `{ data }` (base64, at most 64 KiB) | 204; 404 once it's closed |
 | `POST /v1/previews/{id}/shell/sessions/{sh}/resize` | `{ cols, rows }` | 204 |
 | `DELETE /v1/previews/{id}/shell/sessions/{sh}` | | 204 |
+| `GET /v1/previews/{id}/files?service=&path=` | | `application/x-tar`: what's at `path` (absolute) in the running `roll.toml` service, started if it sleeps (`docker cp`), `x-roll-service` naming it; 404 before any of the answer when nothing is there; said in the activity ("ana copied /app/out.csv out of web"). Admin, as the shell is (it reads anything the service keeps); a roll apps service's is 409 (roll apps' own `…/files` on `pv-`). Runs on the preview's holder |
+| `PUT /v1/previews/{id}/files?service=&path=` | a tar, at most 100 MiB | `{ service, path }`: its files written under the directory `path`, said in the activity. Admin |
 | `GET /v1/previews/{id}/requests` | | `{requests: [{at, service, method, path, status, ms}]}`: its latest 200 requests through roll's runtime, newest first (Vercel's request log): never the query, which can carry a token, and the path masked as its logs are (a path is its code's to choose); `ms` until the answer's headers. Kept in memory on the preview's holder (runs there) and gone with its last service; a roll apps instance's requests are roll apps' own. The sheet's Requests tab, errors at a glance; `roll preview requests <id> [--errors]` |
 | `GET /v1/previews/{id}/metrics` | | `{services: [{service, cpu, memory_bytes, memory_mb}]}`: what its running services use right now (Render's and Railway's metrics): cores of CPU and resident memory, against the memory each runs with. It comes from `docker stats` for roll's runtime. For roll apps' instances it's their last finished minute (`…/environments/pv-…/metrics`), with memory per instance. A sleeping service isn't listed. 404 for no such preview. It runs on the preview's holder, and is read again at most every 10 s, however many sheets ask. The sheet shows it on each running service, read every 15 s while it's open |
 | `GET /v1/previews/{id}/errors?minutes=` | | `{minutes, groups: [{service, fingerprint, kind, title, count, first_seen, last_seen, sample}]}`: its services' errors in the last `minutes` (5–1,440, 60 by default, rounded up to a 15-minute step), grouped as roll apps groups an environment's (Sentry's issues and Vercel's runtime logs, from the output alone; docs/apps/http-api.md): a stack trace (Python, JVM, Node, Go) joined from its lines, or an error line, by what it is (its type and first frames with numbers and ids taken out). `fingerprint` names a group (keyed under a random key per process, so it says nothing of the error and changes on a restart); `kind` is `python`, `java`, `node`, `go` or `line`; `sample` is the newest one whole (8 KiB at most); newest first. Title and sample are masked as its logs are, a value a cut split included (its start at a line's end is `***` too): its code can print its secrets. Its values are read (an audited read) only when there's an error. A roll apps service's are roll apps' own (`…/environments/pv-…/errors`, its 50 most frequent); a `roll.toml` service's are read from its container's last 2,000 lines in the span (`docker logs --timestamps --since`, at most 4 MiB a stream for at most 10 s), masked before they're grouped, its newest 50. A runtime that doesn't stamp lines gives none (its tail's old crash would read as new). 404 for no such preview. It runs on the preview's holder and is read again at most every 10 s for a span, however many ask. The sheet's Errors tab |
@@ -1664,7 +1669,7 @@ type Settings = {
   last seen, the service and its title, opening to its newest sample; the last hour, 6 or 24),
   plus a "Previews" overlay on the canvas that draws each
   preview's branches next to their parents.
-- **CLI**: `roll preview ls|show|open|create|rm|sleep|wake|refresh|reset|keep|logs [-f]|activity|visitors|settings|usage|bypass|wait|up|down|masks|errors|metrics|hooks|shell`.
+- **CLI**: `roll preview ls|show|open|create|rm|sleep|wake|refresh|reset|keep|logs [-f]|activity|visitors|settings|usage|bypass|wait|up|down|masks|errors|metrics|hooks|shell|cp`.
   - `roll preview up [--project P] [--repo owner/name] [--name N] [--no-wait] [--timeout S] [--force]`
     previews a checkout's working tree as it is, as `netlify deploy` and `vercel deploy` do from a
     directory: uncommitted and untracked files included, what `.gitignore` leaves out left out.
@@ -2021,9 +2026,9 @@ Every feature in review has its `roll preview` command too: `shell` (#364).
    #364; Vercel's runtime logs, Render's log explorer): a filter box (text or `/regex/`, on the
    masked lines, in the browser), "Problems only", and errors marked, read as roll apps reads a
    line's level. Next for it: stderr apart (the followed stream doesn't say which yet).
-4. **Files in and out of a preview's service** (`roll preview cp`, roll apps' `…/files`): a dump
-   taken in the shell, a fixture put in, through the Docker Engine API's archive routes, admin
-   as the shell is, bounded as apps' are (100 MiB).
+4. **Files in and out of a preview's service, in review** (`feature/roll-previews-files`, on
+   #364; `roll preview cp`, as roll apps' `…/files`): a dump taken in the shell, a fixture put
+   in, `docker cp` in the service's container, admin as the shell is, 100 MiB a time.
 5. **Secret references in previews' variables** (roll secrets' suggestion, after its #329):
    `env`, `env_for` and a preview's own variables are plain values outside roll secrets
    (redacted on read, but outside health, leak scanning, reach and the cut-off), and a payment

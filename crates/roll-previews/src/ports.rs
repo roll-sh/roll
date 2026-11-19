@@ -489,6 +489,9 @@ pub struct BudgetAlert {
     pub max_usd_month: f64,
 }
 
+/// What's at a path in a service, as a tar, as it's read.
+pub type FileStream = Box<dyn tokio::io::AsyncRead + Send + Unpin>;
+
 /// A terminal's stream, both ways (a hijacked Docker exec).
 pub trait ShellIo: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
 impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> ShellIo for T {}
@@ -676,6 +679,17 @@ pub trait Apps: Send + Sync {
     }
     /// Someone is using the service through a terminal: it doesn't go to sleep meanwhile.
     fn hold(&self, _preview: &str, _service: &str) {}
+    /// What's at `path` in the running service (started if it sleeps), as a tar. `None` where
+    /// this backend has none here: roll apps' services have roll apps' own `…/files`, on their
+    /// `pv-` environment.
+    async fn read_files(&self, _preview: &str, _service: &str, _path: &str) -> anyhow::Result<Option<FileStream>> {
+        Ok(None)
+    }
+    /// A tar's files written under `dir` in the running service (started if it sleeps). `false`
+    /// where this backend has none here.
+    async fn write_files(&self, _preview: &str, _service: &str, _dir: &str, _tar: bytes::Bytes) -> anyhow::Result<bool> {
+        Ok(false)
+    }
 }
 
 /// Who may open a project's previews under `access: "team"` (rolld fills it from roll's
