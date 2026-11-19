@@ -137,6 +137,12 @@ export function PreviewEnvironmentView({ env, compact = false }: { env: PreviewE
       {env.base_change?.api_breaking && <ApiBreaking items={env.base_change.api_breaking} />}
       {env.base_change?.api_unread && <p className="text-[12px] text-danger">Its OpenAPI document couldn't be read: its API isn't compared with {env.base_change.branch}'s.</p>}
       {env.base_change?.endpoints && <Endpoints items={env.base_change.endpoints} branch={env.base_change.branch} />}
+      {!!env.new_errors?.total && (
+        <p className="break-words text-[12px] text-danger">
+          {env.new_errors.total} {env.new_errors.total === 1 ? "error" : "errors"} that {env.new_errors.branch}'s preview doesn't have:{" "}
+          <span className="font-mono text-[11.5px]">{env.new_errors.errors.map((x) => `${x.title} (${x.service})`).join("; ")}</span>
+        </p>
+      )}
       {!!env.slower_routes?.routes.length && (
         <p className="break-words text-[12px] text-muted">
           {env.slower_routes.routes.length} {env.slower_routes.routes.length === 1 ? "route" : "routes"} slower than on {env.slower_routes.branch}'s preview:{" "}

@@ -557,6 +557,34 @@ async fn a_route_slower_than_mains_reaches_the_record_and_the_report() {
     assert!(e.engine.store.preview(&base.id).unwrap().slower_routes.is_none(), "main isn't slower than itself");
 }
 
+/// An error group main's preview doesn't have goes on the change's record (masked, the most
+/// frequent first), and the change is reported again with it; one main has too doesn't count.
+#[tokio::test]
+async fn an_error_mains_preview_doesnt_have_reaches_the_record_and_the_report() {
+    let e = env(json!({ "enabled": true, "github": { "screenshot": true } }));
+    e.secrets.values.lock().push(("STRIPE_KEY".into(), "sk_test_51Hx9".into()));
+    let mut png = Vec::new();
+    image::RgbaImage::new(4, 4).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+    *e.apps.shot.lock() = Some(png);
+    e.code.open(change("chg_ne", 19));
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    let base = e.engine.store.rows(Some(&e.project)).unwrap().into_iter().find(|r| r.is_baseline()).expect("main's preview");
+    let p = e.engine.store.row_by_change("chg_ne").unwrap().unwrap();
+    let web = e.engine.store.services(&p.id).unwrap().into_iter().next().unwrap().name;
+    let group = |f: &str, title: &str, count: u64| roll_previews::ErrorGroup { fingerprint: f.into(), kind: "line".into(), title: title.into(), count, first_seen: 1, last_seen: 2, sample: title.into(), ..Default::default() };
+    e.apps.errors.lock().insert(format!("{}/{web}", base.id), vec![group("old", "a flaky upstream", 3)]);
+    e.apps.errors.lock().insert(format!("{}/{web}", p.id), vec![group("old", "a flaky upstream", 4), group("rare", "RangeError", 1), group("new", "Stripe rejected sk_test_51Hx9", 9)]);
+    e.engine.read_new_errors().await;
+    let n = e.engine.store.preview(&p.id).unwrap().new_errors.expect("new against main's");
+    assert_eq!((n.branch.as_str(), n.total, n.errors.iter().map(|x| x.title.as_str()).collect::<Vec<_>>()), ("main", 2, vec!["Stripe rejected ***", "RangeError"]));
+    assert_eq!(e.code.last_report("chg_ne").new_errors, Some(n), "reported again with it");
+    // Fixed (gone from its output): it goes.
+    e.apps.errors.lock().insert(format!("{}/{web}", p.id), vec![group("old", "a flaky upstream", 5)]);
+    e.engine.read_new_errors().await;
+    assert!(e.engine.store.preview(&p.id).unwrap().new_errors.is_none());
+}
+
 /// A port of a preview's service on a laptop (`roll preview forward`): bytes go both ways, port 0
 /// is refused, a debugger's many connections are said once, and a preview holds a bounded number.
 #[tokio::test]

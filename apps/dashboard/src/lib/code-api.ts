@@ -408,6 +408,8 @@ export interface PreviewEnvironment {
   /** What a screen reader can't name on that page. */
   page_links?: { checked: number; broken: { path: string; status: number }[] };
   /** Its routes (from its traces) clearly slower than the same routes on main's preview; a name is the preview's code's words. */
+  /** Its error groups main's preview doesn't have; a title is the preview's code's words. */
+  new_errors?: { branch: string; total: number; errors: { service: string; title: string }[] };
   slower_routes?: { branch: string; routes: { name: string; p50_ms: number; main_p50_ms: number }[] };
   page_a11y?: { issues: { kind: string; count: number; first: string | null; impact?: "minor" | "moderate" | "serious" | "critical" | null; help?: string | null }[]; lang: boolean; title: boolean; seo?: string[] };
 }

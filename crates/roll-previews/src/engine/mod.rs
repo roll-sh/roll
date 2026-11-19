@@ -176,6 +176,10 @@ pub struct Engine {
     traces: Mutex<traces::Kept>,
     /// When `tend_routes` last read the slower routes.
     routes_read: Mutex<Option<std::time::Instant>>,
+    /// When `read_new_errors` last ran, and what each preview's new errors were then (no values
+    /// are read again for the same).
+    new_errors_read: Mutex<Option<std::time::Instant>>,
+    new_errors_seen: Mutex<HashMap<String, Vec<String>>>,
     /// A round of `read_slower_routes` runs (off the pass), and each held preview's slower routes'
     /// names masked so far (raw → masked: its values aren't read again for the same).
     routes_running: std::sync::atomic::AtomicBool,
@@ -308,6 +312,8 @@ impl Engine {
             shells: Mutex::new(HashMap::new()),
             traces: Mutex::new(HashMap::new()),
             routes_read: Mutex::new(None),
+            new_errors_read: Mutex::new(None),
+            new_errors_seen: Mutex::new(HashMap::new()),
             routes_running: std::sync::atomic::AtomicBool::new(false),
             routes_masked: Mutex::new(HashMap::new()),
             span_reader: std::sync::OnceLock::new(),

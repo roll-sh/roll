@@ -124,6 +124,8 @@ pub struct RouteCompared {
 pub const MIN_SAMPLES: usize = 5;
 /// How often the holder reads its previews' slower routes onto their records.
 pub const ROUTES_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
+/// How often the holder reads its previews' errors against main's (each a read of their logs).
+pub const NEW_ERRORS_EVERY: std::time::Duration = std::time::Duration::from_secs(300);
 pub const SLOWER_MS: u64 = 100;
 
 /// Each of the preview's routes with main's same one; the slower ones first.
@@ -277,7 +279,7 @@ impl Engine {
 
     /// A project's preview of a repo's default branch, else its baseline (main's preview itself
     /// included: who asks may be it).
-    async fn main_of(&self, project: &str, repo: &str) -> Result<Option<crate::store::Row>> {
+    pub(super) async fn main_of(&self, project: &str, repo: &str) -> Result<Option<crate::store::Row>> {
         let rows: Vec<crate::store::Row> = self.store.rows(Some(project))?.into_iter().filter(|x| x.change_id.is_none() && x.desired == crate::Desired::Active).collect();
         let default = self.source.default_branch(repo).await.ok().flatten();
         Ok(rows.iter().find(|x| x.repo == repo && default.is_some() && x.branch == default).or_else(|| rows.iter().find(|x| x.is_baseline())).cloned())
@@ -309,6 +311,18 @@ impl Engine {
         let me = self.clone();
         tokio::spawn(async move {
             me.read_slower_routes().await;
+            // Errors against main's every few minutes (each a read of their logs).
+            let due = {
+                let mut last = me.new_errors_read.lock();
+                let due = last.is_none_or(|at| at.elapsed() >= NEW_ERRORS_EVERY);
+                if due {
+                    *last = Some(std::time::Instant::now());
+                }
+                due
+            };
+            if due {
+                me.read_new_errors().await;
+            }
             me.routes_running.store(false, std::sync::atomic::Ordering::Release);
         });
     }

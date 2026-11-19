@@ -2708,6 +2708,7 @@ impl Store {
         let first_unstable = page_health.as_ref().is_some_and(|h| h.unstable);
         let visual_review = self.visual_review(&r, settings.visual_review, settings.github.visual_threshold, base_change.as_ref(), &pages, first_unstable, f.head)?;
         let page_speed = f.speed.map(|now| crate::PageSpeedView { now, before: f.prev_speed });
+        let new_errors = self.runtime_fact(&r.id, "new_errors")?;
         let slower_routes = if settings.traces { self.runtime_fact(&r.id, "slower_routes")? } else { None };
         let screenshot_link = screenshot_at.map(|at| self.link_at(&r.id, at, None)).transpose()?;
         let diff_link = match screenshot_at.filter(|_| base_differs) {
@@ -2769,6 +2770,7 @@ impl Store {
             visual_review,
             page_links,
             slower_routes,
+            new_errors,
             page_speed,
             page_health,
             page_a11y,

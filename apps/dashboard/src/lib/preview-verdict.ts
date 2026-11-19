@@ -1,7 +1,7 @@
 import { checkSummary, endpointSlower, type Preview } from "./previews-api";
 
 /** A section of the preview's sheet a verdict item jumps to. */
-export type VerdictTarget = "services" | "visual" | "api" | "schema" | "checks" | "endpoints" | "routes";
+export type VerdictTarget = "services" | "visual" | "api" | "schema" | "checks" | "endpoints" | "routes" | "errors";
 
 export interface VerdictItem {
   target: VerdictTarget;
@@ -25,6 +25,8 @@ export function verdict(p: Preview): VerdictItem[] {
   if (risks) out.push({ target: "schema", text: `${plural(risks, "migration risk")}`, tone: "danger" });
   const added = checkSummary(p).added ?? 0;
   if (added > 0) out.push({ target: "checks", text: `${plural(added, "new problem")} against ${p.base_change?.branch ?? "main"}`, tone: "danger" });
+  const newErrors = p.new_errors?.total ?? 0;
+  if (newErrors) out.push({ target: "errors", text: `${plural(newErrors, "new error")} against ${p.new_errors?.branch}`, tone: "danger" });
   const v = p.visual_review;
   if (v?.state === "changed") {
     // The pages nobody accepted yet (all of them when none says).

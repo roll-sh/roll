@@ -152,6 +152,8 @@ export interface Preview {
   /** Its first page's own links that are broken (status 0: no answer), of those checked. */
   page_links?: { checked: number; broken: { path: string; status: number }[] } | null;
   /** Its routes (from its traces) clearly slower than main's preview's, as its holder last read them. */
+  /** Its error groups main's preview doesn't have, as its holder last read them. */
+  new_errors?: { branch: string; total: number; errors: { service: string; title: string }[] } | null;
   slower_routes?: { branch: string; routes: { name: string; count: number; p50_ms: number; main_p50_ms: number }[] } | null;
   /** Earlier pushes of the change's services, still reachable on the same data (newest first). */
   earlier?: { service: string; revision: string; url: string; share_url: string | null; at: number }[];

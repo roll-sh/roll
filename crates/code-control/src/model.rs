@@ -358,6 +358,9 @@ pub struct PreviewEnvironment {
     /// Its routes (from its traces) clearly slower than the same routes on main's preview.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slower_routes: Option<PreviewSlowerRoutes>,
+    /// Its error groups (from its services' output) that main's preview doesn't have.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_errors: Option<PreviewNewErrors>,
     /// How much its page differs from the project's preview of the default branch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_change: Option<PreviewBaseChange>,
@@ -513,6 +516,21 @@ pub struct PreviewBaseChange {
     /// the branch's.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub endpoints: Vec<PreviewEndpoint>,
+}
+
+/// Error groups the branch's preview doesn't have: how many, and the most frequent few. A title
+/// is the preview's code's words (untrusted, masked).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PreviewNewErrors {
+    pub branch: String,
+    pub total: usize,
+    pub errors: Vec<PreviewNewError>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PreviewNewError {
+    pub service: String,
+    pub title: String,
 }
 
 /// Routes slower than on the branch's preview, the slowest against it first. A route's name is

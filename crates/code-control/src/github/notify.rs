@@ -614,6 +614,11 @@ fn page_checks(e: &crate::model::PreviewEnvironment) -> Option<String> {
         summary.push(format!("{} slower than {branch}", plural(s.routes.len() as u64, "route", "routes")));
         details.push_str(&routes_line(s, &branch));
     }
+    if let Some(n) = e.new_errors.as_ref().filter(|n| n.total > 0) {
+        let branch = branch_name(&n.branch);
+        summary.push(format!("{} against {branch}", plural(n.total as u64, "new error", "new errors")));
+        details.push_str(&new_errors_line(n, &branch));
+    }
     if let Some(v) = &e.visual_change {
         summary.push(if v.percent <= 0.0 { "unchanged since the push before".into() } else { format!("changed {} since the push before", pct(v.percent)) });
         details.push_str(&visual_line(v));
@@ -871,6 +876,20 @@ pub fn preview_comment_for(p: Option<&Preview>, marker: &str, teardown: Option<&
     out
 }
 
+/// Its error groups the branch's preview doesn't have: how many, by service. Their titles are log
+/// lines (a branch's data can be in them), so they stay in roll (the change page, the sheet),
+/// never in a comment anyone reading the pull request reads.
+fn new_errors_line(n: &crate::model::PreviewNewErrors, branch: &str) -> String {
+    let mut by: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for x in &n.errors {
+        *by.entry(x.service.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_')).collect()).or_default() += 1;
+    }
+    let each: Vec<String> = by.iter().map(|(service, k)| format!("{k} in {service}")).collect();
+    let more = n.total.saturating_sub(n.errors.len());
+    let more = if more > 0 { format!(", and {more} more") } else { String::new() };
+    format!("Errors in its output that `{branch}`'s preview doesn't have (the last hour): {}{more}. Their lines are on its page in roll.\n\n", each.join(", "))
+}
+
 /// Its routes slower than the branch's preview's, from their traces: each name the preview's
 /// code gave it, in a code span nothing in it can close or break out of (at most 80 characters).
 fn routes_line(s: &crate::model::PreviewSlowerRoutes, branch: &str) -> String {
@@ -1044,6 +1063,7 @@ mod preview_tests {
             page_a11y: None,
             page_links: None,
             slower_routes: None,
+            new_errors: None,
             base_change: None,
             diff_url: None,
             pages: Vec::new(),
@@ -1163,6 +1183,12 @@ mod preview_tests {
         assert!(checks.contains("1 route slower than main"), "{checks}");
         assert!(checks.contains("`GET /a'b'` 420 ms (main 120 ms)"), "{checks}");
         timed.slower_routes = None;
+        // New errors against main's preview: counted in the summary and by service, never their lines.
+        timed.new_errors = Some(crate::model::PreviewNewErrors { branch: "main".into(), total: 7, errors: vec![crate::model::PreviewNewError { service: "web".into(), title: "TypeError: x`y".into() }] });
+        let checks = page_checks(&timed).unwrap();
+        assert!(checks.contains("7 new errors against main"), "{checks}");
+        assert!(checks.contains("1 in web, and 6 more.") && !checks.contains("TypeError"), "{checks}");
+        timed.new_errors = None;
         // Core Web Vitals: in the line, against main's paint, and in the budget.
         let ps = timed.page_speed.as_mut().unwrap();
         (ps.lcp_ms, ps.cls) = (Some(1300), Some(0.123));
