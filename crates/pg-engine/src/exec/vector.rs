@@ -109,6 +109,9 @@ pub enum VB {
     Like { col: usize, pat: Box<crate::sql::func::string::LikePattern>, neg: bool },
     /// `col = ANY (array)` / `col <> ALL (array)` of exact numbers (None: a NULL item).
     NumIn { col: usize, items: Vec<Option<(i128, u32)>>, neg: bool },
+    /// `col [NOT] IN (integers)` of an integer column (`K::IntIn`): the items sorted, whether
+    /// one is NULL.
+    IntIn { col: usize, vals: Box<[i64]>, null: bool, neg: bool },
     /// A comparison of dates, or of dates and timestamps (`ts`: as `ops::p_instant`s, a date
     /// its timestamp; else a date's day number), strict: as integers.
     Instant { test: fn(Ordering) -> bool, args: Box<[Inst; 2]>, ts: bool },
@@ -512,6 +515,13 @@ impl VB {
                 }
                 VB::StrIn { col, items, bp: bp?, neg: *neg, sub: None }
             }
+            K::IntIn(x, vals, null, neg) => {
+                let K::Col(col) = **x else { return None };
+                if !matches!(types.get(col), Some(DataType::Int2 | DataType::Int4 | DataType::Int8)) {
+                    return None;
+                }
+                VB::IntIn { col, vals: vals.clone(), null: *null, neg: *neg }
+            }
             K::Like(a, pat, neg) => match **a {
                 K::Col(col) if matches!(types.get(col), Some(DataType::Text | DataType::Varchar(_))) => {
                     VB::Like { col, pat: pat.clone(), neg: *neg }
@@ -727,6 +737,25 @@ impl VB {
                     };
                 }
             }
+            VB::IntIn { col, vals, null, neg } => {
+                let Some(c) = col_at(b, *col) else { return fill(sel, out, Tri::Out) };
+                let (hit, miss) = if *neg { (Tri::F, Tri::T) } else { (Tri::T, Tri::F) };
+                let miss = if *null { Tri::N } else { miss };
+                for &r in sel {
+                    let r = r as usize;
+                    out[r] = match num_at(c, r) {
+                        None => Tri::Out,
+                        Some(None) => Tri::N,
+                        Some(Some((x, 0))) => match i64::try_from(x) {
+                            Ok(x) if vals.len() <= 8 && vals.contains(&x) => hit,
+                            Ok(x) if vals.len() > 8 && vals.binary_search(&x).is_ok() => hit,
+                            Ok(_) => miss,
+                            Err(_) => Tri::Out,
+                        },
+                        Some(Some(_)) => Tri::Out,
+                    };
+                }
+            }
             VB::Instant { test, args, ts } => {
                 if instant_fast(test, args, *ts, b, sel, out) {
                     return;
@@ -768,7 +797,7 @@ impl VB {
         match self {
             VB::And(a) | VB::Or(a) => a.iter().for_each(|a| a.cols(out)),
             VB::Not(a) => a.cols(out),
-            VB::IsNull(c, _) | VB::Col(c) | VB::Str { col: c, .. } | VB::StrIn { col: c, .. } | VB::NumIn { col: c, .. } | VB::Like { col: c, .. } => out.push(*c),
+            VB::IsNull(c, _) | VB::Col(c) | VB::Str { col: c, .. } | VB::StrIn { col: c, .. } | VB::NumIn { col: c, .. } | VB::IntIn { col: c, .. } | VB::Like { col: c, .. } => out.push(*c),
             VB::NumCmp { args, .. } => args.iter().for_each(|a| a.cols(out)),
             VB::Instant { args, .. } => out.extend(args.iter().filter_map(|a| match a {
                 Inst::Date(c) => Some(*c),
