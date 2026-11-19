@@ -5112,7 +5112,8 @@ work found). First what can be built now:
    cloud federation, apps' instance tokens and #281's hourly digests. One leak forges all three, and
    since #357's emergency rotation, digests signed by a pulled key still verify (their only other
    protection is the chain head's signature under `ROLL_SECRET_KEY`). CloudTrail signs digests with
-   keys of their own. Building: `feature/roll-secrets-digest-key`.
+   keys of their own. #465 (on #357, gated green): an Ed25519 digest key with its own JWKS and rotation;
+   pulled keys' digests are refused unless a later good digest covers them; old digests are `legacy`.
 2. **Validity checks for found credentials** (M; #303 on main; GitGuardian's validity checks). A
    `secret_unstored` notice or a scan finding says whether the credential is live, checked once,
    bounded and audited. AWS uses `sts:GetCallerIdentity` signed with the found pair, GitHub `GET /user`,
