@@ -338,7 +338,7 @@ async fn a_static_sites_files_answer_without_a_container() {
         scan = call(&w.api, "GET", &deps, None, "application/json", None).await.1[0]["vulnerabilities"].clone();
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
-    assert!(scan["scanner"] == "trivy 0.76.1" && scan["error"].is_null(), "{scan}");
+    assert!(scan["scanner"] == "trivy 0.76.1" && scan["error"].is_null() && scan["sbom"] == true, "{scan}");
     eprintln!("MEASURED image scan beside the rollout: done {} ms after it went live (the first downloads the database)", began.elapsed().as_millis());
     assert_eq!(delete_for_good(&w.api, &id).await.0, StatusCode::NO_CONTENT);
     let _ = apps_control::runtime::docker::docker(&["network", "rm", &apps_control::network_name(&w.project, "production")]).await;

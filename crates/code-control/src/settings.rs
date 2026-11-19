@@ -11,9 +11,14 @@
 //!
 //! [main]
 //! auto_revert = true           # revert the change that broke the default branch
+//!
+//! [secrets]
+//! unstored_credentials = "block" # a credential roll secrets doesn't hold blocks (default: "warn")
 //! ```
 //!
-//! code-preview validates the whole file (strictly) and calls [`parse`] for these two tables.
+//! code-preview validates the whole file (strictly) and calls [`parse`] for these tables. The
+//! repo's allow-list for credentials (`.roll/secrets-allow`, [`roll_auth::credentials::Allow`]) is
+//! read from the same head and kept here too.
 
 use serde::Deserialize;
 
@@ -44,10 +49,27 @@ pub struct MainSettings {
     pub auto_revert: bool,
 }
 
+/// What a credential a change adds that roll secrets doesn't hold does (docs/secrets.md,
+/// "Credentials roll doesn't hold"): a `secret_unstored` notice, or a blocker.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Unstored {
+    #[default]
+    Warn,
+    Block,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SecretsSettings {
+    pub unstored_credentials: Unstored,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Settings {
     pub queue: QueueSettings,
     pub main: MainSettings,
+    pub secrets: SecretsSettings,
+    /// `.roll/secrets-allow` at the same head.
+    pub secrets_allow: roll_auth::credentials::Allow,
     /// Names of the `[checks.*]` tables.
     pub declared_checks: Vec<String>,
     /// Why `roll.toml` couldn't be read (the defaults apply meanwhile).
@@ -60,6 +82,7 @@ struct RawFile {
     checks: toml::Table,
     queue: Option<RawQueue>,
     main: Option<RawMain>,
+    secrets: Option<RawSecrets>,
 }
 
 #[derive(Deserialize)]
@@ -77,6 +100,12 @@ pub struct RawMain {
     auto_revert: Option<bool>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawSecrets {
+    unstored_credentials: Option<String>,
+}
+
 /// The landing settings in a `roll.toml`. Other tables are ignored here (code-preview checks
 /// them); errors name the key at fault.
 pub fn parse(text: &str) -> Result<Settings, String> {
@@ -89,7 +118,8 @@ pub fn parse(text: &str) -> Result<Settings, String> {
         Some(q) => queue(q)?,
     };
     let main = raw.main.map(main).unwrap_or_default();
-    Ok(Settings { queue, main, declared_checks: raw.checks.keys().cloned().collect(), error: None })
+    let secrets = raw.secrets.map(secrets).transpose()?.unwrap_or_default();
+    Ok(Settings { queue, main, secrets, declared_checks: raw.checks.keys().cloned().collect(), ..Settings::default() })
 }
 
 /// Validate `[queue]` (code-preview's strict parser hands it here).
@@ -121,6 +151,16 @@ pub fn queue(q: RawQueue) -> Result<QueueSettings, String> {
 /// Validate `[main]`.
 pub fn main(m: RawMain) -> MainSettings {
     MainSettings { auto_revert: m.auto_revert.unwrap_or(false) }
+}
+
+/// Validate `[secrets]`.
+pub fn secrets(s: RawSecrets) -> Result<SecretsSettings, String> {
+    let unstored_credentials = match s.unstored_credentials.as_deref() {
+        None | Some("warn") => Unstored::Warn,
+        Some("block") => Unstored::Block,
+        Some(_) => return Err(format!("{FILE} [secrets]: unstored_credentials is \"warn\" or \"block\"")),
+    };
+    Ok(SecretsSettings { unstored_credentials })
 }
 
 impl Settings {
@@ -176,6 +216,7 @@ mod tests {
             ("[queue]\ntimeout = 0\n", "timeout"),
             ("[queue]\nbogus = 1\n", "bogus"),
             ("[main]\nrevert = true\n", "revert"),
+            ("[secrets]\nunstored_credentials = \"deny\"\n", "unstored_credentials"),
             ("[queue]\nchecks = [\"\"]\n", "check name"),
             ("not toml", "roll.toml"),
         ] {

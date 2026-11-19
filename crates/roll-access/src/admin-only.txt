@@ -10,6 +10,6 @@
 listing GitHub installations needs the admin token | GET /v1/code/github/installations | -
 creating owners needs the admin token | POST /v1/code/owners | {"name": "acme"}
 connecting a GitHub repository needs the admin token | POST /v1/code/repos | {"name": "web", "source": {"github": {"repo": "a/b"}}}
-landing a change that adds a secret's value needs the admin token | POST /v1/code/changes/chg_1/land | {"bypass": true}
+landing a change that adds a secret's value or a credential needs the admin token | POST /v1/code/changes/chg_1/land | {"bypass": true}
 bypassing the merge queue needs the admin token | POST /v1/code/repos/acme/web/land | {"bypass": true}
 landing without the reviews this repo requires needs the admin token | POST /v1/code/changes/chg_1/land | {"bypass": true}

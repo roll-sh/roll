@@ -222,6 +222,14 @@ impl LogHub {
         rx
     }
 
+    /// A line for the drains alone (`audit:<service>/<env>`, an audit entry): kept in no log,
+    /// dropped when no drainer runs or it's behind.
+    pub fn to_drains(&self, key: &str, line: LogLine) {
+        if let Some(tap) = self.tap.lock().as_ref() {
+            let _ = tap.try_send((Arc::from(key), line));
+        }
+    }
+
     /// Which sources beyond runtime output some drain asks for (the drainer's, from the store).
     pub fn set_tapped(&self, http: bool, build: bool) {
         self.tap_http.store(http, std::sync::atomic::Ordering::Relaxed);

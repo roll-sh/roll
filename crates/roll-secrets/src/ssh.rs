@@ -520,7 +520,7 @@ impl Secrets {
                 params![id, project, ca.name, ca.public_key, sealed, serde_json::to_string(&ca.policy).expect("JSON"), now, ca.created_by],
             )?;
             let what: Vec<String> = ca.policy.principals.iter().cloned().chain(ca.policy.host_domains.iter().map(|d| format!("hosts under {d}"))).collect();
-            audit::record(c, project, caller, "ssh_ca.add", None, None, &[], &format!("made SSH CA {} for {}", ca.name, what.join(", ")), now)
+            audit::record(c, self.keys()?, project, caller, "ssh_ca.add", None, None, &[], &format!("made SSH CA {} for {}", ca.name, what.join(", ")), now)
         })?;
         Ok(ca)
     }
@@ -537,7 +537,7 @@ impl Secrets {
                 return Err(Error::Conflict("in_use", format!("{name} still issues {}: unlink them first", linked.join(", "))));
             }
             c.execute("DELETE FROM ssh_cas WHERE id = ?", [id])?;
-            audit::record(c, project, caller, "ssh_ca.delete", None, None, &[], &format!("deleted SSH CA {name}"), now)
+            audit::record(c, self.keys()?, project, caller, "ssh_ca.delete", None, None, &[], &format!("deleted SSH CA {name}"), now)
         })
     }
 
@@ -602,7 +602,7 @@ impl Secrets {
     /// An audit row that must be written: signing hands out nothing it couldn't record.
     fn audit_or_fail(&self, project: &str, caller: &Caller, action: &str, summary: &str) -> Result<()> {
         let now = self.db.now_ms()?;
-        self.db.write(|c| audit::record(c, project, caller, action, None, None, &[], summary, now))
+        self.db.write(|c| audit::record(c, self.keys()?, project, caller, action, None, None, &[], summary, now))
     }
 
     pub(crate) fn ssh_ca_refs(&self, project: &str) -> Result<Vec<(String, String)>> {

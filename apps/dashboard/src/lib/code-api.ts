@@ -281,11 +281,16 @@ export interface Blocker {
     | "visual"
     | "secret_leak"
     | "secret_missing"
+    | "secret_unstored"
     | (string & {});
   message: string;
   /** `secret_leak`, `secret_missing`: the roll secrets key, and the environments it's about. */
   key?: string;
   environments?: string[];
+  /** `secret_unstored`: where the credential is (1-based line), and the fingerprint `.roll/secrets-allow` names to keep it. */
+  path?: string;
+  line?: number;
+  fingerprint?: string;
 }
 
 export type EntryState = "waiting" | "testing" | "bisecting" | "landing" | "ejected" | "landed";
@@ -440,7 +445,7 @@ export interface Change {
   queue?: QueueInfo | null;
   /** Why it can't be queued or land right now; empty when it can. */
   blockers?: Blocker[];
-  /** What it should know but needn't block on (`secret_missing`); absent when there's nothing. */
+  /** What it should know but needn't block on (`secret_missing`, `secret_unstored`); absent when there's nothing. */
   notices?: Blocker[];
   /** Where its review stands under the repo's rules. */
   review?: ReviewSummary;

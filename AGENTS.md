@@ -301,7 +301,9 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     product (Postgres runs `read_only` SQL as a role that can only read), not by parsing.
   - roll's MCP server is `crates/roll-mcp` (`/v1/mcp`): a tool is one route (`tools.rs`), called
     through the gated router, its hints from the catalogue; list it in docs/mcp.md (a test checks).
-    Never call a service directly from a tool.
+    Never call a service directly from a tool. After adding or changing tools, or a product's routes
+    or owner routing, run `pnpm test:mcp-sweep`: every tool called through `/v1/mcp` against a fresh
+    rolld, so a path, query or body the product rejects, or an id it routes on differently, fails.
 - **Projects (the dashboard's workspace):** `crates/roll-workspace` stores projects and where each
   product resource sits on its canvas (docs/workspace.md); the resources themselves stay in their
   products. The dashboard reads it through `lib/workspace-api.ts` (change both together), joins it
@@ -339,7 +341,8 @@ The product should feel alive: dots react to the cursor and the marks "think". E
 - **Secrets (roll secrets: a project's secrets and environment variables):**
   - The design and the HTTP contract are `docs/secrets.md`; `apps/dashboard/src/lib/secrets-api.ts`
     is its client (change both together). `crates/roll-secrets` is the store, crypto and router
-    (`/v1/secrets`); `crates/rolld/src/secrets.rs` mounts it and implements the link providers;
+    (`/v1/secrets`); `crates/roll-secrets-chain` is the audit log's hash chain and signed digests (no
+    I/O; `roll secrets audit verify --file` uses it offline); `crates/rolld/src/secrets.rs` mounts it and implements the link providers;
     `roll secrets …` and `roll run` are `crates/roll-cli/src/secrets.rs`. Runtime clients:
     `packages/secrets` (TypeScript), `sdk/go/secrets` (Go, standard library only),
     `sdk/python/roll_secrets` (Python, `cryptography` only for sealed resolves),
@@ -387,9 +390,13 @@ The product should feel alive: dots react to the cursor and the marks "think". E
   - Read-then-writes are one `code_sql` write (SQLite or the system database's `secrets` schema,
     shared by every node); background work claims each item in a write before acting on it.
   - Tests: flows in `crates/roll-secrets/tests/api.rs` (also on Postgres with
-    `ROLL_CODE_TEST_DATABASE`), two nodes in `tests/nodes.rs`, the CLI in
-    `crates/roll-cli/tests/secrets.rs`, dashboard logic in `apps/dashboard/src/lib/secrets-*.test.ts`.
-    No test calls a real product or platform: use fake providers.
+    `ROLL_CODE_TEST_DATABASE`), two nodes in `tests/nodes.rs`, the CLI (`roll run --watch` too) in
+    `crates/roll-cli/tests/secrets.rs`, rolld's link providers against its own products in
+    `crates/rolld/tests/secrets.rs`, dashboard logic in `apps/dashboard/src/lib/secrets-*.test.ts`.
+    No test calls an outside product or platform: use fake providers.
+  - After touching anything secrets-related, run `pnpm test:secrets` (it skips itself when nothing
+    relevant changed). `--docker` adds roll-secrets on Postgres and the Postgres link (its computes
+    run in Docker): run it after touching SQL, `code-sql` or the Postgres provider.
 - **Agents (roll code agents: the agent harness on a canvas):**
   - The design is in `docs/code/agents.md`. It works like T3 Code (MIT; behavioural reference
     for threads, runs, the execution-node tree, requests, checkpoints, forks, handoffs and
