@@ -208,6 +208,7 @@ pub async fn search_template(ctx: &Ctx<'_>) -> EsResult<Reply> {
     // The URL's `explain` wins over the body's, as on `_search`.
     let explain = if ctx.query("explain").is_some() { Some(ctx.bool_param("explain", false)?) } else { body.get("explain").and_then(Value::as_bool) };
     let profile = body.get("profile").and_then(Value::as_bool);
+    let watch = super::analytics_watch(ctx, Some(&rendered));
     let mut req = super::parse_request(ctx, Some(&rendered), None)?;
     crate::xpack::inference::query::rewrite_request(ctx, &mut req).await?;
     if let Some(e) = explain {
@@ -217,6 +218,7 @@ pub async fn search_template(ctx: &Ctx<'_>) -> EsResult<Reply> {
         req.source.profile = p;
     }
     let out = run(ctx, req.clone())?;
+    super::analytics_record(ctx, watch, &req, &out);
     Reply::ok(render(&out, &req))
 }
 
@@ -240,7 +242,7 @@ pub async fn msearch_template(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let mut responses = Vec::new();
     for pair in lines.chunks(2) {
         let [h, b] = pair else { break };
-        let parsed = (|| -> EsResult<SearchRequest> {
+        let parsed = (|| -> EsResult<(SearchRequest, Option<super::Watch>)> {
             let header = match crate::json::parse(h)? {
                 Some(Value::Obj(m)) => m,
                 _ => Map::new(),
@@ -251,6 +253,7 @@ pub async fn msearch_template(ctx: &Ctx<'_>) -> EsResult<Reply> {
             };
             let rendered = render_template(ctx, &body, None)?;
             crate::xpack::security::check_lookups(ctx, Some(&rendered))?;
+            let watch = super::analytics_watch(ctx, Some(&rendered));
             let mut req: SearchRequest = super::parse_request(ctx, Some(&rendered), None)?;
             req.indices = match header.get("index") {
                 Some(Value::Str(s)) => crate::meta::resolve::split_expressions(s),
@@ -260,11 +263,12 @@ pub async fn msearch_template(ctx: &Ctx<'_>) -> EsResult<Reply> {
             if let Some(n) = crate::xpack::security::authorize_search(ctx, &req.indices, &req.opts)? {
                 req.indices = n;
             }
-            Ok(req)
+            Ok((req, watch))
         })();
         let r = match parsed {
-            Ok(mut req) => match crate::xpack::inference::query::rewrite_request(ctx, &mut req).await {
+            Ok((mut req, watch)) => match crate::xpack::inference::query::rewrite_request(ctx, &mut req).await {
                 Ok(()) => run(ctx, req.clone()).map(|out| {
+                    super::analytics_record(ctx, watch, &req, &out);
                     let mut v = render(&out, &req);
                     if let Value::Obj(m) = &mut v {
                         m.insert("status".into(), Value::from(200i64));

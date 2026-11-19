@@ -106,7 +106,18 @@ fn validate_update_inner(d: Dialect, scope: &str, update: &Settings) -> Result<(
             Some(def) if def.scope == Scope::Managed && scope == "transient" => {
                 return Err(EsError::illegal_argument(format!("sensitive setting [{k}] must be updated using persistent settings")));
             }
-            Some(def) => validate_value(def, v)?,
+            Some(def) => {
+                validate_value(def, v)?;
+                // The audit log's event lists name events it knows.
+                if matches!(k.as_str(), crate::xpack::security::audit::INCLUDE | crate::xpack::security::audit::EXCLUDE) {
+                    let names = match v {
+                        SettingValue::List(l) => l.clone(),
+                        SettingValue::Str(s) => s.split(',').map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect(),
+                        SettingValue::Null => Vec::new(),
+                    };
+                    crate::xpack::security::audit::check_event_names(&names)?;
+                }
+            }
             None => match affix(k) {
                 Some(Affix::LogLevel) => {
                     if let SettingValue::Str(s) = v
