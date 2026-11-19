@@ -245,12 +245,10 @@ impl Control {
         }
         // Only roll's earlier builds from this index go: each carries its uuid from creation.
         let previous: Vec<String> = st.metadata.indices.values().filter(|i| qs::built_from(i, src)).map(|i| i.name.clone()).collect();
-        let create = json!({
-            "settings": { "index": { "number_of_shards": 1, "number_of_replicas": 0, "roll.suggestions.source": src.name, "roll.suggestions.source_uuid": src.uuid } },
-            "mappings": qs::mapping(&src.name),
-        });
+        // Created and marked in one step in process: the mark is private, so no request (this
+        // node's own included) can set it.
+        Box::pin(qs::create_build(&l.cluster, &name, src)).await.map_err(|e| ControlError::Conflict(format!("creating the suggestions index failed: {}", e.reason())))?;
         let path = format!("/{}", urlencoding::encode(&name));
-        self.suggest_call(c, "creating the suggestions index", "PUT", &path, Some(("application/json", create.to_string().into_bytes()))).await?;
         let filled = async {
             for chunk in list.chunks(BULK) {
                 let mut body = String::new();

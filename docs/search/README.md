@@ -424,7 +424,10 @@ build, blocks a term in one click and tries a prefix.
   by construction, never by a setting: the alias is always `<index>-suggestions` (not
   configurable, so an index's settings can't aim a rebuild at another name), and each build is
   marked at creation with `index.roll.suggestions.source` and `source_uuid` (the source's name
-  and uuid; creation-only settings, so no one can add them to an index that already exists). A
+  and uuid). They're private settings, as Elasticsearch's downsample marks are: a user's create
+  or settings update that names them is refused, so only the build (which creates its index and
+  the mark in one cluster state update, in process) can mark an index, and no one can mark an
+  index of theirs, or one that already exists, as a build. A
   build refuses, records the error and writes nothing when the alias name is already a concrete
   index, a data stream or a data stream's alias, or an alias over any index without this source's
   mark. Moving the alias removes only indices carrying the mark of this very source index, and

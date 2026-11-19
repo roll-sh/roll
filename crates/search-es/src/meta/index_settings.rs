@@ -254,8 +254,9 @@ pub static INDEX_SETTINGS: &[IndexSetting] = &[
     s!("index.roll.suggestions.max", Dflt::None, Int(1, crate::query_suggestions::MAX_SUGGESTIONS as i64), Dynamic),
     s!("index.roll.suggestions.min_count", Dflt::None, Int(1, i32::MAX as i64), Dynamic),
     s!("index.roll.suggestions.min_hits", Dflt::None, Int(0, i32::MAX as i64), Dynamic),
-    s!("index.roll.suggestions.source", Dflt::None, Str, Final),
-    s!("index.roll.suggestions.source_uuid", Dflt::None, Str, Final),
+    // Private: only roll's suggestions build sets them (`query_suggestions::create_build`).
+    s!("index.roll.suggestions.source", Dflt::None, Str, Private),
+    s!("index.roll.suggestions.source_uuid", Dflt::None, Str, Private),
     s!("index.rollup.source.name", D(""), Str, Private),
     s!("index.rollup.source.uuid", D(""), Str, Private),
     s!("index.routing.allocation.disk.watermark.ignore", D("false"), B, Dynamic),

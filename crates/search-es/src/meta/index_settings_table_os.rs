@@ -202,8 +202,9 @@ pub static OS_INDEX_SETTINGS: &[IndexSetting] = &[
     s!("index.roll.suggestions.max", Dflt::None, Int(1, crate::query_suggestions::MAX_SUGGESTIONS as i64), Dynamic),
     s!("index.roll.suggestions.min_count", Dflt::None, Int(1, i32::MAX as i64), Dynamic),
     s!("index.roll.suggestions.min_hits", Dflt::None, Int(0, i32::MAX as i64), Dynamic),
-    s!("index.roll.suggestions.source", Dflt::None, Str, Final),
-    s!("index.roll.suggestions.source_uuid", Dflt::None, Str, Final),
+    // Private: only roll's suggestions build sets them (`query_suggestions::create_build`).
+    s!("index.roll.suggestions.source", Dflt::None, Str, Private),
+    s!("index.roll.suggestions.source_uuid", Dflt::None, Str, Private),
     s!("index.routing.allocation.enable", D("all"), Enum(&["all", "primaries", "new_primaries", "none", "ALL", "PRIMARIES", "NEW_PRIMARIES", "NONE"], EnumErr::OneOf), Dynamic),
     s!("index.routing.allocation.total_primary_shards_per_node", D("-1"), Long(-1, i64::MAX), Dynamic),
     s!("index.routing.allocation.total_remote_capable_primary_shards_per_node", D("-1"), Long(-1, i64::MAX), Dynamic),

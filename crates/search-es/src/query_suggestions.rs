@@ -28,8 +28,11 @@ pub const MAX: &str = "index.roll.suggestions.max";
 pub const BLOCK: &str = "index.roll.suggestions.block";
 pub const BLOCK_PREFIX: &str = "index.roll.suggestions.block_prefix";
 pub const CLICK_BOOST: &str = "index.roll.suggestions.click_boost";
-/// Set on a suggestions index roll built (at creation, never changed): the index it was built
+/// Set on a suggestions index roll built, at creation and never changed: the index it was built
 /// from, and that index's uuid, so a source deleted, replaced or with analytics off is noticed.
+/// Private settings: no request can set them at creation or change them after (Elasticsearch's
+/// own "private index setting" refusals), so only [`create_build`] marks an index as a build,
+/// and an index someone else made never looks like one.
 pub const SOURCE: &str = "index.roll.suggestions.source";
 pub const SOURCE_UUID: &str = "index.roll.suggestions.source_uuid";
 
@@ -247,6 +250,31 @@ pub fn mapping(source: &str) -> serde_json::Value {
             "clicks": { "type": "long" },
         }
     })
+}
+
+/// Creates build index `name` of `source` with [`mapping`], marked as `source`'s build, in one
+/// cluster state update (as the downsample target is made): the mark is in the system-provided
+/// settings, which may hold private ones. Fails if `source` was deleted or replaced since it
+/// was read, or if `name` exists.
+pub async fn create_build(cluster: &crate::cluster::Cluster, name: &str, source: &IndexMeta) -> crate::error::EsResult<()> {
+    let mapping = match crate::json::parse(mapping(&source.name).to_string().as_bytes()) {
+        Ok(Some(crate::json::Value::Obj(m))) => m,
+        _ => return Err(crate::error::EsError::illegal_argument("the suggestions mapping didn't parse")),
+    };
+    let mut req = crate::api::indices::CreateRequest { mappings: Some(mapping), ..Default::default() };
+    req.settings.set("index.number_of_shards", "1");
+    req.settings.set("index.number_of_replicas", "0");
+    req.system.set(SOURCE, source.name.clone());
+    req.system.set(SOURCE_UUID, source.uuid.clone());
+    let (name, src, uuid, now) = (name.to_string(), source.name.clone(), source.uuid.clone(), crate::time::now_millis());
+    cluster
+        .update(move |st| {
+            if st.metadata.indices.get(&src).is_none_or(|s| s.uuid != uuid) {
+                return Err(crate::error::EsError::illegal_argument(format!("[{src}] was deleted or replaced during the build")));
+            }
+            crate::api::indices::create_index(st, &name, &name, req, now).map(|_| ())
+        })
+        .await
 }
 
 /// A suggestion as its document.

@@ -2717,7 +2717,8 @@ async fn query_suggestions_from_search_analytics() {
 }
 
 /// A suggestions build touches only its own names: the alias is always `<index>-suggestions`
-/// (no setting names another), and when that name is already someone else's index, or an alias
+/// (no setting names another), only roll's build can mark an index as one (the mark's settings
+/// are private: refused on a user's create and update), and when that name is already someone else's index, or an alias
 /// over an index roll didn't build from this source, the build records the error and writes
 /// nothing: the index keeps its documents, the alias keeps pointing where it did, and no build
 /// is left behind.
@@ -2740,6 +2741,15 @@ async fn suggestions_never_touch_a_name_they_did_not_build() {
     ok(Method::PUT, "/orders", Some(json!({"mappings": {"properties": {"title": {"type": "text"}}}}))).await;
     let (s, v) = es(Method::PUT, "/orders/_settings", Some(json!({"index.roll.suggestions.index": "accounts"}))).await;
     assert_eq!(s, 400, "{v}");
+    // Nor can anyone mark an index as a build: the mark is private, refused on create and update.
+    let uuid = ok(Method::GET, "/orders/_settings/index.uuid?flat_settings=true", None).await["orders"]["settings"]["index.uuid"].as_str().unwrap().to_string();
+    let mark = json!({"index.roll.suggestions.source": "orders", "index.roll.suggestions.source_uuid": uuid});
+    let (s, v) = es(Method::PUT, "/fake-build", Some(json!({ "settings": mark }))).await;
+    assert!(s == 400 && v.to_string().contains("private index setting [index.roll.suggestions.source"), "{s} {v}");
+    let (s, v) = es(Method::GET, "/fake-build", None).await;
+    assert_eq!(s, 404, "{v}");
+    let (s, v) = es(Method::PUT, "/orders/_settings", Some(mark.clone())).await;
+    assert!(s == 400 && v.to_string().contains("can not update private setting [index.roll.suggestions.source"), "{s} {v}");
     // Someone else's index under `orders-suggestions`, and an alias `crm-suggestions` over theirs.
     ok(Method::PUT, "/orders-suggestions/_doc/1?refresh=true", Some(json!({"theirs": true}))).await;
     ok(Method::PUT, "/accounts/_doc/1?refresh=true", Some(json!({"theirs": true}))).await;
