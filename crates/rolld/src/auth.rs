@@ -200,6 +200,11 @@ impl Auth {
     }
 
     /// Scoped tokens' evaluator (`access.rs`): set before serving.
+    /// How the gate reads a client's address (roll-access's, with its trusted proxies).
+    pub fn set_client_ip(&self, f: roll_auth::ClientIpFn) {
+        self.gate.set_client_ip(f);
+    }
+
     pub fn set_authorizer(&self, a: std::sync::Arc<dyn roll_auth::Authorizer>) {
         self.gate.set_authorizer(a);
     }

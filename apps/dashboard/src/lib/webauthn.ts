@@ -55,6 +55,17 @@ export function credentialJSON(c: PublicKeyCredential): Record<string, unknown> 
   return { id: c.id, rawId: toB64url(c.rawId), type: c.type, response };
 }
 
+/** Whether this browser offers passkeys in a field's autofill (WebAuthn conditional mediation). */
+export async function passkeyAutofillSupported(): Promise<boolean> {
+  if (!passkeysSupported()) return false;
+  const P = window.PublicKeyCredential as unknown as { isConditionalMediationAvailable?: () => Promise<boolean> };
+  try {
+    return Boolean(await P.isConditionalMediationAvailable?.());
+  } catch {
+    return false;
+  }
+}
+
 /** Whether this browser can make and use passkeys at all. */
 export function passkeysSupported(): boolean {
   return typeof window !== "undefined" && typeof window.PublicKeyCredential === "function" && !!navigator.credentials;

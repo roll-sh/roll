@@ -6,6 +6,8 @@
 #     (roll-os-sql) and Elasticsearch's module and
 #     x-pack suites (roll-extended, one minimum per suite), each held to a minimum pass count
 #     from docs/search/compatibility.md;
+#   - the gcs and azure snapshot repositories against their emulators
+#     (scripts/search-repo-emulators.sh: fake-gcs-server, Azurite);
 #   - the differential suite against a real Elasticsearch, when present
 #     (crates/search-server/tests/differential.rs);
 #   - the client matrix of unmodified official clients, when present (tests/search/clients/run.sh).
@@ -30,7 +32,7 @@ for d in crates/search-*/; do
   CRATES+=(-p "$(basename "$d")")
 done
 PATHS=(crates/search-* crates/snowball crates/pg-storage crates/roll-cluster crates/code-sql crates/rolld crates/roll-cli
-       Cargo.toml Cargo.lock scripts/test-search.sh scripts/search-yaml-suites.sh
+       Cargo.toml Cargo.lock scripts/test-search.sh scripts/search-yaml-suites.sh scripts/search-repo-emulators.sh
        docs/search/compatibility.md .github/workflows/search.yml tests/search
        apps/dashboard/src/lib/search-console.ts apps/dashboard/src/lib/search-docs.ts
        apps/dashboard/src/lib/search-console.test.ts apps/dashboard/src/lib/search-docs.test.ts
@@ -62,8 +64,8 @@ cargo test "${CRATES[@]}"
 # time) and run rolld with every product.
 cargo test -p roll-cli -p rolld
 
-# The dashboard's console completion, document helpers and playground requests.
-pnpm --filter dashboard exec vitest run src/lib/search-console.test.ts src/lib/search-docs.test.ts src/lib/search-playground.test.ts
+# The dashboard's console completion, document helpers, playground requests and audit rows.
+pnpm --filter dashboard exec vitest run src/lib/search-console.test.ts src/lib/search-docs.test.ts src/lib/search-playground.test.ts src/lib/search-audit.test.ts
 
 # Minimum pass count for a suite from docs/search/compatibility.md (0 when not set).
 threshold() {
@@ -128,6 +130,8 @@ if [[ $unit_only == 0 ]]; then
   yaml_suite roll-os target/search-yaml/roll-opensearch.json
   yaml_suite roll-os-sql target/search-yaml/roll-opensearch-sql.json
   extended_suites
+  # The gcs and azure snapshot repositories against fake-gcs-server and Azurite.
+  scripts/search-repo-emulators.sh
   if [[ -f crates/search-server/tests/differential.rs ]]; then
     ROLL_E2E=1 cargo test -p search-server --test differential
   fi

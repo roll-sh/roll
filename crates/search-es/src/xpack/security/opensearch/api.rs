@@ -2,8 +2,8 @@
 //! `api/internalusers`, `api/roles`, `api/rolesmapping`, `api/actiongroups` and `api/tenants`
 //! (GET, PUT, DELETE, PATCH), `api/account`, `api/permissionsinfo`, `api/securityconfig` (GET;
 //! changing it is refused, as `allow_securityconfig_modification` is off by default),
-//! `api/audit` (GET, PUT, PATCH: stored, roll writes no audit log), `api/ssl` and `whoami` (as a
-//! node without HTTP TLS answers: no certificates for anyone without an admin certificate),
+//! `api/audit` (GET, PUT, PATCH: what the cluster's audit log records, [`crate::xpack::security::audit`]),
+//! `api/ssl` and `whoami` (as a node without HTTP TLS answers: no certificates for anyone without an admin certificate),
 //! `api/cache` (DELETE: forgets verified passwords), `authinfo` and `health`.
 //!
 //! Answers are the plugin's: `{"status": "CREATED", "message": "'x' created."}`, validation
@@ -128,15 +128,9 @@ fn access(ctx: &Ctx, endpoint: Option<&str>) -> Option<Reply> {
         return None;
     }
     let refused = || {
-        message(
-            403,
-            "FORBIDDEN",
-            format!(
-                "No permission to access REST API: User {} with Security roles [{}] does not have any role privileged for admin access. No ssl info found in request.",
-                p.username,
-                p.roles.join(", ")
-            ),
-        )
+        let why = format!("User {} with Security roles [{}] does not have any role privileged for admin access. No ssl info found in request.", p.username, p.roles.join(", "));
+        crate::xpack::security::audit::security_api_denied(&p, &why);
+        message(403, "FORBIDDEN", format!("No permission to access REST API: {why}"))
     };
     let Some(endpoint) = endpoint else { return Some(refused()) };
     let st = ctx.state();
@@ -886,7 +880,7 @@ fn audit_config(m: &Map) -> Option<Value> {
     Some(cfg)
 }
 
-fn current_audit(st: &crate::meta::ClusterState) -> Value {
+pub(crate) fn current_audit(st: &crate::meta::ClusterState) -> Value {
     st.metadata.xpack.get(AUDIT, "config").cloned().unwrap_or_else(|| settings("audit"))
 }
 
