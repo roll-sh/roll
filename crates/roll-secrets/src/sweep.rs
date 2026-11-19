@@ -451,6 +451,10 @@ impl Secrets {
         if let Err(e) = self.sweep_forgotten() {
             tracing::warn!("cleaning up deleted projects failed: {e}");
         }
+        // ACME's used nonces, old orders and expired certificates' rows.
+        if let Err(e) = self.sweep_acme() {
+            tracing::warn!("sweeping ACME's nonces and orders failed: {e}");
+        }
         // Expired ephemeral environments.
         let expired: Vec<(String, String)> = self.db.read(|c| {
             c.query("SELECT project_id, slug FROM environments WHERE kind = 'ephemeral' AND expires_at IS NOT NULL AND expires_at <= ? LIMIT 100", [now], |r| Ok((r.get(0)?, r.get(1)?)))
@@ -496,6 +500,9 @@ impl Secrets {
         self.sweep_retention()?;
         self.sweep_reminders()?;
         self.sweep_alerts()?;
+        if let Err(e) = self.end_decoys() {
+            tracing::warn!("revoking ended decoys failed: {e}");
+        }
         let cutoff = now - crate::audit::RETENTION_DAYS * 86_400_000;
         self.db.write(|c| c.execute("DELETE FROM audit WHERE at < ?", [cutoff]))?;
         Ok(out)

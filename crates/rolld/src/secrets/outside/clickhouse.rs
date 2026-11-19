@@ -1,12 +1,14 @@
 //! ClickHouse outside roll, over its HTTPS interface (port 8443, ClickHouse Cloud's too): the same
-//! guards as Postgres (a public address resolved here and pinned, TLS verified against the URL's
-//! host with the system's roots and `ca`, no redirects, no proxy). Users are `CREATE USER`s with
+//! guards as Postgres (a public address resolved here and pinned, or a gateway's stream; TLS
+//! verified against the URL's host with the system's roots and `ca`; no redirects, no proxy:
+//! https.rs). Users are `CREATE USER`s with
 //! `sha256_hash` passwords, so the server never sees one; a dynamic login is granted the group (a
 //! role) as its default. ClickHouse has no expiry for a user: a dynamic login lasts until roll
 //! ends its lease. Values go as query parameters, never into SQL; names roll checked (lowercase
 //! letters, digits, _) are quoted as identifiers. Answers are read up to [`ANSWER_MAX`].
 
-use super::{TIMEOUT, resolve, tls_config};
+use super::https::{Https, secret};
+use super::{TIMEOUT, Via};
 use sha2::{Digest, Sha256};
 
 /// The most of one answer read: counts and errors.
@@ -42,79 +44,35 @@ pub(super) fn parse(url: &str) -> Result<Url, String> {
 }
 
 pub(super) struct Conn {
-    client: reqwest::Client,
-    base: url::Url,
+    http: Https,
     user: String,
     password: String,
     db: Option<String>,
 }
 
-async fn connect(u: &Url, ca: Option<&str>, allow_private: bool) -> Result<Conn, String> {
-    let addr = resolve(&u.host, u.port, allow_private).await?;
-    let client = reqwest::Client::builder()
-        .use_preconfigured_tls(tls_config(ca)?)
-        // The address rolld checked, whatever DNS says next; the certificate is still the host's.
-        .resolve(&u.host, addr)
-        .redirect(reqwest::redirect::Policy::none())
-        .no_proxy()
-        .timeout(TIMEOUT)
-        .build()
-        .map_err(|e| format!("{}: {e}", u.host))?;
-    let host = if u.host.contains(':') { format!("[{}]", u.host) } else { u.host.clone() };
-    let base = url::Url::parse(&format!("https://{host}:{}/", u.port)).map_err(|_| "a bad host".to_string())?;
-    Ok(Conn { client, base, user: u.user.clone(), password: u.password.clone(), db: u.db.clone() })
+fn connect(u: &Url, ca: Option<&str>, via: &Via) -> Result<Conn, String> {
+    Ok(Conn { http: Https::new(&u.host, u.port, ca, via.clone())?, user: u.user.clone(), password: u.password.clone(), db: u.db.clone() })
 }
 
 /// Run one statement with `{name:String}` parameters; its answer (bounded).
 async fn query(c: &Conn, sql: &str, params: &[(&str, &str)]) -> Result<String, String> {
-    let mut url = c.base.clone();
-    {
-        let mut q = url.query_pairs_mut();
-        if let Some(db) = &c.db {
-            q.append_pair("database", db);
-        }
-        for (k, v) in params {
-            q.append_pair(&format!("param_{k}"), v);
-        }
+    let mut q = url::form_urlencoded::Serializer::new(String::new());
+    if let Some(db) = &c.db {
+        q.append_pair("database", db);
     }
-    let host = c.base.host_str().unwrap_or_default().to_string();
-    let mut resp = c
-        .client
-        .post(url)
-        .header("X-ClickHouse-User", &c.user)
-        .header("X-ClickHouse-Key", &c.password)
-        .body(sql.to_string())
-        .send()
-        .await
-        .map_err(|e| format!("{host}: {}", why(e)))?;
-    let ok = resp.status().is_success();
-    let mut body = Vec::new();
-    while let Some(chunk) = resp.chunk().await.map_err(|e| format!("{host}: {}", why(e)))? {
-        if body.len() + chunk.len() > ANSWER_MAX {
-            return Err(format!("{host}: the answer is longer than roll reads"));
-        }
-        body.extend_from_slice(&chunk);
+    for (k, v) in params {
+        q.append_pair(&format!("param_{k}"), v);
     }
+    let q = q.finish();
+    let path = if q.is_empty() { "/".to_string() } else { format!("/?{q}") };
+    let headers = vec![("x-clickhouse-user", secret(&c.user, "user")?), ("x-clickhouse-key", secret(&c.password, "password")?)];
+    let (status, body) = c.http.send(hyper::Method::POST, &path, headers, sql.as_bytes().to_vec(), ANSWER_MAX).await?;
     let text = String::from_utf8_lossy(&body).trim().to_string();
-    if !ok {
+    if !status.is_success() {
         // ClickHouse's message ("Code: 516. DB::Exception: …"), clipped.
         return Err(text.chars().take(300).collect());
     }
     Ok(text)
-}
-
-/// A request's failure and its causes (a refused certificate, a refused connection), never its
-/// URL or headers.
-fn why(e: reqwest::Error) -> String {
-    let e = e.without_url();
-    let mut out = e.to_string();
-    let mut cause = std::error::Error::source(&e);
-    while let Some(c) = cause {
-        out.push_str(": ");
-        out.push_str(&c.to_string());
-        cause = c.source();
-    }
-    out
 }
 
 /// `` `name` `` (roll-secrets checked the name: lowercase letters, digits and _).
@@ -130,9 +88,9 @@ fn hash(password: &str) -> String {
     Sha256::digest(password.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
 }
 
-pub(super) async fn run<T>(u: Url, ca: Option<String>, allow_private: bool, work: impl AsyncFnOnce(&Conn) -> Result<T, String>) -> Result<T, String> {
+pub(super) async fn run<T>(u: Url, ca: Option<String>, via: Via, work: impl AsyncFnOnce(&Conn) -> Result<T, String>) -> Result<T, String> {
     tokio::time::timeout(TIMEOUT, async move {
-        let c = connect(&u, ca.as_deref(), allow_private).await?;
+        let c = connect(&u, ca.as_deref(), &via)?;
         work(&c).await
     })
     .await

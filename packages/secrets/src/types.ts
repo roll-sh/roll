@@ -84,7 +84,13 @@ export type Secret = {
   expires_at: number | null;
   /** Why a credential's value is easy to guess; only for a caller who may reveal it. */
   weak?: string;
+  /** That it's a decoy (docs/secrets.md, "Decoys"): only for the project's admins. */
+  decoy?: Decoy;
 };
+/** A decoy key's mark: what it is, and its uses (each refused). */
+export type Decoy = { kind: "rlt"; created_at: number; created_by: string; uses: number; used_at: number | null; used_ip: string | null };
+/** `POST …/environments/{env}/decoys`: a new key whose value is a decoy credential. */
+export type NewDecoy = { key: string; kind: "rlt"; path?: string };
 /** `expires_at`: null clears it; absent keeps it. */
 export type SetSecret = { value?: string; comment?: string; tags?: string[]; type?: SecretType; link?: Link | null; message?: string; expires_at?: number | null; if_version?: number };
 /** `path`: another folder for this one operation (default: the batch's). */
@@ -233,9 +239,11 @@ export type Identity = {
   allowed_ips: string[] | null;
   /** How many keys it pins, when it carries its issuer's keys (a cluster roll can't reach). */
   pinned_keys?: number;
+  /** The gateway it logs in (its tokens open that gateway's link and nothing else). */
+  gateway?: string;
 };
 /** `jwks`: the issuer's keys (a JWKS document as text); then the issuer is never fetched. */
-export type NewIdentity = { name: string; issuer: string; audience: string; subject: string; claims?: Record<string, string>; environments?: string[]; paths?: string[]; actions: Action[]; ttl_minutes?: number; allowed_ips?: string[]; jwks?: string };
+export type NewIdentity = { name: string; issuer: string; audience: string; subject: string; claims?: Record<string, string>; environments?: string[]; paths?: string[]; actions: Action[]; ttl_minutes?: number; allowed_ips?: string[]; jwks?: string; gateway?: string };
 export type NewToken = { name: string; environments?: string[]; paths?: string[]; actions: Action[]; expires_at?: number; ttl_days?: number; allowed_ips?: string[] };
 /** `approval`: the approval that let the request through roll-access's gate (an `ask` approved; `until` when a rule it remembered allowed it). */
 export type AuditEntry = { id: number; at: number; actor: string; action: string; environment: string | null; path: string | null; keys: string[]; summary: string; ip: string | null; approval?: Approval };
@@ -290,7 +298,7 @@ export type AwsRole = { id: string; name: string; role_arn: string; trust: "exte
 /** Where a key is set (`GET /v1/secrets/search?key=`): names and versions, never a value. */
 export type Place = { project: string; project_name: string; environment: string; path: string; key: string; version: number; updated_at: number; linked: boolean };
 /** One thing to fix (`GET …/health`), worst first: where, never a value. */
-export type Finding = { issue: "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "public" | "weak" | "operator_made" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string; owner?: string };
+export type Finding = { issue: "decoy_used" | "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "public" | "weak" | "operator_made" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string; owner?: string };
 /** One project's findings (`GET /v1/secrets/findings`). */
 export type ProjectFindings = { project: string; project_name: string; findings: Finding[] };
 /** A URL roll calls to issue and revoke a value that lives outside roll (`rotator` links). */
@@ -303,9 +311,15 @@ export type TransitKey = { id: string; name: string; latest_version: number; min
 /** A project's certificate authority: what it signs for, and its certificate (PEM) for clients to trust. */
 /** A certificate a CA signed for a CSR (`POST …/cas/{id}/sign`): the device keeps its key. */
 /** A certificate a CA signed and that hasn't expired (`GET …/cas/{id}/certificates`). */
-export type CaCertificate = { serial: string; names: string[]; source: "csr" | "link"; not_after: number; issued_at: number; issued_by: string; revoked_at?: number };
+export type CaCertificate = { serial: string; names: string[]; source: "csr" | "link" | "acme"; not_after: number; issued_at: number; issued_by: string; revoked_at?: number };
 export type SignedCertificate = { certificate: string; ca: string; serial: string; names: string[]; not_after: number };
 export type Ca = { id: string; name: string; certificate: string; domains: string[]; allow_ip: boolean; max_days: number; created_at: number; created_by: string };
+/** An ACME External Account Binding on a CA: what an account made with it may order (`names`: each takes every name under it; none: the CA's whole policy). */
+export type AcmeBinding = { id: string; label: string; names: string[] | null; expires_at: number | null; created_at: number; created_by: string; revoked_at: number | null; revoked_by: string | null; used_at: number | null; accounts: number };
+/** A CA's ACME directory, whether its bindings' names are pre-authorized (no challenge), the challenges it validates and its bindings (`GET …/cas/{id}/acme`). */
+export type AcmeSettings = { directory: string; pre_authorize: boolean; challenges: ("http-01" | "dns-01")[]; bindings: AcmeBinding[] };
+/** A new binding and its HMAC key (base64url), shown this once. */
+export type NewAcmeKey = AcmeBinding & { key_id: string; hmac_key: string; directory: string };
 /** A project's SSH CA: the principals it signs for, and its public key for servers' TrustedUserCAKeys. */
 export type SshCa = { id: string; name: string; public_key: string; principals: string[]; max_hours: number; host_domains?: string[]; max_host_days: number; known_hosts?: string; created_at: number; created_by: string };
 /** A person's own key certified by an SSH CA (`POST …/ssh-cas/{id}/sign-user`). */
@@ -318,7 +332,29 @@ export type CloudAccount =
   | { id: string; name: string; cloud: "azure"; tenant: string; client_id: string; scope: string; created_at: number; created_by: string };
 export type NewCloudAccount = { name: string } & ({ cloud: "gcp"; audience: string; service_account: string } | { cloud: "azure"; tenant: string; client_id: string; scope?: string });
 /** A Postgres, MySQL, Redis or MongoDB server outside roll: two login roles that take turns (managed), a group dynamic logins join, or both; the admin URL stays sealed. */
-export type OutsideDatabase = { id: string; name: string; host: string; roles: string[]; group?: string; ca?: string; created_at: number; created_by: string };
+export type OutsideDatabase = { id: string; name: string; host: string; roles: string[]; group?: string; ca?: string; gateway?: string; created_at: number; created_by: string };
+/** An LDAP or Active Directory server outside roll: one or two managed accounts (two take turns), a base dynamic users are made under (in `groups`), or both; the bind password stays sealed. */
+export type DirectoryFlavor = "openldap" | "active_directory";
+export type Directory = { id: string; name: string; url: string; flavor: DirectoryFlavor; bind_dn: string; user_base_dn?: string; managed_accounts: string[]; groups: string[]; ca?: string; gateway?: string; created_at: number; created_by: string };
+/** A Snowflake account: a service user whose key slots take turns (managed), roles a user per lease is granted (dynamic), or both; the admin user's private key stays sealed. */
+export type SnowflakeAuth = "key_pair" | "password";
+export type SnowflakeAccount = { id: string; name: string; account: string; host: string; admin_user: string; admin_role?: string; admin_key_fp: string; auth: SnowflakeAuth; managed_user?: string; roles: string[]; created_at: number; created_by: string };
+/** A MongoDB Atlas project, reached through its Admin API: two database users that take turns (managed), roles a user per lease gets (dynamic), or both; the service account's secret stays sealed. */
+export type AtlasProject = { id: string; name: string; group_id: string; client_id: string; managed_users: string[]; roles: string[]; created_at: number; created_by: string };
+export type NewAtlasProject = { name: string; group_id: string; client_id: string; client_secret: string; managed_users?: string[]; roles?: string[] };
+export type NewSnowflakeAccount = { name: string; account: string; privatelink?: boolean; admin_user: string; admin_role?: string; admin_private_key: string; auth?: SnowflakeAuth; managed_user?: string; roles?: string[] };
+export type NewDirectory = { name: string; url: string; bind_dn: string; bind_password: string; flavor: DirectoryFlavor; user_base_dn?: string; managed_accounts?: string[]; groups?: string[]; ca?: string; gateway?: string };
+/** A gateway into a private network (docs/secrets.md, "Gateways"): a process inside it dials out to roll and relays roll's conversations with private databases and directories. `status` is what its link last reported; `allow` is the gateway's own allow-list, which it enforces. */
+export type Gateway = {
+  id: string;
+  name: string;
+  token_id?: string;
+  created_at: number;
+  created_by: string;
+  status: { online: boolean; node?: string; version?: string; allow: string[]; connected_at?: number; last_seen_at?: number };
+};
+/** A new gateway and its roll token, shown once (none with `token: false`). */
+export type MadeGateway = { gateway: Gateway; token?: string };
 /** A GitHub App's installation; `repositories` and `permissions` are the most its tokens may reach. */
 export type GitHubApp = { id: string; name: string; app_id: number; installation_id: number; api_base: string; repositories: string[]; permissions: Record<string, string>; created_at: number; created_by: string };
 export type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };

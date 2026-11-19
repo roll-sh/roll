@@ -61,10 +61,6 @@ pub fn secret_hash(secret: &str) -> [u8; 32] {
 #[derive(Clone, Debug)]
 pub struct ClusterSpec {
     pub name: String,
-    /// The control plane's id for the cluster (`srch_…`), stable across a restore under another
-    /// name and never reused for another cluster: what roll secrets knows it by. `None` outside
-    /// roll's control plane (dev nodes, tests).
-    pub resource_id: Option<String>,
     pub dialect: Dialect,
     /// Accepted secrets. Empty means no authentication (local development only).
     pub credentials: Vec<Credential>,
@@ -86,13 +82,14 @@ pub struct ClusterSpec {
     pub max_resident_bytes: Option<u64>,
     /// Who may reach the cluster's data plane, checked before authentication (empty: anyone).
     pub ip_allowlist: crate::allow::IpAllowlist,
+    /// Its id in the control plane's catalog, when it has one (`search_es::ClusterConfig::catalog_id`).
+    pub catalog_id: Option<String>,
 }
 
 impl ClusterSpec {
     pub fn new(name: impl Into<String>) -> ClusterSpec {
         ClusterSpec {
             name: name.into(),
-            resource_id: None,
             dialect: Dialect::Elasticsearch,
             credentials: Vec::new(),
             idle_unload: None,
@@ -103,6 +100,7 @@ impl ClusterSpec {
             max_in_flight_bytes: None,
             max_resident_bytes: None,
             ip_allowlist: Default::default(),
+            catalog_id: None,
         }
     }
 

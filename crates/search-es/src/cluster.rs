@@ -109,15 +109,23 @@ pub struct ClusterConfig {
     /// ([`crate::api::snapshots::install_default_repository`]): clusters whose snapshot
     /// contents are durable in roll's object storage (`None`: no default repository).
     pub default_repository: Option<String>,
+    /// Reaches the roll search clusters this one names as remotes ([`crate::remote::links`]);
+    /// `None`: remotes reach only the node itself.
+    pub links: Option<std::sync::Arc<dyn crate::remote::links::Links>>,
+    /// The cluster's id in roll's catalog (`srch_…`), when it has one: how it names itself to
+    /// `links` and to [`Self::secret_refs`] (a name can be reused after a delete).
+    pub catalog_id: Option<String>,
+    /// Read service account tokens from `<path.conf>/service_tokens` too, as Elasticsearch
+    /// does. The file is the node's, so a token in it would sign in to every cluster the node
+    /// serves: the host sets this only for a node serving one cluster, or for the clusters its
+    /// operator names (`search_server::node::FILE_SERVICE_TOKEN_CLUSTERS`).
+    pub file_service_tokens: bool,
     /// Where the cluster's security audit entries go ([`crate::xpack::security::audit`]);
     /// `None`: it records none.
     pub audit: Option<crate::xpack::security::audit::AuditLog>,
     /// Resolves credentials given as references (`roll://ENV/KEY`, [`crate::secret_refs`]);
     /// `None`: references are refused.
     pub secret_refs: Option<crate::secret_refs::Resolver>,
-    /// The control plane's id for the cluster, what [`Self::secret_refs`] knows it by (a name
-    /// can be reused after a delete); `None`: the cluster's name stands for it (dev nodes).
-    pub resource_id: Option<String>,
 }
 
 impl ClusterConfig {
@@ -132,9 +140,11 @@ impl ClusterConfig {
             host_metrics: false,
             sealer: None,
             default_repository: None,
+            links: None,
+            catalog_id: None,
+            file_service_tokens: false,
             audit: None,
             secret_refs: None,
-            resource_id: None,
         }
     }
 

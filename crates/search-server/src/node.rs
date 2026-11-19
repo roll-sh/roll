@@ -86,6 +86,12 @@ const WAKE_ROOM: u64 = 1 << 20;
 const MEMORY_CHECK: Duration = Duration::from_secs(2);
 /// Response header naming the node that owns a cluster this node refused.
 pub const OWNER_HEADER: &str = "X-Roll-Search-Owner";
+/// Node setting: the clusters, comma-separated, that read service account tokens from
+/// `<path.conf>/service_tokens`. The file is the node's: on a node serving many clusters a
+/// token in it would sign in as `elastic/fleet-server` on every one of them, so only the
+/// clusters named here read it. A dev-mode node ([`NodeConfig::default_cluster`]) serves one
+/// cluster, which reads it as Elasticsearch does. Under `roll.security.`, so no tenant sees it.
+pub const FILE_SERVICE_TOKEN_CLUSTERS: &str = "roll.security.service_token_file.clusters";
 
 #[derive(Clone, Debug)]
 pub struct NodeConfig {
@@ -135,6 +141,9 @@ pub struct NodeConfig {
     /// data is in object storage (`search_es::api::snapshots::install_default_repository`;
     /// `None`: none).
     pub default_repository: Option<String>,
+    /// Reaches other roll search clusters as remote clusters (`search_es::remote::links`; the
+    /// control plane's); `None`: remotes reach only the node itself.
+    pub links: Option<Arc<dyn search_es::remote::links::Links>>,
     /// How long and how much each cluster's audit log keeps ([`crate::audit`]).
     pub audit: crate::audit::AuditConfig,
     /// Resolves the credential references clusters' snapshot repositories name
@@ -161,6 +170,7 @@ impl Default for NodeConfig {
             snapshot_leftover_grace: search_es::api::snapshots::LEFTOVER_GRACE,
             sealer: None,
             default_repository: None,
+            links: None,
             audit: crate::audit::AuditConfig::default(),
             secret_refs: None,
         }
@@ -381,6 +391,9 @@ pub struct Lease {
     /// access token, [`auth::native_authorization`]): the `Authorization` header the request
     /// runs with, so search-es authenticates and authorizes it as that principal.
     native_auth: Option<String>,
+    /// A linked remote cluster's request from roll itself ([`search_es::remote::links`]):
+    /// the remote access it carries, the only copy search-es sees.
+    link: Option<String>,
     /// When it started waiting for its permits: its latency is measured from here.
     since: Option<Instant>,
 }
@@ -455,9 +468,14 @@ impl Lease {
 
     /// Runs the request on its cluster and makes its writes durable before answering.
     pub async fn handle(&self, mut req: EsRequest) -> EsResponse {
+        use search_es::remote::links::REMOTE_ACCESS_HEADER;
         use search_es::xpack::security::AUTHENTICATED_HEADER;
-        // Only the node may say who authenticated.
-        req.headers.retain(|(k, _)| !k.eq_ignore_ascii_case(AUTHENTICATED_HEADER));
+        // Only the node may say who authenticated, and only roll's own calls are a remote
+        // cluster's.
+        req.headers.retain(|(k, _)| !k.eq_ignore_ascii_case(AUTHENTICATED_HEADER) && !k.eq_ignore_ascii_case(REMOTE_ACCESS_HEADER));
+        if let Some(a) = &self.link {
+            req.headers.push((REMOTE_ACCESS_HEADER.to_string(), a.clone()));
+        }
         if let Some(u) = &self.user {
             req.headers.push((AUTHENTICATED_HEADER.to_string(), u.to_string()));
         } else if let Some(h) = &self.native_auth {
@@ -779,6 +797,12 @@ fn release_memory() {
 }
 
 impl Node {
+    /// Whether `cluster` reads the node's `service_tokens` file ([`FILE_SERVICE_TOKEN_CLUSTERS`]).
+    fn reads_file_service_tokens(&self, cluster: &str) -> bool {
+        self.cfg.default_cluster.is_some()
+            || self.cfg.node_settings.iter().rev().find(|(k, _)| k == FILE_SERVICE_TOKEN_CLUSTERS).is_some_and(|(_, v)| v.split(',').any(|c| c.trim() == cluster))
+    }
+
     pub fn new(catalog: Arc<dyn Catalog>, stores: Arc<dyn StoreProvider>, cfg: NodeConfig) -> Arc<Node> {
         Node::with_hooks(catalog, stores, cfg, Arc::new(NoHooks))
     }
@@ -1101,10 +1125,12 @@ impl Node {
         cfg.test_features = self.cfg.test_features;
         cfg.host_metrics = self.cfg.host_metrics;
         cfg.sealer = self.cfg.sealer.clone();
+        cfg.links = self.cfg.links.clone();
+        cfg.catalog_id = spec.catalog_id.clone();
         cfg.secret_refs = self.cfg.secret_refs.clone();
-        cfg.resource_id = spec.resource_id.clone();
         // Snapshot contents are durable only with object storage behind the cluster.
         cfg.default_repository = self.cfg.default_repository.clone().filter(|_| data_store.is_some());
+        cfg.file_service_tokens = self.reads_file_service_tokens(&spec.name);
         cfg.audit = Some(search_es::xpack::security::audit::AuditLog(self.audit.clone()));
         let mut cluster = Cluster::open(cfg, store).await?;
         cluster.node.id = stable_node_id(&spec.name);
@@ -1770,7 +1796,18 @@ impl Node {
         // Credentials that aren't the cluster's own may be a principal of the cluster's
         // security (native user, API key, access token): checked once the cluster is loaded.
         let native = claim.as_ref().and_then(|c| auth::native_authorization(&presented, c, host_cluster));
-        let native_ok = |loaded: &Loaded| native.as_deref().is_some_and(|h| search_es::xpack::security::authenticate_native(&loaded.cluster, h).is_some());
+        // A linked remote cluster's request (roll's own, never a client's: the header is
+        // ignored from anyone else) authenticates with a cross-cluster key of this cluster.
+        let link = match origin {
+            Origin::Internal => req.header(search_es::remote::links::REMOTE_ACCESS_HEADER).map(str::to_string),
+            _ => None,
+        };
+        let native_ok = |loaded: &Loaded| {
+            native.as_deref().is_some_and(|h| match &link {
+                Some(access) => search_es::xpack::security::authenticate_native_link(&loaded.cluster, h, access).is_some(),
+                None => search_es::xpack::security::authenticate_native(&loaded.cluster, h).is_some(),
+            })
+        };
         // Fast path: a loaded cluster checks against its shared description, no catalog read.
         if let Some(loaded) = self.get_loaded(name) {
             let spec = loaded.spec();
@@ -1797,6 +1834,7 @@ impl Node {
             if let Ok(mut lease) = self.pin(loaded, spec.dialect) {
                 if via_native {
                     lease.native_auth = native.clone();
+                    lease.link = link.clone();
                 } else {
                     lease.user = claim.as_ref().map(authenticated_user);
                 }
@@ -1841,6 +1879,7 @@ impl Node {
                 Ok(mut lease) => {
                     if via_native {
                         lease.native_auth = native.clone();
+                        lease.link = link.clone();
                     } else {
                         lease.user = claim.as_ref().map(authenticated_user);
                     }
@@ -1881,6 +1920,7 @@ impl Node {
             dialect,
             user: None,
             native_auth: None,
+            link: None,
             since: None,
         };
         if lease.loaded.closed.load(Ordering::SeqCst) {

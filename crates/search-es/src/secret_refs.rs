@@ -49,7 +49,7 @@ impl std::fmt::Debug for Revealed {
 }
 
 /// Resolves references for cluster `cluster` (its control-plane id,
-/// [`crate::cluster::ClusterConfig::resource_id`], else its name), written by `maker` (what
+/// [`crate::cluster::ClusterConfig::catalog_id`], else its name), written by `maker` (what
 /// [`MAKER_HEADER`] said): both re-check that the maker still may reveal what `reference` names.
 /// Errors say why (the reference, the part that failed), never with a value.
 #[async_trait]

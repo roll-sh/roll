@@ -342,7 +342,6 @@ pub fn dialect(flavor: &str) -> Option<Dialect> {
 /// What the node needs to serve a cluster.
 pub fn spec_for(c: &SearchCluster) -> ClusterSpec {
     let mut spec = ClusterSpec::new(c.name.clone());
-    spec.resource_id = Some(c.id.clone());
     spec.dialect = dialect(&c.flavor).unwrap_or(Dialect::Elasticsearch);
     spec.credentials = vec![Credential::password(c.password.clone())];
     spec.idle_unload = Some(if c.idle_timeout_s == 0 { ALWAYS_ON } else { Duration::from_secs(c.idle_timeout_s.max(1) as u64) });
@@ -350,6 +349,7 @@ pub fn spec_for(c: &SearchCluster) -> ClusterSpec {
     spec.max_body_bytes = Some((c.max_body_mb.max(1) as usize) << 20);
     spec.destructive_requires_name = c.destructive_requires_name;
     spec.ip_allowlist = allowlist_of(&c.ip_allowlist);
+    spec.catalog_id = Some(c.id.clone());
     spec
 }
 
@@ -562,6 +562,7 @@ impl Control {
         let wakes = Arc::new(Wakes::default());
         let hooks = Arc::new(ControlHooks { meter: MeterHooks(meter.clone()), wakes: wakes.clone(), control: OnceLock::new() });
         let secret_refs = Arc::new(crate::secret_refs::CatalogRefs { store: store.clone(), secrets: OnceLock::new() });
+        let links = Arc::new(crate::remotes::ControlLinks::new(cfg.domain.clone()));
         let node = Node::with_hooks(
             Arc::new(SqlCatalog { store: store.clone(), wakes: wakes.clone() }),
             Arc::new(GuardedStores { inner: ObjectStores::new(data.clone()), store: store.clone(), wakes: wakes.clone() }),
@@ -574,6 +575,7 @@ impl Control {
                 memory_budget: cfg.memory_budget,
                 sealer: cfg.sealer.clone(),
                 default_repository: cfg.default_repository.clone(),
+                links: Some(links.clone()),
                 audit: cfg.audit.clone(),
                 secret_refs: Some(search_es::secret_refs::Resolver(secret_refs.clone())),
                 ..NodeConfig::default()
@@ -597,6 +599,7 @@ impl Control {
         });
         // Nothing can load before the node is handed out, so the hook always finds the control.
         let _ = hooks.control.set(Arc::downgrade(&control));
+        links.set(Arc::downgrade(&control));
         let _ = control.me.set(Arc::downgrade(&control));
         control.start_metering();
         control.start_gc();
@@ -1227,6 +1230,10 @@ impl Control {
         self.node.audit.forget(&c.name).await;
         if self.cfg.deleted_retention.is_zero() {
             self.data.delete_cluster(&c.name).await?;
+            // Its remotes' keys roll made go with it (a restorable one keeps them for its restore).
+            if let Err(e) = self.revoke_remote_keys_of(&c.id).await {
+                tracing::warn!(cluster = c.id, error = %e, "revoking a deleted search cluster's remote keys failed");
+            }
             self.store.delete(&c.id).await?;
         } else {
             self.keep_deleted(c).await?;
@@ -1399,6 +1406,11 @@ impl Control {
                     ok = false;
                 }
             }
+            // Its remotes' keys roll made are revoked first: a purge that can't is retried.
+            if ok && let Err(e) = self.revoke_remote_keys_of(&d.cluster.id).await {
+                tracing::warn!(cluster = d.cluster.id, error = %e, "revoking a purged search cluster's remote keys failed; retried later");
+                ok = false;
+            }
             if ok && self.store.finish_purge(&d.cluster.id, &claim).await? {
                 purged += 1;
             } else if let Err(e) = self.store.release_claim(&d.cluster.id, &claim).await {
@@ -1514,18 +1526,27 @@ impl Control {
     /// Sends a request to the cluster as its owner (through authentication and admission, so
     /// limits apply and it wakes the cluster like any client). On a fleet it runs on the node that
     /// owns the cluster: here, or sent there (an in-process caller on any node, as apps' links).
-    async fn call(&self, c: &SearchCluster, mut req: EsRequest) -> EsResponse {
+    pub(crate) async fn call(&self, c: &SearchCluster, mut req: EsRequest) -> EsResponse {
         // Who wrote a repository's references is said only by `put_repository`, never by a
         // request relayed here (the console's headers are the caller's).
-        req.headers.retain(|(k, _)| !k.eq_ignore_ascii_case("authorization") && !k.eq_ignore_ascii_case("host") && !k.eq_ignore_ascii_case(search_es::secret_refs::MAKER_HEADER));
+        req.headers.retain(|(k, _)| !k.eq_ignore_ascii_case(search_es::secret_refs::MAKER_HEADER));
         self.call_as_roll(c, req).await
     }
 
     async fn call_as_roll(&self, c: &SearchCluster, mut req: EsRequest) -> EsResponse {
+        req.headers.retain(|(k, _)| {
+            !k.eq_ignore_ascii_case("authorization") && !k.eq_ignore_ascii_case("host") && !k.eq_ignore_ascii_case(search_es::remote::links::REMOTE_ACCESS_HEADER)
+        });
         let token = base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", c.name, c.password));
         req.headers.push(("Authorization".into(), format!("Basic {token}")));
-        if self.node.get_loaded(&c.name).is_none()
-            && let Some(resp) = crate::cluster::to_owner(self, &c.name, &req).await
+        self.on_owner(&c.name, req).await
+    }
+
+    /// Runs `req` on cluster `name`'s owner node: here (waking it if it sleeps), or forwarded
+    /// there signed as roll's own request.
+    pub(crate) async fn on_owner(&self, name: &str, req: EsRequest) -> EsResponse {
+        if self.node.get_loaded(name).is_none()
+            && let Some(resp) = crate::cluster::to_owner(self, name, &req).await
         {
             return resp;
         }

@@ -7,6 +7,7 @@ import { secretsHref, useSecrets } from "./secrets-page";
 import { card, errorText, ErrorNote, ghost, Section, sized, useLoad } from "./ui";
 
 const ISSUES: { issue: Finding["issue"]; title: string; what: string; serious: boolean }[] = [
+  { issue: "decoy_used", title: "Decoy used", what: "Someone used a decoy key's token: they found it where it was planted. Cut off whatever could reach that place, rotate the real credentials beside it, then delete the decoy and plant a new one.", serious: true },
   { issue: "expired", title: "Expired", what: "Their values stopped working outside roll.", serious: true },
   { issue: "rotation_failing", title: "Rotation failing", what: "Their scheduled rotation fails: the database, vendor or rotator refused or didn't answer. The old credential keeps working; roll tries again.", serious: true },
   { issue: "revoke_failing", title: "Not revoked yet", what: "Credentials roll retired or that expired but couldn't revoke yet: they still work until it can. roll keeps trying.", serious: true },

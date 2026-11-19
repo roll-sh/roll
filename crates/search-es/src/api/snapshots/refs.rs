@@ -62,7 +62,7 @@ fn why(setting: &str, reference: &str, why: &str) -> String {
 
 /// What the resolver knows the cluster by: its control-plane id (a name can be reused).
 fn resource(cluster: &crate::Cluster) -> &str {
-    cluster.config.resource_id.as_deref().unwrap_or(&cluster.name)
+    cluster.config.catalog_id.as_deref().unwrap_or(&cluster.name)
 }
 
 /// Drops what's kept for repository `name` (registered again: its new references, or none,
