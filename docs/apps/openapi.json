@@ -525,7 +525,7 @@
               }
             }
           },
-          "description": "`{ kind?: \"webhook\" | \"slack\" | \"discord\" | \"email\", url, events?, environments?, services?, previews? }` (environments: names; services: names or ids, kept as ids; previews: default false; `email` takes no `url`: it's the project's owner, 400 with one, for a project without an owner, or where mail isn't set up)"
+          "description": "`{ kind?: \"webhook\" | \"slack\" | \"discord\" | \"email\" | \"pagerduty\" | \"opsgenie\", url, routing_key?, api_key?, region?, events?, environments?, services?, previews? }` (environments: names; services: names or ids, kept as ids; previews: default false; `email` takes no `url`: it's the project's owner, 400 with one, for a project without an owner, or where mail isn't set up; `pagerduty` takes its integration's `routing_key`, `opsgenie` its `api_key`, each sealed and never returned, and `region` `us` or `eu`, no `url`: the service's own API)"
         },
         "responses": {
           "201": {
@@ -539,7 +539,7 @@
         "tags": [
           "projects"
         ],
-        "x-roll-action": "reveal for a webhook (its secret comes back), write for Slack, Discord and email"
+        "x-roll-action": "reveal for a webhook (its secret comes back), write for Slack, Discord, email, PagerDuty and Opsgenie"
       }
     },
     "/v1/apps/projects/{project}/notifications/{nid}": {

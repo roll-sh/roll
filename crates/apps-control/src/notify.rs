@@ -46,9 +46,11 @@ pub const EVENTS: [&str; 23] = [
 const DEFAULT_EVENTS: [&str; 18] = ["deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"];
 /// Whether a target with `events` hears an event: its own kind, or for a resolution, the alert's
 /// (whoever heard an alert hears it clear; there's nothing else to ask for).
-fn wants(events: &[String], kind: &str, data: &Value) -> bool {
+fn wants(events: &[String], kind: &str, data: &Value, oncall: bool) -> bool {
     match kind {
         "alert.resolved" => data["alert"].as_str().is_some_and(|a| events.iter().any(|e| e == a)),
+        // An on-call target that pages on failed deploys hears the next good one: it closes them.
+        "deploy.active" if oncall => events.iter().any(|e| e == "deploy.failed" || e == "deploy.active"),
         k => events.iter().any(|e| e == k),
     }
 }
@@ -63,11 +65,35 @@ impl Apps {
     /// answer this once.
     pub async fn add_target(self: &Arc<Self>, project: &str, body: Value) -> Result<Value> {
         let o = body.as_object().cloned().unwrap_or_default();
-        if let Some(k) = o.keys().find(|k| !["kind", "url", "events", "environments", "services", "previews"].contains(&k.as_str())) {
+        if let Some(k) = o.keys().find(|k| !["kind", "url", "events", "environments", "services", "previews", "routing_key", "api_key", "region"].contains(&k.as_str())) {
             return Err(Error::BadRequest(format!("unknown field {k}")));
         }
         let kind = o.get("kind").and_then(Value::as_str).unwrap_or("webhook").to_string();
-        let (url, host) = if kind == "email" {
+        // An on-call service's key: the target's secret, sealed, never shown again.
+        let mut key = None;
+        let (url, host) = if kind == "pagerduty" || kind == "opsgenie" {
+            let field = if kind == "pagerduty" { "routing_key" } else { "api_key" };
+            if let Some(k) = o.keys().find(|k| *k == "url" || (["routing_key", "api_key"].contains(&k.as_str()) && *k != field)) {
+                return Err(Error::BadRequest(format!("a {kind} target takes its {field}, not {k}")));
+            }
+            let k = o.get(field).and_then(Value::as_str).map(str::trim).unwrap_or("");
+            if k.is_empty() || k.len() > 128 || !k.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+                return Err(Error::BadRequest(format!("{field} is the key {kind} gave the integration (1–128 letters, digits, - and _)")));
+            }
+            key = Some(k.to_string());
+            let a = &self.cfg.oncall_apis;
+            let url = match (kind.as_str(), o.get("region").and_then(Value::as_str).unwrap_or("us")) {
+                ("pagerduty", "us") => a.pagerduty_us.clone(),
+                ("pagerduty", "eu") => a.pagerduty_eu.clone(),
+                ("opsgenie", "us") => a.opsgenie_us.clone(),
+                ("opsgenie", "eu") => a.opsgenie_eu.clone(),
+                _ => return Err(Error::BadRequest("region is us or eu".into())),
+            };
+            let host = url::Url::parse(&url).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_default();
+            (url, host)
+        } else if o.contains_key("routing_key") || o.contains_key("api_key") || o.contains_key("region") {
+            return Err(Error::BadRequest("routing_key, api_key and region are a pagerduty or opsgenie target's".into()));
+        } else if kind == "email" {
             if o.contains_key("url") {
                 return Err(Error::BadRequest("an email target goes to the project's owner, not to an address".into()));
             }
@@ -95,9 +121,10 @@ impl Apps {
             return Err(Error::Conflict(format!("a project has at most {MAX_TARGETS} notification targets")));
         }
         let secret = (kind == "webhook").then(|| format!("whsec_{}", crate::model::random(32)));
-        let (k, u, s2, ev) = (kind.clone(), url.clone(), secret.clone(), events.clone());
+        let (k, u, s2, ev) = (kind.clone(), url.clone(), secret.clone().or(key), events.clone());
         let t = self.db(move |s| s.add_target(&p, &k, &host, &u, s2.as_deref(), &ev, &filters)).await?;
         let mut v = serde_json::to_value(&t).expect("JSON");
+        // A webhook's signing secret, this once; an on-call key was the caller's to begin with.
         if let Some(s) = secret {
             v["secret"] = json!(s);
         }
@@ -209,7 +236,7 @@ impl Apps {
             "slack" if !self.cfg.allow_private => return bad("a Slack incoming webhook is on hooks.slack.com"),
             "discord" if !self.cfg.allow_private => return bad("a Discord webhook is https://discord.com/api/webhooks/…"),
             "slack" | "discord" => {}
-            _ => return Err(Error::BadRequest("kind is webhook, slack, discord or email".into())),
+            _ => return Err(Error::BadRequest("kind is webhook, slack, discord, email, pagerduty or opsgenie".into())),
         }
         Ok(host)
     }
@@ -299,7 +326,7 @@ impl Apps {
                 }
             };
             for t in self.db(move |s| s.targets(&p)).await.unwrap_or_default() {
-                if wants(&t.events, &e.kind, &e.data) && t.follows(&e.service, &e.environment, preview) {
+                if wants(&t.events, &e.kind, &e.data, matches!(t.kind.as_str(), "pagerduty" | "opsgenie")) && t.follows(&e.service, &e.environment, preview) {
                     queued.push((t.id.clone(), e.seq, e.kind.clone()));
                 }
             }
@@ -455,6 +482,9 @@ impl Apps {
                 Err(err) => (None, Some(err.to_string())),
             };
         }
+        if t.kind == "pagerduty" || t.kind == "opsgenie" {
+            return self.send_oncall(t, url, secret.unwrap_or(""), e, title, text, link.as_deref()).await;
+        }
         let body = match t.kind.as_str() {
             // Slack reads `<…>` as links and mentions (`<!channel>`) and `&` as an entity start:
             // a commit author or an error can't ping a channel or hide a link.
@@ -464,7 +494,7 @@ impl Apps {
         };
         let bytes = serde_json::to_vec(&body).expect("JSON");
         let mut req = self.notify_client.post(url).header("content-type", "application/json");
-        if let Some(s) = secret {
+        if let Some(s) = secret.filter(|_| t.kind == "webhook") {
             use hmac::Mac;
             let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(s.as_bytes()).expect("any key");
             let ts = (code_sql::now_ms() / 1000).to_string();
@@ -476,6 +506,74 @@ impl Apps {
         }
         match req.body(bytes).send().await {
             Ok(res) if res.status().is_success() => (Some(res.status().as_u16()), None),
+            Ok(res) => {
+                let code = res.status().as_u16();
+                let said = String::from_utf8_lossy(&crate::net::read_bounded(res, 512).await).trim().chars().take(200).collect::<String>();
+                (Some(code), Some(if said.is_empty() { format!("answered {code}") } else { format!("answered {code}: {said}") }))
+            }
+            Err(err) => (None, Some(err.without_url().to_string())),
+        }
+    }
+}
+
+/// What an event is to an on-call service: an incident to open (with its severity) or to close,
+/// and which incident (one per service, environment and alert, so a repeat updates it). None:
+/// nothing to page about.
+fn oncall_of(e: &Event) -> Option<(bool, String, &'static str)> {
+    let key = |k: &str| format!("roll:{}/{}/{k}", e.service, e.environment);
+    Some(match e.kind.as_str() {
+        "alert.resolved" => (false, key(e.data["alert"].as_str()?), "info"),
+        // A deploy that worked closes the failed one's.
+        "deploy.active" => (false, key("deploy.failed"), "info"),
+        "domain.active" => return None,
+        "crash_loop" | "spend.limit" => (true, key(&e.kind), "critical"),
+        "deploy.failed" | "alert.errors" | "cron.failed" | "job.failed" | "volume.backup_failed" | "domain.tls_failed" | "domain.expired" => (true, key(&e.kind), "error"),
+        "form.submitted" => (true, format!("{}/{}", key(&e.kind), e.data["submission"].as_str().unwrap_or("")), "info"),
+        "test" => (true, format!("roll:test:{}", e.at), "info"),
+        _ => (true, key(&e.kind), "warning"),
+    })
+}
+
+impl Apps {
+    /// One try at PagerDuty's Events API v2 or Opsgenie's Alert API: open or close the event's
+    /// incident by its key.
+    #[allow(clippy::too_many_arguments)]
+    async fn send_oncall(&self, t: &NotifyTarget, url: &str, key: &str, e: &Event, title: &str, text: &str, link: Option<&str>) -> (Option<u16>, Option<String>) {
+        let Some((open, dedup, severity)) = oncall_of(e) else { return (None, None) };
+        let source = if e.service.is_empty() { "roll apps".to_string() } else { format!("roll apps: {} in {}", e.service, e.environment) };
+        let req = if t.kind == "pagerduty" {
+            let mut body = json!({ "routing_key": key, "event_action": if open { "trigger" } else { "resolve" }, "dedup_key": dedup });
+            if open {
+                body["payload"] = json!({ "summary": title.chars().take(1024).collect::<String>(), "source": source, "severity": severity, "component": e.service, "group": e.environment, "class": e.kind, "custom_details": { "text": text, "data": e.data } });
+                if let Some(l) = link {
+                    body["links"] = json!([{ "href": l, "text": "Open in roll" }]);
+                }
+            }
+            self.notify_client.post(url).json(&body)
+        } else {
+            let auth = format!("GenieKey {key}");
+            if open {
+                let priority = match severity {
+                    "critical" => "P1",
+                    "error" => "P2",
+                    "warning" => "P3",
+                    _ => "P5",
+                };
+                let description = match link {
+                    Some(l) => format!("{text}\n\nOpen in roll: {l}"),
+                    None => text.to_string(),
+                };
+                let body = json!({ "message": title.chars().take(130).collect::<String>(), "alias": dedup.chars().take(512).collect::<String>(), "description": description.chars().take(15_000).collect::<String>(), "priority": priority, "source": "roll", "entity": source, "tags": [e.environment, e.kind] });
+                self.notify_client.post(url).header("authorization", auth).json(&body)
+            } else {
+                let alias: String = url::form_urlencoded::byte_serialize(dedup.as_bytes()).collect();
+                self.notify_client.post(format!("{}/{alias}/close?identifierType=alias", url.trim_end_matches('/'))).header("authorization", auth).json(&json!({ "source": "roll" }))
+            }
+        };
+        match req.send().await {
+            Ok(res) if res.status().is_success() => (Some(res.status().as_u16()), None),
+            // Closing what was never opened (or already closed) is done.
+            Ok(res) if !open && res.status() == reqwest::StatusCode::NOT_FOUND => (Some(404), None),
             Ok(res) => {
                 let code = res.status().as_u16();
                 let said = String::from_utf8_lossy(&crate::net::read_bounded(res, 512).await).trim().chars().take(200).collect::<String>();

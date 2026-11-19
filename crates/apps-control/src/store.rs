@@ -1214,8 +1214,12 @@ impl Store {
     pub fn due_deliveries(&self, limit: usize, claim_ms: i64) -> Result<Vec<(String, String, i64, u32)>> {
         let now = self.now()?;
         self.db.write(|c| {
+            // An on-call target's in event order, one at a time: a resolve never overtakes its
+            // trigger (a page left open for good), a retry included. Others go side by side.
             let due: Vec<(String, String, i64, u32)> = c.query(
-                "SELECT id, target, event, attempts FROM notify_deliveries WHERE status = 'pending' AND next_at <= ? ORDER BY next_at LIMIT ?",
+                "SELECT d.id, d.target, d.event, d.attempts FROM notify_deliveries d LEFT JOIN notify_targets t ON t.id = d.target \
+                 WHERE d.status = 'pending' AND d.next_at <= ? AND (t.kind IS NULL OR t.kind NOT IN ('pagerduty', 'opsgenie') OR NOT EXISTS \
+                 (SELECT 1 FROM notify_deliveries e WHERE e.target = d.target AND e.status = 'pending' AND e.event < d.event)) ORDER BY d.next_at LIMIT ?",
                 params![now, limit as i64],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get::<_, i64>(3)? as u32)),
             )?;

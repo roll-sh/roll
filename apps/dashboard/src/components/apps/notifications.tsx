@@ -34,6 +34,9 @@ const KINDS: { value: NotifyTarget["kind"]; label: string; placeholder: string }
   { value: "discord", label: "Discord", placeholder: "https://discord.com/api/webhooks/…" },
   { value: "webhook", label: "Webhook", placeholder: "https://example.com/roll-events" },
   { value: "email", label: "Email", placeholder: "" },
+  // On-call: each failure an incident, closed when its alert resolves or the next deploy works.
+  { value: "pagerduty", label: "PagerDuty", placeholder: "Integration key (Events API v2)" },
+  { value: "opsgenie", label: "Opsgenie", placeholder: "API key (an API integration's)" },
 ];
 
 /** A project's notification targets: where its services' failed deploys and crash loops go. */
@@ -41,6 +44,8 @@ export function NotificationsPanel({ project, projectName, runner }: { project: 
   const [targets, setTargets] = useState<NotifyTarget[] | null>(null);
   const [kind, setKind] = useState<NotifyTarget["kind"]>("slack");
   const [url, setUrl] = useState("");
+  const [region, setRegion] = useState<"us" | "eu">("us");
+  const oncall = kind === "pagerduty" || kind === "opsgenie";
   const [events, setEvents] = useState<NotifyEvent[]>(["deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"]);
   const [envs, setEnvs] = useState("");
   const [previews, setPreviews] = useState(false);
@@ -62,7 +67,8 @@ export function NotificationsPanel({ project, projectName, runner }: { project: 
 
   const add = async () => {
     const environments = envs.split(",").map((e) => e.trim()).filter(Boolean);
-    const t = await runner.run("notification", () => appsApi.addNotifyTarget(project, { kind, ...(kind === "email" ? {} : { url: url.trim() }), events, environments, previews, ...(only.length ? { services: only } : {}) }));
+    const where = kind === "email" ? {} : kind === "pagerduty" ? { routing_key: url.trim(), region } : kind === "opsgenie" ? { api_key: url.trim(), region } : { url: url.trim() };
+    const t = await runner.run("notification", () => appsApi.addNotifyTarget(project, { kind, ...where, events, environments, previews, ...(only.length ? { services: only } : {}) }));
     if (t) {
       setUrl("");
       setEnvs("");
@@ -144,7 +150,24 @@ export function NotificationsPanel({ project, projectName, runner }: { project: 
         {kind === "email" ? (
           <p className="min-w-0 flex-1 text-[12px] text-muted">To the project's owner, at their account's address.</p>
         ) : (
-          <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder={KINDS.find((k) => k.value === kind)?.placeholder} aria-label="URL" spellCheck={false} autoComplete="off" className={`${input} min-w-0 flex-1 font-mono text-[12px]`} />
+          <>
+            <input
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+              placeholder={KINDS.find((k) => k.value === kind)?.placeholder}
+              aria-label={oncall ? "Key" : "URL"}
+              type={oncall ? "password" : "text"}
+              spellCheck={false}
+              autoComplete="off"
+              className={`${input} min-w-0 flex-1 font-mono text-[12px]`}
+            />
+            {oncall && (
+              <select value={region} onChange={(e) => setRegion(e.target.value as "us" | "eu")} aria-label="Region" className={`${input} w-20 text-[12px]`}>
+                <option value="us">US</option>
+                <option value="eu">EU</option>
+              </select>
+            )}
+          </>
         )}
         <div className="flex flex-wrap gap-x-3 gap-y-1 text-[12px] text-muted">
           {EVENTS.map((e) => (

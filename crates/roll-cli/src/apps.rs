@@ -960,10 +960,16 @@ pub enum AppsCmd {
     Notifications {
         #[command(flatten)]
         target: Target,
+        /// A webhook's, Slack's or Discord's URL; PagerDuty's integration key or Opsgenie's API key
+        /// for those kinds (read from stdin when it's `-`, so it stays out of the shell's history).
         #[arg(long, conflicts_with = "remove")]
         add: Option<String>,
+        /// `webhook`, `slack`, `discord`, `pagerduty` or `opsgenie`.
         #[arg(long, default_value = "webhook")]
         kind: String,
+        /// With `--kind pagerduty` or `opsgenie`: its region, `us` (the default) or `eu`.
+        #[arg(long, requires = "add")]
+        region: Option<String>,
         /// With `--add` or `--edit`: what it's sent, comma-separated (`deploy.failed,deploy.active`;
         /// default for a new one: what needs someone). A resolved alert goes to whoever gets the alert.
         #[arg(long, value_name = "EVENTS")]
@@ -3928,7 +3934,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 v
             }
         }
-        AppsCmd::Notifications { target, add, kind, events, only_env, only_service, previews, every_env, every_service, remove, test, edit, deliveries, email } => {
+        AppsCmd::Notifications { target, add, kind, region, events, only_env, only_service, previews, every_env, every_service, remove, test, edit, deliveries, email } => {
             if add.is_none() && edit.is_none() && !email && (events.is_some() || !only_env.is_empty() || !only_service.is_empty() || previews.is_some()) {
                 bail!("--events, --only-env, --only-service and --previews go with --add, --email or --edit");
             }
@@ -3967,6 +3973,20 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 t
             } else if let Some(url) = add {
                 let mut body = json!({ "kind": kind, "url": url, "environments": only_env, "services": only_service, "previews": previews.unwrap_or(false) });
+                // An on-call service's key, not a URL.
+                if let Some(field) = match kind.as_str() {
+                    "pagerduty" => Some("routing_key"),
+                    "opsgenie" => Some("api_key"),
+                    _ => None,
+                } {
+                    let key = if url == "-" { secret_from_stdin("the integration's key")? } else { url.clone() };
+                    let o = body.as_object_mut().expect("object");
+                    o.remove("url");
+                    o.insert(field.into(), json!(key));
+                    if let Some(r) = &region {
+                        o.insert("region".into(), json!(r));
+                    }
+                }
                 if kind == "email" {
                     body.as_object_mut().expect("object").remove("url");
                 }

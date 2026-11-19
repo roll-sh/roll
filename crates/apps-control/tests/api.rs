@@ -2735,6 +2735,72 @@ async fn a_log_drain_speaks_syslog_or_otlp() {
     assert!(records.iter().any(|r| r["body"]["stringValue"].as_str().is_some_and(|t| t.contains("listening on")) && r["timeUnixNano"].as_str().is_some_and(|t| t.len() >= 19)), "{records:?}");
 }
 
+/// PagerDuty and Opsgenie targets (Heroku's, Cloud Monitoring's): a failure opens an incident
+/// keyed by its service, environment and alert, a resolved alert or the next good deploy closes
+/// it; the key goes with each call and never comes back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn on_call_targets_open_and_close_incidents() {
+    let got: Arc<parking_lot::Mutex<Vec<(String, axum::http::HeaderMap, Value)>>> = Default::default();
+    let g = got.clone();
+    let app = axum::Router::new().fallback(move |uri: axum::http::Uri, h: axum::http::HeaderMap, b: bytes::Bytes| {
+        let g = g.clone();
+        async move {
+            g.lock().push((uri.to_string(), h, serde_json::from_slice(&b).unwrap_or(Value::Null)));
+            StatusCode::ACCEPTED
+        }
+    });
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let at = l.local_addr().unwrap();
+    tokio::spawn(axum::serve(l, app).into_future());
+    let w = world_full(
+        |c| {
+            c.oncall_apis = apps_control::OncallApis { pagerduty_us: format!("http://{at}/pd"), pagerduty_eu: format!("http://{at}/pd-eu"), opsgenie_us: format!("http://{at}/og"), opsgenie_eu: format!("http://{at}/og-eu") };
+        },
+        false,
+        |_| {},
+    )
+    .await;
+    // Deployed before the targets: its first deploy's event isn't theirs.
+    let (svc, _) = image_service(&w, "api", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let base = format!("/v1/apps/projects/{}/notifications", w.project);
+    assert_eq!(call(&w.api, "POST", &base, Some(json!({"kind": "pagerduty"}))).await.0, StatusCode::BAD_REQUEST, "its routing key");
+    assert_eq!(call(&w.api, "POST", &base, Some(json!({"kind": "pagerduty", "routing_key": "r0ut1ng", "url": "https://evil.example/"}))).await.0, StatusCode::BAD_REQUEST, "never a URL of the tenant's");
+    assert_eq!(call(&w.api, "POST", &base, Some(json!({"kind": "webhook", "url": format!("http://{at}/x"), "routing_key": "x"}))).await.0, StatusCode::BAD_REQUEST);
+    let (st, pd) = call(&w.api, "POST", &base, Some(json!({"kind": "pagerduty", "routing_key": "r0ut1ngk3y", "events": ["deploy.failed", "alert.memory"]}))).await;
+    assert_eq!((st, pd["kind"].as_str(), pd.get("secret")), (StatusCode::CREATED, Some("pagerduty"), None), "{pd}");
+    let (st, og) = call(&w.api, "POST", &base, Some(json!({"kind": "opsgenie", "api_key": "g3n1e", "region": "eu", "events": ["alert.memory"]}))).await;
+    assert_eq!(st, StatusCode::CREATED, "{og}");
+    assert!(!call(&w.api, "GET", &base, None).await.1.to_string().contains("r0ut1ngk3y"), "the key never comes back");
+    for (kind, data) in [("deploy.failed", json!({"error": "health check"})), ("alert.memory", json!({"value": 95, "limit_mb": 512, "threshold": 90})), ("alert.resolved", json!({"alert": "alert.memory"})), ("deploy.active", json!({}))] {
+        let sid = id.clone();
+        w.apps.db(move |s| s.add_event(kind, &sid, "production", None, &data)).await.unwrap();
+    }
+    // One a pass (two seconds apart) for an on-call target: in order. The first deploy's own
+    // `deploy.active` (queued once the targets were there) closes nothing yet: left out.
+    let pd = |seen: &[(String, axum::http::HeaderMap, Value)]| -> Vec<Value> {
+        seen.iter().filter(|(u, ..)| u == "/pd").map(|(.., b)| b.clone()).skip_while(|b| b["event_action"] == "resolve").collect()
+    };
+    let mut seen = Vec::new();
+    for _ in 0..400 {
+        seen = got.lock().clone();
+        if pd(&seen).len() >= 4 && seen.iter().filter(|(u, ..)| u.starts_with("/og-eu")).count() >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let pd_calls = pd(&seen);
+    let key = |k: &str| format!("roll:{id}/production/{k}");
+    let actions: Vec<(String, String)> = pd_calls.iter().map(|b| (b["event_action"].as_str().unwrap().to_string(), b["dedup_key"].as_str().unwrap().to_string())).collect();
+    assert_eq!(actions, vec![("trigger".into(), key("deploy.failed")), ("trigger".into(), key("alert.memory")), ("resolve".into(), key("alert.memory")), ("resolve".into(), key("deploy.failed"))], "the next good deploy closes the failed one's: {pd_calls:?}");
+    assert_eq!((pd_calls[0]["routing_key"].as_str(), pd_calls[0]["payload"]["severity"].as_str()), (Some("r0ut1ngk3y"), Some("error")), "{:?}", pd_calls[0]);
+    // Opsgenie (its EU region): an alert by alias, closed by alias.
+    let og_calls: Vec<&(String, axum::http::HeaderMap, Value)> = seen.iter().filter(|(u, ..)| u.starts_with("/og-eu")).collect();
+    assert_eq!(og_calls.len(), 2, "{seen:?}");
+    assert_eq!((og_calls[0].1["authorization"].to_str().unwrap(), og_calls[0].2["alias"].as_str(), og_calls[0].2["priority"].as_str()), ("GenieKey g3n1e", Some(key("alert.memory").as_str()), Some("P3")));
+    assert!(og_calls[1].0.ends_with("/close?identifierType=alias") && og_calls[1].0.contains("alert.memory"), "{}", og_calls[1].0);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_failed_deploy_is_sent_to_the_projects_targets_signed_and_retried() {
     use hmac::Mac;
