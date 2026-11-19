@@ -2260,7 +2260,8 @@ async fn a_password_lets_visitors_in() {
 
 /// A deploy freeze (GitLab's freeze periods): a person's deploy is refused with its reason, or
 /// goes through with `override` (audited); a hook's deploy builds to `ready` beside the live one,
-/// as a hold's; a rollback is never frozen; lifting it deploys as ever.
+/// as a hold's, and putting it live needs the override too; rolling back to what was live is
+/// never frozen; lifting it deploys as ever.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_deploy_freeze_holds_deploys_but_never_a_rollback() {
     let w = world().await;
@@ -2278,7 +2279,10 @@ async fn a_deploy_freeze_holds_deploys_but_never_a_rollback() {
     let (_, h) = call(&w.api, "POST", &format!("{base}/hook"), None).await;
     let (st, d) = call(&w.api, "POST", &format!("{}?image=nginx:1.28", h["path"].as_str().unwrap()), None).await;
     assert_eq!(st, StatusCode::ACCEPTED, "{d}");
-    assert_eq!(settled(&w, &id, "production", d["id"].as_str().unwrap()).await["status"], "ready");
+    let held = d["id"].as_str().unwrap().to_string();
+    assert_eq!(settled(&w, &id, "production", &held).await["status"], "ready");
+    // Putting that never-live build live is a deploy: refused without override.
+    assert_eq!(call(&w.api, "POST", &format!("{base}/deploys/{held}/rollback"), None).await.0, StatusCode::CONFLICT);
     // With override: through, and in the audit log.
     let (st, d) = call(&w.api, "POST", &format!("{base}/deploys"), Some(json!({"image": "nginx:1.28", "override": true}))).await;
     assert_eq!(st, StatusCode::ACCEPTED, "{d}");
@@ -2481,10 +2485,20 @@ async fn status_page_incidents_open_and_close() {
     w.apps.cron_pass(late + 60_000).await;
     let (_, list) = call(&w.api, "GET", &format!("{page}/incidents"), None).await;
     let open: Vec<&Value> = list["incidents"].as_array().unwrap().iter().filter(|i| i["resolved_at"].is_null()).collect();
-    assert_eq!((open.len(), open[0]["title"].as_str(), open[0]["automatic"].as_bool()), (1, Some("web · heartbeat backup is down"), Some(true)), "{list}");
+    assert_eq!((open.len(), open[0]["title"].as_str(), open[0]["automatic"].as_bool()), (1, Some("web · backup is down"), Some(true)), "{list}");
     get(ping, host(&svc["environments"][0]["url"])).await;
     let (_, list) = call(&w.api, "GET", &format!("{page}/incidents"), None).await;
     assert!(list["incidents"][0]["resolved_at"].is_i64(), "{list}");
+    // Missed again, then the heartbeat removed: nothing will ping it now, so the sweep closes it.
+    let late = code_sql::now_ms() + 3_900_000;
+    w.apps.cron_pass(late + 120_000).await;
+    let (_, list) = call(&w.api, "GET", &format!("{page}/incidents"), None).await;
+    assert!(list["incidents"][0]["resolved_at"].is_null(), "open again: {list}");
+    call(&w.api, "PUT", &env, Some(json!({"heartbeats": null}))).await;
+    w.apps.cron_pass(late + 240_000).await;
+    let (_, list) = call(&w.api, "GET", &format!("{page}/incidents"), None).await;
+    let last = &list["incidents"][0];
+    assert!(last["resolved_at"].is_i64() && last.to_string().contains("no longer checked"), "{list}");
     // A person's own, and its update.
     assert_eq!(call(&w.api, "POST", &format!("{page}/incidents"), Some(json!({"title": "x", "state": "nope", "text": "y"}))).await.0, StatusCode::BAD_REQUEST);
     let (st, inc) = call(&w.api, "POST", &format!("{page}/incidents"), Some(json!({"title": "Slow checkouts", "text": "We're looking into slow checkouts."}))).await;

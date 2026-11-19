@@ -267,6 +267,10 @@ pub struct Apps {
     /// its end of the channel until it starts.
     pub(crate) preview_lines: tokio::sync::mpsc::Sender<drains::PreviewBatch>,
     pub(crate) preview_lines_rx: Mutex<Option<tokio::sync::mpsc::Receiver<drains::PreviewBatch>>>,
+    /// Status pages' rows and incidents as last read ([`status_page::serve`]).
+    pub(crate) status_cache: status_page::StatusCache,
+    /// When this node last swept status pages' stale incidents (unix ms).
+    status_swept: std::sync::atomic::AtomicI64,
     /// Private environments' token hashes, by environment, as the owner last read or set them.
     access: Mutex<HashMap<String, Option<Access>>>,
     /// Bumped by every change to the access cache: a cold read caches what it read only if
@@ -543,6 +547,8 @@ impl Apps {
             drains_dirty: Mutex::new(Default::default()),
             preview_lines,
             preview_lines_rx: Mutex::new(Some(preview_lines_rx)),
+            status_cache: Default::default(),
+            status_swept: std::sync::atomic::AtomicI64::new(0),
             access: Mutex::new(HashMap::new()),
             access_gen: std::sync::atomic::AtomicU64::new(0),
             visits: Mutex::new(HashMap::new()),

@@ -122,7 +122,7 @@ pub fn port_router(apps: Arc<Apps>, service: String, env: String) -> axum::Route
 /// roll's own request headers, off a visitor's request where it comes in: from here on, one is
 /// roll's ([`VIA_SITE`] lets a rewrite past its target's access check).
 fn strip_ours(req: &mut Request) {
-    for h in [VIA_SITE, VIA_EDGE, TARGET, ORIGINAL] {
+    for h in [VIA_SITE, VIA_EDGE, MIRROR, TARGET, ORIGINAL] {
         req.headers_mut().remove(h);
     }
 }
@@ -400,6 +400,15 @@ async fn proxy_external(apps: &Arc<Apps>, live: &Arc<crate::live::EnvLive>, serv
 /// Marks a request a site's rewrite sent on (roll's own: `x-roll-*` never reaches an app, and a
 /// visitor's is taken off where it came in, [`strip_ours`]).
 const VIA_SITE: &str = "x-roll-via-site";
+
+/// Marks a mirrored copy (roll's own, as [`VIA_SITE`] is): its target serves it, but it's no
+/// visitor's page view and no answer a rollout judges.
+const MIRROR: &str = "x-roll-mirror";
+
+/// Copies in flight on a node at most; past it, a copy isn't made (a slow or sleeping target
+/// never holds more).
+const MIRRORS_IN_FLIGHT: usize = 64;
+static MIRRORS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(MIRRORS_IN_FLIGHT);
 
 /// Marks an edge function's `context.next()` ([`crate::edge`]): the site's files answer, no edge
 /// function again (roll's own, as [`VIA_SITE`] is).
@@ -1419,13 +1428,16 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
         for (k, v) in req.headers() {
             copy = copy.header(k, v);
         }
-        if let Ok(mut copy) = copy.body(Body::empty()) {
+        copy = copy.header(MIRROR, "1");
+        if let (Ok(mut copy), Ok(permit)) = (copy.body(Body::empty()), MIRRORS.try_acquire()) {
             if let Some(c) = roll_cluster::client_addr(&req) {
                 copy.extensions_mut().insert(roll_cluster::ClientAddr(c));
             }
             let (apps, service, target) = (apps.clone(), service.to_string(), m.environment.clone());
+            permit.forget();
             tokio::spawn(async move {
                 let _ = tokio::time::timeout(std::time::Duration::from_secs(30), split_to(apps, &service, &target, copy)).await;
+                MIRRORS.add_permits(1);
             });
         }
     }
@@ -1559,6 +1571,7 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
     // the proxy's own span in the request's trace (the wait, a wake, the answer).
     let span = gate.traces.then(|| ProxySpan::start(&apps, service, env, req.headers()));
     let access = Access { log: apps.logs.sink(format!("http:{service}/{env}"), crate::logs::Stream::Http), seen: Seen::of(&req), span, deployment: Default::default() };
+    let mirrored = req.headers().contains_key(MIRROR);
     // A custom domain sent to another of the app's ports: that port's address on the same
     // instance (published from the deploy after the domain's port was set; until then, a 502).
     if let Some(TargetPort(p)) = req.extensions().get::<TargetPort>().copied() {
@@ -1636,7 +1649,9 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
         Some(t) => match tokio::time::timeout(t, send).await {
             Ok(r) => r,
             Err(_) => {
-                live.answered(&lease.inst, 504, None);
+                if !mirrored {
+                    live.answered(&lease.inst, 504, None);
+                }
                 live.meter.lock().request(code_sql::now_ms(), began.elapsed().as_secs_f64() * 1000.0, 504, 0);
                 access.write(504, began, 0, &instance, &request_id, cold, waited_ms);
                 return page(StatusCode::GATEWAY_TIMEOUT, "Timed out", &format!("The service didn't answer within its {} s.", t.as_secs()));
@@ -1676,7 +1691,9 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
                         Some(t) => match tokio::time::timeout(t, send).await {
                             Ok(r) => r,
                             Err(_) => {
-                                live.answered(&lease.inst, 504, None);
+                                if !mirrored {
+                                    live.answered(&lease.inst, 504, None);
+                                }
                                 live.meter.lock().request(code_sql::now_ms(), began.elapsed().as_secs_f64() * 1000.0, 504, 0);
                                 access.write(504, began, 0, &instance, &request_id, cold, waited_ms);
                                 return page(StatusCode::GATEWAY_TIMEOUT, "Timed out", &format!("The service didn't answer within its {} s.", t.as_secs()));
@@ -1699,13 +1716,17 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
             // Nothing listens any more (killed, out of memory): the next request starts a
             // fresh instance.
             live.connect_failed(&lease.inst);
-            live.answered(&lease.inst, 503, None);
+            if !mirrored {
+                live.answered(&lease.inst, 503, None);
+            }
             live.meter.lock().request(code_sql::now_ms(), began.elapsed().as_secs_f64() * 1000.0, 503, 0);
             access.write(503, began, 0, &instance, &request_id, cold, waited_ms);
             return retry_soon(page(StatusCode::SERVICE_UNAVAILABLE, "Restarting", "The instance stopped; the next request starts it again."));
         }
         Err(e) => {
-            live.answered(&lease.inst, 502, None);
+            if !mirrored {
+                live.answered(&lease.inst, 502, None);
+            }
             live.meter.lock().request(code_sql::now_ms(), began.elapsed().as_secs_f64() * 1000.0, 502, 0);
             access.write(502, began, 0, &instance, &request_id, cold, waited_ms);
             // What went wrong is the owner's to read (the environment's log), not a visitor's.
@@ -1784,7 +1805,7 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
     let c = counted.clone();
     // Every frame goes through as it came, trailers too (gRPC's status is one); the lease, the
     // meter's request and the access line go when the body does.
-    let done = Done { live: live.clone(), began, status, counted, access: Some((access, instance, request_id, cold, waited_ms)), lease };
+    let done = Done { live: live.clone(), began, status, counted, access: Some((access, instance, request_id, cold, waited_ms)), lease, mirrored, headers_ms: began.elapsed().as_secs_f64() * 1000.0 };
     let frames = http_body_util::BodyStream::new(body).map(move |frame| {
         let _until_sent = &done;
         if let Ok(f) = &frame
@@ -1839,12 +1860,19 @@ struct Done {
     /// Its access line: where it goes, the instance, the request id, a cold start's wait.
     access: Option<(Access, String, String, bool, u64)>,
     lease: crate::live::Lease,
+    /// A mirrored copy ([`MIRROR`]): served and metered, never judged by a rollout.
+    mirrored: bool,
+    /// How long its answer's headers took: what a rollout judges (a stream's body is the app's
+    /// pace, or a slow client's).
+    headers_ms: f64,
 }
 
 impl Drop for Done {
     fn drop(&mut self) {
         let bytes = self.counted.load(Ordering::Relaxed);
-        self.live.answered(&self.lease.inst, self.status, Some(self.began.elapsed().as_secs_f64() * 1000.0));
+        if !self.mirrored {
+            self.live.answered(&self.lease.inst, self.status, Some(self.headers_ms));
+        }
         self.live.meter.lock().request(code_sql::now_ms(), self.began.elapsed().as_secs_f64() * 1000.0, self.status, bytes);
         if let Some((a, instance, id, cold, waited)) = self.access.take() {
             a.write(self.status, self.began, bytes, &instance, &id, cold, waited);
@@ -2009,8 +2037,9 @@ impl Seen {
             ua: text(header::USER_AGENT, 256),
             host: text(header::HOST, 255),
             page: req.method() == axum::http::Method::GET
-                // A cache refresh is roll's own request, not a visitor's page view.
+                // A cache refresh is roll's own request, not a visitor's page view; nor a mirrored copy.
                 && req.extensions().get::<crate::resp_cache::Refresh>().is_none()
+                && !req.headers().contains_key(MIRROR)
                 && match req.headers().get("sec-fetch-dest").and_then(|v| v.to_str().ok()) {
                     Some(dest) => dest.eq_ignore_ascii_case("document"),
                     None => req.headers().get(header::ACCEPT).and_then(|v| v.to_str().ok()).is_some_and(|a| a.contains("text/html")),

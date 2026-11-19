@@ -51,8 +51,51 @@ fn today() -> i64 {
     code_sql::now_ms() / 86_400_000
 }
 
+/// What a page shows, from its project's services and their environments (never a preview's),
+/// narrowed to its items when it names any: each one's key, label and whether it's a check.
+/// `running` leaves out what isn't checked now (a paused environment, one in maintenance).
+fn shown(page: &Page, services: &[crate::store::ServiceRow], envs: &[crate::store::EnvRow], running: bool) -> Vec<(String, String, bool)> {
+    let mut out = Vec::new();
+    for svc in services {
+        for e in envs.iter().filter(|e| e.service == svc.id && !e.ephemeral && (!running || (!e.paused && e.maintenance.is_none()))) {
+            let named = e.checks.iter().map(|c| (&c.name, true)).chain(e.heartbeats.iter().map(|h| (&h.name, false)));
+            for (name, check) in named {
+                if !page.items.is_empty() && !page.items.iter().any(|i| i.service == svc.id && i.environment == e.name && (if check { i.check.as_ref() } else { i.heartbeat.as_ref() }) == Some(name)) {
+                    continue;
+                }
+                let key = if check { check_key(&svc.id, &e.name, name) } else { heartbeat_key(&svc.id, &e.name, name) };
+                let label = if e.name == crate::model::PRODUCTION { format!("{} · {name}", svc.name) } else { format!("{} ({}) · {name}", svc.name, e.name) };
+                out.push((key, label, check));
+            }
+        }
+    }
+    out
+}
+
+/// How long a page's rows and incidents are kept between reads (any change forgets them).
+const CACHED: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Pages' rows and incidents as last read, by project, and a generation each change moves: a
+/// read that a change overtook keeps nothing (it may have read before the change).
+#[derive(Default)]
+pub(crate) struct StatusCache {
+    generation: std::sync::atomic::AtomicU64,
+    pages: parking_lot::Mutex<std::collections::HashMap<String, (std::time::Instant, Arc<Shown>)>>,
+}
+
+/// A page's rows and its incidents.
+type Shown = (Vec<Row>, Vec<Value>);
+
+impl StatusCache {
+    /// Something a page shows changed: every page is read again.
+    pub(crate) fn forget(&self) {
+        self.generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.pages.lock().clear();
+    }
+}
+
 /// One thing shown, as the page has it: who it is, whether it's up now, and its days.
-struct Row {
+pub(crate) struct Row {
     label: String,
     up: Option<bool>,
     /// (day, checks or pings that passed, that failed or were missed).
@@ -60,11 +103,61 @@ struct Row {
 }
 
 impl Apps {
-    /// A check's run, or a heartbeat's ping (true) or miss (false), counted on today.
-    pub(crate) async fn status_count(self: &Arc<Self>, key: String, ok: bool) {
+    /// A check's run, or a heartbeat's ping (true) or miss (false), counted on today, with what
+    /// it is now (`up`): whether it was down before, when it's up now and that changed (a check
+    /// back after a restart, which its memory doesn't know).
+    pub(crate) async fn status_count(self: &Arc<Self>, key: String, ok: bool, up: bool) -> bool {
         let day = today();
-        if let Err(e) = self.db(move |s| s.status_day_add(&key, day, ok)).await {
-            tracing::warn!(error = %e, "apps: a status page's day wasn't counted");
+        match self.db(move |s| s.status_day_add(&key, day, ok, up)).await {
+            Ok(None) => false,
+            Ok(Some(was)) => {
+                self.status_cache.forget();
+                was.as_deref() == Some("down")
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "apps: a status page's day wasn't counted");
+                false
+            }
+        }
+    }
+
+    /// The open incidents a check or heartbeat opened that nothing will close any more: its
+    /// check or heartbeat gone, off the page, its environment paused or in maintenance, its
+    /// service deleted. Resolved by the service's owner (anyone's, for a deleted one).
+    pub(crate) async fn status_sweep(self: &Arc<Self>, services: &[crate::store::ServiceRow]) {
+        let Ok(open) = self.db(|s| s.open_auto_incidents()).await else { return };
+        let mut by_project: std::collections::HashMap<String, Vec<String>> = Default::default();
+        for (p, k) in open {
+            by_project.entry(p).or_default().push(k);
+        }
+        for (p, keys) in by_project {
+            let p2 = p.clone();
+            let Ok((Some(page), envs)) = self
+                .db(move |s| {
+                    let page = s.status_page(&p2)?;
+                    let mut envs = Vec::new();
+                    for svc in s.services(Some(&p2))? {
+                        envs.extend(s.environments(&svc.id)?);
+                    }
+                    Ok((page, envs))
+                })
+                .await
+            else {
+                continue;
+            };
+            let mine: Vec<crate::store::ServiceRow> = services.iter().filter(|s| s.project == p).cloned().collect();
+            let live: Vec<String> = shown(&page, &mine, &envs, true).into_iter().map(|(k, _, _)| k).collect();
+            for k in keys.into_iter().filter(|k| !live.contains(k)) {
+                // check:<service>/… or hb:<service>/…
+                let sid = k.split_once(':').and_then(|(_, r)| r.split('/').next()).unwrap_or_default().to_string();
+                if mine.iter().any(|s| s.id == sid) && !self.owns(&sid) {
+                    continue;
+                }
+                let (p, at) = (p.clone(), code_sql::now_ms());
+                if self.db(move |s| s.update_incident(&p, None, Some(&k), "resolved", "It's no longer checked.", at)).await.unwrap_or(false) {
+                    self.status_cache.forget();
+                }
+            }
         }
     }
 
@@ -96,6 +189,7 @@ impl Apps {
         }
         let (p, slug, j) = (project.to_string(), crate::model::random(10).to_ascii_lowercase(), serde_json::to_string(&items).expect("items serialize"));
         let page = self.db(move |s| s.put_status_page(&p, &slug, &title, &j)).await?;
+        self.status_cache.forget();
         self.status_page_view(page)
     }
 
@@ -120,6 +214,7 @@ impl Apps {
         let (title, state, text) = incident_fields(&body, true)?;
         let (p, at) = (project.to_string(), code_sql::now_ms());
         let id = self.db(move |s| s.open_incident(&p, &title, &state, &text, None, at)).await?.expect("a person's always opens");
+        self.status_cache.forget();
         Ok(json!({ "id": id }))
     }
 
@@ -129,27 +224,39 @@ impl Apps {
         let (_, state, text) = incident_fields(&body, false)?;
         let (p, i, at) = (project.to_string(), id.to_string(), code_sql::now_ms());
         match self.db(move |s| s.update_incident(&p, Some(&i), None, &state, &text, at)).await? {
-            true => Ok(()),
+            true => {
+                self.status_cache.forget();
+                Ok(())
+            }
             false => Err(Error::NotFound(format!("no incident {id}"))),
         }
     }
 
     /// A check going down or a heartbeat missed (`open`), or either back: the incident of its
     /// key on the project's status page, if it has one.
-    pub(crate) async fn status_incident(self: &Arc<Self>, service: &str, key: String, label: String, open: bool) {
+    /// Only for what the page shows (its items, never a preview's), under the label it shows.
+    pub(crate) async fn status_incident(self: &Arc<Self>, service: &str, key: String, open: bool) {
         let sid = service.to_string();
-        let Ok(svc) = self.db(move |s| s.service(&sid)).await else { return };
-        let p = svc.project.clone();
-        if !matches!(self.db(move |s| s.status_page(&p)).await, Ok(Some(_))) {
+        let Ok((page, services, envs)) = self
+            .db(move |s| {
+                let svc = s.service(&sid)?;
+                let envs = s.environments(&svc.id)?;
+                Ok((s.status_page(&svc.project)?, vec![svc], envs))
+            })
+            .await
+        else {
             return;
-        }
-        let (p, at) = (svc.project.clone(), code_sql::now_ms());
+        };
+        let Some(page) = page else { return };
+        let (p, at) = (page.project.clone(), code_sql::now_ms());
         let r = if open {
-            let title = format!("{} · {label} is down", svc.name);
+            let Some((_, label, _)) = shown(&page, &services, &envs, false).into_iter().find(|(k, _, _)| *k == key) else { return };
+            let title = format!("{label} is down");
             self.db(move |s| s.open_incident(&p, &title, "investigating", "Our checks found it down.", Some(&key), at)).await.map(|_| ())
         } else {
             self.db(move |s| s.update_incident(&p, None, Some(&key), "resolved", "It's back up.", at)).await.map(|_| ())
         };
+        self.status_cache.forget();
         if let Err(e) = r {
             tracing::warn!(service, error = %e, "apps: a status page's incident wasn't kept");
         }
@@ -157,7 +264,9 @@ impl Apps {
 
     pub async fn delete_status_page(self: &Arc<Self>, project: &str) -> Result<()> {
         let p = project.to_string();
-        self.db(move |s| s.delete_status_page(&p)).await
+        self.db(move |s| s.delete_status_page(&p)).await?;
+        self.status_cache.forget();
+        Ok(())
     }
 
     fn status_page_view(&self, page: Page) -> Result<Value> {
@@ -174,35 +283,41 @@ impl Apps {
         self.db(move |s| s.status_page_by_slug(&slug)).await.ok().flatten()
     }
 
-    /// What a page shows now: its items (or everything), each up or down and its days.
-    async fn status_rows(self: &Arc<Self>, page: &Page) -> Vec<Row> {
-        let p = page.project.clone();
-        let Ok((services, envs)) = self.db(move |s| Ok((s.services(Some(&p))?, s.all_environments()?))).await else { return Vec::new() };
-        let mut wanted: Vec<(String, String, String, bool)> = Vec::new();
-        for svc in &services {
-            for e in envs.iter().filter(|e| e.service == svc.id && !e.ephemeral) {
-                for c in &e.checks {
-                    wanted.push((svc.id.clone(), e.name.clone(), c.name.clone(), true));
+    /// What a page shows now (each up or down and its days) and its incidents: read again
+    /// after [`CACHED`] or any change, so a flood of visitors reads the store once.
+    async fn status_now(self: &Arc<Self>, page: &Page) -> Arc<Shown> {
+        if let Some((at, v)) = self.status_cache.pages.lock().get(&page.project)
+            && at.elapsed() < CACHED
+        {
+            return v.clone();
+        }
+        let generation = self.status_cache.generation.load(std::sync::atomic::Ordering::SeqCst);
+        let (pg, since) = (page.clone(), today() - DAYS + 1);
+        let v = self
+            .db(move |s| {
+                let services = s.services(Some(&pg.project))?;
+                let mut envs = Vec::new();
+                for svc in &services {
+                    envs.extend(s.environments(&svc.id)?);
                 }
-                for h in &e.heartbeats {
-                    wanted.push((svc.id.clone(), e.name.clone(), h.name.clone(), false));
+                let mut rows = Vec::new();
+                for (key, label, _) in shown(&pg, &services, &envs, false) {
+                    let last = s.get_state(&format!("status-last:{key}"))?;
+                    rows.push(Row { label, up: last.map(|l| l == "up"), days: s.status_days(&key, since)? });
                 }
+                Ok((rows, s.incidents(&pg.project, code_sql::now_ms() - DAYS * 86_400_000)?))
+            })
+            .await
+            .unwrap_or_default();
+        let v = Arc::new(v);
+        let mut cache = self.status_cache.pages.lock();
+        if self.status_cache.generation.load(std::sync::atomic::Ordering::SeqCst) == generation {
+            if cache.len() >= 1000 {
+                cache.clear();
             }
+            cache.insert(page.project.clone(), (std::time::Instant::now(), v.clone()));
         }
-        if !page.items.is_empty() {
-            wanted.retain(|(s, e, n, check)| page.items.iter().any(|i| &i.service == s && &i.environment == e && (if *check { i.check.as_ref() } else { i.heartbeat.as_ref() }) == Some(n)));
-        }
-        let since = today() - DAYS + 1;
-        let mut rows = Vec::new();
-        for (sid, env, name, check) in wanted {
-            let key = if check { check_key(&sid, &env, &name) } else { heartbeat_key(&sid, &env, &name) };
-            let (k, k2) = (key.clone(), format!("status-last:{key}"));
-            let (days, last) = self.db(move |s| Ok((s.status_days(&k, since)?, s.get_state(&k2)?))).await.unwrap_or_default();
-            let svc_name = services.iter().find(|s| s.id == sid).map(|s| s.name.clone()).unwrap_or_default();
-            let label = if env == crate::model::PRODUCTION { format!("{svc_name} · {name}") } else { format!("{svc_name} ({env}) · {name}") };
-            rows.push(Row { label, up: last.map(|l| l == "up"), days });
-        }
-        rows
+        v
     }
 }
 
@@ -232,12 +347,14 @@ fn incident_fields(body: &Value, new: bool) -> Result<(String, String, String)> 
 
 /// The page on its own host: its HTML, or `/status.json`.
 pub(crate) async fn serve(apps: Arc<Apps>, page: Page, path: &str) -> Response {
-    let rows = apps.status_rows(&page).await;
+    if !matches!(path, "/" | "/status.json" | "/feed.xml") {
+        return (StatusCode::NOT_FOUND, "").into_response();
+    }
+    let now = apps.status_now(&page).await;
+    let (rows, incidents) = (&now.0, &now.1);
     let since = today() - DAYS + 1;
-    let p = page.project.clone();
-    let incidents = apps.db(move |s| s.incidents(&p, code_sql::now_ms() - DAYS * 86_400_000)).await.unwrap_or_default();
     if path == "/feed.xml" {
-        return feed(&page, &incidents);
+        return feed(&page, incidents);
     }
     let uptime = |days: &[(i64, i64, i64)]| {
         let (ok, all) = days.iter().fold((0, 0), |(o, a), (_, g, b)| (o + g, a + g + b));
@@ -247,20 +364,17 @@ pub(crate) async fn serve(apps: Arc<Apps>, page: Page, path: &str) -> Response {
         let items: Vec<Value> = rows.iter().map(|r| json!({ "name": r.label, "up": r.up, "uptime": uptime(&r.days), "days": (since..=today()).map(|d| r.day(d)).collect::<Vec<_>>() })).collect();
         return (StatusCode::OK, [(header::CACHE_CONTROL, "public, max-age=30")], axum::Json(json!({ "title": page.title, "up": rows.iter().all(|r| r.up != Some(false)), "items": items, "incidents": incidents }))).into_response();
     }
-    if path != "/" {
-        return (StatusCode::NOT_FOUND, "").into_response();
-    }
     let all_up = rows.iter().all(|r| r.up != Some(false));
     let clock = |ms: i64| chrono::DateTime::from_timestamp_millis(ms).map(|d| d.format("%Y-%m-%d %H:%M UTC").to_string()).unwrap_or_default();
     let mut history = String::new();
-    for i in &incidents {
+    for i in incidents {
         let open = i["resolved_at"].is_null();
         let ups: String = i["updates"].as_array().into_iter().flatten().rev().map(|u| format!("<p><b>{}</b> · {}<br>{}</p>", crate::public::escape(u["state"].as_str().unwrap_or("")), clock(u["at"].as_i64().unwrap_or(0)), crate::public::escape(u["text"].as_str().unwrap_or("")))).collect();
         history.push_str(&format!("<article class=\"{}\"><h2>{}</h2>{ups}</article>", if open { "inc open" } else { "inc" }, crate::public::escape(i["title"].as_str().unwrap_or(""))));
     }
     let esc = crate::public::escape;
     let mut list = String::new();
-    for r in &rows {
+    for r in rows {
         let state = match r.up {
             Some(true) => "<span class=up>up</span>",
             Some(false) => "<span class=down>down</span>",

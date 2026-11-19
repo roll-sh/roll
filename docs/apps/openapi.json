@@ -1856,7 +1856,7 @@
               }
             }
           },
-          "description": "`{ keep_variables? }` (default false: the variables come back as they were when it was live)"
+          "description": "`{ keep_variables?, override? }` (default false: the variables come back as they were when it was live; `override` puts a never-live `ready` build live during a freeze, audited)"
         },
         "responses": {
           "202": {
