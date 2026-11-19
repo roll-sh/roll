@@ -1000,10 +1000,13 @@ waits on a sibling PR reaching main is last.
    Cross App Access sandbox needs an account: the review pack's decision 5). The draft names the
    tenant `tenant`; a provider whose assertions say it another way (Entra's own tokens use `tid`)
    gets a mapping once its ID-JAGs are checked, never a guess.
-12. **Lockdown by default where roll's own agents act on outside text:** roll code agents and
-   automations that pick up issues and chat messages (the agents thread's call; no agents thread is
-   running to tell), and chat messages that reach an agent marked `outside` (an install's
-   non-members can't drive roll, so mostly members' text).
+12. **Outsiders' text reaching roll's own agents:** checked 2026-11-19. An issue or comment from
+   someone GitHub says can't push starts no automation unless its trigger says `anyone`
+   (`chatops/github.rs`, as GitHub's lockdown does), forks' code waits for `approve-run`, and only
+   an install's members drive roll from Slack or Discord. Left, the agents area's call: when a
+   trigger says `anyone`, run its agent with a read-only grant (or ask before every write), since
+   the outsider's text is then the agent's task. roll's agents don't connect to `/v1/mcp` (their
+   MCP server is the orchestrator's), so `?lockdown` isn't where this belongs.
 13. **More MCP Apps views:** a rollback button on a deploy (calling `apps_rollback` through the
    host, so through the gate, as deploy), once a host that renders views is confirmed (the review
    pack's decision 4). A preview's screenshot against its baseline needs no view: hosts render
