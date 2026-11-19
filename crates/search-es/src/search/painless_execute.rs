@@ -106,7 +106,7 @@ pub fn execute(ctx: &Ctx) -> EsResult<Reply> {
             let score = match setup.get("query") {
                 Some(q) => {
                     let (parsed, _) = crate::query::parse_query(q, None, &[])?;
-                    let qctx = super::query::QueryCtx::new(ctx.cluster, &st, &idx, &table, &searcher, ctx.now_ms);
+                    let qctx = super::query::QueryCtx::new(ctx.cluster, &st, &idx, &table, &searcher, ctx.now_ms, crate::search::query::Reader::of(crate::xpack::security::dls::ReadSecurity::of(ctx)));
                     let query = qctx.to_query(&parsed)?;
                     let e = searcher.explain(&query, seg.base + local).map_err(crate::engine::convert::index_error)?;
                     if e.is_match() { e.value() as f64 } else { 0.0 }
