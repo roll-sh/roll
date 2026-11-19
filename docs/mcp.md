@@ -690,6 +690,11 @@ previews are listed once those products are on.
 | `secrets_list` | Secret names and metadata in an environment (never values). | `GET /v1/secrets/projects/{project}/environments/{env}/secrets` |
 | `secrets_reveal` | Read a secret's value. | `GET /v1/secrets/projects/{project}/environments/{env}/secrets/{name}/value` |
 | `secrets_set` | Create or change a secret's value. | `PUT /v1/secrets/projects/{project}/environments/{env}/secrets/{name}` |
+| `secrets_import` | A .env file (or JSON) into an environment as one change; a change request on a protected one. | `POST /v1/secrets/projects/{project}/environments/{env}/import` |
+| `secrets_rollback` | An environment's values back to a change or a time, as a new change (destructive). | `POST /v1/secrets/projects/{project}/environments/{env}/rollback` |
+| `secrets_create_environment` | A new environment (project admin). | `POST /v1/secrets/projects/{project}/environments` |
+| `secrets_link_targets` | The resources a key can link to, with their fields. | `GET /v1/secrets/projects/{project}/links` |
+| `secrets_link` | Link a key to a resource (or unlink it). | `PUT /v1/secrets/projects/{project}/environments/{env}/secrets/{name}` |
 | `secrets_delete` | Delete a secret. | `DELETE /v1/secrets/projects/{project}/environments/{env}/secrets/{name}` |
 | `secrets_list_aws_roles` | A project's registered AWS roles for dynamic AWS keys (registering is admin, in the dashboard). | `GET /v1/secrets/projects/{project}/aws-roles` |
 | `secrets_list_outside_databases` | Servers roll doesn't run (Postgres, MySQL, SQL Server, ClickHouse, RabbitMQ, Redis, MongoDB) whose users a project rotates (never the admin URL; adding one is admin, in the dashboard). | `GET /v1/secrets/projects/{project}/outside-databases` |
