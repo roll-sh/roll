@@ -424,6 +424,58 @@ The UPDATE's and DELETE's ~35 instructions a row past the model are `estlocks::r
 its `locks_maybe` test; VACUUM's ~2 M datminmxid's pass over the database's relations. Rows equal in
 every run; peaks (cgroup / VmHWM) b1 303-398 / 269-294 MB, n3 342-396 / 269-288 MB.
 
+### cand/a261-3: the PGO training (PGO builds of `bc9102ebb`, one instrumented build trained three ways)
+
+**pbo** the old `tools/pgo-train.sh` (TPC-H SF 0.2, unweighted), **pbn** SF 1 with TPC-H at 45% of
+the counts (dropped), **pbe** SF 1 with every class at equal weight (kept). User instructions a
+run (TPC-H) or an operation, % per pair against pbo; 3 alternating pairs (TPC-H, range), each pair
+in its own `tools/lane.sh` hold.
+
+**TPC-H, pbe against pbo** (5 runs a query a pass)
+
+| query | instructions % per pair | cycles % per pair |
+|---|---|---|
+| q01 | +0.4 / +0.4 / +0.4 | +4.1 / +6.4 / -4.0 |
+| q02 | -0.3 / -0.4 / -0.4 | +1.4 / +7.6 / -8.0 |
+| q03 | +0.0 / +0.1 / -0.2 | +4.8 / +1.5 / -2.3 |
+| q04 | -1.0 / -0.9 / -0.8 | +11.3 / -1.8 / +0.6 |
+| q05 | -0.2 / -0.1 / -0.5 | -3.3 / -11.2 / -4.3 |
+| q06 | -1.6 / -1.4 / -1.7 | +16.1 / -12.4 / -1.9 |
+| q07 | +0.2 / -0.0 / -0.4 | +15.8 / -2.3 / -0.0 |
+| q08 | -0.2 / -0.4 / -0.1 | +20.8 / +6.1 / -6.9 |
+| q09 | -0.4 / -0.3 / -1.0 | -8.9 / -0.1 / -4.2 |
+| q10 | -0.1 / -0.5 / -0.3 | -4.7 / +4.0 / -7.3 |
+| q11 | -0.2 / +0.3 / -0.2 | -1.3 / -9.4 / +8.6 |
+| q12 | -0.4 / -0.4 / -0.4 | -7.3 / +1.6 / +0.7 |
+| q13 | -0.3 / -0.3 / -0.2 | -5.6 / +7.0 / -1.5 |
+| q14 | +0.1 / -0.2 / +1.2 | -4.1 / +4.6 / +7.3 |
+| q15 | -1.8 / -1.9 / -1.8 | -5.8 / -5.7 / +0.4 |
+| q16 | -11.7 / -11.8 / -11.3 | -11.3 / -13.2 / -8.6 |
+| q17 | -0.4 / -0.4 / -0.2 | -1.0 / -12.9 / +9.7 |
+| q18 | -0.5 / -0.5 / -0.5 | +2.3 / -4.5 / +5.4 |
+| q19 | -0.2 / -0.3 / +0.5 | +9.2 / -13.4 / +3.4 |
+| q20 | +0.1 / +0.1 / -0.4 | -6.2 / -35.1 / +18.4 |
+| q21 | -0.2 / -0.2 / -0.2 | +1.7 / -13.1 / -2.8 |
+| q22 | -1.9 / -1.4 / -0.9 | +7.3 / -4.6 / +7.9 |
+| all 22 | -0.84 / -0.86 / -0.89 (103.5 -> 102.6 G) | -0.73 / -2.89 / -0.82 |
+
+foreign cores per pass: pbo 2.00 1.94 2.86; pbe 1.95 1.68 2.72. Result hashes: PostgreSQL's.
+pbn against pbo: the 22 +0.24 / +0.37% (its second pair lost counts), q16 -8.5, most others +0.5
+to +3.5.
+
+**The other classes, pbe against pbo** (`~/.cache/a261/oltp/`, agent 255's pair harness: the
+server in a container on the lane's server CPUs, perf stat of its process over a 10 s run)
+
+| workload | lane | pairs | pbo instr/op | instructions % per pair (median) | foreign cores |
+|---|---|---:|---:|---|---|
+| point select, 1 client | A | 4 | 43,122 | +0.19 / +0.02 / -2.30 / -1.04 (-0.5) | 4.7-7.1 |
+| point select, 8 clients | A | 5 | 31,387 | +0.01 / -0.73 / -0.65 / +0.00 / -0.31 (-0.3) | 5.8-7.4 |
+| short write transaction, 8 clients | A | 5 | 208,035 | +1.92 / -5.18 / -5.08 / +0.82 / -8.86 (-5.1) | 4.4-7.3 |
+| range read (100 rows), 8 clients | B | 3 | 283,136 | -1.24 / -1.22 / -1.21 | 1.3-6.4 |
+| bulk (1M rows, the bench client's script) | C | 2 | 46.4 G | -0.42 / -0.42 | 3.0-4.4 |
+
+q01: plain dist 7.83 G, pbo 8.10, pbn 8.14, pbe 8.14 (HANDOFF: the typed walk's code under PGO).
+
 ## Analytic CPU, round 5 (2026-11-18/19, agent 258)
 
 HANDOFF "Analytic CPU, round 5" has what changed. Lane C (servers in containers on CPUs

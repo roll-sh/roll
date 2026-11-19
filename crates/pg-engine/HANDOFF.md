@@ -10526,11 +10526,13 @@ the whole pipeline):
    `LLVM_PROFILE_FILE=<dir>/engine-%p-%m.profraw`, stopped with SIGTERM (the exit handlers write
    the profile); point reads (extended binary, simple, pgbench extended / prepared / simple),
    range reads, short write transactions (8 / 32 / 1 clients, pgbench tpcb-like, single-row
-   INSERT / UPDATE / upsert / DELETE), bulk (1M rows), TPC-H SF0.2 (22 queries, parallel),
-   startup and restarts, catalog DDL and psql's / ORMs' introspection, every 25th golden file;
-   about 5 minutes; all data generated in the script;
+   INSERT / UPDATE / upsert / DELETE), bulk (1M rows), TPC-H SF1 (22 queries, parallel; SF0.2
+   before agent 261's round), startup and restarts, catalog DDL and psql's / ORMs'
+   introspection, every 25th golden file; each class's raw profiles in a directory of its own;
+   about 10 minutes; all data generated in the script;
 3. `llvm-profdata merge` (the toolchain's, `rustup component add llvm-tools`; Debian's LLVM can't
-   read rustc's profiles);
+   read rustc's profiles): each class's profile, then the classes with equal weight (each
+   one's counts brought to the largest class's total: "Analytic CPU, round 6");
 4. the optimised dist build: `RUSTFLAGS="-Cprofile-use=<profdata> -Cllvm-args=-no-pgo-warn-mismatch"`,
    another target dir;
 5. it prints the profile's and the binary's SHA-256 and writes them to `<out>/BUILD.txt`.
@@ -11745,6 +11747,49 @@ hashes are PostgreSQL's.
   with the shorter walk, is built (`b4`, `~/.cache/a261/dev` branch `gate-b4`) and not yet
   gated; the real fix is the brief's: the probe and the partial count as one batch kernel over
   the decoded columns.
+
+- **cand/a261-3 (on cand/a261-2: the docs only): the PGO training at TPC-H SF 1, its classes
+  merged with equal weight** (`tools/pgo-train.sh`: each class's raw profiles in a directory of
+  its own, the engine restarted into it; TPC-H at `PGO_TPCH_SF`, default 1; `tools/dist-pgo.sh`:
+  each class's counts multiplied by the whole number that brings its total to the largest
+  class's, TPC-H's; `PGO_KEEP=1` keeps the class profiles; `tools/pgo-hotcov.py` reports how much
+  of each class's counts a merged profile's hot blocks hold). One instrumented build of
+  `bc9102ebb` trained three ways (`~/.cache/a261/scripts/train3.sh`): the old script (TPC-H SF
+  0.2, one profile: 34.1 G counts, TPC-H's 15.3 G of them, 45%), the per-class script at SF 1
+  (TPC-H 66.8 G, every other class together 21.1 G: TPC-H 76% unweighted) and TPC-H alone at SF
+  0.2. **What the weighting decides**: LLVM optimises as hot the blocks that make 99% of the
+  merged counts; the share of each class's own counts that falls in them
+  (`pgo-hotcov.py`):
+
+  | profile | hot blocks | TPC-H | point | range | short | bulk | catalog | regress |
+  |---|---:|---:|---:|---:|---:|---:|---:|---:|
+  | old (SF 0.2, unweighted) | 12,024 | 98.83 | 99.80 | 99.43 | 97.46 | 99.62 | 96.83 | 86.07 |
+  | SF 1 unweighted (agent 258's) | 9,767 | 99.66 | 99.03 | 97.12 | 93.82 | 99.34 | 95.91 | 81.24 |
+  | SF 1, TPC-H at 45% (the others x4) | 11,606 | 99.49 | 99.79 | 99.48 | 97.50 | 99.65 | 96.65 | 84.91 |
+  | **SF 1, equal weight (kept)** | 16,651 | 99.42 | 99.95 | 99.93 | 98.91 | 99.82 | 98.67 | 95.46 |
+
+  SF 1 unweighted takes hot code from the short transactions and range reads (agent 258's
+  point-read pairs could not show it on a loaded lane A); equal weight gives every class more of
+  its counts in hot code than the old profile. Measured, PGO builds of `bc9102ebb` (each against
+  `pbo`, the old training): **TPC-H at 45%** (`pbn`, 3 pairs): the 22 +0.24 / -11.7 (a pass's lost
+  counts) / +0.37%, most queries +0.5 to +3.5% (q11 +3.5, q03 +2.1, q07 +2.1), q16 -8.5: dropped.
+  **Equal weight** (`pbe`): TPC-H (3 pairs) the 22 -0.84 / -0.86 / -0.89% user instructions,
+  q16 -11.7 / -11.8 / -11.3, q15 -1.8 / -1.9 / -1.8, q06 -1.6 / -1.4 / -1.7, q22 -1.9 / -1.4 / -0.9,
+  q04 -1.0 / -0.9 / -0.8, q01 +0.4 x3, the rest within +-0.5; range reads, 8 clients (lane B, 3
+  pairs with counts) -1.24 / -1.22 / -1.21% user instructions a query; bulk (lane C, 1M rows)
+  -0.42 / -0.42 (a third pair's window missed part of the run); point selects (lane A) 1 client
+  +0.19 / +0.02 / -2.30 / -1.04% user instructions a select (4 pairs with counts), 8 clients +0.01 / -0.73 / -0.65 / +0.00 / -0.31; short write transactions, 8 clients +1.92 / -5.18 / -5.08 / +0.82 / -8.86 (median -5.1). **Lane A
+  was never quiet** (4.4-7.4 foreign cores in every pair: agents 255 and 259's series): the
+  point-select counts repeat within 0.7%, the short transactions' within 7% (their lock waits
+  and group commits move with the load); in-process counts weren't taken (they measure the bench
+  client's release build, not the PGO binary). Training takes ~10 minutes instead of ~6.
+- **q01 under PGO is no training matter**: plain dist 7.83 G user instructions, PGO with the old
+  training 8.10, at 45% 8.14, with equal weight 8.14 (each 3 passes, within 0.05%). By function
+  (`perf record`, q01): `Pre::decode` 40% of plain's and 44% of PGO's: the typed walk's numeric
+  step (`walk_row`, `storage/cols.rs` 520-524) keeps `pos` and the slot pointers in memory under
+  PGO (spills and reloads around the 32-byte store of each `(i128, u32)`), the other functions
+  the same. The fix is in the walk's code (fewer live values across the step dispatch), for both
+  builds: item 3's.
 
 ## Analytic CPU, round 5 (agent 258)
 
