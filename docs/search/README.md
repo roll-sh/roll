@@ -379,6 +379,80 @@ hands the deletion on; one that died is overruled by the next load, which hands 
 indices with analytics on and the catalog drops every other index's rows). Deleting a cluster
 deletes its analytics with its other rows when it's purged.
 
+## Query suggestions
+
+Autocomplete built from real searches, like Algolia's Query Suggestions and Elastic App Search's
+query suggestions: roll turns an index's search analytics into a suggestions index and keeps it
+fresh, so a search box's autocomplete needs no suggestion index built and refreshed by hand. The
+Relevance tab's "Autocomplete" section turns it on, shows the heaviest suggestions and the last
+build, blocks a term in one click and tries a prefix.
+
+- **Turning it on.** Index settings next to `index.roll.analytics.enabled`, so they follow
+  templates, aliases and data streams like it does (registered in both dialects with no default,
+  so `include_defaults` stays Elasticsearch's). Analytics must be on too: suggestions come only
+  from that index's own analytics.
+
+  | setting | default | |
+  | --- | --- | --- |
+  | `index.roll.suggestions.enabled` | off | |
+  | `index.roll.suggestions.index` | `<index>-suggestions` | the alias clients query |
+  | `index.roll.suggestions.min_count` | 5 | searches a query needs in the window |
+  | `index.roll.suggestions.min_hits` | 1 | results its searches found on average (0 lets queries that found nothing through) |
+  | `index.roll.suggestions.lookback` | `30d` | the window, 1h to the 30 days analytics keep |
+  | `index.roll.suggestions.interval` | `1d` | how often it's rebuilt, at least `1h` |
+  | `index.roll.suggestions.max` | 1000 | suggestions kept, at most 10,000 |
+  | `index.roll.suggestions.block` | | queries never suggested (normalized as analytics keep them) |
+  | `index.roll.suggestions.block_prefix` | | prefixes of queries never suggested |
+  | `index.roll.suggestions.click_boost` | 1 | how much click-through raises a weight (0 to 100) |
+
+- **Weight**: a query's searches in the window, raised by its click-through once clients report
+  clicks (`search_click` events, as for analytics): `searches × (1 + click_boost × ctr)`, ctr at
+  most 1. So a query people search less but pick a result for can rank above one they search more
+  and abandon. Ties go to the more searched query, then by text
+  (`search_es::query_suggestions::plan`).
+- **A build** (`crates/search-control/src/suggestions.rs`), on the cluster's owner node: the
+  index's analytics over the window (the catalog's hourly ring for windows up to 7 days, the
+  daily ring beyond, plus what the node recorded since the last metering pass), at most 20,000
+  queries, charged to the cluster's `request` breaker. The suggestions go into a new index
+  `<alias>-<ms>` (one shard; a `completion` field `suggest` and a `search_as_you_type` field
+  `query`, plus `weight`, `searches` and `clicks`; `_id` is the query). It's refreshed, then one
+  `_aliases` call adds the alias to it and removes the previous build, so a reader sees the old
+  suggestions or the new, never half of them or none. A build that fails partway deletes what it
+  wrote; the alias never moved. When the suggestions come out exactly as the last build's (a
+  fingerprint of each suggestion and weight), nothing is written. Builds of one index run one at
+  a time. A concrete index or someone else's alias under the alias name is never touched: the
+  build fails and says to name another.
+- **When.** The catalog (`search_suggestions`) keeps, per index, the settings it was last built
+  with, when it's next due, the last build (when, how many, how long, any error) and its 50
+  heaviest suggestions. The metering pass builds what's due on the clusters loaded on its node,
+  and at once when the settings changed (turning it on, a new block). A sleeping cluster isn't
+  loaded to find out: every `job_wake_interval` its due suggestions are worked out from the
+  catalog alone, and the cluster is woken (and billed as loaded) only when the build would change
+  something; otherwise it's due again an interval on. An idle cluster with nothing new pays
+  nothing. A cluster unloading records the settings it leaves with. A branch keeps its parent's
+  suggestions index until it is due, then builds from its own analytics.
+- **Serving.** Clients query the alias with the APIs they already use: the completion suggester
+  (`"suggest": {"s": {"prefix": "sho", "completion": {"field": "suggest"}}}`, weights as
+  `_score`), or a `bool_prefix` `multi_match` on `query`, `query._2gram` and `query._3gram`
+  (Search UI's and InstantSearch's autocomplete through Searchkit). A browser key (#358) needs
+  only `read` on the alias (`<index>-suggestions`), never on the source index.
+- **roll API.** `GET /v1/search/clusters/{id}/indices/{index}/suggestions` (a read: settings, last
+  build, next due, heaviest suggestions; never wakes the cluster) and `POST
+  …/suggestions/rebuild` (a write: builds now and answers with `changed`). Both are about
+  `{index}` for roll-access and are MCP tools (`search_suggestions`,
+  `search_rebuild_suggestions`). A rebuild writes the suggestions index named by the source
+  index's settings, which only someone who may change those settings could point elsewhere.
+
+**Privacy.** Query text is the tenant's users' data. Suggestions only ever come from that index's
+own analytics, and a query searched fewer than `min_count` times in the window (default 5) never
+becomes a suggestion, so one person's unusual search isn't shown to everyone else; a blocked one
+never does either. The suggestions index and the catalog's row hold only what passed. Turning
+suggestions off stops rebuilds and leaves the index for the owner to delete. Turning analytics off
+(or deleting or replacing the source index) deletes the suggestions too, as it deletes the
+analytics: the catalog's row goes with the analytics' rows, and the next metering pass on the
+cluster's owner deletes every suggestions index roll built from it (marked at creation with
+`index.roll.suggestions.source` and `source_uuid`).
+
 ## Metering and pricing
 
 Every 60 s the control plane accounts each loaded cluster's loaded time exactly (load and unload
