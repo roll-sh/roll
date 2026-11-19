@@ -24,6 +24,7 @@
 //! search/c/<cluster>/i/<index uuid>/<shard>/<epoch:020>-<gen:020>-<token:016x>.json  shard manifest
 //! search/c/<cluster>/i/<index uuid>/<shard>/<epoch:020>-<gen:020>-<token:016x>.deleted.json  shard tombstone
 //! search/c/<cluster>/p/<pin>/<shard>.json                                 pinned commit point (snapshot contents, see `pins`)
+//! search/c/<cluster>/audit/<first ms:013>-<last ms:013>-<token:016x>.ndjson.zst  security audit entries (see `audit`)
 //! search/gc/pending.json                                                   garbage collector state
 //! search/gc/marks.bin                                                      what every manifest references (collector cache)
 //! ```
@@ -310,6 +311,28 @@ pub fn pins_prefix(cluster: &str) -> String {
 /// A pinned commit point: written once, never rewritten.
 pub fn pin_key(cluster: &str, pin: &ShardId) -> String {
     format!("{CLUSTER_PREFIX}{cluster}/p/{}/{}.json", pin.index_uuid, pin.shard)
+}
+
+/// A cluster's security audit entries (`crate::Store::write_audit`).
+pub fn audit_prefix(cluster: &str) -> String {
+    format!("{CLUSTER_PREFIX}{cluster}/audit/")
+}
+
+/// An object of audit entries recorded from `first_ms` to `last_ms` (Unix milliseconds).
+pub fn audit_key(cluster: &str, first_ms: i64, last_ms: i64, token: u64) -> String {
+    format!("{CLUSTER_PREFIX}{cluster}/audit/{first_ms:013}-{last_ms:013}-{token:016x}.ndjson.zst")
+}
+
+/// `(first_ms, last_ms)` of an audit object's file name.
+pub fn parse_audit_file(file: &str) -> Option<(i64, i64)> {
+    let stem = file.strip_suffix(".ndjson.zst")?;
+    let mut parts = stem.split('-');
+    let (first, last, token) = (parts.next()?, parts.next()?, parts.next()?);
+    let num = |s: &str| (s.len() == 13 && s.bytes().all(|b| b.is_ascii_digit())).then(|| s.parse::<i64>().ok()).flatten();
+    if parts.next().is_some() || token.len() != 16 || !token.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some((num(first)?, num(last)?))
 }
 
 /// A shard's tombstone: the generation that records its deletion while the point-in-time window

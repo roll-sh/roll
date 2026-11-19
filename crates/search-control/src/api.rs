@@ -64,8 +64,12 @@ pub fn router(control: Arc<Control>) -> Router {
         .route("/v1/search/clusters/{id}/usage", get(usage))
         .route("/v1/search/clusters/{id}/metrics", get(metrics))
         .route("/v1/search/clusters/{id}/slowlog", get(slowlog))
+        .route("/v1/search/clusters/{id}/audit", get(audit))
+        .route("/v1/search/clusters/{id}/analytics", get(analytics))
         .route("/v1/search/clusters/{id}/keys", post(create_key))
         .route("/v1/search/clusters/{id}/keys/{key}", axum::routing::delete(delete_key))
+        .route("/v1/search/clusters/{id}/remotes", get(remotes))
+        .route("/v1/search/clusters/{id}/remotes/{alias}", axum::routing::put(link_remote).delete(unlink_remote))
         .route("/v1/search/clusters/{id}/indices/{index}", get(index_get).put(index_create).delete(index_delete))
         .route("/v1/search/clusters/{id}/indices/{index}/mapping", axum::routing::put(index_mapping).get(index_mapping_get))
         .route("/v1/search/clusters/{id}/indices/{index}/settings", get(index_settings))
@@ -597,6 +601,37 @@ async fn delete_key(State(c): State<AppState>, Path((id, key)): Path<(String, St
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// The remote clusters a cluster holds credentials for (never the credentials).
+async fn remotes(State(c): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
+    Ok(Json(json!({ "remotes": c.remotes(&id).await? })))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LinkRemote {
+    /// The remote cluster: another of the caller's own (id or name).
+    cluster: String,
+    skip_unavailable: Option<bool>,
+    /// What the cross-cluster API key roll makes may search (Elasticsearch's `access`).
+    access: Option<Value>,
+    /// A cross-cluster API key the caller made on the remote instead (its `encoded` value).
+    api_key: Option<String>,
+}
+
+/// Links a cluster to another of the same owner as its remote `alias` (cross-cluster search).
+/// A remote the caller can't see, or another person's, answers 404 as a missing one does.
+async fn link_remote(State(c): State<AppState>, caller: Caller, Path((id, alias)): Path<(String, String)>, Json(b): Json<LinkRemote>) -> ApiResult<Value> {
+    if b.access.is_some() && b.api_key.is_some() {
+        return Err(ControlError::Invalid("give access (roll makes the key) or api_key (yours), not both".into()));
+    }
+    Ok(Json(c.link_remote(&id, &alias, &b.cluster, b.skip_unavailable, b.access, b.api_key.as_deref(), |t| caller.sees(t)).await?))
+}
+
+async fn unlink_remote(State(c): State<AppState>, Path((id, alias)): Path<(String, String)>) -> Result<StatusCode, ControlError> {
+    c.unlink_remote(&id, &alias).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 #[derive(Deserialize)]
 struct UsageQuery {
     days: Option<i64>,
@@ -620,6 +655,38 @@ async fn metrics(State(c): State<AppState>, Path(id): Path<String>, Query(q): Qu
 /// The search and indexing slow logs, newest first, as Elasticsearch's JSON lines.
 async fn slowlog(State(c): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
     Ok(Json(c.slowlog(&id).await?))
+}
+
+#[derive(Deserialize)]
+struct AuditParams {
+    /// Unix milliseconds, inclusive.
+    from: Option<i64>,
+    /// Unix milliseconds, exclusive.
+    to: Option<i64>,
+    /// Event names or categories, comma-separated.
+    event: Option<String>,
+    size: Option<usize>,
+}
+
+/// The cluster's security audit log, newest first (the caller's own cluster: `per_cluster`).
+async fn audit(State(c): State<AppState>, Path(id): Path<String>, Query(q): Query<AuditParams>) -> ApiResult<Value> {
+    let events = q.event.as_deref().unwrap_or_default().split(',').map(str::trim).filter(|e| !e.is_empty()).map(str::to_string).collect();
+    let query = search_server::audit::AuditQuery { from_ms: q.from, to_ms: q.to, events, size: q.size.unwrap_or(100) };
+    Ok(Json(c.audit(&id, &query).await?))
+}
+
+#[derive(Deserialize)]
+struct AnalyticsQuery {
+    index: Option<String>,
+    range: Option<String>,
+}
+
+/// Search analytics (`?index=&range=24h|7d|30d`): top queries, queries with no results and
+/// click-through. Runs on the cluster's owner (`per_cluster`), which adds what it recorded since
+/// the last pass.
+async fn analytics(State(c): State<AppState>, Path(id): Path<String>, Query(q): Query<AnalyticsQuery>) -> ApiResult<Value> {
+    let index = q.index.as_deref().filter(|i| !i.is_empty());
+    Ok(Json(c.analytics(&id, index, q.range.as_deref().unwrap_or("24h")).await?))
 }
 
 #[cfg(test)]

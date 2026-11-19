@@ -354,7 +354,13 @@ async fn people_see_only_their_own_clusters() {
 
     // Bob's cluster, by name or id, and the operator's: no such cluster for alice, on every route.
     let bob_id = b["id"].as_str().unwrap();
-    for path in ["/v1/search/clusters/bob-app".to_string(), format!("/v1/search/clusters/{bob_id}"), "/v1/search/clusters/ops/usage".into(), "/v1/search/clusters/bob-app/indices".into()] {
+    for path in [
+        "/v1/search/clusters/bob-app".to_string(),
+        format!("/v1/search/clusters/{bob_id}"),
+        "/v1/search/clusters/ops/usage".into(),
+        "/v1/search/clusters/bob-app/indices".into(),
+        "/v1/search/clusters/bob-app/audit".into(),
+    ] {
         let (s, v) = e.call_as("alice", Method::GET, &path, None).await;
         assert_eq!((s, v["error"].as_str()), (404, Some(&*format!("no search cluster {}", path.split('/').nth(4).unwrap()))), "{path}");
     }
@@ -915,6 +921,179 @@ async fn api_keys() {
     assert_eq!(send(reqwest::Method::PUT, "/_security/user/x", json!({"password": "pw-pw-pw-pw", "roles": ["superuser"]})).await, 403);
     let (s, _) = e.call(reqwest::Method::POST, "/v1/search/clusters/keys/keys", Some(json!({"name": "x", "access": "root"}))).await;
     assert_eq!(s, 400);
+}
+
+/// A cluster's audit log entries (`GET …/audit`), and the one of them that is `event` and
+/// whose entry passes `f`.
+async fn audit_entries(e: &Env, cluster: &str, query: &str) -> Vec<Value> {
+    e.get(&format!("/v1/search/clusters/{cluster}/audit{query}")).await["entries"].as_array().unwrap().clone()
+}
+
+fn audited<'a>(entries: &'a [Value], event: &str, f: impl Fn(&Value) -> bool) -> Option<&'a Value> {
+    entries.iter().find(|x| x["event"] == event && f(&x["entry"])).map(|x| &x["entry"])
+}
+
+/// The security audit log (docs/search/README.md, "Audit log"): a wrong password, a denied
+/// index, an API key made and invalidated and a role change each show up under Elasticsearch's
+/// event names with its fields, newest first; a granted request only once the cluster asks for
+/// it; an OpenSearch-flavor cluster records OpenSearch's categories as its stored audit config
+/// says; a deleted cluster's entries go with it, and come back with a restore.
+#[tokio::test]
+async fn the_audit_log_records_what_matters_for_security() {
+    use reqwest::Method;
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({"name": "aud"})).await;
+    let (user, pw) = creds(&c);
+    for (path, body) in [
+        ("/open/_doc/1?refresh=true", json!({"t": "x"})),
+        ("/secret/_doc/1?refresh=true", json!({"t": "y"})),
+        ("/_security/role/reader", json!({"indices": [{"names": ["open"], "privileges": ["read"]}]})),
+        ("/_security/user/bob", json!({"password": "bob-password-1", "roles": ["reader"]})),
+    ] {
+        let (s, v) = e.es(&user, &pw, Method::PUT, path, Some(body)).await;
+        assert!(s == 200 || s == 201, "{path}: {v}");
+    }
+    assert_eq!(e.es("bob@aud", "not-bobs-password", Method::GET, "/open/_search", None).await.0, 401);
+    assert_eq!(e.es("bob@aud", "bob-password-1", Method::GET, "/secret/_search", None).await.0, 403);
+    assert_eq!(e.es("bob@aud", "bob-password-1", Method::GET, "/open/_search", None).await.0, 200);
+    let k = e.post("/v1/search/clusters/aud/keys", json!({"name": "ci"})).await;
+    let key_id = k["id"].as_str().unwrap();
+    assert_eq!(e.call(Method::DELETE, &format!("/v1/search/clusters/aud/keys/{key_id}"), None).await.0, 204);
+    let (s, _) = e.es(&user, &pw, Method::PUT, "/_security/role/reader", Some(json!({"indices": [{"names": ["open", "more"], "privileges": ["read"]}]}))).await;
+    assert_eq!(s, 200);
+
+    let all = audit_entries(&e, "aud", "").await;
+    let failed = audited(&all, "authentication_failed", |x| x["user.name"] == "bob").expect("the wrong password");
+    assert_eq!((&failed["event.type"], &failed["url.path"], &failed["request.method"]), (&json!("rest"), &json!("/open/_search"), &json!("GET")), "{failed}");
+    assert_eq!(failed["origin.address"], "127.0.0.1", "the address the allowlist checks: {failed}");
+    let denied = audited(&all, "access_denied", |x| x["user.name"] == "bob").expect("the denied index");
+    assert_eq!(
+        (&denied["action"], &denied["indices"], &denied["user.realm"], &denied["authentication.type"], &denied["request.name"]),
+        (&json!("indices:data/read/search"), &json!(["secret"]), &json!("default_native"), &json!("REALM"), &json!("SearchRequest")),
+        "{denied}"
+    );
+    let put_user = audited(&all, "security_config_change", |x| x["event.action"] == "put_user").expect("the new user");
+    assert_eq!(put_user["put"]["user"], json!({"name": "bob", "enabled": true, "roles": ["reader"], "has_password": true}));
+    let created = audited(&all, "security_config_change", |x| x["event.action"] == "create_apikey").expect("the key");
+    assert_eq!((&created["create"]["apikey"]["id"], &created["create"]["apikey"]["name"]), (&json!(key_id), &json!("ci")), "{created}");
+    let invalidated = audited(&all, "security_config_change", |x| x["event.action"] == "invalidate_apikeys").expect("the revoked key");
+    assert_eq!(invalidated["invalidate"]["apikeys"]["ids"], json!([key_id]));
+    let role = audited(&all, "security_config_change", |x| x["event.action"] == "put_role").expect("the role change");
+    assert_eq!(role["put"]["role"]["role_descriptor"]["indices"][0]["names"], json!(["open", "more"]), "newest first: {role}");
+    assert!(audited(&all, "access_granted", |_| true).is_none(), "granted access isn't recorded by default");
+    let ats: Vec<i64> = all.iter().map(|x| x["at_ms"].as_i64().unwrap()).collect();
+    assert!(ats.windows(2).all(|w| w[0] >= w[1]), "newest first: {ats:?}");
+    let only = audit_entries(&e, "aud", "?event=access_denied").await;
+    assert!(!only.is_empty() && only.iter().all(|x| x["event"] == "access_denied"));
+    let later = audit_entries(&e, "aud", &format!("?from={}", ats[0] + 1)).await;
+    assert!(later.is_empty(), "{later:?}");
+
+    // Granted access once the cluster includes it; event names are checked; `enabled: false`
+    // records nothing more.
+    let settings = |v: Value| e.es(&user, &pw, Method::PUT, "/_cluster/settings", Some(json!({"persistent": v})));
+    let (s, v) = settings(json!({"xpack.security.audit.logfile.events.include": "bogus"})).await;
+    assert_eq!((s, v["error"]["reason"].as_str()), (400, Some("invalid event name specified [bogus]")), "{v}");
+    assert_eq!(settings(json!({"xpack.security.audit.logfile.events.include": "_all"})).await.0, 200);
+    assert_eq!(e.es("bob@aud", "bob-password-1", Method::GET, "/open/_search", None).await.0, 200);
+    let granted = audit_entries(&e, "aud", "?event=access_granted").await;
+    assert!(audited(&granted, "access_granted", |x| x["user.name"] == "bob" && x["indices"] == json!(["open"])).is_some(), "{granted:?}");
+    assert_eq!(settings(json!({"xpack.security.audit.enabled": false})).await.0, 200);
+    let before = audit_entries(&e, "aud", "").await.len();
+    assert_eq!(e.es("bob@aud", "wrong-again", Method::GET, "/", None).await.0, 401);
+    assert_eq!(audit_entries(&e, "aud", "").await.len(), before, "nothing recorded while disabled");
+
+    // OpenSearch: its categories, and its stored audit config takes effect.
+    let o = e.post("/v1/search/clusters", json!({"name": "aud-os", "flavor": "opensearch"})).await;
+    let (ou, opw) = creds(&o);
+    for (path, body) in [
+        ("/open/_doc/1?refresh=true", json!({"t": "x"})),
+        ("/secret/_doc/1?refresh=true", json!({"t": "y"})),
+        ("/_plugins/_security/api/roles/reader", json!({"index_permissions": [{"index_patterns": ["open"], "allowed_actions": ["read"]}]})),
+        ("/_plugins/_security/api/internalusers/carol", json!({"password": "Zq9#vLx2!pRt7mWk", "opendistro_security_roles": ["reader"]})),
+    ] {
+        let (s, v) = e.es(&ou, &opw, Method::PUT, path, Some(body)).await;
+        assert!(s == 200 || s == 201, "{path}: {v}");
+    }
+    assert_eq!(e.es("carol@aud-os", "not-carols", Method::GET, "/open/_search", None).await.0, 401);
+    assert_eq!(e.es("carol@aud-os", "Zq9#vLx2!pRt7mWk", Method::GET, "/secret/_search", None).await.0, 403);
+    let os = audit_entries(&e, "aud-os", "").await;
+    let failed = audited(&os, "FAILED_LOGIN", |x| x["audit_request_effective_user"] == "carol").expect("the wrong password");
+    assert_eq!((&failed["audit_request_layer"], &failed["audit_rest_request_path"], &failed["audit_format_version"]), (&json!("REST"), &json!("/open/_search"), &json!(4)), "{failed}");
+    let denied = audited(&os, "MISSING_PRIVILEGES", |x| x["audit_request_effective_user"] == "carol").expect("the denied index");
+    assert_eq!((&denied["audit_request_privilege"], &denied["audit_trace_indices"]), (&json!("indices:data/read/search"), &json!(["secret"])), "{denied}");
+    let write = audited(&os, "COMPLIANCE_INTERNAL_CONFIG_WRITE", |x| x["audit_trace_doc_id"] == "roles").expect("the role");
+    assert_eq!((&write["audit_request_effective_user"], &write["audit_compliance_operation"]), (&json!("admin"), &json!("UPDATE")), "{write}");
+    let (s, v) = e.es(&ou, &opw, Method::PATCH, "/_plugins/_security/api/audit", Some(json!([{"op": "replace", "path": "/config/audit/enable_rest", "value": false}]))).await;
+    assert_eq!(s, 200, "{v}");
+    let before = audit_entries(&e, "aud-os", "?event=FAILED_LOGIN").await.len();
+    assert_eq!(e.es("carol@aud-os", "still-not-carols", Method::GET, "/", None).await.0, 401);
+    assert_eq!(audit_entries(&e, "aud-os", "?event=FAILED_LOGIN").await.len(), before, "REST categories off");
+
+    // A deleted cluster's entries go with it (a new cluster of the same name starts empty) and
+    // come back when it is restored.
+    let id = c["id"].as_str().unwrap();
+    assert_eq!(e.call(Method::DELETE, "/v1/search/clusters/aud", None).await.0, 200);
+    e.post("/v1/search/clusters", json!({"name": "aud"})).await;
+    assert_eq!(audit_entries(&e, "aud", "").await, Vec::<Value>::new());
+    let (s, v) = e.call(Method::POST, &format!("/v1/search/clusters/{id}/restore"), Some(json!({"name": "aud-back"}))).await;
+    assert_eq!(s, 200, "{v}");
+    let back = audit_entries(&e, "aud-back", "?event=security_config_change").await;
+    assert!(audited(&back, "security_config_change", |x| x["event.action"] == "put_user").is_some(), "{back:?}");
+}
+
+/// No audit entry holds a credential, a query string or a request body: every secret the
+/// requests below carry (passwords, an API key, a token, the cluster's own password, markers in
+/// bodies and query strings) is looked for in the entries as the API answers them and in the
+/// objects as stored, with every event recorded.
+#[tokio::test]
+async fn audit_entries_hold_no_secrets() {
+    use base64::Engine;
+    use reqwest::Method;
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({"name": "sec"})).await;
+    let (user, pw) = creds(&c);
+    let (s, _) = e.es(&user, &pw, Method::PUT, "/_cluster/settings", Some(json!({"persistent": {"xpack.security.audit.logfile.events.include": "_all"}}))).await;
+    assert_eq!(s, 200);
+    let (s, _) = e.es(&user, &pw, Method::PUT, "/_security/role/r", Some(json!({"indices": [{"names": ["open"], "privileges": ["all"]}]}))).await;
+    assert_eq!(s, 200);
+    let (s, _) = e.es(&user, &pw, Method::PUT, "/_security/user/dave", Some(json!({"password": "USER-SECRET-pw-1", "roles": ["r"]}))).await;
+    assert_eq!(s, 200);
+    let (s, _) = e.es(&user, &pw, Method::POST, "/_security/user/dave/_password", Some(json!({"password": "USER-SECRET-pw-2"}))).await;
+    assert_eq!(s, 200);
+    assert_eq!(e.es("dave@sec", "WRONG-SECRET-pw", Method::GET, "/open/_search?q=QUERY-MARKER", None).await.0, 401);
+    assert_eq!(e.es("dave@sec", "USER-SECRET-pw-2", Method::POST, "/secret/_doc?routing=QUERY-MARKER", Some(json!({"t": "BODY-MARKER"}))).await.0, 403);
+    assert_eq!(e.es("dave@sec", "USER-SECRET-pw-2", Method::POST, "/open/_doc", Some(json!({"t": "BODY-MARKER"}))).await.0, 201);
+    let (s, k) = e.es(&user, &pw, Method::POST, "/_security/api_key", Some(json!({"name": "k", "role_descriptors": {"x": {"cluster": ["monitor"]}}, "metadata": {"m": 1}}))).await;
+    assert_eq!(s, 200, "{k}");
+    let key = k["api_key"].as_str().unwrap().to_string();
+    let encoded = base64::engine::general_purpose::STANDARD.encode(format!("{}@sec:{key}", k["id"].as_str().unwrap()));
+    let with = |h: String, path: &'static str| {
+        let (url, http) = (format!("{}{path}", e.es), e.http.clone());
+        async move { http.get(url).header("Authorization", h).send().await.unwrap().status().as_u16() }
+    };
+    assert_eq!(with(format!("ApiKey {encoded}"), "/secret/_search").await, 403);
+    let wrong_key = base64::engine::general_purpose::STANDARD.encode(format!("{}@sec:WRONG-KEY-SECRET", k["id"].as_str().unwrap()));
+    assert_eq!(with(format!("ApiKey {wrong_key}"), "/").await, 401);
+    assert_eq!(with("Bearer sec_BEARER-SECRET-token".into(), "/").await, 401);
+    let (s, _) = e.es(&user, &pw, Method::POST, "/_security/api_key/grant", Some(json!({"grant_type": "password", "username": "dave", "password": "USER-SECRET-pw-2", "api_key": {"name": "g"}}))).await;
+    assert_eq!(s, 200);
+
+    let secrets = ["USER-SECRET", "WRONG-SECRET", "QUERY-MARKER", "BODY-MARKER", "WRONG-KEY-SECRET", "BEARER-SECRET", key.as_str(), encoded.as_str(), pw.as_str(), "Basic ", "ApiKey ", "authorization", "Authorization"];
+    let answered = e.get("/v1/search/clusters/sec/audit?size=1000").await;
+    let entries = answered["entries"].as_array().unwrap();
+    for event in ["authentication_failed", "anonymous_access_denied", "access_denied", "access_granted", "security_config_change"] {
+        assert!(entries.iter().any(|x| x["event"] == event), "no {event} recorded to check: {answered}");
+    }
+    let mut stored = String::new();
+    for o in e.control.data.list_audit("sec").await.unwrap() {
+        stored.push_str(std::str::from_utf8(&e.control.data.read_audit(&o).await.unwrap().unwrap()).unwrap());
+    }
+    assert!(!stored.is_empty());
+    for (what, text) in [("answered", answered.to_string()), ("stored", stored)] {
+        for secret in secrets {
+            assert!(!text.contains(secret), "{what} audit entries hold {secret:?}: {text}");
+        }
+    }
 }
 
 /// Masking a branch (roll previews: `_update_by_query`, then `only_expunge_deletes` with
@@ -1868,6 +2047,9 @@ async fn an_s3_repository_moves_indices_between_clusters() {
     assert!(bucket.keys("prod/roll/indices/stray/").is_empty());
 }
 
+#[path = "control/cloud_repositories.rs"]
+mod cloud_repositories;
+
 fn gzip(raw: &[u8]) -> Vec<u8> {
     use std::io::Write;
     let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
@@ -2287,4 +2469,276 @@ async fn the_sweep_purges_after_the_window_and_branches_keep_their_data() {
         assert_eq!((s, v["_source"]["text"].as_str()), (200, Some("shared")), "{v}");
     }
     e.control.shutdown().await.unwrap();
+}
+
+/// Cross-cluster search between one person's clusters (docs/search/README.md, "Cross-cluster
+/// search"): linked through roll's API with a cross-cluster key of the remote, which roll keeps
+/// sealed and never shows; a search, `_msearch`, `_field_caps`, `_resolve/cluster` and
+/// `_resolve/index` reach the remote's indices as `alias:index`, within the key's access; another
+/// person's cluster can't be named, and answers as a missing one; revoking the key cuts the link.
+#[tokio::test]
+async fn cross_cluster_search_between_a_persons_own_clusters() {
+    use reqwest::Method;
+    let e = env().await;
+    let mk = |name: &'static str, who: &'static str| {
+        let e = &e;
+        async move {
+            let (s, c) = e.call_as(who, Method::POST, "/v1/search/clusters", Some(json!({ "name": name }))).await;
+            assert_eq!(s, 200, "{c}");
+            creds(&c)
+        }
+    };
+    let (app, app_pw) = mk("ann-app", "ann").await;
+    let (logs, logs_pw) = mk("ann-logs", "ann").await;
+    mk("bob-vault", "bob").await;
+    for (u, p, path, doc) in [
+        (&app, &app_pw, "/app/_doc/1", json!({ "level": "info", "msg": "app up" })),
+        (&logs, &logs_pw, "/logs-1/_doc/1", json!({ "level": "error", "msg": "disk full" })),
+        (&logs, &logs_pw, "/logs-1/_doc/2", json!({ "level": "info", "msg": "disk ok" })),
+        (&logs, &logs_pw, "/private/_doc/1", json!({ "level": "secret" })),
+    ] {
+        let (s, v) = e.es(u, p, Method::PUT, &format!("{path}?refresh=true"), Some(doc)).await;
+        assert_eq!(s, 201, "{v}");
+    }
+
+    // Another person's cluster can't be linked, and answers like one that doesn't exist; so does
+    // naming it in the settings.
+    for target in ["bob-vault", "nope"] {
+        let (s, v) = e.call_as("ann", Method::PUT, "/v1/search/clusters/ann-app/remotes/r", Some(json!({ "cluster": target }))).await;
+        assert_eq!((s, v["error"].as_str()), (404, Some(&*format!("no search cluster {target}"))), "{v}");
+    }
+    let refused: Vec<(u16, Value)> = futures::future::join_all(["bob-vault", "nope"].map(|t| {
+        e.es(&app, &app_pw, Method::PUT, "/_cluster/settings", Some(json!({ "persistent": { "cluster.remote.r.mode": "proxy", "cluster.remote.r.proxy_address": t } })))
+    }))
+    .await;
+    assert_eq!(refused[0].0, 400, "{:?}", refused[0]);
+    assert_eq!(refused[0].1["error"]["reason"].as_str().map(|r| r.replace("bob-vault", "X")), refused[1].1["error"]["reason"].as_str().map(|r| r.replace("nope", "X")));
+
+    // Her own: linked with a key that may search `logs-*` only.
+    let (s, link) = e.call_as("ann", Method::PUT, "/v1/search/clusters/ann-app/remotes/logs", Some(json!({ "cluster": "ann-logs", "access": { "search": [{ "names": ["logs-*"] }] } }))).await;
+    assert_eq!((s, link["cluster"].as_str(), link["minted"].as_bool()), (200, Some("ann-logs"), Some(true)), "{link}");
+    let key_id = link["key_id"].as_str().unwrap().to_string();
+    let (_, listed) = e.call_as("ann", Method::GET, "/v1/search/clusters/ann-app/remotes", None).await;
+    assert_eq!(listed["remotes"][0]["alias"], "logs", "{listed}");
+    assert!(!listed.to_string().contains("encoded") && !link.to_string().contains("api_key"), "credentials never shown: {listed} {link}");
+    let (_, info) = e.es(&app, &app_pw, Method::GET, "/_remote/info", None).await;
+    assert_eq!((info["logs"]["connected"].as_bool(), info["logs"]["cluster_credentials"].as_str()), (Some(true), Some("::es_redacted::")), "{info}");
+
+    // One search over both: hits named by cluster, aggregations merged, a `_clusters` section.
+    let q = json!({ "query": { "match_all": {} }, "aggs": { "levels": { "terms": { "field": "level.keyword" } } }, "sort": [{ "_index": "asc" }] });
+    let (s, v) = e.es(&app, &app_pw, Method::POST, "/app,logs:logs-*/_search", Some(q.clone())).await;
+    assert_eq!(s, 200, "{v}");
+    let indices: Vec<&str> = v["hits"]["hits"].as_array().unwrap().iter().map(|h| h["_index"].as_str().unwrap()).collect();
+    assert_eq!(indices, ["app", "logs:logs-1", "logs:logs-1"], "{v}");
+    assert_eq!(v["hits"]["total"]["value"], 3, "{v}");
+    let buckets: Vec<(String, i64)> = v["aggregations"]["levels"]["buckets"].as_array().unwrap().iter().map(|b| (b["key"].as_str().unwrap().into(), b["doc_count"].as_i64().unwrap())).collect();
+    assert_eq!(buckets, [("info".to_string(), 2), ("error".to_string(), 1)], "{v}");
+    assert_eq!((v["_clusters"]["total"].as_i64(), v["_clusters"]["successful"].as_i64()), (Some(2), Some(2)), "{v}");
+    assert_eq!(v["_clusters"]["details"]["logs"]["indices"], "logs-*", "{v}");
+    // `_msearch` items too.
+    let r = e.http.post(format!("{}/_msearch", e.es)).basic_auth(&app, Some(&app_pw)).header("content-type", "application/x-ndjson").body("{\"index\":\"logs:logs-1\"}\n{\"query\":{\"match\":{\"msg\":\"disk\"}}}\n").send().await.unwrap();
+    let m: Value = r.json().await.unwrap();
+    assert_eq!(m["responses"][0]["hits"]["total"]["value"], 2, "{m}");
+
+    // The key's access is all the link reaches: `private` isn't in it (skipped, the default).
+    let (s, v) = e.es(&app, &app_pw, Method::GET, "/logs:private/_search", None).await;
+    assert_eq!((s, v["_clusters"]["details"]["logs"]["status"].as_str()), (200, Some("skipped")), "{v}");
+    assert_eq!(v["_clusters"]["details"]["logs"]["failures"][0]["reason"]["type"], "security_exception", "{v}");
+    assert_eq!(v["hits"]["total"]["value"], 0, "{v}");
+
+    // Field capabilities, `_resolve/cluster` and `_resolve/index` across the link.
+    let (_, fc) = e.es(&app, &app_pw, Method::GET, "/app,logs:*/_field_caps?fields=level", None).await;
+    assert_eq!(fc["indices"], json!(["app", "logs:logs-1"]), "{fc}");
+    assert_eq!(fc["fields"]["level"]["text"]["searchable"], true, "{fc}");
+    let (_, rc) = e.es(&app, &app_pw, Method::GET, "/_resolve/cluster/app,logs:logs-*", None).await;
+    assert_eq!((rc["(local)"]["matching_indices"].as_bool(), rc["logs"]["connected"].as_bool(), rc["logs"]["matching_indices"].as_bool()), (Some(true), Some(true), Some(true)), "{rc}");
+    let (_, ri) = e.es(&app, &app_pw, Method::GET, "/_resolve/index/logs:logs-*", None).await;
+    assert_eq!(ri["indices"][0]["name"], "logs:logs-1", "{ri}");
+
+    // A user of the local cluster reaches the remote only through `remote_indices` naming it.
+    let role = json!({ "indices": [{ "names": ["app"], "privileges": ["read"] }], "remote_indices": [{ "clusters": ["logs"], "names": ["logs-*"], "privileges": ["read"] }] });
+    assert_eq!(e.es(&app, &app_pw, Method::PUT, "/_security/role/reader", Some(role)).await.0, 200);
+    assert_eq!(e.es(&app, &app_pw, Method::PUT, "/_security/role/local_only", Some(json!({ "indices": [{ "names": ["*"], "privileges": ["read"] }] }))).await.0, 200);
+    for (user, role) in [("reader", "reader"), ("local", "local_only")] {
+        let u = json!({ "password": "pass-word-1", "roles": [role] });
+        assert_eq!(e.es(&app, &app_pw, Method::PUT, &format!("/_security/user/{user}"), Some(u)).await.0, 200);
+    }
+    let (s, v) = e.es(&format!("reader@{app}"), "pass-word-1", Method::GET, "/app,logs:logs-1/_search", None).await;
+    assert_eq!((s, v["hits"]["total"]["value"].as_i64()), (200, Some(3)), "{v}");
+    let (s, v) = e.es(&format!("local@{app}"), "pass-word-1", Method::GET, "/logs:logs-1/_search", None).await;
+    assert_eq!((s, v["_clusters"]["details"]["logs"]["failures"][0]["reason"]["type"].as_str()), (200, Some("security_exception")), "{v}");
+
+    // A cross-cluster key is no REST credential, also with the header only roll's own calls
+    // may carry.
+    let (s, k) = e.es(&logs, &logs_pw, Method::POST, "/_security/cross_cluster/api_key", Some(json!({ "name": "mine", "access": { "search": [{ "names": ["*"] }] } }))).await;
+    assert_eq!(s, 200, "{k}");
+    use base64::Engine;
+    let key = base64::engine::general_purpose::STANDARD.encode(format!("{}@{logs}:{}", k["id"].as_str().unwrap(), k["api_key"].as_str().unwrap()));
+    let r = e.http.get(format!("{}/logs-1/_search", e.es)).header("Authorization", format!("ApiKey {key}")).header("x-roll-remote-access", r#"{"cluster":"ann-app","roles":[{"x":{"indices":[{"names":["*"],"privileges":["all"]}]}}]}"#).send().await.unwrap();
+    assert_eq!(r.status(), 401, "{}", r.text().await.unwrap());
+
+    // Revoking the key on the remote cuts the link: skipped, or an error once it may not be.
+    let (s, v) = e.es(&logs, &logs_pw, Method::DELETE, "/_security/api_key", Some(json!({ "ids": [key_id] }))).await;
+    assert_eq!(s, 200, "{v}");
+    let (_, v) = e.es(&app, &app_pw, Method::GET, "/app,logs:logs-1/_search", None).await;
+    assert_eq!((v["hits"]["total"]["value"].as_i64(), v["_clusters"]["details"]["logs"]["status"].as_str()), (Some(1), Some("skipped")), "{v}");
+    assert_eq!(e.es(&app, &app_pw, Method::PUT, "/_cluster/settings", Some(json!({ "persistent": { "cluster.remote.logs.skip_unavailable": false } }))).await.0, 200);
+    let (s, v) = e.es(&app, &app_pw, Method::GET, "/app,logs:logs-1/_search", None).await;
+    assert_eq!((s, v["error"]["type"].as_str()), (401, Some("security_exception")), "{v}");
+
+    // Unlinked: the remote's settings and credentials go.
+    assert_eq!(e.call_as("ann", Method::DELETE, "/v1/search/clusters/ann-app/remotes/logs", None).await.0, 204);
+    let (_, info) = e.es(&app, &app_pw, Method::GET, "/_remote/info", None).await;
+    assert!(info.get("logs").is_none(), "{info}");
+}
+
+/// A linked remote that sleeps wakes for the search; one that's gone is skipped (the default),
+/// or fails the search when it may not be.
+#[tokio::test]
+async fn a_sleeping_remote_wakes_and_a_gone_one_is_skipped() {
+    use reqwest::Method;
+    let e = env().await;
+    let (near, near_pw) = creds(&e.post("/v1/search/clusters", json!({ "name": "near" })).await);
+    let (far, far_pw) = creds(&e.post("/v1/search/clusters", json!({ "name": "far" })).await);
+    let (s, v) = e.es(&far, &far_pw, Method::PUT, "/items/_doc/1?refresh=true", Some(json!({ "n": 1 }))).await;
+    assert_eq!(s, 201, "{v}");
+    let (s, v) = e.call(Method::PUT, "/v1/search/clusters/near/remotes/far", Some(json!({ "cluster": "far" }))).await;
+    assert_eq!(s, 200, "{v}");
+    e.post("/v1/search/clusters/far/unload", json!({})).await;
+    assert!(!e.control.node.loaded().iter().any(|n| &**n == "far"), "asleep");
+    let (s, v) = e.es(&near, &near_pw, Method::GET, "/far:items/_search", None).await;
+    assert_eq!((s, v["hits"]["total"]["value"].as_i64()), (200, Some(1)), "{v}");
+    assert!(e.control.node.loaded().iter().any(|n| &**n == "far"), "woken for it");
+
+    assert_eq!(e.call(Method::DELETE, "/v1/search/clusters/far", None).await.0, 200);
+    let (s, v) = e.es(&near, &near_pw, Method::GET, "/far:items/_search", None).await;
+    assert_eq!((s, v["_clusters"]["skipped"].as_i64(), v["_clusters"]["details"]["far"]["failures"][0]["reason"]["type"].as_str()), (200, Some(1), Some("connect_transport_exception")), "{v}");
+    assert_eq!(e.es(&near, &near_pw, Method::PUT, "/_cluster/settings", Some(json!({ "persistent": { "cluster.remote.far.skip_unavailable": false } }))).await.0, 200);
+    let (s, v) = e.es(&near, &near_pw, Method::GET, "/far:items/_search", None).await;
+    assert_eq!((s, v["error"]["type"].as_str()), (500, Some("connect_transport_exception")), "{v}");
+}
+
+
+/// Search analytics: off until an index turns them on; then searches (with and without results)
+/// and `search_click` events come back as top queries, no-result queries and click-through,
+/// before and after the metering pass; turning them off deletes what's kept; another person's
+/// cluster answers 404.
+#[tokio::test]
+async fn search_analytics() {
+    use reqwest::Method;
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({"name": "shop"})).await;
+    let (user, pw) = creds(&c);
+    let es = |m: Method, p: &str, b: Option<Value>| {
+        let (user, pw, p, e) = (user.clone(), pw.clone(), p.to_string(), &e);
+        async move {
+            let (s, v) = e.es(&user, &pw, m, &p, b).await;
+            assert!(s < 300, "{p}: {s} {v}");
+            v
+        }
+    };
+    es(Method::PUT, "/products", Some(json!({"mappings": {"properties": {"title": {"type": "text"}}}}))).await;
+    for (id, t) in [("1", "red shoes"), ("2", "blue shoes"), ("3", "red hat")] {
+        es(Method::PUT, &format!("/products/_doc/{id}?refresh=true"), Some(json!({ "title": t }))).await;
+    }
+    let search = |q: &str| es(Method::POST, "/products/_search", Some(json!({"query": {"match": {"title": q}}})));
+    let analytics = async |range: &str| e.get(&format!("/v1/search/clusters/shop/analytics?index=products&range={range}")).await;
+
+    // Off by default: nothing is recorded.
+    search("shoes").await;
+    e.control.sample().await.unwrap();
+    let a = analytics("24h").await;
+    assert_eq!((a["totals"]["searches"].as_u64(), a["top"].as_array().unwrap().len()), (Some(0), 0), "{a}");
+
+    es(Method::PUT, "/products/_settings", Some(json!({"index.roll.analytics.enabled": true}))).await;
+    for _ in 0..3 {
+        search("Shoes").await;
+    }
+    search("red").await;
+    search("sandals").await;
+    search("sandals").await;
+    // A header names a search's text, whatever its body; `_msearch` items count one by one.
+    let r = e.http.post(format!("{}/products/_search", e.es)).basic_auth(&user, Some(&pw)).header("x-roll-search-query", "Hat").json(&json!({"query": {"term": {"title": "hat"}}})).send().await.unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+    let msearch = "{\"index\":\"products\"}\n{\"query\":{\"match\":{\"title\":\"red\"}}}\n";
+    let r = e.http.post(format!("{}/_msearch", e.es)).basic_auth(&user, Some(&pw)).header("content-type", "application/x-ndjson").body(msearch).send().await.unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+    // Clicks: Elasticsearch's own behavioral analytics events.
+    es(Method::PUT, "/_application/analytics/web", None).await;
+    let click = |query: &str, id: &str| {
+        json!({
+            "session": {"id": "s1"}, "user": {"id": "u1"},
+            "document": {"index": "products", "id": id},
+            "search": {"query": query, "results": {"items": [{"document": {"index": "products", "id": "1"}}, {"document": {"index": "products", "id": "2"}}]}},
+        })
+    };
+    es(Method::POST, "/_application/analytics/web/event/search_click", Some(click("shoes", "2"))).await;
+    es(Method::POST, "/_application/analytics/web/event/search_click", Some(click("shoes", "1"))).await;
+
+    let check = |a: &Value| {
+        assert_eq!(a["totals"]["searches"].as_u64(), Some(8), "{a}");
+        assert_eq!(a["totals"]["no_hits"].as_u64(), Some(2), "{a}");
+        assert_eq!(a["totals"]["clicks"].as_u64(), Some(2), "{a}");
+        let top = a["top"].as_array().unwrap();
+        assert_eq!(top.iter().map(|q| (q["query"].as_str().unwrap(), q["searches"].as_u64().unwrap())).collect::<Vec<_>>(), [("shoes", 3), ("red", 2), ("sandals", 2), ("hat", 1)], "{a}");
+        assert_eq!((top[0]["clicks"].as_u64(), top[0]["ctr"].as_f64(), top[0]["avg_position"].as_f64()), (Some(2), Some(0.6667), Some(1.5)), "{a}");
+        assert_eq!(a["no_results"].as_array().unwrap().iter().map(|q| q["query"].as_str().unwrap()).collect::<Vec<_>>(), ["sandals"], "{a}");
+        // Clicked never: red and hat (with results) are low click-through; sandals found nothing.
+        assert_eq!(a["low_ctr"].as_array().unwrap().iter().map(|q| q["query"].as_str().unwrap()).collect::<Vec<_>>(), ["red"], "{a}");
+        assert_eq!(a["indices"], json!(["products"]), "{a}");
+    };
+    check(&analytics("24h").await);
+    e.control.sample().await.unwrap();
+    check(&analytics("24h").await);
+    check(&analytics("30d").await);
+    // Nothing kept anywhere holds a credential or a document.
+    let all = analytics("7d").await.to_string();
+    assert!(!all.contains(&pw) && !all.contains("blue shoes"), "{all}");
+
+    // Another person's cluster: no such cluster.
+    let (s, _) = e.call_as("mallory", Method::GET, "/v1/search/clusters/shop/analytics", None).await;
+    assert_eq!(s, 404);
+
+    // Turning it off deletes what's kept, at once for reads and from the catalog on the next pass.
+    es(Method::PUT, "/products/_settings", Some(json!({"index.roll.analytics.enabled": null}))).await;
+    assert_eq!(analytics("24h").await["totals"]["searches"].as_u64(), Some(0));
+    e.control.sample().await.unwrap();
+    let id = c["id"].as_str().unwrap();
+    assert!(e.control.store.analytics_indices(id).await.unwrap().is_empty());
+    search("shoes").await;
+    assert_eq!(analytics("24h").await["totals"]["searches"].as_u64(), Some(0));
+}
+
+/// An alias pattern matching a link and a loopback remote (whose seed is the node's own address,
+/// which any tenant may set) is authorized locally, whole: a user who may read `app` alone gets
+/// nothing of `secret` through `*:secret`, as through `secret` and `me:secret` (the review of
+/// #347 found `*:secret` skipped the local check while the loopback searched it).
+#[tokio::test]
+async fn an_alias_pattern_over_a_link_and_a_loopback_is_authorized_locally() {
+    use reqwest::Method;
+    let e = env().await;
+    let (app, app_pw) = creds(&e.post("/v1/search/clusters", json!({ "name": "wild-app" })).await);
+    e.post("/v1/search/clusters", json!({ "name": "wild-logs" })).await;
+    for path in ["/app/_doc/1", "/secret/_doc/1"] {
+        let (s, v) = e.es(&app, &app_pw, Method::PUT, &format!("{path}?refresh=true"), Some(json!({ "msg": "secret doc" }))).await;
+        assert_eq!(s, 201, "{v}");
+    }
+    let (s, v) = e.call(Method::PUT, "/v1/search/clusters/wild-app/remotes/logs", Some(json!({ "cluster": "wild-logs" }))).await;
+    assert_eq!(s, 200, "{v}");
+    let (_, nodes) = e.es(&app, &app_pw, Method::GET, "/_nodes/_local", None).await;
+    let me = nodes["nodes"].as_object().unwrap().values().next().unwrap()["transport_address"].as_str().unwrap().to_string();
+    let (s, v) = e.es(&app, &app_pw, Method::PUT, "/_cluster/settings", Some(json!({ "persistent": { "cluster.remote.me.seeds": me } }))).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(e.es(&app, &app_pw, Method::PUT, "/_security/role/app_only", Some(json!({ "indices": [{ "names": ["app"], "privileges": ["read"] }] }))).await.0, 200);
+    assert_eq!(e.es(&app, &app_pw, Method::PUT, "/_security/user/u", Some(json!({ "password": "pass-word-1", "roles": ["app_only"] }))).await.0, 200);
+    let user = format!("u@{app}");
+    for path in ["/secret/_search", "/me:secret/_search"] {
+        assert_eq!(e.es(&user, "pass-word-1", Method::GET, path, None).await.0, 403, "{path}");
+    }
+    let (s, v) = e.es(&user, "pass-word-1", Method::GET, "/*:secret/_search", None).await;
+    assert!(s != 200 || v["hits"]["hits"].as_array().is_some_and(|h| h.is_empty()), "{s} {v}");
+    assert!(!v.to_string().contains("secret doc"), "{v}");
+    let r = e.http.post(format!("{}/_msearch", e.es)).basic_auth(&user, Some("pass-word-1")).header("content-type", "application/x-ndjson").body("{\"index\":\"*:secret\"}\n{}\n").send().await.unwrap();
+    let m = r.text().await.unwrap();
+    assert!(!m.contains("secret doc"), "{m}");
 }
