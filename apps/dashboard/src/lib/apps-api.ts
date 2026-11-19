@@ -5,7 +5,7 @@
 
 import { operatorHeaders, withSession } from "./code-token";
 import { apiHeaders, call, onApiStatus, ROLL_API } from "./roll-api";
-import { streamSse } from "./sse";
+import { followScreen, streamSse, type ScreenHandlers } from "./sse";
 
 // ── shapes (docs/apps/http-api.md) ──
 
@@ -1225,32 +1225,8 @@ export const appsApi = {
  * so the caller drops what it had. Returns the function that stops it.
  */
 /** A shell's screen over SSE: base64 chunks (the scrollback first, again after a reconnect: `onReset`), then `onClosed`. */
-export function followShell(
-  service: string,
-  e: string,
-  sh: string,
-  opts: { onChunk: (bytes: Uint8Array) => void; onReset: () => void; onClosed: () => void },
-): () => void {
-  let opened = false;
-  const stop = streamSse(`${ROLL_API}${env(service, e)}/shell/sessions/${encodeURIComponent(sh)}/screen`, {
-    headers: operatorHeaders,
-    onOpen: (open) => {
-      if (open && opened) opts.onReset();
-      if (open) opened = true;
-    },
-    onEvent: (ev) => {
-      if (ev.event === "closed") {
-        stop();
-        opts.onClosed();
-        return;
-      }
-      const bin = atob(ev.data);
-      const out = new Uint8Array(bin.length);
-      for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-      opts.onChunk(out);
-    },
-  });
-  return stop;
+export function followShell(service: string, e: string, sh: string, opts: ScreenHandlers): () => void {
+  return followScreen(`${ROLL_API}${env(service, e)}/shell/sessions/${encodeURIComponent(sh)}/screen`, operatorHeaders, opts);
 }
 
 /** An access line's text (`http` lines). */

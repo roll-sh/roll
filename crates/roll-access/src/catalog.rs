@@ -1465,6 +1465,13 @@ static ROWS: &[Row] = &[
     // Each data branch's connection as the preview's services get it (the branches' own
     // credentials, never a parent's; previews-next): reveal, as the preview's env is.
     row("GET", "/v1/previews/{id}/connect", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    // A shell in a preview's running service runs anything with its variables and branches, as
+    // roll apps' shells do: admin, every route of it (what closes an admin's shell is admin).
+    row("POST", "/v1/previews/{id}/shell/sessions", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    row("GET", "/v1/previews/{id}/shell/sessions/{sh}/screen", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    row("POST", "/v1/previews/{id}/shell/sessions/{sh}/keys", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    row("POST", "/v1/previews/{id}/shell/sessions/{sh}/resize", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    row("DELETE", "/v1/previews/{id}/shell/sessions/{sh}", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
     // The mail a preview's services sent, caught and never delivered (previews-next): it can hold
     // copies of production's people, so reveal, as the preview's env is.
     row("GET", "/v1/previews/{id}/mail", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),

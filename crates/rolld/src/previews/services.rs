@@ -706,6 +706,31 @@ impl roll_previews::ports::Apps for Services {
         if matches!(self.apps.find(preview, service).await, Ok(Some(_))) { None } else { self.runtime.follow(preview, service, lines).await }
     }
 
+    /// A `roll.toml` service's terminal: a login shell exec'd in its container through the Docker
+    /// Engine API, as roll apps' shells are (roll apps' services have their own, on `pv-…`).
+    async fn shell(&self, preview: &str, service: &str, cols: u16, rows: u16) -> anyhow::Result<Option<roll_previews::ports::Shell>> {
+        if self.apps.find(preview, service).await?.is_some() {
+            return Ok(None);
+        }
+        let Some(engine) = apps_control::runtime::engine::Engine::local() else { anyhow::bail!("a shell needs Docker on a local socket") };
+        let container = self.runtime.shell_container(preview, service).await?;
+        // bash when the image has it, else sh; a login shell, so the image's profile applies.
+        let login = "if command -v bash >/dev/null 2>&1; then exec bash -l; else exec sh -l; fi";
+        let (id, io) = engine.exec_tty(&container, &["sh", "-c", login], &["TERM=xterm-256color"], cols, rows).await?;
+        Ok(Some(roll_previews::ports::Shell::upgraded(id, io)))
+    }
+
+    async fn resize_shell(&self, id: &str, cols: u16, rows: u16) -> anyhow::Result<()> {
+        match apps_control::runtime::engine::Engine::local() {
+            Some(e) => e.resize(id, cols, rows).await,
+            None => Ok(()),
+        }
+    }
+
+    fn hold(&self, preview: &str, service: &str) {
+        self.runtime.hold(preview, service);
+    }
+
     /// roll apps drains its own instances' output (a drain's `previews`).
     async fn drain_from(&self, preview: &str, service: &str, since: &str) -> Option<tokio::sync::mpsc::Receiver<(bool, String)>> {
         if matches!(self.apps.find(preview, service).await, Ok(Some(_))) { None } else { self.runtime.drain_from(preview, service, since).await }

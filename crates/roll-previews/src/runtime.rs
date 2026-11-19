@@ -485,6 +485,30 @@ impl Runtime {
         Some(addr)
     }
 
+    /// The container a terminal in the service goes into: started (or thawed) if it isn't
+    /// running, waited for up to 60 s, and used from then on (as a request would).
+    pub async fn shell_container(self: &Arc<Self>, preview: &str, service: &str) -> anyhow::Result<String> {
+        match self.ready(preview, service, Duration::from_secs(60)).await {
+            Ok(_) => {}
+            Err(Unavailable::Starting) => anyhow::bail!("{service} is still starting: try again in a moment"),
+            Err(Unavailable::NotFound) => anyhow::bail!("{service} isn't running on this node"),
+            Err(Unavailable::Failed(e)) => anyhow::bail!("{service} didn't start: {e}"),
+        }
+        let live = self.live(preview, service);
+        let name = live.container.lock().clone();
+        name.ok_or_else(|| anyhow::anyhow!("{service} isn't running on this node"))
+    }
+
+    /// The service is in use through a terminal: its idle clock starts again.
+    pub fn hold(&self, preview: &str, service: &str) {
+        if let Some(live) = self.live.lock().get(&(preview.to_string(), service.to_string())) {
+            *live.last_request.lock() = Instant::now();
+        }
+        if let Ok(e) = self.engine() {
+            e.touched(preview);
+        }
+    }
+
     /// Where a service answers, starting it if needed; waits up to `wait`.
     async fn ready(self: &Arc<Self>, preview: &str, service: &str, wait: Duration) -> Result<SocketAddr, Unavailable> {
         let live = self.live(preview, service);

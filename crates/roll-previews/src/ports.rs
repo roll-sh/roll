@@ -489,6 +489,23 @@ pub struct BudgetAlert {
     pub max_usd_month: f64,
 }
 
+/// A terminal's stream, both ways (a hijacked Docker exec).
+pub trait ShellIo: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
+impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> ShellIo for T {}
+
+/// A terminal in a running service: what [`Apps::resize_shell`] takes, and its stream.
+pub struct Shell {
+    pub id: String,
+    pub io: Box<dyn ShellIo>,
+}
+
+impl Shell {
+    /// A Docker exec's hijacked connection as a terminal.
+    pub fn upgraded(id: String, io: hyper::upgrade::Upgraded) -> Shell {
+        Shell { id, io: Box::new(hyper_util::rt::TokioIo::new(io)) }
+    }
+}
+
 /// A seed run: the project's command, on the preview's tree, with its variables. (No `Debug`:
 /// `env` holds passwords.)
 #[derive(Clone)]
@@ -648,6 +665,17 @@ pub trait Apps: Send + Sync {
     /// The hosts the preview's egress proxy refused lately (its project's `egress_hosts` don't
     /// list them), each once. No default, as `warm`.
     async fn egress_refused(&self, preview: &str) -> Vec<String>;
+    /// A login shell in the running service (started if it sleeps), `cols` by `rows`. `None`
+    /// where this backend has none here: roll apps' services have roll apps' own shell, on
+    /// their `pv-` environment.
+    async fn shell(&self, _preview: &str, _service: &str, _cols: u16, _rows: u16) -> anyhow::Result<Option<Shell>> {
+        Ok(None)
+    }
+    async fn resize_shell(&self, _id: &str, _cols: u16, _rows: u16) -> anyhow::Result<()> {
+        Ok(())
+    }
+    /// Someone is using the service through a terminal: it doesn't go to sleep meanwhile.
+    fn hold(&self, _preview: &str, _service: &str) {}
 }
 
 /// Who may open a project's previews under `access: "team"` (rolld fills it from roll's

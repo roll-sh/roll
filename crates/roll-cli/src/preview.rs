@@ -258,6 +258,13 @@ pub enum Preview {
         #[arg(long)]
         off: bool,
     },
+    /// A shell in a running service (started if it sleeps): this terminal is its terminal until
+    /// it exits. The preview's activity says who opened it.
+    Shell {
+        preview: String,
+        #[arg(long, short)]
+        service: Option<String>,
+    },
     /// Print a service's link (with its access token when the preview is private); `--browser`
     /// opens it.
     Open {
@@ -267,6 +274,81 @@ pub enum Preview {
         #[arg(long)]
         browser: bool,
     },
+}
+
+/// `roll preview shell`: a session (`POST …/shell/sessions`), its screen read as server-sent
+/// events onto stdout until `event: closed`, keys typed in raw mode posted as they come, the
+/// window's size posted when it changes, the session closed on the way out.
+async fn shell(api: &Api, preview: &str, service: Option<&str>) -> anyhow::Result<()> {
+    use base64::Engine as _;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (cols, rows) = crate::apps::term::size().unwrap_or((80, 24));
+    let opened = api.post(&format!("/v1/previews/{preview}/shell/sessions"), json!({ "service": service, "cols": cols, "rows": rows })).await?;
+    let sid = opened["id"].as_str().ok_or_else(|| anyhow::anyhow!("no shell came back"))?.to_string();
+    let base = format!("/v1/previews/{preview}/shell/sessions/{sid}");
+    let mut res = api.open_stream(&format!("{base}/screen")).await?;
+    let screen = tokio::spawn(async move {
+        let mut stdout = tokio::io::stdout();
+        let (mut buf, mut event) = (Vec::<u8>::new(), String::new());
+        while let Ok(Some(chunk)) = res.chunk().await {
+            buf.extend_from_slice(&chunk);
+            while let Some(i) = buf.iter().position(|&b| b == b'\n') {
+                let line = String::from_utf8_lossy(&buf[..i]).trim_end_matches('\r').to_string();
+                buf.drain(..=i);
+                if let Some(name) = line.strip_prefix("event:") {
+                    event = name.trim().to_string();
+                    if event == "closed" {
+                        return;
+                    }
+                } else if let Some(data) = line.strip_prefix("data:") {
+                    if let Ok(b) = base64::engine::general_purpose::STANDARD.decode(data.trim()) {
+                        let _ = stdout.write_all(&b).await;
+                        let _ = stdout.flush().await;
+                    }
+                } else if line.is_empty() {
+                    event.clear();
+                }
+            }
+        }
+    });
+    // Keystrokes on a task of their own: a read cancelled by the select below would lose them.
+    let (keys_tx, mut keys) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+    tokio::spawn(async move {
+        let mut stdin = tokio::io::stdin();
+        let mut buf = [0u8; 4096];
+        while let Ok(n) = stdin.read(&mut buf).await {
+            if n == 0 || keys_tx.send(buf[..n].to_vec()).await.is_err() {
+                break;
+            }
+        }
+    });
+    let raw = crate::apps::term::Raw::enter();
+    let mut winch = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())?;
+    let mut screen = screen;
+    // The shell ends when its screen does (its `exit`); the end of stdin (keys from a pipe) only
+    // stops the keys.
+    let mut typing = true;
+    let ended: anyhow::Result<()> = loop {
+        tokio::select! {
+            _ = &mut screen => break Ok(()),
+            k = keys.recv(), if typing => match k {
+                Some(b) => {
+                    if let Err(e) = api.post(&format!("{base}/keys"), json!({ "data": base64::engine::general_purpose::STANDARD.encode(&b) })).await {
+                        break Err(e);
+                    }
+                }
+                None => typing = false,
+            },
+            _ = winch.recv() => {
+                if let Some((c, r)) = crate::apps::term::size() {
+                    let _ = api.post(&format!("{base}/resize"), json!({ "cols": c, "rows": r })).await;
+                }
+            }
+        }
+    };
+    drop(raw);
+    let _ = api.call(reqwest::Method::DELETE, &base, None).await;
+    ended
 }
 
 /// A project by id or name.
@@ -1104,6 +1186,7 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
             v
         }
 
+        Preview::Shell { preview, service } => return shell(api, &preview, service.as_deref()).await,
         Preview::Metrics { preview } => {
             let v = api.get(&format!("/v1/previews/{preview}/metrics")).await?;
             if !as_json {
