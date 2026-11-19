@@ -536,6 +536,12 @@ fn oidvectortypes(a: &[Value], c: &FnCtx) -> Result<Value> {
 /// The sequence's next value for this session: from the values it cached (CACHE n),
 /// else from the sequence.
 pub(crate) fn next_value(seq: &crate::catalog::Sequence, c: &FnCtx) -> Result<i64> {
+    if seq.cache <= 1
+        && let Ok(txn) = c.exec.txn.try_borrow()
+    {
+        // (What it logs ahead is waited for by the transaction's commit: `Txn::seq_logged`.)
+        return c.exec.sess.db.nextval_for(seq, Some(&txn.seq_logged));
+    }
     next_value_in(seq, c.exec.sess)
 }
 

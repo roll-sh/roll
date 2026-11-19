@@ -1330,6 +1330,15 @@ impl Store {
         Ok(())
     }
 
+    /// Wait until commit `ts` is durable (`commit_unwaited`'s, for the transaction that
+    /// made it): at once when it is, or the store doesn't fsync.
+    pub fn wait_durable_for(&self, ts: u64) -> Result<()> {
+        if !self.opts.sync || self.durable.load(Ordering::Acquire) >= ts {
+            return Ok(());
+        }
+        self.wait_durable(ts)
+    }
+
     /// Every commit up to `upto` is fsynced: it is visible.
     fn made_durable(&self, upto: u64) {
         self.durable.fetch_max(upto, Ordering::AcqRel);
@@ -1359,7 +1368,7 @@ impl Store {
     /// commit lock through their own fsync, so they took turns at the disk's latency.
     pub fn commit_grouped(
         self: &Arc<Self>,
-        mut writes: Vec<(Vec<u8>, Option<Bytes>)>,
+        writes: Vec<(Vec<u8>, Option<Bytes>)>,
         check: impl FnOnce(&Store, &mut Vec<(Vec<u8>, Option<Bytes>)>) -> Result<()>,
         appended: impl FnOnce(u64),
         after: impl FnOnce(u64),
@@ -1367,43 +1376,74 @@ impl Store {
         if !self.opts.sync || self.ingests(&writes) {
             return self.commit_with(writes, check, after);
         }
-        let rotate;
-        let ts;
-        let ranged;
-        {
-            let mut c = self.commit.lock();
-            if self.closed.load(Ordering::Acquire) {
-                return Err(internal("database is closed"));
-            }
-            check(self, &mut writes)?;
-            if writes.is_empty() {
-                return Ok(self.visible_ts());
-            }
-            ts = self.assigned.load(Ordering::Acquire) + 1;
-            // (Written by the fsync that makes it durable: `wait_durable`.)
-            c.wal.append(ts, &writes);
-            self.assigned.store(ts, Ordering::Release);
-            self.sync_assigned.store(ts, Ordering::Release);
-            ranged = self.note_rdels(writes.iter().map(|(k, v)| (k.as_slice(), v.as_deref())), ts);
-            let view = self.view.load();
-            self.apply_hot(ts, &writes, &view);
-            self.note_untouched(&writes);
-            let mem = view.mem.clone();
-            for (k, v) in writes {
-                mem.insert(&k, v, ts);
-            }
-            appended(ts);
-            rotate = mem.bytes() >= self.opts.memtable_bytes;
-        }
+        let Some((ts, rotate, ranged)) = self.append_grouped(writes, check, appended)? else {
+            return Ok(self.visible_ts());
+        };
         self.wait_durable(ts)?;
         after(ts);
+        self.appended_tail(rotate, ranged)?;
+        Ok(ts)
+    }
+
+    /// `commit` of writes no one waits for: in the WAL and the memtable as a group commit's
+    /// are, made durable and visible by the next fsync that covers them (another commit's, a
+    /// rotation's, the WAL writer's), without waiting for it here (a sequence's logged-ahead
+    /// value: XLogInsert without XLogFlush). Every commit after it in the WAL is durable
+    /// only once it is too.
+    pub fn commit_unwaited(self: &Arc<Self>, writes: Vec<(Vec<u8>, Option<Bytes>)>) -> Result<u64> {
+        if !self.opts.sync || self.ingests(&writes) {
+            return self.commit(writes, |_| Ok(()));
+        }
+        let Some((ts, rotate, ranged)) = self.append_grouped(writes, |_, _| Ok(()), |_| {})? else {
+            return Ok(self.visible_ts());
+        };
+        self.appended_tail(rotate, ranged)?;
+        Ok(ts)
+    }
+
+    /// A group commit's part under the commit lock: `check`, a timestamp, the WAL record
+    /// (written by the fsync that makes it durable: `wait_durable`) and the memtable entries,
+    /// then `appended`. None: `check` left no writes. (ts, the memtable is full, it wrote a
+    /// range deletion.)
+    fn append_grouped(
+        &self,
+        mut writes: Vec<(Vec<u8>, Option<Bytes>)>,
+        check: impl FnOnce(&Store, &mut Vec<(Vec<u8>, Option<Bytes>)>) -> Result<()>,
+        appended: impl FnOnce(u64),
+    ) -> Result<Option<(u64, bool, bool)>> {
+        let mut c = self.commit.lock();
+        if self.closed.load(Ordering::Acquire) {
+            return Err(internal("database is closed"));
+        }
+        check(self, &mut writes)?;
+        if writes.is_empty() {
+            return Ok(None);
+        }
+        let ts = self.assigned.load(Ordering::Acquire) + 1;
+        c.wal.append(ts, &writes);
+        self.assigned.store(ts, Ordering::Release);
+        self.sync_assigned.store(ts, Ordering::Release);
+        let ranged = self.note_rdels(writes.iter().map(|(k, v)| (k.as_slice(), v.as_deref())), ts);
+        let view = self.view.load();
+        self.apply_hot(ts, &writes, &view);
+        self.note_untouched(&writes);
+        let mem = view.mem.clone();
+        for (k, v) in writes {
+            mem.insert(&k, v, ts);
+        }
+        appended(ts);
+        Ok(Some((ts, mem.bytes() >= self.opts.memtable_bytes, ranged)))
+    }
+
+    /// After `append_grouped`: a full memtable rotated, background work scheduled.
+    fn appended_tail(self: &Arc<Self>, rotate: bool, ranged: bool) -> Result<()> {
         if rotate {
             self.rotate()?;
         }
         if rotate || ranged {
             self.schedule_background();
         }
-        Ok(ts)
+        Ok(())
     }
 
     /// `commit` for `synchronous_commit = off` (PostgreSQL's asynchronous commit): the

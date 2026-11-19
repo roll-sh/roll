@@ -572,6 +572,7 @@ impl Database {
             lo_descs: Vec::new(),
             publish: false,
             async_commit: None,
+            seq_logged: std::cell::Cell::new(0),
             new_storage: HashMap::new(),
             si_locks: Vec::new(),
             sxact: false,
@@ -629,15 +630,26 @@ impl Database {
     }
 
     fn log_seq(&self, oid: u32, value: i64, called: bool) -> Result<()> {
+        self.store.commit(vec![Self::seq_record(oid, value, called)], |_| Ok(()))?;
+        Ok(())
+    }
+
+    fn seq_record(oid: u32, value: i64, called: bool) -> (Vec<u8>, Option<Bytes>) {
         let mut b = value.to_le_bytes().to_vec();
         b.push(called as u8);
-        self.store
-            .commit(vec![(Self::seq_key(oid), Some(Bytes::from(b)))], |_| Ok(()))?;
-        Ok(())
+        (Self::seq_key(oid), Some(Bytes::from(b)))
     }
 
     /// nextval(): not transactional, like Postgres.
     pub fn nextval(&self, seq: &Sequence) -> Result<i64> {
+        self.nextval_for(seq, None)
+    }
+
+    /// `nextval` for a transaction that waits at its commit for what it logged (`logged`:
+    /// `Txn::seq_logged`): a value logged ahead is written without waiting for its fsync, its
+    /// commit timestamp put in `logged`. (nextval_internal WAL-logs without a flush, and gives
+    /// the transaction an xid so that its commit flushes it.) None: logged and waited for.
+    pub fn nextval_for(&self, seq: &Sequence, logged: Option<&std::cell::Cell<u64>>) -> Result<i64> {
         let mut seqs = self.seqs.lock();
         if let std::collections::hash_map::Entry::Vacant(e) = seqs.entry(seq.oid) {
             e.insert(self.load_seq(seq)?);
@@ -679,7 +691,12 @@ impl Database {
             let chunk = seq.increment.saturating_mul(32.max(seq.cache));
             let mut to = next.saturating_add(chunk - seq.increment);
             to = to.clamp(seq.min, seq.max);
-            self.log_seq(seq.oid, to, true)?;
+            match logged {
+                // (Every commit after it in the WAL is durable only once it is too: one not
+                // durable at a crash was used by nothing durable.)
+                Some(l) => l.set(l.get().max(self.store.commit_unwaited(vec![Self::seq_record(seq.oid, to, true)])?)),
+                None => self.log_seq(seq.oid, to, true)?,
+            }
             st.logged_to = to;
         }
         // nextval_internal: a fresh sequence, or one whose logged values ran out, logs
@@ -850,8 +867,8 @@ impl Database {
                 );
             }
             None => {
-                let ts = self.store.visible_ts();
-                if self.store.get(&Self::seq_key(oid), ts)?.is_some() {
+                // (The newest version: nextval's logged-ahead one may not be visible yet.)
+                if self.store.get_version(&Self::seq_key(oid), u64::MAX >> 1)?.is_some_and(|(_, v)| v.is_some()) {
                     self.store
                         .commit(vec![(Self::seq_key(oid), None)], |_| Ok(()))?;
                 }
@@ -1161,6 +1178,10 @@ pub struct TxnState {
     /// Commit without waiting for the WAL fsync (`synchronous_commit = off`), the WAL
     /// writer's delay in ms (wal_writer_delay): `Store::commit_async`. None: synchronous.
     pub async_commit: Option<u64>,
+    /// The store commit of the newest sequence value this transaction logged ahead without
+    /// waiting (`Database::nextval_for`; 0: none): a synchronous commit waits for it to be
+    /// durable, as the xid nextval_internal assigns makes RecordTransactionCommit flush.
+    pub seq_logged: std::cell::Cell<u64>,
     /// Relations given new storage (TRUNCATE, a rewrite) in this transaction, by the
     /// subtransaction depth that gave it (rd_newRelfilelocatorSubid).
     new_storage: HashMap<u32, usize>,
@@ -4005,10 +4026,16 @@ impl TxnState {
             && self.moved_out.is_empty()
         {
             let ts = self.db.store.visible_ts();
-            self.finish_xid(true);
+            // (`SELECT nextval(...)`: what it logged ahead, durable before the commit returns.)
+            let durable = match self.seq_logged.get() {
+                0 => Ok(()),
+                _ if self.async_commit.is_some() => Ok(()),
+                logged => self.db.store.wait_durable_for(logged),
+            };
+            self.finish_xid(durable.is_ok());
             self.release_locks();
-            self.ssi_finish(true, ts);
-            return Ok(ts);
+            self.ssi_finish(durable.is_ok(), ts);
+            return durable.map(|_| ts);
         }
         let mut writes: Vec<(Vec<u8>, Option<Bytes>)> = Vec::new();
         let mut new_catalog = false;
@@ -4220,6 +4247,14 @@ impl TxnState {
             self.db.store.commit_async(writes, check, STATE_ONLY_DELAY_MS)
         } else {
             self.db.store.commit_grouped(writes, check, |_| {}, |_| {})
+        };
+        // (A sequence value this transaction logged ahead: durable before a synchronous
+        // commit returns. Its own writes' fsync, when it waited for one, covered it already.)
+        let result = match result {
+            Ok(ts) if self.seq_logged.get() > 0 && (self.async_commit.is_none() || self.prepared || decoded) => {
+                self.db.store.wait_durable_for(self.seq_logged.get()).map(|_| ts)
+            }
+            r => r,
         };
         // (Other commits move the WAL position by what the statistics count them writing:
         // `exec::pgstat`.)

@@ -1081,3 +1081,41 @@ fn power_cut_keeps_a_prefix_of_concurrent_commits() {
         }
     }
 }
+
+/// A value `SELECT nextval(...)` returned survives a power cut once its transaction's commit
+/// returned, though the transaction wrote nothing else: the record of a value logged ahead
+/// goes to the WAL without waiting for an fsync, and the commit waits for it (as the xid
+/// nextval_internal assigns makes PostgreSQL's commit flush it). The child draws values in
+/// autocommit, each acknowledged after its commit, then the power goes.
+#[cfg(feature = "powerloss")]
+#[test]
+fn power_cut_keeps_returned_sequence_values() {
+    if let Ok(dir) = std::env::var("POWER_SEQ_CHILD") {
+        let eng = open(Path::new(&dir));
+        let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+        s.query("CREATE SEQUENCE s").unwrap();
+        for _ in 0..200 {
+            println!("acked {}", one(&mut s, "SELECT nextval('s')"));
+        }
+        sigkill();
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let (data, shadow) = (tmp.path().join("data"), tmp.path().join("shadow"));
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "power_cut_keeps_returned_sequence_values", "--nocapture"])
+        .env("POWER_SEQ_CHILD", &data)
+        .env("ROLL_POWERLOSS", format!("{}:{}", data.display(), shadow.display()))
+        .output()
+        .unwrap();
+    assert!(out.status.code().is_none(), "{}", String::from_utf8_lossy(&out.stderr));
+    let acked = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| l.strip_prefix("acked Int8(")?.strip_suffix(')')?.parse::<i64>().ok())
+        .max()
+        .unwrap();
+    pg_engine::storage::powerloss::power_cut(&data, &shadow, None).unwrap();
+    let eng = open(&data);
+    let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+    let next: i64 = one(&mut s, "SELECT nextval('s')").trim_start_matches("Int8(").trim_end_matches(')').parse().unwrap();
+    assert!(next > acked, "the sequence went back to {next} after returning {acked}");
+}
