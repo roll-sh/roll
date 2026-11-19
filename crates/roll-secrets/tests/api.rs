@@ -3994,3 +3994,87 @@ async fn a_gateway_has_one_token_that_opens_only_its_link_and_reaches_its_projec
     let audit = api.ok(Method::GET, "/audit?action=gateway.connect", None).await.to_string();
     assert!(audit.contains("node-a") && !audit.contains(&secret), "{audit}");
 }
+
+#[tokio::test]
+async fn another_product_resolves_a_reference_only_for_a_resource_its_project_stands_for() {
+    use roll_secrets::{Refusal, ResourceRef};
+    use roll_workspace::Kind;
+    let api = Api::new().await;
+    api.set("production", "AWS_SECRET_ACCESS_KEY", "fake-secret-one").await;
+    let photos = ResourceRef::new(Kind::Bucket, "photos");
+    let reference = "roll://production/AWS_SECRET_ACCESS_KEY";
+    let s = api.secrets.clone();
+    let resolve = move |r: &ResourceRef, reference: &str| s.resolve_for(r, reference);
+
+    // On no canvas: no project to read from.
+    assert!(matches!(resolve(&photos, reference), Err(Refusal::NoProject(_))));
+    // On a person's canvas that doesn't stand for it (anyone may put any bucket on theirs).
+    let (_, mine) = api.as_ada(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "mine" }))).await;
+    let mine = mine["id"].as_str().unwrap().to_string();
+    let (s, _) = api.as_ada(Method::PUT, &format!("/v1/workspace/projects/{mine}/resources/bucket/photos"), Some(json!({ "x": 0, "y": 0 }))).await;
+    assert!(s.is_success());
+    let refused = resolve(&photos, reference).unwrap_err();
+    assert!(matches!(refused, Refusal::NotTrusted(_)), "{refused}");
+
+    // On the operator's project, which stands for its canvas: resolved as its runtime, protected
+    // environments included (as a service's deploy), and audited as the bucket.
+    api.ok(Method::PUT, &format!("/v1/workspace/projects/{}/resources/bucket/photos", api.project), Some(json!({ "x": 0, "y": 0 }))).await;
+    api.ok(Method::PUT, "/environments/production/policy", Some(json!({ "protected": true, "approvals": 1 }))).await;
+    let got = resolve(&photos, reference).unwrap();
+    assert_eq!((got.value.expose(), got.version), ("fake-secret-one", 1));
+    assert!(!format!("{got:?}").contains("fake-secret-one"), "the value redacts itself");
+    let audit = api.ok(Method::GET, "/audit?action=secrets.resolve", None).await;
+    assert_eq!((audit[0]["actor"].as_str(), audit[0]["keys"].clone()), (Some("storage:bucket:photos"), json!(["AWS_SECRET_ACCESS_KEY"])), "{audit}");
+    assert!(!audit.to_string().contains("fake-secret-one"));
+    // A reference may name only that project.
+    assert!(resolve(&photos, &format!("roll://{}@production/AWS_SECRET_ACCESS_KEY", api.project)).is_ok());
+    assert!(matches!(resolve(&photos, &format!("roll://{mine}@production/AWS_SECRET_ACCESS_KEY")), Err(Refusal::NotTrusted(_))));
+    let missing = resolve(&photos, "roll://production/NOPE").unwrap_err();
+    assert!(matches!(missing, Refusal::NoSuchKey(_)), "{missing}");
+    // An ephemeral environment that isn't trusted never reaches its protected base.
+    api.ok(Method::POST, "/environments", Some(json!({ "slug": "pr-1", "base": "production" }))).await;
+    let refused = resolve(&photos, "roll://pr-1/AWS_SECRET_ACCESS_KEY").unwrap_err();
+    assert!(matches!(refused, Refusal::Protected(_)) && !refused.to_string().contains("fake-secret-one"), "{refused}");
+
+    // The digest moves with the value, without reading it.
+    let before = api.secrets.digest_for(&photos, reference).unwrap();
+    api.ok(Method::PUT, "/environments/production/policy", Some(json!({ "protected": false }))).await;
+    api.set("production", "AWS_SECRET_ACCESS_KEY", "fake-secret-two").await;
+    assert_ne!(api.secrets.digest_for(&photos, reference).unwrap(), before);
+    assert_eq!(resolve(&photos, reference).unwrap().value.expose(), "fake-secret-two");
+}
+
+#[tokio::test]
+async fn an_untrusted_resource_ref_never_reads_a_protected_environment_or_a_sensitive_key() {
+    use roll_secrets::{Refusal, ResourceRef};
+    use roll_workspace::Kind;
+    let api = Api::new().await;
+    api.set("production", "AWS_SECRET_ACCESS_KEY", "fake-protected").await;
+    api.ok(Method::PUT, "/environments/staging/secrets/STRIPE_KEY", Some(json!({ "value": "fake-sensitive", "tags": ["sensitive"] }))).await;
+    api.set("staging", "PLAIN_KEY", "fake-plain").await;
+    api.ok(Method::PUT, "/environments/production/policy", Some(json!({ "protected": true, "approvals": 1 }))).await;
+    api.ok(Method::PUT, &format!("/v1/workspace/projects/{}/resources/bucket/photos", api.project), Some(json!({ "x": 0, "y": 0 }))).await;
+    let (trusted, branch) = (ResourceRef::new(Kind::Bucket, "photos"), ResourceRef::new(Kind::Bucket, "photos").untrusted());
+    let (protected, sensitive, plain) = ("roll://production/AWS_SECRET_ACCESS_KEY", "roll://staging/STRIPE_KEY", "roll://staging/PLAIN_KEY");
+
+    // The resource itself reads as its project's runtime.
+    assert_eq!(api.secrets.resolve_for(&trusted, protected).unwrap().value.expose(), "fake-protected");
+    assert_eq!(api.secrets.resolve_for(&trusted, sensitive).unwrap().value.expose(), "fake-sensitive");
+    // The same ref as an untrusted copy: refused both, the digest refused the same way.
+    for (reference, what) in [(protected, "protected"), (sensitive, "sensitive")] {
+        let refused = api.secrets.resolve_for(&branch, reference).unwrap_err();
+        let ok = match what {
+            "protected" => matches!(refused, Refusal::Protected(_)),
+            _ => matches!(refused, Refusal::Unusable(_)),
+        };
+        assert!(ok && !refused.to_string().contains("fake-"), "{what}: {refused}");
+        let digest = api.secrets.digest_for(&branch, reference).unwrap_err();
+        assert_eq!(std::mem::discriminant(&digest), std::mem::discriminant(&refused), "{what}: {digest}");
+        assert!(api.secrets.digest_for(&trusted, reference).is_ok());
+    }
+    // What an untrusted reader may read still resolves, audited as the untrusted copy.
+    assert_eq!(api.secrets.resolve_for(&branch, plain).unwrap().value.expose(), "fake-plain");
+    assert!(api.secrets.digest_for(&branch, plain).is_ok());
+    let audit = api.ok(Method::GET, "/audit?action=secrets.resolve", None).await;
+    assert_eq!((audit[0]["actor"].as_str(), audit[0]["keys"].clone()), (Some("storage:bucket:photos (untrusted)"), json!(["PLAIN_KEY"])), "{audit}");
+}

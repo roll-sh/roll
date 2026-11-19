@@ -683,6 +683,61 @@ impl Secrets {
         Ok((v, problem.into_iter().map(|p| Problem { key: key.into(), problem: p }).collect(), leases))
     }
 
+    /// Where `key` comes from for another roll product (`consumers.rs`), and the caller it reads
+    /// as, deciding everything but the value (so the digest gives the answer the resolve would):
+    /// `caller` (a runtime consumer), or with `untrusted` the caller checks, sandboxes and
+    /// previews resolve as (`Secrets::untrusted`, not a runtime), narrowed again for an untrusted
+    /// ephemeral environment (`caller_for`). What only a protected environment holds is refused as
+    /// protected, a sensitive key for a reader that isn't a runtime, and a dynamic credential.
+    pub(crate) fn consumer_entry(&self, project: &str, slug: &str, path: &str, key: &str, caller: &Caller, untrusted: bool) -> std::result::Result<(Caller, Entry), crate::consumers::Refusal> {
+        use crate::consumers::Refusal;
+        let missing = |e: Error| match e {
+            Error::NotFound(m) => Refusal::NoSuchKey(m),
+            e => Refusal::Failed(e),
+        };
+        let reader = if untrusted { self.untrusted(project, caller)?.not_runtime() } else { caller.clone() };
+        let narrowed = self.caller_for(project, slug, &reader).map_err(missing)?;
+        let why = if untrusted { format!("{} is an untrusted copy", caller.principal.trim_end_matches(" (untrusted)")) } else { format!("{slug} is an ephemeral environment that isn't trusted") };
+        if !narrowed.allows(Action::Reveal, &Scope::at(project, slug, path)) {
+            return Err(Refusal::Protected(format!("{slug} is a protected environment, and {why}")));
+        }
+        let entries = self.view(project, slug, path, &narrowed, false, Action::Reveal).map_err(missing)?;
+        let Some(e) = entries.into_iter().find(|e| e.row.key == key) else {
+            // Set, but only through a protected environment this reader may not read.
+            let through_protected = self.view(project, slug, path, caller, false, Action::Reveal).is_ok_and(|all| all.iter().any(|e| e.row.key == key));
+            return Err(if through_protected {
+                Refusal::Protected(format!("{key} in {slug} comes from a protected environment, and {why}"))
+            } else {
+                Refusal::NoSuchKey(format!("no secret {key} in {slug}:{path}"))
+            });
+        };
+        if names::sensitive(&e.row.tags) && !narrowed.runtime {
+            return Err(Refusal::Unusable(format!("{key} is sensitive, and {why}: only a trusted runtime reads it")));
+        }
+        if e.row.link.as_ref().is_some_and(|l| l.mode == Mode::Dynamic) {
+            return Err(Refusal::Unusable(format!("{key} is a dynamic credential, which ends with its lease: link it as managed or live for another product")));
+        }
+        Ok((narrowed, e))
+    }
+
+    /// One key's value for another roll product, read as [`Secrets::consumer_entry`] decides:
+    /// audited as `secrets.resolve` by `caller` (the resource asking), no dynamic credential.
+    pub(crate) fn resolve_one(&self, project: &str, slug: &str, path: &str, key: &str, caller: &Caller, untrusted: bool) -> std::result::Result<crate::consumers::Resolved, crate::consumers::Refusal> {
+        use crate::consumers::{Refusal, Resolved};
+        let (narrowed, e) = self.consumer_entry(project, slug, path, key, caller, untrusted)?;
+        let dek = self.project(project)?;
+        let consumer = &caller.principal;
+        let mut r = Resolver::new(self, project, slug, &dek, &narrowed, true, consumer)?;
+        r.no_dynamic = true;
+        let (value, problem) = r.entry(&e);
+        r.finish(slug)?;
+        if let Some(p) = problem {
+            return Err(Refusal::Unusable(format!("{key} doesn't resolve: {p}")));
+        }
+        self.audit_now(project, &narrowed, "secrets.resolve", Some(slug), Some(path), &[key.to_string()], &format!("resolved {key} for {consumer}"));
+        Ok(Resolved { value, version: e.row.version, expires_at: e.row.expires_at })
+    }
+
     /// Every effective value of a folder (`…/values`, `roll run`, an app's start). Audited as
     /// `action` by `consumer`.
     pub fn values(&self, project: &str, slug: &str, path: &str, resolve: bool, consumer: Option<&str>, caller: &Caller) -> Result<Values> {
