@@ -5119,7 +5119,7 @@ work found). First what can be built now:
    Stripe `GET /v1/balance` and Slack `auth.test`; each goes through `roll_net::PublicOnly` with no
    redirects, and the request carries nothing but the credential. A live one ranks first and offers
    rotate-on-leak where roll has a rotator for its kind. Opt-in per project, since it contacts the
-   provider.
+   provider. Building: `feature/roll-secrets-validity`.
 3. **Postgres decoys in the dashboard** (S; #432): the "Add a decoy" dialog offers only `rlt`.
 4. **Members v1** (building, `feature/roll-members` on #445; decisions D1–D9 with the user, (a) for now).
 5. **Use without seeing** (building, `feature/roll-secrets-placeholders`): host-bound keys,
@@ -5127,7 +5127,7 @@ work found). First what can be built now:
    proxies embed.
 6. **The audit chain under concurrency, and a sealed-start rolld test** (building, `feature/roll-secrets-chain-load`).
 7. **`Reference::parse` exact** (#451, gated green; batch 5): the trim bypass.
-8. **roll code's secrets out of `Debug`, and its signing secrets sealed** (gating, `fix/code-no-secret-debug`).
+8. **roll code's secrets out of `Debug`, and its signing secrets sealed** (#455, gated).
 
 Waiting on another thread or on a merge:
 - **Batch 5:** #407, #430, #440; #277, #397, #432; #357, #330 (being levelled and gated); the strict
