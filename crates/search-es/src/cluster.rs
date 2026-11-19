@@ -112,6 +112,9 @@ pub struct ClusterConfig {
     /// ([`crate::api::snapshots::install_default_repository`]): clusters whose snapshot
     /// contents are durable in roll's object storage (`None`: no default repository).
     pub default_repository: Option<String>,
+    /// Where the cluster's security audit entries go ([`crate::xpack::security::audit`]);
+    /// `None`: it records none.
+    pub audit: Option<crate::xpack::security::audit::AuditLog>,
 }
 
 impl ClusterConfig {
@@ -127,6 +130,7 @@ impl ClusterConfig {
             host_metrics: false,
             sealer: None,
             default_repository: None,
+            audit: None,
         }
     }
 
@@ -188,6 +192,8 @@ pub struct Cluster {
     pub knn: std::sync::Arc<crate::opensearch::knn_api::KnnRuntime>,
     /// The OpenSearch job scheduler (Index State Management jobs; idle without jobs).
     pub jobs: crate::opensearch::jobs::Jobs,
+    /// Search analytics of the indices that turned them on ([`crate::analytics`]).
+    pub analytics: crate::analytics::Analytics,
     /// The cluster's own handle, once its owner allowed background work
     /// ([`Cluster::enable_background_tasks`]).
     background: std::sync::OnceLock<std::sync::Weak<Cluster>>,
@@ -553,7 +559,10 @@ impl Cluster {
                 .map_or(1000, |t| t.as_millis());
             search_painless::es::extract::set_runtime_grok_watchdog((ms > 0).then(|| std::time::Duration::from_millis(ms as u64)));
         }
+        let analytics = crate::analytics::Analytics::default();
+        analytics.sync(&state);
         Ok(Cluster {
+            analytics,
             changes,
             name: config.name.clone(),
             dialect: config.dialect,
@@ -705,7 +714,9 @@ impl Cluster {
             None => EsError::internal(format!("failed to persist cluster state: {e}")),
         })?;
         let version = next.version;
-        *self.state.write() = Arc::new(next);
+        let next = Arc::new(next);
+        *self.state.write() = next.clone();
+        self.analytics.sync(&next);
         self.changes.send_replace(version);
         self.jobs.kick(self);
         Ok(r)

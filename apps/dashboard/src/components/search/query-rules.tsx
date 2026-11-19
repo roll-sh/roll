@@ -324,7 +324,7 @@ function IconButton({ title, disabled, onClick, danger, children }: { title: str
 }
 
 /** The rule form: criteria (type, metadata, values) and the action (pin or hide; ids or docs). */
-function RuleEditor({ draft, onChange, idEditable }: { draft: RuleDraft; onChange: (d: RuleDraft) => void; idEditable?: boolean }) {
+export function RuleEditor({ draft, onChange, idEditable }: { draft: RuleDraft; onChange: (d: RuleDraft) => void; idEditable?: boolean }) {
   const set = (patch: Partial<RuleDraft>) => onChange({ ...draft, ...patch });
   const setCriterion = (i: number, patch: Partial<RuleDraft["criteria"][number]>) =>
     set({ criteria: draft.criteria.map((c, j) => (j === i ? { ...c, ...patch } : c)) });

@@ -2,6 +2,7 @@ import { Building2, Check, Copy, Fingerprint, KeyRound, LoaderCircle, Monitor, S
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { accountsApi, activityText, refreshSession, useSession, type AccountPolicy, type Activity, type Invite, type NetworkPolicy, type Passkey, type PasskeyPolicy, type Provider, type ResetRequest, type Session, type User } from "@/lib/accounts-api";
 import { creationOptions, credentialJSON, passkeyProblem, passkeysSupported } from "@/lib/webauthn";
+import { Link } from "./link";
 import { GitHubMark, GoogleMark } from "./agents/brand-icons";
 import { SsoSection } from "./account-sso";
 import { AppShell } from "./app-shell";
@@ -45,6 +46,7 @@ export function AccountPage() {
           <Sessions />
           <RecentActivity me={user.id} />
           <YourData handle={user.handle} />
+          <DeleteAccount user={user} />
           {user.admin && <Invites />}
           {user.admin && <Resets me={user.id} />}
           {user.admin && <Users me={user.id} />}
@@ -163,6 +165,38 @@ function EmailChange({ onDone }: { onDone: (u: User | null) => void }) {
       </div>
       {error && <p className="mt-2 text-[12px] text-danger">{error}</p>}
     </form>
+  );
+}
+
+/** Delete your own account: typed handle, then sudo mode's confirmation; signed out after. */
+function DeleteAccount({ user }: { user: User }) {
+  const [typed, setTyped] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  return (
+    <Section title="Delete your account" lead="Your sessions, sign-in links, second factors, passkeys and tokens stop at once, and this address no longer signs in. It can't be undone: download your data first if you want it.">
+      <form
+        className={`${card} flex flex-wrap items-center gap-2 p-4`}
+        onSubmit={async (e) => {
+          e.preventDefault();
+          setBusy(true);
+          setError(null);
+          try {
+            await accountsApi.deleteMe(typed.trim());
+            window.location.assign("/signin");
+          } catch (err) {
+            setError(errorText(err));
+            setBusy(false);
+          }
+        }}
+      >
+        <input aria-label="Type your handle to confirm" placeholder={`Type ${user.handle} to confirm`} value={typed} onChange={(e) => setTyped(e.target.value)} className={`${field} min-w-48 flex-1 font-mono`} />
+        <button type="submit" disabled={busy || typed.trim() !== user.handle} className="h-8 rounded-lg border border-danger/50 px-3.5 text-[12.5px] font-medium text-danger transition-colors hover:bg-danger/10 disabled:opacity-40">
+          Delete my account
+        </button>
+      </form>
+      {error && <p className="mt-2 text-[12px] text-danger">{error}</p>}
+    </Section>
   );
 }
 
@@ -852,6 +886,13 @@ function Users({ me }: { me: string }) {
   const without = (list ?? []).filter((u) => !u.disabled && !u.totp && !u.passkeys).length;
   return (
     <Section title="People" lead="Everyone with an account. Turning someone off signs them out everywhere at once.">
+      <p className="-mt-1 mb-2 text-[12px] text-muted">
+        Everyone&apos;s sign-ins and account changes are in the{" "}
+        <Link href="/dashboard/access/audit?product=accounts" className="text-accent hover:underline">
+          sign-in report
+        </Link>{" "}
+        (the audit log, as CSV for a spreadsheet).
+      </p>
       {error && <p className="mb-2 text-[12px] text-danger">{error}</p>}
       {list && without > 0 && (
         <p className={`mb-2 text-[12px] ${required ? "text-danger" : "text-muted"}`}>

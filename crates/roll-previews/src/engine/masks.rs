@@ -20,6 +20,25 @@ pub(super) struct Masks {
     values: Vec<String>,
 }
 
+/// A preview's values to mask, read the first time something asks (`Apps::errors`): a preview
+/// with no errors reads none (each read of its secrets' values is audited).
+pub struct ErrorMasks<'a> {
+    engine: &'a Engine,
+    id: &'a str,
+    values: tokio::sync::OnceCell<Vec<String>>,
+}
+
+impl<'a> ErrorMasks<'a> {
+    pub(super) fn new(engine: &'a Engine, id: &'a str) -> Self {
+        ErrorMasks { engine, id, values: tokio::sync::OnceCell::new() }
+    }
+
+    /// The values (fails closed: no text without its masks).
+    pub async fn values(&self) -> Result<&[String]> {
+        self.values.get_or_try_init(|| self.engine.masks(self.id)).await.map(Vec::as_slice)
+    }
+}
+
 impl Engine {
     /// `lines` as anyone who reads the preview may see them.
     pub(super) async fn masked(&self, id: &str, lines: Vec<String>) -> Result<Vec<String>> {

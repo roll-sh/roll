@@ -341,6 +341,33 @@ async fn a_previews_metrics_are_what_its_running_services_use() {
     assert!(matches!(e.engine.metrics("pv_nope").await, Err(roll_previews::Error::NotFound(_))));
 }
 
+/// A preview's errors are its services' groups, newest first, named by service, with a secret its
+/// code printed shown as `***` in the title and the sample (as its logs are), a value a cut split
+/// included; its values are read only when there's an error (counting reads none), and a
+/// fingerprint isn't the backend's; 404 for no such preview.
+#[tokio::test]
+async fn a_previews_errors_are_its_services_groups_masked() {
+    let e = env(json!({ "enabled": true }));
+    e.secrets.values.lock().push(("STRIPE_KEY".into(), "sk_test_51Hx9".into()));
+    e.code.open(change("chg_er", 4));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_er").unwrap().unwrap();
+    let web = e.engine.store.services(&p.id).unwrap().into_iter().next().unwrap();
+    let masks_read = || e.secrets.reasons.lock().iter().filter(|r| *r == "logs").count();
+    let before = masks_read();
+    assert!(e.engine.errors(&p.id, 60).await.unwrap().is_empty());
+    assert_eq!(masks_read(), before, "no errors, no values read");
+    let group = |f: &str, title: &str, last_seen: i64| roll_previews::ErrorGroup { service: String::new(), fingerprint: f.into(), kind: "line".into(), title: title.into(), count: 2, first_seen: 1, last_seen, sample: format!("{title}\n  at charge()") };
+    e.apps.errors.lock().insert(web.name.clone(), vec![group("aa", "card declined sk_test_51", 5), group("bb", "Stripe rejected sk_test_51Hx9", 9)]);
+    assert_eq!(e.engine.error_count(&p.id, 360).await.unwrap(), 4);
+    assert_eq!(masks_read(), before, "counting reads no values");
+    let got = e.engine.errors(&p.id, 360).await.unwrap();
+    assert_eq!(got.iter().map(|g| (g.service.as_str(), g.title.as_str())).collect::<Vec<_>>(), [(web.name.as_str(), "Stripe rejected ***"), (web.name.as_str(), "card declined ***")]);
+    assert_eq!((got[0].sample.as_str(), got[1].sample.as_str()), ("Stripe rejected ***\n  at charge()", "card declined ***\n  at charge()"));
+    assert!(got.iter().all(|g| g.fingerprint.len() == 16 && !["aa", "bb"].contains(&g.fingerprint.as_str())), "{got:?}");
+    assert!(matches!(e.engine.errors("pv_nope", 60).await, Err(roll_previews::Error::NotFound(_))));
+}
+
 /// A preview's output is read by anyone who can read the preview, and its code (a fork's too) can
 /// print what it was given: its services' logs, its jobs' output and what its page said in a
 /// screenshot run (the pull request's comment) show a secret's value as `***` (as checks'
@@ -639,6 +666,30 @@ async fn masked_postgres_is_masked_before_it_serves_and_new_rules_reach_it() {
     assert_eq!(e.pg.made.load(Ordering::SeqCst), made + 2);
     assert_eq!(e.pg.masks.lock().len(), 3);
     assert_eq!(e.engine.store.row(&p.id).unwrap().state, State::Ready);
+}
+
+/// The rules dialog's suggestions: an unmasked column that looks like people's data is offered
+/// with a rule, a masked one isn't, nor a resource the caller's grant can't read; a parent that
+/// sleeps isn't woken but named.
+#[tokio::test]
+async fn mask_suggestions_name_unmasked_peoples_data_of_branched_resources() {
+    use roll_previews::mask::Column;
+    let e = env(json!({ "enabled": true, "masking": { "postgres:prj_db": { "public.users.name": "redact" } } }));
+    for r in ["prj_hidden", "prj_asleep"] {
+        e.ws.place(roll_workspace::Scope::All, &e.project, roll_workspace::Kind::Postgres, r, 0.0, 0.0).unwrap();
+    }
+    let col = |path: &str| Column { path: path.into(), r#type: Some("text".into()), ..Column::default() };
+    e.pg.columns.lock().insert("prj_db".into(), Ok(vec![col("public.users.email"), col("public.users.name"), col("public.users.created_at"), col("public.products.name")]));
+    e.pg.columns.lock().insert("prj_hidden".into(), Ok(vec![col("public.users.email")]));
+    e.pg.columns.lock().insert("prj_asleep".into(), Err(roll_previews::ports::Asleep));
+    let got = e.engine.mask_suggestions(&e.project, |_, r| r != "prj_hidden").await.unwrap();
+    assert_eq!(
+        got,
+        json!({
+            "suggestions": [{ "resource": "postgres:prj_db", "path": "public.users.email", "rule": "email", "why": "an email address" }],
+            "unread": [{ "resource": "postgres:prj_asleep", "why": "asleep: open it to read its columns" }],
+        })
+    );
 }
 
 #[tokio::test]
@@ -1466,6 +1517,33 @@ async fn a_preview_made_by_hand_is_only_of_a_repo_the_project_stands_for() {
     // The change's preview is the operator's project's: never handed to her.
     let err = e.engine.create(&theirs.id, "acme/api", None, Some("chg_a"), "ada").await.unwrap_err();
     assert!(matches!(err, roll_previews::Error::Conflict(_)) && !err.to_string().contains(&ours.id), "{err}");
+}
+
+/// `roll preview up`'s branch (`preview/<who>/<name>`) has a preview of its own: a change of that
+/// branch gets no second, and one the rules made just before it goes. A preview made by hand of a
+/// pull request's own branch never takes that pull request's preview away.
+#[tokio::test]
+async fn a_change_of_a_branch_with_its_own_preview_gets_none() {
+    let e = env(json!({ "enabled": true }));
+    // `roll preview up`'s order: the push opens the change and nudges a pass, then the branch's
+    // preview is asked for.
+    e.code.heads.lock().insert("acme/web@preview/ana/local".into(), "cs_3a".into());
+    e.code.open(ChangeInfo { branch: Some("preview/ana/local".into()), ..change("chg_3", 3) });
+    e.engine.pass().await.unwrap();
+    let made = e.engine.store.row_by_change("chg_3").unwrap().unwrap();
+    let (branch, _) = e.engine.create(&e.project, "acme/web", Some("preview/ana/local"), None, "ana").await.unwrap();
+    e.engine.pass().await.unwrap();
+    assert_eq!(e.engine.store.row(&made.id).map(|r| r.desired).unwrap_or(Desired::Deleted), Desired::Deleted);
+    e.engine.pass().await.unwrap();
+    assert!(e.engine.store.row_by_change("chg_3").unwrap().is_none_or(|r| r.desired == Desired::Deleted), "no second one");
+    assert_eq!(e.engine.store.row(&branch.id).unwrap().desired, Desired::Active);
+    // A pull request's own branch, previewed by hand too: its own preview stays.
+    e.code.heads.lock().insert("acme/web@feat/4".into(), "cs_4a".into());
+    e.code.open(change("chg_4", 4));
+    e.engine.pass().await.unwrap();
+    e.engine.create(&e.project, "acme/web", Some("feat/4"), None, "ana").await.unwrap();
+    e.engine.pass().await.unwrap();
+    assert_eq!(e.engine.store.row_by_change("chg_4").unwrap().map(|r| r.desired), Some(Desired::Active), "the pull request keeps its preview");
 }
 
 /// A deploy hook (Vercel's and Netlify's, for a headless CMS's publish webhook) builds the

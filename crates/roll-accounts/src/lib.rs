@@ -11,6 +11,7 @@
 
 pub mod api;
 pub mod audit;
+mod deletion;
 mod email_change;
 mod mail;
 mod oauth;
@@ -510,6 +511,10 @@ impl Accounts {
         if !db.has_column("sessions", "passkey_at")? {
             db.add_column("sessions", "passkey_at", "INTEGER")?;
         }
+        // A person deleted their own account: the row is a tombstone from then on.
+        if !db.has_column("users", "deleted_at")? {
+            db.add_column("users", "deleted_at", "INTEGER")?;
+        }
         // How each session began (`sso`, or not): enforcing SSO ends the others.
         if !db.has_column("sessions", "method")? {
             db.add_column("sessions", "method", "TEXT")?;
@@ -576,6 +581,22 @@ impl Accounts {
             self.db.write(|c| c.execute("UPDATE sessions SET seen_at = ? WHERE token_hash = ?", params![now, hash]))?;
         }
         Ok(Some(roll_auth::Session::Full(roll_auth::SignedIn { user, handle, admin, code_owner, session: id })))
+    }
+
+    /// Whether session `id` (`ses_…`, not its token) still signs `user` in, as [`Accounts::resolve`]
+    /// would decide for its cookie: full, not expired or idle, its user not disabled. Signing out,
+    /// revoking it and disabling the user all end it. Nothing is cached, and nothing is written.
+    pub fn session_live(&self, user: &str, id: &str) -> Result<bool> {
+        let now = self.db.now_ms()?;
+        let row = self.db.read(|c| {
+            c.query_row(
+                "SELECT s.seen_at, s.expires_at, u.disabled FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.id = ? AND s.user_id = ? AND s.level = 'full'",
+                [id, user],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, bool>(2)?)),
+            )
+            .optional()
+        })?;
+        Ok(row.is_some_and(|(seen_at, expires_at, disabled)| !disabled && expires_at > now && seen_at + SESSION_IDLE_MS > now))
     }
 
     /// A user as they are now, for a token of theirs (roll-access): `None` once disabled or gone.
@@ -727,8 +748,18 @@ impl Accounts {
         Ok(self.db.read(|c| c.query_row("SELECT code_owner_id FROM users WHERE id = ?", [user], |r| r.get::<_, Option<String>>(0)).optional())?.flatten())
     }
 
+    /// The handles of the people `ids` name (at most 500), whatever their state.
+    pub fn handles(&self, ids: &[String]) -> Result<Vec<(String, String)>> {
+        let ids = &ids[..ids.len().min(500)];
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let marks = vec!["?"; ids.len()].join(", ");
+        Ok(self.db.read(|c| c.query(&format!("SELECT id, handle FROM users WHERE id IN ({marks})"), ids, |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))))?)
+    }
+
     pub fn users(&self) -> Result<Vec<User>> {
-        let ids = self.db.read(|c| c.query("SELECT id FROM users ORDER BY created_at, id", (), |r| r.get::<_, String>(0)))?;
+        let ids = self.db.read(|c| c.query("SELECT id FROM users WHERE deleted_at IS NULL ORDER BY created_at, id", (), |r| r.get::<_, String>(0)))?;
         ids.iter().map(|id| self.user(id)).collect()
     }
 
@@ -750,7 +781,8 @@ impl Accounts {
     /// lifts only a disable of its own, never an admin's.
     pub(crate) fn update_user_by(&self, id: &str, admin: Option<bool>, disabled: Option<bool>, by: &str) -> Result<User> {
         self.db.write(|c| {
-            if c.query_row("SELECT 1 FROM users WHERE id = ?", [id], |_| Ok(())).optional()?.is_none() {
+            // A deleted account is gone for good: no admin turns it back on.
+            if c.query_row("SELECT 1 FROM users WHERE id = ? AND deleted_at IS NULL", [id], |_| Ok(())).optional()?.is_none() {
                 return Err(Error::NotFound(format!("no user {id}")));
             }
             if let Some(a) = admin {
@@ -1096,6 +1128,10 @@ impl roll_auth::Sessions for Resolver {
 
     fn person_now(&self, user: &str) -> Result<Option<roll_auth::SignedIn>, String> {
         self.0.person(user).map_err(|e| e.to_string())
+    }
+
+    fn handles(&self, ids: &[String]) -> Result<Vec<(String, String)>, String> {
+        self.0.handles(ids).map_err(|e| e.to_string())
     }
 
     fn sso_trust<'a>(&'a self, id: &'a str) -> roll_auth::BoxFuture<'a, Result<Option<roll_auth::SsoTrust>, String>> {

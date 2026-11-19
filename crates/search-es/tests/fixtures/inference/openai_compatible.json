@@ -1,0 +1,1384 @@
+[
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-mi",
+  "body": "{\"service\":\"mistral\",\"service_settings\":{\"api_key\":\"mi-key\",\"model\":\"mistral-embed\"}}",
+  "status": 200,
+  "answer": "{\"inference_id\":\"fx-mi\",\"task_type\":\"text_embedding\",\"service\":\"mistral\",\"service_settings\":{\"model\":\"mistral-embed\",\"dimensions\":4,\"similarity\":\"dot_product\",\"rate_limit\":{\"requests_per_minute\":240}},\"chunking_settings\":{\"strategy\":\"sentence\",\"max_chunk_size\":250,\"sentence_overlap\":1}}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/v1/embeddings",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer mi-key"
+     ]
+    ],
+    "body": "{\"model\":\"mistral-embed\",\"input\":[\"how big\"],\"encoding_format\":\"float\"}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"object\": \"list\", \"data\": [{\"object\": \"embedding\", \"index\": 0, \"embedding\": [0.427835, 0.35567, 0.283505, 0.21134]}], \"model\": \"mistral-embed\", \"usage\": {\"prompt_tokens\": 3, \"total_tokens\": 3}}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/fx-mi",
+  "body": "{\"input\":[\"hello world\",\"second\"]}",
+  "status": 200,
+  "answer": "{\"text_embedding\":[{\"embedding\":[0.005155,-0.489691,0.015464,-0.479381]},{\"embedding\":[0.056701,-0.386598,0.170103,-0.273196]}]}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/v1/embeddings",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer mi-key"
+     ]
+    ],
+    "body": "{\"model\":\"mistral-embed\",\"input\":[\"hello world\",\"second\"],\"encoding_format\":\"float\"}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"object\": \"list\", \"data\": [{\"object\": \"embedding\", \"index\": 0, \"embedding\": [0.005155, -0.489691, 0.015464, -0.479381]}, {\"object\": \"embedding\", \"index\": 1, \"embedding\": [0.056701, -0.386598, 0.170103, -0.273196]}], \"model\": \"mistral-embed\", \"usage\": {\"prompt_tokens\": 3, \"total_tokens\": 3}}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-mi2",
+  "body": "{\"service\":\"mistral\",\"service_settings\":{\"api_key\":\"mi-key\",\"model\":\"mistral-embed\",\"dimensions\":3,\"similarity\":\"cosine\",\"max_input_tokens\":10,\"rate_limit\":{\"requests_per_minute\":5}}}",
+  "status": 200,
+  "answer": "{\"inference_id\":\"fx-mi2\",\"task_type\":\"text_embedding\",\"service\":\"mistral\",\"service_settings\":{\"model\":\"mistral-embed\",\"dimensions\":4,\"similarity\":\"cosine\",\"max_input_tokens\":10,\"rate_limit\":{\"requests_per_minute\":5}},\"chunking_settings\":{\"strategy\":\"sentence\",\"max_chunk_size\":250,\"sentence_overlap\":1}}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/v1/embeddings",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer mi-key"
+     ]
+    ],
+    "body": "{\"model\":\"mistral-embed\",\"input\":[\"how big\"],\"encoding_format\":\"float\"}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"object\": \"list\", \"data\": [{\"object\": \"embedding\", \"index\": 0, \"embedding\": [0.427835, 0.35567, 0.283505, 0.21134]}], \"model\": \"mistral-embed\", \"usage\": {\"prompt_tokens\": 3, \"total_tokens\": 3}}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/completion/fx-mic",
+  "body": "{\"service\":\"mistral\",\"service_settings\":{\"api_key\":\"mi-key\",\"model\":\"mistral-small\"}}",
+  "status": 200,
+  "answer": "{\"inference_id\":\"fx-mic\",\"task_type\":\"completion\",\"service\":\"mistral\",\"service_settings\":{\"model\":\"mistral-small\",\"rate_limit\":{\"requests_per_minute\":240}}}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json"
+     ],
+     [
+      "Authorization",
+      "Bearer mi-key"
+     ]
+    ],
+    "body": "{\"messages\":[{\"content\":\"how big\",\"role\":\"user\"}],\"model\":\"mistral-small\",\"n\":1,\"stream\":false}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"id\": \"chatcmpl-1\", \"object\": \"chat.completion\", \"created\": 1, \"model\": \"mistral-small\", \"choices\": [{\"index\": 0, \"message\": {\"role\": \"assistant\", \"content\": \"echo: how big\"}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 3, \"completion_tokens\": 2, \"total_tokens\": 5}}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/fx-mic",
+  "body": "{\"input\":\"hi\"}",
+  "status": 200,
+  "answer": "{\"completion\":[{\"result\":\"echo: hi\"}]}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json"
+     ],
+     [
+      "Authorization",
+      "Bearer mi-key"
+     ]
+    ],
+    "body": "{\"messages\":[{\"content\":\"hi\",\"role\":\"user\"}],\"model\":\"mistral-small\",\"n\":1,\"stream\":false}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"id\": \"chatcmpl-1\", \"object\": \"chat.completion\", \"created\": 1, \"model\": \"mistral-small\", \"choices\": [{\"index\": 0, \"message\": {\"role\": \"assistant\", \"content\": \"echo: hi\"}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 3, \"completion_tokens\": 2, \"total_tokens\": 5}}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/completion/fx-mic/_stream",
+  "body": "{\"input\":\"stream\"}",
+  "status": 200,
+  "answer": "\ufeffevent: message\ndata: {\"completion\":[{\"delta\":\"echo: \"},{\"delta\":\"stream\"}]}\n\n\ufeffevent: message\ndata: [DONE]\n\n",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json"
+     ],
+     [
+      "Authorization",
+      "Bearer mi-key"
+     ]
+    ],
+    "body": "{\"messages\":[{\"content\":\"stream\",\"role\":\"user\"}],\"model\":\"mistral-small\",\"n\":1,\"stream\":true}",
+    "response": {
+     "status": 200,
+     "ctype": "text/event-stream",
+     "headers": [],
+     "body": "data: {\"id\": \"c1\", \"object\": \"chat.completion.chunk\", \"created\": 1, \"model\": \"mistral-small\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": \"echo: \"}, \"finish_reason\": null}]}\n\ndata: {\"id\": \"c1\", \"object\": \"chat.completion.chunk\", \"created\": 1, \"model\": \"mistral-small\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"stream\"}, \"finish_reason\": null}]}\n\ndata: {\"id\": \"c1\", \"object\": \"chat.completion.chunk\", \"created\": 1, \"model\": \"mistral-small\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 3, \"completion_tokens\": 2, \"total_tokens\": 5}}\n\ndata: [DONE]\n\n"
+    }
+   }
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/chat_completion/fx-micc",
+  "body": "{\"service\":\"mistral\",\"service_settings\":{\"api_key\":\"mi-key\",\"model\":\"mistral-small\"}}",
+  "status": 200,
+  "answer": "{\"inference_id\":\"fx-micc\",\"task_type\":\"chat_completion\",\"service\":\"mistral\",\"service_settings\":{\"model\":\"mistral-small\",\"rate_limit\":{\"requests_per_minute\":240}}}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json"
+     ],
+     [
+      "Authorization",
+      "Bearer mi-key"
+     ]
+    ],
+    "body": "{\"messages\":[{\"content\":\"how big\",\"role\":\"user\"}],\"model\":\"mistral-small\",\"n\":1,\"stream\":true}",
+    "response": {
+     "status": 200,
+     "ctype": "text/event-stream",
+     "headers": [],
+     "body": "data: {\"id\": \"c1\", \"object\": \"chat.completion.chunk\", \"created\": 1, \"model\": \"mistral-small\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": \"echo: \"}, \"finish_reason\": null}]}\n\ndata: {\"id\": \"c1\", \"object\": \"chat.completion.chunk\", \"created\": 1, \"model\": \"mistral-small\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"how big\"}, \"finish_reason\": null}]}\n\ndata: {\"id\": \"c1\", \"object\": \"chat.completion.chunk\", \"created\": 1, \"model\": \"mistral-small\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 3, \"completion_tokens\": 2, \"total_tokens\": 5}}\n\ndata: [DONE]\n\n"
+    }
+   }
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/chat_completion/fx-micc/_stream",
+  "body": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_completion_tokens\":5}",
+  "status": 200,
+  "answer": "\ufeffevent: message\ndata: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"content\":\"echo\",\"role\":\"assistant\"},\"index\":0}],\"model\":\"mistral-small\",\"object\":\"chat.completion.chunk\"}\n\n\ufeffevent: message\ndata: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"content\":\": hi\"},\"index\":0}],\"model\":\"mistral-small\",\"object\":\"chat.completion.chunk\"}\n\n\ufeffevent: message\ndata: {\"id\":\"c1\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\",\"index\":0}],\"model\":\"mistral-small\",\"object\":\"chat.completion.chunk\",\"usage\":{\"completion_tokens\":2,\"prompt_tokens\":3,\"total_tokens\":5}}\n\n\ufeffevent: message\ndata: [DONE]\n\n",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json"
+     ],
+     [
+      "Authorization",
+      "Bearer mi-key"
+     ]
+    ],
+    "body": "{\"messages\":[{\"content\":\"hi\",\"role\":\"user\"}],\"max_tokens\":5,\"model\":\"mistral-small\",\"n\":1,\"stream\":true}",
+    "response": {
+     "status": 200,
+     "ctype": "text/event-stream",
+     "headers": [],
+     "body": "data: {\"id\": \"c1\", \"object\": \"chat.completion.chunk\", \"created\": 1, \"model\": \"mistral-small\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": \"echo\"}, \"finish_reason\": null}]}\n\ndata: {\"id\": \"c1\", \"object\": \"chat.completion.chunk\", \"created\": 1, \"model\": \"mistral-small\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \": hi\"}, \"finish_reason\": null}]}\n\ndata: {\"id\": \"c1\", \"object\": \"chat.completion.chunk\", \"created\": 1, \"model\": \"mistral-small\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 3, \"completion_tokens\": 2, \"total_tokens\": 5}}\n\ndata: [DONE]\n\n"
+    }
+   }
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-miy",
+  "body": "{\"service\":\"mistral\",\"service_settings\":{\"api_key\":\"k\",\"model_id\":\"m\"}}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"validation_exception\",\"reason\":\"Validation Failed: 1: [service_settings] does not contain the required setting [model];\"}],\"type\":\"validation_exception\",\"reason\":\"Validation Failed: 1: [service_settings] does not contain the required setting [model];\"},\"status\":400}",
+  "upstream": []
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-miy",
+  "body": "{\"service\":\"mistral\",\"service_settings\":{\"api_key\":\"k\",\"model\":\"fail401\"}}",
+  "status": 200,
+  "answer": "{\"inference_id\":\"fx-miy\",\"task_type\":\"text_embedding\",\"service\":\"mistral\",\"service_settings\":{\"model\":\"fail401\",\"dimensions\":4,\"similarity\":\"dot_product\",\"rate_limit\":{\"requests_per_minute\":240}},\"chunking_settings\":{\"strategy\":\"sentence\",\"max_chunk_size\":250,\"sentence_overlap\":1}}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/v1/embeddings",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer k"
+     ]
+    ],
+    "body": "{\"model\":\"fail401\",\"input\":[\"how big\"],\"encoding_format\":\"float\"}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"object\": \"list\", \"data\": [{\"object\": \"embedding\", \"index\": 0, \"embedding\": [0.427835, 0.35567, 0.283505, 0.21134]}], \"model\": \"fail401\", \"usage\": {\"prompt_tokens\": 3, \"total_tokens\": 3}}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "GET",
+  "path": "/_inference/fx-mi",
+  "body": null,
+  "status": 200,
+  "answer": "{\"endpoints\":[{\"inference_id\":\"fx-mi\",\"task_type\":\"text_embedding\",\"service\":\"mistral\",\"service_settings\":{\"model\":\"mistral-embed\",\"dimensions\":4,\"similarity\":\"dot_product\",\"rate_limit\":{\"requests_per_minute\":240}},\"chunking_settings\":{\"strategy\":\"sentence\",\"max_chunk_size\":250,\"sentence_overlap\":1}}]}",
+  "upstream": []
+ },
+ {
+  "method": "GET",
+  "path": "/_inference/fx-mic",
+  "body": null,
+  "status": 200,
+  "answer": "{\"endpoints\":[{\"inference_id\":\"fx-mic\",\"task_type\":\"completion\",\"service\":\"mistral\",\"service_settings\":{\"model\":\"mistral-small\",\"rate_limit\":{\"requests_per_minute\":240}}}]}",
+  "upstream": []
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-vo",
+  "body": "{\"service\":\"voyageai\",\"service_settings\":{\"api_key\":\"vo-key\",\"model_id\":\"voyage-3\"}}",
+  "status": 200,
+  "answer": "{\"inference_id\":\"fx-vo\",\"task_type\":\"text_embedding\",\"service\":\"voyageai\",\"service_settings\":{\"model_id\":\"voyage-3\",\"rate_limit\":{\"requests_per_minute\":2000},\"similarity\":\"dot_product\",\"dimensions\":4,\"embedding_type\":\"float\"},\"chunking_settings\":{\"strategy\":\"sentence\",\"max_chunk_size\":250,\"sentence_overlap\":1}}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/v1/embeddings",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer vo-key"
+     ],
+     [
+      "Request-Source",
+      "unspecified:elasticsearch"
+     ]
+    ],
+    "body": "{\"input\":[\"how big\"],\"model\":\"voyage-3\",\"input_type\":\"document\",\"output_dtype\":\"float\"}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"object\": \"list\", \"data\": [{\"object\": \"embedding\", \"embedding\": [0.427835, 0.35567, 0.283505, 0.21134], \"index\": 0}], \"model\": \"voyage-3\", \"usage\": {\"total_tokens\": 3}}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/fx-vo",
+  "body": "{\"input\":[\"hello world\",\"second\"],\"input_type\":\"search\"}",
+  "status": 200,
+  "answer": "{\"text_embedding\":[{\"embedding\":[0.005155,-0.489691,0.015464,-0.479381]},{\"embedding\":[0.056701,-0.386598,0.170103,-0.273196]}]}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/v1/embeddings",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer vo-key"
+     ],
+     [
+      "Request-Source",
+      "unspecified:elasticsearch"
+     ]
+    ],
+    "body": "{\"input\":[\"hello world\",\"second\"],\"model\":\"voyage-3\",\"input_type\":\"query\",\"output_dimension\":4,\"output_dtype\":\"float\"}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"object\": \"list\", \"data\": [{\"object\": \"embedding\", \"embedding\": [0.005155, -0.489691, 0.015464, -0.479381], \"index\": 0}, {\"object\": \"embedding\", \"embedding\": [0.056701, -0.386598, 0.170103, -0.273196], \"index\": 1}], \"model\": \"voyage-3\", \"usage\": {\"total_tokens\": 3}}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-vo2",
+  "body": "{\"service\":\"voyageai\",\"service_settings\":{\"api_key\":\"vo-key\",\"model_id\":\"voyage-3\",\"dimensions\":3,\"embedding_type\":\"int8\",\"similarity\":\"cosine\"},\"task_settings\":{\"input_type\":\"ingest\",\"truncation\":false}}",
+  "status": 200,
+  "answer": "{\"inference_id\":\"fx-vo2\",\"task_type\":\"text_embedding\",\"service\":\"voyageai\",\"service_settings\":{\"model_id\":\"voyage-3\",\"rate_limit\":{\"requests_per_minute\":2000},\"similarity\":\"cosine\",\"dimensions\":3,\"embedding_type\":\"int8\"},\"task_settings\":{\"input_type\":\"ingest\",\"truncation\":false},\"chunking_settings\":{\"strategy\":\"sentence\",\"max_chunk_size\":250,\"sentence_overlap\":1}}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/v1/embeddings",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer vo-key"
+     ],
+     [
+      "Request-Source",
+      "unspecified:elasticsearch"
+     ]
+    ],
+    "body": "{\"input\":[\"how big\"],\"model\":\"voyage-3\",\"input_type\":\"document\",\"truncation\":false,\"output_dimension\":3,\"output_dtype\":\"int8\"}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"object\": \"list\", \"data\": [{\"object\": \"embedding\", \"embedding\": [0.427835, 0.35567, 0.283505], \"index\": 0}], \"model\": \"voyage-3\", \"usage\": {\"total_tokens\": 3}}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-vo3",
+  "body": "{\"service\":\"voyageai\",\"service_settings\":{\"api_key\":\"vo-key\",\"model_id\":\"voyage-3\",\"embedding_type\":\"float\"},\"task_settings\":{\"input_type\":\"ingest\",\"truncation\":false}}",
+  "status": 200,
+  "answer": "{\"inference_id\":\"fx-vo3\",\"task_type\":\"text_embedding\",\"service\":\"voyageai\",\"service_settings\":{\"model_id\":\"voyage-3\",\"rate_limit\":{\"requests_per_minute\":2000},\"similarity\":\"dot_product\",\"dimensions\":4,\"embedding_type\":\"float\"},\"task_settings\":{\"input_type\":\"ingest\",\"truncation\":false},\"chunking_settings\":{\"strategy\":\"sentence\",\"max_chunk_size\":250,\"sentence_overlap\":1}}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/v1/embeddings",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer vo-key"
+     ],
+     [
+      "Request-Source",
+      "unspecified:elasticsearch"
+     ]
+    ],
+    "body": "{\"input\":[\"how big\"],\"model\":\"voyage-3\",\"input_type\":\"document\",\"truncation\":false,\"output_dtype\":\"float\"}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"object\": \"list\", \"data\": [{\"object\": \"embedding\", \"embedding\": [0.427835, 0.35567, 0.283505, 0.21134], \"index\": 0}], \"model\": \"voyage-3\", \"usage\": {\"total_tokens\": 3}}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/fx-vo3",
+  "body": "{\"input\":\"z\"}",
+  "status": 200,
+  "answer": "{\"text_embedding\":[{\"embedding\":[-0.242268,0.015464,0.273196,-0.469072]}]}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/v1/embeddings",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer vo-key"
+     ],
+     [
+      "Request-Source",
+      "unspecified:elasticsearch"
+     ]
+    ],
+    "body": "{\"input\":[\"z\"],\"model\":\"voyage-3\",\"input_type\":\"document\",\"truncation\":false,\"output_dimension\":4,\"output_dtype\":\"float\"}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"object\": \"list\", \"data\": [{\"object\": \"embedding\", \"embedding\": [-0.242268, 0.015464, 0.273196, -0.469072], \"index\": 0}], \"model\": \"voyage-3\", \"usage\": {\"total_tokens\": 3}}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/rerank/fx-vor",
+  "body": "{\"service\":\"voyageai\",\"service_settings\":{\"api_key\":\"vo-key\",\"model_id\":\"rerank-2\"},\"task_settings\":{\"top_k\":2,\"return_documents\":true,\"truncation\":true}}",
+  "status": 200,
+  "answer": "{\"inference_id\":\"fx-vor\",\"task_type\":\"rerank\",\"service\":\"voyageai\",\"service_settings\":{\"model_id\":\"rerank-2\",\"rate_limit\":{\"requests_per_minute\":2000}},\"task_settings\":{\"top_k\":2,\"return_documents\":true,\"truncation\":true}}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/v1/rerank",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer vo-key"
+     ],
+     [
+      "Request-Source",
+      "unspecified:elasticsearch"
+     ]
+    ],
+    "body": "{\"model\":\"rerank-2\",\"query\":\"test query\",\"documents\":[\"how big\"],\"return_documents\":true,\"top_k\":2,\"truncation\":true}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"object\": \"list\", \"data\": [{\"index\": 0, \"relevance_score\": 0.333333, \"document\": \"how big\"}], \"model\": \"rerank-2\", \"usage\": {\"total_tokens\": 3}}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/fx-vor",
+  "body": "{\"input\":[\"a\",\"bb\",\"ccc\"],\"query\":\"q\"}",
+  "status": 200,
+  "answer": "{\"rerank\":[{\"index\":0,\"relevance_score\":0.5,\"text\":\"a\"},{\"index\":1,\"relevance_score\":0.25,\"text\":\"bb\"}]}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/v1/rerank",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer vo-key"
+     ],
+     [
+      "Request-Source",
+      "unspecified:elasticsearch"
+     ]
+    ],
+    "body": "{\"model\":\"rerank-2\",\"query\":\"q\",\"documents\":[\"a\",\"bb\",\"ccc\"],\"return_documents\":true,\"top_k\":2,\"truncation\":true}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"object\": \"list\", \"data\": [{\"index\": 0, \"relevance_score\": 0.5, \"document\": \"a\"}, {\"index\": 1, \"relevance_score\": 0.25, \"document\": \"bb\"}], \"model\": \"rerank-2\", \"usage\": {\"total_tokens\": 3}}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/fx-vor",
+  "body": "{\"input\":[\"a\",\"bb\",\"ccc\"],\"query\":\"q\",\"top_n\":1,\"return_documents\":false}",
+  "status": 200,
+  "answer": "{\"rerank\":[{\"index\":0,\"relevance_score\":0.5}]}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/v1/rerank",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer vo-key"
+     ],
+     [
+      "Request-Source",
+      "unspecified:elasticsearch"
+     ]
+    ],
+    "body": "{\"model\":\"rerank-2\",\"query\":\"q\",\"documents\":[\"a\",\"bb\",\"ccc\"],\"return_documents\":false,\"top_k\":1,\"truncation\":true}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"object\": \"list\", \"data\": [{\"index\": 0, \"relevance_score\": 0.5}], \"model\": \"rerank-2\", \"usage\": {\"total_tokens\": 3}}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/completion/fx-voy",
+  "body": "{\"service\":\"voyageai\",\"service_settings\":{\"api_key\":\"k\",\"model_id\":\"m\"}}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"status_exception\",\"reason\":\"The [voyageai] service does not support task type [completion]\"}],\"type\":\"status_exception\",\"reason\":\"The [voyageai] service does not support task type [completion]\"},\"status\":400}",
+  "upstream": []
+ },
+ {
+  "method": "GET",
+  "path": "/_inference/fx-vo",
+  "body": null,
+  "status": 200,
+  "answer": "{\"endpoints\":[{\"inference_id\":\"fx-vo\",\"task_type\":\"text_embedding\",\"service\":\"voyageai\",\"service_settings\":{\"model_id\":\"voyage-3\",\"rate_limit\":{\"requests_per_minute\":2000},\"similarity\":\"dot_product\",\"dimensions\":4,\"embedding_type\":\"float\"},\"chunking_settings\":{\"strategy\":\"sentence\",\"max_chunk_size\":250,\"sentence_overlap\":1}}]}",
+  "upstream": []
+ },
+ {
+  "method": "GET",
+  "path": "/_inference/fx-vo3",
+  "body": null,
+  "status": 200,
+  "answer": "{\"endpoints\":[{\"inference_id\":\"fx-vo3\",\"task_type\":\"text_embedding\",\"service\":\"voyageai\",\"service_settings\":{\"model_id\":\"voyage-3\",\"rate_limit\":{\"requests_per_minute\":2000},\"similarity\":\"dot_product\",\"dimensions\":4,\"embedding_type\":\"float\"},\"task_settings\":{\"input_type\":\"ingest\",\"truncation\":false},\"chunking_settings\":{\"strategy\":\"sentence\",\"max_chunk_size\":250,\"sentence_overlap\":1}}]}",
+  "upstream": []
+ },
+ {
+  "method": "GET",
+  "path": "/_inference/fx-vor",
+  "body": null,
+  "status": 200,
+  "answer": "{\"endpoints\":[{\"inference_id\":\"fx-vor\",\"task_type\":\"rerank\",\"service\":\"voyageai\",\"service_settings\":{\"model_id\":\"rerank-2\",\"rate_limit\":{\"requests_per_minute\":2000}},\"task_settings\":{\"top_k\":2,\"return_documents\":true,\"truncation\":true}}]}",
+  "upstream": []
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-ji",
+  "body": "{\"service\":\"jinaai\",\"service_settings\":{\"api_key\":\"ji-key\",\"model_id\":\"jina-embeddings-v3\"}}",
+  "status": 200,
+  "answer": "{\"inference_id\":\"fx-ji\",\"task_type\":\"text_embedding\",\"service\":\"jinaai\",\"service_settings\":{\"model_id\":\"jina-embeddings-v3\",\"rate_limit\":{\"requests_per_minute\":2000},\"dimensions\":4,\"embedding_type\":\"float\",\"similarity\":\"dot_product\"},\"chunking_settings\":{\"strategy\":\"sentence\",\"max_chunk_size\":250,\"sentence_overlap\":1}}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/v1/embeddings",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer ji-key"
+     ],
+     [
+      "Request-Source",
+      "unspecified:elasticsearch"
+     ]
+    ],
+    "body": "{\"input\":[\"how big\"],\"model\":\"jina-embeddings-v3\",\"embedding_type\":\"float\",\"task\":\"retrieval.passage\"}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"object\": \"list\", \"data\": [{\"object\": \"embedding\", \"index\": 0, \"embedding\": [0.427835, 0.35567, 0.283505, 0.21134]}], \"model\": \"jina-embeddings-v3\", \"usage\": {\"prompt_tokens\": 3, \"total_tokens\": 3}}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/fx-ji",
+  "body": "{\"input\":[\"hello world\",\"second\"],\"input_type\":\"search\"}",
+  "status": 200,
+  "answer": "{\"text_embedding\":[{\"embedding\":[0.005155,-0.489691,0.015464,-0.479381]},{\"embedding\":[0.056701,-0.386598,0.170103,-0.273196]}]}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/v1/embeddings",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer ji-key"
+     ],
+     [
+      "Request-Source",
+      "unspecified:elasticsearch"
+     ]
+    ],
+    "body": "{\"input\":[\"hello world\",\"second\"],\"model\":\"jina-embeddings-v3\",\"embedding_type\":\"float\",\"task\":\"retrieval.query\"}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"object\": \"list\", \"data\": [{\"object\": \"embedding\", \"index\": 0, \"embedding\": [0.005155, -0.489691, 0.015464, -0.479381]}, {\"object\": \"embedding\", \"index\": 1, \"embedding\": [0.056701, -0.386598, 0.170103, -0.273196]}], \"model\": \"jina-embeddings-v3\", \"usage\": {\"prompt_tokens\": 3, \"total_tokens\": 3}}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-ji2",
+  "body": "{\"service\":\"jinaai\",\"service_settings\":{\"api_key\":\"ji-key\",\"model_id\":\"jina-embeddings-v3\",\"dimensions\":4,\"embedding_type\":\"bit\",\"similarity\":\"l2_norm\"},\"task_settings\":{\"input_type\":\"ingest\",\"late_chunking\":true}}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"status_exception\",\"reason\":\"The retrieved embeddings size [32] does not match the size specified in the settings [4]. Please recreate the [fx-ji2] configuration with the correct dimensions\"}],\"type\":\"status_exception\",\"reason\":\"The retrieved embeddings size [32] does not match the size specified in the settings [4]. Please recreate the [fx-ji2] configuration with the correct dimensions\"},\"status\":400}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/v1/embeddings",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer ji-key"
+     ],
+     [
+      "Request-Source",
+      "unspecified:elasticsearch"
+     ]
+    ],
+    "body": "{\"input\":[\"how big\"],\"model\":\"jina-embeddings-v3\",\"embedding_type\":\"binary\",\"task\":\"retrieval.passage\",\"late_chunking\":true,\"dimensions\":4}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"object\": \"list\", \"data\": [{\"object\": \"embedding\", \"index\": 0, \"embedding\": [0.427835, 0.35567, 0.283505, 0.21134]}], \"model\": \"jina-embeddings-v3\", \"usage\": {\"prompt_tokens\": 3, \"total_tokens\": 3}}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-ji3",
+  "body": "{\"service\":\"jinaai\",\"service_settings\":{\"api_key\":\"ji-key\",\"model_id\":\"jina-embeddings-v3\",\"dimensions\":4},\"task_settings\":{\"input_type\":\"classification\",\"late_chunking\":false}}",
+  "status": 200,
+  "answer": "{\"inference_id\":\"fx-ji3\",\"task_type\":\"text_embedding\",\"service\":\"jinaai\",\"service_settings\":{\"model_id\":\"jina-embeddings-v3\",\"rate_limit\":{\"requests_per_minute\":2000},\"dimensions\":4,\"embedding_type\":\"float\",\"similarity\":\"dot_product\"},\"task_settings\":{\"input_type\":\"classification\",\"late_chunking\":false},\"chunking_settings\":{\"strategy\":\"sentence\",\"max_chunk_size\":250,\"sentence_overlap\":1}}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/v1/embeddings",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer ji-key"
+     ],
+     [
+      "Request-Source",
+      "unspecified:elasticsearch"
+     ]
+    ],
+    "body": "{\"input\":[\"how big\"],\"model\":\"jina-embeddings-v3\",\"embedding_type\":\"float\",\"task\":\"retrieval.passage\",\"late_chunking\":false,\"dimensions\":4}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"object\": \"list\", \"data\": [{\"object\": \"embedding\", \"index\": 0, \"embedding\": [0.427835, 0.35567, 0.283505, 0.21134]}], \"model\": \"jina-embeddings-v3\", \"usage\": {\"prompt_tokens\": 3, \"total_tokens\": 3}}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/fx-ji3",
+  "body": "{\"input\":\"z\"}",
+  "status": 200,
+  "answer": "{\"text_embedding\":[{\"embedding\":[-0.242268,0.015464,0.273196,-0.469072]}]}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/v1/embeddings",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer ji-key"
+     ],
+     [
+      "Request-Source",
+      "unspecified:elasticsearch"
+     ]
+    ],
+    "body": "{\"input\":[\"z\"],\"model\":\"jina-embeddings-v3\",\"embedding_type\":\"float\",\"task\":\"classification\",\"late_chunking\":false,\"dimensions\":4}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"object\": \"list\", \"data\": [{\"object\": \"embedding\", \"index\": 0, \"embedding\": [-0.242268, 0.015464, 0.273196, -0.469072]}], \"model\": \"jina-embeddings-v3\", \"usage\": {\"prompt_tokens\": 3, \"total_tokens\": 3}}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/rerank/fx-jir",
+  "body": "{\"service\":\"jinaai\",\"service_settings\":{\"api_key\":\"ji-key\",\"model_id\":\"jina-reranker-v2\"},\"task_settings\":{\"top_n\":2,\"return_documents\":true}}",
+  "status": 200,
+  "answer": "{\"inference_id\":\"fx-jir\",\"task_type\":\"rerank\",\"service\":\"jinaai\",\"service_settings\":{\"model_id\":\"jina-reranker-v2\",\"rate_limit\":{\"requests_per_minute\":2000}},\"task_settings\":{\"top_n\":2,\"return_documents\":true}}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/v1/rerank",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer ji-key"
+     ],
+     [
+      "Request-Source",
+      "unspecified:elasticsearch"
+     ]
+    ],
+    "body": "{\"model\":\"jina-reranker-v2\",\"query\":\"test query\",\"documents\":[\"how big\"],\"top_n\":2,\"return_documents\":true}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"model\": \"jina-reranker-v2\", \"results\": [{\"index\": 0, \"relevance_score\": 0.333333, \"document\": {\"text\": \"how big\"}}], \"usage\": {\"total_tokens\": 3}}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/fx-jir",
+  "body": "{\"input\":[\"a\",\"bb\",\"ccc\"],\"query\":\"q\"}",
+  "status": 200,
+  "answer": "{\"rerank\":[{\"index\":0,\"relevance_score\":0.5,\"text\":\"a\"},{\"index\":1,\"relevance_score\":0.25,\"text\":\"bb\"}]}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/v1/rerank",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer ji-key"
+     ],
+     [
+      "Request-Source",
+      "unspecified:elasticsearch"
+     ]
+    ],
+    "body": "{\"model\":\"jina-reranker-v2\",\"query\":\"q\",\"documents\":[\"a\",\"bb\",\"ccc\"],\"top_n\":2,\"return_documents\":true}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"model\": \"jina-reranker-v2\", \"results\": [{\"index\": 0, \"relevance_score\": 0.5, \"document\": {\"text\": \"a\"}}, {\"index\": 1, \"relevance_score\": 0.25, \"document\": {\"text\": \"bb\"}}], \"usage\": {\"total_tokens\": 3}}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "GET",
+  "path": "/_inference/fx-ji",
+  "body": null,
+  "status": 200,
+  "answer": "{\"endpoints\":[{\"inference_id\":\"fx-ji\",\"task_type\":\"text_embedding\",\"service\":\"jinaai\",\"service_settings\":{\"model_id\":\"jina-embeddings-v3\",\"rate_limit\":{\"requests_per_minute\":2000},\"dimensions\":4,\"embedding_type\":\"float\",\"similarity\":\"dot_product\"},\"chunking_settings\":{\"strategy\":\"sentence\",\"max_chunk_size\":250,\"sentence_overlap\":1}}]}",
+  "upstream": []
+ },
+ {
+  "method": "GET",
+  "path": "/_inference/fx-ji3",
+  "body": null,
+  "status": 200,
+  "answer": "{\"endpoints\":[{\"inference_id\":\"fx-ji3\",\"task_type\":\"text_embedding\",\"service\":\"jinaai\",\"service_settings\":{\"model_id\":\"jina-embeddings-v3\",\"rate_limit\":{\"requests_per_minute\":2000},\"dimensions\":4,\"embedding_type\":\"float\",\"similarity\":\"dot_product\"},\"task_settings\":{\"input_type\":\"classification\",\"late_chunking\":false},\"chunking_settings\":{\"strategy\":\"sentence\",\"max_chunk_size\":250,\"sentence_overlap\":1}}]}",
+  "upstream": []
+ },
+ {
+  "method": "GET",
+  "path": "/_inference/fx-jir",
+  "body": null,
+  "status": 200,
+  "answer": "{\"endpoints\":[{\"inference_id\":\"fx-jir\",\"task_type\":\"rerank\",\"service\":\"jinaai\",\"service_settings\":{\"model_id\":\"jina-reranker-v2\",\"rate_limit\":{\"requests_per_minute\":2000}},\"task_settings\":{\"top_n\":2,\"return_documents\":true}}]}",
+  "upstream": []
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/completion/fx-ds",
+  "body": "{\"service\":\"deepseek\",\"service_settings\":{\"api_key\":\"ds-key\",\"model_id\":\"deepseek-chat\"}}",
+  "status": 200,
+  "answer": "{\"inference_id\":\"fx-ds\",\"task_type\":\"completion\",\"service\":\"deepseek\",\"service_settings\":{\"model_id\":\"deepseek-chat\"}}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/chat/completions",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer ds-key"
+     ]
+    ],
+    "body": "{\"messages\":[{\"content\":\"how big\",\"role\":\"user\"}],\"model\":\"deepseek-chat\",\"n\":1,\"stream\":false}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"id\": \"chatcmpl-1\", \"object\": \"chat.completion\", \"created\": 1, \"model\": \"deepseek-chat\", \"choices\": [{\"index\": 0, \"message\": {\"role\": \"assistant\", \"content\": \"echo: how big\"}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 3, \"completion_tokens\": 2, \"total_tokens\": 5}}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/fx-ds",
+  "body": "{\"input\":\"hi\"}",
+  "status": 200,
+  "answer": "{\"completion\":[{\"result\":\"echo: hi\"}]}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/chat/completions",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer ds-key"
+     ]
+    ],
+    "body": "{\"messages\":[{\"content\":\"hi\",\"role\":\"user\"}],\"model\":\"deepseek-chat\",\"n\":1,\"stream\":false}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"id\": \"chatcmpl-1\", \"object\": \"chat.completion\", \"created\": 1, \"model\": \"deepseek-chat\", \"choices\": [{\"index\": 0, \"message\": {\"role\": \"assistant\", \"content\": \"echo: hi\"}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 3, \"completion_tokens\": 2, \"total_tokens\": 5}}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/completion/fx-ds/_stream",
+  "body": "{\"input\":\"stream\"}",
+  "status": 200,
+  "answer": "\ufeffevent: message\ndata: {\"completion\":[{\"delta\":\"echo: \"},{\"delta\":\"stream\"}]}\n\n\ufeffevent: message\ndata: [DONE]\n\n",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/chat/completions",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer ds-key"
+     ]
+    ],
+    "body": "{\"messages\":[{\"content\":\"stream\",\"role\":\"user\"}],\"model\":\"deepseek-chat\",\"n\":1,\"stream\":true,\"stream_options\":{\"include_usage\":true}}",
+    "response": {
+     "status": 200,
+     "ctype": "text/event-stream",
+     "headers": [],
+     "body": "data: {\"id\": \"c1\", \"object\": \"chat.completion.chunk\", \"created\": 1, \"model\": \"deepseek-chat\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": \"echo: \"}, \"finish_reason\": null}]}\n\ndata: {\"id\": \"c1\", \"object\": \"chat.completion.chunk\", \"created\": 1, \"model\": \"deepseek-chat\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"stream\"}, \"finish_reason\": null}]}\n\ndata: {\"id\": \"c1\", \"object\": \"chat.completion.chunk\", \"created\": 1, \"model\": \"deepseek-chat\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 3, \"completion_tokens\": 2, \"total_tokens\": 5}}\n\ndata: [DONE]\n\n"
+    }
+   }
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/chat_completion/fx-dscc",
+  "body": "{\"service\":\"deepseek\",\"service_settings\":{\"api_key\":\"ds-key\",\"model_id\":\"deepseek-chat\",\"url\":\"$M/v1/chat/completions\"}}",
+  "status": 200,
+  "answer": "{\"inference_id\":\"fx-dscc\",\"task_type\":\"chat_completion\",\"service\":\"deepseek\",\"service_settings\":{\"model_id\":\"deepseek-chat\",\"url\":\"$M/v1/chat/completions\"}}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer ds-key"
+     ]
+    ],
+    "body": "{\"messages\":[{\"content\":\"how big\",\"role\":\"user\"}],\"model\":\"deepseek-chat\",\"n\":1,\"stream\":true,\"stream_options\":{\"include_usage\":true}}",
+    "response": {
+     "status": 200,
+     "ctype": "text/event-stream",
+     "headers": [],
+     "body": "data: {\"id\": \"c1\", \"object\": \"chat.completion.chunk\", \"created\": 1, \"model\": \"deepseek-chat\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": \"echo: \"}, \"finish_reason\": null}]}\n\ndata: {\"id\": \"c1\", \"object\": \"chat.completion.chunk\", \"created\": 1, \"model\": \"deepseek-chat\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"how big\"}, \"finish_reason\": null}]}\n\ndata: {\"id\": \"c1\", \"object\": \"chat.completion.chunk\", \"created\": 1, \"model\": \"deepseek-chat\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 3, \"completion_tokens\": 2, \"total_tokens\": 5}}\n\ndata: [DONE]\n\n"
+    }
+   }
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/chat_completion/fx-dscc/_stream",
+  "body": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_completion_tokens\":5}",
+  "status": 200,
+  "answer": "\ufeffevent: message\ndata: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"content\":\"echo\",\"role\":\"assistant\"},\"index\":0}],\"model\":\"deepseek-chat\",\"object\":\"chat.completion.chunk\"}\n\n\ufeffevent: message\ndata: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"content\":\": hi\"},\"index\":0}],\"model\":\"deepseek-chat\",\"object\":\"chat.completion.chunk\"}\n\n\ufeffevent: message\ndata: {\"id\":\"c1\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\",\"index\":0}],\"model\":\"deepseek-chat\",\"object\":\"chat.completion.chunk\",\"usage\":{\"completion_tokens\":2,\"prompt_tokens\":3,\"total_tokens\":5}}\n\n\ufeffevent: message\ndata: [DONE]\n\n",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json;charset=utf-8"
+     ],
+     [
+      "Authorization",
+      "Bearer ds-key"
+     ]
+    ],
+    "body": "{\"messages\":[{\"content\":\"hi\",\"role\":\"user\"}],\"max_tokens\":5,\"model\":\"deepseek-chat\",\"n\":1,\"stream\":true,\"stream_options\":{\"include_usage\":true}}",
+    "response": {
+     "status": 200,
+     "ctype": "text/event-stream",
+     "headers": [],
+     "body": "data: {\"id\": \"c1\", \"object\": \"chat.completion.chunk\", \"created\": 1, \"model\": \"deepseek-chat\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": \"echo\"}, \"finish_reason\": null}]}\n\ndata: {\"id\": \"c1\", \"object\": \"chat.completion.chunk\", \"created\": 1, \"model\": \"deepseek-chat\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \": hi\"}, \"finish_reason\": null}]}\n\ndata: {\"id\": \"c1\", \"object\": \"chat.completion.chunk\", \"created\": 1, \"model\": \"deepseek-chat\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 3, \"completion_tokens\": 2, \"total_tokens\": 5}}\n\ndata: [DONE]\n\n"
+    }
+   }
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-dsy",
+  "body": "{\"service\":\"deepseek\",\"service_settings\":{\"api_key\":\"k\",\"model_id\":\"m\"}}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"status_exception\",\"reason\":\"The [deepseek] service does not support task type [text_embedding]\"}],\"type\":\"status_exception\",\"reason\":\"The [deepseek] service does not support task type [text_embedding]\"},\"status\":400}",
+  "upstream": []
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/completion/fx-dsy",
+  "body": "{\"service\":\"deepseek\",\"service_settings\":{\"api_key\":\"k\",\"model_id\":\"m\",\"rate_limit\":{\"requests_per_minute\":3}}}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"status_exception\",\"reason\":\"Configuration contains settings [{rate_limit={requests_per_minute=3}}] unknown to the [deepseek] service\"}],\"type\":\"status_exception\",\"reason\":\"Configuration contains settings [{rate_limit={requests_per_minute=3}}] unknown to the [deepseek] service\"},\"status\":400}",
+  "upstream": []
+ },
+ {
+  "method": "GET",
+  "path": "/_inference/fx-ds",
+  "body": null,
+  "status": 200,
+  "answer": "{\"endpoints\":[{\"inference_id\":\"fx-ds\",\"task_type\":\"completion\",\"service\":\"deepseek\",\"service_settings\":{\"model_id\":\"deepseek-chat\"}}]}",
+  "upstream": []
+ },
+ {
+  "method": "GET",
+  "path": "/_inference/fx-dscc",
+  "body": null,
+  "status": 200,
+  "answer": "{\"endpoints\":[{\"inference_id\":\"fx-dscc\",\"task_type\":\"chat_completion\",\"service\":\"deepseek\",\"service_settings\":{\"model_id\":\"deepseek-chat\",\"url\":\"$M/v1/chat/completions\"}}]}",
+  "upstream": []
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-hf",
+  "body": "{\"service\":\"hugging_face\",\"service_settings\":{\"api_key\":\"hf-key\",\"url\":\"$M/hf/embed\"}}",
+  "status": 200,
+  "answer": "{\"inference_id\":\"fx-hf\",\"task_type\":\"text_embedding\",\"service\":\"hugging_face\",\"service_settings\":{\"url\":\"$M/hf/embed\",\"similarity\":\"cosine\",\"dimensions\":4,\"rate_limit\":{\"requests_per_minute\":3000}},\"chunking_settings\":{\"strategy\":\"sentence\",\"max_chunk_size\":250,\"sentence_overlap\":1}}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/hf/embed",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json"
+     ],
+     [
+      "Authorization",
+      "Bearer hf-key"
+     ]
+    ],
+    "body": "{\"inputs\":[\"how big\"]}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "[[0.427835, 0.35567, 0.283505, 0.21134]]"
+    }
+   }
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/fx-hf",
+  "body": "{\"input\":[\"hello world\",\"second\"]}",
+  "status": 200,
+  "answer": "{\"text_embedding\":[{\"embedding\":[0.005155,-0.489691,0.015464,-0.479381]},{\"embedding\":[0.056701,-0.386598,0.170103,-0.273196]}]}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/hf/embed",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json"
+     ],
+     [
+      "Authorization",
+      "Bearer hf-key"
+     ]
+    ],
+    "body": "{\"inputs\":[\"hello world\",\"second\"]}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "[[0.005155, -0.489691, 0.015464, -0.479381], [0.056701, -0.386598, 0.170103, -0.273196]]"
+    }
+   }
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/sparse_embedding/fx-hfs",
+  "body": "{\"service\":\"hugging_face\",\"service_settings\":{\"api_key\":\"hf-key\",\"url\":\"$M/hf/sparse\"}}",
+  "status": 200,
+  "answer": "{\"inference_id\":\"fx-hfs\",\"task_type\":\"sparse_embedding\",\"service\":\"hugging_face\",\"service_settings\":{\"url\":\"$M/hf/sparse\",\"max_input_tokens\":512,\"rate_limit\":{\"requests_per_minute\":3000}}}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/hf/sparse",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json"
+     ],
+     [
+      "Authorization",
+      "Bearer hf-key"
+     ]
+    ],
+    "body": "{\"inputs\":[\"how big\"]}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "[{\"hello\": 0.5, \"world\": 0.25}]"
+    }
+   }
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/fx-hfs",
+  "body": "{\"input\":[\"hello world\"]}",
+  "status": 200,
+  "answer": "{\"sparse_embedding\":[{\"is_truncated\":false,\"embedding\":{\"hello\":0.5,\"world\":0.25}}]}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/hf/sparse",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json"
+     ],
+     [
+      "Authorization",
+      "Bearer hf-key"
+     ]
+    ],
+    "body": "{\"inputs\":[\"hello world\"]}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "[{\"hello\": 0.5, \"world\": 0.25}]"
+    }
+   }
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/rerank/fx-hfr",
+  "body": "{\"service\":\"hugging_face\",\"service_settings\":{\"api_key\":\"hf-key\",\"url\":\"$M/hf/rerank\"},\"task_settings\":{\"top_n\":2,\"return_documents\":true}}",
+  "status": 200,
+  "answer": "{\"inference_id\":\"fx-hfr\",\"task_type\":\"rerank\",\"service\":\"hugging_face\",\"service_settings\":{\"url\":\"$M/hf/rerank\",\"rate_limit\":{\"requests_per_minute\":3000}},\"task_settings\":{\"top_n\":2,\"return_documents\":true}}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/hf/rerank",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json"
+     ],
+     [
+      "Authorization",
+      "Bearer hf-key"
+     ]
+    ],
+    "body": "{\"texts\":[\"how big\"],\"query\":\"test query\",\"return_text\":true,\"top_n\":2}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "[{\"index\": 0, \"score\": 0.333333, \"text\": \"how big\"}]"
+    }
+   }
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/fx-hfr",
+  "body": "{\"input\":[\"a\",\"bb\",\"ccc\"],\"query\":\"q\"}",
+  "status": 200,
+  "answer": "{\"rerank\":[{\"index\":0,\"relevance_score\":0.5,\"text\":\"a\"},{\"index\":1,\"relevance_score\":0.25,\"text\":\"bb\"}]}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/hf/rerank",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json"
+     ],
+     [
+      "Authorization",
+      "Bearer hf-key"
+     ]
+    ],
+    "body": "{\"texts\":[\"a\",\"bb\",\"ccc\"],\"query\":\"q\",\"return_text\":true,\"top_n\":2}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "[{\"index\": 0, \"score\": 0.5, \"text\": \"a\"}, {\"index\": 1, \"score\": 0.25, \"text\": \"bb\"}, {\"index\": 2, \"score\": 0.166667, \"text\": \"ccc\"}]"
+    }
+   }
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/completion/fx-hfc",
+  "body": "{\"service\":\"hugging_face\",\"service_settings\":{\"api_key\":\"hf-key\",\"url\":\"$M/hf/v1/chat/completions\",\"model_id\":\"tgi\"}}",
+  "status": 200,
+  "answer": "{\"inference_id\":\"fx-hfc\",\"task_type\":\"completion\",\"service\":\"hugging_face\",\"service_settings\":{\"model_id\":\"tgi\",\"url\":\"$M/hf/v1/chat/completions\",\"rate_limit\":{\"requests_per_minute\":3000}}}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/hf/v1/chat/completions",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json"
+     ],
+     [
+      "Authorization",
+      "Bearer hf-key"
+     ]
+    ],
+    "body": "{\"messages\":[{\"content\":\"how big\",\"role\":\"user\"}],\"model\":\"tgi\",\"n\":1,\"stream\":false}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"id\": \"chatcmpl-1\", \"object\": \"chat.completion\", \"created\": 1, \"model\": \"tgi\", \"choices\": [{\"index\": 0, \"message\": {\"role\": \"assistant\", \"content\": \"echo: how big\"}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 3, \"completion_tokens\": 2, \"total_tokens\": 5}}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/fx-hfc",
+  "body": "{\"input\":\"hi\"}",
+  "status": 200,
+  "answer": "{\"completion\":[{\"result\":\"echo: hi\"}]}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/hf/v1/chat/completions",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json"
+     ],
+     [
+      "Authorization",
+      "Bearer hf-key"
+     ]
+    ],
+    "body": "{\"messages\":[{\"content\":\"hi\",\"role\":\"user\"}],\"model\":\"tgi\",\"n\":1,\"stream\":false}",
+    "response": {
+     "status": 200,
+     "ctype": "application/json",
+     "headers": [],
+     "body": "{\"id\": \"chatcmpl-1\", \"object\": \"chat.completion\", \"created\": 1, \"model\": \"tgi\", \"choices\": [{\"index\": 0, \"message\": {\"role\": \"assistant\", \"content\": \"echo: hi\"}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 3, \"completion_tokens\": 2, \"total_tokens\": 5}}"
+    }
+   }
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/chat_completion/fx-hfcc",
+  "body": "{\"service\":\"hugging_face\",\"service_settings\":{\"api_key\":\"hf-key\",\"url\":\"$M/hf/v1/chat/completions\"}}",
+  "status": 200,
+  "answer": "{\"inference_id\":\"fx-hfcc\",\"task_type\":\"chat_completion\",\"service\":\"hugging_face\",\"service_settings\":{\"url\":\"$M/hf/v1/chat/completions\",\"rate_limit\":{\"requests_per_minute\":3000}}}",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/hf/v1/chat/completions",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json"
+     ],
+     [
+      "Authorization",
+      "Bearer hf-key"
+     ]
+    ],
+    "body": "{\"messages\":[{\"content\":\"how big\",\"role\":\"user\"}],\"n\":1,\"stream\":true,\"stream_options\":{\"include_usage\":true}}",
+    "response": {
+     "status": 200,
+     "ctype": "text/event-stream",
+     "headers": [],
+     "body": "data: {\"id\": \"c1\", \"object\": \"chat.completion.chunk\", \"created\": 1, \"model\": \"m\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": \"echo: \"}, \"finish_reason\": null}]}\n\ndata: {\"id\": \"c1\", \"object\": \"chat.completion.chunk\", \"created\": 1, \"model\": \"m\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"how big\"}, \"finish_reason\": null}]}\n\ndata: {\"id\": \"c1\", \"object\": \"chat.completion.chunk\", \"created\": 1, \"model\": \"m\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 3, \"completion_tokens\": 2, \"total_tokens\": 5}}\n\ndata: [DONE]\n\n"
+    }
+   }
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/_inference/chat_completion/fx-hfcc/_stream",
+  "body": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+  "status": 200,
+  "answer": "\ufeffevent: message\ndata: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"content\":\"echo\",\"role\":\"assistant\"},\"index\":0}],\"model\":\"m\",\"object\":\"chat.completion.chunk\"}\n\n\ufeffevent: message\ndata: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"content\":\": hi\"},\"index\":0}],\"model\":\"m\",\"object\":\"chat.completion.chunk\"}\n\n\ufeffevent: message\ndata: {\"id\":\"c1\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\",\"index\":0}],\"model\":\"m\",\"object\":\"chat.completion.chunk\",\"usage\":{\"completion_tokens\":2,\"prompt_tokens\":3,\"total_tokens\":5}}\n\n\ufeffevent: message\ndata: [DONE]\n\n",
+  "upstream": [
+   {
+    "method": "POST",
+    "path": "/hf/v1/chat/completions",
+    "headers": [
+     [
+      "Content-Type",
+      "application/json"
+     ],
+     [
+      "Authorization",
+      "Bearer hf-key"
+     ]
+    ],
+    "body": "{\"messages\":[{\"content\":\"hi\",\"role\":\"user\"}],\"n\":1,\"stream\":true,\"stream_options\":{\"include_usage\":true}}",
+    "response": {
+     "status": 200,
+     "ctype": "text/event-stream",
+     "headers": [],
+     "body": "data: {\"id\": \"c1\", \"object\": \"chat.completion.chunk\", \"created\": 1, \"model\": \"m\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": \"echo\"}, \"finish_reason\": null}]}\n\ndata: {\"id\": \"c1\", \"object\": \"chat.completion.chunk\", \"created\": 1, \"model\": \"m\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \": hi\"}, \"finish_reason\": null}]}\n\ndata: {\"id\": \"c1\", \"object\": \"chat.completion.chunk\", \"created\": 1, \"model\": \"m\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 3, \"completion_tokens\": 2, \"total_tokens\": 5}}\n\ndata: [DONE]\n\n"
+    }
+   }
+  ]
+ },
+ {
+  "method": "PUT",
+  "path": "/_inference/text_embedding/fx-hfy",
+  "body": "{\"service\":\"hugging_face\",\"service_settings\":{\"api_key\":\"k\"}}",
+  "status": 400,
+  "answer": "{\"error\":{\"root_cause\":[{\"type\":\"validation_exception\",\"reason\":\"Validation Failed: 1: [service_settings] does not contain the required setting [url];\"}],\"type\":\"validation_exception\",\"reason\":\"Validation Failed: 1: [service_settings] does not contain the required setting [url];\"},\"status\":400}",
+  "upstream": []
+ },
+ {
+  "method": "GET",
+  "path": "/_inference/fx-hf",
+  "body": null,
+  "status": 200,
+  "answer": "{\"endpoints\":[{\"inference_id\":\"fx-hf\",\"task_type\":\"text_embedding\",\"service\":\"hugging_face\",\"service_settings\":{\"url\":\"$M/hf/embed\",\"similarity\":\"cosine\",\"dimensions\":4,\"rate_limit\":{\"requests_per_minute\":3000}},\"chunking_settings\":{\"strategy\":\"sentence\",\"max_chunk_size\":250,\"sentence_overlap\":1}}]}",
+  "upstream": []
+ },
+ {
+  "method": "GET",
+  "path": "/_inference/fx-hfs",
+  "body": null,
+  "status": 200,
+  "answer": "{\"endpoints\":[{\"inference_id\":\"fx-hfs\",\"task_type\":\"sparse_embedding\",\"service\":\"hugging_face\",\"service_settings\":{\"url\":\"$M/hf/sparse\",\"max_input_tokens\":512,\"rate_limit\":{\"requests_per_minute\":3000}}}]}",
+  "upstream": []
+ },
+ {
+  "method": "GET",
+  "path": "/_inference/fx-hfr",
+  "body": null,
+  "status": 200,
+  "answer": "{\"endpoints\":[{\"inference_id\":\"fx-hfr\",\"task_type\":\"rerank\",\"service\":\"hugging_face\",\"service_settings\":{\"url\":\"$M/hf/rerank\",\"rate_limit\":{\"requests_per_minute\":3000}},\"task_settings\":{\"top_n\":2,\"return_documents\":true}}]}",
+  "upstream": []
+ },
+ {
+  "method": "GET",
+  "path": "/_inference/fx-hfc",
+  "body": null,
+  "status": 200,
+  "answer": "{\"endpoints\":[{\"inference_id\":\"fx-hfc\",\"task_type\":\"completion\",\"service\":\"hugging_face\",\"service_settings\":{\"model_id\":\"tgi\",\"url\":\"$M/hf/v1/chat/completions\",\"rate_limit\":{\"requests_per_minute\":3000}}}]}",
+  "upstream": []
+ }
+]

@@ -13,6 +13,7 @@
 //!   as cluster states, shards through [`persist`] (WAL cut records, segments, manifests).
 //!   [`catalog::MemoryStores`] keeps everything in memory.
 //! - [`lease`]: cluster ownership for several nodes on one bucket (epochs fence deposed nodes).
+//! - [`audit`]: each cluster's security audit log, kept next to its data.
 //! - [`limits`]: per-tenant rate and byte budgets and the node-wide fair scheduler.
 //! - [`meta_guard`]: cluster states are saved only if they load again (no unwakeable clusters).
 //! - [`process`]: allocator and kernel tuning so idle nodes stay small (`tune_memory`).
@@ -22,6 +23,7 @@
 //! See `docs/search/architecture.md` and `docs/search/contracts.md`.
 
 pub mod allow;
+pub mod audit;
 pub mod auth;
 pub mod browser;
 pub mod catalog;

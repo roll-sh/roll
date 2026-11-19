@@ -4,6 +4,15 @@ use super::*;
 
 /// How long a preview's metrics are kept before they're read again (ms).
 const METRICS_FOR: i64 = 10_000;
+/// How long a preview's errors are kept before they're read again (ms).
+pub(super) const ERRORS_FOR: i64 = 10_000;
+
+/// The span of minutes a preview's errors are read over: 5–1,440, rounded up to a 15-minute step
+/// (the dashboard's 60, 360 and 1,440 stay as they are), so asking for every minute in between
+/// can't step past [`ERRORS_FOR`]'s cache.
+pub fn error_span(minutes: i64) -> i64 {
+    (minutes.clamp(5, 1440) + 14) / 15 * 15
+}
 
 /// The least time between two rebuilds by one deploy hook (ms).
 pub const HOOK_EVERY: i64 = 60_000;
@@ -378,8 +387,8 @@ impl Engine {
     }
 
     /// A link to the preview for someone outside the team, open for `hours` (1–720), on its own
-    /// token: the answer is the only time the link is shown. Only where the preview needs a
-    /// link (`access: link`); a public one needs none.
+    /// token: the answer is the only time the link is shown. Only where the preview isn't public
+    /// (`access: link` or `team`); a public one needs none.
     pub fn share(&self, id: &str, hours: u32, by: &str) -> Result<(crate::Share, String)> {
         if !(1..=KEEP_MAX_HOURS).contains(&hours) {
             return Err(Error::BadRequest(format!("hours: 1 to {KEEP_MAX_HOURS}")));
@@ -388,7 +397,7 @@ impl Engine {
         if r.desired == Desired::Deleted {
             return Err(Error::Conflict("the preview is being deleted".into()));
         }
-        if !self.store.access(id)?.is_some_and(|a| a.required) {
+        if !self.store.access(id)?.is_some_and(|a| a.required()) {
             return Err(Error::Conflict("the preview is public: anyone can open it without a link".into()));
         }
         let url = self.store.services(id)?.into_iter().next().map(|s| s.url).ok_or_else(|| Error::Conflict("the preview has no service to share yet".into()))?;
@@ -617,6 +626,85 @@ impl Engine {
         read.retain(|_, (at, _)| now - *at < METRICS_FOR);
         read.insert(id.to_string(), (now, m.clone()));
         Ok(m)
+    }
+
+    /// Its services' errors in the last `minutes` ([`error_span`]), grouped, newest first (on its
+    /// holder, which runs them). Titles and samples masked as its logs are, a value a cut split
+    /// too ([`crate::mask_cut`]): its code can print its secrets. Its values are read only when
+    /// there's an error. A fingerprint is keyed ([`Engine::error_fingerprint`]). Read at most once
+    /// per [`ERRORS_FOR`] for a span, whoever asks. (roll apps answers its 50 most frequent
+    /// groups a service; a `roll.toml` service's newest 50.)
+    pub async fn errors(&self, id: &str, minutes: i64) -> Result<Vec<crate::ErrorGroup>> {
+        self.store.row(id)?;
+        let now = self.store.now_ms()?;
+        let key = (id.to_string(), error_span(minutes));
+        if let Some((at, g)) = self.errors_read.lock().get(&key)
+            && now - at < ERRORS_FOR
+        {
+            return Ok(g.clone());
+        }
+        let masks = super::ErrorMasks::new(self, id);
+        let services = self.store.services(id)?;
+        let got = futures::future::join_all(services.iter().map(|s| self.apps.errors(id, &s.name, key.1, Some(&masks)))).await;
+        let mut groups = Vec::new();
+        for (s, gs) in services.iter().zip(got) {
+            groups.extend(gs?.into_iter().map(|g| crate::ErrorGroup { service: s.name.clone(), ..g }));
+        }
+        groups.sort_by(|a, b| b.last_seen.cmp(&a.last_seen).then(b.count.cmp(&a.count)));
+        if !groups.is_empty() {
+            let values = masks.values().await?;
+            for g in &mut groups {
+                g.title = crate::mask_cut(&g.title, values);
+                g.sample = crate::mask_cut(&g.sample, values);
+                g.fingerprint = self.error_fingerprint(id, &g.service, &g.fingerprint);
+            }
+        }
+        let mut read = self.errors_read.lock();
+        read.retain(|_, (at, _)| now - *at < ERRORS_FOR);
+        read.insert(key, (now, groups.clone()));
+        Ok(groups)
+    }
+
+    /// How many errors its services wrote in the last `minutes` ([`error_span`]): a list's rows.
+    /// Counted from the groups [`Engine::errors`] lists, but nothing they say leaves, so nothing is
+    /// masked and no values are read. Kept as long.
+    pub async fn error_count(&self, id: &str, minutes: i64) -> Result<u64> {
+        self.store.row(id)?;
+        let now = self.store.now_ms()?;
+        let key = (id.to_string(), error_span(minutes));
+        if let Some((at, n)) = self.error_counts_read.lock().get(&key)
+            && now - at < ERRORS_FOR
+        {
+            return Ok(*n);
+        }
+        if let Some((at, g)) = self.errors_read.lock().get(&key)
+            && now - at < ERRORS_FOR
+        {
+            return Ok(g.iter().map(|g| g.count).sum());
+        }
+        let services = self.store.services(id)?;
+        let got = futures::future::join_all(services.iter().map(|s| self.apps.errors(id, &s.name, key.1, None))).await;
+        let mut n = 0;
+        for gs in got {
+            n += gs?.iter().map(|g| g.count).sum::<u64>();
+        }
+        let mut read = self.error_counts_read.lock();
+        read.retain(|_, (at, _)| now - *at < ERRORS_FOR);
+        read.insert(key, (now, n));
+        Ok(n)
+    }
+
+    /// A group's fingerprint as answered: its preview, service and backend fingerprint under this
+    /// process's random key, so it names the group without being a hash anyone could match
+    /// against guesses of what the error said.
+    fn error_fingerprint(&self, id: &str, service: &str, fingerprint: &str) -> String {
+        use hmac::Mac;
+        let mut m = hmac::Hmac::<sha2::Sha256>::new_from_slice(&self.errors_key).expect("any key length");
+        for part in [id, service, fingerprint] {
+            m.update(part.as_bytes());
+            m.update(&[0]);
+        }
+        hex::encode(&m.finalize().into_bytes()[..8])
     }
 
     pub async fn logs(&self, id: &str, service: Option<&str>, lines: usize) -> Result<(String, Vec<String>)> {
