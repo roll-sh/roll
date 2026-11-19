@@ -198,6 +198,10 @@
           "type": "boolean",
           "description": "Build again (same revision, no cache) when a base image moves."
         },
+        "skew_protection": {
+          "type": "boolean",
+          "description": "A web service: a page loaded before a deploy keeps talking to the deployment that served it, for a day."
+        },
         "rollback_on_crash": {
           "type": "boolean",
           "description": "Roll back when a new deployment crash-loops."
