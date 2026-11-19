@@ -1000,7 +1000,8 @@ struct Decision {
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct Approve {
-    /// Also allow the same action on the same resource from now on: `1h`, `8h`, `1d` or `always`.
+    /// Also allow the same action on the same resource from now on: `1h`, `8h`, `1d`, `7d`, `30d`
+    /// or `always`.
     remember: Option<String>,
 }
 
@@ -1029,8 +1030,11 @@ async fn remembered(a: &Arc<Access>, id: &str, remember: Option<&str>) -> crate:
         Some("1h") => hours(1),
         Some("8h") => hours(8),
         Some("1d") => hours(24),
+        // A developer's own CLI on their machine (`roll run` in development) wants longer than a day.
+        Some("7d") => hours(7 * 24),
+        Some("30d") => hours(30 * 24),
         Some("always") => Some(None),
-        Some(other) => return Err(Error::BadRequest(format!("remember is 1h, 8h, 1d or always, not {other}"))),
+        Some(other) => return Err(Error::BadRequest(format!("remember is 1h, 8h, 1d, 7d, 30d or always, not {other}"))),
     };
     let Some(until) = until else { return Ok(None) };
     let id2 = id.to_string();
@@ -1314,32 +1318,76 @@ async fn audit(State(a): S, ext: Extensions, Query(mut q): Query<AuditQuery>) ->
     if let Some(user) = &me {
         q.grants = Some(grants_of(&a, user).await?.into_iter().collect());
     }
-    let mut events = blocking(a, move |a| a.store.audit_log(&q)).await?;
+    let mut events = blocking(a.clone(), move |a| a.store.audit_log(&q)).await?;
     if let Some(user) = &me {
         for e in events.iter_mut().filter(|e| e.source == "access" && e.args.as_ref().and_then(|v| v["by"].as_str()) != Some(user.as_str())) {
             e.ip = None;
         }
     }
+    let names = people_named(&a, &events).await;
     if format.as_deref() == Some("csv") {
         let headers = [(axum::http::header::CONTENT_TYPE, "text/csv; charset=utf-8"), (axum::http::header::CONTENT_DISPOSITION, "attachment; filename=\"roll-audit.csv\"")];
-        return Ok((headers, audit_csv(&events)).into_response());
+        return Ok((headers, audit_csv(&events, &names)).into_response());
     }
+    let rows = events.iter().map(|e| {
+        let mut v = json!(e);
+        for (field, id) in [("actor_handle", actor_of(e)), ("resource_handle", e.resource.as_deref())] {
+            if let Some(h) = id.and_then(|id| names.get(id)) {
+                v[field] = json!(h);
+            }
+        }
+        v
+    });
     if jsonl {
         let mut out = String::new();
-        for e in &events {
-            out.push_str(&serde_json::to_string(e).unwrap_or_default());
+        for v in rows {
+            out.push_str(&v.to_string());
             out.push('\n');
         }
         let headers = [(axum::http::header::CONTENT_TYPE, "application/x-ndjson"), (axum::http::header::CONTENT_DISPOSITION, "attachment; filename=\"roll-audit.jsonl\"")];
         return Ok((headers, out).into_response());
     }
-    Ok(Json(json!(events)).into_response())
+    Ok(Json(Value::Array(rows.collect())).into_response())
+}
+
+/// Who acted in a row, when it's a person: an account event's actor, or the person behind a change
+/// to tokens and access.
+fn actor_of(e: &crate::store::AuditEvent) -> Option<&str> {
+    let key = match e.source.as_str() {
+        "accounts" => "actor",
+        "access" => "by",
+        _ => return None,
+    };
+    e.args.as_ref().and_then(|v| v[key].as_str())
+}
+
+/// The handles of the people a page of the audit log names (`usr_` ids: who acted, who it was
+/// about), disabled and deleted people too, so a sign-in report reads as people. Looked up for
+/// each answer, never kept; without accounts, or on a failed lookup, the ids stay.
+async fn people_named(a: &Arc<Access>, events: &[crate::store::AuditEvent]) -> std::collections::HashMap<String, String> {
+    let Some(people) = a.people.get().cloned() else { return Default::default() };
+    let ids: std::collections::BTreeSet<String> = events.iter().flat_map(|e| [actor_of(e), e.resource.as_deref()]).flatten().filter(|id| id.starts_with("usr_")).map(str::to_string).collect();
+    if ids.is_empty() {
+        return Default::default();
+    }
+    let ids: Vec<String> = ids.into_iter().collect();
+    match tokio::task::spawn_blocking(move || people.handles(&ids)).await {
+        Ok(Ok(found)) => found.into_iter().collect(),
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "access: naming the audit log's people");
+            Default::default()
+        }
+        Err(_) => Default::default(),
+    }
 }
 
 /// The audit log as CSV, for a spreadsheet: one event a row, the time in UTC. Token and client
 /// names and resources are anyone's text, so a cell that would start a formula (`=`, `+`, `-`, `@`,
 /// a tab or a carriage return) is prefixed with `'`, as OWASP's CSV injection advice says.
-pub fn audit_csv(events: &[crate::store::AuditEvent]) -> String {
+///
+/// The last two columns name the people a row is about by handle (`names`: who acted, and the
+/// resource when it's a person), after every older column so a spreadsheet's positions hold.
+pub fn audit_csv(events: &[crate::store::AuditEvent], names: &std::collections::HashMap<String, String>) -> String {
     // Every cell quoted; a formula character is defused at the start and after anything a
     // spreadsheet may split a cell on (`;` in many locales, a tab, `|`), past any spaces.
     fn cell(s: &str) -> String {
@@ -1358,7 +1406,8 @@ pub fn audit_csv(events: &[crate::store::AuditEvent]) -> String {
         }
         format!("\"{}\"", out.replace('"', "\"\""))
     }
-    let mut out = String::from("at,token,token_name,source,tool,method,route,product,action,resource,decision,approval,status,ip,duration_ms,client\n");
+    let mut out = String::from("at,token,token_name,source,tool,method,route,product,action,resource,decision,approval,status,ip,duration_ms,client,actor_handle,resource_handle\n");
+    let name = |id: Option<&str>| id.and_then(|id| names.get(id)).cloned().unwrap_or_default();
     for e in events {
         let at = chrono::DateTime::from_timestamp_millis(e.at).map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)).unwrap_or_default();
         let row = [
@@ -1378,6 +1427,8 @@ pub fn audit_csv(events: &[crate::store::AuditEvent]) -> String {
             e.ip.clone().unwrap_or_default(),
             e.duration_ms.to_string(),
             e.client.clone().unwrap_or_default(),
+            name(actor_of(e)),
+            name(e.resource.as_deref()),
         ];
         out.push_str(&row.iter().map(|c| cell(c)).collect::<Vec<_>>().join(","));
         out.push('\n');
@@ -1439,13 +1490,13 @@ mod csv_tests {
             duration_ms: 3,
             client: Some("@evil".into()),
         };
-        let csv = super::audit_csv(std::slice::from_ref(&e));
+        let csv = super::audit_csv(std::slice::from_ref(&e), &Default::default());
         let row = csv.lines().nth(1).unwrap();
         assert!(row.starts_with("\"1970-01-01T00:00:00Z\",\"tok_1\",\"'=HYPERLINK(\"\"https://x.example\"\",\"\"click\"\")\""), "{row}");
-        assert!(row.contains(",\"a,b\",") && row.ends_with(",\"'@evil\""), "{row}");
+        assert!(row.contains(",\"a,b\",") && row.ends_with(",\"'@evil\",\"\",\"\""), "{row}");
         // A separator inside a cell starts another cell in some spreadsheets: defused there too.
         let e2 = crate::store::AuditEvent { grant_name: Some("x; =HYPERLINK(1)|@a".into()), ..e };
-        let row2 = super::audit_csv(&[e2]);
+        let row2 = super::audit_csv(&[e2], &Default::default());
         assert!(row2.lines().nth(1).unwrap().contains("\"x; '=HYPERLINK(1)|'@a\""), "{row2}");
     }
 }

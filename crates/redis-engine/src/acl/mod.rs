@@ -602,6 +602,15 @@ impl Acl {
         self.users.iter().map(|(k, v)| (k.as_slice(), v))
     }
 
+    /// The default user with no password and not `nopass`: no password logs it in until one is
+    /// set (`requirepass`, `ACL SETUSER default >…`). A hosted database's, whose clients log in
+    /// with the platform's secret.
+    pub fn remove_default_password(&mut self) {
+        let mut r = self.default.rules();
+        r.apply(b"resetpass").unwrap();
+        self.default.set_rules(r);
+    }
+
     /// `requirepass`: set (or with `None`, remove) the default user's only password.
     pub fn set_default_password(&mut self, password: Option<&[u8]>) {
         let mut r = self.default.rules();

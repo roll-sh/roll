@@ -7,12 +7,11 @@
 //! tiberius bounds what it preallocates from a server's lengths; on top of that, a conversation
 //! reads at most [`READ_MAX`] bytes, whatever the server sends.
 
-use super::{TIMEOUT, resolve};
+use super::{Io, TIMEOUT, Via};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tiberius::{AuthMethod, Client, Config, EncryptionLevel};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::net::TcpStream;
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 
 /// The most one conversation reads: a few small result sets.
@@ -53,9 +52,9 @@ pub(super) fn parse(url: &str) -> Result<Url, String> {
     Ok(Url { host, port: u.port().unwrap_or(1433), user: decode(u.username())?, password: decode(u.password().unwrap_or(""))?, db: (!db.is_empty()).then(|| decode(db)).transpose()? })
 }
 
-/// A TCP stream that refuses to read past [`READ_MAX`].
+/// A stream that refuses to read past [`READ_MAX`].
 pub(super) struct Bounded {
-    tcp: TcpStream,
+    tcp: Box<dyn Io>,
     left: usize,
 }
 
@@ -90,11 +89,10 @@ impl AsyncWrite for Bounded {
     }
 }
 
-async fn connect(u: &Url, ca: Option<&str>, allow_private: bool) -> Result<Conn, String> {
-    let addr = resolve(&u.host, u.port, allow_private).await?;
+async fn connect(u: &Url, ca: Option<&str>, via: &Via) -> Result<Conn, String> {
     let mut config = Config::new();
     config.host(&u.host);
-    config.port(addr.port());
+    config.port(u.port);
     config.hostname_in_certificate(&u.host);
     config.authentication(AuthMethod::sql_server(&u.user, &u.password));
     if let Some(db) = &u.db {
@@ -107,8 +105,7 @@ async fn connect(u: &Url, ca: Option<&str>, allow_private: bool) -> Result<Conn,
     if let Some(pem) = ca {
         config.trust_cert_ca_bundle(pem.as_bytes().to_vec());
     }
-    let tcp = TcpStream::connect(addr).await.map_err(|e| format!("{}: {e}", u.host))?;
-    let _ = tcp.set_nodelay(true);
+    let tcp = via.dial(&u.host, u.port).await?;
     // A redirect (Azure's gateway names another server) is an error here: roll connects only to
     // the address it checked.
     Client::connect(config, Bounded { tcp, left: READ_MAX }.compat_write()).await.map_err(|e| format!("{}: {}", u.host, error(&e)))
@@ -144,9 +141,9 @@ fn literal(password: &str) -> Result<String, String> {
     Ok(format!("N'{password}'"))
 }
 
-pub(super) async fn run<T>(u: Url, ca: Option<String>, allow_private: bool, work: impl AsyncFnOnce(&mut Conn) -> Result<T, String>) -> Result<T, String> {
+pub(super) async fn run<T>(u: Url, ca: Option<String>, via: Via, work: impl AsyncFnOnce(&mut Conn) -> Result<T, String>) -> Result<T, String> {
     tokio::time::timeout(TIMEOUT, async move {
-        let mut c = connect(&u, ca.as_deref(), allow_private).await?;
+        let mut c = connect(&u, ca.as_deref(), &via).await?;
         let out = work(&mut c).await;
         let _ = c.close().await;
         out

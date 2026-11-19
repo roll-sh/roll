@@ -125,20 +125,52 @@ impl roll_previews::ports::Apps for RollApps {
         let id = self.service_in(&t.project, &t.service).await?.ok_or_else(|| anyhow::anyhow!("roll apps has no service {} in the project", t.service))?;
         self.ids.lock().unwrap_or_else(|p| p.into_inner()).insert((t.preview.clone(), t.service.clone()), id.clone());
         let path = Self::env_path(&id, &t.environment);
-        // Private like the preview (link access): roll apps' proxy checks the same token.
-        let access = t.access_token.as_ref().map(|token| match &t.bypass_sha256 {
-            Some(hash) => json!({ "token": token, "bypass_sha256": hash }),
-            None => json!({ "token": token }),
+        // Private like the preview: roll apps' proxy checks the same token (link access), or
+        // signs people in through roll's dashboard (team access); the bypass opens either.
+        let access = match (&t.access_token, t.signed_in) {
+            (Some(token), _) => Some(json!({ "token": token })),
+            (None, true) => Some(json!({ "signed_in": true })),
+            (None, false) => None,
+        }
+        .map(|mut a| {
+            if let Some(hash) = &t.bypass_sha256 {
+                a["bypass_sha256"] = json!(hash);
+            }
+            a
         });
         // The project's egress: with `roll`, roll apps runs it on a network with no route out (a
         // runtime that can't is a 409, which fails the deploy rather than running it open).
         let closed = t.egress == roll_previews::settings::EgressRule::Roll;
         let egress = if closed { json!({ "mode": "roll", "hosts": t.egress_hosts }) } else { json!({ "mode": "open" }) };
-        let mut body = json!({ "branch": null, "ephemeral": true, "access": access, "egress": egress });
+        // One voice on a pull request: previews posts `roll/preview` and its comment for the
+        // environment, so roll apps posts no commit status or GitHub Deployment of its own (apps' #249).
+        let mut body = json!({ "branch": null, "ephemeral": true, "access": access, "egress": egress, "report": false });
         if self.feedback {
             body["feedback"] = json!(t.feedback);
         }
-        self.api.call(Method::PUT, &path, Some(body)).await?;
+        // Its label under the project's own preview domain (`<label>.preview.acme.dev`, roll apps'
+        // project preview domain): apps routes that name to this environment.
+        body["preview_host"] = json!(t.host);
+        // A roll apps that predates a field refuses it (a node not yet upgraded, on a fleet):
+        // `report` (#249; then its deploys report as well as previews) or `preview_host` (its
+        // rolld preview URL still works). The environment is made without the fields it doesn't know.
+        let mut made = self.api.call(Method::PUT, &path, Some(body.clone())).await;
+        for _ in 0..2 {
+            let unknown = match &made {
+                Err(e) => e.downcast_ref::<super::Refused>().filter(|r| r.status.as_u16() == 400).and_then(|r| r.error.strip_prefix("unknown field ")).filter(|f| matches!(*f, "report" | "preview_host")).map(str::to_string),
+                Ok(_) => None,
+            };
+            let Some(field) = unknown else { break };
+            body.as_object_mut().map(|o| o.remove(&field));
+            made = self.api.call(Method::PUT, &path, Some(body.clone())).await;
+        }
+        let made = made?;
+        // Roll only holds the build too: roll apps builds a closed environment without its secret
+        // values (apps' #222, `build_closed`). One that doesn't say so would build with them on an
+        // open network, where a fork's head could send them out: nothing is deployed there.
+        if closed && made["build_closed"] != json!(true) {
+            anyhow::bail!("roll apps here doesn't build closed environments without their secrets (build_closed): under Roll only, nothing is deployed to it");
+        }
         // Every variable the preview sets: the branches' plain names and the project's overrides,
         // and each prefixed link to a branched parent pointed at the branch (a link is roll apps'
         // own variable, which would still reach production).
@@ -174,12 +206,13 @@ impl roll_previews::ports::Apps for RollApps {
         }
         // What it may reach is part of what's deployed: a changed rule deploys again.
         let key = format!(
-            "{}@{}@{h:016x}{}{}{}",
+            "{}@{}@{h:016x}{}{}{}{}",
             t.environment,
             t.git.as_deref().unwrap_or("image"),
-            if t.access_token.is_some() { "p" } else { "" },
+            if t.access_token.is_some() { "p" } else if t.signed_in { "s" } else { "" },
             if self.feedback && t.feedback { "f" } else { "" },
-            if closed { format!("e{}", t.egress_hosts.join(",")) } else { String::new() }
+            if closed { format!("e{}", t.egress_hosts.join(",")) } else { String::new() },
+            t.rebuild.map(|n| format!("#r{n}")).unwrap_or_default()
         );
         // The deployment previews last started for exactly this, still under way or live: wait on
         // it (or it's done). The engine asks again while a deploy is in flight, and a redeploy
@@ -196,19 +229,35 @@ impl roll_previews::ports::Apps for RollApps {
         }
         // At the sha already (a reset's new URLs, say): run it again with the variables, no build.
         // Otherwise deploy, keyed so a retry after a crash returns the same deployment.
-        let at_sha = t.git.is_some() && env["active"]["revision"].as_str() == t.git.as_deref();
+        // A deploy hook's rebuild builds again even at the sha.
+        let at_sha = t.rebuild.is_none() && t.git.is_some() && env["active"]["revision"].as_str() == t.git.as_deref();
         let deployment = if at_sha {
             // Keyed too (roll apps takes `Idempotency-Key` on a redeploy): what's deployed and the
             // deployment it replaces, so a retry after a crash gets the same one, and variables
             // that come back to an earlier set never get that earlier, superseded, redeploy back.
             let idem = redeploy_key(&key, &s(&env["active"]["id"]).unwrap_or_default());
-            let body = json!({ "message": format!("roll preview {}: new variables", t.preview) });
+            let mut body = json!({ "message": format!("roll preview {}: new variables", t.preview) });
+            if closed {
+                body["closed"] = json!(true);
+            }
             self.api.call_with(Method::POST, &format!("{path}/redeploy"), Some(body), Some(&idem)).await?
         } else {
-            let body = match &t.git {
+            let mut body = match &t.git {
                 Some(sha) => json!({ "revision": sha, "message": format!("roll preview {}", t.preview) }),
                 None => json!({ "message": format!("roll preview {}", t.preview) }),
             };
+            // Nothing cached: the build's steps run again (a static site's content fetched anew).
+            if t.rebuild.is_some() {
+                body["no_cache"] = json!(true);
+                body["message"] = json!(format!("roll preview {}: built again by a deploy hook", t.preview));
+            }
+
+            // The build itself must be closed (the node that takes the deploy says so, or refuses
+            // it: one from before the field answers 400), not only the environment's answer above
+            // (a fleet's rolling upgrade can serve the two on different nodes).
+            if closed {
+                body["closed"] = json!(true);
+            }
             let mut idem = key.clone();
             // After a failed or canceled deploy, a retry is a new deploy (a registry timeout
             // doesn't fail the preview until the next push); a crash's retry still finds its own.
@@ -225,6 +274,15 @@ impl roll_previews::ports::Apps for RollApps {
         self.settle(&path, deployment).await?;
         let env = self.api.get(&path).await?;
         Ok(s(&env["url"]))
+    }
+
+    /// The project's verified preview domain (`GET /v1/apps/projects/{project}/preview-domain`:
+    /// `{hostname: "*.preview.acme.dev", status, tls, …}`; 404 when it has none).
+    async fn preview_domain(&self, project: &str) -> Option<(String, bool)> {
+        let d = self.api.get(&format!("/v1/apps/projects/{}/preview-domain", seg(project))).await.ok()?;
+        (d["status"].as_str() == Some("active")).then_some(())?;
+        let base = d["hostname"].as_str()?.strip_prefix("*.")?.to_ascii_lowercase();
+        Some((base, d["tls"].as_str() == Some("issued")))
     }
 
     async fn memory_mb(&self, preview: &str, service: &str) -> Option<u32> {
@@ -254,6 +312,28 @@ impl roll_previews::ports::Apps for RollApps {
         self.ids.lock().unwrap_or_else(|p| p.into_inner()).remove(&(preview.to_string(), service.to_string()));
         self.started.lock().unwrap_or_else(|p| p.into_inner()).remove(&(preview.to_string(), service.to_string()));
         Ok(())
+    }
+
+    /// The `pv-` environment's latest minute (roll apps' metrics): cores, and resident bytes.
+    /// None while nothing ran that minute (asleep).
+    async fn metrics(&self, preview: &str, service: &str) -> Option<(f64, u64)> {
+        let (id, env) = self.find(preview, service).await.ok()??;
+        let m = self.api.get(&format!("{}/metrics?minutes=5", Self::env_path(&id, &env))).await.ok()?;
+        // The last finished minute: the one under way counts its CPU over the whole minute, so it
+        // reads low (and its memory is 0 in its first second). Memory is summed over instances, and
+        // shown against what one runs with: one instance's, on average.
+        let at = |k: &str| m[k].as_array().and_then(|a| a.get(a.len().saturating_sub(2)).cloned());
+        let (cpu, mem) = (at("cpu")?.as_f64()?, at("memory_bytes")?.as_u64()?);
+        let instances = at("instances").and_then(|v| v.as_u64()).unwrap_or(1).max(1);
+        (mem > 0).then_some((cpu, mem / instances))
+    }
+
+    /// The `pv-` environment's errors, as roll apps groups them (its 50 most frequent; the engine
+    /// masks them).
+    async fn errors(&self, preview: &str, service: &str, minutes: i64, _masks: Option<&roll_previews::engine::ErrorMasks<'_>>) -> roll_previews::Result<Vec<roll_previews::ErrorGroup>> {
+        let Ok(Some((id, env))) = self.find(preview, service).await else { return Ok(Vec::new()) };
+        let Ok(v) = self.api.get(&format!("{}/errors?minutes={minutes}", Self::env_path(&id, &env))).await else { return Ok(Vec::new()) };
+        Ok(serde_json::from_value(v["groups"].clone()).unwrap_or_default())
     }
 
     async fn logs(&self, preview: &str, service: &str, lines: usize) -> Vec<String> {
@@ -460,13 +540,25 @@ impl apps_control::integrations::GitPushes for GitPushes {
 
     async fn pushed(&self, push: apps_control::integrations::GitPush) {
         let Some(engine) = self.0.upgrade() else { return };
-        let pull = push.pull.map(|p| roll_previews::ports::GitPull { number: p.number, title: p.title, url: p.url, fork: p.fork });
-        let p = roll_previews::ports::GitPush { service: push.service, url: push.url, branch: push.branch, sha: push.sha, message: push.message, pull };
+        let pull = push.pull.map(|p| roll_previews::ports::GitPull { number: p.number, title: p.title, url: p.url, fork: p.fork, author: p.author });
+        let p = roll_previews::ports::GitPush { service: push.service, url: push.url, branch: push.branch, sha: push.sha, message: push.message, pusher: push.pusher, pull };
         tokio::spawn(async move {
             if let Err(e) = engine.git_push(&p).await {
                 tracing::warn!(service = %p.service, branch = %p.branch, error = %e, "previews: a Git URL service's push");
             }
         });
+    }
+}
+
+/// Names under a project's own preview domain that no roll apps environment holds (a service on
+/// roll's own runtime): roll apps' ingress hands them on, in process, to previews' router, which
+/// answers a 404 for a name it doesn't hold.
+pub struct DomainRouter(pub Arc<roll_previews::runtime::Runtime>);
+
+#[async_trait]
+impl apps_control::integrations::PreviewRouter for DomainRouter {
+    async fn serve(&self, req: axum::extract::Request) -> axum::response::Response {
+        roll_previews::runtime::serve_host(self.0.clone(), req).await
     }
 }
 
@@ -520,6 +612,10 @@ impl roll_previews::ports::Apps for Services {
         self.apps.memory_mb(preview, service).await
     }
 
+    async fn preview_domain(&self, project: &str) -> Option<(String, bool)> {
+        self.apps.preview_domain(project).await
+    }
+
     async fn deploy(&self, t: &roll_previews::ports::Target) -> anyhow::Result<Option<String>> {
         // Catalog services come without a roll.toml spec.
         if t.spec.image.is_empty() { self.apps.deploy(t).await } else { self.runtime.deploy(t).await }
@@ -552,6 +648,25 @@ impl roll_previews::ports::Apps for Services {
     /// The requests roll's runtime proxied (roll apps' instances are served by roll apps' own).
     fn requests(&self, preview: &str) -> Vec<roll_previews::RequestLine> {
         self.runtime.requests(preview)
+    }
+
+    async fn metrics(&self, preview: &str, service: &str) -> Option<(f64, u64)> {
+        if matches!(self.apps.find(preview, service).await, Ok(Some(_))) { self.apps.metrics(preview, service).await } else { self.runtime.metrics(preview, service).await }
+    }
+
+    /// roll apps groups its own; a `roll.toml` service's are grouped here, from its last
+    /// [`ERROR_LINES`] lines in the span. Grouping cuts a title and a sample, so when there's an
+    /// error (and they're to be shown) its lines are masked first, then grouped again.
+    async fn errors(&self, preview: &str, service: &str, minutes: i64, masks: Option<&roll_previews::engine::ErrorMasks<'_>>) -> roll_previews::Result<Vec<roll_previews::ErrorGroup>> {
+        if matches!(self.apps.find(preview, service).await, Ok(Some(_))) {
+            return self.apps.errors(preview, service, minutes, masks).await;
+        }
+        let lines = self.runtime.timed_lines(preview, service, minutes, ERROR_LINES).await;
+        let groups = group_errors(&lines);
+        let Some(masks) = masks.filter(|_| !groups.is_empty()) else { return Ok(groups) };
+        let values = masks.values().await?;
+        let lines: Vec<_> = lines.into_iter().map(|(t, stderr, text)| (t, stderr, roll_previews::mask_cut(&text, values))).collect();
+        Ok(group_errors(&lines))
     }
 
     async fn follow(&self, preview: &str, service: &str, lines: usize) -> Option<tokio::sync::mpsc::Receiver<String>> {
@@ -634,6 +749,25 @@ fn already(last: Option<&(String, String)>, key: &str, env: &Value) -> Already {
     }
 }
 
+/// The most lines of a runtime service's output its errors are read from.
+const ERROR_LINES: usize = 2_000;
+
+/// A runtime service's lines (`(ms, from stderr, text)`, oldest first) grouped as roll apps groups
+/// an environment's (traces joined per stream, then by fingerprint), the newest 50 (a new error
+/// seen once isn't dropped for older, more frequent ones). Each read as roll apps' route answers
+/// it, as [`RollApps::errors`] reads that: one shape for both.
+fn group_errors(lines: &[(i64, bool, String)]) -> Vec<roll_previews::ErrorGroup> {
+    use apps_control::logs::{LogLine, Stream, level_of};
+    let lines: Vec<LogLine> = lines
+        .iter()
+        .map(|(t, stderr, text)| LogLine { t: *t, stream: if *stderr { Stream::Stderr } else { Stream::Stdout }, instance: None, deployment: None, level: level_of(text), text: text.clone(), trace: None })
+        .collect();
+    let mut groups = apps_control::errors::groups(&lines);
+    groups.sort_by(|a, b| b.last.cmp(&a.last).then(b.count.cmp(&a.count)));
+    groups.truncate(apps_control::errors::MAX_GROUPS);
+    groups.iter().filter_map(|g| serde_json::to_value(g).ok().and_then(|v| serde_json::from_value(v).ok())).collect()
+}
+
 #[cfg(test)]
 mod tests {
     /// Every variable of a roll apps link to a branched resource comes from the branch, under
@@ -661,6 +795,30 @@ mod tests {
     }
 
     use super::*;
+
+    /// A `roll.toml` service's output is grouped from its stamped lines: a trace on stderr is one
+    /// error however stdout's lines fall between, and the same error again is counted, not listed.
+    /// Each group is read through roll apps' `…/errors` answer's JSON, as `RollApps` reads it.
+    #[test]
+    fn a_runtime_services_errors_are_grouped_from_its_stamped_lines() {
+        let trace = |t: i64, line: u32| {
+            vec![
+                (t, true, "Traceback (most recent call last):".to_string()),
+                (t, false, "GET / 200".to_string()),
+                (t, true, format!("  File \"/app/main.py\", line {line}, in handler")),
+                (t, true, "ZeroDivisionError: division by zero".to_string()),
+            ]
+        };
+        let mut lines = trace(1_000, 10);
+        lines.push((1_500, false, "ERROR payment 42 declined".into()));
+        lines.extend(trace(2_000, 11));
+        let g = group_errors(&lines);
+        assert_eq!(g.len(), 2, "{g:#?}");
+        assert_eq!((g[0].kind.as_str(), g[0].count, g[0].first_seen, g[0].last_seen), ("python", 2, 1_000, 2_000));
+        assert_eq!(g[0].title, "ZeroDivisionError: division by zero");
+        assert_eq!(g[0].sample.lines().count(), 3, "stdout's line isn't in it: {}", g[0].sample);
+        assert_eq!((g[1].kind.as_str(), g[1].count), ("line", 1));
+    }
 
     /// A poll while previews' own deploy is going waits on it, once it's live it's done, and only
     /// a different set of variables (or a deployment that replaced it) starts another: one

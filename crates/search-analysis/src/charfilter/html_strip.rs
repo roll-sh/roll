@@ -991,11 +991,10 @@ mod tests {
     #[test]
     fn long_dead_tails_are_linear() {
         for (unit, n) in [("<?", 200_000), ("< a", 100_000), ("<a b='", 50_000), ("&#x", 100_000)] {
-            let text = format!("{}x", unit.repeat(n));
-            let t = std::time::Instant::now();
-            let (out, _) = strip(&text, &[]);
-            assert!(!out.is_empty(), "{unit}");
-            assert!(t.elapsed() < std::time::Duration::from_secs(10), "{unit}: {:?}", t.elapsed());
+            search_test_support::assert_linear(unit, n / 8, |n| format!("{}x", unit.repeat(n)), |text| {
+                let (out, _) = strip(&text, &[]);
+                assert!(!out.is_empty(), "{unit}");
+            });
         }
         // The memo is per text: the same instance gives the same output for the next one.
         let mut f = HtmlStrip::new(&[]);

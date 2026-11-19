@@ -243,6 +243,9 @@ ROBOTS_LOCKED=$(curl -sS -o /dev/null -D - -H "Host: $HOST" "http://$API/" | tr 
 RQ=$(curl -sS "http://$API/v1/previews/$PV/requests")
 REQS=$(echo "$RQ" | python3 -c "import json,sys; r=json.load(sys.stdin)['requests']; print('%d; newest: %s; queries: %s' % (len(r), ' '.join(str(r[0][k]) for k in ('method', 'path', 'status')) if r else 'none', any('?' in x['path'] for x in r)))")
 case "$REQS" in *"newest: GET / 200; queries: False") ;; *) echo "the preview's request log should list its visits without their queries: $REQS"; exit 1;; esac
+# What its running service uses (`…/metrics`): some memory, against what it runs with.
+METRICS=$(curl -sS "http://$API/v1/previews/$PV/metrics" | python3 -c "import json,sys; m=json.load(sys.stdin)['services']; print('; '.join('%s %.2f CPU %d of %d MB' % (x['service'], x['cpu'], x['memory_bytes'] >> 20, x['memory_mb']) for x in m) if m and all(x['memory_bytes'] > 0 for x in m) else 'none')")
+[ "$METRICS" != none ] || { echo "a running preview's services should report what they use"; exit 1; }
 # And from the CLI (`roll preview requests`): its visits, and none with --errors.
 ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview requests "$PV" | grep -q " 200 GET    /  " || { echo "roll preview requests should list GET / 200: $(ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview requests "$PV" | head -3)"; exit 1; }
 [ -z "$(ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview requests "$PV" --errors)" ] || { echo "roll preview requests --errors should list only 4xx and 5xx"; exit 1; }
@@ -419,6 +422,11 @@ SHOT_PATH="/${SHOT_URL#*://*/}"
 case "$SHOT_PATH" in *0) TAMPERED="${SHOT_PATH%?}1";; *) TAMPERED="${SHOT_PATH%?}0";; esac
 [ "$(curl -s -o /dev/null -w '%{http_code}' "http://$API$TAMPERED")" = 403 ] || { echo "a changed signature should be refused"; exit 1; }
 api PUT "/v1/previews/projects/$PRJ/settings" '{"access":"link"}' >/dev/null
+# Leaving link access retired the link handed out: its cookie opens nothing now, and the
+# preview's new link lets its visitor in again.
+[ "$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" -H "Host: $HOST" "http://$API/")" = 401 ] || { echo "a link retired by leaving link access should stop opening the preview"; exit 1; }
+QUERY=$(api GET "/v1/previews/$PV" | jq_ "[x for x in d['services'] if x['name'] == 'web'][0]['share_url'].split('/?')[1]")
+curl -sS -o /dev/null -L -c "$JAR" -b "$JAR" -H "Host: $HOST" "http://$API/?$QUERY" --max-time 120
 
 say "sleep it"
 api POST "/v1/previews/$PV/sleep" >/dev/null
@@ -869,6 +877,7 @@ cat <<EOF
 | Visual review under a 5% visual threshold | $UNDER |
 | X-Robots-Tag on the service's page / on the 401 without the link | $ROBOTS / $ROBOTS_LOCKED |
 | Its request log through roll (count; newest; any query kept) | $REQS |
+| What its running services use (`…/metrics`) | $METRICS |
 | The release's time on the preview's data (at its head) / on the change | $RELEASE / $CHG_RELEASE ms |
 | The preview's link as a QR code (PNG, no-store) | $QR |
 | Mail: the provider's key in the service / sent as the preview, caught | gone / $MAIL |

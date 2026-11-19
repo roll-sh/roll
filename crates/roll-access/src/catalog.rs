@@ -76,6 +76,8 @@ pub struct Row {
     /// The product answers only what the caller's grant reaches per environment and path (secrets'
     /// health and leak scan): rules limited to some environments or paths match it too.
     pub filters_itself: bool,
+    /// The product answers only the indices the grant reaches (`roll_auth::scope::Resource::filters_index`).
+    pub filters_index: bool,
     /// Other resources whose credentials the request hands to this one (apps' links put a
     /// database's address and password in a service's variables): it also needs `reveal` on each.
     pub lends: Option<Lend>,
@@ -197,7 +199,7 @@ impl Row {
 }
 
 const fn row(method: &'static str, route: &'static str, product: &'static str, act: Act, target: Tgt) -> Row {
-    Row { method, route, product, act, target, env: EnvFrom::None, path_query: None, reveals: &[], copies_from: None, index: None, lends: None, filters_itself: false }
+    Row { method, route, product, act, target, env: EnvFrom::None, path_query: None, reveals: &[], copies_from: None, index: None, lends: None, filters_itself: false, filters_index: false }
 }
 
 const R: Act = Act::Is(Action::Read);
@@ -239,6 +241,12 @@ impl Row {
     /// and leaks): a rule limited to some environments or folders matches it too.
     const fn filters_itself(mut self) -> Row {
         self.filters_itself = true;
+        self
+    }
+    /// A list that keeps only the indices the caller's `Grant` reaches (secrets' encryption keys):
+    /// a rule limited to some indices matches it too.
+    const fn filters_index(mut self) -> Row {
+        self.filters_index = true;
         self
     }
     const fn lends(mut self, l: Lend) -> Row {
@@ -294,6 +302,7 @@ pub const OPERATOR_ONLY: &[(&str, &str)] = &[
     ("/v1/access/audit/sinks", "where the audit log is sent is the operator's choice"),
     ("/v1/access/audit/sinks/{id}", "where the audit log is sent is the operator's choice"),
     ("/v1/access/audit/sinks/{id}/retry", "where the audit log is sent is the operator's choice"),
+    ("/v1/previews/{id}/visit", "a browser session in a team-access preview is a signed-in person's (rolld's gate sees their session), never a token's"),
     ("/v1/apps/services/{id}/environments/{env}/visit", "a browser session in a sign-in-gated environment is a signed-in person's (rolld's gate sees their session), never a token's"),
     ("/v1/apps/services/{id}/github", "roll's GitHub App installations span tenants: connecting a service to one (its tokens fetch any repository the installation sees) is the operator's, as connecting a repo is roll code's admin token's"),
 ];
@@ -1121,6 +1130,10 @@ static ROWS: &[Row] = &[
     // cluster's data.
     row("GET", "/v1/search/clusters/{id}/metrics", "search", R, one(PG, "cluster")),
     row("GET", "/v1/search/clusters/{id}/slowlog", "search", R, one(PG, "cluster")),
+    // The security audit log: a read, not a reveal (entries never hold a credential).
+    row("GET", "/v1/search/clusters/{id}/audit", "search", R, one(PG, "cluster")),
+    // Search analytics: the indices' query text, aggregated; a read of the cluster's data.
+    row("GET", "/v1/search/clusters/{id}/analytics", "search", R, one(PG, "cluster")),
     row("*", "/v1/search/clusters/{id}/", "search", M, one(PG, "cluster")),
     // An index's routes are about those indices (`{index}`: a name, or on reads an expression),
     // so a rule can grant some of a cluster's indices. The console (`request`) and the index list
@@ -1190,7 +1203,14 @@ static ROWS: &[Row] = &[
     row("DELETE", "/v1/secrets/projects/{project}/rotators/{id}", "secrets", ADMIN, one(&["project"], "project")),
     row("PATCH", "/v1/secrets/projects/{project}/rotators/{id}", "secrets", ADMIN, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/rotators/{id}/rotate-secret", "secrets", ADMIN, one(&["project"], "project")).reveals(&["secret"]),
-    row("GET", "/v1/secrets/projects/{project}/transit", "secrets", R, one(&["project"], "project")),
+    // SaaS rotators: vendor credentials roll issues and revokes keys with. Listing shows vendors
+    // and targets; the credential is never answered, so adding one reveals nothing.
+    row("GET", "/v1/secrets/projects/{project}/saas", "secrets", R, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/saas", "secrets", ADMIN, one(&["project"], "project")),
+    row("DELETE", "/v1/secrets/projects/{project}/saas/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    // Lists only the keys the caller's grant reaches (`Grants::reaches_key`, each key's name as
+    // its index), so a rule limited to some keys sees those.
+    row("GET", "/v1/secrets/projects/{project}/transit", "secrets", R, one(&["project"], "project")).filters_index(),
     row("POST", "/v1/secrets/projects/{project}/transit", "secrets", ADMIN, one(&["project"], "project")),
     // Each key's routes name it (`.index("name")`): a rule can grant one key
     // (`{"id": "prj_x", "index": "payments"}`); the list and making a key stay the project's.
@@ -1212,6 +1232,13 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/secrets/projects/{project}/cas/{id}/certificates", "secrets", R, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/cas/{id}/revoke", "secrets", W, one(&["project"], "project")),
     row("DELETE", "/v1/secrets/projects/{project}/cas/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    // ACME on a CA: its directory, pre-authorization and External Account Bindings. A binding's
+    // HMAC key is answered once, to who may also reveal; making, revoking and pre-authorizing are
+    // the project admin's (an account acts with its binding's names).
+    row("GET", "/v1/secrets/projects/{project}/cas/{id}/acme", "secrets", R, one(&["project"], "project")),
+    row("PATCH", "/v1/secrets/projects/{project}/cas/{id}/acme", "secrets", ADMIN, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/cas/{id}/acme/eab", "secrets", ADMIN, one(&["project"], "project")).reveals(&["hmac_key"]),
+    row("DELETE", "/v1/secrets/projects/{project}/cas/{id}/acme/eab/{eab}", "secrets", ADMIN, one(&["project"], "project")),
     row("GET", "/v1/secrets/projects/{project}/ssh-cas", "secrets", R, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/ssh-cas", "secrets", ADMIN, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/ssh-cas/{id}/sign-host", "secrets", ADMIN, one(&["project"], "project")),
@@ -1226,11 +1253,37 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/secrets/projects/{project}/outside-databases", "secrets", R, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/outside-databases", "secrets", ADMIN, one(&["project"], "project")),
     row("DELETE", "/v1/secrets/projects/{project}/outside-databases/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    // LDAP and Active Directory: listing never shows the bind password; registering takes one.
+    row("GET", "/v1/secrets/projects/{project}/directories", "secrets", R, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/directories", "secrets", ADMIN, one(&["project"], "project")),
+    row("DELETE", "/v1/secrets/projects/{project}/directories/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    // Snowflake accounts: listing never shows the admin's private key; registering takes one.
+    row("GET", "/v1/secrets/projects/{project}/snowflake-accounts", "secrets", R, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/snowflake-accounts", "secrets", ADMIN, one(&["project"], "project")),
+    row("DELETE", "/v1/secrets/projects/{project}/snowflake-accounts/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    // MongoDB Atlas projects: listing shows the service account's client id, never its secret;
+    // registering takes one.
+    row("GET", "/v1/secrets/projects/{project}/atlas-projects", "secrets", R, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/atlas-projects", "secrets", ADMIN, one(&["project"], "project")),
+    row("DELETE", "/v1/secrets/projects/{project}/atlas-projects/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    // Gateways into private networks (docs/secrets.md, "Gateways"): records are the project's;
+    // a gateway's own link is write on the gateway by its id, which only its token's rule names
+    // (a project-wide rule doesn't reach it).
+    row("GET", "/v1/secrets/projects/{project}/gateways", "secrets", R, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/gateways", "secrets", ADMIN, one(&["project"], "project")).reveals(&["token"]),
+    row("DELETE", "/v1/secrets/projects/{project}/gateways/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    row("GET", "/v1/secrets/gateways/{id}/connect", "secrets", W, one(&["id"], "gateway")),
     row("PATCH", "/v1/secrets/projects/{project}/outside-databases/{id}", "secrets", ADMIN, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/outside-databases/{id}/rotate-admin", "secrets", ADMIN, one(&["project"], "project")),
+    row("GET", "/v1/secrets/projects/{project}/kubernetes", "secrets", R, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/kubernetes", "secrets", ADMIN, one(&["project"], "project")),
+    row("DELETE", "/v1/secrets/projects/{project}/kubernetes/{id}", "secrets", ADMIN, one(&["project"], "project")),
     // A backup seals every environment's values to a key the caller chooses; a restore loads a
     // whole project. Both are admin in secrets too.
     row("POST", "/v1/secrets/projects/{project}/backup", "secrets", ADMIN, one(&["project"], "project")),
+    row("GET", "/v1/secrets/projects/{project}/backup/schedule", "secrets", ADMIN, one(&["project"], "project")),
+    row("PUT", "/v1/secrets/projects/{project}/backup/schedule", "secrets", ADMIN, one(&["project"], "project")),
+    row("DELETE", "/v1/secrets/projects/{project}/backup/schedule", "secrets", ADMIN, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/restore", "secrets", ADMIN, one(&["project"], "project")),
     row("PUT", "/v1/secrets/projects/{project}/environments/{env}/policy", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")),
     row("GET", "/v1/secrets/projects/{project}/environments/{env}/folder-policies", "secrets", R, one(&["project"], "project")).env(EnvFrom::Param("env")),
@@ -1239,6 +1292,8 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/secrets/projects/{project}/environments/{env}/requests/{id}/review", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")),
     row("GET", "/v1/secrets/projects/{project}/environments/{env}/values", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     row("GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/value", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
+    // A TOTP key's current code is a credential: reveal, never the prefix's read.
+    row("GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/totp", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     row("GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/versions/{v}/value", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     // What hands out more than the request itself: syncs (they push values
     // elsewhere), audit sinks and required keys are admin; a share link of a value reveals it.
@@ -1295,6 +1350,11 @@ static ROWS: &[Row] = &[
     // runtime output elsewhere and its signing secret comes back once: reveal. The URL is never
     // answered (only its host).
     row("GET", "/v1/apps/projects/{project}/drains", "apps", R, one(&["project"], "project")),
+    // The project's preview domain: which names its preview environments answer under.
+    row("GET", "/v1/apps/projects/{project}/preview-domain", "apps", R, one(&["project"], "project")),
+    row("POST", "/v1/apps/projects/{project}/preview-domain", "apps", W, one(&["project"], "project")),
+    row("DELETE", "/v1/apps/projects/{project}/preview-domain", "apps", D, one(&["project"], "project")),
+    row("POST", "/v1/apps/projects/{project}/preview-domain/verify", "apps", W, one(&["project"], "project")),
     // Its services as roll.toml: settings and variables' names, never a value.
     row("POST", "/v1/apps/projects/{project}/export", "apps", R, one(&["project"], "project")),
     row("POST", "/v1/apps/projects/{project}/drains", "apps", REVEAL, one(&["project"], "project")),
@@ -1331,7 +1391,9 @@ static ROWS: &[Row] = &[
     // A volume's backups: making one changes nothing the app sees (write, production too);
     // restoring one replaces the volume's files (delete, as restoring over a branch is).
     row("POST", "/v1/apps/services/{id}/environments/{env}/volume/backups", "apps", W, one(PG, "service")).env(EnvFrom::Param("env")),
-    row("POST", "/v1/apps/services/{id}/environments/{env}/volume/backups/{bid}/restore", "apps", D, one(PG, "service")).env(EnvFrom::Param("env")),
+    // `from` restores another environment's backup here (its files are that environment's data):
+    // reveal there too.
+    row("POST", "/v1/apps/services/{id}/environments/{env}/volume/backups/{bid}/restore", "apps", D, one(PG, "service")).env(EnvFrom::Param("env")).copies_from(CopyFrom::Body("from")),
     // A shell runs any command where the service runs, with its variables (`env` prints them all):
     // admin in every environment, as an agent's shell is: its WebSocket, and all of a session
     // (opening, keys, screen, resizing, closing: what may close an admin's shell is admin too).
@@ -1384,6 +1446,9 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/previews/projects/{project}/bypass", "previews", REVEAL, one(&["project"], "project")),
     row("GET", "/v1/previews/projects/{project}/bypass", "previews", ADMIN, one(&["project"], "project")),
     row("DELETE", "/v1/previews/projects/{project}/bypass", "previews", ADMIN, one(&["project"], "project")),
+    // A deploy hook's answer is its secret URL (shown once), as the bypass's is.
+    row("POST", "/v1/previews/projects/{project}/hooks", "previews", REVEAL, one(&["project"], "project")),
+    row("DELETE", "/v1/previews/projects/{project}/hooks/{hook}", "previews", ADMIN, one(&["project"], "project")),
     row("GET", "/v1/previews/{id}", "previews", R, one(PG, "preview")).env(EnvFrom::Fixed("preview")).reveals(&["share_url"]),
     row("DELETE", "/v1/previews/{id}", "previews", D, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
     row("*", "/v1/previews/{id}/", "previews", M, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
@@ -1602,7 +1667,7 @@ mod tests {
         let f = find("GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{key}/value", "x").unwrap();
         assert_eq!(f.row.action("GET", &[], None), Action::Reveal);
         // Every route that answers secret values is reveal.
-        for r in ["values", "secrets/{name}/value", "secrets/{name}/versions/{v}/value", "requests/{id}/values"] {
+        for r in ["values", "secrets/{name}/value", "secrets/{name}/totp", "secrets/{name}/versions/{v}/value", "requests/{id}/values"] {
             let route = format!("/v1/secrets/projects/{{project}}/environments/{{env}}/{r}");
             let f = by_path("GET", &route.replace('{', "x").replace('}', "")).unwrap();
             assert_eq!(f.row.action("GET", &[], None), Action::Reveal, "{route}");

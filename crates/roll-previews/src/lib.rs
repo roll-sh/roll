@@ -26,6 +26,7 @@ pub mod runtime;
 pub mod schema;
 pub mod settings;
 pub mod store;
+pub mod visit;
 pub mod visual;
 
 pub use engine::Engine;
@@ -366,11 +367,34 @@ impl PageHealth {
         }
         let r: Raw = serde_json::from_str(json.trim()).ok()?;
         let line = |s: &String| -> String {
-            let one: String = s.lines().next().unwrap_or("").chars().filter(|c| !c.is_control() && *c != '`').take(200).collect();
+            let one: String = s.lines().next().unwrap_or("").chars().filter(|c| !c.is_control() && *c != '`').take(PAGE_WORDS_WIDE).collect();
             one.trim().to_string()
         };
         Some(PageHealth { errors: r.errors.len().min(50) as u32, first_error: r.errors.first().map(line), failed: r.failed.len().min(50) as u32, first_failed: r.failed.first().map(line), unstable: r.unstable })
     }
+
+    /// Cut to what's shown (200 characters), once it's masked.
+    pub fn cut(&mut self) {
+        for s in [&mut self.first_error, &mut self.first_failed].into_iter().flatten() {
+            cut(s, 200);
+        }
+    }
+}
+
+/// How wide a page's own words are kept until they're masked (a value a cut splits would be left
+/// half shown): then they're cut to what's shown (`cut`).
+pub const PAGE_WORDS_WIDE: usize = 2000;
+
+/// `s` to its first `n` characters.
+pub fn cut(s: &mut String, n: usize) {
+    if let Some((i, _)) = s.char_indices().nth(n) {
+        s.truncate(i);
+    }
+}
+
+/// A page's text (`page_text`) to lines of what's shown (200 characters), once it's masked.
+pub fn cut_page_text(t: &mut String) {
+    *t = t.lines().map(|l| l.chars().take(200).collect::<String>().trim().to_string()).collect::<Vec<_>>().join("\n");
 }
 
 /// What a screen reader can't name on the page, and what the document misses, counted by the
@@ -442,6 +466,18 @@ pub struct A11yIssue {
 }
 
 impl PageA11y {
+    /// Cut to what's shown (an element's markup 120 characters, the help 200), once it's masked.
+    pub fn cut(&mut self) {
+        for i in &mut self.issues {
+            if let Some(s) = i.first.as_mut() {
+                cut(s, 120);
+            }
+            if let Some(s) = i.help.as_mut() {
+                cut(s, 200);
+            }
+        }
+    }
+
     /// How many problems this page has: every issue, a missing language and a missing title.
     pub fn problems(&self) -> u32 {
         self.issues.iter().map(|i| i.count).sum::<u32>() + u32::from(!self.lang) + u32::from(!self.title)
@@ -496,7 +532,7 @@ impl PageA11y {
                 let issues = issues
                     .into_iter()
                     .filter(|r| r.count > 0)
-                    .filter_map(|r| Some(A11yIssue { kind: rule_id(&r.kind)?, count: r.count.min(10_000), first: text(r.first, 120), impact: impact(r.impact), help: text(r.help, 200) }))
+                    .filter_map(|r| Some(A11yIssue { kind: rule_id(&r.kind)?, count: r.count.min(10_000), first: text(r.first, PAGE_WORDS_WIDE), impact: impact(r.impact), help: text(r.help, PAGE_WORDS_WIDE) }))
                     .take(50)
                     .collect();
                 Some(PageA11y { issues, lang, title, seo })
@@ -505,12 +541,93 @@ impl PageA11y {
                 let issues = [("images", images), ("fields", fields), ("buttons", buttons), ("links", links)]
                     .into_iter()
                     .filter(|(_, k)| k.count > 0)
-                    .map(|(kind, k)| A11yIssue { kind: kind.into(), count: k.count.min(10_000), first: text(k.first, 120), impact: None, help: None })
+                    .map(|(kind, k)| A11yIssue { kind: kind.into(), count: k.count.min(10_000), first: text(k.first, PAGE_WORDS_WIDE), impact: None, help: None })
                     .collect();
                 Some(PageA11y { issues, lang, title, seo })
             }
         }
     }
+}
+
+/// What a preview's service uses right now (Render's and Railway's metrics): cores of CPU and
+/// resident memory, against the memory it runs with. Only a running service has any.
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct ServiceMetrics {
+    pub service: String,
+    pub cpu: f64,
+    pub memory_bytes: u64,
+    pub memory_mb: i64,
+}
+
+/// One error in a preview's service's output, grouped (roll apps' Errors, Sentry's issues): a
+/// stack trace joined from its lines, or an error line, by its fingerprint (its type and first
+/// frames, with what varies taken out). How many, first and last seen (ms), and the newest one
+/// whole. Title and sample are masked as its logs are.
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct ErrorGroup {
+    #[serde(default)]
+    pub service: String,
+    pub fingerprint: String,
+    pub kind: String,
+    pub title: String,
+    pub count: u64,
+    pub first_seen: i64,
+    pub last_seen: i64,
+    pub sample: String,
+}
+
+/// `text` with every secret value replaced by `***` (`code_preview::runner::mask`), and then, on
+/// each line, a value's start (6 characters or more) left at the line's end replaced too: text
+/// cut before it was masked (roll apps cuts a log line at 16 KiB, an error's title at 300
+/// characters and its sample at 8 KiB) can end inside a value, which masking whole can't find.
+pub fn mask_cut(text: &str, values: &[String]) -> String {
+    let masked = code_preview::runner::mask(text, values);
+    let starts: Vec<&[u8]> = values.iter().flat_map(|v| v.lines()).filter(|l| l.trim().len() >= 6).map(str::as_bytes).collect();
+    if starts.is_empty() {
+        return masked;
+    }
+    masked
+        .split('\n')
+        .map(|line| {
+            let b = line.as_bytes();
+            // The earliest place a value's start runs to the line's end: what's after it goes.
+            let cut = starts
+                .iter()
+                .filter_map(|v| {
+                    let from = b.len().saturating_sub(v.len() - 1);
+                    (from..b.len().saturating_sub(5)).find(|&i| b[i] == v[0] && v.starts_with(&b[i..]))
+                })
+                .min();
+            // A value starts on a character's first byte, so `i` is one of the line's boundaries.
+            match cut {
+                Some(i) => format!("{}***", &line[..i]),
+                None => line.to_string(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// `docker stats --no-stream --format '{{.CPUPerc}}|{{.MemUsage}}'` (`1.23%|84.2MiB / 256MiB`):
+/// cores and resident bytes.
+pub fn parse_docker_stats(line: &str) -> Option<(f64, u64)> {
+    let (cpu, mem) = line.trim().split_once('|')?;
+    let cpu: f64 = cpu.trim().trim_end_matches('%').parse().ok()?;
+    let used = mem.split('/').next()?.trim();
+    let split = used.find(|c: char| c.is_ascii_alphabetic())?;
+    let (n, unit) = used.split_at(split);
+    let n: f64 = n.trim().parse().ok()?;
+    let mult = match unit.trim() {
+        "B" => 1.0,
+        "kB" | "KB" => 1e3,
+        "KiB" => 1024.0,
+        "MB" => 1e6,
+        "MiB" => 1024.0 * 1024.0,
+        "GB" => 1e9,
+        "GiB" => 1024.0 * 1024.0 * 1024.0,
+        _ => return None,
+    };
+    Some((cpu / 100.0, (n * mult) as u64))
 }
 
 /// A request to a preview's service through roll (Vercel's request log): when, which service,
@@ -779,6 +896,13 @@ pub struct BrokenLink {
 }
 
 impl PageLinks {
+    /// Cut to what's shown (a path 200 characters), once it's masked.
+    pub fn cut(&mut self) {
+        for b in &mut self.broken {
+            cut(&mut b.path, 200);
+        }
+    }
+
     /// From what the browser wrote (its `links`), if it wrote that: printable paths, bounded.
     pub fn parse(json: &str) -> Option<PageLinks> {
         #[derive(serde::Deserialize)]
@@ -790,7 +914,7 @@ impl PageLinks {
             .broken
             .into_iter()
             .filter(|b| b.path.starts_with('/') && b.status < 1000)
-            .map(|b| BrokenLink { path: b.path.chars().filter(|c| !c.is_control() && *c != '`').take(200).collect(), status: b.status })
+            .map(|b| BrokenLink { path: b.path.chars().filter(|c| !c.is_control() && *c != '`').take(PAGE_WORDS_WIDE).collect(), status: b.status })
             .take(20)
             .collect();
         Some(PageLinks { checked: r.checked.min(50), broken })
@@ -819,7 +943,7 @@ pub fn page_text(json: &str) -> Option<String> {
     let t = v.get("text")?.as_str()?;
     let lines: Vec<String> = t
         .lines()
-        .map(|l| l.chars().map(|c| if c.is_control() { ' ' } else { c }).take(200).collect::<String>().trim().to_string())
+        .map(|l| l.chars().map(|c| if c.is_control() { ' ' } else { c }).take(PAGE_WORDS_WIDE).collect::<String>().trim().to_string())
         .filter(|l| !l.is_empty())
         .take(400)
         .collect();
@@ -988,6 +1112,14 @@ impl ResourceState {
     }
 }
 
+/// Someone signed in to roll who opened a team-access preview ([`Store::visitors`]): their
+/// handle, and when they were last in it (ms, as of their session's last recheck).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Visitor {
+    pub who: String,
+    pub last_at: i64,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Activity {
     pub at: i64,
@@ -1030,6 +1162,26 @@ pub fn label_part(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A value a cut splits (its start left at the end of a line, or of the text) never shows;
+    /// whole ones are masked anywhere, and text that only looks a little like one is kept.
+    #[test]
+    fn a_value_cut_in_two_never_shows_its_start() {
+        let values = ["sk_test_51Hx9abc".to_string(), "line-one\nline-two".to_string()];
+        let cut = format!("{}sk_test_5", "x".repeat(20));
+        assert_eq!(mask_cut(&cut, &values), format!("{}***", "x".repeat(20)));
+        assert_eq!(mask_cut("key sk_test_51Hx9abc ok\nthen sk_te\nline-tw", &values), "key *** ok\nthen sk_te\n***");
+        assert_eq!(mask_cut("é sk_test_51H", &values), "é ***", "cut on a character's boundary");
+        assert_eq!(mask_cut("nothing secret", &values), "nothing secret");
+    }
+
+    #[test]
+    fn docker_stats_read_as_cores_and_bytes() {
+        assert_eq!(parse_docker_stats("1.50%|84MiB / 256MiB"), Some((0.015, 84 * 1024 * 1024)));
+        assert_eq!(parse_docker_stats("212.00%|1.5GiB / 4GiB\n"), Some((2.12, (1.5 * 1024.0 * 1024.0 * 1024.0) as u64)));
+        assert_eq!(parse_docker_stats("0.00%|0B / 0B"), Some((0.0, 0)));
+        assert_eq!(parse_docker_stats("--|-- / --"), None, "a container that just stopped");
+    }
 
     /// Production data reaches a preview only as it's masked, or as it is, and that's said.
     #[test]

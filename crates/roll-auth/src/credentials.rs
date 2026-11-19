@@ -8,7 +8,7 @@
 //! message) is refused before it's sent, naming where in its arguments and what kind, never the
 //! value. A prompt-injected agent's way of leaking a secret is writing it somewhere it's read.
 //!
-//! roll's own credentials (`rlt_`, `rlo_`, `rlf_`, `rlc_`, `rlk_`, each with a checksum, so no
+//! roll's own credentials (`rlt_`, `rlo_`, `rlf_`, `rlc_`, `rlk_`, `rlp_`, `rlb_`, each with a checksum, so no
 //! false positives) are refused in any product but roll secrets, where keeping one is the point.
 //! Other well-known formats (AWS, GitHub, Slack, Stripe, Google, Anthropic, OpenAI, PEM private
 //! keys) are refused in the products above. Nothing reached its destination, so nothing is revoked.
@@ -16,10 +16,10 @@
 use serde_json::Value;
 
 /// The secrets roll makes that scanners look for: grants' (`rlt_`, `rlo_`, `rlf_`), machine
-/// clients' (`rlc_`), and other products' made the same way: apps' deploy hooks (`rlk_`) and SSO
-/// connections' SCIM tokens (`rlp_`, roll-accounts).
+/// clients' (`rlc_`), and other products' made the same way: apps' deploy hooks (`rlk_`), SSO
+/// connections' SCIM tokens (`rlp_`, roll-accounts) and previews' deploy hooks (`rlb_`, a rebuild).
 /// (`rlh_` is roll code's automations' inbound webhook secrets: another shape, not ours.)
-pub const SECRET_PREFIXES: [&str; 6] = ["rlt_", "rlo_", "rlf_", "rlc_", "rlk_", "rlp_"];
+pub const SECRET_PREFIXES: [&str; 7] = ["rlt_", "rlo_", "rlf_", "rlc_", "rlk_", "rlp_", "rlb_"];
 
 /// A secret: `prefix`, 34 random characters of lowercase base32 (170 bits) and 6 of checksum, so a
 /// scanner can tell a real roll token from look-alike text without asking roll ([`checksum_ok`],

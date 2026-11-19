@@ -18,7 +18,7 @@ const service: Service = {
   git_login: null,
   github: null,
   created_at: T0,
-  environments: [{ name: "production", state: "running", url: "https://web.roll.test", active: { id: "dep_1", revision: null, created_at: T0 }, latest: { id: "dep_1", status: "active" } }],
+  environments: [{ name: "production", state: "running", url: "https://web.roll.test", active: { id: "dep_1", revision: null, created_at: T0 }, latest: { id: "dep_1", status: "active" }, needs_deploy: false, ephemeral: false }],
 };
 
 const env: Environment = {

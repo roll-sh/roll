@@ -442,6 +442,11 @@ impl Backend {
 impl PreviewBackend for Backend {
     async fn create(&self, repo: &RepoRow, change: &code_control::model::Change, dir: &Path) -> anyhow::Result<code_control::model::Preview> {
         let Some((engine, project)) = self.environment_for(repo) else { return self.inner.create(repo, change, dir).await };
+        // roll code's own call: the change's preview, whichever project made it (one per change).
+        if let Some(existing) = engine.store.row_by_change(&change.id)? {
+            let s = engine.store.settings(&existing.project_id)?;
+            return Ok(self.source.summary(&engine.store.view(existing)?, &s));
+        }
         let (p, _) = engine.create(&project, &repo.full_name(), None, Some(&change.id), "roll").await.map_err(|e| anyhow::anyhow!("{e}"))?;
         let s = engine.store.settings(&project)?;
         Ok(self.source.summary(&p, &s))

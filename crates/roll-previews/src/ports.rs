@@ -35,6 +35,19 @@ impl Branched {
     }
 }
 
+/// What [`Brancher::columns`] fails with when the parent sleeps: reading its columns would wake
+/// it (and keep it awake), which suggestions aren't worth.
+#[derive(Debug)]
+pub struct Asleep;
+
+impl std::fmt::Display for Asleep {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("asleep")
+    }
+}
+
+impl std::error::Error for Asleep {}
+
 /// One data product's branches. Every method is idempotent: the engine may call it again after
 /// a crash, a timeout or a retry.
 #[async_trait]
@@ -100,6 +113,13 @@ pub trait Brancher: Send + Sync {
     /// out): `None` from products whose branches need none.
     async fn credentials(&self, _parent: &str, _branch: &str, _name: &str) -> anyhow::Result<Option<String>> {
         Ok(None)
+    }
+
+    /// The parent's columns (or a search cluster's fields) with their types, at most `max`, for
+    /// mask suggestions ([`crate::mask::suggest`]). None from products without columns to mask.
+    /// A parent that sleeps isn't woken for it: [`Asleep`].
+    async fn columns(&self, _parent: &str, _max: usize) -> anyhow::Result<Vec<crate::mask::Column>> {
+        Ok(Vec::new())
     }
 
     /// The parent's schema and the branch's, one line per object, for [`crate::schema::diff`].
@@ -240,6 +260,9 @@ pub struct GitPush {
     pub sha: Option<String>,
     /// The push's commit message (`[skip preview]` in it skips one).
     pub message: String,
+    /// Who pushed or acted, as the provider says (GitHub's `sender.login`): untrusted text, for
+    /// `skip_authors` only (a dependency bot's branch push makes no preview), never for trust.
+    pub pusher: Option<String>,
     /// The pull request the push is of (GitHub's `pull_request`, GitLab's merge request events),
     /// every claim checked against the repository's refs by roll apps first. A fork's is
     /// `branch: "pull/<n>"`; a same-repo one names its real branch. `sha: None` with a pull: it
@@ -282,6 +305,9 @@ pub struct GitPull {
     pub url: String,
     /// From another repository (its head repo isn't the base's): it runs only once approved.
     pub fork: bool,
+    /// Who opened it, as the provider says (GitHub's `user.login`): untrusted text, for
+    /// `skip_authors` only, never for trust.
+    pub author: Option<String>,
 }
 
 /// A note's element to crop in a screenshot run: its page and its selector, both checked.
@@ -415,8 +441,11 @@ pub struct Target {
     /// The preview's access token when its project's previews are private (`access: "link"`):
     /// a backend that serves the service itself (roll apps) checks it like the runtime does.
     pub access_token: Option<String>,
-    /// With `access_token`: the project's bypass secret's SHA-256 (hex), which opens it for
-    /// automation too (`x-roll-preview-bypass`).
+    /// The project's previews let in people signed in to roll who may open it (`access:
+    /// "team"`): a backend that serves the service itself (roll apps) gates it on signing in.
+    pub signed_in: bool,
+    /// With `access_token` or `signed_in`: the project's bypass secret's SHA-256 (hex), which
+    /// opens it for automation too (`x-roll-preview-bypass`).
     pub bypass_sha256: Option<String>,
     /// The feedback button on its pages (the project's `feedback`, a change's preview, link
     /// access): a backend that serves the pages itself (roll apps) adds it as the runtime does.
@@ -427,6 +456,10 @@ pub struct Target {
     /// With `egress` `roll`: the hosts outside roll it may still reach, through the preview's
     /// egress proxy.
     pub egress_hosts: Vec<String>,
+    /// The `n`th rebuild a deploy hook asked for: built again at the same head with nothing
+    /// cached (a static site reads its content at build time). roll apps builds with `no_cache`;
+    /// the runtime builds at each start anyway.
+    pub rebuild: Option<i64>,
 }
 
 /// A deploy the backend accepted that hasn't finished (a build, a rollout): the converge leaves
@@ -516,6 +549,18 @@ pub trait Apps: Send + Sync {
     fn requests(&self, _preview: &str) -> Vec<crate::RequestLine> {
         Vec::new()
     }
+    /// What the service uses right now, `(cores, resident bytes)`: `None` when it isn't running
+    /// (or the backend can't tell).
+    async fn metrics(&self, _preview: &str, _service: &str) -> Option<(f64, u64)> {
+        None
+    }
+    /// Its errors in the last `minutes`, grouped (none where the backend can't tell when a line
+    /// was written). Text the backend cuts before grouping it is masked first with `masks`' values
+    /// (`crate::mask_cut`), read only when there's an error; the engine masks every title and
+    /// sample again. `None`: only the counts are used, nothing is masked and no text leaves.
+    async fn errors(&self, _preview: &str, _service: &str, _minutes: i64, _masks: Option<&crate::engine::ErrorMasks<'_>>) -> crate::Result<Vec<crate::ErrorGroup>> {
+        Ok(Vec::new())
+    }
     /// The service's output as it comes, after its last `lines`: `None` where it can't be
     /// followed (the engine reads `logs` again every few seconds instead).
     async fn follow(&self, _preview: &str, _service: &str, _lines: usize) -> Option<tokio::sync::mpsc::Receiver<String>> {
@@ -525,7 +570,13 @@ pub trait Apps: Send + Sync {
     async fn seed(&self, _job: &SeedJob) -> anyhow::Result<(i32, String)> {
         anyhow::bail!("this server can't run seed commands")
     }
-    /// A PNG of the service's page as it first shows (`None`: this backend can't take one).
+    /// The project's own preview domain, verified (roll apps' project preview domain: a wildcard
+    /// custom domain, `*.preview.acme.dev`), as `(base, https)`: its previews answer on
+    /// `<label>.<base>`. `None`: none, or not verified yet (rolld's preview domain then).
+    async fn preview_domain(&self, _project: &str) -> Option<(String, bool)> {
+        None
+    }
+
     /// The memory the service's live deployment runs with in this preview (a backend's preview
     /// settings and the environment's own over the service's). `None`: not known, the catalog's.
     async fn memory_mb(&self, _preview: &str, _service: &str) -> Option<u32> {
@@ -553,6 +604,15 @@ pub trait Apps: Send + Sync {
     /// The hosts the preview's egress proxy refused lately (its project's `egress_hosts` don't
     /// list them), each once. No default, as `warm`.
     async fn egress_refused(&self, preview: &str) -> Vec<String>;
+}
+
+/// Who may open a project's previews under `access: "team"` (rolld fills it from roll's
+/// accounts and the workspace): asked when a ticket is given and again every few minutes of a
+/// session. `session` is the roll session (`ses_…`) that asked for the ticket: once it no longer
+/// signs its person in (signed out, revoked, expired), the answer is no. A failed lookup is a
+/// no. It may read a database: it's called off the async workers.
+pub trait Visitors: Send + Sync {
+    fn may_open(&self, user: &str, session: &str, project: &str) -> bool;
 }
 
 /// A project's secrets, per environment (roll secrets; docs/secrets.md).

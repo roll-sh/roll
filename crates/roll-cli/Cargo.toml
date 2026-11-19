@@ -63,6 +63,7 @@ urlencoding.workspace = true
 zeroize.workspace = true
 toml.workspace = true
 serde_yaml_ng.workspace = true
+roll-gateway = { workspace = true, features = ["agent"] }
 # `roll secrets scan`: the credential detectors and the allow-list's globs roll code's landings use.
 roll-auth.workspace = true
 code-review.workspace = true

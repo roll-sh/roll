@@ -129,7 +129,7 @@ impl Secrets {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?)),
             )?;
             let reads: Vec<(String, String, String)> = c.query(
-                "SELECT env, path, keys FROM audit WHERE project_id = ? AND at >= ? AND action IN ('secrets.reveal', 'secrets.export', 'secrets.resolve', 'secrets.revalidate', 'sync.push') ORDER BY id DESC LIMIT ?",
+                "SELECT env, path, keys FROM audit WHERE project_id = ? AND at >= ? AND action IN ('secrets.reveal', 'secrets.export', 'secrets.resolve', 'secrets.revalidate', 'secrets.totp', 'sync.push') ORDER BY id DESC LIMIT ?",
                 params![project, now - UNREAD_DAYS * 86_400_000, READS_MAX],
                 |r| Ok((r.get::<_, Option<String>>(0)?.unwrap_or_default(), r.get::<_, Option<String>>(1)?.unwrap_or_default(), r.get(2)?)),
             )?;

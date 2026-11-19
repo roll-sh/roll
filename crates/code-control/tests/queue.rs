@@ -775,9 +775,11 @@ fn in_process_secrets(dir: &Path, owner: &str) -> (Arc<roll_secrets::Secrets>, S
         kms: None,
         sts: None,
         outside: None,
+        directory: None,
         github: None,
         clouds: None,
         workloads: None,
+        gateways: None,
     };
     let secrets = Arc::new(roll_secrets::Secrets::new(db, ws.clone(), opts).unwrap());
     (secrets.clone(), project, InProcessSecrets(secrets, ws))
