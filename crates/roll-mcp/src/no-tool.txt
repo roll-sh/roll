@@ -134,6 +134,7 @@ POST /v1/secrets/projects/{project}/environments/{env}/requests/{id}/close   no 
 POST /v1/secrets/projects/{project}/environments/{env}/requests/{id}/review  a person's call (reviewing what someone sent)
 GET /v1/secrets/projects/{project}/environments/{env}/requests/{id}/values   answers or sets a credential (a request's values)
 POST /v1/secrets/projects/{project}/environments/{env}/resolve               answers or sets a credential (resolved values)
+POST /v1/secrets/projects/{project}/environments/{env}/value-requests        no tool yet: value requests (roll MCP adds the tools after batch 5)
 POST /v1/secrets/projects/{project}/environments/{env}/secrets/{name}/purge  a person's call (a secret's history gone for good)
 POST /v1/secrets/projects/{project}/gateways                                 an outside integration's setup: an admin's, with its credentials
 DELETE /v1/secrets/projects/{project}/gateways/{id}                          an outside integration's setup: an admin's, with its credentials
@@ -171,6 +172,8 @@ POST /v1/secrets/projects/{project}/syncs/{id}/run                           an 
 DELETE /v1/secrets/projects/{project}/transit/{name}                         a person's call: every ciphertext of the key stops opening
 GET /v1/secrets/projects/{project}/unstored/{fingerprint}                    no tool yet: a found credential's kind, place and liveness, never its value (#487)
 POST /v1/secrets/projects/{project}/validity                                 a person's call: it contacts outside providers (#487)
+GET /v1/secrets/projects/{project}/value-requests                            no tool yet: value requests (roll MCP adds the tools after batch 5)
+DELETE /v1/secrets/projects/{project}/value-requests/{id}                    no tool yet: value requests (roll MCP adds the tools after batch 5)
 GET /v1/secrets/whoami                                                       the operator's (health, migrations, process control)
 * /v1/storage/accounts/{id}                                                  an outside integration's setup: an admin's, with its credentials
 GET /v1/storage/api                                                          the dashboard's (the developer API's settings)

@@ -519,6 +519,25 @@ pub enum Secrets {
     },
     /// Open a share's link (or `<id>#<key>`) and print its value; it counts as one of its opens.
     Open { link: String },
+    /// Ask someone outside roll to send values in: prints a link where they paste them, sealed in
+    /// their browser; they land in this folder as a change (a change request where it needs
+    /// approval). No keys: list the project's requests. `roll secrets requests` is change requests.
+    Request {
+        /// The keys to ask for.
+        keys: Vec<String>,
+        /// What to send and why, shown on the page (never a value).
+        #[arg(long, default_value = "")]
+        note: String,
+        /// How long the link lives: 30m, 12h, 7d (at most 30d).
+        #[arg(long, default_value = "7d")]
+        expires: String,
+        /// How many times it may be answered (each answer is a change).
+        #[arg(long, default_value_t = 1)]
+        answers: i64,
+        /// Cancel a request instead (its link stops working).
+        #[arg(long, conflicts_with_all = ["keys", "note"])]
+        cancel: Option<String>,
+    },
     /// Pushes of an environment to outside platforms (GitHub Actions, Vercel, Cloudflare, Supabase,
     /// AWS Parameter Store, Azure App Configuration, HashiCorp Vault, webhooks): list, add, run now,
     /// remove.
@@ -3274,6 +3293,49 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             eprintln!("Opens {views} time{}, until {}. The key is only in this link: send it, don't store it.", if views == 1 { "" } else { "s" }, chrono::DateTime::from_timestamp_millis(v["expires_at"].as_i64().unwrap_or(0)).map(|t| t.to_rfc3339()).unwrap_or_default());
         }
         Secrets::Open { .. } => unreachable!("handled above"),
+        Secrets::Request { keys, note, expires, answers, cancel } => {
+            if let Some(id) = cancel {
+                c.call(Method::DELETE, &format!("{}/value-requests/{}", c.base(), enc(&id)), None).await?;
+                println!("Cancelled {id}");
+                return Ok(());
+            }
+            if keys.is_empty() {
+                let v = c.call(Method::GET, &format!("{}/value-requests", c.base()), None).await?;
+                if json_out {
+                    return print(&v);
+                }
+                for r in v.as_array().into_iter().flatten() {
+                    let state = match (r["open"] == true, &r["outcome"]) {
+                        (true, _) => format!("open, {} answer{} left", r["answers_left"], if r["answers_left"] == 1 { "" } else { "s" }),
+                        (false, o) if o["change"].is_number() => format!("answered (change #{})", o["change"]),
+                        (false, o) if o["request"].is_string() => format!("answered (change request {})", s(&o["request"])),
+                        _ if r["cancelled_at"].is_number() => "cancelled".into(),
+                        _ => "expired".into(),
+                    };
+                    let keys: Vec<String> = r["keys"].as_array().into_iter().flatten().map(s).collect();
+                    println!("{}  {:<32} {}{}  {state}  by {}  {}", s(&r["id"]), keys.join(","), s(&r["environment"]), if r["path"] == "/" { String::new() } else { s(&r["path"]) }, s(&r["created_by"]), ago(r["created_at"].as_i64().unwrap_or(0)));
+                }
+                return Ok(());
+            }
+            let body = json!({ "keys": keys, "note": note, "ttl_minutes": minutes(&expires)?, "answers": answers });
+            let v = c.call(Method::POST, &format!("{env}/value-requests?{}", c.q()), Some(body)).await?;
+            if json_out {
+                return print(&v);
+            }
+            // The link's token is shown only now; the id (in the list) is for cancelling.
+            let (id, token) = (s(&v["id"]), s(&v["token"]));
+            let link = v["link"].as_str().map(String::from).or_else(|| std::env::var("ROLL_WEB_URL").ok().filter(|u| !u.is_empty()).map(|w| format!("{}/request/{token}", w.trim_end_matches('/'))));
+            println!("{}", link.as_deref().unwrap_or(&format!("/request/{token}")));
+            eprintln!(
+                "Send the link to whoever has the value{}; it's shown only now. It takes {} answer{} until {}; each lands in {}{} as a change (a change request where the folder needs approval). Cancel it with `roll secrets request --cancel {id}`.",
+                if link.is_some() { "" } else { " (the dashboard's address is unknown here: open that path on your dashboard, or set ROLL_WEB_URL to print the whole link)" },
+                answers,
+                if answers == 1 { "" } else { "s" },
+                chrono::DateTime::from_timestamp_millis(v["expires_at"].as_i64().unwrap_or(0)).map(|t| t.to_rfc3339()).unwrap_or_default(),
+                c.at.env,
+                if c.at.path == "/" { String::new() } else { c.at.path.clone() },
+            );
+        }
         Secrets::Syncs(cmd) => syncs(&c, cmd, json_out).await?,
         Secrets::Sinks(cmd) => sinks(&c, cmd, json_out).await?,
         Secrets::Purge { key, before } => {

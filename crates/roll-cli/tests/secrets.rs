@@ -311,6 +311,23 @@ async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_referen
     ok(&api, &[], &["secrets", "-p", "copy", "restore", file, "--key", key], None).await;
     let restored = ok(&api, &[], &["run", "-p", "copy", "-e", "production", "--allow-unresolved", "--no-mask", "--", "sh", "-c", "echo $HOST $PASSWORD"], None).await;
     assert_eq!(restored.trim(), "db.internal s3cret");
+
+    // Asking someone outside roll for a value: the page seals it to the request's own key, it
+    // lands in the folder, and `roll secrets request` lists the request as answered.
+    // With no dashboard address known, it prints the path on the dashboard.
+    let path = ok(&api, &[("ROLL_WEB_URL", "")], &[&at[..], &["request", "VENDOR_TOKEN", "--note", "the example vendor's token"]].concat(), None).await.trim().to_string();
+    let token = path.strip_prefix("/request/rlq_").map(|t| format!("rlq_{t}")).unwrap_or_else(|| panic!("{path}"));
+    let http = reqwest::Client::new();
+    let peek: serde_json::Value = serde_json::from_str(&http.get(format!("{api}/v1/secrets/value-requests/{token}")).send().await.unwrap().text().await.unwrap()).unwrap();
+    let id = peek["id"].as_str().unwrap().to_string();
+    let sealed = roll_secrets::crypto::seal_to(peek["public_key"].as_str().unwrap(), &roll_secrets::value_requests::answer_context(&id, "VENDOR_TOKEN"), b"fake-vendor-token").unwrap();
+    let body = serde_json::json!({ "values": { "VENDOR_TOKEN": sealed } }).to_string();
+    let answered = http.post(format!("{api}/v1/secrets/value-requests/{token}/answer")).header("content-type", "application/json").body(body).send().await.unwrap();
+    assert_eq!(answered.status().as_u16(), 204);
+    let got = ok(&api, &[], &["run", "-p", "shop", "-e", "production", "--allow-unresolved", "--no-mask", "--", "sh", "-c", "echo $VENDOR_TOKEN"], None).await;
+    assert_eq!(got.trim(), "fake-vendor-token");
+    let list = ok(&api, &[], &[&at[..], &["request"]].concat(), None).await;
+    assert!(list.contains(&id) && list.contains("answered (change #") && !list.contains(&token), "{list}");
 }
 
 /// Answers each CLI's arguments with the file named after them (other characters `_`), from the
