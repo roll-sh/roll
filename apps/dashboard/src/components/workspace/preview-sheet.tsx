@@ -1509,19 +1509,25 @@ function Shell({ preview: p }: { preview: Preview }) {
   const [session, setSession] = useState<{ id: string; apps: string | null } | null>(null);
   const [state, setState] = useState<"idle" | "opening" | "ended">("idle");
   const [error, setError] = useState<string | null>(null);
-  // The preview's services that roll apps runs: name → roll apps service id.
+  // The preview's services that roll apps runs: name → roll apps service id, for a service of
+  // that name with this preview's `pv-` environment (a production service that shares a
+  // `roll.toml` service's name isn't it), as previews' own `find` decides.
+  const env = `pv-${p.id.replace(/^pv_/, "")}`;
   const [onApps, setOnApps] = useState<Record<string, string>>({});
   useEffect(() => {
     let live = true;
     appsApi.services(p.project).then(
-      (all) => live && setOnApps(Object.fromEntries(all.filter((s) => s.project === p.project).map((s) => [s.name, s.id]))),
+      async (all) => {
+        const mine = all.filter((s) => s.project === p.project);
+        const has = await Promise.all(mine.map((s) => appsApi.environments(s.id).then((es) => es.some((e) => e.name === env), () => false)));
+        if (live) setOnApps(Object.fromEntries(mine.filter((_, i) => has[i]).map((s) => [s.name, s.id])));
+      },
       () => live && setOnApps({}),
     );
     return () => {
       live = false;
     };
-  }, [p.project]);
-  const env = `pv-${p.id.replace(/^pv_/, "")}`;
+  }, [p.project, env]);
   if (!p.services.length) return <p className="text-[11.5px] text-subtle">No services, so no shell.</p>;
   const apps = onApps[service] ?? null;
   const open = async () => {
