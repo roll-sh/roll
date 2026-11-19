@@ -153,12 +153,15 @@ pub fn router(apps: Arc<Apps>) -> Router {
 
 /// Run a service's route on its owner.
 async fn on_owner(State(apps): S, req: Request, next: Next) -> Response {
-    let Some(id) = req.uri().path().strip_prefix("/v1/apps/services/").map(|r| r.split('/').next().unwrap_or("").to_string()) else {
+    let Some(raw) = req.uri().path().strip_prefix("/v1/apps/services/").map(|r| r.split('/').next().unwrap_or("").to_string()) else {
         return next.run(req).await;
     };
+    // The id as the handlers read it: `svc%5Fx` (a client may encode `_`) is `svc_x`, so one
+    // service has one lease and one owner, however its id was spelled.
+    let id = percent_encoding::percent_decode_str(&raw).decode_utf8_lossy().into_owned();
     // A deleted service is no service but to restore it or delete it for good.
-    let root = req.uri().path().trim_end_matches('/') == format!("/v1/apps/services/{id}");
-    let keeps = (root && req.method() == axum::http::Method::DELETE) || req.uri().path() == format!("/v1/apps/services/{id}/restore");
+    let root = req.uri().path().trim_end_matches('/') == format!("/v1/apps/services/{raw}");
+    let keeps = (root && req.method() == axum::http::Method::DELETE) || req.uri().path() == format!("/v1/apps/services/{raw}/restore");
     if !keeps {
         let sid = id.clone();
         if let Ok((_, Some(_))) = apps.db(move |s| s.service_any(&sid)).await {
