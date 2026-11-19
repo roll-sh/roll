@@ -25,5 +25,9 @@ describe("the settings form", () => {
       run: { pre_deploy: "pnpm migrate" },
     });
     expect(patchOf(svc, { ...f, watch: " " })).toEqual({ build: { watch: null } });
+    // Log metrics as `name: pattern` lines; a cleared field none.
+    expect(patchOf(svc, { ...f, logMetrics: "payments_failed: payment failed\n\nTimeout" })).toEqual({
+      run: { log_metrics: [{ name: "payments_failed", pattern: "payment failed" }, { name: "timeout", pattern: "Timeout" }] },
+    });
   });
 });

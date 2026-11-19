@@ -28,7 +28,7 @@ use crate::error::{AggError, Result};
 use crate::internal::CompensatedSum;
 
 /// `DimensionalShapeType`: the highest dimension among a doc's geometries.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Default, serde::Serialize, serde::Deserialize)]
 pub enum DimensionalShapeType {
     #[default]
     Point = 0,
@@ -371,7 +371,7 @@ pub fn decode_centroid(b: &[u8]) -> Option<Centroid> {
 }
 
 /// `InternalCentroid.ShapeData`: a shape centroid's weighted sums (geo: latitude first).
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ShapeData {
     pub first: f64,
     pub second: f64,

@@ -61,7 +61,7 @@ impl AggRequest {
 }
 
 /// One element of an aggregation path (`agg[key].metric`).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PathElement {
     pub full: String,
     pub name: String,
@@ -71,7 +71,7 @@ pub struct PathElement {
 
 /// `AggregationPath`: `agg1>agg2[key]>agg3.metric`. [`AggPath::parse`] never returns an empty
 /// path, so `elements[0]` always exists.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AggPath {
     pub elements: Vec<PathElement>,
     pub text: String,
@@ -179,14 +179,35 @@ impl std::fmt::Display for AggPath {
     }
 }
 
-/// A bucket order (`BucketOrder`): simple orders, sub-aggregation paths, compounds.
-#[derive(Clone, Debug, PartialEq)]
+/// A bucket order (`BucketOrder`): simple orders, sub-aggregation paths, compounds. Decoding it
+/// from [`crate::wire`] counts its nesting.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub enum BucketOrder {
     Count { asc: bool },
     Key { asc: bool },
     Agg { path: AggPath, asc: bool },
     /// A compound order (the last element is a key order: the tie-breaker).
     Compound(Vec<BucketOrder>),
+}
+
+#[derive(serde::Deserialize)]
+enum BucketOrderDe {
+    Count { asc: bool },
+    Key { asc: bool },
+    Agg { path: AggPath, asc: bool },
+    Compound(Vec<BucketOrder>),
+}
+
+impl<'de> serde::Deserialize<'de> for BucketOrder {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        let _level = crate::wire::Nested::enter::<D::Error>()?;
+        Ok(match BucketOrderDe::deserialize(d)? {
+            BucketOrderDe::Count { asc } => BucketOrder::Count { asc },
+            BucketOrderDe::Key { asc } => BucketOrder::Key { asc },
+            BucketOrderDe::Agg { path, asc } => BucketOrder::Agg { path, asc },
+            BucketOrderDe::Compound(c) => BucketOrder::Compound(c),
+        })
+    }
 }
 
 impl BucketOrder {

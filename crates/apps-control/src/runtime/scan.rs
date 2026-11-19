@@ -20,6 +20,8 @@ const DB_VOLUME: &str = "roll-apps-trivy-db";
 const DB_FRESH: Duration = Duration::from_secs(12 * 3600);
 /// The most of a report read: a bigger one is an image with more findings than anyone reads.
 const MAX_REPORT: u64 = 64 << 20;
+/// The most of an SBOM kept (CycloneDX JSON); a bigger one isn't kept, its scan still is.
+const MAX_SBOM: u64 = 8 << 20;
 
 /// The scanner's state on this node: until when its database is fresh, and one scan at a time
 /// (each takes a CPU or two and up to 2 GiB for a few seconds).
@@ -36,8 +38,9 @@ impl Default for Scanner {
 
 impl Scanner {
 
-    /// An image's known vulnerabilities, most severe first. `service` labels what it runs.
-    pub async fn scan(&self, image: &str, service: &str, note: impl Fn(String)) -> anyhow::Result<Vec<Vulnerability>> {
+    /// An image's known vulnerabilities, most severe first, and its SBOM (CycloneDX JSON) when
+    /// it's small enough to keep. `service` labels what it runs.
+    pub async fn scan(&self, image: &str, service: &str, note: impl Fn(String)) -> anyhow::Result<(Vec<Vulnerability>, Option<Vec<u8>>)> {
         let _one = self.one.acquire().await?;
         self.fresh_db(&note).await?;
         let dir = tempfile::Builder::new().prefix("roll-apps-scan-").tempdir().context("a directory for the scan")?;
@@ -51,14 +54,13 @@ impl Scanner {
         let label = format!("sh.roll.apps={service}");
         let (scan_mount, out_mount) = (format!("{}:/scan:ro", dir.path().display()), format!("{}:/out", out.display()));
         let db = format!("{DB_VOLUME}:/db:ro");
+        // The report lists every package, so the same run's CycloneDX SBOM is its conversion.
+        let run = "trivy image --cache-dir /db --input /scan/image.tar --skip-db-update --skip-java-db-update --offline-scan --cache-backend memory --scanners vuln --list-all-pkgs --format json --output /out/report.json --timeout 8m --quiet && trivy convert --format cyclonedx --output /out/sbom.json --quiet /out/report.json";
         let args = [
             "run", "--rm", "--name", &name, "--label", &label, "--user", &user,
             "--network", "none", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
             "--memory", "2g", "--cpus", "2", "--pids-limit", "256", "--tmpfs", "/tmp:size=256m",
-            "-v", &db, "-v", &scan_mount, "-v", &out_mount, TRIVY,
-            "image", "--cache-dir", "/db", "--input", "/scan/image.tar", "--skip-db-update", "--skip-java-db-update",
-            "--offline-scan", "--cache-backend", "memory", "--scanners", "vuln", "--format", "json",
-            "--output", "/out/report.json", "--timeout", "8m", "--quiet",
+            "-v", &db, "-v", &scan_mount, "-v", &out_mount, "--entrypoint", "sh", TRIVY, "-c", run,
         ];
         if let Err(e) = super::docker::docker_within(&args, Some(Duration::from_secs(600))).await {
             // A CLI that gave up leaves its container running.
@@ -70,7 +72,9 @@ impl Scanner {
         if !size.is_file() || size.len() > MAX_REPORT {
             bail!("the scan's report is over {} MiB: more findings than are read", MAX_REPORT >> 20);
         }
-        parse_trivy(&std::fs::read(&report)?)
+        let found = parse_trivy(&std::fs::read(&report)?)?;
+        let sbom = std::fs::symlink_metadata(out.join("sbom.json")).ok().filter(|m| m.is_file() && m.len() <= MAX_SBOM).and_then(|_| std::fs::read(out.join("sbom.json")).ok());
+        Ok((found, sbom))
     }
 
     /// The database, downloaded when it's older than [`DB_FRESH`] (the scan's only network).

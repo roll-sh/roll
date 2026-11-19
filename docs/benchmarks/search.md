@@ -70,6 +70,257 @@ over rounds with the min–max spread; trust a difference only where the spreads
   request (sum of the process's threads' `schedstat` run time) of two binaries loaded with the
   same data and measured interleaved.
 
+## Round 12: knn beams sized to each segment (2026-11-19)
+
+Round 10's one loss with the ranges apart was dense_vector `knn-search-100-1000_multiple_segments`:
+2.30x Elasticsearch (14.23 against 6.19 ms p50). This round finds the cause and fixes it, then
+reruns dense_vector under Rally. Raw outputs: `~/.cache/rsearch/knn-multiseg/` (A/Bs, recall,
+profiles) and `~/.cache/rsearch/round12/` (Rally) on the machine that ran them.
+
+**What limits the task.** The track indexes 250,000 96-dim float vectors (`int8_hnsw`, `m` 32,
+2 shards) and searches the segments the load left (`k` 100, `num_candidates` 1,000; no
+force-merge). Loaded outside Rally as Rally loads it (`vab.py load`), roll ends with 4 segments
+per shard (65k, 25k, 10k, 25k docs) and Elasticsearch with 3 (41k, 59k, 25k).
+
+- Each of roll's segments searched its graph with the whole 1,000-candidate beam: 42.1M
+  instructions per query on 4 segments per shard against 16.5M on one, 2.5x the work for the same
+  hits. A profile (`perf record`, 400 queries) put about 80% of it in the graph search
+  (`search_layer` 40%, heap pops 10%, sorting the beam 9%, int8 scoring 21%) and about 6% in zstd
+  reading the hits' `_id`.
+- On lane b outside Rally, with each engine warmed by 2,000 queries per task first, the two
+  engines spend about the same CPU per query: roll 15.7-17.5 ms on 4 segments (12.9-14.0 on 3),
+  Elasticsearch 14.1-16.1. Elasticsearch's p50 was 6.7-10.3 ms against roll's 9.3-14.7: it spreads
+  a query over the 4 hardware threads (both shards, their segments concurrently), roll over one
+  thread per physical core (2). Roll's latency follows its CPU per query. (Without the warm-up,
+  Elasticsearch spent 32-35 ms of CPU per query, much of it its JIT compiler: under Rally the
+  earlier `knn` tasks warm it.)
+- Elasticsearch 9.5.5 ships Lucene 10.5.1, whose `AbstractKnnVectorQuery` no longer shares a
+  global minimum score between segments (`MultiLeafKnnCollector` is no longer
+  `TopKnnCollectorManager`'s collector). It collects optimistically instead: each segment searches
+  a beam of `num_candidates · p + 16 · √(num_candidates · p · (1 − p))`, where `p` is the
+  segment's share of the shard's docs, and a segment whose whole beam is in the shard's best
+  `num_candidates` is searched again. At `p` 0.2 that beam is 402 instead of 1,000.
+
+**The change** (`search-index`'s `KnnQuery`, a `steers_precisely` accessor in `search-codec`):
+over several segments, an unfiltered search of a field whose graph steers by float or 8-bit
+scores gives each segment Lucene's beam, at a margin of 24 standard deviations instead of 16
+(below), at least `k` and at most the full beam. A segment whose whole beam made the shard's best
+`num_candidates` is searched again with the full beam, as Lucene does. One-bit (`bbq`) and 4-bit
+fields, filtered searches, nested (`parent_filter`) searches, `per_segment` (OpenSearch) and
+exact searches keep the full beam.
+
+Instructions per query (perf stat, 300 queries, native server; one binary built with
+`-Cllvm-args=-x86-branches-within-32B-boundaries`, the full beam and λ chosen by a temporary
+switch at run time, so code placement is the same for every column):
+
+| layout | task | full beam | λ 16 (Lucene) | λ 24 (adopted) | λ 32 |
+|---|---|---:|---:|---:|---:|
+| 4 segments per shard | `100-1000` | 43.70M | 25.68M | 29.38M | 32.40M |
+| 4 segments per shard | `10-100` | 6.36M | 5.65M | 6.20M | 6.37M |
+| 3 segments per shard | `100-1000` | 35.48M | 24.44M | 27.61M | 30.13M |
+| 3 segments per shard | `10-100` | 5.20M | 5.08M | 5.20M | 5.21M |
+
+Cycles moved with them (`100-1000` on 4 segments: 54.9M → 36.3M at λ 24).
+
+**Recall.** Recall@k against numpy's exact top k, for each switch on the same binary and data:
+Rally's own dense_vector queries (1,000 per task, `vab.py`) and the vectors lane's 1M × 384
+corpus (200 queries; 12 segments `int8_hnsw`, 14 `hnsw`, 17 `bbq_hnsw`):
+
+| corpus | query | full beam | λ 16 | λ 24 |
+|---|---|---:|---:|---:|
+| dense_vector, 4 segments | `100-1000` | 1.0 | 0.9999 | 1.0 |
+| dense_vector, 4 segments | `10-100` | 0.9983 | 0.9981 | 0.9983 |
+| dense_vector, 3 segments | `100-1000` | 1.0 | 1.0 | 1.0 |
+| dense_vector, 3 segments | `10-100` | 0.9982 | 0.9981 | 0.9982 |
+| 1M `int8_hnsw` | `knn` k 10 / 100 | 0.9695 | 0.9695 | 0.9695 |
+| 1M `int8_hnsw` | `knn` k 100 / 1,000 | 0.9968 | 0.9968 | 0.9968 |
+| 1M `hnsw` | `knn` k 10 / 100 | 0.991 | 0.9905 | 0.991 |
+| 1M `hnsw` | `knn` k 100 / 1,000 | 0.9993 | 0.9993 | 0.9993 |
+
+The filtered rows (10% and 1% filters, both `k`s) and every `bbq_hnsw` row are byte-identical to
+the full beam: those searches don't narrow. At λ 24, 3 of dense_vector's 100,000 `100-1000` hits
+changed (each a hit near rank 100 swapped for a slightly lower one: recall 0.99997, which rounds to
+1.0) and 1 of the 1M `int8_hnsw` corpus's 20,000 `k` 100 hits. No margin short of the full beam
+kept every hit (λ 32 still changed two of the 16 result files).
+
+Lane b (server `10,11,28,29`, client `12,13,30,31`, 4 GiB, Docker), the same binary with the
+full beam and with λ 24, 3 alternating rounds, 500 queries after 600 of warm-up; `:8` is 8
+clients. Server CPU ms per query and p50 ms, median (min-max):
+
+| layout | task | CPU, full beam | CPU, λ 24 | p50, full beam | p50, λ 24 |
+|---|---|---:|---:|---:|---:|
+| 4 segments | `100-1000` | 15.13 (14.66-15.24) | 11.08 (10.71-11.18) | 8.78 (8.50-8.87) | 7.60 (6.54-7.94) |
+| 4 segments | `100-1000:8` | 15.51 (15.50-15.69) | 10.80 (10.46-10.80) | 31.30 (31.26-32.95) | 21.38 (20.56-22.57) |
+| 4 segments | `10-100` | 3.10 (3.02-3.13) | 3.16 (3.10-3.25) | 2.28 (2.22-2.38) | 2.64 (2.34-3.16) |
+| 3 segments | `100-1000` | 12.39 (12.13-12.97) | 10.04 (9.96-10.77) | 8.19 (7.84-8.86) | 6.38 (6.28-11.03) |
+| 3 segments | `100-1000:8` | 12.69 (12.60-13.12) | 10.25 (10.17-10.50) | 25.93 (25.86-26.64) | 21.37 (20.47-32.47) |
+| 3 segments | `10-100` | 2.58 (2.50-2.66) | 2.70 (2.65-2.81) | 2.23 (2.09-2.26) | 2.37 (2.35-2.96) |
+
+The λ 24 rounds drew as much or more foreign load (1.5-3.0 cores on the 4 server CPUs against
+1.6-1.9). `10-100` is a tie: at `num_candidates` 100 only the smallest segment narrows
+(instructions −3% and 0%).
+
+**Rally** (Round 10's harness and subsets, `RALLY_DOCS=1000000` on the float corpus, lane b under
+its lock, 3 rounds alternating roll and Elasticsearch 9.5.5 with the order rotating). roll ran
+the A/B's binary (this branch plus the temporary switches) set to λ 24, which takes the
+committed code's path. Every task other than `script-score-query` and `knn-recall-*` had a
+0% error rate on both engines. p50 ms, median (min-max):
+
+| task | Round 10 roll | Round 12 roll | Round 10 Elasticsearch | Round 12 Elasticsearch | roll / Elasticsearch, Round 10 → 12 | at equal foreign load (×/÷ s.e.) | verdict |
+|---|---:|---:|---:|---:|---:|---:|---|
+| `index-append`, docs/s | 12.4k (9.0k-16.8k) | 14.2k (13.9k-15.9k) | 5.3k (4.4k-5.6k) | 4.9k (3.3k-5.4k) | 0.43 → 0.34 | - | roll faster |
+| `10-100_multiple_segments` | 4.20 (3.25-5.08) | 2.91 (2.85-3.17) | 4.83 (3.60-6.23) | 4.38 (4.24-8.23) | 0.87 (tie) → 0.66 | 0.53 (1.26) | roll faster |
+| `100-1000_multiple_segments` | 14.23 (8.20-19.60) | 6.13 (5.91-6.21) | 6.19 (5.65-7.49) | 6.35 (6.18-9.08) | 2.30 → 0.97 (tie) | 0.83 (1.13) | tie |
+| `10-100` | 2.24 (2.08-2.42) | 2.36 (1.99-2.46) | 3.64 (3.18-4.40) | 3.70 (3.43-4.01) | 0.62 → 0.64 | 0.59 (1.06) | roll faster |
+| `100-1000` | 6.22 (5.52-6.89) | 5.33 (5.01-5.75) | 5.56 (5.27-6.65) | 6.20 (5.57-6.31) | 1.12 (tie) → 0.86 (tie) | 0.87 (1.03) | tie |
+
+Foreign load on the lane's server CPUs per race: roll 58, 42, 41%; Elasticsearch 52, 46, 33%.
+roll drew more, and still tied. Server CPU per race: roll 236, 246, 225 s (Round 10: 269-286);
+Elasticsearch 483, 350, 367. RSS at the end of a race: roll 241-251 MiB, Elasticsearch
+1,624-2,761. The force-merged rows don't run this code (one segment per shard): their moves are
+run-to-run variation.
+
+**Measured, not adopted:**
+
+- **Lucene's margin, λ 16**: 12% fewer instructions than λ 24 on `100-1000` (25.7M against
+  29.4M), but recall dropped on two corpora (table above).
+- **Narrowing filtered searches** (Lucene narrows them too): recall with the 1% filter fell from
+  0.9015 to 0.8725 (`int8_hnsw`) and from 0.963 to 0.9145 (`hnsw`) at `k` 10 / 100, and the
+  `int8_hnsw` 10% filter at `k` 100 / 1,000 from 0.9964 to 0.9939. A filtered graph search steps
+  over rejected nodes, and a narrow beam strands it.
+- **Narrowing one-bit fields**: Round 9's port showed the recall loss (0.9935 → 0.9895 at `k` 10 /
+  100 on 1M `bbq_hnsw`).
+
+**Where roll still loses** on dense_vector: nowhere with the ranges apart. The two
+`100-1000` tasks are ties (0.97 and 0.86).
+
+## nyc_taxis bulk indexing: `best_compression`'s buffer segments (2026-11-19)
+
+Round 11 (below) had Elasticsearch 9.5.5 ahead of roll on nyc_taxis indexing: 1.03x docs/s (a tie)
+and 1.04x bulk p50, 1.10 ×/÷ 1.05 at equal foreign load, with roll slower in 3 of 3 rounds. This
+explains the number and fixes its largest cause.
+
+**How it was measured.** The track's own bulk shape: the first 2,000,000 trips, 10,000 documents
+per `_bulk`, the track's index body (1 shard, `index.codec: best_compression`,
+`index.refresh_interval: 30s`, `index.translog.flush_threshold_size: 4g`; mapping: 9
+`scaled_float`, 2 `double`, 1 `integer`, 2 `date`, 2 `geo_point`, 6 `keyword` and 1 `text` field
+the documents don't use). `search-dev` (release, line tables) ran on lane b's server CPUs
+`10,11,28,29`, a Python loader on `12,13,30,31`, under the lane lock, at 8 clients (the track's
+count) and 1. Each run counted the server's user instructions and cycles over exactly the load
+(`perf stat` from the privileged perf container), its CPU time, the lane's busy time minus the
+server's own CPU ("foreign"), then refreshed and checked `_count` and six aggregations (three
+sums, a terms, a monthly date histogram, geo bounds). It waited for merges to finish, recorded
+the segments and store size, and timed 300 `_mget` calls of 10 random ids (random-document
+fetch). Every run below ended with the same `_count` (2,000,000) and identical aggregation
+results. Scripts and raw results: `~/.cache/rsearch/nycbulk/` on the machine that ran them.
+
+**What limits the bulk p50.** The CPUs. In the first 8-client loads (Round 11's binary) the
+lane's 4 server CPUs were 97% busy: roll's own 2.9-3.1 CPUs plus 0.7-1.0 of other sessions' work.
+8 clients × 10,000 documents are in flight, so a bulk's p50 is about 80,000 documents divided by
+the throughput. The WAL isn't it (its thread used 1.9 s of CPU over a 40 s load). Lowering CPU per
+document lowers the p50.
+
+**Where roll's CPU went** (Round 11's binary, `perf record -e instructions:u` over an 8-client load,
+by thread and symbol):
+
+| | share of the server's instructions |
+|---|---:|
+| zstd compressing stored fields | **40%**: 16% on request workers, 8% on flush threads (segments written from the indexing buffer), 16% on merge threads |
+| merges (all of it, zstd included) | 26% |
+| the rest of the request path (fast parser, conversion, the buffer's term, point and doc-value writers, the WAL) | 34% |
+
+roll wrote `best_compression` stored fields at zstd level 6 in 16 KiB chunks with a per-segment
+dictionary. Level 6 searches for matches lazily: on these documents it costs 12.7 µs per document
+to compress, against 2.6 µs at level 1 (the zstd CLI, 200k documents in independent 16 KiB
+chunks with a trained 16 KiB dictionary, one pinned CPU). Each document is compressed when its
+buffer becomes a segment and again in every merge. roll cut 26-35 segments of 10-50k documents per
+2M-document load, and merged them 4-8 times during it; Elasticsearch merged 0 times.
+
+**What Elasticsearch does differently.** From its 9.5.5 jar: `best_compression` is
+`Zstd814StoredFieldsFormat` BEST_COMPRESSION: zstd level **3** on blocks of **240 KiB** (at most
+2,048 documents) with **no dictionary**, so Lucene's merges copy clean compressed chunks without
+recompressing them. Its indexing buffer is 10% of the heap (about 205 MB here), shared by the
+node's shards; Lucene writes stored fields to the segment's file as documents arrive (they take no
+buffer memory), and Elasticsearch adds no version-map entry for an auto-id append. Its 5-9
+segments of 40k-710k documents per load were cut by its refreshes and flushes, not by memory: one
+segment held 710k documents from a buffer of about 205 MB.
+
+roll's buffer, per document on this track (the median over 80 buffer writes of one load): stored
+fields 564 B, doc values 482 B, points 260 B, version-map entries 189 B, terms 89 B; about 1.4 KB
+against Lucene's under 290 B. With a 64 MiB budget per shard, and several concurrent buffers per
+shard (the largest is written when the budget is crossed), segments came out at 10-50k documents.
+
+**Three fixes, measured** on one binary with run-time switches (a same-code control; arms
+alternating; 3 rounds; median (min-max) of instructions per document):
+
+| clients | arm | instructions/doc | cycles/doc | settled store | `_mget` of 10 random ids, p50 / CPU per doc |
+|---|---|---:|---:|---:|---:|
+| 8 | level 6 everywhere (before) | 206.8k (205.9-208.7) | 182.5k | 350.1 MB | 1.0 ms / 90 µs |
+| 8 | level 1 for buffer segments, merges level 6 | 149.4k (147.2-153.1) | 142.5k | 353.9 MB | 1.3 ms / 113 µs |
+| 8 | Elasticsearch's shape (level 3, 240 KiB, 2,048 docs, no dictionary) | 147.2k (143.5-148.5) | 142.3k | 347.2 MB | **3.5 ms / 327 µs** |
+| 8 | 256 MiB buffer budget | 173.2k (173.0-181.3) | 162.0k | 348.3 MB | 1.2 ms / 100 µs |
+| 8 | level 1 for buffer segments + 256 MiB | 142.6k (141.0-143.7) | 137.4k | 350.9 MB | 1.2 ms / 113 µs |
+| 1 | level 6 everywhere (before) | 231.0k (228.2-232.5) | 178.7k | 344.0 MB | 1.1 ms / 93 µs |
+| 1 | level 1 for buffer segments | 190.4k (189.4-192.2) | 150.6k | 344.8 MB | 1.2 ms / 110 µs |
+| 1 | Elasticsearch's shape | 174.3k (173.8-176.4) | 137.3k | 338.1 MB | **3.4 ms / 307 µs** |
+| 1 | 256 MiB buffer budget | 164.2k (164.1-167.8) | 135.1k | 344.0 MB | 1.2 ms / 110 µs |
+| 1 | level 1 for buffer segments + 256 MiB | 143.9k (142.6-146.8) | 122.0k | 345.9 MB | 1.1 ms / 93 µs |
+
+- Elasticsearch's own codec saves as much at 8 clients (-29%) and more at 1 (-25%), and its store
+  is 1% smaller, but a random document's fetch decompresses a 240 KiB block: 3.4x the `_mget` time
+  and 3x its CPU. That is the fetch phase of every query on every track, so it isn't adopted.
+- Level 1 for buffer segments keeps the fetch path and the store (merges rewrite those segments at
+  level 6): **adopted**.
+- A bigger buffer (fewer, larger segments: 24 cut instead of 36-41 at 8 clients, 0-1 merges
+  instead of 4-8) saves 16% alone and 4% more on top of level 1 at 8 clients, but 25% on top of it
+  at one client. Raising the per-shard budget costs memory on a multi-tenant node; the buffer
+  numbers above say where a memory-neutral version comes from (stored fields written as they
+  arrive, as Lucene does: 40% of the buffer). Not done here (the README's Next).
+
+**The change** (`StoredOptions::best_compression_buffer`): under `best_compression`, a segment
+written from the indexing buffer stores its fields at zstd level 1 with the same 16 KiB chunks and
+dictionary; merges keep level 6. The default codec is unchanged (level 3 at 2 KiB chunks; level 1
+saves less there and costs 1-4% of size). The built change against its parent (the parent's code in
+the experiment binary, with no switch set), alternating, 3 rounds:
+
+| clients | binary | instructions/doc | cycles/doc | CPU µs/doc | docs/s | bulk p50 ms | settled store |
+|---|---|---:|---:|---:|---:|---:|---:|
+| 8 | parent | 206.9k (206.8-208.2) | 180.3k | 59.5 (52.7-59.6) | 56,764 (55,261-65,746) | 1,283 (1,059-1,360) | 350.1 MB |
+| 8 | change | **149.7k** (148.1-150.3), -28% | 140.7k, -22% | 42.1 (41.2-48.5) | 91,346 (77,836-94,878) | 859 (840-1,002) | 350.9 MB |
+| 1 | parent | 226.5k (225.8-231.0) | 183.5k | 60.7 (59.8-63.5) | 45,295 (44,123-51,312) | 211 (196-220) | 344.0 MB |
+| 1 | change | **191.8k** (189.4-193.7), -15% | 149.4k, -19% | 49.1 (47.8-52.2) | 57,619 (52,728-59,106) | 173 (166-187) | 344.7 MB |
+
+The change's instruction counts match the switched experiment arm's (149.7k against 151.0k,
+191.8k against 191.9k), so the gain is the work removed, not code placement.
+
+**Rally.** nyc_taxis, `RALLY_DOCS=2000000`, Round 11's harness (`bench-search-rerun.sh`, lane b,
+4 GiB each), roll with the change, roll at its parent and Elasticsearch 9.5.5 rotating over 3
+rounds, one round per lane-lock hold. Every race ended with 2,000,000 documents; Rally's error
+rate was 0 for every task. Foreign load per race, %: roll 45, 39, 76; parent 56, 47, 62;
+Elasticsearch 59, 46, 51.
+
+| | roll | roll's parent | Elasticsearch 9.5.5 | at equal foreign load: change / parent, change / Elasticsearch |
+|---|---:|---:|---:|---:|
+| `index` docs/s | **78,385** (58,385-78,706) | 60,058 (53,681-62,781) | 35,774 (28,299-37,898) | 1.19 (×/÷ 1.06), 2.14 (×/÷ 1.06) |
+| `index` p50 ms | **995** (936-1,337) | 1,309 (995-1,357) | 1,170 (1,167-1,675) | 0.91 (×/÷ 1.10), 0.80 (×/÷ 1.10) |
+| server CPU per race, s | **144** (141-163) | 156 (155-180) | 263 (252-263) | 0.92 (×/÷ 1.05), 0.57 (×/÷ 1.05) |
+| store at the race's end | 350-355 MB | 351-356 MB | 317-408 MB | |
+
+The query tasks didn't move beyond their spreads (medians, change against parent: `default_1k`
+12.1 against 11.9 ms, `range` 5.2 against 5.7, `distance_amount_agg` 43.6 against 61.4 with roll's
+round 2 at 76% foreign load, `default_no_target`, `autohisto_agg` and `date_histogram_agg` within
+0.3 ms).
+Elasticsearch indexed far slower than in Round 11 (35.8k against 62.2k docs/s, 252-263 s of CPU per
+race against 182-208), at similar foreign load and with merges free to run (149-164 GB free, no
+held-merge log lines): unexplained. Its races don't decide this change, so the comparison that
+does is the parent's, run the same hour: +19% docs/s and -8% server CPU per race at equal foreign
+load. The bulk p50 is 0.91 ×/÷ 1.10: lower in 2 of 3 rounds, within the noise.
+
+**The ECS log, for the README's one-client item.** The same profile on `bench-search-ecs.py`'s 1M
+documents at one client (the default codec) has zstd at only 11% of instructions. Merges take 32%,
+and 14% of everything is BP reordering at merge time (`bp::Ctx::bisect`): that is the
+"BP only for time-series and log indices" item, the next lever for that number.
+
 ## Round 11: noaa and nyc_taxis with merges flowing (2026-11-18, `769dd6744`)
 
 Round 10 found that Elasticsearch 9.1+ runs no merge, force-merges included, while less than about

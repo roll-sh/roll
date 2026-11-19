@@ -435,7 +435,13 @@ impl Engine {
         let expires_at = self.store.now_ms()? + SECRETS_ENV_MARGIN_MS;
         // What it branched: roll secrets resolves nothing of those parents' (`followed`).
         let branched: Vec<(Kind, String)> = self.store.resources(&r.id)?.into_iter().map(|x| (x.kind, x.parent)).collect();
-        self.secrets.ensure(&r.project_id, &env_name(&r.id), &s.secrets.base, &vars, trusted, expires_at, &branched).await.map_err(|e| anyhow::anyhow!("secrets: {e:#}"))?;
+        // The project's rules' references (checked when saved), where nothing overrode them, go to
+        // roll secrets as references; everything else, whatever it looks like, as plain text.
+        let own = self.store.vars(&r.id)?;
+        let rule_refs: Vec<(String, String)> = project_env(&s, r.branch.as_deref()).into_iter().filter(|(k, v)| crate::settings::is_reference(v) && !own.contains_key(k)).collect();
+        let refs: Vec<(String, String)> = vars.iter().filter(|kv| rule_refs.contains(kv)).cloned().collect();
+        vars.retain(|kv| !refs.contains(kv));
+        self.secrets.ensure(&r.project_id, &env_name(&r.id), &s.secrets.base, &vars, &refs, trusted, expires_at, &branched).await.map_err(|e| anyhow::anyhow!("secrets: {e:#}"))?;
         // Its logs' masks follow what it's given now: these values at once (roll apps' instances
         // get them without a start here), roll secrets' read again at the next logs read.
         let own: Vec<(String, String)> = project_env(&s, r.branch.as_deref()).into_iter().chain(self.store.vars(&r.id)?).collect();
@@ -1030,7 +1036,8 @@ impl Engine {
         let own: Vec<(String, String)> = project_env(s, r.branch.as_deref()).into_iter().chain(self.store.vars(&r.id)?).collect();
         let hide = super::masks::secret_values(&env, &plain, &own, vars);
         self.add_masks(&r.id, hide.clone());
-        for (k, v) in vars {
+        // A reference is resolved in `env` already (roll secrets'): never set as its text.
+        for (k, v) in vars.iter().filter(|(_, v)| !crate::settings::is_reference(v)) {
             set(&mut env, k, v.clone());
         }
         set(&mut env, "ROLL_PREVIEW", r.id.clone());

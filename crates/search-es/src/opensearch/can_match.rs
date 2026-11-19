@@ -122,6 +122,7 @@ pub fn all_skipped(shards: usize) -> crate::search::SearchOutcome {
         ranked: Vec::new(),
         clusters: None,
         reduce_phases: None,
+        partial_aggs: None,
     }
 }
 
@@ -291,6 +292,7 @@ mod tests {
         let source = crate::search_source::SearchSource::parse(&v, None).unwrap();
         SearchRequest {
             slowlog: Default::default(),
+            partial_aggs: false,
             indices: Vec::new(),
             opts: crate::meta::resolve::IndicesOptions::STRICT_EXPAND_OPEN_FORBID_CLOSED,
             source,
