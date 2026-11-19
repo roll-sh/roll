@@ -6,13 +6,17 @@
 //! is one [`Db::write`] closure, so nodes need no leases. Membership only points at resources:
 //! nothing here creates or deletes a product's resource.
 //!
-//! Every project has an owner: a signed-in user's id (docs/accounts.md), or empty for the
-//! operator's. A [`Scope`] says which projects a caller sees; names and resource places are per
-//! owner.
+//! Every project has a namespace (`owner`): the id of the person who made it (docs/accounts.md), or
+//! empty for the operator's. Names and resource places are per namespace. People share a project as
+//! its members, each with a role ([`members`], docs/members.md); a [`Scope`] says which projects a
+//! caller sees.
 //!
 //! [`api::router`] serves it under `/v1/workspace`.
 
 pub mod api;
+pub mod members;
+
+pub use members::{Actor, Invite, Member, MemberEvent, People, Person};
 
 use code_sql::{Db, OptionalExtension, Target, params};
 use serde::Serialize;
@@ -49,17 +53,8 @@ CREATE INDEX IF NOT EXISTS resources_project ON resources (project_id);
 pub enum Scope<'a> {
     /// Every project: the operator and admins.
     All,
-    /// Only the projects of this owner (a user's id).
-    Owner(&'a str),
-}
-
-impl Scope<'_> {
-    fn sees(&self, owner: &str) -> bool {
-        match self {
-            Scope::All => true,
-            Scope::Owner(o) => *o == owner,
-        }
-    }
+    /// Only the projects this person (a user's id) is a member of.
+    Member(&'a str),
 }
 
 /// The longest project name.
@@ -83,6 +78,11 @@ pub enum Error {
     NotFound(String),
     #[error("{0}")]
     Conflict(String),
+    #[error("{0}")]
+    Forbidden(String),
+    /// The change would leave the project without an owner who can sign in.
+    #[error("{0}")]
+    LastOwner(String),
     #[error("workspace database: {0}")]
     Db(#[from] code_sql::Error),
     #[error("{0}")]
@@ -142,6 +142,9 @@ pub struct Project {
     /// How the project shows itself (docs/workspace.md, "Shapes"); `null` for the default.
     pub icon: Option<Value>,
     pub created_at: i64,
+    /// The caller's role in it, when they're a member.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<roll_auth::roles::Role>,
     pub resources: Vec<Resource>,
 }
 
@@ -162,7 +165,7 @@ pub type OnDelete = Box<dyn Fn(&str) + Send + Sync>;
 /// from the products' own records (a repo under the person's roll code owner), and an admin's
 /// projects stand for anything. Looked up on every use; a failed lookup is a no.
 pub trait Owners: Send + Sync {
-    /// Whether `user`'s project (`usr_…`) may stand for `kind ref` on its canvas.
+    /// Whether a project `user` (`usr_…`) owns may stand for `kind ref` on its canvas.
     fn trusts(&self, user: &str, kind: Kind, r#ref: &str) -> bool;
 }
 
@@ -171,6 +174,9 @@ pub struct Workspace {
     db: Db,
     on_delete: std::sync::RwLock<Vec<OnDelete>>,
     owners: std::sync::OnceLock<std::sync::Arc<dyn Owners>>,
+    people: std::sync::OnceLock<std::sync::Arc<dyn People>>,
+    web_url: std::sync::OnceLock<String>,
+    on_event: std::sync::RwLock<Vec<members::OnEvent>>,
 }
 
 impl Workspace {
@@ -192,6 +198,7 @@ impl Workspace {
             })?;
         }
         db.ensure_schema(SCHEMA)?;
+        db.ensure_schema(members::SCHEMA)?;
         db.migrate("workspace-owners-copy", |c| {
             if !c.has_column("projects_v1", "id")? {
                 return Ok(());
@@ -204,14 +211,28 @@ impl Workspace {
                  DROP TABLE projects_v1; DROP TABLE resources_v1;",
             ))
         })?;
-        Ok(Workspace { db, on_delete: Default::default(), owners: Default::default() })
+        // Members came after owners: every project's maker is its owner.
+        db.migrate("workspace-members", members::migrate)?;
+        Ok(Workspace { db, on_delete: Default::default(), owners: Default::default(), people: Default::default(), web_url: Default::default(), on_event: Default::default() })
     }
 
     /// Every project `scope` sees, with its resources, oldest first.
     pub fn list(&self, scope: Scope<'_>) -> Result<Vec<Project>> {
         self.db.read(|c| {
             let projects = c.query(&format!("SELECT {PROJECT_COLUMNS} FROM projects ORDER BY created_at, id"), (), project_row)?;
-            let projects: Vec<Project> = projects.into_iter().filter(|p| scope.sees(&p.owner)).collect();
+            let projects: Vec<Project> = match scope {
+                Scope::All => projects,
+                Scope::Member(user) => {
+                    let roles: HashMap<String, String> = c.query("SELECT project_id, role FROM members WHERE user_id = ?", [user], |r| Ok((r.get(0)?, r.get(1)?)))?.into_iter().collect();
+                    projects
+                        .into_iter()
+                        .filter_map(|mut p| {
+                            p.role = roll_auth::roles::Role::parse(roles.get(&p.id)?);
+                            Some(p)
+                        })
+                        .collect()
+                }
+            };
             let resources = c.query(
                 "SELECT project_id, kind, ref, x, y, added_at FROM resources ORDER BY added_at, kind, ref",
                 (),
@@ -234,7 +255,11 @@ impl Workspace {
     pub fn get(&self, scope: Scope<'_>, id: &str) -> Result<Project> {
         self.db.read(|c| {
             owner_of(c, scope, id)?;
-            load(c, id)
+            let mut p = load(c, id)?;
+            if let Scope::Member(user) = scope {
+                p.role = c.query_row("SELECT role FROM members WHERE project_id = ? AND user_id = ?", [id, user], |r| r.get::<_, String>(0)).optional()?.and_then(|r| roll_auth::roles::Role::parse(&r));
+            }
+            Ok(p)
         })
     }
 
@@ -252,7 +277,10 @@ impl Workspace {
             let last: Option<i64> = c.query_row("SELECT MAX(created_at) FROM projects", (), |r| r.get(0))?;
             let at = last.map_or(now, |l| now.max(l + 1));
             c.execute("INSERT INTO projects (id, owner, name, description, icon, created_at) VALUES (?, ?, ?, ?, ?, ?)", params![id, owner, name, description, icon, at])?;
-            load(c, &id)
+            members::first_owner(c, &id, owner, at)?;
+            let mut p = load(c, &id)?;
+            p.role = (!owner.is_empty()).then_some(roll_auth::roles::Role::Owner);
+            Ok(p)
         })
     }
 
@@ -296,6 +324,7 @@ impl Workspace {
         self.db.write(|c| {
             owner_of(c, scope, id)?;
             c.execute("DELETE FROM resources WHERE project_id = ?", [id])?;
+            members::forget(c, id)?;
             c.execute("DELETE FROM projects WHERE id = ?", [id])?;
             Ok::<_, Error>(())
         })?;
@@ -312,16 +341,18 @@ impl Workspace {
 
     /// Whether `project`'s canvas may stand for `kind ref`: what may act on the resource through the
     /// project (its secrets reaching a repo's checks and previews, a link reaching a database's
-    /// credentials). Anyone may put any resource on their own canvas, so a person's project stands
-    /// only for what [`Owners`] says is theirs; the operator's projects stand for their canvas.
-    /// The one check every consumer asks: never decide this from canvas membership alone.
+    /// credentials). Anyone may put any resource on a canvas, so a person's project stands only for
+    /// what was made through it (its home, docs/members.md "The canvas rule") or what [`Owners`]
+    /// says is one of its owners'; the operator's projects stand for their canvas. The one check
+    /// every consumer asks: never decide this from canvas membership alone.
     pub fn trusts(&self, project: &Project, kind: Kind, r#ref: &str) -> bool {
-        project.owner.is_empty() || self.owners.get().is_some_and(|o| o.trusts(&project.owner, kind, r#ref))
+        project.owner.is_empty() || self.trusted_by_members(&project.id, kind, r#ref)
     }
 
-    /// The ids of `owner`'s projects (a user's id), without their canvases.
-    pub fn ids_of(&self, owner: &str) -> Result<Vec<String>> {
-        Ok(self.db.read(|c| c.query("SELECT id FROM projects WHERE owner = ? ORDER BY id", [owner], |r| r.get(0)))?)
+    /// Whether [`Owners`] says `kind ref` is `user`'s own (their repo, their search cluster): what a
+    /// person may put on a canvas they manage.
+    pub fn owned_by(&self, user: &str, kind: Kind, r#ref: &str) -> bool {
+        self.owners.get().is_some_and(|o| o.trusts(user, kind, r#ref))
     }
 
     /// Run `f` after each project is deleted, outside the transaction.
@@ -391,7 +422,7 @@ fn project_row(r: &code_sql::Row<'_>) -> code_sql::Result<Project> {
     let icon: Option<String> = r.get(4)?;
     // Only checked icons are stored; one that doesn't parse shows as the default.
     let icon = icon.and_then(|s| serde_json::from_str(&s).ok());
-    Ok(Project { id: r.get(0)?, owner: r.get(1)?, name: r.get(2)?, description: r.get(3)?, icon, created_at: r.get(5)?, resources: Vec::new() })
+    Ok(Project { id: r.get(0)?, owner: r.get(1)?, name: r.get(2)?, description: r.get(3)?, icon, created_at: r.get(5)?, role: None, resources: Vec::new() })
 }
 
 /// A resource from columns `kind, ref, x, y, added_at` starting at `at`.
@@ -412,11 +443,17 @@ fn load(c: &code_sql::Conn<'_>, id: &str) -> Result<Project> {
     Ok(project)
 }
 
-/// The owner of project `id`, if `scope` sees it (another owner's project is a 404, as if it
-/// didn't exist).
-fn owner_of(c: &code_sql::Conn<'_>, scope: Scope<'_>, id: &str) -> Result<String> {
-    match c.query_row("SELECT owner FROM projects WHERE id = ?", [id], |r| r.get::<_, String>(0)).optional()? {
-        Some(owner) if scope.sees(&owner) => Ok(owner),
+/// The namespace of project `id`, if `scope` sees it (a project the caller isn't a member of is a
+/// 404, as if it didn't exist).
+pub(crate) fn owner_of(c: &code_sql::Conn<'_>, scope: Scope<'_>, id: &str) -> Result<String> {
+    let owner = c.query_row("SELECT owner FROM projects WHERE id = ?", [id], |r| r.get::<_, String>(0)).optional()?;
+    let seen = match (scope, &owner) {
+        (_, None) => false,
+        (Scope::All, Some(_)) => true,
+        (Scope::Member(user), Some(_)) => c.query_row("SELECT 1 FROM members WHERE project_id = ? AND user_id = ?", [id, user], |r| r.get::<_, i64>(0)).optional()?.is_some(),
+    };
+    match owner {
+        Some(owner) if seen => Ok(owner),
         _ => Err(not_found(id)),
     }
 }
@@ -430,7 +467,7 @@ fn name_free(c: &code_sql::Conn<'_>, owner: &str, name: &str, except: Option<&st
     }
 }
 
-fn not_found(id: &str) -> Error {
+pub(crate) fn not_found(id: &str) -> Error {
     Error::NotFound(format!("no project {id}"))
 }
 
@@ -487,7 +524,7 @@ fn check_icon(v: &Value) -> Result<String> {
     Ok(serde_json::to_string(v).expect("JSON"))
 }
 
-fn check_ref(r#ref: &str) -> Result<()> {
+pub(crate) fn check_ref(r#ref: &str) -> Result<()> {
     match r#ref.chars().count() {
         1..=REF_MAX => Ok(()),
         _ => Err(Error::BadRequest(format!("a resource ref is 1–{REF_MAX} characters"))),

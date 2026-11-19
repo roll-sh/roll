@@ -10,7 +10,18 @@ use tower::ServiceExt;
 
 struct Api {
     router: Router,
+    ws: Arc<roll_workspace::Workspace>,
     _dir: tempfile::TempDir,
+}
+
+/// People as roll accounts has them: `usr_<handle>` with `<handle>@example.com`.
+struct People;
+
+impl roll_workspace::People for People {
+    fn person(&self, user: &str) -> Option<roll_workspace::Person> {
+        let handle = user.strip_prefix("usr_")?;
+        (handle != "gone").then(|| roll_workspace::Person { handle: handle.into(), email: Some(format!("{handle}@example.com")) })
+    }
 }
 
 impl Api {
@@ -18,8 +29,10 @@ impl Api {
         let dir = tempfile::tempdir().unwrap();
         let target = code_sql::Target::Sqlite(dir.path().join("workspace.db"));
         let db = code_sql::Db::open_or_test(&target, "workspace").unwrap();
-        let ws = roll_workspace::Workspace::new(db).unwrap();
-        Api { router: roll_workspace::router(Arc::new(ws)), _dir: dir }
+        let ws = Arc::new(roll_workspace::Workspace::new(db).unwrap());
+        ws.set_people(Arc::new(People));
+        ws.set_web_url("https://roll.example");
+        Api { router: roll_workspace::router(ws.clone()), ws, _dir: dir }
     }
 
     async fn call(&self, method: Method, path: &str, body: Option<Value>) -> (StatusCode, Value) {
@@ -34,6 +47,9 @@ impl Api {
         if let Some(u) = user {
             let signed_in = roll_auth::SignedIn { user: u.into(), handle: u.into(), admin: false, code_owner: None, session: "ses_test".into() };
             req.extensions_mut().insert(signed_in);
+            // What rolld's gate adds: the person's memberships as their session's grant, now.
+            let scope = roll_auth::roles::session_scope(&self.ws.memberships_of(u).unwrap());
+            req.extensions_mut().insert(roll_auth::Grant { id: "ses_test".into(), name: "session".into(), kind: roll_auth::GrantKind::Session, scope: Arc::new(scope), user: Some(u.into()), ask_otherwise: false });
         }
         let resp = self.router.clone().oneshot(req).await.unwrap();
         let status = resp.status();
@@ -211,4 +227,121 @@ fn projects_from_before_owners_become_the_operators() {
         // Opening again finds the new tables and leaves them be.
         assert_eq!(roll_workspace::Workspace::new(db).unwrap().list(roll_workspace::Scope::All).unwrap().len(), 1);
     }
+}
+
+/// docs/members.md, "Lifecycle": invite, accept by the right address only, change a role, the
+/// last owner, leave and remove; nobody grants more than they hold; every change is an event.
+#[tokio::test]
+async fn members_are_invited_changed_and_removed() {
+    let api = Api::new();
+    let events = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let seen = events.clone();
+    api.ws.on_event(Box::new(move |e| {
+        seen.lock().unwrap().push(format!("{} {}", e.action, e.subject.as_deref().unwrap_or("-")));
+        Ok(())
+    }));
+    let (s, p) = api.call_as(Some("usr_ada"), Method::POST, "/v1/workspace/projects", Some(json!({ "name": "pay" }))).await;
+    assert_eq!((s, p["role"].as_str()), (StatusCode::CREATED, Some("owner")), "its maker is its owner");
+    let id = p["id"].as_str().unwrap().to_string();
+    let at = |rest: &str| format!("/v1/workspace/projects/{id}{rest}");
+
+    // Invite bob as a developer: the link is in the answer once, never in the list.
+    let (s, inv) = api.call_as(Some("usr_ada"), Method::POST, &at("/invites"), Some(json!({ "email": "Bob@Example.com", "role": "developer" }))).await;
+    assert_eq!((s, inv["email"].as_str(), inv["role"].as_str()), (StatusCode::CREATED, Some("bob@example.com"), Some("developer")), "{inv}");
+    let url = inv["url"].as_str().unwrap();
+    assert!(url.starts_with("https://roll.example/dashboard/invites?token=pit_"), "{url}");
+    let token = url.split("token=").nth(1).unwrap().to_string();
+    let (_, list) = api.call_as(Some("usr_ada"), Method::GET, &at("/invites"), None).await;
+    assert_eq!(list.as_array().unwrap().len(), 1);
+    assert!(!list.to_string().contains(&token) && list[0].get("url").is_none());
+
+    // Until bob accepts, he's nobody here; carol can't take his invite.
+    let (s, _) = api.call_as(Some("usr_bob"), Method::GET, &at(""), None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    let (s, _) = api.call_as(Some("usr_carol"), Method::POST, &format!("/v1/workspace/invites/{token}/accept"), None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND, "an invite is for its address only");
+    let (_, mine) = api.call_as(Some("usr_bob"), Method::GET, "/v1/workspace/invites", None).await;
+    assert_eq!((mine.as_array().unwrap().len(), mine[0]["project_name"].as_str()), (1, Some("pay")));
+    let (s, m) = api.call_as(Some("usr_bob"), Method::POST, &format!("/v1/workspace/invites/{token}/accept"), None).await;
+    assert_eq!((s, m["role"].as_str(), m["user"].as_str()), (StatusCode::OK, Some("developer"), Some("usr_bob")), "{m}");
+    let (s, _) = api.call_as(Some("usr_bob"), Method::POST, &format!("/v1/workspace/invites/{token}/accept"), None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND, "used once");
+    let (_, list) = api.call_as(Some("usr_bob"), Method::GET, "/v1/workspace/projects", None).await;
+    assert_eq!((list.as_array().unwrap().len(), list[0]["role"].as_str()), (1, Some("developer")));
+
+    // Members' emails are for the project's admins.
+    let (_, ms) = api.call_as(Some("usr_bob"), Method::GET, &at("/members"), None).await;
+    assert_eq!(ms.as_array().unwrap().len(), 2);
+    assert!(ms.as_array().unwrap().iter().all(|m| m.get("email").is_none()), "{ms}");
+    let (_, ms) = api.call_as(Some("usr_ada"), Method::GET, &at("/members"), None).await;
+    assert_eq!(ms[1]["email"].as_str(), Some("bob@example.com"));
+
+    // A developer manages nobody.
+    let (s, _) = api.call_as(Some("usr_bob"), Method::POST, &at("/invites"), Some(json!({ "email": "dan@example.com", "role": "viewer" }))).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+
+    // Carol joins as an admin: she manages up to admin, never an owner.
+    let (_, inv) = api.call_as(Some("usr_ada"), Method::POST, &at("/invites"), Some(json!({ "email": "carol@example.com", "role": "admin" }))).await;
+    let t = inv["url"].as_str().unwrap().split("token=").nth(1).unwrap().to_string();
+    api.call_as(Some("usr_carol"), Method::POST, &format!("/v1/workspace/invites/{t}/accept"), None).await;
+    let (s, m) = api.call_as(Some("usr_carol"), Method::PATCH, &at("/members/usr_bob"), Some(json!({ "role": "developer", "environments": ["production"] }))).await;
+    assert_eq!((s, &m["environments"]), (StatusCode::OK, &json!(["production"])), "{m}");
+    for (body, who) in [(json!({ "role": "owner" }), "usr_bob"), (json!({ "role": "viewer" }), "usr_ada")] {
+        let (s, e) = api.call_as(Some("usr_carol"), Method::PATCH, &at(&format!("/members/{who}")), Some(body)).await;
+        assert_eq!((s, e["code"].as_str()), (StatusCode::FORBIDDEN, Some("forbidden")), "an admin can't make or change an owner: {e}");
+    }
+    let (s, _) = api.call_as(Some("usr_carol"), Method::POST, &at("/invites"), Some(json!({ "email": "dan@example.com", "role": "owner" }))).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let (s, _) = api.call_as(Some("usr_carol"), Method::DELETE, &at("/members/usr_ada"), None).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+
+    // The last owner can't leave or be demoted until there's another.
+    let (s, e) = api.call_as(Some("usr_ada"), Method::DELETE, &at("/members/me"), None).await;
+    assert_eq!((s, e["code"].as_str()), (StatusCode::CONFLICT, Some("last_owner")));
+    let (s, e) = api.call_as(Some("usr_ada"), Method::PATCH, &at("/members/usr_ada"), Some(json!({ "role": "admin" }))).await;
+    assert_eq!((s, e["code"].as_str()), (StatusCode::CONFLICT, Some("last_owner")));
+    let (s, _) = api.call_as(Some("usr_ada"), Method::PATCH, &at("/members/usr_carol"), Some(json!({ "role": "owner" }))).await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, _) = api.call_as(Some("usr_ada"), Method::DELETE, &at("/members/me"), None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    let (s, _) = api.call_as(Some("usr_ada"), Method::GET, &at(""), None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND, "gone at once");
+    let (s, _) = api.call_as(Some("usr_carol"), Method::DELETE, &at("/members/usr_bob"), None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    let (_, ms) = api.call_as(Some("usr_carol"), Method::GET, &at("/members"), None).await;
+    assert_eq!(ms.as_array().unwrap().iter().map(|m| m["user"].as_str().unwrap()).collect::<Vec<_>>(), vec!["usr_carol"]);
+
+    assert_eq!(
+        *events.lock().unwrap(),
+        [
+            "member.invite -", "member.accept usr_bob", "member.invite -", "member.accept usr_carol", "member.role usr_bob",
+            "member.role usr_carol", "member.leave usr_ada", "member.remove usr_bob",
+        ]
+    );
+
+    // The operator's projects take members too (D8), and their owner is the operator.
+    let ops = api.create("shared").await["id"].as_str().unwrap().to_string();
+    let (s, inv) = api.call(Method::POST, &format!("/v1/workspace/projects/{ops}/invites"), Some(json!({ "email": "bob@example.com", "role": "viewer" }))).await;
+    assert_eq!(s, StatusCode::CREATED);
+    let t = inv["url"].as_str().unwrap().split("token=").nth(1).unwrap().to_string();
+    let (s, _) = api.call_as(Some("usr_bob"), Method::POST, &format!("/v1/workspace/invites/{t}/decline"), None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+}
+
+/// `workspace-members`: every project a person made before members makes them its owner.
+#[test]
+fn makers_become_owners() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = code_sql::Target::Sqlite(dir.path().join("workspace.db"));
+    let db = code_sql::Db::open_or_test(&target, "workspace").unwrap();
+    db.ensure_schema(
+        "CREATE TABLE projects (id TEXT PRIMARY KEY, owner TEXT NOT NULL DEFAULT '', name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', icon TEXT, created_at INTEGER NOT NULL, UNIQUE (owner, name)) WITHOUT ROWID;
+         CREATE TABLE resources (owner TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL, ref TEXT NOT NULL, project_id TEXT NOT NULL, x REAL NOT NULL, y REAL NOT NULL, added_at INTEGER NOT NULL, PRIMARY KEY (owner, kind, ref)) WITHOUT ROWID;",
+    )
+    .unwrap();
+    db.execute("INSERT INTO projects (id, owner, name, created_at) VALUES ('prj_mine', 'usr_ada', 'web', 1), ('prj_ops', '', 'web', 2)", ()).unwrap();
+    let ws = roll_workspace::Workspace::new(db).unwrap();
+    let m = ws.memberships_of("usr_ada").unwrap();
+    assert_eq!((m.len(), m[0].project.as_str(), m[0].role), (1, "prj_mine", roll_auth::roles::Role::Owner));
+    assert_eq!(ws.owners_of("prj_ops").unwrap(), Vec::<String>::new(), "the operator's projects get no members");
 }

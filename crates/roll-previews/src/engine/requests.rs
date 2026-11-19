@@ -68,9 +68,9 @@ impl Engine {
         }
     }
 
-    /// The ids of `owner`'s workspace projects (a signed-in person's).
+    /// The ids of the workspace projects `owner` (a signed-in person) is a member of.
     pub fn projects_of(&self, owner: &str) -> Result<std::collections::HashSet<String>> {
-        Ok(self.workspace.list(roll_workspace::Scope::Owner(owner))?.into_iter().map(|p| p.id).collect())
+        Ok(self.workspace.list(roll_workspace::Scope::Member(owner))?.into_iter().map(|p| p.id).collect())
     }
 
     /// A workspace project, or a 404.
