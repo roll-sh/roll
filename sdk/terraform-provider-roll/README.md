@@ -2,7 +2,9 @@
 
 roll secrets as code (docs/secrets.md, "Terraform"): a project's environments, its keys (a value,
 or a link to a roll resource on the project's canvas) and, as a data source, an environment's
-values for another provider's configuration.
+values for another provider's configuration. Also roll apps' services (docs/apps/README.md,
+"Terraform"), machine clients, and roll search's clusters, API keys and snapshot repositories
+(docs/search/README.md, "Terraform").
 
 ```hcl
 provider "roll" {
@@ -138,6 +140,57 @@ resource "roll_machine_client" "web_ci" {
   }
   # or, instead of oidc, a key it signs with: public_jwk = jsonencode({ kty = "OKP", crv = "Ed25519", x = "…" })
 }
+
+# roll search (docs/search/README.md, "Terraform"): a cluster, a key for a client, a snapshot
+# repository. The operator's token, an admin's, or a person's own (their clusters, within their caps).
+resource "roll_search_cluster" "shop" {
+  name      = "shop"
+  flavor    = "elasticsearch"    # or opensearch; switched in place, data kept
+  always_on = false              # or idle_timeout_s = 900; 0 is always on
+  ip_allowlist = [
+    { cidr = "203.0.113.0/24", description = "office" },
+  ]
+  lifecycle { prevent_destroy = true }   # a destroy is restorable for 7 days, but still a delete
+}
+
+resource "roll_search_api_key" "web" {
+  cluster          = roll_search_cluster.shop.id
+  name             = "web"
+  role_descriptors = jsonencode({ reader = { indices = [{ names = ["products"], privileges = ["read"] }] } })
+  expiration       = "90d"
+  # or access = "data" | "admin" instead of role_descriptors (OpenSearch: .username and .password)
+
+  # Keys don't carry over a flavor switch: make it again in the same apply.
+  lifecycle { replace_triggered_by = [roll_search_cluster.shop.flavor] }
+}
+
+resource "roll_search_snapshot_repository" "backups" {
+  cluster     = roll_search_cluster.shop.id
+  name        = "backups"
+  type        = "s3"                                    # gcs, azure
+  settings    = { bucket = "acme-search", base_path = "shop" }
+  credentials = { access_key = var.aws_key_id, secret_key = var.aws_secret }
+}
+
+data "roll_search_cluster" "logs" {
+  name = "logs"                  # or id = "srch_…": .endpoint, .flavor, .version
+}
+
+# A key for this run only (Terraform 1.10+), in neither the plan nor the state, revoked when the
+# run ends: for another provider that manages what's inside the cluster, or a provisioner.
+ephemeral "roll_search_api_key" "deploy" {
+  cluster    = roll_search_cluster.shop.id
+  name       = "terraform"
+  access     = "admin"
+  expiration = "1h"
+}
+
+provider "elasticstack" {
+  elasticsearch {
+    endpoints = [roll_search_cluster.shop.endpoint]
+    api_key   = ephemeral.roll_search_api_key.deploy.encoded
+  }
+}
 ```
 
 - A machine client has exactly one of `oidc` and `public_jwk`: roll's third way, a secret it
@@ -150,6 +203,45 @@ resource "roll_machine_client" "web_ci" {
   Import it by its client id (`mcl_…`): `oidc` is read back except its `jwks` (roll only counts
   the pinned keys), and a `public_jwk` isn't read back at all, so when either is in the file the
   first apply after an import registers it again (a rotate).
+
+- A search cluster's `name` replaces it; everything else changes in place (`PATCH`), `flavor`
+  too: roll switches the cluster between Elasticsearch and OpenSearch keeping its id and its data
+  (it reloads as soon as no request runs), where a replacement would delete it and make a new,
+  empty one. What a switch doesn't keep: links made before it are reissued by roll (roll secrets'
+  and roll apps' search links), and keys don't carry over, since an Elasticsearch API key isn't
+  an OpenSearch user. A `roll_search_api_key` remembers the flavor it was made on and is gone
+  from the state once the cluster's differs, so the next apply makes it again; give it
+  `lifecycle { replace_triggered_by = [roll_search_cluster.<name>.flavor] }` to make it again in
+  the same apply as the switch.
+  `always_on` and `idle_timeout_s` are one setting: either decides the other, and turning
+  `always_on` off without a timeout goes back to the node's default. Settings left out keep what
+  roll has, except `ip_allowlist`, which Terraform owns: left out, it's empty (anyone). Entries
+  stay as written (`10.1.2.3/8`) while roll keeps them canonical (`10.0.0.0/8`). There's no
+  version argument: roll answers as one Elasticsearch and one OpenSearch version per node (the
+  computed `version`). Destroying a cluster deletes it; `roll search clusters restore` brings it
+  back within the node's retention window (7 days by default). There's no `deletion_protection`:
+  roll has no such setting to enforce it, so use `lifecycle { prevent_destroy = true }`. A
+  create past a person's caps (50 clusters, 2 always-on by default), or a change that makes one
+  always-on past them, fails with the cap, the count and the operator's flag that raises it.
+  `password` is the cluster's own, from when it's made (not after an import); give clients a key.
+  Import a cluster by its id or its name.
+- A search API key never changes in place: every argument replaces it, and destroying it revokes
+  it. Without `role_descriptors` it is made through roll's keys route (`access`, `data` by
+  default, as `roll search keys create`); with them through the cluster's own
+  `_security/api_key` (Elasticsearch only), encoded as roll encodes its keys
+  (`base64(<id>@<cluster>:<key>)`). `encoded` (OpenSearch: `password`) is sensitive and in the
+  state; the ephemeral `roll_search_api_key` keeps it out (revoked when the run closes). It
+  isn't importable: its secret shows only once.
+- Reading a search key or repository never wakes a sleeping cluster: a key is gone with its
+  cluster or past its expiry, and on a loaded cluster a key revoked elsewhere, or a repository
+  changed or removed elsewhere, shows in the plan. A repository's `credentials` are never read
+  back (roll seals them apart from its settings), and only the `settings` in the configuration
+  are compared. Import a repository as `srch_…/<name>`; the first apply registers it again with
+  the configuration's credentials. Keys made with `role_descriptors`, repositories and the key
+  check use the cluster's console route (`admin` for a scoped token); the keys route is
+  `reveal`, creates `write`, changes `admin`, destroys `delete`.
+- TODO (roll search): remote-cluster links (#347's `/v1/search/clusters/{id}/remotes/{alias}`) and
+  allowed origins (browser search), once each is on main.
 
 - An app's variable isn't read back (a sealed one never shows again): a change made outside
   Terraform is put back only when the value in the file changes. Its value lands in the state.

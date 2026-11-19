@@ -704,7 +704,7 @@ async fn forward(AxState(e): S, Path(id): Path<String>, Query(q): Query<ForwardQ
     check_id(&id)?;
     let by = who.map_or_else(|| "the operator".to_string(), |w| w.handle.clone());
     let f = e.forward(&id, q.service.as_deref(), q.port, &by).await?;
-    Ok(ws.on_upgrade(move |socket| bridge(socket, f)))
+    Ok(ws.max_message_size(1 << 20).max_frame_size(1 << 20).on_upgrade(move |socket| bridge(socket, f)))
 }
 
 async fn bridge(socket: axum::extract::ws::WebSocket, f: crate::engine::shell::Forward) {
@@ -712,6 +712,7 @@ async fn bridge(socket: axum::extract::ws::WebSocket, f: crate::engine::shell::F
     use futures::{SinkExt, StreamExt};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let (mut tx, mut rx) = socket.split();
+    let mut ended = f.ended.clone();
     let (mut rd, mut wr) = tokio::io::split(f.io);
     let mut buf = vec![0u8; 64 << 10];
     let (mut from_client, mut from_service) = (true, true);
@@ -733,6 +734,8 @@ async fn bridge(socket: axum::extract::ws::WebSocket, f: crate::engine::shell::F
                 Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
                 Some(Ok(_)) => {}
             },
+            // The preview went: its forwards end with it.
+            _ = ended.changed() => break,
             n = rd.read(&mut buf), if from_service => match n {
                 Ok(0) | Err(_) => {
                     if tx.send(Message::Binary(Bytes::new())).await.is_err() {
@@ -806,7 +809,13 @@ async fn logs(AxState(e): S, Path(id): Path<String>, Query(q): Query<LogsQuery>)
     use axum::response::sse::{Event, KeepAlive, Sse};
     let (service, rx) = e.follow(&id, q.service.as_deref(), lines).await?;
     let first = futures::stream::once(async move { Ok::<_, std::convert::Infallible>(Event::default().event("service").data(service)) });
-    let rest = futures::stream::unfold(rx, |mut rx| async move { rx.recv().await.map(|l| (Ok(Event::default().data(l.replace(['\r', '\n'], ""))), rx)) });
+    // A stderr line is `event: stderr`; a stdout one the default event, as before.
+    let rest = futures::stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|(stderr, l)| {
+            let ev = Event::default().data(l.replace(['\r', '\n'], ""));
+            (Ok(if stderr { ev.event("stderr") } else { ev }), rx)
+        })
+    });
     let mut r = Sse::new(futures::StreamExt::chain(first, rest)).keep_alive(KeepAlive::default()).into_response();
     // Proxies pass it on as it comes.
     r.headers_mut().insert("x-accel-buffering", axum::http::HeaderValue::from_static("no"));

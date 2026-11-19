@@ -171,8 +171,8 @@ const FOLLOW_LINE_MAX: usize = 16 << 10;
 
 /// `docker logs -f` of a container, stdout and stderr, as lines (each at most
 /// [`FOLLOW_LINE_MAX`]). The process goes when the receiver is dropped or the container ends.
-pub fn follow(name: &str, tail: usize) -> Option<tokio::sync::mpsc::Receiver<String>> {
-    followed(&["logs", "--follow", "--tail", &tail.to_string(), name], |_, l| l)
+pub fn follow(name: &str, tail: usize) -> Option<tokio::sync::mpsc::Receiver<(bool, String)>> {
+    followed(&["logs", "--follow", "--tail", &tail.to_string(), name], |stderr, l| (stderr, l))
 }
 
 /// `docker logs -f --timestamps --since <since>` of a container (`since` an RFC 3339 stamp or
@@ -421,7 +421,7 @@ impl Isolation for Docker {
         logs_tail(name, lines).await
     }
 
-    async fn follow(&self, name: &str, tail: usize) -> Option<tokio::sync::mpsc::Receiver<String>> {
+    async fn follow(&self, name: &str, tail: usize) -> Option<tokio::sync::mpsc::Receiver<(bool, String)>> {
         follow(name, tail)
     }
 

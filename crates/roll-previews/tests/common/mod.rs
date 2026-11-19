@@ -243,6 +243,9 @@ pub struct FakeApps {
     pub errors: Mutex<HashMap<String, Vec<roll_previews::ErrorGroup>>>,
     /// What every service's log holds.
     pub log: Mutex<Vec<String>>,
+    /// What a followed log gives, each line with whether it came on stderr (unset: the backend
+    /// can't follow, so the engine reads `log` again and again).
+    pub followed: Mutex<Option<Vec<(bool, String)>>>,
     /// What each seed or release job was run able to reach.
     pub seed_egress: Mutex<Vec<roll_previews::settings::EgressRule>>,
     /// What each service was deployed able to reach.
@@ -350,6 +353,14 @@ impl Apps for FakeApps {
     }
     async fn logs(&self, _: &str, _: &str, _: usize) -> Vec<String> {
         self.log.lock().clone()
+    }
+    async fn follow(&self, _: &str, _: &str, _: usize) -> Option<tokio::sync::mpsc::Receiver<(bool, String)>> {
+        let lines = self.followed.lock().clone()?;
+        let (tx, rx) = tokio::sync::mpsc::channel(lines.len().max(1));
+        for l in lines {
+            let _ = tx.try_send(l);
+        }
+        Some(rx)
     }
     /// What was written under `path` (nothing: an empty stream, as `docker cp` of a missing path).
     async fn read_files(&self, _: &str, _: &str, path: &str) -> anyhow::Result<Option<roll_previews::ports::FileStream>> {
