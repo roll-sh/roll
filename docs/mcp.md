@@ -149,6 +149,23 @@ secret: by writing it somewhere it's read.
 - Nothing reached its destination, so nothing is revoked (a credential that did leak, in a landing
   or a report from GitHub, still is: `Access::revoke_leaked`).
 
+### The sweep
+
+`pnpm test:mcp-sweep` (`scripts/test-mcp-sweep.sh`) builds rolld and starts it with every product
+on, its listeners on free loopback ports and a throwaway home. It then calls every tool through
+`/v1/mcp` as an agent would (`scripts/mcp-sweep.py`):
+
+1. It makes fixtures with the write tools.
+2. It calls each read-only tool with ids from them.
+3. It calls each write tool with values made from its schema, the destructive ones last.
+
+A 5xx, an argument the route rejects, or an empty 404 (no route answers the path) fails it. That's
+what the unit tests can't see: `tools_map_onto_classified_routes` checks a tool against the
+catalogue, not against the product's own handler. It found that an id's `_` sent as `%5F` left a
+service made over MCP never owned by apps' routing (#402). Tools that need a preview or a running
+Postgres endpoint aren't reached without Docker. It skips itself when nothing changed (`--force`;
+`--reads` skips the writes).
+
 ### Lockdown
 
 `/v1/mcp?lockdown=1` (or `X-MCP-Lockdown: true`) works like GitHub's MCP server's lockdown mode:
