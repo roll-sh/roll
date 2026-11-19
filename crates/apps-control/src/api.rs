@@ -69,6 +69,8 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route("/v1/apps/projects/{project}/drains", get(drains).post(add_drain))
         .route("/v1/apps/projects/{project}/export", post(export_project))
         .route("/v1/apps/projects/{project}/status-page", get(status_page).put(put_status_page).delete(delete_status_page))
+        .route("/v1/apps/projects/{project}/status-page/incidents", get(status_incidents).post(post_status_incident))
+        .route("/v1/apps/projects/{project}/status-page/incidents/{iid}/updates", post(update_status_incident))
         .route("/v1/apps/projects/{project}/preview-domain", get(preview_domain).post(set_preview_domain).delete(delete_preview_domain))
         .route("/v1/apps/projects/{project}/preview-domain/verify", post(verify_preview_domain))
         .route("/v1/apps/projects/{project}/drains/{did}", axum::routing::delete(delete_drain).patch(update_drain))
@@ -178,6 +180,19 @@ async fn status_page(State(apps): S, Path(project): Path<String>) -> R {
 
 async fn put_status_page(State(apps): S, Path(project): Path<String>, b: Bytes) -> R {
     ok(apps.put_status_page(&project, body(&b)?).await?)
+}
+
+async fn status_incidents(State(apps): S, Path(project): Path<String>) -> R {
+    ok(apps.incidents(&project).await?)
+}
+
+async fn post_status_incident(State(apps): S, Path(project): Path<String>, b: Bytes) -> R {
+    Ok((StatusCode::CREATED, Json(apps.post_incident(&project, body(&b)?).await?)).into_response())
+}
+
+async fn update_status_incident(State(apps): S, Path((project, iid)): Path<(String, String)>, b: Bytes) -> R {
+    apps.update_incident(&project, &iid, body(&b)?).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 async fn delete_status_page(State(apps): S, Path(project): Path<String>) -> R {

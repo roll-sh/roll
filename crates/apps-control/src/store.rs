@@ -221,6 +221,17 @@ CREATE TABLE IF NOT EXISTS status_pages (
     title TEXT NOT NULL,
     items TEXT NOT NULL
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS status_incidents (
+    id TEXT PRIMARY KEY,
+    project TEXT NOT NULL,
+    title TEXT NOT NULL,
+    state TEXT NOT NULL,
+    started_at INTEGER NOT NULL,
+    resolved_at INTEGER,
+    auto_key TEXT,
+    updates TEXT NOT NULL
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS status_incidents_project ON status_incidents (project, started_at);
 CREATE TABLE IF NOT EXISTS status_days (
     key TEXT NOT NULL,
     day INTEGER NOT NULL,
@@ -1619,6 +1630,54 @@ impl Store {
     fn status_page_where(&self, col: &str, v: &str) -> Result<Option<crate::status_page::Page>> {
         let row: Option<(String, String, String, String)> = self.db.query_row(&format!("SELECT project, slug, title, items FROM status_pages WHERE {col} = ?"), [v], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).optional()?;
         row.map(|(project, slug, title, items)| Ok(crate::status_page::Page { project, slug, title, items: json(&items)? })).transpose()
+    }
+
+    /// An incident opened: a person's, or one a check or heartbeat opened (`auto_key`: one open
+    /// at a time per key, a second open of the same key is none).
+    pub fn open_incident(&self, project: &str, title: &str, state: &str, text: &str, auto_key: Option<&str>, at: i64) -> Result<Option<String>> {
+        let id = format!("inc_{}", crate::model::random(12).to_ascii_lowercase());
+        let updates = serde_json::to_string(&[serde_json::json!({ "at": at, "state": state, "text": text })]).expect("JSON");
+        self.db.write(|c| {
+            if let Some(k) = auto_key
+                && c.query_row("SELECT 1 FROM status_incidents WHERE project = ? AND auto_key = ? AND resolved_at IS NULL", params![project, k], |_| Ok(())).optional()?.is_some()
+            {
+                return Ok(None);
+            }
+            c.execute("INSERT INTO status_incidents (id, project, title, state, started_at, resolved_at, auto_key, updates) VALUES (?, ?, ?, ?, ?, NULL, ?, ?)", params![id, project, title, state, at, auto_key, updates])?;
+            Ok(Some(id.clone()))
+        })
+    }
+
+    /// An update on an incident (`resolved` closes it); by its id, or the open one of `auto_key`.
+    pub fn update_incident(&self, project: &str, id: Option<&str>, auto_key: Option<&str>, state: &str, text: &str, at: i64) -> Result<bool> {
+        self.db.write(|c| {
+            let row: Option<(String, String)> = match (id, auto_key) {
+                (Some(i), _) => c.query_row("SELECT id, updates FROM status_incidents WHERE project = ? AND id = ?", params![project, i], |r| Ok((r.get(0)?, r.get(1)?))).optional()?,
+                (None, Some(k)) => c.query_row("SELECT id, updates FROM status_incidents WHERE project = ? AND auto_key = ? AND resolved_at IS NULL", params![project, k], |r| Ok((r.get(0)?, r.get(1)?))).optional()?,
+                _ => None,
+            };
+            let Some((iid, updates)) = row else { return Ok(false) };
+            let mut list: Vec<serde_json::Value> = serde_json::from_str(&updates).unwrap_or_default();
+            if list.len() >= 100 {
+                return Err(Error::Conflict("an incident takes at most 100 updates".into()));
+            }
+            list.push(serde_json::json!({ "at": at, "state": state, "text": text }));
+            let resolved = (state == "resolved").then_some(at);
+            c.execute("UPDATE status_incidents SET state = ?, updates = ?, resolved_at = COALESCE(?, resolved_at) WHERE id = ?", params![state, serde_json::to_string(&list).expect("JSON"), resolved, iid])?;
+            Ok(true)
+        })
+    }
+
+    /// A project's incidents since `since` (unix ms) or still open, newest first.
+    pub fn incidents(&self, project: &str, since: i64) -> Result<Vec<serde_json::Value>> {
+        Ok(self.db.query(
+            "SELECT id, title, state, started_at, resolved_at, auto_key, updates FROM status_incidents WHERE project = ? AND (started_at >= ? OR resolved_at IS NULL) ORDER BY started_at DESC LIMIT 200",
+            params![project, since],
+            |r| {
+                let updates: String = r.get(6)?;
+                Ok(serde_json::json!({ "id": r.get::<_, String>(0)?, "title": r.get::<_, String>(1)?, "state": r.get::<_, String>(2)?, "started_at": r.get::<_, i64>(3)?, "resolved_at": r.get::<_, Option<i64>>(4)?, "automatic": r.get::<_, Option<String>>(5)?.is_some(), "updates": serde_json::from_str::<serde_json::Value>(&updates).unwrap_or(serde_json::Value::Null) }))
+            },
+        )?)
     }
 
     pub fn delete_status_page(&self, project: &str) -> Result<()> {

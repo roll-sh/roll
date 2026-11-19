@@ -1278,6 +1278,7 @@ export const appsApi = {
   /** The project's own preview domain (a wildcard its preview environments answer under). */
   statusPage: (project: string) => call<StatusPage>("GET", `/v1/apps/projects/${enc(project)}/status-page`),
   putStatusPage: (project: string, body: { title?: string; items?: StatusPage["items"] }) => call<StatusPage>("PUT", `/v1/apps/projects/${enc(project)}/status-page`, body),
+  postIncident: (project: string, body: { title: string; state?: string; text: string }) => call<{ id: string }>("POST", `/v1/apps/projects/${enc(project)}/status-page/incidents`, body),
   deleteStatusPage: (project: string) => call<void>("DELETE", `/v1/apps/projects/${enc(project)}/status-page`),
   previewDomain: (project: string) => call<Domain>("GET", `/v1/apps/projects/${enc(project)}/preview-domain`),
   setPreviewDomain: (project: string, hostname: string) => call<Domain>("POST", `/v1/apps/projects/${enc(project)}/preview-domain`, { hostname }),

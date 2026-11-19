@@ -979,6 +979,119 @@
         "x-roll-action": "write"
       }
     },
+    "/v1/apps/projects/{project}/status-page/incidents": {
+      "get": {
+        "description": "Answers `{ incidents: { id, title, state, started_at, resolved_at, automatic, updates: { at, state, text }[] }[] }`: the last 90 days' and the open ones, newest first (at most 200).",
+        "operationId": "getProjectsProjectStatusPageIncidents",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`{ incidents: { id, title, state, started_at, resolved_at, automatic, updates: { at, state, text }[] }[] }`: the last 90 days' and the open ones, newest first (at most 200)"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "List incidents",
+        "tags": [
+          "projects"
+        ],
+        "x-roll-action": "read"
+      },
+      "post": {
+        "description": "Answers 201 `{ id }`: a person's incident on the page; 404 without a page.",
+        "operationId": "postProjectsProjectStatusPageIncidents",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "description": "`{ title: string /* 1–120 */, state?: \"investigating\" | \"identified\" | \"monitoring\" | \"resolved\", text: string /* 1–2000 */ }`"
+        },
+        "responses": {
+          "201": {
+            "description": "201 `{ id }`: a person's incident on the page; 404 without a page"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Create incident",
+        "tags": [
+          "projects"
+        ],
+        "x-roll-action": "write"
+      }
+    },
+    "/v1/apps/projects/{project}/status-page/incidents/{iid}/updates": {
+      "post": {
+        "description": "Answers 204: an update (at most 100 an incident); `resolved` closes it.",
+        "operationId": "postProjectsProjectStatusPageIncidentsIidUpdates",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "iid",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "description": "`{ state, text }`"
+        },
+        "responses": {
+          "204": {
+            "description": "204: an update (at most 100 an incident); `resolved` closes it"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Create update",
+        "tags": [
+          "projects"
+        ],
+        "x-roll-action": "write"
+      }
+    },
     "/v1/apps/services": {
       "get": {
         "description": "Answers `Service[]`; `deleted=true`: `{id, project, name, deleted_at, purge_at}[]` (unix ms, newest first), the deleted services kept for a restore until `purge_at`, 48 hours after the delete.",
