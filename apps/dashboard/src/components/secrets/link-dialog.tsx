@@ -1,4 +1,4 @@
-import { Cloud, Database, GitBranch, KeyRound, Link2, RotateCw, ShieldCheck, Ship, Terminal, Users, type LucideIcon } from "lucide-react";
+import { Cloud, Database, GitBranch, KeyRound, Link2, RotateCw, ShieldCheck, Ship, Snowflake, Terminal, Users, type LucideIcon } from "lucide-react";
 import { useMemo, useState } from "react";
 import { SECRET_KEY, type Batch, type Environment, type LinkField, type LinkMode, type LinkTarget, type Op } from "@/lib/secrets-api";
 import type { ResourceKind } from "@/lib/workspace-api";
@@ -16,6 +16,7 @@ const OWN_KINDS: Record<string, { icon: LucideIcon; label: string }> = {
   aws_iam_user: { icon: KeyRound, label: "IAM user" },
   outside_database: { icon: Database, label: "Database outside roll" },
   directory: { icon: Users, label: "Directory (LDAP)" },
+  snowflake: { icon: Snowflake, label: "Snowflake" },
   pki: { icon: ShieldCheck, label: "Certificate authority" },
   ssh: { icon: Terminal, label: "SSH CA" },
   gcp: { icon: Cloud, label: "GCP account" },
@@ -99,6 +100,7 @@ function Form({ env, path, taken, onWrite, onClose }: { env: Environment; path: 
   const [ttl, setTtl] = useState("60");
   const [certNames, setCertNames] = useState("");
   const [principals, setPrincipals] = useState("");
+  const [sfRoles, setSfRoles] = useState("");
   const [rotateDays, setRotateDays] = useState("30");
   const [repos, setRepos] = useState("");
   const [perms, setPerms] = useState("");
@@ -138,6 +140,9 @@ function Form({ env, path, taken, onWrite, onClose }: { env: Environment; path: 
   const needsPrincipals = chosen.some((c) => c.t.kind === "ssh");
   const logins = principals.split(",").map((n) => n.trim()).filter(Boolean);
   const principalsOk = !needsPrincipals || logins.length > 0;
+  // A Snowflake user per lease gets the roles named here (default: all the account gives).
+  const needsRoles = chosen.some((c) => c.t.kind === "snowflake" && c.p.mode === "dynamic");
+  const roles = sfRoles.split(",").map((n) => n.trim()).filter(Boolean);
   // A managed certificate rotates on a schedule, before it ends (it lives twice that).
   const needsRotation = chosen.some((c) => c.t.kind === "pki" && c.p.mode === "managed");
   const rotate = Number(rotateDays);
@@ -166,6 +171,7 @@ function Form({ env, path, taken, onWrite, onClose }: { env: Environment; path: 
             ...(c.p.mode === "dynamic" && { ttl_minutes: ttlMinutes }),
             ...(c.t.kind === "pki" && { names, ...(c.p.mode === "managed" && { rotate_days: rotate }) }),
             ...(c.t.kind === "ssh" && { principals: logins }),
+            ...(c.t.kind === "snowflake" && c.p.mode === "dynamic" && roles.length > 0 && { roles }),
             ...(c.t.kind === "kubernetes" && { namespace, ...k8sAccount, ...(auds.length > 0 && { audiences: auds }) }),
             ...(c.t.kind === "github_app" && {
               ...(repositories.length > 0 && { repositories }),
@@ -248,6 +254,12 @@ function Form({ env, path, taken, onWrite, onClose }: { env: Environment; path: 
           <label className="flex items-center gap-1.5 text-[12px] text-muted">
             Logins
             <input value={principals} onChange={(e) => setPrincipals(e.target.value)} placeholder="deploy" spellCheck={false} className={`${sized} h-7 w-40 font-mono`} aria-label="SSH principals" />
+          </label>
+        )}
+        {needsRoles && (
+          <label className="flex items-center gap-1.5 text-[12px] text-muted">
+            Roles
+            <input value={sfRoles} onChange={(e) => setSfRoles(e.target.value)} placeholder="all the account's" spellCheck={false} className={`${sized} h-7 w-44 font-mono`} aria-label="Snowflake roles" />
           </label>
         )}
         {needsGitHub && (
