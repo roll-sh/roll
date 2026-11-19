@@ -2309,7 +2309,11 @@ async fn a_deploy_freeze_holds_deploys_but_never_a_rollback() {
     // Putting that never-live build live is a deploy: refused without override.
     assert_eq!(call(&w.api, "POST", &format!("{base}/deploys/{held}/rollback"), None).await.0, StatusCode::CONFLICT);
     // With override: through, and in the audit log.
-    let (st, d) = call(&w.api, "POST", &format!("{base}/deploys"), Some(json!({"image": "nginx:1.28", "override": true}))).await;
+    assert_eq!(call(&w.api, "POST", &format!("{base}/deploys"), Some(json!({"image": "nginx:1.28", "override": true}))).await.0, StatusCode::BAD_REQUEST, "the header, never the body (roll-access reads the header)");
+    let r = Request::builder().method("POST").uri(format!("{base}/deploys")).header("content-type", "application/json").header("x-roll-override", "1").body(Body::from(json!({"image": "nginx:1.28"}).to_string())).unwrap();
+    let resp = w.api.clone().oneshot(r).await.unwrap();
+    let st = resp.status();
+    let d: Value = serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(st, StatusCode::ACCEPTED, "{d}");
     assert_eq!(settled(&w, &id, "production", d["id"].as_str().unwrap()).await["status"], "active");
     let (_, activity) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/activity"), None).await;
