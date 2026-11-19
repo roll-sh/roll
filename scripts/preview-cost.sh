@@ -427,6 +427,17 @@ TRACES=$(api GET "/v1/previews/$PV/traces" | jq_ "[(t['name'], t['spans'], t['er
 case "$TRACES" in *"('GET /checkout', 2, True)"*) ;; *) echo "the span posted should be the preview's trace: $TRACES"; exit 1;; esac
 ROUTES=$(api GET "/v1/previews/$PV/routes" | jq_ "[(r['name'], r['count']) for r in d['routes']]")
 case "$ROUTES" in *"('GET /checkout', 1)"*) ;; *) echo "the trace should be its route's: $ROUTES"; exit 1;; esac
+# A request that runs one query a row (an N+1): its route says the statement, literals taken out.
+N1=$(NOW_NS="$NOW_NS" python3 -c '
+import json, os
+now = int(os.environ["NOW_NS"]); t = "cd" * 16
+spans = [{"traceId": t, "spanId": "%016x" % 1, "name": "GET /orders", "startTimeUnixNano": str(now - 50000000), "endTimeUnixNano": str(now)}]
+spans += [{"traceId": t, "spanId": "%016x" % (i + 2), "parentSpanId": "%016x" % 1, "name": "SELECT", "startTimeUnixNano": str(now - 40000000 + i * 1000000), "endTimeUnixNano": str(now - 39500000 + i * 1000000),
+  "attributes": [{"key": "db.statement", "value": {"stringValue": "SELECT * FROM items WHERE order_id = %d" % i}}]} for i in range(12)]
+print(json.dumps({"resourceSpans": [{"resource": {"attributes": [{"key": "service.name", "value": {"stringValue": "web"}}]}, "scopeSpans": [{"spans": spans}]}]}))')
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' -d "$N1" "$OTEL_HERE/v1/traces")" = 200 ] || { echo "the N+1 trace should be taken"; exit 1; }
+REPEATED=$(api GET "/v1/previews/$PV/routes" | jq_ "[(r['repeated'] or {}).get('statement', '') + ' ' + str((r['repeated'] or {}).get('count', 0)) for r in d['routes'] if r['name'] == 'GET /orders']")
+[ "$REPEATED" = "['SELECT * FROM items WHERE order_id = ? 12']" ] || { echo "the route should say its repeated query: $REPEATED"; exit 1; }
 [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' -d '{}' "http://$API/v1/previews/$PV/otlp/not-the-token/v1/traces")" = 404 ] || { echo "another token should be 404"; exit 1; }
 
 say "a screenshot of the service (github.screenshot), once per head"
