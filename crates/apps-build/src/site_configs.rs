@@ -3,7 +3,8 @@
 //! rules, the same bounds and the same checks on where a rule may send a visitor). Read from the
 //! tree at plan time and appended to the site's own files in the image: the configs themselves
 //! never go into it (`netlify.toml` can hold build settings). What can't be said in those lines (a
-//! regular expression in a path, a condition, `has`/`missing`) is left out and named in
+//! regular expression in a path, a condition other than Country, Language or Cookie, `has`
+//! other than a cookie, `missing`) is left out and named in
 //! `skipped`, so a site moved from Vercel or Netlify says what it lost instead of losing it
 //! quietly.
 //!
@@ -46,11 +47,26 @@ pub fn from_netlify(text: &str) -> Converted {
             out.skipped.push("netlify.toml: a redirect without from and to".into());
             continue;
         };
-        if ["conditions", "query", "signed", "headers"].iter().any(|k| r.get(*k).is_some()) {
-            out.skipped.push(format!("netlify.toml: {from} → {to} (its conditions, query or signing)"));
+        if ["query", "signed", "headers"].iter().any(|k| r.get(*k).is_some()) {
+            out.skipped.push(format!("netlify.toml: {from} → {to} (its query, signing or headers)"));
             continue;
         }
-        out.redirects.push_str(&format!("{from} {to} {status}\n"));
+        // Its conditions as `_redirects`' (`Country=us,ca`): Country, Language and Cookie.
+        let mut when = String::new();
+        let mut unknown = false;
+        for (k, v) in r.get("conditions").and_then(|c| c.as_table()).into_iter().flatten() {
+            let values: Vec<&str> = v.as_array().map(|a| a.iter().filter_map(|x| x.as_str()).collect()).or_else(|| v.as_str().map(|s| vec![s])).unwrap_or_default();
+            if !["Country", "Language", "Cookie"].contains(&k.as_str()) || values.is_empty() || values.iter().any(|x| clean(x).is_none() || x.contains([',', '='])) {
+                unknown = true;
+                break;
+            }
+            when.push_str(&format!(" {k}={}", values.join(",")));
+        }
+        if unknown {
+            out.skipped.push(format!("netlify.toml: {from} → {to} (a condition other than Country, Language or Cookie)"));
+            continue;
+        }
+        out.redirects.push_str(&format!("{from} {to} {status}{when}\n"));
     }
     for h in doc.get("headers").and_then(|v| v.as_array()).into_iter().flatten().take(MAX_RULES) {
         let (Some(path), Some(values)) = (h.get("for").and_then(|v| v.as_str()).and_then(clean), h.get("values").and_then(|v| v.as_table())) else {
@@ -134,12 +150,25 @@ pub fn from_vercel(text: &str) -> Converted {
     };
     let rule = |r: &Value, what: &str, out: &mut Converted, status: u16| {
         let (source, dest) = (r["source"].as_str().unwrap_or(""), r["destination"].as_str().unwrap_or(""));
-        if r.get("has").is_some() || r.get("missing").is_some() {
+        // `has` a cookie is `Cookie=`; anything else of has/missing (a header, a query, a host,
+        // a value to match) isn't a `_redirects` condition.
+        let mut cookies = Vec::new();
+        for h in r["has"].as_array().into_iter().flatten() {
+            match (h["type"].as_str(), h["key"].as_str().and_then(clean).filter(|k| !k.contains([',', '='])), h.get("value")) {
+                (Some("cookie"), Some(k), None) => cookies.push(k),
+                _ => {
+                    out.skipped.push(format!("vercel.json {what}: {source} → {dest} (has other than a cookie)"));
+                    return;
+                }
+            }
+        }
+        if r.get("missing").is_some() || (r.get("has").is_some() && !r["has"].is_array()) {
             out.skipped.push(format!("vercel.json {what}: {source} → {dest} (has/missing)"));
             return;
         }
+        let when = if cookies.is_empty() { String::new() } else { format!(" Cookie={}", cookies.join(",")) };
         match vercel_source(source).and_then(|(from, rest)| Some((from, vercel_destination(dest, rest.as_deref())?))) {
-            Some((from, to)) => out.redirects.push_str(&format!("{from} {to} {status}\n")),
+            Some((from, to)) => out.redirects.push_str(&format!("{from} {to} {status}{when}\n")),
             None => out.skipped.push(format!("vercel.json {what}: {source} → {dest} (a pattern _redirects can't say)")),
         }
     };
@@ -192,7 +221,9 @@ mod tests {
         assert_eq!(v.redirects, "/old/:slug /new/:slug 308\n/blog/* https://blog.example/:splat 307\n/app/* /index.html 200\n/api/* service:api/:splat 200\n");
         assert_eq!(v.headers, "/assets/*\n  Cache-Control: public, max-age=31536000, immutable\n");
         assert_eq!(v.skipped, vec!["vercel.json redirect: /re/(\\d+) → /x (a pattern _redirects can't say)".to_string(), "vercel.json trailingSlash".to_string()]);
-        let n = from_netlify("[[redirects]]\nfrom = \"/docs/*\"\nto = \"/guide/:splat\"\n\n[[redirects]]\nfrom = \"/x\"\nto = \"/y\"\nconditions = { Country = [\"us\"] }\n\n[[headers]]\nfor = \"/*\"\n[headers.values]\nX-Frame-Options = \"DENY\"\n");
-        assert_eq!((n.redirects.as_str(), n.headers.as_str(), n.skipped.len()), ("/docs/* /guide/:splat 301\n", "/*\n  X-Frame-Options: DENY\n", 1));
+        let n = from_netlify("[[redirects]]\nfrom = \"/docs/*\"\nto = \"/guide/:splat\"\n\n[[redirects]]\nfrom = \"/x\"\nto = \"/y\"\nconditions = { Country = [\"us\", \"ca\"], Language = [\"en\"] }\n\n[[redirects]]\nfrom = \"/z\"\nto = \"/w\"\nconditions = { Role = [\"admin\"] }\n\n[[headers]]\nfor = \"/*\"\n[headers.values]\nX-Frame-Options = \"DENY\"\n");
+        assert_eq!((n.redirects.as_str(), n.headers.as_str(), n.skipped.len()), ("/docs/* /guide/:splat 301\n/x /y 301 Country=us,ca Language=en\n", "/*\n  X-Frame-Options: DENY\n", 1), "a Role= condition is left out");
+        let v = from_vercel(r#"{ "rewrites": [{ "source": "/beta/(.*)", "destination": "https://beta.example.com/$1", "has": [{ "type": "cookie", "key": "beta" }] }, { "source": "/x", "destination": "/y", "has": [{ "type": "header", "key": "x-a" }] }] }"#);
+        assert_eq!((v.redirects.as_str(), v.skipped.len()), ("/beta/* https://beta.example.com/:splat 200 Cookie=beta\n", 1));
     }
 }

@@ -29,30 +29,42 @@ environments that inherit from a base environment instead of copying it.
 
 Everything below works the same from the dashboard (a project's **Secrets**) and the CLI.
 
-1. **Pick a project and its environments.** A workspace project has `development`, `staging` and
+1. **Install the CLI and sign it in** to your roll. `roll login` opens the browser (or shows a code
+   to enter there, over SSH), and later commands go to that roll without `ROLL_API_URL` (with
+   several logins, to the one you signed in to last; `ROLL_API_URL` always wins). roll has no hosted
+   address yet, so give yours:
+
+   ```
+   curl -fsSL https://roll.sh/install.sh | sh
+   roll login https://roll.example.com
+   ```
+
+   The consent screen starts from the `development` preset, where revealing a value asks you first:
+   the first `roll run` prints where to approve it and waits.
+2. **Pick a project and its environments.** A workspace project has `development`, `staging` and
    `production` the first time you open its secrets. Add your own (`roll secrets envs add qa`) and
    remember the project for this directory:
 
    ```
    roll secrets setup -p shop -e development
    ```
-2. **Add values**, one by one or from a `.env` file (one change, which you can roll back):
+3. **Add values**, one by one or from a `.env` file (one change, which you can roll back):
 
    ```
    roll secrets set STRIPE_KEY=sk_test_… LOG_LEVEL=debug
    roll secrets import .env
    roll secrets set DATABASE_URL='postgres://app:${PASSWORD}@${staging.DB_HOST}/shop'   # references
    ```
-3. **Link roll resources** instead of pasting their credentials. A linked value follows the
+4. **Link roll resources** instead of pasting their credentials. A linked value follows the
    resource: a rotated password, a new key. In the dashboard, **Link a resource**: a Postgres
    branch's URL, a Redis URL, a bucket's own access key, a stream's API key, a search API key.
-4. **Run with them.** Nothing is written to disk; `--watch` restarts on a change:
+5. **Run with them.** Nothing is written to disk; `--watch` restarts on a change:
 
    ```
    roll run -- npm run dev
    roll run -e production --watch -- ./server
    ```
-5. **Promote** what changed from one environment to the next, and **protect** production so writes
+6. **Promote** what changed from one environment to the next, and **protect** production so writes
    become change requests someone else approves:
 
    ```
@@ -60,7 +72,7 @@ Everything below works the same from the dashboard (a project's **Secrets**) and
    roll secrets promote --from staging --to production STRIPE_KEY
    roll secrets envs protect production --approvals 1
    ```
-6. **CI and services** get a roll token (roll-access's, docs/permissions.md) with one rule on the
+7. **CI and services** get a roll token (roll-access's, docs/permissions.md) with one rule on the
    project: some environments, some folders and only the actions they need, with an expiry:
 
    ```
@@ -71,7 +83,7 @@ Everything below works the same from the dashboard (a project's **Secrets**) and
    Or push an environment out with a **sync** (GitHub Actions secrets, a sealed webhook, a deploy
    notification). roll's own checks (`secrets = "development"` in `roll.toml`), previews, apps and
    sandboxes read their environment directly.
-7. **From code**, a service reads its environment with `@roll/secrets` (`packages/secrets`) and the
+8. **From code**, a service reads its environment with `@roll/secrets` (`packages/secrets`) and the
    same token. `resolve` with `sealTo` returns the values sealed to a key only that process holds,
    and `watch` follows the digest and renews dynamic credentials' leases, as `roll run --watch` does:
 
@@ -176,7 +188,7 @@ Everything below works the same from the dashboard (a project's **Secrets**) and
    c = RollSecrets.from_env
    c.watch("production") { |v| reload(v.values) }
    ```
-8. **When something goes wrong**: `roll secrets history`, `roll secrets rollback --at 2h`, the
+9. **When something goes wrong**: `roll secrets history`, `roll secrets rollback --at 2h`, the
    audit log (`roll secrets audit`, or streamed to your SIEM), and `roll secrets share KEY` to hand
    one value to someone outside roll through a link that works once.
 
@@ -212,6 +224,27 @@ do. It speaks the same HTTP API as the CLI and the clients, with a roll token or
   (roles, group, CA; its admin URL `admin_url_wo` is write-only, Terraform 1.11+: sent once and
   sealed in roll, never in the state, and bumping `admin_url_wo_version` registers it again). roll
   changes none in place, so every attribute replaces them; keys link to them as to any resource.
+- **More of what a project registers**, each imported by `prj_…/<id>` (or the id alone, in the
+  provider's project). Credentials going in are write-only (Terraform 1.11+), with a `…_wo_version`
+  to send a new one:
+  - **`roll_secrets_rotator`**: its name and URL change in place (`PATCH`). A URL that carries a
+    token goes in `url_wo` (bump `url_wo_version` to send a new one, in place), never in `url`,
+    which is in the plan and the state. Its signing secret is shown once, so it's kept, sensitive,
+    in `secret` from creation. Changing `rotate_secret` (a keepers map) rotates it
+    (`…/rotate-secret`) and keeps the new one.
+  - **`roll_secrets_audit_sink`**: an HTTPS endpoint, or `bucket:`, `search:` or `stream:` on the
+    canvas. A SIEM `format` takes `token_wo`. A roll sink's signing secret is kept in `secret`.
+  - **`roll_secrets_github_app`**: `private_key_wo`, never returned.
+  - **`roll_secrets_aws_role`** and **`roll_secrets_aws_user`**: both change in place (`PATCH`),
+    except a user's IAM user name.
+  - **`roll_secrets_cloud_account`**: `cloud = "gcp"` or `"azure"`, with that cloud's fields.
+
+  Sinks, Apps and accounts have no `PATCH`, so every attribute replaces them.
+- **Project settings**, imported by `prj_…`:
+  - **`roll_secrets_required_keys`** owns the project's whole required list (`PUT …/required`), so
+    keep one per project; destroying it requires nothing.
+  - **`roll_secrets_kms_key`** is the customer-managed key (`PUT`/`DELETE …/kms`): a new ARN changes
+    in place, and destroying it unwraps the data key.
 - **Without values in the state** (Terraform 1.10 and 1.11+), as Vault's and AWS' providers allow:
   - **`ephemeral "roll_secrets_values"`** reads an environment for one run, never into the plan or
     the state; it feeds another provider's configuration or a write-only argument. Strict: a key
@@ -523,6 +556,9 @@ data key encrypts every value                     (aad "roll-secrets:v1:<project
   binds the ciphertext to roll secrets. Rotation works the same with `ROLL_SECRET_KEY_KMS_PREVIOUS`.
   If KMS can't decrypt it, every route answers 503 with KMS's error code (never key material), and
   health reports `"key": "kms"`.
+- **Split into shares.** `roll secrets key split` and `combine` hold the deployment key as N-of-M
+  shares, and rolld can start sealed and be unsealed by them, with the key never in its
+  environment or on its disk (see "Splitting the deployment key" and "Starting sealed").
 - **Key rotation.** Set the new key as `ROLL_SECRET_KEY` and the old one as
   `ROLL_SECRET_KEY_PREVIOUS`. A data key that opens only with the previous key is resealed with the
   new key on first use, so the previous key can be dropped once `GET /v1/secrets/health` reports
@@ -538,6 +574,98 @@ data key encrypts every value                     (aad "roll-secrets:v1:<project
   zeroized on drop. Error messages name keys, never values.
 - **Pending values** (change requests waiting for approval) are encrypted the same way, with
   `roll-secrets:request:<request id>:<n>` as the associated data.
+
+## Splitting the deployment key
+
+As Vault's Shamir unseal and recovery keys: the deployment key (or a backup's secret key) is split
+into shares held by different people, and any threshold of them give it back, so no one person
+holds it and losing one holder doesn't lose it. Fewer than the threshold reveal nothing about the
+key. It's a ceremony on an operator's machine: `roll secrets key` never talks to roll, and no
+share goes to rolld, the database or a log.
+
+```
+roll secrets key split --shares 5 --threshold 3 --file key        # or the key on stdin
+roll secrets key combine --out key                                 # shares on stdin, or asked for
+```
+
+- **The scheme.** Shamir's secret sharing over GF(2^8) (`crates/roll-keyshares`, with the FIPS-197
+  field vectors in its tests). A share is `rlks_` and base64url of the split's random id, the
+  threshold, the share's index, its bytes and a checksum. A mistyped or cut-short share, a share of
+  another split (an older one, or another key's) and a share given twice are each refused by name
+  (`share 2 is from a different split than share 1`). What's shared carries a check of the key, so
+  shares that don't belong together give an error, never a wrong key.
+- **Splitting.** `split` reads the key from `--file` (`<home>/secrets.key` on one node), else stdin,
+  asked for without echo on a terminal; from KMS, `aws kms decrypt … --query Plaintext --output text
+  | base64 -d | roll secrets key split …`. Surrounding whitespace isn't part of the key, as for rolld.
+  It prints one share per line, or writes `roll-key-share-N-of-M` files (0600) with `--out-dir`.
+- **Who holds them.** One share per person, each kept apart from the others and from the servers:
+  a password manager vault of their own, or a sealed envelope in a safe. Threshold 3 of 5 tolerates
+  two holders being away or gone. Record who holds which index, never a share, in the runbook.
+- **Recovering.** Any threshold of the holders run `combine` on one machine, each typing or pasting
+  their share when asked (nothing echoes; a bad share is refused and asked for again). The key goes
+  to stdout or `--out` (0600), from where it's set as `ROLL_SECRET_KEY` (or encrypted for
+  `ROLL_SECRET_KEY_KMS`) as usual: `ROLL_SECRET_KEY="$(roll secrets key combine)" rolld …`. Or
+  rolld starts sealed and holders give it their shares themselves (next section).
+- **Rotating.** Shares follow the key: after a rotation (see "Encryption"), split the new key and
+  have holders destroy the old shares once health reports `"resealed": all` and the previous key is
+  dropped. A new split has a new id, so an old share mixed into it is refused, not misread.
+- **Backups without the one holder.** A backup opens only with its secret key (see "Backup and
+  restore"); split that key the same way, so any threshold of holders restore it:
+  `roll secrets keygen --out k && roll secrets key split --shares 5 --threshold 3 --file k --out-dir
+  shares && rm k`, then at restore time `roll secrets key combine --out k` and `restore … --key k`.
+
+### Starting sealed
+
+As Vault's Shamir unseal: with `ROLL_SECRET_KEY_SEALED` instead of `ROLL_SECRET_KEY`, rolld starts
+without the deployment key, and holders give it their shares over the API until it has a
+threshold of them. The key is then only in rolld's memory: never in its environment, a file or a
+log.
+
+```
+ROLL_SECRET_KEY_SEALED=3f9c0a1b2c3d4e5f:3 rolld …   # as `roll secrets key split` prints it
+roll secrets unseal --status                          # sealed, 0 of 3 shares
+roll secrets unseal                                   # each holder: their share, without echo
+```
+
+- **What runs while sealed.** Nothing but the unseal: no product starts, nothing is opened with the
+  key, and every other route (health included, so load balancers keep the node out) answers 503
+  `{"sealed": true}`. `ROLL_SECRET_KEY_SEALED` is `<split id>:<threshold>`: naming the split
+  means only its shares count, whoever posts first. It can't be set beside `ROLL_SECRET_KEY`,
+  `ROLL_SECRET_KEY_KMS` or their `_PREVIOUS`: finish a rotation (health reports `"resealed": all`)
+  before starting sealed, and split the new key.
+- **Unsealing.** `POST /v1/secrets/unseal {"share": "rlks_…"}` takes one share and answers the
+  progress, `{"sealed": true, "have": 1, "need": 3}`; `GET` answers the same without a share. No
+  answer or log carries a share. `roll secrets unseal` reads the share without echo on a terminal
+  (else a line on stdin) and posts it; `--status` only asks. A mistyped or damaged share is
+  refused, and the others stay. A share of another split drops every share given so far, and so
+  does a threshold whose shares don't combine or whose key isn't the store's: the holders start
+  over, and the log says why (never with a share).
+- **The key is checked against the store.** roll secrets records the deployment key's id (the
+  12-hex-character id customer-wrapped keys already carry, which reveals nothing of the key) each
+  time it opens with a key that opens its data, and a rotation moves it on. The combined key must
+  be the one recorded, or open a project's data key. A store with nothing to check against yet (a
+  new one) takes the first key whose split `ROLL_SECRET_KEY_SEALED` names.
+- **Who may unseal.** The route needs no token (it's public in rolld's gate): before the key exists
+  there's nothing to authenticate against, so the shares are the credential, as in Vault. One
+  address may post 10 shares a minute; a split may fail 5 times an hour (failures are kept in the
+  store, so a restart doesn't clear them, and every node of a fleet counts them together), and
+  then answers 429 with `Retry-After`. Shares given wait 10 minutes at most, in memory only, and
+  are zeroized when dropped. A sealed node's API is still only reachable where its address is
+  (the edge's public listeners don't start until it's unsealed): give holders that address, not a
+  public one.
+- **Then.** Every product starts as it does with `ROLL_SECRET_KEY`, given the key in memory: roll
+  secrets (health reports `"key": "shares"`), and the products that seal with it, roll apps'
+  variables, roll search's cluster secrets, the edge's certificates, the audit log's sinks, roll
+  code's reviewer keys, chat tokens and sandboxes, and accounts' authenticator seeds. The API keeps
+  its port throughout: connections made while the products start wait for them.
+- **A fleet.** Each node unseals on its own, as Vault's do: `roll secrets unseal --node
+  http://10.0.1.5:7070 --node http://10.0.1.6:7070 …` gives one holder's share to every node at
+  once. Unsealed nodes don't pass the key to sealed ones: whatever authenticated that hand-off (the
+  cluster secret, in every node's environment) would then be worth the key itself.
+- **A restart starts sealed again.** Nothing of the key or the shares outlives the process, so
+  every restart (a deploy, a crash, a rolling upgrade, one node at a time) needs a threshold of
+  holders again. Where that's too much for routine restarts, KMS (`ROLL_SECRET_KEY_KMS`) is the
+  unattended choice, with the shares kept for recovery.
 
 ## Model
 
@@ -936,7 +1064,8 @@ is one click.
 
 `GET …/health` (`roll secrets health`, the dashboard's Health view) is every finding above in
 every standard environment and folder at once, worst first, so none waits on someone opening the
-right folder: `expired`, `rotation_failing` (a managed key's scheduled rotation fails: the
+right folder: `decoy_used` (a decoy key's token was used; only the project's admins see it, see
+Decoys), `expired`, `rotation_failing` (a managed key's scheduled rotation fails: the
 database, vendor, product or rotator refused or didn't answer; the detail says why, the old
 credential keeps working, and the sweeper tries again; cleared by the next rotation that works),
 `revoke_failing` (a credential roll retired, or a lease that ended, that it couldn't revoke yet: it
@@ -944,13 +1073,10 @@ still works until roll can; cleared once it does; `GET …/rotations`, `roll sec
 the Health view's "Managed credentials" list every managed credential with its schedule and last
 failure; `roll secrets rotations --rotate-due 7` rotates every one due within a week, or failing,
 in one run, for an operator's maintenance window, and fails if one does), `missing` (a required key an environment doesn't define, through its
-imports and base), `exposed` (a protected value also in an unprotected environment), `weak`,
-`expiring`, `certificate_expiring` (a certificate a project CA signed for a CSR that ends
+imports and base), `exposed` (a protected value also in an unprotected environment), `public`,
+`weak`, `expiring`, `certificate_expiring` (a certificate a project CA signed for a CSR that ends
 within two weeks: links' certificates are replaced by roll, a CSR's only by whoever asked; `key` is
 its names, `path` its CA), `stale`, then `unread` (nobody revealed, exported, resolved or synced it in 90 days,
-right folder: `expired`, `missing` (a required key an environment doesn't define, through its
-imports and base), `exposed` (a protected value also in an unprotected environment), `public`,
-`weak`, `expiring`, `stale`, then `unread` (nobody revealed, exported, resolved or synced it in 90 days,
 and it's older than that). Each `Finding` names the environment, folder and key where it's set,
 with a detail (the other environments, the reason, the date): never a value, and nothing is
 decrypted. Only what the caller may read is listed, and `weak` only where it may reveal.
@@ -1078,6 +1204,7 @@ and in the table below.
 | `stream` | `bootstrap`, `security_protocol` | an API key, credential `key`: `username`, `password`, `properties` | no |
 | `bucket` | `bucket`, `endpoint`, `region` | an access key limited to the bucket, credential `key`: `access_key_id`, `secret_access_key` (option `permission` `read`, `write` or `admin`) | no |
 | `nosql` | `cql`, `username`, `password`, `http_token`, `alternator` | no | yes: a new password |
+| `queue` (a roll queues vhost, by name) | `host`, `port`, `vhost` | a user of its own on that vhost only, credential `user`: `url` (the AMQP URL with it), `username`, `password` (`PUT /v1/queues/users/{name}` with no tags, so no management sign-in, then `PUT /v1/queues/permissions/{vhost}/{name}`; option `permission` `read` (consume), `write` (publish and consume) or `configure`, the default: also declare and delete queues, exchanges and bindings). Rotating makes a new user and deletes the old one after the grace; revoking deletes it, which closes its connections. roll queues enforces no expiry of its own: a dynamic user lives until its lease is revoked | no (the vhost's own user is never readable: `…/credentials` shows a password once) |
 
 Secrets of one environment linked to the same resource and credential share one issue: linking
 `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` gives one access key, and rotating either rotates
@@ -1093,8 +1220,9 @@ a credential never drops data.
 `search` resources are linkable once roll search's workspace kind lands (`feature/roll-search`).
 roll apps' services have a workspace kind (`service`, `svc_…`); they consume secrets (an app's
 variables, `app:<svc>`) rather than issue credentials, so they have no link provider. Products
-without a workspace kind yet (queues, tasks) join by adding their kind to the workspace and
-registering a provider.
+without a link provider yet (tasks) join by registering one. Queues have no owners, so a person's
+project stands for a queue only when the person is an admin (`Workspace::trusts`), as for
+Postgres, Redis, streams, buckets and NoSQL.
 
 ### Rotators
 
@@ -2427,14 +2555,15 @@ roll secrets set     KEY --generate 48                          # a random value
 roll secrets health                                            # every finding, every environment, worst first
 roll secrets doctor                                            # this machine's setup, checked
 roll secrets check   [.env.example] [--strict]                # keys a template names that the environment lacks
-roll secrets scan    [PATH…] | --staged                       # this project's values in files: where, never what
+roll secrets scan    [PATH…] | --staged [--allow-unstored]    # this project's values and credentials it doesn't hold: where, never what
+roll secrets scan    --store [KEY=]FILE:LINE                   # move one such credential in; prints what to write instead
 roll secrets render  config.tpl [--out config.yml [--watch --exec CMD]]   # ${KEY} filled in
 roll secrets export  [--format dotenv|json|shell|yaml|docker|kubernetes] [--name N --namespace NS]
 roll secrets envs    ls | add NAME [--base ENV --ephemeral] | rename OLD NEW | rm NAME | order A B C
 roll secrets history [KEY]   roll secrets rollback --to SEQ | --at TIME
 roll secrets diff    --from development --to staging | --file .env   # two environments, or a local copy
 roll secrets promote --from development --to staging [KEY…]
-roll secrets audit   [--key KEY] [--format csv|jsonl]
+roll secrets audit   [--key KEY] [--format csv|jsonl] | verify [--since TIME] [--file F --jwks F]
 roll secrets syncs   ls | add KIND --target name=value… | run ID | rm ID
 roll secrets sinks   ls | add URL [--from-start] [--format splunk|datadog|bearer] (token on stdin) | rm ID
 roll secrets purge   KEY [--before N]        roll secrets retention 365|forever
@@ -2628,6 +2757,53 @@ unresolved reference or a dynamic credential fails the deploy, saying which. It 
   data `roll-secrets:<project>:<env>:<consumer>`), so the values are never in the clear outside the
   process that holds the private key. Without `seal_to` it is plain JSON over the internal API.
 
+### roll search's inference endpoints
+
+A roll search cluster's inference endpoint (the model a `semantic_text` field embeds with, a
+reranker, a completion) can take its provider key from a key of the project whose canvas holds the
+cluster, instead of a key pasted into it: the Inference tab's "A roll secret", or
+`roll search inference create … --secret OPENAI_API_KEY` (`--environment`, or a
+`roll://ENV[/folder]/KEY` reference). Rotating the key then updates every endpoint keyed by it.
+
+- `POST /v1/search/clusters/{id}/inference/secrets` `{inference_id, task_type?, config, secret:
+  {project?, environment, path?, key}}` (`config`: the `_inference` body without
+  `service_settings.api_key`; `project` only when the cluster is on several canvases) reads the key
+  as the caller (`reveal`, audited `secrets.reveal`; a protected environment's rules apply, a
+  sensitive key is refused, and so is a dynamic credential, which ends with its lease), creates the
+  endpoint with it through the cluster's own `_inference` API (which seals it, as any key), and
+  makes a `search-inference` sync as the caller. The route needs `admin` on the cluster (it changes
+  the cluster as the console does) and the project must stand for the cluster
+  (`Workspace::trusts`). `GET` on the same route lists the endpoints that follow a secret and the
+  projects whose secrets may key one.
+- The sync pushes the key whenever its value changes (the sweeper; `POST …/syncs/{id}/run` pushes
+  it now, the tab's refresh), as its maker. It pins where the endpoint sends the key: a SHA-256 of
+  canonical JSON of its service, task type, service settings (all but `api_key`, `rate_limit`,
+  `num_allocations` and `adaptive_allocations`: a URL, an Azure resource and deployment, a target,
+  a host) and all of its task settings (they can carry headers, and `custom`'s request). On any
+  difference the push refuses, so someone who may change the cluster but not reveal the key can't
+  recreate or repoint the endpoint and wait for the next rotation; creating it again from the
+  Inference tab binds it anew. One window stays: the endpoint recreated in the milliseconds
+  between the push's check and its `_update`, which calls the service with the key before it
+  answers. The push compares the answer's pin too, so that case fails loudly (an error log line
+  and the sync's error say to rotate the key) rather than passing unseen. Its errors name
+  the endpoint and Elasticsearch's error type, never the provider's message (it can quote part of
+  a key).
+- The secret is the endpoint's `api_key`, so it keys the services that take one (OpenAI, Azure
+  OpenAI by key, Cohere, Anthropic, Google AI Studio, Mistral, Voyage AI, Jina AI, DeepSeek, Hugging
+  Face). A service with other credentials (Amazon Bedrock's access keys, Vertex AI's service
+  account) refuses an `api_key` when the endpoint is made (`unknown to the [service] service`), so
+  no sync is made; the tab offers "A roll secret" only for the others.
+- Deleting the endpoint from the tab deletes its sync; one deleted another way leaves the sync,
+  whose next push says the endpoint is gone. Deleting the key leaves the endpoint its last value.
+- The sync names the cluster by its id (`srch_…`, never a name: a name has no `_`) and pushes
+  through roll search's control plane (`/v1/search/clusters/{id}/request`, on the cluster's owner
+  on a fleet), not the cluster's endpoint, so its Basic auth user and IP allowlist don't apply. A
+  deleted cluster (kept for restoring or not) is no cluster: a push fails, the sync shows the
+  error and keeps its last digest, and nothing goes out. A restore, under its own name or another,
+  keeps the id, so the next try (or `POST …/syncs/{id}/run`) pushes the current value to it; a
+  cluster that took the old name never gets it.
+  The Elasticsearch `_inference` API is unchanged: clients there send keys.
+
 ### Checks, sandboxes and previews
 
 - **Checks**: `secrets = "development"` (or `"staging:/api"`) on a `[checks.<name>]` table in
@@ -2709,6 +2885,67 @@ the change`. The blocker names keys and environments, never the value or the lin
   admin lands with `bypass` (on a queue repo, the queue bypass; on a direct-land repo, the bypass of
   review rules, which now covers `secret_leak` too), audited as `secret_leak_bypass`.
 
+#### Credentials roll doesn't hold
+
+The check above only knows values roll secrets already holds, so a newly pushed AWS or Stripe key
+would land silently. The same pass also looks for credentials by their shape, as GitHub's push
+protection and GitGuardian do, with roll's shared detectors (`roll_auth::credentials::find_all`):
+AWS access keys, GitHub, Slack, Stripe live, Google, Anthropic and OpenAI keys, PEM private keys
+(the whole block, which may span lines) and roll's own checksummed tokens.
+
+- **What is checked.** Each run of lines the change adds since its merge base (O(change), with the
+  limits above: no binary files, files over 1 MiB or lines over 4 KiB). A match counts when roll
+  secrets doesn't hold it (it's matched by fingerprint with the candidates; one roll holds is a
+  `secret_leak`), it isn't obviously a placeholder, and the repo's allow-list doesn't keep it. At
+  most 200 are kept per change; the first 20 are shown and one more line counts the rest. Without
+  roll secrets on the server it still runs, and nothing counts as stored.
+- **What it says.** A `secret_unstored` notice on the change ("Worth knowing"), naming the kind,
+  file and line, never the value: `adds what looks like an AWS access key at deploy.py:2, which roll
+  secrets doesn't hold: store it as AWS_ACCESS_KEY_ID (roll secrets scan --store
+  AWS_ACCESS_KEY_ID=deploy.py:2) and read it with os.environ["AWS_ACCESS_KEY_ID"], or allow it in
+  .roll/secrets-allow`. It carries `path`, `line` and `fingerprint`. The key's name comes from the
+  variable the value is assigned to on its line (`const stripeKey = "…"` gives `STRIPE_KEY`; a
+  generic `token:` holding a GitHub token gives `GITHUB_TOKEN`), else from its kind; the read is the
+  file's language's (`process.env.X`, `os.environ["X"]`, `std::env::var("X")`, `os.Getenv("X")`,
+  `ENV["X"]`, `System.getenv("X")`…, `${X}` for configuration).
+- **Blocking.** A repo makes it a blocker in `roll.toml` on its default branch's head (never the
+  change's):
+
+  ```toml
+  [secrets]
+  unstored_credentials = "block"   # default "warn": a notice
+  ```
+
+  An admin `bypass` lands over it, as over `secret_leak`, audited as `secret_unstored_bypass`.
+  Blocking fails closed: while roll secrets can't say which values it holds, every credential
+  counts as unstored (tried again at the next look), and a change whose diff can't be read is
+  blocked with "couldn't check this change for credentials".
+- **The placeholder rule** (`credentials::placeholder`). With the match's known prefix (`sk_live_`,
+  `AKIA`, `ghp_`…) set aside, it's a placeholder when a part of it (split at `_` and `-`) starts or
+  ends with `example`, `fake`, `dummy`, `test`, `sample`, `placeholder`, `redacted` or `changeme`
+  (any case), or when it repeats one character 8 times in a row (`sk_live_xxxxxxxx…`). AWS's
+  documented `AKIAIOSFODNN7EXAMPLE` never matches at all, and values like `x`, `***`, `<your key>`
+  or `${KEY}` don't have a credential's shape. A private key's block is never a placeholder (its
+  base64 repeats `A`): allow test keys instead.
+- **The allow-list.** `.roll/secrets-allow`, read from the default branch's head for landings and
+  from the working tree's top for `roll secrets scan`. One entry a line, `#` starts a comment: a
+  fingerprint (`sha256:` and the first 24 hex digits of the value's SHA-256, as the notice and the
+  scan show it) keeps that value anywhere; anything else is a path glob, matched with roll code's
+  shared table (`*` within a segment, `**` across segments, no `/` matches the name at any depth)
+  and keeping every match in those files. At most 64 KiB and 1,000 entries are read.
+
+  ```
+  # test fixtures
+  tests/fixtures/**
+  *.pem
+  sha256:3f7c0a9e1b2d4c6e8f0a1b2c
+  ```
+- **The fix offered.** `roll secrets scan --store [KEY=]FILE:LINE` (below) reads the value from the
+  file on the author's machine, sets it as a new key of the folder's environment and prints the
+  line to write instead; roll never rewrites the change. Storing it from the change page (roll
+  reading the value from the change's blob into the project the repo is trusted for) isn't built
+  yet: the notice names the CLI command.
+
 #### Keys a change starts reading
 
 The same pass over the lines a change adds also picks out the environment variables they read, by
@@ -2743,6 +2980,21 @@ exec roll secrets scan --staged
 
 A scan only names values its caller may reveal, and among personal values only the caller's own:
 otherwise it would confirm guesses at values the caller can't read. Each scan is audited (`secrets.scan`, the keys it found).
+
+It also lists credentials the project doesn't hold ("Credentials roll doesn't hold" above: the same
+detectors, placeholder rule and `.roll/secrets-allow`, read from the working tree's top), as
+`file:line  an AWS access key, not in roll secrets: roll secrets scan --store AWS_KEY=deploy.ts:2
+[sha256:…]` (`--json`: `{file, line, unstored: true, kind, fingerprint, suggested_key}`). A plain
+scan only reports them; `--staged` refuses the commit unless `--allow-unstored`. To move one in:
+
+```
+$ roll secrets scan --store deploy.ts:2            # or --store AWS_KEY=deploy.ts:2 to name it
+Stored an AWS access key from deploy.ts:2 as AWS_KEY in production:/
+Replace it with process.env.AWS_KEY (roll run puts AWS_KEY in the environment), and rotate it if it was ever pushed
+```
+
+The value is read from the file, never typed or pasted, and goes in one change to the folder of
+`-e`/`roll secrets setup`; a key that's already there is refused, never overwritten.
 
 ### A local copy against the environment
 
@@ -2786,6 +3038,47 @@ roll secrets import --from aws --source prod/shop/ -e production      # your aws
   CLI's output, never on a command line.
 - Checked against Vault 1.20 (a three-level tree into three folders) and Secrets Manager on
   LocalStack (a JSON secret, a plain one, and one outside the prefix left alone).
+
+Through the manager's own CLI, signed in as you already are there (its profiles, SSO or service
+account token), never through roll's server:
+
+```
+roll secrets import --from 1password --source Prod -e production             # op: every item of the vault
+roll secrets import --from 1password --source "Prod/Main DB" -e production   # one item's fields
+roll secrets import --from bitwarden --source <project id> -e production     # bws (BWS_ACCESS_TOKEN)
+roll secrets import --from aws-parameter-store --source /prod/shop -e production --sensitive
+roll secrets import --from gcp --source my-project/prod- -e production       # gcloud
+roll secrets import --from azure --source shop-prod-kv -e production         # az
+roll secrets import --from akeyless --source /prod/shop -e production
+```
+
+| `--from` | Reads | Keys |
+| --- | --- | --- |
+| `1password` | `op item list --vault V`, then `op item get ID --reveal` per item | `VAULT`: `ITEM_FIELD` (`Main DB` + `password` → `MAIN_DB_PASSWORD`; a named section adds itself, `MAIN_DB_REPLICA_PORT`). `VAULT/ITEM`: `FIELD`. Words are uppercased, runs of anything else one `_`. Every field with a value comes in, since `op run` and `op inject` reference any field (`op://Prod/Main DB/username`), except notes and one-time passwords; concealed fields are the secret ones. |
+| `bitwarden` | `bws secret list PROJECT_ID` | Bitwarden's own keys, as they are; one that isn't a roll key stops it, naming the secret. Two secrets with one key (Bitwarden allows it) stop it. |
+| `aws-parameter-store` | `aws ssm get-parameters-by-path --path P --recursive --with-decryption` | The path under `--source` is the folder under `--path` and the last segment the key (`/prod/shop/db/password` → `/db`, `PASSWORD`), one change per folder, as Vault's `--recursive`. A folder segment that can't be a roll folder stops it. SecureStrings are the secret ones. |
+| `gcp` | `gcloud secrets list --project P`, then `gcloud secrets versions access latest` per secret | Each secret whose id starts with the prefix, named after the rest of its id (`prod-db-url` under `prod-` → `DB_URL`). One with no version is left out, named; so is a binary one. |
+| `azure` | `az keyvault secret list --vault-name V`, then `az keyvault secret show` per secret | `db-url` → `DB_URL`: the azure-key-vault sync's `_` → `-` in reverse (Key Vault's names are case-insensitive, so two can't give one key). Disabled secrets and the ones backing certificates are left out, named. |
+| `akeyless` | `akeyless list-items --path P --type static-secret`, then `akeyless get-secret-value` per item | As Parameter Store: folders from the path, the last segment the key (`/prod/shop/api-key` → `API_KEY`). |
+
+- Unless a row says otherwise, a name becomes a key uppercased, any other character `_`, a leading
+  digit after a `_`, as `--from aws` does.
+- Every one keeps the guarantees above: at most 500 secrets (more stops it: import a narrower
+  `--source`); each CLI's answer read up to 16 MiB and killed after 60 s; a secret the CLI can't
+  read stops it, naming it and the CLI's error (only the manager's "not found" is nothing there);
+  two secrets that give one key stop it, naming both. Everything is read before anything is
+  written, so a stopped import writes nothing.
+- Names go on the CLI's command line, never values: values come back on its output only, and no
+  error or line `roll` prints holds one.
+- `--dry-run` (any `--from`) prints the folders and keys it would import, never a value, and
+  imports nothing. Then the import is one change per folder, refused or opened as a change request
+  where the folder is protected, as any other import.
+- `--sensitive` (any `--from`) tags what the source keeps secret `sensitive`: Parameter Store's
+  SecureStrings and 1Password's concealed fields, and every value of the other managers. It's
+  opt-in because sensitive is for good: no person or token reads the key back, `roll run` leaves it
+  out, and the tag never comes off ("Sensitive keys").
+- Checked against each vendor's documented output only (fakes in
+  `crates/roll-cli/tests/secrets.rs` print those shapes), not against real accounts.
 
 `--map dev=development,stg=staging,prd=production` does a whole project: each `<source>/<name>` (a
 Doppler config, a Vault path, an Infisical environment) into its roll environment, one change
@@ -2842,6 +3135,9 @@ required keys. The archive is sealed to that key (`roll-seal-v1`, associated dat
 opens it; `POST …/backup {recipient}` (admin, audited `project.backup`) is the call. Linked keys
 carry their link and no value: a restore issues its own credentials. Personal values, history,
 leases, tokens and identities aren't in it.
+So that a backup restores without the one person who holds its secret key, split that key into
+shares (`roll secrets key split --file roll-secrets-backup.key`; see "Splitting the deployment
+key").
 
 Environments → Backup downloads the same file from the dashboard, sealed to a public key pasted
 there: the browser never holds the secret key.
@@ -2901,6 +3197,59 @@ would go, so it carries the shape of the configuration and no value.
   too (their digests), and renew each dynamic credential's lease at its own project.
 - A dotenv file is one `KEY=value` per line (quoted values on one line; a quote that runs past its
   line is refused), and its errors name the line, never its text.
+
+### Other roll products
+
+A roll product that needs an outside credential takes a `roll://ENV[/folder]/KEY` reference
+where it would otherwise keep its own sealed copy, so the value lives once, in roll secrets, and
+a rotation reaches the product without anyone pasting it again (as 1Password's `op://` and Vault
+Agent's templates do).
+
+- **Which products.** roll storage's replication targets to buckets outside roll: the access key
+  id and the secret (`POST /v1/storage/replication-targets` with
+  `"secret_access_key": "roll://prj_…@production/AWS_SECRET_ACCESS_KEY"`). A target's references
+  name their project by its `prj_…` id: the bucket replicating only proves which projects stand
+  for it, so without one, anyone who may set another bucket's replication could point it at the
+  target and have roll sign for the target's endpoint with that bucket's project's credential. Search snapshot
+  repositories, roll code's reviewer provider keys and the agents' gateway upstreams still keep
+  sealed copies.
+- **Who reads it.** The product asks rolld in process (`Secrets::resolve_for(resource,
+  reference)`), naming the workspace resource that needs the value: a replication target
+  resolves for the source bucket that replicates through it. The project is the one whose canvas
+  holds that resource *and* that stands for it (`Workspace::trusts`): a person's canvas only
+  for what's theirs, never membership alone. A reference names a project
+  (`roll://PROJECT@ENV/KEY`) only if it's that one, and several such projects need it named.
+  Why one doesn't resolve stays in rolld's log: storage tells an S3 client setting a bucket's
+  replication only that the target's credentials don't resolve, never "protected" or "no such
+  key", which would say which keys exist where.
+- **Protected environments.** As a roll apps service reads its own environment: a resource its
+  project stands for reads as that project's runtime, protected environments and sensitive keys
+  included. An ephemeral environment that isn't trusted never reaches a protected one (its base,
+  an import or a reference), and what only comes from there is refused as protected. A dynamic
+  credential is refused: a product keeps its connection past any lease.
+- **Untrusted copies.** A product passes `ResourceRef::untrusted()` for a resource that keeps
+  another's id but whose code or data didn't come through that resource's owner: a branch (roll
+  search's branches keep their cluster's id), a copy or a clone, anything like a preview. It then
+  reads as checks, sandboxes and previews do (`Secrets::untrusted`, not a runtime): a protected
+  environment, or a key only one holds, is refused as protected, and a sensitive key as can't be
+  used. The hint only narrows; nothing widens a resource past its project's runtime. A restore of
+  the resource itself (its own snapshot or backup, back into it) stays trusted.
+- **Audit.** Every read is `secrets.resolve` by the resource, named `<product>:<kind>:<ref>`
+  (`storage:bucket:photos`, `search:search:logs (untrusted)` for an untrusted copy), with the one
+  key read.
+- **Refusals** say which part failed, never the value: no project, not trusted, no such key,
+  protected, or can't be used (a dynamic credential, a sensitive key for an untrusted reader, a
+  reference inside the value that doesn't resolve). `Secrets::digest_for` refuses exactly what
+  the resolve would.
+- **Rotation.** Nothing is cached across calls in roll secrets. A product keeps what it built
+  (storage: one client per target and source bucket) while the folder's digest
+  (`Secrets::digest_for`, no value, not audited) stays the same, and resolves again when it
+  moves, so the next connection after a change in roll uses the new value. A reference that stops
+  resolving fails visibly where the product works (storage: replication waits and retries, with
+  why in its log), and nothing is dropped.
+- **Who may write one.** Storage takes references in a replication target only from the operator
+  (its token, an admin's session): a scoped token that manages targets could otherwise point a
+  reference at any key the bucket's project holds and send it to an endpoint it chose.
 
 ### Templates
 
@@ -3017,6 +3366,12 @@ last_synced_at, error}`:
   `DB_URL: ${staging.X} doesn't exist`. A failed push keeps the previous `last_digest` and is tried
   again after 5 minutes. Deleting a sync leaves what it pushed at the target. Deleting its
   environment or project deletes the sync.
+- **A product's own kinds** (`SyncTarget::internal`: `search-inference`) are made by that
+  product's route (`Secrets::create_product_sync`), never `POST …/syncs` (400), and aren't offered
+  in `GET …/syncs`'s `kinds`; they're listed, run and deleted like any sync. The product checks its
+  own side (roll search: who may change the cluster), and `reveal` on the folder is enough to make,
+  run or delete one, as reading the value and pasting it there would be; `admin` may delete one
+  too (it doesn't include `reveal`, and stopping a sync sends nothing).
 - **Who.** Creating, deleting and running a sync need `admin` on its environment: it sends values
   out of roll. Listing needs `read` and shows the syncs of environments the caller can read.
 
@@ -3032,6 +3387,7 @@ last_synced_at, error}`:
 | `azure-key-vault` | `{vault, tenant_id, client_id, client_secret_key}` | one Key Vault secret per key (`_` becomes `-`) |
 | `azure-devops` | `{organization, project, group, token_key}`, or `tenant_id, client_id, client_secret_key` instead of `token_key` | an Azure Pipelines variable group's variables, all secret |
 | `aws-secrets-manager` | `{region, secret_name: "shop/production", access_key_id_key, secret_access_key_key, kms_key_id?}` | one Secrets Manager secret: the environment's values as a JSON object |
+| `search-inference` | `{cluster, endpoint, service, pin}` (made by roll search, see "roll search's inference endpoints") | one key: a roll search inference endpoint's `api_key` (`PUT _inference/{task}/{endpoint}/_update`) |
 | `supabase` | `{project_ref, token_key}` | a Supabase project's Edge Function secrets |
 | `cloudflare-pages` | `{account, project, environment: "production" \| "preview", token_key}` | a Pages project's environment variables, as `secret_text` |
 | `azure-app-configuration` | `{store, label?, prefix?, tenant_id, client_id, client_secret_key}` | one App Configuration key-value per key, `<prefix><KEY>` under `label` |
@@ -3295,7 +3651,7 @@ metadata:
   labels:
     external-secrets.io/type: webhook   # ESO reads only labelled Secrets
 stringData:
-  token: rlst_…                         # roll secrets -p shop tokens create k8s --for-env production
+  token: rlt_…                          # roll secrets -p shop tokens create k8s --for-env production
 ---
 apiVersion: external-secrets.io/v1
 kind: SecretStore
@@ -3429,7 +3785,8 @@ pub trait Grants: Send + Sync + Debug {
 ```
 
 It is the operator (`Everything`), a roll-access grant (`GrantGrants`, for `rlt_…` tokens and
-`rlo_…` OAuth connections: `ask` inside the product is a no), or one of the project's own tokens.
+`rlo_…` OAuth connections: `ask` inside the product is a no). A project's token is such a grant
+with one secrets rule (`POST /v1/access/tokens`), and a workload identity's login is a `workload` grant.
 
 Secrets accepts the operator (`roll_auth::Operator`, or any request when rolld has no operator
 token), signed-in people on their own projects (below), and roll-access's grants: there is one
@@ -3512,12 +3869,77 @@ credentials as the tokens list does. Names and metadata only, never a value:
   a `${…}` or `roll://` reference in another key are recorded where they happened and aren't
   counted: the answer says so (`uncounted`).
 
-roll-access's grants (`rlt_`, OAuth) aren't listed yet: they're rolld's (#30).
+Who could lists roll-access's live tokens (`rlt_…`) by what each may do here, and workload identities
+by their identity rather than each login. OAuth connections (`rlo_…`) aren't listed yet.
 
 Measured (release, 2026-11-14, `examples/bench.rs`, load average about 52): at its cap, 300 folders
 importing production (it follows 256), each read once, reach takes 5–7 ms on SQLite and 120–150 ms
 on Postgres. The audit is read once per project and filtered in memory (it was a query per folder:
 55–89 ms and 254–302 ms); what's left on Postgres is the walk's two queries per folder.
+
+### Decoys
+
+A decoy key (a honeytoken, as GitGuardian's are) is a credential made to be found. It's stored
+where an intruder would look, and any use of it raises an alert. `POST …/environments/{env}/decoys
+{key, kind, path?}` (`roll secrets decoy add KEY --kind rlt [--path /ci]`, the folder's menu
+"Add a decoy…") makes a new key whose value is a decoy credential:
+
+- **`rlt`**: a roll token that roll-access made as a decoy (docs/permissions.md, "Decoy tokens").
+  It allows nothing, whatever its rules say. Any use is refused as an unknown token is, so whoever
+  holds it learns nothing. roll-access records the use on the token, writes its own audit row,
+  mails the decoy's owner (whoever planted it) and the admins, and tells roll secrets
+  (`Access::on_decoy`). roll secrets keeps no token store: rolld mints the decoy through
+  `Workloads::mint_decoy`.
+- `postgres` and `aws` aren't here yet. A Postgres decoy needs roll Postgres to report a role's
+  login attempts, which its proxy doesn't do: it relays the SCRAM exchange to the database
+  untouched. An AWS decoy needs an AWS account and CloudTrail.
+
+The key is an ordinary change (as a `PUT` of the key makes), so it reads, resolves, exports and
+syncs like any other key. Only the project's admins (`admin` over the whole project) see that it's
+a decoy:
+- the `decoy` on `Secret` in the folder's list (the dashboard's "decoy" badge, and "used N×" in
+  red once it's been used);
+- `decoy_used` in health;
+- its rows in the audit log (`secrets.decoy` when it's planted, `secrets.alert.decoy_used` on each
+  alert).
+
+Everyone else gets the same answers as for any key, without those fields and rows. Nothing marks it
+in the grid, reach or a sync's target: syncing a decoy into CI, or exporting it into an old config,
+is the point. In a protected environment it lands without a change request. It changes no value
+anyone has, and only an admin (who could lift the protection) may plant one.
+
+**What to plant where.** Put it somewhere only an intruder reads, under a name a real credential
+would have (`LEGACY_DEPLOY_TOKEN`, `ROLL_ADMIN_TOKEN`). For example:
+- a CI system's variables, synced from a folder;
+- an old branch's `.env`, or a backup's config;
+- a wiki page about deploys;
+- a developer laptop's shell profile.
+
+One decoy per place tells you which place leaked.
+
+**When it's used.** roll secrets counts every use and raises `decoy_used` at most once an hour per
+decoy:
+- an audit row (`secrets.alert.decoy_used`, by `roll:decoys`, with the source address), which the
+  environment's Activity shows under Alerts and audit sinks carry to a SIEM;
+- a notice to the environment's notify URL, if it has one (the same outbox and retries as read
+  alerts);
+- `decoy_used` first in health, until the decoy ends.
+
+Each names the key, the environment, the folder, when and the address it came from, and the route
+it called. It never names a value.
+
+**What to do.** Someone has read the place the decoy was planted:
+1. Cut off whatever can reach that place (the CI system's tokens, the repository's deploy keys, the
+   laptop's sessions).
+2. Rotate the real credentials stored beside the decoy (`roll secrets rotations --rotate-due`, the
+   Health view).
+3. Delete the decoy key and plant a new one.
+
+**Ending.** Changing a decoy key's value, linking it, or deleting it (its folder, its environment or
+its project too) ends the decoy. The write marks it ended in its own transaction, and its token is
+revoked right after, outside the transaction (roll-access is another store). The sweeper retries a
+revoke that fails. A copy promoted or rolled back into another key holds a token that stops working
+once the decoy ends.
 
 ### Workload identities (OIDC)
 
@@ -3639,7 +4061,104 @@ minutes.
         - run: roll secrets health               # nothing expired, missing, exposed or in the browser
         - run: roll run -- npm test              # the tests get staging's values, never on disk
   ```
-- When roll-access takes over tokens, identities mint its scoped tokens instead; the routes stay.
+
+### AWS IAM
+
+A machine on AWS logs in with its own IAM role, as Vault's AWS auth (its IAM method) and
+Infisical's AWS Auth do: an EC2 instance profile, an ECS task role, EKS's IRSA or Pod Identity, a
+Lambda's role, or an IAM user's keys. Nothing is turned on in the account (unlike
+`GetWebIdentityToken`, which needs IAM outbound federation), nothing is stored on the machine, and
+roll holds no AWS credential.
+
+- **How.** The client signs an `sts:GetCallerIdentity` request with the machine's credentials
+  (Signature Version 4) but doesn't send it. It sends the signed request to roll
+  (`POST /v1/secrets/login {identity, aws: {method, url, headers, body}}`), roll sends it to STS,
+  and STS answers who signed it. roll then mints the same `workload` token an OIDC login gets
+  (the identity's scope and addresses, its TTL, `identity.login` in the audit log with the ARN).
+- **An identity** (`POST …/identities {name, kind: "aws", arn, environments?, paths?, actions,
+  ttl_minutes?, allowed_ips?}`, `roll secrets identities add web --aws ARN`, or "AWS" in the
+  dashboard's New identity) takes one role or user in one account:
+  - `arn:aws:iam::123456789012:role/web`: any session of the role. That covers an instance
+    profile's, a task's or a pod's. A role's path may be given; it isn't compared, since role
+    names are unique in an account and a session's ARN drops the path.
+  - `arn:aws:sts::123456789012:assumed-role/web/i-*`: only sessions whose name starts with
+    `i-` (EC2 instances), or one session exactly without the `*`. A session name isn't a security
+    boundary: whoever may call `sts:AssumeRole` on the role picks the session name, so anything
+    that can assume `web` can name its session `i-…`. Only the role is the boundary; use a
+    session prefix to tell your own workloads apart, never to keep someone out.
+  - `arn:aws:iam::123456789012:user/ci`: one IAM user.
+
+  A `*` anywhere but the end of a session name is refused, as is the account's root and a
+  federated user. The ARN already names its account, so there's no separate `bound_account`.
+- **What roll checks before it sends anything.** A client can't choose where roll sends the
+  request:
+  - The method is `POST`. The URL is exactly `https://sts.amazonaws.com/`,
+    `https://sts.<region>.amazonaws.com/`, `https://sts-fips.<region>.amazonaws.com/` or
+    `https://sts.cn-<…>.amazonaws.com.cn/`, with no path, query, port or user. roll rebuilds the
+    URL from that host and checks it again before it sends.
+  - The body is exactly `Action=GetCallerIdentity&Version=2011-06-15`.
+  - The signature covers `Host`, `X-Amz-Date` and `X-Roll-Server-ID`, and nothing roll doesn't
+    send. Only `Authorization`, `Content-Type`, `X-Amz-Date`, `X-Amz-Security-Token`,
+    `X-Amz-Content-SHA256` and `X-Roll-Server-ID` go on to STS.
+  - `X-Roll-Server-ID` names this server, as Vault's `iam_server_id_header_value` does. A request
+    signed for another roll or a Vault can't be replayed here, so the ID has to be unique to the
+    deployment. It's `ROLL_SECRETS_AWS_SERVER_ID` on rolld, or else its configured public URL
+    (`ROLL_CODE_PUBLIC_URL`), or else 32 hex characters derived from the deployment key
+    (`ROLL_SECRET_KEY`, HKDF under its own label; it reveals nothing of the key). Never a URL made
+    up from the host and port: two deployments can share one. Clients send `ROLL_AWS_SERVER_ID`,
+    or else their `ROLL_API_URL`, so **when the ID is derived, clients must set
+    `ROLL_AWS_SERVER_ID`** to it (rotating the deployment key changes it; set
+    `ROLL_SECRETS_AWS_SERVER_ID` to keep one across rotations). A wrong one is refused with the ID
+    to use, and the identity shows it as `server_id` (the dashboard's and `roll secrets identities
+    add`'s instructions include it when it isn't the API's URL).
+  - `X-Amz-Date` is within 5 minutes of roll's clock.
+  - `Authorization` is `AWS4-HMAC-SHA256` with exactly `Credential`, `SignedHeaders` and
+    `Signature`, each once (a component named twice, in any case, is refused), and `Signature` is
+    64 lowercase hex characters. The whole header goes to STS, so the signature roll keys a login on
+    is the one STS checks: each signed request logs in once, and a replay with another `Signature=`
+    in front of the real one is refused, not counted as new.
+
+  roll then sends the request through rolld's guarded client: no redirects, a 15 s timeout, and
+  at most 64 KiB of the answer read. STS's refusal (a bad signature, an expired session) is a 401
+  with STS's error code. An assumed role's session ARN
+  (`arn:aws:sts::123456789012:assumed-role/web/i-0abc…`) matches its role.
+- **A signed request logs in once.** roll keeps a SHA-256 of each accepted request's signature
+  (`aws_logins`, in the database every node shares, inserted with `ON CONFLICT DO NOTHING`) and
+  refuses the same signature again with a 401, on any node. Rows go after 10 minutes, once the
+  request's date is out of the ±5-minute window. A signed request is still a credential until it's
+  used (STS takes it for 15 minutes, roll for 5). Clients send it to roll over HTTPS only. Logins share OIDC's rate limits
+  (120 a minute per identity, 240 per client address).
+- **The clients.** With `ROLL_IDENTITY=idn_…`, `roll run`, `roll secrets …`, the Go client
+  (`FromEnv`, `LoginAWS`) and the Python client (`from_env`, `login_aws`) sign and log in by
+  themselves when there's no OIDC token (`ROLL_OIDC_TOKEN`, `ROLL_OIDC_TOKEN_FILE`, GitHub
+  Actions'). `ROLL_IDENTITY_KIND=aws` picks AWS anyway, for a GitHub Actions job with an AWS
+  identity. Credentials come from the AWS SDKs' chain:
+  1. `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN`.
+  2. The `AWS_PROFILE` profile's static keys in `~/.aws/credentials` or `~/.aws/config`. For SSO,
+     run `eval "$(aws configure export-credentials --format env)"` first.
+  3. IRSA's `AWS_WEB_IDENTITY_TOKEN_FILE` and `AWS_ROLE_ARN`, exchanged with
+     `AssumeRoleWithWebIdentity`.
+  4. The container endpoint: ECS's `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI`, or EKS Pod
+     Identity's `AWS_CONTAINER_CREDENTIALS_FULL_URI` with its token file.
+  5. IMDSv2 (unless `AWS_EC2_METADATA_DISABLED=true`).
+
+  The region (`AWS_REGION`, `AWS_DEFAULT_REGION`, the profile's `region`) picks STS's regional
+  endpoint; without one, the client uses the global endpoint. Each login reads the credentials
+  again, so rotated instance or task credentials just work. The TypeScript client has no
+  workload login, OIDC or AWS.
+
+  ```sh
+  roll secrets identities add web --aws arn:aws:iam::123456789012:role/web --for-env production
+  ```
+
+  ```sh
+  # on the instance, task or pod: no secret to store
+  ROLL_API_URL=https://roll.example.com ROLL_IDENTITY=idn_… roll run --env production -- ./server
+  ```
+
+- **Not yet checked against real AWS.** The signing matches AWS's published Signature Version 4
+  example in all three clients, and roll's checks and STS's recorded answers are tested. A login
+  through real STS from an instance, a task or a pod is still to be confirmed.
 
 ### Protected environments and approvals
 
@@ -3702,8 +4221,9 @@ allows it. The dashboard's audit log and an environment's
 activity show it as "approved by …". This is how roll secrets does access requests (a time-boxed
 `reveal` an approver grants, as Infisical's and 1Password's): a token that asks for `reveal`.
 Listing metadata isn't audited. Revealing, exporting, resolving and every write are.
-`GET …/audit?env=&key=&actor=&action=&before=&limit=` reads it newest first. Rows are kept for 400
-days.
+`GET …/audit?env=&key=&actor=&action=&before=&limit=&digests=` reads it newest first (`digests=false`
+leaves out roll's hourly signed digests, as the dashboard's list does). Rows are kept for 400
+days, and each project's rows are a hash chain roll signs hourly ("Tamper evidence" below).
 
 - **Export**: `GET …/audit?format=csv` or `format=jsonl` (with the same filters, `since` too)
   answers up to 10,000 rows as a file.
@@ -3738,6 +4258,84 @@ every delivery), writes each batch as an object `roll-secrets/audit/<sink>/<deli
   audit `id`, through roll streams in process: consumers react as it's written. A retried batch can
   produce an event again, so a consumer dedupes by key.
 
+### Tamper evidence
+
+Audit rows sit in the same database as everything else, so someone who can write it could edit or
+delete them. As CloudTrail's log file integrity validation does, each project's log is a hash chain
+with signed digests, so such a change shows:
+
+- **The chain.** Each row has a `seq` (1, 2, 3… per project) and `hash = sha256(previous hash,
+  row)`, written in the row's own transaction. The row's bytes are a length-prefixed encoding of
+  every field the API shows but `id` (`crates/roll-secrets-chain`, `canonical`), so they hash the same from SQLite,
+  Postgres or an export. The project's head (`audit_heads`) is updated in that transaction too:
+  on Postgres a second writer loses the head's row lock and its serializable write is re-run, and a
+  unique index on `(project_id, seq)` refuses a second row at one number anyway, so racing writers,
+  on one node or several, never fork the chain.
+- **The head's MAC.** The head carries an HMAC-SHA256 of `{project, seq, hash, start}` under a key
+  derived from `ROLL_SECRET_KEY` (HKDF, its own label `audit:head:v1`), checked before every append
+  and remade after it (two HMACs a write). Plain SHA-256 lets a database writer recompute every
+  hash; the MAC means they can't move the head to match: not back over rows they cut from the end,
+  not forward over rows they rewrote after the last digest, and not where the log starts. A head
+  that fails the check is never MACed again or signed: it stays broken (`head`) until someone looks.
+  After a deployment-key rotation the previous key's MACs still pass, and the hourly digests remake
+  every head's with the current one.
+- **Digests.** Every hour, the sweeper appends an `audit.digest` row (actor `roll:audit`) to each
+  project's chain, moved or not. Its `digest` is a JWS (RS256, `typ` `roll-audit-digest`) signed
+  with roll's OIDC issuer key: `{project, seq, hash, last_at, at, start}`, the row before it and
+  where the log starts. The digest is claimed per project in its own write, so two nodes don't sign
+  one twice. Sinks get digests like any other row, so a SIEM or a locked bucket holds roll's
+  signatures outside the database: recomputing every hash after an edit no longer matches what
+  roll signed.
+- **Gaps.** Before signing, the sweeper reads the newest digest the chain itself holds (with none,
+  its first row). When that's over two hours old, or isn't the digest the head says roll last
+  wrote, the rows after it can't be vouched for: a head put back from a copy passes its MAC, since
+  nothing in the database can't be put back with it. The new digest then carries
+  `gap: {after, since}` (that digest's seq, or 0, and its time), and `verify` reports the `gap` for
+  as long as the digest is in the log, after any other break, so an old gap never hides a newer one.
+  The head's own `digest_seq`/`digest_at` aren't MACed: they're only the sweeper's schedule, and a
+  MAC over them would pass on a copy too. A signer stopped for over two hours (every node down)
+  shows as a gap the same way: roll can't tell the two apart.
+- **Verifying.** `GET …/audit/verify?since=` (`read`) walks the chain from its start, or from the
+  last digest before `since`, and answers `AuditVerification`: the rows walked (`from`–`head`), how
+  far a valid digest vouches for them (`through`, `signed_at`), and the first thing that doesn't
+  hold (`broken: {seq, reason, detail}`): `edited` (a row doesn't match its hash), `missing` (a
+  gap), `rewritten` (the chain isn't what a digest signed), `signature` (a digest no key of roll's
+  signed), `truncated` (rows gone from the end; the head still counts them), `cut` (rows gone from
+  the start other than by retention), `unchained` (a row added outside the chain), `head` (the
+  head doesn't carry roll's MAC), `stale` (the newest digest is over two hours old: the signer
+  stopped, or rows after it were cut and the head put back from a copy) or `gap` (a digest roll
+  signed after such a span). The dashboard's audit log
+  shows "Verified through #N" or the break. `roll secrets audit verify [--since TIME]` asks the
+  same.
+- **Whose keys.** A row in `oidc_keys` is roll's only when its sealed private key opens with the
+  deployment key and is the private half of the row's `n` and `e`. Only those sign, check digests
+  and are published in the JWKS (which GCP, Azure and AWS trust too). A row that fails is logged
+  by kid (never the key) and ignored, so a database writer who adds a key of their own gets
+  neither a digest nor a cloud to accept their signature.
+- **Offline.** `roll secrets audit verify -p prj_… --file audit.jsonl --jwks keys.json` checks an
+  export (`audit --format jsonl`, unfiltered: a filtered one has gaps) on the machine it runs on.
+  `--jwks` is required: roll's public keys as saved earlier from `/v1/secrets/oidc/jwks` (served
+  whether or not clouds are set up) and kept apart from roll, since keys fetched from the server
+  being checked would vouch for themselves. Save it once, and again only after a key you expected
+  is added. A file whose digests name another project than `-p`, or more than one, is refused (a
+  `prj_…` id needs no server; a name is looked up). An export of the newest 10,000 rows starts
+  checking at its first digest, and a row without a `seq` after the chain began is `unchained`.
+  Staleness isn't checked offline: an export is a copy from some time.
+- **Retention** cuts the chain only at a digest at least 400 days old, which is then where the log
+  starts: a signed anchor, its hash the one before it. The digest written in the cut's own
+  transaction signs the new start, so rows removed from the start any other way are a `cut`.
+- **Older rows** written before the chain have no `seq` or hash: they count as `unchained`, the
+  chain starts at the first row after them, and they're dropped by age as before. A row written by
+  a node still running an older roll during an upgrade shows as `unchained` too.
+- **What it can't show without a sink**: someone holding both the database and `ROLL_SECRET_KEY`
+  can rewrite anything and sign it again, MAC and digests alike. Someone who can write only the
+  database can put back a copy of its rows and head from earlier: once that copy's newest digest is
+  over two hours old, roll's next digest records the gap for good, but rows written in the two hours
+  after it (digests included) can be cut and the copy put back before then, and roll signs on
+  without a trace in the database. Only a copy held outside it catches that: a sink (a SIEM, a
+  locked bucket) that already received the digests the copy lacks, or a saved `--jwks` file for a
+  key roll never made.
+
 
 ## HTTP API
 
@@ -3748,7 +4346,8 @@ isn't in the workspace is 404.
 
 | Route | Body | Answer |
 | --- | --- | --- |
-| `GET /v1/secrets/health` | | `{ok, key: "env"\|"kms"\|"file"\|"missing", resealed: "all"\|number\|null, links: string[], syncs: string[]}` (`links`, `syncs`: the kinds registered) |
+| `GET /v1/secrets/health` | | `{ok, key: "env"\|"kms"\|"file"\|"shares"\|"missing", resealed: "all"\|number\|null, links: string[], syncs: string[]}` (`links`, `syncs`: the kinds registered) |
+| `GET`, `POST /v1/secrets/unseal` | `{share}` (`POST`) | `{sealed, have?, need?, error?}`: a sealed node's progress (public; see "Starting sealed"); 429 with `Retry-After` past the limits |
 | `GET` | | `{project, environments: Environment[], previews: number, history_days: number \| null}` |
 | `PATCH` | `{history_days}` | `{history_days}` (`admin`) |
 | `GET /grid?path=` | | `Grid` |
@@ -3783,6 +4382,7 @@ isn't in the workspace is 404.
 | `PUT /environments/{env}/secrets/{key}?path=` | `SetSecret` | `Written`; 409 `stale` when `if_version` isn't the key's version |
 | `DELETE /environments/{env}/secrets/{key}?path=&type=&if_version=` | | `Written`; 409 `stale` when `if_version` isn't the key's version |
 | `GET /environments/{env}/secrets/{key}/value?path=&resolve=` | | `{value, problems}` |
+| `POST /environments/{env}/decoys` | `NewDecoy` | 201 `Secret` (admin; a new key, never its value; 409 `exists` when the key is there; "Decoys") |
 | `GET /environments/{env}/secrets/{key}/totp?path=` | | `{code, expires_at, period}` (`reveal`; a key that isn't a TOTP key is a 400; audited as `secrets.totp`, without the code) |
 | `GET /environments/{env}/secrets/{key}/versions?path=&type=` | | `Version[]` newest first |
 | `GET /environments/{env}/secrets/{key}/versions/{v}/value?path=&type=` | | `{value}` |
@@ -3796,7 +4396,7 @@ isn't in the workspace is 404.
 | `GET /environments/{env}/changes?before=&limit=` | | `Change[]` newest first |
 | `POST /environments/{env}/changes` | `Batch` | 201 `Applied` |
 | `POST /environments/{env}/diff` | `{dotenv} \| {json}, path?` | `{added, changed, same, missing, references, linked}`: a local copy against the folder by fingerprint, names only (`reveal`, audited) |
-| `POST /environments/{env}/import` | `{dotenv \| json, path?, overwrite?, replace?, message?, request?, if_seq?}` | 201 `Applied & {skipped}` or `{request, skipped}` |
+| `POST /environments/{env}/import` | `{dotenv \| json, path?, overwrite?, replace?, message?, request?, if_seq?}` (`json`'s array items may say `sensitive: true`: the key gets the tag) | 201 `Applied & {skipped}` or `{request, skipped}` |
 | `GET /environments/{env}/changes/{seq}?state=` | | `ChangeDetail` |
 | `POST /environments/{env}/rollback` | `{to?: seq, at?: ms, message?, bypass?}` | 201 `Applied` |
 | `GET /compare?from=&to=&path=` | | `Compare` |
@@ -3815,9 +4415,9 @@ isn't in the workspace is 404.
 | `GET /identities` | | `Identity[]` (admin) |
 | `POST /identities` | `NewIdentity` | 201 `Identity` |
 | `DELETE /identities/{id}` | | 204 (its tokens revoked) |
-| `PUT /identities/{id}/jwks` | `{jwks}` | `Identity` (admin; a person's): its pinned keys replaced, its id kept |
-| `POST /v1/secrets/login` | `{identity, token}` | `{token, expires_at, project, identity}` (public) |
-| `GET /audit?env=&key=&actor=&action=&before=&since=&limit=&format=` | | `AuditEntry[]` newest first, or CSV/JSONL with `format` |
+| `PUT /identities/{id}/jwks` | `{jwks}` | `Identity` (admin; a person's): its pinned keys replaced, its id kept (400 for an `aws` one) |
+| `POST /v1/secrets/login` | `{identity, token}` or `{identity, aws: {method, url, headers, body}}` | `{token, expires_at, project, identity}` (public; `aws`: a signed `GetCallerIdentity`, "AWS IAM") |
+| `GET /audit?env=&key=&actor=&action=&before=&since=&limit=&digests=&format=` | | `AuditEntry[]` newest first, or CSV/JSONL with `format`; `digests=false` leaves out `audit.digest` rows |
 | `GET /required` | | `Required[]` |
 | `PUT /required` | `Required[]` | `Required[]` (replaces the list; `admin`) |
 | `GET /shares` | | `Share[]` newest first |
@@ -3830,6 +4430,7 @@ isn't in the workspace is 404.
 | `POST /syncs/{id}/run` | | `Sync` after pushing every key (`admin`; 409 `running` while another push holds it) |
 | `GET /v1/secrets/shares/{id}` (public) | | `{note, views_left, expires_at}` |
 | `POST /v1/secrets/shares/{id}/open` (public) | | `{ciphertext}` (one open used) |
+| `GET /audit/verify?since=` | | `AuditVerification`: the chain walked from its start (or the last digest before `since`) and the first break |
 | `GET /audit/sinks` | | `Sink[]` (`admin`) |
 | `POST /audit/sinks` | `{url, from_start?, format?, token?}` (an HTTPS endpoint, or on the canvas `bucket:<name>`, `search:<cluster>/<index>` or `stream:<id>/<topic>`; `format` `splunk`, `datadog` or `bearer` takes an HTTPS endpoint and its `token`, sealed) | 201 `Sink & {secret}` (shown once; a `Sink` names its `format`, never its token) |
 | `DELETE /audit/sinks/{id}` | | 204 |
@@ -3884,7 +4485,7 @@ isn't in the workspace is 404.
 | `POST /github-apps` | `{name, app_id, installation_id, private_key, repositories, permissions, api_base?}` | 201 `GitHubApp` (`admin`; gets and revokes a token first: 400 with GitHub's reason) |
 | `DELETE /github-apps/{id}` | | 204; 409 while a key links to it or a lease holds a token (`admin`) |
 | `GET /v1/secrets/oidc/.well-known/openid-configuration` | | roll's issuer's discovery document (public) |
-| `GET /v1/secrets/oidc/jwks` | | roll's issuer's public keys (public) |
+| `GET /v1/secrets/oidc/jwks` | | roll's issuer's public keys (public; they verify the audit log's digests, so served without clouds too) |
 | `GET /cas` | | `Ca[]` (`read` on the project; certificates, never keys) |
 | `POST /cas` | `{name, domains, allow_ip?, max_days?}` | 201 `Ca` (`admin`) |
 | `DELETE /cas/{id}` | | 204; 409 while a key links to it (`admin`) |
@@ -3970,7 +4571,10 @@ type Secret = {
   updated_at: number; updated_by: string;
   source: { kind: "own" } | { kind: "import"; environment: string; path: string } | { kind: "base"; environment: string };
   overridden: boolean; // a personal value of the caller replaces it
+  decoy?: Decoy; // only for the project's admins ("Decoys"); absent for everyone else, as on any key
 };
+type Decoy = { kind: "rlt"; created_at: number; created_by: string; uses: number; used_at: number | null; used_ip: string | null };
+type NewDecoy = { key: string; kind: "rlt"; path?: string };
 type SetSecret = { value?: string; comment?: string; tags?: string[]; type?: "shared" | "personal"; link?: Link | null; message?: string; expires_at?: number | null; if_version?: number };
 type Op =
   | { op: "set"; key: string; value?: string; comment?: string; tags?: string[]; type?: "shared" | "personal"; link?: Link | null; if_version?: number }
@@ -3992,10 +4596,10 @@ type Insights = { path: string; max_age_days: number | null; reads_since: number
 type Required = { key: string; path: string; comment: string; type?: "url" | "int" | "port" | "bool" | "json" | "email"; pattern?: string; owner?: string /* who supplies it */; password?: { length: number; classes?: ("lower" | "upper" | "digit" | "symbol")[]; symbols?: string } };
 type Sink = { id: string; url: string; status: "new" | "ok" | "error"; error: string | null; cursor: number; delivered_at: number | null; created_at: number; created_by: string };
 type ProjectFindings = { project: string; project_name: string; findings: Finding[] };
-type Finding = { issue: "expired" | "missing" | "exposed" | "weak" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string };
-type Finding = { issue: "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "weak" | "expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string };
+type Finding = { issue: "decoy_used" | "expired" | "missing" | "exposed" | "weak" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string };
+type Finding = { issue: "decoy_used" | "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "weak" | "expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string };
 type Rotation = { environment: string; path: string; keys: string[]; kind: string; ref: string; name: string; rotate_days: number | null; grace_minutes: number; issued_at: number | null; next_due: number | null; last_error: string | null; failed_at: number | null };
-type Finding = { issue: "expired" | "missing" | "exposed" | "public" | "weak" | "expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string };
+type Finding = { issue: "decoy_used" | "expired" | "missing" | "exposed" | "public" | "weak" | "expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string };
 type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };
 type SaasRotator = { id: string; name: string; vendor: "sendgrid" | "twilio" | "okta" | "entra" | "auth0"; target: Record<string, unknown>; created_at: number; created_by: string };
 type KubernetesCluster = { id: string; name: string; api_url: string; has_ca: boolean; created_at: number; created_by: string };
@@ -4008,9 +4612,9 @@ type Request = { id: string; environment: string; path: string; message: string;
 type FolderPolicy = { path: string; approvals: number; approvers: string[]; created_at: number; created_by: string };
 type LinkTarget = { kind: string; ref: string; name: string; fields: { field: string; label: string; modes: Link["mode"][]; secret: boolean; suggest: string; credential?: string }[] };
 type Lease = { id: string; environment: string; path: string; key: string; kind: "dynamic" | "retired"; link: Link | null; consumer: string; issued_at: number; expires_at: number; revoked_at: number | null };
-type Identity = { id: string; name: string; issuer: string; audience: string; subject: string; claims: Record<string, string>; environments: string[] | null; paths: string[] | null; actions: Action[]; ttl_minutes: number; created_at: number; created_by: string; last_used_at: number | null; last_subject: string | null; allowed_ips: string[] | null; pinned_keys?: number; gateway?: string }; // gateway: it logs that gateway in (no environments, paths or actions)
+type Identity = { id: string; name: string; kind: "oidc" | "aws"; arn?: string; server_id?: string; issuer: string; audience: string; subject: string; claims: Record<string, string>; environments: string[] | null; paths: string[] | null; actions: Action[]; ttl_minutes: number; created_at: number; created_by: string; last_used_at: number | null; last_subject: string | null; allowed_ips: string[] | null; pinned_keys?: number; gateway?: string }; // gateway: it logs that gateway in (no environments, paths or actions)
 type Gateway = { id: string; name: string; token_id?: string; created_at: number; created_by: string; status: { online: boolean; node?: string; version?: string; allow: string[]; connected_at?: number; last_seen_at?: number } };
-type NewIdentity = { name: string; issuer: string; audience: string; subject: string; claims?: Record<string, string>; environments?: string[]; paths?: string[]; actions: Action[]; ttl_minutes?: number; allowed_ips?: string[]; jwks?: string };
+type NewIdentity = { name: string; environments?: string[]; paths?: string[]; actions: Action[]; ttl_minutes?: number; allowed_ips?: string[]; gateway?: string } & ({ kind?: "oidc"; issuer: string; audience: string; subject: string; claims?: Record<string, string>; jwks?: string } | { kind: "aws"; arn: string });
 type Token = { id: string; name: string; environments: string[] | null; paths: string[] | null; actions: Action[]; expires_at: number | null; created_at: number; created_by: string; last_used_at: number | null; prefix: string; allowed_ips: string[] | null };
 type NewToken = { name: string; environments?: string[]; paths?: string[]; actions: Action[]; expires_at?: number; ttl_days?: number; allowed_ips?: string[] };
 type Action = "read" | "reveal" | "write" | "delete" | "admin";
@@ -4022,7 +4626,8 @@ type Sync = {
 };
 type NewSync = { environment: string; path?: string; kind: string; target: Record<string, unknown>; keys?: string[]; prefix?: string };
 type SyncKind = { kind: string; label: string; values: boolean; signed: boolean; fields: { name: string; label: string; required: boolean; placeholder: string }[] };
-type AuditEntry = { id: number; at: number; actor: string; action: string; environment: string | null; path: string | null; keys: string[]; summary: string; ip: string | null; approval?: Approval };
+type AuditEntry = { id: number; seq?: number; hash?: string; at: number; actor: string; action: string; environment: string | null; path: string | null; keys: string[]; summary: string; ip: string | null; approval?: Approval; digest?: string };
+type AuditVerification = { ok: boolean; from: number | null; through: number | null; signed_at: number | null; head: number | null; rows: number; digests: number; unchained: number; broken: { seq?: number; reason: string; detail: string } | null };
 // The approval that let the request through roll-access's gate (docs/permissions.md, "What a
 // product is told about an approval"): an `ask` approved (no `until`), or a rule an approval
 // remembered for a while (`until`: when it lapses). CSV exports carry `approval` and `approved_by`
@@ -4050,7 +4655,9 @@ tokens(id PK, project_id, name, hash UNIQUE, prefix, environments, paths, action
        created_at, created_by, last_used_at, revoked_at, identity)  -- identity: a login's
 identities(id PK, project_id, name, issuer, audience, subject, claims, environments, paths,
        actions, ttl_minutes, created_at, created_by, last_used_at, last_subject)
-audit(id INTEGER PK, project_id, at, actor, action, env_id, path, keys, summary, ip)
+audit(id INTEGER PK, project_id, at, actor, action, env_id, path, keys, summary, ip, approval,
+      seq, hash, digest)  -- UNIQUE (project_id, seq); digest: an audit.digest row's JWS
+audit_heads(project_id PK, seq, hash, at, digest_seq, digest_at, start_seq, mac)  -- mac: HMAC under ROLL_SECRET_KEY
 syncs(id PK, project_id, env_id, path, kind, target, keys, prefix, secret BLOB, status, error,
       last_digest, state, last_synced_at, running_until, retry_at, checked_at, created_at, created_by)
       -- secret: the sealed signing secret; state: {name: stamp} of what was pushed (no values)
@@ -4088,23 +4695,58 @@ Alarms worth setting: `SecretsKmsRefusals` above zero (a customer's key policy c
 
 `cargo run -p roll-secrets --release --example bench -- 9000` times the hot paths on one
 environment of 9,000 keys plus 900 references, on SQLite or, with `ROLL_CODE_TEST_DATABASE`, on
-Postgres. Measured 2026-11-13 on ai-server under a load average of about 27 (second run, warm):
+Postgres. Measured 2026-11-18 on ai-server, pinned to 12 CPUs (`taskset -c 0-5,18-23`): the
+medians of three runs each, before (the code as of `42a3bbe1b`) and after the polling path's cache,
+alternated, under load averages of 27 to 73. A poll is 100 calls; its p95 is in brackets.
 
-| | SQLite | Postgres |
-| --- | --- | --- |
-| one change of 9,900 keys | 313 ms | |
-| one key's change | 5 ms | 6 ms |
-| grid (every standard environment) | 38 ms | 48 ms |
-| list | 26 ms | 46 ms |
-| values, resolved | 74 ms | 149 ms |
-| digest | 90 ms | 143 ms |
-| insights | 27 ms | 40 ms |
-| compare | 38 ms | 62 ms |
-| health (the whole project) | 53 ms* | 58 ms* |
+| | SQLite before | SQLite after | Postgres before | Postgres after |
+| --- | --- | --- | --- | --- |
+| a 304 (`If-None-Match`, unchanged) | 99 ms (144) | 0.1 ms (0.1) | 169 ms (241) | 3.0 ms (13) |
+| `…/digest`, unchanged | 108 ms (138) | 0.1 ms (0.1) | 157 ms (213) | 2.5 ms (7) |
+| the first digest after a change | 108 ms | 71 ms (88) | 157 ms | 98 ms* |
+| one change of 9,900 keys | 483 ms | 506 ms | 12.1 s | 11.7 s |
+| one key's change | 13 ms | 8 ms | 12 ms | 10 ms |
+| grid (every standard environment) | 88 ms | 91 ms | 117 ms | 111 ms* |
+| list | 51 ms | 53 ms | 76 ms | 61 ms* |
+| values, resolved | 166 ms | 170 ms | 232 ms | 210 ms* |
+| insights | 54 ms | 56 ms | 66 ms | 65 ms* |
+| compare | 73 ms | 79 ms | 104 ms | 96 ms* |
+| health (the whole project) | 64 ms | 59 ms | 82 ms | 78 ms* |
 
-\* Health was measured later the same day under a load average of about 39, with the grid at 77 ms
-(SQLite) and 65 ms (Postgres) in the same runs: it stays under the grid, which the sidebar's count
-and Home rely on.
+\* Postgres's last two rounds after the change ran under loads of 70 and above, and the paths the
+change doesn't touch then took up to 4× as long in both builds. Those rows give the run without the
+digest cache but with its narrower read (the same code for them), alternated in the same session.
+The test database had 4,650 leftover test schemas, which slows every run a little more than the last.
+
+At 1,000 pods polling every 30 s (~33 calls a second) a folder that didn't change cost about 5.6
+cores on Postgres (3.3 on SQLite) to answer 304s; now it costs about 0.1. A digest is computed
+once after each change and then reused (`Secrets::digest_of`, read.rs):
+- **Narrower and once.** A digest reads only the columns that go into its hash, and reads each
+  folder once: a reference into the folder being digested finds its target in rows already read
+  (when the caller may read every import and base exactly as it may reveal them). Those two changes
+  alone halve the first digest (and were the 304's cost before the cache: 62 ms on SQLite, 71 ms on
+  Postgres).
+- **Reused while the database says nothing changed.** Each node keeps a folder's digest by
+  project, environment, folder, principal and whether the caller is untrusted. It reuses the digest
+  only while one read of the database answers the same: the project's change number (every write
+  of a stored value takes one in its own transaction), its environments, imports and required
+  keys, and the change number and share of any folder another project shares into it. A write on
+  any node moves it at once, and no node's memory decides whether a folder changed. A node keeps
+  at most 10,000 digests, and at most 500 for one principal: past either, the least recently used
+  goes (the principal's own first), so one reader cycling through many folders only ever pushes
+  out its own, never another poller's.
+- **Only for the same answers.** It records every permission the digest asked of the caller (an
+  import's environment, a reference's folder) with its answer, and is reused only when the caller
+  gets the same answers now. Each live link is checked as before: its generation (`source_changed`)
+  is read again, and its value's fingerprint is read the same way, at most 10 s old. A digest
+  where anything failed to read is never kept.
+
+`tests/nodes.rs` (`a_digest_one_node_keeps_moves_at_once_with_what_another_node_changes`) keeps
+a digest on one node and changes things on another: a write, an import, a write to the imported
+folder, roll rotating a live link's credential (though the first node read the product's answer a
+moment before). It also changes what the same caller may read. Each one moves the digest at once.
+`links_read_live_values_issue_managed_credentials_rotate_and_lease_dynamic_ones` (`tests/api.rs`)
+still covers 304s, and a product changing its own password.
 
 Every lookup by key inside a request is a hash map (a grid of ~11k keys over 5 environments took
 3.07 s before that, 0.43 s after, on a debug build).
@@ -4120,6 +4762,9 @@ Done and in PR #20:
 - checks, sandboxes and previews, resolving untrusted; preview environments untrusted themselves;
 - leaked secrets don't land, plus scans of a repo's default branch and history, and `roll secrets
   scan [--staged]` before a commit;
+- credentials roll doesn't hold yet, by their shape: a notice on a change (a blocker with
+  `roll.toml`'s `[secrets] unstored_credentials = "block"`), `.roll/secrets-allow`, and `roll secrets
+  scan` listing them, refusing them `--staged`, and `--store` moving one in;
 - required and typed keys; insights, a daily notice of each environment's health, and expiry dates for values that expire
   outside roll; weak credentials; values as they were after any change; a protected environment's values that are also set in an unprotected one; read
   alerts (a machine's new address, many reveals in an hour);

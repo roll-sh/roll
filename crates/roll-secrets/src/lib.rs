@@ -14,6 +14,7 @@ pub mod folder_policy;
 pub mod access;
 pub mod acme;
 mod alerts;
+pub mod decoys;
 pub mod api;
 pub mod health;
 pub mod outside;
@@ -24,11 +25,13 @@ pub mod gateways;
 mod turns;
 pub mod github_app;
 pub mod aws;
+pub mod aws_identity;
 pub mod iam;
 pub mod rotators;
 pub mod saas;
 mod strength;
 mod audit;
+pub use roll_secrets_chain as chain;
 pub mod backup;
 pub mod crypto;
 pub mod dotenv;
@@ -64,13 +67,17 @@ mod sweep;
 pub mod totp;
 pub mod syncs;
 mod caller;
+pub mod consumers;
 pub mod kms;
 mod write;
+pub mod unseal;
 
 pub use access::{Action, Approval, Caller, Minted, People, Person, Scope, Workloads, PREVIEWS};
 pub use api::router;
 pub use crypto::{Keyring, Value};
-pub use audit::{AuditEntry, AuditFilter};
+pub use audit::{AuditEntry, AuditFilter, VerifyQuery};
+pub use chain::Verification;
+pub use consumers::{Reference, Refusal, Resolved, ResourceRef};
 pub use envs::{Branch, EnvChange, Ensure, Ensured, Environment, Folder, Import, Kind as EnvironmentKind, NewEnvironment, Policy};
 pub use leaks::Leak;
 pub use links::{Link, LinkProvider, Links, Mode};
@@ -78,7 +85,8 @@ pub use metrics::Metrics;
 pub use read::{Followed, Grid, Problem, Secret, Source, Values, Version};
 pub use requests::{Request, RequestValue, Review, Verdict};
 pub use exports::Export;
-pub use identities::{Identity, Login, NewIdentity};
+pub use decoys::{Decoy, NewDecoy};
+pub use identities::{Identity, IdentityKind, Login, NewIdentity, Proof};
 pub use required::Required;
 pub use shares::{NewShare, Peek, Share};
 pub use sweep::{Lease, Swept};
@@ -303,6 +311,8 @@ pub enum KeySource {
     /// `ROLL_SECRET_KEY_KMS`: decrypted by AWS KMS at startup.
     Kms,
     File,
+    /// `ROLL_SECRET_KEY_SEALED`: combined from shares posted to a sealed node (unseal.rs).
+    Shares,
     Missing,
 }
 
@@ -352,6 +362,14 @@ pub struct Options {
     pub github: Option<std::sync::Arc<dyn github_app::GitHubApps>>,
 }
 
+/// The store's database (a sealed start reads it before roll secrets opens: unseal.rs).
+pub fn open_db(target: &Target, pg: code_sql::PgOptions) -> Result<Db> {
+    Ok(match target {
+        Target::Sqlite(path) => Db::open_sqlite(path, code_sql::SqliteOptions { readers: 4, cache_kib: 4 << 10 })?,
+        Target::Postgres { url, schema } => Db::connect(url, schema, pg)?,
+    })
+}
+
 /// The secrets store.
 pub struct Secrets {
     db: Db,
@@ -384,12 +402,19 @@ pub struct Secrets {
     code_refs: std::sync::OnceLock<Arc<dyn health::CodeRefs>>,
     /// Where clients reach rolld's API, once rolld says (certificates' CRL distribution point).
     public_api: Arc<std::sync::OnceLock<String>>,
+    /// What AWS identities' logins must name in `X-Roll-Server-ID` (`ROLL_SECRETS_AWS_SERVER_ID`,
+    /// or the configured public URL); unset, one derived from the deployment key.
+    aws_server_id: std::sync::OnceLock<String>,
     /// Signed CRLs by CA, with when they were made (pki.rs): the public route signs one a minute.
     crls: pki::Crls,
     /// What rolld's metrics count (metrics.rs).
     counters: metrics::Counters,
     /// Live links' fingerprints as last read (read.rs): what digests count.
     live_fps: read::LiveFps,
+    /// Which issuer key rows are roll's, as last checked (issuer.rs).
+    issuer_keys: issuer::Checked,
+    /// Folders' digests as last computed, each with the database state it came from (read.rs).
+    digests: read::Digests,
     /// ACME's challenge checks and nonce key (acme.rs).
     acme: acme::State,
 }
@@ -402,11 +427,7 @@ impl std::fmt::Debug for Secrets {
 
 impl Secrets {
     pub fn open(target: &Target, pg: code_sql::PgOptions, workspace: Arc<roll_workspace::Workspace>, opts: Options) -> Result<Secrets> {
-        let db = match target {
-            Target::Sqlite(path) => Db::open_sqlite(path, code_sql::SqliteOptions { readers: 4, cache_kib: 4 << 10 })?,
-            Target::Postgres { url, schema } => Db::connect(url, schema, pg)?,
-        };
-        Secrets::new(db, workspace, opts)
+        Secrets::new(open_db(target, pg)?, workspace, opts)
     }
 
     pub fn new(db: Db, workspace: Arc<roll_workspace::Workspace>, opts: Options) -> Result<Secrets> {
@@ -431,6 +452,13 @@ impl Secrets {
         db.ensure_schema("CREATE INDEX IF NOT EXISTS syncs_due ON syncs (retry_at) WHERE checked_at IS NULL;")?;
         db.add_column("leases", "path", "TEXT")?;
         db.add_column("audit", "approval", "TEXT")?;
+        // The audit log's hash chain and signed digests (roll-secrets-chain): rows before it have none.
+        db.add_column("audit", "seq", "INTEGER")?;
+        db.add_column("audit", "hash", "TEXT")?;
+        db.add_column("audit", "digest", "TEXT")?;
+        db.ensure_schema(audit::SCHEMA)?;
+        // The head's MAC (audit.rs, `head_msg`): a head without one isn't roll's.
+        db.add_column("audit_heads", "mac", "TEXT")?;
         // Workload identities (identities.rs); their logins' tokens are roll-access's.
         db.ensure_schema(identities::SCHEMA)?;
         // Secrets' own `rlst_` tokens are gone (roll-access's grants instead); never on main.
@@ -438,6 +466,8 @@ impl Secrets {
         db.ensure_schema(exports::SCHEMA)?;
         // An identity's pinned keys: a JWKS, for an issuer roll doesn't fetch (identities.rs).
         db.add_column("identities", "jwks", "TEXT")?;
+        // An identity's kind: NULL is OIDC, `aws` takes a signed GetCallerIdentity (aws_identity.rs).
+        db.add_column("identities", "kind", "TEXT")?;
         // Typed keys (required.rs).
         db.add_column("required", "type", "TEXT")?;
         db.add_column("required", "pattern", "TEXT")?;
@@ -470,6 +500,7 @@ impl Secrets {
         db.add_column("projects", "forgotten_at", "INTEGER")?;
         db.ensure_schema(notices::SCHEMA)?;
         db.ensure_schema(alerts::SCHEMA)?;
+        db.ensure_schema(decoys::SCHEMA)?;
         db.ensure_schema(rotators::SCHEMA)?;
         db.ensure_schema(saas::SCHEMA)?;
         db.ensure_schema(transit::SCHEMA)?;
@@ -487,6 +518,11 @@ impl Secrets {
         db.ensure_schema(issuer::SCHEMA)?;
         db.ensure_schema(clouds::SCHEMA)?;
         db.ensure_schema(iam::SCHEMA)?;
+        // The deployment key's id, for a sealed start's check (unseal.rs).
+        db.ensure_schema(unseal::SCHEMA)?;
+        if let Ok(keys) = &opts.keyring {
+            unseal::record_key(&db, keys)?;
+        }
         // Rotators are a link kind of roll secrets' own: they call out through rolld.
         let mut links = opts.links;
         let unwrap = kms::Unwrapper::new(opts.kms.clone());
@@ -550,7 +586,7 @@ impl Secrets {
         if let (Some(github), Ok(keys)) = (&opts.github, &opts.keyring) {
             links.register(Arc::new(github_app::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone(), github: github.clone() }));
         }
-        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, workloads: opts.workloads, gateway_links: opts.gateways, unwrap: unwrap.clone(), open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, outside: opts.outside, directory: opts.directory, github: opts.github, oidc: Default::default(), logins: Default::default(), reads_per_minute: read::READS_PER_MINUTE.into(), code_refs: Default::default(), sts: opts.sts.clone(), clouds: opts.clouds, public_api, crls, live_fps: Default::default(), counters: Default::default(), acme: Default::default() })
+        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, workloads: opts.workloads, gateway_links: opts.gateways, unwrap: unwrap.clone(), open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, outside: opts.outside, directory: opts.directory, github: opts.github, oidc: Default::default(), logins: Default::default(), reads_per_minute: read::READS_PER_MINUTE.into(), code_refs: Default::default(), sts: opts.sts.clone(), clouds: opts.clouds, public_api, aws_server_id: Default::default(), crls, live_fps: Default::default(), issuer_keys: Default::default(), digests: Default::default(), counters: Default::default(), acme: Default::default() })
     }
 
     pub fn links(&self) -> &Links {
@@ -677,8 +713,14 @@ impl Secrets {
             c.execute("DELETE FROM exports WHERE to_project = ?", [project])?;
             c.execute("DELETE FROM environments WHERE project_id = ?", [project])?;
             c.execute("UPDATE projects SET forgotten_at = ? WHERE project_id = ?", code_sql::params![now, project])?;
+            // Its decoys end with it: their tokens are revoked next.
+            c.execute("UPDATE decoys SET ended_at = ? WHERE project_id = ? AND ended_at IS NULL", code_sql::params![now, project])?;
             forget_if_done(c, project, now)
-        })
+        })?;
+        if let Err(e) = self.end_decoys() {
+            tracing::warn!(project, "revoking a deleted project's decoys failed (the sweeper retries): {e}");
+        }
+        Ok(())
     }
 
     /// Forgotten projects whose last lease is revoked: their key and registries go.
