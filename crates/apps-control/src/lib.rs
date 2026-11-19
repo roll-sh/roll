@@ -56,6 +56,7 @@ pub mod visit;
 pub mod vitals;
 pub mod heartbeats;
 pub mod slo;
+pub mod prom;
 pub mod vulns;
 pub mod checks;
 pub mod forms;
@@ -325,6 +326,10 @@ pub struct Apps {
     /// A static site's proxy rewrites to other sites (`_redirects`' `https://… 200`): public
     /// addresses only, no redirects followed, 30 s.
     pub(crate) site_proxy_client: reqwest::Client,
+    /// Scrapes of instances' own Prometheus endpoints ([`prom`]): loopback, no redirects, no
+    /// proxy; and which environments' last scrape failed (said once).
+    pub(crate) scrape_client: reqwest::Client,
+    pub(crate) scrape_errors: Mutex<std::collections::HashSet<String>>,
     /// Shells open over HTTP (the dashboard's terminal), by id.
     sessions: Mutex<HashMap<String, Arc<shell::Session>>>,
     /// WebSocket shells open per environment (`env_key`), counted with the HTTP sessions.
@@ -554,6 +559,8 @@ impl Apps {
             tunnels: Mutex::new(HashMap::new()),
             notify_client: net::client(cfg_allow, Duration::from_secs(10)),
             site_proxy_client: net::client(cfg_allow, Duration::from_secs(30)),
+            scrape_client: reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).no_proxy().timeout(Duration::from_secs(10)).build().expect("a client"),
+            scrape_errors: Mutex::new(Default::default()),
             looping: Mutex::new(std::collections::HashSet::new()),
             client: hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new()).pool_idle_timeout(Duration::from_secs(30)).build_http(),
             client_h2: hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new()).pool_idle_timeout(Duration::from_secs(30)).http2_only(true).build_http(),

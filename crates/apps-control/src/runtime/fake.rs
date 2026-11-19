@@ -266,6 +266,11 @@ async fn serve(spec: InstanceSpec, listener: tokio::net::TcpListener, log: LogSi
         let (name, dep, echo, sick, missing, killed, cache, answered) = (name.clone(), dep.clone(), echo.clone(), sick.clone(), missing.clone(), kill.clone(), cache.clone(), answered.clone());
         async move {
             use axum::response::IntoResponse;
+            // A Prometheus endpoint, as a client library serves one.
+            if req.uri().path() == "/metrics" {
+                let n = answered.load(std::sync::atomic::Ordering::SeqCst);
+                return format!("# TYPE fake_requests_total counter\nfake_requests_total{{route=\"/\"}} {n}\n# TYPE fake_queue_depth gauge\nfake_queue_depth 3\n").into_response();
+            }
             if req.uri().path() == "/count" {
                 return answered.load(std::sync::atomic::Ordering::SeqCst).to_string().into_response();
             }

@@ -1589,7 +1589,20 @@ impl Apps {
             command: run.start.clone(),
             vars,
             port: if run.kind == RunType::Web { run.port } else { None },
-            ports: if run.kind == RunType::Web && !closed { domain_ports } else { Vec::new() },
+            // Custom domains' own ports, and its metrics endpoint's when that's another (never a
+            // closed instance's: nothing reaches it but through its sandbox).
+            ports: if closed {
+                Vec::new()
+            } else {
+                let mut p = if run.kind == RunType::Web { domain_ports } else { Vec::new() };
+                if let Some(mp) = run.metrics.as_ref().and_then(|m| m.port)
+                    && Some(mp) != run.port.filter(|_| run.kind == RunType::Web)
+                    && !p.contains(&mp)
+                {
+                    p.push(mp);
+                }
+                p
+            },
             cpu: run.cpu,
             memory_mb: run.memory_mb,
             network: Some(network),
@@ -2007,6 +2020,9 @@ impl Apps {
                     l.tick().await;
                     l.ticking.store(false, Ordering::SeqCst);
                 });
+            }
+            if n.is_multiple_of(crate::prom::EVERY_S) {
+                self.scrape_pass();
             }
             if n.is_multiple_of(10) {
                 self.flush_meters(false).await;

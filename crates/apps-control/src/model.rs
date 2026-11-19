@@ -519,6 +519,10 @@ pub struct Run {
     /// budget left on Metrics (`…/slo`). How it's watched only: changing it is a write.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub slo: Option<Slo>,
+    /// Its own Prometheus endpoint, scraped every 15 s on each running instance (Fly's
+    /// `[metrics]`) and shown on Metrics with what an OpenTelemetry SDK sends.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metrics: Option<Scrape>,
     /// How a new deployment takes over: at once, or a share of requests at a time.
     pub rollout: Rollout,
     /// The app speaks HTTP/2 without TLS (h2c, prior knowledge), as a gRPC server does: the
@@ -590,6 +594,23 @@ pub struct Run {
     /// the rollout, not beside it. A rollback is never held. Changing it is a deploy.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub block_on: Option<Severity>,
+}
+
+/// Where an app's Prometheus endpoint is ([`crate::prom`]): its port (the app's own by default)
+/// and path (`/metrics`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Scrape {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    #[serde(default = "Scrape::default_path")]
+    pub path: String,
+}
+
+impl Scrape {
+    fn default_path() -> String {
+        "/metrics".into()
+    }
 }
 
 /// A service level objective ([`crate::slo`]): `objective`% of requests succeed (not 5xx) and,
@@ -961,6 +982,7 @@ impl Default for Run {
             sidecars: Vec::new(),
             block_on: None,
             slo: None,
+            metrics: None,
         }
     }
 }
@@ -1010,6 +1032,17 @@ impl Run {
             && (!(90.0..=99.999).contains(&s.objective) || !(1..=60).contains(&s.window_days) || s.latency_ms.is_some_and(|ms| !(1..=60_000).contains(&ms)))
         {
             return bad("slo is {objective: 90–99.999, latency_ms?: 1–60000, window_days?: 1–60}");
+        }
+        if let Some(m) = &self.metrics {
+            if !matches!(self.kind, RunType::Web | RunType::Worker) {
+                return bad("metrics is a web service's or a worker's (it's read from its running instances)");
+            }
+            if !m.path.starts_with('/') || m.path.len() > 200 || !m.path.bytes().all(|b| b.is_ascii_graphic()) {
+                return bad("metrics.path is an absolute path, like /metrics");
+            }
+            if m.port == Some(0) || (m.port.is_none() && (self.kind != RunType::Web || self.tcp)) {
+                return bad("metrics.port is the port its endpoint listens on (a worker's or a TCP service's has no other)");
+            }
         }
         if self.slo.is_some() && (self.kind != RunType::Web || self.tcp) {
             return bad("slo is a web service's (it's read from its requests)");
