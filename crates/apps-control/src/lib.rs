@@ -1574,6 +1574,7 @@ impl Apps {
             heartbeats: r.heartbeats.clone(),
             split: r.split.clone(),
             mirror: r.mirror.clone(),
+            pause_schedule: r.pause_schedule.clone(),
             frozen: r.freeze.as_ref().is_some_and(|f| f.on(code_sql::now_ms())),
             freeze: r.freeze.clone(),
             heartbeat_urls: Default::default(),
@@ -1694,7 +1695,7 @@ impl Apps {
     pub async fn put_environment(self: &Arc<Self>, service: &str, env: &str, body: Value) -> Result<Environment> {
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "checks", "heartbeats", "split", "mirror", "freeze", "paused", "held", "hostname", "traces", "egress", "vitals", "report", "preview_host"].contains(&k.as_str()) {
+            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "checks", "heartbeats", "split", "mirror", "freeze", "pause_schedule", "paused", "held", "hostname", "traces", "egress", "vitals", "report", "preview_host"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
@@ -1820,6 +1821,16 @@ impl Apps {
             Some(_) => return Err(Error::BadRequest(format!("routes is at most {} routes, or null", crate::model::MAX_ROUTES))),
         };
         // Uptime checks: unique names, at most MAX_CHECKS.
+        // Paused by the clock: weekly windows, as a freeze's.
+        let pause_schedule = match o.get("pause_schedule") {
+            None => None,
+            Some(Value::Null) => Some(None),
+            Some(v) => {
+                let p: crate::freeze::PauseSchedule = serde_json::from_value(v.clone()).map_err(|e| Error::BadRequest(format!("pause_schedule: {e}")))?;
+                p.check()?;
+                Some(Some(p))
+            }
+        };
         // Traffic mirroring: another environment of this service, as a split names one.
         let mirror = match o.get("mirror") {
             None => None,
@@ -2076,29 +2087,10 @@ impl Apps {
             Some(_) => return Err(Error::BadRequest("feedback is a boolean".into())),
         }
         if let Some(on) = paused {
-            let (sid, e) = (service.to_string(), env.to_string());
-            self.db(move |s| s.set_paused(&sid, &e, on)).await?;
-            // Resumed: its secrets are watched again (a watch ends itself while it's paused).
-            if !on {
-                self.watch_secrets_of(service).await;
-            }
-            // At once on its owner: what runs stops, and the next tick keeps no floor; resumed,
-            // the next tick (or request) starts what it wants again.
-            let live = self.live(service, env);
-            live.set_paused(on);
-            if on {
-                live.sleep().await;
-                // What runs to its end (a job, a cron run) stops too: nothing of it runs.
-                self.cancel_jobs(service, env);
-                let runs: Vec<String> = self.running_runs.lock().iter().filter(|(_, (s, e))| s == service && e == env).map(|(id, _)| id.clone()).collect();
-                for id in runs {
-                    if let Some(t) = self.cancels.lock().get(&id) {
-                        t.cancel();
-                    }
-                }
-            } else {
-                live.tick().await;
-            }
+            self.set_env_paused(service, env, on).await?;
+            // A person's say holds over the schedule until its window ends ("held").
+            let k = format!("sched-paused:{service}/{env}");
+            let _ = self.db(move |s| s.set_state(&k, "held")).await;
             self.changed(service);
         }
         if let Some(m) = maintenance {
@@ -2137,6 +2129,11 @@ impl Apps {
             let (sid, e) = (service.to_string(), env.to_string());
             self.db(move |s| s.set_headers(&sid, &e, &rules)).await?;
             self.live(service, env).forget_gate();
+            self.changed(service);
+        }
+        if let Some(p) = pause_schedule {
+            let (sid, e) = (service.to_string(), env.to_string());
+            self.db(move |s| s.set_pause_schedule(&sid, &e, p.as_ref())).await?;
             self.changed(service);
         }
         if let Some(m) = mirror {
@@ -3541,6 +3538,36 @@ impl Apps {
         });
         let burning = crate::slo::burning(&slo, &minutes, now_min).map(|(i, rate, w)| json!({ "indicator": i, "burn_rate": (rate * 10.0).round() / 10.0, "window": w }));
         Ok(json!({ "slo": slo, "availability": show(avail), "latency": latency, "burning": burning }))
+    }
+
+    /// Pause or resume an environment (`PUT … {paused}`, its pause schedule): at once on its
+    /// owner, what runs stops; resumed, the next tick starts what it wants again.
+    pub(crate) async fn set_env_paused(self: &Arc<Self>, service: &str, env: &str, on: bool) -> Result<()> {
+        let (sid, e) = (service.to_string(), env.to_string());
+        self.db(move |s| s.set_paused(&sid, &e, on)).await?;
+        // Resumed: its secrets are watched again (a watch ends itself while it's paused).
+        if !on {
+            self.watch_secrets_of(service).await;
+        }
+        // At once on its owner: what runs stops, and the next tick keeps no floor; resumed,
+        // the next tick (or request) starts what it wants again.
+        let live = self.live(service, env);
+        live.set_paused(on);
+        if on {
+            live.sleep().await;
+            // What runs to its end (a job, a cron run) stops too: nothing of it runs.
+            self.cancel_jobs(service, env);
+            let runs: Vec<String> = self.running_runs.lock().iter().filter(|(_, (s, e))| s == service && e == env).map(|(id, _)| id.clone()).collect();
+            for id in runs {
+                if let Some(t) = self.cancels.lock().get(&id) {
+                    t.cancel();
+                }
+            }
+        } else {
+            live.tick().await;
+        }
+        self.changed(service);
+        Ok(())
     }
 
     /// An environment's metrics over the last `minutes`: a point a minute for up to a week, a

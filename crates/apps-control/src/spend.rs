@@ -85,6 +85,37 @@ impl Apps {
         Ok(())
     }
 
+    /// Owned environments with a pause schedule ([`crate::freeze::PauseSchedule`]): paused as
+    /// a window starts, resumed as it ends, only what the schedule itself paused (a person's
+    /// pause stays theirs, and their resume inside a window holds until the next one).
+    pub(crate) async fn pause_pass(self: &Arc<Self>, services: &[crate::store::ServiceRow], now: i64) {
+        let Ok(envs) = self.db(|s| s.all_environments()).await else { return };
+        for e in envs.into_iter().filter(|e| e.pause_schedule.is_some() && services.iter().any(|s| s.id == e.service && self.owns(&s.id))) {
+            let on = e.pause_schedule.as_ref().is_some_and(|p| p.on(now));
+            let key = format!("sched-paused:{}/{}", e.service, e.name);
+            let (k, k2) = (key.clone(), key.clone());
+            let ours = self.db(move |s| s.get_state(&k)).await.ok().flatten();
+            let log = self.logs.sink(format!("env:{}/{}", e.service, e.name), crate::logs::Stream::System);
+            match (on, e.paused, ours.as_deref()) {
+                // A window started: paused, and marked as the schedule's, once per window.
+                (true, false, None) => {
+                    let w = now.to_string();
+                    if self.db(move |s| s.claim_state(&k2, &w)).await.unwrap_or(false) && self.set_env_paused(&e.service, &e.name, true).await.is_ok() {
+                        log.line("paused by its schedule");
+                    }
+                }
+                // Its window ended: resumed if the schedule paused it (not a person's "held").
+                (false, paused, Some(mark)) => {
+                    if paused && mark != "held" && self.set_env_paused(&e.service, &e.name, false).await.is_ok() {
+                        log.line("resumed by its schedule");
+                    }
+                    let _ = self.db(move |s| s.take_state(&k2)).await;
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// A person's deploy into a frozen environment ([`crate::freeze`]): a 409 that says why, or
     /// with `override` let through and written in the audit log.
     pub(crate) async fn refuse_frozen(self: &Arc<Self>, service: &str, env: &str, over: bool, actor: Option<String>) -> Result<()> {

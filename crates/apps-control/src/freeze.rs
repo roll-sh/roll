@@ -31,6 +31,33 @@ pub struct Window {
     pub to: String,
 }
 
+/// When an environment is paused by the clock ([`crate::Apps::pause_pass`]): a staging site off
+/// at night and over the weekend, as Railway's app sleeping and a scheduled scale to zero save.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PauseSchedule {
+    pub windows: Vec<Window>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+}
+
+impl PauseSchedule {
+    fn as_freeze(&self) -> Freeze {
+        Freeze { until: None, windows: self.windows.clone(), timezone: self.timezone.clone(), reason: String::new() }
+    }
+
+    pub fn check(&self) -> Result<()> {
+        if self.windows.is_empty() {
+            return Err(Error::BadRequest("pause_schedule: at least one window".into()));
+        }
+        self.as_freeze().check().map_err(|e| Error::BadRequest(e.to_string().replace("freeze:", "pause_schedule:")))
+    }
+
+    pub fn on(&self, now: i64) -> bool {
+        !self.windows.is_empty() && self.as_freeze().on(now)
+    }
+}
+
 const DAYS: [&str; 7] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 
 /// Minutes into the week (Monday 00:00 is 0) of `"fri 17:00"`.
