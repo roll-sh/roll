@@ -50,6 +50,12 @@ pub fn router(engine: Arc<Engine>) -> Router {
                 .route("/v1/previews/{id}/metrics", get(metrics))
                 .route("/v1/previews/{id}/errors", get(errors))
                 .route("/v1/previews/{id}/errors/count", get(error_count))
+                // A shell in a running service: its session lives on the holder too.
+                .route("/v1/previews/{id}/shell/sessions", post(open_shell))
+                .route("/v1/previews/{id}/shell/sessions/{sh}", axum::routing::delete(close_shell))
+                .route("/v1/previews/{id}/shell/sessions/{sh}/screen", get(shell_screen))
+                .route("/v1/previews/{id}/shell/sessions/{sh}/keys", post(shell_keys))
+                .route("/v1/previews/{id}/shell/sessions/{sh}/resize", post(shell_resize))
                 .route_layer(axum::middleware::from_fn_with_state(engine.clone(), on_leader))
                 .with_state(engine.clone()),
         )
@@ -593,6 +599,95 @@ async fn requests(AxState(e): S, Path(id): Path<String>) -> crate::Result<Json<V
 
 /// A service's last lines; with `follow`, server-sent events: `event: service` (its name), then
 /// one event per line as it comes, with keep-alives.
+#[derive(serde::Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct ShellAsk {
+    service: Option<String>,
+    cols: Option<u16>,
+    rows: Option<u16>,
+}
+
+/// `POST …/{id}/shell/sessions {service?, cols?, rows?}`: a shell in the service, said in the
+/// activity as the person who opened it (or the token's: the operator's).
+async fn open_shell(AxState(e): S, Path(id): Path<String>, who: Option<axum::Extension<roll_auth::SignedIn>>, b: Bytes) -> crate::Result<Response> {
+    check_id(&id)?;
+    let ask: ShellAsk = if b.is_empty() { ShellAsk::default() } else { serde_json::from_slice(&b).map_err(|err| Error::BadRequest(format!("bad body: {err}")))? };
+    let by = who.map_or_else(|| "the operator".to_string(), |w| w.handle.clone());
+    let sid = e.open_shell(&id, ask.service.as_deref(), &by, ask.cols.unwrap_or(120), ask.rows.unwrap_or(32)).await?;
+    Ok((StatusCode::CREATED, Json(json!({ "id": sid }))).into_response())
+}
+
+/// The shell's screen: its scrollback, then what comes, as base64 chunks; `event: closed` at its end.
+async fn shell_screen(AxState(e): S, Path((id, sh)): Path<(String, String)>) -> crate::Result<Response> {
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    use base64::Engine as _;
+    check_id(&id)?;
+    let (first, rx, closed) = e.shell_screen(&id, &sh)?;
+    let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+    let head = futures::stream::iter((!first.is_empty()).then(|| Ok::<_, std::convert::Infallible>(Event::default().data(b64(&first)))));
+    let rest = futures::stream::unfold((rx, closed, false), move |(mut rx, mut closed, done)| async move {
+        if done {
+            return None;
+        }
+        loop {
+            if *closed.borrow() {
+                return Some((Ok(Event::default().event("closed").data("")), (rx, closed, true)));
+            }
+            tokio::select! {
+                got = rx.recv() => match got {
+                    Ok(chunk) => return Some((Ok(Event::default().data(b64(&chunk))), (rx, closed, false))),
+                    // A viewer that fell behind misses what it missed (the shell goes on).
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return Some((Ok(Event::default().event("closed").data("")), (rx, closed, true))),
+                },
+                c = closed.changed() => if c.is_err() {
+                    return Some((Ok(Event::default().event("closed").data("")), (rx, closed, true)));
+                },
+            }
+        }
+    });
+    let mut r = Sse::new(futures::StreamExt::chain(head, rest)).keep_alive(KeepAlive::default()).into_response();
+    r.headers_mut().insert("x-accel-buffering", axum::http::HeaderValue::from_static("no"));
+    Ok(r)
+}
+
+/// `{data}`: keys typed, base64, at most 64 KiB.
+async fn shell_keys(AxState(e): S, Path((id, sh)): Path<(String, String)>, b: Bytes) -> crate::Result<StatusCode> {
+    use base64::Engine as _;
+    check_id(&id)?;
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Keys {
+        data: String,
+    }
+    let k: Keys = serde_json::from_slice(&b).map_err(|err| Error::BadRequest(format!("bad body: {err}")))?;
+    let data = base64::engine::general_purpose::STANDARD.decode(k.data.as_bytes()).map_err(|_| Error::BadRequest("data is base64".into()))?;
+    if data.len() > 64 << 10 {
+        return Err(Error::BadRequest("at most 64 KiB of keys at once".into()));
+    }
+    e.shell_keys(&id, &sh, data).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn shell_resize(AxState(e): S, Path((id, sh)): Path<(String, String)>, b: Bytes) -> crate::Result<StatusCode> {
+    check_id(&id)?;
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Size {
+        cols: u16,
+        rows: u16,
+    }
+    let s: Size = serde_json::from_slice(&b).map_err(|err| Error::BadRequest(format!("bad body: {err}")))?;
+    e.shell_resize(&id, &sh, s.cols, s.rows).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn close_shell(AxState(e): S, Path((id, sh)): Path<(String, String)>) -> crate::Result<StatusCode> {
+    check_id(&id)?;
+    e.close_shell(&id, &sh)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn logs(AxState(e): S, Path(id): Path<String>, Query(q): Query<LogsQuery>) -> crate::Result<Response> {
     check_id(&id)?;
     let lines = q.lines.unwrap_or(200).clamp(1, 2000);

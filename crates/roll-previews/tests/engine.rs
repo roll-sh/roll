@@ -429,6 +429,45 @@ async fn a_previews_runtime_output_goes_to_the_projects_log_drains_masked() {
     assert_eq!(all[2].3, "ready");
 }
 
+/// A shell in a preview's running service (Render's shell, `heroku run`): what's typed reaches its
+/// terminal, a viewer who joins later gets the scrollback, the activity says who opened it, a
+/// preview holds a few at once, and closing one ends it.
+#[tokio::test]
+async fn a_shell_in_a_previews_service_is_said_and_bounded() {
+    let e = env(json!({ "enabled": true }));
+    e.code.open(change("chg_sh", 14));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_sh").unwrap().unwrap();
+    let sid = e.engine.open_shell(&p.id, None, "ana", 80, 24).await.unwrap();
+    let web = e.engine.store.services(&p.id).unwrap().into_iter().next().unwrap().name;
+    assert!(e.engine.store.activity(&p.id).unwrap().iter().any(|a| a.message == format!("ana opened a shell in {web}")));
+    let (first, mut rx, closed) = e.engine.shell_screen(&p.id, &sid).unwrap();
+    assert!(first.is_empty());
+    e.engine.shell_keys(&p.id, &sid, b"echo hi\r".to_vec()).await.unwrap();
+    let mut seen = Vec::new();
+    while seen.len() < 8 {
+        seen.extend_from_slice(&tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv()).await.unwrap().unwrap());
+    }
+    assert_eq!(seen, b"echo hi\r");
+    assert_eq!(e.engine.shell_screen(&p.id, &sid).unwrap().0, b"echo hi\r", "a later viewer gets the scrollback");
+    assert!(matches!(e.engine.shell_screen("pv_other", &sid), Err(roll_previews::Error::NotFound(_))), "a shell is only its preview's");
+    let mut more = Vec::new();
+    for _ in 1..roll_previews::engine::shell::MAX_SHELLS {
+        more.push(e.engine.open_shell(&p.id, Some(&web), "ana", 80, 24).await.unwrap());
+    }
+    assert!(matches!(e.engine.open_shell(&p.id, None, "ana", 80, 24).await, Err(roll_previews::Error::Conflict(_))), "a preview holds a few at once");
+    e.engine.close_shell(&p.id, &sid).unwrap();
+    assert!(*closed.borrow(), "closing it ends it");
+    for _ in 0..200 {
+        if e.engine.shell_screen(&p.id, &sid).is_err() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(e.engine.shell_screen(&p.id, &sid).is_err(), "a closed shell is gone");
+    e.engine.open_shell(&p.id, None, "ana", 80, 24).await.expect("its place is free again");
+}
+
 /// A preview's output is read by anyone who can read the preview, and its code (a fork's too) can
 /// print what it was given: its services' logs, its jobs' output and what its page said in a
 /// screenshot run (the pull request's comment) show a secret's value as `***` (as checks'

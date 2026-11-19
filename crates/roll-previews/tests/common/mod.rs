@@ -349,6 +349,15 @@ impl Apps for FakeApps {
     async fn logs(&self, _: &str, _: &str, _: usize) -> Vec<String> {
         self.log.lock().clone()
     }
+    /// A terminal that echoes what it's sent.
+    async fn shell(&self, _: &str, service: &str, _: u16, _: u16) -> anyhow::Result<Option<roll_previews::ports::Shell>> {
+        let (ours, theirs) = tokio::io::duplex(1 << 16);
+        tokio::spawn(async move {
+            let (mut r, mut w) = tokio::io::split(theirs);
+            let _ = tokio::io::copy(&mut r, &mut w).await;
+        });
+        Ok(Some(roll_previews::ports::Shell { id: format!("exec-{service}"), io: Box::new(ours) }))
+    }
     async fn drain_from(&self, _: &str, _: &str, since: &str) -> Option<tokio::sync::mpsc::Receiver<(bool, String)>> {
         self.drain_since.lock().push(since.to_string());
         let (tx, rx) = tokio::sync::mpsc::channel(16);

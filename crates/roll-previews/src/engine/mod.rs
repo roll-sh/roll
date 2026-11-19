@@ -161,6 +161,8 @@ pub struct Engine {
     pub git_report: std::sync::OnceLock<Arc<dyn crate::ports::GitReport>>,
     /// The projects' log drains (roll apps'); unset, previews' runtime output goes to none.
     pub drains: std::sync::OnceLock<Arc<dyn crate::ports::Drains>>,
+    /// Open shells in previews' services (`shell.rs`), by id.
+    shells: Mutex<HashMap<String, Arc<shell::ShellSession>>>,
     /// Each running service's follower to the drains (`drains.rs`), by preview and service.
     draining: Mutex<HashMap<(String, String), Arc<drains::Draining>>>,
     /// When this process started, as Docker's `--since` takes it: a follower's first start.
@@ -283,6 +285,7 @@ impl Engine {
             passing: tokio::sync::Mutex::new(()),
             drains: std::sync::OnceLock::new(),
             draining: Mutex::new(HashMap::new()),
+            shells: Mutex::new(HashMap::new()),
             started_stamp: drains::now_stamp(),
         })
     }
@@ -838,6 +841,7 @@ mod discover;
 mod drains;
 mod env;
 mod masks;
+pub mod shell;
 pub use masks::ErrorMasks;
 pub use requests::error_span;
 mod requests;

@@ -1190,6 +1190,8 @@ impl Engine {
             }
             self.store.set_ran_head(&r.id, None)?;
         }
+        // Its shells end with it.
+        self.close_shells_of(&r.id);
         for p in self.store.pinned(&r.id)? {
             let name = format!("{}@{}", p.service, p.revision);
             self.apps.remove(&r.id, &name).await.map_err(|e| anyhow::anyhow!("removing {name}: {e:#}"))?;

@@ -374,6 +374,16 @@ RSS1=$(ps -o rss= -p "$PID")
 api POST "/v1/previews/$PV/refresh" >/dev/null; sleep 3
 ACTIVE=$(api GET "/v1/previews/$PV" | jq_ "d['cost']")
 
+say "a shell in the preview's service: what's typed runs in its container, with its variables"
+SH=$(api POST "/v1/previews/$PV/shell/sessions" '{"cols":100,"rows":30}' | jq_ "d['id']")
+KEYS=$(printf 'echo "seen $ROLL_PREVIEW"; exit\r' | base64 -w0)
+api POST "/v1/previews/$PV/shell/sessions/$SH/keys" "{\"data\":\"$KEYS\"}" >/dev/null
+# The screen as server-sent events, base64 chunks, until the shell's `exit` closes it.
+SCREEN=$(curl -sS -N --max-time 30 "http://$API/v1/previews/$PV/shell/sessions/$SH/screen" | sed -n 's/^data: *//p' | while read -r l; do [ -n "$l" ] && echo "$l" | base64 -d 2>/dev/null; done)
+case "$SCREEN" in *"seen $PV"*) ;; *) echo "the shell should run in the service's container with its variables: $SCREEN"; exit 1;; esac
+api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d]" | grep -q "opened a shell in web" || { echo "the activity should say a shell was opened"; exit 1; }
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://$API/v1/previews/$PV/shell/sessions/$SH/keys" -H 'content-type: application/json' -d '{"data":"eA=="}')" = 404 ] || { echo "a shell that exited should be gone"; exit 1; }
+
 say "a screenshot of the service (github.screenshot), once per head"
 # And /pricing, which the test service doesn't have (a 404 page, one failed request).
 api PUT "/v1/previews/projects/$PRJ/settings" '{"github":{"screenshot":true,"pages":["/pricing","web:/","wiki:/"],"widths":[768],"hide":[".clock"],"budget":{"load_ms":60000},"openapi":"/openapi.json","endpoints":["/openapi.json"],"states":[{"name":"tab","page":"/","steps":[{"press":"Tab"}]}],"browsers":["firefox","webkit-phone"]}}' >/dev/null
