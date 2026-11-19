@@ -6978,6 +6978,7 @@ dependencies = [
  "futures",
  "getrandom 0.4.3",
  "hkdf",
+ "hmac 0.12.1",
  "ignore",
  "libc",
  "model-gateway",

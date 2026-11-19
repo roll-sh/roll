@@ -106,6 +106,13 @@ pub trait Deliver: Send + Sync {
         let _ = (bucket, key);
         Err(crate::Error::Link("buckets aren't on this server".into()))
     }
+    /// POST an AWS identity's login (aws_identity.rs) to `https://<host>/`, an STS endpoint
+    /// [`crate::aws_identity::check`] passed, with `headers` and `body` as signed: the status and
+    /// the answer (at most `limit` bytes), over the same guarded client, without redirects.
+    fn sts(&self, host: &str, headers: &[(String, String)], body: &str, limit: usize) -> Result<(u16, Vec<u8>)> {
+        let _ = (host, headers, body, limit);
+        Err(crate::Error::Link("AWS logins aren't on this server".into()))
+    }
 }
 
 /// How a batch is sent: `roll` (signed JSON), `splunk` (HTTP Event Collector events,
