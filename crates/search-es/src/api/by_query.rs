@@ -271,6 +271,8 @@ pub struct Status {
     pub batches: u64,
     pub version_conflicts: u64,
     pub noops: u64,
+    /// Searches sent again after the source rejected them (a remote's 429: `retries.search`).
+    pub search_retries: u64,
     pub failures: Vec<Value>,
     pub failure_status: u16,
     pub requests_per_second: f64,
@@ -313,7 +315,7 @@ impl Status {
         m.insert("batches".into(), Value::from(self.batches as i64));
         m.insert("version_conflicts".into(), Value::from(self.version_conflicts as i64));
         m.insert("noops".into(), Value::from(self.noops as i64));
-        m.insert("retries".into(), obj! { "bulk" => 0, "search" => 0 });
+        m.insert("retries".into(), obj! { "bulk" => 0, "search" => self.search_retries as i64 });
         if human {
             m.insert("throttled".into(), Value::from(crate::units::TimeValue::millis(self.throttled_millis as i64).human()));
         }
@@ -369,6 +371,7 @@ impl Status {
         self.batches += o.batches;
         self.version_conflicts += o.version_conflicts;
         self.noops += o.noops;
+        self.search_retries += o.search_retries;
         self.throttled_millis += o.throttled_millis;
         self.throttled_until_millis = self.throttled_until_millis.max(o.throttled_until_millis);
         self.failures.extend(o.failures.iter().cloned());
@@ -441,6 +444,15 @@ impl Live {
 
     fn is_cancelled(&self) -> bool {
         self.cancelled.iter().any(|c| c.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    /// Wakes whatever the task (and its slices) waits on, so a cancel takes effect now, not
+    /// when a throttle's delay or a remote's answer ends.
+    pub fn wake(&self) {
+        for k in self.children.lock().clone() {
+            k.wake();
+        }
+        self.changed.notify_waiters();
     }
 
     /// The current counters (a sliced task: the sum of its slices, each listed).
@@ -895,6 +907,91 @@ fn description(kind: Kind, indices: &[String], dest: Option<&str>) -> String {
     }
 }
 
+/// Runs `f` until it ends, or `None` once the task is cancelled (checked when woken by
+/// [`Live::wake`], and every 250ms besides): a remote that's slow to answer doesn't hold a
+/// cancelled task.
+async fn until_cancelled<F: std::future::Future>(live: &Live, f: F) -> Option<F::Output> {
+    tokio::pin!(f);
+    loop {
+        if live.is_cancelled() {
+            return None;
+        }
+        let woken = live.changed.notified();
+        tokio::select! {
+            r = &mut f => return Some(r),
+            _ = woken => {}
+            _ = tokio::time::sleep(std::time::Duration::from_millis(250)) => {}
+        }
+    }
+}
+
+/// A reindex whose source is a remote cluster ([`super::remote`]): one page at a time, each
+/// written before the next is fetched, throttled between pages like a local scroll; the
+/// remote's search context is released however the run ends.
+async fn reindex_remote(ctx: &Ctx<'_>, plan: &ReindexPlan, req: &super::by_query_request::ByScroll, remote: &super::by_query_request::Remote, max_docs: Option<u64>, live: &Arc<Live>) -> EsResult<SliceRun> {
+    let rules = super::remote::Rules::of_cluster(ctx.cluster)?;
+    let client = super::remote::Client::new(&rules, remote, Some(ctx.cluster.breakers.request(ctx.cluster, &ctx.state())))?;
+    let mut src = match until_cancelled(live, super::remote::RemoteSource::open(client, req, remote, max_docs)).await {
+        None => return Ok((cancelled_before_start(live), Vec::new())),
+        Some(r) => r?,
+    };
+    let mut s = Status::default();
+    let mut touched = Vec::new();
+    let mut throttle = Throttle::new(live.clone());
+    let mut read = 0u64;
+    let run: EsResult<()> = async {
+        loop {
+            if !throttle.wait().await {
+                s.canceled = Some("by user request".into());
+                // The task shows why it stopped (`BulkByScrollTask.Status.reasonCancelled`).
+                publish(live, &s, &throttle);
+                return Ok(());
+            }
+            let page = match until_cancelled(live, src.next()).await {
+                None => {
+                    s.canceled = Some("by user request".into());
+                    publish(live, &s, &throttle);
+                    return Ok(());
+                }
+                Some(p) => p?,
+            };
+            s.search_retries = src.retries;
+            if let Some(t) = page.total {
+                s.total = max_docs.map_or(t, |m| t.min(m));
+            }
+            let mut docs = page.docs;
+            if let Some(m) = max_docs {
+                docs.truncate(m.saturating_sub(read).min(usize::MAX as u64) as usize);
+            }
+            if docs.is_empty() {
+                publish(live, &s, &throttle);
+                return Ok(());
+            }
+            throttle.start(docs.len());
+            s.batches += 1;
+            read += docs.len() as u64;
+            let sds: Vec<SourceDoc> = docs.into_iter().map(|d| SourceDoc { index: d.index, id: d.id, routing: d.routing, version: d.version, source: d.source }).collect();
+            reject_versioned_deletes(ctx, plan, sds.iter())?;
+            let mut stop = false;
+            for sd in &sds {
+                if let Flow::Stop = reindex_doc(ctx, plan, sd, &mut s, &mut touched).await? {
+                    stop = true;
+                }
+            }
+            publish(live, &s, &throttle);
+            // A batch's failures end the run once the whole batch was sent.
+            if stop || max_docs.is_some_and(|m| read >= m) {
+                return Ok(());
+            }
+        }
+    }
+    .await;
+    src.close().await;
+    run?;
+    s.throttled_millis = throttle.millis();
+    Ok((s, touched))
+}
+
 /// The outcome of one write: counted, or stop the slice.
 enum Flow {
     Next,
@@ -1327,7 +1424,7 @@ async fn reindex_doc(ctx: &Ctx<'_>, p: &ReindexPlan, d: &SourceDoc, s: &mut Stat
 pub async fn reindex(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let req = super::by_query_request::parse_reindex(ctx)?;
     if let Some(r) = &req.remote {
-        super::remote::check_whitelist(ctx.cluster.config.node_setting("reindex.remote.whitelist"), r)?;
+        super::remote::Rules::of_cluster(ctx.cluster)?.check(r)?;
     }
     let remote = req.remote.clone();
     let remote_req = remote.is_some().then(|| req.clone());
@@ -1355,7 +1452,11 @@ pub async fn reindex(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let script = req.script.clone();
     let slice = req.slice();
     let action = "indices:data/write/reindex";
-    let desc = description(Kind::Reindex, &src_indices, Some(&dest_index));
+    let mut desc = description(Kind::Reindex, &src_indices, Some(&dest_index));
+    if let Some(r) = &remote {
+        // `ReindexRequest.getDescription`: `reindex from [<remote>][<indices>] to [<dest>]`.
+        desc = format!("reindex from [{}][{}] to [{dest_index}]", r.describe(), src_indices.join(", "));
+    }
     let d2 = desc.clone();
     run_as_task(ctx, Kind::Reindex, opts.rps, action, desc, |task, live| async move {
         let st = ctx.state();
@@ -1374,36 +1475,9 @@ pub async fn reindex(ctx: &Ctx<'_>) -> EsResult<Reply> {
             proceed: opts.proceed,
         };
         let (s, touched) = match (&remote, &remote_req) {
-            // A remote source is read as one scroll; its documents are written in batches.
-            (Some(r), Some(rq)) => {
-                let (docs, batches) = super::remote::fetch(rq, r, opts.max_docs).await?;
-                let mut s = Status { total: docs.len() as u64, batches, ..Default::default() };
-                let mut touched = Vec::new();
-                let mut throttle = Throttle::new(live.clone());
-                let mut stop = false;
-                for chunk in docs.chunks(batch.max(1) as usize) {
-                    if !throttle.before_batch(chunk.len()).await {
-                        s.canceled = Some("by user request".into());
-                        // The task shows why it stopped (`BulkByScrollTask.Status.reasonCancelled`).
-                        publish(&live, &s, &throttle);
-                        break;
-                    }
-                    let sds: Vec<SourceDoc> = chunk.iter().map(|d| SourceDoc { index: d.index.clone(), id: d.id.clone(), routing: d.routing.clone(), version: d.version, source: d.source.clone() }).collect();
-                    reject_versioned_deletes(ctx, &plan, sds.iter())?;
-                    for sd in &sds {
-                        if let Flow::Stop = reindex_doc(ctx, &plan, sd, &mut s, &mut touched).await? {
-                            stop = true;
-                        }
-                    }
-                    publish(&live, &s, &throttle);
-                    // A batch's failures end the run once the whole batch was sent.
-                    if stop {
-                        break;
-                    }
-                }
-                s.throttled_millis = throttle.millis();
-                (s, touched)
-            }
+            // A remote source is read page by page; boxed, as the request path runs near a debug
+            // build's stack limit.
+            (Some(r), Some(rq)) => Box::pin(reindex_remote(ctx, &plan, rq, r, opts.max_docs, &live)).await?,
             _ => {
                 let one = |slice: Option<(u32, u32)>, max_docs: Option<u64>, live: Arc<Live>| {
                     let (src_indices, query, plan) = (&src_indices, &query, &plan);

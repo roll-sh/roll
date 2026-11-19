@@ -68,6 +68,8 @@ pub fn router(control: Arc<Control>) -> Router {
         .route("/v1/search/clusters/{id}/analytics", get(analytics))
         .route("/v1/search/clusters/{id}/keys", post(create_key))
         .route("/v1/search/clusters/{id}/keys/{key}", axum::routing::delete(delete_key))
+        .route("/v1/search/clusters/{id}/migrate/inspect", post(migrate_inspect))
+        .route("/v1/search/clusters/{id}/migrate", post(migrate))
         .route("/v1/search/clusters/{id}/remotes", get(remotes))
         .route("/v1/search/clusters/{id}/remotes/{alias}", axum::routing::put(link_remote).delete(unlink_remote))
         .route("/v1/search/clusters/{id}/indices/{index}", get(index_get).put(index_create).delete(index_delete))
@@ -599,6 +601,18 @@ async fn create_key(State(c): State<AppState>, Path(id): Path<String>, Json(k): 
 async fn delete_key(State(c): State<AppState>, Path((id, key)): Path<(String, String)>) -> Result<StatusCode, ControlError> {
     c.delete_key(&id, &key).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Lists an Elasticsearch or OpenSearch cluster's indices for a migration into cluster `id`
+/// (`crate::migrate`): fetched by roll, never by the browser; the credentials aren't kept.
+async fn migrate_inspect(State(c): State<AppState>, Path(id): Path<String>, Json(b): Json<crate::migrate::InspectRequest>) -> ApiResult<Value> {
+    Ok(Json(c.migrate_inspect(&id, &b.source).await?))
+}
+
+/// Copies the picked indices' definitions into cluster `id` and starts a reindex from remote
+/// for each (`wait_for_completion=false`: the answer lists the tasks).
+async fn migrate(State(c): State<AppState>, Path(id): Path<String>, Json(b): Json<crate::migrate::MigrateRequest>) -> ApiResult<Value> {
+    Ok(Json(c.migrate(&id, &b).await?))
 }
 
 /// The remote clusters a cluster holds credentials for (never the credentials).

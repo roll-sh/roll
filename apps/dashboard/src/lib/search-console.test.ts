@@ -254,6 +254,8 @@ test("history keeps requests without their credentials", () => {
   assert.ok(!out.includes("sk-a") && !out.includes("hunter22"), out);
   assert.ok(out.includes('"api_key" : "<redacted>"') && out.includes('"password":"<redacted>"'), out);
   assert.ok(out.includes('"model_id":"m"') && out.includes('"key":"kept"'), out);
+  const remote = redactSecrets('POST /_reindex\n{"source":{"remote":{"host":"https://h:443","headers":{"Authorization":"ApiKey c2VjcmV0"}},"index":"a"},"dest":{"index":"a"}}');
+  assert.ok(!remote.includes("c2VjcmV0") && remote.includes('"host":"https://h:443"'), remote);
 });
 
 test("a profiled search's answer as rows per shard", () => {

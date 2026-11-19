@@ -2742,3 +2742,71 @@ async fn an_alias_pattern_over_a_link_and_a_loopback_is_authorized_locally() {
     let m = r.text().await.unwrap();
     assert!(!m.contains("secret doc"), "{m}");
 }
+
+/// A migration from another Elasticsearch-compatible cluster (here another roll cluster on this
+/// node, reached by its REST address as an outside cluster would be): the remote's indices are
+/// listed through roll, the picked one's mappings, settings and aliases copied with what roll
+/// doesn't take dropped and said why, its documents reindexed by a task the console follows;
+/// the remote's password is in no answer, error or task.
+#[tokio::test]
+async fn migrating_from_another_cluster() {
+    use reqwest::Method;
+    let e = env_with(|c| c.node_settings.push((search_control::REINDEX_ALLOW_PRIVATE.into(), "true".into()))).await;
+    let (old, old_pw) = creds(&e.post("/v1/search/clusters", json!({ "name": "old" })).await);
+    e.post("/v1/search/clusters", json!({ "name": "new" })).await;
+    let index = json!({
+        "settings": { "number_of_shards": 2, "refresh_interval": "5s", "routing": { "allocation": { "include": { "_tier_preference": "data_hot" } } } },
+        "mappings": { "properties": { "name": { "type": "text" }, "sku": { "type": "keyword" }, "price": { "type": "double" } } },
+        "aliases": { "catalog": {} },
+    });
+    let (s, v) = e.es(&old, &old_pw, Method::PUT, "/products", Some(index)).await;
+    assert_eq!(s, 200, "{v}");
+    for (i, name) in ["kettle", "teapot", "mug"].iter().enumerate() {
+        let (s, v) = e.es(&old, &old_pw, Method::PUT, &format!("/products/_doc/{i}?refresh=true"), Some(json!({ "name": name, "sku": format!("s{i}"), "price": i as f64 + 0.5 }))).await;
+        assert_eq!(s, 201, "{v}");
+    }
+    // A write block on the source is the remote's business: it isn't copied.
+    let (s, v) = e.es(&old, &old_pw, Method::PUT, "/products/_settings", Some(json!({ "index.blocks.write": true }))).await;
+    assert_eq!(s, 200, "{v}");
+    let source = json!({ "host": e.es, "username": old, "password": old_pw });
+
+    // A wrong password: the remote's 401, never the password.
+    let (s, v) = e.call(Method::POST, "/v1/search/clusters/new/migrate/inspect", Some(json!({ "source": { "host": e.es, "username": old, "password": "wrong-pass-123" } }))).await;
+    assert_eq!(s, 400, "{v}");
+    assert!(v.to_string().contains("status_exception") && v.to_string().contains("401") && !v.to_string().contains("wrong-pass-123"), "{v}");
+
+    let listed = e.post("/v1/search/clusters/new/migrate/inspect", json!({ "source": source })).await;
+    let row = listed["indices"].as_array().unwrap().iter().find(|r| r["index"] == "products").cloned().unwrap_or_default();
+    assert_eq!((row["docs"].as_i64(), row["aliases"].clone(), row["exists"].as_bool()), (Some(3), json!(["catalog"]), Some(false)), "{listed}");
+    assert!(listed["remote"]["version"].as_str().is_some() && !listed.to_string().contains(&old_pw), "{listed}");
+
+    let started = e.post("/v1/search/clusters/new/migrate", json!({ "source": source, "indices": [{ "index": "products" }], "size": 2 })).await;
+    let r = &started["indices"][0];
+    let task = r["task"].as_str().unwrap_or_else(|| panic!("{started}")).to_string();
+    let dropped: Vec<&str> = r["dropped"].as_array().unwrap().iter().filter_map(|d| d["setting"].as_str()).collect();
+    for s in ["index.uuid", "index.creation_date", "index.blocks.write", "index.routing.allocation.include._tier_preference"] {
+        assert!(dropped.contains(&s), "{s} dropped: {started}");
+    }
+    assert_eq!(r["aliases"], json!(["catalog"]), "{started}");
+    assert!(!started.to_string().contains(&old_pw), "{started}");
+
+    // The console follows the task to its end; nothing it shows holds the password.
+    let (_, done) = e.call(Method::POST, "/v1/search/clusters/new/request", Some(json!({ "method": "GET", "path": format!("/_tasks/{task}?wait_for_completion=true&timeout=30s") }))).await;
+    let t = body(&done);
+    assert_eq!((t["completed"].as_bool(), t["response"]["created"].as_i64(), t["response"]["batches"].as_i64()), (Some(true), Some(3), Some(2)), "{t}");
+    let desc = t["task"]["description"].as_str().unwrap_or_default();
+    assert!(desc.starts_with("reindex from [host=127.0.0.1 port=") && desc.ends_with("][products] to [products]"), "{desc}");
+    assert!(!done.to_string().contains(&old_pw), "{done}");
+
+    let (_, found) = e.call(Method::POST, "/v1/search/clusters/new/request", Some(json!({ "method": "POST", "path": "/catalog/_search?refresh=true", "body": { "query": { "term": { "sku": "s1" } } } }))).await;
+    let found = body(&found);
+    assert_eq!(found["hits"]["hits"][0]["_source"]["name"], "teapot", "{found}");
+    let (_, settings) = e.call(Method::POST, "/v1/search/clusters/new/request", Some(json!({ "method": "GET", "path": "/products/_settings?flat_settings=true" }))).await;
+    let settings = body(&settings);
+    assert_eq!(settings["products"]["settings"]["index.number_of_shards"], "2", "{settings}");
+    assert!(settings["products"]["settings"]["index.blocks.write"].is_null(), "{settings}");
+
+    // Again: the index is there now, so it isn't overwritten.
+    let again = e.post("/v1/search/clusters/new/migrate", json!({ "source": source, "indices": [{ "index": "products" }] })).await;
+    assert!(again["indices"][0]["error"].as_str().is_some_and(|m| m.contains("already exists")), "{again}");
+}

@@ -19,6 +19,7 @@ pub mod api;
 pub mod cluster;
 pub mod control;
 pub mod meter;
+pub mod migrate;
 pub mod pricing;
 pub mod remotes;
 pub mod store;
@@ -31,3 +32,4 @@ pub use search_es::seal::Sealer;
 pub use search_es::api::snapshots::S3_ALLOW_PRIVATE;
 /// Node setting that lets inference endpoints reach private addresses (local development, tests).
 pub use search_es::xpack::inference::http::ALLOW_PRIVATE as INFERENCE_ALLOW_PRIVATE;
+pub use search_es::api::remote::ALLOW_PRIVATE as REINDEX_ALLOW_PRIVATE;

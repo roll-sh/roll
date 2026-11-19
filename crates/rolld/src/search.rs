@@ -103,6 +103,10 @@ pub struct SearchArgs {
     /// on this machine, tests).
     #[arg(long = "search-inference-allow-private", env = "ROLL_SEARCH_INFERENCE_ALLOW_PRIVATE", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
     pub search_inference_allow_private: bool,
+    /// Let reindex from remote (and the dashboard's migration) reach private addresses (local
+    /// development with an Elasticsearch on this machine, tests).
+    #[arg(long = "search-reindex-allow-private", env = "ROLL_SEARCH_REINDEX_ALLOW_PRIVATE", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
+    pub search_reindex_allow_private: bool,
     /// Search clusters a signed-in person may own, branches included (0: no cap). The operator
     /// and admins aren't capped.
     #[arg(long = "search-max-clusters-per-person", env = "ROLL_SEARCH_MAX_CLUSTERS_PER_PERSON", default_value_t = 50)]
@@ -177,6 +181,9 @@ impl Search {
         }
         if args.search_inference_allow_private {
             cfg.node_settings.push((search_control::INFERENCE_ALLOW_PRIVATE.to_string(), "true".to_string()));
+        }
+        if args.search_reindex_allow_private {
+            cfg.node_settings.push((search_control::REINDEX_ALLOW_PRIVATE.to_string(), "true".to_string()));
         }
         // Watch passwords, connector and Fleet secrets are sealed in cluster state under the
         // deployment's key; without one they're stored as given (as on Elasticsearch).

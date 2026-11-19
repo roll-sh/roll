@@ -28,8 +28,8 @@ use crate::units::TimeValue;
 /// `AbstractBulkByScrollRequest.DEFAULT_SCROLL_SIZE`.
 pub const DEFAULT_SCROLL_SIZE: i32 = 1000;
 
-/// `source.remote` of a reindex.
-#[derive(Clone, Debug, Default)]
+/// `source.remote` of a reindex. Its `Debug` leaves the credentials out.
+#[derive(Clone, Default)]
 pub struct Remote {
     pub scheme: String,
     pub host: String,
@@ -42,6 +42,44 @@ pub struct Remote {
     pub connect_timeout: Option<TimeValue>,
     /// `source.query`, sent to the remote cluster as is (`RemoteInfo.queryForRemote`).
     pub query: Option<Value>,
+}
+
+impl std::fmt::Debug for Remote {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.describe())?;
+        if self.username.is_some() {
+            f.write_str(" username=<<>>")?;
+        }
+        if self.password.is_some() {
+            f.write_str(" password=<<>>")?;
+        }
+        if !self.headers.is_empty() {
+            let names: Vec<&str> = self.headers.iter().map(|(k, _)| k.as_str()).collect();
+            write!(f, " headers=[{}]", names.join(","))?;
+        }
+        Ok(())
+    }
+}
+
+impl Remote {
+    /// `RemoteInfo.toString()` as Elasticsearch 9.5.5 prints it in a task's description:
+    /// `scheme=https host=h port=9243` (`http` left out), never the query or a credential.
+    pub fn describe(&self) -> String {
+        let mut b = String::new();
+        if self.scheme != "http" {
+            b.push_str(&format!("scheme={} ", self.scheme));
+        }
+        b.push_str(&format!("host={} port={}", self.host, self.port));
+        if let Some(p) = &self.path_prefix {
+            b.push_str(&format!(" pathPrefix={p}"));
+        }
+        b
+    }
+
+    /// `host` as `source.remote.host` takes it (`scheme://host:port[/pathPrefix]`).
+    pub fn parse(host: &str) -> EsResult<Remote> {
+        parse_host(host)
+    }
 }
 
 /// `dest` of a reindex (the `IndexRequest` template).
@@ -383,9 +421,20 @@ fn remote_info(mut remote: Map, source: &mut Map) -> EsResult<Remote> {
 
 /// `new URI(host)` with a required port: `scheme://host:port[/path]`.
 fn parse_host(h: &str) -> EsResult<Remote> {
+    // Errors quote the host without any `user:password@` it carries.
+    let shown = match h.split_once("://") {
+        Some((scheme, rest)) => {
+            let end = rest.find('/').unwrap_or(rest.len());
+            match rest[..end].rfind('@') {
+                Some(at) => format!("{scheme}://{}", &rest[at + 1..]),
+                None => h.to_string(),
+            }
+        }
+        None => h.to_string(),
+    };
     let bad = |why: &str| {
-        EsError::illegal_argument(format!("[host] must be of the form [scheme]://[host]:[port](/[pathPrefix])? but was [{h}]"))
-            .caused_by(EsError::java(400, "u_r_i_syntax_exception", format!("{why}: {h}")))
+        EsError::illegal_argument(format!("[host] must be of the form [scheme]://[host]:[port](/[pathPrefix])? but was [{shown}]"))
+            .caused_by(EsError::java(400, "u_r_i_syntax_exception", format!("{why}: {shown}")))
     };
     let no_port = "The port was not defined in the [host]";
     let Some((scheme, rest)) = h.split_once("://") else { return Err(bad(no_port)) };

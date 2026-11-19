@@ -224,6 +224,9 @@ pub fn cancel(ctx: &Ctx) -> EsResult<Reply> {
             Some(t) if !t.cancellable => Reply::ok(failure(&node, EsError::illegal_argument(format!("task [{raw}] doesn't support cancellation")))),
             Some(t) => {
                 t.cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+                if let Some(l) = &t.live {
+                    l.wake();
+                }
                 // The cancelled task as it now stands (`CancelTasksResponse`).
                 Reply::ok(by_node(ctx, &[t], false))
             }
@@ -242,6 +245,9 @@ pub fn cancel(ctx: &Ctx) -> EsResult<Reply> {
     let matched: Vec<TaskInfo> = matched.into_iter().filter(|t| t.cancellable).collect();
     for t in &matched {
         t.cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(l) = &t.live {
+            l.wake();
+        }
     }
     Reply::ok(by_node(ctx, &matched, false))
 }
