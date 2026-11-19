@@ -11743,10 +11743,13 @@ hashes are PostgreSQL's.
   '%special%requests%'`, and below stages (the customer hash probe) the batch only filters, so
   `Pre::worth` counts only the 1.4% it drops as its work and switches the batch off after 2,048
   rows of each chunk: the row path then walks every row to o_comment and evaluates the LIKE
-  through `Lazy::text` (`from_utf8`). A row whose filter the batch decided counted as its work,
-  with the shorter walk, is built (`b4`, `~/.cache/a261/dev` branch `gate-b4`) and not yet
-  gated; the real fix is the brief's: the probe and the partial count as one batch kernel over
-  the decoded columns.
+  through `Lazy::text` (`from_utf8`). Dropped too
+  (`~/.cache/a261/patches/dropped-worth-passed-and-read-passed.patch`): a row whose filter the
+  batch decided counted as its work below stages, with the shorter walk (b4 against b2, 1
+  pair): q13 +1.7%, q14 +1.2, q20 +0.9, the 22 +0.30%: kept on, the batch's decode and filter
+  plus the row path's walk of each passed row cost more than the row path alone, as `worth`
+  assumes. The fix is the brief's: the probe and the partial count as one batch kernel over the
+  decoded columns (no row made for an order at all).
 
 - **cand/a261-3 (on cand/a261-2: the docs only): the PGO training at TPC-H SF 1, its classes
   merged with equal weight** (`tools/pgo-train.sh`: each class's raw profiles in a directory of
@@ -11790,6 +11793,24 @@ hashes are PostgreSQL's.
   PGO (spills and reloads around the 32-byte store of each `(i128, u32)`), the other functions
   the same. The fix is in the walk's code (fewer live values across the step dispatch), for both
   builds: item 3's.
+- **The same-day table** (BENCH "Analytic CPU, round 6"; two rotated rounds, stopped there
+  under the coordinator's rule of 2026-11-19 to keep measuring short): user instructions over
+  the 22, PostgreSQL 159.3 G, pgrust 90.4 G (one counted pass each: the first round's reference
+  passes lost their counts to the perf container, which couldn't see the containers' cgroups
+  until it ran with `--cgroupns host`), plain dist base 113.4 -> the round's stack 111.8 G
+  (-1.4%), PGO base (old training) 103.6 -> the stack built by `tools/dist-pgo.sh` itself (new
+  training) 102.3 G (-1.3%): the PGO stack 1.13x pgrust (from 1.17x). Every pass's 22 result
+  hashes are PostgreSQL's. Wall times are no measure here: the references' passes ran at 6.3-7.4
+  foreign cores, roll's at 2.4-3.2. Still behind PostgreSQL in instructions (PGO stack): q02 2.32
+  / 1.15 G, q20 1.13 / 0.43, q11 0.76 / 0.37, q08 1.51 / 0.92, q04 1.96 / 1.01, q19 0.48 / 0.39,
+  q14 1.39 / 1.05, q03, q05, q07, q15, q17, q21; ahead on q09, q12, q18, q16 (2.52 / 3.51), q13
+  (5.98 / 6.75), q01, q10.
+- **Left** (largest first): the serial executor's joined rows (q02, q11, q20: the narrowed-row
+  version that won cycles but lost instructions needs a cheaper pick, above); q20's serial part
+  scan read twice under the heap-order emulation (agents 260's / 262's area: the TID pass and
+  merge of `next_heap_ordered` each run); the typed walk's numeric step under PGO (q01, q06:
+  `pos` and the slots in registers); q13's probe and partial count as one batch kernel; the
+  store's point gets and key compares in q07, q08 (agent 255's).
 
 ## Analytic CPU, round 5 (agent 258)
 
