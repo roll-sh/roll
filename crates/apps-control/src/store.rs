@@ -215,6 +215,19 @@ CREATE TABLE IF NOT EXISTS deploy_secrets (
     deployment TEXT PRIMARY KEY,
     digest TEXT NOT NULL
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS status_pages (
+    project TEXT PRIMARY KEY,
+    slug TEXT NOT NULL UNIQUE,
+    title TEXT NOT NULL,
+    items TEXT NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS status_days (
+    key TEXT NOT NULL,
+    day INTEGER NOT NULL,
+    ok INTEGER NOT NULL,
+    bad INTEGER NOT NULL,
+    PRIMARY KEY (key, day)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS deploy_scans (
     deployment TEXT PRIMARY KEY,
     service TEXT NOT NULL,
@@ -949,6 +962,7 @@ impl Store {
             )?;
             c.execute("DELETE FROM deploy_steps WHERE deployment IN (SELECT id FROM deployments WHERE service = ?)", [id])?;
             c.execute("DELETE FROM state WHERE key LIKE ?", [format!("%:{id}/%")])?;
+            c.execute("DELETE FROM status_days WHERE key LIKE ?", [format!("%:{id}/%")])?;
             for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "preview_hosts", "runs", "jobs", "metrics", "usage", "form_submissions", "deploy_scans"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ?"), [id])?;
             }
@@ -1576,6 +1590,53 @@ impl Store {
 
     /// The project's secrets' digest ([`crate::integrations::SecretSource::digest`]) a deployment
     /// went live with.
+    /// A project's status page made or changed: a new one gets `slug`, a changed one keeps its own.
+    pub fn put_status_page(&self, project: &str, slug: &str, title: &str, items: &str) -> Result<crate::status_page::Page> {
+        self.db.execute(
+            "INSERT INTO status_pages (project, slug, title, items) VALUES (?, ?, ?, ?) ON CONFLICT (project) DO UPDATE SET title = excluded.title, items = excluded.items",
+            params![project, slug, title, items],
+        )?;
+        self.status_page(project)?.ok_or_else(|| Error::NotFound(format!("{project} has no status page")))
+    }
+
+    pub fn status_page(&self, project: &str) -> Result<Option<crate::status_page::Page>> {
+        self.status_page_where("project", project)
+    }
+
+    pub fn status_page_by_slug(&self, slug: &str) -> Result<Option<crate::status_page::Page>> {
+        self.status_page_where("slug", slug)
+    }
+
+    fn status_page_where(&self, col: &str, v: &str) -> Result<Option<crate::status_page::Page>> {
+        let row: Option<(String, String, String, String)> = self.db.query_row(&format!("SELECT project, slug, title, items FROM status_pages WHERE {col} = ?"), [v], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).optional()?;
+        row.map(|(project, slug, title, items)| Ok(crate::status_page::Page { project, slug, title, items: json(&items)? })).transpose()
+    }
+
+    pub fn delete_status_page(&self, project: &str) -> Result<()> {
+        match self.db.execute("DELETE FROM status_pages WHERE project = ?", [project])? {
+            0 => Err(Error::NotFound(format!("{project} has no status page"))),
+            _ => Ok(()),
+        }
+    }
+
+    /// One more check run or ping (`ok`), or failure or miss, on `day` (days since 1970).
+    pub fn status_day_add(&self, key: &str, day: i64, ok: bool) -> Result<()> {
+        let (g, b) = if ok { (1, 0) } else { (0, 1) };
+        self.db.execute(
+            "INSERT INTO status_days (key, day, ok, bad) VALUES (?, ?, ?, ?) ON CONFLICT (key, day) DO UPDATE SET ok = status_days.ok + excluded.ok, bad = status_days.bad + excluded.bad",
+            params![key, day, g, b],
+        )?;
+        self.db.execute("INSERT INTO state (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", params![format!("status-last:{key}"), if ok { "up" } else { "down" }])?;
+        if day % 7 == 0 {
+            self.db.execute("DELETE FROM status_days WHERE day < ?", [day - crate::status_page::DAYS])?;
+        }
+        Ok(())
+    }
+
+    pub fn status_days(&self, key: &str, since_day: i64) -> Result<Vec<(i64, i64, i64)>> {
+        Ok(self.db.query("SELECT day, ok, bad FROM status_days WHERE key = ? AND day >= ? ORDER BY day", params![key, since_day], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?)
+    }
+
     /// A deployment's scan: its counts and its findings (most severe first, at most [`crate::model::MAX_VULNERABILITIES`]).
     pub fn set_scan(&self, service: &str, deployment: &str, summary: &crate::model::ScanSummary, items: &[crate::model::Vulnerability]) -> Result<()> {
         let (s, i) = (serde_json::to_string(summary).expect("a scan serializes"), serde_json::to_string(items).expect("findings serialize"));
