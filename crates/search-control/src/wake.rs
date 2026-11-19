@@ -246,6 +246,13 @@ impl LifecycleHooks for ControlHooks {
             c.note_loaded(&cluster.name, true).await;
             // Loaded, its scheduler runs its jobs.
             c.note_wake_at(&cluster.name, None).await;
+            // A load with `branch_of` marked what the branch inherited (or failed): no later one
+            // marks again. Should this fail, the next load finds the marker and leaves it.
+            if cluster.config.branch_of.is_some()
+                && let Err(e) = c.store.set_inherit_pending(&cluster.name, false).await
+            {
+                tracing::warn!(cluster = cluster.name, error = %e, "recording that a branch's inheritance is marked failed");
+            }
         }
         let token = self.wakes.claim(&cluster.name);
         match self.control.get().and_then(Weak::upgrade) {
@@ -266,7 +273,9 @@ impl LifecycleHooks for ControlHooks {
         self.meter.unloading(cluster).await;
         if let Some(c) = self.control.get().and_then(Weak::upgrade) {
             c.note_loaded(&cluster.name, false).await;
-            c.note_wake_at(&cluster.name, search_es::opensearch::jobs::next_due(&cluster.state())).await;
+            let st = cluster.state();
+            c.note_wake_at(&cluster.name, search_es::opensearch::jobs::next_due(&st)).await;
+            c.note_suggestions(&cluster.name, &st).await;
         }
     }
 }

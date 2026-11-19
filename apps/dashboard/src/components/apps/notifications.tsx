@@ -20,6 +20,7 @@ const EVENTS: { value: NotifyEvent; label: string }[] = [
   { value: "alert.slo", label: "Error budget burning" },
   { value: "alert.log", label: "Log alert" },
   { value: "error.new", label: "New error" },
+  { value: "error.regressed", label: "A resolved error came back" },
   { value: "cron.failed", label: "Cron run failed" },
   { value: "job.failed", label: "Job failed" },
   { value: "domain.active", label: "Domain live" },
@@ -31,11 +32,14 @@ const EVENTS: { value: NotifyEvent; label: string }[] = [
   { value: "check.down", label: "Uptime check down" },
   { value: "heartbeat.missed", label: "Heartbeat missed" },
   { value: "deploy.vulnerable", label: "New known vulnerabilities" },
+  { value: "audit", label: "Every change people make (audit log)" },
 ];
 
 const KINDS: { value: NotifyTarget["kind"]; label: string; placeholder: string }[] = [
   { value: "slack", label: "Slack", placeholder: "https://hooks.slack.com/services/…" },
   { value: "discord", label: "Discord", placeholder: "https://discord.com/api/webhooks/…" },
+  { value: "teams", label: "Microsoft Teams", placeholder: "A Workflows webhook URL (…logic.azure.com/…)" },
+  { value: "googlechat", label: "Google Chat", placeholder: "https://chat.googleapis.com/v1/spaces/…" },
   { value: "webhook", label: "Webhook", placeholder: "https://example.com/roll-events" },
   { value: "email", label: "Email", placeholder: "" },
   // On-call: each failure an incident, closed when its alert resolves or the next deploy works.
@@ -50,7 +54,7 @@ export function NotificationsPanel({ project, projectName, runner }: { project: 
   const [url, setUrl] = useState("");
   const [region, setRegion] = useState<"us" | "eu">("us");
   const oncall = kind === "pagerduty" || kind === "opsgenie";
-  const [events, setEvents] = useState<NotifyEvent[]>(["check.down", "heartbeat.missed", "alert.slo", "deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"]);
+  const [events, setEvents] = useState<NotifyEvent[]>(["check.down", "heartbeat.missed", "alert.slo", "deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "error.regressed", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"]);
   const [envs, setEnvs] = useState("");
   const [previews, setPreviews] = useState(false);
   // Only some of the project's services (none chosen: every one).

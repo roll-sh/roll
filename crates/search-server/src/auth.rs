@@ -15,12 +15,23 @@
 use crate::catalog::{ClusterSpec, Credential};
 
 /// Credentials as presented in the `Authorization` header.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum Presented {
     None,
     Basic { user: String, password: String },
     ApiKey { id: String, secret: String },
     Bearer(String),
+}
+
+impl std::fmt::Debug for Presented {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Presented::None => f.write_str("None"),
+            Presented::Basic { user, .. } => f.debug_struct("Basic").field("user", user).field("password", &"<redacted>").finish(),
+            Presented::ApiKey { id, .. } => f.debug_struct("ApiKey").field("id", id).field("secret", &"<redacted>").finish(),
+            Presented::Bearer(_) => f.write_str("Bearer(<redacted>)"),
+        }
+    }
 }
 
 impl Presented {
@@ -176,13 +187,24 @@ pub fn cluster_named(headers: &hyper::HeaderMap, domain: Option<&str>) -> Option
 }
 
 /// Which cluster a request is for and the secret to check (`None` when no secret was given).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Claim {
     pub cluster: String,
     /// The Basic user (for credentials bound to a user).
     pub user: Option<String>,
     pub api_key_id: Option<String>,
     pub secret: Option<String>,
+}
+
+impl std::fmt::Debug for Claim {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Claim")
+            .field("cluster", &self.cluster)
+            .field("user", &self.user)
+            .field("api_key_id", &self.api_key_id)
+            .field("secret", &self.secret.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 pub fn claim(p: &Presented, host_cluster: Option<&str>) -> Option<Claim> {

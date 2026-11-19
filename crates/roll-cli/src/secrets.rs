@@ -291,6 +291,9 @@ pub enum Secrets {
         /// table asks again).
         #[arg(long, conflicts_with_all = ["show", "clear"])]
         approve: bool,
+        /// Create the project `-p` names when there's none (a terminal asks instead).
+        #[arg(long, conflicts_with_all = ["show", "clear", "approve"])]
+        create: bool,
     },
     /// List a folder's secrets (values masked; `--reveal` to show them).
     #[command(alias = "list")]
@@ -1411,21 +1414,29 @@ pub enum TransitCmd {
 pub enum Tokens {
     #[command(alias = "list")]
     Ls,
-    /// Create a token; it's printed once.
+    /// Create a token; it's printed once. It reaches the environments named with `--for-env`, else
+    /// this command's own (`-e`, `ROLL_ENV` or the directory's setup) unless that one is protected,
+    /// and expires in 90 days.
     Create {
         name: String,
-        /// Environments it reaches (default: all).
+        /// Environments it reaches (repeatable). A protected one is reached only when named here.
         #[arg(long = "for-env")]
         envs: Vec<String>,
+        /// Every environment, protected ones and ones made later included.
+        #[arg(long, conflicts_with = "envs")]
+        all_environments: bool,
         /// Folders it reaches (default: all).
         #[arg(long = "for-path")]
         paths: Vec<String>,
         /// read, reveal, write, delete, admin (default: read and reveal).
         #[arg(long = "action")]
         actions: Vec<String>,
-        /// Days until it expires.
+        /// Days until it expires (default: 90).
         #[arg(long)]
         ttl_days: Option<i64>,
+        /// It never expires (a warning says so).
+        #[arg(long, conflicts_with = "ttl_days")]
+        no_expiry: bool,
         /// Only from this address or CIDR (repeatable).
         #[arg(long = "allow-ip")]
         allow_ips: Vec<String>,
@@ -1804,8 +1815,8 @@ fn approval_hint(e: anyhow::Error) -> anyhow::Error {
 }
 
 pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyhow::Result<()> {
-    if let Secrets::Setup { show, clear, approve } = cmd {
-        return setup_dir(api, &args, show, clear, approve).await;
+    if let Secrets::Setup { show, clear, approve, create } = cmd {
+        return setup_dir(api, &args, show, clear, approve, create).await;
     }
     // Opening a link needs no project: the link names its share.
     if let Secrets::Open { link } = &cmd {
@@ -3127,17 +3138,27 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     println!("{}  {:<20} envs {}  paths {}  {}  {}", s(&t["id"]), s(&t["name"]), list(&rule["environments"]), list(&rule["paths"]), actions, state);
                 }
             }
-            Tokens::Create { name, envs, paths, actions, ttl_days, allow_ips } => {
+            Tokens::Create { name, envs, all_environments, paths, actions, ttl_days, no_expiry, allow_ips } => {
                 let actions = if actions.is_empty() { vec!["read".to_string(), "reveal".to_string()] } else { actions };
                 let mut rule = json!({ "product": "secrets", "resources": [{ "project": c.project }], "actions": actions.iter().map(|a| (a.clone(), json!("allow"))).collect::<serde_json::Map<_, _>>() });
-                if !envs.is_empty() {
+                // Least privilege: the API reads a rule without environments as all of them, so
+                // the CLI always says which, and all only when asked.
+                let reach = if all_environments {
+                    "every environment".to_string()
+                } else {
+                    let envs = if envs.is_empty() { vec![token_env(&c, &args).await?] } else { envs };
+                    let named = envs.join(", ");
                     rule["environments"] = json!(envs);
-                }
+                    named
+                };
                 if !paths.is_empty() {
                     rule["paths"] = json!(paths);
                 }
                 let mut body = json!({ "name": name, "rules": [rule] });
-                if let Some(d) = ttl_days {
+                // The API keeps a token without `expires_at` for good: the CLI sends one unless
+                // told not to.
+                let days = if no_expiry { None } else { Some(ttl_days.unwrap_or(90)) };
+                if let Some(d) = days {
                     anyhow::ensure!(d > 0, "--ttl-days is positive");
                     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as i64;
                     body["expires_at"] = json!(now + d * 86_400_000);
@@ -3146,11 +3167,19 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     body["ip_allow"] = json!(allow_ips);
                 }
                 let v = c.call(Method::POST, "/v1/access/tokens", Some(body)).await?;
+                // On stderr, so a script that reads the token or the JSON still sees them.
+                if all_environments {
+                    eprintln!("warning: it reaches every environment, protected ones and ones made later included");
+                }
+                if no_expiry {
+                    eprintln!("warning: it never expires; revoke it when nothing uses it: roll secrets tokens revoke {}", s(&v["grant"]["id"]));
+                }
                 if json_out {
                     return print(&v);
                 }
                 println!("{}", s(&v["token"]));
-                eprintln!("Created {} ({}). This is the only time it's shown: use it as ROLL_TOKEN.", s(&v["grant"]["name"]), s(&v["grant"]["id"]));
+                let life = days.map_or_else(|| "never expires".to_string(), |d| format!("expires in {d} days"));
+                eprintln!("Created {} ({}): {reach}, {}, {life}. This is the only time it's shown: use it as ROLL_TOKEN.", s(&v["grant"]["name"]), s(&v["grant"]["id"]), actions.join("+"));
             }
             Tokens::Revoke { id } => {
                 c.call(Method::DELETE, &format!("/v1/access/tokens/{}", enc(&id)), None).await?;
@@ -4664,9 +4693,26 @@ async fn open_share(api: &Api, link: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The environment a token reaches when `--for-env` names none: the one `-e`, `ROLL_ENV` or the
+/// directory's setup for this project chose (not the `development` fallback), never a protected
+/// one (that's named with `--for-env`).
+async fn token_env(c: &Client<'_>, args: &AtArgs) -> anyhow::Result<String> {
+    let chosen = args.env.clone().or_else(|| std::env::current_dir().ok().and_then(|d| setup::nearest(&d)).filter(|d| d.project == c.project).map(|d| d.env));
+    let Some(env) = chosen.as_deref() else {
+        bail!("which environments may it reach? --for-env ENV (repeatable), or --all-environments; roll secrets setup -e ENV makes one this directory's default");
+    };
+    let e = c.call(Method::GET, &format!("/v1/secrets/projects/{}/environments/{}", enc(&c.project), enc(env)), None).await?;
+    if e["protected"] == true || e["trusted"] == true {
+        bail!("{env} is protected: a token reaches it only when you name it, --for-env {env}");
+    }
+    Ok(env.to_string())
+}
+
 /// `roll secrets setup`: remember (or show, or forget) where this directory's secrets are, approve
-/// what the repo's `roll.toml` suggests, or pick in a terminal.
-async fn setup_dir(api: &Api, args: &AtArgs, show: bool, clear: bool, approve: bool) -> anyhow::Result<()> {
+/// what the repo's `roll.toml` suggests, or pick in a terminal. `-p` names a project, made first
+/// when there's none ([`project_or_create`]).
+#[allow(clippy::fn_params_excessive_bools)]
+async fn setup_dir(api: &Api, args: &AtArgs, show: bool, clear: bool, approve: bool, create: bool) -> anyhow::Result<()> {
     use std::io::IsTerminal;
     let here = std::env::current_dir()?;
     let key = here.to_string_lossy().to_string();
@@ -4733,7 +4779,7 @@ async fn setup_dir(api: &Api, args: &AtArgs, show: bool, clear: bool, approve: b
     }
     let (id, display, env) = match &args.project {
         Some(name) => {
-            let id = project(api, Some(name)).await?;
+            let id = project_or_create(api, name, create).await?;
             (id.clone(), if name.starts_with("prj_") { id } else { name.clone() }, args.env.clone().unwrap_or_else(|| "development".into()))
         }
         None if terminal => pick(api, args.env.as_deref()).await?,
@@ -4824,6 +4870,26 @@ async fn pick(api: &Api, env: Option<&str>) -> anyhow::Result<(String, String, S
     }
     let env = envs[choose("Environment", envs.len())?].0.clone();
     Ok((id, name, env))
+}
+
+/// `setup -p NAME`'s project, made first when there's none by that name: with `--create`, or after
+/// a yes in a terminal. It's made through the workspace's own route (the dashboard's), as whoever
+/// this CLI is signed in as.
+async fn project_or_create(api: &Api, name: &str, create: bool) -> anyhow::Result<String> {
+    if !name.starts_with("prj_") {
+        let list = api.get("/v1/workspace/projects").await.context("finding the project by name (pass its prj_… id with a scoped token)")?;
+        if !list.as_array().into_iter().flatten().any(|p| p["name"] == name) {
+            let terminal = std::io::IsTerminal::is_terminal(&std::io::stdin());
+            if !create && !(terminal && ask(&format!("No project named {name}. Create project \"{name}\"?"))?) {
+                bail!("no project named {name}: roll secrets setup -p {name} --create makes it");
+            }
+            let p = api.call(Method::POST, "/v1/workspace/projects", Some(json!({ "name": name }))).await.with_context(|| format!("creating project {name}"))?;
+            let id = p["id"].as_str().map(String::from).context("the new project's answer has no id")?;
+            eprintln!("Created project {name} ({id})");
+            return Ok(id);
+        }
+    }
+    project(api, Some(name)).await
 }
 
 /// The template filled from the environment, and the leases of the dynamic credentials in it.

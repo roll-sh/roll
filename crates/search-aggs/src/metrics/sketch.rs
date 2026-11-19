@@ -109,7 +109,7 @@ fn median_absolute_deviation(sketch: &mut TDigest) -> f64 {
 }
 
 /// `InternalMedianAbsoluteDeviation`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct MedianAbsoluteDeviation {
     pub sketch: TDigest,
     pub value: f64,
@@ -203,7 +203,7 @@ fn whiskers(q1: f64, q3: f64, centroids: &[(f64, u64)], max: f64) -> (f64, f64) 
 }
 
 /// A boxplot's sketch: a digest, or a union state once exponential histograms take part.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum BoxState {
     TDigest(TDigest),
     Union(Box<UnionState>),
@@ -226,7 +226,7 @@ impl BoxState {
 }
 
 /// `InternalBoxplot`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Boxplot {
     pub state: BoxState,
     pub format: DocValueFormat,

@@ -481,6 +481,83 @@ async fn sandboxes_need_a_backend_and_a_server_secret() {
     assert!(v["error"].as_str().unwrap().contains("ROLL_SECRET_KEY"));
 }
 
+/// roll secrets as it answers a person: `usr_ada` may reveal acme's development, nobody else may.
+#[derive(Default)]
+struct Reveals {
+    /// `consumer by` of every ask that reached it.
+    asked: Mutex<Vec<String>>,
+}
+
+#[async_trait::async_trait]
+impl code_control::SecretEnv for Reveals {
+    async fn for_repo(&self, _: &str, _: &str, _: &str) -> anyhow::Result<Vec<(String, String)>> {
+        anyhow::bail!("not in this test")
+    }
+    async fn for_owner(&self, _: &str, project: &str, environment: &str, consumer: &str, who: code_control::Asker<'_>) -> anyhow::Result<code_control::Revealed> {
+        let by = who.user.map(|u| u.user.clone()).or(who.operator.then(|| "operator".to_string())).unwrap_or_default();
+        self.asked.lock().push(format!("{consumer} {by}"));
+        match (by.as_str(), project, environment) {
+            ("usr_ada", "acme", "development") => Ok(code_control::Revealed { by, values: vec![("DATABASE_URL".into(), "postgres://dev-only".into())] }),
+            _ => Err(code_control::Refused(format!("{by} may not reveal {environment}")).into()),
+        }
+    }
+    async fn leaks(&self, _: &str, _: Vec<String>) -> anyhow::Result<Vec<(usize, String, String, String)>> {
+        Ok(vec![])
+    }
+}
+
+/// Managing the owner isn't revealing a project's values: `secrets` copies an environment into a
+/// sandbox only for someone roll secrets lets reveal it, and the sandbox names them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sandbox_gets_secrets_only_from_someone_who_may_reveal_them() {
+    let w = world(|_| {}).await;
+    let secrets = Arc::new(Reveals::default());
+    w.a.code.set_secret_env(secrets.clone());
+    let body = json!({ "name": "box", "secrets": { "project": "acme", "environment": "development" } });
+    let acme = w.a.code.owner_or_404("acme").unwrap().id;
+    // A session of acme's (rolld's gate signed them in), as `user`.
+    let as_person = |user: &str| {
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/v1/code/agents/acme/sandboxes")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(body.to_string()))
+            .unwrap();
+        req.extensions_mut().insert(roll_auth::SignedIn { user: user.into(), handle: user.into(), admin: false, code_owner: Some(acme.clone()), session: "ses_1".into() });
+        req
+    };
+    let answer = |r: axum::response::Response| async move {
+        let s = r.status();
+        let b = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
+        (s, serde_json::from_slice::<Value>(&b).unwrap())
+    };
+
+    // acme's owner token, a person who can't reveal development: 403, and nothing made.
+    let (s, v) = w.req("POST", "/v1/code/agents/acme/sandboxes", Some(body.clone())).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{v}");
+    let (s, v) = answer(w.a.send(as_person("usr_bob")).await).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{v}");
+    assert!(v["error"].as_str().unwrap().contains("may not reveal development"), "{v}");
+    // An agent token never manages the owner, so roll secrets isn't even asked.
+    let (_, agent) = w.a.req("POST", "/v1/code/owners/acme/tokens", Some(json!({ "name": "agent:bot" })), Some(ADMIN)).await;
+    let (s, _) = w.a.req("POST", "/v1/code/agents/acme/sandboxes", Some(body.clone()), agent["token"].as_str()).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    assert_eq!(secrets.asked.lock().len(), 2, "{:?}", secrets.asked.lock());
+    assert_eq!(w.req("GET", "/v1/code/agents/acme/sandboxes", None).await.1["sandboxes"], json!([]));
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    assert!(w.mock.lock().creates.is_empty(), "a refused sandbox reached the backend");
+
+    // Someone who may: the values reach the sandbox, and it names who copied them.
+    let (s, made) = answer(w.a.send(as_person("usr_ada")).await).await;
+    assert_eq!(s, StatusCode::CREATED, "{made}");
+    assert!(!made.to_string().contains("postgres://dev-only"), "{made}");
+    let id = made["sandbox"]["id"].as_str().unwrap().to_string();
+    assert_eq!(made["sandbox"]["secrets_by"], "usr_ada");
+    assert_eq!(secrets.asked.lock().last().unwrap(), &format!("sandbox:{id} usr_ada"));
+    w.until(&id, "running", status_is("running")).await;
+    assert_eq!(w.mock.lock().creates[0]["env"]["DATABASE_URL"], "postgres://dev-only");
+}
+
 /// The agent37 client on its own: a wrong key is a clear, key-free error; huge answers are
 /// refused rather than read.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

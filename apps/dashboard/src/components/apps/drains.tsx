@@ -8,6 +8,9 @@ const SOURCES: { value: DrainSource; label: string; title: string }[] = [
   { value: "runtime", label: "Runtime output", title: "What its instances write, and roll's lines about them" },
   { value: "http", label: "Requests", title: "The access log: a line a request" },
   { value: "build", label: "Builds", title: "Each deploy's build output" },
+  { value: "audit", label: "Audit log", title: "Every change people make, as it's written (a SIEM's copy)" },
+  { value: "traces", label: "Traces", title: "The spans its instances send (OTLP drains get them at /v1/traces)" },
+  { value: "metrics", label: "Metrics", title: "The metrics its instances send or roll scrapes (OTLP drains get them at /v1/metrics)" },
 ];
 
 /** `Name: value` a line, as a vendor's docs show its key; what doesn't parse is named. */

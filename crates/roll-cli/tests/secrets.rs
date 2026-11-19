@@ -20,6 +20,8 @@ async fn roll(api: &str, env: &[(&str, &str)], args: &[&str], stdin: Option<&str
         .env_remove("ROLL_PROJECT")
         .env_remove("ROLL_ENV")
         .env_remove("ROLL_ADMIN_TOKEN")
+        // A CI runner sets CI=true, which turns masking on; the tests that want it pass it.
+        .env_remove("CI")
         .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -56,7 +58,7 @@ async fn create_token(axum::extract::State(tokens): axum::extract::State<Tokens>
     let (secret, id) = (format!("rlt_cli{}", t.len()), format!("tok_{}", t.len()));
     let name = b["name"].as_str().unwrap().to_string();
     t.insert(secret.clone(), roll_auth::Grant { ask_otherwise: false, user: None, id: id.clone().into(), name: name.clone().into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(roll_auth::scope::Scope(rules)) });
-    axum::Json(serde_json::json!({ "grant": { "id": id, "name": name }, "token": secret }))
+    axum::Json(serde_json::json!({ "grant": { "id": id, "name": name, "rules": b["rules"], "expires_at": b["expires_at"] }, "token": secret }))
 }
 
 async fn gate(axum::extract::State(tokens): axum::extract::State<Tokens>, mut req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
@@ -615,6 +617,50 @@ async fn roll_run_watch_restarts_on_a_write_waits_out_failures_and_passes_sigter
     let status = tokio::time::timeout(Duration::from_secs(10), roll.wait()).await.expect("roll exits with its command").unwrap();
     assert_eq!(status.code(), Some(7));
     assert_eq!(seen(), "one\nterm\ntwo\nterm\n");
+}
+
+/// A token reaches what it's told to, for 90 days: no environment named is refused (or the
+/// directory's own, never a protected one), and forever or everywhere are asked for. `setup` makes
+/// a project that isn't there yet when asked to.
+#[tokio::test]
+async fn tokens_default_to_one_environment_and_90_days_and_setup_creates_its_project() {
+    let Server { api, projects, .. } = start().await;
+    ok(&api, &[], &["secrets", "-p", "shop", "-e", "production", "set", "HOST=db.internal"], None).await;
+    ok(&api, &[], &["secrets", "-p", "shop", "envs", "protect", "production", "--approvals", "1"], None).await;
+    let home = tempfile::tempdir().unwrap();
+    let cfg = home.path().join("config");
+    let cfg = cfg.to_str().unwrap();
+    let here = [("XDG_CONFIG_HOME", cfg), ("ROLL_TEST_CWD", home.path().to_str().unwrap())];
+    let create = |extra: &'static [&'static str]| [&["--json", "secrets", "tokens", "create", "ci"][..], extra].concat();
+
+    let unnamed = roll(&api, &here, &["secrets", "-p", "shop", "tokens", "create", "ci"], None).await;
+    assert!(unnamed.code != Some(0) && unnamed.stderr.contains("--for-env ENV"), "{}", unnamed.stderr);
+
+    // The directory's environment, for 90 days.
+    ok(&api, &here, &["secrets", "setup", "-p", "shop", "-e", "staging"], None).await;
+    let made: serde_json::Value = serde_json::from_str(&ok(&api, &here, &create(&[]), None).await).unwrap();
+    assert_eq!(made["grant"]["rules"][0]["environments"], serde_json::json!(["staging"]));
+    let days = (made["grant"]["expires_at"].as_i64().unwrap() - chrono::Utc::now().timestamp_millis()) as f64 / 86_400_000.0;
+    assert!((89.9..=90.0).contains(&days), "{days} days");
+    let forever = roll(&api, &here, &create(&["--for-env", "staging", "--no-expiry"]), None).await;
+    let forever_grant: serde_json::Value = serde_json::from_str(&forever.stdout).unwrap();
+    assert!(forever_grant["grant"]["expires_at"].is_null() && forever.stderr.contains("warning: it never expires"), "{}", forever.stderr);
+    let everywhere: serde_json::Value = serde_json::from_str(&ok(&api, &here, &create(&["--all-environments"]), None).await).unwrap();
+    assert!(everywhere["grant"]["rules"][0].get("environments").is_none());
+
+    // A protected environment only by name.
+    ok(&api, &here, &["secrets", "setup", "-p", "shop", "-e", "production"], None).await;
+    let guessed = roll(&api, &here, &create(&[]), None).await;
+    assert!(guessed.code != Some(0) && guessed.stderr.contains("--for-env production"), "{}", guessed.stderr);
+    let named: serde_json::Value = serde_json::from_str(&ok(&api, &here, &create(&["--for-env", "production"]), None).await).unwrap();
+    assert_eq!(named["grant"]["rules"][0]["environments"], serde_json::json!(["production"]));
+
+    // A project that isn't there: refused in a script unless --create, which makes it.
+    let missing = roll(&api, &here, &["secrets", "setup", "-p", "web", "-e", "development"], None).await;
+    assert!(missing.code != Some(0) && missing.stderr.contains("--create"), "{}", missing.stderr);
+    ok(&api, &here, &["secrets", "setup", "-p", "web", "-e", "development", "--create"], None).await;
+    assert!(projects.list(roll_workspace::Scope::All).unwrap().iter().any(|p| p.name == "web"));
+    ok(&api, &here, &["secrets", "set", "PORT=3000"], None).await;
 }
 
 /// A repo's roll.toml suggests where its secrets are, and the person approves it (direnv's

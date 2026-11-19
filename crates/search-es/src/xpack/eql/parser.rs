@@ -440,6 +440,37 @@ struct Parser<'a> {
     src: &'a str,
     toks: Vec<Token>,
     pos: usize,
+    /// Nesting of the expression being parsed ([`Parser::nest`]).
+    depth: usize,
+    /// Operators folded in the current top-level expression ([`Parser::fold`]).
+    folds: usize,
+}
+
+/// `EqlParser.MAX_EXPRESSION_DEPTH`, as its pre-scan counts it ([`prescan`]).
+const MAX_EXPRESSION_DEPTH: usize = 250;
+
+/// Operators one top-level expression may chain. Elasticsearch doesn't bound chains (only its
+/// JVM stack does), but the tree is walked and dropped recursively, and a stack overflow aborts
+/// the whole node: roll's own bound.
+const MAX_CHAINED: usize = 1000;
+
+/// `EqlParser`'s pre-scan of the tokens, before anything parses: parentheses nest, and a run
+/// of `not`s or signs adds to the nesting it is in.
+fn prescan(src: &str, toks: &[Token]) -> Result<(), EsError> {
+    let (mut parens, mut run, mut operand) = (0usize, 0usize, false);
+    for t in toks {
+        match &t.tok {
+            Tok::Op("(") => (parens, run, operand) = (parens + 1, 0, false),
+            Tok::Op(")") => (parens, run, operand) = (parens.saturating_sub(1), 0, true),
+            Tok::Kw("not") => (run, operand) = (run + 1, false),
+            Tok::Op("-" | "+") if !operand => run += 1,
+            other => (run, operand) = (0, matches!(other, Tok::Ident(_) | Tok::QuotedIdent(_) | Tok::TildeIdent(_) | Tok::Str(_) | Tok::Int(_) | Tok::Decimal(_) | Tok::Kw("null" | "true" | "false") | Tok::Op("]"))),
+        }
+        if parens + run > MAX_EXPRESSION_DEPTH {
+            return Err(error_at(src, t.start, format!("EQL statement exceeded the maximum expression depth allowed ({MAX_EXPRESSION_DEPTH})")));
+        }
+    }
+    Ok(())
 }
 
 /// How a token reads in `mismatched input '...'` messages.
@@ -910,11 +941,35 @@ impl<'a> Parser<'a> {
         Ok(EventFilter { category, condition })
     }
 
+    fn too_long(&self) -> EsError {
+        error_at(self.src, self.start(), format!("EQL statement chains more than {MAX_CHAINED} operators in one expression"))
+    }
+
+    /// Runs `f` one nesting level deeper (on a fresh stack segment when this one runs low).
+    /// Parses one nesting level deeper (on a fresh stack segment when this one runs low; the
+    /// pre-scan bounds how deep).
+    fn nest<R>(&mut self, f: impl FnOnce(&mut Self) -> Result<R, EsError>) -> Result<R, EsError> {
+        self.depth += 1;
+        let r = crate::stack::maybe_grow(|| f(self));
+        self.depth -= 1;
+        r
+    }
+
+    /// One more node on top of a chain (`a + b + c` is as deep as it is long).
+    fn fold(&mut self) -> Result<(), EsError> {
+        self.folds += 1;
+        if self.folds > MAX_CHAINED { Err(self.too_long()) } else { Ok(()) }
+    }
+
     // booleanExpression: OR < AND < NOT.
     fn boolean(&mut self) -> Result<Expr, EsError> {
+        if self.depth == 0 {
+            self.folds = 0;
+        }
         let mut left = self.and_expr()?;
         while self.is_kw("or") {
             self.bump();
+            self.fold()?;
             let right = self.and_expr()?;
             let (start, end) = (left.start, right.end);
             left = Expr { kind: ExprKind::Or(Box::new(left), Box::new(right)), start, end };
@@ -926,6 +981,7 @@ impl<'a> Parser<'a> {
         let mut left = self.not_expr()?;
         while self.is_kw("and") {
             self.bump();
+            self.fold()?;
             let right = self.not_expr()?;
             let (start, end) = (left.start, right.end);
             left = Expr { kind: ExprKind::And(Box::new(left), Box::new(right)), start, end };
@@ -937,7 +993,7 @@ impl<'a> Parser<'a> {
         if self.is_kw("not") {
             let start = self.start();
             self.bump();
-            let inner = self.not_expr()?;
+            let inner = self.nest(Self::not_expr)?;
             let end = inner.end;
             return Ok(Expr { kind: ExprKind::Not(Box::new(inner)), start, end });
         }
@@ -983,6 +1039,7 @@ impl<'a> Parser<'a> {
                 _ => return Ok(left),
             };
             self.bump();
+            self.fold()?;
             let right = self.mul_expr()?;
             let (start, end) = (left.start, right.end);
             left = Expr { kind: ExprKind::Arith(op, Box::new(left), Box::new(right)), start, end };
@@ -999,6 +1056,7 @@ impl<'a> Parser<'a> {
                 _ => return Ok(left),
             };
             self.bump();
+            self.fold()?;
             let right = self.unary_expr()?;
             let (start, end) = (left.start, right.end);
             left = Expr { kind: ExprKind::Arith(op, Box::new(left), Box::new(right)), start, end };
@@ -1010,7 +1068,7 @@ impl<'a> Parser<'a> {
             let start = self.start();
             let neg = self.is_op("-");
             self.bump();
-            let inner = self.unary_expr()?;
+            let inner = self.nest(Self::unary_expr)?;
             let end = inner.end;
             if !neg {
                 return Ok(Expr { kind: inner.kind, start, end });
@@ -1025,8 +1083,9 @@ impl<'a> Parser<'a> {
             }
             return Ok(Expr { kind: ExprKind::Neg(Box::new(inner)), start, end });
         }
-        let primary = self.primary()?;
-        self.predicate(primary)
+        // Both a level deeper: a predicate's list holds whole expressions.
+        let primary = self.nest(Self::primary)?;
+        self.nest(|p| p.predicate(primary))
     }
 
     fn predicate(&mut self, expr: Expr) -> Result<Expr, EsError> {
@@ -1171,9 +1230,9 @@ fn int_literal(src: &str, t: &Token, s: &str) -> Result<Lit, EsError> {
 fn fold_int(e: &Expr) -> Option<i64> {
     match &e.kind {
         ExprKind::Lit(Lit::Int(i)) => Some(*i),
-        ExprKind::Neg(x) => fold_int(x).and_then(i64::checked_neg),
+        ExprKind::Neg(x) => crate::stack::maybe_grow(|| fold_int(x)).and_then(i64::checked_neg),
         ExprKind::Arith(op, a, b) => {
-            let (a, b) = (fold_int(a)?, fold_int(b)?);
+            let (a, b) = (crate::stack::maybe_grow(|| fold_int(a))?, crate::stack::maybe_grow(|| fold_int(b))?);
             match op {
                 ArithOp::Add => a.checked_add(b),
                 ArithOp::Sub => a.checked_sub(b),
@@ -1225,7 +1284,8 @@ fn levenshtein(a: &str, b: &str) -> usize {
 /// Parses an EQL statement.
 pub fn parse(src: &str) -> Result<Statement, EsError> {
     let toks = lex(src)?;
-    let mut p = Parser { src, toks, pos: 0 };
+    prescan(src, &toks)?;
+    let mut p = Parser { src, toks, pos: 0, depth: 0, folds: 0 };
     p.statement()
 }
 
