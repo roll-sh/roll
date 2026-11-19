@@ -588,6 +588,7 @@ static TOOLS: &[Tool] = &[
     t("streams_get_group", "Get a consumer group", "A group's members and its committed offset and lag on each partition.", "streams", "GET", "/v1/streams/{stream}/groups/{group}", &[STREAM, req("group", "Group id")]),
     t("streams_branch", "Branch a stream", "A new stream with this one's topics, records (shared, not copied) and committed offsets; its first key's secret comes back once (reveal).", "streams", "POST", "/v1/streams/{stream}/branches", &[STREAM, breq("name", Ty::Str, "Branch name")]),
     t("streams_usage", "Stream usage", "A stream's usage and throughput.", "streams", "GET", "/v1/streams/{stream}/usage", &[STREAM, q("hours", Ty::Int, "Hours of history")]),
+    t("streams_list_keys", "List a stream's keys", "The SASL users a stream's Kafka clients sign in as: username, label and when made (never a password; a new key is a reveal, in the dashboard or roll stream).", "streams", "GET", "/v1/streams/{stream}/keys", &[STREAM]),
     t("streams_update", "Change a stream's settings", "Change some of a stream's settings (as streams_get shows them: retention, throughput limits…); the rest stay.", "streams", "PATCH", "/v1/streams/{stream}", &[STREAM, breq("settings", Ty::Obj, "The settings to change")]),
     t(
         "streams_update_topic",

@@ -593,6 +593,7 @@ previews are listed once those products are on.
 | `streams_get_group` | A group's members, offsets and lag per partition. | `GET /v1/streams/{s}/groups/{g}` |
 | `streams_branch` | A stream branched, records shared (its key's secret: reveal). | `POST /v1/streams/{s}/branches` |
 | `streams_usage` | A stream's usage and throughput. | `GET /v1/streams/{stream}/usage` |
+| `streams_list_keys` | The SASL users a stream's clients sign in as (never a password). | `GET /v1/streams/{stream}/keys` |
 | `streams_update` | Change some of a stream's settings (as streams_get shows them: retention, throughput limits…); the rest stay. | `PATCH /v1/streams/{stream}` |
 | `streams_update_topic` | Grow a topic's partitions or change its configs, online. | `PATCH /v1/streams/{stream}/topics/{topic}` |
 | `streams_delete_group` | Delete a group and its committed offsets (refused while it has members). | `DELETE /v1/streams/{stream}/groups/{group}` |
@@ -886,7 +887,7 @@ waits on a sibling PR reaching main is last.
 1. **Next, ranked (now):** an advisor like Supabase's `get_advisors` and GitHub's security
    overview: the access checkup, tokens, tighten proposals and a token's networks as read tools,
    and a `security_checkup` workflow that changes nothing, plus queues' users, tasks' apps and API
-   keys and nosql's imports as read tools, each answer checked for credentials first
+   keys, nosql's imports and a stream's keys as read tools, each answer checked for credentials first
    (`feature/roll-mcp-next-6`, this PR, stacked on #380). Open: read tools for secrets' new
    backends and storage's IAM (#380; unit `roll-mcp-land380` lands both after previews' turn). Waiting
    on a sibling: apps' forms tools (`apps_list_forms`, and `apps_form_submissions` as a reveal;
