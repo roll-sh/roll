@@ -796,6 +796,21 @@ impl Apps {
             anyhow::bail!("canceled");
         }
         let mut dep = d.clone();
+        // Its sidecars' images pinned with it (a rollback or a redeploy runs the same ones).
+        let mut run = run;
+        // Every one's registry is checked, a pinned one's too (its pull comes at create).
+        for sc in &run.sidecars {
+            self.check_registry(&sc.image).await.map_err(|e| e.context(format!("sidecar {}", sc.name)))?;
+        }
+        if run.sidecars.iter().any(|s| !s.image.contains("@sha256:")) {
+            for sc in run.sidecars.iter_mut().filter(|s| !s.image.contains("@sha256:")) {
+                let pinned = self.deps.runtime.pull(&sc.image, log, None).await.map_err(|e| e.context(format!("sidecar {}", sc.name)))?;
+                log.line(format!("sidecar {}: pinned {pinned}", sc.name));
+                sc.image = pinned;
+            }
+            let (id, img, r) = (d.id.clone(), image.clone(), run.clone());
+            self.db(move |s| s.set_built(&id, &img, None, Some(&r))).await?;
+        }
         dep.image = Some(image);
         dep.run = run;
         // The plan the build just stored (a single-page app, say).
@@ -1539,6 +1554,20 @@ impl Apps {
         // Other ports its custom domains send to (Railway's target ports).
         let (sid, en) = (svc.id.clone(), env.name.clone());
         let domain_ports = self.db(move |s| s.domain_ports(&sid, &en)).await?;
+        // Each sidecar gets its own settings and only the variables it names.
+        let sidecars: Vec<crate::runtime::SidecarSpec> = run
+            .sidecars
+            .iter()
+            .filter(|_| matches!(run.kind, RunType::Web | RunType::Worker))
+            .map(|sc| crate::runtime::SidecarSpec {
+                name: sc.name.clone(),
+                image: sc.image.clone(),
+                command: sc.command.clone(),
+                vars: sc.env.iter().map(|(k, v)| (k.clone(), v.clone())).chain(sc.variables.iter().filter_map(|n| vars.iter().find(|(k, _)| k == n).cloned())).collect(),
+                cpu: sc.cpu,
+                memory_mb: sc.memory_mb,
+            })
+            .collect();
         let spec = InstanceSpec {
             name: String::new(),
             service: svc.id.clone(),
@@ -1566,6 +1595,7 @@ impl Apps {
                 failures: run.health_failures.unwrap_or(3),
                 start: Duration::from_secs(run.health_timeout_s as u64),
             }),
+            sidecars,
         };
         let spa = dep.plan.as_ref().is_some_and(|p| p["spa"] == true);
         // A static plan whose files were exported answers from them, with no instance.

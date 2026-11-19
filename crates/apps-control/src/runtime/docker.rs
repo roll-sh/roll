@@ -63,6 +63,8 @@ struct Known {
     /// Instance → the connections its network had accepted when it went to sleep, or when it
     /// was last asked about callers ([`super::Runtime::take_callers`]).
     marks: HashMap<String, u64>,
+    /// Instance → its sidecars' containers ([`InstanceSpec::sidecars`]), by name.
+    sidecars: HashMap<String, Vec<String>>,
 }
 
 /// Where to read who's at an instance's port: its sandbox's process (`/proc/<pid>/net`), the
@@ -535,6 +537,61 @@ impl Docker {
         }
     }
 
+    /// An instance's sidecars' containers, as created or adopted here.
+    fn sidecars_of(&self, instance: &str) -> Vec<String> {
+        self.known.lock().sidecars.get(instance).cloned().unwrap_or_default()
+    }
+
+    /// Its sidecars, in its network namespace: its sandbox's when it has one (always up), else
+    /// its own. Made with it, never started yet.
+    async fn create_sidecars(&self, spec: &InstanceSpec) -> anyhow::Result<()> {
+        let Some(engine) = &self.engine else { return Ok(()) };
+        if spec.sidecars.is_empty() {
+            return Ok(());
+        }
+        let holder = match engine.inspect(&sandbox_name(&spec.name)).await {
+            Ok(_) => sandbox_name(&spec.name),
+            Err(_) => spec.name.clone(),
+        };
+        let mut made = Vec::new();
+        for sc in &spec.sidecars {
+            let name = super::sidecar_name(&spec.name, &sc.name);
+            let config = sidecar_config(spec, sc, &holder)?;
+            let r = match engine.create(&name, &config).await {
+                // Pulled when the deployment was made; a host that's lost it since pulls it again.
+                Err(e) if e.to_string().contains("No such image") => {
+                    docker_within(&["pull", "-q", &sc.image], Some(Duration::from_secs(300))).await?;
+                    engine.create(&name, &config).await
+                }
+                r => r,
+            };
+            r.with_context(|| format!("sidecar {}", sc.name))?;
+            made.push(name);
+        }
+        self.known.lock().sidecars.insert(spec.name.clone(), made);
+        Ok(())
+    }
+
+    /// After the app started: each sidecar again, so it joins the namespace as it is now (one
+    /// whose holder restarted keeps a dead one), its output in the instance's log under its own name.
+    async fn start_sidecars(&self, engine: &Engine, instance: &str, since: chrono::DateTime<chrono::Utc>, log: &LogSink) -> anyhow::Result<()> {
+        for sc in self.sidecars_of(instance) {
+            let _ = engine.kill(&sc).await;
+            engine.start(&sc).await.with_context(|| format!("starting {sc}"))?;
+            let l = log.renamed(&sc);
+            self.follow_logs(&sc, since, l.stream(Stream::Stdout), l.stream(Stream::Stderr));
+        }
+        Ok(())
+    }
+
+    async fn cgroup_usage(id: &str) -> Option<Usage> {
+        let dir = Self::cgroup_dir(id)?;
+        let stat = tokio::fs::read_to_string(dir.join("cpu.stat")).await.ok()?;
+        let usec: u64 = stat.lines().find_map(|l| l.strip_prefix("usage_usec ")).and_then(|v| v.trim().parse().ok())?;
+        let mem: u64 = tokio::fs::read_to_string(dir.join("memory.current")).await.ok()?.trim().parse().ok()?;
+        Some(Usage { cpu_ns: usec * 1000, memory_bytes: mem })
+    }
+
     fn cgroup_dir(id: &str) -> Option<PathBuf> {
         [format!("/sys/fs/cgroup/system.slice/docker-{id}.scope"), format!("/sys/fs/cgroup/docker/{id}")]
             .into_iter()
@@ -657,7 +714,14 @@ impl Runtime for Docker {
     }
 
     async fn create(&self, spec: &InstanceSpec) -> anyhow::Result<()> {
+        if !spec.sidecars.is_empty() && self.engine.is_none() {
+            bail!("sidecars need Docker on a local socket");
+        }
         self.create_container(spec).await?;
+        if let Err(e) = self.create_sidecars(spec).await {
+            self.remove(&spec.name).await;
+            return Err(e);
+        }
         // Its variables kept as files, in before it ever starts (a tar from the root, so their
         // folders are made too). Readable by the app's user, whoever it runs as.
         if !spec.files.is_empty() {
@@ -700,6 +764,7 @@ impl Runtime for Docker {
             // Running: its own connections aren't callers; the next sleep marks it again.
             self.known.lock().marks.remove(name);
             engine.start(name).await?;
+            self.start_sidecars(engine, name, now, &log).await?;
         } else {
             docker(&["start", name]).await?;
         }
@@ -719,7 +784,17 @@ impl Runtime for Docker {
         }
         let (_, port) = self.id_and_port(&spec.name).await.ok()?;
         let addr = self.address(&spec.name, port).await.ok()?;
-        self.follow_logs(&spec.name, chrono::Utc::now(), log.stream(Stream::Stdout), log.stream(Stream::Stderr));
+        let now = chrono::Utc::now();
+        self.follow_logs(&spec.name, now, log.stream(Stream::Stdout), log.stream(Stream::Stderr));
+        // Its sidecars, as an earlier process made them.
+        let sidecars: Vec<String> = spec.sidecars.iter().map(|s| super::sidecar_name(&spec.name, &s.name)).collect();
+        for sc in &sidecars {
+            let l = log.renamed(sc);
+            self.follow_logs(sc, now, l.stream(Stream::Stdout), l.stream(Stream::Stderr));
+        }
+        if !sidecars.is_empty() {
+            self.known.lock().sidecars.insert(spec.name.clone(), sidecars);
+        }
         Some(super::Adopted { addr, paused })
     }
 
@@ -739,13 +814,25 @@ impl Runtime for Docker {
         if let Some(n) = self.sandbox(name).await.and_then(|sb| sb.accepted()) {
             self.known.lock().marks.insert(name.to_string(), n);
         }
-        match &self.engine {
+        let paused = match &self.engine {
             Some(e) => e.pause(name).await,
             None => docker(&["pause", name]).await.map(|_| ()),
+        };
+        // Frozen with it: a sidecar meters nothing while the app doesn't run.
+        if let (Ok(()), Some(e)) = (&paused, &self.engine) {
+            for sc in self.sidecars_of(name) {
+                let _ = e.pause(&sc).await;
+            }
         }
+        paused
     }
 
     async fn resume(&self, name: &str) -> anyhow::Result<()> {
+        if let Some(e) = &self.engine {
+            for sc in self.sidecars_of(name) {
+                let _ = e.unpause(&sc).await;
+            }
+        }
         match &self.engine {
             Some(e) => e.unpause(name).await,
             None => docker(&["unpause", name]).await.map(|_| ()),
@@ -761,6 +848,10 @@ impl Runtime for Docker {
             None => docker_within(&["stop", "-t", &secs.to_string(), name], Some(Duration::from_secs(secs + 60))).await.map(|_| ()),
         };
         if let (Ok(()), Some(engine)) = (&stopped, &self.engine) {
+            // Its sidecars after it (a proxy outlives the app's last requests), then the waker.
+            for sc in self.sidecars_of(name) {
+                let _ = engine.stop(&sc, secs).await;
+            }
             self.arm_waker(engine, name).await;
         }
         // The next start gets the boost again (set now, off the wake's path).
@@ -775,6 +866,15 @@ impl Runtime for Docker {
     }
 
     async fn remove(&self, name: &str) {
+        // Its sidecars, known or not (an earlier process's): by the label naming their instance.
+        let filter = format!("label={LABEL}.of={name}");
+        let mut sidecars: Vec<String> = docker(&["ps", "-aq", "--filter", &filter]).await.map(|s| s.lines().map(str::to_string).collect()).unwrap_or_default();
+        sidecars.extend(self.sidecars_of(name));
+        if !sidecars.is_empty() {
+            let mut args = vec!["rm", "-f", "-v"];
+            args.extend(sidecars.iter().map(String::as_str));
+            let _ = docker(&args).await;
+        }
         let _ = docker(&["rm", "-f", "-v", name, &waker_name(name), &sandbox_name(name)]).await;
         if let Some(i) = &self.ingress {
             i.forget(&sandbox_name(name));
@@ -784,6 +884,7 @@ impl Runtime for Docker {
         k.sandboxes.remove(name);
         k.wakers.remove(name);
         k.marks.remove(name);
+        k.sidecars.remove(name);
     }
 
     async fn network_container(&self, name: &str) -> Option<String> {
@@ -847,11 +948,17 @@ impl Runtime for Docker {
 
     async fn usage(&self, name: &str) -> Option<Usage> {
         let (id, _) = self.id_and_port(name).await.ok()?;
-        let dir = Self::cgroup_dir(&id)?;
-        let stat = tokio::fs::read_to_string(dir.join("cpu.stat")).await.ok()?;
-        let usec: u64 = stat.lines().find_map(|l| l.strip_prefix("usage_usec ")).and_then(|v| v.trim().parse().ok())?;
-        let mem: u64 = tokio::fs::read_to_string(dir.join("memory.current")).await.ok()?.trim().parse().ok()?;
-        Some(Usage { cpu_ns: usec * 1000, memory_bytes: mem })
+        let mut u = Self::cgroup_usage(&id).await?;
+        // Its sidecars' are the instance's: metered with it.
+        for sc in self.sidecars_of(name) {
+            if let Ok((id, _)) = self.id_and_port(&sc).await
+                && let Some(s) = Self::cgroup_usage(&id).await
+            {
+                u.cpu_ns += s.cpu_ns;
+                u.memory_bytes += s.memory_bytes;
+            }
+        }
+        Some(u)
     }
 
     async fn list(&self, service: Option<&str>) -> Vec<String> {
@@ -859,12 +966,12 @@ impl Runtime for Docker {
             Some(s) => format!("label={LABEL}={s}"),
             None => format!("label={LABEL}"),
         };
-        docker(&["ps", "-a", "--filter", &filter, "--format", "{{.Names}}"]).await.map(|s| s.lines().map(str::to_string).collect()).unwrap_or_default()
+        listed(docker(&["ps", "-a", "--filter", &filter, "--format", LISTED]).await)
     }
 
     async fn list_env(&self, service: &str, env: &str) -> Vec<String> {
         let (s, e) = (format!("label={LABEL}={service}"), format!("label={LABEL}.env={env}"));
-        docker(&["ps", "-a", "--filter", &s, "--filter", &e, "--format", "{{.Names}}"]).await.map(|s| s.lines().map(str::to_string).collect()).unwrap_or_default()
+        listed(docker(&["ps", "-a", "--filter", &s, "--filter", &e, "--format", LISTED]).await)
     }
 
     async fn ensure_network(&self, name: &str, service: &str, closed: bool) -> anyhow::Result<()> {
@@ -1193,6 +1300,55 @@ fn waker_config(spec: &InstanceSpec, sandbox: &str) -> serde_json::Value {
 
 /// An instance's config joined to its sandbox's network: no network, port or hosts of its own
 /// (Docker refuses those with another container's network).
+/// `docker ps`'s names with their role: an instance's sidecars are left out of lists (they go
+/// with it, [`Runtime::remove`]), so nothing mistakes one for an instance of its own.
+const LISTED: &str = "{{.Names}} {{.Label \"sh.roll.apps.role\"}}";
+
+fn listed(out: anyhow::Result<String>) -> Vec<String> {
+    out.map(|s| s.lines().filter_map(|l| l.split_once(' ').map_or(Some(l), |(n, role)| (role.trim() != "sidecar").then_some(n))).filter(|n| !n.is_empty()).map(str::to_string).collect()).unwrap_or_default()
+}
+
+/// A sidecar's container: its own image, command, settings and size, in `holder`'s network
+/// namespace, hardened as the instance is, restarted if it fails.
+fn sidecar_config(spec: &InstanceSpec, sc: &super::SidecarSpec, holder: &str) -> anyhow::Result<serde_json::Value> {
+    use serde_json::json;
+    let mut env = Vec::with_capacity(sc.vars.len());
+    for (k, v) in &sc.vars {
+        if v.contains('\0') {
+            bail!("sidecar {}: variable {k} holds a NUL byte", sc.name);
+        }
+        env.push(format!("{k}={v}"));
+    }
+    let mut config = json!({
+        "Image": sc.image,
+        "Env": env,
+        "Labels": {
+            LABEL: spec.service,
+            format!("{LABEL}.env"): spec.env,
+            format!("{LABEL}.deployment"): spec.deployment,
+            format!("{LABEL}.role"): "sidecar",
+            format!("{LABEL}.of"): spec.name,
+        },
+        "HostConfig": {
+            "Memory": (sc.memory_mb as i64) << 20,
+            "MemorySwap": (sc.memory_mb as i64) << 20,
+            "NanoCpus": nanos(sc.cpu),
+            "PidsLimit": 1024,
+            "SecurityOpt": ["no-new-privileges"],
+            "CapDrop": CAP_DROP,
+            "RestartPolicy": {"Name": "on-failure", "MaximumRetryCount": 5},
+            "Init": true,
+            "LogConfig": {"Type": "local", "Config": {}},
+            "NetworkMode": format!("container:{holder}"),
+        },
+    });
+    if let Some(cmd) = &sc.command {
+        config["Entrypoint"] = json!(["sh"]);
+        config["Cmd"] = json!(["-c", cmd]);
+    }
+    Ok(config)
+}
+
 fn joined(mut config: serde_json::Value, sandbox: &str) -> serde_json::Value {
     if let Some(o) = config.as_object_mut() {
         o.remove("ExposedPorts");
@@ -1529,6 +1685,7 @@ mod tests {
             registry: None,
             files: vec![],
             health: None,
+            sidecars: vec![],
         };
         let c = engine_config(&spec, Some(41234), &[(9000, 41235)], Some("host-gateway")).unwrap();
         assert_eq!((c["HostConfig"]["PortBindings"]["9000/tcp"][0]["HostPort"].as_str(), c["Labels"]["sh.roll.apps.port"].as_str()), (Some("41235"), Some("8080")));

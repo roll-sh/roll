@@ -133,6 +133,7 @@ mod tests {
             rollback_on_crash: true,
             rebuild_on_base: true,
             schedules: vec![crate::model::Scheduled { name: "a".into(), schedule: "@daily".into(), command: "x".into(), path: None, timezone: None, timeout_s: None }],
+            sidecars: vec![crate::model::Sidecar { name: "a".into(), image: "x".into(), command: None, env: Default::default(), variables: vec![], cpu: 0.25, memory_mb: 128 }],
         };
         let keys: std::collections::BTreeSet<String> = serde_json::to_value(&all).unwrap().as_object().unwrap().keys().filter(|k| *k != "volume").cloned().collect();
         let file: std::collections::BTreeSet<String> = apps_build::app::RUN_KEYS.iter().map(|k| k.to_string()).collect();
@@ -168,6 +169,10 @@ mod tests {
         assert!(parse("[app]\nbuidl = \"x\"\n").is_err(), "a typo isn't ignored");
         assert!(parse("[app]\nhealth_path = \"healthz\"\n").unwrap().unwrap().apply(&Build::default(), &Run::default(), None).is_err(), "checked like the API");
         assert_eq!(parse("[preview]\nimage = \"x\"\n").unwrap(), None);
+        // Sidecars as arrays of tables, checked as the API checks them.
+        let side = parse("[app.run]\nport = 80\n[[app.run.sidecars]]\nname = \"proxy\"\nimage = \"envoy:1\"\nvariables = [\"DATABASE_URL\"]\n").unwrap().unwrap();
+        let (_, r, _) = side.apply(&Build::default(), &Run::default(), None).unwrap();
+        assert_eq!((r.sidecars[0].name.as_str(), r.sidecars[0].variables.as_slice(), r.sidecars[0].memory_mb), ("proxy", ["DATABASE_URL".to_string()].as_slice(), 128));
     }
 
     #[test]

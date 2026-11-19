@@ -805,6 +805,55 @@ async fn a_restart_keeps_the_running_container() {
     assert!(apps_control::runtime::docker::docker(&["network", "inspect", &net]).await.is_err(), "{net} is left");
 }
 
+/// A sidecar shares its instance's network namespace (the app reaches it on localhost), in a
+/// sandbox or in the instance's own, again after the instance sleeps and wakes (a joined
+/// container keeps a dead namespace unless it's started again), and goes with it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sidecar_answers_the_app_on_localhost_across_a_sleep() {
+    use apps_control::runtime::docker::docker;
+    for netns in [false, true] {
+        let Some(w) = docker_world_netns(Some(netns)).await else { return };
+        let (id, host) = deploy_container(&w, "with-sidecar").await;
+        let sidecar = json!([{"name": "side", "image": "busybox:1.37", "command": "mkdir -p /s && echo \"sidecar $GREETING\" > /s/index.html && exec httpd -f -p 9000 -h /s", "env": {"GREETING": "here"}, "memory_mb": 64}]);
+        let (st, v) = call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"sidecars": sidecar}})), "application/json", None).await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        let (_, d) = call(&w.api, "POST", &format!("/v1/apps/services/{id}/environments/production/redeploy"), Some(json!({})), "application/json", None).await;
+        let dep = d["id"].as_str().unwrap().to_string();
+        for _ in 0..1200 {
+            let (_, x) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/deploys/{dep}"), None, "application/json", None).await;
+            if x["status"] == "active" {
+                break;
+            }
+            assert!(!["failed", "canceled"].contains(&x["status"].as_str().unwrap_or("")), "netns {netns}: {x}");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let reach = || async {
+            assert_eq!(get(&w.public, &host).await.0, StatusCode::OK);
+            let live = w.apps.live(&id, "production");
+            let inst = live.instances().into_iter().find(|i| i.deployment == dep).map(|i| i.name.clone()).expect("the new deployment's instance");
+            let mut got = Err(anyhow::anyhow!("never asked"));
+            for _ in 0..50 {
+                got = docker(&["exec", &inst, "wget", "-q", "-O-", "-T", "2", "http://127.0.0.1:9000/"]).await;
+                if got.is_ok() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            assert_eq!(got.as_deref().ok().map(str::trim), Some("sidecar here"), "netns {netns}: {got:?}");
+            inst
+        };
+        let inst = reach().await;
+        let filter = format!("label=sh.roll.apps.of={inst}");
+        // Asleep: the sidecar stops with it; woken, it answers again.
+        w.apps.live(&id, "production").sleep().await;
+        let running = docker(&["ps", "-q", "--filter", &filter]).await.unwrap();
+        assert!(running.is_empty(), "netns {netns}: the sidecar sleeps with it");
+        reach().await;
+        assert_eq!(delete_for_good(&w.api, &id).await.0, StatusCode::NO_CONTENT);
+        assert_eq!(docker(&["ps", "-aq", "--filter", &filter]).await.unwrap(), "", "netns {netns}: the sidecar went with it");
+    }
+}
+
 /// An app bound to loopback in its container (a framework's dev default) fails its deploy at once
 /// saying so, read from its sandbox's sockets, not after the whole health timeout.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

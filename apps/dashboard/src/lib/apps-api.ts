@@ -111,6 +111,24 @@ export interface Run {
   scale?: { stream: string; group: string; per_instance?: number };
   /** Commands on a schedule, each a job of the live deployment at its due times (Heroku Scheduler); at most 20. */
   schedules?: Scheduled[];
+  /** Containers beside each instance, in its network namespace (a web service's or a worker's); at most 4. */
+  sidecars?: Sidecar[];
+}
+
+/** A container beside each instance: `name` a-z, 0-9 and - (unique, at most 20); its image pinned with each deployment. */
+export interface Sidecar {
+  name: string;
+  image: string;
+  /** Run as `sh -c` instead of the image's own. */
+  command?: string;
+  /** Plain settings, shown as they are: never a secret. */
+  env?: Record<string, string>;
+  /** The environment's own variables it gets, by name (its secrets too). */
+  variables?: string[];
+  /** 0.1–2, default 0.25. */
+  cpu?: number;
+  /** 64–4096, default 128. */
+  memory_mb?: number;
 }
 
 /** A command on a schedule: `name` a-z, 0-9 and - (unique), `schedule` five fields or `@daily`, `timezone` IANA (default UTC). */
