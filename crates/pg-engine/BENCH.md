@@ -759,6 +759,73 @@ Short transactions, 8 clients, c5 against c6:
 tps: 5 pairs, at equal foreign +30.8% (±24.9% s.e.), per foreign core -0.39 log
 user cycles/txn: 5 pairs, at equal foreign +4.3% (±1.3% s.e.), slope +0.21
 
+## Read path, round 7: the audit since 6d3b7e9e5, the estimates' operator lookups (2026-11-18/19, agent 255)
+
+HANDOFF.md "Read path, round 7" has what changed and why. Harness `~/.cache/a255/bench`
+(agent 243's and 250's): one server at a time in a container on the lane's server CPUs (8 GiB,
+swap off, host network), the bench client on the lane's client CPUs, 100,000-row fixture loaded
+fresh for each run, 2 s warm-up, 10 s measured; short transactions reload and CHECKPOINT after
+the warm-up. User instructions and cycles per operation: `perf stat -p` of the engine over the
+run and 3 s after (its connection threads inherited), divided by the run's exact operation
+count. Each pair one `tools/lane.sh` hold, alternating order; lane A (servers 6,7,24,25) point
+selects and short transactions, lane B (10,11,28,29) 100-row range reads. "A/A": the same binary
+under two names. Δ = second minus first, median over the pairs [range]. **Foreign load**: every
+hold read 0.9-7.5 cores of other tenants' work on the lane's 8 CPUs (median 5.1; 1 of 144 holds
+under 1.0): no pair meets the brief's rule, all are counted. Instructions held (A/A ±0.0-0.1%
+at 8 and 32 clients); cycles, tps and p99 did not.
+
+**The audit**: base `6d3b7e9e5` against head `c4ad9402d`, 7 pairs a cell; A/A of head, 3 pairs.
+
+| cell | build | instr/op base | Δ instr | Δ cycles | p99 ms base -> head | A/A Δ instr |
+|---|---|---:|---:|---:|---:|---:|
+| point, 1 client | plain dist | 52,662 | +1.02 [-0.2, +1.9] | +0.20 [-5.3, +5.5] | 0.16 -> 0.14 | +0.85 [-2.0, +1.0] |
+| point, 1 client | PGO | 43,247 | +2.06 [-3.5, +7.6] | -3.63 [-13.3, +6.5] | 0.11 -> 0.10 | +0.47 [-0.0, +2.3] |
+| point, 8 clients | plain dist | 40,327 | +0.08 [-0.0, +0.2] | +1.31 [-3.0, +3.9] | 0.36 -> 0.35 | +0.00 [-0.1, +0.1] |
+| point, 8 clients | PGO | 31,897 | -0.45 [-0.6, -0.3] | -1.77 [-7.1, +1.8] | 0.26 -> 0.29 | +0.12 [-0.6, +0.6] |
+| point, 32 clients | plain dist | 40,352 | -0.03 [-0.1, +0.2] | -0.43 [-3.2, +9.3] | 4.83 -> 2.39 | +0.01 [-0.2, +0.3] |
+| point, 32 clients | PGO | 31,884 | -0.46 [-0.7, -0.3] | -3.34 [-14.2, +6.1] | 1.87 -> 1.21 | +0.04 [-0.0, +0.0] |
+| short txn, 1 client | plain dist | 276,604 | -0.01 [-18.5, +2.8] | +2.34 [-5.2, +41.5] | 4.38 -> 4.60 | +1.66 [+0.2, +2.2] |
+| short txn, 1 client | PGO | 234,222 | -0.14 [-4.4, +1.1] | +5.67 [-8.5, +16.9] | 2.36 -> 3.57 | +0.22 [-2.3, +5.5] |
+| short txn, 8 clients | plain dist | 250,801 | +5.17 [-2.2, +14.7] | +0.20 [-2.8, +11.6] | 5.72 -> 4.70 | +0.46 [-0.7, +0.9] |
+| short txn, 8 clients | PGO | 211,794 | +0.78 [-6.8, +10.0] | +0.95 [-2.5, +5.6] | 2.98 -> 3.71 | -2.09 [-3.8, -1.9] |
+| short txn, 32 clients | plain dist | 250,761 | -0.02 [-1.6, +9.6] | +0.05 [-3.1, +3.0] | 13.83 -> 22.93 | -2.07 [-10.1, +15.7] |
+| short txn, 32 clients | PGO | 214,897 | +3.91 [-3.6, +11.2] | -1.37 [-3.5, +1.9] | 13.50 -> 13.12 | -2.35 [-6.8, -1.9] |
+| range, 8 clients | plain dist | 348,516 | +0.82 [+0.8, +0.9] | +3.42 [-0.6, +7.0] | 1.65 -> 2.92 | +0.01 [+0.0, +0.0] |
+| range, 8 clients | PGO | 278,754 | +0.23 [+0.2, +0.3] | -0.22 [-6.2, +1.5] | 2.31 -> 0.84 | +0.00 [-0.0, +0.0] |
+
+Two PGO builds of `c4ad9402d` (each `tools/dist-pgo.sh`, its own training run), range reads at
+8 clients, 5 pairs: **+0.94% [+0.9, +1.0]** instructions, cycles -0.31%.
+
+Short transactions' whole-run count includes work after the clients stop; profiles of the
+run's middle (8 s `perf record -e instructions:u`, one pair each) put the 32-client PGO
+difference in format 4's dictionary compression in flushes and compactions (+4-6k a
+transaction), `compact_within` (+1.1k) and `Txn::first_snap` (+1.7k): HANDOFF.
+
+**The range reads' bisection** (plain dist, 8 clients, against base, 3 pairs a point):
+
+| commit (in landing order) | Δ instr |
+|---|---:|
+| `2d155511c` (analytic round 4) | +0.02 [-0.0, +0.0] |
+| `ce9986d4d` (RESET ALL, object locks) | +0.01 [-0.0, +0.1] |
+| `7d4e1cb1e` (EXPLAIN plan choices) | +0.08 [+0.1, +0.1] |
+| `0e0a235ee` (a tsvector's stadistinct) | +0.13 [+0.1, +0.1] |
+| `bf1bf318c` (EXPLAIN estimates, round 2) | +0.50 [+0.5, +0.5] |
+| `1cd28df01` (compact lock set) | +0.49 [+0.4, +0.6] |
+| `d10e78ea2` (integer filter kernels) | +0.49 [+0.5, +0.5] |
+| `f1f8fac4d` (before format 4) | +0.46 [+0.4, +0.5] |
+| `6f02353d9` (format 4, one-allocation blocks) | +0.85 [+0.8, +0.9] |
+| `0808ed9ac` (MultiXact) | +0.92 [+0.9, +0.9] |
+| `c4ad9402d` (head) | +0.82 [+0.8, +0.9] |
+
+**The estimates' operator lists** (`cand/a255`, on `c4ad9402d` for the gate), range reads at 8
+clients:
+
+| build | pairs | Δ instr | Δ cycles | p99 ms |
+|---|---:|---:|---:|---:|
+| plain dist | 7 | -0.35 [-0.4, -0.3] | +0.13 [-1.7, +5.4] | 0.70 -> 0.76 |
+| PGO | 7 | +0.29 [+0.2, +0.3] | +1.85 [-2.1, +4.4] | 0.68 -> 0.76 |
+| plain dist, point selects at 8 clients (the first version, lists without the bit test) | 5 | -0.00 [-0.1, +0.0] | -1.93 [-3.8, +2.6] | 0.35 -> 0.29 |
+
 ## Point and range reads, round 6: the same-day table, 32 clients, idle footprint (2026-11-17/18, agent 250)
 
 HANDOFF.md "Point and range reads, round 6" has what changed and why. Base `6d3b7e9e5`, built

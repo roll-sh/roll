@@ -12286,6 +12286,77 @@ user (`a234-rref2`): 1,881 / 1,881 units, newly differing 0, i.e. 51,148 / 51,15
 Run regress references as the image's user, not `--user 1000:1000`. No planner change: the
 difftest guard was not run.
 
+## Read path, round 7: the audit since 6d3b7e9e5, the estimates' operator lookups (agent 255)
+
+BENCH.md "Read path, round 7" has the tables. Two items: an owed regression audit of point
+reads, short transactions and range reads over the rounds landed between `6d3b7e9e5` and
+`c4ad9402d` (plain dist and PGO), and the block cache's hit path (below, and `cand/a255-2`).
+
+**No pair met the 1.0 foreign-core rule.** For the whole round (2026-11-18 evening to 11-19
+noon) the lanes' 8 CPUs were 4-8 cores busy with other tenants' work: other sessions' unpinned
+gate builds (`roll-apps-gate-*`, `roll-chainfix-gate-3`, `rpv-gate-visits`, `rs-b3-gate-onmain`
+units, a `t3code-claude-*` scope) and, on lane B, the roll search session's
+`~/.cache/rsearch/nycbulk/test2.sh` (`run.sh round11`), which takes `lane-b.lock` with a bare
+`flock` (23 minutes at once on 11-19 04:49Z). Of 144 audit holds, 1 read under 1.0 foreign core
+(median 5.1, max 7.5). The tables count every pair, with its hold's foreign load, and an A/A
+control (the same binary under two names) of 3 pairs a cell beside the 7 alternating pairs.
+User instructions per operation held up under that load: the A/A pairs read ±0.0-0.1% for point
+selects at 8 and 32 clients and for range reads. Cycles, tps and p99 did not (A/A ±5% cycles,
+±20-50% tps), and nothing below rests on them alone.
+
+**What the audit found** (base `6d3b7e9e5`, head `c4ad9402d`; plain dist `tools/dist.sh`, PGO
+`tools/dist-pgo.sh` with its own profile per build; harness `~/.cache/a255/bench`):
+
+- Point selects at 8 and 32 clients: within ±0.5% instructions in both builds (PGO -0.45%);
+  p99 at 32 clients lower (plain 4.83 -> 2.39 ms, PGO 1.87 -> 1.21: agent 250's shared locks).
+- 100-row range reads at 8 clients, plain: **+0.82%** (every pair +0.8 to +0.9). Bisected over
+  the landed commits (plain builds, 3 pairs a point): +0.02% through `2d155511c`, +0.13% at
+  `0e0a235ee`, **+0.50% at `bf1bf318c`** (EXPLAIN estimates round 2: two `oper_row` lookups, each
+  hashing the operator's name with SipHash, for every comparison and every binary operator a
+  plan estimates; a prepared statement's custom plan is made at each execution), +0.46% at
+  `f1f8fac4d`, **+0.85% at `6f02353d9`** (agent 247's format 4: 4 kB index and 8 kB row blocks,
+  so a 100-row range crosses about twice the block boundaries), +0.93% after MultiXact
+  (`0808ed9ac`, +0.08%), +0.82% at head (`a2d669230`'s boxed `Txn::mx` gave back 0.1%). PGO:
+  +0.23%.
+- Short transactions (UPDATE, SELECT, INSERT in BEGIN/COMMIT) at 8 clients, plain: +5.2% median
+  (-2.2 to +14.7) over the whole run, with cycles +0.2% and tps up in 4 of 5 pairs. The count
+  runs 3 s past the clients' end, and the gap between base and head grows as tps falls: work
+  fixed per burst, not per transaction. Profiles of the run's middle (an 8 s `perf record` of
+  user instructions, one pair at 8 clients plain, one at 32 clients PGO) place it: format 4's
+  write side (`ZSTD_compressBlock_fast_dictMatchState` and its extDict path in flushes and
+  compactions, +4-6k instructions a transaction at 32 clients; agent 247's lead 2),
+  `compact_within`, MultiXact's `Txn::first_snap` (+1.7k at 32 clients), and the reclaim
+  after the run (agent 253's idle trigger). (The window's per-operation figures divide by tps
+  times 8 s, which is off by a few percent when throughput is uneven: the symbols are the
+  evidence, not the window's total.)
+- Point selects and short transactions at 1 client: inside the A/A spread (±2% at 1 client,
+  where background threads' work is a larger share of the count).
+- **Two PGO builds of the same commit (`c4ad9402d`) differ by +0.94% instructions** on range
+  reads (5 pairs, +0.9 to +1.0): a PGO gate under about 1% measures the training run as much as
+  the change. The PGO cells above, and any PGO gate under 1%, are inside that.
+
+**Kept (`cand/a255`): the estimates' operator lists.** `sql::func::ineq_rest_unlike_scalar`
+and `eq_rest_under_other_name` answer what `bf1bf318c` asked `oper_row` (an inequality whose
+estimator isn't scalarltsel, scalarlesel, scalargtsel or scalargesel; an operator other than
+`=` / `<>` that eqsel or neqsel estimates) from two short lists built once from the registry's
+own rows, with a bit for each left argument type oid below 4096 they hold: a scalar comparison
+is passed over by one bit test, `=` and `<>` by their name, and no name is hashed. The test
+`sql::func::tests::estimate_lists_match_oper_row` checks both against `oper_row` for every
+built-in binary operator. Range reads at 8 clients against `c4ad9402d`: plain **-0.35%**
+instructions (7 pairs, -0.4 to -0.3; A/A ±0.0%), cycles +0.1% (-1.7 to +5.4); point selects at
+8 clients 0.00% (5 pairs); PGO +0.29% (7 pairs), inside the 0.94% two PGO builds of one commit
+differ by. (A first version, the lists without the bit test, was -0.30% plain and +0.08% PGO.)
+
+Not fixed in this round, named: format 4's smaller blocks cost range reads about +0.4%
+instructions (block boundaries) and short transactions their dictionary compression in
+flushes and compactions (agent 247's leads 1, 2 and 5; agent 257 is in compaction); MultiXact
+about +0.1% on range reads and `first_snap` on short transactions.
+
+Verification: `tools/quick-check.sh` over `bc9102ebb` (`c7434e412`): build and Clippy (16
+warnings, none new in a changed file), 386 tests in 11 binaries, regress 51,148/51,150 (none
+newly differing), isolation 1,647/1,648, pg_dump_tap 14,609 passed. No assertions or catalog
+counts touched (no checked stage).
+
 ## Point and range reads, round 6: 32 clients, idle footprint (agent 250)
 
 BENCH.md "Point and range reads, round 6" has the tables. Base `6d3b7e9e5`, built plain dist
