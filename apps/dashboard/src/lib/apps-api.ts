@@ -114,7 +114,8 @@ export interface Run {
   /** A deploy whose image has a known vulnerability this severe or worse fails before it goes live (a rollback never does). */
   block_on?: Exclude<Severity, "unknown">;
   /** A worker follows `group`'s lag on `stream` (a roll stream of its project): one instance per `per_instance` behind. */
-  scale?: { stream: string; group: string; per_instance?: number };
+  /** A worker follows a stream group's lag, or a gauge of its own (`metric`: the largest series, or their `sum`). */
+  scale?: { stream?: string; group?: string; metric?: string; sum?: boolean; per_instance?: number };
   /** Commands on a schedule, each a job of the live deployment at its due times (Heroku Scheduler); at most 20. */
   schedules?: Scheduled[];
   /** Containers beside each instance, in its network namespace (a web service's or a worker's); at most 4. */
