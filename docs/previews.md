@@ -1217,7 +1217,9 @@ backends' own, before previews key them), and keeps the ones main's doesn't have
 comment only counts them by service (their lines can hold a branch's data, and anyone reading the
 pull request reads its comment). A change reports the preview again; an error fixed (gone from
 the last hour) goes. A preview asleep keeps what it last said. An error whose line holds a
-per-preview value (its id, its branch's host) can read as new where main's has the same one.
+per-preview value reads as new only if it's new without them: a group main's has under another
+fingerprint is the same one when their titles match with each preview's own names (its id and
+slug, its branches' refs, its services' hosts) taken out.
 `an_error_mains_preview_doesnt_have_reaches_the_record_and_the_report`.
 
 Repeated queries (Sentry's N+1 detection): a trace whose spans run one database statement
