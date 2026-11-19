@@ -359,6 +359,7 @@ impl Secrets {
                 return Err(Error::BadRequest(format!("{k} is the sync's credential: it's never pushed, so leave it out of keys")));
             }
         }
+        let by = self.maker_of(caller)?;
         let id = names::new_id("syn", 16);
         let secret = target.signed().then(|| Value::new(names::new_id("whsec", 40)));
         let sealed = secret.as_ref().map(|s| dek.seal(&secret_aad(project, &id), s));
@@ -372,7 +373,7 @@ impl Secrets {
             c.execute(
                 "INSERT INTO syncs (id, project_id, env_id, path, kind, target, keys, prefix, secret, status, error, last_digest, state, last_synced_at, running_until, retry_at, created_at, created_by)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, '{}', NULL, 0, 0, ?, ?)",
-                params![id, project, env.id, path, n.kind, json(&n.target), keys.as_ref().map(json), prefix, sealed, now, caller.principal],
+                params![id, project, env.id, path, n.kind, json(&n.target), keys.as_ref().map(json), prefix, sealed, now, by],
             )?;
             audit::record(c, project, caller, "sync.create", Some(&n.environment), Some(&path), keys.as_deref().unwrap_or_default(), &format!("created {} sync {id}", n.kind), now)
         })?;
@@ -391,7 +392,7 @@ impl Secrets {
             synced: 0,
             signed: secret.is_some(),
             created_at: now,
-            created_by: caller.principal.clone(),
+            created_by: by,
             signing_secret: secret.map(|s| s.expose().to_string()),
         }))
     }
@@ -437,24 +438,13 @@ impl Secrets {
         Ok((n == 1).then_some(hold))
     }
 
-    /// Who a sync resolves as: its creator's access, looked up now, named `sync:<id>`.
+    /// Who a sync resolves as: its maker's access, looked up now ([`Secrets::maker_caller`]),
+    /// named `sync:<id>`.
     fn sync_caller(&self, r: &Row) -> Result<Caller> {
-        let principal = format!("sync:{}", r.info.id);
-        if r.info.created_by == "operator" {
-            return Ok(Caller { principal, grants: Arc::new(Everything), ip: None, runtime: false, approval: None });
-        }
-        let gone = || Error::Forbidden(format!("{} made this sync and can't reach secrets any more: make the sync again", r.info.created_by));
-        // A person's: as they are now, while their account can sign in.
-        if crate::access::is_person(&r.info.created_by) {
-            let person = self.person(&r.info.created_by)?.ok_or_else(gone)?;
-            let mut c = self.person_caller(&r.info.created_by, person.admin)?;
-            c.principal = principal;
-            return Ok(c);
-        }
-        // A roll-access grant: as it is now, or gone once revoked or expired (a person's acts as them).
-        let token = r.info.created_by.strip_prefix("token:").ok_or_else(gone)?;
-        let g = self.grants.as_ref().and_then(|g| g.grant(token)).ok_or_else(gone)?;
-        Ok(Caller { principal, grants: self.grant_grants(&g)?, ip: None, runtime: false, approval: None })
+        self.maker_caller(&r.info.created_by, &format!("sync:{}", r.info.id)).map_err(|e| match e {
+            Error::Forbidden(_) => Error::Forbidden(format!("{} made this sync and can't reach secrets any more: make the sync again", r.info.created_by)),
+            e => e,
+        })
     }
 
     /// A pass over the syncs only when a change marked some due (`checked_at` NULL): what rolld
@@ -554,7 +544,7 @@ impl Secrets {
         let outcome = caller.and_then(|caller| self.push_once(&r, &caller, digest, force));
         let now = self.db.now_ms().unwrap_or(hold - HOLD_MS);
         let (project, id, env, path) = (r.project.as_str(), r.info.id.as_str(), r.info.environment.as_str(), r.info.path.as_str());
-        let actor = Caller { principal: format!("sync:{id}"), grants: Arc::new(Everything), ip: None, runtime: false, approval: None };
+        let actor = Caller { principal: format!("sync:{id}"), grants: Arc::new(Everything), ip: None, runtime: false, approval: None, maker: None };
         let ok = outcome.is_ok();
         let res = self.db.write(|c| {
             match &outcome {

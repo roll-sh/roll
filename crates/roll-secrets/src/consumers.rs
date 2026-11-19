@@ -1,8 +1,21 @@
 //! Other roll products reading a secret by reference (docs/secrets.md, "Other roll products"): a
-//! product that needs an outside credential (storage's replication targets) keeps
-//! `roll://ENV[/folder]/KEY` instead of a sealed copy, and asks for the value each time it opens
-//! the connection, as 1Password's `op://` and Vault Agent do. rolld hands products this in
-//! process; roll-secrets knows no product, only the workspace resource asking.
+//! product that needs an outside credential keeps `roll://ENV[/folder]/KEY` instead of a sealed
+//! copy, and asks for the value each time it opens the connection, as 1Password's `op://` and
+//! Vault Agent do. rolld hands products this in process; roll-secrets knows no product, only the
+//! workspace resource asking.
+//!
+//! **Who chose the reference** decides which call a product makes:
+//! - A person or a token chose it (search's snapshot repositories): [`Secrets::bind_ref`] when
+//!   it's written, with the request's caller, returns a [`Maker`] the product stores beside it;
+//!   every read is [`Secrets::resolve_as`] / [`Secrets::digest_as`] with that maker. The reference
+//!   reads as its maker, re-checked on every use (an admin while still one, a person while they
+//!   can sign in and own the project, a token while it lives), never a runtime: no sensitive key,
+//!   imports and bases only where the maker may reveal, no protected environment for an untrusted
+//!   copy. Otherwise anyone who may write a product's settings could send any value the project's
+//!   runtime reads to a host of their choosing.
+//! - The operator wrote it (storage's replication targets, an operator-only API):
+//!   [`Secrets::resolve_for`] / [`Secrets::digest_for`] read as the project's runtime, sensitive
+//!   keys included.
 //!
 //! **Trust**, as roll apps' services (`ForApps` in rolld): the project is the one whose canvas
 //! holds the resource *and* that `Workspace::trusts` for it, never membership alone; a reference
@@ -70,6 +83,20 @@ impl ResourceRef {
     }
 }
 
+/// Who chose a reference a product holds ([`Secrets::bind_ref`]): opaque, stored by the product
+/// as it serializes (a string), handed back to each [`Secrets::resolve_as`] and
+/// [`Secrets::digest_as`], which look its rights up again. It's who to name when a reference stops
+/// working ("usr_… set it and can't reach it any more"), never a credential.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct Maker(String);
+
+impl std::fmt::Display for Maker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// A resolved reference. `value` redacts itself and is wiped on drop.
 #[derive(Clone, Debug)]
 pub struct Resolved {
@@ -92,14 +119,18 @@ pub enum Refusal {
     /// another project.
     #[error("not trusted: {0}")]
     NotTrusted(String),
+    /// Whoever chose the reference may not reveal it ([`Secrets::bind_ref`]'s caller, or a
+    /// [`Maker`] since demoted, disabled, revoked or no longer on the project).
+    #[error("not allowed: {0}")]
+    NotAllowed(String),
     #[error("no such key: {0}")]
     NoSuchKey(String),
     /// A protected environment, or only reachable through one, for an untrusted reader (an
     /// untrusted ephemeral environment, or an untrusted [`ResourceRef`]).
     #[error("protected: {0}")]
     Protected(String),
-    /// Set, but not usable here (a dynamic credential, a sensitive key for an untrusted reader, a
-    /// reference inside it that doesn't resolve).
+    /// Set, but not usable here (a dynamic credential, a sensitive key for any reader but a
+    /// trusted runtime, a reference inside it that doesn't resolve).
     #[error("can't be used: {0}")]
     Unusable(String),
     #[error("{0}")]
@@ -146,6 +177,58 @@ impl Reference {
 }
 
 impl Secrets {
+    /// Check that `caller` (the request writing `reference` into `resource`'s settings) may
+    /// choose it, and return who to store as its [`Maker`]: the caller may reveal its folder in
+    /// the one project that holds and stands for `resource`, and it resolves for `resource` read
+    /// as they are ([`Secrets::digest_as`]): a sensitive key, a key only a protected environment
+    /// holds for an untrusted copy, or one reached only through what they can't reveal is refused
+    /// here, not at the first use. An admin's session is stored as the person; a workload
+    /// identity's login is refused (it ends with its token). Not audited (nothing is read).
+    pub fn bind_ref(&self, resource: &ResourceRef, reference: &str, caller: &Caller) -> Result<Maker, Refusal> {
+        let maker = Maker(self.maker_of(caller)?);
+        let r = Reference::required(reference)?;
+        let project = self.project_for(resource, r.project.as_deref())?;
+        self.may_reveal_for(&project, &r, caller)?;
+        self.digest_as(resource, reference, &maker)?;
+        Ok(maker)
+    }
+
+    /// `reference`'s value for `resource`, read as `maker` may now (see the module doc), audited
+    /// as `secrets.resolve` by the resource, naming the maker.
+    pub fn resolve_as(&self, resource: &ResourceRef, reference: &str, maker: &Maker) -> Result<Resolved, Refusal> {
+        let (project, r, caller) = self.as_maker(resource, reference, maker)?;
+        self.resolve_one(&project, &r.env, &r.path, &r.key, &caller, resource.untrusted)
+    }
+
+    /// The digest of the folder `reference` reads, as `maker` may now: refused exactly as
+    /// [`Secrets::resolve_as`] would be, not audited, no value.
+    pub fn digest_as(&self, resource: &ResourceRef, reference: &str, maker: &Maker) -> Result<String, Refusal> {
+        let (project, r, caller) = self.as_maker(resource, reference, maker)?;
+        self.digest_one(&project, &r, &caller, resource.untrusted)
+    }
+
+    /// The project, the reference, and the caller a read as `maker` runs as: the maker's rights
+    /// now, named for the resource, not a runtime, and allowed to reveal the folder.
+    fn as_maker(&self, resource: &ResourceRef, reference: &str, maker: &Maker) -> Result<(String, Reference, Caller), Refusal> {
+        let r = Reference::required(reference)?;
+        let project = self.project_for(resource, r.project.as_deref())?;
+        let caller = self.maker_caller(&maker.0, &resource.consumer()).map_err(|e| match e {
+            Error::Forbidden(_) => Refusal::NotAllowed(format!("{maker}, who chose it, can't reach roll secrets any more")),
+            e => e.into(),
+        })?;
+        self.may_reveal_for(&project, &r, &caller)?;
+        Ok((project, r, caller.not_runtime()))
+    }
+
+    /// Whether `caller` may reveal `r`'s folder in `project`. Never says more than a reveal's 403.
+    pub(crate) fn may_reveal_for(&self, project: &str, r: &Reference, caller: &Caller) -> Result<(), Refusal> {
+        if caller.allows(crate::access::Action::Reveal, &crate::access::Scope::at(project, &r.env, &r.path)) {
+            return Ok(());
+        }
+        let who = caller.maker.as_deref().unwrap_or(&caller.principal);
+        Err(Refusal::NotAllowed(format!("{who} may not reveal {}:{}", r.env, r.path)))
+    }
+
     /// `reference`'s value for `resource`, read as described in the module doc and audited.
     pub fn resolve_for(&self, resource: &ResourceRef, reference: &str) -> Result<Resolved, Refusal> {
         let r = Reference::required(reference)?;
@@ -159,8 +242,12 @@ impl Secrets {
     pub fn digest_for(&self, resource: &ResourceRef, reference: &str) -> Result<String, Refusal> {
         let r = Reference::required(reference)?;
         let project = self.project_for(resource, r.project.as_deref())?;
-        let (reader, _) = self.consumer_entry(&project, &r.env, &r.path, &r.key, &Caller::consumer(&resource.consumer()), resource.untrusted)?;
-        match self.digest(&project, &r.env, &r.path, &reader) {
+        self.digest_one(&project, &r, &Caller::consumer(&resource.consumer()), resource.untrusted)
+    }
+
+    fn digest_one(&self, project: &str, r: &Reference, caller: &Caller, untrusted: bool) -> Result<String, Refusal> {
+        let (reader, _) = self.consumer_entry(project, &r.env, &r.path, &r.key, caller, untrusted)?;
+        match self.digest(project, &r.env, &r.path, &reader) {
             Err(Error::NotFound(m)) => Err(Refusal::NoSuchKey(m)),
             d => Ok(d?),
         }
