@@ -913,6 +913,10 @@ a SIEM", `roll mcp sinks add https://…`, or `POST /v1/access/audit/sinks {url,
 
 ## Users' own tokens
 
+A person's session as a grant built from their project roles is designed in
+[members.md](members.md) (not built yet).
+
+
 With accounts (docs/accounts.md), a signed-in person who isn't an admin makes tokens and connects
 MCP clients for themselves, as GitHub's fine-grained tokens act for the person who made them:
 

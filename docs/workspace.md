@@ -8,6 +8,9 @@ or taking a resource out of one, never deletes the resource.
 - Client: `apps/dashboard/src/lib/workspace-api.ts`. Change it and this contract together.
 - Tests: `crates/roll-workspace/tests/api.rs` (the router in process, on SQLite).
 
+Sharing a project with other people, each with a role, is designed in [members.md](members.md)
+(not built yet).
+
 ## Where it runs
 
 Workspace projects are always on: they are not a product in `ROLL_PRODUCTS`. The routes take the
