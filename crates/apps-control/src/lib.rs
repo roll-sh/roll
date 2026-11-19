@@ -34,6 +34,7 @@ pub mod drains;
 pub mod export;
 pub mod git_source;
 pub mod image_upload;
+pub mod images;
 pub mod integrations;
 pub mod jobs;
 pub mod live;
@@ -233,6 +234,8 @@ pub struct Apps {
     capped_refresh: tokio::sync::Mutex<()>,
     /// roll previews' notes for a preview's feedback button ([`Apps::set_feedback_notes`]).
     notes: std::sync::OnceLock<Arc<dyn integrations::FeedbackNotes>>,
+    /// Where a name under a project's preview domain no environment holds goes (roll previews).
+    preview_router: std::sync::OnceLock<Arc<dyn integrations::PreviewRouter>>,
     /// roll previews' branch pushes ([`Apps::set_git_pushes`]).
     pub(crate) pushes: std::sync::OnceLock<Arc<dyn integrations::GitPushes>>,
     /// roll's GitHub App ([`Apps::set_github_app`]).
@@ -245,6 +248,10 @@ pub struct Apps {
     drain_done: Arc<Mutex<Vec<String>>>,
     /// Projects whose drains changed on this node: the drainer reads theirs again (only theirs).
     pub(crate) drains_dirty: Mutex<std::collections::HashSet<String>>,
+    /// Previews' runtime lines on their way to the drainer ([`Apps::drain_preview_lines`]), and
+    /// its end of the channel until it starts.
+    pub(crate) preview_lines: tokio::sync::mpsc::Sender<drains::PreviewBatch>,
+    pub(crate) preview_lines_rx: Mutex<Option<tokio::sync::mpsc::Receiver<drains::PreviewBatch>>>,
     /// Private environments' token hashes, by environment, as the owner last read or set them.
     access: Mutex<HashMap<String, Option<Access>>>,
     /// Bumped by every change to the access cache: a cold read caches what it read only if
@@ -276,12 +283,17 @@ pub struct Apps {
     watching: std::sync::atomic::AtomicBool,
     watching_bases: std::sync::atomic::AtomicBool,
     watching_secrets: std::sync::atomic::AtomicBool,
+    /// Environments whose project secrets are long-polled here ([`Apps::watch_secrets_of`]), by
+    /// [`env_key`]: one task each, on the owner.
+    pub(crate) secret_watches: Mutex<std::collections::HashSet<String>>,
     /// Scaling workers' backlogs are being read (on their own task).
     scaling: std::sync::atomic::AtomicBool,
     /// The App's queued events are being run on this node.
     github_running: std::sync::atomic::AtomicBool,
     /// Web services' answers a shared cache may keep, per environment (`resp_cache`).
     pub(crate) responses: resp_cache::ResponseCache,
+    /// Images made by `/__roll/image` on this node ([`images::ImageCache`]).
+    pub(crate) images: images::ImageCache,
     /// Static sites' file indexes, by image digest, as this node read them.
     sites: Mutex<HashMap<String, Arc<sites::Site>>>,
     /// Per environment, for the live site's key: its earlier static deployments' site keys.
@@ -375,7 +387,11 @@ type NeedsDeploy = (std::time::Instant, u64, String, Option<String>, bool);
 /// A service id looked up by name, as of when (none: no such web service).
 type NameLookup = (std::time::Instant, Option<String>);
 /// A host's kept answer: when, at which generation, and the service, environment and deployment.
-type HostAnswer = (Instant, u64, Option<(String, String, Option<String>)>);
+type HostAnswer = (Instant, u64, Option<HostTarget>);
+
+/// What a hostname names: the service, the environment, a deployment's own (`<dep>--<slug>`),
+/// and another of the app's ports when it's a custom domain sent there.
+pub type HostTarget = (String, String, Option<String>, Option<u16>);
 
 /// Another service's values a reference may read, and which of them are sealed.
 type ServiceValues = (HashMap<String, String>, BTreeSet<String>);
@@ -443,6 +459,7 @@ impl Apps {
     pub fn new(cfg: AppsConfig, store: Store, deps: Deps) -> Arc<Apps> {
         let cfg_allow = cfg.allow_private;
         let logs = LogHub::new(deps.objects.clone());
+        let (preview_lines, preview_lines_rx) = tokio::sync::mpsc::channel(drains::PREVIEW_BATCHES);
         Arc::new(Apps {
             cfg,
             store,
@@ -459,12 +476,15 @@ impl Apps {
             capped: Mutex::new(Default::default()),
             capped_refresh: tokio::sync::Mutex::new(()),
             notes: std::sync::OnceLock::new(),
+            preview_router: std::sync::OnceLock::new(),
             pushes: std::sync::OnceLock::new(),
             github: std::sync::OnceLock::new(),
             mail: std::sync::OnceLock::new(),
             visitors: std::sync::OnceLock::new(),
             drain_done: Arc::new(Mutex::new(Vec::new())),
             drains_dirty: Mutex::new(Default::default()),
+            preview_lines,
+            preview_lines_rx: Mutex::new(Some(preview_lines_rx)),
             access: Mutex::new(HashMap::new()),
             access_gen: std::sync::atomic::AtomicU64::new(0),
             visits: Mutex::new(HashMap::new()),
@@ -479,9 +499,11 @@ impl Apps {
             watching: std::sync::atomic::AtomicBool::new(false),
             watching_bases: std::sync::atomic::AtomicBool::new(false),
             watching_secrets: std::sync::atomic::AtomicBool::new(false),
+            secret_watches: Mutex::new(std::collections::HashSet::new()),
             scaling: std::sync::atomic::AtomicBool::new(false),
             github_running: std::sync::atomic::AtomicBool::new(false),
             responses: resp_cache::ResponseCache::default(),
+            images: images::ImageCache::default(),
             sites: Mutex::new(HashMap::new()),
             earlier_sites: Mutex::new(HashMap::new()),
             site_loads: Mutex::new(HashMap::new()),
@@ -1026,7 +1048,8 @@ impl Apps {
 
     async fn summary(self: &Arc<Self>, e: &EnvRow) -> Result<EnvironmentSummary> {
         let sid = e.service.clone();
-        let public = self.db(move |s| s.service(&sid)).await.map(|s| s.run.public).unwrap_or(true);
+        let svc_row = self.db(move |s| s.service(&sid)).await.ok();
+        let public = svc_row.as_ref().map(|s| s.run.public).unwrap_or(true);
         let (svc, env) = (e.service.clone(), e.name.clone());
         let recent = self.db(move |s| s.deployments(&svc, &env, 1, None)).await?;
         let active = match &e.active {
@@ -1068,7 +1091,12 @@ impl Apps {
         if latest.as_ref().is_some_and(|l| l.status == DeployStatus::Failed) {
             attention.push("deploy_failed");
         }
-        Ok(EnvironmentSummary { name: e.name.clone(), state, url: public.then(|| self.url(&e.slug)), active, latest, attention })
+        // Cached for a minute per environment ([`Apps::needs_deploy`]), so a list stays cheap.
+        let needs_deploy = match (&e.active, svc_row) {
+            (Some(a), Some(svc)) => self.needs_deploy(&svc.for_env(e).unwrap_or(svc), e, a).await?,
+            _ => false,
+        };
+        Ok(EnvironmentSummary { name: e.name.clone(), state, url: public.then(|| self.url(&e.slug)), active, latest, attention, needs_deploy, ephemeral: e.ephemeral })
     }
 
     pub async fn patch_service(self: &Arc<Self>, id: &str, body: Value) -> Result<Service> {
@@ -1423,10 +1451,6 @@ impl Apps {
             (Some(sched), Some(_)) if svc.run.kind == RunType::Cron => crate::cron::Schedule::parse(sched, svc.run.timezone.as_deref()).ok().and_then(|s| s.next_after(code_sql::now_ms())),
             _ => None,
         };
-        let needs_deploy = match &r.active {
-            Some(a) => self.needs_deploy(&svc, &r, a).await?,
-            None => false,
-        };
         let gate = self.access(&r.service, &r.name).await?;
         let (private, signed_in) = (gate.is_some(), gate.is_some_and(|a| a.signed_in));
         let (sid, e) = (r.service.clone(), r.name.clone());
@@ -1435,12 +1459,10 @@ impl Apps {
             summary,
             service: r.service.clone(),
             branch: r.branch.clone(),
-            ephemeral: r.ephemeral,
             instances,
             domains,
             port: r.port,
             tcp: r.tcp_port.filter(|_| svc.run.tcp && svc.run.public && !private).map(|p| format!("{}:{p}", self.cfg.tcp_host)),
-            needs_deploy,
             private,
             signed_in,
             next_run_at,
@@ -1462,6 +1484,10 @@ impl Apps {
             feedback: r.feedback,
             vitals: r.vitals,
             report: r.report,
+            preview_host: {
+                let (sid, e) = (r.service.clone(), r.name.clone());
+                self.db(move |s| s.preview_host(&sid, &e)).await.ok().flatten()
+            },
             maintenance: r.maintenance.clone().map(|m| crate::model::Maintenance { message: Some(m).filter(|m| !m.is_empty()) }),
             paused: r.paused,
             held_after: r.held_by.clone().filter(|h| h != crate::deploy::MANUAL_HOLD),
@@ -1589,7 +1615,7 @@ impl Apps {
     pub async fn put_environment(self: &Arc<Self>, service: &str, env: &str, body: Value) -> Result<Environment> {
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "paused", "held", "hostname", "traces", "egress", "vitals", "report"].contains(&k.as_str()) {
+            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "paused", "held", "hostname", "traces", "egress", "vitals", "report", "preview_host"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
@@ -1613,6 +1639,13 @@ impl Apps {
             None => None,
             Some(Value::Bool(b)) => Some(*b),
             Some(_) => return Err(Error::BadRequest("paused is a boolean".into())),
+        };
+        // One DNS label under the project's preview domain, or null.
+        let preview_label: Option<Option<String>> = match o.get("preview_host") {
+            None => None,
+            Some(Value::Null) => Some(None),
+            Some(Value::String(l)) if l.len() <= 63 && !l.is_empty() && !l.starts_with('-') && !l.ends_with('-') && l.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') => Some(Some(l.clone())),
+            Some(_) => return Err(Error::BadRequest("preview_host is one DNS label (lowercase letters, digits and -, at most 63), or null".into())),
         };
         // Maintenance: true or {message?} turns it on, false or null off.
         let maintenance: Option<Option<String>> = match o.get("maintenance") {
@@ -1890,6 +1923,10 @@ impl Apps {
         if let Some(on) = paused {
             let (sid, e) = (service.to_string(), env.to_string());
             self.db(move |s| s.set_paused(&sid, &e, on)).await?;
+            // Resumed: its secrets are watched again (a watch ends itself while it's paused).
+            if !on {
+                self.watch_secrets_of(service).await;
+            }
             // At once on its owner: what runs stops, and the next tick keeps no floor; resumed,
             // the next tick (or request) starts what it wants again.
             let live = self.live(service, env);
@@ -1959,6 +1996,12 @@ impl Apps {
             self.live(service, env).forget_gate();
             self.changed(service);
         }
+        // The label it answers to under the project's preview domain (roll previews sets it).
+        if let Some(label) = preview_label {
+            let (sid, e, p) = (service.to_string(), env.to_string(), svc.project.clone());
+            self.db(move |s| s.set_preview_host(&sid, &e, &p, label.as_deref())).await?;
+            self.hosts_changed();
+        }
         // Its deploys' reports to the Git host, from the next one on.
         if let Some(Value::Bool(on)) = o.get("report") {
             let (sid, e, on) = (service.to_string(), env.to_string(), *on);
@@ -1975,6 +2018,10 @@ impl Apps {
         if let Some(Value::Bool(on)) = o.get("redeploy_on_secrets") {
             let (sid, e, on) = (service.to_string(), env.to_string(), *on);
             self.db(move |s| s.set_redeploy_on_secrets(&sid, &e, on)).await?;
+            // Watched from now on (a watch already running ends itself once it's off).
+            if on {
+                self.watch_secrets_of(service).await;
+            }
         }
         // Traces: a token of the environment's own (kept sealed: it goes into every deploy's
         // variables), or none. Its variables reach instances at the next deploy.
@@ -2720,6 +2767,7 @@ impl Apps {
             tls_error: None,
             created_at: row.created_at,
             redirect_to: None,
+            port: None,
         };
         Ok(std::iter::once(own).chain(custom).collect())
     }
@@ -2826,6 +2874,89 @@ impl Apps {
         Ok(d)
     }
 
+    // ── a project's preview domain (docs/apps/README.md, "A project's preview domain") ──
+
+    /// Where a project's preview domain's CNAME points (a name of roll's that reaches it).
+    fn preview_target(&self, project: &str) -> String {
+        self.target(&format!("previews-{}", project.strip_prefix("prj_").unwrap_or(project)))
+    }
+
+    fn preview_domain_view(&self, project: &str, (hostname, status, token, error, created_at): store::PreviewDomainRow) -> Domain {
+        Domain {
+            record: self.record(&hostname),
+            target: self.preview_target(project),
+            hostname,
+            kind: DomainKind::Custom,
+            status,
+            token,
+            error,
+            // Plain HTTP until wildcard certificates (DNS-01) are issued here.
+            tls: TlsStatus::None,
+            tls_error: None,
+            created_at,
+            redirect_to: None,
+            port: None,
+        }
+    }
+
+    /// `GET /v1/apps/projects/{project}/preview-domain`.
+    pub async fn preview_domain(self: &Arc<Self>, project: &str) -> Result<Domain> {
+        let p = project.to_string();
+        let row = self.db(move |s| s.preview_domain(&p)).await?.ok_or_else(|| Error::NotFound(format!("{project} has no preview domain")))?;
+        Ok(self.preview_domain_view(project, row))
+    }
+
+    /// `POST /v1/apps/projects/{project}/preview-domain {hostname}`: a wildcard (`*.preview.acme.dev`)
+    /// its preview environments answer under, by their `preview_host`; pending until its DNS is
+    /// verified, as a custom domain is. One a project (a new one replaces it).
+    pub async fn set_preview_domain(self: &Arc<Self>, project: &str, body: Value) -> Result<Domain> {
+        self.project_name(project)?;
+        let host = body.get("hostname").and_then(Value::as_str).ok_or_else(|| Error::BadRequest("hostname is a wildcard like *.preview.acme.dev".into()))?;
+        let mut reserved: Vec<&str> = self.cfg.reserved.iter().map(String::as_str).collect();
+        reserved.push(&self.cfg.domain);
+        let host = check_hostname(host, &reserved)?;
+        if !host.starts_with("*.") {
+            return Err(Error::BadRequest("hostname is a wildcard like *.preview.acme.dev (its previews are the names one label under it)".into()));
+        }
+        let (p, h) = (project.to_string(), host.clone());
+        self.db(move |s| s.set_preview_domain(&p, &h)).await?;
+        self.hosts_changed();
+        self.preview_domain(project).await
+    }
+
+    /// `POST …/preview-domain/verify`: its DNS checked as a custom domain's is (the TXT challenge,
+    /// or the CNAME to its own target where that target is the project's alone).
+    pub async fn verify_preview_domain(self: &Arc<Self>, project: &str) -> Result<Domain> {
+        let p = project.to_string();
+        let (host, _, token, _, _) = self.db(move |s| s.preview_domain(&p)).await?.ok_or_else(|| Error::NotFound(format!("{project} has no preview domain")))?;
+        let target = self.preview_target(project);
+        let cnames = self.deps.resolver.cname(&host).await;
+        let cname_ok = cnames.contains(&target);
+        let challenge = crate::model::challenge_name(&host);
+        let txts = self.deps.resolver.txt(&challenge).await;
+        let shared = self.cfg.cname_target.is_some();
+        let (status, error) = if txts.contains(&token) || (cname_ok && !shared) {
+            (DomainStatus::Active, None)
+        } else {
+            let seen = crate::model::DnsSeen { cnames, txts, host_txts: self.deps.resolver.txt(&host).await, addresses: if cname_ok { Vec::new() } else { self.deps.resolver.addresses(&host).await } };
+            (DomainStatus::Pending, Some(crate::model::domain_diagnosis(&host, &target, &challenge, &token, &seen, shared)))
+        };
+        let (p, err) = (project.to_string(), error.clone());
+        self.db(move |s| s.set_preview_domain_status(&p, status, err.as_deref())).await?;
+        self.hosts_changed();
+        self.preview_domain(project).await
+    }
+
+    /// `DELETE …/preview-domain`.
+    pub async fn delete_preview_domain(self: &Arc<Self>, project: &str) -> Result<()> {
+        let p = project.to_string();
+        if !self.db(move |s| s.delete_preview_domain(&p)).await? {
+            return Err(Error::NotFound(format!("{project} has no preview domain")));
+        }
+        self.hosts_changed();
+        Ok(())
+    }
+
     pub async fn delete_domain(self: &Arc<Self>, service: &str, env: &str, host: &str) -> Result<()> {
         // What a hostname names is about to change: no host answer kept from before.
         self.hosts_changed();
@@ -2863,27 +2994,46 @@ impl Apps {
         Ok(hosts)
     }
 
-    /// `PATCH …/domains/{host} {redirect_to}`: send a custom domain's requests to another of the
-    /// environment's hostnames (its own, or another custom domain that doesn't redirect), or
-    /// (`null`) serve them again.
-    pub async fn set_domain_redirect(self: &Arc<Self>, service: &str, env: &str, host: &str, body: Value) -> Result<Domain> {
-        // What a hostname names is about to change: no host answer kept from before.
-        self.hosts_changed();
+    /// `PATCH …/domains/{host} {redirect_to?, port?}`: send a custom domain's requests to another
+    /// of the environment's hostnames (its own, or another custom domain that doesn't redirect),
+    /// or (`null`) serve them again; `port`: to another of the app's ports, published from the
+    /// next deploy (`null`: the service's own). A field left out stays as it is.
+    pub async fn patch_domain(self: &Arc<Self>, service: &str, env: &str, host: &str, body: Value) -> Result<Domain> {
         let o = body.as_object().cloned().unwrap_or_default();
-        if let Some(k) = o.keys().find(|k| k.as_str() != "redirect_to") {
+        if let Some(k) = o.keys().find(|k| !matches!(k.as_str(), "redirect_to" | "port")) {
             return Err(Error::BadRequest(format!("unknown field {k}")));
         }
         let h = host.to_ascii_lowercase();
-        let to = match o.get("redirect_to") {
-            None | Some(Value::Null) => None,
-            Some(Value::String(t)) => Some(t.trim().trim_end_matches('.').to_ascii_lowercase()),
-            Some(_) => return Err(Error::BadRequest("redirect_to is a hostname or null".into())),
-        };
         let all = self.domains(service, env).await?;
         if !all.iter().any(|d| d.kind == DomainKind::Custom && d.hostname == h) {
             return Err(Error::NotFound(format!("{h} isn't a custom domain of {service} in {env}")));
         }
-        if let Some(t) = &to {
+        let port = match o.get("port") {
+            None => None,
+            Some(Value::Null) => Some(None),
+            Some(v) => match v.as_u64() {
+                Some(p) if (1..=65535).contains(&p) => Some(Some(p as u16)),
+                _ => return Err(Error::BadRequest("port is the app's port this hostname goes to (1–65535), or null".into())),
+            },
+        };
+        if let Some(Some(_)) = port {
+            let (sid, e) = (service.to_string(), env.to_string());
+            let (svc, row) = self.db(move |s| Ok((s.service(&sid)?, s.environment(&sid, &e)?))).await?;
+            if svc.run.tcp || svc.run.kind != crate::model::RunType::Web {
+                return Err(Error::BadRequest("port is for a web service's custom domain".into()));
+            }
+            // Its instances answer rolld through their sandbox's socket, on their own port.
+            if row.egress.closed() {
+                return Err(Error::Conflict("a closed environment's instances are reached on their own port only".into()));
+            }
+        }
+        let to = match o.get("redirect_to") {
+            None => None,
+            Some(Value::Null) => Some(None),
+            Some(Value::String(t)) => Some(Some(t.trim().trim_end_matches('.').to_ascii_lowercase())),
+            Some(_) => return Err(Error::BadRequest("redirect_to is a hostname or null".into())),
+        };
+        if let Some(Some(t)) = &to {
             if t.starts_with("*.") {
                 return Err(Error::BadRequest("redirect_to is one hostname, not a wildcard".into()));
             }
@@ -2895,8 +3045,18 @@ impl Apps {
                 return Err(Error::BadRequest(format!("another domain redirects to {h}: it serves, so it can't redirect")));
             }
         }
-        let (hh, t) = (h.clone(), to.clone());
-        self.db(move |s| s.set_redirect(&hh, t.as_deref())).await?;
+        let hh = h.clone();
+        self.db(move |s| {
+            if let Some(t) = &to {
+                s.set_redirect(&hh, t.as_deref())?;
+            }
+            if let Some(p) = port {
+                s.set_domain_port(&hh, p)?;
+            }
+            Ok(())
+        })
+        .await?;
+        // What a hostname names changed: no host answer kept from before.
         self.hosts_changed();
         self.domains(service, env).await?.into_iter().find(|d| d.hostname == h).ok_or_else(|| Error::NotFound(h.clone()))
     }
@@ -2945,7 +3105,7 @@ impl Apps {
     /// The environment a request's `Host` names: a generated hostname, or an active custom domain.
     /// The service and environment a hostname is, and the deployment when it's one's own
     /// (`<deployment>--<slug>`: the id without `dep_`).
-    pub async fn env_for_host(self: &Arc<Self>, host: &str) -> Option<(String, String, Option<String>)> {
+    pub async fn env_for_host(self: &Arc<Self>, host: &str) -> Option<HostTarget> {
         // Every request asks: kept a second (another node's change shows within it), and
         // forgotten at once on any change here. It was two queries a request, about 150 µs of the
         // proxy's 260 (`docker.rs::the_proxys_own_cost_is_measured`, release).
@@ -2974,7 +3134,7 @@ impl Apps {
         v
     }
 
-    async fn env_for_host_now(self: &Arc<Self>, host: &str) -> Option<(String, String, Option<String>)> {
+    async fn env_for_host_now(self: &Arc<Self>, host: &str) -> Option<HostTarget> {
         let found = self.host_target(host).await?;
         // A private service has no public names: the same 404 as an address nobody has, read
         // from its settings now (making it private takes effect at once, not with a deploy).
@@ -2983,19 +3143,26 @@ impl Apps {
         self.db(move |s| s.service(&sid)).await.ok().is_some_and(|svc| svc.run.public && !svc.run.tcp).then_some(found)
     }
 
-    async fn host_target(self: &Arc<Self>, host: &str) -> Option<(String, String, Option<String>)> {
+    async fn host_target(self: &Arc<Self>, host: &str) -> Option<HostTarget> {
         let host = host.rsplit_once(':').filter(|(_, p)| p.bytes().all(|b| b.is_ascii_digit())).map_or(host, |(h, _)| h);
         let host = host.trim_end_matches('.').to_ascii_lowercase();
         if let Some(label) = host.strip_suffix(&self.cfg.domain).and_then(|s| s.strip_suffix('.')).filter(|s| !s.contains('.')) {
             let slug = label.to_string();
             if let Some(e) = self.db(move |s| s.environment_by_slug(&slug)).await.ok().flatten() {
-                return Some((e.service, e.name, None));
+                return Some((e.service, e.name, None, None));
             }
             let (dep, slug) = label.split_once("--").filter(|(d, s)| d.len() == 12 && d.bytes().all(|b| b.is_ascii_alphanumeric()) && !s.is_empty())?;
             let (dep, slug) = (format!("dep_{dep}"), slug.to_string());
-            return self.db(move |s| s.environment_by_slug(&slug)).await.ok().flatten().map(|e| (e.service, e.name, Some(dep)));
+            return self.db(move |s| s.environment_by_slug(&slug)).await.ok().flatten().map(|e| (e.service, e.name, Some(dep), None));
         }
-        self.active_domain(&host).await.map(|(s, e, _)| (s, e, None))
+        if let Some((s, e, d)) = self.active_domain(&host).await {
+            return Some((s, e, None, d.port));
+        }
+        // One label under a project's active preview domain: the environment that answers to it
+        // (any other label is none of roll apps': rolld's own previews may serve it).
+        let (label, rest) = host.split_once('.')?;
+        let (wild, label) = (format!("*.{rest}"), label.to_string());
+        self.db(move |s| s.preview_target(&wild, &label)).await.ok().flatten().map(|(s, e)| (s, e, None, None))
     }
 
     /// What the environment's public names let through ([`live::Gate`]): the live state's copy,
@@ -3029,6 +3196,22 @@ impl Apps {
 
     pub(crate) fn feedback_notes(&self) -> Option<Arc<dyn integrations::FeedbackNotes>> {
         self.notes.get().cloned()
+    }
+
+    /// Where names under a project's preview domain that no environment holds go (roll previews'
+    /// router, for its previews on roll's own runtime). Set once.
+    pub fn set_preview_router(&self, router: Arc<dyn integrations::PreviewRouter>) {
+        let _ = self.preview_router.set(router);
+    }
+
+    /// The router for `host` when it's one label under a project's active preview domain that no
+    /// environment answers to.
+    pub(crate) async fn preview_router_for(self: &Arc<Self>, host: &str) -> Option<Arc<dyn integrations::PreviewRouter>> {
+        let router = self.preview_router.get().cloned()?;
+        let host = host.rsplit_once(':').filter(|(_, p)| p.bytes().all(|b| b.is_ascii_digit())).map_or(host, |(h, _)| h).trim_end_matches('.').to_ascii_lowercase();
+        let (_, rest) = host.split_once('.')?;
+        let wild = format!("*.{rest}");
+        self.db(move |s| s.preview_domain_active(&wild)).await.ok().filter(|on| *on).map(|_| router)
     }
 
     /// Where a Git URL service's pushes to branches it doesn't follow go (roll previews). Set once.

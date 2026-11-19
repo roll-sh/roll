@@ -115,6 +115,11 @@ pub struct ClusterConfig {
     /// The cluster's id in roll's catalog (`srch_…`), when it has one: how it names itself to
     /// `links`.
     pub catalog_id: Option<String>,
+    /// Read service account tokens from `<path.conf>/service_tokens` too, as Elasticsearch
+    /// does. The file is the node's, so a token in it would sign in to every cluster the node
+    /// serves: the host sets this only for a node serving one cluster, or for the clusters its
+    /// operator names (`search_server::node::FILE_SERVICE_TOKEN_CLUSTERS`).
+    pub file_service_tokens: bool,
     /// Where the cluster's security audit entries go ([`crate::xpack::security::audit`]);
     /// `None`: it records none.
     pub audit: Option<crate::xpack::security::audit::AuditLog>,
@@ -134,6 +139,7 @@ impl ClusterConfig {
             default_repository: None,
             links: None,
             catalog_id: None,
+            file_service_tokens: false,
             audit: None,
         }
     }

@@ -11,8 +11,8 @@ const PAGE = 100;
  * `/dashboard/access/audit`: every request a token made and every MCP tool call, newest first,
  * with the decision, the resource, and the arguments as stored (secrets redacted).
  */
-export function Audit({ grant, product }: { grant?: string; product?: string }) {
-  const [filter, setFilter] = useState<AuditFilter>({ grant, product });
+export function Audit({ grant, product, resource }: { grant?: string; product?: string; resource?: string }) {
+  const [filter, setFilter] = useState<AuditFilter>({ grant, product, resource });
   const [events, setEvents] = useState<AuditEvent[] | null>(null);
   const [more, setMore] = useState(false);
   const [error, setError] = useState<string | null>(null);

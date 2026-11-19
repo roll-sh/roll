@@ -1000,7 +1000,8 @@ struct Decision {
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct Approve {
-    /// Also allow the same action on the same resource from now on: `1h`, `8h`, `1d` or `always`.
+    /// Also allow the same action on the same resource from now on: `1h`, `8h`, `1d`, `7d`, `30d`
+    /// or `always`.
     remember: Option<String>,
 }
 
@@ -1029,8 +1030,11 @@ async fn remembered(a: &Arc<Access>, id: &str, remember: Option<&str>) -> crate:
         Some("1h") => hours(1),
         Some("8h") => hours(8),
         Some("1d") => hours(24),
+        // A developer's own CLI on their machine (`roll run` in development) wants longer than a day.
+        Some("7d") => hours(7 * 24),
+        Some("30d") => hours(30 * 24),
         Some("always") => Some(None),
-        Some(other) => return Err(Error::BadRequest(format!("remember is 1h, 8h, 1d or always, not {other}"))),
+        Some(other) => return Err(Error::BadRequest(format!("remember is 1h, 8h, 1d, 7d, 30d or always, not {other}"))),
     };
     let Some(until) = until else { return Ok(None) };
     let id2 = id.to_string();

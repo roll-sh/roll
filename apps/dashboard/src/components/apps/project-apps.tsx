@@ -3,6 +3,7 @@ import { appsApi } from "@/lib/apps-api";
 import { useWorkspace } from "@/lib/workspace-store";
 import { btn, Panel } from "../ui";
 import { DeletedPanel } from "./deleted";
+import { PreviewDomainPanel } from "./preview-domain";
 import { DrainsPanel } from "./drains";
 import { NotificationsPanel } from "./notifications";
 import { RunnerError, useRunner } from "./shared";
@@ -44,6 +45,7 @@ export function ProjectApps({ project, projectName }: { project: string; project
       <NotificationsPanel project={project} projectName={projectName} runner={runner} />
       <DrainsPanel project={project} projectName={projectName} runner={runner} />
       <SpendPanel project={project} projectName={projectName} runner={runner} />
+      <PreviewDomainPanel project={project} projectName={projectName} runner={runner} />
       <DeletedPanel project={project} projectName={projectName} runner={runner} />
       <RunnerError runner={runner} />
     </div>
