@@ -1118,7 +1118,7 @@ impl Secrets {
         let keys: Vec<String> = self.view(project, slug, &at, caller, false, Action::Reveal)?.into_iter().map(|e| e.row.key).collect();
         self.db.write(|c| {
             if !seen(c)? {
-                crate::audit::record(c, project, caller, "secrets.revalidate", Some(slug), Some(&at), &keys, &format!("revalidated {} (unchanged since its last read)", crate::write::plural(keys.len(), "value")), now)?;
+                crate::audit::record(c, self.keys()?, project, caller, "secrets.revalidate", Some(slug), Some(&at), &keys, &format!("revalidated {} (unchanged since its last read)", crate::write::plural(keys.len(), "value")), now)?;
             }
             Ok::<_, Error>(())
         })?;

@@ -86,6 +86,7 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route("/v1/secrets/oidc/.well-known/openid-configuration", get(oidc_discovery))
         .route("/v1/secrets/oidc/jwks", get(oidc_jwks))
         .route(&format!("{P}/audit"), get(audit))
+        .route(&format!("{P}/audit/verify"), get(verify_audit))
         .route(&format!("{P}/audit/sinks"), get(sinks).post(create_sink))
         .route(&format!("{P}/audit/sinks/{{id}}"), axum::routing::delete(delete_sink))
         .route(&format!("{P}/leaks"), post(scan_leaks))
@@ -1118,6 +1119,10 @@ async fn audit(State(s): S, Who(c): Who, Path(project): Path<String>, Query(q): 
         }
         Some(f) => return Err(Error::BadRequest(format!("format is csv or jsonl, not {f}"))),
     })
+}
+
+async fn verify_audit(State(s): S, Who(c): Who, Path(project): Path<String>, Query(q): Query<crate::audit::VerifyQuery>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.verify_audit(&project, q, &c)).await?))
 }
 
 async fn sinks(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {

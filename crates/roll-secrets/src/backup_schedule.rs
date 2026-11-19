@@ -117,7 +117,7 @@ impl Secrets {
                  ON CONFLICT (project_id) DO UPDATE SET bucket = excluded.bucket, recipient = excluded.recipient, every_hours = excluded.every_hours, keep = excluded.keep, next_at = excluded.next_at, last_error = NULL, created_at = excluded.created_at, created_by = excluded.created_by",
                 params![project, n.bucket, n.recipient, n.every_hours as i64, n.keep as i64, now, now, caller.principal],
             )?;
-            audit::record(c, project, caller, "backup.schedule", None, None, &[], &format!("backs the project up to bucket {} every {} h, keeping {}", n.bucket, n.every_hours, n.keep), now)
+            audit::record(c, self.keys()?, project, caller, "backup.schedule", None, None, &[], &format!("backs the project up to bucket {} every {} h, keeping {}", n.bucket, n.every_hours, n.keep), now)
         })?;
         self.backup_schedule(project, caller)?.ok_or_else(|| Error::Internal("the schedule vanished".into()))
     }
@@ -130,7 +130,7 @@ impl Secrets {
             if c.execute("DELETE FROM backup_schedules WHERE project_id = ?", [project])? == 0 {
                 return Err(Error::NotFound("no backup schedule".into()));
             }
-            audit::record(c, project, caller, "backup.unschedule", None, None, &[], "stopped scheduled backups (the backups made stay in the bucket)", now)
+            audit::record(c, self.keys()?, project, caller, "backup.unschedule", None, None, &[], "stopped scheduled backups (the backups made stay in the bucket)", now)
         })
     }
 

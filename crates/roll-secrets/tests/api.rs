@@ -1916,7 +1916,9 @@ async fn the_audit_log_exports_and_streams_to_a_sink_without_values() {
     let sent = api.sent.0.lock().unwrap().clone();
     assert_eq!(sent.len(), 1, "one batch, not delivered twice");
     let actions: Vec<&str> = sent[0]["events"].as_array().unwrap().iter().map(|e| e["action"].as_str().unwrap()).collect();
-    assert_eq!(actions, ["sink.create", "secrets.write", "secrets.export"]);
+    // The sweep's signed digest of the log goes out as its own event.
+    assert_eq!(actions, ["sink.create", "secrets.write", "secrets.export", "audit.digest"]);
+    assert!(sent[0]["events"][3]["digest"].as_str().is_some_and(|d| d.split('.').count() == 3));
     assert!(!serde_json::to_string(&sent).unwrap().contains("sk_live_never_sent"));
     // A SIEM's own format with its token, sealed: never shown again, sent only with the batch.
     assert_eq!(api.call(Method::POST, "/audit/sinks", Some(json!({ "url": "https://splunk.example:8088/services/collector/event", "format": "splunk" }))).await.0, StatusCode::BAD_REQUEST, "a token is needed");
@@ -1966,6 +1968,134 @@ async fn the_audit_log_exports_and_streams_to_a_sink_without_values() {
     let (_, csv) = api.call(Method::GET, "/audit?format=csv", None).await;
     let csv = csv.as_str().unwrap();
     assert!(csv.starts_with("id,at,actor,action,") && csv.contains("\"secrets.export\"") && !csv.contains("sk_live"));
+}
+
+#[tokio::test]
+async fn the_audit_log_is_a_signed_chain_that_shows_an_edit_and_a_deletion_and_starts_again_at_retentions_anchor() {
+    let api = Api::new().await;
+    for k in ["A", "B", "C", "D"] {
+        api.set("production", k, "v").await;
+    }
+    api.values("production", "/").await;
+    let sweep = |keep_ms: i64| {
+        let s = api.secrets.clone();
+        async move { tokio::task::spawn_blocking(move || s.sweep_audit_chain(keep_ms).unwrap()).await.unwrap() }
+    };
+    assert_eq!(sweep(i64::MAX / 2).await, 1, "a digest of the chain so far");
+    let v = api.ok(Method::GET, "/audit/verify", None).await;
+    assert_eq!((v["ok"].as_bool(), v["from"].as_i64(), v["through"].as_i64(), v["head"].as_i64()), (Some(true), Some(1), Some(5), Some(6)), "{v}");
+
+    // A row edited in the database, and put back.
+    let p = api.project.clone();
+    let summary = |c: &code_sql::Conn<'_>| c.query_row("SELECT summary FROM audit WHERE project_id = ? AND seq = 3", [p.as_str()], |r| r.get::<_, String>(0));
+    let original = api.db.read(summary).unwrap();
+    let edit = |to: &str| api.db.write(|c| c.execute("UPDATE audit SET summary = ? WHERE project_id = ? AND seq = 3", [to, p.as_str()])).unwrap();
+    edit("nothing happened");
+    let v = api.ok(Method::GET, "/audit/verify", None).await;
+    assert_eq!((v["ok"].as_bool(), v["broken"]["seq"].as_i64(), v["broken"]["reason"].as_str()), (Some(false), Some(3), Some("edited")), "{v}");
+    edit(&original);
+    assert_eq!(api.ok(Method::GET, "/audit/verify", None).await["ok"], true);
+    // A row deleted: a gap.
+    api.db.write(|c| c.execute("DELETE FROM audit WHERE project_id = ? AND seq = 4", [p.as_str()])).unwrap();
+    let v = api.ok(Method::GET, "/audit/verify", None).await;
+    assert_eq!((v["broken"]["seq"].as_i64(), v["broken"]["reason"].as_str()), (Some(4), Some("missing")), "{v}");
+
+    // Retention cuts at the digest, which the log then starts from; the cut's own digest says so.
+    api.set("production", "E", "v").await;
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    assert_eq!(sweep(0).await, 1);
+    let v = api.ok(Method::GET, "/audit/verify", None).await;
+    assert_eq!((v["ok"].as_bool(), v["from"].as_i64(), v["through"].as_i64(), v["digests"].as_i64()), (Some(true), Some(6), Some(7), Some(2)), "{v}");
+
+    // Rows cut from the end and the head put back on the digest before them: the head's MAC needs
+    // the deployment key.
+    api.set("production", "F", "v").await;
+    api.db.write(|c| c.execute("DELETE FROM audit WHERE project_id = ? AND seq = 9", [p.as_str()])).unwrap();
+    api.db.write(|c| c.execute("UPDATE audit_heads SET seq = 8, hash = (SELECT hash FROM audit WHERE project_id = ? AND seq = 8) WHERE project_id = ?", [p.as_str(), p.as_str()])).unwrap();
+    let v = api.ok(Method::GET, "/audit/verify", None).await;
+    assert_eq!((v["ok"].as_bool(), v["broken"]["seq"].as_i64(), v["broken"]["reason"].as_str()), (Some(false), Some(8), Some("head")), "{v}");
+}
+
+#[tokio::test]
+async fn an_old_head_put_back_over_cut_rows_leaves_a_gap_that_verify_reports_from_then_on() {
+    let api = Api::new().await;
+    api.set("production", "A", "v").await;
+    let (now, hour) = (api.db.now_ms().unwrap(), 3_600_000);
+    let sweep = |at: i64| {
+        let s = api.secrets.clone();
+        async move { tokio::task::spawn_blocking(move || s.sweep_audit_chain_at(i64::MAX / 2, at).unwrap()).await.unwrap() }
+    };
+    assert_eq!(sweep(now).await, 1);
+    // A database writer copies the head...
+    let p = api.project.clone();
+    type Head = (i64, String, i64, i64, i64, i64, Option<String>);
+    let copy: Head = api.db.read(|c| c.query_row("SELECT seq, hash, at, digest_seq, digest_at, start_seq, mac FROM audit_heads WHERE project_id = ?", [p.as_str()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)))).unwrap();
+    // ...roll writes more and signs it an hour later...
+    api.set("production", "B", "v").await;
+    assert_eq!(sweep(now + hour + 1).await, 1);
+    api.set("production", "C", "v").await;
+    // ...and they delete all of it, the digest too, and put the copy back. Its MAC holds.
+    api.db.write(|c| c.execute("DELETE FROM audit WHERE project_id = ? AND seq > ?", code_sql::params![p, copy.0])).unwrap();
+    let (seq, hash, at, digest_seq, digest_at, start, mac) = copy.clone();
+    api.db.write(|c| c.execute("UPDATE audit_heads SET seq = ?, hash = ?, at = ?, digest_seq = ?, digest_at = ?, start_seq = ?, mac = ? WHERE project_id = ?", code_sql::params![seq, hash, at, digest_seq, digest_at, start, mac, p])).unwrap();
+    assert_eq!(api.ok(Method::GET, "/audit/verify", None).await["ok"], true, "the copy passes until roll signs again");
+
+    // Roll's next digest finds its newest one too old to vouch for what's after it, and says so;
+    // verify reports the gap through later hours and later digests.
+    assert_eq!(sweep(now + 3 * hour).await, 1);
+    for later in [5, 9, 30] {
+        let v = api.ok(Method::GET, "/audit/verify", None).await;
+        assert_eq!((v["ok"].as_bool(), v["broken"]["reason"].as_str()), (Some(false), Some("gap")), "{v}");
+        assert!(v["broken"]["seq"].as_i64().is_some_and(|s| s > copy.0), "{v}");
+        assert_eq!(sweep(now + later * hour).await, 1);
+    }
+    assert_eq!(api.ok(Method::GET, "/audit/verify", None).await["broken"]["reason"], "gap");
+}
+
+#[tokio::test]
+async fn a_signing_key_added_to_the_database_vouches_for_no_digest_and_isnt_published() {
+    use base64::Engine as _;
+    use roll_secrets::chain;
+    use rsa::pkcs8::EncodePrivateKey;
+    use rsa::traits::PublicKeyParts;
+    let api = Api::new().await;
+    api.set("production", "A", "v").await;
+    api.set("production", "B", "v").await;
+    let s = api.secrets.clone();
+    assert_eq!(tokio::task::spawn_blocking(move || s.sweep_audit_chain(i64::MAX / 2).unwrap()).await.unwrap(), 1);
+
+    // A database writer adds a key of their own, older than roll's so roll's still signs...
+    let b64 = |b: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b);
+    let theirs = rsa::RsaPrivateKey::new(&mut rand::thread_rng(), 2048).unwrap();
+    let (n, e) = (b64(&theirs.n().to_bytes_be()), b64(&theirs.e().to_bytes_be()));
+    api.db.write(|c| c.execute("INSERT INTO oidc_keys (kid, sealed_dek, private, n, e, created_at) VALUES ('k_theirs', 'v1:AAAA', ?, ?, ?, 0)", code_sql::params![vec![0u8], n, e])).unwrap();
+    // ...edits row #1, recomputes every hash after it and signs the digest again with that key.
+    let p = api.project.clone();
+    let mut rows: Vec<roll_secrets::AuditEntry> = serde_json::from_value(api.ok(Method::GET, "/audit", None).await).unwrap();
+    rows.sort_by_key(|r| r.seq);
+    let signed = rows.iter().find(|r| r.action == chain::DIGEST).and_then(|r| r.seq);
+    let pair = ring::signature::RsaKeyPair::from_pkcs8(theirs.to_pkcs8_der().unwrap().as_bytes()).unwrap();
+    let mut prev = String::new();
+    for r in &mut rows {
+        if r.seq == Some(1) {
+            r.summary = "nothing happened".into();
+        }
+        if r.action == chain::DIGEST {
+            let d = chain::Digest { project: p.clone(), seq: r.seq.unwrap() - 1, hash: prev.clone(), last_at: r.at, at: r.at, start: 1, gap: None };
+            r.digest = Some(chain::sign("k_theirs", &pair, &d).unwrap());
+        }
+        prev = chain::link(&prev, &p, r);
+        let (seq, hash, digest) = (r.seq.unwrap(), prev.clone(), r.digest.clone());
+        let summary = r.summary.clone();
+        api.db.write(|c| c.execute("UPDATE audit SET summary = ?, hash = ?, digest = ? WHERE project_id = ? AND seq = ?", code_sql::params![summary, hash, digest, p, seq])).unwrap();
+    }
+    let v = api.ok(Method::GET, "/audit/verify", None).await;
+    assert_eq!((v["ok"].as_bool(), v["broken"]["seq"].as_i64(), v["broken"]["reason"].as_str()), (Some(false), signed, Some("signature")), "{v}");
+    // Nor does a cloud see it: the JWKS has roll's key alone.
+    let s = api.secrets.clone();
+    let jwks = tokio::task::spawn_blocking(move || s.oidc_jwks().unwrap()).await.unwrap();
+    let kids: Vec<&str> = jwks["keys"].as_array().unwrap().iter().map(|k| k["kid"].as_str().unwrap()).collect();
+    assert!(kids.len() == 1 && kids[0] != "k_theirs", "{jwks}");
 }
 
 #[tokio::test]
