@@ -2294,7 +2294,12 @@ reach as the caller sees it (the list the confirmation showed), then:
 - **Freeze** (off by default): reads of the folder's values answer 423 `frozen`, the shape of
   `kms_denied`, to everyone but its admins, also through a folder that imports it, an environment
   based on it, a reference, or the history. Admins still read and write, so they can rotate.
-  Names and metadata stay readable. `DELETE …/reach/cut-off?path=` lifts it. A freeze is the
+  An admin here is who the caller is, not only what it may do: the operator, a signed-in person,
+  or a roll-access token with `admin` there. roll's own readers never pass a freeze, though they
+  may do everything in-process: apps' services, roll code's checks, sandboxes and previews (an
+  untrusted caller), other products' `roll://` references, workload identities' logins, share
+  links and syncs (a sync made after the freeze pushes nothing: its pushes fail with `frozen`
+  until the freeze is lifted). Names and metadata stay readable. `DELETE …/reach/cut-off?path=` lifts it. A freeze is the
   folder's, not the folders under it, as reach is.
 
 What's roll secrets' own (identities, shares, exports, syncs, the freeze) changes in one

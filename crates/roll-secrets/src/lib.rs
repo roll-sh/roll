@@ -267,7 +267,8 @@ pub enum Error {
     #[error("{0}")]
     KeyDenied(String),
     /// 423 `frozen`: an admin froze the folder during an incident (`…/reach/cut-off`); only its
-    /// admins read it until one unfreezes it. Never an outage either.
+    /// admins (people and tokens, never roll's own readers: `Caller::reads_frozen`) read it until
+    /// one unfreezes it. Never an outage either.
     #[error("{0}")]
     Frozen(String),
     /// 429: too many attempts (`rate_limited`).

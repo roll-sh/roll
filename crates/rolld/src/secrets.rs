@@ -1359,6 +1359,52 @@ mod tests {
         assert_eq!(apps.digest(&project, "pr-9").await.unwrap(), None);
     }
 
+    /// A frozen folder stops roll's own readers, which do everything in-process: a service's
+    /// deploy (`ForApps`) and a check or sandbox (`ForCode`, untrusted) both get 423 `frozen`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_frozen_folder_stops_services_checks_and_sandboxes() {
+        use apps_control::integrations::SecretSource;
+        use tower::ServiceExt;
+        let dir = tempfile::tempdir().unwrap();
+        let ws_db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("workspace.db")), "workspace").unwrap();
+        let ws = Arc::new(roll_workspace::Workspace::new(ws_db).unwrap());
+        let project = ws.create("", "shop", "", None).unwrap().id;
+        let db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("secrets.db")), "secrets").unwrap();
+        let opts = roll_secrets::Options {
+            keyring: Ok(roll_secrets::Keyring::new(&"k".repeat(32), None).unwrap()),
+            key_source: roll_secrets::KeySource::Env,
+            links: Default::default(),
+            syncs: Default::default(),
+            open: true,
+            trust_forwarded_for: false,
+            web_url: None,
+            deliver: None,
+            grants: None,
+            people: None,
+            kms: None,
+            sts: None,
+            outside: None,
+            github: None,
+            clouds: None,
+            workloads: None,
+        };
+        let secrets = Arc::new(roll_secrets::Secrets::new(db, ws.clone(), opts).unwrap());
+        let post = |method: &str, path: &str, body: Json| {
+            axum::http::Request::builder().method(method).uri(format!("/v1/secrets/projects/{project}/environments/staging{path}")).header("content-type", "application/json").body(axum::body::Body::from(body.to_string())).unwrap()
+        };
+        let set = roll_secrets::router(secrets.clone()).oneshot(post("PUT", "/secrets/STRIPE_KEY", json!({ "value": "sk_test_fake_staging" }))).await.unwrap();
+        assert!(set.status().is_success());
+        let cut = roll_secrets::router(secrets.clone()).oneshot(post("POST", "/reach/cut-off?path=/", json!({ "why": "fake incident", "tokens": false, "freeze": true }))).await.unwrap();
+        assert!(cut.status().is_success(), "{}", cut.status());
+        let frozen = |e: anyhow::Error| matches!(e.downcast_ref::<roll_secrets::Error>(), Some(roll_secrets::Error::Frozen(_)));
+        let apps = super::ForApps::default();
+        apps.set(secrets.clone(), ws.clone());
+        assert!(frozen(apps.resolve(&project, "staging", "svc_web").await.unwrap_err()), "a service's deploy");
+        let code = super::ForCode::default();
+        code.set(secrets.clone(), ws);
+        assert!(frozen(code.resolve(project.clone(), "staging", "check:acme/web").await.unwrap_err()), "a check or a sandbox");
+    }
+
     /// An incident's cut-off revokes through roll-access's own bulk revoke: every token that
     /// reaches the folder, 500 a call (one write each, all or none), each with why; none other.
     #[tokio::test(flavor = "multi_thread")]

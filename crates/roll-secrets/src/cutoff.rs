@@ -15,7 +15,10 @@
 //!   stop reading it (its exports are removed).
 //! - **Syncs** that push it are paused until an admin resumes them.
 //! - **Freeze** (optional): reads of its values answer 423 `frozen` to everyone but its admins,
-//!   who can still read and write, so they can rotate.
+//!   who can still read and write, so they can rotate. An admin here is the operator, a signed-in
+//!   person or a roll-access token with `admin` there ([`Caller::reads_frozen`]): never roll's own
+//!   readers (apps' services, checks, sandboxes, previews, other products' references), a sync, a
+//!   workload identity's login or a share link, whatever they may otherwise do.
 //!
 //! What's roll secrets' own (identities, shares, exports, syncs, the freeze) changes in one
 //! transaction; revocations happen outside it. One audit row names what was cut and why. A second

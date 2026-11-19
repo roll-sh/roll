@@ -246,7 +246,8 @@ pub struct Version {
 type Through<'a> = &'a dyn Fn(&str, &str) -> bool;
 
 /// For a read of values: whether the caller reads past a freeze at (project, environment,
-/// folder), as its admins do (`cutoff.rs`). `None`: names only, which a freeze doesn't stop.
+/// folder) ([`Caller::passes_freeze`], `cutoff.rs`). `None`: names only, which a freeze doesn't
+/// stop.
 type Pass<'a> = Option<&'a dyn Fn(&str, &str, &str) -> bool>;
 
 /// 423 `frozen` when `env`'s `path` is frozen and the caller can't read past it.
@@ -421,8 +422,8 @@ impl Secrets {
     pub(crate) fn view(&self, project: &str, slug: &str, path: &str, caller: &Caller, shared: bool, action: Action) -> Result<Vec<Entry>> {
         let principal = (!shared && caller.personal()).then_some(caller.principal.as_str());
         let through = |e: &str, p: &str| caller.allows(action, &Scope::at(project, e, p));
-        let admin = |p: &str, e: &str, at: &str| caller.allows(Action::Admin, &Scope::at(p, e, at));
-        let pass: Pass<'_> = (action == Action::Reveal).then_some(&admin);
+        let passes = |p: &str, e: &str, at: &str| caller.passes_freeze(p, e, at);
+        let pass: Pass<'_> = (action == Action::Reveal).then_some(&passes);
         self.db.read(|c| {
             let env = envs::by_slug(c, project, slug)?;
             view_in(c, &env, path, principal, &through, pass, caller.grants.untrusted(), 0, &mut HashSet::new())
@@ -588,10 +589,10 @@ impl Secrets {
         let path = names::path(path)?;
         caller.need(Action::Reveal, &Scope::at(project, slug, &path))?;
         let dek = self.project(project)?;
-        let admin = |p: &str, e: &str, at: &str| caller.allows(Action::Admin, &Scope::at(p, e, at));
+        let passes = |p: &str, e: &str, at: &str| caller.passes_freeze(p, e, at);
         let (seq, state, branches) = self.db.read(|c| {
             let env = envs::by_slug(c, project, slug)?;
-            unfrozen(c, &env, &path, Some(&admin))?;
+            unfrozen(c, &env, &path, Some(&passes))?;
             let seq = match (seq, at) {
                 (Some(s), None) => s,
                 (None, Some(at)) => c.query_row("SELECT COALESCE(MAX(seq), 0) FROM changes WHERE project_id = ? AND at <= ?", params![project, at], |r| r.get(0))?,
@@ -809,10 +810,10 @@ impl Secrets {
         caller.need(Action::Reveal, &Scope::at(project, slug, &path))?;
         let dek = self.project(project)?;
         let owner = self.owner_of(kind, caller);
-        let admin = |p: &str, e: &str, at: &str| caller.allows(Action::Admin, &Scope::at(p, e, at));
+        let passes = |p: &str, e: &str, at: &str| caller.passes_freeze(p, e, at);
         let (id, ct, link, tags): (String, Option<Vec<u8>>, Option<String>, String) = self.db.read(|c| {
             let env = envs::by_slug(c, project, slug)?;
-            unfrozen(c, &env, &path, Some(&admin))?;
+            unfrozen(c, &env, &path, Some(&passes))?;
             c.query_row(
                 "SELECT secret_id, value, link, tags FROM versions WHERE env_id = ? AND path = ? AND key = ? AND owner = ? AND version = ?",
                 params![env.id, path, key, owner, version],

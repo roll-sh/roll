@@ -2955,15 +2955,26 @@ async fn a_cut_off_pauses_the_folders_syncs_until_an_admin_resumes_them() {
 #[tokio::test]
 async fn a_frozen_folder_answers_423_to_readers_and_lets_its_admins_through() {
     let api = Api::new().await;
-    api.set("production", "STRIPE_KEY", "sk_test_fake_prod").await;
-    let reader = api.token(json!({ "name": "web", "environments": ["production"], "actions": ["read", "reveal"] }));
-    let r = cut_off(&api, "path=/", json!({ "why": "fake incident", "tokens": false, "freeze": true })).await;
-    assert_eq!(r["frozen"], true, "{r}");
-    let (s, e) = api.req(Method::GET, "/environments/production/values", None, Some(&reader)).await;
+    // Ada's own project: she administers it as a signed-in person, the operator as everyone's.
+    let (_, mine) = api.as_ada(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "ada-shop" }))).await;
+    let mine = mine["id"].as_str().unwrap().to_string();
+    let at = |rest: &str| format!("/v1/secrets/projects/{mine}{rest}");
+    api.as_ada(Method::PUT, &at("/environments/production/secrets/STRIPE_KEY"), Some(json!({ "value": "sk_test_fake_prod" }))).await;
+    let reader = api.gate.issue("web", roll_secrets::access::rule(&mine, Some(vec!["production".into()]), None, &[roll_secrets::Action::Read, roll_secrets::Action::Reveal]), None);
+    let (s, r) = api.as_ada(Method::POST, &at("/environments/production/reach/cut-off?path=/"), Some(json!({ "why": "fake incident", "tokens": false, "freeze": true }))).await;
+    assert_eq!((s, r["frozen"].clone()), (StatusCode::OK, json!(true)), "{r}");
+    let values = at("/environments/production/values");
+    let (s, e) = api.req(Method::GET, &values, None, Some(&reader)).await;
     assert_eq!((s, e["code"].as_str()), (StatusCode::LOCKED, Some("frozen")), "{e}");
-    // An admin still reads and writes (to rotate), then unfreezes it.
-    assert_eq!(api.values("production", "/").await["values"]["STRIPE_KEY"], "sk_test_fake_prod");
-    api.set("production", "STRIPE_KEY", "sk_test_fake_rotated").await;
-    assert_eq!(api.call(Method::DELETE, "/environments/production/reach/cut-off?path=/", None).await.0, StatusCode::NO_CONTENT);
-    assert_eq!(api.req(Method::GET, "/environments/production/values", None, Some(&reader)).await.0, StatusCode::OK);
+    // A sync isn't an admin, whoever made it: one made after the freeze pushes nothing.
+    let (s, sync) = api.as_ada(Method::POST, &at("/syncs"), Some(json!({ "environment": "production", "kind": "fake", "target": { "name": "x" } }))).await;
+    assert!(s.is_success(), "{s} {sync}");
+    api.secrets.sweep().unwrap();
+    assert!(api.sync.pushes.lock().unwrap().is_empty(), "a sync doesn't read past a freeze");
+    // Its admins still read and write, so they can rotate: the person, and the operator.
+    assert_eq!(api.as_ada(Method::GET, &values, None).await.1["values"]["STRIPE_KEY"], "sk_test_fake_prod");
+    assert_eq!(api.ok(Method::GET, &values, None).await["values"]["STRIPE_KEY"], "sk_test_fake_prod");
+    api.as_ada(Method::PUT, &at("/environments/production/secrets/STRIPE_KEY"), Some(json!({ "value": "sk_test_fake_rotated" }))).await;
+    assert_eq!(api.as_ada(Method::DELETE, &at("/environments/production/reach/cut-off?path=/"), None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(api.req(Method::GET, &values, None, Some(&reader)).await.0, StatusCode::OK);
 }

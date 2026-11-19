@@ -356,6 +356,10 @@ pub struct Caller {
     /// The person's approval that let this request through roll-access's gate (an `ask` approved,
     /// or a rule an approval remembered for a while), for the audit log.
     pub approval: Option<Approval>,
+    /// Who it is may read past an incident's freeze, where it has Admin ([`Caller::reads_frozen`]):
+    /// the operator, a signed-in person, a roll-access token. Private, so only their constructors
+    /// set it: a consumer, an untrusted caller, a sync, a login or a share link never has it.
+    frozen: bool,
 }
 
 /// An approval from roll-access's gate (`roll_auth::Approved`), as the audit log records it.
@@ -384,13 +388,46 @@ pub const PREVIEWS: &str = "roll:previews";
 
 impl Caller {
     pub fn operator() -> Caller {
-        Caller { principal: "operator".into(), grants: std::sync::Arc::new(Everything), ip: None, runtime: false, approval: None }
+        Caller { principal: "operator".into(), grants: std::sync::Arc::new(Everything), ip: None, runtime: false, approval: None, frozen: true }
     }
 
     /// An in-process consumer (roll apps, previews, sandboxes, tasks): everything the caller
-    /// handing out the call may do, named for the audit log.
+    /// handing out the call may do, named for the audit log. Never past a freeze: the services,
+    /// checks and previews reading a leaked folder are what a freeze stops.
     pub fn consumer(name: &str) -> Caller {
-        Caller { principal: name.into(), grants: std::sync::Arc::new(Everything), ip: None, runtime: true, approval: None }
+        Caller { principal: name.into(), grants: std::sync::Arc::new(Everything), ip: None, runtime: true, approval: None, frozen: false }
+    }
+
+    /// A signed-in person (`usr_…`), with what they may do.
+    pub(crate) fn person(user: &str, grants: std::sync::Arc<dyn Grants>) -> Caller {
+        Caller { principal: user.into(), grants, ip: None, runtime: false, approval: None, frozen: true }
+    }
+
+    /// A roll-access token (`token:<id>`), with what its rules allow here.
+    pub(crate) fn token(id: &str, grants: std::sync::Arc<dyn Grants>) -> Caller {
+        Caller { principal: format!("token:{id}"), grants, ip: None, runtime: false, approval: None, frozen: true }
+    }
+
+    /// Something roll runs on someone's behalf that isn't a person or their token (a sync, a
+    /// workload identity's login, a share link): not a runtime, never past a freeze.
+    pub(crate) fn acting(principal: String, grants: std::sync::Arc<dyn Grants>) -> Caller {
+        Caller { principal, grants, ip: None, runtime: false, approval: None, frozen: false }
+    }
+
+    /// This caller's access, acting as `principal` ([`Caller::acting`]): a sync runs as its maker.
+    pub(crate) fn acting_as(self, principal: String) -> Caller {
+        Caller { principal, frozen: false, ..self }
+    }
+
+    /// Whether it reads past an incident's freeze where it's an admin: the operator, a signed-in
+    /// person, a roll-access token, never a runtime, code nobody vetted, a sync, a login or a link.
+    pub fn reads_frozen(&self) -> bool {
+        self.frozen && !self.runtime && !self.grants.untrusted()
+    }
+
+    /// Whether it reads `env`'s `path` of `project` while it's frozen (`cutoff.rs`).
+    pub(crate) fn passes_freeze(&self, project: &str, env: &str, path: &str) -> bool {
+        self.reads_frozen() && self.allows(Action::Admin, &Scope::at(project, env, path))
     }
 
     /// Whether this caller may learn anything of a row's value: reveal it, see its fingerprint, or
@@ -406,9 +443,10 @@ impl Caller {
     }
 
     /// This caller, kept out of `except` (a project's protected environments) whatever it may
-    /// otherwise do.
+    /// otherwise do: an untrusted one ([`Secrets::untrusted`](crate::Secrets::untrusted)), which
+    /// never reads past a freeze.
     pub fn without(&self, except: Vec<String>) -> Caller {
-        Caller { principal: self.principal.clone(), grants: std::sync::Arc::new(Narrowed(self.grants.clone(), Except(except))), ip: self.ip.clone(), runtime: self.runtime, approval: self.approval.clone() }
+        Caller { principal: self.principal.clone(), grants: std::sync::Arc::new(Narrowed(self.grants.clone(), Except(except))), ip: self.ip.clone(), runtime: self.runtime, approval: self.approval.clone(), frozen: false }
     }
 
     pub fn allows(&self, action: Action, at: &Scope<'_>) -> bool {
