@@ -5126,7 +5126,7 @@ work found). First what can be built now:
    `rlph_` placeholders, `substitute`, and a filter that previews', apps' and the agents sandbox's
    proxies embed.
 6. **The audit chain under concurrency, and a sealed-start rolld test** (building, `feature/roll-secrets-chain-load`).
-7. **`Reference::parse` exact** (gating, `fix/secrets-strict-reference`): the trim bypass.
+7. **`Reference::parse` exact** (#451, gated green; batch 5): the trim bypass.
 8. **roll code's secrets out of `Debug`, and its signing secrets sealed** (gating, `fix/code-no-secret-debug`).
 
 Waiting on another thread or on a merge:
