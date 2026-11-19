@@ -838,24 +838,35 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **Built 2026-11-18, for the next turn (after secrets #79 and search's turn):** a person's own
-   data export (#283, this PR), hardware keys only (#286), one provider for people and agents
-   (#287), an SSO connection's session length (#289) with back-channel logout on it (#292),
-   allowed networks (#294) with a second factor for everyone (#298), who has one (#299) and an
-   idle timeout (#302) on it; moving an account to another address (#306) with deleting your own
-   account on it (#309); downloads that send the session (signed-in people got 401s on the audit
-   export, apps' logs and previews' QR codes, screenshots, mail and logs) and the sign-in report
-   link (#307); the audit log naming people by handle, the CSV too (#313); tools for search's
-   metrics, slow log and IP allowlist and previews' metrics (#310). #306, #307 and #309 were
-   checked together in a real Chromium (`users-live/review306-shot.sh`). Conflicts: appended
-   tests (keep both), #287×#289 in `account-sso.tsx`, #306/#309×#302's stack in `account.tsx`,
-   `api.rs` and docs/accounts.md, #307×#313 in the audit page; build land commits up front as the
-   last turn did.
-2. **Next, ranked (now):** the email change's and deletion's SCIM and SSO refusals in the SSO and
-   SCIM flow tests; what a removed person owned (their roll code owner's repositories) handed to
-   someone else when an admin disables or a person deletes the account (GitHub's transfer on
-   removal; roll code's routes, so asked of no thread until a code thread runs); tools for
-   search's audit and analytics once #247 and #291 are on main.
+1. **Next, ranked (now):** land turn 4 (15 PRs below, after previews), then open its follow-ups
+   (`feature/roll-mcp-turn4-followups`: the policy alert naming the longest session, People's
+   Dormant filter and turning the dormant off in one step); `previews_errors` and a
+   mask-suggestions tool once previews' #326 and #324 land (landing now); secrets' request (#277)
+   and cut-off (#304) tools when secrets' batch 4 lands; apps' forms tools once their routes land;
+   a removed person's repositories handed to someone else (waits for a repository transfer in roll
+   code). Not doing: "remember this browser"; `roll login`'s preset revealing development's values
+   without asking (#354, closed after review: a client's name proves nothing, so any approved
+   client would read them; #360 lets a CLI's approval be remembered for 30 days instead).
+   An independent security review of turn 4's account PRs (2026-11-19) found, and these fix:
+   token use counting as activity for dormant people (#349); resending an invite ending sign-ins
+   begun with the old link (#351); alerts naming every SSO change and everything a change to a
+   person did (#333); the session list ending sessions as the policy does (#337); signing out of
+   the others pointing to tokens and connections (#342); a 48 KiB cut for dense JSON (#355).
+   Open for the next turn (landed by the unit `roll-mcp-turn4-auto` once previews releases: a
+   fresh chain on main, one gate, one PR a round): #348, #322, #323, #328, #333, #334, #337, #338,
+   #342, #345, #349, #351, #353, #355, #360 (approvals remembered for a week or 30 days), #362
+   (debugging reads as tools: apps' errors, traces and metrics, queue internals, preview errors
+   and unmasked personal data, search branches).
+2. **Landed 2026-11-18, turn 3 (main e84194b6f, ci green):** a person's own data export (#283),
+   hardware keys only (#286), one provider for people and agents (#287), an SSO connection's
+   session length (#289) and back-channel logout (#292), allowed networks (#294), a second factor
+   for everyone (#298) and who has one (#299), an idle timeout (#302), phishing-resistant sign-in
+   (#316), moving an account to another address (#306), deleting your own account (#309),
+   downloads that send the session plus the sign-in report link (#307), tools for search's
+   metrics, slow log and IP allowlist, previews' metrics and secrets' TOTP, SaaS rotators and
+   Kubernetes clusters (#310), and the audit log naming people by handle (#313). Gated as one tree,
+   then landed one per round (`turn3-land.sh`: the queue drops stacked PRs that share anchors once
+   a squash breaks their ancestry).
 3. **Landed 2026-11-18 (main 1a60b43be):** passkeys (#256), sudo mode (#257, #260), new-sign-in mail
    (#258), second-factor resets (#263), refused codes in the security log (#254); for roll secrets,
    `revoke_many` and the public detectors (#267) and decoy tokens (#270).
