@@ -68,10 +68,18 @@ fn rowlocks(a: &[Value], c: &FnCtx) -> Result<SrfIter> {
     let db = &c.exec.sess.db;
     let xids = db.xids();
     let vis = crate::catalog::heapsim::Vis::new(xids).with_multis(&db.multis);
-    for (i, (k, _)) in rows.iter().enumerate() {
-        if let Some(tid) = tids.as_ref().and_then(|t| t[i])
-            && let Some(x) = crate::exec::sizing::tuple_xmax(t.oid, tid, db)
-        {
+    for (i, (k, bytes)) in rows.iter().enumerate() {
+        // (The version's xmax: the model's tuple's, or past the model the lock kept for it,
+        // at its estimated TID where there is one.)
+        let found = match tids.as_ref().and_then(|t| t[i]) {
+            Some(tid) => crate::exec::sizing::tuple_xmax(t.oid, tid, db).map(|x| (tid, x)),
+            None if tids.is_none() => crate::exec::scan::row_xmin(bytes)
+                .ok()
+                .and_then(|xmin| crate::exec::sizing::estlocks::xmax_of(t.oid, k, xmin, db))
+                .map(|x| (crate::exec::sizing::estimated_ctid(t.oid, k, db).unwrap_or((0, i as u16 + 1)), x)),
+            None => None,
+        };
+        if let Some((tid, x)) = found {
             if x.raw == 0 {
                 continue;
             }
