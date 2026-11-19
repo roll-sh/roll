@@ -311,6 +311,16 @@ mod finds {
             ("nosql activity", "nosql_activity"),
             ("share a preview", "previews_share"),
             ("create a workspace project", "workspace_create_project"),
+            ("why is my service failing", "apps_errors"),
+            ("slow request traces", "apps_traces"),
+            ("preview errors", "previews_errors"),
+            ("unmasked personal data", "previews_mask_suggestions"),
+            ("queue bindings", "queues_list_bindings"),
+            ("search cluster audit log", "search_audit"),
+            ("import a .env file", "secrets_import"),
+            ("roll back secrets", "secrets_rollback"),
+            ("which secrets nobody reads", "secrets_insights"),
+            ("one-time code", "secrets_totp"),
         ]
         .iter()
         .filter_map(|(q, want)| {
