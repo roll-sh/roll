@@ -311,6 +311,22 @@ mod finds {
             ("nosql activity", "nosql_activity"),
             ("share a preview", "previews_share"),
             ("create a workspace project", "workspace_create_project"),
+            ("why is my service failing", "apps_errors"),
+            ("slow request traces", "apps_traces"),
+            ("preview errors", "previews_errors"),
+            ("unmasked personal data", "previews_mask_suggestions"),
+            ("queue bindings", "queues_list_bindings"),
+            ("search cluster audit log", "search_audit"),
+            ("import a .env file", "secrets_import"),
+            ("roll back secrets", "secrets_rollback"),
+            ("which secrets nobody reads", "secrets_insights"),
+            ("one-time code", "secrets_totp"),
+            ("why is my queue client refused", "queues_list_users"),
+            ("is my nosql import done", "nosql_list_imports"),
+            ("is the gateway to my private network online", "secrets_list_gateways"),
+            ("acme external account binding", "secrets_ca_acme"),
+            ("why is assume role refused", "storage_list_roles"),
+            ("list s3 access keys", "storage_list_keys"),
         ]
         .iter()
         .filter_map(|(q, want)| {

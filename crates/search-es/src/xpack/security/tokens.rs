@@ -328,9 +328,15 @@ fn authenticate_service_token(cluster: &Cluster, value: &str) -> EsResult<Princi
 const MAX_TOKENS_FILE: u64 = 1 << 20;
 
 /// `config/service_tokens` (`FileServiceAccountTokenStore`, read as it is now, as Elasticsearch
-/// reloads it on change): `namespace/service/name:hash` lines, as (qualified name, hash).
+/// reloads it on change): `namespace/service/name:hash` lines, as (qualified name, hash). None
+/// unless the host lets this cluster read the node's file ([`ClusterConfig::file_service_tokens`]).
+///
+/// [`ClusterConfig::file_service_tokens`]: crate::ClusterConfig::file_service_tokens
 fn file_tokens(cluster: &Cluster) -> Vec<(String, String)> {
     use std::io::Read;
+    if !cluster.config.file_service_tokens {
+        return Vec::new();
+    }
     let Some(dir) = cluster.config.node_setting("path.conf") else { return Vec::new() };
     let Ok(f) = std::fs::File::open(std::path::Path::new(dir).join("service_tokens")) else { return Vec::new() };
     let mut text = String::new();

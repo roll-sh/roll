@@ -68,6 +68,8 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route("/v1/apps/projects/{project}/limits", get(limits).put(set_limits))
         .route("/v1/apps/projects/{project}/drains", get(drains).post(add_drain))
         .route("/v1/apps/projects/{project}/export", post(export_project))
+        .route("/v1/apps/projects/{project}/preview-domain", get(preview_domain).post(set_preview_domain).delete(delete_preview_domain))
+        .route("/v1/apps/projects/{project}/preview-domain/verify", post(verify_preview_domain))
         .route("/v1/apps/projects/{project}/drains/{did}", axum::routing::delete(delete_drain).patch(update_drain))
         .route("/v1/apps/projects/{project}/drains/{did}/test", post(test_drain))
         .route("/v1/apps/projects/{project}/notifications/{nid}", axum::routing::delete(delete_target).patch(update_target))
@@ -158,6 +160,23 @@ async fn on_owner(State(apps): S, req: Request, next: Next) -> Response {
     }
     let cluster = apps.deps.cluster.clone();
     cluster.dispatch(&lease_key(&id), req, |req, _guard| next.run(req)).await
+}
+
+async fn preview_domain(State(apps): S, Path(project): Path<String>) -> R {
+    ok(apps.preview_domain(&project).await?)
+}
+
+async fn set_preview_domain(State(apps): S, Path(project): Path<String>, b: Bytes) -> R {
+    Ok((StatusCode::CREATED, Json(apps.set_preview_domain(&project, body(&b)?).await?)).into_response())
+}
+
+async fn verify_preview_domain(State(apps): S, Path(project): Path<String>) -> R {
+    ok(apps.verify_preview_domain(&project).await?)
+}
+
+async fn delete_preview_domain(State(apps): S, Path(project): Path<String>) -> R {
+    apps.delete_preview_domain(&project).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 async fn overview(State(apps): S) -> R {
@@ -970,9 +989,19 @@ async fn backup_volume(State(apps): S, Path((id, env)): Path<(String, String)>, 
     Ok((StatusCode::CREATED, Json(b)).into_response())
 }
 
-async fn restore_volume(State(apps): S, Path((id, env, bid)): Path<(String, String, String)>, ext: Extensions) -> R {
-    let b = apps.restore_volume(&id, &env, &bid).await?;
-    apps.audit("volume.restored", &id, &env, actor(&ext), json!({ "backup": b.id })).await;
+async fn restore_volume(State(apps): S, Path((id, env, bid)): Path<(String, String, String)>, ext: Extensions, b: Bytes) -> R {
+    // `from`: another environment's backup (seeding staging from production).
+    let o = body(&b)?;
+    if let Some(k) = o.as_object().into_iter().flatten().map(|(k, _)| k).find(|k| k.as_str() != "from") {
+        return Err(Error::BadRequest(format!("unknown field {k}")));
+    }
+    let from = match o.get("from") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(f)) => Some(f.clone()),
+        Some(_) => return Err(Error::BadRequest("from is another environment's name".into())),
+    };
+    let b = apps.restore_volume(&id, &env, &bid, from.as_deref()).await?;
+    apps.audit("volume.restored", &id, &env, actor(&ext), json!({ "backup": b.id, "from": from })).await;
     ok(b)
 }
 
@@ -1245,6 +1274,12 @@ struct ShellQuery {
     instance: Option<String>,
     cols: Option<u16>,
     rows: Option<u16>,
+    /// A one-off console (a fresh container) instead of a running instance, with what to run in
+    /// it and its own size.
+    console: Option<bool>,
+    command: Option<String>,
+    cpu: Option<f64>,
+    memory_mb: Option<u32>,
 }
 
 /// `GET …/shell` (a WebSocket): a shell in a running instance; see `crate::shell`.
@@ -1252,7 +1287,17 @@ async fn shell(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q)
     // A shell reads every variable: roll secrets' reveal rule, as for their values.
     apps.check_secret_reveal(&id, &env, asker(&ext)).await?;
     let slot = apps.shell_slot(&id, &env)?;
-    let target = apps.shell_target(&id, &env, q.instance.as_deref()).await?;
+    let target = if q.console == Some(true) {
+        let t = apps.console_target(&id, &env, crate::shell::ConsoleAsk { command: q.command.clone(), cpu: q.cpu, memory_mb: q.memory_mb }).await?;
+        // What it runs stays out of the trail (a command line can hold a credential).
+        apps.audit("console.opened", &id, &env, actor(&ext), json!({ "command": q.command.is_some(), "cpu": q.cpu, "memory_mb": q.memory_mb })).await;
+        t
+    } else {
+        if q.command.is_some() || q.cpu.is_some() || q.memory_mb.is_some() {
+            return Err(Error::BadRequest("command, cpu and memory_mb are a console's (console=true)".into()));
+        }
+        apps.shell_target(&id, &env, q.instance.as_deref()).await?
+    };
     let (cols, rows) = (q.cols.unwrap_or(80).clamp(10, 1000), q.rows.unwrap_or(24).clamp(2, 500));
     // Keys and resizes are small: nothing near axum's 64 MiB default is held for a peer.
     let ws = ws.max_message_size(1 << 20).max_frame_size(1 << 20);
@@ -1298,13 +1343,25 @@ struct OpenSession {
     instance: Option<String>,
     cols: Option<u16>,
     rows: Option<u16>,
+    #[serde(default)]
+    console: bool,
+    command: Option<String>,
+    cpu: Option<f64>,
+    memory_mb: Option<u32>,
 }
 
 /// `POST …/shell/sessions`: a shell over HTTP (the dashboard's terminal); see `crate::shell`.
 async fn open_session(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, b: Bytes) -> R {
     apps.check_secret_reveal(&id, &env, asker(&ext)).await?;
-    let o: OpenSession = if b.is_empty() { OpenSession { instance: None, cols: None, rows: None } } else { serde_json::from_slice(&b).map_err(|e| Error::BadRequest(e.to_string()))? };
-    let sh = apps.open_session(&id, &env, o.instance.as_deref(), o.cols.unwrap_or(80).clamp(10, 1000), o.rows.unwrap_or(24).clamp(2, 500)).await?;
+    let o: OpenSession = if b.is_empty() { OpenSession { instance: None, cols: None, rows: None, console: false, command: None, cpu: None, memory_mb: None } } else { serde_json::from_slice(&b).map_err(|e| Error::BadRequest(e.to_string()))? };
+    let console = o.console.then(|| crate::shell::ConsoleAsk { command: o.command.clone(), cpu: o.cpu, memory_mb: o.memory_mb });
+    if console.is_none() && (o.command.is_some() || o.cpu.is_some() || o.memory_mb.is_some()) {
+        return Err(Error::BadRequest("command, cpu and memory_mb are a console's (console: true)".into()));
+    }
+    if console.is_some() {
+        apps.audit("console.opened", &id, &env, actor(&ext), json!({ "command": o.command.is_some(), "cpu": o.cpu, "memory_mb": o.memory_mb })).await;
+    }
+    let sh = apps.open_session(&id, &env, o.instance.as_deref(), console, o.cols.unwrap_or(80).clamp(10, 1000), o.rows.unwrap_or(24).clamp(2, 500)).await?;
     Ok((StatusCode::CREATED, Json(json!({ "id": sh }))).into_response())
 }
 

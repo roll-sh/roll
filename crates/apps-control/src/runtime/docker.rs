@@ -1064,10 +1064,12 @@ impl Runtime for Docker {
         }
     }
 
-    async fn shell(&self, name: &str, cols: u16, rows: u16) -> anyhow::Result<super::Shell> {
+    async fn shell(&self, name: &str, command: Option<&str>, cols: u16, rows: u16) -> anyhow::Result<super::Shell> {
         let Some(engine) = &self.engine else { bail!("a shell needs Docker on a local socket") };
-        // bash when the image has it, else sh; a login shell, so the image's profile applies.
-        let cmd = ["sh", "-c", "if command -v bash >/dev/null 2>&1; then exec bash -l; else exec sh -l; fi"];
+        // bash when the image has it, else sh; a login shell, so the image's profile applies. A
+        // command (`rails console`) runs as `sh -c` would.
+        let login = "if command -v bash >/dev/null 2>&1; then exec bash -l; else exec sh -l; fi";
+        let cmd = ["sh", "-c", command.unwrap_or(login)];
         let (id, io) = engine.exec_tty(name, &cmd, &["TERM=xterm-256color"], cols, rows).await?;
         Ok(super::Shell { id, io: Box::new(hyper_util::rt::TokioIo::new(io)) })
     }

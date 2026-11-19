@@ -638,7 +638,7 @@ impl Secrets {
     }
 
     /// What this project may link, sink to or sync to, as (kind, ref): its canvas's resources and
-    /// its own registrations (rotators, SaaS rotators, databases outside roll, AWS roles and IAM users, cloud
+    /// its own registrations (rotators, SaaS rotators, databases, directories, Snowflake accounts and MongoDB Atlas projects outside roll, AWS roles and IAM users, cloud
     /// accounts, Kubernetes clusters, CAs, SSH CAs and GitHub Apps), checked on every write, read, issue, rotation and delivery (a
     /// resource can move to another project).
     ///
@@ -656,6 +656,9 @@ impl Secrets {
         out.extend(self.aws_role_refs(project)?.into_iter().map(|(id, _)| (crate::aws::KIND.to_string(), id)));
         out.extend(self.aws_user_refs(project)?.into_iter().map(|(id, _)| (crate::iam::KIND.to_string(), id)));
         out.extend(self.outside_db_refs(project)?.into_iter().map(|(id, _)| (crate::outside::KIND.to_string(), id)));
+        out.extend(self.directory_refs(project)?.into_iter().map(|(id, _)| (crate::directories::KIND.to_string(), id)));
+        out.extend(self.snowflake_refs(project)?.into_iter().map(|(id, _)| (crate::snowflake::KIND.to_string(), id)));
+        out.extend(self.atlas_refs(project)?.into_iter().map(|(id, _)| (crate::atlas::KIND.to_string(), id)));
         out.extend(self.kubernetes_refs(project)?.into_iter().map(|(id, _)| (crate::kubernetes::KIND.to_string(), id)));
         out.extend(self.github_app_refs(project)?.into_iter().map(|(id, _)| (crate::github_app::KIND.to_string(), id)));
         Ok(out)

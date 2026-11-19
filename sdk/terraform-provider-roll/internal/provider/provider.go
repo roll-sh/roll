@@ -1,5 +1,5 @@
 // Package provider is the roll Terraform provider: roll secrets' environments, keys and values
-// (docs/secrets.md, "Terraform").
+// (docs/secrets.md, "Terraform"), roll apps' services, machine clients and roll search's clusters.
 package provider
 
 import (
@@ -34,7 +34,7 @@ func (p *rollProvider) Metadata(_ context.Context, _ provider.MetadataRequest, r
 
 func (p *rollProvider) Schema(_ context.Context, _ provider.SchemaRequest, resp *provider.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		Description: "roll secrets: a project's environments, keys and values. Each setting falls back to the environment variable `roll` reads (ROLL_API_URL, ROLL_TOKEN, ROLL_PROJECT).",
+		Description: "roll secrets, roll apps and roll search as code. Each setting falls back to the environment variable `roll` reads (ROLL_API_URL, ROLL_TOKEN, ROLL_PROJECT).",
 		Attributes: map[string]schema.Attribute{
 			"api_url": schema.StringAttribute{Optional: true, Description: "rolld's API, e.g. https://api.roll.example (ROLL_API_URL)."},
 			"token":   schema.StringAttribute{Optional: true, Sensitive: true, Description: "A roll token with a rule on the project, or the operator token (ROLL_TOKEN)."},
@@ -69,16 +69,17 @@ func (p *rollProvider) Configure(ctx context.Context, req provider.ConfigureRequ
 func (p *rollProvider) Resources(context.Context) []func() resource.Resource {
 	return []func() resource.Resource{newEnvironmentResource, newSecretResource, newIdentityResource, newSyncResource, newTokenResource, newCaResource, newSshCaResource, newTransitKeyResource, newOutsideDatabaseResource,
 		newAppServiceResource, newAppVariableResource, newAppDomainResource, newAppEnvironmentResource, newAppLinkResource, newAppNotificationResource,
-		newMachineClientResource}
+		newMachineClientResource,
+		newSearchClusterResource, newSearchKeyResource, newSearchRepoResource}
 }
 
 func (p *rollProvider) DataSources(context.Context) []func() datasource.DataSource {
-	return []func() datasource.DataSource{newValuesDataSource, newAppServiceDataSource}
+	return []func() datasource.DataSource{newValuesDataSource, newAppServiceDataSource, newSearchClusterDataSource}
 }
 
 // EphemeralResources are read for one run and never written to the plan or the state.
 func (p *rollProvider) EphemeralResources(context.Context) []func() ephemeral.EphemeralResource {
-	return []func() ephemeral.EphemeralResource{newValuesEphemeral}
+	return []func() ephemeral.EphemeralResource{newValuesEphemeral, newSearchKeyEphemeral}
 }
 
 // project is a resource's own project, or the provider's.

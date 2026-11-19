@@ -86,6 +86,9 @@ pub struct RuntimeConfig {
     /// The most services frozen on this node at once (their memory stays): the oldest are stopped
     /// past it.
     pub warm_max: usize,
+    /// How often a signed-in visitor's session (`access: team`) asks again whether its person may
+    /// still open the project.
+    pub visitor_recheck: Duration,
 }
 
 /// Playwright's image has a headless Chromium shell (its path names its version).
@@ -151,6 +154,7 @@ impl Default for RuntimeConfig {
             screenshot_command: SCREENSHOT_COMMAND.into(),
             warm_for: Duration::from_secs(8 * 3600),
             warm_max: 32,
+            visitor_recheck: Duration::from_secs(300),
         }
     }
 }
@@ -194,6 +198,128 @@ const BROWSERS_RETRY: Duration = Duration::from_secs(3600);
 /// A repo's cache volume.
 pub fn cache_name(repo: &str) -> String {
     format!("roll-previews-cache-{}", crate::label_part(repo, 40))
+}
+
+/// The longest line [`Runtime::timed_lines`] keeps (bytes of its text; a stamp is ~31 more).
+const TIMED_LINE_MAX: usize = 16 << 10;
+/// The most of a stream's output [`Runtime::timed_lines`] holds (its newest lines), and reads.
+const TIMED_KEEP_MAX: usize = 4 << 20;
+const TIMED_READ_MAX: u64 = 64 << 20;
+/// How long [`Runtime::timed_lines`] reads before it gives up (nothing: no groups).
+const TIMED_READ_FOR: Duration = Duration::from_secs(10);
+
+/// One stream of `docker logs --timestamps` (`2026-11-18T10:00:00.123456789Z text`) as `(ms,
+/// stderr, text)`, oldest first: read a line at a time, a line's bytes past [`TIMED_LINE_MAX`]
+/// dropped as they come (its text then cut on a character), its newest lines up to `keep` bytes
+/// held. A line without a stamp takes the one before's.
+async fn read_timed<R: tokio::io::AsyncRead + Unpin>(r: R, stderr: bool, keep: usize) -> Vec<(i64, bool, String)> {
+    use tokio::io::AsyncBufReadExt;
+    let mut r = tokio::io::BufReader::new(tokio::io::AsyncReadExt::take(r, TIMED_READ_MAX));
+    let (mut out, mut held, mut last) = (std::collections::VecDeque::new(), 0, 0);
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        // Up to the newline, holding at most a stamp and TIMED_LINE_MAX of text.
+        let mut ended = false;
+        while !ended {
+            let Ok(chunk) = r.fill_buf().await else { break };
+            if chunk.is_empty() {
+                break;
+            }
+            let (n, nl) = match chunk.iter().position(|b| *b == b'\n') {
+                Some(i) => (i + 1, true),
+                None => (chunk.len(), false),
+            };
+            let room = (TIMED_LINE_MAX + 64).saturating_sub(buf.len());
+            buf.extend_from_slice(&chunk[..(n - nl as usize).min(room)]);
+            r.consume(n);
+            ended = nl;
+        }
+        if buf.is_empty() && !ended {
+            break;
+        }
+        let l = String::from_utf8_lossy(&buf);
+        let l: &str = &l;
+        let (ts, text) = l.split_once(' ').unwrap_or((l, ""));
+        let text = match humantime::parse_rfc3339(ts) {
+            Ok(t) => {
+                last = t.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0);
+                text
+            }
+            Err(_) => l,
+        };
+        let mut end = text.len().min(TIMED_LINE_MAX);
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        held += end;
+        out.push_back((last, stderr, text[..end].to_string()));
+        while held > keep {
+            held -= out.pop_front().map(|l| l.2.len()).unwrap_or(held);
+        }
+    }
+    out.into()
+}
+
+/// A service's stdout and stderr as one, by their stamps (each stream's lines in their order),
+/// its last `lines`.
+fn merge_timed(mut out: Vec<(i64, bool, String)>, err: Vec<(i64, bool, String)>, lines: usize) -> Vec<(i64, bool, String)> {
+    out.extend(err);
+    out.sort_by_key(|l| l.0);
+    let skip = out.len().saturating_sub(lines);
+    out.drain(..skip);
+    out
+}
+
+/// The relay a forwarded connection goes through: busybox's `nc`.
+const FORWARD_IMAGE: &str = "alpine:3.20";
+
+/// A forwarded connection's relay: its stdio, both ways; its container removed when it's dropped
+/// (a killed `docker run` client leaves the container running).
+struct Relay {
+    _child: tokio::process::Child,
+    name: String,
+    stdin: tokio::process::ChildStdin,
+    stdout: tokio::process::ChildStdout,
+}
+
+impl Drop for Relay {
+    fn drop(&mut self) {
+        let name = std::mem::take(&mut self.name);
+        if let Ok(h) = tokio::runtime::Handle::try_current() {
+            h.spawn(async move { code_preview::docker::remove(&name).await });
+        }
+    }
+}
+
+impl tokio::io::AsyncRead for Relay {
+    fn poll_read(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>, buf: &mut tokio::io::ReadBuf<'_>) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.stdout).poll_read(cx, buf)
+    }
+}
+
+impl tokio::io::AsyncWrite for Relay {
+    fn poll_write(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>, buf: &[u8]) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.stdin).poll_write(cx, buf)
+    }
+    fn poll_flush(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.stdin).poll_flush(cx)
+    }
+    fn poll_shutdown(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.stdin).poll_shutdown(cx)
+    }
+}
+
+/// A child's stdout that keeps the child (killed when dropped) for as long as it's read.
+struct ChildOut {
+    _child: tokio::process::Child,
+    out: tokio::process::ChildStdout,
+}
+
+impl tokio::io::AsyncRead for ChildOut {
+    fn poll_read(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>, buf: &mut tokio::io::ReadBuf<'_>) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.out).poll_read(cx, buf)
+    }
 }
 
 /// The container of a service: every one roll previews makes starts with `roll-previews-`.
@@ -410,6 +536,30 @@ impl Runtime {
         Some(addr)
     }
 
+    /// The container a terminal in the service goes into: started (or thawed) if it isn't
+    /// running, waited for up to 60 s, and used from then on (as a request would).
+    pub async fn shell_container(self: &Arc<Self>, preview: &str, service: &str) -> anyhow::Result<String> {
+        match self.ready(preview, service, Duration::from_secs(60)).await {
+            Ok(_) => {}
+            Err(Unavailable::Starting) => anyhow::bail!("{service} is still starting: try again in a moment"),
+            Err(Unavailable::NotFound) => anyhow::bail!("{service} isn't running on this node"),
+            Err(Unavailable::Failed(e)) => anyhow::bail!("{service} didn't start: {e}"),
+        }
+        let live = self.live(preview, service);
+        let name = live.container.lock().clone();
+        name.ok_or_else(|| anyhow::anyhow!("{service} isn't running on this node"))
+    }
+
+    /// The service is in use through a terminal: its idle clock starts again.
+    pub fn hold(&self, preview: &str, service: &str) {
+        if let Some(live) = self.live.lock().get(&(preview.to_string(), service.to_string())) {
+            *live.last_request.lock() = Instant::now();
+        }
+        if let Ok(e) = self.engine() {
+            e.touched(preview);
+        }
+    }
+
     /// Where a service answers, starting it if needed; waits up to `wait`.
     async fn ready(self: &Arc<Self>, preview: &str, service: &str, wait: Duration) -> Result<SocketAddr, Unavailable> {
         let live = self.live(preview, service);
@@ -604,7 +754,7 @@ impl Runtime {
     }
 
     /// The notes left on `path` of the preview's pages, as JSON (the latest 50; for whoever has
-    /// the button: link access, through roll).
+    /// the button: link access or a team session, through roll).
     async fn feedback_notes(&self, preview: &str, path: &str) -> Response {
         let here = match self.engine() {
             Ok(e) => e.notes_of(preview, path).await.unwrap_or_default(),
@@ -616,59 +766,91 @@ impl Runtime {
     /// A link's way in: its token becomes a cookie (`cookie`, for `max_age` seconds) and the
     /// visitor is sent to the same URL without `param`.
     fn enter(&self, req: &Request, param: &str, cookie: &str, value: &str, max_age: i64) -> Response {
+        let mut r = self.without(req, param);
+        let secure = if self.cfg.scheme == "https" { "; Secure" } else { "" };
+        let set = format!("{cookie}={value}; Path=/; Max-Age={max_age}; HttpOnly; SameSite=Lax{secure}");
+        if let Ok(c) = HeaderValue::from_str(&set) {
+            r.headers_mut().insert(header::SET_COOKIE, c);
+        }
+        r
+    }
+
+    /// A redirect to the URL `req` asked for without the query parameter `param`.
+    fn without(&self, req: &Request, param: &str) -> Response {
         let query = req.uri().query().unwrap_or("");
         let prefix = format!("{param}=");
         let rest: Vec<&str> = query.split('&').filter(|kv| !kv.starts_with(&prefix) && !kv.is_empty()).collect();
         // Only a path on this host: `//evil.example/` would be another site.
         let path = format!("/{}", req.uri().path().trim_start_matches(['/', '\\']));
         let location = if rest.is_empty() { path } else { format!("{path}?{}", rest.join("&")) };
-        let secure = if self.cfg.scheme == "https" { "; Secure" } else { "" };
-        let set = format!("{cookie}={value}; Path=/; Max-Age={max_age}; HttpOnly; SameSite=Lax{secure}");
         let mut r = (StatusCode::FOUND, "").into_response();
-        if let (Ok(l), Ok(c)) = (HeaderValue::from_str(&location), HeaderValue::from_str(&set)) {
+        if let Ok(l) = HeaderValue::from_str(&location) {
             r.headers_mut().insert(header::LOCATION, l);
-            r.headers_mut().insert(header::SET_COOKIE, c);
             r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
         }
         r
     }
 
     /// Where a visitor's feedback goes (the preview in roll's dashboard), when they get the button:
-    /// they came in through roll (the link access cookie), the preview is a change's, the rules
-    /// have `feedback` on and roll's dashboard is known.
+    /// they came in through roll ([`ThroughRoll`]: the link's cookie, or a team session), the
+    /// preview is a change's, the rules have `feedback` on and roll's dashboard is known. The
+    /// note is posted there, by whoever is signed in to roll, as them.
     fn feedback_target(&self, preview: &str, req: &Request) -> Option<String> {
         let web = self.cfg.dashboard.as_deref()?;
-        let access = self.store.access(preview).ok().flatten()?;
-        if !access.required || !has_access_cookie(preview, &access.token, req) {
-            return None;
-        }
+        req.extensions().get::<ThroughRoll>()?;
         let row = self.store.row(preview).ok()?;
         row.change_id.as_ref()?;
         self.store.settings(&row.project_id).ok()?.feedback.then(|| format!("{}/dashboard/projects/{}/previews?preview={preview}", web.trim_end_matches('/'), row.project_id))
     }
 
     /// Link access: a request carries the preview's token in its query (it gets a cookie and is
-    /// sent to the same URL without it) or in that cookie; anything else is refused. `None`:
-    /// let it through.
-    fn gate(&self, preview: &str, service: &str, req: &Request) -> Option<Response> {
-        let crate::store::Access { token, required, bypass } = match self.store.access(preview) {
+    /// sent to the same URL without it) or in that cookie. Team access: a session of the
+    /// preview's own, from a ticket roll's dashboard gave a person signed in (`visit.rs`); the
+    /// link's token lets nobody in (a URL carrying it is sent on without it). Either way a share
+    /// link and the CI bypass do; anything else is refused. `None`: let it through.
+    async fn gate(&self, preview: &str, service: &str, req: &mut Request) -> Option<Response> {
+        let access = match self.store.access(preview) {
             Ok(Some(a)) => a,
             Ok(None) => return None,
             Err(_) => return Some((StatusCode::SERVICE_UNAVAILABLE, "try again").into_response()),
         };
-        if !required {
+        if !access.required() {
             return None;
         }
         // Automation (end-to-end tests in CI): the project's bypass secret in a header, for every
         // request (no cookie, no redirect).
         let given = req.headers().get(BYPASS_HEADER).and_then(|v| v.to_str().ok());
-        if let (Some(want), Some(given)) = (&bypass, given)
+        if let (Some(want), Some(given)) = (&access.bypass, given)
             && same(&crate::store::bypass_hash(given), want)
         {
             return None;
         }
+        let team = access.mode == crate::settings::Access::Team;
+        let query = req.uri().query().unwrap_or("").to_string();
+        let given = |name: &str| query.split('&').filter_map(|kv| kv.split_once('=')).find(|(k, _)| *k == name).map(|(_, v)| v);
+        if team {
+            // A ticket from roll's dashboard, coming back: the session it opens.
+            if req.uri().path() == crate::visit::PATH {
+                return Some(self.land_visit(preview, req));
+            }
+            // An old link's token opens nothing here and never reaches the app: the same URL
+            // without it.
+            if given("roll_access").is_some() {
+                return Some(self.without(req, "roll_access"));
+            }
+            // Any of the cookies by that name (a sibling preview can set junk on the parent
+            // domain, and the browser sends both): one live session lets them in.
+            for t in take_cookies(req, &crate::visit::cookie(preview)) {
+                if self.visitor(preview, &t).await {
+                    req.extensions_mut().insert(ThroughRoll);
+                    return None;
+                }
+            }
+        }
+        let token = access.link_token().unwrap_or_default().to_string();
         let cookie = format!("roll_access_{preview}");
         if has_access_cookie(preview, &token, req) {
+            req.extensions_mut().insert(ThroughRoll);
             return None;
         }
         // A share link (someone outside the team, until it ends), checked again at every request
@@ -677,16 +859,20 @@ impl Runtime {
         if cookie_value(req, &share_cookie).is_some_and(|t| self.store.share_ends(preview, t).ok().flatten().is_some()) {
             return None;
         }
-        let query = req.uri().query().unwrap_or("");
-        let given = |name: &str| query.split('&').filter_map(|kv| kv.split_once('=')).find(|(k, _)| *k == name).map(|(_, v)| v);
         if !token.is_empty() && given("roll_access").is_some_and(|v| same(v, &token)) {
             return Some(self.enter(req, "roll_access", &cookie, &token, 2_592_000));
         }
         if let Some(t) = given("roll_share")
             && let Ok(Some(ends)) = self.store.share_ends(preview, t)
         {
-            let left = ((ends - self.store.now_ms().unwrap_or(ends)) / 1000).max(1);
+            let now = self.store.now_ms().unwrap_or(ends);
+            // Who followed it isn't known (nobody signed in): that it was, once a day.
+            let _ = self.store.share_opened(preview, t, now.div_euclid(86_400_000), now);
+            let left = ((ends - now) / 1000).max(1);
             return Some(self.enter(req, "roll_share", &share_cookie, t, left));
+        }
+        if team {
+            return Some(self.sign_in(preview, req));
         }
         let through = match (&self.cfg.dashboard, self.store.row(preview)) {
             (Some(web), Ok(row)) => Some(format!(
@@ -698,6 +884,85 @@ impl Runtime {
             _ => None,
         };
         Some(private_page(through.as_deref()))
+    }
+
+    /// A visitor with no session of a team-access preview's: a page load goes to roll's
+    /// dashboard, which signs them in and sends them back with a ticket; anything else is a 401
+    /// that says where.
+    fn sign_in(&self, preview: &str, req: &Request) -> Response {
+        let Some(web) = self.cfg.dashboard.as_deref() else {
+            return roll_page(StatusCode::UNAUTHORIZED, "This preview is private", "<p>It lets in people signed in to roll, and this node doesn't know where roll is.</p>");
+        };
+        let host = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).unwrap_or("");
+        let back = format!("{}://{host}{}", self.cfg.scheme, req.uri().path_and_query().map_or("/", |p| p.as_str()));
+        let url = format!("{}/dashboard/previews/visit?preview={}&to={}", web.trim_end_matches('/'), crate::visit::encode(preview), crate::visit::encode(&back));
+        let get = matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD);
+        if get
+            && is_page_load(req)
+            && let Ok(l) = HeaderValue::from_str(&url)
+        {
+            let mut r = StatusCode::FOUND.into_response();
+            r.headers_mut().insert(header::LOCATION, l);
+            r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+            return r;
+        }
+        roll_page(StatusCode::UNAUTHORIZED, "This preview is private", &format!("<p><a href=\"{}\">Sign in to roll</a> to open it: it lets in people who can open its project.</p>", escape(&url)))
+    }
+
+    /// `/__roll/visit?ticket=…&to=…` on the preview's own host: the ticket traded for a session
+    /// cookie (host-only, 12 hours), then on to `to` on the same site.
+    fn land_visit(&self, preview: &str, req: &Request) -> Response {
+        let mut ticket = None;
+        let mut to = "/".to_string();
+        for pair in req.uri().query().unwrap_or("").split('&') {
+            if let Some(v) = pair.strip_prefix("ticket=") {
+                ticket = Some(percent_decode(v));
+            } else if let Some(v) = pair.strip_prefix("to=") {
+                to = crate::visit::local_path(&percent_decode(v));
+            }
+        }
+        let expired = || roll_page(StatusCode::UNAUTHORIZED, "This sign-in link has expired", "<p>Open the page again: roll signs you in and sends you back.</p>");
+        // Where it goes, checked before the ticket is used.
+        let Ok(location) = HeaderValue::from_str(&to) else { return expired() };
+        let Ok(now) = self.store.now_ms() else { return (StatusCode::SERVICE_UNAVAILABLE, "try again").into_response() };
+        let Some(ticket) = ticket else { return expired() };
+        let session = format!("rls_{}", crate::store::new_token());
+        match self.store.open_visit_session(&crate::store::bypass_hash(&ticket), &crate::store::bypass_hash(&session), preview, now + crate::visit::SESSION_S * 1000, now) {
+            Ok(Some(_)) => {}
+            Ok(None) => return expired(),
+            Err(_) => return (StatusCode::SERVICE_UNAVAILABLE, "try again").into_response(),
+        }
+        let secure = if self.cfg.scheme == "https" { "; Secure" } else { "" };
+        let set = format!("{}={session}; Path=/; Max-Age={}; HttpOnly; SameSite=Lax{secure}", crate::visit::cookie(preview), crate::visit::SESSION_S);
+        let mut r = StatusCode::FOUND.into_response();
+        let Ok(c) = HeaderValue::from_str(&set) else { return expired() };
+        r.headers_mut().insert(header::LOCATION, location);
+        r.headers_mut().insert(header::SET_COOKIE, c);
+        r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        r
+    }
+
+    /// Whether `token` is a live session in `preview` whose person may still open the project
+    /// and whose roll session still signs them in, asked again (off the async workers: it reads
+    /// roll's accounts) once it was last asked `visitor_recheck` ago; a session that may not
+    /// ends now.
+    async fn visitor(&self, preview: &str, token: &str) -> bool {
+        let hash = crate::store::bypass_hash(token);
+        let (Ok(Some(s)), Ok(now)) = (self.store.visit_session(&hash, preview), self.store.now_ms()) else { return false };
+        if s.expires_at <= now {
+            return false;
+        }
+        if s.checked_at <= now - self.cfg.visitor_recheck.as_millis() as i64 {
+            let Ok(engine) = self.engine() else { return false };
+            let user = s.user.clone();
+            let may = tokio::task::spawn_blocking(move || engine.may_open(&s.user, &s.roll_session, &s.project)).await.unwrap_or(false);
+            if !may {
+                let _ = self.store.end_visit_session(&hash);
+                return false;
+            }
+            let _ = self.store.visit_checked(&hash, preview, &user, now);
+        }
+        true
     }
 
     /// [`Runtime::proxy_to`], kept in the preview's request log.
@@ -791,12 +1056,18 @@ impl Runtime {
     }
 }
 
+/// A request [`Runtime::gate`] let in as someone who came through roll: link access's cookie, or
+/// a live session of a team-access preview (a person signed in to roll). Not a share link, the CI
+/// bypass or a public preview: those get no feedback button.
+#[derive(Clone, Copy)]
+struct ThroughRoll;
+
 /// Where a preview's pages load the feedback button from (its own host, so `script-src 'self'`
 /// allows it), and the tag that loads it.
 pub const FEEDBACK_PATH: &str = "/__roll/feedback.js";
 /// The feedback already left on a page (`?path=`), for the button to list.
 pub const FEEDBACK_NOTES_PATH: &str = "/__roll/feedback.json";
-const FEEDBACK_TAG: &[u8] = b"<script src=\"/__roll/feedback.js\" defer></script>";
+pub(crate) const FEEDBACK_TAG: &[u8] = b"<script src=\"/__roll/feedback.js\" defer></script>";
 /// Adds the feedback button's tag to a page as it streams: before the first `</body>` (matched
 /// across chunk boundaries, in any case), or at the end of a page without one. Chunks pass on as
 /// they come, so streamed rendering stays streamed and memory stays one chunk.
@@ -920,22 +1191,65 @@ fn has_access_cookie(preview: &str, token: &str, req: &Request) -> bool {
     !token.is_empty() && cookie_value(req, &format!("roll_access_{preview}")).is_some_and(|v| same(v, token))
 }
 
+/// Every cookie `name` taken off `req` (a browser sends one per domain and path that set it):
+/// their values, and the rest of the cookies kept.
+fn take_cookies(req: &mut Request, name: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut kept = Vec::new();
+    for v in req.headers().get_all(header::COOKIE).iter().filter_map(|v| v.to_str().ok()) {
+        for c in v.split(';').map(str::trim).filter(|c| !c.is_empty()) {
+            match c.split_once('=') {
+                Some((k, v)) if k == name => found.push(v.to_string()),
+                _ => kept.push(c.to_string()),
+            }
+        }
+    }
+    if found.is_empty() {
+        return found;
+    }
+    req.headers_mut().remove(header::COOKIE);
+    if !kept.is_empty()
+        && let Ok(v) = HeaderValue::from_str(&kept.join("; "))
+    {
+        req.headers_mut().insert(header::COOKIE, v);
+    }
+    found
+}
+
+/// A page load: a browser says so (`Sec-Fetch-Dest: document`, so not a fetch, a fragment or an
+/// iframe); without that header, one that asks for HTML.
+fn is_page_load(req: &Request) -> bool {
+    let header_of = |h: &str| req.headers().get(h).and_then(|v| v.to_str().ok()).map(str::to_ascii_lowercase);
+    match header_of("sec-fetch-dest") {
+        Some(dest) => dest == "document",
+        None => header_of("accept").is_some_and(|a| a.contains("text/html")),
+    }
+}
+
+fn escape(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+}
+
 fn private_page(through: Option<&str>) -> Response {
-    let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;");
     let action = match through {
-        Some(u) => format!("<p><a href=\"{}\">Open it through roll</a>: sign in, and you're sent on with its link.</p>", esc(u)),
+        Some(u) => format!("<p><a href=\"{}\">Open it through roll</a>: sign in, and you're sent on with its link.</p>", escape(u)),
         None => "<p>Open it from its link in roll.</p>".into(),
     };
+    roll_page(StatusCode::UNAUTHORIZED, "This preview is private", &action)
+}
+
+/// roll's own answer on a preview's host: a title and a line (`body` is HTML), dark first.
+fn roll_page(status: StatusCode, title: &str, body: &str) -> Response {
     let html = format!(
-        "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width\"><title>Private preview · roll</title><style>\
+        "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width\"><title>{title} · roll</title><style>\
          :root{{color-scheme:dark light;--bg:#000;--fg:#ededed;--muted:#8f8f8f;--accent:#4c8dff}}\
          @media (prefers-color-scheme:light){{:root{{--bg:#fff;--fg:#111;--muted:#666}}}}\
          body{{margin:0;min-height:100vh;display:grid;place-items:center;background:var(--bg);color:var(--fg);\
          font:14px/1.5 ui-sans-serif,system-ui,sans-serif}}main{{max-width:520px;padding:24px}}\
          h1{{font-size:20px;font-weight:600;letter-spacing:-0.04em;margin:0 0 8px}}p{{color:var(--muted);margin:0}}\
-         a{{color:var(--accent)}}</style></head><body><main><h1>This preview is private</h1>{action}</main></body></html>"
+         a{{color:var(--accent)}}</style></head><body><main><h1>{title}</h1>{body}</main></body></html>"
     );
-    (StatusCode::UNAUTHORIZED, [(header::CONTENT_TYPE, "text/html; charset=utf-8"), (header::CACHE_CONTROL, "no-store")], html).into_response()
+    (status, [(header::CONTENT_TYPE, "text/html; charset=utf-8"), (header::CACHE_CONTROL, "no-store")], html).into_response()
 }
 
 /// Equal, in time that doesn't depend on where they differ.
@@ -1090,6 +1404,71 @@ impl Apps for Runtime {
         self.iso.follow(&container_name(&host), lines.clamp(1, 2000)).await
     }
 
+    /// `docker cp <container>:<path> -`, read as it comes; the process goes when the stream does.
+    async fn read_files(&self, preview: &str, service: &str, path: &str) -> anyhow::Result<Option<crate::ports::FileStream>> {
+        let me = self.me.upgrade().ok_or_else(|| anyhow::anyhow!("the preview runtime is stopping"))?;
+        let name = me.shell_container(preview, service).await?;
+        let mut child = tokio::process::Command::new("docker")
+            .args(["cp", &format!("{name}:{path}"), "-"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()?;
+        let out = child.stdout.take().ok_or_else(|| anyhow::anyhow!("docker cp gave no output"))?;
+        self.hold(preview, service);
+        Ok(Some(Box::new(ChildOut { _child: child, out })))
+    }
+
+    /// A relay in the service's network namespace (`--network container:<it>`, as screenshots
+    /// join it): busybox's `nc` to `127.0.0.1:<port>` there, its stdio the connection. Removed
+    /// when the connection is dropped.
+    async fn forward(&self, preview: &str, service: &str, port: u16) -> anyhow::Result<Option<Box<dyn crate::ports::ShellIo>>> {
+        let me = self.me.upgrade().ok_or_else(|| anyhow::anyhow!("the preview runtime is stopping"))?;
+        let name = me.shell_container(preview, service).await?;
+        let relay = format!("roll-previews-fwd-{}", &crate::store::new_token()[..12]);
+        let mut child = tokio::process::Command::new("docker")
+            .args(["run", "--rm", "-i", "--name", &relay, "--network", &format!("container:{name}"), "--memory", "32m", "--cpus", "0.25", "--pids-limit", "16", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", FORWARD_IMAGE, "nc", "127.0.0.1", &port.to_string()])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()?;
+        let (stdin, stdout) = (child.stdin.take(), child.stdout.take());
+        let (Some(stdin), Some(stdout)) = (stdin, stdout) else { anyhow::bail!("the relay took no input") };
+        self.hold(preview, service);
+        Ok(Some(Box::new(Relay { _child: child, name: relay, stdin, stdout })))
+    }
+
+    /// `docker cp - <container>:<dir>` with the tar on its stdin.
+    async fn write_files(&self, preview: &str, service: &str, dir: &str, tar: bytes::Bytes) -> anyhow::Result<bool> {
+        use tokio::io::AsyncWriteExt;
+        let me = self.me.upgrade().ok_or_else(|| anyhow::anyhow!("the preview runtime is stopping"))?;
+        let name = me.shell_container(preview, service).await?;
+        let mut child = tokio::process::Command::new("docker")
+            .args(["cp", "-", &format!("{name}:{dir}")])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()?;
+        let mut stdin = child.stdin.take().ok_or_else(|| anyhow::anyhow!("docker cp took no input"))?;
+        stdin.write_all(&tar).await?;
+        drop(stdin);
+        let out = tokio::time::timeout(Duration::from_secs(120), child.wait_with_output()).await.map_err(|_| anyhow::anyhow!("writing the files took over 2 minutes"))??;
+        self.hold(preview, service);
+        if !out.status.success() {
+            let said = String::from_utf8_lossy(&out.stderr);
+            anyhow::bail!("{}", said.trim().lines().last().unwrap_or("docker cp failed").chars().take(300).collect::<String>());
+        }
+        Ok(true)
+    }
+
+    async fn drain_from(&self, preview: &str, service: &str, since: &str) -> Option<tokio::sync::mpsc::Receiver<(bool, String)>> {
+        let host = self.store.services(preview).ok()?.into_iter().find(|s| s.name == service)?.host;
+        self.iso.follow_since(&container_name(&host), since).await
+    }
+
     /// Its running container's use, from Docker (a sleeping or frozen service has none).
     async fn metrics(&self, preview: &str, service: &str) -> Option<(f64, u64)> {
         if self.iso.name() != "docker" {
@@ -1186,6 +1565,26 @@ impl Apps for Runtime {
 }
 
 impl Runtime {
+    /// A service's output over the last `minutes` as `(ms, from stderr, text)`, oldest first, at
+    /// most its last `lines` (each cut at 16 KiB, at most 4 MiB a stream, read for at most 10 s):
+    /// what its errors are read from. Only Docker stamps its lines: on another backend nothing
+    /// (an old crash in its tail would read as new).
+    pub async fn timed_lines(&self, preview: &str, service: &str, minutes: i64, lines: usize) -> Vec<(i64, bool, String)> {
+        let Ok(Some(host)) = self.store.services(preview).map(|v| v.into_iter().find(|s| s.name == service).map(|s| s.host)) else { return Vec::new() };
+        if self.iso.name() != "docker" {
+            return Vec::new();
+        }
+        let (since, tail, name) = (format!("{minutes}m"), lines.to_string(), container_name(&host));
+        let args = ["logs", "--timestamps", "--since", &since, "--tail", &tail, &name];
+        let spawned = tokio::process::Command::new("docker").args(args).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).kill_on_drop(true).spawn();
+        let Ok(mut child) = spawned else { return Vec::new() };
+        let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else { return Vec::new() };
+        let read = async { tokio::join!(read_timed(stdout, false, TIMED_KEEP_MAX), read_timed(stderr, true, TIMED_KEEP_MAX)) };
+        // Past its time `child` is dropped, which kills it.
+        let Ok((out, err)) = tokio::time::timeout(TIMED_READ_FOR, read).await else { return Vec::new() };
+        merge_timed(out, err, lines)
+    }
+
     /// A screenshot run in container `name`'s own network (its page at `127.0.0.1:<port>`, so the
     /// page's code reaches only what the service does): this runtime's containers, and roll
     /// apps' instances (rolld's `RollApps`, through roll apps' `reachable`). The container must
@@ -1616,12 +2015,14 @@ async fn serve_named(rt: Arc<Runtime>, preview: String, service: String, req: Re
 }
 
 /// A request for a preview's service: through its gate, then to the service.
-async fn serve(rt: Arc<Runtime>, preview: String, service: String, req: Request) -> Response {
-    if let Some(r) = rt.gate(&preview, &service, &req) {
+async fn serve(rt: Arc<Runtime>, preview: String, service: String, mut req: Request) -> Response {
+    if let Some(r) = rt.gate(&preview, &service, &mut req).await {
         return r;
     }
     // The feedback button: its script, and pages (a browser's GET for HTML) that load it.
     let target = rt.feedback_target(&preview, &req);
+    // The link's token is roll's: the app never sees it, whichever way they came in.
+    take_cookies(&mut req, &format!("roll_access_{preview}"));
     if req.uri().path() == FEEDBACK_PATH
         && let Some(t) = &target
     {
@@ -1631,16 +2032,7 @@ async fn serve(rt: Arc<Runtime>, preview: String, service: String, req: Request)
         let path = req.uri().query().unwrap_or("").split('&').filter_map(|kv| kv.split_once('=')).find(|(k, _)| *k == "path").map(|(_, v)| percent_decode(v)).unwrap_or_default();
         return rt.feedback_notes(&preview, &path).await;
     }
-    // A page load: a browser says so (`Sec-Fetch-Dest: document`, so not a fetch, a fragment or
-    // an iframe); without that header, one that asks for HTML.
-    let page_load = {
-        let header_of = |h: &str| req.headers().get(h).and_then(|v| v.to_str().ok()).map(str::to_ascii_lowercase);
-        match header_of("sec-fetch-dest") {
-            Some(dest) => dest == "document",
-            None => header_of("accept").is_some_and(|a| a.contains("text/html")),
-        }
-    };
-    let feedback = target.is_some() && req.method() == axum::http::Method::GET && page_load;
+    let feedback = target.is_some() && req.method() == axum::http::Method::GET && is_page_load(&req);
     match rt.cluster.get().cloned() {
         Some(cluster) => {
             let rt2 = rt.clone();
@@ -1660,6 +2052,25 @@ async fn serve(rt: Arc<Runtime>, preview: String, service: String, req: Request)
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// `docker logs --timestamps` is read as stamped lines: a line with no stamp takes the one
+    /// before's, a long one is cut on a character while it's read, only the newest lines up to the
+    /// cap are held, and stdout and stderr interleave by their stamps.
+    #[tokio::test]
+    async fn a_services_stamped_output_is_read_bounded() {
+        let long = format!("2026-11-18T10:00:02Z {}é", "x".repeat(TIMED_LINE_MAX - 1));
+        let out = format!("2026-11-18T10:00:01.5Z GET / 200\nno stamp here\n{long}\n2026-11-18T10:00:04Z last");
+        let out = read_timed(out.as_bytes(), false, 1 << 20).await;
+        let t = |ms: i64| 1_794_996_000_000 + ms;
+        assert_eq!(out.iter().map(|l| l.0).collect::<Vec<_>>(), [t(1_500), t(1_500), t(2_000), t(4_000)]);
+        assert_eq!((out[1].2.as_str(), out[2].2.len(), out[3].2.as_str()), ("no stamp here", TIMED_LINE_MAX - 1, "last"));
+        let err = read_timed(&b"2026-11-18T10:00:03Z boom\n"[..], true, 1 << 20).await;
+        let merged = merge_timed(out.clone(), err, 3);
+        assert_eq!(merged.iter().map(|l| (l.1, &l.2[..l.2.len().min(4)])).collect::<Vec<_>>(), [(false, "xxxx"), (true, "boom"), (false, "last")]);
+        // Held up to the cap: the newest lines.
+        let kept = read_timed(&b"2026-11-18T10:00:01Z aaaa\n2026-11-18T10:00:02Z bbbb\n2026-11-18T10:00:03Z cccc\n"[..], false, 8).await;
+        assert_eq!(kept.iter().map(|l| l.2.as_str()).collect::<Vec<_>>(), ["bbbb", "cccc"]);
+    }
 
     struct NoTrees;
 

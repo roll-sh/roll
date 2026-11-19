@@ -214,7 +214,13 @@ pub struct LogDrain {
     pub previews: bool,
     /// The names of the headers it's sent with (an API key's: their values are sealed).
     pub headers: Vec<String>,
+    /// How its lines go: `ndjson` (roll's own, signed), `otlp` (OpenTelemetry logs over
+    /// OTLP/HTTP JSON) or `syslog` (RFC 5424 over TLS, RFC 5425's framing).
+    pub format: String,
 }
+
+/// How a drain's lines can go ([`LogDrain::format`]).
+pub const DRAIN_FORMATS: [&str; 3] = ["ndjson", "otlp", "syslog"];
 
 /// What a drain can be sent.
 pub const DRAIN_SOURCES: [&str; 3] = ["runtime", "http", "build"];
@@ -439,6 +445,24 @@ pub enum RunType {
 pub struct Volume {
     pub mount: String,
     pub size_gb: u32,
+    /// Its backups' schedule and retention (Fly's snapshot retention, Railway's schedules);
+    /// none: one a day, the newest seven kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backups: Option<VolumeBackups>,
+}
+
+/// How often a volume is backed up and how many backups are kept.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VolumeBackups {
+    /// Hours between scheduled backups, 1–168; 0: none on a schedule (by hand only).
+    pub every_hours: u32,
+    /// The newest kept, 1–90 (scheduled and by hand alike).
+    pub keep: u32,
+}
+
+impl VolumeBackups {
+    pub const DEFAULT: VolumeBackups = VolumeBackups { every_hours: 24, keep: 7 };
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -942,6 +966,11 @@ impl Run {
             if !(1..=500).contains(&v.size_gb) {
                 return bad("volume.size_gb is 1–500");
             }
+            if let Some(b) = v.backups
+                && (b.every_hours > 168 || !(1..=90).contains(&b.keep))
+            {
+                return bad("volume.backups is {every_hours: 0–168 (0: by hand only), keep: 1–90}");
+            }
             self.max_instances = 1;
             self.min_instances = self.min_instances.min(1);
             if !self.rollout.steps.is_empty() {
@@ -1084,6 +1113,11 @@ pub struct EnvironmentSummary {
     /// the project capped by its spend limit, maintenance, its latest deploy failed.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub attention: Vec<&'static str>,
+    /// Settings, variables, links or the project's secrets changed since the live deployment:
+    /// a redeploy applies them (Railway's staged changes, on every list and card).
+    pub needs_deploy: bool,
+    /// A preview's (made for a branch or a pull request, deleted with it).
+    pub ephemeral: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -1092,13 +1126,11 @@ pub struct Environment {
     pub summary: EnvironmentSummary,
     pub service: String,
     pub branch: Option<String>,
-    pub ephemeral: bool,
     pub instances: Vec<Instance>,
     pub domains: Vec<Domain>,
     pub port: Option<u16>,
     /// A TCP service's address (`host:port`), once it has its port.
     pub tcp: Option<String>,
-    pub needs_deploy: bool,
     /// Visitors need the environment's access token (`PUT … {access: {token}}`), or to sign in.
     pub private: bool,
     /// People signed in to roll who may open the project get in (`access.signed_in`).
@@ -1134,6 +1166,10 @@ pub struct Environment {
     /// someone else reports them (roll previews, for its `pv-` environments: one voice on a
     /// pull request).
     pub report: bool,
+    /// The label it answers to under its project's preview domain (`<label>.preview.acme.dev`),
+    /// when roll previews gave it one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview_host: Option<String>,
     /// A preview's pages carry roll previews' feedback button for visitors who came in through
     /// its access link.
     pub feedback: bool,

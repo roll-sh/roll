@@ -272,6 +272,17 @@ pub trait Workloads: Send + Sync {
     fn grants(&self) -> crate::Result<Vec<roll_auth::Grant>> {
         Ok(vec![])
     }
+    /// A long-lived roll token with `rule`, made for the request `ext` belongs to as `POST
+    /// /v1/access/tokens` makes one (its owner the caller; a gateway's). Blocking.
+    fn token(&self, ext: &axum::http::Extensions, name: &str, rule: roll_auth::scope::Rule) -> crate::Result<Minted> {
+        let _ = (ext, name, rule);
+        Err(crate::Error::BadRequest("roll tokens aren't on this server".into()))
+    }
+    /// Revoke a token [`Workloads::token`] made, saying why. Blocking.
+    fn revoke_token(&self, id: &str, why: &str) -> crate::Result<()> {
+        let _ = (id, why);
+        Ok(())
+    }
     /// A decoy token (docs/secrets.md, "Decoys"; roll-access's decoys): it looks as `rule` says and
     /// allows nothing, and roll-access tells roll secrets of each use
     /// ([`crate::Secrets::decoy_used`]). Owned by `owner` (`None`: the operator), who's mailed

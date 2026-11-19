@@ -81,6 +81,10 @@ interface Form {
   sleepAfter: string;
   volumeMount: string;
   volumeSize: string;
+  /** Hours between scheduled backups ("" the default, a day; 0 by hand only). */
+  backupEvery: string;
+  /** Backups kept ("" the default, seven). */
+  backupKeep: string;
 }
 
 const str = (v: string | number | undefined | null) => (v == null ? "" : String(v));
@@ -148,6 +152,8 @@ export function formOf(s: Service): Form {
     sleepAfter: str(s.run.sleep_after_s),
     volumeMount: s.run.volume?.mount ?? "",
     volumeSize: str(s.run.volume?.size_gb),
+    backupEvery: str(s.run.volume?.backups?.every_hours),
+    backupKeep: str(s.run.volume?.backups?.keep),
   };
 }
 
@@ -234,13 +240,16 @@ export function patchOf(s: Service, f: Form): ServicePatch {
     run.scale = f.scaleStream && f.scaleGroup.trim() ? { stream: f.scaleStream, group: f.scaleGroup.trim(), ...(f.scalePer.trim() ? { per_instance: Number(f.scalePer) } : {}) } : null;
   if (f.suspendAfter !== before.suspendAfter) run.suspend_after_s = num(f.suspendAfter);
   if (f.sleepAfter !== before.sleepAfter) run.sleep_after_s = num(f.sleepAfter);
-  if (f.volumeMount !== before.volumeMount || f.volumeSize !== before.volumeSize)
-    run.volume = f.volumeMount.trim() ? { mount: f.volumeMount.trim(), size_gb: Number(f.volumeSize) || 1 } : null;
+  if (f.volumeMount !== before.volumeMount || f.volumeSize !== before.volumeSize || f.backupEvery !== before.backupEvery || f.backupKeep !== before.backupKeep) {
+    // Unset both: the default schedule; one set takes the default for the other.
+    const backups = f.backupEvery.trim() || f.backupKeep.trim() ? { every_hours: f.backupEvery.trim() ? Number(f.backupEvery) : 24, keep: f.backupKeep.trim() ? Number(f.backupKeep) : 7 } : undefined;
+    run.volume = f.volumeMount.trim() ? { mount: f.volumeMount.trim(), size_gb: Number(f.volumeSize) || 1, ...(backups ? { backups } : {}) } : null;
+  }
   if (Object.keys(run).length) patch.run = run;
   return patch;
 }
 
-const NUMERIC: (keyof Form)[] = ["scalePer", "port", "timeout", "retries", "min", "max", "concurrency", "healthTimeout", "healthEvery", "healthFailures", "drain", "cpuTarget", "memoryTarget", "suspendAfter", "sleepAfter", "volumeSize", "alertMemory", "alertErrors", "alertP95", "alertCapacity", "alertLogCount", "rolloutStep", "rolloutErrors", "restartTries"];
+const NUMERIC: (keyof Form)[] = ["scalePer", "port", "timeout", "retries", "min", "max", "concurrency", "healthTimeout", "healthEvery", "healthFailures", "drain", "cpuTarget", "memoryTarget", "suspendAfter", "sleepAfter", "volumeSize", "backupEvery", "backupKeep", "alertMemory", "alertErrors", "alertP95", "alertCapacity", "alertLogCount", "rolloutStep", "rolloutErrors", "restartTries"];
 
 /** A rollout's steps as typed (`10, 50`): increasing percents 1–99, at most five; null when they aren't. */
 export function rolloutSteps(v: string): number[] | null {
@@ -484,6 +493,16 @@ export function SettingsTab({
               <Field label="Volume size (GB)" hint="what it's billed and planned at; a host without disk quotas doesn't stop it growing past">
                 {t("volumeSize", "1")}
               </Field>
+            )}
+            {form.volumeMount.trim() && (
+              <>
+                <Field label="Back up every (hours)" hint="1–168; 0 by hand only">
+                  {t("backupEvery", "24")}
+                </Field>
+                <Field label="Backups kept" hint="1–90, scheduled and by hand">
+                  {t("backupKeep", "7")}
+                </Field>
+              </>
             )}
           </Grid>
         </Section>
