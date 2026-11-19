@@ -621,7 +621,7 @@ pub trait Apps: Send + Sync {
     }
     /// The service's output as it comes, after its last `lines`: `None` where it can't be
     /// followed (the engine reads `logs` again every few seconds instead).
-    async fn follow(&self, _preview: &str, _service: &str, _lines: usize) -> Option<tokio::sync::mpsc::Receiver<String>> {
+    async fn follow(&self, _preview: &str, _service: &str, _lines: usize) -> Option<tokio::sync::mpsc::Receiver<(bool, String)>> {
         None
     }
     /// The service's output from `since` (a Docker stamp, RFC 3339, or Unix seconds) as it comes,

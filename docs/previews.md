@@ -1280,7 +1280,7 @@ and admins see every project.
 | `GET /v1/previews/{id}/qr.png` | `service?` | The preview's link with its access (`share_url`, or that service's) as a QR code PNG, to open on a phone; `Cache-Control: no-store` (it carries the token); 404 with no link yet |
 | `POST /v1/previews/{id}/visual/accept` | `{head?, path?}` (the screenshot's looked at, `visual_review.head`; `path`: that page only, `""` the first, else every page) | `Preview`: how a change's pages look at its latest screenshot is accepted (`visual_review`, `roll/visual`); 404 for a page it has no screenshot of; 409 with no screenshot yet, 400 for a branch's preview, 403 from the change's author or from a token when the review is required, 409 when `head` isn't the latest screenshot's (a newer one came in) |
 | `GET /v1/previews/{id}/logs?service=&lines=` | | `{service, lines: string[]}`, masked: every value the preview got from roll secrets, the project's `env` and the preview's own variables, and its branches' credentials (a password, key or token, a URL's password) are `***`, as checks' output is (each line of 6 characters or more). A preview's code, a fork's too, can print what it was given, and anyone who reads the preview reads its logs. 409 when what they must hide can't be read. A seed's, release's or teardown's output (the preview's error, a teardown's in the pull request's comment), what its page said in a screenshot run (its errors and failed requests, broken links, words, markup and API operations: the comment's "What went wrong") and the hosts its egress proxy refused (a name is its code's to choose) are masked the same way (a picture can't be: a page that renders a secret shows it). Masking matches values as written, so code that prints a secret encoded (base64, hex) gets it through, as with every log masker (GitHub Actions' too). It hides what a preview shows, not what its code sends: with egress open (the default) its code reaches the internet, DNS included. Under "Roll only" it can't: the preview's network is `--internal`, where Docker's embedded DNS doesn't forward outside names (SERVFAIL; checked on Docker 29.9) and no resolver is reachable, and the egress proxy checks a name against `egress_hosts` before it resolves it, so `<secret>.attacker.example` is never looked up; on roll apps, every variable previews sets in the `pv-` environment is sealed, so apps' own logs hide it and its API never returns it (`…/connect` and `…/env` reveal them) |
-| `GET /v1/previews/{id}/logs?service=&lines=&follow=1` | | `text/event-stream`: `event: service` (its name), then one event per line, the last `lines` first and then as they come. `docker logs -f` for `roll.toml` services; for others the tail is read every 2 s (2,000 lines wide after the first read) and only new lines are sent, with a line saying so when some were missed. Runs on the preview's holder; the stream ends when the client goes |
+| `GET /v1/previews/{id}/logs?service=&lines=&follow=1` | | `text/event-stream`: `event: service` (its name), then one event per line, the last `lines` first and then as they come; a line the service wrote on stderr is `event: stderr` (a stdout one the default event; `roll preview logs -f` writes them to its own stderr and stdout). `docker logs -f` for `roll.toml` services; for others the tail is read every 2 s (2,000 lines wide after the first read) and only new lines are sent, with a line saying so when some were missed. Runs on the preview's holder; the stream ends when the client goes |
 | `POST /v1/previews/{id}/shell/sessions` | `{ service?, cols?, rows? }` (the preview's first service without one; 120×32) | 201 `{ id }`: a login shell (bash where the image has it, else sh) in the running `roll.toml` service's container, started or thawed if it sleeps (up to 60 s), kept awake while the shell is open, its opener in the activity ("ana opened a shell in web"). At most 4 a preview (409); a roll apps service's is 409 (its own shell is on its `pv-` environment in roll apps). Runs on the preview's holder. A terminal isn't masked: it's an admin's, as roll apps' shells are, and reaches what the service does (the preview's branches and variables, never a parent's) |
 | `GET /v1/previews/{id}/shell/sessions/{sh}/screen` | | `text/event-stream`: base64 chunks (the scrollback first, at most 256 KiB), then `event: closed` when the shell ends (its `exit`, a close, the preview going, a minute with nobody watching: a closed tab gives its place back) |
 | `POST /v1/previews/{id}/shell/sessions/{sh}/keys` | `{ data }` (base64, at most 64 KiB) | 204; 404 once it's closed |
@@ -1670,7 +1670,8 @@ type Settings = {
   its services wrote in the last hour, logs, and open, sleep, wake, reset and delete
   actions. A preview's sheet has its Overview, Activity, Logs (live while a service runs; a filter
   box, text or `/regex/`, and "Problems only", warnings and worse read as roll apps reads a line's
-  level, `lib/preview-logs.ts`; errors in red; all in the browser on the masked lines), Shell
+  level, `lib/preview-logs.ts`; "stderr" while it follows, the lines the service wrote there; errors
+  in red; all in the browser on the masked lines), Shell
   (a terminal on a `roll.toml` service's shell: "A shell in a preview"; it shares roll apps'
   terminal, `components/terminal-screen.tsx`), Requests and Errors (its services' errors grouped, newest first, each with how many times, when
   last seen, the service and its title, opening to its newest sample; the last hour, 6 or 24),
@@ -2018,41 +2019,47 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-Every feature in review has its `roll preview` command too: `shell` (#364).
-
-1. **A shell in a preview's service, in review** (#364, on #363; Render's shell, `heroku run`):
-   the API, the engine's sessions, the exec, `roll preview shell` and the sheet's Shell tab (roll
-   apps' terminal, shared; a roll apps service opens roll apps' own shell on its `pv-`
-   environment). See "A shell in a preview". The look at the real sheet found three bugs, fixed:
-   a terminal that remounted closed its own shell, closed tabs held shells for 10 minutes, and a
-   short command's last output raced its end.
-2. **A preview's `roll.toml` services and jobs in the project's log drains, in review** (#363):
-   roll apps' drains with `previews: true` got only roll apps' own `pv-` environments, so a team
-   with Datadog on a drain saw half of a preview's output. See "Log drains" under Services.
-3. **Search and levels in the sheet's logs, in review** (`feature/roll-previews-log-search`, on
-   #364; Vercel's runtime logs, Render's log explorer): a filter box (text or `/regex/`, on the
-   masked lines, in the browser), "Problems only", and errors marked, read as roll apps reads a
-   line's level. Next for it: stderr apart (the followed stream doesn't say which yet).
-4. **Files in and out of a preview's service, in review** (`feature/roll-previews-files`, on
-   #364; `roll preview cp`, as roll apps' `…/files`): a dump taken in the shell, a fixture put
-   in, `docker cp` in the service's container, admin as the shell is, 100 MiB a time.
-5. **Secret references in previews' variables** (roll secrets' suggestion, after its #329):
+1. **Secret references in previews' variables** (roll secrets' suggestion, after its #329):
    `env`, `env_for` and a preview's own variables are plain values outside roll secrets
    (redacted on read, but outside health, leak scanning, reach and the cut-off), and a payment
    provider's test key is just what teams put there. Take `roll://ENV/KEY` there, resolved
    through `Secrets::resolve_for(ResourceRef::new(kind, id).untrusted(), …)` (never a
    protected environment or a sensitive key), and offer to keep a pasted value in the base
    environment's folder.
-6. **A port of a preview's service on a laptop, in review** (`feature/roll-previews-forward`, on
-   #372; `roll preview forward`, roll apps' tunnel): any port the service listens on, through a
-   relay in its network namespace (so Roll-only egress's `--internal` networks don't stop it),
-   admin, on the preview's holder.
-7. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+2. **WebSocket upgrades checked against the dashboard's origins** (from turn 6's review): a
+   WebSocket upgrade is a GET, which rolld's gate lets past its CSRF and Origin check, so an
+   admin's `SameSite=Lax` cookie opens `…/forward` (and roll apps' tunnel and shell) from any page
+   on the API's own site. It only matters where a preview host shares the API's registrable
+   domain (a self-hosted `api.acme.dev` with `*.preview.acme.dev`). One check in the gate for
+   every product's upgrades, agreed with the apps and MCP threads.
+3. **stderr apart in the sheet's logs**: the followed stream merges a container's stdout and
+   stderr (`docker logs -f` read as one), so the sheet can't show stderr on its own. The drains
+   already tell them apart (`drain_from` tags each line); tag `follow` the same way and carry it
+   to the sheet.
+4. **Traces of a preview's `roll.toml` services** (Vercel's preview traces, roll apps' `traces`):
+   roll apps keeps an environment's spans when it sets the OpenTelemetry SDK's variables; a
+   preview's services on roll's runtime get none. Give them `OTEL_EXPORTER_OTLP_ENDPOINT` to a
+   preview-scoped intake and show its recent traces on the sheet, beside its errors.
+5. **Files and ports from the sheet**: a download for a path (the shell's `…/files`) and the
+   `roll preview forward` line for a port, so the sheet covers what the CLI does.
+6. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-8. **Watch: pg-control's recovery to a time seconds old** (unowned).
-9. **A cold start on a Docker name conflict, in review** (#374): a start whose container name is
-   still being removed (a stop just before it) removes it again and tries twice more, half a
-   second apart, before it fails.
+7. **Watch: pg-control's recovery to a time seconds old** (unowned).
+
+Landed in previews' lock turn 6 of 2026-11-19 (main 741f8b789, exactly the gated tree; built and
+gated before the lock came, rebuilt on the new main when it did, the stack's own diff checked line
+for line against the green tree, gated again, landed one at a time, stacked PRs retargeted to
+main before the queue):
+- a preview's `roll.toml` services and jobs in the project's log drains (#363);
+- a shell in a preview's service: the API, `roll preview shell` and the sheet's Shell tab, a roll
+  apps service's being roll apps' own (#364);
+- search and levels in the sheet's logs (#369);
+- files in and out of a preview's service, `roll preview cp` (#372);
+- a port of a preview's service on a laptop, `roll preview forward` (#378);
+- a cold start that meets a container name still being removed tries again (#374).
+Looking at the real sheet (screenshots of a live preview) found three bugs before review: a
+terminal that remounted closed its own shell, closed tabs held shells open for ten minutes, and a
+short command's last output raced its end.
 
 Landed in previews' lock turn of 2026-11-19 (main 5eb41bf5f, exactly the gated tree: one
 combined tree, each step tagged, gated once with both live checks, landing simulated with
