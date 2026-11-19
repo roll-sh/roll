@@ -542,6 +542,8 @@ export interface EnvironmentPut {
   routes?: RouteRule[] | null;
   /** Its uptime checks (at most 5), or null for none. */
   checks?: UptimeCheck[] | null;
+  /** Its deploy freeze: on until lifted (null), until `until`, or in weekly `windows`; a person's deploy then needs `override: true`. */
+  freeze?: Freeze | null;
   /** Its split test: `percent` of visitors (1–99) served by `environment`, or null to end it. */
   split?: { environment: string; percent: number } | null;
   /** Its heartbeats (at most 10), or null for none; one kept by name keeps its URL. */
@@ -668,6 +670,9 @@ export interface Environment extends EnvironmentSummary {
   check_states?: UptimeCheckState[];
   heartbeats?: Heartbeat[];
   heartbeat_states?: HeartbeatState[];
+  freeze?: Freeze;
+  /** Its freeze is on now: automatic deploys build to ready, a person's deploy needs override. */
+  frozen?: boolean;
   /** Its split test: a share of its visitors, kept by their bucket cookie, served by another environment. */
   split?: { environment: string; percent: number };
   /** Only in the answer to the PUT that added them: each new heartbeat's ping URL (shown once). */
@@ -973,6 +978,14 @@ export interface UptimeCheckState {
 }
 
 /** A heartbeat: something outside roll pings its URL at least every `every_s` (60–604800); one not come within that and `grace_s` (default 300) is `heartbeat.missed`. */
+/** A deploy freeze: `until` (unix ms), weekly `windows` (`{ from: "fri 17:00", to: "mon 09:00" }`) in `timezone`, or always. */
+export interface Freeze {
+  until?: number;
+  windows?: { from: string; to: string }[];
+  timezone?: string;
+  reason?: string;
+}
+
 export interface Heartbeat {
   name: string;
   every_s: number;

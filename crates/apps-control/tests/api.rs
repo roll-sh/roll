@@ -2258,6 +2258,42 @@ async fn a_password_lets_visitors_in() {
     assert_eq!(send("GET", "/docs", Some(session), None, "203.0.113.5").await.0, StatusCode::UNAUTHORIZED);
 }
 
+/// A deploy freeze (GitLab's freeze periods): a person's deploy is refused with its reason, or
+/// goes through with `override` (audited); a hook's deploy builds to `ready` beside the live one,
+/// as a hold's; a rollback is never frozen; lifting it deploys as ever.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_deploy_freeze_holds_deploys_but_never_a_rollback() {
+    let w = world().await;
+    let (svc, first) = image_service(&w, "api", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    let first = first["id"].as_str().unwrap().to_string();
+    assert_eq!(call(&w.api, "PUT", &base, Some(json!({"freeze": {"windows": [{"from": "fri 17", "to": "mon 09:00"}]}}))).await.0, StatusCode::BAD_REQUEST);
+    let (_, env) = call(&w.api, "PUT", &base, Some(json!({"freeze": {"reason": "the launch"}}))).await;
+    assert_eq!((env["frozen"].as_bool(), env["freeze"]["reason"].as_str()), (Some(true), Some("the launch")), "{env}");
+    let (st, r) = call(&w.api, "POST", &format!("{base}/deploys"), Some(json!({"image": "nginx:1.28"}))).await;
+    assert!(st == StatusCode::CONFLICT && r.to_string().contains("deploys are frozen: the launch"), "{st} {r}");
+    assert_eq!(call(&w.api, "POST", &format!("{base}/redeploy"), Some(json!({}))).await.0, StatusCode::CONFLICT);
+    // A hook (automation): built beside the live one, not put live.
+    let (_, h) = call(&w.api, "POST", &format!("{base}/hook"), None).await;
+    let (st, d) = call(&w.api, "POST", &format!("{}?image=nginx:1.28", h["path"].as_str().unwrap()), None).await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{d}");
+    assert_eq!(settled(&w, &id, "production", d["id"].as_str().unwrap()).await["status"], "ready");
+    // With override: through, and in the audit log.
+    let (st, d) = call(&w.api, "POST", &format!("{base}/deploys"), Some(json!({"image": "nginx:1.28", "override": true}))).await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{d}");
+    assert_eq!(settled(&w, &id, "production", d["id"].as_str().unwrap()).await["status"], "active");
+    let (_, activity) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/activity"), None).await;
+    assert!(activity.as_array().unwrap().iter().any(|e| e["kind"] == "audit.freeze.overridden"), "{activity}");
+    // A rollback is the way out: never frozen.
+    let (st, rb) = call(&w.api, "POST", &format!("{base}/deploys/{first}/rollback"), None).await;
+    assert!(st.is_success(), "{rb}");
+    assert_eq!(settled(&w, &id, "production", rb["id"].as_str().unwrap()).await["status"], "active");
+    // Lifted: deploys as ever.
+    call(&w.api, "PUT", &base, Some(json!({"freeze": null}))).await;
+    assert_eq!(call(&w.api, "POST", &format!("{base}/redeploy"), Some(json!({}))).await.0, StatusCode::ACCEPTED);
+}
+
 /// An instance the kernel killed for its memory says so: in the log and in why it crashed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_instance_killed_for_its_memory_says_so() {

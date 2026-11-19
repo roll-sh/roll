@@ -53,7 +53,12 @@ impl Apps {
     pub async fn deploy(self: &Arc<Self>, service: &str, env: &str, body: Value, by: By, upload: Option<Bytes>, key: Option<&str>) -> Result<Deployment> {
         self.refuse_capped(service)?;
         self.refuse_paused(service, env).await?;
-        let o = body.as_object().cloned().unwrap_or_default();
+        let mut o = body.as_object().cloned().unwrap_or_default();
+        // A person's deploy in a freeze: refused, or let through with `override` (said).
+        if matches!(by.trigger, Trigger::Manual | Trigger::Upload) {
+            let over = o.remove("override").is_some_and(|v| v == true);
+            self.refuse_frozen(service, env, over, by.actor.clone()).await?;
+        }
         for k in o.keys() {
             if !["revision", "image", "message", "no_traffic", "no_cache", "image_upload", "closed"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
@@ -222,6 +227,9 @@ impl Apps {
     pub async fn redeploy(self: &Arc<Self>, service: &str, env: &str, body: Value, actor: Option<String>, key: Option<&str>) -> Result<Deployment> {
         self.refuse_capped(service)?;
         self.refuse_paused(service, env).await?;
+        let mut body = body;
+        let over = body.as_object_mut().and_then(|o| o.remove("override")).is_some_and(|v| v == true);
+        self.refuse_frozen(service, env, over, actor.clone()).await?;
         if let Some(k) = key {
             if k.is_empty() || k.len() > 200 || !k.bytes().all(|b| b.is_ascii_graphic()) {
                 return Err(Error::BadRequest("Idempotency-Key is 1–200 printable ASCII characters".into()));
@@ -290,7 +298,9 @@ impl Apps {
     pub async fn promote(self: &Arc<Self>, service: &str, env: &str, body: Value, actor: Option<String>) -> Result<Deployment> {
         self.refuse_capped(service)?;
         self.refuse_paused(service, env).await?;
-        let o = body.as_object().cloned().unwrap_or_default();
+        let mut o = body.as_object().cloned().unwrap_or_default();
+        let over = o.remove("override").is_some_and(|v| v == true);
+        self.refuse_frozen(service, env, over, actor.clone()).await?;
         if let Some(k) = o.keys().find(|k| !["from", "message", "expect"].contains(&k.as_str())) {
             return Err(Error::BadRequest(format!("unknown field {k}")));
         }
@@ -2830,6 +2840,13 @@ pub(crate) enum Held {
 }
 
 pub(crate) fn hold_of(svc: &crate::store::ServiceRow, e: &crate::store::EnvRow) -> Held {
+    // A freeze holds as a person's hold does, saying why.
+    if let Some(f) = e.freeze.as_ref().filter(|f| f.on(code_sql::now_ms())) {
+        return match svc.run.kind == RunType::Web && svc.run.volume.is_none() {
+            true => Held::Ready,
+            false => Held::Skip(format!("{}, and this service's can't wait beside the live one", f.says())),
+        };
+    }
     match e.held_by.as_deref() {
         None => Held::No,
         Some(MANUAL_HOLD) if svc.run.kind == RunType::Web && svc.run.volume.is_none() => Held::Ready,

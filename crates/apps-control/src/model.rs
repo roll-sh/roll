@@ -1469,6 +1469,11 @@ pub struct Environment {
     /// Its split test: a share of its visitors served by another environment.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub split: Option<Split>,
+    /// Its deploy freeze, and whether it's on now ([`crate::freeze`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub freeze: Option<crate::freeze::Freeze>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub frozen: bool,
     /// What its code may reach: anything (`open`), or roll and the listed hosts (`roll`).
     pub egress: Egress,
     /// Hosts its egress proxy refused lately (its code tried them; they aren't listed).

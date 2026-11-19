@@ -475,6 +475,8 @@ pub struct EnvRow {
     pub heartbeats: Vec<crate::model::Heartbeat>,
     /// Its split test ([`crate::model::Split`]).
     pub split: Option<crate::model::Split>,
+    /// Its deploy freeze ([`crate::freeze`]).
+    pub freeze: Option<crate::freeze::Freeze>,
     /// Paused (Render's Suspend): nothing of it runs, wakes, deploys or is scheduled until it's
     /// resumed.
     pub paused: bool,
@@ -603,7 +605,7 @@ fn name_taken(name: &str, deleted: Option<i64>) -> String {
         Some(_) => format!("a deleted service named {name} holds the name: restore it, or delete it again to delete it for good"),
     }
 }
-const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen, feedback, maintenance, allow_ips, rate_limit, tcp_port, firewall, pages, redeploy_on_secrets, secrets_seen, headers, paused, held_by, egress, vitals, routes, report, checks, heartbeats, split";
+const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen, feedback, maintenance, allow_ips, rate_limit, tcp_port, firewall, pages, redeploy_on_secrets, secrets_seen, headers, paused, held_by, egress, vitals, routes, report, checks, heartbeats, split, freeze";
 /// A deployment [`Store::prune_deployments`] pruned, with its image when nothing else names it.
 pub struct Pruned {
     pub id: String,
@@ -686,6 +688,7 @@ fn env_row(r: &code_sql::Row<'_>) -> code_sql::Result<EnvRow> {
         heartbeats: r.get::<_, Option<String>>(30)?.and_then(|j| serde_json::from_str::<Vec<StoredHeartbeat>>(&j).ok()).unwrap_or_default().into_iter().map(Into::into).collect(),
         report: r.get::<_, i64>(28)? != 0,
         split: r.get::<_, Option<String>>(31)?.and_then(|j| serde_json::from_str(&j).ok()),
+        freeze: r.get::<_, Option<String>>(32)?.and_then(|j| serde_json::from_str(&j).ok()),
     })
 }
 
@@ -834,6 +837,7 @@ impl Store {
         db.add_column("environments", "checks", "TEXT")?;
         db.add_column("environments", "heartbeats", "TEXT")?;
         db.add_column("environments", "split", "TEXT")?;
+        db.add_column("environments", "freeze", "TEXT")?;
         // Drains made before their filters sent every environment's runtime output: still so.
         db.add_column("log_drains", "sources", "TEXT")?;
         db.add_column("log_drains", "environments", "TEXT")?;
@@ -1044,7 +1048,7 @@ impl Store {
                     None => None,
                 };
                 c.execute(
-                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, 0, NULL, NULL, 0, NULL, 1, NULL, NULL, NULL)"),
+                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, 0, NULL, NULL, 0, NULL, 1, NULL, NULL, NULL, NULL)"),
                     params![service, env, branch.flatten(), ephemeral.unwrap_or(false) as i64, slug, port, now],
                 )?;
             }
@@ -2571,6 +2575,12 @@ impl Store {
         let stored: Vec<StoredHeartbeat> = beats.iter().cloned().map(Into::into).collect();
         let j = (!stored.is_empty()).then(|| serde_json::to_string(&stored).expect("heartbeats serialize"));
         self.db.execute("UPDATE environments SET heartbeats = ? WHERE service = ? AND name = ?", params![j, service, env])?;
+        Ok(())
+    }
+
+    pub fn set_freeze(&self, service: &str, env: &str, freeze: Option<&crate::freeze::Freeze>) -> Result<()> {
+        let j = freeze.map(|f| serde_json::to_string(f).expect("a freeze serializes"));
+        self.db.execute("UPDATE environments SET freeze = ? WHERE service = ? AND name = ?", params![j, service, env])?;
         Ok(())
     }
 

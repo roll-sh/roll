@@ -233,6 +233,16 @@ function Conditions({ service, env, runner, go }: { service: Service; env: Envir
         </button>
       ),
     });
+  if (env.frozen)
+    lines.push({
+      key: "frozen",
+      text: `Deploys are frozen${env.freeze?.reason ? `: ${env.freeze.reason}` : ""}. Pushes and hooks build without going live; deploying by hand needs an override; a rollback always works.`,
+      action: (
+        <button type="button" className={btn} disabled={runner.busy !== null} onClick={() => runner.run("unfreeze", () => appsApi.putEnvironment(service.id, env.name, { freeze: null }))}>
+          Lift the freeze
+        </button>
+      ),
+    });
   if (env.held)
     lines.push({
       key: "held-by-you",
