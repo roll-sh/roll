@@ -2065,16 +2065,20 @@ Ranked by what a person notices first. Done so far:
 3. **Repeated queries in a trace** (Sentry's N+1 detection): a request whose child spans repeat
    one database statement many times (`db.statement`, numbers and strings taken out) said on the
    route table and in the trace, with the statement masked.
-4. **An independent review of turns 9 and 10** (slower routes on the record and in the comment,
-   an error's trace from its sample: both put a preview's code's words in roll's own surfaces):
-   their findings fixed before anything builds on them, as turns 6's and 7–8's were.
+4. **A preview's own variables only in roll secrets** (roll secrets' review, 2026-11-19): `PUT
+   …/{id}/env` keeps their values as plain JSON in the previews table though they go to the
+   preview's ephemeral environment anyway; keep only their names there (roll secrets the one copy,
+   sealed), or seal the column bound to the preview's id. Nothing logs or prints the map today.
 5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
 6. **Watch: pg-control's recovery to a time seconds old** (unowned).
 
 In review after turn 9: the routes slower than main's preview on the record, the verdict strip,
 the change page and the pull request's comment (#431); an error group opens its request's trace
-(#433).
+(#433). An independent review of them, and of #436, #438 and #441, found 13 things, all fixed
+before they land (a reference past the reveal check by a leading space, reads that held up the
+reconcile pass, reports on every trace's drift, false new errors where main's can't be read, log
+lines in a public comment, unmasked span services and keys) or written down as limits.
 
 Landed in previews' lock turn 9 of 2026-11-19 (main 84d246b60, exactly its gated tree): turns 7
 and 8's review fixes (span bytes bounded, traces off for roll apps, the intake's token first,
