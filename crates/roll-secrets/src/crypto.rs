@@ -91,6 +91,7 @@ pub struct Keyring {
     /// What tells the current key from others without revealing it (a customer-wrapped data key
     /// records which deployment key sealed it inside: kms.rs).
     current_id: String,
+    previous_id: Option<String>,
 }
 
 impl std::fmt::Debug for Keyring {
@@ -118,12 +119,18 @@ fn kek(secret: &str) -> Result<Aes256Gcm, CryptoError> {
 
 impl Keyring {
     pub fn new(current: &str, previous: Option<&str>) -> Result<Keyring, CryptoError> {
-        Ok(Keyring { current: kek(current)?, previous: previous.filter(|p| !p.trim().is_empty()).map(kek).transpose()?, current_id: kek_id(current) })
+        let previous = previous.filter(|p| !p.trim().is_empty());
+        Ok(Keyring { current: kek(current)?, previous: previous.map(kek).transpose()?, current_id: kek_id(current), previous_id: previous.map(kek_id) })
     }
 
     /// The current deployment key's id.
     pub fn current_id(&self) -> &str {
         &self.current_id
+    }
+
+    /// The previous deployment key's id, during a rotation.
+    pub fn previous_id(&self) -> Option<&str> {
+        self.previous_id.as_deref()
     }
 
     /// A fresh data key for `project`, and its sealed form to store.
