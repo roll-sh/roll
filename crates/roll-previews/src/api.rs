@@ -57,6 +57,10 @@ pub fn router(engine: Arc<Engine>) -> Router {
                 .route("/v1/previews/{id}/shell/sessions/{sh}/keys", post(shell_keys))
                 .route("/v1/previews/{id}/shell/sessions/{sh}/resize", post(shell_resize))
                 .route("/v1/previews/{id}/forward", get(forward))
+                // A preview's spans, kept on its holder: the intake (its token the credential) and the reads.
+                .route("/v1/previews/{id}/otlp/{token}/v1/traces", post(otlp_traces).layer(axum::extract::DefaultBodyLimit::max(8 << 20)))
+                .route("/v1/previews/{id}/traces", get(traces))
+                .route("/v1/previews/{id}/traces/{trace}", get(trace))
                 .route("/v1/previews/{id}/files", get(read_files).put(write_files).layer(axum::extract::DefaultBodyLimit::max(crate::engine::shell::FILES_MAX + (1 << 20))))
                 .route_layer(axum::middleware::from_fn_with_state(engine.clone(), on_leader))
                 .with_state(engine.clone()),
@@ -718,6 +722,37 @@ async fn shell_resize(AxState(e): S, Path((id, sh)): Path<(String, String)>, b: 
     let s: Size = serde_json::from_slice(&b).map_err(|err| Error::BadRequest(format!("bad body: {err}")))?;
     e.shell_resize(&id, &sh, s.cols, s.rows).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// OTLP/HTTP `…/v1/traces` from a preview's service: protobuf or JSON (its `Content-Type`), gzip
+/// or not (its `Content-Encoding`). OTLP's success answer: an empty partial success.
+async fn otlp_traces(AxState(e): S, Path((id, token)): Path<(String, String)>, headers: axum::http::HeaderMap, b: Bytes) -> crate::Result<Json<Value>> {
+    check_id(&id)?;
+    let Some(reader) = e.span_reader.get() else { return Err(Error::NotFound("no such trace address".into())) };
+    let h = |k: axum::http::HeaderName| headers.get(k).and_then(|v| v.to_str().ok()).unwrap_or("").to_ascii_lowercase();
+    let json = h(axum::http::header::CONTENT_TYPE).contains("json");
+    let gzip = h(axum::http::header::CONTENT_ENCODING).contains("gzip");
+    // The token first: an address that isn't a live preview's reads nothing.
+    e.keep_spans(&id, &token, Vec::new())?;
+    let spans = reader.spans(&b, json, gzip).map_err(|err| Error::BadRequest(err.to_string()))?;
+    e.keep_spans(&id, &token, spans)?;
+    Ok(Json(json!({ "partialSuccess": {} })))
+}
+
+#[derive(serde::Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct TracesQuery {
+    minutes: Option<i64>,
+}
+
+async fn traces(AxState(e): S, Path(id): Path<String>, Query(q): Query<TracesQuery>) -> crate::Result<Json<Value>> {
+    check_id(&id)?;
+    Ok(Json(e.traces(&id, q.minutes.unwrap_or(60)).await?))
+}
+
+async fn trace(AxState(e): S, Path((id, t)): Path<(String, String)>) -> crate::Result<Json<Value>> {
+    check_id(&id)?;
+    Ok(Json(e.trace(&id, &t).await?))
 }
 
 #[derive(serde::Deserialize)]
