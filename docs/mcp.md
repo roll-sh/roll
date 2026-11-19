@@ -167,7 +167,8 @@ How it works:
 - A tool whose answer anyone outside can write names those fields itself (`Tool::outside`):
   `apps_form_submissions` withholds every submission's `fields`, since anyone can submit a site's
   form, and so do `apps_events` and `apps_activity` (a `form.submitted` event names the fields the
-  visitor posted). Ids and times stay.
+  visitor posted); `search_analytics` withholds each `query`, what a cluster's users typed into a search
+  box. Ids, times and counts stay.
 - A tool's text block is then rebuilt from what's left, because a tool set may have written its
   own text block.
 - Ids and states stay, so the agent can still say what's there. The instructions tell it not to
