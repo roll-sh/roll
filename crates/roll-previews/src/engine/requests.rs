@@ -197,6 +197,9 @@ impl Engine {
             let rows = self.store.rows(Some(&project.id))?;
             let s = self.store.settings(&project.id)?;
             let bot = p.pull.as_ref().and_then(|pl| pl.author.as_deref()).is_some_and(|a| crate::glob::any(&s.skip_authors, a)) && says != Some(true);
+            // A bot's own branch push (its pusher a `skip_authors` glob matches), before any pull
+            // request: no preview to make and take back. A preview someone else's push made stays.
+            let bot_push = p.pull.is_none() && p.sha.is_some() && p.pusher.as_deref().is_some_and(|a| crate::glob::any(&s.skip_authors, a));
             // A fork's pull request's preview is its number's (never a writer's branch that happens
             // to be named `pull/7`); a branch's is the branch's that no fork's pull request holds.
             let fork_of = |r: &Row| self.store.git_pull(&r.id).ok().flatten().filter(|g| g.fork).map(|g| g.number);
@@ -216,6 +219,9 @@ impl Engine {
             // pull event takes back, and later pushes to the branch make none until it closes.
             if p.sha.is_none() || says == Some(true) {
                 self.store.set_git_skip(&project.id, &repo, &p.branch, false)?;
+            } else if bot_push && existing.is_none() {
+                self.store.set_git_skip(&project.id, &repo, &p.branch, true)?;
+                continue;
             } else if bot {
                 self.store.set_git_skip(&project.id, &repo, &p.branch, true)?;
                 if let Some(r) = &existing {
