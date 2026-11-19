@@ -27,6 +27,9 @@ pub enum Norm {
     Float,
     Numeric,
     Bpchar,
+    /// oidvector / int2vector (oidvectoreq, int2vectoreq): the elements, whatever the
+    /// lower bound (`'1 2'::oidvector` starts at 0, `ARRAY[1, 2]::oidvector` at 1).
+    Vector,
 }
 
 /// The numeric family a key type belongs to: 0 integers, 1 floats, 2 numeric.
@@ -46,6 +49,9 @@ fn family(ty: &DataType) -> Option<u8> {
 pub fn norm_for(own: &DataType, other: &DataType) -> Norm {
     if matches!(own, DataType::Bpchar(_)) {
         return Norm::Bpchar;
+    }
+    if [own, other].iter().any(|t| matches!(t, DataType::OidVector | DataType::Int2Vector)) {
+        return Norm::Vector;
     }
     match (family(own), family(other)) {
         (Some(a), Some(b)) => match a.max(b) {
@@ -86,6 +92,13 @@ pub fn norm(v: Value, n: Norm) -> Value {
             crate::types::numeric::Numeric::from_i64(v.as_i64().unwrap_or(0)),
         )),
         (Norm::Bpchar, Value::Text(s)) if s.ends_with(' ') => Value::text(s.trim_end_matches(' ')),
+        (Norm::Vector, Value::Array(a)) if a.dims.iter().any(|d| d.1 != 0) => {
+            let mut a = (*a).clone();
+            for d in &mut a.dims {
+                d.1 = 0;
+            }
+            Value::Array(Arc::new(a))
+        }
         (_, Value::Int2(x)) => Value::Int8(x as i64),
         (_, Value::Int4(x)) => Value::Int8(x as i64),
         (_, v) => v,

@@ -651,9 +651,11 @@ fn database_settings() {
     let s = server(AuthMethod::ScramSha256);
     runtime().block_on(async {
         let a = s.connect("postgres").await;
+        // (CREATE DATABASE in a Query of its own: a multi-statement Query's implicit block
+        // refuses it, as PostgreSQL's does.)
+        a.batch_execute("CREATE DATABASE setdb").await.unwrap();
         a.batch_execute(
-            "CREATE DATABASE setdb;
-             ALTER DATABASE setdb SET work_mem = '2MB';
+            "ALTER DATABASE setdb SET work_mem = '2MB';
              ALTER DATABASE setdb SET search_path = a, \"b c\";",
         )
         .await
@@ -908,10 +910,9 @@ fn databases_open_and_close() {
     let s = server(AuthMethod::ScramSha256);
     runtime().block_on(async {
         let admin = s.connect("postgres").await;
-        admin
-            .batch_execute("CREATE DATABASE app1; CREATE DATABASE app2")
-            .await
-            .unwrap();
+        for db in ["app1", "app2"] {
+            admin.batch_execute(&format!("CREATE DATABASE {db}")).await.unwrap();
+        }
         let err = admin
             .batch_execute("CREATE DATABASE app1")
             .await
@@ -3926,9 +3927,8 @@ fn startup_names_cut_to_namedatalen() {
     runtime().block_on(async {
         let c = s.connect("postgres").await;
         let (db, user) = ("d".repeat(66), "u".repeat(70));
-        c.batch_execute(&format!("CREATE DATABASE \"{db}\"; CREATE ROLE \"{user}\" LOGIN"))
-            .await
-            .unwrap();
+        c.batch_execute(&format!("CREATE DATABASE \"{db}\"")).await.unwrap();
+        c.batch_execute(&format!("CREATE ROLE \"{user}\" LOGIN")).await.unwrap();
         let mut cfg = s.config(&db, "");
         cfg.user(&user);
         let (c, conn) = cfg.connect(NoTls).await.unwrap();
@@ -4889,6 +4889,32 @@ fn protocol_cases() {
             query("select pg_notify('', 'x')"),
             query("prepare transaction 'x'"),
         ])),
+        // PreventInTransactionBlock in a multi-statement Query's implicit block (a migration
+        // tool's `DROP DATABASE x; CREATE DATABASE x` in one Query).
+        c("a263_block_only", |a| session(a, &[], &[
+            query("select 1; discard all"),
+            query("select 1; create database a263_pc"),
+            query("select 1; drop database if exists a263_pc"),
+        ])),
+        // A statement prepared before its parameter's type was dropped and made again (an
+        // enum a migration recreated; asyncpg's statement cache): Bind's getTypeInputInfo of
+        // the old oid fails, before the statement is planned again. (The oid masked.)
+        c("a263_stale_param_type", |a| {
+            let out = session(a, &[
+                "drop table if exists a263_st",
+                "drop type if exists a263_en",
+                "create type a263_en as enum ('a', 'b')",
+                "create table a263_st (e a263_en)",
+            ], &[
+                [parse("s263", "insert into a263_st values ($1::a263_en)", &[]), sync()].concat(),
+                query("drop table a263_st; drop type a263_en; create type a263_en as enum ('x'); create table a263_st (e a263_en)"),
+                [bind("", "s263", &[], &[Some(b"x".as_slice())], &[]), execute("", 0), sync()].concat(),
+            ]);
+            match out.split_once("for type ") {
+                Some((head, tail)) => format!("{head}for type N{}", tail.trim_start_matches(|c: char| c.is_ascii_digit())),
+                None => out,
+            }
+        }),
     ];
     let file = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/protocol_cases.out");
     if let Ok(addr) = std::env::var("PROTOCOL_RECORD") {

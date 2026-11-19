@@ -1228,7 +1228,7 @@ impl Session {
         use pb::DiscardMode as M;
         match M::try_from(s.target).unwrap_or(M::DiscardAll) {
             M::DiscardAll => {
-                if self.status != TxnStatus::Idle {
+                if self.in_block() {
                     return Err(Error::new(
                         code::ACTIVE_SQL_TRANSACTION,
                         "DISCARD ALL cannot run inside a transaction block",

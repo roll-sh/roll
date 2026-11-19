@@ -919,7 +919,6 @@ impl Session {
             self.state.notice_hold.set(held + 1);
         }
         let enc = self.copy_encoding(&format);
-        let fmt = self.state.settings.borrow().format_ctx();
         let run = self.with_ctx(params, |ctx| {
             let bq = Binder::new(ctx, Vec::new()).bind_statement(&stmt)?;
             bq.check_perms(ctx)?;
@@ -942,7 +941,9 @@ impl Session {
                     }
                 }
             }
-            let mut lines = CopyLines::new(&format, &bq.cols, fmt, enc)?;
+            // (With the catalog's names: regclass, regtype, ... columns are written as names,
+            // as their output functions write them.)
+            let mut lines = CopyLines::new(&format, &bq.cols, super::sink::format_ctx(ctx), enc)?;
             let mut dest = match (file, sink.as_deref_mut()) {
                 (Some(d), _) => d,
                 (None, Some(k)) => {

@@ -2808,9 +2808,10 @@ impl<'c> TypeRows<'c> {
         let Value::Oid(oid) = row[0] else {
             return false;
         };
-        // information_schema declares its text domains COLLATE "C".
-        if row[28] != o(0) && cat.domains.get(&oid).is_some_and(|d| d.schema == INF) {
-            row[28] = o(950);
+        // A domain's: its COLLATE, information_schema's text domains' "C", or its base type's
+        // (an extension's collatable type's too: citext).
+        if let Some(d) = cat.domains.get(&oid) {
+            row[28] = o(domain_collation(cat, d));
         }
         if row[28] != o(0) {
             self.colls.insert(oid, row[28].clone());
@@ -2833,18 +2834,13 @@ impl<'c> TypeRows<'c> {
         {
             row[28] = self.colls.get(&elem).cloned().unwrap_or(o(0));
         }
-        if let Some(d) = cat.domains.get(&oid) {
-            if let Some(def) = &d.default {
-                let shown = crate::sql::ruleutils::domain_default(ctx, &d.base, def)
-                    .unwrap_or_else(|| def.clone());
-                row[29] = nm(&shown);
-                row[30] = nm(shown);
-            }
-            if let Some(coll) = &d.collation
-                && type_collation(&d.base) != 0
-            {
-                row[28] = o(collation_oid(coll).unwrap_or(100));
-            }
+        if let Some(d) = cat.domains.get(&oid)
+            && let Some(def) = &d.default
+        {
+            let shown = crate::sql::ruleutils::domain_default(ctx, &d.base, def)
+                .unwrap_or_else(|| def.clone());
+            row[29] = nm(&shown);
+            row[30] = nm(shown);
         }
         // A made base type's own attributes (its array's alignment follows it).
         if let Some(d) = cat.base_types.get(&oid) {
