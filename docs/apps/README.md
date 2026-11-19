@@ -3078,7 +3078,8 @@ so the next step (a Dockerfile, the root directory) is plain.
   old) and tasks' environment files every ten minutes (`Runtime::sweep`); the bucket's `builds/`
   zips, and every object's noncurrent versions, wait for the stack's lifecycle rule.
 - Links: Postgres, Redis, buckets, streams, NoSQL and search are wired; queues answer "not wired
-  yet" (roll secrets has no queue provider to issue a user with).
+  yet". roll secrets' `queue` provider issues a vhost user of its own now (docs/secrets.md,
+  "Links"); `RollResources` doesn't call it yet (item 16).
 - Private networking is a Docker network per project and environment; it isn't reachable from
   the host's own roll databases on hosts whose firewall drops container-to-host traffic.
 

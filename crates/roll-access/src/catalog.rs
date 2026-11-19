@@ -1186,6 +1186,8 @@ static ROWS: &[Row] = &[
     row("DELETE", "/v1/secrets/projects/{project}/", "secrets", D, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     row("PATCH", "/v1/secrets/projects/{project}/environments/{env}", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")),
     row("PUT", "/v1/secrets/projects/{project}/environments/order", "secrets", ADMIN, one(&["project"], "project")),
+    // A decoy key (docs/secrets.md, "Decoys"): an admin's, and it answers the key, never its value.
+    row("POST", "/v1/secrets/projects/{project}/environments/{env}/decoys", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")),
     // Imports: write, reveal on each in-project source, admin for another project's folder.
     row("PUT", "/v1/secrets/projects/{project}/environments/{env}/imports", "secrets", Act::Body(secrets_imports_action), one(&["project"], "project"))
         .env(EnvFrom::Param("env"))
@@ -1323,6 +1325,8 @@ static ROWS: &[Row] = &[
     row("*", "/v1/secrets/projects/{project}/syncs", "secrets", ADMIN, one(&["project"], "project")).reveals(&["signing_secret"]),
     row("GET", "/v1/secrets/projects/{project}/syncs", "secrets", R, one(&["project"], "project")),
     row("*", "/v1/secrets/projects/{project}/syncs/", "secrets", ADMIN, one(&["project"], "project")),
+    // Checking the audit log's chain answers where it breaks, never what a row says.
+    row("GET", "/v1/secrets/projects/{project}/audit/verify", "secrets", R, one(&["project"], "project")),
     row("*", "/v1/secrets/projects/{project}/audit/sinks", "secrets", ADMIN, one(&["project"], "project")).reveals(&["secret"]),
     row("*", "/v1/secrets/projects/{project}/audit/sinks/", "secrets", ADMIN, one(&["project"], "project")),
     row("PUT", "/v1/secrets/projects/{project}/required", "secrets", ADMIN, one(&["project"], "project")),
@@ -1339,6 +1343,10 @@ static ROWS: &[Row] = &[
     row("PUT", "/v1/secrets/projects/{project}/environments/{env}/exports", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")),
     // Who and what can read a folder: the project's credentials, as the tokens list (a project admin's).
     row("GET", "/v1/secrets/projects/{project}/environments/{env}/reach", "secrets", ADMIN, one(&["project"], "project")),
+    // An incident's cut-off revokes the project's credentials that reach a folder, and its freeze
+    // locks readers out until an admin lifts it: both the project admin's, as reach is.
+    row("POST", "/v1/secrets/projects/{project}/environments/{env}/reach/cut-off", "secrets", ADMIN, one(&["project"], "project")),
+    row("DELETE", "/v1/secrets/projects/{project}/environments/{env}/reach/cut-off", "secrets", ADMIN, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/shares", "secrets", REVEAL, one(&["project"], "project")),
     // Purging a secret's history can't be undone.
     row("POST", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/purge", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),

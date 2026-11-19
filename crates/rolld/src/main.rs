@@ -29,6 +29,7 @@ mod queues;
 mod storage;
 mod redis;
 mod search;
+mod sealed;
 mod storage_events;
 mod streams;
 mod tasks;
@@ -296,9 +297,27 @@ struct Args {
     /// CloudWatch metrics (Embedded Metric Format).
     #[arg(long, env = "ROLL_LOG_FORMAT", value_enum, default_value_t = logs::LogFormat::Text)]
     log_format: logs::LogFormat,
+    /// Start sealed: nothing runs until a threshold of the deployment key's shares are posted to
+    /// `/v1/secrets/unseal` (`roll secrets unseal`). `<set id>:<threshold>`, as `roll secrets key
+    /// split` prints it; replaces ROLL_SECRET_KEY (docs/secrets.md, "Starting sealed").
+    #[arg(long, env = "ROLL_SECRET_KEY_SEALED")]
+    secret_key_sealed: Option<String>,
+    /// The deployment key a sealed start's shares gave: in memory only, never the environment.
+    #[arg(skip)]
+    unsealed_key: Option<std::sync::Arc<zeroize::Zeroizing<String>>>,
 }
 
 impl Args {
+    /// The deployment key: what a sealed start's shares gave this node, else `ROLL_SECRET_KEY`.
+    /// Every product that seals with it asks here (never the environment itself), so a sealed
+    /// start's key reaches them all in memory.
+    fn secret_key(&self) -> Option<zeroize::Zeroizing<String>> {
+        match &self.unsealed_key {
+            Some(k) => Some(zeroize::Zeroizing::new(k.as_str().to_string())),
+            None => std::env::var("ROLL_SECRET_KEY").ok().filter(|k| !k.trim().is_empty()).map(zeroize::Zeroizing::new),
+        }
+    }
+
     /// The products this node runs: one set, from `--products` and the older switches.
     /// The system database's connections per product pool on this node
     /// (`ROLL_SYSTEM_DB_CONNECTIONS`, split by [`cluster::DbBudget::split`]).
@@ -358,13 +377,25 @@ fn main() -> anyhow::Result<()> {
 }
 
 async fn run() -> anyhow::Result<()> {
-    let mut args = Args::parse();
+    let args = Args::parse();
     logs::init(args.log_format);
+    run_with(args).await
+}
+
+async fn run_with(mut args: Args) -> anyhow::Result<()> {
     edge::configure(&mut args);
     let mut auth = auth::Auth::new(&args)?;
     let on = args.products()?;
     info!(products = %on, "starting");
     let home = std::path::absolute(&args.home)?;
+    // A sealed start: nothing runs until the deployment key's shares unseal this node (sealed.rs).
+    let mut api_listener = None;
+    if let Some(s) = args.secret_key_sealed.as_deref().filter(|s| !s.trim().is_empty()) {
+        let sealed = roll_secrets::unseal::Sealed::parse(s).map_err(anyhow::Error::msg)?;
+        let Some((listener, key)) = sealed::unseal(&args, &home, sealed).await? else { return Ok(()) };
+        args.unsealed_key = Some(std::sync::Arc::new(key));
+        api_listener = Some(listener);
+    }
     let storage_opts = storage::StorageOpts::from(&args);
     let storage = match &args.s3_bucket {
         Some(bucket) => StorageConfig::S3 {
@@ -423,17 +454,19 @@ async fn run() -> anyhow::Result<()> {
 
     // roll storage on the node's cluster: every node serves it, the metadata's owner runs it, with
     // its event notifications into roll queues and streams, in process.
+    // Its replication targets' roll:// references resolve through roll secrets, set once it's open.
+    let storage_secrets = secrets::ForStorage::default();
     let mut storage_svc = match on.on(Product::Storage) {
         true => {
             let sink = std::sync::Arc::new(storage_events::RollSink { queues: queues.as_ref().map(|q| q.broker.clone()), streams: streams.as_ref().map(|s| s.broker.clone()) });
-            Some(storage::start(&storage_opts, &home, &storage, cluster.clone(), sink).await?)
+            Some(storage::start(&storage_opts, &home, &storage, cluster.clone(), sink, std::sync::Arc::new(storage_secrets.clone())).await?)
         }
         false => None,
     };
 
     // roll search: same object storage; the Elasticsearch REST listener and `/v1/search`.
     let search = match on.on(Product::Search) {
-        true => Some(search::Search::start(&home, &args.search, &storage, &args.public_host, &args.node, &cluster, args.code.cluster.system_database.as_deref(), args.db_budget()?.search, edge::Public::of(&args).as_ref()).await?),
+        true => Some(search::Search::start(&home, &args.search, &storage, &args.public_host, &args.node, &cluster, args.code.cluster.system_database.as_deref(), args.db_budget()?.search, edge::Public::of(&args).as_ref(), args.secret_key().as_deref().map(String::as_str)).await?),
         false => None,
     };
 
@@ -594,11 +627,14 @@ async fn run() -> anyhow::Result<()> {
     let _secrets_metrics = logs::SecretsMetrics::start(cluster.node_id().to_string(), secrets.clone());
     code_secrets.set(secrets.clone(), workspace.clone());
     apps_secrets.set(secrets.clone(), workspace.clone());
+    storage_secrets.set(secrets.clone());
     let _ = secrets_envs.0.set(secrets.clone());
     if let Some(c) = &code {
         secrets.set_code_refs(std::sync::Arc::new(secrets::CodeRefs(c.code.clone())));
     }
     router = router.merge(roll_secrets::router(secrets.clone()).layer(axum::middleware::map_request(secrets::guard_header))).merge(gateways.router());
+    // A node that isn't (or no longer is) sealed answers the unseal with nothing to give.
+    router = router.merge(roll_secrets::unseal::unsealed_router());
     // roll search's inference endpoints keyed by a project's secret (a sync rotations follow).
     if search.is_some() {
         router = router.merge(secrets::search_inference(secrets.clone(), workspace.clone(), products_api.clone()));
@@ -617,7 +653,7 @@ async fn run() -> anyhow::Result<()> {
         access.on_leaked("rlb_", move |secret, _why| e.revoke_leaked_hook(secret));
     }
     // The audit log streamed to SIEMs (it needs ROLL_SECRET_KEY to keep each sink's secret).
-    access::sinks(&access);
+    access::sinks(&access, args.secret_key().as_deref().map(String::as_str));
     // Trusted machine clients' issuers' keys: the guarded client roll secrets' identities use.
     let _ = access.oidc_fetch.set(secrets::oidc_fetch(&args, !auth.enforcing()));
     // Approvals can be posted to a Slack channel through roll code's chat ops.
@@ -733,9 +769,14 @@ async fn run() -> anyhow::Result<()> {
         serving.push(Box::pin(a.serve()));
     }
 
+    // A sealed start kept its listener: connections waited in its backlog while products started.
+    let bound = match api_listener {
+        Some(l) => l,
+        None => tokio::net::TcpListener::bind(args.api).await?,
+    };
     // No Nagle: a WebSocket's small frames (a gateway's `open`, roll code's events) would otherwise
     // wait for the peer's delayed ACK.
-    let listener = axum::serve::ListenerExt::tap_io(tokio::net::TcpListener::bind(args.api).await?, |tcp| {
+    let listener = axum::serve::ListenerExt::tap_io(bound, |tcp| {
         let _ = tcp.set_nodelay(true);
     });
     info!(addr = %args.api, products = %on, "control API listening");
@@ -927,7 +968,11 @@ async fn start_code(
         allow_private_webhooks: args.code_webhook_allow_private,
         allow_private_providers: args.code_provider_allow_private,
         // roll's reviewer: ROLL_REVIEW_PROVIDER, ROLL_REVIEW_ANTHROPIC_API_KEY, ROLL_SECRET_KEY, … (docs/code/reviews.md).
-        review: code_control::ai::AiConfig::from_env(),
+        review: {
+            let mut review = code_control::ai::AiConfig::from_env();
+            review.secret_key = args.secret_key().map(|k| k.to_string());
+            review
+        },
         // roll code agents' sandboxes: ROLL_SANDBOX_BACKEND, ROLL_AGENT37_API_KEY, … (docs/code/agents.md).
         sandboxes: code_control::agents::sandbox::SandboxConfig::from_env()?,
         max_streams_per_caller: args.code_max_streams_per_caller,
@@ -942,7 +987,7 @@ async fn start_code(
         d.connections = args.db_budget()?.code;
     }
     // Docker on this host, or a Fargate task per run (ROLL_CODE_RUNNER; isolation.rs).
-    let isolation = isolation::setup(home, &mut code_config.sandboxes).await?;
+    let isolation = isolation::setup(home, &mut code_config.sandboxes, args.secret_key().as_deref().map(String::as_str)).await?;
     let code = code_control::Code::open(code_config, objects)?;
     match (&code.config.database, code.cluster()) {
         (_, Some(c)) => info!(node = %c.node_id(), url = %c.config().advertise_url, backend = c.backend_name(), "roll code: cluster node (data on Postgres)"),
@@ -1062,5 +1107,53 @@ mod tests {
         let mut config = code_control::Config::local(PathBuf::from("/tmp/x"));
         both.code.apply(&mut config, "h", "0.0.0.0:1".parse().unwrap()).unwrap();
         assert_eq!(config.database.unwrap().url, "postgres://code/roll");
+    }
+
+    /// A sealed start (sealed.rs): 503 `sealed` on product routes until a threshold of the
+    /// deployment key's shares are given, a share of another split dropping those given; then
+    /// the products start with the key the shares gave.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_sealed_node_starts_its_products_once_its_shares_are_given() {
+        const KEY: &str = "fake-deployment-key-for-the-rolld-test-00";
+        let shares = roll_keyshares::split(KEY.as_bytes(), 3, 2).unwrap();
+        let others = roll_keyshares::split(b"another-fake-key-for-the-rolld-test-111", 3, 2).unwrap();
+        let set = roll_secrets::unseal::Sealed::set_hex(&roll_keyshares::Share::parse(1, &shares[0]).unwrap().set);
+        let home = tempfile::tempdir().unwrap();
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let home_arg = home.path().display().to_string();
+        let args = Args::parse_from(["rolld", "--home", &home_arg, "--api", &format!("127.0.0.1:{port}"), "--products", "tasks", "--secret-key-sealed", &format!("{set}:2")]);
+        // Its own runtime: rolld's startup isn't a Send future.
+        std::thread::spawn(move || tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap().block_on(run_with(args)));
+        let (http, api) = (reqwest::Client::new(), format!("http://127.0.0.1:{port}"));
+        let status = async |path: &str| http.get(format!("{api}{path}")).send().await.map_or(0, |r| r.status().as_u16());
+        let give = async |share: &str| -> serde_json::Value { http.post(format!("{api}/v1/secrets/unseal")).json(&serde_json::json!({ "share": share })).send().await.unwrap().json().await.unwrap() };
+        let mut up = false;
+        for _ in 0..400 {
+            up = status("/v1/secrets/unseal").await == 200;
+            if up {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(up, "the sealed API didn't come up");
+        assert_eq!(status("/v1/tasks/health").await, 503);
+        assert_eq!(give(&shares[0]).await["have"], 1);
+        assert_eq!(status("/v1/tasks/health").await, 503, "one share of two");
+        let reset = give(&others[0]).await;
+        assert!(reset["have"] == 0 && reset["error"].is_string(), "{reset}");
+        assert_eq!(give(&shares[1]).await["have"], 1);
+        assert_eq!(give(&shares[2]).await["sealed"], false);
+        let mut serving = 0;
+        for _ in 0..1200 {
+            serving = status("/v1/tasks/health").await;
+            if serving == 200 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert_eq!(serving, 200, "the products didn't start");
+        let health: serde_json::Value = http.get(format!("{api}/v1/secrets/health")).send().await.unwrap().json().await.unwrap();
+        assert!(health["ok"] == true && health["key"] == "shares", "{health}");
+        assert_eq!(give(&shares[0]).await, serde_json::json!({ "sealed": false }));
     }
 }
