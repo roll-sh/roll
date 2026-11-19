@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// What a target can ask for; a new one gets the two that need someone.
-pub const EVENTS: [&str; 25] = [
+pub const EVENTS: [&str; 26] = [
     "deploy.failed",
     "deploy.base_updated",
     "rollout.waiting",
@@ -44,6 +44,7 @@ pub const EVENTS: [&str; 25] = [
     "form.submitted",
     "check.down",
     "heartbeat.missed",
+    "deploy.vulnerable",
 ];
 const DEFAULT_EVENTS: [&str; 20] = ["check.down", "heartbeat.missed", "deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"];
 /// Whether a target with `events` hears an event: its own kind, or for a resolution, the alert's
@@ -403,6 +404,17 @@ impl Apps {
                 format!("{what}: a rollout waits for you at {}%", e.data["share"]),
                 format!("The deployment{rev} passed its step at {}% of requests and holds there until someone advances it, puts it all live or rolls it back (the service page, or `roll apps rollout`). It still rolls back by itself if it starts failing.", e.data["share"]),
             ),
+            "deploy.vulnerable" => {
+                let ids: Vec<&str> = e.data["ids"].as_array().map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+                let more = e.data["new"].as_u64().unwrap_or(0).saturating_sub(ids.len() as u64);
+                (
+                    format!("{what}: {} new known vulnerabilities", e.data["new"]),
+                    format!(
+                        "The image{rev} has {} critical and {} high known vulnerabilities; new since the last scan: {}{}. Deploying without the cache picks up a fixed base image; the deployment's vulnerabilities list what to upgrade.",
+                        e.data["critical"], e.data["high"], ids.join(", "), if more > 0 { format!(" and {more} more") } else { String::new() }
+                    ),
+                )
+            }
             "deploy.base_updated" => (format!("{what}: its base image {} was updated", e.data["image"].as_str().unwrap_or("")), "A deploy now would build on the new one and get its fixes (Deploy without the cache, or `run.rebuild_on_base` to do it by itself).".to_string()),
             "deploy.ready" => (format!("{what}: built and waiting to go live"), format!("The deployment{rev} is healthy beside the live one, on its own URL ({}), and waits for a person to put it live.", e.data["url"].as_str().unwrap_or("its deployment URL"))),
             "spend.alert" | "spend.limit" => {

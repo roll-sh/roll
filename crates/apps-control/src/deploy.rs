@@ -468,11 +468,12 @@ impl Apps {
 
     pub async fn deployments(self: &Arc<Self>, service: &str, env: &str, before: Option<i64>) -> Result<Vec<Deployment>> {
         let (sid, e) = (service.to_string(), env.to_string());
-        self.db(move |s| {
+        let deps = self.db(move |s| {
             s.environment(&sid, &e)?;
             s.deployments(&sid, &e, 100, before)
         })
-        .await
+        .await?;
+        self.with_scans(service, deps).await
     }
 
     /// Old deployments of the services this node owns, past what each environment keeps
@@ -525,6 +526,8 @@ impl Apps {
         }
         let id = dep.to_string();
         d.steps = self.db(move |s| s.steps(&id)).await?;
+        let id = dep.to_string();
+        d.vulnerabilities = self.db(move |s| s.scan(&id)).await?.map(|(sum, _)| sum);
         Ok(d)
     }
 
@@ -810,6 +813,15 @@ impl Apps {
             }
             let (id, img, r) = (d.id.clone(), image.clone(), run.clone());
             self.db(move |s| s.set_built(&id, &img, None, Some(&r))).await?;
+        }
+        // Its image's known vulnerabilities: before the rollout with `run.block_on` (never a
+        // rollback's: it's how out of a bad deploy), else beside it.
+        match run.block_on.filter(|_| d.trigger != Trigger::Rollback) {
+            Some(floor) => self.hold_on_vulnerabilities(&svc.id, &env.name, &d.id, &image, floor, &log.stream(Stream::System)).await?,
+            None => {
+                let (this, sid, en, did, img, log) = (self.clone(), svc.id.clone(), env.name.clone(), d.id.clone(), image.clone(), log.stream(Stream::System));
+                tokio::spawn(async move { this.scan_deployment(&sid, &en, &did, &img, &log).await });
+            }
         }
         dep.image = Some(image);
         dep.run = run;
@@ -2405,6 +2417,7 @@ impl Apps {
         self.schedules_pass(&services, now).await;
         self.checks_pass(&services, now).await;
         self.heartbeats_pass(&services, now).await;
+        self.rescan_pass(&services, now).await;
         for svc in services.into_iter().filter(|s| s.run.kind == RunType::Cron && self.owns(&s.id) && !self.capped(&s.id)) {
             let Some(schedule) = svc.run.schedule.as_deref().and_then(|s| crate::cron::Schedule::parse(s, svc.run.timezone.as_deref()).ok()) else { continue };
             let sid = svc.id.clone();

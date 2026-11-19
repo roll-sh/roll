@@ -1976,6 +1976,38 @@ environment's allow list, firewall and rate limit, and wakes nothing: an idle se
 Pings and misses are kept in the store's state, so a takeover keeps them and two nodes' passes
 say a miss once. A paused environment's heartbeats aren't judged. `heartbeats_ping_and_go_missed`.
 
+## Vulnerability scanning
+
+Each deployment's image is scanned for known vulnerabilities (Cloud Run's Artifact Analysis,
+Render's and Railway's image scans) by the builder, once it's built, pulled or loaded: beside the
+rollout, so a deploy is no slower, or before it with `run.block_on` (below). The live deployment
+of every environment is scanned again each day on its owner, as advisories come out for the same
+packages. The counts by severity are on the deployment (`vulnerabilities`), the findings at
+`…/deploys/{dep}/vulnerabilities` (the most severe first, then those with a fix; at most 2,000;
+`roll apps deploys --vulnerabilities DEP [--severity high]`), and both on the Deployments tab,
+beside the build log. Advisories at high or worse that the
+deployment's last scan, else the environment's deployment before, didn't have are
+`deploy.vulnerable` (not in the default events: every base image has some on its first scan).
+
+The scanner is Trivy, pinned by digest (`runtime/scan.rs`), on one node's Docker: the image is
+saved to a 0700 directory and read as an archive by a container with no network, as rolld's own
+user, read-only with every capability dropped (2 GiB, 2 CPUs, 256 processes, its report the one
+file it writes, read up to 64 MiB). Nothing in the image runs: its package databases and lockfiles
+are a parser's input. Its database is a volume (`roll-apps-trivy-db`) only the download writes,
+at most twice a day; when a download fails, the one from before goes on (tried again in ten
+minutes), and a scan with none fails (kept as its `error`). One scan at a time per node; a scan
+takes a few seconds (4 s for `node:22-slim`, 330 MB). Fargate's builder (CodeBuild) doesn't scan
+yet.
+
+`run.block_on: "critical" | "high" | "medium" | "low"` (Settings' "Known vulnerabilities",
+`roll apps set --block-on critical`) holds
+a deploy whose image has one that severe or worse: the scan runs before the rollout and the deploy
+fails with how many, the live deployment serving on; one that can't be scanned (a builder that
+doesn't scan, a scan that didn't finish) fails too, since a hold that can't look holds. A
+rollback is never held: it's the way out of a bad deploy. Changing `block_on` is a deploy in the
+permissions catalogue, as any run key that decides what production runs.
+`api.rs::images_are_scanned_and_block_on_holds_a_deploy`, `scan::tests`.
+
 ## Visitors
 
 Visitors and page views (Vercel's Web Analytics, Netlify's, Plausible's way: no script to add, no
@@ -3050,84 +3082,82 @@ the app's for autoscaling; invented event properties grew a read without bound; 
 dropped `_`, missed `"""…"""` and had no tree of its own without a plugin; a dev start.sh turned a
 static site into a container. Firewall rules on more than the path were built next, then PagerDuty and Opsgenie targets
 ("Notifications"), then external proxy rewrites and conditional rules ("Static sites"), then uptime
-checks ("Uptime checks"), then heartbeats ("Heartbeats").
+checks ("Uptime checks"), then heartbeats ("Heartbeats"), then image scans ("Vulnerability
+scanning").
 
 1. **Variables that belong in roll secrets** (roll secrets' review): a secret-looking variable
    pasted into the panel offers "Move to roll secrets" (into the project environment apps
    already injects), and a variable may be `roll://ENV/KEY`, resolved through roll secrets'
    `Secrets::resolve_for(ResourceRef::new(Kind::Service, id), …)` (#329, audited as the service,
    rotation seen through `digest_for`), so values reach its health, leak guard and audit chain.
-2. **Image vulnerability scanning** (Cloud Run's Artifact Analysis): a pinned Trivy run in the
-   builder after each build, counts on the deployment, `…/deploys/{dep}/vulnerabilities`,
-   `deploy.vulnerable`, an opt-in `run.block_on: "critical"`; `rebuild_on_base` rescans.
-3. **SLOs and error-budget burn alerts** (Cloud Monitoring's): `run.slo: {availability, p95_ms?,
+2. **SLOs and error-budget burn alerts** (Cloud Monitoring's): `run.slo: {availability, p95_ms?,
    window_days}` from the hourly and minute metrics, multi-window `alert.slo`, the budget left on
    Metrics.
-4. **Scraping the app's own Prometheus endpoint** (Fly's `[metrics]`): `run.metrics: {port,
+3. **Scraping the app's own Prometheus endpoint** (Fly's `[metrics]`): `run.metrics: {port,
    path}` scraped every 15 s on the owner into the app-metrics store; fly.toml's `[metrics]`
    imported instead of dropped.
-5. **Split testing between environments** (Netlify's): `split: {environment, percent}`, sticky
+4. **Split testing between environments** (Netlify's): `split: {environment, percent}`, sticky
    through the bucket cookie, Metrics by deployment.
-6. **Edge functions for static sites** (Netlify Edge Functions, Vercel Middleware):
+5. **Edge functions for static sites** (Netlify Edge Functions, Vercel Middleware):
    `netlify/edge-functions/` and `middleware.ts` in the site's `-fn` service on Deno, before its
    files on their `config.path`.
-7. *Waiting on roll secrets' #357 (its batch 4).* **A workload
+6. *Waiting on roll secrets' #357 (its batch 4).* **A workload
    identity token in each instance** (Vercel's OIDC federation, Fly's, Cloud Run's): roll
    secrets' #68 issuer mints `sub = roll-apps:<project>:<service>:<env>` (`SecretSource::issue`,
    at most an hour, rotated keys); apps' half is delivery: a refreshed token per instance read
    from its link endpoint, a per-request header for web services, and `aud` per environment.
-8. *Waiting on the user.* **Signed-in people, not just admins** (every competitor; roll search and
+7. *Waiting on the user.* **Signed-in people, not just admins** (every competitor; roll search and
    secrets do): `roll_auth::SignedIn` scoped through `Workspace::trusts`, others' services 404.
    Letting non-admins run code on a node's Docker is the user's call first.
-9. *Waiting on the fleet's first run.* **Cached answers across nodes and at the edge** (Vercel's, Netlify's): today the owner's
+8. *Waiting on the fleet's first run.* **Cached answers across nodes and at the edge** (Vercel's, Netlify's): today the owner's
    proxy alone keeps them; the storage CDN's purge outbox could carry the purges.
    Across nodes means a node that doesn't own the service answering from its own copy, which
    needs the owner's say that the environment has no gate (access, allow list, firewall, rate
    limit) on each answer, a generation per environment for purges, and hits metered and logged
    where the owner reads them: only worth it once the fleet serves traffic.
-10. **Egress on the fleet** (Fargate): a security group per closed environment's tasks with no
+9. **Egress on the fleet** (Fargate): a security group per closed environment's tasks with no
    outbound rule but the egress proxy's, and the proxy as a task or on the node; until then
    Fargate refuses `egress: roll` (409). *Waiting on the fleet's first run.*
-11. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
+10. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
    follow a stream group's lag now (a queue's project is what keeps another tenant's depth
    unread).
-12. **Region**: the region shown on the overview and each environment, defaulting to the project's
+11. **Region**: the region shown on the overview and each environment, defaulting to the project's
    databases', then a choice per environment once the fleet has a second region (Railway's,
    Fly's). *Waiting on the fleet.*
-13. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
+12. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
    Settings, without stopping services from sleeping (Railway's and Render's). A roll-hosted app
    linked to a search cluster with an IP allowlist (search #243) needs them on the list; until
    then such a cluster stays open (on one node, the link relay's loopback is what it sees). *Waiting on the
    user's first AWS run.*
-14. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
+13. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
    listener offering `h2` (ALPN `h2, http/1.1`; hyper's `http2::Builder` when `h2` is chosen,
    with the same graceful drain) and setting `Host` from `:authority` (HTTP/2 has no `Host`,
    and every product behind the edge routes on it), so Cloudflare's gRPC reaches h2c apps.
    Done here: `run.h2c` to the app, trailers through the proxy. Then TCP services.
-15. **roll secrets as the env store**: the wiring is done (deploys resolve the project's secrets,
+14. **roll secrets as the env store**: the wiring is done (deploys resolve the project's secrets,
    digests mark "needs deploy", roll secrets' reveal rules, linked and sensitive keys, dynamic
    credentials refused, new environments ensured); what's left is service variables kept in roll
    secrets at `/services/<name>` (one store for both), and links as per-environment secrets
    links.
-16. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
+15. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
    settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
    warm window or `min_instances` 1 by default there until a wake is fast), and
    allocation-based metering for Fargate.
-17. *Waiting on roll secrets' #274.* **Queues linkable from a service**: buckets, streams and NoSQL are (rolld's `RollResources::link`, through roll secrets' providers); #274 adds the `queue` provider (its own user, `AMQP_URL`, `permission` read, write or configure), then `RollResources` and the one-node relay for the AMQP port here.
-18. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
+16. *Waiting on roll secrets' #274.* **Queues linkable from a service**: buckets, streams and NoSQL are (rolld's `RollResources::link`, through roll secrets' providers); #274 adds the `queue` provider (its own user, `AMQP_URL`, `permission` read, write or configure), then `RollResources` and the one-node relay for the AMQP port here.
+17. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
    `_acme-challenge.<base>` CNAME into a zone roll writes (`roll_edge::acme`'s DNS solver at
    another name), then `DomainTls::wildcards` true there; the routing and verification are done.
-19. *Waiting on the edge's owner (roll cloud).* **Bring your own certificate** (Vercel's,
+18. *Waiting on the edge's owner (roll cloud).* **Bring your own certificate** (Vercel's,
    Heroku's SNI, Fly's import): `PUT …/domains/{host}/certificate {cert_pem, key_pem}`, sealed,
    served by SNI at the edge (and Cloudflare's custom certificates), expiry through
    `domain.expiring`.
-20. *Waiting on a static build (no musl target on ai-server, and adding one is the shared toolchain's).* **A waker that takes every caller while the app starts**: busybox `nc -l` takes one, so a burst
+19. *Waiting on a static build (no musl target on ai-server, and adding one is the shared toolchain's).* **A waker that takes every caller while the app starts**: busybox `nc -l` takes one, so a burst
    of private calls to a stopped service loses all but the first (refused). A waker of roll's own
    (roll-fetch's `wake` mode, a static binary mounted read-only) that accepts each, holds them,
    and hands them over once the app listens; the cheap accept count already tells rolld.
-21. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
+20. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
     origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
-22. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
+21. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
     restore (CRIU, which needs the host's Docker daemon with checkpoints on: the user's call), or
     Firecracker microVM hosts on the fleet.
-23. EFS volumes and Cloud Map private DNS on the fleet; TCP services on the fleet (the edge carrying TCP to a service's owner).
+22. EFS volumes and Cloud Map private DNS on the fleet; TCP services on the fleet (the edge carrying TCP to a service's owner).

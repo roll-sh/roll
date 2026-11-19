@@ -134,6 +134,7 @@ mod tests {
             rebuild_on_base: true,
             schedules: vec![crate::model::Scheduled { name: "a".into(), schedule: "@daily".into(), command: "x".into(), path: None, timezone: None, timeout_s: None }],
             sidecars: vec![crate::model::Sidecar { name: "a".into(), image: "x".into(), command: None, env: Default::default(), variables: vec![], cpu: 0.25, memory_mb: 128 }],
+            block_on: Some(crate::model::Severity::Critical),
         };
         let keys: std::collections::BTreeSet<String> = serde_json::to_value(&all).unwrap().as_object().unwrap().keys().filter(|k| *k != "volume").cloned().collect();
         let file: std::collections::BTreeSet<String> = apps_build::app::RUN_KEYS.iter().map(|k| k.to_string()).collect();

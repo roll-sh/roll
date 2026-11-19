@@ -2830,6 +2830,79 @@ async fn heartbeats_ping_and_go_missed() {
     assert_eq!(kinds, ["heartbeat.missed", "alert.resolved"], "missed once, then resolved: {ev}");
 }
 
+/// Images scanned for known vulnerabilities (Cloud Run's Artifact Analysis): beside the rollout,
+/// counts on the deployment and the findings most severe first; new ones at high or worse are
+/// `deploy.vulnerable`; `run.block_on` scans first and fails a deploy that has one, never a
+/// rollback.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn images_are_scanned_and_block_on_holds_a_deploy() {
+    use apps_control::model::{Severity, Vulnerability};
+    let w = world().await;
+    let v = |id: &str, severity: Severity, fixed: Option<&str>| Vulnerability { id: id.into(), severity, package: "openssl".into(), installed: "3.0.1".into(), fixed: fixed.map(String::from), title: None, target: "debian 12".into() };
+    *w.fake.scan_findings.lock() = Some(vec![v("CVE-1", Severity::Critical, Some("3.0.2")), v("CVE-2", Severity::High, None), v("CVE-3", Severity::Low, None)]);
+    let (svc, first) = image_service(&w, "web", json!({"port": 80, "min_instances": 1})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let env = format!("/v1/apps/services/{id}/environments/production");
+    let first = first["id"].as_str().unwrap().to_string();
+    // Beside the rollout: read back once it's kept.
+    let mut d = Value::Null;
+    for _ in 0..200 {
+        d = call(&w.api, "GET", &format!("{env}/deploys/{first}"), None).await.1;
+        if !d["vulnerabilities"].is_null() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let s = &d["vulnerabilities"];
+    assert_eq!((s["critical"].as_u64(), s["high"].as_u64(), s["low"].as_u64(), s["fixable"].as_u64()), (Some(1), Some(1), Some(1), Some(1)), "{d}");
+    assert_eq!(call(&w.api, "GET", &format!("{env}/deploys"), None).await.1[0]["vulnerabilities"]["critical"], 1, "the list has the counts too");
+    let (_, list) = call(&w.api, "GET", &format!("{env}/deploys/{first}/vulnerabilities?severity=high"), None).await;
+    let ids: Vec<&str> = list["vulnerabilities"].as_array().unwrap().iter().map(|v| v["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["CVE-1", "CVE-2"], "{list}");
+    assert_eq!(call(&w.api, "GET", &format!("{env}/deploys/{first}/vulnerabilities?severity=bad"), None).await.0, StatusCode::BAD_REQUEST);
+    // With block_on, a deploy whose image has one fails before it goes live.
+    assert_eq!(call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"block_on": "unknown"}}))).await.0, StatusCode::BAD_REQUEST);
+    let (st, r) = call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"block_on": "critical"}}))).await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    let (_, r) = call(&w.api, "POST", &format!("{env}/redeploy"), Some(json!({}))).await;
+    let held = settled(&w, &id, "production", r["id"].as_str().unwrap()).await;
+    assert_eq!(held["status"], "failed", "{held}");
+    assert!(held["error"].as_str().unwrap().contains("1 known vulnerability at critical or worse"), "{held}");
+    assert_eq!(call(&w.api, "GET", &env, None).await.1["active"]["id"], first.as_str(), "the live one keeps serving");
+    // A rollback is never held.
+    let (st, rb) = call(&w.api, "POST", &format!("{env}/deploys/{first}/rollback"), None).await;
+    assert!(st.is_success(), "{rb}");
+    assert_eq!(settled(&w, &id, "production", rb["id"].as_str().unwrap()).await["status"], "active");
+    // Fixed: it goes live, and nothing new at high or worse says so again.
+    *w.fake.scan_findings.lock() = Some(vec![v("CVE-2", Severity::High, None)]);
+    let (_, r) = call(&w.api, "POST", &format!("{env}/redeploy"), Some(json!({}))).await;
+    assert_eq!(settled(&w, &id, "production", r["id"].as_str().unwrap()).await["status"], "active");
+    let ev = call(&w.api, "GET", "/v1/apps/events?after=0", None).await.1;
+    let found: Vec<&Value> = ev["events"].as_array().unwrap().iter().filter(|e| e["kind"] == "deploy.vulnerable").collect();
+    assert_eq!(found.len(), 1, "{ev}");
+    assert_eq!((found[0]["deployment"].as_str(), found[0]["data"]["new"].as_u64()), (Some(first.as_str()), Some(2)), "{ev}");
+    // A day on, the live one is scanned again: an advisory out since is new.
+    let live = r["id"].as_str().unwrap().to_string();
+    for _ in 0..200 {
+        if !call(&w.api, "GET", &format!("{env}/deploys/{live}"), None).await.1["vulnerabilities"].is_null() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    *w.fake.scan_findings.lock() = Some(vec![v("CVE-2", Severity::High, None), v("CVE-9", Severity::Critical, Some("3.0.9"))]);
+    w.apps.cron_pass(code_sql::now_ms() + 25 * 3_600_000).await;
+    let mut again = Vec::new();
+    for _ in 0..200 {
+        let ev = call(&w.api, "GET", "/v1/apps/events?after=0", None).await.1;
+        again = ev["events"].as_array().unwrap().iter().filter(|e| e["kind"] == "deploy.vulnerable" && e["deployment"] == live.as_str()).map(|e| e["data"]["ids"].clone()).collect();
+        if !again.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(again, [json!(["CVE-9"])], "only what's new since its last scan");
+}
+
 /// PagerDuty and Opsgenie targets (Heroku's, Cloud Monitoring's): a failure opens an incident
 /// keyed by its service, environment and alert, a resolved alert or the next good deploy closes
 /// it; the key goes with each call and never comes back.

@@ -215,6 +215,12 @@ CREATE TABLE IF NOT EXISTS deploy_secrets (
     deployment TEXT PRIMARY KEY,
     digest TEXT NOT NULL
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS deploy_scans (
+    deployment TEXT PRIMARY KEY,
+    service TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    items TEXT NOT NULL
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS deploy_no_cache (
     deployment TEXT PRIMARY KEY
 ) WITHOUT ROWID;
@@ -729,6 +735,7 @@ fn deploy_row(r: &code_sql::Row<'_>) -> code_sql::Result<Deployment> {
         vars_hash: r.get(16)?,
         actor: r.get(17)?,
         pruned_at: r.get(18)?,
+        vulnerabilities: None,
         error_detail,
         fix,
         steps: Vec::new(),
@@ -933,7 +940,7 @@ impl Store {
             )?;
             c.execute("DELETE FROM deploy_steps WHERE deployment IN (SELECT id FROM deployments WHERE service = ?)", [id])?;
             c.execute("DELETE FROM state WHERE key LIKE ?", [format!("%:{id}/%")])?;
-            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "preview_hosts", "runs", "jobs", "metrics", "usage", "form_submissions"] {
+            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "preview_hosts", "runs", "jobs", "metrics", "usage", "form_submissions", "deploy_scans"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ?"), [id])?;
             }
             match c.execute("DELETE FROM services WHERE id = ?", [id])? {
@@ -1483,6 +1490,8 @@ impl Store {
                     continue;
                 }
                 c.execute("UPDATE deployments SET pruned_at = ? WHERE id = ?", params![now, id])?;
+                // History keeps its counts; its findings went with its image.
+                c.execute("UPDATE deploy_scans SET items = '[]' WHERE deployment = ?", [&id])?;
                 out.push(Pruned { id, image });
             }
             for p in &mut out {
@@ -1558,6 +1567,27 @@ impl Store {
 
     /// The project's secrets' digest ([`crate::integrations::SecretSource::digest`]) a deployment
     /// went live with.
+    /// A deployment's scan: its counts and its findings (most severe first, at most [`crate::model::MAX_VULNERABILITIES`]).
+    pub fn set_scan(&self, service: &str, deployment: &str, summary: &crate::model::ScanSummary, items: &[crate::model::Vulnerability]) -> Result<()> {
+        let (s, i) = (serde_json::to_string(summary).expect("a scan serializes"), serde_json::to_string(items).expect("findings serialize"));
+        self.db.execute(
+            "INSERT INTO deploy_scans (deployment, service, summary, items) VALUES (?, ?, ?, ?) ON CONFLICT (deployment) DO UPDATE SET summary = excluded.summary, items = excluded.items",
+            params![deployment, service, s, i],
+        )?;
+        Ok(())
+    }
+
+    pub fn scan(&self, deployment: &str) -> Result<Option<(crate::model::ScanSummary, Vec<crate::model::Vulnerability>)>> {
+        let row: Option<(String, String)> = self.db.query_row("SELECT summary, items FROM deploy_scans WHERE deployment = ?", [deployment], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+        row.map(|(s, i)| Ok((json(&s)?, json(&i)?))).transpose()
+    }
+
+    /// The scans' counts of a service's deployments, by deployment.
+    pub fn scan_summaries(&self, service: &str) -> Result<HashMap<String, crate::model::ScanSummary>> {
+        let rows: Vec<(String, String)> = self.db.query("SELECT deployment, summary FROM deploy_scans WHERE service = ?", [service], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.into_iter().map(|(d, s)| Ok((d, json(&s)?))).collect()
+    }
+
     pub fn set_secrets_digest(&self, deployment: &str, digest: &str) -> Result<()> {
         self.db.execute("INSERT INTO deploy_secrets (deployment, digest) VALUES (?, ?) ON CONFLICT (deployment) DO UPDATE SET digest = excluded.digest", params![deployment, digest])?;
         Ok(())
