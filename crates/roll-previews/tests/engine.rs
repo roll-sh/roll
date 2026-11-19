@@ -504,6 +504,16 @@ async fn a_previews_traces_are_kept_by_its_token_and_read_masked() {
     let one = e.engine.trace(&p.id, &"a".repeat(32)).await.unwrap();
     assert_eq!(one["spans"][1]["attrs"][0][1].as_str(), Some("***"), "{one}");
     assert!(!one.to_string().contains("sk_test_51Hx9"));
+    // A service on roll apps keeps its own (its pv- environment's, turned on by the deploy): on the
+    // same list, and one opens from it, masked the same way.
+    assert_eq!(e.apps.traces_asked.lock().get(&(p.id.clone(), web.clone())), Some(&true), "the deploy asks for the environment's traces");
+    let row = roll_previews::engine::traces::TraceRow { trace: "b".repeat(32), name: "POST /pay sk_test_51Hx9".into(), service: "api".into(), start_ms: now / 1_000_000 + 5, ms: 12, spans: 1, error: false };
+    *e.apps.app_traces.lock() = vec![(row, vec![span("0000000000000009", "", "POST /pay sk_test_51Hx9", false, vec![])])];
+    let list = e.engine.traces(&p.id, 60).await.unwrap();
+    assert_eq!(list["traces"].as_array().map(Vec::len), Some(2), "{list}");
+    assert_eq!(list["traces"][0]["name"].as_str(), Some("POST /pay ***"), "the newest first, masked");
+    let apps_one = e.engine.trace(&p.id, &"b".repeat(32)).await.unwrap();
+    assert_eq!(apps_one["spans"][0]["name"].as_str(), Some("POST /pay ***"));
 }
 
 /// A port of a preview's service on a laptop (`roll preview forward`): bytes go both ways, port 0

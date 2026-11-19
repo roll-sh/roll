@@ -104,8 +104,10 @@ async fn scoped(AxState(e): S, mut req: axum::extract::Request, next: axum::midd
             }
         }
     };
-    let path = req.uri().path().to_string();
-    let rest: Vec<&str> = path.trim_start_matches("/v1/previews").trim_start_matches('/').split('/').filter(|s| !s.is_empty()).collect();
+    // The path's segments as the handlers read them (percent-decoded): a client may encode an id
+    // (`pv%5Fabc`), and a check on the raw one would look up nothing.
+    let segs = segments(req.uri().path().trim_start_matches("/v1/previews"));
+    let rest: Vec<&str> = segs.iter().map(String::as_str).collect();
     let project = match rest.as_slice() {
         ["projects", project, ..] => Some(project.to_string()),
         [_, "screenshot.png"] => None,
@@ -124,9 +126,36 @@ async fn scoped(AxState(e): S, mut req: axum::extract::Request, next: axum::midd
     next.run(req).await
 }
 
+/// A path's non-empty segments, each percent-decoded as axum's `Path` decodes it (`+` is itself:
+/// it's a query's space, not a path's).
+fn segments(path: &str) -> Vec<String> {
+    path.split('/')
+        .filter(|s| !s.is_empty())
+        .map(|seg| {
+            let b = seg.as_bytes();
+            let mut out = Vec::with_capacity(b.len());
+            let mut i = 0;
+            while i < b.len() {
+                let hex = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
+                if b[i] == b'%'
+                    && let (Some(h), Some(l)) = (b.get(i + 1).copied().and_then(hex), b.get(i + 2).copied().and_then(hex))
+                {
+                    out.push(h * 16 + l);
+                    i += 3;
+                    continue;
+                }
+                out.push(b[i]);
+                i += 1;
+            }
+            String::from_utf8_lossy(&out).into_owned()
+        })
+        .collect()
+}
+
 /// Run on the preview's holder (`preview:<id>`), which runs its services, forwarding if need be.
 async fn on_leader(AxState(e): S, req: axum::extract::Request, next: axum::middleware::Next) -> Response {
-    let id = req.uri().path().split('/').nth(3).unwrap_or_default().to_string();
+    // Decoded as the handler's `Path` is, so the lease named is the preview the handler serves.
+    let id = segments(req.uri().path()).into_iter().nth(2).unwrap_or_default();
     match e.cluster.get().cloned() {
         Some(cluster) => {
             cluster
@@ -1047,4 +1076,15 @@ async fn usage(AxState(e): S, Path(project): Path<String>) -> crate::Result<Json
     })
     .await
     .map(Json)
+}
+
+#[cfg(test)]
+mod tests {
+    /// A route's id read by the middlewares is the one the handler's `Path` reads: a client may
+    /// percent-encode it (`pv%5Fabc`), and a `+` in a path is itself.
+    #[test]
+    fn path_segments_are_read_as_the_handlers_read_them() {
+        assert_eq!(super::segments("/v1/previews/pv%5Fabc/logs"), ["v1", "previews", "pv_abc", "logs"]);
+        assert_eq!(super::segments("/a+b/%2"), ["a+b", "%2"]);
+    }
 }

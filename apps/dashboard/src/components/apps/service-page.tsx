@@ -25,6 +25,7 @@ import { Deployments } from "./deployments";
 import { DomainsTab } from "./domains";
 import { JobsTab } from "./jobs";
 import { ShellTab } from "./shell";
+import { FormsPanel } from "./forms";
 import { anyPending, POLL_BUSY_MS, POLL_IDLE_MS, POLL_STREAMED_MS, useDeployMark, usePageVisible } from "./live";
 import { RuntimeLogs } from "./logs";
 import { MetricsTab } from "./metrics";
@@ -704,7 +705,10 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
         ) : tab === "usage" ? (
           <UsageTab service={service.id} env={envName} prices={overview?.prices ?? null} />
         ) : tab === "events" ? (
-          <EventsTab service={service.id} changed={`${data.deploys?.[0]?.id ?? ""}:${data.deploys?.[0]?.status ?? ""}:${env?.state ?? ""}`} />
+          <div className="space-y-6">
+            <FormsPanel service={service.id} env={envName} runner={runner} />
+            <EventsTab service={service.id} changed={`${data.deploys?.[0]?.id ?? ""}:${data.deploys?.[0]?.status ?? ""}:${env?.state ?? ""}`} />
+          </div>
         ) : (
           <SettingsTab
             service={service}

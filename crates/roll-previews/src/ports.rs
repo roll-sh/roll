@@ -460,6 +460,9 @@ pub struct Target {
     /// cached (a static site reads its content at build time). roll apps builds with `no_cache`;
     /// the runtime builds at each start anyway.
     pub rebuild: Option<i64>,
+    /// The project's `traces`: a backend that keeps traces itself (roll apps) turns its own on
+    /// for the preview's environment.
+    pub traces: bool,
 }
 
 /// A deploy the backend accepted that hasn't finished (a build, a rollout): the converge leaves
@@ -690,6 +693,15 @@ pub trait Apps: Send + Sync {
     /// `pv-` environment.
     async fn read_files(&self, _preview: &str, _service: &str, _path: &str) -> anyhow::Result<Option<FileStream>> {
         Ok(None)
+    }
+    /// The service's recent traces where the backend keeps them itself (roll apps' `pv-`
+    /// environment's), newest first; none elsewhere (roll's runtime: the engine keeps those).
+    async fn traces(&self, _preview: &str, _service: &str, _minutes: i64) -> Vec<crate::engine::traces::TraceRow> {
+        Vec::new()
+    }
+    /// One of those traces' spans, oldest first; `None` where it isn't this backend's.
+    async fn trace(&self, _preview: &str, _service: &str, _trace: &str) -> Option<Vec<crate::engine::traces::Span>> {
+        None
     }
     /// One TCP connection to `port` inside the running service (started if it sleeps), from its
     /// own network namespace, so any port it listens on is reachable, published or not. `None`
