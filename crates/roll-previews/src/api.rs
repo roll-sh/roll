@@ -61,6 +61,7 @@ pub fn router(engine: Arc<Engine>) -> Router {
                 .route("/v1/previews/{id}/otlp/{token}/v1/traces", post(otlp_traces).layer(axum::extract::DefaultBodyLimit::max(8 << 20)))
                 .route("/v1/previews/{id}/traces", get(traces))
                 .route("/v1/previews/{id}/traces/{trace}", get(trace))
+                .route("/v1/previews/{id}/routes", get(routes))
                 .route("/v1/previews/{id}/files", get(read_files).put(write_files).layer(axum::extract::DefaultBodyLimit::max(crate::engine::shell::FILES_MAX + (1 << 20))))
                 .route_layer(axum::middleware::from_fn_with_state(engine.clone(), on_leader))
                 .with_state(engine.clone()),
@@ -726,15 +727,17 @@ async fn shell_resize(AxState(e): S, Path((id, sh)): Path<(String, String)>, b: 
 
 /// OTLP/HTTP `…/v1/traces` from a preview's service: protobuf or JSON (its `Content-Type`), gzip
 /// or not (its `Content-Encoding`). OTLP's success answer: an empty partial success.
-async fn otlp_traces(AxState(e): S, Path((id, token)): Path<(String, String)>, headers: axum::http::HeaderMap, b: Bytes) -> crate::Result<Json<Value>> {
+async fn otlp_traces(AxState(e): S, Path((id, token)): Path<(String, String)>, headers: axum::http::HeaderMap, body: axum::body::Body) -> crate::Result<Json<Value>> {
     check_id(&id)?;
-    let Some(reader) = e.span_reader.get() else { return Err(Error::NotFound("no such trace address".into())) };
+    let Some(reader) = e.span_reader.get().cloned() else { return Err(Error::NotFound("no such trace address".into())) };
     let h = |k: axum::http::HeaderName| headers.get(k).and_then(|v| v.to_str().ok()).unwrap_or("").to_ascii_lowercase();
     let json = h(axum::http::header::CONTENT_TYPE).contains("json");
     let gzip = h(axum::http::header::CONTENT_ENCODING).contains("gzip");
-    // The token first: an address that isn't a live preview's reads nothing.
-    e.keep_spans(&id, &token, Vec::new())?;
-    let spans = reader.spans(&b, json, gzip).map_err(|err| Error::BadRequest(err.to_string()))?;
+    // The token first: an address that isn't a live preview's reads none of its body.
+    e.check_trace_token(&id, &token)?;
+    let b = axum::body::to_bytes(body, 8 << 20).await.map_err(|_| Error::BadRequest("traces are at most 8 MiB a request".into()))?;
+    // Parsed off the async workers: a large request is CPU, not waiting.
+    let spans = tokio::task::spawn_blocking(move || reader.spans(&b, json, gzip)).await.map_err(|err| Error::Internal(err.to_string()))?.map_err(|err| Error::BadRequest(err.to_string()))?;
     e.keep_spans(&id, &token, spans)?;
     Ok(Json(json!({ "partialSuccess": {} })))
 }
@@ -748,6 +751,11 @@ struct TracesQuery {
 async fn traces(AxState(e): S, Path(id): Path<String>, Query(q): Query<TracesQuery>) -> crate::Result<Json<Value>> {
     check_id(&id)?;
     Ok(Json(e.traces(&id, q.minutes.unwrap_or(60)).await?))
+}
+
+async fn routes(AxState(e): S, Path(id): Path<String>, Query(q): Query<TracesQuery>) -> crate::Result<Json<Value>> {
+    check_id(&id)?;
+    Ok(Json(e.routes(&id, q.minutes.unwrap_or(60)).await?))
 }
 
 async fn trace(AxState(e): S, Path((id, t)): Path<(String, String)>) -> crate::Result<Json<Value>> {
@@ -876,8 +884,10 @@ async fn logs(AxState(e): S, Path(id): Path<String>, Query(q): Query<LogsQuery>)
     // A stderr line is `event: stderr`; a stdout one the default event, as before.
     let rest = futures::stream::unfold(rx, |mut rx| async move {
         rx.recv().await.map(|(stderr, l)| {
-            let ev = Event::default().data(l.replace(['\r', '\n'], ""));
-            (Ok(if stderr { ev.event("stderr") } else { ev }), rx)
+            // `event:` before `data:` on the wire (axum writes them in the order they're set): a
+            // client that acts on each `data:` line as it reads it (the CLI) knows the stream.
+            let ev = if stderr { Event::default().event("stderr") } else { Event::default() };
+            (Ok(ev.data(l.replace(['\r', '\n'], ""))), rx)
         })
     });
     let mut r = Sse::new(futures::StreamExt::chain(first, rest)).keep_alive(KeepAlive::default()).into_response();
@@ -930,7 +940,7 @@ async fn mask_suggestions(AxState(e): S, Path(project): Path<String>, grant: Opt
     e.mask_suggestions(&project, may_read).await.map(Json)
 }
 
-async fn put_settings(AxState(e): S, Path(project): Path<String>, b: Bytes) -> crate::Result<Json<crate::Settings>> {
+async fn put_settings(AxState(e): S, Path(project): Path<String>, ext: axum::http::Extensions, b: Bytes) -> crate::Result<Json<crate::Settings>> {
     let patch: Value = body(&b)?;
     let (p, check) = (project.clone(), patch.clone());
     let (old, new) = blocking(e.clone(), move |e| {
@@ -941,9 +951,44 @@ async fn put_settings(AxState(e): S, Path(project): Path<String>, b: Bytes) -> c
     })
     .await?;
     e.check_masks(&old, &new).await?;
+    // A reference to an environment other than the one the previews follow routes its values into
+    // code whoever pushes a branch controls: a new or changed one needs its writer's reveal there.
+    let who = crate::ports::Asker::of(&ext);
+    let may_reveal = |env: &str, folder: &str| e.reveal.get().is_some_and(|r| r.may_reveal(&who, &project, env, folder));
+    // So does a new base: every preview's code then reads that environment.
+    let base = &new.secrets.base;
+    if *base != old.secrets.base && !may_reveal(base, "/") {
+        return Err(Error::Forbidden(format!("secrets.base: following {base} needs reveal on {base} in roll secrets")));
+    }
+    // A reference to the base needed no reveal when the base was the old one: moved, it's checked
+    // as new.
+    let place = |reference: &str| match e.reveal.get() {
+        Some(r) => r.place(reference).map_err(Error::BadRequest),
+        None => Err(Error::BadRequest("roll:// references need roll secrets on this node".into())),
+    };
+    let mut before = crate::settings::references(&old);
+    if *base != old.secrets.base {
+        before.retain(|(_, _, reference)| place(reference).is_ok_and(|(env, _)| env != old.secrets.base));
+    }
+    for (scope, name, reference) in crate::settings::references(&new).into_iter().filter(|r| !before.contains(r)) {
+        let (env, folder) = place(&reference).map_err(|err| Error::BadRequest(format!("{scope}: {name}: {err}")))?;
+        if env == *base {
+            continue;
+        }
+        if !may_reveal(&env, &folder) {
+            return Err(Error::Forbidden(format!("{scope}: {name}: naming {env}'s keys needs reveal on {env} in roll secrets")));
+        }
+    }
+    let by = who.principal();
     let s = blocking(e.clone(), move |e| {
-        let s = e.store.settings(&project)?.patched(&patch)?;
+        // What's written is what was checked: rules another request changed since are its own.
+        let current = e.store.settings(&project)?;
+        if current != old {
+            return Err(Error::Conflict("the project's preview rules changed while these were checked: try again".into()));
+        }
+        let s = current.patched(&patch)?;
         let s = e.store.put_settings(&project, &s)?;
+        e.store.set_env_refs(&project, &crate::settings::references(&s), &by)?;
         // Every preview of the project converges on the new rules (modes, masks, variables,
         // access): nothing waits for its next push.
         reconverge(e, &project)?;

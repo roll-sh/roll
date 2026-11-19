@@ -243,6 +243,9 @@ pub enum Preview {
         minutes: u32,
         #[arg(long)]
         trace: Option<String>,
+        /// Each route's time (p50, p95) against main's preview's same route, the slower ones first.
+        #[arg(long, conflicts_with = "trace")]
+        routes: bool,
     },
     /// A project's deploy hooks (a secret URL a headless CMS calls on publish to build the
     /// previews of some branches again): lists them; `--add NAME` makes one (its URL printed
@@ -548,7 +551,37 @@ impl Working {
             env.push((format!("GIT_CONFIG_VALUE_{i}"), (*v).into()));
         }
         let env: Vec<(&str, std::ffi::OsString)> = env.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
-        git(dir, &["push", "--quiet", &self.clone_url, refspec], &env).map(|_| ()).map_err(|e| anyhow::anyhow!("pushing {} to {}: {e:#}", self.branch, self.clone_url))
+        // A push to a URL updates the remote-tracking ref of any configured remote with that URL
+        // (newer git does; older didn't). Those refs are the user's: what the push made goes, what it
+        // moved goes back.
+        let tracking = |d: &std::path::Path| -> std::collections::HashMap<String, String> {
+            git(d, &["for-each-ref", "--format=%(refname) %(objectname)", "refs/remotes"], &[])
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|l| l.split_once(' '))
+                .filter(|(r, _)| r.rsplit_once(&format!("/{}", self.branch)).is_some_and(|(_, rest)| rest.is_empty()))
+                .map(|(r, o)| (r.to_string(), o.to_string()))
+                .collect()
+        };
+        let before = tracking(dir);
+        let pushed = git(dir, &["push", "--quiet", &self.clone_url, refspec], &env).map(|_| ()).map_err(|e| anyhow::anyhow!("pushing {} to {}: {e:#}", self.branch, self.clone_url));
+        let after = tracking(dir);
+        // One the push removed (a delete's) is put back too.
+        for (r, was) in before.iter().filter(|(r, _)| !after.contains_key(*r)) {
+            let _ = git(dir, &["update-ref", r, was], &[]);
+        }
+        for (r, now) in after {
+            match before.get(&r) {
+                None => {
+                    let _ = git(dir, &["update-ref", "-d", &r, &now], &[]);
+                }
+                Some(was) if *was != now => {
+                    let _ = git(dir, &["update-ref", &r, was, &now], &[]);
+                }
+                Some(_) => {}
+            }
+        }
+        pushed
     }
 }
 
@@ -1215,14 +1248,37 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
                 }
                 for g in groups {
                     println!("{:>5}x  {:>8}  {:<12} {}", g["count"], ago(g["last_seen"].as_i64().unwrap_or(0) / 1000), s(&g["service"]), s(&g["title"]));
+                    // Its request's trace: `roll preview traces --trace <id>` opens it.
+                    if let Some(t) = g["trace"].as_str() {
+                        println!("{:>17}trace {t}", "");
+                    }
                 }
                 return Ok(());
             }
             v
         }
 
-        Preview::Traces { preview, minutes, trace } => {
-            if let Some(t) = trace {
+        Preview::Traces { preview, minutes, trace, routes } => {
+            if routes {
+                let v = api.get(&format!("/v1/previews/{preview}/routes?minutes={minutes}")).await?;
+                if !as_json {
+                    let list = v["routes"].as_array().cloned().unwrap_or_default();
+                    if list.is_empty() {
+                        println!("no traces in the last {} minutes", v["minutes"].as_u64().unwrap_or(minutes as u64));
+                    }
+                    for r in list {
+                        let main = r["main_p50_ms"].as_u64().map_or_else(|| "main —".to_string(), |m| format!("main {m} ms"));
+                        let mark = if r["slower"].as_bool() == Some(true) { "slower" } else { "" };
+                        println!("{:>5}x  p50 {:>6} ms  p95 {:>6} ms  {:<14} {:<6} {}", r["count"], r["p50_ms"], r["p95_ms"], main, mark, s(&r["name"]));
+                        // An N+1: the statement a trace of it runs most.
+                        if let Some(q) = r["repeated"]["statement"].as_str() {
+                            println!("{:>8}N+1: {}x {q}", "", r["repeated"]["count"]);
+                        }
+                    }
+                    return Ok(());
+                }
+                v
+            } else if let Some(t) = trace {
                 let v = api.get(&format!("/v1/previews/{preview}/traces/{t}")).await?;
                 if !as_json {
                     let spans = v["spans"].as_array().cloned().unwrap_or_default();

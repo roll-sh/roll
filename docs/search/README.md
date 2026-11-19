@@ -591,7 +591,7 @@ nyc_taxis with Elasticsearch's merges flowing (#340).
    clusters panel, OpenSearch 3.9's `cluster.remote.*` answers. Left: ES|QL
    `FROM <alias>:<index>`; linking OpenSearch-flavor clusters (no `cross_cluster` keys there:
    it needs a credential model and a review of its own).
-4. **The Rally losses left by the full rerun** (Round 10, vectors, #268: Elasticsearch 9.1+ runs no merge while less than ~93.5 GB of disk is free, and this host was 91-98% full, so Round 9's Elasticsearch races were held on vectors and noaa (4 of 6); the harness now sets `indices.merge.disk.check_interval=0`. With merges flowing, the force-merged vector losses are gone and dense_vector `100-1000_multiple_segments` (2.30x) is the one loss with ranges apart. Round 11, noaa and nyc_taxis rerun with merges flowing at `769dd6744` (#340): Round 9's noaa claims held (every range-field query ahead in median, all ties; `conjunction_big_range_big_term` 7.4 against 12.2 ms, faster in 6 of 6 rounds; indexing 0.75, ahead in 6 of 6), and nyc_taxis wasn't held at all (its 0-merge races are Elasticsearch's merge policy). What changed: nyc_taxis `distance_amount_agg` leads by less (46 against 78 ms, 0.59; Round 9's 118 was load), its `range` now leads (0.88), and Elasticsearch now indexes nyc_taxis faster in median (1.03 docs/s, bulk p50 1.04, ties)) (docs/benchmarks/search.md: Round 8, every Rally
+4. **The Rally losses left by the full rerun** (Round 10, vectors, #268: Elasticsearch 9.1+ runs no merge while less than ~93.5 GB of disk is free, and this host was 91-98% full, so Round 9's Elasticsearch races were held on vectors and noaa (4 of 6); the harness now sets `indices.merge.disk.check_interval=0`. With merges flowing, the force-merged vector losses are gone and dense_vector `100-1000_multiple_segments` (2.30x) was the one loss with ranges apart; Round 12 makes it a tie (0.97, 6.13 against 6.35 ms; 0.83 at equal foreign load): each segment now searches a beam sized to its share of the shard, as Lucene 10.5 does, −33% instructions per query, recall unchanged. Round 11, noaa and nyc_taxis rerun with merges flowing at `769dd6744` (#340): Round 9's noaa claims held (every range-field query ahead in median, all ties; `conjunction_big_range_big_term` 7.4 against 12.2 ms, faster in 6 of 6 rounds; indexing 0.75, ahead in 6 of 6), and nyc_taxis wasn't held at all (its 0-merge races are Elasticsearch's merge policy). What changed: nyc_taxis `distance_amount_agg` leads by less (46 against 78 ms, 0.59; Round 9's 118 was load), its `range` now leads (0.88), and Elasticsearch now indexes nyc_taxis faster in median (1.03 docs/s, bulk p50 1.04, ties)) (docs/benchmarks/search.md: Round 8, every Rally
    track against Elasticsearch 9.5.5 and OpenSearch 3.9 at `83fac5982`; Round 9, the four tracks
    #29 fixed rerun at `c2b47b251`, three alternating rounds each, noaa six; Round 11, noaa and
    nyc_taxis again at `769dd6744`). Roll leads most tasks
@@ -706,7 +706,16 @@ nyc_taxis with Elasticsearch's merges flowing (#340).
    default `rescore_vector.oversample` isn't applied to queries (no change to hits while every
    candidate is rescored); float construction on CPUs without AVX-512 downclocking.
    Decided 2026-11-17: concurrent knn segments stay on (lower latency for 3-25% more CPU on
-   unmerged indices); the vector rerun under Rally (in progress) decides what to cut next.
+   unmerged indices). Round 12 (docs/benchmarks/search.md) sizes each unmerged segment's beam to
+   its share of the shard, as Lucene 10.5's optimistic collection does (a margin of 24 standard
+   deviations, not Lucene's 16, which lost a few hits per 10,000), and searches a segment again
+   with the full beam when its whole beam made the shard's best `num_candidates`: dense_vector
+   `100-1000` on 4 segments per shard 43.7M → 29.4M instructions and 15.1 → 11.1 ms CPU per
+   query, recall unchanged on Rally's queries and the 1M corpus, Rally's last vector loss now a
+   tie. Only unfiltered searches over float and int8 fields narrow: filtered graph searches and
+   one-bit estimates lost recall with narrow beams. Left: a filtered search's beam (a narrow
+   one strands the filtered graph search), and the 6% of `100-1000` that zstd spends reading the
+   hits' `_id`.
 8. **The dashboard against Elastic Cloud and OpenSearch Dashboards** (landed: Snapshot and Restore
    in #325, Ingest Pipelines in #339, as Kibana's Stack Management has them; left: OpenSearch's
    snapshot policies, `fs` repositories' `path.repo`). Landed: the

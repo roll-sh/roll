@@ -77,6 +77,8 @@ export function blockerCopy(b: Blocker): BlockerCopy {
       return { title: "Visual change to accept", detail: b.message, action: "visual" };
     case "secret_leak":
       return { title: "Adds a secret's value", detail: b.message, action: null };
+    case "secret_unstored":
+      return { title: "Adds a credential roll secrets doesn't hold", detail: b.message, action: null };
     default:
       return { title: b.message, detail: "", action: null };
   }

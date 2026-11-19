@@ -147,9 +147,8 @@ impl roll_previews::ports::Apps for RollApps {
         let mut body = json!({ "branch": null, "ephemeral": true, "access": access, "egress": egress, "report": false });
         // The project's traces: roll apps keeps the environment's itself (its own OpenTelemetry
         // variables), and the preview's sheet reads them from it.
-        if t.traces {
-            body["traces"] = json!(true);
-        }
+        // Off is said too: roll apps keeps an environment's `traces` as it was when a field is left out.
+        body["traces"] = json!(t.traces);
         if self.feedback {
             body["feedback"] = json!(t.feedback);
         }
