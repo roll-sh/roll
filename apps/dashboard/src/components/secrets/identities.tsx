@@ -1,16 +1,12 @@
 import { Check, Copy, Fingerprint, Plus } from "lucide-react";
 import { useState } from "react";
+import { useInstallLine } from "@/lib/install-line";
 import { ROLL_API } from "@/lib/roll-api";
+import { AZURE, AZURE_AUDIENCE, ciSnippets, GITHUB, GITLAB, type CiSnippet } from "@/lib/secrets-ci";
 import { ACTIONS, type Action, type Identity, type NewIdentity } from "@/lib/secrets-api";
 import { useSecrets } from "./secrets-page";
 import { ago, button, card, Chip, dangerButton, ErrorNote, errorText, field, ghost, label, primary, Section, useLoad } from "./ui";
 
-const GITHUB = "https://token.actions.githubusercontent.com";
-const GITLAB = "https://gitlab.com";
-/** Azure Pipelines' issuer, one per organization (its id: `$(System.CollectionId)`). */
-const AZURE = "https://vstoken.dev.azure.com/";
-/** The audience of every Azure Pipelines token: Azure's own, not this server's. */
-const AZURE_AUDIENCE = "api://AzureADTokenExchange";
 type Provider = "github" | "gitlab" | "azure" | "other";
 
 /** What an identity takes, in a few words: `acme/web · refs/heads/main`. */
@@ -20,13 +16,27 @@ function identitySummary(i: Pick<Identity, "issuer" | "subject" | "claims">): st
   return [repo ?? i.subject, ...claims].join(" · ");
 }
 
-/** The workflow lines a GitHub Actions job (or an Azure pipeline) needs to log in as `i`. */
-function workflow(i: Identity, env: string): string {
-  if (i.issuer.startsWith(AZURE)) {
-    // System.AccessToken reaches a script only when mapped: roll asks Azure for the pipeline's token with it.
-    return [`variables: { ROLL_API_URL: ${ROLL_API}, ROLL_IDENTITY: ${i.id} }`, "steps:", `  - script: roll run --env ${env} -- ./deploy.sh`, "    env: { SYSTEM_ACCESSTOKEN: $(System.AccessToken) }"].join("\n");
-  }
-  return ["permissions: { id-token: write, contents: read }", `env: { ROLL_API_URL: ${ROLL_API}, ROLL_IDENTITY: ${i.id} }`, "steps:", `  - run: roll run --env ${env} -- ./deploy.sh`].join("\n");
+/** One CI snippet with its copy button. */
+function Snippet({ snippet }: { snippet: CiSnippet }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <div className="mt-2">
+      <span className="mb-1 block text-[11px] text-muted">{snippet.title}</span>
+      <div className="flex items-start gap-2">
+        <pre className="min-w-0 flex-1 overflow-x-auto rounded-md border border-line-2 bg-panel-2 px-2 py-1.5 font-mono text-[11.5px] leading-relaxed select-all">{snippet.text}</pre>
+        <button
+          className={button}
+          onClick={() => {
+            void navigator.clipboard?.writeText(snippet.text);
+            setCopied(true);
+            setTimeout(() => setCopied(false), 1200);
+          }}
+        >
+          {copied ? <Check className="size-3.5 text-ok" /> : <Copy className="size-3.5" />} Copy
+        </button>
+      </div>
+    </div>
+  );
 }
 
 /**
@@ -39,7 +49,8 @@ export function Identities() {
   const [creating, setCreating] = useState(false);
   const [made, setMade] = useState<Identity | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
+  const install = useInstallLine();
+  const snippets = made ? ciSnippets(made, { api: ROLL_API, env: made.environments?.[0] ?? "production", install }) : [];
   const rows = identities.data ?? [];
 
   return (
@@ -55,23 +66,11 @@ export function Identities() {
       {made && (
         <div className="fade-in mb-3 rounded-xl border border-accent/40 bg-panel p-3 shadow-card inset-shadow-highlight" role="status">
           <p className="text-[12.5px]">
-            <b className="font-medium">{made.name}</b> <span className="text-muted">is ready.{made.issuer === GITHUB ? " In the workflow:" : made.issuer.startsWith(AZURE) ? " In the pipeline:" : ` Set ROLL_IDENTITY=${made.id} and ROLL_OIDC_TOKEN (or ROLL_OIDC_TOKEN_FILE) in the workload.`}</span>
+            <b className="font-medium">{made.name}</b> <span className="text-muted">is ready.{made.issuer === GITHUB ? " In the workflow:" : made.issuer === GITLAB ? " In the job:" : made.issuer.startsWith(AZURE) ? " In the pipeline:" : ` Set ROLL_IDENTITY=${made.id} and ROLL_OIDC_TOKEN (or ROLL_OIDC_TOKEN_FILE) in the workload.`}</span>
           </p>
-          {(made.issuer === GITHUB || made.issuer.startsWith(AZURE)) && (
-            <div className="mt-2 flex items-start gap-2">
-              <pre className="min-w-0 flex-1 overflow-x-auto rounded-md border border-line-2 bg-panel-2 px-2 py-1.5 font-mono text-[11.5px] leading-relaxed select-all">{workflow(made, made.environments?.[0] ?? "production")}</pre>
-              <button
-                className={button}
-                onClick={() => {
-                  void navigator.clipboard?.writeText(workflow(made, made.environments?.[0] ?? "production"));
-                  setCopied(true);
-                  setTimeout(() => setCopied(false), 1200);
-                }}
-              >
-                {copied ? <Check className="size-3.5 text-ok" /> : <Copy className="size-3.5" />} Copy
-              </button>
-            </div>
-          )}
+          {snippets.map((snippet) => (
+            <Snippet key={snippet.title} snippet={snippet} />
+          ))}
           <div className="mt-2 flex justify-end">
             <button className={ghost} onClick={() => setMade(null)}>
               Done
