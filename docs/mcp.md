@@ -166,7 +166,8 @@ How it works:
   records replaced with a notice, wherever they sit in the answer.
 - A tool whose answer anyone outside can write names those fields itself (`Tool::outside`):
   `apps_form_submissions` withholds every submission's `fields`, since anyone can submit a site's
-  form. Ids and times stay.
+  form, and so do `apps_events` and `apps_activity` (a `form.submitted` event names the fields the
+  visitor posted). Ids and times stay.
 - A tool's text block is then rebuilt from what's left, because a tool set may have written its
   own text block.
 - Ids and states stay, so the agent can still say what's there. The instructions tell it not to

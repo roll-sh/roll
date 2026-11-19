@@ -1009,7 +1009,7 @@ static TOOLS: &[Tool] = &[
     )
     .until(job_over),
     t("apps_cancel_job", "Cancel a job", "Stop a running job (production is a \"deploy\" action).", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/jobs/{job}/cancel", &[SERVICE, ENV, req("job", "Job id")]),
-    t("apps_events", "App events", "What happened to services (deploys going live or failing, crash loops, failed cron runs and jobs, memory, error and latency alerts, and audit.* changes to settings, variables, domains and links), in order after a cursor.", "apps", "GET", "/v1/apps/events", &[q("after", Ty::Int, "The last answer's next"), q("limit", Ty::Int, "At most this many")]),
+    t("apps_events", "App events", "What happened to services (deploys going live or failing, crash loops, failed cron runs and jobs, memory, error and latency alerts, and audit.* changes to settings, variables, domains and links), in order after a cursor.", "apps", "GET", "/v1/apps/events", &[q("after", Ty::Int, "The last answer's next"), q("limit", Ty::Int, "At most this many")]).outside(&["fields"]),
     t("apps_list_variables", "List variables", "An environment's variables, values masked. A sealed variable is never readable again by anyone (only the running service gets it): set a new value or delete it, never look for the old one.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/variables", &[SERVICE, ENV]),
     t(
         "apps_set_variables",
@@ -1033,7 +1033,7 @@ static TOOLS: &[Tool] = &[
     t("apps_list_backups", "Volume backups", "An environment's volume backups, newest first (7 kept).", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/volume/backups", &[SERVICE, ENV]),
     t("apps_backup_volume", "Back up a volume", "Back up an environment's volume now.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/volume/backups", &[SERVICE, ENV]),
     t("apps_restore_backup", "Restore a volume backup", "Put an environment's volume back as it was in a backup, replacing its files; the environment sleeps meanwhile.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/volume/backups/{backup}/restore", &[SERVICE, ENV, req("backup", "Backup id")]),
-    t("apps_activity", "Service activity", "Who changed what on a service, newest first (never a value); with all, its whole timeline: deploys, failures, crash loops, alerts, domains, spend.", "apps", "GET", "/v1/apps/services/{service}/activity", &[SERVICE, q("all", Ty::Bool, "The whole timeline, not only changes")]),
+    t("apps_activity", "Service activity", "Who changed what on a service, newest first (never a value); with all, its whole timeline: deploys, failures, crash loops, alerts, domains, spend.", "apps", "GET", "/v1/apps/services/{service}/activity", &[SERVICE, q("all", Ty::Bool, "The whole timeline, not only changes")]).outside(&["fields"]),
     t("apps_get_deploy", "Get a deploy", "One deploy: its status, commit, image and when it went live.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/deploys/{deploy}", &[SERVICE, ENV, req("deploy", "Deploy id")]),
     t(
         "apps_wait_deploy",
@@ -1220,6 +1220,11 @@ mod tests {
         assert!(matches!(r.body, Built::Json(ref b) if b["sql"] == "EXPLAIN (FORMAT JSON) select * from users" && b["read_only"] == true));
         for n in ["postgres_explain", "postgres_slow_queries", "postgres_advisors", "postgres_list_extensions"] {
             assert_eq!(def(n)["annotations"]["readOnlyHint"], true, "{n}");
+        }
+        // What a site's visitors write (a form's fields, and the field names a form.submitted event
+        // carries) is withheld in lockdown wherever an answer holds it.
+        for n in ["apps_form_submissions", "apps_events", "apps_activity"] {
+            assert!(all().iter().find(|t| t.name == n).unwrap().outside.contains(&"fields"), "{n}");
         }
         // docs/mcp.md lists every tool.
         let doc = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/mcp.md")).unwrap();
