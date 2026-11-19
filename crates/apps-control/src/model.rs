@@ -900,12 +900,20 @@ pub struct Rollout {
     /// for errors meanwhile.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub manual: bool,
+    /// With `run.slo`: a step fails when the new deployment spends its error budget this many
+    /// times as fast as it lasts (Argo Rollouts' analysis); default 14.4, the fast burn alert's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slo_burn: Option<f64>,
 }
 
 impl Default for Rollout {
     fn default() -> Self {
-        Rollout { steps: Vec::new(), step_s: 120, error_pct: 5, manual: false }
+        Rollout { steps: Vec::new(), step_s: 120, error_pct: 5, manual: false, slo_burn: None }
     }
+}
+
+impl Rollout {
+    pub const SLO_BURN: f64 = 14.4;
 }
 
 /// What a person says to a rollout that waits for them.
@@ -1096,6 +1104,9 @@ impl Run {
         }
         if !(1..=3600).contains(&r.step_s) {
             return bad("rollout.step_s is 1–3600");
+        }
+        if r.slo_burn.is_some_and(|b| !(1.0..=1000.0).contains(&b)) {
+            return bad("rollout.slo_burn is 1–1000");
         }
         if !(1..=100).contains(&r.error_pct) {
             return bad("rollout.error_pct is 1–100");

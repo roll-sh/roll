@@ -1046,7 +1046,7 @@ impl Apps {
                     into.errors += s.errors;
                     into.crashes += s.crashes;
                 }
-                if let Some(why) = judge(new, old, r.error_pct) {
+                if let Some(why) = judge(new, old, r.error_pct, tpl.run.slo.as_ref().map(|s| (s, r.slo_burn.unwrap_or(crate::model::Rollout::SLO_BURN)))) {
                     sys.line(format!("canary: rolled back at {share}%: {why}"));
                     anyhow::bail!("rolled back at {share}% of requests: {why}");
                 }
@@ -1091,7 +1091,7 @@ impl Apps {
                     into.errors += s.errors;
                     into.crashes += s.crashes;
                 }
-                if let Some(why) = judge(new, old, r.error_pct) {
+                if let Some(why) = judge(new, old, r.error_pct, tpl.run.slo.as_ref().map(|s| (s, r.slo_burn.unwrap_or(crate::model::Rollout::SLO_BURN)))) {
                     sys.line(format!("canary: rolled back at {share}% while held: {why}"));
                     anyhow::bail!("rolled back at {share}% of requests: {why}");
                 }
@@ -2740,10 +2740,20 @@ impl Apps {
 /// Whether a canary step fails: the new deployment answered `error_pct` or more of at least
 /// [`Rollout::MIN_REQUESTS`] requests with a 5xx, and more often than the old one (an outage
 /// both share, a database down, isn't the new code's fault).
-fn judge(new: crate::live::Served, old: crate::live::Served, error_pct: u8) -> Option<String> {
+fn judge(new: crate::live::Served, old: crate::live::Served, error_pct: u8, slo: Option<(&crate::model::Slo, f64)>) -> Option<String> {
     // Crashes no request saw (a failed health check, a process that exits).
     if new.crashes >= 2 && new.crashes > old.crashes {
         return Some(format!("its instances crashed {} times (the old deployment's {})", new.crashes, old.crashes));
+    }
+    // The objective's budget, spent too fast by the new one (and faster than the old one).
+    if let Some((s, max)) = slo
+        && new.requests >= crate::model::Rollout::MIN_REQUESTS
+        && new.error_pct() > old.error_pct()
+    {
+        let burn = (new.error_pct() / 100.0) / (1.0 - s.objective / 100.0);
+        if burn >= max {
+            return Some(format!("it spent the error budget of the {}% objective {burn:.1}× as fast as it lasts ({} of its {} requests were 5xx; the step allows {max}×)", s.objective, new.errors, new.requests));
+        }
     }
     if new.requests < crate::model::Rollout::MIN_REQUESTS || new.error_pct() < error_pct as f64 || new.error_pct() <= old.error_pct() {
         return None;
@@ -2862,6 +2872,24 @@ impl Held {
             body["no_traffic"] = serde_json::json!(true);
         }
         body
+    }
+}
+
+#[cfg(test)]
+mod judge_tests {
+    use super::judge;
+    use crate::live::Served;
+
+    #[test]
+    fn a_step_that_spends_the_objectives_budget_too_fast_fails() {
+        let served = |requests: u64, errors: u64| Served { requests, errors, ..Default::default() };
+        let slo = crate::model::Slo { objective: 99.0, latency_ms: None, window_days: 28 };
+        // 3% of 100 is under the 5% rule, but 3× the 99% objective's budget: past a 2× step.
+        assert_eq!(judge(served(100, 3), served(100, 0), 5, None), None);
+        assert!(judge(served(100, 3), served(100, 0), 5, Some((&slo, 2.0))).unwrap().contains("3.0× as fast"));
+        assert_eq!(judge(served(100, 3), served(100, 0), 5, Some((&slo, 14.4))), None, "under the default burn");
+        assert_eq!(judge(served(100, 3), served(100, 5), 5, Some((&slo, 2.0))), None, "the old one is worse");
+        assert_eq!(judge(served(10, 3), served(100, 0), 5, Some((&slo, 2.0))), None, "too few requests to say");
     }
 }
 
