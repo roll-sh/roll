@@ -264,6 +264,12 @@ pub struct FakeApps {
     pub shot_services: Mutex<Vec<String>>,
     /// The notes each screenshot was asked to crop (a `#missing` selector finds nothing).
     pub crops_asked: Mutex<Vec<String>>,
+    /// Where each drain follower asked to start (`drain_from`'s `since`), and the end the test
+    /// writes the followed container's lines into (`(stderr, "<stamp> <text>")`).
+    pub drain_since: Mutex<Vec<String>>,
+    pub drain_tx: Mutex<Option<tokio::sync::mpsc::Sender<(bool, String)>>>,
+    /// Tars written into services, by the directory they were written under.
+    pub files: Mutex<HashMap<String, Vec<u8>>>,
     /// Services the runtime says run on this node, and those put to sleep.
     pub running: Mutex<std::collections::HashSet<(String, String)>>,
     pub slept: Mutex<Vec<(String, String)>>,
@@ -345,6 +351,39 @@ impl Apps for FakeApps {
     async fn logs(&self, _: &str, _: &str, _: usize) -> Vec<String> {
         self.log.lock().clone()
     }
+    /// What was written under `path` (nothing: an empty stream, as `docker cp` of a missing path).
+    async fn read_files(&self, _: &str, _: &str, path: &str) -> anyhow::Result<Option<roll_previews::ports::FileStream>> {
+        let got = self.files.lock().get(path).cloned().unwrap_or_default();
+        Ok(Some(Box::new(std::io::Cursor::new(got))))
+    }
+    async fn write_files(&self, _: &str, _: &str, dir: &str, tar: bytes::Bytes) -> anyhow::Result<bool> {
+        self.files.lock().insert(dir.to_string(), tar.to_vec());
+        Ok(true)
+    }
+    /// A forwarded port that echoes what it's sent.
+    async fn forward(&self, _: &str, _: &str, _: u16) -> anyhow::Result<Option<Box<dyn roll_previews::ports::ShellIo>>> {
+        let (ours, theirs) = tokio::io::duplex(1 << 16);
+        tokio::spawn(async move {
+            let (mut r, mut w) = tokio::io::split(theirs);
+            let _ = tokio::io::copy(&mut r, &mut w).await;
+        });
+        Ok(Some(Box::new(ours)))
+    }
+    /// A terminal that echoes what it's sent.
+    async fn shell(&self, _: &str, service: &str, _: u16, _: u16) -> anyhow::Result<Option<roll_previews::ports::Shell>> {
+        let (ours, theirs) = tokio::io::duplex(1 << 16);
+        tokio::spawn(async move {
+            let (mut r, mut w) = tokio::io::split(theirs);
+            let _ = tokio::io::copy(&mut r, &mut w).await;
+        });
+        Ok(Some(roll_previews::ports::Shell { id: format!("exec-{service}"), io: Box::new(ours) }))
+    }
+    async fn drain_from(&self, _: &str, _: &str, since: &str) -> Option<tokio::sync::mpsc::Receiver<(bool, String)>> {
+        self.drain_since.lock().push(since.to_string());
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+        *self.drain_tx.lock() = Some(tx);
+        Some(rx)
+    }
     async fn seed(&self, job: &roll_previews::ports::SeedJob) -> anyhow::Result<(i32, String)> {
         let db = job.env.iter().find(|(k, _)| k == "DATABASE_URL").map(|(_, v)| v.clone()).unwrap_or_default();
         self.seeds.lock().push(db);
@@ -389,6 +428,24 @@ impl Apps for FakeApps {
 /// roll secrets as previews see it: every `ensure` (environment, trusted). With `dynamic`, each
 /// A Git URL service's repository: records each status and comment (a comment gets id 77,
 /// edits name it). `connected: false` posts nothing.
+/// A project's log drains: whether they take previews' output (every source), and every line
+/// sent (environment, service, source, line).
+#[derive(Default)]
+pub struct FakeDrains {
+    pub wanted: std::sync::atomic::AtomicBool,
+    pub sent: Mutex<Vec<(String, String, &'static str, roll_previews::ports::DrainLine)>>,
+}
+
+#[async_trait]
+impl roll_previews::ports::Drains for FakeDrains {
+    async fn wanted(&self, _: &str, _: roll_previews::ports::DrainSource) -> bool {
+        self.wanted.load(Ordering::SeqCst)
+    }
+    fn send(&self, _: &str, environment: &str, service: &str, source: roll_previews::ports::DrainSource, lines: Vec<roll_previews::ports::DrainLine>) {
+        self.sent.lock().extend(lines.into_iter().map(|l| (environment.to_string(), service.to_string(), source.as_str(), l)));
+    }
+}
+
 /// A posted status: service, sha, state, description, link.
 pub type PostedStatus = (String, String, String, String, Option<String>);
 

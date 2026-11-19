@@ -16,8 +16,11 @@ vi.mock("@/lib/previews-api", async (orig) => {
 
 vi.mock("@/lib/apps-api", async (orig) => {
   const real = await orig<typeof import("@/lib/apps-api")>();
-  return { ...real, appsApi: { ...real.appsApi, services: vi.fn(), environments: vi.fn(), promote: vi.fn() } };
+  return { ...real, appsApi: { ...real.appsApi, services: vi.fn(), environments: vi.fn(), promote: vi.fn(), openShell: vi.fn() } };
 });
+
+// xterm.js draws on a canvas jsdom hasn't: the terminal says which session it shows.
+vi.mock("@/components/terminal-screen", () => ({ TerminalScreen: ({ session }: { session: string }) => <div>terminal {session}</div> }));
 
 vi.mock("@/lib/code-api", async (orig) => {
   const real = await orig<typeof import("@/lib/code-api")>();
@@ -139,6 +142,30 @@ describe("the Previews tab", () => {
     await u.type(screen.getByRole("textbox", { name: /to confirm/ }), "web");
     await u.click(screen.getByRole("button", { name: "Promote to production" }));
     expect(await screen.findByText(/runs dep_2 now/)).toBeInTheDocument();
+  });
+
+  it("opens a service's shell where it runs: previews' for a roll.toml service, roll apps' on the pv- environment for one on roll apps", async () => {
+    const u = userEvent.setup({ delay: null });
+    const worker = { ...preview.services[0], name: "worker", url: "https://worker-pr482-shop.preview.roll.site" };
+    api.list.mockResolvedValue([{ ...preview, services: [...preview.services, worker] }]);
+    vi.mocked(appsApi.services).mockResolvedValue([{ id: "svc_web", project: "prj_shop", name: "web" }] as never);
+    api.openShell.mockResolvedValue({ id: "pvsh_1" });
+    vi.mocked(appsApi.openShell).mockResolvedValue({ id: "sh_apps" });
+    view();
+    const list = await screen.findByRole("list", { name: "Previews" });
+    await u.click(within(list).getByRole("button", { name: "Checkout redesign: Ready" }));
+    await u.click(screen.getByRole("button", { name: "Shell" }));
+    expect(await screen.findByText("roll apps ssh -s web -e pv-abc")).toBeInTheDocument();
+    await u.selectOptions(screen.getByRole("combobox", { name: "Service" }), "worker");
+    expect(screen.getByText("roll preview shell pv_abc -s worker")).toBeInTheDocument();
+    await u.click(screen.getByRole("button", { name: "Open a shell" }));
+    expect(api.openShell).toHaveBeenCalledWith("pv_abc", { service: "worker", cols: 80, rows: 24 });
+    expect(await screen.findByText("terminal pvsh_1")).toBeInTheDocument();
+    await u.click(screen.getByRole("button", { name: "Close the shell" }));
+    await u.selectOptions(screen.getByRole("combobox", { name: "Service" }), "web");
+    await u.click(screen.getByRole("button", { name: "Open a shell" }));
+    expect(appsApi.openShell).toHaveBeenCalledWith("svc_web", "pv-abc", { cols: 80, rows: 24 });
+    expect(await screen.findByText("terminal sh_apps")).toBeInTheDocument();
   });
 
   it("lists the previews waiting for a visual review first, tagged", async () => {
