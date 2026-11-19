@@ -609,6 +609,7 @@ previews are listed once those products are on.
 | `nosql_diff` | What a branch changed against its parent. | `GET /v1/nosql/databases/{id}/diff` |
 | `nosql_update_database` | Change a database's name, idle timeout, durability, history, expiry, read-only flag or masking policy: what's left out stays. Loosening masking or read-only needs admin. | `PATCH /v1/nosql/databases/{database}` |
 | `nosql_activity` | What a database is doing now: connected clients, slow queries, warnings and metrics. | `GET /v1/nosql/databases/{database}/activity` |
+| `nosql_list_imports` | A database's imports (cql://, s3://, file://): state, rows, tables, errors, schedule (the source's password hidden). | `GET /v1/nosql/databases/{id}/imports` |
 | `queues_overview` | The broker's totals and listeners. | `GET /v1/queues/overview` |
 | `queues_list_vhosts` | RabbitMQ-compatible virtual hosts. | `GET /v1/queues/vhosts` |
 | `queues_create_vhost` | A new virtual host. | `POST /v1/queues/vhosts` |
@@ -627,6 +628,7 @@ previews are listed once those products are on.
 | `queues_close_connection` | Close a client's connection (it may reconnect). | `DELETE /v1/queues/connections/{id}` |
 | `queues_list_channels` | Open channels with their prefetch and unacknowledged messages. | `GET /v1/queues/channels` |
 | `queues_list_policies` | Policies (message TTL, dead-lettering, length limits) and the queues they match. | `GET /v1/queues/policies` |
+| `queues_list_users` | The broker's users with their tags, permissions per vhost and limits (never a password). | `GET /v1/queues/users` |
 | `queues_set_policy` | Create or replace a policy: a pattern of queue or exchange names and what applies to them. | `PUT /v1/queues/policies/{vhost}/{name}` |
 | `queues_delete_policy` | Delete a policy. | `DELETE /v1/queues/policies/{vhost}/{name}` |
 | `queues_rates` | Publish, deliver and ack rates over the last minutes. | `GET /v1/queues/rates` |
@@ -646,6 +648,8 @@ previews are listed once those products are on.
 | `tasks_cancel_run` | Stop a durable function run. | `POST /v1/tasks/runs/{id}/cancel` |
 | `tasks_rerun` | A past run's function run again with its input. | `POST /v1/tasks/runs/{id}/rerun` |
 | `tasks_list_functions` | Durable functions. | `GET /v1/tasks/functions` |
+| `tasks_list_apps` | Synced apps: URL, functions, SDK, last sync. | `GET /v1/tasks/apps` |
+| `tasks_list_api_keys` | Tasks' API keys: name, prefix, made, last used (never the key). | `GET /v1/tasks/api-keys` |
 | `tasks_list_queues` | Queues with their parallelism, rate and backlog. | `GET /v1/tasks/queues` |
 | `tasks_stats` | Nodes, queue stats, dead letters, schedules and functions. | `GET /v1/tasks/stats` |
 | `tasks_list_dead_letters` | Messages that ran out of retries, newest first. | `GET /v1/tasks/dlq` |
@@ -881,10 +885,10 @@ waits on a sibling PR reaching main is last.
 
 1. **Next, ranked (now):** an advisor like Supabase's `get_advisors` and GitHub's security
    overview: the access checkup, tokens, tighten proposals and a token's networks as read tools,
-   and a `security_checkup` workflow that changes nothing (`feature/roll-mcp-next-6`, this PR,
-   stacked on #380). Open: read tools for secrets' new backends and storage's IAM (#380; unit
-   `roll-mcp-land380` lands it after previews' turn). Then, unblocked: queues' users, tasks' apps
-   and API keys and nosql's imports as read tools (each route checked for credentials first). Waiting
+   and a `security_checkup` workflow that changes nothing, plus queues' users, tasks' apps and API
+   keys and nosql's imports as read tools, each answer checked for credentials first
+   (`feature/roll-mcp-next-6`, this PR, stacked on #380). Open: read tools for secrets' new
+   backends and storage's IAM (#380; unit `roll-mcp-land380` lands both after previews' turn). Waiting
    on a sibling: apps' forms tools (`apps_list_forms`, and `apps_form_submissions` as a reveal;
    apps #346), image scanning and SLOs (`apps_deploy_vulnerabilities` with `severity`,
    `apps_environment_slo`; apps #379) and the scan in `security_checkup` once they land; secrets'

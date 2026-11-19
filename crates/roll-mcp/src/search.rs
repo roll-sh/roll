@@ -321,6 +321,8 @@ mod finds {
             ("roll back secrets", "secrets_rollback"),
             ("which secrets nobody reads", "secrets_insights"),
             ("one-time code", "secrets_totp"),
+            ("why is my queue client refused", "queues_list_users"),
+            ("is my nosql import done", "nosql_list_imports"),
             ("is the gateway to my private network online", "secrets_list_gateways"),
             ("acme external account binding", "secrets_ca_acme"),
             ("why is assume role refused", "storage_list_roles"),

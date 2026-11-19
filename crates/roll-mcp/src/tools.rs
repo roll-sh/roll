@@ -630,6 +630,7 @@ static TOOLS: &[Tool] = &[
         ],
     ),
     t("nosql_activity", "NoSQL activity", "What a database is doing now: connected clients, slow queries, warnings and metrics.", "nosql", "GET", "/v1/nosql/databases/{database}/activity", &[NOSQL]),
+    t("nosql_list_imports", "List imports into a database", "A database's imports from another cluster (cql://) or a backup (s3://, file://): state, keyspaces, rows, tables done, errors, the schedule and the next run (the source's password hidden).", "nosql", "GET", "/v1/nosql/databases/{database}/imports", &[NOSQL]),
     // ── queues ──
     t("queues_overview", "Queues overview", "The broker's totals and listeners.", "queues", "GET", "/v1/queues/overview", &[]),
     t("queues_list_vhosts", "List virtual hosts", "RabbitMQ-compatible virtual hosts.", "queues", "GET", "/v1/queues/vhosts", &[]),
@@ -649,6 +650,7 @@ static TOOLS: &[Tool] = &[
     t("queues_close_connection", "Close a connection", "Close a client's connection (it may reconnect).", "queues", "DELETE", "/v1/queues/connections/{id}", &[req("id", "Connection id or name")]).destructive(),
     t("queues_list_channels", "List channels", "Open channels with their prefetch and unacknowledged messages.", "queues", "GET", "/v1/queues/channels", &[]),
     t("queues_list_policies", "List policies", "Policies (message TTL, dead-lettering, length limits) and the queues they match.", "queues", "GET", "/v1/queues/policies", &[]),
+    t("queues_list_users", "List queue users", "The broker's users: tags, each vhost's configure, write and read permissions, and limits (never a password). Use it when a client is refused (ACCESS_REFUSED).", "queues", "GET", "/v1/queues/users", &[]),
     t(
         "queues_set_policy",
         "Set a policy",
@@ -685,6 +687,8 @@ static TOOLS: &[Tool] = &[
     t("tasks_cancel_run", "Cancel a run", "Stop a durable function run (its finished steps stay done).", "tasks", "POST", "/v1/tasks/runs/{id}/cancel", &[req("id", "Run id")]),
     t("tasks_rerun", "Rerun a run", "Run a function again with the same input as a past run.", "tasks", "POST", "/v1/tasks/runs/{id}/rerun", &[req("id", "Run id")]),
     t("tasks_list_functions", "List functions", "Durable functions: their triggers and URLs.", "tasks", "GET", "/v1/tasks/functions", &[]),
+    t("tasks_list_apps", "List synced apps", "The apps whose functions tasks runs: each one's URL, functions, SDK and when it last synced. Use it when a function is missing or stale.", "tasks", "GET", "/v1/tasks/apps", &[]),
+    t("tasks_list_api_keys", "List tasks API keys", "Tasks' API keys: name, prefix, when made and last used (never the key itself).", "tasks", "GET", "/v1/tasks/api-keys", &[]),
     t("tasks_list_queues", "List task queues", "Queues with their parallelism, rate and backlog.", "tasks", "GET", "/v1/tasks/queues", &[]),
     t("tasks_stats", "Tasks stats", "Nodes, queue stats, dead letters, schedules and functions.", "tasks", "GET", "/v1/tasks/stats", &[]),
     t("tasks_list_dead_letters", "List dead letters", "Messages that ran out of retries, newest first.", "tasks", "GET", "/v1/tasks/dlq", &[q("queue", Ty::Str, "Only this queue's"), q("topic", Ty::Str, "Only this topic's"), q("cursor", Ty::Str, "From a page's cursor"), q("limit", Ty::Int, "At most")]),
