@@ -820,6 +820,8 @@ previews are listed once those products are on.
 | `previews_get` | A preview with its branched resources and its schema changes. | `GET /v1/previews/{id}` |
 | `previews_create` | A preview environment for a change or a branch: the project's resources branched, its services deployed. | `POST /v1/previews` |
 | `previews_refresh` | Redeploy a preview now. | `POST /v1/previews/{id}/refresh` |
+| `previews_errors` | A preview's errors, grouped (masked as logs are). | `GET /v1/previews/{id}/errors` |
+| `previews_mask_suggestions` | Columns that look like people's data and aren't masked in previews, with the rule each would take. | `GET /v1/previews/projects/{project}/mask-suggestions` |
 | `previews_metrics` | Each of a preview's services' CPU and memory now. | `GET /v1/previews/{id}/metrics` |
 | `previews_logs` | A preview's deploy and service logs. | `GET /v1/previews/{id}/logs` |
 | `previews_requests` | A preview's latest 200 requests through roll (service, method, path, status, time), to find the one that failed. | `GET /v1/previews/{id}/requests` |
