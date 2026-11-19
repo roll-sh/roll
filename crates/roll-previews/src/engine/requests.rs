@@ -535,7 +535,7 @@ impl Engine {
             }
             // A person's own reference into roll secrets waits for its maker-checked binding
             // (roll secrets' `bind_ref`); the project's rules (`env`, `env_for`) take one now.
-            if v.as_deref().is_some_and(crate::settings::is_reference) {
+            if v.as_deref().is_some_and(|v| v.trim_start().to_ascii_lowercase().starts_with("roll://")) {
                 return Err(Error::BadRequest(format!("{k}: a preview's own variable can't be a roll:// reference yet; put it in the project's env rules")));
             }
         }

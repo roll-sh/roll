@@ -960,9 +960,18 @@ async fn put_settings(AxState(e): S, Path(project): Path<String>, ext: axum::htt
     if *base != old.secrets.base && !may_reveal(base, "/") {
         return Err(Error::Forbidden(format!("secrets.base: following {base} needs reveal on {base} in roll secrets")));
     }
-    let before = crate::settings::references(&old);
+    // A reference to the base needed no reveal when the base was the old one: moved, it's checked
+    // as new.
+    let place = |reference: &str| match e.reveal.get() {
+        Some(r) => r.place(reference).map_err(Error::BadRequest),
+        None => Err(Error::BadRequest("roll:// references need roll secrets on this node".into())),
+    };
+    let mut before = crate::settings::references(&old);
+    if *base != old.secrets.base {
+        before.retain(|(_, _, reference)| place(reference).is_ok_and(|(env, _)| env != old.secrets.base));
+    }
     for (scope, name, reference) in crate::settings::references(&new).into_iter().filter(|r| !before.contains(r)) {
-        let (env, folder) = crate::settings::reference_place(&reference);
+        let (env, folder) = place(&reference).map_err(|err| Error::BadRequest(format!("{scope}: {name}: {err}")))?;
         if env == *base {
             continue;
         }

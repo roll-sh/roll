@@ -521,6 +521,8 @@ impl Asker<'_> {
 /// secrets' own check, `Caller::allows(Reveal, …)`).
 pub trait Reveal: Send + Sync {
     fn may_reveal(&self, who: &Asker<'_>, project: &str, env: &str, folder: &str) -> bool;
+    /// A reference's environment and folder as roll secrets reads it, or why it can't be one.
+    fn place(&self, reference: &str) -> std::result::Result<(String, String), String>;
 }
 
 /// What reads an OpenTelemetry export request (OTLP/HTTP: protobuf or JSON, gzip or not) into
@@ -764,7 +766,10 @@ pub trait Secrets: Send + Sync {
     /// `branches`: what the preview branched (`(kind, parent)`): a link of the environment (or its
     /// base) to one of those parents isn't resolved but comes back in [`Resolved::followed`].
     #[allow(clippy::too_many_arguments)]
-    async fn ensure(&self, project: &str, env: &str, base: &str, vars: &[(String, String)], trusted: bool, expires_at: i64, branches: &[(Kind, String)]) -> anyhow::Result<()>;
+    /// `refs`: the project's rules' `roll://` references (checked when they were saved), kept as
+    /// roll secrets' own references; every value in `vars` is plain text, whatever it looks like.
+    #[allow(clippy::too_many_arguments)]
+    async fn ensure(&self, project: &str, env: &str, base: &str, vars: &[(String, String)], refs: &[(String, String)], trusted: bool, expires_at: i64, branches: &[(Kind, String)]) -> anyhow::Result<()>;
     /// Every variable of `env`, inherited ones included, for `consumer` (a start of one service,
     /// a job): a dynamic link issues it a fresh credential under a lease ([`Resolved::leases`]),
     /// which the caller renews while it runs and revokes when it stops.
@@ -813,7 +818,7 @@ pub struct NoSecrets;
 
 #[async_trait]
 impl Secrets for NoSecrets {
-    async fn ensure(&self, _: &str, _: &str, _: &str, _: &[(String, String)], _: bool, _: i64, _: &[(Kind, String)]) -> anyhow::Result<()> {
+    async fn ensure(&self, _: &str, _: &str, _: &str, _: &[(String, String)], _: &[(String, String)], _: bool, _: i64, _: &[(Kind, String)]) -> anyhow::Result<()> {
         Ok(())
     }
 

@@ -1180,7 +1180,11 @@ async fn a_rules_reference_to_another_environment_needs_its_writers_reveal_there
     struct StagingOnly;
     impl roll_previews::ports::Reveal for StagingOnly {
         fn may_reveal(&self, who: &roll_previews::ports::Asker<'_>, _: &str, env: &str, folder: &str) -> bool {
-            who.user.is_some_and(|u| u.user == "usr_b") && env == "staging" && folder == "/payments"
+            who.user.is_some_and(|u| u.user == "usr_b") && ((env == "staging" && folder == "/payments") || (env == "dev2" && folder == "/"))
+        }
+        fn place(&self, reference: &str) -> Result<(String, String), String> {
+            let parts: Vec<&str> = reference.strip_prefix("roll://").ok_or("not one")?.split('/').collect();
+            Ok((parts[0].to_string(), if parts.len() > 2 { format!("/{}", parts[1..parts.len() - 1].join("/")) } else { "/".into() }))
         }
     }
     let e = env(json!({ "enabled": true }));
@@ -1194,6 +1198,7 @@ async fn a_rules_reference_to_another_environment_needs_its_writers_reveal_there
     };
     assert_eq!(put(json!({ "K": "roll://qa/KEY" })).await, 403, "no reveal on qa");
     assert_eq!(put(json!({ "K": "roll://staging/KEY" })).await, 403, "reveal on staging's /payments only");
+    assert_eq!(put(json!({ "K": " roll://qa/KEY" })).await, 400, "a look-alike isn't kept as text either");
     assert_eq!(put(json!({ "K": "roll://staging/payments/KEY" })).await, 200);
     let base = e.engine.store.settings(&mine.id).unwrap().secrets.base;
     assert_eq!(put(json!({ "K": "roll://staging/payments/KEY", "B": format!("roll://{base}/OTHER") })).await, 200, "the environment it follows needs nothing more");
@@ -1202,6 +1207,11 @@ async fn a_rules_reference_to_another_environment_needs_its_writers_reveal_there
     let mut req = axum::http::Request::put(format!("/v1/previews/projects/{}/settings", mine.id)).header("content-type", "application/json").body(axum::body::Body::from(json!({ "secrets": { "base": "qa" } }).to_string())).unwrap();
     req.extensions_mut().insert(roll_auth::SignedIn { user: "usr_b".into(), handle: "b".into(), admin: false, code_owner: None, session: "ses_1".into() });
     assert_eq!(router.oneshot(req).await.unwrap().status().as_u16(), 403, "no reveal on qa");
+    // A reference to the base, free while it's the base, is checked as new once the base moves.
+    let router = roll_previews::api::router(e.engine.clone());
+    let mut req = axum::http::Request::put(format!("/v1/previews/projects/{}/settings", mine.id)).header("content-type", "application/json").body(axum::body::Body::from(json!({ "secrets": { "base": "dev2" } }).to_string())).unwrap();
+    req.extensions_mut().insert(roll_auth::SignedIn { user: "usr_b".into(), handle: "b".into(), admin: false, code_owner: None, session: "ses_1".into() });
+    assert_eq!(router.oneshot(req).await.unwrap().status().as_u16(), 403, "B names the old base, which usr_b can't reveal");
 }
 
 /// A variable set while a deploy is still going, then removed, is removed from the backend too:

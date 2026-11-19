@@ -408,8 +408,14 @@ behind the `Apps` trait:
   access. A reference to the base needs none of this, but changing the base needs its writer's
   reveal on the new one (every preview's code then reads it). The rules are written only as they
   were checked: another request's change in between is a 409.
-  A plain value is kept as it is: its `${` is escaped (every value previews write goes through
-  one place, rolld's ensure), so it's never a reference by accident and reads back as written. A
+  Moving the base checks the references that named the old one as new. A value that reads as a
+  reference only once trimmed or lowercased (` roll://…`) is refused. Who wrote each reference
+  is kept, not yet checked again later: a writer who loses reveal leaves their reference working
+  until roll secrets' `bind_ref` binds it to them (its #407).
+  Only the rules' own references (checked when saved) go to roll secrets as references, as their
+  own input to rolld's ensure; every other value previews write, a preview's own variables and
+  anything stored before included, is plain text: its `${` is escaped, so it's never a reference
+  by accident and reads back as written. A
   preview's own variables refuse a reference (400) until roll secrets' maker-checked binding for
   references a person chooses (`bind_ref`, its #407). Renaming an environment rewrites roll
   secrets' references, not these rules: the next converge logs the old name as one that doesn't

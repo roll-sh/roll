@@ -526,7 +526,7 @@ pub struct FakeSecrets {
 
 #[async_trait]
 impl roll_previews::ports::Secrets for FakeSecrets {
-    async fn ensure(&self, _: &str, env: &str, _: &str, vars: &[(String, String)], trusted: bool, _: i64, branches: &[(Kind, String)]) -> anyhow::Result<()> {
+    async fn ensure(&self, _: &str, env: &str, _: &str, vars: &[(String, String)], _: &[(String, String)], trusted: bool, _: i64, branches: &[(Kind, String)]) -> anyhow::Result<()> {
         self.ensured.lock().push((env.to_string(), trusted));
         *self.branched.lock() = branches.to_vec();
         *self.own.lock() = vars.to_vec();
