@@ -129,4 +129,9 @@ async fn validate_and_aggregations_read_as_their_reader() {
     assert_eq!((s, v.pointer(&["aggregations", "f", "doc_count"]).and_then(Value::as_i64)), (200, Some(1)), "{}", v.to_json());
     let (s, v) = call(&c, "POST", "/g/_search", &agg, Some("r")).await;
     assert_ne!((s, v.pointer(&["aggregations", "f", "doc_count"]).and_then(Value::as_i64)), (200, Some(1)), "counted through a hidden document: {}", v.to_json());
+    // A restricted reader isn't served the superuser's cached answer to the same request.
+    let terms = r#"{"size":0,"aggs":{"t":{"terms":{"field":"team"}}}}"#;
+    let keys = |v: &Value| v.pointer(&["aggregations", "t", "buckets"]).and_then(Value::as_array).map(|b| b.iter().filter_map(|x| x.get("key").and_then(Value::as_str).map(str::to_string)).collect::<Vec<_>>());
+    assert_eq!(keys(&call(&c, "POST", "/p/_search", terms, None).await.1), Some(vec!["blue".into(), "red".into()]));
+    assert_eq!(keys(&call(&c, "POST", "/p/_search", terms, Some("r")).await.1), Some(vec!["red".to_string()]));
 }
