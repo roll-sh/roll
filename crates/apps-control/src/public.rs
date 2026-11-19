@@ -30,6 +30,12 @@ pub fn router(apps: Arc<Apps>) -> axum::Router {
                 return crate::edge::next(apps, req).await;
             }
             let host = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).unwrap_or("").to_string();
+            // A project's status page ([`crate::status_page`]), on its own name.
+            if host.starts_with("status-")
+                && let Some(page) = apps.status_page_for_host(&host).await
+            {
+                return crate::status_page::serve(apps, page, req.uri().path()).await;
+            }
             // A domain that redirects (www → apex): a 308 to the same path and query there.
             if let Some(to) = apps.redirect_for_host(&host).await {
                 let pq = req.uri().path_and_query().map(|p| p.as_str()).unwrap_or("/");

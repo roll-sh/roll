@@ -2294,6 +2294,53 @@ async fn a_deploy_freeze_holds_deploys_but_never_a_rollback() {
     assert_eq!(call(&w.api, "POST", &format!("{base}/redeploy"), Some(json!({}))).await.0, StatusCode::ACCEPTED);
 }
 
+/// A project's status page (Better Stack's, Instatus'): its checks, up or down and their days, on
+/// its own public name (HTML and `/status.json`), with nothing but names on it; gone when deleted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_status_page_shows_the_projects_checks() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "web", json!({"port": 80, "min_instances": 1})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let env = format!("/v1/apps/services/{id}/environments/production");
+    call(&w.api, "PUT", &env, Some(json!({"checks": [{"name": "home", "path": "/secret-health", "every_s": 60}]}))).await;
+    let page = format!("/v1/apps/projects/{}/status-page", w.project);
+    assert_eq!(call(&w.api, "GET", &page, None).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(call(&w.api, "PUT", &page, Some(json!({"items": [{"service": "svc_notmine00000", "check": "home"}]}))).await.0, StatusCode::BAD_REQUEST);
+    let (st, p) = call(&w.api, "PUT", &page, Some(json!({"title": "Acme status"}))).await;
+    assert_eq!(st, StatusCode::OK, "{p}");
+    let h = host(&p["url"]);
+    assert!(h.starts_with("status-"), "{p}");
+    // A check runs (the pass a minute on), its day counted.
+    let t0 = code_sql::now_ms() + 3_600_000;
+    w.apps.cron_pass(t0).await;
+    let get = |path: &'static str| {
+        let public = w.public.clone();
+        let h = h.clone();
+        async move {
+            let resp = public.oneshot(Request::builder().uri(path).header("host", h).body(Body::empty()).unwrap()).await.unwrap();
+            let st = resp.status();
+            (st, String::from_utf8_lossy(&resp.into_body().collect().await.unwrap().to_bytes()).into_owned())
+        }
+    };
+    let mut j = Value::Null;
+    for _ in 0..200 {
+        j = serde_json::from_str(&get("/status.json").await.1).unwrap_or(Value::Null);
+        if j["items"][0]["up"] == true {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!((j["title"].as_str(), j["up"].as_bool(), j["items"][0]["name"].as_str(), j["items"][0]["uptime"].as_f64()), (Some("Acme status"), Some(true), Some("web · home"), Some(100.0)), "{j}");
+    let (st, html) = get("/").await;
+    assert!(st == StatusCode::OK && html.contains("Acme status") && html.contains("web · home") && html.contains("Everything is up"), "{html}");
+    assert!(!html.contains("secret-health") && !j.to_string().contains("secret-health"), "names only, never a path");
+    // Kept by its address when changed; gone when deleted.
+    let (_, p2) = call(&w.api, "PUT", &page, Some(json!({"title": "Acme"}))).await;
+    assert_eq!(p2["url"], p["url"]);
+    assert_eq!(call(&w.api, "DELETE", &page, None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(get("/status.json").await.0, StatusCode::NOT_FOUND);
+}
+
 /// An instance the kernel killed for its memory says so: in the log and in why it crashed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_instance_killed_for_its_memory_says_so() {

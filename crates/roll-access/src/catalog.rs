@@ -1382,6 +1382,10 @@ static ROWS: &[Row] = &[
     // answered (only its host).
     row("GET", "/v1/apps/projects/{project}/drains", "apps", R, one(&["project"], "project")),
     // The project's preview domain: which names its preview environments answer under.
+    // A public page of the project's checks and heartbeats (names and up or down only).
+    row("GET", "/v1/apps/projects/{project}/status-page", "apps", R, one(&["project"], "project")),
+    row("PUT", "/v1/apps/projects/{project}/status-page", "apps", W, one(&["project"], "project")),
+    row("DELETE", "/v1/apps/projects/{project}/status-page", "apps", W, one(&["project"], "project")),
     row("GET", "/v1/apps/projects/{project}/preview-domain", "apps", R, one(&["project"], "project")),
     row("POST", "/v1/apps/projects/{project}/preview-domain", "apps", W, one(&["project"], "project")),
     row("DELETE", "/v1/apps/projects/{project}/preview-domain", "apps", D, one(&["project"], "project")),

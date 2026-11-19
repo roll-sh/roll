@@ -986,6 +986,13 @@ export interface Freeze {
   reason?: string;
 }
 
+/** A project's public status page: its checks and heartbeats (all, or `items`), at `url`. */
+export interface StatusPage {
+  title: string;
+  url: string;
+  items: { service: string; environment?: string; check?: string; heartbeat?: string }[];
+}
+
 export interface Heartbeat {
   name: string;
   every_s: number;
@@ -1259,6 +1266,9 @@ export const appsApi = {
   roots: (req: { repo: string } | { git: string; branch?: string; git_login?: { username: string; password: string } }) => call<{ roots: RootCandidate[] }>("POST", "/v1/apps/plan", { ...req, roots: true }),
   /** The project as roll.toml: `databases` names what its services link (`{"postgres:<id>": "db"}`). */
   /** The project's own preview domain (a wildcard its preview environments answer under). */
+  statusPage: (project: string) => call<StatusPage>("GET", `/v1/apps/projects/${enc(project)}/status-page`),
+  putStatusPage: (project: string, body: { title?: string; items?: StatusPage["items"] }) => call<StatusPage>("PUT", `/v1/apps/projects/${enc(project)}/status-page`, body),
+  deleteStatusPage: (project: string) => call<void>("DELETE", `/v1/apps/projects/${enc(project)}/status-page`),
   previewDomain: (project: string) => call<Domain>("GET", `/v1/apps/projects/${enc(project)}/preview-domain`),
   setPreviewDomain: (project: string, hostname: string) => call<Domain>("POST", `/v1/apps/projects/${enc(project)}/preview-domain`, { hostname }),
   verifyPreviewDomain: (project: string) => call<Domain>("POST", `/v1/apps/projects/${enc(project)}/preview-domain/verify`),
