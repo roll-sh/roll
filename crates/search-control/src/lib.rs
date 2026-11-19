@@ -20,6 +20,7 @@ pub mod cluster;
 pub mod control;
 pub mod meter;
 pub mod pricing;
+pub mod remotes;
 pub mod store;
 mod wake;
 

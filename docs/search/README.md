@@ -158,6 +158,62 @@ owner must allow for roll apps and previews, is in architecture.md, "Client addr
 allowlists". `crates/search-control/tests/control.rs` `ip_allowlists_turn_addresses_away_before_credentials`
 and `tests/cluster.rs` `a_forward_carries_the_clients_address_to_the_owner` cover it.
 
+**Cross-cluster search** (Elastic Cloud's remote clusters between deployments, Elasticsearch 9's
+API key based remote cluster security; `search-control` `remotes.rs`, `search-es`
+`remote/links.rs`). A cluster may name another roll search cluster as a remote, and search it as
+`<alias>:<index>`, when both have the same owner: one person's, or both the operator's (admins
+act for the owner, they can't link two owners' clusters). Never across owners: names are global,
+so a remote naming another person's cluster is refused exactly as one naming a cluster that
+doesn't exist (404 from the route, the same 400 from `PUT _cluster/settings`). Both must be
+Elasticsearch-flavor.
+
+- **Linking**: `PUT /v1/search/clusters/{id}/remotes/{alias}` `{cluster, skip_unavailable?,
+  access?}` makes a `cross_cluster` API key on the remote with `access` (Elasticsearch's shape,
+  `{"search": [{"names": ["logs-*"], "query"?, "field_security"?}]}`; default every index), keeps
+  it as `cluster.remote.<alias>.credentials` and sets `cluster.remote.<alias>.mode: proxy` and
+  `proxy_address: <remote name>`. Or `{cluster, api_key}` with a key the person made on the remote
+  (`POST _security/cross_cluster/api_key`, its `encoded` value), checked there first. The route is
+  the way in because roll clusters have no keystore a tenant writes, and it needs no endpoint
+  syntax; Elasticsearch's own `PUT _cluster/settings` with `mode: proxy` and `proxy_address` (or
+  `seeds`) naming a cluster (its name, or its endpoint `<name>.<domain>[:port]`) works too, held
+  to the same owner rule, but connects only once the remote has credentials.
+- **Credentials** are a secure setting: sealed under `ROLL_SECRET_KEY` and bound to their row
+  (cluster, alias, remote) in the catalog (`search_remotes`), never returned (`_remote/info`
+  shows `cluster_credentials: "::es_redacted::"`). The remote authorizes each request with the
+  key's access intersected with the local user's `remote_indices` privileges for the alias (the
+  cluster's own password is a superuser: everything the key allows), as Elasticsearch does.
+  Revoking the key on the remote (`DELETE _security/api_key`) cuts the link; `DELETE …/remotes/
+  {alias}` removes the settings and credentials and revokes a key roll made, and so does deleting
+  the cluster for good (at once with no retention, else when its restore window ends). A cluster
+  holds credentials for at most 20 remotes (409 past that). Without `ROLL_SECRET_KEY` (local
+  development) credentials are stored as given, as every secret search keeps.
+- **Execution**: the remote's part runs on the remote cluster's owner node through roll's own
+  in-process call or signed fleet forward (`Control::on_owner`, `cluster::to_owner`), never over
+  the public endpoint, so neither cluster's IP allowlist applies to it: a client the local
+  cluster's allowlist admits reaches the remote's data within the key's access even when the
+  remote's own allowlist wouldn't admit that client directly. Link only clusters whose data may
+  be read from wherever the local one may be. The link's header
+  (`x-roll-remote-access`) is honored only on those calls; a client sending it, or presenting a
+  cross-cluster key, gets 401. A sleeping remote wakes for it, for at most
+  `cluster.remote.initial_connect_timeout` (30 s); one that can't be reached, or answers an error
+  (a revoked key, an index outside the key's access), is skipped with its failure in `_clusters`
+  when `skip_unavailable` (the default) and fails the search otherwise.
+- **What reaches remotes**: `_search` and `_msearch` (merged as `ccs_minimize_roundtrips` does:
+  hits by score or sort values, totals, shards and failures, a `_clusters` section; aggregations
+  merged by type: bucket aggregations by key with their sub-aggregations, `min`, `max`, `sum`,
+  `value_count`, `stats`, held to `search.max_buckets`; others refused with a 400 naming them;
+  remotes' answers are held on the request circuit breaker while they merge), `_field_caps` (each remote index's
+  capabilities merged as local ones are), `_resolve/index`, `_resolve/cluster` and `_remote/info`.
+  An expression is authorized on the remotes only when every remote its alias pattern matches
+  is a link; `*:index` over a link and a loopback remote is authorized locally, whole.
+  Left: `scroll` and point in time across clusters, ES|QL `FROM <alias>:<index>`, suggesters and
+  `avg`/`cardinality`/percentile-style aggregations over several clusters, OpenSearch-flavor
+  clusters (their remotes still reach only the node itself).
+
+`crates/search-control/tests/control.rs` `cross_cluster_search_between_a_persons_own_clusters` and
+`a_sleeping_remote_wakes_and_a_gone_one_is_skipped`, and `tests/cluster.rs`
+`a_remote_on_another_node_is_searched_through_the_signed_forward` cover it.
+
 **Terraform** (Elastic Cloud's `ec_deployment` and `elasticstack` providers, AWS's
 `aws_opensearch_domain`). roll's provider (`sdk/terraform-provider-roll`, its README has the
 details) has `roll_search_cluster` (name, flavor, `always_on` or `idle_timeout_s`, limits,
@@ -197,6 +253,9 @@ origins (browser search), once they're on main.
 | GET | `/v1/search/clusters/{id}/audit?from=&to=&event=&size=` | the cluster's security audit log (below), newest first: `{flavor, retention_days, entries: [{at_ms, event, entry}], more}`. `from` (inclusive) and `to` (exclusive) are Unix milliseconds; `event` takes names or categories, comma-separated (an Elasticsearch `event.action` such as `put_user` too); `size` up to 1,000 (100). Never wakes the cluster. A read in roll's permissions, not a reveal: entries hold no secret |
 | POST | `/v1/search/clusters/{id}/keys` | a new API key of the cluster `{name, expires_in_s?, access?}` (`access`: `admin`, the default, or `data`: a link's role, data, templates, pipelines and lifecycle policies without security) → `{id, name, access, api_key, url, expires_at?}` (`access`: the access the key was made with): `api_key` is `base64(<key id>@<cluster>:<key>)` for `Authorization: ApiKey …`, in this answer only (roll secrets' managed links use it instead of sharing the password); on an OpenSearch-flavor cluster (whose clients sign in with a user) the key is an internal user of its own: `{id, name, access, username, password, url, expires_at?}` without `api_key`, `username` being `<user>@<cluster>`, refused once `expires_in_s` passes |
 | DELETE | `/v1/search/clusters/{id}/keys/{key}` | revoke it (204; 404 when it's gone). On a deleted cluster (by its id) the revoke is kept and applied by its restore (204) |
+| GET | `/v1/search/clusters/{id}/remotes` | the remote clusters it holds credentials for: `{remotes: [{alias, cluster, cluster_id, key_id, minted, created_at, connected}]}` (never the key) |
+| PUT | `/v1/search/clusters/{id}/remotes/{alias}` | link another cluster of the same owner as remote `alias` (above): `{cluster, skip_unavailable?, access?}` or `{cluster, skip_unavailable?, api_key}` → `{alias, cluster, cluster_id, mode, proxy_address, key_id, minted, skip_unavailable?}`; 404 for a cluster the caller can't link to, missing or not. `admin` on both clusters for roll-access |
+| DELETE | `/v1/search/clusters/{id}/remotes/{alias}` | unlink: the remote's settings and credentials go, a key roll made is revoked (204) |
 | GET, PUT, DELETE | `/v1/search/clusters/{id}/indices/{index}` | Elasticsearch's `GET`/`PUT`/`DELETE /<index>`: mappings, settings and aliases; create (body: `mappings`, `settings`); delete |
 | GET, PUT | `/v1/search/clusters/{id}/indices/{index}/mapping` | `GET`/`PUT /<index>/_mapping` |
 | GET | `/v1/search/clusters/{id}/indices/{index}/settings` | `GET /<index>/_settings` |
@@ -851,8 +910,10 @@ Built 2026-11-19 (in review): Terraform for search clusters (#350's item 3): clu
    - Every `/v1/search/clusters/{id}/…` call checks the owner. It does so before the fleet
      forwards it, and again on the owner node, behind its gate.
    - Another person's cluster answers the same 404 as a missing one.
-   - A cluster's credentials and keys name that cluster only. Remote clusters reach only the
-     cluster itself, and reindex from a remote is off: the whitelist is empty.
+   - A cluster's credentials and keys name that cluster only. Remote clusters reach only
+     another cluster of the same owner (cross-cluster search, above: refused for anyone else's
+     as for a missing one, checked again on every request) or the cluster itself, and reindex
+     from a remote is off: the whitelist is empty.
    - `fs` and `url` repositories need `path.repo`, which rolld doesn't set.
    - A person's canvas reaches only their own clusters (`Workspace::trusts`), on every read and
      issue.
