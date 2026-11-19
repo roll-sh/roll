@@ -416,15 +416,13 @@ for _ in $(seq 1 120); do
   sleep 1
 done
 [ -n "$OTEL" ] || { echo "the service should get OTEL_EXPORTER_OTLP_ENDPOINT with traces on"; exit 1; }
-TRC=$(docker ps -q --filter "name=^$CONTAINER\$" | head -1)
-docker exec "$TRC" python -c '
-import json, os, time, urllib.request
-now = time.time_ns()
-span = lambda sid, parent, name, err: {"traceId": "ab" * 16, "spanId": sid, "parentSpanId": parent, "name": name, "startTimeUnixNano": str(now - 40_000_000), "endTimeUnixNano": str(now), "status": {"code": 2 if err else 0}}
-body = {"resourceSpans": [{"resource": {"attributes": [{"key": "service.name", "value": {"stringValue": os.environ["OTEL_SERVICE_NAME"]}}]}, "scopeSpans": [{"spans": [span("01" * 8, "", "GET /checkout", False), span("02" * 8, "01" * 8, "charge card", True)]}]}]}
-req = urllib.request.Request(os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"] + "/v1/traces", data=json.dumps(body).encode(), headers={"content-type": "application/json"})
-print(urllib.request.urlopen(req, timeout=10).status)
-' >/dev/null || { echo "the service should reach its OpenTelemetry intake"; exit 1; }
+# The span an SDK in it would send, to the endpoint and token it was given. Posted from this host:
+# on ai-server the firewall keeps containers from the host (as with the mail catcher and host
+# Postgres), so the container's own `host.docker.internal` hop can't be checked here.
+OTEL_HERE=$(echo "$OTEL" | sed 's#host.docker.internal#127.0.0.1#')
+NOW_NS=$(date +%s%N)
+SPANS="{\"resourceSpans\":[{\"resource\":{\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"web\"}}]},\"scopeSpans\":[{\"spans\":[{\"traceId\":\"abababababababababababababababab\",\"spanId\":\"0101010101010101\",\"name\":\"GET /checkout\",\"startTimeUnixNano\":\"$((NOW_NS - 40000000))\",\"endTimeUnixNano\":\"$NOW_NS\"},{\"traceId\":\"abababababababababababababababab\",\"spanId\":\"0202020202020202\",\"parentSpanId\":\"0101010101010101\",\"name\":\"charge card\",\"startTimeUnixNano\":\"$((NOW_NS - 30000000))\",\"endTimeUnixNano\":\"$((NOW_NS - 5000000))\",\"status\":{\"code\":2}}]}]}]}"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' -d "$SPANS" "$OTEL_HERE/v1/traces")" = 200 ] || { echo "the service's OpenTelemetry endpoint should take its spans: $OTEL_HERE"; exit 1; }
 TRACES=$(api GET "/v1/previews/$PV/traces" | jq_ "[(t['name'], t['spans'], t['error']) for t in d['traces']]")
 case "$TRACES" in *"('GET /checkout', 2, True)"*) ;; *) echo "the span posted should be the preview's trace: $TRACES"; exit 1;; esac
 [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' -d '{}' "http://$API/v1/previews/$PV/otlp/not-the-token/v1/traces")" = 404 ] || { echo "another token should be 404"; exit 1; }
