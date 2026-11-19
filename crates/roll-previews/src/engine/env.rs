@@ -122,6 +122,7 @@ impl EnvSource for Engine {
             egress: s.egress_for(r.trusted),
             egress_hosts: s.egress_hosts.clone(),
             rebuild: None,
+            traces: s.traces,
         };
         Ok((t, env))
     }

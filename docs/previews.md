@@ -1158,7 +1158,9 @@ preview: they're for looking at it now. The sheet lists recent traces under Requ
 to its spans as bars on the trace's time; `roll preview traces [--trace <id>]`. Read back masked as
 its logs are: a span's name and attributes are its code's words. The intake reads OTLP with roll
 apps' reader (`apps_control::otlp::spans_of_request`). A roll apps service's traces are roll apps'
-own (its environment's `traces`). `a_previews_traces_are_kept_by_its_token_and_read_masked`;
+own: with the project's `traces` the preview's `pv-` environment gets roll apps' `traces: true` (its
+own OpenTelemetry variables and intake), and the preview's list and trace reads take them from roll
+apps too, masked the same way, one list for every service. `a_previews_traces_are_kept_by_its_token_and_read_masked`;
 `scripts/preview-cost.sh` posts a span from inside a live preview's service to its own endpoint and
 reads it back as the preview's trace.
 
@@ -2058,8 +2060,8 @@ Ranked by what a person notices first. Done so far:
    already tell them apart (`drain_from` tags each line); tag `follow` the same way and carry it
    to the sheet.
 4. **Traces of a preview's `roll.toml` services, in review** (`feature/roll-previews-traces`;
-   Vercel's preview traces, roll apps' `traces`): see "Traces". Next for it: a roll apps
-   service's traces on the same list (roll apps keeps them per `pv-` environment).
+   Vercel's preview traces, roll apps' `traces`): see "Traces"; a preview's roll apps services'
+   own on the same list (`feature/roll-previews-apps-traces`, on #403).
 5. **Files and ports from the sheet, in review** (`feature/roll-previews-sheet-files`): under the
    Shell tab, a path's tar downloaded from `…/files` (the server's own words when nothing's there),
    and the `roll preview cp`/`forward` lines (roll apps' `cp`/`proxy` for its services).
