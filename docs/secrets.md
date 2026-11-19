@@ -3678,7 +3678,8 @@ cache waited out. Ranked now:
 5b. **The thirty-first product review** (2026-11-18 night): the store is level with or ahead of the
    category; what's left is the first ten minutes, two test gaps and three products' own credential
    copies. Ranked:
-   - P1–P4, **the first ten minutes** (building: `feature/roll-secrets-first-ten-minutes`): the CLI
+   - P1–P4, **the first ten minutes** (#370: a saved login's URL by default, approvals printed and
+     resent with `X-Roll-Approval`, the quick start and dashboard dead ends fixed): the CLI
      keeps 127.0.0.1:7070 after `roll login`; the first `roll run` waits silently on an `ask` approval
      it can't handle; the quick start has no install or login; the dashboard's commands dead-end.
      Then a committed `[secrets]` in `roll.toml` and an interactive `setup` (Doppler's `doppler.yaml`).
