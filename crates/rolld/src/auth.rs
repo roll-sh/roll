@@ -82,6 +82,9 @@ pub const RULES: &[Rule] = &[
     Rule { route: "/v1/secrets/health", access: Access::Credential("a roll token (rlt_…); the operator's answer") },
     // roll's issuer key signs for every project: rotating it is the operator's.
     Rule { route: "/v1/secrets/issuer", access: Access::Operator },
+    // So does the audit log's digest key, and its public keys are what exports are checked with.
+    Rule { route: "/v1/secrets/audit/key", access: Access::Operator },
+    Rule { route: "/v1/secrets/audit/jwks", access: Access::Public("the audit log's digest keys: public, as an export is checked against them offline") },
     // A one-time share's link: the value is encrypted with a key only the link holds, and opens
     // a few times at most (docs/secrets.md, "Sharing a value once").
     Rule { route: "/v1/secrets/shares", access: Access::Public("a one-time share's link: ciphertext only, the key stays in the link") },

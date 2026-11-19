@@ -6,9 +6,14 @@
 //!   canonical(row))`, written in the row's own transaction (roll-secrets' audit.rs, `append`). The per-project
 //!   head (`audit_heads`) is updated in that transaction too, so two writers can't fork the chain.
 //! - Every hour the sweeper appends a digest row (`audit.digest`) holding a JWS signed with roll's
-//!   issuer key: `{project, seq, hash, last_at, at}` of the row before it. Sinks get it like any
-//!   other row. Rewriting the chain before a digest, even with recomputed hashes, no longer matches
-//!   what roll signed.
+//!   digest key (EdDSA, a key of its own: never the issuer's): `{project, seq, hash, last_at, at,
+//!   start}` of the row before it. Sinks get it like any other row. Rewriting the chain before a
+//!   digest, even with recomputed hashes, no longer matches what roll signed.
+//! - Digests from before the digest key were signed with roll's issuer key (RS256): they still
+//!   check, as `legacy`, against the issuer keys the digest JWKS names, and only before the chain's
+//!   first digest under a digest key ([`Keys`]).
+//! - A key pulled in an emergency vouches for nothing again: its digests are reported (`pulled`),
+//!   and the chain past one needs a later digest under a good key, whose hash runs through them.
 //! - Retention cuts the chain only at a digest, which is then the signed anchor the log starts at,
 //!   and every digest signs where the log starts: rows removed from the start any other way show.
 //!
@@ -40,7 +45,8 @@ pub struct AuditEntry {
     /// The approval that let the request through roll-access's gate, if one did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval: Option<Approval>,
-    /// An `audit.digest` row's signed digest: a JWS (RS256, roll's issuer key) of [`Digest`].
+    /// An `audit.digest` row's signed digest: a JWS of [`Digest`] (EdDSA, roll's digest key; RS256,
+    /// roll's issuer key, on digests from before the digest key).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub digest: Option<String>,
 }
@@ -84,24 +90,122 @@ pub struct Digest {
     pub start: i64,
 }
 
-/// An RSA public key (a JWKS entry's `n` and `e`, big-endian).
+/// A public key a digest is checked with.
 #[derive(Clone, Debug)]
-pub struct PublicKey {
-    pub n: Vec<u8>,
-    pub e: Vec<u8>,
+pub enum PublicKey {
+    /// roll's digest key: a JWK `{kty: OKP, crv: Ed25519, x}`; it checks `EdDSA` digests only.
+    Ed25519(Vec<u8>),
+    /// roll's issuer key (`n` and `e`, big-endian): `RS256` digests from before the digest key.
+    Rsa { n: Vec<u8>, e: Vec<u8> },
+}
+
+fn unb64(v: &serde_json::Value) -> Option<Vec<u8>> {
+    v.as_str().and_then(|s| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(s).ok())
 }
 
 impl PublicKey {
-    /// Keys of a JWKS document (`/v1/secrets/oidc/jwks`) by `kid`.
+    /// One JWK, when it's an Ed25519 or RSA key: (kid, key).
+    pub fn from_jwk(k: &serde_json::Value) -> Option<(String, PublicKey)> {
+        let kid = k["kid"].as_str()?.to_string();
+        let key = match (k["kty"].as_str()?, k["crv"].as_str()) {
+            ("OKP", Some("Ed25519")) => PublicKey::Ed25519(unb64(&k["x"]).filter(|x| x.len() == 32)?),
+            ("RSA", _) => PublicKey::Rsa { n: unb64(&k["n"])?, e: unb64(&k["e"])? },
+            _ => return None,
+        };
+        Some((kid, key))
+    }
+
+    /// The keys of a JWKS document's `keys` by `kid`.
     pub fn from_jwks(jwks: &serde_json::Value) -> Vec<(String, PublicKey)> {
-        let d = |v: &serde_json::Value| v.as_str().and_then(|s| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(s).ok());
-        jwks["keys"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|k| k["kty"] == "RSA")
-            .filter_map(|k| Some((k["kid"].as_str()?.to_string(), PublicKey { n: d(&k["n"])?, e: d(&k["e"])? })))
-            .collect()
+        jwks["keys"].as_array().into_iter().flatten().filter_map(PublicKey::from_jwk).collect()
+    }
+}
+
+/// What digests are checked with: roll's digest keys, the issuer keys whose digests from before the
+/// digest key still count, and the keys pulled in an emergency.
+#[derive(Clone, Debug, Default)]
+pub struct Keys {
+    /// Digest keys (Ed25519) by kid, the pulled ones left out.
+    pub digest: std::collections::HashMap<String, PublicKey>,
+    /// Issuer keys (RSA) by kid whose digests count as `legacy`, the pulled ones left out.
+    pub legacy: std::collections::HashMap<String, PublicKey>,
+    /// Kids pulled in an emergency (either kind), with when: their digests vouch for nothing.
+    pub pulled: std::collections::HashMap<String, i64>,
+}
+
+/// What a digest's signature says.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Signed {
+    /// Signed by one of roll's digest keys.
+    Digest(Digest),
+    /// Signed by an issuer key, as roll did before the digest key.
+    Legacy(Digest),
+    /// Its kid was pulled: what it says (unchecked) vouches for nothing.
+    Pulled { kid: String, digest: Digest },
+    /// No key of roll's signed it.
+    Bad,
+}
+
+impl Keys {
+    /// Keys from JWKS documents saved earlier (`audit verify --file`): the digest JWKS
+    /// (`/v1/secrets/audit/jwks`: Ed25519 `keys`, its `legacy` issuer keys and its `pulled` kids),
+    /// and optionally an issuer JWKS saved before the digest key (`/v1/secrets/oidc/jwks`). An RSA
+    /// key from an issuer JWKS counts only when a digest JWKS names its kid as legacy, if one is
+    /// given: issuer keys made since never signed a digest.
+    pub fn from_jwks(docs: &[serde_json::Value]) -> Keys {
+        let mut k = Keys::default();
+        let mut named: Option<std::collections::HashSet<String>> = None;
+        let mut issuers = Vec::new();
+        for doc in docs {
+            for (kid, key) in PublicKey::from_jwks(doc) {
+                match key {
+                    PublicKey::Ed25519(_) => {
+                        k.digest.insert(kid, key);
+                    }
+                    PublicKey::Rsa { .. } => issuers.push((kid, key)),
+                }
+            }
+            if let Some(legacy) = doc["legacy"].as_array() {
+                let named = named.get_or_insert_with(Default::default);
+                for (kid, key) in legacy.iter().filter_map(PublicKey::from_jwk) {
+                    if matches!(key, PublicKey::Rsa { .. }) {
+                        named.insert(kid.clone());
+                        k.legacy.insert(kid, key);
+                    }
+                }
+            }
+            for p in doc["pulled"].as_array().into_iter().flatten() {
+                if let Some(kid) = p["kid"].as_str() {
+                    k.pulled.insert(kid.to_string(), p["pulled_at"].as_i64().unwrap_or(0));
+                }
+            }
+        }
+        for (kid, key) in issuers {
+            if named.as_ref().is_none_or(|n| n.contains(&kid)) {
+                k.legacy.entry(kid).or_insert(key);
+            }
+        }
+        for kid in k.pulled.keys() {
+            k.digest.remove(kid);
+            k.legacy.remove(kid);
+        }
+        k
+    }
+
+    /// Check a digest JWS.
+    pub fn check(&self, jws: &str) -> Signed {
+        let Some(kid) = kid(jws) else { return Signed::Bad };
+        if self.pulled.contains_key(&kid) {
+            return match payload(jws) {
+                Some(digest) => Signed::Pulled { kid, digest },
+                None => Signed::Bad,
+            };
+        }
+        match (self.digest.get(&kid), self.legacy.get(&kid)) {
+            (Some(k), _) => open(jws, k).map_or(Signed::Bad, Signed::Digest),
+            (None, Some(k)) => open(jws, k).map_or(Signed::Bad, Signed::Legacy),
+            (None, None) => Signed::Bad,
+        }
     }
 }
 
@@ -113,9 +217,11 @@ pub struct Break {
     pub seq: Option<i64>,
     /// `edited` (a row doesn't hash to what's stored), `missing` (a gap: rows deleted),
     /// `rewritten` (the chain doesn't match what a digest signed), `signature` (a digest that
-    /// doesn't verify), `truncated` (rows deleted from the end), `cut` (rows deleted from the
-    /// start other than by retention), `unchained` (a row added outside the chain); the server
-    /// also says `head` (the head lacks roll's MAC) and `stale` (no digest for over two hours).
+    /// doesn't verify), `pulled` (a digest rests on a key pulled in an emergency, and no later
+    /// digest under a good key covers it), `truncated` (rows deleted from the end), `cut` (rows
+    /// deleted from the start other than by retention), `unchained` (a row added outside the
+    /// chain); the server also says `head` (the head lacks roll's MAC) and `stale` (no digest for
+    /// over two hours).
     pub reason: String,
     pub detail: String,
 }
@@ -138,6 +244,37 @@ pub struct Verification {
     /// Rows written before the chain began: they have no hash.
     pub unchained: i64,
     pub broken: Option<Break>,
+    /// Digests signed by roll's issuer key, from before the digest key: they count, marked so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legacy: Option<Legacy>,
+    /// Digests resting on keys pulled in an emergency, by key: they vouch for nothing themselves.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pulled: Vec<OnPulled>,
+}
+
+/// The digests of a walk signed by roll's issuer key (before the digest key).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Legacy {
+    /// Always `issuer key`.
+    pub signer: String,
+    pub digests: i64,
+    /// The last row a legacy digest covers.
+    pub through: i64,
+}
+
+/// One pulled key's digests in a walk.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OnPulled {
+    pub kid: String,
+    /// When it was pulled (unix ms), as the keys say.
+    pub pulled_at: i64,
+    pub digests: i64,
+    /// The first and the last of them (their own rows' seq).
+    pub first: i64,
+    pub last: i64,
+    /// The next digest under a good key after `last`, whose signature covers them; `None` leaves
+    /// the log from `first`'s place on unvouched (a `pulled` break).
+    pub countersigned: Option<i64>,
 }
 
 fn put(out: &mut Vec<u8>, s: &str) {
@@ -210,10 +347,22 @@ fn b64(b: &[u8]) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b)
 }
 
-/// A digest as a JWS (RS256, compact) signed with the issuer's key `kid`.
-pub fn sign(kid: &str, key: &ring::signature::RsaKeyPair, d: &Digest) -> Result<String, ring::error::Unspecified> {
-    let header = serde_json::json!({ "alg": "RS256", "typ": TYP, "kid": kid });
-    let signed = format!("{}.{}", b64(header.to_string().as_bytes()), b64(serde_json::to_string(d).expect("JSON").as_bytes()));
+fn signing_input(alg: &str, kid: &str, d: &Digest) -> String {
+    let header = serde_json::json!({ "alg": alg, "typ": TYP, "kid": kid });
+    format!("{}.{}", b64(header.to_string().as_bytes()), b64(serde_json::to_string(d).expect("JSON").as_bytes()))
+}
+
+/// A digest as a JWS (EdDSA, compact) signed with roll's digest key `kid`.
+pub fn sign(kid: &str, key: &ring::signature::Ed25519KeyPair, d: &Digest) -> String {
+    let signed = signing_input("EdDSA", kid, d);
+    let sig = key.sign(signed.as_bytes());
+    format!("{signed}.{}", b64(sig.as_ref()))
+}
+
+/// A digest as a JWS (RS256, compact) signed with an issuer key, as roll signed digests before the
+/// digest key (tests of the legacy path).
+pub fn sign_rs256(kid: &str, key: &ring::signature::RsaKeyPair, d: &Digest) -> Result<String, ring::error::Unspecified> {
+    let signed = signing_input("RS256", kid, d);
     let mut sig = vec![0u8; key.public().modulus_len()];
     key.sign(&ring::signature::RSA_PKCS1_SHA256, &ring::rand::SystemRandom::new(), signed.as_bytes(), &mut sig)?;
     Ok(format!("{signed}.{}", b64(&sig)))
@@ -225,17 +374,29 @@ pub fn kid(jws: &str) -> Option<String> {
     serde_json::from_slice::<serde_json::Value>(&header).ok()?["kid"].as_str().map(String::from)
 }
 
-/// The digest a JWS signs, if `key` signed it.
+/// What a digest JWS says, checking nothing (a pulled key's: it vouches for nothing).
+fn payload(jws: &str) -> Option<Digest> {
+    let p = jws.split('.').nth(1)?;
+    serde_json::from_slice(&base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(p).ok()?).ok()
+}
+
+/// The digest a JWS signs, if `key` signed it. The algorithm is the key's: EdDSA for a digest key,
+/// RS256 for an issuer key, never the other way round.
 pub fn open(jws: &str, key: &PublicKey) -> Option<Digest> {
     let d = |s: &str| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(s).ok();
     let mut parts = jws.split('.');
     let (h, p, s) = (parts.next()?, parts.next()?, parts.next()?);
     let header: serde_json::Value = serde_json::from_slice(&d(h)?).ok()?;
-    if parts.next().is_some() || header["alg"] != "RS256" || header["typ"] != TYP {
+    if parts.next().is_some() || header["typ"] != TYP {
         return None;
     }
     let msg = format!("{h}.{p}");
-    ring::signature::RsaPublicKeyComponents { n: &key.n, e: &key.e }.verify(&ring::signature::RSA_PKCS1_2048_8192_SHA256, msg.as_bytes(), &d(s)?).ok()?;
+    let sig = d(s)?;
+    match key {
+        PublicKey::Ed25519(x) if header["alg"] == "EdDSA" => ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, x).verify(msg.as_bytes(), &sig).ok()?,
+        PublicKey::Rsa { n, e } if header["alg"] == "RS256" => ring::signature::RsaPublicKeyComponents { n, e }.verify(&ring::signature::RSA_PKCS1_2048_8192_SHA256, msg.as_bytes(), &sig).ok()?,
+        _ => return None,
+    }
     serde_json::from_slice(&d(p)?).ok()
 }
 
@@ -249,6 +410,10 @@ pub struct Walk<'a> {
     prev: Option<String>,
     /// Where the latest valid digest says the log starts.
     start: Option<i64>,
+    /// A digest under a digest key was walked: an issuer key's after it isn't roll's.
+    digest_keyed: bool,
+    /// The first digest on a pulled key since the last one that vouches.
+    unvouched: Option<(i64, String)>,
     /// Rows skipped before the first anchor.
     pub skipped: i64,
     pub v: Verification,
@@ -256,7 +421,7 @@ pub struct Walk<'a> {
 
 impl<'a> Walk<'a> {
     pub fn new(project: &'a str, whole: bool) -> Walk<'a> {
-        Walk { project, whole, prev: None, start: None, skipped: 0, v: Verification::default() }
+        Walk { project, whole, prev: None, start: None, digest_keyed: false, unvouched: None, skipped: 0, v: Verification::default() }
     }
 
     fn fail(&mut self, seq: Option<i64>, reason: &str, detail: String) -> bool {
@@ -264,8 +429,8 @@ impl<'a> Walk<'a> {
         false
     }
 
-    /// Check the next row; `false` once broken (stop walking). `key` finds roll's key by id.
-    pub fn push(&mut self, e: &AuditEntry, key: &mut dyn FnMut(&str) -> Option<PublicKey>) -> bool {
+    /// Check the next row; `false` once broken (stop walking).
+    pub fn push(&mut self, e: &AuditEntry, keys: &Keys) -> bool {
         if self.v.broken.is_some() {
             return false;
         }
@@ -273,7 +438,11 @@ impl<'a> Walk<'a> {
             self.v.unchained += 1;
             return true;
         };
-        let signed = e.digest.as_deref().and_then(|jws| kid(jws).and_then(|k| key(&k)).and_then(|k| open(jws, &k)));
+        let checked = e.digest.as_deref().map_or(Signed::Bad, |jws| keys.check(jws));
+        let signed = match &checked {
+            Signed::Digest(d) | Signed::Legacy(d) | Signed::Pulled { digest: d, .. } => Some(d.clone()),
+            Signed::Bad => None,
+        };
         let prev = match self.prev.take() {
             Some(prev) => {
                 let expect = self.v.head.unwrap_or(0) + 1;
@@ -283,7 +452,8 @@ impl<'a> Walk<'a> {
                 prev
             }
             None if seq == 1 => String::new(),
-            // A signed digest names the hash before it: an anchor to start from.
+            // A signed digest names the hash before it: an anchor to start from. One on a pulled key
+            // too, as the digest under a good key that must come later covers the walk from it.
             None => match signed.as_ref().filter(|d| e.action == DIGEST && d.project == self.project && d.seq == seq - 1) {
                 Some(d) => d.hash.clone(),
                 None if self.whole => return self.fail(Some(seq), "cut", format!("the log starts at #{seq}, which isn't a signed digest: rows before it were removed")),
@@ -305,10 +475,40 @@ impl<'a> Walk<'a> {
             if d.project != self.project || d.seq != seq - 1 || d.hash != prev {
                 return self.fail(Some(seq - 1), "rewritten", format!("the log through #{} isn't what roll signed at #{seq}", seq - 1));
             }
-            self.v.digests += 1;
-            self.v.through = Some(d.seq);
-            self.v.signed_at = Some(d.at);
-            self.start = Some(d.start);
+            match checked {
+                Signed::Pulled { kid, .. } => {
+                    let pulled_at = keys.pulled.get(&kid).copied().unwrap_or(0);
+                    match self.v.pulled.iter_mut().find(|p| p.kid == kid) {
+                        Some(p) => {
+                            p.digests += 1;
+                            p.last = seq;
+                            p.countersigned = None;
+                        }
+                        None => self.v.pulled.push(OnPulled { kid: kid.clone(), pulled_at, digests: 1, first: seq, last: seq, countersigned: None }),
+                    }
+                    self.unvouched.get_or_insert((seq, kid));
+                }
+                Signed::Legacy(_) if self.digest_keyed => {
+                    return self.fail(Some(seq), "signature", format!("digest #{seq} is signed by roll's issuer key after the digest key took over: the issuer key no longer signs digests"));
+                }
+                vouching => {
+                    if let Signed::Legacy(_) = vouching {
+                        let l = self.v.legacy.get_or_insert_with(|| Legacy { signer: "issuer key".into(), ..Legacy::default() });
+                        l.digests += 1;
+                        l.through = d.seq;
+                    } else {
+                        self.digest_keyed = true;
+                    }
+                    self.v.digests += 1;
+                    self.v.through = Some(d.seq);
+                    self.v.signed_at = Some(d.at);
+                    self.start = Some(d.start);
+                    self.unvouched = None;
+                    for p in self.v.pulled.iter_mut().filter(|p| p.countersigned.is_none()) {
+                        p.countersigned = Some(seq);
+                    }
+                }
+            }
         }
         self.v.rows += 1;
         self.v.head = Some(seq);
@@ -329,6 +529,14 @@ impl<'a> Walk<'a> {
     }
 
     pub fn finish(mut self) -> Verification {
+        // A pulled key's digest vouches for nothing: the chain from it needs a later good digest.
+        if let Some((seq, kid)) = self.unvouched.take() {
+            self.broken(
+                Some(seq),
+                "pulled",
+                format!("digest #{seq} rests on {kid}, a key pulled in an emergency, and no later digest under a good key covers it: the log from #{seq} on needs the next good digest, or a sink's copy, to be trusted"),
+            );
+        }
         // Retention moves the start only with a digest that says so.
         if let (true, Some(from), Some(start)) = (self.whole, self.v.from, self.start)
             && from != start

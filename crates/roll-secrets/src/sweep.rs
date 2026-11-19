@@ -485,9 +485,13 @@ impl Secrets {
         self.sweep_retention()?;
         self.sweep_reminders()?;
         self.sweep_alerts()?;
-        // The issuer key's rotation, before the digests it signs (issuer.rs).
+        // The issuer key's rotation (issuer.rs).
         if let Err(e) = self.sweep_issuer() {
             tracing::warn!("rotating roll's OIDC issuer key failed: {e}");
+        }
+        // The digest key's, before the digests it signs (audit_key.rs).
+        if let Err(e) = self.sweep_audit_key() {
+            tracing::warn!("rotating the audit log's digest key failed: {e}");
         }
         // Digests of the audit log, and its retention (at a digest: audit.rs).
         if let Err(e) = self.sweep_audit_chain(crate::audit::RETENTION_DAYS * 86_400_000) {

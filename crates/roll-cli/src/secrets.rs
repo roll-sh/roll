@@ -454,8 +454,8 @@ pub enum Secrets {
         #[arg(long)]
         format: Option<String>,
     },
-    /// roll's OIDC issuer key (the operator's): it signs clouds' and apps' tokens and the audit
-    /// log's digests.
+    /// roll's OIDC issuer key (the operator's): it signs clouds' and apps' tokens (the audit log's
+    /// digests have a key of their own: `audit key`).
     Issuer {
         #[command(subcommand)]
         cmd: IssuerCmd,
@@ -488,10 +488,31 @@ pub enum AuditCmd {
         /// with nothing but roll's public keys.
         #[arg(long, requires = "jwks")]
         file: Option<std::path::PathBuf>,
-        /// roll's public keys, as saved earlier from `/v1/secrets/oidc/jwks` and kept apart from
-        /// roll: keys fetched from the server being checked would vouch for themselves.
+        /// roll's digest keys, as saved earlier from `/v1/secrets/audit/jwks` and kept apart from
+        /// roll: keys fetched from the server being checked would vouch for themselves. Give it
+        /// again for an issuer JWKS (`/v1/secrets/oidc/jwks`) saved before the digest key, for the
+        /// digests it signed.
         #[arg(long, requires = "file")]
-        jwks: Option<std::path::PathBuf>,
+        jwks: Vec<std::path::PathBuf>,
+    },
+    /// The key that signs the digests (the operator's).
+    Key {
+        #[command(subcommand)]
+        cmd: AuditKeyCmd,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AuditKeyCmd {
+    /// A new digest key signs now. With `--now --retire KID` (a key that may have leaked): KID is
+    /// pulled too, its digests vouch for nothing again, and every project's log is signed under the
+    /// new key at once.
+    Rotate {
+        #[arg(long, requires = "retire")]
+        now: bool,
+        /// The kid to pull.
+        #[arg(long, requires = "now", value_name = "KID")]
+        retire: Option<String>,
     },
 }
 
@@ -1233,6 +1254,19 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
         }
         return Ok(());
     }
+    // So is the audit log's digest key.
+    if let Secrets::Audit { cmd: Some(AuditCmd::Key { cmd: AuditKeyCmd::Rotate { now, retire } }), .. } = &cmd {
+        let body = if *now { json!({ "now": true, "retire": retire }) } else { json!({}) };
+        let v = api.call(Method::POST, "/v1/secrets/audit/key/rotate", Some(body)).await?;
+        if json_out {
+            println!("{}", serde_json::to_string_pretty(&v)?);
+        } else if let Some(pulled) = v["pulled"].as_str() {
+            println!("{} signs digests now; {pulled} is pulled, and {} logs were signed under the new key. Save /v1/secrets/audit/jwks again for offline checks.", s(&v["kid"]), v["signed"]);
+        } else {
+            println!("{} signs digests now. Save /v1/secrets/audit/jwks again for offline checks.", s(&v["kid"]));
+        }
+        return Ok(());
+    }
     if let Secrets::Health { all: true, .. } = &cmd {
         let v = api.get("/v1/secrets/findings").await?;
         if json_out {
@@ -1263,7 +1297,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
     }
     // An export is checked on this machine, against keys saved earlier. A `prj_…` id needs no
     // server; a name is looked up.
-    if let Secrets::Audit { cmd: Some(AuditCmd::Verify { file: Some(file), jwks: Some(jwks), .. }), .. } = &cmd {
+    if let Secrets::Audit { cmd: Some(AuditCmd::Verify { file: Some(file), jwks, .. }), .. } = &cmd {
         let given = args.resolve().project.context("which project's log is it? pass -p (a prj_… id needs no server)")?;
         return verify_audit_file(&project(api, Some(&given)).await?, file, jwks, json_out);
     }
@@ -2561,6 +2595,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 println!("{}  {:<8} {:<12} {:<24} {}  {state}", s(&l["id"]), s(&l["kind"]), s(&l["environment"]), s(&l["key"]), s(&l["consumer"]));
             }
         }
+        Secrets::Audit { cmd: Some(AuditCmd::Key { .. }), .. } => unreachable!("handled above"),
         Secrets::Audit { cmd: Some(AuditCmd::Verify { since, .. }), .. } => {
             let q = since.as_deref().map(parse_time).transpose()?.map(|t| format!("?since={t}")).unwrap_or_default();
             let v = c.call(Method::GET, &format!("{}/audit/verify{q}", c.base()), None).await?;
@@ -2613,15 +2648,21 @@ fn parse_time(t: &str) -> anyhow::Result<i64> {
 }
 
 /// `audit verify --file`: an export of `project`'s log, its chain and digests checked here against
-/// roll's public keys as saved in `jwks`.
-fn verify_audit_file(project: &str, file: &std::path::Path, jwks: &std::path::Path, json_out: bool) -> anyhow::Result<()> {
-    use roll_secrets_chain::{PublicKey, Walk};
+/// roll's public keys as saved in `jwks` (the digest JWKS, and an issuer JWKS for legacy digests).
+fn verify_audit_file(project: &str, file: &std::path::Path, jwks: &[std::path::PathBuf], json_out: bool) -> anyhow::Result<()> {
+    use roll_secrets_chain::{Keys, Signed, Walk};
     let text = std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
     let mut rows = text.lines().filter(|l| !l.trim().is_empty()).map(serde_json::from_str::<roll_secrets_chain::AuditEntry>).collect::<Result<Vec<_>, _>>().context("that isn't a JSONL export of the audit log (audit --format jsonl)")?;
     rows.sort_by_key(|r| r.seq);
-    let jwks: Value = serde_json::from_str(&std::fs::read_to_string(jwks).with_context(|| format!("reading {}", jwks.display()))?).context("that isn't a JWKS")?;
-    let keys: std::collections::HashMap<String, PublicKey> = PublicKey::from_jwks(&jwks).into_iter().collect();
-    let opened = |jws: &str| roll_secrets_chain::kid(jws).and_then(|k| keys.get(&k)).and_then(|k| roll_secrets_chain::open(jws, k));
+    let docs = jwks
+        .iter()
+        .map(|f| serde_json::from_str::<Value>(&std::fs::read_to_string(f).with_context(|| format!("reading {}", f.display()))?).with_context(|| format!("{} isn't a JWKS", f.display())))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let keys = Keys::from_jwks(&docs);
+    let opened = |jws: &str| match keys.check(jws) {
+        Signed::Digest(d) | Signed::Legacy(d) | Signed::Pulled { digest: d, .. } => Some(d),
+        Signed::Bad => None,
+    };
     // The digests name their project: it must be the one asked about, and only it.
     let mut named: Vec<String> = rows.iter().filter_map(|r| r.digest.as_deref()).filter_map(opened).map(|d| d.project).collect();
     named.sort();
@@ -2634,7 +2675,7 @@ fn verify_audit_file(project: &str, file: &std::path::Path, jwks: &std::path::Pa
     }
     let mut walk = Walk::new(project, false);
     for r in &rows {
-        if !walk.push(r, &mut |k| keys.get(k).cloned()) {
+        if !walk.push(r, &keys) {
             break;
         }
     }
@@ -2668,6 +2709,15 @@ fn report_verification(v: &Value, json_out: bool) -> anyhow::Result<()> {
         }
         if v["unchained"].as_i64().unwrap_or(0) > 0 {
             println!("{} rows from before the chain began have no hash (unchained before #{})", v["unchained"], from.unwrap_or(1));
+        }
+        if let Some(l) = v["legacy"].as_object() {
+            println!("legacy: {}: {} digests through #{} (signed before the digest key)", l["signer"].as_str().unwrap_or("issuer key"), l["digests"], l["through"]);
+        }
+        for p in v["pulled"].as_array().into_iter().flatten() {
+            match p["countersigned"].as_i64() {
+                Some(by) => println!("pulled key {}: {} digests (#{}–#{}), covered by the good digest #{by}", s(&p["kid"]), p["digests"], p["first"], p["last"]),
+                None => println!("pulled key {}: {} digests (#{}–#{}), no later good digest covers them", s(&p["kid"]), p["digests"], p["first"], p["last"]),
+            }
         }
     }
     if v["ok"] != true {

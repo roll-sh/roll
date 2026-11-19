@@ -227,10 +227,12 @@ export type NewToken = { name: string; environments?: string[]; paths?: string[]
 /** `approval`: the approval that let the request through roll-access's gate (an `ask` approved; `until` when a rule it remembered allowed it). */
 /** `seq` and `hash` place a row in its project's chain (absent on rows from before it); an `audit.digest` row's `digest` is roll's signed JWS of it. */
 export type AuditEntry = { id: number; seq?: number; hash?: string; at: number; actor: string; action: string; environment: string | null; path: string | null; keys: string[]; summary: string; ip: string | null; approval?: Approval; digest?: string };
-/** Where the chain breaks: `edited`, `missing`, `rewritten`, `signature`, `truncated`, `cut`, `unchained`, `head` or `stale`. */
+/** Where the chain breaks: `edited`, `missing`, `rewritten`, `signature`, `pulled`, `truncated`, `cut`, `unchained`, `head` or `stale`. */
 export type AuditBreak = { seq?: number; reason: string; detail: string };
-/** `GET …/audit/verify`: rows `from`–`head` walked, signed by a digest `through` a row. */
-export type AuditVerification = { ok: boolean; from: number | null; through: number | null; signed_at: number | null; head: number | null; rows: number; digests: number; unchained: number; broken: AuditBreak | null };
+/** `GET …/audit/verify`: rows `from`–`head` walked, signed by a digest `through` a row. `legacy`: digests roll's issuer key signed before the digest key (they count); `pulled`: digests on keys pulled in an emergency (they don't), each covered by the good digest at `countersigned`, or not (`null`: a `pulled` break). */
+export type AuditVerification = { ok: boolean; from: number | null; through: number | null; signed_at: number | null; head: number | null; rows: number; digests: number; unchained: number; broken: AuditBreak | null; legacy?: AuditLegacy; pulled?: AuditPulled[] };
+export type AuditLegacy = { signer: "issuer key"; digests: number; through: number };
+export type AuditPulled = { kid: string; pulled_at: number; digests: number; first: number; last: number; countersigned: number | null };
 /** `by`: who approved it, in order (more than one when a policy asks for two people). */
 export type Approval = { id: string; by?: string[]; until?: number };
 /** `since`: rows at or after this time (ms); `before`: rows older than this id. */
