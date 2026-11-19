@@ -60,8 +60,9 @@ impl ValueTemplate {
     pub fn new(v: &Value) -> EsResult<ValueTemplate> {
         Ok(match v {
             Value::Str(s) => ValueTemplate::Str(Template::new(s)?),
-            Value::Arr(a) => ValueTemplate::List(a.iter().map(ValueTemplate::new).collect::<EsResult<_>>()?),
-            Value::Obj(m) => ValueTemplate::Map(m.iter().map(|(k, v)| Ok((k.clone(), ValueTemplate::new(v)?))).collect::<EsResult<_>>()?),
+            // One level per nested value (up to the 1000 a request body may have).
+            Value::Arr(a) => ValueTemplate::List(a.iter().map(|x| crate::stack::maybe_grow(|| ValueTemplate::new(x))).collect::<EsResult<_>>()?),
+            Value::Obj(m) => ValueTemplate::Map(m.iter().map(|(k, v)| Ok((k.clone(), crate::stack::maybe_grow(|| ValueTemplate::new(v))?))).collect::<EsResult<_>>()?),
             other => ValueTemplate::Other(other.clone()),
         })
     }
@@ -69,11 +70,11 @@ impl ValueTemplate {
     pub fn render(&self, d: &IngestDoc) -> EsResult<Value> {
         Ok(match self {
             ValueTemplate::Str(t) => Value::Str(t.render(d)?),
-            ValueTemplate::List(l) => Value::Arr(l.iter().map(|x| x.render(d)).collect::<EsResult<_>>()?),
+            ValueTemplate::List(l) => Value::Arr(l.iter().map(|x| crate::stack::maybe_grow(|| x.render(d))).collect::<EsResult<_>>()?),
             ValueTemplate::Map(m) => {
                 let mut out = Map::new();
                 for (k, v) in m {
-                    out.insert(k.clone(), v.render(d)?);
+                    out.insert(k.clone(), crate::stack::maybe_grow(|| v.render(d))?);
                 }
                 Value::Obj(out)
             }
@@ -1667,6 +1668,7 @@ fn grok_value(v: &search_painless::grok::GrokValue) -> Value {
 fn expand_dots(m: &mut Map, field: &str, overwrite: bool) -> EsResult<()> {
     let keys: Vec<String> = if field == "*" { m.keys().filter(|k| k.contains('.')).cloned().collect() } else { vec![field.to_string()] };
     for k in keys {
+        super::doc::check_path_depth(&k)?;
         let Some(v) = m.shift_remove(&k) else { continue };
         let parts: Vec<&str> = k.split('.').collect();
         let mut cur = &mut *m;

@@ -789,7 +789,8 @@ fn nested_sort(p: &mut XParser<'_>) -> EsResult<NestedSort> {
             0 => path = Some(p.text()?),
             1 => filter = Some(parse_inner(p)?),
             2 => max_children = Some(p.int_value()?),
-            _ => nested = Some(Box::new(nested_sort(p)?)),
+            // Nesting is the request's to choose (up to the JSON parser's 1000 levels).
+            _ => nested = Some(Box::new(crate::stack::maybe_grow(|| nested_sort(p))?)),
         }
         Ok(())
     })?;

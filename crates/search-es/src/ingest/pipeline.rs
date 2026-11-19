@@ -107,8 +107,12 @@ impl std::fmt::Debug for Cache {
     }
 }
 
-/// Compiles a processor list.
+/// Compiles a processor list. Recurses once per nested processor (`foreach`, `on_failure`).
 pub fn compile_list(cluster: &Cluster, v: &Value) -> EsResult<Vec<Compiled>> {
+    crate::stack::maybe_grow(|| compile_list_at(cluster, v))
+}
+
+fn compile_list_at(cluster: &Cluster, v: &Value) -> EsResult<Vec<Compiled>> {
     let Value::Arr(a) = v else { return Ok(Vec::new()) };
     let mut out = Vec::with_capacity(a.len());
     for item in a {
@@ -491,7 +495,12 @@ fn run_traced_pipeline(cluster: &Cluster, p: &Compiled, name: &processors::Templ
 }
 
 /// Runs one processor (condition, failure handling).
+/// Runs one processor. Recurses once per nested processor or pipeline.
 pub fn run_one(cluster: &Cluster, p: &Compiled, d: &mut IngestDoc, depth: usize) -> EsResult<Flow> {
+    crate::stack::maybe_grow(|| run_one_at(cluster, p, d, depth))
+}
+
+fn run_one_at(cluster: &Cluster, p: &Compiled, d: &mut IngestDoc, depth: usize) -> EsResult<Flow> {
     let mut cond = None;
     if let Some(c) = &p.cond {
         let ok = cond_true(c, d)?;
@@ -569,12 +578,17 @@ pub fn run_one(cluster: &Cluster, p: &Compiled, d: &mut IngestDoc, depth: usize)
     }
 }
 
+/// Pipelines one document may run nested in one another.
+const MAX_PIPELINES: usize = 100;
+
 /// Runs a pipeline over a document.
 pub fn run_pipeline(cluster: &Cluster, pl: &Pipeline, d: &mut IngestDoc, depth: usize) -> EsResult<Flow> {
-    if depth > 100 || d.pipelines.contains(&pl.id) {
-        let mut chain = d.pipelines.clone();
-        chain.push(pl.id.clone());
+    if d.pipelines.contains(&pl.id) {
         return Err(EsError::new(500, "graph_structure_exception", format!("Cycle detected for pipeline: {}", pl.id)));
+    }
+    // `IngestDocument.MAX_PIPELINES` (`es.ingest.max_pipelines`).
+    if depth >= MAX_PIPELINES {
+        return Err(EsError::new(500, "graph_structure_exception", format!("Too many nested pipelines. Cannot have more than {MAX_PIPELINES} nested pipelines")));
     }
     d.pipelines.push(pl.id.clone());
     d.ingest.insert("pipeline".into(), Value::Str(pl.id.clone()));

@@ -692,7 +692,9 @@ mod tests {
             ok(&c, "POST", "/metrics-d/_doc?refresh=true", &format!(r#"{{"@timestamp":"{ts}","host":"{host}","cpu":{cpu}}}"#)).await;
         }
         let first = c.state().metadata.data_streams["metrics-d"].indices[0].clone();
-        settle(&c, now).await;
+        // ILM runs once the index exists: at `now` (taken before the documents created it) the
+        // index would be younger than zero and stay in `new`.
+        settle(&c, crate::time::now_millis()).await;
         let v = explain(&c, &first).await;
         assert_eq!(step(&v), "warm/downsample/check-ts-end-time-passed", "{v}");
         let end = super::super::ilm_run::next_due(&c.state()).expect("the end time is due");

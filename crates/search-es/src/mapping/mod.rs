@@ -1139,6 +1139,17 @@ impl ObjectMapper {
                 if parts.is_empty() {
                     return Err(EsError::illegal_argument("field name cannot contain only dots"));
                 }
+                // Its parent objects can't pass the depth limit, and building, validating and
+                // dropping them all walks the chain: past the nesting a request body may have,
+                // it's refused as the validation would refuse it.
+                if parts.len() > MAX_DOTTED_PARENTS {
+                    let at = (ctx.depth_limit.max(1) as usize).min(parts.len() - 1);
+                    return Err(EsError::illegal_argument(format!(
+                        "Limit of mapping depth [{}] has been exceeded due to object field [{}]",
+                        ctx.depth_limit,
+                        parts[..at].join(".")
+                    )));
+                }
                 let leaf = parts[parts.len() - 1].to_string();
                 validate_field_name(&leaf)?;
                 for p in &parts[..parts.len() - 1] {
@@ -1339,6 +1350,9 @@ fn parse_subobjects(v: &Value) -> Result<bool, EsError> {
         other => Err(EsError::parse(format!("unknown subobjects value: {}", other.to_es_string()))),
     }
 }
+
+/// Parent objects a dotted field name may spell out (a request body nests at most 1000 levels).
+const MAX_DOTTED_PARENTS: usize = 1000;
 
 fn validate_field_name(name: &str) -> Result<(), EsError> {
     if name.is_empty() {

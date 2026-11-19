@@ -288,6 +288,12 @@ impl<'m, 'p> Walker<'m, 'p> {
 
     /// Validates a field name as `DocumentParser` does.
     fn check_name(&self, name: &str) -> EsResult<()> {
+        // Each part of a dotted name is an object level: resolving and mapping one walks all
+        // its prefixes. Past the nesting a request body may have, it's refused (roll's own).
+        if name.bytes().filter(|&b| b == b'.').count() >= crate::ingest::doc::MAX_PATH_DEPTH {
+            let msg = format!("field name [{}...] has more than {} parts", &name[..name.char_indices().nth(64).map_or(name.len(), |(i, _)| i)], crate::ingest::doc::MAX_PATH_DEPTH);
+            return Err(self.doc_error(format!("failed to parse: {msg}")).caused_by(EsError::illegal_argument(msg)));
+        }
         if crate::opensearch::active() {
             return crate::opensearch::check_field_name(name);
         }
