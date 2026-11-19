@@ -256,6 +256,10 @@ pub enum EnterpriseCmd {
         /// A multi-tenant issuer's one tenant roll trusts (its assertions' `tenant` claim).
         #[arg(long)]
         tenant: Option<String>,
+        /// The SSO connection that is this same provider (`sso_…`, on the account page's single sign-on): it vouches
+        /// for the domains a DNS record proved for that connection, instead of `--domain`.
+        #[arg(long, conflicts_with = "domains")]
+        sso: Option<String>,
     },
     /// Stop trusting an identity provider: no new sign-ins from it.
     Untrust { issuer: String },
@@ -683,8 +687,9 @@ pub enum Mcp {
     /// Approve a request: it runs.
     Approve {
         id: String,
-        /// Also allow the same action on the same resource without asking: 1h, 8h, 1d or always.
-        #[arg(long, value_parser = ["1h", "8h", "1d", "always"])]
+        /// Also allow the same action on the same resource without asking: 1h, 8h, 1d, 7d, 30d or
+        /// always.
+        #[arg(long, value_parser = ["1h", "8h", "1d", "7d", "30d", "always"])]
         remember: Option<String>,
     },
     /// Deny a request.
@@ -787,7 +792,7 @@ async fn enterprise(api: &Api, json_out: bool, cmd: Option<EnterpriseCmd>) -> an
     let other = |list: Vec<Value>, issuer: &str| -> Vec<Value> { list.into_iter().filter(|i| i["issuer"].as_str().map(|s| s.trim_end_matches('/')) != Some(issuer.trim_end_matches('/'))).collect() };
     let out = match cmd {
         None => current,
-        Some(EnterpriseCmd::Trust { issuer, name, jwks, matching, domains, admins, tenant }) => {
+        Some(EnterpriseCmd::Trust { issuer, name, jwks, matching, domains, admins, tenant, sso }) => {
             // Again for the same issuer and tenant changes it; another tenant is another entry.
             let mut list: Vec<Value> = idps(&current)
                 .into_iter()
@@ -796,6 +801,9 @@ async fn enterprise(api: &Api, json_out: bool, cmd: Option<EnterpriseCmd>) -> an
             let mut idp = json!({ "issuer": issuer, "matching": matching, "domains": domains, "admins": admins });
             if let Some(t) = tenant {
                 idp["tenant"] = json!(t);
+            }
+            if let Some(s) = sso {
+                idp["sso"] = json!(s);
             }
             if let Some(n) = name {
                 idp["name"] = json!(n);

@@ -70,18 +70,34 @@ pub fn extra_params(api: Api) -> &'static [&'static str] {
     }
 }
 
+/// A running API handler ([`dispatch`]).
+pub type Handler<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = EsResult<Reply>> + Send + 'a>>;
+
+/// One arm of a dispatch table: `make` makes the handler's future in this function's frame, which
+/// holds only that arm's.
+pub(crate) fn handler<'a, F: std::future::Future<Output = EsResult<Reply>> + Send + 'a>(make: impl FnOnce() -> F) -> Handler<'a> {
+    Box::pin(make())
+}
+
 /// The handler of every implemented API. [`dispatch`] runs them and [`implemented`] (which
 /// `_capabilities` reports) is generated from the same table, so they can't drift apart.
+///
+/// The table only picks the handler: each arm makes its handler's future in a function of its
+/// own ([`handler`]) and returns it boxed, and it runs after the table has returned. As one
+/// `async fn` matching on the API, an unoptimized build's poll frame held every arm's
+/// temporaries at once (378 KiB here, 408 KiB for the x-pack table), and an internal call (an
+/// SLM run writing its history) stacked those frames again under its own, past a worker's 2 MiB
+/// stack.
 macro_rules! handlers {
     ($ctx:ident; $( $($api:ident)|+ => $e:expr, )*) => {
-        pub async fn dispatch($ctx: &Ctx<'_>) -> EsResult<Reply> {
+        pub fn dispatch<'a>($ctx: &'a Ctx<'_>) -> Handler<'a> {
             match $ctx.api {
-                $( $(Api::$api)|+ => $e, )*
+                $( $(Api::$api)|+ => handler(move || async move { $e }), )*
                 // The x-pack APIs have their own table (`crate::xpack`).
-                other if crate::xpack::implemented(other) => crate::xpack::dispatch($ctx).await,
+                other if crate::xpack::implemented(other) => crate::xpack::dispatch($ctx),
                 // The APIs only the opensearch dialect has (`crate::opensearch`).
-                other if crate::opensearch::implemented(other) => crate::opensearch::dispatch($ctx).await,
-                other => Err(EsError::not_implemented(other.name())),
+                other if crate::opensearch::implemented(other) => Box::pin(crate::opensearch::dispatch($ctx)),
+                other => Box::pin(std::future::ready(Err(EsError::not_implemented(other.name())))),
             }
         }
 
@@ -298,7 +314,7 @@ handlers! { ctx;
     SnapshotGetRepository => snapshots::get_repository(ctx),
     SnapshotDeleteRepository => snapshots::delete_repository(ctx).await,
     SnapshotVerifyRepository => snapshots::verify_repository(ctx).await,
-    SnapshotRepositoryAnalyze => snapshots::analyze_repository(ctx),
+    SnapshotRepositoryAnalyze => snapshots::analyze_repository(ctx).await,
     SnapshotRepositoryVerifyIntegrity => snapshots::verify_integrity(ctx).await,
     SnapshotCleanupRepository => snapshots::cleanup_repository(ctx).await,
     SnapshotCreate => snapshots::create(ctx).await,

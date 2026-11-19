@@ -13,7 +13,7 @@ fn node(dir: &std::path::Path, ws: Arc<roll_workspace::Workspace>) -> Arc<Secret
 
 fn node_with(dir: &std::path::Path, ws: Arc<roll_workspace::Workspace>, links: Links) -> Arc<Secrets> {
     let db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.join("secrets.db")), "secrets").unwrap();
-    let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links, syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None, kms: None, sts: None, outside: None, github: None, clouds: None, workloads: None };
+    let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links, syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None, kms: None, sts: None, outside: None, directory: None, github: None, clouds: None, workloads: None, gateways: None };
     Arc::new(Secrets::new(db, ws, opts).unwrap())
 }
 
