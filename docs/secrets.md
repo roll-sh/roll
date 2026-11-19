@@ -3724,7 +3724,9 @@ cache waited out. Ranked now:
    - P12 members (R1, waits); P13 a CI token's defaults (all environments, no expiry: the user's call);
      P14 a dashboard write-flow test; P15 R4 and real-account checks.
    - Inconsistent: `roll://` is also the desktop app's deep-link scheme (`roll://agents/…` parses as a
-     reference), `doctor` suggests `export > .env`, GitLab is listed without a snippet.
+     reference; proposed: the desktop app moves to a scheme of its own, e.g. `roll-app://`, since
+     `roll://ENV/KEY` references are in the CLI, VS Code, the clients and #329 already; the agents
+     owner's call), `doctor` suggests `export > .env`, GitLab is listed without a snippet.
 6. **R10, decoy keys** (building: `feature/roll-secrets-decoys`): a key holding a decoy `rlt_` token
    (#270) or a Postgres role, alerting `decoy_used` on any use; IAM users need an account;
    **R4** (GCP KMS, Azure Key Vault, HSM) and confirming #290, #284, #227, #229 on real accounts: the
