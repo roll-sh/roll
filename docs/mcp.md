@@ -901,16 +901,16 @@ waits on a sibling PR reaching main is last.
    `apps_delete_form_submission`; in lockdown what a site's visitors wrote is withheld
    (`Tool::outside`: a submission's `fields`, and the field names a `form.submitted` event carries in
    `apps_events` and `apps_activity`, found by an independent review); `security_checkup` flags live
-   images with high or critical vulnerabilities. Next unblocked: `tools/list` from borrowed
-   definitions (an approval-less copy worked out once, serialized without cloning ~290 KB a call:
-   about a fifth of its ~10 ms). Waiting on secrets: value requests as tools
+   images with high or critical vulnerabilities. Waiting on secrets: value requests as tools
    (`feature/roll-mcp-secrets-requests`; held for #277's answer token, `rlq_…`, which the same
    review found was missing: a request's listed id was the capability to answer it, so a `read`
    could plant a value; secrets moved #277 to batch 5 to fix it); later `secrets_verify_audit` once
    #281 lands. No tools for #304's cut-off (a person's call), #392's decoys (an admin's), or
    previews' shell, files and forward (ADMIN, interactive). Waiting on roll code: a removed
    person's repositories handed to someone else. Not doing: "remember this browser"; a preset that
-   reveals development's values without asking (#354).
+   reveals development's values without asking (#354); `tools/list` without copying its
+   definitions (about 2 of its ~10 ms with 376 tools, once a session: its size, ~290 KB, is the
+   cost, and search mode and toolsets, whose context tokens the connect panel shows, answer it).
 2. **Landed 2026-11-19 (main 098fb41a2, ci green):** `security_checkup` past tokens to what's open to
    the internet; search's remotes and inference secrets as tools; a test that every tool a
    description or workflow names exists; a connection's tools read in place (`prompts/list` 2.2 ms to
