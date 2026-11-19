@@ -405,7 +405,9 @@ behind the `Apps` trait:
   environment's folder in roll secrets (roll secrets' own answer for the request's caller, as roll
   apps asks it; 403 otherwise), and who wrote each is kept (`env_refs`) for roll secrets'
   maker-checked binding (`bind_ref`, its #407), which will stop a reference whose writer lost
-  access. A reference to the base needs none of this.
+  access. A reference to the base needs none of this, but changing the base needs its writer's
+  reveal on the new one (every preview's code then reads it). The rules are written only as they
+  were checked: another request's change in between is a 409.
   A plain value is kept as it is: its `${` is escaped (every value previews write goes through
   one place, rolld's ensure), so it's never a reference by accident and reads back as written. A
   preview's own variables refuse a reference (400) until roll secrets' maker-checked binding for

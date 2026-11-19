@@ -1197,6 +1197,11 @@ async fn a_rules_reference_to_another_environment_needs_its_writers_reveal_there
     assert_eq!(put(json!({ "K": "roll://staging/payments/KEY" })).await, 200);
     let base = e.engine.store.settings(&mine.id).unwrap().secrets.base;
     assert_eq!(put(json!({ "K": "roll://staging/payments/KEY", "B": format!("roll://{base}/OTHER") })).await, 200, "the environment it follows needs nothing more");
+    // Following another environment is the same reach: it needs reveal there too.
+    let router = roll_previews::api::router(e.engine.clone());
+    let mut req = axum::http::Request::put(format!("/v1/previews/projects/{}/settings", mine.id)).header("content-type", "application/json").body(axum::body::Body::from(json!({ "secrets": { "base": "qa" } }).to_string())).unwrap();
+    req.extensions_mut().insert(roll_auth::SignedIn { user: "usr_b".into(), handle: "b".into(), admin: false, code_owner: None, session: "ses_1".into() });
+    assert_eq!(router.oneshot(req).await.unwrap().status().as_u16(), 403, "no reveal on qa");
 }
 
 /// A variable set while a deploy is still going, then removed, is removed from the backend too:

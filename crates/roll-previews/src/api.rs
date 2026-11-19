@@ -954,19 +954,30 @@ async fn put_settings(AxState(e): S, Path(project): Path<String>, ext: axum::htt
     // A reference to an environment other than the one the previews follow routes its values into
     // code whoever pushes a branch controls: a new or changed one needs its writer's reveal there.
     let who = crate::ports::Asker::of(&ext);
+    let may_reveal = |env: &str, folder: &str| e.reveal.get().is_some_and(|r| r.may_reveal(&who, &project, env, folder));
+    // So does a new base: every preview's code then reads that environment.
+    let base = &new.secrets.base;
+    if *base != old.secrets.base && !may_reveal(base, "/") {
+        return Err(Error::Forbidden(format!("secrets.base: following {base} needs reveal on {base} in roll secrets")));
+    }
     let before = crate::settings::references(&old);
     for (scope, name, reference) in crate::settings::references(&new).into_iter().filter(|r| !before.contains(r)) {
         let (env, folder) = crate::settings::reference_place(&reference);
-        if env == new.secrets.base {
+        if env == *base {
             continue;
         }
-        if !e.reveal.get().is_some_and(|r| r.may_reveal(&who, &project, &env, &folder)) {
+        if !may_reveal(&env, &folder) {
             return Err(Error::Forbidden(format!("{scope}: {name}: naming {env}'s keys needs reveal on {env} in roll secrets")));
         }
     }
     let by = who.principal();
     let s = blocking(e.clone(), move |e| {
-        let s = e.store.settings(&project)?.patched(&patch)?;
+        // What's written is what was checked: rules another request changed since are its own.
+        let current = e.store.settings(&project)?;
+        if current != old {
+            return Err(Error::Conflict("the project's preview rules changed while these were checked: try again".into()));
+        }
+        let s = current.patched(&patch)?;
         let s = e.store.put_settings(&project, &s)?;
         e.store.set_env_refs(&project, &crate::settings::references(&s), &by)?;
         // Every preview of the project converges on the new rules (modes, masks, variables,
