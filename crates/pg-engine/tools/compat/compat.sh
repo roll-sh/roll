@@ -12,7 +12,10 @@
 #                   tools/ref-containers.sh with default settings and
 #                   POSTGRES_INITDB_ARGS="--locale=C --encoding=UTF8")
 #   COMPAT_ENGINE   roll, host:port: a plain dist build (tools/dist.sh), started with
-#                   roll-engine --data <dir> --listen <host:port> --password pw --allow-server-programs
+#                   roll-engine --data <dir> --listen <host:port> --password pw --allow-server-programs \
+#                     --allow-outbound local --hba "local all all trust" --hba "host all all all scram-sha-256"
+#                   (the reference image's rules: its Unix socket is trusted, so postgres_fdw's
+#                   loopback in ActiveRecord's ForeignTableTest connects as on PostgreSQL)
 # and writes one `PASS|FAIL|SKIP <test id>` line per test to $COMPAT_CACHE/results/<suite>-<pg|engine>.txt.
 # A difference is a bug in roll unless PostgreSQL's run fails the same way.
 #   COMPAT_CACHE    sources, package caches (pip, npm, Go, Gradle, Maven, gems; ~10 GB) and
@@ -21,7 +24,8 @@
 #   COMPAT_CPUSET   the suites' CPUs (default 0-5,18-23: off the benchmark lanes)
 # Run each suite against a fresh engine where the counts matter: some suites leave databases and
 # roles behind that others' catalog queries list (metaqueries above all).
-# HANDOFF "Frameworks and tools side by side (agent 263)" has the table and what each difference was.
+# Logical replication PostgreSQL <-> roll is tools/bench/repl/e2e.sh. tests/clients/STATUS.md
+# "Round 8" has the table and what each difference was.
 set -eu
 if ! docker info > /dev/null 2>&1; then exec sg docker -c "exec $0 $*"; fi
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -34,7 +38,7 @@ ENGINE=${COMPAT_ENGINE:-127.0.0.1:55839}
 export PG_HOST=${PG%:*} PG_PORT=${PG##*:} ENGINE_HOST=${ENGINE%:*} ENGINE_PORT=${ENGINE##*:}
 
 # The suites and the arguments each runs with.
-SUITES="django sqlalchemy sqla_psycopg sqla_asyncpg activerecord prisma drizzle asyncpg pgx spring alembic pgrestore metaqueries hibernate"
+SUITES="django sqlalchemy sqla_psycopg sqla_asyncpg activerecord prisma drizzle drizzlekit asyncpg pgx spring alembic pgrestore metaqueries hibernate"
 args() {
   case $1 in
     django) echo "backends migrations schema queries aggregation postgres_tests basic expressions model_fields

@@ -16310,3 +16310,103 @@ are compared as it runs, record_ops; fixed); the isolation suite past the model 
 These supersede agent 249's "Not done" note on datminmxid, truncation, `count(DISTINCT xmax)` and
 a table too big to model keeping no xmax, and the FROM-function and alias entries of the left
 lists of agents 233, 240, 248 and 254 (their sections are left as they were).
+
+## Frameworks and tools side by side (agent 263, 2026-11-19)
+
+Recorded against a private PostgreSQL 18.6 (the pinned image, `select version()`: 18.6 on
+x86_64-pc-linux-musl), default settings. The layers above the drivers, each run against it and
+against roll and compared test by test: `crates/pg-engine/tools/compat/compat.sh run both
+<suite>` (each suite a pinned release fetched into a scratch cache and run in a container
+pinned to CPUs 0-5,18-23; `compat.sh table`, `compat.sh diff <suite>`), roll a plain dist build
+with a fresh data directory per suite. tests/clients/STATUS.md "Round 8" has the per-suite
+table, before (`8fa1154dd`) and after:
+
+| suite | tests | identical before | after | causes fixed | left |
+|---|---:|---:|---:|---|---|
+| Django 5.2.4 (28 apps with postgres_tests) | 4,419 | 4,419 | 4,419 | | |
+| SQLAlchemy 2.0.41, psycopg2 / psycopg 3 / asyncpg | 15,803 / 15,891 / 15,829 | all / all / 15,828 | all | stale parameter type at Bind | |
+| ActiveRecord 8.1.4 adapter tests | 777 | 772 | 777 | oidvector join keys; fdw loopback (settings) | |
+| Prisma 7.10.1, Drizzle 0.45.4 | 47, 852 | all | all | | |
+| drizzle-kit 0.31.11 (push, migrate, pull) | 63 | 43 | 43 | | 20: information_schema row order |
+| Hibernate 7.4.14 (dialect, type, schema tools) | 438 | 438 | 438 | (JVM addresses in test ids) | |
+| asyncpg 0.30.0, pgx 5.7.5 | 267, 1,220 | all, 1,219 | all | (pgx: a timing test at load 47) | |
+| Flyway 13.11.1 / Spring JDBC / Liquibase, Alembic 1.20.1 | 271, 2,153 | all | all | | |
+| pg_restore 18.6 of a PostgreSQL archive, 11 ways | 1,935 ids | 1,921 | all | domain collation; COPY TO of reg* | |
+| pgAdmin 4 / DBeaver catalog queries | 856 queries | 828 | 828 | | 28: as round 4 (pg_node_tree text, oid names) |
+| logical replication PostgreSQL <-> roll (`tools/bench/repl/e2e.sh`, 9 scenarios x 4 pairs) | 9 | 9 | 9 | | |
+
+Fixed (golden `a263_compat`; protocol cases `a263_block_only`, `a263_stale_param_type`,
+recorded from PostgreSQL with `PROTOCOL_RECORD`; each fails on the base build):
+- **A domain's typcollation** (`catalog/system.rs` `TypeRows::finish`): a domain over a
+  collatable extension type (citext) had 0; it takes `domain_collation` (its COLLATE, "C" for
+  information_schema's, else its base type's), a user collation's oid included. pg_dump wrote
+  `COLLATE pg_catalog."default"` on every column of such a domain.
+- **COPY TO of reg\* columns** (`session/copy.rs`): written as oids (the format context had no
+  catalog names); now as regclassout and the others write them, under the search path. A
+  pg_dump of roll restored an audit table's regclass column as numbers.
+- **oidvector / int2vector join keys** (`exec/pipe.rs` `Norm::Vector`): merge and hash joins
+  compared them as arrays, lower bounds included; `ARRAY[...]::oidvector` starts at 1, a stored
+  one at 0, so ActiveRecord's "is there a lower() for this type" join (`ARRAY[casttarget]::
+  oidvector = proargtypes`) found nothing and it compared case-sensitively.
+- **CREATE / DROP DATABASE and DISCARD ALL in a multi-statement Query** (`Session::in_block`):
+  they ran inside its implicit block; PreventInTransactionBlock refuses them there (a
+  migration's `DROP DATABASE x; CREATE DATABASE x` in one Query).
+- **Bind of a statement whose parameter type was dropped** (`session/mod.rs` bind): asyncpg's
+  statement cache keeps `INSERT ... ($1::my_enum)` across DROP TYPE / CREATE TYPE; PostgreSQL's
+  Bind fails in getTypeInputInfo (XX000 "cache lookup failed for type N", context "unnamed
+  portal parameter $1"), which SQLAlchemy's asyncpg dialect catches to clear its cache. Roll
+  planned it again with the old type (42846 "cannot cast type my_enum to my_enum"); a parameter
+  type the catalog no longer has is now the unknown oid of agents 222 / 229.
+- Operator settings, no code: postgres_fdw's loopback (ActiveRecord's ForeignTableTest) needs
+  `--allow-outbound local` and the reference image's `local all all trust`
+  (`--hba "local all all trust" --hba "host all all all scram-sha-256"`).
+
+Left, with reasons:
+- drizzle-kit's introspection reads information_schema.table_constraints joined with
+  constraint_column_usage and a pg_constraint join without ORDER BY; PostgreSQL's plan sorts the
+  view's DISTINCT branches (by schema, table, owner, column name) and merge-joins on the
+  namespace oid, so a composite key's columns come in column-name order: PostgreSQL's own
+  `pull` writes `primaryKey({ columns: [planId, userId] })` for `(user_id, plan_id)` and every
+  `push` drops and re-adds that key. Roll's views are native relations (a nested loop, declared
+  key order). Matching it needs the views' rows in the order of PostgreSQL's plan for each query.
+- Describe of a statement whose parameter type was dropped: PostgreSQL returns the stored
+  parameter types and NoData for a DML without RETURNING (no revalidation); roll analyses it
+  again (42846). No suite reaches it once the Bind fails as PostgreSQL's does.
+- pgAdmin / DBeaver: the round-4 causes (pg_node_tree columns hold SQL text; names with oids:
+  pg_toast_N, RI_ConstraintTrigger_c_N; a listing without ORDER BY).
+
+The suites' own failures on PostgreSQL (Django's 17: psycopg_pool isn't installed, and
+PostgreSQL 18's named NOT NULL constraints appear in the constraint lists Django 5.2's schema
+tests compare; asyncpg's 6, pgx's 3, ...) are the same tests on roll.
+
+Gate (point reads and short transactions, user instructions per operation): lane A first,
+plain dist builds `8fa1154dd` against it with these commits, pgbench 8 clients, prepared, one
+pair per `tools/lane.sh a` hold (`~/.cache/a263/gate`, agent 254's harness). No pair counts:
+every one ran at more than 1.0 foreign core (1.6 to 5.4 for point reads, 0.7 to 9.5 for short
+transactions; unpinned builds and services on the lane's CPUs at a machine load of 30 to 53).
+For what they show: point reads -0.58% at the median (pairs -2.18..+0.06), cycles -1.2%;
+short transactions +5.8% (pairs -1.2..+16.2), with the new build at the higher foreign load in
+all five pairs and its instructions following it (a session's spin waits count). So the gate
+is the in-process count below.
+In-process (agent 239's method, `~/.cache/a263/inproc`: the `bench` example with the engine
+linked in, 1 client, lane B's CPUs 10 and 11 under `tools/lane.sh b`, user instructions per
+operation as (I30 s - I10 s) / (ops30 - ops10); dist builds of the parent `bc9102ebb` and of
+these commits on it, five alternating pairs each): point select pairs -0.8%, +2.0%, -26%,
+-8.4% (the fourth pair's 10 s run failed to record), short transactions -6.0%, +2.1%, -3.9%,
+-12.7%, -6.0%. Lane B carried 3.1 to 5.9 foreign cores in every hold, the runs of one binary
+spread by 30% (point) and 2x (short transactions: each arm's data grows from pair to pair), so
+neither the +0.3% bound nor a win can be read from them; the new build is not higher at the
+median in either. What these commits add on those paths: at Bind, per parameter, a type-oid
+compare (a catalog lookup only for a user-defined type's oid); nothing per row. A later run on
+a quiet machine should redo the lane A pairs (`~/.cache/a263/gate/pairs.sh`).
+
+Verification (agent 263): quick-check with `QC_CHECKED=1` on these commits on `bc9102ebb`:
+build, clippy (16 warnings, none new in changed files), tests 401 passed in 17 binaries,
+regress 51,148 / 51,150 with 0 newly differing, isolation 1647/1648, pg_dump 14,609 passed.
+The checked stage stopped at the lib's `server::tests::wait_spin_polls_only_for_a_quick_client`
+(a 5 ms / 20 ms timing test of the idle read, code these commits don't touch, at machine load
+52; alone it passed 4 of 5 runs), so its other nine binaries were run from the same build by
+hand: all pass. Quick-check's first run found three wire tests (`database_settings`,
+`databases_open_and_close`, `startup_names_cut_to_namedatalen`) sending `CREATE DATABASE ...;
+...` in one Query, which PostgreSQL refuses: they send it alone now. The new golden and both
+protocol cases fail on the parent's build (`PROTOCOL_SERVER`) and pass on these commits.

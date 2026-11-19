@@ -142,6 +142,92 @@ first run in a session (per-session catalog caches, `Catalog::rel_rowtype`'s deb
 integer converted to decimal, quadratic; PostgreSQL keeps base-10000 digits); jOOQ's codegen
 catalog queries 13 s vs 2.3 s; EF Core's suite 31 min vs 7 min.
 
+## Round 8 (agent 263): frameworks and tools, `tools/compat`
+
+`crates/pg-engine/tools/compat/compat.sh run both <suite...>` runs each suite against a
+PostgreSQL 18.6 (the pinned image, default settings, `--locale=C --encoding=UTF8`) and against
+roll (a plain dist build, `--password pw --allow-server-programs --allow-outbound local --hba
+"local all all trust" --hba "host all all all scram-sha-256"`: the reference image's own rules,
+which trust its Unix socket, so postgres_fdw's loopback connects as on PostgreSQL), a fresh
+engine per suite; `compat.sh table` prints the counts, `compat.sh diff <suite>` the tests whose
+outcome differs. Suites run in containers pinned to CPUs 0-5,18-23 (`COMPAT_CPUSET`), off the
+benchmark lanes. New suites: `pgrestore` (pg_dump's custom archive of `pgrestore.setup.sql`'s
+database, made from PostgreSQL, restored full, `-j 4`, `--clean`, by sections, schema then data,
+by an edited `-l` list, `-O -x`, `-1`, as plain SQL, and roll's own dumps, custom and `-Fd -j 4`;
+one id per object of a schema-only dump of the result, per table's rows, sequence and large
+object), `drizzlekit` (push twice, generate / migrate / check, a second schema version, pull of
+the result and of a hand-written schema with partitioned tables; the statements a repeated push
+runs again and one id per pulled declaration), `sqla_psycopg` / `sqla_asyncpg` (SQLAlchemy's
+suite with psycopg 3 and asyncpg). Django runs with `postgres_tests` (614 tests: hstore,
+citext, ranges, arrays, search, constraints, operations), Hibernate the dialect, type and
+schema-tool packages.
+
+Before: the origin head `8fa1154dd`; after: with agent 263's commits. Both dist builds, the
+same reference.
+
+| suite (`tools/compat` name) | tests | PostgreSQL pass / fail | roll before: pass / fail, differing | roll after: pass / fail, differing |
+|---|---:|---:|---:|---:|
+| Django 5.2.4 (backends, migrations, schema, queries, aggregation, postgres_tests + 22 apps) (`django`) | 4419 | 4402 / 17 | 4402 / 17, 0 | 4402 / 17, **0** |
+| SQLAlchemy 2.0.41, psycopg2 (`sqlalchemy`) | 15803 | 15801 / 2 | 15801 / 2, 0 | 15801 / 2, **0** |
+| SQLAlchemy 2.0.41, psycopg 3.2.9 (`sqla_psycopg`) | 15891 | 15889 / 2 | 15889 / 2, 0 | 15889 / 2, **0** |
+| SQLAlchemy 2.0.41, asyncpg 0.30.0 (`sqla_asyncpg`) | 15829 | 15827 / 2 | 15826 / 3, 1 | 15827 / 2, **0** |
+| ActiveRecord 8.1.4 (PostgreSQL adapter tests) (`activerecord`) | 777 | 776 / 1 | 771 / 6, 5 | 776 / 1, **0** |
+| Prisma 7.10.1 (push, migrate, pull, client) (`prisma`) | 47 | 47 / 0 | 47 / 0, 0 | 47 / 0, **0** |
+| Drizzle ORM 0.45.4 (pg integration) (`drizzle`) | 852 | 852 / 0 | 852 / 0, 0 | 852 / 0, **0** |
+| drizzle-kit 0.31.11 (push, generate, migrate, pull) (`drizzlekit`) | 63 | 55 / 2 | 47 / 2, 20 | 47 / 2, **20** |
+| Hibernate 7.4.14 (dialect, type, schemaupdate, schemavalidation) (`hibernate`) | 438 | 438 / 0 | 438 / 0, 0 | 438 / 0, **0** |
+| asyncpg 0.30.0 (tests/) (`asyncpg`) | 267 | 261 / 6 | 261 / 6, 0 | 261 / 6, **0** |
+| pgx 5.7.5 (`pgx`) | 1220 | 1217 / 3 | 1216 / 4, 1 | 1217 / 3, **0** |
+| Spring JDBC / Flyway 13.11.1 / Liquibase 5.0.4 (`spring`) | 271 | 271 / 0 | 271 / 0, 0 | 271 / 0, **0** |
+| Alembic 1.20.1 (`alembic`) | 2153 | 2152 / 1 | 2152 / 1, 0 | 2152 / 1, **0** |
+| pg_restore 18.6 of a PostgreSQL archive (11 ways) (`pgrestore`) | 1935 | 1934 / 1 | 1934 / 1, 28 | 1934 / 1, **0** |
+| pgAdmin 4 9.18 / DBeaver 26.2.3 catalog queries (`metaqueries`) | 884 | 856 / 0 | 856 / 0, 56 | 856 / 0, **56** |
+
+Fixed (golden `a263_compat`, protocol cases `a263_block_only`, `a263_stale_param_type`):
+- pg_restore (26 ids): a domain over citext had typcollation 0 (the base type's collation was
+  only taken for built-in string types), so pg_dump wrote `COLLATE pg_catalog."default"` on
+  its columns.
+- pg_restore of roll's own dump (2 ids): COPY TO wrote regclass / regtype / regproc /
+  regnamespace columns as oids (its format context had no catalog names), so an audit table's
+  `regclass` column came back as numbers.
+- ActiveRecord (1): `case_insensitive_comparison` asks whether `lower()` takes the column's
+  type through `JOIN pg_cast ON ARRAY[casttarget]::oidvector = proargtypes`: merge and hash joins
+  compared oidvector keys as arrays, lower bounds included (`ARRAY[...]::oidvector` starts at
+  1, a stored oidvector at 0), so nothing matched. Join keys of oidvector / int2vector now
+  compare their elements (`pipe::Norm::Vector`), as oidvectoreq does.
+- ActiveRecord (4): ForeignTableTest's postgres_fdw loopback: the engine's operator settings
+  (`--allow-outbound local`, `local ... trust`), not a code change.
+- SQLAlchemy + asyncpg (1): asyncpg's statement cache kept `INSERT ... ($1::my_enum)` across a
+  DROP TYPE / CREATE TYPE; PostgreSQL's Bind fails in getTypeInputInfo ("cache lookup failed
+  for type N", context "unnamed portal parameter $1", XX000, which SQLAlchemy catches to
+  invalidate its cache); roll planned it again with the old type and failed with 42846. A
+  parameter type no type has now fails Bind as an unknown oid does.
+- A migration tool's `DROP DATABASE x; CREATE DATABASE x` in one Query (found by the
+  drizzle-kit suite's setup): CREATE / DROP DATABASE and DISCARD ALL ran inside a
+  multi-statement Query's implicit block; they fail as PreventInTransactionBlock does.
+- Hibernate's parameterized test ids carry JVM object addresses (`$$Lambda/0x...@...`):
+  `collect.py` drops them, so the two runs' ids compare.
+
+Left:
+- drizzle-kit (20 ids): row order of introspection queries without ORDER BY over
+  information_schema.table_constraints / constraint_column_usage and of its pg_constraint
+  join. PostgreSQL's plan for constraint_column_usage sorts each DISTINCT branch (Unique over
+  Sort by schema, table, owner, column) and merge-joins on the namespace oid, so a composite
+  key's columns come in column-name order (PostgreSQL's own drizzle-kit pull writes
+  `primaryKey({ columns: [planId, userId] })` for `(user_id, plan_id)`, and every push drops and
+  re-adds that key and the unique constraint); roll's views are native relations joined by a
+  nested loop, which gives the declared order (its push changes nothing). Matching needs those
+  views' rows in the order PostgreSQL's plan of the view produces, query by query.
+- pgAdmin / DBeaver (28 queries, as in round 4): pg_node_tree columns hold SQL text, not node
+  trees (clients read them through pg_get_expr, which matches); names that carry an oid
+  (pg_toast_N, RI_ConstraintTrigger_c_N); two roles another suite had left in the reference;
+  a catalog listing without ORDER BY.
+- Describe of a statement whose parameter type was dropped: PostgreSQL answers its stored
+  parameter types and NoData (a DML without RETURNING isn't revalidated), roll analyses it
+  again and fails with 42846. No suite reaches it after the Bind fix.
+- pgx TestConnCopyFromFailServerSideMidwayAbortsWithoutWaiting failed once on roll at load 47
+  (1.1 s against its 1 s limit); 3 of 3 pass on each server alone and it passed in the after run.
+
 ## Round 7 (round 24, agent 133)
 
 Release engines (line tables, frame pointers for the profiles), private references of the
