@@ -71,7 +71,8 @@ impl EnvSource for Engine {
         let untrusted = !(s.secrets.allow_production && r.trusted);
         let (secrets, leases, plain) = self.resolve_secrets(&r, untrusted, true, service).await?;
         self.keep_leases(&r, service, &leases).await?;
-        let own: Vec<(String, String)> = project_env(&s, r.branch.as_deref()).into_iter().chain(self.store.vars(preview)?).collect();
+        // A reference (`roll://…`) is roll secrets' to resolve (`secrets` has its value): never set as its text.
+        let own: Vec<(String, String)> = project_env(&s, r.branch.as_deref()).into_iter().chain(self.store.vars(preview)?).filter(|(_, v)| !crate::settings::is_reference(v)).collect();
         let branches = self.resource_env(preview).await?;
         // Its logs hide what this start is given (its dynamic credentials included).
         self.add_masks(preview, masks::secret_values(&secrets, &plain, &own, &branches));
