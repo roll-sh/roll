@@ -1459,21 +1459,21 @@ function Traces({ preview: p, n }: { preview: Preview; n: number }) {
       {error && <p className="mb-1.5 text-[11.5px] text-danger">{error}</p>}
       {routes.length > 0 && (
         <div className="mb-2 rounded-lg border border-line-2 bg-canvas">
-          <div className="flex items-baseline gap-2 border-b border-line px-2.5 py-1 font-mono text-[10px] text-subtle">
-            <span className="min-w-0 flex-1">route</span>
-            <span className="w-10 text-right">n</span>
-            <span className="w-14 text-right">p50</span>
-            <span className="w-14 text-right">p95</span>
-            <span className="w-16 text-right">main p50</span>
-          </div>
+          {/* A route a row of its own: its name the full width (a sheet is narrow), its times under it. */}
           {routes.slice(0, 12).map((r) => (
-            <div key={r.name} className="flex items-baseline gap-2 border-b border-line px-2.5 py-1 font-mono text-[10.5px] last:border-b-0" title={r.slower ? "clearly slower than main's preview" : undefined}>
-              <span className={`min-w-0 flex-1 truncate ${r.slower ? "text-danger" : "text-soft"}`}>{r.name}</span>
-              {r.repeated && <RepeatedTag repeated={r.repeated} />}
-              <span className="w-10 text-right text-subtle">{r.count}</span>
-              <span className={`w-14 text-right ${r.slower ? "text-danger" : "text-muted"}`}>{r.p50_ms} ms</span>
-              <span className="w-14 text-right text-muted">{r.p95_ms} ms</span>
-              <span className="w-16 text-right text-subtle">{r.main_p50_ms == null ? "—" : `${r.main_p50_ms} ms`}</span>
+            <div key={r.name} className="border-b border-line px-2.5 py-1 font-mono last:border-b-0" title={r.slower ? "clearly slower than main's preview" : undefined}>
+              <div className="flex items-baseline gap-2 text-[10.5px]">
+                <span className={`min-w-0 flex-1 truncate ${r.slower ? "text-danger" : "text-soft"}`} title={r.name}>
+                  {r.name}
+                </span>
+                {r.repeated && <RepeatedTag repeated={r.repeated} />}
+              </div>
+              <div className="flex flex-wrap gap-x-3 text-[10px] text-subtle tabular-nums">
+                <span>{r.count}×</span>
+                <span className={r.slower ? "text-danger" : "text-muted"}>p50 {r.p50_ms} ms</span>
+                <span>p95 {r.p95_ms} ms</span>
+                <span>main {r.main_p50_ms == null ? "—" : `${r.main_p50_ms} ms`}</span>
+              </div>
             </div>
           ))}
         </div>
@@ -1492,7 +1492,7 @@ function Traces({ preview: p, n }: { preview: Preview; n: number }) {
             </button>
             {open?.trace === t.trace && open.repeated && (
               <p className="px-2.5 pt-1 font-mono text-[10px] text-danger">
-                runs {open.repeated.count}× <span className="text-soft">{open.repeated.statement}</span>: one query a row is an N+1 (batch it, or join)
+                runs {open.repeated.count}× <span className="text-soft">{open.repeated.statement}</span>. One query a row is an N+1: batch it, or join.
               </p>
             )}
             {open?.trace === t.trace && <Waterfall spans={open.spans} />}
