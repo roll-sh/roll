@@ -2139,9 +2139,14 @@ impl Apps {
         let mut new_urls = Vec::new();
         if let Some((beats, tokens)) = heartbeats {
             let (sid, e) = (service.to_string(), env.to_string());
+            let fresh: Vec<String> = tokens.iter().map(|(n, _)| n.clone()).collect();
             let slug = self
                 .db(move |s| {
                     s.set_heartbeats(&sid, &e, &beats)?;
+                    // A new one (a name used before, an environment made again) starts with no ping.
+                    for name in &fresh {
+                        crate::heartbeats::forget(s, &sid, &e, name)?;
+                    }
                     Ok(s.environment(&sid, &e)?.slug)
                 })
                 .await?;

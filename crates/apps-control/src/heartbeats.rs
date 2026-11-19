@@ -29,6 +29,13 @@ fn missed_key(service: &str, env: &str, name: &str) -> String {
     format!("hb-missed:{service}/{env}/{name}")
 }
 
+/// What's kept of a heartbeat's pings, gone (a new heartbeat by an old one's name).
+pub(crate) fn forget(s: &crate::store::Store, service: &str, env: &str, name: &str) -> Result<()> {
+    s.take_state(&ping_key(service, env, name))?;
+    s.take_state(&missed_key(service, env, name))?;
+    Ok(())
+}
+
 /// A heartbeat's due time: its last ping (or when it was added) and its period, before the grace.
 fn due_at(h: &Heartbeat, last: Option<i64>) -> i64 {
     last.unwrap_or(h.added_at) + h.every_s as i64 * 1000
