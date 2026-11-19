@@ -373,6 +373,8 @@ export interface PreviewSettings {
   visual_review?: "off" | "check" | "required";
   /** `catch` (default): services send mail to roll's catcher, listed on the preview, never delivered; `deliver`: the project's own mail settings. */
   mail?: "catch" | "deliver";
+  /** Its `roll.toml` services get the OpenTelemetry SDK's variables, their spans kept on the preview a few hours. */
+  traces?: boolean;
   /** What its services' code may reach: `open` (default) anything; `roll` only roll's own products (a network with no route out). */
   egress?: "open" | "roll";
   /** With `egress: "roll"` (or `egress_forks: "roll"`, for forks): hosts outside roll its code may still reach (`api.stripe.com`, `*.sentry.io`), through a proxy that refuses anything else. */
@@ -533,6 +535,12 @@ export const previewsApi = {
   shellKeys: (id: string, sh: string, data: string) => call<null>("POST", `${one(id)}/shell/sessions/${encodeURIComponent(sh)}/keys`, { data }),
   resizeShell: (id: string, sh: string, size: { cols: number; rows: number }) => call<null>("POST", `${one(id)}/shell/sessions/${encodeURIComponent(sh)}/resize`, size),
   closeShell: (id: string, sh: string) => call<null>("DELETE", `${one(id)}/shell/sessions/${encodeURIComponent(sh)}`),
+  /** Its recent traces (the project's `traces`), newest first, masked. */
+  traces: (id: string, minutes?: number) => call<{ minutes: number; traces: TraceSummary[] }>("GET", `${one(id)}/traces${query({ minutes })}`),
+  /** Each route's time from its traces against main's preview's same route, the slower ones first. */
+  routes: (id: string, minutes?: number) => call<{ minutes: number; main: string | null; routes: RouteTime[] }>("GET", `${one(id)}/routes${query({ minutes })}`),
+  /** One trace's spans, oldest first, masked. */
+  trace: (id: string, trace: string) => call<{ trace: string; spans: TraceSpan[] }>("GET", `${one(id)}/traces/${encodeURIComponent(trace)}`),
   logs: (id: string, opts: { service?: string; lines?: number } = {}) =>
     call<{ service: string; lines: string[] }>("GET", `${one(id)}/logs${query(opts)}`),
   /** Newest first. */
@@ -580,6 +588,13 @@ export type ErrorGroup = { service: string; fingerprint: string; kind: string; t
 
 /** A running service's use right now: cores of CPU, resident bytes (an instance's, on roll apps), and the MB it runs with. */
 export type ServiceMetrics = { service: string; cpu: number; memory_bytes: number; memory_mb: number };
+
+/** One of a preview's recent traces: its root span's name and service, when (ms), how long, how many spans, whether any failed. */
+export type TraceSummary = { trace: string; name: string; service: string; start_ms: number; ms: number; spans: number; error: boolean };
+/** A route's time from a preview's traces (a root span's name): how many, p50 and p95 (ms), main's preview's p50 for it, and whether it's clearly slower. */
+export type RouteTime = { name: string; count: number; p50_ms: number; p95_ms: number; main_p50_ms: number | null; main_count: number; slower: boolean };
+/** A span of a trace (times in Unix nanoseconds), its attributes as name/value pairs. */
+export type TraceSpan = { trace: string; span: string; parent?: string; name: string; service?: string; start: number; end: number; error?: boolean; attrs?: [string, string][] };
 
 /** A request to a preview's service through roll: when (ms), the method, the path (never the query), the status, ms until the answer's headers. */
 export type RequestLine = { at: number; service: string; method: string; path: string; status: number; ms: number };

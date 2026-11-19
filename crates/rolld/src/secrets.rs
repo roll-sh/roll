@@ -426,7 +426,7 @@ pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Work
     let opts = roll_secrets::Options { keyring, key_source, links: links(api.clone()), syncs: syncs::kinds(api.clone(), allow_private), open, trust_forwarded_for: args.code_trust_forwarded_for, web_url, deliver: Some(Arc::new(syncs::AuditDeliver::new(allow_private, api))),
         // Grants are looked up when a sync made by one pushes; identities' logins mint workload tokens.
         grants: Some(access.clone() as Arc<dyn roll_auth::Grants>),
-        workloads: Some(Arc::new(Workloads(access))),
+        workloads: Some(Arc::new(Workloads(access.clone()))),
         people: Some(Arc::new(people)),
         kms: Some(Arc::new(CustomerKms::new(None))), sts: Some(Arc::new(RollSts::new(None))), outside: Some(Arc::new(outside::Guarded { allow_private, gateways: gateways.clone() })), directory: Some(Arc::new(directory::Guarded { allow_private, gateways: gateways.clone() })), github: Some(Arc::new(github::RollGitHub::new(allow_private))), clouds: Some(roll_secrets::clouds::Clouds { issuer: issuer_url(args), tokens: Arc::new(clouds::RollClouds::new()) }),
         // A deleted gateway, or a revoked credential that opened one, closes its link at once.
@@ -441,6 +441,7 @@ pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Work
     }
     // Where clients reach rolld: a CA's certificates name its CRL there.
     secrets.set_public_api(args.code_public_url.clone().unwrap_or_else(|| format!("http://{}:{}", args.public_host, args.api.port())));
+    tell_decoys(&access, secrets.clone());
     // ACME's http-01 and dns-01 checks: public addresses only, as webhooks.
     secrets.set_acme_checks(Arc::new(acme::Checks::new(allow_private)));
     // A deleted project's secrets go with it.
@@ -475,6 +476,20 @@ pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Work
         }
     });
     Ok(secrets)
+}
+
+/// A decoy key's token was used: roll-access tells roll secrets, which raises `decoy_used` on its
+/// project (off the request's task: it writes).
+fn tell_decoys(access: &roll_access::Access, secrets: Arc<Secrets>) {
+    access.on_decoy(move |used| {
+        let (s, used) = (secrets.clone(), used.clone());
+        let Ok(rt) = tokio::runtime::Handle::try_current() else { return };
+        rt.spawn_blocking(move || {
+            if let Err(e) = s.decoy_used(&used.grant, used.ip.as_deref(), &used.route) {
+                tracing::warn!(grant = %used.grant, "raising a decoy key's alert failed: {e}");
+            }
+        });
+    });
 }
 
 /// roll's OIDC issuer for GCP and Azure (roll-secrets' issuer.rs): where clouds reach rolld.
@@ -523,6 +538,7 @@ fn links(api: Api) -> Links {
     l.register(Arc::new(Stream(api.clone())));
     l.register(Arc::new(Bucket(api.clone())));
     l.register(Arc::new(Nosql(api.clone())));
+    l.register(Arc::new(Queue(api.clone())));
     l.register(Arc::new(Search(api, Default::default())));
     l
 }
@@ -852,6 +868,129 @@ impl LinkProvider for Nosql {
     }
     fn rotate_source(&self, r#ref: &str) -> roll_secrets::Result<bool> {
         self.0.call(Method::POST, &format!("/v1/nosql/databases/{}/password", enc(r#ref)), Some(json!({}))).map(|_| true)
+    }
+}
+
+/// Queues (a roll queues vhost, by name): where clients reach it (live), and a user of its own
+/// (managed or dynamic) made through `/v1/queues/users` with permissions on that vhost only. The
+/// vhost's own user can't be read back (`…/credentials` shows its password once, and every call
+/// makes a new one), so no credential is live. Option `permission`: `read` (consume), `write`
+/// (publish and consume) or `configure` (default: also declare and delete queues, exchanges and
+/// bindings, as the vhost's own user may).
+struct Queue(Api);
+
+impl Queue {
+    /// The vhost's AMQP URL as roll queues answers it (the admin's user in it: only its scheme,
+    /// host, port, path and query are used, never edited into a link's value).
+    fn amqp_url(&self, vhost: &str) -> roll_secrets::Result<url::Url> {
+        let list = self.0.call(Method::GET, "/v1/queues/vhosts", None)?;
+        let v = list.as_array().into_iter().flatten().find(|v| v["name"] == vhost).ok_or_else(|| Error::Link(format!("roll queues has no vhost {vhost}")))?;
+        let u = v["amqp_url"].as_str().ok_or_else(|| Error::Link("the product didn't return amqp_url".into()))?;
+        url::Url::parse(u).map_err(|_| Error::Link("the vhost's AMQP URL doesn't parse".into()))
+    }
+
+    /// RabbitMQ's `configure`, `write` and `read` patterns for `permission`. A pattern that
+    /// matches nothing is `$.`, not empty: an empty pattern matches the default exchange's name.
+    fn patterns(permission: &str) -> Option<(&'static str, &'static str, &'static str)> {
+        match permission {
+            "read" => Some(("$.", "$.", ".*")),
+            "write" => Some(("$.", ".*", ".*")),
+            "configure" => Some((".*", ".*", ".*")),
+            _ => None,
+        }
+    }
+
+    fn permission(link: &Link) -> &str {
+        link.options.get("permission").and_then(Json::as_str).unwrap_or("configure")
+    }
+
+    /// `user`'s URL for the vhost `admin` reaches, built from its scheme, host, port, path and
+    /// query: the admin's user and password are never in it, and anything that doesn't come out
+    /// exactly as built is refused rather than handed out.
+    fn user_url(admin: &url::Url, user: &str, password: &str) -> roll_secrets::Result<String> {
+        let bad = || Error::Link("the vhost's AMQP URL can't carry a user of its own".into());
+        let host = admin.host_str().filter(|h| !h.is_empty()).ok_or_else(bad)?;
+        let port = admin.port().map(|p| format!(":{p}")).unwrap_or_default();
+        let query = admin.query().map(|q| format!("?{q}")).unwrap_or_default();
+        let u = url::Url::parse(&format!("{}://{user}:{password}@{host}{port}{}{query}", admin.scheme(), admin.path())).map_err(|_| bad())?;
+        if u.username() != user || u.password() != Some(password) || u.host_str() != Some(host) || u.port() != admin.port() || u.path() != admin.path() {
+            return Err(bad());
+        }
+        Ok(u.to_string())
+    }
+
+    /// Only a user this provider made (`roll-` and its random part): a lease never names another.
+    fn ours(user: &str) -> bool {
+        user.strip_prefix("roll-").is_some_and(|r| !r.is_empty() && r.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()))
+    }
+}
+
+impl LinkProvider for Queue {
+    fn kind(&self) -> &str {
+        "queue"
+    }
+    fn fields(&self) -> &[Field] {
+        const F: &[Field] = &[
+            live("host", "Host", false, "AMQP_HOST"),
+            live("port", "Port", false, "AMQP_PORT"),
+            live("vhost", "Virtual host", false, "AMQP_VHOST"),
+            issued("url", "AMQP URL", true, "AMQP_URL", "user"),
+            issued("username", "Username", false, "AMQP_USERNAME", "user"),
+            issued("password", "Password", true, "AMQP_PASSWORD", "user"),
+        ];
+        F
+    }
+    fn suggested(&self) -> &[(&'static str, Mode)] {
+        // A user of the app's own, never the vhost's.
+        &[("url", Mode::Managed)]
+    }
+    fn read(&self, r#ref: &str, field: &str, _: &Link) -> roll_secrets::Result<Value> {
+        if field == "vhost" {
+            return Ok(Value::new(r#ref));
+        }
+        let u = self.amqp_url(r#ref)?;
+        match field {
+            "host" => Ok(Value::new(u.host_str().unwrap_or_default())),
+            "port" => Ok(Value::new(u.port().unwrap_or(if u.scheme() == "amqps" { 5671 } else { 5672 }).to_string())),
+            f => Err(Error::BadRequest(format!("queue has no live field {f}"))),
+        }
+    }
+    fn issue(&self, r#ref: &str, _: &str, link: &Link, _: &str, _: Option<u64>) -> roll_secrets::Result<Issued> {
+        let (configure, write, read) = Self::patterns(Self::permission(link)).ok_or_else(|| Error::BadRequest("a queue link's permission is read, write or configure".into()))?;
+        let admin = self.amqp_url(r#ref)?;
+        // Only letters and digits we made: nothing to escape.
+        let user = format!("roll-{}", random(12));
+        let password = random(32);
+        // Before the user exists: a URL that can't carry it is refused, never handed out.
+        let url = Self::user_url(&admin, &user, &password)?;
+        // No tags: the user can't sign in to the management API.
+        self.0.call(Method::PUT, &format!("/v1/queues/users/{}", enc(&user)), Some(json!({ "password": password, "tags": [] })))?;
+        let granted = self.0.call(Method::PUT, &format!("/v1/queues/permissions/{}/{}", enc(r#ref), enc(&user)), Some(json!({ "configure": configure, "write": write, "read": read })));
+        if let Err(e) = granted {
+            // A user without its permission is no use: it goes again.
+            let _ = self.0.delete_gone(&format!("/v1/queues/users/{}", enc(&user)));
+            return Err(e);
+        }
+        let parts = BTreeMap::from([
+            ("url".to_string(), Value::new(url)),
+            ("username".to_string(), Value::new(user.clone())),
+            ("password".to_string(), Value::new(password)),
+        ]);
+        Ok(Issued { parts, handle: json!({ "user": user }) })
+    }
+    /// Deletes the user, which closes its connections and drops its permissions.
+    fn revoke(&self, _: &str, h: &Json) -> roll_secrets::Result<()> {
+        let Some(user) = h["user"].as_str() else { return Ok(()) };
+        if !Self::ours(user) {
+            return Err(Error::Internal("a lease names a queue user roll didn't make".into()));
+        }
+        self.0.delete_gone(&format!("/v1/queues/users/{}", enc(user)))
+    }
+    fn check(&self, link: &Link) -> roll_secrets::Result<()> {
+        if link.mode != Mode::Live && Self::patterns(Self::permission(link)).is_none() {
+            return Err(Error::BadRequest("a queue link's permission is read, write or configure".into()));
+        }
+        Ok(())
     }
 }
 
@@ -1200,6 +1339,35 @@ impl apps_control::integrations::SecretSource for ForApps {
     }
 }
 
+/// roll secrets for roll storage's replication targets (`s3_server::TargetCredentials`): a
+/// target's `roll://` references resolve for the source bucket, the canvas resource asking
+/// (`Secrets::resolve_for`: its project must stand for it; audited as `storage:bucket:<name>`).
+/// Set once the store is open (it opens after storage starts).
+#[derive(Clone, Default)]
+pub struct ForStorage(Arc<OnceLock<Arc<Secrets>>>);
+
+impl ForStorage {
+    pub fn set(&self, secrets: Arc<Secrets>) {
+        let _ = self.0.set(secrets);
+    }
+
+    async fn run<T: Send + 'static>(&self, bucket: &str, reference: &str, f: fn(&Secrets, &roll_secrets::ResourceRef, &str) -> Result<T, roll_secrets::Refusal>) -> Result<T, String> {
+        let secrets = self.0.get().cloned().ok_or("roll secrets is starting")?;
+        let (resource, reference) = (roll_secrets::ResourceRef::new(roll_workspace::Kind::Bucket, bucket), reference.to_string());
+        tokio::task::spawn_blocking(move || f(&secrets, &resource, &reference).map_err(|e| e.to_string())).await.map_err(|e| e.to_string())?
+    }
+}
+
+impl s3_server::TargetCredentials for ForStorage {
+    fn resolve<'a>(&'a self, bucket: &'a str, reference: &'a str) -> futures::future::BoxFuture<'a, Result<s3_store::Secret, String>> {
+        Box::pin(async move { self.run(bucket, reference, |s, r, x| s.resolve_for(r, x).map(|v| s3_store::Secret::new(v.value.expose()))).await })
+    }
+
+    fn digest<'a>(&'a self, bucket: &'a str, reference: &'a str) -> futures::future::BoxFuture<'a, Result<String, String>> {
+        Box::pin(async move { self.run(bucket, reference, |s, r, x| s.digest_for(r, x)).await })
+    }
+}
+
 /// Workload identities' logins get roll-access workload tokens (`Access::mint_workload`): the
 /// identity's scope, its addresses, for its minutes, owned by whoever made it.
 pub struct Workloads(pub Arc<roll_access::Access>);
@@ -1252,6 +1420,20 @@ impl roll_secrets::Workloads for Workloads {
             Ok(_) | Err(roll_access::Error::NotFound(_)) => Ok(()),
             Err(e) => Err(Error::Internal(format!("revoking {id} ({why}): {e}"))),
         }
+    }
+
+    /// A decoy token for a decoy key: roll-access's own decoys, owned by whoever planted it.
+    fn mint_decoy(&self, name: &str, rule: roll_auth::scope::Rule, owner: Option<&str>) -> roll_secrets::Result<roll_secrets::Minted> {
+        match self.0.mint_decoy(name, roll_auth::scope::Scope(vec![rule]), owner.unwrap_or("operator"), owner) {
+            Ok((g, secret)) => Ok(roll_secrets::Minted { id: g.id, secret, expires_at: 0 }),
+            Err(roll_access::Error::BadRequest(m)) => Err(Error::BadRequest(m)),
+            Err(roll_access::Error::Conflict(m) | roll_access::Error::TooMany(m)) => Err(Error::TooMany(m)),
+            Err(e) => Err(Error::Internal(format!("minting a decoy token: {e}"))),
+        }
+    }
+
+    fn revoke_decoy(&self, id: &str) -> roll_secrets::Result<()> {
+        self.0.revoke_decoy(id, "its decoy key was changed or deleted").map(|_| ()).map_err(|e| Error::Internal(format!("revoking a decoy token: {e}")))
     }
 
     /// Each token as roll-access answers it now: gone once revoked or expired, or (a person's own)
@@ -1391,6 +1573,197 @@ mod tests {
         assert!(super::search_parts(&json!({ "id": "x" })).is_err());
     }
 
+    /// roll queues in process (a broker with an AMQP listener, mq-control's routes behind the
+    /// links' `Api`) and roll secrets with rolld's providers, a vhost `orders` and the operator's
+    /// project `shop` with it on the canvas.
+    struct Queues {
+        broker: Arc<mq_core::Broker>,
+        secrets: Arc<roll_secrets::Secrets>,
+        ws: Arc<roll_workspace::Workspace>,
+        project: String,
+        _dir: tempfile::TempDir,
+    }
+
+    impl Queues {
+        async fn start(people: Option<super::People>) -> Queues {
+            let dir = tempfile::tempdir().unwrap();
+            let broker = mq_core::Broker::start(mq_core::BrokerConfig::default(), mq_core::meta::MemMeta::new(), mq_core::log::MemStore::new()).await.unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let b = broker.clone();
+            tokio::spawn(async move {
+                let _ = mq_amqp::serve_listener(b, listener, mq_amqp::ServerConfig { listen: addr, amqp10: None }).await;
+            });
+            let endpoints = mq_control::Endpoints { amqp: Some(format!("amqp://{addr}")), ..Default::default() };
+            let control = mq_control::QueuesControl::with_config(broker.clone(), endpoints, mq_control::ControlConfig::default()).unwrap();
+            let router = mq_control::api::router(control);
+            assert_eq!(send(&router, "POST", "/v1/queues/vhosts", Some(json!({ "name": "orders" }))).await.0, 201);
+            let api = super::Api::default();
+            api.set(router);
+            let ws_db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("workspace.db")), "workspace").unwrap();
+            let ws = Arc::new(roll_workspace::Workspace::new(ws_db).unwrap());
+            if let Some(p) = &people {
+                ws.set_owners(Arc::new(p.clone()));
+            }
+            let project = ws.create("", "shop", "", None).unwrap().id;
+            ws.place(roll_workspace::Scope::All, &project, roll_workspace::Kind::Queue, "orders", 0.0, 0.0).unwrap();
+            let db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("secrets.db")), "secrets").unwrap();
+            let opts = roll_secrets::Options {
+                keyring: Ok(roll_secrets::Keyring::new(&"k".repeat(32), None).unwrap()),
+                key_source: roll_secrets::KeySource::Env,
+                links: super::links(api),
+                syncs: Default::default(),
+                open: true,
+                trust_forwarded_for: false,
+                web_url: None,
+                deliver: None,
+                grants: None,
+                people: people.map(|p| Arc::new(p) as Arc<dyn roll_secrets::People>),
+                kms: None,
+                sts: None,
+                outside: None,
+                directory: None,
+                github: None,
+                clouds: None,
+                workloads: None,
+                gateways: None,
+            };
+            let secrets = Arc::new(roll_secrets::Secrets::new(db, ws.clone(), opts).unwrap());
+            Queues { broker, secrets, ws, project, _dir: dir }
+        }
+
+        /// A request to the project's routes (`/environments/…`) as the operator.
+        async fn call(&self, method: &str, path: &str, body: Option<Json>) -> (u16, Json) {
+            send(&roll_secrets::router(self.secrets.clone()), method, &format!("/v1/secrets/projects/{}{path}", self.project), body).await
+        }
+
+        async fn ok(&self, method: &str, path: &str, body: Option<Json>) -> Json {
+            let (s, v) = self.call(method, path, body).await;
+            assert!((200..300).contains(&s), "{method} {path}: {s} {v}");
+            v
+        }
+
+        /// `AMQP_URL` as `env` resolves it.
+        async fn amqp_url(&self, env: &str) -> String {
+            self.ok("GET", &format!("/environments/{env}/values"), None).await["values"]["AMQP_URL"].as_str().unwrap().to_string()
+        }
+
+        /// Users roll made on the broker, with their permissions on `orders`.
+        fn users(&self) -> Vec<(String, Option<String>)> {
+            let mut out: Vec<_> = self.broker.users().into_iter().filter(|u| u.name.starts_with("roll-")).map(|u| (u.name.clone(), self.broker.permission("orders", &u.name).map(|p| format!("{} {} {}", p.configure, p.write, p.read)))).collect();
+            out.sort();
+            out
+        }
+    }
+
+    async fn send(router: &axum::Router, method: &str, path: &str, body: Option<Json>) -> (u16, Json) {
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+        let req = axum::http::Request::builder().method(method).uri(path).header("content-type", "application/json").body(body.map_or(axum::body::Body::empty(), |b| axum::body::Body::from(b.to_string()))).unwrap();
+        let resp = router.clone().oneshot(req).await.unwrap();
+        let status = resp.status().as_u16();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Json::Null))
+    }
+
+    fn queue_link(field: &str, mode: &str, options: Json) -> Json {
+        json!({ "link": { "kind": "queue", "ref": "orders", "field": field, "mode": mode, "options": options } })
+    }
+
+    /// Whether `url`'s user can publish to a queue `jobs` on its vhost (a broker confirm).
+    async fn publishes(url: &str) -> bool {
+        let conn = lapin::Connection::connect(url, lapin::ConnectionProperties::default()).await.unwrap();
+        let ch = conn.create_channel().await.unwrap();
+        ch.confirm_select(Default::default()).await.unwrap();
+        match ch.basic_publish("".into(), "jobs".into(), Default::default(), b"job 1", Default::default()).await {
+            Ok(confirm) => confirm.await.is_ok_and(|c| c.is_ack()),
+            Err(_) => false,
+        }
+    }
+
+    /// A queue links live (where it is), managed (a user of its own, rotated by replacing it) and
+    /// dynamic (a user per lease, deleted when the lease ends).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_queue_links_live_managed_and_dynamic() {
+        let q = Queues::start(None).await;
+        let targets = q.ok("GET", "/links", None).await;
+        assert_eq!(targets[0]["kind"], "queue", "{targets}");
+        q.ok("PUT", "/environments/production/secrets/AMQP_VHOST", Some(queue_link("vhost", "live", json!({})))).await;
+        q.ok("PUT", "/environments/production/secrets/AMQP_PORT", Some(queue_link("port", "live", json!({})))).await;
+        q.ok("PUT", "/environments/production/secrets/AMQP_URL", Some(queue_link("url", "managed", json!({})))).await;
+        let v = q.ok("GET", "/environments/production/values", None).await["values"].clone();
+        assert_eq!(v["AMQP_VHOST"], "orders");
+        assert!(v["AMQP_PORT"].as_str().unwrap().parse::<u16>().is_ok(), "{v}");
+        let users = q.users();
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0].1.as_deref(), Some(".* .* .*"), "configure by default, on its vhost only");
+        let first = users[0].0.clone();
+        assert!(v["AMQP_URL"].as_str().unwrap().starts_with(&format!("amqp://{first}:")), "{v}");
+
+        // Rotating makes a new user; the old one is a retired lease until its grace ends, then goes.
+        q.ok("POST", "/environments/production/secrets/AMQP_URL/rotate", None).await;
+        assert_eq!(q.users().len(), 2);
+        let retired = q.ok("GET", "/leases", None).await[0]["id"].as_str().unwrap().to_string();
+        q.ok("DELETE", &format!("/leases/{retired}"), None).await;
+        let users = q.users();
+        assert!(users.len() == 1 && users[0].0 != first, "{users:?}");
+
+        // Dynamic: each resolve makes a user, deleted when its lease ends.
+        q.ok("PUT", "/environments/staging/secrets/WORKER_AMQP_URL", Some(queue_link("url", "dynamic", json!({ "ttl_minutes": 15 })))).await;
+        let r = q.ok("POST", "/environments/staging/resolve", Some(json!({ "consumer": "app:worker" }))).await;
+        assert_eq!(q.users().len(), 2);
+        q.ok("DELETE", &format!("/leases/{}", r["leases"][0].as_str().unwrap()), None).await;
+        assert_eq!(q.users().len(), 1, "the lease's user is deleted");
+    }
+
+    /// A linked user connects with the URL alone, with only the access its link asked for.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_linked_queue_user_connects_with_only_the_access_it_asked_for() {
+        let q = Queues::start(None).await;
+        q.ok("PUT", "/environments/production/secrets/AMQP_URL", Some(queue_link("url", "managed", json!({})))).await;
+        q.ok("PUT", "/environments/staging/secrets/AMQP_URL", Some(queue_link("url", "managed", json!({ "permission": "read" })))).await;
+        let (writer, reader) = (q.amqp_url("production").await, q.amqp_url("staging").await);
+        let conn = lapin::Connection::connect(&writer, lapin::ConnectionProperties::default()).await.unwrap();
+        conn.create_channel().await.unwrap().queue_declare("jobs".into(), Default::default(), Default::default()).await.unwrap();
+        assert!(publishes(&writer).await);
+        assert!(!publishes(&reader).await, "a read link's user can't publish");
+        let (s, e) = q.call("PUT", "/environments/development/secrets/AMQP_URL", Some(queue_link("url", "managed", json!({ "permission": "admin" })))).await;
+        assert_eq!((s, e["error"].as_str()), (400, Some("a queue link's permission is read, write or configure")));
+    }
+
+    /// A person's project stands for a queue only where rolld trusts it (queues say no owner, so an
+    /// admin's): a link to one on anyone else's canvas is refused.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_queue_the_project_isnt_trusted_for_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = roll_accounts::Config {
+            api_url: "http://api.example.com".into(),
+            web_url: "http://roll.example.com".into(),
+            mail: roll_accounts::MailConfig::Off,
+            github: None,
+            google: None,
+            secret_key: None,
+            open: false,
+            sso_allow_private: false,
+        };
+        let db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("accounts.db")), "accounts").unwrap();
+        let accounts = Arc::new(roll_accounts::Accounts::new(db, config, None).await.unwrap());
+        let (_, invite, _) = accounts.invite("operator", "dev@example.com", false, None).unwrap();
+        let mail = accounts.email_start("chal-test", "dev@example.com", Some(&invite)).unwrap().unwrap();
+        let (user, _) = accounts.email_verify("chal-test", mail.subject.split(' ').next().unwrap()).unwrap();
+        let q = Queues::start(Some(super::People { accounts: accounts.clone(), code: None, search: None })).await;
+        let mine = q.ws.create(&user, "side-project", "", None).unwrap().id;
+        q.ws.place(roll_workspace::Scope::Owner(&user), &mine, roll_workspace::Kind::Queue, "orders", 0.0, 0.0).unwrap();
+        let path = format!("/v1/secrets/projects/{mine}/environments/production/secrets/AMQP_URL");
+        let (s, e) = send(&roll_secrets::router(q.secrets.clone()), "PUT", &path, Some(queue_link("url", "managed", json!({})))).await;
+        assert!(s == 400 && e["error"].as_str().is_some_and(|m| m.starts_with("queue orders is on this project's canvas, but roll can't tell it's yours")), "{s} {e}");
+        assert!(q.users().is_empty(), "nothing issued");
+        // The same canvas once its person is an admin.
+        accounts.update_user(&user, Some(true), None).unwrap();
+        let (s, e) = send(&roll_secrets::router(q.secrets.clone()), "PUT", &path, Some(queue_link("url", "managed", json!({})))).await;
+        assert!((200..300).contains(&s), "{s} {e}");
+    }
+
 
     /// A service's deploy gets its project's environment as `app:<svc>`; where roll secrets has no
     /// such project or environment it gets nothing (a service needn't use secrets), never a failure.
@@ -1459,6 +1832,70 @@ mod tests {
         assert!(roll_secrets::router(secrets.clone()).oneshot(set).await.unwrap().status().is_success());
         assert_ne!(apps.digest(&project, "production").await.unwrap(), Some(before));
         assert_eq!(apps.digest(&project, "pr-9").await.unwrap(), None);
+    }
+
+    /// A decoy key's token, used where it was planted: roll-access refuses it and roll secrets
+    /// raises `decoy_used` on the key; deleting the key revokes the token (rolld's wiring).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_decoy_keys_token_raises_decoy_used_and_dies_with_its_key() {
+        use tower::ServiceExt;
+        let dir = tempfile::tempdir().unwrap();
+        let ws_db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("workspace.db")), "workspace").unwrap();
+        let ws = Arc::new(roll_workspace::Workspace::new(ws_db).unwrap());
+        let project = ws.create("", "shop", "", None).unwrap().id;
+        let access = roll_access::Access::with_db(code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("access.db")), "access").unwrap(), Default::default(), Default::default()).unwrap();
+        let db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("secrets.db")), "secrets").unwrap();
+        let opts = roll_secrets::Options {
+            keyring: Ok(roll_secrets::Keyring::new(&"k".repeat(32), None).unwrap()),
+            key_source: roll_secrets::KeySource::Env,
+            links: Default::default(),
+            syncs: Default::default(),
+            open: true,
+            trust_forwarded_for: false,
+            web_url: None,
+            deliver: None,
+            grants: Some(access.clone() as Arc<dyn roll_auth::Grants>),
+            people: None,
+            kms: None,
+            sts: None,
+            outside: None,
+            directory: None,
+            github: None,
+            clouds: None,
+            workloads: Some(Arc::new(super::Workloads(access.clone()))),
+            gateways: None,
+        };
+        let secrets = Arc::new(roll_secrets::Secrets::new(db, ws, opts).unwrap());
+        super::tell_decoys(&access, secrets.clone());
+        let call = |method: &str, path: &str, body: Option<Json>| {
+            let req = axum::http::Request::builder().method(method).uri(format!("/v1/secrets/projects/{project}/environments/production{path}")).header("content-type", "application/json");
+            let req = req.body(axum::body::Body::from(body.map(|b| b.to_string()).unwrap_or_default())).unwrap();
+            roll_secrets::router(secrets.clone()).oneshot(req)
+        };
+        let made = call("POST", "/decoys", Some(json!({ "key": "OLD_DEPLOY_TOKEN", "kind": "rlt" }))).await.unwrap();
+        assert_eq!(made.status(), axum::http::StatusCode::CREATED);
+        let operator = roll_secrets::Caller::operator();
+        let (value, _) = secrets.reveal(&project, "production", "/", "OLD_DEPLOY_TOKEN", false, &operator).unwrap();
+        // roll-access's own decoy: never a grant a product acts on.
+        let g = access.store.by_secret(value.expose()).unwrap().expect("a decoy grant");
+        assert!(g.decoy);
+        assert!(roll_auth::Grants::grant(&*access, &g.id).is_none());
+        // The gate's decoy path.
+        access.decoy_tripped(&g, Some("198.51.100.4".into()), "/v1/secrets/whoami", None);
+        let mut first = None;
+        for _ in 0..50 {
+            first = secrets.project_health(&project, &operator, false).unwrap().into_iter().next();
+            if first.is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        let first = first.expect("a finding");
+        assert_eq!((first.issue, first.key.as_str()), (roll_secrets::health::Issue::DecoyUsed, "OLD_DEPLOY_TOKEN"));
+        assert!(first.detail.contains("198.51.100.4"), "{}", first.detail);
+        assert!(call("DELETE", "/secrets/OLD_DEPLOY_TOKEN", None).await.unwrap().status().is_success());
+        assert!(access.store.by_secret(value.expose()).unwrap().is_none());
+        assert!(access.store.get(&g.id).unwrap().revoked_at.is_some());
     }
 
     /// A customer's key wraps a project's data key: Encrypt and Decrypt name the key and carry the
