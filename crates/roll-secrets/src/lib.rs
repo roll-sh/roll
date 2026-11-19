@@ -16,6 +16,8 @@ mod alerts;
 pub mod api;
 pub mod health;
 pub mod outside;
+pub mod directories;
+mod turns;
 pub mod github_app;
 pub mod aws;
 pub mod iam;
@@ -334,6 +336,9 @@ pub struct Options {
     pub clouds: Option<clouds::Clouds>,
     /// Sets passwords on Postgres servers outside roll (outside.rs); `None`: not on this server.
     pub outside: Option<std::sync::Arc<dyn outside::OutsideDb>>,
+    /// Sets passwords and makes users on LDAP and Active Directory servers outside roll
+    /// (directories.rs); `None`: not on this server.
+    pub directory: Option<std::sync::Arc<dyn directories::Directory>>,
     /// Calls GitHub for the installation tokens of Apps projects register (github_app.rs); `None`:
     /// not on this server.
     pub github: Option<std::sync::Arc<dyn github_app::GitHubApps>>,
@@ -358,6 +363,7 @@ pub struct Secrets {
     web_url: Option<String>,
     clouds: Option<clouds::Clouds>,
     outside: Option<Arc<dyn outside::OutsideDb>>,
+    directory: Option<Arc<dyn directories::Directory>>,
     github: Option<Arc<dyn github_app::GitHubApps>>,
     /// OIDC issuers' public keys (identities.rs).
     oidc: oidc::Keys,
@@ -506,6 +512,10 @@ impl Secrets {
         if let (Some(outside), Ok(keys)) = (&opts.outside, &opts.keyring) {
             links.register(Arc::new(outside::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone(), outside: outside.clone() }));
         }
+        db.ensure_schema(directories::SCHEMA)?;
+        if let (Some(directory), Ok(keys)) = (&opts.directory, &opts.keyring) {
+            links.register(Arc::new(directories::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone(), directory: directory.clone() }));
+        }
         db.ensure_schema(github_app::SCHEMA)?;
         // An App's ceiling: the repositories and permissions its tokens may reach at most.
         db.add_column("github_apps", "repositories", "TEXT")?;
@@ -513,7 +523,7 @@ impl Secrets {
         if let (Some(github), Ok(keys)) = (&opts.github, &opts.keyring) {
             links.register(Arc::new(github_app::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone(), github: github.clone() }));
         }
-        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, workloads: opts.workloads, unwrap: unwrap.clone(), open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, outside: opts.outside, github: opts.github, oidc: Default::default(), logins: Default::default(), reads_per_minute: read::READS_PER_MINUTE.into(), code_refs: Default::default(), sts: opts.sts.clone(), clouds: opts.clouds, public_api, crls, live_fps: Default::default(), counters: Default::default() })
+        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, workloads: opts.workloads, unwrap: unwrap.clone(), open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, outside: opts.outside, directory: opts.directory, github: opts.github, oidc: Default::default(), logins: Default::default(), reads_per_minute: read::READS_PER_MINUTE.into(), code_refs: Default::default(), sts: opts.sts.clone(), clouds: opts.clouds, public_api, crls, live_fps: Default::default(), counters: Default::default() })
     }
 
     pub fn links(&self) -> &Links {
@@ -659,7 +669,7 @@ impl Secrets {
 }
 
 /// Registries of the project's own resources (rotators…): a lease's revocation reads them.
-const REGISTRIES: &[&str] = &["rotators", "saas_rotators", "outside_dbs", "aws_users", "aws_roles", "cloud_accounts", "kubernetes_clusters", "cas", "ca_certs", "ssh_cas", "github_apps", "backup_schedules"];
+const REGISTRIES: &[&str] = &["rotators", "saas_rotators", "outside_dbs", "directories", "aws_users", "aws_roles", "cloud_accounts", "kubernetes_clusters", "cas", "ca_certs", "ssh_cas", "github_apps", "backup_schedules"];
 
 /// Drop a forgotten project's key and registries once no lease of its waits to be revoked, and no
 /// certificate its CAs revoked is still within its lifetime (their CRLs, signed with the CA's key,

@@ -132,6 +132,8 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/outside-databases"), get(outside_databases).post(add_outside_database))
         .route(&format!("{P}/outside-databases/{{id}}"), axum::routing::delete(delete_outside_database).patch(update_outside_database))
         .route(&format!("{P}/outside-databases/{{id}}/rotate-admin"), post(rotate_outside_admin))
+        .route(&format!("{P}/directories"), get(directories).post(add_directory))
+        .route(&format!("{P}/directories/{{id}}"), axum::routing::delete(delete_directory))
         .route(&format!("{P}/kubernetes"), get(kubernetes_clusters).post(add_kubernetes_cluster))
         .route(&format!("{P}/kubernetes/{{id}}"), axum::routing::delete(delete_kubernetes_cluster))
         .route(&format!("{P}/required"), get(required).put(set_required))
@@ -1283,6 +1285,20 @@ async fn add_kubernetes_cluster(State(s): S, Who(c): Who, Path(project): Path<St
 
 async fn delete_kubernetes_cluster(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
     blocking(s, move |s| s.delete_kubernetes_cluster(&project, &id, &c)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn directories(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.directories(&project, &c)).await?))
+}
+
+async fn add_directory(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
+    let n: crate::directories::NewDirectory = body(&b)?;
+    Ok(created(blocking(s, move |s| s.add_directory(&project, n, &c)).await?))
+}
+
+async fn delete_directory(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
+    blocking(s, move |s| s.delete_directory(&project, &id, &c)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

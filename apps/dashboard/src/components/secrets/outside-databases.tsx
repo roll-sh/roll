@@ -2,7 +2,7 @@ import { Database, KeyRound, Pencil, Plus, Trash2 } from "lucide-react";
 import { useState } from "react";
 import type { OutsideDatabase } from "@/lib/secrets-api";
 import { useSecrets } from "./secrets-page";
-import { ActorMark, ago, button, card, dangerButton, ErrorNote, errorText, field, ghost, primary, Section, useLoad } from "./ui";
+import { ActorMark, ago, button, card, dangerButton, ErrorNote, errorText, field, ghost, primary, Section, textareaField, useLoad } from "./ui";
 
 const ROLE = /^[a-z_][a-z0-9_]{0,62}$/;
 
@@ -127,7 +127,7 @@ export function OutsideDatabases() {
           </div>
           <details className="sm:col-start-2">
             <summary className="cursor-pointer text-[11px] text-subtle select-none">Server CA certificate (Amazon RDS and other private CAs)</summary>
-            <textarea value={ca} onChange={(e) => setCa(e.target.value)} rows={4} placeholder="-----BEGIN CERTIFICATE-----" spellCheck={false} className={`${field} mt-1 h-auto resize-y py-1.5 font-mono text-[11px]`} />
+            <textarea value={ca} onChange={(e) => setCa(e.target.value)} rows={4} placeholder="-----BEGIN CERTIFICATE-----" spellCheck={false} className={`${textareaField} mt-1 resize-y font-mono text-[11px]`} />
           </details>
           <div className="sm:col-start-2 flex gap-2">
             <button type="submit" className={primary} disabled={!ok || busy}>
