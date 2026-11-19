@@ -5121,8 +5121,9 @@ work found). First what can be built now:
    redirects, and the request carries nothing but the credential. A live one ranks first and offers
    rotate-on-leak where roll has a rotator for its kind. Opt-in per project, since it contacts the
    provider. Building: `feature/roll-secrets-validity`.
-3. **Postgres decoys in the dashboard** (S; #432): the "Add a decoy" dialog offers only `rlt`. Building:
-   `feature/roll-secrets-pg-decoys-ui`, on #432.
+3. **Postgres decoys in the dashboard** (S; #432): the "Add a decoy" dialog offers only `rlt`. #467 (on #432):
+   the dialog offers a Postgres login with a database picker. Follow-up: name the endpoint in the
+   badge and Health finding (the server's detail).
 4. **Members v1** (building, `feature/roll-members` on #445; decisions D1–D9 with the user, (a) for now).
 5. **Use without seeing** (building, `feature/roll-secrets-placeholders`): host-bound keys,
    `rlph_` placeholders, `substitute`, and a filter that previews', apps' and the agents sandbox's
