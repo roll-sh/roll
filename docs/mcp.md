@@ -891,8 +891,13 @@ waits on a sibling PR reaching main is last.
    `apps_deploy_vulnerabilities` (`severity`), `apps_environment_slo`, `apps_list_forms`,
    `apps_form_submissions` (a reveal; in lockdown each submission's `fields` are withheld,
    `Tool::outside`: anyone can submit a site's form) and `apps_delete_form_submission`; then
-   images with critical vulnerabilities in `security_checkup`. Waiting on a sibling: secrets'
-   request (#277) and cut-off (#304) tools when secrets' batch 4 lands; a removed person's
+   images with critical vulnerabilities in `security_checkup`. Proposed to secrets (their call, #277's doc
+   says no tool today): `secrets_request_value` (write), `secrets_list_value_requests` and
+   `secrets_cancel_value_request`, so an agent that needs a key it doesn't have sends the person a
+   link and the value goes from their browser, sealed, into the folder, never through the
+   conversation; mapped once #277 lands if they agree. No tool for #304's cut-off (an incident
+   response that can revoke the agent's own token: a person's call; `secrets_reach` reads who can
+   reach a folder). Waiting on a sibling: a removed person's
    repositories handed to someone else (waits for a repository transfer in roll code). Not doing:
    "remember this browser"; a preset that reveals development's values without asking (#354);
    tools for previews' shell, files and forward (ADMIN, interactive, as apps' shell and files).
