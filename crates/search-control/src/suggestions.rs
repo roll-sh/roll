@@ -305,7 +305,8 @@ impl Control {
             let at = now_ms();
             for w in wanted {
                 let row = rows.iter().find(|r| r.index == w.index);
-                if row.is_none_or(|r| r.due_at <= at || r.config != w.cfg.to_json().to_string())
+                let config = w.cfg.to_json().to_string();
+                if row.is_none_or(|r| r.due_at <= at || r.config != config)
                     && let Err(e) = Box::pin(self.build_suggestions(&c, &w.index, false)).await
                 {
                     tracing::info!(cluster = name, index = w.index, error = %e, "building query suggestions failed");
