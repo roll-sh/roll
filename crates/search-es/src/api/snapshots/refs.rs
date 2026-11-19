@@ -60,12 +60,23 @@ fn why(setting: &str, reference: &str, why: &str) -> String {
     format!("[{setting}] names [{reference}], which can't be used: {why}")
 }
 
+/// What the resolver knows the cluster by: its control-plane id (a name can be reused).
+fn resource(cluster: &crate::Cluster) -> &str {
+    cluster.config.resource_id.as_deref().unwrap_or(&cluster.name)
+}
+
+/// Drops what's kept for repositories that are no longer registered (`DELETE _snapshot`).
+pub(super) fn forget_unregistered(cluster: &crate::Cluster, st: &ClusterState) {
+    cluster.snapshot_data.refs.lock().retain(|n, _| st.metadata.repositories.contains_key(n));
+}
+
 const NO_RESOLVER: &str = "this node resolves no roll secrets references";
 
 /// `PUT _snapshot`'s check of a definition's references (`settings` as given): who wrote them
 /// ([`MAKER_HEADER`], set only by roll's control plane), `None` when there are none.
 pub(super) async fn check(ctx: &Ctx<'_>, name: &str, ty: &str, settings: &Settings) -> EsResult<Option<String>> {
     let cluster = ctx.cluster;
+    let id = resource(cluster);
     let refs = references(ty, settings);
     let Some((first, first_ref)) = refs.first() else { return Ok(None) };
     let bad = |setting: &str, reference: &str, reason: &str| EsError::new(400, "settings_exception", why(setting, reference, reason));
@@ -78,7 +89,7 @@ pub(super) async fn check(ctx: &Ctx<'_>, name: &str, ty: &str, settings: &Settin
     };
     let Some(resolver) = &cluster.config.secret_refs else { return Err(bad(first, first_ref, NO_RESOLVER)) };
     for (k, reference) in &refs {
-        resolver.0.digest(&cluster.name, maker, reference).await.map_err(|e| bad(k, reference, &e))?;
+        resolver.0.digest(id, maker, reference).await.map_err(|e| bad(k, reference, &e))?;
     }
     Ok(Some(maker.to_string()))
 }
@@ -98,7 +109,7 @@ pub(super) async fn credentials(cluster: &crate::Cluster, name: &str, r: &Reposi
     let Some(maker) = r.refs_by.as_deref().filter(|m| !m.is_empty()) else { return Err(refused(first, first_ref, "nobody roll knows wrote it")) };
     let mut digests = Vec::with_capacity(refs.len());
     for (k, reference) in &refs {
-        digests.push(resolver.0.digest(&cluster.name, maker, reference).await.map_err(|e| refused(k, reference, &e))?);
+        digests.push(resolver.0.digest(resource(cluster), maker, reference).await.map_err(|e| refused(k, reference, &e))?);
     }
     let kept = &cluster.snapshot_data.refs;
     let same = kept.lock().get(name).filter(|c| c.refs == refs && c.digests == digests).map(|c| c.values.clone());
@@ -107,7 +118,7 @@ pub(super) async fn credentials(cluster: &crate::Cluster, name: &str, r: &Reposi
         None => {
             let mut values = Vec::with_capacity(refs.len());
             for (k, reference) in &refs {
-                values.push(resolver.0.resolve(&cluster.name, maker, reference).await.map_err(|e| refused(k, reference, &e))?);
+                values.push(resolver.0.resolve(resource(cluster), maker, reference).await.map_err(|e| refused(k, reference, &e))?);
             }
             kept.lock().insert(name.to_string(), Kept { refs: refs.clone(), digests, values: values.clone() });
             values

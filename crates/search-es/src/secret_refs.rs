@@ -21,9 +21,16 @@ pub fn is_reference(value: &str) -> bool {
     value.trim_start().starts_with(SCHEME)
 }
 
-/// A resolved value: never printed (`Debug` redacts it), opened only to build a client.
+/// A resolved value: never printed (`Debug` redacts it), opened only to build a client, wiped
+/// when dropped.
 #[derive(Clone)]
 pub struct Revealed(String);
+
+impl Drop for Revealed {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.0);
+    }
+}
 
 impl Revealed {
     pub fn new(value: impl Into<String>) -> Revealed {
@@ -41,7 +48,8 @@ impl std::fmt::Debug for Revealed {
     }
 }
 
-/// Resolves references for cluster `cluster` (its name), written by `maker` (what
+/// Resolves references for cluster `cluster` (its control-plane id,
+/// [`crate::cluster::ClusterConfig::resource_id`], else its name), written by `maker` (what
 /// [`MAKER_HEADER`] said): both re-check that the maker still may reveal what `reference` names.
 /// Errors say why (the reference, the part that failed), never with a value.
 #[async_trait]

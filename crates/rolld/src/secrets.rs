@@ -1229,7 +1229,13 @@ impl ForSearch {
         tokio::task::spawn_blocking(move || {
             let caller = secrets.maker_caller(&maker, &resource.consumer()).map_err(|e| e.to_string())?;
             secrets.may_reveal_for(&resource, &reference, &caller).map_err(|e| format!("{maker}, who set it, can't use it any more: {e}"))?;
-            f(&secrets, &resource, &reference).map_err(|e| e.to_string())
+            f(&secrets, &resource, &reference).map_err(|e| match e {
+                // A branch learns nothing about which keys a protected environment holds.
+                roll_secrets::Refusal::Protected(_) | roll_secrets::Refusal::NoSuchKey(_) if resource.is_untrusted() => {
+                    format!("not available to a branch: {reference} is protected or doesn't exist")
+                }
+                e => e.to_string(),
+            })
         })
         .await
         .map_err(|e| e.to_string())?
@@ -1401,6 +1407,13 @@ impl code_control::SecretEnv for ForCode {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_search_branch_resolves_as_its_root_untrusted() {
+        let holder = |copy| search_control::secret_refs::Holder { id: "srch_root".into(), copy, maker: "usr_ada".into() };
+        assert_eq!(super::ForSearch::resource(&holder(false)).consumer(), "search:search:srch_root");
+        assert_eq!(super::ForSearch::resource(&holder(true)).consumer(), "search:search:srch_root (untrusted)");
+    }
+
     #[test]
     fn only_roll_mcps_guard_keeps_the_guard_header() {
         let req = || super::Request::builder().uri("/v1/secrets/projects/p/leaks").header("x-roll-guard", "1").body(super::Body::empty()).unwrap();

@@ -115,6 +115,9 @@ pub struct ClusterConfig {
     /// Resolves credentials given as references (`roll://ENV/KEY`, [`crate::secret_refs`]);
     /// `None`: references are refused.
     pub secret_refs: Option<crate::secret_refs::Resolver>,
+    /// The control plane's id for the cluster, what [`Self::secret_refs`] knows it by (a name
+    /// can be reused after a delete); `None`: the cluster's name stands for it (dev nodes).
+    pub resource_id: Option<String>,
 }
 
 impl ClusterConfig {
@@ -131,6 +134,7 @@ impl ClusterConfig {
             default_repository: None,
             audit: None,
             secret_refs: None,
+            resource_id: None,
         }
     }
 

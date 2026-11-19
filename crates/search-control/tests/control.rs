@@ -2174,6 +2174,12 @@ async fn an_s3_repository_takes_its_keys_from_roll_secrets() {
     assert!(v.to_string().contains("usr_ada may not reveal") && !v.to_string().contains("fake-secret"), "{v}");
     fake.revealers.lock().unwrap().push("usr_ada".into());
 
+    // The cluster taken off the project's canvas: the next snapshot fails, with why.
+    fake.canvas.lock().unwrap().clear();
+    let (s, v) = e.es(&u, &p, reqwest::Method::PUT, &snapshot("off-canvas"), Some(json!({"indices": "docs"}))).await;
+    assert!(s == 500 && v.to_string().contains("isn't on any project's canvas"), "{v}");
+    fake.canvas.lock().unwrap().push(id.clone());
+
     // A branch asks as the cluster it came from, untrusted: production is refused, visibly.
     let (s, branch) = e.call_as("ada", reqwest::Method::POST, &format!("/v1/search/clusters/{id}/branches"), Some(json!({"name": "vault-dev"}))).await;
     assert_eq!(s, 200, "{branch}");

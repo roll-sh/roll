@@ -342,6 +342,7 @@ pub fn dialect(flavor: &str) -> Option<Dialect> {
 /// What the node needs to serve a cluster.
 pub fn spec_for(c: &SearchCluster) -> ClusterSpec {
     let mut spec = ClusterSpec::new(c.name.clone());
+    spec.resource_id = Some(c.id.clone());
     spec.dialect = dialect(&c.flavor).unwrap_or(Dialect::Elasticsearch);
     spec.credentials = vec![Credential::password(c.password.clone())];
     spec.idle_unload = Some(if c.idle_timeout_s == 0 { ALWAYS_ON } else { Duration::from_secs(c.idle_timeout_s.max(1) as u64) });
@@ -1548,7 +1549,7 @@ impl Control {
             .collect();
         let mut maker = None;
         if !refs.is_empty() {
-            let (holder, secrets) = self.secret_refs.holder(&c.name, "").await.map_err(ControlError::Invalid)?;
+            let (holder, secrets) = self.secret_refs.holder(&c.id, "").await.map_err(ControlError::Invalid)?;
             for r in refs {
                 let by = secrets.may_write(who, &holder, r.trim()).await.map_err(|e| match e {
                     crate::secret_refs::Refused::Forbidden(m) => ControlError::Forbidden(format!("{r}: {m}")),

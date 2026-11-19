@@ -7,7 +7,8 @@
 //! secrets lets reveal each one ([`ResourceSecrets::may_write`], its `Caller::allows`), and records
 //! the caller as their maker. The cluster's own endpoint refuses them.
 //!
-//! **Resolving.** For the cluster's id, as its maker: every resolve and digest re-checks that the
+//! **Resolving.** For the cluster's id (bound when the node loads it: a name can be reused after
+//! a delete), as its maker: every resolve and digest re-checks that the
 //! maker still may reveal what the reference names (roll secrets' `maker_caller`). A branch
 //! (anything with a parent) is a copy its project never vetted: it asks as the cluster it came
 //! from (the root of its line, the one a canvas holds) and as an untrusted copy, so roll secrets
@@ -81,10 +82,11 @@ pub(crate) struct CatalogRefs {
 }
 
 impl CatalogRefs {
-    pub(crate) async fn holder(&self, name: &str, maker: &str) -> Result<(Holder, Arc<dyn ResourceSecrets>), String> {
+    /// `cluster`: its id (a name, on a node outside roll's control plane, matches no id).
+    pub(crate) async fn holder(&self, cluster: &str, maker: &str) -> Result<(Holder, Arc<dyn ResourceSecrets>), String> {
         let secrets = self.secrets.get().cloned().ok_or("roll secrets isn't available on this node")?;
         let fail = |e: anyhow::Error| format!("reading the search catalog: {e}");
-        let c = self.store.by_name(name).await.map_err(fail)?.ok_or_else(|| format!("no search cluster {name}"))?;
+        let c = self.store.get(cluster).await.map_err(fail)?.ok_or_else(|| format!("no live search cluster {cluster}"))?;
         let mut holder = Holder { id: c.id, copy: false, maker: maker.to_string() };
         let mut parent = c.parent_id;
         for _ in 0..MAX_DEPTH {

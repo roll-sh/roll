@@ -477,7 +477,8 @@ allowlist (a preview's branch included); change it like any setting.
     bucket) without the references drops them: where credentials go never changes without them
     being given again.
   - *Resolving.* search-es only knows the seam (`search_es::secret_refs::SecretRefs`, on the
-    cluster's config); search-control's resolver names the cluster from the catalog
+    cluster's config, with the cluster's id bound when the node loads it: a name can be reused
+    after a delete); search-control's resolver finds the cluster in the catalog by that id
     (`secret_refs.rs`) and rolld's `ForSearch` first rebuilds the maker as roll secrets has them
     now (`Secrets::maker_caller`, as a sync acts as its maker: a person while they can sign in, a
     token while it lives) and checks they still may reveal the reference, then asks
@@ -490,7 +491,8 @@ allowlist (a preview's branch included); change it like any setting.
     holds in memory while they're the same, so a rotation reaches the next operation. A reference
     refused later (the secret deleted, the maker's access gone) fails that operation with the
     reason; it never falls back to anonymous requests or to values held from before, and no error
-    carries a value.
+    carries a value. Resolved values are wiped when dropped, and unregistering a repository drops
+    them. A branch is told the same thing whether a key is protected or missing.
 
 ## On the fleet (roll cloud)
 

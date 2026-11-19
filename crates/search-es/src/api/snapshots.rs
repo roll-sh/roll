@@ -849,6 +849,7 @@ pub async fn delete_repository(ctx: &Ctx<'_>) -> EsResult<Reply> {
             Ok(())
         })
         .await?;
+    refs::forget_unregistered(ctx.cluster, &ctx.state());
     Reply::acknowledged()
 }
 
