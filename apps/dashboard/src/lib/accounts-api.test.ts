@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { accountsApi, activityText, onReauthRequired, phishingResistant, sessionMethod, type Activity } from "./accounts-api";
+import { accountsApi, activityText, onReauthRequired, phishingResistant, sessionMethod, findPeople, type Activity } from "./accounts-api";
 
 describe("activityText", () => {
   const e = (a: Partial<Activity>): Activity => ({ at: 0, action: "sign_in", actor: "usr_me", ok: true, status: 200, ...a });
@@ -82,5 +82,17 @@ describe("sessions", () => {
     expect(sessionMethod({ method: "github" })).toBe("GitHub");
     expect(sessionMethod({ method: null })).toBeNull();
     expect([{ method: "email" }, { method: "email", passkey: true }, { method: "sso" }, { method: "passkey" }].map((s) => phishingResistant(s as never))).toEqual([false, true, true, true]);
+  });
+});
+
+describe("findPeople", () => {
+  const p = (handle: string, o: Partial<{ admin: boolean; disabled: boolean; totp: boolean; passkeys: number }> = {}) => ({ name: handle.toUpperCase(), handle, email: `${handle}@acme.test`, admin: false, disabled: false, totp: false, passkeys: 0, ...o });
+  const all = [p("ada", { admin: true, totp: true }), p("bob"), p("cy", { disabled: true }), p("dee", { passkeys: 1 })];
+  it("finds by name, handle or address, and filters", () => {
+    expect(findPeople(all, "ACME.test", "everyone").length).toBe(4);
+    expect(findPeople(all, "bo", "everyone").map((u) => u.handle)).toEqual(["bob"]);
+    expect(findPeople(all, "", "admins").map((u) => u.handle)).toEqual(["ada"]);
+    expect(findPeople(all, "", "no-second-factor").map((u) => u.handle)).toEqual(["bob"]);
+    expect(findPeople(all, "", "turned-off").map((u) => u.handle)).toEqual(["cy"]);
   });
 });
