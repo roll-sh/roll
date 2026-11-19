@@ -572,7 +572,7 @@ async fn an_error_mains_preview_doesnt_have_reaches_the_record_and_the_report() 
     let base = e.engine.store.rows(Some(&e.project)).unwrap().into_iter().find(|r| r.is_baseline()).expect("main's preview");
     let p = e.engine.store.row_by_change("chg_ne").unwrap().unwrap();
     let web = e.engine.store.services(&p.id).unwrap().into_iter().next().unwrap().name;
-    let group = |f: &str, title: &str, count: u64| roll_previews::ErrorGroup { service: String::new(), fingerprint: f.into(), kind: "line".into(), title: title.into(), count, first_seen: 1, last_seen: 2, sample: title.into() };
+    let group = |f: &str, title: &str, count: u64| roll_previews::ErrorGroup { fingerprint: f.into(), kind: "line".into(), title: title.into(), count, first_seen: 1, last_seen: 2, sample: title.into(), ..Default::default() };
     e.apps.errors.lock().insert(format!("{}/{web}", base.id), vec![group("old", "a flaky upstream", 3)]);
     e.apps.errors.lock().insert(format!("{}/{web}", p.id), vec![group("old", "a flaky upstream", 4), group("rare", "RangeError", 1), group("new", "Stripe rejected sk_test_51Hx9", 9)]);
     e.engine.read_new_errors().await;

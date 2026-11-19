@@ -611,7 +611,7 @@ pub struct ServiceMetrics {
 /// stack trace joined from its lines, or an error line, by its fingerprint (its type and first
 /// frames, with what varies taken out). How many, first and last seen (ms), and the newest one
 /// whole. Title and sample are masked as its logs are.
-#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, serde::Deserialize)]
 pub struct ErrorGroup {
     #[serde(default)]
     pub service: String,
