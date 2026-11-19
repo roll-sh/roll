@@ -1076,7 +1076,13 @@ in one run, for an operator's maintenance window, and fails if one does), `missi
 imports and base), `exposed` (a protected value also in an unprotected environment), `public`,
 `weak`, `expiring`, `certificate_expiring` (a certificate a project CA signed for a CSR that ends
 within two weeks: links' certificates are replaced by roll, a CSR's only by whoever asked; `key` is
-its names, `path` its CA), `stale`, then `unread` (nobody revealed, exported, resolved or synced it in 90 days,
+its names, `path` its CA), `operator_made` (a sync or a workload identity made as the
+operator account: "made by the operator account: re-save to bind it to a person". Before makers
+were people, an admin's session made them as `operator`, which would act forever after the admin
+was demoted or disabled; nothing is migrated, since nothing tells those from what the deployment's
+own token made. Making the sync again, or the identity (or setting its pinned keys again), from a
+person's session binds it to them. `key` is its id, an identity's environment and folder empty),
+`stale`, then `unread` (nobody revealed, exported, resolved or synced it in 90 days,
 and it's older than that). Each `Finding` names the environment, folder and key where it's set,
 with a detail (the other environments, the reason, the date): never a value, and nothing is
 decrypted. Only what the caller may read is listed, and `weak` only where it may reveal.
@@ -2486,6 +2492,11 @@ it, and leaves out dynamic keys and what doesn't resolve instead of failing the 
   - Checks, sandboxes (a terminal), previews, syncs (a target its maker chose and may read back:
     the key is "not synced" and the target keeps what it had) and CI's workload identities don't
     get it.
+  - Nor does another roll product's reference that a person or a token chose
+    (`Secrets::bind_ref`, then `resolve_as`: search's snapshot repositories). Whoever may write
+    the product's settings chooses where the value goes (their own S3 endpoint), so the key is
+    refused when it's chosen, and at every read if it's tagged later. It reaches only
+    operator-written storage targets (`resolve_for`, "Other roll products").
 - Nothing tests a guess against it either: no fingerprint, weakness or typed-key misfit shows for
   it, comparing environments says `hidden`, a local file's diff skips it, and the leak scan
   (`POST …/leaks`) doesn't match it. roll code's own scans of pushed code still do: a sensitive
@@ -3209,6 +3220,42 @@ where it would otherwise keep its own sealed copy, so the value lives once, in r
 a rotation reaches the product without anyone pasting it again (as 1Password's `op://` and Vault
 Agent's templates do).
 
+- **Who chose it** decides how a product reads it:
+  - **A person or a token** (roll search's snapshot repositories): the product calls
+    `Secrets::bind_ref(resource, reference, caller)` when the reference is written, with the
+    request's caller, and stores the opaque `Maker` it returns (it serializes as a string) beside
+    the reference. Every read is `Secrets::resolve_as(resource, reference, &maker)` or
+    `digest_as`: the reference reads *as its maker*, never as a runtime, through the same code a
+    reveal runs. So a sensitive key is refused (when it's chosen, and at every read if it's tagged
+    later), an import, a base or a `${…}` inside the value counts only where the maker may reveal,
+    and folders a token's rules leave out stay out. The maker's rights are looked up on every
+    read, never cached: a person while they can sign in and still own the project (an admin while
+    they still are one), a token while it lives. An admin's session is kept as the person
+    (`usr_…`), not `operator`. A workload identity's login can't choose one (400): it ends with its
+    token. The audit row is still the resource's, naming the maker
+    (`resolved KEY for search:search:logs, for usr_… (who chose it)`).
+  - **A deployer, for the resource's own runtime** (roll apps' git login: a person pastes a deploy
+    token, tagged sensitive, and the service's login refers to it):
+    `Secrets::bind_ref_runtime(resource, reference, caller, runtime_env)`. The contract is the
+    product's: it calls this only after its own check that the caller holds deploy on the
+    resource in `runtime_env` (for roll apps, naming the login is already `deploy`); anything else
+    calls `bind_ref`. Whoever may deploy there can already run code that reads that environment's
+    sensitive keys, so this adds no reach:
+    - A reference to exactly `runtime_env` is a *runtime binding*. Its `Maker` serializes as
+      `usr_…@runtime:production` (a plain maker's format is unchanged). It reads that one
+      environment as the resource's runtime: sensitive keys included, imports and bases as the
+      runtime follows them, within the resource's trust (its one trusted project, and an untrusted
+      copy still reads as an untrusted caller, so no protected environment and no sensitive key).
+    - Every `resolve_as` and `digest_as` still checks first that the maker can sign in, still
+      reaches the project and may reveal the folder, and refuses otherwise.
+    - The audit row is `<resource> (runtime read for <maker>)`, e.g.
+      `apps:service:web (runtime read for usr_…)`.
+    - A reference to any other environment binds by the maker's rules above, and a runtime
+      binding refuses any environment but its own. A workload identity's login is refused here
+      too.
+  - **The operator** (roll storage's replication targets, which only the operator writes):
+    `Secrets::resolve_for` / `digest_for` read as the project's runtime, sensitive keys included.
+    These and runtime bindings are the only references a sensitive key reaches.
 - **Which products.** roll storage's replication targets to buckets outside roll: the access key
   id and the secret (`POST /v1/storage/replication-targets` with
   `"secret_access_key": "roll://prj_…@production/AWS_SECRET_ACCESS_KEY"`). A target's references
@@ -3216,9 +3263,8 @@ Agent's templates do).
   for it, so without one, anyone who may set another bucket's replication could point it at the
   target and have roll sign for the target's endpoint with that bucket's project's credential. Search snapshot
   repositories, roll code's reviewer provider keys and the agents' gateway upstreams still keep
-  sealed copies.
-- **Who reads it.** The product asks rolld in process (`Secrets::resolve_for(resource,
-  reference)`), naming the workspace resource that needs the value: a replication target
+  sealed copies. roll search's snapshot repositories take them through `bind_ref` (#361).
+- **Who reads it.** The product asks rolld in process (`resolve_as` or `resolve_for`), naming the workspace resource that needs the value: a replication target
   resolves for the source bucket that replicates through it. The project is the one whose canvas
   holds that resource *and* that stands for it (`Workspace::trusts`): a person's canvas only
   for what's theirs, never membership alone. A reference names a project
@@ -3227,8 +3273,8 @@ Agent's templates do).
   replication only that the target's credentials don't resolve, never "protected" or "no such
   key", which would say which keys exist where.
 - **Protected environments.** As a roll apps service reads its own environment: a resource its
-  project stands for reads as that project's runtime, protected environments and sensitive keys
-  included. An ephemeral environment that isn't trusted never reaches a protected one (its base,
+  project stands for reads as that project's runtime (or, through `resolve_as`, as its maker),
+  protected environments included (sensitive keys only through `resolve_for`). An ephemeral environment that isn't trusted never reaches a protected one (its base,
   an import or a reference), and what only comes from there is refused as protected. A dynamic
   credential is refused: a product keeps its connection past any lease.
 - **Untrusted copies.** A product passes `ResourceRef::untrusted()` for a resource that keeps
@@ -3241,10 +3287,12 @@ Agent's templates do).
 - **Audit.** Every read is `secrets.resolve` by the resource, named `<product>:<kind>:<ref>`
   (`storage:bucket:photos`, `search:search:logs (untrusted)` for an untrusted copy), with the one
   key read.
-- **Refusals** say which part failed, never the value: no project, not trusted, no such key,
-  protected, or can't be used (a dynamic credential, a sensitive key for an untrusted reader, a
-  reference inside the value that doesn't resolve). `Secrets::digest_for` refuses exactly what
-  the resolve would.
+- **Refusals** say which part failed, never the value: no project, not trusted, not allowed (the
+  maker may not reveal it, or can't reach roll secrets any more), no such key, protected, or can't
+  be used (a dynamic credential, a sensitive key for anyone but a trusted runtime, a reference
+  inside the value that doesn't resolve). `digest_for` and `digest_as` refuse exactly what their
+  resolve would; `bind_ref` refuses what `digest_as` would for the caller (it decrypts nothing, so
+  a `${…}` reaching a sensitive key fails at the first read).
 - **Rotation.** Nothing is cached across calls in roll secrets. A product keeps what it built
   (storage: one client per target and source bucket) while the folder's digest
   (`Secrets::digest_for`, no value, not audited) stays the same, and resolves again when it
@@ -3366,9 +3414,12 @@ last_synced_at, error}`:
   names `changed` since the last push, and which were `removed`: synced before, gone now (deleted,
   or left out by `keys`). Targets that set one value per call (GitHub) send only the changed ones
   and delete the removed ones at the target.
-- **As whom.** A sync resolves with the access of whoever created it, looked up at every push: the
-  operator, or the scoped token that made it (a revoked or expired token stops the sync with an
-  error). So a reference to an environment its creator can't reveal stays unresolved. Every push is
+- **As whom.** A sync resolves with the access of whoever created it (`created_by`), looked up at
+  every push: a person while they can sign in and still reach the project (an admin's session is
+  kept as the person, `usr_…`, so a demoted or disabled admin's syncs stop), the scoped token that
+  made it (a revoked or expired token stops the sync with an error), or the operator for the
+  deployment's own token. A workload identity's login can't make one (400). Syncs an admin's
+  session made before this are `operator` and stay so: health flags them (`operator_made`). So a reference to an environment its creator can't reveal stays unresolved. Every push is
   audited as `sync.push` by `sync:<id>`, with the keys it pushed or removed (roll's names, without
   the prefix) and never a value; a push that fails is audited too.
 - **Errors** name keys and the target, never a value: `github owner/app: 404 Not Found`,
@@ -3827,8 +3878,9 @@ their personal overrides are theirs. The deployment key's state (`GET /v1/secret
 operator's.
 
 What a person made acts later only while they can sign in and still reach its project (an admin
-then, or its owner now): their tokens, any token one of those made, their identities' logins and
-their syncs. rolld asks roll-accounts on every use (`People`); a lookup that fails is an error, not
+then, or its owner now): their tokens, any token one of those made, their identities' logins,
+their syncs and the references they chose for another product (`bind_ref`). What an admin's
+session makes is the person's (`Caller::maker`), though the audit log names it `operator`. rolld asks roll-accounts on every use (`People`); a lookup that fails is an error, not
 a disabled account. A sync a person made pushes as them, as they are then.
 
 Anyone may put any resource on their own canvas, so a project reaches a resource only where the
@@ -4720,10 +4772,8 @@ type Insights = { path: string; max_age_days: number | null; reads_since: number
 type Required = { key: string; path: string; comment: string; type?: "url" | "int" | "port" | "bool" | "json" | "email"; pattern?: string; owner?: string /* who supplies it */; password?: { length: number; classes?: ("lower" | "upper" | "digit" | "symbol")[]; symbols?: string } };
 type Sink = { id: string; url: string; status: "new" | "ok" | "error"; error: string | null; cursor: number; delivered_at: number | null; created_at: number; created_by: string };
 type ProjectFindings = { project: string; project_name: string; findings: Finding[] };
-type Finding = { issue: "decoy_used" | "expired" | "missing" | "exposed" | "weak" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string };
-type Finding = { issue: "decoy_used" | "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "weak" | "expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string };
+type Finding = { issue: "decoy_used" | "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "public" | "weak" | "operator_made" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string; owner?: string };
 type Rotation = { environment: string; path: string; keys: string[]; kind: string; ref: string; name: string; rotate_days: number | null; rotate_window: string | null; grace_minutes: number; issued_at: number | null; next_due: number | null; last_error: string | null; failed_at: number | null };
-type Finding = { issue: "decoy_used" | "expired" | "missing" | "exposed" | "public" | "weak" | "expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string };
 type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };
 type SaasRotator = { id: string; name: string; vendor: "sendgrid" | "twilio" | "okta" | "entra" | "auth0"; target: Record<string, unknown>; created_at: number; created_by: string };
 type KubernetesCluster = { id: string; name: string; api_url: string; has_ca: boolean; created_at: number; created_by: string };

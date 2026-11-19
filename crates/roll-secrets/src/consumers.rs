@@ -1,8 +1,28 @@
 //! Other roll products reading a secret by reference (docs/secrets.md, "Other roll products"): a
-//! product that needs an outside credential (storage's replication targets) keeps
-//! `roll://ENV[/folder]/KEY` instead of a sealed copy, and asks for the value each time it opens
-//! the connection, as 1Password's `op://` and Vault Agent do. rolld hands products this in
-//! process; roll-secrets knows no product, only the workspace resource asking.
+//! product that needs an outside credential keeps `roll://ENV[/folder]/KEY` instead of a sealed
+//! copy, and asks for the value each time it opens the connection, as 1Password's `op://` and
+//! Vault Agent do. rolld hands products this in process; roll-secrets knows no product, only the
+//! workspace resource asking.
+//!
+//! **Who chose the reference** decides which call a product makes:
+//! - A person or a token chose it (search's snapshot repositories): [`Secrets::bind_ref`] when
+//!   it's written, with the request's caller, returns a [`Maker`] the product stores beside it;
+//!   every read is [`Secrets::resolve_as`] / [`Secrets::digest_as`] with that maker. The reference
+//!   reads as its maker, re-checked on every use (an admin while still one, a person while they
+//!   can sign in and own the project, a token while it lives), never a runtime: no sensitive key,
+//!   imports and bases only where the maker may reveal, no protected environment for an untrusted
+//!   copy. Otherwise anyone who may write a product's settings could send any value the project's
+//!   runtime reads to a host of their choosing.
+//! - A deployer chose it for the resource's own runtime (roll apps' git login, a deploy token a
+//!   person pasted, tagged sensitive): [`Secrets::bind_ref_runtime`] with the one environment the
+//!   product checked they may deploy to. A reference to exactly that environment is a runtime
+//!   binding (`usr_…@runtime:production`): it reads as the resource's runtime there, sensitive keys
+//!   included, while its maker can sign in, still reaches the project and may reveal the folder.
+//!   A deployer can already run code that reads them, so this adds no reach. A reference to any
+//!   other environment binds as above.
+//! - The operator wrote it (storage's replication targets, an operator-only API):
+//!   [`Secrets::resolve_for`] / [`Secrets::digest_for`] read as the project's runtime, sensitive
+//!   keys included.
 //!
 //! **Trust**, as roll apps' services (`ForApps` in rolld): the project is the one whose canvas
 //! holds the resource *and* that `Workspace::trusts` for it, never membership alone; a reference
@@ -70,6 +90,36 @@ impl ResourceRef {
     }
 }
 
+/// Who chose a reference a product holds ([`Secrets::bind_ref`]): opaque, stored by the product
+/// as it serializes (a string), handed back to each [`Secrets::resolve_as`] and
+/// [`Secrets::digest_as`], which look its rights up again. It's who to name when a reference stops
+/// working ("usr_… set it and can't reach it any more"), never a credential. A runtime binding
+/// ([`Secrets::bind_ref_runtime`]) is the maker with its environment after it,
+/// `usr_…@runtime:production`; a product stores one only as `bind_ref*` returned it.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct Maker(String);
+
+/// Between a runtime binding's maker and its environment (neither a maker nor a slug holds `@`).
+const RUNTIME: &str = "@runtime:";
+
+impl Maker {
+    /// Who chose it, and the one environment it reads as the resource's runtime, if it's a
+    /// runtime binding.
+    fn parts(&self) -> (&str, Option<&str>) {
+        match self.0.split_once(RUNTIME) {
+            Some((by, env)) => (by, Some(env)),
+            None => (&self.0, None),
+        }
+    }
+}
+
+impl std::fmt::Display for Maker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.parts().0)
+    }
+}
+
 /// A resolved reference. `value` redacts itself and is wiped on drop.
 #[derive(Clone, Debug)]
 pub struct Resolved {
@@ -92,14 +142,18 @@ pub enum Refusal {
     /// another project.
     #[error("not trusted: {0}")]
     NotTrusted(String),
+    /// Whoever chose the reference may not reveal it ([`Secrets::bind_ref`]'s caller, or a
+    /// [`Maker`] since demoted, disabled, revoked or no longer on the project).
+    #[error("not allowed: {0}")]
+    NotAllowed(String),
     #[error("no such key: {0}")]
     NoSuchKey(String),
     /// A protected environment, or only reachable through one, for an untrusted reader (an
     /// untrusted ephemeral environment, or an untrusted [`ResourceRef`]).
     #[error("protected: {0}")]
     Protected(String),
-    /// Set, but not usable here (a dynamic credential, a sensitive key for an untrusted reader, a
-    /// reference inside it that doesn't resolve).
+    /// Set, but not usable here (a dynamic credential, a sensitive key for any reader but a
+    /// trusted runtime, a reference inside it that doesn't resolve).
     #[error("can't be used: {0}")]
     Unusable(String),
     #[error("{0}")]
@@ -146,6 +200,90 @@ impl Reference {
 }
 
 impl Secrets {
+    /// Check that `caller` (the request writing `reference` into `resource`'s settings) may
+    /// choose it, and return who to store as its [`Maker`]: the caller may reveal its folder in
+    /// the one project that holds and stands for `resource`, and it resolves for `resource` read
+    /// as they are ([`Secrets::digest_as`]): a sensitive key, a key only a protected environment
+    /// holds for an untrusted copy, or one reached only through what they can't reveal is refused
+    /// here, not at the first use. An admin's session is stored as the person; a workload
+    /// identity's login is refused (it ends with its token). Not audited (nothing is read).
+    pub fn bind_ref(&self, resource: &ResourceRef, reference: &str, caller: &Caller) -> Result<Maker, Refusal> {
+        self.bind(resource, reference, caller, None)
+    }
+
+    /// [`Secrets::bind_ref`] for a reference the resource's runtime reads in `runtime_env` (roll
+    /// apps' git login). **Contract:** the product calls it only after its own check that `caller`
+    /// holds deploy on `resource` in `runtime_env` (whoever may deploy there can already run code
+    /// that reads it); anything else calls `bind_ref`. A reference to exactly `runtime_env` is a
+    /// runtime binding: sensitive keys are allowed there, as for the resource's own runtime read,
+    /// within its trust (its one trusted project; an untrusted copy still gets no protected
+    /// environment or sensitive key). Every read still re-checks that the maker can sign in,
+    /// reaches the project and may reveal the folder. A reference to any other environment binds
+    /// exactly as `bind_ref` does. A workload identity's login is refused, as there.
+    pub fn bind_ref_runtime(&self, resource: &ResourceRef, reference: &str, caller: &Caller, runtime_env: &str) -> Result<Maker, Refusal> {
+        self.bind(resource, reference, caller, Some(runtime_env))
+    }
+
+    fn bind(&self, resource: &ResourceRef, reference: &str, caller: &Caller, runtime_env: Option<&str>) -> Result<Maker, Refusal> {
+        let by = self.maker_of(caller)?;
+        let r = Reference::required(reference)?;
+        let project = self.project_for(resource, r.project.as_deref())?;
+        self.may_reveal_for(&project, &r, caller)?;
+        let maker = match runtime_env {
+            Some(env) if env == r.env => Maker(format!("{by}{RUNTIME}{env}")),
+            _ => Maker(by),
+        };
+        self.digest_as(resource, reference, &maker)?;
+        Ok(maker)
+    }
+
+    /// `reference`'s value for `resource`, read as `maker` may now (see the module doc), audited
+    /// as `secrets.resolve` by the resource, naming the maker.
+    pub fn resolve_as(&self, resource: &ResourceRef, reference: &str, maker: &Maker) -> Result<Resolved, Refusal> {
+        let (project, r, caller) = self.as_maker(resource, reference, maker)?;
+        self.resolve_one(&project, &r.env, &r.path, &r.key, &caller, resource.untrusted)
+    }
+
+    /// The digest of the folder `reference` reads, as `maker` may now: refused exactly as
+    /// [`Secrets::resolve_as`] would be, not audited, no value.
+    pub fn digest_as(&self, resource: &ResourceRef, reference: &str, maker: &Maker) -> Result<String, Refusal> {
+        let (project, r, caller) = self.as_maker(resource, reference, maker)?;
+        self.digest_one(&project, &r, &caller, resource.untrusted)
+    }
+
+    /// The project, the reference, and the caller a read as `maker` runs as: the maker's rights
+    /// now, named for the resource, not a runtime, and allowed to reveal the folder. A runtime
+    /// binding then reads its one environment as the resource's runtime, named
+    /// `<resource> (runtime read for <maker>)`, while the maker still reaches the project.
+    fn as_maker(&self, resource: &ResourceRef, reference: &str, maker: &Maker) -> Result<(String, Reference, Caller), Refusal> {
+        let r = Reference::required(reference)?;
+        let project = self.project_for(resource, r.project.as_deref())?;
+        let (by, runtime_env) = maker.parts();
+        let gone = || Refusal::NotAllowed(format!("{by}, who chose it, can't reach roll secrets any more"));
+        let caller = self.maker_caller(by, &resource.consumer()).map_err(|e| match e {
+            Error::Forbidden(_) => gone(),
+            e => e.into(),
+        })?;
+        self.may_reveal_for(&project, &r, &caller)?;
+        let Some(env) = runtime_env else { return Ok((project, r, caller.not_runtime())) };
+        if r.env != env {
+            return Err(Refusal::NotAllowed(format!("{by} chose this for {env}'s runtime, not {}'s", r.env)));
+        }
+        if !self.maker_reaches(by, &project)? {
+            return Err(gone());
+        }
+        Ok((project, r, Caller::consumer(&format!("{} (runtime read for {by})", resource.consumer()))))
+    }
+
+    /// Whether `caller` may reveal `r`'s folder in `project`. Never says more than a reveal's 403.
+    pub(crate) fn may_reveal_for(&self, project: &str, r: &Reference, caller: &Caller) -> Result<(), Refusal> {
+        if caller.allows(crate::access::Action::Reveal, &crate::access::Scope::at(project, &r.env, &r.path)) {
+            return Ok(());
+        }
+        let who = caller.maker.as_deref().unwrap_or(&caller.principal);
+        Err(Refusal::NotAllowed(format!("{who} may not reveal {}:{}", r.env, r.path)))
+    }
+
     /// `reference`'s value for `resource`, read as described in the module doc and audited.
     pub fn resolve_for(&self, resource: &ResourceRef, reference: &str) -> Result<Resolved, Refusal> {
         let r = Reference::required(reference)?;
@@ -159,8 +297,12 @@ impl Secrets {
     pub fn digest_for(&self, resource: &ResourceRef, reference: &str) -> Result<String, Refusal> {
         let r = Reference::required(reference)?;
         let project = self.project_for(resource, r.project.as_deref())?;
-        let (reader, _) = self.consumer_entry(&project, &r.env, &r.path, &r.key, &Caller::consumer(&resource.consumer()), resource.untrusted)?;
-        match self.digest(&project, &r.env, &r.path, &reader) {
+        self.digest_one(&project, &r, &Caller::consumer(&resource.consumer()), resource.untrusted)
+    }
+
+    fn digest_one(&self, project: &str, r: &Reference, caller: &Caller, untrusted: bool) -> Result<String, Refusal> {
+        let (reader, _) = self.consumer_entry(project, &r.env, &r.path, &r.key, caller, untrusted)?;
+        match self.digest(project, &r.env, &r.path, &reader) {
             Err(Error::NotFound(m)) => Err(Refusal::NoSuchKey(m)),
             d => Ok(d?),
         }
