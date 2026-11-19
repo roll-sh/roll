@@ -1655,6 +1655,10 @@ AWS access keys, GitHub, Slack, Stripe live, Google, Anthropic and OpenAI keys, 
     environment, else `development` and `/`. The dialog lists the environments the caller may read.
   - **Who.** A writer on the repo, and then roll secrets asks the request's own grant, session or
     operator token for `write` in the folder, as any write: a roll token that may only read gets a 403.
+  - **Only the repo's own changes.** An outsider's change (`trusted: false`, a fork's pull request)
+    has no button, and the routes answer 409, whoever approved its run: its credential is whoever
+    sent it, and storing it would put a value someone outside chose (their `DATABASE_URL`, their
+    `sk_live_` key) into the project the repo is trusted for.
     It's one change attributed to the caller, or a change request where the environment is protected
     or a folder policy asks for approval. A key the folder already has is refused (409), never
     overwritten.

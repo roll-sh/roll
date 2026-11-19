@@ -7,7 +7,9 @@
 //! `GET /v1/code/changes/{id}/unstored/{fingerprint}` says where it would go (the suggested key,
 //! the project, its environments); `POST …/store {key?, environment?, path?}` stores it. Both need
 //! a writer on the repo; roll secrets then checks `write` in the folder with the caller's own grant,
-//! session or operator token.
+//! session or operator token. An outsider's change (`trusted: false`, a fork's pull request) is
+//! refused with 409: its credential is whoever sent it, not the repo's, and never goes into the
+//! project the repo is trusted for.
 
 use crate::ext::{CredentialValue, SecretsAsker, StoreCredential, StoreTarget};
 use crate::model::{Change, ChangeState, RepoRow};
@@ -48,6 +50,11 @@ impl Code {
     async fn unstored_credential(&self, r: &RepoRow, c: &Change, fingerprint: &str) -> Result<Found> {
         if matches!(c.state, ChangeState::Landed | ChangeState::Closed) {
             return Err(Error::Conflict(format!("change {} is {}: there's nothing to store from it", c.id, if c.state == ChangeState::Landed { "landed" } else { "closed" })));
+        }
+        // An outsider's credential (a fork's pull request) isn't the repo's to keep, whoever approved
+        // its run: storing it would hand the trusted project a value someone outside chose.
+        if !c.trusted {
+            return Err(Error::Conflict(format!("change {} is from outside the repo: roll doesn't store its credentials", c.id)));
         }
         let gone = || Error::NotFound(format!("credential {fingerprint} in change {}", c.id));
         let head = self.store.resolve(&r.id, &c.head)?.ok_or_else(gone)?;

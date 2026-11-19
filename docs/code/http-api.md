@@ -229,7 +229,8 @@ POST /v1/code/changes/{id}/unstored/{fingerprint}/store {key?, environment?, pat
      Defaults: the notice's key; the environment and folder roll.toml's first `[checks.*] secrets` names
      ("staging:/api"), else `development` and "/". Recorded in the audit log (`secret_unstored_stored`:
      key and where, never the value). Neither answer ever holds the value; roll never rewrites the change.
-     404: no such notice on the change's head; 409 if landed or closed, or the key is already there
+     404: no such notice on the change's head; 409 if landed or closed, from outside the repo (`trusted:
+     false`, a fork's pull request: its credential isn't the repo's), or the key is already there
      (never overwritten); 422 when no project roll secrets trusts the repo for, or roll secrets is off;
      403 without `write` in the folder.
 UnstoredTarget = {kind, file, line, fingerprint, key /* suggested */, project: {id, name},

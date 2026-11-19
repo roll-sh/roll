@@ -331,9 +331,10 @@ export function CodeChange({ fullName, id }: { fullName: string; id: string }) {
               {b.kind === "secret_leak" ? `Rotate ${b.key} in roll secrets` : `Add ${b.key} in roll secrets`}
             </Link>
           ) : null;
-        // A credential roll secrets doesn't hold: a writer stores it from the change itself.
+        // A credential roll secrets doesn't hold: a writer stores it from the change itself, never
+        // from an outsider's (a fork's pull request), whose credential isn't the repo's.
         const storeIn = (b: Blocker) =>
-          writer && b.kind === "secret_unstored" && b.fingerprint ? <StoreInRoll change={c.id} notice={{ ...b, fingerprint: b.fingerprint }} onStored={() => void load()} /> : null;
+          writer && c.trusted !== false && b.kind === "secret_unstored" && b.fingerprint ? <StoreInRoll change={c.id} notice={{ ...b, fingerprint: b.fingerprint }} onStored={() => void load()} /> : null;
         const fixes = (b: Blocker) => {
           const store = storeIn(b);
           return store ? <div className="mt-2">{store}</div> : fixIn(b);

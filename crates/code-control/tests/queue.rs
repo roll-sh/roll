@@ -860,6 +860,21 @@ async fn storing_a_notices_credential_needs_write_in_the_folder_and_a_trusted_pr
     let (s, v) = b.req("POST", &format!("/v1/code/changes/{cid}/unstored/{fp}/store"), Some(json!({})), None).await;
     assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
     assert!(!v.to_string().contains(&aws), "{v}");
+
+    // An outsider's change (a fork's pull request) carries their credential, not the repo's: it's
+    // never stored in the trusted project, even once a writer approves its run.
+    let r = a.code.find_repo("acme", "api").unwrap();
+    let fork = json!({ "title": "from a fork", "message": "fork", "files": { "settings.py": { "content": format!("aws_access_key_id = \"{aws}\"\n") } } });
+    let u = a.code.create_change_as(&r, &Caller::Admin, &fork, None, false).await.unwrap();
+    a.ok("POST", &format!("/v1/code/changes/{}/approve-run", u.id), None).await;
+    let u = a.ok("GET", &format!("/v1/code/changes/{}", u.id), None).await;
+    let n = u["notices"].as_array().into_iter().flatten().find(|n| n["kind"] == "secret_unstored").unwrap_or_else(|| panic!("{u}"));
+    let at = format!("/v1/code/changes/{}/unstored/{}", id(&u), n["fingerprint"].as_str().unwrap());
+    for (method, path) in [("GET", at.clone()), ("POST", format!("{at}/store"))] {
+        let (s, v) = a.req(method, &path, if method == "POST" { Some(json!({})) } else { None }, None).await;
+        assert_eq!(s, StatusCode::CONFLICT, "{method} {v}");
+    }
+    assert!(secrets.values(&project, "development", "/", true, None, &roll_secrets::Caller::operator()).unwrap().values.is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
