@@ -1155,7 +1155,9 @@ its output already). An app with an SDK sends its spans with no setup (Vercel's 
 apps' `traces`). Turning it on restarts the runtime's services (it's in their deploy's fingerprint).
 Spans are kept on the preview's holder, in memory, its newest 20,000 for six hours, and go with the
 preview: they're for looking at it now. The sheet lists recent traces under Requests, each opening
-to its spans as bars on the trace's time; `roll preview traces [--trace <id>]`. Read back masked as
+to its spans as bars on the trace's time, and above them each route's time (p50, p95) against
+main's preview's same route, the clearly slower ones first and in red; `roll preview traces
+[--trace <id> | --routes]`. Read back masked as
 its logs are: a span's name and attributes are its code's words. The intake reads OTLP with roll
 apps' reader (`apps_control::otlp::spans_of_request`). A roll apps service's traces are roll apps'
 own: with the project's `traces` the preview's `pv-` environment gets roll apps' `traces: true` (its
@@ -1310,6 +1312,7 @@ and admins see every project.
 | `POST /v1/previews/{id}/otlp/{token}/v1/traces` | OTLP/HTTP traces: protobuf or JSON (`Content-Type`), gzip or not, at most 8 MiB | `{"partialSuccess": {}}`; 404 for anything but the preview's own token (derived from its id with the store's key, as its SMTP password is). Public in rolld's gate: the token in the path is the credential. A service gets it as `OTEL_EXPORTER_OTLP_ENDPOINT` when the project's `traces` is on. Spans are kept on the preview's holder, in memory: its newest 20,000, for 6 hours |
 | `GET /v1/previews/{id}/traces?minutes=` | | `{ minutes, traces: [{ trace, name, service, start_ms, ms, spans, error }] }`: its recent traces (5 to 360 minutes, 60 by default), newest first, at most 100, the root span's name masked as logs are |
 | `GET /v1/previews/{id}/traces/{trace}` | | `{ trace, spans }`: one trace's spans, oldest first, names and attributes masked |
+| `GET /v1/previews/{id}/routes?minutes=` | | `{ minutes, main, routes: [{ name, count, p50_ms, p95_ms, main_p50_ms, main_count, slower }] }`: each route's time from its traces (a trace's root span's name, as an SDK names a request by its route), against the same route on main's preview (the repo's default branch's, else the project's baseline; `main` its id), the slower ones first: `slower` with at least 5 traces on both sides and a p50 half again main's and 100 ms more. Names masked |
 | `PUT /v1/previews/{id}/files?service=&path=` | a tar, at most 100 MiB | `{ service, path }`: its files written under the directory `path`, said in the activity. Admin |
 | `GET /v1/previews/{id}/requests` | | `{requests: [{at, service, method, path, status, ms}]}`: its latest 200 requests through roll's runtime, newest first (Vercel's request log): never the query, which can carry a token, and the path masked as its logs are (a path is its code's to choose); `ms` until the answer's headers. Kept in memory on the preview's holder (runs there) and gone with its last service; a roll apps instance's requests are roll apps' own. The sheet's Requests tab, errors at a glance; `roll preview requests <id> [--errors]` |
 | `GET /v1/previews/{id}/metrics` | | `{services: [{service, cpu, memory_bytes, memory_mb}]}`: what its running services use right now (Render's and Railway's metrics): cores of CPU and resident memory, against the memory each runs with. It comes from `docker stats` for roll's runtime. For roll apps' instances it's their last finished minute (`…/environments/pv-…/metrics`), with memory per instance. A sleeping service isn't listed. 404 for no such preview. It runs on the preview's holder, and is read again at most every 10 s, however many sheets ask. The sheet shows it on each running service, read every 15 s while it's open |
@@ -2052,10 +2055,10 @@ Ranked by what a person notices first. Done so far:
 2. **An independent review of turns 7 and 8** (a public OTLP intake, an untrusted parser, the
    gate's WebSocket rule, the sheet's downloads): their findings fixed before anything builds on
    them, as turn 6's were (#386).
-3. **Slowest routes from traces** (Vercel's Observability, Sentry's performance): a preview's
-   spans say each route's real time; the sheet's endpoint times read only a few GETs of the
-   OpenAPI's (`github.endpoints`). The routes a change made slower than main's preview, from its
-   traces, in the verdict strip and the pull request comment.
+3. **Slowest routes from traces, in review** (`feature/roll-previews-slow-routes`, on #419;
+   Vercel's Observability, Sentry's performance): `…/routes`, the sheet's route table and
+   `roll preview traces --routes`. Next for it: the slower routes in the verdict strip and the pull
+   request comment.
 4. **An error group opens its trace**: a grouped error whose lines carry a trace id (most SDKs
    log it) links to that trace's spans, so a failing request's path is one click from its error.
 5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured

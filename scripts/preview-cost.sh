@@ -425,6 +425,8 @@ SPANS="{\"resourceSpans\":[{\"resource\":{\"attributes\":[{\"key\":\"service.nam
 [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' -d "$SPANS" "$OTEL_HERE/v1/traces")" = 200 ] || { echo "the service's OpenTelemetry endpoint should take its spans: $OTEL_HERE"; exit 1; }
 TRACES=$(api GET "/v1/previews/$PV/traces" | jq_ "[(t['name'], t['spans'], t['error']) for t in d['traces']]")
 case "$TRACES" in *"('GET /checkout', 2, True)"*) ;; *) echo "the span posted should be the preview's trace: $TRACES"; exit 1;; esac
+ROUTES=$(api GET "/v1/previews/$PV/routes" | jq_ "[(r['name'], r['count']) for r in d['routes']]")
+case "$ROUTES" in *"('GET /checkout', 1)"*) ;; *) echo "the trace should be its route's: $ROUTES"; exit 1;; esac
 [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' -d '{}' "http://$API/v1/previews/$PV/otlp/not-the-token/v1/traces")" = 404 ] || { echo "another token should be 404"; exit 1; }
 
 say "a screenshot of the service (github.screenshot), once per head"

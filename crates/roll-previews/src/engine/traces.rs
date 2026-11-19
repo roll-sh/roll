@@ -80,6 +80,64 @@ fn size(s: &Span) -> usize {
     64 + s.trace.len() + s.span.len() + s.parent.len() + s.name.len() + s.service.len() + s.attrs.iter().map(|(k, v)| 16 + k.len() + v.len()).sum::<usize>()
 }
 
+/// A route's times: how many traces, their p50 and p95 (ms).
+#[derive(Clone, Debug, PartialEq)]
+pub struct RouteStat {
+    pub name: String,
+    pub count: usize,
+    pub p50: u64,
+    pub p95: u64,
+}
+
+/// Each route's (a trace's root span's name) count, p50 and p95, the busiest first.
+pub fn route_stats(rows: &[TraceRow]) -> Vec<RouteStat> {
+    let mut by: HashMap<&str, Vec<u64>> = HashMap::new();
+    for r in rows {
+        by.entry(r.name.as_str()).or_default().push(r.ms);
+    }
+    let pct = |v: &[u64], p: usize| v[((v.len() - 1) * p) / 100];
+    let mut out: Vec<RouteStat> = by
+        .into_iter()
+        .map(|(name, mut ms)| {
+            ms.sort_unstable();
+            RouteStat { name: name.to_string(), count: ms.len(), p50: pct(&ms, 50), p95: pct(&ms, 95) }
+        })
+        .collect();
+    out.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.name.cmp(&b.name)));
+    out
+}
+
+/// A route against main's same route.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RouteCompared {
+    pub name: String,
+    pub count: usize,
+    pub p50: u64,
+    pub p95: u64,
+    pub main_p50: Option<u64>,
+    pub main_count: usize,
+    /// Clearly slower than main's: at least [`MIN_SAMPLES`] traces on both sides, its p50 at least
+    /// half again main's and [`SLOWER_MS`] more (the noise a few requests make otherwise).
+    pub slower: bool,
+}
+
+pub const MIN_SAMPLES: usize = 5;
+pub const SLOWER_MS: u64 = 100;
+
+/// Each of the preview's routes with main's same one; the slower ones first.
+pub fn compare_routes(mine: &[RouteStat], main: &[RouteStat]) -> Vec<RouteCompared> {
+    let mut out: Vec<RouteCompared> = mine
+        .iter()
+        .map(|m| {
+            let b = main.iter().find(|b| b.name == m.name);
+            let slower = b.is_some_and(|b| m.count >= MIN_SAMPLES && b.count >= MIN_SAMPLES && m.p50 >= b.p50 + SLOWER_MS && m.p50 * 2 >= b.p50 * 3);
+            RouteCompared { name: m.name.clone(), count: m.count, p50: m.p50, p95: m.p95, main_p50: b.map(|b| b.p50), main_count: b.map_or(0, |b| b.count), slower }
+        })
+        .collect();
+    out.sort_by_key(|c| !c.slower);
+    out
+}
+
 impl Engine {
     /// The OpenTelemetry SDK's variables a service of a preview with traces on gets: the intake
     /// on rolld (as containers reach it), its token in the path.
@@ -137,8 +195,20 @@ impl Engine {
     /// `GET …/{id}/traces?minutes=`: its recent traces, newest first (at most 100): each one's root
     /// span's name and service, when, how long, how many spans, whether any failed. Masked.
     pub async fn traces(&self, id: &str, minutes: i64) -> Result<Value> {
-        self.store.row(id)?;
         let minutes = minutes.clamp(5, KEEP_MS / 60_000);
+        let mut out = self.trace_rows(id, minutes).await?;
+        out.truncate(100);
+        let names = self.masked(id, out.iter().map(|o| o.name.clone()).collect()).await?;
+        for (o, name) in out.iter_mut().zip(names) {
+            o.name = name;
+        }
+        Ok(json!({ "minutes": minutes, "traces": out }))
+    }
+
+    /// Every trace of the preview in the last `minutes`, newest first, unmasked: the runtime's kept
+    /// spans summed, and its roll apps services' own while the project's traces are on.
+    async fn trace_rows(&self, id: &str, minutes: i64) -> Result<Vec<TraceRow>> {
+        self.store.row(id)?;
         let since = (self.store.now_ms()? - minutes * 60_000).max(0) as u64 * 1_000_000;
         // Summed under the lock without copying the spans (only each trace's row leaves it).
         let mut out: Vec<TraceRow> = {
@@ -167,12 +237,33 @@ impl Engine {
             }
         }
         out.sort_by_key(|o| std::cmp::Reverse(o.start_ms));
-        out.truncate(100);
-        let names = self.masked(id, out.iter().map(|o| o.name.clone()).collect()).await?;
-        for (o, name) in out.iter_mut().zip(names) {
-            o.name = name;
-        }
-        Ok(json!({ "minutes": minutes, "traces": out }))
+        Ok(out)
+    }
+
+    /// `GET …/{id}/routes?minutes=`: each route's time from its traces (a root span's name, as an
+    /// SDK names a request by its route), against the same route on main's preview (the repo's
+    /// default branch's, else the project's baseline), the slower ones said (Vercel's
+    /// Observability, Sentry's performance). Names masked.
+    pub async fn routes(&self, id: &str, minutes: i64) -> Result<Value> {
+        let r = self.store.row(id)?;
+        let minutes = minutes.clamp(5, KEEP_MS / 60_000);
+        let mine = route_stats(&self.trace_rows(id, minutes).await?);
+        // Main's preview, as a change's screenshot finds it.
+        let rows: Vec<crate::store::Row> = self.store.rows(Some(&r.project_id))?.into_iter().filter(|x| x.change_id.is_none() && x.desired == crate::Desired::Active && x.id != r.id).collect();
+        let default = self.source.default_branch(&r.repo).await.ok().flatten();
+        let base = rows.iter().find(|x| x.repo == r.repo && default.is_some() && x.branch == default).or_else(|| rows.iter().find(|x| x.is_baseline()));
+        let main = match base {
+            Some(b) => route_stats(&self.trace_rows(&b.id, minutes).await?),
+            None => Vec::new(),
+        };
+        let compared = compare_routes(&mine, &main);
+        let names = self.masked(id, compared.iter().map(|c| c.name.clone()).collect()).await?;
+        let routes: Vec<Value> = compared
+            .into_iter()
+            .zip(names)
+            .map(|(c, name)| json!({ "name": name, "count": c.count, "p50_ms": c.p50, "p95_ms": c.p95, "main_p50_ms": c.main_p50, "main_count": c.main_count, "slower": c.slower }))
+            .collect();
+        Ok(json!({ "minutes": minutes, "main": base.map(|b| b.id.clone()), "routes": routes }))
     }
 
     /// `GET …/{id}/traces/{trace}`: one trace's spans, oldest first, names and attributes masked.
@@ -210,5 +301,29 @@ impl Engine {
     /// A preview that goes takes its traces with it.
     pub(crate) fn forget_traces(&self, id: &str) {
         self.traces.lock().remove(id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(name: &str, ms: u64) -> TraceRow {
+        TraceRow { trace: String::new(), name: name.into(), service: String::new(), start_ms: 0, ms, spans: 1, error: false }
+    }
+
+    /// A route is slower than main's only past the noise: enough traces on both sides, half again
+    /// main's p50 and 100 ms more; a route main hasn't seen isn't compared.
+    #[test]
+    fn a_route_is_slower_than_mains_only_past_the_noise() {
+        let mine: Vec<TraceRow> = (0..10).map(|_| row("GET /checkout", 400)).chain((0..10).map(|_| row("GET /", 30))).chain((0..3).map(|_| row("GET /new", 900))).collect();
+        let main: Vec<TraceRow> = (0..10).map(|_| row("GET /checkout", 200)).chain((0..10).map(|_| row("GET /", 15))).collect();
+        let c = compare_routes(&route_stats(&mine), &route_stats(&main));
+        let by = |n: &str| c.iter().find(|r| r.name == n).unwrap().clone();
+        assert!(by("GET /checkout").slower, "400 ms against 200: slower");
+        assert!(!by("GET /").slower, "30 ms against 15: twice, but 15 ms isn't past the noise");
+        assert_eq!((by("GET /new").slower, by("GET /new").main_p50), (false, None), "main hasn't seen it");
+        assert_eq!(c[0].name, "GET /checkout", "the slower ones first");
+        assert_eq!((by("GET /checkout").p50, by("GET /checkout").p95), (400, 400));
     }
 }

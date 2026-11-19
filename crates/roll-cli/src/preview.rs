@@ -243,6 +243,9 @@ pub enum Preview {
         minutes: u32,
         #[arg(long)]
         trace: Option<String>,
+        /// Each route's time (p50, p95) against main's preview's same route, the slower ones first.
+        #[arg(long, conflicts_with = "trace")]
+        routes: bool,
     },
     /// A project's deploy hooks (a secret URL a headless CMS calls on publish to build the
     /// previews of some branches again): lists them; `--add NAME` makes one (its URL printed
@@ -1221,8 +1224,23 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
             v
         }
 
-        Preview::Traces { preview, minutes, trace } => {
-            if let Some(t) = trace {
+        Preview::Traces { preview, minutes, trace, routes } => {
+            if routes {
+                let v = api.get(&format!("/v1/previews/{preview}/routes?minutes={minutes}")).await?;
+                if !as_json {
+                    let list = v["routes"].as_array().cloned().unwrap_or_default();
+                    if list.is_empty() {
+                        println!("no traces in the last {} minutes", v["minutes"].as_u64().unwrap_or(minutes as u64));
+                    }
+                    for r in list {
+                        let main = r["main_p50_ms"].as_u64().map_or_else(|| "main —".to_string(), |m| format!("main {m} ms"));
+                        let mark = if r["slower"].as_bool() == Some(true) { "slower" } else { "" };
+                        println!("{:>5}x  p50 {:>6} ms  p95 {:>6} ms  {:<14} {:<6} {}", r["count"], r["p50_ms"], r["p95_ms"], main, mark, s(&r["name"]));
+                    }
+                    return Ok(());
+                }
+                v
+            } else if let Some(t) = trace {
                 let v = api.get(&format!("/v1/previews/{preview}/traces/{t}")).await?;
                 if !as_json {
                     let spans = v["spans"].as_array().cloned().unwrap_or_default();

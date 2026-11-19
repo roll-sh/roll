@@ -514,6 +514,9 @@ async fn a_previews_traces_are_kept_by_its_token_and_read_masked() {
     assert_eq!(list["traces"][0]["name"].as_str(), Some("POST /pay ***"), "the newest first, masked");
     let apps_one = e.engine.trace(&p.id, &"b".repeat(32)).await.unwrap();
     assert_eq!(apps_one["spans"][0]["name"].as_str(), Some("POST /pay ***"));
+    // Each route's time from the traces (masked), with nothing of main's to compare yet.
+    let routes = e.engine.routes(&p.id, 60).await.unwrap();
+    assert!(routes["routes"].as_array().unwrap().iter().any(|r| r["name"] == "GET /checkout?key=***" && r["count"] == 1 && r["main_p50_ms"].is_null()), "{routes}");
     // Turned off, what roll apps kept isn't the preview's to show.
     let mut s = e.engine.store.settings(&e.project).unwrap();
     s.traces = false;

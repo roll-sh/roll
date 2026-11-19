@@ -61,6 +61,7 @@ pub fn router(engine: Arc<Engine>) -> Router {
                 .route("/v1/previews/{id}/otlp/{token}/v1/traces", post(otlp_traces).layer(axum::extract::DefaultBodyLimit::max(8 << 20)))
                 .route("/v1/previews/{id}/traces", get(traces))
                 .route("/v1/previews/{id}/traces/{trace}", get(trace))
+                .route("/v1/previews/{id}/routes", get(routes))
                 .route("/v1/previews/{id}/files", get(read_files).put(write_files).layer(axum::extract::DefaultBodyLimit::max(crate::engine::shell::FILES_MAX + (1 << 20))))
                 .route_layer(axum::middleware::from_fn_with_state(engine.clone(), on_leader))
                 .with_state(engine.clone()),
@@ -750,6 +751,11 @@ struct TracesQuery {
 async fn traces(AxState(e): S, Path(id): Path<String>, Query(q): Query<TracesQuery>) -> crate::Result<Json<Value>> {
     check_id(&id)?;
     Ok(Json(e.traces(&id, q.minutes.unwrap_or(60)).await?))
+}
+
+async fn routes(AxState(e): S, Path(id): Path<String>, Query(q): Query<TracesQuery>) -> crate::Result<Json<Value>> {
+    check_id(&id)?;
+    Ok(Json(e.routes(&id, q.minutes.unwrap_or(60)).await?))
 }
 
 async fn trace(AxState(e): S, Path((id, t)): Path<(String, String)>) -> crate::Result<Json<Value>> {
