@@ -1057,7 +1057,12 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
                                         eprintln!("following {data} (ctrl-c to stop)");
                                     }
                                 } else if !(std::mem::take(&mut fresh) && last.as_deref() == Some(data.as_str())) {
-                                    println!("{data}");
+                                    // The service's stderr to ours, its stdout to ours.
+                                    if event == "stderr" {
+                                        eprintln!("{data}");
+                                    } else {
+                                        println!("{data}");
+                                    }
                                     last = Some(data);
                                 }
                             } else if line.is_empty() {
