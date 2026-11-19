@@ -26,6 +26,12 @@ function themeOf(el: HTMLElement) {
   };
 }
 
+/** Sessions whose terminal went, closed a moment later unless a terminal on them comes back (a
+ * parent that re-renders a new tree remounts it: closing at once ended the shell it had just
+ * opened). */
+const closing = new Map<string, ReturnType<typeof setTimeout>>();
+const CLOSE_AFTER_MS = 1500;
+
 /** Text as the base64 of its UTF-8, as a shell's keys are sent. */
 export function encodeKeys(text: string): string {
   let bin = "";
@@ -36,7 +42,8 @@ export function encodeKeys(text: string): string {
 /**
  * An open shell session as a terminal (roll apps' instances, previews' services): xterm.js, the
  * screen over SSE, keystrokes batched into POSTs in order, the size sent when the panel changes.
- * Unmounting closes the session (and lets what it held awake sleep again). Keyed by `session`.
+ * Unmounting closes the session a moment later (and lets what it held awake sleep again), unless a
+ * terminal on it mounts again meanwhile. Keyed by `session`.
  */
 export function TerminalScreen({ session, link, onEnded, className = "h-[440px] rounded-b-xl bg-panel px-2 py-2" }: { session: string; link: ShellLink; onEnded: () => void; className?: string }) {
   const host = useRef<HTMLDivElement>(null);
@@ -49,6 +56,11 @@ export function TerminalScreen({ session, link, onEnded, className = "h-[440px] 
     const el = host.current;
     if (!el) return;
     const l = linked.current;
+    const again = closing.get(session);
+    if (again) {
+      clearTimeout(again);
+      closing.delete(session);
+    }
     let disposed = false;
     let cleanup = () => {};
     void (async () => {
@@ -121,7 +133,13 @@ export function TerminalScreen({ session, link, onEnded, className = "h-[440px] 
     return () => {
       disposed = true;
       cleanup();
-      l.close().catch(() => {});
+      closing.set(
+        session,
+        setTimeout(() => {
+          closing.delete(session);
+          l.close().catch(() => {});
+        }, CLOSE_AFTER_MS),
+      );
     };
   }, [session]);
 

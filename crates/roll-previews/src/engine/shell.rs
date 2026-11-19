@@ -16,10 +16,12 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 const SCROLLBACK: usize = 256 << 10;
 /// Shells open at once in one preview.
 pub const MAX_SHELLS: usize = 4;
-/// A shell nobody watches and nobody types in for this long is closed.
-const IDLE: Duration = Duration::from_secs(600);
-/// How often an open shell holds its service awake.
-const HOLD_EVERY: Duration = Duration::from_secs(30);
+/// A shell nobody watches for this long is closed: its tab was closed (a viewer that drops
+/// reconnects well within it, its scrollback first), so it doesn't hold one of the preview's
+/// places for long.
+const UNWATCHED: Duration = Duration::from_secs(60);
+/// How often an open shell is checked, and holds its service awake.
+const TICK: Duration = Duration::from_secs(15);
 
 /// An open shell: whose, its keys, its screen (scrollback and what comes), and whether it ended.
 pub(crate) struct ShellSession {
@@ -92,8 +94,10 @@ impl Engine {
         let (this, key, sess) = (self.clone(), sid.clone(), s.clone());
         tokio::spawn(async move {
             let mut buf = vec![0u8; 16 << 10];
-            let mut tick = tokio::time::interval(HOLD_EVERY);
+            let mut tick = tokio::time::interval(TICK);
             let mut closed = sess.closed.subscribe();
+            // Since when nobody has watched (the opener has `UNWATCHED` to start watching too).
+            let mut unwatched = Instant::now();
             loop {
                 tokio::select! {
                     n = out.read(&mut buf) => match n {
@@ -117,7 +121,9 @@ impl Engine {
                         None => break,
                     },
                     _ = tick.tick() => {
-                        if sess.screen.receiver_count() == 0 && sess.used.lock().elapsed() > IDLE {
+                        if sess.screen.receiver_count() > 0 {
+                            unwatched = Instant::now();
+                        } else if unwatched.elapsed() > UNWATCHED && sess.used.lock().elapsed() > UNWATCHED {
                             break;
                         }
                         this.apps.hold(&sess.preview, &sess.service);

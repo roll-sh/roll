@@ -1562,10 +1562,13 @@ function Shell({ preview: p }: { preview: Preview }) {
           }}
         />
       ) : (
-        <p className="text-[11.5px] leading-relaxed text-subtle">
-          {error ? <span className="text-danger">{error}</span> : state === "ended" ? "The shell ended." : "bash (or sh) in the running service, with the preview's variables and its branches' data, never production's. A service that's asleep is started and kept awake while the shell is open; the activity says who opened it."}{" "}
-          From a terminal: <code className="font-mono text-soft">roll preview shell {p.id} -s {service}</code>.
-        </p>
+        <>
+          {error && <p className="mb-1.5 text-[11.5px] leading-relaxed text-danger">{error}</p>}
+          <p className="text-[11.5px] leading-relaxed text-subtle">
+            {state === "ended" ? "The shell ended." : "bash (or sh) in the running service, with the preview's variables and its branches' data, never production's. A service that's asleep is started and kept awake while the shell is open; the activity says who opened it."}{" "}
+            From a terminal: <code className="font-mono text-soft">roll preview shell {p.id} -s {service}</code>.
+          </p>
+        </>
       )}
     </>
   );
