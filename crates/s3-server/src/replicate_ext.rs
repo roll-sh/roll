@@ -403,6 +403,11 @@ impl External {
 
     async fn client_for(&self, t: &ReplicationTarget, bucket: &str) -> Result<Client, String> {
         let refs = t.references();
+        // Only references naming their project by id (as stored targets' are): never one the
+        // bucket replicating would pick a project for.
+        if let Some(r) = refs.iter().find(|r| s3_store::targets::reference_project(r).is_none()) {
+            return Err(format!("{r} names no project: a replication target's reference is roll://prj_…@ENV/KEY"));
+        }
         let source = if refs.is_empty() { None } else { Some(self.credentials.read().unwrap().clone().ok_or("roll secrets isn't connected to storage on this node")?) };
         let mut digests = Vec::new();
         if let Some(src) = &source {
@@ -449,7 +454,9 @@ impl External {
     /// `source` is the bucket replicating (whose project's secrets a reference reads).
     pub(crate) async fn check_destination(&self, name: &str, bucket: &str, object_lock: bool, source: &str) -> Result<(), String> {
         let t = self.store.replication_target(name).map_err(|e| e.to_string())?.ok_or_else(|| format!("no replication target {name}"))?;
-        let client = self.client(&t, source).await.map_err(|why| format!("the replication target {name}'s credentials: {why}"))?;
+        // Why it didn't resolve (protected, no such key, another project) is in the warn log only:
+        // told to whoever sets a bucket's replication, it would say which keys exist where.
+        let client = self.client(&t, source).await.map_err(|_| format!("the replication target {name}'s credentials don't resolve for {source}"))?;
         let out = client.get_bucket_versioning().bucket(bucket).send().await.map_err(|e| format!("Destination bucket {bucket} on the replication target {name} can't be checked: {}", aws_sdk_s3::error::DisplayErrorContext(e)))?;
         if out.status() != Some(&aws_sdk_s3::types::BucketVersioningStatus::Enabled) {
             return Err(format!("Destination bucket must have versioning enabled: {bucket} on the replication target {name}"));

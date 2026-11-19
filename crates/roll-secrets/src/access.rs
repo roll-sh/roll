@@ -350,6 +350,10 @@ pub struct Caller {
     /// The person's approval that let this request through roll-access's gate (an `ask` approved,
     /// or a rule an approval remembered for a while), for the audit log.
     pub approval: Option<Approval>,
+    /// The person behind an admin's session, which acts as the operator: what's recorded as the
+    /// maker of something that acts later (a sync, an identity, a product's reference), so it
+    /// stops when they're demoted or can't sign in. `None`: the principal is the maker.
+    pub maker: Option<String>,
 }
 
 /// An approval from roll-access's gate (`roll_auth::Approved`), as the audit log records it.
@@ -378,13 +382,13 @@ pub const PREVIEWS: &str = "roll:previews";
 
 impl Caller {
     pub fn operator() -> Caller {
-        Caller { principal: "operator".into(), grants: std::sync::Arc::new(Everything), ip: None, runtime: false, approval: None }
+        Caller { principal: "operator".into(), grants: std::sync::Arc::new(Everything), ip: None, runtime: false, approval: None, maker: None }
     }
 
     /// An in-process consumer (roll apps, previews, sandboxes, tasks): everything the caller
     /// handing out the call may do, named for the audit log.
     pub fn consumer(name: &str) -> Caller {
-        Caller { principal: name.into(), grants: std::sync::Arc::new(Everything), ip: None, runtime: true, approval: None }
+        Caller { principal: name.into(), grants: std::sync::Arc::new(Everything), ip: None, runtime: true, approval: None, maker: None }
     }
 
     /// Whether this caller may learn anything of a row's value: reveal it, see its fingerprint, or
@@ -402,7 +406,7 @@ impl Caller {
     /// This caller, kept out of `except` (a project's protected environments) whatever it may
     /// otherwise do.
     pub fn without(&self, except: Vec<String>) -> Caller {
-        Caller { principal: self.principal.clone(), grants: std::sync::Arc::new(Narrowed(self.grants.clone(), Except(except))), ip: self.ip.clone(), runtime: self.runtime, approval: self.approval.clone() }
+        Caller { principal: self.principal.clone(), grants: std::sync::Arc::new(Narrowed(self.grants.clone(), Except(except))), ip: self.ip.clone(), runtime: self.runtime, approval: self.approval.clone(), maker: self.maker.clone() }
     }
 
     pub fn allows(&self, action: Action, at: &Scope<'_>) -> bool {
@@ -431,6 +435,12 @@ impl Caller {
             _ => at.project.to_string(),
         };
         Err(crate::Error::Forbidden(format!("this token may not {} in {place}", action.as_str())))
+    }
+
+    /// Who to record as the maker of something that acts later as them: the person behind an
+    /// admin's session, else the principal.
+    pub fn made_by(&self) -> &str {
+        self.maker.as_deref().unwrap_or(&self.principal)
     }
 
     /// Whether the caller can own personal overrides (people, not tokens or services).

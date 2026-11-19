@@ -555,6 +555,11 @@ impl Secrets {
         let reader = if untrusted { self.untrusted(project, caller)?.not_runtime() } else { caller.clone() };
         let narrowed = self.caller_for(project, slug, &reader).map_err(missing)?;
         let why = if untrusted { format!("{} is an untrusted copy", caller.principal.trim_end_matches(" (untrusted)")) } else { format!("{slug} is an ephemeral environment that isn't trusted") };
+        // Read as whoever chose the reference (`Secrets::resolve_as`): never a runtime.
+        let not_runtime = match &caller.maker {
+            Some(maker) if !caller.runtime => format!("{maker} chose the reference, and a person's or a token's choice never reads a sensitive key (an operator-written target does)"),
+            _ => why.clone(),
+        };
         if !narrowed.allows(Action::Reveal, &Scope::at(project, slug, path)) {
             return Err(Refusal::Protected(format!("{slug} is a protected environment, and {why}")));
         }
@@ -569,6 +574,7 @@ impl Secrets {
             });
         };
         if names::sensitive(&e.row.tags) && !narrowed.runtime {
+            let why = if untrusted || caller.runtime { why } else { not_runtime };
             return Err(Refusal::Unusable(format!("{key} is sensitive, and {why}: only a trusted runtime reads it")));
         }
         if e.row.link.as_ref().is_some_and(|l| l.mode == Mode::Dynamic) {
@@ -591,7 +597,8 @@ impl Secrets {
         if let Some(p) = problem {
             return Err(Refusal::Unusable(format!("{key} doesn't resolve: {p}")));
         }
-        self.audit_now(project, &narrowed, "secrets.resolve", Some(slug), Some(path), &[key.to_string()], &format!("resolved {key} for {consumer}"));
+        let chosen = caller.maker.as_ref().map(|m| format!(", for {m} (who chose it)")).unwrap_or_default();
+        self.audit_now(project, &narrowed, "secrets.resolve", Some(slug), Some(path), &[key.to_string()], &format!("resolved {key} for {consumer}{chosen}"));
         Ok(Resolved { value, version: e.row.version, expires_at: e.row.expires_at })
     }
 

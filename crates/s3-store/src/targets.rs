@@ -12,10 +12,12 @@
 //! readable for as long as the metadata exists). A target without an access key uses the
 //! deployment's own AWS credentials (the default chain, as the backing bucket does).
 //!
-//! Either credential may instead be a `roll://ENV[/folder]/KEY` reference to a roll secret
+//! Either credential may instead be a `roll://prj_…@ENV[/folder]/KEY` reference to a roll secret
 //! (docs/secrets.md, "Other roll products"): the reference is stored as written, in place of a
 //! sealed copy, and replication resolves it through rolld each time it builds the target's client.
-//! A reference names a value; it isn't one.
+//! A reference names a value; it isn't one. It names its project by id: the bucket replicating
+//! only proves the project stands for it, so a source bucket another project stands for can't make
+//! roll sign for this target with that project's credential.
 
 use crate::error::{Result, StoreError};
 use crate::rows;
@@ -59,11 +61,19 @@ pub fn is_reference(s: &str) -> bool {
     s.starts_with("roll://")
 }
 
-/// A reference's shape (roll secrets checks the rest when it resolves it): `roll://` then
-/// letters, digits and `-_./@`, at most 512 characters.
+/// The project a reference names by id (`roll://prj_…@ENV/…`), which a replication target's
+/// references must: the source bucket only picks among the projects that stand for it, never the
+/// project whose credential signs for the target.
+pub fn reference_project(s: &str) -> Option<&str> {
+    let (project, _) = s.strip_prefix("roll://")?.split_once('@')?;
+    (project.len() > "prj_".len() && project.starts_with("prj_") && !project.contains('/')).then_some(project)
+}
+
+/// A reference's shape (roll secrets checks the rest when it resolves it): `roll://prj_…@` then
+/// letters, digits and `-_./`, at most 512 characters.
 fn check_reference(field: &str, s: &str) -> Result<()> {
     let ok = s.len() <= 512 && s.len() > "roll://".len() && s["roll://".len()..].bytes().all(|b| b.is_ascii_alphanumeric() || b"-_./@".contains(&b));
-    if ok { Ok(()) } else { Err(invalid(format!("{field}: a reference is roll://ENV/KEY, roll://ENV/folder/KEY or roll://PROJECT@ENV/KEY"))) }
+    if ok && reference_project(s).is_some() { Ok(()) } else { Err(invalid(format!("{field}: a replication target's reference names its project by id: roll://prj_…@ENV/KEY or roll://prj_…@ENV/folder/KEY"))) }
 }
 
 /// A replication target as stored (its secret only when asked for).
@@ -365,8 +375,11 @@ mod tests {
         assert!(!format!("{s:?}").contains("supersecret"));
         assert_eq!(format!("{:?}", Secret::new("supersecret")), "Secret(REDACTED)");
         let refs = |k: &str, s: &str| TargetSpec { access_key_id: Some(k.into()), secret_access_key: Some(Secret::new(s)), ..Default::default() }.check();
-        assert!(refs("roll://production/AWS_ACCESS_KEY_ID", "roll://shop@production/aws/AWS_SECRET_ACCESS_KEY").is_ok());
-        assert!(refs("AKIAFAKE", "roll://production/has space").is_err());
+        assert!(refs("roll://prj_shop@production/AWS_ACCESS_KEY_ID", "roll://prj_shop@production/aws/AWS_SECRET_ACCESS_KEY").is_ok());
+        // Without its project (or with a name, not an id) the bucket replicating would pick it.
+        assert!(refs("roll://prj_shop@production/AWS_ACCESS_KEY_ID", "roll://production/AWS_SECRET_ACCESS_KEY").is_err());
+        assert!(refs("roll://shop@production/AWS_ACCESS_KEY_ID", "roll://shop@production/AWS_SECRET_ACCESS_KEY").is_err());
+        assert!(refs("AKIAFAKE", "roll://prj_shop@production/has space").is_err());
         assert!(refs("roll://", "roll://production/K").is_err());
     }
 }

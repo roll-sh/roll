@@ -199,7 +199,7 @@ impl Secrets {
         let (environments, paths, actions) = crate::caller::scope(project, n.environments, n.paths, n.actions, caller)?;
         self.project(project)?;
         let now = self.db.now_ms()?;
-        let i = Identity { id: names::new_id("idn", 12), name, issuer, audience, subject, claims: n.claims, environments, paths, actions, ttl_minutes: ttl, created_at: now, created_by: caller.principal.clone(), last_used_at: None, last_subject: None, allowed_ips: crate::caller::allowed(n.allowed_ips)?, pinned_keys };
+        let i = Identity { id: names::new_id("idn", 12), name, issuer, audience, subject, claims: n.claims, environments, paths, actions, ttl_minutes: ttl, created_at: now, created_by: self.maker_of(caller)?, last_used_at: None, last_subject: None, allowed_ips: crate::caller::allowed(n.allowed_ips)?, pinned_keys };
         self.db.write(|c| {
             let count: i64 = c.query_row("SELECT COUNT(*) FROM identities WHERE project_id = ?", [project], |r| r.get(0))?;
             if count >= IDENTITIES_MAX {
@@ -231,13 +231,14 @@ impl Secrets {
             return Err(Error::Forbidden("an identity's keys are set by people, not tokens or logins".into()));
         }
         let jwks = jwks.trim();
+        let by = self.maker_of(caller)?;
         let n = crate::oidc::pinned_keys(jwks).map_err(bad)?;
         self.project(project)?;
         let now = self.db.now_ms()?;
         let (identity, live) = self.db.write(|c| {
             let name: Option<String> = c.query_row("SELECT name FROM identities WHERE id = ? AND project_id = ?", [id, project], |r| r.get(0)).optional()?;
             let name = name.ok_or_else(|| Error::NotFound(format!("no identity {id}")))?;
-            c.execute("UPDATE identities SET jwks = ?, created_by = ? WHERE id = ?", params![jwks, caller.principal, id])?;
+            c.execute("UPDATE identities SET jwks = ?, created_by = ? WHERE id = ?", params![jwks, by, id])?;
             let live: Vec<String> = c.query("SELECT grant_id FROM identity_logins WHERE identity = ? AND expires_at > ?", params![id, now], |r| r.get(0))?;
             let revoked = live.len();
             audit::record(c, project, caller, "identity.keys", None, None, &[], &format!("identity {name} now pins {n} key{} ({revoked} live token{} revoked)", if n == 1 { "" } else { "s" }, if revoked == 1 { "" } else { "s" }), now)?;
@@ -315,12 +316,12 @@ impl Secrets {
         let rule = crate::access::rule(&project, i.environments.clone(), i.paths.clone(), &i.actions);
         // Owned by the person behind whoever made it (a person's token is that person).
         let owner = match self.maker(&i.created_by)? {
-            crate::caller::Maker::Person(user) => Some(user),
-            crate::caller::Maker::Operator => None,
-            crate::caller::Maker::Gone => return Err(denied()),
+            crate::caller::Origin::Person(user) => Some(user),
+            crate::caller::Origin::Operator => None,
+            crate::caller::Origin::Gone => return Err(denied()),
         };
         let m = workloads.mint(&i.name, rule, i.allowed_ips.clone(), i.ttl_minutes as u32, owner.as_deref())?;
-        let caller = Caller { principal: format!("identity:{}", i.id), grants: std::sync::Arc::new(crate::access::Everything), ip, runtime: false, approval: None };
+        let caller = Caller { principal: format!("identity:{}", i.id), grants: std::sync::Arc::new(crate::access::Everything), ip, runtime: false, approval: None, maker: None };
         let kept = self.db.write(|c| {
             // Deleted meanwhile, or its keys replaced (and so its maker changed): the token goes
             // too. A login verified against the old keys mustn't keep one after the replacement

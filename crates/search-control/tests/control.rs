@@ -2047,8 +2047,8 @@ async fn an_s3_repository_moves_indices_between_clusters() {
     assert!(bucket.keys("prod/roll/indices/stray/").is_empty());
 }
 
-/// roll secrets as a fake (rolld's is `Secrets::may_reveal_for`, `maker_caller` and
-/// `resolve_for`): keys by reference with a version, the clusters a project's canvas holds, who may
+/// roll secrets as a fake (rolld's is `Secrets::bind_ref`, `resolve_as` and
+/// `digest_as`): keys by reference with a version, the clusters a project's canvas holds, who may
 /// reveal (a person's `usr_…`, or `operator`), and protected references (refused to an untrusted
 /// copy).
 #[derive(Default)]
@@ -2092,12 +2092,9 @@ fn refused(r: search_control::secret_refs::Refused) -> String {
 #[async_trait::async_trait]
 impl search_control::secret_refs::ResourceSecrets for FakeSecrets {
     async fn may_write(&self, who: &search_control::secret_refs::Who, h: &search_control::secret_refs::Holder, reference: &str) -> Result<String, search_control::secret_refs::Refused> {
-        // As roll secrets' `caller_of`: the operator, an admin's session or an open daemon is the
-        // operator; a signed-in person is themselves.
-        let principal = match &who.user {
-            Some(u) if !u.admin && !who.operator => u.user.clone(),
-            _ => "operator".to_string(),
-        };
+        // As roll secrets' `bind_ref`: a signed-in person (an admin too) is themselves; the
+        // operator's token or an open daemon is the operator.
+        let principal = who.user.as_ref().map_or_else(|| "operator".to_string(), |u| u.user.clone());
         self.check(h, &principal, reference).map(|_| principal)
     }
 

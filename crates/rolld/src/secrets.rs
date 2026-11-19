@@ -1209,11 +1209,11 @@ impl s3_server::TargetCredentials for ForStorage {
 }
 
 /// roll secrets for roll search's snapshot repositories (`search_control::secret_refs`): a
-/// repository's `roll://` credentials are written only by a caller who may reveal each
-/// (`Secrets::may_reveal_for`, the caller as a request to secrets would be), and resolve for its
-/// cluster, the canvas resource asking (`search:search:<id>` in the audit log; a branch asks as
-/// the cluster it came from, untrusted), only while their maker still may reveal them
-/// (`Secrets::maker_caller`, as syncs act as theirs).
+/// repository's `roll://` credentials are bound by the caller who writes them
+/// (`Secrets::bind_ref`, the caller as a request to secrets would be), and read as that maker
+/// (`resolve_as`/`digest_as`, their rights looked up again on every use) for the cluster, the
+/// canvas resource asking (`search:search:<id>` in the audit log; a branch asks as the cluster it
+/// came from, untrusted).
 pub struct ForSearch(pub Arc<Secrets>);
 
 impl ForSearch {
@@ -1231,17 +1231,12 @@ impl ForSearch {
         }
     }
 
-    /// `f` for the reference, after checking its maker still may reveal it.
-    async fn as_maker<T: Send + 'static>(&self, holder: &search_control::secret_refs::Holder, reference: &str, f: fn(&Secrets, &roll_secrets::ResourceRef, &str) -> Result<T, roll_secrets::Refusal>) -> Result<T, String> {
+    /// `f` for the reference, as its stored maker (a string only roll's control plane writes).
+    async fn as_maker<T: Send + 'static>(&self, holder: &search_control::secret_refs::Holder, reference: &str, f: fn(&Secrets, &roll_secrets::ResourceRef, &str, &roll_secrets::Maker) -> Result<T, roll_secrets::Refusal>) -> Result<T, String> {
         let resource = Self::resource(holder);
-        let (secrets, reference, maker) = (self.0.clone(), reference.to_string(), holder.maker.clone());
-        tokio::task::spawn_blocking(move || {
-            let caller = secrets.maker_caller(&maker, &resource.consumer()).map_err(|e| e.to_string())?;
-            secrets.may_reveal_for(&resource, &reference, &caller).map_err(|e| format!("{maker}, who set it, can't use it any more: {e}"))?;
-            f(&secrets, &resource, &reference).map_err(|e| Self::refusal(&resource, &reference, e))
-        })
-        .await
-        .map_err(|e| e.to_string())?
+        let maker: roll_secrets::Maker = serde_json::from_value(serde_json::Value::String(holder.maker.clone())).map_err(|_| "nobody roll knows chose it".to_string())?;
+        let (secrets, reference) = (self.0.clone(), reference.to_string());
+        tokio::task::spawn_blocking(move || f(&secrets, &resource, &reference, &maker).map_err(|e| Self::refusal(&resource, &reference, e))).await.map_err(|e| e.to_string())?
     }
 }
 
@@ -1253,23 +1248,22 @@ impl search_control::secret_refs::ResourceSecrets for ForSearch {
         let (secrets, reference, who) = (self.0.clone(), reference.to_string(), who.clone());
         tokio::task::spawn_blocking(move || {
             let caller = secrets.caller_of(who.operator, who.user.as_ref(), who.grant.as_ref()).map_err(|e| Refused::Forbidden(e.to_string()))?;
-            // Then a digest: the reference resolves for the cluster at all (a key that exists).
-            secrets.may_reveal_for(&resource, &reference, &caller).and_then(|()| secrets.digest_for(&resource, &reference).map(drop)).map_err(|e| match e {
-                roll_secrets::Refusal::NotTrusted(_) | roll_secrets::Refusal::Protected(_) => Refused::Forbidden(e.to_string()),
+            let maker = secrets.bind_ref(&resource, &reference, &caller).map_err(|e| match e {
+                roll_secrets::Refusal::NotAllowed(_) | roll_secrets::Refusal::NotTrusted(_) | roll_secrets::Refusal::Protected(_) => Refused::Forbidden(e.to_string()),
                 e => Refused::Invalid(e.to_string()),
             })?;
-            Ok(caller.principal)
+            Ok(maker.to_string())
         })
         .await
         .map_err(|e| Refused::Invalid(e.to_string()))?
     }
 
     async fn resolve(&self, holder: &search_control::secret_refs::Holder, reference: &str) -> Result<search_control::secret_refs::Revealed, String> {
-        self.as_maker(holder, reference, |s, r, x| s.resolve_for(r, x).map(|v| search_control::secret_refs::Revealed::new(v.value.expose()))).await
+        self.as_maker(holder, reference, |s, r, x, m| s.resolve_as(r, x, m).map(|v| search_control::secret_refs::Revealed::new(v.value.expose()))).await
     }
 
     async fn digest(&self, holder: &search_control::secret_refs::Holder, reference: &str) -> Result<String, String> {
-        self.as_maker(holder, reference, |s, r, x| s.digest_for(r, x)).await
+        self.as_maker(holder, reference, |s, r, x, m| s.digest_as(r, x, m)).await
     }
 }
 

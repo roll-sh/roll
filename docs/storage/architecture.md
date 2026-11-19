@@ -602,13 +602,16 @@ deployment's credentials. See [compatibility](compatibility.md#event-notificatio
 a dedicated 32-byte key in `state` (`replication_target_key`, created once and never rotated
 away, so a sealed secret stays readable as long as the metadata exists). They're opened only to
 build the target's S3 client, never returned by the API, and never printed (`Secret`'s `Debug`
-is redacted). Either credential may instead be a `roll://ENV[/folder]/KEY` reference to a roll
-secret (docs/secrets.md, "Other roll products"): the reference is stored as written, and the
+is redacted). Either credential may instead be a `roll://prj_…@ENV[/folder]/KEY` reference to a
+roll secret (docs/secrets.md, "Other roll products"), naming its project by id (never left to the
+source bucket, which only proves the projects that stand for it): the reference is stored as written, and the
 value is resolved through rolld's `TargetCredentials` (roll secrets, audited as
 `storage:bucket:<source bucket>`) each time the target's client is built for a source bucket.
 That client is kept while the references' digests stay the same, so a rotation in roll reaches
 the next connection; a reference that doesn't resolve leaves the row queued and retried (logged
-with why, never a value) until the row's retention fails it. Only the operator sets references
+with why, never a value) until the row's retention fails it. `PutBucketReplication` naming such a
+target answers `InvalidRequest` saying only that its credentials don't resolve for the bucket; why
+(protected, no such key, another project) is only in the log. Only the operator sets references
 or changes a target that has them.
 
 **Inventory reports** (`s3-server/src/inventory.rs`) are checked hourly: each enabled inventory
@@ -1439,7 +1442,7 @@ POST   /v1/storage/session-keys/rotate           → { key_id }
 GET    /v1/storage/replication-targets           → [Target]
 POST   /v1/storage/replication-targets  { name, endpoint? /* none: AWS S3 */, region? (us-east-1),
                                           access_key_id?, secret_access_key? /* with the key; write-only */
-                                          /* either may be roll://ENV[/folder]/KEY (both, if the key id is): operator only */,
+                                          /* either may be roll://prj_…@ENV[/folder]/KEY (both, if the key id is): operator only */,
                                           path_style? (true), buckets?: [string] } → Target
 GET    /v1/storage/replication-targets/{name}    → Target
 PUT    /v1/storage/replication-targets/{name}  { same, without name; no secret_access_key keeps it } → Target

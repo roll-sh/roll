@@ -4,12 +4,12 @@
 //!
 //! **Writing.** Only [`Control::put_repository`](crate::Control::put_repository)
 //! (`PUT /v1/search/clusters/{id}/repositories/{name}`) takes references, from a caller roll
-//! secrets lets reveal each one ([`ResourceSecrets::may_write`], its `Caller::allows`), and records
+//! secrets lets reveal each one ([`ResourceSecrets::may_write`], roll secrets' `bind_ref`), and records
 //! the caller as their maker. The cluster's own endpoint refuses them.
 //!
 //! **Resolving.** For the cluster's id (bound when the node loads it: a name can be reused after
 //! a delete), as its maker: every resolve and digest re-checks that the
-//! maker still may reveal what the reference names (roll secrets' `maker_caller`). A branch
+//! maker still may reveal what the reference names (roll secrets' `resolve_as`/`digest_as`). A branch
 //! (anything with a parent) is a copy its project never vetted: it asks as the cluster it came
 //! from (the root of its line, the one a canvas holds) and as an untrusted copy, so roll secrets
 //! never gives it a protected environment or a sensitive key, whoever made the reference. A
@@ -59,8 +59,8 @@ pub enum Refused {
     Invalid(String),
 }
 
-/// roll secrets for a [`Holder`] (rolld's: `Secrets::may_reveal_for`, `maker_caller`,
-/// `resolve_for` and `digest_for`). Errors say why, never with a value.
+/// roll secrets for a [`Holder`] (rolld's: `Secrets::bind_ref`, `resolve_as`,
+/// `digest_as`, as the stored maker). Errors say why, never with a value.
 #[async_trait]
 pub trait ResourceSecrets: Send + Sync {
     /// Whether `who` may write `reference` for the cluster: they may reveal what it names. Their

@@ -466,7 +466,7 @@ allowlist (a preview's branch included); change it like any setting.
   stored.
   - *Who writes one.* Only roll's control plane:
     `PUT /v1/search/clusters/{id}/repositories/{name}` (Elasticsearch's body) asks roll secrets
-    whether the caller may reveal each reference (`Secrets::may_reveal_for`, the caller as a
+    whether the caller may choose each reference (`Secrets::bind_ref`, the caller as a
     request to secrets would be: 403 if not, 400 for a cluster no project stands for or a key that
     doesn't exist), then registers the repository naming the caller in `x-roll-repository-maker`,
     kept as the repository's `refs_by`. The node's REST port drops that header from every request
@@ -479,10 +479,11 @@ allowlist (a preview's branch included); change it like any setting.
   - *Resolving.* search-es only knows the seam (`search_es::secret_refs::SecretRefs`, on the
     cluster's config, with the cluster's id bound when the node loads it: a name can be reused
     after a delete); search-control's resolver finds the cluster in the catalog by that id
-    (`secret_refs.rs`) and rolld's `ForSearch` first rebuilds the maker as roll secrets has them
-    now (`Secrets::maker_caller`, as a sync acts as its maker: a person while they can sign in, a
-    token while it lives) and checks they still may reveal the reference, then asks
-    `resolve_for`/`digest_for` for workspace resource `search` with the cluster's id. A branch asks
+    (`secret_refs.rs`) and rolld's `ForSearch` reads the reference as its maker
+    (`Secrets::resolve_as`/`digest_as` with the stored `Maker`: their rights looked up again on
+    every use, so a person who can't sign in or no longer owns the project, a demoted admin or a
+    revoked token stops it; a sensitive key is refused) for workspace resource `search` with the
+    cluster's id. A branch asks
     as the cluster its line started from, marked untrusted (`ResourceRef::untrusted`): no
     protected environment, no sensitive key, whoever made the reference. A cluster restored after
     a delete keeps its id and owner, so it stays trusted. The value is resolved when the
