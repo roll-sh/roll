@@ -156,6 +156,10 @@ is judged by its token alone. Anything else is:
 403 {"error": "a WebSocket with a roll session opens only from roll's dashboard", "code": "origin"}
 ```
 
+The check is as good as the dashboard's origins are narrow: with `ROLL_DASHBOARD_ORIGIN` unset on a
+loopback daemon (local development), any `localhost` port counts as the dashboard's, so a preview
+or an app served on `localhost:<port>` passes it. Rely on it where the origins are a list.
+
 Signing in has no session yet, so the header can't guard it. Instead, a write to `/v1/accounts`
 without an `Authorization` header must send its body as `Content-Type: application/json` (else
 `415`). A form on another site can post any text as its body, and the browser keeps the cookie the
