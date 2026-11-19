@@ -640,8 +640,17 @@ impl<'a> Pre<'a> {
 
     /// What each row of `rows` comes to (`fate`), into `skip` (`Reader::next_row_with`).
     fn mark(&mut self, b: &RowBatch, rows: std::ops::Range<usize>, skip: &mut Vec<u8>) {
-        use super::vector::Tri;
         self.decode(b, rows.clone());
+        self.fates(skip);
+        let n = skip.iter().filter(|s| **s == DROP).count();
+        self.off = !self.worth(rows.len(), n as u64);
+    }
+
+    /// What each row of the run `decode` decoded comes to (`fate`), into `skip`, a column
+    /// at a time.
+    fn fates(&self, skip: &mut Vec<u8>) {
+        use super::vector::Tri;
+        let n = self.odd.len();
         skip.clear();
         match self.probe {
             // (`fate` without a probe: one pass over the outcomes.)
@@ -667,18 +676,12 @@ impl<'a> Pre<'a> {
                     (false, Tri::T) => pass,
                 };
                 match key.map(|c| (&c.data, &c.nulls)) {
-                    Some((ColData::I32(v), nulls)) => {
-                        skip.extend((0..rows.len()).map(|r| fate(self.odd[r], self.tri[r], nulls[r], v[r] as i64)))
-                    }
-                    Some((ColData::I64(v), nulls)) => {
-                        skip.extend((0..rows.len()).map(|r| fate(self.odd[r], self.tri[r], nulls[r], v[r])))
-                    }
-                    _ => skip.extend((0..rows.len()).map(|r| self.fate(r))),
+                    Some((ColData::I32(v), nulls)) => skip.extend((0..n).map(|r| fate(self.odd[r], self.tri[r], nulls[r], v[r] as i64))),
+                    Some((ColData::I64(v), nulls)) => skip.extend((0..n).map(|r| fate(self.odd[r], self.tri[r], nulls[r], v[r]))),
+                    _ => skip.extend((0..n).map(|r| self.fate(r))),
                 }
             }
         }
-        let n = skip.iter().filter(|s| **s == DROP).count();
-        self.off = !self.worth(rows.len(), n as u64);
     }
 }
 
@@ -1773,6 +1776,8 @@ fn partial_chunk<'d>(
         false => None,
     };
     let mut pre_off = false;
+    // (What each decoded row comes to, `Pre::fates`.)
+    let mut fates: Vec<u8> = Vec::new();
     loop {
         if pre_off {
             pre = None;
@@ -1803,11 +1808,12 @@ fn partial_chunk<'d>(
                 continue;
             }
             pre.eval_nums();
+            pre.fates(&mut fates);
             let mut taken = 0;
             for (r, i) in run.enumerate() {
                 use super::vector::Tri;
                 read += 1;
-                let fate = pre.fate(r);
+                let fate = fates[r];
                 if fate == DROP {
                     taken += 1;
                     continue;
