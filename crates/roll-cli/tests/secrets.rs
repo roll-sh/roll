@@ -71,6 +71,7 @@ async fn gate(axum::extract::State(tokens): axum::extract::State<Tokens>, mut re
 /// The workspace, secrets and access routers on a local port, with the project `shop`.
 struct Server {
     api: String,
+    secrets: Arc<roll_secrets::Secrets>,
     projects: Arc<roll_workspace::Workspace>,
     _dir: tempfile::TempDir,
 }
@@ -102,19 +103,20 @@ async fn start() -> Server {
         gateways: None,
     };
     let secrets = Arc::new(roll_secrets::Secrets::new(db, ws.clone(), opts).unwrap());
+    let served = secrets.clone();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let api = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
     let projects = ws.clone();
     let tokens = Tokens::default();
     let access = axum::Router::new().route("/v1/access/tokens", axum::routing::post(create_token)).with_state(tokens.clone());
-    let router = roll_workspace::router(ws).merge(roll_secrets::router(secrets)).merge(access).layer(axum::middleware::from_fn_with_state(tokens, gate));
+    let router = roll_workspace::router(ws).merge(roll_secrets::router(served)).merge(access).layer(axum::middleware::from_fn_with_state(tokens, gate));
     tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-    Server { api, projects, _dir: dir }
+    Server { api, secrets, projects, _dir: dir }
 }
 
 #[tokio::test]
 async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_references() {
-    let Server { api, projects, _dir: dir } = start().await;
+    let Server { api, projects, _dir: dir, .. } = start().await;
     let at = ["secrets", "-p", "shop", "-e", "production"];
     ok(&api, &[], &[&at[..], &["set", "HOST=db.internal", "PORT=5432"]].concat(), None).await;
     ok(&api, &[], &[&at[..], &["set", "PASSWORD"]].concat(), Some("s3cret\n")).await;
@@ -501,4 +503,36 @@ async fn roll_secrets_unseal_gives_a_sealed_node_its_shares() {
     let done = ok(&api, &[], &["secrets", "unseal", "--node", &api], Some(&format!("{}\n", shares[0]))).await;
     assert_eq!(done.trim(), format!("{api}: unsealed"));
     assert_eq!(unsealed.await.unwrap().as_str(), KEY);
+}
+
+#[tokio::test]
+async fn an_exported_audit_log_verifies_offline_with_saved_keys_for_its_own_project_and_an_edit_fails_it() {
+    let Server { api, secrets, projects, _dir } = start().await;
+    let shop = projects.list(roll_workspace::Scope::All).unwrap().into_iter().find(|p| p.name == "shop").unwrap().id;
+    let at = ["secrets", "-p", "shop", "-e", "production"];
+    ok(&api, &[], &[&at[..], &["set", "HOST=db.internal", "PORT=5432"]].concat(), None).await;
+    let s = secrets.clone();
+    tokio::task::spawn_blocking(move || s.sweep_audit_chain(i64::MAX / 2).unwrap()).await.unwrap();
+    ok(&api, &[], &[&at[..], &["set", "PORT=6543"]].concat(), None).await;
+    let export = ok(&api, &[], &["secrets", "-p", "shop", "audit", "--format", "jsonl", "--limit", "10000"], None).await;
+    let files = tempfile::tempdir().unwrap();
+    let (log, keys) = (files.path().join("audit.jsonl"), files.path().join("jwks.json"));
+    std::fs::write(&keys, secrets.oidc_jwks().unwrap().to_string()).unwrap();
+    std::fs::write(&log, &export).unwrap();
+    // Nothing but the file, the keys and the project's id: the API isn't there.
+    let offline = "http://127.0.0.1:9";
+    let verify = ["secrets", "-p", shop.as_str(), "audit", "verify", "--file", log.to_str().unwrap(), "--jwks", keys.to_str().unwrap()];
+    let out = ok(offline, &[], &verify, None).await;
+    assert!(out.contains("signed through #"), "{out}");
+    // Keys fetched from the server being checked would vouch for themselves: saved ones only.
+    let o = roll(offline, &[], &verify[..7], None).await;
+    assert!(o.code != Some(0) && o.stderr.contains("--jwks"), "{}", o.stderr);
+    // Another project's log isn't this one's, however well it verifies.
+    let mut other = verify;
+    other[2] = "prj_someoneelse";
+    let o = roll(offline, &[], &other, None).await;
+    assert!(o.code != Some(0) && o.stderr.contains("not prj_someoneelse's"), "{}", o.stderr);
+    std::fs::write(&log, export.replacen("\"summary\":\"", "\"summary\":\"not ", 1)).unwrap();
+    let o = roll(offline, &[], &verify, None).await;
+    assert!(o.code != Some(0) && o.stderr.contains("edited"), "{}{}", o.stdout, o.stderr);
 }

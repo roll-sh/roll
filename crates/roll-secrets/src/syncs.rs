@@ -429,7 +429,7 @@ impl Secrets {
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, '{}', NULL, 0, 0, ?, ?)",
                 params![id, project, env.id, path, n.kind, json(&n.target), keys.as_ref().map(json), prefix, sealed, now, caller.principal],
             )?;
-            audit::record(c, project, caller, "sync.create", Some(&n.environment), Some(&path), keys.as_deref().unwrap_or_default(), &format!("created {} sync {id}", n.kind), now)
+            audit::record(c, self.keys()?, project, caller, "sync.create", Some(&n.environment), Some(&path), keys.as_deref().unwrap_or_default(), &format!("created {} sync {id}", n.kind), now)
         })?;
         Ok(masked(SecretSync {
             id,
@@ -469,7 +469,7 @@ impl Secrets {
         let now = self.db.now_ms()?;
         self.db.write(|c| {
             c.execute("DELETE FROM syncs WHERE id = ?", [id])?;
-            audit::record(c, project, caller, "sync.delete", Some(&r.info.environment), Some(&r.info.path), &[], &format!("deleted {} sync {id}", r.info.kind), now)
+            audit::record(c, self.keys()?, project, caller, "sync.delete", Some(&r.info.environment), Some(&r.info.path), &[], &format!("deleted {} sync {id}", r.info.kind), now)
         })
     }
 
@@ -629,10 +629,10 @@ impl Secrets {
             };
             // The audit row whether or not the hold was still ours: values went out either way.
             match &outcome {
-                Ok(o) if !o.keys.is_empty() || force => audit::record(c, project, &actor, "sync.push", Some(env), Some(path), &o.keys, &o.summary, now)?,
+                Ok(o) if !o.keys.is_empty() || force => audit::record(c, self.keys()?, project, &actor, "sync.push", Some(env), Some(path), &o.keys, &o.summary, now)?,
                 Ok(_) => {}
                 // Which keys reached the target before it failed isn't known: the row says so.
-                Err(e) => audit::record(c, project, &actor, "sync.push", Some(env), Some(path), &[], &clip(format!("{} sync failed (values may have reached the target in part): {e}", r.info.kind)), now)?,
+                Err(e) => audit::record(c, self.keys()?, project, &actor, "sync.push", Some(env), Some(path), &[], &clip(format!("{} sync failed (values may have reached the target in part): {e}", r.info.kind)), now)?,
             }
             Ok::<_, Error>(())
         });

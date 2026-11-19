@@ -291,7 +291,7 @@ fn credential_id(state: &Option<Json>) -> Option<String> {
 
 /// Apply `items` to `env` as one change. Inside a write closure: only the database.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn apply(c: &Conn<'_>, dek: &Dek, env: &EnvRow, items: &[Item], kind: &str, message: &str, caller: &Caller, now: i64) -> Result<(Change, Vec<ItemDiff>)> {
+pub(crate) fn apply(c: &Conn<'_>, dek: &Dek, mac: &crate::Keyring, env: &EnvRow, items: &[Item], kind: &str, message: &str, caller: &Caller, now: i64) -> Result<(Change, Vec<ItemDiff>)> {
     let project = &env.project_id;
     c.execute("UPDATE projects SET seq = seq + 1 WHERE project_id = ?", [project])?;
     // The project's syncs check their digests next, within seconds, ahead of their turn.
@@ -456,7 +456,7 @@ pub(crate) fn apply(c: &Conn<'_>, dek: &Dek, env: &EnvRow, items: &[Item], kind:
     )?;
     let keys: Vec<String> = diffs.iter().map(|d| d.key.clone()).collect();
     let summary = summarize(&diffs);
-    audit::record(c, project, caller, &format!("secrets.{kind}"), Some(&env.slug), Some(&change.path), &keys, &format!("#{seq} {summary}"), now)?;
+    audit::record(c, mac, project, caller, &format!("secrets.{kind}"), Some(&env.slug), Some(&change.path), &keys, &format!("#{seq} {summary}"), now)?;
     Ok((change, diffs))
 }
 
@@ -759,7 +759,7 @@ impl Secrets {
             {
                 return Err(Error::Conflict("stale", format!("{} changed after #{s}", env.slug)));
             }
-            let applied = apply(c, &dek, &env, &prepared.items, kind, message, caller, now)?;
+            let applied = apply(c, &dek, self.keys()?, &env, &prepared.items, kind, message, caller, now)?;
             then(c, &env, now)?;
             Ok(applied)
         });

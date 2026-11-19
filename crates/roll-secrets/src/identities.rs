@@ -231,7 +231,7 @@ impl Secrets {
                 params![i.id, project, i.name, i.issuer, i.audience, i.subject, json(&i.claims), i.environments.as_ref().map(json), i.paths.as_ref().map(json), json(&i.actions), i.ttl_minutes, now, i.created_by, i.allowed_ips.as_ref().map(json), jwks, i.gateway],
             )?;
             let keys = i.pinned_keys.map(|n| format!(", {n} pinned key{}", if n == 1 { "" } else { "s" })).unwrap_or_default();
-            audit::record(c, project, caller, "identity.create", None, None, &[], &format!("created identity {} for {} ({}{keys})", i.name, i.issuer, i.subject), now)
+            audit::record(c, self.keys()?, project, caller, "identity.create", None, None, &[], &format!("created identity {} for {} ({}{keys})", i.name, i.issuer, i.subject), now)
         })?;
         Ok(i)
     }
@@ -256,7 +256,7 @@ impl Secrets {
             c.execute("UPDATE identities SET jwks = ?, created_by = ? WHERE id = ?", params![jwks, caller.principal, id])?;
             let live: Vec<String> = c.query("SELECT grant_id FROM identity_logins WHERE identity = ? AND expires_at > ?", params![id, now], |r| r.get(0))?;
             let revoked = live.len();
-            audit::record(c, project, caller, "identity.keys", None, None, &[], &format!("identity {name} now pins {n} key{} ({revoked} live token{} revoked)", if n == 1 { "" } else { "s" }, if revoked == 1 { "" } else { "s" }), now)?;
+            audit::record(c, self.keys()?, project, caller, "identity.keys", None, None, &[], &format!("identity {name} now pins {n} key{} ({revoked} live token{} revoked)", if n == 1 { "" } else { "s" }, if revoked == 1 { "" } else { "s" }), now)?;
             Ok::<_, Error>((c.query_row(&format!("SELECT {COLUMNS} FROM identities WHERE id = ?"), [id], identity_row)?.0, live))
         })?;
         // What it gave out under the old keys ends (outside the transaction: roll-access's store).
@@ -285,7 +285,7 @@ impl Secrets {
             c.execute("DELETE FROM identities WHERE id = ?", [id])?;
             let live: Vec<String> = c.query("SELECT grant_id FROM identity_logins WHERE identity = ? AND expires_at > ?", params![id, now], |r| r.get(0))?;
             let n = live.len();
-            audit::record(c, project, caller, "identity.delete", None, None, &[], &format!("deleted identity {name} ({n} live token{} revoked)", if n == 1 { "" } else { "s" }), now)?;
+            audit::record(c, self.keys()?, project, caller, "identity.delete", None, None, &[], &format!("deleted identity {name} ({n} live token{} revoked)", if n == 1 { "" } else { "s" }), now)?;
             Ok::<_, Error>((live, gateway))
         })?;
         // What it gave out ends with it (outside the transaction: roll-access's own store).
@@ -361,7 +361,7 @@ impl Secrets {
                 return Ok(false);
             }
             c.execute("INSERT INTO identity_logins (grant_id, identity, project_id, expires_at) VALUES (?, ?, ?, ?)", params![m.id, i.id, project, m.expires_at])?;
-            audit::record(c, &project, &caller, "identity.login", None, None, &[], &format!("{sub} logged in as {} for {} min (token {})", i.name, i.ttl_minutes, m.id), now)?;
+            audit::record(c, self.keys()?, &project, &caller, "identity.login", None, None, &[], &format!("{sub} logged in as {} for {} min (token {})", i.name, i.ttl_minutes, m.id), now)?;
             Ok::<_, Error>(true)
         })?;
         if !kept {

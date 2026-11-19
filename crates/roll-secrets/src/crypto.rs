@@ -92,6 +92,10 @@ pub struct Keyring {
     /// records which deployment key sealed it inside: kms.rs).
     current_id: String,
     previous_id: Option<String>,
+    /// The audit chain's head MAC keys (audit.rs), current and previous: a database writer without
+    /// the deployment key can't move the head.
+    audit: Zeroizing<[u8; 32]>,
+    audit_previous: Option<Zeroizing<[u8; 32]>>,
 }
 
 impl std::fmt::Debug for Keyring {
@@ -117,10 +121,34 @@ fn kek(secret: &str) -> Result<Aes256Gcm, CryptoError> {
     Ok(cipher(okm.as_ref()))
 }
 
+/// The audit chain's MAC key: its own label, so it's no other key.
+fn audit_key(secret: &str) -> Zeroizing<[u8; 32]> {
+    let mut okm = Zeroizing::new([0u8; 32]);
+    hkdf::Hkdf::<Sha256>::new(Some(b"roll-secrets"), secret.trim().as_bytes()).expand(b"audit:head:v1", okm.as_mut()).expect("32 bytes");
+    okm
+}
+
+fn mac(key: &[u8; 32], msg: &[u8]) -> Hmac<Sha256> {
+    let mut m = <Hmac<Sha256> as Mac>::new_from_slice(key).expect("any key length");
+    m.update(msg);
+    m
+}
+
 impl Keyring {
     pub fn new(current: &str, previous: Option<&str>) -> Result<Keyring, CryptoError> {
         let previous = previous.filter(|p| !p.trim().is_empty());
-        Ok(Keyring { current: kek(current)?, previous: previous.map(kek).transpose()?, current_id: kek_id(current), previous_id: previous.map(kek_id) })
+        Ok(Keyring { current: kek(current)?, previous: previous.map(kek).transpose()?, current_id: kek_id(current), previous_id: previous.map(kek_id), audit: audit_key(current), audit_previous: previous.map(audit_key) })
+    }
+
+    /// The audit chain's head MAC of `msg` (audit.rs), with the current deployment key.
+    pub(crate) fn audit_mac(&self, msg: &[u8]) -> String {
+        URL_SAFE_NO_PAD.encode(mac(&self.audit, msg).finalize().into_bytes())
+    }
+
+    /// Whether `tag` is the current or the previous deployment key's [`Keyring::audit_mac`] of `msg`.
+    pub(crate) fn audit_mac_ok(&self, msg: &[u8], tag: &str) -> bool {
+        let Ok(tag) = URL_SAFE_NO_PAD.decode(tag) else { return false };
+        std::iter::once(&self.audit).chain(self.audit_previous.as_ref()).any(|k| mac(k, msg).verify_slice(&tag).is_ok())
     }
 
     /// The current deployment key's id.

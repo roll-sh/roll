@@ -679,7 +679,7 @@ impl Secrets {
                 "INSERT INTO atlas_projects (id, project_id, name, group_id, client_id, client_secret, managed_users, roles, state, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 params![id, project, a.name, a.group_id, a.client_id, sealed, serde_json::to_string(&a.managed_users).expect("users"), serde_json::to_string(&a.roles).expect("roles"), crate::turns::Turns::initial(), now, a.created_by],
             )?;
-            audit::record(c, project, caller, "atlas.add", None, None, &[], &format!("added MongoDB Atlas project {} ({}, service account {})", a.name, a.group_id, a.client_id), now)
+            audit::record(c, self.keys()?, project, caller, "atlas.add", None, None, &[], &format!("added MongoDB Atlas project {} ({}, service account {})", a.name, a.group_id, a.client_id), now)
         })?;
         Ok(a)
     }
@@ -701,7 +701,7 @@ impl Secrets {
                 return Err(Error::Conflict("in_use", format!("{name} has {waiting} password(s) or user(s) still to retire (a grace period, or a dynamic lease): delete it once they're done")));
             }
             c.execute("DELETE FROM atlas_projects WHERE id = ?", [id])?;
-            audit::record(c, project, caller, "atlas.delete", None, None, &[], &format!("deleted MongoDB Atlas project {name}"), now)
+            audit::record(c, self.keys()?, project, caller, "atlas.delete", None, None, &[], &format!("deleted MongoDB Atlas project {name}"), now)
         })
     }
 
