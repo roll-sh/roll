@@ -500,10 +500,14 @@ fn walk_row(steps: &mut [Step<'_>], r: usize, bytes: &[u8], buf: Option<(u32, us
                     }
                 }
             }
+            // (Through a copy: `pos` itself passed by reference to `skip`'s out-of-line call
+            // was kept in memory, stored and loaded again around every step.)
             Step::Any => {
-                if skip(data, &mut pos).is_err() {
+                let mut q = pos;
+                if skip(data, &mut q).is_err() {
                     return false;
                 }
+                pos = q;
             }
             Step::I32 { tag, v, nulls } => fixed!(v, nulls, *tag, i32, 4, |x| x),
             Step::I16 { v, nulls } => fixed!(v, nulls, tag::INT2, i16, 2, |x: i16| x as i32),
