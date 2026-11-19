@@ -963,13 +963,10 @@ still works until roll can; cleared once it does; `GET …/rotations`, `roll sec
 the Health view's "Managed credentials" list every managed credential with its schedule and last
 failure; `roll secrets rotations --rotate-due 7` rotates every one due within a week, or failing,
 in one run, for an operator's maintenance window, and fails if one does), `missing` (a required key an environment doesn't define, through its
-imports and base), `exposed` (a protected value also in an unprotected environment), `weak`,
-`expiring`, `certificate_expiring` (a certificate a project CA signed for a CSR that ends
+imports and base), `exposed` (a protected value also in an unprotected environment), `public`,
+`weak`, `expiring`, `certificate_expiring` (a certificate a project CA signed for a CSR that ends
 within two weeks: links' certificates are replaced by roll, a CSR's only by whoever asked; `key` is
 its names, `path` its CA), `stale`, then `unread` (nobody revealed, exported, resolved or synced it in 90 days,
-right folder: `expired`, `missing` (a required key an environment doesn't define, through its
-imports and base), `exposed` (a protected value also in an unprotected environment), `public`,
-`weak`, `expiring`, `stale`, then `unread` (nobody revealed, exported, resolved or synced it in 90 days,
 and it's older than that). Each `Finding` names the environment, folder and key where it's set,
 with a detail (the other environments, the reason, the date): never a value, and nothing is
 decrypted. Only what the caller may read is listed, and `weak` only where it may reveal.
@@ -3368,7 +3365,7 @@ metadata:
   labels:
     external-secrets.io/type: webhook   # ESO reads only labelled Secrets
 stringData:
-  token: rlst_…                         # roll secrets -p shop tokens create k8s --for-env production
+  token: rlt_…                          # roll secrets -p shop tokens create k8s --for-env production
 ---
 apiVersion: external-secrets.io/v1
 kind: SecretStore
@@ -3502,7 +3499,8 @@ pub trait Grants: Send + Sync + Debug {
 ```
 
 It is the operator (`Everything`), a roll-access grant (`GrantGrants`, for `rlt_…` tokens and
-`rlo_…` OAuth connections: `ask` inside the product is a no), or one of the project's own tokens.
+`rlo_…` OAuth connections: `ask` inside the product is a no). A project's token is such a grant
+with one secrets rule (`POST /v1/access/tokens`), and a workload identity's login is a `workload` grant.
 
 Secrets accepts the operator (`roll_auth::Operator`, or any request when rolld has no operator
 token), signed-in people on their own projects (below), and roll-access's grants: there is one
@@ -3585,7 +3583,8 @@ credentials as the tokens list does. Names and metadata only, never a value:
   a `${…}` or `roll://` reference in another key are recorded where they happened and aren't
   counted: the answer says so (`uncounted`).
 
-roll-access's grants (`rlt_`, OAuth) aren't listed yet: they're rolld's (#30).
+Who could lists roll-access's live tokens (`rlt_…`) by what each may do here, and workload identities
+by their identity rather than each login. OAuth connections (`rlo_…`) aren't listed yet.
 
 Measured (release, 2026-11-14, `examples/bench.rs`, load average about 52): at its cap, 300 folders
 importing production (it follows 256), each read once, reach takes 5–7 ms on SQLite and 120–150 ms
@@ -3712,7 +3711,6 @@ minutes.
         - run: roll secrets health               # nothing expired, missing, exposed or in the browser
         - run: roll run -- npm test              # the tests get staging's values, never on disk
   ```
-- When roll-access takes over tokens, identities mint its scoped tokens instead; the routes stay.
 
 ### Protected environments and approvals
 
