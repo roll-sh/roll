@@ -68,6 +68,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route("/v1/apps/projects/{project}/limits", get(limits).put(set_limits))
         .route("/v1/apps/projects/{project}/drains", get(drains).post(add_drain))
         .route("/v1/apps/projects/{project}/export", post(export_project))
+        .route("/v1/apps/projects/{project}/status-page", get(status_page).put(put_status_page).delete(delete_status_page))
         .route("/v1/apps/projects/{project}/preview-domain", get(preview_domain).post(set_preview_domain).delete(delete_preview_domain))
         .route("/v1/apps/projects/{project}/preview-domain/verify", post(verify_preview_domain))
         .route("/v1/apps/projects/{project}/drains/{did}", axum::routing::delete(delete_drain).patch(update_drain))
@@ -85,6 +86,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/deploys/{{dep}}/logs"), get(deploy_logs))
         .route(&format!("{env}/deploys/{{dep}}/commits"), get(deploy_commits))
         .route(&format!("{env}/deploys/{{dep}}/vulnerabilities"), get(deploy_vulnerabilities))
+        .route(&format!("{env}/deploys/{{dep}}/sbom"), get(deploy_sbom))
         .route(&format!("{env}/deploys/{{dep}}/rollback"), post(rollback))
         .route(&format!("{env}/deploys/{{dep}}/rollout"), post(rollout_action))
         .route(&format!("{env}/rollback"), post(rollback_previous))
@@ -165,6 +167,19 @@ async fn on_owner(State(apps): S, req: Request, next: Next) -> Response {
     }
     let cluster = apps.deps.cluster.clone();
     cluster.dispatch(&lease_key(&id), req, |req, _guard| next.run(req)).await
+}
+
+async fn status_page(State(apps): S, Path(project): Path<String>) -> R {
+    ok(apps.get_status_page(&project).await?)
+}
+
+async fn put_status_page(State(apps): S, Path(project): Path<String>, b: Bytes) -> R {
+    ok(apps.put_status_page(&project, body(&b)?).await?)
+}
+
+async fn delete_status_page(State(apps): S, Path(project): Path<String>) -> R {
+    apps.delete_status_page(&project).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 async fn preview_domain(State(apps): S, Path(project): Path<String>) -> R {
@@ -734,6 +749,12 @@ async fn deploy_commits(State(apps): S, Path((id, env, dep)): Path<(String, Stri
 #[derive(Deserialize)]
 struct VulnQuery {
     severity: Option<String>,
+}
+
+async fn deploy_sbom(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>) -> R {
+    let body = apps.sbom(&id, &env, &dep).await?;
+    let file = format!("attachment; filename=\"{dep}.cdx.json\"");
+    Ok(([(axum::http::header::CONTENT_TYPE, "application/vnd.cyclonedx+json".to_string()), (axum::http::header::CONTENT_DISPOSITION, file)], body).into_response())
 }
 
 async fn deploy_vulnerabilities(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>, Query(q): Query<VulnQuery>) -> R {

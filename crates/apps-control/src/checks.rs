@@ -104,6 +104,8 @@ impl Apps {
             }
         };
         let log = self.logs.sink(format!("env:{service}/{env}"), crate::logs::Stream::System);
+        // Its day on a status page: a pass or a failure.
+        self.status_count(crate::status_page::check_key(service, env, &c.name), verdict.is_ok()).await;
         let (sid, e) = (service.to_string(), env.to_string());
         if went_down {
             let why = verdict.as_ref().err().cloned().unwrap_or_default();

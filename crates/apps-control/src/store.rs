@@ -215,6 +215,19 @@ CREATE TABLE IF NOT EXISTS deploy_secrets (
     deployment TEXT PRIMARY KEY,
     digest TEXT NOT NULL
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS status_pages (
+    project TEXT PRIMARY KEY,
+    slug TEXT NOT NULL UNIQUE,
+    title TEXT NOT NULL,
+    items TEXT NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS status_days (
+    key TEXT NOT NULL,
+    day INTEGER NOT NULL,
+    ok INTEGER NOT NULL,
+    bad INTEGER NOT NULL,
+    PRIMARY KEY (key, day)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS deploy_scans (
     deployment TEXT PRIMARY KEY,
     service TEXT NOT NULL,
@@ -475,6 +488,10 @@ pub struct EnvRow {
     pub heartbeats: Vec<crate::model::Heartbeat>,
     /// Its split test ([`crate::model::Split`]).
     pub split: Option<crate::model::Split>,
+    /// Where a share of its requests is copied ([`crate::model::Split`]'s shape).
+    pub mirror: Option<crate::model::Split>,
+    /// Its deploy freeze ([`crate::freeze`]).
+    pub freeze: Option<crate::freeze::Freeze>,
     /// Paused (Render's Suspend): nothing of it runs, wakes, deploys or is scheduled until it's
     /// resumed.
     pub paused: bool,
@@ -603,7 +620,7 @@ fn name_taken(name: &str, deleted: Option<i64>) -> String {
         Some(_) => format!("a deleted service named {name} holds the name: restore it, or delete it again to delete it for good"),
     }
 }
-const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen, feedback, maintenance, allow_ips, rate_limit, tcp_port, firewall, pages, redeploy_on_secrets, secrets_seen, headers, paused, held_by, egress, vitals, routes, report, checks, heartbeats, split";
+const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen, feedback, maintenance, allow_ips, rate_limit, tcp_port, firewall, pages, redeploy_on_secrets, secrets_seen, headers, paused, held_by, egress, vitals, routes, report, checks, heartbeats, split, freeze, mirror";
 /// A deployment [`Store::prune_deployments`] pruned, with its image when nothing else names it.
 pub struct Pruned {
     pub id: String,
@@ -686,6 +703,8 @@ fn env_row(r: &code_sql::Row<'_>) -> code_sql::Result<EnvRow> {
         heartbeats: r.get::<_, Option<String>>(30)?.and_then(|j| serde_json::from_str::<Vec<StoredHeartbeat>>(&j).ok()).unwrap_or_default().into_iter().map(Into::into).collect(),
         report: r.get::<_, i64>(28)? != 0,
         split: r.get::<_, Option<String>>(31)?.and_then(|j| serde_json::from_str(&j).ok()),
+        freeze: r.get::<_, Option<String>>(32)?.and_then(|j| serde_json::from_str(&j).ok()),
+        mirror: r.get::<_, Option<String>>(33)?.and_then(|j| serde_json::from_str(&j).ok()),
     })
 }
 
@@ -834,6 +853,9 @@ impl Store {
         db.add_column("environments", "checks", "TEXT")?;
         db.add_column("environments", "heartbeats", "TEXT")?;
         db.add_column("environments", "split", "TEXT")?;
+        db.add_column("deploy_scans", "sbom", "TEXT")?;
+        db.add_column("environments", "freeze", "TEXT")?;
+        db.add_column("environments", "mirror", "TEXT")?;
         // Drains made before their filters sent every environment's runtime output: still so.
         db.add_column("log_drains", "sources", "TEXT")?;
         db.add_column("log_drains", "environments", "TEXT")?;
@@ -945,6 +967,7 @@ impl Store {
             )?;
             c.execute("DELETE FROM deploy_steps WHERE deployment IN (SELECT id FROM deployments WHERE service = ?)", [id])?;
             c.execute("DELETE FROM state WHERE key LIKE ?", [format!("%:{id}/%")])?;
+            c.execute("DELETE FROM status_days WHERE key LIKE ?", [format!("%:{id}/%")])?;
             for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "preview_hosts", "runs", "jobs", "metrics", "usage", "form_submissions", "deploy_scans"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ?"), [id])?;
             }
@@ -1044,7 +1067,7 @@ impl Store {
                     None => None,
                 };
                 c.execute(
-                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, 0, NULL, NULL, 0, NULL, 1, NULL, NULL, NULL)"),
+                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, 0, NULL, NULL, 0, NULL, 1, NULL, NULL, NULL, NULL, NULL)"),
                     params![service, env, branch.flatten(), ephemeral.unwrap_or(false) as i64, slug, port, now],
                 )?;
             }
@@ -1496,7 +1519,7 @@ impl Store {
                 }
                 c.execute("UPDATE deployments SET pruned_at = ? WHERE id = ?", params![now, id])?;
                 // History keeps its counts; its findings went with its image.
-                c.execute("UPDATE deploy_scans SET items = '[]' WHERE deployment = ?", [&id])?;
+                c.execute("UPDATE deploy_scans SET items = '[]', sbom = NULL WHERE deployment = ?", [&id])?;
                 out.push(Pruned { id, image });
             }
             for p in &mut out {
@@ -1572,14 +1595,67 @@ impl Store {
 
     /// The project's secrets' digest ([`crate::integrations::SecretSource::digest`]) a deployment
     /// went live with.
-    /// A deployment's scan: its counts and its findings (most severe first, at most [`crate::model::MAX_VULNERABILITIES`]).
-    pub fn set_scan(&self, service: &str, deployment: &str, summary: &crate::model::ScanSummary, items: &[crate::model::Vulnerability]) -> Result<()> {
-        let (s, i) = (serde_json::to_string(summary).expect("a scan serializes"), serde_json::to_string(items).expect("findings serialize"));
+    /// A project's status page made or changed: a new one gets `slug`, a changed one keeps its own.
+    pub fn put_status_page(&self, project: &str, slug: &str, title: &str, items: &str) -> Result<crate::status_page::Page> {
         self.db.execute(
-            "INSERT INTO deploy_scans (deployment, service, summary, items) VALUES (?, ?, ?, ?) ON CONFLICT (deployment) DO UPDATE SET summary = excluded.summary, items = excluded.items",
-            params![deployment, service, s, i],
+            "INSERT INTO status_pages (project, slug, title, items) VALUES (?, ?, ?, ?) ON CONFLICT (project) DO UPDATE SET title = excluded.title, items = excluded.items",
+            params![project, slug, title, items],
+        )?;
+        self.status_page(project)?.ok_or_else(|| Error::NotFound(format!("{project} has no status page")))
+    }
+
+    pub fn status_page(&self, project: &str) -> Result<Option<crate::status_page::Page>> {
+        self.status_page_where("project", project)
+    }
+
+    pub fn status_page_by_slug(&self, slug: &str) -> Result<Option<crate::status_page::Page>> {
+        self.status_page_where("slug", slug)
+    }
+
+    fn status_page_where(&self, col: &str, v: &str) -> Result<Option<crate::status_page::Page>> {
+        let row: Option<(String, String, String, String)> = self.db.query_row(&format!("SELECT project, slug, title, items FROM status_pages WHERE {col} = ?"), [v], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).optional()?;
+        row.map(|(project, slug, title, items)| Ok(crate::status_page::Page { project, slug, title, items: json(&items)? })).transpose()
+    }
+
+    pub fn delete_status_page(&self, project: &str) -> Result<()> {
+        match self.db.execute("DELETE FROM status_pages WHERE project = ?", [project])? {
+            0 => Err(Error::NotFound(format!("{project} has no status page"))),
+            _ => Ok(()),
+        }
+    }
+
+    /// One more check run or ping (`ok`), or failure or miss, on `day` (days since 1970).
+    pub fn status_day_add(&self, key: &str, day: i64, ok: bool) -> Result<()> {
+        let (g, b) = if ok { (1, 0) } else { (0, 1) };
+        self.db.execute(
+            "INSERT INTO status_days (key, day, ok, bad) VALUES (?, ?, ?, ?) ON CONFLICT (key, day) DO UPDATE SET ok = status_days.ok + excluded.ok, bad = status_days.bad + excluded.bad",
+            params![key, day, g, b],
+        )?;
+        self.db.execute("INSERT INTO state (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", params![format!("status-last:{key}"), if ok { "up" } else { "down" }])?;
+        if day % 7 == 0 {
+            self.db.execute("DELETE FROM status_days WHERE day < ?", [day - crate::status_page::DAYS])?;
+        }
+        Ok(())
+    }
+
+    pub fn status_days(&self, key: &str, since_day: i64) -> Result<Vec<(i64, i64, i64)>> {
+        Ok(self.db.query("SELECT day, ok, bad FROM status_days WHERE key = ? AND day >= ? ORDER BY day", params![key, since_day], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?)
+    }
+
+    /// A deployment's scan: its counts and its findings (most severe first, at most [`crate::model::MAX_VULNERABILITIES`]).
+    pub fn set_scan(&self, service: &str, deployment: &str, summary: &crate::model::ScanSummary, items: &[crate::model::Vulnerability], sbom: Option<&[u8]>) -> Result<()> {
+        let (s, i) = (serde_json::to_string(summary).expect("a scan serializes"), serde_json::to_string(items).expect("findings serialize"));
+        let b = sbom.map(|b| String::from_utf8_lossy(b).into_owned());
+        self.db.execute(
+            "INSERT INTO deploy_scans (deployment, service, summary, items, sbom) VALUES (?, ?, ?, ?, ?) ON CONFLICT (deployment) DO UPDATE SET summary = excluded.summary, items = excluded.items, sbom = excluded.sbom",
+            params![deployment, service, s, i, b],
         )?;
         Ok(())
+    }
+
+    /// A deployment's SBOM (CycloneDX JSON), when its scan kept one.
+    pub fn scan_sbom(&self, deployment: &str) -> Result<Option<String>> {
+        Ok(self.db.query_row("SELECT sbom FROM deploy_scans WHERE deployment = ?", [deployment], |r| r.get::<_, Option<String>>(0)).optional()?.flatten())
     }
 
     pub fn scan(&self, deployment: &str) -> Result<Option<(crate::model::ScanSummary, Vec<crate::model::Vulnerability>)>> {
@@ -2574,9 +2650,21 @@ impl Store {
         Ok(())
     }
 
+    pub fn set_freeze(&self, service: &str, env: &str, freeze: Option<&crate::freeze::Freeze>) -> Result<()> {
+        let j = freeze.map(|f| serde_json::to_string(f).expect("a freeze serializes"));
+        self.db.execute("UPDATE environments SET freeze = ? WHERE service = ? AND name = ?", params![j, service, env])?;
+        Ok(())
+    }
+
     pub fn set_split(&self, service: &str, env: &str, split: Option<&crate::model::Split>) -> Result<()> {
         let j = split.map(|s| serde_json::to_string(s).expect("a split serializes"));
         self.db.execute("UPDATE environments SET split = ? WHERE service = ? AND name = ?", params![j, service, env])?;
+        Ok(())
+    }
+
+    pub fn set_mirror(&self, service: &str, env: &str, mirror: Option<&crate::model::Split>) -> Result<()> {
+        let j = mirror.map(|s| serde_json::to_string(s).expect("a mirror serializes"));
+        self.db.execute("UPDATE environments SET mirror = ? WHERE service = ? AND name = ?", params![j, service, env])?;
         Ok(())
     }
 

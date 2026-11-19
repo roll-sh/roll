@@ -85,6 +85,19 @@ impl Apps {
         Ok(())
     }
 
+    /// A person's deploy into a frozen environment ([`crate::freeze`]): a 409 that says why, or
+    /// with `override` let through and written in the audit log.
+    pub(crate) async fn refuse_frozen(self: &Arc<Self>, service: &str, env: &str, over: bool, actor: Option<String>) -> Result<()> {
+        let (sid, e) = (service.to_string(), env.to_string());
+        let freeze = self.db(move |s| Ok(s.environment(&sid, &e).ok().and_then(|r| r.freeze))).await?;
+        let Some(f) = freeze.filter(|f| f.on(code_sql::now_ms())) else { return Ok(()) };
+        if !over {
+            return Err(Error::Conflict(format!("{}: deploying anyway takes `override: true` (a rollback is never frozen)", f.says())));
+        }
+        self.audit("freeze.overridden", service, env, actor, serde_json::json!({ "reason": f.reason })).await;
+        Ok(())
+    }
+
     pub(crate) fn refuse_capped(&self, service: &str) -> Result<()> {
         if self.capped(service) {
             return Err(Error::Conflict("this project reached its spending limit for the month: raise the limit to deploy".into()));

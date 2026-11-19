@@ -30,6 +30,12 @@ pub fn router(apps: Arc<Apps>) -> axum::Router {
                 return crate::edge::next(apps, req).await;
             }
             let host = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).unwrap_or("").to_string();
+            // A project's status page ([`crate::status_page`]), on its own name.
+            if host.starts_with("status-")
+                && let Some(page) = apps.status_page_for_host(&host).await
+            {
+                return crate::status_page::serve(apps, page, req.uri().path()).await;
+            }
             // A domain that redirects (www → apex): a 308 to the same path and query there.
             if let Some(to) = apps.redirect_for_host(&host).await {
                 let pq = req.uri().path_and_query().map(|p| p.as_str()).unwrap_or("/");
@@ -1394,6 +1400,34 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
         let mut b = [0u8; 1];
         getrandom::fill(&mut b).expect("system randomness");
         bucket = Some(b[0] % 100);
+    }
+    // Mirroring (Envoy's): a copy of a bodiless request to another environment, its answer
+    // dropped; never roll's own call, an upgrade, or a request another environment sent.
+    if let Some(m) = gate.mirror.as_ref()
+        && deployment.is_none()
+        && !ours
+        && !req.headers().contains_key(VIA_SITE)
+        && matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD)
+        && !is_upgrade(req.headers())
+        && {
+            let mut b = [0u8; 1];
+            getrandom::fill(&mut b).expect("system randomness");
+            (b[0] % 100) < m.percent
+        }
+    {
+        let mut copy = Request::builder().method(req.method().clone()).uri(req.uri().clone());
+        for (k, v) in req.headers() {
+            copy = copy.header(k, v);
+        }
+        if let Ok(mut copy) = copy.body(Body::empty()) {
+            if let Some(c) = roll_cluster::client_addr(&req) {
+                copy.extensions_mut().insert(roll_cluster::ClientAddr(c));
+            }
+            let (apps, service, target) = (apps.clone(), service.to_string(), m.environment.clone());
+            tokio::spawn(async move {
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(30), split_to(apps, &service, &target, copy)).await;
+            });
+        }
     }
     // In the split's share: the other environment answers, and the cookie keeps them there.
     if let (Some(sp), Some(b)) = (split, bucket)

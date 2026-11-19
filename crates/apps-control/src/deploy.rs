@@ -53,7 +53,12 @@ impl Apps {
     pub async fn deploy(self: &Arc<Self>, service: &str, env: &str, body: Value, by: By, upload: Option<Bytes>, key: Option<&str>) -> Result<Deployment> {
         self.refuse_capped(service)?;
         self.refuse_paused(service, env).await?;
-        let o = body.as_object().cloned().unwrap_or_default();
+        let mut o = body.as_object().cloned().unwrap_or_default();
+        // A person's deploy in a freeze: refused, or let through with `override` (said).
+        if matches!(by.trigger, Trigger::Manual | Trigger::Upload) {
+            let over = o.remove("override").is_some_and(|v| v == true);
+            self.refuse_frozen(service, env, over, by.actor.clone()).await?;
+        }
         for k in o.keys() {
             if !["revision", "image", "message", "no_traffic", "no_cache", "image_upload", "closed"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
@@ -222,6 +227,9 @@ impl Apps {
     pub async fn redeploy(self: &Arc<Self>, service: &str, env: &str, body: Value, actor: Option<String>, key: Option<&str>) -> Result<Deployment> {
         self.refuse_capped(service)?;
         self.refuse_paused(service, env).await?;
+        let mut body = body;
+        let over = body.as_object_mut().and_then(|o| o.remove("override")).is_some_and(|v| v == true);
+        self.refuse_frozen(service, env, over, actor.clone()).await?;
         if let Some(k) = key {
             if k.is_empty() || k.len() > 200 || !k.bytes().all(|b| b.is_ascii_graphic()) {
                 return Err(Error::BadRequest("Idempotency-Key is 1–200 printable ASCII characters".into()));
@@ -290,7 +298,9 @@ impl Apps {
     pub async fn promote(self: &Arc<Self>, service: &str, env: &str, body: Value, actor: Option<String>) -> Result<Deployment> {
         self.refuse_capped(service)?;
         self.refuse_paused(service, env).await?;
-        let o = body.as_object().cloned().unwrap_or_default();
+        let mut o = body.as_object().cloned().unwrap_or_default();
+        let over = o.remove("override").is_some_and(|v| v == true);
+        self.refuse_frozen(service, env, over, actor.clone()).await?;
         if let Some(k) = o.keys().find(|k| !["from", "message", "expect"].contains(&k.as_str())) {
             return Err(Error::BadRequest(format!("unknown field {k}")));
         }
@@ -1036,7 +1046,7 @@ impl Apps {
                     into.errors += s.errors;
                     into.crashes += s.crashes;
                 }
-                if let Some(why) = judge(new, old, r.error_pct) {
+                if let Some(why) = judge(new, old, r.error_pct, tpl.run.slo.as_ref().map(|s| (s, r.slo_burn.unwrap_or(crate::model::Rollout::SLO_BURN)))) {
                     sys.line(format!("canary: rolled back at {share}%: {why}"));
                     anyhow::bail!("rolled back at {share}% of requests: {why}");
                 }
@@ -1081,7 +1091,7 @@ impl Apps {
                     into.errors += s.errors;
                     into.crashes += s.crashes;
                 }
-                if let Some(why) = judge(new, old, r.error_pct) {
+                if let Some(why) = judge(new, old, r.error_pct, tpl.run.slo.as_ref().map(|s| (s, r.slo_burn.unwrap_or(crate::model::Rollout::SLO_BURN)))) {
                     sys.line(format!("canary: rolled back at {share}% while held: {why}"));
                     anyhow::bail!("rolled back at {share}% of requests: {why}");
                 }
@@ -1945,6 +1955,18 @@ impl Apps {
                 firing.push(("alert.latency", serde_json::json!({ "value": value, "threshold": a.p95_ms })));
             }
         }
+        // Its log-based metrics: the minute's matching lines, as gauges beside its own metrics.
+        if !tpl.run.log_metrics.is_empty() {
+            let key = format!("env:{}/{}", l.service, l.env);
+            let since = code_sql::now_ms() - 60_000;
+            let sink = self.logs.sink(crate::traces::metric_key(&l.service, &l.env), Stream::System);
+            let at = code_sql::now_ms() as u64 * 1_000_000;
+            for m in &tpl.run.log_metrics {
+                let n = self.logs.count_recent(&key, &m.pattern, since);
+                let p = crate::otlp::Point { name: m.name.clone(), kind: "gauge".into(), unit: String::new(), time: at, value: n as f64, count: None, counter: false, attrs: vec![("source".into(), "log".into())] };
+                sink.line(serde_json::to_string(&p).expect("a point serializes"));
+            }
+        }
         // Its output saying something often enough (system lines are roll's, and the alert's
         // own line names the pattern: only stdout and stderr count).
         if let Some(pat) = a.log_match.as_deref() {
@@ -2730,10 +2752,20 @@ impl Apps {
 /// Whether a canary step fails: the new deployment answered `error_pct` or more of at least
 /// [`Rollout::MIN_REQUESTS`] requests with a 5xx, and more often than the old one (an outage
 /// both share, a database down, isn't the new code's fault).
-fn judge(new: crate::live::Served, old: crate::live::Served, error_pct: u8) -> Option<String> {
+fn judge(new: crate::live::Served, old: crate::live::Served, error_pct: u8, slo: Option<(&crate::model::Slo, f64)>) -> Option<String> {
     // Crashes no request saw (a failed health check, a process that exits).
     if new.crashes >= 2 && new.crashes > old.crashes {
         return Some(format!("its instances crashed {} times (the old deployment's {})", new.crashes, old.crashes));
+    }
+    // The objective's budget, spent too fast by the new one (and faster than the old one).
+    if let Some((s, max)) = slo
+        && new.requests >= crate::model::Rollout::MIN_REQUESTS
+        && new.error_pct() > old.error_pct()
+    {
+        let burn = (new.error_pct() / 100.0) / (1.0 - s.objective / 100.0);
+        if burn >= max {
+            return Some(format!("it spent the error budget of the {}% objective {burn:.1}× as fast as it lasts ({} of its {} requests were 5xx; the step allows {max}×)", s.objective, new.errors, new.requests));
+        }
     }
     if new.requests < crate::model::Rollout::MIN_REQUESTS || new.error_pct() < error_pct as f64 || new.error_pct() <= old.error_pct() {
         return None;
@@ -2830,6 +2862,13 @@ pub(crate) enum Held {
 }
 
 pub(crate) fn hold_of(svc: &crate::store::ServiceRow, e: &crate::store::EnvRow) -> Held {
+    // A freeze holds as a person's hold does, saying why.
+    if let Some(f) = e.freeze.as_ref().filter(|f| f.on(code_sql::now_ms())) {
+        return match svc.run.kind == RunType::Web && svc.run.volume.is_none() {
+            true => Held::Ready,
+            false => Held::Skip(format!("{}, and this service's can't wait beside the live one", f.says())),
+        };
+    }
     match e.held_by.as_deref() {
         None => Held::No,
         Some(MANUAL_HOLD) if svc.run.kind == RunType::Web && svc.run.volume.is_none() => Held::Ready,
@@ -2845,6 +2884,24 @@ impl Held {
             body["no_traffic"] = serde_json::json!(true);
         }
         body
+    }
+}
+
+#[cfg(test)]
+mod judge_tests {
+    use super::judge;
+    use crate::live::Served;
+
+    #[test]
+    fn a_step_that_spends_the_objectives_budget_too_fast_fails() {
+        let served = |requests: u64, errors: u64| Served { requests, errors, ..Default::default() };
+        let slo = crate::model::Slo { objective: 99.0, latency_ms: None, window_days: 28 };
+        // 3% of 100 is under the 5% rule, but 3× the 99% objective's budget: past a 2× step.
+        assert_eq!(judge(served(100, 3), served(100, 0), 5, None), None);
+        assert!(judge(served(100, 3), served(100, 0), 5, Some((&slo, 2.0))).unwrap().contains("3.0× as fast"));
+        assert_eq!(judge(served(100, 3), served(100, 0), 5, Some((&slo, 14.4))), None, "under the default burn");
+        assert_eq!(judge(served(100, 3), served(100, 5), 5, Some((&slo, 2.0))), None, "the old one is worse");
+        assert_eq!(judge(served(10, 3), served(100, 0), 5, Some((&slo, 2.0))), None, "too few requests to say");
     }
 }
 

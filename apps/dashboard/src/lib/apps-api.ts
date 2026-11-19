@@ -95,7 +95,7 @@ export interface Run {
   metrics?: { port?: number; path?: string };
   /** A gradual rollout: the new deployment takes each percent of `steps` for `step_s`, rolled
    *  back by a 5xx share of `error_pct` or more (worse than the old one); no steps: at once. */
-  rollout?: { steps: number[]; step_s: number; error_pct: number; /** Each step waits for a person once it passes. */ manual?: boolean };
+  rollout?: { steps: number[]; step_s: number; error_pct: number; /** Each step waits for a person once it passes. */ manual?: boolean; /** With run.slo: a step fails past this burn rate (default 14.4). */ slo_burn?: number };
   /** The app speaks HTTP/2 without TLS (a gRPC server). */
   h2c?: boolean;
   /** false: no public URL, only the project's private network (absent: public). */
@@ -542,6 +542,10 @@ export interface EnvironmentPut {
   routes?: RouteRule[] | null;
   /** Its uptime checks (at most 5), or null for none. */
   checks?: UptimeCheck[] | null;
+  /** Its deploy freeze: on until lifted (null), until `until`, or in weekly `windows`; a person's deploy then needs `override: true`. */
+  freeze?: Freeze | null;
+  /** Traffic mirroring: copies of `percent` of GET and HEAD requests to `environment`, answers dropped; null ends it. */
+  mirror?: { environment: string; percent: number } | null;
   /** Its split test: `percent` of visitors (1–99) served by `environment`, or null to end it. */
   split?: { environment: string; percent: number } | null;
   /** Its heartbeats (at most 10), or null for none; one kept by name keeps its URL. */
@@ -668,6 +672,11 @@ export interface Environment extends EnvironmentSummary {
   check_states?: UptimeCheckState[];
   heartbeats?: Heartbeat[];
   heartbeat_states?: HeartbeatState[];
+  /** Where a share of its GET and HEAD requests is copied, answers dropped. */
+  mirror?: { environment: string; percent: number };
+  freeze?: Freeze;
+  /** Its freeze is on now: automatic deploys build to ready, a person's deploy needs override. */
+  frozen?: boolean;
   /** Its split test: a share of its visitors, kept by their bucket cookie, served by another environment. */
   split?: { environment: string; percent: number };
   /** Only in the answer to the PUT that added them: each new heartbeat's ping URL (shown once). */
@@ -787,6 +796,8 @@ export interface ScanSummary {
   scanned_at: number;
   scanner: string;
   error?: string;
+  /** Its SBOM (CycloneDX) is kept: `…/sbom`. */
+  sbom?: boolean;
 }
 
 /** One known vulnerability: a package at a version an advisory names. */
@@ -973,6 +984,21 @@ export interface UptimeCheckState {
 }
 
 /** A heartbeat: something outside roll pings its URL at least every `every_s` (60–604800); one not come within that and `grace_s` (default 300) is `heartbeat.missed`. */
+/** A deploy freeze: `until` (unix ms), weekly `windows` (`{ from: "fri 17:00", to: "mon 09:00" }`) in `timezone`, or always. */
+export interface Freeze {
+  until?: number;
+  windows?: { from: string; to: string }[];
+  timezone?: string;
+  reason?: string;
+}
+
+/** A project's public status page: its checks and heartbeats (all, or `items`), at `url`. */
+export interface StatusPage {
+  title: string;
+  url: string;
+  items: { service: string; environment?: string; check?: string; heartbeat?: string }[];
+}
+
 export interface Heartbeat {
   name: string;
   every_s: number;
@@ -1062,7 +1088,7 @@ export interface NotifyTarget {
   id: string;
   project: string;
   /** `email`: the project's owner, at their account's address (never an address someone names). */
-  kind: "webhook" | "slack" | "discord" | "email" | "pagerduty" | "opsgenie";
+  kind: "webhook" | "slack" | "discord" | "teams" | "googlechat" | "email" | "pagerduty" | "opsgenie";
   /** The URL's host (the URL itself isn't returned); an email target's says who it reaches. */
   host: string;
   events: NotifyEvent[];
@@ -1246,6 +1272,9 @@ export const appsApi = {
   roots: (req: { repo: string } | { git: string; branch?: string; git_login?: { username: string; password: string } }) => call<{ roots: RootCandidate[] }>("POST", "/v1/apps/plan", { ...req, roots: true }),
   /** The project as roll.toml: `databases` names what its services link (`{"postgres:<id>": "db"}`). */
   /** The project's own preview domain (a wildcard its preview environments answer under). */
+  statusPage: (project: string) => call<StatusPage>("GET", `/v1/apps/projects/${enc(project)}/status-page`),
+  putStatusPage: (project: string, body: { title?: string; items?: StatusPage["items"] }) => call<StatusPage>("PUT", `/v1/apps/projects/${enc(project)}/status-page`, body),
+  deleteStatusPage: (project: string) => call<void>("DELETE", `/v1/apps/projects/${enc(project)}/status-page`),
   previewDomain: (project: string) => call<Domain>("GET", `/v1/apps/projects/${enc(project)}/preview-domain`),
   setPreviewDomain: (project: string, hostname: string) => call<Domain>("POST", `/v1/apps/projects/${enc(project)}/preview-domain`, { hostname }),
   verifyPreviewDomain: (project: string) => call<Domain>("POST", `/v1/apps/projects/${enc(project)}/preview-domain/verify`),
@@ -1313,6 +1342,7 @@ export const appsApi = {
   /** What a repo deployment brings over the live one (for the live one, the one before it). */
   commits: (id: string, e: string, d: string) => call<DeployCommits>("GET", `${dep(id, e, d)}/commits`),
   slo: (id: string, e: string) => call<SloReport>("GET", `${env(id, e)}/slo`),
+  sbom: (id: string, e: string, d: string) => call<unknown>("GET", `${dep(id, e, d)}/sbom`),
   vulnerabilities: (id: string, e: string, d: string) => call<{ scan: ScanSummary | null; vulnerabilities: Vulnerability[] }>("GET", `${dep(id, e, d)}/vulnerabilities`),
   buildLog: (id: string, e: string, d: string, q: LogQuery = {}) => call<LogLine[]>("GET", `${dep(id, e, d)}/logs${qs({ tail: q.tail })}`),
   /** `keepVariables`: its image with the variables as they are now (after a rotated secret), not as they were then. */
