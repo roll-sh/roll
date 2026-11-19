@@ -11,6 +11,10 @@
 //! Lucene, a filter too small for the graph to find its docs cheaply (`VectorsReader::search_filtered`)
 //! is also searched exactly, and exact searches score only the filter's docs.
 //! Quantized fields are rescored with exact float similarities by the codec.
+//! Over several segments, a field steering by float or 8-bit scores gives each segment a beam
+//! sized to its share of the shard (Lucene 10.5's optimistic collection, `segment_beam`) and
+//! searches again with the full beam any segment whose whole beam made the shard's best
+//! `num_candidates`.
 
 use std::any::Any;
 use std::sync::Arc;
@@ -105,6 +109,7 @@ impl KnnQuery {
             }
             None => None,
         };
+        let full = num_candidates.max(k);
         let parent_filter = match &self.parent_filter {
             Some(p) => Some(s.rewrite(p)?),
             None => None,
@@ -143,21 +148,44 @@ impl KnnQuery {
                 Some(pf) => Some(segment_bits(s, seg, pf)?),
                 None => None,
             };
-            tasks.push(SegmentKnn { seg, vr, q, bits, ords, parents });
+            tasks.push(SegmentKnn { seg, vr, q, bits, ords, parents, beam: full });
         }
-        let run_task = |t: &SegmentKnn| self.search_segment(t, k, num_candidates);
-        let mut all: Vec<(u32, f32)> = if tasks.len() < 2 {
-            tasks.iter().flat_map(run_task).collect()
-        } else {
-            // Largest segments first: workers claim tasks in this order, which balances them.
-            tasks.sort_by_key(|t| std::cmp::Reverse(t.cost()));
-            let slots: Vec<parking_lot::Mutex<Vec<(u32, f32)>>> = tasks.iter().map(|_| parking_lot::Mutex::new(Vec::new())).collect();
-            // One thread per physical core: a hyperthread sibling would add little speed to
-            // these memory-bound searches and as much CPU time.
-            let helpers = pool::physical_cores().saturating_sub(1).min(tasks.len() - 1);
-            pool::help_each_index(tasks.len(), helpers, &|i| *slots[i].lock() = run_task(&tasks[i]));
-            slots.into_iter().flat_map(|m| m.into_inner()).collect()
-        };
+        // Lucene's optimistic collection (`AbstractKnnVectorQuery`, Lucene 10.5): a segment's
+        // beam is its share of the candidates plus a margin, not all of them, and a segment
+        // whose whole beam made the shard's best `num_candidates` is searched again with the
+        // full beam. Only for unfiltered searches over fields steering by precise scores (see
+        // `segment_beam`).
+        let optimistic = tasks.len() > 1 && !self.exact && !self.per_segment && parent_filter.is_none();
+        if optimistic {
+            let max_doc = s.max_doc();
+            for t in &mut tasks {
+                if t.bits.is_none() && t.vr.steers_precisely() {
+                    t.beam = segment_beam(num_candidates, k, t.seg.max_doc(), max_doc);
+                }
+            }
+        }
+        // A segment's search: its whole beam rescored while it is narrowed, else its best `k`.
+        let first = |t: &SegmentKnn| if t.beam < full { self.search_segment(t, t.beam, t.beam) } else { self.search_segment(t, k, num_candidates) };
+        // Largest segments first: workers claim tasks in this order, which balances them.
+        tasks.sort_by_key(|t| std::cmp::Reverse(t.cost()));
+        let mut found = run_segments(&tasks, &first);
+        if optimistic && tasks.iter().any(|t| t.beam < full) {
+            let bar = nth_best(&found, full);
+            let again: Vec<usize> = (0..tasks.len())
+                .filter(|&i| {
+                    let t = &tasks[i];
+                    t.beam < full && found[i].len() >= t.beam && found[i].last().is_some_and(|h| h.1 >= bar)
+                })
+                .collect();
+            if !again.is_empty() {
+                let redo: Vec<&SegmentKnn> = again.iter().map(|&i| &tasks[i]).collect();
+                let hits = run_segments(&redo, &|t: &&SegmentKnn| self.search_segment(t, k, num_candidates));
+                for (i, h) in again.into_iter().zip(hits) {
+                    found[i] = h;
+                }
+            }
+        }
+        let mut all: Vec<(u32, f32)> = found.into_iter().flatten().collect();
         if !self.per_segment {
             all.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
             all.truncate(self.k);
@@ -196,6 +224,56 @@ impl KnnQuery {
     }
 }
 
+/// Runs `f` over `tasks` (in order; claim the costliest first) on the search pool, one thread
+/// per physical core: a hyperthread sibling would add little speed to these memory-bound
+/// searches and as much CPU time. The results are in `tasks`' order.
+fn run_segments<T: Sync>(tasks: &[T], f: &(dyn Fn(&T) -> Vec<(u32, f32)> + Sync)) -> Vec<Vec<(u32, f32)>> {
+    if tasks.len() < 2 {
+        return tasks.iter().map(f).collect();
+    }
+    let slots: Vec<parking_lot::Mutex<Vec<(u32, f32)>>> = tasks.iter().map(|_| parking_lot::Mutex::new(Vec::new())).collect();
+    let helpers = pool::physical_cores().saturating_sub(1).min(tasks.len() - 1);
+    pool::help_each_index(tasks.len(), helpers, &|i| *slots[i].lock() = f(&tasks[i]));
+    slots.into_iter().map(|m| m.into_inner()).collect()
+}
+
+/// The `n`-th best score over every segment's hits, or -inf with fewer than `n` hits.
+fn nth_best(found: &[Vec<(u32, f32)>], n: usize) -> f32 {
+    let mut v: Vec<f32> = found.iter().flatten().map(|h| h.1).collect();
+    if n == 0 || v.len() < n {
+        return f32::NEG_INFINITY;
+    }
+    let (_, nth, _) = v.select_nth_unstable_by(n - 1, |a, b| b.total_cmp(a));
+    *nth
+}
+
+/// Margin of a segment's beam in standard deviations. Lucene's `AbstractKnnVectorQuery.LAMBDA`
+/// is 16; at 16 a few hits per 10,000 changed (recall 1.0 to 0.9999 on Rally's dense_vector,
+/// 0.991 to 0.9905 on a 1M x 384 float corpus), at 24 recall held on every corpus measured
+/// (docs/benchmarks/search.md, Round 12).
+const LAMBDA: f64 = 24.0;
+
+/// A segment's beam under optimistic collection: Lucene's `perLeafTopKCalculation`, the
+/// segment's expected share of the `num_candidates` best (its share `p` of the shard's docs)
+/// plus `LAMBDA` binomial standard deviations, in Lucene's float and double arithmetic; at
+/// least `k` and at most the full beam.
+///
+/// Only for unfiltered searches over fields steering by precise scores. One-bit estimates rank
+/// vectors loosely, so the exact best hits sit deeper in a beam: on a 1M x 384 `bbq_hnsw` corpus
+/// this beam cost recall (0.9935 to 0.9895 at `k` 10, `num_candidates` 100; docs/benchmarks/search.md,
+/// Round 9). A filtered graph search steps over rejected nodes and needs its full beam: with a 1%
+/// filter recall fell from 0.963 to 0.9145 (float, same corpus; Round 12).
+fn segment_beam(num_candidates: usize, k: usize, seg_max_doc: u32, max_doc: u32) -> usize {
+    let full = num_candidates.max(k);
+    if max_doc == 0 {
+        return full;
+    }
+    let p = seg_max_doc as f32 / max_doc as f32;
+    let n = num_candidates as f32;
+    let top = (n * p) as f64 + LAMBDA * ((n * p * (1.0 - p)) as f64).sqrt();
+    (top.max(1.0) as usize).clamp(k, full)
+}
+
 /// A segment's share of a k-NN search, prepared on the request's thread.
 struct SegmentKnn<'a> {
     seg: &'a SegmentContext,
@@ -207,6 +285,8 @@ struct SegmentKnn<'a> {
     ords: Option<search_codec::vectors::OrdFilter>,
     /// Parents of nested vectors.
     parents: Option<Arc<FixedBitSet>>,
+    /// The graph search's beam: `max(num_candidates, k)`, or less ([`segment_beam`]).
+    beam: usize,
 }
 
 impl SegmentKnn<'_> {

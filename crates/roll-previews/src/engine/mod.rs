@@ -80,6 +80,9 @@ pub struct Config {
     /// Where services reach roll's mail catcher (`host:port` as a client on this node writes it;
     /// containers get it rewritten). `None`: no catcher, and previews' mail fails.
     pub mail: Option<String>,
+    /// Where services reach rolld's API for their OpenTelemetry intake (`host:port` as a client on
+    /// this node writes it; containers get it rewritten). `None`: no traces.
+    pub otlp: Option<String>,
 }
 
 impl Default for Config {
@@ -91,6 +94,7 @@ impl Default for Config {
             interval: Duration::from_secs(15),
             usage_every: Duration::from_secs(300),
             mail: None,
+            otlp: None,
         }
     }
 }
@@ -165,6 +169,25 @@ pub struct Engine {
     /// was last said in the activity (`shell.rs`).
     forwards: Mutex<HashMap<String, Arc<std::sync::atomic::AtomicUsize>>>,
     forwards_said: Mutex<HashMap<(String, String, String, u16), i64>>,
+    /// What ends a preview's forwarded connections when it goes, by preview.
+    forwards_end: Mutex<HashMap<String, tokio::sync::watch::Sender<bool>>>,
+    /// Each preview's recent spans (`traces.rs`), and what reads an OTLP request into them
+    /// (rolld: roll apps' reader); unset, the intake answers 404.
+    traces: Mutex<traces::Kept>,
+    /// When `tend_routes` last read the slower routes.
+    routes_read: Mutex<Option<std::time::Instant>>,
+    /// When `read_new_errors` last ran, and what each preview's new errors were then (no values
+    /// are read again for the same).
+    new_errors_read: Mutex<Option<std::time::Instant>>,
+    new_errors_seen: Mutex<HashMap<String, Vec<String>>>,
+    /// A round of `read_slower_routes` runs (off the pass), and each held preview's slower routes'
+    /// names masked so far (raw → masked: its values aren't read again for the same).
+    routes_running: std::sync::atomic::AtomicBool,
+    routes_masked: Mutex<HashMap<String, HashMap<String, String>>>,
+    pub span_reader: std::sync::OnceLock<Arc<dyn crate::ports::SpanReader>>,
+    /// Who may name another environment's keys in the project's rules (rolld: roll secrets);
+    /// unset, a rule's reference to one is refused.
+    pub reveal: std::sync::OnceLock<Arc<dyn crate::ports::Reveal>>,
     /// Open shells in previews' services (`shell.rs`), by id.
     shells: Mutex<HashMap<String, Arc<shell::ShellSession>>>,
     /// Each running service's follower to the drains (`drains.rs`), by preview and service.
@@ -290,8 +313,17 @@ impl Engine {
             drains: std::sync::OnceLock::new(),
             draining: Mutex::new(HashMap::new()),
             shells: Mutex::new(HashMap::new()),
+            traces: Mutex::new(HashMap::new()),
+            routes_read: Mutex::new(None),
+            new_errors_read: Mutex::new(None),
+            new_errors_seen: Mutex::new(HashMap::new()),
+            routes_running: std::sync::atomic::AtomicBool::new(false),
+            routes_masked: Mutex::new(HashMap::new()),
+            span_reader: std::sync::OnceLock::new(),
+            reveal: std::sync::OnceLock::new(),
             forwards: Mutex::new(HashMap::new()),
             forwards_said: Mutex::new(HashMap::new()),
+            forwards_end: Mutex::new(HashMap::new()),
             started_stamp: drains::now_stamp(),
         })
     }
@@ -390,6 +422,7 @@ impl Engine {
         while set.join_next().await.is_some() {}
         self.tend_leases().await;
         self.tend_drains().await;
+        self.tend_routes();
         self.note_refused_egress().await;
         // Services those converges deployed at a new head, woken so their first visit is warm (a
         // few at a time, off the pass).
@@ -848,6 +881,7 @@ mod drains;
 mod env;
 mod masks;
 pub mod shell;
+pub mod traces;
 pub use masks::ErrorMasks;
 pub use requests::error_span;
 mod requests;

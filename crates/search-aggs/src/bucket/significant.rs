@@ -36,7 +36,7 @@ use crate::values::{BoundVs, BytesReader, DocCounter, NumReader, VsOpts, VsSpec,
 use crate::xparser::{Field, Token, Tokens, XParser};
 
 /// A significance heuristic.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Heuristic {
     Jlh,
     MutualInformation { include_negatives: bool, background_is_superset: bool },
@@ -510,7 +510,7 @@ impl DupSpotter {
 }
 
 /// Which result.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SigKind {
     Str,
     Long,
@@ -518,7 +518,7 @@ pub enum SigKind {
 }
 
 /// One significant term.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SigBucket {
     pub key: TermKey,
     pub subset_df: u64,
@@ -528,7 +528,7 @@ pub struct SigBucket {
 }
 
 /// `SignificantStringTerms` / `SignificantLongTerms` / `UnmappedSignificantTerms`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SignificantTerms {
     pub kind: SigKind,
     pub size: usize,

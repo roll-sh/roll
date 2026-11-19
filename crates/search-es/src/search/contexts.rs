@@ -37,6 +37,18 @@ pub struct SearchContext {
     pub created_ms: i64,
     /// The keep alive it was opened with (ms).
     pub keep_alive_ms: i64,
+    /// Who opened it ([`owner_of`]): anyone else finds no such context, as Elasticsearch's
+    /// `SecuritySearchOperationListener` answers.
+    pub owner: String,
+}
+
+/// Who a scroll or point in time belongs to: the request's API key, or its user and realm.
+pub(crate) fn owner_of(ctx: &Ctx) -> String {
+    let p = crate::xpack::security::principal(ctx);
+    match &p.kind {
+        crate::xpack::security::AuthKind::ApiKey(a) => format!("api_key:{}", a.id),
+        _ => format!("{}:{}", p.realm_name, p.username),
+    }
 }
 
 #[derive(Default)]
@@ -210,39 +222,45 @@ impl Contexts {
         self.map.lock().values().filter(|c| !c.pit).count()
     }
 
-    /// Runs `f` on a live context (extending its expiry by `keep_alive`).
-    pub fn with<R>(&self, id: &str, keep_alive: Option<Duration>, f: impl FnOnce(&mut SearchContext) -> R) -> Option<R> {
+    /// Runs `f` on a live context of `owner`'s (extending its expiry by `keep_alive`).
+    pub fn with<R>(&self, id: &str, owner: &str, keep_alive: Option<Duration>, f: impl FnOnce(&mut SearchContext) -> R) -> Option<R> {
         self.purge();
         let mut g = self.map.lock();
-        let c = g.get_mut(id)?;
+        let c = g.get_mut(id).filter(|c| c.owner == owner)?;
         if let Some(k) = keep_alive {
             c.expires = Instant::now() + k;
         }
         Some(f(c))
     }
 
-    pub fn close(&self, id: &str) -> bool {
-        self.map.lock().remove(id).is_some()
+    /// Removes `owner`'s context `id`.
+    fn take(&self, id: &str, owner: &str) -> Option<SearchContext> {
+        let mut g = self.map.lock();
+        if g.get(id).is_some_and(|c| c.owner == owner) { g.remove(id) } else { None }
     }
 
-    /// Closes a context; how many shard contexts that frees (`num_freed` counts one per shard
-    /// the scroll or point in time holds open), 0 when it wasn't open.
-    pub fn close_shards(&self, id: &str) -> usize {
+    pub fn close(&self, id: &str, owner: &str) -> bool {
+        self.take(id, owner).is_some()
+    }
+
+    /// Closes `owner`'s context; how many shard contexts that frees (`num_freed` counts one per
+    /// shard the scroll or point in time holds open), 0 when it wasn't open.
+    pub fn close_shards(&self, id: &str, owner: &str) -> usize {
         // A scroll whose shards the can-match phase all skipped holds none: it frees nothing.
-        self.map.lock().remove(id).map_or(0, |c| if c.pit { c.targets.len().max(1) } else { c.targets.len() })
+        self.take(id, owner).map_or(0, |c| if c.pit { c.targets.len().max(1) } else { c.targets.len() })
     }
 
-    /// The live points in time as `(id, created_ms, keep_alive_ms)`, oldest first.
-    pub fn pits(&self) -> Vec<(String, i64, i64)> {
+    /// `owner`'s live points in time as `(id, created_ms, keep_alive_ms)`, oldest first.
+    pub fn pits(&self, owner: &str) -> Vec<(String, i64, i64)> {
         self.purge();
-        let mut out: Vec<(String, i64, i64)> = self.map.lock().iter().filter(|(_, c)| c.pit).map(|(id, c)| (id.clone(), c.created_ms, c.keep_alive_ms)).collect();
+        let mut out: Vec<(String, i64, i64)> = self.map.lock().iter().filter(|(_, c)| c.pit && c.owner == owner).map(|(id, c)| (id.clone(), c.created_ms, c.keep_alive_ms)).collect();
         out.sort_by(|a, b| (a.1, &a.0).cmp(&(b.1, &b.0)));
         out
     }
 
-    /// Closes every point in time, returning their ids (oldest first).
-    pub fn close_pits(&self) -> Vec<String> {
-        let ids: Vec<String> = self.pits().into_iter().map(|(id, _, _)| id).collect();
+    /// Closes every point in time of `owner`'s, returning their ids (oldest first).
+    pub fn close_pits(&self, owner: &str) -> Vec<String> {
+        let ids: Vec<String> = self.pits(owner).into_iter().map(|(id, _, _)| id).collect();
         let mut g = self.map.lock();
         for id in &ids {
             g.remove(id);
@@ -250,16 +268,16 @@ impl Contexts {
         ids
     }
 
-    /// Closes every scroll (or every point in time); the shard contexts freed.
-    pub fn close_all(&self, pit: bool) -> usize {
+    /// Closes every scroll (or every point in time) of `owner`'s; the shard contexts freed.
+    pub fn close_all(&self, pit: bool, owner: &str) -> usize {
         let mut g = self.map.lock();
-        let freed = g.values().filter(|c| c.pit == pit).map(|c| c.targets.len().max(1)).sum();
-        g.retain(|_, c| c.pit != pit);
+        let freed = g.values().filter(|c| c.pit == pit && c.owner == owner).map(|c| c.targets.len().max(1)).sum();
+        g.retain(|_, c| c.pit != pit || c.owner != owner);
         freed
     }
 }
 
-fn missing(id: &str) -> EsError {
+pub(crate) fn missing(id: &str) -> EsError {
     let inner = EsError::new(404, "search_context_missing_exception", format!("No search context found for id [{id}]"));
     EsError::new(404, "search_phase_execution_exception", "all shards failed")
         .with_meta("phase", "query")
@@ -298,7 +316,7 @@ pub fn start_scroll(ctx: &Ctx, req: &SearchRequest, targets: Vec<Target>, out: &
         t.shard.counters.scroll_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     let n = targets.len();
-    let id = ctx.cluster.contexts.open(SearchContext { targets, request: Some(req.clone()), expires: Instant::now() + ka, pit: false, offset: returned, indices: req.indices.clone(), created_ms: ctx.now_ms, keep_alive_ms: ka.as_millis() as i64 });
+    let id = ctx.cluster.contexts.open(SearchContext { targets, request: Some(req.clone()), expires: Instant::now() + ka, pit: false, offset: returned, indices: req.indices.clone(), created_ms: ctx.now_ms, keep_alive_ms: ka.as_millis() as i64, owner: owner_of(ctx) });
     if let Some(kind) = cursor_kind(req) {
         let mut last = vec![None; n];
         advance(&mut last, &ranked);
@@ -327,12 +345,19 @@ pub fn scroll(ctx: &Ctx) -> EsResult<Reply> {
     let Some(id) = id else {
         return Err(EsError::action_request_validation(&["scrollId is missing".into()]));
     };
+    Reply::ok(scroll_by(ctx, &id, ka.as_deref())?)
+}
+
+/// The next page of this cluster's scroll `id` (kept alive `ka` longer), rendered.
+pub(crate) fn scroll_by(ctx: &Ctx, id: &str, ka: Option<&str>) -> EsResult<Value> {
+    let id = id.to_string();
     check_scroll_id(&id)?;
+    let owner = owner_of(ctx);
     let keep = match &ka {
         Some(k) => Some(check_keep_alive(ctx, TimeValue::parse(k, "scroll")?)?),
         None => None,
     };
-    let state = ctx.cluster.contexts.with(&id, keep, |c| (c.targets.clone(), c.request.clone(), c.offset));
+    let state = ctx.cluster.contexts.with(&id, &owner, keep, |c| (c.targets.clone(), c.request.clone(), c.offset));
     let Some((targets, Some(req), offset)) = state else { return Err(missing(&id)) };
     let size = req.source.size.unwrap_or(10).max(0) as usize;
     let mut page = req.clone();
@@ -380,11 +405,11 @@ pub fn scroll(ctx: &Ctx) -> EsResult<Reply> {
             *slot = c;
         }
     }
-    ctx.cluster.contexts.with(&id, None, |c| c.offset += n);
+    ctx.cluster.contexts.with(&id, &owner, None, |c| c.offset += n);
     // Elasticsearch: a continuation without a `scroll` keep-alive is the last one: its
     // contexts are freed and the response carries no scroll id.
     if ka.is_none() && ctx.cluster.dialect == crate::cluster::Dialect::Elasticsearch {
-        ctx.cluster.contexts.close(&id);
+        ctx.cluster.contexts.close(&id, &owner);
         ctx.cluster.contexts.cursors.lock().remove(&id);
     } else {
         out.scroll_id = Some(id);
@@ -403,7 +428,7 @@ pub fn scroll(ctx: &Ctx) -> EsResult<Reply> {
         let at = m.get_index_of("_shards").unwrap_or(m.len());
         m.shift_insert(at, "num_reduce_phases".into(), Value::from(0i64));
     }
-    Reply::ok(v)
+    Ok(v)
 }
 
 fn token(v: &Value) -> &'static str {
@@ -416,6 +441,13 @@ fn token(v: &Value) -> &'static str {
 
 /// `DELETE /_search/scroll`.
 pub fn clear_scroll(ctx: &Ctx) -> EsResult<Reply> {
+    let ids = clear_scroll_ids(ctx)?;
+    let freed = free_scrolls(ctx, &ids)?;
+    Ok(cleared(freed, &ids))
+}
+
+/// The ids a clear-scroll request names (`_all` among them for every scroll).
+pub(crate) fn clear_scroll_ids(ctx: &Ctx) -> EsResult<Vec<String>> {
     let body = ctx.body_map()?.unwrap_or_default();
     let mut ids: Vec<String> = ctx.param("scroll_id").map(|s| s.split(',').map(str::to_string).collect()).unwrap_or_default();
     // Ids in the body replace the URL's (`RestClearScrollAction`).
@@ -432,19 +464,30 @@ pub fn clear_scroll(ctx: &Ctx) -> EsResult<Reply> {
     if ids.is_empty() {
         return Err(EsError::action_request_validation(&["no scroll ids specified".into()]));
     }
+    Ok(ids)
+}
+
+/// Frees this cluster's scrolls `ids` names: how many shard contexts went.
+pub(crate) fn free_scrolls(ctx: &Ctx, ids: &[String]) -> EsResult<usize> {
     let mut freed = 0;
     if ids.iter().any(|i| i == "_all") {
-        freed = ctx.cluster.contexts.close_all(false);
+        freed = ctx.cluster.contexts.close_all(false, &owner_of(ctx));
     } else {
-        for id in &ids {
+        for id in ids {
             check_scroll_id(id)?;
         }
-        for id in &ids {
-            freed += ctx.cluster.contexts.close_shards(id);
+        let owner = owner_of(ctx);
+        for id in ids {
+            freed += ctx.cluster.contexts.close_shards(id, &owner);
         }
     }
+    Ok(freed)
+}
+
+/// A clear-scroll's answer: 404 when nothing was freed (unless it named `_all`).
+pub(crate) fn cleared(freed: usize, ids: &[String]) -> Reply {
     let status = if freed == 0 && !ids.iter().any(|i| i == "_all") { 404 } else { 200 };
-    Ok(Reply::Body(status, obj! { "succeeded" => true, "num_freed" => freed as i64 }))
+    Reply::Body(status, obj! { "succeeded" => true, "num_freed" => freed as i64 })
 }
 
 /// `POST /{index}/_pit`.
@@ -454,10 +497,16 @@ pub fn open_pit(ctx: &Ctx) -> EsResult<Reply> {
     };
     let ka = check_keep_alive(ctx, TimeValue::parse(ka, "keep_alive")?)?;
     let body = ctx.body_map()?.unwrap_or_default();
-    let mut req = super::parse_request(ctx, None, None)?;
+    let req = super::parse_request(ctx, None, None)?;
+    Reply::ok(open_pit_for(ctx, req, ka, body.get("index_filter"))?)
+}
+
+/// Opens a point in time over `req`'s indices for `ka` (shards `index_filter` can't match left
+/// out), owned by the caller: `{id, _shards}`.
+pub(crate) fn open_pit_for(ctx: &Ctx, mut req: SearchRequest, ka: Duration, index_filter: Option<&Value>) -> EsResult<Value> {
     // `index_filter`: shards it can't match are left out of the point in time (can_match),
     // reported as skipped.
-    let filter = match body.get("index_filter") {
+    let filter = match index_filter {
         Some(f) => Some(crate::query::parse_query(f, ctx.raw_json(), &[crate::json::locate::Seg::Key("index_filter")]).map_err(|e| {
             let get = |k: &str| e.meta().iter().find(|(n, _)| n == k).and_then(|(_, v)| v.as_i64());
             let (l, c) = get("line").zip(get("col")).map(|(l, c)| (l as usize, c as usize)).unwrap_or((1, 1));
@@ -486,8 +535,8 @@ pub fn open_pit(ctx: &Ctx) -> EsResult<Reply> {
         targets = kept;
     }
     let skipped = n - targets.len();
-    let id = ctx.cluster.contexts.open(SearchContext { targets, request: None, expires: Instant::now() + ka, pit: true, offset: 0, indices: req.indices.clone(), created_ms: ctx.now_ms, keep_alive_ms: ka.as_millis() as i64 });
-    Reply::ok(obj! { "id" => id, "_shards" => obj! { "total" => n as i64, "successful" => n as i64, "skipped" => skipped as i64, "failed" => 0 } })
+    let id = ctx.cluster.contexts.open(SearchContext { targets, request: None, expires: Instant::now() + ka, pit: true, offset: 0, indices: req.indices.clone(), created_ms: ctx.now_ms, keep_alive_ms: ka.as_millis() as i64, owner: owner_of(ctx) });
+    Ok(obj! { "id" => id, "_shards" => obj! { "total" => n as i64, "successful" => n as i64, "skipped" => skipped as i64, "failed" => 0 } })
 }
 
 /// `DELETE /_pit`.
@@ -497,7 +546,7 @@ pub fn close_pit(ctx: &Ctx) -> EsResult<Reply> {
         return Err(EsError::action_request_validation(&["point in time id is missing".into()]));
     };
     check_pit_id(&id)?;
-    let freed = ctx.cluster.contexts.close_shards(&id);
+    let freed = ctx.cluster.contexts.close_shards(&id, &owner_of(ctx));
     Ok(Reply::Body(if freed > 0 { 200 } else { 404 }, obj! { "succeeded" => true, "num_freed" => freed as i64 }))
 }
 
@@ -649,7 +698,7 @@ pub fn pit_targets(ctx: &Ctx, pit: &crate::search_source::PointInTime) -> EsResu
         Some(k) => Some(check_keep_alive(ctx, *k)?),
         None => None,
     };
-    match ctx.cluster.contexts.with(&pit.id, keep, |c| c.targets.clone()) {
+    match ctx.cluster.contexts.with(&pit.id, &owner_of(ctx), keep, |c| c.targets.clone()) {
         Some(t) => Ok(t),
         None => Err(missing(&pit.id)),
     }
