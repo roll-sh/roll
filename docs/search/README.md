@@ -517,9 +517,20 @@ a worker's 2 MiB, so the six above could land together).
    bulk p50s (Round 8, ties). Rerun next: so_vector with #156, http_logs (its indexing regression
    since `dbe79f8f7` is fixed by `6c2834a3e`, not yet measured under Rally), so, pmc and
    percolator at the current head. Not a loss: `terms_enum` (OpenSearch has no such API; its
-   "0.57 ms" was an error). Still open from before: one-client indexing CPU (51.8 against 34.6
-   µs/doc on the ECS log), BP only for time-series and log indices, the request path's
-   allocations, one allocator policy.
+   "0.57 ms" was an error). nyc_taxis indexing (Round 11, #340: 1.03x Elasticsearch docs/s, bulk
+   p50 1.04x, slower in 3 of 3 rounds): 40% of the server's instructions were zstd level 6
+   compressing `best_compression` stored fields, once when a buffer became a segment and again in
+   every merge; buffer segments now use level 1 and merges keep level 6 (-28% instructions per
+   document at 8 clients, -15% at 1; store +0.2%; random fetches unchanged; Rally: +19% docs/s and
+   -8% server CPU per race against the parent the same hour, at equal foreign load;
+   docs/benchmarks/search.md, "nyc_taxis bulk indexing"). Elasticsearch's own codec (level 3,
+   240 KiB blocks, no dictionary) saved as much but made random fetches 3x dearer. Next there: fewer,
+   larger buffer segments without more memory (roll's buffer holds 1.4 KB per nyc document against
+   Lucene's under 290 B; 564 B of it stored fields Lucene writes as they arrive; a 256 MiB budget
+   saved another 4% at 8 clients and 25% at one). Still open from before: one-client indexing CPU
+   (51.8 against 34.6 µs/doc on the ECS log; its profile has BP reordering at merge time at 14% of
+   instructions), BP only for time-series and log indices, the request path's allocations, one
+   allocator policy.
 3. **Connectors that sync** (built in #318: `postgresql` full and incremental, `s3`, sync rules,
    a Connectors tab; in review. Left: linking a person's own roll Postgres or bucket with a
    read-only credential of its own, credentials from roll secrets after #134, Postgres advanced
