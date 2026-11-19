@@ -133,12 +133,13 @@ them (`api::Caller`):
   `Owners` reads the owner), so previews, roll secrets' links and roll apps' links take only
   those.
 - A snapshot repository's credentials may be roll secrets references (`roll://ENV/KEY`,
-  architecture.md "Snapshots"), resolved for the cluster as its project's runtime reads them: only
-  a cluster on a project's canvas that stands for it resolves one, and a branch resolves as an
-  untrusted copy of the cluster it came from (no protected environment, no sensitive key). Whoever
-  holds a cluster's admin credentials can register a repository, so they can send any key the
-  cluster's project runtime reads to an endpoint they choose, as code deployed to a roll apps
-  service can: hand those credentials out accordingly.
+  architecture.md "Snapshots"), but only through roll's API
+  (`PUT /v1/search/clusters/{id}/repositories/{name}`, the cluster's `admin` for roll-access), by a
+  caller roll secrets lets reveal each one (`Caller::allows`), who is kept as their maker. The
+  cluster's own endpoint refuses them (400): its password or an API key with `manage` is no grant to
+  read a project's secrets. Each use re-checks that the maker still may reveal them; only a cluster
+  on a project's canvas that stands for it resolves one, and a branch resolves as an untrusted copy
+  of the cluster it came from (no protected environment, no sensitive key).
 - Nothing in the API is node-wide besides `GET /v1/search`'s figures: node settings and the
   default repository are rolld's flags (`--search-*`), not routes. A cluster's data plane is
   unchanged: the REST port with the cluster's own credentials, which give what any tenant gets.
@@ -182,6 +183,7 @@ and `tests/cluster.rs` `a_forward_carries_the_clients_address_to_the_owner` cove
 | GET | `/v1/search/clusters/{id}/audit?from=&to=&event=&size=` | the cluster's security audit log (below), newest first: `{flavor, retention_days, entries: [{at_ms, event, entry}], more}`. `from` (inclusive) and `to` (exclusive) are Unix milliseconds; `event` takes names or categories, comma-separated (an Elasticsearch `event.action` such as `put_user` too); `size` up to 1,000 (100). Never wakes the cluster. A read in roll's permissions, not a reveal: entries hold no secret |
 | POST | `/v1/search/clusters/{id}/keys` | a new API key of the cluster `{name, expires_in_s?, access?}` (`access`: `admin`, the default, or `data`: a link's role, data, templates, pipelines and lifecycle policies without security) → `{id, name, access, api_key, url, expires_at?}` (`access`: the access the key was made with): `api_key` is `base64(<key id>@<cluster>:<key>)` for `Authorization: ApiKey …`, in this answer only (roll secrets' managed links use it instead of sharing the password); on an OpenSearch-flavor cluster (whose clients sign in with a user) the key is an internal user of its own: `{id, name, access, username, password, url, expires_at?}` without `api_key`, `username` being `<user>@<cluster>`, refused once `expires_in_s` passes |
 | DELETE | `/v1/search/clusters/{id}/keys/{key}` | revoke it (204; 404 when it's gone). On a deleted cluster (by its id) the revoke is kept and applied by its restore (204) |
+| PUT | `/v1/search/clusters/{id}/repositories/{name}` | `PUT _snapshot/{name}` (Elasticsearch's body and query: `verify`), the only way a repository's credential settings can be roll secrets references (`roll://ENV/KEY`): the caller must be able to reveal each (403 if not; 400 for a cluster no project stands for or a key that doesn't exist), and is kept as their maker (architecture.md "Snapshots") → the cluster's answer |
 | GET, PUT, DELETE | `/v1/search/clusters/{id}/indices/{index}` | Elasticsearch's `GET`/`PUT`/`DELETE /<index>`: mappings, settings and aliases; create (body: `mappings`, `settings`); delete |
 | GET, PUT | `/v1/search/clusters/{id}/indices/{index}/mapping` | `GET`/`PUT /<index>/_mapping` |
 | GET | `/v1/search/clusters/{id}/indices/{index}/settings` | `GET /<index>/_settings` |

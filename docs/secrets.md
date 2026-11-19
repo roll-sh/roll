@@ -2215,8 +2215,8 @@ Agent's templates do).
   `"secret_access_key": "roll://production/AWS_SECRET_ACCESS_KEY"`), and roll search's `s3`,
   `gcs` and `azure` snapshot repositories: their credential settings (`PUT _snapshot/backup`
   with `"secret_key": "roll://production/AWS_SECRET_ACCESS_KEY"`; docs/search/architecture.md,
-  "Snapshots"), resolved for the search cluster (a branch as an untrusted copy of the cluster it
-  came from). roll code's reviewer provider keys and the agents' gateway upstreams still keep
+  "Snapshots"; set only through `PUT /v1/search/clusters/{id}/repositories/{name}`), resolved for
+  the search cluster (a branch as an untrusted copy of the cluster it came from). roll code's reviewer provider keys and the agents' gateway upstreams still keep
   sealed copies.
 - **Who reads it.** The product asks rolld in process (`Secrets::resolve_for(resource,
   reference)`), naming the workspace resource that needs the value: a replication target
@@ -2252,9 +2252,13 @@ Agent's templates do).
 - **Who may write one.** Storage takes references in a replication target only from the operator
   (its token, an admin's session): a scoped token that manages targets could otherwise point a
   reference at any key the bucket's project holds and send it to an endpoint it chose. Search
-  takes them from whoever may register a repository on the cluster (its admin credentials), who
-  can likewise reach any key the cluster's project runtime reads, as a roll apps service's code
-  can.
+  takes them only through roll's API, from a caller who may reveal each
+  (`Secrets::may_reveal_for`), never through the cluster's own endpoint.
+- **Makers.** A product that stores a reference a caller wrote also stores who wrote it (their
+  principal) and re-checks it before each resolve: `Secrets::maker_caller` rebuilds them as syncs
+  act as theirs (the operator; a person while they can sign in, on their own projects; a token
+  while it lives), and `may_reveal_for` asks whether they still may reveal it. Search's snapshot
+  repositories do; a maker who can't fails the use, visibly and without the value.
 
 ### Templates
 

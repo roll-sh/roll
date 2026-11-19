@@ -10,6 +10,12 @@ use std::sync::Arc;
 /// The scheme a reference starts with.
 pub const SCHEME: &str = "roll://";
 
+/// The header with which roll's control plane names who wrote a request's references (a roll
+/// principal: `operator`, `usr_…`, `token:…`), after checking they may reveal what each names.
+/// The node's REST port drops it from every request but roll's own (`search_server::http`), and
+/// the control plane drops it from whatever it relays (its console).
+pub const MAKER_HEADER: &str = "x-roll-repository-maker";
+
 /// Whether a setting's value is a reference rather than a value.
 pub fn is_reference(value: &str) -> bool {
     value.trim_start().starts_with(SCHEME)
@@ -35,15 +41,16 @@ impl std::fmt::Debug for Revealed {
     }
 }
 
-/// Resolves references for cluster `cluster` (its name). Errors say why (the reference, the
-/// part that failed), never with a value.
+/// Resolves references for cluster `cluster` (its name), written by `maker` (what
+/// [`MAKER_HEADER`] said): both re-check that the maker still may reveal what `reference` names.
+/// Errors say why (the reference, the part that failed), never with a value.
 #[async_trait]
 pub trait SecretRefs: Send + Sync {
     /// `reference`'s value now (read, and audited, by the system that holds it).
-    async fn resolve(&self, cluster: &str, reference: &str) -> Result<Revealed, String>;
+    async fn resolve(&self, cluster: &str, maker: &str, reference: &str) -> Result<Revealed, String>;
     /// A digest that moves when the value would, read without the value: cheap enough to ask
     /// before each repository operation.
-    async fn digest(&self, cluster: &str, reference: &str) -> Result<String, String>;
+    async fn digest(&self, cluster: &str, maker: &str, reference: &str) -> Result<String, String>;
 }
 
 /// A cluster's resolver ([`crate::cluster::ClusterConfig::secret_refs`]).

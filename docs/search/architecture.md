@@ -463,20 +463,34 @@ allowlist (a preview's branch included); change it like any setting.
 - **Credentials by reference** (`api/snapshots/refs.rs`). Any of those settings may hold a roll
   secrets reference (`roll://ENV/KEY`) instead. It isn't a secret: it stays in the settings as
   written (the cluster state, `GET _snapshot` and branches show it), and the value is never
-  stored. search-es only knows the seam (`search_es::secret_refs::SecretRefs`, on the
-  cluster's config); search-control's resolver names the cluster from the catalog
-  (`secret_refs.rs`) and rolld's `ForSearch` asks `Secrets::resolve_for` for workspace resource
-  `search` with that id. A branch asks as the cluster its line started from, marked untrusted
-  (`ResourceRef::untrusted`): no protected environment, no sensitive key. A cluster restored
-  after a delete keeps its id and owner, so it stays trusted. The value is resolved when the
-  repository's client is built; each repository operation (snapshot, restore, verify, cleanup)
-  first asks for the references' digests (`digest_for`) and reuses the values it holds in
-  memory while they're the same, so a rotation reaches the next operation. `PUT _snapshot`
-  checks every reference first: one that can't resolve (no roll secrets on the node, as on dev
-  nodes and the YAML clusters; no project standing for the cluster; no such key) is a 400
-  `settings_exception` naming the setting, the reference and why. A reference refused later
-  (the secret deleted, access lost) fails that operation with the reason; it never falls back
-  to anonymous requests or to values held from before, and no error carries a value.
+  stored.
+  - *Who writes one.* Only roll's control plane:
+    `PUT /v1/search/clusters/{id}/repositories/{name}` (Elasticsearch's body) asks roll secrets
+    whether the caller may reveal each reference (`Secrets::may_reveal_for`, the caller as a
+    request to secrets would be: 403 if not, 400 for a cluster no project stands for or a key that
+    doesn't exist), then registers the repository naming the caller in `x-roll-repository-maker`,
+    kept as the repository's `refs_by`. The node's REST port drops that header from every request
+    but roll's own forwards, and the control plane drops it from what its console relays. On the
+    cluster's endpoint a `PUT _snapshot` naming a reference is a 400 `settings_exception` pointing
+    at roll's API, so its password or a `manage` API key can't send a project's secret to an
+    endpoint of their choosing. Registering the repository again there (another endpoint or
+    bucket) without the references drops them: where credentials go never changes without them
+    being given again.
+  - *Resolving.* search-es only knows the seam (`search_es::secret_refs::SecretRefs`, on the
+    cluster's config); search-control's resolver names the cluster from the catalog
+    (`secret_refs.rs`) and rolld's `ForSearch` first rebuilds the maker as roll secrets has them
+    now (`Secrets::maker_caller`, as a sync acts as its maker: a person while they can sign in, a
+    token while it lives) and checks they still may reveal the reference, then asks
+    `resolve_for`/`digest_for` for workspace resource `search` with the cluster's id. A branch asks
+    as the cluster its line started from, marked untrusted (`ResourceRef::untrusted`): no
+    protected environment, no sensitive key, whoever made the reference. A cluster restored after
+    a delete keeps its id and owner, so it stays trusted. The value is resolved when the
+    repository's client is built; each repository operation (snapshot, restore, verify, cleanup)
+    first asks for the references' digests (which re-checks the maker) and reuses the values it
+    holds in memory while they're the same, so a rotation reaches the next operation. A reference
+    refused later (the secret deleted, the maker's access gone) fails that operation with the
+    reason; it never falls back to anonymous requests or to values held from before, and no error
+    carries a value.
 
 ## On the fleet (roll cloud)
 

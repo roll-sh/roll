@@ -55,6 +55,12 @@ mod transfer;
 pub use analyze::analyze_repository;
 pub use s3::ALLOW_PRIVATE as S3_ALLOW_PRIVATE;
 
+/// The settings of repository type `ty` that are credentials (`s3`'s `access_key`, …): any of
+/// them may be a roll secrets reference, set only through roll's control plane.
+pub fn credential_settings(ty: &str) -> &'static [&'static str] {
+    cloud::secret_names(ty)
+}
+
 /// The shard contents of this process's snapshots, by snapshot uuid and index name (one
 /// searcher per shard), and the snapshot operations running here.
 #[derive(Default)]
@@ -713,9 +719,9 @@ pub async fn put_repository(ctx: &Ctx<'_>) -> EsResult<Reply> {
     }
     let mut settings = settings;
     validate_repository(ctx, &name, &ty, &settings)?;
-    refs::check(ctx.cluster, &ty, &settings).await?;
+    let maker = refs::check(ctx, &name, &ty, &settings).await?;
     let secrets = cloud::take_secrets(ctx.cluster, &ty, &mut settings);
-    let repo = Repository { ty, settings, secrets };
+    let repo = Repository { ty, settings, secrets, refs_by: maker };
     // A bucket is checked once registered (a write, a read and a delete); a repository that
     // fails stays registered, as on Elasticsearch, and the error is the answer.
     let registered = (repo.in_bucket() && verify).then(|| (name.clone(), repo.clone()));

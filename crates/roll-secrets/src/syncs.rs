@@ -458,20 +458,33 @@ impl Secrets {
 
     /// Who a sync resolves as: its creator's access, looked up now, named `sync:<id>`.
     fn sync_caller(&self, r: &Row) -> Result<Caller> {
-        let principal = format!("sync:{}", r.info.id);
-        if r.info.created_by == "operator" {
+        self.maker_caller(&r.info.created_by, &format!("sync:{}", r.info.id)).map_err(|e| match e {
+            Error::Forbidden(_) => Error::Forbidden(format!("{} made this sync and can't reach secrets any more: make the sync again", r.info.created_by)),
+            e => e,
+        })
+    }
+
+    /// What `by` (a caller's principal recorded when it made something: `operator`, a person's
+    /// `usr_…`, `token:…`) may do now, named `name` in the audit log, as a sync acts as its maker:
+    /// the operator everything; a person while their account can sign in, on their own projects;
+    /// a roll-access grant while it lives (a person's acting as them). Anything else, or a maker
+    /// that's gone, is `Forbidden`. A product that stores something a caller made with secrets in
+    /// it (a reference) re-checks its maker with this before each use.
+    pub fn maker_caller(&self, by: &str, name: &str) -> Result<Caller> {
+        let principal = name.to_string();
+        if by == "operator" {
             return Ok(Caller { principal, grants: Arc::new(Everything), ip: None, runtime: false, approval: None });
         }
-        let gone = || Error::Forbidden(format!("{} made this sync and can't reach secrets any more: make the sync again", r.info.created_by));
+        let gone = || Error::Forbidden(format!("{by} made this and can't reach secrets any more"));
         // A person's: as they are now, while their account can sign in.
-        if crate::access::is_person(&r.info.created_by) {
-            let person = self.person(&r.info.created_by)?.ok_or_else(gone)?;
-            let mut c = self.person_caller(&r.info.created_by, person.admin)?;
+        if crate::access::is_person(by) {
+            let person = self.person(by)?.ok_or_else(gone)?;
+            let mut c = self.person_caller(by, person.admin)?;
             c.principal = principal;
             return Ok(c);
         }
         // A roll-access grant: as it is now, or gone once revoked or expired (a person's acts as them).
-        let token = r.info.created_by.strip_prefix("token:").ok_or_else(gone)?;
+        let token = by.strip_prefix("token:").ok_or_else(gone)?;
         let g = self.grants.as_ref().and_then(|g| g.grant(token)).ok_or_else(gone)?;
         Ok(Caller { principal, grants: self.grant_grants(&g)?, ip: None, runtime: false, approval: None })
     }
