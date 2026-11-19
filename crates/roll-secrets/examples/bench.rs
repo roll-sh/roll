@@ -14,7 +14,7 @@ fn main() {
     let project = ws.create("", "bench", "", None).unwrap().id;
     let db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("secrets.db")), "secrets").unwrap();
     let backend = format!("{:?}", db.backend());
-    let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), deliver: None, open: true, trust_forwarded_for: false, web_url: None, grants: None, people: None, kms: None, sts: None, outside: None, github: None, clouds: None, workloads: None };
+    let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), deliver: None, open: true, trust_forwarded_for: false, web_url: None, grants: None, people: None, kms: None, sts: None, outside: None, directory: None, github: None, clouds: None, workloads: None, gateways: None };
     let s = Secrets::new(db, ws, opts).unwrap();
     let c = Caller::operator();
     let time = |what: &str, f: &mut dyn FnMut()| {
@@ -41,6 +41,35 @@ fn main() {
         time("health", &mut || drop(s.project_health(&project, &c, false).unwrap()));
         time("compare", &mut || drop(s.compare(&project, "production", "staging", "/", &c).unwrap()));
     }
+    // What a CSI driver, an operator or `roll run --watch` polls: a conditional read that stays a
+    // 304, and the digest; per call, over 100 calls.
+    let etag = s.digest(&project, "production", "/", &c).unwrap();
+    let polls = |what: &str, f: &mut dyn FnMut()| {
+        let mut ms: Vec<f64> = (0..100)
+            .map(|_| {
+                let t = Instant::now();
+                f();
+                t.elapsed().as_secs_f64() * 1000.0
+            })
+            .collect();
+        ms.sort_by(f64::total_cmp);
+        println!("{backend:>8} {n:>6} keys  {what:<24} {:>8.1} ms median {:>8.1} ms p95", ms[50], ms[95]);
+    };
+    for _ in 0..2 {
+        polls("304 (If-None-Match)", &mut || assert!(s.unchanged(&project, "production", "/", &etag, true, &c).unwrap().is_some()));
+        polls("digest x100", &mut || drop(s.digest(&project, "production", "/", &c).unwrap()));
+    }
+    // The first digest after a change (one key written, untimed, before each).
+    let mut ms: Vec<f64> = (0..20)
+        .map(|i| {
+            s.batch(&project, "production", Batch { path: None, message: None, ops: vec![Op::Set { key: "ONE".into(), value: Some(i.to_string()), comment: None, tags: None, kind: None, link: None, path: None, expires_at: None, if_version: None }], if_seq: None }, &c).unwrap();
+            let t = Instant::now();
+            drop(s.digest(&project, "production", "/", &c).unwrap());
+            t.elapsed().as_secs_f64() * 1000.0
+        })
+        .collect();
+    ms.sort_by(f64::total_cmp);
+    println!("{backend:>8} {n:>6} keys  {:<24} {:>8.1} ms median {:>8.1} ms p95", "digest after a write", ms[10], ms[19]);
     // Reach's walk at its cap: 300 folders import production (it stops at 256), each read once.
     let from = vec![roll_secrets::Import { environment: "production".into(), path: "/".into(), project: None }];
     for i in 0..300 {

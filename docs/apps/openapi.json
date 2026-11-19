@@ -235,7 +235,7 @@
               }
             }
           },
-          "description": "`{ url, sources?, environments?, services?, previews?, headers? }` (https, a public host; `sources` some of `runtime` (default), `http`, `build`; services by name or id; `headers` `{name: value}`, at most 10, sealed, never roll's own or `content-type`)"
+          "description": "`{ url, format?, sources?, environments?, services?, previews?, headers? }` (https, a public host, or `syslog+tls://host:port` for `format: \"syslog\"`, which takes no headers; `sources` some of `runtime` (default), `http`, `build`; services by name or id; `headers` `{name: value}`, at most 10, sealed, never roll's own or `content-type`)"
         },
         "responses": {
           "201": {
@@ -317,7 +317,7 @@
               }
             }
           },
-          "description": "`{ sources?, environments?, services?, previews?, headers? }` (given ones replace, `headers` all of them; a new URL is a new drain)"
+          "description": "`{ sources?, environments?, services?, previews?, headers? }` (given ones replace, `headers` all of them; a new URL or format is a new drain)"
         },
         "responses": {
           "200": {
@@ -336,7 +336,7 @@
     },
     "/v1/apps/projects/{project}/drains/{did}/test": {
       "post": {
-        "description": "Answers `{ ok, code, error }` (one line sent now, signed and with its headers, not retried).",
+        "description": "Answers `{ ok, code, error }` (one line sent now, signed and with its headers, not retried; `code` null for syslog).",
         "operationId": "postProjectsProjectDrainsDidTest",
         "parameters": [
           {
@@ -358,7 +358,7 @@
         ],
         "responses": {
           "200": {
-            "description": "`{ ok, code, error }` (one line sent now, signed and with its headers, not retried)"
+            "description": "`{ ok, code, error }` (one line sent now, signed and with its headers, not retried; `code` null for syslog)"
           },
           "4XX": {
             "$ref": "#/components/responses/Error"
@@ -525,7 +525,7 @@
               }
             }
           },
-          "description": "`{ kind?: \"webhook\" | \"slack\" | \"discord\" | \"email\", url, events?, environments?, services?, previews? }` (environments: names; services: names or ids, kept as ids; previews: default false; `email` takes no `url`: it's the project's owner, 400 with one, for a project without an owner, or where mail isn't set up)"
+          "description": "`{ kind?: \"webhook\" | \"slack\" | \"discord\" | \"email\" | \"pagerduty\" | \"opsgenie\", url, routing_key?, api_key?, region?, events?, environments?, services?, previews? }` (environments: names; services: names or ids, kept as ids; previews: default false; `email` takes no `url`: it's the project's owner, 400 with one, for a project without an owner, or where mail isn't set up; `pagerduty` takes its integration's `routing_key`, `opsgenie` its `api_key`, each sealed and never returned, and `region` `us` or `eu`, no `url`: the service's own API)"
         },
         "responses": {
           "201": {
@@ -539,7 +539,7 @@
         "tags": [
           "projects"
         ],
-        "x-roll-action": "reveal for a webhook (its secret comes back), write for Slack, Discord and email"
+        "x-roll-action": "reveal for a webhook (its secret comes back), write for Slack, Discord, email, PagerDuty and Opsgenie"
       }
     },
     "/v1/apps/projects/{project}/notifications/{nid}": {
@@ -692,6 +692,128 @@
           }
         },
         "summary": "Test notification",
+        "tags": [
+          "projects"
+        ],
+        "x-roll-action": "write"
+      }
+    },
+    "/v1/apps/projects/{project}/preview-domain": {
+      "delete": {
+        "description": "Answers 204 (its names answer nothing; the environments keep their labels for another).",
+        "operationId": "deleteProjectsProjectPreviewDomain",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "204 (its names answer nothing; the environments keep their labels for another)"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Delete preview domain",
+        "tags": [
+          "projects"
+        ],
+        "x-roll-action": "delete"
+      },
+      "get": {
+        "description": "Answers `Domain` (404: none): the project's own preview domain, a wildcard its preview environments answer under by their `preview_host`; `tls` is `none` (plain HTTP until wildcard certificates, DNS-01, are issued here).",
+        "operationId": "getProjectsProjectPreviewDomain",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`Domain` (404: none): the project's own preview domain, a wildcard its preview environments answer under by their `preview_host`; `tls` is `none` (plain HTTP until wildcard certificates, DNS-01, are issued here)"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Get preview domain",
+        "tags": [
+          "projects"
+        ],
+        "x-roll-action": "read"
+      },
+      "post": {
+        "description": "Answers 201 `Domain` (pending: the same CNAME, `target` its own, or `_roll-challenge` TXT a custom domain takes).",
+        "operationId": "postProjectsProjectPreviewDomain",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "description": "`{ hostname: \"*.preview.acme.dev\" }` (a wildcard; one a project, a new one replaces it; 409 when another project's previews or any service's domain has it)"
+        },
+        "responses": {
+          "201": {
+            "description": "201 `Domain` (pending: the same CNAME, `target` its own, or `_roll-challenge` TXT a custom domain takes)"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Preview domain project",
+        "tags": [
+          "projects"
+        ],
+        "x-roll-action": "write"
+      }
+    },
+    "/v1/apps/projects/{project}/preview-domain/verify": {
+      "post": {
+        "description": "Answers `Domain` (active once its DNS checks out, else pending with what DNS answered).",
+        "operationId": "postProjectsProjectPreviewDomainVerify",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`Domain` (active once its DNS checks out, else pending with what DNS answered)"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Verify project",
         "tags": [
           "projects"
         ],
@@ -1600,6 +1722,51 @@
         "x-roll-action": "deploy*"
       }
     },
+    "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/vulnerabilities": {
+      "get": {
+        "description": "Answers `{ scan: ScanSummary | null, vulnerabilities: Vulnerability[] }`: its image's known vulnerabilities, most severe first (then those with a fix), at most 2,000 (the counts are of all); `severity` keeps those at it or worse; a pruned deployment's list is empty, its counts kept.",
+        "operationId": "getServicesIdEnvironmentsEnvDeploysDepVulnerabilities",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "dep",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`{ scan: ScanSummary | null, vulnerabilities: Vulnerability[] }`: its image's known vulnerabilities, most severe first (then those with a fix), at most 2,000 (the counts are of all); `severity` keeps those at it or worse; a pruned deployment's list is empty, its counts kept"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "List vulnerabilities",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "read"
+      }
+    },
     "/v1/apps/services/{id}/environments/{env}/diff": {
       "get": {
         "description": "Answers `{from, to, variables: {missing: {name, sealed}[], extra: string[], differ: string[] | null}, settings: {field, from, to, put}[]}`: how `env` differs from `from` (Railway's environment sync), never a value. `variables`: its own variables' names, `differ` null for a token without reveal on both; `settings`: `run.*`, `wait_for_ci`, `follow_tag`, `redeploy_on_secrets`, `traces`, `vitals`, `report`, `egress`, `allow_ips`, `rate_limit`, `firewall`, `headers`, `routes`, `pages.*` (whether each has its own), each with the `PUT …/environments/{env}` body that makes it `from`'s. A token needs read on `from` too (403).",
@@ -1979,6 +2146,141 @@
           "services"
         ],
         "x-roll-action": "admin (what's written runs next)"
+      }
+    },
+    "/v1/apps/services/{id}/environments/{env}/forms": {
+      "get": {
+        "description": "Answers `{ name, submissions, last_at }[]`: a static site's forms with submissions kept.",
+        "operationId": "getServicesIdEnvironmentsEnvForms",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`{ name, submissions, last_at }[]`: a static site's forms with submissions kept"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "List forms",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "read"
+      }
+    },
+    "/v1/apps/services/{id}/environments/{env}/forms/{form}/submissions": {
+      "get": {
+        "description": "Answers `{ id, created_at, fields: { name, value }[] }[]`, the newest first (limit 1–200, default 50; `before` a submission's id: the page after it); each read is `audit.forms.read`.",
+        "operationId": "getServicesIdEnvironmentsEnvFormsFormSubmissions",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "form",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`{ id, created_at, fields: { name, value }[] }[]`, the newest first (limit 1–200, default 50; `before` a submission's id: the page after it); each read is `audit.forms.read`"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "List submissions",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "reveal (what people sent)"
+      }
+    },
+    "/v1/apps/services/{id}/environments/{env}/forms/{form}/submissions/{sub}": {
+      "delete": {
+        "description": "Answers 204; `audit.forms.deleted`.",
+        "operationId": "deleteServicesIdEnvironmentsEnvFormsFormSubmissionsSub",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "form",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "sub",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "204; `audit.forms.deleted`"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Delete submission",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "delete"
       }
     },
     "/v1/apps/services/{id}/environments/{env}/hook": {
@@ -2850,7 +3152,7 @@
     },
     "/v1/apps/services/{id}/environments/{env}/shell": {
       "get": {
-        "description": "Answers a terminal: binary both ways, text `{\"resize\":[cols,rows]}`.",
+        "description": "Answers a terminal: binary both ways, text `{\"resize\":[cols,rows]}`; `console=true` makes it a fresh container of the live deployment running `command` (a login shell without one), sized by `cpu` (0.25–8) and `memory_mb` (256–16384), removed when it closes (`command`, `cpu`, `memory_mb` without `console`: 400).",
         "operationId": "getServicesIdEnvironmentsEnvShell",
         "parameters": [
           {
@@ -2882,7 +3184,7 @@
         },
         "responses": {
           "200": {
-            "description": "a terminal: binary both ways, text `{\"resize\":[cols,rows]}`"
+            "description": "a terminal: binary both ways, text `{\"resize\":[cols,rows]}`; `console=true` makes it a fresh container of the live deployment running `command` (a login shell without one), sized by `cpu` (0.25–8) and `memory_mb` (256–16384), removed when it closes (`command`, `cpu`, `memory_mb` without `console`: 400)"
           },
           "4XX": {
             "$ref": "#/components/responses/Error"
@@ -2925,7 +3227,7 @@
               }
             }
           },
-          "description": "`{ instance?, cols?, rows? }`"
+          "description": "`{ instance?, cols?, rows?, console?, command?, cpu?, memory_mb? }` (a console as on the WebSocket)"
         },
         "responses": {
           "201": {
@@ -3177,6 +3479,43 @@
           "services"
         ],
         "x-roll-action": "deploy*"
+      }
+    },
+    "/v1/apps/services/{id}/environments/{env}/slo": {
+      "get": {
+        "description": "Answers `SloReport`: its objective (the live deployment's `run.slo`, else the service's) against its window: per indicator the total, the failures, the share that met it and the budget left (1 untouched, below 0 spent); minutes for the last week, hours before (an hour's latency fails whole when its slowest minute did); `burning`: the burn alert firing now; `{ slo: null }` without one.",
+        "operationId": "getServicesIdEnvironmentsEnvSlo",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`SloReport`: its objective (the live deployment's `run.slo`, else the service's) against its window: per indicator the total, the failures, the share that met it and the budget left (1 untouched, below 0 spent); minutes for the last week, hours before (an hour's latency fails whole when its slowest minute did); `burning`: the burn alert firing now; `{ slo: null }` without one"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Get slo",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "read"
       }
     },
     "/v1/apps/services/{id}/environments/{env}/traces": {
@@ -3622,7 +3961,7 @@
     },
     "/v1/apps/services/{id}/environments/{env}/volume/backups/{bid}/restore": {
       "post": {
-        "description": "Answers `Backup` (the volume as it was; the environment asleep meanwhile).",
+        "description": "Answers `Backup` (the volume as it was; what's there now backed up first under this environment's name; the environment asleep meanwhile).",
         "operationId": "postServicesIdEnvironmentsEnvVolumeBackupsBidRestore",
         "parameters": [
           {
@@ -3650,9 +3989,19 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "description": "`{ from?: string }` (another environment of the service, whose backup `bid` is: seeding staging from production; 404 for one it doesn't have)"
+        },
         "responses": {
           "200": {
-            "description": "`Backup` (the volume as it was; the environment asleep meanwhile)"
+            "description": "`Backup` (the volume as it was; what's there now backed up first under this environment's name; the environment asleep meanwhile)"
           },
           "4XX": {
             "$ref": "#/components/responses/Error"
@@ -3662,7 +4011,7 @@
         "tags": [
           "services"
         ],
-        "x-roll-action": "delete (it replaces the volume's files)"
+        "x-roll-action": "delete (it replaces the volume's files); with `from`, reveal on that environment too"
       }
     },
     "/v1/apps/services/{id}/environments/{env}/wake": {

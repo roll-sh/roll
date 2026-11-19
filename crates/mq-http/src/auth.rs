@@ -106,8 +106,8 @@ fn query_token(query: Option<&str>) -> Option<&str> {
     query?.split('&').find_map(|kv| kv.strip_prefix("access_token=")).filter(|t| !t.is_empty())
 }
 
-/// The name RabbitMQ uses for the default exchange in permission checks.
-pub const DEFAULT_EXCHANGE: &str = "amq.default";
+/// The default exchange's name in URLs, token scopes and permission checks.
+pub use mq_core::auth::DEFAULT_EXCHANGE;
 
 impl HttpApi {
     /// The vhost, if the caller may use it (like `connection.open`).

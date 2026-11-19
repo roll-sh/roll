@@ -1,6 +1,6 @@
 import { AlertTriangle, Plus, X } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
-import { isProduction, previewsApi, unmaskedNote, type PageState, type PreviewBypass, type PreviewHook, type PreviewJob, type PreviewSettings, type ResourceRule, type SettingsPatch } from "@/lib/previews-api";
+import { isProduction, previewsApi, unmaskedNote, type MaskSuggestion, type MaskSuggestions, type PageState, type PreviewBypass, type PreviewHook, type PreviewJob, type PreviewSettings, type ResourceRule, type SettingsPatch } from "@/lib/previews-api";
 import { ROLL_API } from "@/lib/roll-api";
 import type { PlacedResource } from "@/lib/workspace-api";
 import { KIND_LABEL, resourceKey } from "@/lib/workspace-resources";
@@ -107,7 +107,25 @@ function Form({
   const [perBranch, setPerBranch] = useState<[string, string, string][]>(Object.entries(saved.env_for ?? {}).flatMap(([g, vars]) => Object.entries(vars).map(([k, v]) => [g, k, v] as [string, string, string])));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [suggested, setSuggested] = useState<MaskSuggestions>({ suggestions: [], unread: [] });
+  // Read only when asked: reading a parent's columns resets a running database's idle timer.
+  const [looking, setLooking] = useState<"no" | "reading" | "done">("no");
   const set = <K extends keyof PreviewSettings>(k: K, v: PreviewSettings[K]) => setS((x) => ({ ...x, [k]: v }));
+  // A mask added from a suggestion joins the masks being edited, saved with the rest.
+  const addMasks = (resource: string, add: MaskSuggestion[]) =>
+    setS((x) => ({ ...x, masking: { ...x.masking, [resource]: { ...x.masking?.[resource], ...Object.fromEntries(add.map((m) => [m.path, m.rule])) } } }));
+
+  // Only a hint: the dialog works the same without it.
+  const lookForPersonalData = () => {
+    setLooking("reading");
+    previewsApi.maskSuggestions(projectId).then(
+      (r) => {
+        setSuggested(r);
+        setLooking("done");
+      },
+      () => setLooking("done"),
+    );
+  };
 
   useEffect(() => setError(null), [s, branches, paths, ignorePaths, skipAuthors, pages, widths, openapi, endpoints, states, hide, env, perBranch]);
 
@@ -187,6 +205,14 @@ function Form({
         <Field group label="By default" note="A branch has every row; schema only has the structure and no rows.">
           <Choice value={s.data} options={["branch", "schema"]} onChange={(v) => set("data", v)} labels={{ branch: "Branch", schema: "Schema only" }} />
         </Field>
+        {resources.length > 0 && looking !== "done" && (
+          <p className="text-[12px] text-muted">
+            <button type="button" disabled={looking === "reading"} onClick={lookForPersonalData} className="text-accent hover:underline disabled:opacity-50">
+              {looking === "reading" ? "Reading the columns…" : "Look for personal data that isn't masked"}
+            </button>{" "}
+            <span className="text-subtle">(reads each database's columns; a sleeping one isn't woken)</span>
+          </p>
+        )}
         {resources.length > 0 && (
           <div className="overflow-hidden rounded-lg border border-line-2">
             {resources.map((r) => {
@@ -197,7 +223,11 @@ function Form({
               const masks = Object.entries(s.masking?.[id] ?? {})
                 .map(([col, f]) => `${col} = ${f}`)
                 .join("\n");
-              const unmasked = unmaskedNote(r.kind, rule ?? (s.data === "branch" ? "branch" : schema ? "schema" : "skip"), Object.keys(s.masking?.[id] ?? {}).length);
+              const mode = rule ?? (s.data === "branch" ? "branch" : schema ? "schema" : "skip");
+              const unmasked = unmaskedNote(r.kind, mode, Object.keys(s.masking?.[id] ?? {}).length);
+              // Read for every resource, so one switched to "branch" here shows them at once.
+              const suggestions = mode === "branch" ? suggested.suggestions.filter((x) => x.resource === id && !s.masking?.[id]?.[x.path]) : [];
+              const unread = mode === "branch" ? suggested.unread.find((x) => x.resource === id) : undefined;
               return (
                 <div key={id} className="border-t border-line first:border-t-0">
                   <div className="flex items-center gap-2 px-2.5 py-1.5">
@@ -227,6 +257,7 @@ function Form({
                     <div className="px-2.5 pb-2">
                       <textarea
                         aria-label={`Masked ${r.kind === "search" ? "fields" : "columns"} of ${names.get(id) ?? r.ref}`}
+                        key={masks}
                         defaultValue={masks}
                         placeholder={r.kind === "postgres" ? "public.users.email = email" : r.kind === "search" ? "users.email = email" : "app.users.email = mask_default()"}
                         rows={Math.max(1, masks.split("\n").length)}
@@ -251,6 +282,8 @@ function Form({
                             ? "Rewritten in each preview's branch before anything serves it, one field per line: index.field (nested: index.a.b) = redact, remove or email. The parent is untouched."
                             : "Masked in previews, one column per line: keyspace.table.column = mask function. The parent is untouched."}
                       </p>
+                      {suggestions.length > 0 && <MaskHints items={suggestions} onAdd={(add) => addMasks(id, add)} />}
+                      {unread && <p className="mt-1.5 text-[11px] text-subtle">Mask suggestions: {unread.why}</p>}
                     </div>
                   )}
                 </div>
@@ -407,13 +440,25 @@ function Form({
       </Section>
 
       <Section title="Who can open them">
-        <Field group label="Access" note="Previews run on branches of real data. Private ones answer only to their link (from roll, the change or the pull request).">
-          <Choice value={s.access} options={["link", "public"]} onChange={(v) => set("access", v)} labels={{ link: "Private link", public: "Anyone with the URL" }} />
+        <Field
+          group
+          label="Access"
+          note="Previews run on branches of real data. A private link answers only to the link roll hands out; signed in to roll lets in only people who can open this project, who sign in on the way. Share links work with either."
+        >
+          <Choice
+            value={s.access}
+            options={["link", "team", "public"]}
+            onChange={(v) => set("access", v)}
+            labels={{ link: "Private link", team: "Signed in to roll", public: "Anyone with the URL" }}
+          />
         </Field>
-        {s.access === "link" && <Bypass projectId={projectId} />}
+        {s.access !== "public" && <Bypass projectId={projectId} />}
         <Hooks projectId={projectId} />
         <Field group label="Mail" note="Previews run on copies of production's people. Caught: their services send mail to roll, where it's listed on the preview and goes no further (mail providers' API keys are removed).">
           <Choice value={s.mail ?? "catch"} options={["catch", "deliver"]} onChange={(v) => set("mail", v)} labels={{ catch: "Caught by roll", deliver: "Delivered" }} />
+        </Field>
+        <Field group label="Traces" note="Its services get the OpenTelemetry SDK's variables, so an app with an SDK sends its spans to the preview: listed under Requests on its sheet, masked as its logs are, kept a few hours.">
+          <Choice value={s.traces ? "on" : "off"} options={["off", "on"]} onChange={(v) => set("traces", v === "on")} labels={{ off: "Off", on: "On" }} />
         </Field>
         <Field group label="Reaches" note="What a preview's code may call. Roll only: its services run on a network of their own that reaches roll's products (its branches) and nothing on the internet, so a webhook or a live payment API can't be called from a change.">
           <Choice value={s.egress ?? "open"} options={["open", "roll"]} onChange={(v) => set("egress", v)} labels={{ open: "Anything", roll: "Roll only" }} />
@@ -536,6 +581,42 @@ function Form({
         </button>
       </div>
     </form>
+  );
+}
+
+/** Columns that look like people's data and have no mask yet, each with the rule that fits it. */
+function MaskHints({ items, onAdd }: { items: MaskSuggestion[]; onAdd: (add: MaskSuggestion[]) => void }) {
+  const [all, setAll] = useState(false);
+  const shown = all ? items : items.slice(0, 5);
+  const add = "flex h-6 shrink-0 items-center gap-1 rounded-md px-1.5 text-[11px] text-accent hover:bg-white/[0.05]";
+  return (
+    <div className="mt-2 rounded-md border border-line px-2 py-1.5">
+      <div className="flex items-center gap-2">
+        <p className="min-w-0 flex-1 text-[11px] text-muted">These look like personal data and aren't masked</p>
+        {items.length > 1 && (
+          <button type="button" onClick={() => onAdd(items)} className={add}>
+            Add all
+          </button>
+        )}
+      </div>
+      <ul className="mt-0.5">
+        {shown.map((x) => (
+          <li key={x.path} className="flex items-center gap-2">
+            <span className="min-w-0 flex-1 truncate text-[11px] text-subtle" title={`${x.path}: ${x.why}`}>
+              <span className="font-mono text-soft">{x.path}</span> · {x.why} · <span className="font-mono">{x.rule}</span>
+            </span>
+            <button type="button" aria-label={`Add mask ${x.path} = ${x.rule}`} onClick={() => onAdd([x])} className={add}>
+              <Plus className="size-3" strokeWidth={1.5} /> Add mask
+            </button>
+          </li>
+        ))}
+      </ul>
+      {items.length > shown.length && (
+        <button type="button" onClick={() => setAll(true)} className="mt-0.5 h-6 rounded-md px-1 text-[11px] text-muted hover:text-fg">
+          {items.length - shown.length} more
+        </button>
+      )}
+    </div>
   );
 }
 

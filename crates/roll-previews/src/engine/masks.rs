@@ -20,6 +20,25 @@ pub(super) struct Masks {
     values: Vec<String>,
 }
 
+/// A preview's values to mask, read the first time something asks (`Apps::errors`): a preview
+/// with no errors reads none (each read of its secrets' values is audited).
+pub struct ErrorMasks<'a> {
+    engine: &'a Engine,
+    id: &'a str,
+    values: tokio::sync::OnceCell<Vec<String>>,
+}
+
+impl<'a> ErrorMasks<'a> {
+    pub(super) fn new(engine: &'a Engine, id: &'a str) -> Self {
+        ErrorMasks { engine, id, values: tokio::sync::OnceCell::new() }
+    }
+
+    /// The values (fails closed: no text without its masks).
+    pub async fn values(&self) -> Result<&[String]> {
+        self.values.get_or_try_init(|| self.engine.masks(self.id)).await.map(Vec::as_slice)
+    }
+}
+
 impl Engine {
     /// `lines` as anyone who reads the preview may see them.
     pub(super) async fn masked(&self, id: &str, lines: Vec<String>) -> Result<Vec<String>> {
@@ -57,7 +76,11 @@ impl Engine {
         }
         let branches = self.resource_env(id).await.map_err(|e| Error::Conflict(format!("its logs wait for what they must hide: {e:#}")))?;
         let own = project_env(&s, r.branch.as_deref()).into_iter().chain(self.store.vars(id)?).collect::<Vec<_>>();
-        let values = secret_values(&secrets, &plain, &own, &branches);
+        let mut values = secret_values(&secrets, &plain, &own, &branches);
+        // Roll's own credentials a start gets (its traces intake's token, its SMTP password): from
+        // the store, so they're hidden after a restart or a move as well.
+        values.push(self.store.trace_token(id)?);
+        values.push(self.store.mail_password(id)?);
         let mut all = self.log_masks.lock();
         let m = all.entry(id.to_string()).or_default();
         m.read_at = now;

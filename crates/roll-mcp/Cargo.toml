@@ -22,6 +22,7 @@ url.workspace = true
 
 [dev-dependencies]
 code-sql.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 http-body-util.workspace = true
 roll-workspace.workspace = true
 tempfile.workspace = true

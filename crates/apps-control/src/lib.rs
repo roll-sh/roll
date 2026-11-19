@@ -34,6 +34,7 @@ pub mod drains;
 pub mod export;
 pub mod git_source;
 pub mod image_upload;
+pub mod images;
 pub mod integrations;
 pub mod jobs;
 pub mod live;
@@ -53,6 +54,15 @@ pub mod store;
 pub mod traces;
 pub mod visit;
 pub mod vitals;
+pub mod heartbeats;
+pub mod slo;
+pub mod prom;
+pub mod edge;
+pub mod password;
+pub mod vulns;
+pub mod checks;
+pub mod forms;
+pub mod track;
 pub mod traffic;
 
 use integrations::{DomainTls, Resolver, Resources, SecretSource, Sources};
@@ -152,6 +162,9 @@ pub struct AppsConfig {
     /// registries whose names resolve to one (local development and tests only:
     /// `ROLL_APPS_ALLOW_PRIVATE`).
     pub allow_private: bool,
+    /// PagerDuty's Events API v2 and Opsgenie's Alert API, per region (`us`, `eu`): fixed, never
+    /// a tenant's URL ([`notify`]'s on-call targets). Tests point them at their own servers.
+    pub oncall_apis: OncallApis,
     /// Between two passes over spend limits (`spend`).
     pub spend_every: Duration,
     /// A failed cron run's first retry waits this long, each next one twice as long (10 min at most).
@@ -184,6 +197,7 @@ impl AppsConfig {
             visitor_recheck: Duration::from_secs(300),
             otlp_base: None,
             allow_private: false,
+            oncall_apis: OncallApis::default(),
             spend_every: Duration::from_secs(30),
             cron_retry_after: Duration::from_secs(30),
             keep_deployments: 10,
@@ -233,6 +247,8 @@ pub struct Apps {
     capped_refresh: tokio::sync::Mutex<()>,
     /// roll previews' notes for a preview's feedback button ([`Apps::set_feedback_notes`]).
     notes: std::sync::OnceLock<Arc<dyn integrations::FeedbackNotes>>,
+    /// Where a name under a project's preview domain no environment holds goes (roll previews).
+    preview_router: std::sync::OnceLock<Arc<dyn integrations::PreviewRouter>>,
     /// roll previews' branch pushes ([`Apps::set_git_pushes`]).
     pub(crate) pushes: std::sync::OnceLock<Arc<dyn integrations::GitPushes>>,
     /// roll's GitHub App ([`Apps::set_github_app`]).
@@ -245,6 +261,10 @@ pub struct Apps {
     drain_done: Arc<Mutex<Vec<String>>>,
     /// Projects whose drains changed on this node: the drainer reads theirs again (only theirs).
     pub(crate) drains_dirty: Mutex<std::collections::HashSet<String>>,
+    /// Previews' runtime lines on their way to the drainer ([`Apps::drain_preview_lines`]), and
+    /// its end of the channel until it starts.
+    pub(crate) preview_lines: tokio::sync::mpsc::Sender<drains::PreviewBatch>,
+    pub(crate) preview_lines_rx: Mutex<Option<tokio::sync::mpsc::Receiver<drains::PreviewBatch>>>,
     /// Private environments' token hashes, by environment, as the owner last read or set them.
     access: Mutex<HashMap<String, Option<Access>>>,
     /// Bumped by every change to the access cache: a cold read caches what it read only if
@@ -254,6 +274,16 @@ pub struct Apps {
     visits: Mutex<HashMap<String, visit::Seen>>,
     /// Web Vitals beacons kept this minute, by environment: (minute, count).
     pub(crate) vitals_seen: Mutex<HashMap<String, (i64, u32)>>,
+    /// Custom events taken this minute, per environment ([`track`]).
+    pub(crate) events_seen: Mutex<HashMap<String, (i64, u32)>>,
+    /// Form submissions taken this minute, per environment ([`forms`]).
+    pub(crate) forms_seen: Mutex<HashMap<String, (i64, u32)>>,
+    /// Uptime checks' last results here, on the owner ([`checks`]), by environment and name.
+    pub(crate) check_states: Mutex<HashMap<String, checks::Run>>,
+    /// A pass of daily rescans is running, and when live deployments were last looked at for
+    /// one ([`vulns`]).
+    pub(crate) rescanning: std::sync::atomic::AtomicBool,
+    pub(crate) rescan_looked: std::sync::atomic::AtomicI64,
     /// When each environment's log was last looked at for new errors ([`errors`]).
     pub(crate) errors_seen: Mutex<HashMap<String, i64>>,
     /// Manual rollouts waiting for a person, by deployment: what they say, and the wake.
@@ -276,12 +306,17 @@ pub struct Apps {
     watching: std::sync::atomic::AtomicBool,
     watching_bases: std::sync::atomic::AtomicBool,
     watching_secrets: std::sync::atomic::AtomicBool,
+    /// Environments whose project secrets are long-polled here ([`Apps::watch_secrets_of`]), by
+    /// [`env_key`]: one task each, on the owner.
+    pub(crate) secret_watches: Mutex<std::collections::HashSet<String>>,
     /// Scaling workers' backlogs are being read (on their own task).
     scaling: std::sync::atomic::AtomicBool,
     /// The App's queued events are being run on this node.
     github_running: std::sync::atomic::AtomicBool,
     /// Web services' answers a shared cache may keep, per environment (`resp_cache`).
     pub(crate) responses: resp_cache::ResponseCache,
+    /// Images made by `/__roll/image` on this node ([`images::ImageCache`]).
+    pub(crate) images: images::ImageCache,
     /// Static sites' file indexes, by image digest, as this node read them.
     sites: Mutex<HashMap<String, Arc<sites::Site>>>,
     /// Per environment, for the live site's key: its earlier static deployments' site keys.
@@ -294,6 +329,19 @@ pub struct Apps {
     looping: Mutex<std::collections::HashSet<String>>,
     /// For notification targets: public addresses only, no redirects.
     notify_client: reqwest::Client,
+    /// A static site's proxy rewrites to other sites (`_redirects`' `https://… 200`): public
+    /// addresses only, no redirects followed, 30 s.
+    pub(crate) site_proxy_client: reqwest::Client,
+    /// Scrapes of instances' own Prometheus endpoints ([`prom`]): loopback, no redirects, no
+    /// proxy; and which environments' last scrape failed (said once).
+    pub(crate) scrape_client: reqwest::Client,
+    pub(crate) scrape_errors: Mutex<std::collections::HashSet<String>>,
+    /// The key edge functions' `next` addresses are signed with ([`edge`]), once read; and which
+    /// edge functions were said not to run (once each).
+    pub(crate) edge_key: Mutex<Option<Vec<u8>>>,
+    pub(crate) edge_noted: Mutex<std::collections::HashSet<String>>,
+    /// Password tries per environment and client, in the last ten minutes ([`password`]).
+    pub(crate) password_tries: Mutex<HashMap<password::Client, (i64, u32)>>,
     /// Shells open over HTTP (the dashboard's terminal), by id.
     sessions: Mutex<HashMap<String, Arc<shell::Session>>>,
     /// WebSocket shells open per environment (`env_key`), counted with the HTTP sessions.
@@ -304,6 +352,26 @@ pub struct Apps {
     /// HTTP/2 without TLS (prior knowledge), for h2c apps ([`model::Run::h2c`]).
     pub(crate) client_h2: hyper_util::client::legacy::Client<hyper_util::client::legacy::connect::HttpConnector, axum::body::Body>,
     stop: CancellationToken,
+}
+
+/// Where on-call targets are sent ([`AppsConfig::oncall_apis`]).
+#[derive(Clone, Debug)]
+pub struct OncallApis {
+    pub pagerduty_us: String,
+    pub pagerduty_eu: String,
+    pub opsgenie_us: String,
+    pub opsgenie_eu: String,
+}
+
+impl Default for OncallApis {
+    fn default() -> Self {
+        OncallApis {
+            pagerduty_us: "https://events.pagerduty.com/v2/enqueue".into(),
+            pagerduty_eu: "https://events.eu.pagerduty.com/v2/enqueue".into(),
+            opsgenie_us: "https://api.opsgenie.com/v2/alerts".into(),
+            opsgenie_eu: "https://api.eu.opsgenie.com/v2/alerts".into(),
+        }
+    }
 }
 
 pub(crate) fn env_key(service: &str, env: &str) -> String {
@@ -447,6 +515,7 @@ impl Apps {
     pub fn new(cfg: AppsConfig, store: Store, deps: Deps) -> Arc<Apps> {
         let cfg_allow = cfg.allow_private;
         let logs = LogHub::new(deps.objects.clone());
+        let (preview_lines, preview_lines_rx) = tokio::sync::mpsc::channel(drains::PREVIEW_BATCHES);
         Arc::new(Apps {
             cfg,
             store,
@@ -463,16 +532,24 @@ impl Apps {
             capped: Mutex::new(Default::default()),
             capped_refresh: tokio::sync::Mutex::new(()),
             notes: std::sync::OnceLock::new(),
+            preview_router: std::sync::OnceLock::new(),
             pushes: std::sync::OnceLock::new(),
             github: std::sync::OnceLock::new(),
             mail: std::sync::OnceLock::new(),
             visitors: std::sync::OnceLock::new(),
             drain_done: Arc::new(Mutex::new(Vec::new())),
             drains_dirty: Mutex::new(Default::default()),
+            preview_lines,
+            preview_lines_rx: Mutex::new(Some(preview_lines_rx)),
             access: Mutex::new(HashMap::new()),
             access_gen: std::sync::atomic::AtomicU64::new(0),
             visits: Mutex::new(HashMap::new()),
             vitals_seen: Mutex::new(HashMap::new()),
+            events_seen: Mutex::new(HashMap::new()),
+            forms_seen: Mutex::new(HashMap::new()),
+            check_states: Mutex::new(HashMap::new()),
+            rescanning: Default::default(),
+            rescan_looked: Default::default(),
             errors_seen: Mutex::new(HashMap::new()),
             rollout_waits: Mutex::new(HashMap::new()),
             calling: Mutex::new(std::collections::HashSet::new()),
@@ -483,9 +560,11 @@ impl Apps {
             watching: std::sync::atomic::AtomicBool::new(false),
             watching_bases: std::sync::atomic::AtomicBool::new(false),
             watching_secrets: std::sync::atomic::AtomicBool::new(false),
+            secret_watches: Mutex::new(std::collections::HashSet::new()),
             scaling: std::sync::atomic::AtomicBool::new(false),
             github_running: std::sync::atomic::AtomicBool::new(false),
             responses: resp_cache::ResponseCache::default(),
+            images: images::ImageCache::default(),
             sites: Mutex::new(HashMap::new()),
             earlier_sites: Mutex::new(HashMap::new()),
             site_loads: Mutex::new(HashMap::new()),
@@ -494,6 +573,12 @@ impl Apps {
             ws_shells: Mutex::new(HashMap::new()),
             tunnels: Mutex::new(HashMap::new()),
             notify_client: net::client(cfg_allow, Duration::from_secs(10)),
+            site_proxy_client: net::client(cfg_allow, Duration::from_secs(30)),
+            scrape_client: reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).no_proxy().timeout(Duration::from_secs(10)).build().expect("a client"),
+            scrape_errors: Mutex::new(Default::default()),
+            edge_key: Mutex::new(None),
+            edge_noted: Mutex::new(Default::default()),
+            password_tries: Mutex::new(HashMap::new()),
             looping: Mutex::new(std::collections::HashSet::new()),
             client: hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new()).pool_idle_timeout(Duration::from_secs(30)).build_http(),
             client_h2: hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new()).pool_idle_timeout(Duration::from_secs(30)).http2_only(true).build_http(),
@@ -1030,7 +1115,8 @@ impl Apps {
 
     async fn summary(self: &Arc<Self>, e: &EnvRow) -> Result<EnvironmentSummary> {
         let sid = e.service.clone();
-        let public = self.db(move |s| s.service(&sid)).await.map(|s| s.run.public).unwrap_or(true);
+        let svc_row = self.db(move |s| s.service(&sid)).await.ok();
+        let public = svc_row.as_ref().map(|s| s.run.public).unwrap_or(true);
         let (svc, env) = (e.service.clone(), e.name.clone());
         let recent = self.db(move |s| s.deployments(&svc, &env, 1, None)).await?;
         let active = match &e.active {
@@ -1072,7 +1158,12 @@ impl Apps {
         if latest.as_ref().is_some_and(|l| l.status == DeployStatus::Failed) {
             attention.push("deploy_failed");
         }
-        Ok(EnvironmentSummary { name: e.name.clone(), state, url: public.then(|| self.url(&e.slug)), active, latest, attention })
+        // Cached for a minute per environment ([`Apps::needs_deploy`]), so a list stays cheap.
+        let needs_deploy = match (&e.active, svc_row) {
+            (Some(a), Some(svc)) => self.needs_deploy(&svc.for_env(e).unwrap_or(svc), e, a).await?,
+            _ => false,
+        };
+        Ok(EnvironmentSummary { name: e.name.clone(), state, url: public.then(|| self.url(&e.slug)), active, latest, attention, needs_deploy, ephemeral: e.ephemeral })
     }
 
     pub async fn patch_service(self: &Arc<Self>, id: &str, body: Value) -> Result<Service> {
@@ -1427,26 +1518,21 @@ impl Apps {
             (Some(sched), Some(_)) if svc.run.kind == RunType::Cron => crate::cron::Schedule::parse(sched, svc.run.timezone.as_deref()).ok().and_then(|s| s.next_after(code_sql::now_ms())),
             _ => None,
         };
-        let needs_deploy = match &r.active {
-            Some(a) => self.needs_deploy(&svc, &r, a).await?,
-            None => false,
-        };
         let gate = self.access(&r.service, &r.name).await?;
-        let (private, signed_in) = (gate.is_some(), gate.is_some_and(|a| a.signed_in));
+        let (private, signed_in, password) = (gate.is_some(), gate.as_ref().is_some_and(|a| a.signed_in), gate.as_ref().is_some_and(|a| a.password_hash.is_some()));
         let (sid, e) = (r.service.clone(), r.name.clone());
         let waiting_for_ci = self.db(move |s| s.ci_waits()).await?.into_iter().find(|(w, _)| w.service == sid && w.env == e).map(|(w, _)| w.sha);
         Ok(Environment {
             summary,
             service: r.service.clone(),
             branch: r.branch.clone(),
-            ephemeral: r.ephemeral,
             instances,
             domains,
             port: r.port,
             tcp: r.tcp_port.filter(|_| svc.run.tcp && svc.run.public && !private).map(|p| format!("{}:{p}", self.cfg.tcp_host)),
-            needs_deploy,
             private,
             signed_in,
+            password,
             next_run_at,
             schedules: self.schedule_states(&svc, &r).await,
             volume_used: match svc.run.volume {
@@ -1466,6 +1552,10 @@ impl Apps {
             feedback: r.feedback,
             vitals: r.vitals,
             report: r.report,
+            preview_host: {
+                let (sid, e) = (r.service.clone(), r.name.clone());
+                self.db(move |s| s.preview_host(&sid, &e)).await.ok().flatten()
+            },
             maintenance: r.maintenance.clone().map(|m| crate::model::Maintenance { message: Some(m).filter(|m| !m.is_empty()) }),
             paused: r.paused,
             held_after: r.held_by.clone().filter(|h| h != crate::deploy::MANUAL_HOLD),
@@ -1476,6 +1566,12 @@ impl Apps {
             firewall: r.firewall.clone(),
             headers: r.headers.clone(),
             routes: r.routes.clone(),
+            check_states: self.check_states_of(&r.service, &r.name, &r.checks),
+            checks: r.checks.clone(),
+            heartbeat_states: self.heartbeat_states_of(&r.service, &r.name, &r.heartbeats).await,
+            heartbeats: r.heartbeats.clone(),
+            split: r.split.clone(),
+            heartbeat_urls: Default::default(),
             egress_refused: if r.egress.closed() { self.deps.runtime.egress_refused(&closed_network_name(&svc.project, &r.name), &r.egress.hosts) } else { Vec::new() },
             egress: r.egress.clone(),
             scaling,
@@ -1549,7 +1645,7 @@ impl Apps {
                 settings.push(json!({ "field": format!("run.{k}"), "from": x, "to": y, "put": { "run": { k: x } } }));
             }
         }
-        for k in ["wait_for_ci", "follow_tag", "redeploy_on_secrets", "traces", "vitals", "report", "egress", "allow_ips", "rate_limit", "firewall", "headers", "routes"] {
+        for k in ["wait_for_ci", "follow_tag", "redeploy_on_secrets", "traces", "vitals", "report", "egress", "allow_ips", "rate_limit", "firewall", "headers", "routes", "checks"] {
             let (x, y) = (a.get(k).cloned().unwrap_or(Value::Null), b.get(k).cloned().unwrap_or(Value::Null));
             if x != y {
                 settings.push(json!({ "field": k, "from": x, "to": y, "put": { k: x } }));
@@ -1593,7 +1689,7 @@ impl Apps {
     pub async fn put_environment(self: &Arc<Self>, service: &str, env: &str, body: Value) -> Result<Environment> {
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "paused", "held", "hostname", "traces", "egress", "vitals", "report"].contains(&k.as_str()) {
+            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "checks", "heartbeats", "split", "paused", "held", "hostname", "traces", "egress", "vitals", "report", "preview_host"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
@@ -1617,6 +1713,13 @@ impl Apps {
             None => None,
             Some(Value::Bool(b)) => Some(*b),
             Some(_) => return Err(Error::BadRequest("paused is a boolean".into())),
+        };
+        // One DNS label under the project's preview domain, or null.
+        let preview_label: Option<Option<String>> = match o.get("preview_host") {
+            None => None,
+            Some(Value::Null) => Some(None),
+            Some(Value::String(l)) if l.len() <= 63 && !l.is_empty() && !l.starts_with('-') && !l.ends_with('-') && l.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') => Some(Some(l.clone())),
+            Some(_) => return Err(Error::BadRequest("preview_host is one DNS label (lowercase letters, digits and -, at most 63), or null".into())),
         };
         // Maintenance: true or {message?} turns it on, false or null off.
         let maintenance: Option<Option<String>> = match o.get("maintenance") {
@@ -1711,6 +1814,50 @@ impl Apps {
             }
             Some(_) => return Err(Error::BadRequest(format!("routes is at most {} routes, or null", crate::model::MAX_ROUTES))),
         };
+        // Uptime checks: unique names, at most MAX_CHECKS.
+        // A split test: another deployed-or-not environment of this service, never itself.
+        let split = match o.get("split") {
+            None => None,
+            Some(Value::Null) => Some(None),
+            Some(v) => {
+                let sp: crate::model::Split = serde_json::from_value(v.clone()).map_err(|e| Error::BadRequest(format!("split: {e}")))?;
+                if !(1..=99).contains(&sp.percent) {
+                    return Err(Error::BadRequest("split.percent is 1–99".into()));
+                }
+                if sp.environment == env {
+                    return Err(Error::BadRequest("split.environment is another environment".into()));
+                }
+                let (sid, other) = (service.to_string(), sp.environment.clone());
+                if self.db(move |s| s.environment(&sid, &other)).await.is_err() {
+                    return Err(Error::BadRequest(format!("split: this service has no environment {}", sp.environment)));
+                }
+                Some(Some(sp))
+            }
+        };
+        // Heartbeats: kept ones keep their tokens; a new one's token is in this answer, once.
+        let heartbeats = match o.get("heartbeats") {
+            None => None,
+            Some(v) => {
+                let (sid, e) = (service.to_string(), env.to_string());
+                let current = self.db(move |s| s.environment(&sid, &e)).await.map(|r| r.heartbeats).unwrap_or_default();
+                Some(self.heartbeats_of(v, &current)?)
+            }
+        };
+        let checks = match o.get("checks") {
+            None => None,
+            Some(Value::Null) => Some(Vec::new()),
+            Some(Value::Array(a)) if a.len() <= crate::model::MAX_CHECKS => {
+                let cs = a
+                    .iter()
+                    .map(|c| serde_json::from_value::<crate::model::Check>(c.clone()).map_err(|e| Error::BadRequest(format!("checks: {e}"))).and_then(crate::model::Check::check))
+                    .collect::<Result<Vec<_>>>()?;
+                if cs.iter().enumerate().any(|(i, c)| cs[..i].iter().any(|o| o.name == c.name)) {
+                    return Err(Error::BadRequest("checks: names are unique".into()));
+                }
+                Some(cs)
+            }
+            Some(_) => return Err(Error::BadRequest(format!("checks is at most {} checks, or null", crate::model::MAX_CHECKS))),
+        };
         // What its code may reach: `{mode: "roll", hosts?}` closes its network, null or
         // `{mode: "open"}` opens it.
         let egress = match o.get("egress") {
@@ -1739,7 +1886,7 @@ impl Apps {
             None => None,
             Some(Value::Null) => Some(None),
             Some(Value::Object(a)) => {
-                if let Some(k) = a.keys().find(|k| !["token", "bypass_sha256", "signed_in"].contains(&k.as_str())) {
+                if let Some(k) = a.keys().find(|k| !["token", "bypass_sha256", "signed_in", "password"].contains(&k.as_str())) {
                     return Err(Error::BadRequest(format!("access.{k} isn't a field")));
                 }
                 let signed_in = match a.get("signed_in") {
@@ -1747,10 +1894,16 @@ impl Apps {
                     Some(Value::Bool(b)) => *b,
                     Some(_) => return Err(Error::BadRequest("access.signed_in is a boolean".into())),
                 };
+                // A password visitors type (Vercel's password protection): its argon2id hash only.
+                let password = match a.get("password") {
+                    None | Some(Value::Null) => None,
+                    Some(Value::String(p)) if (8..=200).contains(&p.chars().count()) => Some(crate::password::hash(p).await.map_err(Error::Internal)?),
+                    Some(_) => return Err(Error::BadRequest("access.password is 8–200 characters".into())),
+                };
                 let token = match a.get("token") {
-                    None | Some(Value::Null) if signed_in => None,
+                    None | Some(Value::Null) if signed_in || password.is_some() => None,
                     Some(Value::String(t)) if (20..=200).contains(&t.len()) && t.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b)) => Some(t.as_str()),
-                    _ => return Err(Error::BadRequest("access.token is 20–200 of A-Z, a-z, 0-9, - and _ (or access.signed_in is true)".into())),
+                    _ => return Err(Error::BadRequest("access.token is 20–200 of A-Z, a-z, 0-9, - and _ (or access.signed_in is true, or there's a password)".into())),
                 };
                 if signed_in && self.cfg.web_url.is_none() {
                     return Err(Error::Conflict("signing in needs roll's dashboard address on this node (web_url)".into()));
@@ -1760,9 +1913,9 @@ impl Apps {
                     Some(Value::String(h)) if h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()) => Some(h.to_ascii_lowercase()),
                     Some(_) => return Err(Error::BadRequest("access.bypass_sha256 is a SHA-256 in hex".into())),
                 };
-                Some(Some(Access { token_hash: token.map(crate::public::token_hash), bypass_hash: bypass, signed_in }))
+                Some(Some(Access { token_hash: token.map(crate::public::token_hash), bypass_hash: bypass, signed_in, password_hash: password }))
             }
-            Some(_) => return Err(Error::BadRequest("access is {token?, signed_in?, bypass_sha256?} or null".into())),
+            Some(_) => return Err(Error::BadRequest("access is {token?, signed_in?, password?, bypass_sha256?} or null".into())),
         };
         // A new environment may start with another's variables (cloning staging from production).
         let variables_from = match o.get("variables_from") {
@@ -1894,6 +2047,10 @@ impl Apps {
         if let Some(on) = paused {
             let (sid, e) = (service.to_string(), env.to_string());
             self.db(move |s| s.set_paused(&sid, &e, on)).await?;
+            // Resumed: its secrets are watched again (a watch ends itself while it's paused).
+            if !on {
+                self.watch_secrets_of(service).await;
+            }
             // At once on its owner: what runs stops, and the next tick keeps no floor; resumed,
             // the next tick (or request) starts what it wants again.
             let live = self.live(service, env);
@@ -1951,10 +2108,24 @@ impl Apps {
             self.live(service, env).forget_gate();
             self.changed(service);
         }
+        if let Some(sp) = split {
+            let (sid, e) = (service.to_string(), env.to_string());
+            self.db(move |s| s.set_split(&sid, &e, sp.as_ref())).await?;
+            self.live(service, env).forget_gate();
+            self.changed(service);
+        }
         if let Some(routes) = routes {
             let (sid, e) = (service.to_string(), env.to_string());
             self.db(move |s| s.set_routes(&sid, &e, &routes)).await?;
             self.live(service, env).forget_gate();
+            self.changed(service);
+        }
+        if let Some(checks) = checks {
+            let (sid, e, names) = (service.to_string(), env.to_string(), checks.iter().map(|c| c.name.clone()).collect::<Vec<_>>());
+            self.db(move |s| s.set_checks(&sid, &e, &checks)).await?;
+            // A removed check's state goes with it.
+            let prefix = format!("{}/", crate::env_key(service, env));
+            self.check_states.lock().retain(|k, _| !k.strip_prefix(&prefix).is_some_and(|n| !names.iter().any(|x| x == n)));
             self.changed(service);
         }
         if let Some(limit) = rate_limit {
@@ -1962,6 +2133,12 @@ impl Apps {
             self.db(move |s| s.set_rate_limit(&sid, &e, limit.as_ref())).await?;
             self.live(service, env).forget_gate();
             self.changed(service);
+        }
+        // The label it answers to under the project's preview domain (roll previews sets it).
+        if let Some(label) = preview_label {
+            let (sid, e, p) = (service.to_string(), env.to_string(), svc.project.clone());
+            self.db(move |s| s.set_preview_host(&sid, &e, &p, label.as_deref())).await?;
+            self.hosts_changed();
         }
         // Its deploys' reports to the Git host, from the next one on.
         if let Some(Value::Bool(on)) = o.get("report") {
@@ -1979,6 +2156,10 @@ impl Apps {
         if let Some(Value::Bool(on)) = o.get("redeploy_on_secrets") {
             let (sid, e, on) = (service.to_string(), env.to_string(), *on);
             self.db(move |s| s.set_redeploy_on_secrets(&sid, &e, on)).await?;
+            // Watched from now on (a watch already running ends itself once it's off).
+            if on {
+                self.watch_secrets_of(service).await;
+            }
         }
         // Traces: a token of the environment's own (kept sealed: it goes into every deploy's
         // variables), or none. Its variables reach instances at the next deploy.
@@ -2021,7 +2202,27 @@ impl Apps {
             self.db(move |s| s.set_access(&sid, &e, a.as_ref())).await?;
             self.set_access_cache(service, env, Some(access));
         }
-        self.environment(service, env).await
+        let mut new_urls = Vec::new();
+        if let Some((beats, tokens)) = heartbeats {
+            let (sid, e) = (service.to_string(), env.to_string());
+            let fresh: Vec<String> = tokens.iter().map(|(n, _)| n.clone()).collect();
+            let slug = self
+                .db(move |s| {
+                    s.set_heartbeats(&sid, &e, &beats)?;
+                    // A new one (a name used before, an environment made again) starts with no ping.
+                    for name in &fresh {
+                        crate::heartbeats::forget(s, &sid, &e, name)?;
+                    }
+                    Ok(s.environment(&sid, &e)?.slug)
+                })
+                .await?;
+            // Where each new heartbeat pings: shown this once (only its token's hash is kept).
+            new_urls = tokens.into_iter().map(|(name, token)| (name, format!("{}{}{token}", self.url(&slug), crate::heartbeats::PATH))).collect();
+            self.changed(service);
+        }
+        let mut view = self.environment(service, env).await?;
+        view.heartbeat_urls.extend(new_urls);
+        Ok(view)
     }
 
     /// Tear an environment down: instances, volume, domains, variables; deployments stay in
@@ -2244,6 +2445,14 @@ impl Apps {
                 // Its token is a credential: never shown, as a sealed variable.
                 trace_endpoint = true;
             }
+        }
+        // A site's functions service: where its edge functions' `context.next()` reaches the
+        // site (this listener, as instances reach it; `crate::edge`), set at start so the runtime
+        // makes it reachable.
+        if svc.build.builder == crate::model::Builder::Functions
+            && let Some(base) = &self.cfg.otlp_base
+        {
+            vars.insert("ROLL_EDGE_BASE".into(), (self.deps.runtime.reach(base.trim_end_matches('/')), "roll"));
         }
         let sid = svc.id.clone();
         let links = self.db(move |s| s.links_minted(&sid)).await?;
@@ -2831,6 +3040,89 @@ impl Apps {
         Ok(d)
     }
 
+    // ── a project's preview domain (docs/apps/README.md, "A project's preview domain") ──
+
+    /// Where a project's preview domain's CNAME points (a name of roll's that reaches it).
+    fn preview_target(&self, project: &str) -> String {
+        self.target(&format!("previews-{}", project.strip_prefix("prj_").unwrap_or(project)))
+    }
+
+    fn preview_domain_view(&self, project: &str, (hostname, status, token, error, created_at): store::PreviewDomainRow) -> Domain {
+        Domain {
+            record: self.record(&hostname),
+            target: self.preview_target(project),
+            hostname,
+            kind: DomainKind::Custom,
+            status,
+            token,
+            error,
+            // Plain HTTP until wildcard certificates (DNS-01) are issued here.
+            tls: TlsStatus::None,
+            tls_error: None,
+            created_at,
+            redirect_to: None,
+            port: None,
+        }
+    }
+
+    /// `GET /v1/apps/projects/{project}/preview-domain`.
+    pub async fn preview_domain(self: &Arc<Self>, project: &str) -> Result<Domain> {
+        let p = project.to_string();
+        let row = self.db(move |s| s.preview_domain(&p)).await?.ok_or_else(|| Error::NotFound(format!("{project} has no preview domain")))?;
+        Ok(self.preview_domain_view(project, row))
+    }
+
+    /// `POST /v1/apps/projects/{project}/preview-domain {hostname}`: a wildcard (`*.preview.acme.dev`)
+    /// its preview environments answer under, by their `preview_host`; pending until its DNS is
+    /// verified, as a custom domain is. One a project (a new one replaces it).
+    pub async fn set_preview_domain(self: &Arc<Self>, project: &str, body: Value) -> Result<Domain> {
+        self.project_name(project)?;
+        let host = body.get("hostname").and_then(Value::as_str).ok_or_else(|| Error::BadRequest("hostname is a wildcard like *.preview.acme.dev".into()))?;
+        let mut reserved: Vec<&str> = self.cfg.reserved.iter().map(String::as_str).collect();
+        reserved.push(&self.cfg.domain);
+        let host = check_hostname(host, &reserved)?;
+        if !host.starts_with("*.") {
+            return Err(Error::BadRequest("hostname is a wildcard like *.preview.acme.dev (its previews are the names one label under it)".into()));
+        }
+        let (p, h) = (project.to_string(), host.clone());
+        self.db(move |s| s.set_preview_domain(&p, &h)).await?;
+        self.hosts_changed();
+        self.preview_domain(project).await
+    }
+
+    /// `POST …/preview-domain/verify`: its DNS checked as a custom domain's is (the TXT challenge,
+    /// or the CNAME to its own target where that target is the project's alone).
+    pub async fn verify_preview_domain(self: &Arc<Self>, project: &str) -> Result<Domain> {
+        let p = project.to_string();
+        let (host, _, token, _, _) = self.db(move |s| s.preview_domain(&p)).await?.ok_or_else(|| Error::NotFound(format!("{project} has no preview domain")))?;
+        let target = self.preview_target(project);
+        let cnames = self.deps.resolver.cname(&host).await;
+        let cname_ok = cnames.contains(&target);
+        let challenge = crate::model::challenge_name(&host);
+        let txts = self.deps.resolver.txt(&challenge).await;
+        let shared = self.cfg.cname_target.is_some();
+        let (status, error) = if txts.contains(&token) || (cname_ok && !shared) {
+            (DomainStatus::Active, None)
+        } else {
+            let seen = crate::model::DnsSeen { cnames, txts, host_txts: self.deps.resolver.txt(&host).await, addresses: if cname_ok { Vec::new() } else { self.deps.resolver.addresses(&host).await } };
+            (DomainStatus::Pending, Some(crate::model::domain_diagnosis(&host, &target, &challenge, &token, &seen, shared)))
+        };
+        let (p, err) = (project.to_string(), error.clone());
+        self.db(move |s| s.set_preview_domain_status(&p, status, err.as_deref())).await?;
+        self.hosts_changed();
+        self.preview_domain(project).await
+    }
+
+    /// `DELETE …/preview-domain`.
+    pub async fn delete_preview_domain(self: &Arc<Self>, project: &str) -> Result<()> {
+        let p = project.to_string();
+        if !self.db(move |s| s.delete_preview_domain(&p)).await? {
+            return Err(Error::NotFound(format!("{project} has no preview domain")));
+        }
+        self.hosts_changed();
+        Ok(())
+    }
+
     pub async fn delete_domain(self: &Arc<Self>, service: &str, env: &str, host: &str) -> Result<()> {
         // What a hostname names is about to change: no host answer kept from before.
         self.hosts_changed();
@@ -3029,7 +3321,14 @@ impl Apps {
             let (dep, slug) = (format!("dep_{dep}"), slug.to_string());
             return self.db(move |s| s.environment_by_slug(&slug)).await.ok().flatten().map(|e| (e.service, e.name, Some(dep), None));
         }
-        self.active_domain(&host).await.map(|(s, e, d)| (s, e, None, d.port))
+        if let Some((s, e, d)) = self.active_domain(&host).await {
+            return Some((s, e, None, d.port));
+        }
+        // One label under a project's active preview domain: the environment that answers to it
+        // (any other label is none of roll apps': rolld's own previews may serve it).
+        let (label, rest) = host.split_once('.')?;
+        let (wild, label) = (format!("*.{rest}"), label.to_string());
+        self.db(move |s| s.preview_target(&wild, &label)).await.ok().flatten().map(|(s, e)| (s, e, None, None))
     }
 
     /// What the environment's public names let through ([`live::Gate`]): the live state's copy,
@@ -3050,7 +3349,7 @@ impl Apps {
             }
             false => None,
         };
-        let g = Arc::new(live::Gate { maintenance: row.maintenance, allow, rate: row.rate_limit, firewall: row.firewall, pages: row.pages, preview: row.ephemeral, headers: row.headers, routes: row.routes, traces, vitals: row.vitals, challenge_key });
+        let g = Arc::new(live::Gate { maintenance: row.maintenance, allow, rate: row.rate_limit, firewall: row.firewall, pages: row.pages, preview: row.ephemeral, headers: row.headers, routes: row.routes, traces, vitals: row.vitals, challenge_key, split: row.split });
         live.set_gate(g.clone(), seen);
         Ok(g)
     }
@@ -3063,6 +3362,22 @@ impl Apps {
 
     pub(crate) fn feedback_notes(&self) -> Option<Arc<dyn integrations::FeedbackNotes>> {
         self.notes.get().cloned()
+    }
+
+    /// Where names under a project's preview domain that no environment holds go (roll previews'
+    /// router, for its previews on roll's own runtime). Set once.
+    pub fn set_preview_router(&self, router: Arc<dyn integrations::PreviewRouter>) {
+        let _ = self.preview_router.set(router);
+    }
+
+    /// The router for `host` when it's one label under a project's active preview domain that no
+    /// environment answers to.
+    pub(crate) async fn preview_router_for(self: &Arc<Self>, host: &str) -> Option<Arc<dyn integrations::PreviewRouter>> {
+        let router = self.preview_router.get().cloned()?;
+        let host = host.rsplit_once(':').filter(|(_, p)| p.bytes().all(|b| b.is_ascii_digit())).map_or(host, |(h, _)| h).trim_end_matches('.').to_ascii_lowercase();
+        let (_, rest) = host.split_once('.')?;
+        let wild = format!("*.{rest}");
+        self.db(move |s| s.preview_domain_active(&wild)).await.ok().filter(|on| *on).map(|_| router)
     }
 
     /// Where a Git URL service's pushes to branches it doesn't follow go (roll previews). Set once.
@@ -3154,6 +3469,36 @@ impl Apps {
         gauge("roll_apps_egress_bytes_per_minute", "Bytes answered in the last finished minute.", r.egress_bytes as f64, "");
         gauge("roll_apps_over_capacity_per_minute", "Requests in the last finished minute that found every instance busy at max_instances.", r.over_capacity as f64, "");
         Ok(out)
+    }
+
+    /// `GET …/environments/{env}/slo`: its objective (the live deployment's, else the service's)
+    /// against its window: each indicator's total, failures, share and budget left, and the burn
+    /// alert firing now. Minutes for the last week, hours before (an hour's latency fails whole
+    /// when its slowest minute did). Null when it has none.
+    pub async fn slo_report(self: &Arc<Self>, service: &str, env: &str) -> Result<Value> {
+        let (svc, row) = self.service_env(service, env).await?;
+        let slo = match row.active.clone() {
+            Some(dep) => self.db(move |s| s.deployment(&dep)).await?.run.slo,
+            None => svc.for_env(&row)?.run.slo,
+        };
+        let Some(slo) = slo else { return Ok(json!({ "slo": null })) };
+        let now_min = code_sql::now_ms() / 60_000;
+        let since = now_min - slo.window_days as i64 * 24 * 60;
+        let (sid, e) = (service.to_string(), env.to_string());
+        let (minutes, hours) = self.db(move |s| Ok((s.minutes(&sid, &e, since)?, s.hours(&sid, &e, since / 60)?))).await?;
+        let minutes: Vec<_> = minutes.into_iter().filter(|r| r.minute < now_min).collect();
+        // Hours only before the first minute kept (a rolled-up hour isn't counted twice).
+        let first = minutes.first().map_or(now_min, |r| r.minute);
+        let hours: Vec<_> = hours.into_iter().filter(|h| (h.minute + 1) * 60 <= first).collect();
+        let show = |t: crate::slo::Tally| json!({ "total": t.total, "bad": t.bad, "sli": (t.total > 0).then(|| 100.0 * (t.total - t.bad) as f64 / t.total as f64), "budget_left": t.budget_left(slo.objective) });
+        let avail = crate::slo::availability(&minutes);
+        let avail = crate::slo::Tally { total: avail.total + crate::slo::availability(&hours).total, bad: avail.bad + crate::slo::availability(&hours).bad };
+        let latency = slo.latency_ms.map(|ms| {
+            let (m, h) = (crate::slo::latency(&minutes, ms, 1), crate::slo::latency(&hours, ms, 60));
+            show(crate::slo::Tally { total: m.total + h.total, bad: m.bad + h.bad })
+        });
+        let burning = crate::slo::burning(&slo, &minutes, now_min).map(|(i, rate, w)| json!({ "indicator": i, "burn_rate": (rate * 10.0).round() / 10.0, "window": w }));
+        Ok(json!({ "slo": slo, "availability": show(avail), "latency": latency, "burning": burning }))
     }
 
     /// An environment's metrics over the last `minutes`: a point a minute for up to a week, a

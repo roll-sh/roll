@@ -499,7 +499,87 @@ fn os_body(ctx: &Ctx) -> EsResult<Option<Value>> {
     Ok(filter)
 }
 
-pub fn field_caps(ctx: &Ctx) -> EsResult<Reply> {
+/// The header a linked cluster's `_field_caps` sends its remotes: answer each index's
+/// capabilities ([`per_index`]) for the asking cluster to merge with its own. Honored only on a
+/// linked cluster's request (the remote access header, which only roll's own calls carry).
+pub const PER_INDEX_HEADER: &str = "x-roll-field-caps-per-index";
+
+/// What a linked remote contributes to a cross-cluster `_field_caps`: its indices (named
+/// `alias:index`) and each one's capabilities.
+#[derive(Default)]
+struct Remotes {
+    indices: Vec<(String, Vec<(String, Cap)>)>,
+    /// Only remote clusters were named: no local index.
+    no_local: bool,
+}
+
+/// `GET/POST [<index>/]_field_caps`. Expressions naming linked remote clusters
+/// (`crate::remote::links`) are asked there, each index's capabilities coming back to merge
+/// here exactly as local indices merge; a remote that can't be reached is left out when its
+/// `skip_unavailable` says so, and fails the request otherwise.
+pub async fn field_caps(ctx: &Ctx<'_>) -> EsResult<Reply> {
+    use crate::remote::links;
+    let exprs = super::index_expressions(ctx);
+    let Some(split) = links::split(ctx, &exprs)? else { return field_caps_local(ctx, Remotes::default()) };
+    let body = ctx.body()?;
+    let qs = links::query_string(ctx, &["index", "pretty", "human", "error_trace", "filter_path"], &[]);
+    let mut legs = Vec::new();
+    for (r, target, remote_exprs) in &split.legs {
+        let uri = format!("/{}/_field_caps{qs}", links::path_segment(remote_exprs));
+        let mut rq = links::request(ctx, &r.alias, "POST", &uri, Some(body.clone().unwrap_or_else(Value::object)));
+        rq.headers.push((PER_INDEX_HEADER.into(), "true".into()));
+        legs.push((r.clone(), links::leg(ctx, r, target.clone(), rq)));
+    }
+    let mut remotes = Remotes { indices: Vec::new(), no_local: split.local.is_empty() };
+    for (r, h) in legs {
+        match links::join(&r.alias, h).await {
+            links::Answer::Ok(v) => {
+                for e in v.get("per_index").and_then(Value::as_array).into_iter().flatten() {
+                    let Some(name) = e.get("index").and_then(Value::as_str) else { continue };
+                    let caps = e.get("fields").and_then(Value::as_array).into_iter().flatten().filter_map(|f| Some((f.get("name")?.as_str()?.to_string(), cap_of(f)?))).collect();
+                    remotes.indices.push((format!("{}:{name}", r.alias), caps));
+                }
+            }
+            links::Answer::Failed(e) | links::Answer::Unavailable(e) => {
+                if !r.skip_unavailable {
+                    return Err(e);
+                }
+            }
+        }
+    }
+    field_caps_local(ctx, remotes)
+}
+
+fn cap_to_value(name: &str, c: &Cap) -> Value {
+    let mut meta = Map::new();
+    for (k, v) in &c.meta {
+        meta.insert(k.clone(), v.clone().into());
+    }
+    obj! {
+        "name" => name, "type" => c.ty.clone(), "metadata" => c.metadata, "searchable" => c.searchable, "aggregatable" => c.aggregatable,
+        "parent" => c.parent, "nested" => c.nested, "multi" => c.multi, "dimension" => c.dimension,
+        "metric" => c.metric.clone().map_or(Value::Null, Value::from), "meta" => Value::Obj(meta), "inference" => c.inference,
+    }
+}
+
+fn cap_of(v: &Value) -> Option<Cap> {
+    let b = |k: &str| v.get(k).and_then(Value::as_bool).unwrap_or(false);
+    Some(Cap {
+        ty: v.get("type")?.as_str()?.to_string(),
+        metadata: b("metadata"),
+        searchable: b("searchable"),
+        aggregatable: b("aggregatable"),
+        parent: b("parent"),
+        nested: b("nested"),
+        multi: b("multi"),
+        dimension: b("dimension"),
+        metric: v.get("metric").and_then(Value::as_str).map(str::to_string),
+        meta: v.get("meta").and_then(Value::as_object).map(|m| m.iter().map(|(k, v)| (k.clone(), v.to_es_string())).collect()).unwrap_or_default(),
+        inference: b("inference"),
+    })
+}
+
+fn field_caps_local(ctx: &Ctx, remotes: Remotes) -> EsResult<Reply> {
     let os = ctx.cluster.dialect == crate::cluster::Dialect::OpenSearch;
     if os {
         let patterns: Vec<String> = ctx.query("fields").map(|q| q.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()).unwrap_or_default();
@@ -508,7 +588,7 @@ pub fn field_caps(ctx: &Ctx) -> EsResult<Reply> {
         }
         let filter = os_body(ctx)?;
         let include_unmapped = ctx.bool_param("include_unmapped", false)?;
-        return respond(ctx, patterns, Map::new(), filter, Filters::default(), Vec::new(), include_unmapped, true, true);
+        return respond(ctx, patterns, Map::new(), filter, Filters::default(), Vec::new(), include_unmapped, true, true, remotes);
     }
     let body = ctx.body_map()?;
     let mut patterns: Vec<String> = Vec::new();
@@ -549,7 +629,7 @@ pub fn field_caps(ctx: &Ctx) -> EsResult<Reply> {
     let types: Vec<String> = ctx.query("types").map(|t| t.split(',').map(str::to_string).filter(|s| !s.is_empty()).collect()).unwrap_or_default();
     let include_unmapped = ctx.bool_param("include_unmapped", false)?;
     let include_empty = ctx.bool_param("include_empty_fields", true)?;
-    respond(ctx, patterns, runtime_request, index_filter, filters, types, include_unmapped, include_empty, false)
+    respond(ctx, patterns, runtime_request, index_filter, filters, types, include_unmapped, include_empty, false, remotes)
 }
 
 /// Collects and merges the capabilities of `patterns` over the target indices. OpenSearch
@@ -565,8 +645,16 @@ fn respond(
     include_unmapped: bool,
     include_empty: bool,
     os: bool,
+    remotes: Remotes,
 ) -> EsResult<Reply> {
-    let names = super::resolve_indices(ctx, IndicesOptions::STRICT_EXPAND_OPEN)?;
+    let names = match remotes.no_local {
+        true => Vec::new(),
+        false => {
+            let opts = ctx.indices_options(IndicesOptions::STRICT_EXPAND_OPEN)?;
+            let exprs: Vec<String> = super::index_expressions(ctx).into_iter().filter(|e| !crate::remote::links::names_link(ctx, e)).collect();
+            crate::meta::resolve::resolve(&ctx.state(), &exprs, &opts, ctx.now_ms)?
+        }
+    };
     let st = ctx.state();
     let indices: Vec<&IndexMeta> = names
         .iter()
@@ -606,7 +694,31 @@ fn respond(
             merged.entry(name).or_default().entry(cap.ty.clone()).or_default().push((idx.name.clone(), cap));
         }
     }
-    let mut index_names: Vec<String> = indices.iter().map(|i| i.name.clone()).collect();
+    // A linked cluster asking for each index's capabilities (its remote).
+    if ctx.request.header(PER_INDEX_HEADER).is_some() && ctx.request.header(crate::remote::links::REMOTE_ACCESS_HEADER).is_some() {
+        let mut per: Vec<(String, Vec<Value>)> = indices.iter().map(|i| (i.name.clone(), Vec::new())).collect();
+        for (field, by_type) in &merged {
+            for entries in by_type.values() {
+                for (index, cap) in entries {
+                    if let Some((_, list)) = per.iter_mut().find(|(i, _)| i == index) {
+                        list.push(cap_to_value(field, cap));
+                    }
+                }
+            }
+        }
+        let per: Vec<Value> = per.into_iter().map(|(i, f)| obj! { "index" => i, "fields" => Value::Arr(f) }).collect();
+        return Reply::ok(obj! { "per_index" => Value::Arr(per) });
+    }
+    let remote_names: Vec<String> = remotes.indices.iter().map(|(i, _)| i.clone()).collect();
+    for (index, caps) in remotes.indices {
+        for (name, cap) in caps {
+            if !merged.contains_key(&name) {
+                order.push(name.clone());
+            }
+            merged.entry(name).or_default().entry(cap.ty.clone()).or_default().push((index.clone(), cap));
+        }
+    }
+    let mut index_names: Vec<String> = indices.iter().map(|i| i.name.clone()).chain(remote_names).collect();
     index_names.sort();
     let mut fields = Map::new();
     for name in order {
