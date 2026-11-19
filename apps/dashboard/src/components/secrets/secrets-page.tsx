@@ -96,7 +96,7 @@ function Surface({ project, search }: { project: WorkspaceProject; search: Searc
     resourceName: (l) => ws.inventory.get(resourceKey({ kind: l.kind as never, ref: l.ref }))?.name ?? l.ref,
     required: required.data ?? [],
     reloadRequired: required.reload,
-    serious: (health.data ?? []).filter((f) => f.issue === "expired" || f.issue === "missing" || f.issue === "exposed" || f.issue === "public").length,
+    serious: (health.data ?? []).filter((f) => f.issue === "decoy_used" || f.issue === "expired" || f.issue === "missing" || f.issue === "exposed" || f.issue === "public").length,
   };
 
   const env = search.env ? envs.find((e) => e.slug === search.env) : undefined;

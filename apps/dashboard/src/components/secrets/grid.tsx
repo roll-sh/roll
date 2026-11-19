@@ -68,7 +68,7 @@ export function OverviewGrid() {
         <Teach
           login
           title={path === "/" ? `No secrets in ${project.name} yet` : `Nothing in ${path} yet`}
-          cli={[`roll secrets set -p ${project.name} -e development DATABASE_URL=…`, `roll secrets import -p ${project.name} -e development .env`, `roll run -p ${project.name} --env production -- <cmd>`]}
+          cli={[`roll secrets set -p ${project.name} -e development DATABASE_URL=…`, `roll secrets import -p ${project.name} -e development .env`, `roll run -p ${project.name} -e development -- <cmd>`]}
         >
           Open an environment to add a secret, paste a .env file, or link one of the project's resources so its credentials stay current. From the CLI:
         </Teach>

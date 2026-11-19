@@ -94,13 +94,13 @@ export function Warnings({ items, className = "" }: { items: string[]; className
 const still = () => () => {};
 
 /**
- * How the CLI signs in to this roll, before an empty state's CLI lines: the API as this browser
- * reaches it (relative to the page's origin), then `roll login`. None on the server, which has no
- * origin.
+ * How the CLI signs in to this roll, before an empty state's CLI lines: `roll login` with the API
+ * as this browser reaches it (relative to the page's origin); later commands go to the last
+ * login's roll. None on the server, which has no origin.
  */
 function useCliLogin(): string[] {
   const api = useSyncExternalStore(still, () => new URL(ROLL_API, window.location.origin).href.replace(/\/$/, ""), () => null);
-  return api ? [`export ROLL_API_URL=${api}`, "roll login"] : [];
+  return api ? [`roll login ${api}`] : [];
 }
 
 /** `login`: the CLI lines start by signing in to this roll. */

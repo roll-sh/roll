@@ -155,12 +155,18 @@ function SyncRow({ sync: s, kind, onChanged, onError }: { sync: Sync; kind?: Syn
           </span>
         )}
         <span className="ml-auto flex items-center gap-2 text-right text-[11px] text-subtle">
-          <span className={running ? "shimmer" : status.tone}>{running ? "pushing…" : status.text}</span>
+          {s.paused_at ? <span className="text-muted" title={s.paused_why ?? undefined}>paused {ago(s.paused_at)}</span> : <span className={running ? "shimmer" : status.tone}>{running ? "pushing…" : status.text}</span>}
           <span>{s.last_synced_at ? `${ago(s.last_synced_at)} · ${s.synced} at the target` : "never synced"}</span>
         </span>
-        <button className={ghost} onClick={run} disabled={running} title="Push every key now">
-          <RefreshCw className={`size-3.5 ${running ? "animate-spin motion-reduce:animate-none" : ""}`} /> Run now
-        </button>
+        {s.paused_at ? (
+          <button className={ghost} onClick={() => api.setSyncPaused(s.id, false).then(onChanged, (e) => onError(errorText(e)))} title="Push again; what changed while it was paused goes out">
+            <RefreshCw className="size-3.5" /> Resume
+          </button>
+        ) : (
+          <button className={ghost} onClick={run} disabled={running} title="Push every key now">
+            <RefreshCw className={`size-3.5 ${running ? "animate-spin motion-reduce:animate-none" : ""}`} /> Run now
+          </button>
+        )}
         {sure ? (
           <span className="flex gap-1">
             <button className={dangerButton} onClick={() => api.deleteSync(s.id).then(onChanged, (e) => onError(errorText(e)))}>
