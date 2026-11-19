@@ -24,7 +24,7 @@
 #   PGO_TRAIN_SKIP   classes left out, space-separated (startup point range short bulk tpch
 #                    catalog regress breadth): only for a hold-out measurement, never for a shipped
 #                    build
-# Time: about 8 minutes on 2 cores for the engine. Classes and their shares are set below; a
+# Time: about 10 minutes on 2 cores for the engine. Classes and their shares are set below; a
 # class's OLTP parts run for fixed seconds, the others for fixed work.
 set -eu
 # Without the docker group in this shell (a session older than the membership), again under sg.
@@ -51,7 +51,7 @@ log() { echo "   $*"; }
 
 if ss -ltn | grep -q ":$PORT "; then echo "pgo-train: port $PORT busy" >&2; exit 1; fi
 rm -rf "$WORK"; mkdir -p "$WORK/out" "$DATA"
-rm -f "$RAW"/*.profraw
+find "$RAW" -name '*.profraw' -delete
 [ -z "$BRAW" ] || rm -f "$BRAW"/*.profraw
 EPID=
 PROFDIR=$RAW
@@ -88,7 +88,13 @@ docker run -d --name "$CLI" --network host --user "$(id -u):$(id -g)" ${PGO_CLIE
   -v "$WORK/w:/w" -v "$WORK:$WORK" -v "$(realpath "$SQL"):/sql:ro" --entrypoint sleep "$PGIMG" infinity >/dev/null
 
 T0=$(date +%s)
+# Each class writes its raw profiles into its own directory (<raw dir>/<class>, the engine
+# restarted into it: a restart over a store with data in it, recovery and the catalog's reload,
+# is trained at every class's start), so that dist-pgo.sh can weight the classes against each
+# other without training again.
+class() { stop; PROFDIR=$RAW/$1; mkdir -p "$PROFDIR"; start; }
 # Startup: a new data directory (bootstrap), first sessions, a restart that recovers it.
+PROFDIR=$RAW/startup; mkdir -p "$PROFDIR"
 start
 b createdb
 if want startup; then
@@ -97,6 +103,7 @@ if want startup; then
 fi
 b oltp-load --rows 100000
 
+class point
 # Point reads: extended protocol with binary results (the bench client), simple protocol
 # (text), extended with text parameters and results (pgbench -M extended), prepared text.
 if want point; then
@@ -108,11 +115,13 @@ if want point; then
   pgbench -n -S -M prepared -c 8 -j 4 -T 10 bench
   pgbench -n -S -M simple -c 8 -j 4 -T 5 bench
 fi
+class range
 # Range reads: 100-row index ranges, a secondary index's aggregate.
 if want range; then
   b oltp --rows 100000 --clients 8 --secs 25 --only range_scan_100
   b oltp --rows 100000 --clients 8 --secs 5 --only secondary_lookup
 fi
+class short
 # Short write transactions: the bench client's UPDATE / SELECT / INSERT transaction at 8, 32
 # and 1 clients, pgbench's tpcb-like, single-row INSERT, UPDATE, upsert and DELETE.
 if want short; then
@@ -129,19 +138,22 @@ if want short; then
   pgbench -n -M simple -c 8 -j 4 -T 5 bench
   psql -d bench -c CHECKPOINT
 fi
-# A restart over a store with data in it (recovery, the catalog's reload).
-stop; start
-
+class bulk
 # Bulk: COPY in and out, index builds, INSERT ... SELECT, UPDATE, DELETE, VACUUM, ANALYZE.
 if want bulk; then
   psql -d bench -c "ALTER DATABASE bench SET maintenance_work_mem = '256MB'" >/dev/null
   b bulk --rows 1000000 --reps 1
 fi
-# TPC-H at a small scale: the load (COPY, indexes, VACUUM ANALYZE), all 22 queries, parallel.
+class tpch
+# TPC-H at the benchmarked scale (PGO_TPCH_SF, default 1, as BENCH's tables): the load (COPY,
+# indexes, VACUUM ANALYZE), all 22 queries, parallel. At SF 0.2 the plans' and batches' shapes
+# that SF 1 takes went untrained (PGO took more instructions than plain dist on q01: HANDOFF
+# "Analytic CPU, round 6").
 if want tpch; then
-  b tpch-load --sf 0.2
+  b tpch-load --sf "${PGO_TPCH_SF:-1}"
   b tpch --reps 2
 fi
+class catalog
 # Catalog: DDL as a schema grows, psql's \d family and ORM introspection (catalog-tools),
 # psql's own queries.
 if want catalog; then
@@ -151,6 +163,7 @@ if want catalog; then
     psql -d bench -c "$c" >>"$WORK/out/meta.out" 2>&1 || log "psql $c failed"
   done
 fi
+class regress
 # A slice of the golden SQL suite for breadth (every 25th file, each in a new database).
 if want regress; then
   n=0
@@ -196,7 +209,7 @@ if [ -n "$BRAW" ] && want breadth; then
   echo "pgo-train: breadth $(ls "$BRAW"/*.profraw | wc -l) raw profiles"
 fi
 T1=$(date +%s)
-n=$(ls "$RAW"/*.profraw 2>/dev/null | wc -l)
+n=$(ls "$RAW"/*/*.profraw 2>/dev/null | wc -l)
 [ "$n" -gt 0 ] || { echo "pgo-train: no profile written (an uninstrumented engine?)" >&2; exit 1; }
 echo "pgo-train: $((T1 - T0)) s, $n raw profiles, $(du -sh "$RAW" | cut -f1)"
 rm -rf "$WORK"
