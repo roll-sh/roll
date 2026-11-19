@@ -33,7 +33,9 @@ pub async fn open(args: &crate::Args, home: &Path, code: Option<Arc<code_control
     };
     let pg = code_sql::PgOptions { max_connections: args.db_budget()?.accounts, ca: args.code.code_db_ca.clone(), ..Default::default() };
     let api = args.code_public_url.clone().unwrap_or_else(|| format!("http://{}:{}", args.public_host, args.api.port()));
-    let config = roll_accounts::Config::from_env(&api, &args.web_url, open);
+    let mut config = roll_accounts::Config::from_env(&api, &args.web_url, open);
+    // The deployment key as every product has it (a sealed start's is in memory only).
+    config.secret_key = args.secret_key().map(|k| roll_accounts::Secret::new(k.trim()));
     tracing::info!(
         email = !matches!(config.mail, roll_accounts::MailConfig::Off),
         github = config.github.is_some(),
