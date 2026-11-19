@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { accountsApi, activityText, onReauthRequired, phishingResistant, sessionMethod, findPeople, type Activity } from "./accounts-api";
+import { accountsApi, activityText, onReauthRequired, phishingResistant, sessionMethod, findPeople, dormant, type Activity } from "./accounts-api";
 
 describe("activityText", () => {
   const e = (a: Partial<Activity>): Activity => ({ at: 0, action: "sign_in", actor: "usr_me", ok: true, status: 200, ...a });
@@ -94,5 +94,15 @@ describe("findPeople", () => {
     expect(findPeople(all, "", "admins").map((u) => u.handle)).toEqual(["ada"]);
     expect(findPeople(all, "", "no-second-factor").map((u) => u.handle)).toEqual(["bob"]);
     expect(findPeople(all, "", "turned-off").map((u) => u.handle)).toEqual(["cy"]);
+  });
+});
+
+describe("dormant", () => {
+  it("is 90 days without using roll; unknown activity isn't dormant", () => {
+    const day = 24 * 3600 * 1000, now = 1000 * day;
+    expect(dormant({ last_active_at: now - 89 * day, created_at: 0, disabled: false }, now)).toBe(false);
+    expect(dormant({ last_active_at: now - 91 * day, created_at: 0, disabled: false }, now)).toBe(true);
+    expect(dormant({ last_active_at: null, created_at: now - 91 * day, disabled: false }, now)).toBe(false);
+    expect(dormant({ last_active_at: now - 91 * day, created_at: 0, disabled: true }, now)).toBe(false);
   });
 });

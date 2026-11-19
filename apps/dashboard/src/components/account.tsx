@@ -1,6 +1,6 @@
 import { Building2, Check, Copy, Fingerprint, KeyRound, LoaderCircle, Monitor, ShieldCheck, UserPlus } from "lucide-react";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { accountsApi, activityText, phishingResistant, sessionMethod, refreshSession, useSession, findPeople, type AccountPolicy, type Activity, type Invite, type NetworkPolicy, type Passkey, type PasskeyPolicy, type Provider, type ResetRequest, type Session, type User, type PeopleFilter } from "@/lib/accounts-api";
+import { accountsApi, activityText, phishingResistant, sessionMethod, refreshSession, useSession, findPeople, dormant, DORMANT_DAYS, type AccountPolicy, type Activity, type Invite, type NetworkPolicy, type Passkey, type PasskeyPolicy, type Provider, type ResetRequest, type Session, type User, type PeopleFilter } from "@/lib/accounts-api";
 import { creationOptions, credentialJSON, passkeyProblem, passkeysSupported } from "@/lib/webauthn";
 import { Link } from "./link";
 import { GitHubMark, GoogleMark } from "./agents/brand-icons";
@@ -966,6 +966,7 @@ function Users({ me }: { me: string }) {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<PeopleFilter>("everyone");
   const shown = findPeople(list ?? [], query, filter);
+  const idle = (list ?? []).filter((u) => dormant(u)).length;
   return (
     <Section title="People" lead="Everyone with an account. Turning someone off signs them out everywhere at once.">
       <p className="-mt-1 mb-2 text-[12px] text-muted">
@@ -976,6 +977,11 @@ function Users({ me }: { me: string }) {
         (the audit log, as CSV for a spreadsheet).
       </p>
       {error && <p className="mb-2 text-[12px] text-danger">{error}</p>}
+      {list && idle > 0 && (
+        <p className="mb-2 text-[12px] text-muted">
+          {idle === 1 ? "One person hasn't" : `${idle} people haven't`} used roll in {DORMANT_DAYS} days: turning off accounts nobody uses closes a way in.
+        </p>
+      )}
       {list && without > 0 && (
         <p className={`mb-2 text-[12px] ${required ? "text-danger" : "text-muted"}`}>
           {without === 1 ? "One person has" : `${without} people have`} no second factor{required ? ": they can use only their account page until they set one up." : "."}
@@ -1008,6 +1014,9 @@ function Users({ me }: { me: string }) {
                 {u.email}
                 {u.totp || u.passkeys ? ` · ${[u.totp ? "authenticator app" : "", u.passkeys ? `${u.passkeys} passkey${u.passkeys === 1 ? "" : "s"}` : ""].filter(Boolean).join(", ")}` : ""}
                 {!u.totp && !u.passkeys && <span className={required ? "text-danger" : ""}> · no second factor</span>}
+                {" · "}
+                {dormant(u) && <span className="font-medium text-fg">dormant · </span>}
+                {u.last_active_at ? `active ${when(u.last_active_at)}` : "no activity recorded"}
               </span>
             </span>
             {u.id !== me && (
