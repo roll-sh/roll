@@ -3637,7 +3637,7 @@ cache waited out. Ranked now:
    combined tree gated on main c59fca59c with the live outside-databases check (`batch-3.txt`,
    `batch3-round.sh`). **Batch 3 landed** (2026-11-19 02:56–04:07, one lock turn): #132; #136 + #165;
    #173; #166; #144 (main cd65c5fcb = the gated tree plus #375), with roll redis's auth-bypass fix #375
-   ahead of it in the same turn. Then batch 4: today's
+   ahead of it in the same turn. Batch 4 (preparing, 2026-11-19 04:15): today's
    PRs (#248 #262 #264 #274 #276 #277 #279 #281 #284 #290 #303 #304 #329 #330, the issuer work) and
    #86 (`batch-4-notes.txt`).
 3. **R2, cut off everything that reaches a folder** (#304): tokens through roll-access's bulk revoke,
