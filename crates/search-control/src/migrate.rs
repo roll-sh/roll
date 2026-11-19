@@ -468,7 +468,9 @@ mod tests {
         }))
         .unwrap();
         let (kept, dropped) = filter_settings(s);
-        assert_eq!(kept.keys().cloned().collect::<Vec<_>>(), ["index.analysis.analyzer.a.type", "index.number_of_shards"]);
+        let mut kept: Vec<String> = kept.keys().cloned().collect();
+        kept.sort();
+        assert_eq!(kept, ["index.analysis.analyzer.a.type", "index.number_of_shards"]);
         assert_eq!(dropped.len(), 5);
         assert_eq!(named_setting("unknown setting [index.foo.bar] please check that any required plugins are installed").as_deref(), Some("index.foo.bar"));
         assert_eq!(named_setting("Failed to parse value [x] for setting [index.refresh_interval]").as_deref(), Some("index.refresh_interval"));

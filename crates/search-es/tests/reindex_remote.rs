@@ -176,10 +176,15 @@ async fn echoed_credentials_never_reach_an_error_or_a_task() {
     })
     .await;
     let c = cluster(&[("roll.reindex.remote.allow_private_hosts", "true")]).await;
-    for creds in [r#","username":"elastic","password":"hunter2-secret""#, r#","headers":{"Authorization":"ApiKey c2VjcmV0LWtleS12YWx1ZQ=="}"#] {
+    // Each request's own credentials: the password and its Basic token, or the API key.
+    for (creds, secrets) in [
+        (r#","username":"elastic","password":"hunter2-secret""#, &["hunter2", "ZWxhc3RpYzpo"][..]),
+        (r#","headers":{"Authorization":"ApiKey c2VjcmV0LWtleS12YWx1ZQ=="}"#, &["c2VjcmV0"][..]),
+    ] {
+        let leaked = |text: &str| secrets.iter().any(|s| text.contains(s));
         let (s, v, text) = call(&c, "POST", "/_reindex", &reindex(&remote, creds)).await;
         assert_eq!((s, at(&v, "error.type").as_str()), (401, Some("status_exception")), "{text}");
-        assert!(!text.contains("hunter2") && !text.contains("c2VjcmV0") && !text.contains("ZWxhc3RpYzpo"), "{text}");
+        assert!(!leaked(&text), "{text}");
         assert!(text.contains("::es_redacted::"), "{text}");
         // The same as a task: its stored result, its description and the task list.
         let (s, v, _) = call(&c, "POST", "/_reindex?wait_for_completion=false", &reindex(&remote, creds)).await;
@@ -188,7 +193,7 @@ async fn echoed_credentials_never_reach_an_error_or_a_task() {
         let (_, done, text) = call(&c, "GET", &format!("/_tasks/{task}?wait_for_completion=true&timeout=10s"), "").await;
         assert_eq!(at(&done, "completed").as_bool(), Some(true), "{text}");
         assert_eq!(at(&done, "task.description").as_str().map(|d| d.starts_with("reindex from [host=127.0.0.1 port=")), Some(true), "{text}");
-        assert!(!text.contains("hunter2") && !text.contains("c2VjcmV0") && !text.contains("ZWxhc3RpYzpo"), "{text}");
+        assert!(!leaked(&text), "{text}");
     }
 }
 

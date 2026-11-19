@@ -232,7 +232,8 @@ both, for local development), no redirect is followed, no proxy is used, each an
 at most 100 MiB (`roll.reindex.remote.buffer_limit`) and charged to the request breaker, and
 reads time out. Public hosts need no node allowlist; an operator's `reindex.remote.whitelist`
 still narrows them, as in Elasticsearch, and `reindex.remote.blocklist` refuses. HTTPS is verified
-against the platform's roots (plus `reindex.ssl.certificate_authorities`). The remote's answers
+against the platform's roots (plus `reindex.ssl.certificate_authorities`: rolld's
+`--search-reindex-ca`, `ROLL_SEARCH_REINDEX_CA`, for a remote with a private CA). The remote's answers
 are untrusted input. Credentials never leave the client but on the wire: a task's description
 names the host alone (`reindex from [scheme=https host=… port=…][logs] to [logs]`, as
 Elasticsearch prints it), and anything quoted from the remote (an error body, a transport

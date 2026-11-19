@@ -496,16 +496,6 @@ impl Throttle {
         Throttle { live, last_start: None, last_size: 0, throttled: std::time::Duration::ZERO }
     }
 
-    /// Waits until a batch of `size` documents may start; `false` when the task was cancelled.
-    /// For documents already in hand (a remote source); a scroll waits before its next fetch.
-    async fn before_batch(&mut self, size: usize) -> bool {
-        let go = self.wait().await;
-        if go {
-            self.start(size);
-        }
-        go
-    }
-
     /// Waits out the delay the last batch earned before the next one is fetched
     /// (`AbstractAsyncBulkByScrollAction.startNextScroll`): even the fetch that finds nothing waits,
     /// so a throttled run stays running for its whole delay. `false` when the task was cancelled.

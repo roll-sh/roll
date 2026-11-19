@@ -226,7 +226,7 @@ pub struct Client {
 struct Body {
     status: u16,
     bytes: Vec<u8>,
-    _held: Option<Reservation>,
+    held: Option<Reservation>,
 }
 
 impl Client {
@@ -351,7 +351,7 @@ impl Client {
             }
             bytes.extend_from_slice(&chunk);
         }
-        Ok(Body { status, bytes, _held: held })
+        Ok(Body { status, bytes, held })
     }
 
     /// `wrapExceptionToPreserveStatus`: the remote's answer as the reason, its status kept.
@@ -388,7 +388,7 @@ impl Client {
                 return Err(self.status_error(&method, path_query, &b));
             }
             return match crate::json::parse(&b.bytes) {
-                Ok(Some(v @ Value::Obj(_))) => Ok((v, b._held)),
+                Ok(Some(v @ Value::Obj(_))) => Ok((v, b.held)),
                 Ok(_) => Err(not_elasticsearch(None)),
                 Err(e) => Err(not_elasticsearch(Some(EsError::java(500, "x_content_parse_exception", self.scrub(&e.to_string()))))),
             };
@@ -503,7 +503,7 @@ impl RemoteSource {
             (None, true) => obj! { "exclude_vectors" => false, "includes" => Value::Arr(vec![]), "excludes" => Value::Arr(vec![]) },
             (None, false) => Value::Bool(true),
         };
-        let keep_alive = req.search.scroll.clone().unwrap_or_else(|| crate::units::TimeValue::parse("5m", "scroll").expect("5m is a time value"));
+        let keep_alive = req.search.scroll.unwrap_or_else(|| crate::units::TimeValue::parse("5m", "scroll").expect("5m is a time value"));
         let mut s = RemoteSource {
             version: info.version,
             cursor: Cursor::Scroll(None),
@@ -656,11 +656,11 @@ impl RemoteSource {
 
 /// `hits.total`: a number, or `{"value": n}` (7.0 and later).
 fn total_hits(v: &Value) -> Option<u64> {
-    match v.pointer(&["hits", "total"])? {
+    let n = match v.pointer(&["hits", "total"])? {
         Value::Obj(m) => m.get("value").and_then(Value::as_i64),
         t => t.as_i64(),
-    }
-    .map(|n| n.max(0) as u64)
+    };
+    n.map(|n| n.max(0) as u64)
 }
 
 /// A page that failed on some shards (`allow_partial_search_results=false` keeps a recent
