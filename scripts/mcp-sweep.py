@@ -77,7 +77,8 @@ ws = (made.get("workspace_create_project") or by_name("workspace_list_projects",
 pgp = made.get("postgres_create_project") or by_name("postgres_list_projects", {}, "sweep") or {}
 pg = pgp.get("id") or (pgp.get("project") or {}).get("id")
 full = call("postgres_get_project", {"project": pg}) if pg else None
-ep = next((e.get("id") for e in ((full or {}).get("endpoints") or []) if isinstance(e, dict)), None)
+# A branch's primary endpoint (`branches[].endpoint`; no compute runs without Docker, but its reads answer).
+ep = next(((b.get("endpoint") or {}).get("id") for b in ((full or {}).get("branches") or []) if isinstance(b, dict) and isinstance(b.get("endpoint"), dict)), None)
 br = next((b.get("id") for b in ((full or {}).get("branches") or []) if isinstance(b, dict)), None)
 # A token to look at (its secret is never printed).
 tok_req = urllib.request.Request(f"{api}/v1/access/tokens", data=json.dumps({"name": "sweep", "rules": [{"product": "storage", "resources": "*", "actions": {"read": "allow"}}]}).encode(),
@@ -114,6 +115,13 @@ def rest(method, path, body):
 # roll code: an owner and a repo (code's and agents' tools name them).
 rest("POST", "/v1/code/owners", {"name": "sweep"})
 repo_made = rest("POST", "/v1/code/repos", {"owner": "sweep", "name": "app"}) is not None or call("code_list_repos", {}) is not None
+# previews: the repo on the workspace project's canvas, then a preview of it (its deploy needs
+# Docker and fails, but the preview and its reads answer).
+pv_id = None
+if repo_made and ws:
+    rest("PUT", f"/v1/workspace/projects/{ws}/resources/repo/sweep%2Fapp", {"x": 0, "y": 0})
+    pv = rest("POST", "/v1/previews", {"project": ws, "repo": "sweep/app"}) or {}
+    pv_id = pv.get("id") or (pv.get("preview") or {}).get("id")
 # tasks: a message (its delivery to an address that never resolves fails, which is fine).
 msg = call("tasks_publish", {"url": "https://example.invalid/sweep", "body": "{}"}) or {}
 msg_id = msg.get("id") or (msg.get("ids") or [None])[0] or msg.get("message_id")
@@ -131,7 +139,9 @@ if repo_made:
     seen[("code", "owner")] = "sweep"
 if msg_id:
     seen[("tasks", "id")] = msg_id
-print(f"fixtures: repo {repo_made}, tasks message {bool(msg_id)}")
+if pv_id:
+    seen[("previews", "id")] = pv_id
+print(f"fixtures: repo {repo_made}, tasks message {bool(msg_id)}, preview {bool(pv_id)}")
 
 fails, ran, skipped = [], 0, []
 # Two passes: tools without required arguments first (their answers give ids), then the others.
