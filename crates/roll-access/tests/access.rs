@@ -1884,6 +1884,8 @@ async fn a_rule_can_grant_some_indices() {
         let (d, path) = (&d, format!("/v1/access/audit?{q}"));
         async move { d.call(OPERATOR, Method::GET, &path, None).await.1.as_array().unwrap().iter().map(|e| e["resource"].as_str().unwrap_or("").to_string()).collect::<Vec<_>>() }
     };
+    // The audit writer batches: wait for the searches' rows rather than a fixed time.
+    d.audit_until("/v1/access/audit?resource=cl_1", |l| l.as_array().is_some_and(|a| a.iter().any(|e| e["resource"] == "cl_1/logs-2025"))).await;
     let all = who("resource=cl_1").await;
     assert!(all.contains(&"cl_1".to_string()) && all.contains(&"cl_1/logs-2025".to_string()), "{all:?}");
     assert!(who("resource=cl_1/logs-2025&action=read").await.iter().all(|r| r == "cl_1/logs-2025"));
