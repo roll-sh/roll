@@ -78,6 +78,28 @@ impl Repository {
         format!("{}:{loc}", self.ty)
     }
 
+    /// The bucket storage a repository in a tenant's bucket ([`Repository::in_bucket`]) reaches,
+    /// as its client resolves it: the bucket (or an `azure` container, Elasticsearch's default
+    /// when none is named) and the `base_path` without its outer slashes, lower case. Unlike
+    /// [`Repository::location_key`] (the key its contents are kept under, the settings as given),
+    /// spellings of one place compare equal: `prod` and `prod/`, an unnamed container and
+    /// `elasticsearch-snapshots`. Type, endpoint and account are left out on purpose: two
+    /// repositories at one bucket path through different clients (S3 interoperability on GCS,
+    /// another endpoint spelling) may be one place, and what this decides ([`crate::branch`])
+    /// only errs towards read-only. `None` for other repositories.
+    pub fn bucket_place(&self) -> Option<String> {
+        if !self.in_bucket() {
+            return None;
+        }
+        let s = &self.settings;
+        let bucket = match self.ty.as_str() {
+            "azure" => s.get("container").filter(|c| !c.is_empty()).unwrap_or(crate::api::snapshots::AZURE_CONTAINER),
+            _ => s.get("bucket").unwrap_or_default(),
+        };
+        let base = s.get("base_path").unwrap_or_default().trim_matches('/');
+        Some(format!("{}/{}", bucket.to_ascii_lowercase(), base.to_ascii_lowercase()))
+    }
+
     /// `readonly: true` (only that spelling; `url` repositories are read-only by nature, and an
     /// `azure` one reading only its secondary location, as Elasticsearch forces it).
     pub fn read_only(&self) -> bool {

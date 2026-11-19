@@ -223,7 +223,7 @@ pub struct LogDrain {
 pub const DRAIN_FORMATS: [&str; 3] = ["ndjson", "otlp", "syslog"];
 
 /// What a drain can be sent.
-pub const DRAIN_SOURCES: [&str; 4] = ["runtime", "http", "build", "audit"];
+pub const DRAIN_SOURCES: [&str; 6] = ["runtime", "http", "build", "audit", "traces", "metrics"];
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct NotifyTarget {
@@ -599,10 +599,18 @@ pub struct Run {
     /// slot, then gets a 429. Without it the least busy instance takes it past its concurrency.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub queue_s: Option<u32>,
+    /// A web service scaled on its answers' p95 too (Heroku's response-time autoscaling): over
+    /// this many ms for a window, another instance, as `cpu_target` adds one (50–60,000).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latency_target_ms: Option<u32>,
     /// Commands on a schedule, each a job of the live deployment at its due times (Heroku
     /// Scheduler, Vercel crons): any service's, without a cron service of its own.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub schedules: Vec<Scheduled>,
+    /// A roll stream's records POSTed to a web service's path as they arrive (Cloud Run's
+    /// Pub/Sub push): a group's offset committed on each 2xx (`crate::push`). At most four.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub push: Vec<Push>,
     /// Containers beside each instance (Cloud Run's sidecars, Fly's multi-container machines):
     /// in its network namespace (they reach each other on localhost), started after it, frozen,
     /// stopped and removed with it. A web service's or a worker's; at most four.
@@ -870,6 +878,53 @@ pub struct Scheduled {
     pub timeout_s: Option<u32>,
 }
 
+/// One of `run.push`: a topic of a roll stream delivered to a path of one environment, a record
+/// a POST, each partition in order, the group's offset committed on a 2xx (at least once).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Push {
+    /// The stream, by its id (`st_…`), on the service's own project.
+    pub stream: String,
+    pub topic: String,
+    /// The consumer group whose committed offsets say what was delivered.
+    pub group: String,
+    /// Where each record is POSTed: an absolute path, like `/events`.
+    pub path: String,
+    /// The environment that gets them (default `production`): one, so two never split a group.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment: Option<String>,
+    /// A topic of the same stream a record goes to after `max_attempts` failed tries, so its
+    /// partition moves on; without one a record is tried until it's taken.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dead_letter: Option<String>,
+    /// 1–100 (default 5), with `dead_letter`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_attempts: Option<u32>,
+    /// How long one POST may take: 1–600 s (default 30).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_s: Option<u32>,
+    /// Records POSTed at once, each from its own partitions (1–32, default 4): order holds
+    /// within a partition, and a busy topic scales the service out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_in_flight: Option<u32>,
+}
+
+impl Push {
+    pub fn environment(&self) -> &str {
+        self.environment.as_deref().unwrap_or(PRODUCTION)
+    }
+}
+
+/// A topic or group name as Kafka takes one.
+fn kafka_name(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 249 && s != "." && s != ".." && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+}
+
+/// A stream's id (`st_` and 12 of a-z, 0-9): never a name.
+pub fn stream_id(s: &str) -> bool {
+    s.strip_prefix("st_").is_some_and(|r| r.len() == 12 && r.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()))
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Restart {
@@ -1056,7 +1111,9 @@ impl Default for Run {
             rebuild_on_base: false,
             skew_protection: false,
             queue_s: None,
+            latency_target_ms: None,
             schedules: Vec::new(),
+            push: Vec::new(),
             sidecars: Vec::new(),
             block_on: None,
             slo: None,
@@ -1103,6 +1160,38 @@ impl Run {
             }
             if sc.timeout_s.is_some_and(|t| !(1..=86_400).contains(&t)) {
                 return bad("schedules' timeout_s is 1–86400");
+            }
+        }
+        if !self.push.is_empty() && (self.kind != RunType::Web || self.tcp) {
+            return bad("push is a web service's (each record is an HTTP POST)");
+        }
+        if self.push.len() > 4 {
+            return bad("push is at most four");
+        }
+        for (i, p) in self.push.iter().enumerate() {
+            if !stream_id(&p.stream) || !kafka_name(&p.topic) || !kafka_name(&p.group) {
+                return bad("push is [{ stream: a stream's id (st_…), topic, group: a-z, A-Z, 0-9, . _ -, path }]");
+            }
+            if !p.path.starts_with('/') || p.path.len() > 2000 || !p.path.bytes().all(|b| b.is_ascii_graphic()) {
+                return bad("push's path is an absolute path, like /events");
+            }
+            if let Some(e) = &p.environment {
+                check_name("push's environment", e)?;
+            }
+            if p.dead_letter.as_deref().is_some_and(|d| !kafka_name(d) || d == p.topic) {
+                return bad("push's dead_letter is another topic of the stream");
+            }
+            if p.max_attempts.is_some_and(|m| p.dead_letter.is_none() || !(1..=100).contains(&m)) {
+                return bad("push's max_attempts is 1–100, with a dead_letter");
+            }
+            if p.timeout_s.is_some_and(|t| !(1..=600).contains(&t)) {
+                return bad("push's timeout_s is 1–600");
+            }
+            if p.max_in_flight.is_some_and(|n| !(1..=32).contains(&n)) {
+                return bad("push's max_in_flight is 1–32");
+            }
+            if self.push[..i].iter().any(|o| o.stream == p.stream && o.group == p.group && o.topic == p.topic) {
+                return bad("push has one rule per stream, topic and group");
             }
         }
         if !self.sidecars.is_empty() && !matches!(self.kind, RunType::Web | RunType::Worker) {
@@ -1178,6 +1267,9 @@ impl Run {
         if self.queue_s.is_some_and(|q| !(1..=60).contains(&q)) {
             return bad("queue_s is 1–60 seconds");
         }
+        if self.latency_target_ms.is_some_and(|t| !(50..=60_000).contains(&t)) {
+            return bad("latency_target_ms is 50–60,000");
+        }
         let r = &self.rollout;
         if r.steps.len() > 5 || r.steps.iter().any(|s| !(1..=99).contains(s)) || r.steps.windows(2).any(|w| w[0] >= w[1]) {
             return bad("rollout.steps is up to five increasing percents, 1–99");
@@ -1211,9 +1303,7 @@ impl Run {
             }
         } else if let Some(sc) = &self.scale {
             // A stream by its id (`st_…`), never a name; a group as Kafka names one.
-            let stream_ok = sc.stream.strip_prefix("st_").is_some_and(|r| r.len() == 12 && r.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()));
-            let group_ok = !sc.group.is_empty() && sc.group.len() <= 249 && sc.group != "." && sc.group != ".." && sc.group.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b));
-            if !stream_ok || !group_ok || !(1..=1_000_000_000).contains(&sc.per_instance) {
+            if !stream_id(&sc.stream) || !kafka_name(&sc.group) || !(1..=1_000_000_000).contains(&sc.per_instance) {
                 return bad("scale is { stream: a stream's id (st_…), group: a-z, A-Z, 0-9, . _ -, per_instance: 1–1e9 }");
             }
         }
@@ -1575,6 +1665,16 @@ pub struct Environment {
     /// HTML of its own in every page (Netlify's snippet injection).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub snippets: Vec<Snippet>,
+    /// Its runtime config (Vercel's Edge Config): values its instances read at `ROLL_CONFIG_URL`
+    /// without a deploy, and the version they're at.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config_version: Option<i64>,
+    /// When its token was last rotated (`…/config/rotate`): the address before it reads until a
+    /// deploy made after it is live.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config_rotated_at: Option<i64>,
     /// Its deploy freeze, and whether it's on now ([`crate::freeze`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub freeze: Option<crate::freeze::Freeze>,
@@ -2589,6 +2689,13 @@ pub fn secret_ref_env(v: &str) -> Option<Result<String>> {
         Some((env, key)) if !env.is_empty() && !key.is_empty() && !key.ends_with('/') => Some(Ok(env.to_string())),
         _ => bad("a roll:// reference is roll://ENV/KEY or roll://ENV/folder/KEY"),
     }
+}
+
+/// Whether a `roll://` reference's folder may be read by `service`: one under `/services/<id>`
+/// (where "Move to roll secrets" keeps a service's own) only by that service.
+pub fn secret_ref_folder_ok(v: &str, service: &str) -> bool {
+    let parts: Vec<&str> = v.strip_prefix("roll://").unwrap_or(v).split('/').collect();
+    !(parts.len() >= 4 && parts[1] == "services" && parts[2] != service)
 }
 
 /// An environment variable's name: `[A-Za-z_][A-Za-z0-9_]*`, at most 128 characters.

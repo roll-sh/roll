@@ -1,7 +1,7 @@
 import { Check, Copy, KeyRound, Plus, Send } from "lucide-react";
 import { useState } from "react";
 import { Link } from "@tanstack/react-router";
-import { ACTIONS, type Action, type NewToken } from "@/lib/secrets-api";
+import { ACTIONS, type Action, type Environment, type NewToken } from "@/lib/secrets-api";
 import { CodeLeaks } from "./code-leaks";
 import { Identities } from "./identities";
 import { ShareDialog, type ShareSource } from "./share-dialog";
@@ -33,7 +33,7 @@ function Tokens() {
   const { api, project, standard } = useSecrets();
   const tokens = useLoad(() => api.tokens(), [api]);
   const [creating, setCreating] = useState(false);
-  const [made, setMade] = useState<{ name: string; token: string } | null>(null);
+  const [made, setMade] = useState<{ name: string; token: string; env: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const active = (tokens.data ?? []).filter((t) => !t.expires_at || t.expires_at > Date.now());
@@ -68,18 +68,18 @@ function Tokens() {
               Done
             </button>
           </div>
-          <p className="mt-2 font-mono text-[11px] text-subtle">ROLL_TOKEN=… roll run --env production -- &lt;cmd&gt;</p>
+          <p className="mt-2 font-mono text-[11px] text-subtle">ROLL_TOKEN=… roll run --env {made.env} -- &lt;cmd&gt;</p>
         </div>
       )}
       {creating && (
         <NewTokenForm
-          envs={standard.map((e) => e.slug)}
+          envs={standard}
           onCancel={() => setCreating(false)}
           onCreate={async (t) => {
             setError(null);
             try {
               const r = await api.createToken(t);
-              setMade({ name: r.name, token: r.token });
+              setMade({ name: r.name, token: r.token, env: t.environments?.[0] ?? "development" });
               setCreating(false);
               tokens.reload();
             } catch (e) {
@@ -90,7 +90,7 @@ function Tokens() {
       )}
       <ErrorNote error={error ?? tokens.error} onDismiss={error ? () => setError(null) : undefined} className="mb-3" />
       {tokens.data && tokens.data.length === 0 && !creating ? (
-        <Teach title="No tokens yet" cli={[`ROLL_TOKEN=rlt_… roll run -p ${project.name} --env production -- <cmd>`]}>
+        <Teach title="No tokens yet" cli={[`ROLL_TOKEN=rlt_… roll run -p ${project.name} --env ${firstOpen(standard) ?? "development"} -- <cmd>`]}>
           A token lets CI or a service read this project's secrets without your sign-in, limited to the environments, folders and actions you pick.
         </Teach>
       ) : (
@@ -154,10 +154,14 @@ function Revoke({ onRevoke }: { onRevoke: () => void }) {
   );
 }
 
-function NewTokenForm({ envs, onCreate, onCancel }: { envs: string[]; onCreate: (t: NewToken) => Promise<void>; onCancel: () => void }) {
+/** A new token's environment unless one is picked: development, else the first unprotected one (a protected one only when picked). */
+const firstOpen = (envs: Environment[]) => (envs.find((e) => e.slug === "development" && !e.protected) ?? envs.find((e) => !e.protected))?.slug;
+
+function NewTokenForm({ envs: all, onCreate, onCancel }: { envs: Environment[]; onCreate: (t: NewToken) => Promise<void>; onCancel: () => void }) {
+  const envs = all.map((e) => e.slug);
   const [name, setName] = useState("");
   const [allEnvs, setAllEnvs] = useState(false);
-  const [picked, setPicked] = useState<Set<string>>(new Set(envs.includes("production") ? ["production"] : envs.slice(0, 1)));
+  const [picked, setPicked] = useState<Set<string>>(() => new Set([firstOpen(all)].filter((e) => e !== undefined)));
   const [paths, setPaths] = useState("");
   const [actions, setActions] = useState<Set<Action>>(new Set(["read", "reveal"]));
   const [ttl, setTtl] = useState("90");

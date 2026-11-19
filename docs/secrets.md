@@ -21,7 +21,7 @@ environments that inherit from a base environment instead of copying it.
 - Tests: `crates/roll-secrets/tests/api.rs` (the router in process, on SQLite or Postgres),
   `crates/roll-secrets/tests/nodes.rs` (two stores racing on one database),
   `crates/roll-cli/tests/secrets.rs` (`roll run`, with `--watch`, against roll secrets in process),
-  `crates/rolld/tests/secrets.rs` (each product's link against the real rolld),
+  `crates/rolld/tests/secrets.rs` (each product's link against the real rolld, and a sealed start),
   `apps/dashboard/src/lib/secrets-*.test.ts`. `pnpm test:secrets` runs them (`--docker`: on
   Postgres, and the Postgres link).
 
@@ -43,7 +43,8 @@ Everything below works the same from the dashboard (a project's **Secrets**) and
    the first `roll run` prints where to approve it and waits.
 2. **Pick a project and its environments.** A workspace project has `development`, `staging` and
    `production` the first time you open its secrets. Add your own (`roll secrets envs add qa`) and
-   remember the project for this directory:
+   remember the project for this directory (a project that doesn't exist yet is offered to you to
+   create; in a script, `--create` makes it):
 
    ```
    roll secrets setup -p shop -e development
@@ -73,10 +74,13 @@ Everything below works the same from the dashboard (a project's **Secrets**) and
    roll secrets envs protect production --approvals 1
    ```
 7. **CI and services** get a roll token (roll-access's, docs/permissions.md) with one rule on the
-   project: some environments, some folders and only the actions they need, with an expiry:
+   project: some environments, some folders and only the actions they need, with an expiry. By
+   default a token reads and reveals one environment for 90 days: the one `--for-env` names, else
+   the directory's own unless it's protected (a protected one only by name). Everywhere
+   (`--all-environments`) and never expiring (`--no-expiry`, with a warning) are asked for:
 
    ```
-   roll secrets tokens create ci --for-env staging --action read --action reveal --ttl-days 90
+   roll secrets tokens create ci --for-env staging
    ROLL_TOKEN=rlt_… roll run -e staging -- make test
    ```
 
@@ -484,7 +488,7 @@ key. The values themselves aren't re-encrypted; only the data key is wrapped.
 ## AWS
 Short-lived AWS credentials for each lease, as Vault's AWS engine and Infisical's dynamic secrets
 give: a project registers a role in its own account (`POST …/aws-roles {name, role_arn, trust?}`,
-`roll secrets aws-roles add`, the Integrations tab; admin), and three keys link to it in `dynamic`
+`roll secrets aws-roles add`, the Credentials tab; admin), and three keys link to it in `dynamic`
 mode (`access_key_id`, `secret_access_key`, `session_token`: one credential, so they share one
 session per resolve). Each resolve assumes the role for the lease's TTL plus five minutes (15
 minutes to 12 hours, within the role's own maximum). The role trusts roll one of two ways:
@@ -507,7 +511,7 @@ minutes to 12 hours, within the role's own maximum). The role trusts roll one of
 **IAM users' access keys**, rotated by roll as Infisical's AWS IAM rotation does, for what can't
 use a role's sessions (a vendor that takes only a key pair, an old CI). A project registers an IAM
 user next to one of its roles (`POST …/aws-users {name, role, user}`, `roll secrets aws-users add
-NAME USER --role ROLE`, the Integrations tab; admin): roll acts as that role (one that trusts roll
+NAME USER --role ROLE`, the Credentials tab; admin): roll acts as that role (one that trusts roll
 by the project's ExternalId), whose policy allows `iam:ListAccessKeys`, `iam:CreateAccessKey` and
 `iam:DeleteAccessKey` on the user, and registering lists the user's keys to check. It's the link kind
 `aws_iam_user`, `managed` (`access_key_id` and `secret_access_key`, one credential `key`).
@@ -1076,7 +1080,13 @@ in one run, for an operator's maintenance window, and fails if one does), `missi
 imports and base), `exposed` (a protected value also in an unprotected environment), `public`,
 `weak`, `expiring`, `certificate_expiring` (a certificate a project CA signed for a CSR that ends
 within two weeks: links' certificates are replaced by roll, a CSR's only by whoever asked; `key` is
-its names, `path` its CA), `stale`, then `unread` (nobody revealed, exported, resolved or synced it in 90 days,
+its names, `path` its CA), `operator_made` (a sync or a workload identity made as the
+operator account: "made by the operator account: re-save to bind it to a person". Before makers
+were people, an admin's session made them as `operator`, which would act forever after the admin
+was demoted or disabled; nothing is migrated, since nothing tells those from what the deployment's
+own token made. Making the sync again, or the identity (or setting its pinned keys again), from a
+person's session binds it to them. `key` is its id, an identity's environment and folder empty),
+`stale`, then `unread` (nobody revealed, exported, resolved or synced it in 90 days,
 and it's older than that). Each `Finding` names the environment, folder and key where it's set,
 with a detail (the other environments, the reason, the date): never a value, and nothing is
 decrypted. Only what the caller may read is listed, and `weak` only where it may reveal.
@@ -2047,7 +2057,7 @@ in a secret.
 A project admin registers the App's installation (`POST …/github-apps {name, app_id,
 installation_id, private_key, repositories, permissions, api_base?}`, `roll secrets github-apps
 add deploy --app-id 123 --installation 456 --repo web --permission contents:write < key.pem`, or
-the Syncs tab): the App's private key, as GitHub gave it, is sealed with the project's key and
+the Credentials tab): the App's private key, as GitHub gave it, is sealed with the project's key and
 bound to its row, and never shown again. `repositories` and `permissions` are the most any token
 may reach, as Vault and Akeyless put the ceiling on the role: a link narrows within them, never
 past them, so an environment's admin can't mint a token the project's admin didn't allow, and no
@@ -2104,7 +2114,7 @@ engine gives, so a pod, a CI job or a person gets cluster access for minutes rat
 that never expires.
 - **Register a cluster** (`POST …/kubernetes {name, api_url, ca_pem?, token}`, `admin`; `roll
   secrets kubernetes-clusters add NAME API_URL [--ca FILE]` with the token on stdin, or the
-  dashboard's Syncs page). `token` is a service account token roll manages the cluster with: for
+  dashboard's Credentials tab). `token` is a service account token roll manages the cluster with: for
   links to existing service accounts it needs `create` on `serviceaccounts/token` in the namespaces
   links name, and nothing more (a ClusterRole with that one rule, bound per namespace); links with
   `role_rules` need more (["Generated roles"](#generated-roles), below). `api_url` is the API server's `https://`
@@ -2250,7 +2260,7 @@ the labels are for an operator's `kubectl delete -l roll.sh/lease=…`.
 A project's own certificate authority, as Vault's PKI engine and Infisical's PKI give: short-lived
 TLS certificates for services (mTLS between them), with no CA to run.
 - `POST …/cas {name, domains, allow_ip?, max_days?}` (admin; `roll secrets cas add NAME --domain
-  svc.internal`, the Integrations tab) makes an ECDSA P-256 key and a self-signed certificate for ten
+  svc.internal`, the Keys & certificates tab) makes an ECDSA P-256 key and a self-signed certificate for ten
   years. The key is sealed with the project's data key, bound to the CA, and never leaves roll; the
   certificate (`GET …/cas`, `roll secrets cas cert NAME`) is what clients trust. It carries name
   constraints: only its domains, and IP addresses only where allowed (otherwise excluded), so a
@@ -2422,7 +2432,7 @@ A project's own SSH CA, as Vault's SSH engine signs them: short-lived user certi
 long-lived public keys on every server. Servers trust one CA key (`TrustedUserCAKeys`).
 
 - `POST …/ssh-cas {name, principals, max_hours?, host_domains?, max_host_days?}` (admin; `roll secrets ssh-cas add NAME --principal
-  deploy`, the Integrations tab) makes an Ed25519 key, sealed with the project's data key and bound to
+  deploy`, the Keys & certificates tab) makes an Ed25519 key, sealed with the project's data key and bound to
   the CA. Its public key (`ssh-ed25519 …`, `roll secrets ssh-cas key NAME`) is what servers trust.
   `principals` are the logins it signs for; `max_hours` (24 by default, a week at most) is the longest
   a certificate lives.
@@ -2464,7 +2474,7 @@ suffix such as `com`, `co.uk` or `github.io` is refused (from a built-in list of
   under a host domain (a `*.` one level under one too), and answers the `…-cert-v01@openssh.com`
   line for sshd's `HostCertificate` and the `known_hosts` line clients add: `@cert-authority
   *.svc.internal,svc.internal ssh-ed25519 …` (`roll secrets ssh-cas known-hosts NAME`, the CA's row
-  in the Integrations tab). The server's key never leaves it. A CA may sign users, hosts or both.
+  in the Keys & certificates tab). The server's key never leaves it. A CA may sign users, hosts or both.
   Checked against OpenSSH 10: `ssh-keygen -L` reads all three key types' certificates as host
   certificates, and `ssh -o StrictHostKeyChecking=yes` with only the `@cert-authority` line accepts
   a real `sshd`'s Ed25519, ECDSA and RSA host certificates and refuses another name (`Host key
@@ -2486,6 +2496,11 @@ it, and leaves out dynamic keys and what doesn't resolve instead of failing the 
   - Checks, sandboxes (a terminal), previews, syncs (a target its maker chose and may read back:
     the key is "not synced" and the target keeps what it had) and CI's workload identities don't
     get it.
+  - Nor does another roll product's reference that a person or a token chose
+    (`Secrets::bind_ref`, then `resolve_as`: search's snapshot repositories). Whoever may write
+    the product's settings chooses where the value goes (their own S3 endpoint), so the key is
+    refused when it's chosen, and at every read if it's tagged later. It reaches only
+    operator-written storage targets (`resolve_for`, "Other roll products").
 - Nothing tests a guess against it either: no fingerprint, weakness or typed-key misfit shows for
   it, comparing environments says `hidden`, a local file's diff skips it, and the leak scan
   (`POST …/leaks`) doesn't match it. roll code's own scans of pushed code still do: a sensitive
@@ -2601,7 +2616,9 @@ roll completions bash|zsh|fish|powershell
   `--path`/`ROLL_SECRETS_PATH`. Without them, `roll secrets setup -p shop -e staging [--path /api]`
   remembers them for the current directory and the ones under it, in the user's own
   `~/.config/roll/secrets.json` (never the repo), so `roll run -- npm start` needs no flags there
-  (`--show`, `--clear`). Then `development` and `/`. A scoped token (`ROLL_TOKEN`) implies its
+  (`--show`, `--clear`). A project of that name that doesn't exist is made first, through the
+  workspace's `POST /v1/workspace/projects` as whoever the CLI is signed in as: after a yes in a
+  terminal (`Create project "shop"? [y/N]`), or with `--create` in a script. Then `development` and `/`. A scoped token (`ROLL_TOKEN`) implies its
   project.
 - `roll secrets doctor` checks that setup in one go, each line ok or FAIL: who the token is (and
   the project it's bound to), the directory's project and environment and how many keys it can
@@ -2822,8 +2839,15 @@ cluster, instead of a key pasted into it: the Inference tab's "A roll secret", o
   (`DOCKER_*`, `PATH`, proxies…) go in a private env file. On Fargate the env travels in the run's
   bundle, as before.
 - **Sandboxes**: `POST /v1/code/agents/{owner}/sandboxes` takes `secrets: {project, environment}`.
-  The project must have one of the owner's repos on its canvas. The values are sealed with the rest
-  of the sandbox's env until the backend has them. The consumer is `sandbox:<id>`.
+  The project must have one of the owner's repos on its canvas. Managing the code owner isn't
+  enough: whoever creates the sandbox must be able to reveal the environment (or the folder asked
+  for) themselves, as roll secrets answers them (`Secrets::caller_of`: their session, a roll token's
+  rules, or the operator). Their rules also decide references and imports. Anyone else gets a 403
+  and nothing is copied. A roll code owner token isn't anyone to roll secrets, so it can't copy
+  secrets, and an agent token never manages the owner. The values are sealed with the rest of the
+  sandbox's env until the backend has them. The sandbox records who copied them (`secrets_by`, the
+  principal), and the read is theirs in the audit log (its actor), resolved for `sandbox:<id> for
+  <principal>`.
 - **Previews**: roll previews (docs/previews.md) makes an ephemeral environment per change (see
   "Ephemeral environments") and resolves it as `preview:<slug>`. A preview runs a change's code, so
   it resolves with `"untrusted": true`: an ephemeral environment based on a protected one gets its
@@ -3209,6 +3233,42 @@ where it would otherwise keep its own sealed copy, so the value lives once, in r
 a rotation reaches the product without anyone pasting it again (as 1Password's `op://` and Vault
 Agent's templates do).
 
+- **Who chose it** decides how a product reads it:
+  - **A person or a token** (roll search's snapshot repositories): the product calls
+    `Secrets::bind_ref(resource, reference, caller)` when the reference is written, with the
+    request's caller, and stores the opaque `Maker` it returns (it serializes as a string) beside
+    the reference. Every read is `Secrets::resolve_as(resource, reference, &maker)` or
+    `digest_as`: the reference reads *as its maker*, never as a runtime, through the same code a
+    reveal runs. So a sensitive key is refused (when it's chosen, and at every read if it's tagged
+    later), an import, a base or a `${…}` inside the value counts only where the maker may reveal,
+    and folders a token's rules leave out stay out. The maker's rights are looked up on every
+    read, never cached: a person while they can sign in and still own the project (an admin while
+    they still are one), a token while it lives. An admin's session is kept as the person
+    (`usr_…`), not `operator`. A workload identity's login can't choose one (400): it ends with its
+    token. The audit row is still the resource's, naming the maker
+    (`resolved KEY for search:search:logs, for usr_… (who chose it)`).
+  - **A deployer, for the resource's own runtime** (roll apps' git login: a person pastes a deploy
+    token, tagged sensitive, and the service's login refers to it):
+    `Secrets::bind_ref_runtime(resource, reference, caller, runtime_env)`. The contract is the
+    product's: it calls this only after its own check that the caller holds deploy on the
+    resource in `runtime_env` (for roll apps, naming the login is already `deploy`); anything else
+    calls `bind_ref`. Whoever may deploy there can already run code that reads that environment's
+    sensitive keys, so this adds no reach:
+    - A reference to exactly `runtime_env` is a *runtime binding*. Its `Maker` serializes as
+      `usr_…@runtime:production` (a plain maker's format is unchanged). It reads that one
+      environment as the resource's runtime: sensitive keys included, imports and bases as the
+      runtime follows them, within the resource's trust (its one trusted project, and an untrusted
+      copy still reads as an untrusted caller, so no protected environment and no sensitive key).
+    - Every `resolve_as` and `digest_as` still checks first that the maker can sign in, still
+      reaches the project and may reveal the folder, and refuses otherwise.
+    - The audit row is `<resource> (runtime read for <maker>)`, e.g.
+      `apps:service:web (runtime read for usr_…)`.
+    - A reference to any other environment binds by the maker's rules above, and a runtime
+      binding refuses any environment but its own. A workload identity's login is refused here
+      too.
+  - **The operator** (roll storage's replication targets, which only the operator writes):
+    `Secrets::resolve_for` / `digest_for` read as the project's runtime, sensitive keys included.
+    These and runtime bindings are the only references a sensitive key reaches.
 - **Which products.** roll storage's replication targets to buckets outside roll: the access key
   id and the secret (`POST /v1/storage/replication-targets` with
   `"secret_access_key": "roll://prj_…@production/AWS_SECRET_ACCESS_KEY"`). A target's references
@@ -3216,9 +3276,8 @@ Agent's templates do).
   for it, so without one, anyone who may set another bucket's replication could point it at the
   target and have roll sign for the target's endpoint with that bucket's project's credential. Search snapshot
   repositories, roll code's reviewer provider keys and the agents' gateway upstreams still keep
-  sealed copies.
-- **Who reads it.** The product asks rolld in process (`Secrets::resolve_for(resource,
-  reference)`), naming the workspace resource that needs the value: a replication target
+  sealed copies. roll search's snapshot repositories take them through `bind_ref` (#361).
+- **Who reads it.** The product asks rolld in process (`resolve_as` or `resolve_for`), naming the workspace resource that needs the value: a replication target
   resolves for the source bucket that replicates through it. The project is the one whose canvas
   holds that resource *and* that stands for it (`Workspace::trusts`): a person's canvas only
   for what's theirs, never membership alone. A reference names a project
@@ -3227,8 +3286,8 @@ Agent's templates do).
   replication only that the target's credentials don't resolve, never "protected" or "no such
   key", which would say which keys exist where.
 - **Protected environments.** As a roll apps service reads its own environment: a resource its
-  project stands for reads as that project's runtime, protected environments and sensitive keys
-  included. An ephemeral environment that isn't trusted never reaches a protected one (its base,
+  project stands for reads as that project's runtime (or, through `resolve_as`, as its maker),
+  protected environments included (sensitive keys only through `resolve_for`). An ephemeral environment that isn't trusted never reaches a protected one (its base,
   an import or a reference), and what only comes from there is refused as protected. A dynamic
   credential is refused: a product keeps its connection past any lease.
 - **Untrusted copies.** A product passes `ResourceRef::untrusted()` for a resource that keeps
@@ -3241,10 +3300,12 @@ Agent's templates do).
 - **Audit.** Every read is `secrets.resolve` by the resource, named `<product>:<kind>:<ref>`
   (`storage:bucket:photos`, `search:search:logs (untrusted)` for an untrusted copy), with the one
   key read.
-- **Refusals** say which part failed, never the value: no project, not trusted, no such key,
-  protected, or can't be used (a dynamic credential, a sensitive key for an untrusted reader, a
-  reference inside the value that doesn't resolve). `Secrets::digest_for` refuses exactly what
-  the resolve would.
+- **Refusals** say which part failed, never the value: no project, not trusted, not allowed (the
+  maker may not reveal it, or can't reach roll secrets any more), no such key, protected, or can't
+  be used (a dynamic credential, a sensitive key for anyone but a trusted runtime, a reference
+  inside the value that doesn't resolve). `digest_for` and `digest_as` refuse exactly what their
+  resolve would; `bind_ref` refuses what `digest_as` would for the caller (it decrypts nothing, so
+  a `${…}` reaching a sensitive key fails at the first read).
 - **Rotation.** Nothing is cached across calls in roll secrets. A product keeps what it built
   (storage: one client per target and source bucket) while the folder's digest
   (`Secrets::digest_for`, no value, not audited) stays the same, and resolves again when it
@@ -3366,9 +3427,12 @@ last_synced_at, error}`:
   names `changed` since the last push, and which were `removed`: synced before, gone now (deleted,
   or left out by `keys`). Targets that set one value per call (GitHub) send only the changed ones
   and delete the removed ones at the target.
-- **As whom.** A sync resolves with the access of whoever created it, looked up at every push: the
-  operator, or the scoped token that made it (a revoked or expired token stops the sync with an
-  error). So a reference to an environment its creator can't reveal stays unresolved. Every push is
+- **As whom.** A sync resolves with the access of whoever created it (`created_by`), looked up at
+  every push: a person while they can sign in and still reach the project (an admin's session is
+  kept as the person, `usr_…`, so a demoted or disabled admin's syncs stop), the scoped token that
+  made it (a revoked or expired token stops the sync with an error), or the operator for the
+  deployment's own token. A workload identity's login can't make one (400). Syncs an admin's
+  session made before this are `operator` and stay so: health flags them (`operator_made`). So a reference to an environment its creator can't reveal stays unresolved. Every push is
   audited as `sync.push` by `sync:<id>`, with the keys it pushed or removed (roll's names, without
   the prefix) and never a value; a push that fails is audited too.
 - **Errors** name keys and the target, never a value: `github owner/app: 404 Not Found`,
@@ -3805,7 +3869,12 @@ above), an optional expiry and client addresses (up to 20 addresses or CIDRs; fr
 it's refused), made through `POST /v1/access/tokens`: `roll secrets tokens create … --allow-ip
 203.0.113.0/24`, or the project's Access tab, which lists them from `GET
 /v1/access/tokens?product=secrets&resource=<project>` (one at a time: the list also holds tokens
-made in the access builder, so nothing here revokes them in bulk). roll-access stores them hashed,
+made in the access builder, so nothing here revokes them in bulk). The API reads a rule without
+`environments` as every environment and a grant without `expires_at` as one that never expires
+(unless roll's token policy requires one), so both clients always send them: the CLI one
+environment (`--for-env`, else the directory's own, never a protected one unless named) and 90
+days, with `--all-environments` and `--no-expiry` only when asked; the Access tab's form starts from
+`development` (else the first unprotected environment) and 90 days. roll-access stores them hashed,
 looks them up on every request and never caches them; OAuth connections (`rlo_…`) reach secrets
 the same way. rolld's gate classifies each request, and secrets asks the same `Grant` for every
 second check (`GrantGrants`); a read of the project as a whole (its environments' names, health,
@@ -3827,8 +3896,9 @@ their personal overrides are theirs. The deployment key's state (`GET /v1/secret
 operator's.
 
 What a person made acts later only while they can sign in and still reach its project (an admin
-then, or its owner now): their tokens, any token one of those made, their identities' logins and
-their syncs. rolld asks roll-accounts on every use (`People`); a lookup that fails is an error, not
+then, or its owner now): their tokens, any token one of those made, their identities' logins,
+their syncs and the references they chose for another product (`bind_ref`). What an admin's
+session makes is the person's (`Caller::maker`), though the audit log names it `operator`. rolld asks roll-accounts on every use (`People`); a lookup that fails is an error, not
 a disabled account. A sync a person made pushes as them, as they are then.
 
 Anyone may put any resource on their own canvas, so a project reaches a resource only where the
@@ -4358,10 +4428,40 @@ with signed digests, so such a change shows:
   row)`, written in the row's own transaction. The row's bytes are a length-prefixed encoding of
   every field the API shows but `id` (`crates/roll-secrets-chain`, `canonical`), so they hash the same from SQLite,
   Postgres or an export. The project's head (`audit_heads`) is updated in that transaction too:
-  on Postgres a second writer loses the head's row lock and its serializable write is re-run, and a
-  unique index on `(project_id, seq)` refuses a second row at one number anyway, so racing writers,
-  on one node or several, never fork the chain.
-- **The head's MAC.** The head carries an HMAC-SHA256 of `{project, seq, hash, start}` under a key
+  writers queue on the head's row lock (or SQLite's one writer), and a unique index on
+  `(project_id, seq)` refuses a second row at one number anyway, so racing writers, on one node or
+  several, never fork the chain.
+- **Under load.** Every read of values writes a row, so 500 pods of a rollout reading one project
+  take its head 500 times. Reads waiting on one node are group-committed: one of them writes
+  everyone's rows (up to 256) onto the chain in one read-committed transaction, in the order they
+  came, and the others answer once it commits. Batches from several nodes queue on the chain's
+  claim (`code_sql::Conn::claim`, an advisory lock) rather than fail and re-run. A change writes its
+  own row in its own serializable transaction, as before; when a batch commits under it, its next
+  attempt holds the claim from before its snapshot, so reads can't starve it. Measured with
+  `examples/bench concurrent` (Postgres 18 in Docker, `max_connections=500`, one project of 20
+  keys, a writer changing a key every 20 ms; medians of 2 alternating runs on one node, 3 on eight,
+  each pool its own; a shared 36-core host at load 35–50, so the numbers are low and noisy:
+  base varied 2x run to run), reads a second and p99:
+
+  | resolvers | before the chain | the chain alone (#281) | batched and claimed (now) |
+  | --- | --- | --- | --- |
+  | 1 node, 1 | 300, 6 ms | 236, 14 ms | 184, 20 ms |
+  | 10 | 2,622, 28 ms | 420, 521 ms | 914, 77 ms |
+  | 50 | 5,002, 42 ms | 704, 881 ms | 2,626, 52 ms |
+  | 200 | 4,792, 103 ms | 468, 2.7 s (104 reads unaudited) | 3,029, 162 ms |
+  | 500 | 4,436, 229 ms | 428, 4.4 s (515 unaudited) | 3,034, 332 ms |
+  | 8 nodes, 10 | 1,493, 44 ms | 515, 345 ms | 590, 112 ms |
+  | 50 | 1,999, 80 ms | 469, 1.5 s | 1,458, 93 ms |
+  | 200 | 2,269, 198 ms | 181, 3.5 s (180 unaudited) | 1,994, 313 ms |
+  | 500 | 2,419, 317 ms | 343, 3.5 s (706 unaudited) | 2,468, 514 ms |
+
+  The chain alone re-ran each read's write up to 40 times (70,000 serialization retries in 10 s at
+  500), gave up on some (the read answered, unaudited), and failed most changes made meanwhile: 3–5
+  changes in 10 s, 2–3 of them failing, against 23–378 before the chain. Now no read goes
+  unaudited and no change fails (52–300 in 10 s, each retried once: the only retries left). What's
+  left is the chain itself: one batch at a time per project, each holding the claim for about three
+  round trips and a commit. At 50 resolvers or more that's within 2x of before the chain on every
+  line; few readers per node make small batches (eight nodes sharing ten readers: 0.4x). of `{project, seq, hash, start}` under a key
   derived from `ROLL_SECRET_KEY` (HKDF, its own label `audit:head:v1`), checked before every append
   and remade after it (two HMACs a write). Plain SHA-256 lets a database writer recompute every
   hash; the MAC means they can't move the head to match: not back over rows they cut from the end,
@@ -4690,10 +4790,8 @@ type Insights = { path: string; max_age_days: number | null; reads_since: number
 type Required = { key: string; path: string; comment: string; type?: "url" | "int" | "port" | "bool" | "json" | "email"; pattern?: string; owner?: string /* who supplies it */; password?: { length: number; classes?: ("lower" | "upper" | "digit" | "symbol")[]; symbols?: string } };
 type Sink = { id: string; url: string; status: "new" | "ok" | "error"; error: string | null; cursor: number; delivered_at: number | null; created_at: number; created_by: string };
 type ProjectFindings = { project: string; project_name: string; findings: Finding[] };
-type Finding = { issue: "decoy_used" | "expired" | "missing" | "exposed" | "weak" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string };
-type Finding = { issue: "decoy_used" | "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "weak" | "expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string };
+type Finding = { issue: "decoy_used" | "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "public" | "weak" | "operator_made" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string; owner?: string };
 type Rotation = { environment: string; path: string; keys: string[]; kind: string; ref: string; name: string; rotate_days: number | null; rotate_window: string | null; grace_minutes: number; issued_at: number | null; next_due: number | null; last_error: string | null; failed_at: number | null };
-type Finding = { issue: "decoy_used" | "expired" | "missing" | "exposed" | "public" | "weak" | "expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string };
 type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };
 type SaasRotator = { id: string; name: string; vendor: "sendgrid" | "twilio" | "okta" | "entra" | "auth0"; target: Record<string, unknown>; created_at: number; created_by: string };
 type KubernetesCluster = { id: string; name: string; api_url: string; has_ca: boolean; created_at: number; created_by: string };
@@ -5234,7 +5332,11 @@ inconsistencies are fixed in #264:
   transaction (one head row, a unique seq: no forks, checked with two racing nodes), hourly digests
   signed by roll's issuer key and sent to the sinks, `audit verify` online or offline against an
   export and a saved JWKS; retention cuts only at a signed digest. ~+0.1 ms per audited write on
-  SQLite, ~one round trip on Postgres. Known: rows cut from the end along with the head, after the
+  SQLite, ~one round trip on Postgres with one writer. Under many readers of one project (a
+  500-pod rollout) the chain alone capped reads at ~500 a second with p99s of seconds, left reads
+  unaudited and failed most changes; reads are now group-committed per node and queue across nodes
+  on a claim, and a change that loses once runs next holding it ("Tamper evidence", "Under load").
+  Known: rows cut from the end along with the head, after the
   last delivered digest (≤1 h), aren't detectable without a sink.
 - R9. **Secret requests** (#277): `roll secrets request KEY…` or "Request a value…" makes a link;
   the answerer's browser seals each value to the request's own key, roll opens it only in the write

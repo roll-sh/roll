@@ -9,7 +9,7 @@
 //! ([`Secrets::end_decoys`]; the sweeper retries what fails).
 
 use crate::access::{Action, Caller, Scope};
-use crate::caller::Maker;
+use crate::caller::Origin;
 use crate::envs;
 use crate::write::{Item, ItemAction, SecretType, current};
 use crate::{Error, Result, Secret, Secrets, Value, audit, names};
@@ -115,9 +115,9 @@ impl Secrets {
         }
         // Whose it is: they're mailed when it's used, as the admins are.
         let owner = match self.maker(&caller.principal)? {
-            Maker::Person(u) => Some(u),
-            Maker::Operator => None,
-            Maker::Gone => return Err(Error::Forbidden("whoever made this token can't make decoys any more".into())),
+            Origin::Person(u) => Some(u),
+            Origin::Operator => None,
+            Origin::Gone => return Err(Error::Forbidden("whoever made this token can't make decoys any more".into())),
         };
         let name: String = format!("secrets decoy {} in {env}", n.key).chars().take(64).collect();
         let rule = crate::access::rule(project, Some(vec![env.to_string()]), Some(vec![path.clone()]), &[Action::Read, Action::Reveal]);
