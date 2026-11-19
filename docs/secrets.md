@@ -3095,9 +3095,36 @@ AWS access keys, GitHub, Slack, Stripe live, Google, Anthropic and OpenAI keys, 
   ```
 - **The fix offered.** `roll secrets scan --store [KEY=]FILE:LINE` (below) reads the value from the
   file on the author's machine, sets it as a new key of the folder's environment and prints the
-  line to write instead; roll never rewrites the change. Storing it from the change page (roll
-  reading the value from the change's blob into the project the repo is trusted for) isn't built
-  yet: the notice names the CLI command.
+  line to write instead. roll never rewrites the change.
+- **Store in roll.** On the change page each `secret_unstored` notice (or blocker) has a "Store in
+  roll…" button for the repo's writers: a dialog with the suggested key (editable) and an
+  environment picker, then the read to write instead with a copy button. Behind it, `POST
+  /v1/code/changes/{id}/unstored/{fingerprint}/store {key?, environment?, path?}`
+  (docs/code/http-api.md): roll code finds the notice on the change's current head, reads the value
+  from the change's own blob at its path and line, and hands it in process to roll secrets
+  (`Secrets::store_found`), which never returns it:
+  - **The project** is the one the repository is trusted for (`counts_for_repo`, which asks
+    `Workspace::trusts`): the operator's projects with the repo on their canvas, and a person's only
+    for their own repositories. Canvas membership alone never counts, so a person who puts someone
+    else's repository on their canvas gets a 422, not its credentials.
+  - **The environment and folder** default to what the repo's `roll.toml` gives its checks (the first
+    `[checks.*] secrets = "staging:/api"`, from the default branch's head) when the project has that
+    environment, else `development` and `/`. The dialog lists the environments the caller may read.
+  - **Who.** A writer on the repo, and then roll secrets asks the request's own grant, session or
+    operator token for `write` in the folder, as any write: a roll token that may only read gets a 403.
+  - **Only the repo's own changes.** An outsider's change (`trusted: false`, a fork's pull request)
+    has no button, and the routes answer 409, whoever approved its run: its credential is whoever
+    sent it, and storing it would put a value someone outside chose (their `DATABASE_URL`, their
+    `sk_live_` key) into the project the repo is trusted for.
+    It's one change attributed to the caller, or a change request where the environment is protected
+    or a folder policy asks for approval. A key the folder already has is refused (409), never
+    overwritten.
+  - **What's kept.** roll secrets audits the write as every write; roll code's audit log says
+    `secret_unstored_stored` with the key and where, never the value. The answer is `{key, project,
+    environment, path, file, line, replacement, change, request}`.
+
+  Until the author changes the code, the change adds a value roll secrets now holds, so it reads as
+  a `secret_leak` on its next head.
 
 #### Keys a change starts reading
 
@@ -5187,7 +5214,8 @@ Done and in PR #20:
   scan [--staged]` before a commit;
 - credentials roll doesn't hold yet, by their shape: a notice on a change (a blocker with
   `roll.toml`'s `[secrets] unstored_credentials = "block"`), `.roll/secrets-allow`, and `roll secrets
-  scan` listing them, refusing them `--staged`, and `--store` moving one in;
+  scan` listing them, refusing them `--staged`, and `--store` moving one in; the change page's
+  "Store in roll" storing one from the change itself into the project the repo is trusted for;
 - required and typed keys; insights, a daily notice of each environment's health, and expiry dates for values that expire
   outside roll; weak credentials; values as they were after any change; a protected environment's values that are also set in an unprotected one; read
   alerts (a machine's new address, many reveals in an hour);
