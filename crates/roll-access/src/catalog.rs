@@ -1232,6 +1232,13 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/secrets/projects/{project}/cas/{id}/certificates", "secrets", R, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/cas/{id}/revoke", "secrets", W, one(&["project"], "project")),
     row("DELETE", "/v1/secrets/projects/{project}/cas/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    // ACME on a CA: its directory, pre-authorization and External Account Bindings. A binding's
+    // HMAC key is answered once, to who may also reveal; making, revoking and pre-authorizing are
+    // the project admin's (an account acts with its binding's names).
+    row("GET", "/v1/secrets/projects/{project}/cas/{id}/acme", "secrets", R, one(&["project"], "project")),
+    row("PATCH", "/v1/secrets/projects/{project}/cas/{id}/acme", "secrets", ADMIN, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/cas/{id}/acme/eab", "secrets", ADMIN, one(&["project"], "project")).reveals(&["hmac_key"]),
+    row("DELETE", "/v1/secrets/projects/{project}/cas/{id}/acme/eab/{eab}", "secrets", ADMIN, one(&["project"], "project")),
     row("GET", "/v1/secrets/projects/{project}/ssh-cas", "secrets", R, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/ssh-cas", "secrets", ADMIN, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/ssh-cas/{id}/sign-host", "secrets", ADMIN, one(&["project"], "project")),

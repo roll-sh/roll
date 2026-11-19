@@ -89,6 +89,9 @@ pub const RULES: &[Rule] = &[
     Rule { route: "/v1/secrets/shares", access: Access::Public("a one-time share's link: ciphertext only, the key stays in the link") },
     Rule { route: "/v1/secrets/ocsp", access: Access::Public("a project CA's OCSP responder, which anyone checking its certificates asks") },
     Rule { route: "/v1/secrets/crl", access: Access::Public("a project CA's certificate revocation list, which anyone checking its certificates fetches") },
+    // ACME (RFC 8555) on a project's CA: the account key's JWS, made with an External Account
+    // Binding an admin of the project issued, and looked up on every request.
+    Rule { route: "/v1/secrets/acme", access: Access::Public("ACME on a project's CA: the account key's signature and its External Account Binding are the credential") },
     Rule { route: "/v1/secrets/login", access: Access::Public("a workload's OIDC token is the credential (workload identities)") },
     Rule { route: "/v1/secrets/oidc", access: Access::Public("roll's OIDC issuer: its discovery document and public keys, which GCP and Azure fetch anonymously") },
     // Tasks: its own token (ROLL_TASKS_TOKEN) and API keys.

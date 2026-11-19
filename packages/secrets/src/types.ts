@@ -305,9 +305,15 @@ export type TransitKey = { id: string; name: string; latest_version: number; min
 /** A project's certificate authority: what it signs for, and its certificate (PEM) for clients to trust. */
 /** A certificate a CA signed for a CSR (`POST …/cas/{id}/sign`): the device keeps its key. */
 /** A certificate a CA signed and that hasn't expired (`GET …/cas/{id}/certificates`). */
-export type CaCertificate = { serial: string; names: string[]; source: "csr" | "link"; not_after: number; issued_at: number; issued_by: string; revoked_at?: number };
+export type CaCertificate = { serial: string; names: string[]; source: "csr" | "link" | "acme"; not_after: number; issued_at: number; issued_by: string; revoked_at?: number };
 export type SignedCertificate = { certificate: string; ca: string; serial: string; names: string[]; not_after: number };
 export type Ca = { id: string; name: string; certificate: string; domains: string[]; allow_ip: boolean; max_days: number; created_at: number; created_by: string };
+/** An ACME External Account Binding on a CA: what an account made with it may order (`names`: each takes every name under it; none: the CA's whole policy). */
+export type AcmeBinding = { id: string; label: string; names: string[] | null; expires_at: number | null; created_at: number; created_by: string; revoked_at: number | null; revoked_by: string | null; used_at: number | null; accounts: number };
+/** A CA's ACME directory, whether its bindings' names are pre-authorized (no challenge), the challenges it validates and its bindings (`GET …/cas/{id}/acme`). */
+export type AcmeSettings = { directory: string; pre_authorize: boolean; challenges: ("http-01" | "dns-01")[]; bindings: AcmeBinding[] };
+/** A new binding and its HMAC key (base64url), shown this once. */
+export type NewAcmeKey = AcmeBinding & { key_id: string; hmac_key: string; directory: string };
 /** A project's SSH CA: the principals it signs for, and its public key for servers' TrustedUserCAKeys. */
 export type SshCa = { id: string; name: string; public_key: string; principals: string[]; max_hours: number; host_domains?: string[]; max_host_days: number; known_hosts?: string; created_at: number; created_by: string };
 /** A person's own key certified by an SSH CA (`POST …/ssh-cas/{id}/sign-user`). */

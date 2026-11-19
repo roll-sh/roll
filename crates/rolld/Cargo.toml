@@ -102,6 +102,8 @@ rustls-native-certs.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 urlencoding.workspace = true
+# roll secrets' ACME: tls-alpn-01's challenge certificate.
+x509-parser.workspace = true
 zeroize.workspace = true
 # The deployment key of roll secrets as a KMS ciphertext (ROLL_SECRET_KEY_KMS).
 aws-config.workspace = true

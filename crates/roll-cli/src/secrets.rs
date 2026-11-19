@@ -329,8 +329,9 @@ pub enum Secrets {
     /// Encryption keys (encryption as a service): encrypt stdin, decrypt stdin, rotate, list.
     #[command(subcommand)]
     Transit(TransitCmd),
-    /// The project's certificate authorities: list, add, print one's certificate, remove.
-    #[command(subcommand)]
+    /// The project's certificate authorities: list, add, print one's certificate, sign, revoke,
+    /// ACME, remove.
+    #[command(subcommand, alias = "ca")]
     Cas(CasCmd),
     /// The project's SSH CAs: list, add, print one's public key (for TrustedUserCAKeys), remove.
     #[command(subcommand, name = "ssh-cas")]
@@ -1041,7 +1042,47 @@ pub enum CasCmd {
     Certs { id: String },
     /// Revoke a certificate (on the CA's CRL until it expires).
     Revoke { id: String, serial: String },
+    /// ACME on the CA (cert-manager, certbot, lego, Caddy): its directory URL and External Account
+    /// Bindings.
+    #[command(subcommand)]
+    Acme(AcmeCmd),
     Rm { id: String },
+}
+
+#[derive(Subcommand)]
+pub enum AcmeCmd {
+    /// External Account Bindings: the key id and HMAC key an ACME client makes its account with.
+    #[command(subcommand)]
+    Eab(EabCmd),
+    /// Make a binding's names valid without a challenge (on|off): its key is then the whole proof.
+    PreAuthorize {
+        ca: String,
+        #[arg(value_parser = ["on", "off"])]
+        state: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum EabCmd {
+    /// A new binding: prints its key id and HMAC key (shown once), the directory URL and a
+    /// cert-manager ClusterIssuer.
+    Add {
+        ca: String,
+        /// Names its accounts may order (each takes every name under it); the CA's whole policy
+        /// by default.
+        #[arg(long = "name")]
+        names: Vec<String>,
+        /// Days until it stops working (until revoked by default).
+        #[arg(long)]
+        days: Option<u32>,
+        #[arg(long)]
+        label: Option<String>,
+    },
+    /// The CA's directory URL and bindings.
+    #[command(alias = "list")]
+    Ls { ca: String },
+    /// Revoke a binding: every account made with it stops at once.
+    Rm { ca: String, id: String },
 }
 
 #[derive(Subcommand)]
@@ -2563,6 +2604,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 c.call(Method::DELETE, &format!("{}/cas/{}", c.base(), enc(&id)), None).await?;
                 println!("Removed {id}");
             }
+            CasCmd::Acme(cmd) => acme(&c, cmd, json_out).await?,
         },
         Secrets::Transit(t) => match t {
             TransitCmd::Ls => {
@@ -4614,6 +4656,93 @@ async fn stop(child: &mut tokio::process::Child) {
         }
     }
     let _ = child.kill().await;
+}
+
+/// `roll secrets cas acme …`: a CA's ACME directory, bindings and pre-authorization.
+async fn acme(c: &Client<'_>, cmd: AcmeCmd, json_out: bool) -> anyhow::Result<()> {
+    let at = |ca: &str| format!("{}/cas/{}/acme", c.base(), enc(ca));
+    let print = |v: &Value| -> anyhow::Result<()> {
+        println!("{}", serde_json::to_string_pretty(v)?);
+        Ok(())
+    };
+    match cmd {
+        AcmeCmd::PreAuthorize { ca, state } => {
+            let id = ca_id(c, &ca).await?;
+            let v = c.call(Method::PATCH, &at(&id), Some(json!({ "pre_authorize": state == "on" }))).await?;
+            if json_out {
+                return print(&v);
+            }
+            if state == "on" {
+                println!("{ca}: a binding's names are valid without a challenge; its HMAC key is the whole proof.");
+            } else {
+                println!("{ca}: every name is proven with http-01, dns-01 or tls-alpn-01.");
+            }
+        }
+        AcmeCmd::Eab(EabCmd::Add { ca, names, days, label }) => {
+            let id = ca_id(c, &ca).await?;
+            let body = json!({ "names": (!names.is_empty()).then_some(names), "days": days, "label": label });
+            let v = c.call(Method::POST, &format!("{}/eab", at(&id)), Some(body)).await?;
+            if json_out {
+                return print(&v);
+            }
+            let (key_id, hmac, directory) = (s(&v["key_id"]), s(&v["hmac_key"]), s(&v["directory"]));
+            println!("Directory  {directory}");
+            println!("Key id     {key_id}");
+            println!("HMAC key   {hmac}");
+            eprintln!("The HMAC key isn't shown again. certbot: --server {directory} --eab-kid {key_id} --eab-hmac-key <HMAC key>; lego: --server {directory} --eab --kid {key_id} --hmac <HMAC key>.");
+            println!("\n# cert-manager: kubectl -n cert-manager create secret generic roll-{ca}-eab --from-literal secret=<HMAC key>\n{}", cluster_issuer(&ca, &directory, &key_id));
+        }
+        AcmeCmd::Eab(EabCmd::Ls { ca }) => {
+            let id = ca_id(c, &ca).await?;
+            let v = c.call(Method::GET, &at(&id), None).await?;
+            if json_out {
+                return print(&v);
+            }
+            println!("Directory  {}", s(&v["directory"]));
+            println!("Pre-authorized names: {}", if v["pre_authorize"] == true { "on (a binding's key is the whole proof)" } else { "off" });
+            for b in v["bindings"].as_array().into_iter().flatten() {
+                let names: Vec<&str> = b["names"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+                let state = match (b["revoked_at"].as_i64(), b["expires_at"].as_i64()) {
+                    (Some(t), _) => format!("revoked {}", day(t)),
+                    (None, Some(t)) => format!("until {}", day(t)),
+                    (None, None) => "live".into(),
+                };
+                let scope = if names.is_empty() { "the CA's names".to_string() } else { names.join(",") };
+                println!("{}  {:<16} {}  {} account(s)  {state}", s(&b["id"]), s(&b["label"]), scope, b["accounts"]);
+            }
+        }
+        AcmeCmd::Eab(EabCmd::Rm { ca, id }) => {
+            let ca_id = ca_id(c, &ca).await?;
+            c.call(Method::DELETE, &format!("{}/eab/{}", at(&ca_id), enc(&id)), None).await?;
+            println!("Revoked {id}: its accounts stop at once");
+        }
+    }
+    Ok(())
+}
+
+/// A cert-manager ClusterIssuer for a CA's ACME directory, with a binding's key id (its HMAC key
+/// in the Secret `roll-<ca>-eab`).
+fn cluster_issuer(ca: &str, directory: &str, key_id: &str) -> String {
+    format!(
+        "apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: roll-{ca}
+spec:
+  acme:
+    server: {directory}
+    privateKeySecretRef:
+      name: roll-{ca}-acme-account
+    externalAccountBinding:
+      keyID: {key_id}
+      keySecretRef:
+        name: roll-{ca}-eab
+        key: secret
+    solvers:
+      - http01:
+          ingress:
+            ingressClassName: nginx"
+    )
 }
 
 /// A CA's id from its id or its name.
