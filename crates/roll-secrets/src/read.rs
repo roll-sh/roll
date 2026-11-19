@@ -360,28 +360,59 @@ type DigestKey = (String, String, String, String, bool);
 #[derive(Default)]
 pub(crate) struct Digests(std::sync::Mutex<DigestCache>);
 
-/// The most digests a node keeps. Past it the least recently used one goes, so a reader polling
-/// many folders only pushes out what nobody polled since, never every poller's at once.
+/// The most digests a node keeps. Past it the least recently used one goes, so readers polling
+/// many folders only push out what nobody polled since, never every poller's at once.
 const DIGESTS_MAX: usize = 10_000;
 
-/// Digests by key, each with when it was last used, and the keys in that order (an LRU).
+/// The most digests a node keeps for one reader (a principal). Past it that reader's own least
+/// recently used goes, so one reader cycling through more folders than [`DIGESTS_MAX`] within
+/// another poller's interval only ever pushes out its own.
+const READER_MAX: usize = 500;
+
+/// Digests by key, each with when it was last used, the keys in that order (an LRU), and each
+/// reader's uses (its own LRU).
 #[derive(Default)]
 pub(crate) struct DigestCache {
     by_key: HashMap<DigestKey, (u64, String, std::sync::Arc<Digested>)>,
     by_use: BTreeMap<u64, DigestKey>,
+    by_reader: HashMap<String, BTreeSet<u64>>,
     next: u64,
 }
 
 impl DigestCache {
+    /// A new use of `key`, in place of its last one (`was`).
+    fn stamp(&mut self, key: &DigestKey, was: Option<u64>) -> u64 {
+        let now = self.next;
+        self.next += 1;
+        let uses = self.by_reader.entry(key.3.clone()).or_default();
+        if let Some(was) = was {
+            self.by_use.remove(&was);
+            uses.remove(&was);
+        }
+        uses.insert(now);
+        self.by_use.insert(now, key.clone());
+        now
+    }
+
     /// `key`'s entry as just used.
     fn touch(&mut self, key: &DigestKey) -> Option<&(u64, String, std::sync::Arc<Digested>)> {
-        let next = self.next;
+        let was = self.by_key.get(key)?.0;
+        let now = self.stamp(key, Some(was));
         let e = self.by_key.get_mut(key)?;
-        self.by_use.remove(&e.0);
-        e.0 = next;
-        self.by_use.insert(next, key.clone());
-        self.next += 1;
+        e.0 = now;
         Some(e)
+    }
+
+    /// Drop the entry last used at `used`.
+    fn evict(&mut self, used: u64) {
+        let Some(key) = self.by_use.remove(&used) else { return };
+        if let Some(uses) = self.by_reader.get_mut(&key.3) {
+            uses.remove(&used);
+            if uses.is_empty() {
+                self.by_reader.remove(&key.3);
+            }
+        }
+        self.by_key.remove(&key);
     }
 }
 
@@ -393,15 +424,17 @@ impl Digests {
 
     fn put(&self, key: DigestKey, state: String, d: Digested) {
         let mut m = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        let used = m.next;
-        m.next += 1;
-        if let Some((was, ..)) = m.by_key.insert(key.clone(), (used, state, std::sync::Arc::new(d))) {
-            m.by_use.remove(&was);
+        let was = m.by_key.get(&key).map(|e| e.0);
+        let used = m.stamp(&key, was);
+        let reader = key.3.clone();
+        m.by_key.insert(key, (used, state, std::sync::Arc::new(d)));
+        // The reader's own oldest first, then the node's.
+        while let Some(oldest) = m.by_reader.get(&reader).filter(|u| u.len() > READER_MAX).and_then(|u| u.first().copied()) {
+            m.evict(oldest);
         }
-        m.by_use.insert(used, key);
         while m.by_key.len() > DIGESTS_MAX {
-            let Some((_, oldest)) = m.by_use.pop_first() else { break };
-            m.by_key.remove(&oldest);
+            let Some(oldest) = m.by_use.first_key_value().map(|(u, _)| *u) else { break };
+            m.evict(oldest);
         }
     }
 }
@@ -1440,17 +1473,32 @@ mod tests {
 
     #[test]
     fn a_full_digest_cache_drops_only_what_nobody_polled_lately() {
-        let key = |i: usize| ("prj".to_string(), "env".to_string(), format!("/f{i}"), "who".to_string(), false);
+        let key = |who: &str, i: usize| ("prj".to_string(), "env".to_string(), format!("/f{i}"), who.to_string(), false);
         let digested = || Digested { digest: String::new(), unvouched: Unvouched::default(), asked: BTreeMap::new(), live: Vec::new(), keep: true };
         let cache = Digests::default();
-        cache.put(key(0), "s".into(), digested());
-        // Another reader polls many folders; the first poller keeps polling its own.
-        for i in 1..=DIGESTS_MAX * 2 {
-            cache.put(key(i), "s".into(), digested());
-            assert!(cache.get(&key(0), "s").is_some(), "the poller's digest went at {i}");
+        cache.put(key("poller", 0), "s".into(), digested());
+        // One reader cycles through more folders than the node keeps, all between two of the
+        // poller's polls: it only pushes out its own, oldest first.
+        let last = DIGESTS_MAX * 2;
+        for i in 1..=last {
+            cache.put(key("cycler", i), "s".into(), digested());
+        }
+        assert!(cache.get(&key("poller", 0), "s").is_some(), "the poller's digest went");
+        {
+            let m = cache.0.lock().unwrap();
+            assert_eq!((m.by_key.len(), m.by_use.len(), m.by_reader["cycler"].len()), (READER_MAX + 1, READER_MAX + 1, READER_MAX));
+            assert!(!m.by_key.contains_key(&key("cycler", last - READER_MAX)) && m.by_key.contains_key(&key("cycler", last - READER_MAX + 1)));
+        }
+        // Many readers, each within its cap, fill the node: the least recently used goes first,
+        // and a poller that keeps polling stays.
+        for r in 0..DIGESTS_MAX / READER_MAX * 2 {
+            for i in 0..READER_MAX {
+                cache.put(key(&format!("r{r}"), i), "s".into(), digested());
+            }
+            assert!(cache.get(&key("poller", 0), "s").is_some(), "the poller's digest went at reader {r}");
         }
         let m = cache.0.lock().unwrap();
-        assert_eq!((m.by_key.len(), m.by_use.len()), (DIGESTS_MAX, DIGESTS_MAX));
-        assert!(!m.by_key.contains_key(&key(1)), "the least recently used went first");
+        assert_eq!((m.by_key.len(), m.by_use.len(), m.by_reader.values().map(BTreeSet::len).sum::<usize>()), (DIGESTS_MAX, DIGESTS_MAX, DIGESTS_MAX));
+        assert!(!m.by_reader.contains_key("cycler"), "the least recently used went first");
     }
 }

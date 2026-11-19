@@ -2779,7 +2779,10 @@ once after each change and then reused (`Secrets::digest_of`, read.rs):
   only while one read of the database answers the same: the project's change number (every write
   of a stored value takes one in its own transaction), its environments, imports and required
   keys, and the change number and share of any folder another project shares into it. A write on
-  any node moves it at once, and no node's memory decides whether a folder changed.
+  any node moves it at once, and no node's memory decides whether a folder changed. A node keeps
+  at most 10,000 digests, and at most 500 for one principal: past either, the least recently used
+  goes (the principal's own first), so one reader cycling through many folders only ever pushes
+  out its own, never another poller's.
 - **Only for the same answers.** It records every permission the digest asked of the caller (an
   import's environment, a reference's folder) with its answer, and is reused only when the caller
   gets the same answers now. Each live link is checked as before: its generation (`source_changed`)
