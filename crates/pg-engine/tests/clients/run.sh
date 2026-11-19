@@ -17,11 +17,14 @@
 #   ENGINE_PORT    the engine on 127.0.0.1 (default 55839); start it yourself, e.g.
 #                  roll-engine --data <dir> --listen 127.0.0.1:55839 --password pw \
 #                    --allow-server-programs   (Django's file_fdw `program` table)
+#   ENGINE_HOST, PG_HOST  the servers' address (default 127.0.0.1; the suites' containers are on
+#                  the host network)
 #   PG_PORT        a PostgreSQL 18.6 on 127.0.0.1 (default 55838), password pw:
 #                  docker run -d --name clients-pg -p 127.0.0.1:55838:5432 -e POSTGRES_PASSWORD=pw \
 #                    -e POSTGRES_INITDB_ARGS="--locale=C --encoding=UTF8" <PG_IMAGE below> \
 #                    (default settings, as roll-engine-ref)
 #   CLIENTS_CPUS   docker --cpus (default 4)
+#   CLIENTS_CPUSET docker --cpuset-cpus (e.g. 0-5,18-23: off the benchmark lanes' CPUs)
 #   APP_PORT       an application suite's HTTP port (its default otherwise; agents sharing a
 #                  machine use one of their own range)
 #   CLIENTS_NAME   the suite container's name prefix (default clients; agents sharing a
@@ -43,8 +46,8 @@ if [ "$TARGET" = compare ]; then
   exec python3 -I "$HERE/compare.py" "$RES/$SUITE-engine.txt" "$RES/$SUITE-pg.txt"
 fi
 case $TARGET in
-  engine) PORT=${ENGINE_PORT:-55839} ;;
-  pg) PORT=${PG_PORT:-55838} ;;
+  engine) PORT=${ENGINE_PORT:-55839} HOST=${ENGINE_HOST:-127.0.0.1} ;;
+  pg) PORT=${PG_PORT:-55838} HOST=${PG_HOST:-127.0.0.1} ;;
   *) echo "target must be engine, pg or compare" >&2; exit 2 ;;
 esac
 
@@ -61,22 +64,25 @@ if [ -n "$SRC" ]; then
 fi
 mkdir -p "$CACHE/src/$SUITE"
 
-# Databases and roles a suite expects, made through the pinned image's psql.
-if [ -f "$HERE/suites/$SUITE.setup.sql" ]; then
-  docker run --rm -i --network host -e PGPASSWORD=pw "$PG_IMAGE" \
-    psql -X -h 127.0.0.1 -p "$PORT" -U postgres -d postgres \
-    < "$HERE/suites/$SUITE.setup.sql" > "$RES/$SUITE-$TARGET.setup.log" 2>&1 || true
+# Databases and roles a suite expects, made through the pinned image's psql (another suite's
+# setup with `# setup: <suite>`).
+SETUP=$(sed -n 's/^# setup: *//p' "$SCRIPT" | head -1)
+SETUP=$HERE/suites/${SETUP:-$SUITE}.setup.sql
+if [ -f "$SETUP" ]; then
+  docker run --rm -i --network host --user "$(id -u):$(id -g)" -e PGPASSWORD=pw "$PG_IMAGE" \
+    psql -X -h "$HOST" -p "$PORT" -U postgres -d postgres \
+    < "$SETUP" > "$RES/$SUITE-$TARGET.setup.log" 2>&1 || true
 fi
 
 OUT="$RES/$SUITE-$TARGET"
 rm -rf "$OUT.d" "$OUT.txt"
 mkdir -p "$OUT.d"
-echo "running $SUITE against $TARGET (127.0.0.1:$PORT), log: $OUT.log" >&2
+echo "running $SUITE against $TARGET ($HOST:$PORT), log: $OUT.log" >&2
 set +e
-docker run --rm --network host --cpus="${CLIENTS_CPUS:-4}" --name "${CLIENTS_NAME:-clients}-$SUITE-$TARGET" \
+docker run --rm --network host --cpus="${CLIENTS_CPUS:-4}" ${CLIENTS_CPUSET:+--cpuset-cpus=$CLIENTS_CPUSET} --name "${CLIENTS_NAME:-clients}-$SUITE-$TARGET" \
   --user "$(id -u):$(id -g)" -e HOME=/cache/home \
   -v "$CACHE:/cache" -v "$HERE:/harness:ro" \
-  -e PGHOST=127.0.0.1 -e PGPORT="$PORT" -e PGUSER=postgres -e PGPASSWORD=pw -e PGDATABASE=postgres \
+  -e PGHOST="$HOST" -e PGPORT="$PORT" -e PGUSER=postgres -e PGPASSWORD=pw -e PGDATABASE=postgres \
   ${APP_PORT:+-e APP_PORT=$APP_PORT} -e TARGET="$TARGET" -e SRC="/cache/src/$SUITE" -e OUT="/cache/results/$SUITE-$TARGET.d" \
   -w "/cache/src/$SUITE" ${ENTRY:+--entrypoint "$ENTRY"} "$IMAGE" $RUNNER /harness/suites/"$SUITE".sh "$@" > "$OUT.log" 2>&1
 STATUS=$?
