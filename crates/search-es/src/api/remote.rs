@@ -388,8 +388,9 @@ impl Client {
                 return Err(self.status_error(&method, path_query, &b));
             }
             return match crate::json::parse(&b.bytes) {
-                Ok(Some(v @ Value::Obj(_))) => Ok((v, b.held)),
-                Ok(_) => Err(not_elasticsearch(None)),
+                // Any JSON: `_cat` answers an array; callers check the shape they need.
+                Ok(Some(v)) => Ok((v, b.held)),
+                Ok(None) => Err(not_elasticsearch(None)),
                 Err(e) => Err(not_elasticsearch(Some(EsError::java(500, "x_content_parse_exception", self.scrub(&e.to_string()))))),
             };
         }
