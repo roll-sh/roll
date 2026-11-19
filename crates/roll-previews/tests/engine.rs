@@ -341,6 +341,33 @@ async fn a_previews_metrics_are_what_its_running_services_use() {
     assert!(matches!(e.engine.metrics("pv_nope").await, Err(roll_previews::Error::NotFound(_))));
 }
 
+/// A preview's errors are its services' groups, newest first, named by service, with a secret its
+/// code printed shown as `***` in the title and the sample (as its logs are), a value a cut split
+/// included; its values are read only when there's an error (counting reads none), and a
+/// fingerprint isn't the backend's; 404 for no such preview.
+#[tokio::test]
+async fn a_previews_errors_are_its_services_groups_masked() {
+    let e = env(json!({ "enabled": true }));
+    e.secrets.values.lock().push(("STRIPE_KEY".into(), "sk_test_51Hx9".into()));
+    e.code.open(change("chg_er", 4));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_er").unwrap().unwrap();
+    let web = e.engine.store.services(&p.id).unwrap().into_iter().next().unwrap();
+    let masks_read = || e.secrets.reasons.lock().iter().filter(|r| *r == "logs").count();
+    let before = masks_read();
+    assert!(e.engine.errors(&p.id, 60).await.unwrap().is_empty());
+    assert_eq!(masks_read(), before, "no errors, no values read");
+    let group = |f: &str, title: &str, last_seen: i64| roll_previews::ErrorGroup { service: String::new(), fingerprint: f.into(), kind: "line".into(), title: title.into(), count: 2, first_seen: 1, last_seen, sample: format!("{title}\n  at charge()") };
+    e.apps.errors.lock().insert(web.name.clone(), vec![group("aa", "card declined sk_test_51", 5), group("bb", "Stripe rejected sk_test_51Hx9", 9)]);
+    assert_eq!(e.engine.error_count(&p.id, 360).await.unwrap(), 4);
+    assert_eq!(masks_read(), before, "counting reads no values");
+    let got = e.engine.errors(&p.id, 360).await.unwrap();
+    assert_eq!(got.iter().map(|g| (g.service.as_str(), g.title.as_str())).collect::<Vec<_>>(), [(web.name.as_str(), "Stripe rejected ***"), (web.name.as_str(), "card declined ***")]);
+    assert_eq!((got[0].sample.as_str(), got[1].sample.as_str()), ("Stripe rejected ***\n  at charge()", "card declined ***\n  at charge()"));
+    assert!(got.iter().all(|g| g.fingerprint.len() == 16 && !["aa", "bb"].contains(&g.fingerprint.as_str())), "{got:?}");
+    assert!(matches!(e.engine.errors("pv_nope", 60).await, Err(roll_previews::Error::NotFound(_))));
+}
+
 /// A preview's output is read by anyone who can read the preview, and its code (a fork's too) can
 /// print what it was given: its services' logs, its jobs' output and what its page said in a
 /// screenshot run (the pull request's comment) show a secret's value as `***` (as checks'
@@ -639,6 +666,30 @@ async fn masked_postgres_is_masked_before_it_serves_and_new_rules_reach_it() {
     assert_eq!(e.pg.made.load(Ordering::SeqCst), made + 2);
     assert_eq!(e.pg.masks.lock().len(), 3);
     assert_eq!(e.engine.store.row(&p.id).unwrap().state, State::Ready);
+}
+
+/// The rules dialog's suggestions: an unmasked column that looks like people's data is offered
+/// with a rule, a masked one isn't, nor a resource the caller's grant can't read; a parent that
+/// sleeps isn't woken but named.
+#[tokio::test]
+async fn mask_suggestions_name_unmasked_peoples_data_of_branched_resources() {
+    use roll_previews::mask::Column;
+    let e = env(json!({ "enabled": true, "masking": { "postgres:prj_db": { "public.users.name": "redact" } } }));
+    for r in ["prj_hidden", "prj_asleep"] {
+        e.ws.place(roll_workspace::Scope::All, &e.project, roll_workspace::Kind::Postgres, r, 0.0, 0.0).unwrap();
+    }
+    let col = |path: &str| Column { path: path.into(), r#type: Some("text".into()), ..Column::default() };
+    e.pg.columns.lock().insert("prj_db".into(), Ok(vec![col("public.users.email"), col("public.users.name"), col("public.users.created_at"), col("public.products.name")]));
+    e.pg.columns.lock().insert("prj_hidden".into(), Ok(vec![col("public.users.email")]));
+    e.pg.columns.lock().insert("prj_asleep".into(), Err(roll_previews::ports::Asleep));
+    let got = e.engine.mask_suggestions(&e.project, |_, r| r != "prj_hidden").await.unwrap();
+    assert_eq!(
+        got,
+        json!({
+            "suggestions": [{ "resource": "postgres:prj_db", "path": "public.users.email", "rule": "email", "why": "an email address" }],
+            "unread": [{ "resource": "postgres:prj_asleep", "why": "asleep: open it to read its columns" }],
+        })
+    );
 }
 
 #[tokio::test]
@@ -1092,6 +1143,7 @@ async fn a_git_url_services_branch_push_makes_its_preview() {
         branch: branch.into(),
         sha: sha.map(Into::into),
         message: message.into(),
+        pusher: None,
         pull: None,
     };
     let rows = || e.engine.store.rows(Some(&e.project)).unwrap().into_iter().filter(|r| r.repo == "git:svc_shop").collect::<Vec<_>>();
@@ -1120,7 +1172,7 @@ async fn a_git_url_services_branch_push_makes_its_preview() {
     e.engine.git_push(&push("feat/docs", Some("c3"), "typo [skip preview]")).await.unwrap();
     assert_eq!(rows().len(), 1, "[skip preview] skips one");
     // Its pull request (same repo) names the branch's preview and links it, still trusted.
-    let pull = roll_previews::ports::GitPull { number: 3, title: "Cart\nbadge".into(), url: "https://github.com/acme/shop/pull/3".into(), fork: false };
+    let pull = roll_previews::ports::GitPull { number: 3, title: "Cart\nbadge".into(), url: "https://github.com/acme/shop/pull/3".into(), fork: false, author: None };
     e.engine.git_push(&roll_previews::ports::GitPush { pull: Some(pull), ..push("feat/cart", Some("b2"), "") }).await.unwrap();
     let v = e.engine.store.view(e.engine.store.row(&r[0].id).unwrap()).unwrap();
     assert_eq!((v.title.as_str(), v.pull.as_ref().map(|p| p.number), v.trusted, rows().len()), ("Cart badge", Some(3), true, 1));
@@ -1143,7 +1195,8 @@ async fn a_forks_pull_request_on_a_git_url_service_runs_only_its_approved_head()
         branch: "pull/7".into(),
         sha: sha.map(Into::into),
         message: String::new(),
-        pull: Some(roll_previews::ports::GitPull { number: 7, title: "Faster cart".into(), url: "https://github.com/acme/shop/pull/7".into(), fork: true }),
+        pusher: None,
+        pull: Some(roll_previews::ports::GitPull { number: 7, title: "Faster cart".into(), url: "https://github.com/acme/shop/pull/7".into(), fork: true, author: None }),
     };
     let deployed = |id: &str| e.apps.deployed.lock().get(&(id.to_string(), "shop".to_string())).cloned();
     e.engine.git_push(&push(Some("f1"))).await.unwrap();
@@ -1217,7 +1270,8 @@ async fn a_git_url_preview_reports_its_status_and_pull_request_comment() {
         branch: branch.into(),
         sha: Some(sha.into()),
         message: String::new(),
-        pull: Some(roll_previews::ports::GitPull { number, title: "Cart".into(), url: format!("https://github.com/acme/shop/pull/{number}"), fork }),
+        pusher: None,
+        pull: Some(roll_previews::ports::GitPull { number, title: "Cart".into(), url: format!("https://github.com/acme/shop/pull/{number}"), fork, author: None }),
     };
     e.engine.git_push(&push("feat/cart", "a1", 3, false)).await.unwrap();
     for _ in 0..3 {
@@ -1253,6 +1307,34 @@ async fn a_git_url_preview_reports_its_status_and_pull_request_comment() {
     e.engine.git_push(&push("feat/cart", "a2", 3, false)).await.unwrap();
     e.engine.pass().await.unwrap();
     assert_eq!(gr.statuses.lock().len(), n);
+    gr.connected.store(true, std::sync::atomic::Ordering::SeqCst);
+    // A dependency bot's pull request (`skip_authors`) gets no preview, unless its title asks.
+    let bots = e.engine.store.settings(&e.project).unwrap().patched(&json!({ "skip_authors": ["*[bot]"] })).unwrap();
+    e.engine.store.put_settings(&e.project, &bots).unwrap();
+    let bump = |title: &str| roll_previews::ports::GitPush {
+        pull: Some(roll_previews::ports::GitPull { number: 9, title: title.into(), url: "https://github.com/acme/shop/pull/9".into(), fork: false, author: Some("dependabot[bot]".into()) }),
+        ..push("deps/lodash", "d1", 9, false)
+    };
+    let of_bump = || e.engine.store.rows(Some(&e.project)).unwrap().into_iter().any(|r| r.branch.as_deref() == Some("deps/lodash") && r.desired == Desired::Active);
+    // The bot pushes its branch first (no pull request yet, no opener): that makes a preview…
+    let branch_push = || roll_previews::ports::GitPush { pull: None, ..push("deps/lodash", "d1", 9, false) };
+    e.engine.git_push(&branch_push()).await.unwrap();
+    assert!(of_bump());
+    // (With the pusher known, a bot's branch push makes none at all.)
+    let deps = |b: &str| roll_previews::ports::GitPush { pusher: Some("dependabot[bot]".into()), ..roll_previews::ports::GitPush { pull: None, ..push(b, "e1", 10, false) } };
+    e.engine.git_push(&deps("deps/react")).await.unwrap();
+    assert!(!e.engine.store.rows(Some(&e.project)).unwrap().iter().any(|r| r.branch.as_deref() == Some("deps/react")), "a bot's branch push");
+    // …which its pull request takes back, and the branch's next push makes none.
+    e.engine.git_push(&bump("Bump lodash")).await.unwrap();
+    assert!(!of_bump(), "a bot's pull request is skipped");
+    e.engine.git_push(&roll_previews::ports::GitPush { sha: Some("d2".into()), ..branch_push() }).await.unwrap();
+    assert!(!of_bump(), "and so are its branch's later pushes");
+    // A later event that names no opener (GitLab's when someone else acted) keeps the skip.
+    let unknown = roll_previews::ports::GitPush { pull: Some(roll_previews::ports::GitPull { author: None, ..bump("Bump lodash").pull.unwrap() }), sha: Some("d3".into()), ..branch_push() };
+    e.engine.git_push(&unknown).await.unwrap();
+    assert!(!of_bump(), "an unknown opener isn't a person");
+    e.engine.git_push(&bump("Bump lodash [preview]")).await.unwrap();
+    assert!(of_bump(), "unless its title asks");
 }
 
 #[tokio::test]
@@ -1406,7 +1488,8 @@ async fn the_project_that_has_had_a_service_longest_speaks_for_its_branches() {
         branch: branch.into(),
         sha: Some("a1".into()),
         message: String::new(),
-        pull: Some(roll_previews::ports::GitPull { number, title: "Cart".into(), url: format!("https://github.com/acme/shop/pull/{number}"), fork: false }),
+        pusher: None,
+        pull: Some(roll_previews::ports::GitPull { number, title: "Cart".into(), url: format!("https://github.com/acme/shop/pull/{number}"), fork: false, author: None }),
     };
     e.engine.git_push(&push("feat/cart", 3)).await.unwrap();
     e.engine.git_push(&push("wip/x", 4)).await.unwrap();
@@ -1466,6 +1549,33 @@ async fn a_preview_made_by_hand_is_only_of_a_repo_the_project_stands_for() {
     // The change's preview is the operator's project's: never handed to her.
     let err = e.engine.create(&theirs.id, "acme/api", None, Some("chg_a"), "ada").await.unwrap_err();
     assert!(matches!(err, roll_previews::Error::Conflict(_)) && !err.to_string().contains(&ours.id), "{err}");
+}
+
+/// `roll preview up`'s branch (`preview/<who>/<name>`) has a preview of its own: a change of that
+/// branch gets no second, and one the rules made just before it goes. A preview made by hand of a
+/// pull request's own branch never takes that pull request's preview away.
+#[tokio::test]
+async fn a_change_of_a_branch_with_its_own_preview_gets_none() {
+    let e = env(json!({ "enabled": true }));
+    // `roll preview up`'s order: the push opens the change and nudges a pass, then the branch's
+    // preview is asked for.
+    e.code.heads.lock().insert("acme/web@preview/ana/local".into(), "cs_3a".into());
+    e.code.open(ChangeInfo { branch: Some("preview/ana/local".into()), ..change("chg_3", 3) });
+    e.engine.pass().await.unwrap();
+    let made = e.engine.store.row_by_change("chg_3").unwrap().unwrap();
+    let (branch, _) = e.engine.create(&e.project, "acme/web", Some("preview/ana/local"), None, "ana").await.unwrap();
+    e.engine.pass().await.unwrap();
+    assert_eq!(e.engine.store.row(&made.id).map(|r| r.desired).unwrap_or(Desired::Deleted), Desired::Deleted);
+    e.engine.pass().await.unwrap();
+    assert!(e.engine.store.row_by_change("chg_3").unwrap().is_none_or(|r| r.desired == Desired::Deleted), "no second one");
+    assert_eq!(e.engine.store.row(&branch.id).unwrap().desired, Desired::Active);
+    // A pull request's own branch, previewed by hand too: its own preview stays.
+    e.code.heads.lock().insert("acme/web@feat/4".into(), "cs_4a".into());
+    e.code.open(change("chg_4", 4));
+    e.engine.pass().await.unwrap();
+    e.engine.create(&e.project, "acme/web", Some("feat/4"), None, "ana").await.unwrap();
+    e.engine.pass().await.unwrap();
+    assert_eq!(e.engine.store.row_by_change("chg_4").unwrap().map(|r| r.desired), Some(Desired::Active), "the pull request keeps its preview");
 }
 
 /// A deploy hook (Vercel's and Netlify's, for a headless CMS's publish webhook) builds the

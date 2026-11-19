@@ -1,0 +1,67 @@
+//! A person deletes their own account (GitHub's "Delete your account", docs/accounts.md "Deleting
+//! your account"): from a fresh session (sudo mode), typing their handle. In one write, every way
+//! in and everything personal goes (sessions, links, second factors, passkeys, pending codes,
+//! sign-in places, reset requests), and the row stays as a tombstone: no address (it can be
+//! invited again), no name, disabled for good, `deleted_at` set. Ids in the audit log and the
+//! handle (their roll code owner keeps it) still name it; nothing brings it back. Their tokens
+//! die with it (a token acts as its person now: there is none), and their roll code owner is
+//! suspended as a disabled person's is. A company's people are its to remove: SCIM-provisioned
+//! people and SSO-enforced domains ask their admin. The last admin can't leave roll without one.
+
+use crate::{Accounts, Error, Mail, Result};
+use code_sql::{OptionalExtension, params};
+
+/// What a deleted account's rows hold about the person: everything keyed by them.
+const THEIRS: [&str; 11] = ["sessions", "identities", "email_codes", "email_changes", "oauth_states", "totp", "recovery_codes", "passkeys", "passkey_challenges", "reset_requests", "sign_in_places"];
+
+impl Accounts {
+    /// Delete `user`'s account, `confirm` being their handle. Returns the mail for the address
+    /// it had.
+    pub fn delete_self(&self, user: &str, confirm: &str) -> Result<Mail> {
+        let me = self.user(user)?;
+        if confirm.trim() != me.handle {
+            return Err(Error::BadRequest(format!("type your handle ({}) to confirm", me.handle), Some("confirm")));
+        }
+        if self.db.read(|c| c.query_row("SELECT 1 FROM scim_users WHERE user_id = ? LIMIT 1", [user], |_| Ok(())).optional())?.is_some() {
+            return Err(Error::Forbidden("your company's provider (SCIM) manages your account: ask your admin to remove it".into(), "managed"));
+        }
+        if let Some(name) = self.sso_required_for(&me.email)? {
+            return Err(Error::Forbidden(format!("{name} manages your account: ask your admin to remove it"), "sso_required"));
+        }
+        let now = self.db.now_ms()?;
+        let tombstone = format!("{user}@deleted.invalid");
+        let done = self.db.write(|c| {
+            let row = c.query_row("SELECT admin FROM users WHERE id = ? AND deleted_at IS NULL", [user], |r| r.get::<_, bool>(0)).optional()?;
+            let Some(admin) = row else { return Ok(Err(Error::NotFound(format!("no user {user}")))) };
+            if admin {
+                let others: i64 = c.query_row("SELECT COUNT(*) FROM users WHERE admin = 1 AND disabled = 0 AND deleted_at IS NULL AND id <> ?", [user], |r| r.get(0))?;
+                if others == 0 {
+                    return Ok(Err(Error::Conflict("you're roll's last admin: make someone else an admin first".into())));
+                }
+            }
+            for table in THEIRS {
+                c.execute(&format!("DELETE FROM {table} WHERE user_id = ?"), [user])?;
+            }
+            c.execute(
+                "UPDATE users SET email = ?, name = '', admin = 0, disabled = 1, disabled_by = 'self', deleted_at = ? WHERE id = ?",
+                params![tombstone, now, user],
+            )?;
+            Ok::<_, code_sql::Error>(Ok(()))
+        })?;
+        done?;
+        // Their roll code owner's own tokens and machine links (another database: after the write).
+        if let Some(owners) = &self.owners
+            && let Some(owner) = self.db.read(|c| c.query_row("SELECT code_owner_id FROM users WHERE id = ?", [user], |r| r.get::<_, Option<String>>(0)))?
+        {
+            owners.suspend(&owner).map_err(|e| Error::Internal(format!("the account is deleted, but cutting off its roll code owner failed: {e}")))?;
+        }
+        Ok(Mail {
+            to: me.email,
+            subject: "Your roll account was deleted".into(),
+            text: format!(
+                "The roll account {} was deleted, as you asked from your account page. Its sessions, sign-in links, second factors and tokens stopped working at once, and this address no longer signs in.\n\nIf this wasn't you, tell your admin at once: someone had your session and confirmed it was you.\n",
+                me.handle
+            ),
+        })
+    }
+}

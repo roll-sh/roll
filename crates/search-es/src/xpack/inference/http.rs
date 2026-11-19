@@ -58,9 +58,32 @@ pub struct Call<'a> {
     pub per_minute: Option<i64>,
 }
 
+impl<'a> Call<'a> {
+    /// A JSON POST with the usual retries (429, 500, 503).
+    pub fn json(inference_id: &'a str, url: String, headers: Vec<(String, String)>, body: &crate::json::Value, timeout: Duration, per_minute: Option<i64>) -> Call<'a> {
+        Call { inference_id, url, headers, body: body.to_json().into_bytes(), timeout, retry: retry_server_errors, per_minute }
+    }
+}
+
+/// A URL as errors may print it: without its query (Google AI Studio's key travels there) or
+/// user info.
+pub fn redact(url: &str) -> String {
+    match reqwest::Url::parse(url) {
+        Ok(mut u) => {
+            u.set_query(None);
+            let _ = u.set_username("");
+            let _ = u.set_password(None);
+            u.to_string()
+        }
+        Err(_) => url.split('?').next().unwrap_or_default().to_string(),
+    }
+}
+
 /// What came back.
 pub struct Answer {
     pub status: u16,
+    /// Response headers, names in lower case.
+    pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
 }
 
@@ -71,6 +94,10 @@ impl Answer {
 
     pub fn json(&self) -> Option<crate::json::Value> {
         crate::json::parse(&self.body).ok().flatten()
+    }
+
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str())
     }
 }
 
@@ -95,10 +122,16 @@ fn innermost(e: &reqwest::Error) -> String {
 
 /// Sends a POST, retrying as described above.
 pub async fn post(cluster: &Cluster, call: &Call<'_>) -> EsResult<Answer> {
+    post_limited(cluster, call, MAX_RESPONSE).await
+}
+
+/// [`post`], reading at most `max` bytes of the answer.
+pub async fn post_limited(cluster: &Cluster, call: &Call<'_>, max: usize) -> EsResult<Answer> {
     let allow_private = cluster.config.node_setting(ALLOW_PRIVATE).is_some_and(|v| v.eq_ignore_ascii_case("true"));
-    let url = reqwest::Url::parse(&call.url).map_err(|_| EsError::status(400, format!("Invalid host [{}], please check that the URL is correct.", call.url)))?;
-    if !matches!(url.scheme(), "http" | "https") {
-        return Err(EsError::status(400, format!("Invalid host [{}], please check that the URL is correct.", call.url)));
+    let invalid = || EsError::status(400, format!("Invalid host [{}], please check that the URL is correct.", redact(&call.url)));
+    let url = reqwest::Url::parse(&call.url).map_err(|_| invalid())?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none_or(str::is_empty) {
+        return Err(invalid());
     }
     if !allow_private && roll_net::literal_private_host(&url) {
         return Err(EsError::status(
@@ -132,12 +165,13 @@ pub async fn post(cluster: &Cluster, call: &Call<'_>) -> EsResult<Answer> {
         let outcome = match sent {
             Ok(mut resp) => {
                 let status = resp.status().as_u16();
+                let headers: Vec<(String, String)> = resp.headers().iter().filter_map(|(k, v)| Some((k.as_str().to_string(), v.to_str().ok()?.to_string()))).collect();
                 let mut body = Vec::new();
                 loop {
                     match resp.chunk().await {
                         Ok(Some(c)) => {
-                            if body.len() + c.len() > MAX_RESPONSE {
-                                return Err(EsError::status(400, format!("the answer of inference endpoint [{}] exceeds [{MAX_RESPONSE}] bytes", call.inference_id)));
+                            if body.len() + c.len() > max {
+                                return Err(EsError::status(400, format!("the answer of inference endpoint [{}] exceeds [{max}] bytes", call.inference_id)));
                             }
                             body.extend_from_slice(&c);
                         }
@@ -146,7 +180,7 @@ pub async fn post(cluster: &Cluster, call: &Call<'_>) -> EsResult<Answer> {
                         Err(e) => return Err(failed(call.inference_id, innermost(&e))),
                     }
                 }
-                let answer = Answer { status, body };
+                let answer = Answer { status, headers, body };
                 if !(call.retry)(status) {
                     return Ok(answer);
                 }
@@ -200,7 +234,27 @@ pub fn check(id: &str, url: &str, answer: &Answer) -> EsResult<()> {
         403 => "Received a permission denied error status code",
         300..=399 => "Unhandled redirection",
         400 => "Received a bad request status code",
-        404 => return Err(status_error(&format!("Resource not found at [{url}]"), id, answer)),
+        404 => return Err(status_error(&format!("Resource not found at [{}]", redact(url)), id, answer)),
+        _ => "Received an unsuccessful status code",
+    };
+    Err(status_error(prefix, id, answer))
+}
+
+/// Google's handlers (`GoogleVertexAiResponseHandler`, `GoogleAiStudioResponseHandler`): no
+/// special 400 or 401, 503 says the service is overloaded.
+pub fn check_google(id: &str, url: &str, answer: &Answer, service: &str) -> EsResult<()> {
+    if answer.ok() {
+        return Ok(());
+    }
+    let unavailable = format!("The {service} service may be temporarily overloaded or down");
+    let prefix = match answer.status {
+        500 => "Received a server error status code",
+        503 => unavailable.as_str(),
+        501..=599 => "Received a server error status code",
+        429 => "Received a rate limit status code",
+        404 => return Err(status_error(&format!("Resource not found at [{}]", redact(url)), id, answer)),
+        403 => "Received a permission denied error status code",
+        300..=399 => "Unhandled redirection",
         _ => "Received an unsuccessful status code",
     };
     Err(status_error(prefix, id, answer))
