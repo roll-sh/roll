@@ -1220,6 +1220,15 @@ the last hour) goes. A preview asleep keeps what it last said. An error whose li
 per-preview value (its id, its branch's host) can read as new where main's has the same one.
 `an_error_mains_preview_doesnt_have_reaches_the_record_and_the_report`.
 
+Where a slower route's time went (Sentry's span comparison): for each slower route, each span
+name's median time under it (a trace's spans of one name summed, so an N+1's queries are one; a
+trace without the span counts as 0) here and on main's preview, and the one that grew most, by
+20 ms or more, is said with it (`grew: {span, ms, main_ms}`): on `…/routes`' slower rows, the
+sheet's route table ("SELECT orders +280 ms"), the record's `slower_routes`, the change page and
+the pull request's comment. Only spans this node keeps compare (main's on its holder); a roll
+apps service's traces have no spans here, so its routes say no reason.
+`a_slower_routes_time_is_put_on_the_span_that_grew`.
+
 Repeated queries (Sentry's N+1 detection): a trace whose spans run one database statement
 (`db.statement`, or the newer `db.query.text`) ten times or more says it as `repeated`
 (`{statement, count}`), the statement's shape with its literals taken out (`SELECT … WHERE id = ?`,
