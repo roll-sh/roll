@@ -850,6 +850,7 @@ impl Store {
         db.add_column("environments", "checks", "TEXT")?;
         db.add_column("environments", "heartbeats", "TEXT")?;
         db.add_column("environments", "split", "TEXT")?;
+        db.add_column("deploy_scans", "sbom", "TEXT")?;
         db.add_column("environments", "freeze", "TEXT")?;
         // Drains made before their filters sent every environment's runtime output: still so.
         db.add_column("log_drains", "sources", "TEXT")?;
@@ -1514,7 +1515,7 @@ impl Store {
                 }
                 c.execute("UPDATE deployments SET pruned_at = ? WHERE id = ?", params![now, id])?;
                 // History keeps its counts; its findings went with its image.
-                c.execute("UPDATE deploy_scans SET items = '[]' WHERE deployment = ?", [&id])?;
+                c.execute("UPDATE deploy_scans SET items = '[]', sbom = NULL WHERE deployment = ?", [&id])?;
                 out.push(Pruned { id, image });
             }
             for p in &mut out {
@@ -1638,13 +1639,19 @@ impl Store {
     }
 
     /// A deployment's scan: its counts and its findings (most severe first, at most [`crate::model::MAX_VULNERABILITIES`]).
-    pub fn set_scan(&self, service: &str, deployment: &str, summary: &crate::model::ScanSummary, items: &[crate::model::Vulnerability]) -> Result<()> {
+    pub fn set_scan(&self, service: &str, deployment: &str, summary: &crate::model::ScanSummary, items: &[crate::model::Vulnerability], sbom: Option<&[u8]>) -> Result<()> {
         let (s, i) = (serde_json::to_string(summary).expect("a scan serializes"), serde_json::to_string(items).expect("findings serialize"));
+        let b = sbom.map(|b| String::from_utf8_lossy(b).into_owned());
         self.db.execute(
-            "INSERT INTO deploy_scans (deployment, service, summary, items) VALUES (?, ?, ?, ?) ON CONFLICT (deployment) DO UPDATE SET summary = excluded.summary, items = excluded.items",
-            params![deployment, service, s, i],
+            "INSERT INTO deploy_scans (deployment, service, summary, items, sbom) VALUES (?, ?, ?, ?, ?) ON CONFLICT (deployment) DO UPDATE SET summary = excluded.summary, items = excluded.items, sbom = excluded.sbom",
+            params![deployment, service, s, i, b],
         )?;
         Ok(())
+    }
+
+    /// A deployment's SBOM (CycloneDX JSON), when its scan kept one.
+    pub fn scan_sbom(&self, deployment: &str) -> Result<Option<String>> {
+        Ok(self.db.query_row("SELECT sbom FROM deploy_scans WHERE deployment = ?", [deployment], |r| r.get::<_, Option<String>>(0)).optional()?.flatten())
     }
 
     pub fn scan(&self, deployment: &str) -> Result<Option<(crate::model::ScanSummary, Vec<crate::model::Vulnerability>)>> {

@@ -86,6 +86,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/deploys/{{dep}}/logs"), get(deploy_logs))
         .route(&format!("{env}/deploys/{{dep}}/commits"), get(deploy_commits))
         .route(&format!("{env}/deploys/{{dep}}/vulnerabilities"), get(deploy_vulnerabilities))
+        .route(&format!("{env}/deploys/{{dep}}/sbom"), get(deploy_sbom))
         .route(&format!("{env}/deploys/{{dep}}/rollback"), post(rollback))
         .route(&format!("{env}/deploys/{{dep}}/rollout"), post(rollout_action))
         .route(&format!("{env}/rollback"), post(rollback_previous))
@@ -748,6 +749,12 @@ async fn deploy_commits(State(apps): S, Path((id, env, dep)): Path<(String, Stri
 #[derive(Deserialize)]
 struct VulnQuery {
     severity: Option<String>,
+}
+
+async fn deploy_sbom(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>) -> R {
+    let body = apps.sbom(&id, &env, &dep).await?;
+    let file = format!("attachment; filename=\"{dep}.cdx.json\"");
+    Ok(([(axum::http::header::CONTENT_TYPE, "application/vnd.cyclonedx+json".to_string()), (axum::http::header::CONTENT_DISPOSITION, file)], body).into_response())
 }
 
 async fn deploy_vulnerabilities(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>, Query(q): Query<VulnQuery>) -> R {
