@@ -209,9 +209,15 @@ export function MigratePanel({ cluster, existing, onClose, onChanged }: { cluste
               </Field>
             </div>
             {form.auth === "api_key" && (
-              <Field label="API key" hint="The encoded value, sent as Authorization: ApiKey …">
-                <input type="password" value={form.apiKey} onChange={(e) => set({ apiKey: e.target.value })} className={`${input} w-full font-mono`} autoComplete="off" spellCheck={false} />
-              </Field>
+              <div className="space-y-1">
+                <Field label="API key">
+                  <input type="password" value={form.apiKey} onChange={(e) => set({ apiKey: e.target.value })} className={`${input} w-full font-mono`} autoComplete="off" spellCheck={false} />
+                </Field>
+                <p className="text-[11px] text-subtle">
+                  Its encoded value. It needs the <span className="font-mono">monitor</span> cluster privilege, and <span className="font-mono">read</span> and{" "}
+                  <span className="font-mono">view_index_metadata</span> on the indices to copy.
+                </p>
+              </div>
             )}
             {form.auth === "basic" && (
               <div className="grid gap-3 sm:grid-cols-2">

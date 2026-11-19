@@ -1533,13 +1533,28 @@ the rest are skipped by the tests' own prerequisites.
   setting. A `search_click` behavioral analytics event is indexed as on Elasticsearch, and also
   counts as a click for the index's analytics when they're on.
 
-- By-query tasks (`wait_for_completion=false`) run to completion before their task id is
-  returned (their results are stored in the `.tasks` system index), so they are not
-  throttled and `_rethrottle` doesn't reach them; synchronous requests are throttled by
-  `requests_per_second`.
-- Reindex from remote reads over plain HTTP (no TLS client) and needs
-  `reindex.remote.whitelist` (node setting, `search-dev --yaml-test-cluster` sets
-  `127.0.0.1:*`); an empty whitelist rejects every remote, as in Elasticsearch.
+- By-query tasks (`wait_for_completion=false`) run in the background on a served cluster, as
+  in Elasticsearch: `_tasks` shows their status, `_rethrottle` changes their rate and a cancel
+  stops them at once (also mid-throttle or while a remote is slow to answer); their results are
+  stored in the `.tasks` system index. Only a cluster embedded without a background handle
+  (search-es' own tests) runs them before returning the task id.
+- Reindex from remote reads the remote as Elasticsearch 9.5.5 does: a point in time with
+  `search_after` from 7.10 on (`_shard_doc` from 7.12), a scroll before that and for OpenSearch
+  (whose version numbers read as old Elasticsearch ones), one page in memory at a time, over HTTP
+  or HTTPS (the platform's roots plus `reindex.ssl.certificate_authorities`, with
+  `reindex.ssl.verification_mode`). Differences, because the remote is a URL a tenant chose
+  (README.md, "Migrating into roll"): names resolve to public addresses only and private
+  literals and `localhost` are refused unless the node sets
+  `roll.reindex.remote.allow_private_hosts` (rolld's `--search-reindex-allow-private`); no
+  redirect is followed (its status comes back as the `status_exception`); each answer is read to
+  at most `roll.reindex.remote.buffer_limit` (100 MiB, Elasticsearch's REST client's buffer) and
+  charged to the request breaker; a request's whole exchange is capped at 10 minutes, whatever
+  `socket_timeout` (which bounds each read) says; an HTTPS remote's default `connect_timeout` is
+  5s rather than 1s (it covers the TLS handshake too). Unset, `reindex.remote.whitelist` lets
+  any public host through (Elasticsearch refuses every remote); set, it narrows as in
+  Elasticsearch (an empty value refuses every remote), and `reindex.remote.blocklist` refuses what
+  it matches. A credential the remote echoes back is replaced by `::es_redacted::` in errors.
+  `search-dev --yaml-test-cluster` sets the whitelist to `127.0.0.1:*` and allows private hosts.
 - Segment generations in `_segments` / `_cat/segments` number the current segments.
 - Remote clusters (`cluster.remote.<alias>.*`) reach another roll search cluster of the same
   owner with API key based security (README.md, "Cross-cluster search"), or the node itself

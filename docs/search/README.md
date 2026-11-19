@@ -214,6 +214,67 @@ Elasticsearch-flavor.
 `a_sleeping_remote_wakes_and_a_gone_one_is_skipped`, and `tests/cluster.rs`
 `a_remote_on_another_node_is_searched_through_the_signed_forward` cover it.
 
+**Migrating into roll** (Elastic Cloud's restore from another deployment, AWS OpenSearch
+Service's migration assistant; `search-control` `migrate.rs`, `search-es` `api/remote.rs`). The
+way in from Elastic Cloud, a self-hosted Elasticsearch or OpenSearch is reindex from remote, as
+Elasticsearch 9.5.5 does it from the client's side: `source.remote.host` over `https://` (or
+`http://`), `username`/`password` or `headers` (`Authorization: ApiKey …`), `socket_timeout`,
+`connect_timeout`, `query`, `size`, `max_docs`, `_source` filtering, `requests_per_second`,
+`wait_for_completion=false` with `_tasks`, `_rethrottle` and cancel; `slices` refused as
+Elasticsearch refuses it for a remote. A remote of 7.10 or later is read through a point in time
+with `search_after`, an older one (and OpenSearch) with a scroll, one page held at a time and
+written before the next is read; the search context is released however the run ends.
+
+The remote is a URL a tenant chose, so every request goes through the guarded client: names
+resolve to public addresses only (`roll_net::PublicOnly`), private literals and `localhost` are
+refused (rolld's `--search-reindex-allow-private`, `ROLL_SEARCH_REINDEX_ALLOW_PRIVATE`, lifts
+both, for local development), no redirect is followed, no proxy is used, each answer is read to
+at most 100 MiB (`roll.reindex.remote.buffer_limit`) and charged to the request breaker, and
+reads time out. Public hosts need no node allowlist; an operator's `reindex.remote.whitelist`
+still narrows them, as in Elasticsearch, and `reindex.remote.blocklist` refuses. HTTPS is verified
+against the platform's roots (plus `reindex.ssl.certificate_authorities`). The remote's answers
+are untrusted input. Credentials never leave the client but on the wire: a task's description
+names the host alone (`reindex from [scheme=https host=… port=…][logs] to [logs]`, as
+Elasticsearch prints it), and anything quoted from the remote (an error body, a transport
+failure) has the password, the `Authorization` value and every header value replaced by
+`::es_redacted::`. The dashboard's console keeps no `Authorization` header in its history.
+
+The dashboard's Indices tab has **Migrate**: the remote's URL and an API key (it needs the
+`monitor` cluster privilege and `read` and `view_index_metadata` on the indices) or a user and
+password, sent to roll and never shown back. roll lists the remote's open indices with documents,
+size and aliases (hidden and system indices aside; data streams named but not copied yet). For
+each picked index roll creates the copy (its own name unless roll has one) with the remote's
+mappings, settings and aliases, dropping the settings it doesn't take and saying why: those the
+remote's cluster set (uuid, creation date, versions), shard allocation, blocks (they'd stop the
+copy), lifecycle policies (not copied), storage, a pipeline roll doesn't have, and any setting
+roll's index creation refuses (its error names it). Then it starts the reindex task, which the
+panel follows through `_tasks` with cancel; a copy under another name can take the remote's name
+as an alias when it's done. Copies keep running if the panel closes.
+
+| method | path | |
+| ------ | ---- | - |
+| POST | `/v1/search/clusters/{id}/migrate/inspect` | `{source: {host, api_key? \| username?, password?}}` → `{remote: {host, version, distribution, cluster_name}, indices: [{index, health, status, docs, size_bytes, primary_size_bytes, primaries, replicas, aliases, exists}], data_streams}`; a remote's refusal is a 400 naming it (`the remote cluster: status_exception: …`), never echoing a credential. `write` for roll-access |
+| POST | `/v1/search/clusters/{id}/migrate` | `{source, indices: [{index, dest?}], requests_per_second?, size?}` (at most 100 indices) → `{indices: [{index, dest, task, dropped: [{setting, value, reason}], aliases} \| {index, dest, error}]}`: each index's copy created and its `wait_for_completion=false` reindex started; one index's failure doesn't stop the others; an index roll already has is refused, not overwritten. `write` for roll-access |
+
+`crates/search-es/tests/reindex_remote.rs` covers the guard against a hostile mock remote (a
+redirect not followed, an oversized page refused, private hosts refused without the flag, echoed
+credentials kept out of errors and tasks) and, with `ROLL_REINDEX_ES` set, a real Elasticsearch
+9.5.5 over HTTPS (a query, an API key, a wrong password answering exactly as Elasticsearch's own
+reindex does, a cancelled task, every point in time released). `crates/search-control/tests/
+control.rs` `migrating_from_another_cluster` runs the routes' flow; the dashboard's logic is in
+`apps/dashboard/src/lib/search-migrate.ts` (tested beside it).
+
+Phase 2, Algolia (planned, not built): an import that reads an Algolia application through its
+REST API with an admin key the caller gives once (the same guarded client and sealing rules):
+`browse` every record of the picked indices into roll indices (`objectID` as `_id`, with
+mappings inferred from the first pages as the file import does, and Algolia's searchable
+attributes, attributes for faceting and custom ranking turned into `text`, `keyword` and numeric
+fields with `index_options` to match), its synonyms (`synonym`, `onewaysynonym`, `altcorrection`,
+`placeholder`) into roll synonym sets, its rules (conditions on a query pattern, consequences that
+promote, hide or filter) into query rules where Elasticsearch's rule criteria can say the same and
+listed as dropped where they can't, and its replicas into sorts the dashboard records for the
+browser keys. Progress, cancel and the alias switch as above.
+
 **Terraform** (Elastic Cloud's `ec_deployment` and `elasticstack` providers, AWS's
 `aws_opensearch_domain`). roll's provider (`sdk/terraform-provider-roll`, its README has the
 details) has `roll_search_cluster` (name, flavor, `always_on` or `idle_timeout_s`, limits,
@@ -256,6 +317,8 @@ origins (browser search), once they're on main.
 | GET | `/v1/search/clusters/{id}/remotes` | the remote clusters it holds credentials for: `{remotes: [{alias, cluster, cluster_id, key_id, minted, created_at, connected}]}` (never the key) |
 | PUT | `/v1/search/clusters/{id}/remotes/{alias}` | link another cluster of the same owner as remote `alias` (above): `{cluster, skip_unavailable?, access?}` or `{cluster, skip_unavailable?, api_key}` → `{alias, cluster, cluster_id, mode, proxy_address, key_id, minted, skip_unavailable?}`; 404 for a cluster the caller can't link to, missing or not. `admin` on both clusters for roll-access |
 | DELETE | `/v1/search/clusters/{id}/remotes/{alias}` | unlink: the remote's settings and credentials go, a key roll made is revoked (204) |
+| POST | `/v1/search/clusters/{id}/migrate/inspect` | list another Elasticsearch or OpenSearch's indices for a migration ("Migrating into roll" above) |
+| POST | `/v1/search/clusters/{id}/migrate` | copy picked indices' definitions and start their reindex tasks (above) |
 | GET, PUT, DELETE | `/v1/search/clusters/{id}/indices/{index}` | Elasticsearch's `GET`/`PUT`/`DELETE /<index>`: mappings, settings and aliases; create (body: `mappings`, `settings`); delete |
 | GET, PUT | `/v1/search/clusters/{id}/indices/{index}/mapping` | `GET`/`PUT /<index>/_mapping` |
 | GET | `/v1/search/clusters/{id}/indices/{index}/settings` | `GET /<index>/_settings` |
