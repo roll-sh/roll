@@ -1770,7 +1770,10 @@ Agent's templates do).
 
 - **Which products.** roll storage's replication targets to buckets outside roll: the access key
   id and the secret (`POST /v1/storage/replication-targets` with
-  `"secret_access_key": "roll://production/AWS_SECRET_ACCESS_KEY"`). Search snapshot
+  `"secret_access_key": "roll://prj_…@production/AWS_SECRET_ACCESS_KEY"`). A target's references
+  name their project by its `prj_…` id: the bucket replicating only proves which projects stand
+  for it, so without one, anyone who may set another bucket's replication could point it at the
+  target and have roll sign for the target's endpoint with that bucket's project's credential. Search snapshot
   repositories, roll code's reviewer provider keys and the agents' gateway upstreams still keep
   sealed copies.
 - **Who reads it.** The product asks rolld in process (`Secrets::resolve_for(resource,
@@ -1779,6 +1782,9 @@ Agent's templates do).
   holds that resource *and* that stands for it (`Workspace::trusts`): a person's canvas only
   for what's theirs, never membership alone. A reference names a project
   (`roll://PROJECT@ENV/KEY`) only if it's that one, and several such projects need it named.
+  Why one doesn't resolve stays in rolld's log: storage tells an S3 client setting a bucket's
+  replication only that the target's credentials don't resolve, never "protected" or "no such
+  key", which would say which keys exist where.
 - **Protected environments.** As a roll apps service reads its own environment: a resource its
   project stands for reads as that project's runtime, protected environments and sensitive keys
   included. An ephemeral environment that isn't trusted never reaches a protected one (its base,
