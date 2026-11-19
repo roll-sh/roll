@@ -293,7 +293,7 @@ impl Secrets {
                 "INSERT INTO github_apps (id, project_id, name, app_id, installation_id, api_base, private_key, created_at, created_by, repositories, permissions) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 params![id, project, app.name, app.app_id as i64, app.installation_id as i64, app.api_base, sealed, now, app.created_by, serde_json::to_string(&app.repositories).expect("JSON"), serde_json::to_string(&app.permissions).expect("JSON")],
             )?;
-            audit::record(c, project, caller, "github_app.add", None, None, &[], &format!("added GitHub App {} (app {}, installation {})", app.name, app.app_id, app.installation_id), now)
+            audit::record(c, self.keys()?, project, caller, "github_app.add", None, None, &[], &format!("added GitHub App {} (app {}, installation {})", app.name, app.app_id, app.installation_id), now)
         })?;
         Ok(app)
     }
@@ -315,7 +315,7 @@ impl Secrets {
                 return Err(Error::Conflict("in_use", format!("{name} has {live} token(s) still to revoke: delete it once their leases end")));
             }
             c.execute("DELETE FROM github_apps WHERE id = ?", [id])?;
-            audit::record(c, project, caller, "github_app.delete", None, None, &[], &format!("deleted GitHub App {name}"), now)
+            audit::record(c, self.keys()?, project, caller, "github_app.delete", None, None, &[], &format!("deleted GitHub App {name}"), now)
         })
     }
 
