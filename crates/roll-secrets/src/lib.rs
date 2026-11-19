@@ -55,6 +55,7 @@ pub mod syncs;
 mod caller;
 pub mod kms;
 mod write;
+pub mod unseal;
 
 pub use access::{Action, Approval, Caller, Minted, People, Person, Scope, Workloads, PREVIEWS};
 pub use api::router;
@@ -291,6 +292,8 @@ pub enum KeySource {
     /// `ROLL_SECRET_KEY_KMS`: decrypted by AWS KMS at startup.
     Kms,
     File,
+    /// `ROLL_SECRET_KEY_SEALED`: combined from shares posted to a sealed node (unseal.rs).
+    Shares,
     Missing,
 }
 
@@ -331,6 +334,14 @@ pub struct Options {
     /// Calls GitHub for the installation tokens of Apps projects register (github_app.rs); `None`:
     /// not on this server.
     pub github: Option<std::sync::Arc<dyn github_app::GitHubApps>>,
+}
+
+/// The store's database (a sealed start reads it before roll secrets opens: unseal.rs).
+pub fn open_db(target: &Target, pg: code_sql::PgOptions) -> Result<Db> {
+    Ok(match target {
+        Target::Sqlite(path) => Db::open_sqlite(path, code_sql::SqliteOptions { readers: 4, cache_kib: 4 << 10 })?,
+        Target::Postgres { url, schema } => Db::connect(url, schema, pg)?,
+    })
 }
 
 /// The secrets store.
@@ -375,11 +386,7 @@ impl std::fmt::Debug for Secrets {
 
 impl Secrets {
     pub fn open(target: &Target, pg: code_sql::PgOptions, workspace: Arc<roll_workspace::Workspace>, opts: Options) -> Result<Secrets> {
-        let db = match target {
-            Target::Sqlite(path) => Db::open_sqlite(path, code_sql::SqliteOptions { readers: 4, cache_kib: 4 << 10 })?,
-            Target::Postgres { url, schema } => Db::connect(url, schema, pg)?,
-        };
-        Secrets::new(db, workspace, opts)
+        Secrets::new(open_db(target, pg)?, workspace, opts)
     }
 
     pub fn new(db: Db, workspace: Arc<roll_workspace::Workspace>, opts: Options) -> Result<Secrets> {
@@ -454,6 +461,11 @@ impl Secrets {
         db.ensure_schema(issuer::SCHEMA)?;
         db.ensure_schema(clouds::SCHEMA)?;
         db.ensure_schema(iam::SCHEMA)?;
+        // The deployment key's id, for a sealed start's check (unseal.rs).
+        db.ensure_schema(unseal::SCHEMA)?;
+        if let Ok(keys) = &opts.keyring {
+            unseal::record_key(&db, keys)?;
+        }
         // Rotators are a link kind of roll secrets' own: they call out through rolld.
         let mut links = opts.links;
         let unwrap = kms::Unwrapper::new(opts.kms.clone());

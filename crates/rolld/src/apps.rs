@@ -522,10 +522,11 @@ pub struct AppsNode {
     ports_host: std::net::IpAddr,
 }
 
-/// The variable-sealing key: `ROLL_SECRET_KEY`, else a key of this node's own made once.
-fn sealer(home: &Path) -> anyhow::Result<Sealer> {
-    if let Some(k) = std::env::var("ROLL_SECRET_KEY").ok().filter(|k| k.trim().len() >= 32) {
-        return Sealer::new(&k);
+/// The variable-sealing key: the deployment key (`Args::secret_key`), else a key of this node's
+/// own made once.
+fn sealer(home: &Path, secret_key: Option<&str>) -> anyhow::Result<Sealer> {
+    if let Some(k) = secret_key.filter(|k| k.trim().len() >= 32) {
+        return Sealer::new(k);
     }
     let path = home.join("apps").join("key");
     if let Ok(k) = std::fs::read_to_string(&path) {
@@ -567,7 +568,7 @@ pub async fn start(
             tokio::task::block_in_place(|| code_sql::Db::connect(url, schema, pg))?
         }
     };
-    let store = tokio::task::block_in_place(|| Store::new(db, sealer(home)?).map_err(|e| anyhow::anyhow!("{e}")))?;
+    let store = tokio::task::block_in_place(|| Store::new(db, sealer(home, args.secret_key().as_deref().map(String::as_str))?).map_err(|e| anyhow::anyhow!("{e}")))?;
     let mut cfg = AppsConfig::new(home.to_path_buf());
     cfg.web_url = Some(args.web_url.trim_end_matches('/').to_string()).filter(|u| !u.is_empty());
     // Traces' address: `ROLL_APPS_OTLP_URL` (a fleet's public apps address), else the apps

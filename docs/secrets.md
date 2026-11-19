@@ -337,7 +337,8 @@ data key encrypts every value                     (aad "roll-secrets:v1:<project
   If KMS can't decrypt it, every route answers 503 with KMS's error code (never key material), and
   health reports `"key": "kms"`.
 - **Split into shares.** `roll secrets key split` and `combine` hold the deployment key as N-of-M
-  shares (see "Splitting the deployment key").
+  shares, and rolld can start sealed and be unsealed by them, with the key never in its
+  environment or on its disk (see "Splitting the deployment key" and "Starting sealed").
 - **Key rotation.** Set the new key as `ROLL_SECRET_KEY` and the old one as
   `ROLL_SECRET_KEY_PREVIOUS`. A data key that opens only with the previous key is resealed with the
   new key on first use, so the previous key can be dropped once `GET /v1/secrets/health` reports
@@ -383,8 +384,8 @@ roll secrets key combine --out key                                 # shares on s
 - **Recovering.** Any threshold of the holders run `combine` on one machine, each typing or pasting
   their share when asked (nothing echoes; a bad share is refused and asked for again). The key goes
   to stdout or `--out` (0600), from where it's set as `ROLL_SECRET_KEY` (or encrypted for
-  `ROLL_SECRET_KEY_KMS`) as usual: `ROLL_SECRET_KEY="$(roll secrets key combine)" rolld …`. rolld
-  doesn't start from shares itself.
+  `ROLL_SECRET_KEY_KMS`) as usual: `ROLL_SECRET_KEY="$(roll secrets key combine)" rolld …`. Or
+  rolld starts sealed and holders give it their shares themselves (next section).
 - **Rotating.** Shares follow the key: after a rotation (see "Encryption"), split the new key and
   have holders destroy the old shares once health reports `"resealed": all` and the previous key is
   dropped. A new split has a new id, so an old share mixed into it is refused, not misread.
@@ -392,6 +393,59 @@ roll secrets key combine --out key                                 # shares on s
   restore"); split that key the same way, so any threshold of holders restore it:
   `roll secrets keygen --out k && roll secrets key split --shares 5 --threshold 3 --file k --out-dir
   shares && rm k`, then at restore time `roll secrets key combine --out k` and `restore … --key k`.
+
+### Starting sealed
+
+As Vault's Shamir unseal: with `ROLL_SECRET_KEY_SEALED` instead of `ROLL_SECRET_KEY`, rolld starts
+without the deployment key, and holders give it their shares over the API until it has a
+threshold of them. The key is then only in rolld's memory: never in its environment, a file or a
+log.
+
+```
+ROLL_SECRET_KEY_SEALED=3f9c0a1b2c3d4e5f:3 rolld …   # as `roll secrets key split` prints it
+roll secrets unseal --status                          # sealed, 0 of 3 shares
+roll secrets unseal                                   # each holder: their share, without echo
+```
+
+- **What runs while sealed.** Nothing but the unseal: no product starts, nothing is opened with the
+  key, and every other route (health included, so load balancers keep the node out) answers 503
+  `{"sealed": true}`. `ROLL_SECRET_KEY_SEALED` is `<split id>:<threshold>`: naming the split
+  means only its shares count, whoever posts first. It can't be set beside `ROLL_SECRET_KEY`,
+  `ROLL_SECRET_KEY_KMS` or their `_PREVIOUS`: finish a rotation (health reports `"resealed": all`)
+  before starting sealed, and split the new key.
+- **Unsealing.** `POST /v1/secrets/unseal {"share": "rlks_…"}` takes one share and answers the
+  progress, `{"sealed": true, "have": 1, "need": 3}`; `GET` answers the same without a share. No
+  answer or log carries a share. `roll secrets unseal` reads the share without echo on a terminal
+  (else a line on stdin) and posts it; `--status` only asks. A mistyped or damaged share is
+  refused, and the others stay. A share of another split drops every share given so far, and so
+  does a threshold whose shares don't combine or whose key isn't the store's: the holders start
+  over, and the log says why (never with a share).
+- **The key is checked against the store.** roll secrets records the deployment key's id (the
+  12-hex-character id customer-wrapped keys already carry, which reveals nothing of the key) each
+  time it opens with a key that opens its data, and a rotation moves it on. The combined key must
+  be the one recorded, or open a project's data key. A store with nothing to check against yet (a
+  new one) takes the first key whose split `ROLL_SECRET_KEY_SEALED` names.
+- **Who may unseal.** The route needs no token (it's public in rolld's gate): before the key exists
+  there's nothing to authenticate against, so the shares are the credential, as in Vault. One
+  address may post 10 shares a minute; a split may fail 5 times an hour (failures are kept in the
+  store, so a restart doesn't clear them, and every node of a fleet counts them together), and
+  then answers 429 with `Retry-After`. Shares given wait 10 minutes at most, in memory only, and
+  are zeroized when dropped. A sealed node's API is still only reachable where its address is
+  (the edge's public listeners don't start until it's unsealed): give holders that address, not a
+  public one.
+- **Then.** Every product starts as it does with `ROLL_SECRET_KEY`, given the key in memory: roll
+  secrets (health reports `"key": "shares"`), and the products that seal with it, roll apps'
+  variables, roll search's cluster secrets, the edge's certificates, the audit log's sinks, roll
+  code's reviewer keys, chat tokens and sandboxes, and accounts' authenticator seeds. The API keeps
+  its port throughout: connections made while the products start wait for them.
+- **A fleet.** Each node unseals on its own, as Vault's do: `roll secrets unseal --node
+  http://10.0.1.5:7070 --node http://10.0.1.6:7070 …` gives one holder's share to every node at
+  once. Unsealed nodes don't pass the key to sealed ones: whatever authenticated that hand-off (the
+  cluster secret, in every node's environment) would then be worth the key itself.
+- **A restart starts sealed again.** Nothing of the key or the shares outlives the process, so
+  every restart (a deploy, a crash, a rolling upgrade, one node at a time) needs a threshold of
+  holders again. Where that's too much for routine restarts, KMS (`ROLL_SECRET_KEY_KMS`) is the
+  unattended choice, with the shares kept for recovery.
 
 ## Model
 
@@ -2514,7 +2568,8 @@ isn't in the workspace is 404.
 
 | Route | Body | Answer |
 | --- | --- | --- |
-| `GET /v1/secrets/health` | | `{ok, key: "env"\|"kms"\|"file"\|"missing", resealed: "all"\|number\|null, links: string[], syncs: string[]}` (`links`, `syncs`: the kinds registered) |
+| `GET /v1/secrets/health` | | `{ok, key: "env"\|"kms"\|"file"\|"shares"\|"missing", resealed: "all"\|number\|null, links: string[], syncs: string[]}` (`links`, `syncs`: the kinds registered) |
+| `GET`, `POST /v1/secrets/unseal` | `{share}` (`POST`) | `{sealed, have?, need?, error?}`: a sealed node's progress (public; see "Starting sealed"); 429 with `Retry-After` past the limits |
 | `GET` | | `{project, environments: Environment[], previews: number, history_days: number \| null}` |
 | `PATCH` | `{history_days}` | `{history_days}` (`admin`) |
 | `GET /grid?path=` | | `Grid` |

@@ -380,6 +380,16 @@ pub enum Secrets {
     /// goes to roll.
     #[command(subcommand)]
     Key(KeyCmd),
+    /// Give a sealed node (`ROLL_SECRET_KEY_SEALED`) your share of the deployment key: read
+    /// without echo (or a line on stdin), sent to the node, or to each `--node` of a fleet (every
+    /// node unseals on its own). `--status` only shows how many shares each has.
+    Unseal {
+        #[arg(long)]
+        status: bool,
+        /// A node's API; repeat it for every node of a fleet (default: this CLI's API).
+        #[arg(long = "node", value_name = "URL")]
+        nodes: Vec<String>,
+    },
     /// The folders this folder imports (its own project's, or a folder another project shares
     /// with it): list, add, rm.
     #[command(subcommand)]
@@ -1248,6 +1258,10 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
     // So is a key's split.
     if let Secrets::Key(cmd) = cmd {
         return key_shares(cmd);
+    }
+    // A sealed node has no projects yet.
+    if let Secrets::Unseal { status, nodes } = cmd {
+        return unseal(api, status, nodes).await;
     }
     let at = args.resolve();
     let c = Client { project: project(api, at.project.as_deref()).await?, api, at };
@@ -2228,7 +2242,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 println!("Revoked {id}");
             }
         },
-        Secrets::Keygen { .. } | Secrets::Key(_) | Secrets::Find { .. } | Secrets::Doctor | Secrets::Health { all: true, .. } => unreachable!("handled before a project is picked"),
+        Secrets::Keygen { .. } | Secrets::Key(_) | Secrets::Unseal { .. } | Secrets::Find { .. } | Secrets::Doctor | Secrets::Health { all: true, .. } => unreachable!("handled before a project is picked"),
         Secrets::Backup { to, out } => {
             let v = c.call(Method::POST, &format!("{}/backup", c.base()), Some(json!({ "recipient": to }))).await?;
             let text = serde_json::to_string_pretty(&v)?;
@@ -2982,6 +2996,9 @@ fn key_shares(cmd: KeyCmd) -> anyhow::Result<()> {
                     eprintln!("{shares} shares, any {threshold} recover the key: give each to a different holder.");
                 }
             }
+            // What a sealed start names, should this be the deployment key: the split, not a share.
+            let set: String = keyshares::Share::parse(1, &parts[0])?.set.iter().map(|b| format!("{b:02x}")).collect();
+            eprintln!("For a deployment key, start rolld sealed with ROLL_SECRET_KEY_SEALED={set}:{threshold} (docs/secrets.md, \"Starting sealed\").");
         }
         KeyCmd::Combine { out } => {
             let mut given: Vec<zeroize::Zeroizing<String>> = Vec::new();
@@ -3023,6 +3040,63 @@ fn key_shares(cmd: KeyCmd) -> anyhow::Result<()> {
                 None => println!("{}", key.as_str()),
             }
         }
+    }
+    Ok(())
+}
+
+/// `roll secrets unseal`: one share to each node (it never goes anywhere else, and nothing prints
+/// it), or each node's progress.
+async fn unseal(api: &Api, status: bool, nodes: Vec<String>) -> anyhow::Result<()> {
+    use std::io::IsTerminal as _;
+    let nodes: Vec<String> = match nodes.is_empty() {
+        true => vec![api.base.clone()],
+        false => nodes.iter().map(|n| n.trim_end_matches('/').to_string()).collect(),
+    };
+    let share = match status {
+        true => None,
+        false => {
+            let line = zeroize::Zeroizing::new(match std::io::stdin().is_terminal() {
+                true => read_hidden("Share: ")?,
+                false => {
+                    let mut l = String::new();
+                    std::io::stdin().read_line(&mut l)?;
+                    l
+                }
+            });
+            let share = zeroize::Zeroizing::new(line.trim().to_string());
+            if share.is_empty() {
+                bail!("no share entered");
+            }
+            Some(share)
+        }
+    };
+    let mut failed = 0;
+    for node in &nodes {
+        let url = format!("{node}/v1/secrets/unseal");
+        let req = match &share {
+            Some(s) => api.http.post(&url).json(&json!({ "share": s.as_str() })),
+            None => api.http.get(&url),
+        };
+        let line = match req.send().await {
+            Err(e) => format!("can't reach it ({})", e.without_url()),
+            Ok(res) => {
+                let code = res.status();
+                let v: Value = res.json().await.unwrap_or(Value::Null);
+                match (v["sealed"].as_bool(), v["error"].as_str()) {
+                    (Some(false), _) => "unsealed".to_string(),
+                    (_, Some(e)) => format!("{e} ({} of {} shares)", v["have"], v["need"]),
+                    (Some(true), None) => format!("sealed, {} of {} shares", v["have"], v["need"]),
+                    (None, None) => format!("answered {code}, not an unseal"),
+                }
+            }
+        };
+        if !line.starts_with("unsealed") && !line.starts_with("sealed,") {
+            failed += 1;
+        }
+        println!("{node}: {line}");
+    }
+    if failed > 0 {
+        bail!("{failed} of {} nodes refused or didn't answer", nodes.len());
     }
     Ok(())
 }

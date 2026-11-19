@@ -14,7 +14,7 @@ use std::sync::Arc;
 use tracing::info;
 
 /// The node's isolation, and the sandbox backend that goes with it (filled into `sandboxes`).
-pub async fn setup(home: &Path, sandboxes: &mut SandboxConfig) -> anyhow::Result<Arc<dyn Isolation>> {
+pub async fn setup(home: &Path, sandboxes: &mut SandboxConfig, secret_key: Option<&str>) -> anyhow::Result<Arc<dyn Isolation>> {
     let env = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
     let Some(cfg) = FargateConfig::from_lookup(env, home.join("code").join("runs"))? else {
         // Containers carry this daemon's home, so a restart cleans up only its own leftovers.
@@ -27,8 +27,8 @@ pub async fn setup(home: &Path, sandboxes: &mut SandboxConfig) -> anyhow::Result
     let (cluster, subnets) = (cfg.cluster.clone(), cfg.subnets.len());
     let fargate = Fargate::new(cfg).await?;
     if matches!(sandboxes.backend, Some(BackendConfig::Fargate)) {
-        let key = env("ROLL_SECRET_KEY").ok_or_else(|| anyhow::anyhow!("ROLL_SANDBOX_BACKEND=fargate needs ROLL_SECRET_KEY (it seals what a sandbox starts with)"))?;
-        sandboxes.backend = Some(BackendConfig::External(ExternalBackend(Arc::new(FargateSandboxes::new(fargate.clone(), &key)?))));
+        let key = secret_key.ok_or_else(|| anyhow::anyhow!("ROLL_SANDBOX_BACKEND=fargate needs ROLL_SECRET_KEY (it seals what a sandbox starts with)"))?;
+        sandboxes.backend = Some(BackendConfig::External(ExternalBackend(Arc::new(FargateSandboxes::new(fargate.clone(), key)?))));
     }
     info!(%cluster, subnets, "roll code: checks, previews and sandboxes run as Fargate tasks");
     Ok(fargate)

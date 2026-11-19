@@ -129,7 +129,7 @@ impl Search {
     /// cluster is served by the holder of its lease (`search_control::cluster`), with the catalog
     /// in the system database and acknowledgements once writes are in object storage.
     #[allow(clippy::too_many_arguments)]
-    pub async fn start(home: &Path, args: &SearchArgs, storage: &StorageConfig, public_host: &str, node: &str, cluster: &Arc<roll_cluster::Cluster>, system_database: Option<&str>, db_connections: usize, public: Option<&crate::edge::Public>) -> anyhow::Result<Self> {
+    pub async fn start(home: &Path, args: &SearchArgs, storage: &StorageConfig, public_host: &str, node: &str, cluster: &Arc<roll_cluster::Cluster>, system_database: Option<&str>, db_connections: usize, public: Option<&crate::edge::Public>, secret_key: Option<&str>) -> anyhow::Result<Self> {
         let mut cfg = SearchConfig::local(home.join("search"));
         let fleet = (cluster.backend_name() != "memory").then(|| cluster.clone());
         cfg.node_name = node.to_string();
@@ -165,7 +165,7 @@ impl Search {
         }
         // Watch passwords, connector and Fleet secrets are sealed in cluster state under the
         // deployment's key; without one they're stored as given (as on Elasticsearch).
-        cfg.sealer = std::env::var("ROLL_SECRET_KEY").ok().and_then(|k| search_control::Sealer::from_secret(&k));
+        cfg.sealer = secret_key.and_then(search_control::Sealer::from_secret);
         // Behind the edge, cluster URLs name `<cluster>.search.<region>.<domain>` over HTTPS.
         if let Some(p) = public {
             p.search(&mut cfg);

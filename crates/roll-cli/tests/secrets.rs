@@ -252,3 +252,30 @@ async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_referen
     let restored = ok(&api, &[], &["run", "-p", "copy", "-e", "production", "--allow-unresolved", "--no-mask", "--", "sh", "-c", "echo $HOST $PASSWORD"], None).await;
     assert_eq!(restored.trim(), "db.internal s3cret");
 }
+
+/// A sealed start's ceremony: `key split` names the split rolld starts sealed with, and `unseal`
+/// gives a sealed node one share at a time (read from stdin, printed nowhere) until it unseals.
+#[tokio::test(flavor = "multi_thread")]
+async fn roll_secrets_unseal_gives_a_sealed_node_its_shares() {
+    const KEY: &str = "fake-deployment-key-for-the-cli-test-000";
+    let split = roll("http://127.0.0.1:9", &[], &["secrets", "key", "split", "--shares", "3", "--threshold", "2"], Some(KEY)).await;
+    assert_eq!(split.code, Some(0), "{}", split.stderr);
+    let shares: Vec<&str> = split.stdout.lines().collect();
+    let named = split.stderr.split("ROLL_SECRET_KEY_SEALED=").nth(1).and_then(|s| s.split_whitespace().next()).unwrap_or_else(|| panic!("{}", split.stderr));
+    let sealed = roll_secrets::unseal::Sealed::parse(named).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("secrets.db")), "secrets").unwrap();
+    let (unsealer, unsealed) = roll_secrets::unseal::Unsealer::new(sealed, db).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api = format!("http://{}", listener.local_addr().unwrap());
+    let node = roll_secrets::unseal::sealed_router(unsealer).into_make_service_with_connect_info::<std::net::SocketAddr>();
+    tokio::spawn(async move { axum::serve(listener, node).await.unwrap() });
+
+    assert!(ok(&api, &[], &["secrets", "unseal", "--status"], None).await.contains("sealed, 0 of 2 shares"));
+    let one = roll(&api, &[], &["secrets", "unseal"], Some(&format!("{}\n", shares[2]))).await;
+    assert!(one.code == Some(0) && one.stdout.contains("sealed, 1 of 2 shares"), "{}{}", one.stdout, one.stderr);
+    assert!(!format!("{}{}", one.stdout, one.stderr).contains("rlks_"), "a share was printed");
+    let done = ok(&api, &[], &["secrets", "unseal", "--node", &api], Some(&format!("{}\n", shares[0]))).await;
+    assert_eq!(done.trim(), format!("{api}: unsealed"));
+    assert_eq!(unsealed.await.unwrap().as_str(), KEY);
+}

@@ -84,9 +84,13 @@ impl Api {
     }
 }
 
-/// The deployment key: `ROLL_SECRET_KEY_KMS` (a KMS ciphertext, decrypted at startup), else
-/// `ROLL_SECRET_KEY`, else (one node) a generated key file.
-fn keyring(home: &Path, shared: bool) -> (Result<Keyring, String>, KeySource) {
+/// The deployment key: the one a sealed start's shares gave (`ROLL_SECRET_KEY_SEALED`),
+/// `ROLL_SECRET_KEY_KMS` (a KMS ciphertext, decrypted at startup), `ROLL_SECRET_KEY`, else (one
+/// node) a generated key file.
+fn keyring(args: &crate::Args, home: &Path, shared: bool) -> (Result<Keyring, String>, KeySource) {
+    if let Some(k) = &args.unsealed_key {
+        return (Keyring::new(k, None).map_err(|e| e.to_string()), KeySource::Shares);
+    }
     let env = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
     if let Some(ct) = env("ROLL_SECRET_KEY_KMS") {
         let run = async {
@@ -101,7 +105,7 @@ fn keyring(home: &Path, shared: bool) -> (Result<Keyring, String>, KeySource) {
         let keyring = tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(run));
         return (keyring, KeySource::Kms);
     }
-    if let Some(k) = env("ROLL_SECRET_KEY") {
+    if let Some(k) = args.secret_key() {
         return (Keyring::new(&k, env("ROLL_SECRET_KEY_PREVIOUS").as_deref()).map_err(|e| e.to_string()), KeySource::Env);
     }
     if shared {
@@ -360,17 +364,22 @@ pub fn oidc_fetch(args: &crate::Args, open: bool) -> Arc<dyn roll_oidc::Fetch + 
     Arc::new(syncs::OidcFetch::new(args.code_webhook_allow_private.unwrap_or(open)))
 }
 
-pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Workspace>, open: bool, api: Api, access: Arc<roll_access::Access>, people: People) -> anyhow::Result<Arc<Secrets>> {
-    let system = args.code.cluster.system_database.as_deref().filter(|u| !u.is_empty());
-    let target = match system {
+/// Where roll secrets keeps its data: the system database's `secrets` schema, else
+/// `<home>/secrets.db`.
+pub fn store(args: &crate::Args, home: &Path) -> anyhow::Result<(code_sql::Target, code_sql::PgOptions)> {
+    let target = match args.code.cluster.system_database.as_deref().filter(|u| !u.is_empty()) {
         Some(url) => code_sql::Target::Postgres { url: url.to_string(), schema: "secrets".into() },
         None => code_sql::Target::Sqlite(home.join("secrets.db")),
     };
-    let (keyring, key_source) = keyring(home, system.is_some());
+    Ok((target, code_sql::PgOptions { max_connections: args.db_budget()?.secrets, ca: args.code.code_db_ca.clone(), ..Default::default() }))
+}
+
+pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Workspace>, open: bool, api: Api, access: Arc<roll_access::Access>, people: People) -> anyhow::Result<Arc<Secrets>> {
+    let (target, pg) = store(args, home)?;
+    let (keyring, key_source) = keyring(args, home, matches!(target, code_sql::Target::Postgres { .. }));
     if let Err(why) = &keyring {
         tracing::error!("roll secrets is unavailable: {why}");
     }
-    let pg = code_sql::PgOptions { max_connections: args.db_budget()?.secrets, ca: args.code.code_db_ca.clone(), ..Default::default() };
     let web_url = std::env::var("ROLL_WEB_URL").ok().filter(|u| !u.trim().is_empty());
     // Syncs' webhooks go to private addresses only where roll code's may (local development).
     let allow_private = args.code_webhook_allow_private.unwrap_or(open);
