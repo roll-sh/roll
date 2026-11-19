@@ -93,9 +93,16 @@ fn tls_config(ca: Option<&str>) -> Result<rustls::ClientConfig, String> {
         .with_no_client_auth())
 }
 
-/// The server's own message (never the connection's settings).
+/// The server's own message, or the client's error with its cause (an I/O error, a refused
+/// frame); never the connection's settings.
 fn db_error(e: tokio_postgres::Error) -> String {
-    e.as_db_error().map_or_else(|| e.to_string(), |d| d.message().to_string())
+    if let Some(d) = e.as_db_error() {
+        return d.message().to_string();
+    }
+    match std::error::Error::source(&e) {
+        Some(cause) => format!("{e}: {cause}"),
+        None => e.to_string(),
+    }
 }
 
 /// How many bytes the connection may still read before the current query fails.
