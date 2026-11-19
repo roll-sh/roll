@@ -121,6 +121,7 @@ pub fn all_skipped(shards: usize) -> crate::search::SearchOutcome {
         pit_id: None,
         ranked: Vec::new(),
         clusters: None,
+        reduce_phases: None,
     }
 }
 

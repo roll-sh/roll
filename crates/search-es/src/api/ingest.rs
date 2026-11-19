@@ -165,10 +165,19 @@ pub fn validate_pipeline(id: &str, body: &Map) -> EsResult<()> {
         }
     }
     let unknown: Vec<&String> =
-        body.keys().filter(|k| !matches!(k.as_str(), "description" | "processors" | "on_failure" | "version" | "_meta" | "deprecated" | "field_access_pattern")).collect();
+        body.keys().filter(|k| !matches!(k.as_str(), "description" | "processors" | "on_failure" | "version" | "_meta" | "deprecated" | "field_access_pattern" | "created_date_millis" | "modified_date_millis")).collect();
     if !unknown.is_empty() {
         let list: Vec<&str> = unknown.iter().map(|s| s.as_str()).collect();
         return Err(parse_err(format!("pipeline [{id}] doesn't support one or more provided configuration parameters [{}]", list.join(", "))));
+    }
+    // `Pipeline.create` reads the dates the cluster keeps (a stored pipeline as `GET` gives it
+    // simulates as is); `PUT` refuses them before this.
+    for k in ["created_date_millis", "modified_date_millis"] {
+        if let Some(Value::Str(s)) = body.get(k)
+            && s.parse::<i64>().is_err()
+        {
+            return Err(EsError::number_format(s));
+        }
     }
     if let Some(v) = body.get("version")
         && !matches!(v, Value::Num(n) if n.is_integer())
@@ -196,7 +205,7 @@ pub async fn put(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let body = ctx.body_map()?.ok_or_else(|| EsError::action_request_validation(&["request body or source parameter is required".into()]))?;
     for field in ["created_date", "created_date_millis", "modified_date", "modified_date_millis"] {
         if body.contains_key(field) {
-            return Err(EsError::illegal_argument(format!("Provided a pipeline property which is managed by the system: {field}.")));
+            return Err(EsError::parse(format!("Provided a pipeline property which is managed by the system: {field}.")));
         }
     }
     validate_pipeline(&id, &body)?;
@@ -348,5 +357,11 @@ mod tests {
         );
         assert!(check(r#"{"processors":[{"set":{"field":"a","copy_from":"b"}}]}"#).is_ok());
         assert_eq!(check(r#"{"processors":[{"set":{"field":"a","value":1,"on_failure":[{"bogus":{}}]}}]}"#).unwrap_err(), "No processor type exists with name [bogus]");
+        // A pipeline as `GET` gives it (with the cluster's dates) is a valid definition, as
+        // Elasticsearch's `Pipeline.create` reads it (`_simulate` takes it; `PUT` refuses the
+        // dates before this, as a parse_exception).
+        assert!(check(r#"{"processors":[],"created_date_millis":1795023963973,"modified_date_millis":1795023963973}"#).is_ok());
+        assert_eq!(check(r#"{"processors":[],"modified_date_millis":"abc"}"#).unwrap_err(), "For input string: \"abc\"");
+        assert_eq!(check(r#"{"processors":[],"created_date":"x"}"#).unwrap_err(), "pipeline [p] doesn't support one or more provided configuration parameters [created_date]");
     }
 }
