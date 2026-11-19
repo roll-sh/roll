@@ -899,7 +899,7 @@ Ranked; the top item is in progress. A watchdog reads this list. Unblocked work 
 waits on a sibling PR reaching main is last.
 
 1. **Next, ranked (now):** apps' image scanning, SLOs and forms as tools
-   (`feature/roll-mcp-apps-tools-4`, this PR, after apps' chain4): `apps_deploy_vulnerabilities`
+   (`feature/roll-mcp-apps-tools-4`, this PR; apps' chain4 is on main, f8a0cbbf5): `apps_deploy_vulnerabilities`
    (`severity`), `apps_environment_slo`, `apps_list_forms`, `apps_form_submissions` (a reveal) and
    `apps_delete_form_submission`; in lockdown what a site's visitors wrote is withheld
    (`Tool::outside`: a submission's `fields`, and the field names a `form.submitted` event carries in
