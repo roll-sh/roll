@@ -304,6 +304,9 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     Never call a service directly from a tool. After adding or changing tools, or a product's routes
     or owner routing, run `pnpm test:mcp-sweep`: every tool called through `/v1/mcp` against a fresh
     rolld, so a path, query or body the product rejects, or an id it routes on differently, fails.
+    A new route of a product with MCP tools gets a tool, or a line in
+    `crates/roll-mcp/src/no-tool.txt` saying why not (a credential, a person's call, the
+    operator's…; `no tool yet` for a gap): roll-mcp's tests fail on a route with neither.
 - **Projects (the dashboard's workspace):** `crates/roll-workspace` stores projects and where each
   product resource sits on its canvas (docs/workspace.md); the resources themselves stay in their
   products. The dashboard reads it through `lib/workspace-api.ts` (change both together), joins it

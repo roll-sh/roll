@@ -150,6 +150,9 @@ pub struct ChangeInfo {
     /// Who opened it (roll code's `author`): not the one to accept its visual change.
     pub author: String,
     pub github_pr: Option<i64>,
+    /// Its repo's roll code owner (`own_…`): who may write to it (roll code's bar for a landing
+    /// decision, as accepting regressions is).
+    pub owner_id: String,
 }
 
 impl ChangeInfo {
@@ -761,6 +764,13 @@ pub trait Apps: Send + Sync {
 /// no. It may read a database: it's called off the async workers.
 pub trait Visitors: Send + Sync {
     fn may_open(&self, user: &str, session: &str, project: &str) -> bool;
+    /// Every name a person goes by where a change's author is written (their roll handle, and the
+    /// login of each GitHub account linked to them): how an author is told apart, whichever name
+    /// their change carries. It may read a database: it's called off the async workers. An error
+    /// refuses the accept (an author isn't let through because their names couldn't be read).
+    fn names_of(&self, _user: &str) -> anyhow::Result<Vec<String>> {
+        Ok(Vec::new())
+    }
 }
 
 /// A project's secrets, per environment (roll secrets; docs/secrets.md).

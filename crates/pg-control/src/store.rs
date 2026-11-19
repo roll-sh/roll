@@ -152,6 +152,17 @@ pub struct BaseImage {
     pub bytes: i64,
 }
 
+/// A decoy role (roll secrets' Postgres decoys) as the proxy sees it at a login.
+#[derive(Clone, Debug)]
+pub struct DecoyAt {
+    pub project_id: String,
+    /// The SCRAM salt the proxy answers its logins with (base64 of 16 bytes).
+    pub salt: String,
+    pub pg_version: u32,
+    /// The endpoint's compute is up: a real login wouldn't wait for it.
+    pub running: bool,
+}
+
 pub struct Store {
     conn: Mutex<Connection>,
 }
@@ -208,6 +219,14 @@ ALTER TABLE endpoints ADD COLUMN data_dir TEXT;
 "#,
     r#"
 ALTER TABLE branches ADD COLUMN app_password TEXT;
+"#,
+    // Decoy roles (roll secrets' Postgres decoys): refused by the proxy on every endpoint of the
+    // project, keyed for the one read each login makes.
+    r#"
+CREATE TABLE decoy_roles (
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE, role TEXT NOT NULL,
+  salt TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (project_id, role)
+) WITHOUT ROWID;
 "#,
 ];
 
@@ -340,6 +359,53 @@ impl Store {
                 )?;
             }
             c.execute("DELETE FROM projects WHERE id = ?1", [id]).map(drop)
+        })
+    }
+
+    // ── decoy roles ──
+
+    pub fn insert_decoy_role(&self, project_id: &str, role: &str, salt: &str) -> anyhow::Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO decoy_roles (project_id, role, salt, created_at) VALUES (?1, ?2, ?3, ?4)",
+                params![project_id, role, salt, now()],
+            )
+            .map(drop)
+        })
+    }
+
+    pub fn is_decoy_role(&self, project_id: &str, role: &str) -> anyhow::Result<bool> {
+        self.with(|c| {
+            c.query_row("SELECT 1 FROM decoy_roles WHERE project_id = ?1 AND role = ?2", [project_id, role], |_| Ok(()))
+                .optional()
+                .map(|r| r.is_some())
+        })
+    }
+
+    pub fn delete_decoy_role(&self, project_id: &str, role: &str) -> anyhow::Result<()> {
+        self.with(|c| {
+            c.execute("DELETE FROM decoy_roles WHERE project_id = ?1 AND role = ?2", [project_id, role]).map(drop)
+        })
+    }
+
+    /// `role` at `endpoint`, if it's a decoy of the endpoint's project: the proxy asks on every
+    /// login, so it's one statement over three primary keys.
+    pub fn decoy_at(&self, endpoint_id: &str, role: &str) -> anyhow::Result<Option<DecoyAt>> {
+        self.with(|c| {
+            c.prepare_cached(
+                "SELECT d.project_id, d.salt, p.pg_version, e.state FROM endpoints e \
+                 JOIN decoy_roles d ON d.project_id = e.project_id AND d.role = ?2 \
+                 JOIN projects p ON p.id = e.project_id WHERE e.id = ?1",
+            )?
+            .query_row([endpoint_id, role], |r| {
+                Ok(DecoyAt {
+                    project_id: r.get(0)?,
+                    salt: r.get(1)?,
+                    pg_version: r.get(2)?,
+                    running: r.get::<_, String>(3)? == EndpointState::Running.as_str(),
+                })
+            })
+            .optional()
         })
     }
 
