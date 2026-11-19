@@ -327,8 +327,8 @@ impl Gate {
     /// matching, it does.
     /// What its firewall says of the request: the first rule that matches decides; none lets it
     /// in.
-    pub fn firewall_verdict(&self, method: &str, path: &str, user_agent: &str) -> Verdict {
-        match self.firewall.iter().enumerate().find(|(_, r)| r.matches(method, path, user_agent)) {
+    pub fn firewall_verdict(&self, asked: &crate::model::Asked<'_>) -> Verdict {
+        match self.firewall.iter().enumerate().find(|(_, r)| r.matches(asked)) {
             None => Verdict::Allow,
             Some((_, r)) if r.action == crate::model::FirewallAction::Allow => Verdict::Allow,
             Some((i, r)) if r.action == crate::model::FirewallAction::Limit => Verdict::Limit(i as u16 + 1, crate::model::RateLimit { per_minute: r.per_minute.unwrap_or(60), burst: r.burst }),

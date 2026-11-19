@@ -325,9 +325,20 @@ export interface FirewallRule {
   methods?: string[];
   /** Text the User-Agent contains. */
   user_agent?: string;
+  /** Clients by address: addresses or networks (`203.0.113.0/24`). */
+  ips?: string[];
+  /** A request header, cookie or query parameter there (and holding `contains`, case aside). */
+  header?: FieldMatch;
+  cookie?: FieldMatch;
+  query?: FieldMatch;
 }
 
-/** Firewall rules as typed, one a line: `deny /admin/*`, `deny method=DELETE,PUT`, `allow /admin/health`, `deny ua=BadBot` (`ua=` last: the rest of the line). */
+export interface FieldMatch {
+  name: string;
+  contains?: string;
+}
+
+/** Firewall rules as typed, one a line: `deny /admin/*`, `deny method=DELETE,PUT`, `allow /admin/health`, `deny ip=203.0.113.0/24`, `deny header=X-Bot`, `deny query=debug:1`, `deny ua=BadBot` (`ua=` last: the rest of the line). */
 export function parseFirewall(text: string): FirewallRule[] {
   return text
     .split("\n")
@@ -350,7 +361,16 @@ export function parseFirewall(text: string): FirewallRule[] {
           rule.user_agent = [t.slice(3), ...rest.slice(i + 1)].join(" ");
           break;
         }
+        // `name[:contains]`: there, or there and holding that.
+        const field = (v: string) => {
+          const at = v.indexOf(":");
+          return at < 0 ? { name: v } : { name: v.slice(0, at), contains: v.slice(at + 1) };
+        };
         if (t.startsWith("method=")) rule.methods = t.slice(7).split(",").filter(Boolean);
+        else if (t.startsWith("ip=")) rule.ips = t.slice(3).split(",").filter(Boolean);
+        else if (t.startsWith("header=")) rule.header = field(t.slice(7));
+        else if (t.startsWith("cookie=")) rule.cookie = field(t.slice(7));
+        else if (t.startsWith("query=")) rule.query = field(t.slice(6));
         else if (t.startsWith("/")) rule.path = t;
       }
       return rule;
@@ -360,7 +380,23 @@ export function parseFirewall(text: string): FirewallRule[] {
 /** The rules as one line each, as `parseFirewall` reads them. */
 export function formatFirewall(rules: FirewallRule[]): string {
   return rules
-    .map((r) => [r.action, r.action === "limit" ? `${r.per_minute ?? 60}${r.burst ? `:${r.burst}` : ""}` : undefined, r.path, r.methods?.length ? `method=${r.methods.join(",")}` : undefined, r.user_agent ? `ua=${r.user_agent}` : undefined].filter(Boolean).join(" "))
+    .map((r) => {
+      const field = (k: string, f?: FieldMatch) => (f ? `${k}=${f.name}${f.contains ? `:${f.contains}` : ""}` : undefined);
+      return [
+        r.action,
+        r.action === "limit" ? `${r.per_minute ?? 60}${r.burst ? `:${r.burst}` : ""}` : undefined,
+        r.path,
+        r.methods?.length ? `method=${r.methods.join(",")}` : undefined,
+        r.ips?.length ? `ip=${r.ips.join(",")}` : undefined,
+        field("header", r.header),
+        field("cookie", r.cookie),
+        field("query", r.query),
+        // Last: it takes the rest of the line.
+        r.user_agent ? `ua=${r.user_agent}` : undefined,
+      ]
+        .filter(Boolean)
+        .join(" ");
+    })
     .join("\n");
 }
 

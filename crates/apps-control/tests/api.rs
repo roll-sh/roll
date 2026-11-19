@@ -4267,6 +4267,35 @@ async fn firewall_rules_decide_in_order() {
     assert_eq!(req("HEAD", "/report", "curl").await, StatusCode::FORBIDDEN, "HEAD is a GET");
     assert_eq!(req("GET", "/", "Mozilla badbot/2").await, StatusCode::FORBIDDEN);
     assert_eq!(req("GET", "/", "Mozilla").await, StatusCode::OK, "nothing matching lets it in");
+    // One abusive network, a bot's header, a cookie's value and a query parameter (Vercel's custom rules).
+    let rules = json!([
+        {"action": "deny", "ips": ["203.0.113.9/24", "2001:db8::1"]},
+        {"action": "deny", "header": {"name": "X-Scanner"}},
+        {"action": "deny", "cookie": {"name": "role", "contains": "Intruder"}},
+        {"action": "deny", "query": {"name": "debug"}, "path": "/api/*"},
+    ]);
+    let (st, env) = call(&w.api, "PUT", &base, Some(json!({"firewall": rules}))).await;
+    assert_eq!((st, &env["firewall"][0]["ips"]), (StatusCode::OK, &json!(["203.0.113.0/24", "2001:db8::1/128"])), "kept canonical: {env}");
+    assert_eq!(call(&w.api, "PUT", &base, Some(json!({"firewall": [{"action": "deny", "ips": ["not-an-ip"]}]}))).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(call(&w.api, "PUT", &base, Some(json!({"firewall": [{"action": "deny", "header": {"name": "a b"}}]}))).await.0, StatusCode::BAD_REQUEST);
+    let ask = |from: &str, path: &str, headers: &[(&str, &str)]| {
+        let mut r = Request::builder().uri(path).header("host", h.as_str());
+        for (k, v) in headers {
+            r = r.header(*k, *v);
+        }
+        let mut r = r.body(Body::empty()).unwrap();
+        r.extensions_mut().insert(axum::extract::ConnectInfo(from.parse::<std::net::SocketAddr>().unwrap()));
+        let public = w.public.clone();
+        async move { public.oneshot(r).await.unwrap().status() }
+    };
+    assert_eq!(ask("203.0.113.77:5000", "/", &[]).await, StatusCode::FORBIDDEN, "its network");
+    assert_eq!(ask("[2001:db8::1]:5000", "/", &[]).await, StatusCode::FORBIDDEN);
+    assert_eq!(ask("198.51.100.1:5000", "/", &[]).await, StatusCode::OK, "another address");
+    assert_eq!(ask("198.51.100.1:5000", "/", &[("x-scanner", "1")]).await, StatusCode::FORBIDDEN, "the header, any case");
+    assert_eq!(ask("198.51.100.1:5000", "/", &[("cookie", "a=1; role=intruder-x")]).await, StatusCode::FORBIDDEN, "a cookie holding it");
+    assert_eq!(ask("198.51.100.1:5000", "/", &[("cookie", "a=1; role=admin")]).await, StatusCode::OK);
+    assert_eq!(ask("198.51.100.1:5000", "/api/items?debug", &[]).await, StatusCode::FORBIDDEN, "the parameter, on its path");
+    assert_eq!(ask("198.51.100.1:5000", "/items?debug", &[]).await, StatusCode::OK, "every field must match");
     // A challenge: a browser that worked out the page's proof gets in, nothing else does.
     let (st, e) = call(&w.api, "PUT", &base, Some(json!({"firewall": [{"action": "challenge", "path": "/*"}]}))).await;
     assert_eq!(st, StatusCode::OK, "{e}");
