@@ -70,6 +70,9 @@ fn no_target(name: &str) -> ControlError {
     ControlError::NotFound(format!("no search cluster {name}"))
 }
 
+/// The most remote clusters one cluster holds credentials for: each search may fan out to all.
+pub const MAX_REMOTES: usize = 20;
+
 /// What a remote's credentials are sealed for: their row.
 fn kind(cluster_id: &str, alias: &str, target_id: &str) -> String {
     format!("search remote credentials {cluster_id} {alias} {target_id}")
@@ -193,6 +196,10 @@ impl Control {
             return Err(ControlError::Invalid("alias: 1 to 64 letters, digits, - and _".into()));
         }
         let c = self.get(id).await?;
+        let held = self.store.remotes(&c.id).await?;
+        if held.len() >= MAX_REMOTES && !held.iter().any(|r| r.alias == alias) {
+            return Err(ControlError::Conflict(format!("cluster {} has {MAX_REMOTES} remote clusters already, the most one may have: unlink one first", c.name)));
+        }
         let t = match self.get(target).await {
             Ok(t) if t.id == c.id => return Err(ControlError::Invalid("a cluster can't be its own remote".into())),
             Ok(t) if visible(&t) && may_link(&c, &t) => t,
@@ -225,6 +232,8 @@ impl Control {
             }
         };
         let k = kind(&c.id, alias, &t.id);
+        // Sealed under the deployment's key; a node without one (`ROLL_SECRET_KEY` unset: local
+        // development only, as for every secret search keeps) stores it as given.
         let credentials = match &self.cfg.sealer {
             Some(s) => s.seal_text(&k, &encoded),
             None => encoded,
@@ -278,6 +287,15 @@ impl Control {
         self.store.delete_remote(&c.id, alias).await?;
         if row.minted {
             self.revoke_remote_key(&row.target_id, &row.key_id).await?;
+        }
+        Ok(())
+    }
+
+    /// Revokes the cross-cluster keys roll made for cluster `id`'s remotes, on their targets
+    /// (before its rows go, at a hard delete or a purge).
+    pub(crate) async fn revoke_remote_keys_of(&self, id: &str) -> Result<()> {
+        for r in self.store.remotes(id).await?.into_iter().filter(|r| r.minted) {
+            self.revoke_remote_key(&r.target_id, &r.key_id).await?;
         }
         Ok(())
     }

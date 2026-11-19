@@ -2708,3 +2708,37 @@ async fn search_analytics() {
     search("shoes").await;
     assert_eq!(analytics("24h").await["totals"]["searches"].as_u64(), Some(0));
 }
+
+/// An alias pattern matching a link and a loopback remote (whose seed is the node's own address,
+/// which any tenant may set) is authorized locally, whole: a user who may read `app` alone gets
+/// nothing of `secret` through `*:secret`, as through `secret` and `me:secret` (the review of
+/// #347 found `*:secret` skipped the local check while the loopback searched it).
+#[tokio::test]
+async fn an_alias_pattern_over_a_link_and_a_loopback_is_authorized_locally() {
+    use reqwest::Method;
+    let e = env().await;
+    let (app, app_pw) = creds(&e.post("/v1/search/clusters", json!({ "name": "wild-app" })).await);
+    e.post("/v1/search/clusters", json!({ "name": "wild-logs" })).await;
+    for path in ["/app/_doc/1", "/secret/_doc/1"] {
+        let (s, v) = e.es(&app, &app_pw, Method::PUT, &format!("{path}?refresh=true"), Some(json!({ "msg": "secret doc" }))).await;
+        assert_eq!(s, 201, "{v}");
+    }
+    let (s, v) = e.call(Method::PUT, "/v1/search/clusters/wild-app/remotes/logs", Some(json!({ "cluster": "wild-logs" }))).await;
+    assert_eq!(s, 200, "{v}");
+    let (_, nodes) = e.es(&app, &app_pw, Method::GET, "/_nodes/_local", None).await;
+    let me = nodes["nodes"].as_object().unwrap().values().next().unwrap()["transport_address"].as_str().unwrap().to_string();
+    let (s, v) = e.es(&app, &app_pw, Method::PUT, "/_cluster/settings", Some(json!({ "persistent": { "cluster.remote.me.seeds": me } }))).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(e.es(&app, &app_pw, Method::PUT, "/_security/role/app_only", Some(json!({ "indices": [{ "names": ["app"], "privileges": ["read"] }] }))).await.0, 200);
+    assert_eq!(e.es(&app, &app_pw, Method::PUT, "/_security/user/u", Some(json!({ "password": "pass-word-1", "roles": ["app_only"] }))).await.0, 200);
+    let user = format!("u@{app}");
+    for path in ["/secret/_search", "/me:secret/_search"] {
+        assert_eq!(e.es(&user, "pass-word-1", Method::GET, path, None).await.0, 403, "{path}");
+    }
+    let (s, v) = e.es(&user, "pass-word-1", Method::GET, "/*:secret/_search", None).await;
+    assert!(s != 200 || v["hits"]["hits"].as_array().is_some_and(|h| h.is_empty()), "{s} {v}");
+    assert!(!v.to_string().contains("secret doc"), "{v}");
+    let r = e.http.post(format!("{}/_msearch", e.es)).basic_auth(&user, Some("pass-word-1")).header("content-type", "application/x-ndjson").body("{\"index\":\"*:secret\"}\n{}\n").send().await.unwrap();
+    let m = r.text().await.unwrap();
+    assert!(!m.contains("secret doc"), "{m}");
+}

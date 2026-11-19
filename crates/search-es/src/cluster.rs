@@ -112,6 +112,9 @@ pub struct ClusterConfig {
     /// Reaches the roll search clusters this one names as remotes ([`crate::remote::links`]);
     /// `None`: remotes reach only the node itself.
     pub links: Option<std::sync::Arc<dyn crate::remote::links::Links>>,
+    /// The cluster's id in roll's catalog (`srch_…`), when it has one: how it names itself to
+    /// `links`.
+    pub catalog_id: Option<String>,
     /// Where the cluster's security audit entries go ([`crate::xpack::security::audit`]);
     /// `None`: it records none.
     pub audit: Option<crate::xpack::security::audit::AuditLog>,
@@ -130,6 +133,7 @@ impl ClusterConfig {
             sealer: None,
             default_repository: None,
             links: None,
+            catalog_id: None,
             audit: None,
         }
     }

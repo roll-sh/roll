@@ -78,8 +78,8 @@ pub async fn remote_info(cluster: &Cluster, st: &ClusterState) -> Value {
         let mut credentials = false;
         let connected = match (cluster.config.links.as_deref(), cluster.config.links.as_deref().and_then(|l| r.link(l))) {
             (Some(l), Some(target)) => {
-                credentials = l.has_credentials(&cluster.name, &r.alias).await;
-                credentials && l.may_link(&cluster.name, &target).await
+                credentials = l.has_credentials(links::local_ref(cluster), &r.alias).await;
+                credentials && l.may_link(links::local_ref(cluster), &target).await
             }
             _ => r.is_loopback(cluster),
         };

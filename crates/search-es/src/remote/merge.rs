@@ -14,6 +14,10 @@ use super::links::cmp_sort_value;
 use crate::error::{EsError, EsResult};
 use crate::json::{Map, Number, Value};
 
+/// The most empty buckets one histogram's merge fills in (the merged result is then held to
+/// `search.max_buckets`).
+const FILL_LIMIT: usize = 65_536;
+
 fn unsupported(name: &str, ty: &str) -> EsError {
     EsError::illegal_argument(format!(
         "roll can't merge aggregation [{name}] of type [{ty}] across clusters yet: run it on one cluster, or search the clusters one at a time"
@@ -180,20 +184,51 @@ fn positional(name: &str, ty: &str, values: &[&Value], subs: &Value) -> EsResult
     }
 }
 
-/// Buckets merged by `key`, in first-seen order: `(key, buckets with that key)`.
+/// A bucket key as one string, equal for keys [`cmp_sort_value`] calls equal (`1` and `1.0`).
+pub fn key_of(k: &Value) -> String {
+    match k {
+        Value::Num(n) => match n {
+            Number::Int(i) => format!("n:{i}"),
+            Number::Float(f) if f.fract() == 0.0 && f.abs() < 9.0e15 => format!("n:{}", *f as i64),
+            n => format!("f:{}", n.as_f64().to_bits()),
+        },
+        Value::Str(s) => format!("s:{s}"),
+        other => format!("j:{}", other.to_json()),
+    }
+}
+
+/// Buckets merged by `key`, in first-seen order: `(key, buckets with that key)`, found through a
+/// hash map (linear in the buckets).
 fn by_key<'a>(values: &[&'a Value]) -> Option<Vec<(Value, Vec<&'a Value>)>> {
     let mut out: Vec<(Value, Vec<&'a Value>)> = Vec::new();
+    let mut at: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for v in values {
         let buckets = v.get("buckets")?.as_array()?;
         for b in buckets {
             let key = b.get("key")?.clone();
-            match out.iter_mut().find(|(k, _)| cmp_sort_value(k, &key) == Ordering::Equal) {
-                Some((_, list)) => list.push(b),
-                None => out.push((key, vec![b])),
+            match at.entry(key_of(&key)) {
+                std::collections::hash_map::Entry::Occupied(e) => out[*e.get()].1.push(b),
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    e.insert(out.len());
+                    out.push((key, vec![b]));
+                }
             }
         }
     }
     Some(out)
+}
+
+/// The buckets in a merged result, sub-aggregations' included.
+pub fn bucket_count(v: &Value) -> usize {
+    let Some(m) = v.as_object() else { return 0 };
+    m.iter()
+        .map(|(k, a)| match (k.contains('#'), a.get("buckets")) {
+            (true, Some(Value::Arr(list))) => list.len() + list.iter().map(bucket_count).sum::<usize>(),
+            (true, Some(Value::Obj(keyed))) => keyed.len() + keyed.values().map(bucket_count).sum::<usize>(),
+            (true, _) => bucket_count(a),
+            _ => 0,
+        })
+        .sum()
 }
 
 fn merged_bucket(key: &Value, list: &[&Value], subs: &Value) -> EsResult<(Value, i64)> {
@@ -313,7 +348,7 @@ fn histogram(name: &str, ty: &str, values: &[&Value], body: Option<&Value>, subs
                         e.extend(subs_of(&[], subs)?);
                         filled.push((next, Value::Obj(e)));
                         next += step;
-                        if filled.len() > 65_536 {
+                        if filled.len() > FILL_LIMIT {
                             return Err(unsupported(name, ty));
                         }
                     }

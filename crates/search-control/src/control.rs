@@ -346,6 +346,7 @@ pub fn spec_for(c: &SearchCluster) -> ClusterSpec {
     spec.max_body_bytes = Some((c.max_body_mb.max(1) as usize) << 20);
     spec.destructive_requires_name = c.destructive_requires_name;
     spec.ip_allowlist = allowlist_of(&c.ip_allowlist);
+    spec.catalog_id = Some(c.id.clone());
     spec
 }
 
@@ -1214,6 +1215,10 @@ impl Control {
         self.node.audit.forget(&c.name).await;
         if self.cfg.deleted_retention.is_zero() {
             self.data.delete_cluster(&c.name).await?;
+            // Its remotes' keys roll made go with it (a restorable one keeps them for its restore).
+            if let Err(e) = self.revoke_remote_keys_of(&c.id).await {
+                tracing::warn!(cluster = c.id, error = %e, "revoking a deleted search cluster's remote keys failed");
+            }
             self.store.delete(&c.id).await?;
         } else {
             self.keep_deleted(c).await?;
@@ -1385,6 +1390,11 @@ impl Control {
                     tracing::warn!(cluster = d.cluster.id, storage = n, error = %e, "purging a deleted search cluster failed; retried later");
                     ok = false;
                 }
+            }
+            // Its remotes' keys roll made are revoked first: a purge that can't is retried.
+            if ok && let Err(e) = self.revoke_remote_keys_of(&d.cluster.id).await {
+                tracing::warn!(cluster = d.cluster.id, error = %e, "revoking a purged search cluster's remote keys failed; retried later");
+                ok = false;
             }
             if ok && self.store.finish_purge(&d.cluster.id, &claim).await? {
                 purged += 1;

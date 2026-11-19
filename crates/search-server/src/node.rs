@@ -1110,6 +1110,7 @@ impl Node {
         cfg.host_metrics = self.cfg.host_metrics;
         cfg.sealer = self.cfg.sealer.clone();
         cfg.links = self.cfg.links.clone();
+        cfg.catalog_id = spec.catalog_id.clone();
         // Snapshot contents are durable only with object storage behind the cluster.
         cfg.default_repository = self.cfg.default_repository.clone().filter(|_| data_store.is_some());
         cfg.audit = Some(search_es::xpack::security::audit::AuditLog(self.audit.clone()));
