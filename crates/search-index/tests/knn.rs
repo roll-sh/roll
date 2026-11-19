@@ -267,7 +267,7 @@ fn small_segment_holding_the_neighbours_returns_them_all() {
     let mut rng = StdRng::seed_from_u64(9);
     let center = unit(&mut rng);
     let mut vecs = Vec::new();
-    let mut add = |v: Vec<f32>, vecs: &mut Vec<Vec<f32>>| {
+    let add = |v: Vec<f32>, vecs: &mut Vec<Vec<f32>>| {
         let bytes: Vec<u8> = v.iter().flat_map(|x| x.to_le_bytes()).collect();
         let doc = IndexableDoc::new(format!("{}", vecs.len()).into_bytes()).field(IndexableField::Vector { field: V, value: bytes.into() });
         shard.index(IndexOp::new(doc)).unwrap();
