@@ -1955,6 +1955,18 @@ impl Apps {
                 firing.push(("alert.latency", serde_json::json!({ "value": value, "threshold": a.p95_ms })));
             }
         }
+        // Its log-based metrics: the minute's matching lines, as gauges beside its own metrics.
+        if !tpl.run.log_metrics.is_empty() {
+            let key = format!("env:{}/{}", l.service, l.env);
+            let since = code_sql::now_ms() - 60_000;
+            let sink = self.logs.sink(crate::traces::metric_key(&l.service, &l.env), Stream::System);
+            let at = code_sql::now_ms() as u64 * 1_000_000;
+            for m in &tpl.run.log_metrics {
+                let n = self.logs.count_recent(&key, &m.pattern, since);
+                let p = crate::otlp::Point { name: m.name.clone(), kind: "gauge".into(), unit: String::new(), time: at, value: n as f64, count: None, counter: false, attrs: vec![("source".into(), "log".into())] };
+                sink.line(serde_json::to_string(&p).expect("a point serializes"));
+            }
+        }
         // Its output saying something often enough (system lines are roll's, and the alert's
         // own line names the pattern: only stdout and stderr count).
         if let Some(pat) = a.log_match.as_deref() {

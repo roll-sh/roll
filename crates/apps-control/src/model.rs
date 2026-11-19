@@ -529,6 +529,10 @@ pub struct Run {
     /// rule's weekly windows its `min_instances` is the floor, when higher.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub schedule_scale: Vec<ScaleWindow>,
+    /// Counts of its log lines (Cloud Logging's log-based metrics): each minute, the lines of its
+    /// output matching `pattern` (any case) as a gauge named `name`, on Metrics and for `scale`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub log_metrics: Vec<LogMetric>,
     /// How a new deployment takes over: at once, or a share of requests at a time.
     pub rollout: Rollout,
     /// The app speaks HTTP/2 without TLS (h2c, prior knowledge), as a gRPC server does: the
@@ -600,6 +604,14 @@ pub struct Run {
     /// the rollout, not beside it. A rollback is never held. Changing it is a deploy.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub block_on: Option<Severity>,
+}
+
+/// A count of matching log lines a minute ([`Run::log_metrics`]).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LogMetric {
+    pub name: String,
+    pub pattern: String,
 }
 
 /// A floor for some hours of the week ([`Run::schedule_scale`]).
@@ -1035,6 +1047,7 @@ impl Default for Run {
             slo: None,
             metrics: None,
             schedule_scale: Vec::new(),
+            log_metrics: Vec::new(),
         }
     }
 }
@@ -1084,6 +1097,15 @@ impl Run {
             && (!(90.0..=99.999).contains(&s.objective) || !(1..=60).contains(&s.window_days) || s.latency_ms.is_some_and(|ms| !(1..=60_000).contains(&ms)))
         {
             return bad("slo is {objective: 90–99.999, latency_ms?: 1–60000, window_days?: 1–60}");
+        }
+        if self.log_metrics.len() > 10 {
+            return bad("log_metrics is at most 10");
+        }
+        for (i, m) in self.log_metrics.iter().enumerate() {
+            let name_ok = !m.name.is_empty() && m.name.len() <= 100 && m.name.bytes().enumerate().all(|(j, b)| b.is_ascii_alphabetic() || b == b'_' || (j > 0 && (b.is_ascii_digit() || b == b'.')));
+            if !name_ok || m.pattern.is_empty() || m.pattern.chars().count() > 200 || self.log_metrics[..i].iter().any(|o| o.name == m.name) {
+                return bad("log_metrics are {name: a metric's name (unique), pattern: 1–200 characters}");
+            }
         }
         if self.schedule_scale.len() > 10 {
             return bad("schedule_scale is at most 10 rules");
