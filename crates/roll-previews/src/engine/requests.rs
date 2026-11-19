@@ -2,6 +2,21 @@
 
 use super::*;
 
+/// How long a preview's metrics are kept before they're read again (ms).
+const METRICS_FOR: i64 = 10_000;
+/// How long a preview's errors are kept before they're read again (ms).
+pub(super) const ERRORS_FOR: i64 = 10_000;
+
+/// The span of minutes a preview's errors are read over: 5–1,440, rounded up to a 15-minute step
+/// (the dashboard's 60, 360 and 1,440 stay as they are), so asking for every minute in between
+/// can't step past [`ERRORS_FOR`]'s cache.
+pub fn error_span(minutes: i64) -> i64 {
+    (minutes.clamp(5, 1440) + 14) / 15 * 15
+}
+
+/// The least time between two rebuilds by one deploy hook (ms).
+pub const HOOK_EVERY: i64 = 60_000;
+
 impl Engine {
     // ── what the API asks for ──
 
@@ -66,7 +81,9 @@ impl Engine {
     /// A preview for `branch` of `repo` (or for change `change`), made by hand.
     pub async fn create(&self, project_id: &str, repo: &str, branch: Option<&str>, change: Option<&str>, by: &str) -> Result<(Preview, bool)> {
         let project = self.workspace.get(roll_workspace::Scope::All, project_id)?;
-        if !project.resources.iter().any(|r| r.kind == roll_workspace::Kind::Repo && r.r#ref == repo) {
+        // Only a repo the project stands for (`Workspace::trusts`), as for the previews it makes
+        // itself: anyone may put any repo on their own canvas, and a preview builds and runs it.
+        if !project.resources.iter().any(|r| r.kind == roll_workspace::Kind::Repo && r.r#ref == repo) || !self.workspace.trusts(&project, roll_workspace::Kind::Repo, repo) {
             return Err(Error::NotFound(format!("{repo} isn't in project {}", project.name)));
         }
         let s = self.store.settings(project_id)?;
@@ -83,7 +100,12 @@ impl Engine {
                 if !c.open {
                     return Err(Error::Conflict(format!("change {id} has landed or closed")));
                 }
+                // A change has one preview: this project's is answered, another's never (it's
+                // another project's, perhaps another owner's).
                 if let Some(existing) = self.store.row_by_change(id)? {
+                    if existing.project_id != project_id {
+                        return Err(Error::Conflict(format!("change {id} already has a preview in another project")));
+                    }
                     return Ok((self.store.view(existing)?, false));
                 }
                 self.store.undismiss(id)?;
@@ -168,8 +190,16 @@ impl Engine {
             // (`Workspace::trusts`) gets its pushes (its branches, titles and commits).
             .filter(|pr| pr.resources.iter().any(|r| r.kind == roll_workspace::Kind::Service && r.r#ref == p.service) && self.workspace.trusts(pr, roll_workspace::Kind::Service, &p.service))
             .collect();
+        // What the pull request's title says (`[preview]` asks, `[skip preview]`/`[no preview]`
+        // skips), and whether its opener is a dependency bot the project skips (`skip_authors`).
+        let says = pull_title.as_deref().and_then(title_says);
         for project in projects {
             let rows = self.store.rows(Some(&project.id))?;
+            let s = self.store.settings(&project.id)?;
+            let bot = p.pull.as_ref().and_then(|pl| pl.author.as_deref()).is_some_and(|a| crate::glob::any(&s.skip_authors, a)) && says != Some(true);
+            // A bot's own branch push (its pusher a `skip_authors` glob matches), before any pull
+            // request: no preview to make and take back. A preview someone else's push made stays.
+            let bot_push = p.pull.is_none() && p.sha.is_some() && p.pusher.as_deref().is_some_and(|a| crate::glob::any(&s.skip_authors, a));
             // A fork's pull request's preview is its number's (never a writer's branch that happens
             // to be named `pull/7`); a branch's is the branch's that no fork's pull request holds.
             let fork_of = |r: &Row| self.store.git_pull(&r.id).ok().flatten().filter(|g| g.fork).map(|g| g.number);
@@ -185,6 +215,24 @@ impl Engine {
                         }
                 })
                 .cloned();
+            // A bot's branch is pushed before its pull request opens: that push made a preview the
+            // pull event takes back, and later pushes to the branch make none until it closes.
+            if p.sha.is_none() || says == Some(true) {
+                self.store.set_git_skip(&project.id, &repo, &p.branch, false)?;
+            } else if bot_push && existing.is_none() {
+                self.store.set_git_skip(&project.id, &repo, &p.branch, true)?;
+                continue;
+            } else if bot {
+                self.store.set_git_skip(&project.id, &repo, &p.branch, true)?;
+                if let Some(r) = &existing {
+                    self.mark_deleted(&r.id, "its pull request's opener is in skip_authors")?;
+                }
+                continue;
+            } else if self.store.git_skipped(&project.id, &repo, &p.branch)? {
+                // A later push, or a pull event that names no opener (GitLab's when someone else
+                // acted: unknown, not a person), keeps what the opening event decided.
+                continue;
+            }
             match (&p.sha, existing) {
                 (None, Some(r)) => {
                     let why = match &p.pull {
@@ -196,7 +244,7 @@ impl Engine {
                 (None, None) => {}
                 (Some(sha), Some(r)) => {
                     if let Some(pl) = &p.pull {
-                        self.store.set_git_pull(&r.id, pl.number as i64, https_only(&pl.url), pl.fork, sha)?;
+                        self.store.set_git_pull(&r.id, pl.number as i64, kept_url(&pl.url), pl.fork, sha)?;
                     }
                     let title = pull_title.clone().filter(|t| !t.is_empty() && *t != r.title);
                     if r.head != *sha || title.is_some() || (fork && r.trusted) {
@@ -221,8 +269,7 @@ impl Engine {
                     }
                 }
                 (Some(sha), None) => {
-                    let s = self.store.settings(&project.id)?;
-                    let skip = [Some(p.message.as_str()), pull_title.as_deref()].into_iter().flatten().any(|t| t.to_ascii_lowercase().contains("[skip preview]"));
+                    let skip = [Some(p.message.as_str()), pull_title.as_deref()].into_iter().flatten().any(|t| title_says(t) == Some(false));
                     if !s.enabled || skip || !crate::glob::any(&s.branches, &p.branch) {
                         continue;
                     }
@@ -255,7 +302,7 @@ impl Engine {
                     };
                     let (row, _) = self.store.create(&n)?;
                     if let Some(pl) = &p.pull {
-                        self.store.set_git_pull(&row.id, pl.number as i64, https_only(&pl.url), pl.fork, sha)?;
+                        self.store.set_git_pull(&row.id, pl.number as i64, kept_url(&pl.url), pl.fork, sha)?;
                     }
                     if fork {
                         self.store.log(&row.id, &format!("pull request #{} is from a fork: it runs once a writer approves {}", p.pull.as_ref().map_or(0, |pl| pl.number), short(sha)))?;
@@ -280,15 +327,11 @@ impl Engine {
     /// code's `approve-run` for a Git URL service's preview). Only the head the preview is at; the
     /// next push waits again.
     pub fn approve(&self, id: &str, head: &str, by: &str) -> Result<Preview> {
-        // roll apps holds a pv- environment's instance to Roll only (apps' #143), not its build:
-        // the build sees the environment's variables on an open network, so a fork's head there
-        // would send its branched data wherever it liked. Not released under Roll only.
-        let row = self.store.row(id)?;
-        if row.repo.starts_with("git:") && self.store.settings(&row.project_id)?.egress_for(row.trusted) == crate::settings::EgressRule::Roll {
-            return Err(Error::Conflict(
-                "this project's forks reach roll only (egress_forks), and roll apps builds a fork's head with its variables on an open network: it isn't approved to run there (open forks' egress to run it)".into(),
-            ));
-        }
+        // Roll only holds on roll apps for the instance (apps' #143, its gateway isolated from the
+        // host's services since #240) and the build: it gets none of its secrets (#222; rolld's
+        // adapter deploys nothing to a closed environment that doesn't say so) on a network of
+        // its own, out only to public hosts through its proxy (#238). So a fork's head is
+        // released under it.
         self.store.approve_git_pull(id, head, by)?;
         self.store.log(id, &format!("{} approved by {by}", short(head)))?;
         let r = self.store.update(id, |row| {
@@ -320,9 +363,57 @@ impl Engine {
         self.store.view(r)
     }
 
+    /// A deploy hook for `project`'s previews of `branches` (globs; `["*"]`: every one): its path,
+    /// shown once (`/v1/previews/hooks/rlb_…`).
+    pub fn create_hook(&self, project: &str, name: &str, branches: &[String]) -> Result<(crate::store::Hook, String)> {
+        self.workspace_project(project)?;
+        let name = name.trim();
+        if name.is_empty() || name.chars().count() > 64 || name.chars().any(char::is_control) {
+            return Err(Error::BadRequest("a hook's name is 1–64 printable characters".into()));
+        }
+        if branches.is_empty() || branches.len() > crate::settings::MAX_BRANCH_GLOBS || branches.iter().any(|b| b.is_empty() || b.len() > 200) {
+            return Err(Error::BadRequest(format!("branches: 1–{} globs of 1–200 characters", crate::settings::MAX_BRANCH_GLOBS)));
+        }
+        let (hook, secret) = self.store.create_hook(project, name, branches)?;
+        Ok((hook, format!("/v1/previews/hooks/{secret}")))
+    }
+
+    /// `POST /v1/previews/hooks/{secret}` (a headless CMS's publish webhook): every active preview
+    /// of the hook's project whose branch a glob matches is built again at its head, with nothing
+    /// cached. At most once a [`HOOK_EVERY`] (a CMS that saves often makes one rebuild, not one a
+    /// save: `coalesced`). Anything but a live hook is the same 404. `from`: the caller's address,
+    /// for each preview's activity.
+    pub fn run_hook(&self, secret: &str, from: Option<&str>) -> Result<(Vec<String>, bool)> {
+        let Some(hook) = self.store.hook_by_secret(secret)? else { return Err(Error::NotFound("no such hook".into())) };
+        if !self.store.fire_hook(&hook.id, self.store.now_ms()?, HOOK_EVERY)? {
+            return Ok((Vec::new(), true));
+        }
+        let mut rebuilt = Vec::new();
+        for r in self.store.rows(Some(&hook.project))? {
+            if r.desired != Desired::Active || !crate::glob::any(&hook.branches, r.branch.as_deref().unwrap_or("*")) {
+                continue;
+            }
+            self.store.add_rebuild(&r.id)?;
+            let by = from.map(|a| format!(" (from {a})")).unwrap_or_default();
+            self.store.log(&r.id, &format!("built again by the deploy hook {:?}{by}", hook.name))?;
+            rebuilt.push(r.id);
+        }
+        self.kick();
+        Ok((rebuilt, false))
+    }
+
+    /// A hook secret found where it shouldn't be (roll-access's leak scanning): the hook stops
+    /// working at once. Says which it was, or `None` when no live hook has it.
+    pub fn revoke_leaked_hook(&self, secret: &str) -> Option<String> {
+        let hook = self.store.hook_by_secret(secret).ok()??;
+        self.store.delete_hook(&hook.project, &hook.id).ok()?;
+        tracing::warn!(project = %hook.project, hook = %hook.id, "previews: a leaked deploy hook was revoked");
+        Some(format!("previews' deploy hook {:?} of project {}", hook.name, hook.project))
+    }
+
     /// A link to the preview for someone outside the team, open for `hours` (1–720), on its own
-    /// token: the answer is the only time the link is shown. Only where the preview needs a
-    /// link (`access: link`); a public one needs none.
+    /// token: the answer is the only time the link is shown. Only where the preview isn't public
+    /// (`access: link` or `team`); a public one needs none.
     pub fn share(&self, id: &str, hours: u32, by: &str) -> Result<(crate::Share, String)> {
         if !(1..=KEEP_MAX_HOURS).contains(&hours) {
             return Err(Error::BadRequest(format!("hours: 1 to {KEEP_MAX_HOURS}")));
@@ -331,7 +422,7 @@ impl Engine {
         if r.desired == Desired::Deleted {
             return Err(Error::Conflict("the preview is being deleted".into()));
         }
-        if !self.store.access(id)?.is_some_and(|a| a.required) {
+        if !self.store.access(id)?.is_some_and(|a| a.required()) {
             return Err(Error::Conflict("the preview is public: anyone can open it without a link".into()));
         }
         let url = self.store.services(id)?.into_iter().next().map(|s| s.url).ok_or_else(|| Error::Conflict("the preview has no service to share yet".into()))?;
@@ -538,6 +629,109 @@ impl Engine {
         Ok(lines)
     }
 
+    /// What its services use right now (on its holder, which runs them): the running ones. Read
+    /// at most once per [`METRICS_FOR`] (each read is a `docker stats` or a roll apps call per
+    /// service), whoever asks.
+    pub async fn metrics(&self, id: &str) -> Result<Vec<crate::ServiceMetrics>> {
+        self.store.row(id)?;
+        let now = self.store.now_ms()?;
+        if let Some((at, m)) = self.metrics_read.lock().get(id)
+            && now - at < METRICS_FOR
+        {
+            return Ok(m.clone());
+        }
+        let services = self.store.services(id)?;
+        let got = futures::future::join_all(services.iter().map(|s| self.apps.metrics(id, &s.name))).await;
+        let m: Vec<crate::ServiceMetrics> = services
+            .into_iter()
+            .zip(got)
+            .filter_map(|(s, m)| m.map(|(cpu, memory_bytes)| crate::ServiceMetrics { service: s.name, cpu, memory_bytes, memory_mb: s.memory_mb }))
+            .collect();
+        let mut read = self.metrics_read.lock();
+        read.retain(|_, (at, _)| now - *at < METRICS_FOR);
+        read.insert(id.to_string(), (now, m.clone()));
+        Ok(m)
+    }
+
+    /// Its services' errors in the last `minutes` ([`error_span`]), grouped, newest first (on its
+    /// holder, which runs them). Titles and samples masked as its logs are, a value a cut split
+    /// too ([`crate::mask_cut`]): its code can print its secrets. Its values are read only when
+    /// there's an error. A fingerprint is keyed ([`Engine::error_fingerprint`]). Read at most once
+    /// per [`ERRORS_FOR`] for a span, whoever asks. (roll apps answers its 50 most frequent
+    /// groups a service; a `roll.toml` service's newest 50.)
+    pub async fn errors(&self, id: &str, minutes: i64) -> Result<Vec<crate::ErrorGroup>> {
+        self.store.row(id)?;
+        let now = self.store.now_ms()?;
+        let key = (id.to_string(), error_span(minutes));
+        if let Some((at, g)) = self.errors_read.lock().get(&key)
+            && now - at < ERRORS_FOR
+        {
+            return Ok(g.clone());
+        }
+        let masks = super::ErrorMasks::new(self, id);
+        let services = self.store.services(id)?;
+        let got = futures::future::join_all(services.iter().map(|s| self.apps.errors(id, &s.name, key.1, Some(&masks)))).await;
+        let mut groups = Vec::new();
+        for (s, gs) in services.iter().zip(got) {
+            groups.extend(gs?.into_iter().map(|g| crate::ErrorGroup { service: s.name.clone(), ..g }));
+        }
+        groups.sort_by(|a, b| b.last_seen.cmp(&a.last_seen).then(b.count.cmp(&a.count)));
+        if !groups.is_empty() {
+            let values = masks.values().await?;
+            for g in &mut groups {
+                g.title = crate::mask_cut(&g.title, values);
+                g.sample = crate::mask_cut(&g.sample, values);
+                g.fingerprint = self.error_fingerprint(id, &g.service, &g.fingerprint);
+            }
+        }
+        let mut read = self.errors_read.lock();
+        read.retain(|_, (at, _)| now - *at < ERRORS_FOR);
+        read.insert(key, (now, groups.clone()));
+        Ok(groups)
+    }
+
+    /// How many errors its services wrote in the last `minutes` ([`error_span`]): a list's rows.
+    /// Counted from the groups [`Engine::errors`] lists, but nothing they say leaves, so nothing is
+    /// masked and no values are read. Kept as long.
+    pub async fn error_count(&self, id: &str, minutes: i64) -> Result<u64> {
+        self.store.row(id)?;
+        let now = self.store.now_ms()?;
+        let key = (id.to_string(), error_span(minutes));
+        if let Some((at, n)) = self.error_counts_read.lock().get(&key)
+            && now - at < ERRORS_FOR
+        {
+            return Ok(*n);
+        }
+        if let Some((at, g)) = self.errors_read.lock().get(&key)
+            && now - at < ERRORS_FOR
+        {
+            return Ok(g.iter().map(|g| g.count).sum());
+        }
+        let services = self.store.services(id)?;
+        let got = futures::future::join_all(services.iter().map(|s| self.apps.errors(id, &s.name, key.1, None))).await;
+        let mut n = 0;
+        for gs in got {
+            n += gs?.iter().map(|g| g.count).sum::<u64>();
+        }
+        let mut read = self.error_counts_read.lock();
+        read.retain(|_, (at, _)| now - *at < ERRORS_FOR);
+        read.insert(key, (now, n));
+        Ok(n)
+    }
+
+    /// A group's fingerprint as answered: its preview, service and backend fingerprint under this
+    /// process's random key, so it names the group without being a hash anyone could match
+    /// against guesses of what the error said.
+    fn error_fingerprint(&self, id: &str, service: &str, fingerprint: &str) -> String {
+        use hmac::Mac;
+        let mut m = hmac::Hmac::<sha2::Sha256>::new_from_slice(&self.errors_key).expect("any key length");
+        for part in [id, service, fingerprint] {
+            m.update(part.as_bytes());
+            m.update(&[0]);
+        }
+        hex::encode(&m.finalize().into_bytes()[..8])
+    }
+
     pub async fn logs(&self, id: &str, service: Option<&str>, lines: usize) -> Result<(String, Vec<String>)> {
         let services = self.store.services(id)?;
         let svc = match service {
@@ -627,8 +821,11 @@ pub fn resume_at(before: &[String], now: &[String]) -> Option<usize> {
 
 /// A pull request's link as the sheet may show it: `https://` only (`""` otherwise), so a link
 /// can't run script.
-fn https_only(url: &str) -> &str {
-    if url.starts_with("https://") && !url.chars().any(char::is_whitespace) { url } else { "" }
+/// A pull request's page as roll apps built it (from the service's source and the number), kept
+/// to tell its repository (`pull_repo`): whole when it's one printable URL of at most 500
+/// bytes. Shown as a link only when `https://` (the preview's view).
+fn kept_url(url: &str) -> &str {
+    if url.len() <= 500 && url.contains("://") && !url.chars().any(|c| c.is_whitespace() || c.is_control()) { url } else { "" }
 }
 
 #[cfg(test)]

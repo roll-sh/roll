@@ -48,12 +48,20 @@
 //!   flight are unloaded.
 //! - **Metering** ([`Node::take_request_counts`]): requests admitted per cluster since the last
 //!   call, counted per instance and carried over when an instance unloads.
+//! - **Observability** ([`Node::take_observations`]): each loaded cluster's request metrics
+//!   ([`crate::metrics`]: requests, responses by class, 429 rejections and latency per kind of
+//!   request, by the minute) and its slow log entries (`search_es::slowlog`), handed to whoever
+//!   meters, and carried over the same way when an instance unloads. Latency is the time from
+//!   taking the cluster's permits (queueing included) to the answer being durable. Search
+//!   analytics (`search_es::analytics`: the buckets of the indices that turned them on, and the
+//!   indices whose analytics went) travel with them.
 //! - **Live spec changes** ([`Node::update_spec`]): limits and credentials apply to the loaded
 //!   instance at once, and to one still waking (the wake re-reads the catalog before it
 //!   publishes, and updates made after that wait in `pending_specs` for the publishing opener).
 //! - **Shutdown** ([`Node::shutdown`]): refuses new loads, unloads every cluster (flushing and
 //!   handing the leases back, so another node can take over at once) and closes the WAL.
 
+use crate::allow::Origin;
 use crate::auth::{self, Presented};
 use crate::catalog::{Catalog, ClusterSpec, StoreProvider};
 use crate::lease::Leases;
@@ -127,6 +135,8 @@ pub struct NodeConfig {
     /// data is in object storage (`search_es::api::snapshots::install_default_repository`;
     /// `None`: none).
     pub default_repository: Option<String>,
+    /// How long and how much each cluster's audit log keeps ([`crate::audit`]).
+    pub audit: crate::audit::AuditConfig,
 }
 
 impl Default for NodeConfig {
@@ -148,6 +158,7 @@ impl Default for NodeConfig {
             snapshot_leftover_grace: search_es::api::snapshots::LEFTOVER_GRACE,
             sealer: None,
             default_repository: None,
+            audit: crate::audit::AuditConfig::default(),
         }
     }
 }
@@ -190,6 +201,8 @@ pub struct Loaded {
     requests: AtomicU64,
     /// `requests` as last reported by [`Node::take_request_counts`].
     metered: AtomicU64,
+    /// Request metrics not handed on yet ([`Node::take_observations`]).
+    pub metrics: crate::metrics::Recorder,
     lease: Option<HeldLease>,
     name: Arc<str>,
     /// The node's body limit, for specs without their own.
@@ -257,6 +270,37 @@ pub struct Usage {
     pub requests: u64,
 }
 
+/// A cluster's request metrics, slow log entries and search analytics not handed on yet
+/// ([`Node::take_observations`]).
+#[derive(Debug, Default)]
+pub struct Observed {
+    /// Unix minutes and what they saw, oldest first.
+    pub minutes: Vec<(u64, crate::metrics::Stats)>,
+    /// Oldest first.
+    pub slow: Vec<search_es::slowlog::Entry>,
+    /// Search analytics: buckets, and the indices whose analytics went (their kept rows go).
+    pub analytics: search_es::analytics::Taken,
+}
+
+impl Observed {
+    pub fn is_empty(&self) -> bool {
+        self.minutes.is_empty() && self.slow.is_empty() && self.analytics.is_empty()
+    }
+
+    /// Adds `o` (newer) to this.
+    fn extend(&mut self, o: Observed) {
+        self.minutes.extend(o.minutes);
+        self.slow.extend(o.slow);
+        self.analytics.extend(o.analytics);
+        let over = self.slow.len().saturating_sub(search_es::slowlog::MAX_ENTRIES);
+        self.slow.drain(..over);
+    }
+
+    fn take_from(l: &Loaded) -> Observed {
+        Observed { minutes: l.metrics.take().into_iter().map(|(m, s)| (m, *s)).collect(), slow: l.cluster.engine.slowlog.take(), analytics: l.cluster.analytics.take() }
+    }
+}
+
 pub struct Node {
     pub catalog: Arc<dyn Catalog>,
     pub stores: Arc<dyn StoreProvider>,
@@ -281,6 +325,8 @@ pub struct Node {
     pending_specs: Mutex<HashMap<String, ClusterSpec>>,
     /// Requests of unloaded instances not reported yet ([`Node::take_request_counts`]).
     unmetered: Mutex<HashMap<String, u64>>,
+    /// Observations of unloaded instances not handed on yet ([`Node::take_observations`]).
+    unobserved: Mutex<HashMap<String, Observed>>,
     /// Makes a running reaper re-plan its tick (a cluster with a memory budget loaded).
     reaper_kick: Arc<tokio::sync::Notify>,
     tasks: Arc<TaskCount>,
@@ -288,6 +334,8 @@ pub struct Node {
     /// Wakes and unloads since start.
     pub wakes: AtomicU64,
     pub unloads: AtomicU64,
+    /// Every cluster's security audit log.
+    pub audit: Arc<crate::audit::AuditLogs>,
 }
 
 /// Holds a cluster's transition lock; drops the map entry when nobody else wants it.
@@ -329,6 +377,8 @@ pub struct Lease {
     /// access token, [`auth::native_authorization`]): the `Authorization` header the request
     /// runs with, so search-es authenticates and authorizes it as that principal.
     native_auth: Option<String>,
+    /// When it started waiting for its permits: its latency is measured from here.
+    since: Option<Instant>,
 }
 
 /// Counts a request in the cluster's queue for as long as it waits, however the wait ends
@@ -376,6 +426,7 @@ impl Lease {
 
     /// The 429 for a body past the cluster's in-flight byte budget.
     pub fn over_budget(&self, req: &EsRequest, used: usize, bytes: usize) -> Rejected {
+        Self::refused(&self.loaded, req);
         Rejected {
             error: EsError::too_many_requests(format!(
                 "rejected execution of coordinating operation [coordinating_and_primary_bytes={used}, replica_bytes=0, all_bytes={used}, coordinating_operation_bytes={bytes}, max_coordinating_and_primary_bytes={}] for REST request [{} {}]",
@@ -409,7 +460,16 @@ impl Lease {
             req.headers.retain(|(k, _)| !k.eq_ignore_ascii_case("authorization"));
             req.headers.push(("authorization".to_string(), h.clone()));
         }
-        self.run(req).await
+        let kind = crate::metrics::Kind::of(&req.method, &req.uri);
+        let since = self.since.unwrap_or_else(Instant::now);
+        let resp = self.run(req).await;
+        self.loaded.metrics.record(std::time::SystemTime::now(), kind, resp.status, Some(since.elapsed()));
+        resp
+    }
+
+    /// Counts a request the cluster's limits refused (429) in its metrics.
+    fn refused(loaded: &Loaded, req: &EsRequest) {
+        loaded.metrics.record(std::time::SystemTime::now(), crate::metrics::Kind::of(&req.method, &req.uri), 429, None);
     }
 
     /// Writes the async results a request changed to `.async-search` (a durable cluster): they
@@ -516,6 +576,7 @@ impl Lease {
         if self.permit.is_some() {
             return Ok(());
         }
+        self.since = Some(Instant::now());
         let loaded = self.loaded.clone();
         let sem = loaded.permits.clone();
         let permit = match sem.clone().try_acquire_owned() {
@@ -525,6 +586,7 @@ impl Lease {
                 let queued = Queued(&loaded.waiting);
                 if loaded.waiting.fetch_add(1, Ordering::SeqCst) >= max {
                     drop(queued);
+                    Self::refused(&loaded, req);
                     return Err(Rejected {
                         error: EsError::too_many_requests(format!(
                             "rejected execution of REST request [{} {}]: cluster [{}] has [{max}] requests in flight and [{max}] queued",
@@ -606,6 +668,21 @@ fn reads_async_results(uri: &str) -> bool {
 pub struct Rejected {
     pub error: EsError,
     pub dialect: Dialect,
+}
+
+/// Why [`Node::enter_from`] turned a request away.
+#[derive(Debug)]
+pub enum Refused {
+    /// The cluster's IP allowlist doesn't admit the request's origin: answered with
+    /// [`crate::allow::REFUSED_BODY`], before its credentials are looked at.
+    Filtered,
+    Rejected(Rejected),
+}
+
+impl From<Rejected> for Refused {
+    fn from(r: Rejected) -> Refused {
+        Refused::Rejected(r)
+    }
 }
 
 const WWW_AUTHENTICATE: [&str; 3] = ["Basic realm=\"security\", charset=\"UTF-8\"", "Bearer realm=\"security\"", "ApiKey"];
@@ -712,7 +789,9 @@ impl Node {
             0 => std::thread::available_parallelism().map_or(2, |n| n.get() * 2),
             n => n,
         };
+        let audit = crate::audit::AuditLogs::new(stores.data(), cfg.audit.clone());
         Arc::new(Node {
+            audit,
             catalog,
             stores,
             fair: (running != usize::MAX).then(|| FairScheduler::new(running)),
@@ -728,6 +807,7 @@ impl Node {
             leases: OnceLock::new(),
             pending_specs: Mutex::new(HashMap::new()),
             unmetered: Mutex::new(HashMap::new()),
+            unobserved: Mutex::new(HashMap::new()),
             reaper_kick: Arc::new(tokio::sync::Notify::new()),
             tasks: Arc::new(TaskCount::default()),
             shutting_down: AtomicBool::new(false),
@@ -978,6 +1058,7 @@ impl Node {
             bytes,
             requests: AtomicU64::new(0),
             metered: AtomicU64::new(0),
+            metrics: Default::default(),
             lease: held,
             kept_volatile: AtomicBool::new(false),
             default_max_body: self.cfg.max_body_bytes,
@@ -1018,6 +1099,7 @@ impl Node {
         cfg.sealer = self.cfg.sealer.clone();
         // Snapshot contents are durable only with object storage behind the cluster.
         cfg.default_repository = self.cfg.default_repository.clone().filter(|_| data_store.is_some());
+        cfg.audit = Some(search_es::xpack::security::audit::AuditLog(self.audit.clone()));
         let mut cluster = Cluster::open(cfg, store).await?;
         cluster.node.id = stable_node_id(&spec.name);
         if cluster.state().version <= 1 {
@@ -1131,6 +1213,8 @@ impl Node {
             l
         };
         self.hooks.unloading(&loaded.cluster).await;
+        // Failed logins the node refuses while it sleeps are recorded as it last asked.
+        self.audit.remember(name, search_es::xpack::security::audit::snapshot(&loaded.cluster));
         if flush
             && loaded.data.is_some()
             && let Err(e) = loaded.cluster.sync_async_results().await
@@ -1170,6 +1254,10 @@ impl Node {
         let left = loaded.unmetered();
         if left > 0 {
             *self.unmetered.lock().entry(name.to_string()).or_default() += left;
+        }
+        let seen = Observed::take_from(&loaded);
+        if !seen.is_empty() {
+            self.unobserved.lock().entry(name.to_string()).or_default().extend(seen);
         }
         drop(loaded);
         self.unloads.fetch_add(1, Ordering::Relaxed);
@@ -1293,6 +1381,7 @@ impl Node {
     /// Deletes a cluster's data (unloading it first, without flushing).
     pub async fn delete_cluster(&self, name: &str) -> anyhow::Result<()> {
         self.force_unload(name).await;
+        self.audit.forget(name).await;
         self.stores.delete(name).await
     }
 
@@ -1346,6 +1435,42 @@ impl Node {
         let mut v: Vec<(String, u64)> = out.into_iter().collect();
         v.sort_unstable();
         v
+    }
+
+    /// Every cluster's request metrics and slow log entries since the previous call (loaded
+    /// clusters and those unloaded meanwhile), each handed on once.
+    pub fn take_observations(&self) -> Vec<(String, Observed)> {
+        let loaded: Vec<Arc<Loaded>> = self.clusters.read().values().filter_map(|s| s.get().cloned()).collect();
+        let mut out: HashMap<String, Observed> = std::mem::take(&mut *self.unobserved.lock());
+        for l in loaded {
+            let seen = Observed::take_from(&l);
+            if !seen.is_empty() {
+                out.entry(l.name.to_string()).or_default().extend(seen);
+            }
+        }
+        let mut v: Vec<(String, Observed)> = out.into_iter().collect();
+        v.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        v
+    }
+
+    /// What [`Node::take_observations`] would hand on for `name`, left in place (an API read
+    /// between two metering passes).
+    pub fn peek_observations(&self, name: &str) -> Observed {
+        let mut out = Observed::default();
+        if let Some(o) = self.unobserved.lock().get(name) {
+            out.minutes.extend(o.minutes.iter().cloned());
+            out.slow.extend(o.slow.iter().cloned());
+            out.analytics.cleared = o.analytics.cleared.clone();
+            out.analytics.enabled = o.analytics.enabled.clone();
+            out.analytics.hours = o.analytics.hours.clone();
+        }
+        if let Some(l) = self.get_loaded(name) {
+            let analytics = search_es::analytics::Taken { hours: l.cluster.analytics.peek(), ..Default::default() };
+            out.extend(Observed { minutes: l.metrics.peek(), slow: l.cluster.engine.slowlog.peek(), analytics });
+            // Loaded here: which indices have analytics on now decides what reads may show.
+            out.analytics.enabled = Some(l.cluster.analytics.enabled_names());
+        }
+        out
     }
 
     /// Applies memory budgets: commits clusters over their own `max_resident_bytes` (moving
@@ -1422,6 +1547,7 @@ impl Node {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         }
+        self.audit.flush_all().await;
         if let Some(store) = self.stores.data() {
             store.close().await?;
         }
@@ -1577,9 +1703,24 @@ impl Node {
         Ok(lease)
     }
 
+    /// Finds and authenticates a request from roll itself (in process: not on the data plane,
+    /// so no IP allowlist applies) and pins its cluster, as [`Node::enter_from`] does.
+    pub async fn enter(self: &Arc<Self>, req: &EsRequest, sni: Option<&str>) -> Result<Lease, Rejected> {
+        self.enter_from(req, sni, Origin::Internal).await.map_err(|r| match r {
+            Refused::Rejected(r) => r,
+            // An in-process request is admitted by every allowlist.
+            Refused::Filtered => Rejected { error: EsError::new(403, "security_exception", "forbidden"), dialect: Dialect::Elasticsearch },
+        })
+    }
+
     /// Finds and authenticates a request and pins its cluster (loading it if needed), without
     /// taking a concurrency permit yet ([`Lease::acquire`]). Applies the request rate.
-    pub async fn enter(self: &Arc<Self>, req: &EsRequest, sni: Option<&str>) -> Result<Lease, Rejected> {
+    ///
+    /// The cluster's IP allowlist is checked against `origin` first, before its credentials and
+    /// before a sleeping cluster wakes: a refused address learns nothing from its credentials
+    /// and costs nothing ([`Refused::Filtered`]). A request that names no cluster that exists is
+    /// refused (401) as before.
+    pub async fn enter_from(self: &Arc<Self>, req: &EsRequest, sni: Option<&str>, origin: Origin) -> Result<Lease, Refused> {
         crate::process::note_activity();
         let reject = |error: EsError| Rejected { error, dialect: Dialect::Elasticsearch };
         let presented;
@@ -1590,7 +1731,7 @@ impl Node {
                 None
             }
             None => {
-                presented = auth::parse_authorization(req.header("authorization")).map_err(|m| reject(malformed(m)))?;
+                presented = auth::parse_authorization(req.header("authorization")).map_err(|m| Refused::Rejected(reject(malformed(m))))?;
                 host_cluster = sni
                     .and_then(|s| auth::host_label(s, self.cfg.domain.as_deref()))
                     .or_else(|| req.header("host").and_then(|h| auth::host_label(h, self.cfg.domain.as_deref())));
@@ -1613,12 +1754,12 @@ impl Node {
         let claim = match claim {
             None => None,
             Some(Some(c)) => Some(c),
-            Some(None) => return Err(failed()),
+            Some(None) => return Err(failed().into()),
         };
         let name = match (&claim, &self.cfg.default_cluster) {
             (Some(c), _) => c.cluster.as_str(),
             (None, Some(name)) => name.as_str(),
-            (None, None) => return Err(failed()),
+            (None, None) => return Err(failed().into()),
         };
         // Credentials that aren't the cluster's own may be a principal of the cluster's
         // security (native user, API key, access token): checked once the cluster is loaded.
@@ -1627,12 +1768,16 @@ impl Node {
         // Fast path: a loaded cluster checks against its shared description, no catalog read.
         if let Some(loaded) = self.get_loaded(name) {
             let spec = loaded.spec();
+            if !spec.ip_allowlist.admits(origin) {
+                return Err(Refused::Filtered);
+            }
             let mut via_native = false;
             if let Some(c) = &claim
                 && !auth::verify(&spec, c)
             {
                 if !native_ok(&loaded) {
-                    return Err(failed());
+                    self.audit_refusal(name, spec.dialect, Some(&*loaded), req, &presented, Some(c));
+                    return Err(failed().into());
                 }
                 via_native = true;
             }
@@ -1640,7 +1785,7 @@ impl Node {
             // cluster flushes and hands its lease over instead of being starved by a steady
             // stream of requests. Refused before running: the proxy resends it to the next owner.
             if self.shutting_down.load(Ordering::SeqCst) {
-                return Err(Rejected { error: EsError::new(503, "node_closed_exception", "node is shutting down"), dialect: spec.dialect });
+                return Err(Rejected { error: EsError::new(503, "node_closed_exception", "node is shutting down"), dialect: spec.dialect }.into());
             }
             // Otherwise it is being unloaded: wake it again below.
             if let Ok(mut lease) = self.pin(loaded, spec.dialect) {
@@ -1649,20 +1794,24 @@ impl Node {
                 } else {
                     lease.user = claim.as_ref().map(authenticated_user);
                 }
-                return self.admitted(lease, req);
+                return self.admitted(lease, req).map_err(Refused::Rejected);
             }
         }
         let spec = match self.catalog.lookup(name).await {
             Some(spec) => spec,
             None if self.cfg.default_cluster.is_some() => ClusterSpec::new(name.to_string()),
-            None => return Err(failed()),
+            None => return Err(failed().into()),
         };
+        if !spec.ip_allowlist.admits(origin) {
+            return Err(Refused::Filtered);
+        }
         let mut via_native = false;
         if let Some(c) = &claim
             && !auth::verify(&spec, c)
         {
             if native.is_none() {
-                return Err(failed());
+                self.audit_refusal(name, spec.dialect, None, req, &presented, Some(c));
+                return Err(failed().into());
             }
             via_native = true;
         }
@@ -1676,10 +1825,11 @@ impl Node {
                         EsError::new(503, "cluster_block_exception", format!("cluster could not be loaded: {e:#}"))
                     }
                 };
-                Rejected { error, dialect }
+                Refused::Rejected(Rejected { error, dialect })
             })?;
             if via_native && !native_ok(&loaded) {
-                return Err(failed());
+                self.audit_refusal(name, dialect, Some(&*loaded), req, &presented, claim.as_ref());
+                return Err(failed().into());
             }
             match self.pin(loaded, dialect) {
                 Ok(mut lease) => {
@@ -1688,11 +1838,27 @@ impl Node {
                     } else {
                         lease.user = claim.as_ref().map(authenticated_user);
                     }
-                    return self.admitted(lease, req);
+                    return self.admitted(lease, req).map_err(Refused::Rejected);
                 }
                 Err(()) => tokio::task::yield_now().await,
             }
         }
+    }
+
+    /// Records in cluster `name`'s audit log that the node refused `req`'s credentials: as the
+    /// loaded cluster asks, or as it last asked when it was loaded here (its defaults if never).
+    /// Only a Basic user name is read from the credentials.
+    fn audit_refusal(&self, name: &str, dialect: Dialect, loaded: Option<&Loaded>, req: &EsRequest, presented: &Presented, claim: Option<&auth::Claim>) {
+        use search_es::xpack::security::audit;
+        let user = match presented {
+            Presented::Basic { user, .. } => Some(claim.and_then(|c| c.user.clone()).unwrap_or_else(|| user.clone())),
+            _ => None,
+        };
+        let snap = match loaded {
+            Some(l) => audit::snapshot(&l.cluster),
+            None => self.audit.remembered(name).unwrap_or_else(|| Arc::new(audit::Snapshot::defaults(dialect, name, &stable_node_id(name), &self.cfg.node_name))),
+        };
+        audit::failed_login(&audit::AuditLog(self.audit.clone()), &snap, req, user.as_deref());
     }
 
     /// Counts a request in flight on `loaded`, unless it is being unloaded (the residency
@@ -1709,6 +1875,7 @@ impl Node {
             dialect,
             user: None,
             native_auth: None,
+            since: None,
         };
         if lease.loaded.closed.load(Ordering::SeqCst) {
             // Unloaded (or being unloaded) under us: the lease's drop uncounts it.
@@ -1729,6 +1896,7 @@ impl Node {
         if let Some(r) = &*rate
             && !r.try_take()
         {
+            Lease::refused(&lease.loaded, req);
             return Err(Rejected {
                 error: EsError::too_many_requests(format!(
                     "rejected execution of REST request [{} {}]: cluster [{}] exceeds its rate of [{}] requests per second",

@@ -43,6 +43,27 @@ pub struct Running {
     pub internal: Option<axum::Router>,
 }
 
+/// Who may open a team-access project's previews: an account that still signs in, through the
+/// roll session that asked for the ticket (signed out, revoked or expired is a no), and is an
+/// admin or owns the project now (a disabled or deleted one, or one whose project went to
+/// someone else, is a no at once). A failed lookup is a no.
+pub struct AccountsVisitors {
+    pub accounts: Arc<roll_accounts::Accounts>,
+    pub workspace: Arc<roll_workspace::Workspace>,
+}
+
+impl roll_previews::ports::Visitors for AccountsVisitors {
+    fn may_open(&self, user: &str, session: &str, project: &str) -> bool {
+        if !self.accounts.session_live(user, session).unwrap_or(false) {
+            return false;
+        }
+        match self.accounts.user(user) {
+            Ok(u) if !u.disabled => u.admin || self.workspace.get(roll_workspace::Scope::All, project).is_ok_and(|p| !p.owner.is_empty() && p.owner == user),
+            _ => false,
+        }
+    }
+}
+
 /// Open the store and start the engine: branches through this node's API, services as
 /// containers through roll code's isolation (Docker or Fargate), roll code's changes as the
 /// source, and roll code's preview backend in front of its own single-container previews.
@@ -114,7 +135,7 @@ pub fn start(
     let engine = roll_previews::Engine::new(
         roll_previews::engine::Config { domain, port: Some(args.api.port()), mail: Some(format!("127.0.0.1:{}", args.previews_smtp.port())), ..Default::default() },
         store.clone(),
-        workspace.clone(),
+        workspace,
         source.clone(),
         branchers,
         // roll apps' instances are screenshotted where roll apps says they run (`Apps::reachable`):
@@ -127,13 +148,17 @@ pub fn start(
     // roll apps' proxy lists a preview page's notes from the engine (`Engine::notes_for`).
     if let Some(a) = &apps_for_notes {
         a.set_feedback_notes(Arc::new(services::Notes(Arc::downgrade(&engine))));
+        // A project's own preview domain: names apps' ingress doesn't hold go to previews' router.
+        a.set_preview_router(Arc::new(services::DomainRouter(runtime.clone())));
         // Its pushes to branches of a Git URL service: those branches' previews.
         a.set_git_pushes(Arc::new(services::GitPushes(Arc::downgrade(&engine))));
+        // And their status and pull request comment, where the code lives (roll's GitHub App).
+        let _ = engine.git_report.set(Arc::new(services::GitReport { api: api.clone(), code: code.code.clone() }));
     }
     if clustered {
         let _ = engine.cluster.set(cluster.clone());
     }
-    let backend = roll_previews::code::Backend::new(code.previews.clone(), workspace, source);
+    let backend = roll_previews::code::Backend::new(code.previews.clone(), source);
     backend.attach(&engine);
     code.code.set_preview_backend(backend);
     // The mail catcher: previews' mail is kept with them, never sent on.

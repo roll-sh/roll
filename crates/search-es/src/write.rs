@@ -949,6 +949,31 @@ pub fn seq_no_unsupported(idx: &IndexMeta, shard: u32, kind: &'static str, what:
     shard_error(EsError::new(400, kind, format!("{what} not supported on indices with sequence numbers disabled")), idx, shard)
 }
 
+/// Logs an index operation that took `nanos` on its primary when it passed one of its index's
+/// slow log thresholds (`IndexingSlowLog.postIndex`).
+fn slow_index(shard: &ShardEngine, index: &IndexMeta, id: &str, routing: Option<&str>, source: &[u8], nanos: u64) {
+    let Some(level) = shard.slow.level(crate::slowlog::Phase::Index, nanos) else { return };
+    let chars = shard.slow.source_chars();
+    let head = &source[..source.len().min(chars * 4)];
+    shard.slowlog.push(crate::slowlog::Entry {
+        at_ms: crate::slowlog::now_ms(),
+        phase: crate::slowlog::Phase::Index,
+        level,
+        took_nanos: nanos,
+        index: index.name.clone(),
+        uuid: index.uuid.clone(),
+        shard: shard.id,
+        source: crate::slowlog::cut(&String::from_utf8_lossy(head), chars).to_string(),
+        opaque_id: None,
+        total_hits: None,
+        total_shards: None,
+        search_type: None,
+        stats: Vec::new(),
+        id: Some(id.to_string()),
+        routing: routing.map(str::to_string),
+    });
+}
+
 /// Applies an index operation to its shard.
 pub fn apply_index(p: Prepared, args: &WriteArgs, auto_id: bool, id: &str) -> EsResult<WriteOutcome> {
     if args.if_seq_no.is_some() && seq_no_disabled(&p.index) {
@@ -967,7 +992,11 @@ pub fn apply_index(p: Prepared, args: &WriteArgs, auto_id: bool, id: &str) -> Es
     let t = std::time::Instant::now();
     let r = p.shard.shard.index(op);
     let c = &p.shard.counters;
-    c.index_time_nanos.fetch_add(t.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+    let took = t.elapsed().as_nanos() as u64;
+    c.index_time_nanos.fetch_add(took, std::sync::atomic::Ordering::Relaxed);
+    if r.is_ok() {
+        slow_index(&p.shard, &p.index, &p.id, p.routing.as_deref(), &p.source, took);
+    }
     let r = match r {
         Ok(r) => r,
         Err(e) => {

@@ -24,7 +24,7 @@ import { BulkBar } from "./bulk";
 import { LinkDialog } from "./link-dialog";
 import { ApprovalOffer, RequestsPanel, type Pending } from "./requests";
 import { secretsHref, useSecrets } from "./secrets-page";
-import { ago, button, Chip, CommentMark, dangerButton, ErrorNote, errorText, ExpiryMark, field, ghost, iconButton, label, LinkChip, PersonalMark, primary, RefMark, Reveal, saveText, sized, SourceMark, Teach, until, useLoad, Warnings } from "./ui";
+import { ago, button, Chip, CommentMark, dangerButton, ErrorNote, errorText, ExpiryMark, field, ghost, iconButton, label, LinkChip, PersonalMark, primary, RefMark, Reveal, saveText, TotpCode, sized, SourceMark, Teach, textareaField, until, useLoad, Warnings } from "./ui";
 
 /** One environment: its folder's secrets (inline edit, reveal, add, delete, overrides), requests and history. */
 export function EnvView({ env }: { env: Environment }) {
@@ -438,7 +438,8 @@ function AddSecret({ path, keys, refs, onAdd, onCancel }: { path: string; keys: 
   const tagsOk = tagList.every((t) => TAG.test(t));
   const warn = useRefWarnings(value, key, refs);
   const exists = keys.has(key) && !personal;
-  const unfit = misfit(required.find((r) => r.key === key && r.path === path), value);
+  const rule = required.find((r) => r.key === key && r.path === path);
+  const unfit = misfit(rule, value);
   const submit = async () => {
     if (!keyOk || !tagsOk || unfit || busy) return;
     setBusy(true);
@@ -466,8 +467,8 @@ function AddSecret({ path, keys, refs, onAdd, onCancel }: { path: string; keys: 
           {exists && <span className="mt-1 block text-[11px] text-muted">{key} exists: this writes a new version.</span>}
         </label>
         <div>
-          <ValueHead onGenerate={() => setValue(generateValue())} />
-          <RefInput aria-label="Value" value={value} onValue={setValue} source={refs} rows={value.includes("\n") ? 4 : 1} placeholder="value, or ${OTHER_KEY}, ${production.KEY}" spellCheck={false} autoComplete="off" className={`${field} h-auto min-h-8 resize-y py-1.5 font-mono`} />
+          <ValueHead onGenerate={() => setValue(generateValue(48, rule?.password))} />
+          <RefInput aria-label="Value" value={value} onValue={setValue} source={refs} rows={value.includes("\n") ? 4 : 1} placeholder="value, or ${OTHER_KEY}, ${production.KEY}" spellCheck={false} autoComplete="off" className={`${textareaField} min-h-8 resize-y font-mono`} />
           {unfit && value && <span className="mt-1 block text-[11px] text-danger">{unfit}</span>}
         </div>
         <label>
@@ -540,10 +541,11 @@ function SecretRow({
   /** Says what was copied. */
   onCopied: (text: string) => void;
 }) {
-  const { api, project, resourceName } = useSecrets();
+  const { api, project, resourceName, required } = useSecrets();
   const [editing, setEditing] = useState<null | EditMode>(null);
   const [confirming, setConfirming] = useState(false);
   const row = useRef<HTMLDivElement>(null);
+  const totp = required.some((r) => r.key === s.key && r.path === s.path && r.type === "totp");
   const own = s.source.kind === "own";
   const personal = s.type === "personal";
 
@@ -600,7 +602,10 @@ function SecretRow({
               <Lock className="size-3" /> sensitive, never shown
             </span>
           ) : (
-            <Reveal className="flex-1" load={() => api.value(env.slug, s.key, path)} />
+            <>
+              <Reveal className="flex-1" load={() => api.value(env.slug, s.key, path)} />
+              {totp && <TotpCode load={() => api.totp(env.slug, s.key, path)} />}
+            </>
           )}
         </div>
         <div role="cell" className="flex min-w-0 items-center gap-1.5 text-[11.5px] text-muted @max-4xl:hidden">
@@ -761,7 +766,8 @@ function Editor({
   const tagsOk = tagList.every((t) => TAG.test(t));
   const warn = useRefWarnings(value, s.key, refs, touched && !linked);
   const { required } = useSecrets();
-  const unfit = touched && !linked ? misfit(required.find((r) => r.key === s.key && r.path === s.path), value) : null;
+  const rule = required.find((r) => r.key === s.key && r.path === s.path);
+  const unfit = touched && !linked ? misfit(rule, value) : null;
   const save = async () => {
     if (!tagsOk || unfit || busy) return;
     setBusy(true);
@@ -799,7 +805,7 @@ function Editor({
       )}
       <div className="grid gap-2 sm:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
         <div>
-          <ValueHead onGenerate={linked ? undefined : () => (setValue(generateValue()), setTouched(true))} />
+          <ValueHead onGenerate={linked ? undefined : () => (setValue(generateValue(48, rule?.password)), setTouched(true))} />
           {linked ? (
             <div className="flex h-8 items-center gap-2 text-[11.5px] text-muted">
               The value comes from the link.
@@ -821,7 +827,7 @@ function Editor({
               placeholder={fresh ? "value" : "unchanged: type a new value to replace it"}
               spellCheck={false}
               autoComplete="off"
-              className={`${field} h-auto min-h-8 resize-y py-1.5 font-mono`}
+              className={`${textareaField} min-h-8 resize-y font-mono`}
             />
           )}
           {unfit && <span className="mt-1 block text-[11px] text-danger">{unfit}</span>}
@@ -862,7 +868,7 @@ function ValueHead({ onGenerate }: { onGenerate?: () => void }) {
     <span className={`${label} flex items-center justify-between`}>
       Value
       {onGenerate && (
-        <button type="button" onClick={onGenerate} className="flex items-center gap-1 text-[11px] font-normal text-muted transition-colors hover:text-accent" title="A random value of 48 letters and digits, made here in the browser">
+        <button type="button" onClick={onGenerate} className="flex items-center gap-1 text-[11px] font-normal text-muted transition-colors hover:text-accent" title="A random value made here in the browser: 48 letters and digits, or what the key's password policy asks">
           <Dices className="size-3" /> Generate
         </button>
       )}

@@ -170,6 +170,22 @@ impl Brancher for Postgres {
         Ok(Some((lines(s(&from["endpoint"]["id"]), None).await?, lines(s(&b["endpoint"]["id"]), role).await?)))
     }
 
+    /// The parent's table columns (`main`, the branch previews start from), as the superuser
+    /// with only the catalog's names in reach, as `schema` reads it, for at most 10 s. A parent
+    /// whose compute sleeps isn't woken for it ([`roll_previews::ports::Asleep`]).
+    async fn columns(&self, parent: &str, max: usize) -> anyhow::Result<Vec<roll_previews::mask::Column>> {
+        let p = self.0.get(&format!("/v1/projects/{}", seg(parent))).await?;
+        let branches = p["branches"].as_array().cloned().unwrap_or_default();
+        let main = branches.iter().find(|b| b["name"] == "main").or_else(|| branches.iter().find(|b| b["parent_id"].is_null())).ok_or_else(|| anyhow::anyhow!("{parent} has no main branch"))?;
+        let ep = s(&main["endpoint"]["id"]).ok_or_else(|| anyhow::anyhow!("{parent}'s main branch has no endpoint"))?;
+        if main["endpoint"]["state"] != "running" {
+            return Err(roll_previews::ports::Asleep.into());
+        }
+        let v = self.0.post(&format!("/v1/endpoints/{}/query", seg(&ep)), json!({ "sql": columns_sql(max) })).await?;
+        let rows = v["results"].as_array().and_then(|r| r.last()).and_then(|r| r["rows"].as_array()).cloned().unwrap_or_default();
+        Ok(rows.iter().filter_map(|r| column(r[0].as_str()?)).collect())
+    }
+
     /// A branch's own bytes (its local data directory, else its objects), at Postgres's rates.
     async fn usage(&self, parent: &str, branch: &str) -> anyhow::Result<Usage> {
         let p = self.0.get(&format!("/v1/projects/{}", seg(parent))).await?;
@@ -186,6 +202,63 @@ impl Brancher for Postgres {
 
 /// What a Postgres branch's `kept` says: it has a role of its own (pg-control's `app_role`).
 const APP_ROLE: &str = r#"{"app_role":true}"#;
+
+/// [`COLUMNS_SQL`] for at most `max` columns, with only the catalog's names in reach and a 10 s
+/// statement timeout.
+fn columns_sql(max: usize) -> String {
+    format!("SET search_path = pg_catalog, pg_temp; SET statement_timeout = '10s'; {COLUMNS_SQL} LIMIT {max}")
+}
+
+/// One row of [`COLUMNS_SQL`].
+fn column(row: &str) -> Option<roll_previews::mask::Column> {
+    use roll_previews::mask::Takes;
+    let c: Value = serde_json::from_str(row).ok()?;
+    let takes = match c["takes"].as_str()? {
+        "any" => Takes::Any,
+        "null" => Takes::Null,
+        _ => Takes::Nothing,
+    };
+    Some(roll_previews::mask::Column { path: s(&c["path"])?, r#type: s(&c["type"]), not_null: c["not_null"] == true, unique: c["unique"] == true, takes })
+}
+
+/// The user's tables' columns (a partitioned table's, not each partition's), one JSON object
+/// each (`{path, type, not_null, unique, takes}`), for mask suggestions: what a mask may write
+/// into each without failing (`roll_previews::mask::Takes`). A name with a dot in it can't be
+/// named by a mask (`schema.table.column`), and a generated or `GENERATED ALWAYS` identity column
+/// can't be written, so they're left out. What holds a column is read across its table's
+/// partitions (by name):
+/// - `none` (nothing): a foreign key other rows point at, a CHECK, an exclusion constraint, a
+///   unique index's expression or predicate, a partition key, a domain with constraints;
+/// - `null` (only a null): a foreign key's own column, an array, a range, an enum, a composite;
+/// - `unique`: a unique index's column; `nnd`: one `NULLS NOT DISTINCT` (a null fails too).
+const COLUMNS_SQL: &str = r"
+WITH tbl AS MATERIALIZED (
+  SELECT c.oid, s.nspname, c.relname FROM pg_class c JOIN pg_namespace s ON s.oid = c.relnamespace
+   WHERE c.relkind IN ('r', 'p') AND NOT c.relispartition
+     AND s.nspname NOT IN ('pg_catalog', 'information_schema') AND s.nspname NOT LIKE 'pg\_%'),
+tree AS (SELECT oid AS top, oid AS rel FROM tbl UNION SELECT tbl.oid, t.relid FROM tbl, pg_partition_tree(tbl.oid) t),
+held (rel, k, how) AS (
+  SELECT conrelid, k, CASE contype WHEN 'f' THEN 'null' ELSE 'none' END FROM pg_constraint, unnest(conkey) k WHERE contype IN ('f', 'c', 'x')
+  UNION ALL SELECT confrelid, k, 'none' FROM pg_constraint, unnest(confkey) k WHERE contype = 'f'
+  UNION ALL SELECT i.indrelid, k, CASE WHEN to_jsonb(i) ->> 'indnullsnotdistinct' = 'true' THEN 'nnd' ELSE 'unique' END
+    FROM pg_index i, unnest(i.indkey::int2[]) k WHERE i.indisunique AND k > 0
+  UNION ALL SELECT i.indrelid, a.attnum, 'none' FROM pg_index i JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum > 0
+    WHERE (i.indisunique OR i.indisexclusion) AND concat(i.indexprs::text, i.indpred::text) ~ (':varattno ' || a.attnum || ' ')
+  UNION ALL SELECT p.partrelid, k, 'none' FROM pg_partitioned_table p, unnest(p.partattrs::int2[]) k WHERE k > 0
+  UNION ALL SELECT p.partrelid, a.attnum, 'none' FROM pg_partitioned_table p JOIN pg_attribute a ON a.attrelid = p.partrelid AND a.attnum > 0
+    WHERE p.partexprs::text ~ (':varattno ' || a.attnum || ' ')),
+hows AS (
+  SELECT tree.top, ca.attname, array_agg(held.how) AS hows FROM tree JOIN held ON held.rel = tree.rel
+    JOIN pg_attribute ca ON ca.attrelid = held.rel AND ca.attnum = held.k GROUP BY 1, 2)
+SELECT json_build_object('path', tbl.nspname || '.' || tbl.relname || '.' || a.attname, 'type', format_type(a.atttypid, a.atttypmod),
+       'not_null', a.attnotnull OR 'nnd' = ANY (h.hows), 'unique', coalesce(h.hows && ARRAY['unique', 'nnd'], false),
+       'takes', CASE WHEN 'none' = ANY (h.hows) OR t.typtype = 'd' AND (t.typnotnull OR EXISTS (SELECT 1 FROM pg_constraint d WHERE d.contypid = t.oid)) THEN 'nothing'
+                     WHEN 'null' = ANY (h.hows) OR t.typcategory = 'A' OR t.typtype <> 'b' THEN 'null' ELSE 'any' END)::text
+  FROM tbl JOIN pg_attribute a ON a.attrelid = tbl.oid JOIN pg_type t ON t.oid = a.atttypid
+  LEFT JOIN hows h ON h.top = tbl.oid AND h.attname = a.attname
+ WHERE a.attnum > 0 AND NOT a.attisdropped AND a.attgenerated = '' AND a.attidentity <> 'a'
+   AND strpos(tbl.nspname || tbl.relname || a.attname, '.') = 0
+ ORDER BY tbl.nspname, tbl.relname, a.attnum";
 
 /// One line per object in the user's schemas, for `roll_previews::schema::diff`: tables, views,
 /// sequences, columns (type, nullability, default), indexes, constraints, enums, functions and
@@ -358,6 +431,12 @@ impl Brancher for Nosql {
     async fn mask_problems(&self, parent: &str, columns: &std::collections::BTreeMap<String, String>) -> anyhow::Result<Vec<String>> {
         let schema = self.0.get(&format!("/v1/nosql/databases/{}/schema", seg(parent))).await?;
         Ok(roll_previews::mask::nosql_key_masks(&schema, columns))
+    }
+
+    /// The parent's columns that can be masked (not a key's: `mask::nosql_columns`).
+    async fn columns(&self, parent: &str, max: usize) -> anyhow::Result<Vec<roll_previews::mask::Column>> {
+        let schema = self.0.get(&format!("/v1/nosql/databases/{}/schema", seg(parent))).await?;
+        Ok(roll_previews::mask::nosql_columns(&schema, max))
     }
 
     /// NoSQL resets in place: same id, endpoint and credentials.
@@ -773,9 +852,9 @@ fn mapping_lines(v: &Value) -> Vec<String> {
     out
 }
 
-fn percent_decode(s: &str) -> String {
-    urlencoding::decode(s).map(|c| c.into_owned()).unwrap_or_else(|_| s.to_string())
-}
+/// A search cluster's indices, hidden ones too (a data stream's backing indices, `.ds-…`, which
+/// masks can name).
+const CAT_INDICES: &str = "/_cat/indices?h=index&format=json&expand_wildcards=all";
 
 pub struct Search(pub Api);
 
@@ -833,7 +912,7 @@ impl Brancher for Search {
     async fn mask_problems(&self, parent: &str, fields: &std::collections::BTreeMap<String, String>) -> anyhow::Result<Vec<String>> {
         // Each index the rules name, read as itself (an alias or pattern answers with its real
         // indices, and only those are checked); one the parent doesn't have yet is none.
-        let listed = self.0.post(&format!("/v1/search/clusters/{}/request", seg(parent)), json!({ "method": "GET", "path": "/_cat/indices?h=index&format=json" })).await?;
+        let listed = self.0.post(&format!("/v1/search/clusters/{}/request", seg(parent)), json!({ "method": "GET", "path": CAT_INDICES })).await?;
         let indices: Vec<String> = serde_json::from_str::<Vec<Value>>(listed["body"].as_str().unwrap_or("[]")).unwrap_or_default().iter().filter_map(|x| x["index"].as_str().map(str::to_string)).collect();
         let mut by_index: std::collections::BTreeMap<&str, std::collections::BTreeMap<String, String>> = Default::default();
         for (spec, rule) in fields {
@@ -851,6 +930,34 @@ impl Brancher for Search {
             }
             let mapping: Value = serde_json::from_str(v["body"].as_str().unwrap_or("{}"))?;
             out.extend(roll_previews::mask::search_field_masks(&mapping, &specs, &indices));
+        }
+        Ok(out)
+    }
+
+    /// The parent's fields from its indices' mappings, through the operator's console request
+    /// (as `schema`), one index at a time until `max` (so a large cluster's mappings aren't
+    /// read whole): its own indices and its data streams' backing ones, not system indices.
+    async fn columns(&self, parent: &str, max: usize) -> anyhow::Result<Vec<roll_previews::mask::Column>> {
+        let console = format!("/v1/search/clusters/{}/request", seg(parent));
+        let listed = self.0.post(&console, json!({ "method": "GET", "path": CAT_INDICES })).await?;
+        anyhow::ensure!(listed["status"].as_u64() == Some(200), "listing {parent}'s indices: {}", listed["status"]);
+        let mut indices: Vec<String> = serde_json::from_str::<Vec<Value>>(listed["body"].as_str().unwrap_or("[]"))?.iter().filter_map(|x| s(&x["index"])).collect();
+        indices.retain(|i| roll_previews::mask::search_index_offered(i));
+        indices.sort();
+        let mut out = Vec::new();
+        for index in indices {
+            if out.len() >= max {
+                break;
+            }
+            let v = self.0.post(&console, json!({ "method": "GET", "path": format!("/{}/_mapping", seg(&index)) })).await?;
+            match v["status"].as_u64() {
+                Some(200) => {}
+                // Deleted since it was listed.
+                Some(404) => continue,
+                s => anyhow::bail!("reading {parent}'s {index} mapping: {s:?}"),
+            }
+            let body: Value = serde_json::from_str(v["body"].as_str().unwrap_or("{}"))?;
+            out.extend(roll_previews::mask::search_columns(&body, max - out.len()));
         }
         Ok(out)
     }
@@ -915,40 +1022,46 @@ impl Brancher for Search {
 
     /// Rewrite the masked fields in the branch's documents (`_update_by_query`, Painless): the
     /// parent's segments are shared, so the branch's rewritten documents are its own and the
-    /// parent keeps its values. Run again it's harmless: masked values stay masked.
-    async fn mask(&self, _parent: &str, branch: &str, kept: Option<&str>, fields: &std::collections::BTreeMap<String, String>) -> anyhow::Result<()> {
-        let vars = self.connect("", branch, kept).await?;
-        let url = vars.iter().find(|(k, _)| k == "ELASTICSEARCH_URL").map(|(_, v)| v.clone()).ok_or_else(|| anyhow::anyhow!("the search branch {branch} has no URL"))?;
-        let mut u = reqwest::Url::parse(&url)?;
-        let (user, pass) = (percent_decode(u.username()), u.password().map(percent_decode));
-        let _ = u.set_username("");
-        let _ = u.set_password(None);
-        let http = reqwest::Client::builder().timeout(std::time::Duration::from_secs(300)).build()?;
-        let send = |req: reqwest::RequestBuilder| if user.is_empty() { req } else { req.basic_auth(&user, pass.as_deref()) };
+    /// parent keeps its values. Run again it's harmless: masked values stay masked. Through the
+    /// operator's console request, as `schema` reads: roll's own call, so no cluster password and
+    /// no IP allowlist (a branch keeps its parent's, which needn't admit this node).
+    async fn mask(&self, _parent: &str, branch: &str, _kept: Option<&str>, fields: &std::collections::BTreeMap<String, String>) -> anyhow::Result<()> {
+        let console = format!("/v1/search/clusters/{}/request", seg(branch));
+        // `(status, body)` of one REST request on the branch.
+        let run = |method: &'static str, path: String, body: Option<Value>| {
+            let console = console.clone();
+            async move {
+                let mut req = json!({ "method": method, "path": path });
+                if let Some(b) = body {
+                    req["body"] = b;
+                }
+                let v = self.0.post(&console, req).await?;
+                let text = v["body"].as_str().unwrap_or("").to_string();
+                anyhow::Ok((v["status"].as_u64().unwrap_or(0), text))
+            }
+        };
         let mut masked: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
         // The branch's indices, so an index whose name has dots is split off whole.
-        let listed = send(http.get(u.join("_cat/indices?h=index&format=json")?)).send().await?;
-        let indices: Vec<String> = listed.json::<Vec<Value>>().await.unwrap_or_default().iter().filter_map(|x| x["index"].as_str().map(str::to_string)).collect();
+        let (_, listed) = run("GET", CAT_INDICES.into(), None).await?;
+        let indices: Vec<String> = serde_json::from_str::<Vec<Value>>(&listed).unwrap_or_default().iter().filter_map(|x| x["index"].as_str().map(str::to_string)).collect();
         for (spec, rule) in fields {
-            let Some((index, path)) = roll_previews::mask::split_mask(spec, &indices) else { anyhow::bail!("{spec:?} isn't index.field") };
-            let target = u.join(&format!("{}/_update_by_query?conflicts=proceed&refresh=true", seg(index)))?;
+            let Some((index, path)) = roll_previews::mask::split_mask(spec, &indices).filter(|(i, _)| !i.is_empty()) else { anyhow::bail!("{spec:?} isn't index.field") };
             // Every document, not those `exists` finds: a field that isn't indexed (or has no doc
             // values) is in `_source` all the same.
             let body = json!({
                 "query": { "match_all": {} },
                 "script": { "lang": "painless", "source": SEARCH_MASK_SCRIPT, "params": { "path": path.split('.').collect::<Vec<_>>(), "rule": rule } },
             });
-            let res = send(http.post(target).json(&body)).send().await?;
-            let status = res.status();
-            let v: Value = res.json().await.unwrap_or(Value::Null);
+            let (status, text) = run("POST", format!("/{}/_update_by_query?conflicts=proceed&refresh=true", seg(index)), Some(body)).await?;
             // An index the branch doesn't have holds nothing to mask.
-            if status.as_u16() == 404 {
+            if status == 404 {
                 continue;
             }
+            let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
             // A document skipped on a version conflict kept its value: masking isn't done.
             let failures = v["failures"].as_array().map_or(0, Vec::len);
             let conflicts = v["version_conflicts"].as_u64().unwrap_or(0);
-            anyhow::ensure!(status.is_success() && failures == 0 && conflicts == 0, "masking {spec}: {status} {}", v.to_string().chars().take(300).collect::<String>());
+            anyhow::ensure!((200..300).contains(&status) && failures == 0 && conflicts == 0, "masking {spec}: {status} {}", text.chars().take(300).collect::<String>());
             masked.insert(index);
         }
         // The documents as they were stay in the segments the branch shares with its parent,
@@ -956,12 +1069,10 @@ impl Brancher for Search {
         // (`_terms_enum`, suggesters): every segment that holds one is rewritten as the branch's
         // own without it (as Postgres masking's VACUUM FULL), the parent's untouched.
         for index in masked {
-            let settings = u.join(&format!("{}/_settings", seg(index)))?;
-            let res = send(http.put(settings).json(&json!({ "index.merge.policy.expunge_deletes_allowed": 0.0 }))).send().await?;
-            anyhow::ensure!(res.status().is_success(), "masking {index}: its merge policy: {}", res.status());
-            let merge = u.join(&format!("{}/_forcemerge?only_expunge_deletes=true", seg(index)))?;
-            let res = send(http.post(merge)).send().await?;
-            anyhow::ensure!(res.status().is_success(), "masking {index}: expunging what was masked: {} {}", res.status(), res.text().await.unwrap_or_default().chars().take(300).collect::<String>());
+            let (status, _) = run("PUT", format!("/{}/_settings", seg(index)), Some(json!({ "index.merge.policy.expunge_deletes_allowed": 0.0 }))).await?;
+            anyhow::ensure!((200..300).contains(&status), "masking {index}: its merge policy: {status}");
+            let (status, text) = run("POST", format!("/{}/_forcemerge?only_expunge_deletes=true", seg(index)), None).await?;
+            anyhow::ensure!((200..300).contains(&status), "masking {index}: expunging what was masked: {status} {}", text.chars().take(300).collect::<String>());
         }
         Ok(())
     }
@@ -1001,5 +1112,98 @@ mod tests {
         let n = bucket_name(&long, "pv-abcdefghijkl");
         assert_eq!(n.len(), 63);
         assert!(n.ends_with("-pv-abcdefghijkl"));
+    }
+
+    /// Every mask suggested for a real Postgres 18 schema's columns applies: masking with all of
+    /// them at once ("Add all") succeeds, whatever holds the columns (generated and identity
+    /// columns, a `varchar(11)` ssn, foreign keys both ways, arrays, a range, a CHECK, a domain,
+    /// a unique expression, `NULLS NOT DISTINCT`, partition keys). Starts `postgres:18-alpine` in
+    /// Docker and removes it: `cargo test -p rolld --bin rolld suggested_mask -- --ignored`.
+    #[tokio::test]
+    #[ignore = "needs Docker"]
+    async fn every_suggested_mask_applies_on_real_postgres() {
+        use std::process::Command;
+        struct Container(String);
+        impl Drop for Container {
+            fn drop(&mut self) {
+                let _ = Command::new("docker").args(["rm", "-f", &self.0]).output();
+            }
+        }
+        let name = format!("roll-previews-masks-test-{}", std::process::id());
+        let run = Command::new("docker").args(["run", "-d", "--rm", "--name", &name, "-e", "POSTGRES_PASSWORD=pw", "-p", "127.0.0.1::5432", "postgres:18-alpine"]).output().unwrap();
+        assert!(run.status.success(), "docker run: {}", String::from_utf8_lossy(&run.stderr));
+        let _container = Container(name.clone());
+        let port = String::from_utf8(Command::new("docker").args(["port", &name, "5432"]).output().unwrap().stdout).unwrap();
+        let port = port.lines().next().and_then(|l| l.rsplit(':').next()).unwrap().trim().to_string();
+        let info = format!("host=127.0.0.1 port={port} user=postgres password=pw dbname=postgres");
+        let mut client = None;
+        for _ in 0..120 {
+            if let Ok((c, conn)) = tokio_postgres::connect(&info, tokio_postgres::NoTls).await {
+                tokio::spawn(conn);
+                if c.simple_query("SELECT 1").await.is_ok() {
+                    client = Some(c);
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        let pg = client.expect("postgres:18-alpine answers");
+        pg.batch_execute(
+            "CREATE TABLE taxes (id bigint PRIMARY KEY, tax_id text UNIQUE);
+             CREATE DOMAIN us_zip AS text CHECK (VALUE ~ '^[0-9]{5}$');
+             CREATE TABLE users (
+               id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+               email varchar(255) NOT NULL UNIQUE,
+               ssn varchar(11) NOT NULL,
+               national_id char(9),
+               phone_numbers varchar(20)[] NOT NULL DEFAULT '{}',
+               phones bigint[],
+               born daterange,
+               first_name text NOT NULL CHECK (first_name <> '***'),
+               last_name text NOT NULL,
+               zip_code us_zip,
+               tax_id bigint NOT NULL REFERENCES taxes,
+               search_vector tsvector GENERATED ALWAYS AS (to_tsvector('simple', last_name)) STORED,
+               full_name text GENERATED ALWAYS AS (first_name || ' ' || last_name) STORED,
+               phone text,
+               date_of_birth date NOT NULL);
+             CREATE UNIQUE INDEX ON users (lower(last_name));
+             CREATE TABLE contacts (id int PRIMARY KEY, email text, phone bigint NOT NULL, mobile text, UNIQUE NULLS NOT DISTINCT (mobile));
+             CREATE TABLE visits (id int, client_ip inet NOT NULL, born_on date NOT NULL, home_address text) PARTITION BY RANGE (born_on);
+             CREATE TABLE visits_old PARTITION OF visits FOR VALUES FROM ('2000-01-01') TO ('2100-01-01') PARTITION BY HASH (home_address);
+             CREATE TABLE visits_old_0 PARTITION OF visits_old FOR VALUES WITH (MODULUS 1, REMAINDER 0);
+             INSERT INTO taxes VALUES (1, 'T1'), (2, 'T2');
+             INSERT INTO users (email, ssn, national_id, phone_numbers, phones, born, first_name, last_name, zip_code, tax_id, phone, date_of_birth) VALUES
+               ('ann@corp.example', '123-45-6789', '123456789', '{555}', '{555}', '[1990-01-01,1990-01-02)', 'Ann', 'Lee', '12345', 1, '555', '1990-01-01'),
+               ('bob@corp.example', '987-65-4321', NULL, '{}', NULL, NULL, 'Bob', 'Ray', NULL, 2, NULL, '1980-02-02');
+             INSERT INTO contacts VALUES (1, 'ann@corp.example', 1, NULL), (2, NULL, 2, '07700');
+             INSERT INTO visits VALUES (1, '10.0.0.1', '2001-01-01', '1 Main St'), (2, '10.0.0.2', '2002-01-01', NULL);",
+        )
+        .await
+        .unwrap();
+
+        let rows = pg.simple_query(&super::columns_sql(1000)).await.unwrap();
+        let columns: Vec<_> = rows.iter().filter_map(|m| if let tokio_postgres::SimpleQueryMessage::Row(r) = m { super::column(r.get(0)?) } else { None }).collect();
+        let suggested: std::collections::BTreeMap<String, String> =
+            columns.iter().filter_map(|c| roll_previews::mask::suggest(roll_previews::Kind::Postgres, c).map(|x| (c.path.clone(), x.rule))).collect();
+        let rule = |path: &str| suggested.get(path).map(String::as_str);
+        // What it found and offered (so masking below isn't trivially all nulls).
+        assert_eq!(rule("public.users.email"), Some("email"));
+        assert_eq!(rule("public.users.ssn"), Some("redact"), "hash doesn't fit varchar(11)");
+        assert_eq!(rule("public.users.phones"), Some("null"));
+        assert_eq!(rule("public.contacts.mobile"), Some("hash"), "unique NULLS NOT DISTINCT: no null");
+        assert_eq!(rule("public.visits.client_ip"), Some("fixed:0.0.0.0"));
+        assert!(!columns.iter().any(|c| c.path == "public.users.full_name" || c.path == "public.users.id"), "generated and identity columns aren't offered");
+        for held in ["users.tax_id", "users.first_name", "users.last_name", "users.zip_code", "users.phone_numbers", "visits.born_on", "visits.home_address", "taxes.id"] {
+            assert_eq!(rule(&format!("public.{held}")), None, "{held}");
+        }
+
+        let plan = roll_previews::mask::postgres(&suggested, "salt").unwrap();
+        pg.batch_execute(&plan.update).await.unwrap_or_else(|e| panic!("masking with every suggestion fails: {e:?}\n{suggested:?}"));
+        for after in &plan.after {
+            pg.batch_execute(after).await.unwrap();
+        }
+        let email: String = pg.query_one("SELECT email FROM public.users LIMIT 1", &[]).await.unwrap().get(0);
+        assert!(email.starts_with("user-") && email.ends_with("@example.invalid"), "{email}");
     }
 }

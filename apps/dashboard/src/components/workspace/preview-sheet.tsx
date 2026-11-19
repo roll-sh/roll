@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { appsApi } from "@/lib/apps-api";
 import { codeApi } from "@/lib/code-api";
 import { Confirm } from "@/components/ui";
-import { endpointSlower, type EndpointTime, a11yWords, checkSummary, seoWords, duration, followLogs, openUrl, pageLabel, previewsApi, noteCropUrl, qrUrl, screenshotUrl, resourceId, thanMain, type CaughtMail, type PageCheck, type Preview, type TextDiff, type PreviewActivity, type PreviewKind, type PreviewShare, type RequestLine } from "@/lib/previews-api";
+import { endpointSlower, type EndpointTime, a11yWords, checkSummary, seoWords, duration, followLogs, openUrl, pageLabel, previewsApi, noteCropUrl, qrUrl, screenshotUrl, resourceId, thanMain, type CaughtMail, type PageCheck, type Preview, type TextDiff, type PreviewActivity, type PreviewVisitor, type PreviewKind, type PreviewShare, type RequestLine, type ServiceMetrics, type ErrorGroup } from "@/lib/previews-api";
 import { verdict, type VerdictTarget } from "@/lib/preview-verdict";
 import { formatBytes } from "@/lib/roll-api";
 import { Head, Label, Rows, Stat, Tabs } from "./inspector";
@@ -69,7 +69,7 @@ export function PreviewSheet({
   /** It was posted (the link that brought it is spent). */
   onFeedbackPosted?: () => void;
 }) {
-  const [tab, setTab] = useState<"Overview" | "Activity" | "Logs" | "Requests">("Overview");
+  const [tab, setTab] = useState<"Overview" | "Activity" | "Logs" | "Requests" | "Errors">("Overview");
   const [busy, setBusy] = useState<string | null>(null);
   // The service whose link is shown as a QR code, to open on a phone.
   const [phoneFor, setPhoneFor] = useState<string | null>(null);
@@ -77,6 +77,7 @@ export function PreviewSheet({
   const [deleting, setDeleting] = useState(false);
   const gone = p.desired === "deleted";
   const asleep = p.state === "sleeping";
+  const metrics = useServiceMetrics(p);
 
   const run = async (key: string, fn: () => Promise<Preview>) => {
     setBusy(key);
@@ -121,7 +122,7 @@ export function PreviewSheet({
         }
         onClose={onClose}
       />
-      <Tabs tabs={["Overview", "Activity", "Logs", "Requests"] as const} value={tab} onChange={setTab} />
+      <Tabs tabs={["Overview", "Activity", "Logs", "Requests", "Errors"] as const} value={tab} onChange={setTab} />
       <div key={tab} className="rise flex-1 overflow-y-auto p-3 [scrollbar-width:none]">
         {tab === "Overview" ? (
           <>
@@ -183,6 +184,7 @@ export function PreviewSheet({
                       <StateDot state={s.state} />
                       <span className="font-medium">{s.name}</span>
                       <span className="text-[11px] text-subtle">{s.state}</span>
+                      {metrics.get(s.name) && <span className="font-mono text-[10.5px] text-subtle">{metricsText(metrics.get(s.name)!)}</span>}
                       {s.deployed && <span className="ml-auto font-mono text-[10.5px] text-subtle">{s.deployed.slice(0, 8)}</span>}
                     </div>
                     <div className="mt-0.5 flex items-center gap-2">
@@ -470,6 +472,7 @@ export function PreviewSheet({
                       : "with its change",
                 ],
                 ["created by", p.created_by],
+                ...(p.reported_by ? ([["reported by", `${p.reported_by}: the pull request hears from that project's preview, not this one`]] as [string, string][]) : []),
               ]}
             />
           </>
@@ -477,8 +480,10 @@ export function PreviewSheet({
           <ActivityList id={p.id} updated={p.updated_at} />
         ) : tab === "Logs" ? (
           <Logs preview={p} />
-        ) : (
+        ) : tab === "Requests" ? (
           <Requests preview={p} />
+        ) : (
+          <Errors preview={p} />
         )}
       </div>
       <div className="border-t border-line px-3 py-2">
@@ -687,11 +692,13 @@ function Vars({ id }: { id: string }) {
 
 function ActivityList({ id, updated }: { id: string; updated: number }) {
   const [items, setItems] = useState<PreviewActivity[] | null>(null);
+  const [visitors, setVisitors] = useState<PreviewVisitor[]>([]);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
     let live = true;
-    previewsApi.activity(id).then(
-      (a) => live && (setItems(a), setError(null)),
+    // The list is a nicety: an older node without it (a 404) leaves the activity as it is.
+    Promise.all([previewsApi.activity(id), previewsApi.visitors(id).catch(() => [])]).then(
+      ([a, v]) => live && (setItems(a), setVisitors(v ?? []), setError(null)),
       (e) => live && setError(errorText(e)),
     );
     return () => {
@@ -700,18 +707,38 @@ function ActivityList({ id, updated }: { id: string; updated: number }) {
   }, [id, updated]);
   if (error) return <p className="text-[11.5px] text-danger">{error}</p>;
   if (!items) return <p className="text-[11.5px] text-subtle">Loading…</p>;
-  if (!items.length) return <p className="text-[11.5px] text-subtle">Nothing yet.</p>;
   return (
-    <ol className="space-y-2">
-      {items.map((a, i) => (
-        <li key={`${a.at}-${i}`} className="flex gap-2.5 text-[12px]">
-          <span className="w-14 shrink-0 pt-px text-right font-mono text-[10.5px] text-subtle" title={new Date(a.at).toLocaleString()}>
-            {since(a.at)}
-          </span>
-          <span className="min-w-0 flex-1 break-words text-soft">{a.message}</span>
-        </li>
-      ))}
-    </ol>
+    <>
+      {visitors.length > 0 && (
+        <section className="mb-4">
+          <Label>Who opened it</Label>
+          <ul className="mt-2 space-y-1.5">
+            {visitors.map((v) => (
+              <li key={v.who} className="flex gap-2.5 text-[12px]">
+                <span className="w-14 shrink-0 pt-px text-right font-mono text-[10.5px] text-subtle" title={new Date(v.last_at).toLocaleString()}>
+                  {since(v.last_at)}
+                </span>
+                <span className="min-w-0 flex-1 truncate font-mono text-soft">{v.who}</span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+      {items.length ? (
+        <ol className="space-y-2">
+          {items.map((a, i) => (
+            <li key={`${a.at}-${i}`} className="flex gap-2.5 text-[12px]">
+              <span className="w-14 shrink-0 pt-px text-right font-mono text-[10.5px] text-subtle" title={new Date(a.at).toLocaleString()}>
+                {since(a.at)}
+              </span>
+              <span className="min-w-0 flex-1 break-words text-soft">{a.message}</span>
+            </li>
+          ))}
+        </ol>
+      ) : (
+        <p className="text-[11.5px] text-subtle">Nothing yet.</p>
+      )}
+    </>
   );
 }
 
@@ -1297,6 +1324,38 @@ export function PhoneCode({ id, service }: { id: string; service: string }) {
 /** Lines a followed log keeps. */
 const LOG_KEEP = 2000;
 
+/** What its running services use, read again every 15 s while one runs and the sheet is in view. */
+function useServiceMetrics(p: Preview): Map<string, ServiceMetrics> {
+  const [m, setM] = useState<Map<string, ServiceMetrics>>(new Map());
+  const running = p.services.some((s) => s.state === "running");
+  const visible = useVisible();
+  useEffect(() => {
+    if (!running || !visible) {
+      setM(new Map());
+      return;
+    }
+    let live = true;
+    const read = () =>
+      previewsApi.metrics(p.id).then(
+        (r) => live && setM(new Map(r.services.map((x) => [x.service, x]))),
+        () => {},
+      );
+    void read();
+    const t = setInterval(read, 15_000);
+    return () => {
+      live = false;
+      clearInterval(t);
+    };
+  }, [p.id, running, visible]);
+  return m;
+}
+
+/** `0.25 CPU · 96 of 256 MB`. */
+function metricsText(m: ServiceMetrics): string {
+  const mb = Math.round(m.memory_bytes / (1024 * 1024));
+  return `${m.cpu < 0.01 ? "0" : m.cpu.toFixed(2)} CPU · ${mb}${m.memory_mb > 0 ? ` of ${m.memory_mb}` : ""} MB`;
+}
+
 /** Its latest requests through roll (Vercel's request log): newest first, errors at a glance. */
 function Requests({ preview: p }: { preview: Preview }) {
   const [list, setList] = useState<RequestLine[] | null>(null);
@@ -1348,6 +1407,89 @@ function Requests({ preview: p }: { preview: Preview }) {
             </div>
           ))}
         </div>
+      )}
+    </>
+  );
+}
+
+/** Spans the Errors tab reads, in minutes. */
+const ERROR_SPANS = [
+  [60, "1 hour"],
+  [360, "6 hours"],
+  [1440, "24 hours"],
+] as const;
+
+/** Its services' errors, grouped (Sentry's issues, from its output alone): newest first, each opening to its newest sample. */
+function Errors({ preview: p }: { preview: Preview }) {
+  const [minutes, setMinutes] = useState<number>(60);
+  const [list, setList] = useState<ErrorGroup[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [open, setOpen] = useState<string | null>(null);
+  const [n, setN] = useState(0);
+  useEffect(() => {
+    let live = true;
+    setError(null);
+    setList(null);
+    previewsApi.errors(p.id, minutes).then(
+      (r) => live && setList(r.groups),
+      (e) => live && setError(errorText(e)),
+    );
+    return () => {
+      live = false;
+    };
+  }, [p.id, minutes, n]);
+  const several = p.services.length > 1;
+  return (
+    <>
+      <div className="mb-2 flex items-center gap-2">
+        <select
+          aria-label="Span"
+          value={minutes}
+          onChange={(e) => setMinutes(Number(e.target.value))}
+          className="h-7 min-w-0 flex-1 rounded-md border border-line-2 bg-canvas px-2 text-[11.5px] outline-none focus:border-accent/60"
+        >
+          {ERROR_SPANS.map(([m, label]) => (
+            <option key={m} value={m}>
+              Last {label}
+            </option>
+          ))}
+        </select>
+        <button onClick={() => setN((x) => x + 1)} aria-label="Read the errors again" className="grid size-7 place-items-center rounded-md text-muted hover:bg-white/[0.06] hover:text-fg">
+          <RefreshCw className="size-3.5" />
+        </button>
+      </div>
+      {error ? (
+        <p className="text-[11.5px] text-danger">{error}</p>
+      ) : !list ? (
+        <p className="text-[11.5px] text-subtle">Loading…</p>
+      ) : !list.length ? (
+        <p className="text-[11.5px] text-subtle">No errors in its output.</p>
+      ) : (
+        <ul className="overflow-hidden rounded-lg border border-line-2 bg-canvas" aria-label="Errors">
+          {list.map((g) => {
+            const key = `${g.service}/${g.fingerprint}`;
+            const shown = open === key;
+            return (
+              <li key={key} className="border-b border-line last:border-b-0">
+                <button onClick={() => setOpen(shown ? null : key)} aria-expanded={shown} className="flex w-full items-baseline gap-2 px-2.5 py-1.5 text-left hover:bg-fg/[0.03]">
+                  <span className="w-9 shrink-0 text-right font-mono text-[10.5px] text-danger tabular-nums" title={`${g.count} since ${new Date(g.first_seen).toLocaleString()}`}>
+                    {g.count > 999 ? "999+" : `${g.count}×`}
+                  </span>
+                  <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-soft" title={g.title}>
+                    {g.title}
+                  </span>
+                  {several && <span className="shrink-0 font-mono text-[10.5px] text-subtle">{g.service}</span>}
+                  <span className="shrink-0 text-[10.5px] text-subtle" title={new Date(g.last_seen).toLocaleString()}>
+                    {since(g.last_seen)}
+                  </span>
+                </button>
+                {shown && (
+                  <pre className="rise max-h-[40vh] overflow-auto border-t border-line px-2.5 py-2 font-mono text-[10.5px] leading-relaxed whitespace-pre-wrap text-soft [scrollbar-width:thin]">{g.sample}</pre>
+                )}
+              </li>
+            );
+          })}
+        </ul>
       )}
     </>
   );

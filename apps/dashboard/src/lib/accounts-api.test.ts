@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { activityText, type Activity } from "./accounts-api";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { accountsApi, activityText, onReauthRequired, phishingResistant, sessionMethod, findPeople, dormant, type Activity } from "./accounts-api";
 
 describe("activityText", () => {
   const e = (a: Partial<Activity>): Activity => ({ at: 0, action: "sign_in", actor: "usr_me", ok: true, status: 200, ...a });
@@ -11,5 +11,99 @@ describe("activityText", () => {
     expect(activityText(e({ action: "PATCH /v1/accounts/users/{id}", actor: "usr_admin", detail: { set: { admin: true } } }), "usr_me")).toBe("An admin made you an admin");
     expect(activityText(e({ action: "scim.update", actor: "scim:sso_1", detail: { active: false } }), "usr_me")).toBe("Your company's provider deactivated your account");
     expect(activityText(e({ action: "DELETE /v1/accounts/me/totp" }), "usr_me")).toBe("Your authenticator app was turned off");
+  });
+});
+
+describe("an export in the security log", () => {
+  it("says so", () => {
+    expect(activityText({ at: 0, action: "account.export", actor: "usr_me", ok: true, status: 200 }, "usr_me")).toBe("You exported your data");
+  });
+});
+
+describe("second-factor resets in the security log", () => {
+  const e = (a: Partial<Activity>): Activity => ({ at: 0, action: "sign_in", actor: "usr_me", ok: true, status: 200, ...a });
+  it("say who asked and who decided", () => {
+    expect(activityText(e({ action: "recovery.request" }), "usr_me")).toBe("You asked an admin to reset your second factor");
+    expect(activityText(e({ action: "recovery.approve", actor: "usr_admin" }), "usr_me")).toBe("Your second factor was reset by an admin");
+    expect(activityText(e({ action: "recovery.deny", actor: "operator" }), "usr_me")).toBe("The operator declined to reset your second factor");
+  });
+});
+
+describe("refused changes in the security log", () => {
+  const e = (a: Partial<Activity>): Activity => ({ at: 0, action: "sign_in", actor: "usr_me", ok: true, status: 200, ...a });
+  it("say what was refused, never what it would have done", () => {
+    expect(activityText(e({ action: "DELETE /v1/accounts/me/passkeys/{id}" }), "usr_me")).toBe("A passkey was removed");
+    expect(activityText(e({ action: "DELETE /v1/accounts/me/passkeys/{id}", ok: false, status: 403 }), "usr_me")).toBe("Removing a passkey was refused");
+    expect(activityText(e({ action: "POST /v1/accounts/me/totp", ok: false, status: 403 }), "usr_me")).toBe("Setting up an authenticator app was refused");
+    expect(activityText(e({ action: "PATCH /v1/accounts/users/{id}", actor: "usr_admin", ok: false, status: 403, detail: { set: { admin: true } } }), "usr_me")).toBe("Making you an admin was refused");
+  });
+});
+
+describe("sudo mode", () => {
+  afterEach(() => {
+    onReauthRequired(null);
+    vi.unstubAllGlobals();
+  });
+  const answers = (...bodies: [number, unknown][]) => {
+    const f = vi.fn();
+    for (const [status, body] of bodies) f.mockResolvedValueOnce(new Response(JSON.stringify(body), { status }));
+    vi.stubGlobal("fetch", f);
+    return f;
+  };
+  it("asks the person to confirm, then runs the change once more", async () => {
+    const f = answers([403, { error: "confirm it's you first", code: "reauth_required" }], [200, { id: "pk_1", name: "Phone" }]);
+    const confirm = vi.fn(async () => {});
+    onReauthRequired(confirm);
+    await expect(accountsApi.renamePasskey("pk_1", "Phone")).resolves.toMatchObject({ name: "Phone" });
+    expect(confirm).toHaveBeenCalledOnce();
+    expect(f).toHaveBeenCalledTimes(2);
+  });
+  it("changes nothing when the person doesn't confirm, or nobody can ask", async () => {
+    const f = answers([403, { error: "confirm it's you first", code: "reauth_required" }]);
+    onReauthRequired(async () => {
+      throw new Error("Not confirmed: nothing changed.");
+    });
+    await expect(accountsApi.removePasskey("pk_1")).rejects.toThrow("Not confirmed");
+    expect(f).toHaveBeenCalledOnce();
+    onReauthRequired(null);
+    answers([403, { error: "confirm it's you first", code: "reauth_required" }]);
+    await expect(accountsApi.removePasskey("pk_1")).rejects.toMatchObject({ code: "reauth_required" });
+  });
+});
+
+describe("a provider's logout in the security log", () => {
+  it("says the provider signed the person out", () => {
+    expect(activityText({ at: 0, action: "session.end", actor: "sso:sso_okta", ok: true, status: 200 }, "usr_me")).toBe("Your company's provider signed you out (its back-channel logout)");
+  });
+});
+
+describe("sessions", () => {
+  it("say how they signed in, and which are phishing-resistant", () => {
+    expect(sessionMethod({ method: "github" })).toBe("GitHub");
+    expect(sessionMethod({ method: null })).toBeNull();
+    expect([{ method: "email" }, { method: "email", passkey: true }, { method: "sso" }, { method: "passkey" }].map((s) => phishingResistant(s as never))).toEqual([false, true, true, true]);
+  });
+});
+
+describe("findPeople", () => {
+  const p = (handle: string, o: Partial<{ admin: boolean; disabled: boolean; totp: boolean; passkeys: number; last_active_at: number }> = {}) => ({ name: handle.toUpperCase(), handle, email: `${handle}@acme.test`, admin: false, disabled: false, totp: false, passkeys: 0, created_at: 0, last_active_at: Date.now(), ...o });
+  const all = [p("ada", { admin: true, totp: true }), p("bob"), p("cy", { disabled: true }), p("dee", { passkeys: 1, last_active_at: 0 })];
+  it("finds by name, handle or address, and filters", () => {
+    expect(findPeople(all, "ACME.test", "everyone").length).toBe(4);
+    expect(findPeople(all, "bo", "everyone").map((u) => u.handle)).toEqual(["bob"]);
+    expect(findPeople(all, "", "admins").map((u) => u.handle)).toEqual(["ada"]);
+    expect(findPeople(all, "", "no-second-factor").map((u) => u.handle)).toEqual(["bob"]);
+    expect(findPeople(all, "", "turned-off").map((u) => u.handle)).toEqual(["cy"]);
+    expect(findPeople(all, "", "dormant").map((u) => u.handle)).toEqual(["dee"]);
+  });
+});
+
+describe("dormant", () => {
+  it("is 90 days without using roll; unknown activity isn't dormant", () => {
+    const day = 24 * 3600 * 1000, now = 1000 * day;
+    expect(dormant({ last_active_at: now - 89 * day, created_at: 0, disabled: false }, now)).toBe(false);
+    expect(dormant({ last_active_at: now - 91 * day, created_at: 0, disabled: false }, now)).toBe(true);
+    expect(dormant({ last_active_at: null, created_at: now - 91 * day, disabled: false }, now)).toBe(false);
+    expect(dormant({ last_active_at: now - 91 * day, created_at: 0, disabled: true }, now)).toBe(false);
   });
 });

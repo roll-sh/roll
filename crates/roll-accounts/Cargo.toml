@@ -18,11 +18,15 @@ bytes.workspace = true
 code-sql.workspace = true
 getrandom.workspace = true
 hex.workspace = true
+ipnet.workspace = true
 percent-encoding.workspace = true
 reqwest = { workspace = true, features = ["rustls", "form"] }
+ring.workspace = true
 roll-auth.workspace = true
 roll-net.workspace = true
 roll-oidc.workspace = true
+rustls-pki-types.workspace = true
+rustls-webpki.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -30,10 +34,11 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 url.workspace = true
+x509-parser.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
-ring.workspace = true
+rcgen.workspace = true
 http-body-util.workspace = true
 url.workspace = true
 tempfile.workspace = true

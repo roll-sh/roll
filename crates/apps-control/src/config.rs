@@ -117,7 +117,7 @@ mod tests {
             health_command: Some("a".into()),
             suspend_after_s: 1,
             sleep_after_s: 1,
-            volume: Some(Volume { mount: "/data".into(), size_gb: 1 }),
+            volume: Some(Volume { mount: "/data".into(), size_gb: 1, backups: None }),
             alerts: Alerts::default(),
             rollout: Rollout::default(),
             h2c: true,
