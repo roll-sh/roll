@@ -1,0 +1,130 @@
+> CREATE TABLE a267_c (id int, grp int, name text) WITH (autovacuum_enabled = false)
+-- CREATE TABLE
+
+> INSERT INTO a267_c SELECT g, g % 7, 'c' || g FROM generate_series(1, 3000) g
+-- INSERT 0 3000
+
+> INSERT INTO a267_c SELECT g, 100 + g % 3, 'dup' || g FROM generate_series(1, 3000, 97) g
+-- INSERT 0 31
+
+> CREATE TABLE a267_o (oid int8, cid int, amt numeric(12,2), tag text, note varchar(79)) WITH (autovacuum_enabled = false)
+-- CREATE TABLE
+
+> INSERT INTO a267_o SELECT g,
+>   CASE WHEN g % 211 = 0 THEN NULL ELSE (g * 7) % 3600 END,
+>   CASE WHEN g % 13 = 0 THEN NULL ELSE (g % 1000) * 0.5 END,
+>   't' || (g % 5),
+>   CASE WHEN g % 37 = 0 THEN 'very special requests ' || g ELSE 'plain note ' || (g % 101) END
+>   FROM generate_series(1, 40000) g
+-- INSERT 0 40000
+
+> VACUUM ANALYZE a267_c
+-- VACUUM
+
+> VACUUM ANALYZE a267_o
+-- VACUUM
+
+> SET parallel_setup_cost = 0
+-- SET
+
+> SET parallel_tuple_cost = 0
+-- SET
+
+> SET min_parallel_table_scan_size = 0
+-- SET
+
+> SELECT c_count, count(*) AS custdist FROM (
+>   SELECT c.id, count(o.oid) FROM a267_c c LEFT OUTER JOIN a267_o o ON c.id = o.cid AND o.note NOT LIKE '%special%requests%'
+>   GROUP BY c.id) AS x (id, c_count)
+> GROUP BY c_count ORDER BY custdist DESC, c_count DESC
+c_count:int8 | custdist:int8
+11 | 1864
+10 | 805
+12 | 251
+9 | 49
+22 | 20
+20 | 10
+24 | 1
+-- SELECT 7
+
+> SELECT c.grp, count(*), count(o.amt), sum(o.amt) FROM a267_o o JOIN a267_c c ON o.cid = c.id
+>   WHERE o.note NOT LIKE '%special%' GROUP BY c.grp ORDER BY 1
+grp:int4 | count:int8 | count:int8 | sum:numeric
+0 | 4946 | 4567 | 1128509.50
+1 | 4570 | 4217 | 1110161.50
+2 | 4569 | 4219 | 1015495.00
+3 | 4569 | 4216 | 995586.50
+4 | 4569 | 4219 | 1119535.50
+5 | 4558 | 4205 | 1097916.50
+6 | 4558 | 4210 | 1004423.50
+100 | 107 | 99 | 25339.00
+101 | 117 | 109 | 27710.00
+102 | 108 | 98 | 23552.50
+-- SELECT 10
+
+> SELECT o.tag, count(*), sum(o.amt), max(c.id), min(c.grp) FROM a267_o o JOIN a267_c c ON o.cid = c.id
+>   WHERE o.note LIKE 'plain%' GROUP BY o.tag ORDER BY 1
+tag:text | count:int8 | sum:numeric | max:int4 | min:int4
+t0 | 6532 | 1503035.00 | 3000 | 0
+t1 | 6532 | 1508210.50 | 2997 | 0
+t2 | 6531 | 1509168.00 | 2999 | 0
+t3 | 6543 | 1512944.50 | 2996 | 0
+t4 | 6533 | 1514871.50 | 2998 | 0
+-- SELECT 5
+
+> SELECT count(*), count(o.oid), sum(o.amt) FROM a267_c c LEFT JOIN a267_o o ON o.cid = c.id
+count:int8 | count:int8 | sum:numeric
+33582 | 33582 | 7758778.50
+-- SELECT 1
+
+> SELECT c.name, count(o.oid) FROM a267_c c LEFT JOIN a267_o o ON o.cid = c.id AND o.note NOT LIKE '%a%'
+>   GROUP BY c.name ORDER BY 2 DESC, 1 LIMIT 8
+name:text | count:int8
+c1 | 0
+c10 | 0
+c100 | 0
+c1000 | 0
+c1001 | 0
+c1002 | 0
+c1003 | 0
+c1004 | 0
+-- SELECT 8
+
+> ALTER TABLE a267_o ADD COLUMN pri int DEFAULT 3
+-- ALTER TABLE
+
+> INSERT INTO a267_o SELECT g, g % 3100, g * 0.25, 't9', 'late note' FROM generate_series(40001, 46000) g
+-- INSERT 0 6000
+
+> UPDATE a267_o SET pri = 4 WHERE oid % 1000 = 0
+-- UPDATE 46
+
+> SELECT o.pri, count(*), sum(o.amt), count(DISTINCT c.grp) FROM a267_o o JOIN a267_c c ON o.cid = c.id
+>   WHERE o.note NOT LIKE '%special%' GROUP BY o.pri ORDER BY 1
+pri:int4 | count:int8 | sum:numeric | count:int8
+3 | 38493 | 70538813.25 | 10
+4 | 38 | 65250.00 | 7
+-- SELECT 2
+
+> SELECT c_count, count(*) AS custdist FROM (
+>   SELECT c.id, count(o.pri) FROM a267_c c LEFT OUTER JOIN a267_o o ON c.id = o.cid AND o.note NOT LIKE '%special%requests%'
+>   GROUP BY c.id) AS x (id, c_count)
+> GROUP BY c_count ORDER BY custdist DESC, c_count DESC
+c_count:int8 | custdist:int8
+13 | 1759
+12 | 876
+14 | 232
+11 | 100
+26 | 19
+24 | 10
+10 | 2
+28 | 1
+22 | 1
+-- SELECT 9
+
+> DROP TABLE a267_o
+-- DROP TABLE
+
+> DROP TABLE a267_c
+-- DROP TABLE
+

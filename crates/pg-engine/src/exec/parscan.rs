@@ -382,8 +382,46 @@ struct Pre<'a> {
     off: bool,
     /// The batch aggregates the rows it decides (an aggregating scan without stages); below
     /// stages it only filters them (and a probe drops misses): the joined rows are the row
-    /// path's to aggregate.
+    /// path's to aggregate, but where the one stage is the probe (`joined`).
     agg: bool,
+    /// An aggregating scan whose one stage is the probe (`joined_cols`): the outer columns
+    /// its joined rows have, and a row of the scan's width holding them for the row at hand
+    /// (the other columns NULL, as the joined row has them).
+    join: Option<(Vec<usize>, Row)>,
+}
+
+/// For an aggregating scan whose only stage is a hash join's probe of an integer key
+/// (`Probe::int_key_col`; an inner or right join, no condition beyond the keys), the outer
+/// columns its joined rows have: those the scan's row has (`need` and not `late`) that the
+/// join keeps (`Probe::keep`). The batch decodes them, so that a row it passes is joined and
+/// aggregated from its columns (`Pre::joined`) instead of being read again and made a row
+/// (q13's orders, nearly all passing its LIKE). None: not such a scan.
+fn joined_cols(d: &Decode, spec: Option<&super::partial::Spec>) -> Option<Vec<usize>> {
+    use crate::sql::plan::JoinKind;
+    let ([st], Some(_)) = (d.stages.as_slice(), spec) else { return None };
+    let super::pipe::Stage::Hash(p) = &**st else { return None };
+    if p.int_key_col().is_none()
+        || !matches!(p.kind, JoinKind::Inner | JoinKind::Right)
+        || p.cond.is_some()
+        || p.defer
+        || d.with_key
+        || d.ios.is_some()
+        || !d.extra.is_empty()
+    {
+        return None;
+    }
+    use crate::types::DataType as T;
+    let ncols = d.missing.len().min(d.types.len());
+    let on = |m: Option<&[bool]>, c: usize, none: bool| m.map_or(none, |m| m.get(c).copied().unwrap_or(false));
+    let cols: Vec<usize> = (0..ncols).filter(|&c| on(d.need.as_deref(), c, true) && !on(d.late.as_deref(), c, false) && on(p.keep.as_deref(), c, true)).collect();
+    // (Only types the typed walk writes: another would send every row the general walk.)
+    let typed = |c: &usize| {
+        matches!(
+            d.types[*c],
+            T::Int2 | T::Int4 | T::Int8 | T::Float4 | T::Float8 | T::Numeric(_) | T::Bool | T::Date | T::Text | T::Varchar(_) | T::Bpchar(_) | T::Name | T::Bytea
+        )
+    };
+    cols.iter().all(typed).then_some(cols)
 }
 
 impl<'a> Pre<'a> {
@@ -409,6 +447,7 @@ impl<'a> Pre<'a> {
         };
         let plan = d.vplan.get_or_init(|| Pre::compile(d, spec, probe.map(|p| p.0)).map(Arc::new)).clone()?;
         let agg = spec.is_some() && d.stages.is_empty();
+        let join = plan.joined.clone().map(|c| (c, vec![Value::Null; d.missing.len()]));
         Some(Pre {
             plan,
             probe: probe.map(|p| p.1),
@@ -426,6 +465,7 @@ impl<'a> Pre<'a> {
             done: 0,
             off: false,
             agg,
+            join,
         })
     }
 
@@ -444,11 +484,55 @@ impl<'a> Pre<'a> {
         if !d.stages.is_empty() && probe.is_none() && d.filter.is_none() {
             return None;
         }
+        let join = joined_cols(d, spec);
         let spec = spec.filter(|_| d.stages.is_empty());
         if spec.is_none() && probe.is_none() && d.filter.is_none() {
             return None;
         }
-        super::vector::AggPlan::compile(&d.types, d.filter.as_ref(), d.filtered, spec, probe)
+        let mut plan = super::vector::AggPlan::compile(&d.types, d.filter.as_ref(), d.filtered, spec, probe)?;
+        // (Only columns the walk passes anyway: one past its last would be walked to in every
+        // row, the many the probe drops too; q12's orders, probed by a few lineitem rows.)
+        let upto = plan.need.iter().rposition(|n| *n).map_or(0, |c| c + 1);
+        if let Some(cols) = join.filter(|cols| cols.iter().all(|&c| c < upto)) {
+            for &c in &cols {
+                plan.need[c] = true;
+            }
+            plan.joined = Some(cols);
+        }
+        Some(plan)
+    }
+
+    /// Decoded row `r`, which the batch passed (`fate` not `DROP`; not odd, the filter true)
+    /// and whose key has candidates, joined by the scan's one stage (`join`) and each joined
+    /// row aggregated into `pa` (or queued in `serial`, `joined_to`), as the row path's
+    /// `run_stages` gives them. False, nothing done: a column that doesn't make a value here
+    /// (the row path raises its error in place).
+    fn joined(&mut self, r: usize, pa: &mut super::partial::Partials, serial: &mut Vec<(Row, u8, bool)>) -> bool {
+        use crate::storage::cols::ColData;
+        let (Some((cols, row)), Some(p), Some(kc)) = (&mut self.join, self.probe, self.plan.probe) else { return false };
+        let Some(key) = self.cols.cols.get(kc).and_then(Option::as_ref) else { return false };
+        let x = match &key.data {
+            _ if key.nulls[r] => return false,
+            ColData::I32(v) => v[r] as i64,
+            ColData::I64(v) => v[r],
+            _ => return false,
+        };
+        let Some(span) = p.built.int_span(x) else { return false };
+        for &c in cols.iter() {
+            match self.cols.cols[c].as_ref().map(|col| col.value(&self.cols, r, &self.types[c])) {
+                Some(Ok(v)) => row[c] = v,
+                _ => return false,
+            }
+        }
+        let t = &*p.built;
+        for i in 0..span.1 {
+            let j = t.cand(span, i);
+            if let Some(m) = &p.matched {
+                m[j].store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            joined_to(pa, serial, 1, super::pipe::Joined::Pair { l: &row[..], r: t.inner(j), keep: p.keep.as_deref() }, 1);
+        }
+        true
     }
 
     /// Rows `rows` of `b` decoded, `odd` and `tri` (by row of the run) filled.
@@ -1733,7 +1817,7 @@ fn partial_chunk<'d>(
                     && pre.tri[r] == Tri::T
                     && pre.plan.probe.is_none()
                     && pa.batch_row(&pre.plan, &pre.cols, &pre.nums, r);
-                if aggregated {
+                if aggregated || (!pre.odd[r] && pre.tri[r] == Tri::T && pre.joined(r, &mut pa, &mut serial)) {
                     taken += 1;
                 } else {
                     let (k, v) = scan.batch.get(i);

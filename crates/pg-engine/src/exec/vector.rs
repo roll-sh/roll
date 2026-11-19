@@ -1175,7 +1175,8 @@ pub enum AggArg {
 /// filter (None: none), the group key columns, each aggregate's argument, and the columns
 /// decoded (a mask over the table's). Or, below a hash join's probe (`probe`: its integer
 /// key column, `pipe::Probe::int_key_col`), the filter and the probe's lookup only: a row
-/// that passes and has candidates goes through the row path, the others are dropped.
+/// that passes and has candidates goes through the row path (or is joined from its columns,
+/// `joined`), the others are dropped.
 pub struct AggPlan {
     pub filter: Option<VB>,
     pub keys: Vec<usize>,
@@ -1186,6 +1187,9 @@ pub struct AggPlan {
     /// Some column is needed (`need`): count(*) alone reads none.
     pub reads: bool,
     pub probe: Option<usize>,
+    /// The outer columns a passed row is joined and aggregated from, decoded too
+    /// (`parscan::joined_cols`; None: the row path joins it).
+    pub joined: Option<Vec<usize>>,
 }
 
 impl AggPlan {
@@ -1257,7 +1261,7 @@ impl AggPlan {
         }
         let key_types = keys.iter().map(|c| types[*c].clone()).collect();
         let reads = need.contains(&true);
-        Some(AggPlan { filter, keys, key_types, args, need, reads, probe })
+        Some(AggPlan { filter, keys, key_types, args, need, reads, probe, joined: None })
     }
 
     /// Whether row `r` of `b` misses the probe's table (its key NULL or not one of the
