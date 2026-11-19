@@ -391,7 +391,10 @@ impl Secrets {
         }
         let digests: Vec<String> = a.values.values().map(box_digest).collect();
         // As whoever asked, as they are now: no answer lands where they couldn't write.
-        let landing = self.acting_as(&requester, format!("request:{id}"))?.ok_or_else(|| Error::Gone(format!("{requester} asked for this and can't write secrets any more")))?;
+        let landing = self.maker_caller(&requester, &format!("request:{id}")).map_err(|e| match e {
+            Error::Forbidden(_) => Error::Gone(format!("{requester} asked for this and can't write secrets any more")),
+            e => e,
+        })?;
         let mut landing = landing;
         landing.ip = ip.clone();
         self.check_items(&project, &slug, &items, &landing)?;

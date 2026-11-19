@@ -45,11 +45,12 @@ use std::path::Path;
 pub const MAX_BYTES: u64 = 64 << 10;
 
 /// What `[app.run]` takes: a service's run settings (apps-control's `Run`, whose tests keep the
-/// two equal), but `volume`.
-pub const RUN_KEYS: [&str; 43] = [
+/// two equal), but `volume` and `push` (a stream another product guards: set through the API,
+/// whose gate asks for access to it, never by a file in the tree being deployed).
+pub const RUN_KEYS: [&str; 44] = [
     "type", "port", "start", "pre_deploy", "schedule", "timezone", "timeout_s", "retries", "min_instances", "max_instances", "concurrency", "cpu", "memory_mb", "health_path",
     "health_timeout_s", "suspend_after_s", "sleep_after_s", "alerts", "rollout", "h2c", "scale", "public", "drain_s", "cpu_target", "memory_target", "restart", "restart_tries", "affinity", "tcp",
-    "rollback_on_crash", "schedules", "health_every_s", "health_failures", "health_command", "rebuild_on_base", "sidecars", "block_on", "slo", "metrics", "schedule_scale", "log_metrics", "skew_protection", "queue_s",
+    "rollback_on_crash", "schedules", "health_every_s", "health_failures", "health_command", "rebuild_on_base", "sidecars", "block_on", "slo", "metrics", "schedule_scale", "log_metrics", "skew_protection", "queue_s", "latency_target_ms",
 ];
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -154,6 +155,11 @@ pub fn parse(text: &str) -> Result<Option<AppConfig>, String> {
         if e.run.as_ref().is_some_and(|r| r.contains_key("volume")) {
             return Err("roll.toml: a volume is the service's setting, not the tree's (`roll apps set --volume`)".into());
         }
+        // A file in the tree being deployed never subscribes to a stream: who sets push needs
+        // access to the stream, and only the API's gate asks.
+        if e.run.as_ref().is_some_and(|r| r.contains_key("push")) {
+            return Err("roll.toml: push is the service's setting, not the tree's (setting it needs access to the stream)".into());
+        }
     }
     Ok(f.app)
 }
@@ -256,6 +262,8 @@ mod tests {
         let typo = parse("[app.environments.staging.run]\nmin_instaces = 1\n").unwrap().unwrap();
         assert!(typo.check_all().unwrap_err().contains("min_instaces"), "nor in run, before a push");
         assert!(parse("[app.run]\nvolume = { mount = \"/data\", size_gb = 9 }\n").is_err(), "a push can't move a volume");
+        let push = "[app.environments.production.run]\npush = [{ stream = \"st_aaaaaaaaaaaa\", topic = \"t\", group = \"g\", path = \"/e\" }]\n";
+        assert!(parse(push).unwrap_err().to_string().contains("push is the service's setting"), "nor subscribe to a stream");
         assert!(parse("[app.environments.production.environments.x]\nstart = \"a\"\n").is_err());
         assert_eq!(parse("[checks.test]\nrun = \"npm test\"\n[apps.web]\nroot = \"web\"\n").unwrap(), None, "roll code's and roll up --all's sections are theirs");
         let app = parse("[app]\nbuild = \"pnpm build\"\n[app.run]\nconcurrency = 20\n[app.environments.production]\nstart = \"node a.js\"\n").unwrap().unwrap();

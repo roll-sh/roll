@@ -80,7 +80,7 @@ pub use api::router;
 pub use crypto::{Keyring, Value};
 pub use audit::{AuditEntry, AuditFilter, VerifyQuery};
 pub use chain::Verification;
-pub use consumers::{Reference, Refusal, Resolved, ResourceRef};
+pub use consumers::{Maker, Reference, Refusal, Resolved, ResourceRef};
 pub use envs::{Branch, EnvChange, Ensure, Ensured, Environment, Folder, Import, Kind as EnvironmentKind, NewEnvironment, Policy};
 pub use leaks::Leak;
 pub use links::{Link, LinkProvider, Links, Mode};

@@ -58,6 +58,11 @@ pub struct Settings {
     /// `roll/visual` commit status), pending while its pages differ from the baseline's and
     /// nobody has accepted them at that head; `required` also keeps it from landing in roll.
     pub visual_review: VisualReviewRule,
+    /// Lighthouse CI's budgets and Sentry's regression gates for what the preview ran: `check`
+    /// posts `roll/regressions`, failing while the change has routes slower than main's preview or
+    /// errors main's doesn't have (`slower_routes`, `new_errors`); `required` also keeps it from
+    /// landing in roll until they're gone or someone other than its author accepts them.
+    pub regressions: RegressionsRule,
     /// `catch` (the default): services send mail to roll's catcher (`SMTP_*` are roll's, mail
     /// providers' API keys are removed), listed on the preview, never delivered; `deliver`: the
     /// project's own mail settings reach previews.
@@ -146,6 +151,15 @@ pub enum EgressRule {
     #[default]
     Open,
     Roll,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RegressionsRule {
+    #[default]
+    Off,
+    Check,
+    Required,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -283,7 +297,14 @@ pub struct Budget {
     pub lcp_ms: u32,
     /// Cumulative layout shift ("good" is up to 0.1).
     pub cls: f64,
+    /// Routes held to a time of their own (a trace's root span name → its p50 in ms, over the
+    /// last hour's traces): over it, a route counts as a regression whatever main's does.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub routes: std::collections::BTreeMap<String, u32>,
 }
+
+/// The most routes a project budgets.
+pub const MAX_ROUTE_BUDGETS: usize = 50;
 
 pub const MAX_HIDE: usize = 20;
 
@@ -356,6 +377,7 @@ impl Default for Settings {
             github: GithubRule::default(),
             access: Access::Link,
             visual_review: VisualReviewRule::Off,
+            regressions: RegressionsRule::Off,
             mail: MailRule::Catch,
             traces: false,
             egress: EgressRule::Open,
@@ -602,6 +624,9 @@ impl Settings {
         if b.load_ms > 600_000 || b.bytes > 10 << 30 || b.lcp_ms > 600_000 || !(0.0..=100.0).contains(&b.cls) {
             return bad("github.budget: load_ms and lcp_ms up to 600000, bytes up to 10 GiB, cls from 0 to 100".into());
         }
+        if b.routes.len() > MAX_ROUTE_BUDGETS || b.routes.iter().any(|(name, ms)| name.trim().is_empty() || name.len() > 200 || name.chars().any(char::is_control) || *ms == 0 || *ms > 600_000) {
+            return bad(format!("github.budget.routes: up to {MAX_ROUTE_BUDGETS} routes (a trace's root span name, as GET /orders), each 1 to 600000 ms"));
+        }
         let pages = &self.github.pages;
         if pages.len() > MAX_PAGES || pages.iter().any(|p| page_entry(p).is_none() || p == "/") || pages.iter().enumerate().any(|(i, p)| pages[..i].contains(p)) {
             return bad(format!(
@@ -653,7 +678,7 @@ fn merge(into: &mut Value, patch: &Value) {
                 match a.get_mut(k) {
                     // `resources`, `env`, `env_for` and `masking` are maps: a patch replaces them
                     // whole, so a key can be removed.
-                    Some(slot) if v.is_object() && !matches!(k.as_str(), "resources" | "env" | "env_for" | "masking") => merge(slot, v),
+                    Some(slot) if v.is_object() && !matches!(k.as_str(), "resources" | "env" | "env_for" | "masking" | "routes") => merge(slot, v),
                     _ => {
                         a.insert(k.clone(), v.clone());
                     }
@@ -715,6 +740,10 @@ mod tests {
         let two = Settings::default().patched(&json!({ "env_for": { "feat/*": { "A": "1", "B": "2" } } })).unwrap();
         let one = two.patched(&json!({ "env_for": { "feat/*": { "A": "1" } } })).unwrap();
         assert_eq!(one.env_for["feat/*"].len(), 1);
+        // Route budgets too: a route taken out of them goes.
+        let two = Settings::default().patched(&json!({ "github": { "budget": { "routes": { "GET /a": 300, "GET /b": 200 } } } })).unwrap();
+        let one = two.patched(&json!({ "github": { "budget": { "routes": { "GET /b": 200 } } } })).unwrap();
+        assert_eq!(one.github.budget.routes.keys().collect::<Vec<_>>(), ["GET /b"]);
         let r = Settings::default().patched(&json!({ "resources": { "redis:rdb_1": "skip", "nosql:n1": "schema" } })).unwrap();
         assert_eq!(r.mode_of(Kind::Redis, "rdb_1"), None);
         assert_eq!(r.mode_of(Kind::Nosql, "n1"), Some(Mode::Schema));

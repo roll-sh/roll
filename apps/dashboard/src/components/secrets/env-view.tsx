@@ -326,6 +326,7 @@ export function EnvView({ env }: { env: Environment }) {
             )}
             {list.data && secrets.length === 0 && !adding ? (
               <Teach
+                login
                 title={path === "/" ? `${env.name} has no secrets yet` : `${path} is empty in ${env.name}`}
                 cli={[`roll secrets set -p ${project.name} -e ${env.slug} KEY=value`, `roll run -p ${project.name} --env ${env.slug} -- <cmd>`]}
               >
