@@ -11675,6 +11675,122 @@ at open, a compaction): older builds ignore the manifest's `format` and fail on 
   the probe needs from the OS page cache, as PostgreSQL's 8 kB page), each a format change for
   its own round.
 
+## Analytic CPU, round 5 (agent 258)
+
+TPC-H SF1 on lane C against PostgreSQL 18.6 and pgrust (2 workers a gather, 8 workers, a 2 GB
+cache on all three; BENCH.md "Analytic CPU, round 5" has the tables). Six code changes, gated one
+on top of the other on base `3d30eb71e` (each against its parent: plain dist, 3 alternating
+pairs, 5 runs a query in one `perf stat` window a pass, ONE pair per `tools/lane.sh c` hold),
+then rebased without conflict onto `99abdc240` and handed in as stacked candidates: `cand/a258`
+(this section and the first change), `cand/a258-2` ... `cand/a258-6`, each on the one before it
+(the later ones depend on the earlier only textually: shared files).
+
+**Lane C was never quiet in this round** (18:00 through the night): other sessions' unpinned builds ran on
+the lane's CPUs (gpass's foreign load 0.9-3.1 cores an engine pass, lane.sh's 1.3-7.9; host load
+30-95). Every gate is decided on user instructions, which repeat within 0.1-0.5% from pass to
+pass at any load; cycles, CPU and wall are shown but mean little where a pass ran over 1.0
+foreign core. A pass's window that missed part of a run (a run slower than the timing run before
+it) shows as an instruction count 5-7% low; two such (q10 in n6's third pair, q18 in n5b's first)
+are marked in BENCH.
+
+- **The same-day tables** (four rotated rounds each; instructions are the measure, see above):
+  before, at `3d30eb71e` (pass foreign load 1.5-3.1 engine, 3.9-7.3 references): user
+  instructions over the 22, PostgreSQL 159.5 G, pgrust 89.5 G, plain 120.7 G (1.35x pgrust),
+  PGO 107.1 G (1.20x pgrust). The table after the round, the PGO training and lane A come in
+  `cand/a258-7`'s additions to this section.
+- **Whole-run profile of the plain base** (one pass after a warm-up, `perf record -e
+  instructions:u`, classes by `~/.cache/a258/scripts/classify.py`): 120.5 G; row decode 28.1%
+  (`Pre::decode` 14.2, `LazyBuf::read` 2.2, `decode_value` 1.9, `decode_row_need_spare` 1.7,
+  `Lazy::into_row` 1.4, `num_bytes` 1.0, not inlined), store scan read 13.7 (`fill_batch_with`
+  7.7), expressions 9.3, index point gets 7.2 (`Lookup::batch` 3.1), hash joins 7.2, memcmp 6.1,
+  aggregation 5.8, allocation 5.6, `Value` drops and clones 5.0. Per query: q01 `Pre::decode`
+  34%, `batch_run` 22% (group keys packed a row at a time, bpchar trimmed a row at a time),
+  `Lanes::eval` 15%, `num_bytes` 8% (a call returning `Option<i128>` through memory); q06
+  `Pre::decode` 44%; q04 the row path over all 1.5 million orders (an aggregating scan below a
+  nested-loop semi join got no batch filter: `LazyBuf::read` 16%, the date filter by `K::run`
+  12%); q13 the row path (`LazyBuf::read` 11%, `Lazy::into_row` 10%, `decode_value` +
+  `from_utf8` 9%: o_comment made a string for the LIKE, kept in the row, dropped); q22 `K::run`
+  11% (substring(c_phone) = ANY made a string per row); q02 / q11 / q20 flat (point fetches,
+  `Value` churn of joined rows, the serial executor).
+- **cand/a258: batch aggregation of q01's shape** (`partial.rs`, `vector.rs`, `cols.rs`): group
+  keys packed a key column at a time (`Partials::packed_run`; no copy of each key's bytes per
+  row); numeric lanes in 64 bits where every value, and every product and sum the bounds allow,
+  fits (`Lane::n64`, `narrow`: an i128 multiply is three multiplies and its loads and stores
+  two), wide as before otherwise; `num_bytes` inlined; a column batch's slots written by their
+  rows (`ColData::size`, `set_default` for a NULL's and an odd row's) instead of filled with
+  defaults first. Against the base (3 pairs): q01 -11.5% x3, q06 -6.6 / -6.5 / -6.5, q15 -4.7
+  x3, q18 -1.1 / -0.9 / -0.8, q10 +0.3 / +0.4 / +0.4, the rest within +-0.5; the 22 -1.5 to
+  -1.6%. decode_cost (`storage::cols` test, verify build, lineitem rows, q06 and q01 masks):
+  561 -> 483 user instructions a row.
+- **cand/a258-2: a joined row the next stage makes a row of its own takes the outer row's
+  values at its last match** (`Probe::emit` / `Lookup::emit`'s `own_last`: moved, not cloned and
+  dropped; the last stage's rows stay pairs read in place). Against cand/a258 (3 pairs): q09
+  -3.9 / -4.1 / -4.1% user instructions, q08 -0.3 to -0.4, q03 / q21 -0.2 to -0.3, q13 +0.2 /
+  +0.4 / +0.3, q16 +0.3 / +0.2 / +0.3, the rest within +-0.4; the 15 joined queries -0.55%. Dropped (`~/.cache/a258/patches/dropped-nestloop-keep-and-probe-last.patch`): a
+  `Joined::Last` variant for every last match and a nested loop copying only its `keep` columns:
+  q09 -3.6% but q02 +1.4, q13 +1.0, q11 +0.9, q16 +0.6 (a third variant in every joined-row
+  read; a per-column copy loop where most columns are kept); `Joined::Last` for lookups only:
+  q09 -4.0, q13 +0.7, q11 / q14 +0.5 (1 pair).
+- **cand/a258-3: substring(col FROM s FOR n) = ANY (array) / <> ALL as a batch filter**
+  (`VB::StrIn`'s `sub`: a text column's, or a bpchar column cast to text without its trailing
+  spaces; characters found by their bytes): q22 -44.2 / -44.1 / -44.2% user instructions,
+  cycles -44.9 / -40.2 / -46.7%; q02 / q13 / q16 within +-0.4.
+- **cand/a258-4: the typed walk reads a value's tag and length bytes with one bounds check**
+  (slice patterns in `walk_row`): q15 -4.0 / -4.0 / -4.1%, q06 -3.8 / -3.9 / -3.8, q12 -3.8 /
+  -3.7 / -3.7, q10 -2.8 / -3.0 / -3.1, q21 -2.5 / -2.4 / -2.3, q01 -2.4 x3, q03 / q05 -0.4 to
+  -0.7, q14 +0.7 / +0.2 / +0.3, q19 +0.3 / +0.1 / +0.0. decode_cost 483 -> 462. Dropped: a run
+  of fixed-width values checked over one slice (`step_by`): decode_cost 503.
+- **cand/a258-5: a row the filter passed in place leaves out the columns only the filter
+  reads** (`Decode::late`, from `ScanNode::above`: what the nodes above the scan read before the
+  filter's columns were added; only values a decode allocates: strings, numerics) **and LIKE
+  reads its column's string where it is** (`Cols::text`, `Lazy::text`): q20 -4.1 / -3.7 / -3.9%,
+  q02 -1.9 / -3.7 / -2.0, q13 -2.3 / -2.5 / -2.5, q16 -0.1 to -0.2, the rest within +-0.4. The
+  first version, every filter-only column left out, cost q21 +0.6 and q19 +0.3 (a check per
+  column where a date costs less to make than to pass).
+- **cand/a258-6: an aggregating scan below nested-loop lookups filters its rows a batch at a
+  time** (`Pre` without aggregating, `agg`: the joined rows stay the row path's; a row the batch
+  passed isn't filtered again, `partial_row`'s `passed`): q19 -44.1 / -43.7 / -43.4%, q04 -42.4 /
+  -42.5 / -42.4, q08 -10.6 / -10.7 / -10.6, q13 -2.4 / -2.7 / -2.4, q05 -1.8 / -1.7 / -1.7, q21
+  -1.5 / -1.5 / -1.3, q17 -0.5 to -0.7, q03 -0.3 to -1.0, q07 +0.3 / +0.4 / +0.2 (its cycle
+  profiles of both builds the same: lookups' block reads), the rest within +-0.2. Cycles q04
+  -35 to -38%, q19 -42 to -45%.
+- **PGO training** (q04, q19, q14, q08, q22 rose under PGO after agent 251's round while plain
+  dist fell): PGO's gain over plain dist on those queries had shrunk (user instructions PGO /
+  plain at `3d30eb71e`: q04 0.86, q19 0.83, q14 0.83, q08 0.85, q22 0.85; before agent 251's
+  round 0.77, 0.77, 0.80, 0.81, 0.79). `tools/pgo-train.sh` trains TPC-H at SF 0.2. Trained at
+  SF 1 instead (same instrumented build, `~/.cache/a258/scripts/pgoexp.sh`; training 755 s
+  against 422): `cand/a258-7`.
+- Tests: golden `a258_batch_keys_lanes`, `a258_join_rows`, `a258_substr_any`, `a258_late_rows`
+  (recorded from PostgreSQL 18.6). `tools/quick-check.sh` with `QC_CHECKED=1` green on the stack
+  at `e974a84e1` (on `c4ad9402d`) and on the rebased `f65116a28` (on `99abdc240`): Clippy none new, 434
+  tests in 28 binaries, crash seeds 1-3 x 2 and the power cut, the checked stage 434, regression
+  51,148 / 51,150 none newly differing, isolation 1,647 / 1,648, pg_dump TAP 14,609; every golden
+  file also with `--profile verify-checked`. Every gate pass's 22 result hashes are PostgreSQL's.
+- Lane A, point selects (`cand/a258-7`): none of the six changes is on a point read's path (parallel
+  scans' batch kernels, the parallel pipeline's joined rows, the serial seq scan's filter path,
+  LIKE).
+- Compared with PostgreSQL line by line (EXPLAIN (ANALYZE, BUFFERS) in `~/.cache/a258/notes/`):
+  q20, q11, q22 and q02 run PostgreSQL's plans node for node with its loop counts (q20: 2,083
+  index searches of partsupp_pkey, 8,332 SubPlan runs over lineitem's (partkey, suppkey) index;
+  q11: 405 index scans of partsupp by suppkey, twice; q02: 1,984 such scans into a 158,720-row
+  hash in 8 batches, 1,309 SubPlan runs; q22: 19,110 anti-join lookups). Where roll does more:
+  q22's customer filter made a string per row (cand/a258-3); q20's serial part scan decoded and
+  kept p_name for its LIKE (cand/a258-5), and each of its 8,332 SubPlan runs sets an Aggregate
+  and an index scan up again (`eval_here`, `Value`s; no function above 6%); q11's nested loops
+  copy the whole nation and supplier row into each of 64,800 joined rows to keep three columns
+  (`concat_rows`, `project_moving`, drops: 14% of q11) and multiply `ps_supplycost *
+  ps_availqty::numeric` as a `Numeric` per row in the serial HashAggregate (no lanes off the
+  parallel path); q02 builds and spills 158,720 wide joined rows as PostgreSQL does, each made
+  twice (`concat_rows`, then the Hash node's `Narrow::shrink`). Roll's EXPLAIN ANALYZE timings
+  are no measure: instrumented scans decode every column (`scan_need` gives None) and the dense
+  bitmap scan is off.
+- Next (largest first): `Pre::decode` is still the largest function (the walk's step dispatch
+  per value and `pos` kept in memory: ~460 instructions a q01 row in the verify build); the
+  store's `fill_batch_with` and memcmp (agents 247 / 255's); the serial executor's per-row `Value`
+  work in q02 / q11 / q20 (joined rows copied whole and projected after, `Numeric` arithmetic off
+  the batch path); q13's probe and aggregation as one kernel (the row path walks each order row
+  again after the batch decoded and filtered it).
+
 ## Analytic CPU, round 4 (agent 251)
 
 TPC-H SF1 on lane C against pgrust's 84.7 G user instructions: whole-run profiles of the three

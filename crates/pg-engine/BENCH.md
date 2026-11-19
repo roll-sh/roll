@@ -285,6 +285,191 @@ The current checked measurements compare release engine builds and PostgreSQL 18
 the wire. Older rounds below are historical records, with their original methods and
 limits. Their results have not been reverified on the current source.
 
+## Analytic CPU, round 5 (2026-11-18/19, agent 258)
+
+HANDOFF "Analytic CPU, round 5" has what changed. Lane C (servers in containers on CPUs
+14,15,32,33, `--memory 8g`; clients on 16,17,34,35), TPC-H SF1, a 2 GB cache and
+`max_parallel_workers_per_gather=2`, `max_parallel_workers=8` on all three (pgrust's by ALTER
+SYSTEM and a restart, checked with SHOW). Harness: agent 251's copied to `~/.cache/a258/tpch/`
+(a pass is a fresh engine on the restored data directory, a warm-up of the 22, then per query
+its runs in one `perf stat -e instructions:u,cycles:u` window; the window now opens 2.5 s before
+the runs and closes 4 s after: under load a `docker exec` of perf started after the runs had
+begun), each pass or pair in its own `tools/lane.sh c` hold. Plain dist builds
+(`tools/dist.sh`) of each commit in build worktrees of their own: **b0** origin's `3d30eb71e`,
+**n1** b0 + cand/a258's change, **n2c** n1 + cand/a258-2's, **n3** n2 + cand/a258-3's (n2: the
+dropped first version of cand/a258-2), **n4** + cand/a258-4's, **n5** + the first version of
+cand/a258-5's, **n5b** n4 + the kept version, **n6** n5 + cand/a258-6's. **The lane was never
+quiet**: every pass below ran at 0.9-3.1 foreign cores (gpass's own reading of the server CPUs,
+the engine's process subtracted); the gates are decided on user instructions, cycles shown for
+completeness. A window that missed part of a run shows as a count 5-7% low (marked).
+
+### The changes, gated (user instructions a run, % per pair against the parent; plain dist, 3 alternating pairs, 5 runs a query a pass; queries within +-0.25 / +-0.45% left out of the longer lists)
+
+**cand/a258 (n1 against b0)**
+
+| query | instructions % per pair | cycles % per pair |
+|---|---|---|
+| q01 | -11.5 / -11.5 / -11.5 | -18.9 / -5.7 / -7.7 |
+| q06 | -6.6 / -6.5 / -6.5 | -5.1 / -16.5 / -22.0 |
+| q07 | -0.8 / -0.4 / -0.0 | -5.9 / +5.2 / -9.7 |
+| q13 | +0.0 / +0.5 / +0.0 | -17.1 / +11.4 / -9.2 |
+| q15 | -4.7 / -4.7 / -4.7 | -20.1 / +8.8 / -6.2 |
+| q18 | -1.1 / -0.9 / -0.8 | -3.0 / +4.3 / -1.4 |
+| all 22 | -1.59 / -1.49 / -1.54 | |
+foreign cores per pass: b0 1.80 1.32 2.33; n1 1.40 2.05 1.85
+
+**cand/a258-2 (n2c against n1)**
+
+| query | instructions % per pair | cycles % per pair |
+|---|---|---|
+| q03 | -0.3 / -0.2 / -0.3 | -1.4 / +11.2 / +7.0 |
+| q08 | -0.4 / -0.3 / -0.4 | +3.6 / +23.6 / +8.8 |
+| q09 | -3.9 / -4.1 / -4.1 | -3.1 / +8.6 / +3.4 |
+| q11 | -0.1 / +0.4 / +0.1 | +10.0 / +7.3 / +9.5 |
+| q13 | +0.2 / +0.4 / +0.3 | -4.9 / -4.4 / -2.2 |
+| q14 | -0.1 / +0.3 / +0.2 | +0.2 / +6.4 / +1.8 |
+| q16 | +0.3 / +0.2 / +0.3 | +1.8 / -0.4 / +2.7 |
+| q21 | -0.2 / -0.3 / -0.3 | -0.9 / +6.2 / +1.6 |
+| all 15 | -0.55 / -0.56 / -0.55 | |
+foreign cores per pass: n1 1.20 1.00 2.40; n2c 1.23 1.72 2.86
+
+**cand/a258-3 (n3 against n2)**
+
+| query | instructions % per pair | cycles % per pair |
+|---|---|---|
+| q02 | -0.1 / +0.1 / -0.1 | +29.0 / -17.5 / -24.2 |
+| q13 | +0.4 / -0.3 / +0.2 | +7.3 / -6.5 / -12.8 |
+| q16 | -0.1 / -0.1 / +0.1 | +6.5 / -4.3 / -1.0 |
+| q22 | -44.2 / -44.1 / -44.2 | -44.9 / -40.2 / -46.7 |
+| all 4 | -4.22 / -4.50 / -4.27 | |
+foreign cores per pass: n2 2.09 2.34 2.76; n3 3.11 1.73 1.79
+
+**cand/a258-4 (n4 against n3)**
+
+| query | instructions % per pair | cycles % per pair |
+|---|---|---|
+| q01 | -2.4 / -2.4 / -2.4 | -0.8 / -4.6 / +12.0 |
+| q03 | -0.6 / -0.4 / -0.4 | +4.3 / -3.2 / +9.3 |
+| q05 | -0.5 / -0.5 / -0.7 | -8.6 / +4.9 / -6.5 |
+| q06 | -3.8 / -3.9 / -3.8 | -0.2 / -3.6 / +10.8 |
+| q10 | -2.8 / -3.0 / -3.1 | +0.2 / -4.7 / +3.4 |
+| q12 | -3.8 / -3.7 / -3.7 | -8.0 / -6.7 / +2.8 |
+| q14 | +0.7 / +0.2 / +0.3 | +3.6 / -2.7 / +6.8 |
+| q15 | -4.0 / -4.0 / -4.1 | -6.2 / -15.2 / +21.5 |
+| q21 | -2.5 / -2.4 / -2.3 | -6.9 / -10.6 / +11.8 |
+| all 12 | -2.13 / -2.13 / -2.16 | |
+foreign cores per pass: n3 1.89 1.20 1.24; n4 1.56 0.93 1.85
+
+**cand/a258-5 (n5b against n4; q18's +7.1 is n4's window short by a run: 15.54 G against 16.64-16.67 in its other passes)**
+
+| query | instructions % per pair | cycles % per pair |
+|---|---|---|
+| q02 | -1.9 / -3.7 / -2.0 | -9.3 / +17.1 / +7.3 |
+| q13 | -2.3 / -2.5 / -2.5 | -12.3 / -7.9 / +0.2 |
+| q14 | +0.4 / -0.0 / +0.3 | +5.8 / +14.4 / -0.3 |
+| q18 | +7.1 / +0.2 / -0.1 | +5.0 / +0.1 / -1.5 |
+| q20 | -4.1 / -3.7 / -3.9 | -13.8 / -35.8 / -3.8 |
+| q22 | -0.4 / -0.0 / +0.3 | -12.5 / +2.8 / +2.4 |
+| all 12 | +1.17 / -0.47 / -0.45 | |
+foreign cores per pass: n4 2.06 2.36 2.36; n5b 1.67 2.69 2.43
+
+**cand/a258-6 (n6 against n5; q10's +6.5 is n5's window short by a run: 7.39 G against 7.87)**
+
+| query | instructions % per pair | cycles % per pair |
+|---|---|---|
+| q03 | -0.5 / -1.0 / -0.3 | +2.3 / +1.1 / -10.2 |
+| q04 | -42.4 / -42.5 / -42.4 | -35.0 / -37.1 / -38.0 |
+| q05 | -1.8 / -1.7 / -1.7 | -0.5 / -1.1 / +4.5 |
+| q08 | -10.6 / -10.7 / -10.6 | +1.6 / +8.7 / -9.6 |
+| q09 | +0.2 / -0.5 / +0.0 | +5.3 / -0.5 / +3.6 |
+| q10 | +0.0 / -0.1 / +6.5 | +0.6 / +2.6 / +5.4 |
+| q13 | -2.4 / -2.7 / -2.4 | +11.4 / +3.8 / +4.8 |
+| q17 | -0.7 / -0.7 / -0.5 | +12.6 / +20.8 / +3.3 |
+| q19 | -44.1 / -43.7 / -43.4 | -41.7 / -45.4 / -42.5 |
+| q21 | -1.5 / -1.5 / -1.3 | +0.6 / -11.3 / +2.1 |
+| all 22 | -2.29 / -2.39 / -1.82 | |
+foreign cores per pass: n5 1.58 1.92 1.86; n6 2.30 2.57 1.64
+
+**Dropped: the first cand/a258-2 (n2 against n1: a `Joined::Last` for every last match, a nested loop copying only its `keep` columns)**
+
+| query | instructions % per pair | cycles % per pair |
+|---|---|---|
+| q02 | +1.4 / +1.5 / +1.3 | +20.0 / -3.8 / +29.3 |
+| q09 | -3.5 / -3.7 / -3.8 | -1.2 / -3.0 / +14.1 |
+| q11 | +0.8 / +1.2 / +0.8 | +0.0 / +46.1 / +43.8 |
+| q13 | +1.0 / +1.0 / +1.0 | +6.9 / +20.4 / +1.3 |
+| q14 | +0.3 / -0.0 / +1.1 | +3.3 / +20.3 / +15.9 |
+| q16 | +0.5 / +0.5 / +0.8 | +3.6 / +10.8 / +6.3 |
+| q17 | -0.0 / -0.1 / +0.7 | +4.5 / +32.8 / -2.2 |
+| all 22 | -0.17 / -0.27 / -0.19 | |
+foreign cores per pass: n1 2.29 1.72 1.93; n2 2.85 2.78 2.62
+
+**Replaced: the first cand/a258-5 (n5 against n4: every filter-only column left out)**
+
+| query | instructions % per pair | cycles % per pair |
+|---|---|---|
+| q02 | -2.0 / -2.0 / -2.1 | -33.1 / -21.9 / -33.2 |
+| q03 | -0.3 / -0.1 / -0.5 | -13.6 / -14.6 / -11.4 |
+| q07 | +0.1 / -0.1 / -0.4 | -6.9 / -9.1 / +4.0 |
+| q11 | -0.0 / -0.4 / -0.0 | +45.8 / -14.4 / +10.9 |
+| q13 | -2.9 / -3.1 / -2.7 | +5.0 / -11.2 / -1.2 |
+| q16 | -0.5 / -0.2 / -0.1 | +14.6 / -0.4 / -3.5 |
+| q19 | +0.4 / +0.3 / +0.3 | +7.4 / -2.6 / -7.0 |
+| q20 | -3.9 / -3.9 / -4.1 | +17.5 / +0.5 / -26.7 |
+| q21 | +0.7 / +0.6 / +0.4 | +12.6 / -5.2 / +0.3 |
+| q22 | -0.4 / +0.2 / +0.4 | -8.2 / -2.2 / +2.6 |
+| all 22 | -0.26 / -0.33 / -0.34 | |
+foreign cores per pass: n4 1.98 2.92 2.35; n5 2.29 2.26 2.04
+
+Every pass's 22 result hashes are PostgreSQL's (`~/.cache/a258/scripts/hashes.py`). VmHWM
+1,680-1,741 MB in every pass of every build.
+
+decode_cost (`storage::cols::tests::decode_cost`, verify build, 2,048 lineitem-shaped rows,
+the q06 and q01 masks, `perf stat` of the test at 400 and at 0 repetitions): origin 561.0 user
+instructions a row, with cand/a258 483.1, with cand/a258-4 461.7 (each exact to 0.1 over three
+runs); the dropped one-slice check of fixed-width runs 503.2.
+
+### TPC-H SF1 before the round: PostgreSQL, pgrust, b0 and pb0 (G user instructions a run / median s)
+
+**b0** plain dist and **pb0** `tools/dist-pgo.sh` of origin's `3d30eb71e`. Four rotated rounds
+(PostgreSQL, pgrust, b0, pb0), 20:50-22:35; a pass is a warm-up of the 22, then 3 runs a query in
+one perf window (PostgreSQL's and pgrust's container cgroups counted with `-a -G`). No pass was
+under 1.0 foreign core (engine passes 1.5-3.1 by gpass's reading; the references' 3.9-7.3 are
+lane.sh's, which didn't subtract the references' own containers: own 0.2-1.0 cores where they ran 2-3), so the medians are of all four
+passes and only the instructions are a measure (they repeat within 0.3% from pass to pass).
+
+| query | pg | pgrust | b0 | pb0 |
+|---|---|---|---|---|
+| q01 | 45.15 / 4.029 | 6.90 / 0.697 | 9.05 / 0.592 | 8.52 / 0.540 |
+| q02 | 1.15 / 0.392 | 1.11 / 0.249 | 2.92 / 0.782 | 2.45 / 0.728 |
+| q03 | 4.00 / 0.731 | 3.59 / 0.503 | 5.99 / 0.538 | 5.08 / 0.539 |
+| q04 | 1.00 / 0.250 | 1.59 / 0.218 | 3.76 / 0.387 | 3.24 / 0.345 |
+| q05 | 1.97 / 0.566 | 1.75 / 0.307 | 3.90 / 0.551 | 3.35 / 0.438 |
+| q06 | 4.76 / 0.756 | 5.76 / 0.535 | 6.20 / 0.450 | 5.67 / 0.410 |
+| q07 | 2.56 / 0.702 | 3.36 / 0.590 | 5.14 / 0.611 | 4.29 / 0.552 |
+| q08 | 0.92 / 0.302 | 1.24 / 0.219 | 2.00 / 0.372 | 1.69 / 0.343 |
+| q09 | 13.19 / 2.206 | 14.31 / 2.568 | 11.54 / 1.754 | 9.97 / 1.534 |
+| q10 | 6.50 / 1.052 | 4.47 / 1.221 | 8.09 / 0.871 | 7.64 / 0.859 |
+| q11 | 0.37 / 0.150 | 0.51 / 0.088 | 0.88 / 0.261 | 0.75 / 0.204 |
+| q12 | 8.65 / 1.042 | 9.21 / 1.069 | 6.61 / 0.426 | 6.50 / 0.514 |
+| q13 | 6.76 / 1.359 | 3.89 / 0.662 | 7.50 / 1.268 | 6.08 / 1.319 |
+| q14 | 1.05 / 0.297 | 0.78 / 0.114 | 1.68 / 0.251 | 1.39 / 0.335 |
+| q15 | 3.09 / 0.647 | 3.07 / 0.384 | 5.67 / 0.399 | 5.34 / 0.446 |
+| q16 | 3.52 / 0.434 | 1.98 / 0.470 | 4.37 / 0.375 | 4.03 / 0.504 |
+| q17 | 4.54 / 1.359 | 2.41 / 0.912 | 5.84 / 0.836 | 4.93 / 0.946 |
+| q18 | 41.05 / 5.169 | 16.66 / 3.930 | 16.85 / 1.190 | 15.03 / 1.238 |
+| q19 | 0.39 / 0.113 | 0.61 / 0.052 | 0.94 / 0.096 | 0.78 / 0.083 |
+| q20 | 0.43 / 0.188 | 0.71 / 0.182 | 1.50 / 0.412 | 1.16 / 0.305 |
+| q21 | 7.31 / 1.013 | 4.88 / 0.872 | 8.60 / 0.716 | 7.77 / 0.717 |
+| q22 | 1.12 / 0.159 | 0.76 / 0.088 | 1.64 / 0.183 | 1.38 / 0.212 |
+| **all 22** | **159.5 / 22.92** | **89.5 / 15.93** | **120.7 / 13.32** | **107.1 / 13.11** |
+
+- CPU s (medians summed): pg 54.66, pgrust 23.77, b0 32.33, pb0 30.65.
+- User cycles G (medians summed): pg 158.6, pgrust 77.2, b0 105.6, pb0 97.5.
+- Against pgrust, user instructions: plain 1.35x, PGO 1.20x; against PostgreSQL 0.76x and 0.67x.
+
+The table after the round, the PGO training gate and lane A: `cand/a258-7`.
+
 ## Point and range reads, round 6: the same-day table, 32 clients, idle footprint (2026-11-17/18, agent 250)
 
 HANDOFF.md "Point and range reads, round 6" has what changed and why. Base `6d3b7e9e5`, built
