@@ -34,9 +34,10 @@ import { IndexBrowser } from "./index-browser";
 import { PerformanceTab } from "./performance";
 import { Playground } from "./playground";
 import { RelevanceTab } from "./relevance";
+import { SnapshotsTab } from "./snapshots";
 import { CredentialsOnce, SearchStateDot, settingsOf, SettingsFields, stateLabel, useAction, useSearchClusters, type Run } from "./shared";
 
-const TABS = ["overview", "indices", "console", "playground", "analyze", "relevance", "inference", "branches", "performance", "usage", "settings"] as const;
+const TABS = ["overview", "indices", "console", "playground", "analyze", "relevance", "inference", "snapshots", "branches", "performance", "usage", "settings"] as const;
 type Tab = (typeof TABS)[number];
 
 /** Placeholder while the route's params resolve. */
@@ -207,6 +208,16 @@ export function SearchClusterPage({ id }: { id: string }) {
         )}
         {tab === "inference" && (
           <InferenceTab
+            key={cluster.id}
+            cluster={cluster}
+            onOpenConsole={(text) => {
+              setPrefill((p) => ({ text, n: (p?.n ?? 0) + 1 }));
+              setTab("console");
+            }}
+          />
+        )}
+        {tab === "snapshots" && (
+          <SnapshotsTab
             key={cluster.id}
             cluster={cluster}
             onOpenConsole={(text) => {

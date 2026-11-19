@@ -694,9 +694,12 @@ pub async fn put_lifecycle(ctx: &Ctx<'_>) -> EsResult<Reply> {
     Reply::acknowledged()
 }
 
+/// `XContentBuilder.timeField`: the readable form is `strict_date_optional_time`, milliseconds
+/// always (`2026-11-19T01:30:00.000Z`), not `Instant.toString()`'s.
 fn time_field(m: &mut Map, raw: &str, readable: &str, ms: i64, human: bool) {
     if human {
-        m.insert(readable.into(), Value::from(crate::time::java_instant_string(ms)));
+        let text = crate::time::DateFormatter::new("strict_date_optional_time").map(|f| f.format_millis(ms)).unwrap_or_else(|_| crate::time::java_instant_string(ms));
+        m.insert(readable.into(), Value::from(text));
     }
     m.insert(raw.into(), Value::from(ms));
 }
@@ -1009,6 +1012,9 @@ mod tests {
         // A schedule far ahead ends the runs; retention keeps the newest two.
         let (s, v) = call(&c, "PUT", "/_slm/policy/p", r#"{"schedule":"0 0 0 1 1 ? 2099","name":"<s-{now/d}>","repository":"repo","retention":{"max_count":2}}"#).await;
         assert_eq!(s, 200, "{v}");
+        // Readable times are `XContentBuilder.timeField`'s: milliseconds even when they're zero.
+        let (_, v) = call(&c, "GET", "/_slm/policy/p?human", "").await;
+        assert_eq!(v.pointer(&["p", "next_execution"]).and_then(Value::as_str), Some("2099-01-01T00:00:00.000Z"), "{v}");
         let taken = policy_snapshots(&c);
         let (s, v) = call(&c, "POST", "/_slm/_execute_retention", "").await;
         assert_eq!(s, 200, "{v}");
