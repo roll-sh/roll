@@ -3663,8 +3663,11 @@ cache waited out. Ranked now:
    never a second one. Built: 90-day rotation (published 2 days ahead, old key kept 2 h after the
    switch, retired keys kept sealed so old audit digests still verify), one audit row per subject,
    audience and hour, `ForApps::issue` behind the same trust check as `resolve`.
-5. **A sealed start for the deployment key** (building: `feature/roll-secrets-sealed-start`, on #276):
-   rolld starts with products down until N of M holders post shares. The thirty-second security
+5. **A sealed start for the deployment key** (#367, on #276): `ROLL_SECRET_KEY_SEALED=<split>:<threshold>`
+   starts rolld with only `POST /v1/secrets/unseal` up; K shares from the split, checked against the
+   store's key id, start every product with the key in memory (all eight readers take it as a value);
+   10 shares a minute per address, 5 failed sets an hour per split (durable); `roll secrets unseal
+   --node …` for a fleet, each node unsealing itself. The thirty-second security
    review (2026-11-18 evening): one high, two medium, four low, all being fixed. High: #304's freeze
    let roll's own products through (every in-process reader counts as the folder's admin), so a
    frozen folder still fed previews, checks and apps; only people, the operator and roll-access
