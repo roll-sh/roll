@@ -457,6 +457,9 @@ function Form({
         <Field group label="Mail" note="Previews run on copies of production's people. Caught: their services send mail to roll, where it's listed on the preview and goes no further (mail providers' API keys are removed).">
           <Choice value={s.mail ?? "catch"} options={["catch", "deliver"]} onChange={(v) => set("mail", v)} labels={{ catch: "Caught by roll", deliver: "Delivered" }} />
         </Field>
+        <Field group label="Traces" note="Its services get the OpenTelemetry SDK's variables, so an app with an SDK sends its spans to the preview: listed under Requests on its sheet, masked as its logs are, kept a few hours.">
+          <Choice value={s.traces ? "on" : "off"} options={["off", "on"]} onChange={(v) => set("traces", v === "on")} labels={{ off: "Off", on: "On" }} />
+        </Field>
         <Field group label="Reaches" note="What a preview's code may call. Roll only: its services run on a network of their own that reaches roll's products (its branches) and nothing on the internet, so a webhook or a live payment API can't be called from a change.">
           <Choice value={s.egress ?? "open"} options={["open", "roll"]} onChange={(v) => set("egress", v)} labels={{ open: "Anything", roll: "Roll only" }} />
         </Field>
