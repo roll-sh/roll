@@ -256,6 +256,22 @@ impl<'a> BindCtx<'a> {
         self.matches_all && self.parents.is_empty()
     }
 
+    /// The query matches every live root doc: [`matches_all`](Self::matches_all), or, in an
+    /// index with nested objects, a `match_all` the shard query filtered to the root docs
+    /// (`DefaultSearchContext.buildFilteredQuery`'s non-nested filter).
+    pub fn matches_every_root(&self) -> bool {
+        use search_index::query::{BooleanQuery, FieldExistsQuery, Occur, basic::MatchAllQuery};
+        if self.matches_all {
+            return true;
+        }
+        let Some(b) = self.query.as_ref().and_then(|q| q.as_any().downcast_ref::<BooleanQuery>()) else { return false };
+        let is = |o: Occur, f: &dyn Fn(&search_index::QueryRef) -> bool| b.clauses.iter().filter(|c| c.occur == o).count() == 1 && b.clauses.iter().any(|c| c.occur == o && f(&c.query));
+        b.clauses.len() == 2
+            && b.minimum_should_match == 0
+            && is(Occur::Must, &|q| q.as_any().is::<MatchAllQuery>())
+            && is(Occur::Filter, &|q| q.as_any().downcast_ref::<FieldExistsQuery>().is_some_and(|e| e.field == search_index::schema::PRIMARY_TERM_FIELD))
+    }
+
     /// [`whole_segments`](Self::whole_segments) for a shortcut Elasticsearch doesn't take,
     /// which must collect what `terminate_after` lets through.
     pub fn whole_segments_unless_terminating(&self) -> bool {
@@ -493,6 +509,12 @@ impl Subs {
         self.needs_scores || self.deferred.as_ref().is_some_and(|d| d.needs_scores)
     }
 
+    /// Every sub-aggregation took the current segment from its statistics
+    /// ([`Aggregator::segment_done`]); none is deferred.
+    pub fn all_done(&self) -> bool {
+        self.deferred.is_none() && !self.nodes.is_empty() && self.nodes.iter().all(|n| n.agg.segment_done())
+    }
+
     pub fn set_segment(&mut self, seg: &SegmentContext) -> Result<()> {
         if let Some(d) = self.deferred.as_mut() {
             if d.segments.last().is_some_and(|s| s.docs.is_empty()) {
@@ -558,7 +580,8 @@ impl Subs {
         let b = Batch { docs: &self.docs, ords: &self.ords, scores: &self.scores };
         let mask = self.deferred.as_ref().map(|d| d.mask.as_slice());
         for (i, n) in self.nodes.iter_mut().enumerate() {
-            if mask.is_none_or(|m| !m[i]) {
+            // A node that took the segment from its statistics is never handed its docs.
+            if mask.is_none_or(|m| !m[i]) && !n.agg.segment_done() {
                 n.agg.collect(b)?;
             }
         }
@@ -579,7 +602,7 @@ impl Subs {
         }
         let mask = self.deferred.as_ref().map(|d| d.mask.as_slice());
         for (i, n) in self.nodes.iter_mut().enumerate() {
-            if mask.is_none_or(|m| !m[i]) {
+            if mask.is_none_or(|m| !m[i]) && !n.agg.segment_done() {
                 n.agg.collect(b)?;
             }
         }
