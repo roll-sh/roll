@@ -2499,7 +2499,8 @@ roll secrets set     KEY --generate 48                          # a random value
 roll secrets health                                            # every finding, every environment, worst first
 roll secrets doctor                                            # this machine's setup, checked
 roll secrets check   [.env.example] [--strict]                # keys a template names that the environment lacks
-roll secrets scan    [PATH…] | --staged                       # this project's values in files: where, never what
+roll secrets scan    [PATH…] | --staged [--allow-unstored]    # this project's values and credentials it doesn't hold: where, never what
+roll secrets scan    --store [KEY=]FILE:LINE                   # move one such credential in; prints what to write instead
 roll secrets render  config.tpl [--out config.yml [--watch --exec CMD]]   # ${KEY} filled in
 roll secrets export  [--format dotenv|json|shell|yaml|docker|kubernetes] [--name N --namespace NS]
 roll secrets envs    ls | add NAME [--base ENV --ephemeral] | rename OLD NEW | rm NAME | order A B C
@@ -2828,6 +2829,67 @@ the change`. The blocker names keys and environments, never the value or the lin
   admin lands with `bypass` (on a queue repo, the queue bypass; on a direct-land repo, the bypass of
   review rules, which now covers `secret_leak` too), audited as `secret_leak_bypass`.
 
+#### Credentials roll doesn't hold
+
+The check above only knows values roll secrets already holds, so a newly pushed AWS or Stripe key
+would land silently. The same pass also looks for credentials by their shape, as GitHub's push
+protection and GitGuardian do, with roll's shared detectors (`roll_auth::credentials::find_all`):
+AWS access keys, GitHub, Slack, Stripe live, Google, Anthropic and OpenAI keys, PEM private keys
+(the whole block, which may span lines) and roll's own checksummed tokens.
+
+- **What is checked.** Each run of lines the change adds since its merge base (O(change), with the
+  limits above: no binary files, files over 1 MiB or lines over 4 KiB). A match counts when roll
+  secrets doesn't hold it (it's matched by fingerprint with the candidates; one roll holds is a
+  `secret_leak`), it isn't obviously a placeholder, and the repo's allow-list doesn't keep it. At
+  most 200 are kept per change; the first 20 are shown and one more line counts the rest. Without
+  roll secrets on the server it still runs, and nothing counts as stored.
+- **What it says.** A `secret_unstored` notice on the change ("Worth knowing"), naming the kind,
+  file and line, never the value: `adds what looks like an AWS access key at deploy.py:2, which roll
+  secrets doesn't hold: store it as AWS_ACCESS_KEY_ID (roll secrets scan --store
+  AWS_ACCESS_KEY_ID=deploy.py:2) and read it with os.environ["AWS_ACCESS_KEY_ID"], or allow it in
+  .roll/secrets-allow`. It carries `path`, `line` and `fingerprint`. The key's name comes from the
+  variable the value is assigned to on its line (`const stripeKey = "…"` gives `STRIPE_KEY`; a
+  generic `token:` holding a GitHub token gives `GITHUB_TOKEN`), else from its kind; the read is the
+  file's language's (`process.env.X`, `os.environ["X"]`, `std::env::var("X")`, `os.Getenv("X")`,
+  `ENV["X"]`, `System.getenv("X")`…, `${X}` for configuration).
+- **Blocking.** A repo makes it a blocker in `roll.toml` on its default branch's head (never the
+  change's):
+
+  ```toml
+  [secrets]
+  unstored_credentials = "block"   # default "warn": a notice
+  ```
+
+  An admin `bypass` lands over it, as over `secret_leak`, audited as `secret_unstored_bypass`.
+  Blocking fails closed: while roll secrets can't say which values it holds, every credential
+  counts as unstored (tried again at the next look), and a change whose diff can't be read is
+  blocked with "couldn't check this change for credentials".
+- **The placeholder rule** (`credentials::placeholder`). With the match's known prefix (`sk_live_`,
+  `AKIA`, `ghp_`…) set aside, it's a placeholder when a part of it (split at `_` and `-`) starts or
+  ends with `example`, `fake`, `dummy`, `test`, `sample`, `placeholder`, `redacted` or `changeme`
+  (any case), or when it repeats one character 8 times in a row (`sk_live_xxxxxxxx…`). AWS's
+  documented `AKIAIOSFODNN7EXAMPLE` never matches at all, and values like `x`, `***`, `<your key>`
+  or `${KEY}` don't have a credential's shape. A private key's block is never a placeholder (its
+  base64 repeats `A`): allow test keys instead.
+- **The allow-list.** `.roll/secrets-allow`, read from the default branch's head for landings and
+  from the working tree's top for `roll secrets scan`. One entry a line, `#` starts a comment: a
+  fingerprint (`sha256:` and the first 24 hex digits of the value's SHA-256, as the notice and the
+  scan show it) keeps that value anywhere; anything else is a path glob, matched with roll code's
+  shared table (`*` within a segment, `**` across segments, no `/` matches the name at any depth)
+  and keeping every match in those files. At most 64 KiB and 1,000 entries are read.
+
+  ```
+  # test fixtures
+  tests/fixtures/**
+  *.pem
+  sha256:3f7c0a9e1b2d4c6e8f0a1b2c
+  ```
+- **The fix offered.** `roll secrets scan --store [KEY=]FILE:LINE` (below) reads the value from the
+  file on the author's machine, sets it as a new key of the folder's environment and prints the
+  line to write instead; roll never rewrites the change. Storing it from the change page (roll
+  reading the value from the change's blob into the project the repo is trusted for) isn't built
+  yet: the notice names the CLI command.
+
 #### Keys a change starts reading
 
 The same pass over the lines a change adds also picks out the environment variables they read, by
@@ -2862,6 +2924,21 @@ exec roll secrets scan --staged
 
 A scan only names values its caller may reveal, and among personal values only the caller's own:
 otherwise it would confirm guesses at values the caller can't read. Each scan is audited (`secrets.scan`, the keys it found).
+
+It also lists credentials the project doesn't hold ("Credentials roll doesn't hold" above: the same
+detectors, placeholder rule and `.roll/secrets-allow`, read from the working tree's top), as
+`file:line  an AWS access key, not in roll secrets: roll secrets scan --store AWS_KEY=deploy.ts:2
+[sha256:…]` (`--json`: `{file, line, unstored: true, kind, fingerprint, suggested_key}`). A plain
+scan only reports them; `--staged` refuses the commit unless `--allow-unstored`. To move one in:
+
+```
+$ roll secrets scan --store deploy.ts:2            # or --store AWS_KEY=deploy.ts:2 to name it
+Stored an AWS access key from deploy.ts:2 as AWS_KEY in production:/
+Replace it with process.env.AWS_KEY (roll run puts AWS_KEY in the environment), and rotate it if it was ever pushed
+```
+
+The value is read from the file, never typed or pasted, and goes in one change to the folder of
+`-e`/`roll secrets setup`; a key that's already there is refused, never overwritten.
 
 ### A local copy against the environment
 
@@ -4447,6 +4524,9 @@ Done and in PR #20:
 - checks, sandboxes and previews, resolving untrusted; preview environments untrusted themselves;
 - leaked secrets don't land, plus scans of a repo's default branch and history, and `roll secrets
   scan [--staged]` before a commit;
+- credentials roll doesn't hold yet, by their shape: a notice on a change (a blocker with
+  `roll.toml`'s `[secrets] unstored_credentials = "block"`), `.roll/secrets-allow`, and `roll secrets
+  scan` listing them, refusing them `--staged`, and `--store` moving one in;
 - required and typed keys; insights, a daily notice of each environment's health, and expiry dates for values that expire
   outside roll; weak credentials; values as they were after any change; a protected environment's values that are also set in an unprotected one; read
   alerts (a machine's new address, many reveals in an hour);
