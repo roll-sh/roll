@@ -80,6 +80,7 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `GET /v1/apps/services/{id}/environments/{env}/deploys?before=` | | `Deployment[]`, newest first, 100 at most; `before` (unix ms, the last one's `created_at`): the next page | read |
 | `GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}` | | `Deployment` | read |
 | `GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}/logs?follow=&tail=` | | `LogLine[]` or SSE | read |
+| `GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}/sbom` | | its image's SBOM, CycloneDX JSON (`application/vnd.cyclonedx+json`, as a download) from the same scan; 404 when it wasn't scanned, the SBOM was over 8 MiB, or the deployment was pruned | read |
 | `GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}/vulnerabilities?severity=` | | `{ scan: ScanSummary \| null, vulnerabilities: Vulnerability[] }`: its image's known vulnerabilities, most severe first (then those with a fix), at most 2,000 (the counts are of all); `severity` keeps those at it or worse; a pruned deployment's list is empty, its counts kept | read |
 | `GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}/commits` | | `DeployCommits`: what a repo deployment brings over the live one (for the live one: the one live before it), along its first parents, newest first, at most 50 | read |
 | `POST /v1/apps/services/{id}/environments/{env}/deploys/{dep}/rollback` | `{ keep_variables? }` (default false: the variables come back as they were when it was live) | 202 `Deployment` | deploy* |
@@ -560,7 +561,7 @@ type Deployment = {
 type SloIndicator = { total: number /* requests, or minutes with requests */; bad: number; sli: number | null /* percent that met it */; budget_left: number | null };
 type SloReport = { slo: { objective: number; latency_ms?: number; window_days: number } | null; availability?: SloIndicator; latency?: SloIndicator | null; burning?: { indicator: "availability" | "latency"; burn_rate: number; window: "1h" | "6h" } | null };
 type Severity = "critical" | "high" | "medium" | "low" | "unknown";
-type ScanSummary = { critical: number; high: number; medium: number; low: number; unknown: number; fixable: number /* with a fixed version */; scanned_at: number; scanner: string /* "trivy 0.76.1" */; error?: string /* the scan didn't finish: the counts mean nothing */ };
+type ScanSummary = { sbom?: true /* its SBOM is kept */; critical: number; high: number; medium: number; low: number; unknown: number; fixable: number /* with a fixed version */; scanned_at: number; scanner: string /* "trivy 0.76.1" */; error?: string /* the scan didn't finish: the counts mean nothing */ };
 type Vulnerability = { id: string /* CVE-…, GHSA-…, a distribution's */; severity: Severity; package: string; installed: string; fixed?: string; title?: string; target: string /* the OS's packages ("debian 12.15") or a lockfile's path */ };
 
 

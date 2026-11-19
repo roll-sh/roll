@@ -3225,6 +3225,10 @@ async fn images_are_scanned_and_block_on_holds_a_deploy() {
     let ids: Vec<&str> = list["vulnerabilities"].as_array().unwrap().iter().map(|v| v["id"].as_str().unwrap()).collect();
     assert_eq!(ids, ["CVE-1", "CVE-2"], "{list}");
     assert_eq!(call(&w.api, "GET", &format!("{env}/deploys/{first}/vulnerabilities?severity=bad"), None).await.0, StatusCode::BAD_REQUEST);
+    // Its SBOM, from the same scan (CycloneDX).
+    assert_eq!(s["sbom"], true, "{d}");
+    let (st, sbom) = call(&w.api, "GET", &format!("{env}/deploys/{first}/sbom"), None).await;
+    assert_eq!((st, sbom["bomFormat"].as_str()), (StatusCode::OK, Some("CycloneDX")), "{sbom}");
     // With block_on, a deploy whose image has one fails before it goes live.
     assert_eq!(call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"block_on": "unknown"}}))).await.0, StatusCode::BAD_REQUEST);
     let (st, r) = call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"block_on": "critical"}}))).await;

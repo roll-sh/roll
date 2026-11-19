@@ -692,6 +692,9 @@ pub struct ScanSummary {
     /// Why the scan didn't finish (the counts are then zero and mean nothing).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Its SBOM is kept (`…/deploys/{dep}/sbom`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sbom: bool,
 }
 
 impl ScanSummary {

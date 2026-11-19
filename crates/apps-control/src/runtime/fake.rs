@@ -731,7 +731,8 @@ impl Builder for Fake {
         let Some(found) = self.scan_findings.lock().clone() else { return Ok(None) };
         self.scans.fetch_add(1, Ordering::SeqCst);
         log.line(format!("scanned {image}"));
-        Ok(Some(super::Scanned { scanner: "fake".into(), found }))
+        let sbom = Some(serde_json::to_vec(&serde_json::json!({ "bomFormat": "CycloneDX", "specVersion": "1.7", "components": [{ "type": "operating-system", "name": "fake" }] })).expect("JSON"));
+        Ok(Some(super::Scanned { scanner: "fake".into(), found, sbom }))
     }
 
     async fn build(&self, job: &BuildJob, log: &LogSink, cancel: tokio_util::sync::CancellationToken) -> anyhow::Result<String> {
