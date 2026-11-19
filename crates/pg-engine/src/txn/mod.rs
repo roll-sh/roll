@@ -509,7 +509,7 @@ impl Database {
         };
         let ts = pin.ts;
         let room = LockRoom::take();
-        Txn {
+        Txn::boxed(TxnState {
             id,
             xid: 0,
             mx: None,
@@ -596,7 +596,7 @@ impl Database {
             loads: Vec::new(),
             held: None,
             loading: None,
-        }
+        })
     }
 
     fn seq_key(oid: u32) -> Vec<u8> {
@@ -985,7 +985,51 @@ struct TxnMx {
     state: Vec<(Vec<u8>, Option<Bytes>)>,
 }
 
-pub struct Txn {
+/// A transaction: its state (`TxnState`) behind a box, so the session and the commit move a
+/// pointer, not the state's ~1.5 kB (copied three or four times a transaction before:
+/// `ensure_txn`, `finish_txn`, the commit's calls); the box is kept by the thread when the
+/// transaction ends and taken by its next one (`SPARE_TXN`).
+pub struct Txn(std::mem::ManuallyDrop<Box<TxnState>>);
+
+thread_local! {
+    /// An ended transaction's box, its state dropped: the next one begun on the thread goes in it.
+    static SPARE_TXN: std::cell::Cell<Option<Box<std::mem::MaybeUninit<TxnState>>>> = const { std::cell::Cell::new(None) };
+}
+
+impl Txn {
+    fn boxed(state: TxnState) -> Txn {
+        let spare = SPARE_TXN.try_with(|s| s.take()).ok().flatten();
+        let mut b = spare.unwrap_or_else(Box::new_uninit);
+        b.write(state);
+        // SAFETY: written just now.
+        Txn(std::mem::ManuallyDrop::new(unsafe { b.assume_init() }))
+    }
+
+    /// Commit (`TxnState::commit_in`); the transaction ends.
+    pub fn commit(mut self) -> Result<u64> {
+        self.commit_in()
+    }
+
+    /// Roll back (`TxnState::rollback_in`); the transaction ends.
+    pub fn rollback(mut self) {
+        self.rollback_in()
+    }
+}
+
+impl std::ops::Deref for Txn {
+    type Target = TxnState;
+    fn deref(&self) -> &TxnState {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for Txn {
+    fn deref_mut(&mut self) -> &mut TxnState {
+        &mut self.0
+    }
+}
+
+pub struct TxnState {
     /// Lock owner id (every transaction has one).
     pub id: u64,
     /// The Postgres transaction id, once it has one (0: none yet).
@@ -1225,7 +1269,7 @@ impl Sink {
     }
 }
 
-impl Txn {
+impl TxnState {
     /// Whether this transaction's reads take SIRead predicate locks: a serializable one SSI
     /// tracks (not a read-only one on a safe snapshot: `ssi::Ssi::register`).
     pub fn takes_predicate_locks(&self) -> bool {
@@ -1355,7 +1399,7 @@ impl Txn {
     }
 }
 
-impl Txn {
+impl TxnState {
     /// The visible timestamp, pinned (in its session's slot when it has one).
     fn pin_visible(&self) -> SnapshotPin {
         match &self.pin_slot {
@@ -3930,7 +3974,7 @@ impl Txn {
                 .unwrap_or(deferral.1)
     }
 
-    pub fn commit(mut self) -> Result<u64> {
+    pub(crate) fn commit_in(&mut self) -> Result<u64> {
         // (A statement's deferred index entry deletes go in at its end at the latest.)
         self.flush_entry_deletes()?;
         // (Its MultiXact state records go in with its writes.)
@@ -4103,7 +4147,7 @@ impl Txn {
             // deletions and linked runs change rows the writes don't list.)
             db.watch.committing(writes);
             for (k, _) in writes.iter().filter(|w| crate::storage::rdel::is_marker(&w.0)) {
-                db.watch.committing_table(Txn::marker_table(k));
+                db.watch.committing_table(TxnState::marker_table(k));
             }
             for &t in &linked_tables {
                 db.watch.committing_table(t);
@@ -4138,7 +4182,7 @@ impl Txn {
                 // (Too many to log: the structures over its tables are dropped, `watch`.)
                 store_watch.committing_unlogged(k);
                 if crate::storage::rdel::is_marker(k) {
-                    store_watch.committing_table(Txn::marker_table(k));
+                    store_watch.committing_table(TxnState::marker_table(k));
                 }
                 Ok(())
             };
@@ -4222,7 +4266,7 @@ impl Txn {
         persist::writes(&cur, c)
     }
 
-    pub fn rollback(mut self) {
+    pub(crate) fn rollback_in(&mut self) {
         self.finish_xid(false);
         self.release_locks();
         self.ssi_finish(false, 0);
@@ -4436,6 +4480,13 @@ impl Drop for Txn {
             self.db.xids().unexport(self.db.instance, self.id);
         }
         LockRoom::keep(self);
+        // (The box goes to the thread's next transaction, its state dropped.)
+        // SAFETY: the box isn't used again; `TxnState` and `MaybeUninit<TxnState>` share a layout.
+        let b = unsafe { std::mem::ManuallyDrop::take(&mut self.0) };
+        let raw = Box::into_raw(b);
+        unsafe { std::ptr::drop_in_place(raw) };
+        let spare = unsafe { Box::from_raw(raw.cast::<std::mem::MaybeUninit<TxnState>>()) };
+        let _ = SPARE_TXN.try_with(|s| s.set(Some(spare)));
     }
 }
 
@@ -4463,7 +4514,7 @@ impl LockRoom {
         LOCK_ROOM.try_with(|r| r.borrow_mut().take()).ok().flatten().unwrap_or_default()
     }
 
-    fn keep(t: &mut Txn) {
+    fn keep(t: &mut TxnState) {
         if t.locks_held.capacity() > Self::KEEP
             || t.lock_journal.capacity() > Self::KEEP
             || t.row_locks.capacity() > Self::KEEP

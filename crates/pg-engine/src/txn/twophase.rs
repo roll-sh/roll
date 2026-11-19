@@ -319,7 +319,7 @@ pub fn without_writes(b: &[u8], drop: impl Fn(&[u8]) -> bool) -> Result<Option<V
 /// Past every key (a key's first bytes are its relation's oid).
 const ALL_END: &[u8] = &[0xff; 16];
 
-impl Txn {
+impl crate::txn::TxnState {
     /// Whether this is a prepared transaction.
     pub fn is_prepared(&self) -> bool {
         self.prepared

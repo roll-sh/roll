@@ -206,7 +206,7 @@ const ABORT: u8 = b'a';
 /// decoder may have streamed them before it reads the abort), so they are written again as
 /// the aborted subtransactions' (`keep_aborted`); `xids` are the subtransactions aborting,
 /// innermost first, each after those released into it (DecodeAbort's order).
-pub fn rolled_back_to(txn: &mut crate::txn::Txn, from: u32, xids: Vec<u64>) -> Result<Aborted> {
+pub fn rolled_back_to(txn: &mut crate::txn::TxnState, from: u32, xids: Vec<u64>) -> Result<Aborted> {
     let top = txn.xid_if_assigned().unwrap_or(0);
     let Some(log) = txn.log.as_ref() else { return Ok(Aborted { recs: Vec::new(), xids: Vec::new(), grow: 0 }) };
     let mut recs = Vec::new();
@@ -249,7 +249,7 @@ pub fn own_records(txn: &crate::txn::Txn) -> Result<Option<(u64, Vec<Bytes>)>> {
 }
 
 /// `rolled_back_to`'s records written again, and an abort record after them.
-pub fn keep_aborted(txn: &mut crate::txn::Txn, a: Aborted) -> Result<()> {
+pub fn keep_aborted(txn: &mut crate::txn::TxnState, a: Aborted) -> Result<()> {
     if a.recs.is_empty() {
         return Ok(());
     }
