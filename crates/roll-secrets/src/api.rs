@@ -50,6 +50,7 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/backup/schedule"), get(backup_schedule).put(set_backup_schedule).delete(delete_backup_schedule))
         .route(&format!("{P}/restore"), post(restore))
         .route(&format!("{E}/secrets"), get(secrets))
+        .route(&format!("{E}/decoys"), post(add_decoy))
         .route(K, get(secret).put(set_secret).delete(delete_secret))
         .route(&format!("{K}/value"), get(reveal))
         .route(&format!("{K}/totp"), get(totp))
@@ -85,6 +86,7 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route("/v1/secrets/oidc/.well-known/openid-configuration", get(oidc_discovery))
         .route("/v1/secrets/oidc/jwks", get(oidc_jwks))
         .route(&format!("{P}/audit"), get(audit))
+        .route(&format!("{P}/audit/verify"), get(verify_audit))
         .route(&format!("{P}/audit/sinks"), get(sinks).post(create_sink))
         .route(&format!("{P}/audit/sinks/{{id}}"), axum::routing::delete(delete_sink))
         .route(&format!("{P}/leaks"), post(scan_leaks))
@@ -889,6 +891,17 @@ async fn import_dotenv(State(s): S, Who(c): Who, Path((project, env)): Path<(Str
         let existing: std::collections::HashSet<String> = mine.iter().map(|x| x.key.clone()).collect();
         let own: Vec<&crate::Secret> = mine.iter().filter(|x| x.kind == crate::SecretType::Shared).collect();
         let in_file: std::collections::HashSet<String> = entries.iter().map(|e| e.key.clone()).collect();
+        // A sensitive entry adds the tag to what the key has (the tag is never taken off).
+        let tags_of: std::collections::HashMap<&str, &Vec<String>> = own.iter().map(|x| (x.key.as_str(), &x.tags)).collect();
+        let tagged = |e: &dotenv::Entry| {
+            e.sensitive.then(|| {
+                let mut t = tags_of.get(e.key.as_str()).map(|t| t.to_vec()).unwrap_or_default();
+                if !t.iter().any(|x| x == crate::names::SENSITIVE) {
+                    t.push(crate::names::SENSITIVE.to_string());
+                }
+                t
+            })
+        };
         let removed: Vec<Op> = if i.replace {
             own.iter().filter(|x| x.link.is_none() && !in_file.contains(&x.key)).map(|x| Op::Delete { key: x.key.clone(), kind: None, path: None, if_version: None }).collect()
         } else {
@@ -906,10 +919,10 @@ async fn import_dotenv(State(s): S, Who(c): Who, Path((project, env)): Path<(Str
                 keep
             })
             .map(|e| Op::Set {
+                tags: tagged(&e),
                 key: e.key,
                 value: Some(e.value.expose().to_string()),
                 comment: (!e.comment.is_empty()).then_some(e.comment),
-                tags: None,
                 kind: None,
                 link: None,
                 path: None,
@@ -1012,6 +1025,12 @@ async fn create_identity(State(s): S, Who(c): Who, Path(project): Path<String>, 
     Ok(created(blocking(s, move |s| s.create_identity(&project, n, &c)).await?))
 }
 
+/// A decoy key (docs/secrets.md, "Decoys"): answered as the key, never its value.
+async fn add_decoy(State(s): S, Who(c): Who, Path((project, env)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let n: crate::NewDecoy = body(&b)?;
+    Ok(created(blocking(s, move |s| s.add_decoy(&project, &env, n, &c)).await?))
+}
+
 async fn delete_identity(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
     blocking(s, move |s| s.delete_identity(&project, &id, &c)).await?;
     Ok(StatusCode::NO_CONTENT)
@@ -1022,7 +1041,9 @@ async fn delete_identity(State(s): S, Who(c): Who, Path((project, id)): Path<(St
 struct LoginBody {
     identity: String,
     /// The workload's OIDC token (a JWT).
-    token: String,
+    token: Option<String>,
+    /// An AWS identity's signed `sts:GetCallerIdentity` (aws_identity.rs).
+    aws: Option<crate::aws_identity::SignedRequest>,
 }
 
 /// A workload's OIDC token for a short-lived scoped token (public: the token is the credential).
@@ -1051,8 +1072,13 @@ async fn delete_cloud_account(State(s): S, Who(c): Who, Path((project, id)): Pat
 
 async fn login(State(s): S, parts: Parts, b: Bytes) -> crate::Result<Response> {
     let l: LoginBody = body(&b)?;
+    let proof = match (l.token, l.aws) {
+        (Some(t), None) => crate::Proof::Oidc(t),
+        (None, Some(a)) => crate::Proof::Aws(a),
+        _ => return Err(Error::BadRequest("a login carries a token (OIDC) or aws (a signed GetCallerIdentity)".into())),
+    };
     let ip = s.client_ip(&parts);
-    Ok(secret_response(ok(blocking(s, move |s| s.login(&l.identity, &l.token, ip)).await?)))
+    Ok(secret_response(ok(blocking(s, move |s| s.login(&l.identity, proof, ip)).await?)))
 }
 
 async fn required(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
@@ -1100,6 +1126,10 @@ async fn audit(State(s): S, Who(c): Who, Path(project): Path<String>, Query(q): 
         }
         Some(f) => return Err(Error::BadRequest(format!("format is csv or jsonl, not {f}"))),
     })
+}
+
+async fn verify_audit(State(s): S, Who(c): Who, Path(project): Path<String>, Query(q): Query<crate::audit::VerifyQuery>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.verify_audit(&project, q, &c)).await?))
 }
 
 async fn sinks(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {

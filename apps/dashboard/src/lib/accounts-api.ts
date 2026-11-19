@@ -172,11 +172,34 @@ export function activityText(e: Activity, me: string): string {
   return e.ok ? `${e.action} by ${by}` : `${e.action} by ${by} was refused`;
 }
 
+/** A CSV cell: quoted, and a formula character defused with `'` at its start and after a `;`, tab
+ * or `|` (OWASP's CSV injection advice, as roll's audit export does): names and addresses are
+ * people's own text. */
+function csvCell(v: string): string {
+  let out = "";
+  let start = true;
+  for (const c of v) {
+    if (start && "=+-@\t\r".includes(c)) out += "'";
+    out += c;
+    if (";\t|".includes(c)) start = true;
+    else if (c !== " ") start = false;
+  }
+  return `"${out.replace(/"/g, '""')}"`;
+}
+
+/** People as CSV for a spreadsheet (Okta's and Google Workspace's people export): one row each. */
+export function peopleCsv(list: User[]): string {
+  const iso = (ms?: number | null) => (ms == null ? "" : new Date(ms).toISOString());
+  const head = ["handle", "name", "email", "admin", "turned_off", "authenticator_app", "passkeys", "dormant", "last_active", "created"];
+  const rows = list.map((u) => [u.handle, u.name, u.email, String(u.admin), String(u.disabled), String(u.totp), String(u.passkeys ?? 0), String(dormant(u)), iso(u.last_active_at), iso(u.created_at)]);
+  return [head.join(","), ...rows.map((r) => r.map(csvCell).join(","))].join("\n") + "\n";
+}
+
 /** People's filters in the admin list. */
-export type PeopleFilter = "everyone" | "admins" | "no-second-factor" | "turned-off";
+export type PeopleFilter = "everyone" | "admins" | "no-second-factor" | "dormant" | "turned-off";
 
 /** The people matching `query` (name, handle or address, any case) and `filter`. */
-export function findPeople<U extends Pick<User, "name" | "handle" | "email" | "admin" | "disabled" | "totp" | "passkeys">>(list: U[], query: string, filter: PeopleFilter): U[] {
+export function findPeople<U extends Pick<User, "name" | "handle" | "email" | "admin" | "disabled" | "totp" | "passkeys" | "last_active_at" | "created_at">>(list: U[], query: string, filter: PeopleFilter): U[] {
   const q = query.trim().toLowerCase();
   return list.filter((u) => {
     if (q && ![u.name, u.handle, u.email].some((s) => s.toLowerCase().includes(q))) return false;
@@ -185,6 +208,8 @@ export function findPeople<U extends Pick<User, "name" | "handle" | "email" | "a
         return u.admin;
       case "no-second-factor":
         return !u.disabled && !u.totp && !u.passkeys;
+      case "dormant":
+        return dormant(u);
       case "turned-off":
         return u.disabled;
       default:

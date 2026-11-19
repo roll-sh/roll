@@ -61,6 +61,57 @@ pub fn authenticate(cluster: &Cluster, value: &str) -> EsResult<Principal> {
             role_descriptors: k.get("role_descriptors").cloned().unwrap_or_else(Value::object),
             limited_by: k.get("limited_by").cloned().unwrap_or_else(Value::object),
             cross_cluster: k.get("type").and_then(Value::as_str) == Some("cross_cluster"),
+            remote: None,
+        })),
+    })
+}
+
+/// Authenticates a linked remote cluster's request ([`crate::remote::links`]): a
+/// `cross_cluster` key of this cluster (never a REST key), valid and not expired, with the
+/// role descriptor sets of the user it was sent for (`access`, the
+/// [`crate::remote::links::REMOTE_ACCESS_HEADER`]), which limit the key's access.
+pub fn authenticate_link(cluster: &Cluster, value: &str, access: &str) -> EsResult<Principal> {
+    let decoded = super::b64_decode(value).map_err(|e| super::unauthorized_credentials(format!("API key: {e}")))?;
+    let text = String::from_utf8_lossy(&decoded).into_owned();
+    let Some((id, secret)) = text.split_once(':').filter(|(i, s)| !i.is_empty() && !s.is_empty()) else {
+        return Err(super::unauthorized_credentials("API key: invalid ApiKey value"));
+    };
+    // `<id>@<cluster>` names the cluster for the node.
+    let id = id.split_once('@').map_or(id, |(i, _)| i);
+    let st = cluster.state();
+    let refused = || super::unauthorized_credentials(format!("API key: unable to authenticate cross-cluster API key [{id}]"));
+    let Some(k) = st.metadata.xpack.get(KEYS, id) else { return Err(refused()) };
+    if k.get("invalidated").and_then(Value::as_bool) == Some(true)
+        || k.get("expiration").and_then(Value::as_i64).is_some_and(|exp| exp <= crate::time::now_millis())
+        || !super::verify_secret(secret, k.get("hash").and_then(Value::as_str).unwrap_or_default())
+    {
+        return Err(refused());
+    }
+    if let Some(ty) = k.get("type").and_then(Value::as_str).filter(|t| *t != "cross_cluster") {
+        return Err(super::unauthorized(format!("authentication expected API key type of [cross_cluster], but API key [{id}] has type [{ty}]")));
+    }
+    if access.len() > crate::remote::links::MAX_REMOTE_ACCESS {
+        return Err(EsError::illegal_argument("remote access header too large"));
+    }
+    let access = crate::json::parse(access.as_bytes()).ok().flatten().unwrap_or(Value::Null);
+    let roles = access.get("roles").and_then(Value::as_array).cloned().ok_or_else(|| EsError::illegal_argument("invalid remote access header"))?;
+    let who = access.get("who").and_then(Value::as_str).unwrap_or("user []").to_string();
+    Ok(Principal {
+        username: k.get("username").map(Value::to_es_string).unwrap_or_default(),
+        roles: Vec::new(),
+        full_name: k.get("owner_full_name").cloned().unwrap_or(Value::Null),
+        email: k.get("owner_email").cloned().unwrap_or(Value::Null),
+        metadata: k.get("owner_metadata").cloned().unwrap_or_else(Value::object),
+        realm_name: "_es_api_key",
+        realm_type: "_es_api_key",
+        authenticating: None,
+        kind: AuthKind::ApiKey(Box::new(super::ApiKeyAuth {
+            id: id.to_string(),
+            name: k.get("name").cloned().unwrap_or(Value::Null),
+            role_descriptors: k.get("role_descriptors").cloned().unwrap_or_else(Value::object),
+            limited_by: Value::object(),
+            cross_cluster: true,
+            remote: Some(Box::new(super::RemoteUser { roles, who })),
         })),
     })
 }

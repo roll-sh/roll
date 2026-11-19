@@ -1,6 +1,6 @@
 import { Building2, Check, Copy, Fingerprint, KeyRound, LoaderCircle, Monitor, ShieldCheck, UserPlus } from "lucide-react";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { accountsApi, activityText, phishingResistant, sessionMethod, refreshSession, useSession, findPeople, dormant, DORMANT_DAYS, type AccountPolicy, type Activity, type Invite, type NetworkPolicy, type Passkey, type PasskeyPolicy, type Provider, type ResetRequest, type Session, type User, type PeopleFilter } from "@/lib/accounts-api";
+import { accountsApi, peopleCsv, activityText, phishingResistant, sessionMethod, refreshSession, useSession, findPeople, dormant, DORMANT_DAYS, type AccountPolicy, type Activity, type Invite, type NetworkPolicy, type Passkey, type PasskeyPolicy, type Provider, type ResetRequest, type Session, type User, type PeopleFilter } from "@/lib/accounts-api";
 import { creationOptions, credentialJSON, passkeyProblem, passkeysSupported } from "@/lib/webauthn";
 import { Link } from "./link";
 import { GitHubMark, GoogleMark } from "./agents/brand-icons";
@@ -979,10 +979,11 @@ function Users({ me }: { me: string }) {
   const act = (p: Promise<unknown>) => p.then(load, (e) => setError(errorText(e)));
   const [open, setOpen] = useState<string | null>(null);
   const without = (list ?? []).filter((u) => !u.disabled && !u.totp && !u.passkeys).length;
+  const idle = (list ?? []).filter((u) => dormant(u) && u.id !== me).length;
+  const [offering, setOffering] = useState(false);
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<PeopleFilter>("everyone");
   const shown = findPeople(list ?? [], query, filter);
-  const idle = (list ?? []).filter((u) => dormant(u)).length;
   return (
     <Section title="People" lead="Everyone with an account. Turning someone off signs them out everywhere at once.">
       <p className="-mt-1 mb-2 text-[12px] text-muted">
@@ -990,12 +991,49 @@ function Users({ me }: { me: string }) {
         <Link href="/dashboard/access/audit?product=accounts" className="text-accent hover:underline">
           sign-in report
         </Link>{" "}
-        (the audit log, as CSV for a spreadsheet).
+        (the audit log, as CSV for a spreadsheet).{" "}
+        {list && list.length > 0 && (
+          <button
+            onClick={() => {
+              const url = URL.createObjectURL(new Blob([peopleCsv(list)], { type: "text/csv" }));
+              const a = document.createElement("a");
+              a.href = url;
+              a.download = "roll-people.csv";
+              a.click();
+              URL.revokeObjectURL(url);
+            }}
+            className="text-accent hover:underline"
+          >
+            Export people as CSV
+          </button>
+        )}
       </p>
       {error && <p className="mb-2 text-[12px] text-danger">{error}</p>}
       {list && idle > 0 && (
         <p className="mb-2 text-[12px] text-muted">
-          {idle === 1 ? "One person hasn't" : `${idle} people haven't`} used roll in {DORMANT_DAYS} days: turning off accounts nobody uses closes a way in.
+          {idle === 1 ? "One person hasn't" : `${idle} people haven't`} used roll in {DORMANT_DAYS} days: turning off accounts nobody uses closes a way in.{" "}
+          {offering ? (
+            <>
+              <button
+                onClick={() => {
+                  setOffering(false);
+                  // One at a time: each is an admin's change (sudo mode asks once, then holds).
+                  const them = (list ?? []).filter((u) => dormant(u) && u.id !== me);
+                  void them.reduce((p, u) => p.then(() => accountsApi.updateUser(u.id, { disabled: true })), Promise.resolve() as Promise<unknown>).then(load, (e) => setError(errorText(e)));
+                }}
+                className="font-medium text-danger hover:underline"
+              >
+                Turn off {idle === 1 ? "that person" : `all ${idle}`}
+              </button>{" "}
+              <button onClick={() => setOffering(false)} className="hover:text-fg">
+                Cancel
+              </button>
+            </>
+          ) : (
+            <button onClick={() => setOffering(true)} className="text-accent hover:underline">
+              Turn them off…
+            </button>
+          )}
         </p>
       )}
       {list && without > 0 && (
@@ -1010,6 +1048,7 @@ function Users({ me }: { me: string }) {
             <option value="everyone">Everyone</option>
             <option value="admins">Admins</option>
             <option value="no-second-factor">No second factor</option>
+            <option value="dormant">Dormant</option>
             <option value="turned-off">Turned off</option>
           </select>
           <span className="shrink-0 text-[11.5px] tabular-nums text-subtle">

@@ -739,7 +739,8 @@ async fn set_account_policy(State(a): S, me: Me, op: Op, b: Bytes) -> Result<Res
         Some(crate::policy::Whom::Everyone) => "everyone",
         None => "nobody",
     };
-    alert(&a, actor, format!("the sign-in policy changed: a second factor for everyone {}, sessions end after {idle} unused, passkeys required for {passkeys}", on_off(p.require_second_factor))).await;
+    let longest = p.max_session_hours.map_or_else(|| "30 days".to_string(), |h| format!("{h} hours"));
+    alert(&a, actor, format!("the sign-in policy changed: a second factor for everyone {}, sessions end after {idle} unused and {longest} after sign-in, passkeys required for {passkeys}", on_off(p.require_second_factor))).await;
     Ok(Json(p).into_response())
 }
 

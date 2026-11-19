@@ -173,6 +173,19 @@
           "type": "boolean",
           "description": "Raw TCP, not HTTP."
         },
+        "metrics": {
+          "type": "object",
+          "description": "Its own Prometheus endpoint, scraped every 15 s on each running instance: port (default the app's), path (default /metrics)."
+        },
+        "slo": {
+          "type": "object",
+          "description": "Its service level objective: objective (90-99.999) percent of requests not 5xx, and with latency_ms of minutes under it at p95, over window_days (default 28); alert.slo when the error budget burns fast."
+        },
+        "block_on": {
+          "type": "string",
+          "enum": ["critical", "high", "medium", "low"],
+          "description": "Fail a deploy whose image has a known vulnerability this severe or worse, before it goes live (never a rollback)."
+        },
         "rebuild_on_base": {
           "type": "boolean",
           "description": "Build again (same revision, no cache) when a base image moves."
@@ -180,6 +193,61 @@
         "rollback_on_crash": {
           "type": "boolean",
           "description": "Roll back when a new deployment crash-loops."
+        },
+        "sidecars": {
+          "type": "array",
+          "maxItems": 4,
+          "description": "Containers beside each instance, in its network namespace (they reach each other on localhost): a web service's or a worker's.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "image"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "pattern": "^[a-z0-9-]{1,20}$"
+              },
+              "image": {
+                "type": "string",
+                "description": "Pinned to its digest with each deployment."
+              },
+              "command": {
+                "type": "string",
+                "description": "Run as sh -c instead of the image's own."
+              },
+              "env": {
+                "type": "object",
+                "maxProperties": 50,
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "description": "Plain settings, shown as they are: never a secret."
+              },
+              "variables": {
+                "type": "array",
+                "maxItems": 50,
+                "items": {
+                  "type": "string"
+                },
+                "description": "The environment's own variables it gets, by name (its secrets too)."
+              },
+              "cpu": {
+                "type": "number",
+                "minimum": 0.1,
+                "maximum": 2,
+                "description": "Default 0.25, metered with the instance."
+              },
+              "memory_mb": {
+                "type": "integer",
+                "minimum": 64,
+                "maximum": 4096,
+                "description": "Default 128, metered with the instance."
+              }
+            }
+          }
         },
         "schedules": {
           "type": "array",

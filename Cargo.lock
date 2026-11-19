@@ -277,6 +277,7 @@ dependencies = [
  "aho-corasick",
  "anyhow",
  "apps-build",
+ "argon2",
  "async-trait",
  "aws-config",
  "aws-sdk-cloudwatchlogs",
@@ -327,6 +328,7 @@ dependencies = [
  "tower",
  "tracing",
  "url",
+ "zeroize",
  "zip",
 ]
 
@@ -6978,6 +6980,7 @@ dependencies = [
  "futures",
  "getrandom 0.4.3",
  "hkdf",
+ "hmac 0.12.1",
  "ignore",
  "libc",
  "model-gateway",
@@ -6995,8 +6998,10 @@ dependencies = [
  "roll-cluster",
  "roll-fetch",
  "roll-gateway",
+ "roll-keyshares",
  "roll-previews",
  "roll-secrets",
+ "roll-secrets-chain",
  "roll-workspace",
  "rustls-pemfile",
  "rustyline",
@@ -7114,6 +7119,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "roll-keyshares"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "getrandom 0.4.3",
+ "sha2 0.10.9",
+ "thiserror",
+ "zeroize",
+]
+
+[[package]]
 name = "roll-mcp"
 version = "0.1.0"
 dependencies = [
@@ -7213,7 +7229,9 @@ dependencies = [
  "regex",
  "ring",
  "roll-auth",
+ "roll-keyshares",
  "roll-oidc",
+ "roll-secrets-chain",
  "roll-workspace",
  "rsa",
  "serde",
@@ -7230,6 +7248,17 @@ dependencies = [
  "x509-ocsp",
  "x509-parser",
  "zeroize",
+]
+
+[[package]]
+name = "roll-secrets-chain"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "ring",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
 ]
 
 [[package]]
@@ -7332,6 +7361,7 @@ dependencies = [
  "roll-cluster",
  "roll-edge",
  "roll-gateway",
+ "roll-keyshares",
  "roll-mcp",
  "roll-net",
  "roll-oidc",
