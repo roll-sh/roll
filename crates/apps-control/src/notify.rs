@@ -553,7 +553,7 @@ impl Apps {
             "discord" => json!({ "content": format!("**{title}**\n{text}{}", link.as_ref().map(|l| format!("\n{l}")).unwrap_or_default()), "allowed_mentions": { "parse": [] } }),
             // An Adaptive Card (what Teams' Workflows take): its text is never a mention.
             "teams" => {
-                let body = [json!({ "type": "TextBlock", "text": title, "weight": "Bolder", "wrap": true }), json!({ "type": "TextBlock", "text": text, "wrap": true })];
+                let body = [json!({ "type": "TextBlock", "text": teams_escape(title), "weight": "Bolder", "wrap": true }), json!({ "type": "TextBlock", "text": teams_escape(text), "wrap": true })];
                 let actions = link.as_ref().map(|l| vec![json!({ "type": "Action.OpenUrl", "title": "Open in roll", "url": l })]).unwrap_or_default();
                 json!({ "type": "message", "attachments": [{ "contentType": "application/vnd.microsoft.card.adaptive", "content": { "$schema": "http://adaptivecards.io/schemas/adaptive-card.json", "type": "AdaptiveCard", "version": "1.4", "body": body, "actions": actions } }] })
             }
@@ -668,6 +668,12 @@ fn slack_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
+/// An Adaptive Card's text renders Markdown links (`[Approve](https://…)`): a commit author's
+/// name or an error can't make one (a zero-width space between `]` and `(`; nothing shows).
+fn teams_escape(s: &str) -> String {
+    s.replace("](", "]\u{200B}(")
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -677,6 +683,11 @@ mod tests {
         assert!(super::wants(&ev(&["audit"]), "audit.variables", &data, false));
         assert!(!super::wants(&ev(&["audit"]), "audit.variables", &data, true), "never an on-call page");
         assert!(!super::wants(&super::DEFAULT_EVENTS.map(String::from), "audit.variables", &data, false), "not by default");
+    }
+
+    #[test]
+    fn a_teams_card_can_not_link() {
+        assert!(!super::teams_escape("[Approve](https://evil)").contains("]("));
     }
 
     #[test]

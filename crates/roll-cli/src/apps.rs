@@ -42,6 +42,9 @@ pub struct Up {
     /// dependency caches empty from here on.
     #[arg(long)]
     pub no_cache: bool,
+    /// Deploy during the environment's deploy freeze (said in the deployment and the audit log).
+    #[arg(long = "override")]
+    pub override_freeze: bool,
     /// Every service and database the directory's roll.toml declares (`[apps.<name>]`,
     /// `[databases.<name>]`): made where missing, linked, and deployed. The plan is printed
     /// first.
@@ -77,6 +80,9 @@ pub struct Deploy {
     /// dependency caches empty from here on (for a build a stale cache keeps breaking).
     #[arg(long)]
     pub no_cache: bool,
+    /// Deploy during the environment's deploy freeze (said in the deployment and the audit log).
+    #[arg(long = "override")]
+    pub override_freeze: bool,
     #[arg(long, short = 'd')]
     pub detach: bool,
 }
@@ -662,6 +668,9 @@ pub enum AppsCmd {
         /// Keep today's variables (by default they come back as they were when it was live).
         #[arg(long)]
         keep_variables: bool,
+        /// Put a build live that never was (one held at ready) during a deploy freeze.
+        #[arg(long = "override")]
+        override_freeze: bool,
     },
     /// Variables: list (masked), `--reveal`, or change with `KEY=value` and `-u KEY`.
     Vars {
@@ -1947,6 +1956,9 @@ pub async fn up(api: &Api, json_out: bool, u: Up) -> anyhow::Result<()> {
     if u.no_cache {
         req = req.header("x-roll-no-cache", "1");
     }
+    if u.override_freeze {
+        req = req.header("x-roll-override", "1");
+    }
     // The message: the one given, else the checkout's last commit (said to have local changes
     // when the tree isn't clean), percent-encoded since a subject needn't be ASCII.
     let message = u.message.clone().or_else(|| git.as_ref().map(|(_, subject, dirty)| if *dirty { format!("{subject} (with local changes)") } else { subject.clone() }));
@@ -2256,6 +2268,9 @@ async fn up_all(api: &Api, json_out: bool, dir: &Path, u: &Up) -> anyhow::Result
                 if u.no_cache {
                     req = req.header("x-roll-no-cache", "1");
                 }
+                if u.override_freeze {
+                    req = req.header("x-roll-override", "1");
+                }
                 if let Some(m) = &u.message {
                     req = req.header("x-roll-message", urlencoding::encode(m).into_owned());
                 }
@@ -2320,7 +2335,7 @@ pub async fn deploy(api: &Api, json_out: bool, d: Deploy) -> anyhow::Result<()> 
     let dep = if d.local_image.is_some() || d.image_file.is_some() {
         upload_image(api, &svc, &d).await?
     } else {
-        let body = json!({ "revision": d.revision, "image": d.image, "no_traffic": d.no_traffic.then_some(true), "no_cache": d.no_cache.then_some(true) });
+        let body = json!({ "revision": d.revision, "image": d.image, "no_traffic": d.no_traffic.then_some(true), "no_cache": d.no_cache.then_some(true), "override": d.override_freeze.then_some(true) });
         api.post(&format!("{}/deploys", env_path(&svc, &d.target.env)), body).await?
     };
     if json_out || d.detach {
@@ -2347,6 +2362,9 @@ async fn upload_image(api: &Api, svc: &Value, d: &Deploy) -> anyhow::Result<Valu
     anyhow::ensure!(bytes.len() <= MAX, "the image is {} MiB: at most {} MiB goes up this way (push it to a registry and deploy it with --image)", bytes.len() >> 20, MAX >> 20);
     eprintln!("uploading {} MiB…", bytes.len() >> 20);
     let mut req = api.http.post(format!("{}{}/deploys", api.base, env_path(svc, &d.target.env))).header("content-type", "application/x-docker-image").body(bytes);
+    if d.override_freeze {
+        req = req.header("x-roll-override", "1");
+    }
     if let Some(k) = &api.key {
         req = req.bearer_auth(k);
     }
@@ -3402,14 +3420,14 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             dep
         }
-        AppsCmd::Rollback { deployment, target, keep_variables } => {
+        AppsCmd::Rollback { deployment, target, keep_variables, override_freeze } => {
             let svc = service(api, &target).await?;
             // No id: the server picks the one before what's live, walking back through rollbacks.
             let path = match &deployment {
                 Some(d) => format!("{}/deploys/{}/rollback", env_path(&svc, &target.env), enc(d)),
                 None => format!("{}/rollback", env_path(&svc, &target.env)),
             };
-            let dep = api.post(&path, json!({ "keep_variables": keep_variables })).await?;
+            let dep = api.post(&path, json!({ "keep_variables": keep_variables, "override": override_freeze.then_some(true) })).await?;
             if deployment.is_none() && !json_out {
                 eprintln!("rolling back to {}", s(&dep["rollback_of"]));
             }

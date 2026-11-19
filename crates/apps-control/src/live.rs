@@ -293,12 +293,14 @@ pub struct Served {
     pub errors: u64,
     /// Its instances that crashed or failed their health check (no request sees those).
     pub crashes: u64,
-    /// Its answers' times: how many in each of [`LAT_BUCKETS`] buckets of √2 steps (ms).
+    /// Its answers' times (to their headers): how many in each of [`LAT_BUCKETS`] buckets of
+    /// 2^¼ steps (ms, about 19% each).
     pub lat: [u32; LAT_BUCKETS],
 }
 
-/// Buckets of a step's answer times: bucket `i` holds up to √2^(i+1) ms (the last, the rest).
-pub const LAT_BUCKETS: usize = 48;
+/// Buckets of a step's answer times: bucket `i` holds up to 2^((i+1)/4) ms (the last, the
+/// rest: past 16 s).
+pub const LAT_BUCKETS: usize = 96;
 
 impl Default for Served {
     fn default() -> Self {
@@ -313,11 +315,11 @@ impl Served {
 
     /// One answer that took `ms`.
     pub fn took(&mut self, ms: f64) {
-        let i = if ms <= 1.0 { 0 } else { ((ms.log2() * 2.0).ceil() as usize).saturating_sub(1).min(LAT_BUCKETS - 1) };
+        let i = if ms <= 1.0 { 0 } else { ((ms.log2() * 4.0).ceil() as usize).saturating_sub(1).min(LAT_BUCKETS - 1) };
         self.lat[i] = self.lat[i].saturating_add(1);
     }
 
-    /// Its answers' p95 (the bucket's top, ms), when it timed any.
+    /// Its answers' p95 (ms, read between its bucket's ends by rank), when it timed any.
     pub fn p95_ms(&self) -> Option<f64> {
         let n: u64 = self.lat.iter().map(|&c| c as u64).sum();
         if n == 0 {
@@ -326,10 +328,11 @@ impl Served {
         let want = (n as f64 * 0.95).ceil() as u64;
         let mut seen = 0;
         for (i, &c) in self.lat.iter().enumerate() {
-            seen += c as u64;
-            if seen >= want {
-                return Some(2f64.powf((i + 1) as f64 / 2.0));
+            if c > 0 && seen + c as u64 >= want {
+                let (lo, hi) = (if i == 0 { 0.0 } else { 2f64.powf(i as f64 / 4.0) }, 2f64.powf((i + 1) as f64 / 4.0));
+                return Some(lo + (hi - lo) * (want - seen) as f64 / c as f64);
             }
+            seen += c as u64;
         }
         None
     }
