@@ -260,16 +260,27 @@ function Visitors({ a }: { a: Analytics }) {
     { title: "Pages", rows: a.pages.map((p) => ({ label: p.path, n: p.views })) },
     { title: "Referrers", rows: a.referrers.map((r) => ({ label: r.host, n: r.views })) },
     { title: "Countries", rows: a.countries.map((c) => ({ label: c.country, n: c.views })) },
+    { title: "Campaigns", rows: (a.campaigns ?? []).map((c) => ({ label: [c.source, c.medium, c.campaign].filter(Boolean).join(" / "), n: c.views })) },
+    { title: "Devices", rows: (a.devices?.classes ?? []).map((d) => ({ label: d.class, n: d.views })) },
+    { title: "Browsers", rows: (a.devices?.browsers ?? []).map((b) => ({ label: b.browser, n: b.views })) },
+    {
+      title: "Events",
+      rows: (a.events ?? []).map((e) => {
+        const [k, values] = Object.entries(e.props)[0] ?? [];
+        return { label: k && values?.[0] ? `${e.name} · ${k}: ${values[0].value}` : e.name, n: e.count };
+      }),
+    },
   ];
   return (
     <section className={`${panel} overflow-hidden`} aria-label="Visitors">
       <div className="border-b border-line px-4 py-2.5">
         <p className="text-[12px] text-muted">
-          Visitors <span className="text-subtle">· {count(a.visitors)} visitors, {count(a.page_views)} page views{a.cut ? ", the newest read" : ""}; from the access log, no script or cookie</span>
+          Visitors <span className="text-subtle">· {count(a.visitors)} visitors, {count(a.page_views)} page views{a.cut ? ", the newest read" : ""}; from the access log, no script or cookie (events: <code className="font-mono">roll.track()</code> from /__roll/track.js)</span>
         </p>
       </div>
       <div className="grid gap-px bg-line sm:grid-cols-3">
-        {lists.map((l) => (
+        {/* Pages, referrers and countries always; the rest once there's something to show. */}
+        {lists.filter((l, i) => i < 3 || l.rows.length > 0).map((l) => (
           <div key={l.title} className="bg-panel px-4 py-3">
             <p className="mb-2 text-[11px] font-medium uppercase tracking-[0.06em] text-subtle">{l.title}</p>
             {l.rows.length === 0 ? (

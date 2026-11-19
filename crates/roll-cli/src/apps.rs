@@ -3468,7 +3468,13 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             let a = api.get(&format!("{}/analytics?minutes={minutes}", env_path(&svc, &target.env))).await?;
             if !json_out {
                 println!("{} visitors, {} page views over {} minutes{}", a["visitors"], a["page_views"], a["minutes"], if a["cut"] == true { " (the newest requests read)" } else { "" });
-                for (title, list, key) in [("pages", &a["pages"], "path"), ("referrers", &a["referrers"], "host"), ("countries", &a["countries"], "country")] {
+                for (title, list, key) in [
+                    ("pages", &a["pages"], "path"),
+                    ("referrers", &a["referrers"], "host"),
+                    ("countries", &a["countries"], "country"),
+                    ("devices", &a["devices"]["classes"], "class"),
+                    ("browsers", &a["devices"]["browsers"], "browser"),
+                ] {
                     let rows = list.as_array().cloned().unwrap_or_default();
                     if rows.is_empty() {
                         continue;
@@ -3476,6 +3482,19 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                     println!("\n{title}");
                     for r in rows.iter().take(10) {
                         println!("  {:>7}  {}", r["views"], s(&r[key]));
+                    }
+                }
+                if let Some(rows) = a["campaigns"].as_array().filter(|r| !r.is_empty()) {
+                    println!("\ncampaigns (source / medium / campaign)");
+                    for r in rows.iter().take(10) {
+                        println!("  {:>7}  {} / {} / {}", r["views"], s(&r["source"]), s(&r["medium"]), s(&r["campaign"]));
+                    }
+                }
+                if let Some(rows) = a["events"].as_array().filter(|r| !r.is_empty()) {
+                    println!("\nevents");
+                    for r in rows.iter().take(10) {
+                        let props: Vec<String> = r["props"].as_object().into_iter().flatten().filter_map(|(k, v)| Some(format!("{k}: {}", s(&v.as_array()?.first()?["value"])))).collect();
+                        println!("  {:>7}  {}{}", r["count"], s(&r["name"]), if props.is_empty() { String::new() } else { format!("  ({})", props.join(", ")) });
                     }
                 }
                 return Ok(());

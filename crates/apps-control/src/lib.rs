@@ -54,6 +54,7 @@ pub mod store;
 pub mod traces;
 pub mod visit;
 pub mod vitals;
+pub mod track;
 pub mod traffic;
 
 use integrations::{DomainTls, Resolver, Resources, SecretSource, Sources};
@@ -261,6 +262,8 @@ pub struct Apps {
     visits: Mutex<HashMap<String, visit::Seen>>,
     /// Web Vitals beacons kept this minute, by environment: (minute, count).
     pub(crate) vitals_seen: Mutex<HashMap<String, (i64, u32)>>,
+    /// Custom events taken this minute, per environment ([`track`]).
+    pub(crate) events_seen: Mutex<HashMap<String, (i64, u32)>>,
     /// When each environment's log was last looked at for new errors ([`errors`]).
     pub(crate) errors_seen: Mutex<HashMap<String, i64>>,
     /// Manual rollouts waiting for a person, by deployment: what they say, and the wake.
@@ -489,6 +492,7 @@ impl Apps {
             access_gen: std::sync::atomic::AtomicU64::new(0),
             visits: Mutex::new(HashMap::new()),
             vitals_seen: Mutex::new(HashMap::new()),
+            events_seen: Mutex::new(HashMap::new()),
             errors_seen: Mutex::new(HashMap::new()),
             rollout_waits: Mutex::new(HashMap::new()),
             calling: Mutex::new(std::collections::HashSet::new()),
