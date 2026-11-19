@@ -11683,7 +11683,8 @@ on top of the other on base `3d30eb71e` (each against its parent: plain dist, 3 
 pairs, 5 runs a query in one `perf stat` window a pass, ONE pair per `tools/lane.sh c` hold),
 then rebased without conflict onto `99abdc240` and handed in as stacked candidates: `cand/a258`
 (this section and the first change), `cand/a258-2` ... `cand/a258-6`, each on the one before it
-(the later ones depend on the earlier only textually: shared files).
+(the later ones depend on the earlier only textually: shared files), and `cand/a258-7` (a scan's
+mask copied only where it is read, and this section's last tables).
 
 **Lane C was never quiet in this round** (18:00 through the night): other sessions' unpinned builds ran on
 the lane's CPUs (gpass's foreign load 0.9-3.1 cores an engine pass, lane.sh's 1.3-7.9; host load
@@ -11696,8 +11697,23 @@ are marked in BENCH.
 - **The same-day tables** (four rotated rounds each; instructions are the measure, see above):
   before, at `3d30eb71e` (pass foreign load 1.5-3.1 engine, 3.9-7.3 references): user
   instructions over the 22, PostgreSQL 159.5 G, pgrust 89.5 G, plain 120.7 G (1.35x pgrust),
-  PGO 107.1 G (1.20x pgrust). The table after the round, the PGO training and lane A come in
-  `cand/a258-7`'s additions to this section.
+  PGO 107.1 G (1.20x pgrust). After, at `c4ad9402d` (origin's head before the rebase; the
+  commits between it and `99abdc240` are bulk-write paths) against the round's stack there
+  (`e974a84e1`, three rotated rounds of PostgreSQL, pgrust, b1 / pb1 the base and f2 / pf2 the
+  stack, plain dist and PGO; the PGO builds trained as `tools/pgo-train.sh` was, SF 0.2):
+  user instructions over the 22, plain 120.7 -> 113.4 G (-6.0%), PGO 106.5 -> 103.9 G (-2.4%);
+  PostgreSQL 159.5 G, pgrust 88.8 G: the stack 1.28x pgrust plain and 1.17x PGO (from 1.36x and
+  1.20x). Per query, plain: q22 1.64 -> 0.92 G, q19 0.94 -> 0.53, q04 3.76 -> 2.17, q01 9.05 ->
+  7.83, q08 2.01 -> 1.79, q06 6.20 -> 5.63, q15 5.67 -> 5.22, q09 11.54 -> 11.07, q13 7.49 ->
+  7.15, q12 6.62 -> 6.35. Under the SF 0.2 profile PGO gives back part of it where the code is new
+  (q01 8.18 G PGO against 7.83 plain, q06 5.71 against 5.63, q12 6.54 against 6.35, q15 5.38
+  against 5.22): the profile trained none of the new batch code at the benchmarked scale, which
+  the SF 1 training below measures. Wall sums of the night (no pass under 1.0 foreign core:
+  roll's 1.0-2.7, the references' readings 3.0-7.3): PostgreSQL 20.27 s, pgrust 12.42, b1 11.68,
+  pb1 11.07, f2 12.73, pf2 11.61; CPU s 51.6, 19.8, 29.1, 27.3, 30.7, 27.8. Still above
+  PostgreSQL's wall in this table (PGO stack): q02 0.554 / 0.428 s, q20 0.335 / 0.136, q11 0.171
+  / 0.151, q16 0.469 / 0.405, q08 0.284 / 0.270, q22 0.142 / 0.131, q07 0.528 / 0.510; level q04,
+  q13. Every pass's 22 result hashes are PostgreSQL's.
 - **Whole-run profile of the plain base** (one pass after a warm-up, `perf record -e
   instructions:u`, classes by `~/.cache/a258/scripts/classify.py`): 120.5 G; row decode 28.1%
   (`Pre::decode` 14.2, `LazyBuf::read` 2.2, `decode_value` 1.9, `decode_row_need_spare` 1.7,
@@ -11759,16 +11775,34 @@ are marked in BENCH.
   plain at `3d30eb71e`: q04 0.86, q19 0.83, q14 0.83, q08 0.85, q22 0.85; before agent 251's
   round 0.77, 0.77, 0.80, 0.81, 0.79). `tools/pgo-train.sh` trains TPC-H at SF 0.2. Trained at
   SF 1 instead (same instrumented build, `~/.cache/a258/scripts/pgoexp.sh`; training 755 s
-  against 422): `cand/a258-7`.
+  against 422), against the SF 0.2 profile (3 pairs of PGO builds of `3d30eb71e`): q04 -9.5 / -9.3
+  / -9.4% user instructions, q19 -6.1 x3, q22 -2.8 / -2.9 / -3.3, q08 -1.8 / -1.8 / -1.7, q09 -1.6
+  / -1.7 / -1.7, q14 -0.9 to -1.8, q13 -0.9 to -2.3, q03 -1.2 to -1.7, q18 / q01 / q06 -0.3 to
+  -0.9, q21 0.0 to -0.2; the 12 measured -1.47%. So the training's scale was it. Not handed in:
+  lane A's point selects with the two PGO builds (1 client, 4 pairs, all over 2.0 foreign cores)
+  came out +4.8 / -2.9 / +2.4 / +9.5% user instructions a select (cycles -3.3% median): the OLTP
+  classes' share of the profile's counts falls as TPC-H's grows, and the +0.3% bound can't be
+  shown on this lane. The change (`b tpch-load --sf 1`) is
+  `~/.cache/a258/patches/pgo-train-tpch-sf1.patch`; next: train SF 1 with the OLTP classes'
+  weight kept (`llvm-profdata merge -weighted-input`, as the breadth phase is merged), gated on a
+  quiet lane A.
 - Tests: golden `a258_batch_keys_lanes`, `a258_join_rows`, `a258_substr_any`, `a258_late_rows`
   (recorded from PostgreSQL 18.6). `tools/quick-check.sh` with `QC_CHECKED=1` green on the stack
-  at `e974a84e1` (on `c4ad9402d`) and on the rebased `f65116a28` (on `99abdc240`): Clippy none new, 434
+  at `e974a84e1` (on `c4ad9402d`), on the rebased `f65116a28` (on `99abdc240`) and on
+  `cand/a258-7`'s code (`99beb43f2`, which also had the training change below): Clippy none new, 434
   tests in 28 binaries, crash seeds 1-3 x 2 and the power cut, the checked stage 434, regression
   51,148 / 51,150 none newly differing, isolation 1,647 / 1,648, pg_dump TAP 14,609; every golden
   file also with `--profile verify-checked`. Every gate pass's 22 result hashes are PostgreSQL's.
-- Lane A, point selects (`cand/a258-7`): none of the six changes is on a point read's path (parallel
-  scans' batch kernels, the parallel pipeline's joined rows, the serial seq scan's filter path,
-  LIKE).
+- **Lane A, point selects: not settled.** The lane was free but never quiet (every pair 1.05-3.6
+  foreign cores): 8 clients, b1 against f2 (the stack at `e974a84e1`), 4 pairs: -0.9 / -1.5 /
+  +11.7 / +1.6% user instructions a select; 1 client, 5 pairs: -12.7 / -1.3 / -0.9 / -5.2 / +6.8.
+  In process instead (the release bench client of each commit, 1 client, the session thread's
+  user instructions over 14 s less 4 s of selects): base 38,025 / 38,948 / 37,578 a select, the
+  stack 37,624 / 39,504 / 37,995 (medians -0.1%, a spread of +-2.5% from run to run: the +0.3%
+  bound can't be shown either way). The stack's only change on a point read's path was
+  cand/a258-5's: every scan with a column mask copied the mask of what the nodes above read
+  (`ScanNode::above`, one allocation a scan); `cand/a258-7` copies it only for a filtered
+  sequential scan, the one place it is read, so an index scan does no more work than before.
 - Compared with PostgreSQL line by line (EXPLAIN (ANALYZE, BUFFERS) in `~/.cache/a258/notes/`):
   q20, q11, q22 and q02 run PostgreSQL's plans node for node with its loop counts (q20: 2,083
   index searches of partsupp_pkey, 8,332 SubPlan runs over lineitem's (partkey, suppkey) index;
