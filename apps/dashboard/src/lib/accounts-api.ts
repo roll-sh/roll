@@ -349,6 +349,8 @@ export const accountsApi = {
   invites: () => call<Invite[]>("GET", "/invites"),
   invite: (email: string, opts: { admin?: boolean; handle?: string } = {}) => call<Invite & { token: string; url: string }>("POST", "/invites", { email, ...opts }),
   revokeInvite: (id: string) => call<null>("DELETE", `/invites/${encodeURIComponent(id)}`),
+  /** A fresh link for an unused invite (another 7 days, mailed again); the old link stops. */
+  resendInvite: (id: string) => call<Invite & { token: string; url: string }>("POST", `/invites/${encodeURIComponent(id)}/resend`),
   users: () => call<User[]>("GET", "/users"),
   updateUser: (id: string, patch: { admin?: boolean; disabled?: boolean }) => call<User>("PATCH", `/users/${encodeURIComponent(id)}`, patch),
   signOutUser: (id: string) => call<null>("DELETE", `/users/${encodeURIComponent(id)}/sessions`),

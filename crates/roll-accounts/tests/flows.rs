@@ -276,6 +276,19 @@ async fn an_invite_becomes_a_session_by_email_code() {
 
     let a = env.call(&mut b, Method::POST, "/v1/accounts/invites/peek", Some(json!({ "token": token }))).await;
     assert_eq!(a.json["email"], "ada@example.com");
+    // Resent (a lost mail): a fresh link, and the old one stops, a sign-in begun with it too.
+    let sent = count_codes(&env.outbox, "ada@example.com");
+    let begun = env.call(&mut Browser::default(), Method::POST, "/v1/accounts/email/start", Some(json!({ "email": "ada@example.com", "invite": token }))).await.json["challenge"].as_str().unwrap().to_string();
+    let early = env.code_for("ada@example.com", sent).await;
+    let list = env.operator(Method::GET, "/v1/accounts/invites", json!({})).await.json;
+    let id = list.as_array().unwrap().iter().find(|i| i["email"] == "ada@example.com").unwrap()["id"].as_str().unwrap().to_string();
+    let again = env.operator(Method::POST, &format!("/v1/accounts/invites/{id}/resend"), json!({})).await;
+    assert_eq!(again.status, StatusCode::OK, "{}", again.json);
+    let old = token;
+    let token = again.json["token"].as_str().unwrap().to_string();
+    assert_eq!(env.call(&mut b, Method::POST, "/v1/accounts/invites/peek", Some(json!({ "token": old }))).await.status, StatusCode::NOT_FOUND);
+    let late = env.call(&mut Browser::default(), Method::POST, "/v1/accounts/email/verify", Some(json!({ "challenge": begun, "code": early }))).await;
+    assert_eq!(late.json["code"], "bad_code", "a sign-in begun with the old link: {}", late.json);
     let a = env.email_sign_in(&mut b, "ada@example.com", Some(&token)).await;
     assert_eq!((a.status, a.json["status"].as_str()), (StatusCode::OK, Some("signed_in")), "{}", a.json);
     assert_eq!((a.json["user"]["handle"].as_str(), a.json["user"]["admin"].as_bool()), (Some("ada"), Some(false)));

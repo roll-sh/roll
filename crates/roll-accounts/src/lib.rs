@@ -1015,6 +1015,34 @@ impl Accounts {
         Ok(self.db.read(|c| c.query("SELECT id, email, admin, handle, created_by, created_at, expires_at, used_at, used_by FROM invites ORDER BY created_at DESC, id", (), invite_row))?)
     }
 
+    /// A fresh link for unused invite `id`, valid another 7 days; the old link stops at once (its
+    /// hash is replaced in the same write).
+    pub fn resend_invite(&self, id: &str) -> Result<(Invite, String, String)> {
+        let token = new_token("rli");
+        let now = self.db.now_ms()?;
+        self.db.write(|c| {
+            let used = c.query_row("SELECT used_at FROM invites WHERE id = ?", [id], |r| r.get::<_, Option<i64>>(0)).optional()?;
+            match used {
+                None => Err(Error::NotFound(format!("no invite {id}"))),
+                Some(Some(_)) => Err(Error::Conflict("the invite is used".into())),
+                Some(None) => {
+                    let email: String = c.query_row("SELECT email FROM invites WHERE id = ?", [id], |r| r.get(0))?;
+                    if c.query_row("SELECT 1 FROM users WHERE email = ?", [email.as_str()], |_| Ok(())).optional()?.is_some() {
+                        return Err(Error::Conflict(format!("an account has {email}")));
+                    }
+                    c.execute("UPDATE invites SET token_hash = ?, expires_at = ? WHERE id = ? AND used_at IS NULL", params![sha256_hex(&token), now + INVITE_TTL_MS, id])?;
+                    // Sign-ins already started with the old link stop too: they hold the invite's id.
+                    c.execute("DELETE FROM email_codes WHERE invite_id = ?", [id])?;
+                    c.execute("DELETE FROM oauth_states WHERE invite_id = ?", [id])?;
+                    Ok(())
+                }
+            }
+        })?;
+        let invite = self.invites()?.into_iter().find(|i| i.id == id).ok_or_else(|| Error::NotFound(format!("no invite {id}")))?;
+        let url = format!("{}/signin?invite={token}", self.config.web_url);
+        Ok((invite, token, url))
+    }
+
     pub fn revoke_invite(&self, id: &str) -> Result<()> {
         self.db.write(|c| {
             let used = c.query_row("SELECT used_at FROM invites WHERE id = ?", [id], |r| r.get::<_, Option<i64>>(0)).optional()?;
