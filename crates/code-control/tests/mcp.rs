@@ -136,6 +136,11 @@ async fn transport_sessions_and_protocol() {
         assert_eq!(t["inputSchema"]["additionalProperties"], false, "{}", t["name"]);
         let read_only = READ_ONLY.contains(&t["name"].as_str().unwrap());
         assert_eq!(t["annotations"]["readOnlyHint"], read_only, "{}", t["name"]);
+        // A model provider or a branch's remote is outside roll; a repo's own reads and writes aren't.
+        let open = ["request_ai_review", "create_agent_thread", "publish_agent_thread"].contains(&t["name"].as_str().unwrap());
+        if open || ["read_file", "land", "comment"].contains(&t["name"].as_str().unwrap()) {
+            assert_eq!(t["annotations"]["openWorldHint"], open, "{}", t["name"]);
+        }
     }
     assert_eq!(c.rpc("ping", json!({})).await["result"], json!({}));
     assert_eq!(c.rpc("nope/method", json!({})).await["error"]["code"], -32601);
