@@ -1,13 +1,15 @@
 import { Database, KeyRound, Pencil, Plus, Trash2 } from "lucide-react";
 import { useState } from "react";
 import type { OutsideDatabase } from "@/lib/secrets-api";
+import { GatewayPicker } from "./gateways";
 import { useSecrets } from "./secrets-page";
-import { ActorMark, ago, button, card, dangerButton, ErrorNote, errorText, field, ghost, primary, Section, useLoad } from "./ui";
+import { ActorMark, ago, button, card, dangerButton, ErrorNote, errorText, field, ghost, primary, Section, textareaField, useLoad } from "./ui";
 
 const ROLE = /^[a-z_][a-z0-9_]{0,62}$/;
 
 /**
- * Databases outside roll (docs/secrets.md, "Databases outside roll"): Postgres, MySQL, Redis and MongoDB servers roll
+ * Databases outside roll (docs/secrets.md, "Databases outside roll"): Postgres, MySQL, SQL Server, ClickHouse,
+ * RabbitMQ, Redis, MongoDB, Elasticsearch/OpenSearch and Cassandra/ScyllaDB servers roll
  * rotates logins on itself. Two roles take turns (managed links), so the one in use keeps working
  * through the grace period while the other gets a new password; a group role gives each dynamic
  * lease a login of its own.
@@ -21,6 +23,7 @@ export function OutsideDatabases() {
   const [roles, setRoles] = useState<[string, string]>(["", ""]);
   const [group, setGroup] = useState("");
   const [ca, setCa] = useState("");
+  const [gateway, setGateway] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
@@ -30,19 +33,20 @@ export function OutsideDatabases() {
   const pair = roles.every((r) => ROLE.test(r)) && roles[0] !== roles[1];
   const noPair = roles.every((r) => r === "");
   const groupOk = group === "" ? !noPair : ROLE.test(group) && !roles.includes(group);
-  const ok = /^[A-Za-z0-9_-]{1,64}$/.test(name) && /^(postgres(ql)?|mysql|rediss?|sqlserver|clickhouse|rabbitmq|mongodb(\+srv)?):\/\/\S+@\S+/.test(url.trim()) && (pair || noPair) && groupOk;
+  const ok = /^[A-Za-z0-9_-]{1,64}$/.test(name) && /^(postgres(ql)?|mysql|rediss?|sqlserver|clickhouse|rabbitmq|mongodb(\+srv)?|elasticsearch|opensearch|cassandra):\/\/\S+@\S+/.test(url.trim()) && (pair || noPair) && groupOk;
 
   const add = async () => {
     setBusy(true);
     setError(null);
     try {
-      await api.addOutsideDatabase({ name, url: url.trim(), roles: noPair ? [] : roles, group: group || undefined, ca: ca.trim() || undefined });
+      await api.addOutsideDatabase({ name, url: url.trim(), roles: noPair ? [] : roles, group: group || undefined, ca: ca.trim() || undefined, gateway: gateway || undefined });
       setAdding(false);
       setName("");
       setUrl("");
       setRoles(["", ""]);
       setGroup("");
       setCa("");
+      setGateway("");
       list.reload();
     } catch (e) {
       setError(errorText(e));
@@ -84,7 +88,7 @@ export function OutsideDatabases() {
       }
     >
       <p className="mb-2 text-[11.5px] text-muted">
-        Postgres, MySQL, Redis or MongoDB that roll doesn&apos;t run (RDS, Supabase, PlanetScale, ElastiCache, Upstash, Atlas, your own server). Managed: two login roles take turns, roll sets the free one&apos;s password on each rotation, and the
+        Postgres, MySQL, SQL Server, ClickHouse, RabbitMQ, Redis, MongoDB, Elasticsearch, OpenSearch, Cassandra or ScyllaDB that roll doesn&apos;t run (RDS, Supabase, PlanetScale, ElastiCache, Upstash, Elastic Cloud, your own server; MongoDB Atlas has its own section below). Managed: two login roles take turns, roll sets the free one&apos;s password on each rotation, and the
         one in use keeps working through the grace period. Dynamic: each lease gets a login of its own in a group role, valid until the lease ends. Link <span className="font-mono">DB_USER</span> and{" "}
         <span className="font-mono">DB_PASSWORD</span> to it.
       </p>
@@ -111,7 +115,7 @@ export function OutsideDatabases() {
           </label>
           <label>
             <span className="mb-1 block text-[11px] font-medium text-subtle">Admin URL (kept sealed; a user that may alter these roles)</span>
-            <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="postgres://admin:…@db.example.com:5432/app, mysql://…, sqlserver://…, clickhouse://…, rabbitmq://…, rediss://… or mongodb+srv://…" spellCheck={false} autoComplete="off" className={`${field} font-mono text-[12px]`} />
+            <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="postgres://admin:…@db.example.com:5432/app, mysql://…, sqlserver://…, clickhouse://…, rabbitmq://…, rediss://…, mongodb+srv://…, elasticsearch://…, opensearch://… or cassandra://…" spellCheck={false} autoComplete="off" className={`${field} font-mono text-[12px]`} />
           </label>
           <div className="sm:col-start-2 flex flex-wrap gap-2">
             {roles.map((r, i) => (
@@ -125,9 +129,12 @@ export function OutsideDatabases() {
               <input value={group} onChange={(e) => setGroup(e.target.value)} placeholder="app_rw" spellCheck={false} className={`${field} font-mono text-[12px]`} />
             </label>
           </div>
+          <div className="sm:col-start-2 max-w-sm">
+            <GatewayPicker value={gateway} onChange={setGateway} />
+          </div>
           <details className="sm:col-start-2">
             <summary className="cursor-pointer text-[11px] text-subtle select-none">Server CA certificate (Amazon RDS and other private CAs)</summary>
-            <textarea value={ca} onChange={(e) => setCa(e.target.value)} rows={4} placeholder="-----BEGIN CERTIFICATE-----" spellCheck={false} className={`${field} mt-1 h-auto resize-y py-1.5 font-mono text-[11px]`} />
+            <textarea value={ca} onChange={(e) => setCa(e.target.value)} rows={4} placeholder="-----BEGIN CERTIFICATE-----" spellCheck={false} className={`${textareaField} mt-1 resize-y font-mono text-[11px]`} />
           </details>
           <div className="sm:col-start-2 flex gap-2">
             <button type="submit" className={primary} disabled={!ok || busy}>
@@ -151,6 +158,7 @@ export function OutsideDatabases() {
                 <span className="font-mono text-[11.5px] text-subtle">{d.host}</span>
                 {d.roles.length > 0 && <span className="font-mono text-[11px] text-muted">{d.roles.join(" ⇄ ")}</span>}
                 {d.group && <span className="font-mono text-[11px] text-muted">dynamic in {d.group}</span>}
+                {d.gateway && <span className="font-mono text-[11px] text-muted">through {d.gateway}</span>}
                 <span className="ml-auto text-[11px] text-subtle">
                   added {ago(d.created_at)} · <ActorMark who={d.created_by} />
                 </span>

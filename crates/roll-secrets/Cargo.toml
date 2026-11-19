@@ -41,5 +41,9 @@ zeroize.workspace = true
 
 [dev-dependencies]
 http-body-util.workspace = true
+# ACME's flow test drives a real client in process (tests/acme.rs).
+instant-acme.workspace = true
 tempfile.workspace = true
+tokio-rustls.workspace = true
 tower.workspace = true
+x509-parser = { workspace = true, features = ["verify"] }
