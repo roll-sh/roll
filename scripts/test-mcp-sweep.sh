@@ -6,8 +6,9 @@
 # a 5xx. Run it after adding or changing MCP tools, or a product's routes or owner routing.
 #
 # Only runs when something it covers changed since the last green run. `--force` runs regardless;
-# `--reads` skips the write tools. Needs nothing outside this machine (Docker isn't used: products
-# whose tools need it answer refusals the sweep counts as fine).
+# `--reads` skips the write tools. Needs nothing outside this machine. Postgres computes run in
+# Docker when it's there (removed on exit: the containers that mount the throwaway home); without it
+# their tools answer refusals the sweep counts as fine.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -53,8 +54,16 @@ EOF
 
 home=$(mktemp -d)
 pid=
+# Docker as this user (or through the docker group's shell), for the computes rolld starts.
+dock() { if docker info >/dev/null 2>&1; then docker "$@"; else sg docker -c "docker $(printf '%q ' "$@")"; fi; }
 cleanup() {
   [[ -n $pid ]] && kill "$pid" 2>/dev/null && wait "$pid" 2>/dev/null || true
+  # The Postgres computes this rolld started: exactly the containers that mount its home.
+  if command -v docker >/dev/null 2>&1; then
+    for n in $(dock ps -a --format '{{.Names}}' 2>/dev/null | grep '^roll-'); do
+      dock inspect -f '{{range .Mounts}}{{.Source}} {{end}}' "$n" 2>/dev/null | grep -q "$home/" && dock rm -f -v "$n" >/dev/null 2>&1 || true
+    done
+  fi
   rm -rf "$home"
 }
 trap cleanup EXIT
