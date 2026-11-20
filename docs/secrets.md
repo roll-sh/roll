@@ -1008,7 +1008,8 @@ key is only flagged: it doesn't stop `roll run`, a deploy or a check.
 notice a day with its health findings (see Health): expired, missing, exposed, expiring and stale
 keys, worst first, each with its detail (`findings`), up to 10 per kind in the text, and a link to
 the Health view. Weak values aren't in it (that says something about a value, and a channel's
-readers needn't be ones who may reveal it), nor unread ones. Stale needs a `max_age_days`; live
+readers needn't be ones who may reveal it), nor unread ones; `decoy_used` is only for a URL a
+session or the operator set, and a decoy is stale as any key is (see Decoys). Stale needs a `max_age_days`; live
 and dynamic links never count as stale (they change on their own), managed ones do. The same
 outbox and retries as approval notices carry it; two nodes never both send it, since the day is
 claimed in the same write that queues the notice, and an environment with nothing to say is
@@ -3987,22 +3988,37 @@ where an intruder would look, and any use of it raises an alert. `POST …/envir
 The key is an ordinary change (as a `PUT` of the key makes), so it reads, resolves, exports and
 syncs like any other key. Only the project's admins (`admin` over the whole project) see that it's
 a decoy, and only in a signed-in session (the dashboard) or with the operator token:
-- the `decoy` on `Secret` in the folder's list and on the key (the dashboard's "decoy" badge, and
-  "used N×" in red once it's been used);
-- `decoy_used` in health (and decoys left out of `stale` and `unread`);
-- its rows in the audit log (`secrets.decoy` when it's planted, `secrets.alert.decoy_used` on each
-  alert), in listings, exports and the audit sinks such a caller made.
+- the `decoy` on `Secret` in the folder's list and on the key: who planted it and when
+  (`created_by`, `created_at`), and its uses (the dashboard's "decoy" badge, which says who planted
+  it, and "used N×" in red once it's been used);
+- `decoy_used` in health (and decoys left out of `stale` and `unread` there);
+- its `secrets.alert.decoy_used` rows in the audit log, one per alert, in listings, exports and the
+  audit sinks such a caller made;
+- its `decoy_used` notices, at a notify URL such a caller set.
+
+Planting writes no audit row of its own: the change's only row is the key's ordinary
+`secrets.write`, as any new key's is, and the `decoy` on `Secret` is the record of who planted it.
+(Plants from before this wrote a `secrets.decoy` row; it's treated as an alert row is.)
 
 Every token gets the same answers as for any key, an admin's too: `rlt_` and `rlo_` grants (so an
 agent on roll MCP), workload identities' logins and roll's own in-process consumers. A
 prompt-injected agent, or whoever holds a leaked admin token, can't tell the decoys and skip them,
 which is who a decoy is for. `Caller::sees_decoys` is the one check. Their audit listings and
-exports leave the decoy rows out, and sinks a token made never get them. The hash chain covers
+exports leave the alert rows out, and sinks a token made never get them. The hash chain covers
 every field of a row, so redacting a row would fail `audit verify` as surely as leaving it out; an
 export without those rows has a gap at each, as any filtered export does (verify the log with `GET
-…/audit/verify`, or offline with an operator's or a session's export). Nothing marks a decoy in the
-grid, reach or a sync's target: syncing a decoy into CI, or exporting it into an old config, is the
-point.
+…/audit/verify`, or offline with an operator's or a session's export). Such a gap only says some
+decoy was used at some time, never which key: with no plant row, nothing in a token's view sits
+next to a decoy's own write. Nothing marks a decoy in the grid, reach or a sync's target: syncing a
+decoy into CI, or exporting it into an old config, is the point.
+
+A notify URL remembers whether a session or the operator set it (`notify_set_by_session`, set by
+`PUT …/policy`; a URL from before is counted as theirs only when every policy change the audit log
+still holds for its environment was). A URL a token set gets every other notice but never a decoy's:
+neither the alert nor `decoy_used` in the daily notice, and a decoy notice queued before a token
+replaced the URL is dropped. The audit row and the Health finding still record the use. The daily
+notice lists a decoy as `stale` as it would any key, whoever set the URL, so a channel can't tell
+the decoys by which old keys are missing.
 
 Planting one (`POST …/decoys`) takes a session or the operator token too: a token that planted one
 could tell it from the rest. In a protected environment it lands without a change request. It
@@ -4023,8 +4039,8 @@ One decoy per place tells you which place leaked.
 decoy:
 - an audit row (`secrets.alert.decoy_used`, by `roll:decoys`, with the source address), which the
   environment's Activity shows under Alerts and audit sinks carry to a SIEM;
-- a notice to the environment's notify URL, if it has one (the same outbox and retries as read
-  alerts);
+- a notice to the environment's notify URL, if a session or the operator set it (the same outbox
+  and retries as read alerts);
 - `decoy_used` first in health, until the decoy ends.
 
 Each names the key, the environment, the folder, when and the address it came from, and the route

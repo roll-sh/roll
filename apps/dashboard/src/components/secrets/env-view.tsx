@@ -880,12 +880,16 @@ function ValueHead({ onGenerate }: { onGenerate?: () => void }) {
   );
 }
 
-/** A decoy key (docs/secrets.md, "Decoys"), shown to the project's admins only: the API leaves it out for everyone else. */
+/**
+ * A decoy key (docs/secrets.md, "Decoys"), shown to the project's admins in a session only: the API leaves it out for
+ * tokens. Who planted it and when are here, not in the audit log (a plant's only row is its key's ordinary write).
+ */
 function DecoyMark({ decoy }: { decoy: NonNullable<Secret["decoy"]> }) {
   const used = decoy.uses > 0;
+  const planted = `Planted by ${decoy.created_by} ${ago(decoy.created_at)}.`;
   const title = used
-    ? `A decoy, used ${decoy.uses === 1 ? "once" : `${decoy.uses} times`}${decoy.used_at ? `, last ${ago(decoy.used_at)}` : ""}${decoy.used_ip ? ` from ${decoy.used_ip}` : ""}. Whoever used it found it where it was planted: cut them off and rotate what sits beside it.`
-    : "A decoy: its value is a roll token that opens nothing, and any use raises an alert. Only admins see this mark.";
+    ? `A decoy, used ${decoy.uses === 1 ? "once" : `${decoy.uses} times`}${decoy.used_at ? `, last ${ago(decoy.used_at)}` : ""}${decoy.used_ip ? ` from ${decoy.used_ip}` : ""}. Whoever used it found it where it was planted: cut them off and rotate what sits beside it. ${planted}`
+    : `A decoy: its value is a roll token that opens nothing, and any use raises an alert. ${planted} Only admins see this mark.`;
   return (
     <span className={`shrink-0 rounded border px-1 font-mono text-[10px] ${used ? "border-danger/40 text-danger" : "border-accent/40 text-accent"}`} title={title}>
       {used ? `decoy · used ${decoy.uses}×` : "decoy"}

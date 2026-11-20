@@ -119,6 +119,13 @@ impl Secrets {
     /// With `code`, keys no repository on the project's canvas mentions too (`unreferenced`):
     /// a search per key and repository, so only when asked for.
     pub fn project_health(&self, project: &str, caller: &Caller, code: bool) -> Result<Vec<Finding>> {
+        self.findings(project, caller, code, true)
+    }
+
+    /// [`Self::project_health`]. `exempt`: decoys left out of `stale` and `unread` for whoever sees
+    /// them (nobody should rotate or read one). Reminders pass `false`: a channel lists a decoy's
+    /// staleness as any key's, so nothing is learned there by elimination.
+    pub(crate) fn findings(&self, project: &str, caller: &Caller, code: bool, exempt: bool) -> Result<Vec<Finding>> {
         caller.need(Action::Read, &Scope::project(project))?;
         let dek = self.project(project)?;
         let now = self.db.now_ms()?;
@@ -142,7 +149,7 @@ impl Secrets {
         // Decoys, for the admins: their use first, and no staleness or disuse (nobody should read one).
         let admin = self.sees_decoys(project, caller);
         let used = if admin { self.used_decoys(project)? } else { vec![] };
-        let decoys: HashSet<(String, String, String)> = if admin { self.live_decoys(project)? } else { HashSet::new() };
+        let decoys: HashSet<(String, String, String)> = if admin && exempt { self.live_decoys(project)? } else { HashSet::new() };
         let mut read: HashSet<(String, String, String)> = HashSet::new();
         for (env, path, keys) in reads {
             for k in from_json::<Vec<String>>(&keys) {

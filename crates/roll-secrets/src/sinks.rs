@@ -210,6 +210,8 @@ impl Secrets {
     /// A new sink; the second value is its signing secret, shown once.
     pub fn create_sink(&self, project: &str, n: NewSink, caller: &Caller) -> Result<(Sink, String)> {
         caller.need(Action::Admin, &Scope::project(project))?;
+        // Whether it gets the rows that say a decoy was used: made by someone who sees decoys.
+        let decoys = self.sees_decoys(project, caller);
         let format = n.format.clone().unwrap_or_else(|| "roll".into());
         if !FORMATS.contains(&format.as_str()) {
             return Err(Error::BadRequest(format!("format is one of {}", FORMATS.join(", "))));
@@ -260,7 +262,7 @@ impl Secrets {
             c.execute(
                 "INSERT INTO audit_sinks (id, project_id, url, secret, cursor, status, error, delivered_at, running_until, retry_at, created_at, created_by, format, token, decoys)
                  VALUES (?, ?, ?, ?, ?, 'new', NULL, NULL, 0, 0, ?, ?, ?, ?, ?)",
-                params![id, project, n.url.trim(), sealed, cursor, now, caller.principal, format, sealed_token, caller.sees_decoys() as i64],
+                params![id, project, n.url.trim(), sealed, cursor, now, caller.principal, format, sealed_token, decoys as i64],
             )?;
             audit::record(c, self.keys()?, project, caller, "sink.create", None, None, &[], &format!("audit stream to {} ({format})", host(&n.url)), now)?;
             Ok(c.query_row(&format!("SELECT {COLUMNS} FROM audit_sinks WHERE id = ?"), [&id], sink_row)?)
@@ -313,7 +315,7 @@ impl Secrets {
             }
             let last = rows.last().map(|r| r.id).unwrap_or(cursor);
             // Which keys are decoys only reaches a sink a session or the operator made, as the
-            // listing only shows it to them (`Caller::sees_decoys`); the cursor still moves past.
+            // listing only shows it to them (`Secrets::sees_decoys`); the cursor still moves past.
             rows.retain(|r| decoys || !crate::decoys::DECOY_ACTIONS.contains(&r.action.as_str()));
             if rows.is_empty() {
                 self.db.write(|c| c.execute("UPDATE audit_sinks SET cursor = ?, running_until = 0 WHERE id = ? AND running_until = ?", params![last, id, hold]))?;

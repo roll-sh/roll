@@ -50,7 +50,8 @@ CREATE INDEX IF NOT EXISTS decoys_ended ON decoys (revoked_at, ended_at);
 const ALERT_EVERY_MS: i64 = 3_600_000;
 
 /// The audit actions only [`Secrets::sees_decoys`] callers see (and only sinks they made get): they
-/// say which keys are decoys.
+/// say a decoy was used. `secrets.decoy` is a plant's row from before plants wrote none: a plant's
+/// only row is its key's `secrets.write`, as any key's, so no gap in a token's view points at it.
 pub(crate) const DECOY_ACTIONS: [&str; 2] = ["secrets.decoy", "secrets.alert.decoy_used"];
 
 /// `POST …/environments/{env}/decoys`.
@@ -132,14 +133,16 @@ impl Secrets {
         let item = Item { path: path.clone(), key: n.key.clone(), owner: String::new(), action: ItemAction::set_value(Value::new(minted.secret)) };
         let (key, kind, grant, by) = (n.key.clone(), n.kind.clone(), minted.id.clone(), caller.principal.clone());
         // `if_version` 0: only while the key doesn't exist. The decoy's row in the change's own
-        // transaction: never a decoy key without its mark.
+        // transaction: never a decoy key without its mark. It's also the plant's only record past
+        // the key's ordinary `secrets.write` (who and when, on [`Decoy`]): an audit row of its own
+        // would leave a gap right after that write in a token's view.
         let written = self.commit_then(project, env, vec![item], &[(0, 0)], "write", "", None, true, caller, &|c, e, now| {
             let id = current(c, &e.id, &path, &key, "")?.ok_or_else(|| Error::Internal(format!("{key} wasn't written")))?.id;
             c.execute(
                 "INSERT INTO decoys (id, project_id, env_id, secret_id, path, key, kind, ref, created_by, created_at, uses) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
                 params![names::new_id("dcy", 16), project, e.id, id, path, key, kind, grant, by, now],
             )?;
-            audit::record(c, self.keys()?, project, caller, "secrets.decoy", Some(&e.slug), Some(&path), std::slice::from_ref(&key), &format!("planted decoy {key} ({kind})"), now)
+            Ok(())
         });
         if let Err(e) = written {
             if let Err(r) = workloads.revoke_decoy(&minted.id) {
@@ -174,7 +177,9 @@ impl Secrets {
                 return Ok(true);
             }
             c.execute("UPDATE decoys SET alerted_at = ? WHERE id = ?", params![now, id])?;
-            let env: Option<(String, bool)> = c.query_row("SELECT slug, notify_url IS NOT NULL FROM environments WHERE id = ?", [&env_id], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+            // Told only to a notify URL a session or the operator set (`notices::tells_decoy`).
+            let env: Option<(String, bool)> =
+                c.query_row("SELECT slug, notify_url IS NOT NULL AND COALESCE(notify_set_by_session, 0) = 1 FROM environments WHERE id = ?", [&env_id], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
             let (slug, notify) = env.unwrap_or_else(|| ("(deleted)".into(), false));
             let from = ip.as_deref().map(|i| format!(" from {i}")).unwrap_or_default();
             let text = format!("decoy {key} in {slug}:{path} was used{from}, calling {route}");
