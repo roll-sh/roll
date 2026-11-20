@@ -3977,28 +3977,81 @@ async fn a_decoy_key_reads_as_any_other_and_its_use_is_alerted() {
     assert_eq!(api.ok(Method::GET, "/audit?action=secrets.alert", None).await.as_array().map(Vec::len), Some(1));
 }
 
-/// Only the project's admins can tell a key is a decoy: to a reader, writer or revealer it's the
-/// same as any other key, in listings, health and the audit log; and only an admin plants one.
+/// Only the project's admins, signed in or the operator, can tell a key is a decoy. To any token,
+/// an admin's too (an agent on roll MCP), it answers as any other key does: listings, the key,
+/// health, the audit log and its export, the sinks and notify URLs the token set, and the daily
+/// reminder. No audit row marks the plant, and no token plants one.
 #[tokio::test]
-async fn only_admins_can_tell_a_key_is_a_decoy() {
+async fn only_an_admins_session_can_tell_a_key_is_a_decoy() {
     let api = Api::new().await;
     api.ok(Method::PUT, "/environments/production/secrets/STRIPE_KEY", Some(json!({ "value": "sk_test_not_a_real_key_0000" }))).await;
-    api.ok(Method::POST, "/environments/production/decoys", Some(json!({ "key": "BACKUP_DB_TOKEN", "kind": "rlt" }))).await;
     let dev = api.token(json!({ "actions": ["read", "reveal", "write", "delete"] }));
-    assert_eq!(api.req(Method::POST, "/environments/production/decoys", Some(json!({ "key": "OTHER", "kind": "rlt" })), Some(&dev)).await.0, StatusCode::FORBIDDEN);
-    let (_, listed) = api.req(Method::GET, "/environments/production/secrets", None, Some(&dev)).await;
-    let shape = |key: &str| listed.as_array().unwrap().iter().find(|s| s["key"] == key).unwrap().as_object().unwrap().keys().cloned().collect::<Vec<_>>();
-    assert_eq!(shape("BACKUP_DB_TOKEN"), shape("STRIPE_KEY"), "{listed}");
-    let (_, one) = api.req(Method::GET, "/environments/production/secrets/BACKUP_DB_TOKEN", None, Some(&dev)).await;
-    assert!(one.get("decoy").is_none(), "{one}");
-    // Its use is the admins' news.
+    let admin = api.token(json!({ "actions": ["read", "reveal", "write", "delete", "admin"] }));
+    let (s, token_sink) = api.req(Method::POST, "/audit/sinks", Some(json!({ "url": "https://siem.example/token" })), Some(&admin)).await;
+    assert!(s.is_success(), "{s} {token_sink}");
+    let operator_sink = api.ok(Method::POST, "/audit/sinks", Some(json!({ "url": "https://siem.example/operator" }))).await;
+    // Production's channel, set by the admin token, with a staleness limit.
+    let (s, _) = api.req(Method::PUT, "/environments/production/policy", Some(json!({ "protected": false, "notify_url": "https://hooks.example/T0/B0/token" })), Some(&admin)).await;
+    assert!(s.is_success(), "{s}");
+    api.ok(Method::PATCH, "/environments/production", Some(json!({ "max_age_days": 90 }))).await;
+    api.ok(Method::POST, "/environments/production/decoys", Some(json!({ "key": "BACKUP_DB_TOKEN", "kind": "rlt" }))).await;
+    // Used once.
     let (_, value) = api.req(Method::GET, "/environments/production/secrets/BACKUP_DB_TOKEN/value", None, Some(&dev)).await;
     api.req(Method::GET, "/v1/secrets/whoami", None, value["value"].as_str()).await;
-    let (_, health) = api.req(Method::GET, "/health", None, Some(&dev)).await;
-    assert!(!health.to_string().contains("decoy"), "{health}");
-    let (_, audit) = api.req(Method::GET, "/audit", None, Some(&dev)).await;
-    assert!(!audit.to_string().contains("decoy"), "{audit}");
-    assert!(api.ok(Method::GET, "/audit", None).await.to_string().contains("secrets.alert.decoy_used"));
+    for t in [&dev, &admin] {
+        assert_eq!(api.req(Method::POST, "/environments/production/decoys", Some(json!({ "key": "OTHER", "kind": "rlt" })), Some(t)).await.0, StatusCode::FORBIDDEN);
+        let (_, listed) = api.req(Method::GET, "/environments/production/secrets", None, Some(t)).await;
+        let shape = |key: &str| listed.as_array().unwrap().iter().find(|s| s["key"] == key).unwrap().as_object().unwrap().keys().cloned().collect::<Vec<_>>();
+        assert_eq!(shape("BACKUP_DB_TOKEN"), shape("STRIPE_KEY"), "{listed}");
+        let (_, one) = api.req(Method::GET, "/environments/production/secrets/BACKUP_DB_TOKEN", None, Some(t)).await;
+        assert!(one.get("decoy").is_none(), "{one}");
+        let (_, health) = api.req(Method::GET, "/health", None, Some(t)).await;
+        assert!(!health.to_string().contains("decoy"), "{health}");
+        let (_, audit) = api.req(Method::GET, "/audit", None, Some(t)).await;
+        assert!(!audit.to_string().contains("decoy"), "{audit}");
+        let (_, export) = api.req(Method::GET, "/audit?format=jsonl", None, Some(t)).await;
+        assert!(export.as_str().is_some_and(|e| e.contains("BACKUP_DB_TOKEN") && !e.contains("decoy")), "{export}");
+    }
+    // No row marks the plant, even for the operator: the key's write is as any new key's (but for
+    // its change's number).
+    let all = api.ok(Method::GET, "/audit", None).await;
+    let rows = all.as_array().unwrap();
+    assert!(!rows.iter().any(|r| r["action"] == "secrets.decoy"), "{all}");
+    let write = |key: &str| rows.iter().rev().find(|r| r["keys"] == json!([key])).map(|r| (r["action"].clone(), r["summary"].as_str().unwrap().split_once(' ').unwrap().1.to_string())).unwrap();
+    assert_eq!(write("BACKUP_DB_TOKEN"), write("STRIPE_KEY"), "{all}");
+    // An admin's session, as the operator, sees it all: who planted it on the key, its use.
+    let base = format!("/v1/secrets/projects/{}", api.project);
+    let (_, listed) = api.signed_in("root", true, Method::GET, &format!("{base}/environments/production/secrets"), None).await;
+    let decoy = listed.as_array().unwrap().iter().find(|s| s["key"] == "BACKUP_DB_TOKEN").unwrap()["decoy"].clone();
+    assert_eq!((decoy["uses"].as_i64(), decoy["created_by"].as_str(), decoy["created_at"].is_i64()), (Some(1), Some("operator"), true), "{listed}");
+    let (_, health) = api.signed_in("root", true, Method::GET, &format!("{base}/health"), None).await;
+    assert_eq!(health[0]["issue"], "decoy_used", "{health}");
+    let (_, audit) = api.signed_in("root", true, Method::GET, &format!("{base}/audit"), None).await;
+    assert!(audit.to_string().contains("secrets.alert.decoy_used"), "{audit}");
+    // Both keys past the limit; a day of sweeps: sinks, notices, the reminder.
+    api.db.write(|c| c.execute("UPDATE audit SET at = at - 60000", ())).unwrap();
+    api.db.write(|c| c.execute("UPDATE secrets SET updated_at = updated_at - 8640000000", ())).unwrap();
+    let s = api.secrets.clone();
+    tokio::task::spawn_blocking(move || {
+        s.sweep().unwrap();
+        s.sweep().unwrap();
+    })
+    .await
+    .unwrap();
+    let sent = api.sent.0.lock().unwrap().clone();
+    let actions = |sink: &Value| -> Vec<String> {
+        sent.iter().filter(|b| b["sink"] == sink["id"]).flat_map(|b| b["events"].as_array().unwrap().iter().map(|e| e["action"].as_str().unwrap().to_string())).collect()
+    };
+    let (theirs, ours) = (actions(&token_sink), actions(&operator_sink));
+    assert!(ours.iter().any(|a| a == "secrets.alert.decoy_used"), "{ours:?}");
+    assert!(theirs.iter().any(|a| a == "secrets.write") && !theirs.iter().any(|a| a.contains("decoy")), "{theirs:?}");
+    // The token's channel hears nothing of the decoy, and its reminder calls both keys stale.
+    let notices: Vec<&Value> = sent.iter().filter(|b| b.get("sink").is_none()).collect();
+    assert!(!json!(notices).to_string().contains("decoy"), "{notices:?}");
+    let reminder = notices.iter().find(|n| n["findings"].is_array()).unwrap_or_else(|| panic!("{notices:?}"));
+    let mut stale: Vec<&str> = reminder["findings"].as_array().unwrap().iter().filter(|f| f["issue"] == "stale").map(|f| f["key"].as_str().unwrap()).collect();
+    stale.sort();
+    assert_eq!(stale, ["BACKUP_DB_TOKEN", "STRIPE_KEY"], "{reminder}");
 }
 
 /// Deleting a decoy key, or giving it a value of its own, ends the decoy: its token is revoked

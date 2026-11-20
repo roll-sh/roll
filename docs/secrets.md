@@ -1027,7 +1027,8 @@ key is only flagged: it doesn't stop `roll run`, a deploy or a check.
 notice a day with its health findings (see Health): expired, missing, exposed, expiring and stale
 keys, worst first, each with its detail (`findings`), up to 10 per kind in the text, and a link to
 the Health view. Weak values aren't in it (that says something about a value, and a channel's
-readers needn't be ones who may reveal it), nor unread ones. Stale needs a `max_age_days`; live
+readers needn't be ones who may reveal it), nor unread ones; `decoy_used` is only for a URL a
+session or the operator set, and a decoy is stale as any key is (see Decoys). Stale needs a `max_age_days`; live
 and dynamic links never count as stale (they change on their own), managed ones do. The same
 outbox and retries as approval notices carry it; two nodes never both send it, since the day is
 claimed in the same write that queues the notice, and an environment with nothing to say is
@@ -1083,8 +1084,8 @@ is one click.
 
 `GET …/health` (`roll secrets health`, the dashboard's Health view) is every finding above in
 every standard environment and folder at once, worst first, so none waits on someone opening the
-right folder: `decoy_used` (a decoy key's credential was used; only the project's admins see it, see
-Decoys), `expired`, `rotation_failing` (a managed key's scheduled rotation fails: the
+right folder: `decoy_used` (a decoy key's credential was used; only the project's admins see it, signed in or
+the operator, see Decoys), `expired`, `rotation_failing` (a managed key's scheduled rotation fails: the
 database, vendor, product or rotator refused or didn't answer; the detail says why, the old
 credential keeps working, and the sweeper tries again; cleared by the next rotation that works),
 `revoke_failing` (a credential roll retired, or a lease that ended, that it couldn't revoke yet: it
@@ -4392,17 +4393,44 @@ a decoy credential:
 
 The key is an ordinary change (as a `PUT` of the key makes), so it reads, resolves, exports and
 syncs like any other key. Only the project's admins (`admin` over the whole project) see that it's
-a decoy:
-- the `decoy` on `Secret` in the folder's list (the dashboard's "decoy" badge, and "used N×" in
-  red once it's been used);
-- `decoy_used` in health;
-- its rows in the audit log (`secrets.decoy` when it's planted, `secrets.alert.decoy_used` on each
-  alert).
+a decoy, and only in a signed-in session (the dashboard) or with the operator token:
+- the `decoy` on `Secret` in the folder's list and on the key: who planted it and when
+  (`created_by`, `created_at`), and its uses (the dashboard's "decoy" badge, which says who planted
+  it, and "used N×" in red once it's been used);
+- `decoy_used` in health (and decoys left out of `stale` and `unread` there);
+- its `secrets.alert.decoy_used` rows in the audit log, one per alert, in listings, exports and the
+  audit sinks such a caller made;
+- its `decoy_used` notices, at a notify URL such a caller set.
 
-Everyone else gets the same answers as for any key, without those fields and rows. Nothing marks it
-in the grid, reach or a sync's target: syncing a decoy into CI, or exporting it into an old config,
-is the point. In a protected environment it lands without a change request. It changes no value
-anyone has, and only an admin (who could lift the protection) may plant one.
+Planting writes no audit row of its own: the change's only row is the key's ordinary
+`secrets.write`, as any new key's is, and the `decoy` on `Secret` is the record of who planted it.
+(Plants from before this wrote a `secrets.decoy` row; it's treated as an alert row is.)
+
+Every token gets the same answers as for any key, an admin's too: `rlt_` and `rlo_` grants (so an
+agent on roll MCP), workload identities' logins and roll's own in-process consumers. A
+prompt-injected agent, or whoever holds a leaked admin token, can't tell the decoys and skip them,
+which is who a decoy is for. `Caller::sees_decoys` is the one check. Their audit listings and
+exports leave the alert rows out, and sinks a token made never get them. The hash chain covers
+every field of a row, so redacting a row would fail `audit verify` as surely as leaving it out; an
+export without those rows has a gap at each, as any filtered export does (verify the log with `GET
+…/audit/verify`, or offline with an operator's or a session's export). Such a gap only says some
+decoy was used at some time, never which key: with no plant row, nothing in a token's view sits
+next to a decoy's own write. Nothing marks a decoy in the grid, reach or a sync's target: syncing a
+decoy into CI, or exporting it into an old config, is the point.
+
+A notify URL remembers whether a session or the operator set it (`notify_set_by_session`, set by
+`PUT …/policy`; a URL from before is counted as theirs only when every policy change the audit log
+still holds for its environment was). A URL a token set gets every other notice but never a decoy's:
+neither the alert nor `decoy_used` in the daily notice, and a decoy notice queued before a token
+replaced the URL is dropped. The audit row and the Health finding still record the use. The daily
+notice lists a decoy as `stale` as it would any key, whoever set the URL, so a channel can't tell
+the decoys by which old keys are missing.
+
+Planting one (`POST …/decoys`) takes a session or the operator token too: a token that planted one
+could tell it from the rest. In a protected environment it lands without a change request. It
+changes no value anyone has, and only an admin (who could lift the protection) may plant one.
+Ordinary writes still end a decoy by rights alone (deleting the key or giving it a value), and say
+nothing about it.
 
 **What to plant where.** Put it somewhere only an intruder reads, under a name a real credential
 would have (`LEGACY_DEPLOY_TOKEN`, `ROLL_ADMIN_TOKEN`). For example:
@@ -4417,8 +4445,8 @@ One decoy per place tells you which place leaked.
 decoy:
 - an audit row (`secrets.alert.decoy_used`, by `roll:decoys`, with the source address), which the
   environment's Activity shows under Alerts and audit sinks carry to a SIEM;
-- a notice to the environment's notify URL, if it has one (the same outbox and retries as read
-  alerts);
+- a notice to the environment's notify URL, if a session or the operator set it (the same outbox
+  and retries as read alerts);
 - `decoy_used` first in health, until the decoy ends.
 
 Each names the key, the environment, the folder, when and the address it came from, and the route
@@ -4908,7 +4936,8 @@ with signed digests, so such a change shows:
   A row that fails is logged by kid (never the key) and ignored, so a database writer who adds a key
   of their own gets neither a digest nor a cloud to accept their signature.
 - **Offline.** `roll secrets audit verify -p prj_… --file audit.jsonl --jwks keys.json` checks an
-  export (`audit --format jsonl`, unfiltered: a filtered one has gaps) on the machine it runs on.
+  export (`audit --format jsonl`, unfiltered: a filtered one has gaps, and so has a token's where a
+  decoy's rows were, see Decoys) on the machine it runs on.
   `--jwks` is required: the digest JWKS as saved earlier from `/v1/secrets/audit/jwks` and kept
   apart from roll, since keys fetched from the server being checked would vouch for themselves.
   Save it once, and again after each rotation of the digest key (an emergency's names the pulled
@@ -4979,7 +5008,7 @@ isn't in the workspace is 404.
 | `PUT /environments/{env}/secrets/{key}?path=` | `SetSecret` | `Written`; 409 `stale` when `if_version` isn't the key's version |
 | `DELETE /environments/{env}/secrets/{key}?path=&type=&if_version=` | | `Written`; 409 `stale` when `if_version` isn't the key's version |
 | `GET /environments/{env}/secrets/{key}/value?path=&resolve=` | | `{value, problems}` |
-| `POST /environments/{env}/decoys` | `NewDecoy` | 201 `Secret` (admin; a new key, never its value; 409 `exists` when the key is there; "Decoys") |
+| `POST /environments/{env}/decoys` | `NewDecoy` | 201 `Secret` (admin, signed in or the operator; 403 for any token; a new key, never its value; 409 `exists` when the key is there; "Decoys") |
 | `GET /environments/{env}/secrets/{key}/totp?path=` | | `{code, expires_at, period}` (`reveal`; a key that isn't a TOTP key is a 400; audited as `secrets.totp`, without the code) |
 | `GET /environments/{env}/secrets/{key}/versions?path=&type=` | | `Version[]` newest first |
 | `GET /environments/{env}/secrets/{key}/versions/{v}/value?path=&type=` | | `{value}` |
@@ -5183,7 +5212,7 @@ type Secret = {
   updated_at: number; updated_by: string;
   source: { kind: "own" } | { kind: "import"; environment: string; path: string } | { kind: "base"; environment: string };
   overridden: boolean; // a personal value of the caller replaces it
-  decoy?: Decoy; // only for the project's admins ("Decoys"); absent for everyone else, as on any key
+  decoy?: Decoy; // only for the project's admins, signed in or the operator ("Decoys"); absent for everyone else, tokens too, as on any key
 };
 type Decoy = { kind: "rlt" | "postgres"; created_at: number; created_by: string; uses: number; used_at: number | null; used_ip: string | null };
 type NewDecoy = { key: string; kind: "rlt"; path?: string } | { key: string; kind: "postgres"; resource: string; path?: string };
