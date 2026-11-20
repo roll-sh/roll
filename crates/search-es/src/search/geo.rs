@@ -155,12 +155,9 @@ fn indexed_shape(ctx: &QueryCtx, id: &str, index: Option<&str>, path: Option<&st
     let st = ctx.st;
     let names = crate::meta::resolve::resolve(st, &[index.to_string()], &crate::meta::resolve::IndicesOptions::STRICT_EXPAND_OPEN, ctx.now_ms)?;
     let Some(idx) = names.first().and_then(|n| st.metadata.indices.get(n)).cloned() else { return Err(EsError::index_not_found(index)) };
-    let engine = ctx.cluster.engine.index(ctx.cluster, st, &idx)?;
-    let shard = crate::meta::routing::shard_for(&idx, id, routing);
-    let doc = engine.shard(shard).shard.get(id.as_bytes(), true).map_err(index_err)?;
-    let Some(doc) = doc else { return Err(EsError::resource_not_found(format!("Shape with ID [{id}] not found"))) };
-    let src = crate::fetch::source_bytes(&doc.fields).ok_or_else(|| EsError::illegal_state("no source"))?;
-    let Value::Obj(m) = crate::fetch::parse_source(src)? else { return Err(EsError::illegal_state("bad source")) };
+    // Read as the request's reader may read it (its document and field level security).
+    let Some((_, src)) = super::lookup_source(ctx, &idx, id, routing)? else { return Err(EsError::resource_not_found(format!("Shape with ID [{id}] not found"))) };
+    let Some(Value::Obj(m)) = src else { return Err(EsError::illegal_state("no source")) };
     let mut vals = Vec::new();
     crate::engine::source::extract_values(&m, path, &mut vals);
     let v = vals.first().ok_or_else(|| EsError::illegal_state(format!("Shape with name [{id}] found but missing {path} field")))?;

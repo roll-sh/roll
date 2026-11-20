@@ -828,10 +828,15 @@ async fn ask_for_missing(ctx: &Arc<Ctx>, name: &str, args: &mut Value, params: &
     {
         return Some(refused(why));
     }
-    // Only a tool this connection is offered; the gate still decides the call.
-    let tool = tools::all().iter().find(|t| t.name == name).filter(|_| tool_names(ctx).iter().any(|n| n == name))?;
-    let (param, src) = ask::missing(tool, args)?;
-    if !tool_names(ctx).iter().any(|t| t == src.tool) {
+    // The tool's definition, roll's own or a fronted set's (roll code's take repos and owners).
+    let def: std::borrow::Cow<'static, Value> = match tools::all().iter().find(|t| t.name == name) {
+        Some(t) => std::borrow::Cow::Borrowed(t.definition_ref()),
+        None => std::borrow::Cow::Owned(ctx.m.sets.iter().flat_map(|s| s.tools()).find(|t| t["name"] == name)?),
+    };
+    let (param, src) = ask::missing(&def, args)?;
+    // Only a tool this connection is offered, and a list it may call; the gate still decides both.
+    let offered = tool_names(ctx);
+    if !offered.iter().any(|n| n == name) || !offered.iter().any(|t| t == src.tool) {
         return None;
     }
     // The choices, read through the gate with the caller's token (never asking a person).
@@ -843,7 +848,8 @@ async fn ask_for_missing(ctx: &Arc<Ctx>, name: &str, args: &mut Value, params: &
     if values.is_empty() {
         return None;
     }
-    Some(ask::input_required(tool.title, param, &values, more))
+    let title = def["title"].as_str().or_else(|| def["annotations"]["title"].as_str()).unwrap_or(name);
+    Some(ask::input_required(title, &param, &values, more))
 }
 
 /// The names of the tools this connection is offered (what prompts may use).
@@ -1166,7 +1172,7 @@ async fn call_as(ctx: &Arc<Ctx>, name: &str, args: Value, quiet: bool) -> Option
 /// `readOnlyHint`).
 fn writes_to(ctx: &Ctx, name: &str) -> Option<(String, bool)> {
     Some(match tools::all().iter().find(|t| t.name == name) {
-        Some(t) => (t.product.to_string(), t.method != "GET"),
+        Some(t) => (if t.published { "published".to_string() } else { t.product.to_string() }, t.method != "GET"),
         None => {
             let def = ctx.m.sets.iter().flat_map(|s| s.tools()).find(|t| t["name"] == name)?;
             let product = def["_meta"]["roll/product"].as_str().map(str::to_string).unwrap_or_else(|| name.split('_').next().unwrap_or_default().to_string());

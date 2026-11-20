@@ -36,7 +36,7 @@ use crate::values::{BoundVs, BytesReader, DocCounter, GeoReader, NumReader, VsSp
 use crate::xparser::{Field, Token, Tokens, XParser};
 
 /// `MissingOrder`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum MissingOrder {
     Default,
     First,
@@ -325,7 +325,7 @@ pub fn parse_bounds(p: &mut XParser<'_>) -> Result<GeoBounds> {
 }
 
 /// One part of a composite key (`Comparable`: `BytesRef`, `Long` or `Double`; `None` missing).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum KeyPart {
     Null,
     Long(i64),
@@ -460,7 +460,7 @@ fn compare_views<'a, 'b>(a: impl Iterator<Item = PartView<'a>>, b: impl Iterator
 }
 
 /// Key order of one source.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PartOrder {
     pub reverse_mul: i32,
     pub missing: MissingOrder,
@@ -505,7 +505,7 @@ fn format_part(v: &KeyPart, f: &DocValueFormat) -> Json {
 }
 
 /// A composite bucket.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct CompositeBucket {
     pub key: CompositeKey,
     pub doc_count: u64,
@@ -513,7 +513,7 @@ pub struct CompositeBucket {
 }
 
 /// `InternalComposite`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Composite {
     pub size: usize,
     pub names: Arc<Vec<String>>,
