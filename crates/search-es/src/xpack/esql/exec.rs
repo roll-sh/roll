@@ -2189,9 +2189,24 @@ impl Grouper {
         if key.len() != self.keys.len() || accs.len() != self.specs.len() {
             return Err("a group of another shape".into());
         }
+        for ((_, ty, name), v) in self.keys.iter().zip(key) {
+            if !value::fits(*ty, v) {
+                return Err(format!("a key of another type for [{name}]"));
+            }
+        }
         for (s, a) in self.specs.iter().zip(&accs) {
             if std::mem::discriminant(&Acc::for_spec(&s.func, s.arg_ty, &s.extra)) != std::mem::discriminant(a) {
                 return Err(format!("a state of another kind for [{}]", s.func));
+            }
+            let values_fit = match a {
+                Acc::MinMax(Some(v)) => value::fits(s.arg_ty, v),
+                Acc::Collect(vs) => vs.iter().all(|v| value::fits(s.arg_ty, v)),
+                Acc::Points(ps) => ps.iter().all(|(_, v)| value::fits(s.arg_ty, v)),
+                Acc::Distinct { ty, .. } => *ty == s.arg_ty,
+                _ => true,
+            };
+            if !values_fit {
+                return Err(format!("a state of another type for [{}]", s.func));
             }
         }
         let refs: Vec<&V> = key.iter().collect();
@@ -2697,12 +2712,13 @@ struct Source {
 impl Source {
     /// A cross-cluster part's source: every cluster's fields (`schema`, in its order and types;
     /// one this cluster doesn't map reads null), then its own others, then the metadata.
-    fn align_to(&mut self, schema: &[(String, DataType)]) {
+    /// `metadata`: what the `FROM` asked for (a source that matched no index has none of its own).
+    fn align_to(&mut self, schema: &[(String, DataType)], metadata: &[String]) {
         if schema.is_empty() {
             return;
         }
-        let nf = self.fields.len();
-        let meta: Vec<Col> = self.cols[nf..].iter().filter(|c| c.name != "<no-fields>").cloned().collect();
+        let meta: Vec<Col> = metadata.iter().filter_map(|m| metadata_type(m).map(|ty| Col { name: m.clone(), ty })).collect();
+        self.metadata = metadata.to_vec();
         let mut cols: Vec<Col> = schema.iter().map(|(n, t)| Col { name: n.clone(), ty: *t }).collect();
         let mut fields: Vec<String> = schema.iter().map(|(n, _)| n.clone()).collect();
         for (i, f) in self.fields.iter().enumerate() {
@@ -2764,6 +2780,43 @@ pub(super) fn part_columns(src: &Src<'_>, schema: &[Col], metadata: &[String], p
     let mut cols = schema.to_vec();
     cols.extend(metadata.iter().filter_map(|m| metadata_type(m).map(|ty| Col { name: m.clone(), ty })));
     Ok(build_pipeline(src, prefix, cols)?.1)
+}
+
+/// A cross-cluster query's part (`part`, its first `pre` commands those that run row by row,
+/// then its breaker), compiled over every cluster's columns before any cluster runs it, so the
+/// query's own errors are the query's: the columns its row-by-row commands make (a `STATS`'s
+/// input). `Ok(None)`: no columns to compile over, or a command reads a resource this cluster
+/// doesn't have (an enrich policy or lookup index of the remotes only), which the parts decide.
+pub(super) fn verify_part(src: &Src<'_>, schema: &[Col], metadata: &[String], part: &[Cmd], pre: usize) -> EsResult<Option<Vec<Col>>> {
+    if schema.is_empty() {
+        return Ok(None);
+    }
+    let mut cmds = part.to_vec();
+    let ft = super::fulltext::extract(src, &mut cmds, &|n| schema.iter().any(|c| c.name == n))?;
+    let mut cols = schema.to_vec();
+    cols.extend(metadata.iter().filter_map(|m| metadata_type(m).map(|ty| Col { name: m.clone(), ty })));
+    cols.extend((0..ft.len()).map(|i| Col { name: format!("{}{i}", super::fulltext::HIDDEN), ty: DataType::Boolean }));
+    for c in &cmds[..pre] {
+        let here = match c {
+            Cmd::Enrich { policy, .. } => src.res.enrich.contains_key(policy.rsplit(':').next().unwrap_or(policy)),
+            Cmd::LookupJoin { index, .. } => src.res.lookup.contains_key(index),
+            _ => true,
+        };
+        if !here {
+            return Ok(None);
+        }
+    }
+    let (_, out) = build_pipeline(src, &cmds[..pre], cols)?;
+    match cmds.get(pre) {
+        Some(Cmd::Stats { aggs, by }) => {
+            Grouper::new(src, aggs, by, &out)?;
+        }
+        Some(Cmd::Sort(keys)) => {
+            SortSpec::new(src, keys, &out)?;
+        }
+        _ => {}
+    }
+    Ok(Some(out))
 }
 
 /// Every cluster's rows in one table: a column whose types differ between clusters is
@@ -3805,6 +3858,13 @@ pub async fn execute(cluster: &Cluster, q: Query, filter: Option<Value>, w: &mut
 }
 
 async fn execute_inner(cluster: &Cluster, q: Query, filter: Option<Value>, w: &mut Warnings) -> EsResult<(Table, Stats)> {
+    // A remote's part never reads its views (Elasticsearch refuses remote views).
+    if let Some(p) = super::ccs::part()
+        && let Some(alias) = &p.alias
+        && let Some(Cmd::From { sources, .. }) = q.cmds.first()
+    {
+        super::ccs::check_remote_views(&cluster.state(), alias, sources)?;
+    }
     let q = expand_views(&cluster.state(), q)?;
     // An implicit `LIMIT 1000` ends every query without a limit; Elasticsearch doesn't warn of
     // it after a time series aggregation (`TS ... | STATS`, `PROMQL`).
@@ -4172,7 +4232,8 @@ async fn execute_plain(cluster: &Cluster, q: Query, filter: Option<Value>, w: &m
         Cmd::From { sources, metadata, at } => Some(resolve_source(cluster, &src, sources, metadata, *at).await?),
         _ => None,
     };
-    let ft = super::fulltext::extract(&src, &mut cmds, &|n| resolved.as_ref().is_some_and(|s| s.fields.iter().any(|f| f == n)))?;
+    // A cross-cluster part's fields are every cluster's (its columns are, [`Source::align_to`]).
+    let ft = super::fulltext::extract(&src, &mut cmds, &|n| resolved.as_ref().is_some_and(|s| s.fields.iter().any(|f| f == n)) || part.as_ref().is_some_and(|p| p.schema.iter().any(|(f, _)| f == n)))?;
     // Conditions on `_ignored` right after the source filter in Lucene only (any of its values
     // matches), as Elasticsearch pushes them down.
     let mut ignored_query = None;
@@ -4225,8 +4286,10 @@ async fn execute_plain(cluster: &Cluster, q: Query, filter: Option<Value>, w: &m
         }
         Cmd::From { at, .. } => {
             let mut source = resolved.take().expect("resolved above");
-            if let Some(p) = &part {
-                source.align_to(&p.schema);
+            if let Some(p) = &part
+                && let Cmd::From { metadata, .. } = &first
+            {
+                source.align_to(&p.schema, metadata);
                 source.index_prefix = p.alias.clone();
             }
             if q.settings.unmapped == Unmapped::Load && !source.flattened.is_empty() {
@@ -4348,7 +4411,20 @@ async fn execute_plain(cluster: &Cluster, q: Query, filter: Option<Value>, w: &m
                             .await?
                         }
                     }
-                    let t = Table { cols: out_cols, rows: top.finish() };
+                    let mut t = Table { cols: out_cols, rows: top.finish() };
+                    // A part whose `ENRICH _remote` after the limit may overwrite a sort key carries
+                    // the keys' values from before it, for the coordinating cluster's sort.
+                    if part.as_ref().is_some_and(|p| p.sort_keys) {
+                        let spec = SortSpec::new(&src, keys, &t.cols)?;
+                        for r in t.rows.iter_mut() {
+                            let mut vals = Vec::with_capacity(spec.0.len());
+                            for (c, ..) in &spec.0 {
+                                vals.push(eval(c, r, &[], w)?);
+                            }
+                            r.extend(vals);
+                        }
+                        t.cols.extend(spec.0.iter().enumerate().map(|(k, (.., ty))| Col { name: format!("{}{k}", super::ccs::SORT_CARRY), ty: *ty }));
+                    }
                     // The one-row-per-row commands between `SORT` and `LIMIT` run on the `n` rows.
                     let after: Vec<Cmd> = rest[1..j].iter().chain(&rest[j + 1..]).cloned().collect();
                     return finish(cluster, &src, t, &after, w, stats).await;

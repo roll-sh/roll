@@ -2882,7 +2882,9 @@ async fn ccs_policy(e: &Env, user: &str, pw: &str, name: &str, prefix: &str) {
 /// `_clusters` with `include_ccs_metadata` (`_query/async` too); a missing remote is a 404 and
 /// a missing remote index skips that cluster (`skip_unavailable`) or fails the query; `ENRICH`
 /// runs with each cluster's policy in `_remote` mode, the coordinator's in `_coordinator` mode,
-/// and where it lands in `_any` mode, refused after `STATS` and when a cluster lacks the policy.
+/// and where it lands in `_any` mode, refused after `STATS` and when a cluster lacks the policy;
+/// the query's own errors and a remote's views are errors, never a skipped remote; and the
+/// remote reduces `STATS` itself (its rows wouldn't fit the breaker its answer is held on).
 #[tokio::test]
 async fn esql_across_clusters_answers_as_one_cluster() {
     use reqwest::Method;
@@ -2893,6 +2895,9 @@ async fn esql_across_clusters_answers_as_one_cluster() {
     ccs_items(&e, &all, &all_pw, 0..90).await;
     ccs_items(&e, &near, &near_pw, (0..90).filter(|i| i % 3 != 0)).await;
     ccs_items(&e, &far, &far_pw, (0..90).filter(|i| i % 3 == 0)).await;
+    let bulk: String = (0..3000).map(|i| format!("{{\"index\":{{}}}}\n{{\"k\":{}}}\n", i % 7)).collect();
+    let r = e.http.post(format!("{}/many/_bulk?refresh=true", e.es)).basic_auth(&far, Some(&far_pw)).header("content-type", "application/x-ndjson").body(bulk).send().await.unwrap();
+    assert_eq!(r.json::<Value>().await.unwrap()["errors"], false);
     let (s, v) = e.call(Method::PUT, "/v1/search/clusters/esql-near/remotes/far", Some(json!({ "cluster": "esql-far" }))).await;
     assert_eq!(s, 200, "{v}");
     let query = |user: &str, pw: &str, body: Value| {
@@ -2923,6 +2928,9 @@ async fn esql_across_clusters_answers_as_one_cluster() {
     let (_, only) = query(&near, &near_pw, json!({ "query": "FROM *:items | STATS c = COUNT(*), s = SUM(n)" })).await;
     let (_, one) = query(&all, &all_pw, json!({ "query": "FROM items | WHERE n % 3 == 0 | STATS c = COUNT(*), s = SUM(n)" })).await;
     assert_eq!(esql_answer(&only), esql_answer(&one), "{only}");
+    // An exclusion of a remote's is that remote's own (`-many` there).
+    let (s, v) = query(&near, &near_pw, json!({ "query": "FROM far:*,-far:many | STATS c = COUNT(*)" })).await;
+    assert_eq!((s, v["values"].clone()), (200, json!([[30]])), "{v}");
 
     // `_index` names the cluster; `_clusters` reports every cluster's part.
     let (s, v) = query(&near, &near_pw, json!({ "query": "FROM items,far:items METADATA _index | WHERE n < 4 | KEEP n, _index | SORT n", "include_ccs_metadata": true })).await;
@@ -2944,6 +2952,14 @@ async fn esql_across_clusters_answers_as_one_cluster() {
     // or fails the query.
     let (s, v) = query(&near, &near_pw, json!({ "query": "FROM nope:items | LIMIT 1" })).await;
     assert_eq!((s, v["error"]["type"].as_str(), v["error"]["reason"].as_str()), (404, Some("no_such_remote_cluster_exception"), Some("no such remote cluster: [nope]")), "{v}");
+    // The query's own error is the query's, never a skipped remote.
+    let (s, v) = query(&near, &near_pw, json!({ "query": "FROM far:items | WHERE nosuch > 1" })).await;
+    assert_eq!((s, v["error"]["reason"].as_str()), (400, Some("Found 1 problem\nline 1:24: Unknown column [nosuch]")), "{v}");
+    // A remote's ES|QL view isn't read across clusters (Elasticsearch's 400).
+    let (s, v) = e.es(&far, &far_pw, Method::PUT, "/_query/view/itemsview", Some(json!({ "query": "FROM items" }))).await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = query(&near, &near_pw, json!({ "query": "FROM far:itemsview | STATS c = COUNT(*)" })).await;
+    assert_eq!((s, v["error"]["type"].as_str(), v["error"]["reason"].as_str()), (400, Some("remote_view_not_supported_exception"), Some("ES|QL queries with remote views are not supported. Matched [far:itemsview]. Remove them from the query pattern or exclude them with [far:-itemsview] if matched by a wildcard.")), "{v}");
     let (s, v) = query(&near, &near_pw, json!({ "query": "FROM items,far:missing | STATS c = COUNT(*)", "include_ccs_metadata": true })).await;
     assert_eq!((s, v["values"].clone(), v["is_partial"].as_bool()), (200, json!([[60]]), Some(true)), "{v}");
     let far_part = &v["_clusters"]["details"]["far"];
@@ -2963,6 +2979,8 @@ async fn esql_across_clusters_answers_as_one_cluster() {
         ("FROM items,far:items | WHERE n < 2 | ENRICH _coordinator:tag_label | KEEP n, label | SORT n", json!([[0, "N-a"], [1, "N-b"]])),
         ("FROM items,far:items | SORT n | LIMIT 2 | ENRICH _remote:tag_label | KEEP n, label", json!([[0, "F-a"], [1, "N-b"]])),
         ("FROM items,far:items | SORT n | LIMIT 2 | ENRICH tag_label | KEEP n, label", json!([[0, "N-a"], [1, "N-b"]])),
+        // Sorted on the parts' `n`, which the policy then overwrites.
+        ("FROM items,far:items | WHERE n > 0 | SORT n | LIMIT 3 | ENRICH _remote:tag_label WITH n = label | KEEP n", json!([["N-b"], ["N-c"], ["F-d"]])),
     ] {
         let (s, v) = query(&near, &near_pw, json!({ "query": q })).await;
         assert_eq!((s, v["values"].clone()), (200, want), "{q}: {v}");
@@ -2974,12 +2992,21 @@ async fn esql_across_clusters_answers_as_one_cluster() {
         let (s, v) = query(&near, &near_pw, json!({ "query": q })).await;
         assert_eq!((s, v["error"]["reason"].as_str()), (400, Some(reason)), "{q}: {v}");
     }
+
+    // `STATS` merges each cluster's partial states: 3,000 remote rows wouldn't fit the request
+    // breaker this cluster holds remote answers on, the remote's states do.
+    assert_eq!(e.es(&near, &near_pw, Method::PUT, "/_cluster/settings", Some(json!({ "transient": { "indices.breaker.request.limit": "100kb" } }))).await.0, 200);
+    let (s, v) = query(&near, &near_pw, json!({ "query": "FROM far:many | STATS c = COUNT(*), s = SUM(k), d = COUNT_DISTINCT(k)" })).await;
+    assert_eq!((s, v["values"].clone()), (200, json!([[3000, 8994, 7]])), "{v}");
+    let (s, v) = query(&near, &near_pw, json!({ "query": "FROM far:many | KEEP k | LIMIT 3000" })).await;
+    assert_eq!((s, v["error"]["type"].as_str()), (429, Some("circuit_breaking_exception")), "{v}");
 }
 
 /// ES|QL's part on a linked remote reads as the link allows, as `_search` across clusters does:
 /// the `cross_cluster` key's access (its document and field level security included)
-/// intersected with the caller's `remote_indices`; a caller without them for the remote is
-/// refused, and a client can't ask a cluster for a part's internal answer.
+/// intersected with the caller's `remote_indices` (a field the key hides reads null); a caller
+/// without them for the remote is refused (403), a remote's `ENRICH` needs `monitor_enrich` there
+/// (`remote_cluster`), and a client can't ask a cluster for a part's internal answer.
 #[tokio::test]
 async fn esql_across_clusters_reads_as_the_link_allows() {
     use reqwest::Method;
@@ -2999,6 +3026,11 @@ async fn esql_across_clusters_reads_as_the_link_allows() {
     let (s, v) = e.es(&near, &near_pw, Method::POST, "/_query", Some(json!({ "query": "FROM far:items | SORT n | LIMIT 2" }))).await;
     let names: Vec<&str> = v["columns"].as_array().map(|c| c.iter().filter_map(|c| c["name"].as_str()).collect()).unwrap_or_default();
     assert_eq!((s, names, v["values"].clone()), (200, vec!["n", "tag"], json!([[0, "a"], [4, "a"]])), "{v}");
+    // A field this cluster maps that the key hides on the remote reads null there.
+    let (s, v) = e.es(&near, &near_pw, Method::PUT, "/items/_doc/1?refresh=true", Some(json!({ "n": 100, "price": 7.5, "tag": "a" }))).await;
+    assert_eq!(s, 201, "{v}");
+    let (s, v) = e.es(&near, &near_pw, Method::POST, "/_query", Some(json!({ "query": "FROM items,far:items | STATS p = MAX(price), c = COUNT(*)" }))).await;
+    assert_eq!((s, v["values"].clone()), (200, json!([[7.5, 6]])), "{v}");
     let (s, v) = e.es(&near, &near_pw, Method::POST, "/_query", Some(json!({ "query": "FROM far:secret | LIMIT 1", "include_ccs_metadata": true }))).await;
     assert_eq!((s, v["_clusters"]["details"]["far"]["status"].as_str()), (200, Some("skipped")), "{v}");
 
@@ -3013,8 +3045,19 @@ async fn esql_across_clusters_reads_as_the_link_allows() {
     let (s, v) = e.es(&format!("reader@{near}"), "pass-word-1", Method::POST, "/_query", Some(body.clone())).await;
     assert_eq!((s, v["values"].clone()), (200, json!([[5]])), "{v}");
     let (s, v) = e.es(&format!("local@{near}"), "pass-word-1", Method::POST, "/_query", Some(body)).await;
-    let d = &v["_clusters"]["details"]["far"];
-    assert_eq!((s, d["status"].as_str(), d["failures"][0]["reason"]["type"].as_str()), (200, Some("skipped"), Some("security_exception")), "{v}");
+    let reason = v["error"]["reason"].as_str().unwrap_or_default();
+    assert!(s == 403 && reason.starts_with("action [indices:data/read/esql/resolve_fields] towards remote cluster [far] is unauthorized for user [local]"), "{v}");
+
+    // A remote's ENRICH needs `monitor_enrich` there (`remote_cluster`), whatever the key's own.
+    ccs_policy(&e, &far, &far_pw, "tag_label", "F").await;
+    let enrich = json!({ "query": "FROM far:items | ENRICH _remote:tag_label | KEEP n, label | SORT n | LIMIT 1" });
+    let (s, v) = e.es(&format!("reader@{near}"), "pass-word-1", Method::POST, "/_query", Some(enrich.clone())).await;
+    let reason = v["error"]["reason"].as_str().unwrap_or_default();
+    assert!(s == 403 && reason.starts_with("action [cluster:monitor/xpack/enrich/esql/resolve_policy] towards remote cluster is unauthorized for user [reader]"), "{v}");
+    let reader = json!({ "indices": [{ "names": ["*"], "privileges": ["read"] }], "remote_indices": [{ "clusters": ["far"], "names": ["items"], "privileges": ["read"] }], "remote_cluster": [{ "clusters": ["far"], "privileges": ["monitor_enrich"] }] });
+    assert_eq!(e.es(&near, &near_pw, Method::PUT, "/_security/role/reader", Some(reader)).await.0, 200);
+    let (s, v) = e.es(&format!("reader@{near}"), "pass-word-1", Method::POST, "/_query", Some(enrich)).await;
+    assert_eq!((s, v["values"].clone()), (200, json!([[0, "F-a"]])), "{v}");
 
     // A part's answer is a link's only: a client asking gets an ordinary one.
     let part = r#"{"mode":"rows","schema":[],"policies":[]}"#;

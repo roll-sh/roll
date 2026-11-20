@@ -45,9 +45,16 @@ pub const PART_FIELD: &str = "__roll_esql_part";
 /// reason: the names, comma separated). Only parts answer it.
 const MISSING_POLICY: &str = "roll_missing_enrich_policy";
 
-/// How many times its size a part's answer is held on the request breaker before it's parsed
-/// (JSON, then values, then rows).
-const DECODED_PER_BYTE: u64 = 6;
+/// What one decoded element of a part's answer costs at most: its parsed JSON value and the
+/// value decoded from it, whatever few bytes it took to send.
+const PER_ELEMENT: u64 = (std::mem::size_of::<Value>() + std::mem::size_of::<V>() + 16) as u64;
+
+/// The cluster action a remote's `ENRICH` needs (`remote_cluster: monitor_enrich`).
+pub const RESOLVE_POLICY: &str = "cluster:monitor/xpack/enrich/esql/resolve_policy";
+
+/// The prefix of the columns a part carries its sort keys in, when an `ENRICH _remote` after
+/// its `SORT ... | LIMIT` may overwrite them: the coordinating cluster sorts on these.
+pub(super) const SORT_CARRY: &str = "$ccs_sort";
 
 /// How a part ends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -70,6 +77,53 @@ pub struct Part {
     pub schema: Vec<(String, DataType)>,
     /// Enrich policies the part's cluster must have.
     pub policies: Vec<String>,
+    /// The part ends `SORT ... | LIMIT n | ENRICH _remote:...`: it carries its sort keys'
+    /// values ([`SORT_CARRY`]) from before the `ENRICH`.
+    pub sort_keys: bool,
+}
+
+impl Part {
+    /// The part as a remote's request carries it, in its body ([`PART_FIELD`]): a schema of
+    /// thousands of fields fits there, never in a header a fleet forward caps.
+    fn to_value(&self) -> Value {
+        obj! {
+            "alias" => self.alias.clone().map_or(Value::Null, Value::Str),
+            "mode" => if self.mode == Mode::Stats { "stats" } else { "rows" },
+            "schema" => Value::Arr(self.schema.iter().map(|(n, t)| crate::arr![n.clone(), t.name()]).collect()),
+            "policies" => Value::Arr(self.policies.iter().cloned().map(Value::Str).collect()),
+            "sort_keys" => self.sort_keys,
+        }
+    }
+
+    fn of_value(v: &Value) -> Option<Part> {
+        let mode = match v.get("mode").and_then(Value::as_str)? {
+            "stats" => Mode::Stats,
+            "rows" => Mode::Rows,
+            _ => return None,
+        };
+        let mut schema = Vec::new();
+        for c in v.get("schema").and_then(Value::as_array)? {
+            schema.push((pair(c, 0).and_then(Value::as_str)?.to_string(), pair(c, 1).and_then(Value::as_str).and_then(type_named)?));
+        }
+        let mut policies = Vec::new();
+        for p in v.get("policies").and_then(Value::as_array)? {
+            policies.push(p.as_str()?.to_string());
+        }
+        let alias = v.get("alias").and_then(Value::as_str).map(str::to_string);
+        Some(Part { alias, mode, schema, policies, sort_keys: v.get("sort_keys").and_then(Value::as_bool).unwrap_or(false) })
+    }
+}
+
+/// A remote's part request: the query fields the client sent (`forwarded`), the part's text, and
+/// the part itself in the body; the header only marks it (honored on a link's request alone).
+fn part_request(template: &EsRequest, forwarded: &Map, text: &str, part: &Part) -> EsRequest {
+    let mut body = forwarded.clone();
+    body.insert("query".into(), Value::Str(text.to_string()));
+    body.insert(PART_FIELD.into(), part.to_value());
+    let mut req = EsRequest::json("POST", "/_query", Value::Obj(body).to_json().into_bytes());
+    req.headers.extend(template.headers.iter().cloned());
+    req.headers.push((PART_HEADER.into(), "1".into()));
+    req
 }
 
 /// A `STATS` part's result: its input columns and each group's key and states.
@@ -128,9 +182,11 @@ pub fn clusters_section(parts: &[ClusterInfo], took: i64) -> Value {
 struct Linked {
     remote: Remote,
     target: String,
-    /// The request carrying the caller's remote access (body and part header added per query),
-    /// or why the caller may not reach this remote (no `remote_indices` naming it).
-    template: Result<EsRequest, EsError>,
+    /// The request carrying the caller's remote access (body and part header added per query).
+    template: EsRequest,
+    /// Why the caller may not reach this remote: no `remote_indices` naming it (Elasticsearch's
+    /// 403 for a query over remotes alone; with local indices too, the remote is skipped).
+    refusal: Option<EsError>,
 }
 
 /// The linked remotes a query names, each with its expressions there.
@@ -164,15 +220,22 @@ impl Ccs {
             return None;
         }
         let configured = crate::remote::remotes(&ctx.state());
+        let p = crate::xpack::security::principal(ctx);
         let linked: Vec<Linked> = configured
             .iter()
             .filter_map(|r| {
                 let target = r.link(&*links)?;
-                let template = match links::refusal(ctx, r) {
-                    Some(e) => Err(e),
-                    None => Ok(links::request(ctx, &r.alias, "POST", "/_query", None)),
-                };
-                Some(Linked { remote: r.clone(), target, template })
+                let refusal = links::refusal(ctx, r).map(|_| {
+                    EsError::security(
+                        403,
+                        format!(
+                            "action [indices:data/read/esql/resolve_fields] towards remote cluster [{}] is unauthorized for {} because no remote indices privileges apply for the target cluster",
+                            r.alias,
+                            crate::xpack::security::who(p)
+                        ),
+                    )
+                });
+                Some(Linked { remote: r.clone(), target, template: links::request(ctx, &r.alias, "POST", "/_query", None), refusal })
             })
             .collect();
         if linked.is_empty() {
@@ -199,20 +262,27 @@ impl Ccs {
     }
 
     /// Splits `sources` into the local part's and each linked remote's (in alias order);
-    /// `None` when they name no linked remote.
+    /// `None` when they name no linked remote. An exclusion of a remote's (`-far:x`) is that
+    /// remote's own (`-x`), as Elasticsearch applies it.
     fn split(&self, sources: &[String]) -> Option<(Vec<String>, Legs<'_>)> {
         let mut local = Vec::new();
         let mut legs: Legs<'_> = Vec::new();
         for e in sources {
-            if !self.names_link(e) {
+            let (exclude, bare) = match e.strip_prefix('-') {
+                Some(b) if crate::remote::split_expression(b).is_some() => (true, b),
+                _ => (false, e.as_str()),
+            };
+            if !self.names_link(bare) {
                 local.push(e.clone());
                 continue;
             }
-            let (pattern, index) = crate::remote::split_expression(e).expect("names a link");
+            let (pattern, index) = crate::remote::split_expression(bare).expect("names a link");
+            let index = if exclude { format!("-{index}") } else { index.to_string() };
             for l in self.linked.iter().filter(|l| crate::xcontent::filter::glob_match(pattern, &l.remote.alias)) {
                 match legs.iter_mut().find(|(x, _)| x.remote.alias == l.remote.alias) {
-                    Some((_, exprs)) => exprs.push(index.to_string()),
-                    None => legs.push((l, vec![index.to_string()])),
+                    Some((_, exprs)) => exprs.push(index.clone()),
+                    None if !exclude => legs.push((l, vec![index.clone()])),
+                    None => {}
                 }
             }
         }
@@ -250,30 +320,39 @@ pub fn part() -> Option<Arc<Part>> {
     PART.try_with(Arc::clone).ok()
 }
 
-/// The part a link's request asks to run ([`PART_HEADER`]); `None` for anyone else's.
-pub fn requested(ctx: &Ctx) -> EsResult<Option<Arc<Part>>> {
-    let Some(h) = ctx.request.header(PART_HEADER) else { return Ok(None) };
-    if !links::is_link_call(ctx) {
+/// The part a link's request asks to run ([`PART_HEADER`], the part in the body's
+/// [`PART_FIELD`], taken out of it); `None` for anyone else's request, whose body keeps the
+/// field (and fails as an unknown one).
+pub fn requested(ctx: &Ctx, body: &mut Value) -> EsResult<Option<Arc<Part>>> {
+    if ctx.request.header(PART_HEADER).is_none() || !links::is_link_call(ctx) {
         return Ok(None);
     }
-    let bad = || EsError::illegal_argument("an ES|QL part roll can't read");
-    if h.len() > links::MAX_REMOTE_ACCESS * 16 {
-        return Err(bad());
+    let v = body.as_object_mut().and_then(|m| m.shift_remove(PART_FIELD)).unwrap_or(Value::Null);
+    Part::of_value(&v).map(|p| Some(Arc::new(p))).ok_or_else(|| EsError::illegal_argument("an ES|QL part roll can't read"))
+}
+
+/// A remote part's `FROM` naming ES|QL views: Elasticsearch's 400 (views on remote clusters
+/// aren't queried across clusters). `sources` are the remote's own expressions.
+pub fn check_remote_views(st: &crate::meta::ClusterState, alias: &str, sources: &[String]) -> EsResult<()> {
+    let mut matched: Vec<String> = Vec::new();
+    for (name, _) in st.metadata.xpack.iter(super::VIEWS) {
+        let hit = sources.iter().filter(|s| !s.starts_with('-')).any(|s| crate::xcontent::filter::glob_match(s, name));
+        let excluded = sources.iter().filter_map(|s| s.strip_prefix('-')).any(|s| crate::xcontent::filter::glob_match(s, name));
+        if hit && !excluded {
+            matched.push(name.clone());
+        }
     }
-    let v = crate::json::parse(h.as_bytes()).ok().flatten().ok_or_else(bad)?;
-    let mode = match v.get("mode").and_then(Value::as_str) {
-        Some("stats") => Mode::Stats,
-        Some("rows") => Mode::Rows,
-        _ => return Err(bad()),
-    };
-    let mut schema = Vec::new();
-    for c in v.get("schema").and_then(Value::as_array).into_iter().flatten() {
-        let (Some(n), Some(t)) = (pair(c, 0).and_then(Value::as_str), pair(c, 1).and_then(Value::as_str).and_then(type_named)) else { return Err(bad()) };
-        schema.push((n.to_string(), t));
+    if matched.is_empty() {
+        return Ok(());
     }
-    let policies = v.get("policies").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect();
-    let alias = v.get("alias").and_then(Value::as_str).map(str::to_string);
-    Ok(Some(Arc::new(Part { alias, mode, schema, policies })))
+    matched.sort();
+    let named: Vec<String> = matched.iter().map(|v| format!("{alias}:{v}")).collect();
+    let excluding: Vec<String> = matched.iter().map(|v| format!("{alias}:-{v}")).collect();
+    Err(EsError::new(
+        400,
+        "remote_view_not_supported_exception",
+        format!("ES|QL queries with remote views are not supported. Matched [{}]. Remove them from the query pattern or exclude them with [{}] if matched by a wildcard.", named.join(", "), excluding.join(", ")),
+    ))
 }
 
 /// Every type, by its [`DataType::name`].
@@ -335,6 +414,8 @@ pub struct Cut {
     pub rest: Vec<Cmd>,
     /// The `STATS` the parts reduce partially.
     pub stats: Option<Cmd>,
+    /// The parts carry their sort keys' values ([`Part::sort_keys`]).
+    pub sort_keys: bool,
 }
 
 fn enrich_mode(policy: &str) -> &str {
@@ -379,7 +460,7 @@ pub fn cut(cmds: &[Cmd], parsed: usize) -> Cut {
     match cmds.get(i) {
         Some(c @ Cmd::Stats { .. }) => {
             part.push(i);
-            Cut { mode: Mode::Stats, part, append_limit: None, rest: cmds[i + 1..].to_vec(), stats: Some(c.clone()) }
+            Cut { mode: Mode::Stats, part, append_limit: None, rest: cmds[i + 1..].to_vec(), stats: Some(c.clone()), sort_keys: false }
         }
         Some(Cmd::Limit(n)) => {
             let mut append_limit = None;
@@ -392,7 +473,7 @@ pub fn cut(cmds: &[Cmd], parsed: usize) -> Cut {
             };
             let mut rest = vec![Cmd::Limit(*n)];
             rest.extend(cmds[after..].iter().cloned());
-            Cut { mode: Mode::Rows, part, append_limit, rest, stats: None }
+            Cut { mode: Mode::Rows, part, append_limit, rest, stats: None, sort_keys: false }
         }
         Some(Cmd::Sort(keys)) if cmds.get(i + 1).is_some_and(|c| matches!(c, Cmd::Limit(_))) => {
             // `SORT ... | LIMIT n`: every part sorts and limits, then again here.
@@ -406,11 +487,24 @@ pub fn cut(cmds: &[Cmd], parsed: usize) -> Cut {
                 part.push(i + 1);
                 trailing_remote(i + 2, &mut part)
             };
-            let mut rest = vec![Cmd::Sort(keys.clone()), Cmd::Limit(*n)];
+            // An `ENRICH _remote` the parts ran after their limit may overwrite a sort key: they
+            // carry the keys' values from before it, and the rows sort on those here.
+            let sort_keys = after > i + 2;
+            let mut rest = if sort_keys {
+                let carried: Vec<super::parser::SortKey> = keys
+                    .iter()
+                    .enumerate()
+                    .map(|(k, key)| super::parser::SortKey { expr: super::parser::Expr::new(super::parser::ExprKind::Col(format!("{SORT_CARRY}{k}")), key.expr.start, key.expr.end), asc: key.asc, nulls_first: key.nulls_first })
+                    .collect();
+                let names = (0..keys.len()).map(|k| (format!("{SORT_CARRY}{k}"), 0)).collect();
+                vec![Cmd::Sort(carried), Cmd::Limit(*n), Cmd::Drop(names)]
+            } else {
+                vec![Cmd::Sort(keys.clone()), Cmd::Limit(*n)]
+            };
             rest.extend(cmds[after..].iter().cloned());
-            Cut { mode: Mode::Rows, part, append_limit, rest, stats: None }
+            Cut { mode: Mode::Rows, part, append_limit, rest, stats: None, sort_keys }
         }
-        _ => Cut { mode: Mode::Rows, part, append_limit: None, rest: cmds[i..].to_vec(), stats: None },
+        _ => Cut { mode: Mode::Rows, part, append_limit: None, rest: cmds[i..].to_vec(), stats: None, sort_keys: false },
     }
 }
 
@@ -695,7 +789,9 @@ pub struct Answer {
 }
 
 /// Decodes a part's answer (already parsed, its bytes held on the breaker): every row exactly as
-/// wide as its columns, values and states checked as [`decode_v`] and [`decode_acc`] check them.
+/// wide as its columns and every value of its column's type ([`super::value::fits`]), values and
+/// states checked as [`decode_v`] and [`decode_acc`] check them (and a `STATS` part's states
+/// against the coordinating cluster's aggregations, when they merge).
 pub fn decode_answer(v: &Value, mode: Mode) -> Result<Answer, String> {
     let p = v.get(PART_FIELD).ok_or("no part in the answer")?;
     let mut cols = Vec::new();
@@ -711,8 +807,12 @@ pub fn decode_answer(v: &Value, mode: Mode) -> Result<Answer, String> {
             for r in p.get("rows").and_then(Value::as_array).ok_or("no rows")? {
                 let r = r.as_array().filter(|r| r.len() == cols.len()).ok_or("a row of another width")?;
                 let mut row = Vec::with_capacity(r.len());
-                for x in r {
-                    row.push(decode_v(x, true)?);
+                for (x, c) in r.iter().zip(&cols) {
+                    let v = decode_v(x, true)?;
+                    if !super::value::fits(c.ty, &v) {
+                        return Err(format!("a value that isn't of its column's type [{}]", c.ty.name()));
+                    }
+                    row.push(v);
                 }
                 rows.push(row);
             }
@@ -751,12 +851,19 @@ pub fn check_part_policies(cluster: &crate::cluster::Cluster, part: &Part) -> Es
     if missing.is_empty() { Ok(()) } else { Err(EsError::new(400, MISSING_POLICY, missing.join(","))) }
 }
 
-/// A remote's part, sent.
+/// A remote's part, sent. Aborted when it's dropped unawaited (the local part failed, the client
+/// went away, an error ended the query first): no leg outlives its query.
 struct Leg {
     alias: String,
     skip_unavailable: bool,
     indices: String,
     handle: tokio::task::JoinHandle<Result<crate::rest::EsResponse, EsError>>,
+}
+
+impl Drop for Leg {
+    fn drop(&mut self) {
+        self.handle.abort();
+    }
 }
 
 /// One cluster's part's outcome.
@@ -766,6 +873,43 @@ enum Outcome {
     Skipped(EsError),
 }
 
+/// Whether a remote's failed part may be skipped (`skip_unavailable`): it couldn't be reached or
+/// authenticated, or its indices are missing (an index outside what the link may read answers as
+/// missing). Anything else is the query's own error, as Elasticsearch fails it (a remote denying
+/// `ENRICH` its `monitor_enrich` too).
+fn skippable(e: &EsError) -> bool {
+    match e.kind.as_ref() {
+        "connect_transport_exception" | "index_not_found_exception" => true,
+        "verification_exception" => e.reason().starts_with("Unknown index ["),
+        "security_exception" => !e.reason().contains(RESOLVE_POLICY),
+        _ => matches!(e.status, 502 | 503),
+    }
+}
+
+/// How many values a JSON text holds at most (its separators and openers outside strings),
+/// counted before it's parsed.
+fn json_elements(b: &[u8]) -> u64 {
+    let (mut n, mut in_str, mut escaped) = (1u64, false, false);
+    for &c in b {
+        if in_str {
+            if escaped {
+                escaped = false;
+            } else if c == b'\\' {
+                escaped = true;
+            } else if c == b'"' {
+                in_str = false;
+            }
+        } else {
+            match c {
+                b'"' => in_str = true,
+                b',' | b'[' | b'{' | b':' => n += 1,
+                _ => {}
+            }
+        }
+    }
+    n
+}
+
 /// Runs query `q` (its source naming linked remotes) as parts on every cluster it names and
 /// merges them; `None` when its shape can't be cut into parts (the caller then reads the
 /// remotes' rows through cross-cluster search, as before).
@@ -773,8 +917,9 @@ pub async fn run(cluster: &crate::cluster::Cluster, ccs: &Ccs, q: &Query, filter
     let started = Instant::now();
     let Some(Cmd::From { sources, metadata, at }) = q.cmds.first() else { return Ok(None) };
     let Some((local_sources, legs)) = ccs.split(sources) else { return Ok(None) };
-    // Only the query's own text (its commands as parsed, maybe the implicit limit after them).
-    if q.sql || q.spans.is_empty() || q.spans.len() + 1 < q.cmds.len() {
+    // Only the query's own text (its commands as parsed, maybe the implicit limit after them),
+    // with every cluster's columns its mappings' (`SET unmapped_fields` makes them each part's).
+    if q.sql || q.spans.is_empty() || q.spans.len() + 1 < q.cmds.len() || q.settings.unmapped != super::parser::Unmapped::Default {
         return Ok(None);
     }
     let cut = cut(&q.cmds, q.spans.len());
@@ -784,15 +929,29 @@ pub async fn run(cluster: &crate::cluster::Cluster, ccs: &Ccs, q: &Query, filter
         None => return Ok(None),
     };
     check_placement(&q.src, &q.spans, &q.cmds)?;
+    // A caller no `remote_indices` lets reach a remote: a query over remotes alone is refused.
+    if local_sources.is_empty()
+        && let Some(e) = legs.iter().find_map(|(l, _)| l.refusal.clone())
+    {
+        return Err(e);
+    }
 
     // Every cluster's columns, as one source of them all.
     let schema = super::exec::source_schema(cluster, &q.src, sources, &local_sources, *at).await?;
+    let text = q.src.clone();
+    let res = super::exec::load_resources(cluster, &text, &q.cmds[1..]).await?;
+    let tz = q.settings.time_zone.as_deref().and_then(|z| crate::time::Zone::parse(z).ok()).filter(|z| *z != crate::time::Zone::UTC);
+    let src = super::exec::Src { text: &text, sql: false, locale: q.locale.as_deref(), res: &res, tz };
+    // The parts' commands, compiled here first: the query's own errors (an unknown column, a
+    // bad aggregation) are the query's, before any cluster runs it. `expected`: the columns the
+    // parts' row-by-row commands make (the input of a partial `STATS`).
+    let part_cmds: Vec<Cmd> = cut.part.iter().map(|&k| q.cmds[k].clone()).collect();
+    let pre = part_cmds.iter().take_while(|c| runs_in_parts(c)).count();
+    let expected = super::exec::verify_part(&src, &schema, metadata, &part_cmds, pre)?;
 
     // Enrich policies: `_any` must be here and on every part's cluster, `_remote` on every
     // part's cluster, `_coordinator` here (as one cluster's query checks it).
     let used = policies(&q.cmds);
-    let st = cluster.state();
-    let here = |p: &str| st.metadata.xpack.get(crate::xpack::enrich::POLICIES, p).is_some();
     let mut missing: Vec<(String, usize, Vec<String>)> = Vec::new();
     let mut note = |name: &str, at: usize, cluster_name: &str| match missing.iter_mut().find(|(n, _, _)| n == name) {
         Some((_, _, cs)) => {
@@ -802,12 +961,14 @@ pub async fn run(cluster: &crate::cluster::Cluster, ccs: &Ccs, q: &Query, filter
         }
         None => missing.push((name.to_string(), at, vec![cluster_name.to_string()])),
     };
-    for (name, mode, at) in &used {
-        if (mode == "_any" || (mode == "_remote" && !local_sources.is_empty())) && !here(name) {
-            note(name, *at, "_local");
+    {
+        let st = cluster.state();
+        for (name, mode, at) in &used {
+            if (mode == "_any" || (mode == "_remote" && !local_sources.is_empty())) && st.metadata.xpack.get(crate::xpack::enrich::POLICIES, name).is_none() {
+                note(name, *at, "_local");
+            }
         }
     }
-    drop(st);
     let remote_policies: Vec<String> = {
         let mut v: Vec<String> = used.iter().filter(|(_, m, _)| m != "_coordinator").map(|(n, _, _)| n.clone()).collect();
         v.sort();
@@ -815,26 +976,19 @@ pub async fn run(cluster: &crate::cluster::Cluster, ccs: &Ccs, q: &Query, filter
         v
     };
 
-    // The parts' header: what every part is told.
-    let schema_json = Value::Arr(schema.iter().map(|c| crate::arr![c.name.clone(), c.ty.name()]).collect());
-    let mode_name = if cut.mode == Mode::Stats { "stats" } else { "rows" };
+    let schema_cols: Vec<(String, DataType)> = schema.iter().map(|c| (c.name.clone(), c.ty)).collect();
     let mut sent: Vec<Leg> = Vec::new();
     let mut refused: Vec<(String, bool, String, EsError)> = Vec::new();
     for ((l, exprs), text) in legs.iter().zip(&texts) {
         let indices = exprs.join(",");
-        let template = match &l.template {
-            Ok(t) => t.clone(),
-            Err(e) => {
-                refused.push((l.remote.alias.clone(), l.remote.skip_unavailable, indices, e.clone()));
-                continue;
-            }
-        };
-        let mut body = ccs.forwarded.clone();
-        body.insert("query".into(), Value::Str(text.clone()));
-        let mut req = EsRequest::json("POST", "/_query", Value::Obj(body).to_json().into_bytes());
-        req.headers.extend(template.headers.iter().cloned());
-        let header = obj! { "alias" => l.remote.alias.clone(), "mode" => mode_name, "schema" => schema_json.clone(), "policies" => Value::Arr(remote_policies.iter().cloned().map(Value::Str).collect()) };
-        req.headers.push((PART_HEADER.into(), header.to_json()));
+        if l.refusal.is_some() {
+            // With local indices too, Elasticsearch skips such a remote as one without them.
+            let named: Vec<String> = exprs.iter().map(|e| format!("{}:{e}", l.remote.alias)).collect();
+            refused.push((l.remote.alias.clone(), l.remote.skip_unavailable, indices, EsError::new(400, "verification_exception", format!("Unknown index [{}]", named.join(",")))));
+            continue;
+        }
+        let part = Part { alias: Some(l.remote.alias.clone()), mode: cut.mode, schema: schema_cols.clone(), policies: remote_policies.clone(), sort_keys: cut.sort_keys };
+        let req = part_request(&l.template, &ccs.forwarded, text, &part);
         let (links, local, alias, target, wait) = (ccs.links.clone(), ccs.local.clone(), l.remote.alias.clone(), l.target.clone(), ccs.wait);
         let handle = tokio::spawn(async move {
             match tokio::time::timeout(wait, links.send(&local, &alias, &target, req)).await {
@@ -846,23 +1000,26 @@ pub async fn run(cluster: &crate::cluster::Cluster, ccs: &Ccs, q: &Query, filter
         sent.push(Leg { alias: l.remote.alias.clone(), skip_unavailable: l.remote.skip_unavailable, indices, handle });
     }
 
-    // The local part, while the remotes run theirs.
-    let local_part = Arc::new(Part { alias: None, mode: cut.mode, schema: schema.iter().map(|c| (c.name.clone(), c.ty)).collect(), policies: Vec::new() });
+    // The local part, while the remotes run theirs (dropped legs abort if it fails).
     let local = if local_sources.is_empty() {
         None
     } else {
         let mut cmds = vec![Cmd::From { sources: local_sources.clone(), metadata: metadata.clone(), at: *at }];
-        cmds.extend(cut.part.iter().map(|&k| q.cmds[k].clone()));
+        cmds.extend(part_cmds.iter().cloned());
         if let Some(n) = cut.append_limit {
             cmds.push(Cmd::Limit(n));
         }
         let lq = Query { src: q.src.clone(), cmds, sql: false, locale: q.locale.clone(), settings: q.settings.clone(), spans: Vec::new() };
-        let started = Instant::now();
-        let (t, s) = PART.scope(local_part.clone(), super::exec::execute_part(cluster, lq, filter.clone(), w)).await?;
-        Some((t, s, started.elapsed().as_millis() as i64))
+        let part = Arc::new(Part { alias: None, mode: cut.mode, schema: schema_cols.clone(), policies: Vec::new(), sort_keys: cut.sort_keys });
+        let (t, s) = PART.scope(part, super::exec::execute_part(cluster, lq, filter.clone(), w)).await?;
+        if cut.mode == Mode::Stats && s.partial.is_none() {
+            return Err(EsError::illegal_state("the local cluster's part answered STATS without its partial states"));
+        }
+        Some((t, s))
     };
 
-    // The remotes' answers, held on the request breaker before they're read.
+    // The remotes' answers, held on the request breaker before they're read: their bytes and,
+    // per value they may hold, what it costs parsed and decoded.
     let mut held = crate::breaker::Reservation::new(cluster.breakers.request(cluster, &cluster.state()));
     let mut outcomes: Outcomes = Vec::new();
     let fail = |alias: &str, skip: bool, e: EsError, indices: &str, outcomes: &mut Outcomes| -> EsResult<()> {
@@ -875,8 +1032,8 @@ pub async fn run(cluster: &crate::cluster::Cluster, ccs: &Ccs, q: &Query, filter
     for (alias, skip, indices, e) in refused {
         fail(&alias, skip, e, &indices, &mut outcomes)?;
     }
-    for leg in sent {
-        let resp = match leg.handle.await {
+    for mut leg in sent {
+        let resp = match (&mut leg.handle).await {
             Ok(r) => r,
             Err(_) => Err(EsError::new(502, "connect_transport_exception", format!("Unable to connect to [{}]", leg.alias))),
         };
@@ -887,7 +1044,7 @@ pub async fn run(cluster: &crate::cluster::Cluster, ccs: &Ccs, q: &Query, filter
                 continue;
             }
         };
-        held.add(resp.body.len() as u64 * DECODED_PER_BYTE, "<remote_cluster_response>")?;
+        held.add((resp.body.len() as u64).saturating_add(json_elements(&resp.body).saturating_mul(PER_ELEMENT)), "<remote_cluster_response>")?;
         let v = crate::json::parse(&resp.body).ok().flatten().unwrap_or(Value::Null);
         if resp.status >= 300 {
             let e = links::error_of(resp.status, &v);
@@ -898,6 +1055,9 @@ pub async fn run(cluster: &crate::cluster::Cluster, ccs: &Ccs, q: &Query, filter
                     }
                 }
                 continue;
+            }
+            if !skippable(&e) {
+                return Err(e);
             }
             fail(&leg.alias, leg.skip_unavailable, e, &leg.indices, &mut outcomes)?;
             continue;
@@ -911,10 +1071,7 @@ pub async fn run(cluster: &crate::cluster::Cluster, ccs: &Ccs, q: &Query, filter
         }
         match decode_answer(&v, cut.mode) {
             Ok(a) => outcomes.push((leg.alias.clone(), leg.indices.clone(), Outcome::Done(a))),
-            Err(why) => {
-                let e = EsError::illegal_state(format!("remote cluster [{}] answered a part roll can't read: {why}", leg.alias));
-                fail(&leg.alias, leg.skip_unavailable, e, &leg.indices, &mut outcomes)?;
-            }
+            Err(why) => return Err(EsError::illegal_state(format!("remote cluster [{}] answered a part roll can't read: {why}", leg.alias))),
         }
     }
     if let Some((name, at, mut cs)) = missing.into_iter().next() {
@@ -927,26 +1084,25 @@ pub async fn run(cluster: &crate::cluster::Cluster, ccs: &Ccs, q: &Query, filter
     let mut infos: Vec<ClusterInfo> = Vec::new();
     let mut tables: Vec<Table> = Vec::new();
     let mut partials: Vec<Partial> = Vec::new();
-    if let Some((t, s, _)) = local {
+    if let Some((t, s)) = local {
         infos.push(ClusterInfo { name: "(local)".into(), indices: local_sources.join(","), status: "successful", took: None, shards: shards_of(cluster, s.indices.as_deref()), failures: Vec::new() });
-        stats.documents_found += s.documents_found;
-        stats.values_loaded += s.values_loaded;
+        stats.documents_found = stats.documents_found.saturating_add(s.documents_found);
+        stats.values_loaded = stats.values_loaded.saturating_add(s.values_loaded);
         stats.indices = s.indices.clone();
         stats.fields = s.fields.clone();
         stats.original_types = s.original_types.clone();
         stats.col_meta = s.col_meta.clone();
-        if let Some(p) = s.partial {
-            partials.push(p);
-        } else {
-            tables.push(t);
+        match s.partial {
+            Some(p) => partials.push(p),
+            None => tables.push(t),
         }
     }
     for (alias, indices, o) in outcomes {
         match o {
             Outcome::Done(a) => {
                 infos.push(ClusterInfo { name: alias, indices, status: "successful", took: Some(a.took), shards: a.shards, failures: Vec::new() });
-                stats.documents_found += a.documents_found;
-                stats.values_loaded += a.values_loaded;
+                stats.documents_found = stats.documents_found.saturating_add(a.documents_found);
+                stats.values_loaded = stats.values_loaded.saturating_add(a.values_loaded);
                 match a.partial {
                     Some(p) => partials.push(p),
                     None => tables.push(a.table),
@@ -965,26 +1121,33 @@ pub async fn run(cluster: &crate::cluster::Cluster, ccs: &Ccs, q: &Query, filter
     let remotes_from = usize::from(infos.first().is_some_and(|i| i.name == "(local)"));
     infos[remotes_from..].sort_by(|a, b| a.name.cmp(&b.name));
 
-    let text = q.src.clone();
-    let res = super::exec::load_resources(cluster, &text, &cut.rest).await?;
-    let tz = q.settings.time_zone.as_deref().and_then(|z| crate::time::Zone::parse(z).ok()).filter(|z| *z != crate::time::Zone::UTC);
-    let src = super::exec::Src { text: &text, sql: false, locale: q.locale.as_deref(), res: &res, tz };
-    // The parts' row-by-row commands, for the columns when no part answered.
-    let prefix: Vec<Cmd> = cut.part.iter().map(|&k| q.cmds[k].clone()).filter(runs_in_parts).collect();
+    // The columns the parts make when none answered (every one skipped).
+    let empty_cols = || -> EsResult<Vec<Col>> {
+        let mut cols = match &expected {
+            Some(c) => c.clone(),
+            None => super::exec::part_columns(&src, &schema, metadata, &part_cmds[..pre])?,
+        };
+        if cut.sort_keys {
+            cols.extend((0..part_cmds.iter().find_map(|c| if let Cmd::Sort(k) = c { Some(k.len()) } else { None }).unwrap_or(0)).map(|k| Col { name: format!("{SORT_CARRY}{k}"), ty: DataType::Null }));
+        }
+        Ok(cols)
+    };
     let table = match &cut.stats {
         Some(Cmd::Stats { aggs, by }) => {
-            // The final reduce: every part's states into one grouper over the same columns.
-            let input = match partials.first() {
-                Some(p) => p.input.clone(),
-                None => super::exec::part_columns(&src, &schema, metadata, &prefix).unwrap_or_default(),
+            // The final reduce: every part's states into one grouper over the query's columns,
+            // each part's exactly those (as the coordinating cluster compiled them, else the
+            // first part's when it can't: a policy only the remotes have).
+            let input = match (&expected, partials.first()) {
+                (Some(e), _) => e.clone(),
+                (None, Some(p)) => p.input.clone(),
+                (None, None) => empty_cols()?,
             };
             let mut g = super::exec::Grouper::new(&src, aggs, by, &input)?;
             for p in partials {
-                if p.input.iter().map(|c| (&c.name, c.ty)).ne(input.iter().map(|c| (&c.name, c.ty))) {
-                    return Err(EsError::illegal_state("clusters answered STATS over columns of different types: roll can't merge them"));
+                if p.input.len() != input.len() || p.input.iter().zip(&input).any(|(a, b)| a.name != b.name || a.ty != b.ty) {
+                    return Err(EsError::illegal_state("a cluster answered STATS over other columns than the query's: roll can't merge them"));
                 }
-                // Groups are created in order: their keys and states, held while merging.
-                held.add(p.groups.len() as u64 * 64, "<remote_cluster_response>")?;
+                held.add((p.groups.len() as u64).saturating_mul(64), "<remote_cluster_response>")?;
                 for (key, accs) in p.groups {
                     g.merge_group(&key, accs).map_err(|why| EsError::illegal_state(format!("a cluster's STATS state roll can't merge: {why}")))?;
                 }
@@ -993,7 +1156,7 @@ pub async fn run(cluster: &crate::cluster::Cluster, ccs: &Ccs, q: &Query, filter
         }
         _ => {
             if tables.is_empty() {
-                Table { cols: super::exec::part_columns(&src, &schema, metadata, &prefix).unwrap_or_default(), rows: Vec::new() }
+                Table { cols: empty_cols()?, rows: Vec::new() }
             } else {
                 let mut original = std::mem::take(&mut stats.original_types);
                 let t = super::exec::union_parts(tables, &mut original)?;
@@ -1049,7 +1212,8 @@ mod tests {
         let q = parse("FROM items,far:items METADATA _index | WHERE n > 1 | SORT n | LIMIT 5 | ENRICH _remote:p | STATS c = COUNT(*)");
         let c = cut(&q.cmds, q.spans.len());
         assert_eq!((c.mode, c.part.as_slice()), (Mode::Rows, [1, 2, 3, 4].as_slice()));
-        assert!(matches!(c.rest.as_slice(), [Cmd::Sort(_), Cmd::Limit(5), Cmd::Stats { .. }]), "{:?}", c.rest);
+        // The `ENRICH _remote` the parts run after their limit may overwrite `n`: they carry it.
+        assert!(c.sort_keys && matches!(c.rest.as_slice(), [Cmd::Sort(k), Cmd::Limit(5), Cmd::Drop(_), Cmd::Stats { .. }] if matches!(&k[0].expr.kind, super::super::parser::ExprKind::Col(n) if n == "$ccs_sort0")), "{:?}", c.rest);
         let t = part_text(&q.src, &q.spans, &["items".into()], &["_index".into()], &c.part, None).unwrap();
         assert_eq!(t, "FROM \"items\" METADATA _index         | WHERE n > 1 | SORT n | LIMIT 5 | ENRICH _remote:p");
         assert_eq!(t.find("ENRICH"), q.src.find("ENRICH"));
@@ -1070,6 +1234,8 @@ mod tests {
         // Cluster patterns are one source.
         let q = parse("FROM *:logs-*,items | LIMIT 1");
         assert!(matches!(&q.cmds[0], Cmd::From { sources, .. } if sources == &["*:logs-*", "items"]), "{:?}", q.cmds[0]);
+        let q = parse("FROM far:*,-far:many,far:-x | LIMIT 1");
+        assert!(matches!(&q.cmds[0], Cmd::From { sources, .. } if sources == &["far:*", "-far:many", "far:-x"]), "{:?}", q.cmds[0]);
 
         // `ENRICH _coordinator` and what follows run here, over the parts' rows.
         let q = parse("FROM far:items | WHERE a | ENRICH _coordinator:p | LIMIT 3");
@@ -1128,6 +1294,24 @@ mod tests {
         assert!(decode_answer(&wide, Mode::Rows).is_err());
         let bad_type = obj! { PART_FIELD => obj! { "columns" => crate::arr![crate::arr!["a", "nope"]], "rows" => crate::arr![] } };
         assert!(decode_answer(&bad_type, Mode::Rows).is_err());
+        let text_in_long = obj! { PART_FIELD => obj! { "columns" => crate::arr![crate::arr!["a", "long"]], "rows" => crate::arr![crate::arr!["x"]] } };
+        assert!(decode_answer(&text_in_long, Mode::Rows).is_err());
+        // Every value's cost is counted before parsing, however small it was to send.
+        assert_eq!(json_elements(b"[1,1,1]"), 4);
+        assert_eq!(json_elements(br#"["a,b",[]]"#), 4);
+    }
+
+    /// The part goes in the request's body: a schema of thousands of fields leaves the headers a
+    /// fleet forward carries (16 KiB at most) as small as the link's own.
+    #[test]
+    fn a_wide_schema_travels_in_the_body() {
+        let part = Part { alias: Some("far".into()), mode: Mode::Stats, schema: (0..1000).map(|i| (format!("service.instance.field_{i}"), DataType::Keyword)).collect(), policies: vec!["p".into()], sort_keys: false };
+        let template = EsRequest::new("POST", "/_query");
+        let req = part_request(&template, &Map::new(), "FROM \"items\" | STATS c = COUNT(*)", &part);
+        assert!(req.headers.iter().map(|(k, v)| k.len() + v.len()).sum::<usize>() < 64, "{:?}", req.headers);
+        let body = crate::json::parse(&req.body).unwrap().unwrap();
+        let back = Part::of_value(body.get(PART_FIELD).unwrap()).unwrap();
+        assert_eq!((back.schema.len(), back.alias.as_deref(), back.mode), (1000, Some("far"), Mode::Stats));
     }
 
     /// Two clusters' states merged answer what one cluster accumulating every row does.

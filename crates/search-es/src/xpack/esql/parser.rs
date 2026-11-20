@@ -716,14 +716,21 @@ impl<'a> P<'a> {
                     let t = self.bump();
                     let first = match &t.tok {
                         Tok::Ident(s) | Tok::Quoted(s) | Tok::Str(s) => Some(s.clone()),
-                        // `*`, and a cluster pattern (`*:logs-*`).
-                        Tok::Op("*") => Some("*".to_string()),
+                        // `*`, a cluster pattern (`*:logs-*`) and an exclusion (`-far:x`).
+                        Tok::Op(op @ ("*" | "-")) => Some(op.to_string()),
                         _ => None,
                     };
                     match first {
                         Some(s) => {
                             // Index patterns may contain `-`, `:` and `*`; glue adjacent pieces.
                             let mut s = s;
+                            if matches!(t.tok, Tok::Op(_))
+                                && let Tok::Ident(_) | Tok::Int(_) = self.peek().tok
+                                && self.peek().start == t.end
+                            {
+                                let m = self.bump();
+                                s.push_str(&self.src[m.start..m.end]);
+                            }
                             while matches!(self.peek().tok, Tok::Op("-") | Tok::Op(":") | Tok::Op("*")) && self.peek().start == self.toks[self.i - 1].end {
                                 let n = self.bump();
                                 s.push_str(&self.src[n.start..n.end]);

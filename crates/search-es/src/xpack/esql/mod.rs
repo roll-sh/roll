@@ -297,12 +297,20 @@ fn body_time_zone(ctx: &Ctx, m: &Map) -> EsResult<Option<String>> {
 
 /// Runs a request: the JSON response and the table (for text formats). A linked remote's part
 /// ([`ccs::requested`]) runs as one and answers its result for the coordinating cluster.
-async fn run(ctx: &Ctx<'_>, req: &Request, body: &Value) -> EsResult<(Map, exec::Table)> {
-    let part = ccs::requested(ctx)?;
+async fn run(ctx: &Ctx<'_>, req: &Request, body: &Value, part: Option<std::sync::Arc<ccs::Part>>) -> EsResult<(Map, exec::Table)> {
+    // A remote's `ENRICH` reads its policies for the caller only with `monitor_enrich` on it
+    // (the `remote_cluster` privilege the link carries), as Elasticsearch's remote cluster does.
+    if part.as_ref().is_some_and(|p| p.alias.is_some() && !p.policies.is_empty()) {
+        crate::xpack::security::check_cluster_action(ctx, ccs::RESOLVE_POLICY)?;
+    }
     let remotes = if part.is_some() { None } else { ccs::Ccs::of(ctx, body) };
     let is_part = part.clone();
     let (mut out, table, stats) = ccs::part_scope(part, ccs::scope(remotes, run_query(ctx, req))).await?;
     if let Some(p) = is_part {
+        // A `STATS` part answers its states or nothing: never final rows as if it had none.
+        if p.mode == ccs::Mode::Stats && stats.partial.is_none() {
+            return Err(EsError::illegal_state("this cluster's part of the query can't answer STATS partially"));
+        }
         let shards = ccs::shards_of(ctx.cluster, stats.indices.as_deref());
         out.insert(ccs::PART_FIELD.into(), ccs::encode_answer(&table, p.mode, stats.partial.as_ref(), shards));
         out.shift_remove("columns");
@@ -503,9 +511,10 @@ fn reply(ctx: &Ctx, out: Map, table: &exec::Table) -> EsResult<Reply> {
 }
 
 pub async fn query(ctx: &Ctx<'_>) -> EsResult<Reply> {
-    let body = ctx.body()?.unwrap_or_else(Value::object);
+    let mut body = ctx.body()?.unwrap_or_else(Value::object);
+    let part = ccs::requested(ctx, &mut body)?;
     let req = parse_request(ctx, &body, false)?;
-    let (out, table) = run(ctx, &req, &body).await?;
+    let (out, table) = run(ctx, &req, &body, part).await?;
     reply(ctx, out, &table)
 }
 
@@ -522,7 +531,7 @@ fn with_id(id: &str, running: bool, out: &Map) -> Value {
 pub async fn async_query(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let body = ctx.body()?.unwrap_or_else(Value::object);
     let req = parse_request(ctx, &body, true)?;
-    let (out, table) = run(ctx, &req, &body).await?;
+    let (out, table) = run(ctx, &req, &body, None).await?;
     // Every query completes before answering; it is kept only when asked to be.
     if !req.keep_on_completion {
         let mut m = Map::with_capacity(out.len() + 1);

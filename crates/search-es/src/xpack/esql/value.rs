@@ -1235,6 +1235,27 @@ pub enum Acc {
     Present(i64, bool),
 }
 
+/// Whether `v` is a value a column of type `ty` holds: of the type's family (any number for a
+/// numeric type, a date or long for dates, text for the string types). Null always fits, and a
+/// multi-value whose every value fits does.
+pub fn fits(ty: DataType, v: &V) -> bool {
+    use DataType as T;
+    match v {
+        V::Null => true,
+        V::Multi(vs) => vs.iter().all(|x| !matches!(x, V::Multi(_)) && fits(ty, x)),
+        _ => match ty {
+            T::Boolean => matches!(v, V::Bool(_)),
+            T::Integer | T::Long | T::UnsignedLong | T::Double | T::CounterLong | T::CounterInteger | T::CounterDouble => matches!(v, V::Int(_) | V::Long(_) | V::ULong(_) | V::Double(_)),
+            T::Date | T::DateNanos => matches!(v, V::Date(_) | V::Long(_)),
+            T::Ip => matches!(v, V::Ip(_) | V::Str(_)),
+            T::Keyword | T::Text | T::Version | T::Source | T::Tsid | T::Flattened => matches!(v, V::Str(_)),
+            T::Geohash | T::Geotile | T::Geohex => matches!(v, V::Long(_) | V::Str(_)),
+            T::Null => false,
+            _ => true,
+        },
+    }
+}
+
 impl Acc {
     pub fn new(name: &str) -> Acc {
         match name {

@@ -1586,8 +1586,10 @@ the rest are skipped by the tests' own prerequisites.
   Elasticsearch resolves the union type and its conversion functions across clusters;
   `SORT ... | EVAL ... | LIMIT n` (commands between the two) is sorted on the coordinating
   cluster over every part's rows (same answer, more rows sent); `FORK`, subqueries, views,
-  `TS` and `PROMQL` over remote indices read the remotes' rows through cross-cluster search on
-  the coordinating cluster (no `_clusters`, and `ENRICH` there uses the local policies). A
+  `TS`, `PROMQL` and `SET unmapped_fields` over remote indices read the remotes' rows through
+  cross-cluster search on the coordinating cluster (no `_clusters`, and `ENRICH` there uses the
+  local policies). roll doesn't require the local `monitor_enrich` an ENRICH's policy resolution
+  needs in Elasticsearch (the remote's is required, as there). A
   remote that can't be reached while it may not be skipped fails the query with roll's own
   `connect_transport_exception` reason (502, as Elasticsearch's status). A policy a remote lacks
   is reported once that remote's part answered (it fails before reading anything), not before

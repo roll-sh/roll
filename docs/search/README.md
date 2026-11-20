@@ -298,18 +298,31 @@ Elasticsearch-flavor.
   the first breaker and the local one after it; `ENRICH _remote` after `STATS` or
   `ENRICH _coordinator`, and `LOOKUP JOIN` after `STATS` or `LIMIT`, are refused with
   Elasticsearch's errors, and so is a policy missing on a cluster that needs it (`cannot find
-  enrich policy [p] on clusters [_local, far]`). `include_ccs_metadata` (or
+  enrich policy [p] on clusters [_local, far]`). A remote's `ENRICH` needs `monitor_enrich` there
+  (`remote_cluster` on the caller's role, carried over the link as the remote's cluster
+  privileges; 403 without), after which the remote reads its own policy's index, as
+  Elasticsearch's does. An exclusion of a remote's (`-far:x`, `far:-x`) is that remote's own;
+  a remote's ES|QL view is refused (`remote_view_not_supported_exception`). The parts' commands
+  are compiled on the coordinating cluster first, so the query's own errors (`Unknown column`)
+  are the query's; only a remote that can't be reached or authenticate, or whose indices are
+  missing (or outside the link's access), is skipped. A caller with no `remote_indices` for a
+  remote is refused (403) on a query over remotes alone, and skips the remote otherwise. `include_ccs_metadata` (or
   `include_execution_metadata`) adds `_clusters`; a skipped cluster makes `is_partial` true; a
   missing remote is `no_such_remote_cluster_exception` (404), and a remote's missing index or any
   failure of its part skips it (`skip_unavailable`) or fails the query. `_query/async` answers
   the same. A remote's part is the query's own text with its `FROM` naming that cluster's indices
   and the commands it doesn't run blanked, so the positions in its errors are the query's; it
-  runs as a `_query` on the remote's owner through the link (`x-roll-esql-part`, honored only
-  for a link's own request), authorized there exactly as a `_search` part is: the key's access,
+  runs as a `_query` on the remote's owner through the link (`x-roll-esql-part` marks it, honored
+  only for a link's own request; the part itself, its columns included, travels in the body),
+  authorized there exactly as a `_search` part is: the key's access,
   its document and field level security included, intersected with the caller's
   `remote_indices`. Its answer (typed rows, or `STATS` states) is held on the request breaker
-  before it's parsed and decoded with one level of multi-values, every row exactly as wide as its
-  columns and sketches checked (`Hll::from_parts`), never sized from a count it sent. Queries
+  before it's parsed (its bytes and, per value it may hold, what that costs decoded) and decoded
+  with one level of multi-values, every row exactly as wide as its columns and every value of its
+  column's type, `STATS` states of the kinds and over the columns the coordinating cluster's own
+  compilation makes, sketches checked (`Hll::from_parts`), never sized from a count it sent. A
+  `STATS` part that can't answer its states fails rather than answering nothing. Remote parts
+  still running when the query ends (an error, a client gone) are aborted. Queries
   whose commands aren't the text's (`FORK` branches, subqueries, views, `TS`, `PROMQL`) read a
   remote's rows through cross-cluster search on the coordinating cluster, without `_clusters`.
 - **Left**: suggesters over several clusters.

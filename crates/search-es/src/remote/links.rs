@@ -235,27 +235,32 @@ pub fn remote_roles(ctx: &Ctx, alias: &str) -> Vec<Value> {
     use crate::xpack::security::{self, privileges::Permission};
     let p = security::principal(ctx);
     if p.is_superuser() {
-        // `ReservedRolesStore`'s superuser: every remote index, restricted ones read-only.
-        return vec![obj! { "superuser" => obj! { "cluster" => Value::Arr(Vec::new()), "indices" => Value::Arr(vec![
+        // `ReservedRolesStore`'s superuser: every remote index, restricted ones read-only, and
+        // its `remote_cluster` privileges.
+        return vec![obj! { "superuser" => obj! { "cluster" => crate::arr!["monitor_enrich", "monitor_stats"], "indices" => Value::Arr(vec![
             obj! { "names" => crate::arr!["*"], "privileges" => crate::arr!["all"], "allow_restricted_indices" => false },
             obj! { "names" => crate::arr!["*"], "privileges" => crate::arr!["monitor", "read", "read_cross_cluster", "view_index_metadata"], "allow_restricted_indices" => true },
         ]) } }];
     }
     let eff = security::effective(&security::file_roles(ctx.cluster), &ctx.state(), p);
+    let names_alias = |e: &Value| {
+        let clusters: Vec<String> = match e.get("clusters") {
+            Some(Value::Arr(a)) => a.iter().map(Value::to_es_string).collect(),
+            Some(Value::Str(s)) => vec![s.clone()],
+            _ => Vec::new(),
+        };
+        clusters.iter().any(|c| glob_match(c, alias))
+    };
     let set = |perms: &[Permission]| -> Value {
         let mut m = Map::new();
         for (i, perm) in perms.iter().enumerate() {
+            // `remote_cluster` privileges naming the alias are the remote's cluster privileges
+            // (`monitor_enrich` for ES|QL's ENRICH, `monitor_stats`).
+            let cluster: Vec<Value> = perm.remote_cluster.iter().filter(|e| names_alias(e)).flat_map(|e| e.get("privileges").and_then(Value::as_array).cloned().unwrap_or_default()).collect();
             let indices: Vec<Value> = perm
                 .remote_indices
                 .iter()
-                .filter(|e| {
-                    let clusters: Vec<String> = match e.get("clusters") {
-                        Some(Value::Arr(a)) => a.iter().map(Value::to_es_string).collect(),
-                        Some(Value::Str(s)) => vec![s.clone()],
-                        _ => Vec::new(),
-                    };
-                    clusters.iter().any(|c| glob_match(c, alias))
-                })
+                .filter(|e| names_alias(e))
                 .map(|e| {
                     let mut e = e.clone();
                     if let Some(m) = e.as_object_mut() {
@@ -264,7 +269,7 @@ pub fn remote_roles(ctx: &Ctx, alias: &str) -> Vec<Value> {
                     e
                 })
                 .collect();
-            m.insert(format!("r{i}"), obj! { "cluster" => Value::Arr(Vec::new()), "indices" => Value::Arr(indices) });
+            m.insert(format!("r{i}"), obj! { "cluster" => Value::Arr(cluster), "indices" => Value::Arr(indices) });
         }
         Value::Obj(m)
     };
