@@ -92,6 +92,11 @@ impl Hll {
         self.p
     }
 
+    /// What the state holds outside its own slot: the linear-counting set or the registers.
+    pub fn heap_bytes(&self) -> usize {
+        self.lc.capacity() * size_of::<u32>() + self.regs.as_ref().map_or(0, Vec::capacity)
+    }
+
     fn lc_threshold(&self) -> usize {
         let capacity = (1usize << self.p) / 4;
         (capacity as f32 * 0.75) as usize

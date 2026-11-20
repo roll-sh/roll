@@ -17,11 +17,16 @@
 //! sums what the children hold, with their overheads, where Elasticsearch measures the real
 //! heap: roll has no garbage-collected heap whose usage would mean the same, so only memory
 //! roll accounts can trip it.
+//!
+//! A tenant can raise `indices.breaker.request.limit` (to `-1` even), so on a node serving many
+//! clusters it can't be the only bound: what requests hold is charged to the node's budget too
+//! ([`Breakers::node`], [`crate::ClusterConfig::request_memory`]), which only the operator sets,
+//! and a charge fails when either refuses it (ES|QL's, [`crate::xpack::esql::memory`]).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use search_aggs::memory::MemoryBudget;
+pub use search_aggs::memory::MemoryBudget;
 
 use crate::api::nodes::NodeMetrics;
 use crate::cluster::Cluster;
@@ -31,6 +36,8 @@ use crate::meta::ClusterState;
 #[derive(Debug)]
 pub struct Breakers {
     request: Arc<MemoryBudget>,
+    /// The node's budget, shared by every cluster it serves (`None`: none).
+    node: Option<Arc<MemoryBudget>>,
     /// Bytes of the request bodies being handled.
     in_flight: AtomicU64,
     in_flight_tripped: AtomicU64,
@@ -45,6 +52,7 @@ impl Default for Breakers {
     fn default() -> Self {
         Breakers {
             request: MemoryBudget::new(u64::MAX),
+            node: None,
             in_flight: AtomicU64::new(0),
             in_flight_tripped: AtomicU64::new(0),
             parent_tripped: AtomicU64::new(0),
@@ -141,6 +149,23 @@ pub fn memory_size(value: &str, heap: i64) -> Option<u64> {
 }
 
 impl Breakers {
+    /// Breakers whose requests also charge the node's budget `node`.
+    pub fn with_node(node: Option<Arc<MemoryBudget>>) -> Breakers {
+        Breakers { node, ..Breakers::default() }
+    }
+
+    /// The node's budget for what requests hold, when the node has one.
+    pub fn node(&self) -> Option<&Arc<MemoryBudget>> {
+        self.node.as_ref()
+    }
+
+    /// A node's budget for what requests hold: `limit` bytes, the operator's memory budget
+    /// for search, or else half of the host's memory.
+    pub fn node_budget(limit: Option<u64>) -> Arc<MemoryBudget> {
+        let host = crate::api::nodes::NodeMetrics::host_memory();
+        MemoryBudget::new(limit.unwrap_or(if host > 0 { host as u64 / 2 } else { u64::MAX }))
+    }
+
     /// The `request` breaker with its limit brought up to date.
     pub fn request(&self, cluster: &Cluster, st: &ClusterState) -> Arc<MemoryBudget> {
         let heap = NodeMetrics::sample(cluster).heap_max;

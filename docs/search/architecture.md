@@ -267,6 +267,15 @@ cluster, `Authorization: Bearer <cluster>_<secret>`, or the TLS SNI/`Host` label
 domain (`<cluster>.search.<domain>`). Secrets are compared in constant time. Each cluster has
 request-rate and in-flight byte budgets so one tenant can't starve the node.
 
+Memory a request holds is charged as it is built to the cluster's `request` breaker, whose limit
+the tenant sets (`indices.breaker.request.limit`, `-1` even), and to the node's budget for
+requests, which only the operator sets (`Node::request_memory`: `--search-memory-mb`, else half
+of the host's memory); either refuses with Elasticsearch's 429 `circuit_breaking_exception`.
+ES|QL charges each page of rows, group table and aggregate state, sort buffer, join and lookup
+table and its result as they grow, from what they allocate, and gives each back when it drops
+(`xpack/esql/memory.rs`). Past `--search-memory-mb`, idle clusters unload to make room for
+what requests hold too.
+
 APIs built on other APIs (EQL, ES|QL, SQL, PPL, graph, vector tiles, `terms_enum`, transforms'
 preview, rollup search, downsampling, search applications, …) make their inner requests as
 the client (`xpack::internal::as_caller`, set for every x-pack and opensearch-dialect API at

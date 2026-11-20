@@ -1128,6 +1128,21 @@ Checked against Elasticsearch 9.5.5 (captures in
   `model_inference`, `eql_sequence` and `parent` in Elasticsearch's order with live numbers.
   The `request` breaker's messages carry the documentation link too. `fielddata` accounts
   nothing yet.
+- ES|QL's memory (and SQL's, which runs on it) is charged to `request` as Elasticsearch charges
+  its blocks: each page of rows while the commands work on it; `STATS` group tables and
+  aggregate states as they grow (`VALUES`, `TOP`, percentiles, `COUNT_DISTINCT`'s sketch);
+  `SORT` buffers and keys; `MV_EXPAND`, `ENRICH` and `LOOKUP JOIN` output as it is built; lookup
+  tables; `INLINE STATS`; `FORK` branches' and subqueries' results; and the result and its JSON
+  until the response is built. Everything comes back when the query ends, however it ends
+  (`_nodes/stats` shows `request` at 0 after a refusal). Past the limit, `_query` and
+  `_query/async` answer Elasticsearch's 429 `circuit_breaking_exception` (checked against
+  9.5.5). Sizes are what roll allocates, so a query crosses the limit at a different point than
+  on Elasticsearch, and `data for [...]` names where roll's query was (`<reused_arrays>`, `load
+  blocks`; Elasticsearch's varies too: `ords`, `<reused_arrays>`, `load blocks`). The internal
+  `_search` reads keep their own accounting. roll's difference: every charge also goes to the
+  node's budget for requests, which only the operator sets (`--search-memory-mb`, else half of
+  the host's memory) and no tenant setting raises; a query past it gets the same 429 with the
+  node's limit as `bytes_limit`.
 
 ## Inference (`_inference`)
 

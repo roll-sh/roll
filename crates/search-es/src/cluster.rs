@@ -128,6 +128,10 @@ pub struct ClusterConfig {
     /// Where the cluster's security audit entries go ([`crate::xpack::security::audit`]);
     /// `None`: it records none.
     pub audit: Option<crate::xpack::security::audit::AuditLog>,
+    /// The node's budget for what requests hold, shared by every cluster on the node and set by
+    /// its operator, never by a tenant: charged along with the cluster's `request` breaker
+    /// ([`crate::breaker::Breakers::node`]). `None`: the `request` breaker alone.
+    pub request_memory: Option<std::sync::Arc<search_aggs::memory::MemoryBudget>>,
 }
 
 impl ClusterConfig {
@@ -147,6 +151,7 @@ impl ClusterConfig {
             branch_of: None,
             file_service_tokens: false,
             audit: None,
+            request_memory: None,
         }
     }
 
@@ -571,6 +576,7 @@ impl Cluster {
         }
         let analytics = crate::analytics::Analytics::default();
         analytics.sync(&state);
+        let breakers = crate::breaker::Breakers::with_node(config.request_memory.clone());
         Ok(Cluster {
             analytics,
             changes,
@@ -600,7 +606,7 @@ impl Cluster {
             ccs_contexts: Default::default(),
             ingest: Default::default(),
             xpack: Default::default(),
-            breakers: Default::default(),
+            breakers,
             thread_pools,
             snapshot_data: Default::default(),
             ccs: Default::default(),

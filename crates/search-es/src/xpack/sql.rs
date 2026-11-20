@@ -1105,7 +1105,8 @@ async fn run(ctx: &Ctx<'_>, stmt: Stmt, filter: Option<Value>, lenient: bool) ->
                 Some(Cmd::From { at, .. }) => super::esql::parser::location(&q.src, *at),
                 _ => (1, 1),
             };
-            let (mut t, _) = exec::execute(ctx.cluster, q, filter, &mut w).await.map_err(|e| {
+            let mem = super::esql::memory::Memory::for_query(ctx.cluster);
+            let (mut t, _) = exec::execute(ctx.cluster, q, filter, &mut w, &mem).await.map_err(|e| {
                 if e.kind == "verification_exception" && e.reason().starts_with("Unknown index") {
                     EsError::new(400, "verification_exception", format!("Found 1 problem\nline {}:{}: Unknown index [{table}]", from_at.0, from_at.1))
                 } else {

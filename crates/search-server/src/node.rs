@@ -122,9 +122,11 @@ pub struct NodeConfig {
     /// Lease time to live, with [`Node::set_leases`].
     pub lease_ttl: Duration,
     /// Memory all loaded clusters together may hold (indexing buffers, in-heap segments,
-    /// version maps; [`Usage::resident_bytes`]). Past it, the least recently used clusters with
-    /// no request in flight are unloaded, and waking another cluster first makes room.
-    /// `None`: no node budget.
+    /// version maps; [`Usage::resident_bytes`]) and what their requests hold
+    /// ([`Node::request_memory`]). Past it, the least recently used clusters with no request in
+    /// flight are unloaded, and waking another cluster first makes room; a request that would
+    /// hold more than it fails with `circuit_breaking_exception`. `None`: no node budget for
+    /// loaded clusters, and half of the host's memory for requests.
     pub memory_budget: Option<u64>,
     /// Let idle and memory-budget unloads drop clusters whose documents live only in memory
     /// (a [`StoreProvider`] without [`StoreProvider::data`]): they lose every document and keep
@@ -346,6 +348,10 @@ pub struct Node {
     pub unloads: AtomicU64,
     /// Every cluster's security audit log.
     pub audit: Arc<crate::audit::AuditLogs>,
+    /// What requests on every cluster hold together (ES|QL's pages and tables), whatever the
+    /// tenants set their `request` breakers to: the operator's `memory_budget`, or else half of
+    /// the host's memory ([`search_es::breaker::Breakers::node_budget`]).
+    pub request_memory: Arc<search_es::breaker::MemoryBudget>,
 }
 
 /// Holds a cluster's transition lock; drops the map entry when nobody else wants it.
@@ -814,8 +820,10 @@ impl Node {
             n => n,
         };
         let audit = crate::audit::AuditLogs::new(stores.data(), cfg.audit.clone());
+        let request_memory = search_es::breaker::Breakers::node_budget(cfg.memory_budget);
         Arc::new(Node {
             audit,
+            request_memory,
             catalog,
             stores,
             fair: (running != usize::MAX).then(|| FairScheduler::new(running)),
@@ -1128,6 +1136,7 @@ impl Node {
         cfg.default_repository = self.cfg.default_repository.clone().filter(|_| data_store.is_some());
         cfg.file_service_tokens = self.reads_file_service_tokens(&spec.name);
         cfg.audit = Some(search_es::xpack::security::audit::AuditLog(self.audit.clone()));
+        cfg.request_memory = Some(self.request_memory.clone());
         let mut cluster = Cluster::open(cfg, store).await?;
         cluster.node.id = stable_node_id(&spec.name);
         if cluster.state().version <= 1 {
@@ -1532,7 +1541,8 @@ impl Node {
         }
         let mut evicted = Vec::new();
         let Some(budget) = self.cfg.memory_budget else { return evicted };
-        let mut total: u64 = sizes.iter().map(|(_, r)| *r).sum();
+        // What requests hold right now shares the budget: idle clusters make room for it.
+        let mut total: u64 = sizes.iter().map(|(_, r)| *r).sum::<u64>() + self.request_memory.used();
         if total.saturating_add(room) <= budget {
             return evicted;
         }

@@ -16,6 +16,7 @@ pub mod datasources;
 pub mod exec;
 pub mod fulltext;
 pub mod functions;
+pub mod memory;
 pub mod parser;
 pub mod profile;
 pub mod promql;
@@ -288,8 +289,9 @@ fn body_time_zone(ctx: &Ctx, m: &Map) -> EsResult<Option<String>> {
     }
 }
 
-/// Runs a request: the JSON response and the table (for text formats).
-async fn run(ctx: &Ctx<'_>, req: &Request) -> EsResult<(Map, exec::Table)> {
+/// Runs a request: the JSON response and the table (for text formats), both charged to `mem`
+/// until it drops (after the response is rendered).
+async fn run(ctx: &Ctx<'_>, req: &Request, mem: &memory::Memory) -> EsResult<(Map, exec::Table)> {
     let started = std::time::Instant::now();
     let start_ms = ctx.now_ms;
     let kibana = ctx.request.header("x-elastic-product-origin").is_some_and(|o| o.eq_ignore_ascii_case("kibana"));
@@ -320,7 +322,7 @@ async fn run(ctx: &Ctx<'_>, req: &Request) -> EsResult<(Map, exec::Table)> {
     let used = telemetry::Used::of(&q, &ctx.state());
     let column_metadata = q.settings.column_metadata;
     let approximation = q.settings.approximation || req.approximation;
-    let result = exec::execute(ctx.cluster, q, req.filter.clone(), &mut w).await;
+    let result = exec::execute(ctx.cluster, q, req.filter.clone(), &mut w, mem).await;
     telemetry.record(kibana, Some(&used), result.is_err(), started.elapsed().as_millis() as i64);
     // Warnings recorded before a failure (the implicit limit's, added while analyzing) go out
     // with the error, as Elasticsearch's do.
@@ -392,7 +394,9 @@ async fn run(ctx: &Ctx<'_>, req: &Request) -> EsResult<(Map, exec::Table)> {
         union_types(all, &stats.original_types);
     }
     out.insert("columns".into(), columns);
-    out.insert("values".into(), exec::values_json_in(&table, req.columnar, tz.as_ref()));
+    let values = exec::values_json_in(&table, req.columnar, tz.as_ref());
+    mem.hold(memory::json_bytes(&values), memory::REUSED_ARRAYS)?.keep();
+    out.insert("values".into(), values);
     if req.profile {
         out.insert("profile".into(), profile::build(ctx.cluster, start_ms, took.as_nanos() as i64, unmapped, &shape, &stats, &table));
     }
@@ -467,7 +471,8 @@ fn reply(ctx: &Ctx, out: Map, table: &exec::Table) -> EsResult<Reply> {
 pub async fn query(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let body = ctx.body()?.unwrap_or_else(Value::object);
     let req = parse_request(ctx, &body, false)?;
-    let (out, table) = run(ctx, &req).await?;
+    let mem = memory::Memory::for_query(ctx.cluster);
+    let (out, table) = run(ctx, &req, &mem).await?;
     reply(ctx, out, &table)
 }
 
@@ -484,7 +489,8 @@ fn with_id(id: &str, running: bool, out: &Map) -> Value {
 pub async fn async_query(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let body = ctx.body()?.unwrap_or_else(Value::object);
     let req = parse_request(ctx, &body, true)?;
-    let (out, table) = run(ctx, &req).await?;
+    let mem = memory::Memory::for_query(ctx.cluster);
+    let (out, table) = run(ctx, &req, &mem).await?;
     // Every query completes before answering; it is kept only when asked to be.
     if !req.keep_on_completion {
         let mut m = Map::with_capacity(out.len() + 1);
