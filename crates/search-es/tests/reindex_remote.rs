@@ -285,6 +285,42 @@ async fn a_third_concurrent_task_is_refused() {
     assert_eq!(c.remote_running.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
 
+/// A page's cost is charged to the node's budget before anything is built from it: under a small
+/// budget, a page of two million zeros fails as Elasticsearch's breaker does, and nothing is held
+/// afterwards.
+#[tokio::test]
+async fn a_page_is_charged_to_the_nodes_budget() {
+    let zeros = format!(r#"{{"pit_id":"p","hits":{{"total":{{"value":1,"relation":"eq"}},"hits":[{{"_index":"src","_id":"1","_source":{{"z":[{}0]}},"sort":[1]}}]}}}}"#, "0,".repeat(2_000_000));
+    let (remote, _) = mock(move |m, p, _| match (m, p) {
+        ("GET", "/") => (200, vec![], root()),
+        (_, p) if p.contains("_pit") => (200, vec![], r#"{"id":"p"}"#.into()),
+        _ => (200, vec![], zeros.clone()),
+    })
+    .await;
+    let c = cluster(&[LOCAL, &[("roll.reindex.remote.memory", "1mb")]].concat()).await;
+    let (s, v, text) = call(&c, "POST", "/_reindex", &reindex(&remote, "")).await;
+    assert_eq!((s, at(&v, "error.type").as_str()), (429, Some("circuit_breaking_exception")), "{text}");
+    assert_eq!(c.remote.budget.used(), 0);
+}
+
+/// Addresses the node denies (its own endpoints) are refused whatever leads there: a literal in
+/// any form, or a name that resolves to one.
+#[tokio::test]
+async fn a_denied_address_is_refused_by_name_or_literal() {
+    let (remote, seen) = mock(|_, _, _| (200, vec![], root())).await;
+    let port = remote.rsplit(':').next().unwrap().to_string();
+    let c = cluster(&[LOCAL, &[("reindex.remote.whitelist", "*:*"), ("roll.reindex.remote.deny_addresses", "127.0.0.0/8,::1")]].concat()).await;
+    for host in [format!("http://127.0.0.1:{port}"), format!("http://127.000.000.001:{port}"), format!("http://[::ffff:127.0.0.1]:{port}")] {
+        let (s, v, text) = call(&c, "POST", "/_reindex", &reindex(&host, "")).await;
+        assert!(s >= 400, "{host}: {text}");
+        let _ = v;
+    }
+    let (s, v, text) = call(&c, "POST", "/_reindex", &reindex(&format!("http://localhost.:{port}"), "")).await;
+    assert_eq!((s, at(&v, "error.type").as_str()), (500, Some("connect_exception")), "{text}");
+    assert!(text.contains("an address reindex from remote may not reach"), "{text}");
+    assert!(seen.lock().unwrap().is_empty(), "a request reached a denied address");
+}
+
 // --- a real Elasticsearch 9.5.5 over HTTPS -----------------------------------------------------
 
 struct Es {

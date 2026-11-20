@@ -48,7 +48,8 @@ export interface DroppedSetting {
   reason: string;
 }
 
-/** One picked index after `migrate`: its task, or why it didn't start. */
+/** One picked index after `migrate`: its task, why it didn't start, or that it waits for a
+ * free task slot (`queued`: nothing was created for it yet). */
 export interface MigrateStarted {
   index: string;
   dest: string;
@@ -56,6 +57,10 @@ export interface MigrateStarted {
   error?: string;
   dropped?: DroppedSetting[];
   aliases?: string[];
+  queued?: boolean;
+  reason?: string;
+  /** The copy was created (also when the call's deadline cut the rest short). */
+  created?: boolean;
 }
 
 export interface MigrateRequest {
@@ -234,6 +239,29 @@ export function aliasOffer(index: string, dest: string, rollNames: Set<string>):
 /** The `_aliases` body that points `alias` at `dest`. */
 export function aliasBody(alias: string, dest: string) {
   return { actions: [{ add: { index: dest, alias } }] };
+}
+
+/** How many copies one cluster runs at once (roll's `roll.reindex.remote.max_per_cluster`). */
+export const COPIES_AT_ONCE = 2;
+
+/** The copies waiting for a free task slot, as `migrate` takes them again. */
+export function queuedPicks(rows: MigrateStarted[]): { index: string; dest: string }[] {
+  return rows.filter((r) => r.queued).map((r) => ({ index: r.index, dest: r.dest }));
+}
+
+/** Whether to ask roll to start waiting copies now: some wait, and fewer than
+ * [`COPIES_AT_ONCE`] run (a copy is running until its task ends; one without a known state yet
+ * counts as running). */
+export function shouldStartQueued(rows: MigrateStarted[], states: Record<string, TaskState | undefined>, atOnce = COPIES_AT_ONCE): boolean {
+  if (!rows.some((r) => r.queued)) return false;
+  const running = rows.filter((r) => r.task && (states[r.task] ?? "running") === "running").length;
+  return running < atOnce;
+}
+
+/** `rows` with each waiting copy replaced by what a later `migrate` call made of it (matched by
+ * index and copy name); the others as they were. */
+export function mergeStarted(rows: MigrateStarted[], results: MigrateStarted[]): MigrateStarted[] {
+  return rows.map((r) => (r.queued ? (results.find((x) => x.index === r.index && x.dest === r.dest) ?? r) : r));
 }
 
 /** Dropped settings grouped by reason, in the order they first appear. */

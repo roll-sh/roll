@@ -1257,8 +1257,11 @@ impl Node {
         // Tasks still running (the cluster was unloaded on purpose: deleted, handed over, put to
         // sleep) would vanish with it: they end now as cancelled, which `_tasks` reports.
         let cancelled = search_es::api::tasks::cancel_all(&loaded.cluster);
-        if cancelled > 0 {
-            tracing::info!(cluster = name, tasks = cancelled, "cancelled the running tasks of a cluster being unloaded");
+        if !cancelled.is_empty() {
+            // They stop between documents; a few seconds at most, so a stuck one can't hold the
+            // unload (its writes find the cluster closed below).
+            let ended = search_es::api::tasks::wait_for(&loaded.cluster, &cancelled, std::time::Duration::from_secs(5)).await;
+            tracing::info!(cluster = name, tasks = cancelled.len(), ended, "cancelled the running tasks of a cluster being unloaded");
         }
         self.hooks.unloading(&loaded.cluster).await;
         // Failed logins the node refuses while it sleeps are recorded as it last asked.

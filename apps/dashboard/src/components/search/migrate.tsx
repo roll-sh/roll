@@ -10,14 +10,18 @@ import {
   displayHost,
   droppedByReason,
   LOST,
+  mergeStarted,
   migrateApi,
   partial,
+  queuedPicks,
+  shouldStartQueued,
   sourceFrom,
   sourceProblem,
   taskPoll,
   taskProgress,
   type AuthKind,
   type MigrateInspect,
+  type MigrateRequest,
   type MigrateStarted,
   type SourceForm,
   type TaskProgress,
@@ -63,6 +67,19 @@ export function MigratePanel({ cluster, existing, onClose, onChanged }: { cluste
   const [removed, setRemoved] = useState<Record<string, true | "done" | string>>({});
   const taken = useMemo(() => new Set(existing), [existing]);
   const reported = useRef(false);
+  /** The remote and options while copies wait for a free slot (in memory only, never in the
+   * page; dropped once nothing waits, or the panel closes). */
+  const waiting = useRef<Omit<MigrateRequest, "indices"> | null>(null);
+  const starting = useRef(false);
+  /** Bumped 10s after an attempt that started nothing (the node's slots were all taken), so
+   * the waiting copies are asked about again without a busy loop. */
+  const [nudge, setNudge] = useState(0);
+  useEffect(
+    () => () => {
+      waiting.current = null;
+    },
+    [],
+  );
 
   const set = (patch: Partial<SourceForm>) => setForm((f) => ({ ...f, ...patch }));
   const problem = sourceProblem(form);
@@ -96,14 +113,11 @@ export function MigratePanel({ cluster, existing, onClose, onChanged }: { cluste
     setBusy("start");
     setError(null);
     try {
-      const r = await migrateApi.start(cluster.id, {
-        source: sourceFrom(form),
-        indices: chosen.map((i) => ({ index: i.index, dest: picks[i.index].dest.trim() })),
-        requests_per_second: rpsNum,
-        size: sizeNum,
-      });
+      const options = { source: sourceFrom(form), requests_per_second: rpsNum, size: sizeNum };
+      const r = await migrateApi.start(cluster.id, { ...options, indices: chosen.map((i) => ({ index: i.index, dest: picks[i.index].dest.trim() })) });
       setStarted(r.indices);
-      // The remote's key has done its job: it doesn't stay in the page.
+      // The remote's key leaves the page; it's kept in memory only while copies wait.
+      waiting.current = r.indices.some((x) => x.queued) ? options : null;
       setForm((f) => ({ ...f, apiKey: "", password: "" }));
       const offers: Record<string, AliasState> = {};
       for (const s of r.indices) {
@@ -145,7 +159,33 @@ export function MigratePanel({ cluster, existing, onClose, onChanged }: { cluste
     };
   }, [cluster.id, runningKey]);
 
-  const allEnded = started !== null && running.length === 0;
+  // Waiting copies start as earlier ones end (roll creates a copy only when it can start it).
+  const states = Object.fromEntries(Object.entries(progress).map(([t, p]) => [t, p.state]));
+  const ready = started !== null && shouldStartQueued(started, states);
+  useEffect(() => {
+    const options = waiting.current;
+    if (!ready || !started || !options || starting.current) return;
+    starting.current = true;
+    (async () => {
+      try {
+        const r = await migrateApi.start(cluster.id, { ...options, indices: queuedPicks(started) });
+        setStarted((rows) => {
+          const next = rows ? mergeStarted(rows, r.indices) : rows;
+          if (next && !next.some((x) => x.queued)) waiting.current = null;
+          return next;
+        });
+        if (r.indices.every((x) => x.queued)) setTimeout(() => setNudge((n) => n + 1), 10_000);
+        onChanged();
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+      } finally {
+        starting.current = false;
+      }
+    })();
+    // `nudge` asks again after an attempt that started nothing.
+  }, [ready, started, cluster.id, onChanged, nudge]);
+
+  const allEnded = started !== null && running.length === 0 && !started.some((x) => x.queued);
   useEffect(() => {
     if (allEnded && !reported.current) {
       reported.current = true;
@@ -382,7 +422,7 @@ export function MigratePanel({ cluster, existing, onClose, onChanged }: { cluste
           <div className="space-y-3" aria-live="polite">
             {started.map((s) => {
               const pr = s.task ? progress[s.task] : undefined;
-              const state = s.error ? "failed" : (pr?.state ?? "running");
+              const state = s.queued ? "queued" : s.error ? "failed" : (pr?.state ?? "running");
               const width = state === "done" ? 100 : pr?.fraction != null ? Math.round(pr.fraction * 100) : 0;
               const a = aliases[s.index];
               const groups = droppedByReason(s.dropped ?? []);
@@ -396,7 +436,7 @@ export function MigratePanel({ cluster, existing, onClose, onChanged }: { cluste
                     </p>
                     <span className="flex items-center gap-2">
                       <span className={`text-[12px] ${state === "failed" || state === "lost" ? "text-danger" : state === "done" ? "text-fg" : state === "running" ? "text-accent" : "text-subtle"}`}>
-                        {state === "running" ? <span className="shimmer">Copying</span> : state === "done" ? "Done" : state === "cancelled" || state === "lost" ? "Stopped" : "Failed"}
+                        {state === "running" ? <span className="shimmer">Copying</span> : state === "queued" ? "Waiting for a free slot" : state === "done" ? "Done" : state === "cancelled" || state === "lost" ? "Stopped" : "Failed"}
                       </span>
                       {state === "running" && s.task && (
                         <button onClick={() => cancel(s.task!)} className={btn}>
@@ -419,7 +459,7 @@ export function MigratePanel({ cluster, existing, onClose, onChanged }: { cluste
                     </>
                   )}
                   {(s.error || pr?.error) && <p className="break-words font-mono text-[11px] text-danger">{s.error ?? pr?.error}</p>}
-                  {s.task && partial(state) && (
+                  {s.task && state !== "queued" && partial(state) && (
                     <div className="flex flex-wrap items-center gap-2 text-[12px]">
                       {removed[s.dest] === "done" ? (
                         <span className="text-muted">

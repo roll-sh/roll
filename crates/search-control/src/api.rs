@@ -41,6 +41,7 @@ impl IntoResponse for ControlError {
             ControlError::Invalid(_) => StatusCode::BAD_REQUEST,
             ControlError::Conflict(_) => StatusCode::CONFLICT,
             ControlError::TooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
+            ControlError::Busy(_) => StatusCode::TOO_MANY_REQUESTS,
             ControlError::Internal(e) => {
                 tracing::warn!(error = %e, "search control error");
                 StatusCode::INTERNAL_SERVER_ERROR

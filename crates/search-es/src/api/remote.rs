@@ -49,6 +49,7 @@ use crate::obj;
 use bytes::Bytes;
 use search_aggs::memory::MemoryBudget;
 use std::sync::Arc;
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -71,12 +72,28 @@ pub const MEMORY: &str = "roll.reindex.remote.memory";
 pub const MAX_DURATION: &str = "roll.reindex.remote.max_duration";
 /// The longest scroll or point-in-time id kept from a remote.
 pub const MAX_ID_BYTES: usize = 4096;
+/// Addresses reindex from remote never connects to, whatever name leads there (CIDRs or
+/// addresses, comma-separated): rolld puts its own public addresses and the operator's fleet
+/// networks here.
+pub const DENY_ADDRESSES: &str = "roll.reindex.remote.deny_addresses";
+/// roll's own calls to a remote (a migration's listing and index definitions) at once per node;
+/// one per cluster.
+pub const MAX_CONTROL_PER_NODE: usize = 4;
+/// The most one answer to a control call may hold.
+pub const CONTROL_ANSWER_LIMIT: u64 = 1024 * 1024;
+/// How long one control call's exchange may take.
+pub const CONTROL_EXCHANGE: Duration = Duration::from_secs(30);
+/// The control calls' slice of [`MEMORY`] (tasks never draw from it, nor they from the tasks').
+const CONTROL_MEMORY: u64 = 32 * 1024 * 1024;
+/// What an answer's parsed tree may cost per byte of structure: a node and its slot for every
+/// value, a key for every member.
+const TREE_BYTES_PER_TOKEN: u64 = 2 * std::mem::size_of::<Value>() as u64;
 
 const DEFAULT_BUFFER_LIMIT: u64 = 16 * 1024 * 1024;
 const DEFAULT_MEMORY: u64 = 256 * 1024 * 1024;
 const DEFAULT_MAX_DURATION: Duration = Duration::from_secs(24 * 3600);
-/// An answer costs its raw bytes, its parsed documents and their re-serialized sources.
-const CHARGE_FACTOR: u64 = 3;
+/// What one hit's decoded envelope (`_index`, `_id`, `_routing`) costs besides the page's bytes.
+const HIT_OVERHEAD: u64 = 256;
 /// `RemoteParseContext.REMOTE_RESPONSE_BREAKER_LABEL`.
 const BREAKER_LABEL: &str = "reindex_remote_response";
 /// `cluster.reindex.pit.keep_alive`'s default.
@@ -97,8 +114,12 @@ pub struct RemoteNode {
     running: AtomicUsize,
     max_per_node: usize,
     max_per_cluster: usize,
-    /// What the node's remote answers hold ([`MEMORY`]).
+    /// What the tasks' answers hold ([`MEMORY`] less the control slice).
     pub budget: Arc<MemoryBudget>,
+    /// What roll's own calls to remotes hold ([`CONTROL_MEMORY`] of [`MEMORY`]).
+    pub control_budget: Arc<MemoryBudget>,
+    /// The clusters with a control call running.
+    control: parking_lot::Mutex<std::collections::HashSet<String>>,
     pub max_duration: Duration,
 }
 
@@ -109,6 +130,7 @@ impl std::fmt::Debug for RemoteNode {
             .field("max_per_node", &self.max_per_node)
             .field("max_per_cluster", &self.max_per_cluster)
             .field("memory", &self.budget.limit())
+            .field("control_memory", &self.control_budget.limit())
             .finish_non_exhaustive()
     }
 }
@@ -122,7 +144,41 @@ impl RemoteNode {
         let max_duration = get(MAX_DURATION)
             .and_then(|v| crate::units::TimeValue::parse(v, MAX_DURATION).ok())
             .map_or(DEFAULT_MAX_DURATION, |t| Duration::from_millis(t.as_millis().max(1) as u64));
-        Arc::new(RemoteNode { running: AtomicUsize::new(0), max_per_node: count(MAX_PER_NODE, 4), max_per_cluster: count(MAX_PER_CLUSTER, 2), budget: MemoryBudget::new(memory), max_duration })
+        let control = CONTROL_MEMORY.min(memory / 8).max(1);
+        Arc::new(RemoteNode {
+            running: AtomicUsize::new(0),
+            max_per_node: count(MAX_PER_NODE, 4),
+            max_per_cluster: count(MAX_PER_CLUSTER, 2),
+            budget: MemoryBudget::new((memory - control).max(1)),
+            control_budget: MemoryBudget::new(control),
+            control: Default::default(),
+            max_duration,
+        })
+    }
+
+    /// Whether one more task of the cluster whose running count is `cluster` would get a slot
+    /// now (roll's migration creates a copy only then).
+    pub fn has_room(&self, cluster: &AtomicUsize) -> bool {
+        cluster.load(Ordering::SeqCst) < self.max_per_cluster && self.running.load(Ordering::SeqCst) < self.max_per_node
+    }
+
+    /// The most tasks one cluster runs at once.
+    pub fn max_per_cluster(&self) -> usize {
+        self.max_per_cluster
+    }
+
+    /// A place for one control call on `cluster` (one per cluster, [`MAX_CONTROL_PER_NODE`] per
+    /// node), or a 429.
+    pub fn control_slot(self: &Arc<Self>, cluster: &str) -> EsResult<ControlSlot> {
+        let mut busy = self.control.lock();
+        if busy.contains(cluster) {
+            return Err(rejected("a migration call of this cluster is running: wait for it".into()));
+        }
+        if busy.len() >= MAX_CONTROL_PER_NODE {
+            return Err(rejected(format!("the node runs [{MAX_CONTROL_PER_NODE}] migration calls, the most it may run at once")));
+        }
+        busy.insert(cluster.to_string());
+        Ok(ControlSlot { node: self.clone(), cluster: cluster.to_string() })
     }
 
     /// A slot for one remote reindex task of the cluster whose running count is `cluster`, or
@@ -142,6 +198,18 @@ impl RemoteNode {
 
 fn rejected(why: String) -> EsError {
     EsError::new(429, "es_rejected_execution_exception", format!("rejected execution of reindex from remote: {why}"))
+}
+
+/// One control call's place in [`RemoteNode`]'s pool, given back when dropped.
+pub struct ControlSlot {
+    node: Arc<RemoteNode>,
+    cluster: String,
+}
+
+impl Drop for ControlSlot {
+    fn drop(&mut self) {
+        self.node.control.lock().remove(&self.cluster);
+    }
 }
 
 /// One running remote reindex task's place in [`RemoteNode`]'s counts, given back when dropped.
@@ -175,6 +243,7 @@ pub struct RemoteDoc {
 /// How the node lets reindex from remote connect (its operator's settings).
 pub struct Rules {
     allow_private: bool,
+    deny: Arc<Vec<Net>>,
     whitelist: Option<Vec<String>>,
     blocklist: Vec<String>,
     buffer_limit: u64,
@@ -187,6 +256,74 @@ enum Verification {
     Full,
     Certificate,
     None,
+}
+
+/// An address or network (`10.0.0.0/8`, `2001:db8::/32`, `203.0.113.7`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Net {
+    addr: IpAddr,
+    prefix: u8,
+}
+
+impl Net {
+    pub fn parse(s: &str) -> Option<Net> {
+        let (a, p) = s.trim().split_once('/').map_or((s.trim(), None), |(a, p)| (a, Some(p)));
+        let addr: IpAddr = a.trim_start_matches('[').trim_end_matches(']').parse().ok()?;
+        let addr = addr.to_canonical();
+        let max = if addr.is_ipv4() { 32 } else { 128 };
+        let prefix = match p {
+            Some(p) => p.parse::<u8>().ok().filter(|p| *p <= max)?,
+            None => max,
+        };
+        Some(Net { addr, prefix })
+    }
+
+    pub fn contains(&self, ip: IpAddr) -> bool {
+        let ip = ip.to_canonical();
+        let mask = |bits: u32, len: u8| if len == 0 { 0 } else { u128::MAX << (bits - len as u32) };
+        match (self.addr, ip) {
+            (IpAddr::V4(n), IpAddr::V4(i)) => {
+                let m = mask(32, self.prefix) as u32;
+                u32::from(n) & m == u32::from(i) & m
+            }
+            (IpAddr::V6(n), IpAddr::V6(i)) => {
+                let m = mask(128, self.prefix);
+                u128::from(n) & m == u128::from(i) & m
+            }
+            _ => false,
+        }
+    }
+}
+
+/// A host as patterns match it: lower case, no trailing dot.
+fn normal_host(h: &str) -> String {
+    h.to_ascii_lowercase().trim_end_matches('.').to_string()
+}
+
+/// Resolves names to the addresses reindex from remote may reach: public ones unless private
+/// ones are allowed, never a denied one ([`DENY_ADDRESSES`]); checked on the addresses the
+/// connection uses, so no name (or name of a name) leads around it.
+struct Guarded {
+    allow_private: bool,
+    deny: Arc<Vec<Net>>,
+}
+
+impl reqwest::dns::Resolve for Guarded {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_string();
+        let (allow_private, deny) = (self.allow_private, self.deny.clone());
+        Box::pin(async move {
+            let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host.as_str(), 0)).await?.collect();
+            let denied = |ip: IpAddr| deny.iter().any(|n| n.contains(ip));
+            let private = addrs.iter().any(|a| !allow_private && roll_net::private_ip(a.ip()));
+            let ok: Vec<std::net::SocketAddr> = addrs.into_iter().filter(|a| (allow_private || !roll_net::private_ip(a.ip())) && !denied(a.ip())).collect();
+            if ok.is_empty() {
+                let why = if private { "a private address" } else { "an address reindex from remote may not reach" };
+                return Err(format!("{host} resolves to {why}").into());
+            }
+            Ok(Box::new(ok.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
 }
 
 /// A list setting as node settings hold it: `a,b` or `[a, b]`.
@@ -214,8 +351,13 @@ impl Rules {
             Some("none") => Verification::None,
             Some(v) => return Err(EsError::illegal_argument(format!("unknown verification mode [{v}] for [{SSL_VERIFICATION_MODE}]"))),
         };
+        let mut deny = Vec::new();
+        for n in setting(DENY_ADDRESSES).map(list).unwrap_or_default() {
+            deny.push(Net::parse(&n).ok_or_else(|| EsError::illegal_argument(format!("[{DENY_ADDRESSES}] holds [{n}], which isn't an address or network")))?);
+        }
         Ok(Rules {
             allow_private: setting(ALLOW_PRIVATE).is_some_and(|v| v.eq_ignore_ascii_case("true")),
+            deny: Arc::new(deny),
             whitelist: setting(WHITELIST).map(list),
             blocklist: setting(BLOCKLIST).map(list).unwrap_or_default(),
             buffer_limit,
@@ -248,7 +390,9 @@ impl Rules {
             return Err(EsError::illegal_argument(format!("[host] must use the http or https scheme but was [{}]", r.scheme)));
         }
         let target = format!("{}:{}", r.host, r.port);
-        let matches = |list: &[String]| list.iter().any(|p| crate::xcontent::filter::glob_match(p, &target));
+        // Names match in lower case without a trailing dot, as they resolve.
+        let normal = format!("{}:{}", normal_host(&r.host), r.port);
+        let matches = |list: &[String]| list.iter().any(|p| crate::xcontent::filter::glob_match(&normal_host(p), &normal));
         // `ReindexValidator.checkRemoteWhitelist`: unset or empty, every remote is refused.
         let allowed = self.whitelist.as_deref().is_some_and(matches) && !matches(&self.blocklist);
         if !allowed {
@@ -258,11 +402,14 @@ impl Rules {
                 format!("[{target}] either not whitelisted in {WHITELIST} or blocked in {BLOCKLIST}")
             }));
         }
-        if !self.allow_private {
-            let url = reqwest::Url::parse(&format!("{}://{target}/", r.scheme)).map_err(|_| EsError::illegal_argument(format!("[host] [{target}] is not a valid host")))?;
-            if roll_net::literal_private_host(&url) {
-                return Err(EsError::illegal_argument(format!("[{target}] is a private address, which reindex from remote may not connect to unless [{ALLOW_PRIVATE}] is set")));
-            }
+        let url = reqwest::Url::parse(&format!("{}://{target}/", r.scheme)).map_err(|_| EsError::illegal_argument(format!("[host] [{target}] is not a valid host")))?;
+        if !self.allow_private && roll_net::literal_private_host(&url) {
+            return Err(EsError::illegal_argument(format!("[{target}] is a private address, which reindex from remote may not connect to unless [{ALLOW_PRIVATE}] is set")));
+        }
+        // An address written out never reaches the resolver: checked here, in any of its forms.
+        let literal = url.host_str().and_then(|h| h.trim_start_matches('[').trim_end_matches(']').parse::<IpAddr>().ok());
+        if literal.is_some_and(|ip| self.deny.iter().any(|n| n.contains(ip))) {
+            return Err(EsError::illegal_argument(format!("[{target}] is an address reindex from remote may not reach")));
         }
         Ok(())
     }
@@ -327,15 +474,31 @@ pub struct Client {
     secrets: Vec<String>,
     /// The requests carry credentials: no error quotes what the remote answered.
     credentials: bool,
+    /// Never quote what the remote answered, credentials or not (roll's own calls).
+    quiet: bool,
     limit: u64,
+    /// One request's whole exchange.
+    exchange: Duration,
     budget: Option<Arc<MemoryBudget>>,
 }
 
 /// An answer read whole (within the limit), with the breaker bytes it holds.
 struct Body {
     status: u16,
-    bytes: Vec<u8>,
+    bytes: Bytes,
     held: Option<Reservation>,
+}
+
+/// A parsed answer and what it's charged for, given back when it's dropped.
+pub struct Charged {
+    pub value: Value,
+    _held: Option<Reservation>,
+}
+
+/// An upper bound of what `b`'s tree costs: every value a node and a slot, every member a key.
+fn tree_cost(b: &[u8]) -> u64 {
+    let tokens = b.iter().filter(|c| matches!(c, b'{' | b'[' | b',' | b':')).count() as u64 + 1;
+    tokens * TREE_BYTES_PER_TOKEN + b.len() as u64
 }
 
 impl Client {
@@ -386,9 +549,7 @@ impl Client {
             .http1_only()
             .user_agent(concat!("roll-search/", env!("CARGO_PKG_VERSION"), " (reindex)"))
             .default_headers(headers);
-        if !rules.allow_private {
-            b = b.dns_resolver(Arc::new(roll_net::PublicOnly));
-        }
+        b = b.dns_resolver(Arc::new(Guarded { allow_private: rules.allow_private, deny: rules.deny.clone() }));
         if !rules.roots.is_empty() {
             b = b.tls_certs_merge(rules.roots.iter().cloned());
         }
@@ -400,7 +561,29 @@ impl Client {
         let http = b.build().map_err(|e| EsError::illegal_state(format!("building the remote client failed: {}", innermost(&e))))?;
         let prefix = r.path_prefix.as_deref().unwrap_or("").trim_end_matches('/');
         let host = format!("{}://{}:{}", r.scheme, r.host, r.port);
-        Ok(Client { base: format!("{host}{prefix}"), host, http, socket_timeout: socket_timeout.min(MAX_EXCHANGE), secrets, credentials, limit: rules.buffer_limit, budget })
+        Ok(Client {
+            base: format!("{host}{prefix}"),
+            host,
+            http,
+            socket_timeout: socket_timeout.min(MAX_EXCHANGE),
+            secrets,
+            credentials,
+            quiet: false,
+            limit: rules.buffer_limit,
+            exchange: MAX_EXCHANGE,
+            budget,
+        })
+    }
+
+    /// For roll's own calls (a migration's listing and definitions): answers of at most
+    /// `limit` bytes, exchanges of at most [`CONTROL_EXCHANGE`], and errors that never quote the
+    /// remote's answer (its status and `error.type` only) nor tell one transport failure from
+    /// another.
+    pub fn for_control(mut self, limit: u64) -> Client {
+        self.limit = self.limit.min(limit);
+        self.exchange = CONTROL_EXCHANGE;
+        self.quiet = true;
+        self
     }
 
     /// `s` with every credential replaced.
@@ -423,7 +606,7 @@ impl Client {
         if lower.contains("certificate") || lower.contains("handshake") || lower.contains("tls") {
             return EsError::java(500, "s_s_l_handshake_exception", detail);
         }
-        if lower.contains("private address") {
+        if lower.contains("private address") || lower.contains("may not reach") {
             return EsError::java(500, "connect_exception", detail);
         }
         if lower.contains("dns error") || lower.contains("failed to lookup") || lower.contains("name or service not known") {
@@ -440,35 +623,48 @@ impl Client {
     /// the breaker while it's held.
     async fn exchange(&self, method: &reqwest::Method, path_query: &str, body: Option<&str>) -> EsResult<Body> {
         let url = format!("{}{path_query}", self.base);
-        let mut rb = self.http.request(method.clone(), &url);
+        let mut rb = self.http.request(method.clone(), &url).timeout(self.exchange);
         if let Some(b) = body {
             rb = rb.header(reqwest::header::CONTENT_TYPE, "application/json; charset=UTF-8").body(b.to_string());
         }
         let mut resp = rb.send().await.map_err(|e| self.transport_error(&e))?;
+        let read = async {
         let status = resp.status().as_u16();
         if let Some(n) = resp.content_length().filter(|n| *n > self.limit) {
             return Err(too_large(n, self.limit));
         }
         let mut held = self.budget.clone().map(Reservation::new);
-        let mut bytes = Vec::with_capacity(resp.content_length().unwrap_or(4096).min(self.limit).min(1 << 20) as usize);
+        let mut bytes = bytes::BytesMut::with_capacity(resp.content_length().unwrap_or(4096).min(self.limit).min(1 << 20) as usize);
         while let Some(chunk) = resp.chunk().await.map_err(|e| self.transport_error(&e))? {
             let n = (bytes.len() + chunk.len()) as u64;
             if n > self.limit {
                 return Err(too_large(n, self.limit));
             }
             if let Some(h) = held.as_mut() {
-                h.add(chunk.len() as u64 * CHARGE_FACTOR, BREAKER_LABEL)?;
+                h.add(chunk.len() as u64, BREAKER_LABEL)?;
             }
             bytes.extend_from_slice(&chunk);
         }
-        Ok(Body { status, bytes, held })
+        Ok(Body { status, bytes: bytes.freeze(), held })
+        };
+        read.await
     }
 
     /// `wrapExceptionToPreserveStatus`: the remote's answer as the reason, its status kept.
     /// After a request that carried credentials, the answer is left out (its status stays).
     fn status_error(&self, method: &reqwest::Method, path_query: &str, b: &Body) -> EsError {
-        let text = if self.credentials {
-            format!("[the remote's answer isn't shown: the request carried credentials; {} bytes]", b.bytes.len())
+        let text = if self.credentials || self.quiet {
+            // The error's type alone (a name, not text the remote chose freely).
+            let kind = (b.bytes.len() <= 64 * 1024)
+                .then(|| crate::json::parse(&b.bytes).ok().flatten())
+                .flatten()
+                .and_then(|v| v.pointer(&["error", "type"]).and_then(Value::as_str).map(str::to_string))
+                .filter(|t| t.len() <= 100 && t.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_'));
+            let why = if self.credentials { "the request carried credentials" } else { "roll doesn't quote a remote's answer here" };
+            match kind {
+                Some(k) => format!("[the remote's answer isn't shown: {why}; error type [{k}], {} bytes]", b.bytes.len()),
+                None => format!("[the remote's answer isn't shown: {why}; {} bytes]", b.bytes.len()),
+            }
         } else {
             self.scrub(&String::from_utf8_lossy(&b.bytes))
         };
@@ -485,12 +681,12 @@ impl Client {
         EsError::new(status, "status_exception", message).caused_by(cause)
     }
 
-    /// One request whose answer is JSON; a rejected one (429) is sent again with Elasticsearch's
+    /// One request answered with a 2xx; a rejected one (429) is sent again with Elasticsearch's
     /// backoff, each retry counted in `retries`.
-    async fn json(&self, method: reqwest::Method, path_query: &str, body: Option<&str>, retries: &mut u64) -> EsResult<(Value, Option<Reservation>)> {
+    async fn checked(&self, method: &reqwest::Method, path_query: &str, body: Option<&str>, retries: &mut u64) -> EsResult<Body> {
         let mut attempt = 0u32;
         loop {
-            let b = self.exchange(&method, path_query, body).await?;
+            let b = self.exchange(method, path_query, body).await?;
             if b.status == 429 && attempt < MAX_RETRIES {
                 // `BackoffPolicy.exponentialBackoff`: start + 10 * (e^(0.8 * n) - 1) ms.
                 let wait = RETRY_INITIAL_MS + 10 * (((0.8 * attempt as f64).exp() as u64).saturating_sub(1));
@@ -500,33 +696,62 @@ impl Client {
                 continue;
             }
             if !(200..300).contains(&b.status) {
-                return Err(self.status_error(&method, path_query, &b));
+                return Err(self.status_error(method, path_query, &b));
             }
-            return match crate::json::parse(&b.bytes) {
-                // Any JSON: `_cat` answers an array; callers check the shape they need.
-                Ok(Some(v)) => Ok((v, b.held)),
-                Ok(None) => Err(not_elasticsearch(None)),
-                Err(e) => {
-                    let detail = if self.credentials { "the answer isn't valid JSON".to_string() } else { self.scrub(&e.to_string()) };
-                    Err(not_elasticsearch(Some(EsError::java(500, "x_content_parse_exception", detail))))
-                }
-            };
+            return Ok(b);
         }
+    }
+
+    /// One request whose answer is JSON, parsed into a tree: its cost ([`tree_cost`]) is charged
+    /// before the tree is built and held until it's dropped. For small answers (`GET /`, a point
+    /// in time's id, a migration's listing); a page of hits is scanned instead ([`page`](Self::page)).
+    async fn json(&self, method: reqwest::Method, path_query: &str, body: Option<&str>, retries: &mut u64) -> EsResult<Charged> {
+        let mut b = self.checked(&method, path_query, body, retries).await?;
+        if let Some(h) = b.held.as_mut() {
+            h.add(tree_cost(&b.bytes), BREAKER_LABEL)?;
+        }
+        match crate::json::parse(&b.bytes) {
+            // Any JSON: `_cat` answers an array; callers check the shape they need.
+            Ok(Some(v)) => Ok(Charged { value: v, _held: b.held }),
+            Ok(None) => Err(not_elasticsearch(None)),
+            Err(e) => {
+                let detail = if self.credentials || self.quiet { "the answer isn't valid JSON".to_string() } else { self.scrub(&e.to_string()) };
+                Err(not_elasticsearch(Some(EsError::java(500, "x_content_parse_exception", detail))))
+            }
+        }
+    }
+
+    /// A page of hits, scanned without a tree ([`super::remote_page`]): its bytes and each hit's
+    /// envelope are charged, and held while the page is.
+    async fn page(&self, method: reqwest::Method, path_query: &str, body: Option<&str>, retries: &mut u64) -> EsResult<(super::remote_page::ScannedPage, Option<Reservation>)> {
+        let mut b = self.checked(&method, path_query, body, retries).await?;
+        let page = super::remote_page::scan(&b.bytes, MAX_ID_BYTES).map_err(|e| if e.kind == "illegal_argument_exception" { e } else { not_elasticsearch(Some(e)) })?;
+        if let Some(h) = b.held.as_mut() {
+            h.add(page.hits.len() as u64 * HIT_OVERHEAD, BREAKER_LABEL)?;
+        }
+        Ok((page, b.held))
     }
 
     /// `GET /`: the remote's version (`lookupRemoteVersion`).
     pub async fn info(&self, retries: &mut u64) -> EsResult<RemoteInfo> {
-        let (v, _) = self.json(reqwest::Method::GET, "/", None, retries).await?;
+        let charged = self.json(reqwest::Method::GET, "/", None, retries).await?;
+        let v = &charged.value;
         let number = v.pointer(&["version", "number"]).and_then(Value::as_str).ok_or_else(|| not_elasticsearch(None))?.to_string();
         let version = Version::parse(&number).ok_or_else(|| not_elasticsearch(None))?;
         let s = |p: &[&str]| v.pointer(p).and_then(Value::as_str).map(|s| self.scrub(s).chars().take(256).collect::<String>());
         Ok(RemoteInfo { version, number, distribution: s(&["version", "distribution"]), cluster_name: s(&["cluster_name"]) })
     }
 
-    /// One `GET` whose answer is JSON (the migration's listing and index definitions).
-    pub async fn get(&self, path_query: &str) -> EsResult<Value> {
+    /// One `GET` whose answer is JSON (the migration's listing and index definitions), its tree
+    /// charged while it's held.
+    pub async fn get(&self, path_query: &str) -> EsResult<Charged> {
         let mut retries = 0;
-        Ok(self.json(reqwest::Method::GET, path_query, None, &mut retries).await?.0)
+        self.json(reqwest::Method::GET, path_query, None, &mut retries).await
+    }
+
+    /// `scheme://host:port`, as errors name the remote.
+    pub fn host(&self) -> &str {
+        &self.host
     }
 }
 
@@ -641,8 +866,8 @@ impl RemoteSource {
         if s.version >= PIT_SINCE {
             let partial = if s.version >= PIT_PARTIAL_SINCE { "allow_partial_search_results=false&" } else { "" };
             let path = format!("/{}_pit?{partial}keep_alive=15m", s.indices);
-            let (v, _) = s.client.json(reqwest::Method::POST, &path, None, &mut s.retries).await?;
-            let id = v.get("id").and_then(Value::as_str).ok_or_else(|| EsError::illegal_state("open point-in-time response must contain [id] field"))?;
+            let opened = s.client.json(reqwest::Method::POST, &path, None, &mut s.retries).await?;
+            let id = opened.value.get("id").and_then(Value::as_str).ok_or_else(|| EsError::illegal_state("open point-in-time response must contain [id] field"))?;
             s.cursor = Cursor::Pit { id: bounded_id(id, "point in time")?, after: None };
         }
         Ok(s)
@@ -659,7 +884,7 @@ impl RemoteSource {
             return Ok(Page { docs: Vec::new(), total: None, _held: None });
         }
         let first = std::mem::replace(&mut self.first, false);
-        let (v, held) = match &self.cursor {
+        let (page, held) = match &self.cursor {
             Cursor::Pit { id, after } => {
                 let keep_alive = if first { Value::from("15m") } else { Value::from(format!("{PIT_KEEP_ALIVE_NANOS}nanos")) };
                 let tiebreak = if self.version >= SHARD_DOC_SINCE { "_shard_doc" } else { "_doc" };
@@ -677,7 +902,7 @@ impl RemoteSource {
                 }
                 body.insert("track_total_hits".into(), Value::from(if first { i32::MAX as i64 } else { -1 }));
                 let path = if self.version >= PARTIAL_SINCE { "/_search?allow_partial_search_results=false" } else { "/_search" };
-                self.client.json(reqwest::Method::POST, path, Some(&Value::Obj(body).to_json()), &mut self.retries).await?
+                self.client.page(reqwest::Method::POST, path, Some(&Value::Obj(body).to_json()), &mut self.retries).await?
             }
             Cursor::Scroll(None) => {
                 let keep_alive = if self.version < NANOS_SINCE { format!("{}ms", self.keep_alive.as_millis()) } else { self.keep_alive.string_rep() };
@@ -691,7 +916,7 @@ impl RemoteSource {
                 }
                 q.push_str(&format!("&version={}", self.fetch_version));
                 let body = obj! { "query" => self.query.clone(), "_source" => self.source.clone() };
-                self.client.json(reqwest::Method::POST, &format!("/{}_search{q}", self.indices), Some(&body.to_json()), &mut self.retries).await?
+                self.client.page(reqwest::Method::POST, &format!("/{}_search{q}", self.indices), Some(&body.to_json()), &mut self.retries).await?
             }
             Cursor::Scroll(Some(id)) => {
                 let keep_alive = if self.version < NANOS_SINCE {
@@ -700,58 +925,41 @@ impl RemoteSource {
                     format!("{}nanos", (self.keep_alive.as_millis().max(0) as u64).saturating_mul(1_000_000))
                 };
                 let body = obj! { "scroll_id" => id.clone() };
-                self.client.json(reqwest::Method::POST, &format!("/_search/scroll?scroll={keep_alive}"), Some(&body.to_json()), &mut self.retries).await?
+                self.client.page(reqwest::Method::POST, &format!("/_search/scroll?scroll={keep_alive}"), Some(&body.to_json()), &mut self.retries).await?
             }
         };
-        if let Some(fail) = shard_failure(&v) {
-            return Err(fail);
+        // A page that failed on some shards (`allow_partial_search_results=false` keeps a recent
+        // remote from sending one; an older one may): the reindex stops rather than skip
+        // documents. Its reason is the remote's text: left out once credentials were sent.
+        if let Some((n, reason)) = &page.shard_failures {
+            let reason = if self.client.credentials { "[the remote's reason isn't shown: the request carried credentials]".to_string() } else { self.client.scrub(reason) };
+            return Err(EsError::new(500, "search_phase_execution_exception", format!("remote search failed on [{n}] shards: {reason}")));
         }
-        let docs = self.hits(&v)?;
+        if !page.has_hits {
+            return Err(not_elasticsearch(None));
+        }
         match &mut self.cursor {
             Cursor::Pit { id, after } => {
-                if let Some(p) = v.get("pit_id").and_then(Value::as_str) {
-                    *id = bounded_id(p, "point in time")?;
+                if let Some(p) = page.pit_id {
+                    *id = p;
                 }
-                *after = v.pointer(&["hits", "hits"]).and_then(Value::as_array).and_then(|h| h.last()).and_then(|h| h.get("sort")).cloned();
-                if after.is_none() && !docs.is_empty() {
+                *after = page.last_sort;
+                if after.is_none() && !page.hits.is_empty() {
                     return Err(not_elasticsearch(Some(EsError::illegal_state("Expected value in sort array"))));
                 }
             }
             Cursor::Scroll(id) => {
-                if let Some(s) = v.get("_scroll_id").and_then(Value::as_str) {
-                    *id = Some(bounded_id(s, "scroll")?);
+                if let Some(s) = page.scroll_id {
+                    *id = Some(s);
                 }
             }
         }
-        if docs.is_empty() {
+        if page.hits.is_empty() {
             self.done = true;
         }
-        let total = if first { total_hits(&v) } else { None };
+        let docs = page.hits.into_iter().map(|h| RemoteDoc { index: h.index, id: h.id, routing: h.routing, version: h.version, source: h.source }).collect();
+        let total = if first { page.total } else { None };
         Ok(Page { docs, total, _held: held })
-    }
-
-    fn hits(&self, v: &Value) -> EsResult<Vec<RemoteDoc>> {
-        let Some(hits) = v.pointer(&["hits", "hits"]) else { return Err(not_elasticsearch(None)) };
-        let Value::Arr(hits) = hits else { return Err(not_elasticsearch(None)) };
-        let mut out = Vec::with_capacity(hits.len());
-        for h in hits {
-            let s = |k: &str| h.get(k).and_then(Value::as_str).map(str::to_string);
-            let (Some(index), Some(id)) = (s("_index"), s("_id")) else { return Err(not_elasticsearch(None)) };
-            let routing = s("_routing").or_else(|| {
-                h.get("fields").and_then(|f| f.get("_routing")).and_then(|r| match r {
-                    Value::Arr(a) => a.first().and_then(Value::as_str).map(str::to_string),
-                    Value::Str(x) => Some(x.clone()),
-                    _ => None,
-                })
-            });
-            let source = match h.get("_source") {
-                None | Some(Value::Null) => None,
-                Some(src @ Value::Obj(_)) => Some(Bytes::from(src.to_json())),
-                Some(_) => return Err(not_elasticsearch(Some(EsError::java(500, "x_content_parse_exception", "[hit] failed to parse [_source]")))),
-            };
-            out.push(RemoteDoc { index, id, routing, version: h.get("_version").and_then(Value::as_i64).unwrap_or(-1), source });
-        }
-        Ok(out)
     }
 
     /// Releases the remote's search context (`DELETE /_pit` or `DELETE /_search/scroll`), best
@@ -779,23 +987,6 @@ fn bounded_id(id: &str, what: &str) -> EsResult<String> {
         return Err(EsError::illegal_argument(format!("the remote's {what} id is [{}] bytes, longer than the [{MAX_ID_BYTES}] roll keeps", id.len())));
     }
     Ok(id.to_string())
-}
-
-/// `hits.total`: a number, or `{"value": n}` (7.0 and later).
-fn total_hits(v: &Value) -> Option<u64> {
-    let n = match v.pointer(&["hits", "total"])? {
-        Value::Obj(m) => m.get("value").and_then(Value::as_i64),
-        t => t.as_i64(),
-    };
-    n.map(|n| n.max(0) as u64)
-}
-
-/// A page that failed on some shards (`allow_partial_search_results=false` keeps a recent
-/// remote from sending one; an older one may): the reindex stops rather than skip documents.
-fn shard_failure(v: &Value) -> Option<EsError> {
-    let failures = v.pointer(&["_shards", "failures"]).and_then(Value::as_array).filter(|f| !f.is_empty())?;
-    let reason = failures.first().and_then(|f| f.pointer(&["reason", "reason"]).or_else(|| f.get("reason"))).and_then(Value::as_str).unwrap_or("shard failure");
-    Some(EsError::new(500, "search_phase_execution_exception", format!("remote search failed on [{}] shards: {reason}", failures.len())))
 }
 
 #[cfg(test)]

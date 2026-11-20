@@ -35,6 +35,12 @@ pub use search_es::api::snapshots::S3_ALLOW_PRIVATE;
 pub use search_es::xpack::inference::http::ALLOW_PRIVATE as INFERENCE_ALLOW_PRIVATE;
 pub use search_es::api::remote::ALLOW_PRIVATE as REINDEX_ALLOW_PRIVATE;
 pub use search_es::api::remote::MAX_DURATION as REINDEX_MAX_DURATION;
+pub use search_es::api::remote::DENY_ADDRESSES as REINDEX_DENY_ADDRESSES;
+
+/// Whether `n` is an address or network the reindex deny list takes.
+pub fn reindex_deny_net_ok(n: &str) -> bool {
+    search_es::api::remote::Net::parse(n).is_some()
+}
 
 /// Checks a time value given to a flag (`24h`, `90m`), as Elasticsearch parses one.
 pub fn check_time_value(v: &str, flag: &str) -> anyhow::Result<()> {

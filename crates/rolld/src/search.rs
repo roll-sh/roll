@@ -116,6 +116,11 @@ pub struct SearchArgs {
     /// value: `24h`, `90m`), so a remote that answers slowly forever can't hold a task.
     #[arg(long = "search-reindex-max-duration", env = "ROLL_SEARCH_REINDEX_MAX_DURATION", default_value = "24h")]
     pub search_reindex_max_duration: String,
+    /// Networks reindex from remote never reaches, whatever name leads there (CIDRs or
+    /// addresses, comma-separated): the fleet's own networks. This node's public addresses
+    /// are added on their own.
+    #[arg(long = "search-reindex-deny", env = "ROLL_SEARCH_REINDEX_DENY")]
+    pub search_reindex_deny: Option<String>,
     /// Search clusters a signed-in person may own, branches included (0: no cap). The operator
     /// and admins aren't capped.
     #[arg(long = "search-max-clusters-per-person", env = "ROLL_SEARCH_MAX_CLUSTERS_PER_PERSON", default_value_t = 50)]
@@ -218,6 +223,29 @@ impl Search {
             blocked.push(format!("{h}:*"));
         }
         cfg.node_settings.push(("reindex.remote.blocklist".to_string(), blocked.join(",")));
+        // The same endpoints by address, checked on the address a connection uses: a name
+        // spelled another way, an IP literal or any DNS name pointing here leads nowhere.
+        // Private addresses are refused anyway unless private hosts are allowed (development).
+        let mut deny: Vec<String> = args.search_reindex_deny.as_deref().map(|d| d.split(',').map(str::trim).filter(|x| !x.is_empty()).map(str::to_string).collect()).unwrap_or_default();
+        for n in &deny {
+            anyhow::ensure!(search_control::reindex_deny_net_ok(n), "--search-reindex-deny: [{n}] isn't an address or network");
+        }
+        let mut names: Vec<String> = vec![public_host.to_string()];
+        names.extend(cfg.domain.clone());
+        names.extend(cfg.public_url.as_deref().and_then(|u| reqwest::Url::parse(u).ok()).and_then(|u| u.host_str().map(str::to_string)));
+        for name in names {
+            let name = name.trim_start_matches('[').trim_end_matches(']').to_string();
+            let addrs: Vec<std::net::IpAddr> = match name.parse::<std::net::IpAddr>() {
+                Ok(ip) => vec![ip],
+                Err(_) => tokio::net::lookup_host((name.as_str(), 0)).await.map(|a| a.map(|s| s.ip()).collect()).unwrap_or_default(),
+            };
+            deny.extend(addrs.into_iter().filter(|ip| !roll_net::private_ip(*ip)).map(|ip| ip.to_string()));
+        }
+        deny.sort();
+        deny.dedup();
+        if !deny.is_empty() {
+            cfg.node_settings.push((search_control::REINDEX_DENY_ADDRESSES.to_string(), deny.join(",")));
+        }
         let client = search_server::ClientAddresses::new(args.search_client_ip_header.as_deref(), args.search_trusted_proxies.as_deref())?;
         let mut opts = search_server::ListenOptions { proxy_protocol: args.search_proxy_protocol, client, ..Default::default() };
         if let (Some(c), Some(k)) = (&args.search_tls_cert, &args.search_tls_key) {

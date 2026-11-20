@@ -1579,7 +1579,10 @@ the rest are skipped by the tests' own prerequisites.
   - no redirect is followed (its status comes back as the `status_exception`);
   - each answer is read to at most `roll.reindex.remote.buffer_limit`, 16 MiB rather than the
     REST client's 100 MiB (past it, Elasticsearch's own error), and charged to a node-wide budget
-    rather than the request breaker; a scroll or point-in-time id is kept up to 4 KiB;
+    rather than the request breaker (past it, a 429 `circuit_breaking_exception`); a page's hits
+    are scanned, never parsed into a tree; a scroll or point-in-time id is kept up to 4 KiB;
+  - addresses the node denies (`roll.reindex.remote.deny_addresses`: rolld's own) are refused,
+    checked on the address each connection uses;
   - at most 2 tasks per cluster and 4 per node run at once (a 429
     `es_rejected_execution_exception` past them), and a task stops after
     `roll.reindex.remote.max_duration` (24h; its `canceled` reason says so);

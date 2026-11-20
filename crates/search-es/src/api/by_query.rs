@@ -1016,6 +1016,13 @@ async fn reindex_remote(ctx: &Ctx<'_>, plan: &ReindexPlan, req: &super::by_query
             reject_versioned_deletes(ctx, plan, sds.iter())?;
             let mut stop = false;
             for sd in &sds {
+                // A cancel (also the node unloading the cluster) stops between documents: nothing
+                // is written into a cluster being unloaded.
+                if live.is_cancelled() {
+                    s.canceled = Some(Stop::Cancelled.reason(node.max_duration));
+                    publish(live, &s, &throttle);
+                    return Ok(());
+                }
                 if let Flow::Stop = reindex_doc(ctx, plan, sd, &mut s, &mut touched).await? {
                     stop = true;
                 }

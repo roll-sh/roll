@@ -56,6 +56,9 @@ pub enum ControlError {
     /// A request body over the limit (HTTP 413).
     #[error("{0}")]
     TooLarge(String),
+    /// Too much of something runs at once (HTTP 429): try again later.
+    #[error("{0}")]
+    Busy(String),
     #[error(transparent)]
     Internal(#[from] anyhow::Error),
 }
@@ -374,7 +377,8 @@ pub fn spec_for(c: &SearchCluster) -> ClusterSpec {
     spec.max_body_bytes = Some((c.max_body_mb.max(1) as usize) << 20);
     spec.destructive_requires_name = c.destructive_requires_name;
     spec.ip_allowlist = allowlist_of(&c.ip_allowlist);
-    spec.reindex_whitelist = (!c.reindex_whitelist.is_empty()).then(|| c.reindex_whitelist.clone());
+    // The cluster's own, even empty (`[]`: no remote), never the node setting's.
+    spec.reindex_whitelist = Some(c.reindex_whitelist.clone());
     spec.catalog_id = Some(c.id.clone());
     // Only until its first load has marked what it inherited: a branch made before marking
     // existed, or one already marked, runs its jobs as its own.
@@ -1035,9 +1039,21 @@ impl Control {
     /// request runs, or as soon as none does; until then it keeps its current ones. Making the
     /// cluster always-on past the owner's `caps.always_on` is refused (409).
     pub async fn update(&self, id: &str, o: ClusterOptions, caps: Caps) -> Result<SearchCluster> {
+        self.update_with(id, caps, move |c| {
+            *c = Self::apply(c.clone(), o)?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Changes cluster `id` with `f`, which reads and writes the row as it stands under the
+    /// settings lock (a read-modify-write no concurrent update is lost to), then saves and
+    /// applies it as [`Control::update`] does.
+    pub async fn update_with(&self, id: &str, caps: Caps, f: impl FnOnce(&mut SearchCluster) -> Result<()>) -> Result<SearchCluster> {
         let c = {
             let _g = self.specs.lock().await;
-            let c = Self::apply(self.get(id).await?, o)?;
+            let mut c = self.get(id).await?;
+            f(&mut c)?;
             self.check(&c)?;
             self.save(&c, caps).await?;
             self.apply_spec(&c.name).await;

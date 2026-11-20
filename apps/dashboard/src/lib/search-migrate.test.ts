@@ -1,7 +1,7 @@
 // Tests of the dashboard's migration from Elasticsearch or OpenSearch (vitest).
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { aliasOffer, defaultDest, destProblem, displayHost, droppedByReason, partial, sourceFrom, sourceProblem, taskPoll, taskProgress, type SourceForm } from "./search-migrate";
+import { aliasOffer, defaultDest, destProblem, displayHost, droppedByReason, mergeStarted, partial, queuedPicks, shouldStartQueued, sourceFrom, sourceProblem, taskPoll, taskProgress, type MigrateStarted, type SourceForm } from "./search-migrate";
 
 const form = (f: Partial<SourceForm>): SourceForm => ({ host: "https://es.example:9243", auth: "api_key", apiKey: "", username: "", password: "", ...f });
 
@@ -71,4 +71,22 @@ test("a task _tasks no longer knows is lost, and its partial copy can go", () =>
   if (p.kind === "task") assert.equal(taskProgress(p.body).copied, 4);
   assert.ok(partial("lost") && partial("failed") && partial("cancelled"));
   assert.ok(!partial("done") && !partial("running"));
+});
+
+test("copies past the free task slots wait, and start as earlier ones end", () => {
+  const rows: MigrateStarted[] = [
+    { index: "a", dest: "a", task: "n:1" },
+    { index: "b", dest: "b", task: "n:2" },
+    { index: "c", dest: "c", queued: true },
+    { index: "d", dest: "d-copy", queued: true },
+  ];
+  assert.deepEqual(queuedPicks(rows), [{ index: "c", dest: "c" }, { index: "d", dest: "d-copy" }]);
+  // Both slots taken (a task whose state isn't known yet counts as running).
+  assert.equal(shouldStartQueued(rows, { "n:1": "running" }), false);
+  // One ended: ask again.
+  assert.equal(shouldStartQueued(rows, { "n:1": "done", "n:2": "running" }), true);
+  const merged = mergeStarted(rows, [{ index: "c", dest: "c", task: "n:3" }, { index: "d", dest: "d-copy", queued: true }]);
+  assert.deepEqual(merged.map((r) => [r.index, r.task ?? null, !!r.queued]), [["a", "n:1", false], ["b", "n:2", false], ["c", "n:3", false], ["d", null, true]]);
+  assert.equal(shouldStartQueued(merged, { "n:1": "done", "n:2": "done", "n:3": "running" }), true);
+  assert.equal(shouldStartQueued([{ index: "a", dest: "a", task: "n:1" }], {}), false, "nothing waits");
 });
