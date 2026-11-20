@@ -866,6 +866,7 @@ impl Apps {
         let snapshot = self.db(move |s| s.seal_snapshot(&did, &sid, &e)).await?;
         let vars_hash = {
             let r = self.resolve_vars(&svc, &env, &dep.id).await?;
+            r.check_refs()?;
             fingerprint(&r.vars_for_hash(), &svc)
         };
         let tpl = Arc::new(self.template(&svc, &env, &dep).await?);
@@ -1302,6 +1303,7 @@ impl Apps {
         let (sid, e) = (svc.id.clone(), d.environment.clone());
         let env_row = self.db(move |s| s.environment(&sid, &e)).await?;
         let resolved = self.resolve_vars(svc, &env_row, &d.id).await?;
+        resolved.check_refs()?;
         // Its secret values never reach the build's log, whatever a step prints.
         self.logs.redact(&format!("build:{}", d.id), &d.id, resolved.secret_values());
         let closed_vars = env_row.egress.closed().then(|| resolved.without_secrets());
@@ -1518,6 +1520,7 @@ impl Apps {
         let mut probe = svc.clone();
         probe.run.port = run.port;
         let resolved = self.resolve_vars(&probe, env, &dep.id).await?;
+        resolved.check_refs()?;
         // Its secret values never reach any of the environment's logs, whoever prints them: its
         // output, its requests' paths, its spans and its metrics.
         let secrets = resolved.secret_values();

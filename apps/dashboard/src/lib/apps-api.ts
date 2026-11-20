@@ -548,12 +548,14 @@ export interface EnvironmentPut {
   routes?: RouteRule[] | null;
   /** Its uptime checks (at most 5), or null for none. */
   checks?: UptimeCheck[] | null;
-  /** Its deploy freeze: on until lifted (null), until `until`, or in weekly `windows`; a person's deploy then needs `override: true`. */
+  /** Its deploy freeze: on until lifted (null), until `until`, or in weekly `windows`; a person's deploy then needs the header `X-Roll-Override: 1` (admin). */
   freeze?: Freeze | null;
   /** Paused by the clock: as a window starts it's paused, as it ends resumed; null removes it. */
   pause_schedule?: { windows: { from: string; to: string }[]; timezone?: string } | null;
   /** Traffic mirroring: copies of `percent` of GET and HEAD requests to `environment`, answers dropped; null ends it. */
   mirror?: { environment: string; percent: number } | null;
+  /** Its own HTML in every page: before `</head>` or `</body>` (at most 5, each up to 16 KiB); null: none. */
+  snippets?: Snippet[] | null;
   /** Its split test: `percent` of visitors (1–99) served by `environment`, or null to end it. */
   split?: { environment: string; percent: number } | null;
   /** Its heartbeats (at most 10), or null for none; one kept by name keeps its URL. */
@@ -684,8 +686,9 @@ export interface Environment extends EnvironmentSummary {
   pause_schedule?: { windows: { from: string; to: string }[]; timezone?: string };
   /** Where a share of its GET and HEAD requests is copied, answers dropped. */
   mirror?: { environment: string; percent: number };
+  snippets?: Snippet[];
   freeze?: Freeze;
-  /** Its freeze is on now: automatic deploys build to ready, a person's deploy needs override. */
+  /** Its freeze is on now: automatic deploys build to ready, a person's deploy needs the `X-Roll-Override: 1` header (admin). */
   frozen?: boolean;
   /** Its split test: a share of its visitors, kept by their bucket cookie, served by another environment. */
   split?: { environment: string; percent: number };
@@ -1142,6 +1145,12 @@ export type NotifyEvent =
   | "alert.slo"
   /** Every `audit.*` entry: who changed what (never paged). */
   | "audit";
+
+/** HTML of an environment's own the proxy puts in every page (Netlify's snippet injection). */
+export interface Snippet {
+  at: "head" | "body_end";
+  html: string;
+}
 
 /** An entry of the event log (`GET /v1/apps/events`, a service's `…/activity`). */
 export interface AppEvent {

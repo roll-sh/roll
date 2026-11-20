@@ -67,7 +67,8 @@ pub async fn submit(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let uri = path + &forwarded_query(ctx, ASYNC_PARAMS);
     let body = ctx.body()?;
     let start = ctx.now_ms;
-    let result = internal::call(ctx.cluster, "POST", &uri, body.as_ref()).await;
+    // As the submitter, a superuser too: a point in time the body names is bound to its opener.
+    let result = internal::as_caller(internal::Caller::client(ctx), internal::call(ctx.cluster, "POST", &uri, body.as_ref())).await;
     let id = async_results::async_id(&ctx.cluster.node.id);
     let mut m = Map::new();
     let status;

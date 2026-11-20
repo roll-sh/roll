@@ -1172,7 +1172,7 @@ async fn call_as(ctx: &Arc<Ctx>, name: &str, args: Value, quiet: bool) -> Option
 /// `readOnlyHint`).
 fn writes_to(ctx: &Ctx, name: &str) -> Option<(String, bool)> {
     Some(match tools::all().iter().find(|t| t.name == name) {
-        Some(t) => (t.product.to_string(), t.method != "GET"),
+        Some(t) => (if t.published { "published".to_string() } else { t.product.to_string() }, t.method != "GET"),
         None => {
             let def = ctx.m.sets.iter().flat_map(|s| s.tools()).find(|t| t["name"] == name)?;
             let product = def["_meta"]["roll/product"].as_str().map(str::to_string).unwrap_or_else(|| name.split('_').next().unwrap_or_default().to_string());
