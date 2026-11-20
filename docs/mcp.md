@@ -1071,9 +1071,12 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **Next, ranked (now):** what each client takes, said only as documented: VS Code's 128, Cursor's
-   about 40; Windsurf's 100 no longer appears in its docs (now Devin's desktop app's), so roll stops
-   citing it (`feature/roll-mcp-client-limits`, this PR). Then, as each lands: search's browser keys
+1. **Next, ranked (now):** landed 2026-11-20/21: `previews_wait` (#555), 2026-07-28's
+   resource-not-found code (#556; the rest of that revision's changelog and deprecations were
+   already in: discover, listen, `resultType`, `ttlMs`, `Mcp-Name`, the renumbered errors, `iss`,
+   client ID metadata documents beside dynamic registration), and workflows for previews, tasks,
+   queues and streams (`review_preview`, `clear_task_backlog`, `drain_queue`,
+   `find_consumer_lag`; this PR). Then, as each lands: search's browser keys
    (#358: list and revoke as tools, making one stays a credential), secrets' found-credential view
    (#487's `unstored`) and placeholders (#520: the list as a read, the revokes destructive; binding a
    key to hosts stays a person's), project members (#501's own tools; its other routes are
@@ -1086,7 +1089,11 @@ waits on a sibling PR reaching main is last.
    owners (they fail only under load and pass alone): code-control's
    `automations::concurrency_cancel_and_retry` and
    `agents_code::roll_code_projects_with_auto_pull_follow_their_default_branch`. Waiting on roll code: a removed person's
-   repositories handed to someone else. Not doing: "remember this browser"; a preset that reveals
+   repositories handed to someone else. Later: a docs search tool (Supabase, Vercel, Neon,
+   Cloudflare and Stripe have one) once roll has user documentation to search (`docs/` is design
+   notes and contracts, not that); tasks' tools in areas once it nears ~60 (47 now); a call's
+   `_meta.traceparent` (SEP-414) carried into the routed request once rolld's API traces (apps'
+   and previews' traffic do). Not doing: "remember this browser"; a preset that reveals
    development's values without asking (#354); a connection-level `?project=` (only a token's
    rules bound a project; a default that some tools can't honour would look like a boundary).
 2. **Landed 2026-11-20, evening (main 32352f2fc, ci green):** secrets' toolset in areas (#538);
