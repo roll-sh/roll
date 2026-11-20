@@ -1048,7 +1048,7 @@ impl Decode {
         }
         let data = super::scan::row_data(bytes)?;
         let mut row = match need {
-            Some(n) => crate::storage::row::decode_row_need_spare(data, n, self.extra.len())?,
+            Some(n) => crate::storage::row::decode_row_need_spare(data, n, self.extra.len() + super::pipe::spare(&self.stages, 0))?,
             None => crate::storage::row::decode_row(data)?,
         };
         let ncols = self.missing.len();
@@ -1156,6 +1156,9 @@ pub(super) struct LazyBuf {
     nums: Vec<std::cell::OnceCell<Option<Option<(i128, u32)>>>>,
     /// The columns walked: up to the last one the scan reads.
     upto: usize,
+    /// Room a row made here gets for the values computed after its columns and the scan's
+    /// stages' (`pipe::spare`).
+    spare: usize,
     /// The worker's reader of the rows' out-of-line values (`Decode::toast`).
     reader: std::cell::RefCell<Option<crate::txn::toast::Reader>>,
 }
@@ -1172,6 +1175,7 @@ impl LazyBuf {
             cells: (0..ncols + d.with_key as usize).map(|_| Default::default()).collect(),
             nums: (0..upto).map(|_| Default::default()).collect(),
             upto,
+            spare: d.extra.len() + super::pipe::spare(&d.stages, 0),
             reader: std::cell::RefCell::new(d.toast.clone().map(crate::txn::toast::Reader::new)),
         }
     }
@@ -1266,7 +1270,7 @@ impl Lazy<'_> {
     /// (`Decode::late`) NULL, not decoded.
     pub(super) fn into_row_passed(self) -> Result<Row> {
         let Some(late) = self.d.late.as_deref() else { return self.into_row() };
-        let mut row = Vec::with_capacity(self.buf.cells.len() + self.d.extra.len());
+        let mut row = Vec::with_capacity(self.buf.cells.len() + self.buf.spare);
         let lates = late.iter().copied().chain(std::iter::repeat(false));
         for (i, late) in (0..self.buf.cells.len()).zip(lates) {
             let v = match self.buf.cells[i].take() {
@@ -1281,7 +1285,7 @@ impl Lazy<'_> {
 
     /// The scan's row (`Decode::row`'s), with the values already read.
     pub(super) fn into_row(self) -> Result<Row> {
-        let mut row = Vec::with_capacity(self.buf.cells.len() + self.d.extra.len());
+        let mut row = Vec::with_capacity(self.buf.cells.len() + self.buf.spare);
         for i in 0..self.buf.cells.len() {
             let v = match self.buf.cells[i].take() {
                 Some(Some(v)) => v,

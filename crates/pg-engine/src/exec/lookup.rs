@@ -290,7 +290,7 @@ impl Lookup {
     /// something is left to `eval` or failed (the row goes to the executor's thread, which
     /// runs it as the serial join does). `sc`: the worker's counts and cache.
     pub fn rows(&self, l: &[Value], out: &mut Vec<Row>, sc: &mut LookupScratch) -> bool {
-        out.clear();
+        super::pipe::clear_rows(out);
         let mut start = self.prefix.clone();
         for (k, desc, nulls_first, coll, pad) in &self.keys {
             let Some(v) = k.run(l) else { return false };
@@ -470,7 +470,7 @@ impl Lookup {
     /// taken in its entries' order, filtered and counted as `rows` does.
     pub fn batch(&self, ls: &[Row], got: &mut Vec<Got>, out: &mut Vec<Row>, sc: &mut LookupScratch) {
         got.clear();
-        out.clear();
+        super::pipe::clear_rows(out);
         let mut b = std::mem::take(&mut sc.batch);
         let BatchBufs { starts, wants, order, ekeys, espans, sorted } = &mut b;
         starts.clear();
@@ -663,6 +663,7 @@ impl Lookup {
                     for r in rows {
                         f(Joined::Pair { l: &l, r: super::pipe::Inner::plain(r), keep: self.keep.as_deref() });
                     }
+                    super::pipe::drop_row(l);
                     return;
                 };
                 for r in rest {

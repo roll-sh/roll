@@ -348,6 +348,33 @@ impl<'a> Inner<'a> {
     }
 }
 
+/// Drops row `r`, its values that own nothing (NULLs and plain scalars: most of a joined
+/// row's, whose columns nothing above reads, NULL) without a call each: `Value`'s drop is
+/// out of line, a call and a jump on its variant for every value of a row of 30 to 50.
+pub fn drop_row(mut r: Row) {
+    for v in r.drain(..) {
+        match v {
+            Value::Null
+            | Value::Bool(_)
+            | Value::Int2(_)
+            | Value::Int4(_)
+            | Value::Int8(_)
+            | Value::Float4(_)
+            | Value::Float8(_)
+            | Value::Date(_)
+            | Value::Timestamp(_)
+            | Value::Timestamptz(_)
+            | Value::Oid(_) => std::mem::forget(v),
+            v => drop(v),
+        }
+    }
+}
+
+/// `drop_row` of each of `rows`, emptied.
+pub fn clear_rows(rows: &mut Vec<Row>) {
+    rows.drain(..).for_each(drop_row);
+}
+
 /// `joined` of `l`'s own row: its values moved, not copied (those `keep` leaves out made NULL),
 /// then `r`'s.
 pub fn joined_from(mut l: Row, r: Inner, keep: Option<&[bool]>) -> Row {
@@ -358,8 +385,9 @@ pub fn joined_from(mut l: Row, r: Inner, keep: Option<&[bool]>) -> Row {
         (None, Some(_)) => l.extend((0..r.width()).map(|i| r.get(i).cloned().unwrap_or(Value::Null))),
         (Some(k), _) => {
             let kept = |i: usize| k.get(i).copied().unwrap_or(false);
+            // (Most columns not kept are NULL already, a stage's before: not dropped again.)
             for (i, v) in l.iter_mut().enumerate() {
-                if !kept(i) {
+                if !kept(i) && !v.is_null() {
                     *v = Value::Null;
                 }
             }
@@ -373,9 +401,10 @@ pub fn joined_from(mut l: Row, r: Inner, keep: Option<&[bool]>) -> Row {
 }
 
 /// A row of `l`'s columns then `r`'s, copying only the columns in `keep` (None: all;
-/// the others are NULL: nothing above reads them).
-pub fn joined(l: &[Value], r: Inner, keep: Option<&[bool]>) -> Row {
-    let mut out = Vec::with_capacity(l.len() + r.width());
+/// the others are NULL: nothing above reads them), with room for `spare` more values (the
+/// stages after it: `spare`).
+pub fn joined(l: &[Value], r: Inner, keep: Option<&[bool]>, spare: usize) -> Row {
+    let mut out = Vec::with_capacity(l.len() + r.width() + spare);
     match (keep, r.map) {
         (None, None) => {
             out.extend_from_slice(l);
@@ -427,9 +456,14 @@ pub enum Joined<'a> {
 impl Joined<'_> {
     /// The joined row (`joined`'s copy of a pair).
     pub fn into_row(self) -> Row {
+        self.into_row_spare(0)
+    }
+
+    /// `into_row`, a copied pair's row with room for `spare` more values.
+    fn into_row_spare(self, spare: usize) -> Row {
         match self {
             Joined::Row(r) => r,
-            Joined::Pair { l, r, keep } => joined(l, r, keep),
+            Joined::Pair { l, r, keep } => joined(l, r, keep, spare),
         }
     }
 }
@@ -524,6 +558,7 @@ impl Probe {
                     for &j in matches {
                         f(Joined::Pair { l: &l, r: t.inner(j as usize), keep: self.keep.as_deref() });
                     }
+                    drop_row(l);
                     return;
                 };
                 for &j in rest {
@@ -540,6 +575,17 @@ impl Probe {
 pub enum Stage {
     Hash(Probe),
     Lookup(Box<super::lookup::Lookup>),
+}
+
+/// The values stages `from..` add to a row going through them in place: a row made before
+/// them is made with room for those (`Vec::with_capacity`), so each stage's `joined_from`
+/// extends it instead of moving it to a bigger allocation. (Not the last stage's: its rows go
+/// out as pairs, `Probe::emit`'s `own_last`, a row made of each only where one is needed.)
+pub fn spare(stages: &[Arc<Stage>], from: usize) -> usize {
+    stages.get(from..stages.len().saturating_sub(1)).unwrap_or(&[]).iter().map(|s| match &**s {
+        Stage::Hash(p) => p.nright,
+        Stage::Lookup(l) => l.nright,
+    }).sum()
 }
 
 /// What a pipeline's node gives the node above: a row through `.1` stages (the scan's
@@ -682,7 +728,7 @@ fn onward(stages: &[Arc<Stage>], from: usize, j: Joined, s: &mut Scratch, emit: 
     if from + 1 == stages.len() {
         emit(j, from as u8 + 1);
     } else {
-        run_stages(stages, from + 1, j.into_row(), s, emit);
+        run_stages(stages, from + 1, j.into_row_spare(spare(stages, from + 1)), s, emit);
     }
 }
 

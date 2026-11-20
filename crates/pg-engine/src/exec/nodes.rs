@@ -6537,7 +6537,7 @@ impl HashJoinNode {
             while *i < span.1 {
                 let j = t.cand(*span, *i);
                 *i += 1;
-                let combined = super::pipe::joined(l, t.inner(j), self.keep.as_deref());
+                let combined = super::pipe::joined(l, t.inner(j), self.keep.as_deref(), 0);
                 if let Some(c) = &self.cond
                     && !eval_bool(c, &combined, ctx)?
                 {
