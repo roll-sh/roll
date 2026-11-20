@@ -184,6 +184,12 @@ async fn tools_follow_the_tokens_rules() {
     assert!(some.contains(&"workspace_list_projects".into()) && some.contains(&"access_wait_approval".into()) && !some.iter().any(|n| n.starts_with("postgres_")), "{some:?}");
     let (s, _, _) = d.http(OPERATOR, Method::POST, "/v1/mcp?toolsets=nope", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))).await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
+    // A product's area (apps': observe, deploy, configure, project) is a toolset too; one it doesn't have is refused.
+    for (toolset, ok) in [("apps.observe,workspace", true), ("apps.nope", false), ("postgres.observe", false)] {
+        let (s, _, _) = d.http(OPERATOR, Method::POST, &format!("/v1/mcp?toolsets={toolset}"), Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))).await;
+        assert_eq!(s == StatusCode::OK, ok, "{toolset}: {s}");
+    }
+    assert!(costs["areas"].as_array().unwrap().iter().any(|a| a["toolset"] == "apps.observe"), "{costs}");
     // Read-only (GitHub's read-only mode): only read-only tools are listed and run, even for the operator.
     let (_, _, ro) = d.http(OPERATOR, Method::POST, "/v1/mcp?readonly=1", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))).await;
     let ro = names(&ro["result"]);

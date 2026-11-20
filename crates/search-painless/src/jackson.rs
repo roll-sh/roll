@@ -1169,6 +1169,11 @@ impl XContentReader {
     }
 
     fn read_value(&mut self, t: Option<Tok>) -> Result<Value, ReadError> {
+        // One level per nested value: a document deeper than the stack the caller allows
+        // (`guard::StackScope`) fails instead of overflowing it.
+        if crate::guard::stack_exhausted() {
+            return Err(self.fail(self.lx.err("Document nesting depth exceeds the stack available to read it".into()), Call::NextToken));
+        }
         self.stack.push(("readValueUnsafe", 464));
         let v = match t {
             Some(Tok::Str) => Value::string(self.text()?),

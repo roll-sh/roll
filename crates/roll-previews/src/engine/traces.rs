@@ -499,6 +499,9 @@ impl Engine {
             None => None,
             Some((base, main)) => {
                 let Ok(rows) = self.trace_rows(&r.id, 60).await else { return };
+                if self.store.set_runtime_fact(&r.id, "compared_routes", Some(&r.head)).unwrap_or(false) {
+                    self.report(r.clone()).await;
+                }
                 let mut slower: Vec<RouteCompared> = compare_routes(&route_stats(&rows), &main).into_iter().filter(|c| c.slower).collect();
                 slower.sort_by_key(|c| std::cmp::Reverse(c.p50.saturating_sub(c.main_p50.unwrap_or_default())));
                 slower.truncate(crate::SlowerRoutes::MAX);
@@ -528,7 +531,7 @@ impl Engine {
                         })
                         .collect();
                     self.routes_masked.lock().insert(r.id.clone(), names);
-                    Some(crate::SlowerRoutes { branch: base.branch.clone().unwrap_or_else(|| "main".into()), routes })
+                    Some(crate::SlowerRoutes { branch: base.branch.clone().unwrap_or_else(|| "main".into()), routes, head: r.head.clone() })
                 }
             }
         };

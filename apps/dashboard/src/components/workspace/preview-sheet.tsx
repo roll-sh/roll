@@ -176,6 +176,7 @@ export function PreviewSheet({
               </p>
             )}
             <VerdictStrip p={p} onTab={setTab} />
+            <RegressionsAccept p={p} />
             <span data-section="services" />
             <Label>Services</Label>
             {p.services.length ? (
@@ -993,6 +994,37 @@ export function Endpoints({ items, branch }: { items: EndpointTime[]; branch: st
           </li>
         ))}
       </ul>
+    </div>
+  );
+}
+
+/** With the project's regressions rule, a change's regressions against main wait for someone other
+ * than its author to accept them at this head (as its visual review does). */
+function RegressionsAccept({ p }: { p: Preview }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const routes = p.slower_routes?.routes.length ?? 0;
+  const errors = p.new_errors?.total ?? 0;
+  if (!p.regressions || !p.change || routes + errors === 0) return null;
+  if (p.regressions_accepted) return <p className="mb-3 text-[11.5px] text-subtle">Its regressions against main were accepted by {p.regressions_accepted.by} at this push.</p>;
+  const accept = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await previewsApi.acceptRegressions(p.id, p.head);
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="mb-3 flex flex-wrap items-center gap-2 text-[11.5px]">
+      <span className="text-muted">{p.regressions === "required" ? "They keep it from landing until they're fixed or accepted." : "They fail roll/regressions until they're fixed or accepted."}</span>
+      <button type="button" disabled={busy} onClick={() => void accept()} className="h-6 rounded-md border border-line-2 px-2 hover:bg-white/[0.05] disabled:opacity-50">
+        Accept them
+      </button>
+      {error && <span className="text-danger">{error}</span>}
     </div>
   );
 }
