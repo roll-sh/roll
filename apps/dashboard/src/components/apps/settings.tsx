@@ -113,6 +113,16 @@ interface Form {
 
 const str = (v: string | number | undefined | null) => (v == null ? "" : String(v));
 
+/** The form after the service changed under it (a panel beside it saved, or someone else did):
+ *  `next` (the service as it is now) wherever the person hasn't edited `form` since `base`. */
+export function rebase(form: Form, base: Form, next: Form): Form {
+  const out = { ...next };
+  for (const k of Object.keys(form) as (keyof Form)[]) {
+    if (form[k] !== base[k]) (out as Record<keyof Form, unknown>)[k] = form[k];
+  }
+  return out;
+}
+
 export function formOf(s: Service): Form {
   return {
     name: s.name,
@@ -358,12 +368,20 @@ export function SettingsTab({
   onEnvDeleted: () => void;
 }) {
   const [form, setForm] = useState<Form>(() => formOf(service));
+  const base = useRef<Form>(form);
   const [deleting, setDeleting] = useState(false);
-  // A save (or someone else's) brings the form back to what rolld has; polls that change nothing don't.
+  // A save (or someone else's, or a panel's beside it) brings what wasn't edited to what rolld
+  // has, and keeps what was; polls that change nothing don't.
   const saved = JSON.stringify([service.name, service.source, service.build, service.run]);
-  useEffect(() => setForm(formOf(service)), [saved]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    const next = formOf(service);
+    setForm((f) => rebase(f, base.current, next));
+    base.current = next;
+  }, [saved]); // eslint-disable-line react-hooks/exhaustive-deps
   const patch = useMemo(() => patchOf(service, form), [service, form]);
   const dirty = Object.keys(patch).length > 0;
+  // A push rule needs all of it before it's saved.
+  const pushIncomplete = !!form.pushStream && (!form.pushTopic.trim() || !form.pushGroup.trim() || !form.pushPath.trim().startsWith("/"));
   const set = <K extends keyof Form>(k: K, v: Form[K]) => setForm((f) => ({ ...f, [k]: NUMERIC.includes(k) && typeof v === "string" ? v.replace(/[^\d.]/g, "") : v }));
   const t = (k: keyof Form, placeholder?: string, mono = true) => (
     <input value={form[k] as string} onChange={(e) => set(k, e.target.value)} placeholder={placeholder} className={`${input} w-full ${mono ? "font-mono text-[12px]" : ""}`} spellCheck={false} />
@@ -850,14 +868,14 @@ export function SettingsTab({
         )}
 
         <div className={`sticky bottom-4 z-10 flex items-center justify-end gap-2 transition-opacity duration-150 ${dirty ? "opacity-100" : "pointer-events-none opacity-0"}`}>
-          <span className="mr-auto text-[12px] text-muted">Changes apply with the next deploy.</span>
+          <span className="mr-auto text-[12px] text-muted">{pushIncomplete ? <span className="text-danger">A pushed stream needs its topic, group and a path starting with /.</span> : "Changes apply with the next deploy."}</span>
           <button className={btn} onClick={() => setForm(formOf(service))}>
             Discard
           </button>
           {env?.active && (
             <button
               className={btn}
-              disabled={!dirty || !SERVICE_NAME.test(form.name) || rolloutSteps(form.rolloutSteps) === null || runner.busy !== null}
+              disabled={!dirty || !SERVICE_NAME.test(form.name) || rolloutSteps(form.rolloutSteps) === null || pushIncomplete || runner.busy !== null}
               onClick={() =>
                 runner.run("settings", async () => {
                   await appsApi.update(service.id, patch);
@@ -871,7 +889,7 @@ export function SettingsTab({
           )}
           <button
             className={primary}
-            disabled={!dirty || !SERVICE_NAME.test(form.name) || rolloutSteps(form.rolloutSteps) === null || runner.busy !== null}
+            disabled={!dirty || !SERVICE_NAME.test(form.name) || rolloutSteps(form.rolloutSteps) === null || pushIncomplete || runner.busy !== null}
             onClick={() => runner.run("settings", () => appsApi.update(service.id, patch))}
           >
             {runner.busy === "settings" ? <span className="shimmer">Saving…</span> : "Save"}

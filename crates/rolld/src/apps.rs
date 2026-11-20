@@ -886,6 +886,55 @@ mod tests {
     use super::*;
     use axum::routing::{delete, get, post};
 
+    /// `run.push` against the real broker's HTTP API: a group's records come back as they were
+    /// sent (key, value and headers, through base64), a commit moves the group so a fresh consumer
+    /// (the last one left) starts after it, the lag counts what isn't committed, and a dead letter
+    /// lands in its topic with its headers.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn push_reads_commits_and_dead_letters_through_the_broker() {
+        use apps_control::integrations::{Resources, StreamRecord};
+        let dir = tempfile::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let mut config = stream_broker::Config::local(dir.path().to_path_buf());
+        config.http_url = base.clone();
+        let broker = stream_broker::Broker::new(config).await.unwrap();
+        let (stream, _, _) = broker.create_stream("events", Default::default()).unwrap();
+        broker.create_topic(&stream, "orders", 2, 1, Default::default(), false).unwrap();
+        broker.create_topic(&stream, "dead", 1, 1, Default::default(), false).unwrap();
+        let sid = stream.id.clone();
+        tokio::spawn(broker.clone().run());
+        let router = stream_broker::http::router(broker.clone());
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let http = reqwest::Client::new();
+        let sent = serde_json::json!({ "records": [
+            { "partition": 0, "key": "k1", "value": { "id": 1 }, "headers": { "content-type": "application/json" } },
+            { "partition": 1, "value": "two" },
+        ] });
+        let st = http.post(format!("{base}/v1/streams/{sid}/topics/orders/records")).json(&sent).send().await.unwrap().status();
+        assert!(st.is_success(), "{st}");
+        let r = RollResources { postgres: None, redis: None, api: (base.clone(), None, http.clone()), products: crate::secrets::Api::default() };
+        let got = r.read_group(&sid, "orders", "web", "c1", 1000, 10).await.unwrap();
+        assert_eq!(got.len(), 2, "{got:?}");
+        let first = got.iter().find(|x| x.partition == 0).unwrap();
+        assert_eq!((first.key.as_deref(), first.value.as_deref()), (Some(&b"k1"[..]), Some(&br#"{"id":1}"#[..])));
+        assert!(first.headers.iter().any(|(k, v)| k == "content-type" && v == b"application/json"), "{first:?}");
+        // Lag counts the partitions the group has committed on (Kafka's rule): none yet.
+        assert_eq!(r.backlog(&sid, "web").await.unwrap(), 0, "nothing committed yet");
+        r.commit(&sid, "orders", "web", "c1", 0, first.offset + 1).await.unwrap();
+        r.leave(&sid, "web", "c1").await.unwrap();
+        let again = r.read_group(&sid, "orders", "web", "c2", 1000, 10).await.unwrap();
+        assert_eq!(again.iter().map(|x| x.partition).collect::<Vec<_>>(), [1], "a fresh consumer starts after the commit: {again:?}");
+        let more = serde_json::json!({ "records": [{ "partition": 0, "value": "three" }] });
+        http.post(format!("{base}/v1/streams/{sid}/topics/orders/records")).json(&more).send().await.unwrap();
+        assert_eq!(r.backlog(&sid, "web").await.unwrap(), 1, "one past partition 0's commit");
+        let dead = StreamRecord { value: Some(b"x".to_vec()), headers: vec![("x-roll-error".into(), b"/events answered 500 after 5 tries".to_vec())], ..Default::default() };
+        r.produce(&sid, "dead", &dead).await.unwrap();
+        let landed = r.read_group(&sid, "dead", "check", "c3", 1000, 10).await.unwrap();
+        assert_eq!(landed.len(), 1, "{landed:?}");
+        assert_eq!((landed[0].value.as_deref(), landed[0].headers.iter().find(|(k, _)| k == "x-roll-error").map(|(_, v)| v.as_slice())), (Some(&b"x"[..]), Some(&b"/events answered 500 after 5 tries"[..])));
+    }
+
     /// A bucket's link gets a key of its own, named for the service and for that bucket only,
     /// with the storage's endpoint and region read as they are; unlinking revokes the key.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
