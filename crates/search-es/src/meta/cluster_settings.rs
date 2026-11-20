@@ -126,6 +126,17 @@ fn validate_update_inner(d: Dialect, scope: &str, update: &Settings) -> Result<(
                         return Err(EsError::illegal_argument(format!("Unknown level constant [{}].", s.to_ascii_uppercase())));
                     }
                 }
+                // OpenSearch's remotes are transport addresses (`RemoteConnectionStrategy.parsePort`).
+                Some(Affix::Str | Affix::List) if d == Dialect::OpenSearch && k.starts_with("cluster.remote.") && (k.ends_with(".seeds") || k.ends_with(".proxy_address")) => {
+                    let hosts = match v {
+                        SettingValue::List(l) => l.clone(),
+                        SettingValue::Str(s) => s.split(',').map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect(),
+                        SettingValue::Null => Vec::new(),
+                    };
+                    if let Some(h) = hosts.iter().find(|h| !h.contains(':')) {
+                        return Err(EsError::illegal_argument(format!("remote hosts need to be configured as [host:port], found [{h}] instead")));
+                    }
+                }
                 Some(Affix::Str | Affix::List) => {}
                 None => return Err(EsError::illegal_argument(format!("{scope} setting [{k}], not recognized"))),
             },

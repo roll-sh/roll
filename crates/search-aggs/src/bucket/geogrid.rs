@@ -29,7 +29,7 @@ use crate::values::{BoundVs, DocCounter, GeoReader, VsOpts, VsSpec, VsType, bind
 use crate::xparser::{Field, Token, Tokens, XParser};
 
 /// Which grid.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum GridKind {
     GeoHash,
     GeoTile,
@@ -197,7 +197,7 @@ pub fn parse(p: &mut XParser<'_>, kind: GridKind, name: &str) -> Result<GridSpec
 }
 
 /// A grid bucket.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct GridBucket {
     pub cell: i64,
     pub doc_count: u64,
@@ -205,7 +205,7 @@ pub struct GridBucket {
 }
 
 /// `InternalGeoHashGrid` / `InternalGeoTileGrid`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct GeoGrid {
     pub kind: GridKind,
     pub size: usize,

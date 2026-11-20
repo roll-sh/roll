@@ -63,7 +63,7 @@ pub fn filter(ctx: &crate::rest::Ctx, req: &SearchRequest, targets: Vec<Target>)
         for (i, t) in targets.iter().enumerate() {
             let Ok(searcher) = t.searcher() else { continue };
             let table = t.table();
-            let mut qctx = QueryCtx::new(ctx.cluster, &st, &t.idx, &table, &searcher, req.now_ms);
+            let mut qctx = QueryCtx::new(ctx.cluster, &st, &t.idx, &table, &searcher, req.now_ms, t.reader());
             qctx.runtime_mappings = req.source.runtime_mappings.clone();
             if let Err(e) = crate::search::sort::build(&qctx, &req.source.sort[..1]) {
                 failures.push((i, e));
@@ -81,7 +81,7 @@ pub fn filter(ctx: &crate::rest::Ctx, req: &SearchRequest, targets: Vec<Target>)
             continue;
         };
         let table = t.table();
-        let mut qctx = QueryCtx::new(ctx.cluster, &st, &t.idx, &table, &searcher, req.now_ms);
+        let mut qctx = QueryCtx::new(ctx.cluster, &st, &t.idx, &table, &searcher, req.now_ms, t.reader());
         qctx.runtime_mappings = req.source.runtime_mappings.clone();
         let alias_none = t.alias_filter.as_ref().is_some_and(|f| matches!(rewrite(&qctx, f, es), Rewritten::None));
         keep.push(!alias_none && !matches!(rewrite(&qctx, q, es), Rewritten::None));
@@ -122,6 +122,7 @@ pub fn all_skipped(shards: usize) -> crate::search::SearchOutcome {
         ranked: Vec::new(),
         clusters: None,
         reduce_phases: None,
+        partial_aggs: None,
     }
 }
 
@@ -291,6 +292,7 @@ mod tests {
         let source = crate::search_source::SearchSource::parse(&v, None).unwrap();
         SearchRequest {
             slowlog: Default::default(),
+            partial_aggs: false,
             indices: Vec::new(),
             opts: crate::meta::resolve::IndicesOptions::STRICT_EXPAND_OPEN_FORBID_CLOSED,
             source,

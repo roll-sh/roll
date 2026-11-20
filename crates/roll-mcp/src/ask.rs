@@ -18,9 +18,24 @@ pub fn source(product: &str, param: &str) -> Option<Source> {
         // A Postgres project is Postgres's own, not a workspace project.
         ("postgres", "project") => Some(Source { tool: "postgres_list_projects", args: |_| json!({}), fields: &["id"] }),
         // A workspace project: the workspace's own tools name it `id`, the others `project`.
-        ("workspace", "id") | ("workspace" | "secrets" | "previews" | "apps", "project") => Some(workspace_projects()),
+        ("workspace", "id") | ("workspace" | "secrets" | "previews" | "apps" | "access", "project") => Some(workspace_projects()),
+        ("access", "id") => Some(Source { tool: "access_list_tokens", args: |_| json!({}), fields: &["id"] }),
         ("apps", "service") => Some(Source { tool: "apps_list_services", args: |_| json!({}), fields: &["id"] }),
         ("apps", "env") => Some(Source { tool: "apps_list_environments", args: |a| json!({ "service": a["service"] }), fields: &["name"] }),
+        // A secrets environment by its slug (`development`), as its tools take it; `name` is for people.
+        ("secrets", "env") => Some(Source { tool: "secrets_list_environments", args: |a| json!({ "project": a["project"] }), fields: &["slug"] }),
+        ("postgres", "branch") => Some(Source { tool: "postgres_get_project", args: |a| json!({ "project": a["project"] }), fields: &["id"] }),
+        ("previews", "id") => Some(Source { tool: "previews_list", args: |_| json!({}), fields: &["id"] }),
+        // The rest are named by their names, as their tools take them.
+        ("storage", "bucket") => Some(Source { tool: "storage_list_buckets", args: |_| json!({}), fields: &["name"] }),
+        ("streams", "stream") => Some(Source { tool: "streams_list", args: |_| json!({}), fields: &["name"] }),
+        ("streams", "topic") => Some(Source { tool: "streams_list_topics", args: |a| json!({ "stream": a["stream"] }), fields: &["name"] }),
+        ("nosql", "database") => Some(Source { tool: "nosql_list_databases", args: |_| json!({}), fields: &["name"] }),
+        ("redis", "database") => Some(Source { tool: "redis_list_databases", args: |_| json!({}), fields: &["name"] }),
+        ("search", "cluster") => Some(Source { tool: "search_list_clusters", args: |_| json!({}), fields: &["name"] }),
+        ("search", "index") => Some(Source { tool: "search_list_indices", args: |a| json!({ "cluster": a["cluster"] }), fields: &["index", "name"] }),
+        ("queues", "vhost") => Some(Source { tool: "queues_list_vhosts", args: |_| json!({}), fields: &["name"] }),
+        ("queues", "queue") => Some(Source { tool: "queues_list_queues", args: |a| json!({ "vhost": a["vhost"] }), fields: &["name"] }),
         _ => None,
     }
 }
