@@ -837,6 +837,9 @@ impl Store {
         db.add_column("deployments", "build_key", "TEXT")?;
         // A failed deployment's explanation from a model (`explain::Explanation` as JSON).
         db.add_column("deployments", "explanation", "TEXT")?;
+        // Runtime config's token before its last rotation (sealed), and when that was.
+        db.add_column("runtime_config", "previous", "TEXT")?;
+        db.add_column("runtime_config", "rotated_at", "INTEGER")?;
         // A deleted service is kept this long (`DELETED_KEPT_MS`), stopped, until it's restored
         // or the prune sweep deletes it for good.
         db.add_column("services", "deleted_at", "INTEGER")?;
@@ -2466,6 +2469,39 @@ impl Store {
     pub fn runtime_config_token(&self, service: &str, env: &str) -> Result<Option<String>> {
         let sealed: Option<String> = self.db.query_row("SELECT sealed FROM runtime_config WHERE service = ? AND env = ?", params![service, env], |r| r.get(0)).optional()?;
         sealed.map(|s| self.sealer.open(&format!("config:{service}:{env}"), &s)).transpose()
+    }
+
+    /// A new read token for its runtime config (a leaked `ROLL_CONFIG_URL`); the one before is
+    /// kept for [`Store::runtime_config_tokens`]. When it was (none: it has no config).
+    pub fn rotate_runtime_config(&self, service: &str, env: &str) -> Result<Option<i64>> {
+        let now = self.now()?;
+        let sealed = self.sealer.seal(&format!("config:{service}:{env}"), &format!("rlc_{}", random(32)));
+        let n = self.db.execute("UPDATE runtime_config SET previous = sealed, sealed = ?, rotated_at = ? WHERE service = ? AND env = ?", params![sealed, now, service, env])?;
+        Ok((n > 0).then_some(now))
+    }
+
+    /// When its runtime config's token was last rotated.
+    pub fn runtime_config_rotated(&self, service: &str, env: &str) -> Result<Option<i64>> {
+        Ok(self.db.query_row("SELECT rotated_at FROM runtime_config WHERE service = ? AND env = ?", params![service, env], |r| r.get::<_, Option<i64>>(0)).optional()?.flatten())
+    }
+
+    /// The tokens that read its runtime config: the current one, and the one before the last
+    /// rotation while instances started with it may run: while the environment's live
+    /// deployment of the service, or of its site's functions service, was made before the
+    /// rotation (a deploy after it gives them the new address).
+    pub fn runtime_config_tokens(&self, service: &str, env: &str) -> Result<Option<(String, Option<String>)>> {
+        let row: Option<(String, Option<String>, Option<i64>)> = self.db.query_row("SELECT sealed, previous, rotated_at FROM runtime_config WHERE service = ? AND env = ?", params![service, env], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
+        let Some((sealed, previous, rotated)) = row else { return Ok(None) };
+        let open = |s: &str| self.sealer.open(&format!("config:{service}:{env}"), s);
+        let current = open(&sealed)?;
+        let (Some(previous), Some(at)) = (previous, rotated) else { return Ok(Some((current, None))) };
+        let svc = self.service(service)?;
+        let fn_name: String = format!("{}-fn", svc.name).chars().take(40).collect();
+        let functions = self.services(Some(&svc.project))?.into_iter().find(|s| s.name == fn_name && s.build.builder == crate::model::Builder::Functions).map(|s| s.id);
+        let live_before = [Some(service.to_string()), functions].into_iter().flatten().any(|id| {
+            self.environment(&id, env).ok().and_then(|e| e.active).and_then(|a| self.deployment(&a).ok()).is_some_and(|d| d.created_at < at)
+        });
+        Ok(Some((current, live_before.then(|| open(&previous)).transpose()?)))
     }
 
     // ── roll's GitHub App on a Git URL service ──

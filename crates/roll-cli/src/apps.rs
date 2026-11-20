@@ -1201,6 +1201,10 @@ pub enum AppsCmd {
         /// Lift its deploy freeze.
         #[arg(long)]
         unfreeze: bool,
+        /// A new `ROLL_CONFIG_URL` token (a leaked address): the old one reads until a deploy
+        /// made after it is live.
+        #[arg(long)]
+        rotate_config: bool,
         /// Any setting the environment takes, as JSON (docs/apps/http-api.md): `--set
         /// 'mirror={"environment":"staging","percent":5}'`, `--set
         /// 'pause_schedule={"windows":[{"from":"fri 19:00","to":"mon 07:00"}]}'`, `--set
@@ -4252,8 +4256,17 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Env { target, all_services, branch, no_branch, variables_from, wait_for_ci, run, follow_tag, redeploy_on_secrets, vitals, egress, egress_host, private, open, signed_in, maintenance, serve, pause, resume, resume_deploys, hold, allow_ip, allow_any, rate_limit, no_rate_limit, firewall, no_firewall, header, no_headers, route, no_routes, error_page, maintenance_page, roll_pages, freeze, unfreeze, set } => {
+        AppsCmd::Env { target, all_services, branch, no_branch, variables_from, wait_for_ci, run, follow_tag, redeploy_on_secrets, vitals, egress, egress_host, private, open, signed_in, maintenance, serve, pause, resume, resume_deploys, hold, allow_ip, allow_any, rate_limit, no_rate_limit, firewall, no_firewall, header, no_headers, route, no_routes, error_page, maintenance_page, roll_pages, freeze, unfreeze, rotate_config, set } => {
             let svc = service(api, &target).await?;
+            if rotate_config {
+                let e = api.post(&format!("{}/config/rotate", env_path(&svc, &target.env)), json!({})).await?;
+                if json_out {
+                    println!("{}", serde_json::to_string_pretty(&e)?);
+                } else {
+                    println!("{}: a new ROLL_CONFIG_URL; the old one reads until a deploy made now is live (`roll apps redeploy`)", target.env);
+                }
+                return Ok(());
+            }
             // Only what was asked changes: no `--branch` keeps the one it has.
             let mut body = serde_json::Map::new();
             if let Some(reason) = freeze {

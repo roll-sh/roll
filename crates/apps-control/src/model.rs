@@ -1664,6 +1664,10 @@ pub struct Environment {
     pub config: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub config_version: Option<i64>,
+    /// When its token was last rotated (`…/config/rotate`): the address before it reads until a
+    /// deploy made after it is live.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config_rotated_at: Option<i64>,
     /// Its deploy freeze, and whether it's on now ([`crate::freeze`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub freeze: Option<crate::freeze::Freeze>,

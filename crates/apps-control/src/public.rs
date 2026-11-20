@@ -95,7 +95,8 @@ async fn runtime_config(apps: Arc<Apps>, req: Request) -> Response {
     }
     // A deleted service's (kept for a restore) answers nothing, whatever its token.
     let (sid, e, t) = (id.clone(), env.clone(), token.clone());
-    if !apps.db(move |s| Ok(s.service(&sid).is_ok() && s.runtime_config_token(&sid, &e)?.is_some_and(|k| same(&k, &t)))).await.unwrap_or(false) {
+    let reads = move |s: &crate::store::Store| Ok(s.service(&sid).is_ok() && s.runtime_config_tokens(&sid, &e)?.is_some_and(|(now, before)| same(&now, &t) || before.is_some_and(|b| same(&b, &t))));
+    if !apps.db(reads).await.unwrap_or(false) {
         return (StatusCode::NOT_FOUND, "").into_response();
     }
     let has = req.headers().get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()).map(|v| v.trim_start_matches("W/").trim_matches('"').to_string());

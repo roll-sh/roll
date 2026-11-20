@@ -1567,6 +1567,8 @@ impl Apps {
         let waiting_for_ci = self.db(move |s| s.ci_waits()).await?.into_iter().find(|(w, _)| w.service == sid && w.env == e).map(|(w, _)| w.sha);
         let (sid, e) = (r.service.clone(), r.name.clone());
         let config = self.db(move |s| s.runtime_config(&sid, &e)).await?;
+        let (sid, e) = (r.service.clone(), r.name.clone());
+        let rotated = self.db(move |s| s.runtime_config_rotated(&sid, &e)).await?;
         Ok(Environment {
             summary,
             service: r.service.clone(),
@@ -1619,6 +1621,7 @@ impl Apps {
             mirror: r.mirror.clone(),
             snippets: r.snippets.clone(),
             config_version: config.as_ref().map(|(_, v)| *v),
+            config_rotated_at: rotated,
             config: config.map(|(c, _)| c).filter(|c| !c.is_null()),
             pause_schedule: r.pause_schedule.clone(),
             frozen: r.freeze.as_ref().is_some_and(|f| f.on(code_sql::now_ms())),
