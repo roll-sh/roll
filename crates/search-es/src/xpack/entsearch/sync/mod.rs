@@ -62,8 +62,8 @@ pub const DOC_BYTES_MAX: usize = 10 << 20;
 #[derive(Default)]
 pub struct Syncs {
     running: parking_lot::Mutex<HashSet<String>>,
-    /// The cluster's key and owner in the node's [`slots`] (set by its first [`run_due`]).
-    identity: std::sync::OnceLock<(String, String)>,
+    /// The cluster's key, owner and slot pool ([`slots`]), set by its first [`run_due`].
+    identity: std::sync::OnceLock<(String, String, Arc<slots::Slots>)>,
 }
 
 impl Syncs {
@@ -172,7 +172,7 @@ pub fn next_due(st: &crate::meta::ClusterState, syncs: Option<&Syncs>) -> Option
             "pending" if runnable.contains(cid) && !busy.contains(cid) && syncs.is_none_or(|s| !s.is_running(cid)) => match syncs {
                 Some(s) if !s.has_room() => {}
                 // Not this cluster's turn for a node slot: a slot freeing wakes it.
-                Some(s) if s.identity.get().is_some_and(|(k, o)| !slots::node().admits(k, o)) => at(crate::time::now_millis() + SLOT_RETRY_MS),
+                Some(s) if s.identity.get().is_some_and(|(k, o, pool)| !pool.admits(k, o)) => at(crate::time::now_millis() + SLOT_RETRY_MS),
                 _ => at(0),
             },
             // A job left by a node that went away; one running here checks in by itself (a long
@@ -277,28 +277,14 @@ pub async fn run_due(cluster: &Cluster, now: i64) {
             Ok(())
         })
         .await;
-    // Pending jobs, oldest first, of connectors with nothing running.
-    let st = cluster.state();
-    let busy = busy_connectors(&st);
-    let mut pending: Vec<(String, String, String)> = st
-        .metadata
-        .xpack
-        .iter(SYNC_JOBS)
-        .filter(|(_, j)| str_of(j, "status") == "pending")
-        .filter_map(|(id, j)| {
-            let cid = connector_of(j);
-            let c = st.metadata.xpack.get(CONNECTORS, cid)?;
-            (config::runs(c) && !busy.contains(cid)).then(|| (str_of(j, "created_at").to_string(), id.clone(), cid.to_string()))
-        })
-        .collect();
-    pending.sort();
-    drop(st);
+    let pending = pending_jobs(&cluster.state(), syncs);
     // A slot of the node's, in turn with every other cluster ([`slots`]).
     let key = cluster.name.clone();
     let owner = cluster.config.owner.clone().unwrap_or_else(|| format!("cluster {key}"));
-    let _ = syncs.identity.set((key.clone(), owner.clone()));
+    let pool = cluster.config.connector_slots.clone().unwrap_or_else(|| slots::node().clone());
+    let _ = syncs.identity.set((key.clone(), owner.clone(), pool.clone()));
     if pending.is_empty() {
-        slots::node().leave(&key);
+        pool.leave(&key);
     }
     let weak = Arc::downgrade(&handle);
     for (_, job, cid) in pending {
@@ -306,13 +292,14 @@ pub async fn run_due(cluster: &Cluster, now: i64) {
             break;
         }
         let (alive, woken) = (weak.clone(), weak.clone());
-        let alive: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(move || alive.strong_count() > 0);
+        // A waiter counts only while its cluster is loaded and still has a job to start.
+        let alive: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(move || alive.upgrade().is_some_and(|c| !pending_jobs(&c.state(), &c.xpack.connector_syncs).is_empty()));
         let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
             if let Some(c) = woken.upgrade() {
                 c.jobs.kick(&c);
             }
         });
-        let Some(permit) = slots::node().take(&key, &owner, alive, wake) else { break };
+        let Some(permit) = pool.take(&key, &owner, alive, wake) else { break };
         if !syncs.begin(&cid) {
             continue;
         }
@@ -354,6 +341,25 @@ async fn supervise(cluster: Arc<Cluster>, job: String, cid: String, permit: Opti
     drop(permit);
     drop(slot);
     cluster.jobs.kick(&cluster);
+}
+
+/// The pending jobs a cluster could start now, oldest first (`created_at`, job, connector): of
+/// connectors roll runs, with nothing in progress or starting.
+fn pending_jobs(st: &crate::meta::ClusterState, syncs: &Syncs) -> Vec<(String, String, String)> {
+    let busy = busy_connectors(st);
+    let mut pending: Vec<(String, String, String)> = st
+        .metadata
+        .xpack
+        .iter(SYNC_JOBS)
+        .filter(|(_, j)| str_of(j, "status") == "pending")
+        .filter_map(|(id, j)| {
+            let cid = connector_of(j);
+            let c = st.metadata.xpack.get(CONNECTORS, cid)?;
+            (config::runs(c) && !busy.contains(cid) && !syncs.is_running(cid)).then(|| (str_of(j, "created_at").to_string(), id.clone(), cid.to_string()))
+        })
+        .collect();
+    pending.sort();
+    pending
 }
 
 /// How a sync ended.

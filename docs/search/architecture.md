@@ -500,8 +500,11 @@ both with Elasticsearch 9.5.5's shapes, validation and state machines
   back to sleep. At most two run at once per cluster, four per node, and two per owner on a node
   (the person a cluster belongs to; `sync/slots.rs`). A cluster that can't get one of the
   node's slots waits in a FIFO queue: a slot that frees wakes the first waiter whose owner is
-  under its cap, and nobody behind it (the cluster that freed it included) takes the slot first;
-  a waiter with nothing pending leaves the queue. While every slot of its own is taken a
+  under its cap, and nobody behind it (the cluster that freed it included) takes the slot first.
+  A waiter counts only while its cluster is loaded and still has a job it could start (checked
+  whenever the queue is looked at, so a canceled job or a removed connector never holds it
+  up), a woken waiter that doesn't take its slot within 30 seconds loses its place, and a
+  successful take wakes the next waiter, so slots that free together all find a taker. While every slot of its own is taken a
   pending job isn't due (a slot freeing wakes the scheduler), and a sync running here isn't
   due again for its stale time (a long statement can outlast it). While
   one runs the cluster is pinned loaded (`Syncs::busy`), and every write it makes goes through
@@ -537,7 +540,8 @@ both with Elasticsearch 9.5.5's shapes, validation and state machines
     framing) fails the sync, so a server ignoring the cut can't grow memory. Every message's
     header is read on the plaintext side (after TLS) before the client library sees it, and a
     length over 64 MiB fails the connection: the library reserves a message's whole length
-    from its header.
+    from its header. `ParameterStatus` messages, which the library keeps for the connection's
+    life, are capped at 256 and 64 KiB per connection.
   - A bucket is listed a page at a time (4 MiB of listing at most) and a page is indexed once
     its objects' text passes 20 MiB; an object over 10 MiB is indexed without its text
     (Elastic's default extraction limit).
@@ -573,7 +577,9 @@ both with Elasticsearch 9.5.5's shapes, validation and state machines
   listed a page at a time; each becomes a document with `_id` the MD5 of `{bucket}/{key}`,
   `filename`, `bucket`, `size_in_bytes`, `_timestamp` (its `LastModified`) and `body`: the text
   of plain text, Markdown, CSV and logs, the string values of JSON, and the visible text of HTML
-  (scripts and styles dropped, entities decoded). roll has no `attachment` processor yet, so
+  (scripts and styles dropped, entities decoded). An object whose key has a `.` or `..` segment
+  can't be fetched by its signed path: it is indexed without its text and counted in the job's
+  `metadata.unreadable_object_count`. roll has no `attachment` processor yet, so
   other formats (PDF, Office) are indexed by their metadata only. Advanced sync rules follow
   Elastic's (`[{"bucket", "prefix", "extension"}]`, naming only buckets of `buckets`). Incremental syncs
   fetch only objects modified at or after the last sync's newest `LastModified`: listings give
@@ -601,10 +607,12 @@ both with Elasticsearch 9.5.5's shapes, validation and state machines
     value copied into another connector or field doesn't open. It isn't bound to the cluster:
     a branch and a snapshot restore carry the connector to a cluster with another uuid, and
     its syncs must keep working there.
-  - When roll starts running a connector (created native, made native, or given a service roll
-    runs) every sensitive value it holds is sealed as given, even one that looks sealed: a value
-    sealed elsewhere is only ever text to it, and a password written while the connector was
-    self-managed doesn't stay in the clear.
+  - When roll stops running a connector (made self-managed, given a service roll doesn't run,
+    deleted) the values it sealed are cleared. When roll starts running one (created native, made
+    native, or given a service roll runs) every sensitive value it holds is sealed as given, and
+    a sealed box is cleared instead: roll cleared its own, so a sealed box then was written by a
+    client. A value written back keeps the stored one only when the stored entry was sensitive
+    too, so a value stored in the clear under a non-sensitive entry is never taken for it.
   - Changing where a credential goes (Postgres `host`, `port`, `username`, `database`,
     `ssl_enabled`, `ssl_ca`; S3 `endpoint`, `region`, `aws_access_key_id`, `buckets`), filling
     in an empty one included, without giving it again in the same write clears it and puts the

@@ -118,6 +118,9 @@ pub struct ClusterConfig {
     /// Who the cluster belongs to, when the host knows: what node-wide fairness counts by
     /// (connector syncs: [`crate::xpack::entsearch::sync`]). `None`: the cluster counts alone.
     pub owner: Option<String>,
+    /// The pool of connector sync slots this cluster takes from (`None`: the process's, shared by
+    /// every cluster on the node; tests give clusters a pool of their own).
+    pub connector_slots: Option<std::sync::Arc<crate::xpack::entsearch::sync::slots::Slots>>,
     /// Read service account tokens from `<path.conf>/service_tokens` too, as Elasticsearch
     /// does. The file is the node's, so a token in it would sign in to every cluster the node
     /// serves: the host sets this only for a node serving one cluster, or for the clusters its
@@ -143,6 +146,7 @@ impl ClusterConfig {
             links: None,
             catalog_id: None,
             owner: None,
+            connector_slots: None,
             file_service_tokens: false,
             audit: None,
         }

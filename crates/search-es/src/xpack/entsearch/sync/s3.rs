@@ -53,6 +53,13 @@ fn changed_since(last_modified: &str, cursor: &str) -> bool {
     last_modified >= cursor
 }
 
+/// Whether an object's content can be fetched by its key: a `.` or `..` path segment is
+/// normalised away by URL parsing while the request's signature covers the key as it is, so
+/// such an object can't be read (it's indexed without its text instead of failing the sync).
+fn fetchable(key: &str) -> bool {
+    !key.split('/').any(|seg| seg == "." || seg == "..")
+}
+
 /// Elastic's id of an object: the MD5 of `bucket/key`, in hex.
 fn doc_id(bucket: &str, key: &str) -> String {
     md5::Md5::digest(format!("{bucket}/{key}").as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
@@ -91,7 +98,11 @@ async fn read_bucket(client: &Client, sink: &mut Sink<'_>, t: &S3Rule, since: Op
             doc.insert("bucket".into(), t.bucket.clone().into());
             doc.insert("filename".into(), o.key.clone().into());
             doc.insert("size_in_bytes".into(), (o.size as i64).into());
-            if let Some(kind) = extract::kind_of(&o.key).filter(|_| o.size as usize <= DOC_BYTES_MAX) {
+            if !fetchable(&o.key) {
+                // Its text can't be read (see [`fetchable`]): indexed by its metadata, and counted.
+                let n = sink.counters.metadata.get("unreadable_object_count").and_then(Value::as_i64).unwrap_or(0);
+                sink.counters.metadata.insert("unreadable_object_count".into(), (n + 1).into());
+            } else if let Some(kind) = extract::kind_of(&o.key).filter(|_| o.size as usize <= DOC_BYTES_MAX) {
                 let got = tokio::select! {
                     r = client.get(&o.key, DOC_BYTES_MAX) => r,
                     s = sink.stopped() => return Err(s),
@@ -124,6 +135,12 @@ async fn read_bucket(client: &Client, sink: &mut Sink<'_>, t: &S3Rule, since: Op
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn dot_segments_are_indexed_without_their_text() {
+        assert!(super::fetchable("docs/a.txt") && super::fetchable("..hidden/x") && super::fetchable("a/.b"));
+        assert!(!super::fetchable("a/../b.txt") && !super::fetchable("./b.txt") && !super::fetchable("a/.."));
+    }
+
     #[test]
     fn incremental_syncs_reread_the_cursors_second() {
         assert!(super::changed_since("2026-11-18T10:00:00.000Z", "2026-11-18T10:00:00.000Z"));

@@ -110,6 +110,9 @@ fn db_error(e: tokio_postgres::Error) -> String {
 struct Window {
     read: Arc<AtomicU64>,
     limit: Arc<AtomicU64>,
+    /// Why the connection's task ended, when it failed (a refused frame, an I/O error): a query
+    /// only sees the connection close.
+    failure: Arc<parking_lot::Mutex<Option<String>>>,
 }
 
 impl Window {
@@ -166,7 +169,16 @@ struct Frames {
     have: usize,
     /// Body bytes of the current message still to come.
     remaining: u64,
+    /// `ParameterStatus` messages (`S`) so far, and their bytes: the client library keeps every
+    /// one for the connection's life, so a server could grow it without end.
+    params: u64,
+    param_bytes: u64,
 }
+
+/// The most `ParameterStatus` messages, and bytes of them, one connection takes (a server sends
+/// about fifteen at startup and one per `SET` of a reported setting).
+const PARAMS_MAX: u64 = 256;
+const PARAM_BYTES_MAX: u64 = 64 << 10;
 
 impl Frames {
     fn feed(&mut self, mut bytes: &[u8]) -> std::io::Result<()> {
@@ -188,6 +200,13 @@ impl Frames {
                     return Err(std::io::Error::other(format!("the server sent a message of {len} bytes: over what one page may hold")));
                 }
                 self.remaining = len - 4;
+                if self.header[0] == b'S' {
+                    self.params += 1;
+                    self.param_bytes += len;
+                    if self.params > PARAMS_MAX || self.param_bytes > PARAM_BYTES_MAX {
+                        return Err(std::io::Error::other("the server sent more parameter statuses than a connection keeps"));
+                    }
+                }
             }
         }
         Ok(())
@@ -291,9 +310,15 @@ async fn connect(v: &Values, allow_private: bool) -> Result<Conn, String> {
     let window = Window::default();
     window.open(CATALOG_WINDOW);
     let stream = Counted { inner: tcp, window: window.clone() };
-    let spawn = |conn: ConnTask| tokio::spawn(async move {
-        let _ = conn.await;
-    });
+    let failure = window.failure.clone();
+    let spawn = move |conn: ConnTask| {
+        let failure = failure.clone();
+        tokio::spawn(async move {
+            if let Err(e) = conn.await {
+                *failure.lock() = Some(db_error(e));
+            }
+        })
+    };
     let handshake = async {
         let connected = if v.bool("ssl_enabled", true) {
             cfg.ssl_mode(SslMode::Require);
@@ -310,11 +335,24 @@ async fn connect(v: &Values, allow_private: bool) -> Result<Conn, String> {
     Ok(Conn { client, window, task })
 }
 
-/// `fut`, a statement, bounded by [`QUERY_TIMEOUT`] and stopped by the job's cancel.
-async fn wait<T>(sink: &Sink<'_>, what: &str, fut: impl std::future::Future<Output = Result<T, tokio_postgres::Error>>) -> Result<T, Stop> {
+/// `fut`, a statement, bounded by [`QUERY_TIMEOUT`] and stopped by the job's cancel. A statement
+/// that failed because the connection closed says why the connection failed.
+async fn wait<T>(sink: &Sink<'_>, window: &Window, what: &str, fut: impl std::future::Future<Output = Result<T, tokio_postgres::Error>>) -> Result<T, Stop> {
     tokio::select! {
         r = tokio::time::timeout(QUERY_TIMEOUT, fut) => match r {
-            Ok(r) => r.map_err(|e| Stop::Failed(format!("{what} failed: {}", db_error(e)))),
+            Ok(Ok(v)) => Ok(v),
+            Ok(Err(e)) => {
+                let closed = e.is_closed();
+                let mut message = db_error(e);
+                if closed {
+                    // The connection's task records its error as it ends, just after this.
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    if let Some(cause) = window.failure.lock().clone() {
+                        message = format!("{message}: {cause}");
+                    }
+                }
+                Err(Stop::Failed(format!("{what} failed: {message}")))
+            }
             Err(_) => Err(Stop::Failed(format!("{what} timed out: the database didn't answer within {} s", QUERY_TIMEOUT.as_secs()))),
         },
         s = sink.stopped() => Err(s),
@@ -334,6 +372,7 @@ async fn tables(conn: &Conn, sink: &Sink<'_>, schema: &str, wanted: &[String], i
     conn.window.open(CATALOG_WINDOW);
     let rows = wait(
         sink,
+        &conn.window,
         &format!("listing the tables of [{schema}]"),
         c.query("SELECT c.relname FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relkind IN ('r', 'p') ORDER BY 1", &[&schema]),
     )
@@ -353,6 +392,7 @@ async fn tables(conn: &Conn, sink: &Sink<'_>, schema: &str, wanted: &[String], i
         conn.window.open(CATALOG_WINDOW);
         let key: Vec<(String, String)> = wait(
             sink,
+            &conn.window,
             &format!("reading the primary key of [{schema}.{name}]"),
             c.query(
                 "SELECT a.attname::text, format_type(a.atttypid, a.atttypmod) FROM pg_catalog.pg_index i JOIN pg_catalog.pg_class c ON c.oid = i.indrelid JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
@@ -372,6 +412,7 @@ async fn tables(conn: &Conn, sink: &Sink<'_>, schema: &str, wanted: &[String], i
         let incremental = match incremental {
             Some(col) => wait(
                 sink,
+                &conn.window,
                 &format!("reading [{schema}.{name}]"),
                 c.query_opt(
                     "SELECT format_type(a.atttypid, a.atttypmod) FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_class c ON c.oid = a.attrelid JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
@@ -464,9 +505,9 @@ async fn read_table(conn: &mut Conn, sink: &mut Sink<'_>, r: &Read<'_>) -> Resul
     let qualified = format!("{}.{}", ident(r.schema), ident(&t.name));
     let window = conn.window.clone();
     window.open(CATALOG_WINDOW);
-    let tx = wait(sink, &label, conn.client.build_transaction().isolation_level(tokio_postgres::IsolationLevel::RepeatableRead).read_only(true).start()).await?;
+    let tx = wait(sink, &window, &label, conn.client.build_transaction().isolation_level(tokio_postgres::IsolationLevel::RepeatableRead).read_only(true).start()).await?;
     let max: Option<String> = match (r.col, &t.incremental) {
-        (Some(c), Some(_)) => wait(sink, &label, tx.query_one(&format!("SELECT max({})::text FROM {qualified}", ident(c)), &[])).await?.get(0),
+        (Some(c), Some(_)) => wait(sink, &window, &label, tx.query_one(&format!("SELECT max({})::text FROM {qualified}", ident(c)), &[])).await?.get(0),
         _ => None,
     };
     let prefix = format!("{}_{}_", r.schema, t.name);
@@ -476,7 +517,7 @@ async fn read_table(conn: &mut Conn, sink: &mut Sink<'_>, r: &Read<'_>) -> Resul
     loop {
         let n = (PAGE_BYTES / largest.max(1024)).clamp(1, r.fetch);
         window.open(PAGE_WINDOW);
-        let rows = wait(sink, &label, tx.query(&page_sql(r, &qualified, after.as_deref(), n), &[])).await?;
+        let rows = wait(sink, &window, &label, tx.query(&page_sql(r, &qualified, after.as_deref(), n), &[])).await?;
         let Some(last) = rows.last() else { break };
         after = Some((0..t.key.len()).map(|i| last.get::<_, String>(i + 1)).collect());
         let mut docs = Vec::with_capacity(rows.len());
@@ -508,7 +549,7 @@ async fn read_table(conn: &mut Conn, sink: &mut Sink<'_>, r: &Read<'_>) -> Resul
         sink.page(docs).await?;
     }
     window.open(CATALOG_WINDOW);
-    wait(sink, &label, tx.commit()).await?;
+    wait(sink, &window, &label, tx.commit()).await?;
     Ok(max)
 }
 
@@ -516,6 +557,88 @@ async fn read_table(conn: &mut Conn, sink: &mut Sink<'_>, r: &Read<'_>) -> Resul
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// A server announcing parameter after parameter fails the connection once past the cap
+    /// (the client library keeps every one).
+    #[test]
+    fn parameter_status_messages_are_capped() {
+        let mut frames = Frames::default();
+        let one = |name: &str| {
+            let body = format!("{name}\0on\0");
+            let mut m = vec![b'S'];
+            m.extend_from_slice(&((body.len() + 4) as u32).to_be_bytes());
+            m.extend_from_slice(body.as_bytes());
+            m
+        };
+        for i in 0..PARAMS_MAX {
+            frames.feed(&one(&format!("p{i}"))).unwrap();
+        }
+        let err = frames.feed(&one("one_too_many")).unwrap_err();
+        assert!(err.to_string().contains("parameter statuses"), "{err}");
+    }
+
+    /// A TLS session in name only: the plaintext stream after a handshake (what [`FramedTls`]
+    /// wraps under rustls).
+    struct PlainTls;
+    struct PlainStream(tokio::net::TcpStream);
+
+    impl AsyncRead for PlainStream {
+        fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.0).poll_read(cx, buf)
+        }
+    }
+
+    impl AsyncWrite for PlainStream {
+        fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>> {
+            Pin::new(&mut self.0).poll_write(cx, buf)
+        }
+        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.0).poll_flush(cx)
+        }
+        fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.0).poll_shutdown(cx)
+        }
+    }
+
+    impl TlsStream for PlainStream {
+        fn channel_binding(&self) -> tokio_postgres::tls::ChannelBinding {
+            tokio_postgres::tls::ChannelBinding::none()
+        }
+    }
+
+    impl TlsConnect<tokio::net::TcpStream> for PlainTls {
+        type Stream = PlainStream;
+        type Error = std::io::Error;
+        type Future = std::future::Ready<Result<PlainStream, std::io::Error>>;
+        fn connect(self, stream: tokio::net::TcpStream) -> Self::Future {
+            std::future::ready(Ok(PlainStream(stream)))
+        }
+    }
+
+    /// Under TLS the headers are checked on the session's plaintext: a huge one fails the
+    /// connection before the client library reserves it.
+    #[tokio::test]
+    async fn framed_tls_refuses_a_huge_header() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let mut ssl_request = [0u8; 8];
+            s.read_exact(&mut ssl_request).await.unwrap();
+            s.write_all(b"S").await.unwrap();
+            let len = s.read_i32().await.unwrap();
+            let mut startup = vec![0; len as usize - 4];
+            s.read_exact(&mut startup).await.unwrap();
+            s.write_all(&[b'D', 0xFF, 0xFF, 0xFF, 0xF0]).await.unwrap();
+            let mut rest = Vec::new();
+            let _ = s.read_to_end(&mut rest).await;
+        });
+        let mut cfg = tokio_postgres::Config::new();
+        cfg.host("127.0.0.1").user("roll").dbname("shop").ssl_mode(SslMode::Require);
+        let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let err = tokio::time::timeout(Duration::from_secs(5), cfg.connect_raw(tcp, FramedTls(PlainTls))).await.expect("refused at once").err().expect("refused");
+        assert!(db_error(err).contains("4294967280 bytes"));
+    }
 
     /// A server sending more than a query's window fails the read instead of growing a buffer.
     #[tokio::test]

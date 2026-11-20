@@ -4,8 +4,11 @@
 //! owner (the person a cluster belongs to; a cluster without one counts alone). A cluster that
 //! can't get a slot waits in a FIFO queue. A slot that frees goes to the first waiter whose owner
 //! is under its cap: that waiter's scheduler is woken, and nobody behind it (the cluster that
-//! just freed the slot included) may take the slot first. A waiter that no longer wants one
-//! ([`Slots::leave`]) or whose cluster is gone is dropped, so it never holds up the queue.
+//! just freed the slot included) may take the slot first. A waiter counts only while it still
+//! wants a slot (its cluster is loaded and has a runnable pending job, checked whenever the
+//! queue is looked at), and a woken waiter that doesn't take its slot within [`WAKE_DEADLINE`]
+//! is dropped, so no cluster holds up the queue, on purpose or not. A successful take wakes the
+//! next waiter too, so slots that free together all find a taker.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -15,6 +18,8 @@ use std::sync::Arc;
 pub const NODE_MAX: usize = 4;
 /// Syncs running at once for one owner on a node.
 pub const OWNER_MAX: usize = 2;
+/// How long a woken waiter has to take its slot before it loses its place.
+pub const WAKE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
 
 type Check = Arc<dyn Fn() -> bool + Send + Sync>;
 type Wake = Arc<dyn Fn() + Send + Sync>;
@@ -23,10 +28,18 @@ type Wake = Arc<dyn Fn() + Send + Sync>;
 struct Waiter {
     key: String,
     owner: String,
-    /// Whether its cluster is still loaded.
+    /// Whether it still wants a slot (its cluster is loaded and has a runnable pending job).
     alive: Check,
     /// Wakes its scheduler.
     wake: Wake,
+    /// When it was woken for a slot.
+    woken: Option<std::time::Instant>,
+}
+
+impl Waiter {
+    fn counts(&self) -> bool {
+        (self.alive)() && self.woken.is_none_or(|t| t.elapsed() < WAKE_DEADLINE)
+    }
 }
 
 #[derive(Default)]
@@ -41,6 +54,12 @@ pub struct Slots {
     max: usize,
     per_owner: usize,
     state: parking_lot::Mutex<State>,
+}
+
+impl std::fmt::Debug for Slots {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Slots({} per node, {} per owner)", self.max, self.per_owner)
+    }
 }
 
 /// One running sync's hold on a slot; dropping it frees the slot for the next waiter.
@@ -82,7 +101,7 @@ impl Slots {
     /// Whether `key` (of `owner`) would get a slot now.
     pub fn admits(&self, key: &str, owner: &str) -> bool {
         let mut st = self.state.lock();
-        st.waiting.retain(|w| (w.alive)());
+        st.waiting.retain(Waiter::counts);
         st.running < self.max && self.under_cap(&st, owner) && !self.ahead(&st, key)
     }
 
@@ -90,17 +109,25 @@ impl Slots {
     /// (once), and `wake` is called when a slot may be its.
     pub fn take(self: &Arc<Self>, key: &str, owner: &str, alive: Check, wake: Wake) -> Option<Permit> {
         let mut st = self.state.lock();
-        st.waiting.retain(|w| (w.alive)());
+        st.waiting.retain(Waiter::counts);
         if st.running < self.max && self.under_cap(&st, owner) && !self.ahead(&st, key) {
             st.waiting.retain(|w| w.key != key);
             st.running += 1;
             *st.owners.entry(owner.to_string()).or_default() += 1;
+            drop(st);
+            // Another slot may be free too: its waiter is woken now, not at the next release.
+            self.wake_next();
             return Some(Permit { slots: self.clone(), owner: owner.to_string() });
         }
         if !st.waiting.iter().any(|w| w.key == key) {
-            st.waiting.push_back(Waiter { key: key.to_string(), owner: owner.to_string(), alive, wake });
+            st.waiting.push_back(Waiter { key: key.to_string(), owner: owner.to_string(), alive, wake, woken: None });
         }
         None
+    }
+
+    /// The keys waiting, in order (tests and diagnostics).
+    pub fn queued(&self) -> Vec<String> {
+        self.state.lock().waiting.iter().map(|w| w.key.clone()).collect()
     }
 
     /// `key` wants no slot any more (nothing pending): it leaves the queue, and the next waiter
@@ -121,11 +148,16 @@ impl Slots {
     fn wake_next(&self) {
         let wake = {
             let mut st = self.state.lock();
-            st.waiting.retain(|w| (w.alive)());
+            st.waiting.retain(Waiter::counts);
             if st.running >= self.max {
                 return;
             }
-            st.waiting.iter().find(|w| self.under_cap(&st, &w.owner)).map(|w| w.wake.clone())
+            let st = &mut *st;
+            let (owners, per_owner) = (&st.owners, self.per_owner);
+            st.waiting.iter_mut().find(|w| owners.get(&w.owner).copied().unwrap_or(0) < per_owner).map(|w| {
+                w.woken.get_or_insert_with(std::time::Instant::now);
+                w.wake.clone()
+            })
         };
         if let Some(w) = wake {
             w();
@@ -181,5 +213,33 @@ mod tests {
         // A cluster that no longer wants a slot doesn't hold up the queue.
         slots.leave("a");
         assert!(slots.admits("b", "bob"));
+    }
+
+    /// A waiter whose job stopped being runnable (canceled, its connector gone) without the
+    /// cluster ever looking again doesn't block the queue: the next waiter gets the slot.
+    #[test]
+    fn a_waiter_with_nothing_pending_doesnt_hold_the_queue() {
+        use std::sync::atomic::AtomicBool;
+        let slots = Slots::new(1, 1);
+        let held = slots.take("x", "xavier", Arc::new(|| true), Arc::new(|| {})).unwrap();
+        let wants = Arc::new(AtomicBool::new(true));
+        let (a_wakes, b_wakes) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let w = wants.clone();
+        let aw = a_wakes.clone();
+        let a_wake: Wake = Arc::new(move || {
+            aw.fetch_add(1, Ordering::SeqCst);
+        });
+        assert!(slots.take("a", "alice", Arc::new(move || w.load(Ordering::SeqCst)), a_wake).is_none());
+        let bw = b_wakes.clone();
+        let b_wake: Wake = Arc::new(move || {
+            bw.fetch_add(1, Ordering::SeqCst);
+        });
+        assert!(slots.take("b", "bob", Arc::new(|| true), b_wake.clone()).is_none());
+        assert_eq!(slots.queued(), ["a", "b"]);
+        // A's job is canceled: A no longer wants a slot, and never says so.
+        wants.store(false, Ordering::SeqCst);
+        drop(held);
+        assert_eq!((a_wakes.load(Ordering::SeqCst), b_wakes.load(Ordering::SeqCst)), (0, 1), "B is woken, not A");
+        assert!(slots.take("b", "bob", Arc::new(|| true), b_wake).is_some());
     }
 }

@@ -296,6 +296,15 @@ async fn s3_bucket_objects_and_text() {
     let job = finished(&c, &start(&c, "files", "full").await).await;
     assert_eq!((num(&job, "deleted_document_count"), num(&job, "total_document_count")), (1, 5), "{job:?}");
     assert!(!visible(&c).await.contains(S3_SECRET), "the secret key is visible");
+
+    // Active advanced rules naming a bucket outside [buckets] (set directly, past the draft's
+    // validation) fail the sync rather than reading another bucket with the stored key.
+    let filtering = r#"{"filtering":[{"domain":"DEFAULT","active":{"advanced_snippet":{"value":[{"bucket":"payroll"}]},"rules":[{"id":"DEFAULT","order":0,"field":"_","policy":"include","rule":"regex","value":".*"}],"validation":{"state":"valid","errors":[]}},"draft":{"advanced_snippet":{"value":{}},"rules":[{"id":"DEFAULT","order":0,"field":"_","policy":"include","rule":"regex","value":".*"}],"validation":{"state":"valid","errors":[]}}}]}"#;
+    let (s, _, t) = call(&c, "PUT", "/_connector/files/_filtering", Some(filtering)).await;
+    assert_eq!(s, 200, "{t}");
+    let job = finished(&c, &start(&c, "files", "full").await).await;
+    assert_eq!(at(&job, "status").as_str(), Some("error"), "{job:?}");
+    assert!(at(&job, "error").as_str().is_some_and(|e| e.contains("payroll")), "{job:?}");
 }
 
 #[tokio::test]
@@ -455,10 +464,99 @@ async fn a_planted_sealed_value_opens_to_nothing() {
     let (_, v, _) = call(&c, "GET", "/_connector/planted", None).await;
     assert_eq!(at(&v, "configuration.password.value").as_str(), Some("********"), "a sealed value is never shown: {v:?}");
 
+    // Once roll runs it, a sealed box a client wrote is refused, not opened: the connector needs
+    // its password again, and nothing is sent.
     assert_eq!(call(&c, "PUT", "/_connector/planted/_native", Some(r#"{"is_native":true}"#)).await.0, 200);
+    let (_, v, _) = call(&c, "GET", "/_connector/planted", None).await;
+    assert_eq!((at(&v, "status").as_str(), at(&v, "configuration.password.value").as_str()), (Some("needs_configuration"), Some("")), "{v:?}");
     let job = finished(&c, &start(&c, "planted", "full").await).await;
     assert_eq!(at(&job, "status").as_str(), Some("error"), "{job:?}");
-    assert_eq!(*got.lock().unwrap(), [stolen], "the planted value is sent as the text it is");
+    assert!(got.lock().unwrap().is_empty(), "something was sent: {:?}", got.lock().unwrap());
+}
+
+/// A detour through self-managed (where roll doesn't guard the configuration) and back, or a
+/// sealed value moved from a non-sensitive entry to the sensitive one, never sends the stored
+/// password to a host it wasn't paired with.
+#[tokio::test]
+async fn a_detour_through_self_managed_never_sends_the_password_elsewhere() {
+    let (home, home_got) = fake_postgres(Fake::Password).await;
+    let (evil, evil_got) = fake_postgres(Fake::Password).await;
+    let c = cluster(&[]).await;
+    pg_connector(&c, &format!("127.0.0.1:{home}"), "x", "content-x", "*", "pw-paired-7").await;
+    let sealed = at(c.state().metadata.xpack.get("connector", "x").unwrap(), "configuration.password.value").as_str().unwrap().to_string();
+    // (a) Made self-managed, pointed elsewhere, made native again.
+    assert_eq!(call(&c, "PUT", "/_connector/x/_native", Some(r#"{"is_native":false}"#)).await.0, 200);
+    assert_eq!(call(&c, "PUT", "/_connector/x/_configuration", Some(&format!(r#"{{"values":{{"port":{evil}}}}}"#))).await.0, 200);
+    assert_eq!(call(&c, "PUT", "/_connector/x/_native", Some(r#"{"is_native":true}"#)).await.0, 200);
+    // (b) The sealed value written back under a non-sensitive entry, then (c) the entry made
+    // sensitive with the same value.
+    let replace = |sensitive: bool| {
+        format!(
+            r#"{{"configuration":{{"host":{{"label":"Host","value":"127.0.0.1"}},"port":{{"label":"Port","value":{evil}}},"username":{{"label":"Username","value":"roll"}},"database":{{"label":"Database","value":"shop"}},"ssl_enabled":{{"label":"SSL","value":false}},"password":{{"label":"Password","sensitive":{sensitive},"value":"{sealed}"}}}}}}"#
+        )
+    };
+    assert_eq!(call(&c, "PUT", "/_connector/x/_configuration", Some(&replace(false))).await.0, 200);
+    assert_eq!(call(&c, "PUT", "/_connector/x/_configuration", Some(&replace(true))).await.0, 200);
+    // (d) The sync reaches the new host without the paired password.
+    let job = finished(&c, &start(&c, "x", "full").await).await;
+    assert_eq!(at(&job, "status").as_str(), Some("error"), "{job:?}");
+    assert!(home_got.lock().unwrap().is_empty());
+    assert!(!evil_got.lock().unwrap().iter().any(|p| p == "pw-paired-7"), "the paired password reached another host: {:?}", evil_got.lock().unwrap());
+}
+
+/// A cluster whose queued job is canceled while the node's slots are all taken doesn't hold up
+/// the queue: another tenant's sync still runs when a slot frees.
+#[tokio::test]
+async fn a_canceled_queued_job_doesnt_hold_up_other_tenants() {
+    use search_es::xpack::entsearch::sync::slots::Slots;
+    let pool = Slots::new(1, 1);
+    let tenant = |name: &'static str, owner: &'static str| {
+        let pool = pool.clone();
+        async move {
+            let mut cfg = ClusterConfig::new(name);
+            cfg.node_settings.push(("roll.connectors.allow_private_hosts".into(), "true".into()));
+            cfg.owner = Some(owner.into());
+            cfg.connector_slots = Some(pool);
+            let c = Arc::new(Cluster::open(cfg, Arc::new(MemoryStore::new())).await.unwrap());
+            c.enable_background_tasks();
+            c
+        }
+    };
+    let (silent, _) = fake_postgres(Fake::Silent).await;
+    let (port, _) = fake_postgres(Fake::Password).await;
+    let (holder, queued, other) = (tenant("holder", "hal").await, tenant("queued", "quinn").await, tenant("other", "olga").await);
+    // The only slot: a sync waiting on a silent server.
+    pg_connector(&holder, &format!("127.0.0.1:{silent}"), "pg", "content-h", "*", "pw-h").await;
+    let held = start(&holder, "pg", "full").await;
+    let in_progress = |c: Arc<Cluster>, id: String| async move {
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while call(&c, "GET", &format!("/_connector/_sync_job/{id}"), None).await.1.get("status").and_then(Value::as_str) != Some("in_progress") {
+            assert!(std::time::Instant::now() < deadline, "{id} never started");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    };
+    in_progress(holder.clone(), held.clone()).await;
+    // Two tenants wait for it, in order.
+    pg_connector(&queued, &format!("127.0.0.1:{port}"), "pg", "content-q", "*", "pw-q").await;
+    let canceled = start(&queued, "pg", "full").await;
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while pool.queued() != ["queued"] {
+        assert!(std::time::Instant::now() < deadline, "{:?}", pool.queued());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    pg_connector(&other, &format!("127.0.0.1:{port}"), "pg", "content-o", "*", "pw-o").await;
+    let wanted = start(&other, "pg", "full").await;
+    while pool.queued() != ["queued", "other"] {
+        assert!(std::time::Instant::now() < deadline, "{:?}", pool.queued());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // The first waiter's job is canceled (a pending job goes straight to canceled), then the
+    // slot frees: the other tenant's sync runs.
+    assert_eq!(call(&queued, "PUT", &format!("/_connector/_sync_job/{canceled}/_cancel"), None).await.0, 200);
+    assert_eq!(call(&holder, "PUT", &format!("/_connector/_sync_job/{held}/_cancel"), None).await.0, 200);
+    let job = finished(&other, &wanted).await;
+    assert_eq!(at(&job, "status").as_str(), Some("error"), "it ran (and the fake refused it): {job:?}");
+    assert!(at(&job, "started_at").as_str().is_some());
 }
 
 /// A server that accepts the connection and never answers doesn't hold the sync: cancel ends it

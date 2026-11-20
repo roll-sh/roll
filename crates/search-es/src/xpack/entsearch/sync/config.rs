@@ -164,11 +164,16 @@ fn value_of<'a>(m: &'a Map, field: &str) -> Option<&'a Value> {
 
 /// Keeps a connector roll runs safe after any update (`before` is the stored connector, empty for
 /// a new one):
+/// - When roll stops running it (made self-managed, given a service roll doesn't run, deleted),
+///   the values it sealed are cleared: nothing sealed survives a stretch where its
+///   configuration (a host included) changes unguarded.
 /// - When roll starts running it (created native, or made native, or given a service roll runs),
-///   every non-empty sensitive value is sealed as given, even one that looks sealed: a value
-///   sealed elsewhere (another cluster, another connector) is only ever text here.
+///   every non-empty sensitive value is sealed as given, and one that is a sealed box is cleared
+///   instead: roll cleared its own when it stopped, so a sealed box then was written by a client
+///   (copied from this or another connector) and is never opened.
 /// - Otherwise a written sensitive value is sealed; [`REDACTED`] or the stored value written back
-///   keeps the stored one.
+///   keeps the stored one, and only when the stored entry was sensitive too (a value stored in
+///   the clear under a non-sensitive entry is never taken for the sealed one).
 /// - A change to where the credential goes ([`target_fields`]), filling in an empty one too,
 ///   without giving it again clears it and puts the connector back to `needs_configuration`, as
 ///   Elastic's UI asks for the password again.
@@ -176,7 +181,11 @@ fn value_of<'a>(m: &'a Map, field: &str) -> Option<&'a Value> {
 ///   of the old service's configuration, its credentials included, carries over, so fields one
 ///   service doesn't guard can't be set aside for the other.
 pub fn protect(m: &mut Map, before: &Map, sealer: Option<&crate::seal::Sealer>) {
+    let ran = runs(&Value::Obj(before.clone()));
     if !runs(&Value::Obj(m.clone())) {
+        if ran {
+            clear_secrets(m);
+        }
         return;
     }
     let service = m.get("service_type").and_then(Value::as_str).unwrap_or_default().to_string();
@@ -185,7 +194,7 @@ pub fn protect(m: &mut Map, before: &Map, sealer: Option<&crate::seal::Sealer>) 
         m.insert("status".into(), "needs_configuration".into());
         return;
     }
-    let started = !runs(&Value::Obj(before.clone()));
+    let started = !ran;
     let id = m.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
     let had_secret = before.get("configuration").and_then(Value::as_object).is_some_and(|c| {
         c.values().any(|e| sensitive(e) && e.get("value").and_then(Value::as_str).is_some_and(|v| !v.is_empty()))
@@ -203,7 +212,17 @@ pub fn protect(m: &mut Map, before: &Map, sealer: Option<&crate::seal::Sealer>) 
         if v.is_empty() {
             continue;
         }
-        let stored = (!started).then(|| old.get(k).and_then(|o| o.get("value")).cloned()).flatten();
+        if started {
+            let next = if v == REDACTED || crate::seal::is_sealed(&v) {
+                cleared = true;
+                Value::from("")
+            } else {
+                Value::from(crate::seal::seal_given_with(sealer, &kind_of(&id, k), &v))
+            };
+            e.insert("value".into(), next);
+            continue;
+        }
+        let stored = old.get(k).filter(|o| sensitive(o)).and_then(|o| o.get("value")).cloned();
         let unchanged = v == REDACTED || stored.as_ref().and_then(Value::as_str) == Some(v.as_str());
         let next = if unchanged && retargeted {
             cleared = true;
@@ -218,6 +237,21 @@ pub fn protect(m: &mut Map, before: &Map, sealer: Option<&crate::seal::Sealer>) 
     }
     if cleared {
         m.insert("status".into(), "needs_configuration".into());
+    }
+}
+
+/// Empties every sensitive value, and any sealed one, of a connector roll stops running.
+fn clear_secrets(m: &mut Map) {
+    let Some(Value::Obj(cfg)) = m.get_mut("configuration") else { return };
+    for entry in cfg.values_mut() {
+        let secret = sensitive(entry);
+        if let Value::Obj(e) = entry
+            && let Some(Value::Str(v)) = e.get("value")
+            && !v.is_empty()
+            && (secret || crate::seal::is_sealed(v))
+        {
+            e.insert("value".into(), Value::from(""));
+        }
     }
 }
 
