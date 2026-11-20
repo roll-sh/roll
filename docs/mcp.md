@@ -833,7 +833,7 @@ previews are listed once those products are on.
 | `apps_get_service` | A service with its environments' summaries. | `GET /v1/apps/services/{service}` |
 | `apps_set_environment` | Create or change an environment: branch, run settings, following an image tag, waiting for CI. | `PUT /v1/apps/services/{service}/environments/{env}` |
 | `apps_update_service` | Change a service's name, source, build or run settings (run takes `alerts {memory_pct, error_pct, p95_ms}`). | `PATCH /v1/apps/services/{service}` |
-| `apps_deploy` | Deploy a service to an environment: a git revision of its repo, or an image (production deploys are "deploy" actions). | `POST /v1/apps/services/{service}/environments/{env}/deploys` |
+| `apps_deploy` | Deploy a service to an environment: a git revision of its repo, or an image (production deploys are "deploy" actions). `override: true` goes past a deploy freeze, as do `apps_redeploy`'s, `apps_promote`'s and `apps_rollback`'s: sent as `X-Roll-Override: 1`, which roll-access makes `admin` (a deploy token can't) and binds into an approval. | `POST /v1/apps/services/{service}/environments/{env}/deploys` |
 | `apps_list_deploys` | An environment's deploys, newest first. | `GET /v1/apps/services/{service}/environments/{env}/deploys` |
 | `apps_deploy_logs` | A deploy's build and release log. | `GET /v1/apps/services/{service}/environments/{env}/deploys/{deploy}/logs` |
 | `apps_promote` | Deploy another environment's running image into this one. | `POST /v1/apps/services/{service}/environments/{env}/promote` |
@@ -921,6 +921,7 @@ previews are listed once those products are on.
 | `previews_refresh` | Redeploy a preview now. | `POST /v1/previews/{id}/refresh` |
 | `previews_errors` | A preview's errors, grouped (masked as logs are). | `GET /v1/previews/{id}/errors` |
 | `previews_traces` | A preview's recent traces: root span, service, duration, spans, failed (masked). | `GET /v1/previews/{id}/traces` |
+| `previews_routes` | Each route's p50/p95 in a preview against main's preview, the slower ones first (masked). | `GET /v1/previews/{id}/routes` |
 | `previews_get_trace` | One trace's spans, oldest first (masked). | `GET /v1/previews/{id}/traces/{trace}` |
 | `previews_mask_suggestions` | Columns that look like people's data and aren't masked in previews, with the rule each would take. | `GET /v1/previews/projects/{project}/mask-suggestions` |
 | `previews_metrics` | Each of a preview's services' CPU and memory now. | `GET /v1/previews/{id}/metrics` |

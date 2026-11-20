@@ -233,6 +233,13 @@ impl Tool {
                     body[p.name] = v.clone();
                     body_used = true;
                 }
+                // A yes/no header is `1` when yes and left out when no (apps' `X-Roll-Override`
+                // takes exactly `1`: `true` would be no override at all).
+                At::Header(h) if p.ty == Ty::Bool => {
+                    if v.as_bool() == Some(true) {
+                        headers.push((h, "1".into()));
+                    }
+                }
                 At::Header(h) => headers.push((h, as_text(v))),
                 At::RawText => raw = Some((as_text(v).into_bytes(), "application/octet-stream")),
                 At::RawJson => raw = Some((as_text(v).into_bytes(), "application/json")),
@@ -286,6 +293,9 @@ const fn qreq(name: &'static str, desc: &'static str) -> P {
 /// The workspace project a new resource goes in (`X-Roll-Project`): needed by project-scoped tokens.
 /// A key a retried call sends again, so a route that honours it (apps' deploys) runs it once.
 const IDEMPOTENCY: P = P { name: "idempotency_key", ty: Ty::Str, at: At::Header("idempotency-key"), required: false, desc: "Any unique string: a call retried with the same key runs once" };
+/// Past an environment's deploy freeze: an admin's call (roll-access makes the request `admin` and
+/// binds the header into its approval), audited by roll apps as `freeze.overridden`.
+const OVERRIDE: P = P { name: "override", ty: Ty::Bool, at: At::Header("x-roll-override"), required: false, desc: "Go past the environment's deploy freeze: an admin's call (a token that may only deploy can't), audited" };
 const IN_PROJECT: P = P { name: "workspace_project", ty: Ty::Str, at: At::Header("x-roll-project"), required: false, desc: "Workspace project (prj_…) to put the new resource in" };
 
 const fn t(name: &'static str, title: &'static str, description: &'static str, product: &'static str, method: &'static str, path: &'static str, params: &'static [P]) -> Tool {
@@ -979,6 +989,7 @@ static TOOLS: &[Tool] = &[
             b("no_traffic", Ty::Bool, "Build and health-check it, then stop at status ready without sending it traffic"),
             b("no_cache", Ty::Bool, "Build from scratch: no cached layer, no reused build"),
             b("closed", Ty::Bool, "Refuse (409) unless the environment builds closed (its builds get no secret value)"),
+            OVERRIDE,
             IDEMPOTENCY,
         ],
     ).open_world(),
@@ -991,7 +1002,7 @@ static TOOLS: &[Tool] = &[
         "apps",
         "POST",
         "/v1/apps/services/{service}/environments/{env}/promote",
-        &[SERVICE, ENV, breq("from", Ty::Str, "The environment to take it from"), b("message", Ty::Str, "Why")],
+        &[SERVICE, ENV, breq("from", Ty::Str, "The environment to take it from"), b("message", Ty::Str, "Why"), OVERRIDE],
     ),
     t("apps_cancel_deploy", "Cancel a deploy", "Stop a deploy that hasn't gone live.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/deploys/{deploy}/cancel", &[SERVICE, ENV, req("deploy", "Deploy id")]),
     t(
@@ -1017,7 +1028,7 @@ static TOOLS: &[Tool] = &[
         &[SERVICE, ENV, b("paths", Ty::Arr, "1-100 absolute paths (any query; a trailing * is a prefix)"), b("tags", Ty::Arr, "1-100 cache tags its answers carried (any case)")],
     ),
     t("apps_restart_instance", "Restart one instance", "Replace one instance of a web service (a fresh one answers before this one drains; if it doesn't start, this one keeps serving). Instance names are in apps_get_environment. Production is a \"deploy\" action.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/instances/{name}/restart", &[SERVICE, ENV, req("name", "Instance id (instances[].id in apps_get_environment)")]),
-    t("apps_redeploy", "Redeploy", "Deploy what's running again with the current settings and variables (production is a \"deploy\" action).", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/redeploy", &[SERVICE, ENV, b("message", Ty::Str, "Why"), b("closed", Ty::Bool, "Refuse (409) unless the environment builds closed")]),
+    t("apps_redeploy", "Redeploy", "Deploy what's running again with the current settings and variables (production is a \"deploy\" action).", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/redeploy", &[SERVICE, ENV, b("message", Ty::Str, "Why"), b("closed", Ty::Bool, "Refuse (409) unless the environment builds closed"), OVERRIDE]),
     t(
         "apps_run_job",
         "Run a job",
@@ -1131,7 +1142,7 @@ static TOOLS: &[Tool] = &[
     t("apps_list_forms", "List a site's forms", "A static site's forms with their submission counts and the last one's time (never what people sent; apps_form_submissions reads that).", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/forms", &[SERVICE, ENV]),
     t("apps_form_submissions", "Read form submissions", "What people sent through a site's form, newest first: each submission's id, time and fields. People's own data: every read is audited.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/forms/{form}/submissions", &[SERVICE, ENV, req("form", "Form name"), q("limit", Ty::Int, "At most (1-200, default 50)"), q("before", Ty::Str, "A submission's id: the page after it")]).outside(&["fields"]),
     t("apps_delete_form_submission", "Delete a form submission", "Delete one submission for good (someone asked to be forgotten, or spam). Audited.", "apps", "DELETE", "/v1/apps/services/{service}/environments/{env}/forms/{form}/submissions/{submission}", &[SERVICE, ENV, req("form", "Form name"), req("submission", "Submission id")]),
-    t("apps_rollback", "Roll back a deployment", "Roll an environment back to an earlier deploy, with the variables it went live with (keep_variables: true keeps today's).", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/deploys/{deploy}/rollback", &[SERVICE, ENV, req("deploy", "Deploy id"), b("keep_variables", Ty::Bool, "Keep the variables as they are now")]),
+    t("apps_rollback", "Roll back a deployment", "Roll an environment back to an earlier deploy, with the variables it went live with (keep_variables: true keeps today's).", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/deploys/{deploy}/rollback", &[SERVICE, ENV, req("deploy", "Deploy id"), b("keep_variables", Ty::Bool, "Keep the variables as they are now"), OVERRIDE]),
     t("apps_rollback_previous", "Roll back to the last deploy", "Put back the deploy that was live before this one, with its variables (keep_variables: true keeps today's).", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/rollback", &[SERVICE, ENV, b("keep_variables", Ty::Bool, "Keep the variables as they are now")]),
     t("apps_logs", "Service logs", "Recent logs of a service's environment, or with http its requests (method, path, status, ms): the quickest way to find failing or slow ones.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/logs", &[
         SERVICE,
@@ -1173,6 +1184,7 @@ static TOOLS: &[Tool] = &[
     t("previews_refresh", "Refresh a preview", "Redeploy a preview now.", "previews", "POST", "/v1/previews/{id}/refresh", &[req("id", "Preview id")]),
     t("previews_errors", "Preview errors", "A preview's errors over the last minutes (5-1440, default 60), grouped by service and fingerprint, with counts, first and last seen and a sample (masked as its logs are). Start here when a preview fails.", "previews", "GET", "/v1/previews/{id}/errors", &[req("id", "Preview id"), q("minutes", Ty::Int, "How far back, 5-1440 (default 60)")]),
     t("previews_traces", "Preview traces: slow or failing requests", "A preview's recent traces (5-360 minutes back, default 60), newest first, at most 100: each one's root span, service, duration, span count and whether it failed. previews_get_trace has one trace's spans. Names and attributes are masked as its logs are.", "previews", "GET", "/v1/previews/{id}/traces", &[req("id", "Preview id"), q("minutes", Ty::Int, "How far back, 5-360 (default 60)")]),
+    t("previews_routes", "Preview route times against main", "Each route's p50 and p95 in a preview (from its traces, 5-360 minutes back, default 60) against the same route on main's preview, the slower ones first: `slower` when both sides have 5 traces and the preview's p50 is half again main's and 100 ms more. Which request got slower before it merges. Names are masked as its traces are.", "previews", "GET", "/v1/previews/{id}/routes", &[req("id", "Preview id"), q("minutes", Ty::Int, "How far back, 5-360 (default 60)")]),
     t("previews_get_trace", "A preview trace's spans", "One trace's spans, oldest first: where a slow or failing request spent its time across the preview's services (names and attributes masked).", "previews", "GET", "/v1/previews/{id}/traces/{trace}", &[req("id", "Preview id"), req("trace", "Trace id (from previews_traces)")]),
     t("previews_mask_suggestions", "Unmasked personal data", "Columns in a project's databases and indices that look like people's data (emails, names, phone numbers…) and aren't masked in its previews yet, with the masking rule each would take and why; only resources this token can read.", "previews", "GET", "/v1/previews/projects/{project}/mask-suggestions", &[req("project", "Workspace project")]),
     t("previews_metrics", "Preview metrics", "Each of a preview's services' CPU and memory now: which one is slow or about to run out.", "previews", "GET", "/v1/previews/{id}/metrics", &[req("id", "Preview id")]),
@@ -1264,6 +1276,11 @@ mod tests {
         let r = all().iter().find(|t| t.name == "apps_restart").unwrap().request(&json!({ "service": "svc_a-b~c", "env": ".." })).unwrap();
         assert_eq!(r.uri, "/v1/apps/services/svc_a-b~c/environments/%2E%2E/restart");
         assert!(all()[0].request(&json!({ "nope": 1 })).is_err());
+        // Past a freeze: the header apps reads (exactly `1`), never a body field; no override, no header.
+        let deploy = all().iter().find(|t| t.name == "apps_deploy").unwrap();
+        let r = deploy.request(&json!({ "service": "svc_a", "env": "production", "override": true })).unwrap();
+        assert!(r.headers.contains(&("x-roll-override", "1".into())) && matches!(r.body, Built::Json(ref b) if b.get("override").is_none()), "{:?}", r.headers);
+        assert!(!deploy.request(&json!({ "service": "svc_a", "env": "production", "override": false })).unwrap().headers.iter().any(|(h, _)| *h == "x-roll-override"));
         // Explain plans the agent's statement in a read-only transaction, and runs nothing.
         let r = all().iter().find(|t| t.name == "postgres_explain").unwrap().request(&json!({ "endpoint": "ep_1", "sql": "select * from users;" })).unwrap();
         assert!(matches!(r.body, Built::Json(ref b) if b["sql"] == "EXPLAIN (FORMAT JSON) select * from users" && b["read_only"] == true));
