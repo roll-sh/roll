@@ -2178,20 +2178,33 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Route budgets** (Lighthouse CI's budgets, beside its comparisons): a project's
-   `github.budget.routes` (`{"GET /orders": 300}`, p50 in ms) holds a route to a time of its own,
-   not only to main's; a route over its budget counts in `roll/regressions` and the record (with
-   main's time when there is one), so a slow new route fails too.
-2. **The author as an account, not a name, in review** (#507): the accepts tell a person from the
-   change's author by every name they go by (their roll handle and each linked GitHub login).
-3. **Previews on the session grant with project members** (roll secrets' members v1.1, after its
-   #501): viewers read a preview's status, developers and up get shells, files, connect and
-   deploy hooks; until then previews stay the project owner's (and admins').
-4. **References a person chooses** (after roll secrets' #407, `bind_ref`/`resolve_as`): a
+1. **Previews on members, in review** (#524, stacked on roll's members #501): a member's role
+   decides each previews route by roll-access's catalogue (viewer reads, developer reveals and
+   writes, admin opens shells and manages the rules); roll-access learns a preview's project, so a
+   token confined to a project reaches its previews too. Left on it once #501's owner-only fix is
+   pushed: any member passes previews' own check, and team access opens to any member.
+2. **Keys a fork's preview never holds** (roll secrets' #520 placeholders and #517 interception
+   CA, after its batch 6): a fork's preview resolves as the rule's writer and gets `rlph_`
+   placeholders for keys bound to hosts; the egress proxy terminates TLS only for hosts the
+   preview's CA covers, swaps placeholders in headers and query for the host it dialled
+   (`roll_secrets::proxy::filter`), re-dials with real verification, checks the CA is live on
+   every connection, and ends the consumer with the preview. `egress_hosts` still decides first:
+   a key's hosts never open egress by themselves, and the preview's status says when a key is
+   bound to a host its egress doesn't allow. What GitHub's and Vercel's fork previews can't do:
+   run a fork's code against a real API without handing it the key.
+3. **References a person chooses** (after roll secrets' #407, `bind_ref`/`resolve_as`): a
    preview's own variables take `roll://` too, and the rules' references move to bindings.
-5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+4. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-6. **Watch: pg-control's recovery to a time seconds old** (unowned).
+5. **Watch: pg-control's recovery to a time seconds old** (unowned).
+
+Landed in previews' lock turn 13 of 2026-11-20 (main c256b2f0d, exactly its gated tree): route
+budgets (#512: a route held to a p50 of its own, failing `roll/regressions` and blocking without
+main's preview, accepted with its budget named) and the author told apart by every name they go
+by (#507: their roll handle and each linked GitHub login, refreshed when GitHub renames it). An
+independent review of both found 8 things, all fixed before they landed; the live check found
+the operator's token refused for a required visual review (#507's own fix) and was changed to
+accept as a check.
 
 Landed in previews' lock turn 10 of 2026-11-19 (main 020da3033, exactly its gated tree): the
 routes slower than main's preview in the verdict strip, the change page and the comment (#431),
