@@ -900,12 +900,14 @@ as a private address.
       sessions are kept by their SHA-256, and only while the project has team access: the write
       that keeps one reads the project's access, so a change of access can't miss it.
     - *Who.* rolld's `AccountsVisitors` (`crates/rolld/src/previews/mod.rs`) is the one place
-      that says for services roll runs itself: an account that still signs in and is an admin or
-      owns the project now, through the same roll session that asked for the ticket. rolld's
-      gate lets only admins into `/v1/previews` today, so today it's an admin. A ticket is only
-      given to them, and each session asks again every 5 minutes (`visitor_recheck`, off the
-      async workers): a roll session signed out, revoked or expired, or an account disabled,
-      deleted or that lost the project, is turned away at its next request after that, and its
+      that says for services roll runs itself: an account that still signs in and is an admin, or
+      whose role in the project now may reveal a preview there (docs/members.md: a developer
+      whose environments take in `preview`, an admin or owner; never a viewer, who sees no values:
+      the running app is what a share link gives, and minting one is `reveal`), through the same
+      roll session that asked for the ticket. A ticket is only given to them, and each session
+      asks again every 5 minutes (`visitor_recheck`, off the async workers): a roll session signed
+      out, revoked or expired, an account disabled or deleted, or a member removed or made a
+      viewer, is turned away at its next request after that, and its
       session is gone. Changing the project's access ends every session.
     - *The link's token lets nobody in.* The links roll hands out (`share_url`) are the plain
       URLs, as the change's and the pull request's are. A URL that still carries
