@@ -240,9 +240,11 @@ impl Graph {
         self.dirty_n.push(slot);
     }
 
-    /// A new page at the end of the relation (HnswNewBuffer + HnswInitPage): its block.
+    /// A new page at the end of the relation (HnswNewBuffer + HnswInitPage): its block. The
+    /// meta record holds the page count, so it is written again.
     fn append_page(&mut self) -> u32 {
         self.pages.push(Page::new());
+        self.dirty_meta = true;
         self.pages.len() as u32
     }
 

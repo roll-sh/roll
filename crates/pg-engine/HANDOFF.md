@@ -17103,3 +17103,43 @@ Verification: quick-check with `QC_CHECKED=1` on this commit on `50fd640af` (the
 `915acffbf` takes only its HANDOFF and BENCH text): build, clippy (16 warnings, none new in
 changed files), tests 400 passed in 17 binaries and the same with `--profile verify-checked`,
 regress 51,148 / 51,150 with 0 newly differing, isolation 1,647 / 1,648, pg_dump 14,609 passed.
+
+## hnsw: an index that would not load after a restart (agent 269, 2026-11-20)
+
+The batch train's assertions build failed once in `pgvector_hnsw::truncate_reindex_and_reopen`
+(`graph.rs:637`, "the len is 41 but the index is 41") and passed when run again. It was not a race
+and not anything that landed on 2026-11-19: the cause dates from the first hnsw port (5a4d843e4),
+and any build panics the same way.
+
+- **Cause.** The meta record (`Graph::meta_record`) holds the page count that `Graph::load` sizes
+  `pages` with, but adding a page (`append_page`) did not mark it to be written. When a new
+  element with level 1 or higher does not fit on the insert page but a level-0 element still would,
+  `add_element_on_disk` puts it on a new page and leaves the insert page where it is
+  (`new_insert_page` is the current page, as in hnswinsert.c). So nothing wrote the meta record.
+  It was written again only when a later insert moved the insert page or raised the entry point.
+  If the database closed before that (the last insert or two), the element and neighbour records
+  named a block past the stored page count, and the first scan after reopening panicked in
+  `Graph::load`. The index stayed unreadable until a REINDEX.
+- **Fix.** `append_page` marks the meta record dirty. At most one more 24-byte record is written
+  per new page, about one insert in 25 with 8-dimension vectors. Builds wrote the record anyway.
+  No benchmark was run: this is not a per-row path.
+- **Reproducing it.** It fails about 1 run in 1,000. The level draws are random, and only the
+  final inserts matter. `ROLL_VECTOR_BUILD_SEED` seeds the generator at the TRUNCATE's empty
+  build, which makes the test deterministic. `~/.cache/a269/sim.py` simulates the page placement
+  of the test's last 1,000 inserts with graph.rs's rules. It finds 20 stale seeds in 1..20,000
+  (the first are 1372, 1402, 3252, 3917 and 4095), each with 41 pages in the meta record against
+  42 used. On the parent's `--profile verify-checked` binary, all 20 seeds fail with this panic
+  and their neighbouring seeds pass. Before the fix, 400 random runs and seeds 1..600 all passed,
+  as the 1 in 1,000 rate predicts. After the fix, all 20 seeds pass, and so do 1,000 random
+  runs and the rest of `pgvector_hnsw`, all in the same build.
+- **Left.** No new test. A deterministic one needs either the seed (`ROLL_VECTOR_BUILD_SEED` is
+  read once per process, so it would seed every test in `pgvector_hnsw`) or a unit test with a
+  store. The existing test still catches a regression at about 1 run in 1,000, and
+  `ROLL_VECTOR_BUILD_SEED=1372` reproduces it at once.
+- **Verification.** Quick-check on this commit on `6fc5d19ac`: build; clippy (16 warnings, none
+  new in changed files); tests, 90 passed in 6 binaries; regress 51,148 / 51,150 with 0 newly
+  differing; isolation 1,647 / 1,648; pg_dump 14,609 passed. The first run failed
+  `wire::protocol_cases` (`loc_bind`: "startup quiet", with the machine's load at about 75). That
+  test does not use hnsw; it passed alone and in the full rerun. The checked build is the
+  `pgvector_hnsw` binary above (`--profile verify-checked`, 7 of 7 passed). Only HANDOFF text
+  changed after the gate.
