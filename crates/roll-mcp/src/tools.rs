@@ -340,7 +340,7 @@ fn apps_area(method: &str, path: &str) -> Area {
         ["services", "environments", s, ..] => match *s {
             "analytics" | "app-metrics" | "errors" | "logs" | "metrics" | "routes" | "slo" | "traces" | "usage" | "vitals" => "observe",
             "deploys" | "promote" | "redeploy" | "rollback" | "pending" | "diff" | "jobs" | "runs" | "restart" | "sleep" | "wake" | "instances" | "cache" => "deploy",
-            "variables" | "domains" | "forms" | "volume" => "configure",
+            "variables" | "domains" | "forms" | "volume" | "config" => "configure",
             _ => return Area::Unplaced,
         },
         ["services", "activity"] | ["events"] => "observe",
