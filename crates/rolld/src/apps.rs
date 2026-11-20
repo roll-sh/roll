@@ -469,6 +469,77 @@ impl Resources for RollResources {
         Ok(v["lag"].as_i64().unwrap_or(0).max(0) as u64)
     }
 
+    /// A server-managed group's next records (`GET …/topics/{t}/records?group=`, committed only
+    /// by `commit`), keys, values and headers as base64 so bytes come back as they were.
+    async fn read_group(&self, stream: &str, topic: &str, group: &str, consumer: &str, wait_ms: u64, limit: usize) -> anyhow::Result<Vec<apps_control::integrations::StreamRecord>> {
+        use base64::Engine;
+        let (base, token, http) = &self.api;
+        let enc = |s: &str| urlencoding::encode(s).into_owned();
+        let url = format!(
+            "{base}/v1/streams/{}/topics/{}/records?group={}&consumer={}&commit=manual&lease_ms=300000&encoding=base64&wait_ms={wait_ms}&limit={limit}",
+            enc(stream),
+            enc(topic),
+            enc(group),
+            enc(consumer)
+        );
+        let mut req = http.get(url).timeout(std::time::Duration::from_millis(wait_ms + 30_000));
+        if let Some(t) = token {
+            req = req.bearer_auth(t);
+        }
+        let resp = req.send().await?;
+        anyhow::ensure!(resp.status().is_success(), "the stream answered {}", resp.status());
+        let v: serde_json::Value = resp.json().await?;
+        let b64 = |v: &serde_json::Value| v.as_str().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
+        Ok(v["records"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|r| apps_control::integrations::StreamRecord {
+                partition: r["partition"].as_i64().unwrap_or(0) as i32,
+                offset: r["offset"].as_i64().unwrap_or(0),
+                timestamp: r["timestamp"].as_i64().unwrap_or(0),
+                key: b64(&r["key"]),
+                value: b64(&r["value"]),
+                headers: r["headers"].as_array().into_iter().flatten().filter_map(|h| Some((h["key"].as_str()?.to_string(), b64(&h["value"]).unwrap_or_default()))).collect(),
+            })
+            .collect())
+    }
+
+    async fn commit(&self, stream: &str, topic: &str, group: &str, consumer: &str, partition: i32, offset: i64) -> anyhow::Result<()> {
+        let (base, token, http) = &self.api;
+        let enc = |s: &str| urlencoding::encode(s).into_owned();
+        let body = serde_json::json!({ "consumer": consumer, "offsets": [{ "topic": topic, "partition": partition, "offset": offset }] });
+        let mut req = http.post(format!("{base}/v1/streams/{}/groups/{}/commit", enc(stream), enc(group))).json(&body);
+        if let Some(t) = token {
+            req = req.bearer_auth(t);
+        }
+        let resp = req.send().await?;
+        anyhow::ensure!(resp.status().is_success(), "the stream answered {}", resp.status());
+        Ok(())
+    }
+
+    async fn produce(&self, stream: &str, topic: &str, r: &apps_control::integrations::StreamRecord) -> anyhow::Result<()> {
+        use base64::Engine;
+        let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+        let (base, token, http) = &self.api;
+        let enc = |s: &str| urlencoding::encode(s).into_owned();
+        let headers: Vec<serde_json::Value> = r.headers.iter().map(|(k, v)| serde_json::json!({ "key": k, "value_base64": b64(v) })).collect();
+        let mut rec = serde_json::json!({ "headers": headers });
+        if let Some(k) = &r.key {
+            rec["key_base64"] = b64(k).into();
+        }
+        if let Some(v) = &r.value {
+            rec["value_base64"] = b64(v).into();
+        }
+        let mut req = http.post(format!("{base}/v1/streams/{}/topics/{}/records", enc(stream), enc(topic))).json(&serde_json::json!({ "records": [rec] }));
+        if let Some(t) = token {
+            req = req.bearer_auth(t);
+        }
+        let resp = req.send().await?;
+        anyhow::ensure!(resp.status().is_success(), "the stream answered {}", resp.status());
+        Ok(())
+    }
+
     async fn link_vars(&self, kind: LinkKind, r#ref: &str) -> anyhow::Result<Vec<(String, String)>> {
         match kind {
             LinkKind::Postgres => {
