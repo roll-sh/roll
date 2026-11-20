@@ -140,7 +140,9 @@ const PROMPTS: &[Prompt] = &[
              it was used from, so I can tell whether one is unexpected. Say which tokens to revoke (unused) and \
              which need an expiry. If you also have secrets_findings or previews_mask_suggestions, add the secrets \
              that need fixing and the personal data previews don't mask yet; with secrets_verify_audit, each \
-             project whose secrets audit log doesn't hold (its first break); with storage_list_keys, the S3 access \
+             project whose secrets audit log doesn't hold (its first break), and each whose log has digests on a \
+             pulled signing key that nothing later vouches for (pulled with countersigned null: say from when to \
+             when); legacy digests are only a note; with storage_list_keys, the S3 access \
              keys that are admin over every bucket or unused for 90 days. Then what's open to the internet, with \
              whichever of these you have: buckets that are public (storage_list_buckets), search clusters with no \
              IP allowlist (search_list_clusters), and previews shared outside the team (previews_list, then \
