@@ -954,7 +954,10 @@ async fn stream_log(apps: &Arc<Apps>, key: String, q: LogQuery, done: Option<tok
     if let Some(k) = &keep {
         first.retain(|l| k(l));
     }
-    let stream = async_stream(first, move |tx| async move {
+    // A log that ends (a build, a job, a cron run) says so last, so a follower stops instead of
+    // taking the close for a drop and reading it all again.
+    let ends = done.is_some();
+    let stream = async_stream(first, ends, move |tx| async move {
         let mut done = done;
         loop {
             let next = async {
@@ -985,8 +988,8 @@ async fn stream_log(apps: &Arc<Apps>, key: String, q: LogQuery, done: Option<tok
     Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))).into_response())
 }
 
-/// An SSE stream of `first`, then whatever `more` sends.
-fn async_stream<F, Fut>(first: Vec<LogLine>, more: F) -> impl futures::Stream<Item = Result<Event, Infallible>>
+/// An SSE stream of `first`, then whatever `more` sends, then (`end`) an `end` event.
+fn async_stream<F, Fut>(first: Vec<LogLine>, end: bool, more: F) -> impl futures::Stream<Item = Result<Event, Infallible>>
 where
     F: FnOnce(tokio::sync::mpsc::Sender<LogLine>) -> Fut + Send + 'static,
     Fut: std::future::Future<Output = ()> + Send + 'static,
@@ -1000,9 +1003,12 @@ where
         }
         more(tx).await;
     });
-    futures::stream::unfold(rx, |mut rx| async move {
-        let l = rx.recv().await?;
-        Some((Ok(Event::default().data(serde_json::to_string(&l).expect("JSON"))), rx))
+    futures::stream::unfold((rx, end), |(mut rx, end)| async move {
+        match rx.recv().await {
+            Some(l) => Some((Ok(Event::default().data(serde_json::to_string(&l).expect("JSON"))), (rx, end))),
+            None if end => Some((Ok(Event::default().event("end").data("end")), (rx, false))),
+            None => None,
+        }
     })
 }
 

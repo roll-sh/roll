@@ -1495,14 +1495,15 @@ function Traces({ preview: p, n }: { preview: Preview; n: number }) {
           {routes.slice(0, 12).map((r) => (
             <div key={r.name} className="border-b border-line px-2.5 py-1 font-mono last:border-b-0" title={r.slower ? "clearly slower than main's preview" : undefined}>
               <div className="flex items-baseline gap-2 text-[10.5px]">
-                <span className={`min-w-0 flex-1 truncate ${r.slower ? "text-danger" : "text-soft"}`} title={r.name}>
+                <span className={`min-w-0 flex-1 truncate ${r.slower || r.over_budget ? "text-danger" : "text-soft"}`} title={r.name}>
                   {r.name}
                 </span>
                 {r.repeated && <RepeatedTag repeated={r.repeated} />}
               </div>
               <div className="flex flex-wrap gap-x-3 text-[10px] text-subtle tabular-nums">
                 <span>{r.count}×</span>
-                <span className={r.slower ? "text-danger" : "text-muted"}>p50 {r.p50_ms} ms</span>
+                <span className={r.slower || r.over_budget ? "text-danger" : "text-muted"}>p50 {r.p50_ms} ms</span>
+                {r.budget_ms != null && <span className={r.over_budget ? "text-danger" : ""}>budget {r.budget_ms} ms</span>}
                 <span>p95 {r.p95_ms} ms</span>
                 <span>main {r.main_p50_ms == null ? "—" : `${r.main_p50_ms} ms`}</span>
                 {r.grew && (

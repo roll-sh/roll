@@ -311,63 +311,6 @@
               }
             }
           }
-        },
-        "push": {
-          "type": "array",
-          "maxItems": 4,
-          "description": "A roll stream's records POSTed to a web service's path as they arrive, the group's offset committed on each 2xx (Cloud Run's Pub/Sub push).",
-          "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": [
-              "stream",
-              "topic",
-              "group",
-              "path"
-            ],
-            "properties": {
-              "stream": {
-                "type": "string",
-                "pattern": "^st_[a-z0-9]{12}$",
-                "description": "The stream's id, on the service's own project."
-              },
-              "topic": {
-                "type": "string",
-                "pattern": "^[A-Za-z0-9._-]{1,249}$"
-              },
-              "group": {
-                "type": "string",
-                "pattern": "^[A-Za-z0-9._-]{1,249}$",
-                "description": "The consumer group whose committed offsets say what was delivered."
-              },
-              "path": {
-                "type": "string",
-                "pattern": "^/",
-                "description": "Where each record is POSTed."
-              },
-              "environment": {
-                "type": "string",
-                "description": "The environment that gets them (default production)."
-              },
-              "dead_letter": {
-                "type": "string",
-                "pattern": "^[A-Za-z0-9._-]{1,249}$",
-                "description": "A topic of the same stream a record goes to after max_attempts failed tries."
-              },
-              "max_attempts": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 100,
-                "description": "Default 5, with dead_letter."
-              },
-              "timeout_s": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 600,
-                "description": "How long one POST may take (default 30)."
-              }
-            }
-          }
         }
       }
     },

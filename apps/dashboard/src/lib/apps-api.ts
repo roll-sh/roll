@@ -1587,7 +1587,7 @@ export function followLog(
     | { build: { service: string; env: string; deployment: string } }
     | { job: { service: string; env: string; job: string } }
     | { run: { service: string; env: string; run: string } },
-  opts: { tail?: number; onLine: (l: LogLine) => void; onReset: () => void; onOpen?: (open: boolean) => void },
+  opts: { tail?: number; onLine: (l: LogLine) => void; onReset: () => void; onOpen?: (open: boolean) => void; onEnd?: () => void },
 ): () => void {
   const path =
     "runtime" in kind
@@ -1598,13 +1598,20 @@ export function followLog(
           ? `${env(kind.run.service, kind.run.env)}/runs/${encodeURIComponent(kind.run.run)}/logs`
           : `${dep(kind.build.service, kind.build.env, kind.build.deployment)}/logs`;
   const http = "runtime" in kind && kind.runtime.http ? true : undefined;
-  return streamSse(`${ROLL_API}${path}${qs({ follow: true, tail: opts.tail ?? 500, http })}`, {
+  const stop = streamSse(`${ROLL_API}${path}${qs({ follow: true, tail: opts.tail ?? 500, http })}`, {
     headers: operatorHeaders,
     onOpen: (open) => {
       if (open) opts.onReset();
       opts.onOpen?.(open);
     },
     onEvent: (e) => {
+      // A build's, a job's or a run's log ended: nothing more comes, so no reconnect (one would
+      // read it all again).
+      if (e.event === "end") {
+        stop();
+        opts.onEnd?.();
+        return;
+      }
       try {
         opts.onLine(JSON.parse(e.data) as LogLine);
       } catch {
@@ -1612,6 +1619,7 @@ export function followLog(
       }
     },
   });
+  return stop;
 }
 
 // ── how the dashboard shows them ──
