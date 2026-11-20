@@ -73,6 +73,7 @@ heapprof = []
 powerloss = []
 
 [dev-dependencies]
+libmimalloc-sys.workspace = true
 fallible-iterator.workspace = true
 futures.workspace = true
 snap.workspace = true

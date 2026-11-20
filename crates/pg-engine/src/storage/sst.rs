@@ -1991,9 +1991,13 @@ fn entries_n<const N: usize>(s: &mut [ZipSide; N], bound: Option<&[u8]>, f: &mut
 
 impl Block {
 
-    /// The bytes it holds (what the block cache counts).
+    /// The bytes it holds (what the block cache counts): its buffer, the `Arc` it is cached
+    /// in, and the header `Bytes` makes of a buffer once it is cloned (a range read's values),
+    /// each at the allocator's size for it.
     pub fn mem_bytes(&self) -> usize {
-        self.data.len() + std::mem::size_of::<Block>()
+        use super::cache::alloc_bytes;
+        let arc = 2 * std::mem::size_of::<usize>() + std::mem::size_of::<Block>();
+        alloc_bytes(self.data.len()) + alloc_bytes(arc) + alloc_bytes(3 * std::mem::size_of::<usize>())
     }
 
     /// Every entry with its key whole, for readers that go backwards or read a block once.
