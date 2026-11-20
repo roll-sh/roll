@@ -204,6 +204,19 @@ pub struct SlowerRoute {
     pub count: usize,
     pub p50_ms: u64,
     pub main_p50_ms: u64,
+    /// The span inside it whose time grew most against main's (Sentry's span comparison): where
+    /// the time went. `None` when no span of it did (or main's spans aren't on this node).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grew: Option<GrewSpan>,
+}
+
+/// A span name's median time in one route's traces (each trace's spans of that name summed: an
+/// N+1's 24 queries are one), here and on main's preview (0: main's has none of it).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GrewSpan {
+    pub span: String,
+    pub ms: u64,
+    pub main_ms: u64,
 }
 
 /// A preview's error groups that main's preview (`branch`) doesn't have: how many, and the most

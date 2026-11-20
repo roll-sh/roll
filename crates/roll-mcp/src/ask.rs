@@ -6,7 +6,7 @@
 //! the gate decides it as if the client had sent the id itself, and there's no `requestState` to
 //! trust.
 
-use crate::prompts::{Source, is_id, workspace_projects};
+use crate::prompts::{Source, is_choice, workspace_projects};
 use serde_json::{Value, json};
 
 /// The key of the form for a missing `param` in `inputRequests` and `inputResponses`.
@@ -36,15 +36,20 @@ pub fn source(product: &str, param: &str) -> Option<Source> {
         ("search", "index") => Some(Source { tool: "search_list_indices", args: |a| json!({ "cluster": a["cluster"] }), fields: &["index", "name"] }),
         ("queues", "vhost") => Some(Source { tool: "queues_list_vhosts", args: |_| json!({}), fields: &["name"] }),
         ("queues", "queue") => Some(Source { tool: "queues_list_queues", args: |a| json!({ "vhost": a["vhost"] }), fields: &["name"] }),
+        // roll code's (fronted from `code_control::mcp`): a repo as `owner/name`, an owner of one.
+        ("code" | "workspace", "repo") => Some(Source { tool: "code_list_repos", args: |_| json!({}), fields: &["full_name"] }),
+        ("code" | "agents", "owner") => Some(Source { tool: "code_list_repos", args: |_| json!({}), fields: &["owner"] }),
         _ => None,
     }
 }
 
-/// The first id `tool` requires that `args` lacks and that has choices to offer.
-pub fn missing(tool: &crate::tools::Tool, args: &Value) -> Option<(&'static str, Source)> {
-    tool.params.iter().filter(|p| p.required).find_map(|p| {
-        let blank = args.get(p.name).is_none_or(|v| v.is_null() || v.as_str().is_some_and(str::is_empty));
-        if blank { source(tool.product, p.name).map(|s| (p.name, s)) } else { None }
+/// The first id a tool requires that `args` lacks and that has choices to offer, from its
+/// definition (roll's own tools and the ones fronted from another crate alike).
+pub fn missing(def: &Value, args: &Value) -> Option<(String, Source)> {
+    let product = def["_meta"]["roll/product"].as_str()?;
+    def["inputSchema"]["required"].as_array()?.iter().filter_map(Value::as_str).find_map(|p| {
+        let blank = args.get(p).is_none_or(|v| v.is_null() || v.as_str().is_some_and(str::is_empty));
+        if blank { source(product, p).map(|s| (p.to_string(), s)) } else { None }
     })
 }
 
@@ -54,7 +59,7 @@ pub fn fill(args: &mut Value, responses: &Value) -> Result<(), String> {
     for (key, r) in responses.as_object().into_iter().flatten() {
         let Some(param) = key.strip_prefix(KEY_PREFIX) else { continue };
         match (r["action"].as_str(), r["content"]["value"].as_str()) {
-            (Some("accept"), Some(v)) if is_id(v) => args[param] = json!(v),
+            (Some("accept"), Some(v)) if is_choice(v) => args[param] = json!(v),
             (Some("accept"), _) => return Err(format!("the {param} chosen isn't an id (letters, digits, _ . -; at most 64)")),
             _ => return Err(format!("no {param} was chosen, so nothing ran")),
         }
@@ -102,10 +107,13 @@ mod tests {
         assert_eq!(args["project"], "prj_a1");
         assert!(fill(&mut json!({}), &json!({ "missing:project": { "action": "decline" } })).is_err());
         assert!(fill(&mut json!({}), &json!({ "missing:project": { "action": "accept", "content": { "value": "../x" } } })).is_err());
-        let postgres = crate::tools::all().iter().find(|t| t.name == "postgres_get_project").unwrap();
-        assert_eq!(missing(postgres, &json!({})).map(|(p, s)| (p, s.tool)), Some(("project", "postgres_list_projects")));
-        assert!(missing(postgres, &json!({ "project": "prj_a1" })).is_none());
-        let workspace = crate::tools::all().iter().find(|t| t.name == "workspace_get_project").unwrap();
-        assert_eq!(missing(workspace, &json!({})).map(|(p, s)| (p, s.tool)), Some(("id", "workspace_list_projects")));
+        assert!(fill(&mut json!({}), &json!({ "missing:repo": { "action": "accept", "content": { "value": "../.." } } })).is_err());
+        fill(&mut args, &json!({ "missing:repo": { "action": "accept", "content": { "value": "acme/app" } } })).unwrap();
+        assert_eq!(args["repo"], "acme/app");
+        let def = |name: &str| crate::tools::all().iter().find(|t| t.name == name).unwrap().definition_ref();
+        let missed = |name: &str, args: Value| missing(def(name), &args).map(|(p, s)| (p, s.tool));
+        assert_eq!(missed("postgres_get_project", json!({})), Some(("project".into(), "postgres_list_projects")));
+        assert!(missed("postgres_get_project", json!({ "project": "prj_a1" })).is_none());
+        assert_eq!(missed("workspace_get_project", json!({})), Some(("id".into(), "workspace_list_projects")));
     }
 }
