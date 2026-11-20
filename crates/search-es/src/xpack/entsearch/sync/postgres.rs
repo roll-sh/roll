@@ -14,9 +14,12 @@
 //!   [`DOC_BYTES_MAX`] comes back as NULL (skipped and counted), so an honest page is at most
 //!   `PAGE_BYTES + DOC_BYTES_MAX` of rows' text, and a page past that (or past its row count)
 //!   fails the sync.
-//! - A page's rows are streamed: each is turned into its document and dropped as it arrives
-//!   (the client library hands rows over one message at a time and reads no further ahead), and
-//!   the documents a page holds are charged to the cluster's request breaker until indexed.
+//! - The query builds each document's source as JSON text (columns renamed, roll's fields
+//!   added) and its `_id`; a page's rows are streamed and each document's text goes into the
+//!   `_bulk` body as it is ([`super::Page`]), never parsed into a tree. A page in memory is its
+//!   body's bytes, charged to the cluster's request breaker until it's indexed.
+//! - Every byte the connection reads counts against the sync's `max_bytes_per_second`, rows the
+//!   sync rules exclude and the server's messages included.
 //! - The connection counts the bytes it reads ([`Counted`]): a query whose answer passes its
 //!   window ([`PAGE_WINDOW`]) fails the sync, so a server ignoring the cut can't grow a page.
 //! - Every message's 5-byte header is read on the plaintext side ([`Framed`], under TLS through
@@ -25,14 +28,17 @@
 //!   does a row (or row description) of more than [`COLUMNS_MAX`] columns, since the library
 //!   keeps a position per column of every row.
 //! - The server's notices are dropped as they arrive (their bytes count in the window): none is
-//!   kept, and none of a server's text reaches the node's logs.
+//!   kept, and none of a server's text reaches the node's logs. Before the connection is ready
+//!   the client library keeps them, so [`Frames`] caps them there as it caps parameter statuses.
+//! - A schema's table list is at most [`TABLES_MAX`] names, and a job records the first
+//!   [`SKIPPED_SHOWN`] tables it skipped plus their count.
 //! - Every statement has a client-side timeout a little over the session's `statement_timeout`
 //!   and races the job's cancel, and the socket has TCP keepalives: a silent server or a dead
 //!   network ends the sync instead of holding its slot.
 
 use super::config::Values;
 use super::{DOC_BYTES_MAX, PAGE_BYTES, PAGE_DOCS, Sink, Stop};
-use crate::json::{Map, Value};
+use crate::json::Value;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -58,11 +64,14 @@ pub const PAGE_WINDOW: u64 = 2 * (PAGE_BYTES + DOC_BYTES_MAX) as u64 + (4 << 20)
 /// The most a catalog query's answer may take (its rows are collected: a few hundred thousand
 /// table names).
 const CATALOG_WINDOW: u64 = 8 << 20;
-/// The most columns a row may have: roll's queries answer a row's JSON and its primary key's
-/// columns (an index has at most 32 in Postgres).
+/// The most columns a row may have: roll's queries answer a document, its id and its primary
+/// key's columns (an index has at most 32 in Postgres).
 const COLUMNS_MAX: u16 = 64;
-/// What a page's documents are charged to the breaker per byte of rows' text (parsed JSON).
-const PARSED_FACTOR: u64 = 3;
+/// The most tables a schema may list (name the ones to sync in `tables` past it).
+const TABLES_MAX: usize = 10_000;
+/// How many skipped tables a job names (`metadata.skipped_tables`; the count is
+/// `metadata.skipped_table_count`).
+const SKIPPED_SHOWN: usize = 100;
 
 /// `"name"`, quotes doubled.
 fn ident(name: &str) -> String {
@@ -119,7 +128,8 @@ fn db_error(e: tokio_postgres::Error) -> String {
             None => e.to_string(),
         }
     };
-    super::capped(text)
+    // Not cut here: the sync scrubs every secret from it first, then cuts it (`super::capped`).
+    text
 }
 
 /// How many bytes the connection may still read before the current query fails.
@@ -209,17 +219,20 @@ struct Frames {
     have: usize,
     /// Body bytes of the current message still to come.
     remaining: u64,
-    /// `ParameterStatus` messages (`S`) so far, and their bytes: the client library keeps every
-    /// one for the connection's life, so a server could grow it without end.
+    /// Messages the client library keeps, and their bytes: every `ParameterStatus` (`S`), for
+    /// the connection's life, and every notice (`N`) before the connection is ready (`Z`), so a
+    /// server could grow either without end.
     params: u64,
     param_bytes: u64,
+    ready: bool,
     /// The column count of the current row (`D`) or row description (`T`), as its first two body
     /// bytes arrive.
     columns: Option<(usize, [u8; 2])>,
 }
 
-/// The most `ParameterStatus` messages, and bytes of them, one connection takes (a server sends
-/// about fifteen at startup and one per `SET` of a reported setting).
+/// The most `ParameterStatus` messages and early notices, and bytes of them, one connection
+/// takes (a server sends about fifteen statuses at startup and one per `SET` of a reported
+/// setting).
 const PARAMS_MAX: u64 = 256;
 const PARAM_BYTES_MAX: u64 = 64 << 10;
 
@@ -260,12 +273,16 @@ impl Frames {
                 if matches!(self.header[0], b'D' | b'T') && self.remaining >= 2 {
                     self.columns = Some((0, [0; 2]));
                 }
-                if self.header[0] == b'S' {
-                    self.params += 1;
-                    self.param_bytes += len;
-                    if self.params > PARAMS_MAX || self.param_bytes > PARAM_BYTES_MAX {
-                        return Err(std::io::Error::other("the server sent more parameter statuses than a connection keeps"));
+                match self.header[0] {
+                    b'Z' => self.ready = true,
+                    b'S' | b'N' if self.header[0] == b'S' || !self.ready => {
+                        self.params += 1;
+                        self.param_bytes += len;
+                        if self.params > PARAMS_MAX || self.param_bytes > PARAM_BYTES_MAX {
+                            return Err(std::io::Error::other("the server sent more parameter statuses and notices than a connection keeps"));
+                        }
                     }
+                    _ => {}
                 }
             }
         }
@@ -422,15 +439,23 @@ struct Table {
 async fn tables(conn: &Conn, sink: &Sink<'_>, schema: &str, wanted: &[String], incremental: Option<&str>) -> Result<(Vec<Table>, Vec<String>), Stop> {
     let c = &conn.client;
     conn.window.open(CATALOG_WINDOW);
-    let rows = wait(
-        sink,
-        &conn.window,
-        &format!("listing the tables of [{schema}]"),
-        c.query("SELECT c.relname FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relkind IN ('r', 'p') ORDER BY 1", &[&schema]),
-    )
-    .await?;
-    let all: Vec<String> = rows.iter().map(|r| r.get(0)).collect();
-    let names: Vec<String> = if wanted.is_empty() || wanted.iter().any(|t| t == "*") {
+    let every = wanted.is_empty() || wanted.iter().any(|t| t == "*");
+    if wanted.len() > TABLES_MAX {
+        return Err(Stop::Failed(format!("[tables] names more than {TABLES_MAX} tables")));
+    }
+    let what = format!("listing the tables of [{schema}]");
+    let list = "SELECT c.relname FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relkind IN ('r', 'p')";
+    let rows = if every {
+        wait(sink, &conn.window, &what, c.query(&format!("{list} ORDER BY 1 LIMIT {}", TABLES_MAX + 1), &[&schema])).await?
+    } else {
+        wait(sink, &conn.window, &what, c.query(&format!("{list} AND c.relname = ANY($2) ORDER BY 1"), &[&schema, &wanted])).await?
+    };
+    let all: Vec<String> = rows.iter().map(|r| r.try_get(0)).collect::<Result<_, _>>().map_err(|e| Stop::Failed(format!("{what} failed: {}", db_error(e))))?;
+    drop(rows);
+    if all.len() > TABLES_MAX {
+        return Err(Stop::Failed(format!("the schema [{schema}] has more than {TABLES_MAX} tables: name the ones to sync in [tables]")));
+    }
+    let names: Vec<String> = if every {
         all
     } else {
         if let Some(missing) = wanted.iter().find(|t| !all.contains(t)) {
@@ -493,7 +518,8 @@ pub async fn sync(v: &Values, sink: &mut Sink<'_>, full: bool, cursor: &Value, a
     };
     let (tables, skipped) = tables(&conn, sink, &schema, &v.list("tables"), incremental_col.as_deref()).await?;
     if !skipped.is_empty() {
-        sink.counters.metadata.insert("skipped_tables".into(), Value::Arr(skipped.into_iter().map(Value::from).collect()));
+        sink.counters.metadata.insert("skipped_table_count".into(), (skipped.len() as i64).into());
+        sink.counters.metadata.insert("skipped_tables".into(), Value::Arr(skipped.into_iter().take(SKIPPED_SHOWN).map(Value::from).collect()));
     }
     let mut next = cursor.get("tables").and_then(Value::as_object).cloned().unwrap_or_default();
     let ts = super::now_nanos_string();
@@ -520,8 +546,11 @@ struct Read<'a> {
 }
 
 /// A page's query: at most `n` rows after `after` (the last key's values as text), cut by the
-/// server once their sizes pass [`PAGE_BYTES`] (always at least one row). It answers each row's
-/// JSON (NULL when over [`DOC_BYTES_MAX`]) and its key values as text.
+/// server once their documents' sizes pass [`PAGE_BYTES`] (always at least one row). It answers
+/// each row's document as JSON text (NULL when over [`DOC_BYTES_MAX`]): roll's fields, then the
+/// columns as `{schema}_{table}_{column}`, built by the server so the sync never parses it. Then
+/// the document's `_id` (`{database}_{schema}_{table}_{key values joined by _}`) and the key
+/// values as text.
 fn page_sql(r: &Read, qualified: &str, after: Option<&[String]>, n: usize) -> String {
     let t = r.table;
     let mut conds = Vec::new();
@@ -538,12 +567,26 @@ fn page_sql(r: &Read, qualified: &str, after: Option<&[String]>, n: usize) -> St
     let ocols = (0..t.key.len()).map(|i| format!("o{i}")).collect::<Vec<_>>().join(", ");
     let kcols = (0..t.key.len()).map(|i| format!("k{i}")).collect::<Vec<_>>().join(", ");
     let inner_keys = t.key.iter().enumerate().map(|(i, (k, _))| format!("t.{c} AS o{i}, t.{c}::text AS k{i}", c = ident(k))).collect::<Vec<_>>().join(", ");
+    let id_parts = t.key.iter().map(|(k, _)| format!("to_json(t.{}) #>> '{{}}'", ident(k))).collect::<Vec<_>>().join(", ");
+    let (db, schema, table) = (literal(r.database), literal(r.schema), literal(&t.name));
+    let id = format!("concat_ws('_', {db}, {schema}, {table}, {id_parts})");
+    let prefix = literal(&format!("{}_{}_", r.schema, t.name));
+    let doc = format!(
+        "(SELECT json_object_agg(f.k, f.v ORDER BY f.o, f.n)::text FROM (\
+           SELECT 0 AS o, 0::bigint AS n, '_timestamp'::text AS k, to_json({ts}::text) AS v \
+           UNION ALL SELECT 0, 1, 'database', to_json({db}::text) \
+           UNION ALL SELECT 0, 2, 'schema', to_json({schema}::text) \
+           UNION ALL SELECT 0, 3, 'table', to_json({table}::text) \
+           UNION ALL SELECT 1, e.n, {prefix} || e.key, e.value FROM json_each(row_to_json(t)) WITH ORDINALITY AS e(key, value, n)\
+         ) f)",
+        ts = literal(r.ts)
+    );
     let over = DOC_BYTES_MAX + 1;
     format!(
-        "SELECT CASE WHEN len > {DOC_BYTES_MAX} THEN NULL ELSE j END, {kcols} FROM (\
-           SELECT j, len, {kcols}, {ocols}, sum(least(len, {over})) OVER (ORDER BY {ocols} ROWS UNBOUNDED PRECEDING) - least(len, {over}) AS before FROM (\
-             SELECT j, octet_length(j) AS len, {kcols}, {ocols} FROM (\
-               SELECT row_to_json(t)::text AS j, {inner_keys} FROM {qualified} t{filter} ORDER BY {order} LIMIT {n}\
+        "SELECT CASE WHEN len > {DOC_BYTES_MAX} THEN NULL ELSE j END, id, {kcols} FROM (\
+           SELECT j, len, id, {kcols}, {ocols}, sum(least(len, {over})) OVER (ORDER BY {ocols} ROWS UNBOUNDED PRECEDING) - least(len, {over}) AS before FROM (\
+             SELECT j, octet_length(convert_to(j, 'UTF8')) AS len, id, {kcols}, {ocols} FROM (\
+               SELECT {doc} AS j, {id} AS id, {inner_keys} FROM {qualified} t{filter} ORDER BY {order} LIMIT {n}\
              ) a\
            ) b\
          ) c WHERE before < {PAGE_BYTES} ORDER BY {ocols}"
@@ -562,9 +605,8 @@ async fn read_table(conn: &mut Conn, sink: &mut Sink<'_>, r: &Read<'_>) -> Resul
         (Some(c), Some(_)) => wait(sink, &window, &label, tx.query_one(&format!("SELECT max({})::text FROM {qualified}", ident(c)), &[])).await?.get(0),
         _ => None,
     };
-    let prefix = format!("{}_{}_", r.schema, t.name);
     let mut after: Option<Vec<String>> = None;
-    // Pages ask for as many rows as the largest row seen leaves room for.
+    // Pages ask for as many rows as the largest document seen leaves room for.
     let mut largest = DOC_BYTES_MAX;
     loop {
         let n = (PAGE_BYTES / largest.max(1024)).clamp(1, r.fetch);
@@ -572,50 +614,36 @@ async fn read_table(conn: &mut Conn, sink: &mut Sink<'_>, r: &Read<'_>) -> Resul
         let failed = |e: tokio_postgres::Error| Stop::Failed(format!("{label} failed: {}", db_error(e)));
         let rows = wait(sink, &window, &label, tx.query_raw(&page_sql(r, &qualified, after.as_deref(), n), std::iter::empty::<&(dyn tokio_postgres::types::ToSql + Sync)>())).await?;
         let mut rows = std::pin::pin!(rows);
-        let mut docs = Vec::new();
-        let mut held = sink.reserve();
+        let mut page = sink.new_page();
         let (mut got, mut text) = (0usize, 0usize);
         largest = 0;
         while let Some(row) = wait(sink, &window, &label, async { rows.as_mut().next().await.transpose() }).await? {
             got += 1;
-            let keys = (0..t.key.len()).map(|i| row.try_get::<_, String>(i + 1)).collect::<Result<Vec<_>, _>>().map_err(failed)?;
-            let j = row.try_get::<_, Option<String>>(0).map_err(failed)?;
+            let keys = (0..t.key.len()).map(|i| row.try_get::<_, String>(i + 2)).collect::<Result<Vec<_>, _>>().map_err(failed)?;
+            let id = row.try_get::<_, String>(1).map_err(failed)?;
+            let doc = row.try_get::<_, Option<String>>(0).map_err(failed)?;
             drop(row);
             after = Some(keys);
-            let Some(j) = j else {
+            // Too large (the server's measure, then the text as received).
+            let Some(doc) = doc.filter(|d| d.len() <= DOC_BYTES_MAX) else {
                 sink.skip();
                 largest = DOC_BYTES_MAX;
                 continue;
             };
-            text += j.len();
-            // The server cuts a page at PAGE_BYTES of rows (the last may add a row's limit).
+            text += doc.len();
+            // The server cuts a page at PAGE_BYTES of documents (the last may add one's limit).
             if got > n || text > PAGE_BYTES + DOC_BYTES_MAX {
                 return Err(Stop::Failed(format!("{label} failed: the server sent more than one page may hold")));
             }
-            held.add(j.len() as u64 * PARSED_FACTOR, "connector page").map_err(|e| Stop::Failed(format!("{label} failed: {}", e.reason())))?;
-            largest = largest.max(j.len());
-            let Ok(Some(Value::Obj(cols))) = crate::json::parse(j.as_bytes()) else {
-                sink.skip();
-                continue;
-            };
-            drop(j);
-            let ids: Vec<String> = t.key.iter().map(|(k, _)| cols.get(k).map(Value::to_es_string).unwrap_or_default()).collect();
-            let mut doc = Map::new();
-            doc.insert("_id".into(), format!("{}_{}_{}_{}", r.database, r.schema, t.name, ids.join("_")).into());
-            doc.insert("_timestamp".into(), r.ts.into());
-            doc.insert("database".into(), r.database.into());
-            doc.insert("schema".into(), r.schema.into());
-            doc.insert("table".into(), t.name.clone().into());
-            for (k, v) in cols {
-                doc.insert(format!("{prefix}{k}"), v);
-            }
-            docs.push(doc);
+            largest = largest.max(doc.len());
+            sink.push_text(&mut page, &id, &doc)?;
         }
+        // Everything the page's answer took on the wire is throttled, excluded rows included.
+        sink.read(window.read.load(Ordering::SeqCst));
         if got == 0 {
             break;
         }
-        sink.page(docs).await?;
-        drop(held);
+        sink.send(page).await?;
     }
     window.open(CATALOG_WINDOW);
     wait(sink, &window, &label, tx.commit()).await?;
@@ -644,6 +672,24 @@ mod tests {
         }
         let err = frames.feed(&one("one_too_many")).unwrap_err();
         assert!(err.to_string().contains("parameter statuses"), "{err}");
+        // Notices before the connection is ready are kept by the library too; after, they're
+        // dropped as they arrive.
+        let notice = |kind: u8| {
+            let mut m = vec![kind];
+            m.extend_from_slice(&9u32.to_be_bytes());
+            m.extend_from_slice(b"SWARN");
+            m
+        };
+        let mut frames = Frames::default();
+        for _ in 0..PARAMS_MAX {
+            frames.feed(&notice(b'N')).unwrap();
+        }
+        assert!(frames.feed(&notice(b'N')).is_err());
+        let mut frames = Frames::default();
+        frames.feed(&[b'Z', 0, 0, 0, 5, b'I']).unwrap();
+        for _ in 0..=PARAMS_MAX {
+            frames.feed(&notice(b'N')).unwrap();
+        }
     }
 
     /// A row (or row description) of more columns than roll's queries answer fails the
@@ -666,41 +712,6 @@ mod tests {
         frames.feed(&big[..6]).unwrap();
         let err = frames.feed(&big[6..]).unwrap_err();
         assert!(err.to_string().contains("2000 columns"), "{err}");
-    }
-
-    /// The server's notices are taken and dropped by the connection's task (never logged, never
-    /// kept), and the connection goes on.
-    #[tokio::test]
-    async fn notices_are_dropped_not_logged() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            let (mut s, _) = listener.accept().await.unwrap();
-            let len = s.read_i32().await.unwrap();
-            let mut startup = vec![0; len as usize - 4];
-            s.read_exact(&mut startup).await.unwrap();
-            // AuthenticationOk, ReadyForQuery.
-            s.write_all(&[b'R', 0, 0, 0, 8, 0, 0, 0, 0, b'Z', 0, 0, 0, 5, b'I']).await.unwrap();
-            let body = b"SNOTICE\0C00000\0Mthe server's own text\0\0";
-            for _ in 0..3 {
-                let mut m = vec![b'N'];
-                m.extend_from_slice(&((body.len() + 4) as u32).to_be_bytes());
-                m.extend_from_slice(body);
-                s.write_all(&m).await.unwrap();
-            }
-            s.shutdown().await.unwrap();
-            let mut rest = Vec::new();
-            let _ = s.read_to_end(&mut rest).await;
-        });
-        let mut cfg = tokio_postgres::Config::new();
-        cfg.host("127.0.0.1").user("roll").dbname("shop").ssl_mode(SslMode::Disable);
-        let window = Window::default();
-        window.open(1 << 20);
-        let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
-        let stream = Framed::new(Counted { inner: tcp, window: window.clone() });
-        let (_client, conn) = cfg.connect_raw(stream, tokio_postgres::NoTls).await.unwrap();
-        tokio::time::timeout(Duration::from_secs(5), drive(conn, window.clone())).await.expect("the connection ends");
-        assert_eq!(window.notices.load(Ordering::SeqCst), 3);
     }
 
     /// A TLS session in name only: the plaintext stream after a handshake (what [`FramedTls`]

@@ -148,6 +148,8 @@ pub fn next_due(cluster: &Cluster, st: &crate::meta::ClusterState, syncs: Option
     let mut due: Option<i64> = None;
     let mut at = |t: i64| due = Some(due.map_or(t, |d| d.min(t)));
     let busy = busy_connectors(st);
+    // Whether it's this cluster's turn for a node slot: asked once, when a job wants one.
+    let mut turn: Option<bool> = None;
     let mut runnable = HashSet::new();
     for (id, c) in st.metadata.xpack.iter(CONNECTORS) {
         if !syncs_here(cluster, st, id, c) {
@@ -174,7 +176,7 @@ pub fn next_due(cluster: &Cluster, st: &crate::meta::ClusterState, syncs: Option
             "pending" if runnable.contains(cid) && !busy.contains(cid) && syncs.is_none_or(|s| !s.is_running(cid)) => match syncs {
                 Some(s) if !s.has_room() => {}
                 // Not this cluster's turn for a node slot: a slot freeing wakes it.
-                Some(s) if s.identity.get().is_some_and(|(k, o, pool)| !pool.admits(k, o)) => at(crate::time::now_millis() + SLOT_RETRY_MS),
+                Some(s) if !*turn.get_or_insert_with(|| s.identity.get().is_none_or(|(k, o, pool)| pool.admits(k, o))) => at(crate::time::now_millis() + SLOT_RETRY_MS),
                 _ => at(0),
             },
             // A job left by a node that went away; one running here checks in by itself (a long
@@ -720,6 +722,23 @@ impl Counters {
     }
 }
 
+/// A page of documents on its way to `_bulk`: the NDJSON body itself, each document's source
+/// as the text the source gave, charged to the cluster's request breaker as it grows. A page in
+/// memory is its bytes, never a tree of its documents.
+pub struct Page {
+    body: String,
+    /// Each document's source size (the job's volume).
+    sizes: Vec<u64>,
+    held: crate::breaker::Reservation,
+}
+
+impl Page {
+    /// The body's bytes so far.
+    pub fn bytes(&self) -> usize {
+        self.body.len()
+    }
+}
+
 /// Where a source's documents go: sync rules, bulk indexing into the connector's index,
 /// throttling, the job's heartbeat and cancel.
 pub struct Sink<'a> {
@@ -750,14 +769,15 @@ fn id_hash(id: &str) -> u64 {
 }
 
 impl Sink<'_> {
-    /// Counts bytes read from the source that aren't in a document (they're throttled too).
+    /// Counts bytes read from the source (what `max_bytes_per_second` throttles): every source
+    /// reports all it reads, listings, rows its rules exclude and protocol messages included.
     pub fn read(&mut self, bytes: u64) {
         self.counters.bytes += bytes;
     }
 
-    /// A hold on the cluster's request breaker for what a page keeps until it's indexed.
-    pub fn reserve(&self) -> crate::breaker::Reservation {
-        crate::breaker::Reservation::new(self.cluster.breakers.request(self.cluster, &self.cluster.state()))
+    /// A new, empty page.
+    pub fn new_page(&self) -> Page {
+        Page { body: String::new(), sizes: Vec::new(), held: crate::breaker::Reservation::new(self.cluster.breakers.request(self.cluster, &self.cluster.state())) }
     }
 
     /// Records a document the source couldn't hand over (too large).
@@ -765,33 +785,59 @@ impl Sink<'_> {
         self.counters.skipped += 1;
     }
 
-    /// Indexes one page of documents (each with its `_id`).
-    pub async fn page(&mut self, docs: Vec<Map>) -> Result<(), Stop> {
-        let mut body = String::new();
-        let mut sizes = Vec::new();
-        for mut doc in docs {
-            let Some(id) = doc.shift_remove("_id").map(|v| v.to_es_string()) else { continue };
-            if self.counters.processed >= self.max_docs {
-                return Err(Stop::Failed(format!("a sync reads at most {} documents ({MAX_DOCS_PER_SYNC})", self.max_docs)));
-            }
-            self.counters.processed += 1;
-            if !self.rules.includes(&doc) {
-                continue;
-            }
-            if self.full {
-                if self.seen.len() >= MAX_SEEN {
-                    return Err(Stop::Failed(format!("a full sync indexes at most {MAX_SEEN} documents")));
-                }
-                self.seen.push(id_hash(&id));
-            }
-            let source = Value::Obj(doc).to_json();
-            self.counters.bytes += source.len() as u64;
-            sizes.push(source.len() as u64);
-            body.push_str(&obj! { "index" => obj! { "_index" => self.index.clone(), "_id" => id } }.to_json());
-            body.push('\n');
-            body.push_str(&source);
-            body.push('\n');
+    /// Adds document `id` whose source is the JSON object `source`, as text: it goes into the
+    /// page's body as it is, and the sync rules read only the fields they name from it
+    /// ([`rules::pick`]), so no document becomes a tree here.
+    pub fn push_text(&mut self, page: &mut Page, id: &str, source: &str) -> Result<(), Stop> {
+        self.count()?;
+        let fields = self.rules.fields();
+        if !fields.is_empty() && !self.rules.includes(&rules::pick(source, &fields)) {
+            return Ok(());
         }
+        self.append(page, id, source)
+    }
+
+    /// Adds document `id` (a source that builds its documents itself).
+    pub fn push_doc(&mut self, page: &mut Page, id: &str, doc: Map) -> Result<(), Stop> {
+        self.count()?;
+        if !self.rules.includes(&doc) {
+            return Ok(());
+        }
+        self.append(page, id, &Value::Obj(doc).to_json())
+    }
+
+    /// Counts a document read, failing past [`MAX_DOCS_PER_SYNC`].
+    fn count(&mut self) -> Result<(), Stop> {
+        if self.counters.processed >= self.max_docs {
+            return Err(Stop::Failed(format!("a sync reads at most {} documents ({MAX_DOCS_PER_SYNC})", self.max_docs)));
+        }
+        self.counters.processed += 1;
+        Ok(())
+    }
+
+    fn append(&mut self, page: &mut Page, id: &str, source: &str) -> Result<(), Stop> {
+        if self.full {
+            if self.seen.len() >= MAX_SEEN {
+                return Err(Stop::Failed(format!("a full sync indexes at most {MAX_SEEN} documents")));
+            }
+            self.seen.push(id_hash(id));
+        }
+        let action = obj! { "index" => obj! { "_index" => self.index.clone(), "_id" => id } }.to_json();
+        let bytes = action.len() + source.len() + 2;
+        page.held.add(bytes as u64, "connector page").map_err(|e| Stop::Failed(format!("indexing into [{}] failed: {}", self.index, e.reason())))?;
+        page.sizes.push(source.len() as u64);
+        page.body.reserve(bytes);
+        page.body.push_str(&action);
+        page.body.push('\n');
+        page.body.push_str(source);
+        page.body.push('\n');
+        Ok(())
+    }
+
+    /// Indexes a page (the bulk request charges its body to `inflight_requests`, as any
+    /// `_bulk`'s), then throttles and checks the job.
+    pub async fn send(&mut self, page: Page) -> Result<(), Stop> {
+        let Page { body, sizes, held } = page;
         if !sizes.is_empty() {
             let uri = match &self.pipeline {
                 Some(p) => format!("/_bulk?pipeline={}", enc(p)),
@@ -812,6 +858,7 @@ impl Sink<'_> {
                 return Err(Stop::Failed(format!("{} documents failed to index (the last: {reason})", self.counters.failed)));
             }
         }
+        drop(held);
         self.throttle().await;
         self.check().await
     }
@@ -992,6 +1039,25 @@ mod tests {
         assert_eq!(password(&c), "");
         let x = call(&c, "GET", "/_connector/x", "").await;
         assert_eq!(x.get("status").and_then(Value::as_str), Some("needs_configuration"), "{x:?}");
+    }
+
+    /// A credential sealed on one cluster doesn't open on another (a branch's copy of the
+    /// state), whatever its name: the seal is bound to the catalog id.
+    #[tokio::test]
+    async fn a_seal_opens_only_on_its_own_cluster() {
+        let open = |catalog: &str| {
+            let mut cfg = ClusterConfig::new("same-name");
+            cfg.catalog_id = Some(catalog.into());
+            cfg.sealer = crate::seal::Sealer::from_secret("0123456789abcdef0123456789abcdef-catalog");
+            cfg
+        };
+        let a = Arc::new(Cluster::open(open("a"), Arc::new(MemoryStore::new())).await.unwrap());
+        call(&a, "PUT", "/_connector/x", r#"{"index_name":"content-x","is_native":true,"service_type":"postgresql"}"#).await;
+        call(&a, "PUT", "/_connector/x/_configuration", r#"{"values":{"password":"pw-a"}}"#).await;
+        let stored = a.state().metadata.xpack.get(CONNECTORS, "x").cloned().unwrap();
+        assert_eq!(config::Values::open(&a, &stored).ok().and_then(|v| v.text("password")).as_deref(), Some("pw-a"));
+        let b = Arc::new(Cluster::open(open("b"), Arc::new(MemoryStore::new())).await.unwrap());
+        assert!(config::Values::open(&b, &stored).is_err());
     }
 
     /// A sync running here whose statement outlasts the stale time isn't due again (the

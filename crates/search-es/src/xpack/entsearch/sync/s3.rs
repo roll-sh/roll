@@ -65,8 +65,9 @@ fn doc_id(bucket: &str, key: &str) -> String {
     md5::Md5::digest(format!("{bucket}/{key}").as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Listing pages in a row that may list nothing a sync reads (an endpoint paging through
-/// nothing, or a prefix of folder markers) before the sync gives up.
+/// Listing pages in a row with no key at all (an endpoint paging through nothing) before the
+/// sync gives up. Pages of keys the sync skips (folder markers, other extensions, unchanged
+/// objects) are progress and never count.
 const EMPTY_PAGES_MAX: usize = 100;
 
 /// One bucket (under a prefix): the newest `LastModified` it listed.
@@ -84,10 +85,8 @@ async fn read_bucket(client: &Client, sink: &mut Sink<'_>, t: &S3Rule, since: Op
         };
         let (objects, next, listing) = listed.map_err(|e| Stop::Failed(format!("listing bucket [{}] failed: {e}", t.bucket)))?;
         sink.read(listing as u64);
-        let mut docs = Vec::new();
-        let mut bytes = 0usize;
-        let mut held = sink.reserve();
-        let mut added = false;
+        empty = if objects.is_empty() { empty + 1 } else { 0 };
+        let mut page = sink.new_page();
         for o in objects {
             // Folder markers.
             if o.key.ends_with('/') && o.size == 0 {
@@ -96,7 +95,6 @@ async fn read_bucket(client: &Client, sink: &mut Sink<'_>, t: &S3Rule, since: Op
             if !t.extensions.is_empty() && !t.extensions.contains(&extract::extension(&o.key)) {
                 continue;
             }
-            added = true;
             if newest.as_deref().is_none_or(|n| o.last_modified.as_str() > n) {
                 newest = Some(o.last_modified.clone());
             }
@@ -105,7 +103,6 @@ async fn read_bucket(client: &Client, sink: &mut Sink<'_>, t: &S3Rule, since: Op
                 continue;
             }
             let mut doc = Map::new();
-            doc.insert("_id".into(), doc_id(&t.bucket, &o.key).into());
             doc.insert("_timestamp".into(), o.last_modified.clone().into());
             doc.insert("bucket".into(), t.bucket.clone().into());
             doc.insert("filename".into(), o.key.clone().into());
@@ -122,8 +119,6 @@ async fn read_bucket(client: &Client, sink: &mut Sink<'_>, t: &S3Rule, since: Op
                 match got {
                     Ok(Some(body)) => {
                         sink.read(body.len() as u64);
-                        bytes += body.len();
-                        held.add(body.len() as u64, "connector page").map_err(|e| Stop::Failed(format!("reading bucket [{}] failed: {}", t.bucket, e.reason())))?;
                         doc.insert("body".into(), extract::text(kind, &body).into());
                     }
                     // Gone since the listing.
@@ -131,20 +126,17 @@ async fn read_bucket(client: &Client, sink: &mut Sink<'_>, t: &S3Rule, since: Op
                     Err(e) => return Err(Stop::Failed(format!("reading [{}] from bucket [{}] failed: {e}", o.key, t.bucket))),
                 }
             }
-            docs.push(doc);
+            sink.push_doc(&mut page, &doc_id(&t.bucket, &o.key), doc)?;
             // A page holds at most PAGE_BYTES of objects' text.
-            if bytes >= PAGE_BYTES {
-                sink.page(std::mem::take(&mut docs)).await?;
-                held = sink.reserve();
-                bytes = 0;
+            if page.bytes() >= PAGE_BYTES {
+                let full = std::mem::replace(&mut page, sink.new_page());
+                sink.send(full).await?;
             }
         }
-        // Called on an empty page too: it throttles, and notices a cancel or the time limit.
-        sink.page(docs).await?;
-        drop(held);
-        empty = if added { 0 } else { empty + 1 };
+        // Sent empty too: it throttles, and notices a cancel or the time limit.
+        sink.send(page).await?;
         if empty >= EMPTY_PAGES_MAX && next.is_some() {
-            return Err(Stop::Failed(format!("listing bucket [{}] gave {EMPTY_PAGES_MAX} pages in a row with no object to read", t.bucket)));
+            return Err(Stop::Failed(format!("listing bucket [{}] gave {EMPTY_PAGES_MAX} pages in a row with no key", t.bucket)));
         }
         match next {
             Some(n) => token = Some(n),

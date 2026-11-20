@@ -201,13 +201,14 @@ fn value_of<'a>(m: &'a Map, field: &str) -> Option<&'a Value> {
 /// - A change of service starts from the new service's schema (`needs_configuration`): nothing
 ///   of the old service's configuration, its credentials included, carries over, so fields one
 ///   service doesn't guard can't be set aside for the other.
-/// - A write that `adopting` makes a waiting connector the cluster's own (one a branch inherited,
-///   or one from before an upgrade: [`super::waits_for_adoption`]) is treated as roll starting to
-///   run it: only credentials given in that write are kept, so its syncs only ever use
+/// - A write that makes a waiting connector the cluster's own (one a branch inherited, or one
+///   from before an upgrade: [`super::waits_for_adoption`]; `adopting` names the fields the write
+///   gave) is treated as roll starting to run it, and keeps only the credentials it gave: every
+///   other sensitive value is cleared, sealed or in the clear, so its syncs only ever use
 ///   credentials this cluster's owner entered.
 ///
 /// `cluster` is the cluster's catalog id, which seals are bound to ([`kind_of`]).
-pub fn protect(m: &mut Map, before: &Map, sealer: Option<&crate::seal::Sealer>, cluster: &str, adopting: bool) {
+pub fn protect(m: &mut Map, before: &Map, sealer: Option<&crate::seal::Sealer>, cluster: &str, adopting: Option<&[String]>) {
     let ran = runs(&Value::Obj(before.clone()));
     if !runs(&Value::Obj(m.clone())) {
         if ran {
@@ -221,7 +222,7 @@ pub fn protect(m: &mut Map, before: &Map, sealer: Option<&crate::seal::Sealer>, 
         m.insert("status".into(), "needs_configuration".into());
         return;
     }
-    let started = !ran || adopting;
+    let started = !ran || adopting.is_some();
     let id = m.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
     let had_secret = before.get("configuration").and_then(Value::as_object).is_some_and(|c| {
         c.values().any(|e| sensitive(e) && e.get("value").and_then(Value::as_str).is_some_and(|v| !v.is_empty()))
@@ -240,7 +241,8 @@ pub fn protect(m: &mut Map, before: &Map, sealer: Option<&crate::seal::Sealer>, 
             continue;
         }
         if started {
-            let next = if v == REDACTED || crate::seal::is_sealed(&v) {
+            let given = adopting.is_none_or(|g| g.iter().any(|f| f == k));
+            let next = if !given || v == REDACTED || crate::seal::is_sealed(&v) {
                 cleared = true;
                 Value::from("")
             } else {
@@ -433,7 +435,7 @@ mod tests {
         {
             e.insert("value".into(), "https://elsewhere.example".into());
         }
-        protect(&mut after, &before, None, "c", false);
+        protect(&mut after, &before, None, "c", None);
         assert_eq!(secret(&after, "aws_secret_access_key"), "");
         assert_eq!(after.get("status").and_then(Value::as_str), Some("needs_configuration"));
         // The same write giving the secret again keeps it (sealed).
@@ -448,7 +450,15 @@ mod tests {
         {
             e.insert("value".into(), "https://other.example".into());
         }
-        protect(&mut again, &after, None, "c", false);
+        protect(&mut again, &after, None, "c", None);
         assert_eq!(secret(&again, "aws_secret_access_key"), "new-secret", "no sealer: kept as given");
+
+        // Adopting keeps only what the write gave, a value stored in the clear included.
+        let mut adopted = again.clone();
+        protect(&mut adopted, &again, None, "c", Some(&[]));
+        assert_eq!(secret(&adopted, "aws_secret_access_key"), "");
+        let mut adopted = again.clone();
+        protect(&mut adopted, &again, None, "c", Some(&["aws_secret_access_key".to_string()]));
+        assert_eq!(secret(&adopted, "aws_secret_access_key"), "new-secret");
     }
 }

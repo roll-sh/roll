@@ -64,6 +64,14 @@ impl Rules {
         if problems.is_empty() { Ok(Rules(rules)) } else { Err(problems) }
     }
 
+    /// The fields the rules read (none when every document is included whatever it holds).
+    pub fn fields(&self) -> Vec<&str> {
+        let mut out: Vec<&str> = self.0.iter().map(|r| r.field.as_str()).filter(|f| *f != "_").collect();
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
     /// Whether `doc` is indexed.
     pub fn includes(&self, doc: &Map) -> bool {
         for r in &self.0 {
@@ -101,6 +109,108 @@ impl Cond {
             Cond::Regex(re) => re.is_match(&text),
             Cond::Gt(w) => cmp(w) == Some(std::cmp::Ordering::Greater),
             Cond::Lt(w) => cmp(w) == Some(std::cmp::Ordering::Less),
+        }
+    }
+}
+
+/// The top-level fields `wanted` of the JSON object `text`, read by scanning its tokens: nothing
+/// else of it is parsed, so a document whose other fields hold millions of values costs nothing
+/// here. A scalar is parsed; an object or array is kept as its JSON text (what a rule compares).
+/// Text that isn't an object gives what was read before it stopped making sense.
+pub fn pick(text: &str, wanted: &[&str]) -> Map {
+    let b = text.as_bytes();
+    let mut out = Map::new();
+    let mut i = ws(b, 0);
+    if b.get(i) != Some(&b'{') {
+        return out;
+    }
+    i += 1;
+    while out.len() < wanted.len() {
+        i = ws(b, i);
+        if b.get(i) != Some(&b'"') {
+            break;
+        }
+        let Some(key_end) = string_end(b, i) else { break };
+        let key = &text[i..key_end];
+        i = ws(b, key_end);
+        if b.get(i) != Some(&b':') {
+            break;
+        }
+        i = ws(b, i + 1);
+        let Some(end) = value_end(b, i) else { break };
+        let name = if key.contains('\\') {
+            crate::json::parse(key.as_bytes()).ok().flatten().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default()
+        } else {
+            key[1..key.len() - 1].to_string()
+        };
+        if wanted.contains(&name.as_str()) {
+            let raw = &text[i..end];
+            let v = match b[i] {
+                b'{' | b'[' => Value::Str(raw.to_string()),
+                _ => crate::json::parse(raw.as_bytes()).ok().flatten().unwrap_or(Value::Null),
+            };
+            out.insert(name, v);
+        }
+        i = ws(b, end);
+        if b.get(i) != Some(&b',') {
+            break;
+        }
+        i += 1;
+    }
+    out
+}
+
+fn ws(b: &[u8], mut i: usize) -> usize {
+    while b.get(i).is_some_and(|c| c.is_ascii_whitespace()) {
+        i += 1;
+    }
+    i
+}
+
+/// Past the string starting at `b[i]` (a quote).
+fn string_end(b: &[u8], i: usize) -> Option<usize> {
+    let mut j = i + 1;
+    while j < b.len() {
+        match b[j] {
+            b'\\' => j += 2,
+            b'"' => return Some(j + 1),
+            _ => j += 1,
+        }
+    }
+    None
+}
+
+/// Past the value starting at `b[i]`.
+fn value_end(b: &[u8], i: usize) -> Option<usize> {
+    match *b.get(i)? {
+        b'"' => string_end(b, i),
+        b'{' | b'[' => {
+            let (mut depth, mut j) = (0usize, i);
+            while j < b.len() {
+                match b[j] {
+                    b'"' => {
+                        j = string_end(b, j)?;
+                        continue;
+                    }
+                    b'{' | b'[' => depth += 1,
+                    b'}' | b']' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return Some(j + 1);
+                        }
+                    }
+                    _ => {}
+                }
+                j += 1;
+            }
+            None
+        }
+        _ => {
+            let mut j = i;
+            while j < b.len() && !matches!(b[j], b',' | b'}' | b']') && !b[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            (j > i).then_some(j)
         }
     }
 }
@@ -197,6 +307,13 @@ mod tests {
         assert!(!r.includes(&doc("apple", 500)), "numbers compare as numbers");
         assert!(!r.includes(&doc("pear", 5)), "regex anchors at the start");
         assert!(Rules::compile(&crate::json::parse(br#"{"rules":[{"id":"x","rule":"regex","value":"("}]}"#).unwrap().unwrap()).is_err());
+        // Read from a document's text without parsing the rest of it.
+        let text = r#"{ "zeros" : [0,0,[0,"]"],{"a":"}"}], "na\u006de" : "apple", "price": 500 , "x":{"y":1}}"#;
+        let picked = pick(text, &r.fields());
+        assert_eq!(picked.get("name").and_then(Value::as_str), Some("apple"));
+        assert_eq!(picked.get("price").and_then(Value::as_i64), Some(500));
+        assert!(!r.includes(&picked));
+        assert!(pick(text, &["zeros"]).get("zeros").and_then(Value::as_str).is_some_and(|z| z.ends_with("}]")));
     }
 
     /// An advanced rule naming a bucket outside the configured ones makes the draft invalid.

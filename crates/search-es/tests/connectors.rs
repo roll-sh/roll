@@ -329,6 +329,17 @@ async fn postgres_pages_are_bounded_by_bytes() {
     assert_eq!(at(&job, "status").as_str(), Some("completed"), "{job:?}");
     assert_eq!((num(&job, "indexed_document_count"), num(&job, "metadata.skipped_document_count"), num(&job, "total_document_count")), (40, 1, 40), "{job:?}");
     db.batch_execute("DROP TABLE wide").await.unwrap();
+
+    // A row of four million zeros (8 MB of text) is never parsed into a tree: its page is its
+    // bytes, charged to the request breaker, so under a 4 MB limit the sync fails instead.
+    db.batch_execute("DROP TABLE IF EXISTS zeros; CREATE TABLE zeros (id int PRIMARY KEY, z int[]); INSERT INTO zeros VALUES (1, array_fill(0, ARRAY[4000000]));").await.unwrap();
+    let (s, _, t) = call(&c, "PUT", "/_cluster/settings", Some(r#"{"persistent":{"indices.breaker.request.limit":"4mb"}}"#)).await;
+    assert_eq!(s, 200, "{t}");
+    pg_connector(&c, &addr, "zeros", "content-zeros", "zeros", PG_PASSWORD).await;
+    let job = finished(&c, &start(&c, "zeros", "full").await).await;
+    assert_eq!(at(&job, "status").as_str(), Some("error"), "{job:?}");
+    assert!(at(&job, "error").as_str().is_some_and(|e| e.contains("Data too large")), "{job:?}");
+    db.batch_execute("DROP TABLE zeros").await.unwrap();
 }
 
 /// How a fake Postgres behaves.

@@ -992,7 +992,7 @@ pub async fn update(ctx: &Ctx<'_>) -> EsResult<Reply> {
                 }
                 _ => {}
             }
-            let mut adopting = false;
+            let mut adopting: Option<Vec<String>> = None;
             match api {
                 // The service now runs on roll (or another service does): its schema.
                 Api::ConnectorUpdateServiceType | Api::ConnectorUpdateNative => sync::config::fill_schema(&mut m),
@@ -1000,13 +1000,17 @@ pub async fn update(ctx: &Ctx<'_>) -> EsResult<Reply> {
                 // whose configuration is written is the cluster's own (with only the
                 // credentials this write gives: `protect`).
                 Api::ConnectorUpdateConfiguration => {
-                    adopting = sync::waits_for_adoption(cluster, st, &id);
+                    if sync::waits_for_adoption(cluster, st, &id) {
+                        // The fields this write gives: only their credentials are kept.
+                        let given = body.get("configuration").or_else(|| body.get("values")).and_then(Value::as_object);
+                        adopting = Some(given.map(|g| g.keys().cloned().collect()).unwrap_or_default());
+                    }
                     remember_user(st, &id, &m, user, now_ms)?;
                     sync::adopt(st, &id, now_ms)?;
                 }
                 _ => {}
             }
-            sync::config::protect(&mut m, &before, sealer.as_deref(), &me, adopting);
+            sync::config::protect(&mut m, &before, sealer.as_deref(), &me, adopting.as_deref());
             sync::mark_current(st, now_ms)?;
             store::put(st, CONNECTORS, &id, updated_doc(m), now_ms).map(|_| false)
         })

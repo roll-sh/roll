@@ -540,14 +540,15 @@ both with Elasticsearch 9.5.5's shapes, validation and state machines
   running syncs (`sync::adopt_existing`, on the first load after the upgrade, before the
   scheduler starts: their credentials, stored in the clear until then, are sealed where they
   lie). That one rule also covers branches made before branches recorded what they inherited,
-  and native connectors whose credentials a tenant stored expecting nothing to run them. Every
-  write to a connector records that the cluster's connectors are made under roll's syncs (a
-  branch has its parent's record), so no connector made since ever waits, and a cluster with
-  nothing to pause isn't written to on load. Putting a connector again or
+  and native connectors whose credentials a tenant stored expecting nothing to run them. Putting
+  a connector, or updating one through any `_connector/{id}/_…` endpoint, records that the
+  cluster's connectors are made under roll's syncs (`sync::mark_current`; a branch has its
+  parent's record), so no connector made since ever waits, and a cluster with nothing to pause
+  isn't written to on load. Putting a connector again or
   writing its configuration makes it the cluster's own (`sync::adopt`), and that write is
   treated as roll starting to run it: only the credentials given in it are kept (sealed);
-  stored sealed values and `********` are cleared, and the connector needs configuration until
-  they are given. An empty configuration write adopts a connector without any password.
+  every other sensitive value, sealed or in the clear, and `********` are cleared, and the
+  connector needs configuration until they are given. An empty configuration write adopts a connector without any password.
 - **A run.** Claim the job (`in_progress`, `worker_hostname: roll`, `started_at`), read the
   source a page at a time, apply the active sync rules, and bulk-index each page into
   `index_name` through the connector's `pipeline` when that pipeline exists, as the user who
@@ -564,34 +565,45 @@ both with Elasticsearch 9.5.5's shapes, validation and state machines
   failures that are also over a tenth of the documents fail the job.
 - **Limits.** A sync reads at most `roll.connectors.max_docs_per_second` documents (1,000) and
   `roll.connectors.max_bytes_per_second` bytes (10 MiB) per second (node settings), sleeping
-  between pages to stay under them. A page is at most 500 rows or objects and is held in memory
-  only while it is indexed; its documents are charged to the cluster's request circuit breaker
-  meanwhile (three times a row's text, for its parsed fields; an object's text), so a node
-  under memory pressure fails the sync rather than the node:
+  between pages to stay under them. The bytes are everything read from the source: the
+  Postgres connection's every byte (rows the sync rules exclude and the server's messages
+  included), an S3 listing's and objects' bytes. A page is at most 500 rows or objects and is
+  held in memory only while it is indexed, as the `_bulk` body itself (`sync::Page`): each
+  document's source is text the source gave (Postgres) or built from an object's text (S3),
+  never a tree of the document, and the sync rules read only the fields they name from it with
+  a token scan (`rules::pick`). The body is charged to the cluster's request circuit breaker as
+  it grows, so a page costs its bytes, about 30 MiB at most, and a node under memory pressure
+  fails the sync rather than the node; sending it charges it to `inflight_requests` and the
+  bulk handler parses it as it parses any `_bulk`:
   - A table is read in one `REPEATABLE READ READ ONLY` transaction, a keyset page at a time
-    (`WHERE (key) > (last key) ORDER BY key LIMIT n`). The server cuts each page once its rows'
-    sizes pass 20 MiB (a running sum in the query), and a row over 10 MiB comes back as NULL
-    (skipped and counted), so an honest page is at most 30 MiB of rows' text; a page past that,
-    or past `n` rows, fails the sync. `n` follows the largest row seen, starting from 10 MiB.
-    A page's rows are streamed: each becomes its document and is dropped as it arrives (the
-    client library reads no further ahead than the row being taken), so a page in memory is its
-    documents, not its rows as well.
+    (`WHERE (key) > (last key) ORDER BY key LIMIT n`). The query builds each row's document as
+    JSON text (`json_object_agg`: roll's fields, then the columns renamed) and its `_id`. The
+    server cuts each page once its documents' UTF-8 sizes pass 20 MiB (a running sum in the
+    query), and a document over 10 MiB comes back as NULL (skipped and counted, as is one over
+    10 MiB as received), so an honest page is at most 30 MiB of documents; a page past that, or
+    past `n` rows, fails the sync. `n` follows the largest document seen, starting from 10 MiB.
+    A page's rows are streamed: each document's text goes into the body and the row is dropped
+    as it arrives (the client library reads no further ahead than the row being taken).
   - The connection counts the bytes it reads: a page's answer past 64 MiB (twice the page, plus
     framing) fails the sync, and a catalog query's (the table list, keys) past 8 MiB, so a
-    server ignoring the cut can't grow memory. Every message's header is read on the plaintext
+    server ignoring the cut can't grow memory. A schema lists at most 10,000 tables (past it,
+    name them in `tables`). Every message's header is read on the plaintext
     side (after TLS) before the client library sees it, and a length over 64 MiB fails the
     connection: the library reserves a message's whole length from its header. So does a row
-    or row description of more than 64 columns (roll's queries answer a row's JSON and its
-    primary key, at most 32 columns in Postgres), since the library keeps 24 bytes per column
-    of a row. `ParameterStatus` messages, which the library keeps for the connection's life,
-    are capped at 256 and 64 KiB per connection. The server's notices are dropped as they
-    arrive (their bytes count in the window); none reaches the node's logs.
+    or row description of more than 64 columns (roll's queries answer a document, its id and
+    its primary key, at most 32 columns in Postgres), since the library keeps 24 bytes per
+    column of a row. `ParameterStatus` messages, which the library keeps for the connection's
+    life, and notices before the connection is ready, which it keeps until then, are capped at
+    256 and 64 KiB per connection. Later notices are dropped as they arrive (their bytes count
+    in the window); none reaches the node's logs.
   - A bucket is listed a page at a time (4 MiB of listing at most) and a page is indexed once
     its objects' text passes 20 MiB; an object over 10 MiB is indexed without its text
     (Elastic's default extraction limit). Listings' bytes count against the sync's rate like
-    objects' do, and 100 listing pages in a row with no object in them fail the sync, so an
-    endpoint can't keep one listing nothing.
-  - An error a job or a connector records is cut to 4 KiB. Finished jobs are kept, as on
+    objects' do, and 100 listing pages in a row with no key at all fail the sync, so an
+    endpoint can't keep one listing nothing. Pages of keys the sync skips (folder markers,
+    other extensions, objects unchanged since the last sync) are progress and never count.
+  - An error a job or a connector records is cut to 4 KiB, after every configured secret is
+    scrubbed from it. Finished jobs are kept, as on
     Elasticsearch, until deleted (`DELETE _connector/_sync_job/{id}`); they're small (counters
     and a redacted snapshot of the connector).
   - Postgres sessions get `statement_timeout` (5 min) and `idle_in_transaction_session_timeout`
@@ -606,10 +618,10 @@ both with Elasticsearch 9.5.5's shapes, validation and state machines
 - **`postgresql`** (Elastic's configuration fields: `host`, `port`, `username`, `password`,
   `database`, `schema`, `tables` (`*` or a comma list), `ssl_enabled`, `ssl_ca`, `fetch_size`,
   `retry_count`; plus roll's `incremental_column`). Each table with a primary key is read in
-  primary-key order; tables without one are skipped, as Elastic's are (named in the job's
-  `metadata.skipped_tables`). A row's `_id` is `{database}_{schema}_{table}_{key values joined
-  by _}` and its columns are fields `{schema}_{table}_{column}`, with `database`, `schema`,
-  `table` and `_timestamp`. **Incremental syncs** (which Elastic's PostgreSQL connector doesn't
+  primary-key order; tables without one are skipped, as Elastic's are (the job's
+  `metadata.skipped_table_count`, and the first 100 named in `metadata.skipped_tables`). A
+  row's `_id` is `{database}_{schema}_{table}_{key values joined by _}` and its columns are
+  fields `{schema}_{table}_{column}`, with `database`, `schema`, `table` and `_timestamp`. **Incremental syncs** (which Elastic's PostgreSQL connector doesn't
   have) read only rows whose `incremental_column` (a timestamp or an ever-increasing number) is
   at or after the cursor of the last sync; the cursor is the column's maximum seen at that
   sync's snapshot, per table, in the connector's `sync_cursor`. Without the column, an
