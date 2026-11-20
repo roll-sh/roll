@@ -746,7 +746,7 @@ async fn prompt_arguments_complete_from_what_it_may_read() {
     assert_eq!(templates["resourceTemplates"][1]["uriTemplate"], "roll://code/{owner}/{repo}/{+path}", "{templates}");
     let file = d.rpc(OPERATOR, "resources/read", json!({ "uri": "roll://code/acme/api/src/main.rs" })).await;
     assert_eq!(file["contents"][0]["text"], "fn main() {}\n", "{file}");
-    for bad in ["roll://code/acme/api/src/../../x", "roll://code/acme/api/a%2Fb", "roll://code/acme/api/missing.rs"] {
+    for bad in ["roll://code/acme/api/src/../../x", "roll://code/acme/api/a%2Fb", "roll://code/acme/api/missing.rs", "roll://code/../../x"] {
         let out = d.http(OPERATOR, Method::POST, "/v1/mcp", Some(json!({ "jsonrpc": "2.0", "id": 9, "method": "resources/read", "params": { "uri": bad } }))).await.2;
         assert_eq!(out["error"]["code"], -32002, "{bad}: {out}");
     }
