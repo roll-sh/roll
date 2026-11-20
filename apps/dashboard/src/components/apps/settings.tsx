@@ -93,6 +93,12 @@ interface Form {
   scaleGroup: string;
   scaleMetric: string;
   scalePer: string;
+  /** The first of `run.push` (the rest are kept as they are). */
+  pushStream: string;
+  pushTopic: string;
+  pushGroup: string;
+  pushPath: string;
+  pushDead: string;
   suspendAfter: string;
   sleepAfter: string;
   volumeMount: string;
@@ -175,6 +181,11 @@ export function formOf(s: Service): Form {
     scaleGroup: s.run.scale?.group ?? "",
     scaleMetric: s.run.scale?.metric ?? "",
     scalePer: str(s.run.scale?.per_instance),
+    pushStream: s.run.push?.[0]?.stream ?? "",
+    pushTopic: s.run.push?.[0]?.topic ?? "",
+    pushGroup: s.run.push?.[0]?.group ?? "",
+    pushPath: s.run.push?.[0]?.path ?? "",
+    pushDead: s.run.push?.[0]?.dead_letter ?? "",
     suspendAfter: str(s.run.suspend_after_s),
     sleepAfter: str(s.run.sleep_after_s),
     volumeMount: s.run.volume?.mount ?? "",
@@ -275,6 +286,13 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   if (f.scaleStream !== before.scaleStream || f.scaleGroup !== before.scaleGroup || f.scalePer !== before.scalePer || f.scaleMetric !== before.scaleMetric) {
     const per = f.scalePer.trim() ? { per_instance: Number(f.scalePer) } : {};
     run.scale = f.scaleMetric.trim() ? { metric: f.scaleMetric.trim(), ...per } : f.scaleStream && f.scaleGroup.trim() ? { stream: f.scaleStream, group: f.scaleGroup.trim(), ...per } : null;
+  }
+  if (f.pushStream !== before.pushStream || f.pushTopic !== before.pushTopic || f.pushGroup !== before.pushGroup || f.pushPath !== before.pushPath || f.pushDead !== before.pushDead) {
+    const [first, ...rest] = s.run.push ?? [];
+    const rule = f.pushStream ? { ...first, stream: f.pushStream, topic: f.pushTopic.trim(), group: f.pushGroup.trim(), path: f.pushPath.trim(), dead_letter: f.pushDead.trim() || undefined } : null;
+    if (rule && !rule.dead_letter) delete rule.max_attempts;
+    const all = rule ? [rule, ...rest] : rest;
+    run.push = all.length ? all : null;
   }
   if (f.suspendAfter !== before.suspendAfter) run.suspend_after_s = num(f.suspendAfter);
   if (f.sleepAfter !== before.sleepAfter) run.sleep_after_s = num(f.sleepAfter);
@@ -590,6 +608,25 @@ export function SettingsTab({
                   <Field label="Sleep after (s)" hint="idle; stopped costs nothing">
                     {t("sleepAfter", "600")}
                   </Field>
+                  <Field label="Push a stream" hint={streams.length ? "each record POSTed to a path; the group's offset moves on a 2xx" : "a stream on this project can push its records here"}>
+                    <select value={form.pushStream} onChange={(e) => set("pushStream", e.target.value)} className={`${input} w-full`} disabled={!streams.length && !form.pushStream}>
+                      <option value="">No</option>
+                      {streams.map((s) => (
+                        <option key={s.ref} value={s.ref}>
+                          {s.name}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                  {form.pushStream && (
+                    <>
+                      <Field label="Topic">{t("pushTopic", "orders")}</Field>
+                      <Field label="Consumer group">{t("pushGroup", "web")}</Field>
+                      <Field label="Path" hint="POSTed in production">{t("pushPath", "/events")}</Field>
+                      <Field label="Dead-letter topic" hint="after 5 failed tries; none: tried until taken">{t("pushDead", "orders-dead")}</Field>
+                    </>
+                  )}
+                  {(service.run.push?.length ?? 0) > 1 && <p className="col-span-full text-[12px] text-subtle">And {(service.run.push?.length ?? 1) - 1} more set in roll.toml or the API, kept as they are.</p>}
                 </>
               )}
               {form.type === "worker" && (
