@@ -1367,6 +1367,46 @@ Result hashes are equal. Medians (s, base -> c1): q02 1.26 / 1.90 -> 0.89 / 0.50
 | point select (lane A) | 1.70 / 0.38 | 39,775 -> 39,631 | -0.36% |
 | 100-row range read (lane B) | 1.52 / 0.29 | 348,552 -> 348,471 | -0.02% |
 
+## Block cache, round 3: bulk reads through a ring (2026-11-20, agent 270)
+
+HANDOFF.md "Block cache, round 3" has what changed, the per-relation counters and the policies
+tried. Plain dist: base `cand/a268` (`40a291dc4`, the code of origin `5e5c16e53` but the HNSW
+fix), old `6fc5d19ac` (before 268), c1 base plus the change. Lane C, TPC-H SF 1 at a 256 MB
+cache, harness `~/.cache/a270/tpch/pair.sh` (agent 268's): per arm a fresh engine on a copy of the
+loaded data, a warm-up pass over the 22, then per query three runs in one `perf stat -a -G
+<the server's cgroup>` window (user instructions per run, parallel workers too), and VmHWM.
+Foreign load: the server CPUs' (the lane's eight CPUs read 3.1-7.1 cores).
+
+| pair (first, second) | foreign | q02 | q09 | q17 | q21 | VmHWM |
+|---|---|---|---|---|---|---|
+| (old, base) | 0.59 / 0.28 | 9.49 -> 2.76 G | 77.94 -> 57.06 G | 30.46 -> 14.45 G | **23.63 -> 28.79 G (+21.8%)** | 534.7 -> 519.1 MB |
+| (base, c1) | 0.31 / 1.46 | +0.00% | +0.74% | +1.30% | **28.79 -> 20.80 G (-27.7%)** | 520.8 -> 509.8 MB |
+| (c1, base) | 1.94 / 1.43 | -0.01% | +0.73% | +1.42% | **28.79 -> 20.81 G (-27.7%)** | 520.0 -> 505.5 MB |
+
+Result hashes are equal. The 22 once each (base, c1; 2.24 / 2.43 foreign cores), user
+instructions per run:
+
+| q | base G | c1 G | Δ | | q | base G | c1 G | Δ |
+|---|---:|---:|---:|---|---|---:|---:|---:|
+| q01 | 16.44 | 16.22 | -1.31% | | q12 | 17.68 | 18.10 | +2.38% |
+| q02 | 2.77 | 2.77 | +0.10% | | q13 | 6.07 | 6.12 | +0.72% |
+| q03 | 18.37 | 18.36 | -0.06% | | q14 | 6.19 | 6.28 | +1.41% |
+| q04 | 10.11 | 10.09 | -0.27% | | q15 | 12.23 | 12.47 | +2.01% |
+| q05 | 11.03 | 11.04 | +0.09% | | q16 | 3.09 | 2.89 | -6.51% |
+| q06 | 13.31 | 13.39 | +0.61% | | q17 | 13.37 | 13.60 | +1.69% |
+| q07 | 24.33 | 24.44 | +0.44% | | q18 | 30.12 | 28.24 | -6.24% |
+| q08 | 8.20 | 8.51 | +3.75% | | q19 | 0.83 | 0.53 | -36.03% |
+| q09 | 57.04 | 57.42 | +0.68% | | q20 | 6.83 | 6.86 | +0.42% |
+| q10 | 18.12 | 18.18 | +0.31% | | q21 | 28.80 | 20.81 | -27.74% |
+| q11 | 0.89 | 0.89 | +0.01% | | q22 | 0.91 | 0.94 | +3.20% |
+| | | | | | **all** | **306.72** | **298.13** | **-2.80%** |
+
+The single pass's largest rises, again in three runs a query (c1 first; 2.49 / 2.38 foreign):
+q08 +0.74%, q12 +0.40%, q15 +0.28%, q22 -0.05%. Cached reads at 8 clients, one pair each (c1
+first, harness `~/.cache/a270/bench`, agent 255's): point selects (lane A, 1.23 / 1.09 foreign)
+39,705 -> 39,675 user instructions a read (-0.08%), 100-row range reads (lane B, 0.86 / 1.28)
+348,476 -> 348,642 (+0.05%).
+
 ## Read path, round 7: the audit since 6d3b7e9e5, the estimates' operator lookups (2026-11-18/19, agent 255)
 
 HANDOFF.md "Read path, round 7" has what changed and why. Harness `~/.cache/a255/bench`

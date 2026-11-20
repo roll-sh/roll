@@ -12913,6 +12913,110 @@ Gate on all 22 queries, not these four. (2) The arena's own fragmentation was no
 (3) Agent 264's item (2): cut row and index blocks so that their in-memory form ends at a class
 boundary. It no longer applies: a piece wastes at most 47 bytes.
 
+## Block cache, round 3: bulk reads through a ring (agent 270)
+
+Agent 268's CLOCK hand fix made TPC-H q21 at a 256 MB cache 21% worse (user instructions), and
+268 named the likely cause: q21 loops over more of lineitem than the cache holds, and the old
+stuck hand kept part of it. BENCH.md "Block cache, round 3" has the tables.
+
+**The cause, measured.** A diagnostic build (`~/.cache/a270/patches/diag-policies-and-stats.patch`)
+counted, per relation (a block's first 8 key bytes: table oid, index id), cache hits, misses by
+kind (fill, bulk, no fill), evictions and what stays resident. It also took the eviction policy
+from `ROLL_CACHE_POLICY`: the old stuck hand, 268's CLOCK, or usage counts (a maximum, a count
+for a new block, and optionally one increment per lap of the hand). Harness:
+`~/.cache/a270/tpch/stats.sh` (lane C, a fresh engine, the warm-up pass over the 22, then two
+runs of each query, with the counters read before and after). Over two q21 runs:
+
+| policy | lineitem hits | lineitem fill misses | lineitem bulk misses | lineitem_pkey hits / misses | q21 median |
+|---|---:|---:|---:|---:|---:|
+| stuck hand (before 268) | 112,730 | 122,388 | 163,949 | 40,230 / 99,422 | 1.74 s |
+| CLOCK (268) | 26,184 | 161,611 | 211,277 | 26,592 / 113,063 | 2.63 s |
+| usage counts, max 5, new 1 (PostgreSQL's) | 26,336 | 161,459 | 211,277 | 26,598 / 113,060 | 3.05 s |
+| usage counts, max 5, new 0, one per lap | 26,164 | 161,626 | 211,281 | 26,593 / 113,060 | 2.09 s |
+| **the ring (kept)** | **187,819** | **16** | 211,235 | 26,596 / 113,059 | 2.36 s |
+
+(Medians are from busy lanes, 3.6-5.3 foreign cores on the lane's CPUs. The counts are what
+matters.)
+- The explanation holds. Both policies make the same 399k lineitem accesses. The stuck hand kept
+  217 MB of lineitem resident: q01's bulk scan filled the empty cache with it at the start of
+  the warm-up, and the stuck hand never let it go. q21's scan and probes hit that part on every
+  run. A correct CLOCK keeps only the newest part of a loop four times the cache's size, which
+  the next run has to read again first. q02 and q17 show the reverse: the stuck hand kept stale
+  blocks and their working sets (124 and 127 MB) could not get in.
+- **Usage counts change nothing for q21** (the table's rows 3 and 4). Every lineitem block is
+  read in a burst (the scan, then probes of the same orders), so all of them reach the same count,
+  and under a loop that large the hand decrements them at the same rate. Usage counts would rank
+  blocks that are read more often; here none are.
+- What the counts showed instead: **every lineitem block was read from the file twice a run.**
+  q21's `l1` is a parallel scan, which is a bulk read. In a full cache, `insert_if_room` dropped
+  its blocks at once. The EXISTS / NOT EXISTS probes of the same `l_orderkey` came a moment later,
+  missed on the block the scan had just read, and read and decompressed it again (about 80k fill
+  misses a run against about 105k bulk misses).
+
+**Kept (`cand/a270`): a full cache's bulk reads go through a ring**, as PostgreSQL's bulk-read
+strategy (`GetBufferFromRing`) does. A scan's pages sit in a small ring of shared buffers that
+other backends can hit, and the scan reuses a ring buffer only when nobody else used it.
+- Each shard has `ring` (a `VecDeque` of keys, oldest first, not in `clock`) and `ring_bytes`,
+  at most `ring_max` (a 64th of the shard: 4 MB of a 256 MB cache). A cache with room takes a
+  bulk read's block as before (an empty cache fills with a scan). Once a shard has evicted
+  (`full`), a bulk read's block goes into the ring (`BlockCache::insert_bulk`, which replaces
+  `insert_if_room`). It makes room with `Shard::evict_for_bulk`: while the ring holds `ring_max`
+  bytes or more, it takes the oldest ring block. If no other reader read it (its bit is clear),
+  that block is evicted. If one did, it moves to `clock` with its bit set and stays. Below
+  `ring_max`, the ring grows by evicting through CLOCK, as a PostgreSQL ring's empty slots take
+  victims from the clock sweep. `BlockCache::buffer` makes a bulk block's arena piece the same
+  way. Before, it gave a bulk read in a full shard a heap buffer.
+- The hit path is unchanged (`BlockCache::get`: a shared lock and an atomic). The changed code
+  runs only on a miss.
+- `forget_file` drops a file's ring entries. `full` clears when a shard falls to half its
+  budget. `evict_one` takes from the ring when the clock is empty.
+- Ring size: a 64th (4 MB) and a 16th (16 MB) gave the same q21 counts (187,819 and 187,991
+  hits). The probes read a block within a few hundred blocks of the scan.
+- The ring is not specific to q21 or to one table. It applies to every bulk read in a full
+  cache. q02, q09 and q17's counts are level (fill misses +0 to +1.3%).
+
+**Measured** (plain dist, `cand/a268` (base, the same code as origin `5e5c16e53` but the HNSW
+fix) against it plus the change, lane C, TPC-H SF 1 at 256 MB, agent 268's `pair.sh`: three runs
+a query after the warm-up pass, user instructions of the server's cgroup). Two pairs. The
+server CPUs read 0.3-1.9 foreign cores, and three of the four arms read more than 1.0, so the
+cycles and times are not gated.
+- **q21: 28.79 -> 20.80 and 28.79 -> 20.81 G (-27.7%)**, under the build before 268 (`6fc5d19ac`,
+  23.63 G the same day, base 28.79 G: +21.8%, as 268 measured).
+- q02 0.00 / +0.00%, q09 +0.74 / +0.73%, q17 +1.30 / +1.42%. These are within the brief's 2%, and
+  q17's and q09's counts are level, so the rise is per-block cost. The q17 profiles caught only
+  part of the run (perf throttled) and did not locate it.
+- **VmHWM 520.8 -> 509.8 and 520.0 -> 505.5 MB.** Result hashes are equal.
+- **The 22 once each** (one pass a build, base first): **306.72 -> 298.13 G (-2.80%)**. q21
+  -27.7%, q19 -36.0% (0.83 -> 0.53 G), q16 -6.5%, q18 -6.2%, q01 -1.3%. q08 +3.75%, q22
+  +3.2%, q12 +2.4% and q15 +2.0% in that single pass (2.2-2.4 foreign cores) are within 1% in
+  three runs a query: q08 +0.74%, q12 +0.40%, q15 +0.28%, q22 -0.05%. The counters for q08, q12
+  and q15 show no more misses. q12's +0.4% is about 640 instructions a scanned block (the ring's
+  hash lookups and the arena's piece where a heap buffer was).
+- Cached reads at 8 clients, one pair each: point selects 39,705 -> 39,675 user instructions a
+  read (-0.08%, lane A), 100-row range reads 348,476 -> 348,642 (+0.05%, lane B).
+
+Verification: `tools/quick-check.sh` with `QC_CHECKED=1` over origin's `5e5c16e53` (`3168fc584`):
+build and Clippy (16 warnings, none new in a changed file), 381 tests in 19 binaries, the same
+built `verify-checked`, crash seeds 1-3 x 2 rounds and the power cut, regress 51,148/51,150
+(none newly differing), isolation 1,647/1,648, pg_dump_tap 14,609 passed. New test:
+`storage::sst::tests::bulk_reads_go_through_a_ring`. A 16 MB cache is filled by one file's bulk
+read, a hot file is read twice, and a second big file is then bulk-read. The test checks that the
+block the scan just read is in the cache, that one another reader read stays, that every hot
+block survives, and that the scan leaves under 5% of its blocks (52 of about 3,000: the
+rings, and room that earlier evictions left free, which a ring block takes without recycling).
+
+**Measured and dropped** (`~/.cache/a270/patches/`, diagnostics only): usage counts as
+PostgreSQL's clock sweep (max 5, a new block at 1), and a variant counting one increment per lap
+of the hand (so a burst of reads counts once). Neither changed q21's hits (table above).
+
+**Left:** (1) q21 still loops over lineitem_pkey (56k fill misses a run, 4.4 times the cache)
+and over the scan's own blocks (105k bulk misses a run). A loop larger than the cache keeps
+nothing under any recency policy. Keeping a fixed part of it (scan resistance by admission,
+such as TinyLFU's, or LIRS / CLOCK-Pro's reuse distances) would get up to the cache's share of
+the loop. (2) The ring's per-block cost: three hash lookups a recycled block (`evict_for_bulk`
+looks the key up twice and then removes it). One `entry` would do. It is worth about 0.4% on
+scan-bound queries at small caches.
+
 ## Point and range reads, round 6: 32 clients, idle footprint (agent 250)
 
 BENCH.md "Point and range reads, round 6" has the tables. Base `6d3b7e9e5`, built plain dist
