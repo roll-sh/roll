@@ -152,6 +152,10 @@ export interface Preview {
   /** Its first page's own links that are broken (status 0: no answer), of those checked. */
   page_links?: { checked: number; broken: { path: string; status: number }[] } | null;
   /** Its routes (from its traces) clearly slower than main's preview's, as its holder last read them. */
+  /** The project's rule for regressions against main (`check`, `required`). */
+  regressions?: "check" | "required" | null;
+  /** Who accepted its regressions at its head. */
+  regressions_accepted?: { head: string; by: string; at: number } | null;
   /** Its error groups main's preview doesn't have, as its holder last read them. */
   new_errors?: { branch: string; total: number; errors: { service: string; title: string }[] } | null;
   slower_routes?: { branch: string; routes: { name: string; count: number; p50_ms: number; main_p50_ms: number; grew?: GrewSpan | null }[] } | null;
@@ -376,7 +380,7 @@ export interface PreviewSettings {
   /** Chromatic's UI Review: `check` posts `roll/visual`; `required` also keeps a change waiting for one from landing in roll. */
   visual_review?: "off" | "check" | "required";
   /** `check` posts `roll/regressions`, failing while a change has routes slower than main's preview or errors main's doesn't have. */
-  regressions?: "off" | "check";
+  regressions?: "off" | "check" | "required";
   /** `catch` (default): services send mail to roll's catcher, listed on the preview, never delivered; `deliver`: the project's own mail settings. */
   mail?: "catch" | "deliver";
   /** Its `roll.toml` services get the OpenTelemetry SDK's variables, their spans kept on the preview a few hours. */
@@ -512,6 +516,7 @@ export const previewsApi = {
   approve: (id: string, head: string) => call<Preview>("POST", `${one(id)}/approve`, { head }),
   /** As the person signed in (a session, never a token): a one-use URL into a team-access preview's page `to` (one of its service URLs), good for a minute. */
   visit: (id: string, to: string) => call<{ url: string }>("POST", `${one(id)}/visit`, { to }),
+  acceptRegressions: (id: string, head?: string) => call<Preview>("POST", `${one(id)}/regressions/accept`, head ? { head } : {}),
   acceptVisual: (id: string, head?: string, path?: string) =>
     call<Preview>("POST", `${one(id)}/visual/accept`, { ...(head ? { head } : {}), ...(path !== undefined ? { path } : {}) }),
   /** Its share links (never their tokens). */

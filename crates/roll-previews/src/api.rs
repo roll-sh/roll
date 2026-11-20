@@ -25,6 +25,7 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route("/v1/previews/{id}/refresh", post(refresh))
         .route("/v1/previews/{id}/keep", post(keep))
         .route("/v1/previews/{id}/visual/accept", post(accept_visual))
+        .route("/v1/previews/{id}/regressions/accept", post(accept_regressions))
         .route("/v1/previews/{id}/approve", post(approve))
         .route("/v1/previews/{id}/visit", post(visit))
         .route("/v1/previews/{id}/env", get(vars).put(put_vars))
@@ -315,6 +316,26 @@ async fn accept_visual(AxState(e): S, Path(id): Path<String>, who: Option<axum::
         (None, None) => ("operator".into(), true),
     };
     e.accept_visual(&id, &by, behind.as_deref(), person, seen.as_deref(), path.as_deref()).await.map(Json)
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct AcceptRegressionsBody {
+    /// The head that was looked at: refused (409) when a newer push came in.
+    head: Option<String>,
+}
+
+async fn accept_regressions(AxState(e): S, Path(id): Path<String>, who: Option<axum::Extension<roll_auth::SignedIn>>, grant: Option<axum::Extension<roll_auth::Grant>>, b: Bytes) -> crate::Result<Json<Preview>> {
+    check_id(&id)?;
+    let AcceptRegressionsBody { head: seen } = if b.is_empty() { AcceptRegressionsBody::default() } else { body::<AcceptRegressionsBody>(&b)? };
+    // As the visual review's: the person behind a token too.
+    let behind = who.as_ref().map(|u| u.handle.clone());
+    let (by, person) = match (who, grant) {
+        (Some(axum::Extension(u)), None) => (u.handle, true),
+        (_, Some(axum::Extension(g))) => (format!("token:{}", g.name), false),
+        (None, None) => ("operator".into(), true),
+    };
+    e.accept_regressions(&id, &by, behind.as_deref(), person, seen.as_deref()).await.map(Json)
 }
 
 #[derive(Deserialize)]

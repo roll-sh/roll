@@ -238,6 +238,14 @@ pub struct NewError {
     pub title: String,
 }
 
+/// Someone accepted a preview's regressions against main at one head.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RegressionsAccepted {
+    pub head: String,
+    pub by: String,
+    pub at: i64,
+}
+
 /// A preview as the API shows it (docs/previews.md, "HTTP contract").
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Preview {
@@ -327,6 +335,12 @@ pub struct Preview {
     /// minutes: Sentry's new issues in a release).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub new_errors: Option<NewErrors>,
+    /// The project's rule for regressions against main's (`check`, `required`), when it has one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub regressions: Option<String>,
+    /// Who accepted its regressions at its head (`POST …/regressions/accept`); a new head asks again.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub regressions_accepted: Option<RegressionsAccepted>,
     /// The screenshot's signed link (`(expiry, signature)`), for roll code's summary; never in
     /// API answers.
     #[serde(skip)]

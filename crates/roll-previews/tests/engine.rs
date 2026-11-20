@@ -606,6 +606,15 @@ async fn an_error_mains_preview_doesnt_have_reaches_the_record_and_the_report() 
     let n = e.engine.store.preview(&p.id).unwrap().new_errors.expect("new against main's");
     assert_eq!((n.branch.as_str(), n.total, n.errors.iter().map(|x| x.title.as_str()).collect::<Vec<_>>()), ("main", 2, vec!["Stripe rejected ***", "RangeError"]));
     assert_eq!(e.code.last_report("chg_ne").new_errors, Some(n), "reported again with it");
+    // Required, someone other than its author accepts them at its head (a person, not a token).
+    let mut s = e.engine.store.settings(&e.project).unwrap();
+    s.regressions = roll_previews::settings::RegressionsRule::Required;
+    e.engine.store.put_settings(&e.project, &s).unwrap();
+    assert!(matches!(e.engine.accept_regressions(&p.id, "carol", None, true, None).await, Err(roll_previews::Error::Forbidden(_))), "not its author");
+    assert!(matches!(e.engine.accept_regressions(&p.id, "token:ci", None, false, None).await, Err(roll_previews::Error::Forbidden(_))), "not a token");
+    assert!(matches!(e.engine.accept_regressions(&p.id, "ada", None, true, Some("cs_old")).await, Err(roll_previews::Error::Conflict(_))), "a newer push");
+    let accepted = e.engine.accept_regressions(&p.id, "ada", None, true, Some(&p.head)).await.unwrap();
+    assert_eq!((accepted.regressions.as_deref(), accepted.regressions_accepted.map(|a| a.by)), (Some("required"), Some("ada".to_string())));
     // Fixed (gone from its output): it goes.
     e.apps.errors.lock().insert(format!("{}/{web}", p.id), vec![group("old", "a flaky upstream", 5)]);
     e.engine.read_new_errors().await;

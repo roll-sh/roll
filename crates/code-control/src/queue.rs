@@ -187,6 +187,16 @@ impl Code {
                 _ => {}
             }
         }
+        // The project's previews keep regressions against main from landing (`regressions =
+        // "required"`): routes slower or errors new, until someone other than the author accepts them.
+        if let Some(e) = c.preview.as_ref().and_then(|p| p.environment.as_ref()).filter(|e| e.regressions.as_deref() == Some("required")) {
+            let routes = e.slower_routes.as_ref().map_or(0, |s| s.routes.len());
+            let errors = e.new_errors.as_ref().map_or(0, |n| n.total);
+            let own = e.regressions_accepted_by.as_deref().is_some_and(|by| by.eq_ignore_ascii_case(&c.author) || by.eq_ignore_ascii_case(c.author.trim_start_matches('@')));
+            if routes + errors > 0 && (e.regressions_accepted_by.is_none() || own) {
+                out.push(Blocker::new("regressions", format!("against main's preview: {routes} route(s) slower, {errors} new error(s): fix them, or someone else accepts them on its preview")));
+            }
+        }
         if r.land_policy == LandPolicy::Queue {
             let pending: Vec<String> = settings
                 .change_checks(&r.required_checks)

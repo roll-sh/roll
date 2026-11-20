@@ -378,6 +378,9 @@ pub struct PreviewEnvironment {
     /// status), when it has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub regressions: Option<String>,
+    /// Who accepted its regressions at this head (not its author, for `required`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub regressions_accepted_by: Option<String>,
     /// The `roll/visual` status (the project's `github.visual_review`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visual_review: Option<PreviewVisualReview>,

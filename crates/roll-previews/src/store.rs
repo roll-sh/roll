@@ -2763,6 +2763,12 @@ impl Store {
         let visual_review = self.visual_review(&r, settings.visual_review, settings.github.visual_threshold, base_change.as_ref(), &pages, first_unstable, f.head)?;
         let page_speed = f.speed.map(|now| crate::PageSpeedView { now, before: f.prev_speed });
         let new_errors = self.runtime_fact(&r.id, "new_errors")?;
+        let regressions = match settings.regressions {
+            crate::settings::RegressionsRule::Off => None,
+            crate::settings::RegressionsRule::Check => Some("check".to_string()),
+            crate::settings::RegressionsRule::Required => Some("required".to_string()),
+        };
+        let regressions_accepted = self.runtime_fact::<crate::RegressionsAccepted>(&r.id, "regressions_accepted")?.filter(|a| a.head == r.head);
         let slower_routes = if settings.traces { self.runtime_fact(&r.id, "slower_routes")? } else { None };
         let screenshot_link = screenshot_at.map(|at| self.link_at(&r.id, at, None)).transpose()?;
         let diff_link = match screenshot_at.filter(|_| base_differs) {
@@ -2825,6 +2831,8 @@ impl Store {
             page_links,
             slower_routes,
             new_errors,
+            regressions,
+            regressions_accepted,
             page_speed,
             page_health,
             page_a11y,

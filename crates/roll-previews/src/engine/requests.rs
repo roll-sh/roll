@@ -493,6 +493,33 @@ impl Engine {
         self.store.view(self.store.row(id)?)
     }
 
+    /// Someone accepts a change's regressions against main's preview at its head (`seen`: the head
+    /// they looked at; a newer one is a 409), as a visual change is accepted: not by its own author,
+    /// and a required rule's only by a person.
+    pub async fn accept_regressions(&self, id: &str, by: &str, behind: Option<&str>, person: bool, seen: Option<&str>) -> Result<Preview> {
+        let r = self.store.row(id)?;
+        if r.change_id.is_none() {
+            return Err(Error::BadRequest("only a change's preview has regressions against main".into()));
+        }
+        if !person && self.store.settings(&r.project_id)?.regressions == crate::settings::RegressionsRule::Required {
+            return Err(Error::Forbidden("required regressions are accepted by a person, in roll, not by a token".into()));
+        }
+        if let Some(change) = &r.change_id
+            && let Ok(Some(c)) = self.source.change(change).await
+            && [Some(by), behind].into_iter().flatten().any(|who| who.eq_ignore_ascii_case(&c.author) || who.eq_ignore_ascii_case(c.author.trim_start_matches('@')))
+        {
+            return Err(Error::Forbidden("the change's own author can't accept its regressions: someone else looks at them".into()));
+        }
+        if seen.is_some_and(|s| s != r.head) {
+            return Err(Error::Conflict(format!("a newer push came in (at {}): look at it first", short(&r.head))));
+        }
+        let at = self.store.now_ms()?;
+        self.store.set_runtime_fact(id, "regressions_accepted", Some(&crate::RegressionsAccepted { head: r.head.clone(), by: by.to_string(), at }))?;
+        self.store.log(id, &format!("{by} accepted its regressions against main at {}", short(&r.head)))?;
+        self.report(r.clone()).await;
+        self.store.view(self.store.row(id)?)
+    }
+
     /// Each data branch's connection, as the preview's services get it (Neon's connection
     /// strings), so a reviewer queries what the preview sees: the branch's own credentials (a
     /// Postgres branch's role), never the parent's or a superuser's. Read from the products each
