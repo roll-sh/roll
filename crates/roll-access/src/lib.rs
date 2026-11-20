@@ -321,7 +321,13 @@ pub struct Resolvers {
     /// Per product: whether a resource's environment is protected (`Resource::protected`, for
     /// rules limited to unprotected ones).
     pub protected: HashMap<&'static str, ProtectedFn>,
+    /// Per product: the workspace project a resource is in, for a product that keeps it itself
+    /// rather than on the canvas (previews: a preview's project).
+    pub projects: HashMap<&'static str, ProjectFn>,
 }
+
+/// The workspace project `product`'s resource `id` is in (`None`: not known, or gone).
+pub type ProjectFn = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
 /// Whether environment `env` of resource `id` is protected (`None`: not known).
 pub type ProtectedFn = Arc<dyn Fn(&str, &str) -> Option<bool> + Send + Sync>;
@@ -350,6 +356,13 @@ impl Resolvers {
     /// Register whether `product`'s environments are protected: `f(id, env)`.
     pub fn protected_fn(&mut self, product: &'static str, f: impl Fn(&str, &str) -> Option<bool> + Send + Sync + 'static) {
         self.protected.insert(product, Arc::new(f));
+    }
+
+    /// Register the project `product`'s resources are in, for a product that keeps it itself:
+    /// `f(id)`. A rule naming the project then matches them (a member's role, a token confined to
+    /// the project).
+    pub fn project_fn(&mut self, product: &'static str, f: impl Fn(&str) -> Option<String> + Send + Sync + 'static) {
+        self.projects.insert(product, Arc::new(f));
     }
 
     /// Whether `env` of `product`'s resource `id` is protected, as the product says now.
@@ -592,7 +605,13 @@ impl Access {
         let id = resolved.as_ref().map_or_else(|| id.to_string(), |r| r.id.clone());
         // A workspace project (kind `project`) is in itself, and so is what a product keeps per
         // workspace project (secrets' environments, previews' settings): their routes name it.
-        let mut projects = if kind == "project" { vec![id.clone()] } else { catalog::workspace_kind(product).map(|wk| self.resolvers.projects_of(wk, &id)).unwrap_or_default() };
+        let mut projects = if kind == "project" {
+            vec![id.clone()]
+        } else if let Some(f) = self.resolvers.projects.get(product) {
+            f(&id).into_iter().collect()
+        } else {
+            catalog::workspace_kind(product).map(|wk| self.resolvers.projects_of(wk, &id)).unwrap_or_default()
+        };
         let project = (!projects.is_empty()).then(|| projects.remove(0));
         Resource { product: product.into(), id: Some(id), project, also_in: projects, environment: resolved.and_then(|r| r.environment), ..Default::default() }
     }

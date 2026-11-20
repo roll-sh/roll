@@ -900,12 +900,14 @@ as a private address.
       sessions are kept by their SHA-256, and only while the project has team access: the write
       that keeps one reads the project's access, so a change of access can't miss it.
     - *Who.* rolld's `AccountsVisitors` (`crates/rolld/src/previews/mod.rs`) is the one place
-      that says for services roll runs itself: an account that still signs in and is an admin or
-      owns the project now, through the same roll session that asked for the ticket. rolld's
-      gate lets only admins into `/v1/previews` today, so today it's an admin. A ticket is only
-      given to them, and each session asks again every 5 minutes (`visitor_recheck`, off the
-      async workers): a roll session signed out, revoked or expired, or an account disabled,
-      deleted or that lost the project, is turned away at its next request after that, and its
+      that says for services roll runs itself: an account that still signs in and is an admin, or
+      whose role in the project now may reveal a preview there (docs/members.md: a developer
+      whose environments take in `preview`, an admin or owner; never a viewer, who sees no values:
+      the running app is what a share link gives, and minting one is `reveal`), through the same
+      roll session that asked for the ticket. A ticket is only given to them, and each session
+      asks again every 5 minutes (`visitor_recheck`, off the async workers): a roll session signed
+      out, revoked or expired, an account disabled or deleted, or a member removed or made a
+      viewer, is turned away at its next request after that, and its
       session is gone. Changing the project's access ends every session.
     - *The link's token lets nobody in.* The links roll hands out (`share_url`) are the plain
       URLs, as the change's and the pull request's are. A URL that still carries
@@ -1269,15 +1271,25 @@ activity(preview_id TEXT NOT NULL, at INTEGER NOT NULL, seq INTEGER NOT NULL, me
 
 ## HTTP contract
 
-Bodies are JSON. Every error is `{"error": string}`. A signed-in person who isn't an admin sees
-only the previews of their own workspace projects (as the workspace scopes them): another
-owner's preview or project is a 404. Tokens (their scopes are roll MCP's catalog), the operator
-and admins see every project.
+Bodies are JSON. Every error is `{"error": string}`. Previews are a member product
+(docs/members.md): a signed-in person who isn't an admin reaches the previews of the projects
+they're a member of, each route as their role there allows, by roll-access's catalogue (a preview
+is in its project, and its environment, `preview`, is never protected): a viewer reads a preview,
+its logs, traces and screenshots; a developer also reveals what holds credentials (`…/env`,
+`…/connect`, mail, share links) and writes (sleep, wake, refresh, its variables); an admin or owner
+also opens shells, files and ports, deletes and resets, accepts reviews and manages the project's
+rules, bypass secret and hooks. Another project's preview, or a project they aren't in, is a 404;
+what their role lacks is a 403 naming it. Starting a preview by hand (`POST /v1/previews`, `roll
+preview up`) makes something in the project: an admin's, the request naming the project in
+`X-Roll-Project` (as roll-access reads every create; the dashboard and the CLI send it). The handlers see the person
+(their session's grant isn't a token): their name on an accept, a person's accept for a required
+rule. Tokens (their scopes are roll MCP's catalog, and a rule naming a project reaches the
+previews in it), the operator and admins see every project.
 
 | Route | Body | Answer |
 | --- | --- | --- |
 | `GET /v1/previews?project=&state=` | | `Preview[]`, newest first, light (`Preview::light`): every count and state a row reads, without each page's accessibility issues, links and comparison, the first page's issues' markup and axe-core's words, or the words against main (by the bounds, about 130 KB a preview whose pages have the most violations, down to a few KB); `GET …/{id}` has all of it |
-| `POST /v1/previews` | `{project, repo, branch? , change?}` | 201 `Preview` (or 200 with the project's existing one). 404 unless the repo is on the project's canvas and the project stands for it (`Workspace::trusts`, as for the previews it makes itself: a preview builds and runs the repo). 409 when the change's preview is another project's (a change has one; it's never handed to another project) |
+| `POST /v1/previews` | `{project, repo, branch? , change?}` | 201 `Preview` (or 200 with the project's existing one). 404 unless the repo is on the project's canvas and the project stands for it (`Workspace::trusts`, as for the previews it makes itself: a preview builds and runs the repo). 409 when the change's preview is another project's (a change has one; it's never handed to another project); 400 when `X-Roll-Project` (the project roll-access decided the create on) names another project than the body |
 | `GET /v1/previews/{id}` | | `Preview` |
 | `DELETE /v1/previews/{id}` | | 202 `Preview` (`desired: "deleted"`) |
 | `POST /v1/previews/{id}/refresh` | | `Preview`: redeploy now |

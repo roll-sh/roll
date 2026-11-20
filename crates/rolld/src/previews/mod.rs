@@ -45,8 +45,8 @@ pub struct Running {
 
 /// Who may open a team-access project's previews: an account that still signs in, through the
 /// roll session that asked for the ticket (signed out, revoked or expired is a no), and is an
-/// admin account or the project's owner or admin now (a disabled or deleted one, or one removed
-/// or demoted, is a no at once). A failed lookup is a no.
+/// admin or owns the project now (a disabled or deleted one, or one whose project went to
+/// someone else, is a no at once). A failed lookup is a no.
 pub struct AccountsVisitors {
     pub accounts: Arc<roll_accounts::Accounts>,
     pub workspace: Arc<roll_workspace::Workspace>,
@@ -58,11 +58,36 @@ impl roll_previews::ports::Visitors for AccountsVisitors {
             return false;
         }
         match self.accounts.user(user) {
-            // An owner or admin of the project now (a member removed or demoted is a no at once),
-            // never by who made it.
-            Ok(u) if !u.disabled => u.admin || matches!(self.workspace.role_in(project, user), Ok(Some(roll_auth::roles::Role::Owner | roll_auth::roles::Role::Admin))),
+            Ok(u) if !u.disabled => u.admin || self.workspace.memberships_of(user).is_ok_and(|m| opens_team_previews(&m, project)),
             _ => false,
         }
+    }
+}
+
+/// Whether a person's roles (docs/members.md) let them open a team-access preview of `project`:
+/// its running app is what a share link gives, and minting one is `reveal` on the preview, so it's
+/// what the catalogue asks for that (a developer whose environments take in `preview`, an admin or
+/// owner; never a viewer, who sees no values).
+fn opens_team_previews(memberships: &[roll_auth::roles::Membership], project: &str) -> bool {
+    use roll_auth::scope::{Action, Outcome, Resource, Target};
+    let preview = Resource { project: Some(project.into()), environment: Some("preview".into()), protected: Some(false), ..Resource::new("previews", "") };
+    roll_auth::roles::session_scope(memberships).outcome(&Target::One(preview), Action::Reveal) == Outcome::Allow
+}
+
+#[cfg(test)]
+mod team_access_tests {
+    use roll_auth::roles::{Membership, Role};
+
+    #[test]
+    fn a_role_that_reveals_a_preview_opens_its_team_access() {
+        let m = |role, environments: Option<&[&str]>| vec![Membership { project: "prj_a".into(), role, environments: environments.map(|e| e.iter().map(|x| x.to_string()).collect()) }];
+        let opens = |ms: Vec<Membership>| super::opens_team_previews(&ms, "prj_a");
+        assert!(!opens(m(Role::Viewer, None)), "a viewer sees no values");
+        assert!(opens(m(Role::Developer, None)), "a developer's default takes in what isn't protected");
+        assert!(!opens(m(Role::Developer, Some(&["staging"]))), "named environments without preview");
+        assert!(opens(m(Role::Developer, Some(&["preview"]))));
+        assert!(opens(m(Role::Admin, None)) && opens(m(Role::Owner, None)));
+        assert!(!super::opens_team_previews(&m(Role::Owner, None), "prj_b"), "another project");
     }
 }
 

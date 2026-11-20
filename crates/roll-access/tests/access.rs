@@ -138,6 +138,9 @@ fn postgres() -> Router {
         .route("/v1/endpoints/{id}/query", post(|body: String| async move { axum::Json(json!({ "ran": body })) }))
         .route("/v1/queues/overview", get(|| async { "{}" }))
         .route("/v1/unclassified", get(|| async { "{}" }))
+        .route("/v1/previews/{id}", get(|ext: axum::http::Extensions| async move { axum::Json(seen(&ext)) }))
+        .route("/v1/previews/{id}/connect", get(|ext: axum::http::Extensions| async move { axum::Json(seen(&ext)) }))
+        .route("/v1/previews/{id}/shell/sessions", post(|ext: axum::http::Extensions| async move { axum::Json(seen(&ext)) }))
         .route("/v1/open", get(|ext: axum::http::Extensions| async move { axum::Json(seen(&ext)) }))
         .route("/internal/tasks", axum::routing::any(|ext: axum::http::Extensions| async move { axum::Json(seen(&ext)) }))
         .route("/git/{owner}/{repo}/git-receive-pack", post(|ext: axum::http::Extensions| async move { axum::Json(seen(&ext)) }))
@@ -185,6 +188,9 @@ impl Daemon {
         resolvers.by_kind.insert("endpoint", Arc::new(Endpoints));
         resolvers.by_kind.insert("default-branch", Arc::new(DefaultBranch));
         resolvers.workspace = Some(Arc::new(WorkspaceResolver(workspace.clone())));
+        // Previews keep each preview's project themselves: `pv_in_<project>` is in `<project>`.
+        resolvers.project_fn("previews", |id: &str| id.strip_prefix("pv_in_").map(String::from));
+        resolvers.protected_fn("previews", |_, _| Some(false));
         // Metadata documents from 127.0.0.1 (the test's own server) are allowed here only.
         let mut config = Config { locked: true, approval_wait: std::time::Duration::from_millis(wait_ms), metadata_allow_private: true, ..Config::default() };
         configure(&mut config);
@@ -194,6 +200,7 @@ impl Daemon {
             roll_auth::Rule { route: "/v1/workspace", access: roll_auth::Access::User("a user's own projects") },
             roll_auth::Rule { route: "/v1/access", access: roll_auth::Access::User("a user's own tokens") },
             roll_auth::Rule { route: "/v1/secrets", access: roll_auth::Access::UserOrCredential("a project's members, or a token") },
+            roll_auth::Rule { route: "/v1/previews", access: roll_auth::Access::User("a project's members") },
             roll_auth::Rule { route: "/internal", access: roll_auth::Access::Product("signed hops") },
         ];
         let people = Arc::new(People::default());
@@ -2547,6 +2554,49 @@ async fn a_decoy_token_allows_nothing_and_gives_its_user_away() {
 /// one evaluator (a stranger's project is a 404, a list is filtered, a role allows what it says);
 /// nobody grants more than they hold; removing a member revokes their tokens confined to the
 /// project at once (D7) and narrows the rest, in the audit log.
+/// Previews are a member product (docs/members.md, v1.1): a preview is in its project, so a
+/// member's role there decides what they do to it (a viewer reads it, a developer also reveals its
+/// credentials, only an admin or owner opens a shell), a stranger doesn't see it, and a token
+/// confined to the project reaches it.
+#[tokio::test]
+async fn a_members_role_decides_what_they_do_to_a_preview() {
+    let d = Daemon::new(0);
+    for (u, h) in [("usr_ada", "ada"), ("usr_bob", "bob"), ("usr_cy", "cy"), ("usr_eve", "eve")] {
+        d.people.add(u, h);
+    }
+    let (_, p) = d.as_user("usr_ada", Method::POST, "/v1/workspace/projects", Some(json!({ "name": "web" }))).await;
+    let id = p["id"].as_str().unwrap().to_string();
+    for (who, email, role) in [("usr_bob", "bob@acme.test", "viewer"), ("usr_cy", "cy@acme.test", "developer")] {
+        let (s, inv) = d.as_user("usr_ada", Method::POST, &format!("/v1/workspace/projects/{id}/invites"), Some(json!({ "email": email, "role": role }))).await;
+        assert_eq!(s, StatusCode::CREATED, "{inv}");
+        let token = inv["url"].as_str().unwrap().split("token=").nth(1).unwrap().to_string();
+        assert_eq!(d.as_user(who, Method::POST, &format!("/v1/workspace/invites/{token}/accept"), None).await.0, StatusCode::OK);
+    }
+    let pv = format!("/v1/previews/pv_in_{id}");
+    let (connect, shell) = (format!("{pv}/connect"), format!("{pv}/shell/sessions"));
+    let status = |who: &'static str, m: Method, path: String| {
+        let d = &d;
+        async move { d.as_user(who, m, &path, None).await.0 }
+    };
+    // (reads it, reveals its credentials, opens a shell)
+    for (who, want) in [
+        ("usr_bob", [StatusCode::OK, StatusCode::FORBIDDEN, StatusCode::FORBIDDEN]),
+        ("usr_cy", [StatusCode::OK, StatusCode::OK, StatusCode::FORBIDDEN]),
+        ("usr_ada", [StatusCode::OK, StatusCode::OK, StatusCode::OK]),
+        ("usr_eve", [StatusCode::NOT_FOUND, StatusCode::NOT_FOUND, StatusCode::NOT_FOUND]),
+    ] {
+        let got = [status(who, Method::GET, pv.clone()).await, status(who, Method::GET, connect.clone()).await, status(who, Method::POST, shell.clone()).await];
+        assert_eq!(got, want, "{who}");
+    }
+    // The product sees the person, never the operator.
+    let (_, seen) = d.as_user("usr_bob", Method::GET, &pv, None).await;
+    assert_eq!(seen["operator"], false, "{seen}");
+    // A token confined to the project reaches the preview in it.
+    let (s, t) = d.as_user("usr_ada", Method::POST, "/v1/access/tokens", Some(json!({ "name": "pv", "rules": [{ "product": "previews", "resources": [{ "project": id }], "actions": { "read": "allow" } }] }))).await;
+    assert_eq!(s, StatusCode::CREATED, "{t}");
+    assert_eq!(d.call(t["token"].as_str().unwrap(), Method::GET, &pv, None).await.0, StatusCode::OK);
+}
+
 #[tokio::test]
 async fn a_session_is_its_roles_and_a_removal_revokes_what_it_confines() {
     let d = Daemon::new(0);
