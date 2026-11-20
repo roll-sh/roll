@@ -2223,8 +2223,8 @@ Ranked by what a person notices first. Done so far:
    decides each previews route by roll-access's catalogue (viewer reads, developer reveals and
    writes, admin opens shells and manages the rules); team access by role (reveal: developer in
    `preview`, admin, owner); a create only in the project roll-access decided it on, the dashboard
-   and the CLI naming it. Left: members' owner-only fix merged in, then any member passes
-   previews' own check.
+   and the CLI naming it; a request no role was decided for (past the gate) reaches only what the
+   person owns. Members' fix merged in and gated; lands after #501.
 2. **Keys a fork's preview never holds, in progress** (`feature/roll-previews-intercept`; roll
    secrets' #520 and #517, its batch 6): see "Keys a preview never holds". Built: the
    TLS-terminating swap (`intercept::serve`). Next: the socket handoff from `egress.js`, the trust
@@ -2234,8 +2234,10 @@ Ranked by what a person notices first. Done so far:
    link naming a head (`?head=`) that the preview has moved past answers a page saying so, with
    that head's screenshot and the way to the current one, and the pull request comment's links
    name their head.
-4. **References a person chooses** (after roll secrets' #407, `bind_ref`/`resolve_as`): a
-   preview's own variables take `roll://` too, and the rules' references move to bindings.
+4. **References a person chooses, in review** (#537, on roll secrets' #407): a rule's reference
+   to another environment reaches a preview only while its writer still may (`digest_as` at every
+   converge, as them). Next for it: a preview's own variables taking `roll://`, bound to whoever
+   sets them.
 5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
 6. **Watch: pg-control's recovery to a time seconds old** (unowned).
