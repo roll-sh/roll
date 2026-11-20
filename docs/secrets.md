@@ -5128,7 +5128,17 @@ work found). First what can be built now:
 5. **Use without seeing** (building, `feature/roll-secrets-placeholders`): host-bound keys,
    `rlph_` placeholders, `substitute`, and a filter that previews', apps' and the agents sandbox's
    proxies embed.
-6. **The audit chain under concurrency, and a sealed-start rolld test** (building, `feature/roll-secrets-chain-load`).
+6. **The audit chain under concurrency, and a sealed-start rolld test** (#475, urgent, landing alone before
+   batch 5). The measurement found main's #281 chain collapsing under concurrent readers:
+   - 5,000–72,000 serialization retries per 10 s;
+   - reads 6–10x slower;
+   - most secret changes failing;
+   - reads past their 40 retries answering *without* an audit row.
+
+   The fix batches one node's reads into one READ COMMITTED transaction (up to 256), and a new
+   `code_sql::Conn::claim(key)` queues batches and changes on a per-project advisory lock, so they
+   don't retry. It keeps the chain unforked. At 50+ readers it's within 2x of pre-#281. Plus a test
+   booting rolld sealed.
 7. **`Reference::parse` exact** (#451, gated green; batch 5): the trim bypass.
 8. **roll code's secrets out of `Debug`, and its signing secrets sealed** (#455, gated).
 9. **A product sync's maker can pause it** (S; #304's rule was admin for every pause; gating
