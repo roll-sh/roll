@@ -876,9 +876,27 @@ impl Store {
         })
     }
 
-    /// Each of a project's rules' references with who wrote it: `(name, reference, by)`.
-    pub fn env_ref_writers(&self, project: &str) -> Result<Vec<(String, String, String)>> {
-        Ok(self.db.read(|c| c.query("SELECT name, reference, by FROM env_refs WHERE project_id = ?", [project], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))))?)
+    /// Each of a project's references with who wrote it: `(scope, name, reference, by)`. A rule's
+    /// scope is `env` or an `env_for` pattern; a preview's own variable's is `preview:<id>`.
+    pub fn env_ref_writers(&self, project: &str) -> Result<Vec<(String, String, String, String)>> {
+        Ok(self.db.read(|c| c.query("SELECT scope, name, reference, by FROM env_refs WHERE project_id = ?", [project], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))))?)
+    }
+
+    /// Who set a preview's own variable to a reference (`Some((reference, by))`), or that it isn't
+    /// one any more (`None`).
+    pub fn set_var_ref(&self, project: &str, preview: &str, name: &str, set: Option<(&str, &str)>) -> Result<()> {
+        let now = self.now_ms()?;
+        let scope = format!("preview:{preview}");
+        self.db.write(|c| {
+            match set {
+                Some((reference, by)) => c.execute(
+                    "INSERT INTO env_refs (project_id, scope, name, reference, by, at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (project_id, scope, name) DO UPDATE SET reference = excluded.reference, by = excluded.by, at = excluded.at",
+                    params![project, scope, name, reference, by, now],
+                )?,
+                None => c.execute("DELETE FROM env_refs WHERE project_id = ? AND scope = ? AND name = ?", params![project, scope, name])?,
+            };
+            Ok::<_, Error>(())
+        })
     }
 
     /// Who wrote each of a project's rules' references (`(scope, name, reference)`): one kept as
@@ -886,7 +904,8 @@ impl Store {
     pub fn set_env_refs(&self, project: &str, refs: &[(String, String, String)], by: &str) -> Result<()> {
         let now = self.now_ms()?;
         self.db.write(|c| {
-            let kept: Vec<(String, String, String)> = c.query("SELECT scope, name, reference FROM env_refs WHERE project_id = ?", [project], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            // The rules' own: a preview's variables' references are their setters' (`set_var_ref`).
+            let kept: Vec<(String, String, String)> = c.query("SELECT scope, name, reference FROM env_refs WHERE project_id = ? AND scope NOT LIKE 'preview:%'", [project], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
             for k in kept.iter().filter(|k| !refs.contains(k)) {
                 c.execute("DELETE FROM env_refs WHERE project_id = ? AND scope = ? AND name = ?", params![project, k.0, k.1])?;
             }
