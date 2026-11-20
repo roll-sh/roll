@@ -1,12 +1,25 @@
 //! How long the hot paths take with a large environment, on SQLite or (with
 //! `ROLL_CODE_TEST_DATABASE=postgres://…`) the system database's dialect:
 //! `cargo run -p roll-secrets --release --example bench -- 9000`.
+//!
+//! `… --example bench -- concurrent 1,10,50,200,500 [secs] [nodes]` (Postgres only): that many
+//! resolvers, spread over `nodes` (each its own pool), reading one project's values at once, each read audited onto the project's chain, as a rollout
+//! or a CI matrix does, while one writer changes a key every 20 ms. A line per count: p50, p99,
+//! reads a second, serialization retries (the database's rolled-back transactions; reads run
+//! outside transactions), errors (failed reads, and reads whose audit row was never written), and
+//! the writer's changes, p99 and failures.
 
 use roll_secrets::{Batch, Caller, Keyring, Op, Options, Secrets};
 use std::sync::Arc;
 use std::time::Instant;
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("concurrent") {
+        let ns: Vec<usize> = std::env::args().nth(2).unwrap_or("1,10,50,200,500".into()).split(',').map(|n| n.parse().unwrap()).collect();
+        let secs: u64 = std::env::args().nth(3).and_then(|a| a.parse().ok()).unwrap_or(15);
+        let nodes: usize = std::env::args().nth(4).and_then(|a| a.parse().ok()).unwrap_or(1);
+        return concurrent(&ns, secs, nodes);
+    }
     let n: usize = std::env::args().nth(1).and_then(|a| a.parse().ok()).unwrap_or(2000);
     let dir = tempfile::tempdir().unwrap();
     let ws_db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("workspace.db")), "workspace").unwrap();
@@ -80,4 +93,104 @@ fn main() {
     for _ in 0..2 {
         time("reach (300 importers)", &mut || drop(s.reach(&project, "production", "/", None, &c).unwrap()));
     }
+}
+
+fn concurrent(ns: &[usize], secs: u64, nodes: usize) {
+    use std::time::Duration;
+    let url = std::env::var(code_sql::TEST_DATABASE_ENV).expect("concurrent runs on Postgres: set ROLL_CODE_TEST_DATABASE=postgres://…");
+    let most = ns.iter().copied().max().unwrap_or(1);
+    let dir = tempfile::tempdir().unwrap();
+    let ws_db = code_sql::Db::open(&code_sql::Target::Sqlite(dir.path().join("workspace.db"))).unwrap();
+    let ws = Arc::new(roll_workspace::Workspace::new(ws_db).unwrap());
+    let project = ws.create("", "bench", "", None).unwrap().id;
+    // A connection per resolver, the nodes' pools together (under Postgres' 500, with room for its
+    // own).
+    let schema = format!("bench_chain_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+    let pool = most.min(490).div_ceil(nodes);
+    let connect = || code_sql::Db::connect(&url, &schema, code_sql::PgOptions { max_connections: pool, ..Default::default() }).unwrap();
+    let probe = connect();
+    let opts = || Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), deliver: None, open: true, trust_forwarded_for: false, web_url: None, grants: None, people: None, kms: None, sts: None, outside: None, directory: None, github: None, clouds: None, workloads: None, gateways: None };
+    let all: Vec<Arc<Secrets>> = (0..nodes).map(|_| Arc::new(Secrets::new(connect(), ws.clone(), opts()).unwrap())).collect();
+    let (s, c) = (&all[0], Caller::operator());
+    let ops = (0..20).map(|i| Op::Set { key: format!("APP_{i:02}"), value: Some(format!("value-{i:02}-abcdefghijklmnop")), comment: None, tags: None, kind: None, link: None, path: None, expires_at: None, if_version: None }).collect();
+    s.batch(&project, "production", Batch { path: None, message: None, ops, if_seq: None }, &c).unwrap();
+    // Every resolver reads the project's production values until `stop`, and the writer writes:
+    // (read latencies in ms, read errors, seconds, write latencies, write errors).
+    type Timed = (Vec<f64>, usize);
+    let run = |n: usize, for_: Duration| -> (Vec<f64>, usize, f64, Vec<f64>, usize) {
+        let stop = Instant::now() + for_;
+        let started = Instant::now();
+        let (out, (wms, werrors)): (Vec<Timed>, Timed) = std::thread::scope(|sc| {
+            let writer = sc.spawn(|| {
+                let (mut ms, mut errors) = (vec![], 0);
+                for i in 0.. {
+                    if Instant::now() >= stop {
+                        break;
+                    }
+                    let t = Instant::now();
+                    let ops = vec![Op::Set { key: "ROLLOUT".into(), value: Some(i.to_string()), comment: None, tags: None, kind: None, link: None, path: None, expires_at: None, if_version: None }];
+                    if s.batch(&project, "production", Batch { path: None, message: None, ops, if_seq: None }, &c).is_err() {
+                        errors += 1;
+                    }
+                    ms.push(t.elapsed().as_secs_f64() * 1000.0);
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                (ms, errors)
+            });
+            let hs: Vec<_> = (0..n)
+                .map(|i| {
+                    let (s, project, c) = (&all[i % nodes], &project, &c);
+                    sc.spawn(move || {
+                        let (mut ms, mut errors) = (vec![], 0);
+                        while Instant::now() < stop {
+                            let t = Instant::now();
+                            match s.values(project, "production", "/", true, None, c) {
+                                Ok(v) => drop(v),
+                                Err(_) => errors += 1,
+                            }
+                            ms.push(t.elapsed().as_secs_f64() * 1000.0);
+                        }
+                        (ms, errors)
+                    })
+                })
+                .collect();
+            (hs.into_iter().map(|h| h.join().unwrap()).collect(), writer.join().unwrap())
+        });
+        let elapsed = started.elapsed().as_secs_f64();
+        let errors = out.iter().map(|o| o.1).sum();
+        (out.into_iter().flat_map(|o| o.0).collect(), errors, elapsed, wms, werrors)
+    };
+    // Postgres flushes an idle connection's counters within 10 s.
+    let counters = || {
+        std::thread::sleep(Duration::from_secs(11));
+        let rollbacks: i64 = probe.read(|c| c.query_row("SELECT xact_rollback FROM pg_stat_database WHERE datname = current_database()", (), |r| r.get(0))).unwrap();
+        let rows: i64 = probe.read(|c| c.query_row("SELECT COUNT(*) FROM audit WHERE project_id = ? AND action = 'secrets.export'", [&project], |r| r.get(0))).unwrap();
+        (rollbacks, rows)
+    };
+    let load = || std::fs::read_to_string("/proc/loadavg").unwrap_or_default().split_whitespace().next().unwrap_or("?").to_string();
+    run(most, Duration::from_secs(3));
+    let mut before = counters();
+    println!("resolvers\treads\tper_s\tp50_ms\tp99_ms\tretries\terrors\tunaudited\twrites\twrite_p99_ms\twrite_errors\tload_start\tload_end");
+    for &n in ns {
+        let load_start = load();
+        let (mut ms, errors, elapsed, mut wms, werrors) = run(n, Duration::from_secs(secs));
+        let load_end = load();
+        let after = counters();
+        ms.sort_by(f64::total_cmp);
+        wms.sort_by(f64::total_cmp);
+        let at = |v: &[f64], q: f64| v[((v.len() as f64 * q) as usize).min(v.len() - 1)];
+        let reads = ms.len() as i64;
+        let unaudited = reads - errors as i64 - (after.1 - before.1);
+        println!(
+            "{n}\t{reads}\t{:.0}\t{:.2}\t{:.2}\t{}\t{errors}\t{unaudited}\t{}\t{:.2}\t{werrors}\t{load_start}\t{load_end}",
+            reads as f64 / elapsed,
+            at(&ms, 0.5),
+            at(&ms, 0.99),
+            after.0 - before.0,
+            wms.len(),
+            at(&wms, 0.99)
+        );
+        before = after;
+    }
+    probe.write(|c| c.execute_batch(&format!("DROP SCHEMA {schema} CASCADE"))).unwrap();
 }

@@ -795,7 +795,7 @@ pub(crate) fn add_value_as_string(out: &mut Json, key: &str, format: &DocValueFo
 }
 
 /// `avg`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Avg {
     pub sum: f64,
     pub count: u64,
@@ -837,7 +837,7 @@ impl Internal for Avg {
 }
 
 /// `sum`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Sum {
     pub sum: f64,
     pub format: DocValueFormat,
@@ -873,7 +873,7 @@ impl Internal for Sum {
 }
 
 /// `min`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Min {
     pub value: f64,
     pub format: DocValueFormat,
@@ -910,7 +910,7 @@ impl Internal for Min {
 }
 
 /// `max`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Max {
     pub value: f64,
     pub format: DocValueFormat,
@@ -947,7 +947,7 @@ impl Internal for Max {
 }
 
 /// `value_count`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ValueCount {
     pub count: u64,
 }
@@ -971,7 +971,7 @@ impl Internal for ValueCount {
 }
 
 /// `stats`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Stats {
     pub count: u64,
     pub sum: f64,
@@ -1082,7 +1082,7 @@ pub fn multi_value_property(name: &str, path: &[String], value: impl Fn(&str) ->
 }
 
 /// `extended_stats`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ExtendedStats {
     pub count: u64,
     pub sum: f64,
@@ -1467,7 +1467,7 @@ impl Aggregator for WeightedAvgAgg {
 }
 
 /// `weighted_avg`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct WeightedAvg {
     pub sum: f64,
     pub weight: f64,
@@ -1508,7 +1508,7 @@ impl Internal for WeightedAvg {
 }
 
 /// `rate` (see `metrics::rate` for collection).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Rate {
     pub sum: f64,
     pub divisor: f64,

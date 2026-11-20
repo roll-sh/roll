@@ -208,6 +208,7 @@ fn enumerate(
     let st = cluster.state();
     let req = crate::search::SearchRequest {
         slowlog: Default::default(),
+        partial_aggs: false,
         indices: crate::meta::resolve::split_expressions(targets),
         opts: crate::meta::resolve::IndicesOptions { ignore_unavailable: true, ..crate::meta::resolve::IndicesOptions::STRICT_EXPAND_OPEN_FORBID_CLOSED },
         source: crate::search_source::SearchSource::default(),
