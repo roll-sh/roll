@@ -626,6 +626,7 @@ previews are listed once those products are on.
 | `storage_usage_all` | Storage and requests across every bucket. | `GET /v1/storage/usage` |
 | `storage_list_accounts` | Storage's accounts (12-digit ids): name, alias, the default. | `GET /v1/storage/accounts` |
 | `storage_list_keys` | An account's access keys: permission, buckets, IAM user, last use (never a secret). | `GET /v1/storage/keys` |
+| `storage_revoke_key` | Revoke an S3 access key at once. | `DELETE /v1/storage/keys/{id}` |
 | `storage_list_roles` | An account's IAM roles: ARN, trust, permissions policy, session length. | `GET /v1/storage/roles` |
 | `storage_get_role` | One IAM role. | `GET /v1/storage/roles/{name}` |
 | `storage_list_replication_targets` | Buckets outside roll that replication copies to (never the secret). | `GET /v1/storage/replication-targets` |
@@ -647,6 +648,7 @@ previews are listed once those products are on.
 | `streams_branch` | A stream branched, records shared (its key's secret: reveal). | `POST /v1/streams/{s}/branches` |
 | `streams_usage` | A stream's usage and throughput. | `GET /v1/streams/{stream}/usage` |
 | `streams_list_keys` | The SASL users a stream's clients sign in as (never a password). | `GET /v1/streams/{stream}/keys` |
+| `streams_revoke_key` | Revoke a stream's SASL user at once. | `DELETE /v1/streams/{stream}/keys/{username}` |
 | `streams_update` | Change some of a stream's settings (as streams_get shows them: retention, throughput limits…); the rest stay. | `PATCH /v1/streams/{stream}` |
 | `streams_update_topic` | Grow a topic's partitions or change its configs, online. | `PATCH /v1/streams/{stream}/topics/{topic}` |
 | `streams_delete_group` | Delete a group and its committed offsets (refused while it has members). | `DELETE /v1/streams/{stream}/groups/{group}` |
@@ -676,6 +678,11 @@ previews are listed once those products are on.
 | `queues_queue_rates` | One queue's rates and depth over the last minutes (`queues_rates` is the broker's). | `GET /v1/queues/vhosts/{vhost}/queues/{queue}/rates` |
 | `queues_list_exchanges` | A virtual host's exchanges. | `GET /v1/queues/vhosts/{vhost}/exchanges` |
 | `queues_list_bindings` | Which exchange routes to which queue by which key. | `GET /v1/queues/vhosts/{vhost}/bindings` |
+| `queues_declare_exchange` | Make an exchange (idempotent; amq.* reserved). | `POST /v1/queues/vhosts/{vhost}/exchanges` |
+| `queues_delete_exchange` | Delete an exchange and its bindings. | `DELETE /v1/queues/vhosts/{vhost}/exchanges/{exchange}` |
+| `queues_bind` | Route an exchange's messages to a queue or exchange by a key. | `POST /v1/queues/vhosts/{vhost}/bindings` |
+| `queues_unbind` | Remove a binding. | `DELETE /v1/queues/vhosts/{vhost}/bindings` |
+| `queues_replay` | Publish a queue's messages again (a dead-letter queue's, back where they came from). | `POST /v1/queues/vhosts/{vhost}/queues/{queue}/replay` |
 | `queues_peek` | Messages in a queue, without consuming them. | `GET /v1/queues/vhosts/{vhost}/queues/{queue}/messages` |
 | `queues_publish` | Publish to an exchange with a routing key. | `POST /v1/queues/vhosts/{vhost}/publish` |
 | `queues_list_connections` | Open client connections: who, from where, and their channels. | `GET /v1/queues/connections` |
@@ -737,6 +744,9 @@ previews are listed once those products are on.
 | `search_create_cluster` | A new cluster, or a branch of one (its password once, to tokens that may reveal). | `POST /v1/search/clusters` |
 | `search_list_branches` | A cluster's branches. | `GET /v1/search/clusters/{id}/branches` |
 | `search_list_remotes` | The clusters this one searches across: alias, cluster, key id, whether it connects (never the key). | `GET /v1/search/clusters/{id}/remotes` |
+| `search_overview` | What roll search offers here: versions, endpoint, defaults, pricing. | `GET /v1/search` |
+| `search_unlink_remote` | Unlink a remote cluster (its credentials go; a key roll made is revoked). | `DELETE /v1/search/clusters/{cluster}/remotes/{alias}` |
+| `search_revoke_key` | Revoke a cluster API key at once. | `DELETE /v1/search/clusters/{cluster}/keys/{key}` |
 | `search_list_inference_secrets` | Inference endpoints keyed by a roll secret, and what each follows (never the value). | `GET /v1/search/clusters/{id}/inference/secrets` |
 | `search_branch_cluster` | A copy-on-write branch of a cluster. | `POST /v1/search/clusters/{cluster}/branches` |
 | `search_update_cluster` | A cluster's idle timeout, request limits, flavor, IP allowlist (admin). | `PATCH /v1/search/clusters/{id}` |
@@ -794,6 +804,7 @@ previews are listed once those products are on.
 | `secrets_get_change` | One change: what it did to each key (fingerprints, never values). | `GET /v1/secrets/projects/{project}/environments/{env}/changes/{seq}` |
 | `secrets_insights` | Each key's version, last change and read, reads in 30 days, staleness. | `GET /v1/secrets/projects/{project}/environments/{env}/insights` |
 | `secrets_verify_audit` | Whether a project's secrets audit chain holds: rows walked, how far signed digests vouch, the first break. | `GET /v1/secrets/projects/{project}/audit/verify` |
+| `secrets_audit` | A project's secrets audit log, newest first: who read or changed what (never a value), by env, key, actor or action. | `GET /v1/secrets/projects/{project}/audit` |
 | `secrets_required` | The keys every standard environment must define. | `GET /v1/secrets/projects/{project}/required` |
 | `secrets_folders` | An environment's folders. | `GET /v1/secrets/projects/{project}/environments/{env}/folders` |
 | `secrets_suggestions` | Links roll suggests for a project's resources. | `GET /v1/secrets/projects/{project}/suggestions` |
@@ -907,6 +918,7 @@ previews are listed once those products are on.
 | `apps_deploy_vulnerabilities` | Known vulnerabilities in a deploy's image, most severe first (`severity` keeps that or worse), with the scan's counts. | `GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}/vulnerabilities` |
 | `apps_deploy_sbom` | A deploy's image as a CycloneDX SBOM (every package and version). | `GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}/sbom` |
 | `apps_status_page` | A project's public status page: title, URL, what it shows. | `GET /v1/apps/projects/{project}/status-page` |
+| `apps_remove_status_page` | Take a project's public status page down (making or changing one is a person's: admin, no tool). | `DELETE /v1/apps/projects/{project}/status-page` |
 | `apps_list_incidents` | Its incidents: the last 90 days' and the open ones, with updates. | `GET /v1/apps/projects/{project}/status-page/incidents` |
 | `apps_create_incident` | Post an incident on the public page (published text: the credential guard refuses credentials as where people read). | `POST /v1/apps/projects/{project}/status-page/incidents` |
 | `apps_update_incident` | Add a public update to an incident (`resolved` closes it). | `POST /v1/apps/projects/{project}/status-page/incidents/{iid}/updates` |
