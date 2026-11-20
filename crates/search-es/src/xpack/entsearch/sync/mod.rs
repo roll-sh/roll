@@ -142,13 +142,13 @@ fn draft_edited(c: &Value) -> bool {
 /// When the scheduler must run [`run_due`] next (Unix ms; `0`: now). `syncs` is the loaded
 /// cluster's running syncs (`None` for an unloaded one, which runs none): a pending job isn't due
 /// while every slot is taken, since a slot freeing wakes the scheduler.
-pub fn next_due(st: &crate::meta::ClusterState, syncs: Option<&Syncs>) -> Option<i64> {
+pub fn next_due(cluster: &Cluster, st: &crate::meta::ClusterState, syncs: Option<&Syncs>) -> Option<i64> {
     let mut due: Option<i64> = None;
     let mut at = |t: i64| due = Some(due.map_or(t, |d| d.min(t)));
     let busy = busy_connectors(st);
     let mut runnable = HashSet::new();
     for (id, c) in st.metadata.xpack.iter(CONNECTORS) {
-        if !config::runs(c) {
+        if !syncs_here(cluster, st, id, c) {
             continue;
         }
         runnable.insert(id.as_str());
@@ -206,7 +206,7 @@ pub async fn run_due(cluster: &Cluster, now: i64) {
         .metadata
         .xpack
         .iter(CONNECTORS)
-        .filter(|(_, c)| config::runs(c) && draft_edited(c))
+        .filter(|(id, c)| syncs_here(cluster, &st, id, c) && draft_edited(c))
         .map(|(id, c)| {
             let draft = c.get("filtering").and_then(Value::as_array).and_then(|f| f.first()).and_then(|f| f.get("draft")).cloned().unwrap_or(Value::Null);
             (id.clone(), rules::validate(str_of(c, "service_type"), &draft, &config::listed(c, "buckets")))
@@ -217,7 +217,7 @@ pub async fn run_due(cluster: &Cluster, now: i64) {
         .metadata
         .xpack
         .iter(CONNECTORS)
-        .filter(|(_, c)| config::runs(c))
+        .filter(|(id, c)| syncs_here(cluster, &st, id, c))
         .flat_map(|(id, c)| {
             schedules(c).into_iter().filter_map(|(kind, cron)| match anchor(&st, id, kind) {
                 None => Some((id.clone(), kind, false)),
@@ -277,7 +277,7 @@ pub async fn run_due(cluster: &Cluster, now: i64) {
             Ok(())
         })
         .await;
-    let pending = pending_jobs(&cluster.state(), syncs);
+    let pending = pending_jobs(cluster, &cluster.state(), syncs);
     // A slot of the node's, in turn with every other cluster ([`slots`]).
     let key = cluster.name.clone();
     let owner = cluster.config.owner.clone().unwrap_or_else(|| format!("cluster {key}"));
@@ -293,7 +293,7 @@ pub async fn run_due(cluster: &Cluster, now: i64) {
         }
         let (alive, woken) = (weak.clone(), weak.clone());
         // A waiter counts only while its cluster is loaded and still has a job to start.
-        let alive: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(move || alive.upgrade().is_some_and(|c| !pending_jobs(&c.state(), &c.xpack.connector_syncs).is_empty()));
+        let alive: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(move || alive.upgrade().is_some_and(|c| !pending_jobs(&c, &c.state(), &c.xpack.connector_syncs).is_empty()));
         let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
             if let Some(c) = woken.upgrade() {
                 c.jobs.kick(&c);
@@ -345,7 +345,7 @@ async fn supervise(cluster: Arc<Cluster>, job: String, cid: String, permit: Opti
 
 /// The pending jobs a cluster could start now, oldest first (`created_at`, job, connector): of
 /// connectors roll runs, with nothing in progress or starting.
-fn pending_jobs(st: &crate::meta::ClusterState, syncs: &Syncs) -> Vec<(String, String, String)> {
+fn pending_jobs(cluster: &Cluster, st: &crate::meta::ClusterState, syncs: &Syncs) -> Vec<(String, String, String)> {
     let busy = busy_connectors(st);
     let mut pending: Vec<(String, String, String)> = st
         .metadata
@@ -355,11 +355,18 @@ fn pending_jobs(st: &crate::meta::ClusterState, syncs: &Syncs) -> Vec<(String, S
         .filter_map(|(id, j)| {
             let cid = connector_of(j);
             let c = st.metadata.xpack.get(CONNECTORS, cid)?;
-            (config::runs(c) && !busy.contains(cid) && !syncs.is_running(cid)).then(|| (str_of(j, "created_at").to_string(), id.clone(), cid.to_string()))
+            (syncs_here(cluster, st, cid, c) && !busy.contains(cid) && !syncs.is_running(cid)).then(|| (str_of(j, "created_at").to_string(), id.clone(), cid.to_string()))
         })
         .collect();
     pending.sort();
     pending
+}
+
+/// Whether roll runs connector `id`'s syncs on this cluster: one it runs, and not one a branch
+/// inherited from its parent ([`crate::branch::inherited_connector`]: paused until the branch
+/// makes it its own).
+fn syncs_here(cluster: &Cluster, st: &crate::meta::ClusterState, id: &str, c: &Value) -> bool {
+    config::runs(c) && !crate::branch::inherited_connector(cluster, st, id)
 }
 
 /// How a sync ended.
@@ -437,10 +444,15 @@ fn settle_connector(st: &mut crate::meta::ClusterState, cid: &str, outcome: &Out
 async fn run(cluster: &Arc<Cluster>, job_id: &str, cid: &str) {
     // Claim it: only a job still pending is ours.
     let (jid, connector_id) = (job_id.to_string(), cid.to_string());
+    let me = cluster.clone();
     let claimed = cluster
         .update(move |st| {
             let Some(Value::Obj(mut j)) = st.metadata.xpack.get(SYNC_JOBS, &jid).cloned() else { return Ok(false) };
             if j.get("status").and_then(Value::as_str) != Some("pending") {
+                return Ok(false);
+            }
+            // A connector the branch inherited doesn't start (it stays pending).
+            if crate::branch::inherited_connector(&me, st, &connector_id) {
                 return Ok(false);
             }
             let t = now_nanos_string();
@@ -852,8 +864,8 @@ mod tests {
         })
         .await
         .unwrap();
-        assert!(next_due(&c.state(), None).is_some_and(|t| t <= crate::time::now_millis()), "a dead node's job");
+        assert!(next_due(&c, &c.state(), None).is_some_and(|t| t <= crate::time::now_millis()), "a dead node's job");
         assert!(c.xpack.connector_syncs.begin("x"));
-        assert_eq!(next_due(&c.state(), Some(&c.xpack.connector_syncs)), None);
+        assert_eq!(next_due(&c, &c.state(), Some(&c.xpack.connector_syncs)), None);
     }
 }

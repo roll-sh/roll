@@ -125,6 +125,8 @@ async fn create(ctx: &Ctx<'_>, id: String) -> EsResult<(bool, String)> {
             let Value::Obj(mut c) = new_connector(&id, &body) else { return Err(not_found(&id)) };
             sync::config::fill_schema(&mut c);
             remember_user(st, &id, &c, user, now)?;
+            // Put again on a branch: the connector is the branch's own now.
+            crate::branch::adopt_connector(st, &id, now)?;
             store::put(st, CONNECTORS, &id, Value::Obj(c), now)
         })
         .await?;
@@ -991,8 +993,12 @@ pub async fn update(ctx: &Ctx<'_>) -> EsResult<Reply> {
             match api {
                 // The service now runs on roll (or another service does): its schema.
                 Api::ConnectorUpdateServiceType | Api::ConnectorUpdateNative => sync::config::fill_schema(&mut m),
-                // The sync runs as whoever configured the connector last.
-                Api::ConnectorUpdateConfiguration => remember_user(st, &id, &m, user, now_ms)?,
+                // The sync runs as whoever configured the connector last; on a branch, a
+                // connector whose configuration it writes is its own.
+                Api::ConnectorUpdateConfiguration => {
+                    remember_user(st, &id, &m, user, now_ms)?;
+                    crate::branch::adopt_connector(st, &id, now_ms)?;
+                }
                 _ => {}
             }
             sync::config::protect(&mut m, &before, sealer.as_deref());

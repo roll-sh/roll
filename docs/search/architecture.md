@@ -531,6 +531,11 @@ both with Elasticsearch 9.5.5's shapes, validation and state machines
   slot and the node's permit are freed, a job it left unfinished is settled (`error`, or
   `canceled` when it was canceling), and the scheduler is woken, so no bug can pin a cluster or
   strand a job.
+- **On a branch.** The connectors a branch inherited stay paused there
+  (`branch::inherited_connector`, the marker its first load records): none of their jobs
+  becomes due or starts, and their schedules make none, so the branch never reads the parent's
+  source with the parent's credentials. Putting a connector again or writing its configuration
+  makes it the branch's own (`branch::adopt_connector`).
 - **A run.** Claim the job (`in_progress`, `worker_hostname: roll`, `started_at`), read the
   source a page at a time, apply the active sync rules, and bulk-index each page into
   `index_name` through the connector's `pipeline` when that pipeline exists, as the user who

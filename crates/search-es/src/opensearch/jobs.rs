@@ -148,20 +148,20 @@ impl Jobs {
 
 /// The earliest due time of any job (Unix ms): what the host records when the cluster unloads,
 /// to wake it then. The lifecycles' polls aren't in it (see the module docs).
-pub fn next_due(st: &crate::meta::ClusterState) -> Option<i64> {
-    due(st, None)
+pub fn next_due(cluster: &Cluster, st: &crate::meta::ClusterState) -> Option<i64> {
+    due(cluster, st, None)
 }
 
 /// The earliest due time; `syncs` is a loaded cluster's running connector syncs (a sync already
 /// starting isn't due again).
-fn due(st: &crate::meta::ClusterState, syncs: Option<&crate::xpack::entsearch::sync::Syncs>) -> Option<i64> {
+fn due(cluster: &Cluster, st: &crate::meta::ClusterState, syncs: Option<&crate::xpack::entsearch::sync::Syncs>) -> Option<i64> {
     [
         super::ism_run::next_due(st),
         crate::xpack::transform::next_due(st),
         crate::xpack::watcher::next_due(st),
         crate::xpack::rollup::next_due(st),
         crate::xpack::slm::next_due(st),
-        crate::xpack::entsearch::sync::next_due(st, syncs),
+        crate::xpack::entsearch::sync::next_due(cluster, st, syncs),
         crate::xpack::ilm_run::next_due(st),
         crate::api::data_stream_lifecycle::next_due(st),
     ]
@@ -176,7 +176,7 @@ fn due(st: &crate::meta::ClusterState, syncs: Option<&crate::xpack::entsearch::s
 fn has_work(c: &Cluster) -> bool {
     let state = c.state();
     let st = &*state;
-    due(st, Some(&c.xpack.connector_syncs)).is_some() || crate::xpack::ilm_run::polls(st) || crate::api::data_stream_lifecycle::polls(st)
+    due(c, st, Some(&c.xpack.connector_syncs)).is_some() || crate::xpack::ilm_run::polls(st) || crate::api::data_stream_lifecycle::polls(st)
 }
 
 /// When a loaded cluster's scheduler runs next: [`next_due`] or a lifecycle's poll; with when
@@ -189,7 +189,7 @@ fn loaded_due(c: &Cluster, shared: &Shared) -> Option<(i64, Option<i64>, Option<
     let poll = |polls: bool, last: &std::sync::atomic::AtomicI64, interval: i64| polls.then(|| last.load(Ordering::SeqCst).saturating_add(interval));
     let ilm_due = [ilm::next_due(st), poll(ilm::polls(st), &shared.ilm_polled, ilm::poll_interval(st))].into_iter().flatten().min();
     let dsl_due = [dsl::next_due(st), poll(dsl::polls(st), &shared.dsl_polled, dsl::poll_interval(st))].into_iter().flatten().min();
-    let others = [super::ism_run::next_due(st), crate::xpack::transform::next_due(st), crate::xpack::watcher::next_due(st), crate::xpack::rollup::next_due(st), crate::xpack::slm::next_due(st), crate::xpack::entsearch::sync::next_due(st, Some(&c.xpack.connector_syncs))];
+    let others = [super::ism_run::next_due(st), crate::xpack::transform::next_due(st), crate::xpack::watcher::next_due(st), crate::xpack::rollup::next_due(st), crate::xpack::slm::next_due(st), crate::xpack::entsearch::sync::next_due(c, st, Some(&c.xpack.connector_syncs))];
     let due = others.into_iter().chain([ilm_due, dsl_due]).flatten().min()?;
     Some((due, ilm_due, dsl_due))
 }

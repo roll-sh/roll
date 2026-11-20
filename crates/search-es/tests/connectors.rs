@@ -578,3 +578,42 @@ async fn cancel_stops_a_sync_waiting_on_a_silent_server() {
     assert_eq!(at(&job, "status").as_str(), Some("canceled"), "{job:?}");
     assert!(canceled_at.elapsed() < Duration::from_secs(5), "took {:?}", canceled_at.elapsed());
 }
+
+/// A branch keeps the connectors it inherited paused: no sync of theirs runs there (it would
+/// read the parent's source with the parent's stored credentials) until the branch puts the
+/// connector again and configures it.
+#[tokio::test]
+async fn a_branch_runs_no_inherited_sync_until_the_connector_is_its_own() {
+    let (port, got) = fake_postgres(Fake::Password).await;
+    let mut cfg = ClusterConfig::new("branch");
+    cfg.sealer = search_es::seal::Sealer::from_secret("0123456789abcdef0123456789abcdef-connectors");
+    cfg.node_settings.push(("roll.connectors.allow_private_hosts".into(), "true".into()));
+    cfg.branch_of = Some("parent".into());
+    let b = Arc::new(Cluster::open(cfg, Arc::new(MemoryStore::new())).await.unwrap());
+    // The branch's copy of its parent's state: a configured connector with a job waiting.
+    pg_connector(&b, &format!("127.0.0.1:{port}"), "pg", "content-pg", "*", "pw-parent-3").await;
+    let waiting = start(&b, "pg", "full").await;
+    // Its first load marks what it inherited, then its scheduler starts.
+    search_es::branch::mark_inherited(&b).await.unwrap();
+    b.enable_background_tasks();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let (_, j, _) = call(&b, "GET", &format!("/_connector/_sync_job/{waiting}"), None).await;
+    assert_eq!(at(&j, "status").as_str(), Some("pending"), "an inherited connector's job waits: {j:?}");
+    let again = start(&b, "pg", "full").await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let (_, j, _) = call(&b, "GET", &format!("/_connector/_sync_job/{again}"), None).await;
+    assert_eq!(at(&j, "status").as_str(), Some("pending"), "a job started on the branch waits too: {j:?}");
+    assert!(got.lock().unwrap().is_empty(), "the parent's source was reached");
+    for id in [&waiting, &again] {
+        assert_eq!(call(&b, "PUT", &format!("/_connector/_sync_job/{id}/_cancel"), None).await.0, 200);
+    }
+
+    // Put again and configured on the branch: its own, and its syncs run.
+    let (s, _, t) = call(&b, "PUT", "/_connector/pg", Some(r#"{"index_name":"content-pg","is_native":true,"service_type":"postgresql","name":"shop"}"#)).await;
+    assert_eq!(s, 200, "{t}");
+    let values = format!(r#"{{"values":{{"host":"127.0.0.1","port":{port},"username":"roll","password":"pw-branch-4","database":"shop","ssl_enabled":false}}}}"#);
+    assert_eq!(call(&b, "PUT", "/_connector/pg/_configuration", Some(&values)).await.0, 200);
+    let job = finished(&b, &start(&b, "pg", "full").await).await;
+    assert_eq!(at(&job, "status").as_str(), Some("error"), "it ran (the fake refused it): {job:?}");
+    assert_eq!(got.lock().unwrap().first().map(String::as_str), Some("pw-branch-4"));
+}
