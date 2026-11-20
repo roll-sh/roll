@@ -66,6 +66,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route("/v1/apps/services/{id}/changes", get(changes))
         .route("/v1/apps/projects/{project}/notifications", get(targets).post(add_target))
         .route("/v1/apps/projects/{project}/limits", get(limits).put(set_limits))
+        .route("/v1/apps/projects/{project}/usage", get(project_usage))
         .route("/v1/apps/projects/{project}/drains", get(drains).post(add_drain))
         .route("/v1/apps/projects/{project}/export", post(export_project))
         .route("/v1/apps/projects/{project}/status-page", get(status_page).put(put_status_page).delete(delete_status_page))
@@ -577,6 +578,16 @@ async fn add_drain(State(apps): S, Path(project): Path<String>, b: Bytes) -> R {
 async fn delete_drain(State(apps): S, Path((project, id)): Path<(String, String)>) -> R {
     apps.delete_drain(&project, &id).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+#[derive(Deserialize)]
+struct MonthQuery {
+    month: Option<String>,
+}
+
+/// A month's use by service and environment, with this month's projection.
+async fn project_usage(State(apps): S, Path(project): Path<String>, Query(q): Query<MonthQuery>) -> R {
+    ok(apps.project_usage_view(&project, q.month.as_deref()).await?)
 }
 
 async fn limits(State(apps): S, Path(project): Path<String>) -> R {

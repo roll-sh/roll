@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { appsApi, type SpendLimits } from "@/lib/apps-api";
+import { appsApi, type ProjectUsage, type SpendLimits } from "@/lib/apps-api";
 import { Field } from "../redis/shared";
 import { input, Panel, primary } from "../ui";
 import type { Runner } from "./shared";
@@ -10,6 +10,10 @@ const shown = (v: number | null) => (v == null ? "" : String(v));
 /** A project's spend limits: an alert (a notification) and a hard limit that pauses it. */
 export function SpendPanel({ project, projectName, runner }: { project: string; projectName: string; runner: Runner }) {
   const [limits, setLimits] = useState<SpendLimits | null>(null);
+  const [usage, setUsage] = useState<ProjectUsage | null>(null);
+  useEffect(() => {
+    appsApi.projectUsage(project).then(setUsage, () => setUsage(null));
+  }, [project]);
   const [alert, setAlert] = useState("");
   const [hard, setHard] = useState("");
   useEffect(() => {
@@ -60,6 +64,27 @@ export function SpendPanel({ project, projectName, runner }: { project: string; 
           </button>
         </div>
       </form>
+      {usage && usage.rows.length > 0 && (
+        <div className="border-t border-line px-5 py-4">
+          <p className="mb-2 flex items-baseline justify-between text-[12px] text-muted">
+            <span>What it costs this month, by service</span>
+            {usage.projected_usd != null && <span className="font-mono">≈ ${usage.projected_usd.toFixed(2)} by the month's end</span>}
+          </p>
+          <table className="w-full text-[12.5px]" aria-label="Cost by service">
+            <tbody>
+              {usage.rows.map((r) => (
+                <tr key={`${r.service ?? "deleted"}/${r.environment ?? (r.previews ? "previews" : "")}`} className="border-b border-line last:border-0">
+                  <td className="py-1.5">
+                    {r.deleted ? <span className="text-subtle">Deleted services</span> : r.name}
+                    {!r.deleted && <span className="ml-2 text-[11.5px] text-subtle">{r.previews ? "previews" : r.environment}</span>}
+                  </td>
+                  <td className="py-1.5 text-right font-mono">${r.usd.toFixed(2)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </Panel>
   );
 }
