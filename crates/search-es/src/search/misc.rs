@@ -62,7 +62,7 @@ pub fn validate_query(ctx: &Ctx) -> EsResult<Reply> {
         seen.push(t.idx.name.clone());
         let searcher = t.searcher()?;
         let table = t.table();
-        let qctx = QueryCtx::new(ctx.cluster, &st, &t.idx, &table, &searcher, ctx.now_ms);
+        let qctx = QueryCtx::new(ctx.cluster, &st, &t.idx, &table, &searcher, ctx.now_ms, t.reader());
         let r = match &req.source.query {
             Some(q) => qctx.to_query(q),
             None if crate::opensearch::active() => Ok(crate::opensearch::approximate::ApproximateScoreQuery::match_all()),

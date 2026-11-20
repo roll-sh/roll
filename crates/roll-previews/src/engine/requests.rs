@@ -17,6 +17,11 @@ pub fn error_span(minutes: i64) -> i64 {
 /// The least time between two rebuilds by one deploy hook (ms).
 pub const HOOK_EVERY: i64 = 60_000;
 
+/// `text` with each of `words` (a preview's own names) as `*`.
+pub fn without_words(text: &str, words: &[String]) -> String {
+    words.iter().fold(text.to_string(), |t, w| t.replace(w.as_str(), "*"))
+}
+
 impl Engine {
     // ── what the API asks for ──
 
@@ -753,7 +758,14 @@ impl Engine {
             Some((base, main)) => {
                 let Ok(mine) = self.raw_errors(&r.id).await else { return };
                 let theirs: std::collections::HashSet<(&str, &str)> = main.iter().map(|g| (g.service.as_str(), g.fingerprint.as_str())).collect();
-                let mut new: Vec<&crate::ErrorGroup> = mine.iter().filter(|g| !theirs.contains(&(g.service.as_str(), g.fingerprint.as_str()))).collect();
+                // The same error says each preview's own names (its id, its branches, its hosts):
+                // with those taken out, a title main's has too isn't new either.
+                let (my_words, main_words) = (self.own_words(&r.id), self.own_words(&base.id));
+                let their_titles: std::collections::HashSet<(&str, String)> = main.iter().map(|g| (g.service.as_str(), without_words(&g.title, &main_words))).collect();
+                let mut new: Vec<&crate::ErrorGroup> = mine
+                    .iter()
+                    .filter(|g| !theirs.contains(&(g.service.as_str(), g.fingerprint.as_str())) && !their_titles.contains(&(g.service.as_str(), without_words(&g.title, &my_words))))
+                    .collect();
                 new.sort_by(|a, b| b.count.cmp(&a.count).then(b.last_seen.cmp(&a.last_seen)));
                 let total = new.len();
                 new.truncate(crate::NewErrors::MAX);
@@ -777,6 +789,21 @@ impl Engine {
         if self.store.set_runtime_fact(&r.id, "new_errors", kept.as_ref()).unwrap_or(false) {
             self.report(r).await;
         }
+    }
+
+    /// What differs between two previews' output for the same error: a preview's id and slug, its
+    /// branches' refs and its services' hosts (each of 4 characters or more), longest first.
+    fn own_words(&self, id: &str) -> Vec<String> {
+        let mut words = vec![id.to_string()];
+        if let Ok(r) = self.store.row(id) {
+            words.push(r.slug);
+        }
+        words.extend(self.store.resources(id).unwrap_or_default().into_iter().filter_map(|x| x.r#ref));
+        words.extend(self.store.services(id).unwrap_or_default().into_iter().map(|s| s.host));
+        words.retain(|w| w.len() >= 4);
+        words.sort_by_key(|w| std::cmp::Reverse(w.len()));
+        words.dedup();
+        words
     }
 
     /// Its services' error groups of the last hour as the backends group them: fingerprints

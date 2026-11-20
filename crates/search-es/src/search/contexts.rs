@@ -201,6 +201,20 @@ impl Contexts {
         }
     }
 
+    /// Opens a point in time unless `max` are open: the count and the insert happen under one
+    /// lock, so concurrent opens can't pass the limit together.
+    pub fn open_pit(&self, c: SearchContext, max: usize) -> Option<String> {
+        self.purge();
+        let n = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        let id = new_id(n, true);
+        let mut map = self.map.lock();
+        if map.values().filter(|c| c.pit).count() >= max {
+            return None;
+        }
+        map.insert(id.clone(), c);
+        Some(id)
+    }
+
     pub fn open(&self, c: SearchContext) -> String {
         self.purge();
         let n = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
@@ -490,6 +504,28 @@ pub(crate) fn cleared(freed: usize, ids: &[String]) -> Reply {
     Reply::Body(status, obj! { "succeeded" => true, "num_freed" => freed as i64 })
 }
 
+/// Points in time an Elasticsearch-flavor cluster may hold open. Each keeps its searchers (and
+/// the segments they read) for up to `search.max_keep_alive` on a node other tenants share, and
+/// Elasticsearch has no limit of its own (its heap is the cluster's alone): roll's own, as
+/// OpenSearch's `search.max_open_pit_context`.
+const MAX_OPEN_PITS: usize = 1000;
+
+/// Opens a point in time, refusing it past the limit as OpenSearch 3.9 does
+/// (`search.max_open_pit_context`: a 429 `rejected_execution_exception`).
+pub fn open_bounded_pit(ctx: &Ctx, c: SearchContext) -> EsResult<String> {
+    let (max, setting) = match ctx.cluster.dialect {
+        crate::cluster::Dialect::OpenSearch => {
+            (ctx.state().metadata.cluster_setting("search.max_open_pit_context").and_then(|v| v.parse::<usize>().ok()).unwrap_or(300), "search.max_open_pit_context")
+        }
+        crate::cluster::Dialect::Elasticsearch => (MAX_OPEN_PITS, ""),
+    };
+    if let Some(id) = ctx.cluster.contexts.open_pit(c, max) {
+        return Ok(id);
+    }
+    let change = if setting.is_empty() { String::new() } else { format!(" This limit can be set by changing the [{setting}] setting.") };
+    Err(EsError::new(429, "rejected_execution_exception", format!("Trying to create too many Point In Time contexts. Must be less than or equal to: [{max}].{change}")))
+}
+
 /// `POST /{index}/_pit`.
 pub fn open_pit(ctx: &Ctx) -> EsResult<Reply> {
     let Some(ka) = ctx.query("keep_alive") else {
@@ -526,7 +562,7 @@ pub(crate) fn open_pit_for(ctx: &Ctx, mut req: SearchRequest, ka: Duration, inde
         for t in targets {
             let searcher = t.searcher()?;
             let table = t.table();
-            let qctx = super::query::QueryCtx::new(ctx.cluster, &st, &t.idx, &table, &searcher, ctx.now_ms);
+            let qctx = super::query::QueryCtx::new(ctx.cluster, &st, &t.idx, &table, &searcher, ctx.now_ms, t.reader());
             let q = qctx.to_filter(f).map_err(|e| super::query::shard_exception(&t.idx, e))?;
             if searcher.count(&q).map_err(crate::engine::convert::index_error)? > 0 {
                 kept.push(t);
@@ -535,7 +571,7 @@ pub(crate) fn open_pit_for(ctx: &Ctx, mut req: SearchRequest, ka: Duration, inde
         targets = kept;
     }
     let skipped = n - targets.len();
-    let id = ctx.cluster.contexts.open(SearchContext { targets, request: None, expires: Instant::now() + ka, pit: true, offset: 0, indices: req.indices.clone(), created_ms: ctx.now_ms, keep_alive_ms: ka.as_millis() as i64, owner: owner_of(ctx) });
+    let id = open_bounded_pit(ctx, SearchContext { targets, request: None, expires: Instant::now() + ka, pit: true, offset: 0, indices: req.indices.clone(), created_ms: ctx.now_ms, keep_alive_ms: ka.as_millis() as i64, owner: owner_of(ctx) })?;
     Ok(obj! { "id" => id, "_shards" => obj! { "total" => n as i64, "successful" => n as i64, "skipped" => skipped as i64, "failed" => 0 } })
 }
 
