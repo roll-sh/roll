@@ -354,6 +354,8 @@ if "--writes" in sys.argv:
         if (prod, name) in seen:
             return seen[(prod, name)]
         ty = schema.get("type")
+        if isinstance(ty, list):  # a field that takes null to clear: fake its other type
+            ty = next((t for t in ty if t != "null"), None)
         if ty == "integer" or ty == "number":
             return 1
         if ty == "boolean":
