@@ -51,6 +51,35 @@ export interface Build {
 
 export type ServiceType = "web" | "worker" | "cron";
 
+/** One of `run.push`: a topic of a stream (`st_…`, on the project) delivered to one environment's path. */
+export interface Push {
+  stream: string;
+  topic: string;
+  group: string;
+  path: string;
+  /** Default production. */
+  environment?: string;
+  /** A topic of the same stream a record goes to after `max_attempts` (default 5) failed tries. */
+  dead_letter?: string;
+  max_attempts?: number;
+  timeout_s?: number;
+  /** Records POSTed at once, each from its own partitions (1–32, default 4). */
+  max_in_flight?: number;
+}
+
+/** A push rule as it stands (`…/environments/{env}/push`), on the service's owner since it began delivering. */
+export interface PushState extends Push {
+  /** Records its group hasn't committed, every partition. */
+  lag?: number;
+  /** Why nothing is delivered. */
+  off?: string;
+  delivered: number;
+  dead_lettered: number;
+  last_delivered_at?: number;
+  failing_since?: number;
+  last_error?: string;
+}
+
 export interface Run {
   type: ServiceType;
   port?: number;
@@ -80,6 +109,8 @@ export interface Run {
   drain_s?: number;
   /** A web service also scales on CPU: another instance while they average over this percent for a minute (10–100). */
   cpu_target?: number;
+  /** A web service also scaled on its answers' p95 (50–60,000 ms). */
+  latency_target_ms?: number;
   /** And on memory: another while they average over this percent of their memory for a minute (10–100). */
   memory_target?: number;
   suspend_after_s: number;
@@ -97,7 +128,7 @@ export interface Run {
   log_metrics?: { name: string; pattern: string }[];
   /** A gradual rollout: the new deployment takes each percent of `steps` for `step_s`, rolled
    *  back by a 5xx share of `error_pct` or more (worse than the old one); no steps: at once. */
-  rollout?: { steps: number[]; step_s: number; error_pct: number; /** Each step waits for a person once it passes. */ manual?: boolean; /** With run.slo: a step fails past this burn rate (default 14.4). */ slo_burn?: number; /** A step fails when the new deployment's p95 is this many percent above the old one's. */ p95_pct?: number };
+  rollout?: { steps: number[]; step_s: number; error_pct: number; /** Each step waits for a person once it passes. */ manual?: boolean; /** With run.slo: a step fails past this burn rate (default 14.4). */ slo_burn?: number; /** A step fails when the new deployment's p95 is this many percent above the old one's. */ p95_pct?: number; /** false: the old instances stop before the new ones start (two never run at once). */ overlap?: boolean };
   /** The app speaks HTTP/2 without TLS (a gRPC server). */
   h2c?: boolean;
   /** false: no public URL, only the project's private network (absent: public). */
@@ -124,6 +155,8 @@ export interface Run {
   scale?: { stream?: string; group?: string; metric?: string; sum?: boolean; per_instance?: number };
   /** Commands on a schedule, each a job of the live deployment at its due times (Heroku Scheduler); at most 20. */
   schedules?: Scheduled[];
+  /** A web service's: a roll stream's records POSTed to `path` as they arrive, the group's offset committed on a 2xx (Cloud Run's Pub/Sub push); at most 4. */
+  push?: Push[];
   /** Containers beside each instance, in its network namespace (a web service's or a worker's); at most 4. */
   sidecars?: Sidecar[];
 }
@@ -692,6 +725,8 @@ export interface Environment extends EnvironmentSummary {
   /** Its runtime config, and the version its instances read. */
   config?: Record<string, unknown>;
   config_version?: number;
+  /** When its config's token was last rotated: the address before it reads until a deploy made after it is live. */
+  config_rotated_at?: number;
   freeze?: Freeze;
   /** Its freeze is on now: automatic deploys build to ready, a person's deploy needs the `X-Roll-Override: 1` header (admin). */
   frozen?: boolean;
@@ -816,6 +851,19 @@ export interface ScanSummary {
   error?: string;
   /** Its SBOM (CycloneDX) is kept: `…/sbom`. */
   sbom?: boolean;
+}
+
+/** Why a failed deployment failed, from the repo owner's model (`…/explain`). The model's words: shown as text. */
+export interface Explanation {
+  summary: string;
+  cause: string;
+  /** What to change, in order (at most 5; none when it isn't the app's fault). */
+  steps: string[];
+  confidence: "high" | "medium" | "low";
+  model: string;
+  at: number;
+  /** Older log lines it didn't see. */
+  lines_left_out: number;
 }
 
 /** One known vulnerability: a package at a version an advisory names. */
@@ -1270,6 +1318,10 @@ export interface Job {
   command: string;
   /** Containers it ran, each with ROLL_TASK_INDEX and ROLL_TASK_COUNT. */
   tasks?: number;
+  /** Tries after a task's failure (0–5), each with ROLL_TASK_ATTEMPT. */
+  retries?: number;
+  /** Tasks running at once. */
+  parallelism?: number;
   status: RunStatus;
   exit_code: number | null;
   started_at: number;
@@ -1375,6 +1427,8 @@ export const appsApi = {
   commits: (id: string, e: string, d: string) => call<DeployCommits>("GET", `${dep(id, e, d)}/commits`),
   slo: (id: string, e: string) => call<SloReport>("GET", `${env(id, e)}/slo`),
   sbom: (id: string, e: string, d: string) => call<unknown>("GET", `${dep(id, e, d)}/sbom`),
+  /** A failed deployment explained by its repo owner's model: kept, unless `again` asks anew (charged again). */
+  explain: (id: string, e: string, d: string, again = false) => call<Explanation>("POST", `${dep(id, e, d)}/explain${qs({ again })}`),
   vulnerabilities: (id: string, e: string, d: string) => call<{ scan: ScanSummary | null; vulnerabilities: Vulnerability[] }>("GET", `${dep(id, e, d)}/vulnerabilities`),
   buildLog: (id: string, e: string, d: string, q: LogQuery = {}) => call<LogLine[]>("GET", `${dep(id, e, d)}/logs${qs({ tail: q.tail })}`),
   /** `keepVariables`: its image with the variables as they are now (after a rotated secret), not as they were then. */
@@ -1383,6 +1437,9 @@ export const appsApi = {
   rollbackPrevious: (id: string, e: string) => call<Deployment>("POST", `${env(id, e)}/rollback`),
   /** The live image again with the current variables and settings: no build, same revision. */
   redeploy: (id: string, e: string, body: { message?: string } = {}) => call<Deployment>("POST", `${env(id, e)}/redeploy`, body),
+  pushStates: (id: string, e: string) => call<PushState[]>("GET", `${env(id, e)}/push`),
+  /** A new `ROLL_CONFIG_URL` token (a leaked address): the old one reads until a deploy made after it is live. */
+  rotateConfig: (id: string, e: string) => call<Environment>("POST", `${env(id, e)}/config/rotate`),
   /** `expect`: the deployment of `from` that was looked at; a 409 when `from` runs another now. */
   promote: (id: string, e: string, from: string, expect?: string) => call<Deployment>("POST", `${env(id, e)}/promote`, { from, ...(expect ? { expect } : {}) }),
   backups: (id: string, e: string) => call<Backup[]>("GET", `${env(id, e)}/volume/backups`),
@@ -1482,7 +1539,7 @@ export const appsApi = {
   run: (id: string, e: string, r: string) => call<CronRun>("GET", `${env(id, e)}/runs/${encodeURIComponent(r)}`),
   cancelRun: (id: string, e: string, r: string) => call<CronRun>("POST", `${env(id, e)}/runs/${encodeURIComponent(r)}/cancel`),
   jobs: (id: string, e: string) => call<Job[]>("GET", `${env(id, e)}/jobs`),
-  startJob: (id: string, e: string, body: { command: string; timeout_s?: number; tasks?: number }) => call<Job>("POST", `${env(id, e)}/jobs`, body),
+  startJob: (id: string, e: string, body: { command: string; timeout_s?: number; tasks?: number; retries?: number; parallelism?: number }) => call<Job>("POST", `${env(id, e)}/jobs`, body),
   job: (id: string, e: string, j: string) => call<Job>("GET", `${env(id, e)}/jobs/${encodeURIComponent(j)}`),
   cancelJob: (id: string, e: string, j: string) => call<Job>("POST", `${env(id, e)}/jobs/${encodeURIComponent(j)}/cancel`),
 
@@ -1550,7 +1607,7 @@ export function followLog(
     | { build: { service: string; env: string; deployment: string } }
     | { job: { service: string; env: string; job: string } }
     | { run: { service: string; env: string; run: string } },
-  opts: { tail?: number; onLine: (l: LogLine) => void; onReset: () => void; onOpen?: (open: boolean) => void },
+  opts: { tail?: number; onLine: (l: LogLine) => void; onReset: () => void; onOpen?: (open: boolean) => void; onEnd?: () => void },
 ): () => void {
   const path =
     "runtime" in kind
@@ -1561,13 +1618,20 @@ export function followLog(
           ? `${env(kind.run.service, kind.run.env)}/runs/${encodeURIComponent(kind.run.run)}/logs`
           : `${dep(kind.build.service, kind.build.env, kind.build.deployment)}/logs`;
   const http = "runtime" in kind && kind.runtime.http ? true : undefined;
-  return streamSse(`${ROLL_API}${path}${qs({ follow: true, tail: opts.tail ?? 500, http })}`, {
+  const stop = streamSse(`${ROLL_API}${path}${qs({ follow: true, tail: opts.tail ?? 500, http })}`, {
     headers: operatorHeaders,
     onOpen: (open) => {
       if (open) opts.onReset();
       opts.onOpen?.(open);
     },
     onEvent: (e) => {
+      // A build's, a job's or a run's log ended: nothing more comes, so no reconnect (one would
+      // read it all again).
+      if (e.event === "end") {
+        stop();
+        opts.onEnd?.();
+        return;
+      }
       try {
         opts.onLine(JSON.parse(e.data) as LogLine);
       } catch {
@@ -1575,6 +1639,7 @@ export function followLog(
       }
     },
   });
+  return stop;
 }
 
 // ── how the dashboard shows them ──

@@ -141,13 +141,18 @@ impl Apps {
                 (Some(rev.sha), None, trigger)
             }
             (Source::Git { url, .. }, false, None) => {
-                let sha = match &revision {
-                    Some(r) if r.len() == 40 && r.bytes().all(|b| b.is_ascii_hexdigit()) => r.to_ascii_lowercase(),
-                    Some(_) => return Err(Error::BadRequest("revision is a full commit id (40 hex digits) for a Git URL".into())),
-                    None => crate::git_source::head(&self.git_remote(service, url).await, row.branch.as_deref()).await.map_err(|e| Error::BadRequest(format!("{url}: {e:#}")))?.0,
+                // A full commit, or a branch or tag by name (deployed once: the environment
+                // keeps following its own branch).
+                let (sha, named) = match &revision {
+                    Some(r) if r.len() == 40 && r.bytes().all(|b| b.is_ascii_hexdigit()) => (r.to_ascii_lowercase(), None),
+                    Some(r) => {
+                        let (sha, kind) = crate::git_source::named(&self.git_remote(service, url).await, r).await.map_err(|e| Error::BadRequest(format!("{url}: {e:#}")))?;
+                        (sha, Some(format!("{kind} {r}")))
+                    }
+                    None => (crate::git_source::head(&self.git_remote(service, url).await, row.branch.as_deref()).await.map_err(|e| Error::BadRequest(format!("{url}: {e:#}")))?.0, None),
                 };
                 if message.is_empty() {
-                    message = format!("{} at {}", row.branch.as_deref().unwrap_or("HEAD"), &sha[..12]);
+                    message = format!("{} at {}", named.unwrap_or_else(|| row.branch.clone().unwrap_or_else(|| "HEAD".into())), &sha[..12]);
                 }
                 (Some(sha), None, trigger)
             }
@@ -777,11 +782,7 @@ impl Apps {
                 let sid = svc.id.clone();
                 self.check_registry(img).await?;
                 // The login goes only to the registry it's for, whatever the image names now.
-                let login = self
-                    .db(move |s| s.registry_login(&sid))
-                    .await?
-                    .filter(|(r, _)| crate::model::registry_key(&r.server) == crate::model::image_registry(img))
-                    .map(|(r, password)| crate::runtime::RegistryLogin { server: r.server, username: r.username, password });
+                let login = self.pull_login(&sid, img).await?;
                 let pinned = self.deps.runtime.pull(img, log, login.as_ref()).await?;
                 log.line(format!("pinned {pinned}"));
                 // A preview's defaults (an image service has no roll.toml), frozen with it.
@@ -1569,11 +1570,7 @@ impl Apps {
         // registry it's for gets it.
         let registry = match &svc.source {
             Source::Image { .. } => {
-                let sid = svc.id.clone();
-                self.db(move |s| s.registry_login(&sid))
-                    .await?
-                    .filter(|(r, _)| crate::model::registry_key(&r.server) == crate::model::image_registry(&image))
-                    .map(|(r, password)| crate::runtime::RegistryLogin { server: r.server, username: r.username, password })
+                self.pull_login(&svc.id, &image).await?
             }
             _ => None,
         };
@@ -2471,6 +2468,8 @@ impl Apps {
     pub async fn cron_pass(self: &Arc<Self>, now: i64) {
         let Ok(services) = self.db(|s| s.services(None)).await else { return };
         self.schedules_pass(&services, now).await;
+        self.push_pass(&services).await;
+        self.ecr_refresh_pass().await;
         self.checks_pass(&services, now).await;
         self.heartbeats_pass(&services, now).await;
         self.rescan_pass(&services, now).await;

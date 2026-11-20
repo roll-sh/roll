@@ -19,11 +19,11 @@ use serde_json::Value;
 
 /// The secrets roll makes that scanners look for: grants' (`rlt_`, `rlo_`, `rlf_`), machine
 /// clients' (`rlc_`), and other products' made the same way: apps' deploy hooks (`rlk_`), SSO
-/// connections' SCIM tokens (`rlp_`, roll-accounts), previews' deploy hooks (`rlb_`, a rebuild) and
-/// roll secrets' placeholders (`rlph_`: what a sandbox holds instead of a key, swapped by roll's
-/// egress proxy). (`rlh_` is roll code's automations' inbound webhook secrets: another shape, not
-/// ours.)
-pub const SECRET_PREFIXES: [&str; 8] = ["rlt_", "rlo_", "rlf_", "rlc_", "rlk_", "rlp_", "rlb_", "rlph_"];
+/// connections' SCIM tokens (`rlp_`, roll-accounts), previews' deploy hooks (`rlb_`, a rebuild),
+/// roll secrets' request answers (`rlq_`) and placeholders (`rlph_`: what a sandbox holds instead
+/// of a key, swapped by roll's egress proxy). (`rlh_` is roll code's automations' inbound webhook
+/// secrets: another shape, not ours.)
+pub const SECRET_PREFIXES: [&str; 9] = ["rlt_", "rlo_", "rlf_", "rlc_", "rlk_", "rlp_", "rlb_", "rlq_", "rlph_"];
 
 /// A secret: `prefix`, 34 random characters of lowercase base32 (170 bits) and 6 of checksum, so a
 /// scanner can tell a real roll token from look-alike text without asking roll ([`checksum_ok`],

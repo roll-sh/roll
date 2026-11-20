@@ -785,7 +785,12 @@ impl Secrets {
         };
         let reader = if untrusted { self.untrusted(project, caller)?.not_runtime() } else { caller.clone() };
         let narrowed = self.caller_for(project, slug, &reader).map_err(missing)?;
-        let why = if untrusted { format!("{} is an untrusted copy", caller.principal.trim_end_matches(" (untrusted)")) } else { format!("{slug} is an ephemeral environment that isn't trusted") };
+        let why = if untrusted { format!("{} is an untrusted copy", caller.principal.split(" (").next().unwrap_or_default()) } else { format!("{slug} is an ephemeral environment that isn't trusted") };
+        // Read as whoever chose the reference (`Secrets::resolve_as`): never a runtime.
+        let not_runtime = match &caller.maker {
+            Some(maker) if !caller.runtime => format!("{maker} chose the reference, and a person's or a token's choice never reads a sensitive key (an operator-written target does)"),
+            _ => why.clone(),
+        };
         if !narrowed.allows(Action::Reveal, &Scope::at(project, slug, path)) {
             return Err(Refusal::Protected(format!("{slug} is a protected environment, and {why}")));
         }
@@ -810,6 +815,7 @@ impl Secrets {
             }
         }
         if bound.is_none() && names::sensitive(&e.row.tags) && !narrowed.runtime {
+            let why = if untrusted || caller.runtime { why } else { not_runtime };
             return Err(Refusal::Unusable(format!("{key} is sensitive, and {why}: only a trusted runtime reads it")));
         }
         if dynamic {
@@ -820,17 +826,19 @@ impl Secrets {
 
     /// One key's value for another roll product, read as [`Secrets::consumer_entry`] decides:
     /// audited as `secrets.resolve` by `caller` (the resource asking), no dynamic credential.
-    /// A key bound to hosts, for a resource that asks for placeholders, is answered as one.
+    /// A key bound to hosts, for a resource that asks for placeholders, is answered as one; for a
+    /// reference a person chose ([`Secrets::resolve_as`]), its swaps re-check that person.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn resolve_one(&self, project: &str, slug: &str, path: &str, key: &str, caller: &Caller, untrusted: bool, resource: &crate::consumers::ResourceRef) -> std::result::Result<crate::consumers::Resolved, crate::consumers::Refusal> {
         use crate::consumers::{Refusal, Resolved};
         let (narrowed, e, bound) = self.consumer_entry(project, slug, path, key, caller, untrusted, resource.wants_placeholders())?;
         let consumer = &caller.principal;
+        let chosen = caller.maker.as_ref().map(|m| format!(", for {m} (who chose it)")).unwrap_or_default();
         if let Some(b) = bound {
             let env_id = self.db.read(|c| envs::by_slug(c, project, slug))?.id;
-            let how = crate::placeholders::Issue { consumer, issued_by: consumer, maker: None, resource: Some(resource), untrusted, minutes: None };
+            let how = crate::placeholders::Issue { consumer, issued_by: consumer, maker: caller.maker.as_deref(), resource: Some(resource), untrusted, minutes: None };
             let (token, p) = self.issue_placeholders(project, &env_id, path, &[(key.to_string(), e.row.id.clone(), b)], &how)?.pop().ok_or_else(|| Refusal::Failed(Error::Internal("no placeholder was issued".into())))?;
-            self.audit_now(project, &narrowed, "secrets.resolve", Some(slug), Some(path), &[key.to_string()], &format!("resolved {key} for {consumer} as a placeholder"));
+            self.audit_now(project, &narrowed, "secrets.resolve", Some(slug), Some(path), &[key.to_string()], &format!("resolved {key} for {consumer}{chosen} as a placeholder"));
             return Ok(Resolved { value: token, version: e.row.version, expires_at: e.row.expires_at, placeholder: Some(p) });
         }
         let dek = self.project(project)?;
@@ -841,7 +849,7 @@ impl Secrets {
         if let Some(p) = problem {
             return Err(Refusal::Unusable(format!("{key} doesn't resolve: {p}")));
         }
-        self.audit_now(project, &narrowed, "secrets.resolve", Some(slug), Some(path), &[key.to_string()], &format!("resolved {key} for {consumer}"));
+        self.audit_now(project, &narrowed, "secrets.resolve", Some(slug), Some(path), &[key.to_string()], &format!("resolved {key} for {consumer}{chosen}"));
         Ok(Resolved { value, version: e.row.version, expires_at: e.row.expires_at, placeholder: None })
     }
 
