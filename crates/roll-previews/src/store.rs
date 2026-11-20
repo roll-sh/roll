@@ -876,6 +876,11 @@ impl Store {
         })
     }
 
+    /// Each of a project's rules' references with who wrote it: `(name, reference, by)`.
+    pub fn env_ref_writers(&self, project: &str) -> Result<Vec<(String, String, String)>> {
+        Ok(self.db.read(|c| c.query("SELECT name, reference, by FROM env_refs WHERE project_id = ?", [project], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))))?)
+    }
+
     /// Who wrote each of a project's rules' references (`(scope, name, reference)`): one kept as
     /// it was keeps its writer, a new or changed one is `by`'s, one gone goes.
     pub fn set_env_refs(&self, project: &str, refs: &[(String, String, String)], by: &str) -> Result<()> {

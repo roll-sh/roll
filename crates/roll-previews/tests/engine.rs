@@ -1283,7 +1283,8 @@ async fn a_signed_in_person_sees_only_their_own_projects_previews() {
 
 /// A project rule naming another environment's key (`roll://ENV/KEY`) routes its values into code
 /// whoever pushes a branch controls: saving one needs its writer's reveal there (roll secrets
-/// decides); the environment its previews follow needs none.
+/// decides); the environment its previews follow needs none. Each preview then gets it only while
+/// its writer still may (roll secrets reads it as them at every converge).
 #[tokio::test]
 async fn a_rules_reference_to_another_environment_needs_its_writers_reveal_there() {
     use tower::ServiceExt;
@@ -1295,6 +1296,9 @@ async fn a_rules_reference_to_another_environment_needs_its_writers_reveal_there
         fn place(&self, reference: &str) -> Result<(String, String), String> {
             let parts: Vec<&str> = reference.strip_prefix("roll://").ok_or("not one")?.split('/').collect();
             Ok((parts[0].to_string(), if parts.len() > 2 { format!("/{}", parts[1..parts.len() - 1].join("/")) } else { "/".into() }))
+        }
+        fn still(&self, _: &str, _: &str, _: bool, _: &str, maker: &str) -> Result<(), String> {
+            if maker == "usr_b" { Ok(()) } else { Err(format!("{maker} may not reveal staging:/payments")) }
         }
     }
     let e = env(json!({ "enabled": true }));
@@ -1322,6 +1326,26 @@ async fn a_rules_reference_to_another_environment_needs_its_writers_reveal_there
     let mut req = axum::http::Request::put(format!("/v1/previews/projects/{}/settings", mine.id)).header("content-type", "application/json").body(axum::body::Body::from(json!({ "secrets": { "base": "dev2" } }).to_string())).unwrap();
     req.extensions_mut().insert(roll_auth::SignedIn { user: "usr_b".into(), handle: "b".into(), admin: false, code_owner: None, session: "ses_1".into() });
     assert_eq!(router.oneshot(req).await.unwrap().status().as_u16(), 403, "B names the old base, which usr_b can't reveal");
+
+    // A preview gets a reference only while who wrote it still may: one by someone who can't now
+    // is left out (said in its activity), the base's always goes.
+    let mut st = e.engine.store.settings(&e.project).unwrap();
+    let base = st.secrets.base.clone();
+    st.env = [("K".to_string(), "roll://staging/payments/KEY".to_string()), ("B".to_string(), format!("roll://{base}/OTHER"))].into();
+    e.engine.store.put_settings(&e.project, &st).unwrap();
+    e.engine.store.set_env_refs(&e.project, &roll_previews::settings::references(&st), "usr_gone").unwrap();
+    e.code.open(change("chg_refs", 3));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_refs").unwrap().unwrap();
+    assert_eq!(e.secrets.refs.lock().clone(), vec![("B".to_string(), format!("roll://{base}/OTHER"))]);
+    let said: Vec<String> = e.engine.store.activity(&p.id).unwrap().into_iter().map(|a| a.message).collect();
+    assert!(said.iter().any(|m| m.contains("K: usr_gone may not reveal staging:/payments")), "{said:?}");
+    // Written again by someone who may: it reaches the preview.
+    e.engine.store.set_env_refs(&e.project, &[], "x").unwrap();
+    e.engine.store.set_env_refs(&e.project, &roll_previews::settings::references(&st), "usr_b").unwrap();
+    e.engine.store.update(&p.id, |row| row.next_at = 0).unwrap();
+    e.engine.pass().await.unwrap();
+    assert!(e.secrets.refs.lock().iter().any(|(k, _)| k == "K"));
 }
 
 /// A variable set while a deploy is still going, then removed, is removed from the backend too:
