@@ -510,7 +510,7 @@ same slots.
 
 ```
 landed  = {changeset, git_commit: sha | null, ref, generation, message, author, change: string | null, files: number, at, count}
-change  = Change      work = WorkItem      preview = {change, preview: Preview, became?: ("ready" | "failed" | "visual_change")[]}
+change  = Change      work = WorkItem      preview = {change, preview: Preview, became?: ("ready" | "failed" | "visual_change" | "regressions")[]}
 check   = {change, check: Check}  |  {changeset, status: Status} /* a commit status was posted */
 queue   = {state, paused, depth, batch: Queue.batch}   a summary: refetch GET …/queue for the entries
 review  = Review      thread = Thread
