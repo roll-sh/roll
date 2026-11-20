@@ -211,6 +211,9 @@ pub struct SlowerRoute {
     /// the time went. `None` when no span of it did (or main's spans aren't on this node).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grew: Option<GrewSpan>,
+    /// The project's budget for it (`github.budget.routes`), when its p50 is over it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_ms: Option<u64>,
 }
 
 /// A span name's median time in one route's traces (each trace's spans of that name summed: an
@@ -266,7 +269,10 @@ pub struct RegressionsAccepted {
 impl RegressionsAccepted {
     /// The regressions a record shows, as an acceptance names them.
     pub fn of(routes: Option<&SlowerRoutes>, errors: Option<&NewErrors>) -> Vec<String> {
-        let mut what: Vec<String> = routes.iter().flat_map(|s| s.routes.iter().map(|r| format!("route:{}", r.name))).chain(errors.iter().flat_map(|n| n.errors.iter().map(|e| format!("error:{}:{}", e.service, e.title)))).collect();
+        let mut what: Vec<String> = routes
+            .iter()
+            .flat_map(|s| s.routes.iter().flat_map(|r| std::iter::once(format!("route:{}", r.name)).chain(r.budget_ms.map(|b| format!("budget:{}:{b}", r.name)))))
+            .chain(errors.iter().flat_map(|n| n.errors.iter().map(|e| format!("error:{}:{}", e.service, e.title)))).collect();
         what.sort();
         what.dedup();
         what

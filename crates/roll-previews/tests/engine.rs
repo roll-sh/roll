@@ -581,6 +581,13 @@ async fn a_route_slower_than_mains_reaches_the_record_and_the_report() {
     assert_eq!(s.routes[0].grew, Some(roll_previews::GrewSpan { span: "SELECT orders".into(), ms: 330, main_ms: 50 }), "where its time went");
     assert_eq!(e.code.last_report("chg_sr").slower_routes, Some(s), "reported again with it");
     assert!(e.engine.store.preview(&base.id).unwrap().slower_routes.is_none(), "main isn't slower than itself");
+    // A route with a budget of its own is over it whatever main's does (main's own, here).
+    let mut st = e.engine.store.settings(&e.project).unwrap();
+    st.github.budget.routes.insert("GET /orders".into(), 80);
+    e.engine.store.put_settings(&e.project, &st).unwrap();
+    e.engine.read_slower_routes().await;
+    let s = e.engine.store.preview(&base.id).unwrap().slower_routes.expect("main's over its budget");
+    assert_eq!((s.routes[0].name.as_str(), s.routes[0].p50_ms, s.routes[0].budget_ms), ("GET /orders", 100, Some(80)));
 }
 
 /// An error group main's preview doesn't have goes on the change's record (masked, the most
