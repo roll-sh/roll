@@ -882,6 +882,9 @@ previews are listed once those products are on.
 | `secrets_rotate` | A new value for a secret, switched to: a generated one, or a managed link's, made where it lives. | `POST …/environments/{env}/secrets/{name}/rotate` |
 | `secrets_promote` | Copy another environment's secrets in (a change request into a protected one). | `POST …/environments/{env}/promote` |
 | `secrets_list_requests` | An environment's change requests. | `GET …/environments/{env}/requests` |
+| `secrets_get_request` | One change request: what it changes, reviews, whether approvals are met. | `GET /v1/secrets/projects/{project}/environments/{env}/requests/{id}` |
+| `secrets_apply_request` | Apply an approved change request (never with bypass). | `POST /v1/secrets/projects/{project}/environments/{env}/requests/{id}/apply` |
+| `secrets_close_request` | Withdraw a change request. | `POST /v1/secrets/projects/{project}/environments/{env}/requests/{id}/close` |
 | `secrets_propose` | Propose changes for a person to review and apply: the way to change a protected environment. | `POST …/environments/{env}/requests` |
 | `secrets_transit_encrypt` | Encrypt with a project's encryption key (the key never leaves roll). | `POST /v1/secrets/projects/{project}/transit/{name}/encrypt` |
 | `secrets_transit_decrypt` | Decrypt a `roll:v<n>:` (or Vault's `vault:v<n>:`) ciphertext; reveal, audited. | `POST /v1/secrets/projects/{project}/transit/{name}/decrypt` |
