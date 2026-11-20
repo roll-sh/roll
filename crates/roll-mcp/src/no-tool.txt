@@ -21,7 +21,6 @@ GET /v1/apps/services/{id}/environments/{env}/files                          int
 PUT /v1/apps/services/{id}/environments/{env}/files                          interactive (a shell, files, a forward): an admin's, live
 DELETE /v1/apps/services/{id}/environments/{env}/hook                        answers or sets a credential (a deploy hook's secret)
 POST /v1/apps/services/{id}/environments/{env}/hook                          answers or sets a credential (a deploy hook's secret)
-GET /v1/apps/services/{id}/environments/{env}/push                           no tool yet: apps_push_status maps it once it lands (apps' push status)
 GET /v1/apps/services/{id}/environments/{env}/shell                          interactive (a shell, files, a forward): an admin's, live
 POST /v1/apps/services/{id}/environments/{env}/shell/sessions                interactive (a shell, files, a forward): an admin's, live
 DELETE /v1/apps/services/{id}/environments/{env}/shell/sessions/{sh}         interactive (a shell, files, a forward): an admin's, live
@@ -48,7 +47,6 @@ DELETE /v1/previews/projects/{project}/bypass                                ans
 GET /v1/previews/projects/{project}/bypass                                   answers or sets a credential
 POST /v1/previews/projects/{project}/bypass                                  answers or sets a credential
 POST /v1/previews/projects/{project}/hooks                                   answers or sets a credential (a deploy hook's secret)
-PUT /v1/previews/projects/{project}/settings                                 no tool yet: a project's preview rules
 POST /v1/previews/{id}/approve                                               a person's call (approving, accepting, cutting off)
 PUT /v1/previews/{id}/env                                                    answers or sets a credential (a preview's env is reveal)
 GET /v1/previews/{id}/errors/count                                           the dashboard's (a row's count; previews_errors has the groups)
