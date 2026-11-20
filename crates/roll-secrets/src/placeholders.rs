@@ -187,8 +187,9 @@ static SUFFIXES: std::sync::LazyLock<Suffixes> = std::sync::LazyLock::new(|| {
     s
 });
 
-/// Whether names one label under `name` are anyone's to register.
-fn public_suffix(name: &str) -> bool {
+/// Whether names one label under `name` are anyone's to register (a host binding's wildcard here,
+/// and an interception CA's: `intercept.rs`).
+pub(crate) fn public_suffix(name: &str) -> bool {
     let s = &*SUFFIXES;
     !s.except.contains(name) && (s.exact.contains(name) || name.split_once('.').is_some_and(|(_, parent)| s.wild.contains(parent)))
 }
@@ -661,10 +662,13 @@ impl Secrets {
         Ok(())
     }
 
-    /// End every live placeholder issued to `consumer` (a sandbox stopped, a preview torn down).
-    /// Answers how many ended.
+    /// End every live placeholder issued to `consumer` (a sandbox stopped, a preview torn down),
+    /// and its interception CAs ([`Secrets::end_intercept_cas`]): the proxy drops them at its next
+    /// check. Answers how many placeholders ended.
     pub fn end_consumer(&self, consumer: &str) -> Result<usize> {
-        self.end_placeholders("consumer = ?", consumer, None)
+        let ended = self.end_placeholders("consumer = ?", consumer, None)?;
+        self.end_intercept_cas(consumer, "its consumer ended")?;
+        Ok(ended)
     }
 
     /// End the placeholders matching `cond` (one `?`, `arg`) and, with `caller`, only those of its
@@ -755,6 +759,27 @@ impl Secrets {
             c.execute("DELETE FROM key_hosts WHERE NOT EXISTS (SELECT 1 FROM secrets s WHERE s.id = key_hosts.secret_id)", ())?;
             Ok::<_, Error>(())
         })
+    }
+}
+
+/// Interception CAs' hosts ([`crate::intercept`]): by project, the hosts of the keys `consumer`
+/// holds live placeholders for, as bound now.
+impl crate::intercept::BoundHosts for Secrets {
+    fn bound_hosts(&self, consumer: &str) -> Result<std::collections::BTreeMap<String, std::collections::BTreeSet<String>>> {
+        let now = self.db.now_ms()?;
+        let rows: Vec<(String, String)> = self.db.read(|c| {
+            c.query(
+                "SELECT DISTINCT p.project_id, h.binding FROM placeholders p JOIN key_hosts h ON h.secret_id = p.secret_id WHERE p.consumer = ? AND p.revoked_at IS NULL AND p.expires_at > ?",
+                params![consumer, now],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+        })?;
+        let mut out: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> = Default::default();
+        for (project, binding) in rows {
+            let b: Hosts = serde_json::from_str(&binding).map_err(|e| Error::Internal(format!("a key's hosts: {e}")))?;
+            out.entry(project).or_default().extend(b.hosts);
+        }
+        Ok(out)
     }
 }
 

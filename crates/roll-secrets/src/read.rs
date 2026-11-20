@@ -127,8 +127,9 @@ pub struct Secret {
     /// Why its value is easy to guess: only for a caller who may reveal it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub weak: Option<String>,
-    /// That it's a decoy (docs/secrets.md, "Decoys"): only for the project's admins. Absent for
-    /// everyone else, as on any other key.
+    /// That it's a decoy (docs/secrets.md, "Decoys"): only for the project's admins, signed in or
+    /// the operator ([`Caller::sees_decoys`]). Absent for everyone else, tokens too, as on any other
+    /// key.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub decoy: Option<crate::Decoy>,
     /// The hosts its value may be sent to through a placeholder (docs/secrets.md, "Using a key

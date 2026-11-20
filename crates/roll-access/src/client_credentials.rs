@@ -241,7 +241,7 @@ pub async fn federated(a: Arc<Access>, f: &HashMap<String, String>, ip: Option<s
                 why = "the token's subject isn't the one this client trusts".into();
                 continue;
             }
-            if let Some((k, _)) = i.claims.iter().find(|(k, want)| !jwt.str(k).is_some_and(|have| roll_oidc::wildcard(want, have))) {
+            if let Some(k) = jwt.unmatched(&i.claims) {
                 why = format!("the token's {k} isn't the one this client trusts");
                 continue;
             }
