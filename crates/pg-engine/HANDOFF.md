@@ -12738,6 +12738,100 @@ shared lock; what limits it now was not measured this round.
 
 Verification of `cand/a255-2`: `tools/quick-check.sh` over `bc9102ebb` (`007c5c7eb`, with `cand/a255`): build and Clippy (16 warnings, none new in a changed file), 443 tests in 26 binaries, the crash step (seeds 1-3 x 2, power cut), regress 51,148/51,150 (none newly differing), isolation 1,647/1,648, pg_dump_tap 14,609 passed. (The dropped epoch version also passed quick-check with the checked stage, over `8fa1154dd`.)
 
+## Block cache memory: exact block sizes, the CLOCK hand (agent 264)
+
+Agent 255 measured agent 247's CLOCK hand fix at TPC-H SF 1 with a 256 MB cache (-15.6% user
+instructions, VmHWM 576 -> 720 MB) and named the lead: `Block::mem_bytes` undercounts a cached
+block's allocation, so a better eviction policy exposes it. **The lead is wrong.** The
+undercount is real but small, and the CLOCK fix's peak is memory mimalloc holds after it was
+freed, outside the cache's count.
+
+**How it was measured.** Off-lane (server CPUs 2,3,20,21, client 4,5,22,23), `verify` builds
+with a diagnostic in the server (`~/.cache/a264/patches/diag.patch`, `diag-bin-counting.patch`).
+The diagnostic does three things. It sums `mi_usable_size` of every cached block's buffer and
+`Arc` against the cache's own count. It counts live requested bytes with a counting global
+allocator striped by CPU, which is exact. It samples VmRSS / RssAnon every 0.25-1 s. One run:
+TPC-H SF 1 at a 256 MB cache, the 22 queries once, then q02, q09, q17 and q21 twice (harness
+`~/.cache/a264/memdiag.sh`). (A first counter batched per thread, as `heapprof` does, and lost a
+thread's unflushed bytes when the thread exited. Parallel scan workers are threads that exit,
+and under CLOCK the blocks they read are freed by other threads, so that counter drifted by
+about 70 MB. Use the striped counter for this kind of question.)
+
+- **The cache's count against the allocator's:** 256.0 MB counted, 266.5-269.0 MB allocated
+  (+4.1 to +5.1%: the buffer's size class, the `Arc` at 96 bytes against the 72 counted), plus
+  the shards' hash tables and CLOCK vectors (about 3 MB, not counted at all). It is the same
+  with and without the CLOCK fix (268.1 against 267.5 MB), so it can't explain the CLOCK fix's
+  peak.
+- **The CLOCK fix's peak is allocator-held memory.** VmHWM: base 527-540 MB in five runs,
+  CLOCK fix 695 and 712 MB. During the CLOCK arm's RSS spikes (678 MB in q02/q03 and q21),
+  RssAnon minus live bytes was about 290 MB, against about 125 MB in the base. Why: a cache miss
+  allocates the block in the reading thread's heap, often a parallel scan worker
+  (`exec::parscan`) that exits when its scan ends. Under the current hand (it stays on the slot
+  the newest block was swapped into), each insert evicts the block inserted just before, which
+  the same thread usually allocated, and the memory is reused at once. With the hand fixed,
+  CLOCK evicts the oldest blocks, which other threads allocated, many of them since exited. The
+  free goes to the owning heap's pages and is not reused by the threads that read next.
+
+**Kept (`cand/a264`): the cache counts what it holds.** `Block::mem_bytes` is the buffer, the
+`Arc` and the `Bytes` header (made when a block is cloned, as range reads' values are), each at
+mimalloc's size for it (`storage::cache::alloc_bytes`: 16-byte steps up to 64 bytes, four
+classes a power of two up to 64 kB, 4 kB pages past it). The test `alloc_bytes_is_the_allocators_size` checks it against
+`mi_good_size` for every size up to 256 kB. Each shard also counts its own tables
+(`allocation_size` of the hash map, the CLOCK vector's capacity). A shard that `forget_file`
+leaves empty gives its tables back, so an empty cache counts 0. A 256 MB cache now holds
+256 MB of allocations, where it held 268 MB.
+
+The gate: plain dist, `50fd640af` against the change on it, lane C, TPC-H SF 1 at 256 MB, q02,
+q09, q17 and q21, three runs each in one `perf stat` window after a warm-up pass over the 22
+(`~/.cache/a264/tpch/pair.sh`, agent 255's). Three pairs, two with instruction counts.
+- **VmHWM is lower:** 541 -> 535, 550 -> 534 and 547 -> 526 MB.
+- **User instructions are +1.30% and +1.26%** over the four: q02 +3.2 / +3.6%, q17 +2.0 /
+  +1.8%, q21 +1.6 / +1.5%, q09 +0.7 / +0.7%. Result hashes are equal.
+
+**That rise is item 3's cost: the same budget now holds about 5% fewer blocks** (about 40,000
+blocks of 6.4 kB: the count per block rose 4-5%, and the tables now count). The default isn't
+raised to hide it. A 256 MB cache was 268 MB, now it is 256 MB. Cycles: inside the noise (one
+pair's arm read 2.25 foreign cores on the server CPUs). Point selects at 8 clients (lane A,
+one pair) moved +0.04% user instructions a select, with the head arm at 1.34 foreign cores.
+100-row range reads at 8 clients (lane B, one pair) moved -0.02%. With the fixture cached, the
+changed code runs only on a miss. (The gated build counted the `Bytes` header at 24 bytes.
+mimalloc gives it 32, which `alloc_bytes` now models: 8 bytes a block, about 0.1%.)
+
+Verification: `tools/quick-check.sh` over `d06686d6c` (`16b55f5a2`): build and Clippy (16
+warnings, none new in a changed file), 567 tests in 61 binaries, crash seeds 1-3 x 2 rounds and
+the power cut, regress 51,148/51,150 (none newly differing), isolation 1,647/1,648,
+pg_dump_tap 14,609 passed. No assertions or catalog counts touched (no checked stage).
+
+**Measured and dropped** (patches in `~/.cache/a264/patches/`):
+- The CLOCK hand fix with exact sizes, evicted blocks' buffers kept per size class for the next
+  miss (32 classes, 256 kB each), and evicted `Arc`s kept for reuse
+  (`cache-clock-exact-recycle.patch`). Recycling works: 2.77M buffers reused, 1.51M allocated,
+  4% of evicted buffers over a class's bound. VmHWM falls from 695-712 to 572-626 MB (5 runs).
+  It still rises, by +36 to +88 MB, against base's 527-540, so it fails the rule. In the last
+  pair (striped counter), non-cache live bytes peak the same in both arms (about 155 MB, in
+  q10), and the exact cache is 17 MB smaller than base's. What is left is allocator overhead
+  that the recycling didn't reach. The queries are much faster: off-lane, `verify` build, one
+  run each, q02 14.1 -> 1.9-5.5 s, q09 58 -> 8-14 s, q17 24 -> 3-6.5 s, q21 9.7 -> 3.6-4.3 s
+  (the machine at load 40-90).
+- mimalloc options instead of recycling, env only: `MIMALLOC_ABANDONED_RECLAIM_ON_FREE=1`
+  712 -> 678 MB; that plus `MAX_SEGMENT_RECLAIM=100`, 647 MB. With recycling, all of
+  `PURGE_DELAY=0`, `ABANDONED_PAGE_PURGE=1`, `ABANDONED_RECLAIM_ON_FREE=1` and
+  `MAX_SEGMENT_RECLAIM=100` together gave 623 MB, against base 527 MB with the same options.
+  `PURGE_DELAY=0` alone: 581 MB, base 528 MB.
+- A deeper spare pool (4 MB a class): 620 MB, no better (drops halved, 119k -> 60k).
+
+Left: (1) the CLOCK fix is worth about 15% of TPC-H's user instructions at a 256 MB cache
+(agent 255's figure). What blocks it is about 40-90 MB of peak memory that mimalloc holds when
+blocks are freed by threads other than the one that read them. Two leads, not tried: parallel
+scan workers from a persistent pool, so their heaps live on and reuse what is freed into them
+(`parscan::ParScan::start` spawns threads per scan); or block buffers from an arena the cache
+owns (fixed-size slots, as PostgreSQL's shared buffers), so the cache's memory never goes back
+to a thread's heap. (2) The exact count's cost, +1.3% instructions on the four
+cache-sensitive queries at 256 MB, goes when the cache holds more of what it counts. A cached
+block's buffer is rounded up to its size class: blocks cut just past 8 kB (`ROW_BLOCK`) cost
+10 kB. Cutting row and index blocks so their in-memory form ends at a class boundary would
+recover it. Not measured.
+
 ## Point and range reads, round 6: 32 clients, idle footprint (agent 250)
 
 BENCH.md "Point and range reads, round 6" has the tables. Base `6d3b7e9e5`, built plain dist
