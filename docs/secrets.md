@@ -5109,8 +5109,8 @@ roll MCP adds no cut-off tool: #304 is a person's call, since it can revoke the 
 **State, 2026-11-20 23:00.**
 - **Batch 6:** per-PR gates green so far: #487, #499 (its Terraform step re-run on Go 1.25), #511, #513,
   #517, #520, and the #520 and #493 prepared merges. #493 is gating; the combined gate comes next.
-- **#455:** merged with main and SQLite-green. Its Postgres failures are being checked against main
-  (`code-sql` backends serialization, the reviewer race, cluster timing).
+- **#455:** cleared at da336d428. SQLite passed 923/0, and Postgres' failures were load flakes: code-sql
+  untouched, the rest 2/2 alone. It lands in a free gap or with batch 7.
 - **#501:** its re-review fixes are on a seventh gate.
 - **#546:** AGENTS.md now carries the reference and issuer rules for other products.
 
