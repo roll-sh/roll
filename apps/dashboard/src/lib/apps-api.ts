@@ -1318,6 +1318,10 @@ export interface Job {
   command: string;
   /** Containers it ran, each with ROLL_TASK_INDEX and ROLL_TASK_COUNT. */
   tasks?: number;
+  /** Tries after a task's failure (0–5), each with ROLL_TASK_ATTEMPT. */
+  retries?: number;
+  /** Tasks running at once. */
+  parallelism?: number;
   status: RunStatus;
   exit_code: number | null;
   started_at: number;
@@ -1535,7 +1539,7 @@ export const appsApi = {
   run: (id: string, e: string, r: string) => call<CronRun>("GET", `${env(id, e)}/runs/${encodeURIComponent(r)}`),
   cancelRun: (id: string, e: string, r: string) => call<CronRun>("POST", `${env(id, e)}/runs/${encodeURIComponent(r)}/cancel`),
   jobs: (id: string, e: string) => call<Job[]>("GET", `${env(id, e)}/jobs`),
-  startJob: (id: string, e: string, body: { command: string; timeout_s?: number; tasks?: number }) => call<Job>("POST", `${env(id, e)}/jobs`, body),
+  startJob: (id: string, e: string, body: { command: string; timeout_s?: number; tasks?: number; retries?: number; parallelism?: number }) => call<Job>("POST", `${env(id, e)}/jobs`, body),
   job: (id: string, e: string, j: string) => call<Job>("GET", `${env(id, e)}/jobs/${encodeURIComponent(j)}`),
   cancelJob: (id: string, e: string, j: string) => call<Job>("POST", `${env(id, e)}/jobs/${encodeURIComponent(j)}/cancel`),
 
