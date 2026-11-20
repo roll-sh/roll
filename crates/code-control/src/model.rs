@@ -294,7 +294,8 @@ impl Preview {
 
     /// The head at which its preview regressed against main's (routes slower, or errors new).
     pub fn regressions_at(&self) -> Option<&str> {
-        let e = self.environment.as_ref()?;
+        // Up at its head (a push still deploying hasn't been compared at it).
+        let e = self.environment.as_ref().filter(|e| matches!(e.state.as_str(), "ready" | "sleeping"))?;
         let any = e.slower_routes.as_ref().is_some_and(|s| !s.routes.is_empty()) || e.new_errors.as_ref().is_some_and(|n| n.total > 0);
         any.then(|| e.head.as_deref().unwrap_or(""))
     }

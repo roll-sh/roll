@@ -894,7 +894,8 @@ async fn every_event_is_the_same_on_the_stream_and_in_webhooks() {
                 "new_errors": { "branch": "main", "total": total, "errors": [] } } }))
         .unwrap()
     };
-    for (head, total, became) in [("cs_4", 1, Some(json!(["ready", "regressions"]))), ("cs_4", 2, None)] {
+    // Gone and back at that head (main's preview asleep, then awake): not said again.
+    for (head, total, became) in [("cs_4", 1, Some(json!(["ready", "regressions"]))), ("cs_4", 2, None), ("cs_4", 0, None), ("cs_4", 3, None)] {
         a.code.report_environment(&id, Some(&regressed(head, total))).unwrap();
         assert_eq!(ev.next("preview").await.get("became").cloned(), became, "{total} at {head}");
     }
