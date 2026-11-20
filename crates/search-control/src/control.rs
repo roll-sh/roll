@@ -28,7 +28,7 @@
 use crate::meter::{Meter, MeterHooks, engine_figures, index_figures, now_ms};
 use crate::pricing::{Cost, Pricing};
 mod browser_keys;
-pub use browser_keys::NewBrowserKey;
+pub use browser_keys::{NewBrowserKey, Revoked};
 
 use crate::store::{Caps, CorsSettings, DeletedCluster, Inserted, IpRule, Over, Recorded, SearchCluster, Store, UsageTotals};
 pub use crate::wake::SqlCatalog;

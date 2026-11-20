@@ -39,6 +39,34 @@ pub struct Entry {
     pub bytes: usize,
     /// Extra state a kind needs (SQL cursors: the remaining rows and columns).
     pub extra: Value,
+    /// Who opened it ([`crate::xpack::security::resource_owner`]): anyone else finds it missing.
+    /// `None` for results stored before owners were recorded.
+    pub owner: Option<String>,
+}
+
+/// Stored result `id` of `kind` if the request's caller opened it: anyone else's answers as a
+/// missing one (`AsyncTaskIndexService.ensureAuthenticatedUserIsSame`), whatever its roles.
+pub fn get_own(ctx: &crate::rest::Ctx, id: &str, kind: Kind) -> Option<Entry> {
+    ctx.cluster.xpack.results.get(id, kind, ctx.now_ms).filter(|e| opened_by_caller(ctx, e))
+}
+
+/// Removes stored result `id` of `kind` if the caller opened it, or may cancel tasks
+/// (`cancel_task`); `false` when it's missing to the caller.
+pub fn remove_own(ctx: &crate::rest::Ctx, id: &str, kind: Kind) -> bool {
+    let may = match ctx.cluster.xpack.results.get(id, kind, ctx.now_ms) {
+        Some(e) => opened_by_caller(ctx, &e) || crate::xpack::security::allows_cluster_action(ctx, "cluster:admin/tasks/cancel"),
+        None => false,
+    };
+    may && ctx.cluster.xpack.results.remove(id, kind)
+}
+
+/// The owner a result the request stores gets.
+pub fn owner(ctx: &crate::rest::Ctx) -> Option<String> {
+    Some(crate::xpack::security::resource_owner(ctx))
+}
+
+fn opened_by_caller(ctx: &crate::rest::Ctx, e: &Entry) -> bool {
+    e.owner.as_deref().is_none_or(|o| o == crate::xpack::security::resource_owner(ctx))
 }
 
 /// At most this many stored results per cluster...
@@ -298,7 +326,7 @@ mod tests {
     use crate::obj;
 
     fn entry(kind: Kind, exp: i64) -> Entry {
-        Entry { kind, response: obj! { "a" => 1 }, start_ms: 0, expiration_ms: exp, bytes: 0, extra: Value::Null }
+        Entry { kind, response: obj! { "a" => 1 }, start_ms: 0, expiration_ms: exp, bytes: 0, extra: Value::Null, owner: None }
     }
 
     #[test]

@@ -654,6 +654,7 @@ mod tests {
         SearchRequest {
             slowlog: Default::default(),
             partial_aggs: false,
+            max_buckets: None,
             indices: indices.iter().map(|s| s.to_string()).collect(),
             opts: crate::meta::resolve::IndicesOptions::STRICT_EXPAND_OPEN_FORBID_CLOSED,
             source: source(body),

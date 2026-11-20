@@ -199,6 +199,7 @@ fn scroll_search(ctx: &Ctx, source: SearchSource) -> EsResult<SearchRequest> {
     Ok(SearchRequest {
         slowlog: Default::default(),
         partial_aggs: false,
+        max_buckets: None,
         indices: Vec::new(),
         opts: ctx.indices_options(IndicesOptions::STRICT_EXPAND_OPEN_FORBID_CLOSED)?,
         source,

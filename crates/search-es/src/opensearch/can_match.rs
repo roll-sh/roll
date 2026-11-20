@@ -293,6 +293,7 @@ mod tests {
         SearchRequest {
             slowlog: Default::default(),
             partial_aggs: false,
+            max_buckets: None,
             indices: Vec::new(),
             opts: crate::meta::resolve::IndicesOptions::STRICT_EXPAND_OPEN_FORBID_CLOSED,
             source,

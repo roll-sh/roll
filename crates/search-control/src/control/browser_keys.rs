@@ -52,6 +52,35 @@ pub struct NewBrowserKey {
     pub expires_in_s: Option<i64>,
     #[serde(default)]
     pub rate_limit: Option<RateLimit>,
+    /// What its requests may cost (`search_es::xpack::security::browser::Policy`, and
+    /// `max_concurrent`): the safe defaults when left out, widened by the owner.
+    #[serde(default)]
+    pub limits: Option<Limits>,
+}
+
+/// A browser key's request limits; every field optional.
+#[derive(Clone, Copy, Debug, Default, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Limits {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrent: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_result_window: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_buckets: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_items: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_scripts: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_expensive_queries: Option<bool>,
+}
+
+/// What a revoke did.
+pub enum Revoked {
+    Now,
+    /// The cluster is deleted: the revoke is kept and applied by its restore.
+    AtRestore,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -115,7 +144,15 @@ fn reach(k: &NewBrowserKey) -> Result<Value> {
     if k.expires_in_s.is_some_and(|s| s <= 0) {
         return Err(ControlError::Invalid("expires_in_s must be positive".into()));
     }
+    let l = k.limits.unwrap_or_default();
+    let within = |v: Option<u64>, max: u64| v.is_none_or(|n| (1..=max).contains(&n));
+    if !within(l.max_concurrent, 64) || !within(l.max_result_window, 10_000) || !within(l.max_buckets, 65_536) || !within(l.max_items, 1_000) {
+        return Err(ControlError::Invalid("limits: max_concurrent 1-64, max_result_window 1-10000, max_buckets 1-65536, max_items 1-1000".into()));
+    }
     let mut out = json!({ "rate_limit": { "per_minute": per_minute, "per_ip_per_minute": per_ip } });
+    if k.limits.is_some() {
+        out["limits"] = json!(l);
+    }
     match (indices, application) {
         (Some(i), _) => out["indices"] = json!(i),
         (_, Some(a)) => out["application"] = json!(a),
@@ -159,7 +196,7 @@ fn listed(k: &Value, cluster_id: &str) -> Option<Value> {
         "expires_at": k.get("expiration").and_then(Value::as_i64).map(|ms| ms / 1000),
         "rate_limit": meta.get("rate_limit").cloned().unwrap_or(Value::Null),
     });
-    for f in ["indices", "application", "filter"] {
+    for f in ["indices", "application", "filter", "limits"] {
         if let Some(v) = meta.get(f) {
             out[f] = v.clone();
         }
@@ -237,8 +274,23 @@ impl Control {
     /// Revokes browser key `key_id` of cluster `id` (`NotFound`: no such browser key, any other
     /// key of the cluster, or a deleted cluster, whose keys can't be told apart until it is
     /// restored).
-    pub async fn revoke_browser_key(&self, id: &str, key_id: &str) -> Result<()> {
-        let c = self.get(id).await?;
+    pub async fn revoke_browser_key(&self, id: &str, key_id: &str) -> Result<Revoked> {
+        let c = match self.get(id).await {
+            Ok(c) => c,
+            // A deleted cluster: a browser key of it (its stored security says so) is revoked by
+            // the restore, as `keys/{key}` keeps a revoke.
+            Err(ControlError::NotFound(m)) => {
+                let Some(d) = self.store.get_deleted(id).await? else { return Err(ControlError::NotFound(m)) };
+                let dialect = super::dialect(&d.cluster.flavor).unwrap_or(search_es::Dialect::Elasticsearch);
+                let state = self.data.read_cluster(&d.stored_as).await.map_err(ControlError::Internal)?;
+                let made_for = state.and_then(|s| search_es::xpack::security::stored_browser_key_cluster(&s.json, dialect, key_id));
+                if made_for.as_deref() != Some(d.cluster.id.as_str()) || !self.keep_revoke(id, &format!("key:{key_id}")).await? {
+                    return Err(ControlError::NotFound(format!("no browser key {key_id} on cluster {id}")));
+                }
+                return Ok(Revoked::AtRestore);
+            }
+            Err(e) => return Err(e),
+        };
         let none = || ControlError::NotFound(format!("no browser key {key_id} on cluster {}", c.name));
         if c.flavor == "opensearch" {
             return Err(none());
@@ -249,7 +301,7 @@ impl Control {
         if !is_browser {
             return Err(none());
         }
-        self.delete_key_on(&c, key_id).await
+        self.delete_key_on(&c, key_id).await.map(|()| Revoked::Now)
     }
 }
 

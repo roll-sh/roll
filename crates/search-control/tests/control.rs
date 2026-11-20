@@ -931,31 +931,131 @@ async fn more_like_this_reads_its_documents_as_the_filtered_key() {
     assert_eq!(s, 403, "{v}");
 }
 
-/// Term vectors of a document the key's filter hides are "not found", as its get is.
+/// A regular API key of cluster `shop` with the browser key's filter (`public: true` on
+/// `products`): document level security for a principal that isn't a browser key.
+async fn filtered_api_key(e: &Env) -> String {
+    use base64::Engine;
+    let r = e
+        .post(
+            "/v1/search/clusters/shop/request",
+            json!({"method": "POST", "path": "/_security/api_key", "body": {"name": "filtered", "role_descriptors": {"r": {"indices": [{"names": ["products"], "privileges": ["read"], "query": {"term": {"public": true}}}]}}}}),
+        )
+        .await;
+    let v = body(&r);
+    base64::engine::general_purpose::STANDARD.encode(format!("{}@shop:{}", v["id"].as_str().unwrap(), v["api_key"].as_str().unwrap()))
+}
+
+/// Term vectors of a document a key's filter hides are "not found", as its get is.
 #[tokio::test]
 async fn term_vectors_of_a_hidden_document_are_not_found() {
     let e = env().await;
-    let key = filtered_key(&e).await;
+    filtered_key(&e).await;
+    let key = filtered_api_key(&e).await;
     let (s, v) = as_key(&e, &key, reqwest::Method::GET, "/products/_termvectors/2", None).await;
     assert_eq!((s, &v["found"]), (200, &json!(false)), "{v}");
     let (s, v) = as_key(&e, &key, reqwest::Method::GET, "/products/_termvectors/1", None).await;
     assert_eq!((s, &v["found"]), (200, &json!(true)), "{v}");
 }
 
-/// An async search's stored result is its opener's: anyone else (here a browser key with the
-/// id of the cluster owner's search) gets 404 for it, its status and its delete.
+/// A stored result (async search, ES|QL, SQL) is its opener's: anyone else (here another API
+/// key, with the id of the cluster owner's) gets 404 for it, its status and its delete.
 #[tokio::test]
-async fn async_search_results_belong_to_their_opener() {
+async fn stored_results_belong_to_their_opener() {
     let e = env().await;
-    let key = filtered_key(&e).await;
-    let r = e.post("/v1/search/clusters/shop/request", json!({"method": "POST", "path": "/products/_async_search?keep_on_completion=true", "body": {"query": {"match_all": {}}}})).await;
-    let id = body(&r)["id"].as_str().unwrap().to_string();
-    for (m, p) in [(reqwest::Method::GET, format!("/_async_search/{id}")), (reqwest::Method::GET, format!("/_async_search/status/{id}")), (reqwest::Method::DELETE, format!("/_async_search/{id}"))] {
+    filtered_key(&e).await;
+    let key = e.post("/v1/search/clusters/shop/keys", json!({"name": "another", "access": "data"})).await["api_key"].as_str().unwrap().to_string();
+    let console = |method: &str, p: &str, b: Value| e.post("/v1/search/clusters/shop/request", json!({"method": method, "path": p, "body": b}));
+    let search = body(&console("POST", "/products/_async_search?keep_on_completion=true", json!({"query": {"match_all": {}}})).await)["id"].as_str().unwrap().to_string();
+    let esql = body(&console("POST", "/_query/async", json!({"query": "FROM products | LIMIT 1", "keep_on_completion": true})).await)["id"].as_str().unwrap().to_string();
+    let sql = body(&console("POST", "/_sql?format=json", json!({"query": "SELECT title FROM products", "keep_on_completion": true})).await)["id"].as_str().unwrap().to_string();
+    let theirs = [
+        (reqwest::Method::GET, format!("/_async_search/{search}")),
+        (reqwest::Method::GET, format!("/_async_search/status/{search}")),
+        (reqwest::Method::DELETE, format!("/_async_search/{search}")),
+        (reqwest::Method::GET, format!("/_query/async/{esql}")),
+        (reqwest::Method::DELETE, format!("/_query/async/{esql}")),
+        (reqwest::Method::GET, format!("/_sql/async/{sql}?format=json")),
+        (reqwest::Method::DELETE, format!("/_sql/async/delete/{sql}")),
+    ];
+    for (m, p) in theirs {
         let (s, v) = as_key(&e, &key, m.clone(), &p, None).await;
         assert_eq!(s, 404, "{m} {p}: {v}");
     }
-    let r = e.post("/v1/search/clusters/shop/request", json!({"method": "GET", "path": format!("/_async_search/{id}")})).await;
+    let r = console("GET", &format!("/_async_search/{search}"), Value::Null).await;
     assert_eq!((r["status"].as_i64(), total(&body(&r)["response"])), (Some(200), 2), "{r}");
+    assert_eq!(console("GET", &format!("/_query/async/{esql}"), Value::Null).await["status"], 200);
+}
+
+/// A browser key only searches: it can't run painless or expensive queries, ask for a large
+/// window, explain, or hold state on the cluster (scrolls, points in time, stored async searches),
+/// and has no term vectors (their statistics come from every document, filtered or not).
+#[tokio::test]
+async fn a_browser_key_only_searches() {
+    let e = env().await;
+    let key = filtered_key(&e).await;
+    let refused = [
+        (reqwest::Method::POST, "/products/_search", Some(json!({"script_fields": {"x": {"script": "1"}}}))),
+        (reqwest::Method::POST, "/products/_search", Some(json!({"query": {"script_score": {"query": {"match_all": {}}, "script": {"source": "1"}}}}))),
+        (reqwest::Method::POST, "/products/_search", Some(json!({"query": {"regexp": {"title": "s.*"}}}))),
+        (reqwest::Method::POST, "/products/_search", Some(json!({"from": 990, "size": 20}))),
+        (reqwest::Method::POST, "/products/_search", Some(json!({"explain": true}))),
+        (reqwest::Method::POST, "/products/_search?scroll=1m", Some(json!({}))),
+        (reqwest::Method::POST, "/products/_pit?keep_alive=1m", None),
+        (reqwest::Method::POST, "/products/_async_search?keep_on_completion=true", Some(json!({}))),
+        (reqwest::Method::GET, "/products/_termvectors/1", None),
+        (reqwest::Method::POST, "/products/_explain/1", Some(json!({"query": {"match_all": {}}}))),
+    ];
+    for (m, p, b) in refused {
+        let (s, v) = as_key(&e, &key, m.clone(), p, b.clone()).await;
+        assert_eq!(s, 400, "{m} {p} {b:?}: {v}");
+        assert!(v["error"]["reason"].as_str().unwrap_or_default().contains("browser key"), "{v}");
+    }
+    let (s, v) = as_key(&e, &key, reqwest::Method::POST, "/products/_search", Some(json!({"query": {"match": {"title": {"query": "shose", "fuzziness": "AUTO"}}}}))).await;
+    assert_eq!((s, total(&v)), (200, 1), "search-as-you-type still works: {v}");
+}
+
+/// A browser key's request costs a token per item (an `_msearch` of N searches N), and browser
+/// requests running at once are capped below the cluster's own permits: past the key's cap a
+/// browser request gets 429 while the owner's clients go on.
+#[tokio::test]
+async fn browser_keys_pay_per_item_and_leave_the_owner_permits() {
+    let e = env().await;
+    filtered_key(&e).await;
+    let k = e.post("/v1/search/clusters/shop/browser-keys", json!({"name": "few", "indices": ["products"], "rate_limit": {"per_minute": 10}, "limits": {"max_concurrent": 1}})).await;
+    let key = k["api_key"].as_str().unwrap().to_string();
+    let msearch = |n: usize| {
+        let body = "{\"index\":\"products\"}\n{\"size\":0}\n".repeat(n);
+        e.http.post(format!("{}/_msearch", e.es)).header("authorization", format!("ApiKey {key}")).header("content-type", "application/x-ndjson").body(body).send()
+    };
+    assert_eq!(msearch(7).await.unwrap().status().as_u16(), 200);
+    let r = msearch(4).await.unwrap();
+    assert_eq!(r.status().as_u16(), 429, "3 tokens left can't pay for 4 searches");
+    assert!(r.headers().contains_key("retry-after"));
+    assert_eq!(msearch(3).await.unwrap().status().as_u16(), 200);
+
+    // One browser request of this key running (a lease held as a request would hold it): the
+    // next gets 429, the owner's still runs.
+    let k2 = e.post("/v1/search/clusters/shop/browser-keys", json!({"name": "one at a time", "indices": ["products"], "limits": {"max_concurrent": 1}})).await;
+    let key2 = k2["api_key"].as_str().unwrap().to_string();
+    let mut held = search_es::EsRequest::new("GET", "/");
+    held.headers.push(("authorization".into(), format!("ApiKey {key2}")));
+    let Ok(lease) = e.control.node.enter_from(&held, None, search_server::Origin::Client("203.0.113.9".parse().unwrap())).await else { panic!("not admitted") };
+    let (s, _) = as_key(&e, &key2, reqwest::Method::POST, "/products/_search", Some(json!({}))).await;
+    assert_eq!(s, 429);
+    let c = e.post("/v1/search/clusters/shop/password", json!({})).await;
+    let (user, pw) = creds(&c);
+    let (s, _) = e.es(&user, &pw, reqwest::Method::POST, "/products/_search", Some(json!({}))).await;
+    assert_eq!(s, 200, "the owner's request isn't held back by browser keys");
+    drop(lease);
+    let (s, _) = as_key(&e, &key2, reqwest::Method::POST, "/products/_search", Some(json!({}))).await;
+    assert_eq!(s, 200);
+
+    // At most 20 browser keys a cluster.
+    for i in 3..20 {
+        e.post("/v1/search/clusters/shop/browser-keys", json!({"name": format!("k{i}"), "indices": ["products"]})).await;
+    }
+    let (s, v) = e.call(reqwest::Method::POST, "/v1/search/clusters/shop/browser-keys", Some(json!({"name": "k20", "indices": ["products"]}))).await;
+    assert_eq!(s, 409, "{v}");
 }
 
 #[tokio::test]

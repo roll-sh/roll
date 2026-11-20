@@ -181,7 +181,7 @@ async fn per_cluster(State(c): State<AppState>, req: Request, next: Next) -> Res
         Ok(d) => d,
         // A key revoked while its cluster is deleted is kept for the restore
         // (`Control::delete_key`): it too runs where it lands, for whoever may see the cluster.
-        Err(ControlError::NotFound(_)) if req.method() == Method::DELETE && rest.is_some_and(|(_, r)| r.starts_with("keys/")) => {
+        Err(ControlError::NotFound(_)) if req.method() == Method::DELETE && rest.is_some_and(|(_, r)| r.starts_with("keys/") || r.starts_with("browser-keys/")) => {
             return match c.get_deleted(&id).await {
                 Ok(d) if Caller::of(req.extensions()).sees(&d.cluster) => next.run(req).await,
                 _ => no_such(&id).into_response(),
@@ -616,9 +616,15 @@ async fn create_browser_key(State(c): State<AppState>, Path(id): Path<String>, J
     Ok(Json(c.create_browser_key(&id, k).await?))
 }
 
-async fn revoke_browser_key(State(c): State<AppState>, Path((id, key)): Path<(String, String)>) -> Result<StatusCode, ControlError> {
-    c.revoke_browser_key(&id, &key).await?;
-    Ok(StatusCode::NO_CONTENT)
+/// `DELETE /v1/search/clusters/{id}/browser-keys/{key}`: 204, or 202 on a deleted cluster (the
+/// restore revokes it).
+async fn revoke_browser_key(State(c): State<AppState>, Path((id, key)): Path<(String, String)>) -> Result<Response, ControlError> {
+    Ok(match c.revoke_browser_key(&id, &key).await? {
+        crate::control::Revoked::Now => StatusCode::NO_CONTENT.into_response(),
+        crate::control::Revoked::AtRestore => {
+            (StatusCode::ACCEPTED, Json(json!({ "revoked": "at restore", "note": "the cluster is deleted: restoring it revokes the key before it answers" }))).into_response()
+        }
+    })
 }
 
 /// The remote clusters a cluster holds credentials for (never the credentials).

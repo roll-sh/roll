@@ -204,8 +204,9 @@ applications). A web page calls a cluster directly, with no backend of its own i
   document-level `query` (Algolia's secured-key filters), and `expires_in_s` its `expiration`.
   The encoded key (`base64(<key id>@<cluster>:<key>)`, `Authorization: ApiKey …`) is in the
   create answer only; the list shows what each reaches, its filter, expiry and limit, never a
-  secret; revoking refuses any key that isn't a browser key (404), and on a deleted cluster
-  answers 404 (restore it, then revoke). Names starting with `.` and a bare `*` are refused; a
+  secret; revoking refuses any key that isn't a browser key (404); on a deleted cluster a
+  browser key of it (its stored security says so) is kept for the restore, which revokes it
+  before it answers (202). Names starting with `.` and a bare `*` are refused; a
   pattern reads every index whose name it matches, hidden ones (`index.hidden`) included, as an
   Elasticsearch role's pattern does. At most 20 browser keys per cluster (409 past it).
 - *A browser key works only on its own cluster.* Its `metadata.roll_browser.cluster` is the
@@ -219,19 +220,47 @@ applications). A web page calls a cluster directly, with no backend of its own i
   the branch's before it is in the catalog, so every revocation, invalidation, deletion and
   password change made after `at` holds there; only the data goes back in time. A branch made now
   starts from the parent's security of now anyway; changes made to the parent after that stay the
-  parent's.
+  parent's. A point-in-time branch has the data as of `at` and today's security: a document
+  deleted after `at` is back, and a role loosened since because that document was gone now reaches
+  it. Review its roles before sharing it.
+- *What a browser key may ask for* (`search_es::xpack::security::browser`; Algolia's search-only
+  keys): it's a public credential, so it gets what search-as-you-type needs and nothing else.
+  Searches (`_search`, `_msearch`, `_count`), document reads, `_terms_enum`, a search
+  application's `_search`, and the root and `_security/_authenticate` that clients call first;
+  any other API is a 400 naming why: no scrolls, points in time or stored async searches (they
+  hold state on the cluster), no term vectors or `_explain`, no SQL, ES|QL or EQL, no search
+  templates. In a search: no `explain` or `profile`; no painless (`script`, `script_fields`,
+  `runtime_mappings`, scripted scores, aggregations and sorts) unless the key's
+  `limits.allow_scripts`; none of the query families Elasticsearch's
+  `search.allow_expensive_queries: false` turns off (`regexp`, `wildcard`, `prefix`, `fuzzy`,
+  `query_string`; a `match` with `fuzziness` and a completion suggester's options stay) unless
+  `limits.allow_expensive_queries`; `from + size` at most `limits.max_result_window` (1,000);
+  aggregations at most `limits.max_buckets` (1,000) buckets; `_msearch` and `_mget` at most
+  `limits.max_items` (100) items. The owner widens them in `limits` when making the key
+  (`max_concurrent` 1-64, `max_result_window` up to 10,000, `max_buckets` up to 65,536,
+  `max_items` up to 1,000, the two `allow_` switches); the list shows them.
+- *Term statistics aren't filtered* (as in Elasticsearch): a filter (document level security)
+  hides documents from searches and gets, but scores, term vectors' `term_statistics` and
+  `_explain`'s idf come from every document of the shard, so a user or API key with a filter can
+  learn about hidden documents through them. A browser key can't ask for any of them.
 - *Rate limits* (Algolia's `maxQueriesPerIPPerHour`): per key `rate_limit: {per_minute?,
   per_ip_per_minute?}` (defaults 600 and 60 a minute, at most 100,000), kept in the key's
   `metadata.roll_browser`, so they travel with the cluster; a key's limit is shared by all its
   visitors, and the per-address one keeps a single visitor from using it up. Per cluster,
   `browser_per_minute` (`PATCH`; `null`: 6,000) is a ceiling every browser key draws from. The
-  cluster's owner node counts each request a browser key authenticates against three token
-  buckets (the cluster's, the key's, and the key's per client address; an IPv6 client counts by
-  its /64), and an empty bucket answers 429 `es_rejected_execution_exception` (as Elasticsearch
+  cluster's owner node charges each request a browser key authenticates one token per item it
+  holds (an `_msearch` of 50 searches, an `_mget` of 50 documents: 50) to every bucket, all or
+  none: the cluster's, the key's, and the key's per client address at three widths (the address,
+  an IPv6 /64 counting as one; its /56 at 4 times and its /48 at 16 times the per-address limit;
+  IPv4 /32, /24 and /16), the wider two never past a quarter of the key's or the cluster's limit,
+  so one network can't take more than a quarter of either. An empty bucket answers 429 `es_rejected_execution_exception` (as Elasticsearch
   rejects work it can't take) with `Retry-After` in seconds (exposed to the page through `Access-Control-Expose-Headers`); a refused request takes nothing from
   the other buckets. The buckets are in memory on the owner and bounded (50,000 addresses per
   cluster; past it the fullest are forgotten first, so a drained address keeps its debt): a takeover, a drain or an unload starts them full again.
   roll's own requests (the console) aren't counted.
+- *Running at once*: browser requests are capped per key (`limits.max_concurrent`, 4) and per
+  cluster (a quarter of the cluster's `max_in_flight`, at least 4), past either 429 with
+  `Retry-After: 1`, so the owner's own clients always find permits.
 - *The safe surface* is `_application/search_application/{name}/_search` with a key limited to
   that application: a page sends only the template's `params`. Search UI's
   `@elastic/search-ui-elasticsearch-connector` and InstantSearch through Searchkit send whole
@@ -397,8 +426,8 @@ origins (browser search), once they're on main.
 | POST | `/v1/search/clusters/{id}/keys` | a new API key of the cluster `{name, expires_in_s?, access?}` (`access`: `admin`, the default, or `data`: a link's role, data, templates, pipelines and lifecycle policies without security) → `{id, name, access, api_key, url, expires_at?}` (`access`: the access the key was made with): `api_key` is `base64(<key id>@<cluster>:<key>)` for `Authorization: ApiKey …`, in this answer only (roll secrets' managed links use it instead of sharing the password); on an OpenSearch-flavor cluster (whose clients sign in with a user) the key is an internal user of its own: `{id, name, access, username, password, url, expires_at?}` without `api_key`, `username` being `<user>@<cluster>`, refused once `expires_in_s` passes |
 | DELETE | `/v1/search/clusters/{id}/keys/{key}` | revoke it (204; 404 when it's gone). On a deleted cluster (by its id) the revoke is kept and applied by its restore (204) |
 | GET | `/v1/search/clusters/{id}/browser-keys` | `{keys}`: the browser keys that still work, newest first, each `{id, name, indices or application, filter?, rate_limit, created_at, expires_at}` (no secret). Wakes the cluster |
-| POST | `/v1/search/clusters/{id}/browser-keys` | a key a web page ships (above) `{name, indices or application, filter?, expires_in_s?, rate_limit?: {per_minute?, per_ip_per_minute?}}` → the same fields plus `api_key` (once) and `url`. 400 on an OpenSearch-flavor cluster; 409 past 20 browser keys |
-| DELETE | `/v1/search/clusters/{id}/browser-keys/{key}` | revoke a browser key (204; 404 for any other key of the cluster, and on a deleted cluster: restore it first) |
+| POST | `/v1/search/clusters/{id}/browser-keys` | a key a web page ships (above) `{name, indices or application, filter?, expires_in_s?, rate_limit?: {per_minute?, per_ip_per_minute?}, limits?: {max_concurrent?, max_result_window?, max_buckets?, max_items?, allow_scripts?, allow_expensive_queries?}}` → the same fields plus `api_key` (once) and `url`. 400 on an OpenSearch-flavor cluster; 409 past 20 browser keys |
+| DELETE | `/v1/search/clusters/{id}/browser-keys/{key}` | revoke a browser key (204; 404 for any other key of the cluster; on a deleted cluster, a browser key of it is kept for the restore, which revokes it: 202) |
 | GET | `/v1/search/clusters/{id}/remotes` | the remote clusters it holds credentials for: `{remotes: [{alias, cluster, cluster_id, key_id, minted, created_at, connected}]}` (never the key) |
 | PUT | `/v1/search/clusters/{id}/remotes/{alias}` | link another cluster of the same owner as remote `alias` (above): `{cluster, skip_unavailable?, access?}` or `{cluster, skip_unavailable?, api_key}` → `{alias, cluster, cluster_id, mode, proxy_address, key_id, minted, skip_unavailable?}`; 404 for a cluster the caller can't link to, missing or not. `admin` on both clusters for roll-access |
 | DELETE | `/v1/search/clusters/{id}/remotes/{alias}` | unlink: the remote's settings and credentials go, a key roll made is revoked (204) |

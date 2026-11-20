@@ -27,6 +27,7 @@
 
 pub mod actions;
 pub mod api_keys;
+pub mod browser;
 pub mod audit;
 pub mod dls;
 pub mod opensearch;
@@ -251,6 +252,15 @@ pub fn adopt_current_security(branch: &[u8], current: &[u8], dialect: crate::clu
         }
     }
     Ok(st.to_json().to_json().into_bytes())
+}
+
+/// The cluster id a browser key of a stored state (a deleted cluster's) was made for, from its
+/// `metadata.roll_browser.cluster` (`None`: no such key, or not a browser key).
+pub fn stored_browser_key_cluster(state: &[u8], dialect: crate::cluster::Dialect, key_id: &str) -> Option<String> {
+    let v = crate::json::parse(state).ok()??;
+    let st = crate::meta::ClusterState::from_json_in(&v, dialect).ok()?;
+    let meta = st.metadata.xpack.get(api_keys::KEYS, key_id)?.get("metadata")?.get(browser::METADATA)?.get("cluster")?.as_str()?.to_string();
+    Some(meta)
 }
 
 /// Who owns what a request stores for later (async search results): the API key it
@@ -676,6 +686,7 @@ fn check_workflow(ctx: &Ctx, p: &Principal) -> EsResult<()> {
 pub fn authorize(ctx: &Ctx) -> EsResult<Option<String>> {
     let r = authorize_action(ctx)?;
     check_lookups(ctx, None)?;
+    browser::check(ctx)?;
     Ok(r)
 }
 

@@ -515,8 +515,10 @@ pub fn date_factory() -> search_aggs::wire::DateFactory {
 }
 
 /// The final reduce, rendered.
-pub fn reduce(cluster: &Cluster, st: &ClusterState, req: &AggRequest, parts: Vec<search_aggs::Aggs>, typed_keys: bool) -> EsResult<Value> {
+pub fn reduce(cluster: &Cluster, st: &ClusterState, req: &AggRequest, parts: Vec<search_aggs::Aggs>, typed_keys: bool, cap: Option<usize>) -> EsResult<Value> {
     let max_buckets = st.metadata.cluster_setting("search.max_buckets").and_then(|v| v.parse::<usize>().ok()).unwrap_or(65536);
+    // A request's own cap (a browser key's `max_buckets`) under the cluster's.
+    let max_buckets = cap.map_or(max_buckets, |c| c.min(max_buckets));
     let host: Arc<dyn search_aggs::ScriptHost> = Arc::new(super::agg_scripts::Host::new(cluster, None, 0, String::new()));
     let opts = search_aggs::ReduceOptions { final_reduce: true, max_buckets, scripts: Some(host), budget: Some(cluster.breakers.request(cluster, st)), ..Default::default() };
     let out = search_aggs::reduce(parts, req, &opts).map_err(|e| reduce_failure(agg_error(e)))?;

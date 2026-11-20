@@ -102,7 +102,8 @@ pub async fn submit(ctx: &Ctx<'_>) -> EsResult<Reply> {
                 start_ms: start,
                 expiration_ms: start + keep_alive,
                 bytes: 0,
-                extra: obj! { "status" => status as i64, "owner" => crate::xpack::security::resource_owner(ctx) },
+                extra: Value::from(status as i64),
+                owner: async_results::owner(ctx),
             },
             ctx.now_ms,
         );
@@ -119,24 +120,15 @@ pub async fn submit(ctx: &Ctx<'_>) -> EsResult<Reply> {
 fn stored(ctx: &Ctx) -> EsResult<(String, Entry)> {
     let id = ctx.path_param("id").unwrap_or_default().to_string();
     async_results::check_id(&id)?;
-    match ctx.cluster.xpack.results.get(&id, Kind::Search, ctx.now_ms) {
-        Some(e) if opened_by_caller(ctx, &e) => Ok((id, e)),
-        _ => Err(EsError::resource_not_found(id)),
+    match async_results::get_own(ctx, &id, Kind::Search) {
+        Some(e) => Ok((id, e)),
+        None => Err(EsError::resource_not_found(id)),
     }
 }
 
-/// Whether the caller opened stored result `e` (results stored before owners were recorded
-/// have none, and stay readable as they were).
-fn opened_by_caller(ctx: &Ctx, e: &Entry) -> bool {
-    match e.extra.get("owner").and_then(Value::as_str) {
-        Some(owner) => owner == crate::xpack::security::resource_owner(ctx),
-        None => true,
-    }
-}
-
-/// The HTTP status the stored search answered with (an older entry keeps it bare).
+/// The HTTP status the stored search answered with.
 fn stored_status(e: &Entry) -> i64 {
-    e.extra.get("status").and_then(Value::as_i64).or_else(|| e.extra.as_i64()).unwrap_or(200)
+    e.extra.as_i64().unwrap_or(200)
 }
 
 fn with_id(id: &str, v: &Value, expiration: i64) -> Map {
@@ -192,13 +184,7 @@ pub fn status(ctx: &Ctx) -> EsResult<Reply> {
 pub fn delete(ctx: &Ctx) -> EsResult<Reply> {
     let id = ctx.path_param("id").unwrap_or_default().to_string();
     async_results::check_id(&id)?;
-    // Its opener deletes it, and so does whoever may cancel tasks (`cancel_task`); to anyone
-    // else it is missing.
-    let may = match ctx.cluster.xpack.results.get(&id, Kind::Search, ctx.now_ms) {
-        Some(e) => opened_by_caller(ctx, &e) || crate::xpack::security::allows_cluster_action(ctx, "cluster:admin/tasks/cancel"),
-        None => false,
-    };
-    if may && ctx.cluster.xpack.results.remove(&id, Kind::Search) {
+    if async_results::remove_own(ctx, &id, Kind::Search) {
         Reply::ok(obj! { "acknowledged" => true })
     } else {
         Err(EsError::resource_not_found(id))

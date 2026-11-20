@@ -95,6 +95,9 @@ pub struct SearchRequest {
     /// retrievers' children).
     pub rank_only: bool,
     /// The document and field level security of the principal the search reads for.
+    /// The most aggregation buckets it may make (a browser key's `max_buckets`), under
+    /// `search.max_buckets`.
+    pub max_buckets: Option<usize>,
     pub security: Option<crate::xpack::security::dls::ReadSecurity>,
     /// What its slow log entries say about it (its body, `X-Opaque-Id`).
     pub slowlog: crate::slowlog::Origin,
@@ -373,6 +376,7 @@ pub fn parse_request(ctx: &Ctx, body: Option<&Value>, raw: Option<&[u8]>) -> EsR
         now_ms: ctx.now_ms,
         slowlog: crate::slowlog::Origin::of(&ctx.request.body, raw, ctx.request.header("x-opaque-id")),
         partial_aggs: false,
+        max_buckets: crate::xpack::security::browser::policy(ctx).map(|p| p.max_buckets),
     })
 }
 
@@ -1342,6 +1346,10 @@ fn query_phase_inner(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, 
                 lookup = lookup.with_rescore(prepare_rescore(&QueryCtx::new(cluster, st, &t.idx, &table, &searcher, req.now_ms, t.reader()), src));
             }
             let max_buckets = st.metadata.cluster_setting("search.max_buckets").and_then(|v| v.parse::<usize>().ok());
+            let max_buckets = match req.max_buckets {
+                Some(cap) => Some(max_buckets.map_or(cap, |m| m.min(cap))),
+                None => max_buckets,
+            };
             let opts = search_aggs::ShardOptions {
                 max_buckets,
                 // Top-level aggregations may answer from segment statistics only when the query
@@ -2967,7 +2975,7 @@ fn execute_targets(cluster: &Cluster, req: &SearchRequest, targets: &[Target]) -
                 partial_aggs = Some(out);
                 None
             } else {
-            let mut out = aggs::reduce(cluster, &st, a, parts, req.typed_keys).map_err(|e| with_query_failures(e, &cluster.node.id, targets, &failures))?;
+            let mut out = aggs::reduce(cluster, &st, a, parts, req.typed_keys, req.max_buckets).map_err(|e| with_query_failures(e, &cluster.node.id, targets, &failures))?;
             finish_top_hits(cluster, &st, req, targets, &results, &mut out)?;
             if let Some(raw) = &src.aggs
                 && aggs::mentions_tsid(raw)
@@ -3630,6 +3638,7 @@ fn lookup_fields_of_hit(cluster: &Cluster, src: &SearchSource, table: &Arc<crate
             let req = SearchRequest {
                 slowlog: Default::default(),
                 partial_aggs: false,
+                max_buckets: None,
                 indices: vec![target_index.clone()],
                 opts: IndicesOptions::STRICT_EXPAND_OPEN,
                 source: SearchSource::parse(&body, None)?,
@@ -4106,7 +4115,7 @@ pub(crate) fn reduce_clusters(ctx: &Ctx, req: &SearchRequest, parts: Vec<search_
     let Some(a) = req.source.aggs.as_ref().filter(|_| !parts.is_empty()) else { return Ok(None) };
     let agg_req = aggs::parse(a, req.source.aggs_raw.as_deref().map(|r| (r, a)))?;
     let st = ctx.state();
-    let mut out = aggs::reduce(ctx.cluster, &st, &agg_req, parts, req.typed_keys)?;
+    let mut out = aggs::reduce(ctx.cluster, &st, &agg_req, parts, req.typed_keys, req.max_buckets)?;
     // Every part's top hits were fetched on its cluster: only `rest_total_hits_as_int` is left.
     finish_top_hits(ctx.cluster, &st, req, &[], &[], &mut out)?;
     if aggs::mentions_tsid(a) {
