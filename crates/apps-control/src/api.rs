@@ -117,6 +117,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/vitals"), get(vitals))
         .route(&format!("{env}/app-metrics"), get(app_metrics))
         .route(&format!("{env}/errors"), get(errors))
+        .route(&format!("{env}/errors/{{fingerprint}}"), axum::routing::patch(error_state))
         .route(&format!("{env}/forms"), get(forms))
         .route(&format!("{env}/forms/{{form}}/submissions"), get(form_submissions))
         .route(&format!("{env}/forms/{{form}}/submissions/{{sub}}"), axum::routing::delete(delete_form_submission))
@@ -1299,6 +1300,13 @@ async fn traces(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q
 #[derive(Deserialize)]
 struct VitalsQuery {
     minutes: Option<i64>,
+}
+
+async fn error_state(State(apps): S, Path((id, env, fp)): Path<(String, String, String)>, ext: Extensions, b: Bytes) -> R {
+    let body = body(&b)?;
+    let out = apps.set_error_state(&id, &env, &fp, body.clone()).await?;
+    apps.audit("error.state", &id, &env, actor(&ext), json!({ "fingerprint": fp, "state": out["state"] })).await;
+    ok(out)
 }
 
 async fn errors(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q): Query<VitalsQuery>) -> R {

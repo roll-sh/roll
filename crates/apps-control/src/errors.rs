@@ -165,9 +165,11 @@ pub struct Occurrence {
     pub text: String,
     pub at: i64,
     pub instance: Option<String>,
+    /// The deployment whose instance wrote it.
+    pub deployment: Option<String>,
 }
 
-fn occurrence(kind: Kind, lines: &[&str], at: i64, instance: Option<String>) -> Occurrence {
+fn occurrence(kind: Kind, lines: &[&str], at: i64, instance: Option<String>, deployment: Option<String>) -> Occurrence {
     use sha2::{Digest, Sha256};
     let (key, title) = if kind == Kind::Line {
         let m = message(lines[0]);
@@ -189,7 +191,7 @@ fn occurrence(kind: Kind, lines: &[&str], at: i64, instance: Option<String>) -> 
         }
         text.truncate(cut);
     }
-    Occurrence { kind, fingerprint, title, text, at, instance }
+    Occurrence { kind, fingerprint, title, text, at, instance, deployment }
 }
 
 /// The errors in an environment's lines (oldest first): each instance's and stream's traces
@@ -204,7 +206,7 @@ pub fn occurrences(lines: &[LogLine]) -> Vec<Occurrence> {
     let close = |o: Open, out: &mut Vec<Occurrence>| {
         let first = &lines[o.lines[0]];
         let texts: Vec<&str> = o.lines.iter().map(|i| lines[*i].text.as_str()).collect();
-        out.push(occurrence(o.kind, &texts, first.t, first.instance.clone()));
+        out.push(occurrence(o.kind, &texts, first.t, first.instance.clone(), first.deployment.clone()));
     };
     for (i, l) in lines.iter().enumerate() {
         if !matches!(l.stream, Stream::Stdout | Stream::Stderr) {
@@ -230,7 +232,7 @@ pub fn occurrences(lines: &[LogLine]) -> Vec<Occurrence> {
         if let Some(kind) = starts(&l.text) {
             open.insert(key, Open { kind, lines: vec![i] });
         } else if l.level.is_some_and(|lv| lv >= Level::Error) {
-            out.push(occurrence(Kind::Line, &[l.text.as_str()], l.t, l.instance.clone()));
+            out.push(occurrence(Kind::Line, &[l.text.as_str()], l.t, l.instance.clone(), l.deployment.clone()));
         }
     }
     let mut rest: Vec<Open> = open.into_values().collect();
@@ -301,7 +303,39 @@ pub fn groups(lines: &[LogLine]) -> Vec<Group> {
     list
 }
 
+/// What an error seen means ([`crate::store::Store::remember_error`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Seen {
+    /// The environment never had it: `error.new`.
+    New,
+    /// It was resolved, and it's back: open again, `error.regressed`.
+    Regressed,
+    /// Known (open, or muted): nothing said.
+    Known,
+}
+
+/// An error group's state (Cloud Run Error Reporting's): open; resolved (said again if it comes
+/// back after); muted (never said again).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Lifecycle {
+    Open,
+    Resolved,
+    Muted,
+}
+
 impl Apps {
+    /// `PATCH …/environments/{env}/errors/{fingerprint} {state}`: resolved, muted or open again.
+    pub async fn set_error_state(self: &Arc<Self>, service: &str, env: &str, fingerprint: &str, body: Value) -> Result<Value> {
+        self.service_env(service, env).await?;
+        let state: Lifecycle = body.get("state").cloned().and_then(|s| serde_json::from_value(s).ok()).ok_or_else(|| crate::Error::BadRequest("state is open, resolved or muted".into()))?;
+        let (sid, e, f) = (service.to_string(), env.to_string(), fingerprint.to_string());
+        if !self.db(move |s| s.set_error_state(&sid, &e, &f, state, code_sql::now_ms())).await? {
+            return Err(crate::Error::NotFound(format!("{env} never had the error {fingerprint}")));
+        }
+        Ok(json!({ "fingerprint": fingerprint, "state": state }))
+    }
+
     /// New errors in an environment's log since it was last looked at (the alerts' pass, each
     /// minute on the owner): a fingerprint it has never had is an `error.new` event, once ever
     /// (kept in `error_groups`, so a restart doesn't say it again). The event names the error's
@@ -325,14 +359,17 @@ impl Apps {
                 continue;
             }
             let name = name_of(&o);
-            let (sid, e, f, n, at) = (l.service.clone(), l.env.clone(), o.fingerprint.clone(), name.clone(), o.at);
-            if !self.db(move |s| s.remember_error(&sid, &e, &f, &n, at)).await.unwrap_or(false) {
-                continue;
-            }
-            let (sid, e, dep) = (l.service.clone(), l.env.clone(), l.template().map(|t| t.deployment.clone()));
+            let dep = o.deployment.clone().or_else(|| l.template().map(|t| t.deployment.clone()));
+            let (sid, e, f, n, at, d) = (l.service.clone(), l.env.clone(), o.fingerprint.clone(), name.clone(), o.at, dep.clone());
+            let kind = match self.db(move |s| s.remember_error(&sid, &e, &f, &n, at, d.as_deref())).await {
+                Ok(Seen::New) => "error.new",
+                Ok(Seen::Regressed) => "error.regressed",
+                _ => continue,
+            };
+            let (sid, e) = (l.service.clone(), l.env.clone());
             let data = json!({ "fingerprint": o.fingerprint, "kind": o.kind.name(), "name": name });
-            let _ = self.db(move |s| s.add_event("error.new", &sid, &e, dep.as_deref(), &data)).await;
-            l.log.stream(Stream::System).line(format!("a new error: {name} ({})", o.fingerprint));
+            let _ = self.db(move |s| s.add_event(kind, &sid, &e, dep.as_deref(), &data)).await;
+            l.log.stream(Stream::System).line(if kind == "error.new" { format!("a new error: {name} ({})", o.fingerprint) } else { format!("an error resolved before is back: {name} ({})", o.fingerprint) });
             told += 1;
         }
         if more > 0 {
@@ -351,6 +388,19 @@ impl Apps {
         let scanned = lines.len();
         let mut groups = groups(&lines);
         groups.truncate(MAX_GROUPS);
+        // Each with its state and the deployment it was first seen in, as kept.
+        let (sid, e) = (service.to_string(), env.to_string());
+        let states = self.db(move |s| s.error_states(&sid, &e)).await.unwrap_or_default();
+        let groups: Vec<Value> = groups
+            .iter()
+            .map(|g| {
+                let mut v = json!(g);
+                let (state, first) = states.get(&g.fingerprint).cloned().unwrap_or((Lifecycle::Open, None));
+                v["state"] = json!(state);
+                v["first_deployment"] = json!(first);
+                v
+            })
+            .collect();
         Ok(json!({ "minutes": minutes, "groups": groups, "scanned": scanned, "cut": cut || scanned >= MAX_LINES }))
     }
 }
