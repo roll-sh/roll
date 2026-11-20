@@ -2247,17 +2247,16 @@ Ranked by what a person notices first. Done so far:
    secrets' #520 and #517, its batch 6): see "Keys a preview never holds". Built: the
    TLS-terminating swap (`intercept::serve`). Next: the socket handoff from `egress.js`, the trust
    stores, rolld's adapter.
-3. **An evicted earlier push says so on a project's own preview domain, in review** (#553; #545
-   landed it on roll's preview domain).
-4. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+3. **Previews for the members thread's next products**: once roll apps' and roll search's routes
    become member routes (docs/members.md, v1.1), a preview's roll apps services and search branch
    follow the same roles, checked live against a member's session.
-5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+4. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-6. **Watch: pg-control's recovery to a time seconds old** (unowned).
+5. **Watch: pg-control's recovery to a time seconds old** (unowned).
 
-Landed 2026-11-20 night (main b820c8883): a link to an earlier push no longer kept answers 410
-naming the push and linking the service's latest (#545).
+Landed 2026-11-20 night (main b820c8883, c80a3fb99): a link to an earlier push no longer kept
+answers 410 naming the push and linking the service's latest (#545), on a project's own preview
+domain too (#553).
 
 Landed 2026-11-20 evening, later (main 089b7fa80): a preview's own variables take `roll://`
 references, each read as its setter at every converge (#544).
