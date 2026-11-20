@@ -174,6 +174,9 @@ pub struct AppsConfig {
     pub spend_every: Duration,
     /// A failed cron run's first retry waits this long, each next one twice as long (10 min at most).
     pub cron_retry_after: Duration,
+    /// Where ECR's API is asked for a registry login's token, instead of each region's (tests'
+    /// fake). The operator's setting, never a tenant's.
+    pub ecr_endpoint: Option<String>,
     /// Built deployments each environment keeps to roll back to; older ones' images go
     /// ([`Apps::prune`]).
     pub keep_deployments: usize,
@@ -205,6 +208,7 @@ impl AppsConfig {
             oncall_apis: OncallApis::default(),
             spend_every: Duration::from_secs(30),
             cron_retry_after: Duration::from_secs(30),
+            ecr_endpoint: None,
             keep_deployments: 10,
             keep_recent: Duration::from_secs(24 * 3600),
         }
@@ -261,6 +265,8 @@ pub struct Apps {
     /// Email to projects' owners (`notify`), once rolld has accounts.
     mail: std::sync::OnceLock<Arc<dyn integrations::Mailbox>>,
     explainer: std::sync::OnceLock<Arc<dyn integrations::Explainer>>,
+    /// ECR logins' tokens by service: (the token, when it expires, unix ms).
+    ecr_tokens: Mutex<HashMap<String, (String, i64)>>,
     pushers: push::Pushers,
     /// Who may still open a project's environments ([`Apps::set_visitors`]).
     pub(crate) visitors: std::sync::OnceLock<Arc<dyn integrations::Visitors>>,
@@ -574,6 +580,7 @@ impl Apps {
             github: std::sync::OnceLock::new(),
             mail: std::sync::OnceLock::new(),
             explainer: std::sync::OnceLock::new(),
+            ecr_tokens: Mutex::new(HashMap::new()),
             pushers: push::Pushers::default(),
             visitors: std::sync::OnceLock::new(),
             drain_done: Arc::new(Mutex::new(Vec::new())),
@@ -892,8 +899,13 @@ impl Apps {
     /// registry (Docker Hub when it names none).
     pub async fn put_registry(self: &Arc<Self>, service: &str, body: Value) -> Result<Service> {
         let o = body.as_object().cloned().unwrap_or_default();
-        if let Some(k) = o.keys().find(|k| !["server", "username", "password"].contains(&k.as_str())) {
+        let ecr = o.get("kind").and_then(Value::as_str) == Some("ecr");
+        let fields: &[&str] = if ecr { &["kind", "access_key_id", "secret_access_key", "region"] } else { &["kind", "server", "username", "password"] };
+        if let Some(k) = o.keys().find(|k| !fields.contains(&k.as_str())) {
             return Err(Error::BadRequest(format!("unknown field {k}")));
+        }
+        if o.get("kind").is_some_and(|k| !matches!(k.as_str(), Some("basic" | "ecr"))) {
+            return Err(Error::BadRequest("kind is basic (a username and password) or ecr (an AWS access key)".into()));
         }
         let text = |k: &str, max: usize| -> Result<Option<String>> {
             match o.get(k) {
@@ -902,11 +914,31 @@ impl Apps {
                 _ => Err(Error::BadRequest(format!("{k} is 1–{max} characters"))),
             }
         };
-        let (username, password) = (text("username", 200)?, text("password", 4096)?);
-        let (Some(username), Some(password)) = (username, password) else { return Err(Error::BadRequest("username and password are required".into())) };
         let sid = service.to_string();
         let svc = self.db(move |s| s.service(&sid)).await?;
         let Source::Image { image } = &svc.source else { return Err(Error::Conflict("only an image source pulls from a registry".into())) };
+        if ecr {
+            // An access key, exchanged for ECR's 12-hour token at each pull that needs a fresh
+            // one: a login that never expires on roll's side (Render's ECR credentials).
+            let host = registry_host(image).unwrap_or("");
+            let Some(from_host) = crate::model::ecr_region(host) else { return Err(Error::BadRequest(format!("{image} isn't in an ECR registry (<account>.dkr.ecr.<region>.amazonaws.com)"))) };
+            let key_ok = |v: &str| (16..=128).contains(&v.len()) && v.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit());
+            let (Some(key), Some(secret)) = (text("access_key_id", 128)?.filter(|k| key_ok(k)), text("secret_access_key", 128)?) else {
+                return Err(Error::BadRequest("an ecr login is {kind: \"ecr\", access_key_id, secret_access_key, region?}".into()));
+            };
+            let region = text("region", 32)?.unwrap_or_else(|| from_host.to_string());
+            if region != from_host {
+                return Err(Error::BadRequest(format!("region {region} isn't {from_host}, the registry's")));
+            }
+            let (sid, server) = (service.to_string(), host.to_string());
+            self.db(move |s| s.set_registry(&sid, &server, &key, &secret, Some(&region))).await?;
+            self.ecr_tokens.lock().remove(service);
+            let login = self.pull_login(service, image).await?;
+            self.registry_changed(service, login.as_ref()).await;
+            return self.service(service).await;
+        }
+        let (username, password) = (text("username", 200)?, text("password", 4096)?);
+        let (Some(username), Some(password)) = (username, password) else { return Err(Error::BadRequest("username and password are required".into())) };
         // A login goes only to the registry the image is pulled from (deploys check it again).
         let server = match text("server", 255)? {
             Some(s) if registry_key(&s) == image_registry(image) => s,
@@ -915,7 +947,8 @@ impl Apps {
         };
         let sid = service.to_string();
         let login = crate::runtime::RegistryLogin { server: server.clone(), username: username.clone(), password: password.clone() };
-        self.db(move |s| s.set_registry(&sid, &server, &username, &password)).await?;
+        self.db(move |s| s.set_registry(&sid, &server, &username, &password, None)).await?;
+        self.ecr_tokens.lock().remove(service);
         // Wakes and new instances pull with it from now on, not at the next deploy.
         self.registry_changed(service, Some(&login)).await;
         self.service(service).await

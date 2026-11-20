@@ -1387,10 +1387,10 @@ impl EnvLive {
     }
 
     /// Make and start the instances a new deployment needs and check their health: the old
-    /// ones keep serving meanwhile, except with a volume (one writer): then the old ones stop
-    /// first, and the environment stays locked until [`EnvLive::commit`], so no request starts
-    /// an old instance on the volume in between. On failure nothing of the new deployment is
-    /// left.
+    /// ones keep serving meanwhile, except with a volume (one writer) or `rollout.overlap: false`
+    /// (one runner): then the old ones stop first, draining for `drain_s`, and the environment
+    /// stays locked until [`EnvLive::commit`], so no request starts an old instance in between.
+    /// On failure nothing of the new deployment is left.
     pub async fn prepare(self: &Arc<Self>, tpl: &Arc<Template>, health_path: Option<&str>) -> anyhow::Result<Prepared> {
         let run = &tpl.run;
         let was_awake = self.awake_count() as u32;
@@ -1407,12 +1407,16 @@ impl EnvLive {
             return Ok(Prepared { made: Vec::new(), took: Duration::ZERO, hold: None });
         }
         let mut hold = None;
-        if run.volume.is_some() {
-            // One volume, one instance: the old one lets go of it first.
+        if run.volume.is_some() || !run.rollout.overlap {
+            // One volume, or one runner: the old ones let go first, finishing their work.
             hold = Some(self.wake.clone().lock_owned().await);
             let old: Vec<Arc<Inst>> = self.insts.lock().drain(..).collect();
+            if !old.is_empty() {
+                self.log.stream(Stream::System).line(format!("stopping {} old instance{} before the new one starts", old.len(), if old.len() == 1 { "" } else { "s" }));
+            }
+            let drain = self.drain_of(run);
             for i in old {
-                let _ = self.runtime.stop(&i.name, Duration::from_secs(10)).await;
+                let _ = self.runtime.stop(&i.name, drain).await;
                 self.runtime.remove(&i.name).await;
             }
         }
