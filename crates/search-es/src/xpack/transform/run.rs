@@ -263,6 +263,11 @@ pub(super) async fn checkpoint(cluster: &Cluster, t: &Value) -> EsResult<Pass> {
         let changed = internal::call(cluster, "POST", &count_uri, Some(&obj! { "query" => query_between(t, previous, upper) })).await?;
         pass.search_ms += s0.elapsed().as_millis() as i64;
         pass.searches += 1;
+        // A shard that failed (the node's cap stopped it) may hold changes: fail the pass, as
+        // a failed search does, rather than skip the checkpoint.
+        if changed.pointer(&["_shards", "failed"]).and_then(Value::as_i64).unwrap_or(0) > 0 {
+            return Err(EsError::new(429, "search_timeout_exception", "Time exceeded").with_meta("timed_out", true));
+        }
         if changed.get("count").and_then(Value::as_i64).unwrap_or(0) == 0 {
             pass.upper_bound = previous;
             pass.duration_ms = began.elapsed().as_millis() as i64;

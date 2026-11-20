@@ -1051,62 +1051,81 @@ fn is_time_exceeded(e: &EsError) -> bool {
     e.kind == "time_exceeded_exception"
 }
 
-/// Node setting: the longest one search may run on this node (roll's own; Elasticsearch has
-/// no such cap). Shared nodes set it so no tenant's request holds a worker indefinitely: it
-/// lowers every query phase's `timeout` ([`search_deadline`]) and bounds the phases around it
-/// and `_explain` too. Unset, `0` or `-1`: no cap.
+/// Node setting: the longest one request that searches may run on this node (roll's own;
+/// Elasticsearch has no such cap). Shared nodes set it so no tenant's request holds a worker
+/// indefinitely. The time is fixed once per request ([`bound_request`]) and bounds every
+/// phase, shard and nested search of it, below the search's own `timeout`. Unset, `0` or
+/// `-1`: no cap.
 pub const MAX_TIME: &str = "roll.search.max_time";
 
-/// The node's [`MAX_TIME`], if it has one.
+/// The node's [`MAX_TIME`], if it has one. [`check_max_time`] refused an unreadable value
+/// when the cluster opened.
 pub(crate) fn max_time(cluster: &Cluster) -> Option<std::time::Duration> {
     let v = cluster.config.node_setting(MAX_TIME)?;
     let nanos = crate::units::TimeValue::parse(v, MAX_TIME).ok()?.nanos();
     (nanos > 0).then(|| std::time::Duration::from_nanos(nanos.min(u64::MAX as i128) as u64))
 }
 
+/// Refuses a [`MAX_TIME`] that isn't a time value, so a typo can't turn the cap off.
+pub(crate) fn check_max_time(config: &crate::cluster::ClusterConfig) -> anyhow::Result<()> {
+    if let Some(v) = config.node_setting(MAX_TIME) {
+        crate::units::TimeValue::parse(v, MAX_TIME).map_err(|e| anyhow::anyhow!("{MAX_TIME}: {}", e.reason.unwrap_or_default()))?;
+    }
+    Ok(())
+}
+
+/// Fixes when the request running on this thread stops ([`MAX_TIME`] from now), unless an
+/// outer part of it already did: every phase, shard and nested search then keeps that one
+/// instant ([`SearchControl::limit`](search_index::search::SearchControl::limit)), carried
+/// with the request's cancellation. `None` without a cap or when the limit is already set.
+pub(crate) fn bound_request(cluster: &Cluster) -> Option<search_index::search::AmbientGuard> {
+    let mut ctl = search_index::search::ambient_control().unwrap_or_default();
+    if ctl.limit.is_some() {
+        return None;
+    }
+    ctl.limit = Some(std::time::Instant::now().checked_add(max_time(cluster)?)?);
+    Some(search_index::search::set_ambient_control(Some(ctl)))
+}
+
+/// Whether the request's limit ([`bound_request`]) has passed.
+pub(crate) fn limit_passed() -> bool {
+    search_index::search::ambient_control().is_some_and(|c| c.limit_passed())
+}
+
 /// When the query phase of `req` stops collecting (`QueryPhase.getTimeoutCheck`): the
 /// request's `timeout`, else `search.default_search_timeout`; never for a scroll or for
 /// `-1` (`NO_TIMEOUT`). Elasticsearch counts whole milliseconds and times out once the clock
 /// is past `start + timeout` (`time > maxTime`), so `timeout=0` lets a search that takes less
-/// than a millisecond finish. The node's [`MAX_TIME`] lowers it, scrolls included.
-fn search_deadline(cluster: &Cluster, st: &ClusterState, req: &SearchRequest) -> Option<std::time::Instant> {
-    let now = std::time::Instant::now();
-    let asked = match &req.source.timeout {
-        _ if req.scroll.is_some() => None,
-        Some(t) => Some(t.nanos()),
-        None => st.metadata.cluster_setting("search.default_search_timeout").and_then(|v| crate::units::TimeValue::parse(v, "search.default_search_timeout").ok()).map(|t| t.nanos()),
-    };
-    let asked = asked.filter(|n| *n >= 0).and_then(|nanos| {
-        let millis = (nanos / 1_000_000).min(i64::MAX as i128 / 2) as u64;
-        now.checked_add(std::time::Duration::from_millis(millis.saturating_add(1)))
-    });
-    let capped = max_time(cluster).and_then(|c| now.checked_add(c));
-    match (asked, capped) {
-        (Some(a), Some(c)) => Some(a.min(c)),
-        (a, c) => a.or(c),
+/// than a millisecond finish. The request's limit ([`bound_request`]) applies besides.
+fn search_deadline(st: &ClusterState, req: &SearchRequest) -> Option<std::time::Instant> {
+    if req.scroll.is_some() {
+        return None;
     }
+    let nanos = match &req.source.timeout {
+        Some(t) => t.nanos(),
+        None => st.metadata.cluster_setting("search.default_search_timeout").and_then(|v| crate::units::TimeValue::parse(v, "search.default_search_timeout").ok())?.nanos(),
+    };
+    if nanos < 0 {
+        return None;
+    }
+    let millis = (nanos / 1_000_000).min(i64::MAX as i128 / 2) as u64;
+    std::time::Instant::now().checked_add(std::time::Duration::from_millis(millis.saturating_add(1)))
 }
 
-/// Bounds what runs on this thread from now on by the node's [`MAX_TIME`] (the phases of a
-/// search around its query phases, `_explain`): the deadline replaces any earlier one, and
-/// the cancellation and request state stay. `None` without a cap.
-fn cap_phase(cluster: &Cluster) -> Option<search_index::search::AmbientGuard> {
-    Some(with_deadline(std::time::Instant::now().checked_add(max_time(cluster)?)?))
-}
-
-/// Makes `deadline` this thread's search deadline, keeping its cancellation and request state.
+/// Makes `deadline` this thread's search deadline unless an earlier one is set, keeping the
+/// cancellation, limit and request state.
 fn with_deadline(deadline: std::time::Instant) -> search_index::search::AmbientGuard {
     let mut ctl = search_index::search::ambient_control().unwrap_or_default();
-    ctl.deadline = Some(deadline);
+    ctl.deadline = Some(ctl.deadline.map_or(deadline, |d| d.min(deadline)));
     search_index::search::set_ambient_control(Some(ctl))
 }
 
-/// An error a phase [`cap_phase`] bounded ended with: the cap's `search_timeout_exception`
-/// when the deadline interrupted it (collection, a script, a nested search), else `e`.
-fn capped_error(e: EsError, capped: bool) -> EsError {
+/// `e`, or the search's `search_timeout_exception` when a deadline interrupted it (collection,
+/// a script, a nested search) in a phase that has no partial answer.
+pub(crate) fn timeout_error(e: EsError) -> EsError {
     let mut cause = Some(&e);
     while let Some(c) = cause {
-        if capped && is_time_exceeded(c) {
+        if is_time_exceeded(c) {
             return search_timeout_error();
         }
         cause = c.caused_by.as_deref();
@@ -1125,13 +1144,16 @@ fn capped_error(e: EsError, capped: bool) -> EsError {
 /// result, `timed_out`.
 #[allow(clippy::too_many_arguments)]
 pub fn query_phase(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, t: &Target, ti: usize, shards: usize, n: usize, after: Option<&[Value]>, aggs: Option<&search_aggs::AggRequest>, knn: &[QueryRef], window: Option<EsError>) -> EsResult<ShardResult> {
-    let deadline = search_deadline(cluster, st, req);
-    // The request's cancellation (its client went away) stays in force.
-    let cancelled = search_index::search::ambient_control().and_then(|c| c.cancelled);
+    // A query phase run outside a request (a background job's search) is a request of its own.
+    let _bound = bound_request(cluster);
+    let deadline = search_deadline(st, req);
+    // The request's cancellation (its client went away) and its limit stay in force.
+    let (cancelled, limit) = search_index::search::ambient_control().map_or((None, None), |c| (c.cancelled, c.limit));
     // The runtime fields scripts read through `doc[...]` travel with the control.
     let scope = runtime::RuntimeScope::build(&cluster.scripts, cluster.state(), &t.idx, &t.table(), t.shard.id as i32, req.source.runtime_mappings.as_ref())?;
-    let ctl = (deadline.is_some() || cancelled.is_some() || scope.is_some()).then(|| search_index::search::SearchControl {
+    let ctl = (deadline.is_some() || limit.is_some() || cancelled.is_some() || scope.is_some()).then(|| search_index::search::SearchControl {
         deadline,
+        limit,
         cancelled,
         ext: scope.clone().map(|s| s as Arc<dyn std::any::Any + Send + Sync>),
     });
@@ -2436,11 +2458,12 @@ fn run_query_phases(n: usize, run: &(dyn Fn(usize) -> EsResult<ShardResult> + Sy
     let opensearch = crate::opensearch::active();
     let lookups = extra::LookupScope::current();
     let page = contexts::page_state();
-    // The request's cancellation (`_tasks/_cancel`, a closed connection) reaches every shard.
-    let cancelled = search_index::search::ambient_control().and_then(|c| c.cancelled);
+    // The request's cancellation (`_tasks/_cancel`, a closed connection) and its limit reach
+    // every shard.
+    let ctl = search_index::search::ambient_control().map(|c| search_index::search::SearchControl { cancelled: c.cancelled, limit: c.limit, ..Default::default() });
     pool::for_each_index(n, (n - 1).min(cores - 1), &|i| {
         let _lookups = extra::LookupScope::adopt(lookups.clone());
-        let _ambient = cancelled.clone().map(|c| search_index::search::set_ambient_control(Some(search_index::search::SearchControl { deadline: None, cancelled: Some(c), ext: None })));
+        let _ambient = ctl.clone().map(|c| search_index::search::set_ambient_control(Some(c)));
         let r = crate::opensearch::with(opensearch, || contexts::with_page(page.clone(), || run(i)));
         *slots[i].lock() = Some(r);
     });
@@ -2475,13 +2498,13 @@ pub(super) fn context_checks_of(t: &Target, req: &SearchRequest) -> EsResult<()>
 pub fn execute_on(cluster: &Cluster, req: &SearchRequest, targets: &[Target]) -> EsResult<SearchOutcome> {
     // The search's shard tasks (`_tasks`), under the request's task.
     let _tasks = crate::tasks::search_started(cluster, req, targets);
-    // The node's cap bounds the phases before the query phase (DFS, can-match, knn), which
-    // runs under its own deadline, and the reduce and fetch phases after it.
-    let cap = cap_phase(cluster);
-    execute_capped(cluster, req, targets).map_err(|e| capped_error(e, cap.is_some()))
+    // The request's limit bounds every phase (DFS, can-match, knn, query, reduce, fetch); the
+    // phases without a partial answer fail when it passes.
+    let _bound = bound_request(cluster);
+    execute_capped(cluster, req, targets).map_err(timeout_error)
 }
 
-/// [`execute_on`] under the node's cap.
+/// [`execute_on`] under the request's limit.
 fn execute_capped(cluster: &Cluster, req: &SearchRequest, targets: &[Target]) -> EsResult<SearchOutcome> {
     // `dfs_query_then_fetch` over more than one shard (a single shard runs query_then_fetch):
     // a DFS phase, then the query phase Elasticsearch calls `dfs_query`.
@@ -2636,8 +2659,6 @@ fn execute_targets(cluster: &Cluster, req: &SearchRequest, targets: &[Target]) -
         query_phase(cluster, &st, req, &targets[i], i, targets.len(), n, after, agg_req.as_ref(), &knn_queries[i], window[i].clone())
     };
     let phases = run_query_phases(targets.len(), &run);
-    // The reduce and fetch phases get a cap of their own.
-    let _cap = cap_phase(cluster);
     for (i, phase) in phases.into_iter().enumerate() {
         match phase {
             Ok(mut r) => {
@@ -4620,11 +4641,10 @@ pub fn explain(ctx: &Ctx) -> EsResult<Reply> {
         return Ok(Reply::Body(404, Value::Obj(m)));
     };
     let q = shard_query(&qctx, &t, &req.source).map_err(|e| query::shard_exception(&idx, e))?;
-    // Elasticsearch explains with no timeout (`NO_TIMEOUT`); the node's cap still bounds the
-    // scripts it runs.
-    let cap = cap_phase(ctx.cluster);
-    let e = searcher.explain(&q, doc).map_err(|e| capped_error(crate::engine::convert::index_error(e), cap.is_some()))?;
-    drop(cap);
+    // Elasticsearch explains with no timeout (`NO_TIMEOUT`); the request's limit still bounds
+    // the scripts it runs.
+    let _bound = bound_request(ctx.cluster);
+    let e = searcher.explain(&q, doc).map_err(|e| timeout_error(crate::engine::convert::index_error(e)))?;
     m.insert("matched".into(), Value::Bool(e.is_match()));
     m.insert("explanation".into(), explanation_json(&e));
     let fs = crate::fetch::FetchSource::from_params(ctx.query("_source"), ctx.query("_source_includes"), ctx.query("_source_excludes"))?;
@@ -4816,10 +4836,12 @@ pub fn count(ctx: &Ctx) -> EsResult<Reply> {
     let mut total = 0u64;
     let mut failures = Vec::new();
     let mut terminated_early = false;
+    // One limit for every shard of the count.
+    let _bound = bound_request(ctx.cluster);
     for (i, t) in targets.iter().enumerate() {
-        // A count is a search (`RestCountAction`): its shards stop at the search's deadline and
-        // count what they reached.
-        let _deadline = search_deadline(ctx.cluster, &st, &req).map(with_deadline);
+        // A count is a search (`RestCountAction`): each shard stops at the search's own
+        // deadline and counts what it reached.
+        let _deadline = search_deadline(&st, &req).map(with_deadline);
         SHARD_TIMED_OUT.with(|c| c.set(false));
         let r = (|| -> EsResult<u64> {
             let searcher = t.searcher()?;
@@ -4846,14 +4868,18 @@ pub fn count(ctx: &Ctx) -> EsResult<Reply> {
         })();
         let timed_out = SHARD_TIMED_OUT.with(|c| c.replace(false));
         match r {
-            Ok(_) if timed_out && !req.allow_partial => failures.push((i, search_timeout_error())),
+            // The node's limit stopped the shard: it failed, so the count is never short
+            // without a sign. The caller's own timeout keeps the partial count, as on
+            // Elasticsearch.
+            Ok(_) if timed_out && (limit_passed() || !req.allow_partial) => failures.push((i, search_timeout_error())),
             Ok(n) => total += n,
             Err(e) if is_time_exceeded(&e) => failures.push((i, search_timeout_error())),
             Err(e) => failures.push((i, e)),
         }
     }
-    if !failures.is_empty() && failures.len() == targets.len() {
-        return Err(all_shards_failed(&ctx.cluster.node.id, &targets, &failures, "all shards failed"));
+    if !failures.is_empty() && (failures.len() == targets.len() || !req.allow_partial) {
+        let reason = if failures.len() == targets.len() { "all shards failed" } else { "Partial shards failure" };
+        return Err(all_shards_failed(&ctx.cluster.node.id, &targets, &failures, reason));
     }
     let mut m = Map::new();
     // `RestCountAction`: reported whenever `terminate_after` is set.

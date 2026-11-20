@@ -73,7 +73,7 @@ fn windowed_scoring_equals_plain() {
     for seed in 0..3u64 {
         let corpus = build(seed + 50, 1500, ShardConfig { merge_threads: 0, ..Default::default() });
         let s = corpus.shard.searcher();
-        let ctl = SearchControl { deadline: Some(std::time::Instant::now() + std::time::Duration::from_secs(3600)), cancelled: None, ext: None };
+        let ctl = SearchControl { deadline: Some(std::time::Instant::now() + std::time::Duration::from_secs(3600)), limit: None, cancelled: None, ext: None };
         for (qi, q) in queries().iter().enumerate() {
             for (n, threshold) in [(10usize, u64::MAX), (3, 5), (100, u64::MAX)] {
                 let mut a = TopScoreCollector::new(n, threshold);

@@ -187,6 +187,9 @@ pub fn scan(
     };
     let targets = crate::search::shard_targets(cluster, &st, &req)?;
     let _tasks = crate::tasks::scan_started(ctx, parent, &req, &targets);
+    // The scan is the run's search: the node's cap on one request bounds it (a run in the
+    // background, off its request's thread, starts its own).
+    let _bound = crate::search::bound_request(cluster);
     let mut shards = Vec::new();
     let mut matched = 0u64;
     let mut failures: Vec<(usize, EsError)> = Vec::new();
@@ -251,7 +254,8 @@ fn scan_shard(
     }
     q = arc(b);
     let mut ids = DocIds(Vec::new());
-    searcher.search(&q, &mut ids).map_err(crate::engine::convert::index_error)?;
+    // A scroll page stopped by the cap fails: the run would miss documents.
+    searcher.search(&q, &mut ids).map_err(|e| crate::search::timeout_error(crate::engine::convert::index_error(e)))?;
     let mut docs = ids.0;
     docs.sort_unstable();
     if let Some(l) = limit {

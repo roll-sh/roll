@@ -901,7 +901,11 @@ impl Default for SearchLimits {
 /// Deadline and cancellation of one search.
 #[derive(Clone, Default)]
 pub struct SearchControl {
+    /// When this phase stops (a search's own `timeout`).
     pub deadline: Option<Instant>,
+    /// When the whole request stops (the node's cap on one request), fixed once and kept by
+    /// every phase, shard and nested search of the request.
+    pub limit: Option<Instant>,
     pub cancelled: Option<Arc<AtomicBool>>,
     /// Request-scoped state of the embedding layer that code created per segment needs (a
     /// search's runtime fields for the scripts it runs), carried to the threads of a
@@ -917,17 +921,23 @@ impl SearchControl {
         {
             return Err(Error::Cancelled);
         }
-        if let Some(d) = self.deadline
-            && Instant::now() >= d
-        {
-            return Err(Error::TimeExceeded);
+        if self.deadline.or(self.limit).is_some() {
+            let now = Instant::now();
+            if self.deadline.is_some_and(|d| now >= d) || self.limit.is_some_and(|l| now >= l) {
+                return Err(Error::TimeExceeded);
+            }
         }
         Ok(())
     }
 
-    /// Neither a deadline nor a cancellation flag.
+    /// Whether the request's [`limit`](Self::limit) has passed.
+    pub fn limit_passed(&self) -> bool {
+        self.limit.is_some_and(|l| Instant::now() >= l)
+    }
+
+    /// No deadline, limit or cancellation flag.
     pub fn is_noop(&self) -> bool {
-        self.deadline.is_none() && self.cancelled.is_none()
+        self.deadline.is_none() && self.limit.is_none() && self.cancelled.is_none()
     }
 }
 

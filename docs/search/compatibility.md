@@ -1008,34 +1008,49 @@ Checked against Elasticsearch 9.5.5 (captures in
   exactly as Elasticsearch's; a non-cancellable task answers `doesn't support cancellation`.
   `_cat/tasks` lists the real tasks. A client that disconnects cancels its search; a graceful
   stop lets requests run for 10 s, then cancels what still runs.
-- A node can cap how long one search runs, so that no tenant's request holds a worker of a node
-  that many tenants share. Elasticsearch has no such cap. The cap is the node setting
-  `roll.search.max_time` (rolld's `--search-max-time`): 60 s on a daemon with an operator token,
-  none on an open daemon, and `0` turns it off.
-  - **The query phase:** the cap lowers the search's `timeout` (the request's, else
-    `search.default_search_timeout`), so a caller's larger `timeout` is held to the cap. When it
-    fires, the search answers as Elasticsearch does when its timeout fires: the hits and
-    aggregations collected so far, `timed_out: true` and the same `_shards`, or a 429
-    `search_timeout_exception` with `allow_partial_search_results=false`. This covers
-    `_search`, `_msearch` items, search templates, search applications, retrievers, `knn`,
-    async search, point-in-time pages and each cross-cluster part (each node applies its own
-    cap).
-  - **Scroll pages:** each page gets the cap. Elasticsearch never times a scroll out. A page that
-    passes the cap fails with `search_timeout_exception`, because a page cut short would leave
-    documents out of the scroll for good. By-query requests read through a scroll, so their
-    batches fail the same way.
-  - **`_count`:** counts what each shard reached by its deadline. Elasticsearch counts the same
-    way under `search.default_search_timeout`, which roll now honours for `_count` too.
-  - **Around the query phase:** the DFS and `knn` phases, the reduce (pipeline and
-    `scripted_metric` scripts) and the fetch phase (`script_fields`, inner hits) each get the
-    cap again. Elasticsearch doesn't time these out, so they have no partial answer: past the
-    cap the search fails with `search_timeout_exception`, and a fetch that passes the cap
-    reports its shard as failed.
-  - **`_explain`:** Elasticsearch explains with no timeout. roll stops it at the cap with
-    `search_timeout_exception`.
-  - **Not covered:** ES|QL, SQL and EQL, the scripts of `_update` and the by-query APIs, and
-    ingest scripts. Write and ingest scripts keep Painless's loop limit (`max_loop_counter`), so
-    one run of a script is bounded.
+- A node can cap how long one request that searches runs, so that no tenant's request holds a
+  worker of a node that many tenants share. Elasticsearch has no such cap. The cap is the node
+  setting `roll.search.max_time` (rolld's `--search-max-time`): 60 s on a daemon with an
+  operator token, none on an open daemon, and `0` turns it off. A value that isn't a time
+  refuses to load the cluster. The time is fixed once per request, when it holds its thread
+  pool slot, and bounds every phase, shard and nested search of it: the cap is never per shard
+  or per phase. A request's own `timeout` (or `search.default_search_timeout`) still applies per
+  shard's query phase, as on Elasticsearch, so a caller's larger `timeout` is held to the cap.
+  - **The query phase:** when the cap fires, the search answers as Elasticsearch does when its
+    timeout fires: the hits and aggregations collected so far, `timed_out: true` and the same
+    `_shards`, or a 429 `search_timeout_exception` with `allow_partial_search_results=false`.
+    This covers `_search`, `_msearch` (one cap for the whole request), search templates,
+    search applications, retrievers (one cap for every child), `knn`, point-in-time pages and
+    each cross-cluster part (each node applies its own cap). Async search runs its search as a
+    request of its own: on a node with a cap it returns partial results, `timed_out: true`, once
+    the cap passes.
+  - **Scroll pages:** each page is a request with its own cap. Elasticsearch never times a
+    scroll out. A page that passes the cap fails with `search_timeout_exception` and leaves the
+    scroll where it was, because a page cut short would leave documents out of the scroll for
+    good.
+  - **`_count`:** a shard the cap stopped is reported as failed (`search_timeout_exception` in
+    `_shards.failures`), so a count is never short without a sign; when every shard failed, the
+    count fails. A shard the caller's own `timeout` stopped counts what it reached, as on
+    Elasticsearch, and with `allow_partial_search_results=false` a timed-out shard fails the
+    count.
+  - **Phases without a partial answer:** the DFS and `knn` phases, the reduce (pipeline and
+    `scripted_metric` scripts), the fetch phase (`script_fields`, inner hits) and `_explain`
+    fail with `search_timeout_exception` once the cap passes. Elasticsearch doesn't time these
+    out.
+  - **By-query requests** (`_delete_by_query`, `_update_by_query`, `_reindex`, with or without
+    `wait_for_completion`): their search stops at the cap and the run fails with
+    `search_timeout_exception` before it writes anything, as a scroll that fails does.
+  - **Query languages:** ES|QL and SQL read indices through doc values or an internal scroll,
+    both under the request's cap: past it the query fails with `search_timeout_exception`. PPL
+    pages over a point in time and fails the same way. EQL's searches are capped like any
+    search, and keep its `allow_partial_search_results`: with it (the default) a capped search
+    contributes the events it found.
+  - **Background jobs:** each search a job makes is a request with its own cap. Transforms,
+    enrich policies' loads, downsampling and the rollup indexer page through their sources with
+    `allow_partial_search_results=false`, so a page the cap cut short is a failed search that
+    the job reports and retries, never a short page taken as complete.
+  - **Not covered:** the scripts of `_update` and of by-query writes, and ingest scripts. They
+    keep Painless's loop limit (`max_loop_counter`), so one run of a script is bounded.
 - Thread pools gate requests: `search` (int(p * 3 / 2) + 1, queue size * 1000), `write` (p,
   queue max(10000, 750 * p)), `get` and `analyze` (1, queue 16) take a slot per request and
   queue FIFO behind a full pool; a full queue refuses with 429

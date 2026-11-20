@@ -709,16 +709,24 @@ fn can_block_in_place() -> bool {
 /// long search doesn't stall `GET /`, `_cluster/health` or other searches behind it. Run on the
 /// worker itself, it would also stall the runtime's I/O and timers when that worker was the
 /// last to poll them: other workers take the I/O driver over only when there is work to steal.
+///
+/// The node's cap on one request ([`crate::search::MAX_TIME`]) starts here, once the request
+/// holds its thread pool slot, and bounds everything it runs.
 async fn dispatch_off_reactor(ctx: &Ctx<'_>) -> EsResult<Reply> {
-    if (runs_searches(ctx.api) || runs_by_query(ctx.api)) && can_block_in_place() {
+    let searches = runs_searches(ctx.api) || runs_by_query(ctx.api);
+    // A deadline that interrupted a phase with no partial answer is the search's timeout.
+    let timed_out = |r: EsResult<Reply>| r.map_err(|e| if crate::search::limit_passed() { crate::search::timeout_error(e) } else { e });
+    if searches && can_block_in_place() {
         return tokio::task::block_in_place(|| {
             // Registered on the thread the search runs on (the task is thread-bound).
             let _task = crate::tasks::RequestTask::start(ctx);
-            tokio::runtime::Handle::current().block_on(crate::api::dispatch(ctx))
+            let _bound = crate::search::bound_request(ctx.cluster);
+            timed_out(tokio::runtime::Handle::current().block_on(crate::api::dispatch(ctx)))
         });
     }
     let _task = crate::tasks::RequestTask::start(ctx);
-    crate::api::dispatch(ctx).await
+    let _bound = searches.then(|| crate::search::bound_request(ctx.cluster)).flatten();
+    timed_out(crate::api::dispatch(ctx).await)
 }
 
 /// Runs `f` with the context `req` would get, without running its handler or any check
@@ -794,7 +802,7 @@ pub async fn handle_shared_admitted(cluster: &std::sync::Arc<Cluster>, req: EsRe
     let cluster = cluster.clone();
     let rt = tokio::runtime::Handle::current();
     let task = tokio::task::spawn_blocking(move || {
-        let ctl = search_index::search::SearchControl { deadline: None, cancelled: Some(flag), ext: None };
+        let ctl = search_index::search::SearchControl { cancelled: Some(flag), ..Default::default() };
         let _ambient = search_index::search::set_ambient_control(Some(ctl));
         rt.block_on(crate::xpack::security::audit::run(audit, handle_admitted(&cluster, req, admitted)))
     });

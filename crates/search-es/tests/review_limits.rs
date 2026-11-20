@@ -163,21 +163,82 @@ async fn open_points_in_time_are_bounded() {
     assert_eq!(call(&c, "POST", "/idx/_pit?keep_alive=1h", "").await.0, 200);
 }
 
-#[tokio::test]
-async fn the_node_cap_bounds_a_search_with_no_timeout() {
+/// A cluster whose node caps one request at `cap`, with `idx` spread over 10 shards.
+async fn capped(cap: &str) -> Arc<Cluster> {
     let mut cfg = search_es::ClusterConfig::new("limits");
-    cfg.node_settings.push((search_es::search::MAX_TIME.into(), "500ms".into()));
-    let c = Cluster::open(cfg, Arc::new(search_es::MemoryStore::new())).await.unwrap();
-    call(&c, "PUT", "/idx/_doc/1?refresh=true", r#"{"a":1}"#).await;
-    // A search script polls the search's deadline instead of counting loop statements.
-    let looping = r#""query":{"script_score":{"query":{"match_all":{}},"script":{"source":"long n = 0; for (long i = 0; i < 1000000000000L; i++) { n += i; } return n % 2 + 1;"}}}"#;
-    // No timeout of its own, then a larger one than the cap: both stop at the cap.
-    for body in [format!("{{{looping}}}"), format!(r#"{{"timeout":"1h",{looping}}}"#)] {
-        let t = Instant::now();
-        let (status, v) = call(&c, "POST", "/idx/_search", &body).await;
+    cfg.node_settings.push((search_es::search::MAX_TIME.into(), cap.into()));
+    let c = Arc::new(Cluster::open(cfg, Arc::new(search_es::MemoryStore::new())).await.unwrap());
+    call(&c, "PUT", "/idx", r#"{"settings":{"number_of_shards":10},"mappings":{"properties":{"k":{"type":"keyword"},"a":{"type":"long"}}}}"#).await;
+    let mut bulk = String::new();
+    for i in 0..40 {
+        bulk.push_str(&format!("{{\"index\":{{\"_id\":\"{i}\"}}}}\n{{\"k\":\"k{}\",\"a\":{i}}}\n", i % 4));
+    }
+    call(&c, "POST", "/idx/_bulk?refresh=true", &bulk).await;
+    c
+}
+
+/// Runs a call on a task of its own, failing the test (instead of hanging it) when it runs past
+/// `within`; with how long it took.
+async fn call_within(c: &Arc<Cluster>, within: Duration, method: &'static str, uri: &str, body: String) -> (u16, Value, Duration) {
+    let (c, uri) = (c.clone(), uri.to_string());
+    let t = Instant::now();
+    let task = tokio::spawn(async move { call(&c, method, &uri, &body).await });
+    let (status, v) = tokio::time::timeout(within, task).await.expect("the call ran past the cap").unwrap();
+    (status, v, t.elapsed())
+}
+
+/// A search script that never ends on its own: it polls the request's deadline instead of
+/// counting loop statements.
+const ENDLESS: &str = "long n = 0; for (long i = 0; i < 1000000000000L; i++) { n += i; }";
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_node_cap_bounds_one_request() {
+    let c = capped("1s").await;
+    let within = Duration::from_secs(8);
+    let score = format!(r#""query":{{"script_score":{{"query":{{"match_all":{{}}}},"script":{{"source":"{ENDLESS} return n % 2 + 1;"}}}}}}"#);
+    // No timeout of its own, then a larger one: both stop at the cap with partial results.
+    for body in [format!("{{{score}}}"), format!(r#"{{"timeout":"1h",{score}}}"#)] {
+        let (status, v, took) = call_within(&c, within, "POST", "/idx/_search", body).await;
         assert_eq!(status, 200, "{}", v.to_json());
         assert_eq!(at(&v, &["timed_out"]).as_bool(), Some(true), "{}", v.to_json());
-        assert_eq!(at(&v, &["_shards", "failed"]).as_i64(), Some(0), "{}", v.to_json());
-        assert!(t.elapsed() < Duration::from_secs(10), "took {:?}", t.elapsed());
+        assert!(took < Duration::from_secs(5), "took {took:?}");
     }
+    let filter = format!(r#"{{"query":{{"script":{{"script":{{"source":"{ENDLESS} return n >= 0;"}}}}}}}}"#);
+    // One limit for the whole count, not one per shard; the shards it stopped failed.
+    let (status, v, took) = call_within(&c, within, "POST", "/idx/_count", filter.clone()).await;
+    assert_ne!(status, 200, "{}", v.to_json());
+    assert!(v.to_json().contains("search_timeout_exception"), "{}", v.to_json());
+    assert!(took < Duration::from_secs(5), "took {took:?}");
+    // A by-query run's search stops at the cap and fails the run; nothing was deleted.
+    let (status, v, took) = call_within(&c, within, "POST", "/idx/_delete_by_query", filter).await;
+    assert_ne!(status, 200, "{}", v.to_json());
+    assert!(v.to_json().contains("search_timeout_exception"), "{}", v.to_json());
+    assert!(took < Duration::from_secs(5), "took {took:?}");
+    let (_, v) = call(&c, "GET", "/idx/_count", "").await;
+    assert_eq!(at(&v, &["count"]).as_i64(), Some(40));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_transform_whose_search_hits_the_cap_fails() {
+    let c = capped("1s").await;
+    let t = format!(
+        r#"{{"source":{{"index":"idx","query":{{"script":{{"script":{{"source":"{ENDLESS} return n >= 0;"}}}}}}}},"dest":{{"index":"out"}},"pivot":{{"group_by":{{"k":{{"terms":{{"field":"k"}}}}}},"aggregations":{{"a":{{"max":{{"field":"a"}}}}}}}},"settings":{{"unattended":true}}}}"#
+    );
+    let (status, v) = call(&c, "PUT", "/_transform/t?defer_validation=true", &t).await;
+    assert_eq!(status, 200, "{}", v.to_json());
+    let (status, v, _) = call_within(&c, Duration::from_secs(20), "POST", "/_transform/t/_start", String::new()).await;
+    assert_eq!(status, 200, "{}", v.to_json());
+    // The page the cap cut short is a failed search the transform retries; taken as complete,
+    // it would have written checkpoint 1.
+    let t0 = Instant::now();
+    let v = loop {
+        let (_, v) = call(&c, "GET", "/_transform/t/_stats", "").await;
+        if at(&v, &["transforms", "0", "stats", "search_failures"]).as_i64().unwrap_or(0) > 0 || at(&v, &["transforms", "0", "checkpointing", "last", "checkpoint"]).as_i64().unwrap_or(0) > 0 {
+            break v;
+        }
+        assert!(t0.elapsed() < Duration::from_secs(20), "{}", v.to_json());
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    assert_eq!(at(&v, &["transforms", "0", "checkpointing", "last", "checkpoint"]).as_i64().unwrap_or(0), 0, "{}", v.to_json());
+    call(&c, "POST", "/_transform/t/_stop?force=true", "").await;
 }

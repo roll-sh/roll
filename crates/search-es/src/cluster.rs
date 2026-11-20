@@ -544,6 +544,7 @@ impl std::fmt::Debug for Cluster {
 impl Cluster {
     /// Loads the cluster's state from `store`, or starts a new one.
     pub async fn open(config: ClusterConfig, store: Arc<dyn MetaStore>) -> anyhow::Result<Cluster> {
+        crate::search::check_max_time(&config)?;
         let state = match store.load().await? {
             Some(bytes) => {
                 let v = json::parse(&bytes).map_err(|e| anyhow::anyhow!("corrupt cluster state: {e}"))?.unwrap_or(Value::Null);

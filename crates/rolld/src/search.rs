@@ -103,9 +103,10 @@ pub struct SearchArgs {
     /// on this machine, tests).
     #[arg(long = "search-inference-allow-private", env = "ROLL_SEARCH_INFERENCE_ALLOW_PRIVATE", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
     pub search_inference_allow_private: bool,
-    /// The longest one search may run on this node, in seconds (0: no cap). A request's own
-    /// larger `timeout` is lowered to it; past it a search answers with what it collected,
-    /// `timed_out: true` (Elasticsearch has no such cap). Unset: 60 on a daemon that serves
+    /// The longest one request that searches may run on this node, in seconds (0: no cap),
+    /// counted once for all its shards and phases. A request's own larger `timeout` is lowered
+    /// to it; past it a search answers with what it collected, `timed_out: true`
+    /// (Elasticsearch has no such cap). Unset: 60 on a daemon that serves
     /// others (ROLL_ADMIN_TOKEN set), none on an open one.
     #[arg(long = "search-max-time", env = "ROLL_SEARCH_MAX_TIME")]
     pub search_max_time_s: Option<u64>,
