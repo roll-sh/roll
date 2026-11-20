@@ -319,8 +319,8 @@ impl Tool {
 }
 
 /// The areas a product's toolset splits into, as GitHub's server splits its own: a client with a
-/// tool limit (Windsurf 100, Cursor about 40) takes the area it works in. Only apps so far: alone it
-/// is 89 tools, at Windsurf's limit with the access tools.
+/// tool limit (VS Code 128, Cursor about 40) takes the area it works in: apps (101 tools) and secrets
+/// (94) near VS Code's with the access tools, far past Cursor's.
 pub const AREAS: &[(&str, &[&str])] = &[("apps", &["observe", "deploy", "configure", "project"]), ("secrets", &["values", "security", "integrations"])];
 
 /// Where a tool sits in its product's areas.
