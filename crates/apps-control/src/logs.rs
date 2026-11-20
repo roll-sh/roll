@@ -204,6 +204,8 @@ pub struct LogHub {
     /// Whether some drain asks for request (`http:`) and build (`build:`) lines.
     tap_http: std::sync::atomic::AtomicBool,
     tap_build: std::sync::atomic::AtomicBool,
+    tap_traces: std::sync::atomic::AtomicBool,
+    tap_metrics: std::sync::atomic::AtomicBool,
     /// The traces open in each log's instance and stream: their kind and lines so far.
     traces: Mutex<HashMap<TraceKey, (crate::errors::Kind, usize)>>,
     /// What each log takes out of its lines ([`Redact`]), by log key.
@@ -212,7 +214,7 @@ pub struct LogHub {
 
 impl LogHub {
     pub fn new(objects: Option<Objects>) -> Arc<LogHub> {
-        Arc::new(LogHub { logs: Mutex::new(HashMap::new()), objects, tap: Mutex::new(None), tap_http: Default::default(), tap_build: Default::default(), traces: Mutex::new(HashMap::new()), redactions: Mutex::new(HashMap::new()) })
+        Arc::new(LogHub { logs: Mutex::new(HashMap::new()), objects, tap: Mutex::new(None), tap_http: Default::default(), tap_build: Default::default(), tap_traces: Default::default(), tap_metrics: Default::default(), traces: Mutex::new(HashMap::new()), redactions: Mutex::new(HashMap::new()) })
     }
 
     /// Every runtime line from now on, `(log key, line)`, at most `capacity` waiting.
@@ -231,9 +233,11 @@ impl LogHub {
     }
 
     /// Which sources beyond runtime output some drain asks for (the drainer's, from the store).
-    pub fn set_tapped(&self, http: bool, build: bool) {
+    pub fn set_tapped(&self, http: bool, build: bool, traces: bool, metrics: bool) {
         self.tap_http.store(http, std::sync::atomic::Ordering::Relaxed);
         self.tap_build.store(build, std::sync::atomic::Ordering::Relaxed);
+        self.tap_traces.store(traces, std::sync::atomic::Ordering::Relaxed);
+        self.tap_metrics.store(metrics, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn sink(self: &Arc<Self>, key: impl Into<String>, stream: Stream) -> LogSink {
@@ -302,7 +306,11 @@ impl LogHub {
         // The drains' sources: an environment's output, and its requests and builds while a drain
         // asks for them (a request a line: nothing on the proxy's path otherwise).
         use std::sync::atomic::Ordering::Relaxed;
-        let tapped = key.starts_with("env:") || (key.starts_with("http:") && self.tap_http.load(Relaxed)) || (key.starts_with("build:") && self.tap_build.load(Relaxed));
+        let tapped = key.starts_with("env:")
+            || (key.starts_with("http:") && self.tap_http.load(Relaxed))
+            || (key.starts_with("build:") && self.tap_build.load(Relaxed))
+            || (key.starts_with("trace:") && self.tap_traces.load(Relaxed))
+            || (key.starts_with("metric:") && self.tap_metrics.load(Relaxed));
         if tapped
             && let Some(tap) = self.tap.lock().as_ref()
         {

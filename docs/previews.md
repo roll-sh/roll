@@ -425,7 +425,9 @@ behind the `Apps` trait:
   (`STRIPE_SECRET_KEY`, `GITHUB_TOKEN`: the same rule as roll apps' sealed-by-default names) and
   whose value isn't a reference: one click writes the value to the base environment under that
   name (roll secrets' own write, so its rules and audit apply) and puts `roll://BASE/NAME` in
-  the rule, saved with the rest. The value then lives in roll secrets only.
+  the rule, saved with the rest. The value then lives in roll secrets only. A protected base refuses
+  the write (`approval_required`): the button opens a change request with it instead (as roll
+  secrets' Find does), and the rule keeps its value and says so until it's approved.
   Only the rules' own references (checked when saved) go to roll secrets as references, as their
   own input to rolld's ensure; every other value previews write, a preview's own variables and
   anything stored before included, is plain text: its `${` is escaped, so it's never a reference
@@ -1739,7 +1741,7 @@ type Settings = {
     which a scoped or OAuth token (an agent's) can't give (403). Automations see it too: the `preview` trigger's
     `preview.environment.visual_review.state` field, and the built-in "Tell me when a visual change
     waits for a review" template (a notice linking to the preview, or a Slack step instead). The
-    event's `became` (`ready`, `failed`, `visual_change`) names what an update reached that the
+    event's `became` (`ready`, `failed`, `visual_change`, `regressions`) names what an update reached that the
     preview wasn't already at, at its head, so that template, "Post a change's preview to Slack
     when it's ready" and "Tell me when a change's preview fails" fire once a
     push, as Vercel's Slack app posts once a deployment, not at every state, cost or screenshot
