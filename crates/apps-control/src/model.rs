@@ -283,11 +283,24 @@ pub struct Access {
 }
 
 /// A private registry's login for a service's image (`PUT …/registry`); the password is sealed
-/// and never returned.
+/// and never returned. An ECR login (`kind: "ecr"`) is an access key (its id as `username`) that
+/// each pull exchanges for ECR's 12-hour token in `region`.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Registry {
     pub server: String,
     pub username: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
+}
+
+/// An ECR registry host (`<account>.dkr.ecr.<region>.amazonaws.com`): its region.
+pub fn ecr_region(host: &str) -> Option<&str> {
+    let rest = host.strip_suffix(".amazonaws.com")?;
+    let (account, region) = rest.split_once(".dkr.ecr.")?;
+    let ok = account.len() == 12 && account.bytes().all(|b| b.is_ascii_digit()) && !region.is_empty() && region.len() <= 32 && region.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+    ok.then_some(region)
 }
 
 /// A private Git repository's login for a Git URL service (`PUT …/git-login`): sent only to
@@ -1014,11 +1027,16 @@ pub struct Rollout {
     /// above the old one's (Flagger's request duration check); off unless set.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub p95_pct: Option<u32>,
+    /// `false`: the old instances stop (draining for `drain_s`) before the new ones start, so
+    /// two never run at once (Fly's `immediate`, Heroku's workers): a bot, a scheduler, a
+    /// consumer that must be alone. A web service's requests wait for the new one meanwhile.
+    #[serde(skip_serializing_if = "is_true")]
+    pub overlap: bool,
 }
 
 impl Default for Rollout {
     fn default() -> Self {
-        Rollout { steps: Vec::new(), step_s: 120, error_pct: 5, manual: false, slo_burn: None, p95_pct: None }
+        Rollout { steps: Vec::new(), step_s: 120, error_pct: 5, manual: false, slo_burn: None, p95_pct: None, overlap: true }
     }
 }
 
@@ -1415,6 +1433,9 @@ impl Run {
         if self.kind != RunType::Web {
             // Only requests can be split: a worker or a cron run switches at once.
             self.rollout.steps.clear();
+        }
+        if !self.rollout.overlap && !self.rollout.steps.is_empty() {
+            return bad("rollout: without overlap nothing runs beside the new deployment, so it can't take a share of requests (no steps)");
         }
         match self.kind {
             RunType::Cron => {
@@ -2794,6 +2815,12 @@ pub struct Job {
     pub command: String,
     /// Containers it runs, each with `ROLL_TASK_INDEX` and `ROLL_TASK_COUNT` (Cloud Run Jobs').
     pub tasks: u32,
+    /// Tries after a task's failure (Cloud Run Jobs' `--max-retries`): 0–5, each in a fresh
+    /// container with `ROLL_TASK_ATTEMPT`.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub retries: u32,
+    /// Tasks running at once (Cloud Run Jobs' `--parallelism`): 1–100.
+    pub parallelism: u32,
     pub status: RunStatus,
     pub exit_code: Option<i32>,
     pub started_at: i64,
@@ -2972,4 +2999,8 @@ mod fix_tests {
         assert!(f("the build failed (docker build exited with 1)", Some("npm ci can only install packages when your package.json and package-lock.json are in sync")).contains("package-lock.json"));
         assert_eq!(super::fix_for("a reason nobody wrote down", None), None);
     }
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
