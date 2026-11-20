@@ -5308,7 +5308,7 @@ impl ScanNode {
         let per = keys.len().div_ceil(ParScan::chunks(workers)).max(1);
         let scans = (0..keys.len())
             .step_by(per)
-            .map(|i| super::parscan::Source::Rows(Box::new(super::parscan::FillIter::new(IndexChunk::keyed(keys.clone(), i..(i + per).min(keys.len()), fetch.clone())))))
+            .map(|i| super::parscan::fill_source(IndexChunk::keyed(keys.clone(), i..(i + per).min(keys.len()), fetch.clone()), false))
             .collect();
         let d = Decode {
             need: self.need.as_deref().map(Arc::from),

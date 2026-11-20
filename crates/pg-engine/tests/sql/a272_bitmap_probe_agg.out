@@ -1,0 +1,120 @@
+> CREATE TABLE a272_p (id int, kind text, w int) WITH (autovacuum_enabled = false)
+-- CREATE TABLE
+
+> INSERT INTO a272_p SELECT g, CASE WHEN g % 3 = 0 THEN 'PROMO ' || g ELSE 'STD ' || g END, g % 11 FROM generate_series(1, 2000) g
+-- INSERT 0 2000
+
+> INSERT INTO a272_p SELECT g, 'DUP ' || g, 100 + g % 4 FROM generate_series(1, 2000, 89) g
+-- INSERT 0 23
+
+> CREATE TABLE a272_l (k int8, pid int, d date, qty int, price numeric(12,2), disc numeric(4,2), note varchar(40)) WITH (autovacuum_enabled = false)
+-- CREATE TABLE
+
+> INSERT INTO a272_l SELECT g,
+>   CASE WHEN g % 199 = 0 THEN NULL ELSE (g * 7) % 2300 END,
+>   date '1995-01-01' + (g % 365),
+>   g % 50,
+>   CASE WHEN g % 17 = 0 THEN NULL ELSE (g % 1000) * 1.25 END,
+>   (g % 10) * 0.01,
+>   'note ' || (g % 13)
+>   FROM generate_series(1, 30000) g
+-- INSERT 0 30000
+
+> ALTER TABLE a272_l ADD COLUMN tag text DEFAULT 'old'
+-- ALTER TABLE
+
+> INSERT INTO a272_l SELECT g, (g * 11) % 2300, date '1995-01-01' + (g % 365), g % 50, (g % 700) * 0.5, (g % 7) * 0.01, 'late ' || (g % 5), 'new'
+>   FROM generate_series(30001, 40000) g
+-- INSERT 0 10000
+
+> CREATE INDEX a272_l_d ON a272_l (d)
+-- CREATE INDEX
+
+> VACUUM ANALYZE a272_p
+-- VACUUM
+
+> VACUUM ANALYZE a272_l
+-- VACUUM
+
+> SET parallel_setup_cost = 0
+-- SET
+
+> SET parallel_tuple_cost = 0
+-- SET
+
+> SET min_parallel_table_scan_size = 0
+-- SET
+
+> SET min_parallel_index_scan_size = 0
+-- SET
+
+> SET enable_seqscan = off
+-- SET
+
+> SET enable_indexscan = off
+-- SET
+
+> SELECT 100.00 * sum(CASE WHEN p.kind LIKE 'PROMO%' THEN l.price * (1 - l.disc) ELSE 0 END) / sum(l.price * (1 - l.disc)) AS promo,
+>   count(*), count(l.price)
+>   FROM a272_l l, a272_p p WHERE l.pid = p.id AND l.d >= date '1995-03-01' AND l.d < date '1995-03-01' + interval '4' month
+promo:numeric | count:int8 | count:int8
+32.8891821507774889 | 11735 | 11217
+-- SELECT 1
+
+> SELECT p.w, count(*), sum(l.price), sum(l.qty), min(l.note), max(l.tag)
+>   FROM a272_l l JOIN a272_p p ON l.pid = p.id WHERE l.d >= date '1995-02-01' AND l.d < date '1995-07-01'
+>   GROUP BY p.w ORDER BY 1
+w:int4 | count:int8 | sum:numeric | sum:int8 | min:text | max:text
+0 | 1369 | 649031.00 | 33238 | late 0 | old
+1 | 1217 | 585418.00 | 29240 | late 0 | old
+2 | 1341 | 619866.75 | 32726 | late 0 | old
+3 | 1228 | 627604.50 | 30610 | late 0 | old
+4 | 1285 | 625543.25 | 31887 | late 0 | old
+5 | 1273 | 607451.00 | 30842 | late 0 | old
+6 | 1272 | 627935.50 | 30694 | late 0 | old
+7 | 1329 | 667565.25 | 32613 | late 0 | old
+8 | 1308 | 628207.25 | 32106 | late 0 | old
+9 | 1423 | 640735.25 | 35317 | late 0 | old
+10 | 1266 | 633620.00 | 31258 | late 0 | old
+100 | 36 | 17009.00 | 1072 | late 0 | old
+101 | 44 | 18119.50 | 1014 | late 0 | old
+102 | 42 | 21726.00 | 1040 | late 0 | old
+103 | 44 | 22204.00 | 1160 | late 0 | old
+-- SELECT 15
+
+> SELECT l.tag, l.note, count(*), sum(l.price * (1 - l.disc)), max(p.id)
+>   FROM a272_l l JOIN a272_p p ON l.pid = p.id WHERE l.d BETWEEN date '1995-05-01' AND date '1995-09-30'
+>   GROUP BY l.tag, l.note ORDER BY 1, 2
+tag:text | note:varchar | count:int8 | sum:numeric | max:int4
+new | late 0 | 755 | 122507.4000 | 2000
+new | late 1 | 751 | 122315.8250 | 1996
+new | late 2 | 751 | 122397.4050 | 1997
+new | late 3 | 728 | 118681.5100 | 1998
+new | late 4 | 730 | 119824.4050 | 1999
+old | note 0 | 847 | 470931.5500 | 2000
+old | note 1 | 846 | 473151.5750 | 2000
+old | note 10 | 844 | 468373.2125 | 2000
+old | note 11 | 847 | 471201.3250 | 1987
+old | note 12 | 848 | 472919.9625 | 1994
+old | note 2 | 848 | 472240.4125 | 1993
+old | note 3 | 847 | 474894.0625 | 2000
+old | note 4 | 841 | 465246.9000 | 2000
+old | note 5 | 848 | 476421.5000 | 1991
+old | note 6 | 847 | 473790.1375 | 1998
+old | note 7 | 845 | 472702.8625 | 2000
+old | note 8 | 849 | 476426.6875 | 1989
+old | note 9 | 847 | 473159.8000 | 1996
+-- SELECT 18
+
+> SELECT count(*), sum(l.price) FROM a272_l l JOIN a272_p p ON l.pid = p.id
+>   WHERE l.d >= date '1995-04-01' AND l.d < date '1995-10-01' AND p.kind LIKE 'DUP%'
+count:int8 | sum:numeric
+206 | 99588.75
+-- SELECT 1
+
+> DROP TABLE a272_l
+-- DROP TABLE
+
+> DROP TABLE a272_p
+-- DROP TABLE
+

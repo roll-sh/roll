@@ -133,7 +133,32 @@ pub struct Decode {
     pub toast: Option<Arc<crate::txn::toast::Source>>,
     /// The batch kernels (`Pre`), compiled by the first chunk for all of them (None
     /// inside: none fit).
-    pub vplan: std::sync::OnceLock<Option<Arc<super::vector::AggPlan>>>,
+    pub vplan: std::sync::OnceLock<Option<Arc<VPlan>>>,
+}
+
+/// A scan's batch kernels (`Pre::compile`), and where its one probe's joined rows could be
+/// made from columns past the walk's reach (`wide`), how many of the rows decoded so far
+/// the probe passed: the chunks decode those columns too once most rows pass.
+pub struct VPlan {
+    plan: Arc<super::vector::AggPlan>,
+    /// `plan` with the joined columns (`AggPlan::joined`) past its last column decoded.
+    wide: Option<Arc<super::vector::AggPlan>>,
+    /// Rows decoded and, of them, the ones the probe passed (counted where `wide` is).
+    seen: std::sync::atomic::AtomicU64,
+    passed: std::sync::atomic::AtomicU64,
+}
+
+impl VPlan {
+    /// The plan for the next run of rows: `wide` once a quarter or more of 1,024 or more
+    /// rows decoded passed the probe (a row the batch joins costs a walk to the columns; one
+    /// the row path joins, a walk, a row made and a probe of its own).
+    fn pick(&self) -> &Arc<super::vector::AggPlan> {
+        use std::sync::atomic::Ordering::Relaxed;
+        match &self.wide {
+            Some(w) if { let n = self.seen.load(Relaxed); n >= 1024 && self.passed.load(Relaxed) * 4 >= n } => w,
+            _ => &self.plan,
+        }
+    }
 }
 
 /// `Decode::late`: the columns of `need` that `above` (what the nodes above the scan read)
@@ -357,6 +382,7 @@ const FILL: usize = 256;
 /// vector can't hold, one out of line; or a filter outcome `Out`) goes through the row path.
 struct Pre<'a> {
     plan: Arc<super::vector::AggPlan>,
+    vp: Arc<VPlan>,
     probe: Option<&'a super::pipe::Probe>,
     types: &'a [crate::types::DataType],
     missing: Vec<Value>,
@@ -445,11 +471,13 @@ impl<'a> Pre<'a> {
             Some(super::pipe::Stage::Hash(p)) => p.int_key_col().map(|c| (c, p)),
             _ => None,
         };
-        let plan = d.vplan.get_or_init(|| Pre::compile(d, spec, probe.map(|p| p.0)).map(Arc::new)).clone()?;
+        let vp = d.vplan.get_or_init(|| Pre::compile(d, spec, probe.map(|p| p.0)).map(Arc::new)).clone()?;
+        let plan = vp.pick().clone();
         let agg = spec.is_some() && d.stages.is_empty();
         let join = plan.joined.clone().map(|c| (c, vec![Value::Null; d.missing.len()]));
         Some(Pre {
             plan,
+            vp,
             probe: probe.map(|p| p.1),
             types: &d.types,
             missing: d.missing.iter().map(|m| m.clone().unwrap_or(Value::Null)).collect(),
@@ -470,7 +498,7 @@ impl<'a> Pre<'a> {
     }
 
     /// `new`'s kernels (the same for every chunk of the scan: `Decode::vplan` keeps them).
-    fn compile(d: &Decode, spec: Option<&super::partial::Spec>, probe: Option<usize>) -> Option<super::vector::AggPlan> {
+    fn compile(d: &Decode, spec: Option<&super::partial::Spec>, probe: Option<usize>) -> Option<VPlan> {
         if d.ios.is_some()
             || !d.raw.is_empty()
             || d.topk.is_some()
@@ -489,17 +517,44 @@ impl<'a> Pre<'a> {
         if spec.is_none() && probe.is_none() && d.filter.is_none() {
             return None;
         }
-        let mut plan = super::vector::AggPlan::compile(&d.types, d.filter.as_ref(), d.filtered, spec, probe)?;
+        let make = || super::vector::AggPlan::compile(&d.types, d.filter.as_ref(), d.filtered, spec, probe);
+        let mut plan = make()?;
         // (Only columns the walk passes anyway: one past its last would be walked to in every
-        // row, the many the probe drops too; q12's orders, probed by a few lineitem rows.)
+        // row, the many the probe drops too; q12's orders, probed by a few lineitem rows. The
+        // others in `wide`, which the chunks take once most rows pass: q14's lineitem rows,
+        // each joined to its part.)
         let upto = plan.need.iter().rposition(|n| *n).map_or(0, |c| c + 1);
-        if let Some(cols) = join.filter(|cols| cols.iter().all(|&c| c < upto)) {
+        let with = |mut plan: super::vector::AggPlan, cols: Vec<usize>| {
             for &c in &cols {
                 plan.need[c] = true;
             }
+            plan.reads = true;
             plan.joined = Some(cols);
+            plan
+        };
+        let mut wide = None;
+        match join {
+            Some(cols) if cols.iter().all(|&c| c < upto) => plan = with(plan, cols),
+            Some(cols) => wide = make().map(|w| Arc::new(with(w, cols))),
+            None => {}
         }
-        Some(plan)
+        Some(VPlan { plan: Arc::new(plan), wide, seen: Default::default(), passed: Default::default() })
+    }
+
+    /// A run's rows the probe passed counted (its `fates`), and the next run's plan
+    /// (`VPlan::pick`).
+    fn repick(&mut self, fates: &[u8]) {
+        use std::sync::atomic::Ordering::Relaxed;
+        if self.vp.wide.is_none() {
+            return;
+        }
+        let (n, dropped) = (fates.len(), fates.iter().filter(|f| **f == DROP).count());
+        self.vp.seen.fetch_add(n as u64, Relaxed);
+        self.vp.passed.fetch_add((n - dropped) as u64, Relaxed);
+        if !Arc::ptr_eq(self.vp.pick(), &self.plan) {
+            self.plan = self.vp.pick().clone();
+            self.join = self.plan.joined.clone().map(|c| (c, vec![Value::Null; self.missing.len()]));
+        }
     }
 
     /// Decoded row `r`, which the batch passed (`fate` not `DROP`; not odd, the filter true)
@@ -946,42 +1001,6 @@ impl FillRows for IndexChunk {
             self.fetch_into(b)?;
         }
         Ok(())
-    }
-}
-
-/// A fill's rows one at a time, owned (`Source::Rows`): for chunks too small for the batch
-/// kernels to pay off (`Pre::worth` decides per chunk), a bitmap heap scan's runs of keys.
-pub struct FillIter<F> {
-    fill: F,
-    batch: RowBatch,
-    done: bool,
-}
-
-impl<F: FillRows> FillIter<F> {
-    pub fn new(fill: F) -> FillIter<F> {
-        FillIter { fill, batch: RowBatch::default(), done: false }
-    }
-}
-
-impl<F: FillRows> Iterator for FillIter<F> {
-    type Item = Result<(Vec<u8>, bytes::Bytes)>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.batch.remaining() == 0 {
-            if self.done {
-                return None;
-            }
-            self.batch.clear();
-            if let Err(e) = self.fill.fill(&mut self.batch, FILL) {
-                self.done = true;
-                return Some(Err(e));
-            }
-            if self.batch.is_empty() {
-                self.done = true;
-                return None;
-            }
-        }
-        self.batch.take().map(Ok)
     }
 }
 
@@ -1843,6 +1862,7 @@ fn partial_chunk<'d>(
                     return (false, pa);
                 }
             }
+            pre.repick(&fates);
             if !pre.worth(pa_run, taken) {
                 pre_off = true;
             }
