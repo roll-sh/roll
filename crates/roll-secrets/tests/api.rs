@@ -3241,6 +3241,59 @@ async fn a_projects_ca_signs_short_lived_certificates_for_its_names_only() {
     assert_eq!(api.call(Method::DELETE, &format!("/cas/{}", ca["id"].as_str().unwrap()), None).await.0, StatusCode::CONFLICT);
 }
 
+/// Placeholders' host bindings by consumer, as placeholders' branch answers them from its tables.
+#[derive(Default)]
+struct FakeBound(Mutex<BTreeMap<String, BTreeMap<String, std::collections::BTreeSet<String>>>>);
+
+impl roll_secrets::intercept::BoundHosts for FakeBound {
+    fn bound_hosts(&self, consumer: &str) -> roll_secrets::Result<BTreeMap<String, std::collections::BTreeSet<String>>> {
+        Ok(self.0.lock().unwrap().get(consumer).cloned().unwrap_or_default())
+    }
+}
+
+#[tokio::test]
+async fn an_interception_ca_names_only_its_consumers_bound_hosts_and_ends_with_it() {
+    use roll_secrets::Error;
+    use std::time::Duration;
+    let api = Api::new().await;
+    let s = &api.secrets;
+    let consumer = "sandbox:sbx_1";
+    assert!(matches!(s.intercept_ca(consumer, None), Err(Error::Unavailable(_))), "no bindings, no CA");
+    let bound = Arc::new(FakeBound::default());
+    let bind = |consumer: &str, hosts: &[&str]| {
+        bound.0.lock().unwrap().insert(consumer.into(), BTreeMap::from([(api.project.clone(), hosts.iter().map(|h| h.to_string()).collect())]));
+    };
+    bind(consumer, &["api.stripe.com", "*.example.com"]);
+    assert!(s.set_bound_hosts(bound.clone()));
+    assert!(matches!(s.intercept_ca("sandbox:other", None), Err(Error::NotFound(_))), "a consumer with no placeholders");
+    // The hosts are the bindings', and the TTL is a day at most.
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+    let ca = s.intercept_ca(consumer, Some(Duration::from_secs(7 * 86_400))).unwrap();
+    assert!((now + 86_400_000 - 60_000..=now + 86_400_000 + 60_000).contains(&ca.expires_at), "{}", ca.expires_at - now);
+    assert_eq!(ca.hosts, ["*.example.com", "api.stripe.com"]);
+    assert!(ca.cert_pem.starts_with("-----BEGIN CERTIFICATE-----") && ca.key.expose().starts_with("-----BEGIN PRIVATE KEY-----"));
+    assert!(!format!("{ca:?}").contains("PRIVATE KEY"));
+    // Asking again mints a new one, never the same key.
+    let again = s.intercept_ca(consumer, None).unwrap();
+    assert!(again.id != ca.id && again.key.expose() != ca.key.expose());
+    assert!(s.intercept_ca_live(&ca.id).unwrap() && s.intercept_ca_live(&again.id).unwrap() && !s.intercept_ca_live("ica_nope").unwrap());
+    // Audited with the consumer, hosts and expiry; never the key.
+    let audit = api.ok(Method::GET, "/audit?action=secrets.intercept_ca", None).await.to_string();
+    assert!(audit.contains(&format!("interception CA {} for sandbox:sbx_1: *.example.com, api.stripe.com, until 20", ca.id)), "{audit}");
+    assert!(!audit.contains("PRIVATE KEY"));
+    // Ending the consumer ends both, with a revocation row, and the proxy's next check drops them.
+    assert_eq!(s.end_intercept_cas(consumer, "the sandbox stopped").unwrap(), 2);
+    assert!(!s.intercept_ca_live(&ca.id).unwrap() && !s.intercept_ca_live(&again.id).unwrap());
+    assert_eq!(s.end_intercept_cas(consumer, "again").unwrap(), 0);
+    let ended = api.ok(Method::GET, "/audit?action=secrets.intercept_ca.end", None).await.to_string();
+    assert!(ended.contains(&format!("ended interception CA {} for sandbox:sbx_1: the sandbox stopped", ca.id)), "{ended}");
+    // A binding a CA must never name is refused, not narrowed.
+    for wide in ["*.co.uk", "*", "10.0.0.1"] {
+        bind("sandbox:sbx_2", &["api.stripe.com", wide]);
+        assert!(matches!(s.intercept_ca("sandbox:sbx_2", None), Err(Error::BadRequest(_))), "{wide}");
+    }
+}
+
 #[tokio::test]
 async fn an_ssh_ca_signs_short_lived_user_certificates_for_its_principals() {
     use base64::Engine;
