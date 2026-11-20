@@ -374,6 +374,13 @@ pub struct PreviewEnvironment {
     /// How slow and heavy its first page may get (`roll/speed`), when the project set a budget.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speed_budget: Option<PreviewSpeedBudget>,
+    /// The project's rule for regressions against main's preview (`check`: the `roll/regressions`
+    /// status), when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub regressions: Option<String>,
+    /// Whether its preview was compared with main's at its head (errors, and routes with traces).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub regressions_compared: bool,
     /// The `roll/visual` status (the project's `github.visual_review`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visual_review: Option<PreviewVisualReview>,

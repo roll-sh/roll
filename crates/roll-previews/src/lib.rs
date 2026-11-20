@@ -191,6 +191,9 @@ impl State {
 pub struct SlowerRoutes {
     pub branch: String,
     pub routes: Vec<SlowerRoute>,
+    /// The head it was read at: shown only for that head (a push reads it again).
+    #[serde(default)]
+    pub head: String,
 }
 
 impl SlowerRoutes {
@@ -226,6 +229,9 @@ pub struct NewErrors {
     pub branch: String,
     pub total: usize,
     pub errors: Vec<NewError>,
+    /// The head it was read at: shown only for that head (a push reads it again).
+    #[serde(default)]
+    pub head: String,
 }
 
 impl NewErrors {
@@ -327,6 +333,10 @@ pub struct Preview {
     /// minutes: Sentry's new issues in a release).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub new_errors: Option<NewErrors>,
+    /// Whether it was compared with main's preview at its head (errors, and routes when the
+    /// project keeps traces): until then nothing above says "no regressions".
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub regressions_compared: bool,
     /// The screenshot's signed link (`(expiry, signature)`), for roll code's summary; never in
     /// API answers.
     #[serde(skip)]

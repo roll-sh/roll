@@ -375,6 +375,8 @@ export interface PreviewSettings {
   access: "link" | "team" | "public";
   /** Chromatic's UI Review: `check` posts `roll/visual`; `required` also keeps a change waiting for one from landing in roll. */
   visual_review?: "off" | "check" | "required";
+  /** `check` posts `roll/regressions`, failing while a change has routes slower than main's preview or errors main's doesn't have. */
+  regressions?: "off" | "check";
   /** `catch` (default): services send mail to roll's catcher, listed on the preview, never delivered; `deliver`: the project's own mail settings. */
   mail?: "catch" | "deliver";
   /** Its `roll.toml` services get the OpenTelemetry SDK's variables, their spans kept on the preview a few hours. */

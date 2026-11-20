@@ -136,6 +136,7 @@ impl CodeSource {
                     api_unread: b.api_unread,
                     endpoints: b.endpoints.iter().map(|x| code_control::model::PreviewEndpoint { path: x.path.clone(), ms: x.ms, status: x.status, main_ms: x.main_ms, slower: x.slower() }).collect(),
                     seo_added: b.seo_added }),
+                regressions: (s.regressions == crate::settings::RegressionsRule::Check).then(|| "check".to_string()),
                 speed_budget: Some(code_control::model::PreviewSpeedBudget { load_ms: s.github.budget.load_ms, bytes: s.github.budget.bytes, lcp_ms: s.github.budget.lcp_ms, cls: s.github.budget.cls })
                     .filter(|b| b.load_ms > 0 || b.bytes > 0 || b.lcp_ms > 0 || b.cls > 0.0),
                 pages: p
@@ -175,6 +176,7 @@ impl CodeSource {
                     title: a.title,
                     seo: a.seo.as_ref().map(|s| s.problems().into_iter().map(String::from).collect()).unwrap_or_default(),
                 }),
+                regressions_compared: p.regressions_compared,
                 slower_routes: p.slower_routes.as_ref().map(|s| code_control::model::PreviewSlowerRoutes {
                     branch: s.branch.clone(),
                     routes: s.routes.iter().map(|x| code_control::model::PreviewSlowerRoute { name: x.name.clone(), p50_ms: x.p50_ms, main_p50_ms: x.main_p50_ms, grew: x.grew.as_ref().map(|g| (g.span.clone(), g.ms, g.main_ms)) }).collect(),

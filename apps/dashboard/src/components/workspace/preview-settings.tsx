@@ -546,6 +546,13 @@ function Form({
             />
           </Field>
         )}
+        <Field
+          group
+          label="Regressions against main"
+          note="A change whose routes are slower than on the default branch's preview, or whose output has errors that one doesn't, fails the roll/regressions status until they're gone (routes need traces)."
+        >
+          <Choice value={s.regressions ?? "off"} options={["off", "check"]} onChange={(v) => set("regressions", v)} labels={{ off: "Off", check: "A check" }} />
+        </Field>
         {s.github.screenshot && (
           <Field label="Other pages" note="Taken with / at each push and compared the same way (up to 10: /pricing, or another service's, admin:/users).">
             <input value={pages} onChange={(e) => setPages(e.target.value)} placeholder="/ only" className={`${field} h-8 w-full font-mono text-[12px]`} spellCheck={false} />

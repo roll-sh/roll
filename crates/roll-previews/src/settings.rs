@@ -58,6 +58,10 @@ pub struct Settings {
     /// `roll/visual` commit status), pending while its pages differ from the baseline's and
     /// nobody has accepted them at that head; `required` also keeps it from landing in roll.
     pub visual_review: VisualReviewRule,
+    /// Lighthouse CI's budgets and Sentry's regression gates for what the preview ran: `check`
+    /// posts `roll/regressions`, failing while the change has routes slower than main's preview or
+    /// errors main's doesn't have (`slower_routes`, `new_errors`).
+    pub regressions: RegressionsRule,
     /// `catch` (the default): services send mail to roll's catcher (`SMTP_*` are roll's, mail
     /// providers' API keys are removed), listed on the preview, never delivered; `deliver`: the
     /// project's own mail settings reach previews.
@@ -146,6 +150,14 @@ pub enum EgressRule {
     #[default]
     Open,
     Roll,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RegressionsRule {
+    #[default]
+    Off,
+    Check,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -356,6 +368,7 @@ impl Default for Settings {
             github: GithubRule::default(),
             access: Access::Link,
             visual_review: VisualReviewRule::Off,
+            regressions: RegressionsRule::Off,
             mail: MailRule::Catch,
             traces: false,
             egress: EgressRule::Open,
