@@ -349,7 +349,9 @@ impl Control {
             source["size"] = json!(n);
         }
         let body = json!({ "source": source, "dest": { "index": dest } });
-        let mut path = "/_reindex?wait_for_completion=false".to_string();
+        // `refresh=true`: the copy is searchable (and counted on the Indices tab) as soon as its
+        // task ends.
+        let mut path = "/_reindex?wait_for_completion=false&refresh=true".to_string();
         if let Some(rps) = req.requests_per_second {
             path.push_str(&format!("&requests_per_second={rps}"));
         }

@@ -2798,7 +2798,7 @@ async fn migrating_from_another_cluster() {
     assert!(desc.starts_with("reindex from [host=127.0.0.1 port=") && desc.ends_with("][products] to [products]"), "{desc}");
     assert!(!done.to_string().contains(&old_pw), "{done}");
 
-    e.call(Method::POST, "/v1/search/clusters/new/request", Some(json!({ "method": "POST", "path": "/products/_refresh" }))).await;
+    // The task refreshed its copy: no refresh needed before searching it.
     let (_, found) = e.call(Method::POST, "/v1/search/clusters/new/request", Some(json!({ "method": "POST", "path": "/catalog/_search", "body": { "query": { "term": { "sku": "s1" } } } }))).await;
     let found = body(&found);
     assert_eq!(found["hits"]["hits"][0]["_source"]["name"], "teapot", "{found}");
