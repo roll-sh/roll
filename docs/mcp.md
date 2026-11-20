@@ -731,6 +731,8 @@ previews are listed once those products are on.
 | `search_slowlog` | A cluster's slowest recent requests. | `GET /v1/search/clusters/{id}/slowlog` |
 | `search_audit` | A cluster's security audit log (failed logins, access denials, changes to users, roles and keys; never a secret). | `GET /v1/search/clusters/{id}/audit` |
 | `search_analytics` | What a cluster's users search for: top queries, queries with no results, click-through (indices that opt in). | `GET /v1/search/clusters/{id}/analytics` |
+| `search_suggestions` | An index's query suggestions from its search analytics: settings, last build, heaviest suggestions. | `GET /v1/search/clusters/{cluster}/indices/{index}/suggestions` |
+| `search_rebuild_suggestions` | Rebuild an index's suggestions index from its analytics now (write). | `POST /v1/search/clusters/{cluster}/indices/{index}/suggestions/rebuild` |
 | `search_usage` | A cluster's metering and cost against Elastic Cloud and Amazon OpenSearch. | `GET /v1/search/clusters/{cluster}/usage` |
 | `search_get_index` | An index's mappings, settings and aliases. | `GET /v1/search/clusters/{cluster}/indices/{index}` |
 | `search_create_index` | Create an index with mappings and settings. | `PUT /v1/search/clusters/{cluster}/indices/{index}` |

@@ -252,6 +252,11 @@ pub trait DateFormatter: Send + Sync + std::fmt::Debug {
     /// Parses `text` with date math into epoch millis (`round_up` for `/unit` rounding of upper
     /// bounds; `zone` for dates without an offset).
     fn parse(&self, text: &str, now_millis: i64, round_up: bool, zone: &TimeZone) -> Result<i64>;
+    /// The locale it prints in when it isn't English or `Locale.ROOT` (a field's `locale`):
+    /// what rebuilds it on another cluster ([`crate::wire`]).
+    fn locale(&self) -> Option<&str> {
+        None
+    }
 }
 
 /// A `java.text.DecimalFormat`.
@@ -285,6 +290,88 @@ pub enum DocValueFormat {
     Binary,
     /// A `version` field's encoded terms ([`crate::version_string`]).
     Version,
+}
+
+/// [`DocValueFormat`] as [`crate::wire`] carries it: what rebuilds each formatter.
+#[derive(serde::Serialize, serde::Deserialize)]
+enum FormatWire {
+    Raw,
+    Decimal(String),
+    DateTime { pattern: String, locale: Option<String>, zone: TimeZone, nanos: bool },
+    Ip,
+    Boolean,
+    GeoHash,
+    GeoTile,
+    UnsignedLongShifted,
+    Binary,
+    Version,
+}
+
+impl serde::Serialize for DocValueFormat {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        match self {
+            DocValueFormat::Raw => FormatWire::Raw,
+            DocValueFormat::Decimal(f) => FormatWire::Decimal(f.pattern().to_string()),
+            DocValueFormat::DateTime { formatter, zone, nanos } => {
+                FormatWire::DateTime { pattern: formatter.pattern().to_string(), locale: formatter.locale().map(str::to_string), zone: zone.clone(), nanos: *nanos }
+            }
+            DocValueFormat::Ip => FormatWire::Ip,
+            DocValueFormat::Boolean => FormatWire::Boolean,
+            DocValueFormat::GeoHash => FormatWire::GeoHash,
+            DocValueFormat::GeoTile => FormatWire::GeoTile,
+            DocValueFormat::UnsignedLongShifted => FormatWire::UnsignedLongShifted,
+            DocValueFormat::Binary => FormatWire::Binary,
+            DocValueFormat::Version => FormatWire::Version,
+        }
+        .serialize(s)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for DocValueFormat {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        use serde::de::Error;
+        Ok(match FormatWire::deserialize(d)? {
+            FormatWire::Raw => DocValueFormat::Raw,
+            FormatWire::Decimal(p) => DocValueFormat::Decimal(builtin_decimal_format(&p).map_err(|e| D::Error::custom(e.reason))?),
+            FormatWire::DateTime { pattern, locale, zone, nanos } => {
+                let formatter = crate::wire::date_formatter(&pattern, locale.as_deref()).map_err(|e| D::Error::custom(e.reason))?;
+                DocValueFormat::DateTime { formatter, zone, nanos }
+            }
+            FormatWire::Ip => DocValueFormat::Ip,
+            FormatWire::Boolean => DocValueFormat::Boolean,
+            FormatWire::GeoHash => DocValueFormat::GeoHash,
+            FormatWire::GeoTile => DocValueFormat::GeoTile,
+            FormatWire::UnsignedLongShifted => DocValueFormat::UnsignedLongShifted,
+            FormatWire::Binary => DocValueFormat::Binary,
+            FormatWire::Version => DocValueFormat::Version,
+        })
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+enum ZoneWire {
+    Fixed { offset_secs: i32, id: String },
+    Named(String),
+}
+
+impl serde::Serialize for TimeZone {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        match self {
+            TimeZone::Fixed { offset_secs, id } => ZoneWire::Fixed { offset_secs: *offset_secs, id: id.clone() },
+            TimeZone::Named(tz) => ZoneWire::Named(tz.name().to_string()),
+        }
+        .serialize(s)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for TimeZone {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        use serde::de::Error;
+        Ok(match ZoneWire::deserialize(d)? {
+            ZoneWire::Fixed { offset_secs, id } => TimeZone::Fixed { offset_secs, id },
+            ZoneWire::Named(n) => TimeZone::Named(n.parse().map_err(|_| D::Error::custom(format!("unknown time zone [{n}]")))?),
+        })
+    }
 }
 
 impl PartialEq for DocValueFormat {
