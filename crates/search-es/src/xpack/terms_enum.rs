@@ -127,7 +127,7 @@ impl Matcher<'_> {
     /// Whether the request's `timeout` is up (checked every [`CLOCK_EVERY`] terms read).
     fn expired(&self, read: &mut u32) -> bool {
         *read += 1;
-        if *read % CLOCK_EVERY == 0 && std::time::Instant::now() >= self.deadline {
+        if read.is_multiple_of(CLOCK_EVERY) && std::time::Instant::now() >= self.deadline {
             self.timed_out.store(true, std::sync::atomic::Ordering::Relaxed);
         }
         self.timed_out.load(std::sync::atomic::Ordering::Relaxed)

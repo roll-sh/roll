@@ -202,11 +202,9 @@ fn collect(ctx: &Ctx, q: &Query, targets: &Targets, out: &mut Vec<Wanted>) -> Es
         }
         for (name, idx) in targets {
             match config(idx, field) {
-                FieldConfig::Semantic { inference_id, settings } => {
-                    if let Some(s) = settings {
-                        let what = if s.task == TaskType::SparseEmbedding { super::Use::Sparse } else { super::Use::Dense };
-                        out.push(Wanted { id: inference_id, text: text.clone(), what, field: Some(field.to_string()) });
-                    }
+                FieldConfig::Semantic { inference_id, settings: Some(s) } => {
+                    let what = if s.task == TaskType::SparseEmbedding { super::Use::Sparse } else { super::Use::Dense };
+                    out.push(Wanted { id: inference_id, text: text.clone(), what, field: Some(field.to_string()) });
                 }
                 FieldConfig::Other(ty) if kind == Kind::Semantic => {
                     err.get_or_insert(EsError::new(400, "query_shard_exception", format!("Field [{field}] of type [{ty}] is not supported for [semantic] query")).with_meta("index", name.clone()));
