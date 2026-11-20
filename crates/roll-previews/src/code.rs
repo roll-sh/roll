@@ -75,6 +75,7 @@ impl CodeSource {
             approved: c.run_approved,
             author: c.author.clone(),
             github_pr: c.github_pr.map(|n| n as i64),
+            owner_id: repo.owner_id.clone(),
         }
     }
 
@@ -136,7 +137,8 @@ impl CodeSource {
                     api_unread: b.api_unread,
                     endpoints: b.endpoints.iter().map(|x| code_control::model::PreviewEndpoint { path: x.path.clone(), ms: x.ms, status: x.status, main_ms: x.main_ms, slower: x.slower() }).collect(),
                     seo_added: b.seo_added }),
-                regressions: (s.regressions == crate::settings::RegressionsRule::Check).then(|| "check".to_string()),
+                regressions: p.regressions.clone(),
+                regressions_accepted_by: p.regressions_accepted.as_ref().map(|a| a.by.clone()),
                 speed_budget: Some(code_control::model::PreviewSpeedBudget { load_ms: s.github.budget.load_ms, bytes: s.github.budget.bytes, lcp_ms: s.github.budget.lcp_ms, cls: s.github.budget.cls })
                     .filter(|b| b.load_ms > 0 || b.bytes > 0 || b.lcp_ms > 0 || b.cls > 0.0),
                 pages: p
@@ -466,7 +468,7 @@ impl PreviewBackend for Backend {
     async fn accept_visual(&self, change: &code_control::model::Change, by: &str, head: &str) -> anyhow::Result<()> {
         let engine = self.engine.get().and_then(Weak::upgrade).ok_or_else(|| anyhow::anyhow!("previews aren't running"))?;
         let row = engine.store.row_by_change(&change.id)?.ok_or_else(|| anyhow::anyhow!("the change has no preview"))?;
-        engine.accept_visual(&row.id, by, None, true, Some(head), None).await.map(|_| ()).map_err(|e| anyhow::anyhow!("{e}"))
+        engine.accept_visual(&row.id, by, None, true, None, Some(head), None).await.map(|_| ()).map_err(|e| anyhow::anyhow!("{e}"))
     }
 
     async fn delete(&self, repo: &RepoRow, change: &code_control::model::Change) -> anyhow::Result<()> {

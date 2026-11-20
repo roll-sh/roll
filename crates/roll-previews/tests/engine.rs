@@ -242,21 +242,22 @@ async fn a_visual_change_waits_for_someone_to_accept_it_at_each_head() {
     shoot("cs_1b", 255, 255);
     assert_eq!(review().map(|v| (v.state, v.percent)), Some((VisualState::Changed, 100.0)));
     assert_eq!(waiting(), Some(vec!["".to_string(), "/pricing".to_string()]));
-    assert!(e.engine.accept_visual(&base.id, "ada", None, true, None, None).await.is_err(), "only a change's");
+    assert!(e.engine.accept_visual(&base.id, "ada", None, true, None, None, None).await.is_err(), "only a change's");
     // Not by its own author.
-    let err = e.engine.accept_visual(&chg.id, "carol", None, true, Some("cs_1b"), None).await.unwrap_err();
+    let err = e.engine.accept_visual(&chg.id, "carol", None, true, None, Some("cs_1b"), None).await.unwrap_err();
     assert!(err.to_string().contains("own author"), "{err}");
-    let err = e.engine.accept_visual(&chg.id, "token:ci", Some("carol"), false, Some("cs_1b"), None).await.unwrap_err();
+    let err = e.engine.accept_visual(&chg.id, "token:ci", Some("carol"), false, None, Some("cs_1b"), None).await.unwrap_err();
     assert!(err.to_string().contains("own author"), "nor with their own token: {err}");
     // What was seen: an older screenshot's head is refused, this one's accepted.
-    let err = e.engine.accept_visual(&chg.id, "ada", None, true, Some("cs_1a"), None).await.unwrap_err();
+    let err = e.engine.accept_visual(&chg.id, "ada", None, true, None, Some("cs_1a"), None).await.unwrap_err();
     assert!(err.to_string().contains("a newer screenshot came in"), "{err}");
     // One page at a time: the change waits until every changed page is accepted.
-    let p = e.engine.accept_visual(&chg.id, "ada", None, true, Some("cs_1b"), Some("/pricing")).await.unwrap();
+    assert!(matches!(e.engine.accept_visual(&chg.id, "bob", None, true, Some(Some("own_bob")), Some("cs_1b"), None).await, Err(roll_previews::Error::Forbidden(_))), "no write on its repo");
+    let p = e.engine.accept_visual(&chg.id, "ada", None, true, Some(Some("own_acme")), Some("cs_1b"), Some("/pricing")).await.unwrap();
     assert_eq!(p.visual_review.map(|v| v.state), Some(VisualState::Changed));
     assert_eq!(waiting(), Some(vec!["".to_string()]));
-    assert!(e.engine.accept_visual(&chg.id, "ada", None, true, Some("cs_1b"), Some("/nowhere")).await.is_err(), "a page it has no screenshot of");
-    let p = e.engine.accept_visual(&chg.id, "ada", None, true, Some("cs_1b"), Some("")).await.unwrap();
+    assert!(e.engine.accept_visual(&chg.id, "ada", None, true, None, Some("cs_1b"), Some("/nowhere")).await.is_err(), "a page it has no screenshot of");
+    let p = e.engine.accept_visual(&chg.id, "ada", None, true, None, Some("cs_1b"), Some("")).await.unwrap();
     assert_eq!(p.visual_review.map(|v| (v.state, v.by)), Some((VisualState::Accepted, Some("ada".into()))));
     assert_eq!(e.code.last_report("chg_1").visual_review.map(|v| v.state), Some(VisualState::Accepted), "the change is told at once");
     // A push that changes nothing visible keeps it.
@@ -269,7 +270,7 @@ async fn a_visual_change_waits_for_someone_to_accept_it_at_each_head() {
     assert_eq!(review().map(|v| v.state), Some(VisualState::Changed));
     assert_eq!(waiting(), Some(vec!["/pricing".to_string()]));
     // Accept with no page: every page there.
-    e.engine.accept_visual(&chg.id, "ada", None, true, Some("cs_1d"), None).await.unwrap();
+    e.engine.accept_visual(&chg.id, "ada", None, true, None, Some("cs_1d"), None).await.unwrap();
     assert_eq!(review().map(|v| v.state), Some(VisualState::Accepted));
     // Under the project's threshold a page counts as unchanged (a clock `hide` can't name).
     let mut one_pixel = image::RgbaImage::from_pixel(4, 4, image::Rgba([255, 255, 255, 255]));
@@ -609,6 +610,20 @@ async fn an_error_mains_preview_doesnt_have_reaches_the_record_and_the_report() 
     assert_eq!(n.head, p.head, "read at its head");
     assert_eq!((n.branch.as_str(), n.total, n.errors.iter().map(|x| x.title.as_str()).collect::<Vec<_>>()), ("main", 2, vec!["Stripe rejected ***", "RangeError"]));
     assert_eq!(e.code.last_report("chg_ne").new_errors, Some(n), "reported again with it");
+    // Required, someone other than its author accepts them at its head (a person, not a token).
+    let mut s = e.engine.store.settings(&e.project).unwrap();
+    s.regressions = roll_previews::settings::RegressionsRule::Required;
+    e.engine.store.put_settings(&e.project, &s).unwrap();
+    assert!(matches!(e.engine.accept_regressions(&p.id, "carol", None, true, None, None).await, Err(roll_previews::Error::Forbidden(_))), "not its author");
+    assert!(matches!(e.engine.accept_regressions(&p.id, "token:ci", None, false, None, None).await, Err(roll_previews::Error::Forbidden(_))), "not a token");
+    assert!(matches!(e.engine.accept_regressions(&p.id, "ada", None, true, None, Some("cs_old")).await, Err(roll_previews::Error::Conflict(_))), "a newer push");
+    assert!(matches!(e.engine.accept_regressions(&p.id, "bob", None, true, Some(Some("own_bob")), Some(&p.head)).await, Err(roll_previews::Error::Forbidden(_))), "no write on its repo");
+    let accepted = e.engine.accept_regressions(&p.id, "ada", None, true, Some(Some("own_acme")), Some(&p.head)).await.unwrap();
+    assert_eq!((accepted.regressions.as_deref(), accepted.regressions_accepted.map(|a| a.by)), (Some("required"), Some("ada".to_string())));
+    // A new one at the same head isn't covered by it: accepted again or not at all.
+    e.apps.errors.lock().get_mut(&format!("{}/{web}", p.id)).unwrap().push(group("later", "TimeoutError", 1));
+    e.engine.read_new_errors().await;
+    assert!(e.engine.store.preview(&p.id).unwrap().regressions_accepted.is_none(), "more than was accepted");
     // Fixed (gone from its output): it goes.
     e.apps.errors.lock().insert(format!("{}/{web}", p.id), vec![group("old", "a flaky upstream", 5)]);
     e.engine.read_new_errors().await;

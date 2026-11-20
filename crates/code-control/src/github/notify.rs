@@ -466,8 +466,10 @@ fn regressions_status(e: &crate::model::PreviewEnvironment) -> Option<(&'static 
     let errors = e.new_errors.as_ref().map_or(0, |n| n.total);
     let branch = branch_name(e.slower_routes.as_ref().map(|s| s.branch.as_str()).or(e.new_errors.as_ref().map(|n| n.branch.as_str())).unwrap_or("main"));
     let count = |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+    let by = e.regressions_accepted_by.as_deref().map(|b| b.chars().filter(|c| c.is_ascii_alphanumeric() || "-_.:".contains(*c)).take(40).collect::<String>());
     Some(match (routes, errors) {
         (0, 0) => ("success", format!("No route slower and no new error against {branch}")),
+        (r, e) if by.is_some() => ("success", format!("Accepted by {}: {} slower, {} against {branch}", by.unwrap_or_default(), count(r, "route", "routes"), count(e, "new error", "new errors"))),
         (r, 0) => ("failure", format!("{} slower than {branch}", count(r, "route", "routes"))),
         (0, e) => ("failure", format!("{} against {branch}", count(e, "new error", "new errors"))),
         (r, e) => ("failure", format!("{} slower, {} against {branch}", count(r, "route", "routes"), count(e, "new error", "new errors"))),
@@ -1100,6 +1102,7 @@ mod preview_tests {
             pages: Vec::new(),
             speed_budget: None,
             regressions: None,
+            regressions_accepted_by: None,
             regressions_compared: false,
             visual_review: None,
             notes: Vec::new(),
@@ -1221,6 +1224,9 @@ mod preview_tests {
         assert_eq!(regressions_status(&timed).map(|s| s.0), Some("pending"), "not compared at this head yet");
         timed.regressions_compared = true;
         assert_eq!(regressions_status(&timed), Some(("failure", "1 route slower than main".into())));
+        timed.regressions_accepted_by = Some("ada".into());
+        assert_eq!(regressions_status(&timed), Some(("success", "Accepted by ada: 1 route slower, 0 new errors against main".into())));
+        timed.regressions_accepted_by = None;
         timed.slower_routes = None;
         assert_eq!(regressions_status(&timed), Some(("success", "No route slower and no new error against main".into())));
         timed.regressions = None;

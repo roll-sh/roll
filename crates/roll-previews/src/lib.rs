@@ -244,6 +244,35 @@ pub struct NewError {
     pub title: String,
 }
 
+/// Someone accepted a preview's regressions against main at one head.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RegressionsAccepted {
+    pub head: String,
+    pub by: String,
+    pub at: i64,
+    /// A person signed in to roll accepted them (not a token or the operator): a `required`
+    /// rule counts only theirs.
+    #[serde(default)]
+    pub person: bool,
+    /// What was accepted (each slower route, `route:<name>`, and new error, `error:<service>:<title>`):
+    /// anything else at the same head asks again.
+    #[serde(default)]
+    pub what: Vec<String>,
+    /// How many new errors there were (the record names the most frequent few): more asks again.
+    #[serde(default)]
+    pub errors_total: usize,
+}
+
+impl RegressionsAccepted {
+    /// The regressions a record shows, as an acceptance names them.
+    pub fn of(routes: Option<&SlowerRoutes>, errors: Option<&NewErrors>) -> Vec<String> {
+        let mut what: Vec<String> = routes.iter().flat_map(|s| s.routes.iter().map(|r| format!("route:{}", r.name))).chain(errors.iter().flat_map(|n| n.errors.iter().map(|e| format!("error:{}:{}", e.service, e.title)))).collect();
+        what.sort();
+        what.dedup();
+        what
+    }
+}
+
 /// A preview as the API shows it (docs/previews.md, "HTTP contract").
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Preview {
@@ -333,6 +362,12 @@ pub struct Preview {
     /// minutes: Sentry's new issues in a release).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub new_errors: Option<NewErrors>,
+    /// The project's rule for regressions against main's (`check`, `required`), when it has one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub regressions: Option<String>,
+    /// Who accepted its regressions at its head (`POST …/regressions/accept`); a new head asks again.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub regressions_accepted: Option<RegressionsAccepted>,
     /// Whether it was compared with main's preview at its head (errors, and routes when the
     /// project keeps traces): until then nothing above says "no regressions".
     #[serde(skip_serializing_if = "std::ops::Not::not")]

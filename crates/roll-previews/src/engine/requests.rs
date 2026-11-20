@@ -467,7 +467,10 @@ impl Engine {
     /// say so at once.
     /// `person`: not a token's; only a person (or the operator) accepts a required one.
     /// `behind`: the signed-in person a token acts for, checked against the author as `by` is.
-    pub async fn accept_visual(&self, id: &str, by: &str, behind: Option<&str>, person: bool, seen: Option<&str>, page: Option<&str>) -> Result<Preview> {
+    /// `writer`: as [`Engine::accept_regressions`]' (a signed-in person's code owner must be the
+    /// repo's; GitHub's Accept checks its own writers).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn accept_visual(&self, id: &str, by: &str, behind: Option<&str>, person: bool, writer: Option<Option<&str>>, seen: Option<&str>, page: Option<&str>) -> Result<Preview> {
         let r = self.store.row(id)?;
         if r.change_id.is_none() {
             return Err(Error::BadRequest("only a change's preview has a visual review".into()));
@@ -482,6 +485,15 @@ impl Engine {
         {
             return Err(Error::Forbidden("the change's own author can't accept its visual change: someone else looks at it".into()));
         }
+        if let Some(owner) = writer {
+            let c = match &r.change_id {
+                Some(change) => self.source.change(change).await.map_err(|e| Error::Internal(format!("reading the change: {e}")))?,
+                None => None,
+            };
+            if c.as_ref().is_none_or(|c| owner != Some(c.owner_id.as_str())) {
+                return Err(Error::Forbidden(format!("accepting {}'s visual change needs write access to it in roll code", r.repo)));
+            }
+        }
         let head = self.store.accept_visual(id, by, seen, page)?.ok_or_else(|| Error::Conflict("the preview has no screenshot to accept yet".into()))?;
         let what = match page {
             None => "its pages look".to_string(),
@@ -489,6 +501,51 @@ impl Engine {
             Some(p) => format!("{p} looks"),
         };
         self.store.log(id, &format!("{by} accepted how {what} at {}", short(&head)))?;
+        self.report(r.clone()).await;
+        self.store.view(self.store.row(id)?)
+    }
+
+    /// Someone accepts a change's regressions against main's preview at its head (`seen`: the head
+    /// they looked at; a newer one is a 409), as a visual change is accepted: not by its own author,
+    /// and a required rule's only by a person.
+    /// `writer`: a signed-in person's own roll code owner (`Some(None)`: they have none yet), who
+    /// must be the repo's (roll code's write); `None` for the operator, an admin or a token, which
+    /// the permissions catalog decides.
+    pub async fn accept_regressions(&self, id: &str, by: &str, behind: Option<&str>, person: bool, writer: Option<Option<&str>>, seen: Option<&str>) -> Result<Preview> {
+        let r = self.store.row(id)?;
+        if r.change_id.is_none() {
+            return Err(Error::BadRequest("only a change's preview has regressions against main".into()));
+        }
+        if !person && self.store.settings(&r.project_id)?.regressions == crate::settings::RegressionsRule::Required {
+            return Err(Error::Forbidden("required regressions are accepted by a person, in roll, not by a token".into()));
+        }
+        // Its author, read for sure (an error refuses, it doesn't pass), and known.
+        let change = r.change_id.as_deref().unwrap_or_default();
+        let c = self.source.change(change).await.map_err(|e| Error::Internal(format!("reading the change's author: {e}")))?.ok_or_else(|| Error::NotFound(format!("no change {change}")))?;
+        if c.author.is_empty() || c.author == "github" {
+            return Err(Error::Conflict("the change's author isn't known, so nobody can be told apart from them".into()));
+        }
+        if [Some(by), behind].into_iter().flatten().any(|who| who.eq_ignore_ascii_case(&c.author) || who.eq_ignore_ascii_case(c.author.trim_start_matches('@'))) {
+            return Err(Error::Forbidden("the change's own author can't accept its regressions: someone else looks at them".into()));
+        }
+        // Roll code's bar for a landing decision: someone who can write to the change's repo.
+        if let Some(owner) = writer
+            && owner != Some(c.owner_id.as_str())
+        {
+            return Err(Error::Forbidden(format!("accepting {}'s regressions needs write access to it in roll code", c.repo)));
+        }
+        if seen.is_some_and(|s| s != r.head) {
+            return Err(Error::Conflict(format!("a newer push came in (at {}): look at it first", short(&r.head))));
+        }
+        // Something compared at this head to accept: what it is goes with the acceptance.
+        let view = self.store.view(r.clone())?;
+        let what = crate::RegressionsAccepted::of(view.slower_routes.as_ref(), view.new_errors.as_ref());
+        if !view.regressions_compared || what.is_empty() {
+            return Err(Error::Conflict("nothing to accept: it has no regressions against main's preview at this push (or isn't compared yet)".into()));
+        }
+        let at = self.store.now_ms()?;
+        self.store.set_runtime_fact(id, "regressions_accepted", Some(&crate::RegressionsAccepted { head: r.head.clone(), by: by.to_string(), at, person, what, errors_total: view.new_errors.as_ref().map_or(0, |n| n.total) }))?;
+        self.store.log(id, &format!("{by} accepted its regressions against main at {}", short(&r.head)))?;
         self.report(r.clone()).await;
         self.store.view(self.store.row(id)?)
     }
