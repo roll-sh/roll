@@ -31,6 +31,8 @@ export function OverviewGrid() {
   // The grid's own columns are the standard environments in order; fall back to the overview's.
   const cols = grid.data?.environments ?? standard.map((e) => e.slug);
   const names = new Map(standard.map((e) => [e.slug, e.name]));
+  // Where the empty state sends you to add the first secret: development, else the first environment.
+  const first = standard.find((e) => e.slug === "development") ?? standard[0];
 
   return (
     <div className="flex min-h-full flex-col">
@@ -68,8 +70,20 @@ export function OverviewGrid() {
         <Teach
           title={path === "/" ? `No secrets in ${project.name} yet` : `Nothing in ${path} yet`}
           cli={[`roll secrets set -p ${project.name} -e development DATABASE_URL=…`, `roll secrets import -p ${project.name} -e development .env`, `roll run -p ${project.name} -e development -- <cmd>`]}
+          install
         >
-          Open an environment to add a secret, paste a .env file, or link one of the project's resources so its credentials stay current. From the CLI:
+          {first ? (
+            <>
+              Open{" "}
+              <Link href={secretsHref(project.id, { env: first.slug, path: path === "/" ? undefined : path })} className="text-accent hover:underline">
+                {first.name}
+              </Link>{" "}
+              to add a secret
+            </>
+          ) : (
+            "Open an environment to add a secret"
+          )}
+          , paste a .env file, or link one of the project&apos;s resources so its credentials stay current. From the CLI:
         </Teach>
       ) : grid.data ? (
         <div className="overflow-x-auto px-3 pt-2 pb-6">

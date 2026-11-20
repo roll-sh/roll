@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import type { AuditEntry, Cell, Link, Problem, Secret, Totp } from "@/lib/secrets-api";
 import { KIND_ICON } from "../workspace/kind";
 import type { ResourceKind } from "@/lib/workspace-api";
+import { useInstallLine } from "@/lib/install-line";
 
 /** The Secrets surface's controls, on the dashboard frame's tokens (docs/code/agents-design.md). */
 export const button =
@@ -89,15 +90,16 @@ export function Warnings({ items, className = "" }: { items: string[]; className
   );
 }
 
-/** An empty state that teaches: what goes here, and the CLI way to do it. */
-export function Teach({ title, children, cli }: { title: string; children: ReactNode; cli?: string[] }) {
+/** An empty state that teaches: what goes here, and the CLI way to do it. `install`: the CLI lines start with how to install roll. */
+export function Teach({ title, children, cli, install = false }: { title: string; children: ReactNode; cli?: string[]; install?: boolean }) {
+  const installLine = useInstallLine();
   return (
     <div className="rise mx-auto w-full max-w-[520px] px-4 py-14 text-center">
       <h2 className="text-[18px] font-semibold tracking-[-0.045em]">{title}</h2>
       <div className="mt-1.5 text-[12.5px] text-muted">{children}</div>
       {cli && (
         <pre className="mt-4 overflow-x-auto rounded-lg border border-line-2 bg-panel px-3 py-2.5 text-left font-mono text-[11.5px] leading-relaxed text-soft inset-shadow-highlight">
-          {cli.join("\n")}
+          {[...(install ? [installLine] : []), ...cli].join("\n")}
         </pre>
       )}
     </div>
