@@ -774,8 +774,13 @@ and its egress container running as the directory's owner with it mounted at `/r
 api.stripe.com: 3 request(s), 3 key(s) swapped in"), never a value. A dead listener's socket is
 made again in place (a running container keeps its mount); a change of hosts makes the egress
 container again; dropping the proxy ends the listener and the directory. The test's first
-connection goes through a real socket. Next: the CA in the service containers' trust stores,
-rolld's adapter once roll secrets' batch 6 lands, then the live check.
+connection goes through a real socket. A service of an intercepted preview trusts its CA: the
+CA's PEM comes as `ROLL_INTERCEPT_CA`, and before its command runs it's written to a file and
+added to a copy of the system's bundle (Debian's, Red Hat's or Alpine's path, whichever is
+there), which `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE` and `CURL_CA_BUNDLE` name, with
+`NODE_EXTRA_CA_CERTS` naming the CA alone: every other host verifies as before (checked in
+Alpine and Debian images). A runtime with a trust store of its own (Java's keystore) doesn't read
+these. Next: rolld's adapter once roll secrets' batch 6 lands, then the live check.
 
 ## Safety
 

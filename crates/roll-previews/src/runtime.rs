@@ -709,6 +709,7 @@ impl Runtime {
         }
         if let Some(n) = job.network.as_ref().filter(|_| !t.egress_hosts.is_empty()) {
             self.egress_proxy(preview, &n.name, &t.egress_hosts).await?;
+            self.trust_intercept_ca(preview, &mut job);
             let proxy = format!("http://{EGRESS_ALIAS}:3128");
             for k in ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"] {
                 job.env.push((k.into(), proxy.clone()));
@@ -1915,6 +1916,18 @@ impl Runtime {
         self.stop_intercepting(preview);
     }
 
+    /// A preview being intercepted: its code trusts its interception CA too (the CA's PEM as a
+    /// variable, written to a file and added to the system's bundle before the command runs):
+    /// `NODE_EXTRA_CA_CERTS`, and `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE` and `CURL_CA_BUNDLE` as the
+    /// system's bundle plus it, so every other host still verifies as before. A runtime with a
+    /// store of its own (Java's keystore) doesn't read these.
+    fn trust_intercept_ca(&self, preview: &str, job: &mut code_preview::isolation::Job) {
+        let Some(dir) = self.cfg.intercept_dir.as_ref().filter(|_| self.intercepting.lock().contains_key(preview)) else { return };
+        let Ok(pem) = std::fs::read_to_string(dir.join(preview).join("ca.pem")) else { return };
+        job.env.push(("ROLL_INTERCEPT_CA".into(), pem));
+        job.run = format!("{TRUST_INTERCEPT_CA}\n{}", job.run);
+    }
+
     fn stop_intercepting(&self, preview: &str) {
         if let Some((_, h)) = self.intercepting.lock().remove(preview) {
             h.abort();
@@ -2004,6 +2017,9 @@ impl Runtime {
         Ok(())
     }
 }
+
+/// What a service's command runs after when its preview is intercepted (`trust_intercept_ca`).
+const TRUST_INTERCEPT_CA: &str = r#"if [ -n "$ROLL_INTERCEPT_CA" ]; then printf '%s\n' "$ROLL_INTERCEPT_CA" > /tmp/roll-intercept-ca.pem; b=/tmp/roll-ca-bundle.pem; : > "$b"; for f in /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/certs/ca-bundle.crt /etc/ssl/cert.pem; do if [ -r "$f" ]; then cat "$f" >> "$b"; break; fi; done; cat /tmp/roll-intercept-ca.pem >> "$b"; export NODE_EXTRA_CA_CERTS=/tmp/roll-intercept-ca.pem SSL_CERT_FILE="$b" REQUESTS_CA_BUNDLE="$b" CURL_CA_BUNDLE="$b"; fi"#;
 
 /// The network a preview whose project limits egress runs on (docs/previews.md, "Egress").
 fn network_name(preview: &str) -> String {
