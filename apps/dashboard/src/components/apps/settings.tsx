@@ -1,7 +1,7 @@
 import { Trash2 } from "lucide-react";
 import { useReducedMotion } from "@roll/brand";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { appsApi, SERVICE_NAME, type Build, type Environment, type Prices, type Reset, type Run, type Service, type ServicePatch, type Source } from "@/lib/apps-api";
+import { appsApi, SERVICE_NAME, type Build, type Environment, type Prices, type PushState, type Reset, type Run, type Service, type ServicePatch, type Source } from "@/lib/apps-api";
 import { Field, Segmented } from "../redis/shared";
 import { btn, Confirm, danger, input, Panel, panel, primary } from "../ui";
 import { Link } from "@/components/link";
@@ -10,7 +10,7 @@ import { DuplicatePanel } from "./duplicate";
 import { EnvironmentPanel, InstancesPanel } from "./environment";
 import { resourceKey } from "@/lib/workspace-resources";
 import { useWorkspace } from "@/lib/workspace-store";
-import { CPU, MEMORY, mb, type Runner } from "./shared";
+import { CPU, MEMORY, mb, since, type Runner } from "./shared";
 import { SidecarsPanel } from "./sidecars";
 import { ChecksPanel } from "./checks";
 import { HeartbeatsPanel } from "./heartbeats";
@@ -626,7 +626,8 @@ export function SettingsTab({
                       <Field label="Dead-letter topic" hint="after 5 failed tries; none: tried until taken">{t("pushDead", "orders-dead")}</Field>
                     </>
                   )}
-                  {(service.run.push?.length ?? 0) > 1 && <p className="col-span-full text-[12px] text-subtle">And {(service.run.push?.length ?? 1) - 1} more set in roll.toml or the API, kept as they are.</p>}
+                  {(service.run.push?.length ?? 0) > 1 && <p className="col-span-full text-[12px] text-subtle">And {(service.run.push?.length ?? 1) - 1} more set through the API, kept as they are.</p>}
+                  {(service.run.push?.length ?? 0) > 0 && <PushStatus service={service.id} envs={[...new Set((service.run.push ?? []).map((p) => p.environment ?? "production"))]} />}
                 </>
               )}
               {form.type === "worker" && (
@@ -1185,5 +1186,43 @@ function RegistryLogin({ service, runner }: { service: Service; runner: Runner }
         </form>
       )}
     </div>
+  );
+}
+
+/** Each push rule as it stands on the service's owner: how far behind, delivered, failing. */
+function PushStatus({ service, envs }: { service: string; envs: string[] }) {
+  const [states, setStates] = useState<PushState[] | null>(null);
+  const key = envs.join(",");
+  useEffect(() => {
+    let live = true;
+    const load = () => Promise.all(envs.map((e) => appsApi.pushStates(service, e).catch(() => [] as PushState[]))).then((all) => live && setStates(all.flat()));
+    void load();
+    const t = setInterval(load, 15000);
+    return () => {
+      live = false;
+      clearInterval(t);
+    };
+  }, [service, key]); // eslint-disable-line react-hooks/exhaustive-deps
+  if (!states?.length) return null;
+  const now = Date.now();
+  return (
+    <ul className="col-span-full space-y-1 text-[12px]" aria-label="Pushes">
+      {states.map((s) => (
+        <li key={`${s.stream}/${s.topic}/${s.group}`} className="text-muted">
+          <span className="font-mono text-fg">{s.topic}</span> → <span className="font-mono">{s.path}</span>
+          {s.off ? (
+            <span className="text-subtle"> · off: {s.off}</span>
+          ) : (
+            <>
+              {s.lag != null && <span> · {s.lag.toLocaleString()} behind</span>}
+              <span> · {s.delivered.toLocaleString()} delivered</span>
+              {s.last_delivered_at && <span> {since(s.last_delivered_at, now)}</span>}
+              {s.dead_lettered > 0 && <span> · {s.dead_lettered.toLocaleString()} dead-lettered</span>}
+              {s.failing_since && <span className="text-danger"> · failing since {since(s.failing_since, now)}: {s.last_error}</span>}
+            </>
+          )}
+        </li>
+      ))}
+    </ul>
   );
 }

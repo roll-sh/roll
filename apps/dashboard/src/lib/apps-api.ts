@@ -63,6 +63,21 @@ export interface Push {
   dead_letter?: string;
   max_attempts?: number;
   timeout_s?: number;
+  /** Records POSTed at once, each from its own partitions (1–32, default 4). */
+  max_in_flight?: number;
+}
+
+/** A push rule as it stands (`…/environments/{env}/push`), on the service's owner since it began delivering. */
+export interface PushState extends Push {
+  /** Records its group hasn't committed, every partition. */
+  lag?: number;
+  /** Why nothing is delivered. */
+  off?: string;
+  delivered: number;
+  dead_lettered: number;
+  last_delivered_at?: number;
+  failing_since?: number;
+  last_error?: string;
 }
 
 export interface Run {
@@ -1418,6 +1433,7 @@ export const appsApi = {
   rollbackPrevious: (id: string, e: string) => call<Deployment>("POST", `${env(id, e)}/rollback`),
   /** The live image again with the current variables and settings: no build, same revision. */
   redeploy: (id: string, e: string, body: { message?: string } = {}) => call<Deployment>("POST", `${env(id, e)}/redeploy`, body),
+  pushStates: (id: string, e: string) => call<PushState[]>("GET", `${env(id, e)}/push`),
   /** A new `ROLL_CONFIG_URL` token (a leaked address): the old one reads until a deploy made after it is live. */
   rotateConfig: (id: string, e: string) => call<Environment>("POST", `${env(id, e)}/config/rotate`),
   /** `expect`: the deployment of `from` that was looked at; a 409 when `from` runs another now. */
