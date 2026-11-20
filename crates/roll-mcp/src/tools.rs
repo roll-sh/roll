@@ -127,6 +127,11 @@ impl Tool {
     }
 
     /// Whether any grant may call it (an `AnyGrant` route).
+    /// Which area of its product's toolset this tool is in (`?toolsets=apps.observe`).
+    pub fn area(&self) -> Area {
+        if self.product == "apps" { apps_area(self.method, self.path) } else { Area::Every }
+    }
+
     pub fn open(&self) -> bool {
         PREPARED.get(self.name).map_or_else(|| self.find_open(), |p| p.open)
     }
@@ -297,6 +302,46 @@ impl Tool {
         };
         Ok(Request { uri, headers, body })
     }
+}
+
+/// The areas a product's toolset splits into, as GitHub's server splits its own: a client with a
+/// tool limit (Windsurf 100, Cursor about 40) takes the area it works in. Only apps so far: alone it
+/// is 89 tools, at Windsurf's limit with the access tools.
+pub const AREAS: &[(&str, &[&str])] = &[("apps", &["observe", "deploy", "configure", "project"])];
+
+/// Where a tool sits in its product's areas.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Area {
+    /// The product has no areas, or this is a lookup every area needs (a service, an environment).
+    Every,
+    One(&'static str),
+    /// A route the table below doesn't place: a test fails until it does.
+    Unplaced,
+}
+
+/// An apps tool's area, from its route: what an agent does with it (watch, ship, set up, run the
+/// project).
+fn apps_area(method: &str, path: &str) -> Area {
+    let Some(rest) = path.strip_prefix("/v1/apps") else { return Area::Unplaced };
+    let parts: Vec<&str> = rest.split('/').filter(|s| !s.is_empty() && !s.starts_with('{')).collect();
+    let read = method == "GET";
+    let area = match parts.as_slice() {
+        // Finding a service and its environments: every area starts there.
+        [] | ["services"] | ["services", "environments"] if read => return Area::Every,
+        ["projects", "services"] if read => return Area::Every,
+        ["services"] | ["services", "environments"] | ["projects", "services"] => "configure",
+        ["services", "environments", s, ..] => match *s {
+            "analytics" | "app-metrics" | "errors" | "logs" | "metrics" | "routes" | "slo" | "traces" | "usage" | "vitals" => "observe",
+            "deploys" | "promote" | "redeploy" | "rollback" | "pending" | "diff" | "jobs" | "runs" | "restart" | "sleep" | "wake" | "instances" | "cache" => "deploy",
+            "variables" | "domains" | "forms" | "volume" => "configure",
+            _ => return Area::Unplaced,
+        },
+        ["services", "activity"] | ["events"] => "observe",
+        ["services", "links"] | ["services", "restore"] | ["import"] | ["plan"] => "configure",
+        ["projects", "drains" | "notifications" | "limits" | "status-page" | "preview-domain" | "export", ..] => "project",
+        _ => return Area::Unplaced,
+    };
+    Area::One(area)
 }
 
 const fn req(name: &'static str, desc: &'static str) -> P {
@@ -999,6 +1044,8 @@ static TOOLS: &[Tool] = &[
         bnull("routes", Ty::Arr, "[{path, service}] (at most 20): a path (a prefix ends in *) another service of the project answers, by name; clear it for none"),
         bnull("egress", Ty::Any, "{mode: roll|open, hosts?}: roll lets its code reach roll and only these hosts (at most 20, *. for subdomains), from the next deploy; clear it for open"),
         b("vitals", Ty::Bool, "Measure its pages' Web Vitals in visitors' browsers (read them with apps_vitals)"),
+        bnull("config", Ty::Obj, "Runtime config its instances read at ROLL_CONFIG_URL (edge functions: context.config) without a deploy: at most 200 keys, 64 KiB; the first one needs a deploy to give them the address. Clear it for none"),
+        bnull("freeze", Ty::Obj, "A deploy freeze: {until? (unix ms), windows?: [{from: \"fri 17:00\", to}], timezone?, reason?}, on until cleared when it has neither until nor windows. Setting or clearing one is an admin's call (clearing it would get past it)"),
         b("traces", Ty::Bool, "Send its OpenTelemetry traces and metrics to roll (OTEL_EXPORTER_OTLP_* from the next deploy)"),
         b("redeploy_on_secrets", Ty::Bool, "Redeploy (the same image, new values) when the project's roll secrets change"),
         b("pages", Ty::Obj, "{error?, maintenance?}: its own HTML for roll's error and maintenance pages (a page set to null puts roll's back)"),
@@ -1135,6 +1182,7 @@ static TOOLS: &[Tool] = &[
     t("apps_vitals", "Web Vitals", "What visitors' browsers measured on an environment's pages (with vitals on): LCP, INP, CLS, FCP and TTFB p75s rated good, needs-improvement or poor, overall and for the 20 routes with the most page loads.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/vitals", &[SERVICE, ENV, q("minutes", Ty::Int, "How far back, 60-10080 (default 1440)")]),
     t("apps_route_stats", "Route stats", "An environment's routes from its access log over the last minutes (5-60, default 60): requests, 5xx and 4xx errors, p50/p95/max latency per route (ids folded as :id), the busiest, most failing and slowest 50 of each. Start here when a service is slow or failing.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/routes", &[SERVICE, ENV, q("minutes", Ty::Int, "How far back, 5-60 (default 60)")]),
     t("apps_errors", "Errors: why a service is failing", "An environment's errors over the last minutes (5-10080, default 1440), grouped (the same error once, with its count, first and last seen and a sample), the most frequent first, at most 50. Start here when a service is failing or erroring.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/errors", &[SERVICE, ENV, q("minutes", Ty::Int, "How far back, 5-10080 (default 1440)")]),
+    t("apps_set_error_state", "Resolve, mute or reopen an error", "Triage an error group (its fingerprint from apps_errors): resolved goes quiet until it's seen again, which reopens it as a regression naming the deploy it came back in; muted stays quiet; open reopens it.", "apps", "PATCH", "/v1/apps/services/{service}/environments/{env}/errors/{fingerprint}", &[SERVICE, ENV, req("fingerprint", "The error group's fingerprint"), breq("state", Ty::Str, "open, resolved or muted")]),
     t("apps_traces", "Traces of slow requests", "An environment's recent traces (traces on), newest first, at most 100: each one's root span, service, duration, span count and whether any span failed; min_ms keeps the slow ones. apps_get_trace has one's spans.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/traces", &[SERVICE, ENV, q("minutes", Ty::Int, "How far back (default 60)"), q("min_ms", Ty::Int, "Only traces at least this slow")]),
     t("apps_get_trace", "Get a trace", "One trace by its id (from apps_traces): its spans in start order, from the last week.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/traces/{trace}", &[SERVICE, ENV, req("trace", "Trace id")]),
     t("apps_app_metrics", "App metrics", "What the app's OpenTelemetry SDK sent as metrics (traces on) over the last minutes (default 60): each series (a name and its attributes, the busiest 50) as at most 60 points.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/app-metrics", &[SERVICE, ENV, q("minutes", Ty::Int, "How far back (default 60)")]),
@@ -1170,9 +1218,9 @@ static TOOLS: &[Tool] = &[
         "apps",
         "POST",
         "/v1/apps/projects/{project}/drains",
-        &[req("project", "Workspace project"), breq("url", Ty::Str, "https URL on a public host"), b("sources", Ty::Arr, "runtime (default), http, build"), b("environments", Ty::Arr, "Only these environments"), b("services", Ty::Arr, "Only these services"), b("previews", Ty::Bool, "Previews' logs too"), b("headers", Ty::Obj, "Headers sent with each batch")],
+        &[req("project", "Workspace project"), breq("url", Ty::Str, "https URL on a public host"), b("sources", Ty::Arr, "runtime (default), http, build, audit (who changed what), traces, metrics"), b("format", Ty::Str, "ndjson (default, signed batches), otlp (an OTLP/HTTP collector's /v1/logs, traces and metrics beside it) or syslog (a syslog+tls:// URL, no headers)"), b("environments", Ty::Arr, "Only these environments"), b("services", Ty::Arr, "Only these services"), b("previews", Ty::Bool, "Previews' logs too"), b("headers", Ty::Obj, "Headers sent with each batch")],
     ).open_world(),
-    t("apps_update_drain", "Change a log drain", "Change what a drain sends or its headers: given ones replace (a new URL is a new drain).", "apps", "PATCH", "/v1/apps/projects/{project}/drains/{did}", &[req("project", "Workspace project"), req("did", "Drain id"), b("sources", Ty::Arr, "Sources"), b("environments", Ty::Arr, "Environments"), b("services", Ty::Arr, "Services"), b("previews", Ty::Bool, "Previews' logs too"), b("headers", Ty::Obj, "Headers (all of them)")]).open_world(),
+    t("apps_update_drain", "Change a log drain", "Change what a drain sends or its headers: given ones replace (a new URL is a new drain).", "apps", "PATCH", "/v1/apps/projects/{project}/drains/{did}", &[req("project", "Workspace project"), req("did", "Drain id"), b("sources", Ty::Arr, "runtime (default), http, build, audit (who changed what), traces, metrics"), b("environments", Ty::Arr, "Environments"), b("services", Ty::Arr, "Services"), b("previews", Ty::Bool, "Previews' logs too"), b("headers", Ty::Obj, "Headers (all of them)")]).open_world(),
     t("apps_delete_drain", "Delete a log drain", "Stop sending a project's logs there.", "apps", "DELETE", "/v1/apps/projects/{project}/drains/{did}", &[req("project", "Workspace project"), req("did", "Drain id")]),
     t("apps_test_drain", "Test a log drain", "Send one signed test line now (not retried): whether it arrived.", "apps", "POST", "/v1/apps/projects/{project}/drains/{did}/test", &[req("project", "Workspace project"), req("did", "Drain id")]).open_world(),
     t("apps_pending", "What the next deploy changes", "Before deploying: which variables (names, never values), run settings and project secrets the next deploy changes against what's live.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/pending", &[SERVICE, ENV]),
@@ -1318,6 +1366,16 @@ mod tests {
         assert_eq!(def("apps_deploy")["annotations"]["destructiveHint"], true);
         // Taking a status page down deletes its incidents too: a write the catalogue calls write.
         assert_eq!(def("apps_remove_status_page")["annotations"]["destructiveHint"], true);
+        // Every apps tool has an area (or is a lookup every area lists), and each area is a fraction of the whole.
+        let apps: Vec<&Tool> = all().iter().filter(|t| t.product == "apps").collect();
+        let unplaced: Vec<&str> = apps.iter().filter(|t| t.area() == Area::Unplaced).map(|t| t.name).collect();
+        assert!(unplaced.is_empty(), "apps tools with no area (add their route to apps_area): {unplaced:?}");
+        for area in AREAS[0].1 {
+            let n = apps.iter().filter(|t| matches!(t.area(), Area::Every) || t.area() == Area::One(area)).count();
+            assert!(n > 5 && n < 45, "apps.{area}: {n} tools");
+        }
+        assert_eq!(all().iter().find(|t| t.name == "apps_logs").unwrap().area(), Area::One("observe"));
+        assert_eq!(all().iter().find(|t| t.name == "apps_list_services").unwrap().area(), Area::Every);
         // Revoking a credential can't be undone: clients that ask before destructive calls ask.
         for n in ["storage_revoke_key", "streams_revoke_key", "search_revoke_key", "search_unlink_remote", "previews_delete_hook"] {
             assert_eq!(def(n)["annotations"]["destructiveHint"], true, "{n}");
