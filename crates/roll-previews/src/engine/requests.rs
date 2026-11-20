@@ -466,11 +466,11 @@ impl Engine {
     /// `page` only, or all of them; a new head needs its own. The change and its pull request
     /// say so at once.
     /// `person`: not a token's; only a person (or the operator) accepts a required one.
-    /// `behind`: the signed-in person a token acts for, checked against the author as `by` is.
+    /// `aliases`: every name the person goes by (their handle, their linked GitHub logins; the person a token acts for), each checked against the author as `by` is.
     /// `writer`: as [`Engine::accept_regressions`]' (a signed-in person's code owner must be the
     /// repo's; GitHub's Accept checks its own writers).
     #[allow(clippy::too_many_arguments)]
-    pub async fn accept_visual(&self, id: &str, by: &str, behind: Option<&str>, person: bool, writer: Option<Option<&str>>, seen: Option<&str>, page: Option<&str>) -> Result<Preview> {
+    pub async fn accept_visual(&self, id: &str, by: &str, aliases: &[String], person: bool, writer: Option<Option<&str>>, seen: Option<&str>, page: Option<&str>) -> Result<Preview> {
         let r = self.store.row(id)?;
         if r.change_id.is_none() {
             return Err(Error::BadRequest("only a change's preview has a visual review".into()));
@@ -481,7 +481,7 @@ impl Engine {
         // Not by the change's own author, as approvals aren't (and as GitHub's button isn't).
         if let Some(change) = &r.change_id
             && let Ok(Some(c)) = self.source.change(change).await
-            && [Some(by), behind].into_iter().flatten().any(|who| who.eq_ignore_ascii_case(&c.author) || who.eq_ignore_ascii_case(c.author.trim_start_matches('@')))
+            && std::iter::once(by).chain(aliases.iter().map(String::as_str)).any(|who| who.eq_ignore_ascii_case(&c.author) || who.eq_ignore_ascii_case(c.author.trim_start_matches('@')))
         {
             return Err(Error::Forbidden("the change's own author can't accept its visual change: someone else looks at it".into()));
         }
@@ -511,7 +511,7 @@ impl Engine {
     /// `writer`: a signed-in person's own roll code owner (`Some(None)`: they have none yet), who
     /// must be the repo's (roll code's write); `None` for the operator, an admin or a token, which
     /// the permissions catalog decides.
-    pub async fn accept_regressions(&self, id: &str, by: &str, behind: Option<&str>, person: bool, writer: Option<Option<&str>>, seen: Option<&str>) -> Result<Preview> {
+    pub async fn accept_regressions(&self, id: &str, by: &str, aliases: &[String], person: bool, writer: Option<Option<&str>>, seen: Option<&str>) -> Result<Preview> {
         let r = self.store.row(id)?;
         if r.change_id.is_none() {
             return Err(Error::BadRequest("only a change's preview has regressions against main".into()));
@@ -525,7 +525,7 @@ impl Engine {
         if c.author.is_empty() || c.author == "github" {
             return Err(Error::Conflict("the change's author isn't known, so nobody can be told apart from them".into()));
         }
-        if [Some(by), behind].into_iter().flatten().any(|who| who.eq_ignore_ascii_case(&c.author) || who.eq_ignore_ascii_case(c.author.trim_start_matches('@'))) {
+        if std::iter::once(by).chain(aliases.iter().map(String::as_str)).any(|who| who.eq_ignore_ascii_case(&c.author) || who.eq_ignore_ascii_case(c.author.trim_start_matches('@'))) {
             return Err(Error::Forbidden("the change's own author can't accept its regressions: someone else looks at them".into()));
         }
         // Roll code's bar for a landing decision: someone who can write to the change's repo.

@@ -764,6 +764,12 @@ pub trait Apps: Send + Sync {
 /// no. It may read a database: it's called off the async workers.
 pub trait Visitors: Send + Sync {
     fn may_open(&self, user: &str, session: &str, project: &str) -> bool;
+    /// Every name a person goes by where a change's author is written (their roll handle, and the
+    /// login of each GitHub account linked to them): how an author is told apart, whichever name
+    /// their change carries.
+    fn names_of(&self, _user: &str) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// A project's secrets, per environment (roll secrets; docs/secrets.md).

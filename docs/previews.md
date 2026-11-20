@@ -1252,7 +1252,8 @@ public) and passing once they're gone or accepted. `regressions: "required"` als
 landing in roll (a `regressions` blocker in `Code::blockers`) until then. Someone other than the
 change's author accepts them at its head (`POST …/regressions/accept`, the sheet's "Accept them";
 a required rule's by a person signed in to roll, never a token or the operator's token; the
-author is read for sure, and an unknown one refuses; a signed-in person must also be able to write
+author is read for sure, and an unknown one refuses; the person is told apart from the author by
+every name they go by, their roll handle and each linked GitHub login (roll accounts); a signed-in person must also be able to write
 to the change's repo in roll code, roll code's bar for a landing decision, as GitHub's Accept is): the acceptance names what it accepted, so
 anything new at the same head asks again, and nothing (or nothing compared yet) is a 409. The
 status passes with who did ("Accepted by ada: …"), and a new push asks again. The blocker also
@@ -2169,10 +2170,9 @@ Ranked by what a person notices first. Done so far:
 2. **References a person chooses** (after roll secrets' #407, `bind_ref`/`resolve_as`): a
    preview's own variables take `roll://` too, and the rules' references (who wrote each is kept,
    `env_refs`) move to bindings, so a writer who loses reveal stops theirs.
-3. **The author as an account, not a name**: a GitHub pull request's author is its login and a
-   roll person is their handle, so an author whose two names differ isn't recognised as the author
-   by the accepts. Compare roll accounts (the person's linked GitHub login, roll accounts' GitHub
-   sign-in) wherever an author is told apart (visual, regressions, roll code's approvals).
+3. **The author as an account, not a name, in review** (`feature/roll-previews-author-names`):
+   the accepts tell a person from the change's author by every name they go by (their roll handle
+   and each linked GitHub login). Next for it: roll code's own approvals the same way.
 4. **In review**: a protected base's change request in the keep-in-secrets button (#482).
 5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.

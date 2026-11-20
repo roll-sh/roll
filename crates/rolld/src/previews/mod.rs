@@ -53,6 +53,13 @@ pub struct AccountsVisitors {
 }
 
 impl roll_previews::ports::Visitors for AccountsVisitors {
+    fn names_of(&self, user: &str) -> Vec<String> {
+        match self.accounts.user(user) {
+            Ok(u) => std::iter::once(u.handle).chain(u.identities.into_iter().filter(|i| i.provider == "github").map(|i| i.login)).collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
     fn may_open(&self, user: &str, session: &str, project: &str) -> bool {
         if !self.accounts.session_live(user, session).unwrap_or(false) {
             return false;
