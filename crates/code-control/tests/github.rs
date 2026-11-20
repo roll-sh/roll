@@ -722,6 +722,7 @@ async fn connect_import_webhooks_and_mirror() {
             diff_url: None,
             pages: Vec::new(),
             speed_budget: None,
+            regressions: None,
             visual_review: None,
             notes: Vec::new(),
             issues: Vec::new(),

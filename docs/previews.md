@@ -1241,6 +1241,13 @@ running beside the change's, with `ROLL_PREVIEWS_COMPARE_EVERY=5`). Only spans t
 apps service's traces have no spans here, so its routes say no reason.
 `a_slower_routes_time_is_put_on_the_span_that_grew`.
 
+Regressions as a check (Lighthouse CI's budgets, Sentry's regression gates): with the project's
+`regressions: "check"` (the rules dialog's "Regressions against main"), a change's head gets the
+`roll/regressions` commit status, failing while its preview has routes slower than main's or
+errors main's doesn't have ("1 route slower, 2 new errors against main": counts only, a status is
+public) and passing once they're gone. Branch protection can require it. A `required` rule that
+keeps it from landing in roll, with an accept as the visual review has, comes next.
+
 Repeated queries (Sentry's N+1 detection): a trace whose spans run one database statement
 (`db.statement`, or the newer `db.query.text`) ten times or more says it as `repeated`
 (`{statement, count}`), the statement's shape with its literals taken out (`SELECT … WHERE id = ?`,

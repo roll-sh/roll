@@ -136,6 +136,7 @@ impl CodeSource {
                     api_unread: b.api_unread,
                     endpoints: b.endpoints.iter().map(|x| code_control::model::PreviewEndpoint { path: x.path.clone(), ms: x.ms, status: x.status, main_ms: x.main_ms, slower: x.slower() }).collect(),
                     seo_added: b.seo_added }),
+                regressions: (s.regressions == crate::settings::RegressionsRule::Check).then(|| "check".to_string()),
                 speed_budget: Some(code_control::model::PreviewSpeedBudget { load_ms: s.github.budget.load_ms, bytes: s.github.budget.bytes, lcp_ms: s.github.budget.lcp_ms, cls: s.github.budget.cls })
                     .filter(|b| b.load_ms > 0 || b.bytes > 0 || b.lcp_ms > 0 || b.cls > 0.0),
                 pages: p
