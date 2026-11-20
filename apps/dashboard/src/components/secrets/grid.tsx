@@ -66,6 +66,7 @@ export function OverviewGrid() {
 
       {grid.data && rows.length === 0 ? (
         <Teach
+          login
           title={path === "/" ? `No secrets in ${project.name} yet` : `Nothing in ${path} yet`}
           cli={[`roll secrets set -p ${project.name} -e development DATABASE_URL=…`, `roll secrets import -p ${project.name} -e development .env`, `roll run -p ${project.name} -e development -- <cmd>`]}
         >

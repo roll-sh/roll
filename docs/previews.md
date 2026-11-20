@@ -412,9 +412,14 @@ behind the `Apps` trait:
   its values into code whoever pushes a branch controls, so a person choosing that reach must be
   able to reveal it: saving a new or changed reference needs its writer's reveal on that
   environment's folder in roll secrets (roll secrets' own answer for the request's caller, as roll
-  apps asks it; 403 otherwise), and who wrote each is kept (`env_refs`) for roll secrets'
-  maker-checked binding (`bind_ref`, its #407), which will stop a reference whose writer lost
-  access. A reference to the base needs none of this, but changing the base needs its writer's
+  apps asks it; 403 otherwise), and who wrote each is kept (`env_refs`). At every converge each
+  preview gets such a reference only while its writer still may choose it for that preview: roll
+  secrets reads it as them (`Secrets::digest_as`, its #407, named for the preview's project and as
+  its repo, untrusted for a fork's code; no value, not audited), so a writer who can no longer
+  sign in, lost the project or its reveal, a revoked token, a key made sensitive since or a
+  protected environment for an untrusted preview leaves it out, said once in the preview's
+  activity ("references left out (who chose them can't now): K: …"). Saving the rules again as
+  someone who may brings it back. A reference to the base needs none of this, but changing the base needs its writer's
   reveal on the new one (every preview's code then reads it). The rules are written only as they
   were checked: another request's change in between is a 409.
   Moving the base checks the references that named the old one as new. A value that reads as a
