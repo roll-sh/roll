@@ -2076,7 +2076,7 @@ mod tests {
         let (operators, adas) = (ws.create("", "shop", "", None).unwrap().id, ws.create("usr_ada", "mine", "", None).unwrap().id);
         let db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("secrets.db")), "secrets").unwrap();
         let clouds = roll_secrets::clouds::Clouds { issuer: "https://roll.example/v1/secrets/oidc".into(), tokens: Arc::new(super::clouds::RollClouds::new()) };
-        let opts = roll_secrets::Options { keyring: Ok(roll_secrets::Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None, kms: None, sts: None, outside: None, github: None, clouds: Some(clouds), workloads: None };
+        let opts = roll_secrets::Options { keyring: Ok(roll_secrets::Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None, kms: None, sts: None, outside: None, github: None, clouds: Some(clouds), workloads: None, directory: None, gateways: None };
         let secrets = Arc::new(roll_secrets::Secrets::new(db, ws.clone(), opts).unwrap());
         let apps = super::ForApps::default();
         apps.set(secrets.clone(), ws);
