@@ -53,7 +53,19 @@ export function DrainsPanel({ project, projectName, runner }: { project: string;
   const [editing, setEditing] = useState<LogDrain | null>(null);
   const fmt = FORMATS.find((f) => f.value === (editing?.format ?? format)) ?? FORMATS[0];
   const { copied, copy } = useCopy();
-  const load = useCallback(() => appsApi.drains(project).then(setDrains, () => setDrains([])), [project]);
+  // A read that failed says so (an empty list would read as "none set").
+  const [failed, setFailed] = useState<string | null>(null);
+  const load = useCallback(
+    () =>
+      appsApi.drains(project).then(
+        (d) => {
+          setDrains(d);
+          setFailed(null);
+        },
+        (e: unknown) => setFailed(e instanceof Error ? e.message : String(e)),
+      ),
+    [project],
+  );
   useEffect(() => {
     void load();
     appsApi.services(project).then((s) => setAll(s.map((x) => ({ id: x.id, name: x.name }))), () => setAll([]));
@@ -95,6 +107,7 @@ export function DrainsPanel({ project, projectName, runner }: { project: string;
           a vendor's <span className="font-mono">/v1/logs</span>, or syslog over TLS (Papertrail, a syslog server), with the drain's own headers (a vendor's API key) where it's HTTP. Best effort: a
           batch that can't be delivered after three tries is dropped.
         </p>
+        {failed && <p className="text-[12.5px] text-danger">Its drains couldn't be read: {failed}</p>}
         {drains && drains.length > 0 && (
           <ul className="divide-y divide-line rounded-lg border border-line">
             {drains.map((d) => (
