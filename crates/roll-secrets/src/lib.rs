@@ -522,6 +522,13 @@ impl Secrets {
         // An audit sink's format and its SIEM's token, sealed (sinks.rs): absent is roll's own.
         db.add_column("audit_sinks", "format", "TEXT")?;
         db.add_column("audit_sinks", "token", "BLOB")?;
+        // Whether a sink gets the rows that say which keys are decoys: its maker's
+        // `Caller::sees_decoys` (sinks.rs). Older sinks: when a session or the operator made them.
+        db.add_column("audit_sinks", "decoys", "INTEGER")?;
+        db.migrate("secrets-sinks-decoys", |c| {
+            c.execute("UPDATE audit_sinks SET decoys = CASE WHEN created_by = 'operator' OR substr(created_by, 1, 4) = 'usr_' THEN 1 ELSE 0 END WHERE decoys IS NULL", ())?;
+            Ok(())
+        })?;
         // How a role trusts roll (aws.rs): absent is the ExternalId, as before there were two.
         db.add_column("aws_roles", "trust", "TEXT")?;
         db.ensure_schema(issuer::SCHEMA)?;

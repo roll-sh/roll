@@ -1,6 +1,7 @@
 //! Decoy keys (docs/secrets.md, "Decoys"): a key whose value is a credential made to be found, as
 //! GitGuardian's honeytokens are. It's stored, read, synced and exported like any other key; only
-//! the project's admins see that it's a decoy. Any use of it raises `decoy_used` on the project.
+//! the project's admins, signed in or the operator, see that it's a decoy ([`Caller::sees_decoys`]):
+//! a token's answers about it are a normal key's, admin or not. Any use of it raises `decoy_used` on the project.
 //!
 //! An `rlt` decoy is a roll-access decoy token ([`crate::Workloads::mint_decoy`]): roll-access
 //! answers its use as it answers an unknown token, tells its owner and the admins, and tells roll
@@ -48,8 +49,9 @@ CREATE INDEX IF NOT EXISTS decoys_ended ON decoys (revoked_at, ended_at);
 /// One alert an hour per decoy (the audit row and the notice); every use is counted.
 const ALERT_EVERY_MS: i64 = 3_600_000;
 
-/// The audit actions only a project's admins see: they say which keys are decoys.
-pub(crate) const ADMIN_ACTIONS: [&str; 2] = ["secrets.decoy", "secrets.alert.decoy_used"];
+/// The audit actions only [`Secrets::sees_decoys`] callers see (and only sinks they made get): they
+/// say which keys are decoys.
+pub(crate) const DECOY_ACTIONS: [&str; 2] = ["secrets.decoy", "secrets.alert.decoy_used"];
 
 /// `POST …/environments/{env}/decoys`.
 #[derive(Debug, Deserialize)]
@@ -62,7 +64,7 @@ pub struct NewDecoy {
     pub path: Option<String>,
 }
 
-/// That a key is a decoy, on [`Secret::decoy`] for the project's admins only.
+/// That a key is a decoy, on [`Secret::decoy`] for [`Secrets::sees_decoys`] callers only.
 #[derive(Clone, Debug, Serialize, PartialEq)]
 pub struct Decoy {
     pub kind: String,
@@ -85,17 +87,22 @@ pub(crate) struct UsedDecoy {
 }
 
 impl Secrets {
-    /// Whether `caller` sees which keys are decoys: the project's admins.
+    /// Whether `caller` sees which keys are decoys: the project's admins, signed in or the operator
+    /// ([`Caller::sees_decoys`]), never a token.
     pub(crate) fn sees_decoys(&self, project: &str, caller: &Caller) -> bool {
-        caller.allows(Action::Admin, &Scope::whole(project))
+        caller.sees_decoys() && caller.allows(Action::Admin, &Scope::whole(project))
     }
 
     /// Plant a decoy key: a new key in `env` whose value is a decoy credential. It's an ordinary
     /// change (as a `PUT` of the key makes), so the key reads like any other to everyone else. In
     /// a protected environment it lands without a change request: it changes no value anyone
-    /// has, and only an admin, who could lift the protection, may plant one.
+    /// has, and only an admin, who could lift the protection, may plant one. Signed in or the
+    /// operator: a token that planted one could tell it from the rest by elimination.
     pub fn add_decoy(&self, project: &str, env: &str, n: NewDecoy, caller: &Caller) -> Result<Secret> {
         caller.need(Action::Admin, &Scope::whole(project))?;
+        if !caller.sees_decoys() {
+            return Err(Error::Forbidden("decoys are planted from a signed-in session (the dashboard) or with the operator token, never a roll token".into()));
+        }
         let path = names::path(n.path.as_deref().unwrap_or("/"))?;
         names::key(&n.key)?;
         match n.kind.as_str() {

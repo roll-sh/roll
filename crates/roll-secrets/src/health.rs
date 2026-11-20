@@ -19,7 +19,7 @@ const READS_MAX: i64 = 100_000;
 #[serde(rename_all = "snake_case")]
 pub enum Issue {
     /// A decoy key's credential was used (docs/secrets.md, "Decoys"): someone found it where it
-    /// was planted. Only the project's admins see it.
+    /// was planted. Only the project's admins see it, signed in or the operator, never a token.
     DecoyUsed,
     /// Its value stopped working outside roll.
     Expired,
