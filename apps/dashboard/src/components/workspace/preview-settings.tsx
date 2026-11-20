@@ -113,7 +113,13 @@ function Form({
     setKeeping(i);
     setKept(null);
     try {
-      await secretsApi(projectId).set(base, key, { value, message: "kept from the preview rules" });
+      const w = await secretsApi(projectId).set(base, key, { value, message: "kept from the preview rules" });
+      // A protected base takes it as a change request: until it's approved the key isn't there, so
+      // the rule keeps its value (a reference now would resolve to nothing).
+      if (!w.secret) {
+        setKept(`${base} is protected: a change request for ${key} waits for approval in roll secrets. Use roll://${base}/${key} here once it's approved.`);
+        return;
+      }
       setEnv((rows) => rows.map((x, j) => (j === i ? [x[0], `roll://${base}/${key}`] : x)));
       setKept(`${key} is in roll secrets (${base}); Save to use it from there.`);
     } catch (e) {
