@@ -5145,7 +5145,8 @@ is still level with or ahead of the category. The gaps are at the new features' 
    Entra's `groups` can't be matched. Doppler and Vault both take JSON pointers and lists.
 7. **Big changes on Postgres** (performance, M): 9,900 keys in one change took 11.7 s against 0.5 s on
    SQLite, about one round trip per row. Batch the rows in `write.rs` and add the case to `bench`.
-   Building: `perf/secrets-batch-writes` (measured first; lands only on a measured win).
+   #511 (CI green): rows read up front and written in one pipeline of 128-row statements on
+   Postgres; 9,900 new keys 11 s → 1.1 s (49,529 → 236 statements), SQLite unchanged.
 8. **Test gaps** (S):
    - demotion, not removal, stopping syncs, #407 bindings, placeholders and schedules;
    - #357's "one node rotates" with two nodes (building: `test/secrets-issuer-two-nodes`, on #357);
