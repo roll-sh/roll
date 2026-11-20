@@ -447,6 +447,9 @@ GET   /v1/code/owners/{owner}/usage?month=YYYY-MM → {owner, month,
   `@roll resume`, `@roll resolve`, `@roll explain`, `@roll fix`, `@roll don't flag …`, any other
   question) run for writers only; roll answers in the thread. `explain`, `fix` and questions are
   jobs (`kind: "command"`) metered as `chat`.
+- **Other products' questions** run on the same provider choice, cap and prices as a chat reply
+  (`Code::ask_model`): roll apps' "Why did it fail?" asks the model of the owner of the service's
+  repo and is metered as `kind: "explain"` (counted in `totals.chats`).
 - **On GitHub** (connected repos), the same commands work in a pull request's conversation and in
   inline review comments, for people GitHub reports as `admin`, `maintain` or `write` on the repo
   (anyone it can't vouch for is a reader and is ignored). Conversation commands are answered with a

@@ -89,11 +89,13 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/deploys/{{dep}}/commits"), get(deploy_commits))
         .route(&format!("{env}/deploys/{{dep}}/vulnerabilities"), get(deploy_vulnerabilities))
         .route(&format!("{env}/deploys/{{dep}}/sbom"), get(deploy_sbom))
+        .route(&format!("{env}/deploys/{{dep}}/explain"), post(explain_deploy))
         .route(&format!("{env}/deploys/{{dep}}/rollback"), post(rollback))
         .route(&format!("{env}/deploys/{{dep}}/rollout"), post(rollout_action))
         .route(&format!("{env}/rollback"), post(rollback_previous))
         .route(&format!("{env}/deploys/{{dep}}/cancel"), post(cancel))
         .route(&format!("{env}/redeploy"), post(redeploy))
+        .route(&format!("{env}/config/rotate"), post(rotate_config))
         .route(&format!("{env}/promote"), post(promote))
         .route(&format!("{env}/hook"), post(put_hook).delete(delete_hook))
         .route(&format!("{env}/volume/backups"), get(backups).post(backup_volume))
@@ -711,6 +713,20 @@ async fn get_env(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {
     ok(apps.environment(&id, &env).await?)
 }
 
+/// A new `ROLL_CONFIG_URL` token; the old one reads until a deploy made after it is live.
+async fn rotate_config(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions) -> R {
+    apps.environment(&id, &env).await?;
+    // One at a time: a second would drop the address running instances still read with.
+    let (sid, e) = (id.clone(), env.clone());
+    if apps.db(move |s| s.runtime_config_tokens(&sid, &e)).await?.is_some_and(|(_, before)| before.is_some()) {
+        return Err(Error::Conflict("the last rotation isn't finished: redeploy, so nothing runs with the address before it, then rotate again".into()));
+    }
+    let (sid, e) = (id.clone(), env.clone());
+    apps.db(move |s| s.rotate_runtime_config(&sid, &e)).await?.ok_or_else(|| Error::NotFound(format!("{env} has no runtime config")))?;
+    apps.audit("config.rotated", &id, &env, actor(&ext), json!({})).await;
+    ok(apps.environment(&id, &env).await?)
+}
+
 async fn put_env(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, b: Bytes) -> R {
     let put = body(&b)?;
     let e = apps.put_environment(&id, &env, put.clone()).await?;
@@ -785,6 +801,16 @@ async fn deploy_commits(State(apps): S, Path((id, env, dep)): Path<(String, Stri
 #[derive(Deserialize)]
 struct VulnQuery {
     severity: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ExplainQuery {
+    again: Option<String>,
+}
+
+/// A failed deployment explained by the repo owner's model (kept; `?again=1` asks anew).
+async fn explain_deploy(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>, Query(q): Query<ExplainQuery>) -> R {
+    ok(apps.explain(&id, &env, &dep, truthy(&q.again)).await?)
 }
 
 async fn deploy_sbom(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>) -> R {
@@ -928,7 +954,10 @@ async fn stream_log(apps: &Arc<Apps>, key: String, q: LogQuery, done: Option<tok
     if let Some(k) = &keep {
         first.retain(|l| k(l));
     }
-    let stream = async_stream(first, move |tx| async move {
+    // A log that ends (a build, a job, a cron run) says so last, so a follower stops instead of
+    // taking the close for a drop and reading it all again.
+    let ends = done.is_some();
+    let stream = async_stream(first, ends, move |tx| async move {
         let mut done = done;
         loop {
             let next = async {
@@ -959,8 +988,8 @@ async fn stream_log(apps: &Arc<Apps>, key: String, q: LogQuery, done: Option<tok
     Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))).into_response())
 }
 
-/// An SSE stream of `first`, then whatever `more` sends.
-fn async_stream<F, Fut>(first: Vec<LogLine>, more: F) -> impl futures::Stream<Item = Result<Event, Infallible>>
+/// An SSE stream of `first`, then whatever `more` sends, then (`end`) an `end` event.
+fn async_stream<F, Fut>(first: Vec<LogLine>, end: bool, more: F) -> impl futures::Stream<Item = Result<Event, Infallible>>
 where
     F: FnOnce(tokio::sync::mpsc::Sender<LogLine>) -> Fut + Send + 'static,
     Fut: std::future::Future<Output = ()> + Send + 'static,
@@ -974,9 +1003,12 @@ where
         }
         more(tx).await;
     });
-    futures::stream::unfold(rx, |mut rx| async move {
-        let l = rx.recv().await?;
-        Some((Ok(Event::default().data(serde_json::to_string(&l).expect("JSON"))), rx))
+    futures::stream::unfold((rx, end), |(mut rx, end)| async move {
+        match rx.recv().await {
+            Some(l) => Some((Ok(Event::default().data(serde_json::to_string(&l).expect("JSON"))), (rx, end))),
+            None if end => Some((Ok(Event::default().event("end").data("end")), (rx, false))),
+            None => None,
+        }
     })
 }
 
