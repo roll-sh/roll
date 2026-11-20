@@ -128,8 +128,9 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
   `roll.toml` services only (roll apps runs its own), and old code on migrated data can break.
   They're on the sheet, `roll preview show`, the change and the pull request comment.
   A link to one that's no longer kept says so: its host answers 410 with a page naming the
-  service and the push and linking the service's latest (on roll's preview domain; the latest
-  30 a preview evicted, gone with the preview), not a 404 that reads as a broken preview.
+  service and the push and linking the service's latest (on roll's preview domain and on a
+  project's own, there only for that project's previews; the latest 30 a preview evicted, gone
+  with the preview), not a 404 that reads as a broken preview.
 - **Warm after a push**: once a new head is deployed, the change's own services are woken (after
   the pass, a few at a time), so the first visit, usually the pull request comment's link,
   doesn't wait for a cold start; they sleep again after `sleep_after` unused. Not a preview
