@@ -461,12 +461,21 @@ pub type HostTarget = (String, String, Option<String>, Option<u16>);
 /// Another service's values a reference may read, and which of them are sealed.
 type ServiceValues = (HashMap<String, String>, BTreeSet<String>);
 
+/// An environment's snippets joined for the proxy: before `</head>`, before `</body>`.
+fn snippets_of(all: &[model::Snippet]) -> Option<(bytes::Bytes, bytes::Bytes)> {
+    let join = |at: model::SnippetAt| bytes::Bytes::from(all.iter().filter(|s| s.at == at).map(|s| s.html.as_str()).collect::<String>());
+    (!all.is_empty()).then(|| (join(model::SnippetAt::Head), join(model::SnippetAt::BodyEnd)))
+}
+
 pub struct ResolvedVars {
     pub vars: Vec<(String, String)>,
     pub sources: HashMap<String, &'static str>,
     /// References that named nothing ([`refs`]), as `VAR: service.NAME`: empty, and the deploy
     /// says so.
     pub unresolved: Vec<String>,
+    /// `roll://` references that didn't resolve, as `VAR (roll://…): why`: left out, and a deploy
+    /// fails on them ([`ResolvedVars::check_refs`]); a listing just shows them unresolved.
+    pub refused: Vec<String>,
     /// Never shown again: the environment's own sealed variables, and references that read one.
     pub sealed: BTreeSet<String>,
     /// Those roll secrets gave (a secret is one whatever its name or tag), and of them those it
@@ -474,6 +483,16 @@ pub struct ResolvedVars {
     /// which logs may show but for a URL's password.
     pub from_secrets: BTreeSet<String>,
     pub plain_secrets: BTreeSet<String>,
+}
+
+impl ResolvedVars {
+    /// A deploy's check: every `roll://` reference resolved.
+    pub fn check_refs(&self) -> Result<()> {
+        match self.refused.first() {
+            Some(r) => Err(Error::Conflict(format!("{r} didn't resolve{}", if self.refused.len() > 1 { format!(" (and {} more)", self.refused.len() - 1) } else { String::new() }))),
+            None => Ok(()),
+        }
+    }
 }
 
 impl ResolvedVars {
@@ -1584,6 +1603,7 @@ impl Apps {
             heartbeats: r.heartbeats.clone(),
             split: r.split.clone(),
             mirror: r.mirror.clone(),
+            snippets: r.snippets.clone(),
             pause_schedule: r.pause_schedule.clone(),
             frozen: r.freeze.as_ref().is_some_and(|f| f.on(code_sql::now_ms())),
             freeze: r.freeze.clone(),
@@ -1705,7 +1725,7 @@ impl Apps {
     pub async fn put_environment(self: &Arc<Self>, service: &str, env: &str, body: Value) -> Result<Environment> {
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "checks", "heartbeats", "split", "mirror", "freeze", "pause_schedule", "paused", "held", "hostname", "traces", "egress", "vitals", "report", "preview_host"].contains(&k.as_str()) {
+            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "checks", "heartbeats", "split", "mirror", "snippets", "freeze", "pause_schedule", "paused", "held", "hostname", "traces", "egress", "vitals", "report", "preview_host"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
@@ -1839,6 +1859,16 @@ impl Apps {
                 let p: crate::freeze::PauseSchedule = serde_json::from_value(v.clone()).map_err(|e| Error::BadRequest(format!("pause_schedule: {e}")))?;
                 p.check()?;
                 Some(Some(p))
+            }
+        };
+        // Snippets: HTML of its own in every page (null or []: none).
+        let snippets = match o.get("snippets") {
+            None => None,
+            Some(Value::Null) => Some(Vec::new()),
+            Some(v) => {
+                let all: Vec<crate::model::Snippet> = serde_json::from_value(v.clone()).map_err(|e| Error::BadRequest(format!("snippets: {e}")))?;
+                crate::model::Snippet::check(&all)?;
+                Some(all)
             }
         };
         // Traffic mirroring: another environment of this service, as a split names one.
@@ -2144,6 +2174,12 @@ impl Apps {
         if let Some(p) = pause_schedule {
             let (sid, e) = (service.to_string(), env.to_string());
             self.db(move |s| s.set_pause_schedule(&sid, &e, p.as_ref())).await?;
+            self.changed(service);
+        }
+        if let Some(all) = snippets {
+            let (sid, e) = (service.to_string(), env.to_string());
+            self.db(move |s| s.set_snippets(&sid, &e, &all)).await?;
+            self.live(service, env).forget_gate();
             self.changed(service);
         }
         if let Some(m) = mirror {
@@ -2550,12 +2586,41 @@ impl Apps {
         for (k, v) in own {
             vars.insert(k, (v, "service"));
         }
+        // `roll://` references to its own environment's secrets, read as the service (audited
+        // there), sealed: a value from roll secrets is shown only as they reveal it. One that
+        // doesn't resolve fails the deploy; a preview's (copied from its base, naming the base's
+        // environment) is left out, as an untrusted preview's secrets are.
+        let mut refused = Vec::new();
+        let refs: Vec<(String, String)> = vars.iter().filter(|(_, (v, s))| *s == "service" && crate::model::secret_ref_env(v).is_some()).map(|(k, (v, _))| (k.clone(), v.clone())).collect();
+        for (k, r) in refs {
+            let read = match crate::model::secret_ref_env(&r) {
+                Some(Ok(e)) if e == env.name => self.deps.secrets.resolve_ref(&svc.project, &env.name, &svc.id, &r).await.map_err(|e| e.to_string()),
+                Some(Ok(e)) => Err(format!("it names the {e} environment's secret, not {}'s", env.name)),
+                Some(Err(e)) => Err(e.to_string()),
+                None => continue,
+            };
+            match read {
+                Ok(v) => {
+                    vars.insert(k.clone(), (v, "secret"));
+                    from_secrets.insert(k.clone());
+                    sealed.insert(k);
+                }
+                Err(why) if env.ephemeral => {
+                    tracing::info!(service = %svc.id, env = %env.name, variable = %k, "apps: a preview's roll:// reference is left out: {why}");
+                    vars.remove(&k);
+                }
+                Err(why) => {
+                    vars.remove(&k);
+                    refused.push(format!("{k} ({r}): {why}"));
+                }
+            }
+        }
         // A sensitive secret is as a sealed variable (unless the service's own takes its name).
         sealed.extend(sensitive.into_iter().filter(|k| vars.get(k).is_some_and(|(_, s)| *s == "secret")));
         // Reference variables, one level deep: against what resolved above, and other services'.
         let unresolved = self.fill_references(svc, &env.name, &mut vars, &mut sealed).await;
         let sources = vars.iter().map(|(k, (_, s))| (k.clone(), *s)).collect();
-        Ok(ResolvedVars { vars: vars.into_iter().map(|(k, (v, _))| (k, v)).collect(), sources, unresolved, sealed, from_secrets, plain_secrets })
+        Ok(ResolvedVars { vars: vars.into_iter().map(|(k, (v, _))| (k, v)).collect(), sources, unresolved, refused, sealed, from_secrets, plain_secrets })
     }
 
     /// Fill the `${{ … }}` in the service's own variables ([`refs`]); what named nothing. A
@@ -2730,6 +2795,15 @@ impl Apps {
                 let v = v.as_str().ok_or_else(|| Error::BadRequest(format!("{k}'s value is a string")))?;
                 if v.len() > 64 << 10 || v.contains('\0') {
                     return Err(Error::BadRequest(format!("{k}'s value is at most 64 KiB, without NUL")));
+                }
+                // A roll secrets reference: its own environment's (another's needs whoever set
+                // it bound to it, roll secrets' maker references: not here yet).
+                match crate::model::secret_ref_env(v) {
+                    Some(Ok(e)) if e != env => {
+                        return Err(Error::BadRequest(format!("{k}: {v} is the {e} environment's secret; a variable's roll:// reference names its own environment (roll://{env}/…)")));
+                    }
+                    Some(Err(e)) => return Err(Error::BadRequest(format!("{k}: {e}"))),
+                    _ => {}
                 }
                 set.insert(k.clone(), v.to_string());
             }
@@ -3404,7 +3478,7 @@ impl Apps {
             }
             false => None,
         };
-        let g = Arc::new(live::Gate { maintenance: row.maintenance, allow, rate: row.rate_limit, firewall: row.firewall, pages: row.pages, preview: row.ephemeral, headers: row.headers, routes: row.routes, traces, vitals: row.vitals, challenge_key, split: row.split, mirror: row.mirror });
+        let g = Arc::new(live::Gate { maintenance: row.maintenance, allow, rate: row.rate_limit, firewall: row.firewall, pages: row.pages, preview: row.ephemeral, headers: row.headers, routes: row.routes, traces, vitals: row.vitals, challenge_key, split: row.split, mirror: row.mirror, snippets: snippets_of(&row.snippets) });
         live.set_gate(g.clone(), seen);
         Ok(g)
     }
