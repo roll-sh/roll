@@ -440,7 +440,7 @@ pub(crate) fn shards_can_match(ctx: &Ctx, st: &crate::meta::ClusterState, filter
     let table = engine.table();
     engine.shards.iter().any(|s| {
         let searcher = s.shard.searcher();
-        let qctx = crate::search::query::QueryCtx::new(ctx.cluster, st, idx, &table, &searcher, ctx.now_ms);
+        let qctx = crate::search::query::QueryCtx::new(ctx.cluster, st, idx, &table, &searcher, ctx.now_ms, crate::search::query::Reader::of(crate::xpack::security::dls::ReadSecurity::of(ctx)));
         match qctx.to_filter(&q).and_then(|eq| searcher.rewrite(&eq).map_err(crate::engine::convert::index_error)) {
             Ok(r) => !r.as_any().is::<search_index::query::MatchNoneQuery>(),
             Err(_) => true,

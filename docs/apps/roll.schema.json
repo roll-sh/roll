@@ -198,6 +198,12 @@
           "type": "boolean",
           "description": "Build again (same revision, no cache) when a base image moves."
         },
+        "latency_target_ms": {
+          "type": "integer",
+          "minimum": 50,
+          "maximum": 60000,
+          "description": "A web service scaled on its answers' p95 too: over this many ms for a window, another instance."
+        },
         "queue_s": {
           "type": "integer",
           "minimum": 1,

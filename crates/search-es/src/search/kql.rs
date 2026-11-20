@@ -65,7 +65,12 @@ fn field_query(kind: &str, field: &str, body: Value) -> Value {
 }
 
 impl Rewriter<'_, '_> {
+    /// Recurses once per group, `NOT` or nested query (bounded by the parser's depth).
     fn node(&self, n: &Node, scope: &str) -> EsResult<Value> {
+        crate::stack::maybe_grow(|| self.node_at(n, scope))
+    }
+
+    fn node_at(&self, n: &Node, scope: &str) -> EsResult<Value> {
         Ok(match n {
             Node::And(xs) => bool_of("must", xs.iter().map(|x| self.node(x, scope)).collect::<EsResult<_>>()?),
             Node::Or(xs) => bool_of("should", xs.iter().map(|x| self.node(x, scope)).collect::<EsResult<_>>()?),
@@ -128,6 +133,10 @@ impl Rewriter<'_, '_> {
 
     /// A field query's value on one field.
     fn value(&self, field: &str, kind: Kind, v: &ValueExpr) -> Value {
+        crate::stack::maybe_grow(|| self.value_at(field, kind, v))
+    }
+
+    fn value_at(&self, field: &str, kind: Kind, v: &ValueExpr) -> Value {
         match v {
             ValueExpr::Leaf(t) => self.leaf(field, kind, t),
             ValueExpr::And(xs) => bool_of("must", xs.iter().map(|x| self.value(field, kind, x)).collect()),

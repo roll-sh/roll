@@ -11,14 +11,49 @@ use serde_json::{Value, json};
 /// secrets: every route 404s) gives its previews no environment and nothing to resolve.
 pub struct Secrets(pub Api);
 
+/// Who may name an environment's keys in previews' rules: roll secrets' own answer for the
+/// request's caller (as roll apps asks it).
+pub struct SecretsReveal(pub Arc<roll_secrets::Secrets>);
 
-fn set_ops(vars: &[(String, String)]) -> Value {
-    json!(vars.iter().map(|(k, v)| json!({ "op": "set", "key": k, "value": v })).collect::<Vec<_>>())
+impl roll_previews::ports::Reveal for SecretsReveal {
+    fn may_reveal(&self, who: &roll_previews::ports::Asker<'_>, project: &str, env: &str, folder: &str) -> bool {
+        match self.0.caller_of(who.operator, who.user, who.grant) {
+            Ok(caller) => caller.allows(roll_secrets::Action::Reveal, &roll_secrets::Scope::at(project, env, folder)),
+            Err(_) => false,
+        }
+    }
+
+    fn place(&self, reference: &str) -> Result<(String, String), String> {
+        match roll_secrets::Reference::parse(reference) {
+            Ok(Some(r)) if r.project.is_none() && !reference.starts_with(char::is_whitespace) => Ok((r.env, r.path)),
+            Ok(Some(_)) => Err("a preview reads its own project's environments: roll://ENV/KEY".into()),
+            Ok(None) => Err("not a roll:// reference".into()),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+}
+
+
+/// The environment's own keys. Every value in `vars` is plain text, kept as it is (a `${` in it
+/// escaped: never a reference, whatever it looks like); each of `refs` (the project's rules'
+/// `roll://ENV[/folder]/KEY`, checked when saved) becomes roll secrets' own reference
+/// (`${ENV.folder.KEY}`), read with the preview's environment: untrusted, so never a protected
+/// environment or a sensitive key, and a branched parent's link is followed as any.
+fn set_ops(vars: &[(String, String)], refs: &[(String, String)]) -> anyhow::Result<Value> {
+    let mut ops: Vec<Value> = vars.iter().map(|(k, v)| json!({ "op": "set", "key": k, "value": v.replace("${", "$${") })).collect();
+    for (k, v) in refs {
+        let value = match roll_secrets::Reference::parse(v).map_err(|e| anyhow::anyhow!("{k}: {e}"))? {
+            Some(r) if r.project.is_none() => format!("${{{}}}", std::iter::once(r.env.as_str()).chain(r.path.split('/').filter(|p| !p.is_empty())).chain([r.key.as_str()]).collect::<Vec<_>>().join(".")),
+            _ => anyhow::bail!("{k}: a preview reads its own project's environments (roll://ENV/KEY)"),
+        };
+        ops.push(json!({ "op": "set", "key": k, "value": value }));
+    }
+    Ok(json!(ops))
 }
 
 #[async_trait]
 impl roll_previews::ports::Secrets for Secrets {
-    async fn ensure(&self, project: &str, env: &str, base: &str, vars: &[(String, String)], trusted: bool, expires_at: i64, branches: &[(roll_previews::Kind, String)]) -> anyhow::Result<()> {
+    async fn ensure(&self, project: &str, env: &str, base: &str, vars: &[(String, String)], refs: &[(String, String)], trusted: bool, expires_at: i64, branches: &[(roll_previews::Kind, String)]) -> anyhow::Result<()> {
         // One idempotent call: made if missing, else its labels and expiry brought to these and
         // its own keys to exactly `vars` (`replace`: overrides the rules dropped go). An unchanged
         // repeat records nothing. A different base or trust can't change in place (409
@@ -28,7 +63,7 @@ impl roll_previews::ports::Secrets for Secrets {
         let ttl_minutes = ((expires_at - now) / 60_000).max(15);
         // What the preview branched: a link to one of those parents comes back `followed` (the
         // engine sets it from the branch), never resolved against the parent.
-        let mut body = json!({ "base": base, "labels": { "preview": env }, "ttl_minutes": ttl_minutes, "trusted": trusted, "secrets": set_ops(vars), "replace": true,
+        let mut body = json!({ "base": base, "labels": { "preview": env }, "ttl_minutes": ttl_minutes, "trusted": trusted, "secrets": set_ops(vars, refs)?, "replace": true,
             "branches": branches.iter().map(|(k, p)| json!({ "kind": k.as_str(), "parent": p })).collect::<Vec<_>>() });
         // A roll secrets from before `branches` refuses it (unknown fields are a 400): sent again
         // without only when the preview branched nothing. With branches, failing is the safe
@@ -153,5 +188,37 @@ impl roll_previews::ports::Secrets for Secrets {
 
     async fn delete(&self, project: &str, env: &str) -> anyhow::Result<()> {
         self.0.delete(&format!("/v1/secrets/projects/{}/environments/{}?confirm={}", seg(project), seg(env), seg(env))).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// A project rule's `roll://ENV/folder/KEY` goes to roll secrets as its own reference, a
+    /// plain value's `${` is escaped (never a reference by accident), and another project's is refused.
+    #[test]
+    fn a_roll_reference_becomes_roll_secrets_own_and_a_plain_value_stays_plain() {
+        let kv = |v: &str| [("K".to_string(), v.to_string())];
+        let value = |v: &str| super::set_ops(&kv(v), &[]).map(|ops| ops[0]["value"].as_str().unwrap_or_default().to_string());
+        let reference = |v: &str| super::set_ops(&[], &kv(v)).map(|ops| ops[0]["value"].as_str().unwrap_or_default().to_string());
+        assert_eq!(reference("roll://staging/payments/STRIPE_KEY").unwrap(), "${staging.payments.STRIPE_KEY}");
+        assert_eq!(reference("roll://staging/STRIPE_KEY").unwrap(), "${staging.STRIPE_KEY}");
+        assert!(reference("roll://other@staging/STRIPE_KEY").is_err());
+        // Anything else is text, a reference's look-alike too.
+        assert_eq!(value("hello ${USER}").unwrap(), "hello $${USER}");
+        assert_eq!(value(" roll://qa/KEY").unwrap(), " roll://qa/KEY");
+        assert_eq!(value("roll://qa/KEY").unwrap(), "roll://qa/KEY");
+        // A plain value reads back from roll secrets as written: `${x}`, and a `$${` escaped once.
+        for plain in ["hello ${USER}", "a $${x} b", "$${", "cost: $5 ${staging.KEY}"] {
+            let kept = value(plain).unwrap();
+            let read: String = roll_secrets::refs::parse(&kept)
+                .into_iter()
+                .map(|p| match p {
+                    roll_secrets::refs::Part::Text(t) => t.to_string(),
+                    roll_secrets::refs::Part::Escaped => "${".into(),
+                    roll_secrets::refs::Part::Ref(_, raw) => panic!("{plain:?} read as a reference: {raw}"),
+                })
+                .collect();
+            assert_eq!(read, plain);
+        }
     }
 }

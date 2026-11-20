@@ -27,7 +27,7 @@ use crate::format::TimeZone;
 const DAY: i64 = 86_400_000;
 
 /// Elasticsearch's `Rounding.DateTimeUnit`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum DateUnit {
     Week,
     Year,
@@ -300,20 +300,42 @@ impl PreparedRounding {
 }
 
 /// What a rounding rounds to.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RoundingKind {
     Unit(DateUnit),
     /// A fixed interval in millis.
     Interval(i64),
 }
 
-/// A date rounding.
-#[derive(Clone, Debug)]
+/// A date rounding. It travels as its kind, zone and offset ([`crate::wire`]); the zone's
+/// rules are rebuilt.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(into = "RoundingWire", try_from = "RoundingWire")]
 pub struct Rounding {
     pub kind: RoundingKind,
     pub zone: TimeZone,
     pub offset: i64,
     rules: Option<Arc<ZoneRules>>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RoundingWire {
+    kind: RoundingKind,
+    zone: TimeZone,
+    offset: i64,
+}
+
+impl From<Rounding> for RoundingWire {
+    fn from(r: Rounding) -> Self {
+        RoundingWire { kind: r.kind, zone: r.zone, offset: r.offset }
+    }
+}
+
+impl TryFrom<RoundingWire> for Rounding {
+    type Error = String;
+    fn try_from(w: RoundingWire) -> std::result::Result<Self, String> {
+        Rounding::new(w.kind, w.zone, w.offset).map_err(|e| e.reason)
+    }
 }
 
 impl PartialEq for Rounding {
@@ -644,7 +666,7 @@ fn truncate_as_local_time(rules: &ZoneRules, u: DateUnit, instant: i64) -> Optio
 }
 
 /// One offset transition.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 struct Transition {
     /// Epoch millis (a whole second).
     at: i64,

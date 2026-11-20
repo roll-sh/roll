@@ -48,7 +48,7 @@ pub(crate) fn map_capacity(n: usize) -> usize {
 }
 
 /// `InternalStringStats`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct StringStats {
     pub count: u64,
     pub total_length: u64,

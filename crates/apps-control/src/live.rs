@@ -384,6 +384,8 @@ pub struct Gate {
     pub split: Option<crate::model::Split>,
     /// Where a share of its bodiless requests is copied.
     pub mirror: Option<crate::model::Split>,
+    /// Its snippets, joined: before `</head>`, before `</body>`.
+    pub snippets: Option<(bytes::Bytes, bytes::Bytes)>,
 }
 
 /// A rate-limit bucket: which (0 the environment's, 1 + i firewall rule i's) and whose.
@@ -560,6 +562,9 @@ pub struct EnvLive {
     /// CPU its awake instances used and could have used, per tick, for `cpu_window` (only what
     /// the runtime measures).
     cpu_samples: Mutex<std::collections::VecDeque<(Instant, f64, f64)>>,
+    /// Its answers' times since the window began (`run.latency_target_ms`), and the last
+    /// whole window's p95.
+    lat_window: Mutex<(Instant, Served, Option<f64>)>,
     /// The same for memory: bytes in use and the instances' limits, per tick.
     mem_samples: Mutex<std::collections::VecDeque<(Instant, f64, f64)>>,
     /// The instances CPU last asked for: kept while the window fills again after a scale-out,
@@ -615,6 +620,7 @@ impl EnvLive {
             gate_gen: AtomicU64::new(0),
             buckets: Mutex::new(HashMap::new()),
             cpu_samples: Mutex::new(std::collections::VecDeque::new()),
+            lat_window: Mutex::new((Instant::now(), Served::default(), None)),
             mem_samples: Mutex::new(std::collections::VecDeque::new()),
             cpu_need: AtomicU32::new(0),
             last_tick: Mutex::new(None),
@@ -668,6 +674,9 @@ impl EnvLive {
     /// The proxy's answer to a request `inst` served: counted per deployment while a canary
     /// runs (the rollout judges the new deployment by them).
     pub fn answered(&self, inst: &Inst, status: u16, ms: Option<f64>) {
+        if let Some(ms) = ms {
+            self.lat_window.lock().1.took(ms);
+        }
         self.count(&inst.deployment, |s| {
             s.requests += 1;
             if status >= 500 {
@@ -2003,6 +2012,18 @@ impl EnvLive {
         self.load(&self.cpu_samples)
     }
 
+    /// Its answers' p95 over the last whole window (at least 20 answers timed), ms: a window
+    /// closes each `cpu_window`, and a scale-out starts a fresh one.
+    fn latency_p95(&self) -> Option<f64> {
+        let mut w = self.lat_window.lock();
+        if w.0.elapsed() >= self.cfg.cpu_window {
+            let timed: u64 = w.1.lat.iter().map(|&c| c as u64).sum();
+            w.2 = (timed >= 20).then(|| w.1.p95_ms()).flatten();
+            *w = (Instant::now(), Served::default(), w.2);
+        }
+        w.2
+    }
+
     /// Its awake instances' memory over the same window, in percent of their limits.
     fn mem_load(&self) -> Option<f64> {
         self.load(&self.mem_samples)
@@ -2091,7 +2112,7 @@ impl EnvLive {
             let (target, load) = (target?, load.filter(|_| awake > 0)?);
             Some((((awake as f64 * load / target as f64).ceil() as u32).min(run.max_instances.max(1)), load, target, what))
         };
-        let wanted = [by(run.cpu_target, self.cpu_load(), "CPU"), by(run.memory_target, self.mem_load(), "memory")].into_iter().flatten().max_by_key(|(n, ..)| *n);
+        let wanted = [by(run.cpu_target, self.cpu_load(), "CPU"), by(run.memory_target, self.mem_load(), "memory"), by(run.latency_target_ms, run.latency_target_ms.and_then(|_| self.latency_p95()), "p95")].into_iter().flatten().max_by_key(|(n, ..)| *n);
         if let Some((by_cpu, load, target, what)) = wanted {
             self.cpu_need.store(by_cpu, Ordering::SeqCst);
             if by_cpu > awake && awake < run.max_instances {
@@ -2103,13 +2124,15 @@ impl EnvLive {
                         awake += 1;
                         self.cpu_samples.lock().clear();
                         self.mem_samples.lock().clear();
+                        *self.lat_window.lock() = (Instant::now(), Served::default(), None);
                         self.cpu_need.store(awake, Ordering::SeqCst);
-                        self.log.stream(Stream::System).line(format!("scaled out: {what} at {load:.0}% of the {target}% target, {awake} instances"));
+                        let at = if what == "p95" { format!("p95 at {load:.0} ms, over its {target} ms target") } else { format!("{what} at {load:.0}% of the {target}% target") };
+                        self.log.stream(Stream::System).line(format!("scaled out: {at}, {awake} instances"));
                     }
                 }
             }
             needed = needed.max(by_cpu);
-        } else if run.cpu_target.is_some() || run.memory_target.is_some() {
+        } else if run.cpu_target.is_some() || run.memory_target.is_some() || run.latency_target_ms.is_some() {
             needed = needed.max(self.cpu_need.load(Ordering::SeqCst));
         }
         let over = awake > needed;

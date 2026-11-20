@@ -25,6 +25,7 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route("/v1/previews/{id}/refresh", post(refresh))
         .route("/v1/previews/{id}/keep", post(keep))
         .route("/v1/previews/{id}/visual/accept", post(accept_visual))
+        .route("/v1/previews/{id}/regressions/accept", post(accept_regressions))
         .route("/v1/previews/{id}/approve", post(approve))
         .route("/v1/previews/{id}/visit", post(visit))
         .route("/v1/previews/{id}/env", get(vars).put(put_vars))
@@ -309,12 +310,39 @@ async fn accept_visual(AxState(e): S, Path(id): Path<String>, who: Option<axum::
     let AcceptBody { head: seen, path } = if b.is_empty() { AcceptBody::default() } else { body::<AcceptBody>(&b)? };
     // The person behind a token too: their own token doesn't let an author accept their change.
     let behind = who.as_ref().map(|u| u.handle.clone());
+    // A signed-in person who can write to the change's repo in roll code (an admin can).
+    let writer = who.as_ref().filter(|u| grant.is_none() && !u.admin).map(|u| u.code_owner.clone());
     let (by, person) = match (who, grant) {
         (Some(axum::Extension(u)), None) => (u.handle, true),
         (_, Some(axum::Extension(g))) => (format!("token:{}", g.name), false),
         (None, None) => ("operator".into(), true),
     };
-    e.accept_visual(&id, &by, behind.as_deref(), person, seen.as_deref(), path.as_deref()).await.map(Json)
+    e.accept_visual(&id, &by, behind.as_deref(), person, writer.as_ref().map(|o| o.as_deref()), seen.as_deref(), path.as_deref()).await.map(Json)
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct AcceptRegressionsBody {
+    /// The head that was looked at: refused (409) when a newer push came in.
+    head: Option<String>,
+}
+
+async fn accept_regressions(AxState(e): S, Path(id): Path<String>, who: Option<axum::Extension<roll_auth::SignedIn>>, grant: Option<axum::Extension<roll_auth::Grant>>, b: Bytes) -> crate::Result<Json<Preview>> {
+    check_id(&id)?;
+    let AcceptRegressionsBody { head: seen } = if b.is_empty() { AcceptRegressionsBody::default() } else { body::<AcceptRegressionsBody>(&b)? };
+    // As the visual review's: the person behind a token too.
+    let behind = who.as_ref().map(|u| u.handle.clone());
+    let signed = who.as_ref().filter(|_| grant.is_none()).map(|axum::Extension(u)| u.clone());
+    let (by, person) = match (who, grant) {
+        (Some(axum::Extension(u)), None) => (u.handle, true),
+        (_, Some(axum::Extension(g))) => (format!("token:{}", g.name), false),
+        (None, None) => ("operator".into(), true),
+    };
+    // A person signed in to roll, not the operator's token (a CI job may hold it), who can write to
+    // the change's repo (an admin can).
+    let person = person && by != "operator";
+    let writer = signed.filter(|u| !u.admin).map(|u| u.code_owner);
+    e.accept_regressions(&id, &by, behind.as_deref(), person, writer.as_ref().map(|o| o.as_deref()), seen.as_deref()).await.map(Json)
 }
 
 #[derive(Deserialize)]
@@ -940,7 +968,7 @@ async fn mask_suggestions(AxState(e): S, Path(project): Path<String>, grant: Opt
     e.mask_suggestions(&project, may_read).await.map(Json)
 }
 
-async fn put_settings(AxState(e): S, Path(project): Path<String>, b: Bytes) -> crate::Result<Json<crate::Settings>> {
+async fn put_settings(AxState(e): S, Path(project): Path<String>, ext: axum::http::Extensions, b: Bytes) -> crate::Result<Json<crate::Settings>> {
     let patch: Value = body(&b)?;
     let (p, check) = (project.clone(), patch.clone());
     let (old, new) = blocking(e.clone(), move |e| {
@@ -951,9 +979,44 @@ async fn put_settings(AxState(e): S, Path(project): Path<String>, b: Bytes) -> c
     })
     .await?;
     e.check_masks(&old, &new).await?;
+    // A reference to an environment other than the one the previews follow routes its values into
+    // code whoever pushes a branch controls: a new or changed one needs its writer's reveal there.
+    let who = crate::ports::Asker::of(&ext);
+    let may_reveal = |env: &str, folder: &str| e.reveal.get().is_some_and(|r| r.may_reveal(&who, &project, env, folder));
+    // So does a new base: every preview's code then reads that environment.
+    let base = &new.secrets.base;
+    if *base != old.secrets.base && !may_reveal(base, "/") {
+        return Err(Error::Forbidden(format!("secrets.base: following {base} needs reveal on {base} in roll secrets")));
+    }
+    // A reference to the base needed no reveal when the base was the old one: moved, it's checked
+    // as new.
+    let place = |reference: &str| match e.reveal.get() {
+        Some(r) => r.place(reference).map_err(Error::BadRequest),
+        None => Err(Error::BadRequest("roll:// references need roll secrets on this node".into())),
+    };
+    let mut before = crate::settings::references(&old);
+    if *base != old.secrets.base {
+        before.retain(|(_, _, reference)| place(reference).is_ok_and(|(env, _)| env != old.secrets.base));
+    }
+    for (scope, name, reference) in crate::settings::references(&new).into_iter().filter(|r| !before.contains(r)) {
+        let (env, folder) = place(&reference).map_err(|err| Error::BadRequest(format!("{scope}: {name}: {err}")))?;
+        if env == *base {
+            continue;
+        }
+        if !may_reveal(&env, &folder) {
+            return Err(Error::Forbidden(format!("{scope}: {name}: naming {env}'s keys needs reveal on {env} in roll secrets")));
+        }
+    }
+    let by = who.principal();
     let s = blocking(e.clone(), move |e| {
-        let s = e.store.settings(&project)?.patched(&patch)?;
+        // What's written is what was checked: rules another request changed since are its own.
+        let current = e.store.settings(&project)?;
+        if current != old {
+            return Err(Error::Conflict("the project's preview rules changed while these were checked: try again".into()));
+        }
+        let s = current.patched(&patch)?;
         let s = e.store.put_settings(&project, &s)?;
+        e.store.set_env_refs(&project, &crate::settings::references(&s), &by)?;
         // Every preview of the project converges on the new rules (modes, masks, variables,
         // access): nothing waits for its next push.
         reconverge(e, &project)?;

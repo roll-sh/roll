@@ -3,7 +3,7 @@
 starts the rolld). It first makes fixtures with the write tools (a workspace project, a bucket, a
 stream, NoSQL and Redis databases, a search cluster and index, a Postgres project, a queue, an apps
 service, a roll code repo, a tasks message, a token), then calls each read-only tool with ids from
-them, then, with --writes, each write tool with values made from its schema (non-destructive first).
+them (a stand-in that doesn't exist for what none made), then, with --writes, each write tool with values made from its schema (non-destructive first).
 
 A failure is a mapping bug: a 5xx, an argument the route rejects (unknown, missing or of another type),
 or an empty 404 (no route answers the path). "Not found" for a missing resource, a refusal about a
@@ -27,9 +27,18 @@ def rpc(method, params, token=None):
         return json.load(r)
 
 
-tools = rpc("tools/list", {})["result"]["tools"]
+listed = rpc("tools/list", {})["result"]
+tools = listed["tools"]
+# What a client takes in before it does anything (docs/mcp.md, "Toolsets"): the tools and their size.
+print(f"tools/list: {len(tools)} tools, {len(json.dumps(listed)) // 1024} KB")
+if "-v" in sys.argv:
+    with urllib.request.urlopen(urllib.request.Request(f"{api}/v1/mcp/toolsets", headers={"authorization": f"Bearer {tok}"}), timeout=30) as r:
+        costs = json.load(r)
+        print("toolsets:", json.dumps(costs["products"])[:1500])
+        print("areas:", ", ".join(f"{a['toolset']} {a['tools']} tools ~{a['context_tokens']} tokens" for a in costs.get("areas", [])))
 reads = [t for t in tools if t.get("annotations", {}).get("readOnlyHint") and (only is None or t["name"] == only)]
-FAIL_WORDS = ("unknown argument", "is required", "can't be empty", "no route", "method not allowed", "invalid type", "missing field", "unknown field")
+FAIL_WORDS = ("unknown argument", "is required", "can't be empty", "no route", "method not allowed", "invalid type", "missing field", "unknown field",
+              "Invalid URL: Cannot parse")  # a path segment of a type the route doesn't take
 
 
 def items_of(sc):
@@ -136,7 +145,7 @@ def rest(method, path, body):
             collect(answer, "", f"{method} {path}")
             return answer
     except urllib.error.HTTPError as e:
-        # A fixture that isn't made leaves its tools skipped: say why (an id or a message, never a secret).
+        # A fixture that isn't made leaves its tools on stand-ins: say why (an id or a message, never a secret).
         print(f"fixture {method} {path}: {e.code} {e.read()[:200].decode(errors='replace')}")
         return None
     except Exception as e:
@@ -187,7 +196,30 @@ if pv_id:
     seen[("previews", "id")] = pv_id
 print(f"fixtures: repo {repo_made}, tasks message {bool(msg_id)}, preview {bool(pv_id)}")
 
-fails, ran, skipped = [], 0, []
+# Values for arguments no fixture names: the repo's one file and its branch, a query, a statement,
+# a route to check; for an id nothing made, one that doesn't exist. A route that's there answers
+# "not found" with a message; a path no route answers is an empty 404, which fails. Tools called
+# with one are counted apart, so they read as mapping checks, not as answers.
+VALUES = {"path": "README.md", "query": "sweep", "base": "main", "head": "main", "sql": "select 1", "text": "hello sweep",
+          "method": "GET", "key": "sweep.txt", "host": "sweep.example.invalid", "repo": "sweep/app", "name": "SWEEP", "reason": "sweep", "trace": "0" * 32}
+BY_PRODUCT = {("access", "path"): "/v1/storage/buckets", ("access", "product"): "storage", ("access", "action"): "read",
+              ("secrets", "from"): "development", ("secrets", "key"): "SWEEP", ("secrets", "to"): "production", ("apps", "from"): "development"}
+def stand_in(t, prod, a):
+    s = t["inputSchema"].get("properties", {}).get(a, {})
+    ty = s.get("type")
+    if s.get("enum"):
+        return s["enum"][0]
+    if ty in ("integer", "number"):
+        return 1
+    if ty == "boolean":
+        return False
+    if ty == "array":
+        return ["sweep"] if (s.get("items") or {}).get("type") == "string" else []
+    if ty == "object":
+        return {}
+    return BY_PRODUCT.get((prod, a)) or VALUES.get(a) or f"sweep-none-{a}"
+
+fails, ran, stood_in = [], 0, []
 # Two passes: tools without required arguments first (their answers give ids), then the others.
 for pass_ in (0, 1):
     for t in reads:
@@ -197,13 +229,15 @@ for pass_ in (0, 1):
         args = {}
         prod = t.get("_meta", {}).get("roll/product", "")
         if req:
+            args = {a: seen[(prod, a)] if (prod, a) in seen else stand_in(t, prod, a) for a in req}
             missing = [a for a in req if (prod, a) not in seen]
             if missing:
-                skipped.append(f"{t['name']} (needs {', '.join(missing)})")
-                continue
-            args = {a: seen[(prod, a)] for a in req}
+                stood_in.append(f"{t['name']} ({', '.join(f'{a}={json.dumps(args[a])}' for a in missing)})")
         res = rpc("tools/call", {"name": t["name"], "arguments": args})
         ran += 1
+        if req and stood_in and stood_in[-1].startswith(t["name"] + " "):
+            sc = res.get("result", {}).get("structuredContent")
+            stood_in[-1] += f" -> {sc.get('http_status', 200) if isinstance(sc, dict) and res['result'].get('isError') else 200}: {json.dumps(sc)[:120] if res.get('result', {}).get('isError') else 'ok'}"
         bad = judge(t["name"], res)
         if bad:
             fails.append(f"{t['name']} {json.dumps(args)}: {bad}")
@@ -214,7 +248,7 @@ for pass_ in (0, 1):
                     key = {"postgres": "project", "redis": "database", "nosql": "database", "search": "cluster", "streams": "stream", "apps": "service", "previews": "id", "workspace": "id", "secrets": "project"}.get(prod)
                     if key and (prod, key) not in seen and t["name"].split("_")[1] == "list":
                         seen[(prod, key)] = it["id"]
-print(f"{len(reads)} read-only tools, {ran} called, {len(skipped)} skipped for want of an id, {len(fails)} failed")
+print(f"{len(reads)} read-only tools, {ran} called ({len(stood_in)} with a stand-in for what no fixture made), {len(fails)} failed")
 
 # Leaks: every read tool that isn't a reveal, called by a token that may read everything and
 # reveal nothing. Any credential the fixtures made, or anything shaped like a roll token or a
@@ -256,6 +290,75 @@ for l in leaks:
 if reader and shown == 0:
     leaks.append("no tool showed even the operator a known credential: the check sees nothing (are the fixtures' secrets collected?)")
 fails += [f"leak {l}" for l in leaks]
+
+# Choices: a tool called without an id it needs, by a client that fills in forms (2026-07-28 with
+# form elicitation), answers a form whose choices are what the connection may read
+# (`roll_mcp::ask`). For every kind of id the fixtures made, the form must offer the fixture's,
+# or the kind is below with why it has none: a list answer of another shape offers nothing
+# without failing anything, and a new kind of id with no choices fails here until it has some.
+NO_CHOICES = {("postgres", "endpoint"): "an endpoint sits inside its branch, and no tool lists every project's"}
+# Where a name means different things by tool, the one the fixture's id is: tasks' `id` is a
+# message's in the fixture (a run's, a schedule's… by their own tools' routes).
+CHOICE_TOOL = {("tasks", "id"): "tasks_get_message"}
+def form_call(name, args):
+    global n
+    n += 1
+    meta = {"io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientInfo": {"name": "sweep", "version": "1"},
+            "io.modelcontextprotocol/clientCapabilities": {"elicitation": {"form": {}}}}
+    body = {"jsonrpc": "2.0", "id": n, "method": "tools/call", "params": {"name": name, "arguments": args, "_meta": meta}}
+    req = urllib.request.Request(f"{api}/v1/mcp", data=json.dumps(body).encode(), headers={"authorization": f"Bearer {tok}", "content-type": "application/json",
+                                 "accept": "application/json", "mcp-protocol-version": "2026-07-28", "mcp-method": "tools/call", "mcp-name": name})
+    with urllib.request.urlopen(req, timeout=60) as r:
+        return json.load(r)
+offered, no_form = 0, []
+for (prod, param), value in sorted(seen.items()):
+    if (prod, param) in NO_CHOICES:
+        continue
+    tool = next((t for t in reads if t.get("_meta", {}).get("roll/product") == prod and param in t["inputSchema"].get("required", [])
+                 and all((prod, a) in seen for a in t["inputSchema"]["required"]) and t["name"] == CHOICE_TOOL.get((prod, param), t["name"])), None)
+    if tool is None:
+        continue
+    args = {a: seen[(prod, a)] for a in tool["inputSchema"]["required"] if a != param}
+    r = form_call(tool["name"], args).get("result", {})
+    field = (r.get("inputRequests", {}).get(f"missing:{param}", {}).get("params", {}).get("requestedSchema", {}).get("properties", {}).get("value", {}))
+    if r.get("resultType") != "input_required" or not field:
+        no_form.append(f"{prod} {param} ({tool['name']} answered {r.get('resultType')}: {json.dumps(r.get('structuredContent'))[:120]})")
+    elif value not in field.get("enum", [value] if "description" in field else []):
+        no_form.append(f"{prod} {param} ({tool['name']}'s form offers {json.dumps(field.get('enum'))[:160]}, not the fixture's {value})")
+    else:
+        offered += 1
+        if "-v" in sys.argv:
+            print(f"choices: {prod} {param} from {tool['name']}: {json.dumps(field.get('enum'))[:160]}")
+print(f"choices: {offered} kinds of id offered as a form's choices, {len(NO_CHOICES)} with none by design, {len(no_form)} missing")
+fails += [f"choices {c}" for c in no_form]
+
+# The rest of what a client reads: every prompt (its arguments from the fixtures), every resource
+# listed, a project's page, every skill. An error is a failure: they're all read-only.
+surface = []
+PROMPT_ARGS = {"project": seen.get(("workspace", "id")), "service": seen.get(("apps", "service")), "env": "production", "branch": seen.get(("postgres", "branch"))}
+for p in rpc("prompts/list", {}).get("result", {}).get("prompts", []):
+    args = {a["name"]: (seen.get(("postgres", "project")) if a["name"] == "project" and "Postgres" in a.get("description", "") else PROMPT_ARGS.get(a["name"]) or "sweep")
+            for a in p.get("arguments", [])}
+    surface.append((f"prompt {p['name']}", rpc("prompts/get", {"name": p["name"], "arguments": args})))
+    # Each argument a fixture made completes to it (the others as context, as a client sends them).
+    for a in p.get("arguments", []):
+        want = args[a["name"]]
+        if a["name"] not in PROMPT_ARGS or want in (None, "sweep"):
+            continue
+        r = rpc("completion/complete", {"ref": {"type": "ref/prompt", "name": p["name"]}, "argument": {"name": a["name"], "value": ""},
+                                        "context": {"arguments": {k: v for k, v in args.items() if k != a["name"]}}})
+        got = r.get("result", {}).get("completion", {}).get("values", [])
+        surface.append((f"completion {p['name']} {a['name']}", r if want in got else {"error": f"offers {got[:5]}, not the fixture's {want}"}))
+uris = [r["uri"] for r in rpc("resources/list", {}).get("result", {}).get("resources", [])]
+if seen.get(("workspace", "id")):
+    uris.append(f"roll://projects/{seen[('workspace', 'id')]}")
+for uri in uris:
+    surface.append((f"resource {uri}", rpc("resources/read", {"uri": uri})))
+for sk in rpc("skills/list", {}).get("result", {}).get("skills", []):
+    surface.append((f"skill {sk.get('uri') or sk.get('name')}", rpc("skills/get", {"uri": sk.get("uri", "")})))
+bad = [f"{what}: {json.dumps(r.get('error'))[:200]}" for what, r in surface if "error" in r]
+print(f"surfaces: {len(surface)} prompts, completions, resources and skills read, {len(bad)} failed")
+fails += bad
 if "--writes" in sys.argv:
     def fake(name, schema, prod):
         if (prod, name) in seen:
@@ -300,6 +403,6 @@ if "--writes" in sys.argv:
 for f in fails:
     print("FAIL", f)
 if "-v" in sys.argv:
-    for s in skipped:
-        print("skip", s)
+    for s in stood_in:
+        print("stand-in", s)
 sys.exit(1 if fails else 0)

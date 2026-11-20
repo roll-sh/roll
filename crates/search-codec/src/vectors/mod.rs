@@ -593,6 +593,17 @@ impl VectorsReader {
         self.graph.is_some()
     }
 
+    /// Whether the graph search steers by scores that rank vectors about as the exact scores
+    /// do: full precision or 8-bit codes. One-bit (`bbq`) and 4-bit estimates are coarse, so
+    /// their beam holds a segment's exact best hits only when it is wide.
+    pub fn steers_precisely(&self) -> bool {
+        match &self.quant {
+            None => true,
+            Some(Quantized::Scalar { code_len, .. }) => *code_len == self.spec.dims as usize,
+            Some(Quantized::Binary { .. }) => false,
+        }
+    }
+
     /// Ordinal of `doc`'s vector.
     #[inline]
     pub fn ord(&self, doc: u32) -> Option<u32> {
