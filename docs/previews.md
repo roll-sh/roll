@@ -2247,14 +2247,12 @@ Ranked by what a person notices first. Done so far:
    secrets' #520 and #517, its batch 6): see "Keys a preview never holds". Built: the
    TLS-terminating swap (`intercept::serve`). Next: the socket handoff from `egress.js`, the trust
    stores, rolld's adapter.
-3. **A link to one push** (Vercel's per-commit URLs): a preview follows its change's head, so a
-   link a reviewer shared shows whatever came after. Keeping every head running isn't cheap; a
-   link naming a head (`?head=`) that the preview has moved past answers a page saying so, with
-   that head's screenshot and the way to the current one, and the pull request comment's links
-   name their head.
-4. **A preview's own variables take `roll://` too** (on roll secrets' #407, as #537 did for the
-   rules): `PUT …/{id}/env` binds a reference to whoever sets it (their reveal there, kept as its
-   writer), and every converge reads it as them, as the rules' references.
+3. **A preview's own variables take `roll://` too, in review** (#544, as #537 did for the
+   rules): `PUT …/{id}/env` takes a reference with its setter's reveal there, kept as its
+   writer, read as them at every converge.
+4. **An earlier push that's gone says so** (Vercel keeps every push; previews keep the last 3 per
+   service at hosts of their own, "Earlier pushes"): a link to one evicted since answers a page
+   naming the push and linking the current one and its screenshot, instead of a 404.
 5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
 6. **Watch: pg-control's recovery to a time seconds old** (unowned).
