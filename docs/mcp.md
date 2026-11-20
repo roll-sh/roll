@@ -1075,10 +1075,11 @@ waits on a sibling PR reaching main is last.
    "http"`) once its tool limit and OAuth are checked against a live client; a product past ~60
    tools gets areas before it reaches a client's limit; `sibling-check.py` on each thread's open
    PRs before their turns (it compares a PR that conflicts with main against its own merge base).
-   For their owners (they fail only under load and pass alone): code-control's
+   What has no tool goes in `no-tool.txt` with why; a product's new route fails roll-mcp's tests
+   until it has a tool or a line (that replaced the hand checks with `tool-gaps.py`). For their
+   owners (they fail only under load and pass alone): code-control's
    `automations::concurrency_cancel_and_retry` and
-   `agents_code::roll_code_projects_with_auto_pull_follow_their_default_branch`. What has no tool,
-   and why, is `crates/roll-mcp/src/no-tool.txt`. Waiting on roll code: a removed person's
+   `agents_code::roll_code_projects_with_auto_pull_follow_their_default_branch`. Waiting on roll code: a removed person's
    repositories handed to someone else. Not doing: "remember this browser"; a preset that reveals
    development's values without asking (#354); a connection-level `?project=` (only a token's
    rules bound a project; a default that some tools can't honour would look like a boundary).
@@ -1174,15 +1175,7 @@ waits on a sibling PR reaching main is last.
    - Provider groups to roles over SCIM: **blocked.** roll has no org or team membership for people
      yet (docs/accounts.md phase 2, "Orgs"), and its one role, admin, is never SCIM's to grant.
      Groups map to org membership once orgs exist.
-16. **Tools for sibling routes as they reach main** (each a row in tools.rs and the table above).
-   `secrets_list_github_apps` (secrets #73) is #253; secrets' other routes after batch 1 are admin,
-   a credential, a person's review, or an existing tool's (`tool-gaps.py`, 2026-11-18). Waiting on
-   open PRs: `secrets_totp` (secrets #194), apps #230 (`apps_restore_service`, deploy,
-   its own row as agreed; `deleted` on `apps_list_services`; delete keeps a service 48 h), apps
-   #219/#221/#222 (`rebuild_on_base`, firewall `challenge`, `build_closed`), apps #235 (`GET …/diff`,
-   and `PATCH …/variables` `copy_from` on its own row with `copies_from`). Apps tells this thread
-   as #230 and #235 land (their turn began 2026-11-18 03:00).
-17. **Gate flakes under load, for their owners:** code-sql's `writes_are_serializable_and_retried`
+16. **Gate flakes under load, for their owners:** code-sql's `writes_are_serializable_and_retried`
    and `killed_connections_never_lose_or_repeat_acknowledged_writes` (16 threads on one row exhaust
    the 40 conflict re-runs), and code-control's Linear e2e (30 s for the elicitation). Measured
    2026-11-20 on Postgres 18 at load 40-48: the first took 633-727 runs for its 400 increments
@@ -1192,18 +1185,18 @@ waits on a sibling PR reaching main is last.
    machine was the cause. A test-side deadline, not more retries in production, stays the fix. (The 2026-11-18 turn's combined
    gate passed without them: #208, #209, #210, #225, #226, #231, #236 and #239 landed as one gated
    tree, main 53b939213.)
-18. **Enterprise sign-in (#210), what's left:** a live check with a real provider's ID-JAG (Okta's
+17. **Enterprise sign-in (#210), what's left:** a live check with a real provider's ID-JAG (Okta's
    Cross App Access sandbox needs an account: the review pack's decision 5). The draft names the
    tenant `tenant`; a provider whose assertions say it another way (Entra's own tokens use `tid`)
    gets a mapping once its ID-JAGs are checked, never a guess.
-19. **Outsiders' text reaching roll's own agents:** checked 2026-11-19. An issue or comment from
+18. **Outsiders' text reaching roll's own agents:** checked 2026-11-19. An issue or comment from
    someone GitHub says can't push starts no automation unless its trigger says `anyone`
    (`chatops/github.rs`, as GitHub's lockdown does), forks' code waits for `approve-run`, and only
    an install's members drive roll from Slack or Discord. Left, the agents area's call: when a
    trigger says `anyone`, run its agent with a read-only grant (or ask before every write), since
    the outsider's text is then the agent's task. roll's agents don't connect to `/v1/mcp` (their
    MCP server is the orchestrator's), so `?lockdown` isn't where this belongs.
-20. **More MCP Apps views:** a rollback button on a deploy (calling `apps_rollback` through the
+19. **More MCP Apps views:** a rollback button on a deploy (calling `apps_rollback` through the
    host, so through the gate, as deploy), once a host that renders views is confirmed (the review
    pack's decision 4). A preview's screenshot against its baseline needs no view: hosts render
    `previews_screenshot`'s image (`diff=base`) themselves, and accepting a visual change stays a
@@ -1211,30 +1204,27 @@ waits on a sibling PR reaching main is last.
    (`examples/basic-host` v2.0.4: `users-live/host-shot.mjs`, with its one-line patch declaring
    the extension) and the stand-in; Claude.ai or ChatGPT need a public HTTPS rolld and the user's
    account.
-21. **Everyday routes with no tool:** rechecked on main 2026-11-18 (03:40, after secrets' batch 1
-   and search's and previews' turns): secrets' one gap is #253, search and previews have nothing new; what has no tool is a credential, a password, a key's
-   material, a deployment key's health, a person's review, or admin by design (tasks, streams,
-   storage, queues, postgres, Redis and NoSQL have theirs). Recheck each product after its thread
-   lands routes (`tool-gaps.py origin/main <product> <branch>`).
-22. **More tools that wait:** `apps_wait_deploy` is in #108. Rechecked on main (05:50): Postgres
+20. **More tools that wait:** `apps_wait_deploy`, `apps_wait_job`, `tasks_wait_run` and, since
+   2026-11-20, `previews_wait` (until a preview is ready, failed, sleeping, going or waiting on a
+   person's `approve-run`). Rechecked on main (05:50): Postgres
    branch backups and restores answer once done (nothing to wait on); search's reindexes are
    Elasticsearch's own `_tasks` behind the operator's request route. Branch backups and search reindexes
    can use `until` once their routes answer a state to wait on (search's reindex is an
    Elasticsearch task today, with no roll route to watch). Recheck with `mcpc` (`~/.local/share/roll-mcp/live/mcpc-tasks.sh`), and with the
    TypeScript SDK's `client/ext/tasks` once it ships.
-23. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
+21. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
    rolld, and send each thread its conflicts and their resolutions (`sibling-auth.sh`: every
    route classified, per method, with #25; agreed conflicts resolved by `known-conflicts.py`), and
    compare each product's routes with its tools (an everyday route with no tool is a gap: apps'
    were found this way). #24 and #25 are on main, so `feature/mcp-on-landing` is retired:
    secrets' #64 lands on main directly.
-24. **The operator's steps:** only if a load balancer that terminates HTTP sits in front of rolld (not
+22. **The operator's steps:** only if a load balancer that terminates HTTP sits in front of rolld (not
    roll's own edge, which needs nothing), set `ROLL_TRUSTED_PROXIES` to its addresses; and register `rlt_`, `rlo_`, `rlf_`, `rlc_`, `rlk_`, `rlp_`, `rlb_` and `rlq_` (`[a-z2-7]{40}` with a
    checksum) with GitHub's secret scanning partner program, so leaks on GitHub reach
    `/v1/access/leaks/github`.
-25. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
+23. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
    reach the daemon on the Docker bridge; run `pnpm test:pg` where they can (CI) before merging.
-26. **Step-up authorization (SEP-835), once clients do it:** a refused call could answer `403`
+24. **Step-up authorization (SEP-835), once clients do it:** a refused call could answer `403`
    `WWW-Authenticate: Bearer error="insufficient_scope", scope=…` so the client reopens roll's
    consent screen for the refused rule (as the refusal's widen link proposes it now). Not yet: today
    it would take the refusal's explanation and `access_request_access` away from the main clients,
