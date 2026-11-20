@@ -86,6 +86,9 @@ pub struct Tool {
     /// It makes roll reach outside it, to an address the caller chose (a task's URL, a webhook, a log
     /// drain, a Git URL or image, a vendor's API): MCP's `openWorldHint`, so a client can say so.
     pub open_world: bool,
+    /// Sends no body when no body field is given, for a route that reads a missing body one way
+    /// and `{}` another (a transit key's rotate: no body is roll's own new material).
+    pub bodiless: bool,
 }
 
 pub enum Built {
@@ -304,7 +307,7 @@ impl Tool {
         }
         let body = match raw {
             Some((b, ct)) => Built::Raw(b, ct),
-            None if body_used || matches!(self.method, "POST" | "PUT" | "PATCH") => Built::Json(body),
+            None if body_used || (!self.bodiless && matches!(self.method, "POST" | "PUT" | "PATCH")) => Built::Json(body),
             None => Built::None,
         };
         Ok(Request { uri, headers, body })
@@ -383,7 +386,7 @@ const OVERRIDE: P = P { name: "override", ty: Ty::Bool, at: At::Header("x-roll-o
 const IN_PROJECT: P = P { name: "workspace_project", ty: Ty::Str, at: At::Header("x-roll-project"), required: false, desc: "Workspace project (prj_…) to put the new resource in" };
 
 const fn t(name: &'static str, title: &'static str, description: &'static str, product: &'static str, method: &'static str, path: &'static str, params: &'static [P]) -> Tool {
-    Tool { name, title, description, product, method, path, params, fixed: None, wrap: None, hint: Hint::Auto, until: None, outside: &[], published: false, open_world: false }
+    Tool { name, title, description, product, method, path, params, fixed: None, wrap: None, hint: Hint::Auto, until: None, outside: &[], published: false, open_world: false, bodiless: false }
 }
 
 /// A tasks run that's over (`completed`, `failed` or `canceled`).
@@ -434,6 +437,12 @@ impl Tool {
         self.published = true;
         self
     }
+    /// No body unless a body field is given ([`Tool::bodiless`]).
+    const fn bodiless(mut self) -> Tool {
+        self.bodiless = true;
+        self
+    }
+
     const fn open_world(mut self) -> Tool {
         self.open_world = true;
         self
@@ -961,7 +970,7 @@ static TOOLS: &[Tool] = &[
     t("secrets_apply_changes", "Change several keys at once", "Set and delete several keys of a folder in one change (one entry in the history): ops [{op: set, key, value?, comment?, tags?, link?, if_version?} | {op: delete, key, if_version?}]. if_seq refuses it when the environment changed since. Into a protected environment it opens a request instead.", "secrets", "POST", "/v1/secrets/projects/{project}/environments/{env}/changes", &[SECRET_PROJECT, ENV, b("path", Ty::Str, "Folder"), b("message", Ty::Str, "Why"), breq("ops", Ty::Arr, "The set and delete operations"), b("if_seq", Ty::Int, "Only if the environment's last change is this")]),
     t("secrets_revoke_share", "Revoke a share link", "Revoke one of a project's one-off share links at once (secrets_list_shares lists them): it opens nothing after.", "secrets", "DELETE", "/v1/secrets/projects/{project}/shares/{id}", &[SECRET_PROJECT, req("id", "Share id")]),
     t("secrets_create_transit_key", "Make a transit key", "A key roll keeps to encrypt and sign for an app (secrets_transit_encrypt, secrets_transit_sign and the like), whose material never leaves roll. Bringing your own material is a person's (no tool).", "secrets", "POST", "/v1/secrets/projects/{project}/transit", &[SECRET_PROJECT, breq("name", Ty::Str, "Key name")]),
-    t("secrets_rotate_transit_key", "Rotate a transit key", "A new version of a transit key, made by roll: new ciphertexts use it, old ones still decrypt until min_decrypt_version moves past them.", "secrets", "POST", "/v1/secrets/projects/{project}/transit/{name}/rotate", &[SECRET_PROJECT, req("name", "Key name")]).undoable(),
+    t("secrets_rotate_transit_key", "Rotate a transit key", "A new version of a transit key, made by roll: new ciphertexts use it, old ones still decrypt until min_decrypt_version moves past them.", "secrets", "POST", "/v1/secrets/projects/{project}/transit/{name}/rotate", &[SECRET_PROJECT, req("name", "Key name")]).undoable().bodiless(),
     t("secrets_update_transit_key", "Set a transit key's oldest version", "Stop older versions of a transit key from decrypting: min_decrypt_version is the oldest that still does (ciphertexts made with older ones stop opening).", "secrets", "PATCH", "/v1/secrets/projects/{project}/transit/{name}", &[SECRET_PROJECT, req("name", "Key name"), breq("min_decrypt_version", Ty::Int, "The oldest version that still decrypts")]).destructive(),
     t("secrets_backup_schedule", "A project's backup schedule", "Where and how often a project's values are saved as a sealed copy (to a recipient key, in one of its buckets): bucket, every_hours, keep, next and last run, last error. Setting or stopping it is a person's.", "secrets", "GET", "/v1/secrets/projects/{project}/backup/schedule", &[SECRET_PROJECT]),
     t("secrets_list", "List secrets", "Secret names and metadata in an environment (never values).", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/secrets", &[SECRET_PROJECT, ENV, q("path", Ty::Str, "Folder, e.g. /api")]),
