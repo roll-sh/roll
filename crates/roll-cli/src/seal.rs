@@ -20,6 +20,9 @@ pub fn keypair() -> (String, String) {
 
 /// Open a box (`{v, epk, nonce, ct}`) with the secret key, `context` as the associated data.
 pub fn open(secret_b64: &str, context: &str, sealed: &serde_json::Value) -> anyhow::Result<Vec<u8>> {
+    if sealed["v"] != 1 {
+        anyhow::bail!("not a roll-seal-v1 box");
+    }
     let field = |k: &str| sealed[k].as_str().and_then(|s| URL_SAFE_NO_PAD.decode(s).ok()).ok_or_else(|| anyhow::anyhow!("not a roll-seal-v1 box"));
     let secret: [u8; 32] = URL_SAFE_NO_PAD.decode(secret_b64.trim()).ok().and_then(|b| b.try_into().ok()).ok_or_else(|| anyhow::anyhow!("the key file isn't a backup secret key (roll secrets keygen)"))?;
     let epk: [u8; 32] = field("epk")?.try_into().map_err(|_| anyhow::anyhow!("not a roll-seal-v1 box"))?;

@@ -1,0 +1,201 @@
+# Routes with no MCP tool, each with why (crates/roll-mcp: a test fails on a catalogued route that
+# is neither a tool's nor here). `no tool yet` is a gap to close, everything else a decision.
+# One `METHOD route  reason` a line, as the catalogue spells the route; `*` for a row of every method.
+# A line may name a route an open PR is about to add, so that PR's gate passes when it lands.
+GET /v1/access/catalog                                                       the dashboard's (the permission catalogue; tools carry their own actions)
+GET /v1/access/oauth/clients                                                 the dashboard's (the OAuth clients a person registered)
+GET /v1/access/oauth/clients/{id}                                            the dashboard's (one registered OAuth client)
+POST /v1/access/tokens                                                       answers or sets a credential
+DELETE /v1/access/tokens/{id}                                                a person's call (a token's revoke is the person's; security_checkup names them)
+PATCH /v1/access/tokens/{id}                                                 a person's call (a token's rules)
+POST /v1/access/tokens/{id}/approve                                          a person's call (approving, accepting, cutting off)
+POST /v1/access/tokens/{id}/deny                                             a person's call (approving, accepting, cutting off)
+POST /v1/access/tokens/{id}/rotate                                           answers or sets a credential
+DELETE /v1/access/tokens/{id}/temporary/{approval}                           a person's call (approving, accepting, cutting off)
+POST /v1/access/tokens/{id}/tighten                                          a person's call (approving, accepting, cutting off)
+GET /v1/access/tokens/{id}/tools                                             the dashboard's (what a token's connection lists)
+PUT /v1/apps/projects/{project}/status-page                                  a person's call (it makes the project's service names public)
+POST /v1/apps/services                                                       covered by apps_create_service (POST /v1/apps/projects/{project}/services)
+GET /v1/apps/services/{id}/changes                                           the dashboard's (a server-sent change stream)
+GET /v1/apps/services/{id}/environments/{env}/files                          interactive (a shell, files, a forward): an admin's, live
+PUT /v1/apps/services/{id}/environments/{env}/files                          interactive (a shell, files, a forward): an admin's, live
+DELETE /v1/apps/services/{id}/environments/{env}/hook                        answers or sets a credential (a deploy hook's secret)
+POST /v1/apps/services/{id}/environments/{env}/hook                          answers or sets a credential (a deploy hook's secret)
+GET /v1/apps/services/{id}/environments/{env}/shell                          interactive (a shell, files, a forward): an admin's, live
+POST /v1/apps/services/{id}/environments/{env}/shell/sessions                interactive (a shell, files, a forward): an admin's, live
+DELETE /v1/apps/services/{id}/environments/{env}/shell/sessions/{sh}         interactive (a shell, files, a forward): an admin's, live
+POST /v1/apps/services/{id}/environments/{env}/shell/sessions/{sh}/keys      answers or sets a credential
+POST /v1/apps/services/{id}/environments/{env}/shell/sessions/{sh}/resize    interactive (a shell, files, a forward): an admin's, live
+GET /v1/apps/services/{id}/environments/{env}/shell/sessions/{sh}/screen     interactive (a shell, files, a forward): an admin's, live
+GET /v1/apps/services/{id}/environments/{env}/tunnel                         interactive (a shell, files, a forward): an admin's, live
+GET /v1/apps/services/{id}/environments/{env}/variables/values               answers or sets a credential (variables' values)
+DELETE /v1/apps/services/{id}/git-login                                      answers or sets a credential
+PUT /v1/apps/services/{id}/git-login                                         answers or sets a credential
+DELETE /v1/apps/services/{id}/registry                                       answers or sets a credential
+PUT /v1/apps/services/{id}/registry                                          answers or sets a credential
+GET /v1/health                                                               the operator's (health, migrations, process control)
+GET /v1/info                                                                 the operator's (health, migrations, process control)
+* /v1/mcp                                                                    the MCP server itself
+GET /v1/mcp/toolsets                                                         the dashboard's (the connect panel's costs)
+GET /v1/nosql/databases/{id}/alternator                                      answers or sets a credential (its access key, a reveal)
+POST /v1/nosql/databases/{id}/compact                                        the operator's (health, migrations, process control)
+POST /v1/nosql/databases/{id}/flush                                          the operator's (health, migrations, process control)
+POST /v1/nosql/databases/{id}/imports                                        the operator's (an SSTable backup import from storage the operator holds)
+POST /v1/nosql/databases/{id}/password                                       answers or sets a credential
+POST /v1/nosql/databases/{id}/unload                                         the operator's (health, migrations, process control)
+DELETE /v1/previews/projects/{project}/bypass                                answers or sets a credential
+GET /v1/previews/projects/{project}/bypass                                   answers or sets a credential
+POST /v1/previews/projects/{project}/bypass                                  answers or sets a credential
+POST /v1/previews/projects/{project}/hooks                                   answers or sets a credential (a deploy hook's secret)
+POST /v1/previews/{id}/approve                                               a person's call (approving, accepting, cutting off)
+PUT /v1/previews/{id}/env                                                    answers or sets a credential (a preview's env is reveal)
+GET /v1/previews/{id}/errors/count                                           the dashboard's (a row's count; previews_errors has the groups)
+GET /v1/previews/{id}/files                                                  interactive (a shell, files, a forward): an admin's, live
+PUT /v1/previews/{id}/files                                                  interactive (a shell, files, a forward): an admin's, live
+GET /v1/previews/{id}/forward                                                interactive (a shell, files, a forward): an admin's, live
+GET /v1/previews/{id}/notes/{note}/crop                                      the dashboard's (a note's image)
+GET /v1/previews/{id}/qr.png                                                 the dashboard's (a QR code)
+POST /v1/previews/{id}/regressions/accept                                    a person's call (approving, accepting, cutting off)
+POST /v1/previews/{id}/shell/sessions                                        interactive (a shell, files, a forward): an admin's, live
+DELETE /v1/previews/{id}/shell/sessions/{sh}                                 interactive (a shell, files, a forward): an admin's, live
+POST /v1/previews/{id}/shell/sessions/{sh}/keys                              answers or sets a credential
+POST /v1/previews/{id}/shell/sessions/{sh}/resize                            interactive (a shell, files, a forward): an admin's, live
+GET /v1/previews/{id}/shell/sessions/{sh}/screen                             interactive (a shell, files, a forward): an admin's, live
+POST /v1/previews/{id}/visual/accept                                         a person's call (approving, accepting, cutting off)
+POST /v1/projects/{id}/branches/{branch}/app-role                            answers or sets a credential
+POST /v1/projects/{id}/branches/{branch}/evict                               the operator's (health, migrations, process control)
+POST /v1/projects/{id}/decoy-roles                                           a person's call: decoys are planted by a person (#432)
+DELETE /v1/projects/{id}/decoy-roles/{role}                                  a person's call: decoys are planted by a person (#432)
+GET /v1/queues/definitions                                                   answers or sets a credential (definitions carry users' password hashes)
+POST /v1/queues/definitions                                                  answers or sets a credential (definitions carry users' password hashes)
+GET /v1/queues/health                                                        the operator's (health, migrations, process control)
+* /v1/queues/migrate                                                         the operator's (health, migrations, process control)
+DELETE /v1/queues/permissions/{vhost}/{user}                                 a person's call (a broker user's permissions)
+PUT /v1/queues/permissions/{vhost}/{user}                                    a person's call (a broker user's permissions)
+DELETE /v1/queues/users/{name}                                               a person's call (a broker user)
+PUT /v1/queues/users/{name}                                                  answers or sets a credential (a broker user's password)
+POST /v1/queues/vhosts/{vhost}/credentials                                   answers or sets a credential
+POST /v1/redis/databases/{id}/password                                       answers or sets a credential
+POST /v1/redis/databases/{id}/unload                                         the operator's (health, migrations, process control)
+POST /v1/redis/replicas/{id}/unload                                          the operator's (health, migrations, process control)
+GET /v1/search/clusters/{id}/browser-keys                                    no tool yet: maps after #358 lands
+POST /v1/search/clusters/{id}/browser-keys                                   answers or sets a credential (#358)
+DELETE /v1/search/clusters/{id}/browser-keys/{key}                           no tool yet: maps after #358 lands (destructive, as search_revoke_key)
+GET /v1/search/clusters/{id}/indices/{index}/docs                            no such handler (only POST exists)
+POST /v1/search/clusters/{id}/inference/secrets                              answers or sets a credential (an inference service's key)
+POST /v1/search/clusters/{id}/keys                                           answers or sets a credential
+POST /v1/search/clusters/{id}/migrate                                        an outside integration's setup: an admin's, with the remote's credentials (#485)
+POST /v1/search/clusters/{id}/migrate/inspect                                answers or sets a credential: the remote's credentials go in its body (#485)
+POST /v1/search/clusters/{id}/password                                       answers or sets a credential
+PUT /v1/search/clusters/{id}/remotes/{alias}                                 an admin's: it lends the remote cluster's credentials
+PUT /v1/search/clusters/{id}/repositories/{name}                             an outside integration's setup: an admin's, with its credentials (#361)
+POST /v1/search/clusters/{id}/request                                        the operator's (any Elasticsearch request, unscoped)
+POST /v1/search/clusters/{id}/unload                                         the operator's (health, migrations, process control)
+GET /v1/secrets/gateways/{id}/connect                                        interactive (a shell, files, a forward): an admin's, live
+GET /v1/secrets/health                                                       the operator's (health, migrations, process control)
+PATCH /v1/secrets/projects/{project}                                         a person's call: how long old versions are kept (shortening it deletes history)
+POST /v1/secrets/projects/{project}/atlas-projects                           an outside integration's setup: an admin's, with its credentials
+DELETE /v1/secrets/projects/{project}/atlas-projects/{id}                    an outside integration's setup: an admin's, with its credentials
+* /v1/secrets/projects/{project}/audit/sinks                                 an outside integration's setup: an admin's, with its credentials
+DELETE /v1/secrets/projects/{project}/audit/sinks/{id}                       an outside integration's setup: an admin's, with its credentials
+POST /v1/secrets/projects/{project}/aws-roles                                an outside integration's setup: an admin's, with its credentials
+DELETE /v1/secrets/projects/{project}/aws-roles/{id}                         an outside integration's setup: an admin's, with its credentials
+PATCH /v1/secrets/projects/{project}/aws-roles/{id}                          an outside integration's setup: an admin's, with its credentials
+POST /v1/secrets/projects/{project}/aws-users                                an outside integration's setup: an admin's, with its credentials
+DELETE /v1/secrets/projects/{project}/aws-users/{id}                         an outside integration's setup: an admin's, with its credentials
+PATCH /v1/secrets/projects/{project}/aws-users/{id}                          an outside integration's setup: an admin's, with its credentials
+POST /v1/secrets/projects/{project}/backup                                   a person's call: it seals every value to a recipient key the caller picks
+DELETE /v1/secrets/projects/{project}/backup/schedule                        a person's call: stopping a project's backups
+PUT /v1/secrets/projects/{project}/backup/schedule                           a person's call: it seals every value to a recipient key the caller picks
+POST /v1/secrets/projects/{project}/cas                                      an outside integration's setup: an admin's, with its credentials
+DELETE /v1/secrets/projects/{project}/cas/{id}                               an outside integration's setup: an admin's, with its credentials
+PATCH /v1/secrets/projects/{project}/cas/{id}/acme                           an outside integration's setup: an admin's, with its credentials
+POST /v1/secrets/projects/{project}/cas/{id}/acme/eab                        an outside integration's setup: an admin's, with its credentials
+DELETE /v1/secrets/projects/{project}/cas/{id}/acme/eab/{eab}                an outside integration's setup: an admin's, with its credentials
+POST /v1/secrets/projects/{project}/cas/{id}/revoke                          an outside integration's setup: an admin's, with its credentials
+POST /v1/secrets/projects/{project}/cas/{id}/sign                            an outside integration's setup: an admin's, with its credentials
+POST /v1/secrets/projects/{project}/cloud-accounts                           an outside integration's setup: an admin's, with its credentials
+DELETE /v1/secrets/projects/{project}/cloud-accounts/{id}                    an outside integration's setup: an admin's, with its credentials
+POST /v1/secrets/projects/{project}/directories                              an outside integration's setup: an admin's, with its credentials
+DELETE /v1/secrets/projects/{project}/directories/{id}                       an outside integration's setup: an admin's, with its credentials
+POST /v1/secrets/projects/{project}/environments/{env}/decoys                a person's call (decoys are planted by a person, #392)
+GET /v1/secrets/projects/{project}/environments/{env}/digest                 roll run --watch's change signal
+PUT /v1/secrets/projects/{project}/environments/{env}/exports                a person's call: sharing a folder with other projects grants them its values
+DELETE /v1/secrets/projects/{project}/environments/{env}/folder-policies     a person's call: a folder's approvals
+PUT /v1/secrets/projects/{project}/environments/{env}/folder-policies        a person's call: a folder's approvals
+PUT /v1/secrets/projects/{project}/environments/{env}/policy                 a person's call: an environment's protection and approvers
+DELETE /v1/secrets/projects/{project}/environments/{env}/reach/cut-off       a person's call (approving, accepting, cutting off)
+POST /v1/secrets/projects/{project}/environments/{env}/reach/cut-off         a person's call (approving, accepting, cutting off)
+POST /v1/secrets/projects/{project}/environments/{env}/requests/{id}/review  a person's call (reviewing what someone sent)
+GET /v1/secrets/projects/{project}/environments/{env}/requests/{id}/values   answers or sets a credential (a request's values)
+POST /v1/secrets/projects/{project}/environments/{env}/resolve               answers or sets a credential (resolved values)
+POST /v1/secrets/projects/{project}/environments/{env}/value-requests        no tool yet: value requests (roll MCP adds the tools after batch 5)
+POST /v1/secrets/projects/{project}/environments/{env}/secrets/{name}/purge  a person's call (a secret's history gone for good)
+POST /v1/secrets/projects/{project}/gateways                                 an outside integration's setup: an admin's, with its credentials
+DELETE /v1/secrets/projects/{project}/gateways/{id}                          an outside integration's setup: an admin's, with its credentials
+POST /v1/secrets/projects/{project}/github-apps                              an outside integration's setup: an admin's, with its credentials
+DELETE /v1/secrets/projects/{project}/github-apps/{id}                       an outside integration's setup: an admin's, with its credentials
+* /v1/secrets/projects/{project}/identities                                  an outside integration's setup: an admin's, with its credentials
+DELETE /v1/secrets/projects/{project}/identities/{id}                        an outside integration's setup: an admin's, with its credentials
+PATCH /v1/secrets/projects/{project}/identities/{id}                         an outside integration's setup: an admin's, with its credentials
+PUT /v1/secrets/projects/{project}/identities/{id}/jwks                      an outside integration's setup: an admin's, with its credentials
+* /v1/secrets/projects/{project}/kms                                         an outside integration's setup: an admin's, with its credentials
+POST /v1/secrets/projects/{project}/kubernetes                               an outside integration's setup: an admin's, with its credentials
+DELETE /v1/secrets/projects/{project}/kubernetes/{id}                        an outside integration's setup: an admin's, with its credentials
+POST /v1/secrets/projects/{project}/outside-databases                        an outside integration's setup: an admin's, with its credentials
+DELETE /v1/secrets/projects/{project}/outside-databases/{id}                 an outside integration's setup: an admin's, with its credentials
+PATCH /v1/secrets/projects/{project}/outside-databases/{id}                  an outside integration's setup: an admin's, with its credentials
+POST /v1/secrets/projects/{project}/outside-databases/{id}/rotate-admin      an outside integration's setup: an admin's, with its credentials
+POST /v1/secrets/projects/{project}/restore                                  a person's call (a project's secrets put back from a backup)
+POST /v1/secrets/projects/{project}/rotators                                 an outside integration's setup: an admin's, with its credentials
+DELETE /v1/secrets/projects/{project}/rotators/{id}                          an outside integration's setup: an admin's, with its credentials
+PATCH /v1/secrets/projects/{project}/rotators/{id}                           an outside integration's setup: an admin's, with its credentials
+POST /v1/secrets/projects/{project}/rotators/{id}/rotate-secret              an outside integration's setup: an admin's, with its credentials
+POST /v1/secrets/projects/{project}/saas                                     an outside integration's setup: an admin's, with its credentials
+DELETE /v1/secrets/projects/{project}/saas/{id}                              an outside integration's setup: an admin's, with its credentials
+POST /v1/secrets/projects/{project}/shares                                   answers or sets a credential
+POST /v1/secrets/projects/{project}/snowflake-accounts                       an outside integration's setup: an admin's, with its credentials
+DELETE /v1/secrets/projects/{project}/snowflake-accounts/{id}                an outside integration's setup: an admin's, with its credentials
+POST /v1/secrets/projects/{project}/ssh-cas                                  an outside integration's setup: an admin's, with its credentials
+DELETE /v1/secrets/projects/{project}/ssh-cas/{id}                           an outside integration's setup: an admin's, with its credentials
+POST /v1/secrets/projects/{project}/ssh-cas/{id}/sign-host                   an outside integration's setup: an admin's, with its credentials
+POST /v1/secrets/projects/{project}/ssh-cas/{id}/sign-user                   an outside integration's setup: an admin's, with its credentials
+POST /v1/secrets/projects/{project}/syncs/preview                            an outside integration's setup: an admin's, with its credentials
+DELETE /v1/secrets/projects/{project}/syncs/{id}                             an outside integration's setup: an admin's, with its credentials
+PATCH /v1/secrets/projects/{project}/syncs/{id}                              an outside integration's setup: an admin's, with its credentials
+POST /v1/secrets/projects/{project}/syncs/{id}/run                           an outside integration's setup: an admin's, with its credentials
+DELETE /v1/secrets/projects/{project}/transit/{name}                         a person's call: every ciphertext of the key stops opening
+GET /v1/secrets/projects/{project}/unstored/{fingerprint}                    no tool yet: a found credential's kind, place and liveness, never its value (#487)
+POST /v1/secrets/projects/{project}/validity                                 a person's call: it contacts outside providers (#487)
+GET /v1/secrets/projects/{project}/value-requests                            no tool yet: value requests (roll MCP adds the tools after batch 5)
+DELETE /v1/secrets/projects/{project}/value-requests/{id}                    no tool yet: value requests (roll MCP adds the tools after batch 5)
+GET /v1/secrets/whoami                                                       the operator's (health, migrations, process control)
+* /v1/storage/accounts/{id}                                                  an outside integration's setup: an admin's, with its credentials
+GET /v1/storage/api                                                          the dashboard's (the developer API's settings)
+PUT /v1/storage/api/auth                                                     answers or sets a credential
+POST /v1/storage/api/keys/rotate                                             answers or sets a credential
+POST /v1/storage/buckets/{name}/rules                                        a person's call: a preset can make a bucket public
+POST /v1/storage/buckets/{name}/url                                          answers or sets a credential
+GET /v1/storage/cdn                                                          an outside integration's setup: an admin's, with its credentials
+PATCH /v1/storage/cdn                                                        an outside integration's setup: an admin's, with its credentials
+GET /v1/storage/cdn/worker                                                   an outside integration's setup: an admin's, with its credentials
+POST /v1/storage/iam                                                         an outside integration's setup: an admin's, with its credentials
+POST /v1/storage/keys                                                        answers or sets a credential
+* /v1/storage/replication-targets/{name}                                     answers or sets a credential (a target's secret)
+POST /v1/storage/roles/{name}/sessions                                       answers or sets a credential (temporary credentials)
+POST /v1/storage/session-keys/rotate                                         answers or sets a credential
+POST /v1/streams/{s}/groups/{g}/commit                                       the data plane (clients' own protocol)
+DELETE /v1/streams/{s}/groups/{g}/consumers/{c}                              the data plane (clients' own protocol)
+POST /v1/streams/{s}/keys                                                    answers or sets a credential
+GET /v1/streams/{s}/topics/{t}/partitions/{p}/records                        the data plane (clients' own protocol)
+GET /v1/streams/{s}/topics/{t}/tail                                          the data plane (clients' own protocol)
+POST /v1/tasks/api-keys                                                      answers or sets a credential
+POST /v1/tasks/apps                                                          answers or sets a credential (an app's signing secret)
+POST /v1/tasks/batch                                                         the data plane (clients' own protocol)
+POST /v1/tasks/e/{*name}                                                     the data plane (clients' own protocol)
+GET /v1/tasks/health                                                         the operator's (health, migrations, process control)
+GET /v1/tasks/keys                                                           answers or sets a credential
+POST /v1/tasks/keys/rotate                                                   answers or sets a credential
+POST /v1/tasks/publish/{*destination}                                        the data plane (clients' own protocol)
+DELETE /v1/tasks/topics/{name}/endpoints                                     covered by tasks_set_topic (a topic's endpoints, whole)
+POST /v1/tasks/topics/{name}/endpoints                                       covered by tasks_set_topic (a topic's endpoints, whole)

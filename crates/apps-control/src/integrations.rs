@@ -144,6 +144,14 @@ pub trait SecretSource: Send + Sync {
     async fn ensure(&self, _project: &str, _env: &str) -> anyhow::Result<()> {
         Ok(())
     }
+    /// A token of roll's OIDC issuer for one instance of `service` in `env` (`sub =
+    /// roll-apps:<project>:<service>:<env>`), for `aud`, living `ttl` (an hour at most): what
+    /// clouds' federation and roll secrets' workload logins trust (docs/secrets.md, "roll's tokens
+    /// for other products"). An error when the project doesn't stand for the service. None: no
+    /// issuer here.
+    async fn issue(&self, _project: &str, _service: &str, _env: &str, _aud: &str, _ttl: std::time::Duration) -> anyhow::Result<Option<String>> {
+        Ok(None)
+    }
 }
 
 /// What's been said about a preview's page (roll previews' notes: docs/previews.md, "Feedback on
@@ -266,6 +274,15 @@ pub trait Visitors: Send + Sync {
     fn session_live(&self, user: &str, session: &str) -> bool;
 }
 
+/// A model that reads a failed deployment (rolld: the owner of the service's roll code repo's
+/// provider, through roll code, metered on their account). Unset: nothing is explained.
+#[async_trait]
+pub trait Explainer: Send + Sync {
+    /// Ask `repo`'s (`owner/name`) owner's model; the answer follows `schema`. `None`: it gave
+    /// none (declined, cut off). The answer and the model's name are untrusted.
+    async fn ask(&self, repo: &str, system: &str, user: &str, schema: &serde_json::Value) -> crate::Result<Option<(serde_json::Value, String)>>;
+}
+
 /// Email to a person through their account (rolld fills it with roll-accounts' mailer). Unset or
 /// off: no email targets.
 #[async_trait]
@@ -337,6 +354,36 @@ pub trait Resources: Send + Sync {
     async fn backlog(&self, _stream: &str, _group: &str) -> anyhow::Result<u64> {
         anyhow::bail!("roll streams isn't on this node")
     }
+    /// The next records of `topic` for `group`'s `consumer` (a server-managed group, offsets
+    /// committed by [`Resources::commit`] only), waiting up to `wait_ms` for one: what
+    /// `run.push` delivers. Each partition's records in order.
+    async fn read_group(&self, _stream: &str, _topic: &str, _group: &str, _consumer: &str, _wait_ms: u64, _limit: usize) -> anyhow::Result<Vec<StreamRecord>> {
+        anyhow::bail!("roll streams isn't on this node")
+    }
+    /// Commit `group`'s offset on a partition: `offset` is the next record to deliver.
+    async fn commit(&self, _stream: &str, _topic: &str, _group: &str, _consumer: &str, _partition: i32, _offset: i64) -> anyhow::Result<()> {
+        anyhow::bail!("roll streams isn't on this node")
+    }
+    /// `consumer` leaves `group`: its partitions are free for another at once.
+    async fn leave(&self, _stream: &str, _group: &str, _consumer: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+    /// Append a record to `topic` (a push's dead letters).
+    async fn produce(&self, _stream: &str, _topic: &str, _record: &StreamRecord) -> anyhow::Result<()> {
+        anyhow::bail!("roll streams isn't on this node")
+    }
+}
+
+/// One record of a roll stream, as `run.push` delivers it.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct StreamRecord {
+    pub partition: i32,
+    pub offset: i64,
+    /// Unix ms.
+    pub timestamp: i64,
+    pub key: Option<Vec<u8>>,
+    pub value: Option<Vec<u8>>,
+    pub headers: Vec<(String, Vec<u8>)>,
 }
 
 /// Credentials a link made for itself: its variables, and what revoking them needs.

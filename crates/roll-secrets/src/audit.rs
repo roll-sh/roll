@@ -346,9 +346,10 @@ impl Secrets {
         caller.need(Action::Read, &Scope::project(project))?;
         self.project(project)?;
         let mac = self.keys()?;
-        // Only keys whose private half opens with the deployment key: one a database writer added
-        // doesn't vouch for anything (issuer.rs).
-        let keys = crate::issuer::public_keys(&self.db, mac, &self.issuer_keys)?;
+        // The digest JWKS, as an offline check reads it: only keys whose private half opens with
+        // the deployment key vouch for anything (one a database writer added doesn't), and pulled
+        // ones never again (audit_key.rs).
+        let keys = crate::audit_key::verify_keys(&self.db, mac, &self.audit_keys, &self.issuer_keys)?;
         let from: Option<i64> = match q.since {
             Some(t) => self.db.read(|c| c.query_row("SELECT MAX(seq) FROM audit WHERE project_id = ? AND action = ? AND at <= ?", params![project, chain::DIGEST, t], |r| r.get(0)))?,
             None => None,
@@ -364,7 +365,7 @@ impl Secrets {
             let rows = self.db.read(|c| c.query(&format!("SELECT {COLUMNS} FROM audit WHERE project_id = ? AND seq > ? AND seq <= ? ORDER BY seq LIMIT ?"), params![project, after, upto, PAGE], row))?;
             let n = rows.len() as i64;
             for r in &rows {
-                if !walk.push(r, &mut |kid| keys.get(kid).cloned()) {
+                if !walk.push(r, &keys) {
                     return Ok(walk.finish());
                 }
                 after = r.seq.unwrap_or(after);
@@ -414,7 +415,8 @@ impl Secrets {
     /// The sweeper: sign a digest of each project's chain hourly, moved or not (so `verify` can tell
     /// a stale one), and cut what retention drops. Rows go only at a digest older than `keep_ms`,
     /// which is then where the log starts; the digest written with the cut signs that, in the cut's
-    /// transaction. Returns the digests written.
+    /// transaction. Signed with the digest key (audit_key.rs), never the issuer's. Returns the
+    /// digests written.
     #[doc(hidden)]
     pub fn sweep_audit_chain(&self, keep_ms: i64) -> Result<usize> {
         self.sweep_audit_chain_at(keep_ms, self.db.now_ms()?)
@@ -423,6 +425,32 @@ impl Secrets {
     /// [`Secrets::sweep_audit_chain`] at `now` (tests move the clock).
     #[doc(hidden)]
     pub fn sweep_audit_chain_at(&self, keep_ms: i64, now: i64) -> Result<usize> {
+        Ok(self.sign_digests(keep_ms, now, false)?.1)
+    }
+
+    /// What roll wrote before the digest key: digests signed with the issuer key (RS256). For the
+    /// legacy path's tests only.
+    #[doc(hidden)]
+    pub fn sweep_audit_chain_as_before_the_digest_key(&self, keep_ms: i64) -> Result<usize> {
+        Ok(self.sign_digests(keep_ms, self.db.now_ms()?, true)?.1)
+    }
+
+    /// Sign every chain that's due now, page after page (an emergency rotation of the digest key
+    /// made them all due). How many digests were written.
+    pub(crate) fn sign_due_digests(&self) -> Result<usize> {
+        let mut written = 0;
+        for _ in 0..10_000 {
+            let (due, n) = self.sign_digests(RETENTION_DAYS * 86_400_000, self.db.now_ms()?, false)?;
+            written += n;
+            if due == 0 {
+                break;
+            }
+        }
+        Ok(written)
+    }
+
+    /// One pass of the signer at `now`: (projects due, digests written).
+    fn sign_digests(&self, keep_ms: i64, now: i64, issuer_key: bool) -> Result<(usize, usize)> {
         let cutoff = now - keep_ms;
         // Rows from before the chain began go by age, as every row did.
         self.db.write(|c| c.execute("DELETE FROM audit WHERE seq IS NULL AND at < ?", [cutoff]))?;
@@ -435,11 +463,27 @@ impl Secrets {
             )
         })?;
         if due.is_empty() {
-            return Ok(0);
+            return Ok((0, 0));
         }
-        let Ok(mac) = self.keys() else { return Ok(0) };
-        let (kid, key) = crate::issuer::signer(&self.db, mac)?;
-        let mut written = 0;
+        let Ok(mac) = self.keys() else { return Ok((0, 0)) };
+        enum Signer {
+            Digest(String, ring::signature::Ed25519KeyPair),
+            Issuer(String, ring::signature::RsaKeyPair),
+        }
+        let signer = if issuer_key {
+            let (kid, key) = crate::issuer::signer(&self.db, mac)?;
+            Signer::Issuer(kid, key)
+        } else {
+            let (kid, key) = crate::audit_key::signer(&self.db, mac, &self.audit_keys, &self.issuer_keys)?;
+            Signer::Digest(kid, key)
+        };
+        let sign = |d: &Digest| -> Result<String> {
+            match &signer {
+                Signer::Digest(kid, key) => Ok(chain::sign(kid, key, d)),
+                Signer::Issuer(kid, key) => chain::sign_rs256(kid, key, d).map_err(|_| Error::Internal("signing a digest failed".into())),
+            }
+        };
+        let (n, mut written) = (due.len(), 0);
         for project in due {
             // The write is the claim: a node that comes second finds nothing due.
             let wrote = self.db.write(|c| {
@@ -488,7 +532,7 @@ impl Secrets {
                     actor: chain::DIGEST_ACTOR.into(),
                     action: chain::DIGEST.into(),
                     summary,
-                    digest: Some(chain::sign(&kid, &key, &d).map_err(|_| Error::Internal("signing a digest failed".into()))?),
+                    digest: Some(sign(&d)?),
                     ..AuditEntry::default()
                 };
                 let own = append(c, mac, &project, std::slice::from_ref(&e), Some(start))?;
@@ -497,6 +541,6 @@ impl Secrets {
             })?;
             written += usize::from(wrote);
         }
-        Ok(written)
+        Ok((n, written))
     }
 }

@@ -372,6 +372,9 @@ impl Engine {
             None => Vec::new(),
         };
         let mut compared = compare_routes(&mine, &main);
+        // Each one's budget (`github.budget.routes`), read by its own name before names are masked.
+        let budget = self.store.settings(&r.project_id).map(|s| s.github.budget.routes).unwrap_or_default();
+        let budgets: Vec<Option<u64>> = compared.iter().map(|c| budget.get(&c.name).map(|b| u64::from(*b))).collect();
         // A slower one says where its time went (its spans against main's, kept on this node).
         let mut grown: Vec<Option<crate::GrewSpan>> = compared.iter().map(|c| if c.slower { base.as_ref().and_then(|b| self.grew_in(id, &b.id, &c.name)) } else { None }).collect();
         if !compared.is_empty() {
@@ -395,7 +398,11 @@ impl Engine {
         let routes: Vec<Value> = compared
             .into_iter()
             .zip(grown)
-            .map(|(c, g)| json!({ "name": c.name, "count": c.count, "p50_ms": c.p50, "p95_ms": c.p95, "main_p50_ms": c.main_p50, "main_count": c.main_count, "slower": c.slower, "repeated": c.repeated, "grew": g }))
+            .zip(budgets)
+            .map(|((c, g), b)| {
+                let over = b.is_some_and(|b| c.count >= MIN_SAMPLES && c.p50 > b);
+                json!({ "name": c.name, "count": c.count, "p50_ms": c.p50, "p95_ms": c.p95, "main_p50_ms": c.main_p50, "main_count": c.main_count, "slower": c.slower, "repeated": c.repeated, "grew": g, "budget_ms": b, "over_budget": over })
+            })
             .collect();
         Ok(json!({ "minutes": minutes, "main": base.map(|b| b.id), "routes": routes }))
     }
@@ -495,45 +502,77 @@ impl Engine {
     /// Only the slower few are masked, and only names not masked before (an audited read of its
     /// values); it's reported again only when which routes are slower moves, not their times.
     async fn read_routes_of(&self, r: crate::store::Row, main: Option<(crate::store::Row, Vec<RouteStat>)>) {
-        let kept = match main {
-            None => None,
-            Some((base, main)) => {
-                let Ok(rows) = self.trace_rows(&r.id, 60).await else { return };
-                let mut slower: Vec<RouteCompared> = compare_routes(&route_stats(&rows), &main).into_iter().filter(|c| c.slower).collect();
-                slower.sort_by_key(|c| std::cmp::Reverse(c.p50.saturating_sub(c.main_p50.unwrap_or_default())));
-                slower.truncate(crate::SlowerRoutes::MAX);
-                if slower.is_empty() {
-                    None
-                } else {
-                    // Where each one's time went: its spans against main's (both kept here).
-                    let grown: Vec<Option<crate::GrewSpan>> = slower.iter().map(|c| self.grew_in(&r.id, &base.id, &c.name)).collect();
-                    let known = self.routes_masked.lock().get(&r.id).cloned().unwrap_or_default();
-                    let mut fresh: Vec<String> = slower.iter().map(|c| c.name.clone()).chain(grown.iter().flatten().map(|g| g.span.clone())).filter(|n| !known.contains_key(n)).collect();
-                    fresh.sort();
-                    fresh.dedup();
-                    let mut names = known;
-                    if !fresh.is_empty() {
-                        let Ok(masked) = self.masked(&r.id, fresh.clone()).await else { return };
-                        names.extend(fresh.into_iter().zip(masked));
+        // The routes the project holds to a time of their own (`github.budget.routes`): over it is a
+        // regression whatever main's does, and needs no main to tell.
+        let budget = self.store.settings(&r.project_id).map(|s| s.github.budget.routes).unwrap_or_default();
+        let kept = if main.is_none() && budget.is_empty() {
+            None
+        } else {
+            let Ok(rows) = self.trace_rows(&r.id, 60).await else { return };
+            let mine = route_stats(&rows);
+            let (branch, base, compared) = match &main {
+                Some((base, main)) => {
+                    if self.store.set_runtime_fact(&r.id, "compared_routes", Some(&r.head)).unwrap_or(false) {
+                        self.report(r.clone()).await;
                     }
-                    let routes = slower
-                        .iter()
-                        .zip(grown)
-                        .map(|(c, g)| crate::SlowerRoute {
-                            name: names.get(&c.name).cloned().unwrap_or_default(),
-                            count: c.count,
-                            p50_ms: c.p50,
-                            main_p50_ms: c.main_p50.unwrap_or_default(),
-                            grew: g.map(|g| crate::GrewSpan { span: names.get(&g.span).cloned().unwrap_or_default(), ..g }),
-                        })
-                        .collect();
-                    self.routes_masked.lock().insert(r.id.clone(), names);
-                    Some(crate::SlowerRoutes { branch: base.branch.clone().unwrap_or_else(|| "main".into()), routes })
+                    (base.branch.clone().unwrap_or_else(|| "main".into()), Some(base.id.clone()), compare_routes(&mine, main))
                 }
+                None => ("main".to_string(), None, compare_routes(&mine, &[])),
+            };
+            // Over a budget at this head stays over until clearly under it (90%): a route at its line
+            // doesn't flip the status (and the blocker) every round.
+            let before: Option<crate::SlowerRoutes> = self.store.runtime_fact::<crate::SlowerRoutes>(&r.id, "slower_routes").ok().flatten().filter(|f| f.head == r.head);
+            let masked_now = self.routes_masked.lock().get(&r.id).cloned().unwrap_or_default();
+            let was_over: std::collections::HashSet<String> = before
+                .iter()
+                .flat_map(|f| f.routes.iter().filter(|x| x.budget_ms.is_some()).map(|x| x.name.clone()))
+                .flat_map(|shown| masked_now.iter().filter(move |(_, m)| **m == shown).map(|(raw, _)| raw.clone()))
+                .collect();
+            let over = |c: &RouteCompared| {
+                budget.get(&c.name).map(|b| u64::from(*b)).filter(|b| c.count >= MIN_SAMPLES && (c.p50 > *b || (was_over.contains(&c.name) && c.p50 * 10 > b * 9)))
+            };
+            let mut slower: Vec<(RouteCompared, Option<u64>)> = compared
+                .into_iter()
+                .filter_map(|c| {
+                    let b = over(&c);
+                    (c.slower || b.is_some()).then_some((c, b))
+                })
+                .collect();
+            // The most over (main's time or its budget) first.
+            slower.sort_by_key(|(c, b)| std::cmp::Reverse(c.p50.saturating_sub(b.or(c.main_p50).unwrap_or_default())));
+            slower.truncate(crate::SlowerRoutes::MAX);
+            if slower.is_empty() {
+                None
+            } else {
+                // Where each one slower than main's time went: its spans against main's (both kept here).
+                let grown: Vec<Option<crate::GrewSpan>> = slower.iter().map(|(c, _)| base.as_deref().filter(|_| c.slower).and_then(|b| self.grew_in(&r.id, b, &c.name))).collect();
+                let known = self.routes_masked.lock().get(&r.id).cloned().unwrap_or_default();
+                let mut fresh: Vec<String> = slower.iter().map(|(c, _)| c.name.clone()).chain(grown.iter().flatten().map(|g| g.span.clone())).filter(|n| !known.contains_key(n)).collect();
+                fresh.sort();
+                fresh.dedup();
+                let mut names = known;
+                if !fresh.is_empty() {
+                    let Ok(masked) = self.masked(&r.id, fresh.clone()).await else { return };
+                    names.extend(fresh.into_iter().zip(masked));
+                }
+                let routes = slower
+                    .iter()
+                    .zip(grown)
+                    .map(|((c, b), g)| crate::SlowerRoute {
+                        name: names.get(&c.name).cloned().unwrap_or_default(),
+                        count: c.count,
+                        p50_ms: c.p50,
+                        main_p50_ms: c.main_p50.unwrap_or_default(),
+                        grew: g.map(|g| crate::GrewSpan { span: names.get(&g.span).cloned().unwrap_or_default(), ..g }),
+                        budget_ms: *b,
+                    })
+                    .collect();
+                self.routes_masked.lock().insert(r.id.clone(), names);
+                Some(crate::SlowerRoutes { branch, routes, head: r.head.clone() })
             }
         };
         let names = |f: &Option<crate::SlowerRoutes>| {
-            let mut n: Vec<String> = f.iter().flat_map(|s| s.routes.iter().map(|x| x.name.clone())).collect();
+            let mut n: Vec<String> = f.iter().flat_map(|s| s.routes.iter().map(|x| format!("{}\0{:?}", x.name, x.budget_ms))).collect();
             n.sort();
             n
         };

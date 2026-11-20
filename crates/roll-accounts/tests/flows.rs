@@ -43,6 +43,8 @@ impl Owners for FakeOwners {
 struct Seen {
     challenge: HashMap<String, String>,
     nonce: HashMap<String, String>,
+    /// The fake GitHub's login for its user (`Ada-L` when not set): renamed by a test.
+    github_login: Option<String>,
 }
 
 struct Env {
@@ -98,7 +100,7 @@ async fn fake_providers(seen: Arc<Mutex<Seen>>) -> String {
     let base = Arc::new(Mutex::new(String::new()));
     let app = Router::new()
         .route("/token", post(token))
-        .route("/user", get(|| async { Json(json!({ "id": 42, "login": "Ada-L", "name": "Ada Lovelace" })) }))
+        .route("/user", get(|State(s): State<S>| async move { Json(json!({ "id": 42, "login": s.seen.lock().unwrap().github_login.clone().unwrap_or_else(|| "Ada-L".into()), "name": "Ada Lovelace" })) }))
         .route(
             "/user/emails",
             get(|| async { Json(json!([{ "email": "ada@old.example", "primary": false, "verified": true }, { "email": "ada@example.com", "primary": true, "verified": true }])) }),
@@ -316,9 +318,13 @@ async fn github_and_google_sign_in() {
     assert_eq!((a.status, location(&a)), (StatusCode::SEE_OTHER, "https://roll.test/dashboard/code"));
     let me = env.call(&mut b, Method::GET, "/v1/accounts/me", None).await;
     assert_eq!((me.json["handle"].as_str(), me.json["identities"][0]["login"].as_str()), (Some("ada-l"), Some("Ada-L")), "{}", me.json);
-    // Once linked, the identity signs in without an invite.
-    let a = env.oauth(&mut Browser::default(), "github", json!({})).await;
+    // Once linked, the identity signs in without an invite; a login renamed on GitHub since follows.
+    env.seen.lock().unwrap().github_login = Some("Ada-New".into());
+    let mut b = Browser::default();
+    let a = env.oauth(&mut b, "github", json!({})).await;
     assert_eq!(location(&a), "https://roll.test/dashboard");
+    let me = env.call(&mut b, Method::GET, "/v1/accounts/me", None).await;
+    assert_eq!(me.json["identities"][0]["login"].as_str(), Some("Ada-New"), "{}", me.json);
 
     // No invite, no account: refused.
     let a = env.oauth(&mut Browser::default(), "google", json!({})).await;
