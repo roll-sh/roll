@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Preview } from "./previews-api";
 import { verdict } from "./preview-verdict";
+import { parseRouteBudgets } from "./previews-api";
 
 const base = { services: [], schema_risks: [], base_change: null, visual_review: null, page_health: null, page_links: null, page_a11y: null } as unknown as Preview;
 
@@ -27,5 +28,12 @@ describe("verdict", () => {
       ["routes", "1 route slower than main", "note"],
       ["visual", "1 page moves by itself", "note"],
     ]);
+  });
+
+  it("says a route over its budget as a danger", () => {
+    const p = { ...base, slower_routes: { branch: "main", routes: [{ name: "GET /new", count: 9, p50_ms: 400, main_p50_ms: 0, budget_ms: 300 }] } } as unknown as Preview;
+    expect(verdict(p).map((v) => [v.target, v.text, v.tone])).toEqual([["routes", "1 route slower than main or over budget", "danger"]]);
+    // The rules dialog's lines: a route (spaces and numbers in it too) then its milliseconds.
+    expect(parseRouteBudgets("GET /items/2 300\nPOST /pay 800ms\nGET /x: fast")).toEqual({ routes: { "GET /items/2": 300, "POST /pay": 800 }, bad: ["GET /x: fast"] });
   });
 });

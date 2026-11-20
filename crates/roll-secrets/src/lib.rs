@@ -31,6 +31,7 @@ pub mod rotators;
 pub mod saas;
 mod strength;
 mod audit;
+pub mod audit_key;
 pub use roll_secrets_chain as chain;
 pub mod backup;
 pub mod crypto;
@@ -38,6 +39,7 @@ pub mod dotenv;
 mod envs;
 pub mod exports;
 pub mod find;
+mod found;
 pub mod identities;
 pub mod insights;
 pub mod leaks;
@@ -63,6 +65,7 @@ mod purge;
 mod requests;
 mod required;
 mod shares;
+pub mod value_requests;
 pub mod sinks;
 pub mod suggestions;
 mod sweep;
@@ -80,18 +83,21 @@ pub use api::router;
 pub use crypto::{Keyring, Value};
 pub use audit::{AuditEntry, AuditFilter, VerifyQuery};
 pub use chain::Verification;
-pub use consumers::{Reference, Refusal, Resolved, ResourceRef};
+pub use consumers::{Maker, Reference, Refusal, Resolved, ResourceRef};
 pub use envs::{Branch, EnvChange, Ensure, Ensured, Environment, Folder, Import, Kind as EnvironmentKind, NewEnvironment, Policy};
 pub use leaks::Leak;
-pub use links::{Link, LinkProvider, Links, Mode};
+pub use found::{FoundStored, FoundTarget};
+pub use links::{Link, LinkProvider, Links, Mode, Planted};
 pub use metrics::Metrics;
 pub use read::{Followed, Grid, Problem, Secret, Source, Values, Version};
 pub use requests::{Request, RequestValue, Review, Verdict};
 pub use exports::Export;
 pub use decoys::{Decoy, NewDecoy};
 pub use identities::{Identity, IdentityKind, Login, NewIdentity, Proof};
+pub use issuer::Subject;
 pub use required::Required;
 pub use shares::{NewShare, Peek, Share};
+pub use value_requests::{Answer, NewValueRequest, ValuePeek, ValueRequest};
 pub use sweep::{Lease, Swept};
 pub use sinks::{Deliver, NewSink, Sink};
 pub use syncs::{NewSync, Push, SecretSync, SyncField, SyncKind, SyncTarget, Syncs};
@@ -288,6 +294,9 @@ pub enum Error {
     /// outage: `roll run --fallback` doesn't start from its file on it.
     #[error("{0}")]
     KeyDenied(String),
+    /// 410 `gone`: a secret request already answered, expired or cancelled.
+    #[error("{0}")]
+    Gone(String),
     /// 423 `frozen`: an admin froze the folder during an incident (`…/reach/cut-off`); only its
     /// admins (people and tokens, never roll's own readers: `Caller::reads_frozen`) read it until
     /// one unfreezes it. Never an outage either.
@@ -404,6 +413,8 @@ pub struct Secrets {
     oidc: oidc::Keys,
     /// Logins per identity and per client address in the last minute.
     logins: oidc::Window,
+    /// Answers to secret requests per request and per client address in the last minute.
+    answers: oidc::Window,
     /// How many reads of values a principal may make a minute (read.rs, `read_quota`; 0: no limit).
     reads_per_minute: std::sync::atomic::AtomicU32,
     /// roll code's search, once rolld has it (health's `code` check).
@@ -421,6 +432,12 @@ pub struct Secrets {
     live_fps: read::LiveFps,
     /// Which issuer key rows are roll's, as last checked (issuer.rs).
     issuer_keys: issuer::Checked,
+    /// Days between the issuer key's scheduled rotations (issuer.rs).
+    issuer_rotate_days: std::sync::atomic::AtomicU32,
+    /// Which audit digest key rows are roll's, as last checked (audit_key.rs).
+    audit_keys: audit_key::Checked,
+    /// Days between the digest key's scheduled rotations (audit_key.rs).
+    audit_rotate_days: std::sync::atomic::AtomicU32,
     /// Folders' digests as last computed, each with the database state it came from (read.rs).
     digests: read::Digests,
     /// ACME's challenge checks and nonce key (acme.rs).
@@ -445,6 +462,11 @@ impl Secrets {
     pub fn new(db: Db, workspace: Arc<roll_workspace::Workspace>, opts: Options) -> Result<Secrets> {
         db.ensure_schema(SCHEMA)?;
         db.ensure_schema(shares::SCHEMA)?;
+        db.ensure_schema(value_requests::SCHEMA)?;
+        // Secret requests' answer tokens (value_requests.rs), by digest; requests made before
+        // them have none and can't be answered.
+        db.add_column("value_requests", "token_hash", "TEXT")?;
+        db.ensure_schema("CREATE UNIQUE INDEX IF NOT EXISTS value_requests_token ON value_requests (token_hash);")?;
         db.ensure_schema(read::READS_SCHEMA)?;
         db.ensure_schema(syncs::SCHEMA)?;
         db.ensure_schema(sinks::SCHEMA)?;
@@ -529,6 +551,12 @@ impl Secrets {
         // How a role trusts roll (aws.rs): absent is the ExternalId, as before there were two.
         db.add_column("aws_roles", "trust", "TEXT")?;
         db.ensure_schema(issuer::SCHEMA)?;
+        db.ensure_schema(audit_key::SCHEMA)?;
+        // The issuer key's rotation (issuer.rs): when a key signs from, and when it left the JWKS.
+        db.add_column("oidc_keys", "signs_from", "INTEGER")?;
+        db.add_column("oidc_keys", "retired_at", "INTEGER")?;
+        // An emergency rotation pulled it out of the JWKS at once (health names it a while).
+        db.add_column("oidc_keys", "pulled_at", "INTEGER")?;
         db.ensure_schema(clouds::SCHEMA)?;
         db.ensure_schema(iam::SCHEMA)?;
         // An incident's cut-off (cutoff.rs): frozen folders, disabled identities, paused syncs,
@@ -556,6 +584,12 @@ impl Secrets {
             };
             links.register(Arc::new(aws::Provider { db: db.clone(), sts: sts.clone(), issuing }));
             links.register(Arc::new(iam::Provider { db: db.clone(), sts: sts.clone() }));
+        }
+        let (audit_keys, issuer_keys) = (audit_key::Checked::default(), issuer::Checked::default());
+        // The audit log's digest key first: a deployment's first issuer key then never counts as
+        // one that signed digests before it (audit_key.rs, `legacy`).
+        if let Ok(keys) = &opts.keyring {
+            audit_key::ensure_key(&db, keys, &audit_keys, &issuer_keys)?;
         }
         if let (Some(c), Ok(keys)) = (&opts.clouds, &opts.keyring) {
             // The issuer's key exists before anyone asks for its public half.
@@ -609,7 +643,7 @@ impl Secrets {
         if let (Some(github), Ok(keys)) = (&opts.github, &opts.keyring) {
             links.register(Arc::new(github_app::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone(), github: github.clone() }));
         }
-        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, workloads: opts.workloads, gateway_links: opts.gateways, unwrap: unwrap.clone(), open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, outside: opts.outside, directory: opts.directory, github: opts.github, oidc: Default::default(), logins: Default::default(), reads_per_minute: read::READS_PER_MINUTE.into(), code_refs: Default::default(), sts: opts.sts.clone(), clouds: opts.clouds, public_api, aws_server_id: Default::default(), crls, live_fps: Default::default(), issuer_keys: Default::default(), digests: Default::default(), counters: Default::default(), acme: Default::default(), recorder: Default::default(), bound_hosts: Default::default() })
+        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, workloads: opts.workloads, gateway_links: opts.gateways, unwrap: unwrap.clone(), open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, outside: opts.outside, directory: opts.directory, github: opts.github, oidc: Default::default(), logins: Default::default(), answers: Default::default(), reads_per_minute: read::READS_PER_MINUTE.into(), code_refs: Default::default(), sts: opts.sts.clone(), clouds: opts.clouds, public_api, aws_server_id: Default::default(), crls, live_fps: Default::default(), issuer_keys: Default::default(), issuer_rotate_days: issuer::ROTATE_DAYS.into(), audit_keys: Default::default(), audit_rotate_days: audit_key::ROTATE_DAYS.into(), digests: Default::default(), counters: Default::default(), acme: Default::default(), recorder: Default::default(), bound_hosts: Default::default() })
     }
 
     pub fn links(&self) -> &Links {
@@ -691,15 +725,21 @@ impl Secrets {
                         None => keys.open_dek(p, d).map(|(_, r)| r.is_some()).unwrap_or(true),
                     })
                     .count();
-                // The issuer's signing key is sealed with the deployment key too: resealed here, and
-                // the previous key isn't "done with" while one still needs it.
-                let issuer_old = if self.clouds.is_some() { issuer::reseal(&self.db, keys)? } else { 0 };
+                // The issuer's signing key and the audit log's digest keys are sealed with the
+                // deployment key too: resealed here, and the previous key isn't "done with" while one
+                // still needs it.
+                let issuer_old = if self.clouds.is_some() { issuer::reseal(&self.db, keys)? } else { 0 } + audit_key::reseal(&self.db, keys)?;
                 if old == 0 && issuer_old == 0 { serde_json::json!("all") } else { serde_json::json!(rows.len() - old) }
             }
             Err(_) => serde_json::Value::Null,
         };
         let customer_managed = self.db.read(|c| c.query_row("SELECT COUNT(*) FROM projects WHERE dek LIKE 'kms:%'", (), |r| r.get::<_, i64>(0)))?;
-        Ok(serde_json::json!({ "ok": self.keys.is_ok(), "key": self.key_source, "resealed": resealed, "customer_managed": customer_managed, "links": self.links.kinds().map(|p| p.kind().to_string()).collect::<Vec<_>>(), "syncs": self.syncs.kinds().map(|t| t.kind().to_string()).collect::<Vec<_>>() }))
+        // Issuer keys an emergency rotation pulled: what still trusted them needs to know.
+        let pulled: Vec<serde_json::Value> = issuer::pulled(&self.db)?
+            .into_iter()
+            .map(|(kid, at)| serde_json::json!({ "kid": kid, "pulled_at": at, "detail": format!("roll's issuer key {kid} was pulled: tokens it signed no longer verify, and a cloud trust or verifier that pinned it (not roll's JWKS) needs the new key") }))
+            .collect();
+        Ok(serde_json::json!({ "ok": self.keys.is_ok(), "key": self.key_source, "resealed": resealed, "customer_managed": customer_managed, "issuer_pulled": pulled, "links": self.links.kinds().map(|p| p.kind().to_string()).collect::<Vec<_>>(), "syncs": self.syncs.kinds().map(|t| t.kind().to_string()).collect::<Vec<_>>() }))
     }
 
     /// Forget everything about a project (its workspace project was deleted). What it issued is
@@ -711,7 +751,7 @@ impl Secrets {
         let failed = self.revoke_managed(self.managed_where("project_id = ?", project));
         let now = self.db.now_ms()?;
         self.db.write(|c| {
-            for t in ["secrets", "versions", "changes", "requests", "audit", "required", "shares", "syncs", "audit_sinks", "notices", "identities", "identity_logins", "transit_keys"] {
+            for t in ["secrets", "versions", "changes", "requests", "audit", "required", "shares", "value_requests", "syncs", "audit_sinks", "notices", "identities", "identity_logins", "transit_keys", "oidc_issued"] {
                 c.execute(&format!("DELETE FROM {t} WHERE project_id = ?"), [project])?;
             }
             c.execute("DELETE FROM leases WHERE project_id = ? AND revoked_at IS NOT NULL", [project])?;
