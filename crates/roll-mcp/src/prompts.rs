@@ -170,7 +170,9 @@ const PROMPTS: &[Prompt] = &[
                  knows (a crash loop, a spend cap, maintenance, a failed deploy with its error_detail). Then \
                  apps_activity with all for the timeline (deploys, failures, crash loops, alerts), and apps_route_stats \
                  for which routes fail or slowed (5xx, p95). Call apps_list_deploys to see what changed and when (apps_deploy_commits for what the newest deploy brought); apps_deploy_logs \
-                 for the newest deploy if it failed; apps_logs with http and a status of 500 for the failing \
+                 for the newest deploy if it failed (and, if you have it, apps_explain_deploy: the repo owner's model \
+                 reads its error and logs, and its answer is kept); apps_errors for the errors grouped, newest \
+                 regressions first; apps_logs with http and a status of 500 for the failing \
                  requests, and without http for errors; apps_metrics for CPU and memory. Tell me the most likely \
                  cause with the evidence. If the newest deploy caused it, offer apps_rollback_previous; it puts back \
                  that deploy's variables too, and in production it may ask a person first. Don't roll back without \

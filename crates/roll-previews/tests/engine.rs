@@ -1221,6 +1221,19 @@ async fn earlier_pushes_stay_reachable_at_their_own_urls() {
     assert_eq!(earlier, ["cs_8d", "cs_8c", "cs_8b"]);
     assert!(view.earlier.iter().all(|x| x.service == "web" && x.url != view.url.clone().unwrap()));
     assert!(e.apps.removed.lock().contains(&(p.id.clone(), "web@cs_8a".into())), "the oldest's container goes");
+    // Its link says it's gone, with the way to the latest (not a 404 that reads as broken).
+    let label = |url: &str| url.split("://").nth(1).unwrap().split('.').next().unwrap().to_string();
+    let b = view.earlier.iter().find(|x| x.revision == "cs_8b").unwrap();
+    let a = label(&b.url).replacen("-8b-", "-8a-", 1);
+    let web = view.services.iter().find(|x| x.name == "web").map(|x| x.url.clone());
+    let gone = roll_previews::store::GonePush { preview: p.id.clone(), service: "web".into(), revision: "cs_8a".into(), current_url: web };
+    assert_eq!(e.engine.store.gone_push(&a).unwrap(), Some(gone.clone()), "that service's latest push");
+    // Under the project's own preview domain too, and only that project's.
+    let none = |_: &str| String::new();
+    e.engine.store.set_project_domain(&e.project, Some(("preview.acme.dev", true)), &none, &none).unwrap();
+    e.engine.store.set_project_domain("prj_other", Some(("preview.other.dev", false)), &none, &none).unwrap();
+    assert_eq!(e.engine.store.gone_domain_push(&a, "preview.acme.dev").unwrap(), Some(gone));
+    assert_eq!(e.engine.store.gone_domain_push(&a, "preview.other.dev").unwrap(), None);
     // An earlier push runs its own head on its own host.
     let (t, _) = e.engine.env(&p.id, "web@cs_8c").await.unwrap();
     assert_eq!(t.revision, "cs_8c");
@@ -1346,6 +1359,23 @@ async fn a_rules_reference_to_another_environment_needs_its_writers_reveal_there
     e.engine.store.update(&p.id, |row| row.next_at = 0).unwrap();
     e.engine.pass().await.unwrap();
     assert!(e.secrets.refs.lock().iter().any(|(k, _)| k == "K"));
+
+    // A preview's own variable may be one too: its setter's reveal there, read as them.
+    let signed = |user: &str| roll_auth::SignedIn { user: user.into(), handle: user.into(), admin: false, code_owner: None, session: "ses_1".into() };
+    let (b, c) = (signed("usr_b"), signed("usr_c"));
+    let own = |v: &str| std::collections::BTreeMap::from([("OWN".to_string(), Some(v.to_string()))]);
+    let by = |u| roll_previews::ports::Asker { operator: false, user: Some(u), grant: None };
+    assert!(matches!(e.engine.set_vars_as(&p.id, own("roll://staging/payments/OWN"), &by(&c)).await, Err(roll_previews::Error::Forbidden(_))), "no reveal there");
+    e.engine.set_vars_as(&p.id, own("roll://staging/payments/OWN"), &by(&b)).await.unwrap();
+    e.engine.pass().await.unwrap();
+    assert!(e.secrets.refs.lock().iter().any(|(k, _)| k == "OWN"), "{:?}", e.secrets.refs.lock());
+    // Saving the rules keeps it its setter's; a setter who can't now leaves it out.
+    e.engine.store.set_env_refs(&e.project, &roll_previews::settings::references(&st), "usr_b").unwrap();
+    assert!(e.engine.store.env_ref_writers(&e.project).unwrap().iter().any(|(scope, name, _, by)| *scope == format!("preview:{}", p.id) && name == "OWN" && by == "usr_b"));
+    e.engine.store.set_var_ref(&e.project, &p.id, "OWN", Some(("roll://staging/payments/OWN", "usr_gone"))).unwrap();
+    e.engine.store.update(&p.id, |row| row.next_at = 0).unwrap();
+    e.engine.pass().await.unwrap();
+    assert!(!e.secrets.refs.lock().iter().any(|(k, _)| k == "OWN"));
 }
 
 /// A variable set while a deploy is still going, then removed, is removed from the backend too:
