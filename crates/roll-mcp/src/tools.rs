@@ -135,7 +135,11 @@ impl Tool {
     /// Whether any grant may call it (an `AnyGrant` route).
     /// Which area of its product's toolset this tool is in (`?toolsets=apps.observe`).
     pub fn area(&self) -> Area {
-        if self.product == "apps" { apps_area(self.method, self.path) } else { Area::Every }
+        match self.product {
+            "apps" => apps_area(self.method, self.path),
+            "secrets" => secrets_area(self.method, self.path),
+            _ => Area::Every,
+        }
     }
 
     pub fn open(&self) -> bool {
@@ -317,7 +321,7 @@ impl Tool {
 /// The areas a product's toolset splits into, as GitHub's server splits its own: a client with a
 /// tool limit (Windsurf 100, Cursor about 40) takes the area it works in. Only apps so far: alone it
 /// is 89 tools, at Windsurf's limit with the access tools.
-pub const AREAS: &[(&str, &[&str])] = &[("apps", &["observe", "deploy", "configure", "project"])];
+pub const AREAS: &[(&str, &[&str])] = &[("apps", &["observe", "deploy", "configure", "project"]), ("secrets", &["values", "security", "integrations"])];
 
 /// Where a tool sits in its product's areas.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -327,6 +331,36 @@ pub enum Area {
     One(&'static str),
     /// A route the table below doesn't place: a test fails until it does.
     Unplaced,
+}
+
+/// A secrets tool's area, from its route: the values themselves (keys, folders, environments and
+/// what moves them), who reaches them and what's wrong (audit, findings, shares), or what roll
+/// keeps for outside systems (transit, leases, clouds, CAs, syncs).
+fn secrets_area(method: &str, path: &str) -> Area {
+    let Some(rest) = path.strip_prefix("/v1/secrets") else { return Area::Unplaced };
+    let parts: Vec<&str> = rest.split('/').filter(|s| !s.is_empty() && !s.starts_with('{')).collect();
+    let read = method == "GET";
+    let area = match parts.as_slice() {
+        // A project and its environments: every area starts there.
+        ["projects"] | ["projects", "environments"] if read => return Area::Every,
+        ["findings", ..] => "security",
+        ["search", ..] => "values",
+        ["projects", "environments", s, ..] => match *s {
+            "secrets" | "changes" | "diff" | "folders" | "import" | "imports" | "exports" | "order" | "promote" | "rollback" | "requests" | "value-requests" | "values" => "values",
+            "reach" | "insights" | "folder-policies" => "security",
+            _ => return Area::Unplaced,
+        },
+        ["projects", "environments"] | ["projects"] => "values",
+        ["projects", s, ..] => match *s {
+            "grid" | "compare" | "required" | "shared" | "suggestions" | "links" | "value-requests" => "values",
+            "audit" | "health" | "leaks" | "shares" | "rotations" | "backup" => "security",
+            "transit" | "leases" | "cas" | "ssh-cas" | "atlas-projects" | "aws-roles" | "aws-users" | "cloud-accounts" | "directories" | "gateways" | "github-apps"
+            | "kubernetes" | "outside-databases" | "rotators" | "saas" | "snowflake-accounts" | "syncs" => "integrations",
+            _ => return Area::Unplaced,
+        },
+        _ => return Area::Unplaced,
+    };
+    Area::One(area)
 }
 
 /// An apps tool's area, from its route: what an agent does with it (watch, ship, set up, run the
@@ -1469,13 +1503,16 @@ mod tests {
         // Taking a status page down deletes its incidents too: a write the catalogue calls write.
         assert_eq!(def("apps_remove_status_page")["annotations"]["destructiveHint"], true);
         // Every apps tool has an area (or is a lookup every area lists), and each area is a fraction of the whole.
-        let apps: Vec<&Tool> = all().iter().filter(|t| t.product == "apps").collect();
-        let unplaced: Vec<&str> = apps.iter().filter(|t| t.area() == Area::Unplaced).map(|t| t.name).collect();
-        assert!(unplaced.is_empty(), "apps tools with no area (add their route to apps_area): {unplaced:?}");
-        for area in AREAS[0].1 {
-            let n = apps.iter().filter(|t| matches!(t.area(), Area::Every) || t.area() == Area::One(area)).count();
-            assert!(n > 5 && n < 45, "apps.{area}: {n} tools");
+        for (product, areas) in AREAS {
+            let tools: Vec<&Tool> = all().iter().filter(|t| t.product == *product).collect();
+            let unplaced: Vec<&str> = tools.iter().filter(|t| t.area() == Area::Unplaced).map(|t| t.name).collect();
+            assert!(unplaced.is_empty(), "{product} tools with no area (add their route to {product}_area): {unplaced:?}");
+            for area in *areas {
+                let n = tools.iter().filter(|t| matches!(t.area(), Area::Every) || t.area() == Area::One(area)).count();
+                assert!(n > 5 && n < 50, "{product}.{area}: {n} tools");
+            }
         }
+        assert_eq!(all().iter().find(|t| t.name == "secrets_transit_encrypt").unwrap().area(), Area::One("integrations"));
         assert_eq!(all().iter().find(|t| t.name == "apps_logs").unwrap().area(), Area::One("observe"));
         assert_eq!(all().iter().find(|t| t.name == "apps_list_services").unwrap().area(), Area::Every);
         // Every catalogued route of a product with tools here is a tool's, or in no-tool.txt with
