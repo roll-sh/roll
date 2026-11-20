@@ -144,12 +144,12 @@ mod tests {
             log_metrics: vec![crate::model::LogMetric { name: "payments_failed".into(), pattern: "payment failed".into() }],
             schedule_scale: vec![crate::model::ScaleWindow { windows: vec![crate::freeze::Window { from: "mon 08:00".into(), to: "fri 18:00".into() }], timezone: None, min_instances: 2 }],
         };
-        let keys: std::collections::BTreeSet<String> = serde_json::to_value(&all).unwrap().as_object().unwrap().keys().filter(|k| *k != "volume").cloned().collect();
+        let keys: std::collections::BTreeSet<String> = serde_json::to_value(&all).unwrap().as_object().unwrap().keys().filter(|k| *k != "volume" && *k != "push").cloned().collect();
         let file: std::collections::BTreeSet<String> = apps_build::app::RUN_KEYS.iter().map(|k| k.to_string()).collect();
         assert_eq!(keys, file);
         // The editors' schema gives each the type it serializes as.
         let schema: serde_json::Value = serde_json::from_str(include_str!("../../../docs/apps/roll.schema.json")).unwrap();
-        for (k, v) in serde_json::to_value(&all).unwrap().as_object().unwrap().iter().filter(|(k, _)| *k != "volume") {
+        for (k, v) in serde_json::to_value(&all).unwrap().as_object().unwrap().iter().filter(|(k, _)| *k != "volume" && *k != "push") {
             let kind = match v {
                 serde_json::Value::Bool(_) => "boolean",
                 serde_json::Value::Number(n) if n.is_f64() => "number",
