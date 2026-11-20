@@ -507,6 +507,10 @@ pub fn render_doc_stored(
 ) -> EsResult<Option<Map>> {
     let _ = ctx_now;
     let Some((seg, local)) = searcher.segment_of(doc) else { return Ok(None) };
+    // A browser key's request fetches at most its window, however many hits ask.
+    if let Some(s) = &o.security {
+        s.spend_fetch()?;
+    }
     if o.version {
         m.insert("_version".into(), Value::from(meta_dv(seg, local, search_index::schema::VERSION_FIELD)));
     }

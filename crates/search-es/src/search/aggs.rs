@@ -515,9 +515,11 @@ pub fn date_factory() -> search_aggs::wire::DateFactory {
 }
 
 /// The final reduce, rendered.
-pub fn reduce(cluster: &Cluster, st: &ClusterState, req: &AggRequest, parts: Vec<search_aggs::Aggs>, typed_keys: bool) -> EsResult<Value> {
+pub fn reduce(cluster: &Cluster, st: &ClusterState, req: &AggRequest, parts: Vec<search_aggs::Aggs>, typed_keys: bool, browser: Option<crate::xpack::security::browser::Policy>) -> EsResult<Value> {
     let max_buckets = st.metadata.cluster_setting("search.max_buckets").and_then(|v| v.parse::<usize>().ok()).unwrap_or(65536);
-    let host: Arc<dyn search_aggs::ScriptHost> = Arc::new(super::agg_scripts::Host::new(cluster, None, 0, String::new()));
+    // A browser key's `max_buckets` under the cluster's, and no painless in its pipelines.
+    let max_buckets = browser.map_or(max_buckets, |p| p.max_buckets.min(max_buckets));
+    let host: Arc<dyn search_aggs::ScriptHost> = Arc::new(super::agg_scripts::Host::new(cluster, None, 0, String::new()).denying(browser.is_some_and(|p| !p.allow_scripts)));
     let opts = search_aggs::ReduceOptions { final_reduce: true, max_buckets, scripts: Some(host), budget: Some(cluster.breakers.request(cluster, st)), ..Default::default() };
     let out = search_aggs::reduce(parts, req, &opts).map_err(|e| reduce_failure(agg_error(e)))?;
     Ok(from_json(&out.to_json(typed_keys)))
@@ -609,6 +611,7 @@ impl Lookup<'_> {
         let ctx = QueryCtx::new(self.cluster, self.st, &self.idx, &self.table, &self.searcher, self.now, crate::search::query::Reader::of(self.security.clone()));
         let rf = super::runtime::RuntimeScope::ambient().filter(|s| s.index_name() == self.idx.name).and_then(|s| s.field(field).cloned()).or_else(|| ctx.runtime_field(field));
         let Some(rf) = rf.filter(|f| f.ty != super::runtime::RtType::GeoPoint) else { return Ok(None) };
+        ctx.no_scripts().map_err(err)?;
         let ev = super::runtime::Evaluator::new(&self.cluster.scripts, self.st, &self.table, self.shard.0 as i32, &self.idx.name, rf).map_err(err)?.counted();
         Ok(Some(search_aggs::HitSort::Computed { sort: Arc::new(super::computed_sort::RuntimeKey { ev: Arc::new(ev), reverse }), reverse }))
     }
@@ -962,7 +965,8 @@ impl FieldLookup for Lookup<'_> {
     }
 
     fn scripts(&self) -> Option<Arc<dyn search_aggs::ScriptHost>> {
-        Some(Arc::new(super::agg_scripts::Host::new(self.cluster, Some(self.table.clone()), self.shard.0 as i32, self.index.clone())))
+        let deny = self.security.as_ref().and_then(|s| s.browser()).is_some_and(|p| !p.allow_scripts);
+        Some(Arc::new(super::agg_scripts::Host::new(self.cluster, Some(self.table.clone()), self.shard.0 as i32, self.index.clone()).denying(deny)))
     }
 
     fn time_series(&self) -> Option<search_aggs::TimeSeriesInfo> {
@@ -1279,6 +1283,9 @@ impl search_aggs::TopHitsFetcher for Fetcher {
             marker.insert("highlight".into(), h.clone());
         }
         if get("explain").and_then(Value::as_bool) == Some(true) {
+            if let Some(s) = &self.security {
+                s.refuse_for_browser(crate::xpack::security::browser::Banned::Explain).map_err(fetch_err)?;
+            }
             marker.insert("explain".into(), Value::Bool(true));
         }
         if let Some(sf @ Value::Obj(_)) = get("script_fields") {

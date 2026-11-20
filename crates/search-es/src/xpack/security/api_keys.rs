@@ -17,6 +17,11 @@ use crate::xpack::store;
 
 pub const KEYS: &str = "security.api_key";
 
+/// The `metadata` of API key `id` (`None`: no such key).
+pub fn metadata(cluster: &Cluster, id: &str) -> Option<Value> {
+    cluster.state().metadata.xpack.get(KEYS, id).and_then(|k| k.get("metadata").cloned())
+}
+
 /// Authenticates the value of an `ApiKey` header.
 pub fn authenticate(cluster: &Cluster, value: &str) -> EsResult<Principal> {
     let decoded = super::b64_decode(value).map_err(|e| super::unauthorized_credentials(format!("API key: {e}")))?;

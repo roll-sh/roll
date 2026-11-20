@@ -1034,6 +1034,27 @@ Checked against Elasticsearch 9.5.5 (captures in
   answers; later heads on a kept-alive connection are hyper's (it closes on the malformed
   ones and frames a `Content-Length` next to `Transfer-Encoding` by the latter); and roll sends
   `Content-Length` where Elasticsearch streams some responses chunked (`_cat`).
+- CORS (`http.cors.*`, set per cluster through roll's API: README, "Search from the
+  browser"): diffed against Elasticsearch 9.5.5 with `http.cors.enabled: true`. Preflights are
+  answered before authentication (200 with one `Access-Control-Allow-Methods` and one
+  `Access-Control-Allow-Headers` line per value, in Elasticsearch's order, and
+  `Access-Control-Max-Age`; an empty 403 for another origin); authenticated requests from an
+  origin that isn't allowed get an empty 403, unauthenticated ones their 401 without CORS
+  headers; answers to an allowed origin, errors included, carry `Access-Control-Allow-Origin`,
+  `Vary: origin` and `Access-Control-Expose-Headers: X-elastic-product`; the request's own host
+  counts as allowed. Differences: `*` is answered with `Vary: origin` too, a preflight carries no
+  `Date` (roll sends none anywhere), `allow-credentials` can't be turned on, and the settings
+  apply per cluster without a restart. A browser key's rate limit answers 429
+  `es_rejected_execution_exception` with `Retry-After`, which Elasticsearch has no setting for.
+- Document level security around a filter, as Elasticsearch keeps it: documents another query
+  reads (a terms lookup, an indexed shape, `more_like_this` items, `percolate`'s stored
+  document) are read as the caller, so one its filter hides is missing and hidden fields are left
+  out; term vectors of a hidden document are `found: false`; `suggest` and `profile` are refused
+  (400 `action_request_validation_exception`) where the caller's documents are restricted. A
+  stored result (async search, ES|QL, EQL, SQL, and SQL cursors) is its opener's (the API key, or
+  the user and realm): anyone else gets 404 for it, its status and its delete (a cursor: unknown),
+  except that `cancel_task` may delete it. One stored before owners were recorded is the
+  cluster's superuser's alone.
 - Slow logs: `index.search.slowlog.threshold.{query,fetch}.*` and
   `index.indexing.slowlog.threshold.index.*` log a shard's query or fetch phase, or an index
   operation on the primary, that took longer than a threshold (`took > threshold`, the highest
