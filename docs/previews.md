@@ -1281,7 +1281,7 @@ also opens shells, files and ports, deletes and resets, accepts reviews and mana
 rules, bypass secret and hooks. Another project's preview, or a project they aren't in, is a 404;
 what their role lacks is a 403 naming it. Starting a preview by hand (`POST /v1/previews`, `roll
 preview up`) makes something in the project: an admin's, the request naming the project in
-`X-Roll-Project` (as roll-access reads every create). The handlers see the person
+`X-Roll-Project` (as roll-access reads every create; the dashboard and the CLI send it). The handlers see the person
 (their session's grant isn't a token): their name on an accept, a person's accept for a required
 rule. Tokens (their scopes are roll MCP's catalog, and a rule naming a project reaches the
 previews in it), the operator and admins see every project.

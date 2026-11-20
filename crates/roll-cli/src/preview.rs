@@ -385,6 +385,14 @@ async fn shell(api: &Api, preview: &str, service: Option<&str>) -> anyhow::Resul
 }
 
 /// A project by id or name.
+/// The API with `X-Roll-Project` naming `project`: what roll-access decides a create by (a member's
+/// role there, a token's rule); previews refuses one whose body names another project.
+fn in_project(api: &Api, project: &str) -> Api {
+    let mut headers = api.headers.clone();
+    headers.push(("x-roll-project".into(), project.into()));
+    Api { base: api.base.clone(), http: api.http.clone(), key: api.key.clone(), headers, login: api.login.clone() }
+}
+
 async fn project_id(api: &Api, p: &str) -> anyhow::Result<String> {
     if p.starts_with("prj_") {
         return Ok(p.to_string());
@@ -853,8 +861,9 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
             v
         }
         Preview::Create { project, repo, branch, change, wait: then_wait, timeout } => {
-            let body = json!({ "project": project_id(api, &project).await?, "repo": repo, "branch": branch, "change": change });
-            let v = api.post("/v1/previews", body).await?;
+            let project = project_id(api, &project).await?;
+            let body = json!({ "project": project, "repo": repo, "branch": branch, "change": change });
+            let v = in_project(api, &project).post("/v1/previews", body).await?;
             if then_wait {
                 let id = v["id"].as_str().unwrap_or_default().to_string();
                 return wait(api, as_json, Some(id), None, None, timeout).await;
@@ -876,7 +885,7 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
             if !as_json {
                 eprintln!("pushed {} to {} in {}", &commit[..12], w.branch, w.repo);
             }
-            let v = api.post("/v1/previews", json!({ "project": project, "repo": w.repo, "branch": w.branch })).await?;
+            let v = in_project(api, &project).post("/v1/previews", json!({ "project": project, "repo": w.repo, "branch": w.branch })).await?;
             if !no_wait {
                 return wait(api, as_json, Some(s(&v["id"])), None, None, timeout).await;
             }
