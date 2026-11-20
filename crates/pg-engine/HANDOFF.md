@@ -17499,6 +17499,19 @@ build, clippy (16 warnings, none new), tests 418 passed in 18 binaries, the same
 1,648, pg_dump 14,609 passed. (An earlier quick-check failed clippy, identical `if` arms in
 rangesel.rs, and then golden `gpl_n_append_misc`, the dropped change below.)
 
+Planning cost (the gate's in-process pair; plain dist builds by `tools/dist.sh --example bench`:
+base `289212e3d`, new `b500a9dee`; `~/.cache/a273/inproc`, 245's harness: one client, the engine
+linked into the bench on lane A's server CPUs 6,7, user instructions per point select from `perf
+stat` of the process over a 30 s run less a 10 s one, one pair per `tools/lane.sh a` hold): base /
+new 36,359 / 38,049 (+4.6%), 39,539 / 38,483 (-2.7%, new first), 38,770 / 38,853 (+0.2%); cycles
+32,783 / 43,007, 46,156 / 43,836, 32,746 / 34,526. Every pair had 3.8 to 6.8 cores of foreign load
+on the lane (over the 1.0 limit; the lanes were loaded all evening), so these are instruction
+counts only and the spread is the load's (about +-4%); no change in either direction stands out,
+as expected: a point select's plan runs none of the changed code beyond a field test per index
+(`IndexInfo::gin`) and a pattern match in `Est::constant`. (`roll-perf-tools` was gone from the
+machine; the pairs ran perf from an image of debian:trixie-slim with linux-perf 6.12, `a273-perf`,
+removed after.)
+
 Dropped: **a Result over an inheritance tree's Append** computing the query's values without
 VERBOSE (PostgreSQL shows it; the engine only under VERBOSE): 14 more regress plans matched, but
 `paths.rs` `minmax_aggs` chooses between the MIN / MAX InitPlans and the plain aggregation by
