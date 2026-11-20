@@ -477,7 +477,8 @@ pub enum AppsCmd {
     },
     /// Deployments, newest first; `--commits DEP`: what a repo deployment brings over the one
     /// live before it, newest first; `--vulnerabilities DEP`: its image's known vulnerabilities,
-    /// most severe first (`--severity high`: high or worse).
+    /// most severe first (`--severity high`: high or worse); `--explain DEP`: why a failed
+    /// deployment failed, read by the model of the repo's owner (kept; `--again` asks anew).
     Deploys {
         #[command(flatten)]
         target: Target,
@@ -485,6 +486,10 @@ pub enum AppsCmd {
         commits: Option<String>,
         #[arg(long, value_name = "DEPLOYMENT")]
         vulnerabilities: Option<String>,
+        #[arg(long, value_name = "DEPLOYMENT", conflicts_with_all = ["commits", "vulnerabilities"])]
+        explain: Option<String>,
+        #[arg(long, requires = "explain")]
+        again: bool,
         #[arg(long, requires = "vulnerabilities", value_parser = ["critical", "high", "medium", "low", "unknown"])]
         severity: Option<String>,
     },
@@ -3085,6 +3090,20 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 bail!("no deleted service named {} (`roll apps restore --list` lists them)", target.service.as_deref().unwrap_or("that"));
             };
             api.post(&format!("/v1/apps/services/{}/restore", enc(&s(&d["id"]))), json!({})).await?
+        }
+        AppsCmd::Deploys { target, explain: Some(dep), again, .. } => {
+            let svc = service(api, &target).await?;
+            let q = if again { "?again=1" } else { "" };
+            let e = api.post(&format!("{}/deploys/{}/explain{q}", env_path(&svc, &target.env), enc(&dep)), json!({})).await?;
+            if !json_out {
+                println!("{}\n\n{}", s(&e["summary"]), s(&e["cause"]));
+                for (i, step) in e["steps"].as_array().into_iter().flatten().enumerate() {
+                    println!("{}. {}", i + 1, s(step));
+                }
+                println!("\n({}, {} confidence)", s(&e["model"]), s(&e["confidence"]));
+                return Ok(());
+            }
+            e
         }
         AppsCmd::Deploys { target, vulnerabilities: Some(dep), severity, .. } => {
             let svc = service(api, &target).await?;

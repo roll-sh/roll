@@ -7050,3 +7050,55 @@ async fn an_uploaded_image_deploys_without_its_names() {
     let loaded = w.fake.loaded.lock().last().cloned().unwrap();
     assert!(!loaded.contains("nginx") && loaded.contains("blobs/sha256/l"), "{loaded}");
 }
+
+/// A model that answers as one would, and keeps what it was asked: (repo, case).
+#[derive(Default)]
+struct FakeModel(parking_lot::Mutex<Vec<(String, String)>>);
+
+#[async_trait::async_trait]
+impl apps_control::integrations::Explainer for FakeModel {
+    async fn ask(&self, repo: &str, _system: &str, user: &str, _schema: &Value) -> apps_control::Result<Option<(Value, String)>> {
+        self.0.lock().push((repo.into(), user.into()));
+        let answer = json!({ "summary": "It never passed its health check.", "cause": "Every request answered 500.", "steps": ["Unset FAKE_UNHEALTHY", "", "Deploy again"], "confidence": "sure", "extra": 1 });
+        Ok(Some((answer, "claude-test".into())))
+    }
+}
+
+/// "Why did it fail?": a failed deployment's error, plan and logs go to its repo owner's model
+/// once, and the answer is kept, checked and bounded (`?again=1` asks anew); a server with no
+/// model and a deployment that didn't fail say so.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_deploy_is_explained_once_by_its_repo_owners_model() {
+    let w = world().await;
+    let body = json!({ "project": w.project, "name": "site", "source": {"kind": "repo", "repo": "acme/site"}, "run": {"min_instances": 1, "health_path": "/healthz", "health_timeout_s": 1}, "variables": {"FAKE_UNHEALTHY": "1"} });
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(body)).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap();
+    let dep = svc["environments"][0]["latest"]["id"].as_str().unwrap();
+    let d = settled(&w, id, "production", dep).await;
+    assert_eq!(d["status"], "failed", "{d}");
+    let url = format!("/v1/apps/services/{id}/environments/production/deploys/{dep}/explain");
+    let (st, e) = call(&w.api, "POST", &url, None).await;
+    assert_eq!(st, StatusCode::CONFLICT, "no model on this server: {e}");
+    let model = Arc::new(FakeModel::default());
+    w.apps.set_explainer(model.clone());
+    let (st, e) = call(&w.api, "POST", &url, None).await;
+    assert_eq!(st, StatusCode::OK, "{e}");
+    assert_eq!((e["summary"].as_str(), e["steps"].as_array().map(Vec::len), e["confidence"].as_str(), e["model"].as_str()), (Some("It never passed its health check."), Some(2), Some("low"), Some("claude-test")), "{e}");
+    assert!(e.get("extra").is_none(), "{e}");
+    {
+        let asked = model.0.lock();
+        let (repo, case) = &asked[0];
+        assert_eq!(repo, "acme/site");
+        assert!(case.contains(d["error"].as_str().unwrap()) && case.contains("# Plan") && case.contains("provider: node"), "{case}");
+    }
+    // Kept: asking again reads it back, until `again`.
+    assert_eq!(call(&w.api, "POST", &url, None).await.1, e);
+    assert_eq!(model.0.lock().len(), 1);
+    assert_eq!(call(&w.api, "POST", &format!("{url}?again=1"), None).await.0, StatusCode::OK);
+    assert_eq!(model.0.lock().len(), 2);
+    // A deployment that didn't fail isn't explained.
+    let (img, live) = image_service(&w, "api", json!({"port": 80})).await;
+    let url = format!("/v1/apps/services/{}/environments/production/deploys/{}/explain", img["id"].as_str().unwrap(), live["id"].as_str().unwrap());
+    assert_eq!(call(&w.api, "POST", &url, None).await.0, StatusCode::CONFLICT);
+}

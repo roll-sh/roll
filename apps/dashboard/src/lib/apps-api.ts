@@ -820,6 +820,19 @@ export interface ScanSummary {
   sbom?: boolean;
 }
 
+/** Why a failed deployment failed, from the repo owner's model (`…/explain`). The model's words: shown as text. */
+export interface Explanation {
+  summary: string;
+  cause: string;
+  /** What to change, in order (at most 5; none when it isn't the app's fault). */
+  steps: string[];
+  confidence: "high" | "medium" | "low";
+  model: string;
+  at: number;
+  /** Older log lines it didn't see. */
+  lines_left_out: number;
+}
+
 /** One known vulnerability: a package at a version an advisory names. */
 export interface Vulnerability {
   id: string;
@@ -1377,6 +1390,8 @@ export const appsApi = {
   commits: (id: string, e: string, d: string) => call<DeployCommits>("GET", `${dep(id, e, d)}/commits`),
   slo: (id: string, e: string) => call<SloReport>("GET", `${env(id, e)}/slo`),
   sbom: (id: string, e: string, d: string) => call<unknown>("GET", `${dep(id, e, d)}/sbom`),
+  /** A failed deployment explained by its repo owner's model: kept, unless `again` asks anew (charged again). */
+  explain: (id: string, e: string, d: string, again = false) => call<Explanation>("POST", `${dep(id, e, d)}/explain${qs({ again })}`),
   vulnerabilities: (id: string, e: string, d: string) => call<{ scan: ScanSummary | null; vulnerabilities: Vulnerability[] }>("GET", `${dep(id, e, d)}/vulnerabilities`),
   buildLog: (id: string, e: string, d: string, q: LogQuery = {}) => call<LogLine[]>("GET", `${dep(id, e, d)}/logs${qs({ tail: q.tail })}`),
   /** `keepVariables`: its image with the variables as they are now (after a rotated secret), not as they were then. */

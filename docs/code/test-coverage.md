@@ -840,6 +840,7 @@ every request.
 | learnings from a resolved thread with a reason (once), a dismissed roll review, the API (path-scoped), delete, auth | `reviewer.rs::learnings_from_resolving_and_dismissing` |
 | public-repo allowance, human monthly cap, spending caps (`pause` without a model call, `byok_fallback`, `standard_only` downgrade), BYOK (used first, BYOK fee, owner's key in the request, key never returned nor in the database file, auth, validation, delete), pricing endpoint, billing validation and auth, bad month | `reviewer.rs::pricing_caps_allowances_and_byok` |
 | BYOK refused without (or with a weak) `ROLL_SECRET_KEY` | `reviewer.rs::byok_needs_a_server_secret` |
+| another product's question (`Code::ask_model`, roll apps' "Why did it fail?"): the owner's model at medium effort, metered as its kind and counted with chats, refused past a paused cap without a model call | `reviewer.rs::another_products_question_is_metered_and_capped` |
 | a failing provider retried (job attempts), a bad key not retried and reported on the change (no longer pending), no provider configured | `reviewer.rs::provider_errors_403_persistent_529_and_400` |
 | off by default, settings validation and auth, `.roll/review.yaml` wins (errors reported), drafts wait until ready, requested reviews (auth, bad mode, forced mode) | `reviewer.rs::triggers_settings_and_auth` |
 | a job running when the daemon stopped runs again after a restart | `reviewer.rs::restart_recovers_running_jobs` |

@@ -835,6 +835,8 @@ impl Store {
         db.add_column("deployments", "retired_at", "INTEGER")?;
         db.add_column("deployments", "error_detail", "TEXT")?;
         db.add_column("deployments", "build_key", "TEXT")?;
+        // A failed deployment's explanation from a model (`explain::Explanation` as JSON).
+        db.add_column("deployments", "explanation", "TEXT")?;
         // A deleted service is kept this long (`DELETED_KEPT_MS`), stopped, until it's restored
         // or the prune sweep deletes it for good.
         db.add_column("services", "deleted_at", "INTEGER")?;
@@ -1771,6 +1773,18 @@ impl Store {
     pub fn scan_summaries(&self, service: &str) -> Result<HashMap<String, crate::model::ScanSummary>> {
         let rows: Vec<(String, String)> = self.db.query("SELECT deployment, summary FROM deploy_scans WHERE service = ?", [service], |r| Ok((r.get(0)?, r.get(1)?)))?;
         rows.into_iter().map(|(d, s)| Ok((d, json(&s)?))).collect()
+    }
+
+    /// A failed deployment's explanation, once one was asked.
+    pub fn explanation(&self, deployment: &str) -> Result<Option<crate::explain::Explanation>> {
+        let row: Option<Option<String>> = self.db.query_row("SELECT explanation FROM deployments WHERE id = ?", [deployment], |r| r.get(0)).optional()?;
+        Ok(row.flatten().and_then(|s| serde_json::from_str(&s).ok()))
+    }
+
+    pub fn set_explanation(&self, deployment: &str, e: &crate::explain::Explanation) -> Result<()> {
+        let body = serde_json::to_string(e).map_err(|e| Error::Internal(e.to_string()))?;
+        self.db.execute("UPDATE deployments SET explanation = ? WHERE id = ?", params![body, deployment])?;
+        Ok(())
     }
 
     pub fn set_secrets_digest(&self, deployment: &str, digest: &str) -> Result<()> {

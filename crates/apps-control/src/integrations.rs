@@ -266,6 +266,15 @@ pub trait Visitors: Send + Sync {
     fn session_live(&self, user: &str, session: &str) -> bool;
 }
 
+/// A model that reads a failed deployment (rolld: the owner of the service's roll code repo's
+/// provider, through roll code, metered on their account). Unset: nothing is explained.
+#[async_trait]
+pub trait Explainer: Send + Sync {
+    /// Ask `repo`'s (`owner/name`) owner's model; the answer follows `schema`. `None`: it gave
+    /// none (declined, cut off). The answer and the model's name are untrusted.
+    async fn ask(&self, repo: &str, system: &str, user: &str, schema: &serde_json::Value) -> crate::Result<Option<(serde_json::Value, String)>>;
+}
+
 /// Email to a person through their account (rolld fills it with roll-accounts' mailer). Unset or
 /// off: no email targets.
 #[async_trait]
