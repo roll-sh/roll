@@ -34,6 +34,7 @@ pub mod mapping;
 pub mod meta;
 pub mod opensearch;
 pub mod query;
+pub mod query_suggestions;
 pub mod remote;
 pub mod rest;
 pub mod routes;

@@ -479,7 +479,7 @@ impl Resources for RollResources {
                 })
                 .await
             }
-            LinkKind::Bucket | LinkKind::Stream | LinkKind::Nosql | LinkKind::Search => match self.provided(kind, r#ref, None).await? {
+            LinkKind::Bucket | LinkKind::Stream | LinkKind::Nosql | LinkKind::Search | LinkKind::Queue => match self.provided(kind, r#ref, None).await? {
                 Some(p) => Ok(p.vars),
                 None => anyhow::bail!("links to {} aren't wired on this node yet", kind.as_str()),
             },
@@ -491,7 +491,7 @@ impl Resources for RollResources {
     /// for the service; a search key has data access only, never the cluster's password), made once, revoked when the link goes; only those are kept with the link, and
     /// what's read (an endpoint, NoSQL's login, a database's URL) is read again at each deploy.
     async fn link(&self, kind: LinkKind, r#ref: &str, service: &str) -> anyhow::Result<Option<apps_control::integrations::Minted>> {
-        if !matches!(kind, LinkKind::Bucket | LinkKind::Stream | LinkKind::Nosql | LinkKind::Search) {
+        if !matches!(kind, LinkKind::Bucket | LinkKind::Stream | LinkKind::Nosql | LinkKind::Search | LinkKind::Queue) {
             return Ok(None);
         }
         let Some(p) = self.provided(kind, r#ref, Some(format!("roll apps {service}"))).await? else { return Ok(None) };
@@ -822,5 +822,35 @@ mod tests {
         assert!(listed.iter().all(|(k, _)| !k.starts_with("AWS_ACCESS")), "{listed:?}");
         r.unlink(LinkKind::Bucket, "photos", &m.kept).await.unwrap();
         assert_eq!(*seen.lock().unwrap(), [r#"key roll apps svc_a "write" ["photos"]"#.to_string(), "revoked AKIA1".to_string()]);
+    }
+
+    /// A queue's link gets a vhost user of its own (roll secrets' queue provider): its
+    /// `AMQP_URL` carries that user, never the vhost admin's; unlinking deletes the user.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_queues_link_gets_a_user_of_its_own_and_unlinking_deletes_it() {
+        use axum::routing::put;
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let (s1, s2, s3) = (seen.clone(), seen.clone(), seen.clone());
+        let router = axum::Router::new()
+            .route("/v1/queues/vhosts", get(|| async { axum::Json(serde_json::json!([{ "name": "orders", "amqp_url": "amqp://admin:admin-pw@127.0.0.1:5672/orders" }])) }))
+            .route("/v1/queues/users/{user}", put(move |axum::extract::Path(u): axum::extract::Path<String>| async move {
+                s1.lock().unwrap().push(format!("user {}", u.starts_with("roll-")));
+                axum::http::StatusCode::NO_CONTENT
+            }).delete(move |axum::extract::Path(u): axum::extract::Path<String>| async move {
+                s3.lock().unwrap().push(format!("deleted {}", u.starts_with("roll-")));
+                axum::http::StatusCode::NO_CONTENT
+            }))
+            .route("/v1/queues/permissions/{vhost}/{user}", put(move |axum::extract::Path((v, _)): axum::extract::Path<(String, String)>, axum::Json(b): axum::Json<serde_json::Value>| async move {
+                s2.lock().unwrap().push(format!("permissions {v} {}", b["configure"]));
+                axum::http::StatusCode::NO_CONTENT
+            }));
+        let products = crate::secrets::Api::default();
+        products.set(router);
+        let r = RollResources { postgres: None, redis: None, api: (String::new(), None, reqwest::Client::new()), products };
+        let m = r.link(LinkKind::Queue, "orders", "svc_a").await.unwrap().expect("a user of its own");
+        let url = &m.vars.iter().find(|(k, _)| k == "AMQP_URL").expect("AMQP_URL").1;
+        assert!(url.starts_with("amqp://roll-") && url.ends_with("@127.0.0.1:5672/orders") && !url.contains("admin"), "{url}");
+        r.unlink(LinkKind::Queue, "orders", &m.kept).await.unwrap();
+        assert_eq!(*seen.lock().unwrap(), ["user true", r#"permissions orders ".*""#, "deleted true"]);
     }
 }

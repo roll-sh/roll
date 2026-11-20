@@ -20,6 +20,8 @@ async fn roll(api: &str, env: &[(&str, &str)], args: &[&str], stdin: Option<&str
         .env_remove("ROLL_PROJECT")
         .env_remove("ROLL_ENV")
         .env_remove("ROLL_ADMIN_TOKEN")
+        // A CI runner sets CI=true, which turns masking on; the tests that want it pass it.
+        .env_remove("CI")
         .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

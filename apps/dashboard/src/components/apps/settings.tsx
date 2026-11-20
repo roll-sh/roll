@@ -50,6 +50,7 @@ interface Form {
   min: string;
   max: string;
   concurrency: string;
+  queue: string;
   cpu: number;
   memory: number;
   healthPath: string;
@@ -59,12 +60,15 @@ interface Form {
   healthCommand: string;
   drain: string;
   cpuTarget: string;
+  latencyTarget: string;
   memoryTarget: string;
   alertMemory: string;
   alertErrors: string;
   alertP95: string;
   sloObjective: string;
   metricsPath: string;
+  /** `name: pattern`, one a line. */
+  logMetrics: string;
   metricsPort: string;
   sloLatency: string;
   sloWindow: string;
@@ -83,6 +87,7 @@ interface Form {
   tcp: boolean;
   rollbackOnCrash: boolean;
   rebuildOnBase: boolean;
+  skewProtection: boolean;
   blockOn: "" | "critical" | "high" | "medium" | "low";
   scaleStream: string;
   scaleGroup: string;
@@ -128,6 +133,7 @@ export function formOf(s: Service): Form {
     min: str(s.run.min_instances),
     max: str(s.run.max_instances),
     concurrency: str(s.run.concurrency),
+    queue: str(s.run.queue_s),
     cpu: s.run.cpu,
     memory: s.run.memory_mb,
     healthPath: str(s.run.health_path),
@@ -137,12 +143,14 @@ export function formOf(s: Service): Form {
     healthCommand: str(s.run.health_command),
     drain: str(s.run.drain_s),
     cpuTarget: str(s.run.cpu_target),
+    latencyTarget: str(s.run.latency_target_ms),
     memoryTarget: str(s.run.memory_target),
     alertMemory: str(s.run.alerts?.memory_pct),
     alertErrors: str(s.run.alerts?.error_pct),
     alertP95: str(s.run.alerts?.p95_ms),
     sloObjective: str(s.run.slo?.objective),
     metricsPath: s.run.metrics ? (s.run.metrics.path ?? "/metrics") : "",
+    logMetrics: (s.run.log_metrics ?? []).map((m) => `${m.name}: ${m.pattern}`).join("\n"),
     metricsPort: str(s.run.metrics?.port),
     sloLatency: str(s.run.slo?.latency_ms),
     sloWindow: str(s.run.slo?.window_days),
@@ -161,6 +169,7 @@ export function formOf(s: Service): Form {
     tcp: !!s.run.tcp,
     rollbackOnCrash: !!s.run.rollback_on_crash,
     rebuildOnBase: !!s.run.rebuild_on_base,
+    skewProtection: !!s.run.skew_protection,
     blockOn: s.run.block_on ?? "",
     scaleStream: s.run.scale?.stream ?? "",
     scaleGroup: s.run.scale?.group ?? "",
@@ -223,6 +232,7 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   if (f.min !== before.min) run.min_instances = num(f.min);
   if (f.max !== before.max) run.max_instances = num(f.max);
   if (f.concurrency !== before.concurrency) run.concurrency = num(f.concurrency);
+  if (f.queue !== before.queue) run.queue_s = num(f.queue);
   if (f.cpu !== before.cpu) run.cpu = f.cpu;
   if (f.memory !== before.memory) run.memory_mb = f.memory;
   if (f.healthPath !== before.healthPath) run.health_path = text(f.healthPath);
@@ -232,6 +242,7 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   if (f.healthCommand !== before.healthCommand) run.health_command = text(f.healthCommand);
   if (f.drain !== before.drain) run.drain_s = num(f.drain);
   if (f.cpuTarget !== before.cpuTarget) run.cpu_target = num(f.cpuTarget);
+  if (f.latencyTarget !== before.latencyTarget) run.latency_target_ms = num(f.latencyTarget);
   if (f.memoryTarget !== before.memoryTarget) run.memory_target = num(f.memoryTarget);
   if (f.alertMemory !== before.alertMemory || f.alertErrors !== before.alertErrors || f.alertP95 !== before.alertP95 || f.alertCapacity !== before.alertCapacity || f.alertLog !== before.alertLog || f.alertLogCount !== before.alertLogCount)
     run.alerts = {
@@ -242,18 +253,20 @@ export function patchOf(s: Service, f: Form): ServicePatch {
       ...(f.alertLog.trim() ? { log_match: f.alertLog.trim() } : {}),
       log_count: Number(f.alertLogCount) || 10,
     };
+  if (f.logMetrics !== before.logMetrics) run.log_metrics = logMetrics(f.logMetrics);
   if (f.metricsPath !== before.metricsPath || f.metricsPort !== before.metricsPort)
     run.metrics = f.metricsPath.trim() ? { path: f.metricsPath.trim(), ...(num(f.metricsPort) ? { port: Number(f.metricsPort) } : {}) } : null;
   if (f.sloObjective !== before.sloObjective || f.sloLatency !== before.sloLatency || f.sloWindow !== before.sloWindow)
     run.slo = f.sloObjective.trim() ? { objective: Number(f.sloObjective), ...(num(f.sloLatency) ? { latency_ms: Number(f.sloLatency) } : {}), ...(num(f.sloWindow) ? { window_days: Number(f.sloWindow) } : {}) } : null;
   if (f.rolloutSteps !== before.rolloutSteps || f.rolloutStep !== before.rolloutStep || f.rolloutErrors !== before.rolloutErrors || f.rolloutManual !== before.rolloutManual)
-    run.rollout = { steps: rolloutSteps(f.rolloutSteps) ?? [], step_s: Number(f.rolloutStep) || 120, error_pct: Number(f.rolloutErrors) || 5, ...(f.rolloutManual ? { manual: true } : {}) };
+    run.rollout = { steps: rolloutSteps(f.rolloutSteps) ?? [], step_s: Number(f.rolloutStep) || 120, error_pct: Number(f.rolloutErrors) || 5, ...(f.rolloutManual ? { manual: true } : {}), ...(s.run.rollout?.slo_burn ? { slo_burn: s.run.rollout.slo_burn } : {}), ...(s.run.rollout?.p95_pct ? { p95_pct: s.run.rollout.p95_pct } : {}) };
   if (f.h2c !== before.h2c) run.h2c = f.h2c ? true : null;
   if (f.public !== before.public) run.public = f.public ? null : false;
   if (f.affinity !== before.affinity) run.affinity = f.affinity ? true : null;
   if (f.tcp !== before.tcp) run.tcp = f.tcp ? true : null;
   if (f.rollbackOnCrash !== before.rollbackOnCrash) run.rollback_on_crash = f.rollbackOnCrash ? true : null;
   if (f.rebuildOnBase !== before.rebuildOnBase) run.rebuild_on_base = f.rebuildOnBase ? true : null;
+  if (f.skewProtection !== before.skewProtection) run.skew_protection = f.skewProtection ? true : null;
   if (f.blockOn !== before.blockOn) run.block_on = f.blockOn || null;
   if (f.restart !== before.restart || f.restartTries !== before.restartTries) {
     run.restart = f.restart === "always" ? null : f.restart;
@@ -274,7 +287,19 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   return patch;
 }
 
-const NUMERIC: (keyof Form)[] = ["scalePer", "port", "timeout", "retries", "min", "max", "concurrency", "healthTimeout", "healthEvery", "healthFailures", "drain", "cpuTarget", "memoryTarget", "suspendAfter", "sleepAfter", "volumeSize", "backupEvery", "backupKeep", "alertMemory", "alertErrors", "alertP95", "sloObjective", "sloLatency", "sloWindow", "metricsPort", "alertCapacity", "alertLogCount", "rolloutStep", "rolloutErrors", "restartTries"];
+/** `name: pattern` lines as `run.log_metrics` (a line with no name is its own pattern's). */
+export function logMetrics(text: string): { name: string; pattern: string }[] {
+  return text
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .map((l) => {
+      const at = l.indexOf(":");
+      return at > 0 ? { name: l.slice(0, at).trim(), pattern: l.slice(at + 1).trim() } : { name: l.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, ""), pattern: l };
+    });
+}
+
+const NUMERIC: (keyof Form)[] = ["scalePer", "port", "timeout", "retries", "min", "max", "concurrency", "queue", "healthTimeout", "healthEvery", "healthFailures", "drain", "cpuTarget", "latencyTarget", "memoryTarget", "suspendAfter", "sleepAfter", "volumeSize", "backupEvery", "backupKeep", "alertMemory", "alertErrors", "alertP95", "sloObjective", "sloLatency", "sloWindow", "metricsPort", "alertCapacity", "alertLogCount", "rolloutStep", "rolloutErrors", "restartTries"];
 
 /** A rollout's steps as typed (`10, 50`): increasing percents 1–99, at most five; null when they aren't. */
 export function rolloutSteps(v: string): number[] | null {
@@ -547,8 +572,14 @@ export function SettingsTab({
                   <Field label="Concurrency" hint="requests in flight per instance">
                     {t("concurrency", "50")}
                   </Field>
+                  <Field label="Queue at the limit (s)" hint="all at max and busy: wait this long, then 429; empty: past concurrency">
+                    {t("queue", "")}
+                  </Field>
                   <Field label="CPU target (%)" hint="another instance while they average over it for a minute; empty: requests only">
                     {t("cpuTarget", "70")}
+                  </Field>
+                  <Field label="p95 target (ms)" hint="another instance while a window's p95 is over it; empty: not on latency">
+                    {t("latencyTarget", "300")}
                   </Field>
                   <Field label="Memory target (%)" hint="of each instance's memory, the same way; empty: not on memory">
                     {t("memoryTarget", "80")}
@@ -625,6 +656,9 @@ export function SettingsTab({
                 <Field label="Alert: p95 latency (ms)" hint="in three of five minutes; 0 off">
                   {t("alertP95", "0")}
                 </Field>
+                <Field label="Metrics from its log" hint="name: pattern, one a line; each minute, the lines holding it (any case) as a gauge">
+                  <textarea value={form.logMetrics} onChange={(e) => set("logMetrics", e.target.value)} rows={2} placeholder="payments_failed: payment failed" className={`${input} w-full font-mono text-[12px]`} spellCheck={false} />
+                </Field>
                 <Field label="Metrics endpoint" hint="its Prometheus path, scraped every 15 s while it runs; empty: none">
                   {t("metricsPath", "/metrics")}
                 </Field>
@@ -660,6 +694,14 @@ export function SettingsTab({
                 <option value="back">Rolls back to the one before</option>
               </select>
             </Field>
+            {web && (
+              <Field label="A page loaded before a deploy" hint="its requests name their deployment: x-deployment-id, ?dpl=, or the cookie roll sets">
+                <select value={form.skewProtection ? "keep" : "live"} onChange={(e) => set("skewProtection", e.target.value === "keep")} className={`${input} w-full`}>
+                  <option value="live">Talks to what's live</option>
+                  <option value="keep">Keeps its deployment for a day (skew protection)</option>
+                </select>
+              </Field>
+            )}
             {service.source.kind !== "image" && (
               <Field label="When a base image is updated" hint="its registry moves the tag it builds on (a security fix)">
                 <select value={form.rebuildOnBase ? "build" : "say"} onChange={(e) => set("rebuildOnBase", e.target.value === "build")} className={`${input} w-full`}>
@@ -717,6 +759,7 @@ export function SettingsTab({
                 {t("timeout", "300")}
               </Field>
             </Grid>
+            {env && <CachePurge service={service.id} env={env.name} runner={runner} />}
           </Section>
         )}
 
@@ -843,6 +886,31 @@ export function SettingsTab({
 }
 
 /** A settings section the nav can scroll to. */
+/** Drops the answers roll keeps for the app (`…/cache/purge`, `roll apps purge`): some paths,
+ *  some tags, or all of them. */
+function CachePurge({ service, env, runner }: { service: string; env: string; runner: Runner }) {
+  const [what, setWhat] = useState("");
+  const [said, setSaid] = useState<string | null>(null);
+  const words = what.split(/[\s,]+/).filter(Boolean);
+  const body = { paths: words.filter((w) => w.startsWith("/")), tags: words.filter((w) => !w.startsWith("/")) };
+  const purge = () =>
+    void runner.run("purge", async () => {
+      const r = await appsApi.purgeCache(service, env, { ...(body.paths.length ? { paths: body.paths } : {}), ...(body.tags.length ? { tags: body.tags } : {}) });
+      setSaid(`${r.purged} kept answer${r.purged === 1 ? "" : "s"} dropped.`);
+    });
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-3 border-t border-line px-5 py-4">
+      <p className="text-[13px] text-muted">{said ?? "Answers it marks cacheable (s-maxage) are kept and answered by roll. Drop some paths (/blog/* a prefix), some tags, or all of them."}</p>
+      <span className="flex items-center gap-2">
+        <input value={what} onChange={(e) => setWhat(e.target.value)} aria-label="Paths or tags to purge" placeholder="/blog/* product-42" className={`${input} !w-56 font-mono text-[12px]`} spellCheck={false} />
+        <button type="button" className={btn} disabled={runner.busy !== null} onClick={purge}>
+          {words.length ? "Purge these" : "Purge everything"}
+        </button>
+      </span>
+    </div>
+  );
+}
+
 function Anchor({ id, className, children }: { id: string; className?: string; children: ReactNode }) {
   return (
     <div id={`settings-${id}`} className={`scroll-mt-16 ${className ?? ""}`}>

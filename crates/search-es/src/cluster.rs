@@ -184,6 +184,8 @@ pub struct Cluster {
     pub scripts: Arc<crate::scripting::ScriptService>,
     /// Open scrolls and points in time.
     pub contexts: crate::search::contexts::Contexts,
+    /// Scrolls and points in time over linked remote clusters ([`crate::remote::contexts`]).
+    pub ccs_contexts: crate::remote::contexts::CcsContexts,
     /// Compiled ingest pipelines.
     pub ingest: crate::ingest::pipeline::Cache,
     /// In-memory state of the x-pack APIs (async results, verified credentials).
@@ -595,6 +597,7 @@ impl Cluster {
             engine: Default::default(),
             scripts: Default::default(),
             contexts: Default::default(),
+            ccs_contexts: Default::default(),
             ingest: Default::default(),
             xpack: Default::default(),
             breakers: Default::default(),

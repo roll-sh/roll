@@ -26,7 +26,7 @@ use search_codec::NO_MORE_DOCS;
 use search_index::util::bitset::FixedBitSet;
 
 /// One value of a sort key.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum SortVal {
     Score(f32),
     Doc(u32),
@@ -42,7 +42,7 @@ pub enum SortVal {
 pub type SortKey = SmallVec<[SortVal; 2]>;
 
 /// How a numeric sort field reads.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 enum NumKind {
     Long,
     Double,
@@ -50,7 +50,7 @@ enum NumKind {
 }
 
 /// How a numeric key's stored values convert before comparing (`numeric_type`).
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 enum Conv {
     /// As stored: longs stay raw (`unsigned_long` sign-flipped and `date_nanos` in nanoseconds,
     /// as Lucene's `SortedNumericSortField` compares them); others decode.
@@ -91,12 +91,69 @@ enum KeySpec {
     Computed(std::sync::Arc<dyn crate::field::ComputedSort>),
 }
 
-/// A sort bound to an index: what each key reads and how it orders.
-#[derive(Clone, Debug)]
+/// A sort bound to an index: what each key reads and how it orders. Between clusters
+/// ([`crate::wire`]) it travels as what a reduce compares by: each key's kind, order and where
+/// its missing values go (a computed key orders as bytes do; nested levels only matter when
+/// reading a shard).
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(into = "DocSortWire", from = "DocSortWire")]
 pub struct DocSort {
     keys: Vec<(KeySpec, bool)>,
     /// Per key: the nested level its values come from.
     nested: Vec<Option<NestedSort>>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+enum KeyWire {
+    Score,
+    Doc,
+    Num { field: u32, decode: Decode, kind: NumKind, conv: Conv, mode: SortMode, missing: f64, missing_long: i64 },
+    Bytes { field: u32, ip: bool, mode: SortMode, missing_first: bool, missing_value: Option<Vec<u8>> },
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct DocSortWire {
+    keys: Vec<(KeyWire, bool)>,
+}
+
+impl From<DocSort> for DocSortWire {
+    fn from(s: DocSort) -> Self {
+        let keys = s
+            .keys
+            .into_iter()
+            .map(|(k, reverse)| {
+                let k = match k {
+                    KeySpec::Score => KeyWire::Score,
+                    KeySpec::Doc => KeyWire::Doc,
+                    KeySpec::Num { field, decode, kind, conv, mode, missing, missing_long } => KeyWire::Num { field, decode, kind, conv, mode, missing, missing_long },
+                    KeySpec::Bytes { field, ip, mode, missing_first, missing_value } => KeyWire::Bytes { field, ip, mode, missing_first, missing_value },
+                    KeySpec::Computed(_) => KeyWire::Bytes { field: u32::MAX, ip: false, mode: SortMode::Min, missing_first: false, missing_value: None },
+                };
+                (k, reverse)
+            })
+            .collect();
+        DocSortWire { keys }
+    }
+}
+
+impl From<DocSortWire> for DocSort {
+    fn from(w: DocSortWire) -> Self {
+        let keys: Vec<(KeySpec, bool)> = w
+            .keys
+            .into_iter()
+            .map(|(k, reverse)| {
+                let k = match k {
+                    KeyWire::Score => KeySpec::Score,
+                    KeyWire::Doc => KeySpec::Doc,
+                    KeyWire::Num { field, decode, kind, conv, mode, missing, missing_long } => KeySpec::Num { field, decode, kind, conv, mode, missing, missing_long },
+                    KeyWire::Bytes { field, ip, mode, missing_first, missing_value } => KeySpec::Bytes { field, ip, mode, missing_first, missing_value },
+                };
+                (k, reverse)
+            })
+            .collect();
+        let nested = keys.iter().map(|_| None).collect();
+        DocSort { keys, nested }
+    }
 }
 
 impl DocSort {

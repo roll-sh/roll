@@ -351,7 +351,7 @@ fn initialize(m: &Mcp, headers: &HeaderMap, params: &Value) -> crate::Result<(Va
         "protocolVersion": version,
         "capabilities": { "tools": { "listChanged": false } },
         "serverInfo": { "name": "roll-code", "title": "roll code", "version": env!("CARGO_PKG_VERSION") },
-        "instructions": "roll code: source control for agents. Repos are \"owner/repo\". Read with search_code, read_file, \
+        "instructions": "roll code: source control for agents. Repos are \"owner/repo\" (list_repos lists them). Read with search_code, read_file, \
 list_tree, log, blame, compare. Take work with claim_work (keep it alive with heartbeat_work), make a change with \
 create_change (files map: {path: {content} | {content_b64} | {delete: true}}), then land it. A land can come back \
 queued (merge queue), blocked (review or checks rules; the blockers say what's missing) or conflict (the paths \
@@ -404,8 +404,22 @@ fn files_schema() -> Value {
     })
 }
 
+/// Tools that reach outside roll (MCP's `openWorldHint`): a model provider (an AI review, a coding
+/// agent's turns and automations) or a branch's remote (publishing an agent's work).
+const OPEN_WORLD: [&str; 7] = ["request_ai_review", "create_agent_thread", "send_agent_message", "respond_agent_request", "claim_agent_work", "run_agent_automation", "publish_agent_thread"];
+
 /// Every tool, with its JSON Schema.
 pub fn tools() -> Vec<Value> {
+    let mut all = every_tool();
+    for t in &mut all {
+        if t["name"].as_str().is_some_and(|n| OPEN_WORLD.contains(&n)) {
+            t["annotations"]["openWorldHint"] = Value::Bool(true);
+        }
+    }
+    all
+}
+
+fn every_tool() -> Vec<Value> {
     let repo = s("Repository, \"owner/repo\"");
     let rev = s("Revision: a branch, tag, changeset (cs_…) or git commit; default: the default branch");
     let change = s("Change: \"chg_…\" or \"owner/repo#N\"");
@@ -414,6 +428,14 @@ pub fn tools() -> Vec<Value> {
     let machine = s("Machine: its id (mch_…) or name");
     let command_id = s("Idempotency key: retrying with the same id never runs it twice (default: a new one)");
     vec![
+        tool(
+            "list_repos",
+            "List repositories",
+            "The repositories this caller can read, as `owner/repo` (`full_name`) with each one's default branch and description: where to start before naming a repo.",
+            json!({ "owner": s("Only this owner's repositories") }),
+            &[],
+            true,
+        ),
         tool(
             "search_code",
             "Search code",
@@ -981,6 +1003,7 @@ async fn run(c: &Call<'_>, name: &str, args: &Value) -> std::result::Result<Outc
             let path = str_arg(args, "path").map(path_segs).unwrap_or_default();
             pass(c.get(&format!("{base}/tree/{}/{path}", seg(&rev))).await)
         }
+        "list_repos" => pass(c.get(&format!("/v1/code/repos{}", query(&[("owner", opt(args, "owner"))]))).await),
         "log" => {
             let base = c.repo(args)?;
             let limit = opt(args, "limit").or(Some("30".into()));
