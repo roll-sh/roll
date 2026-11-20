@@ -86,6 +86,9 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route("/v1/secrets/login", post(login))
         .route("/v1/secrets/oidc/.well-known/openid-configuration", get(oidc_discovery))
         .route("/v1/secrets/oidc/jwks", get(oidc_jwks))
+        .route("/v1/secrets/issuer/rotate", post(rotate_issuer))
+        .route("/v1/secrets/audit/jwks", get(audit_jwks))
+        .route("/v1/secrets/audit/key/rotate", post(rotate_audit_key))
         .route(&format!("{P}/audit"), get(audit))
         .route(&format!("{P}/audit/verify"), get(verify_audit))
         .route(&format!("{P}/audit/sinks"), get(sinks).post(create_sink))
@@ -153,6 +156,9 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/required"), get(required).put(set_required))
         .route(&format!("{P}/shares"), get(shares).post(create_share))
         .route(&format!("{P}/shares/{{id}}"), axum::routing::delete(revoke_share))
+        .route(&format!("{E}/value-requests"), post(create_value_request))
+        .route(&format!("{P}/value-requests"), get(value_requests))
+        .route(&format!("{P}/value-requests/{{id}}"), axum::routing::delete(cancel_value_request))
         .route(&format!("{P}/syncs"), get(list_syncs).post(create_sync))
         .route(&format!("{P}/syncs/preview"), post(preview_sync))
         .route(&format!("{P}/syncs/{{id}}"), axum::routing::delete(delete_sync).patch(update_sync))
@@ -160,6 +166,9 @@ pub fn router(s: Arc<Secrets>) -> Router {
         // Public: a share's link (docs/secrets.md, "Sharing a value once").
         .route("/v1/secrets/shares/{id}", get(peek_share))
         .route("/v1/secrets/shares/{id}/open", post(open_share))
+        // Public: a secret request's link (docs/secrets.md, "Asking for a value").
+        .route("/v1/secrets/value-requests/{token}", get(peek_value_request))
+        .route("/v1/secrets/value-requests/{token}/answer", post(answer_value_request))
         .merge(crate::acme::routes())
         .with_state(s)
 }
@@ -171,6 +180,7 @@ impl IntoResponse for Error {
             Error::Unauthorized(_) => (StatusCode::UNAUTHORIZED, Some("unauthorized")),
             Error::Forbidden(_) => (StatusCode::FORBIDDEN, Some("forbidden")),
             Error::NotFound(_) => (StatusCode::NOT_FOUND, None),
+            Error::Gone(_) => (StatusCode::GONE, Some("gone")),
             Error::Conflict(code, _) => (StatusCode::CONFLICT, Some(*code)),
             Error::TooMany(_) => (StatusCode::TOO_MANY_REQUESTS, Some("rate_limited")),
             Error::Unavailable(_) => (StatusCode::SERVICE_UNAVAILABLE, Some("no_key")),
@@ -1120,6 +1130,42 @@ async fn oidc_jwks(State(s): S) -> crate::Result<Response> {
     Ok(ok(blocking(s, |s| s.oidc_jwks()).await?))
 }
 
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RotateKey {
+    #[serde(default)]
+    now: bool,
+    retire: Option<String>,
+}
+
+/// A rotation's body: nothing, or an emergency's `{"now": true, "retire": kid}` (both or neither).
+fn pull(b: &Bytes) -> crate::Result<Option<String>> {
+    let r: RotateKey = if b.is_empty() { RotateKey::default() } else { body(b)? };
+    match (r.now, r.retire) {
+        (false, None) => Ok(None),
+        (true, Some(kid)) if !kid.is_empty() => Ok(Some(kid)),
+        _ => Err(Error::BadRequest("an emergency rotation takes both now: true and retire: the kid to pull".into())),
+    }
+}
+
+/// Start a rotation of roll's issuer key now (the operator's). `{"now": true, "retire": kid}` is
+/// an emergency: a new key signs at once and `kid` leaves the JWKS now.
+async fn rotate_issuer(State(s): S, Who(c): Who, b: Bytes) -> crate::Result<Response> {
+    let pull = pull(&b)?;
+    Ok(ok(blocking(s, move |s| s.rotate_issuer(pull.as_deref(), &c)).await?))
+}
+
+/// The audit log's digest keys (public: what an export is checked with offline).
+async fn audit_jwks(State(s): S) -> crate::Result<Response> {
+    Ok(ok(blocking(s, |s| s.audit_jwks()).await?))
+}
+
+/// A new digest key now (the operator's); `{"now": true, "retire": kid}` also pulls `kid`.
+async fn rotate_audit_key(State(s): S, Who(c): Who, b: Bytes) -> crate::Result<Response> {
+    let pull = pull(&b)?;
+    Ok(ok(blocking(s, move |s| s.rotate_audit_key(pull.as_deref(), &c)).await?))
+}
+
 async fn cloud_accounts(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
     Ok(ok(blocking(s, move |s| s.cloud_accounts(&project, &c)).await?))
 }
@@ -1176,6 +1222,33 @@ async fn open_share(State(s): S, Path(id): Path<String>, parts: Parts) -> crate:
     let ip = s.client_ip(&parts);
     let ct = blocking(s, move |s| s.open_share(&id, ip)).await?;
     Ok(secret_response(ok(json!({ "ciphertext": ct }))))
+}
+
+async fn create_value_request(State(s): S, Who(c): Who, Path((project, env)): Path<(String, String)>, Query(q): Q, b: Bytes) -> crate::Result<Response> {
+    let n: crate::NewValueRequest = body(&b)?;
+    let path = q.get("path").cloned().unwrap_or_else(|| "/".into());
+    Ok(created(blocking(s, move |s| s.create_value_request(&project, &env, &path, n, &c)).await?))
+}
+
+async fn value_requests(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.value_requests(&project, &c)).await?))
+}
+
+async fn cancel_value_request(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
+    blocking(s, move |s| s.cancel_value_request(&project, &id, &c)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn peek_value_request(State(s): S, Path(token): Path<String>) -> crate::Result<Response> {
+    Ok(secret_response(ok(blocking(s, move |s| s.peek_value_request(&token)).await?)))
+}
+
+/// The answer's body is sealed boxes; nothing comes back but the status.
+async fn answer_value_request(State(s): S, Path(token): Path<String>, parts: Parts, b: Bytes) -> crate::Result<StatusCode> {
+    let ip = s.client_ip(&parts);
+    let a: crate::Answer = body(&b)?;
+    blocking(s, move |s| s.answer_value_request(&token, a, ip)).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn audit(State(s): S, Who(c): Who, Path(project): Path<String>, Query(q): Query<crate::audit::AuditFilter>) -> crate::Result<Response> {

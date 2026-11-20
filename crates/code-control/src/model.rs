@@ -568,6 +568,9 @@ pub struct PreviewSlowerRoute {
     /// branch's ms)`. A name is the preview's code's words (untrusted).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grew: Option<(String, u64, u64)>,
+    /// The project's budget for it, when its p50 is over it (roll previews' `github.budget.routes`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_ms: Option<u64>,
 }
 
 /// One endpoint's time against the branch's.

@@ -794,6 +794,19 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
                         }
                     }
                 }
+                // A roll code file, read through the tool as the caller (the gate decides, the audit log has it).
+                Some(uri) if resources::code_file_of(uri).is_some() && tool_names(ctx).iter().any(|t| t == "code_read_file") => {
+                    let (repo, path) = resources::code_file_of(uri).unwrap_or_default();
+                    match call_as(ctx, "code_read_file", json!({ "repo": repo, "path": path }), false).await {
+                        Some(r) if r["isError"] != true => rpc_result(id, resources::code_file(uri, &r["structuredContent"])),
+                        Some(r) => {
+                            let code = if r["structuredContent"]["http_status"] == 404 { -32002 } else { -32603 };
+                            let message: String = r["content"][0]["text"].as_str().unwrap_or("not read").chars().take(300).collect();
+                            json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message, "data": r["structuredContent"] } })
+                        }
+                        None => rpc_error(id, -32002, format!("resource not found: {uri}")),
+                    }
+                }
                 Some(uri) if uri.starts_with("skill://") => match skills::read(uri, &tool_names(ctx)) {
                     Some(v) => rpc_result(id, v),
                     // The Skills extension's answer for a file roll doesn't serve.
@@ -841,6 +854,9 @@ async fn complete(ctx: &Arc<Ctx>, params: &Value) -> Result<Value, String> {
         }
         // A project page's id completes from the workspace's list.
         "ref/resource" if params["ref"]["uri"] == resources::PROJECT_TEMPLATE && arg == "project" => Some(prompts::workspace_projects()),
+        // A code file's owner and repo complete from the repos this connection may read.
+        "ref/resource" if params["ref"]["uri"] == resources::CODE_TEMPLATE && arg == "owner" => Some(prompts::Source { tool: "code_list_repos", args: |_| json!({}), fields: &["owner"] }),
+        "ref/resource" if params["ref"]["uri"] == resources::CODE_TEMPLATE && arg == "repo" => Some(prompts::Source { tool: "code_list_repos", args: |ctx| json!({ "owner": ctx["owner"] }), fields: &["name"] }),
         _ => None,
     };
     let Some(src) = src else { return empty };

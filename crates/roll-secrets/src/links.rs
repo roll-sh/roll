@@ -108,6 +108,15 @@ pub struct Issued {
     pub handle: Json,
 }
 
+/// A decoy credential a product made ([`LinkProvider::plant_decoy`]).
+pub struct Planted {
+    /// Shaped like the resource's own credential (a connection string).
+    pub value: Value,
+    /// What the product names it by when it's used ([`crate::Secrets::decoy_used`]) and how it's
+    /// removed ([`LinkProvider::remove_decoy`]).
+    pub handle: String,
+}
+
 /// One kind of linkable resource. Calls block (they run on the store's blocking threads).
 pub trait LinkProvider: Send + Sync {
     fn kind(&self) -> &str;
@@ -181,6 +190,18 @@ pub trait LinkProvider: Send + Sync {
     fn exclusive_for(&self, r#ref: &str) -> bool {
         let _ = r#ref;
         self.exclusive()
+    }
+    /// A decoy credential for the resource (docs/secrets.md, "Decoys"): it reads like the
+    /// resource's own, the product refuses it as it refuses a wrong one, and tells roll secrets
+    /// of each use ([`crate::Secrets::decoy_used`] with this kind and the handle).
+    fn plant_decoy(&self, r#ref: &str) -> Result<Planted> {
+        let _ = r#ref;
+        Err(Error::BadRequest(format!("{} resources can't hold a decoy", self.kind())))
+    }
+    /// Remove what [`LinkProvider::plant_decoy`] made. Gone already is fine.
+    fn remove_decoy(&self, handle: &str) -> Result<()> {
+        let _ = handle;
+        Ok(())
     }
     /// Refuse a link this kind can't serve as asked (its options, its mode, its resource's
     /// policy), when it's written rather than at its first issue.

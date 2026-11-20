@@ -6,6 +6,7 @@
 
 import { createServerFn } from "@tanstack/react-start";
 import { serverApi } from "./roll-api";
+import { peekRequest, RequestGone, type ValuePeek } from "./secrets-ask";
 import { peekShare, ShareGone, type SharePeek } from "./secrets-share";
 
 const peek = createServerFn({ method: "GET" })
@@ -23,3 +24,19 @@ const peek = createServerFn({ method: "GET" })
 
 /** The share's note, opens left and expiry, and the server's clock; `peek` is null for none. */
 export const loadSharePeek = (id: string) => peek({ data: id });
+
+const peekAsk = createServerFn({ method: "GET" })
+  .validator((token: string) => token)
+  .handler(async ({ data: token }): Promise<{ peek: ValuePeek | null; gone: boolean; now: number }> => {
+    const now = Date.now();
+    if (!/^rlq_[a-z2-7]{40}$/.test(token)) return { peek: null, gone: false, now };
+    try {
+      return { peek: await peekRequest(token, serverApi()), gone: false, now };
+    } catch (e) {
+      if (e instanceof RequestGone) return { peek: null, gone: e.status === 410, now };
+      throw e;
+    }
+  });
+
+/** A secret request's page (`/request/<token>`): its note, key names and public key, read anonymously and fresh. `gone`: it existed and can't be answered now. */
+export const loadValueRequestPeek = (token: string) => peekAsk({ data: token });

@@ -22,6 +22,7 @@ import { addDraft, draftFor, emptyPending, removeDraft, reviewHeadline, reviewPa
 import { CodeShell } from "./shell";
 import { AcceptVisual, PreviewEnvironmentView } from "./preview-environment";
 import { ChangeAgent } from "./change-agent";
+import { StoreInRoll } from "./store-in-roll";
 import { ago, btn, Confirm, EmptyPanel, ErrorNote, Panel, panel, primary } from "../ui";
 import { DiffViewer, type DiffReview } from "./diff";
 import { AiProgress, RunAiReview, useAiJobs } from "./ai";
@@ -335,6 +336,14 @@ export function CodeChange({ fullName, id }: { fullName: string; id: string }) {
               {b.validity.rotator === "aws-iam" ? "Rotate it: let roll secrets manage this IAM user's keys" : "Rotate it: use a GitHub App's short-lived tokens instead"}
             </Link>
           ) : null;
+        // A credential roll secrets doesn't hold: a writer stores it from the change itself, never
+        // from an outsider's (a fork's pull request), whose credential isn't the repo's.
+        const storeIn = (b: Blocker) =>
+          writer && c.trusted !== false && b.kind === "secret_unstored" && b.fingerprint ? <StoreInRoll change={c.id} notice={{ ...b, fingerprint: b.fingerprint }} onStored={() => void load()} /> : null;
+        const fixes = (b: Blocker) => {
+          const store = storeIn(b);
+          return store ? <div className="mt-2">{store}</div> : fixIn(b);
+        };
         const canLand = (c.state === "open" || c.state === "conflict") && !c.draft;
         const conflict = landed?.status === "conflict" ? landed : c.conflict;
         /** Land (post-merge), queue (merge queue) or bypass: one path, so every outcome reads the same. */
@@ -546,7 +555,7 @@ export function CodeChange({ fullName, id }: { fullName: string; id: string }) {
                     <div className="px-5 py-4">
                       <BlockerList
                         blockers={blockers}
-                        extra={fixIn}
+                        extra={fixes}
                         action={(kind) =>
                           !writer ? null : kind === "ready" ? (
                             <button
@@ -576,7 +585,7 @@ export function CodeChange({ fullName, id }: { fullName: string; id: string }) {
                 )}
                 {!!c.notices?.length && c.state !== "landed" && c.state !== "closed" && (
                   <Panel title="Worth knowing">
-                    <ul className="space-y-1 px-5 py-4 text-[12.5px] text-muted">
+                    <ul className="space-y-2 px-5 py-4 text-[12.5px] text-muted">
                       {c.notices.map((n) => (
                         <li key={n.message}>
                           {n.validity?.result === "live" && (
@@ -584,6 +593,7 @@ export function CodeChange({ fullName, id }: { fullName: string; id: string }) {
                           )}
                           {n.message}
                           {fixIn(n) && <span className="ml-2">{fixIn(n)}</span>}
+                          {storeIn(n) && <div className="mt-1.5">{storeIn(n)}</div>}
                         </li>
                       ))}
                     </ul>

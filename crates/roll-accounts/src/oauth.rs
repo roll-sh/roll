@@ -237,7 +237,10 @@ impl Accounts {
                 let holder = c.query_row("SELECT user_id FROM identities WHERE provider = ? AND subject = ?", [provider, v.subject.as_str()], |r| r.get::<_, String>(0)).optional()?;
                 match holder {
                     Some(other) if other != user => Err(elsewhere()),
-                    Some(_) => Ok(()),
+                    Some(_) => {
+                        c.execute("UPDATE identities SET login = ? WHERE provider = ? AND subject = ? AND login <> ?", params![v.login, provider, v.subject, v.login])?;
+                        Ok(())
+                    }
                     None => {
                         // One identity per provider per user: a new link replaces the old one.
                         c.execute("DELETE FROM identities WHERE user_id = ? AND provider = ?", [user.as_str(), provider])?;
@@ -252,6 +255,8 @@ impl Accounts {
             return Ok(Finished::Linked { return_to: st.return_to });
         }
         if let Some(user) = linked_to {
+            // A login renamed at the provider since: the name roll knows them by follows it.
+            self.db.write(|c| c.execute("UPDATE identities SET login = ? WHERE provider = ? AND subject = ? AND login <> ?", params![v.login, provider, v.subject, v.login]).map(|_| ()))?;
             return Ok(Finished::SignIn { user, return_to: st.return_to, new: None, sid: None });
         }
         if let Some(invite) = &st.invite_id {

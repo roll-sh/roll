@@ -245,6 +245,7 @@ export function JobsTab({ service, env, runner, cron = false, schedules, states 
                       <span className="block truncate font-mono text-[12px]">
                         {j.command}
                         {(j.tasks ?? 1) > 1 && <span className="text-muted"> × {j.tasks}</span>}
+                        {(j.retries ?? 0) > 0 && <span className="text-subtle"> · up to {j.retries} {j.retries === 1 ? "retry" : "retries"}</span>}
                       </span>
                       <span className="mt-1 flex items-center justify-between gap-2">
                         <JobBadge job={j} />

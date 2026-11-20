@@ -445,6 +445,11 @@ function DeploymentKey() {
             {h.resealed === "all" ? "Rotation done: the previous key can be dropped" : `Rotating: ${h.resealed} data key${h.resealed === 1 ? "" : "s"} resealed so far`}
           </span>
         )}
+        {h.issuer_pulled?.map((p) => (
+          <span key={p.kid} className="basis-full text-[11.5px] text-danger">
+            {p.detail}
+          </span>
+        ))}
       </div>
     </Section>
   );
