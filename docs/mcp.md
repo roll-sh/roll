@@ -622,6 +622,7 @@ previews are listed once those products are on.
 | `storage_usage_all` | Storage and requests across every bucket. | `GET /v1/storage/usage` |
 | `storage_list_accounts` | Storage's accounts (12-digit ids): name, alias, the default. | `GET /v1/storage/accounts` |
 | `storage_list_keys` | An account's access keys: permission, buckets, IAM user, last use (never a secret). | `GET /v1/storage/keys` |
+| `storage_revoke_key` | Revoke an S3 access key at once. | `DELETE /v1/storage/keys/{id}` |
 | `storage_list_roles` | An account's IAM roles: ARN, trust, permissions policy, session length. | `GET /v1/storage/roles` |
 | `storage_get_role` | One IAM role. | `GET /v1/storage/roles/{name}` |
 | `storage_list_replication_targets` | Buckets outside roll that replication copies to (never the secret). | `GET /v1/storage/replication-targets` |
@@ -643,6 +644,7 @@ previews are listed once those products are on.
 | `streams_branch` | A stream branched, records shared (its key's secret: reveal). | `POST /v1/streams/{s}/branches` |
 | `streams_usage` | A stream's usage and throughput. | `GET /v1/streams/{stream}/usage` |
 | `streams_list_keys` | The SASL users a stream's clients sign in as (never a password). | `GET /v1/streams/{stream}/keys` |
+| `streams_revoke_key` | Revoke a stream's SASL user at once. | `DELETE /v1/streams/{stream}/keys/{username}` |
 | `streams_update` | Change some of a stream's settings (as streams_get shows them: retention, throughput limits…); the rest stay. | `PATCH /v1/streams/{stream}` |
 | `streams_update_topic` | Grow a topic's partitions or change its configs, online. | `PATCH /v1/streams/{stream}/topics/{topic}` |
 | `streams_delete_group` | Delete a group and its committed offsets (refused while it has members). | `DELETE /v1/streams/{stream}/groups/{group}` |
@@ -672,6 +674,11 @@ previews are listed once those products are on.
 | `queues_queue_rates` | One queue's rates and depth over the last minutes (`queues_rates` is the broker's). | `GET /v1/queues/vhosts/{vhost}/queues/{queue}/rates` |
 | `queues_list_exchanges` | A virtual host's exchanges. | `GET /v1/queues/vhosts/{vhost}/exchanges` |
 | `queues_list_bindings` | Which exchange routes to which queue by which key. | `GET /v1/queues/vhosts/{vhost}/bindings` |
+| `queues_declare_exchange` | Make an exchange (idempotent; amq.* reserved). | `POST /v1/queues/vhosts/{vhost}/exchanges` |
+| `queues_delete_exchange` | Delete an exchange and its bindings. | `DELETE /v1/queues/vhosts/{vhost}/exchanges/{exchange}` |
+| `queues_bind` | Route an exchange's messages to a queue or exchange by a key. | `POST /v1/queues/vhosts/{vhost}/bindings` |
+| `queues_unbind` | Remove a binding. | `DELETE /v1/queues/vhosts/{vhost}/bindings` |
+| `queues_replay` | Publish a queue's messages again (a dead-letter queue's, back where they came from). | `POST /v1/queues/vhosts/{vhost}/queues/{queue}/replay` |
 | `queues_peek` | Messages in a queue, without consuming them. | `GET /v1/queues/vhosts/{vhost}/queues/{queue}/messages` |
 | `queues_publish` | Publish to an exchange with a routing key. | `POST /v1/queues/vhosts/{vhost}/publish` |
 | `queues_list_connections` | Open client connections: who, from where, and their channels. | `GET /v1/queues/connections` |
