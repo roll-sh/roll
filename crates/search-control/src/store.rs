@@ -561,14 +561,14 @@ impl Store {
         Ok(())
     }
 
-    /// When cluster `name` must load again to run a background job that comes due (Unix ms;
-    /// `None`: no job, or it is loaded and its scheduler runs them).
     /// Sets or clears [`SearchCluster::inherit_pending`].
     pub async fn set_inherit_pending(&self, name: &str, pending: bool) -> anyhow::Result<()> {
         self.db.write(|x| x.execute("UPDATE search_clusters SET inherit_pending = ?2 WHERE name = ?1", params![name, pending]))?;
         Ok(())
     }
 
+    /// When cluster `name` must load again to run a background job that comes due (Unix ms;
+    /// `None`: no job, or it is loaded and its scheduler runs them).
     pub async fn set_wake_at(&self, name: &str, at: Option<i64>) -> anyhow::Result<()> {
         self.db.write(|x| x.execute("UPDATE search_clusters SET wake_at = ?2 WHERE name = ?1", params![name, at]))?;
         Ok(())
