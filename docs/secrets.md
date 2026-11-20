@@ -5115,7 +5115,7 @@ is still level with or ahead of the category. The gaps are at the new features' 
      exporting every value, and their identities, gateways and ACME kept running;
    - the fix: the action and scope each exercises, and identities capped by their maker's current
      grant, as `Within` caps tokens.
-2. **Placeholders' seams** (security, M; fixing in `feature/roll-secrets-placeholders` before its PR):
+2. **Placeholders' seams** (security, M; all fixed in #520, CI green; the swap 45–69 ms → 0.08 ms):
    - refuse wildcards under shared-hosting suffixes (`*.vercel.app`);
    - sensitive keys only by an opt-in per binding;
    - the person behind an in-process consumer re-checked;
