@@ -91,11 +91,11 @@ export type Secret = {
 };
 /** Where a key's value may go through a placeholder: hostnames or `*.` one-label wildcards, and the
  * one header (`Authorization: Bearer {}`) or query parameter that carries it (not both). */
-export type Hosts = { hosts: string[]; header?: string; query?: string };
+export type Hosts = { hosts: string[]; header?: string; query?: string; untrusted?: boolean };
 /** A placeholder a resolve answered (never the placeholder itself). */
 export type Placeholder = { key: string; id: string; hosts: string[]; expires_at: number };
 /** A placeholder's record (`GET …/placeholders`). */
-export type PlaceholderRecord = { id: string; environment: string; path: string; key: string; consumer: string; issued_by: string; issued_at: number; expires_at: number; revoked_at: number | null };
+export type PlaceholderRecord = { id: string; environment: string; path: string; key: string; consumer: string; issued_by: string; maker: string | null; issued_at: number; expires_at: number; revoked_at: number | null };
 /** A decoy key's mark: what it is, and its uses (each refused). */
 export type Decoy = { kind: "rlt"; created_at: number; created_by: string; uses: number; used_at: number | null; used_ip: string | null };
 /** `POST …/environments/{env}/decoys`: a new key whose value is a decoy credential. */
@@ -177,6 +177,8 @@ export type Reach = {
   syncs: { id: string; kind: string; target: unknown; last_synced_at: number | null; paused_at: number | null }[];
   /** Live dynamic credentials issued for its keys. */
   leases: { id: string; key: string; consumer: string; issued_at: number; expires_at: number }[];
+  /** Live placeholders of its keys, wherever they were resolved (`through`: `env:/path` or `project prj_…`). */
+  placeholders?: { id: string; key: string; consumer: string; maker: string | null; through: string; expires_at: number }[];
   /** Open one-time shares made from its keys, as their makers said (`from`). */
   shares: { id: string; note: string; key: string; created_by: string; expires_at: number }[];
   /** Open shares of the project that don't say where their value came from. */
@@ -189,7 +191,7 @@ export type Reach = {
   frozen: Freeze | null;
 };
 /** `POST …/reach/cut-off`: what to cut (each on unless false; `freeze` off unless true), and why. */
-export type CutOffRequest = { why: string; tokens?: boolean; identities?: boolean; leases?: boolean; shares?: boolean; syncs?: boolean; freeze?: boolean };
+export type CutOffRequest = { why: string; tokens?: boolean; identities?: boolean; leases?: boolean; placeholders?: boolean; shares?: boolean; syncs?: boolean; freeze?: boolean };
 export type Cut = { id: string; name: string };
 /** What a cut-off did: what was cut, and what couldn't be with why (the rest went on). `skipped`: tokens that reach beyond the project, left for the operator to revoke. `batches`: calls to roll-access, 500 grants each at most. */
 export type CutOff = {
@@ -203,11 +205,13 @@ export type CutOff = {
   logins: number;
   batches: number;
   leases: Cut[];
+  /** Placeholders of its keys, ended. */
+  placeholders?: Cut[];
   shares: Cut[];
   projects: string[];
   syncs: Cut[];
   frozen: boolean;
-  failed: { what: "tokens" | "identities" | "logins" | "leases" | "shares" | "syncs" | "freeze" | "audit"; ids: string[]; why: string }[];
+  failed: { what: "tokens" | "identities" | "logins" | "leases" | "placeholders" | "shares" | "syncs" | "freeze" | "audit"; ids: string[]; why: string }[];
 };
 export type Insights = { path: string; max_age_days: number | null; reads_since: number; keys: KeyInsight[] };
 

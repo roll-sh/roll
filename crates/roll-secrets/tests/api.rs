@@ -4675,7 +4675,8 @@ async fn an_untrusted_resolve_of_a_host_bound_key_gets_a_placeholder_never_the_v
     api.set("staging", "PLAIN_KEY", "fake-plain").await;
     // Binding is an admin's: a writer's token can't.
     let writer = api.token(json!({ "name": "w", "environments": ["staging"], "actions": ["read", "reveal", "write"] }));
-    let bind = json!({ "hosts": ["api.stripe.com"], "header": "Authorization: Bearer {}" });
+    // A sensitive key's placeholder reaches untrusted code only by the binding's opt-in.
+    let bind = json!({ "hosts": ["api.stripe.com"], "header": "Authorization: Bearer {}", "untrusted": true });
     assert_eq!(api.req(Method::PUT, "/environments/staging/secrets/STRIPE_KEY/hosts", Some(bind.clone()), Some(&writer)).await.0, StatusCode::FORBIDDEN);
     assert_eq!(api.call(Method::PUT, "/environments/staging/secrets/STRIPE_KEY/hosts", Some(json!({ "hosts": ["*"] }))).await.0, StatusCode::BAD_REQUEST);
     api.ok(Method::PUT, "/environments/staging/secrets/STRIPE_KEY/hosts", Some(bind)).await;
@@ -4793,4 +4794,137 @@ async fn an_expired_or_revoked_placeholder_is_refused() {
     let (d, _) = issue(None, "sandbox:sbx_7").await;
     api.ok(Method::DELETE, "/environments/staging/secrets/STRIPE_KEY/hosts", None).await;
     assert!(matches!(swap(&d), Err(Refusal::Unusable(_))));
+}
+
+/// A wildcard binding never covers names anyone can register (the Public Suffix List): a
+/// prompt-injected sandbox could otherwise send the key to its own subdomain.
+#[tokio::test]
+async fn a_wildcard_under_a_shared_suffix_is_refused() {
+    let api = Api::new().await;
+    api.set("staging", "SUPABASE_KEY", "fake-supabase-key").await;
+    for shared in ["*.supabase.co", "*.vercel.app", "*.workers.dev", "*.co.uk"] {
+        let (s, e) = api.call(Method::PUT, "/environments/staging/secrets/SUPABASE_KEY/hosts", Some(json!({ "hosts": [shared] }))).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{shared}: {e}");
+        assert!(e["error"].as_str().unwrap().contains("Public Suffix List"), "{e}");
+    }
+    // The exact host there is fine.
+    api.ok(Method::PUT, "/environments/staging/secrets/SUPABASE_KEY/hosts", Some(json!({ "hosts": ["myproject.supabase.co"] }))).await;
+}
+
+/// Without the binding's opt-in, an untrusted consumer gets no placeholder for a sensitive key
+/// (withheld, as before placeholders); the opt-in is an admin's and audited, and taking it off
+/// stops the swaps already handed out.
+#[tokio::test]
+async fn a_sensitive_key_without_the_opt_in_gives_untrusted_code_no_placeholder() {
+    use roll_secrets::proxy::{Place, Position, Refusal};
+    let api = Api::new().await;
+    api.ok(Method::PUT, "/environments/staging/secrets/STRIPE_KEY", Some(json!({ "value": "sk_test_fake_optin", "tags": ["sensitive"] }))).await;
+    api.ok(Method::PUT, "/environments/staging/secrets/STRIPE_KEY/hosts", Some(json!({ "hosts": ["api.stripe.com"] }))).await;
+    let resolve = || api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "preview:fork-1", "untrusted": true, "placeholders": true })));
+    let r = resolve().await;
+    assert!(r["values"].get("STRIPE_KEY").is_none() && r.get("placeholders").is_none() && r["withheld"] == json!(["STRIPE_KEY"]), "{r}");
+    api.ok(Method::PUT, "/environments/staging/secrets/STRIPE_KEY/hosts", Some(json!({ "hosts": ["api.stripe.com"], "untrusted": true }))).await;
+    let audit = api.ok(Method::GET, "/audit?action=secrets.hosts", None).await;
+    assert!(audit[0]["summary"].as_str().unwrap().contains("untrusted consumers too"), "{audit}");
+    let ph = resolve().await["values"]["STRIPE_KEY"].as_str().unwrap().to_string();
+    let at = Position { place: Place::Header, name: "x-api-key", value: &ph };
+    assert_eq!(api.secrets.substitute(&ph, "api.stripe.com", at).unwrap().expose(), "sk_test_fake_optin");
+    api.ok(Method::PUT, "/environments/staging/secrets/STRIPE_KEY/hosts", Some(json!({ "hosts": ["api.stripe.com"] }))).await;
+    assert!(matches!(api.secrets.substitute(&ph, "api.stripe.com", at), Err(Refusal::NotAllowed(_))));
+}
+
+/// An in-process consumer (a sandbox) names who made it, and its placeholders swap only while
+/// they may still reveal there: checked again on every swap.
+#[tokio::test]
+async fn the_maker_losing_reveal_stops_the_swaps() {
+    use roll_secrets::placeholders::Ask;
+    use roll_secrets::proxy::{Place, Position, Refusal};
+    let api = Api::new().await;
+    api.set("staging", "STRIPE_KEY", "sk_test_fake_maker").await;
+    api.ok(Method::PUT, "/environments/staging/secrets/STRIPE_KEY/hosts", Some(json!({ "hosts": ["api.stripe.com"] }))).await;
+    let reveal = roll_secrets::access::rule(&api.project, Some(vec!["staging".into()]), None, &[roll_secrets::Action::Read, roll_secrets::Action::Reveal]);
+    let (_, id) = api.gate.grant("ada's", reveal, None);
+    let read_only = roll_secrets::access::rule(&api.project, Some(vec!["staging".into()]), None, &[roll_secrets::Action::Read]);
+    let (_, reader) = api.gate.grant("reader", read_only, None);
+    let sandbox = api.secrets.untrusted(&api.project, &roll_secrets::Caller::consumer("sandbox:sbx_m")).unwrap();
+    let issue = |maker: Option<&str>| api.secrets.values_with_placeholders(&api.project, "staging", "/", "sandbox:sbx_m", false, Ask { minutes: None, maker }, &sandbox);
+    // Nobody named, or someone who may not reveal there: refused.
+    assert!(matches!(issue(None), Err(roll_secrets::Error::BadRequest(_))));
+    assert!(matches!(issue(Some(&format!("token:{reader}"))), Err(roll_secrets::Error::Forbidden(_))));
+    let maker = format!("token:{id}");
+    let v = issue(Some(&maker)).unwrap();
+    let ph = v.values["STRIPE_KEY"].expose().to_string();
+    let at = Position { place: Place::Header, name: "authorization", value: &ph };
+    assert_eq!(api.secrets.substitute(&ph, "api.stripe.com", at).unwrap().expose(), "sk_test_fake_maker");
+    assert_eq!(api.ok(Method::GET, "/placeholders", None).await[0]["maker"], maker.as_str());
+    roll_secrets::Workloads::revoke(&*api.gate, &id).unwrap();
+    assert!(matches!(api.secrets.substitute(&ph, "api.stripe.com", at), Err(Refusal::NotAllowed(_))));
+}
+
+/// Reach lists a folder's live placeholders, and a cut-off ends them, without a freeze.
+#[tokio::test]
+async fn a_cut_off_ends_the_folders_placeholders() {
+    use roll_secrets::proxy::{Place, Position, Refusal};
+    let api = Api::new().await;
+    api.set("production", "STRIPE_KEY", "sk_test_fake_cut").await;
+    api.ok(Method::PUT, "/environments/production/secrets/STRIPE_KEY/hosts", Some(json!({ "hosts": ["api.stripe.com"] }))).await;
+    // Resolved through an environment based on production: still production's key's.
+    api.ok(Method::POST, "/environments", Some(json!({ "slug": "pr-9", "base": "production" }))).await;
+    let r = api.ok(Method::POST, "/environments/pr-9/resolve", Some(json!({ "consumer": "preview:pr-9", "untrusted": true, "placeholders": true }))).await;
+    let ph = r["values"]["STRIPE_KEY"].as_str().unwrap().to_string();
+    let reach = api.ok(Method::GET, "/environments/production/reach?key=STRIPE_KEY", None).await;
+    let listed = &reach["placeholders"][0];
+    assert_eq!((listed["key"].as_str(), listed["consumer"].as_str(), listed["through"].as_str()), (Some("STRIPE_KEY"), Some("preview:pr-9"), Some("pr-9:/")), "{reach}");
+    let cut = cut_off(&api, "path=/&key=STRIPE_KEY", json!({ "why": "fake incident" })).await;
+    assert_eq!((cut["placeholders"].as_array().unwrap().len(), cut["frozen"].as_bool()), (1, Some(false)), "{cut}");
+    let at = Position { place: Place::Header, name: "authorization", value: &ph };
+    assert_eq!(api.secrets.substitute(&ph, "api.stripe.com", at).unwrap_err(), Refusal::Revoked);
+    assert!(api.ok(Method::GET, "/environments/production/reach", None).await["placeholders"].as_array().unwrap().is_empty());
+}
+
+/// A loop over many wrong hosts is one alert a minute per placeholder, not one per host.
+#[tokio::test]
+async fn the_wrong_host_alert_is_limited_per_placeholder() {
+    use roll_secrets::proxy::{Place, Position, Refusal};
+    let api = Api::new().await;
+    api.ok(Method::PUT, "/environments/staging/policy", Some(json!({ "protected": false, "notify_url": "https://hooks.example/T0/B0/x" }))).await;
+    api.set("staging", "STRIPE_KEY", "sk_test_fake_flood").await;
+    api.ok(Method::PUT, "/environments/staging/secrets/STRIPE_KEY/hosts", Some(json!({ "hosts": ["api.stripe.com"] }))).await;
+    let r = api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "sandbox:sbx_f", "untrusted": true, "placeholders": true }))).await;
+    let ph = r["values"]["STRIPE_KEY"].as_str().unwrap().to_string();
+    let at = Position { place: Place::Header, name: "authorization", value: &ph };
+    for i in 0..20 {
+        let host = format!("x{i}.evil.example");
+        assert_eq!(api.secrets.substitute(&ph, &host, at).unwrap_err(), Refusal::WrongHost(host));
+    }
+    let alerts = api.ok(Method::GET, "/audit?action=secrets.alert", None).await;
+    assert_eq!(alerts.as_array().unwrap().len(), 1, "{alerts}");
+    assert!(alerts[0]["summary"].as_str().unwrap().contains("x0.evil.example"), "{alerts}");
+    let notices: i64 = api.db.read(|c| c.query_row("SELECT COUNT(*) FROM notices WHERE body LIKE '%placeholder_host%'", (), |r| r.get(0))).unwrap();
+    assert_eq!(notices, 1);
+}
+
+/// A placeholder stands only for a literal value: a key holding a reference can't be bound, gets
+/// none if it comes to hold one, and a swap refuses it, so a writer can't point a bound key at
+/// another key's value.
+#[tokio::test]
+async fn a_key_holding_a_reference_gets_no_placeholder() {
+    use roll_secrets::proxy::{Place, Position, Refusal};
+    let api = Api::new().await;
+    api.ok(Method::PUT, "/environments/staging/secrets/OTHER_SENSITIVE", Some(json!({ "value": "fake-other-sensitive", "tags": ["sensitive"] }))).await;
+    api.set("staging", "STRIPE_KEY", "${OTHER_SENSITIVE}").await;
+    let (s, e) = api.call(Method::PUT, "/environments/staging/secrets/STRIPE_KEY/hosts", Some(json!({ "hosts": ["api.stripe.com"] }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{e}");
+    api.set("staging", "STRIPE_KEY", "sk_test_fake_literal").await;
+    api.ok(Method::PUT, "/environments/staging/secrets/STRIPE_KEY/hosts", Some(json!({ "hosts": ["api.stripe.com"] }))).await;
+    let resolve = || api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "sandbox:sbx_r", "untrusted": true, "placeholders": true })));
+    let ph = resolve().await["values"]["STRIPE_KEY"].as_str().unwrap().to_string();
+    // A writer points it at the other key: no new placeholder, and the old one doesn't swap.
+    api.set("staging", "STRIPE_KEY", "${OTHER_SENSITIVE}").await;
+    let r = resolve().await;
+    assert!(r["values"].get("STRIPE_KEY").is_none() && r.get("placeholders").is_none(), "{r}");
+    assert!(r["problems"].to_string().contains("reference"), "{r}");
+    let at = Position { place: Place::Header, name: "authorization", value: &ph };
+    assert!(matches!(api.secrets.substitute(&ph, "api.stripe.com", at), Err(Refusal::Unusable(_))));
+    assert!(!r.to_string().contains("fake-other-sensitive"));
 }

@@ -794,6 +794,10 @@ struct ResolveBody {
     /// How long those placeholders live (default a day, at most 30 days).
     #[serde(default)]
     placeholder_minutes: Option<u64>,
+    /// Who made the consumer (`usr_…`, `token:…`, `operator`): its placeholders swap only while
+    /// they may reveal here.
+    #[serde(default)]
+    maker: Option<String>,
 }
 
 fn yes() -> bool {
@@ -810,13 +814,13 @@ async fn resolve(State(s): S, Who(c): Who, Path((project, env)): Path<(String, S
     }
     let path = r.path.unwrap_or_else(|| "/".into());
     let (p, e, cons) = (project.clone(), env.clone(), consumer.clone());
-    let (untrusted, dynamic, codes, placeholders, minutes) = (r.untrusted, r.dynamic, r.codes, r.placeholders, r.placeholder_minutes);
-    if minutes.is_some() && !placeholders {
-        return Err(Error::BadRequest("placeholder_minutes goes with placeholders: true".into()));
+    let (untrusted, dynamic, codes, placeholders, minutes, maker) = (r.untrusted, r.dynamic, r.codes, r.placeholders, r.placeholder_minutes, r.maker);
+    if (minutes.is_some() || maker.is_some()) && !placeholders {
+        return Err(Error::BadRequest("placeholder_minutes and maker go with placeholders: true".into()));
     }
     let v = blocking(s, move |s| {
         let c = if untrusted { s.untrusted(&p, &c)? } else { c };
-        let mut v = if placeholders { s.values_with_placeholders(&p, &e, &path, &cons, dynamic, minutes, &c)? } else { s.values_for(&p, &e, &path, true, Some(&cons), dynamic, &c)? };
+        let mut v = if placeholders { s.values_with_placeholders(&p, &e, &path, &cons, dynamic, crate::placeholders::Ask { minutes, maker: maker.as_deref() }, &c)? } else { s.values_for(&p, &e, &path, true, Some(&cons), dynamic, &c)? };
         if codes {
             s.add_codes(&p, &path, &mut v)?;
         }
