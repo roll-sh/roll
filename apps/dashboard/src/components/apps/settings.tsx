@@ -79,6 +79,8 @@ interface Form {
   rolloutStep: string;
   rolloutErrors: string;
   rolloutManual: boolean;
+  /** The new instances start beside the old ones (false: the old ones stop first). */
+  rolloutOverlap: boolean;
   h2c: boolean;
   public: boolean;
   restart: "always" | "on_failure" | "never";
@@ -167,6 +169,7 @@ export function formOf(s: Service): Form {
     rolloutStep: str(s.run.rollout?.step_s),
     rolloutErrors: str(s.run.rollout?.error_pct),
     rolloutManual: !!s.run.rollout?.manual,
+    rolloutOverlap: s.run.rollout?.overlap !== false,
     h2c: !!s.run.h2c,
     public: s.run.public !== false,
     restart: s.run.restart ?? "always",
@@ -269,8 +272,16 @@ export function patchOf(s: Service, f: Form): ServicePatch {
     run.metrics = f.metricsPath.trim() ? { path: f.metricsPath.trim(), ...(num(f.metricsPort) ? { port: Number(f.metricsPort) } : {}) } : null;
   if (f.sloObjective !== before.sloObjective || f.sloLatency !== before.sloLatency || f.sloWindow !== before.sloWindow)
     run.slo = f.sloObjective.trim() ? { objective: Number(f.sloObjective), ...(num(f.sloLatency) ? { latency_ms: Number(f.sloLatency) } : {}), ...(num(f.sloWindow) ? { window_days: Number(f.sloWindow) } : {}) } : null;
-  if (f.rolloutSteps !== before.rolloutSteps || f.rolloutStep !== before.rolloutStep || f.rolloutErrors !== before.rolloutErrors || f.rolloutManual !== before.rolloutManual)
-    run.rollout = { steps: rolloutSteps(f.rolloutSteps) ?? [], step_s: Number(f.rolloutStep) || 120, error_pct: Number(f.rolloutErrors) || 5, ...(f.rolloutManual ? { manual: true } : {}), ...(s.run.rollout?.slo_burn ? { slo_burn: s.run.rollout.slo_burn } : {}), ...(s.run.rollout?.p95_pct ? { p95_pct: s.run.rollout.p95_pct } : {}) };
+  if (f.rolloutSteps !== before.rolloutSteps || f.rolloutStep !== before.rolloutStep || f.rolloutErrors !== before.rolloutErrors || f.rolloutManual !== before.rolloutManual || f.rolloutOverlap !== before.rolloutOverlap)
+    run.rollout = {
+      steps: f.rolloutOverlap ? (rolloutSteps(f.rolloutSteps) ?? []) : [],
+      step_s: Number(f.rolloutStep) || 120,
+      error_pct: Number(f.rolloutErrors) || 5,
+      ...(f.rolloutManual ? { manual: true } : {}),
+      ...(s.run.rollout?.slo_burn ? { slo_burn: s.run.rollout.slo_burn } : {}),
+      ...(s.run.rollout?.p95_pct ? { p95_pct: s.run.rollout.p95_pct } : {}),
+      ...(f.rolloutOverlap ? {} : { overlap: false }),
+    };
   if (f.h2c !== before.h2c) run.h2c = f.h2c ? true : null;
   if (f.public !== before.public) run.public = f.public ? null : false;
   if (f.affinity !== before.affinity) run.affinity = f.affinity ? true : null;
@@ -808,11 +819,19 @@ export function SettingsTab({
                 {t("drain", "30")}
               </Field>
               {!form.volumeMount.trim() && (
+                <Field label="During a deploy" hint={form.rolloutOverlap ? "the new instances start beside the old ones: no gap" : "the old ones stop first, so two never run at once (a bot, a scheduler)"}>
+                  <select value={form.rolloutOverlap ? "overlap" : "alone"} onChange={(e) => set("rolloutOverlap", e.target.value === "overlap")} className={`${input} w-full`}>
+                    <option value="overlap">New beside old</option>
+                    <option value="alone">Old stops first</option>
+                  </select>
+                </Field>
+              )}
+              {!form.volumeMount.trim() && form.rolloutOverlap && (
                 <Field label="Gradual rollout (%)" hint={rolloutSteps(form.rolloutSteps) ? "shares of requests a new deployment takes in turn; empty: at once" : "increasing percents, 1–99, up to five"}>
                   {t("rolloutSteps", "10, 50")}
                 </Field>
               )}
-              {!form.volumeMount.trim() && form.rolloutSteps.trim() && (
+              {!form.volumeMount.trim() && form.rolloutOverlap && form.rolloutSteps.trim() && (
                 <>
                   <Field label="Each step (s)">{t("rolloutStep", "120")}</Field>
                   <Field label="Roll back at 5xx (%)" hint="of its requests in a step, and more than the old one">
