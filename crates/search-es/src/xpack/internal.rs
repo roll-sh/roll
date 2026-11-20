@@ -78,6 +78,7 @@ pub fn principal_of(u: &Value) -> Option<crate::xpack::security::Principal> {
             role_descriptors: a.get("role_descriptors").cloned().unwrap_or(Value::Null),
             limited_by: a.get("limited_by").cloned().unwrap_or(Value::Null),
             cross_cluster: a.get("cross_cluster").and_then(Value::as_bool).unwrap_or(false),
+            remote: None,
         })),
         None => crate::xpack::security::AuthKind::Realm,
     };
@@ -148,14 +149,22 @@ pub fn acting_principal(req: &EsRequest) -> Option<crate::xpack::security::Princ
 impl Caller {
     /// The client of `ctx`, unless it may read everything anyway.
     pub fn of(ctx: &crate::rest::Ctx<'_>) -> Option<Caller> {
-        use crate::xpack::security::{AUTHENTICATED_HEADER, INDEX_SCOPE_HEADER, RUN_AS_HEADER};
-        let p = ctx.principal.get()?;
-        if p.is_superuser() {
+        if ctx.principal.get()?.is_superuser() {
             return None;
         }
+        Caller::client(ctx)
+    }
+
+    /// The client of `ctx`, a superuser too: for calls whose result belongs to whoever sent
+    /// them (a point in time or scroll is bound to its opener).
+    pub fn client(ctx: &crate::rest::Ctx<'_>) -> Option<Caller> {
+        use crate::xpack::security::{AUTHENTICATED_HEADER, INDEX_SCOPE_HEADER, RUN_AS_HEADER};
+        ctx.principal.get()?;
         // The headers that made it this principal: the node's authentication (narrowed to some
         // indices on a per-index route) or the client's credentials, and its run-as user.
-        let headers = [AUTHENTICATED_HEADER, INDEX_SCOPE_HEADER, "Authorization", RUN_AS_HEADER]
+        // A linked remote cluster's request keeps its remote access too (only roll's own calls
+        // reach here with it), or its key alone would be refused.
+        let headers = [AUTHENTICATED_HEADER, INDEX_SCOPE_HEADER, "Authorization", RUN_AS_HEADER, crate::remote::links::REMOTE_ACCESS_HEADER]
             .into_iter()
             .filter(|h| *h != "Authorization" || ctx.request.header(AUTHENTICATED_HEADER).is_none())
             .filter_map(|h| ctx.request.header(h).map(|v| (h.to_string(), v.to_string())))
@@ -230,6 +239,9 @@ pub fn call_as<'a>(ctx: &crate::rest::Ctx<'_>, cluster: &'a Cluster, method: &st
     }
     if let Some(user) = ctx.request.header(crate::xpack::security::RUN_AS_HEADER) {
         req.headers.push((crate::xpack::security::RUN_AS_HEADER.into(), user.to_string()));
+    }
+    if let Some(access) = ctx.request.header(crate::remote::links::REMOTE_ACCESS_HEADER) {
+        req.headers.push((crate::remote::links::REMOTE_ACCESS_HEADER.into(), access.to_string()));
     }
     Box::pin(async move {
         let resp = crate::rest::handle(cluster, req).await;

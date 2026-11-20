@@ -98,6 +98,9 @@ pub struct SearchRequest {
     pub security: Option<crate::xpack::security::dls::ReadSecurity>,
     /// What its slow log entries say about it (its body, `X-Opaque-Id`).
     pub slowlog: crate::slowlog::Origin,
+    /// A linked cluster's part of a cross-cluster search: the aggregations stop at a partial
+    /// reduce ([`SearchOutcome::partial_aggs`]) for the coordinating cluster's final one.
+    pub partial_aggs: bool,
 }
 
 /// One shard to search.
@@ -116,6 +119,11 @@ pub struct Target {
 }
 
 impl Target {
+    /// Whose reads the target's queries make ([`query::Reader`]).
+    pub fn reader(&self) -> query::Reader {
+        query::Reader::of(self.security.clone())
+    }
+
     /// The fields the target's reader sees: under field level security, the fields it may not
     /// read are unmapped (queries, aggregations, sorts and `fields` don't find them).
     pub fn table(&self) -> Arc<crate::engine::fields::FieldTable> {
@@ -197,6 +205,11 @@ pub struct SearchOutcome {
     pub ranked: Vec<(usize, u32, f32)>,
     /// A cross-cluster search's `_clusters` section.
     pub clusters: Option<Value>,
+    /// `num_reduce_phases` of a search over linked remote clusters (printed unless 1).
+    pub reduce_phases: Option<usize>,
+    /// The partially reduced aggregations of a [`SearchRequest::partial_aggs`] search (its
+    /// `aggs` stay `None`).
+    pub partial_aggs: Option<search_aggs::Aggs>,
 }
 
 fn list(s: &str) -> Vec<String> {
@@ -359,6 +372,7 @@ pub fn parse_request(ctx: &Ctx, body: Option<&Value>, raw: Option<&[u8]>) -> EsR
         security: crate::xpack::security::dls::ReadSecurity::of(ctx),
         now_ms: ctx.now_ms,
         slowlog: crate::slowlog::Origin::of(&ctx.request.body, raw, ctx.request.header("x-opaque-id")),
+        partial_aggs: false,
     })
 }
 
@@ -1181,11 +1195,10 @@ fn query_phase_inner(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, 
         None => t.searcher()?,
     };
     let table = t.table();
-    let mut qctx = QueryCtx::new(cluster, st, &t.idx, &table, &searcher, req.now_ms);
+    let mut qctx = QueryCtx::new(cluster, st, &t.idx, &table, &searcher, req.now_ms, t.reader());
     qctx.shard = t.shard.id;
     qctx.runtime_mappings = src.runtime_mappings.clone();
     qctx.alias_filter = t.alias_filter.clone();
-    qctx.security = t.security.clone();
     if let Some(rm) = &src.runtime_mappings {
         let names: Vec<&str> = rm.keys().map(String::as_str).collect();
         runtime::check_time_series(&t.idx, &names, true)?;
@@ -1312,7 +1325,7 @@ fn query_phase_inner(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, 
         Some(a) => {
             let mut lookup = aggs::Lookup::new(cluster, st, t, &table, &searcher, req.now_ms).with_parent_fields(&src.fields);
             if !src.rescore.is_empty() {
-                lookup = lookup.with_rescore(prepare_rescore(&QueryCtx::new(cluster, st, &t.idx, &table, &searcher, req.now_ms), src));
+                lookup = lookup.with_rescore(prepare_rescore(&QueryCtx::new(cluster, st, &t.idx, &table, &searcher, req.now_ms, t.reader()), src));
             }
             let max_buckets = st.metadata.cluster_setting("search.max_buckets").and_then(|v| v.parse::<usize>().ok());
             let opts = search_aggs::ShardOptions {
@@ -1811,6 +1824,13 @@ fn cacheable(req: &SearchRequest, t: &Target) -> bool {
         return false;
     }
     if req.request_cache.is_none() && t.idx.settings.get("index.requests.cache.enable") == Some("false") {
+        return false;
+    }
+    // A reader whose document or field level security restricts anything never reads or
+    // writes the cache: its answers depend on what it may read, here and in every index its
+    // queries look documents up in, which the key can't hold (Elasticsearch disables the cache
+    // in similar cases, e.g. templated role queries).
+    if t.security.is_some() {
         return false;
     }
     let text = format!("{src:?}");
@@ -2604,7 +2624,7 @@ fn execute_targets(cluster: &Cluster, req: &SearchRequest, targets: &[Target]) -
     } else {
         let t = &targets[results[0].target];
         let table = t.table();
-        let mut qctx = QueryCtx::new(cluster, &st, &t.idx, &table, &results[0].searcher, req.now_ms);
+        let mut qctx = QueryCtx::new(cluster, &st, &t.idx, &table, &results[0].searcher, req.now_ms, t.reader());
         // Sorts on the request's runtime fields resolve them here too.
         qctx.runtime_mappings = src.runtime_mappings.clone();
         let b = sort::build(&qctx, &src.sort)?;
@@ -2615,7 +2635,7 @@ fn execute_targets(cluster: &Cluster, req: &SearchRequest, targets: &[Target]) -
     } else {
         let t = &targets[results[0].target];
         let table = t.table();
-        let mut qctx = QueryCtx::new(cluster, &st, &t.idx, &table, &results[0].searcher, req.now_ms);
+        let mut qctx = QueryCtx::new(cluster, &st, &t.idx, &table, &results[0].searcher, req.now_ms, t.reader());
         // Sorts on the request's runtime fields resolve them here too.
         qctx.runtime_mappings = src.runtime_mappings.clone();
         sort::build(&qctx, &src.sort)?.formats
@@ -2636,7 +2656,7 @@ fn execute_targets(cluster: &Cluster, req: &SearchRequest, targets: &[Target]) -
                 return f.clone();
             }
             let table = t.table();
-            let mut qctx = QueryCtx::new(cluster, &st, &t.idx, &table, &r.searcher, req.now_ms);
+            let mut qctx = QueryCtx::new(cluster, &st, &t.idx, &table, &r.searcher, req.now_ms, t.reader());
             // Sorts on the request's runtime fields resolve them here too.
             qctx.runtime_mappings = src.runtime_mappings.clone();
             let f = sort::build(&qctx, &src.sort).ok().map(|b| Arc::new(b.formats));
@@ -2740,6 +2760,8 @@ fn execute_targets(cluster: &Cluster, req: &SearchRequest, targets: &[Target]) -
             pit_id: None,
             ranked,
             clusters: None,
+            reduce_phases: None,
+            partial_aggs: None,
         });
     }
     let opts = FetchOpts {
@@ -2908,6 +2930,7 @@ fn execute_targets(cluster: &Cluster, req: &SearchRequest, targets: &[Target]) -
             }
         }
     }
+    let mut partial_aggs = None;
     let aggs_out = match &agg_req {
         Some(a) => {
             // Reduced in shard request order (`QueryPhaseResultConsumer` sorts by shard index):
@@ -2915,6 +2938,21 @@ fn execute_targets(cluster: &Cluster, req: &SearchRequest, targets: &[Target]) -
             let mut order: Vec<usize> = (0..results.len()).collect();
             order.sort_by_key(|&i| request_index[results[i].target]);
             let parts: Vec<search_aggs::Aggs> = order.iter().filter_map(|&i| results[i].aggs.take()).collect();
+            if req.partial_aggs {
+                // A linked cluster's part: reduced partially, its top hits fetched here (the
+                // coordinating cluster can't reach these shards).
+                let mut out = aggs::reduce_partial(cluster, &st, a, parts).map_err(|e| with_query_failures(e, &cluster.node.id, targets, &failures))?;
+                out.visit_top_hits_mut(&mut |t: &mut search_aggs::internal::TopHits| -> EsResult<()> {
+                    for h in t.hits.iter_mut() {
+                        let mut v = aggs::from_json(&h.json);
+                        finish_top_hits(cluster, &st, req, targets, &results, &mut v)?;
+                        h.json = aggs::to_json(&v);
+                    }
+                    Ok(())
+                })?;
+                partial_aggs = Some(out);
+                None
+            } else {
             let mut out = aggs::reduce(cluster, &st, a, parts, req.typed_keys).map_err(|e| with_query_failures(e, &cluster.node.id, targets, &failures))?;
             finish_top_hits(cluster, &st, req, targets, &results, &mut out)?;
             if let Some(raw) = &src.aggs
@@ -2923,6 +2961,7 @@ fn execute_targets(cluster: &Cluster, req: &SearchRequest, targets: &[Target]) -
                 aggs::render_tsid_keys(raw, &mut out, req.typed_keys);
             }
             Some(out)
+            }
         }
         None => None,
     };
@@ -3022,6 +3061,8 @@ fn execute_targets(cluster: &Cluster, req: &SearchRequest, targets: &[Target]) -
         pit_id: None,
         ranked,
         clusters: None,
+        reduce_phases: None,
+        partial_aggs,
     })
 }
 
@@ -3202,7 +3243,7 @@ fn render_hit(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, t: &Tar
         spec.semantic = crate::xpack::inference::highlight::probes(src.query.as_ref());
         // The stored fields read at the top serve the highlighter too.
         let source = crate::fetch::source_bytes(&stored).map(crate::fetch::parse_source).transpose()?;
-        let qctx = QueryCtx::new(cluster, st, &t.idx, &table, &r.searcher, req.now_ms);
+        let qctx = QueryCtx::new(cluster, st, &t.idx, &table, &r.searcher, req.now_ms, t.reader());
         let id = m.get("_id").and_then(Value::as_str).unwrap_or_default().to_string();
         let mut out = highlight::highlight_hit(&qctx, &spec, &r.query, source.as_ref(), &id, &r.searcher, Some(h.doc), Some(&stored), Some(&r.match_weights))?;
         // Percolated documents are highlighted with the stored query that matched them.
@@ -3242,7 +3283,7 @@ fn render_hit(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, t: &Tar
     if explain {
         let mut e = r.searcher.explain(&r.query, h.doc).map_err(crate::engine::convert::index_error)?;
         if !r.rescored.is_empty() {
-            let qctx = QueryCtx::new(cluster, st, &t.idx, &table, &r.searcher, req.now_ms);
+            let qctx = QueryCtx::new(cluster, st, &t.idx, &table, &r.searcher, req.now_ms, t.reader());
             e = explain_rescored(&qctx, &r.searcher, src, &r.rescored, h.doc, e)?;
         }
         m.insert("_explanation".into(), explanation_json(&e));
@@ -3250,7 +3291,7 @@ fn render_hit(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, t: &Tar
     if !r.inner_hits.is_empty() {
         let stored = r.searcher.stored(h.doc).map_err(crate::engine::convert::index_error)?;
         let source = crate::fetch::source_bytes(&stored).map(crate::fetch::parse_source).transpose()?;
-        let qctx = QueryCtx::new(cluster, st, &t.idx, &table, &r.searcher, req.now_ms);
+        let qctx = QueryCtx::new(cluster, st, &t.idx, &table, &r.searcher, req.now_ms, t.reader());
         let mut ih = inner::render(&qctx, t, r, h.doc, &hits::stored_id(&stored).unwrap_or_default(), source.as_ref(), req.total_as_int)?;
         // `stored_fields: _none_` reaches nested inner hits (their sub-context reads the
         // search's stored fields context): they print no `_id` either.
@@ -3400,7 +3441,7 @@ fn complete_top_hit(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, t
         if let Some(root) = root {
             let stored = r.searcher.stored(root).map_err(crate::engine::convert::index_error)?;
             let source = crate::fetch::source_bytes(&stored).map(crate::fetch::parse_source).transpose()?;
-            let qctx = QueryCtx::new(cluster, st, &t.idx, &table, &r.searcher, req.now_ms);
+            let qctx = QueryCtx::new(cluster, st, &t.idx, &table, &r.searcher, req.now_ms, t.reader());
             let id = m.get("_id").and_then(Value::as_str).unwrap_or_default().to_string();
             let out = highlight::highlight_hit(&qctx, &spec, &r.query, source.as_ref(), &id, &r.searcher, Some(root), Some(&stored), Some(&r.match_weights))?;
             if !out.is_empty() {
@@ -3442,7 +3483,7 @@ fn complete_top_hit(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, t
     if !nested && !r.inner_hits.is_empty() {
         let stored = r.searcher.stored(doc).map_err(crate::engine::convert::index_error)?;
         let source = crate::fetch::source_bytes(&stored).map(crate::fetch::parse_source).transpose()?;
-        let qctx = QueryCtx::new(cluster, st, &t.idx, &table, &r.searcher, req.now_ms);
+        let qctx = QueryCtx::new(cluster, st, &t.idx, &table, &r.searcher, req.now_ms, t.reader());
         m.insert("inner_hits".into(), inner::render(&qctx, t, r, doc, &hits::stored_id(&stored).unwrap_or_default(), source.as_ref(), req.total_as_int)?);
     }
     Ok(())
@@ -3465,7 +3506,7 @@ fn runtime_fields_of_hit(cluster: &Cluster, st: &ClusterState, src: &SearchSourc
     }
     let Some((seg, local)) = searcher.segment_of(doc) else { return Ok(()) };
     let mut out = Map::new();
-    lookup_fields_of_hit(cluster, src, table, searcher, doc, &mut out)?;
+    lookup_fields_of_hit(cluster, src, table, searcher, doc, t.security.as_ref(), &mut out)?;
     // Runtime fields shadowing a concrete field the concrete fetch already printed: their
     // own values (or none) replace those.
     let mut shadowed_empty = Vec::new();
@@ -3536,8 +3577,10 @@ fn runtime_fields_of_hit(cluster: &Cluster, st: &ClusterState, src: &SearchSourc
 
 /// `lookup` runtime fields (`LookupRuntimeFieldType`) of the request's `fields`: per value of
 /// `input_field`, the `fetch_fields` of the first document of `target_index` whose
-/// `target_field` holds it; values without a match are left out.
-fn lookup_fields_of_hit(cluster: &Cluster, src: &SearchSource, table: &Arc<crate::engine::fields::FieldTable>, searcher: &Searcher, doc: u32, out: &mut Map) -> EsResult<()> {
+/// `target_field` holds it; values without a match are left out. The lookups read as the
+/// search's reader (`security`: its document and field level security over `target_index`).
+#[allow(clippy::too_many_arguments)]
+fn lookup_fields_of_hit(cluster: &Cluster, src: &SearchSource, table: &Arc<crate::engine::fields::FieldTable>, searcher: &Searcher, doc: u32, security: Option<&crate::xpack::security::dls::ReadSecurity>, out: &mut Map) -> EsResult<()> {
     let Some(rm) = &src.runtime_mappings else { return Ok(()) };
     let lookups: Vec<(&String, &Map)> = rm.iter().filter_map(|(k, d)| d.as_object().filter(|m| m.get("type").and_then(Value::as_str) == Some("lookup")).map(|m| (k, m))).collect();
     if lookups.is_empty() {
@@ -3572,6 +3615,7 @@ fn lookup_fields_of_hit(cluster: &Cluster, src: &SearchSource, table: &Arc<crate
             };
             let req = SearchRequest {
                 slowlog: Default::default(),
+                partial_aggs: false,
                 indices: vec![target_index.clone()],
                 opts: IndicesOptions::STRICT_EXPAND_OPEN,
                 source: SearchSource::parse(&body, None)?,
@@ -3588,7 +3632,7 @@ fn lookup_fields_of_hit(cluster: &Cluster, src: &SearchSource, table: &Arc<crate
                 now_ms: crate::time::now_millis(),
                 fused: None,
                 rank_only: false,
-                security: None,
+                security: security.cloned(),
             };
             let o = execute(cluster, &req)?;
             if let Some(Value::Obj(f)) = o.hits.first().and_then(|h| h.get("fields")) {
@@ -3854,6 +3898,9 @@ fn render_with(o: &SearchOutcome, req: &SearchRequest, top_hits: Vec<Value>) -> 
     if let Some(t) = o.terminated_early {
         m.insert("terminated_early".into(), Value::Bool(t));
     }
+    if let Some(n) = o.reduce_phases.filter(|n| *n != 1) {
+        m.insert("num_reduce_phases".into(), Value::from(n as i64));
+    }
     let mut shards = Map::new();
     shards.insert("total".into(), Value::from(o.shards_total as i64));
     shards.insert("successful".into(), Value::from((o.shards_total - o.failures.len()) as i64));
@@ -3959,6 +4006,11 @@ pub(crate) fn analytics_record(ctx: &Ctx, watch: Option<Watch>, req: &SearchRequ
 
 pub async fn search(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let mut body = ctx.body()?;
+    check_pit_without_indices(ctx, body.as_ref().is_some_and(|b| b.get("pit").is_some()))?;
+    // A search naming remote clusters keeps the body it was sent for the linked ones.
+    // So does one on a point in time over linked clusters.
+    let ccs_pit = body.as_ref().and_then(|b| b.pointer(&["pit", "id"])).and_then(Value::as_str).is_some_and(crate::remote::contexts::is_ccs);
+    let original = (ccs_pit || ctx.param("index").is_some_and(|i| i.contains(':'))).then(|| body.clone()).flatten();
     let watch = analytics_watch(ctx, body.as_ref());
     // OpenSearch: the search pipeline the request names, defines inline or its index defaults to.
     let pipeline = if ctx.cluster.dialect == crate::cluster::Dialect::OpenSearch {
@@ -3982,6 +4034,8 @@ pub async fn search(ctx: &Ctx<'_>) -> EsResult<Reply> {
         crate::xpack::inference::retrievers::expand(&targets, b)?;
     }
     let mut req = parse_request(ctx, body.as_ref(), ctx.raw_json())?;
+    // A linked cluster's part of a cross-cluster search: aggregations partially reduced.
+    req.partial_aggs = req.source.aggs.is_some() && crate::remote::links::wants_partial(ctx);
     // Queries that need inference (`semantic`, and others on `semantic_text` fields).
     crate::xpack::inference::query::rewrite_request(ctx, &mut req).await?;
     crate::xpack::entsearch::query_rules::check_rulesets(ctx, body.as_ref())?;
@@ -3994,6 +4048,11 @@ pub async fn search(ctx: &Ctx<'_>) -> EsResult<Reply> {
     if verbose && pipeline.is_none() {
         return Err(EsError::illegal_argument("The 'verbose pipeline' option requires a search pipeline to be defined."));
     }
+    // Boxed: the remote fan-out stays off the request path's stack.
+    if let Some(mut out) = Box::pin(crate::remote::links::search(ctx, &req, original.as_ref())).await? {
+        analytics_record(ctx, watch, &req, &out);
+        return Reply::ok(render_take(&mut out, &req));
+    }
     let Some(pipeline) = pipeline else {
         // Hits carry their stored `_source` bytes as they are when the page goes straight out
         // (`json::raw`).
@@ -4001,6 +4060,9 @@ pub async fn search(ctx: &Ctx<'_>) -> EsResult<Reply> {
         let mut out = crate::json::raw::with_enabled(raw, || run(ctx, req.clone()))?;
         analytics_record(ctx, watch, &req, &out);
         let mut v = render_take(&mut out, &req);
+        if let Some(p) = out.partial_aggs.take() {
+            crate::remote::links::attach_partial(&mut v, &p)?;
+        }
         if let Some(rr) = &reranker {
             crate::xpack::inference::rerank::apply(ctx, rr, &mut v).await?;
         }
@@ -4024,9 +4086,38 @@ pub async fn search(ctx: &Ctx<'_>) -> EsResult<Reply> {
     Reply::ok(v)
 }
 
+/// The final reduce of a cross-cluster search's partially reduced aggregations (each
+/// cluster's part, in cluster order), rendered; `None` without aggregations or parts.
+pub(crate) fn reduce_clusters(ctx: &Ctx, req: &SearchRequest, parts: Vec<search_aggs::Aggs>) -> EsResult<Option<Value>> {
+    let Some(a) = req.source.aggs.as_ref().filter(|_| !parts.is_empty()) else { return Ok(None) };
+    let agg_req = aggs::parse(a, req.source.aggs_raw.as_deref().map(|r| (r, a)))?;
+    let st = ctx.state();
+    let mut out = aggs::reduce(ctx.cluster, &st, &agg_req, parts, req.typed_keys)?;
+    // Every part's top hits were fetched on its cluster: only `rest_total_hits_as_int` is left.
+    finish_top_hits(ctx.cluster, &st, req, &[], &[], &mut out)?;
+    if aggs::mentions_tsid(a) {
+        aggs::render_tsid_keys(a, &mut out, req.typed_keys);
+    }
+    Ok(Some(out))
+}
+
+/// `SearchRequest.validate`: a search on a point in time names no index (its indices are the
+/// point in time's). Checked before anything reads the request's indices (`has_pit`: the body
+/// names one; else read from it).
+pub(crate) fn check_pit_without_indices(ctx: &Ctx, has_pit: bool) -> EsResult<()> {
+    if ctx.param("index").is_none() || !(has_pit || ctx.body().ok().flatten().is_some_and(|b| b.get("pit").is_some())) {
+        return Ok(());
+    }
+    let msg = match ctx.cluster.dialect {
+        crate::cluster::Dialect::OpenSearch => "[indices] cannot be used with point in time",
+        crate::cluster::Dialect::Elasticsearch => "[indices] cannot be used with point in time. Do not specify any index with point in time.",
+    };
+    Err(EsError::action_request_validation(&[msg.into()]))
+}
+
 /// `SearchRequest.rewrite`: a sorted point-in-time search gets a `_shard_doc` tiebreaker when
 /// its sort doesn't end with one, unless `search_after` was given without a value for it.
-fn add_pit_tiebreaker(src: &mut SearchSource) {
+pub(crate) fn add_pit_tiebreaker(src: &mut SearchSource) {
     if src.sort.is_empty() || src.search_after.as_ref().is_some_and(|a| a.len() != src.sort.len() + 1) {
         return;
     }
@@ -4322,10 +4413,10 @@ pub async fn msearch(ctx: &Ctx<'_>) -> EsResult<Reply> {
         if let Some(Value::Str(st)) = h.get("search_type") {
             req.dfs = st == "dfs_query_then_fetch";
         }
-        reqs.push(req);
+        reqs.push((req, b));
     }
     let mut errs = Vec::new();
-    for req in &reqs {
+    for (req, _) in &reqs {
         errs.extend(validate(req));
         if let Some(a) = &req.source.aggs {
             errs.extend(aggs::validation_errors(a));
@@ -4342,16 +4433,26 @@ pub async fn msearch(ctx: &Ctx<'_>) -> EsResult<Reply> {
     // such accounting.
     let mut held = (ctx.cluster.dialect != crate::cluster::Dialect::OpenSearch)
         .then(|| crate::breaker::Reservation::new(ctx.cluster.breakers.request(ctx.cluster, &ctx.state())));
-    for (mut req, watch) in reqs.into_iter().zip(watches) {
-        // Each search is authorized as a search request of its own.
-        let r = match crate::xpack::security::authorize_search(ctx, &req.indices, &req.opts) {
+    for ((mut req, body), watch) in reqs.into_iter().zip(watches) {
+        // Each search is authorized as a search request of its own: one on a point in time
+        // against the point in time's indices (its own stay empty, or `run` refuses them).
+        let authorized = match &req.source.pit {
+            Some(pit) => crate::xpack::security::authorize_search_pit(ctx, &pit.id).map(|()| None),
+            None => crate::xpack::security::authorize_search(ctx, &req.indices, &req.opts),
+        };
+        let r = match authorized {
             Ok(narrowed) => {
                 if let Some(n) = narrowed {
                     req.indices = n;
                 }
                 // Queries that need inference, per search.
                 match crate::xpack::inference::query::rewrite_request(ctx, &mut req).await {
-                    Ok(()) => run(ctx, req.clone()),
+                    // Linked remote clusters' parts run there.
+                    Ok(()) => match Box::pin(crate::remote::links::search(ctx, &req, body.as_ref())).await {
+                        Ok(Some(out)) => Ok(out),
+                        Ok(None) => run(ctx, req.clone()),
+                        Err(e) => Err(e),
+                    },
                     Err(e) => Err(e),
                 }
             }
@@ -4436,17 +4537,23 @@ pub fn explain(ctx: &Ctx) -> EsResult<Reply> {
     let shard = engine.shard(crate::meta::routing::shard_for(&idx, &id, routing.as_deref())).clone();
     shard.before_search(IndexEngine::refresh_interval(&idx))?;
     let searcher = shard.searcher();
-    let table = engine.table();
-    let qctx = QueryCtx::new(ctx.cluster, &st, &idx, &table, &searcher, ctx.now_ms);
     let security = crate::xpack::security::dls::ReadSecurity::of(ctx);
     let alias_filter = match &security {
         Some(s) => s.documents(ctx.cluster, crate::xpack::security::dls::READ, &idx.name)?,
         None => None,
     };
+    let fls = security.as_ref().and_then(|s| s.fields(crate::xpack::security::dls::READ, &idx.name));
     let t = Target { idx: idx.clone(), engine: engine.clone(), shard: shard.clone(), alias_filter, boost: 1.0, searcher: Some(searcher.clone()), security };
+    // The reader's fields only: those its field level security hides are unmapped.
+    let table = t.table();
+    let qctx = QueryCtx::new(ctx.cluster, &st, &idx, &table, &searcher, ctx.now_ms, t.reader());
     // `TransportExplainAction.shardOperation` looks the document up before it builds the
-    // query: a missing document answers 404 whatever the query.
-    let doc = find_doc(&searcher, &id);
+    // query: a missing document answers 404 whatever the query, and so does one the reader's
+    // document level security hides (its reader doesn't hold it).
+    let doc = match find_doc(&searcher, &id) {
+        Some(d) if !doc_allowed(ctx.cluster, &st, &idx, &engine.table(), &searcher, d, t.alias_filter.as_ref())? => None,
+        d => d,
+    };
     let mut m = Map::new();
     m.insert("_index".into(), Value::Str(idx.name.clone()));
     m.insert("_id".into(), Value::Str(id.clone()));
@@ -4471,10 +4578,16 @@ pub fn explain(ctx: &Ctx) -> EsResult<Reply> {
         g.insert("found".into(), Value::Bool(true));
         let view = crate::fetch::SourceView { idx: &idx, table: &table, force_synthetic: false, search: true };
         if let Some(src) = crate::fetch::render_source_view(&stored, &fs2, &view)? {
-            g.insert("_source".into(), src);
+            g.insert("_source".into(), match &fls {
+                Some(f) => f.filter_source(src),
+                None => src,
+            });
         }
         if let Some(s) = &sf {
-            let f = crate::fetch::stored_fields(&table, &stored, s);
+            let mut f = crate::fetch::stored_fields(&table, &stored, s);
+            if let Some(fls) = &fls {
+                f = fls.filter_fields(f);
+            }
             if !f.is_empty() {
                 g.insert("fields".into(), Value::Obj(f));
             }
@@ -4516,7 +4629,7 @@ fn complete_completion_options(cluster: &Cluster, st: &ClusterState, req: &Searc
                 let table = t.table();
                 let stored = r.searcher.stored(doc).map_err(crate::engine::convert::index_error)?;
                 let source = crate::fetch::source_bytes(&stored).map(crate::fetch::parse_source).transpose()?;
-                let qctx = QueryCtx::new(cluster, st, &t.idx, &table, &r.searcher, req.now_ms);
+                let qctx = QueryCtx::new(cluster, st, &t.idx, &table, &r.searcher, req.now_ms, t.reader());
                 if let Some(hl) = &src.highlight {
                     let spec = match &mut spec {
                         Some(s) => s,
@@ -4554,12 +4667,51 @@ fn complete_completion_options(cluster: &Cluster, st: &ClusterState, req: &Searc
 
 /// Whether document `id` of `shard` matches `q` (document level security of a get): the shard
 /// is refreshed first, so a realtime get of a document not yet searchable is judged too.
+/// Document `id` of `idx` as a query reads it on behalf of its request (a `percolate` query's
+/// or an `indexed_shape`'s document): `None` when it's missing or the reader's document level
+/// security hides it, else its version and `_source` (`None`: not stored) without the fields
+/// the reader's field level security hides, as a get by the reader answers.
+pub(crate) fn lookup_source(ctx: &QueryCtx, idx: &Arc<IndexMeta>, id: &str, routing: Option<&str>) -> EsResult<Option<(i64, Option<Value>)>> {
+    use crate::xpack::security::dls::READ;
+    let engine = ctx.cluster.engine.index(ctx.cluster, ctx.st, idx)?;
+    let shard = engine.shard(crate::meta::routing::shard_for(idx, id, routing));
+    let sec = ctx.security.read_as()?;
+    let Some(doc) = shard.shard.get(id.as_bytes(), true).map_err(crate::engine::convert::index_error)? else { return Ok(None) };
+    let fields = match sec.map(|s| s.documents(ctx.cluster, READ, &idx.name)).transpose()?.flatten() {
+        None => doc.fields,
+        // Under document level security the document is read from the searcher the filter is
+        // checked on (a document not searchable yet isn't visible).
+        Some(q) => {
+            let searcher = shard.searcher();
+            match find_doc(&searcher, id) {
+                Some(d) if doc_allowed(ctx.cluster, ctx.st, idx, &engine.table(), &searcher, d, Some(&q))? => searcher.stored(d).map_err(crate::engine::convert::index_error)?,
+                _ => return Ok(None),
+            }
+        }
+    };
+    let Some(src) = crate::fetch::source_bytes(&fields) else { return Ok(Some((doc.version, None))) };
+    let src = crate::fetch::parse_source(src)?;
+    Ok(Some((doc.version, Some(match sec.and_then(|s| s.fields(READ, &idx.name)) {
+        Some(f) => f.filter_source(src),
+        None => src,
+    }))))
+}
+
+/// Whether document `doc` of `searcher` matches a reader's document filter (`None`: none
+/// applies), on that searcher: the copy a request checks is the copy it reads.
+fn doc_allowed(cluster: &Cluster, st: &ClusterState, idx: &Arc<IndexMeta>, table: &Arc<crate::engine::fields::FieldTable>, searcher: &Searcher, doc: u32, filter: Option<&crate::query::Query>) -> EsResult<bool> {
+    let Some(q) = filter else { return Ok(true) };
+    let qctx = QueryCtx::new(cluster, st, idx, table, searcher, crate::time::now_millis(), query::Reader::Unrestricted);
+    let query = qctx.to_filter(q)?;
+    Ok(searcher.explain(&query, doc).map_err(crate::engine::convert::index_error)?.is_match())
+}
+
 pub fn matches_doc(cluster: &Cluster, st: &ClusterState, idx: &Arc<IndexMeta>, engine: &Arc<IndexEngine>, shard: &Arc<ShardEngine>, id: &str, q: &crate::query::Query) -> EsResult<bool> {
     shard.refresh()?;
     let searcher = shard.searcher();
     let Some(doc) = find_doc(&searcher, id) else { return Ok(false) };
     let table = engine.table();
-    let qctx = QueryCtx::new(cluster, st, idx, &table, &searcher, crate::time::now_millis());
+    let qctx = QueryCtx::new(cluster, st, idx, &table, &searcher, crate::time::now_millis(), crate::search::query::Reader::Unrestricted);
     let query = qctx.to_filter(q)?;
     Ok(searcher.explain(&query, doc).map_err(crate::engine::convert::index_error)?.is_match())
 }
@@ -4606,7 +4758,7 @@ pub fn count(ctx: &Ctx) -> EsResult<Reply> {
         let r = (|| -> EsResult<u64> {
             let searcher = t.searcher()?;
             let table = t.table();
-            let qctx = QueryCtx::new(ctx.cluster, &st, &t.idx, &table, &searcher, ctx.now_ms);
+            let qctx = QueryCtx::new(ctx.cluster, &st, &t.idx, &table, &searcher, ctx.now_ms, t.reader());
             check_inner_hit_names(&req.source)?;
             let q = shard_query(&qctx, t, &req.source).map_err(|e| query::shard_exception(&t.idx, e))?;
             match (req.source.min_score, req.source.terminate_after) {

@@ -12,7 +12,7 @@ test("transit sends UTF-8 and bytes as base64 and decrypts back to the same byte
     const out = u.pathname.endsWith("/encrypt") ? { ciphertext: `roll:v1:${body.plaintext}` } : { plaintext: body.ciphertext.slice("roll:v1:".length) };
     return new Response(JSON.stringify(out), { status: 200 });
   }) as typeof globalThis.fetch;
-  const cards = createClient({ api: "http://rolld.test", token: "rlst_test", project: "prj_1", fetch }).transit("cards");
+  const cards = createClient({ api: "http://rolld.test", token: "rlt_test", project: "prj_1", fetch }).transit("cards");
 
   const ct = await cards.encrypt("héllo ✓", "order:42");
   assert.deepEqual(sent[0], { path: "/v1/secrets/projects/prj_1/transit/cards/encrypt", plaintext: Buffer.from("héllo ✓").toString("base64"), context: "order:42" });

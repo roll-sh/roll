@@ -1,6 +1,7 @@
-import { Play, Plus, Sparkles, Trash2 } from "lucide-react";
+import { KeyRound, Play, Plus, RefreshCw, Sparkles, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
-import { esJson, type SearchCluster } from "@/lib/search-api";
+import { esJson, searchApi, type InferenceBinding, type InferenceSecrets, type SearchCluster } from "@/lib/search-api";
+import { secretsApi, type Environment, type Secret } from "@/lib/secrets-api";
 import { Field, Segmented } from "../redis/shared";
 import { btn, ErrorNote, input, Panel, primary } from "../ui";
 
@@ -157,10 +158,21 @@ function summarize(task: string, v: Record<string, unknown>): string {
   return JSON.stringify(v);
 }
 
+/** Where a new endpoint's key comes from: typed here, or a roll secret of the cluster's project. */
+type KeySource = "key" | "secret";
+
+/** A key that can key an endpoint: shared, not sensitive (a key no person reads), not short-lived. */
+const usable = (k: Secret) => !k.tags.includes("sensitive") && k.link?.mode !== "dynamic";
+
+/** The settings a roll secret stands in for: the API key, and Azure's alternative to it. */
+const KEYED = ["api_key", "entra_id"];
+
 /**
  * A cluster's inference endpoints (`_inference`): the models `semantic_text` fields embed with,
- * rerankers and completions. A new endpoint's API key goes to the cluster once, where it's
- * sealed; it's never listed or shown again. Listing wakes the cluster (only when this tab opens).
+ * rerankers and completions. A new endpoint's credentials go to the cluster once, where they're
+ * sealed; they're never listed or shown again. Or, for a service keyed by an API key, the key is
+ * a roll secret of the project the cluster is on (picked by name, never shown): roll secrets
+ * pushes it again whenever it changes. Listing wakes the cluster (only when this tab opens).
  */
 export function InferenceTab({ cluster, onOpenConsole }: { cluster: SearchCluster; onOpenConsole: (text: string) => void }) {
   const [endpoints, setEndpoints] = useState<Endpoint[] | null>(null);
@@ -176,13 +188,56 @@ export function InferenceTab({ cluster, onOpenConsole }: { cluster: SearchCluste
   const [docs, setDocs] = useState("Reset it from the sign-in page\nPasswords expire every 90 days");
   const [answer, setAnswer] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
+  const [source, setSource] = useState<KeySource>("key");
+  const [linked, setLinked] = useState<InferenceSecrets | null>(null);
+  const [project, setProject] = useState("");
+  const [envs, setEnvs] = useState<Environment[] | null>(null);
+  const [env, setEnv] = useState("production");
+  const [keys, setKeys] = useState<Secret[] | null>(null);
+  const [secretKey, setSecretKey] = useState("");
 
   const load = useCallback(() => {
     esJson<{ endpoints: Endpoint[] }>(cluster.id, "GET", "/_inference/_all").then(
       (r) => setEndpoints(r.endpoints.sort((a, b) => a.inference_id.localeCompare(b.inference_id))),
       (e) => setError(message(e)),
     );
+    // Which endpoints follow a secret; nothing when roll secrets can't say (no project, no access).
+    searchApi.inferenceSecrets(cluster.id).then(
+      (r) => {
+        setLinked(r);
+        setProject((p) => (p && r.projects.some((x) => x.id === p) ? p : (r.projects[0]?.id ?? "")));
+      },
+      () => setLinked(null),
+    );
   }, [cluster.id]);
+  const bindingOf = (id: string): InferenceBinding | undefined => linked?.bindings.find((b) => b.endpoint === id);
+
+  // The project's environments, then the environment's keys (names only).
+  useEffect(() => {
+    setEnvs(null);
+    if (source !== "secret" || !project) return;
+    secretsApi(project)
+      .environments()
+      .then(
+        (l) => {
+          const standard = l.filter((e) => e.kind === "standard");
+          setEnvs(standard);
+          setEnv((cur) => (standard.some((e) => e.slug === cur) ? cur : (standard[0]?.slug ?? "")));
+        },
+        (e) => setError(message(e)),
+      );
+  }, [source, project]);
+  useEffect(() => {
+    setKeys(null);
+    setSecretKey("");
+    if (source !== "secret" || !project || !env) return;
+    secretsApi(project)
+      .secrets(env)
+      .then(
+        (l) => setKeys(l.filter((k) => k.type === "shared").sort((a, b) => a.key.localeCompare(b.key))),
+        (e) => setError(message(e)),
+      );
+  }, [source, project, env]);
   useEffect(() => {
     if (cluster.flavor !== "opensearch") load();
   }, [cluster.flavor, load]);
@@ -213,17 +268,36 @@ export function InferenceTab({ cluster, onOpenConsole }: { cluster: SearchCluste
   };
 
   const spec = SERVICES[service];
-  const fields = spec.fields.filter((f) => !f.tasks || f.tasks.includes(task));
-  // Azure's two credentials are alternatives: one of them must be set.
-  const missing = fields.some((f) => !f.optional && !(values[f.key] ?? f.value ?? "").trim()) || (service === "azureopenai" && !values.api_key?.trim() && !values.entra_id?.trim());
+  // A roll secret keys only services that take an API key (`search-inference` pushes `api_key`).
+  const keyed = spec.fields.some((f) => f.key === "api_key");
+  const fromSecret = source === "secret" && keyed;
+  const fields = spec.fields.filter((f) => (!f.tasks || f.tasks.includes(task)) && !(fromSecret && KEYED.includes(f.key)));
+  // Azure's two credentials are alternatives: one of them must be set (or the secret is it).
+  const missing =
+    fields.some((f) => !f.optional && !(values[f.key] ?? f.value ?? "").trim()) ||
+    (fromSecret ? !secretKey : service === "azureopenai" && !values.api_key?.trim() && !values.entra_id?.trim());
   // Vertex AI's rerank picks Google's default ranker without a model.
   const optionalModel = service === "googlevertexai" && task === "rerank";
 
   const create = () =>
     act("create", async () => {
-      await esJson(cluster.id, "PUT", `/_inference/${task}/${encodeURIComponent(id)}`, endpointBody(service, task, model, values));
+      if (fromSecret) {
+        // The secret is the key: whatever was typed for one before switching stays here.
+        const rest = Object.fromEntries(Object.entries(values).filter(([k]) => !KEYED.includes(k)));
+        const config = endpointBody(service, task, model, rest);
+        await searchApi.createInferenceFromSecret(cluster.id, { inference_id: id, task_type: task, config, secret: { project, environment: env, key: secretKey } });
+      } else {
+        await esJson(cluster.id, "PUT", `/_inference/${task}/${encodeURIComponent(id)}`, endpointBody(service, task, model, values));
+      }
       setValues({});
       setId("");
+      load();
+    });
+
+  /** Push the secret's current value to the endpoint now (its sync, run). */
+  const refresh = (b: InferenceBinding) =>
+    act(`refresh:${b.endpoint}`, async () => {
+      await secretsApi(b.project).runSync(b.sync);
       load();
     });
 
@@ -238,6 +312,9 @@ export function InferenceTab({ cluster, onOpenConsole }: { cluster: SearchCluste
   const remove = (e: Endpoint) =>
     act("delete", async () => {
       await esJson(cluster.id, "DELETE", `/_inference/${e.task_type}/${encodeURIComponent(e.inference_id)}`);
+      // Nothing follows the secret for an endpoint that's gone.
+      const b = bindingOf(e.inference_id);
+      if (b) await secretsApi(b.project).deleteSync(b.sync);
       setDeleting(null);
       if (testing?.inference_id === e.inference_id) setTesting(null);
       load();
@@ -286,6 +363,7 @@ export function InferenceTab({ cluster, onOpenConsole }: { cluster: SearchCluste
                   {endpoints.map((e) => {
                     const builtIn = e.inference_id.startsWith(".");
                     const s = e.service_settings ?? {};
+                    const b = bindingOf(e.inference_id);
                     return (
                       <tr key={e.inference_id} className="border-b border-line last:border-0">
                         <td className="max-w-64 px-3 py-2">
@@ -293,6 +371,16 @@ export function InferenceTab({ cluster, onOpenConsole }: { cluster: SearchCluste
                           {(builtIn || typeof s.url === "string") && (
                             <div className="truncate text-[11px] text-subtle">{builtIn ? "built in · needs ML nodes" : String(s.url)}</div>
                           )}
+                          {b && (
+                            <div className="flex items-center gap-1 truncate text-[11px] text-subtle" title="The key follows this roll secret: a new value is pushed to the endpoint">
+                              <KeyRound className="size-3 shrink-0" strokeWidth={1.5} />
+                              <span className="truncate font-mono">
+                                {b.environment}
+                                {b.path === "/" ? "" : b.path}/{b.key}
+                              </span>
+                            </div>
+                          )}
+                          {b?.status === "error" && b.error && <div className="truncate text-[11px] text-danger" title={b.error}>{b.error}</div>}
                         </td>
                         <td className="px-3 py-2 text-muted">{e.task_type}</td>
                         <td className="px-3 py-2 text-muted">{e.service}</td>
@@ -310,6 +398,17 @@ export function InferenceTab({ cluster, onOpenConsole }: { cluster: SearchCluste
                             </span>
                           ) : (
                             <span className="inline-flex gap-2">
+                              {b && (
+                                <button
+                                  disabled={busy !== null}
+                                  onClick={() => refresh(b)}
+                                  className={btn}
+                                  title={`Push ${b.key}'s current value to the endpoint now`}
+                                  aria-label={`Refresh ${e.inference_id} from ${b.key}`}
+                                >
+                                  <RefreshCw className={`size-3.5 ${busy === `refresh:${b.endpoint}` ? "animate-spin motion-reduce:animate-none" : ""}`} />
+                                </button>
+                              )}
                               {!builtIn && e.task_type !== "chat_completion" && (
                                 <button onClick={() => (setTesting(e), setAnswer(null))} className={btn}>
                                   <Play className="size-3.5" /> Test
@@ -377,6 +476,16 @@ export function InferenceTab({ cluster, onOpenConsole }: { cluster: SearchCluste
               ))}
             </select>
             <Segmented value={task} options={Object.keys(SERVICES[service].tasks).map((t) => ({ label: TASK_LABELS[t] ?? t, value: t }))} onChange={pickTask} />
+            {keyed && (
+              <Segmented
+                value={source}
+                options={[
+                  { label: "A key", value: "key" },
+                  { label: "A roll secret", value: "secret" },
+                ]}
+                onChange={setSource}
+              />
+            )}
           </div>
           <div className="grid gap-3 sm:grid-cols-2">
             <Field label="Endpoint id" hint="lowercase letters, digits, . _ -">
@@ -410,6 +519,19 @@ export function InferenceTab({ cluster, onOpenConsole }: { cluster: SearchCluste
                 )}
               </Field>
             ))}
+            {fromSecret && (
+              <SecretPicker
+                linked={linked}
+                project={project}
+                setProject={setProject}
+                envs={envs}
+                env={env}
+                setEnv={setEnv}
+                keys={keys}
+                secretKey={secretKey}
+                setSecretKey={setSecretKey}
+              />
+            )}
           </div>
           <button type="submit" className={primary} disabled={busy !== null || !ID_RE.test(id) || missing || (!!spec.model && !model.trim() && !optionalModel)}>
             {busy === "create" ? (
@@ -423,5 +545,68 @@ export function InferenceTab({ cluster, onOpenConsole }: { cluster: SearchCluste
         </form>
       </Panel>
     </div>
+  );
+}
+
+/**
+ * The secret a new endpoint's key comes from: the cluster's project (when it's on more than one
+ * canvas), an environment and a key, by name. You need reveal on it; the value never comes here.
+ */
+function SecretPicker(p: {
+  linked: InferenceSecrets | null;
+  project: string;
+  setProject: (v: string) => void;
+  envs: Environment[] | null;
+  env: string;
+  setEnv: (v: string) => void;
+  keys: Secret[] | null;
+  secretKey: string;
+  setSecretKey: (v: string) => void;
+}) {
+  if (!p.linked || p.linked.projects.length === 0) {
+    return (
+      <Field label="Roll secret">
+        <p className="py-1.5 text-[12px] text-muted">
+          {p.linked ? "Put this cluster on a project's canvas first: that project's secrets can key it." : <span className="shimmer">Loading…</span>}
+        </p>
+      </Field>
+    );
+  }
+  const choices = (p.keys ?? []).filter(usable);
+  return (
+    <Field label="Roll secret" hint="its value is pushed again whenever it changes">
+      <div className="flex gap-2">
+        {p.linked.projects.length > 1 && (
+          <select className={`${input} min-w-0 flex-1`} value={p.project} onChange={(e) => p.setProject(e.target.value)} aria-label="Project">
+            {p.linked.projects.map((x) => (
+              <option key={x.id} value={x.id}>
+                {x.name}
+              </option>
+            ))}
+          </select>
+        )}
+        <select className={`${input} min-w-0 flex-1`} value={p.env} onChange={(e) => p.setEnv(e.target.value)} aria-label="Environment" disabled={!p.envs}>
+          {(p.envs ?? []).map((e) => (
+            <option key={e.slug} value={e.slug}>
+              {e.name}
+            </option>
+          ))}
+        </select>
+        <select
+          className={`${input} min-w-0 flex-[2] font-mono text-[12px]`}
+          value={p.secretKey}
+          onChange={(e) => p.setSecretKey(e.target.value)}
+          aria-label="Key"
+          disabled={!p.keys}
+        >
+          <option value="">{p.keys ? (choices.length ? "Pick a key" : "No keys here") : "…"}</option>
+          {choices.map((k) => (
+            <option key={k.id} value={k.key}>
+              {k.key}
+            </option>
+          ))}
+        </select>
+      </div>
+    </Field>
   );
 }

@@ -25,6 +25,7 @@ import { Deployments } from "./deployments";
 import { DomainsTab } from "./domains";
 import { JobsTab } from "./jobs";
 import { ShellTab } from "./shell";
+import { FormsPanel } from "./forms";
 import { anyPending, POLL_BUSY_MS, POLL_IDLE_MS, POLL_STREAMED_MS, useDeployMark, usePageVisible } from "./live";
 import { RuntimeLogs } from "./logs";
 import { MetricsTab } from "./metrics";
@@ -229,6 +230,16 @@ function Conditions({ service, env, runner, go }: { service: Service; env: Envir
       action: (
         <button type="button" className={btn} disabled={runner.busy !== null} onClick={() => runner.run("resume-deploys", () => appsApi.putEnvironment(service.id, env.name, { held: false }))}>
           Resume deploys
+        </button>
+      ),
+    });
+  if (env.frozen)
+    lines.push({
+      key: "frozen",
+      text: `Deploys are frozen${env.freeze?.reason ? `: ${env.freeze.reason}` : ""}. Pushes and hooks build without going live; deploying by hand needs an override; a rollback always works.`,
+      action: (
+        <button type="button" className={btn} disabled={runner.busy !== null} onClick={() => runner.run("unfreeze", () => appsApi.putEnvironment(service.id, env.name, { freeze: null }))}>
+          Lift the freeze
         </button>
       ),
     });
@@ -704,7 +715,10 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
         ) : tab === "usage" ? (
           <UsageTab service={service.id} env={envName} prices={overview?.prices ?? null} />
         ) : tab === "events" ? (
-          <EventsTab service={service.id} changed={`${data.deploys?.[0]?.id ?? ""}:${data.deploys?.[0]?.status ?? ""}:${env?.state ?? ""}`} />
+          <div className="space-y-6">
+            <FormsPanel service={service.id} env={envName} runner={runner} />
+            <EventsTab service={service.id} changed={`${data.deploys?.[0]?.id ?? ""}:${data.deploys?.[0]?.status ?? ""}:${env?.state ?? ""}`} />
+          </div>
         ) : (
           <SettingsTab
             service={service}

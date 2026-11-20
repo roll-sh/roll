@@ -461,7 +461,9 @@ and service accounts ignore the header, as in Elasticsearch. Service account tok
 security index and from `config/service_tokens` (`namespace/service/name:hash` lines, the
 `{PBKDF2_STRETCH}` hashes `elasticsearch-service-tokens` writes; read as the file is now, so
 edits take effect without a restart); `_credentials` lists the file's under
-`nodes_credentials.file_tokens`. An API key whose role descriptors
+`nodes_credentials.file_tokens`. The file is the node's, so on a node serving many clusters
+only the clusters named in the node setting `roll.security.service_token_file.clusters` read it
+(a dev-mode `search-dev` node serves one cluster, which always does). An API key whose role descriptors
 carry `restriction.workflows` runs only requests of those workflows (`search_application_query`:
 a search application's `_search`, with the searches it makes), anything else fails with
 `role_restriction_exception` ("access restricted by workflow"), `_authenticate` included. A search with `ignore_unavailable`
@@ -1176,7 +1178,14 @@ to its provider's host (a resource name, region or location must be a host name 
 becomes part of one), and the replay tests check that none appears in a listing, an answer, an
 error or an endpoint's `Debug` form. Every URL is fetched through `roll_net::PublicOnly` with no redirects and no proxy,
 refusing private IP literals and `localhost`, reading at most 32 MiB
-(`roll.inference.allow_private_hosts` lifts the address rule, for test clusters only). Calls are
+(`roll.inference.allow_private_hosts` lifts the address rule, for test clusters only). A call
+waits at most the node's `roll.inference.max_timeout` (default 120s), retries and the rate
+limiter's wait included: a larger `timeout` is accepted and clamped to it. Elasticsearch 9.5.5
+accepts any `timeout` (`1000d`, `9223372036854775807ms`) and waits that long (checked: a `PUT`
+whose validation call went to a server that never answers was still waiting after 100 s), so
+one tenant could hold a shared node's connection and worker with an endpoint that never
+answers. Below the cap nothing differs; above it the call times out sooner, with the same
+`request timed out` error. Calls are
 authorized by the one security evaluator (`monitor_inference`, `manage_inference`). Answers are
 parsed as untrusted data: shapes are checked (a rerank index outside the inputs, a missing field
 or a wrong embedding count fail the call).
@@ -1524,6 +1533,25 @@ the rest are skipped by the tests' own prerequisites.
   setting. A `search_click` behavioral analytics event is indexed as on Elasticsearch, and also
   counts as a click for the index's analytics when they're on.
 
+- Query languages nest only so deep, because a stack overflow aborts a node every tenant
+  shares:
+  - **ES|QL, SQL and EQL:** Elasticsearch's own limits and messages, counted as it counts them.
+    Before parsing, parentheses (every `(`, `FORK`'s included) plus each run of `NOT`s and
+    signs may nest 300, 250 and 250 levels. ES|QL also bounds the expression tree's height at
+    300 (an operator chain is as tall as it is long).
+  - **SQL and EQL operator chains:** Elasticsearch doesn't bound these. roll allows trees up to
+    1,000 levels (SQL) and 1,000 chained operators in one expression (EQL), because the trees
+    are walked and dropped recursively.
+  - **ES|QL subqueries and views:** these nest at most 16 levels, and one query splices at
+    most 1,000 views (roll's own).
+  - **PPL:** the same pre-scan with 300 levels, and 1,000 chained operators per expression
+    (roll's own).
+  - **KQL, PromQL, `query_string` and `simple_query_string`:** 300 levels (roll's own;
+    Elasticsearch and OpenSearch fail with a `StackOverflowError` somewhere deeper).
+- An Elasticsearch-flavor cluster holds at most 1,000 open points in time (roll's own;
+  Elasticsearch has no limit). The 1,001st fails as OpenSearch 3.9 refuses one past
+  `search.max_open_pit_context` (a 429 `rejected_execution_exception`), which
+  OpenSearch-flavor clusters now enforce.
 - By-query tasks (`wait_for_completion=false`) run to completion before their task id is
   returned (their results are stored in the `.tasks` system index), so they are not
   throttled and `_rethrottle` doesn't reach them; synchronous requests are throttled by
@@ -1532,6 +1560,26 @@ the rest are skipped by the tests' own prerequisites.
   `reindex.remote.whitelist` (node setting, `search-dev --yaml-test-cluster` sets
   `127.0.0.1:*`); an empty whitelist rejects every remote, as in Elasticsearch.
 - Segment generations in `_segments` / `_cat/segments` number the current segments.
+- Remote clusters (`cluster.remote.<alias>.*`) reach another roll search cluster of the same
+  owner with API key based security (README.md, "Cross-cluster search"), or the node itself
+  (the YAML suites' loopback); roll speaks no transport protocol, so a seed or proxy address
+  outside roll is never connected. A remote's `credentials` are set through roll's API, not a
+  keystore. Searches merge as `ccs_minimize_roundtrips: true` does whatever the parameter says
+  (aggregations from each cluster's partially reduced state, so they equal one cluster's; a
+  `geo_centroid` may differ in its last digit, as Elasticsearch's does). A scroll over several
+  clusters is a set of per-cluster scrolls under one id, paged as one cluster's would be, where
+  Elasticsearch scrolls across clusters without minimizing round trips; the pages hold the same
+  hits. A remote that fails a later scroll page while it may not be skipped
+  (`skip_unavailable: false`) fails that page, and the hits the clusters after it sent for that
+  page are lost to the scroll (Elasticsearch fails the shards' parts alike). Not across clusters
+  yet: suggesters and ES|QL `FROM <alias>:<index>`.
+- OpenSearch-flavor clusters' `cluster.remote.*` and `_remote/info` follow OpenSearch 3.9
+  (`skip_unavailable` defaults to `false`, a seed or proxy address must be `host:port`, no
+  `cluster_credentials`), but a search naming `alias:index` on them is refused (400), loopback
+  remotes included, where OpenSearch 3.9 searches a loopback. Linking OpenSearch-flavor
+  clusters is left: it needs a credential model of its own, since OpenSearch has no
+  `cross_cluster` API keys (probably an internal user on the remote with a search-only role,
+  issued and sealed as links' keys are).
 - Aggregations and sorting on keyed flattened sub-fields, `_index_mode` aggregations,
   nested sorts inside `top_hits`, and shard-level aggregation failures as partial results.
 - Compound retrievers (`rrf`, `linear`, `pinned`, `rule` and `rescorer` over them) follow

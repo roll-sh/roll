@@ -1,31 +1,10 @@
-import "@xterm/xterm/css/xterm.css";
-import { resolveColor } from "@roll/brand";
-import { SquareTerminal, X } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { Download, SquareTerminal, Upload, X } from "lucide-react";
+import { useState } from "react";
 import { appsApi, followShell, type Instance } from "@/lib/apps-api";
+import { tarOf } from "@/lib/bundle";
+import { TerminalScreen } from "../terminal-screen";
 import { btn, EmptyPanel, input, Panel, primary } from "../ui";
 import { message } from "./shared";
-
-const cssVar = (name: string) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-
-/** The terminal's colours from what its host paints (resolved, so oklch works). */
-function themeOf(el: HTMLElement) {
-  const s = getComputedStyle(el);
-  const rgb = (css: string, fallback: string) => `rgb(${resolveColor(css.trim() || fallback).join(",")})`;
-  const accent = resolveColor(s.getPropertyValue("--accent").trim() || "#4c8dff");
-  return {
-    background: rgb(s.backgroundColor, "#08090a"),
-    foreground: rgb(s.getPropertyValue("--fg"), "#ededed"),
-    cursor: `rgb(${accent.join(",")})`,
-    selectionBackground: `rgba(${accent.join(",")},0.3)`,
-  };
-}
-
-function encode(text: string): string {
-  let bin = "";
-  for (const b of new TextEncoder().encode(text)) bin += String.fromCharCode(b);
-  return btoa(bin);
-}
 
 /**
  * A shell in a running instance (as `roll apps ssh`): xterm.js on an HTTP session, the screen over
@@ -96,10 +75,20 @@ export function ShellTab({ service, env, instances = [] }: { service: string; en
         }
       >
         {session ? (
-          <Screen key={session} service={service} env={env} session={session} onEnded={() => {
-            setSession(null);
-            setState("ended");
-          }} />
+          <TerminalScreen
+            key={session}
+            session={session}
+            link={{
+              follow: (h) => followShell(service, env, session, h),
+              keys: (data) => appsApi.shellKeys(service, env, session, data),
+              resize: (size) => appsApi.resizeShell(service, env, session, size),
+              close: () => appsApi.closeShell(service, env, session),
+            }}
+            onEnded={() => {
+              setSession(null);
+              setState("ended");
+            }}
+          />
         ) : (
           <div className="px-5 py-4 text-[13px] text-muted">
             {state === "ended"
@@ -112,94 +101,77 @@ export function ShellTab({ service, env, instances = [] }: { service: string; en
         )}
       </Panel>
       {error && <EmptyPanel>{error}</EmptyPanel>}
+      <FilesPanel service={service} env={env} instance={running.some((i) => i.id === instance) ? instance : undefined} />
     </div>
   );
 }
 
-function Screen({ service, env, session, onEnded }: { service: string; env: string; session: string; onEnded: () => void }) {
-  const host = useRef<HTMLDivElement>(null);
-  const ended = useRef(onEnded);
-  ended.current = onEnded;
-
-  useEffect(() => {
-    const el = host.current;
-    if (!el) return;
-    let disposed = false;
-    let cleanup = () => {};
-    void (async () => {
-      const [{ Terminal }, { FitAddon }] = await Promise.all([import("@xterm/xterm"), import("@xterm/addon-fit")]);
-      if (disposed) return;
-      const term = new Terminal({
-        fontFamily: `${cssVar("--font-geist-mono") || "ui-monospace"}, ui-monospace, monospace`,
-        fontSize: 12,
-        lineHeight: 1.25,
-        cursorBlink: false,
-        scrollback: 5000,
-        theme: themeOf(el),
-      });
-      const scheme = window.matchMedia("(prefers-color-scheme: light)");
-      const onScheme = () => (term.options.theme = themeOf(el));
-      scheme.addEventListener("change", onScheme);
-      const fit = new FitAddon();
-      term.loadAddon(fit);
-      term.open(el);
-      term.focus();
-      try {
-        fit.fit();
-      } catch {}
-
-      const stop = followShell(service, env, session, {
-        onChunk: (b) => term.write(b),
-        onReset: () => term.reset(),
-        onClosed: () => ended.current(),
-      });
-
-      // Keys: one POST per few milliseconds, in order.
-      let pending = "";
-      let sending: Promise<unknown> = Promise.resolve();
-      let timer: ReturnType<typeof setTimeout> | null = null;
-      const flush = () => {
-        timer = null;
-        const data = pending;
-        pending = "";
-        // A keystroke that didn't get there is said, not lost without a trace.
-        if (data) sending = sending.then(() => appsApi.shellKeys(service, env, session, encode(data)).catch(() => term.write("\r\n\x1b[31m[a keystroke didn't reach the shell: type it again]\x1b[0m\r\n")));
-      };
-      const onData = term.onData((d) => {
-        pending += d;
-        timer ??= setTimeout(flush, 10);
-      });
-
-      let last = { cols: 0, rows: 0 };
-      const resize = () => {
-        try {
-          fit.fit();
-        } catch {}
-        if (term.cols !== last.cols || term.rows !== last.rows) {
-          last = { cols: term.cols, rows: term.rows };
-          appsApi.resizeShell(service, env, session, last).catch(() => {});
-        }
-      };
-      const ro = new ResizeObserver(resize);
-      ro.observe(el);
-      resize();
-
-      cleanup = () => {
-        stop();
-        ro.disconnect();
-        onData.dispose();
-        scheme.removeEventListener("change", onScheme);
-        if (timer) clearTimeout(timer);
-        term.dispose();
-      };
-    })();
-    return () => {
-      disposed = true;
-      cleanup();
-      // Leaving the page closes the shell (and lets the instance sleep again).
-      appsApi.closeShell(service, env, session).catch(() => {});
-    };
-  }, [service, env, session]);
-
-  return <div ref={host} className="h-[440px] rounded-b-xl bg-panel px-2 py-2" />;
+/**
+ * Files out of a running instance (a dump, a report) as a tar, and files into a directory of it
+ * (`…/files`, as `roll apps cp`): the instance chosen above, or one that's running.
+ */
+function FilesPanel({ service, env, instance }: { service: string; env: string; instance?: string }) {
+  const [path, setPath] = useState("/app/");
+  const [dir, setDir] = useState("/tmp/");
+  const [busy, setBusy] = useState<"down" | "up" | null>(null);
+  const [said, setSaid] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const download = async () => {
+    setError(null);
+    setSaid(null);
+    setBusy("down");
+    try {
+      const { tar, instance: from } = await appsApi.downloadFiles(service, env, path.trim(), instance);
+      const url = URL.createObjectURL(tar);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${path.trim().replace(/\/+$/, "").split("/").pop() || "root"}.tar`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      if (from) setSaid(`From ${from}.`);
+    } catch (e) {
+      setError(message(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+  const upload = async (files: FileList | null) => {
+    if (!files?.length) return;
+    setError(null);
+    setSaid(null);
+    setBusy("up");
+    try {
+      const tar = tarOf(await Promise.all([...files].map(async (f) => ({ path: f.name, data: new Uint8Array(await f.arrayBuffer()) }))));
+      const r = await appsApi.uploadFiles(service, env, dir.trim(), tar, instance);
+      setSaid(`${files.length === 1 ? files[0].name : `${files.length} files`} written under ${r.path} in ${r.instance}.`);
+    } catch (e) {
+      setError(message(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+  return (
+    <Panel title="Files">
+      <div className="space-y-3 px-5 py-4 text-[13px]">
+        <div className="flex flex-wrap items-center gap-2">
+          <input value={path} onChange={(e) => setPath(e.target.value)} aria-label="A path to download" placeholder="/app/report.csv" className={`${input} !w-72 font-mono text-[12px]`} />
+          <button type="button" className={btn} disabled={busy !== null || !path.trim().startsWith("/")} onClick={() => void download()}>
+            <Download className="size-3.5" /> {busy === "down" ? "Reading…" : "Download as a tar"}
+          </button>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <input value={dir} onChange={(e) => setDir(e.target.value)} aria-label="A directory to upload into" placeholder="/tmp/" className={`${input} !w-72 font-mono text-[12px]`} />
+          <label className={`${btn} cursor-pointer ${busy !== null || !dir.trim().startsWith("/") ? "pointer-events-none opacity-50" : ""}`}>
+            <Upload className="size-3.5" /> {busy === "up" ? "Writing…" : "Upload files"}
+            <input type="file" multiple className="sr-only" aria-label="Files to upload" onChange={(e) => void upload(e.target.files)} />
+          </label>
+        </div>
+        <p className="text-muted">
+          {said ?? "Read as the shell would. What's written runs next, as an instance's own files do (they go when it's replaced)."} From a terminal:{" "}
+          <code className="font-mono text-fg">roll apps cp -s {service} -e {env} :/app/report.csv .</code>
+        </p>
+        {error && <p className="text-danger">{error}</p>}
+      </div>
+    </Panel>
+  );
 }

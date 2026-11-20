@@ -308,6 +308,19 @@ own requests to a cluster (the console, the per-index routes, links' API keys, p
 masking) run in process (`Control::call`, `Origin::Internal`). On a fleet they are forwarded to
 the owner signed with `INTERNAL_CLIENT` in place of an address. So the dashboard's console keeps
 working from anywhere, also on a cluster whose allowlist admits nobody the person is at.
+A linked remote cluster's part of a cross-cluster search (README.md, "Cross-cluster search") is
+such a request too: it goes from the local cluster's node to the remote's owner in process or
+signed, never through the public endpoint, so the remote's allowlist doesn't apply to it (and
+the local cluster's has already admitted the client): a client the local cluster admits reads the
+remote's data within the key's access, whatever the remote's own allowlist says. Only these calls may carry the link's
+`x-roll-remote-access` header, which lets a `cross_cluster` key authenticate: the node drops it
+from every request with another origin (`Lease::handle`), as it drops `x-roll-authenticated-user`.
+A link's search may ask for its aggregations partially reduced (`x-roll-partial-aggs`, honored
+only for a cross-cluster key's request): the remote answers `search-aggs`' `wire` encoding of its
+`Aggs` tree in an internal field, and the local cluster does the final reduce. The encoding names
+its layout version, and a part of another layout fails that cluster's part rather than being
+misread. Scrolls and points in time over linked clusters live on the local cluster's owner
+(`Cluster::ccs_contexts`), with each part's own context on its cluster's owner.
 
 **The client address** is decided by the node that accepted the connection, by one rule
 (`ClientAddresses`, rolld's flags):

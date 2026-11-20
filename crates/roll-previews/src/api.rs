@@ -50,6 +50,19 @@ pub fn router(engine: Arc<Engine>) -> Router {
                 .route("/v1/previews/{id}/metrics", get(metrics))
                 .route("/v1/previews/{id}/errors", get(errors))
                 .route("/v1/previews/{id}/errors/count", get(error_count))
+                // A shell in a running service: its session lives on the holder too.
+                .route("/v1/previews/{id}/shell/sessions", post(open_shell))
+                .route("/v1/previews/{id}/shell/sessions/{sh}", axum::routing::delete(close_shell))
+                .route("/v1/previews/{id}/shell/sessions/{sh}/screen", get(shell_screen))
+                .route("/v1/previews/{id}/shell/sessions/{sh}/keys", post(shell_keys))
+                .route("/v1/previews/{id}/shell/sessions/{sh}/resize", post(shell_resize))
+                .route("/v1/previews/{id}/forward", get(forward))
+                // A preview's spans, kept on its holder: the intake (its token the credential) and the reads.
+                .route("/v1/previews/{id}/otlp/{token}/v1/traces", post(otlp_traces).layer(axum::extract::DefaultBodyLimit::max(8 << 20)))
+                .route("/v1/previews/{id}/traces", get(traces))
+                .route("/v1/previews/{id}/traces/{trace}", get(trace))
+                .route("/v1/previews/{id}/routes", get(routes))
+                .route("/v1/previews/{id}/files", get(read_files).put(write_files).layer(axum::extract::DefaultBodyLimit::max(crate::engine::shell::FILES_MAX + (1 << 20))))
                 .route_layer(axum::middleware::from_fn_with_state(engine.clone(), on_leader))
                 .with_state(engine.clone()),
         )
@@ -92,8 +105,10 @@ async fn scoped(AxState(e): S, mut req: axum::extract::Request, next: axum::midd
             }
         }
     };
-    let path = req.uri().path().to_string();
-    let rest: Vec<&str> = path.trim_start_matches("/v1/previews").trim_start_matches('/').split('/').filter(|s| !s.is_empty()).collect();
+    // The path's segments as the handlers read them (percent-decoded): a client may encode an id
+    // (`pv%5Fabc`), and a check on the raw one would look up nothing.
+    let segs = segments(req.uri().path().trim_start_matches("/v1/previews"));
+    let rest: Vec<&str> = segs.iter().map(String::as_str).collect();
     let project = match rest.as_slice() {
         ["projects", project, ..] => Some(project.to_string()),
         [_, "screenshot.png"] => None,
@@ -112,9 +127,36 @@ async fn scoped(AxState(e): S, mut req: axum::extract::Request, next: axum::midd
     next.run(req).await
 }
 
+/// A path's non-empty segments, each percent-decoded as axum's `Path` decodes it (`+` is itself:
+/// it's a query's space, not a path's).
+fn segments(path: &str) -> Vec<String> {
+    path.split('/')
+        .filter(|s| !s.is_empty())
+        .map(|seg| {
+            let b = seg.as_bytes();
+            let mut out = Vec::with_capacity(b.len());
+            let mut i = 0;
+            while i < b.len() {
+                let hex = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
+                if b[i] == b'%'
+                    && let (Some(h), Some(l)) = (b.get(i + 1).copied().and_then(hex), b.get(i + 2).copied().and_then(hex))
+                {
+                    out.push(h * 16 + l);
+                    i += 3;
+                    continue;
+                }
+                out.push(b[i]);
+                i += 1;
+            }
+            String::from_utf8_lossy(&out).into_owned()
+        })
+        .collect()
+}
+
 /// Run on the preview's holder (`preview:<id>`), which runs its services, forwarding if need be.
 async fn on_leader(AxState(e): S, req: axum::extract::Request, next: axum::middleware::Next) -> Response {
-    let id = req.uri().path().split('/').nth(3).unwrap_or_default().to_string();
+    // Decoded as the handler's `Path` is, so the lease named is the preview the handler serves.
+    let id = segments(req.uri().path()).into_iter().nth(2).unwrap_or_default();
     match e.cluster.get().cloned() {
         Some(cluster) => {
             cluster
@@ -593,6 +635,242 @@ async fn requests(AxState(e): S, Path(id): Path<String>) -> crate::Result<Json<V
 
 /// A service's last lines; with `follow`, server-sent events: `event: service` (its name), then
 /// one event per line as it comes, with keep-alives.
+#[derive(serde::Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct ShellAsk {
+    service: Option<String>,
+    cols: Option<u16>,
+    rows: Option<u16>,
+}
+
+/// `POST …/{id}/shell/sessions {service?, cols?, rows?}`: a shell in the service, said in the
+/// activity as the person who opened it (or the token's: the operator's).
+async fn open_shell(AxState(e): S, Path(id): Path<String>, who: Option<axum::Extension<roll_auth::SignedIn>>, b: Bytes) -> crate::Result<Response> {
+    check_id(&id)?;
+    let ask: ShellAsk = if b.is_empty() { ShellAsk::default() } else { serde_json::from_slice(&b).map_err(|err| Error::BadRequest(format!("bad body: {err}")))? };
+    let by = who.map_or_else(|| "the operator".to_string(), |w| w.handle.clone());
+    let sid = e.open_shell(&id, ask.service.as_deref(), &by, ask.cols.unwrap_or(120), ask.rows.unwrap_or(32)).await?;
+    Ok((StatusCode::CREATED, Json(json!({ "id": sid }))).into_response())
+}
+
+/// The shell's screen: its scrollback, then what comes, as base64 chunks; `event: closed` at its end.
+async fn shell_screen(AxState(e): S, Path((id, sh)): Path<(String, String)>) -> crate::Result<Response> {
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    use base64::Engine as _;
+    check_id(&id)?;
+    let (first, rx, closed) = e.shell_screen(&id, &sh)?;
+    let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+    let head = futures::stream::iter((!first.is_empty()).then(|| Ok::<_, std::convert::Infallible>(Event::default().data(b64(&first)))));
+    let rest = futures::stream::unfold((rx, closed, false), move |(mut rx, mut closed, done)| async move {
+        if done {
+            return None;
+        }
+        let end = |rx, closed| Some((Ok(Event::default().event("closed").data("")), (rx, closed, true)));
+        loop {
+            // Ended: what it wrote last (still waiting for this viewer) first, then `closed`.
+            if *closed.borrow() {
+                match rx.try_recv() {
+                    Ok(chunk) => return Some((Ok(Event::default().data(b64(&chunk))), (rx, closed, false))),
+                    Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,
+                    Err(_) => return end(rx, closed),
+                }
+            }
+            tokio::select! {
+                biased;
+                got = rx.recv() => match got {
+                    Ok(chunk) => return Some((Ok(Event::default().data(b64(&chunk))), (rx, closed, false))),
+                    // A viewer that fell behind misses what it missed (the shell goes on).
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return end(rx, closed),
+                },
+                c = closed.changed() => if c.is_err() {
+                    return end(rx, closed);
+                },
+            }
+        }
+    });
+    let mut r = Sse::new(futures::StreamExt::chain(head, rest)).keep_alive(KeepAlive::default()).into_response();
+    r.headers_mut().insert("x-accel-buffering", axum::http::HeaderValue::from_static("no"));
+    Ok(r)
+}
+
+/// `{data}`: keys typed, base64, at most 64 KiB.
+async fn shell_keys(AxState(e): S, Path((id, sh)): Path<(String, String)>, b: Bytes) -> crate::Result<StatusCode> {
+    use base64::Engine as _;
+    check_id(&id)?;
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Keys {
+        data: String,
+    }
+    let k: Keys = serde_json::from_slice(&b).map_err(|err| Error::BadRequest(format!("bad body: {err}")))?;
+    let data = base64::engine::general_purpose::STANDARD.decode(k.data.as_bytes()).map_err(|_| Error::BadRequest("data is base64".into()))?;
+    if data.len() > 64 << 10 {
+        return Err(Error::BadRequest("at most 64 KiB of keys at once".into()));
+    }
+    e.shell_keys(&id, &sh, data).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn shell_resize(AxState(e): S, Path((id, sh)): Path<(String, String)>, b: Bytes) -> crate::Result<StatusCode> {
+    check_id(&id)?;
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Size {
+        cols: u16,
+        rows: u16,
+    }
+    let s: Size = serde_json::from_slice(&b).map_err(|err| Error::BadRequest(format!("bad body: {err}")))?;
+    e.shell_resize(&id, &sh, s.cols, s.rows).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// OTLP/HTTP `…/v1/traces` from a preview's service: protobuf or JSON (its `Content-Type`), gzip
+/// or not (its `Content-Encoding`). OTLP's success answer: an empty partial success.
+async fn otlp_traces(AxState(e): S, Path((id, token)): Path<(String, String)>, headers: axum::http::HeaderMap, body: axum::body::Body) -> crate::Result<Json<Value>> {
+    check_id(&id)?;
+    let Some(reader) = e.span_reader.get().cloned() else { return Err(Error::NotFound("no such trace address".into())) };
+    let h = |k: axum::http::HeaderName| headers.get(k).and_then(|v| v.to_str().ok()).unwrap_or("").to_ascii_lowercase();
+    let json = h(axum::http::header::CONTENT_TYPE).contains("json");
+    let gzip = h(axum::http::header::CONTENT_ENCODING).contains("gzip");
+    // The token first: an address that isn't a live preview's reads none of its body.
+    e.check_trace_token(&id, &token)?;
+    let b = axum::body::to_bytes(body, 8 << 20).await.map_err(|_| Error::BadRequest("traces are at most 8 MiB a request".into()))?;
+    // Parsed off the async workers: a large request is CPU, not waiting.
+    let spans = tokio::task::spawn_blocking(move || reader.spans(&b, json, gzip)).await.map_err(|err| Error::Internal(err.to_string()))?.map_err(|err| Error::BadRequest(err.to_string()))?;
+    e.keep_spans(&id, &token, spans)?;
+    Ok(Json(json!({ "partialSuccess": {} })))
+}
+
+#[derive(serde::Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct TracesQuery {
+    minutes: Option<i64>,
+}
+
+async fn traces(AxState(e): S, Path(id): Path<String>, Query(q): Query<TracesQuery>) -> crate::Result<Json<Value>> {
+    check_id(&id)?;
+    Ok(Json(e.traces(&id, q.minutes.unwrap_or(60)).await?))
+}
+
+async fn routes(AxState(e): S, Path(id): Path<String>, Query(q): Query<TracesQuery>) -> crate::Result<Json<Value>> {
+    check_id(&id)?;
+    Ok(Json(e.routes(&id, q.minutes.unwrap_or(60)).await?))
+}
+
+async fn trace(AxState(e): S, Path((id, t)): Path<(String, String)>) -> crate::Result<Json<Value>> {
+    check_id(&id)?;
+    Ok(Json(e.trace(&id, &t).await?))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ForwardQuery {
+    service: Option<String>,
+    port: u16,
+}
+
+/// A WebSocket carrying one TCP connection to `port` in the service, from inside it: binary both
+/// ways, an empty message the end of a direction (a half-close), as roll apps' tunnel.
+async fn forward(AxState(e): S, Path(id): Path<String>, Query(q): Query<ForwardQuery>, who: Option<axum::Extension<roll_auth::SignedIn>>, ws: axum::extract::ws::WebSocketUpgrade) -> crate::Result<Response> {
+    check_id(&id)?;
+    let by = who.map_or_else(|| "the operator".to_string(), |w| w.handle.clone());
+    let f = e.forward(&id, q.service.as_deref(), q.port, &by).await?;
+    Ok(ws.max_message_size(1 << 20).max_frame_size(1 << 20).on_upgrade(move |socket| bridge(socket, f)))
+}
+
+async fn bridge(socket: axum::extract::ws::WebSocket, f: crate::engine::shell::Forward) {
+    use axum::extract::ws::Message;
+    use futures::{SinkExt, StreamExt};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (mut tx, mut rx) = socket.split();
+    let mut ended = f.ended.clone();
+    let (mut rd, mut wr) = tokio::io::split(f.io);
+    let mut buf = vec![0u8; 64 << 10];
+    let (mut from_client, mut from_service) = (true, true);
+    while from_client || from_service {
+        tokio::select! {
+            m = rx.next() => match m {
+                Some(Ok(Message::Binary(b))) if b.is_empty() => {
+                    if from_client {
+                        let _ = wr.shutdown().await;
+                        from_client = false;
+                    }
+                }
+                Some(Ok(Message::Binary(_))) if !from_client => {}
+                Some(Ok(Message::Binary(b))) => {
+                    if wr.write_all(&b).await.is_err() || wr.flush().await.is_err() {
+                        break;
+                    }
+                }
+                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                Some(Ok(_)) => {}
+            },
+            // The preview went: its forwards end with it.
+            _ = ended.changed() => break,
+            n = rd.read(&mut buf), if from_service => match n {
+                Ok(0) | Err(_) => {
+                    if tx.send(Message::Binary(Bytes::new())).await.is_err() {
+                        break;
+                    }
+                    from_service = false;
+                }
+                Ok(n) => {
+                    if tx.send(Message::Binary(Bytes::copy_from_slice(&buf[..n]))).await.is_err() {
+                        break;
+                    }
+                }
+            },
+        }
+    }
+    let _ = tx.send(Message::Close(None)).await;
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FilesQuery {
+    service: Option<String>,
+    path: String,
+}
+
+/// What's at `path` in the service, as a tar (`x-roll-service` says which), as it's read.
+async fn read_files(AxState(e): S, Path(id): Path<String>, Query(q): Query<FilesQuery>, who: Option<axum::Extension<roll_auth::SignedIn>>) -> crate::Result<Response> {
+    check_id(&id)?;
+    let by = who.map_or_else(|| "the operator".to_string(), |w| w.handle.clone());
+    let (svc, stream) = e.read_files(&id, q.service.as_deref(), &q.path, &by).await?;
+    let body = futures::stream::unfold(stream, |mut s| async move {
+        let mut buf = vec![0u8; 64 << 10];
+        match tokio::io::AsyncReadExt::read(&mut s, &mut buf).await {
+            Ok(0) => None,
+            Ok(n) => {
+                buf.truncate(n);
+                Some((Ok::<_, std::io::Error>(Bytes::from(buf)), s))
+            }
+            Err(err) => Some((Err(err), s)),
+        }
+    });
+    let mut r = axum::body::Body::from_stream(body).into_response();
+    r.headers_mut().insert(axum::http::header::CONTENT_TYPE, axum::http::HeaderValue::from_static("application/x-tar"));
+    if let Ok(v) = axum::http::HeaderValue::from_str(&svc) {
+        r.headers_mut().insert("x-roll-service", v);
+    }
+    Ok(r)
+}
+
+/// A tar's files (at most 100 MiB) written under `path` in the service: `{service}`.
+async fn write_files(AxState(e): S, Path(id): Path<String>, Query(q): Query<FilesQuery>, who: Option<axum::Extension<roll_auth::SignedIn>>, b: Bytes) -> crate::Result<Json<Value>> {
+    check_id(&id)?;
+    let by = who.map_or_else(|| "the operator".to_string(), |w| w.handle.clone());
+    let svc = e.write_files(&id, q.service.as_deref(), &q.path, b, &by).await?;
+    Ok(Json(json!({ "service": svc, "path": q.path })))
+}
+
+async fn close_shell(AxState(e): S, Path((id, sh)): Path<(String, String)>) -> crate::Result<StatusCode> {
+    check_id(&id)?;
+    e.close_shell(&id, &sh)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn logs(AxState(e): S, Path(id): Path<String>, Query(q): Query<LogsQuery>) -> crate::Result<Response> {
     check_id(&id)?;
     let lines = q.lines.unwrap_or(200).clamp(1, 2000);
@@ -603,7 +881,15 @@ async fn logs(AxState(e): S, Path(id): Path<String>, Query(q): Query<LogsQuery>)
     use axum::response::sse::{Event, KeepAlive, Sse};
     let (service, rx) = e.follow(&id, q.service.as_deref(), lines).await?;
     let first = futures::stream::once(async move { Ok::<_, std::convert::Infallible>(Event::default().event("service").data(service)) });
-    let rest = futures::stream::unfold(rx, |mut rx| async move { rx.recv().await.map(|l| (Ok(Event::default().data(l.replace(['\r', '\n'], ""))), rx)) });
+    // A stderr line is `event: stderr`; a stdout one the default event, as before.
+    let rest = futures::stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|(stderr, l)| {
+            // `event:` before `data:` on the wire (axum writes them in the order they're set): a
+            // client that acts on each `data:` line as it reads it (the CLI) knows the stream.
+            let ev = if stderr { Event::default().event("stderr") } else { Event::default() };
+            (Ok(ev.data(l.replace(['\r', '\n'], ""))), rx)
+        })
+    });
     let mut r = Sse::new(futures::StreamExt::chain(first, rest)).keep_alive(KeepAlive::default()).into_response();
     // Proxies pass it on as it comes.
     r.headers_mut().insert("x-accel-buffering", axum::http::HeaderValue::from_static("no"));
@@ -654,7 +940,7 @@ async fn mask_suggestions(AxState(e): S, Path(project): Path<String>, grant: Opt
     e.mask_suggestions(&project, may_read).await.map(Json)
 }
 
-async fn put_settings(AxState(e): S, Path(project): Path<String>, b: Bytes) -> crate::Result<Json<crate::Settings>> {
+async fn put_settings(AxState(e): S, Path(project): Path<String>, ext: axum::http::Extensions, b: Bytes) -> crate::Result<Json<crate::Settings>> {
     let patch: Value = body(&b)?;
     let (p, check) = (project.clone(), patch.clone());
     let (old, new) = blocking(e.clone(), move |e| {
@@ -665,9 +951,44 @@ async fn put_settings(AxState(e): S, Path(project): Path<String>, b: Bytes) -> c
     })
     .await?;
     e.check_masks(&old, &new).await?;
+    // A reference to an environment other than the one the previews follow routes its values into
+    // code whoever pushes a branch controls: a new or changed one needs its writer's reveal there.
+    let who = crate::ports::Asker::of(&ext);
+    let may_reveal = |env: &str, folder: &str| e.reveal.get().is_some_and(|r| r.may_reveal(&who, &project, env, folder));
+    // So does a new base: every preview's code then reads that environment.
+    let base = &new.secrets.base;
+    if *base != old.secrets.base && !may_reveal(base, "/") {
+        return Err(Error::Forbidden(format!("secrets.base: following {base} needs reveal on {base} in roll secrets")));
+    }
+    // A reference to the base needed no reveal when the base was the old one: moved, it's checked
+    // as new.
+    let place = |reference: &str| match e.reveal.get() {
+        Some(r) => r.place(reference).map_err(Error::BadRequest),
+        None => Err(Error::BadRequest("roll:// references need roll secrets on this node".into())),
+    };
+    let mut before = crate::settings::references(&old);
+    if *base != old.secrets.base {
+        before.retain(|(_, _, reference)| place(reference).is_ok_and(|(env, _)| env != old.secrets.base));
+    }
+    for (scope, name, reference) in crate::settings::references(&new).into_iter().filter(|r| !before.contains(r)) {
+        let (env, folder) = place(&reference).map_err(|err| Error::BadRequest(format!("{scope}: {name}: {err}")))?;
+        if env == *base {
+            continue;
+        }
+        if !may_reveal(&env, &folder) {
+            return Err(Error::Forbidden(format!("{scope}: {name}: naming {env}'s keys needs reveal on {env} in roll secrets")));
+        }
+    }
+    let by = who.principal();
     let s = blocking(e.clone(), move |e| {
-        let s = e.store.settings(&project)?.patched(&patch)?;
+        // What's written is what was checked: rules another request changed since are its own.
+        let current = e.store.settings(&project)?;
+        if current != old {
+            return Err(Error::Conflict("the project's preview rules changed while these were checked: try again".into()));
+        }
+        let s = current.patched(&patch)?;
         let s = e.store.put_settings(&project, &s)?;
+        e.store.set_env_refs(&project, &crate::settings::references(&s), &by)?;
         // Every preview of the project converges on the new rules (modes, masks, variables,
         // access): nothing waits for its next push.
         reconverge(e, &project)?;
@@ -800,4 +1121,15 @@ async fn usage(AxState(e): S, Path(project): Path<String>) -> crate::Result<Json
     })
     .await
     .map(Json)
+}
+
+#[cfg(test)]
+mod tests {
+    /// A route's id read by the middlewares is the one the handler's `Path` reads: a client may
+    /// percent-encode it (`pv%5Fabc`), and a `+` in a path is itself.
+    #[test]
+    fn path_segments_are_read_as_the_handlers_read_them() {
+        assert_eq!(super::segments("/v1/previews/pv%5Fabc/logs"), ["v1", "previews", "pv_abc", "logs"]);
+        assert_eq!(super::segments("/a+b/%2"), ["a+b", "%2"]);
+    }
 }

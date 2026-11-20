@@ -1,4 +1,5 @@
-# Shared by the local gates (scripts/test-code.sh, scripts/test-agents.sh); sourced, not run.
+# Shared by the local gates (scripts/test-code.sh, scripts/test-agents.sh, scripts/test-secrets.sh);
+# sourced, not run.
 #
 # Every cargo call of both gates names the same packages, so features unify the same way and
 # nothing builds twice: switching between the gates, or between a gate and its end to end binaries,
@@ -8,7 +9,7 @@
 TARGET=${CARGO_TARGET_DIR:-target}
 PKGS=(-p agent-proto -p agent-host -p model-gateway
       -p code-sql -p roll-cluster -p code-store -p code-git -p code-github -p code-index -p code-review -p code-chat -p code-control -p code-preview -p roll-fetch -p roll-workspace -p roll-previews
-      -p roll-auth -p roll-access -p roll-mcp -p roll-net -p roll-accounts
+      -p roll-auth -p roll-access -p roll-mcp -p roll-net -p roll-accounts -p roll-secrets
       -p roll-cli -p rolld)
 # rolld is linted by the other suites; linting it here would also lint every service it links.
 CLIPPY_PKGS=("${PKGS[@]:0:${#PKGS[@]}-2}")

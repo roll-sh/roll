@@ -12,6 +12,7 @@ import { analyticsQuery, type AnalyticsRange, type SearchAnalytics } from "./sea
 import type { SuggestionsStatus } from "./search-suggestions";
 import type { MetricsRange, SearchMetrics, SearchSlowLog } from "./search-performance";
 import type { AuditPage } from "./search-audit";
+import type { LinkBody, RemoteLink } from "./search-remotes";
 
 export type Flavor = "elasticsearch" | "opensearch";
 
@@ -258,6 +259,17 @@ export const searchApi = {
   createKey: (id: string, name: string, access: KeyAccess, expiresInS?: number) =>
     call<NewSearchKey>("POST", `${cl(id)}/keys`, { name, access, expires_in_s: expiresInS }),
   revokeKey: (id: string, key: string) => call<null>("DELETE", `${cl(id)}/keys/${encodeURIComponent(key)}`),
+  /** The remote clusters roll holds credentials for (never wakes the cluster, never the key). */
+  remotes: (id: string) => call<{ remotes: RemoteLink[] }>("GET", `${cl(id)}/remotes`),
+  /** Links another of the person's clusters as remote `alias` (roll makes its cross-cluster key). */
+  linkRemote: (id: string, alias: string, body: LinkBody) => call<unknown>("PUT", `${cl(id)}/remotes/${encodeURIComponent(alias)}`, body),
+  /** Unlinks it: its settings and credentials go, a key roll made is revoked. */
+  unlinkRemote: (id: string, alias: string) => call<null>("DELETE", `${cl(id)}/remotes/${encodeURIComponent(alias)}`),
+  /** The endpoints whose key comes from a roll secret, and the projects whose secrets may key one. */
+  inferenceSecrets: (id: string) => call<InferenceSecrets>("GET", `${cl(id)}/inference/secrets`),
+  /** An endpoint keyed by a roll secret: `config` is the `_inference` body without `api_key`. */
+  createInferenceFromSecret: (id: string, e: NewInferenceFromSecret) =>
+    call<{ endpoint: unknown; binding: InferenceBinding }>("POST", `${cl(id)}/inference/secrets`, e),
   /** The cluster's security audit log, newest first (never wakes it). `from`/`to`: Unix ms. */
   audit: (id: string, q: { from?: number; to?: number; event?: string; size?: number } = {}) => {
     const params = new URLSearchParams();
@@ -266,6 +278,33 @@ export const searchApi = {
     return call<AuditPage>("GET", `${cl(id)}/audit${qs ? `?${qs}` : ""}`);
   },
 };
+
+/** An inference endpoint whose key follows a roll secret (a `search-inference` sync). */
+export interface InferenceBinding {
+  endpoint: string;
+  project: string;
+  environment: string;
+  path: string;
+  key: string;
+  /** The sync (roll secrets' `…/syncs/{id}`: run it to push the key now, delete it to stop). */
+  sync: string;
+  status: "pending" | "ok" | "error";
+  error: string | null;
+  last_synced_at: number | null;
+}
+
+export interface InferenceSecrets {
+  /** The projects whose canvas holds the cluster (and stands for it) that the caller may read. */
+  projects: { id: string; name: string }[];
+  bindings: InferenceBinding[];
+}
+
+export interface NewInferenceFromSecret {
+  inference_id: string;
+  task_type?: string;
+  config: Record<string, unknown>;
+  secret: { project?: string; environment: string; path?: string; key: string };
+}
 
 /**
  * An Elasticsearch error body's reason (`error.reason`, or the first root cause's), followed by

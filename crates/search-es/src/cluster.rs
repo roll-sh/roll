@@ -109,6 +109,17 @@ pub struct ClusterConfig {
     /// ([`crate::api::snapshots::install_default_repository`]): clusters whose snapshot
     /// contents are durable in roll's object storage (`None`: no default repository).
     pub default_repository: Option<String>,
+    /// Reaches the roll search clusters this one names as remotes ([`crate::remote::links`]);
+    /// `None`: remotes reach only the node itself.
+    pub links: Option<std::sync::Arc<dyn crate::remote::links::Links>>,
+    /// The cluster's id in roll's catalog (`srch_…`), when it has one: how it names itself to
+    /// `links`.
+    pub catalog_id: Option<String>,
+    /// Read service account tokens from `<path.conf>/service_tokens` too, as Elasticsearch
+    /// does. The file is the node's, so a token in it would sign in to every cluster the node
+    /// serves: the host sets this only for a node serving one cluster, or for the clusters its
+    /// operator names (`search_server::node::FILE_SERVICE_TOKEN_CLUSTERS`).
+    pub file_service_tokens: bool,
     /// Where the cluster's security audit entries go ([`crate::xpack::security::audit`]);
     /// `None`: it records none.
     pub audit: Option<crate::xpack::security::audit::AuditLog>,
@@ -126,6 +137,9 @@ impl ClusterConfig {
             host_metrics: false,
             sealer: None,
             default_repository: None,
+            links: None,
+            catalog_id: None,
+            file_service_tokens: false,
             audit: None,
         }
     }
@@ -164,6 +178,8 @@ pub struct Cluster {
     pub scripts: Arc<crate::scripting::ScriptService>,
     /// Open scrolls and points in time.
     pub contexts: crate::search::contexts::Contexts,
+    /// Scrolls and points in time over linked remote clusters ([`crate::remote::contexts`]).
+    pub ccs_contexts: crate::remote::contexts::CcsContexts,
     /// Compiled ingest pipelines.
     pub ingest: crate::ingest::pipeline::Cache,
     /// In-memory state of the x-pack APIs (async results, verified credentials).
@@ -575,6 +591,7 @@ impl Cluster {
             engine: Default::default(),
             scripts: Default::default(),
             contexts: Default::default(),
+            ccs_contexts: Default::default(),
             ingest: Default::default(),
             xpack: Default::default(),
             breakers: Default::default(),

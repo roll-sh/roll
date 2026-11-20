@@ -357,7 +357,7 @@ async fn a_previews_errors_are_its_services_groups_masked() {
     let before = masks_read();
     assert!(e.engine.errors(&p.id, 60).await.unwrap().is_empty());
     assert_eq!(masks_read(), before, "no errors, no values read");
-    let group = |f: &str, title: &str, last_seen: i64| roll_previews::ErrorGroup { service: String::new(), fingerprint: f.into(), kind: "line".into(), title: title.into(), count: 2, first_seen: 1, last_seen, sample: format!("{title}\n  at charge()") };
+    let group = |f: &str, title: &str, last_seen: i64| roll_previews::ErrorGroup { service: String::new(), fingerprint: f.into(), kind: "line".into(), title: title.into(), count: 2, first_seen: 1, last_seen, sample: format!("{title}\n  at charge()"), trace: None };
     e.apps.errors.lock().insert(web.name.clone(), vec![group("aa", "card declined sk_test_51", 5), group("bb", "Stripe rejected sk_test_51Hx9", 9)]);
     assert_eq!(e.engine.error_count(&p.id, 360).await.unwrap(), 4);
     assert_eq!(masks_read(), before, "counting reads no values");
@@ -366,6 +366,282 @@ async fn a_previews_errors_are_its_services_groups_masked() {
     assert_eq!((got[0].sample.as_str(), got[1].sample.as_str()), ("Stripe rejected ***\n  at charge()", "card declined ***\n  at charge()"));
     assert!(got.iter().all(|g| g.fingerprint.len() == 16 && !["aa", "bb"].contains(&g.fingerprint.as_str())), "{got:?}");
     assert!(matches!(e.engine.errors("pv_nope", 60).await, Err(roll_previews::Error::NotFound(_))));
+}
+
+/// A project that sends its logs to a drain (roll apps' drains with `previews`) gets its previews'
+/// services on roll's runtime there too, masked, in the preview's `pv-` environment: one
+/// follower a running service while a drain wants it, and a follower after a restart starts at
+/// the last line sent, so nothing is sent twice. Its jobs' output is the `build` source.
+#[tokio::test]
+async fn a_previews_runtime_output_goes_to_the_projects_log_drains_masked() {
+    let e = env(json!({ "enabled": true, "seed": { "image": "node:22", "run": "node seed.js" } }));
+    e.secrets.values.lock().push(("STRIPE_KEY".into(), "sk_test_51Hx9".into()));
+    let drains = Arc::new(common::FakeDrains::default());
+    let _ = e.engine.drains.set(drains.clone());
+    e.code.open(change("chg_d", 12));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_d").unwrap().unwrap();
+    let web = e.engine.store.services(&p.id).unwrap().into_iter().next().unwrap().name;
+    e.apps.running.lock().insert((p.id.clone(), web.clone()));
+    e.engine.pass().await.unwrap();
+    assert!(e.apps.drain_since.lock().is_empty() && drains.sent.lock().is_empty(), "no drain wants previews' output: nothing followed, the seed's output not sent");
+    drains.wanted.store(true, Ordering::SeqCst);
+    // A reset seeds again: the job's output, masked, as the `build` source.
+    e.engine.reset(&p.id, Vec::new()).unwrap();
+    e.engine.pass().await.unwrap();
+    let seeded: Vec<_> = drains.sent.lock().drain(..).map(|(env, svc, source, l)| (env, svc, source, l.text)).collect();
+    assert_eq!(seeded, [(format!("pv-{}", p.id.trim_start_matches("pv_")), "seed".to_string(), "build", "seed output, STRIPE_KEY=***".to_string())]);
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    assert_eq!(e.apps.drain_since.lock().len(), 1, "one follower a service");
+    let say = |stderr: bool, l: &str| {
+        let tx = e.apps.drain_tx.lock().clone().unwrap();
+        let l = l.to_string();
+        async move { tx.send((stderr, l)).await.unwrap() }
+    };
+    say(false, "2026-11-18T10:00:00.000000001Z listening on :3000").await;
+    say(true, "2026-11-18T10:00:00.000000002Z charging with sk_test_51Hx9").await;
+    let sent = |n: usize| {
+        let drains = drains.clone();
+        async move {
+        for _ in 0..200 {
+            if drains.sent.lock().len() >= n {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        drains.sent.lock().iter().map(|(env, svc, _, l)| (env.clone(), svc.clone(), l.stderr, l.text.clone())).collect::<Vec<_>>()
+        }
+    };
+    let env_name = format!("pv-{}", p.id.trim_start_matches("pv_"));
+    assert_eq!(sent(2).await, [(env_name.clone(), web.clone(), false, "listening on :3000".to_string()), (env_name.clone(), web.clone(), true, "charging with ***".to_string())]);
+    assert_eq!(drains.sent.lock()[0].3.t, 1_794_996_000_000);
+    // The container goes (a redeploy): the next follower starts at the last line sent, and the
+    // line Docker gives again from there isn't sent twice.
+    *e.apps.drain_tx.lock() = None;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    e.engine.pass().await.unwrap();
+    // From the earlier of the two streams' last lines: stdout's (stderr's own last is skipped as it comes again).
+    assert_eq!(e.apps.drain_since.lock().last().map(String::as_str), Some("2026-11-18T10:00:00.000000001Z"));
+    say(true, "2026-11-18T10:00:00.000000002Z charging with sk_test_51Hx9").await;
+    say(false, "2026-11-18T10:00:01.000000000Z ready").await;
+    let all = sent(3).await;
+    assert_eq!(all.len(), 3, "{all:?}");
+    assert_eq!(all[2].3, "ready");
+    // stdout and stderr come through pipes of their own: a stderr line may come before an earlier
+    // stdout one, and both are sent.
+    say(true, "2026-11-18T10:00:03.000000000Z card declined").await;
+    say(false, "2026-11-18T10:00:02.000000000Z charging order 42").await;
+    let all = sent(5).await;
+    assert_eq!(all.iter().skip(3).map(|l| l.3.as_str()).collect::<Vec<_>>(), ["card declined", "charging order 42"], "{all:?}");
+}
+
+/// A shell in a preview's running service (Render's shell, `heroku run`): what's typed reaches its
+/// terminal, a viewer who joins later gets the scrollback, the activity says who opened it, a
+/// preview holds a few at once, and closing one ends it.
+#[tokio::test]
+async fn a_shell_in_a_previews_service_is_said_and_bounded() {
+    let e = env(json!({ "enabled": true }));
+    e.code.open(change("chg_sh", 14));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_sh").unwrap().unwrap();
+    let sid = e.engine.open_shell(&p.id, None, "ana", 80, 24).await.unwrap();
+    let web = e.engine.store.services(&p.id).unwrap().into_iter().next().unwrap().name;
+    assert!(e.engine.store.activity(&p.id).unwrap().iter().any(|a| a.message == format!("ana opened a shell in {web}")));
+    let (first, mut rx, closed) = e.engine.shell_screen(&p.id, &sid).unwrap();
+    assert!(first.is_empty());
+    e.engine.shell_keys(&p.id, &sid, b"echo hi\r".to_vec()).await.unwrap();
+    let mut seen = Vec::new();
+    while seen.len() < 8 {
+        seen.extend_from_slice(&tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv()).await.unwrap().unwrap());
+    }
+    assert_eq!(seen, b"echo hi\r");
+    assert_eq!(e.engine.shell_screen(&p.id, &sid).unwrap().0, b"echo hi\r", "a later viewer gets the scrollback");
+    assert!(matches!(e.engine.shell_screen("pv_other", &sid), Err(roll_previews::Error::NotFound(_))), "a shell is only its preview's");
+    let mut more = Vec::new();
+    for _ in 1..roll_previews::engine::shell::MAX_SHELLS {
+        more.push(e.engine.open_shell(&p.id, Some(&web), "ana", 80, 24).await.unwrap());
+    }
+    assert!(matches!(e.engine.open_shell(&p.id, None, "ana", 80, 24).await, Err(roll_previews::Error::Conflict(_))), "a preview holds a few at once");
+    e.engine.close_shell(&p.id, &sid).unwrap();
+    assert!(*closed.borrow(), "closing it ends it");
+    for _ in 0..200 {
+        if e.engine.shell_screen(&p.id, &sid).is_err() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(e.engine.shell_screen(&p.id, &sid).is_err(), "a closed shell is gone");
+    e.engine.open_shell(&p.id, None, "ana", 80, 24).await.expect("its place is free again");
+}
+
+/// A preview's traces (the project's `traces: true`): its services get the OpenTelemetry SDK's
+/// variables, its intake keeps spans only with the preview's own token (anything else is a 404),
+/// and they're read back as traces, masked as its logs are; an error group whose sample names one
+/// opens it.
+#[tokio::test]
+async fn a_previews_traces_are_kept_by_its_token_and_read_masked() {
+    use roll_previews::engine::traces::Span;
+    let e = env(json!({ "enabled": true, "traces": true }));
+    e.secrets.values.lock().push(("STRIPE_KEY".into(), "sk_test_51Hx9".into()));
+    e.code.open(change("chg_tr", 17));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_tr").unwrap().unwrap();
+    let web = e.engine.store.services(&p.id).unwrap().into_iter().next().unwrap().name;
+    // What a start of the service gets (the runtime reads it then, as its `EnvSource`).
+    let (_, vars) = roll_previews::ports::EnvSource::env(e.engine.as_ref(), &p.id, &web).await.unwrap();
+    let var = |k: &str| vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone()).unwrap_or_default();
+    let endpoint = var("OTEL_EXPORTER_OTLP_ENDPOINT");
+    assert!(endpoint.starts_with(&format!("http://127.0.0.1:7070/v1/previews/{}/otlp/", p.id)), "{endpoint}");
+    assert_eq!(var("OTEL_SERVICE_NAME"), web);
+    let token = endpoint.rsplit('/').next().unwrap().to_string();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as u64;
+    let span = |id: &str, parent: &str, name: &str, error: bool, attrs: Vec<(String, String)>| Span { trace: "a".repeat(32), span: id.into(), parent: parent.into(), name: name.into(), service: web.clone(), start: now - 30_000_000, end: now, error, attrs };
+    assert!(matches!(e.engine.keep_spans(&p.id, "not-the-token", vec![span("0000000000000001", "", "GET /", false, vec![])]), Err(roll_previews::Error::NotFound(_))));
+    let kept = e.engine.keep_spans(&p.id, &token, vec![span("0000000000000001", "", "GET /checkout?key=sk_test_51Hx9", false, vec![]), span("0000000000000002", "0000000000000001", "charge", true, vec![("stripe.key".into(), "sk_test_51Hx9".into())])]).unwrap();
+    assert_eq!(kept, 2);
+    let list = e.engine.traces(&p.id, 60).await.unwrap();
+    assert_eq!((list["traces"][0]["name"].as_str(), list["traces"][0]["spans"].as_u64(), list["traces"][0]["error"].as_bool()), (Some("GET /checkout?key=***"), Some(2), Some(true)), "{list}");
+    let one = e.engine.trace(&p.id, &"a".repeat(32)).await.unwrap();
+    assert_eq!(one["spans"][1]["attrs"][0][1].as_str(), Some("***"), "{one}");
+    assert!(!one.to_string().contains("sk_test_51Hx9"));
+    // A service on roll apps keeps its own (its pv- environment's, turned on by the deploy): on the
+    // same list, and one opens from it, masked the same way.
+    assert_eq!(e.apps.traces_asked.lock().get(&(p.id.clone(), web.clone())), Some(&true), "the deploy asks for the environment's traces");
+    let row = roll_previews::engine::traces::TraceRow { trace: "b".repeat(32), name: "POST /pay sk_test_51Hx9".into(), service: "api".into(), start_ms: now / 1_000_000 + 5, ms: 12, spans: 1, error: false, repeated: None };
+    *e.apps.app_traces.lock() = vec![(row, vec![span("0000000000000009", "", "POST /pay sk_test_51Hx9", false, vec![])])];
+    let list = e.engine.traces(&p.id, 60).await.unwrap();
+    assert_eq!(list["traces"].as_array().map(Vec::len), Some(2), "{list}");
+    assert_eq!(list["traces"][0]["name"].as_str(), Some("POST /pay ***"), "the newest first, masked");
+    let apps_one = e.engine.trace(&p.id, &"b".repeat(32)).await.unwrap();
+    assert_eq!(apps_one["spans"][0]["name"].as_str(), Some("POST /pay ***"));
+    // Each route's time from the traces (masked), with nothing of main's to compare yet.
+    let routes = e.engine.routes(&p.id, 60).await.unwrap();
+    assert!(routes["routes"].as_array().unwrap().iter().any(|r| r["name"] == "GET /checkout?key=***" && r["count"] == 1 && r["main_p50_ms"].is_null()), "{routes}");
+    // Turned off, what roll apps kept isn't the preview's to show.
+    let mut s = e.engine.store.settings(&e.project).unwrap();
+    s.traces = false;
+    e.engine.store.put_settings(&e.project, &s).unwrap();
+    assert_eq!(e.engine.traces(&p.id, 60).await.unwrap()["traces"].as_array().map(Vec::len), Some(1), "only the runtime's kept spans");
+    // A preview's spans are bounded by bytes (16 MiB), not only by count: big spans push the oldest out.
+    let big = |i: usize| Span { trace: format!("{i:032x}"), span: "0000000000000001".into(), parent: String::new(), name: "big".into(), service: web.clone(), start: now - 1_000_000, end: now, error: false, attrs: vec![("blob".into(), "x".repeat(1 << 20))] };
+    e.engine.keep_spans(&p.id, &token, (0..20).map(big).collect()).unwrap();
+    let n = e.engine.traces(&p.id, 60).await.unwrap()["traces"].as_array().map(Vec::len).unwrap();
+    assert!(n <= 16, "{n} traces of 1 MiB spans kept");
+    // An error whose sample names a kept trace (an SDK logs its request's trace id) opens it; one
+    // naming a trace it doesn't keep doesn't.
+    let kept = e.engine.traces(&p.id, 60).await.unwrap()["traces"][0]["trace"].as_str().unwrap().to_string();
+    let group = |f: &str, title: &str, trace: &str| roll_previews::ErrorGroup { service: String::new(), fingerprint: f.into(), kind: "line".into(), title: title.into(), count: 1, first_seen: 1, last_seen: 2, sample: format!("{title} trace_id={trace}"), trace: None };
+    e.apps.errors.lock().insert(web.clone(), vec![group("aa", "kept", &kept.to_ascii_uppercase()), group("bb", "not kept", &"c".repeat(32))]);
+    let got = e.engine.errors(&p.id, 60).await.unwrap();
+    let trace_of = |title: &str| got.iter().find(|g| g.title == title).and_then(|g| g.trace.clone());
+    assert_eq!((trace_of("kept"), trace_of("not kept")), (Some(kept), None), "{got:?}");
+}
+
+/// A route clearly slower than on main's preview (from both previews' traces) goes on the change's
+/// record, and the change is reported again with it (its pull request's comment).
+#[tokio::test]
+async fn a_route_slower_than_mains_reaches_the_record_and_the_report() {
+    use roll_previews::engine::traces::Span;
+    let e = env(json!({ "enabled": true, "traces": true, "github": { "screenshot": true } }));
+    let mut png = Vec::new();
+    image::RgbaImage::new(4, 4).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+    *e.apps.shot.lock() = Some(png);
+    e.code.open(change("chg_sr", 18));
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    let base = e.engine.store.rows(Some(&e.project)).unwrap().into_iter().find(|r| r.is_baseline()).expect("main's preview");
+    let p = e.engine.store.row_by_change("chg_sr").unwrap().unwrap();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as u64;
+    let keep = |id: &str, n: u64, ms: u64| {
+        let spans = (0..n).map(|i| Span { trace: format!("{:016x}{i:016x}", ms), span: "0000000000000001".into(), parent: String::new(), name: "GET /orders".into(), service: "web".into(), start: now - ms * 1_000_000, end: now, error: false, attrs: vec![] }).collect();
+        e.engine.keep_spans(id, &e.engine.store.trace_token(id).unwrap(), spans).unwrap();
+    };
+    keep(&base.id, 5, 100);
+    keep(&p.id, 5, 400);
+    e.engine.read_slower_routes().await;
+    let s = e.engine.store.preview(&p.id).unwrap().slower_routes.expect("slower than main's");
+    assert_eq!((s.branch.as_str(), s.routes.len(), s.routes[0].name.as_str(), s.routes[0].p50_ms, s.routes[0].main_p50_ms), ("main", 1, "GET /orders", 400, 100));
+    assert_eq!(e.code.last_report("chg_sr").slower_routes, Some(s), "reported again with it");
+    assert!(e.engine.store.preview(&base.id).unwrap().slower_routes.is_none(), "main isn't slower than itself");
+}
+
+/// An error group main's preview doesn't have goes on the change's record (masked, the most
+/// frequent first), and the change is reported again with it; one main has too doesn't count.
+#[tokio::test]
+async fn an_error_mains_preview_doesnt_have_reaches_the_record_and_the_report() {
+    let e = env(json!({ "enabled": true, "github": { "screenshot": true } }));
+    e.secrets.values.lock().push(("STRIPE_KEY".into(), "sk_test_51Hx9".into()));
+    let mut png = Vec::new();
+    image::RgbaImage::new(4, 4).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+    *e.apps.shot.lock() = Some(png);
+    e.code.open(change("chg_ne", 19));
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    let base = e.engine.store.rows(Some(&e.project)).unwrap().into_iter().find(|r| r.is_baseline()).expect("main's preview");
+    let p = e.engine.store.row_by_change("chg_ne").unwrap().unwrap();
+    let web = e.engine.store.services(&p.id).unwrap().into_iter().next().unwrap().name;
+    let group = |f: &str, title: &str, count: u64| roll_previews::ErrorGroup { fingerprint: f.into(), kind: "line".into(), title: title.into(), count, first_seen: 1, last_seen: 2, sample: title.into(), ..Default::default() };
+    e.apps.errors.lock().insert(format!("{}/{web}", base.id), vec![group("old", "a flaky upstream", 3)]);
+    e.apps.errors.lock().insert(format!("{}/{web}", p.id), vec![group("old", "a flaky upstream", 4), group("rare", "RangeError", 1), group("new", "Stripe rejected sk_test_51Hx9", 9)]);
+    e.engine.read_new_errors().await;
+    let n = e.engine.store.preview(&p.id).unwrap().new_errors.expect("new against main's");
+    assert_eq!((n.branch.as_str(), n.total, n.errors.iter().map(|x| x.title.as_str()).collect::<Vec<_>>()), ("main", 2, vec!["Stripe rejected ***", "RangeError"]));
+    assert_eq!(e.code.last_report("chg_ne").new_errors, Some(n), "reported again with it");
+    // Fixed (gone from its output): it goes.
+    e.apps.errors.lock().insert(format!("{}/{web}", p.id), vec![group("old", "a flaky upstream", 5)]);
+    e.engine.read_new_errors().await;
+    assert!(e.engine.store.preview(&p.id).unwrap().new_errors.is_none());
+}
+
+/// A port of a preview's service on a laptop (`roll preview forward`): bytes go both ways, port 0
+/// is refused, a debugger's many connections are said once, and a preview holds a bounded number.
+#[tokio::test]
+async fn a_forwarded_port_carries_bytes_is_said_once_and_is_bounded() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let e = env(json!({ "enabled": true }));
+    e.code.open(change("chg_fw", 16));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_fw").unwrap().unwrap();
+    let mut f = e.engine.forward(&p.id, None, 9229, "ana").await.unwrap();
+    f.io.write_all(b"ping").await.unwrap();
+    let mut got = [0u8; 4];
+    f.io.read_exact(&mut got).await.unwrap();
+    assert_eq!(&got, b"ping");
+    let again = e.engine.forward(&p.id, None, 9229, "ana").await.unwrap();
+    let said = e.engine.store.activity(&p.id).unwrap().into_iter().filter(|a| a.message == format!("ana forwarded port 9229 of {}", f.service)).count();
+    assert_eq!(said, 1, "a debugger's connections are said once");
+    assert!(matches!(e.engine.forward(&p.id, None, 0, "ana").await, Err(roll_previews::Error::BadRequest(_))));
+    let mut open = vec![f, again];
+    while open.len() < roll_previews::engine::shell::MAX_FORWARDS {
+        open.push(e.engine.forward(&p.id, None, 5432, "ana").await.unwrap());
+    }
+    assert!(matches!(e.engine.forward(&p.id, None, 5432, "ana").await, Err(roll_previews::Error::Conflict(_))), "a preview holds a bounded number");
+    open.pop();
+    e.engine.forward(&p.id, None, 5432, "ana").await.expect("a closed one gives its place back");
+}
+
+/// Files in and out of a preview's service (`roll preview cp`): what's written comes back, nothing
+/// at a path is a 404 before any of the answer, a relative path is refused, and the activity says
+/// who copied what.
+#[tokio::test]
+async fn files_go_in_and_out_of_a_previews_service_and_are_said() {
+    use tokio::io::AsyncReadExt;
+    let e = env(json!({ "enabled": true }));
+    e.code.open(change("chg_cp", 15));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_cp").unwrap().unwrap();
+    let web = e.engine.store.services(&p.id).unwrap().into_iter().next().unwrap().name;
+    assert_eq!(e.engine.write_files(&p.id, None, "/tmp", bytes::Bytes::from_static(b"a tar"), "ana").await.unwrap(), web);
+    let (svc, mut got) = e.engine.read_files(&p.id, Some(&web), "/tmp", "ana").await.unwrap();
+    let mut read = Vec::new();
+    got.read_to_end(&mut read).await.unwrap();
+    assert_eq!((svc.as_str(), read.as_slice()), (web.as_str(), &b"a tar"[..]));
+    assert!(matches!(e.engine.read_files(&p.id, None, "/nothing/here", "ana").await, Err(roll_previews::Error::NotFound(_))));
+    assert!(matches!(e.engine.write_files(&p.id, None, "tmp", bytes::Bytes::new(), "ana").await, Err(roll_previews::Error::BadRequest(_))));
+    assert!(matches!(e.engine.read_files(&p.id, Some("nope"), "/tmp", "ana").await, Err(roll_previews::Error::NotFound(_))));
+    let said: Vec<String> = e.engine.store.activity(&p.id).unwrap().into_iter().map(|a| a.message).collect();
+    assert!(said.contains(&format!("ana copied files into {web} at /tmp")) && said.contains(&format!("ana copied /tmp out of {web}")), "{said:?}");
 }
 
 /// A preview's output is read by anyone who can read the preview, and its code (a fork's too) can
@@ -398,7 +674,15 @@ async fn a_previews_logs_and_job_output_hide_its_secrets() {
     while followed.len() < 2 {
         followed.push(tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv()).await.unwrap().unwrap());
     }
-    assert_eq!(followed, ["listening on :3000", "charging with ***"]);
+    assert_eq!(followed, [(false, "listening on :3000".to_string()), (false, "charging with ***".to_string())], "a tail doesn't say which stream");
+    // Where the backend follows (Docker), each line says whether it came on stderr, masked too.
+    *e.apps.followed.lock() = Some(vec![(false, "listening on :3000".into()), (true, "charging with sk_test_51Hx9".into())]);
+    let (_, mut rx) = e.engine.follow(&p.id, None, 10).await.unwrap();
+    let mut tagged = Vec::new();
+    while tagged.len() < 2 {
+        tagged.push(tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv()).await.unwrap().unwrap());
+    }
+    assert_eq!(tagged, [(false, "listening on :3000".to_string()), (true, "charging with ***".to_string())]);
     let mut said = None;
     for _ in 0..400 {
         said = e.engine.store.page_health(&p.id).unwrap().and_then(|h| h.first_error);
@@ -950,6 +1234,49 @@ async fn a_signed_in_person_sees_only_their_own_projects_previews() {
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(status, 200, "{body}");
     assert!(v["branches"].as_array().unwrap().iter().any(|b| b["kind"] == "postgres" && b["vars"]["DATABASE_URL"].as_str().is_some_and(|u| u.starts_with("fake://"))), "{body}");
+}
+
+/// A project rule naming another environment's key (`roll://ENV/KEY`) routes its values into code
+/// whoever pushes a branch controls: saving one needs its writer's reveal there (roll secrets
+/// decides); the environment its previews follow needs none.
+#[tokio::test]
+async fn a_rules_reference_to_another_environment_needs_its_writers_reveal_there() {
+    use tower::ServiceExt;
+    struct StagingOnly;
+    impl roll_previews::ports::Reveal for StagingOnly {
+        fn may_reveal(&self, who: &roll_previews::ports::Asker<'_>, _: &str, env: &str, folder: &str) -> bool {
+            who.user.is_some_and(|u| u.user == "usr_b") && ((env == "staging" && folder == "/payments") || (env == "dev2" && folder == "/"))
+        }
+        fn place(&self, reference: &str) -> Result<(String, String), String> {
+            let parts: Vec<&str> = reference.strip_prefix("roll://").ok_or("not one")?.split('/').collect();
+            Ok((parts[0].to_string(), if parts.len() > 2 { format!("/{}", parts[1..parts.len() - 1].join("/")) } else { "/".into() }))
+        }
+    }
+    let e = env(json!({ "enabled": true }));
+    let _ = e.engine.reveal.set(Arc::new(StagingOnly));
+    let mine = e.ws.create("usr_b", "mine", "", None).unwrap();
+    let put = |env: serde_json::Value| {
+        let router = roll_previews::api::router(e.engine.clone());
+        let mut req = axum::http::Request::put(format!("/v1/previews/projects/{}/settings", mine.id)).header("content-type", "application/json").body(axum::body::Body::from(json!({ "env": env }).to_string())).unwrap();
+        req.extensions_mut().insert(roll_auth::SignedIn { user: "usr_b".into(), handle: "b".into(), admin: false, code_owner: None, session: "ses_1".into() });
+        async move { router.oneshot(req).await.unwrap().status().as_u16() }
+    };
+    assert_eq!(put(json!({ "K": "roll://qa/KEY" })).await, 403, "no reveal on qa");
+    assert_eq!(put(json!({ "K": "roll://staging/KEY" })).await, 403, "reveal on staging's /payments only");
+    assert_eq!(put(json!({ "K": " roll://qa/KEY" })).await, 400, "a look-alike isn't kept as text either");
+    assert_eq!(put(json!({ "K": "roll://staging/payments/KEY" })).await, 200);
+    let base = e.engine.store.settings(&mine.id).unwrap().secrets.base;
+    assert_eq!(put(json!({ "K": "roll://staging/payments/KEY", "B": format!("roll://{base}/OTHER") })).await, 200, "the environment it follows needs nothing more");
+    // Following another environment is the same reach: it needs reveal there too.
+    let router = roll_previews::api::router(e.engine.clone());
+    let mut req = axum::http::Request::put(format!("/v1/previews/projects/{}/settings", mine.id)).header("content-type", "application/json").body(axum::body::Body::from(json!({ "secrets": { "base": "qa" } }).to_string())).unwrap();
+    req.extensions_mut().insert(roll_auth::SignedIn { user: "usr_b".into(), handle: "b".into(), admin: false, code_owner: None, session: "ses_1".into() });
+    assert_eq!(router.oneshot(req).await.unwrap().status().as_u16(), 403, "no reveal on qa");
+    // A reference to the base, free while it's the base, is checked as new once the base moves.
+    let router = roll_previews::api::router(e.engine.clone());
+    let mut req = axum::http::Request::put(format!("/v1/previews/projects/{}/settings", mine.id)).header("content-type", "application/json").body(axum::body::Body::from(json!({ "secrets": { "base": "dev2" } }).to_string())).unwrap();
+    req.extensions_mut().insert(roll_auth::SignedIn { user: "usr_b".into(), handle: "b".into(), admin: false, code_owner: None, session: "ses_1".into() });
+    assert_eq!(router.oneshot(req).await.unwrap().status().as_u16(), 403, "B names the old base, which usr_b can't reveal");
 }
 
 /// A variable set while a deploy is still going, then removed, is removed from the backend too:

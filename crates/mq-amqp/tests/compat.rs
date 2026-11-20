@@ -6,6 +6,7 @@ use futures::StreamExt;
 use lapin::options::*;
 use lapin::types::{AMQPValue, FieldTable, LongString, ShortString};
 use lapin::{BasicProperties, Channel, Connection, ConnectionProperties, ExchangeKind};
+use mq_core::auth::{Permission, User};
 use mq_core::log::{FileStore, LogStore};
 use mq_core::meta::SqliteMeta;
 use mq_core::{Broker, BrokerConfig};
@@ -315,6 +316,37 @@ async fn errors_match_rabbitmq() {
     // The connection survives channel errors.
     let ch = c.create_channel().await.unwrap();
     ch.queue_declare(s("fine"), QueueDeclareOptions::default(), FieldTable::default()).await.unwrap();
+}
+
+/// RabbitMQ checks the default exchange as `amq.default`: an empty write pattern (`^$`) doesn't
+/// let a user publish to it, and binding to it is refused before any permission check.
+#[tokio::test]
+async fn default_exchange_is_checked_as_amq_default() {
+    let h = Harness::start().await;
+    let (_c, ch) = h.channel().await;
+    declare(&ch, "inbox", FieldTable::default()).await;
+    for (user, write, allowed) in [("empty", "", false), ("all", ".*", true), ("named", "^amq\\.default$", true)] {
+        h.broker.put_user(User::new(user, "pw", vec![])).await.unwrap();
+        h.broker.set_permission("/", user, Permission { configure: "".into(), write: write.into(), read: "".into() }).await.unwrap();
+        let c = Connection::connect(&h.url.replace("guest:guest", &format!("{user}:pw")), ConnectionProperties::default()).await.unwrap();
+        let uch = c.create_channel().await.unwrap();
+        uch.confirm_select(ConfirmSelectOptions::default()).await.unwrap();
+        let r = uch.basic_publish(s(""), s("inbox"), BasicPublishOptions::default(), user.as_bytes(), BasicProperties::default()).await.unwrap().await;
+        if allowed {
+            r.unwrap();
+            assert_eq!(wait_get(&ch, "inbox").await.delivery.data, user.as_bytes());
+        } else {
+            // lapin nacks the confirm when the broker closes the channel (ACCESS_REFUSED).
+            assert!(r.unwrap().is_nack());
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            assert!(!uch.status().connected(), "channel closed by the broker");
+        }
+    }
+    assert!(get(&ch, "inbox").await.is_none(), "the refused publish never arrived");
+    let c = Connection::connect(&h.url.replace("guest:guest", "all:pw"), ConnectionProperties::default()).await.unwrap();
+    let uch = c.create_channel().await.unwrap();
+    let e = uch.queue_bind(s("inbox"), s(""), s("k"), QueueBindOptions::default(), FieldTable::default()).await.unwrap_err();
+    assert!(e.to_string().contains("ACCESS_REFUSED - operation not permitted on the default exchange"), "{e}");
 }
 
 #[tokio::test]

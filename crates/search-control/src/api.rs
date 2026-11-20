@@ -68,6 +68,8 @@ pub fn router(control: Arc<Control>) -> Router {
         .route("/v1/search/clusters/{id}/analytics", get(analytics))
         .route("/v1/search/clusters/{id}/keys", post(create_key))
         .route("/v1/search/clusters/{id}/keys/{key}", axum::routing::delete(delete_key))
+        .route("/v1/search/clusters/{id}/remotes", get(remotes))
+        .route("/v1/search/clusters/{id}/remotes/{alias}", axum::routing::put(link_remote).delete(unlink_remote))
         .route("/v1/search/clusters/{id}/indices/{index}", get(index_get).put(index_create).delete(index_delete))
         .route("/v1/search/clusters/{id}/indices/{index}/mapping", axum::routing::put(index_mapping).get(index_mapping_get))
         .route("/v1/search/clusters/{id}/indices/{index}/settings", get(index_settings))
@@ -598,6 +600,37 @@ async fn create_key(State(c): State<AppState>, Path(id): Path<String>, Json(k): 
 
 async fn delete_key(State(c): State<AppState>, Path((id, key)): Path<(String, String)>) -> Result<StatusCode, ControlError> {
     c.delete_key(&id, &key).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// The remote clusters a cluster holds credentials for (never the credentials).
+async fn remotes(State(c): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
+    Ok(Json(json!({ "remotes": c.remotes(&id).await? })))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LinkRemote {
+    /// The remote cluster: another of the caller's own (id or name).
+    cluster: String,
+    skip_unavailable: Option<bool>,
+    /// What the cross-cluster API key roll makes may search (Elasticsearch's `access`).
+    access: Option<Value>,
+    /// A cross-cluster API key the caller made on the remote instead (its `encoded` value).
+    api_key: Option<String>,
+}
+
+/// Links a cluster to another of the same owner as its remote `alias` (cross-cluster search).
+/// A remote the caller can't see, or another person's, answers 404 as a missing one does.
+async fn link_remote(State(c): State<AppState>, caller: Caller, Path((id, alias)): Path<(String, String)>, Json(b): Json<LinkRemote>) -> ApiResult<Value> {
+    if b.access.is_some() && b.api_key.is_some() {
+        return Err(ControlError::Invalid("give access (roll makes the key) or api_key (yours), not both".into()));
+    }
+    Ok(Json(c.link_remote(&id, &alias, &b.cluster, b.skip_unavailable, b.access, b.api_key.as_deref(), |t| caller.sees(t)).await?))
+}
+
+async fn unlink_remote(State(c): State<AppState>, Path((id, alias)): Path<(String, String)>) -> Result<StatusCode, ControlError> {
+    c.unlink_remote(&id, &alias).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

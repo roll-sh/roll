@@ -145,6 +145,21 @@ API's own. A missing or wrong header or origin is:
 403 {"error": "this request needs the X-Roll-CSRF header from GET /v1/accounts/session", "code": "csrf"}
 ```
 
+A WebSocket upgrade is a `GET`, so the header doesn't guard it, and `SameSite=Lax` sends the
+cookie from any page on the API's own site: a preview or an app served under the same domain
+could otherwise open a shell, a tunnel or a forwarded port as the person. A browser always sends
+`Origin` on one, so an upgrade (`Upgrade: websocket`) that rides a session cookie must come from
+one of the dashboard's origins or the API's own; one with an `Authorization` header (the CLIs')
+is judged by its token alone. Anything else is:
+
+```
+403 {"error": "a WebSocket with a roll session opens only from roll's dashboard", "code": "origin"}
+```
+
+The check is as good as the dashboard's origins are narrow: with `ROLL_DASHBOARD_ORIGIN` unset on a
+loopback daemon (local development), any `localhost` port counts as the dashboard's, so a preview
+or an app served on `localhost:<port>` passes it. Rely on it where the origins are a list.
+
 Signing in has no session yet, so the header can't guard it. Instead, a write to `/v1/accounts`
 without an `Authorization` header must send its body as `Content-Type: application/json` (else
 `415`). A form on another site can post any text as its body, and the browser keeps the cookie the
@@ -706,7 +721,7 @@ same callback; on success it redirects to `return_to` (default `/dashboard/accou
 | `GET /v1/accounts/invites` | | `Invite[]`, newest first |
 | `DELETE /v1/accounts/invites/{id}` | | 204 (unused invites only; 409 once used) |
 | `POST /v1/accounts/invites/{id}/resend` | | `Invite` with a fresh `token` and `url`, valid another 7 days, mailed again; the old link stops at once, and so do sign-ins already begun with it (sudo mode for an invite that makes an admin); 409 used, or the address has an account now |
-| `GET /v1/accounts/users` | | `User[]`, oldest first; each with `last_active_at` (a sign-in or a session's use, noted every five minutes; `null` if not since roll began keeping it). People marks anyone with none in 90 days as dormant, as GitHub Enterprise's dormant users report does: turning off accounts nobody uses closes a way in |
+| `GET /v1/accounts/users` | | `User[]`, oldest first; each with `last_active_at` (a sign-in or a session's use, noted every five minutes; `null` if not since roll began keeping it). People (exported as CSV from the page: handle, name, address, admin, turned off, second factors, dormant, last active, made; cells defused as the audit export's are) marks anyone with none in 90 days as dormant, as GitHub Enterprise's dormant users report does: turning off accounts nobody uses closes a way in |
 | `PATCH /v1/accounts/users/{id}` | `{admin?, disabled?}` | `User`; disabling deletes the user's sessions and cuts off their roll code owner (its tokens are revoked and its machines' links closed; turning the account back on gives none of them back) |
 | `DELETE /v1/accounts/users/{id}/sessions` | | 204: signs the user out everywhere |
 | `GET /v1/accounts/users/{id}/sessions` | | `Session[]`: the person's sessions (none `current`) |

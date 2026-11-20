@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// What a target can ask for; a new one gets the two that need someone.
-pub const EVENTS: [&str; 22] = [
+pub const EVENTS: [&str; 28] = [
     "deploy.failed",
     "deploy.base_updated",
     "rollout.waiting",
@@ -41,13 +41,23 @@ pub const EVENTS: [&str; 22] = [
     "domain.tls_failed",
     "volume.backup_failed",
     "volume.full",
+    "form.submitted",
+    "check.down",
+    "heartbeat.missed",
+    "deploy.vulnerable",
+    "alert.slo",
+    // Every `audit.*` entry (who changed what), for a SIEM's webhook; never an on-call page.
+    "audit",
 ];
-const DEFAULT_EVENTS: [&str; 18] = ["deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"];
+const DEFAULT_EVENTS: [&str; 21] = ["check.down", "heartbeat.missed", "alert.slo", "deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"];
 /// Whether a target with `events` hears an event: its own kind, or for a resolution, the alert's
 /// (whoever heard an alert hears it clear; there's nothing else to ask for).
-fn wants(events: &[String], kind: &str, data: &Value) -> bool {
+fn wants(events: &[String], kind: &str, data: &Value, oncall: bool) -> bool {
     match kind {
         "alert.resolved" => data["alert"].as_str().is_some_and(|a| events.iter().any(|e| e == a)),
+        // An on-call target that pages on failed deploys hears the next good one: it closes them.
+        "deploy.active" if oncall => events.iter().any(|e| e == "deploy.failed" || e == "deploy.active"),
+        k if k.starts_with("audit.") => !oncall && events.iter().any(|e| e == "audit"),
         k => events.iter().any(|e| e == k),
     }
 }
@@ -62,11 +72,35 @@ impl Apps {
     /// answer this once.
     pub async fn add_target(self: &Arc<Self>, project: &str, body: Value) -> Result<Value> {
         let o = body.as_object().cloned().unwrap_or_default();
-        if let Some(k) = o.keys().find(|k| !["kind", "url", "events", "environments", "services", "previews"].contains(&k.as_str())) {
+        if let Some(k) = o.keys().find(|k| !["kind", "url", "events", "environments", "services", "previews", "routing_key", "api_key", "region"].contains(&k.as_str())) {
             return Err(Error::BadRequest(format!("unknown field {k}")));
         }
         let kind = o.get("kind").and_then(Value::as_str).unwrap_or("webhook").to_string();
-        let (url, host) = if kind == "email" {
+        // An on-call service's key: the target's secret, sealed, never shown again.
+        let mut key = None;
+        let (url, host) = if kind == "pagerduty" || kind == "opsgenie" {
+            let field = if kind == "pagerduty" { "routing_key" } else { "api_key" };
+            if let Some(k) = o.keys().find(|k| *k == "url" || (["routing_key", "api_key"].contains(&k.as_str()) && *k != field)) {
+                return Err(Error::BadRequest(format!("a {kind} target takes its {field}, not {k}")));
+            }
+            let k = o.get(field).and_then(Value::as_str).map(str::trim).unwrap_or("");
+            if k.is_empty() || k.len() > 128 || !k.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+                return Err(Error::BadRequest(format!("{field} is the key {kind} gave the integration (1–128 letters, digits, - and _)")));
+            }
+            key = Some(k.to_string());
+            let a = &self.cfg.oncall_apis;
+            let url = match (kind.as_str(), o.get("region").and_then(Value::as_str).unwrap_or("us")) {
+                ("pagerduty", "us") => a.pagerduty_us.clone(),
+                ("pagerduty", "eu") => a.pagerduty_eu.clone(),
+                ("opsgenie", "us") => a.opsgenie_us.clone(),
+                ("opsgenie", "eu") => a.opsgenie_eu.clone(),
+                _ => return Err(Error::BadRequest("region is us or eu".into())),
+            };
+            let host = url::Url::parse(&url).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_default();
+            (url, host)
+        } else if o.contains_key("routing_key") || o.contains_key("api_key") || o.contains_key("region") {
+            return Err(Error::BadRequest("routing_key, api_key and region are a pagerduty or opsgenie target's".into()));
+        } else if kind == "email" {
             if o.contains_key("url") {
                 return Err(Error::BadRequest("an email target goes to the project's owner, not to an address".into()));
             }
@@ -94,9 +128,10 @@ impl Apps {
             return Err(Error::Conflict(format!("a project has at most {MAX_TARGETS} notification targets")));
         }
         let secret = (kind == "webhook").then(|| format!("whsec_{}", crate::model::random(32)));
-        let (k, u, s2, ev) = (kind.clone(), url.clone(), secret.clone(), events.clone());
+        let (k, u, s2, ev) = (kind.clone(), url.clone(), secret.clone().or(key), events.clone());
         let t = self.db(move |s| s.add_target(&p, &k, &host, &u, s2.as_deref(), &ev, &filters)).await?;
         let mut v = serde_json::to_value(&t).expect("JSON");
+        // A webhook's signing secret, this once; an on-call key was the caller's to begin with.
         if let Some(s) = secret {
             v["secret"] = json!(s);
         }
@@ -205,10 +240,16 @@ impl Apps {
             "webhook" => {}
             "slack" if host == "hooks.slack.com" => {}
             "discord" if (host == "discord.com" || host == "discordapp.com") && u.path().starts_with("/api/webhooks/") => {}
+            // Teams' Workflows webhooks (and the connectors' old ones), Google Chat's space webhooks.
+            "teams" if host.ends_with(".webhook.office.com") || host.ends_with(".logic.azure.com") || host.ends_with(".powerplatform.com") => {}
+            "googlechat" if host == "chat.googleapis.com" && u.path().starts_with("/v1/spaces/") => {}
+            "teams" if !self.cfg.allow_private => return bad("a Teams webhook is a Workflows (…logic.azure.com, …powerplatform.com) or …webhook.office.com URL"),
+            "googlechat" if !self.cfg.allow_private => return bad("a Google Chat webhook is https://chat.googleapis.com/v1/spaces/…"),
+            "teams" | "googlechat" => {}
             "slack" if !self.cfg.allow_private => return bad("a Slack incoming webhook is on hooks.slack.com"),
             "discord" if !self.cfg.allow_private => return bad("a Discord webhook is https://discord.com/api/webhooks/…"),
             "slack" | "discord" => {}
-            _ => return Err(Error::BadRequest("kind is webhook, slack, discord or email".into())),
+            _ => return Err(Error::BadRequest("kind is webhook, slack, discord, teams, googlechat, email, pagerduty or opsgenie".into())),
         }
         Ok(host)
     }
@@ -279,8 +320,9 @@ impl Apps {
             let p = match e.data["project"].as_str().filter(|_| e.service.is_empty()) {
                 Some(p) => p.to_string(),
                 None => {
-                    let sid = e.service.clone();
-                    let Ok(svc) = self.db(move |s| s.service(&sid)).await else { continue };
+                    // A deleted service's own entry (`audit.deleted`) is still its project's.
+                    let (sid, audit) = (e.service.clone(), e.kind.starts_with("audit."));
+                    let Ok(svc) = self.db(move |s| if audit { s.service_any(&sid).map(|(s, _)| s) } else { s.service(&sid) }).await else { continue };
                     svc.project
                 }
             };
@@ -298,7 +340,7 @@ impl Apps {
                 }
             };
             for t in self.db(move |s| s.targets(&p)).await.unwrap_or_default() {
-                if wants(&t.events, &e.kind, &e.data) && t.follows(&e.service, &e.environment, preview) {
+                if wants(&t.events, &e.kind, &e.data, matches!(t.kind.as_str(), "pagerduty" | "opsgenie")) && t.follows(&e.service, &e.environment, preview) {
                     queued.push((t.id.clone(), e.seq, e.kind.clone()));
                 }
             }
@@ -347,7 +389,7 @@ impl Apps {
     /// An event for a person: a title and a line.
     async fn describe(self: &Arc<Self>, e: &Event) -> (String, String) {
         let sid = e.service.clone();
-        let name = self.db(move |s| s.service(&sid)).await.map(|s| s.name).unwrap_or_else(|_| e.service.clone());
+        let name = self.db(move |s| s.service_any(&sid)).await.map(|(s, _)| s.name).unwrap_or_else(|_| e.service.clone());
         let what = format!("{name} in {}", e.environment);
         let rev = e.data["revision"].as_str().map(|r| format!(" ({})", &r[..r.len().min(8)])).unwrap_or_default();
         // Who asked for the deploy, when someone did.
@@ -367,12 +409,31 @@ impl Apps {
         };
         let rev = format!("{rev}{by}");
         match e.kind.as_str() {
+            k if k.starts_with("audit.") => {
+                let what = if e.environment.is_empty() { name.clone() } else { what };
+                let who = e.data["actor"].as_str().unwrap_or("someone");
+                let mut fields = e.data.as_object().cloned().unwrap_or_default();
+                fields.remove("actor");
+                let said = if fields.is_empty() { String::new() } else { format!(" {}", Value::Object(fields)) };
+                (format!("{what}: {}", &k[6..]), format!("{who} did {}{said}.", &k[6..]))
+            }
             "deploy.failed" => (format!("{what}: deploy failed"), format!("The deploy{rev} failed: {}. The live deployment keeps serving.", e.data["error"].as_str().unwrap_or("no reason given"))),
             "deploy.active" => (format!("{what}: deployed"), format!("A new deployment{rev} is live.")),
             "rollout.waiting" => (
                 format!("{what}: a rollout waits for you at {}%", e.data["share"]),
                 format!("The deployment{rev} passed its step at {}% of requests and holds there until someone advances it, puts it all live or rolls it back (the service page, or `roll apps rollout`). It still rolls back by itself if it starts failing.", e.data["share"]),
             ),
+            "deploy.vulnerable" => {
+                let ids: Vec<&str> = e.data["ids"].as_array().map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+                let more = e.data["new"].as_u64().unwrap_or(0).saturating_sub(ids.len() as u64);
+                (
+                    format!("{what}: {} new known vulnerabilities", e.data["new"]),
+                    format!(
+                        "The image{rev} has {} critical and {} high known vulnerabilities; new since the last scan: {}{}. Deploying without the cache picks up a fixed base image; the deployment's vulnerabilities list what to upgrade.",
+                        e.data["critical"], e.data["high"], ids.join(", "), if more > 0 { format!(" and {more} more") } else { String::new() }
+                    ),
+                )
+            }
             "deploy.base_updated" => (format!("{what}: its base image {} was updated", e.data["image"].as_str().unwrap_or("")), "A deploy now would build on the new one and get its fixes (Deploy without the cache, or `run.rebuild_on_base` to do it by itself).".to_string()),
             "deploy.ready" => (format!("{what}: built and waiting to go live"), format!("The deployment{rev} is healthy beside the live one, on its own URL ({}), and waits for a person to put it live.", e.data["url"].as_str().unwrap_or("its deployment URL"))),
             "spend.alert" | "spend.limit" => {
@@ -384,9 +445,31 @@ impl Apps {
                 }
             }
             "alert.memory" => (format!("{what}: memory"), format!("Its instances used {}% of their {} MB limit for five minutes (the alert is at {}%).", e.data["value"], e.data["limit_mb"], e.data["threshold"])),
+            "alert.slo" => (
+                format!("{what}: its error budget is burning"),
+                format!(
+                    "Its {} objective ({}%) is spending its error budget {}× as fast as it lasts, over the last {} and the minutes since.",
+                    e.data["indicator"].as_str().unwrap_or("availability"),
+                    e.data["objective"],
+                    e.data["burn_rate"],
+                    if e.data["window"] == "1h" { "hour" } else { "six hours" }
+                ),
+            ),
             "alert.errors" => (format!("{what}: errors"), format!("{}% of its {} requests in five minutes answered 5xx (the alert is at {}%).", e.data["value"], e.data["requests"], e.data["threshold"])),
             "alert.latency" => (format!("{what}: slow"), format!("Its p95 latency reached {} ms (the alert is at {} ms).", e.data["value"], e.data["threshold"])),
             "alert.capacity" => (format!("{what}: at capacity"), format!("{}% of its {} requests in five minutes found all {} instances busy ({} requests each at once). Raise its max instances (`roll apps set --max`) or its concurrency, or make it answer faster (the alert is at {}%).", e.data["value"], e.data["requests"], e.data["max_instances"], e.data["concurrency"], e.data["threshold"])),
+            "heartbeat.missed" => (
+                format!("{what}: heartbeat {} missed", e.data["heartbeat"].as_str().unwrap_or("")),
+                format!("No ping came within {} s{}.", e.data["every_s"], e.data["last_ping_at"].as_i64().map(|t| format!(" of the last ({})", chrono::DateTime::from_timestamp_millis(t).map(|d| d.format("%Y-%m-%d %H:%M UTC").to_string()).unwrap_or_default())).unwrap_or_else(|| " of it being added".into())),
+            ),
+            "check.down" => (
+                format!("{what}: {} is down", e.data["path"].as_str().unwrap_or("a page")),
+                format!("Its uptime check {} failed twice in a row: {}.", e.data["check"].as_str().unwrap_or(""), e.data["error"].as_str().unwrap_or("no answer")),
+            ),
+            "form.submitted" => (
+                format!("{what}: a submission to {}", e.data["form"].as_str().unwrap_or("a form")),
+                format!("Its fields: {}. The service's Forms panel shows what was sent.", e.data["fields"].as_array().map(|f| f.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")).filter(|f| !f.is_empty()).unwrap_or_else(|| "none".into())),
+            ),
             "error.new" => (format!("{what}: a new error, {}", e.data["name"].as_str().unwrap_or("an error")), "Its log has an error it hasn't had before. The Metrics tab's Errors shows it whole, with how often it happens.".to_string()),
             "alert.log" => (format!("{what}: its log says {}", e.data["pattern"]), format!("{} lines in five minutes matched (the alert is at {}).", e.data["count"], e.data["threshold"])),
             "volume.full" => (format!("{what}: its volume is {}% full", e.data["pct"]), format!("It holds {:.1} GB of its {} GB: give it more room (`roll apps set --volume`) or delete what it doesn't need before it fills up.", e.data["used_bytes"].as_f64().unwrap_or(0.0) / 1_073_741_824.0, e.data["size_gb"])),
@@ -395,12 +478,22 @@ impl Apps {
                 let which = match e.data["alert"].as_str() {
                     Some("alert.memory") => "memory",
                     Some("alert.errors") => "errors",
+                    Some("alert.slo") => "error budget burn",
                     Some("alert.latency") => "latency",
                     Some("alert.capacity") => "capacity",
                     Some("alert.log") => "log",
+                    Some("check.down") => "uptime check",
                     _ => "an",
                 };
-                (format!("{what}: {which} alert resolved"), format!("The {which} alert cleared: the last five minutes are under its threshold."))
+                if e.data["alert"] == "heartbeat.missed" {
+                    let name = e.data["heartbeat"].as_str().unwrap_or("");
+                    (format!("{what}: heartbeat {name} is back"), format!("Heartbeat {name} pinged again."))
+                } else if e.data["alert"] == "check.down" {
+                    let name = e.data["check"].as_str().unwrap_or("");
+                    (format!("{what}: uptime check {name} is up"), format!("Its uptime check {name} passes again."))
+                } else {
+                    (format!("{what}: {which} alert resolved"), format!("The {which} alert cleared: the last five minutes are under its threshold."))
+                }
             }
             "cron.failed" | "job.failed" => {
                 let what_ran = if e.kind == "cron.failed" { "A scheduled run" } else { "A job" };
@@ -450,16 +543,31 @@ impl Apps {
                 Err(err) => (None, Some(err.to_string())),
             };
         }
+        if t.kind == "pagerduty" || t.kind == "opsgenie" {
+            return self.send_oncall(t, url, secret.unwrap_or(""), e, title, text, link.as_deref()).await;
+        }
         let body = match t.kind.as_str() {
             // Slack reads `<…>` as links and mentions (`<!channel>`) and `&` as an entity start:
             // a commit author or an error can't ping a channel or hide a link.
             "slack" => json!({ "text": format!("*{}*\n{}{}", slack_escape(title), slack_escape(text), link.as_ref().map(|l| format!("\n<{l}|Open in roll>")).unwrap_or_default()) }),
             "discord" => json!({ "content": format!("**{title}**\n{text}{}", link.as_ref().map(|l| format!("\n{l}")).unwrap_or_default()), "allowed_mentions": { "parse": [] } }),
+            // An Adaptive Card (what Teams' Workflows take): its text is never a mention.
+            "teams" => {
+                let body = [json!({ "type": "TextBlock", "text": teams_escape(title), "weight": "Bolder", "wrap": true }), json!({ "type": "TextBlock", "text": teams_escape(text), "wrap": true })];
+                let actions = link.as_ref().map(|l| vec![json!({ "type": "Action.OpenUrl", "title": "Open in roll", "url": l })]).unwrap_or_default();
+                json!({ "type": "message", "attachments": [{ "contentType": "application/vnd.microsoft.card.adaptive", "content": { "$schema": "http://adaptivecards.io/schemas/adaptive-card.json", "type": "AdaptiveCard", "version": "1.4", "body": body, "actions": actions } }] })
+            }
+            // Google Chat reads `<users/all>` as a mention and `<url|text>` as a link: neither
+            // comes from what an event says.
+            "googlechat" => {
+                let clean = |s: &str| s.replace(['<', '>'], "");
+                json!({ "text": format!("*{}*\n{}{}", clean(title), clean(text), link.as_ref().map(|l| format!("\n<{l}|Open in roll>")).unwrap_or_default()) })
+            }
             _ => json!({ "type": e.kind, "at": e.at, "seq": e.seq, "service": e.service, "environment": e.environment, "deployment": e.deployment, "data": e.data, "title": title, "text": text, "url": link }),
         };
         let bytes = serde_json::to_vec(&body).expect("JSON");
         let mut req = self.notify_client.post(url).header("content-type", "application/json");
-        if let Some(s) = secret {
+        if let Some(s) = secret.filter(|_| t.kind == "webhook") {
             use hmac::Mac;
             let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(s.as_bytes()).expect("any key");
             let ts = (code_sql::now_ms() / 1000).to_string();
@@ -481,14 +589,107 @@ impl Apps {
     }
 }
 
+/// What an event is to an on-call service: an incident to open (with its severity) or to close,
+/// and which incident (one per service, environment and alert, so a repeat updates it). None:
+/// nothing to page about.
+fn oncall_of(e: &Event) -> Option<(bool, String, &'static str)> {
+    let key = |k: &str| format!("roll:{}/{}/{k}", e.service, e.environment);
+    Some(match e.kind.as_str() {
+        // A check's or heartbeat's own incident, by its name: two checks are two pages.
+        "alert.resolved" if e.data["alert"] == "check.down" => (false, key(&format!("check.down/{}", e.data["check"].as_str()?)), "info"),
+        "alert.resolved" if e.data["alert"] == "heartbeat.missed" => (false, key(&format!("heartbeat.missed/{}", e.data["heartbeat"].as_str()?)), "info"),
+        "alert.resolved" => (false, key(e.data["alert"].as_str()?), "info"),
+        "check.down" => (true, key(&format!("check.down/{}", e.data["check"].as_str()?)), "error"),
+        "heartbeat.missed" => (true, key(&format!("heartbeat.missed/{}", e.data["heartbeat"].as_str()?)), "error"),
+        // A deploy that worked closes the failed one's.
+        "deploy.active" => (false, key("deploy.failed"), "info"),
+        "domain.active" => return None,
+        "crash_loop" | "spend.limit" => (true, key(&e.kind), "critical"),
+        "deploy.failed" | "alert.errors" | "alert.slo" | "cron.failed" | "job.failed" | "volume.backup_failed" | "domain.tls_failed" | "domain.expired" => (true, key(&e.kind), "error"),
+        "form.submitted" => (true, format!("{}/{}", key(&e.kind), e.data["submission"].as_str().unwrap_or("")), "info"),
+        "test" => (true, format!("roll:test:{}", e.at), "info"),
+        _ => (true, key(&e.kind), "warning"),
+    })
+}
+
+impl Apps {
+    /// One try at PagerDuty's Events API v2 or Opsgenie's Alert API: open or close the event's
+    /// incident by its key.
+    #[allow(clippy::too_many_arguments)]
+    async fn send_oncall(&self, t: &NotifyTarget, url: &str, key: &str, e: &Event, title: &str, text: &str, link: Option<&str>) -> (Option<u16>, Option<String>) {
+        let Some((open, dedup, severity)) = oncall_of(e) else { return (None, None) };
+        let source = if e.service.is_empty() { "roll apps".to_string() } else { format!("roll apps: {} in {}", e.service, e.environment) };
+        let req = if t.kind == "pagerduty" {
+            let mut body = json!({ "routing_key": key, "event_action": if open { "trigger" } else { "resolve" }, "dedup_key": dedup });
+            if open {
+                body["payload"] = json!({ "summary": title.chars().take(1024).collect::<String>(), "source": source, "severity": severity, "component": e.service, "group": e.environment, "class": e.kind, "custom_details": { "text": text, "data": e.data } });
+                if let Some(l) = link {
+                    body["links"] = json!([{ "href": l, "text": "Open in roll" }]);
+                }
+            }
+            self.notify_client.post(url).json(&body)
+        } else {
+            let auth = format!("GenieKey {key}");
+            if open {
+                let priority = match severity {
+                    "critical" => "P1",
+                    "error" => "P2",
+                    "warning" => "P3",
+                    _ => "P5",
+                };
+                let description = match link {
+                    Some(l) => format!("{text}\n\nOpen in roll: {l}"),
+                    None => text.to_string(),
+                };
+                let body = json!({ "message": title.chars().take(130).collect::<String>(), "alias": dedup.chars().take(512).collect::<String>(), "description": description.chars().take(15_000).collect::<String>(), "priority": priority, "source": "roll", "entity": source, "tags": [e.environment, e.kind] });
+                self.notify_client.post(url).header("authorization", auth).json(&body)
+            } else {
+                let alias: String = url::form_urlencoded::byte_serialize(dedup.as_bytes()).collect();
+                self.notify_client.post(format!("{}/{alias}/close?identifierType=alias", url.trim_end_matches('/'))).header("authorization", auth).json(&json!({ "source": "roll" }))
+            }
+        };
+        match req.send().await {
+            Ok(res) if res.status().is_success() => (Some(res.status().as_u16()), None),
+            // Closing what was never opened (or already closed) is done.
+            Ok(res) if !open && res.status() == reqwest::StatusCode::NOT_FOUND => (Some(404), None),
+            Ok(res) => {
+                let code = res.status().as_u16();
+                let said = String::from_utf8_lossy(&crate::net::read_bounded(res, 512).await).trim().chars().take(200).collect::<String>();
+                (Some(code), Some(if said.is_empty() { format!("answered {code}") } else { format!("answered {code}: {said}") }))
+            }
+            Err(err) => (None, Some(err.without_url().to_string())),
+        }
+    }
+}
+
 /// Text for Slack's `mrkdwn`: `&`, `<` and `>` as entities, so nothing in it is a link or a
 /// mention.
 fn slack_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
+/// An Adaptive Card's text renders Markdown links (`[Approve](https://…)`): a commit author's
+/// name or an error can't make one (a zero-width space between `]` and `(`; nothing shows).
+fn teams_escape(s: &str) -> String {
+    s.replace("](", "]\u{200B}(")
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn audit_entries_go_to_who_asks_and_never_page() {
+        let ev = |e: &[&str]| e.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let data = serde_json::json!({});
+        assert!(super::wants(&ev(&["audit"]), "audit.variables", &data, false));
+        assert!(!super::wants(&ev(&["audit"]), "audit.variables", &data, true), "never an on-call page");
+        assert!(!super::wants(&super::DEFAULT_EVENTS.map(String::from), "audit.variables", &data, false), "not by default");
+    }
+
+    #[test]
+    fn a_teams_card_can_not_link() {
+        assert!(!super::teams_escape("[Approve](https://evil)").contains("]("));
+    }
+
     #[test]
     fn slack_text_can_not_mention_or_link() {
         assert_eq!(super::slack_escape("<!channel> <https://evil|Approve> & co"), "&lt;!channel&gt; &lt;https://evil|Approve&gt; &amp; co");
