@@ -166,7 +166,11 @@ pub(crate) fn target(access: &Access, row: &Row, params: &[(String, String)], qu
                     r.protected = param(p).and_then(|e| access.resolvers.protected(row.product, &id, &e));
                     r.environment = param(p).map(|e| access.resolvers.environment(row.product, &id, &e)).or(r.environment);
                 }
-                EnvFrom::Fixed(e) => r.environment = Some(e.into()),
+                // Whether it's protected, the product says too (a preview's never is).
+                EnvFrom::Fixed(e) => {
+                    r.protected = access.resolvers.protected(row.product, &id, e);
+                    r.environment = Some(e.into());
+                }
                 EnvFrom::None => {}
             }
             r.index = row.index.and_then(param);

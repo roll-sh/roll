@@ -1269,10 +1269,20 @@ activity(preview_id TEXT NOT NULL, at INTEGER NOT NULL, seq INTEGER NOT NULL, me
 
 ## HTTP contract
 
-Bodies are JSON. Every error is `{"error": string}`. A signed-in person who isn't an admin sees
-only the previews of their own workspace projects (as the workspace scopes them): another
-owner's preview or project is a 404. Tokens (their scopes are roll MCP's catalog), the operator
-and admins see every project.
+Bodies are JSON. Every error is `{"error": string}`. Previews are a member product
+(docs/members.md): a signed-in person who isn't an admin reaches the previews of the projects
+they're a member of, each route as their role there allows, by roll-access's catalogue (a preview
+is in its project, and its environment, `preview`, is never protected): a viewer reads a preview,
+its logs, traces and screenshots; a developer also reveals what holds credentials (`…/env`,
+`…/connect`, mail, share links) and writes (sleep, wake, refresh, its variables); an admin or owner
+also opens shells, files and ports, deletes and resets, accepts reviews and manages the project's
+rules, bypass secret and hooks. Another project's preview, or a project they aren't in, is a 404;
+what their role lacks is a 403 naming it. Starting a preview by hand (`POST /v1/previews`, `roll
+preview up`) makes something in the project: an admin's, the request naming the project in
+`X-Roll-Project` (as roll-access reads every create). The handlers see the person
+(their session's grant isn't a token): their name on an accept, a person's accept for a required
+rule. Tokens (their scopes are roll MCP's catalog, and a rule naming a project reaches the
+previews in it), the operator and admins see every project.
 
 | Route | Body | Answer |
 | --- | --- | --- |

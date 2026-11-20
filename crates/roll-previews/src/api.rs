@@ -80,8 +80,9 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .with_state(engine)
 }
 
-/// The projects a signed-in person who isn't an admin may see previews of: their own, as the
-/// workspace API scopes them. `None`: every project (tokens, the operator, admins).
+/// The projects a signed-in person who isn't an admin may see previews of: the ones they're a
+/// member of, as the workspace API scopes them (what their role lets them do there, roll-access
+/// decides). `None`: every project (tokens, the operator, admins).
 #[derive(Clone)]
 struct Visible(Option<std::collections::HashSet<String>>);
 
@@ -124,6 +125,12 @@ async fn scoped(AxState(e): S, mut req: axum::extract::Request, next: axum::midd
         return Error::NotFound("no such preview or project".into()).into_response();
     }
     req.extensions_mut().insert(visible);
+    // A person's session on a member route (docs/members.md): roll-access decided it by their role
+    // in the project, and its grant is them, not a token. Without it the handlers see the person,
+    // as they did before members (their name, a person's accept).
+    if req.extensions().get::<roll_auth::Grant>().is_some_and(|g| g.kind == roll_auth::GrantKind::Session) {
+        req.extensions_mut().remove::<roll_auth::Grant>();
+    }
     next.run(req).await
 }
 
