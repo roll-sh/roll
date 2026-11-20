@@ -195,6 +195,16 @@ ROLL_API_URL="http://$API" "$CLI" preview env "$PV" --unset FEATURE_FLAG >/dev/n
 until_vars "'FEATURE_FLAG' not in n and 'REDIS_URL' in n"
 UNSET="FEATURE_FLAG set, then unset; REDIS_URL kept"
 
+say "traces: the project's traces turn on its pv- environment's own (roll apps keeps them), read from the preview"
+api PUT "/v1/previews/projects/$PRJ/settings" '{"traces":true}' >/dev/null
+for _ in $(seq 1 240); do
+  [ "$(api GET "/v1/apps/services/$SVC/environments/$ENV" | jq_ "d.get('traces')")" = True ] && break
+  sleep 1
+done
+[ "$(api GET "/v1/apps/services/$SVC/environments/$ENV" | jq_ "d.get('traces')")" = True ] || { echo "the pv- environment should get roll apps' traces"; exit 1; }
+[ "$(api GET "/v1/previews/$PV/traces" | jq_ "type(d['traces']).__name__")" = list ] || { echo "the preview's traces should read its roll apps environment's"; exit 1; }
+api PUT "/v1/previews/projects/$PRJ/settings" '{"traces":false}' >/dev/null
+
 say "a screenshot of the roll apps service (in its instance's network), and main's baseline on roll apps"
 api PUT "/v1/previews/projects/$PRJ/settings" '{"github":{"screenshot":true}}' >/dev/null
 for _ in $(seq 1 240); do

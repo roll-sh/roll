@@ -13,6 +13,7 @@
 #
 #   scripts/preview-cost.sh [--keep]     # --keep: leave the daemon running at the end
 #   STOP_BEFORE_LAND=1 scripts/preview-cost.sh --keep   # and the preview with it (to look at it)
+#   STOP_AT=against scripts/preview-cost.sh --keep      # main's preview and the change's running, compared
 set -euo pipefail
 # The ports: <P>070 for the API and so on (27 unless PREVIEW_E2E_PORTS says another two digits).
 P=${PREVIEW_E2E_PORTS:-27}
@@ -60,6 +61,10 @@ export ROLL_HOME=$HOME_DIR ROLL_API=$API ROLL_PROXY=127.0.0.1:${P}432 ROLL_REDIS
   ROLL_NOSQL_CQL=127.0.0.1:${P}042 ROLL_NOSQL_CQL_SHARD_AWARE=127.0.0.1:${P}043 ROLL_NOSQL_ALTERNATOR=127.0.0.1:${P}000 ROLL_NOSQL_REST=127.0.0.1:${P}100 \
   ROLL_CODE_PREVIEW_DOMAIN=$DOMAIN ROLL_PRODUCTS=${PREVIEW_PRODUCTS:-code,postgres,redis,storage,nosql,queues,streams,tasks,search} RUST_LOG=${RUST_LOG:-info}
 unset ROLL_ADMIN_TOKEN ROLL_CODE_TOKEN
+# The comparison with main's preview at a test's pace (every 5 s, not every minute).
+export ROLL_PREVIEWS_COMPARE_EVERY=5
+# A deployment key, as a real node has (what roll seals with it: roll secrets, a preview's own variables).
+export ROLL_SECRET_KEY=${PREVIEW_E2E_SECRET_KEY:-$(python3 -c 'import secrets; print(secrets.token_hex(32))')}
 say "starting rolld ($ROLL_PRODUCTS) in $HOME_DIR"
 nice -n 10 "$BIN" >"$HOME_DIR/rolld.log" 2>&1 &
 PID=$!
@@ -137,7 +142,11 @@ PRJ=$(api POST /v1/workspace/projects '{"name":"shop"}' | jq_ "d['id']")
 for r in "repo/acme%2Fweb" "repo/acme%2Fwiki" "postgres/$PG" "redis/$REDIS" "bucket/assets" "nosql/$NOSQL" "queue/jobs" "stream/$STREAM" "tasks/work" "search/$SEARCH"; do
   api PUT "/v1/workspace/projects/$PRJ/resources/$r" '{"x":0,"y":0}' >/dev/null
 done
-api PUT "/v1/previews/projects/$PRJ/settings" "{\"env\":{\"SENDGRID_API_KEY\":\"SG.from-production\",\"SMTP_HOST\":\"smtp.sendgrid.net\"},\"enabled\":true,\"sleep_after_s\":60,\"release\":{\"image\":\"$IMAGE\",\"run\":\"true\"},\"masking\":{\"nosql:$NOSQL\":{\"app.users.email\":\"mask_default()\"},\"postgres:$PG\":{\"public.users.email\":\"email\"},\"search:$SEARCH\":{\"products.name\":\"redact\",\"products.owner.email\":\"redact\",\"logs.2024.user.email\":\"redact\"}}}" >/dev/null
+# A project rule can name a key in roll secrets instead of holding its value (roll://ENV/KEY): the
+# preview's environment reads it there (untrusted), and a plain value's `${` stays as it is.
+REFD=$(curl -s -o /dev/null -w '%{http_code}' -X PUT "http://$API/v1/secrets/projects/$PRJ/environments/staging/secrets/PAYMENTS_TEST_KEY" -H 'content-type: application/json' -d '{"value":"sk_test_from_staging_42"}')
+case "$REFD" in 200|201) ;; *) echo "setting staging's PAYMENTS_TEST_KEY: HTTP $REFD"; exit 1;; esac
+api PUT "/v1/previews/projects/$PRJ/settings" "{\"env\":{\"SENDGRID_API_KEY\":\"SG.from-production\",\"SMTP_HOST\":\"smtp.sendgrid.net\",\"PAYMENTS_KEY\":\"roll://staging/PAYMENTS_TEST_KEY\",\"GREETING\":\"hello \${USER}\"},\"enabled\":true,\"sleep_after_s\":60,\"release\":{\"image\":\"$IMAGE\",\"run\":\"true\"},\"masking\":{\"nosql:$NOSQL\":{\"app.users.email\":\"mask_default()\"},\"postgres:$PG\":{\"public.users.email\":\"email\"},\"search:$SEARCH\":{\"products.name\":\"redact\",\"products.owner.email\":\"redact\",\"logs.2024.user.email\":\"redact\"}}}" >/dev/null
 # A mask on a key column can't hide it (the engine refuses to read such a table): the settings
 # name it instead of letting a preview's pages fail.
 KEY_MASK=$(curl -s -o /tmp/roll-previews-keymask.json -w '%{http_code}' -X PUT "http://$API/v1/previews/projects/$PRJ/settings" -H 'content-type: application/json' \
@@ -247,7 +256,10 @@ case "$REQS" in *"newest: GET / 200; queries: False") ;; *) echo "the preview's 
 METRICS=$(curl -sS "http://$API/v1/previews/$PV/metrics" | python3 -c "import json,sys; m=json.load(sys.stdin)['services']; print('; '.join('%s %.2f CPU %d of %d MB' % (x['service'], x['cpu'], x['memory_bytes'] >> 20, x['memory_mb']) for x in m) if m and all(x['memory_bytes'] > 0 for x in m) else 'none')")
 [ "$METRICS" != none ] || { echo "a running preview's services should report what they use"; exit 1; }
 # And from the CLI (`roll preview requests`): its visits, and none with --errors.
-ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview requests "$PV" | grep -q " 200 GET    /  " || { echo "roll preview requests should list GET / 200: $(ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview requests "$PV" | head -3)"; exit 1; }
+# (Read whole first: `grep -q` stops at its match, and with pipefail the CLI's next write to the
+# closed pipe would fail the step once there are enough requests.)
+REQS=$(ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview requests "$PV")
+echo "$REQS" | grep -q " 200 GET    /  " || { echo "roll preview requests should list GET / 200: $(echo "$REQS" | head -3)"; exit 1; }
 [ -z "$(ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview requests "$PV" --errors)" ] || { echo "roll preview requests --errors should list only 4xx and 5xx"; exit 1; }
 # The service's DATABASE_URL is the branch's own role, which can't read the WAL (where the pages
 # from before the mask are) and isn't a superuser.
@@ -259,6 +271,10 @@ PG_NAMES=$(python3 -c 'import sys,urllib.parse as u; e=dict(l.split("=",1) for l
 [ "$PG_NAMES" = ok ] || { echo "the service's PGUSER/PGPASSWORD should be the branch's: $PG_NAMES"; exit 1; }
 FOLLOWED=$(python3 -c 'import sys,urllib.parse as u; e=dict(l.split("=",1) for l in sys.stdin.read().splitlines() if "=" in l); p=u.urlsplit(e.get("DATABASE_URL","")); s=e.get("STAGING_PGPASS"); print("ok" if s and s==u.unquote(p.password or "") else "STAGING_PGPASS is %s" % ("unset" if s is None else "not the branch'"'"'s password"))' <<<"$APP_ENV")
 [ "$FOLLOWED" = ok ] || { echo "a secrets link to the branched parent should give the branch's password: $FOLLOWED"; exit 1; }
+echo "$APP_ENV" | grep -qx 'PAYMENTS_KEY=sk_test_from_staging_42' || { echo "roll://staging/PAYMENTS_TEST_KEY should be staging's value: $(echo "$APP_ENV" | grep '^PAYMENTS_KEY=' | cut -c1-40)"; exit 1; }
+echo "$APP_ENV" | grep -qxF 'GREETING=hello ${USER}' || { echo "a plain value's \${ should stay as it is: $(echo "$APP_ENV" | grep '^GREETING=')"; exit 1; }
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X PUT "http://$API/v1/previews/projects/$PRJ/settings" -H 'content-type: application/json' -d '{"env":{"X":"roll://other@staging/KEY"}}')" = 400 ] || { echo "a reference into another project should be refused"; exit 1; }
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X PUT "http://$API/v1/previews/$PV/env" -H 'content-type: application/json' -d '{"vars":{"X":"roll://staging/PAYMENTS_TEST_KEY"}}')" = 400 ] || { echo "a preview's own variable can't be a reference yet"; exit 1; }
 case "$APP_DB" in postgres://br_*) ;; *) echo "the service's DATABASE_URL should be the branch's own role, not ${APP_DB%%@*}…"; exit 1;; esac
 # Its mail goes to roll's catcher, signed in as the preview, never to the provider production
 # uses: the key is gone, and what it sends is caught and listed (sent here as its service would).
@@ -335,6 +351,9 @@ for _ in $(seq 1 60); do grep -q "pushed-log-line" "$FOLLOW" && break; sleep 0.2
 kill "$FPID" 2>/dev/null || true
 wait "$FPID" 2>/dev/null || true
 grep -q "event: service" "$FOLLOW" && grep -q "pushed-log-line" "$FOLLOW" || { echo "the followed log should carry the request:"; cat "$FOLLOW"; exit 1; }
+# Python's server writes its request lines on stderr: the followed log says so (`event: stderr`,
+# before the event's `data:` line, so a client acting on each line knows its stream).
+grep -B1 "pushed-log-line" "$FOLLOW" | grep -q "^event: stderr" || { echo "the request's line came on stderr and should say so:"; cat "$FOLLOW"; exit 1; }
 # CI's way in: the project's bypass secret in a header (no cookie); a wrong one is refused.
 BYPASS=$(api POST "/v1/previews/projects/$PRJ/bypass" | jq_ "d['secret']")
 [ "$(curl -s -o /dev/null -w '%{http_code}' -H "Host: $HOST" -H "x-roll-preview-bypass: $BYPASS" "http://$API/")" = 200 ] || { echo "the bypass secret should open the preview"; exit 1; }
@@ -402,6 +421,49 @@ kill "$FWD_PID" 2>/dev/null || true; wait "$FWD_PID" 2>/dev/null || true
 api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d]" | grep -q "forwarded port 8000 of web" || { echo "the activity should say the port was forwarded"; exit 1; }
 for _ in $(seq 1 30); do [ "$(docker ps -aq --filter name=roll-previews-fwd- | wc -l)" = 0 ] && break; sleep 0.5; done
 [ "$(docker ps -aq --filter name=roll-previews-fwd- | wc -l)" = 0 ] || { echo "a forward's relay should go with its connection"; exit 1; }
+
+say "traces: with the project's traces on, the service gets OpenTelemetry's variables, spans it posts are the preview's traces, and an error naming one opens it"
+api PUT "/v1/previews/projects/$PRJ/settings" '{"traces":true}' >/dev/null
+# It restarts with them (its deploy's fingerprint): the env it writes at start says so.
+OTEL=""
+for _ in $(seq 1 120); do
+  OTEL=$(curl -sS -b "$JAR" -H "Host: $HOST" "http://$API/env.txt" | sed -n 's/^OTEL_EXPORTER_OTLP_ENDPOINT=//p')
+  [ -n "$OTEL" ] && break
+  sleep 1
+done
+[ -n "$OTEL" ] || { echo "the service should get OTEL_EXPORTER_OTLP_ENDPOINT with traces on"; exit 1; }
+# The span an SDK in it would send, to the endpoint and token it was given. Posted from this host:
+# on ai-server the firewall keeps containers from the host (as with the mail catcher and host
+# Postgres), so the container's own `host.docker.internal` hop can't be checked here.
+OTEL_HERE=$(echo "$OTEL" | sed 's#host.docker.internal#127.0.0.1#')
+NOW_NS=$(date +%s%N)
+SPANS="{\"resourceSpans\":[{\"resource\":{\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"web\"}}]},\"scopeSpans\":[{\"spans\":[{\"traceId\":\"abababababababababababababababab\",\"spanId\":\"0101010101010101\",\"name\":\"GET /checkout\",\"startTimeUnixNano\":\"$((NOW_NS - 40000000))\",\"endTimeUnixNano\":\"$NOW_NS\"},{\"traceId\":\"abababababababababababababababab\",\"spanId\":\"0202020202020202\",\"parentSpanId\":\"0101010101010101\",\"name\":\"charge card\",\"startTimeUnixNano\":\"$((NOW_NS - 30000000))\",\"endTimeUnixNano\":\"$((NOW_NS - 5000000))\",\"status\":{\"code\":2}}]}]}]}"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' -d "$SPANS" "$OTEL_HERE/v1/traces")" = 200 ] || { echo "the service's OpenTelemetry endpoint should take its spans: $OTEL_HERE"; exit 1; }
+TRACES=$(api GET "/v1/previews/$PV/traces" | jq_ "[(t['name'], t['spans'], t['error']) for t in d['traces']]")
+case "$TRACES" in *"('GET /checkout', 2, True)"*) ;; *) echo "the span posted should be the preview's trace: $TRACES"; exit 1;; esac
+ROUTES=$(api GET "/v1/previews/$PV/routes" | jq_ "[(r['name'], r['count']) for r in d['routes']]")
+case "$ROUTES" in *"('GET /checkout', 1)"*) ;; *) echo "the trace should be its route's: $ROUTES"; exit 1;; esac
+# A request that runs one query a row (an N+1): its route says the statement, literals taken out.
+N1=$(NOW_NS="$NOW_NS" python3 -c '
+import json, os
+now = int(os.environ["NOW_NS"]); t = "cd" * 16
+spans = [{"traceId": t, "spanId": "%016x" % 1, "name": "GET /orders", "startTimeUnixNano": str(now - 50000000), "endTimeUnixNano": str(now)}]
+spans += [{"traceId": t, "spanId": "%016x" % (i + 2), "parentSpanId": "%016x" % 1, "name": "SELECT", "startTimeUnixNano": str(now - 40000000 + i * 1000000), "endTimeUnixNano": str(now - 39500000 + i * 1000000),
+  "attributes": [{"key": "db.statement", "value": {"stringValue": "SELECT * FROM items WHERE order_id = %d" % i}}]} for i in range(12)]
+print(json.dumps({"resourceSpans": [{"resource": {"attributes": [{"key": "service.name", "value": {"stringValue": "web"}}]}, "scopeSpans": [{"spans": spans}]}]}))')
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' -d "$N1" "$OTEL_HERE/v1/traces")" = 200 ] || { echo "the N+1 trace should be taken"; exit 1; }
+REPEATED=$(api GET "/v1/previews/$PV/routes" | jq_ "[(r['repeated'] or {}).get('statement', '') + ' ' + str((r['repeated'] or {}).get('count', 0)) for r in d['routes'] if r['name'] == 'GET /orders']")
+[ "$REPEATED" = "['SELECT * FROM items WHERE order_id = ? 12']" ] || { echo "the route should say its repeated query: $REPEATED"; exit 1; }
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' -d '{}' "http://$API/v1/previews/$PV/otlp/not-the-token/v1/traces")" = 404 ] || { echo "another token should be 404"; exit 1; }
+# An error its service logs with the request's trace id (as an SDK's logger does) opens that trace.
+docker exec "roll-previews-$(echo "$HOST" | cut -d. -f1)" sh -c 'echo "ERROR card declined trace_id=abababababababababababababababab" > /proc/1/fd/2'
+ERR_TRACE=""
+for _ in $(seq 1 30); do
+  ERR_TRACE=$(api GET "/v1/previews/$PV/errors" | jq_ "' '.join(g.get('trace') or '-' for g in d['groups'] if 'card declined' in g['title'])")
+  [ "$ERR_TRACE" = abababababababababababababababab ] && break
+  sleep 2
+done
+[ "$ERR_TRACE" = abababababababababababababababab ] || { echo "the error naming the trace should carry it: '$ERR_TRACE'"; exit 1; }
 
 say "a screenshot of the service (github.screenshot), once per head"
 # And /pricing, which the test service doesn't have (a 404 page, one failed request).
@@ -522,6 +584,9 @@ done
   curl -sS -b "$JAR" -H "Host: $HOST" "http://$API/env.txt" | grep -c . || true
   exit 1
 }
+# Kept sealed: the previews table holds no name or value of it.
+SEALED=$(python3 -c 'import sqlite3, sys; r = sqlite3.connect(sys.argv[1]).execute("SELECT vars FROM previews WHERE id = ?", (sys.argv[2],)).fetchone(); v = (r or [""])[0] or ""; print("ok" if v.startswith("v1:") and "FEATURE_FLAG" not in v else "plain: " + v[:20])' "$HOME_DIR/previews.db" "$PV")
+[ "$SEALED" = ok ] || { echo "a preview's own variables should be sealed at rest: $SEALED"; exit 1; }
 
 say "with ignore_paths, a docs-only push keeps the services and the preview reports the new head"
 api PUT "/v1/previews/projects/$PRJ/settings" '{"ignore_paths":["docs/"]}' >/dev/null
@@ -539,7 +604,8 @@ DOCS_HEAD=$(api GET "/v1/code/changes/$CHG" | jq_ "d['head']")
 until_head "$DOCS_HEAD"
 # (What it runs is set by the converge just after it reports the new head: waited for.)
 RUNS=""
-for _ in $(seq 1 120); do
+# (Up to 2 minutes: at a load of 80 one converge has taken over one.)
+for _ in $(seq 1 240); do
   RUNS=$(api GET "/v1/previews/$PV" | jq_ "d.get('runs') or ''")
   [ -n "$RUNS" ] && break
   sleep 0.5
@@ -741,6 +807,54 @@ case "$(api GET "/v1/code/changes/$CHG" | jq_ "[b['kind'] for b in d.get('blocke
 REVIEW=$(api POST "/v1/previews/$PV/visual/accept" "{\"head\":\"$SEEN\"}" | jq_ "'%s by %s' % (d['visual_review']['state'], d['visual_review']['by'])")
 [ "$REVIEW" = "accepted by operator" ] || { echo "accepting should settle the review: $REVIEW"; exit 1; }
 case "$(api GET "/v1/code/changes/$CHG" | jq_ "[b['kind'] for b in d.get('blockers', [])]")" in *visual*) echo "an accepted review shouldn't block landing"; exit 1;; esac
+say "against main's preview, both running: a slower route (and the span its time went to) and a new error reach the record and the change"
+api POST "/v1/previews/$MAINPV/wake" >/dev/null
+api POST "/v1/previews/$PV/wake" >/dev/null
+# main's service's OpenTelemetry endpoint, as its service has it (its own access link first).
+MAIN_URL=$(api GET "/v1/previews/$MAINPV" | jq_ "[x for x in d['services'] if x['name'] == 'web'][0]['share_url']")
+MAIN_HOST=$(echo "$MAIN_URL" | sed 's#https\?://##; s#[:/].*##')
+MJAR="$HOME_DIR/main-cookies"
+curl -sS -L -o /dev/null -c "$MJAR" -b "$MJAR" -H "Host: $MAIN_HOST" "http://$API/?${MAIN_URL#*\?}" --max-time 120
+MAIN_OTEL=""
+for _ in $(seq 1 120); do
+  MAIN_OTEL=$(curl -sS -b "$MJAR" -H "Host: $MAIN_HOST" "http://$API/env.txt" | sed -n 's/^OTEL_EXPORTER_OTLP_ENDPOINT=//p' | sed 's#host.docker.internal#127.0.0.1#')
+  [ -n "$MAIN_OTEL" ] && break
+  sleep 1
+done
+[ -n "$MAIN_OTEL" ] || { echo "main's preview's service should have its OpenTelemetry endpoint"; exit 1; }
+# Five requests each: GET /orders at 100 ms on main's (its query 50) and 400 ms here (its query 330).
+post_orders() { # post_orders <endpoint> <ms> <query ms> <trace prefix>
+  NOW_NS=$(date +%s%N) python3 - "$@" <<'PY'
+import json, os, sys, urllib.request
+ep, ms, q, pre = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4]
+now = int(os.environ["NOW_NS"])
+spans = []
+for i in range(5):
+    t = (pre * 32)[:28] + "%04x" % i
+    spans.append({"traceId": t, "spanId": "%016x" % 1, "name": "GET /orders", "startTimeUnixNano": str(now - ms * 1000000), "endTimeUnixNano": str(now)})
+    spans.append({"traceId": t, "spanId": "%016x" % 2, "parentSpanId": "%016x" % 1, "name": "SELECT orders", "startTimeUnixNano": str(now - q * 1000000), "endTimeUnixNano": str(now)})
+body = json.dumps({"resourceSpans": [{"resource": {"attributes": [{"key": "service.name", "value": {"stringValue": "web"}}]}, "scopeSpans": [{"spans": spans}]}]}).encode()
+urllib.request.urlopen(urllib.request.Request(ep + "/v1/traces", body, {"content-type": "application/json"})).read()
+PY
+}
+post_orders "$MAIN_OTEL" 100 50 a1
+post_orders "$OTEL_HERE" 400 330 b2
+# An error only the change's service writes.
+docker exec "roll-previews-$(echo "$HOST" | cut -d. -f1)" sh -c 'echo "ERROR inventory reservation failed for the cart" > /proc/1/fd/2'
+AGAINST=""
+for _ in $(seq 1 90); do
+  AGAINST=$(api GET "/v1/previews/$PV" | jq_ "' / '.join([', '.join('%s %s->%s %s' % (r['name'], r['main_p50_ms'], r['p50_ms'], (r.get('grew') or {}).get('span')) for r in (d.get('slower_routes') or {}).get('routes', [])), str(any('inventory reservation failed' in e['title'] for e in (d.get('new_errors') or {}).get('errors', [])))])")
+  case "$AGAINST" in "GET /orders 100->400 SELECT orders / True") break;; esac
+  sleep 2
+done
+[ "$AGAINST" = "GET /orders 100->400 SELECT orders / True" ] || { echo "the change should be slower than main's on GET /orders (in SELECT orders) and have a new error: $AGAINST"; exit 1; }
+# The change's summary (its pull request's comment and status read it) has both.
+SUMMED=$(api GET "/v1/code/changes/$CHG" | jq_ "(lambda e: '%s %s' % (bool((e.get('slower_routes') or {}).get('routes')), (e.get('new_errors') or {}).get('total', 0) > 0))((d.get('preview') or {}).get('environment') or {})")
+[ "$SUMMED" = "True True" ] || { echo "the change's preview summary should carry them: $SUMMED"; exit 1; }
+if [ "${STOP_AT:-}" = against ]; then
+  echo "stopped against main's preview: project $PRJ, preview $PV, main's $MAINPV, change $CHG (run with --keep to leave the daemon up)"
+  exit 0
+fi
 # Turned off, it goes.
 OFF=$(api PUT "/v1/previews/projects/$PRJ/settings" '{"github":{"baseline":false}}'); echo "$OFF" | grep -q "\"baseline\":false" || { echo "turning the baseline off: $OFF"; exit 1; }
 for _ in $(seq 1 120); do

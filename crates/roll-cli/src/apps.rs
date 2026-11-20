@@ -42,6 +42,9 @@ pub struct Up {
     /// dependency caches empty from here on.
     #[arg(long)]
     pub no_cache: bool,
+    /// Deploy during the environment's deploy freeze (said in the deployment and the audit log).
+    #[arg(long = "override")]
+    pub override_freeze: bool,
     /// Every service and database the directory's roll.toml declares (`[apps.<name>]`,
     /// `[databases.<name>]`): made where missing, linked, and deployed. The plan is printed
     /// first.
@@ -77,6 +80,9 @@ pub struct Deploy {
     /// dependency caches empty from here on (for a build a stale cache keeps breaking).
     #[arg(long)]
     pub no_cache: bool,
+    /// Deploy during the environment's deploy freeze (said in the deployment and the audit log).
+    #[arg(long = "override")]
+    pub override_freeze: bool,
     #[arg(long, short = 'd')]
     pub detach: bool,
 }
@@ -426,6 +432,10 @@ pub enum AppsCmd {
         /// in its registry (`true`), or only say so (`false`).
         #[arg(long)]
         rebuild_on_base: Option<bool>,
+        /// Fail a deploy whose image has a known vulnerability this severe or worse, before it
+        /// goes live (`critical`, `high`, `medium`, `low`); `none`: never.
+        #[arg(long, value_parser = ["critical", "high", "medium", "low", "none"])]
+        block_on: Option<String>,
     },
     /// A copy of the service in its project (Railway's Duplicate): its source, build and run
     /// settings, links and production's own variables. Sealed variables are never shown, so
@@ -466,12 +476,17 @@ pub enum AppsCmd {
         list: bool,
     },
     /// Deployments, newest first; `--commits DEP`: what a repo deployment brings over the one
-    /// live before it, newest first.
+    /// live before it, newest first; `--vulnerabilities DEP`: its image's known vulnerabilities,
+    /// most severe first (`--severity high`: high or worse).
     Deploys {
         #[command(flatten)]
         target: Target,
-        #[arg(long, value_name = "DEPLOYMENT")]
+        #[arg(long, value_name = "DEPLOYMENT", conflicts_with = "vulnerabilities")]
         commits: Option<String>,
+        #[arg(long, value_name = "DEPLOYMENT")]
+        vulnerabilities: Option<String>,
+        #[arg(long, requires = "vulnerabilities", value_parser = ["critical", "high", "medium", "low", "unknown"])]
+        severity: Option<String>,
     },
     /// What the next deploy changes (Railway's staged changes): variables added, removed or
     /// changed (names, never values), run settings the live deployment doesn't run with, and the
@@ -630,6 +645,9 @@ pub enum AppsCmd {
     Redeploy {
         #[command(flatten)]
         target: Target,
+        /// During the environment's deploy freeze (said in the deployment and the audit log).
+        #[arg(long = "override")]
+        override_freeze: bool,
     },
     /// Deploy what another environment runs here (its image: no build), with this
     /// environment's variables: `roll apps promote --from staging` puts staging's image live in
@@ -653,6 +671,9 @@ pub enum AppsCmd {
         /// Keep today's variables (by default they come back as they were when it was live).
         #[arg(long)]
         keep_variables: bool,
+        /// Put a build live that never was (one held at ready) during a deploy freeze.
+        #[arg(long = "override")]
+        override_freeze: bool,
     },
     /// Variables: list (masked), `--reveal`, or change with `KEY=value` and `-u KEY`.
     Vars {
@@ -924,7 +945,7 @@ pub enum AppsCmd {
         #[arg(long, requires = "add", value_parser = ["ndjson", "otlp", "syslog"])]
         format: Option<String>,
         /// With `--add` or `--edit`: what it's sent, comma-separated: `runtime` (the default),
-        /// `http` (a request a line), `build`.
+        /// `http` (a request a line), `build`, `audit` (each change people make).
         #[arg(long, value_name = "SOURCES")]
         source: Option<String>,
         /// With `--add` or `--edit`: only this environment's (repeat it for more).
@@ -955,15 +976,21 @@ pub enum AppsCmd {
         #[arg(long)]
         remove: Option<String>,
     },
-    /// The project's notification targets: list them, `--add <url>` (`--kind slack|discord|webhook`,
+    /// The project's notification targets: list them, `--add <url>` (`--kind slack|discord|teams|googlechat|webhook`,
     /// a webhook's secret printed once), or `--remove <id>`.
     Notifications {
         #[command(flatten)]
         target: Target,
+        /// A webhook's, Slack's or Discord's URL; PagerDuty's integration key or Opsgenie's API key
+        /// for those kinds (read from stdin when it's `-`, so it stays out of the shell's history).
         #[arg(long, conflicts_with = "remove")]
         add: Option<String>,
+        /// `webhook`, `slack`, `discord`, `pagerduty` or `opsgenie`.
         #[arg(long, default_value = "webhook")]
         kind: String,
+        /// With `--kind pagerduty` or `opsgenie`: its region, `us` (the default) or `eu`.
+        #[arg(long, requires = "add")]
+        region: Option<String>,
         /// With `--add` or `--edit`: what it's sent, comma-separated (`deploy.failed,deploy.active`;
         /// default for a new one: what needs someone). A resolved alert goes to whoever gets the alert.
         #[arg(long, value_name = "EVENTS")]
@@ -999,6 +1026,29 @@ pub enum AppsCmd {
         /// adds this once, so it's for one removed before).
         #[arg(long, conflicts_with_all = ["add", "remove", "edit", "test", "deliveries"])]
         email: bool,
+    },
+    /// The project's status page: shown (its address and incidents); made or changed (`--title`,
+    /// `--item SERVICE/ENV/check:NAME` or `…/heartbeat:NAME`: every check and heartbeat without
+    /// one); taken down (`--delete`). An incident posted (`--incident TITLE --text …`) or updated
+    /// (`--update ID --state resolved --text …`).
+    StatusPage {
+        #[command(flatten)]
+        target: Target,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long = "item", value_name = "SERVICE/ENV/check:NAME")]
+        item: Vec<String>,
+        #[arg(long, conflicts_with_all = ["title", "item", "incident", "update"])]
+        delete: bool,
+        #[arg(long, value_name = "TITLE", conflicts_with_all = ["update", "title", "item"])]
+        incident: Option<String>,
+        #[arg(long, value_name = "ID", conflicts_with_all = ["title", "item"])]
+        update: Option<String>,
+        #[arg(long, value_parser = ["investigating", "identified", "monitoring", "resolved"])]
+        state: Option<String>,
+        /// What it says (public: the page and its feed show it).
+        #[arg(long)]
+        text: Option<String>,
     },
     /// The project's spend limits this month: show them, or set `--alert` and `--hard` (dollars;
     /// `0` removes one). At the hard limit its services stop until it's raised.
@@ -1106,8 +1156,9 @@ pub enum AppsCmd {
         #[arg(long)]
         no_rate_limit: bool,
         /// A firewall rule, in order (the first match decides): `deny /admin/*`,
-        /// `deny method=DELETE,PUT`, `allow /admin/health`, `deny ua=BadBot`. Repeatable; the
-        /// rules replace the ones it has.
+        /// `deny method=DELETE,PUT`, `allow /admin/health`, `deny ip=203.0.113.0/24`,
+        /// `deny header=X-Bot`, `deny cookie=beta:1`, `deny query=debug`, `deny ua=BadBot` (ua=
+        /// last). Repeatable; the rules replace the ones it has.
         #[arg(long = "firewall", value_name = "RULE", conflicts_with = "no_firewall")]
         firewall: Vec<String>,
         /// No firewall rules.
@@ -1138,6 +1189,19 @@ pub enum AppsCmd {
         /// Back to roll's pages.
         #[arg(long, conflicts_with_all = ["error_page", "maintenance_page"])]
         roll_pages: bool,
+        /// A deploy freeze, on until lifted (a reason optional): pushes and hooks build without
+        /// going live; a person's deploy needs `--override`. `--set 'freeze={…}'` for windows.
+        #[arg(long, value_name = "REASON", num_args = 0..=1, default_missing_value = "", conflicts_with = "unfreeze")]
+        freeze: Option<String>,
+        /// Lift its deploy freeze.
+        #[arg(long)]
+        unfreeze: bool,
+        /// Any setting the environment takes, as JSON (docs/apps/http-api.md): `--set
+        /// 'mirror={"environment":"staging","percent":5}'`, `--set
+        /// 'pause_schedule={"windows":[{"from":"fri 19:00","to":"mon 07:00"}]}'`, `--set
+        /// 'heartbeats=[{"name":"backup","every_s":86400}]'`, `--set checks=null`.
+        #[arg(long = "set", value_name = "FIELD=JSON")]
+        set: Vec<String>,
     },
     /// How this environment differs from another (Railway's environment sync): variables
     /// missing, extra or with another value (never a value), and settings; `--sync` makes it the
@@ -1189,6 +1253,12 @@ fn write_link(dir: &Path, v: &Value) -> anyhow::Result<()> {
 }
 
 /// The project id `p` names (an id, or a project's name).
+/// `api`, with `X-Roll-Override: 1` when `over`: a deploy past the environment's freeze, which
+/// needs admin (a deploy token can't).
+fn overriding(api: &Api, over: bool) -> Api {
+    api.with_header(over.then_some(("x-roll-override", "1")))
+}
+
 async fn project_id(api: &Api, p: &str) -> anyhow::Result<String> {
     if p.starts_with("prj_") {
         return Ok(p.to_string());
@@ -1931,6 +2001,9 @@ pub async fn up(api: &Api, json_out: bool, u: Up) -> anyhow::Result<()> {
     if u.no_cache {
         req = req.header("x-roll-no-cache", "1");
     }
+    if u.override_freeze {
+        req = req.header("x-roll-override", "1");
+    }
     // The message: the one given, else the checkout's last commit (said to have local changes
     // when the tree isn't clean), percent-encoded since a subject needn't be ASCII.
     let message = u.message.clone().or_else(|| git.as_ref().map(|(_, subject, dirty)| if *dirty { format!("{subject} (with local changes)") } else { subject.clone() }));
@@ -2240,6 +2313,9 @@ async fn up_all(api: &Api, json_out: bool, dir: &Path, u: &Up) -> anyhow::Result
                 if u.no_cache {
                     req = req.header("x-roll-no-cache", "1");
                 }
+                if u.override_freeze {
+                    req = req.header("x-roll-override", "1");
+                }
                 if let Some(m) = &u.message {
                     req = req.header("x-roll-message", urlencoding::encode(m).into_owned());
                 }
@@ -2305,7 +2381,7 @@ pub async fn deploy(api: &Api, json_out: bool, d: Deploy) -> anyhow::Result<()> 
         upload_image(api, &svc, &d).await?
     } else {
         let body = json!({ "revision": d.revision, "image": d.image, "no_traffic": d.no_traffic.then_some(true), "no_cache": d.no_cache.then_some(true) });
-        api.post(&format!("{}/deploys", env_path(&svc, &d.target.env)), body).await?
+        overriding(api, d.override_freeze).post(&format!("{}/deploys", env_path(&svc, &d.target.env)), body).await?
     };
     if json_out || d.detach {
         println!("{}", serde_json::to_string_pretty(&dep)?);
@@ -2331,6 +2407,9 @@ async fn upload_image(api: &Api, svc: &Value, d: &Deploy) -> anyhow::Result<Valu
     anyhow::ensure!(bytes.len() <= MAX, "the image is {} MiB: at most {} MiB goes up this way (push it to a registry and deploy it with --image)", bytes.len() >> 20, MAX >> 20);
     eprintln!("uploading {} MiB…", bytes.len() >> 20);
     let mut req = api.http.post(format!("{}{}/deploys", api.base, env_path(svc, &d.target.env))).header("content-type", "application/x-docker-image").body(bytes);
+    if d.override_freeze {
+        req = req.header("x-roll-override", "1");
+    }
     if let Some(k) = &api.key {
         req = req.bearer_auth(k);
     }
@@ -2606,7 +2685,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Set { target, name, repo, root, image, upload, builder, dockerfile, stage, install, build_command, build_start, health_timeout, health_every, health_failures, health_command, alert_memory, alert_errors, alert_p95, alert_log, alert_log_count, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, retries, volume, watch, packages, build_timeout, rollout, rollout_step, rollout_errors, rollout_manual, h2c, scale, public, drain, cpu_target, memory_target, restart, restart_tries, affinity, tcp, rollback_on_crash, rebuild_on_base } => {
+        AppsCmd::Set { target, name, repo, root, image, upload, builder, dockerfile, stage, install, build_command, build_start, health_timeout, health_every, health_failures, health_command, alert_memory, alert_errors, alert_p95, alert_log, alert_log_count, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, retries, volume, watch, packages, build_timeout, rollout, rollout_step, rollout_errors, rollout_manual, h2c, scale, public, drain, cpu_target, memory_target, restart, restart_tries, affinity, tcp, rollback_on_crash, rebuild_on_base, block_on } => {
             let svc = service(api, &target).await?;
             // The service's rollout with what was given replaced (the API takes it whole).
             let rollout = if rollout.is_some() || rollout_step.is_some() || rollout_errors.is_some() || rollout_manual.is_some() {
@@ -2754,6 +2833,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 ("tcp", tcp.map(Value::from)),
                 ("rollback_on_crash", rollback_on_crash.map(Value::from)),
                 ("rebuild_on_base", rebuild_on_base.map(Value::from)),
+                ("block_on", block_on.map(|b| if b == "none" { Value::Null } else { Value::from(b) })),
                 ("scale", match scale.as_deref() {
                     None => None,
                     Some("none") => Some(Value::Null),
@@ -3006,7 +3086,30 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             };
             api.post(&format!("/v1/apps/services/{}/restore", enc(&s(&d["id"]))), json!({})).await?
         }
-        AppsCmd::Deploys { target, commits: Some(dep) } => {
+        AppsCmd::Deploys { target, vulnerabilities: Some(dep), severity, .. } => {
+            let svc = service(api, &target).await?;
+            let q = severity.map(|s| format!("?severity={s}")).unwrap_or_default();
+            let v = api.get(&format!("{}/deploys/{}/vulnerabilities{q}", env_path(&svc, &target.env), enc(&dep))).await?;
+            if !json_out {
+                let sc = &v["scan"];
+                if sc.is_null() {
+                    println!("not scanned (this node's builder doesn't scan, or the scan hasn't finished)");
+                    return Ok(());
+                }
+                if let Some(e) = sc["error"].as_str() {
+                    println!("the scan didn't finish: {e}");
+                    return Ok(());
+                }
+                println!("{} critical, {} high, {} medium, {} low ({} with a fix; {})", sc["critical"], sc["high"], sc["medium"], sc["low"], sc["fixable"], s(&sc["scanner"]));
+                for x in v["vulnerabilities"].as_array().into_iter().flatten() {
+                    let fix = x["fixed"].as_str().map(|f| format!(" -> {f}")).unwrap_or_else(|| " (no fix yet)".into());
+                    println!("{:<9} {:<20} {} {}{fix}  [{}]", s(&x["severity"]), s(&x["id"]), s(&x["package"]), s(&x["installed"]), s(&x["target"]));
+                }
+                return Ok(());
+            }
+            v
+        }
+        AppsCmd::Deploys { target, commits: Some(dep), .. } => {
             let svc = service(api, &target).await?;
             let c = api.get(&format!("{}/deploys/{}/commits", env_path(&svc, &target.env), enc(&dep))).await?;
             if !json_out {
@@ -3126,7 +3229,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             json!({ "url": url })
         }
-        AppsCmd::Deploys { target, commits: None } => {
+        AppsCmd::Deploys { target, commits: None, .. } => {
             let svc = service(api, &target).await?;
             let v = api.get(&format!("{}/deploys", env_path(&svc, &target.env))).await?;
             if !json_out {
@@ -3136,7 +3239,12 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                     // A pruned one is history only (its image is gone): nothing to roll back to.
                     let status = if d["pruned_at"].is_i64() { "pruned".to_string() } else { s(&d["status"]) };
                     let age = d["created_at"].as_i64().map(|t| ago(chrono::Utc::now().timestamp_millis() - t)).unwrap_or_default();
-                    println!("{}  {status:<10} {:<8} {rev:<8} {age:>8}  {}{by}", s(&d["id"]), s(&d["trigger"]), s(&d["message"]));
+                    // Its scan's worst, when it has any.
+                    let vulns = match (d["vulnerabilities"]["critical"].as_u64(), d["vulnerabilities"]["high"].as_u64()) {
+                        (Some(c), Some(h)) if c + h > 0 => format!("  [{c} critical, {h} high]"),
+                        _ => String::new(),
+                    };
+                    println!("{}  {status:<10} {:<8} {rev:<8} {age:>8}  {}{by}{vulns}", s(&d["id"]), s(&d["trigger"]), s(&d["message"]));
                     if let Some(f) = d["fix"].as_str() {
                         println!("    fix: {f}");
                     }
@@ -3341,9 +3449,9 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             job
         }
-        AppsCmd::Redeploy { target } => {
+        AppsCmd::Redeploy { target, override_freeze } => {
             let svc = service(api, &target).await?;
-            let dep = api.post(&format!("{}/redeploy", env_path(&svc, &target.env)), json!({})).await?;
+            let dep = overriding(api, override_freeze).post(&format!("{}/redeploy", env_path(&svc, &target.env)), json!({})).await?;
             if !json_out {
                 return watch(api, &svc, &target.env, &dep).await;
             }
@@ -3357,14 +3465,14 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             dep
         }
-        AppsCmd::Rollback { deployment, target, keep_variables } => {
+        AppsCmd::Rollback { deployment, target, keep_variables, override_freeze } => {
             let svc = service(api, &target).await?;
             // No id: the server picks the one before what's live, walking back through rollbacks.
             let path = match &deployment {
                 Some(d) => format!("{}/deploys/{}/rollback", env_path(&svc, &target.env), enc(d)),
                 None => format!("{}/rollback", env_path(&svc, &target.env)),
             };
-            let dep = api.post(&path, json!({ "keep_variables": keep_variables })).await?;
+            let dep = overriding(api, override_freeze).post(&path, json!({ "keep_variables": keep_variables })).await?;
             if deployment.is_none() && !json_out {
                 eprintln!("rolling back to {}", s(&dep["rollback_of"]));
             }
@@ -3468,7 +3576,13 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             let a = api.get(&format!("{}/analytics?minutes={minutes}", env_path(&svc, &target.env))).await?;
             if !json_out {
                 println!("{} visitors, {} page views over {} minutes{}", a["visitors"], a["page_views"], a["minutes"], if a["cut"] == true { " (the newest requests read)" } else { "" });
-                for (title, list, key) in [("pages", &a["pages"], "path"), ("referrers", &a["referrers"], "host"), ("countries", &a["countries"], "country")] {
+                for (title, list, key) in [
+                    ("pages", &a["pages"], "path"),
+                    ("referrers", &a["referrers"], "host"),
+                    ("countries", &a["countries"], "country"),
+                    ("devices", &a["devices"]["classes"], "class"),
+                    ("browsers", &a["devices"]["browsers"], "browser"),
+                ] {
                     let rows = list.as_array().cloned().unwrap_or_default();
                     if rows.is_empty() {
                         continue;
@@ -3476,6 +3590,19 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                     println!("\n{title}");
                     for r in rows.iter().take(10) {
                         println!("  {:>7}  {}", r["views"], s(&r[key]));
+                    }
+                }
+                if let Some(rows) = a["campaigns"].as_array().filter(|r| !r.is_empty()) {
+                    println!("\ncampaigns (source / medium / campaign)");
+                    for r in rows.iter().take(10) {
+                        println!("  {:>7}  {} / {} / {}", r["views"], s(&r["source"]), s(&r["medium"]), s(&r["campaign"]));
+                    }
+                }
+                if let Some(rows) = a["events"].as_array().filter(|r| !r.is_empty()) {
+                    println!("\nevents");
+                    for r in rows.iter().take(10) {
+                        let props: Vec<String> = r["props"].as_object().into_iter().flatten().filter_map(|(k, v)| Some(format!("{k}: {}", s(&v.as_array()?.first()?["value"])))).collect();
+                        println!("  {:>7}  {}{}", r["count"], s(&r["name"]), if props.is_empty() { String::new() } else { format!("  ({})", props.join(", ")) });
                     }
                 }
                 return Ok(());
@@ -3908,7 +4035,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 v
             }
         }
-        AppsCmd::Notifications { target, add, kind, events, only_env, only_service, previews, every_env, every_service, remove, test, edit, deliveries, email } => {
+        AppsCmd::Notifications { target, add, kind, region, events, only_env, only_service, previews, every_env, every_service, remove, test, edit, deliveries, email } => {
             if add.is_none() && edit.is_none() && !email && (events.is_some() || !only_env.is_empty() || !only_service.is_empty() || previews.is_some()) {
                 bail!("--events, --only-env, --only-service and --previews go with --add, --email or --edit");
             }
@@ -3947,6 +4074,20 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 t
             } else if let Some(url) = add {
                 let mut body = json!({ "kind": kind, "url": url, "environments": only_env, "services": only_service, "previews": previews.unwrap_or(false) });
+                // An on-call service's key, not a URL.
+                if let Some(field) = match kind.as_str() {
+                    "pagerduty" => Some("routing_key"),
+                    "opsgenie" => Some("api_key"),
+                    _ => None,
+                } {
+                    let key = if url == "-" { secret_from_stdin("the integration's key")? } else { url.clone() };
+                    let o = body.as_object_mut().expect("object");
+                    o.remove("url");
+                    o.insert(field.into(), json!(key));
+                    if let Some(r) = &region {
+                        o.insert("region".into(), json!(r));
+                    }
+                }
                 if kind == "email" {
                     body.as_object_mut().expect("object").remove("url");
                 }
@@ -3999,6 +4140,61 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 v
             }
         }
+        AppsCmd::StatusPage { target, title, item, delete, incident, update, state, text } => {
+            let svc = service(api, &target).await?;
+            let path = format!("/v1/apps/projects/{}/status-page", enc(&s(&svc["project"])));
+            if delete {
+                api.call(reqwest::Method::DELETE, &path, None).await?;
+                json!({ "deleted": true })
+            } else if let Some(t) = incident {
+                let text = text.ok_or_else(|| anyhow::anyhow!("--incident takes --text: what the page says about it"))?;
+                let mut b = json!({ "title": t, "text": text });
+                if let Some(st) = state {
+                    b["state"] = json!(st);
+                }
+                api.post(&format!("{path}/incidents"), b).await?
+            } else if let Some(id) = update {
+                let (Some(st), Some(text)) = (state, text) else { bail!("--update takes --state and --text") };
+                api.post(&format!("{path}/incidents/{}/updates", enc(&id)), json!({ "state": st, "text": text })).await?;
+                json!({ "updated": id })
+            } else if title.is_some() || !item.is_empty() {
+                let mut b = serde_json::Map::new();
+                if let Some(t) = title {
+                    b.insert("title".into(), json!(t));
+                }
+                if !item.is_empty() {
+                    let mut items = Vec::new();
+                    for i in &item {
+                        let parts: Vec<&str> = i.splitn(3, '/').collect();
+                        let [svc_name, env, what] = parts[..] else { bail!("--item is SERVICE/ENV/check:NAME or SERVICE/ENV/heartbeat:NAME") };
+                        let id = service(api, &Target { service: Some(svc_name.to_string()), project: target.project.clone(), env: env.to_string() }).await?["id"].clone();
+                        match what.split_once(':') {
+                            Some(("check", n)) => items.push(json!({ "service": id, "environment": env, "check": n })),
+                            Some(("heartbeat", n)) => items.push(json!({ "service": id, "environment": env, "heartbeat": n })),
+                            _ => bail!("--item is SERVICE/ENV/check:NAME or SERVICE/ENV/heartbeat:NAME"),
+                        }
+                    }
+                    b.insert("items".into(), json!(items));
+                }
+                let p = api.call(reqwest::Method::PUT, &path, Some(Value::Object(b))).await?;
+                if !json_out {
+                    println!("{}", s(&p["url"]));
+                    return Ok(());
+                }
+                p
+            } else {
+                let p = api.get(&path).await?;
+                let inc = api.get(&format!("{path}/incidents")).await?;
+                if !json_out {
+                    println!("{}  {}", s(&p["title"]), s(&p["url"]));
+                    for i in inc["incidents"].as_array().into_iter().flatten() {
+                        println!("{}  {}  {}{}", s(&i["id"]), s(&i["state"]), s(&i["title"]), if i["automatic"] == true { "  (automatic)" } else { "" });
+                    }
+                    return Ok(());
+                }
+                json!({ "page": p, "incidents": inc["incidents"] })
+            }
+        }
         AppsCmd::Limits { target, alert, hard } => {
             let svc = service(api, &target).await?;
             let path = format!("/v1/apps/projects/{}/limits", enc(&s(&svc["project"])));
@@ -4037,10 +4233,20 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Env { target, all_services, branch, no_branch, variables_from, wait_for_ci, run, follow_tag, redeploy_on_secrets, vitals, egress, egress_host, private, open, signed_in, maintenance, serve, pause, resume, resume_deploys, hold, allow_ip, allow_any, rate_limit, no_rate_limit, firewall, no_firewall, header, no_headers, route, no_routes, error_page, maintenance_page, roll_pages } => {
+        AppsCmd::Env { target, all_services, branch, no_branch, variables_from, wait_for_ci, run, follow_tag, redeploy_on_secrets, vitals, egress, egress_host, private, open, signed_in, maintenance, serve, pause, resume, resume_deploys, hold, allow_ip, allow_any, rate_limit, no_rate_limit, firewall, no_firewall, header, no_headers, route, no_routes, error_page, maintenance_page, roll_pages, freeze, unfreeze, set } => {
             let svc = service(api, &target).await?;
             // Only what was asked changes: no `--branch` keeps the one it has.
             let mut body = serde_json::Map::new();
+            if let Some(reason) = freeze {
+                body.insert("freeze".into(), if reason.is_empty() { json!({}) } else { json!({ "reason": reason }) });
+            } else if unfreeze {
+                body.insert("freeze".into(), Value::Null);
+            }
+            for s in &set {
+                let (k, v) = s.split_once('=').ok_or_else(|| anyhow::anyhow!("--set is FIELD=JSON (--set 'mirror={{\"environment\":\"staging\",\"percent\":5}}')"))?;
+                let v: Value = serde_json::from_str(v).map_err(|e| anyhow::anyhow!("--set {k}: its value is JSON ({e}); a string is quoted: --set '{k}=\"…\"'"))?;
+                body.insert(k.trim().to_string(), v);
+            }
             if let Some(b) = branch {
                 body.insert("branch".into(), json!(b));
             } else if no_branch {
@@ -4267,10 +4473,18 @@ fn firewall_rule(line: &str) -> anyhow::Result<Value> {
             break;
         } else if let Some(m) = w.strip_prefix("method=") {
             rule["methods"] = json!(m.split(',').filter(|m| !m.is_empty()).collect::<Vec<_>>());
+        } else if let Some(ips) = w.strip_prefix("ip=") {
+            rule["ips"] = json!(ips.split(',').filter(|m| !m.is_empty()).collect::<Vec<_>>());
+        } else if let Some((k, v)) = ["header=", "cookie=", "query="].iter().find_map(|p| w.strip_prefix(p).map(|v| (p.trim_end_matches('='), v))) {
+            // `name[:contains]`: there, or there and holding that.
+            rule[k] = match v.split_once(':') {
+                Some((name, contains)) => json!({ "name": name, "contains": contains }),
+                None => json!({ "name": v }),
+            };
         } else if w.starts_with('/') {
             rule["path"] = json!(w);
         } else {
-            anyhow::bail!("{w:?} in {line:?}: a path (/…), method=…, or ua=…");
+            anyhow::bail!("{w:?} in {line:?}: a path (/…), method=…, ip=…, header=…, cookie=…, query=…, or ua=…");
         }
     }
     Ok(rule)

@@ -11,6 +11,10 @@ import { EnvironmentPanel, InstancesPanel } from "./environment";
 import { resourceKey } from "@/lib/workspace-resources";
 import { useWorkspace } from "@/lib/workspace-store";
 import { CPU, MEMORY, mb, type Runner } from "./shared";
+import { SidecarsPanel } from "./sidecars";
+import { ChecksPanel } from "./checks";
+import { HeartbeatsPanel } from "./heartbeats";
+import { SplitPanel } from "./split";
 
 
 /** The form's values, as text (empty: the default). */
@@ -46,6 +50,7 @@ interface Form {
   min: string;
   max: string;
   concurrency: string;
+  queue: string;
   cpu: number;
   memory: number;
   healthPath: string;
@@ -59,6 +64,13 @@ interface Form {
   alertMemory: string;
   alertErrors: string;
   alertP95: string;
+  sloObjective: string;
+  metricsPath: string;
+  /** `name: pattern`, one a line. */
+  logMetrics: string;
+  metricsPort: string;
+  sloLatency: string;
+  sloWindow: string;
   alertCapacity: string;
   alertLog: string;
   alertLogCount: string;
@@ -74,8 +86,11 @@ interface Form {
   tcp: boolean;
   rollbackOnCrash: boolean;
   rebuildOnBase: boolean;
+  skewProtection: boolean;
+  blockOn: "" | "critical" | "high" | "medium" | "low";
   scaleStream: string;
   scaleGroup: string;
+  scaleMetric: string;
   scalePer: string;
   suspendAfter: string;
   sleepAfter: string;
@@ -117,6 +132,7 @@ export function formOf(s: Service): Form {
     min: str(s.run.min_instances),
     max: str(s.run.max_instances),
     concurrency: str(s.run.concurrency),
+    queue: str(s.run.queue_s),
     cpu: s.run.cpu,
     memory: s.run.memory_mb,
     healthPath: str(s.run.health_path),
@@ -130,6 +146,12 @@ export function formOf(s: Service): Form {
     alertMemory: str(s.run.alerts?.memory_pct),
     alertErrors: str(s.run.alerts?.error_pct),
     alertP95: str(s.run.alerts?.p95_ms),
+    sloObjective: str(s.run.slo?.objective),
+    metricsPath: s.run.metrics ? (s.run.metrics.path ?? "/metrics") : "",
+    logMetrics: (s.run.log_metrics ?? []).map((m) => `${m.name}: ${m.pattern}`).join("\n"),
+    metricsPort: str(s.run.metrics?.port),
+    sloLatency: str(s.run.slo?.latency_ms),
+    sloWindow: str(s.run.slo?.window_days),
     alertCapacity: str(s.run.alerts?.capacity_pct),
     alertLog: s.run.alerts?.log_match ?? "",
     alertLogCount: str(s.run.alerts?.log_count ?? 10),
@@ -145,8 +167,11 @@ export function formOf(s: Service): Form {
     tcp: !!s.run.tcp,
     rollbackOnCrash: !!s.run.rollback_on_crash,
     rebuildOnBase: !!s.run.rebuild_on_base,
+    skewProtection: !!s.run.skew_protection,
+    blockOn: s.run.block_on ?? "",
     scaleStream: s.run.scale?.stream ?? "",
     scaleGroup: s.run.scale?.group ?? "",
+    scaleMetric: s.run.scale?.metric ?? "",
     scalePer: str(s.run.scale?.per_instance),
     suspendAfter: str(s.run.suspend_after_s),
     sleepAfter: str(s.run.sleep_after_s),
@@ -205,6 +230,7 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   if (f.min !== before.min) run.min_instances = num(f.min);
   if (f.max !== before.max) run.max_instances = num(f.max);
   if (f.concurrency !== before.concurrency) run.concurrency = num(f.concurrency);
+  if (f.queue !== before.queue) run.queue_s = num(f.queue);
   if (f.cpu !== before.cpu) run.cpu = f.cpu;
   if (f.memory !== before.memory) run.memory_mb = f.memory;
   if (f.healthPath !== before.healthPath) run.health_path = text(f.healthPath);
@@ -224,20 +250,29 @@ export function patchOf(s: Service, f: Form): ServicePatch {
       ...(f.alertLog.trim() ? { log_match: f.alertLog.trim() } : {}),
       log_count: Number(f.alertLogCount) || 10,
     };
+  if (f.logMetrics !== before.logMetrics) run.log_metrics = logMetrics(f.logMetrics);
+  if (f.metricsPath !== before.metricsPath || f.metricsPort !== before.metricsPort)
+    run.metrics = f.metricsPath.trim() ? { path: f.metricsPath.trim(), ...(num(f.metricsPort) ? { port: Number(f.metricsPort) } : {}) } : null;
+  if (f.sloObjective !== before.sloObjective || f.sloLatency !== before.sloLatency || f.sloWindow !== before.sloWindow)
+    run.slo = f.sloObjective.trim() ? { objective: Number(f.sloObjective), ...(num(f.sloLatency) ? { latency_ms: Number(f.sloLatency) } : {}), ...(num(f.sloWindow) ? { window_days: Number(f.sloWindow) } : {}) } : null;
   if (f.rolloutSteps !== before.rolloutSteps || f.rolloutStep !== before.rolloutStep || f.rolloutErrors !== before.rolloutErrors || f.rolloutManual !== before.rolloutManual)
-    run.rollout = { steps: rolloutSteps(f.rolloutSteps) ?? [], step_s: Number(f.rolloutStep) || 120, error_pct: Number(f.rolloutErrors) || 5, ...(f.rolloutManual ? { manual: true } : {}) };
+    run.rollout = { steps: rolloutSteps(f.rolloutSteps) ?? [], step_s: Number(f.rolloutStep) || 120, error_pct: Number(f.rolloutErrors) || 5, ...(f.rolloutManual ? { manual: true } : {}), ...(s.run.rollout?.slo_burn ? { slo_burn: s.run.rollout.slo_burn } : {}), ...(s.run.rollout?.p95_pct ? { p95_pct: s.run.rollout.p95_pct } : {}) };
   if (f.h2c !== before.h2c) run.h2c = f.h2c ? true : null;
   if (f.public !== before.public) run.public = f.public ? null : false;
   if (f.affinity !== before.affinity) run.affinity = f.affinity ? true : null;
   if (f.tcp !== before.tcp) run.tcp = f.tcp ? true : null;
   if (f.rollbackOnCrash !== before.rollbackOnCrash) run.rollback_on_crash = f.rollbackOnCrash ? true : null;
   if (f.rebuildOnBase !== before.rebuildOnBase) run.rebuild_on_base = f.rebuildOnBase ? true : null;
+  if (f.skewProtection !== before.skewProtection) run.skew_protection = f.skewProtection ? true : null;
+  if (f.blockOn !== before.blockOn) run.block_on = f.blockOn || null;
   if (f.restart !== before.restart || f.restartTries !== before.restartTries) {
     run.restart = f.restart === "always" ? null : f.restart;
     run.restart_tries = f.restart === "on_failure" ? num(f.restartTries) : null;
   }
-  if (f.scaleStream !== before.scaleStream || f.scaleGroup !== before.scaleGroup || f.scalePer !== before.scalePer)
-    run.scale = f.scaleStream && f.scaleGroup.trim() ? { stream: f.scaleStream, group: f.scaleGroup.trim(), ...(f.scalePer.trim() ? { per_instance: Number(f.scalePer) } : {}) } : null;
+  if (f.scaleStream !== before.scaleStream || f.scaleGroup !== before.scaleGroup || f.scalePer !== before.scalePer || f.scaleMetric !== before.scaleMetric) {
+    const per = f.scalePer.trim() ? { per_instance: Number(f.scalePer) } : {};
+    run.scale = f.scaleMetric.trim() ? { metric: f.scaleMetric.trim(), ...per } : f.scaleStream && f.scaleGroup.trim() ? { stream: f.scaleStream, group: f.scaleGroup.trim(), ...per } : null;
+  }
   if (f.suspendAfter !== before.suspendAfter) run.suspend_after_s = num(f.suspendAfter);
   if (f.sleepAfter !== before.sleepAfter) run.sleep_after_s = num(f.sleepAfter);
   if (f.volumeMount !== before.volumeMount || f.volumeSize !== before.volumeSize || f.backupEvery !== before.backupEvery || f.backupKeep !== before.backupKeep) {
@@ -249,7 +284,19 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   return patch;
 }
 
-const NUMERIC: (keyof Form)[] = ["scalePer", "port", "timeout", "retries", "min", "max", "concurrency", "healthTimeout", "healthEvery", "healthFailures", "drain", "cpuTarget", "memoryTarget", "suspendAfter", "sleepAfter", "volumeSize", "backupEvery", "backupKeep", "alertMemory", "alertErrors", "alertP95", "alertCapacity", "alertLogCount", "rolloutStep", "rolloutErrors", "restartTries"];
+/** `name: pattern` lines as `run.log_metrics` (a line with no name is its own pattern's). */
+export function logMetrics(text: string): { name: string; pattern: string }[] {
+  return text
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .map((l) => {
+      const at = l.indexOf(":");
+      return at > 0 ? { name: l.slice(0, at).trim(), pattern: l.slice(at + 1).trim() } : { name: l.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, ""), pattern: l };
+    });
+}
+
+const NUMERIC: (keyof Form)[] = ["scalePer", "port", "timeout", "retries", "min", "max", "concurrency", "queue", "healthTimeout", "healthEvery", "healthFailures", "drain", "cpuTarget", "memoryTarget", "suspendAfter", "sleepAfter", "volumeSize", "backupEvery", "backupKeep", "alertMemory", "alertErrors", "alertP95", "sloObjective", "sloLatency", "sloWindow", "metricsPort", "alertCapacity", "alertLogCount", "rolloutStep", "rolloutErrors", "restartTries"];
 
 /** A rollout's steps as typed (`10, 50`): increasing percents 1–99, at most five; null when they aren't. */
 export function rolloutSteps(v: string): number[] | null {
@@ -303,6 +350,7 @@ export function SettingsTab({
     ...(form.type !== "cron" ? ([["scaling", "Scaling"]] as [string, string][]) : []),
     ["health", "Health and alerts"],
     ...(web ? ([["networking", "Networking"], ["rollout", "Rollout"]] as [string, string][]) : []),
+    ...(form.type !== "cron" ? ([["sidecars", "Sidecars"]] as [string, string][]) : []),
     ...(env ? ([["environment", "Environment"]] as [string, string][]) : []),
   ];
   const project: [string, string][] = [["project", "Notifications and limits"]];
@@ -521,6 +569,9 @@ export function SettingsTab({
                   <Field label="Concurrency" hint="requests in flight per instance">
                     {t("concurrency", "50")}
                   </Field>
+                  <Field label="Queue at the limit (s)" hint="all at max and busy: wait this long, then 429; empty: past concurrency">
+                    {t("queue", "")}
+                  </Field>
                   <Field label="CPU target (%)" hint="another instance while they average over it for a minute; empty: requests only">
                     {t("cpuTarget", "70")}
                   </Field>
@@ -547,11 +598,16 @@ export function SettingsTab({
                       ))}
                     </select>
                   </Field>
-                  {form.scaleStream && (
+                  {!form.scaleStream && (
+                    <Field label="Or follow its own gauge" hint="a metric it reports (Prometheus or OpenTelemetry): a queue's depth, jobs in flight">
+                      {t("scaleMetric", "queue_depth")}
+                    </Field>
+                  )}
+                  {(form.scaleStream || form.scaleMetric.trim()) && (
                     <>
-                      <Field label="Consumer group">{t("scaleGroup", "billing")}</Field>
-                      <Field label="Messages per instance" hint="behind, before another starts">
-                        {t("scalePer", "1000")}
+                      {form.scaleStream && <Field label="Consumer group">{t("scaleGroup", "billing")}</Field>}
+                      <Field label={form.scaleStream ? "Messages per instance" : "Per instance"} hint={form.scaleStream ? "behind, before another starts" : "of the gauge, before another starts"}>
+                        {t("scalePer", form.scaleStream ? "1000" : "10")}
                       </Field>
                     </>
                   )}
@@ -594,6 +650,30 @@ export function SettingsTab({
                 <Field label="Alert: p95 latency (ms)" hint="in three of five minutes; 0 off">
                   {t("alertP95", "0")}
                 </Field>
+                <Field label="Metrics from its log" hint="name: pattern, one a line; each minute, the lines holding it (any case) as a gauge">
+                  <textarea value={form.logMetrics} onChange={(e) => set("logMetrics", e.target.value)} rows={2} placeholder="payments_failed: payment failed" className={`${input} w-full font-mono text-[12px]`} spellCheck={false} />
+                </Field>
+                <Field label="Metrics endpoint" hint="its Prometheus path, scraped every 15 s while it runs; empty: none">
+                  {t("metricsPath", "/metrics")}
+                </Field>
+                {form.metricsPath.trim() && (
+                  <Field label="Metrics port" hint="empty: its own port">
+                    {t("metricsPort", "9091")}
+                  </Field>
+                )}
+                <Field label="Objective (%)" hint="of requests not 5xx, e.g. 99.9; alerts when its error budget burns fast; empty: none">
+                  {t("sloObjective", "99.9")}
+                </Field>
+                {form.sloObjective.trim() && (
+                  <>
+                    <Field label="Objective: p95 under (ms)" hint="the same share of minutes; empty: requests only">
+                      {t("sloLatency", "300")}
+                    </Field>
+                    <Field label="Objective: window (days)" hint="1–60; empty: 28">
+                      {t("sloWindow", "28")}
+                    </Field>
+                  </>
+                )}
                 <Field label="Alert: over capacity (%)" hint="of five minutes' requests finding every instance busy at max instances; 0 off">
                   {t("alertCapacity", "10")}
                 </Field>
@@ -608,6 +688,14 @@ export function SettingsTab({
                 <option value="back">Rolls back to the one before</option>
               </select>
             </Field>
+            {web && (
+              <Field label="A page loaded before a deploy" hint="its requests name their deployment: x-deployment-id, ?dpl=, or the cookie roll sets">
+                <select value={form.skewProtection ? "keep" : "live"} onChange={(e) => set("skewProtection", e.target.value === "keep")} className={`${input} w-full`}>
+                  <option value="live">Talks to what's live</option>
+                  <option value="keep">Keeps its deployment for a day (skew protection)</option>
+                </select>
+              </Field>
+            )}
             {service.source.kind !== "image" && (
               <Field label="When a base image is updated" hint="its registry moves the tag it builds on (a security fix)">
                 <select value={form.rebuildOnBase ? "build" : "say"} onChange={(e) => set("rebuildOnBase", e.target.value === "build")} className={`${input} w-full`}>
@@ -616,6 +704,13 @@ export function SettingsTab({
                 </select>
               </Field>
             )}
+            <Field label="Known vulnerabilities" hint="its image is scanned each deploy and daily; a hold scans before it goes live">
+              <select value={form.blockOn} onChange={(e) => set("blockOn", e.target.value as Form["blockOn"])} className={`${input} w-full`}>
+                <option value="">Never hold a deploy</option>
+                <option value="critical">Hold a deploy with a critical one</option>
+                <option value="high">Hold one with a high or critical</option>
+              </select>
+            </Field>
             <Field label="Alert: its log says" hint="text in its output (any case); empty: off">
               {t("alertLog", "panic")}
             </Field>
@@ -658,6 +753,7 @@ export function SettingsTab({
                 {t("timeout", "300")}
               </Field>
             </Grid>
+            {env && <CachePurge service={service.id} env={env.name} runner={runner} />}
           </Section>
         )}
 
@@ -719,10 +815,19 @@ export function SettingsTab({
           </button>
         </div>
 
+        {service.run.type !== "cron" && (
+          <Anchor id="sidecars">
+            <SidecarsPanel service={service} runner={runner} />
+          </Anchor>
+        )}
+
         {env && (
           <Anchor id="environment" className="space-y-6">
             <InstancesPanel service={service} env={env} runner={runner} />
             <EnvironmentPanel key={env.name} service={service} env={env} runner={runner} onDeleted={onEnvDeleted} />
+            {service.run.type === "web" && <ChecksPanel service={service.id} env={env} runner={runner} />}
+            <HeartbeatsPanel service={service.id} env={env} runner={runner} />
+            {service.run.type === "web" && <SplitPanel key={env.name} service={service.id} env={env} others={service.environments.map((e) => e.name).filter((n) => n !== env.name)} runner={runner} />}
           </Anchor>
         )}
 
@@ -775,6 +880,31 @@ export function SettingsTab({
 }
 
 /** A settings section the nav can scroll to. */
+/** Drops the answers roll keeps for the app (`…/cache/purge`, `roll apps purge`): some paths,
+ *  some tags, or all of them. */
+function CachePurge({ service, env, runner }: { service: string; env: string; runner: Runner }) {
+  const [what, setWhat] = useState("");
+  const [said, setSaid] = useState<string | null>(null);
+  const words = what.split(/[\s,]+/).filter(Boolean);
+  const body = { paths: words.filter((w) => w.startsWith("/")), tags: words.filter((w) => !w.startsWith("/")) };
+  const purge = () =>
+    void runner.run("purge", async () => {
+      const r = await appsApi.purgeCache(service, env, { ...(body.paths.length ? { paths: body.paths } : {}), ...(body.tags.length ? { tags: body.tags } : {}) });
+      setSaid(`${r.purged} kept answer${r.purged === 1 ? "" : "s"} dropped.`);
+    });
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-3 border-t border-line px-5 py-4">
+      <p className="text-[13px] text-muted">{said ?? "Answers it marks cacheable (s-maxage) are kept and answered by roll. Drop some paths (/blog/* a prefix), some tags, or all of them."}</p>
+      <span className="flex items-center gap-2">
+        <input value={what} onChange={(e) => setWhat(e.target.value)} aria-label="Paths or tags to purge" placeholder="/blog/* product-42" className={`${input} !w-56 font-mono text-[12px]`} spellCheck={false} />
+        <button type="button" className={btn} disabled={runner.busy !== null} onClick={purge}>
+          {words.length ? "Purge these" : "Purge everything"}
+        </button>
+      </span>
+    </div>
+  );
+}
+
 function Anchor({ id, className, children }: { id: string; className?: string; children: ReactNode }) {
   return (
     <div id={`settings-${id}`} className={`scroll-mt-16 ${className ?? ""}`}>

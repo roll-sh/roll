@@ -526,7 +526,7 @@ async fn unacked_messages_are_requeued_on_disconnect() {
 async fn permissions_are_checked() {
     let h = Harness::start().await;
     h.broker.put_user(User::new("limited", "pw", vec![])).await.unwrap();
-    h.broker.set_permission("/", "limited", Permission { configure: "^own\\.".into(), write: "^(own\\..*|amq\\.topic|)$".into(), read: "^own\\.".into() }).await.unwrap();
+    h.broker.set_permission("/", "limited", Permission { configure: "^own\\.".into(), write: "^(own\\..*|amq\\.topic|amq\\.default)$".into(), read: "^own\\.".into() }).await.unwrap();
     let mut c = Client::raw_connect(h.addr).await;
     let f = c.login(&[("accept-version", "1.2"), ("login", "limited"), ("passcode", "pw")]).await;
     assert_eq!(f.command, "CONNECTED");

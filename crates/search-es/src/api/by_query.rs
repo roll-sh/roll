@@ -166,6 +166,7 @@ pub fn scan(
     let st = cluster.state();
     let req = crate::search::SearchRequest {
         slowlog: Default::default(),
+        partial_aggs: false,
         indices: indices.to_vec(),
         opts: ctx.indices_options(crate::meta::resolve::IndicesOptions::STRICT_EXPAND_OPEN_FORBID_CLOSED)?,
         source: crate::search_source::SearchSource { query: query.cloned(), ..Default::default() },
@@ -230,7 +231,7 @@ fn scan_shard(
     t.shard.before_search(crate::engine::IndexEngine::refresh_interval(&t.idx))?;
     let searcher = t.shard.searcher();
     let table = t.table();
-    let qctx = QueryCtx::new(cluster, st, &t.idx, &table, &searcher, ctx.now_ms);
+    let qctx = QueryCtx::new(cluster, st, &t.idx, &table, &searcher, ctx.now_ms, t.reader());
     use crate::search::query::arc;
     let mut q = match query {
         Some(q) => qctx.to_filter(q).map_err(|e| crate::search::query::shard_exception(&t.idx, e))?,

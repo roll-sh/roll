@@ -138,6 +138,7 @@ fn postgres() -> Router {
         .route("/v1/apps/services/{id}", axum::routing::patch(|| async { axum::Json(json!({ "ok": true })) }))
         .route("/v1/apps/services/{id}/links/{kind}/{ref}", axum::routing::put(|| async { axum::Json(json!({ "ok": true })) }))
         .route("/v1/apps/services/{id}/environments/{env}", axum::routing::put(|| async { axum::Json(json!({ "ok": true })) }))
+        .route("/v1/apps/services/{id}/environments/{env}/redeploy", post(|| async { axum::Json(json!({ "ok": true })) }))
         .route("/v1/search/clusters/{id}/indices/{index}/search", post(|| async { axum::Json(json!({ "hits": [] })) }))
         .route("/v1/search/clusters", post(|| async { axum::Json(json!({ "id": "cl_new", "password": "fresh" })) }))
         .route("/v1/search/clusters/{id}/indices", get(|| async { axum::Json(json!([])) }))
@@ -565,6 +566,31 @@ async fn ask_waits_for_a_person() {
     assert_eq!(s, StatusCode::OK);
     let again = d.send(&token, Method::DELETE, "/v1/projects/pc", None, &[("x-roll-approval", &id)]).await;
     assert_eq!(again.1["code"], "approval_used");
+}
+
+/// A deploy past a freeze (`X-Roll-Override: 1`) is admin, and a deploy's approval is never one
+/// for the same request with the override: it's another request, asked about on its own.
+#[tokio::test]
+async fn an_approved_deploy_is_no_approval_past_a_freeze() {
+    let d = Daemon::new(50);
+    let (token, _) = d.token(json!([{ "product": "apps", "resources": "*", "actions": { "deploy": "ask", "admin": "ask" } }]), json!({})).await;
+    let path = "/v1/apps/services/svc_a/environments/production/redeploy";
+    let (s, out) = d.call(&token, Method::POST, path, Some(json!({}))).await;
+    assert_eq!((s, out["code"].as_str()), (StatusCode::FORBIDDEN, Some("approval_pending")), "{out}");
+    let id = out["approval"].as_str().unwrap().to_string();
+    let (_, list) = d.call(OPERATOR, Method::GET, "/v1/access/approvals?state=pending", None).await;
+    assert_eq!(list[0]["action"], "deploy", "{list}");
+    assert_eq!(d.call(OPERATOR, Method::POST, &format!("/v1/access/approvals/{id}/approve"), None).await.0, StatusCode::OK);
+    // The same request with the override: not what was approved.
+    let over = d.send(&token, Method::POST, path, Some(json!({})), &[("x-roll-approval", &id), ("x-roll-override", "1")]).await;
+    assert_eq!(over.1["code"], "approval_mismatch", "{over:?}");
+    // Asked on its own, it's about admin.
+    let (s, out) = d.send(&token, Method::POST, path, Some(json!({})), &[("x-roll-override", "1")]).await;
+    assert_eq!((s, out["code"].as_str()), (StatusCode::FORBIDDEN, Some("approval_pending")), "{out}");
+    let (_, list) = d.call(OPERATOR, Method::GET, "/v1/access/approvals?state=pending", None).await;
+    assert!(list.as_array().unwrap().iter().any(|a| a["action"] == "admin"), "{list}");
+    // The approved request itself still runs once.
+    assert_eq!(d.send(&token, Method::POST, path, Some(json!({})), &[("x-roll-approval", &id)]).await.0, StatusCode::OK);
 }
 
 /// A token allowed to manage access makes only tokens it covers, for no longer than it lives;

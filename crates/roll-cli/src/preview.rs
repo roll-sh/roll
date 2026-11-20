@@ -235,6 +235,18 @@ pub enum Preview {
     /// What a preview's running services use right now: cores of CPU, resident memory against
     /// what each runs with.
     Metrics { preview: String },
+    /// Its recent traces (the project's `traces: true`: its services' OpenTelemetry spans),
+    /// newest first; `--trace <id>` one trace's spans.
+    Traces {
+        preview: String,
+        #[arg(long, default_value_t = 60)]
+        minutes: u32,
+        #[arg(long)]
+        trace: Option<String>,
+        /// Each route's time (p50, p95) against main's preview's same route, the slower ones first.
+        #[arg(long, conflicts_with = "trace")]
+        routes: bool,
+    },
     /// A project's deploy hooks (a secret URL a headless CMS calls on publish to build the
     /// previews of some branches again): lists them; `--add NAME` makes one (its URL printed
     /// once), `--rm HOOK` deletes one.
@@ -539,7 +551,37 @@ impl Working {
             env.push((format!("GIT_CONFIG_VALUE_{i}"), (*v).into()));
         }
         let env: Vec<(&str, std::ffi::OsString)> = env.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
-        git(dir, &["push", "--quiet", &self.clone_url, refspec], &env).map(|_| ()).map_err(|e| anyhow::anyhow!("pushing {} to {}: {e:#}", self.branch, self.clone_url))
+        // A push to a URL updates the remote-tracking ref of any configured remote with that URL
+        // (newer git does; older didn't). Those refs are the user's: what the push made goes, what it
+        // moved goes back.
+        let tracking = |d: &std::path::Path| -> std::collections::HashMap<String, String> {
+            git(d, &["for-each-ref", "--format=%(refname) %(objectname)", "refs/remotes"], &[])
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|l| l.split_once(' '))
+                .filter(|(r, _)| r.rsplit_once(&format!("/{}", self.branch)).is_some_and(|(_, rest)| rest.is_empty()))
+                .map(|(r, o)| (r.to_string(), o.to_string()))
+                .collect()
+        };
+        let before = tracking(dir);
+        let pushed = git(dir, &["push", "--quiet", &self.clone_url, refspec], &env).map(|_| ()).map_err(|e| anyhow::anyhow!("pushing {} to {}: {e:#}", self.branch, self.clone_url));
+        let after = tracking(dir);
+        // One the push removed (a delete's) is put back too.
+        for (r, was) in before.iter().filter(|(r, _)| !after.contains_key(*r)) {
+            let _ = git(dir, &["update-ref", r, was], &[]);
+        }
+        for (r, now) in after {
+            match before.get(&r) {
+                None => {
+                    let _ = git(dir, &["update-ref", "-d", &r, &now], &[]);
+                }
+                Some(was) if *was != now => {
+                    let _ = git(dir, &["update-ref", &r, was, &now], &[]);
+                }
+                Some(_) => {}
+            }
+        }
+        pushed
     }
 }
 
@@ -1057,7 +1099,12 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
                                         eprintln!("following {data} (ctrl-c to stop)");
                                     }
                                 } else if !(std::mem::take(&mut fresh) && last.as_deref() == Some(data.as_str())) {
-                                    println!("{data}");
+                                    // The service's stderr to ours, its stdout to ours.
+                                    if event == "stderr" {
+                                        eprintln!("{data}");
+                                    } else {
+                                        println!("{data}");
+                                    }
                                     last = Some(data);
                                 }
                             } else if line.is_empty() {
@@ -1201,12 +1248,65 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
                 }
                 for g in groups {
                     println!("{:>5}x  {:>8}  {:<12} {}", g["count"], ago(g["last_seen"].as_i64().unwrap_or(0) / 1000), s(&g["service"]), s(&g["title"]));
+                    // Its request's trace: `roll preview traces --trace <id>` opens it.
+                    if let Some(t) = g["trace"].as_str() {
+                        println!("{:>17}trace {t}", "");
+                    }
                 }
                 return Ok(());
             }
             v
         }
 
+        Preview::Traces { preview, minutes, trace, routes } => {
+            if routes {
+                let v = api.get(&format!("/v1/previews/{preview}/routes?minutes={minutes}")).await?;
+                if !as_json {
+                    let list = v["routes"].as_array().cloned().unwrap_or_default();
+                    if list.is_empty() {
+                        println!("no traces in the last {} minutes", v["minutes"].as_u64().unwrap_or(minutes as u64));
+                    }
+                    for r in list {
+                        let main = r["main_p50_ms"].as_u64().map_or_else(|| "main —".to_string(), |m| format!("main {m} ms"));
+                        let mark = if r["slower"].as_bool() == Some(true) { "slower" } else { "" };
+                        println!("{:>5}x  p50 {:>6} ms  p95 {:>6} ms  {:<14} {:<6} {}", r["count"], r["p50_ms"], r["p95_ms"], main, mark, s(&r["name"]));
+                        // An N+1: the statement a trace of it runs most.
+                        if let Some(q) = r["repeated"]["statement"].as_str() {
+                            println!("{:>8}N+1: {}x {q}", "", r["repeated"]["count"]);
+                        }
+                    }
+                    return Ok(());
+                }
+                v
+            } else if let Some(t) = trace {
+                let v = api.get(&format!("/v1/previews/{preview}/traces/{t}")).await?;
+                if !as_json {
+                    let spans = v["spans"].as_array().cloned().unwrap_or_default();
+                    let t0 = spans.iter().filter_map(|s| s["start"].as_u64()).min().unwrap_or(0);
+                    for sp in spans {
+                        let (start, end) = (sp["start"].as_u64().unwrap_or(0), sp["end"].as_u64().unwrap_or(0));
+                        let mark = if sp["error"].as_bool() == Some(true) { "!" } else { " " };
+                        println!("{mark} +{:>6} ms {:>6} ms  {:<12} {}", start.saturating_sub(t0) / 1_000_000, end.saturating_sub(start) / 1_000_000, s(&sp["service"]), s(&sp["name"]));
+                    }
+                    return Ok(());
+                }
+                v
+            } else {
+                let v = api.get(&format!("/v1/previews/{preview}/traces?minutes={minutes}")).await?;
+                if !as_json {
+                    let traces = v["traces"].as_array().cloned().unwrap_or_default();
+                    if traces.is_empty() {
+                        println!("no traces in the last {} minutes (the project's `traces` setting turns them on)", v["minutes"].as_u64().unwrap_or(minutes as u64));
+                    }
+                    for t in traces {
+                        let mark = if t["error"].as_bool() == Some(true) { "!" } else { " " };
+                        println!("{mark} {:>8}  {:>6} ms  {:>3} spans  {:<12} {}  {}", ago(t["start_ms"].as_i64().unwrap_or(0) / 1000), t["ms"], t["spans"], s(&t["service"]), s(&t["name"]), s(&t["trace"]));
+                    }
+                    return Ok(());
+                }
+                v
+            }
+        }
         Preview::Shell { preview, service } => return shell(api, &preview, service.as_deref()).await,
         Preview::Forward { preview, port, service, local_port } => {
             let local = local_port.unwrap_or(port);

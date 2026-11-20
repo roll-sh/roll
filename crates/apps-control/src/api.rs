@@ -68,6 +68,9 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route("/v1/apps/projects/{project}/limits", get(limits).put(set_limits))
         .route("/v1/apps/projects/{project}/drains", get(drains).post(add_drain))
         .route("/v1/apps/projects/{project}/export", post(export_project))
+        .route("/v1/apps/projects/{project}/status-page", get(status_page).put(put_status_page).delete(delete_status_page))
+        .route("/v1/apps/projects/{project}/status-page/incidents", get(status_incidents).post(post_status_incident))
+        .route("/v1/apps/projects/{project}/status-page/incidents/{iid}/updates", post(update_status_incident))
         .route("/v1/apps/projects/{project}/preview-domain", get(preview_domain).post(set_preview_domain).delete(delete_preview_domain))
         .route("/v1/apps/projects/{project}/preview-domain/verify", post(verify_preview_domain))
         .route("/v1/apps/projects/{project}/drains/{did}", axum::routing::delete(delete_drain).patch(update_drain))
@@ -84,6 +87,8 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/deploys/{{dep}}"), get(get_deploy))
         .route(&format!("{env}/deploys/{{dep}}/logs"), get(deploy_logs))
         .route(&format!("{env}/deploys/{{dep}}/commits"), get(deploy_commits))
+        .route(&format!("{env}/deploys/{{dep}}/vulnerabilities"), get(deploy_vulnerabilities))
+        .route(&format!("{env}/deploys/{{dep}}/sbom"), get(deploy_sbom))
         .route(&format!("{env}/deploys/{{dep}}/rollback"), post(rollback))
         .route(&format!("{env}/deploys/{{dep}}/rollout"), post(rollout_action))
         .route(&format!("{env}/rollback"), post(rollback_previous))
@@ -105,12 +110,16 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/variables/values"), get(reveal))
         .route(&format!("{env}/logs"), get(env_logs))
         .route(&format!("{env}/metrics"), get(metrics))
+        .route(&format!("{env}/slo"), get(slo))
         .route(&format!("{env}/routes"), get(routes))
         .route(&format!("{env}/analytics"), get(analytics))
         .route(&format!("{env}/visit"), post(visit))
         .route(&format!("{env}/vitals"), get(vitals))
         .route(&format!("{env}/app-metrics"), get(app_metrics))
         .route(&format!("{env}/errors"), get(errors))
+        .route(&format!("{env}/forms"), get(forms))
+        .route(&format!("{env}/forms/{{form}}/submissions"), get(form_submissions))
+        .route(&format!("{env}/forms/{{form}}/submissions/{{sub}}"), axum::routing::delete(delete_form_submission))
         .route(&format!("{env}/traces"), get(traces))
         .route(&format!("{env}/traces/{{trace}}"), get(trace))
         .route(&format!("{env}/usage"), get(usage))
@@ -146,12 +155,15 @@ pub fn router(apps: Arc<Apps>) -> Router {
 
 /// Run a service's route on its owner.
 async fn on_owner(State(apps): S, req: Request, next: Next) -> Response {
-    let Some(id) = req.uri().path().strip_prefix("/v1/apps/services/").map(|r| r.split('/').next().unwrap_or("").to_string()) else {
+    let Some(raw) = req.uri().path().strip_prefix("/v1/apps/services/").map(|r| r.split('/').next().unwrap_or("").to_string()) else {
         return next.run(req).await;
     };
+    // The id as the handlers read it: `svc%5Fx` (a client may encode `_`) is `svc_x`, so one
+    // service has one lease and one owner, however its id was spelled.
+    let id = percent_encoding::percent_decode_str(&raw).decode_utf8_lossy().into_owned();
     // A deleted service is no service but to restore it or delete it for good.
-    let root = req.uri().path().trim_end_matches('/') == format!("/v1/apps/services/{id}");
-    let keeps = (root && req.method() == axum::http::Method::DELETE) || req.uri().path() == format!("/v1/apps/services/{id}/restore");
+    let root = req.uri().path().trim_end_matches('/') == format!("/v1/apps/services/{raw}");
+    let keeps = (root && req.method() == axum::http::Method::DELETE) || req.uri().path() == format!("/v1/apps/services/{raw}/restore");
     if !keeps {
         let sid = id.clone();
         if let Ok((_, Some(_))) = apps.db(move |s| s.service_any(&sid)).await {
@@ -160,6 +172,32 @@ async fn on_owner(State(apps): S, req: Request, next: Next) -> Response {
     }
     let cluster = apps.deps.cluster.clone();
     cluster.dispatch(&lease_key(&id), req, |req, _guard| next.run(req)).await
+}
+
+async fn status_page(State(apps): S, Path(project): Path<String>) -> R {
+    ok(apps.get_status_page(&project).await?)
+}
+
+async fn put_status_page(State(apps): S, Path(project): Path<String>, b: Bytes) -> R {
+    ok(apps.put_status_page(&project, body(&b)?).await?)
+}
+
+async fn status_incidents(State(apps): S, Path(project): Path<String>) -> R {
+    ok(apps.incidents(&project).await?)
+}
+
+async fn post_status_incident(State(apps): S, Path(project): Path<String>, b: Bytes) -> R {
+    Ok((StatusCode::CREATED, Json(apps.post_incident(&project, body(&b)?).await?)).into_response())
+}
+
+async fn update_status_incident(State(apps): S, Path((project, iid)): Path<(String, String)>, b: Bytes) -> R {
+    apps.update_incident(&project, &iid, body(&b)?).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+async fn delete_status_page(State(apps): S, Path(project): Path<String>) -> R {
+    apps.delete_status_page(&project).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 async fn preview_domain(State(apps): S, Path(project): Path<String>) -> R {
@@ -697,6 +735,21 @@ async fn deploys(State(apps): S, Path((id, env)): Path<(String, String)>, Query(
     ok(apps.deployments(&id, &env, q.before).await?)
 }
 
+/// A person's deploy past a freeze: `X-Roll-Override: 1`, which roll-access makes `admin`
+/// (a deploy token can't go past a freeze the team set). The body's `override` is refused, so
+/// no caller says it where the gate doesn't read.
+fn with_override(mut b: Value, headers: &HeaderMap) -> crate::Result<Value> {
+    if b.get("override").is_some() {
+        return Err(Error::BadRequest("a freeze's override is the header X-Roll-Override: 1 (admin), not a body field".into()));
+    }
+    if headers.get("x-roll-override").is_some_and(|v| v == "1")
+        && let Some(o) = b.as_object_mut()
+    {
+        o.insert("override".into(), Value::Bool(true));
+    }
+    Ok(b)
+}
+
 /// JSON (`NewDeploy`), or a gzipped tar of the tree (`roll up`).
 async fn create_deploy(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, headers: HeaderMap, b: Bytes) -> R {
     let actor = actor(&ext);
@@ -705,18 +758,20 @@ async fn create_deploy(State(apps): S, Path((id, env)): Path<(String, String)>, 
         Some(v) => Some(v.to_str().map_err(|_| Error::BadRequest("Idempotency-Key is printable ASCII".into()))?),
         None => None,
     };
+    // A freeze's override is always the header (roll-access makes it admin); never the body.
+    let over = headers.get("x-roll-override").is_some_and(|v| v == "1");
     let d = if ct.starts_with("application/gzip") || ct.starts_with("application/x-gzip") {
         // Percent-encoded UTF-8 (a commit subject isn't ASCII): `roll up` sends it so.
         let message = headers.get("x-roll-message").and_then(|v| v.to_str().ok()).map(|m| percent_encoding::percent_decode_str(m).decode_utf8_lossy().into_owned()).unwrap_or_default();
         let revision = headers.get("x-roll-revision").and_then(|v| v.to_str().ok()).filter(|r| (7..=64).contains(&r.len()) && r.bytes().all(|b| b.is_ascii_hexdigit()));
         let no_cache = headers.get("x-roll-no-cache").is_some_and(|v| v == "1");
-        apps.deploy(&id, &env, json!({ "message": message, "revision": revision, "no_cache": no_cache }), By { trigger: Trigger::Upload, actor }, Some(b), key).await?
+        apps.deploy(&id, &env, json!({ "message": message, "revision": revision, "no_cache": no_cache, "override": over }), By { trigger: Trigger::Upload, actor }, Some(b), key).await?
     } else if ct.starts_with("application/x-docker-image") {
         // An image built elsewhere (`docker save`'s archive, `roll apps deploy --image-file`).
         let message = headers.get("x-roll-message").and_then(|v| v.to_str().ok()).map(|m| percent_encoding::percent_decode_str(m).decode_utf8_lossy().into_owned()).unwrap_or_default();
-        apps.deploy(&id, &env, json!({ "message": message, "image_upload": true }), By { trigger: Trigger::Upload, actor }, Some(b), key).await?
+        apps.deploy(&id, &env, json!({ "message": message, "image_upload": true, "override": over }), By { trigger: Trigger::Upload, actor }, Some(b), key).await?
     } else {
-        apps.deploy(&id, &env, body(&b)?, By { trigger: Trigger::Manual, actor }, None, key).await?
+        apps.deploy(&id, &env, with_override(body(&b)?, &headers)?, By { trigger: Trigger::Manual, actor }, None, key).await?
     };
     apps.lift_hold(&id, &env).await;
     Ok((StatusCode::ACCEPTED, Json(d)).into_response())
@@ -724,6 +779,21 @@ async fn create_deploy(State(apps): S, Path((id, env)): Path<(String, String)>, 
 
 async fn deploy_commits(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>) -> R {
     ok(apps.deploy_commits(&id, &env, &dep).await?)
+}
+
+#[derive(Deserialize)]
+struct VulnQuery {
+    severity: Option<String>,
+}
+
+async fn deploy_sbom(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>) -> R {
+    let body = apps.sbom(&id, &env, &dep).await?;
+    let file = format!("attachment; filename=\"{dep}.cdx.json\"");
+    Ok(([(axum::http::header::CONTENT_TYPE, "application/vnd.cyclonedx+json".to_string()), (axum::http::header::CONTENT_DISPOSITION, file)], body).into_response())
+}
+
+async fn deploy_vulnerabilities(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>, Query(q): Query<VulnQuery>) -> R {
+    ok(apps.vulnerabilities(&id, &env, &dep, q.severity.as_deref()).await?)
 }
 
 async fn get_deploy(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>) -> R {
@@ -974,7 +1044,7 @@ async fn redeploy(State(apps): S, Path((id, env)): Path<(String, String)>, ext: 
         Some(v) => Some(v.to_str().map_err(|_| Error::BadRequest("Idempotency-Key is printable ASCII".into()))?),
         None => None,
     };
-    let d = apps.redeploy(&id, &env, if b.is_empty() { Value::Null } else { body(&b)? }, actor(&ext), key).await?;
+    let d = apps.redeploy(&id, &env, with_override(if b.is_empty() { json!({}) } else { body(&b)? }, &headers)?, actor(&ext), key).await?;
     apps.lift_hold(&id, &env).await;
     Ok((StatusCode::ACCEPTED, Json(d)).into_response())
 }
@@ -1072,15 +1142,16 @@ async fn run_hook(State(apps): S, Path((id, env, token)): Path<(String, String, 
     Ok((StatusCode::ACCEPTED, Json(d)).into_response())
 }
 
-async fn promote(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, b: Bytes) -> R {
-    let d = apps.promote(&id, &env, body(&b)?, actor(&ext)).await?;
+async fn promote(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, headers: HeaderMap, b: Bytes) -> R {
+    let d = apps.promote(&id, &env, with_override(body(&b)?, &headers)?, actor(&ext)).await?;
     apps.lift_hold(&id, &env).await;
     Ok((StatusCode::ACCEPTED, Json(d)).into_response())
 }
 
-async fn rollback(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>, ext: Extensions, b: Bytes) -> R {
-    let keep = body(&b)?.get("keep_variables").and_then(Value::as_bool).unwrap_or(false);
-    let d = apps.rollback(&id, &env, &dep, actor(&ext), keep).await?;
+async fn rollback(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>, ext: Extensions, headers: HeaderMap, b: Bytes) -> R {
+    let o = with_override(body(&b)?, &headers)?;
+    let (keep, over) = (o.get("keep_variables").and_then(Value::as_bool).unwrap_or(false), o.get("override").and_then(Value::as_bool).unwrap_or(false));
+    let d = apps.rollback(&id, &env, &dep, actor(&ext), keep, over).await?;
     Ok((StatusCode::ACCEPTED, Json(d)).into_response())
 }
 
@@ -1201,6 +1272,10 @@ struct Window {
     format: Option<String>,
 }
 
+async fn slo(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {
+    ok(apps.slo_report(&id, &env).await?)
+}
+
 async fn metrics(State(apps): S, Path((id, env)): Path<(String, String)>, Query(w): Query<Window>) -> R {
     // For a scraper (Prometheus, Grafana Agent): the last finished minute as gauges.
     if w.format.as_deref() == Some("prometheus") {
@@ -1228,6 +1303,29 @@ struct VitalsQuery {
 
 async fn errors(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q): Query<VitalsQuery>) -> R {
     ok(apps.errors(&id, &env, q.minutes.unwrap_or(1440)).await?)
+}
+
+async fn forms(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {
+    ok(apps.forms(&id, &env).await?)
+}
+
+#[derive(Deserialize)]
+struct SubmissionsQuery {
+    limit: Option<usize>,
+    before: Option<String>,
+}
+
+/// A form's submissions in the clear: what people sent (a reveal, as variables' values are).
+async fn form_submissions(State(apps): S, Path((id, env, form)): Path<(String, String, String)>, Query(q): Query<SubmissionsQuery>, ext: Extensions) -> R {
+    let v = apps.form_submissions(&id, &env, &form, q.limit.unwrap_or(50), q.before).await?;
+    apps.audit("forms.read", &id, &env, actor(&ext), json!({ "form": form })).await;
+    ok(v)
+}
+
+async fn delete_form_submission(State(apps): S, Path((id, env, form, sub)): Path<(String, String, String, String)>, ext: Extensions) -> R {
+    apps.delete_form_submission(&id, &env, &form, &sub).await?;
+    apps.audit("forms.deleted", &id, &env, actor(&ext), json!({ "form": form, "submission": sub })).await;
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 async fn app_metrics(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q): Query<VitalsQuery>) -> R {
