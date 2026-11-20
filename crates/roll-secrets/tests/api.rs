@@ -1226,6 +1226,41 @@ async fn every_write_is_a_version_and_an_environment_rolls_back_to_any_change() 
 }
 
 #[tokio::test]
+async fn a_change_of_thousands_of_keys_keeps_every_version_and_the_audit_chain() {
+    let api = Api::new().await;
+    const N: usize = 3000;
+    let dotenv: String = (0..N).map(|i| format!("K{i:04}=one-{i}\n")).collect();
+    let imported = api.ok(Method::POST, "/environments/production/import", Some(json!({ "dotenv": dotenv }))).await;
+    assert_eq!(imported["items"].as_array().unwrap().len(), N);
+    // One change: the first third changed, the second third deleted, as many keys added (some in
+    // a new folder), the last third untouched.
+    let mut ops: Vec<Value> = (0..N / 3).map(|i| json!({ "op": "set", "key": format!("K{i:04}"), "value": format!("two-{i}") })).collect();
+    ops.extend((N / 3..2 * N / 3).map(|i| json!({ "op": "delete", "key": format!("K{i:04}") })));
+    ops.extend((0..N / 3).map(|i| json!({ "op": "set", "key": format!("N{i:04}"), "value": format!("new-{i}"), "path": if i % 2 == 0 { "/" } else { "/svc/api" } })));
+    let second = api.ok(Method::POST, "/environments/production/changes", Some(json!({ "ops": ops }))).await;
+    let seq = second["change"]["seq"].as_i64().unwrap();
+    let detail = api.ok(Method::GET, &format!("/environments/production/changes/{seq}"), None).await;
+    let items = detail["items"].as_array().unwrap();
+    let what = |w: &str| items.iter().filter(|i| i["what"][0] == w).count();
+    assert_eq!((detail["keys"].as_i64(), what("changed"), what("deleted"), what("added")), (Some(N as i64), N / 3, N / 3, N / 3));
+    assert!(items.iter().all(|i| i["what"][0] != "changed" || (i["from_fp"].is_string() && i["from_fp"] != i["to_fp"])), "{detail}");
+    // Deleted keys come back with their history, in the same change as other new ones.
+    let back: Vec<Value> = (N / 3..N / 3 + 10).map(|i| json!({ "op": "set", "key": format!("K{i:04}"), "value": format!("three-{i}") })).collect();
+    api.ok(Method::POST, "/environments/production/changes", Some(json!({ "ops": back }))).await;
+
+    let root = api.values("production", "/").await["values"].clone();
+    let folder = api.values("production", "/svc/api").await["values"].clone();
+    assert_eq!((root["K0000"].as_str(), root["K1000"].as_str(), root["K1010"].as_str(), root["K2999"].as_str()), (Some("two-0"), Some("three-1000"), None, Some("one-2999")));
+    assert_eq!((root["N0000"].as_str(), folder["N0001"].as_str()), (Some("new-0"), Some("new-1")));
+    assert_eq!(root.as_object().unwrap().len(), N / 3 + 10 + N / 3 + N / 6);
+    let versions = api.ok(Method::GET, "/environments/production/secrets/K1000/versions", None).await;
+    let ops: Vec<(i64, &str)> = versions.as_array().unwrap().iter().map(|v| (v["version"].as_i64().unwrap(), v["op"].as_str().unwrap())).collect();
+    assert_eq!(ops, [(3, "set"), (2, "delete"), (1, "set")]);
+    assert_eq!(api.ok(Method::GET, "/environments/production/secrets/K1000/versions/1/value", None).await["value"], "one-1000");
+    assert_eq!(api.ok(Method::GET, "/audit/verify", None).await["ok"], true);
+}
+
+#[tokio::test]
 async fn references_imports_and_personal_values_resolve_and_cycles_are_reported() {
     let api = Api::new().await;
     api.set("production", "DB_HOST", "prod.db").await;
