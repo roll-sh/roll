@@ -1773,6 +1773,51 @@
         "x-roll-action": "read"
       }
     },
+    "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/explain": {
+      "post": {
+        "description": "Answers `Explanation`: why a failed deployment failed, read from its error, plan, steps and the newest lines of its build log and output (masked as they're written) by the model of the owner of the service's roll code repo (their own provider, else the server's within their cap; metered on their roll code usage as `explain`). Kept with the deployment and answered again without a model call, unless `again=1`. 409 when it didn't fail, the service doesn't deploy from a roll code repo, the server has no model, or the owner has none or is past their cap; 503 when the model gave no answer.",
+        "operationId": "postServicesIdEnvironmentsEnvDeploysDepExplain",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "dep",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`Explanation`: why a failed deployment failed, read from its error, plan, steps and the newest lines of its build log and output (masked as they're written) by the model of the owner of the service's roll code repo (their own provider, else the server's within their cap; metered on their roll code usage as `explain`). Kept with the deployment and answered again without a model call, unless `again=1`. 409 when it didn't fail, the service doesn't deploy from a roll code repo, the server has no model, or the owner has none or is past their cap; 503 when the model gave no answer"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Explain deploy",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "write"
+      }
+    },
     "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/logs": {
       "get": {
         "description": "Answers `LogLine[]` or SSE.",

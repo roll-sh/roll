@@ -89,11 +89,13 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/deploys/{{dep}}/commits"), get(deploy_commits))
         .route(&format!("{env}/deploys/{{dep}}/vulnerabilities"), get(deploy_vulnerabilities))
         .route(&format!("{env}/deploys/{{dep}}/sbom"), get(deploy_sbom))
+        .route(&format!("{env}/deploys/{{dep}}/explain"), post(explain_deploy))
         .route(&format!("{env}/deploys/{{dep}}/rollback"), post(rollback))
         .route(&format!("{env}/deploys/{{dep}}/rollout"), post(rollout_action))
         .route(&format!("{env}/rollback"), post(rollback_previous))
         .route(&format!("{env}/deploys/{{dep}}/cancel"), post(cancel))
         .route(&format!("{env}/redeploy"), post(redeploy))
+        .route(&format!("{env}/config/rotate"), post(rotate_config))
         .route(&format!("{env}/promote"), post(promote))
         .route(&format!("{env}/hook"), post(put_hook).delete(delete_hook))
         .route(&format!("{env}/volume/backups"), get(backups).post(backup_volume))
@@ -711,6 +713,20 @@ async fn get_env(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {
     ok(apps.environment(&id, &env).await?)
 }
 
+/// A new `ROLL_CONFIG_URL` token; the old one reads until a deploy made after it is live.
+async fn rotate_config(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions) -> R {
+    apps.environment(&id, &env).await?;
+    // One at a time: a second would drop the address running instances still read with.
+    let (sid, e) = (id.clone(), env.clone());
+    if apps.db(move |s| s.runtime_config_tokens(&sid, &e)).await?.is_some_and(|(_, before)| before.is_some()) {
+        return Err(Error::Conflict("the last rotation isn't finished: redeploy, so nothing runs with the address before it, then rotate again".into()));
+    }
+    let (sid, e) = (id.clone(), env.clone());
+    apps.db(move |s| s.rotate_runtime_config(&sid, &e)).await?.ok_or_else(|| Error::NotFound(format!("{env} has no runtime config")))?;
+    apps.audit("config.rotated", &id, &env, actor(&ext), json!({})).await;
+    ok(apps.environment(&id, &env).await?)
+}
+
 async fn put_env(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, b: Bytes) -> R {
     let put = body(&b)?;
     let e = apps.put_environment(&id, &env, put.clone()).await?;
@@ -785,6 +801,16 @@ async fn deploy_commits(State(apps): S, Path((id, env, dep)): Path<(String, Stri
 #[derive(Deserialize)]
 struct VulnQuery {
     severity: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ExplainQuery {
+    again: Option<String>,
+}
+
+/// A failed deployment explained by the repo owner's model (kept; `?again=1` asks anew).
+async fn explain_deploy(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>, Query(q): Query<ExplainQuery>) -> R {
+    ok(apps.explain(&id, &env, &dep, truthy(&q.again)).await?)
 }
 
 async fn deploy_sbom(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>) -> R {

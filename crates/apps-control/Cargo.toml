@@ -65,4 +65,5 @@ url.workspace = true
 zip.workspace = true
 
 [dev-dependencies]
+code-review.workspace = true
 tokio-tungstenite.workspace = true

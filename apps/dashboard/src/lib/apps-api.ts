@@ -51,6 +51,20 @@ export interface Build {
 
 export type ServiceType = "web" | "worker" | "cron";
 
+/** One of `run.push`: a topic of a stream (`st_…`, on the project) delivered to one environment's path. */
+export interface Push {
+  stream: string;
+  topic: string;
+  group: string;
+  path: string;
+  /** Default production. */
+  environment?: string;
+  /** A topic of the same stream a record goes to after `max_attempts` (default 5) failed tries. */
+  dead_letter?: string;
+  max_attempts?: number;
+  timeout_s?: number;
+}
+
 export interface Run {
   type: ServiceType;
   port?: number;
@@ -126,6 +140,8 @@ export interface Run {
   scale?: { stream?: string; group?: string; metric?: string; sum?: boolean; per_instance?: number };
   /** Commands on a schedule, each a job of the live deployment at its due times (Heroku Scheduler); at most 20. */
   schedules?: Scheduled[];
+  /** A web service's: a roll stream's records POSTed to `path` as they arrive, the group's offset committed on a 2xx (Cloud Run's Pub/Sub push); at most 4. */
+  push?: Push[];
   /** Containers beside each instance, in its network namespace (a web service's or a worker's); at most 4. */
   sidecars?: Sidecar[];
 }
@@ -694,6 +710,8 @@ export interface Environment extends EnvironmentSummary {
   /** Its runtime config, and the version its instances read. */
   config?: Record<string, unknown>;
   config_version?: number;
+  /** When its config's token was last rotated: the address before it reads until a deploy made after it is live. */
+  config_rotated_at?: number;
   freeze?: Freeze;
   /** Its freeze is on now: automatic deploys build to ready, a person's deploy needs the `X-Roll-Override: 1` header (admin). */
   frozen?: boolean;
@@ -818,6 +836,19 @@ export interface ScanSummary {
   error?: string;
   /** Its SBOM (CycloneDX) is kept: `…/sbom`. */
   sbom?: boolean;
+}
+
+/** Why a failed deployment failed, from the repo owner's model (`…/explain`). The model's words: shown as text. */
+export interface Explanation {
+  summary: string;
+  cause: string;
+  /** What to change, in order (at most 5; none when it isn't the app's fault). */
+  steps: string[];
+  confidence: "high" | "medium" | "low";
+  model: string;
+  at: number;
+  /** Older log lines it didn't see. */
+  lines_left_out: number;
 }
 
 /** One known vulnerability: a package at a version an advisory names. */
@@ -1377,6 +1408,8 @@ export const appsApi = {
   commits: (id: string, e: string, d: string) => call<DeployCommits>("GET", `${dep(id, e, d)}/commits`),
   slo: (id: string, e: string) => call<SloReport>("GET", `${env(id, e)}/slo`),
   sbom: (id: string, e: string, d: string) => call<unknown>("GET", `${dep(id, e, d)}/sbom`),
+  /** A failed deployment explained by its repo owner's model: kept, unless `again` asks anew (charged again). */
+  explain: (id: string, e: string, d: string, again = false) => call<Explanation>("POST", `${dep(id, e, d)}/explain${qs({ again })}`),
   vulnerabilities: (id: string, e: string, d: string) => call<{ scan: ScanSummary | null; vulnerabilities: Vulnerability[] }>("GET", `${dep(id, e, d)}/vulnerabilities`),
   buildLog: (id: string, e: string, d: string, q: LogQuery = {}) => call<LogLine[]>("GET", `${dep(id, e, d)}/logs${qs({ tail: q.tail })}`),
   /** `keepVariables`: its image with the variables as they are now (after a rotated secret), not as they were then. */
@@ -1385,6 +1418,8 @@ export const appsApi = {
   rollbackPrevious: (id: string, e: string) => call<Deployment>("POST", `${env(id, e)}/rollback`),
   /** The live image again with the current variables and settings: no build, same revision. */
   redeploy: (id: string, e: string, body: { message?: string } = {}) => call<Deployment>("POST", `${env(id, e)}/redeploy`, body),
+  /** A new `ROLL_CONFIG_URL` token (a leaked address): the old one reads until a deploy made after it is live. */
+  rotateConfig: (id: string, e: string) => call<Environment>("POST", `${env(id, e)}/config/rotate`),
   /** `expect`: the deployment of `from` that was looked at; a 409 when `from` runs another now. */
   promote: (id: string, e: string, from: string, expect?: string) => call<Deployment>("POST", `${env(id, e)}/promote`, { from, ...(expect ? { expect } : {}) }),
   backups: (id: string, e: string) => call<Backup[]>("GET", `${env(id, e)}/volume/backups`),

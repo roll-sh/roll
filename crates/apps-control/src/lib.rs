@@ -31,6 +31,7 @@ pub mod cron;
 pub mod ci_hosts;
 pub mod deploy;
 pub mod errors;
+pub mod explain;
 pub mod drains;
 pub mod export;
 pub mod git_source;
@@ -47,6 +48,7 @@ pub mod net;
 pub mod notify;
 pub mod otlp;
 pub mod public;
+pub mod push;
 pub mod resp_cache;
 pub mod runtime;
 pub mod shell;
@@ -258,6 +260,8 @@ pub struct Apps {
     github: std::sync::OnceLock<Arc<dyn integrations::GitHubApp>>,
     /// Email to projects' owners (`notify`), once rolld has accounts.
     mail: std::sync::OnceLock<Arc<dyn integrations::Mailbox>>,
+    explainer: std::sync::OnceLock<Arc<dyn integrations::Explainer>>,
+    pushers: push::Pushers,
     /// Who may still open a project's environments ([`Apps::set_visitors`]).
     pub(crate) visitors: std::sync::OnceLock<Arc<dyn integrations::Visitors>>,
     /// Log drains whose batch came back (the drainer sends the next).
@@ -569,6 +573,8 @@ impl Apps {
             pushes: std::sync::OnceLock::new(),
             github: std::sync::OnceLock::new(),
             mail: std::sync::OnceLock::new(),
+            explainer: std::sync::OnceLock::new(),
+            pushers: push::Pushers::default(),
             visitors: std::sync::OnceLock::new(),
             drain_done: Arc::new(Mutex::new(Vec::new())),
             drains_dirty: Mutex::new(Default::default()),
@@ -1561,6 +1567,8 @@ impl Apps {
         let waiting_for_ci = self.db(move |s| s.ci_waits()).await?.into_iter().find(|(w, _)| w.service == sid && w.env == e).map(|(w, _)| w.sha);
         let (sid, e) = (r.service.clone(), r.name.clone());
         let config = self.db(move |s| s.runtime_config(&sid, &e)).await?;
+        let (sid, e) = (r.service.clone(), r.name.clone());
+        let rotated = self.db(move |s| s.runtime_config_rotated(&sid, &e)).await?;
         Ok(Environment {
             summary,
             service: r.service.clone(),
@@ -1613,6 +1621,7 @@ impl Apps {
             mirror: r.mirror.clone(),
             snippets: r.snippets.clone(),
             config_version: config.as_ref().map(|(_, v)| *v),
+            config_rotated_at: rotated,
             config: config.map(|(c, _)| c).filter(|c| !c.is_null()),
             pause_schedule: r.pause_schedule.clone(),
             frozen: r.freeze.as_ref().is_some_and(|f| f.on(code_sql::now_ms())),
