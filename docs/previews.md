@@ -2256,12 +2256,22 @@ Ranked by what a person notices first. Done so far:
    secrets' #520 and #517, its batch 6): see "Keys a preview never holds". Built: the swap, the
    handoff, the runtime's socket and the services' trust, bounded per preview after review. Next:
    rolld's adapter once batch 6 lands, then the live check.
-3. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+3. **In review as turn 14**: the independent review's fixes to references (#557: a Git URL
+   service's preview read as its service, a start waiting for the converge that leaves out a
+   reference whose writer lost it, a deleted preview's rows) and acting on a preview from its pull
+   request (#558: `@roll preview redeploy|reset|wake|sleep|keep [hours]`, writers only).
+4. **The gone page and references, tested at the edge**: the review found the 410 page tested
+   only in the store (not `gone()`'s host parsing: a port, a trailing dot, case, `serve_host`), and
+   `Reveal::still` never asked for an untrusted preview. One route-level test each.
+5. **`@roll preview` in roll's own change threads**: commands run where a pull request's
+   conversation is read today; a native roll thread answers that they work there. Run them in
+   threads too (the call is async: a job, as `explain` is).
+6. **Previews for the members thread's next products**: once roll apps' and roll search's routes
    become member routes (docs/members.md, v1.1), a preview's roll apps services and search branch
    follow the same roles, checked live against a member's session.
-4. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+7. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-5. **Watch: pg-control's recovery to a time seconds old** (unowned).
+8. **Watch: pg-control's recovery to a time seconds old** (unowned).
 
 Landed 2026-11-20 night (main b820c8883, c80a3fb99): a link to an earlier push no longer kept
 answers 410 naming the push and linking the service's latest (#545), on a project's own preview
