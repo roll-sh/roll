@@ -17420,3 +17420,50 @@ and any build panics the same way.
   test does not use hnsw; it passed alone and in the full rerun. The checked build is the
   `pgvector_hnsw` binary above (`--profile verify-checked`, 7 of 7 passed). Only HANDOFF text
   changed after the gate.
+
+## EXPLAIN plans against PostgreSQL 18.6's, round 1 (agent 273, 2026-11-20)
+
+Harness: `~/.cache/a273/rx` (248's regress-EXPLAIN comparison: `run.sh <port> <label>` runs every
+regression file with an `EXPLAIN` before each top-level query, `cmp.py` compares the 17,654
+plans) plus `classify.py`, which groups a differing plan by its first differing node: `scan`
+(another scan kind), `join-method`, `join-order`, `sort-agg`, `extra-node` (a node only one side
+has), `other-shape`, then for same-shaped plans the deepest node whose `rows`, `cost` or `width`
+differs, and `display` (node lines equal, detail lines differ). PostgreSQL ran in `a273-pg`
+(the reference image, autovacuum off as the engine in the harness).
+
+On the base (`68e5a2ebd`), 2,779 of 17,654 differ: 989 over system catalogs, 43 where one side
+errors, 1,747 others: cost 812, rows 325, width 263, extra-node 121, display 117, other-shape 38,
+sort-agg 24, join-order 22, scan 22, join-method 3. The largest groups: cost of Bitmap Index
+Scans (269: GIN 190, BRIN 53, GiST / SP-GiST box ops 26), Seq Scan rows (110: range and
+multirange selectivity 52, geometric operators, SP-GiST test tables), one-row Result costs (100:
+SQL functions PostgreSQL inlines to constants, hashed IN lists' startup, coercion costs), Seq
+Scan widths (85: arrays' average width one byte off, columns read).
+
+- **GIN scans costed as gincostestimate** (`sql/paths/gincost.rs`). They had
+  genericcostestimate's cost. Now: the metapage's statistics (`ginsim::GinStats`, from the GIN
+  model: the pending list's pages as they are, entry pages, data pages and entries as the build
+  or the last VACUUM counted them, `GinIndex::record_stats`), scaled to the index's pages or
+  invented from them as selfuncs.c does, and each operator class's search entries
+  (extractQuery: array_ops' elements and search modes, tsvector_ops' operands with prefix ones as
+  partial matches and `!a` a full scan, jsonb_ops' keys / values / `?`, `?|`, `?&`,
+  jsonb_path_ops' scalars, `@?` / `@@` jsonpaths through the executor's extract_jsp_query nodes,
+  `exec::search::jsonpath_entries`). Operands are reduced as estimate_expression_value reduces
+  them: casts of constants, built-in immutable or stable calls of constants (`to_tsquery('a')`).
+  An operator class or condition not modelled keeps the generic cost. jsonb_path_ops indexes of a
+  modelled table are now sized by the model (they were 2 pages; SSI's page locks still leave
+  them out, their keys' order isn't PostgreSQL's).
+- **BRIN's revmap pages** are brinGetStats' (the revmap's last block less one, from the
+  summarized ranges, `sizing::brin_revmap_pages`), not the hypothetical index's count: 3.00 less
+  startup per BRIN scan of a small table.
+- Golden `a273_gin_costs` (recorded from 18.6): GIN scans over arrays, tsvector and jsonb under
+  both classes, after the build, with a pending list, after VACUUM; a BRIN scan.
+
+Result: 163 more of the 17,654 match, none newly differ (2,616 differ). TPC-H: base against new
+on SF 0.05 (`~/.cache/a273/tpchplans.sh`), 22 of 22 plans identical in text, costs x1.000.
+Verification: quick-check with `QC_CHECKED=1` on `eb0c509a9` (this commit on `68e5a2ebd`): build,
+clippy (16 warnings, none new), tests 417 passed in 18 binaries, the same 417 with
+`--profile verify-checked`, regress 51,148 / 51,150 with 0 newly differing, isolation
+1,647 / 1,648, pg_dump 14,609 passed.
+
+Left in the GIN group: GiST / SP-GiST costs of box and tsvector operators (gistcostestimate's
+details), `a <@ '{3,4,5}'`'s row estimate (arraycontsel for `<@`, 10 against PostgreSQL's 6).
