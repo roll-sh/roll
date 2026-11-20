@@ -2,6 +2,8 @@
 //! widths, restriction and join selectivities (selfuncs.c) and the cost formulas of
 //! costsize.c with the default cost parameters.
 
+mod rangesel;
+
 use crate::catalog::{Catalog, ColStats, IndexKey, Table};
 use crate::exec::ExecCtx;
 use crate::sql::expr::Expr;
@@ -733,13 +735,26 @@ fn constant(e: &Expr) -> Option<Option<Value>> {
 
 impl Est<'_> {
     /// `constant`, a cast of a constant left to run (a custom plan's value through a stable
-    /// input routine) evaluated as estimate_expression_value evaluates it.
+    /// input routine) evaluated as estimate_expression_value evaluates it; so is a call of a
+    /// built-in immutable or stable function of constants (`to_tsquery('a')`, `now()`),
+    /// where the planner's context is at hand (`UserOps`). (A call that fails is left to
+    /// run, which raises its error.)
     fn constant(&self, e: &Expr) -> Option<Option<Value>> {
         if let Expr::Cast(x, from, to, explicit) = strip(e)
             && let Some(Some(v)) = self.constant(x)
             && !v.is_null()
         {
             return Some(crate::types::cast::cast_value(v, from, to, self.fmt, *explicit).ok());
+        }
+        if let (Some(u), e @ Expr::Call(def, args, _)) = (self.user, strip(e))
+            && def.oid > 0
+            && def.oid < crate::catalog::FIRST_USER_OID
+            && def.volatility != 'v'
+            && def.srf.is_none()
+            && args.iter().all(|a| matches!(self.constant(a), Some(Some(_))))
+            && let Ok(v) = crate::sql::expr::eval(e, &[], u.ctx)
+        {
+            return Some(Some(v));
         }
         constant(e)
     }
@@ -944,6 +959,11 @@ impl Est<'_> {
                 }
                 if crate::sql::func::oper_row(d.name, d).rest == 5040
                     && let Some(sel) = self.matchingsel(d.name, &args[0], &args[1])
+                {
+                    return sel;
+                }
+                if matches!(crate::sql::func::oper_row(d.name, d).rest, 3169 | 4243)
+                    && let Some(sel) = self.rangesel(d.name, &args[0], &args[1])
                 {
                     return sel;
                 }
@@ -1198,9 +1218,11 @@ impl Est<'_> {
                 _ => return None,
             },
         };
-        let Some(c) = c else {
+        // (A value known only when run: DEFAULT_TS_MATCH_SEL. `@@` is strict: none for NULL.)
+        let c = c?;
+        if c.is_null() {
             return Some(0.0);
-        };
+        }
         let (DataType::TsVector, Value::TsQuery(q)) = (v.ty(), &c) else {
             return None;
         };

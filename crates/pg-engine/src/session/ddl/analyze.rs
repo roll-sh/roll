@@ -829,10 +829,10 @@ impl Ddl<'_, '_> {
         Some(st)
     }
 
-    /// A range type's subtype_diff of two bounds (0 without one).
+    /// A range type's subtype_diff of two bounds (compute_range_stats' 1.0 without one).
     fn subdiff(&self, rt: &crate::types::range::RangeType, upper: &Value, lower: &Value) -> f64 {
         let Some(name) = rt.subdiff.as_deref() else {
-            return 0.0;
+            return 1.0;
         };
         match name {
             "int4range_subdiff" | "int8range_subdiff" | "float8mi" => {

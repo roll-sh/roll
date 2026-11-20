@@ -467,6 +467,8 @@ fn varlena_payload(v: &Value, ty: &DataType, text: &dyn Fn(&Value, &DataType) ->
             let mut n = 16 + 8 * a.dims.len() + if has_null { items.len().div_ceil(8) } else { 0 };
             n = align(n, MAXALIGN);
             let (len, al) = type_layout(&elem);
+            // (construct_md_array: each element padded to the element type's alignment
+            // after it, the last one too.)
             for x in items.iter().filter(|x| !x.is_null()) {
                 n = align(n, al);
                 n += if len > 0 {
@@ -474,6 +476,7 @@ fn varlena_payload(v: &Value, ty: &DataType, text: &dyn Fn(&Value, &DataType) ->
                 } else {
                     4 + varlena_payload(x, &elem, text)
                 };
+                n = align(n, al);
             }
             n - 4
         }

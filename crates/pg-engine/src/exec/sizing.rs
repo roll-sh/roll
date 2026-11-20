@@ -1235,6 +1235,9 @@ fn array_bytes(a: &crate::types::array::ArrayValue, ty: &DataType) -> Option<Vec
                 out.extend(b);
             }
         }
+        // (Padded after it, the last one too: construct_md_array.)
+        let pos = out.len() + 4;
+        out.resize(pos.div_ceil(al) * al - 4, 0);
     }
     Some(out)
 }
