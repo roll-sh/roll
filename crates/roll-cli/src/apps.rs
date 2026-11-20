@@ -417,6 +417,15 @@ pub enum AppsCmd {
         /// memory for a minute (10–100); `0` turns it off.
         #[arg(long, value_name = "PERCENT")]
         memory_target: Option<u32>,
+        /// And on its answers' p95: another instance while a window's p95 is over this many ms
+        /// (50–60000); `0` turns it off.
+        #[arg(long, value_name = "MS")]
+        latency_target: Option<u32>,
+        /// A roll stream's records POSTed to a path as they arrive (repeat for more, at most
+        /// four; replaces them all): `<stream>/<topic>/<group>:<path>[,dead_letter=<topic>]
+        /// [,max_attempts=N][,max_in_flight=N][,environment=<env>]`; `none` removes them.
+        #[arg(long, value_name = "RULE")]
+        push: Vec<String>,
         /// A worker that stops: `always` started again, `on_failure`, or `never`.
         #[arg(long, value_parser = ["always", "on_failure", "never"])]
         restart: Option<String>,
@@ -572,7 +581,7 @@ pub enum AppsCmd {
         #[command(flatten)]
         target: Target,
         /// A terminal to it: `roll apps run -i -- rails console`.
-        #[arg(short = 'i', long, conflicts_with_all = ["timeout", "tasks"])]
+        #[arg(short = 'i', long, conflicts_with_all = ["timeout", "tasks", "retries", "parallelism"])]
         interactive: bool,
         /// A console's CPUs (0.25–8; default the environment's size).
         #[arg(long, requires = "interactive")]
@@ -587,6 +596,13 @@ pub enum AppsCmd {
         /// `ROLL_TASK_COUNT`; done when all are (1–100, ten at a time).
         #[arg(long)]
         tasks: Option<u32>,
+        /// Try a failed or timed-out task again this many times (0–5), each try with
+        /// `ROLL_TASK_ATTEMPT`, as a cron run's retries wait.
+        #[arg(long)]
+        retries: Option<u32>,
+        /// Tasks running at once (1–100; default ten, or fewer tasks).
+        #[arg(long)]
+        parallelism: Option<u32>,
         #[arg(trailing_var_arg = true, required_unless_present = "interactive", allow_hyphen_values = true)]
         command: Vec<String>,
     },
@@ -1762,6 +1778,36 @@ fn env_line(k: &str, v: &str) -> String {
     }
 }
 
+/// `--push` rules as `run.push` takes them: none given, nothing changes; `none`, none at all.
+fn push_rules(given: &[String]) -> anyhow::Result<Option<Value>> {
+    if given.is_empty() {
+        return Ok(None);
+    }
+    if given.iter().any(|g| g == "none") {
+        return Ok(Some(Value::Null));
+    }
+    let shape = "--push is <stream>/<topic>/<group>:<path>[,dead_letter=<topic>][,max_attempts=N][,max_in_flight=N][,environment=<env>]";
+    let mut out = Vec::new();
+    for g in given {
+        let mut parts = g.split(',');
+        let head = parts.next().unwrap_or("");
+        let (src, path) = head.split_once(':').ok_or_else(|| anyhow::anyhow!("{shape}"))?;
+        let mut ids = src.splitn(3, '/');
+        let (Some(stream), Some(topic), Some(group)) = (ids.next(), ids.next(), ids.next()) else { anyhow::bail!("{shape}") };
+        let mut rule = json!({ "stream": stream, "topic": topic, "group": group, "path": path });
+        for opt in parts {
+            let (k, v) = opt.split_once('=').ok_or_else(|| anyhow::anyhow!("{shape}"))?;
+            rule[k] = match k {
+                "dead_letter" | "environment" => json!(v),
+                "max_attempts" | "max_in_flight" => json!(v.parse::<u32>().map_err(|_| anyhow::anyhow!("--push's {k} is a number"))?),
+                _ => anyhow::bail!("{shape}"),
+            };
+        }
+        out.push(rule);
+    }
+    Ok(Some(Value::Array(out)))
+}
+
 /// Print a log's lines (SSE `data:` JSON) until the stream ends.
 async fn follow(api: &Api, path: &str) -> anyhow::Result<()> {
     follow_matching(api, path, None).await
@@ -2705,7 +2751,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Set { target, name, repo, root, image, upload, builder, dockerfile, stage, install, build_command, build_start, health_timeout, health_every, health_failures, health_command, alert_memory, alert_errors, alert_p95, alert_log, alert_log_count, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, retries, volume, watch, packages, build_timeout, rollout, rollout_step, rollout_errors, rollout_manual, overlap, h2c, scale, public, drain, cpu_target, memory_target, restart, restart_tries, affinity, tcp, rollback_on_crash, rebuild_on_base, block_on } => {
+        AppsCmd::Set { target, name, repo, root, image, upload, builder, dockerfile, stage, install, build_command, build_start, health_timeout, health_every, health_failures, health_command, alert_memory, alert_errors, alert_p95, alert_log, alert_log_count, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, retries, volume, watch, packages, build_timeout, rollout, rollout_step, rollout_errors, rollout_manual, overlap, h2c, scale, public, drain, cpu_target, memory_target, latency_target, push, restart, restart_tries, affinity, tcp, rollback_on_crash, rebuild_on_base, block_on } => {
             let svc = service(api, &target).await?;
             // The service's rollout with what was given replaced (the API takes it whole).
             let rollout = if rollout.is_some() || rollout_step.is_some() || rollout_errors.is_some() || rollout_manual.is_some() || overlap.is_some() {
@@ -2850,6 +2896,8 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 ("drain_s", drain.map(|d| if d == 0 { Value::Null } else { Value::from(d) })),
                 ("cpu_target", cpu_target.map(|t| if t == 0 { Value::Null } else { Value::from(t) })),
                 ("memory_target", memory_target.map(|t| if t == 0 { Value::Null } else { Value::from(t) })),
+                ("latency_target_ms", latency_target.map(|t| if t == 0 { Value::Null } else { Value::from(t) })),
+                ("push", push_rules(&push)?),
                 ("restart", restart.map(Value::from)),
                 ("restart_tries", restart_tries.map(Value::from)),
                 ("affinity", affinity.map(Value::from)),
@@ -3494,10 +3542,10 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             return ssh(api, &env_path(&svc, &target.env), &query).await;
         }
-        AppsCmd::Run { target, timeout, tasks, command, .. } => {
+        AppsCmd::Run { target, timeout, tasks, retries, parallelism, command, .. } => {
             let svc = service(api, &target).await?;
             let base = format!("{}/jobs", env_path(&svc, &target.env));
-            let job = api.post(&base, json!({ "command": shell_join(&command), "timeout_s": timeout, "tasks": tasks })).await?;
+            let job = api.post(&base, json!({ "command": shell_join(&command), "timeout_s": timeout, "tasks": tasks, "retries": retries, "parallelism": parallelism })).await?;
             if !json_out {
                 let id = s(&job["id"]);
                 follow(api, &format!("{base}/{}/logs?follow=1", enc(&id))).await?;
@@ -4639,6 +4687,15 @@ fn internal_rewritten(v: &str, host: &str, local: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn push_rules_read_as_run_push_takes_them() {
+        let r = super::push_rules(&["st_aaaaaaaaaaaa/orders/web:/events,dead_letter=orders-dead,max_attempts=3".into()]).unwrap().unwrap();
+        assert_eq!(r, serde_json::json!([{ "stream": "st_aaaaaaaaaaaa", "topic": "orders", "group": "web", "path": "/events", "dead_letter": "orders-dead", "max_attempts": 3 }]));
+        assert_eq!(super::push_rules(&["none".into()]).unwrap(), Some(serde_json::Value::Null));
+        assert_eq!(super::push_rules(&[]).unwrap(), None);
+        assert!(super::push_rules(&["orders:/events".into()]).is_err());
+    }
+
     #[test]
     fn only_a_linked_hosts_urls_are_pointed_at_its_tunnel() {
         let r = |v: &str| super::internal_rewritten(v, "api.production.internal", "127.0.0.1:4000");

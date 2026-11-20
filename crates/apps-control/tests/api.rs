@@ -3072,7 +3072,7 @@ async fn roll_up_deploys_an_uploaded_tree_and_cron_runs_on_demand() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_one_off_job_runs_the_live_image_to_its_exit_and_can_be_canceled() {
-    let w = world().await;
+    let w = world_with(|c| c.cron_retry_after = Duration::from_millis(20)).await;
     let (svc, d) = image_service(&w, "api", json!({"port": 80})).await;
     let id = svc["id"].as_str().unwrap().to_string();
     let base = format!("/v1/apps/services/{id}/environments/production");
@@ -3103,10 +3103,24 @@ async fn a_one_off_job_runs_the_live_image_to_its_exit_and_can_be_canceled() {
     assert_eq!(call(&w.api, "POST", &format!("{base}/jobs"), Some(json!({"command": "exit 0", "tasks": 101}))).await.0, StatusCode::BAD_REQUEST);
     let (_, t) = call(&w.api, "POST", &format!("{base}/jobs"), Some(json!({"command": "exit 0", "tasks": 3}))).await;
     let t = ended(t["id"].as_str().unwrap().to_string()).await;
-    assert_eq!((t["status"].as_str(), t["tasks"].as_u64()), (Some("succeeded"), Some(3)), "{t}");
+    assert_eq!((t["status"].as_str(), t["tasks"].as_u64(), t["parallelism"].as_u64()), (Some("succeeded"), Some(3), Some(3)), "{t}");
     let (_, log) = call(&w.api, "GET", &format!("{base}/jobs/{}/logs", t["id"].as_str().unwrap()), None).await;
     for i in 0..3 {
         assert!(log.as_array().unwrap().iter().any(|l| l["text"] == format!("job ran as task {i} of 3")), "task {i}: {log}");
+    }
+    // A failed task tried again (Cloud Run Jobs' `--max-retries`), each try told which it is:
+    // a flaky one that passes on its third try succeeds with two retries, fails with one.
+    let flaky = |retries: u32| json!({"command": "exit 3 until try 3", "retries": retries, "parallelism": 1});
+    let (_, ok) = call(&w.api, "POST", &format!("{base}/jobs"), Some(flaky(2))).await;
+    let ok = ended(ok["id"].as_str().unwrap().to_string()).await;
+    assert_eq!((ok["status"].as_str(), ok["retries"].as_u64()), (Some("succeeded"), Some(2)), "{ok}");
+    let (_, log) = call(&w.api, "GET", &format!("{base}/jobs/{}/logs", ok["id"].as_str().unwrap()), None).await;
+    let text: Vec<&str> = log.as_array().unwrap().iter().filter_map(|l| l["text"].as_str()).collect();
+    assert!(text.iter().any(|t| t.starts_with("the job: failed (try 1 of 3); again in")) && text.contains(&"the job: succeeded (try 3)"), "{text:?}");
+    let (_, no) = call(&w.api, "POST", &format!("{base}/jobs"), Some(flaky(1))).await;
+    assert_eq!(ended(no["id"].as_str().unwrap().to_string()).await["status"], "failed");
+    for bad in [json!({"command": "x", "retries": 6}), json!({"command": "x", "parallelism": 0})] {
+        assert_eq!(call(&w.api, "POST", &format!("{base}/jobs"), Some(bad)).await.0, StatusCode::BAD_REQUEST);
     }
     // One that doesn't end by itself is canceled, and its container goes.
     let (_, long) = call(&w.api, "POST", &format!("{base}/jobs"), Some(json!({"command": "sleep 3600"}))).await;
@@ -3116,7 +3130,7 @@ async fn a_one_off_job_runs_the_live_image_to_its_exit_and_can_be_canceled() {
     assert_eq!(ended(lid.clone()).await["status"], "canceled");
     assert_eq!(call(&w.api, "POST", &format!("{base}/jobs/{lid}/cancel"), None).await.0, StatusCode::CONFLICT);
     assert_eq!(w.fake.instances(&id).len(), instances, "no job's container is left");
-    assert_eq!(call(&w.api, "GET", &format!("{base}/jobs"), None).await.1.as_array().unwrap().len(), 4);
+    assert_eq!(call(&w.api, "GET", &format!("{base}/jobs"), None).await.1.as_array().unwrap().len(), 6);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -142,7 +142,7 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `POST /v1/apps/services/{id}/environments/{env}/shell/sessions/{sh}/resize` | `{ cols, rows }` | 204 | admin (all of a shell session is) |
 | `DELETE /v1/apps/services/{id}/environments/{env}/shell/sessions/{sh}` | | 204 | admin (what closes an admin's shell is admin) |
 | `GET /v1/apps/services/{id}/environments/{env}/jobs` | | `Job[]`, newest first | read |
-| `POST /v1/apps/services/{id}/environments/{env}/jobs` | `{ command, timeout_s?, tasks? }` (tasks 1–100: that many containers, ten at a time, each with `ROLL_TASK_INDEX` and `ROLL_TASK_COUNT`; the job fails on the first task that does) | 202 `Job` (with `tasks`) | deploy* |
+| `POST /v1/apps/services/{id}/environments/{env}/jobs` | `{ command, timeout_s?, tasks?, retries?, parallelism? }` (tasks 1–100: that many containers, `parallelism` at a time (1–100, default ten or fewer tasks), each with `ROLL_TASK_INDEX` and `ROLL_TASK_COUNT`; `retries` 0–5: a failed or timed-out task tried again in a fresh container with `ROLL_TASK_ATTEMPT`, as a cron run's retries wait, never after a cancel; the job fails on the first task that does in the end) | 202 `Job` | deploy* |
 | `GET /v1/apps/services/{id}/environments/{env}/jobs/{job}` | | `Job` | read |
 | `GET /v1/apps/services/{id}/environments/{env}/jobs/{job}/logs?follow=&tail=` | | `LogLine[]` or SSE (ends with the job, then `end`) | reveal (a job's output can be the variables) |
 | `POST /v1/apps/services/{id}/environments/{env}/jobs/{job}/cancel` | | `Job` | deploy* |
@@ -744,7 +744,7 @@ type RunStatus = "running" | "succeeded" | "failed" | "skipped" | "timed_out" | 
 type CronRun = { id: string; deployment: string; status: RunStatus; exit_code: number | null; started_at: number; finished_at: number | null; attempt: number /* which try of its due time: 1, then up to run.retries more after a failure */ };
 /** A one-off command in a fresh container of the active deployment: its variables and project
  *  network, no port, no volume. timeout_s 1–86400 (default 3600). */
-type Job = { id: string; deployment: string; command: string; status: RunStatus; exit_code: number | null; started_at: number; finished_at: number | null };
+type Job = { id: string; deployment: string; command: string; tasks: number; retries?: number /* tries after a task's failure */; parallelism: number /* tasks at once */; status: RunStatus; exit_code: number | null; started_at: number; finished_at: number | null };
 
 type Domain = {
   hostname: string;

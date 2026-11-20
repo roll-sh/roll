@@ -2802,6 +2802,12 @@ pub struct Job {
     pub command: String,
     /// Containers it runs, each with `ROLL_TASK_INDEX` and `ROLL_TASK_COUNT` (Cloud Run Jobs').
     pub tasks: u32,
+    /// Tries after a task's failure (Cloud Run Jobs' `--max-retries`): 0–5, each in a fresh
+    /// container with `ROLL_TASK_ATTEMPT`.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub retries: u32,
+    /// Tasks running at once (Cloud Run Jobs' `--parallelism`): 1–100.
+    pub parallelism: u32,
     pub status: RunStatus,
     pub exit_code: Option<i32>,
     pub started_at: i64,
@@ -2980,4 +2986,8 @@ mod fix_tests {
         assert!(f("the build failed (docker build exited with 1)", Some("npm ci can only install packages when your package.json and package-lock.json are in sync")).contains("package-lock.json"));
         assert_eq!(super::fix_for("a reason nobody wrote down", None), None);
     }
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
