@@ -52,7 +52,7 @@ impl Server {
 fn members_are_invited_listed_changed_and_removed() {
     let s = server();
     let out = s.roll(&["projects", "members", "invite", "bob@example.com", "--role", "developer", "--env", "staging,production", "-p", "shop"]);
-    assert!(out.contains("invited bob@example.com as developer") && out.contains("https://roll.example/dashboard/invites?token=pit_"), "{out}");
+    assert!(out.contains("invited bob@example.com as developer") && out.contains("https://roll.example/dashboard/invites?token=rlv_"), "{out}");
     let token = out.split("token=").nth(1).unwrap().trim().to_string();
     assert!(s.roll(&["projects", "invites", "list", "-p", "shop"]).contains("bob@example.com"));
     s.ws.accept("usr_bob", &token, None).unwrap();

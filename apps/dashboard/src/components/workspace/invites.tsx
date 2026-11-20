@@ -12,8 +12,14 @@ const when = (ms: number) => new Date(ms).toLocaleDateString(undefined, { month:
  * Invites to projects for the signed-in person (docs/members.md, "Invite and accept"). An invite's
  * link lands here with `?token=`: accepting it takes this session, signed in as the invited address.
  */
-export function Invites({ token }: { token?: string }) {
+export function Invites({ token: linked }: { token?: string }) {
   const session = useSession();
+  // The link's token, kept here and taken out of the address bar (and so out of history, a
+  // screenshot or a shared URL) as soon as it's read.
+  const [token] = useState(linked);
+  useEffect(() => {
+    if (linked && typeof window !== "undefined") window.history.replaceState(window.history.state, "", window.location.pathname);
+  }, [linked]);
   const [list, setList] = useState<Invite[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [joined, setJoined] = useState<{ project: string } | null>(null);
@@ -55,7 +61,7 @@ export function Invites({ token }: { token?: string }) {
       {!signedIn && session.status !== "loading" && (
         <EmptyPanel>
           <span className="text-[13px] text-muted">
-            Sign in as the address the invite went to, then open its link again. <Link href={`/signin?return_to=${encodeURIComponent(`/dashboard/invites${token ? `?token=${token}` : ""}`)}`} className="text-accent">Sign in</Link>
+            Sign in as the address the invite went to, then open its link again. <Link href={`/signin?return_to=${encodeURIComponent("/dashboard/invites")}`} className="text-accent">Sign in</Link>
           </span>
         </EmptyPanel>
       )}

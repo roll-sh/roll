@@ -175,7 +175,7 @@ The gate (`roll_auth::check`) resolves the cookie, then:
 | --- | --- | --- | --- | --- | --- |
 | operator token | admin | all projects | all clusters | everything | everything |
 | admin user | admin (the gate adds `Operator`) | all projects | all clusters | everything | everything |
-| other user | their own owner (`Caller::Owner`, token name `session`) | their own projects | their own clusters | their own account | `403` |
+| other user | their own owner (`Caller::Owner`, token name `session`) | the projects they're members of, as their role allows (docs/members.md); roll secrets too | their own clusters | their own account | `403` |
 | anonymous | public repos | `401` | `401` | sign-in routes | `401` |
 
 The 403 is:
@@ -624,6 +624,10 @@ being the person's handle, answers 204 and clears the session cookie.
   (403 `managed` for SCIM-provisioned ones, `sso_required` on an SSO-enforced domain): their
   admin removes them.
 - The old address gets "Your roll account was deleted", in case it wasn't them.
+- They leave every workspace project through the same path as a removal (docs/members.md): the
+  audit log's `member.remove`, their tokens confined to a project revoked (D7), their shares,
+  leases and shared folders ended, and their pending invites revoked. A project left with no owner
+  who can sign in is the operator's or an admin's to give one.
 
 ## Routes
 

@@ -3798,7 +3798,8 @@ It is the operator (`Everything`), a roll-access grant (`GrantGrants`, for `rlt_
 with one secrets rule (`POST /v1/access/tokens`), and a workload identity's login is a `workload` grant.
 
 Secrets accepts the operator (`roll_auth::Operator`, or any request when rolld has no operator
-token), signed-in people on their own projects (below), and roll-access's grants: there is one
+token), signed-in people on the projects they're members of, as their role allows (below, and
+docs/members.md), and roll-access's grants: there is one
 permission system (docs/permissions.md). A token for CI or a service is a roll token (`rlt_…`)
 with one rule on the project's secrets (environments or all, folder prefixes or all, the actions
 above), an optional expiry and client addresses (up to 20 addresses or CIDRs; from anywhere else
@@ -3846,13 +3847,21 @@ every use with the action and scope the made thing exercises, nothing broader; a
 and the operator always pass):
 
 - a scheduled backup runs while its maker may still `admin` and `reveal` the whole project;
-- a gateway and an ACME external account binding work while their maker is still the project's
-  admin;
+- a gateway, an ACME external account binding, an audit sink, an environment's notify URL, and a
+  rotator, SaaS rotator, outside database or directory someone registered work while their maker is
+  still the project's admin (`Secrets::provider_for` before issuing, reading, renewing or rotating
+  through one; revoking what one issued always goes on);
 - a workload identity logs in only while its maker's session allows every action of its rule in
   each of its environments and folders, and the token it gets runs within that session too (it's
   the maker's, so `Within` caps it on each request);
 - their tokens and any token one of those made act within their session (`Within`); a sync pushes
   as them (`person_caller`).
+
+When a member is removed, leaves, is demoted or deletes their account, rolld also calls
+`Secrets::member_changed`: the folders they shared with other projects stop being shared once they
+may no longer manage the project, and the one-time shares they made end and the dynamic leases
+issued to them are revoked once they're no longer a member. Their personal overrides stay (only
+they read them, and they can't).
 
 So removing or demoting a member stops or narrows what they made at once. rolld asks roll-accounts
 and roll-access on every use; a lookup that fails is an error, not a disabled account.

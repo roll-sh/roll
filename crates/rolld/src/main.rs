@@ -652,6 +652,11 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
         let apps = a.apps.clone();
         access.on_leaked("rlk_", move |secret, _why| apps.revoke_leaked_hook(secret));
     }
+    // …and project invites' (`rlv_`).
+    {
+        let ws = workspace.clone();
+        access.on_leaked("rlv_", move |secret, _why| ws.revoke_leaked_invite(secret));
+    }
     // …and previews' (`rlb_`).
     if let Some(e) = previews_engine.clone() {
         access.on_leaked("rlb_", move |secret, _why| e.revoke_leaked_hook(secret));

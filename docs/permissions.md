@@ -657,7 +657,8 @@ route goes on as it did.
   narrows, so a token can carry it too.
 - A project the session's rules don't name is a 404 (as the workspace answers); one they do is a
   403 that names what the role lacks. A list it can't see whole is filtered; a session never asks.
-- Session requests aren't access-log rows (they aren't a token's); membership changes are
+- Session requests aren't access-log rows (they aren't a token's), allowed or refused: a refused
+  session request leaves no audit row either, only its answer. Membership changes are
   (`product=workspace`: `member.invite`, `member.accept`, `member.role`, `member.remove`,
   `member.leave`, `home.set`, …).
 - Placing a resource on a canvas from a session needs `admin` outright on it where it is, or that

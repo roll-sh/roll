@@ -80,6 +80,13 @@ pub const INVITE_TTL_MS: i64 = 7 * 24 * 3_600_000;
 /// The most pending invites a project has.
 pub const INVITES_MAX: i64 = 200;
 
+/// The kinds a project can be the home of: those whose refs are random ids a product never gives
+/// out again (`prj_…`, `rdb_…`, `st_…`, `srch_…`, NoSQL's, `svc_…`). A bucket, a queues vhost, a
+/// tasks tenant or a repo goes by a name that can be deleted and made again by someone else, and a
+/// home kept by name would hand the new one the old one's trust; until those products tell the
+/// workspace when they delete one, they get no home (their trust comes from `Owners` alone).
+pub const HOME_KINDS: [Kind; 6] = [Kind::Postgres, Kind::Redis, Kind::Stream, Kind::Nosql, Kind::Search, Kind::Service];
+
 /// Who people are, as roll accounts has them now (rolld answers; never cached). `None`: no such
 /// account, or it's disabled.
 pub trait People: Send + Sync {
@@ -372,6 +379,7 @@ impl Workspace {
             }
             c.execute("UPDATE members SET role = ?, environments = ? WHERE project_id = ? AND user_id = ?", params![role.as_str(), envs_json(&environments), project, user])?;
             record(c, now, "member.role", project, actor, Some(user), json!({ "old": { "role": old, "environments": old_envs }, "new": { "role": role, "environments": environments } }))?;
+            revoke_invites_beyond(c, now, project, user, Some((role, environments.clone())), actor)?;
             Ok(())
         })?;
         self.run_events();
@@ -394,6 +402,7 @@ impl Workspace {
                 keeps_an_owner(c, project, user, &signing)?;
             }
             c.execute("DELETE FROM members WHERE project_id = ? AND user_id = ?", [project, user])?;
+            revoke_invites_beyond(c, now, project, user, None, actor)?;
             let action = if leaving { "member.leave" } else { "member.remove" };
             record(c, now, action, project, actor, Some(user), json!({ "role": role, "environments": envs }))?;
             Ok(())
@@ -412,7 +421,8 @@ impl Workspace {
         if !actor.may_grant(project, role, environments.as_deref()) {
             return Err(Error::Forbidden(format!("you can't invite a {}: it's more than your own role gives", role.as_str())));
         }
-        let token = format!("pit_{}", random(32));
+        // Checksummed and prefixed (`rlv_`), so the credential guard and leak scanning know it.
+        let token = roll_auth::credentials::new_secret("rlv_");
         let id = format!("pin_{}", random(12));
         let now = self.db.now_ms()?;
         let name = self.db.write(|c| {
@@ -425,7 +435,15 @@ impl Workspace {
             if pending >= INVITES_MAX {
                 return Err(Error::Conflict(format!("a project has at most {INVITES_MAX} pending invites")));
             }
-            // A pending invite to the same address is replaced: its old link stops working.
+            // A pending invite to the same address is replaced (its old link stops working), but
+            // only by someone who may give the role it names: else re-inviting would quietly take
+            // a higher invite away.
+            let replaced: Vec<(String, Option<String>)> = c.query("SELECT role, environments FROM project_invites WHERE project_id = ? AND email = ? AND state = 'pending' AND expires_at > ?", params![project, email, now], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            for (r, e) in &replaced {
+                if !actor.may_grant(project, parse_role(r)?, envs_of(e.clone()).as_deref()) {
+                    return Err(Error::Conflict(format!("{email} has a pending invite as {r}, which is more than your own role gives: someone who may give it revokes it first")));
+                }
+            }
             c.execute("UPDATE project_invites SET state = 'revoked' WHERE project_id = ? AND email = ? AND state = 'pending'", [project, email.as_str()])?;
             c.execute(
                 "INSERT INTO project_invites (id, project_id, token_hash, email, role, environments, state, created_by, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)",
@@ -535,6 +553,16 @@ impl Workspace {
     /// moves a home that's set. Moving one away from a project takes being its admin too.
     pub fn set_home(&self, actor: &Actor, project: &str, kind: Kind, r#ref: &str, only_if_none: bool) -> Result<()> {
         crate::check_ref(r#ref)?;
+        if !HOME_KINDS.contains(&kind) {
+            // A create placed through a project: it just gets no home.
+            if only_if_none {
+                return Ok(());
+            }
+            return Err(Error::BadRequest(format!("a {} goes by a name that can be made again, so it has no home: a project trusts it only as one of its owners'", kind.as_str())));
+        }
+        // A person makes a project the home of only what's their own (`Owners`): their grant's rules
+        // can name any resource, so they prove nothing about whose it is.
+        let owns = actor.user.as_deref().is_none_or(|u| self.owned_by(u, kind, r#ref));
         let now = self.db.now_ms()?;
         let changed = self.db.write(|c| {
             owner_of(c, actor.scope(), project)?;
@@ -549,6 +577,9 @@ impl Workspace {
                         return Err(Error::Forbidden(format!("{} {} is at home in another project: only its admins move it", kind.as_str(), r#ref)));
                     }
                     c.execute("UPDATE homes SET project_id = ?, set_by = ?, set_at = ? WHERE kind = ? AND ref = ?", params![project, actor.id, now, kind.as_str(), r#ref])?;
+                }
+                None if !owns => {
+                    return Err(Error::Forbidden(format!("{} {} isn't yours: only its owner, an admin or the operator makes a project its home", kind.as_str(), r#ref)));
                 }
                 None => {
                     c.execute("INSERT INTO homes (kind, ref, project_id, set_by, set_at) VALUES (?, ?, ?, ?, ?)", params![kind.as_str(), r#ref, project, actor.id, now])?;
@@ -603,12 +634,61 @@ impl Workspace {
 
     /// Whether `project` trusts `kind ref` through its home or its owners' resources
     /// ([`Workspace::trusts`]).
-    pub(crate) fn trusted_by_members(&self, project: &str, kind: Kind, r#ref: &str) -> bool {
-        if roles::decisions::HOMES && self.home_of(kind, r#ref).ok().flatten().as_deref() == Some(project) {
+    pub(crate) fn trusted_by_members(&self, project: &str, namespace: &str, kind: Kind, r#ref: &str) -> bool {
+        if roles::decisions::HOMES && HOME_KINDS.contains(&kind) && self.home_of(kind, r#ref).ok().flatten().as_deref() == Some(project) {
             return true;
         }
         let Some(owners) = self.owners.get() else { return false };
-        self.owners_of(project).unwrap_or_default().iter().any(|o| owners.trusts(o, kind, r#ref))
+        // The person who made the project as before members (an admin's project is the operator's,
+        // D9); another owner adds only what's their own, never all of an admin account's reach.
+        self.owners_of(project).unwrap_or_default().iter().any(|o| if o == namespace { owners.trusts(o, kind, r#ref) } else { owners.owns(o, kind, r#ref) })
+    }
+
+    /// A product deleted `kind ref`: its home and its places on every canvas go, so nothing made
+    /// later under the same ref inherits them.
+    pub fn forget_resource(&self, kind: Kind, r#ref: &str) -> Result<()> {
+        self.db.write(|c| {
+            c.execute("DELETE FROM homes WHERE kind = ? AND ref = ?", [kind.as_str(), r#ref])?;
+            c.execute("DELETE FROM resources WHERE kind = ? AND ref = ?", [kind.as_str(), r#ref])?;
+            Ok(())
+        })
+    }
+
+    /// `user`'s account was deleted: they leave every project, through the same events as a
+    /// removal (the audit log, D7's revocations, secrets' hook), and their pending invites go. A
+    /// project left with no owner who can sign in is the operator's or an admin's to fix (no
+    /// last-owner refusal: the account is gone either way).
+    pub fn forget_person(&self, user: &str, ip: Option<String>) -> Result<usize> {
+        let now = self.db.now_ms()?;
+        let actor = Actor { id: "accounts".into(), ip, ..Default::default() };
+        let n = self.db.write(|c| {
+            let projects: Vec<(String, String)> = c.query("SELECT project_id, role FROM members WHERE user_id = ?", [user], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            for (project, role) in &projects {
+                c.execute("DELETE FROM members WHERE project_id = ? AND user_id = ?", [project.as_str(), user])?;
+                record(c, now, "member.remove", project, &actor, Some(user), json!({ "role": role, "why": "account deleted" }))?;
+            }
+            c.execute("UPDATE project_invites SET state = 'revoked' WHERE created_by = ? AND state = 'pending'", [user])?;
+            Ok::<_, Error>(projects.len())
+        })?;
+        self.run_events();
+        Ok(n)
+    }
+
+    /// An invite's token was found leaked (roll-access's leak scanning, `rlv_`): it stops working.
+    /// What was revoked, or `None` when it wasn't a live invite.
+    pub fn revoke_leaked_invite(&self, token: &str) -> Option<String> {
+        let now = self.db.now_ms().ok()?;
+        let actor = Actor { id: "roll:leak".into(), ..Default::default() };
+        self.db
+            .write(|c| {
+                let found: Option<(String, String)> = c.query_row("SELECT id, project_id FROM project_invites WHERE token_hash = ? AND state = 'pending'", [hash_token(token)], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+                let Some((id, project)) = found else { return Ok(None) };
+                c.execute("UPDATE project_invites SET state = 'revoked' WHERE id = ?", [id.as_str()])?;
+                record(c, now, "member.invite_revoke", &project, &actor, None, json!({ "invite": id, "why": "leaked" }))?;
+                Ok::<_, Error>(Some(format!("invite {id} to project {project}")))
+            })
+            .ok()
+            .flatten()
     }
 }
 
@@ -643,6 +723,25 @@ fn invite_rows(c: &Conn<'_>, filter: &str, p: impl code_sql::Params) -> Result<V
             })
         },
     )?)
+}
+
+/// `user`'s pending invites to `project` that their role no longer gives (`now`: what it is now;
+/// `None`: they left), revoked in the same write: an invite never outlives its inviter's rights.
+fn revoke_invites_beyond(c: &Conn<'_>, now: i64, project: &str, user: &str, role: Option<(Role, Option<Vec<String>>)>, actor: &Actor) -> Result<()> {
+    let pending: Vec<(String, String, Option<String>)> = c.query("SELECT id, role, environments FROM project_invites WHERE project_id = ? AND created_by = ? AND state = 'pending'", [project, user], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+    let rules = role.map(|(role, environments)| roles::session_scope(&[roles::Membership { project: project.into(), role, environments }]));
+    let manages = rules.as_ref().is_some_and(|s| {
+        use roll_auth::scope::{Action, Outcome, Resource, Target};
+        s.outcome(&Target::One(Resource { project: Some(project.into()), ..Resource::new("workspace", project) }), Action::Admin) == Outcome::Allow
+    });
+    for (id, r, e) in pending {
+        let kept = manages && rules.as_ref().is_some_and(|s| Role::parse(&r).is_some_and(|r| roles::may_grant(s, project, r, envs_of(e).as_deref())));
+        if !kept {
+            c.execute("UPDATE project_invites SET state = 'revoked' WHERE id = ?", [id.as_str()])?;
+            record(c, now, "member.invite_revoke", project, actor, Some(user), json!({ "invite": id, "why": "its inviter's role no longer gives it" }))?;
+        }
+    }
+    Ok(())
 }
 
 /// `workspace-members`: every project's maker becomes its owner, so everyone keeps what they had.

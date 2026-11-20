@@ -209,6 +209,20 @@ impl Secrets {
         }
     }
 
+    /// The provider of `kind`, for `ref`: when `ref` is a project's own record (a rotator, an outside
+    /// database, …), only while whoever registered it may still manage the project, as they are
+    /// now. A removed or demoted admin's rotator stops choosing values at once. Revoking what one
+    /// issued doesn't come through here: ending a credential is always allowed.
+    pub(crate) fn provider_for(&self, kind: &str, r#ref: &str) -> Result<&Arc<dyn crate::links::LinkProvider>> {
+        let p = self.links.get(kind)?;
+        if let Some((project, by)) = p.maker(r#ref)
+            && !self.maker_reaches(&by, &[(Action::Admin, Scope::whole(&project))])?
+        {
+            return Err(Error::Link(format!("{kind} {ref} was registered by {by}, who may no longer manage project {project}: an admin of it registers it again", ref = r#ref)));
+        }
+        Ok(p)
+    }
+
     /// Who made `by` in the end: an identity's maker, a token's person (a roll-access grant made by
     /// someone acts as them), up the chain. A token that's gone (revoked, expired, its person
     /// unable to sign in) or an identity that's gone ends it.

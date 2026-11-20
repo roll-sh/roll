@@ -68,7 +68,9 @@ impl Engine {
         }
     }
 
-    /// The ids of the workspace projects `owner` (a signed-in person) is a member of.
+    /// The ids of the workspace projects `owner` (a signed-in person) is a member of: what their
+    /// role lets them do in each, roll-access decides by the catalogue (previews are a member
+    /// product, docs/members.md).
     pub fn projects_of(&self, owner: &str) -> Result<std::collections::HashSet<String>> {
         Ok(self.workspace.list(roll_workspace::Scope::Member(owner))?.into_iter().map(|p| p.id).collect())
     }

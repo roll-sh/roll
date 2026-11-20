@@ -43,7 +43,10 @@ The answer:
 - **The operator's projects** stand for everything on their canvas.
 - **A person's projects** stand only for:
   - what was made through the project, or set to it: the resource's **home** (`homes`, D6). A
-    create the evaluator places with `X-Roll-Project` sets it; `PUT …/homes/{kind}/{ref}` moves it;
+    create the evaluator places with `X-Roll-Project` sets it; `PUT …/homes/{kind}/{ref}` moves it.
+    Only kinds whose ids are never given out again have one (`HOME_KINDS`: postgres, redis,
+    stream, nosql, search, service); a product deleting the resource drops it
+    (`Workspace::forget_resource`). A person homes or places only what `Owners` says is theirs;
   - what `Owners` (set by rolld) says is one of the project's **owners'** (role `owner`):
     - everything, for an admin;
     - a repo under the owner's roll code owner (`ada/…`);
@@ -148,7 +151,7 @@ docs/members.md is the design; these are its v1 routes.
   every environment that isn't protected, D3); `inactive` is a person who can't sign in now.
 - `Invite`: `{id, project, project_name, email, role, environments, state, created_by,
   created_at, expires_at}`. `POST …/invites` answers it with `url` once
-  (`<web>/dashboard/invites?token=pit_…`), mails it to the address when it has an account, and
+  (`<web>/dashboard/invites?token=rlv_…`, checksummed so leak scanning knows it), mails it to the address when it has an account, and
   stores only the token's hash. The link works for 7 days, once, for that address only; a new
   invite to the same address replaces the old one. The answer is the same whether or not the
   address has an account (D5: one without waits until roll's operator or an admin makes it).
@@ -161,7 +164,12 @@ docs/members.md is the design; these are its v1 routes.
   own. Accepting takes their session (never a token) and their account's address must be the
   invite's; every failure is the same 404.
 - `PUT …/homes/{kind}/{ref}` needs `admin` outright on the resource where it is now, as placing
-  one does; moving a home away from another project takes being that project's admin too.
+  one does, and from a person (their session or their token) that `Owners` says it's theirs;
+  moving a home away from another project takes being that project's admin too. A kind outside
+  `HOME_KINDS` is a 400.
+- A new invite to an address replaces a pending one only when the caller may give the role it
+  names (409 otherwise); a member removed or demoted loses the pending invites their role no longer
+  gives, in the same write.
 
 ## Shapes
 

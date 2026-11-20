@@ -619,14 +619,22 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
     if let Some((product, r#ref)) = catalog::placement(row, &params) {
         let (a, product2, r2) = (access.clone(), product, r#ref.clone());
         let moved = tokio::task::spawn_blocking(move || a.resource(product2, product2, &r2)).await.ok();
-        let ok = moved.is_some_and(|m| scope.outcome(&Target::One(m), Action::Admin) == Outcome::Allow);
-        // A person may also place what's their own (their repo, their cluster: `Owners`).
-        let user = person.as_ref().filter(|_| as_user && !ok).map(|p| p.user.clone());
+        // A person's grant (their session, or a token of theirs) proves nothing here: a token's rules
+        // can name any product's resources, whatever the person reaches. A person places only what
+        // `Owners` says is theirs (their repo, their cluster), or moves on its canvas what's already
+        // at home in the project.
+        let ok = !as_user && moved.is_some_and(|m| scope.outcome(&Target::One(m), Action::Admin) == Outcome::Allow);
+        let user = person.as_ref().filter(|_| as_user).map(|p| p.user.clone());
         let kind = params.iter().find(|(k, _)| k == "kind").and_then(|(_, v)| roll_workspace::Kind::parse(v).ok());
-        let own = match (user, kind) {
-            (Some(u), Some(k)) => {
+        let project = params.iter().find(|(k, _)| k == "id").map(|(_, v)| v.clone());
+        let own = match (user, kind, project) {
+            (Some(u), Some(k), Some(p)) => {
                 let a = access.clone();
-                tokio::task::spawn_blocking(move || a.workspace.get().is_some_and(|ws| ws.owned_by(&u, k, &r#ref))).await.unwrap_or(false)
+                tokio::task::spawn_blocking(move || {
+                    a.workspace.get().is_some_and(|ws| ws.owned_by(&u, k, &r#ref) || ws.home_of(k, &r#ref).ok().flatten().as_deref() == Some(p.as_str()))
+                })
+                .await
+                .unwrap_or(false)
             }
             _ => false,
         };
