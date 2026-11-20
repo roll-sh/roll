@@ -13,6 +13,7 @@
 #
 #   scripts/preview-cost.sh [--keep]     # --keep: leave the daemon running at the end
 #   STOP_BEFORE_LAND=1 scripts/preview-cost.sh --keep   # and the preview with it (to look at it)
+#   STOP_AT=against scripts/preview-cost.sh --keep      # main's preview and the change's running, compared
 set -euo pipefail
 # The ports: <P>070 for the API and so on (27 unless PREVIEW_E2E_PORTS says another two digits).
 P=${PREVIEW_E2E_PORTS:-27}
@@ -60,6 +61,8 @@ export ROLL_HOME=$HOME_DIR ROLL_API=$API ROLL_PROXY=127.0.0.1:${P}432 ROLL_REDIS
   ROLL_NOSQL_CQL=127.0.0.1:${P}042 ROLL_NOSQL_CQL_SHARD_AWARE=127.0.0.1:${P}043 ROLL_NOSQL_ALTERNATOR=127.0.0.1:${P}000 ROLL_NOSQL_REST=127.0.0.1:${P}100 \
   ROLL_CODE_PREVIEW_DOMAIN=$DOMAIN ROLL_PRODUCTS=${PREVIEW_PRODUCTS:-code,postgres,redis,storage,nosql,queues,streams,tasks,search} RUST_LOG=${RUST_LOG:-info}
 unset ROLL_ADMIN_TOKEN ROLL_CODE_TOKEN
+# The comparison with main's preview at a test's pace (every 5 s, not every minute).
+export ROLL_PREVIEWS_COMPARE_EVERY=5
 # A deployment key, as a real node has (what roll seals with it: roll secrets, a preview's own variables).
 export ROLL_SECRET_KEY=${PREVIEW_E2E_SECRET_KEY:-$(python3 -c 'import secrets; print(secrets.token_hex(32))')}
 say "starting rolld ($ROLL_PRODUCTS) in $HOME_DIR"
@@ -804,6 +807,54 @@ case "$(api GET "/v1/code/changes/$CHG" | jq_ "[b['kind'] for b in d.get('blocke
 REVIEW=$(api POST "/v1/previews/$PV/visual/accept" "{\"head\":\"$SEEN\"}" | jq_ "'%s by %s' % (d['visual_review']['state'], d['visual_review']['by'])")
 [ "$REVIEW" = "accepted by operator" ] || { echo "accepting should settle the review: $REVIEW"; exit 1; }
 case "$(api GET "/v1/code/changes/$CHG" | jq_ "[b['kind'] for b in d.get('blockers', [])]")" in *visual*) echo "an accepted review shouldn't block landing"; exit 1;; esac
+say "against main's preview, both running: a slower route (and the span its time went to) and a new error reach the record and the change"
+api POST "/v1/previews/$MAINPV/wake" >/dev/null
+api POST "/v1/previews/$PV/wake" >/dev/null
+# main's service's OpenTelemetry endpoint, as its service has it (its own access link first).
+MAIN_URL=$(api GET "/v1/previews/$MAINPV" | jq_ "[x for x in d['services'] if x['name'] == 'web'][0]['share_url']")
+MAIN_HOST=$(echo "$MAIN_URL" | sed 's#https\?://##; s#[:/].*##')
+MJAR="$HOME_DIR/main-cookies"
+curl -sS -L -o /dev/null -c "$MJAR" -b "$MJAR" -H "Host: $MAIN_HOST" "http://$API/?${MAIN_URL#*\?}" --max-time 120
+MAIN_OTEL=""
+for _ in $(seq 1 120); do
+  MAIN_OTEL=$(curl -sS -b "$MJAR" -H "Host: $MAIN_HOST" "http://$API/env.txt" | sed -n 's/^OTEL_EXPORTER_OTLP_ENDPOINT=//p' | sed 's#host.docker.internal#127.0.0.1#')
+  [ -n "$MAIN_OTEL" ] && break
+  sleep 1
+done
+[ -n "$MAIN_OTEL" ] || { echo "main's preview's service should have its OpenTelemetry endpoint"; exit 1; }
+# Five requests each: GET /orders at 100 ms on main's (its query 50) and 400 ms here (its query 330).
+post_orders() { # post_orders <endpoint> <ms> <query ms> <trace prefix>
+  NOW_NS=$(date +%s%N) python3 - "$@" <<'PY'
+import json, os, sys, urllib.request
+ep, ms, q, pre = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4]
+now = int(os.environ["NOW_NS"])
+spans = []
+for i in range(5):
+    t = (pre * 32)[:28] + "%04x" % i
+    spans.append({"traceId": t, "spanId": "%016x" % 1, "name": "GET /orders", "startTimeUnixNano": str(now - ms * 1000000), "endTimeUnixNano": str(now)})
+    spans.append({"traceId": t, "spanId": "%016x" % 2, "parentSpanId": "%016x" % 1, "name": "SELECT orders", "startTimeUnixNano": str(now - q * 1000000), "endTimeUnixNano": str(now)})
+body = json.dumps({"resourceSpans": [{"resource": {"attributes": [{"key": "service.name", "value": {"stringValue": "web"}}]}, "scopeSpans": [{"spans": spans}]}]}).encode()
+urllib.request.urlopen(urllib.request.Request(ep + "/v1/traces", body, {"content-type": "application/json"})).read()
+PY
+}
+post_orders "$MAIN_OTEL" 100 50 a1
+post_orders "$OTEL_HERE" 400 330 b2
+# An error only the change's service writes.
+docker exec "roll-previews-$(echo "$HOST" | cut -d. -f1)" sh -c 'echo "ERROR inventory reservation failed for the cart" > /proc/1/fd/2'
+AGAINST=""
+for _ in $(seq 1 90); do
+  AGAINST=$(api GET "/v1/previews/$PV" | jq_ "' / '.join([', '.join('%s %s->%s %s' % (r['name'], r['main_p50_ms'], r['p50_ms'], (r.get('grew') or {}).get('span')) for r in (d.get('slower_routes') or {}).get('routes', [])), str(any('inventory reservation failed' in e['title'] for e in (d.get('new_errors') or {}).get('errors', [])))])")
+  case "$AGAINST" in "GET /orders 100->400 SELECT orders / True") break;; esac
+  sleep 2
+done
+[ "$AGAINST" = "GET /orders 100->400 SELECT orders / True" ] || { echo "the change should be slower than main's on GET /orders (in SELECT orders) and have a new error: $AGAINST"; exit 1; }
+# The change's summary (its pull request's comment and status read it) has both.
+SUMMED=$(api GET "/v1/code/changes/$CHG" | jq_ "(lambda e: '%s %s' % (bool((e.get('slower_routes') or {}).get('routes')), (e.get('new_errors') or {}).get('total', 0) > 0))((d.get('preview') or {}).get('environment') or {})")
+[ "$SUMMED" = "True True" ] || { echo "the change's preview summary should carry them: $SUMMED"; exit 1; }
+if [ "${STOP_AT:-}" = against ]; then
+  echo "stopped against main's preview: project $PRJ, preview $PV, main's $MAINPV, change $CHG (run with --keep to leave the daemon up)"
+  exit 0
+fi
 # Turned off, it goes.
 OFF=$(api PUT "/v1/previews/projects/$PRJ/settings" '{"github":{"baseline":false}}'); echo "$OFF" | grep -q "\"baseline\":false" || { echo "turning the baseline off: $OFF"; exit 1; }
 for _ in $(seq 1 120); do

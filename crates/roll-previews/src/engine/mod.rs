@@ -83,6 +83,10 @@ pub struct Config {
     /// Where services reach rolld's API for their OpenTelemetry intake (`host:port` as a client on
     /// this node writes it; containers get it rewritten). `None`: no traces.
     pub otlp: Option<String>,
+    /// How often the holder compares its previews with main's: routes from their traces, and
+    /// errors from their output (a read of their logs).
+    pub routes_every: Duration,
+    pub new_errors_every: Duration,
 }
 
 impl Default for Config {
@@ -95,6 +99,8 @@ impl Default for Config {
             usage_every: Duration::from_secs(300),
             mail: None,
             otlp: None,
+            routes_every: Duration::from_secs(60),
+            new_errors_every: Duration::from_secs(300),
         }
     }
 }
