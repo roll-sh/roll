@@ -358,19 +358,19 @@ impl Verifier<'_> {
                 }
             },
             ExprKind::Not(x) => {
-                let (x, _) = self.resolve(x)?;
+                let (x, _) = crate::stack::maybe_grow(|| self.resolve(x))?;
                 out.kind = ExprKind::Not(Box::new(x));
                 Some(SType::Bool)
             }
             ExprKind::And(a, b) | ExprKind::Or(a, b) => {
-                let (a2, _) = self.resolve(a)?;
-                let (b2, _) = self.resolve(b)?;
+                let (a2, _) = crate::stack::maybe_grow(|| self.resolve(a))?;
+                let (b2, _) = crate::stack::maybe_grow(|| self.resolve(b))?;
                 out.kind = if matches!(e.kind, ExprKind::And(..)) { ExprKind::And(Box::new(a2), Box::new(b2)) } else { ExprKind::Or(Box::new(a2), Box::new(b2)) };
                 Some(SType::Bool)
             }
             ExprKind::Cmp(op, a, b) => {
-                let (a2, _) = self.resolve(a)?;
-                let (b2, _) = self.resolve(b)?;
+                let (a2, _) = crate::stack::maybe_grow(|| self.resolve(a))?;
+                let (b2, _) = crate::stack::maybe_grow(|| self.resolve(b))?;
                 // Field-to-field comparisons are refused before verification on Elasticsearch.
                 if let (ExprKind::Field { .. }, ExprKind::Field { name, .. }) = (&a2.kind, &b2.kind) {
                     let (line, col) = line_col(self.src, b.start);
@@ -394,8 +394,8 @@ impl Verifier<'_> {
                 Some(SType::Bool)
             }
             ExprKind::Arith(op, a, b) => {
-                let (a2, ta) = self.resolve(a)?;
-                let (b2, tb) = self.resolve(b)?;
+                let (a2, ta) = crate::stack::maybe_grow(|| self.resolve(a))?;
+                let (b2, tb) = crate::stack::maybe_grow(|| self.resolve(b))?;
                 for (i, (x, t)) in [(a, &ta), (b, &tb)].into_iter().enumerate() {
                     if let Some(t) = t
                         && !t.is_numeric()
@@ -413,7 +413,7 @@ impl Verifier<'_> {
                 Some(ty)
             }
             ExprKind::Neg(x) => {
-                let (x2, t) = self.resolve(x)?;
+                let (x2, t) = crate::stack::maybe_grow(|| self.resolve(x))?;
                 if let Some(t) = &t
                     && !t.is_numeric()
                 {
@@ -424,17 +424,17 @@ impl Verifier<'_> {
                 t
             }
             ExprKind::In { expr, list, insensitive, negated } => {
-                let (x, _) = self.resolve(expr)?;
+                let (x, _) = crate::stack::maybe_grow(|| self.resolve(expr))?;
                 self.check_exact(e, &x, "first");
                 let mut l2 = Vec::with_capacity(list.len());
                 for item in list {
-                    l2.push(self.resolve(item)?.0);
+                    l2.push(crate::stack::maybe_grow(|| self.resolve(item))?.0);
                 }
                 out.kind = ExprKind::In { expr: Box::new(x), list: l2, insensitive: *insensitive, negated: *negated };
                 Some(SType::Bool)
             }
             ExprKind::Match { kind, expr, patterns } => {
-                let (x, t) = self.resolve(expr)?;
+                let (x, t) = crate::stack::maybe_grow(|| self.resolve(expr))?;
                 self.check_exact(e, &x, "first");
                 if let Some(t) = &t
                     && !t.is_string()
@@ -460,7 +460,7 @@ impl Verifier<'_> {
                 let mut resolved = Vec::with_capacity(args.len());
                 let mut types = Vec::with_capacity(args.len());
                 for a in args {
-                    let (a2, t) = self.resolve(a)?;
+                    let (a2, t) = crate::stack::maybe_grow(|| self.resolve(a))?;
                     resolved.push(a2);
                     types.push(t);
                 }
@@ -671,16 +671,16 @@ impl Planner<'_> {
 
     fn plan(&mut self, e: &Expr) -> Node {
         match &e.kind {
-            ExprKind::And(a, b) => Node::And(Box::new(self.plan(a)), Box::new(self.plan(b))),
-            ExprKind::Or(a, b) => Node::Or(Box::new(self.plan(a)), Box::new(self.plan(b))),
-            ExprKind::Not(x) => Node::Not(Box::new(self.plan(x))),
+            ExprKind::And(a, b) => Node::And(Box::new(crate::stack::maybe_grow(|| self.plan(a))), Box::new(crate::stack::maybe_grow(|| self.plan(b)))),
+            ExprKind::Or(a, b) => Node::Or(Box::new(crate::stack::maybe_grow(|| self.plan(a))), Box::new(crate::stack::maybe_grow(|| self.plan(b)))),
+            ExprKind::Not(x) => Node::Not(Box::new(crate::stack::maybe_grow(|| self.plan(x)))),
             ExprKind::Cmp(CmpOp::Neq, a, b) => {
                 let eq = Expr { kind: ExprKind::Cmp(CmpOp::Eq, a.clone(), b.clone()), start: e.start, end: e.end };
-                Node::Not(Box::new(self.plan(&eq)))
+                Node::Not(Box::new(crate::stack::maybe_grow(|| self.plan(&eq))))
             }
             ExprKind::In { expr, list, insensitive, negated: true } => {
                 let pos = Expr { kind: ExprKind::In { expr: expr.clone(), list: list.clone(), insensitive: *insensitive, negated: false }, start: e.start, end: e.end };
-                Node::Not(Box::new(self.plan(&pos)))
+                Node::Not(Box::new(crate::stack::maybe_grow(|| self.plan(&pos))))
             }
             _ => match self.dsl(e) {
                 Some(Ok(q)) => self.leaf(q),
@@ -795,11 +795,11 @@ fn has_field(e: &Expr) -> bool {
     match &e.kind {
         ExprKind::Field { .. } => true,
         ExprKind::Lit(_) => false,
-        ExprKind::Not(x) | ExprKind::Neg(x) => has_field(x),
-        ExprKind::And(a, b) | ExprKind::Or(a, b) | ExprKind::Cmp(_, a, b) | ExprKind::Arith(_, a, b) => has_field(a) || has_field(b),
-        ExprKind::In { expr, list, .. } => has_field(expr) || list.iter().any(has_field),
-        ExprKind::Match { expr, .. } => has_field(expr),
-        ExprKind::Call { args, .. } => args.iter().any(has_field),
+        ExprKind::Not(x) | ExprKind::Neg(x) => crate::stack::maybe_grow(|| has_field(x)),
+        ExprKind::And(a, b) | ExprKind::Or(a, b) | ExprKind::Cmp(_, a, b) | ExprKind::Arith(_, a, b) => crate::stack::maybe_grow(|| has_field(a)) || crate::stack::maybe_grow(|| has_field(b)),
+        ExprKind::In { expr, list, .. } => crate::stack::maybe_grow(|| has_field(expr)) || list.iter().any(|x| crate::stack::maybe_grow(|| has_field(x))),
+        ExprKind::Match { expr, .. } => crate::stack::maybe_grow(|| has_field(expr)),
+        ExprKind::Call { args, .. } => args.iter().any(|x| crate::stack::maybe_grow(|| has_field(x))),
     }
 }
 
@@ -812,17 +812,17 @@ fn collect_fields(e: &Expr, out: &mut Vec<String>, schema: &Schema) {
             }
         }
         ExprKind::Lit(_) => {}
-        ExprKind::Not(x) | ExprKind::Neg(x) => collect_fields(x, out, schema),
+        ExprKind::Not(x) | ExprKind::Neg(x) => crate::stack::maybe_grow(|| collect_fields(x, out, schema)),
         ExprKind::And(a, b) | ExprKind::Or(a, b) | ExprKind::Cmp(_, a, b) | ExprKind::Arith(_, a, b) => {
-            collect_fields(a, out, schema);
-            collect_fields(b, out, schema);
+            crate::stack::maybe_grow(|| collect_fields(a, out, schema));
+            crate::stack::maybe_grow(|| collect_fields(b, out, schema));
         }
         ExprKind::In { expr, list, .. } => {
-            collect_fields(expr, out, schema);
-            list.iter().for_each(|x| collect_fields(x, out, schema));
+            crate::stack::maybe_grow(|| collect_fields(expr, out, schema));
+            list.iter().for_each(|x| crate::stack::maybe_grow(|| collect_fields(x, out, schema)));
         }
-        ExprKind::Match { expr, .. } => collect_fields(expr, out, schema),
-        ExprKind::Call { args, .. } => args.iter().for_each(|x| collect_fields(x, out, schema)),
+        ExprKind::Match { expr, .. } => crate::stack::maybe_grow(|| collect_fields(expr, out, schema)),
+        ExprKind::Call { args, .. } => args.iter().for_each(|x| crate::stack::maybe_grow(|| collect_fields(x, out, schema))),
     }
 }
 
@@ -992,7 +992,12 @@ fn arith(op: ArithOp, a: V, b: V) -> EsResult<V> {
     }))
 }
 
+/// Recurses once per level of `e` (bounded by the parser's expression depth).
 fn eval(e: &Expr, doc: &Doc) -> EsResult<V> {
+    crate::stack::maybe_grow(|| eval_at(e, doc))
+}
+
+fn eval_at(e: &Expr, doc: &Doc) -> EsResult<V> {
     Ok(match &e.kind {
         ExprKind::Lit(l) => match l {
             Lit::Null => V::Null,
@@ -1300,9 +1305,9 @@ fn cidr_contains(cidr: &str, addr: std::net::IpAddr) -> EsResult<bool> {
 
 fn eval_node(n: &Node, matched: &[bool], doc: &Doc) -> EsResult<bool> {
     Ok(match n {
-        Node::And(a, b) => eval_node(a, matched, doc)? && eval_node(b, matched, doc)?,
-        Node::Or(a, b) => eval_node(a, matched, doc)? || eval_node(b, matched, doc)?,
-        Node::Not(x) => !eval_node(x, matched, doc)?,
+        Node::And(a, b) => crate::stack::maybe_grow(|| eval_node(a, matched, doc))? && crate::stack::maybe_grow(|| eval_node(b, matched, doc))?,
+        Node::Or(a, b) => crate::stack::maybe_grow(|| eval_node(a, matched, doc))? || crate::stack::maybe_grow(|| eval_node(b, matched, doc))?,
+        Node::Not(x) => !crate::stack::maybe_grow(|| eval_node(x, matched, doc))?,
         Node::Dsl(i) => matched.get(*i).copied().unwrap_or(false),
         Node::Mem(e) => matches!(eval(e, doc)?, V::Bool(true)),
         Node::Const(b) => *b,

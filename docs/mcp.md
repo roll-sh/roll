@@ -122,6 +122,7 @@ write a credential where people and other agents read it is refused before it's 
 workspace (names, descriptions) and agents (messages). That's how a prompt-injected agent leaks a
 secret: by writing it somewhere it's read.
 
+- Where: also what a tool publishes (`Tool::published`: a status page's incidents and their updates, read by anyone).
 - Found: AWS access keys (not AWS's documentation `…EXAMPLE` keys), GitHub tokens (`ghp_`…, `github_pat_`), Slack tokens, Stripe live keys,
   Google API keys, Anthropic and OpenAI keys, PEM private keys (a block with a base64 body, not
   a bare header in code that parses keys), database URLs carrying their password (Postgres,
@@ -165,15 +166,20 @@ on, its listeners on free loopback ports and a throwaway home. It then calls eve
 `/v1/mcp` as an agent would (`scripts/mcp-sweep.py`):
 
 1. It makes fixtures with the write tools.
-2. It calls each read-only tool with ids from them.
+2. It calls each read-only tool with ids from them. Where no fixture makes the thing a tool names
+   (a deploy, a trace, a mail), it sends a stand-in that doesn't exist: the route answers "not
+   found" with a message, so the tool's path, query and types are still checked (`--verbose`
+   lists each stand-in and its answer).
 3. It calls each write tool with values made from its schema, the destructive ones last.
 
-A 5xx, an argument the route rejects, or an empty 404 (no route answers the path) fails it. That's
-what the unit tests can't see: `tools_map_onto_classified_routes` checks a tool against the
-catalogue, not against the product's own handler. It found that an id's `_` sent as `%5F` left a
-service made over MCP never owned by apps' routing (#402). Tools that need a preview or a running
-Postgres endpoint aren't reached without Docker. It skips itself when nothing changed (`--force`;
-`--reads` skips the writes).
+A 5xx, an argument the route rejects (unknown, missing, or of a type it can't parse), or an empty 404
+(no route answers the path) fails it. That's what the unit tests can't see:
+`tools_map_onto_classified_routes` checks a tool against the catalogue, not against the product's
+own handler. It found that an id's `_` sent as `%5F` left a service made over MCP never owned by
+apps' routing (#402), and that two secrets tools sent their numeric seq and version as any string.
+Every read is also called as a token that may read everything and reveal nothing: a credential the
+fixtures made, in its answer, fails it. Tools that need a running Postgres endpoint aren't reached
+without Docker. It skips itself when nothing changed (`--force`; `--reads` skips the writes).
 
 ### Lockdown
 
@@ -364,10 +370,16 @@ roll implements the MCP authorization spec (2025-06-18 and 2025-11-25) with OAut
     its tools (9 to 18). That run found two interop bugs, both fixed: the ack must carry the
     subscription id too (the SDK matches the ack by it), and the SDK sends `notifications/cancelled`
     without `Mcp-Method` (a notification may leave it out; one present must still match).
-  - **Asking for a missing id** (`roll_mcp::ask`): a call without an id it requires (a project, a
-    Postgres project, an apps service or environment), from a client that declared form
-    elicitation, answers `input_required` with a form whose choices are what the connection may
-    read (the same list tool completions use, through the gate, never asking a person). The
+  - **Asking for a missing id** (`roll_mcp::ask`): a call without an id it requires, from a
+    client that declared form elicitation, answers `input_required` with a form whose choices are
+    what the connection may read (the list tool's answer, through the gate, never asking a
+    person; completions use the same ones). Every id a tool lists has choices: a workspace or
+    Postgres project, a branch, an apps service or environment, a secrets environment, a preview,
+    a token, a bucket, a stream or topic, a NoSQL or Redis database, a search cluster or index, a
+    vhost or queue. `pnpm test:mcp-sweep` checks each against a live rolld: the form must offer
+    the fixture's id, so a list answer of another shape can't offer nothing unnoticed, and a new
+    kind of id fails it until it has choices or a reason not to (`NO_CHOICES`: a repo's
+    `owner/name`, tasks' `id`, which names four things). The
     retry's `inputResponses` fills the id in, and the call runs as if the client had sent it, so
     the gate decides it as usual and there's no `requestState` to trust. A declined form stops the
     call; a value that isn't an id is refused. Other clients get the call's own answer. Checked
@@ -730,6 +742,8 @@ previews are listed once those products are on.
 | `search_slowlog` | A cluster's slowest recent requests. | `GET /v1/search/clusters/{id}/slowlog` |
 | `search_audit` | A cluster's security audit log (failed logins, access denials, changes to users, roles and keys; never a secret). | `GET /v1/search/clusters/{id}/audit` |
 | `search_analytics` | What a cluster's users search for: top queries, queries with no results, click-through (indices that opt in). | `GET /v1/search/clusters/{id}/analytics` |
+| `search_suggestions` | An index's query suggestions from its search analytics: settings, last build, heaviest suggestions. | `GET /v1/search/clusters/{cluster}/indices/{index}/suggestions` |
+| `search_rebuild_suggestions` | Rebuild an index's suggestions index from its analytics now (write). | `POST /v1/search/clusters/{cluster}/indices/{index}/suggestions/rebuild` |
 | `search_usage` | A cluster's metering and cost against Elastic Cloud and Amazon OpenSearch. | `GET /v1/search/clusters/{cluster}/usage` |
 | `search_get_index` | An index's mappings, settings and aliases. | `GET /v1/search/clusters/{cluster}/indices/{index}` |
 | `search_create_index` | Create an index with mappings and settings. | `PUT /v1/search/clusters/{cluster}/indices/{index}` |
@@ -818,7 +832,7 @@ previews are listed once those products are on.
 | `apps_get_service` | A service with its environments' summaries. | `GET /v1/apps/services/{service}` |
 | `apps_set_environment` | Create or change an environment: branch, run settings, following an image tag, waiting for CI. | `PUT /v1/apps/services/{service}/environments/{env}` |
 | `apps_update_service` | Change a service's name, source, build or run settings (run takes `alerts {memory_pct, error_pct, p95_ms}`). | `PATCH /v1/apps/services/{service}` |
-| `apps_deploy` | Deploy a service to an environment: a git revision of its repo, or an image (production deploys are "deploy" actions). | `POST /v1/apps/services/{service}/environments/{env}/deploys` |
+| `apps_deploy` | Deploy a service to an environment: a git revision of its repo, or an image (production deploys are "deploy" actions). `override: true` goes past a deploy freeze, as do `apps_redeploy`'s, `apps_promote`'s and `apps_rollback`'s: sent as `X-Roll-Override: 1`, which roll-access makes `admin` (a deploy token can't) and binds into an approval. | `POST /v1/apps/services/{service}/environments/{env}/deploys` |
 | `apps_list_deploys` | An environment's deploys, newest first. | `GET /v1/apps/services/{service}/environments/{env}/deploys` |
 | `apps_deploy_logs` | A deploy's build and release log. | `GET /v1/apps/services/{service}/environments/{env}/deploys/{deploy}/logs` |
 | `apps_promote` | Deploy another environment's running image into this one. | `POST /v1/apps/services/{service}/environments/{env}/promote` |
@@ -885,6 +899,11 @@ previews are listed once those products are on.
 | `apps_pending` | What the next deploy changes: variables (names), run settings, project secrets. | `GET /v1/apps/services/{service}/environments/{env}/pending` |
 | `apps_deploy_commits` | The commits a deploy brings over the one live before it. | `GET /v1/apps/services/{service}/environments/{env}/deploys/{deploy}/commits` |
 | `apps_deploy_vulnerabilities` | Known vulnerabilities in a deploy's image, most severe first (`severity` keeps that or worse), with the scan's counts. | `GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}/vulnerabilities` |
+| `apps_deploy_sbom` | A deploy's image as a CycloneDX SBOM (every package and version). | `GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}/sbom` |
+| `apps_status_page` | A project's public status page: title, URL, what it shows. | `GET /v1/apps/projects/{project}/status-page` |
+| `apps_list_incidents` | Its incidents: the last 90 days' and the open ones, with updates. | `GET /v1/apps/projects/{project}/status-page/incidents` |
+| `apps_create_incident` | Post an incident on the public page (published text: the credential guard refuses credentials as where people read). | `POST /v1/apps/projects/{project}/status-page/incidents` |
+| `apps_update_incident` | Add a public update to an incident (`resolved` closes it). | `POST /v1/apps/projects/{project}/status-page/incidents/{iid}/updates` |
 | `apps_environment_slo` | An environment's SLO: per indicator, the share that met it, the error budget left, and whether it's burning. | `GET /v1/apps/services/{id}/environments/{env}/slo` |
 | `apps_list_forms` | A static site's forms with their counts (never what people sent). | `GET /v1/apps/services/{id}/environments/{env}/forms` |
 | `apps_form_submissions` | What people sent through a form, newest first (reveal; every read audited). | `GET /v1/apps/services/{id}/environments/{env}/forms/{form}/submissions` |
@@ -901,6 +920,7 @@ previews are listed once those products are on.
 | `previews_refresh` | Redeploy a preview now. | `POST /v1/previews/{id}/refresh` |
 | `previews_errors` | A preview's errors, grouped (masked as logs are). | `GET /v1/previews/{id}/errors` |
 | `previews_traces` | A preview's recent traces: root span, service, duration, spans, failed (masked). | `GET /v1/previews/{id}/traces` |
+| `previews_routes` | Each route's p50/p95 in a preview against main's preview, the slower ones first (masked). | `GET /v1/previews/{id}/routes` |
 | `previews_get_trace` | One trace's spans, oldest first (masked). | `GET /v1/previews/{id}/traces/{trace}` |
 | `previews_mask_suggestions` | Columns that look like people's data and aren't masked in previews, with the rule each would take. | `GET /v1/previews/projects/{project}/mask-suggestions` |
 | `previews_metrics` | Each of a preview's services' CPU and memory now. | `GET /v1/previews/{id}/metrics` |
@@ -931,39 +951,47 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **Next, ranked (now):** a preview's traces as tools (`previews_traces`, `previews_get_trace`;
-   previews #403, with its apps services' own traces merged in; `feature/roll-mcp-previews-traces`,
-   this PR). With search #382: `search_suggestions` withholds each suggestion's `text` in lockdown
-   (whichever lands second adds it). Waiting on secrets: value requests as tools
-   (`feature/roll-mcp-secrets-requests`; held for #277's answer token, `rlq_…`, which an independent
-   review found was missing: a request's listed id was the capability to answer it, so a `read`
-   could plant a value; secrets moved #277 to batch 5 to fix it; its test's `prj%5Fa` becomes
-   `prj_a` now that ids go unencoded); later `secrets_verify_audit` once #281 lands. Then: widen
-   the live sweep (`live/read-sweep.py --writes`) with a preview, a roll code repo and a running
-   Postgres endpoint, the 80 read tools it can't reach yet. No tools for #304's cut-off (a person's
-   call), #392's decoys (an admin's), or previews' shell, files and forward (ADMIN, interactive).
-   Waiting on roll code: a removed person's repositories handed to someone else. Not doing:
-   "remember this browser"; a preset that reveals development's values without asking (#354);
-   `tools/list` without copying its definitions (about 2 of its ~10 ms with 376 tools, once a
-   session: its size, ~290 KB, is the cost, and search mode and toolsets answer it).
-2. **Landed 2026-11-19 (main 4b20f3402, ci green):** the credential guard finds database URLs
+1. **Next, ranked (now):** the sweep reaches every read tool: a stand-in that doesn't exist for
+   what no fixture makes (a deploy, a trace, a mail), so all 235 are called, not 185; it fails a
+   path segment the route can't parse, which found `secrets_get_change`'s `seq` and
+   `secrets_version_value`'s `v` sent as any string, now integers (`feature/roll-mcp-sweep-ids`,
+   this PR). Queued for the merge lock after search and previews: #448 (apps' status page,
+   incidents and SBOM as tools; what a tool publishes is held to the credential guard) and #450
+   (roll code MCP's openWorldHint). Waiting on apps: `override` on `apps_deploy`, `apps_redeploy`
+   and `apps_rollback` (the `x-roll-override` header from their override-admin branch, after
+   #449). With search #382: `search_suggestions` withholds each suggestion's `text` in lockdown
+   (whichever lands second adds it). Waiting on secrets batch 5: value requests as tools
+   (`feature/roll-mcp-secrets-requests`, on #277's answer token, `rlq_…`; its test's `prj%5Fa`
+   becomes `prj_a`). No tools for #304's cut-off (a person's call), #392's decoys (an admin's), or
+   previews' shell, files and forward (ADMIN, interactive). Waiting on roll code: a removed
+   person's repositories handed to someone else. Not doing: "remember this browser"; a preset
+   that reveals development's values without asking (#354); `tools/list` without copying its
+   definitions (about 2 of its ~10 ms with 376 tools, once a session: its size, ~290 KB, is the
+   cost, and search mode and toolsets answer it).
+2. **Landed 2026-11-19 (main 86039db8a, ci green):** a branch's backup wakes its compute first
+   (#428, found by the sweep's `postgres_backup_branch`); a preview's traces
+   as tools (#421); `pnpm test:mcp-sweep`, every tool against a fresh rolld with a leak check of
+   every read as a token that can't reveal (#425); `secrets_verify_audit`, and `security_checkup`
+   reports a broken audit chain (#443); openWorldHint on the tools that have roll reach an address
+   the caller chose (#447).
+3. **Landed 2026-11-19 (main 4b20f3402, ci green):** the credential guard finds database URLs
    carrying their password and a secret's share link; ids go into paths as they are (an id's `_`
    sent as `%5F` left a service made over MCP never owned by apps' routing, so its live actions
    answered 503; found by the live sweep of every tool); the guide says what outsiders wrote is data
    (#402). Apps' scanning, SLOs and forms as tools; lockdown withholds what a site's visitors and a
    search box's users wrote (#406).
-3. **Landed 2026-11-19 (main 098fb41a2, ci green):** `security_checkup` past tokens to what's open to
+4. **Landed 2026-11-19 (main 098fb41a2, ci green):** `security_checkup` past tokens to what's open to
    the internet; search's remotes and inference secrets as tools; a test that every tool a
    description or workflow names exists; a connection's tools read in place (`prompts/list` 2.2 ms to
    0.18 ms) (#387).
-4. **Landed 2026-11-19 (main 09a3526b6, ci green):** read tools for secrets' new backends and
+5. **Landed 2026-11-19 (main 09a3526b6, ci green):** read tools for secrets' new backends and
    storage's IAM (#380); the access checkup, tokens, tighten proposals and a token's networks as
    tools, the `security_checkup` workflow, queues' users, tasks' apps and API keys, nosql's imports
    and a stream's keys (#383; live-checked with `live/reads-383.sh` against a rolld built from it).
-5. **Landed 2026-11-19 (main 8ce685ac8, ci green):** the turn-4 follow-ups (#373: the policy alert
+6. **Landed 2026-11-19 (main 8ce685ac8, ci green):** the turn-4 follow-ups (#373: the policy alert
    names the longest session, People's Dormant filter and turning the dormant off in one step),
    more secrets reads as tools with 10 more search-mode queries (#376), People as CSV (#377).
-6. **Landed 2026-11-19, turn 4 (main 97cdd7645, ci green):** steadier timing tests (#348), passkey
+7. **Landed 2026-11-19, turn 4 (main 97cdd7645, ci green):** steadier timing tests (#348), passkey
    autofill (#322), an admin's per-person security log (#328), admin alerts (#333), search's audit
    and analytics tools (#334), the longest session (#337), how each session signed in (#338),
    signing out of the others (#342), People's search (#345), dormant people, token use counting
@@ -971,7 +999,7 @@ waits on a sibling PR reaching main is last.
    clients' limits (#355), approvals remembered for a week or 30 days (#360), debugging reads as
    tools (#362). An independent security review fixed six of them before landing; checked in a
    real Chromium (`users-live/review-turn4.sh`).
-7. **Landed 2026-11-18, turn 3 (main e84194b6f, ci green):** a person's own data export (#283),
+8. **Landed 2026-11-18, turn 3 (main e84194b6f, ci green):** a person's own data export (#283),
    hardware keys only (#286), one provider for people and agents (#287), an SSO connection's
    session length (#289) and back-channel logout (#292), allowed networks (#294), a second factor
    for everyone (#298) and who has one (#299), an idle timeout (#302), phishing-resistant sign-in
@@ -981,10 +1009,10 @@ waits on a sibling PR reaching main is last.
    Kubernetes clusters (#310), and the audit log naming people by handle (#313). Gated as one tree,
    then landed one per round (`turn3-land.sh`: the queue drops stacked PRs that share anchors once
    a squash breaks their ancestry).
-8. **Landed 2026-11-18 (main 1a60b43be):** passkeys (#256), sudo mode (#257, #260), new-sign-in mail
+9. **Landed 2026-11-18 (main 1a60b43be):** passkeys (#256), sudo mode (#257, #260), new-sign-in mail
    (#258), second-factor resets (#263), refused codes in the security log (#254); for roll secrets,
    `revoke_many` and the public detectors (#267) and decoy tokens (#270).
-9. **People's accounts, enterprise-grade:** on main: SSO (#225), SCIM provisioning (#231) with
+10. **People's accounts, enterprise-grade:** on main: SSO (#225), SCIM provisioning (#231) with
    checksummed `rlp_` tokens revoked on a leak (#250), accounts in roll's audit log (#236), a
    person's own security log (#239), one place for identity providers (#252: an enterprise
    provider with `sso` vouches for its SSO connection's proven domains), and one provider for
@@ -994,7 +1022,7 @@ waits on a sibling PR reaching main is last.
    - Provider groups to roles over SCIM: **blocked.** roll has no org or team membership for people
      yet (docs/accounts.md phase 2, "Orgs"), and its one role, admin, is never SCIM's to grant.
      Groups map to org membership once orgs exist.
-10. **Tools for sibling routes as they reach main** (each a row in tools.rs and the table above).
+11. **Tools for sibling routes as they reach main** (each a row in tools.rs and the table above).
    `secrets_list_github_apps` (secrets #73) is #253; secrets' other routes after batch 1 are admin,
    a credential, a person's review, or an existing tool's (`tool-gaps.py`, 2026-11-18). Waiting on
    open PRs: `secrets_totp` (secrets #194), apps #230 (`apps_restore_service`, deploy,
@@ -1002,24 +1030,24 @@ waits on a sibling PR reaching main is last.
    #219/#221/#222 (`rebuild_on_base`, firewall `challenge`, `build_closed`), apps #235 (`GET …/diff`,
    and `PATCH …/variables` `copy_from` on its own row with `copies_from`). Apps tells this thread
    as #230 and #235 land (their turn began 2026-11-18 03:00).
-11. **Gate flakes under load, for their owners:** code-sql's `writes_are_serializable_and_retried`
+12. **Gate flakes under load, for their owners:** code-sql's `writes_are_serializable_and_retried`
    and `killed_connections_never_lose_or_repeat_acknowledged_writes` (16 threads on one row exhaust
    the 40 conflict re-runs), and code-control's Linear e2e (30 s for the elicitation). A test-side
    deadline, not more retries in production, is the likely fix. (The 2026-11-18 turn's combined
    gate passed without them: #208, #209, #210, #225, #226, #231, #236 and #239 landed as one gated
    tree, main 53b939213.)
-12. **Enterprise sign-in (#210), what's left:** a live check with a real provider's ID-JAG (Okta's
+13. **Enterprise sign-in (#210), what's left:** a live check with a real provider's ID-JAG (Okta's
    Cross App Access sandbox needs an account: the review pack's decision 5). The draft names the
    tenant `tenant`; a provider whose assertions say it another way (Entra's own tokens use `tid`)
    gets a mapping once its ID-JAGs are checked, never a guess.
-13. **Outsiders' text reaching roll's own agents:** checked 2026-11-19. An issue or comment from
+14. **Outsiders' text reaching roll's own agents:** checked 2026-11-19. An issue or comment from
    someone GitHub says can't push starts no automation unless its trigger says `anyone`
    (`chatops/github.rs`, as GitHub's lockdown does), forks' code waits for `approve-run`, and only
    an install's members drive roll from Slack or Discord. Left, the agents area's call: when a
    trigger says `anyone`, run its agent with a read-only grant (or ask before every write), since
    the outsider's text is then the agent's task. roll's agents don't connect to `/v1/mcp` (their
    MCP server is the orchestrator's), so `?lockdown` isn't where this belongs.
-14. **More MCP Apps views:** a rollback button on a deploy (calling `apps_rollback` through the
+15. **More MCP Apps views:** a rollback button on a deploy (calling `apps_rollback` through the
    host, so through the gate, as deploy), once a host that renders views is confirmed (the review
    pack's decision 4). A preview's screenshot against its baseline needs no view: hosts render
    `previews_screenshot`'s image (`diff=base`) themselves, and accepting a visual change stays a
@@ -1027,30 +1055,30 @@ waits on a sibling PR reaching main is last.
    (`examples/basic-host` v2.0.4: `users-live/host-shot.mjs`, with its one-line patch declaring
    the extension) and the stand-in; Claude.ai or ChatGPT need a public HTTPS rolld and the user's
    account.
-15. **Everyday routes with no tool:** rechecked on main 2026-11-18 (03:40, after secrets' batch 1
+16. **Everyday routes with no tool:** rechecked on main 2026-11-18 (03:40, after secrets' batch 1
    and search's and previews' turns): secrets' one gap is #253, search and previews have nothing new; what has no tool is a credential, a password, a key's
    material, a deployment key's health, a person's review, or admin by design (tasks, streams,
    storage, queues, postgres, Redis and NoSQL have theirs). Recheck each product after its thread
    lands routes (`tool-gaps.py origin/main <product> <branch>`).
-16. **More tools that wait:** `apps_wait_deploy` is in #108. Rechecked on main (05:50): Postgres
+17. **More tools that wait:** `apps_wait_deploy` is in #108. Rechecked on main (05:50): Postgres
    branch backups and restores answer once done (nothing to wait on); search's reindexes are
    Elasticsearch's own `_tasks` behind the operator's request route. Branch backups and search reindexes
    can use `until` once their routes answer a state to wait on (search's reindex is an
    Elasticsearch task today, with no roll route to watch). Recheck with `mcpc` (`~/.local/share/roll-mcp/live/mcpc-tasks.sh`), and with the
    TypeScript SDK's `client/ext/tasks` once it ships.
-17. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
+18. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
    rolld, and send each thread its conflicts and their resolutions (`sibling-auth.sh`: every
    route classified, per method, with #25; agreed conflicts resolved by `known-conflicts.py`), and
    compare each product's routes with its tools (an everyday route with no tool is a gap: apps'
    were found this way). #24 and #25 are on main, so `feature/mcp-on-landing` is retired:
    secrets' #64 lands on main directly.
-18. **The operator's steps:** only if a load balancer that terminates HTTP sits in front of rolld (not
+19. **The operator's steps:** only if a load balancer that terminates HTTP sits in front of rolld (not
    roll's own edge, which needs nothing), set `ROLL_TRUSTED_PROXIES` to its addresses; and register `rlt_`, `rlo_`, `rlf_`, `rlc_`, `rlk_`, `rlp_` and `rlb_` (`[a-z2-7]{40}` with a
    checksum) with GitHub's secret scanning partner program, so leaks on GitHub reach
    `/v1/access/leaks/github`.
-19. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
+20. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
    reach the daemon on the Docker bridge; run `pnpm test:pg` where they can (CI) before merging.
-20. **Step-up authorization (SEP-835), once clients do it:** a refused call could answer `403`
+21. **Step-up authorization (SEP-835), once clients do it:** a refused call could answer `403`
    `WWW-Authenticate: Bearer error="insufficient_scope", scope=…` so the client reopens roll's
    consent screen for the refused rule (as the refusal's widen link proposes it now). Not yet: today
    it would take the refusal's explanation and `access_request_access` away from the main clients,
