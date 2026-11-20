@@ -111,6 +111,8 @@ export interface Run {
   cpu_target?: number;
   /** A web service also scaled on its answers' p95 (50–60,000 ms). */
   latency_target_ms?: number;
+  /** Audiences its instances may ask roll's OIDC issuer for, at ROLL_OIDC_URL (`?aud=`, the first by default). */
+  oidc_audiences?: string[];
   /** And on memory: another while they average over this percent of their memory for a minute (10–100). */
   memory_target?: number;
   suspend_after_s: number;
@@ -1590,15 +1592,42 @@ export interface AccessLine {
   by?: "allow_list" | "firewall" | "rate_limit" | "private" | "maintenance" | "wake" | "capped" | "paused" | "not_deployed" | "moving" | "unavailable";
 }
 
-/** Follows a service's changes (`…/changes`): `onChange` for each tick, `onOpen` as the stream comes and goes. */
-export function followChanges(service: string, opts: { onChange: () => void; onOpen?: (open: boolean) => void }): () => void {
-  return streamSse(`${ROLL_API}/v1/apps/services/${encodeURIComponent(service)}/changes`, {
-    headers: operatorHeaders,
-    onOpen: opts.onOpen,
-    onEvent: (e) => {
-      if (e.event === "changed") opts.onChange();
-    },
-  });
+type ChangeFollower = { onChange: () => void; onOpen?: (open: boolean) => void };
+
+/** One `…/changes` stream a service, shared by everything on the page that follows it. */
+const changeStreams = new Map<string, { followers: Set<ChangeFollower>; open: boolean; stop: () => void }>();
+
+/** Follows a service's changes (`…/changes`): `onChange` for each tick, `onOpen` as the stream comes and goes. Followers of one service share
+ *  one stream, which closes when the last stops. */
+export function followChanges(service: string, opts: ChangeFollower): () => void {
+  let s = changeStreams.get(service);
+  if (!s) {
+    const followers = new Set<ChangeFollower>();
+    const shared = { followers, open: false, stop: () => {} };
+    shared.stop = streamSse(`${ROLL_API}/v1/apps/services/${encodeURIComponent(service)}/changes`, {
+      headers: operatorHeaders,
+      onOpen: (open) => {
+        shared.open = open;
+        for (const f of [...followers]) f.onOpen?.(open);
+      },
+      onEvent: (e) => {
+        if (e.event === "changed") for (const f of [...followers]) f.onChange();
+      },
+    });
+    changeStreams.set(service, shared);
+    s = shared;
+  }
+  const follower = { ...opts };
+  s.followers.add(follower);
+  if (s.open) follower.onOpen?.(true);
+  const mine = s;
+  return () => {
+    mine.followers.delete(follower);
+    if (mine.followers.size === 0 && changeStreams.get(service) === mine) {
+      changeStreams.delete(service);
+      mine.stop();
+    }
+  };
 }
 
 export function followLog(

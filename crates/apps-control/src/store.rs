@@ -88,6 +88,15 @@ CREATE TABLE IF NOT EXISTS trace_ingest (
     sealed TEXT NOT NULL,
     PRIMARY KEY (service, env)
 ) WITHOUT ROWID;
+-- Where an environment's instances read roll's OIDC tokens: its URL's token, sealed.
+CREATE TABLE IF NOT EXISTS oidc_access (
+    service TEXT NOT NULL,
+    env TEXT NOT NULL,
+    sealed TEXT NOT NULL,
+    -- Its SHA-256, to find it by a leaked copy (`Apps::revoke_leaked_oidc`).
+    hash TEXT NOT NULL,
+    PRIMARY KEY (service, env)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS runtime_config (
     service TEXT NOT NULL,
     env TEXT NOT NULL,
@@ -1010,7 +1019,7 @@ impl Store {
             c.execute("DELETE FROM deploy_steps WHERE deployment IN (SELECT id FROM deployments WHERE service = ?)", [id])?;
             c.execute("DELETE FROM state WHERE key LIKE ?", [format!("%:{id}/%")])?;
             c.execute("DELETE FROM status_days WHERE key LIKE ?", [format!("%:{id}/%")])?;
-            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "runtime_config", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "preview_hosts", "runs", "jobs", "metrics", "usage", "form_submissions", "deploy_scans"] {
+            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "runtime_config", "oidc_access", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "preview_hosts", "runs", "jobs", "metrics", "usage", "form_submissions", "deploy_scans"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ?"), [id])?;
             }
             match c.execute("DELETE FROM services WHERE id = ?", [id])? {
@@ -1126,7 +1135,7 @@ impl Store {
             if n == 0 {
                 return Err(Error::NotFound(format!("service {service} has no environment {env}")));
             }
-            for t in ["variables", "variable_files", "error_groups", "domains", "preview_hosts", "runs", "jobs", "metrics", "deploy_keys", "env_access", "trace_ingest", "runtime_config", "visit_tickets", "visit_sessions", "form_submissions"] {
+            for t in ["variables", "variable_files", "error_groups", "domains", "preview_hosts", "runs", "jobs", "metrics", "deploy_keys", "env_access", "trace_ingest", "runtime_config", "oidc_access", "visit_tickets", "visit_sessions", "form_submissions"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ? AND env = ?"), [service, env])?;
             }
             // Its schedules', challenge's and base images' state goes with it.
@@ -2477,6 +2486,35 @@ impl Store {
     pub fn runtime_config_token(&self, service: &str, env: &str) -> Result<Option<String>> {
         let sealed: Option<String> = self.db.query_row("SELECT sealed FROM runtime_config WHERE service = ? AND env = ?", params![service, env], |r| r.get(0)).optional()?;
         sealed.map(|s| self.sealer.open(&format!("config:{service}:{env}"), &s)).transpose()
+    }
+
+    /// The token of the URL an environment's instances read OIDC tokens from, made once and
+    /// kept (it goes only with the environment).
+    pub fn oidc_token(&self, service: &str, env: &str) -> Result<String> {
+        // Apps' own prefix, checksummed (`roll_auth::credentials::SECRET_PREFIXES`): scanners
+        // know it, and a leaked one comes back to `Apps::revoke_leaked_oidc`.
+        let token = roll_auth::credentials::new_secret("rlr_");
+        let sealed = self.sealer.seal(&format!("oidc:{service}:{env}"), &token);
+        let hash = crate::public::token_hash(&token);
+        self.db.execute("INSERT INTO oidc_access (service, env, sealed, hash) VALUES (?, ?, ?, ?) ON CONFLICT (service, env) DO NOTHING", params![service, env, sealed, hash])?;
+        let kept: String = self.db.query_row("SELECT sealed FROM oidc_access WHERE service = ? AND env = ?", params![service, env], |r| r.get(0))?;
+        self.sealer.open(&format!("oidc:{service}:{env}"), &kept)
+    }
+
+    /// The environment whose OIDC address a token is, by its hash; its row gone (the address
+    /// reads nothing from now on; the next deploy makes a new one).
+    pub fn drop_oidc_by_hash(&self, hash: &str) -> Result<Option<(String, String)>> {
+        let row: Option<(String, String)> = self.db.query_row("SELECT service, env FROM oidc_access WHERE hash = ?", [hash], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+        if let Some((s, e)) = &row {
+            self.db.execute("DELETE FROM oidc_access WHERE service = ? AND env = ?", params![s, e])?;
+        }
+        Ok(row)
+    }
+
+    /// That token, when the environment has one (none: never asked for).
+    pub fn oidc_token_of(&self, service: &str, env: &str) -> Result<Option<String>> {
+        let kept: Option<String> = self.db.query_row("SELECT sealed FROM oidc_access WHERE service = ? AND env = ?", params![service, env], |r| r.get(0)).optional()?;
+        kept.map(|k| self.sealer.open(&format!("oidc:{service}:{env}"), &k)).transpose()
     }
 
     /// A new read token for its runtime config (a leaked `ROLL_CONFIG_URL`); the one before is

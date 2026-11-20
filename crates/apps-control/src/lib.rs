@@ -267,6 +267,8 @@ pub struct Apps {
     explainer: std::sync::OnceLock<Arc<dyn integrations::Explainer>>,
     /// ECR logins' tokens by service: (the token, when it expires, unix ms).
     ecr_tokens: Mutex<HashMap<String, (String, i64)>>,
+    /// Instances' OIDC tokens by `<service>/<env>/<aud>`: (the token, when it expires, unix ms).
+    pub(crate) oidc_tokens: Mutex<HashMap<String, (String, i64)>>,
     pushers: push::Pushers,
     /// Who may still open a project's environments ([`Apps::set_visitors`]).
     pub(crate) visitors: std::sync::OnceLock<Arc<dyn integrations::Visitors>>,
@@ -581,6 +583,7 @@ impl Apps {
             mail: std::sync::OnceLock::new(),
             explainer: std::sync::OnceLock::new(),
             ecr_tokens: Mutex::new(HashMap::new()),
+            oidc_tokens: Mutex::new(HashMap::new()),
             pushers: push::Pushers::default(),
             visitors: std::sync::OnceLock::new(),
             drain_done: Arc::new(Mutex::new(Vec::new())),
@@ -2691,6 +2694,16 @@ impl Apps {
         }
         if config_url {
             sealed.insert("ROLL_CONFIG_URL".into());
+        }
+        // Where its instances read roll's OIDC tokens (`run.oidc_audiences`): a token URL on this
+        // listener, sealed, as runtime config's; the first audience said too.
+        if let (Some(base), Some(first)) = (&self.cfg.otlp_base, svc.run.oidc_audiences.first()) {
+            let (sid, e) = (svc.id.clone(), env.name.clone());
+            let token = self.db(move |s| s.oidc_token(&sid, &e)).await?;
+            let url = format!("{}{}{}/{}/{token}", base.trim_end_matches('/'), crate::public::OIDC, svc.id, env.name);
+            vars.insert("ROLL_OIDC_URL".into(), (self.deps.runtime.reach(&url), "roll"));
+            vars.insert("ROLL_OIDC_AUDIENCE".into(), (first.clone(), "roll"));
+            sealed.insert("ROLL_OIDC_URL".into());
         }
         for (k, v) in own {
             vars.insert(k, (v, "service"));
