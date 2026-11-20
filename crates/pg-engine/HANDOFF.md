@@ -12832,6 +12832,85 @@ block's buffer is rounded up to its size class: blocks cut just past 8 kB (`ROW_
 10 kB. Cutting row and index blocks so their in-memory form ends at a class boundary would
 recover it. Not measured.
 
+## Block cache memory, round 2: the cache's own buffers, the CLOCK hand (agent 268)
+
+Agent 264 found what blocked agent 247's CLOCK hand fix: a cache miss's buffer came from the
+reading thread's mimalloc heap, often a parallel scan worker's (`exec::parscan`) that exits when
+its scan ends. With the hand fixed, CLOCK evicts the oldest blocks, which other threads read and
+many of them have exited, so their buffers went back into abandoned heaps and the memory was not
+reused (VmHWM 695-712 MB against 527-540). Recycling evicted buffers through the allocator still
+left +36 to +88 MB. BENCH.md "Block cache memory, round 2" has the tables.
+
+**Kept (`cand/a268`): the cache owns its block buffers** (`storage::cache::arena`, item 1 of the
+brief), with agent 264's exact count (`16f5fc50d`, cherry-picked with its docs) under it and the
+CLOCK hand fix on top.
+- Each of the 16 shards has an `Arena`: chunks it maps itself (`mmap`, `MADV_NOHUGEPAGE`,
+  because THP is `always` here and khugepaged would fill a 2 MB page that only a few pieces
+  use). A chunk is a sixteenth of the shard's budget, between 64 kB and 1 MB (1 MB at 256 MB).
+  Chunks are cut into pieces of a buffer's length rounded to 16 bytes plus a 16-byte header.
+  Free pieces are kept in segregated lists (TLSF's two levels: 16-byte steps below 1 kB, 16
+  lists to each power of two past it, a bitmap), and a freed piece joins its free neighbours.
+  A chunk is unmapped when its last piece is freed, so an empty cache maps nothing and a small
+  cache maps only what it holds. A free piece of 64 kB or more gives its pages back
+  (`MADV_DONTNEED`), as mimalloc's purge does.
+- Waste against a block's length: at most 47 bytes a block, header included (0.7% of a 6.4 kB
+  block), against mimalloc's size classes (+4-5%, agent 264). Blocks over a quarter of a chunk
+  stay on the heap (16 kB at the smallest cache's 64 kB chunks, 256 kB at 256 MB). Fixed-size slots (item 1 as first
+  written) would have wasted up to a class step on every block. Item 2 of the brief (a
+  persistent parscan worker pool) was not needed.
+- A block that goes into the cache is made in its shard's arena: `Block::load` (format 2) writes
+  the body straight into the piece (the copy it made into a `Vec` before). The other forms
+  (format 1, a block without its dead entries, a retagged run) are copied in (`Block::moved_to`).
+  The buffer is a `Bytes::from_owner(Buf)`: clones and value slices are a reference count, as
+  before, and the piece goes back to its arena when the last `Bytes` drops, on whichever thread.
+  Blocks that are not cached (compaction's inputs, `read_once`, a bulk read where the shard has
+  no room) stay on the heap as before.
+- What a block counts (`Block::held`, `mem_bytes`): its piece, the `Bytes` owner's allocation
+  (48 bytes) and the `Arc` (96), each exact by construction, plus the shards' tables (agent
+  264's). A shard's arena maps at most the shard's budget. When it is full and no free piece
+  fits, the miss evicts (CLOCK, `Shard::evict_one`) until one does, at most 16 blocks
+  (`EVICT_FOR_ROOM`), else that buffer is the heap's. A bulk read never evicts for its buffer.
+- CLOCK: after `swap_remove` moves the newest block into the evicted one's slot, the hand goes
+  past it (agent 247's and 255's patch). Before, the hand stayed on that slot, so each insert
+  evicted the block inserted just before it and the cache kept only its oldest blocks.
+
+**Measured** (plain dist, origin `d06686d6c` against it plus the change, lane C, TPC-H SF 1 at a
+256 MB cache, q02, q09, q17 and q21, three runs each after a warm-up pass over the 22; user
+instructions of every thread in the server's cgroup, so parallel workers too). Two pairs, both
+with 1.4-1.8 foreign cores on the server CPUs (the lane did not get quieter; instruction counts
+agree within 3% between the pairs):
+- **Peak memory falls**: VmHWM 518.1 -> 505.5 and 520.2 -> 508.0 MiB (530,540 -> 517,608 and
+  532,712 -> 520,168 kB). The cgroup's peak was 557 -> 525 and 603 -> 476 MiB.
+- **User instructions: -27.1% and -28.3% over the four** (141.8 -> 103.4 and 141.8 -> 101.7 G):
+  q02 -70% / -71%, q17 -52% / -52%, q09 -27% / -29%, **q21 +21% / +22%**. Result hashes are
+  equal. Medians: q02 1.3-1.9 -> 0.5-0.9 s, q17 3.9-4.4 -> 1.4-1.8 s, q09 6.9-7.1 -> 6.0-6.4 s,
+  q21 1.6-1.7 -> 2.8-3.2 s.
+- Cached reads are level, as expected because the changed code runs only on a miss: point
+  selects at 8 clients (lane A, one pair) 39,775 -> 39,631 user instructions a read (-0.4%),
+  100-row range reads (lane B, one pair) 348,552 -> 348,471 (-0.02%). The base arms read
+  1.5-1.7 foreign cores, so the tps (+72%, +61%) is load, not the change.
+
+**q21 is worse.** This was not measured further. The likely cause is the policy, not the
+arena. q21 probes lineitem (EXISTS / NOT EXISTS on `l_orderkey`) through index reads, which are
+not bulk reads. That is a loop over more data than 256 MB, repeated in every run. The old
+stuck hand behaved like MRU, so it kept a fixed part of lineitem across the runs. A real CLOCK
+keeps none of a loop larger than the cache. PostgreSQL's clock sweep has usage counts up to 5
+where ours has a single bit; that would keep blocks read more than once over a scan's
+single-use ones.
+
+Verification: see the candidate's report (quick-check with the checked stage over the origin
+head). Tests: `storage::cache::arena::tests::pieces_come_back_whole` takes and drops 20,000
+buffers of mixed sizes in a scrambled order and checks that they never overlap, keep their
+bytes, unmap every chunk when the last one goes, and that a full arena maps no more.
+
+**Left:** (1) q21 and other loops over more than the cache: CLOCK with usage counts
+(PostgreSQL's `BM_MAX_USAGE_COUNT` 5), or index reads of a big relation treated as bulk reads.
+Gate on all 22 queries, not these four. (2) The arena's own fragmentation was not measured
+(mapped bytes against counted bytes). VmHWM is what the gate checks, and it fell; RUST_LOG
+`pg_engine::storage::cache::arena=debug` logs each chunk mapped and unmapped with the total.
+(3) Agent 264's item (2): cut row and index blocks so that their in-memory form ends at a class
+boundary. It no longer applies: a piece wastes at most 47 bytes.
+
 ## Point and range reads, round 6: 32 clients, idle footprint (agent 250)
 
 BENCH.md "Point and range reads, round 6" has the tables. Base `6d3b7e9e5`, built plain dist

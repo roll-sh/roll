@@ -1342,6 +1342,31 @@ clients:
 | point select (lane A) | 1.34 / 0.45 | 39,660 -> 39,677 | +0.04% |
 | 100-row range read (lane B) | 0.60 / 0.80 | 348,492 -> 348,409 | -0.02% |
 
+## Block cache memory, round 2: the cache's own buffers, the CLOCK hand (2026-11-20, agent 268)
+
+HANDOFF.md "Block cache memory, round 2" has what changed and why. Plain dist, origin
+`d06686d6c` (base) against `cand/a268`'s change on it (c1). Lane C, TPC-H SF 1 at a 256 MB cache:
+per arm a fresh engine in a container on a copy of the loaded data, a warm-up pass over the 22,
+then per query three runs in one `perf stat -a -G <the server's cgroup>` window (user
+instructions per run of every thread in the container, parallel workers too), and VmHWM at the
+end. Harness `~/.cache/a268/tpch/pair.sh` (agent 264's and 255's, counting by cgroup). Each pair
+is one `tools/lane.sh` hold. The lane's eight CPUs read 5.1-5.2 foreign cores, and the server
+CPUs 1.4-1.8.
+
+| pair (first, second) | foreign (base / c1) | q02 | q09 | q17 | q21 | the four | VmHWM base -> c1 |
+|---|---|---|---|---|---|---|---|
+| 1 (base, c1) | 1.49 / 1.75 | -70.3% | -26.8% | -52.3% | +21.0% | **-27.1%** (141.82 -> 103.38 G) | 518.1 -> 505.5 MiB |
+| 2 (c1, base) | 1.36 / 1.49 | -71.4% | -28.8% | -52.2% | +21.8% | **-28.3%** (141.76 -> 101.67 G) | 520.2 -> 508.0 MiB |
+
+Result hashes are equal. Medians (s, base -> c1): q02 1.26 / 1.90 -> 0.89 / 0.50, q09 6.86 / 7.10
+-> 6.00 / 6.41, q17 4.44 / 3.95 -> 1.80 / 1.44, q21 1.72 / 1.59 -> 3.21 / 2.83. OLTP, harness
+`~/.cache/a268/bench` (agent 255's, counting by cgroup), one pair each at 8 clients, c1 first:
+
+| workload | foreign (base / c1) | user instructions / op, base -> c1 | Δ |
+|---|---|---|---|
+| point select (lane A) | 1.70 / 0.38 | 39,775 -> 39,631 | -0.36% |
+| 100-row range read (lane B) | 1.52 / 0.29 | 348,552 -> 348,471 | -0.02% |
+
 ## Read path, round 7: the audit since 6d3b7e9e5, the estimates' operator lookups (2026-11-18/19, agent 255)
 
 HANDOFF.md "Read path, round 7" has what changed and why. Harness `~/.cache/a255/bench`
