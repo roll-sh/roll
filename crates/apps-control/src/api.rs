@@ -671,7 +671,7 @@ async fn changes(State(apps): S, Path(id): Path<String>) -> R {
 }
 
 async fn put_git_login(State(apps): S, Path(id): Path<String>, ext: Extensions, b: Bytes) -> R {
-    let s = apps.put_git_login(&id, body(&b)?).await?;
+    let s = apps.put_git_login(&id, body(&b)?, Some(asker(&ext))).await?;
     apps.audit("git_login.set", &id, "", actor(&ext), json!({ "host": s.git_login.as_ref().map(|l| l.host.clone()) })).await;
     ok(s)
 }
@@ -1295,7 +1295,7 @@ async fn change_variables(State(apps): S, Path((id, env)): Path<(String, String)
         let svc = apps.service(&id).await?;
         apps.check_references(&svc.project, &svc.name, &env, &values, asker(&ext)).await?;
     }
-    let v = apps.change_variables(&id, &env, change.clone()).await?;
+    let v = apps.change_variables(&id, &env, change.clone(), Some(asker(&ext))).await?;
     apps.settings_changed();
     // Names only: a value never reaches the trail.
     let set: Vec<String> = change["set"].as_object().map(|o| o.keys().cloned().collect()).unwrap_or_default();

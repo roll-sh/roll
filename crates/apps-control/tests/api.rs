@@ -4932,8 +4932,9 @@ async fn a_replaced_instance_finishes_its_requests_within_drain_s() {
 }
 
 /// A variable that's a `roll://` reference to its own environment's secret is read as the
-/// service at each deploy and sealed; another environment's or a project's is refused when it's
-/// set, and one that doesn't resolve fails the deploy.
+/// service at each deploy and sealed; another environment's is bound to whoever sets it (roll
+/// secrets' maker references: refused unless they may reveal it) and read as them; a project's is
+/// refused, and one that doesn't resolve fails the deploy.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_roll_reference_variable_reads_its_environments_secret() {
     struct Refs;
@@ -4952,6 +4953,17 @@ async fn a_roll_reference_variable_reads_its_environments_secret() {
                 r => anyhow::bail!("no such key: {r}"),
             }
         }
+        async fn bind_ref(&self, _: apps_control::integrations::Asker<'_>, _: &str, service: &str, reference: &str) -> anyhow::Result<String> {
+            assert!(service.starts_with("svc_"));
+            match reference {
+                "roll://staging/API" => Ok("usr_ada".into()),
+                r => anyhow::bail!("you may not reveal {r}"),
+            }
+        }
+        async fn resolve_as(&self, _: &str, env: &str, _: &str, reference: &str, maker: &str) -> anyhow::Result<String> {
+            assert_eq!((env, reference, maker), ("production", "roll://staging/API", "usr_ada"));
+            Ok("https://staging-api".into())
+        }
     }
     let w = world_full(|_| {}, false, |d| d.secrets = Arc::new(Refs)).await;
     let (svc, _) = image_service(&w, "api", json!({"port": 80})).await;
@@ -4959,17 +4971,17 @@ async fn a_roll_reference_variable_reads_its_environments_secret() {
     let base = format!("/v1/apps/services/{id}/environments/production");
     let vars_path = format!("{base}/variables");
     let set = |vars: Value| call(&w.api, "PATCH", &vars_path, Some(json!({ "set": vars })));
-    assert_eq!(set(json!({"X": "roll://staging/KEY"})).await.0, StatusCode::BAD_REQUEST, "another environment's");
+    assert_eq!(set(json!({"X": "roll://staging/KEY"})).await.0, StatusCode::FORBIDDEN, "another environment's its setter may not reveal");
     assert_eq!(set(json!({"X": "roll://acme@production/KEY"})).await.0, StatusCode::BAD_REQUEST, "a project's");
     assert_eq!(set(json!({"X": " roll://staging/KEY"})).await.0, StatusCode::BAD_REQUEST, "read as a reference once trimmed: written exactly or refused");
     assert_eq!(set(json!({"X": "ROLL://production/db/URL"})).await.0, StatusCode::BAD_REQUEST, "or lowercased");
     assert_eq!(set(json!({"X": "roll://production/services/svc_other/KEY"})).await.0, StatusCode::BAD_REQUEST, "another service's own folder");
-    assert!(set(json!({"DATABASE_URL": "roll://production/db/URL", "FAKE_ECHO": "DATABASE_URL"})).await.0.is_success());
+    assert!(set(json!({"DATABASE_URL": "roll://production/db/URL", "STAGING_API": "roll://staging/API", "FAKE_ECHO": "DATABASE_URL,STAGING_API"})).await.0.is_success());
     let (_, d) = call(&w.api, "POST", &format!("{base}/redeploy"), Some(json!({}))).await;
     let d = settled(&w, &id, "production", d["id"].as_str().unwrap()).await;
     assert_eq!(d["status"], "active", "{d}");
     let (_, body) = visit_deployment(&w, &host(&svc["environments"][0]["url"]), d["id"].as_str().unwrap()).await;
-    assert_eq!(body["vars"]["DATABASE_URL"], "postgres://from-secrets", "{body}");
+    assert_eq!((&body["vars"]["DATABASE_URL"], &body["vars"]["STAGING_API"]), (&json!("postgres://from-secrets"), &json!("https://staging-api")), "{body}");
     let (_, vars) = call(&w.api, "GET", &format!("{base}/variables"), None).await;
     assert!(!vars.to_string().contains("postgres://from-secrets"), "never shown: {vars}");
     // One that doesn't resolve: the deploy fails, saying which.
@@ -6745,6 +6757,15 @@ async fn a_git_login_reads_its_token_from_roll_secrets() {
             assert_eq!(env, "production");
             Ok(vec![apps_control::integrations::SecretVar { name: "GIT_TOKEN".into(), value: TOKEN.lock().clone(), linked: false, sensitive: true, plain: false }])
         }
+        async fn bind_ref_runtime(&self, _: apps_control::integrations::Asker<'_>, _: &str, _: &str, reference: &str, runtime_env: &str) -> anyhow::Result<String> {
+            assert_eq!(runtime_env, "production");
+            anyhow::ensure!(reference == "roll://production/git/TOKEN", "you may not reveal {reference}");
+            Ok("usr_ada@runtime:production".into())
+        }
+        async fn resolve_as(&self, _: &str, env: &str, _: &str, reference: &str, maker: &str) -> anyhow::Result<String> {
+            assert_eq!((env, reference, maker), ("production", "roll://production/git/TOKEN", "usr_ada@runtime:production"));
+            Ok(TOKEN.lock().clone())
+        }
     }
     *TOKEN.lock() = "tok-1".into();
     let w = world_full(|_| {}, false, |d| d.secrets = Arc::new(Tokens)).await;
@@ -6768,6 +6789,16 @@ async fn a_git_login_reads_its_token_from_roll_secrets() {
     *git.login.lock() = Some(("deploy".into(), "tok-2".into()));
     *TOKEN.lock() = "tok-2".into();
     let deploys = format!("/v1/apps/services/{id}/environments/production/deploys");
+    let (st, d) = call(&w.api, "POST", &deploys, Some(json!({}))).await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{d}");
+    assert_eq!(settled(&w, &id, "production", d["id"].as_str().unwrap()).await["status"], "active");
+    // A reference into roll secrets, bound to whoever sets it and read as them at each fetch;
+    // one they may not reveal, or another environment's, is refused when it's set.
+    assert_eq!(call(&w.api, "PUT", &login, Some(json!({"username": "deploy", "secret": "roll://production/git/OTHER"}))).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(call(&w.api, "PUT", &login, Some(json!({"username": "deploy", "secret": "roll://staging/git/TOKEN"}))).await.0, StatusCode::BAD_REQUEST);
+    assert!(call(&w.api, "PUT", &login, Some(json!({"username": "deploy", "secret": "roll://production/git/TOKEN"}))).await.0.is_success());
+    *git.login.lock() = Some(("deploy".into(), "tok-3".into()));
+    *TOKEN.lock() = "tok-3".into();
     let (st, d) = call(&w.api, "POST", &deploys, Some(json!({}))).await;
     assert_eq!(st, StatusCode::ACCEPTED, "{d}");
     assert_eq!(settled(&w, &id, "production", d["id"].as_str().unwrap()).await["status"], "active");
