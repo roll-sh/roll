@@ -7129,6 +7129,8 @@ struct FakeStream {
     /// (topic, partition) → the next offset to deliver.
     committed: Mutex<std::collections::HashMap<(String, i32), i64>>,
     produced: Mutex<Vec<(String, apps_control::integrations::StreamRecord)>>,
+    /// (topic, partition) → the consumer that holds it, as the broker leases partitions.
+    held: Mutex<std::collections::HashMap<(String, i32), String>>,
 }
 
 #[async_trait]
@@ -7136,12 +7138,14 @@ impl apps_control::integrations::Resources for FakeStream {
     async fn link_vars(&self, kind: apps_control::model::LinkKind, _ref: &str) -> anyhow::Result<Vec<(String, String)>> {
         anyhow::bail!("no {}", kind.as_str())
     }
-    async fn read_group(&self, stream: &str, topic: &str, _group: &str, _consumer: &str, _wait_ms: u64, limit: usize) -> anyhow::Result<Vec<apps_control::integrations::StreamRecord>> {
+    async fn read_group(&self, stream: &str, topic: &str, _group: &str, consumer: &str, _wait_ms: u64, limit: usize) -> anyhow::Result<Vec<apps_control::integrations::StreamRecord>> {
         anyhow::ensure!(stream == "st_ag2345678abc", "no stream {stream}");
         let next: Vec<_> = {
             let committed = self.committed.lock();
             let records = self.records.lock();
-            records.iter().filter(|(t, r)| t == topic && r.offset >= committed.get(&(t.clone(), r.partition)).copied().unwrap_or(0)).take(limit).map(|(_, r)| r.clone()).collect()
+            let mut held = self.held.lock();
+            let mine = |p: i32, held: &mut std::collections::HashMap<(String, i32), String>| held.entry((topic.to_string(), p)).or_insert_with(|| consumer.to_string()) == consumer;
+            records.iter().filter(|(t, r)| t == topic && r.offset >= committed.get(&(t.clone(), r.partition)).copied().unwrap_or(0) && mine(r.partition, &mut held)).take(limit).map(|(_, r)| r.clone()).collect()
         };
         if next.is_empty() {
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -7155,6 +7159,14 @@ impl apps_control::integrations::Resources for FakeStream {
     async fn produce(&self, _stream: &str, topic: &str, record: &apps_control::integrations::StreamRecord) -> anyhow::Result<()> {
         self.produced.lock().push((topic.to_string(), record.clone()));
         Ok(())
+    }
+    async fn leave(&self, _stream: &str, _group: &str, consumer: &str) -> anyhow::Result<()> {
+        self.held.lock().retain(|_, c| c != consumer);
+        Ok(())
+    }
+    async fn backlog(&self, _stream: &str, _group: &str) -> anyhow::Result<u64> {
+        let committed = self.committed.lock();
+        Ok(self.records.lock().iter().filter(|(t, r)| r.offset >= committed.get(&(t.clone(), r.partition)).copied().unwrap_or(0)).count() as u64)
     }
 }
 
@@ -7204,6 +7216,11 @@ async fn a_stream_is_pushed_to_a_web_service() {
     for want in ["got event orders/0/0 (try 1, sh.roll.stream.record)", "got event orders/0/1 (try 1, ", "got event poison/0/0 (try 2, "] {
         assert!(got.iter().any(|g| g.starts_with(want)), "{want}: {got:?}");
     }
+    assert_eq!(got.iter().filter(|g| g.starts_with("got event orders/0/0 ")).count(), 1, "several loops a rule, never one record twice: {got:?}");
+    // As they stand: nothing behind, what went where.
+    let (_, states) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/push"), None).await;
+    let by = |t: &str| states.as_array().unwrap().iter().find(|s| s["topic"] == t).cloned().unwrap_or_else(|| panic!("{states}"));
+    assert_eq!((by("orders")["delivered"].as_u64(), by("orders")["lag"].as_u64(), by("poison")["dead_lettered"].as_u64()), (Some(2), Some(0), Some(1)), "{states}");
     let produced = stream.produced.lock().clone();
     assert_eq!(produced.len(), 1, "{produced:?}");
     let (topic, dead) = &produced[0];

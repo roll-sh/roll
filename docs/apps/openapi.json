@@ -3163,6 +3163,43 @@
         "x-roll-action": "deploy*; admin with `X-Roll-Override: 1`"
       }
     },
+    "/v1/apps/services/{id}/environments/{env}/push": {
+      "get": {
+        "description": "Answers `PushState[]`: the environment's `run.push` rules as they stand, read on the service's owner: each group's `lag` (records not committed, every partition), `delivered`, `dead_lettered`, `last_delivered_at`, `failing_since` and `last_error` since that node began delivering, and `off` (why nothing is delivered).",
+        "operationId": "getServicesIdEnvironmentsEnvPush",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`PushState[]`: the environment's `run.push` rules as they stand, read on the service's owner: each group's `lag` (records not committed, every partition), `delivered`, `dead_lettered`, `last_delivered_at`, `failing_since` and `last_error` since that node began delivering, and `off` (why nothing is delivered)"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Get push",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "read"
+      }
+    },
     "/v1/apps/services/{id}/environments/{env}/redeploy": {
       "post": {
         "description": "Answers 202 `Deployment` (trigger `settings`).",

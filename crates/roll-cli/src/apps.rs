@@ -493,6 +493,12 @@ pub enum AppsCmd {
         #[arg(long, requires = "vulnerabilities", value_parser = ["critical", "high", "medium", "low", "unknown"])]
         severity: Option<String>,
     },
+    /// Its streams pushed to it (`run.push`) as they stand: how far each group is behind, what was
+    /// delivered and dead-lettered, and whether one is failing or off.
+    Push {
+        #[command(flatten)]
+        target: Target,
+    },
     /// What the next deploy changes (Railway's staged changes): variables added, removed or
     /// changed (names, never values), run settings the live deployment doesn't run with, and the
     /// project's secrets.
@@ -3154,6 +3160,30 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 return Ok(());
             }
             c
+        }
+        AppsCmd::Push { target } => {
+            let svc = service(api, &target).await?;
+            let v = api.get(&format!("{}/push", env_path(&svc, &target.env))).await?;
+            if !json_out {
+                let rules = v.as_array().cloned().unwrap_or_default();
+                if rules.is_empty() {
+                    println!("no stream is pushed to {} (run.push)", target.env);
+                }
+                for r in rules {
+                    let head = format!("{} -> {}", s(&r["topic"]), s(&r["path"]));
+                    if let Some(off) = r["off"].as_str() {
+                        println!("{head}: off, {off}");
+                        continue;
+                    }
+                    let lag = r["lag"].as_u64().map(|l| format!("{l} behind, ")).unwrap_or_default();
+                    println!("{head}: {lag}{} delivered, {} dead-lettered", r["delivered"], r["dead_lettered"]);
+                    if let Some(e) = r["last_error"].as_str() {
+                        println!("  failing: {e}");
+                    }
+                }
+                return Ok(());
+            }
+            v
         }
         AppsCmd::Pending { target } => {
             let svc = service(api, &target).await?;

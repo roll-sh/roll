@@ -903,6 +903,10 @@ pub struct Push {
     /// How long one POST may take: 1–600 s (default 30).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_s: Option<u32>,
+    /// Records POSTed at once, each from its own partitions (1–32, default 4): order holds
+    /// within a partition, and a busy topic scales the service out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_in_flight: Option<u32>,
 }
 
 impl Push {
@@ -1182,6 +1186,9 @@ impl Run {
             }
             if p.timeout_s.is_some_and(|t| !(1..=600).contains(&t)) {
                 return bad("push's timeout_s is 1–600");
+            }
+            if p.max_in_flight.is_some_and(|n| !(1..=32).contains(&n)) {
+                return bad("push's max_in_flight is 1–32");
             }
             if self.push[..i].iter().any(|o| o.stream == p.stream && o.group == p.group && o.topic == p.topic) {
                 return bad("push has one rule per stream, topic and group");
