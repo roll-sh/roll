@@ -37,7 +37,7 @@ pub mod scorers;
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
 use search_codec::{LiveDocs, NO_MORE_DOCS, SegmentReader};
@@ -1595,6 +1595,16 @@ impl Searcher {
 
     /// [`count`](Self::count) with a deadline and cancellation.
     pub fn count_with(&self, q: &QueryRef, ctl: &SearchControl) -> Result<u64> {
+        match self.count_partial(q, ctl)? {
+            (n, false) => Ok(n),
+            (_, true) => Err(Error::TimeExceeded),
+        }
+    }
+
+    /// [`count_with`](Self::count_with) that keeps what it counted when the deadline passes,
+    /// as a timed-out search keeps its total hits: the count and whether the deadline cut it
+    /// short.
+    pub fn count_partial(&self, q: &QueryRef, ctl: &SearchControl) -> Result<(u64, bool)> {
         let w = self.create_weight(q, ScoreMode::CompleteNoScores)?;
         let mut total = 0u64;
         let mut iterate = vec![false; self.inner.segments.len()];
@@ -1605,7 +1615,7 @@ impl Searcher {
             }
         }
         if !iterate.contains(&true) {
-            return Ok(total);
+            return Ok((total, false));
         }
         let slices: Vec<Vec<Partition>> = self
             .slices()
@@ -1613,16 +1623,22 @@ impl Searcher {
             .map(|s| s.into_iter().filter(|p| iterate[p.seg.ord as usize]).collect::<Vec<_>>())
             .filter(|s| !s.is_empty())
             .collect();
-        if slices.len() <= 1 || pool::in_worker() {
-            let mut c = crate::collector::TotalHitCountCollector::default();
-            for s in &slices {
-                search_partitions(s, w.as_ref(), &mut c, ctl)?;
-            }
-            return Ok(total + c.total);
+        // Slices add what they counted as each partition ends, so a slice stopped by the
+        // deadline still contributes.
+        let counted = Arc::new(AtomicU64::new(0));
+        let r = if slices.len() <= 1 || pool::in_worker() {
+            let mut c = SharedCount(counted.clone());
+            slices.iter().try_for_each(|s| search_partitions(s, w.as_ref(), &mut c, ctl))
+        } else {
+            let collectors = (0..slices.len()).map(|_| SharedCount(counted.clone())).collect();
+            run_slices(Arc::from(w), slices, collectors, ctl).map(drop)
+        };
+        let total = total + counted.load(Ordering::Relaxed);
+        match r {
+            Ok(()) => Ok((total, false)),
+            Err(Error::TimeExceeded) => Ok((total, true)),
+            Err(e) => Err(e),
         }
-        let collectors = (0..slices.len()).map(|_| crate::collector::TotalHitCountCollector::default()).collect();
-        let cs = run_slices(Arc::from(w), slices, collectors, ctl)?;
-        Ok(total + cs.iter().map(|c| c.total).sum::<u64>())
     }
 
     /// Explains global doc `doc`.
@@ -1646,6 +1662,39 @@ impl Searcher {
             .ok_or_else(|| Error::illegal(format!("doc {doc} out of range")))?;
         seg.ensure_stored()?;
         seg.core.stored_document(local)
+    }
+}
+
+/// Counts hits into a total the slices of a concurrent count share
+/// ([`Searcher::count_partial`]): each leaf adds its count when it's dropped, even when the
+/// deadline stopped it.
+struct SharedCount(Arc<AtomicU64>);
+
+struct SharedCountLeaf<'a> {
+    n: u64,
+    total: &'a AtomicU64,
+}
+
+impl LeafCollector for SharedCountLeaf<'_> {
+    #[inline]
+    fn collect(&mut self, _doc: u32, _s: &mut dyn Scorable) -> Result<()> {
+        self.n += 1;
+        Ok(())
+    }
+}
+
+impl Drop for SharedCountLeaf<'_> {
+    fn drop(&mut self) {
+        self.total.fetch_add(self.n, Ordering::Relaxed);
+    }
+}
+
+impl Collector for SharedCount {
+    fn score_mode(&self) -> ScoreMode {
+        ScoreMode::CompleteNoScores
+    }
+    fn leaf<'a>(&'a mut self, _seg: &SegmentContext) -> Result<Box<dyn LeafCollector + 'a>> {
+        Ok(Box::new(SharedCountLeaf { n: 0, total: &self.0 }))
     }
 }
 

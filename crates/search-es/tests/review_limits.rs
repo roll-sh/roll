@@ -162,3 +162,22 @@ async fn open_points_in_time_are_bounded() {
     assert_eq!(call(&c, "DELETE", "/_pit", &format!(r#"{{"id":"{first}"}}"#)).await.0, 200);
     assert_eq!(call(&c, "POST", "/idx/_pit?keep_alive=1h", "").await.0, 200);
 }
+
+#[tokio::test]
+async fn the_node_cap_bounds_a_search_with_no_timeout() {
+    let mut cfg = search_es::ClusterConfig::new("limits");
+    cfg.node_settings.push((search_es::search::MAX_TIME.into(), "500ms".into()));
+    let c = Cluster::open(cfg, Arc::new(search_es::MemoryStore::new())).await.unwrap();
+    call(&c, "PUT", "/idx/_doc/1?refresh=true", r#"{"a":1}"#).await;
+    // A search script polls the search's deadline instead of counting loop statements.
+    let looping = r#""query":{"script_score":{"query":{"match_all":{}},"script":{"source":"long n = 0; for (long i = 0; i < 1000000000000L; i++) { n += i; } return n % 2 + 1;"}}}"#;
+    // No timeout of its own, then a larger one than the cap: both stop at the cap.
+    for body in [format!("{{{looping}}}"), format!(r#"{{"timeout":"1h",{looping}}}"#)] {
+        let t = Instant::now();
+        let (status, v) = call(&c, "POST", "/idx/_search", &body).await;
+        assert_eq!(status, 200, "{}", v.to_json());
+        assert_eq!(at(&v, &["timed_out"]).as_bool(), Some(true), "{}", v.to_json());
+        assert_eq!(at(&v, &["_shards", "failed"]).as_i64(), Some(0), "{}", v.to_json());
+        assert!(t.elapsed() < Duration::from_secs(10), "took {:?}", t.elapsed());
+    }
+}
