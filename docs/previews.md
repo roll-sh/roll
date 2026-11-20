@@ -2247,15 +2247,17 @@ Ranked by what a person notices first. Done so far:
    secrets' #520 and #517, its batch 6): see "Keys a preview never holds". Built: the
    TLS-terminating swap (`intercept::serve`). Next: the socket handoff from `egress.js`, the trust
    stores, rolld's adapter.
-3. **A preview's own variables take `roll://` too, in review** (#544, as #537 did for the
-   rules): `PUT …/{id}/env` takes a reference with its setter's reveal there, kept as its
-   writer, read as them at every converge.
-4. **An earlier push that's gone says so** (Vercel keeps every push; previews keep the last 3 per
-   service at hosts of their own, "Earlier pushes"): a link to one evicted since answers a page
-   naming the push and linking the current one and its screenshot, instead of a 404.
+3. **An earlier push that's gone says so, in review** (#545; Vercel keeps every push, previews
+   the last 3 per service): a link to one evicted since answers 410 naming the push and linking
+   the service's latest, instead of a 404.
+4. **The same on a project's own preview domain**: #545 answers on roll's preview domain only;
+   a project's own (`*.preview.acme.dev`) still 404s for an evicted push.
 5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
 6. **Watch: pg-control's recovery to a time seconds old** (unowned).
+
+Landed 2026-11-20 evening, later (main 089b7fa80): a preview's own variables take `roll://`
+references, each read as its setter at every converge (#544).
 
 Landed 2026-11-20 evening (main ed1868373, gated green with both live checks): a rule's reference
 to another environment reaches a preview only while its writer still may (#537: roll secrets'
