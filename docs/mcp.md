@@ -501,12 +501,19 @@ Two resources an agent can read before it acts (`resources/list`, `resources/rea
 `roll://access/me` is read from `GET /v1/access` through the gated router with the caller's token,
 as a tool is, so it says what the gate decides and the read is in the audit log.
 
-One template (`resources/templates/list`), listed when the connection may list workspace projects:
+Two templates (`resources/templates/list`). Listed when the connection may list workspace projects:
 `roll://projects/{project}` is a project and every resource on its canvas (kind and id, names
 quoted), read from `GET /v1/workspace/projects/{project}` the same way, for a client to attach
 before acting on a project. Its id completes like a prompt's (`completion/complete` with
 `ref/resource`); an id that isn't letters, digits, `_` and `-` is "resource not found", so a URI
 never reaches another route.
+
+Listed when the connection has `code_read_file`: `roll://code/{owner}/{repo}/{+path}` is a file on a
+roll code repo's default branch, as GitHub's server has repository contents as resources, for a
+client to attach a file as context. It's read through `code_read_file` as the caller (the gate
+decides, the audit log has the call); a binary file says what it is, and a long one says where
+`code_read_file` reads on. Owner and repo are ids and complete from `code_list_repos`; a path's
+segments are percent-decoded and never empty, `.`, `..` or a hidden `/`, else "resource not found".
 
 ## Prompts
 
