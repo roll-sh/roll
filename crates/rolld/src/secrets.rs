@@ -1439,6 +1439,69 @@ impl apps_control::integrations::SecretSource for ForApps {
         .await?
     }
 
+    /// A variable's reference into another environment, bound to whoever writes it
+    /// (`Secrets::bind_ref`: they may reveal it for the service now): the maker to keep.
+    async fn bind_ref(&self, who: apps_control::integrations::Asker<'_>, project: &str, service: &str, reference: &str) -> anyhow::Result<String> {
+        let (secrets, _) = self.0.get().cloned().ok_or_else(|| anyhow::anyhow!("roll secrets is starting: try again in a moment"))?;
+        let caller = secrets.caller_of(who.operator, who.user, who.grant).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let (service, reference, _project) = (service.to_string(), reference.to_string(), project.to_string());
+        tokio::task::spawn_blocking(move || {
+            let r = roll_secrets::ResourceRef::new(roll_workspace::Kind::Service, &service);
+            let maker = secrets.bind_ref(&r, &reference, &caller).map_err(|e| anyhow::anyhow!("{e}"))?;
+            Ok(serde_json::to_value(&maker)?.as_str().unwrap_or_default().to_string())
+        })
+        .await?
+    }
+
+    /// A Git login's reference, bound as the service's runtime read in `runtime_env`
+    /// (`Secrets::bind_ref_runtime`; the gate asked for deploy on the service).
+    async fn bind_ref_runtime(&self, who: apps_control::integrations::Asker<'_>, _project: &str, service: &str, reference: &str, runtime_env: &str) -> anyhow::Result<String> {
+        let (secrets, _) = self.0.get().cloned().ok_or_else(|| anyhow::anyhow!("roll secrets is starting: try again in a moment"))?;
+        let caller = secrets.caller_of(who.operator, who.user, who.grant).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let (service, reference, runtime_env) = (service.to_string(), reference.to_string(), runtime_env.to_string());
+        tokio::task::spawn_blocking(move || {
+            let r = roll_secrets::ResourceRef::new(roll_workspace::Kind::Service, &service);
+            let maker = secrets.bind_ref_runtime(&r, &reference, &caller, &runtime_env).map_err(|e| anyhow::anyhow!("{e}"))?;
+            Ok(serde_json::to_value(&maker)?.as_str().unwrap_or_default().to_string())
+        })
+        .await?
+    }
+
+    /// The digest of the folder a bound reference reads, as its maker may now.
+    async fn digest_as(&self, project: &str, env: &str, service: &str, reference: &str, maker: &str) -> anyhow::Result<String> {
+        let (secrets, _) = self.0.get().cloned().ok_or_else(|| anyhow::anyhow!("roll secrets is starting"))?;
+        let (project, env, service, reference) = (project.to_string(), env.to_string(), service.to_string(), reference.to_string());
+        let maker: roll_secrets::Maker = serde_json::from_value(serde_json::Value::String(maker.to_string()))?;
+        tokio::task::spawn_blocking(move || {
+            let caller = roll_secrets::Caller::consumer(&format!("app:{service}"));
+            let untrusted = matches!(secrets.environment(&project, &env, &caller), Ok(e) if e.kind == roll_secrets::EnvironmentKind::Ephemeral && !e.trusted);
+            let mut r = roll_secrets::ResourceRef::new(roll_workspace::Kind::Service, &service);
+            if untrusted {
+                r = r.untrusted();
+            }
+            secrets.digest_as(&r, &reference, &maker).map_err(|e| anyhow::anyhow!("{e}"))
+        })
+        .await?
+    }
+
+    /// That reference's value for the service in `env`, read as its maker may now (untrusted in an
+    /// untrusted preview, as `resolve_ref`).
+    async fn resolve_as(&self, project: &str, env: &str, service: &str, reference: &str, maker: &str) -> anyhow::Result<String> {
+        let (secrets, _) = self.0.get().cloned().ok_or_else(|| anyhow::anyhow!("roll secrets is starting: deploy again in a moment"))?;
+        let (project, env, service, reference) = (project.to_string(), env.to_string(), service.to_string(), reference.to_string());
+        let maker: roll_secrets::Maker = serde_json::from_value(serde_json::Value::String(maker.to_string()))?;
+        tokio::task::spawn_blocking(move || {
+            let caller = roll_secrets::Caller::consumer(&format!("app:{service}"));
+            let untrusted = matches!(secrets.environment(&project, &env, &caller), Ok(e) if e.kind == roll_secrets::EnvironmentKind::Ephemeral && !e.trusted);
+            let mut r = roll_secrets::ResourceRef::new(roll_workspace::Kind::Service, &service);
+            if untrusted {
+                r = r.untrusted();
+            }
+            secrets.resolve_as(&r, &reference, &maker).map(|v| v.value.expose().to_string()).map_err(|e| anyhow::anyhow!("{e}"))
+        })
+        .await?
+    }
+
     async fn may_reveal(&self, who: apps_control::integrations::Asker<'_>, project: &str, env: &str) -> bool {
         let Some((secrets, _)) = self.0.get().cloned() else { return false };
         match secrets.caller_of(who.operator, who.user, who.grant) {
@@ -1775,6 +1838,65 @@ mod tests {
     use axum::http::HeaderMap;
     use serde_json::{Value as Json, json};
     use std::sync::{Arc, Mutex};
+    struct NoClouds;
+    impl roll_secrets::clouds::CloudTokens for NoClouds {
+        fn gcp(&self, _: &str, _: &str, _: &roll_secrets::Value, _: u32) -> Result<(roll_secrets::Value, i64), String> {
+            Err("no clouds here".into())
+        }
+        fn azure(&self, _: &str, _: &str, _: &str, _: &roll_secrets::Value) -> Result<(roll_secrets::Value, i64), String> {
+            Err("no clouds here".into())
+        }
+    }
+
+    /// roll apps' instance tokens through the real issuer, called as apps calls it
+    /// (`SecretSource::issue(project, service, env, aud, ttl)`): the token's `sub` and
+    /// `environment` name the instance's environment; an untrusted preview gets none. (An
+    /// operator's project stands for every service: `Workspace::trusts`.)
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_apps_instance_token_names_its_environment_and_an_untrusted_preview_gets_none() {
+        use apps_control::integrations::SecretSource;
+        use base64::Engine;
+        let dir = tempfile::tempdir().unwrap();
+        let ws_db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("workspace.db")), "workspace").unwrap();
+        let ws = Arc::new(roll_workspace::Workspace::new(ws_db).unwrap());
+        let project = ws.create("", "shop", "", None).unwrap().id;
+        ws.place(roll_workspace::Scope::All, &project, roll_workspace::Kind::Service, "svc_web", 0.0, 0.0).unwrap();
+        let db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("secrets.db")), "secrets").unwrap();
+        let opts = roll_secrets::Options {
+            keyring: Ok(roll_secrets::Keyring::new(&"k".repeat(32), None).unwrap()),
+            key_source: roll_secrets::KeySource::Env,
+            links: super::links(super::Api::default()),
+            syncs: Default::default(),
+            open: true,
+            trust_forwarded_for: false,
+            web_url: None,
+            deliver: None,
+            grants: None,
+            people: None,
+            kms: None,
+            sts: None,
+            outside: None,
+            directory: None,
+            github: None,
+            clouds: Some(roll_secrets::clouds::Clouds { issuer: "https://roll.test/v1/secrets/oidc".into(), tokens: Arc::new(NoClouds) }),
+            workloads: None,
+            gateways: None,
+        };
+        let secrets = Arc::new(roll_secrets::Secrets::new(db, ws.clone(), opts).unwrap());
+        let router = roll_secrets::router(secrets.clone());
+        for body in [json!({ "slug": "production" }), json!({ "slug": "pv-7", "base": "production" })] {
+            let (st, e) = send(&router, "POST", &format!("/v1/secrets/projects/{project}/environments"), Some(body)).await;
+            assert!(st == 201 || st == 200 || st == 409, "{st} {e}");
+        }
+        let apps = super::ForApps::default();
+        apps.set(secrets, ws.clone());
+        let hour = std::time::Duration::from_secs(3600);
+        let token = apps.issue(&project, "svc_web", "production", "sts.amazonaws.com", hour).await.unwrap().expect("an issuer here");
+        let claims: Json = serde_json::from_slice(&base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(token.split('.').nth(1).unwrap()).unwrap()).unwrap();
+        assert_eq!((claims["sub"].as_str(), claims["environment"].as_str(), claims["aud"].as_str()), (Some(format!("roll-apps:{project}:svc_web:production").as_str()), Some("production"), Some("sts.amazonaws.com")), "{claims}");
+        assert!(apps.issue(&project, "svc_web", "pv-7", "sts.amazonaws.com", hour).await.is_err(), "an untrusted preview gets no token");
+    }
+
     /// A search link takes whichever credential the cluster's flavor issues.
     #[test]
     fn a_search_key_is_an_api_key_or_an_opensearch_user() {

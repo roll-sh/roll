@@ -196,7 +196,7 @@ fn context_tokens(t: &Value) -> usize {
 /// `GET /v1/mcp/toolsets`: each product's tools as a connection with no narrowing gets them (the
 /// operator's view): how many, how many only read, and their context cost, so the connect panel
 /// can say what a choice of toolsets costs and whether a client's tool limit takes it (VS Code
-/// allows 128 tools a request, Windsurf 100). Counts only, never a tool's content, and only to a
+/// allows 128 tools a request, Cursor about 40). Counts only, never a tool's content, and only to a
 /// caller (`/v1/mcp` answers its own 401s, and this sits under it).
 async fn toolset_costs(State(m): State<Mcp>, ext: Extensions) -> Response {
     let caller = roll_auth::Grant::on(&ext).is_some() || roll_auth::Operator::on(&ext) || ext.get::<roll_auth::SignedIn>().is_some() || !m.config.locked;
