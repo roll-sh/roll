@@ -210,7 +210,18 @@ pub async fn bulk(ctx: &Ctx<'_>) -> EsResult<Reply> {
     };
     let default_source = FetchSource::from_params(ctx.query("_source"), ctx.query("_source_includes"), ctx.query("_source_excludes"))?;
     let default_index = ctx.path_param("index").map(str::to_string);
-    let items = parse(&ctx.body, &defaults, default_index.as_deref(), default_source.as_ref(), true)?;
+    // A connector's sync ([`crate::xpack::internal::index_only`]): `index` actions into its own
+    // index only, or nothing runs.
+    let only = crate::xpack::internal::bulk_index_only();
+    if let Some(target) = &only
+        && default_index.as_ref() != Some(target)
+    {
+        return Err(EsError::illegal_argument(format!("this bulk request may only write to [{target}]")));
+    }
+    let items = parse(&ctx.body, &defaults, default_index.as_deref(), default_source.as_ref(), only.is_none())?;
+    if only.is_some() && items.iter().any(|it| it.action != Action::Index) {
+        return Err(EsError::illegal_argument("this bulk request may only index documents"));
+    }
     // `BulkRequest.validate`.
     let mut errs = Vec::new();
     if items.is_empty() {

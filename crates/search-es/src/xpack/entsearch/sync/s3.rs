@@ -119,7 +119,15 @@ async fn read_bucket(client: &Client, sink: &mut Sink<'_>, t: &S3Rule, since: Op
                 match got {
                     Ok(Some(body)) => {
                         sink.read(body.len() as u64);
-                        doc.insert("body".into(), extract::text(kind, &body).into());
+                        // The object and its text are charged while the document is built (the
+                        // text is scanned, never a tree: `extract`), then the page holds it.
+                        let mut held = sink.reserve();
+                        let charge = |held: &mut crate::breaker::Reservation, n: usize| held.add(n as u64, "connector object").map_err(|e| Stop::Failed(format!("reading [{}] from bucket [{}] failed: {}", o.key, t.bucket, e.reason())));
+                        charge(&mut held, body.len())?;
+                        let text = extract::text(kind, &body);
+                        drop(body);
+                        charge(&mut held, text.len())?;
+                        doc.insert("body".into(), text.into());
                     }
                     // Gone since the listing.
                     Ok(None) => continue,

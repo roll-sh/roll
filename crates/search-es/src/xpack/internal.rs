@@ -30,6 +30,8 @@ pub struct Caller {
 }
 
 tokio::task_local! {
+    /// Set inside [`index_only`]: the one index a `_bulk` may write, and only by `index`.
+    static INDEX_ONLY: String;
     static CALLER: Caller;
     static ACTING: crate::xpack::security::Principal;
     /// Set inside [`as_principal`]: a job's internal calls are its own, never the caller's.
@@ -47,6 +49,18 @@ pub async fn as_principal<F: Future>(principal: Option<crate::xpack::security::P
         Some(p) => ACTING.scope(p, f).await,
         None => f.await,
     }
+}
+
+/// Runs `f` with every `_bulk` it makes restricted to `index` actions into `index` (a connector's
+/// sync: whatever its body says, it can't delete, update or write elsewhere). It only takes
+/// capability away, so nothing outside can widen it.
+pub async fn index_only<F: Future>(index: String, f: F) -> F::Output {
+    INDEX_ONLY.scope(index, f).await
+}
+
+/// The index a `_bulk` is restricted to ([`index_only`]), if any.
+pub fn bulk_index_only() -> Option<String> {
+    INDEX_ONLY.try_with(Clone::clone).ok()
 }
 
 /// The user a background job (a watch, a rollup job) runs as ([`as_principal`]), kept with

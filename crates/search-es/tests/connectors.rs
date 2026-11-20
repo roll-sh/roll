@@ -297,6 +297,16 @@ async fn s3_bucket_objects_and_text() {
     assert_eq!((num(&job, "deleted_document_count"), num(&job, "total_document_count")), (1, 5), "{job:?}");
     assert!(!visible(&c).await.contains(S3_SECRET), "the secret key is visible");
 
+    // A 9 MB JSON array is scanned for its values, never made a tree, and the object and its
+    // text are charged to the request breaker: under a 4 MB limit the sync fails.
+    bucket.put("big/zeros.json", bytes::Bytes::from(format!("[{}0]", "0,".repeat(4_700_000)))).await.unwrap();
+    let (s, _, t) = call(&c, "PUT", "/_cluster/settings", Some(r#"{"persistent":{"indices.breaker.request.limit":"4mb"}}"#)).await;
+    assert_eq!(s, 200, "{t}");
+    let job = finished(&c, &start(&c, "files", "full").await).await;
+    assert!(at(&job, "error").as_str().is_some_and(|e| e.contains("Data too large")), "{job:?}");
+    call(&c, "PUT", "/_cluster/settings", Some(r#"{"persistent":{"indices.breaker.request.limit":null}}"#)).await;
+    bucket.delete("big/zeros.json").await.unwrap();
+
     // Active advanced rules naming a bucket outside [buckets] (set directly, past the draft's
     // validation) fail the sync rather than reading another bucket with the stored key.
     let filtering = r#"{"filtering":[{"domain":"DEFAULT","active":{"advanced_snippet":{"value":[{"bucket":"payroll"}]},"rules":[{"id":"DEFAULT","order":0,"field":"_","policy":"include","rule":"regex","value":".*"}],"validation":{"state":"valid","errors":[]}},"draft":{"advanced_snippet":{"value":{}},"rules":[{"id":"DEFAULT","order":0,"field":"_","policy":"include","rule":"regex","value":".*"}],"validation":{"state":"valid","errors":[]}}}]}"#;
@@ -330,15 +340,26 @@ async fn postgres_pages_are_bounded_by_bytes() {
     assert_eq!((num(&job, "indexed_document_count"), num(&job, "metadata.skipped_document_count"), num(&job, "total_document_count")), (40, 1, 40), "{job:?}");
     db.batch_execute("DROP TABLE wide").await.unwrap();
 
-    // A row of four million zeros (8 MB of text) is never parsed into a tree: its page is its
-    // bytes, charged to the request breaker, so under a 4 MB limit the sync fails instead.
-    db.batch_execute("DROP TABLE IF EXISTS zeros; CREATE TABLE zeros (id int PRIMARY KEY, z int[]); INSERT INTO zeros VALUES (1, array_fill(0, ARRAY[4000000]));").await.unwrap();
+    // A row of a million zeros (2 MB of text) is never parsed into a tree: its page costs its
+    // bytes, so it syncs under a 4 MB request breaker (a tree, or three times the text, wouldn't
+    // fit). A pretty-printed `json` column keeps its line breaks through the server's JSON, and
+    // still syncs as one document.
+    db.batch_execute(
+        "DROP TABLE IF EXISTS zeros; CREATE TABLE zeros (id int PRIMARY KEY, z int[], pretty json); \
+         INSERT INTO zeros VALUES (1, array_fill(0, ARRAY[1000000]), E'{\\n  \"a\": [1,\\n    2],\\n  \"b\": \"x\"\\n}');",
+    )
+    .await
+    .unwrap();
+    let (s, _, t) = call(&c, "PUT", "/content-zeros", Some(r#"{"mappings":{"dynamic":false}}"#)).await;
+    assert_eq!(s, 200, "{t}");
     let (s, _, t) = call(&c, "PUT", "/_cluster/settings", Some(r#"{"persistent":{"indices.breaker.request.limit":"4mb"}}"#)).await;
     assert_eq!(s, 200, "{t}");
     pg_connector(&c, &addr, "zeros", "content-zeros", "zeros", PG_PASSWORD).await;
     let job = finished(&c, &start(&c, "zeros", "full").await).await;
-    assert_eq!(at(&job, "status").as_str(), Some("error"), "{job:?}");
-    assert!(at(&job, "error").as_str().is_some_and(|e| e.contains("Data too large")), "{job:?}");
+    assert_eq!((at(&job, "status").as_str(), num(&job, "indexed_document_count")), (Some("completed"), 1), "{job:?}");
+    call(&c, "POST", "/content-zeros/_refresh", None).await;
+    let (_, v, _) = call(&c, "POST", "/content-zeros/_search", Some(r#"{"_source":["public_zeros_pretty"]}"#)).await;
+    assert_eq!(at(&v, "hits.hits.0._source.public_zeros_pretty.a.1"), &Value::from(2), "{v:?}");
     db.batch_execute("DROP TABLE zeros").await.unwrap();
 }
 

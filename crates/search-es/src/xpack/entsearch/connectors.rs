@@ -1002,7 +1002,12 @@ pub async fn update(ctx: &Ctx<'_>) -> EsResult<Reply> {
                 Api::ConnectorUpdateConfiguration => {
                     if sync::waits_for_adoption(cluster, st, &id) {
                         // The fields this write gives: only their credentials are kept.
-                        let given = body.get("configuration").or_else(|| body.get("values")).and_then(Value::as_object);
+                        // As the write itself chose them: a `configuration` object, else `values`.
+                        let given = match (body.get("configuration"), body.get("values")) {
+                            (Some(Value::Obj(c)), _) => Some(c),
+                            (_, Some(Value::Obj(v))) => Some(v),
+                            _ => None,
+                        };
                         adopting = Some(given.map(|g| g.keys().cloned().collect()).unwrap_or_default());
                     }
                     remember_user(st, &id, &m, user, now_ms)?;

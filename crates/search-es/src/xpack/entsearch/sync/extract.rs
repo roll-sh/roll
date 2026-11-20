@@ -2,8 +2,6 @@
 //! values, and HTML's and XML's visible text. Other formats have no text (roll has no
 //! `attachment` processor yet).
 
-use crate::json::Value;
-
 /// How an object's text is read, by its key's extension.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -40,30 +38,11 @@ pub fn text(kind: Kind, bytes: &[u8]) -> String {
     }
 }
 
-/// The string and number values of a JSON document (or of each line of NDJSON), one a line.
+/// The string, number and boolean values of a JSON document (or of each line of NDJSON), one a
+/// line, read by scanning the text ([`super::json_scan::values_text`]: no tree, never longer than
+/// the text); text that isn't JSON is kept as it is.
 fn json_text(s: &str) -> String {
-    fn walk(v: &Value, out: &mut Vec<String>) {
-        match v {
-            Value::Str(s) => out.push(s.clone()),
-            Value::Num(_) | Value::Bool(_) => out.push(v.to_es_string()),
-            Value::Arr(a) => a.iter().for_each(|x| walk(x, out)),
-            Value::Obj(m) => m.values().for_each(|x| walk(x, out)),
-            Value::Null => {}
-        }
-    }
-    let mut out = Vec::new();
-    match crate::json::parse(s.as_bytes()) {
-        Ok(Some(v)) => walk(&v, &mut out),
-        _ => {
-            for line in s.lines().filter(|l| !l.trim().is_empty()) {
-                match crate::json::parse(line.as_bytes()) {
-                    Ok(Some(v)) => walk(&v, &mut out),
-                    _ => return s.to_string(),
-                }
-            }
-        }
-    }
-    out.join("\n")
+    super::json_scan::values_text(s).unwrap_or_else(|| s.to_string())
 }
 
 /// The visible text of HTML or XML: tags, comments, scripts and styles dropped, entities

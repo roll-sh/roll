@@ -561,8 +561,16 @@ both with Elasticsearch 9.5.5's shapes, validation and state machines
   20 million per run). The job ends `completed` with `total_document_count` (the index's count)
   and the connector's `last_sync_status`, `last_synced`, `last_indexed_document_count`,
   `last_deleted_document_count` and `sync_cursor`; or `error` with the reason in both. A
-  document that fails to index is counted (`metadata.failed_document_count`); more than 100
-  failures that are also over a tenth of the documents fail the job.
+  document that fails to index is counted (`metadata.failed_document_count`), and so is one
+  whose source isn't exactly one JSON object (`metadata.last_failed_document` says which and
+  why); more than 100 failures that are also over a tenth of the documents fail the job.
+- **What a sync can write.** Only documents into the connector's own index: its `_bulk` goes
+  to `/{index_name}/_bulk` inside `internal::index_only`, where bulk refuses any `_index` in
+  an action line and any action but `index`, whatever the body holds. A document's text from
+  a source is checked to be exactly one JSON object (`sync::json_scan::one_object`, a scan, no
+  tree) and put on one line (line breaks between tokens become spaces; a string can't hold a
+  raw one), so it can't add a line to the body: a server's text can't delete or write
+  anything, and a pretty-printed `json` column syncs as it is.
 - **Limits.** A sync reads at most `roll.connectors.max_docs_per_second` documents (1,000) and
   `roll.connectors.max_bytes_per_second` bytes (10 MiB) per second (node settings), sleeping
   between pages to stay under them. The bytes are everything read from the source: the
@@ -572,9 +580,10 @@ both with Elasticsearch 9.5.5's shapes, validation and state machines
   document's source is text the source gave (Postgres) or built from an object's text (S3),
   never a tree of the document, and the sync rules read only the fields they name from it with
   a token scan (`rules::pick`). The body is charged to the cluster's request circuit breaker as
-  it grows, so a page costs its bytes, about 30 MiB at most, and a node under memory pressure
-  fails the sync rather than the node; sending it charges it to `inflight_requests` and the
-  bulk handler parses it as it parses any `_bulk`:
+  it grows, so while the sync builds a page it holds the page's bytes and no more, and a node
+  under memory pressure fails the sync rather than the node. Sending it charges the body to
+  `inflight_requests`; the bulk handler then prepares it as it prepares any `_bulk`, which
+  isn't charged beyond that (docs/search/README.md, "Next"):
   - A table is read in one `REPEATABLE READ READ ONLY` transaction, a keyset page at a time
     (`WHERE (key) > (last key) ORDER BY key LIMIT n`). The query builds each row's document as
     JSON text (`json_object_agg`: roll's fields, then the columns renamed) and its `_id`. The
@@ -597,8 +606,11 @@ both with Elasticsearch 9.5.5's shapes, validation and state machines
     256 and 64 KiB per connection. Later notices are dropped as they arrive (their bytes count
     in the window); none reaches the node's logs.
   - A bucket is listed a page at a time (4 MiB of listing at most) and a page is indexed once
-    its objects' text passes 20 MiB; an object over 10 MiB is indexed without its text
-    (Elastic's default extraction limit). Listings' bytes count against the sync's rate like
+    its body passes 20 MiB; an object over 10 MiB is indexed without its text (Elastic's
+    default extraction limit). An object's text can be larger than the object (invalid UTF-8
+    becomes replacement characters, and control characters are escaped in JSON), so a page is
+    20 MiB plus its last document, which is charged as it's built: the object, then its text
+    (JSON objects' values are read with the same scan, never a tree). Listings' bytes count against the sync's rate like
     objects' do, and 100 listing pages in a row with no key at all fail the sync, so an
     endpoint can't keep one listing nothing. Pages of keys the sync skips (folder markers,
     other extensions, objects unchanged since the last sync) are progress and never count.

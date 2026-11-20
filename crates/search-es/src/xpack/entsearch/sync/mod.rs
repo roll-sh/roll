@@ -11,6 +11,7 @@
 
 pub mod config;
 pub mod extract;
+pub mod json_scan;
 pub mod postgres;
 pub mod rules;
 pub mod s3;
@@ -775,9 +776,15 @@ impl Sink<'_> {
         self.counters.bytes += bytes;
     }
 
+    /// A hold on the cluster's request breaker (for what a source keeps while it builds a
+    /// document).
+    pub fn reserve(&self) -> crate::breaker::Reservation {
+        crate::breaker::Reservation::new(self.cluster.breakers.request(self.cluster, &self.cluster.state()))
+    }
+
     /// A new, empty page.
     pub fn new_page(&self) -> Page {
-        Page { body: String::new(), sizes: Vec::new(), held: crate::breaker::Reservation::new(self.cluster.breakers.request(self.cluster, &self.cluster.state())) }
+        Page { body: String::new(), sizes: Vec::new(), held: self.reserve() }
     }
 
     /// Records a document the source couldn't hand over (too large).
@@ -785,16 +792,27 @@ impl Sink<'_> {
         self.counters.skipped += 1;
     }
 
-    /// Adds document `id` whose source is the JSON object `source`, as text: it goes into the
-    /// page's body as it is, and the sync rules read only the fields they name from it
+    /// Adds document `id` whose source is the text `source` a source gave: it must be exactly
+    /// one JSON object ([`json_scan::one_object`], which also puts it on one line), or it's
+    /// counted as a failed document and left out, so no text can add a line to the `_bulk` body.
+    /// It goes into the body as text, and the sync rules read only the fields they name from it
     /// ([`rules::pick`]), so no document becomes a tree here.
     pub fn push_text(&mut self, page: &mut Page, id: &str, source: &str) -> Result<(), Stop> {
         self.count()?;
+        let source = match json_scan::one_object(source) {
+            Ok(s) => s,
+            Err(why) => {
+                self.counters.failed += 1;
+                self.counters.metadata.insert("last_failed_document".into(), capped(format!("[{id}] {why}")).into());
+                return Ok(());
+            }
+        };
         let fields = self.rules.fields();
-        if !fields.is_empty() && !self.rules.includes(&rules::pick(source, &fields)) {
+        let picked = if fields.is_empty() { Map::new() } else { rules::pick(&source, &fields) };
+        if !self.rules.includes(&picked) {
             return Ok(());
         }
-        self.append(page, id, source)
+        self.append(page, id, &source)
     }
 
     /// Adds document `id` (a source that builds its documents itself).
@@ -822,7 +840,8 @@ impl Sink<'_> {
             }
             self.seen.push(id_hash(id));
         }
-        let action = obj! { "index" => obj! { "_index" => self.index.clone(), "_id" => id } }.to_json();
+        // The index is the request's ([`Sink::send`]), never a line's.
+        let action = obj! { "index" => obj! { "_id" => id } }.to_json();
         let bytes = action.len() + source.len() + 2;
         page.held.add(bytes as u64, "connector page").map_err(|e| Stop::Failed(format!("indexing into [{}] failed: {}", self.index, e.reason())))?;
         page.sizes.push(source.len() as u64);
@@ -834,16 +853,17 @@ impl Sink<'_> {
         Ok(())
     }
 
-    /// Indexes a page (the bulk request charges its body to `inflight_requests`, as any
-    /// `_bulk`'s), then throttles and checks the job.
+    /// Indexes a page into the connector's index, then throttles and checks the job. The bulk
+    /// request may only index into that index ([`internal::index_only`]), whatever its body
+    /// holds, and charges its body to `inflight_requests`, as any `_bulk`'s.
     pub async fn send(&mut self, page: Page) -> Result<(), Stop> {
         let Page { body, sizes, held } = page;
         if !sizes.is_empty() {
             let uri = match &self.pipeline {
-                Some(p) => format!("/_bulk?pipeline={}", enc(p)),
-                None => "/_bulk".to_string(),
+                Some(p) => format!("/{}/_bulk?pipeline={}", enc(&self.index), enc(p)),
+                None => format!("/{}/_bulk", enc(&self.index)),
             };
-            let resp = internal::call_ndjson(self.cluster, "POST", &uri, body).await.map_err(|e| Stop::Failed(format!("indexing into [{}] failed: {}", self.index, e.reason())))?;
+            let resp = internal::index_only(self.index.clone(), internal::call_ndjson(self.cluster, "POST", &uri, body)).await.map_err(|e| Stop::Failed(format!("indexing into [{}] failed: {}", self.index, e.reason())))?;
             let items = resp.get("items").and_then(Value::as_array).cloned().unwrap_or_default();
             for (item, size) in items.iter().zip(&sizes) {
                 if item.pointer(&["index", "status"]).and_then(Value::as_i64).is_some_and(|s| s < 300) {
@@ -1058,6 +1078,50 @@ mod tests {
         assert_eq!(config::Values::open(&a, &stored).ok().and_then(|v| v.text("password")).as_deref(), Some("pw-a"));
         let b = Arc::new(Cluster::open(open("b"), Arc::new(MemoryStore::new())).await.unwrap());
         assert!(config::Values::open(&b, &stored).is_err());
+    }
+
+    /// A source's text can't add a line to the `_bulk` body: what isn't exactly one JSON object
+    /// is a failed document, a pretty-printed one is put on one line, and the sync's bulk can
+    /// only index into the connector's own index whatever its body says.
+    #[tokio::test]
+    async fn a_document_cant_smuggle_bulk_actions() {
+        let c = Arc::new(Cluster::open(ClusterConfig::new("c"), Arc::new(MemoryStore::new())).await.unwrap());
+        call(&c, "PUT", "/victim/_doc/1?refresh=true", r#"{"a":1}"#).await;
+        call(&c, "PUT", "/content-x", "").await;
+        let mut counters = Counters::default();
+        let mut sink = Sink {
+            cluster: &c,
+            job: "none".into(),
+            index: "content-x".into(),
+            pipeline: None,
+            rules: rules::Rules::default(),
+            full: false,
+            seen: Vec::new(),
+            counters: &mut counters,
+            docs_per_second: u64::MAX,
+            bytes_per_second: u64::MAX,
+            started: Instant::now(),
+            deadline: Instant::now() + Duration::from_secs(60),
+            max_docs: 100,
+            beat: Instant::now(),
+        };
+        let mut page = sink.new_page();
+        assert!(sink.push_text(&mut page, "smuggler", "{\"a\":1}\n{\"delete\":{\"_index\":\"victim\",\"_id\":\"1\"}}\n{\"x\":1}").is_ok());
+        assert!(sink.push_text(&mut page, "pretty", "{\"a\":\n{\"delete\":{\"_index\":\"victim\",\"_id\":\"1\"}}\n}").is_ok());
+        // The job doesn't exist, so the page's check says canceled; the page was indexed first.
+        let _ = sink.send(page).await;
+        assert_eq!((counters.failed, counters.indexed), (1, 1));
+        call(&c, "POST", "/content-x/_refresh", "").await;
+        let pretty = call(&c, "GET", "/content-x/_doc/pretty", "").await;
+        assert_eq!(pretty.pointer(&["_source", "a", "delete", "_id"]).and_then(Value::as_str), Some("1"), "{pretty:?}");
+        // Whatever a body holds, the sync's bulk can't act elsewhere.
+        let body = "{\"delete\":{\"_index\":\"victim\",\"_id\":\"1\"}}\n".to_string();
+        assert!(internal::index_only("content-x".into(), internal::call_ndjson(&c, "POST", "/content-x/_bulk", body)).await.is_err());
+        let body = "{\"index\":{\"_index\":\"victim\",\"_id\":\"2\"}}\n{}\n".to_string();
+        assert!(internal::index_only("content-x".into(), internal::call_ndjson(&c, "POST", "/content-x/_bulk", body)).await.is_err());
+        let victim = call(&c, "GET", "/victim/_doc/1", "").await;
+        assert_eq!(victim.get("found").and_then(Value::as_bool), Some(true), "{victim:?}");
+        assert_eq!(call(&c, "GET", "/victim/_doc/2", "").await.get("found").and_then(Value::as_bool), Some(false));
     }
 
     /// A sync running here whose statement outlasts the stale time isn't due again (the

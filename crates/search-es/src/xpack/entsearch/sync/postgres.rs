@@ -18,8 +18,11 @@
 //!   added) and its `_id`; a page's rows are streamed and each document's text goes into the
 //!   `_bulk` body as it is ([`super::Page`]), never parsed into a tree. A page in memory is its
 //!   body's bytes, charged to the cluster's request breaker until it's indexed.
-//! - Every byte the connection reads counts against the sync's `max_bytes_per_second`, rows the
-//!   sync rules exclude and the server's messages included.
+//! - Every byte the connection reads counts against the sync's `max_bytes_per_second` (counted
+//!   on the socket: catalog queries, rows the sync rules exclude and the server's messages
+//!   included), reported before each page is indexed and at the end.
+//! - Values go into the page query as bound parameters (`$n::text::type`), never spliced, so
+//!   quoting doesn't depend on the session's settings.
 //! - The connection counts the bytes it reads ([`Counted`]): a query whose answer passes its
 //!   window ([`PAGE_WINDOW`]) fails the sync, so a server ignoring the cut can't grow a page.
 //! - Every message's 5-byte header is read on the plaintext side ([`Framed`], under TLS through
@@ -76,11 +79,6 @@ const SKIPPED_SHOWN: usize = 100;
 /// `"name"`, quotes doubled.
 fn ident(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
-}
-
-/// `'text'`, quotes doubled (`standard_conforming_strings` is on for the session).
-fn literal(text: &str) -> String {
-    format!("'{}'", text.replace('\'', "''"))
 }
 
 /// The host's first address, refusing a private one.
@@ -142,6 +140,9 @@ struct Window {
     failure: Arc<parking_lot::Mutex<Option<String>>>,
     /// The server's notices, dropped as they arrived ([`drive`]).
     notices: Arc<AtomicU64>,
+    /// Every byte the connection read, and how many of them the sync was told of ([`Window::report`]).
+    total: Arc<AtomicU64>,
+    reported: Arc<AtomicU64>,
 }
 
 impl Window {
@@ -149,6 +150,13 @@ impl Window {
     fn open(&self, bytes: u64) {
         self.read.store(0, Ordering::SeqCst);
         self.limit.store(bytes, Ordering::SeqCst);
+    }
+
+    /// Tells the sync of the bytes read since the last report (its byte rate).
+    fn report(&self, sink: &mut Sink<'_>) {
+        let total = self.total.load(Ordering::SeqCst);
+        let before = self.reported.swap(total, Ordering::SeqCst);
+        sink.read(total.saturating_sub(before));
     }
 }
 
@@ -164,6 +172,7 @@ impl AsyncRead for Counted {
         let r = Pin::new(&mut self.inner).poll_read(cx, buf);
         if let Poll::Ready(Ok(())) = r {
             let n = (buf.filled().len() - before) as u64;
+            self.window.total.fetch_add(n, Ordering::SeqCst);
             let read = self.window.read.fetch_add(n, Ordering::SeqCst) + n;
             if read > self.window.limit.load(Ordering::SeqCst) {
                 // A failed read hands back nothing (AsyncRead's contract).
@@ -531,6 +540,8 @@ pub async fn sync(v: &Values, sink: &mut Sink<'_>, full: bool, cursor: &Value, a
             next.insert(key, max.into());
         }
     }
+    // The commits and anything since the last page.
+    conn.window.report(sink);
     Ok(crate::obj! { "tables" => Value::Obj(next) })
 }
 
@@ -551,16 +562,24 @@ struct Read<'a> {
 /// columns as `{schema}_{table}_{column}`, built by the server so the sync never parses it. Then
 /// the document's `_id` (`{database}_{schema}_{table}_{key values joined by _}`) and the key
 /// values as text.
-fn page_sql(r: &Read, qualified: &str, after: Option<&[String]>, n: usize) -> String {
+fn page_sql(r: &Read, qualified: &str, after: Option<&[String]>, n: usize) -> (String, Vec<String>) {
     let t = r.table;
+    let mut params: Vec<String> = Vec::new();
+    // A value as the next parameter: text, cast to `ty` by the server.
+    let mut bind = |v: &str, ty: &str| {
+        params.push(v.to_string());
+        if ty == "text" { format!("${}::text", params.len()) } else { format!("${}::text::{ty}", params.len()) }
+    };
+    let (ts, db, schema, table) = (bind(r.ts, "text"), bind(r.database, "text"), bind(r.schema, "text"), bind(&t.name, "text"));
+    let prefix = bind(&format!("{}_{}_", r.schema, t.name), "text");
     let mut conds = Vec::new();
     if let Some(vals) = after {
         let cols = t.key.iter().map(|(k, _)| format!("t.{}", ident(k))).collect::<Vec<_>>().join(", ");
-        let lits = t.key.iter().zip(vals).map(|((_, ty), v)| format!("{}::{ty}", literal(v))).collect::<Vec<_>>().join(", ");
-        conds.push(format!("({cols}) > ({lits})"));
+        let vals = t.key.iter().zip(vals).map(|((_, ty), v)| bind(v, ty)).collect::<Vec<_>>().join(", ");
+        conds.push(format!("({cols}) > ({vals})"));
     }
     if let (Some(c), Some(ty), Some(s)) = (r.col, &t.incremental, r.since) {
-        conds.push(format!("t.{} >= {}::{ty}", ident(c), literal(s)));
+        conds.push(format!("t.{} >= {}", ident(c), bind(s, ty)));
     }
     let filter = if conds.is_empty() { String::new() } else { format!(" WHERE {}", conds.join(" AND ")) };
     let order = t.key.iter().map(|(k, _)| format!("t.{}", ident(k))).collect::<Vec<_>>().join(", ");
@@ -568,21 +587,18 @@ fn page_sql(r: &Read, qualified: &str, after: Option<&[String]>, n: usize) -> St
     let kcols = (0..t.key.len()).map(|i| format!("k{i}")).collect::<Vec<_>>().join(", ");
     let inner_keys = t.key.iter().enumerate().map(|(i, (k, _))| format!("t.{c} AS o{i}, t.{c}::text AS k{i}", c = ident(k))).collect::<Vec<_>>().join(", ");
     let id_parts = t.key.iter().map(|(k, _)| format!("to_json(t.{}) #>> '{{}}'", ident(k))).collect::<Vec<_>>().join(", ");
-    let (db, schema, table) = (literal(r.database), literal(r.schema), literal(&t.name));
     let id = format!("concat_ws('_', {db}, {schema}, {table}, {id_parts})");
-    let prefix = literal(&format!("{}_{}_", r.schema, t.name));
     let doc = format!(
         "(SELECT json_object_agg(f.k, f.v ORDER BY f.o, f.n)::text FROM (\
-           SELECT 0 AS o, 0::bigint AS n, '_timestamp'::text AS k, to_json({ts}::text) AS v \
-           UNION ALL SELECT 0, 1, 'database', to_json({db}::text) \
-           UNION ALL SELECT 0, 2, 'schema', to_json({schema}::text) \
-           UNION ALL SELECT 0, 3, 'table', to_json({table}::text) \
+           SELECT 0 AS o, 0::bigint AS n, '_timestamp'::text AS k, to_json({ts}) AS v \
+           UNION ALL SELECT 0, 1, 'database', to_json({db}) \
+           UNION ALL SELECT 0, 2, 'schema', to_json({schema}) \
+           UNION ALL SELECT 0, 3, 'table', to_json({table}) \
            UNION ALL SELECT 1, e.n, {prefix} || e.key, e.value FROM json_each(row_to_json(t)) WITH ORDINALITY AS e(key, value, n)\
-         ) f)",
-        ts = literal(r.ts)
+         ) f)"
     );
     let over = DOC_BYTES_MAX + 1;
-    format!(
+    let sql = format!(
         "SELECT CASE WHEN len > {DOC_BYTES_MAX} THEN NULL ELSE j END, id, {kcols} FROM (\
            SELECT j, len, id, {kcols}, {ocols}, sum(least(len, {over})) OVER (ORDER BY {ocols} ROWS UNBOUNDED PRECEDING) - least(len, {over}) AS before FROM (\
              SELECT j, octet_length(convert_to(j, 'UTF8')) AS len, id, {kcols}, {ocols} FROM (\
@@ -590,7 +606,8 @@ fn page_sql(r: &Read, qualified: &str, after: Option<&[String]>, n: usize) -> St
              ) a\
            ) b\
          ) c WHERE before < {PAGE_BYTES} ORDER BY {ocols}"
-    )
+    );
+    (sql, params)
 }
 
 /// Reads one table in one snapshot: the incremental column's maximum there, when it has one.
@@ -612,7 +629,8 @@ async fn read_table(conn: &mut Conn, sink: &mut Sink<'_>, r: &Read<'_>) -> Resul
         let n = (PAGE_BYTES / largest.max(1024)).clamp(1, r.fetch);
         window.open(PAGE_WINDOW);
         let failed = |e: tokio_postgres::Error| Stop::Failed(format!("{label} failed: {}", db_error(e)));
-        let rows = wait(sink, &window, &label, tx.query_raw(&page_sql(r, &qualified, after.as_deref(), n), std::iter::empty::<&(dyn tokio_postgres::types::ToSql + Sync)>())).await?;
+        let (sql, params) = page_sql(r, &qualified, after.as_deref(), n);
+        let rows = wait(sink, &window, &label, tx.query_raw(&sql, params.iter())).await?;
         let mut rows = std::pin::pin!(rows);
         let mut page = sink.new_page();
         let (mut got, mut text) = (0usize, 0usize);
@@ -638,8 +656,8 @@ async fn read_table(conn: &mut Conn, sink: &mut Sink<'_>, r: &Read<'_>) -> Resul
             largest = largest.max(doc.len());
             sink.push_text(&mut page, &id, &doc)?;
         }
-        // Everything the page's answer took on the wire is throttled, excluded rows included.
-        sink.read(window.read.load(Ordering::SeqCst));
+        // Everything read so far is throttled, excluded rows and other statements included.
+        window.report(sink);
         if got == 0 {
             break;
         }
