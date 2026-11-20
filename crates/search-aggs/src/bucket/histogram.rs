@@ -395,7 +395,7 @@ pub fn create_rounding(interval: &DateInterval, tz: Option<&crate::format::TimeZ
 }
 
 /// Settings shared by numeric histogram results.
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct HistoConfig {
     pub order: BucketOrder,
     pub min_doc_count: u64,
@@ -1392,7 +1392,7 @@ fn r_val(vals: &[f64], j: usize) -> f64 {
 }
 
 /// `InternalHistogram.EmptyBucketInfo` (without the sub-aggregations, kept beside it).
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct EmptyInfo {
     pub interval: f64,
     pub offset: f64,
@@ -1411,7 +1411,7 @@ impl EmptyInfo {
 }
 
 /// A numeric histogram bucket.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct HistoBucket {
     pub key: f64,
     pub doc_count: u64,
@@ -1419,7 +1419,7 @@ pub struct HistoBucket {
 }
 
 /// `InternalHistogram`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Histogram {
     pub buckets: Vec<HistoBucket>,
     pub cfg: Arc<HistoConfig>,
@@ -1638,7 +1638,7 @@ impl MultiBuckets for Histogram {
 }
 
 /// `InternalDateHistogram.EmptyBucketInfo`.
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct DateEmptyInfo {
     /// The rounding without its offset.
     pub rounding: Rounding,
@@ -1647,7 +1647,7 @@ pub struct DateEmptyInfo {
 }
 
 /// A date histogram bucket.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct DateBucket {
     pub key: i64,
     pub doc_count: u64,
@@ -1655,7 +1655,7 @@ pub struct DateBucket {
 }
 
 /// `InternalDateHistogram`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct DateHistogram {
     pub buckets: Vec<DateBucket>,
     pub cfg: Arc<HistoConfig>,

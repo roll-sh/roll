@@ -29,7 +29,7 @@ use crate::xparser::{Field, Tokens, XParser};
 use super::single::{SingleBucket, SingleKind};
 
 /// The settings a `random_sampler` result carries.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SamplerInfo {
     pub seed: i32,
     pub shard_seed: Option<i32>,

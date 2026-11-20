@@ -344,7 +344,7 @@ impl Aggregator for TTestAgg {
 }
 
 /// `TTestStats`.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TTestStats {
     pub count: u64,
     pub sum: f64,
@@ -375,7 +375,7 @@ fn reduce_stats(list: impl Iterator<Item = TTestStats>) -> TTestStats {
 }
 
 /// `PairedTTestState` / `UnpairedTTestState`.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum TTestState {
     Paired { stats: TTestStats, tails: u8 },
     Unpaired { a: TTestStats, b: TTestStats, homoscedastic: bool, tails: u8 },
@@ -434,7 +434,7 @@ fn unpaired_p(a: &TTestStats, b: &TTestStats, tails: u8, sd2: f64, dof: f64) -> 
 }
 
 /// `InternalTTest`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct TTest {
     pub state: TTestState,
     pub format: DocValueFormat,

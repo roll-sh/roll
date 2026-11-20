@@ -30,7 +30,7 @@ use crate::values::{BoundVs, BytesReader, DocCounter, GeoReader, NumReader, VsOp
 use crate::xparser::{Field, Token, Tokens, XParser};
 
 /// Which single-bucket aggregation produced a result.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SingleKind {
     Filter,
     Global,
@@ -74,7 +74,7 @@ impl SingleKind {
 }
 
 /// A single-bucket result.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SingleBucket {
     pub kind: SingleKind,
     pub doc_count: u64,
