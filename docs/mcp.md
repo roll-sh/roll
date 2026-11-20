@@ -18,8 +18,13 @@ token, through the same gate as any other request. So:
 - **A tool can't do more than its route.** Each tool names its route (`_meta["roll/route"]`), and a
   test fails when a tool's route has no row in the permission catalogue.
 - **A tool's annotations come from its route's action.** `readOnlyHint` is true when the route only
-  reads (`read`, or `reveal`), and `destructiveHint` is true for `delete` and `deploy` routes and for
-  arbitrary statements (`postgres_execute`). `_meta["roll/actions"]` lists the actions.
+  reads (`read`, or `reveal`), and `destructiveHint` is true for `delete` and `deploy` routes, for
+  every `DELETE` route whatever the catalogue calls it (a drain, a lease, a link), and for what
+  removes or replaces something by other means (revoking a key, rotating a secret, arbitrary
+  statements like `postgres_execute`). A tool that only removes what can be put back says so
+  (`.undoable()`: a resource off a canvas, a deleted cluster restored); a test fails on a tool
+  whose name says it deletes, removes, revokes, rotates or restores and is neither.
+  `_meta["roll/actions"]` lists the actions.
 - **`tools/list` shows only tools the connection can use.** A token without Postgres `delete` doesn't
   see `postgres_delete_project`. The list is a convenience: the gate decides every call anyway.
 - **Every call is in the audit log**, with the tool name and its arguments redacted
