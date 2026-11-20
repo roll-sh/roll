@@ -33,7 +33,9 @@ tools = listed["tools"]
 print(f"tools/list: {len(tools)} tools, {len(json.dumps(listed)) // 1024} KB")
 if "-v" in sys.argv:
     with urllib.request.urlopen(urllib.request.Request(f"{api}/v1/mcp/toolsets", headers={"authorization": f"Bearer {tok}"}), timeout=30) as r:
-        print("toolsets:", json.dumps(json.load(r))[:1500])
+        costs = json.load(r)
+        print("toolsets:", json.dumps(costs["products"])[:1500])
+        print("areas:", ", ".join(f"{a['toolset']} {a['tools']} tools ~{a['context_tokens']} tokens" for a in costs.get("areas", [])))
 reads = [t for t in tools if t.get("annotations", {}).get("readOnlyHint") and (only is None or t["name"] == only)]
 FAIL_WORDS = ("unknown argument", "is required", "can't be empty", "no route", "method not allowed", "invalid type", "missing field", "unknown field",
               "Invalid URL: Cannot parse")  # a path segment of a type the route doesn't take
@@ -350,8 +352,13 @@ for p in rpc("prompts/list", {}).get("result", {}).get("prompts", []):
 uris = [r["uri"] for r in rpc("resources/list", {}).get("result", {}).get("resources", [])]
 if seen.get(("workspace", "id")):
     uris.append(f"roll://projects/{seen[('workspace', 'id')]}")
+if repo_made:
+    uris.append("roll://code/sweep/app/README.md")  # a roll code file, read through code_read_file
 for uri in uris:
-    surface.append((f"resource {uri}", rpc("resources/read", {"uri": uri})))
+    r = rpc("resources/read", {"uri": uri})
+    if uri.startswith("roll://code/") and "error" not in r and "sweep" not in json.dumps(r.get("result", {})):
+        r = {"error": f"a code file's resource doesn't hold the file: {json.dumps(r)[:200]}"}
+    surface.append((f"resource {uri}", r))
 for sk in rpc("skills/list", {}).get("result", {}).get("skills", []):
     surface.append((f"skill {sk.get('uri') or sk.get('name')}", rpc("skills/get", {"uri": sk.get("uri", "")})))
 bad = [f"{what}: {json.dumps(r.get('error'))[:200]}" for what, r in surface if "error" in r]

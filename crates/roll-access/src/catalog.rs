@@ -118,6 +118,20 @@ fn apps_scale(b: &Value) -> Vec<Lent> {
     b.pointer("/run/scale/stream").and_then(Value::as_str).map(|s| Lent { kind: "stream".into(), r#ref: s.into(), action: Action::Read }).into_iter().collect()
 }
 
+/// A web service's `run.push`: apps reads each stream for it as a consumer group (read on it), and
+/// appends a record its app keeps refusing to a dead-letter topic there (write, for a rule with
+/// one).
+fn apps_push(b: &Value) -> Vec<Lent> {
+    let rules = b.pointer("/run/push").and_then(Value::as_array).into_iter().flatten();
+    rules
+        .filter_map(|r| {
+            let s = r.get("stream").and_then(Value::as_str)?;
+            let action = if r.get("dead_letter").is_some_and(|d| !d.is_null()) { Action::Write } else { Action::Read };
+            Some(Lent { kind: "stream".into(), r#ref: s.into(), action })
+        })
+        .collect()
+}
+
 /// A roll code repo the body names, which apps reads for the caller (`repo` for a plan or an import,
 /// `source.repo` for a service built from one): read on it, so a token can't learn a repo's stack,
 /// head or roll.toml, or build and run its code, without being allowed to read it.
@@ -126,17 +140,19 @@ fn apps_repo(b: &Value) -> Vec<Lent> {
     b.get("repo").and_then(Value::as_str).or(from_source).map(|r| Lent { kind: "repo".into(), r#ref: r.into(), action: Action::Read }).into_iter().collect()
 }
 
-/// A new service: its links, its scaling stream and the repo it's built from.
+/// A new service: its links, its scaling and pushed streams and the repo it's built from.
 fn apps_create_lends(b: &Value) -> Vec<Lent> {
     let mut out = apps_links(b);
     out.extend(apps_scale(b));
+    out.extend(apps_push(b));
     out.extend(apps_repo(b));
     out
 }
 
-/// A service's settings: its scaling stream and, when its source changes, the repo.
+/// A service's settings: its scaling and pushed streams and, when its source changes, the repo.
 fn apps_patch_lends(b: &Value) -> Vec<Lent> {
     let mut out = apps_scale(b);
+    out.extend(apps_push(b));
     out.extend(apps_repo(b));
     out
 }
@@ -331,6 +347,8 @@ pub const OPERATOR_ONLY: &[(&str, &str)] = &[
     ("/v1/access/audit/sinks", "where the audit log is sent is the operator's choice"),
     ("/v1/access/audit/sinks/{id}", "where the audit log is sent is the operator's choice"),
     ("/v1/access/audit/sinks/{id}/retry", "where the audit log is sent is the operator's choice"),
+    ("/v1/secrets/issuer/rotate", "roll's OIDC issuer key signs for every project: rotating it is the operator's"),
+    ("/v1/secrets/audit/key/rotate", "the audit log's digest key signs every project's digests: rotating or pulling it is the operator's"),
     ("/v1/previews/{id}/visit", "a browser session in a team-access preview is a signed-in person's (rolld's gate sees their session), never a token's"),
     ("/v1/apps/services/{id}/environments/{env}/visit", "a browser session in a sign-in-gated environment is a signed-in person's (rolld's gate sees their session), never a token's"),
     ("/v1/apps/services/{id}/github", "roll's GitHub App installations span tenants: connecting a service to one (its tokens fetch any repository the installation sees) is the operator's, as connecting a repo is roll code's admin token's"),
@@ -524,6 +542,11 @@ pub fn method_by_prefix(method: &str, route: &str) -> bool {
 /// `METHOD route` a line).
 pub fn prefix_reviewed(method: &str, route: &str) -> bool {
     include_str!("prefix-reviewed.txt").lines().map(str::trim).any(|l| l.split_once(' ').is_some_and(|(m, r)| m == method && r == route))
+}
+
+/// Every route a prefix row decides that was looked at, as `(method, route)`.
+pub fn prefix_reviewed_routes() -> impl Iterator<Item = (&'static str, &'static str)> {
+    include_str!("prefix-reviewed.txt").lines().map(str::trim).filter_map(|l| l.split_once(' '))
 }
 
 /// A route listed for a nest (`/v1/storage`, `/v1/storage/`): its rows are matched by path.
@@ -796,11 +819,12 @@ fn apps_create_action(b: &Value) -> Action {
 /// in its instances, and `rollback_on_crash`, which has roll
 /// put an older deployment live by itself), and so does any key apps adds later until it's listed
 /// here: a new setting is never a quiet way into production.
-const APPS_WRITE_RUN: [&str; 26] = [
+const APPS_WRITE_RUN: [&str; 27] = [
     "min_instances",
     "max_instances",
     "concurrency",
     "queue_s",
+    "latency_target_ms",
     "cpu",
     "memory_mb",
     "health_path",
@@ -957,6 +981,9 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/projects/{id}/branches/{branch}/backup", "postgres", W, one(PG, "postgres-project")),
     row("POST", "/v1/projects/{id}/branches/{branch}/evict", "postgres", W, one(PG, "postgres-project")),
     row("POST", "/v1/projects/{id}/branches/{branch}/replicas", "postgres", W, one(PG, "postgres-project")).reveals(PG_SECRETS),
+    // Decoy roles (roll secrets' Postgres decoys): the proxy refuses their logins; no password.
+    row("POST", "/v1/projects/{id}/decoy-roles", "postgres", W, one(PG, "postgres-project")),
+    row("DELETE", "/v1/projects/{id}/decoy-roles/{role}", "postgres", W, one(PG, "postgres-project")),
     row("GET", "/v1/projects/{id}/usage", "postgres", R, one(PG, "postgres-project")),
     row("GET", "/v1/endpoints/{id}", "postgres", R, one(PG, "endpoint")).reveals(PG_SECRETS),
     row("PATCH", "/v1/endpoints/{id}", "postgres", W, one(PG, "endpoint")),
@@ -1378,6 +1405,12 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/secrets/projects/{project}/environments/{env}/reach/cut-off", "secrets", ADMIN, one(&["project"], "project")),
     row("DELETE", "/v1/secrets/projects/{project}/environments/{env}/reach/cut-off", "secrets", ADMIN, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/shares", "secrets", REVEAL, one(&["project"], "project")),
+    // A secret request asks someone outside roll for a folder's values: its answer is written as
+    // the asker, so asking is a write there; the list shows names only; cancelling is the asker's
+    // (or the folder admin's: the product checks).
+    row("POST", "/v1/secrets/projects/{project}/environments/{env}/value-requests", "secrets", W, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
+    row("GET", "/v1/secrets/projects/{project}/value-requests", "secrets", R, one(&["project"], "project")),
+    row("DELETE", "/v1/secrets/projects/{project}/value-requests/{id}", "secrets", W, one(&["project"], "project")),
     // Purging a secret's history can't be undone.
     row("POST", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/purge", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     // A change request's current and proposed values, for its approvers.
@@ -1442,7 +1475,8 @@ static ROWS: &[Row] = &[
     row("PUT", "/v1/apps/services/{id}/links/{kind}/{ref}", "apps", W, one(PG, "service")).lends(Lend::Path("kind", "ref")),
     row("DELETE", "/v1/apps/services/{id}/links/{kind}/{ref}", "apps", W, one(PG, "service")),
     row("*", "/v1/apps/services/{id}", "apps", M, one(PG, "service")),
-    // A worker scaled on a stream group's lag has apps read that stream for it: read there too.
+    // A worker scaled on a stream group's lag has apps read that stream for it, and a web service's
+    // pushes consume one (and dead-letter into it): read there too, write with a dead letter.
     row("PATCH", "/v1/apps/services/{id}", "apps", Act::Body(apps_patch_action), one(PG, "service")).lends(Lend::Each(apps_patch_lends)),
     row("*", "/v1/apps/services/{id}/", "apps", M, one(PG, "service")),
     // A restore puts a deleted service's deployments live again, production's too: a deploy.
@@ -1568,6 +1602,7 @@ static ROWS: &[Row] = &[
     // Accepting a visual change is a person's call (with `visual_review = "required"` previews
     // refuses tokens anyway): admin, so a write token can't wave its own diff through.
     row("POST", "/v1/previews/{id}/visual/accept", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    row("POST", "/v1/previews/{id}/regressions/accept", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
     // Letting a fork's pull request run with the project's data (a Git URL service's preview,
     // roll code's `approve-run`): a person's call, as accepting a visual change is.
     row("POST", "/v1/previews/{id}/approve", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
@@ -1601,6 +1636,11 @@ static ROWS: &[Row] = &[
     row("PATCH", "/v1/code/changes/{id}/enqueue", "code", DEPLOY, one(PG, "change")),
     // Running a fork's code with the repo's data is the repo's owner's call.
     row("POST", "/v1/code/changes/{id}/approve-run", "code", ADMIN, one(PG, "change")),
+    // "Store in roll": a change's credential into roll secrets. A writer's (roll secrets then asks
+    // the same grant for `write` in the folder); the target lists the project's environments, so
+    // it's a writer's too.
+    row("GET", "/v1/code/changes/{id}/unstored/{fingerprint}", "code", W, one(PG, "change")),
+    row("POST", "/v1/code/changes/{id}/unstored/{fingerprint}/store", "code", W, one(PG, "change")),
     row("*", "/v1/code/threads/{id}", "code", M, one(PG, "thread")),
     row("*", "/v1/code/threads/{id}/", "code", M, one(PG, "thread")),
     row("*", "/v1/code/work/{id}", "code", M, one(PG, "work")),

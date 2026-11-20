@@ -521,6 +521,8 @@ pub struct FakeSecrets {
     /// The base's links (`links`), and what each ensure set as the environment's own keys.
     pub links: Mutex<Vec<(String, Kind, String, String)>>,
     pub own: Mutex<Vec<(String, String)>>,
+    /// The references the last ensure sent.
+    pub refs: Mutex<Vec<(String, String)>>,
     /// Values every resolve answers (static secrets).
     pub values: Mutex<Vec<(String, String)>>,
     /// Why each resolve was asked for (`logs`: values read to mask output).
@@ -529,8 +531,9 @@ pub struct FakeSecrets {
 
 #[async_trait]
 impl roll_previews::ports::Secrets for FakeSecrets {
-    async fn ensure(&self, _: &str, env: &str, _: &str, vars: &[(String, String)], _: &[(String, String)], trusted: bool, _: i64, branches: &[(Kind, String)]) -> anyhow::Result<()> {
+    async fn ensure(&self, _: &str, env: &str, _: &str, vars: &[(String, String)], refs: &[(String, String)], trusted: bool, _: i64, branches: &[(Kind, String)]) -> anyhow::Result<()> {
         self.ensured.lock().push((env.to_string(), trusted));
+        *self.refs.lock() = refs.to_vec();
         *self.branched.lock() = branches.to_vec();
         *self.own.lock() = vars.to_vec();
         Ok(())
@@ -592,6 +595,7 @@ pub fn change(id: &str, n: i64) -> ChangeInfo {
         approved: false,
         author: "carol".into(),
         github_pr: Some(100 + n),
+        owner_id: "own_acme".into(),
     }
 }
 

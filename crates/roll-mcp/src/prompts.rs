@@ -140,11 +140,13 @@ const PROMPTS: &[Prompt] = &[
              it was used from, so I can tell whether one is unexpected. Say which tokens to revoke (unused) and \
              which need an expiry. If you also have secrets_findings or previews_mask_suggestions, add the secrets \
              that need fixing and the personal data previews don't mask yet; with secrets_verify_audit, each \
-             project whose secrets audit log doesn't hold (its first break); with storage_list_keys, the S3 access \
+             project whose secrets audit log doesn't hold (its first break), and each whose log has digests on a \
+             pulled signing key that nothing later vouches for (pulled with countersigned null: say from when to \
+             when); legacy digests are only a note; with storage_list_keys, the S3 access \
              keys that are admin over every bucket or unused for 90 days. Then what's open to the internet, with \
              whichever of these you have: buckets that are public (storage_list_buckets), search clusters with no \
              IP allowlist (search_list_clusters), and previews shared outside the team (previews_list, then \
-             previews_list_shares for who and until when), a project's public status page (apps_status_page: \
+             previews_list_shares for who and until when), secrets' one-off share links still open (secrets_list_shares), a project's public status page (apps_status_page: \
              what it shows), and the live deploys whose images have critical or \
              high vulnerabilities with a fix (apps_deploy_vulnerabilities with severity high). Change nothing \
              yourself: applying a \
@@ -168,7 +170,9 @@ const PROMPTS: &[Prompt] = &[
                  knows (a crash loop, a spend cap, maintenance, a failed deploy with its error_detail). Then \
                  apps_activity with all for the timeline (deploys, failures, crash loops, alerts), and apps_route_stats \
                  for which routes fail or slowed (5xx, p95). Call apps_list_deploys to see what changed and when (apps_deploy_commits for what the newest deploy brought); apps_deploy_logs \
-                 for the newest deploy if it failed; apps_logs with http and a status of 500 for the failing \
+                 for the newest deploy if it failed (and, if you have it, apps_explain_deploy: the repo owner's model \
+                 reads its error and logs, and its answer is kept); apps_errors for the errors grouped, newest \
+                 regressions first; apps_logs with http and a status of 500 for the failing \
                  requests, and without http for errors; apps_metrics for CPU and memory. Tell me the most likely \
                  cause with the evidence. If the newest deploy caused it, offer apps_rollback_previous; it puts back \
                  that deploy's variables too, and in production it may ask a person first. Don't roll back without \

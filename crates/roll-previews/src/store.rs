@@ -115,6 +115,13 @@ CREATE TABLE IF NOT EXISTS visits (
     last_at INTEGER NOT NULL,
     PRIMARY KEY (preview_id, user_id)
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS gone_pushes (
+    host TEXT PRIMARY KEY,
+    preview_id TEXT NOT NULL,
+    service TEXT NOT NULL,
+    revision TEXT NOT NULL,
+    at INTEGER NOT NULL
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS pinned (
     preview_id TEXT NOT NULL,
     service TEXT NOT NULL,
@@ -876,12 +883,36 @@ impl Store {
         })
     }
 
+    /// Each of a project's references with who wrote it: `(scope, name, reference, by)`. A rule's
+    /// scope is `env` or an `env_for` pattern; a preview's own variable's is `preview:<id>`.
+    pub fn env_ref_writers(&self, project: &str) -> Result<Vec<(String, String, String, String)>> {
+        Ok(self.db.read(|c| c.query("SELECT scope, name, reference, by FROM env_refs WHERE project_id = ?", [project], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))))?)
+    }
+
+    /// Who set a preview's own variable to a reference (`Some((reference, by))`), or that it isn't
+    /// one any more (`None`).
+    pub fn set_var_ref(&self, project: &str, preview: &str, name: &str, set: Option<(&str, &str)>) -> Result<()> {
+        let now = self.now_ms()?;
+        let scope = format!("preview:{preview}");
+        self.db.write(|c| {
+            match set {
+                Some((reference, by)) => c.execute(
+                    "INSERT INTO env_refs (project_id, scope, name, reference, by, at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (project_id, scope, name) DO UPDATE SET reference = excluded.reference, by = excluded.by, at = excluded.at",
+                    params![project, scope, name, reference, by, now],
+                )?,
+                None => c.execute("DELETE FROM env_refs WHERE project_id = ? AND scope = ? AND name = ?", params![project, scope, name])?,
+            };
+            Ok::<_, Error>(())
+        })
+    }
+
     /// Who wrote each of a project's rules' references (`(scope, name, reference)`): one kept as
     /// it was keeps its writer, a new or changed one is `by`'s, one gone goes.
     pub fn set_env_refs(&self, project: &str, refs: &[(String, String, String)], by: &str) -> Result<()> {
         let now = self.now_ms()?;
         self.db.write(|c| {
-            let kept: Vec<(String, String, String)> = c.query("SELECT scope, name, reference FROM env_refs WHERE project_id = ?", [project], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            // The rules' own: a preview's variables' references are their setters' (`set_var_ref`).
+            let kept: Vec<(String, String, String)> = c.query("SELECT scope, name, reference FROM env_refs WHERE project_id = ? AND scope NOT LIKE 'preview:%'", [project], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
             for k in kept.iter().filter(|k| !refs.contains(k)) {
                 c.execute("DELETE FROM env_refs WHERE project_id = ? AND scope = ? AND name = ?", params![project, k.0, k.1])?;
             }
@@ -1064,7 +1095,7 @@ impl Store {
     /// Remove a preview's rows (after its branches and services are gone).
     pub fn remove(&self, id: &str) -> Result<()> {
         self.db.write(|c| {
-            for t in ["resources", "services", "pinned", "shares", "visit_tickets", "visit_sessions", "visits", "activity", "screenshots", "page_shots", "visual_page_accepts", "mail", "resolved_notes", "base_history", "leases", "note_crops", "git_pulls", "git_reports", "runtime_facts", "previews"] {
+            for t in ["resources", "services", "pinned", "shares", "visit_tickets", "visit_sessions", "visits", "activity", "screenshots", "page_shots", "visual_page_accepts", "mail", "resolved_notes", "base_history", "leases", "note_crops", "git_pulls", "git_reports", "runtime_facts", "gone_pushes", "previews"] {
                 let col = if t == "previews" { "id" } else { "preview_id" };
                 c.execute(&format!("DELETE FROM {t} WHERE {col} = ?"), [id])?;
             }
@@ -2297,6 +2328,18 @@ impl Store {
         })?)
     }
 
+    /// An earlier push no longer kept, by the host it had (a label).
+    pub fn gone_push(&self, host: &str) -> Result<Option<GonePush>> {
+        Ok(self.db.read(|c| {
+            c.query_row(
+                "SELECT g.preview_id, g.service, g.revision, s.url FROM gone_pushes g LEFT JOIN services s ON s.preview_id = g.preview_id AND s.name = g.service WHERE g.host = ?",
+                [host],
+                |r| Ok(GonePush { preview: r.get(0)?, service: r.get(1)?, revision: r.get(2)?, current_url: r.get(3)? }),
+            )
+            .optional()
+        })?)
+    }
+
     /// The host a service (or an earlier push's, `<service>@<revision>`) answers on.
     pub fn service_host(&self, id: &str, name: &str) -> Result<Option<String>> {
         Ok(self.db.read(|c| match name.split_once('@') {
@@ -2328,8 +2371,19 @@ impl Store {
                 |r| r.get(0),
             )?;
             for rev in &old {
+                // Its host says it's gone (and where the current one is), not that nothing's there.
+                c.execute(
+                    "INSERT INTO gone_pushes (host, preview_id, service, revision, at) SELECT host, preview_id, service, revision, ? FROM pinned WHERE preview_id = ? AND service = ? AND revision = ? \
+                     ON CONFLICT (host) DO UPDATE SET preview_id = excluded.preview_id, service = excluded.service, revision = excluded.revision, at = excluded.at",
+                    params![now, id, service, rev],
+                )?;
                 c.execute("DELETE FROM pinned WHERE preview_id = ? AND service = ? AND revision = ?", params![id, service, rev])?;
             }
+            // The latest few a preview's gone pushes say so; older ones are just gone.
+            c.execute(
+                "DELETE FROM gone_pushes WHERE preview_id = ? AND host NOT IN (SELECT host FROM gone_pushes WHERE preview_id = ? ORDER BY at DESC LIMIT ?)",
+                params![id, id, GONE_KEPT as i64],
+            )?;
             Ok::<_, Error>(old.into_iter().map(|rev| format!("{service}@{rev}")).collect())
         })
     }
@@ -2762,8 +2816,25 @@ impl Store {
         let first_unstable = page_health.as_ref().is_some_and(|h| h.unstable);
         let visual_review = self.visual_review(&r, settings.visual_review, settings.github.visual_threshold, base_change.as_ref(), &pages, first_unstable, f.head)?;
         let page_speed = f.speed.map(|now| crate::PageSpeedView { now, before: f.prev_speed });
-        let new_errors = self.runtime_fact(&r.id, "new_errors")?;
-        let slower_routes = if settings.traces { self.runtime_fact(&r.id, "slower_routes")? } else { None };
+        // What the holder read against main's, for this head only (a push reads it again), and
+        // whether it compared at this head at all (errors; routes too with traces).
+        let new_errors = self.runtime_fact::<crate::NewErrors>(&r.id, "new_errors")?.filter(|f| f.head == r.head);
+        let slower_routes = if settings.traces { self.runtime_fact::<crate::SlowerRoutes>(&r.id, "slower_routes")?.filter(|f| f.head == r.head) } else { None };
+        let compared_at = |kind: &str| -> Result<bool> { Ok(self.runtime_fact::<String>(&r.id, kind)?.as_deref() == Some(r.head.as_str())) };
+        let regressions_compared = compared_at("compared_errors")? && (!settings.traces || compared_at("compared_routes")?);
+        let regressions = match settings.regressions {
+            crate::settings::RegressionsRule::Off => None,
+            crate::settings::RegressionsRule::Check => Some("check".to_string()),
+            crate::settings::RegressionsRule::Required => Some("required".to_string()),
+        };
+        // An acceptance counts at its head, for what it accepted (more at that head asks again), and
+        // for a required rule only a person's.
+        let showing = crate::RegressionsAccepted::of(slower_routes.as_ref(), new_errors.as_ref());
+        let errors_total = new_errors.as_ref().map_or(0, |n| n.total);
+        let regressions_accepted = self
+            .runtime_fact::<crate::RegressionsAccepted>(&r.id, "regressions_accepted")?
+            .filter(|a| a.head == r.head && errors_total <= a.errors_total && showing.iter().all(|w| a.what.contains(w)))
+            .filter(|a| a.person || settings.regressions != crate::settings::RegressionsRule::Required);
         let screenshot_link = screenshot_at.map(|at| self.link_at(&r.id, at, None)).transpose()?;
         let diff_link = match screenshot_at.filter(|_| base_differs) {
             Some(at) => Some(self.link_at(&r.id, at, Some("diff=base"))?),
@@ -2825,6 +2896,9 @@ impl Store {
             page_links,
             slower_routes,
             new_errors,
+            regressions,
+            regressions_accepted,
+            regressions_compared,
             page_speed,
             page_health,
             page_a11y,
@@ -2895,6 +2969,18 @@ pub const SHARES_MAX: usize = 20;
 
 /// Earlier pushes kept reachable per service.
 pub const PINNED_KEEP: usize = 3;
+
+/// An earlier push its preview no longer keeps ([`Store::gone_push`]): whose it was, and the
+/// service's current URL (none once the preview no longer runs it).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GonePush {
+    pub preview: String,
+    pub service: String,
+    pub revision: String,
+    pub current_url: Option<String>,
+}
+/// How many of a preview's evicted pushes still say they're gone.
+pub const GONE_KEPT: usize = 30;
 
 fn append(c: &Conn<'_>, id: &str, at: i64, message: &str) -> code_sql::Result<()> {
     let seq: i64 = c.query_row("SELECT COALESCE(MAX(seq), 0) + 1 FROM activity WHERE preview_id = ?", [id], |r| r.get(0))?;

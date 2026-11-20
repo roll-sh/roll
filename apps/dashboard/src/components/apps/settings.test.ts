@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Service } from "@/lib/apps-api";
-import { formOf, patchOf } from "./settings";
+import { formOf, patchOf, rebase } from "./settings";
 
 const svc: Service = {
   id: "svc_a",
@@ -29,5 +29,21 @@ describe("the settings form", () => {
     expect(patchOf(svc, { ...f, logMetrics: "payments_failed: payment failed\n\nTimeout" })).toEqual({
       run: { log_metrics: [{ name: "payments_failed", pattern: "payment failed" }, { name: "timeout", pattern: "Timeout" }] },
     });
+  });
+
+  it("keeps what was edited when the service changes under the form", () => {
+    const base = formOf(svc);
+    const edited = { ...base, build: "pnpm build:prod" };
+    // A panel beside it saved: the service's concurrency changed, the edit stays.
+    const next = formOf({ ...svc, run: { ...svc.run, concurrency: 80 } });
+    expect(rebase(edited, base, next)).toEqual({ ...next, build: "pnpm build:prod" });
+  });
+
+  it("edits the first stream push and keeps the rest as they are", () => {
+    const second = { stream: "st_bbbbbbbbbbbb", topic: "audit", group: "web", path: "/audit" };
+    const withPush = { ...svc, run: { ...svc.run, push: [{ stream: "st_aaaaaaaaaaaa", topic: "orders", group: "web", path: "/events", dead_letter: "dead", max_attempts: 3 }, second] } };
+    const f = formOf(withPush);
+    expect(patchOf(withPush, { ...f, pushPath: "/orders", pushDead: "" })).toEqual({ run: { push: [{ stream: "st_aaaaaaaaaaaa", topic: "orders", group: "web", path: "/orders", dead_letter: undefined }, second] } });
+    expect(patchOf(withPush, { ...f, pushStream: "" })).toEqual({ run: { push: [second] } });
   });
 });

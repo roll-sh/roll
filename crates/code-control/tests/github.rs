@@ -722,6 +722,9 @@ async fn connect_import_webhooks_and_mirror() {
             diff_url: None,
             pages: Vec::new(),
             speed_budget: None,
+            regressions: None,
+            regressions_accepted_by: None,
+            regressions_compared: false,
             visual_review: None,
             notes: Vec::new(),
             issues: Vec::new(),
@@ -741,6 +744,19 @@ async fn connect_import_webhooks_and_mirror() {
     .await;
     assert_eq!(preview_calls("/issues/5/comments").len(), 1, "one comment, edited in place");
     assert_eq!(preview_calls("/deployments").iter().filter(|(_, p, _)| p.ends_with("/deployments")).count(), 1, "one deployment per head");
+
+    // `roll/regressions` follows the comparison with main's preview alone: pending until compared at
+    // the head, then failing on a new error, though nothing else about the preview changed.
+    let regressions = || preview_calls("/statuses/").iter().filter(|(_, _, b)| b["context"] == "roll/regressions").map(|(_, _, b)| b["state"].as_str().unwrap_or("").to_string()).collect::<Vec<_>>();
+    let mut checked = env("ready");
+    checked.environment.as_mut().unwrap().regressions = Some("check".into());
+    a.code.report_environment(c5_id, Some(&checked)).unwrap();
+    until("roll/regressions pending before a comparison", || async { regressions().last().map(String::as_str) == Some("pending") }).await;
+    let e = checked.environment.as_mut().unwrap();
+    e.regressions_compared = true;
+    e.new_errors = Some(code_control::model::PreviewNewErrors { branch: "main".into(), total: 1, errors: Vec::new() });
+    a.code.report_environment(c5_id, Some(&checked)).unwrap();
+    until("roll/regressions failing on a new error", || async { regressions().last().map(String::as_str) == Some("failure") }).await;
 
     // A visual change waiting for a review: `roll/visual`, a check run with Accept. A click is
     // accepted for a writer who isn't the change's author, through the preview backend.

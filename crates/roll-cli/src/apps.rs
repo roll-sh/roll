@@ -59,7 +59,8 @@ pub struct Up {
 pub struct Deploy {
     #[command(flatten)]
     pub target: Target,
-    /// The commit to deploy (a repo service; default: its branch's head).
+    /// What to deploy once: a commit, or a branch or tag by name (default: its branch's head;
+    /// the environment keeps following its branch).
     #[arg(long)]
     pub revision: Option<String>,
     /// Deploy this public image instead of the service's source.
@@ -391,6 +392,10 @@ pub enum AppsCmd {
         /// `roll apps rollout advance|all|abort` decides.
         #[arg(long)]
         rollout_manual: Option<bool>,
+        /// `false`: the old instances stop before the new ones start, so two never run at once
+        /// (a bot, a scheduler); `true` (the default): the new ones start beside them.
+        #[arg(long, value_name = "BOOL")]
+        overlap: Option<bool>,
         /// The app speaks HTTP/2 without TLS (a gRPC server): `true` or `false`.
         #[arg(long)]
         h2c: Option<bool>,
@@ -412,6 +417,20 @@ pub enum AppsCmd {
         /// memory for a minute (10–100); `0` turns it off.
         #[arg(long, value_name = "PERCENT")]
         memory_target: Option<u32>,
+        /// And on its answers' p95: another instance while a window's p95 is over this many ms
+        /// (50–60000); `0` turns it off.
+        #[arg(long, value_name = "MS")]
+        latency_target: Option<u32>,
+        /// An audience its instances may ask roll's OIDC issuer for, at `$ROLL_OIDC_URL` (repeat
+        /// for more, at most five; replaces them all; the first is the default); `none` removes
+        /// them.
+        #[arg(long, value_name = "AUDIENCE")]
+        oidc_audience: Vec<String>,
+        /// A roll stream's records POSTed to a path as they arrive (repeat for more, at most
+        /// four; replaces them all): `<stream>/<topic>/<group>:<path>[,dead_letter=<topic>]
+        /// [,max_attempts=N][,max_in_flight=N][,environment=<env>]`; `none` removes them.
+        #[arg(long, value_name = "RULE")]
+        push: Vec<String>,
         /// A worker that stops: `always` started again, `on_failure`, or `never`.
         #[arg(long, value_parser = ["always", "on_failure", "never"])]
         restart: Option<String>,
@@ -477,7 +496,8 @@ pub enum AppsCmd {
     },
     /// Deployments, newest first; `--commits DEP`: what a repo deployment brings over the one
     /// live before it, newest first; `--vulnerabilities DEP`: its image's known vulnerabilities,
-    /// most severe first (`--severity high`: high or worse).
+    /// most severe first (`--severity high`: high or worse); `--explain DEP`: why a failed
+    /// deployment failed, read by the model of the repo's owner (kept; `--again` asks anew).
     Deploys {
         #[command(flatten)]
         target: Target,
@@ -485,8 +505,18 @@ pub enum AppsCmd {
         commits: Option<String>,
         #[arg(long, value_name = "DEPLOYMENT")]
         vulnerabilities: Option<String>,
+        #[arg(long, value_name = "DEPLOYMENT", conflicts_with_all = ["commits", "vulnerabilities"])]
+        explain: Option<String>,
+        #[arg(long, requires = "explain")]
+        again: bool,
         #[arg(long, requires = "vulnerabilities", value_parser = ["critical", "high", "medium", "low", "unknown"])]
         severity: Option<String>,
+    },
+    /// Its streams pushed to it (`run.push`) as they stand: how far each group is behind, what was
+    /// delivered and dead-lettered, and whether one is failing or off.
+    Push {
+        #[command(flatten)]
+        target: Target,
     },
     /// What the next deploy changes (Railway's staged changes): variables added, removed or
     /// changed (names, never values), run settings the live deployment doesn't run with, and the
@@ -556,7 +586,7 @@ pub enum AppsCmd {
         #[command(flatten)]
         target: Target,
         /// A terminal to it: `roll apps run -i -- rails console`.
-        #[arg(short = 'i', long, conflicts_with_all = ["timeout", "tasks"])]
+        #[arg(short = 'i', long, conflicts_with_all = ["timeout", "tasks", "retries", "parallelism"])]
         interactive: bool,
         /// A console's CPUs (0.25–8; default the environment's size).
         #[arg(long, requires = "interactive")]
@@ -571,6 +601,13 @@ pub enum AppsCmd {
         /// `ROLL_TASK_COUNT`; done when all are (1–100, ten at a time).
         #[arg(long)]
         tasks: Option<u32>,
+        /// Try a failed or timed-out task again this many times (0–5), each try with
+        /// `ROLL_TASK_ATTEMPT`, as a cron run's retries wait.
+        #[arg(long)]
+        retries: Option<u32>,
+        /// Tasks running at once (1–100; default ten, or fewer tasks).
+        #[arg(long)]
+        parallelism: Option<u32>,
         #[arg(trailing_var_arg = true, required_unless_present = "interactive", allow_hyphen_values = true)]
         command: Vec<String>,
     },
@@ -1196,6 +1233,10 @@ pub enum AppsCmd {
         /// Lift its deploy freeze.
         #[arg(long)]
         unfreeze: bool,
+        /// A new `ROLL_CONFIG_URL` token (a leaked address): the old one reads until a deploy
+        /// made after it is live.
+        #[arg(long)]
+        rotate_config: bool,
         /// Any setting the environment takes, as JSON (docs/apps/http-api.md): `--set
         /// 'mirror={"environment":"staging","percent":5}'`, `--set
         /// 'pause_schedule={"windows":[{"from":"fri 19:00","to":"mon 07:00"}]}'`, `--set
@@ -1740,6 +1781,36 @@ fn env_line(k: &str, v: &str) -> String {
         }
         format!("{k}=\"{q}\"")
     }
+}
+
+/// `--push` rules as `run.push` takes them: none given, nothing changes; `none`, none at all.
+fn push_rules(given: &[String]) -> anyhow::Result<Option<Value>> {
+    if given.is_empty() {
+        return Ok(None);
+    }
+    if given.iter().any(|g| g == "none") {
+        return Ok(Some(Value::Null));
+    }
+    let shape = "--push is <stream>/<topic>/<group>:<path>[,dead_letter=<topic>][,max_attempts=N][,max_in_flight=N][,environment=<env>]";
+    let mut out = Vec::new();
+    for g in given {
+        let mut parts = g.split(',');
+        let head = parts.next().unwrap_or("");
+        let (src, path) = head.split_once(':').ok_or_else(|| anyhow::anyhow!("{shape}"))?;
+        let mut ids = src.splitn(3, '/');
+        let (Some(stream), Some(topic), Some(group)) = (ids.next(), ids.next(), ids.next()) else { anyhow::bail!("{shape}") };
+        let mut rule = json!({ "stream": stream, "topic": topic, "group": group, "path": path });
+        for opt in parts {
+            let (k, v) = opt.split_once('=').ok_or_else(|| anyhow::anyhow!("{shape}"))?;
+            rule[k] = match k {
+                "dead_letter" | "environment" => json!(v),
+                "max_attempts" | "max_in_flight" => json!(v.parse::<u32>().map_err(|_| anyhow::anyhow!("--push's {k} is a number"))?),
+                _ => anyhow::bail!("{shape}"),
+            };
+        }
+        out.push(rule);
+    }
+    Ok(Some(Value::Array(out)))
 }
 
 /// Print a log's lines (SSE `data:` JSON) until the stream ends.
@@ -2685,10 +2756,10 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Set { target, name, repo, root, image, upload, builder, dockerfile, stage, install, build_command, build_start, health_timeout, health_every, health_failures, health_command, alert_memory, alert_errors, alert_p95, alert_log, alert_log_count, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, retries, volume, watch, packages, build_timeout, rollout, rollout_step, rollout_errors, rollout_manual, h2c, scale, public, drain, cpu_target, memory_target, restart, restart_tries, affinity, tcp, rollback_on_crash, rebuild_on_base, block_on } => {
+        AppsCmd::Set { target, name, repo, root, image, upload, builder, dockerfile, stage, install, build_command, build_start, health_timeout, health_every, health_failures, health_command, alert_memory, alert_errors, alert_p95, alert_log, alert_log_count, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, retries, volume, watch, packages, build_timeout, rollout, rollout_step, rollout_errors, rollout_manual, overlap, h2c, scale, public, drain, cpu_target, memory_target, latency_target, oidc_audience, push, restart, restart_tries, affinity, tcp, rollback_on_crash, rebuild_on_base, block_on } => {
             let svc = service(api, &target).await?;
             // The service's rollout with what was given replaced (the API takes it whole).
-            let rollout = if rollout.is_some() || rollout_step.is_some() || rollout_errors.is_some() || rollout_manual.is_some() {
+            let rollout = if rollout.is_some() || rollout_step.is_some() || rollout_errors.is_some() || rollout_manual.is_some() || overlap.is_some() {
                 let mut r = svc["run"]["rollout"].as_object().cloned().unwrap_or_default();
                 match rollout.as_deref() {
                     None => {}
@@ -2708,6 +2779,9 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 }
                 if let Some(m) = rollout_manual {
                     r.insert("manual".into(), json!(m));
+                }
+                if let Some(o) = overlap {
+                    r.insert("overlap".into(), json!(o));
                 }
                 Some(Value::Object(r))
             } else {
@@ -2827,6 +2901,13 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 ("drain_s", drain.map(|d| if d == 0 { Value::Null } else { Value::from(d) })),
                 ("cpu_target", cpu_target.map(|t| if t == 0 { Value::Null } else { Value::from(t) })),
                 ("memory_target", memory_target.map(|t| if t == 0 { Value::Null } else { Value::from(t) })),
+                ("latency_target_ms", latency_target.map(|t| if t == 0 { Value::Null } else { Value::from(t) })),
+                ("oidc_audiences", match oidc_audience.as_slice() {
+                    [] => None,
+                    a if a.iter().any(|x| x == "none") => Some(Value::Null),
+                    a => Some(json!(a)),
+                }),
+                ("push", push_rules(&push)?),
                 ("restart", restart.map(Value::from)),
                 ("restart_tries", restart_tries.map(Value::from)),
                 ("affinity", affinity.map(Value::from)),
@@ -3086,6 +3167,20 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             };
             api.post(&format!("/v1/apps/services/{}/restore", enc(&s(&d["id"]))), json!({})).await?
         }
+        AppsCmd::Deploys { target, explain: Some(dep), again, .. } => {
+            let svc = service(api, &target).await?;
+            let q = if again { "?again=1" } else { "" };
+            let e = api.post(&format!("{}/deploys/{}/explain{q}", env_path(&svc, &target.env), enc(&dep)), json!({})).await?;
+            if !json_out {
+                println!("{}\n\n{}", s(&e["summary"]), s(&e["cause"]));
+                for (i, step) in e["steps"].as_array().into_iter().flatten().enumerate() {
+                    println!("{}. {}", i + 1, s(step));
+                }
+                println!("\n({}, {} confidence)", s(&e["model"]), s(&e["confidence"]));
+                return Ok(());
+            }
+            e
+        }
         AppsCmd::Deploys { target, vulnerabilities: Some(dep), severity, .. } => {
             let svc = service(api, &target).await?;
             let q = severity.map(|s| format!("?severity={s}")).unwrap_or_default();
@@ -3131,6 +3226,30 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 return Ok(());
             }
             c
+        }
+        AppsCmd::Push { target } => {
+            let svc = service(api, &target).await?;
+            let v = api.get(&format!("{}/push", env_path(&svc, &target.env))).await?;
+            if !json_out {
+                let rules = v.as_array().cloned().unwrap_or_default();
+                if rules.is_empty() {
+                    println!("no stream is pushed to {} (run.push)", target.env);
+                }
+                for r in rules {
+                    let head = format!("{} -> {}", s(&r["topic"]), s(&r["path"]));
+                    if let Some(off) = r["off"].as_str() {
+                        println!("{head}: off, {off}");
+                        continue;
+                    }
+                    let lag = r["lag"].as_u64().map(|l| format!("{l} behind, ")).unwrap_or_default();
+                    println!("{head}: {lag}{} delivered, {} dead-lettered", r["delivered"], r["dead_lettered"]);
+                    if let Some(e) = r["last_error"].as_str() {
+                        println!("  failing: {e}");
+                    }
+                }
+                return Ok(());
+            }
+            v
         }
         AppsCmd::Pending { target } => {
             let svc = service(api, &target).await?;
@@ -3433,10 +3552,10 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             return ssh(api, &env_path(&svc, &target.env), &query).await;
         }
-        AppsCmd::Run { target, timeout, tasks, command, .. } => {
+        AppsCmd::Run { target, timeout, tasks, retries, parallelism, command, .. } => {
             let svc = service(api, &target).await?;
             let base = format!("{}/jobs", env_path(&svc, &target.env));
-            let job = api.post(&base, json!({ "command": shell_join(&command), "timeout_s": timeout, "tasks": tasks })).await?;
+            let job = api.post(&base, json!({ "command": shell_join(&command), "timeout_s": timeout, "tasks": tasks, "retries": retries, "parallelism": parallelism })).await?;
             if !json_out {
                 let id = s(&job["id"]);
                 follow(api, &format!("{base}/{}/logs?follow=1", enc(&id))).await?;
@@ -4233,8 +4352,17 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Env { target, all_services, branch, no_branch, variables_from, wait_for_ci, run, follow_tag, redeploy_on_secrets, vitals, egress, egress_host, private, open, signed_in, maintenance, serve, pause, resume, resume_deploys, hold, allow_ip, allow_any, rate_limit, no_rate_limit, firewall, no_firewall, header, no_headers, route, no_routes, error_page, maintenance_page, roll_pages, freeze, unfreeze, set } => {
+        AppsCmd::Env { target, all_services, branch, no_branch, variables_from, wait_for_ci, run, follow_tag, redeploy_on_secrets, vitals, egress, egress_host, private, open, signed_in, maintenance, serve, pause, resume, resume_deploys, hold, allow_ip, allow_any, rate_limit, no_rate_limit, firewall, no_firewall, header, no_headers, route, no_routes, error_page, maintenance_page, roll_pages, freeze, unfreeze, rotate_config, set } => {
             let svc = service(api, &target).await?;
+            if rotate_config {
+                let e = api.post(&format!("{}/config/rotate", env_path(&svc, &target.env)), json!({})).await?;
+                if json_out {
+                    println!("{}", serde_json::to_string_pretty(&e)?);
+                } else {
+                    println!("{}: a new ROLL_CONFIG_URL; the old one reads until a deploy made now is live (`roll apps redeploy`)", target.env);
+                }
+                return Ok(());
+            }
             // Only what was asked changes: no `--branch` keeps the one it has.
             let mut body = serde_json::Map::new();
             if let Some(reason) = freeze {
@@ -4569,6 +4697,15 @@ fn internal_rewritten(v: &str, host: &str, local: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn push_rules_read_as_run_push_takes_them() {
+        let r = super::push_rules(&["st_aaaaaaaaaaaa/orders/web:/events,dead_letter=orders-dead,max_attempts=3".into()]).unwrap().unwrap();
+        assert_eq!(r, serde_json::json!([{ "stream": "st_aaaaaaaaaaaa", "topic": "orders", "group": "web", "path": "/events", "dead_letter": "orders-dead", "max_attempts": 3 }]));
+        assert_eq!(super::push_rules(&["none".into()]).unwrap(), Some(serde_json::Value::Null));
+        assert_eq!(super::push_rules(&[]).unwrap(), None);
+        assert!(super::push_rules(&["orders:/events".into()]).is_err());
+    }
+
     #[test]
     fn only_a_linked_hosts_urls_are_pointed_at_its_tunnel() {
         let r = |v: &str| super::internal_rewritten(v, "api.production.internal", "127.0.0.1:4000");

@@ -38,6 +38,24 @@ impl Apps {
         Some(format!("{}'s {} deploy hook", row.service, row.name))
     }
 
+    /// A leaked `ROLL_OIDC_URL` (`rlr_`, found wherever roll's secrets are): it mints the service's
+    /// cloud tokens, so it reads nothing from now on, and a redeploy hands the environment's
+    /// instances a new one (until it's live they get no token). What was revoked, if it was live.
+    pub fn revoke_leaked_oidc(self: &Arc<Self>, token: &str) -> Option<String> {
+        let (service, env) = self.store.drop_oidc_by_hash(&crate::public::token_hash(token)).ok()??;
+        self.oidc_tokens.lock().retain(|k, _| !k.starts_with(&format!("{service}/{env}/")));
+        tracing::warn!(service = %service, env = %env, "apps: a leaked OIDC address was revoked; redeploying with a new one");
+        if let Ok(rt) = tokio::runtime::Handle::try_current() {
+            let (this, s, e) = (self.clone(), service.clone(), env.clone());
+            rt.spawn(async move {
+                if let Err(err) = this.redeploy(&s, &e, json!({ "message": "a new OIDC address (the last one leaked)" }), Some("roll".into()), None).await {
+                    tracing::warn!(service = %s, env = %e, error = %err, "apps: redeploying after a leaked OIDC address");
+                }
+            });
+        }
+        Some(format!("{service}'s {env} OIDC address"))
+    }
+
     /// `POST /v1/apps/hooks/{service}/{env}/{token}[?image=]`: deploy, as the hook. Anything
     /// that isn't a live hook is the same 404, so the URL tells a guesser nothing. A Git URL
     /// service's hook is also its repository's push webhook (GitHub's or GitLab's `push` event

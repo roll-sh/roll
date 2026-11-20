@@ -242,21 +242,22 @@ async fn a_visual_change_waits_for_someone_to_accept_it_at_each_head() {
     shoot("cs_1b", 255, 255);
     assert_eq!(review().map(|v| (v.state, v.percent)), Some((VisualState::Changed, 100.0)));
     assert_eq!(waiting(), Some(vec!["".to_string(), "/pricing".to_string()]));
-    assert!(e.engine.accept_visual(&base.id, "ada", None, true, None, None).await.is_err(), "only a change's");
+    assert!(e.engine.accept_visual(&base.id, "ada", &[], true, None, None, None).await.is_err(), "only a change's");
     // Not by its own author.
-    let err = e.engine.accept_visual(&chg.id, "carol", None, true, Some("cs_1b"), None).await.unwrap_err();
+    let err = e.engine.accept_visual(&chg.id, "carol", &[], true, None, Some("cs_1b"), None).await.unwrap_err();
     assert!(err.to_string().contains("own author"), "{err}");
-    let err = e.engine.accept_visual(&chg.id, "token:ci", Some("carol"), false, Some("cs_1b"), None).await.unwrap_err();
+    let err = e.engine.accept_visual(&chg.id, "token:ci", &["carol".into()], false, None, Some("cs_1b"), None).await.unwrap_err();
     assert!(err.to_string().contains("own author"), "nor with their own token: {err}");
     // What was seen: an older screenshot's head is refused, this one's accepted.
-    let err = e.engine.accept_visual(&chg.id, "ada", None, true, Some("cs_1a"), None).await.unwrap_err();
+    let err = e.engine.accept_visual(&chg.id, "ada", &[], true, None, Some("cs_1a"), None).await.unwrap_err();
     assert!(err.to_string().contains("a newer screenshot came in"), "{err}");
     // One page at a time: the change waits until every changed page is accepted.
-    let p = e.engine.accept_visual(&chg.id, "ada", None, true, Some("cs_1b"), Some("/pricing")).await.unwrap();
+    assert!(matches!(e.engine.accept_visual(&chg.id, "bob", &[], true, Some(Some("own_bob")), Some("cs_1b"), None).await, Err(roll_previews::Error::Forbidden(_))), "no write on its repo");
+    let p = e.engine.accept_visual(&chg.id, "ada", &[], true, Some(Some("own_acme")), Some("cs_1b"), Some("/pricing")).await.unwrap();
     assert_eq!(p.visual_review.map(|v| v.state), Some(VisualState::Changed));
     assert_eq!(waiting(), Some(vec!["".to_string()]));
-    assert!(e.engine.accept_visual(&chg.id, "ada", None, true, Some("cs_1b"), Some("/nowhere")).await.is_err(), "a page it has no screenshot of");
-    let p = e.engine.accept_visual(&chg.id, "ada", None, true, Some("cs_1b"), Some("")).await.unwrap();
+    assert!(e.engine.accept_visual(&chg.id, "ada", &[], true, None, Some("cs_1b"), Some("/nowhere")).await.is_err(), "a page it has no screenshot of");
+    let p = e.engine.accept_visual(&chg.id, "ada", &[], true, None, Some("cs_1b"), Some("")).await.unwrap();
     assert_eq!(p.visual_review.map(|v| (v.state, v.by)), Some((VisualState::Accepted, Some("ada".into()))));
     assert_eq!(e.code.last_report("chg_1").visual_review.map(|v| v.state), Some(VisualState::Accepted), "the change is told at once");
     // A push that changes nothing visible keeps it.
@@ -269,7 +270,7 @@ async fn a_visual_change_waits_for_someone_to_accept_it_at_each_head() {
     assert_eq!(review().map(|v| v.state), Some(VisualState::Changed));
     assert_eq!(waiting(), Some(vec!["/pricing".to_string()]));
     // Accept with no page: every page there.
-    e.engine.accept_visual(&chg.id, "ada", None, true, Some("cs_1d"), None).await.unwrap();
+    e.engine.accept_visual(&chg.id, "ada", &[], true, None, Some("cs_1d"), None).await.unwrap();
     assert_eq!(review().map(|v| v.state), Some(VisualState::Accepted));
     // Under the project's threshold a page counts as unchanged (a clock `hide` can't name).
     let mut one_pixel = image::RgbaImage::from_pixel(4, 4, image::Rgba([255, 255, 255, 255]));
@@ -580,6 +581,13 @@ async fn a_route_slower_than_mains_reaches_the_record_and_the_report() {
     assert_eq!(s.routes[0].grew, Some(roll_previews::GrewSpan { span: "SELECT orders".into(), ms: 330, main_ms: 50 }), "where its time went");
     assert_eq!(e.code.last_report("chg_sr").slower_routes, Some(s), "reported again with it");
     assert!(e.engine.store.preview(&base.id).unwrap().slower_routes.is_none(), "main isn't slower than itself");
+    // A route with a budget of its own is over it whatever main's does (main's own, here).
+    let mut st = e.engine.store.settings(&e.project).unwrap();
+    st.github.budget.routes.insert("GET /orders".into(), 80);
+    e.engine.store.put_settings(&e.project, &st).unwrap();
+    e.engine.read_slower_routes().await;
+    let s = e.engine.store.preview(&base.id).unwrap().slower_routes.expect("main's over its budget");
+    assert_eq!((s.routes[0].name.as_str(), s.routes[0].p50_ms, s.routes[0].budget_ms), ("GET /orders", 100, Some(80)));
 }
 
 /// An error group main's preview doesn't have goes on the change's record (masked, the most
@@ -603,9 +611,28 @@ async fn an_error_mains_preview_doesnt_have_reaches_the_record_and_the_report() 
     e.apps.errors.lock().insert(format!("{}/{web}", base.id), vec![group("old", "a flaky upstream", 3), group("own-main", &own(&base.id), 2)]);
     e.apps.errors.lock().insert(format!("{}/{web}", p.id), vec![group("old", "a flaky upstream", 4), group("rare", "RangeError", 1), group("new", "Stripe rejected sk_test_51Hx9", 9), group("own-mine", &own(&p.id), 2)]);
     e.engine.read_new_errors().await;
-    let n = e.engine.store.preview(&p.id).unwrap().new_errors.expect("new against main's");
+    let seen = e.engine.store.preview(&p.id).unwrap();
+    assert!(seen.regressions_compared, "compared at its head");
+    let n = seen.new_errors.expect("new against main's");
+    assert_eq!(n.head, p.head, "read at its head");
     assert_eq!((n.branch.as_str(), n.total, n.errors.iter().map(|x| x.title.as_str()).collect::<Vec<_>>()), ("main", 2, vec!["Stripe rejected ***", "RangeError"]));
     assert_eq!(e.code.last_report("chg_ne").new_errors, Some(n), "reported again with it");
+    // Required, someone other than its author accepts them at its head (a person, not a token).
+    let mut s = e.engine.store.settings(&e.project).unwrap();
+    s.regressions = roll_previews::settings::RegressionsRule::Required;
+    e.engine.store.put_settings(&e.project, &s).unwrap();
+    assert!(matches!(e.engine.accept_regressions(&p.id, "carol", &[], true, None, None).await, Err(roll_previews::Error::Forbidden(_))), "not its author");
+    // Nor under another of their names (their roll handle, the change carrying their GitHub login).
+    assert!(matches!(e.engine.accept_regressions(&p.id, "carol-roll", &["carol-roll".into(), "carol".into()], true, None, None).await, Err(roll_previews::Error::Forbidden(_))), "their linked login");
+    assert!(matches!(e.engine.accept_regressions(&p.id, "token:ci", &[], false, None, None).await, Err(roll_previews::Error::Forbidden(_))), "not a token");
+    assert!(matches!(e.engine.accept_regressions(&p.id, "ada", &[], true, None, Some("cs_old")).await, Err(roll_previews::Error::Conflict(_))), "a newer push");
+    assert!(matches!(e.engine.accept_regressions(&p.id, "bob", &[], true, Some(Some("own_bob")), Some(&p.head)).await, Err(roll_previews::Error::Forbidden(_))), "no write on its repo");
+    let accepted = e.engine.accept_regressions(&p.id, "ada", &[], true, Some(Some("own_acme")), Some(&p.head)).await.unwrap();
+    assert_eq!((accepted.regressions.as_deref(), accepted.regressions_accepted.map(|a| a.by)), (Some("required"), Some("ada".to_string())));
+    // A new one at the same head isn't covered by it: accepted again or not at all.
+    e.apps.errors.lock().get_mut(&format!("{}/{web}", p.id)).unwrap().push(group("later", "TimeoutError", 1));
+    e.engine.read_new_errors().await;
+    assert!(e.engine.store.preview(&p.id).unwrap().regressions_accepted.is_none(), "more than was accepted");
     // Fixed (gone from its output): it goes.
     e.apps.errors.lock().insert(format!("{}/{web}", p.id), vec![group("old", "a flaky upstream", 5)]);
     e.engine.read_new_errors().await;
@@ -1194,6 +1221,13 @@ async fn earlier_pushes_stay_reachable_at_their_own_urls() {
     assert_eq!(earlier, ["cs_8d", "cs_8c", "cs_8b"]);
     assert!(view.earlier.iter().all(|x| x.service == "web" && x.url != view.url.clone().unwrap()));
     assert!(e.apps.removed.lock().contains(&(p.id.clone(), "web@cs_8a".into())), "the oldest's container goes");
+    // Its link says it's gone, with the way to the latest (not a 404 that reads as broken).
+    let label = |url: &str| url.split("://").nth(1).unwrap().split('.').next().unwrap().to_string();
+    let b = view.earlier.iter().find(|x| x.revision == "cs_8b").unwrap();
+    let a = label(&b.url).replacen("-8b-", "-8a-", 1);
+    let web = view.services.iter().find(|x| x.name == "web").map(|x| x.url.clone());
+    let gone = roll_previews::store::GonePush { preview: p.id.clone(), service: "web".into(), revision: "cs_8a".into(), current_url: web };
+    assert_eq!(e.engine.store.gone_push(&a).unwrap(), Some(gone), "that service's latest push");
     // An earlier push runs its own head on its own host.
     let (t, _) = e.engine.env(&p.id, "web@cs_8c").await.unwrap();
     assert_eq!(t.revision, "cs_8c");
@@ -1256,7 +1290,8 @@ async fn a_signed_in_person_sees_only_their_own_projects_previews() {
 
 /// A project rule naming another environment's key (`roll://ENV/KEY`) routes its values into code
 /// whoever pushes a branch controls: saving one needs its writer's reveal there (roll secrets
-/// decides); the environment its previews follow needs none.
+/// decides); the environment its previews follow needs none. Each preview then gets it only while
+/// its writer still may (roll secrets reads it as them at every converge).
 #[tokio::test]
 async fn a_rules_reference_to_another_environment_needs_its_writers_reveal_there() {
     use tower::ServiceExt;
@@ -1268,6 +1303,9 @@ async fn a_rules_reference_to_another_environment_needs_its_writers_reveal_there
         fn place(&self, reference: &str) -> Result<(String, String), String> {
             let parts: Vec<&str> = reference.strip_prefix("roll://").ok_or("not one")?.split('/').collect();
             Ok((parts[0].to_string(), if parts.len() > 2 { format!("/{}", parts[1..parts.len() - 1].join("/")) } else { "/".into() }))
+        }
+        fn still(&self, _: &str, _: &str, _: bool, _: &str, maker: &str) -> Result<(), String> {
+            if maker == "usr_b" { Ok(()) } else { Err(format!("{maker} may not reveal staging:/payments")) }
         }
     }
     let e = env(json!({ "enabled": true }));
@@ -1295,6 +1333,43 @@ async fn a_rules_reference_to_another_environment_needs_its_writers_reveal_there
     let mut req = axum::http::Request::put(format!("/v1/previews/projects/{}/settings", mine.id)).header("content-type", "application/json").body(axum::body::Body::from(json!({ "secrets": { "base": "dev2" } }).to_string())).unwrap();
     req.extensions_mut().insert(roll_auth::SignedIn { user: "usr_b".into(), handle: "b".into(), admin: false, code_owner: None, session: "ses_1".into() });
     assert_eq!(router.oneshot(req).await.unwrap().status().as_u16(), 403, "B names the old base, which usr_b can't reveal");
+
+    // A preview gets a reference only while who wrote it still may: one by someone who can't now
+    // is left out (said in its activity), the base's always goes.
+    let mut st = e.engine.store.settings(&e.project).unwrap();
+    let base = st.secrets.base.clone();
+    st.env = [("K".to_string(), "roll://staging/payments/KEY".to_string()), ("B".to_string(), format!("roll://{base}/OTHER"))].into();
+    e.engine.store.put_settings(&e.project, &st).unwrap();
+    e.engine.store.set_env_refs(&e.project, &roll_previews::settings::references(&st), "usr_gone").unwrap();
+    e.code.open(change("chg_refs", 3));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_refs").unwrap().unwrap();
+    assert_eq!(e.secrets.refs.lock().clone(), vec![("B".to_string(), format!("roll://{base}/OTHER"))]);
+    let said: Vec<String> = e.engine.store.activity(&p.id).unwrap().into_iter().map(|a| a.message).collect();
+    assert!(said.iter().any(|m| m.contains("K: usr_gone may not reveal staging:/payments")), "{said:?}");
+    // Written again by someone who may: it reaches the preview.
+    e.engine.store.set_env_refs(&e.project, &[], "x").unwrap();
+    e.engine.store.set_env_refs(&e.project, &roll_previews::settings::references(&st), "usr_b").unwrap();
+    e.engine.store.update(&p.id, |row| row.next_at = 0).unwrap();
+    e.engine.pass().await.unwrap();
+    assert!(e.secrets.refs.lock().iter().any(|(k, _)| k == "K"));
+
+    // A preview's own variable may be one too: its setter's reveal there, read as them.
+    let signed = |user: &str| roll_auth::SignedIn { user: user.into(), handle: user.into(), admin: false, code_owner: None, session: "ses_1".into() };
+    let (b, c) = (signed("usr_b"), signed("usr_c"));
+    let own = |v: &str| std::collections::BTreeMap::from([("OWN".to_string(), Some(v.to_string()))]);
+    let by = |u| roll_previews::ports::Asker { operator: false, user: Some(u), grant: None };
+    assert!(matches!(e.engine.set_vars_as(&p.id, own("roll://staging/payments/OWN"), &by(&c)).await, Err(roll_previews::Error::Forbidden(_))), "no reveal there");
+    e.engine.set_vars_as(&p.id, own("roll://staging/payments/OWN"), &by(&b)).await.unwrap();
+    e.engine.pass().await.unwrap();
+    assert!(e.secrets.refs.lock().iter().any(|(k, _)| k == "OWN"), "{:?}", e.secrets.refs.lock());
+    // Saving the rules keeps it its setter's; a setter who can't now leaves it out.
+    e.engine.store.set_env_refs(&e.project, &roll_previews::settings::references(&st), "usr_b").unwrap();
+    assert!(e.engine.store.env_ref_writers(&e.project).unwrap().iter().any(|(scope, name, _, by)| *scope == format!("preview:{}", p.id) && name == "OWN" && by == "usr_b"));
+    e.engine.store.set_var_ref(&e.project, &p.id, "OWN", Some(("roll://staging/payments/OWN", "usr_gone"))).unwrap();
+    e.engine.store.update(&p.id, |row| row.next_at = 0).unwrap();
+    e.engine.pass().await.unwrap();
+    assert!(!e.secrets.refs.lock().iter().any(|(k, _)| k == "OWN"));
 }
 
 /// A variable set while a deploy is still going, then removed, is removed from the backend too:

@@ -150,6 +150,9 @@ pub struct ChangeInfo {
     /// Who opened it (roll code's `author`): not the one to accept its visual change.
     pub author: String,
     pub github_pr: Option<i64>,
+    /// Its repo's roll code owner (`own_…`): who may write to it (roll code's bar for a landing
+    /// decision, as accepting regressions is).
+    pub owner_id: String,
 }
 
 impl ChangeInfo {
@@ -523,6 +526,12 @@ pub trait Reveal: Send + Sync {
     fn may_reveal(&self, who: &Asker<'_>, project: &str, env: &str, folder: &str) -> bool;
     /// A reference's environment and folder as roll secrets reads it, or why it can't be one.
     fn place(&self, reference: &str) -> std::result::Result<(String, String), String>;
+    /// Whether a rule's reference still reads for a preview of `repo` in `project` as `maker`, its
+    /// writer (`operator`, `usr_…` or `token:…`), may now (roll secrets' `digest_as`: they can
+    /// still sign in and reach the project, may still reveal the folder, the key isn't sensitive,
+    /// and an `untrusted` preview reaches no protected environment). Asked at every converge,
+    /// never cached; it may read a database (called off the async workers). Why not, if not.
+    fn still(&self, project: &str, repo: &str, untrusted: bool, reference: &str, maker: &str) -> std::result::Result<(), String>;
 }
 
 /// Seals a preview's own variables at rest (rolld: AES-256-GCM under `ROLL_SECRET_KEY`), each
@@ -761,6 +770,13 @@ pub trait Apps: Send + Sync {
 /// no. It may read a database: it's called off the async workers.
 pub trait Visitors: Send + Sync {
     fn may_open(&self, user: &str, session: &str, project: &str) -> bool;
+    /// Every name a person goes by where a change's author is written (their roll handle, and the
+    /// login of each GitHub account linked to them): how an author is told apart, whichever name
+    /// their change carries. It may read a database: it's called off the async workers. An error
+    /// refuses the accept (an author isn't let through because their names couldn't be read).
+    fn names_of(&self, _user: &str) -> anyhow::Result<Vec<String>> {
+        Ok(Vec::new())
+    }
 }
 
 /// A project's secrets, per environment (roll secrets; docs/secrets.md).

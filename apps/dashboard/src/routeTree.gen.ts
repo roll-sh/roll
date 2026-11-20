@@ -21,6 +21,7 @@ import { Route as DashboardStreamsRouteImport } from './routes/dashboard/streams
 import { Route as DashboardTasksRouteImport } from './routes/dashboard/tasks'
 import { Route as OauthAuthorizeRouteImport } from './routes/oauth/authorize'
 import { Route as OauthDeviceRouteImport } from './routes/oauth/device'
+import { Route as RequestTokenRouteImport } from './routes/request/$token'
 import { Route as ShareIdRouteImport } from './routes/share/$id'
 import { Route as OwnerRepoIndexRouteImport } from './routes/$owner/$repo/index'
 import { Route as OwnerRepoGitReceivePackRouteImport } from './routes/$owner/$repo/git-receive-pack'
@@ -138,6 +139,11 @@ const OauthAuthorizeRoute = OauthAuthorizeRouteImport.update({
 const OauthDeviceRoute = OauthDeviceRouteImport.update({
   id: '/oauth/device',
   path: '/oauth/device',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const RequestTokenRoute = RequestTokenRouteImport.update({
+  id: '/request/$token',
+  path: '/request/$token',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ShareIdRoute = ShareIdRouteImport.update({
@@ -457,6 +463,7 @@ export interface FileRoutesByFullPath {
   '/dashboard/tasks': typeof DashboardTasksRoute
   '/oauth/authorize': typeof OauthAuthorizeRoute
   '/oauth/device': typeof OauthDeviceRoute
+  '/request/$token': typeof RequestTokenRoute
   '/share/$id': typeof ShareIdRoute
   '/$owner/': typeof OwnerIndexRoute
   '/dashboard/': typeof DashboardIndexRoute
@@ -528,6 +535,7 @@ export interface FileRoutesByTo {
   '/dashboard/tasks': typeof DashboardTasksRoute
   '/oauth/authorize': typeof OauthAuthorizeRoute
   '/oauth/device': typeof OauthDeviceRoute
+  '/request/$token': typeof RequestTokenRoute
   '/share/$id': typeof ShareIdRoute
   '/$owner': typeof OwnerIndexRoute
   '/dashboard': typeof DashboardIndexRoute
@@ -601,6 +609,7 @@ export interface FileRoutesById {
   '/dashboard/tasks': typeof DashboardTasksRoute
   '/oauth/authorize': typeof OauthAuthorizeRoute
   '/oauth/device': typeof OauthDeviceRoute
+  '/request/$token': typeof RequestTokenRoute
   '/share/$id': typeof ShareIdRoute
   '/$owner/': typeof OwnerIndexRoute
   '/dashboard/': typeof DashboardIndexRoute
@@ -675,6 +684,7 @@ export interface FileRouteTypes {
     | '/dashboard/tasks'
     | '/oauth/authorize'
     | '/oauth/device'
+    | '/request/$token'
     | '/share/$id'
     | '/$owner/'
     | '/dashboard/'
@@ -746,6 +756,7 @@ export interface FileRouteTypes {
     | '/dashboard/tasks'
     | '/oauth/authorize'
     | '/oauth/device'
+    | '/request/$token'
     | '/share/$id'
     | '/$owner'
     | '/dashboard'
@@ -818,6 +829,7 @@ export interface FileRouteTypes {
     | '/dashboard/tasks'
     | '/oauth/authorize'
     | '/oauth/device'
+    | '/request/$token'
     | '/share/$id'
     | '/$owner/'
     | '/dashboard/'
@@ -891,6 +903,7 @@ export interface RootRouteChildren {
   DashboardTasksRoute: typeof DashboardTasksRoute
   OauthAuthorizeRoute: typeof OauthAuthorizeRoute
   OauthDeviceRoute: typeof OauthDeviceRoute
+  RequestTokenRoute: typeof RequestTokenRoute
   ShareIdRoute: typeof ShareIdRoute
   OwnerIndexRoute: typeof OwnerIndexRoute
   DashboardIndexRoute: typeof DashboardIndexRoute
@@ -1022,6 +1035,13 @@ declare module '@tanstack/react-router' {
       path: '/oauth/device'
       fullPath: '/oauth/device'
       preLoaderRoute: typeof OauthDeviceRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/request/$token': {
+      id: '/request/$token'
+      path: '/request/$token'
+      fullPath: '/request/$token'
+      preLoaderRoute: typeof RequestTokenRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/share/$id': {
@@ -1493,6 +1513,7 @@ const rootRouteChildren: RootRouteChildren = {
   DashboardTasksRoute: DashboardTasksRoute,
   OauthAuthorizeRoute: OauthAuthorizeRoute,
   OauthDeviceRoute: OauthDeviceRoute,
+  RequestTokenRoute: RequestTokenRoute,
   ShareIdRoute: ShareIdRoute,
   OwnerIndexRoute: OwnerIndexRoute,
   DashboardIndexRoute: DashboardIndexRoute,

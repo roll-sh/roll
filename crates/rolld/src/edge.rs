@@ -442,7 +442,7 @@ pub fn splice_routes(cluster: &roll_cluster::Cluster, p: &Products<'_>) -> anyho
             Arc::new(move |io, hop| {
                 let pg = pg.clone();
                 Box::pin(async move {
-                    if let Err(e) = pg.serve_connection(io, Some(hop.tenant)).await {
+                    if let Err(e) = pg.serve_connection(io, Some(hop.tenant), Some(hop.client)).await {
                         tracing::debug!(error = %e, "edge: spliced postgres connection ended with an error");
                     }
                 })

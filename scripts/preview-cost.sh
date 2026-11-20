@@ -274,7 +274,11 @@ FOLLOWED=$(python3 -c 'import sys,urllib.parse as u; e=dict(l.split("=",1) for l
 echo "$APP_ENV" | grep -qx 'PAYMENTS_KEY=sk_test_from_staging_42' || { echo "roll://staging/PAYMENTS_TEST_KEY should be staging's value: $(echo "$APP_ENV" | grep '^PAYMENTS_KEY=' | cut -c1-40)"; exit 1; }
 echo "$APP_ENV" | grep -qxF 'GREETING=hello ${USER}' || { echo "a plain value's \${ should stay as it is: $(echo "$APP_ENV" | grep '^GREETING=')"; exit 1; }
 [ "$(curl -s -o /dev/null -w '%{http_code}' -X PUT "http://$API/v1/previews/projects/$PRJ/settings" -H 'content-type: application/json' -d '{"env":{"X":"roll://other@staging/KEY"}}')" = 400 ] || { echo "a reference into another project should be refused"; exit 1; }
-[ "$(curl -s -o /dev/null -w '%{http_code}' -X PUT "http://$API/v1/previews/$PV/env" -H 'content-type: application/json' -d '{"vars":{"X":"roll://staging/PAYMENTS_TEST_KEY"}}')" = 400 ] || { echo "a preview's own variable can't be a reference yet"; exit 1; }
+# A preview's own variable may be a reference too (its setter's reveal: the operator's here); a
+# look-alike is refused, never kept as text.
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X PUT "http://$API/v1/previews/$PV/env" -H 'content-type: application/json' -d '{"vars":{"X":" roll://staging/PAYMENTS_TEST_KEY"}}')" = 400 ] || { echo "a look-alike reference should be refused"; exit 1; }
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X PUT "http://$API/v1/previews/$PV/env" -H 'content-type: application/json' -d '{"vars":{"X":"roll://staging/PAYMENTS_TEST_KEY"}}')" = 200 ] || { echo "a preview's own variable should take a reference its setter may reveal"; exit 1; }
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X PUT "http://$API/v1/previews/$PV/env" -H 'content-type: application/json' -d '{"vars":{"X":null}}')" = 200 ] || { echo "removing it should work"; exit 1; }
 case "$APP_DB" in postgres://br_*) ;; *) echo "the service's DATABASE_URL should be the branch's own role, not ${APP_DB%%@*}…"; exit 1;; esac
 # Its mail goes to roll's catcher, signed in as the preview, never to the provider production
 # uses: the key is gone, and what it sends is caught and listed (sent here as its service would).
@@ -793,6 +797,10 @@ for _ in $(seq 1 120); do
   sleep 0.5
 done
 case "$BLOCKED" in *visual*) ;; *) echo "a required visual review should keep the change from landing: $BLOCKED"; exit 1;; esac
+# A required review is a person's to accept, signed in to roll: never the operator's token (a CI job
+# may hold it). The rest runs as a check, which the operator may accept.
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://$API/v1/previews/$PV/visual/accept" -H 'content-type: application/json' -d '{}')" = 403 ] || { echo "the operator's token shouldn't accept a required visual review"; exit 1; }
+api PUT "/v1/previews/projects/$PRJ/settings" '{"visual_review":"check"}' >/dev/null
 # Accepting what wasn't seen (an older screenshot's head) is refused; what was, accepted.
 [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://$API/v1/previews/$PV/visual/accept" -H 'content-type: application/json' -d '{"head":"cs_not_this_one"}')" = 409 ] || { echo "accepting an older screenshot should be refused"; exit 1; }
 SEEN=$(api GET "/v1/previews/$PV" | jq_ "d['visual_review']['head']")
@@ -803,7 +811,6 @@ CHANGED_PAGES=$(api GET "/v1/previews/$PV" | jq_ "len(d['visual_review']['pages'
 ONE=$(api GET "/v1/previews/$PV" | jq_ "d['visual_review']['pages'][0]['path']")
 PARTLY=$(api POST "/v1/previews/$PV/visual/accept" "$(python3 -c 'import json,sys; print(json.dumps({"head": sys.argv[1], "path": sys.argv[2]}))' "$SEEN" "$ONE")" | jq_ "'%s, %d of %d' % (d['visual_review']['state'], sum(1 for x in d['visual_review']['pages'] if x['by']), len(d['visual_review']['pages']))")
 case "$PARTLY" in "changed, 1 of "*) ;; *) echo "accepting one page should leave the others waiting: $PARTLY"; exit 1;; esac
-case "$(api GET "/v1/code/changes/$CHG" | jq_ "[b['kind'] for b in d.get('blockers', [])]")" in *visual*) ;; *) echo "a partly accepted required review should still block landing"; exit 1;; esac
 REVIEW=$(api POST "/v1/previews/$PV/visual/accept" "{\"head\":\"$SEEN\"}" | jq_ "'%s by %s' % (d['visual_review']['state'], d['visual_review']['by'])")
 [ "$REVIEW" = "accepted by operator" ] || { echo "accepting should settle the review: $REVIEW"; exit 1; }
 case "$(api GET "/v1/code/changes/$CHG" | jq_ "[b['kind'] for b in d.get('blockers', [])]")" in *visual*) echo "an accepted review shouldn't block landing"; exit 1;; esac
