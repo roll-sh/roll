@@ -269,6 +269,9 @@ pub struct Apps {
     ecr_tokens: Mutex<HashMap<String, (String, i64)>>,
     /// Instances' OIDC tokens by `<service>/<env>/<aud>`: (the token, when it expires, unix ms).
     pub(crate) oidc_tokens: Mutex<HashMap<String, (String, i64)>>,
+    /// When a deployment's explanation last failed (unix ms): asked again at most a minute later,
+    /// as a kept one is (each try is charged to the repo's owner).
+    pub(crate) explain_failed: Mutex<HashMap<String, i64>>,
     pushers: push::Pushers,
     /// Who may still open a project's environments ([`Apps::set_visitors`]).
     pub(crate) visitors: std::sync::OnceLock<Arc<dyn integrations::Visitors>>,
@@ -584,6 +587,7 @@ impl Apps {
             explainer: std::sync::OnceLock::new(),
             ecr_tokens: Mutex::new(HashMap::new()),
             oidc_tokens: Mutex::new(HashMap::new()),
+            explain_failed: Mutex::new(HashMap::new()),
             pushers: push::Pushers::default(),
             visitors: std::sync::OnceLock::new(),
             drain_done: Arc::new(Mutex::new(Vec::new())),
@@ -1511,13 +1515,37 @@ impl Apps {
     /// live (names only, from the snapshot kept at its switch; null when it has none, a
     /// deployment from before snapshots), and the run settings the service sets that the live
     /// deployment doesn't run with. Links and project secrets move `needs_deploy` too, unnamed.
+    /// The digest a deployment of `svc` in `env` goes live with: roll secrets' for the environment,
+    /// and, when its variables name other environments' secrets (bound to their makers), each of
+    /// those folders' as its maker may read it now, so a change there (or the maker losing it)
+    /// reads as needing a deploy. None: no digest to compare.
+    pub(crate) async fn secrets_digest_of(self: &Arc<Self>, svc: &ServiceRow, env: &str) -> Option<String> {
+        let own = self.deps.secrets.digest(&svc.project, env).await.ok().flatten();
+        let (sid, e) = (svc.id.clone(), env.to_string());
+        let makers = self.db(move |s| s.variable_makers(&sid, &e)).await.unwrap_or_default();
+        if makers.is_empty() {
+            return own;
+        }
+        let (sid, e) = (svc.id.clone(), env.to_string());
+        let vars = self.db(move |s| s.variables(&sid, &e)).await.unwrap_or_default();
+        use sha2::Digest;
+        let mut h = sha2::Sha256::new();
+        h.update(own.unwrap_or_default());
+        for (name, maker) in &makers {
+            let Some(r) = vars.get(name) else { continue };
+            let d = self.deps.secrets.digest_as(&svc.project, env, &svc.id, r, maker).await.unwrap_or_else(|e| format!("refused: {e}"));
+            h.update(format!("|{name}={d}"));
+        }
+        Some(format!("bound:{}", hex::encode(h.finalize())))
+    }
+
     pub async fn pending(self: &Arc<Self>, service: &str, env: &str) -> Result<Value> {
         let (svc, row) = self.service_env(service, env).await?;
         let Some(active) = row.active.clone() else { return Ok(json!({ "variables": null, "run": [], "secrets": null })) };
         let a = active.clone();
         let (dep, then, digest_then) = self.db(move |s| Ok((s.deployment(&a)?, s.snapshot(&a)?, s.secrets_digest(&a)?))).await?;
         // The project's secrets since it went live (null: no digest to compare).
-        let secrets = match (digest_then, self.deps.secrets.digest(&svc.project, env).await.ok().flatten()) {
+        let secrets = match (digest_then, self.secrets_digest_of(&svc, env).await) {
             (Some(then), Some(now)) => Value::Bool(then != now),
             _ => Value::Null,
         };
@@ -1547,7 +1575,7 @@ impl Apps {
         let key = env_key(&r.service, &r.name);
         let seen = self.settings_gen.load(SeqCst);
         // The project's secrets moved: worked out again at once, not after the minute.
-        let digest = self.deps.secrets.digest(&svc.project, &r.name).await.ok().flatten();
+        let digest = self.secrets_digest_of(svc, &r.name).await;
         if let Some((at, g, a, d, v)) = self.needs.lock().get(&key)
             && *g == seen
             && a == active
@@ -2752,7 +2780,17 @@ impl Apps {
         let (sid, e) = (svc.id.clone(), env.name.clone());
         let makers = if refs.is_empty() { BTreeMap::new() } else { self.db(move |s| s.variable_makers(&sid, &e)).await? };
         for (k, r) in refs {
-            ref_texts.insert(k.clone(), r.clone());
+            // A reference bound to its maker counts by its folder's digest as they may read it
+            // too (no value): a change there, or the maker losing it, moves the fingerprint. The
+            // same in a deploy and a listing, so both hash alike.
+            let bound = match (crate::model::secret_ref_env(&r), makers.get(&k)) {
+                (Some(Ok(e)), Some(maker)) if e != env.name => {
+                    let d = self.deps.secrets.digest_as(&svc.project, &env.name, &svc.id, &r, maker).await.unwrap_or_else(|e| format!("refused: {e}"));
+                    Some(format!("{r}#{d}"))
+                }
+                _ => None,
+            };
+            ref_texts.insert(k.clone(), bound.unwrap_or_else(|| r.clone()));
             if !read_refs {
                 // Left out of a preview as a deploy leaves it out, so both hash the same.
                 let ours = matches!(crate::model::secret_ref_env(&r), Some(Ok(e)) if e == env.name) && crate::model::secret_ref_folder_ok(&r, &svc.id);

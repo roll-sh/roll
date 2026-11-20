@@ -3126,7 +3126,7 @@ async fn a_one_off_job_runs_the_live_image_to_its_exit_and_can_be_canceled() {
     assert!(text.iter().any(|t| t.starts_with("the job: failed (try 1 of 3); again in")) && text.contains(&"the job: succeeded (try 3)"), "{text:?}");
     let (_, no) = call(&w.api, "POST", &format!("{base}/jobs"), Some(flaky(1))).await;
     assert_eq!(ended(no["id"].as_str().unwrap().to_string()).await["status"], "failed");
-    for bad in [json!({"command": "x", "retries": 6}), json!({"command": "x", "parallelism": 0})] {
+    for bad in [json!({"command": "x", "retries": 6}), json!({"command": "x", "parallelism": 0}), json!({"command": "x", "parallelism": 11})] {
         assert_eq!(call(&w.api, "POST", &format!("{base}/jobs"), Some(bad)).await.0, StatusCode::BAD_REQUEST);
     }
     // One that doesn't end by itself is canceled, and its container goes.
@@ -4971,7 +4971,12 @@ async fn a_roll_reference_variable_reads_its_environments_secret() {
             assert_eq!((env, reference, maker), ("production", "roll://staging/API", "usr_ada"));
             Ok("https://staging-api".into())
         }
+        async fn digest_as(&self, _: &str, _: &str, _: &str, _: &str, _: &str) -> anyhow::Result<String> {
+            Ok(format!("v{}", STAGING.load(Ordering::SeqCst)))
+        }
     }
+    // The version of staging's folder the bound reference reads.
+    static STAGING: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     let w = world_full(|_| {}, false, |d| d.secrets = Arc::new(Refs)).await;
     let (svc, _) = image_service(&w, "api", json!({"port": 80})).await;
     let id = svc["id"].as_str().unwrap().to_string();
@@ -4989,6 +4994,10 @@ async fn a_roll_reference_variable_reads_its_environments_secret() {
     assert_eq!(d["status"], "active", "{d}");
     let (_, body) = visit_deployment(&w, &host(&svc["environments"][0]["url"]), d["id"].as_str().unwrap()).await;
     assert_eq!((&body["vars"]["DATABASE_URL"], &body["vars"]["STAGING_API"]), (&json!("postgres://from-secrets"), &json!("https://staging-api")), "{body}");
+    // A change in the bound reference's folder reads as needing a deploy.
+    assert_eq!(call(&w.api, "GET", &base, None).await.1["needs_deploy"], false);
+    STAGING.store(2, Ordering::SeqCst);
+    assert_eq!(call(&w.api, "GET", &base, None).await.1["needs_deploy"], true, "staging's folder moved");
     let (_, vars) = call(&w.api, "GET", &format!("{base}/variables"), None).await;
     assert!(!vars.to_string().contains("postgres://from-secrets"), "never shown: {vars}");
     // One that doesn't resolve: the deploy fails, saying which.
@@ -7450,7 +7459,7 @@ async fn an_instance_reads_its_oidc_token_for_an_allowed_audience() {
     let mut fresh = String::new();
     for _ in 0..200 {
         let (_, ds) = call(&w.api, "GET", &format!("{base}/deploys"), None).await;
-        if let Some(d) = ds.as_array().unwrap().iter().find(|d| d["message"] == "a new OIDC address (the last one leaked)" && d["status"] == "active") {
+        if let Some(d) = ds.as_array().unwrap().iter().find(|d| d["trigger"] == "rollback" && d["status"] == "active") {
             let (_, b) = visit_deployment(&w, &host(&svc["environments"][0]["url"]), d["id"].as_str().unwrap()).await;
             fresh = b["vars"]["ROLL_OIDC_URL"].as_str().unwrap_or_default().trim_start_matches("http://127.0.0.1:7070").to_string();
             break;
