@@ -5149,7 +5149,8 @@ is still level with or ahead of the category. The gaps are at the new features' 
    Postgres; 9,900 new keys 11 s → 1.1 s (49,529 → 236 statements), SQLite unchanged.
 8. **Test gaps** (S):
    - demotion, not removal, stopping syncs, #407 bindings, placeholders and schedules;
-   - #357's "one node rotates" with two nodes (building: `test/secrets-issuer-two-nodes`, on #357);
+   - #357's "one node rotates" with two nodes: #514 (on #357), no race found on SQLite or Postgres,
+     and it catches one when `rotate`'s guard is removed;
    - placeholders' wildcard and alert limits.
 9. **Integration:** previews to embed `proxy::filter` first; MCP's `secrets_audit` (#479); apps' #474
    and search's #361 resolve as the runtime until #407 lands (known).
