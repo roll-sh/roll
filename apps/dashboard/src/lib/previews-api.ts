@@ -636,7 +636,7 @@ export type GrewSpan = { span: string; ms: number; main_ms: number };
 export type Repeated = { statement: string; count: number };
 export type TraceSummary = { trace: string; name: string; service: string; start_ms: number; ms: number; spans: number; error: boolean; repeated?: Repeated | null };
 /** A route's time from a preview's traces (a root span's name): how many, p50 and p95 (ms), main's preview's p50 for it, and whether it's clearly slower. */
-export type RouteTime = { name: string; count: number; p50_ms: number; p95_ms: number; main_p50_ms: number | null; main_count: number; slower: boolean; repeated?: Repeated | null; grew?: GrewSpan | null };
+export type RouteTime = { name: string; count: number; p50_ms: number; p95_ms: number; main_p50_ms: number | null; main_count: number; slower: boolean; repeated?: Repeated | null; grew?: GrewSpan | null; /** Its budget (`github.budget.routes`), and whether its p50 is over it. */ budget_ms?: number | null; over_budget?: boolean };
 /** A span of a trace (times in Unix nanoseconds), its attributes as name/value pairs. */
 export type TraceSpan = { trace: string; span: string; parent?: string; name: string; service?: string; start: number; end: number; error?: boolean; attrs?: [string, string][] };
 

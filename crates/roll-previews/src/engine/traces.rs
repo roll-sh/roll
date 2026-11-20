@@ -372,6 +372,9 @@ impl Engine {
             None => Vec::new(),
         };
         let mut compared = compare_routes(&mine, &main);
+        // Each one's budget (`github.budget.routes`), read by its own name before names are masked.
+        let budget = self.store.settings(&r.project_id).map(|s| s.github.budget.routes).unwrap_or_default();
+        let budgets: Vec<Option<u64>> = compared.iter().map(|c| budget.get(&c.name).map(|b| u64::from(*b))).collect();
         // A slower one says where its time went (its spans against main's, kept on this node).
         let mut grown: Vec<Option<crate::GrewSpan>> = compared.iter().map(|c| if c.slower { base.as_ref().and_then(|b| self.grew_in(id, &b.id, &c.name)) } else { None }).collect();
         if !compared.is_empty() {
@@ -395,7 +398,11 @@ impl Engine {
         let routes: Vec<Value> = compared
             .into_iter()
             .zip(grown)
-            .map(|(c, g)| json!({ "name": c.name, "count": c.count, "p50_ms": c.p50, "p95_ms": c.p95, "main_p50_ms": c.main_p50, "main_count": c.main_count, "slower": c.slower, "repeated": c.repeated, "grew": g }))
+            .zip(budgets)
+            .map(|((c, g), b)| {
+                let over = b.is_some_and(|b| c.count >= MIN_SAMPLES && c.p50 > b);
+                json!({ "name": c.name, "count": c.count, "p50_ms": c.p50, "p95_ms": c.p95, "main_p50_ms": c.main_p50, "main_count": c.main_count, "slower": c.slower, "repeated": c.repeated, "grew": g, "budget_ms": b, "over_budget": over })
+            })
             .collect();
         Ok(json!({ "minutes": minutes, "main": base.map(|b| b.id), "routes": routes }))
     }
