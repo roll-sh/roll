@@ -7,7 +7,7 @@
  * revealed value for as long as it's shown and no longer.
  */
 
-import type { Action, SecretType, Environment, NewEnvironment, Overview, Folder, Import, Link, Secret, SetSecret, Batch, Change, Written, Applied, ChangeDetail, Version, Problem, Values, Grid, Compare, RequestState, RequestValue, Insights, ChangeRequest, LinkTarget, Lease, Token, Export, Ensure, Ensured, Suggestion, Identity, NewIdentity, Required, KeyType, Totp, Share, NewShare, NewToken, AuditEntry, AuditFilter, AuditVerification, AuditFormat, Sink, Imported, ImportedAsRequest, ExportFormat, Sync, NewSync, SyncKind, Health, WhoAmI, Place, Rotator, SaasRotator, NewSaasRotator, AwsRole, Finding, ProjectFindings, SyncPreview, FileDiff, OutsideDatabase, Directory, NewDirectory, SnowflakeAccount, NewSnowflakeAccount, AtlasProject, NewAtlasProject, AwsUser, CloudAccount, NewCloudAccount, KubernetesCluster, NewKubernetesCluster, SignedCertificate, CaCertificate, Ca, AcmeSettings, NewAcmeKey, SshCa, HostCertificate, UserCertificate, TransitKey, TransitPublicKey, Rotation, FolderPolicy, Reach, GitHubApp, SinkFormat, Gateway, MadeGateway, NewDecoy, CutOff, CutOffRequest } from "@roll/secrets/types";
+import type { Action, SecretType, Environment, NewEnvironment, Overview, Folder, Import, Link, Secret, SetSecret, Batch, Change, Written, Applied, ChangeDetail, Version, Problem, Values, Grid, Compare, RequestState, RequestValue, Insights, ChangeRequest, LinkTarget, Lease, Token, Export, Ensure, Ensured, Suggestion, Identity, NewIdentity, Required, KeyType, Totp, Share, NewShare, ValueRequest, NewValueRequest, NewToken, AuditEntry, AuditFilter, AuditVerification, AuditFormat, Sink, Imported, ImportedAsRequest, ExportFormat, Sync, NewSync, SyncKind, Health, WhoAmI, Place, Rotator, SaasRotator, NewSaasRotator, AwsRole, Finding, ProjectFindings, SyncPreview, FileDiff, OutsideDatabase, Directory, NewDirectory, SnowflakeAccount, NewSnowflakeAccount, AtlasProject, NewAtlasProject, AwsUser, CloudAccount, NewCloudAccount, KubernetesCluster, NewKubernetesCluster, SignedCertificate, CaCertificate, Ca, AcmeSettings, NewAcmeKey, SshCa, HostCertificate, UserCertificate, TransitKey, TransitPublicKey, Rotation, FolderPolicy, Reach, GitHubApp, SinkFormat, Gateway, MadeGateway, NewDecoy, CutOff, CutOffRequest } from "@roll/secrets/types";
 import type { Grant } from "./access-api";
 import { withSession } from "./code-token";
 import { grantFor, tokenOf } from "./secrets-tokens";
@@ -207,6 +207,11 @@ export function secretsApi(project: string) {
     shares: () => req<Share[]>("GET", `${P}/shares`),
     createShare: (s: NewShare) => req<Share>("POST", `${P}/shares`, s),
     revokeShare: (id: string) => req<null>("DELETE", `${P}/shares/${enc(id)}`),
+
+    valueRequests: () => req<ValueRequest[]>("GET", `${P}/value-requests`),
+    /** Ask someone outside roll for `env`'s `path` values (`write` there); the link is `/request/<token>`, and only this answer has the token. */
+    createValueRequest: (env: string, path: string, r: NewValueRequest) => req<ValueRequest & { token: string }>("POST", `${P}/environments/${enc(env)}/value-requests${qs({ path })}`, r),
+    cancelValueRequest: (id: string) => req<null>("DELETE", `${P}/value-requests/${enc(id)}`),
 
     listSyncs: () => req<{ syncs: Sync[]; kinds: SyncKind[] }>("GET", `${P}/syncs`),
     /** `signing_secret`: for a signed kind, shown once. */

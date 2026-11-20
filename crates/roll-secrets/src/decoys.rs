@@ -126,7 +126,7 @@ impl Secrets {
         let (key, kind, grant, by) = (n.key.clone(), n.kind.clone(), minted.id.clone(), caller.principal.clone());
         // `if_version` 0: only while the key doesn't exist. The decoy's row in the change's own
         // transaction: never a decoy key without its mark.
-        let written = self.commit_then(project, env, vec![item], &[(0, 0)], "write", "", None, true, caller, &|c, e, now| {
+        let written = self.commit_then(project, env, vec![item], &[(0, 0)], "write", "", None, true, caller, &|c, e, _, now| {
             let id = current(c, &e.id, &path, &key, "")?.ok_or_else(|| Error::Internal(format!("{key} wasn't written")))?.id;
             c.execute(
                 "INSERT INTO decoys (id, project_id, env_id, secret_id, path, key, kind, ref, created_by, created_at, uses) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",

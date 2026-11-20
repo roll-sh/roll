@@ -1,7 +1,7 @@
 import { Check, Copy, KeyRound, Plus, Send } from "lucide-react";
 import { useState } from "react";
 import { Link } from "@tanstack/react-router";
-import { ACTIONS, type Action, type Environment, type NewToken } from "@/lib/secrets-api";
+import { ACTIONS, type Action, type Environment, type NewToken, type ValueRequest } from "@/lib/secrets-api";
 import { CodeLeaks } from "./code-leaks";
 import { Identities } from "./identities";
 import { ShareDialog, type ShareSource } from "./share-dialog";
@@ -24,6 +24,7 @@ export function AccessView() {
       <Identities />
       <Leases />
       <Shares />
+      <ValueRequests />
       <CodeLeaks />
     </div>
   );
@@ -136,12 +137,12 @@ function Tokens() {
   );
 }
 
-function Revoke({ onRevoke }: { onRevoke: () => void }) {
+function Revoke({ onRevoke, label = "Revoke" }: { onRevoke: () => void; label?: string }) {
   const [sure, setSure] = useState(false);
   return sure ? (
     <span className="flex gap-1">
       <button className={dangerButton} onClick={onRevoke}>
-        Revoke
+        {label}
       </button>
       <button className={ghost} onClick={() => setSure(false)}>
         Keep
@@ -149,7 +150,7 @@ function Revoke({ onRevoke }: { onRevoke: () => void }) {
     </span>
   ) : (
     <button className={ghost} onClick={() => setSure(true)}>
-      Revoke
+      {label}
     </button>
   );
 }
@@ -346,6 +347,71 @@ function Shares() {
         </div>
       )}
       <ShareDialog source={sharing} onClose={() => setSharing(null)} onShared={shares.reload} />
+    </Section>
+  );
+}
+
+/** Secret requests: links asking someone outside roll for a folder's values (docs/secrets.md, "Asking for a value"). Names only, never a value. */
+function ValueRequests() {
+  const { api, project } = useSecrets();
+  const requests = useLoad(() => api.valueRequests(), [api]);
+  const [error, setError] = useState<string | null>(null);
+  const [all, setAll] = useState(false);
+  const now = Date.now();
+  const live = (x: ValueRequest) => x.open && x.expires_at > now;
+  const rows = (requests.data ?? []).filter((x) => all || live(x));
+  return (
+    <Section
+      title="Secret requests"
+      aside={
+        <label className="flex items-center gap-1.5 text-[12px] text-muted">
+          <input type="checkbox" checked={all} onChange={(e) => setAll(e.target.checked)} className="accent-[var(--accent)]" />
+          Show closed
+        </label>
+      }
+    >
+      <p className="mb-2 text-[11.5px] text-muted">Links asking someone outside roll to send values in. Their browser seals what they paste; it lands in the folder as a change, or a change request where the folder needs approval.</p>
+      <ErrorNote error={error ?? requests.error} onDismiss={error ? () => setError(null) : undefined} className="mb-2" />
+      {requests.data && rows.length === 0 ? (
+        <p className="rounded-xl border border-dashed border-line-2 px-3 py-4 text-[12px] text-muted">
+          No open requests. Make one from a folder&apos;s <b className="font-medium text-soft">Request a value…</b>, or from the CLI: <span className="font-mono text-soft">roll secrets request -p {project.name} -e staging KEY</span>
+        </p>
+      ) : (
+        <div className={`${card} divide-y divide-line`}>
+          {rows.map((x) => {
+            const on = live(x);
+            const outcome = x.outcome && ("change" in x.outcome ? `change #${x.outcome.change}` : `change request ${x.outcome.request}`);
+            const state = on
+              ? `${x.answers_left === 1 ? "1 answer" : `${x.answers_left} answers`} left · expires ${until(x.expires_at)}`
+              : x.cancelled_at
+                ? "cancelled"
+                : x.answered_at && x.answers_left === 0
+                  ? `answered ${ago(x.answered_at)}${outcome ? ` · ${outcome}` : ""}`
+                  : "expired";
+            return (
+              <div key={x.id} className={`flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 ${on ? "" : "opacity-60"}`}>
+                <span className="min-w-0 truncate font-mono text-[12px]" title={x.keys.join(", ")}>
+                  {x.keys.join(", ")}
+                </span>
+                <span className="font-mono text-[11px] text-subtle">
+                  {x.environment || "deleted"}
+                  {x.path === "/" ? "" : x.path}
+                </span>
+                {x.note && (
+                  <span className="min-w-0 truncate text-[12px] text-muted" title={x.note}>
+                    {x.note}
+                  </span>
+                )}
+                <ActorMark who={x.created_by} />
+                <span className="ml-auto text-[11px] text-subtle">
+                  {ago(x.created_at)} · {state}
+                </span>
+                {on && <Revoke label="Cancel" onRevoke={() => api.cancelValueRequest(x.id).then(requests.reload, (e) => setError(errorText(e)))} />}
+              </div>
+            );
+          })}
+        </div>
+      )}
     </Section>
   );
 }

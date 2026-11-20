@@ -1400,6 +1400,12 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/secrets/projects/{project}/environments/{env}/reach/cut-off", "secrets", ADMIN, one(&["project"], "project")),
     row("DELETE", "/v1/secrets/projects/{project}/environments/{env}/reach/cut-off", "secrets", ADMIN, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/shares", "secrets", REVEAL, one(&["project"], "project")),
+    // A secret request asks someone outside roll for a folder's values: its answer is written as
+    // the asker, so asking is a write there; the list shows names only; cancelling is the asker's
+    // (or the folder admin's: the product checks).
+    row("POST", "/v1/secrets/projects/{project}/environments/{env}/value-requests", "secrets", W, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
+    row("GET", "/v1/secrets/projects/{project}/value-requests", "secrets", R, one(&["project"], "project")),
+    row("DELETE", "/v1/secrets/projects/{project}/value-requests/{id}", "secrets", W, one(&["project"], "project")),
     // Purging a secret's history can't be undone.
     row("POST", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/purge", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     // A change request's current and proposed values, for its approvers.
