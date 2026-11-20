@@ -158,14 +158,14 @@ pub fn parse(p: &mut XParser<'_>, name: &str, check_query: &mut dyn FnMut(&XPars
 }
 
 /// An item's value: bytes for keyword-like fields, a long for numeric-like ones.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ItemValue {
     Bytes(Box<[u8]>),
     Long(i64),
 }
 
 /// A result field (`ItemSetMapReduceValueSource.Field`): its name and value format.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ItemField {
     pub name: String,
     pub format: DocValueFormat,
@@ -494,7 +494,7 @@ impl FisAgg {
 
 /// A transaction store (`ImmutableTransactionStore`): items in id order with counts,
 /// transactions as item id lists with counts.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct TransactionStore {
     pub items: Vec<(u32, ItemValue)>,
     pub item_counts: Vec<u64>,
@@ -592,7 +592,7 @@ impl TransactionStore {
 }
 
 /// One result set (`FrequentItemSet`).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct FrequentItemSet {
     /// Field name → values, in Elasticsearch's `HashMap` iteration order.
     pub key: Vec<(String, Vec<Json>)>,
@@ -601,7 +601,7 @@ pub struct FrequentItemSet {
 }
 
 /// What the final reduce needs from the request.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct FisParams {
     pub minimum_support: f64,
     pub minimum_set_size: usize,
@@ -610,7 +610,7 @@ pub struct FisParams {
 
 /// `InternalItemSetMapReduceAggregation` of the Eclat map-reducer: a transaction store until
 /// the final reduce, then the item sets.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct FrequentItemSets {
     pub fields: Vec<ItemField>,
     pub store: Option<TransactionStore>,

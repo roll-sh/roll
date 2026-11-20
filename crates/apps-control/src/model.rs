@@ -1572,6 +1572,9 @@ pub struct Environment {
     /// Where a share of its requests is copied, their answers dropped (`mirror`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mirror: Option<Split>,
+    /// HTML of its own in every page (Netlify's snippet injection).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub snippets: Vec<Snippet>,
     /// Its deploy freeze, and whether it's on now ([`crate::freeze`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub freeze: Option<crate::freeze::Freeze>,
@@ -1845,6 +1848,33 @@ pub struct Route {
     pub path: String,
     /// The other service, by its name in the project.
     pub service: String,
+}
+
+/// HTML of an environment's own in every page the proxy answers (Netlify's snippet injection):
+/// an analytics or chat tag without a code change. Only the owner's text, in a 200 HTML page.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Snippet {
+    pub at: SnippetAt,
+    pub html: String,
+}
+
+/// Where a snippet goes in each page: before `</head>`, or before `</body>`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SnippetAt {
+    Head,
+    BodyEnd,
+}
+
+impl Snippet {
+    /// At most five, each 1 byte to 16 KiB of text.
+    pub fn check(all: &[Snippet]) -> Result<()> {
+        if all.len() > 5 || all.iter().any(|s| s.html.trim().is_empty() || s.html.len() > 16 << 10 || s.html.contains('\0')) {
+            return Err(Error::BadRequest("snippets are at most 5 of {at: head | body_end, html: 1 byte to 16 KiB}".into()));
+        }
+        Ok(())
+    }
 }
 
 /// An environment's split test (Netlify's split testing): `percent` of its visitors, each kept
@@ -2537,6 +2567,28 @@ pub struct Link {
     pub r#ref: String,
     pub prefix: String,
     pub vars: Vec<String>,
+}
+
+/// The environment a `roll://ENV[/folder…]/KEY` value names (roll secrets' references; its
+/// own syntax is checked where it resolves): None when it isn't one; an error when it's
+/// malformed, or names a project (a service's references are its own project's).
+pub fn secret_ref_env(v: &str) -> Option<Result<String>> {
+    let bad = |m: &str| Some(Err(Error::BadRequest(m.into())));
+    // What roll secrets' parser would take for one (it trims) is one; only its exact form is
+    // accepted, so no check here or elsewhere reads it differently.
+    if !v.trim().to_ascii_lowercase().starts_with("roll://") {
+        return None;
+    }
+    let Some(rest) = v.strip_prefix("roll://").filter(|_| v.trim() == v) else {
+        return bad("a roll:// reference is written exactly: roll://ENV/KEY, lowercase, with nothing around it");
+    };
+    if rest.contains('@') {
+        return bad("a service's roll:// reference names its own project's secrets: roll://ENV/KEY, without a project");
+    }
+    match rest.split_once('/') {
+        Some((env, key)) if !env.is_empty() && !key.is_empty() && !key.ends_with('/') => Some(Ok(env.to_string())),
+        _ => bad("a roll:// reference is roll://ENV/KEY or roll://ENV/folder/KEY"),
+    }
 }
 
 /// An environment variable's name: `[A-Za-z_][A-Za-z0-9_]*`, at most 128 characters.

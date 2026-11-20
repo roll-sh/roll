@@ -1253,6 +1253,12 @@ fn write_link(dir: &Path, v: &Value) -> anyhow::Result<()> {
 }
 
 /// The project id `p` names (an id, or a project's name).
+/// `api`, with `X-Roll-Override: 1` when `over`: a deploy past the environment's freeze, which
+/// needs admin (a deploy token can't).
+fn overriding(api: &Api, over: bool) -> Api {
+    api.with_header(over.then_some(("x-roll-override", "1")))
+}
+
 async fn project_id(api: &Api, p: &str) -> anyhow::Result<String> {
     if p.starts_with("prj_") {
         return Ok(p.to_string());
@@ -2374,8 +2380,8 @@ pub async fn deploy(api: &Api, json_out: bool, d: Deploy) -> anyhow::Result<()> 
     let dep = if d.local_image.is_some() || d.image_file.is_some() {
         upload_image(api, &svc, &d).await?
     } else {
-        let body = json!({ "revision": d.revision, "image": d.image, "no_traffic": d.no_traffic.then_some(true), "no_cache": d.no_cache.then_some(true), "override": d.override_freeze.then_some(true) });
-        api.post(&format!("{}/deploys", env_path(&svc, &d.target.env)), body).await?
+        let body = json!({ "revision": d.revision, "image": d.image, "no_traffic": d.no_traffic.then_some(true), "no_cache": d.no_cache.then_some(true) });
+        overriding(api, d.override_freeze).post(&format!("{}/deploys", env_path(&svc, &d.target.env)), body).await?
     };
     if json_out || d.detach {
         println!("{}", serde_json::to_string_pretty(&dep)?);
@@ -3445,7 +3451,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
         }
         AppsCmd::Redeploy { target, override_freeze } => {
             let svc = service(api, &target).await?;
-            let dep = api.post(&format!("{}/redeploy", env_path(&svc, &target.env)), if override_freeze { json!({ "override": true }) } else { json!({}) }).await?;
+            let dep = overriding(api, override_freeze).post(&format!("{}/redeploy", env_path(&svc, &target.env)), json!({})).await?;
             if !json_out {
                 return watch(api, &svc, &target.env, &dep).await;
             }
@@ -3466,7 +3472,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 Some(d) => format!("{}/deploys/{}/rollback", env_path(&svc, &target.env), enc(d)),
                 None => format!("{}/rollback", env_path(&svc, &target.env)),
             };
-            let dep = api.post(&path, json!({ "keep_variables": keep_variables, "override": override_freeze.then_some(true) })).await?;
+            let dep = overriding(api, override_freeze).post(&path, json!({ "keep_variables": keep_variables })).await?;
             if deployment.is_none() && !json_out {
                 eprintln!("rolling back to {}", s(&dep["rollback_of"]));
             }
