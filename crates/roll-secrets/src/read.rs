@@ -553,7 +553,7 @@ impl Secrets {
         {
             return fp.clone();
         }
-        let fp = match self.links.get(&l.kind).and_then(|p| p.read(&l.r#ref, &l.field, l)) {
+        let fp = match self.provider_for(&l.kind, &l.r#ref).and_then(|p| p.read(&l.r#ref, &l.field, l)) {
             Ok(v) => dek.fingerprint(v.expose()),
             // A product that doesn't answer for a moment (an owner handing over, a timeout) leaves
             // the digest as it was: flipping it would redeploy apps and push syncs twice. Its
@@ -1536,7 +1536,7 @@ impl<'a> Resolver<'a> {
         }
         match &e.row.link {
             Some(l) if l.mode == Mode::Live => {
-                let p = self.s.links.get(&l.kind).map_err(|e| e.to_string())?;
+                let p = self.s.provider_for(&l.kind, &l.r#ref).map_err(|e| e.to_string())?;
                 p.read(&l.r#ref, &l.field, l).map_err(|err| format!("{} {}: {err}", l.kind, l.r#ref))
             }
             Some(l) if l.mode == Mode::Dynamic && self.no_dynamic => Err(format!("{} {} is dynamic: short-lived credentials aren't issued to a sync or a read with dynamic=false", l.kind, l.r#ref)),
@@ -1548,8 +1548,7 @@ impl<'a> Resolver<'a> {
                     let lease = names::new_id("lse", 16);
                     let r = self
                         .s
-                        .links
-                        .get(&l.kind)
+                        .provider_for(&l.kind, &l.r#ref)
                         .and_then(|p| p.issue_lease(&l.r#ref, &cred, l, &label, l.ttl_minutes(), &lease))
                         .map(|i| (i.parts, i.handle, l.clone(), (e.row.key.clone(), e.row.path.clone()), lease))
                         .map_err(|err| format!("{} {}: {err}", l.kind, l.r#ref));

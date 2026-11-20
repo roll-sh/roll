@@ -4,6 +4,7 @@
 use crate::access::{Action, Caller, Scope};
 use crate::crypto::{Dek, request_aad};
 use crate::envs::{self, EnvRow};
+use crate::folder_policy::Standing;
 use crate::links::Link;
 use crate::write::{Batch, Item, ItemAction, ItemDiff, SecretType, items};
 use crate::{Error, Result, Secrets, Value, audit, from_json, json, names};
@@ -133,11 +134,11 @@ fn approvals(reviews: &[Review], author: &str) -> i64 {
     by.len() as i64
 }
 
-fn view(c: &Conn<'_>, env: &EnvRow, r: RequestRow) -> Result<Request> {
+fn view(c: &Conn<'_>, env: &EnvRow, r: RequestRow, st: &Standing) -> Result<Request> {
     let reviews: Vec<Review> = from_json(&r.reviews);
     let gates = request_gates(c, env, &r)?;
     let needed = gates.iter().map(|g| g.approvals).max().unwrap_or(1);
-    let views: Vec<GateView> = gates.into_iter().map(|g| GateView { approved: crate::folder_policy::counted(&g, &reviews, &r.by), gate: g }).collect();
+    let views: Vec<GateView> = gates.into_iter().map(|g| GateView { approved: crate::folder_policy::counted(&g, &reviews, &r.by, st), gate: g }).collect();
     Ok(Request {
         approvals: approvals(&reviews, &r.by),
         approvals_needed: needed,
@@ -219,12 +220,13 @@ fn plan(c: &Conn<'_>, dek: &Dek, env: &EnvRow, items: &[Item]) -> Result<Vec<Ite
 
 impl Secrets {
     pub fn requests(&self, project: &str, slug: &str, state: Option<&str>, caller: &Caller) -> Result<Vec<Request>> {
+        let st = self.standing(project, slug, None);
         caller.need(Action::Read, &Scope::env(project, slug))?;
         self.project(project)?;
         self.db.read(|c| {
             let env = envs::by_slug(c, project, slug)?;
             let rows = c.query(&format!("SELECT {COLUMNS} FROM requests WHERE env_id = ? ORDER BY at DESC LIMIT 200"), [&env.id], request_row)?;
-            rows.into_iter().filter(|r| state.is_none_or(|s| r.state == s) && caller.allows(Action::Read, &Scope::at(project, slug, &r.path))).map(|r| view(c, &env, r)).collect::<Result<_>>()
+            rows.into_iter().filter(|r| state.is_none_or(|s| r.state == s) && caller.allows(Action::Read, &Scope::at(project, slug, &r.path))).map(|r| view(c, &env, r, &st)).collect::<Result<_>>()
         })
     }
 
@@ -277,11 +279,12 @@ impl Secrets {
     }
 
     pub fn request(&self, project: &str, slug: &str, id: &str, caller: &Caller) -> Result<Request> {
+        let st = self.standing(project, slug, None);
         caller.need(Action::Read, &Scope::env(project, slug))?;
         self.project(project)?;
         let r = self.db.read(|c| {
             let env = envs::by_slug(c, project, slug)?;
-            view(c, &env, load(c, &env, id)?)
+            view(c, &env, load(c, &env, id)?, &st)
         })?;
         caller.need(Action::Read, &Scope::at(project, slug, &r.path))?;
         Ok(r)
@@ -303,6 +306,7 @@ impl Secrets {
     /// it's based on (applying it later needs the environment unchanged since).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn open_request_items(&self, project: &str, slug: &str, path: &str, message: String, items: Vec<Item>, expect: &[(usize, i64)], caller: &Caller) -> Result<Request> {
+        let st = self.standing(project, slug, None);
         let path = path.to_string();
         let members = if items.iter().any(|i| matches!(i.action, ItemAction::Set { link: Some(Some(_)), .. })) { self.members(project)? } else { Default::default() };
         for i in &items {
@@ -360,11 +364,12 @@ impl Secrets {
                 let link = self.web_url.as_ref().map(|w| format!("{}/dashboard/projects/{project}/secrets?env={slug}", w.trim_end_matches('/')));
                 crate::notices::queue(c, project, &env.id, slug, &id, &caller.principal, &message, &keys, link, now)?;
             }
-            view(c, &env, load(c, &env, &id)?)
+            view(c, &env, load(c, &env, &id)?, &st)
         })
     }
 
     pub fn review_request(&self, project: &str, slug: &str, id: &str, v: Verdict, caller: &Caller) -> Result<Request> {
+        let st = self.standing(project, slug, None);
         // Admin where the request changes things (checked per folder below, before anything about
         // the request is told): a folder's own admin reviews its folder's requests, without a read
         // of the whole environment.
@@ -399,7 +404,7 @@ impl Secrets {
                         Some(p) => Scope::at(project, slug, p),
                         None => Scope::env(project, slug),
                     };
-                    caller.allows(Action::Admin, &scope) && crate::folder_policy::may_review(std::slice::from_ref(g), &caller.principal)
+                    caller.allows(Action::Admin, &scope) && crate::folder_policy::may_review(std::slice::from_ref(g), &caller.principal, &st)
                 })
                 .map(|g| g.path.clone())
                 .collect();
@@ -411,14 +416,14 @@ impl Secrets {
             reviews.push(Review { by: caller.principal.clone(), verdict: v.verdict.clone(), comment: v.comment.clone(), at: now, gates: Some(may) });
             let state = if reviews.iter().any(|x| x.verdict == "reject") {
                 "rejected"
-            } else if crate::folder_policy::satisfied(&gates, &reviews, &r.by) {
+            } else if crate::folder_policy::satisfied(&gates, &reviews, &r.by, &st) {
                 "approved"
             } else {
                 "open"
             };
             c.execute("UPDATE requests SET reviews = ?, state = ? WHERE id = ?", params![json(&reviews), state, id])?;
             audit::record(c, self.keys()?, project, caller, &format!("request.{}", v.verdict), Some(slug), Some(&r.path), &[], &format!("{}d {id}", v.verdict.trim_end_matches('e')), now)?;
-            view(c, &env, load(c, &env, id)?)
+            view(c, &env, load(c, &env, id)?, &st)
         })
     }
 
@@ -429,13 +434,17 @@ impl Secrets {
             caller.need(Action::Admin, &Scope::env(project, slug))?;
         }
         let dek = self.project(project)?;
-        let (_, r, met) = self.db.read(|c| {
+        let (_, r, gates) = self.db.read(|c| {
             let env = envs::by_slug(c, project, slug)?;
             let r = load(c, &env, id)?;
             // As the policies are now: one added after the approvals still has to be met.
-            let met = crate::folder_policy::satisfied(&request_gates(c, &env, &r)?, &from_json::<Vec<Review>>(&r.reviews), &r.by);
-            Ok::<_, Error>((env, r, met))
+            let gates = request_gates(c, &env, &r)?;
+            Ok::<_, Error>((env, r, gates))
         })?;
+        // Approvals count as their approvers are now: one removed from the project, or no longer
+        // its admin there, doesn't.
+        let st = self.standing(project, slug, Some((&gates, &from_json::<Vec<Review>>(&r.reviews))));
+        let met = crate::folder_policy::satisfied(&gates, &from_json::<Vec<Review>>(&r.reviews), &r.by, &st);
         match r.state.as_str() {
             "approved" if met || bypass => {}
             "open" if bypass => {}
@@ -468,7 +477,7 @@ impl Secrets {
                 return Err(Error::Conflict("conflict", format!("{id} is {} now", current.state)));
             }
             // The gates as they are in this transaction: a policy added since the read counts.
-            let met = crate::folder_policy::satisfied(&request_gates(c, &env, &current)?, &from_json::<Vec<Review>>(&current.reviews), &current.by);
+            let met = crate::folder_policy::satisfied(&request_gates(c, &env, &current)?, &from_json::<Vec<Review>>(&current.reviews), &current.by, &st);
             if !met && !bypass {
                 return Err(Error::Conflict("approval_required", format!("{id} doesn't have the approvals what it changes needs")));
             }
@@ -501,6 +510,7 @@ impl Secrets {
     }
 
     pub fn close_request(&self, project: &str, slug: &str, id: &str, caller: &Caller) -> Result<Request> {
+        let st = self.standing(project, slug, None);
         caller.need(Action::Write, &Scope::env(project, slug))?;
         self.project(project)?;
         let now = self.db.now_ms()?;
@@ -515,7 +525,38 @@ impl Secrets {
             }
             c.execute("UPDATE requests SET state = 'closed' WHERE id = ?", [id])?;
             audit::record(c, self.keys()?, project, caller, "request.close", Some(slug), Some(&r.path), &[], &format!("closed {id}"), now)?;
-            view(c, &env, load(c, &env, id)?)
+            view(c, &env, load(c, &env, id)?, &st)
         })
+    }
+}
+
+impl Secrets {
+    /// The project's members' roles now and, for a request being applied, which of its reviewers
+    /// still count for each gate: the operator and tokens as recorded, a person while they're an
+    /// admin account or their session still has admin where the gate is.
+    pub(crate) fn standing(&self, project: &str, slug: &str, applying: Option<(&[crate::folder_policy::Gate], &[Review])>) -> Standing {
+        let roles = self.workspace.members(roll_workspace::Scope::All, project, false).map(|ms| ms.into_iter().filter(|m| !m.inactive).map(|m| (m.user, m.role)).collect()).unwrap_or_default();
+        let counts = applying.map(|(gates, reviews)| {
+            let mut out = std::collections::HashSet::new();
+            for r in reviews.iter().filter(|r| r.verdict == "approve") {
+                let person = crate::access::is_person(&r.by).then(|| self.person(&r.by).ok().flatten());
+                for g in gates {
+                    let at = match &g.path {
+                        Some(p) => Scope::at(project, slug, p),
+                        None => Scope::env(project, slug),
+                    };
+                    let counts = match &person {
+                        None => true,
+                        Some(None) => false,
+                        Some(Some(p)) => p.admin || crate::access::Grants::allows(&self.session_grants(&r.by), Action::Admin, &at),
+                    };
+                    if counts {
+                        out.insert((r.by.clone(), g.path.clone()));
+                    }
+                }
+            }
+            out
+        });
+        Standing { roles, counts }
     }
 }

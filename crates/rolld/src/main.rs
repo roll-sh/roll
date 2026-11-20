@@ -619,6 +619,9 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
     // stands only for what's theirs (roll_workspace::Workspace::trusts, asked by every consumer).
     let people = secrets::People { accounts, code: code.as_ref().map(|c| c.code.clone()), search: search.as_ref().map(|s| s.control.clone()) };
     workspace.set_owners(std::sync::Arc::new(people.clone()));
+    // Members' handles and addresses, and invite links to the dashboard (docs/members.md).
+    workspace.set_people(std::sync::Arc::new(people.clone()));
+    workspace.set_web_url(&args.web_url);
     // Its tokens are roll-access's: grants for syncs a token made, workload tokens for identities.
     // Gateways into private networks: their links follow leases on the node's cluster.
     let gateways = secrets::gateway::Gateways::new(cluster.clone(), access.clone() as std::sync::Arc<dyn roll_auth::Grants>, args.code_webhook_allow_private.unwrap_or(!auth.enforcing()));
@@ -647,6 +650,11 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
     if let Some(a) = &apps {
         let apps = a.apps.clone();
         access.on_leaked("rlk_", move |secret, _why| apps.revoke_leaked_hook(secret));
+    }
+    // …and project invites' (`rlv_`).
+    {
+        let ws = workspace.clone();
+        access.on_leaked("rlv_", move |secret, _why| ws.revoke_leaked_invite(secret));
     }
     // …and previews' (`rlb_`).
     if let Some(e) = previews_engine.clone() {

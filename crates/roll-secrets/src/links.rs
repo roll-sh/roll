@@ -133,6 +133,13 @@ pub trait LinkProvider: Send + Sync {
         let _ = r#ref;
         None
     }
+    /// The project and the principal that registered `ref`, when it's one of a project's own records
+    /// in roll secrets (a rotator, a SaaS rotator, an outside database, a directory): roll calls it
+    /// only while they may still manage that project (`Secrets::provider_for`).
+    fn maker(&self, r#ref: &str) -> Option<(String, String)> {
+        let _ = r#ref;
+        None
+    }
     /// The current value of a `live` field.
     fn read(&self, r#ref: &str, field: &str, link: &Link) -> Result<Value>;
     /// A new credential for a `managed` or `dynamic` field's credential, labelled `label` in

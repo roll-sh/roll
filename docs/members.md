@@ -1,10 +1,16 @@
 # Project members and roles (design)
 
-Status: **design, not built.** This is roll secrets' long-standing gap R1 (docs/secrets.md, "Next"),
-and it covers every product whose resources sit on a workspace project. Today a person reaches only
-the projects they made. A team shares only through the operator or through tokens. This document
-is the plan for people sharing a project, each with a role. The decisions the user still has to
-make are listed at the end ([Open decisions](#open-decisions)).
+Status: **v1 built** (workspace and secrets; [Phasing](#phasing), and [What v1 leaves out](#what-v1-leaves-out)).
+This is roll secrets' long-standing gap R1 (docs/secrets.md, "Next"), and it covers every product
+whose resources sit on a workspace project. Before it, a person reached only the projects they
+made, and a team shared only through the operator or through tokens. This document is the plan
+for people sharing a project, each with a role. v1 takes option (a) of every open decision
+([Open decisions](#open-decisions)); each is one constant in `roll_auth::roles::decisions`.
+
+Where v1 differs from the plan below: the roles' templates live in `crates/roll-auth/src/roles.rs`
+(not roll-access), so the workspace checks "nobody grants more than they hold" without depending on
+roll-access; roll-access builds the session grant from them (`Access::session_grant`). An invite's
+link is `<web>/dashboard/invites?token=…` (no new top-level route).
 
 The one rule behind the whole design: **a member's session becomes a roll-access grant**. The
 grant is built from the member's role, on every request, and it goes through the one evaluator
@@ -58,7 +64,7 @@ type Member = {
 ### Built-in roles
 
 Each role is a fixed template of `roll_auth::scope` rules over one project, written in
-`crates/roll-access/src/roles.rs`. `P` stands for the project, and `{project: P}` is the selector
+`crates/roll-auth/src/roles.rs`. `P` stands for the project, and `{project: P}` is the selector
 on every rule. "Member products" are the products whose routes are open to members
 ([Phasing](#phasing)).
 
@@ -127,7 +133,7 @@ Both are later, not v1:
 | piece | where | what it does |
 | --- | --- | --- |
 | memberships, invites, homes | `crates/roll-workspace` | stores them; every read-then-write is one `code_sql` write |
-| roles' rules | `crates/roll-access/src/roles.rs` | turns a membership into `scope::Rule`s |
+| roles' rules | `crates/roll-auth/src/roles.rs` | turns a membership into `scope::Rule`s |
 | a session's grant | `crates/roll-access` (`Access::session_grant`) | on every request, the person's memberships as a `Grant` of kind `session` |
 | the decision | `roll_access::evaluate` | the same evaluator, catalogue and rules as for tokens |
 | who is signed in | `roll_auth::SignedIn` | unchanged: who it is, admin or not, the session |
@@ -222,7 +228,8 @@ What this means for members:
 1. A project admin or owner invites an email with a role (and `environments`):
    `POST …/projects/{id}/invites`. This needs `admin` on the project's workspace resource, and the
    role must be covered by the inviter's own grant. roll mails a link
-   `<web>/invites/<token>`. The token is shown once, stored hashed, and expires after 7 days.
+   `<web>/dashboard/invites?token=rlv_…` (checksummed, so leak scanning knows it; the page takes it
+   out of the address bar). The token is shown once, stored hashed, and expires after 7 days.
 2. An address without a roll account also needs an account. The default (D5) is that the invite
    waits for an operator or admin, because roll accounts are invite-only (docs/accounts.md). Once
    approved, one link creates the account and accepts the project invite.
@@ -254,11 +261,14 @@ After the write, it acts on what the person made:
 | --- | --- | --- |
 | their session and tokens | stop reaching the project on the next request | the session grant no longer has the project; `Within` intersects every token with it |
 | tokens confined to the project | revoked, why "removed from project X", one audit row each | `Access::revoke_many` with the ids `confined_to(project)` finds (D7); tokens reaching other projects only narrow |
-| workload identities they made | logins refused | `maker_reaches` is false; the identity shows "maker left: adopt or delete" |
-| syncs they made | paused at the next run, with that reason | `maker_reaches` before each push |
+| workload identities they made | logins refused, or narrowed after a demotion | `maker_reaches` checks the identity's whole rule against their session now; the token a login gives runs `Within` it |
+| syncs they made | stop pushing what they no longer reveal | each push runs as them, as they are then (`person_caller`) |
 | references bound to them (#407's `bind_ref`, `resolve_as`) | stop resolving | the maker no longer reaches; health reports `maker_gone` on each, so an admin rebinds |
-| dynamic leases they hold, one-time shares they made | revoked and ended | secrets' `on_member_removed(project, user)` hook, outside the workspace write |
-| their personal overrides | deleted | the same hook |
+| dynamic leases they hold, one-time shares they made | revoked and ended | `Secrets::member_changed(project, user)` on the event, outside the workspace write |
+| folders they shared with other projects | stop being shared once they may no longer manage the project | the same hook |
+| backups, gateways, ACME bindings, sinks, notify URLs, rotators, outside databases and directories they set up | stop | `maker_reaches(by, [admin on the project])` on every use |
+| their pending invites | revoked, or those their new role no longer gives | in the same write |
+| their personal overrides | stay (only they read them) | not v1 |
 | approvals they gave on open change requests | no longer count | gates are checked as they are when applied |
 
 **Adopt.** An admin can adopt an identity, sync or bound reference that a former member made:
@@ -440,6 +450,40 @@ There is one test per flow, in the files the repo already uses:
 | two nodes | `crates/roll-secrets/tests/nodes.rs` | a removal on one node stops the person on the other at once |
 | the members page | `apps/dashboard/src/lib/workspace-*.test.ts` | which controls each role is offered |
 | the CLI | `crates/roll-cli/tests/` | `roll projects members …` against a live API |
+
+### What v1 leaves out
+
+Built: memberships, invites (mailed when the address has an account), roles, change of role,
+removal and leaving, the last owner, the migration, the session grant through the evaluator for
+workspace and secrets, `unprotected` rules and a developer's `environments`, homes for creates and
+`trusts` over owners and homes, D7's revocation and the audit rows (through the `member_events`
+outbox), approvals by role and counted as applied, what a member made running at their rights now
+(`maker_reaches` takes the action and scope each made thing uses: a backup schedule needs `admin`
+and `reveal` on the whole project, a gateway or an ACME binding `admin`, an identity's login every
+action of its rule; so a removal or a demotion stops or narrows them at once), the Members tab and
+the Invites page, the CLI, the four MCP tools.
+
+Homes are kept only for kinds whose ids a product never gives out again (Postgres, Redis, streams,
+NoSQL, search clusters, apps services: `roll_workspace::members::HOME_KINDS`). A bucket, a queues
+vhost, a tasks tenant or a repo goes by a name someone else can make again after it's deleted,
+and those products don't tell the workspace when they delete one, so a home kept by name would
+hand the new one the old one's trust: they get no home (their trust comes from `Owners` alone).
+A product that deletes a resource drops its home and canvas places (`Workspace::forget_resource`;
+roll apps does on purge). A person's own grant never proves a resource is theirs: placing or
+homing one takes `Owners`, or a home already in the project.
+
+Not yet:
+- **roll previews** stays owner-only (its routes reach shells, files and branches' credentials):
+  only a project's owners (and admin accounts) reach its previews, and team-access previews open
+  for its owners and admins, until previews decide by role (v1.1);
+- deleting a removed member's personal overrides, and **adopt**;
+- reach listing members beside tokens, and health's `maker_gone` findings;
+- one link that makes an account and accepts (D5's waiting invite: an address without an account
+  waits until roll's operator or an admin makes it, then the same link works);
+- the namespace handle beside a shared project's name in the sidebar, the "not trusted here" mark
+  on the canvas, Home's invites badge;
+- the two-node test (`crates/roll-secrets/tests/nodes.rs`): every check reads the shared databases
+  on each request, so nothing is held per node.
 
 ## Open decisions
 

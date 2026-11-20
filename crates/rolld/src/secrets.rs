@@ -459,6 +459,13 @@ pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Work
     tell_decoys(&access, secrets.clone());
     // ACME's http-01 and dns-01 checks: public addresses only, as webhooks.
     secrets.set_acme_checks(Arc::new(acme::Checks::new(allow_private)));
+    // A member removed, demoted or gone (docs/members.md): their shared folders, one-time shares
+    // and leases end once they no longer hold what those need.
+    let s = secrets.clone();
+    workspace.on_event(Box::new(move |e| match (e.action.as_str(), &e.subject) {
+        ("member.remove" | "member.leave" | "member.role", Some(user)) => s.member_changed(&e.project, user).map_err(|e| e.to_string()),
+        _ => Ok(()),
+    }));
     // A deleted project's secrets go with it.
     let s = secrets.clone();
     workspace.on_delete(Box::new(move |id| {
@@ -1187,18 +1194,46 @@ impl roll_secrets::People for People {
     }
 }
 
+/// Who people are for the workspace's members (docs/members.md): their handle and address, while
+/// they can sign in. An invite is mailed only to an address that has an account (roll accounts
+/// mails people, never an address a caller names).
+impl roll_workspace::People for People {
+    fn person(&self, user: &str) -> Option<roll_workspace::Person> {
+        let u = self.accounts.user(user).ok().filter(|u| !u.disabled)?;
+        Some(roll_workspace::Person { handle: u.handle, email: Some(u.email).filter(|e| !e.is_empty()) })
+    }
+
+    fn mail(&self, email: &str, subject: &str, text: &str) {
+        let Ok(rt) = tokio::runtime::Handle::try_current() else { return };
+        let (accounts, email, subject, text) = (self.accounts.clone(), email.to_string(), subject.to_string(), text.to_string());
+        rt.spawn(async move {
+            if let Ok(Some(p)) = accounts.sessions().person_by_email(&email).await
+                && let Err(e) = accounts.mail_user(&p.user, &subject, &text).await
+            {
+                tracing::warn!(error = %e, "mailing a project invite");
+            }
+        });
+    }
+}
+
 /// What of a person's canvas is theirs: everything for an admin; a repo under their roll code
 /// owner; a search cluster they own; nothing else until each product says who owns its resources.
 /// A failed lookup is a no.
 impl roll_workspace::Owners for People {
     fn trusts(&self, user: &str, kind: roll_workspace::Kind, r#ref: &str) -> bool {
         let Ok(Some(p)) = roll_secrets::People::person(self, user) else { return false };
-        p.admin
-            || match kind {
-                roll_workspace::Kind::Repo => roll_secrets::access::OwnProjects::owns_repo(p.code_owner.as_deref(), r#ref),
-                roll_workspace::Kind::Search => self.search.as_ref().is_some_and(|s| matches!(s.store.owner_of(r#ref), Ok(Some(Some(o))) if o == user)),
-                _ => false,
-            }
+        p.admin || self.owns(user, kind, r#ref)
+    }
+
+    /// Theirs whatever their account is: an admin account added as an owner of someone else's
+    /// project adds only what's its own (docs/members.md, "The canvas rule").
+    fn owns(&self, user: &str, kind: roll_workspace::Kind, r#ref: &str) -> bool {
+        let Ok(Some(p)) = roll_secrets::People::person(self, user) else { return false };
+        match kind {
+            roll_workspace::Kind::Repo => roll_secrets::access::owns_repo(p.code_owner.as_deref(), r#ref),
+            roll_workspace::Kind::Search => self.search.as_ref().is_some_and(|s| matches!(s.store.owner_of(r#ref), Ok(Some(Some(o))) if o == user)),
+            _ => false,
+        }
     }
 }
 
@@ -1780,7 +1815,7 @@ mod tests {
         let (user, _) = accounts.email_verify("chal-test", mail.subject.split(' ').next().unwrap()).unwrap();
         let q = Queues::start(Some(super::People { accounts: accounts.clone(), code: None, search: None })).await;
         let mine = q.ws.create(&user, "side-project", "", None).unwrap().id;
-        q.ws.place(roll_workspace::Scope::Owner(&user), &mine, roll_workspace::Kind::Queue, "orders", 0.0, 0.0).unwrap();
+        q.ws.place(roll_workspace::Scope::Member(&user), &mine, roll_workspace::Kind::Queue, "orders", 0.0, 0.0).unwrap();
         let path = format!("/v1/secrets/projects/{mine}/environments/production/secrets/AMQP_URL");
         let (s, e) = send(&roll_secrets::router(q.secrets.clone()), "PUT", &path, Some(queue_link("url", "managed", json!({})))).await;
         assert!(s == 400 && e["error"].as_str().is_some_and(|m| m.starts_with("queue orders is on this project's canvas, but roll can't tell it's yours")), "{s} {e}");
@@ -1843,7 +1878,7 @@ mod tests {
         // token for another project may not.
         let operator = apps_control::integrations::Asker { operator: true, user: None, grant: None };
         assert!(apps.may_reveal(operator, &project, "production").await);
-        let rule = roll_auth::scope::Rule { product: "secrets".into(), resources: roll_auth::scope::Resources::Some(vec![roll_auth::scope::Selector::Project { project: "prj_other".into() }]), environments: None, paths: None, actions: std::collections::BTreeMap::from([(roll_auth::scope::Action::Reveal, roll_auth::scope::Effect::Allow)]) };
+        let rule = roll_auth::scope::Rule { product: "secrets".into(), resources: roll_auth::scope::Resources::Some(vec![roll_auth::scope::Selector::Project { project: "prj_other".into() }]), environments: None, paths: None, unprotected: false, actions: std::collections::BTreeMap::from([(roll_auth::scope::Action::Reveal, roll_auth::scope::Effect::Allow)]) };
         let grant = roll_auth::Grant { user: None, ask_otherwise: false, id: "tok_x".into(), name: "x".into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(roll_auth::scope::Scope(vec![rule])) };
         assert!(!apps.may_reveal(apps_control::integrations::Asker { operator: true, user: None, grant: Some(&grant) }, &project, "production").await);
         // The read is the service's in the audit log.
