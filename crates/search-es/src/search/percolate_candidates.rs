@@ -217,7 +217,7 @@ impl StoredQueries {
                 seen.insert(bytes.to_vec(), None);
                 continue;
             };
-            let qctx = QueryCtx::new(ctx.cluster, ctx.st, ctx.idx, ctx.table, ctx.searcher, ctx.now_ms);
+            let qctx = QueryCtx::new(ctx.cluster, ctx.st, ctx.idx, ctx.table, ctx.searcher, ctx.now_ms, crate::search::query::Reader::Unset);
             let n = match qctx.to_query(&parsed) {
                 Ok(q) => needs(&q),
                 Err(_) => Needs::Unknown,

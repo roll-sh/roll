@@ -151,6 +151,14 @@ export interface Preview {
   page_a11y?: { issues: A11yIssue[]; lang: boolean; title: boolean; seo?: PageSeo | null } | null;
   /** Its first page's own links that are broken (status 0: no answer), of those checked. */
   page_links?: { checked: number; broken: { path: string; status: number }[] } | null;
+  /** Its routes (from its traces) clearly slower than main's preview's, as its holder last read them. */
+  /** The project's rule for regressions against main (`check`, `required`). */
+  regressions?: "check" | "required" | null;
+  /** Who accepted its regressions at its head. */
+  regressions_accepted?: { head: string; by: string; at: number } | null;
+  /** Its error groups main's preview doesn't have, as its holder last read them. */
+  new_errors?: { branch: string; total: number; errors: { service: string; title: string }[] } | null;
+  slower_routes?: { branch: string; routes: { name: string; count: number; p50_ms: number; main_p50_ms: number; grew?: GrewSpan | null }[] } | null;
   /** Earlier pushes of the change's services, still reachable on the same data (newest first). */
   earlier?: { service: string; revision: string; url: string; share_url: string | null; at: number }[];
   /** When its screenshot was taken (`screenshot` below), if it has one. */
@@ -371,6 +379,8 @@ export interface PreviewSettings {
   access: "link" | "team" | "public";
   /** Chromatic's UI Review: `check` posts `roll/visual`; `required` also keeps a change waiting for one from landing in roll. */
   visual_review?: "off" | "check" | "required";
+  /** `check` posts `roll/regressions`, failing while a change has routes slower than main's preview or errors main's doesn't have. */
+  regressions?: "off" | "check" | "required";
   /** `catch` (default): services send mail to roll's catcher, listed on the preview, never delivered; `deliver`: the project's own mail settings. */
   mail?: "catch" | "deliver";
   /** Its `roll.toml` services get the OpenTelemetry SDK's variables, their spans kept on the preview a few hours. */
@@ -506,6 +516,7 @@ export const previewsApi = {
   approve: (id: string, head: string) => call<Preview>("POST", `${one(id)}/approve`, { head }),
   /** As the person signed in (a session, never a token): a one-use URL into a team-access preview's page `to` (one of its service URLs), good for a minute. */
   visit: (id: string, to: string) => call<{ url: string }>("POST", `${one(id)}/visit`, { to }),
+  acceptRegressions: (id: string, head?: string) => call<Preview>("POST", `${one(id)}/regressions/accept`, head ? { head } : {}),
   acceptVisual: (id: string, head?: string, path?: string) =>
     call<Preview>("POST", `${one(id)}/visual/accept`, { ...(head ? { head } : {}), ...(path !== undefined ? { path } : {}) }),
   /** Its share links (never their tokens). */
@@ -552,7 +563,7 @@ export const previewsApi = {
   /** Each route's time from its traces against main's preview's same route, the slower ones first. */
   routes: (id: string, minutes?: number) => call<{ minutes: number; main: string | null; routes: RouteTime[] }>("GET", `${one(id)}/routes${query({ minutes })}`),
   /** One trace's spans, oldest first, masked. */
-  trace: (id: string, trace: string) => call<{ trace: string; spans: TraceSpan[] }>("GET", `${one(id)}/traces/${encodeURIComponent(trace)}`),
+  trace: (id: string, trace: string) => call<{ trace: string; spans: TraceSpan[]; repeated?: Repeated | null }>("GET", `${one(id)}/traces/${encodeURIComponent(trace)}`),
   logs: (id: string, opts: { service?: string; lines?: number } = {}) =>
     call<{ service: string; lines: string[] }>("GET", `${one(id)}/logs${query(opts)}`),
   /** Newest first. */
@@ -596,15 +607,19 @@ export function parseSse(rest: string, text: string): { events: { event: string;
 }
 
 /** One error in a preview's service's output, grouped (a stack trace joined from its lines, or an error line): how many, first and last seen (ms), and the newest one whole. `fingerprint` names the group (keyed per process: not stable across restarts). */
-export type ErrorGroup = { service: string; fingerprint: string; kind: string; title: string; count: number; first_seen: number; last_seen: number; sample: string };
+export type ErrorGroup = { service: string; fingerprint: string; kind: string; title: string; count: number; first_seen: number; last_seen: number; sample: string; /** The trace its newest sample names, when the preview keeps it. */ trace?: string };
 
 /** A running service's use right now: cores of CPU, resident bytes (an instance's, on roll apps), and the MB it runs with. */
 export type ServiceMetrics = { service: string; cpu: number; memory_bytes: number; memory_mb: number };
 
 /** One of a preview's recent traces: its root span's name and service, when (ms), how long, how many spans, whether any failed. */
-export type TraceSummary = { trace: string; name: string; service: string; start_ms: number; ms: number; spans: number; error: boolean };
+/** The span inside a slower route whose time grew most against main's preview's: where the time went. */
+export type GrewSpan = { span: string; ms: number; main_ms: number };
+/** A database statement a trace runs many times (an N+1), its literals taken out. */
+export type Repeated = { statement: string; count: number };
+export type TraceSummary = { trace: string; name: string; service: string; start_ms: number; ms: number; spans: number; error: boolean; repeated?: Repeated | null };
 /** A route's time from a preview's traces (a root span's name): how many, p50 and p95 (ms), main's preview's p50 for it, and whether it's clearly slower. */
-export type RouteTime = { name: string; count: number; p50_ms: number; p95_ms: number; main_p50_ms: number | null; main_count: number; slower: boolean };
+export type RouteTime = { name: string; count: number; p50_ms: number; p95_ms: number; main_p50_ms: number | null; main_count: number; slower: boolean; repeated?: Repeated | null; grew?: GrewSpan | null };
 /** A span of a trace (times in Unix nanoseconds), its attributes as name/value pairs. */
 export type TraceSpan = { trace: string; span: string; parent?: string; name: string; service?: string; start: number; end: number; error?: boolean; attrs?: [string, string][] };
 

@@ -23,7 +23,7 @@ use crate::json::Json;
 use crate::xparser::{Field, Token, Tokens, XParser};
 
 /// A parsed `script` (inline source or stored id).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Script {
     /// Inline source (`source`, or the string form).
     pub source: Option<String>,

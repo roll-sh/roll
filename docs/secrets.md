@@ -21,7 +21,7 @@ environments that inherit from a base environment instead of copying it.
 - Tests: `crates/roll-secrets/tests/api.rs` (the router in process, on SQLite or Postgres),
   `crates/roll-secrets/tests/nodes.rs` (two stores racing on one database),
   `crates/roll-cli/tests/secrets.rs` (`roll run`, with `--watch`, against roll secrets in process),
-  `crates/rolld/tests/secrets.rs` (each product's link against the real rolld),
+  `crates/rolld/tests/secrets.rs` (each product's link against the real rolld, and a sealed start),
   `apps/dashboard/src/lib/secrets-*.test.ts`. `pnpm test:secrets` runs them (`--docker`: on
   Postgres, and the Postgres link).
 
@@ -4453,10 +4453,40 @@ with signed digests, so such a change shows:
   row)`, written in the row's own transaction. The row's bytes are a length-prefixed encoding of
   every field the API shows but `id` (`crates/roll-secrets-chain`, `canonical`), so they hash the same from SQLite,
   Postgres or an export. The project's head (`audit_heads`) is updated in that transaction too:
-  on Postgres a second writer loses the head's row lock and its serializable write is re-run, and a
-  unique index on `(project_id, seq)` refuses a second row at one number anyway, so racing writers,
-  on one node or several, never fork the chain.
-- **The head's MAC.** The head carries an HMAC-SHA256 of `{project, seq, hash, start}` under a key
+  writers queue on the head's row lock (or SQLite's one writer), and a unique index on
+  `(project_id, seq)` refuses a second row at one number anyway, so racing writers, on one node or
+  several, never fork the chain.
+- **Under load.** Every read of values writes a row, so 500 pods of a rollout reading one project
+  take its head 500 times. Reads waiting on one node are group-committed: one of them writes
+  everyone's rows (up to 256) onto the chain in one read-committed transaction, in the order they
+  came, and the others answer once it commits. Batches from several nodes queue on the chain's
+  claim (`code_sql::Conn::claim`, an advisory lock) rather than fail and re-run. A change writes its
+  own row in its own serializable transaction, as before; when a batch commits under it, its next
+  attempt holds the claim from before its snapshot, so reads can't starve it. Measured with
+  `examples/bench concurrent` (Postgres 18 in Docker, `max_connections=500`, one project of 20
+  keys, a writer changing a key every 20 ms; medians of 2 alternating runs on one node, 3 on eight,
+  each pool its own; a shared 36-core host at load 35–50, so the numbers are low and noisy:
+  base varied 2x run to run), reads a second and p99:
+
+  | resolvers | before the chain | the chain alone (#281) | batched and claimed (now) |
+  | --- | --- | --- | --- |
+  | 1 node, 1 | 300, 6 ms | 236, 14 ms | 184, 20 ms |
+  | 10 | 2,622, 28 ms | 420, 521 ms | 914, 77 ms |
+  | 50 | 5,002, 42 ms | 704, 881 ms | 2,626, 52 ms |
+  | 200 | 4,792, 103 ms | 468, 2.7 s (104 reads unaudited) | 3,029, 162 ms |
+  | 500 | 4,436, 229 ms | 428, 4.4 s (515 unaudited) | 3,034, 332 ms |
+  | 8 nodes, 10 | 1,493, 44 ms | 515, 345 ms | 590, 112 ms |
+  | 50 | 1,999, 80 ms | 469, 1.5 s | 1,458, 93 ms |
+  | 200 | 2,269, 198 ms | 181, 3.5 s (180 unaudited) | 1,994, 313 ms |
+  | 500 | 2,419, 317 ms | 343, 3.5 s (706 unaudited) | 2,468, 514 ms |
+
+  The chain alone re-ran each read's write up to 40 times (70,000 serialization retries in 10 s at
+  500), gave up on some (the read answered, unaudited), and failed most changes made meanwhile: 3–5
+  changes in 10 s, 2–3 of them failing, against 23–378 before the chain. Now no read goes
+  unaudited and no change fails (52–300 in 10 s, each retried once: the only retries left). What's
+  left is the chain itself: one batch at a time per project, each holding the claim for about three
+  round trips and a commit. At 50 resolvers or more that's within 2x of before the chain on every
+  line; few readers per node make small batches (eight nodes sharing ten readers: 0.4x). of `{project, seq, hash, start}` under a key
   derived from `ROLL_SECRET_KEY` (HKDF, its own label `audit:head:v1`), checked before every append
   and remade after it (two HMACs a write). Plain SHA-256 lets a database writer recompute every
   hash; the MAC means they can't move the head to match: not back over rows they cut from the end,
@@ -5333,7 +5363,11 @@ inconsistencies are fixed in #264:
   transaction (one head row, a unique seq: no forks, checked with two racing nodes), hourly digests
   signed by roll's issuer key and sent to the sinks, `audit verify` online or offline against an
   export and a saved JWKS; retention cuts only at a signed digest. ~+0.1 ms per audited write on
-  SQLite, ~one round trip on Postgres. Known: rows cut from the end along with the head, after the
+  SQLite, ~one round trip on Postgres with one writer. Under many readers of one project (a
+  500-pod rollout) the chain alone capped reads at ~500 a second with p99s of seconds, left reads
+  unaudited and failed most changes; reads are now group-committed per node and queue across nodes
+  on a claim, and a change that loses once runs next holding it ("Tamper evidence", "Under load").
+  Known: rows cut from the end along with the head, after the
   last delivered digest (≤1 h), aren't detectable without a sink.
 - R9. **Secret requests** (#277): `roll secrets request KEY…` or "Request a value…" makes a link;
   the answerer's browser seals each value to the request's own key, roll opens it only in the write
