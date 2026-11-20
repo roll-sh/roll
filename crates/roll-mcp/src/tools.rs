@@ -1179,9 +1179,6 @@ static TOOLS: &[Tool] = &[
     t("previews_refresh", "Refresh a preview", "Redeploy a preview now.", "previews", "POST", "/v1/previews/{id}/refresh", &[req("id", "Preview id")]),
     t("previews_errors", "Preview errors", "A preview's errors over the last minutes (5-1440, default 60), grouped by service and fingerprint, with counts, first and last seen and a sample (masked as its logs are). Start here when a preview fails.", "previews", "GET", "/v1/previews/{id}/errors", &[req("id", "Preview id"), q("minutes", Ty::Int, "How far back, 5-1440 (default 60)")]),
     t("previews_traces", "Preview traces: slow or failing requests", "A preview's recent traces (5-360 minutes back, default 60), newest first, at most 100: each one's root span, service, duration, span count and whether it failed. previews_get_trace has one trace's spans. Names and attributes are masked as its logs are.", "previews", "GET", "/v1/previews/{id}/traces", &[req("id", "Preview id"), q("minutes", Ty::Int, "How far back, 5-360 (default 60)")]),
-    t("previews_visitors", "Who opened a preview", "The last 8 people signed in to roll who opened a preview (team access), by handle, latest first. Share links and the CI bypass aren't people and aren't listed.", "previews", "GET", "/v1/previews/{id}/visitors", &[req("id", "Preview id")]),
-    t("previews_list_hooks", "A project's deploy hooks", "The hooks that start a preview from outside (CI): name, branches, when made and last fired; never their secrets.", "previews", "GET", "/v1/previews/projects/{project}/hooks", &[req("project", "Workspace project")]),
-    t("previews_delete_hook", "Delete a deploy hook", "Delete one of a project's preview deploy hooks: its URL stops working.", "previews", "DELETE", "/v1/previews/projects/{project}/hooks/{hook}", &[req("project", "Workspace project"), req("hook", "Hook id")]),
     t("previews_get_trace", "A preview trace's spans", "One trace's spans, oldest first: where a slow or failing request spent its time across the preview's services (names and attributes masked).", "previews", "GET", "/v1/previews/{id}/traces/{trace}", &[req("id", "Preview id"), req("trace", "Trace id (from previews_traces)")]),
     t("previews_mask_suggestions", "Unmasked personal data", "Columns in a project's databases and indices that look like people's data (emails, names, phone numbers…) and aren't masked in its previews yet, with the masking rule each would take and why; only resources this token can read.", "previews", "GET", "/v1/previews/projects/{project}/mask-suggestions", &[req("project", "Workspace project")]),
     t("previews_metrics", "Preview metrics", "Each of a preview's services' CPU and memory now: which one is slow or about to run out.", "previews", "GET", "/v1/previews/{id}/metrics", &[req("id", "Preview id")]),
@@ -1212,6 +1209,9 @@ static TOOLS: &[Tool] = &[
     t("previews_share", "Share a preview", "A link for someone outside the team to open a preview for some hours (its token is in this answer only; anyone with the link gets in).", "previews", "POST", "/v1/previews/{id}/shares", &[req("id", "Preview id"), breq("hours", Ty::Int, "How long the link works")]),
     t("previews_revoke_share", "Revoke a share link", "Stop a preview's share link at once (who it's shared with: previews_list_shares).", "previews", "DELETE", "/v1/previews/{id}/shares/{share}", &[req("id", "Preview id"), req("share", "Share id")]),
     t("previews_settings", "Preview settings", "A project's preview rules: which branches get one, how long they live, private or not, budgets (changing them is the project admin's).", "previews", "GET", "/v1/previews/projects/{project}/settings", &[req("project", "Workspace project")]),
+    t("previews_visitors", "Who opened a preview", "The last 8 people signed in to roll who opened a preview (team access), by handle, latest first. Share links and the CI bypass aren't people and aren't listed.", "previews", "GET", "/v1/previews/{id}/visitors", &[req("id", "Preview id")]),
+    t("previews_list_hooks", "A project's deploy hooks", "The hooks that start a preview from outside (CI): name, branches, when made and last fired; never their secrets.", "previews", "GET", "/v1/previews/projects/{project}/hooks", &[req("project", "Workspace project")]),
+    t("previews_delete_hook", "Delete a deploy hook", "Delete one of a project's preview deploy hooks: its URL stops working.", "previews", "DELETE", "/v1/previews/projects/{project}/hooks/{hook}", &[req("project", "Workspace project"), req("hook", "Hook id")]),
     t("previews_delete", "Delete a preview", "Tear a preview down with its branches.", "previews", "DELETE", "/v1/previews/{id}", &[req("id", "Preview id")]),
 ];
 
@@ -1273,6 +1273,12 @@ mod tests {
         let r = all().iter().find(|t| t.name == "apps_restart").unwrap().request(&json!({ "service": "svc_a-b~c", "env": ".." })).unwrap();
         assert_eq!(r.uri, "/v1/apps/services/svc_a-b~c/environments/%2E%2E/restart");
         assert!(all()[0].request(&json!({ "nope": 1 })).is_err());
+        // Explain plans the agent's statement in a read-only transaction, and runs nothing.
+        let r = all().iter().find(|t| t.name == "postgres_explain").unwrap().request(&json!({ "endpoint": "ep_1", "sql": "select * from users;" })).unwrap();
+        assert!(matches!(r.body, Built::Json(ref b) if b["sql"] == "EXPLAIN (FORMAT JSON) select * from users" && b["read_only"] == true));
+        for n in ["postgres_explain", "postgres_slow_queries", "postgres_advisors", "postgres_list_extensions"] {
+            assert_eq!(def(n)["annotations"]["readOnlyHint"], true, "{n}");
+        }
         // A field whose null means none: null goes as null (it clears), left out it's not sent (it stays).
         let domain = all().iter().find(|t| t.name == "apps_update_domain").unwrap();
         assert_eq!(def("apps_update_domain")["inputSchema"]["properties"]["redirect_to"]["type"], json!(["string", "null"]));
@@ -1282,12 +1288,6 @@ mod tests {
         assert_eq!(body(with("redirect_to", Value::Null)), json!({ "redirect_to": null }));
         assert_eq!(body(with("port", json!(8080))), json!({ "port": 8080 }));
         assert!(body(at.clone()).get("redirect_to").is_none());
-        // Explain plans the agent's statement in a read-only transaction, and runs nothing.
-        let r = all().iter().find(|t| t.name == "postgres_explain").unwrap().request(&json!({ "endpoint": "ep_1", "sql": "select * from users;" })).unwrap();
-        assert!(matches!(r.body, Built::Json(ref b) if b["sql"] == "EXPLAIN (FORMAT JSON) select * from users" && b["read_only"] == true));
-        for n in ["postgres_explain", "postgres_slow_queries", "postgres_advisors", "postgres_list_extensions"] {
-            assert_eq!(def(n)["annotations"]["readOnlyHint"], true, "{n}");
-        }
         // What a site's visitors write (a form's fields, and the field names a form.submitted event
         // carries) is withheld in lockdown wherever an answer holds it.
         for n in ["apps_form_submissions", "apps_events", "apps_activity"] {
