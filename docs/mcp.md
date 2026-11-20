@@ -92,7 +92,7 @@ GitHub's dynamic toolsets, applied to a stateless server:
 
 | Tool | What it does |
 | --- | --- |
-| `roll_find_tools` | Searches the tools this connection may use by what the agent wants to do (`query`, optional `product`, `limit` up to 25) and answers each match's name, description, input schema and which run tool takes it. With no query, it answers every tool's name and title. Words count by how rare they are among the tools, more in a name than a title than a description, and of two names holding the query, the one it covers more of comes first (`apps_deploy` before `apps_cancel_deploy`). `search::finds` holds 30 everyday queries, across every product, to their tool. |
+| `roll_find_tools` | Searches the tools this connection may use by what the agent wants to do (`query`, optional `product`, `limit` up to 25) and answers each match's name, description, input schema and which run tool takes it. With no query, it answers every tool's name and title. Words count by how rare they are among the tools, more in a name than a title than a description, and of two names holding the query, the one it covers more of comes first (`apps_deploy` before `apps_cancel_deploy`); a title that holds every word of the query counts double ("run a function now" is `tasks_invoke`, not `tasks_cancel_function_runs`). Question words (why, are, does) and plurals (`queries` is `query`) don't change a match. `search::finds` holds 73 everyday queries, across every product, to their tool. |
 | `roll_run_read` | Runs a read-only tool: `{"tool": …, "arguments": {…}}`. It refuses one that changes things. |
 | `roll_run` | Runs any tool the connection has. |
 
