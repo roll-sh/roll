@@ -5128,8 +5128,8 @@ work found). First what can be built now:
 5. **Use without seeing** (building, `feature/roll-secrets-placeholders`): host-bound keys,
    `rlph_` placeholders, `substitute`, and a filter that previews', apps' and the agents sandbox's
    proxies embed.
-6. **The audit chain under concurrency, and a sealed-start rolld test** (#475, urgent, landing alone before
-   batch 5). The measurement found main's #281 chain collapsing under concurrent readers:
+6. **The audit chain under concurrency, and a sealed-start rolld test** (#475, on main 2026-11-20 as
+   56f87f031, alone before batch 5). The measurement found main's #281 chain collapsing under concurrent readers:
    - 5,000–72,000 serialization retries per 10 s;
    - reads 6–10x slower;
    - most secret changes failing;
