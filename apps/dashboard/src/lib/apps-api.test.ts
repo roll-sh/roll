@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { deployChange, describePending, formatFirewall, formatHeaders, parseEnv, parseFirewall, parseHeaders, stepDurations, toEnv, type DeployStatus, type EnvironmentSummary, type InstanceState, type Service } from "./apps-api";
+import { describe, expect, it, vi } from "vitest";
+import { deployChange, describePending, followLog, formatFirewall, formatHeaders, parseEnv, parseFirewall, parseHeaders, stepDurations, toEnv, type DeployStatus, type EnvironmentSummary, type InstanceState, type Service } from "./apps-api";
 import { service } from "./workspace-resources";
 
 const svc = (env: Partial<EnvironmentSummary>, id = "svc_a"): Service => ({
@@ -122,5 +122,21 @@ describe("response headers", () => {
       { path: "/api/*", set: { "Content-Type": "application/problem+json" }, replace: true },
     ]);
     expect(parseHeaders(formatHeaders(rules))).toEqual(rules);
+  });
+});
+
+describe("following a log", () => {
+  it("stops at a finished log's end instead of reading it all again", async () => {
+    const enc = new TextEncoder();
+    const fetchFn = vi.fn(async () => new Response(new ReadableStream({ start(c) { c.enqueue(enc.encode('data: {"t":1,"stream":"stdout","text":"done"}\n\nevent: end\ndata: end\n\n')); c.close(); } })));
+    vi.stubGlobal("fetch", fetchFn);
+    const lines: string[] = [];
+    let ended = false;
+    followLog({ job: { service: "svc_1", env: "production", job: "job_1" } }, { onLine: (l) => lines.push(l.text), onReset: () => {}, onEnd: () => (ended = true) });
+    await vi.waitFor(() => expect(ended).toBe(true));
+    await new Promise((r) => setTimeout(r, 700));
+    expect(lines).toEqual(["done"]);
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    vi.unstubAllGlobals();
   });
 });

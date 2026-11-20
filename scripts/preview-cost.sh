@@ -793,6 +793,10 @@ for _ in $(seq 1 120); do
   sleep 0.5
 done
 case "$BLOCKED" in *visual*) ;; *) echo "a required visual review should keep the change from landing: $BLOCKED"; exit 1;; esac
+# A required review is a person's to accept, signed in to roll: never the operator's token (a CI job
+# may hold it). The rest runs as a check, which the operator may accept.
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://$API/v1/previews/$PV/visual/accept" -H 'content-type: application/json' -d '{}')" = 403 ] || { echo "the operator's token shouldn't accept a required visual review"; exit 1; }
+api PUT "/v1/previews/projects/$PRJ/settings" '{"visual_review":"check"}' >/dev/null
 # Accepting what wasn't seen (an older screenshot's head) is refused; what was, accepted.
 [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://$API/v1/previews/$PV/visual/accept" -H 'content-type: application/json' -d '{"head":"cs_not_this_one"}')" = 409 ] || { echo "accepting an older screenshot should be refused"; exit 1; }
 SEEN=$(api GET "/v1/previews/$PV" | jq_ "d['visual_review']['head']")
@@ -803,7 +807,6 @@ CHANGED_PAGES=$(api GET "/v1/previews/$PV" | jq_ "len(d['visual_review']['pages'
 ONE=$(api GET "/v1/previews/$PV" | jq_ "d['visual_review']['pages'][0]['path']")
 PARTLY=$(api POST "/v1/previews/$PV/visual/accept" "$(python3 -c 'import json,sys; print(json.dumps({"head": sys.argv[1], "path": sys.argv[2]}))' "$SEEN" "$ONE")" | jq_ "'%s, %d of %d' % (d['visual_review']['state'], sum(1 for x in d['visual_review']['pages'] if x['by']), len(d['visual_review']['pages']))")
 case "$PARTLY" in "changed, 1 of "*) ;; *) echo "accepting one page should leave the others waiting: $PARTLY"; exit 1;; esac
-case "$(api GET "/v1/code/changes/$CHG" | jq_ "[b['kind'] for b in d.get('blockers', [])]")" in *visual*) ;; *) echo "a partly accepted required review should still block landing"; exit 1;; esac
 REVIEW=$(api POST "/v1/previews/$PV/visual/accept" "{\"head\":\"$SEEN\"}" | jq_ "'%s by %s' % (d['visual_review']['state'], d['visual_review']['by'])")
 [ "$REVIEW" = "accepted by operator" ] || { echo "accepting should settle the review: $REVIEW"; exit 1; }
 case "$(api GET "/v1/code/changes/$CHG" | jq_ "[b['kind'] for b in d.get('blockers', [])]")" in *visual*) echo "an accepted review shouldn't block landing"; exit 1;; esac

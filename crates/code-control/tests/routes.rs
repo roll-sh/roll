@@ -174,6 +174,8 @@ fn writes() -> Vec<(&'static str, String)> {
         change("POST", "/checks"),
         change("POST", "/preview"),
         change("DELETE", "/preview"),
+        change("GET", "/unstored/sha256:0"),
+        change("POST", "/unstored/sha256:0/store"),
         work("PATCH", ""),
         work("POST", "/heartbeat"),
         work("POST", "/release"),
@@ -406,6 +408,10 @@ async fn statuses_of_every_route() {
         ("POST", format!("/v1/code/changes/{cid}/land"), Some(json!({ "lane": "vip" })), StatusCode::BAD_REQUEST),
         ("POST", format!("/v1/code/changes/{cid}/revise"), Some(json!({ "message": "m", "files": {} })), StatusCode::BAD_REQUEST),
         ("POST", format!("/v1/code/changes/{cid}/revise"), Some(json!({ "base": "nope", "message": "m", "files": files })), NOT_FOUND),
+        // "Store in roll": a notice the change doesn't have, and a key roll secrets wouldn't take.
+        ("GET", format!("/v1/code/changes/{cid}/unstored/sha256:0"), None, NOT_FOUND),
+        ("POST", format!("/v1/code/changes/{cid}/unstored/sha256:0/store"), Some(json!({})), NOT_FOUND),
+        ("POST", format!("/v1/code/changes/{cid}/unstored/sha256:0/store"), Some(json!({ "key": "1-bad" })), StatusCode::BAD_REQUEST),
         // Work items.
         ("PATCH", "/v1/code/work/wi_nope".into(), Some(json!({ "title": "t" })), NOT_FOUND),
     ];

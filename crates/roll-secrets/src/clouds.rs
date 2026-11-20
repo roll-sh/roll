@@ -228,8 +228,8 @@ impl Secrets {
         Ok(crate::issuer::Issuer { url: c.issuer.clone() }.discovery())
     }
 
-    /// The issuer's public keys: they verify the audit log's digests too, so they're served
-    /// whether or not clouds are set up. Only rows that are roll's (issuer.rs, `open_row`).
+    /// The issuer's public keys, served whether or not clouds are set up (the audit log's legacy
+    /// digests were signed with them). Only rows that are roll's (issuer.rs, `open_row`).
     pub fn oidc_jwks(&self) -> Result<Json> {
         crate::issuer::jwks(&self.db, self.keys()?, &self.issuer_keys)
     }

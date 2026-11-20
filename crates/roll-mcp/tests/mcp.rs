@@ -66,10 +66,25 @@ impl roll_mcp::ToolSet for Fronted {
         vec![
             json!({ "name": "code_echo", "description": "A review comment", "inputSchema": { "type": "object", "properties": {} }, "annotations": { "readOnlyHint": true }, "_meta": { "roll/product": "workspace" } }),
             json!({ "name": "code_list_work", "description": "Work items", "inputSchema": { "type": "object", "properties": {} }, "annotations": { "readOnlyHint": true }, "_meta": { "roll/product": "workspace" } }),
+            json!({ "name": "code_read_file", "description": "A file", "inputSchema": { "type": "object", "properties": { "repo": {}, "path": {} } }, "annotations": { "readOnlyHint": true }, "_meta": { "roll/product": "workspace" } }),
+            json!({ "name": "code_list_repos", "description": "Repos", "inputSchema": { "type": "object", "properties": { "owner": {} } }, "annotations": { "readOnlyHint": true }, "_meta": { "roll/product": "workspace" } }),
         ]
     }
 
-    fn call(&self, _: Router, _: axum::http::HeaderMap, _: axum::http::Extensions, name: String, _: Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = Value> + Send>> {
+    fn call(&self, _: Router, _: axum::http::HeaderMap, _: axum::http::Extensions, name: String, args: Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = Value> + Send>> {
+        if name == "code_read_file" {
+            let found = args["repo"] == "acme/api" && args["path"] == "src/main.rs";
+            return Box::pin(async move {
+                if found {
+                    json!({ "content": [{ "type": "text", "text": "fn main() {}\n" }], "structuredContent": { "path": "src/main.rs", "binary": false, "truncated": false, "content": "fn main() {}\n" }, "isError": false })
+                } else {
+                    json!({ "content": [{ "type": "text", "text": "not found: no such file" }], "structuredContent": { "http_status": 404, "error": "not found" }, "isError": true })
+                }
+            });
+        }
+        if name == "code_list_repos" {
+            return Box::pin(async move { json!({ "content": [{ "type": "text", "text": "acme/api" }], "structuredContent": { "items": [{ "full_name": "acme/api", "owner": "acme", "name": "api" }] }, "isError": false }) });
+        }
         if name == "code_list_work" {
             // A GitHub issue anyone could open, and one a writer opened; the text block is the set's own.
             let items = json!({ "items": [
@@ -726,6 +741,17 @@ async fn prompt_arguments_complete_from_what_it_may_read() {
     assert_eq!(sneaky["error"]["code"], -32002, "an id that isn't one reaches no route: {sneaky}");
     let ids = d.rpc(OPERATOR, "completion/complete", json!({ "ref": { "type": "ref/resource", "uri": "roll://projects/{project}" }, "argument": { "name": "project", "value": "" } })).await;
     assert_eq!(ids["completion"]["values"].as_array().unwrap().len(), 3, "{ids}");
+    // A roll code file (GitHub's repository contents): listed with code_read_file, read through it,
+    // its owner completed; a path that climbs or hides a slash names nothing.
+    assert_eq!(templates["resourceTemplates"][1]["uriTemplate"], "roll://code/{owner}/{repo}/{+path}", "{templates}");
+    let file = d.rpc(OPERATOR, "resources/read", json!({ "uri": "roll://code/acme/api/src/main.rs" })).await;
+    assert_eq!(file["contents"][0]["text"], "fn main() {}\n", "{file}");
+    for bad in ["roll://code/acme/api/src/../../x", "roll://code/acme/api/a%2Fb", "roll://code/acme/api/missing.rs"] {
+        let out = d.http(OPERATOR, Method::POST, "/v1/mcp", Some(json!({ "jsonrpc": "2.0", "id": 9, "method": "resources/read", "params": { "uri": bad } }))).await.2;
+        assert_eq!(out["error"]["code"], -32002, "{bad}: {out}");
+    }
+    let owners = d.rpc(OPERATOR, "completion/complete", json!({ "ref": { "type": "ref/resource", "uri": "roll://code/{owner}/{repo}/{+path}" }, "argument": { "name": "owner", "value": "" } })).await;
+    assert_eq!(owners["completion"]["values"], json!(["acme"]), "{owners}");
     // A prompt this connection isn't offered: -32602.
     let reader = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }])).await;
     let none = d.http(&reader, Method::POST, "/v1/mcp", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "completion/complete", "params": ask("") }))).await.2;
