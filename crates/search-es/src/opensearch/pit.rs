@@ -54,7 +54,7 @@ pub fn create(ctx: &Ctx) -> EsResult<Reply> {
     }
     let n = targets.len() as i64;
     let created = ctx.now_ms;
-    let id = ctx.cluster.contexts.open(SearchContext {
+    let id = crate::search::contexts::open_bounded_pit(ctx, SearchContext {
         targets,
         request: None,
         expires: Instant::now() + ka,
@@ -64,7 +64,7 @@ pub fn create(ctx: &Ctx) -> EsResult<Reply> {
         created_ms: created,
         keep_alive_ms: ka_value.as_millis(),
         owner: crate::search::contexts::owner_of(ctx),
-    });
+    })?;
     Reply::ok(obj! {
         "pit_id" => id,
         "_shards" => obj! { "total" => n, "successful" => n, "skipped" => 0, "failed" => 0 },

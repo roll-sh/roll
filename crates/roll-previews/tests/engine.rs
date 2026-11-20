@@ -559,15 +559,25 @@ async fn a_route_slower_than_mains_reaches_the_record_and_the_report() {
     let base = e.engine.store.rows(Some(&e.project)).unwrap().into_iter().find(|r| r.is_baseline()).expect("main's preview");
     let p = e.engine.store.row_by_change("chg_sr").unwrap().unwrap();
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as u64;
-    let keep = |id: &str, n: u64, ms: u64| {
-        let spans = (0..n).map(|i| Span { trace: format!("{:016x}{i:016x}", ms), span: "0000000000000001".into(), parent: String::new(), name: "GET /orders".into(), service: "web".into(), start: now - ms * 1_000_000, end: now, error: false, attrs: vec![] }).collect();
+    // Each request a root span and its query, the query the time that grew.
+    let keep = |id: &str, n: u64, ms: u64, query_ms: u64| {
+        let spans = (0..n)
+            .flat_map(|i| {
+                let trace = format!("{:016x}{i:016x}", ms);
+                [
+                    Span { trace: trace.clone(), span: "0000000000000001".into(), parent: String::new(), name: "GET /orders".into(), service: "web".into(), start: now - ms * 1_000_000, end: now, error: false, attrs: vec![] },
+                    Span { trace, span: "0000000000000002".into(), parent: "0000000000000001".into(), name: "SELECT orders".into(), service: "web".into(), start: now - query_ms * 1_000_000, end: now, error: false, attrs: vec![] },
+                ]
+            })
+            .collect();
         e.engine.keep_spans(id, &e.engine.store.trace_token(id).unwrap(), spans).unwrap();
     };
-    keep(&base.id, 5, 100);
-    keep(&p.id, 5, 400);
+    keep(&base.id, 5, 100, 50);
+    keep(&p.id, 5, 400, 330);
     e.engine.read_slower_routes().await;
     let s = e.engine.store.preview(&p.id).unwrap().slower_routes.expect("slower than main's");
     assert_eq!((s.branch.as_str(), s.routes.len(), s.routes[0].name.as_str(), s.routes[0].p50_ms, s.routes[0].main_p50_ms), ("main", 1, "GET /orders", 400, 100));
+    assert_eq!(s.routes[0].grew, Some(roll_previews::GrewSpan { span: "SELECT orders".into(), ms: 330, main_ms: 50 }), "where its time went");
     assert_eq!(e.code.last_report("chg_sr").slower_routes, Some(s), "reported again with it");
     assert!(e.engine.store.preview(&base.id).unwrap().slower_routes.is_none(), "main isn't slower than itself");
 }
@@ -588,8 +598,10 @@ async fn an_error_mains_preview_doesnt_have_reaches_the_record_and_the_report() 
     let p = e.engine.store.row_by_change("chg_ne").unwrap().unwrap();
     let web = e.engine.store.services(&p.id).unwrap().into_iter().next().unwrap().name;
     let group = |f: &str, title: &str, count: u64| roll_previews::ErrorGroup { fingerprint: f.into(), kind: "line".into(), title: title.into(), count, first_seen: 1, last_seen: 2, sample: title.into(), ..Default::default() };
-    e.apps.errors.lock().insert(format!("{}/{web}", base.id), vec![group("old", "a flaky upstream", 3)]);
-    e.apps.errors.lock().insert(format!("{}/{web}", p.id), vec![group("old", "a flaky upstream", 4), group("rare", "RangeError", 1), group("new", "Stripe rejected sk_test_51Hx9", 9)]);
+    // One main's has too under another fingerprint, its line naming each preview's own id: not new.
+    let own = |id: &str| format!("lost the connection for {id}");
+    e.apps.errors.lock().insert(format!("{}/{web}", base.id), vec![group("old", "a flaky upstream", 3), group("own-main", &own(&base.id), 2)]);
+    e.apps.errors.lock().insert(format!("{}/{web}", p.id), vec![group("old", "a flaky upstream", 4), group("rare", "RangeError", 1), group("new", "Stripe rejected sk_test_51Hx9", 9), group("own-mine", &own(&p.id), 2)]);
     e.engine.read_new_errors().await;
     let n = e.engine.store.preview(&p.id).unwrap().new_errors.expect("new against main's");
     assert_eq!((n.branch.as_str(), n.total, n.errors.iter().map(|x| x.title.as_str()).collect::<Vec<_>>()), ("main", 2, vec!["Stripe rejected ***", "RangeError"]));

@@ -417,6 +417,11 @@ behind the `Apps` trait:
   reference only once trimmed or lowercased (` roll://…`) is refused. Who wrote each reference
   is kept, not yet checked again later: a writer who loses reveal leaves their reference working
   until roll secrets' `bind_ref` binds it to them (its #407).
+  The rules dialog offers a key in roll secrets for a variable whose name reads as a secret
+  (`STRIPE_SECRET_KEY`, `GITHUB_TOKEN`: the same rule as roll apps' sealed-by-default names) and
+  whose value isn't a reference: one click writes the value to the base environment under that
+  name (roll secrets' own write, so its rules and audit apply) and puts `roll://BASE/NAME` in
+  the rule, saved with the rest. The value then lives in roll secrets only.
   Only the rules' own references (checked when saved) go to roll secrets as references, as their
   own input to rolld's ensure; every other value previews write, a preview's own variables and
   anything stored before included, is plain text: its `${` is escaped, so it's never a reference
@@ -1217,8 +1222,20 @@ backends' own, before previews key them), and keeps the ones main's doesn't have
 comment only counts them by service (their lines can hold a branch's data, and anyone reading the
 pull request reads its comment). A change reports the preview again; an error fixed (gone from
 the last hour) goes. A preview asleep keeps what it last said. An error whose line holds a
-per-preview value (its id, its branch's host) can read as new where main's has the same one.
+per-preview value reads as new only if it's new without them: a group main's has under another
+fingerprint is the same one when their titles match with each preview's own names (its id and
+slug, its branches' refs, its services' hosts) taken out.
 `an_error_mains_preview_doesnt_have_reaches_the_record_and_the_report`.
+
+Where a slower route's time went (Sentry's span comparison): for each slower route, each span
+name's median time under it (a trace's spans of one name summed, so an N+1's queries are one; a
+trace without the span counts as 0) here and on main's preview, and the one that grew most, by
+20 ms or more, is said with it (`grew: {span, ms, main_ms}`): on `…/routes`' slower rows, the
+sheet's route table ("SELECT orders +280 ms"), the record's `slower_routes`, the change page and
+the pull request's comment (checked live in `scripts/preview-cost.sh`, against main's preview
+running beside the change's, with `ROLL_PREVIEWS_COMPARE_EVERY=5`). Only spans this node keeps compare (main's on its holder); a roll
+apps service's traces have no spans here, so its routes say no reason.
+`a_slower_routes_time_is_put_on_the_span_that_grew`.
 
 Repeated queries (Sentry's N+1 detection): a trace whose spans run one database statement
 (`db.statement`, or the newer `db.query.text`) ten times or more says it as `repeated`
@@ -2121,31 +2138,30 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Secret references in previews' variables, in review** (#436;
-   roll secrets' suggestion): `roll://ENV[/folder]/KEY` in `env` and `env_for` becomes roll
-   secrets' own reference in the preview's environment, read there untrusted; a plain value's
-   `${` is escaped. Next for it: a preview's own variables once roll secrets' `bind_ref` lands
-   (#407), and the rules dialog offering to keep a pasted value in the base environment.
-2. **New errors against main, in review** (#438, on #431; Sentry's new issues in a release): an
-   error group main's preview doesn't have on the record (`new_errors`), the verdict strip, the
-   change page and a count in the pull request's checks.
-3. **Repeated queries in a trace, in review** (#441, on #438; Sentry's N+1 detection): a trace
-   running one database statement ten times or more says it (`repeated`) on the trace list, the
-   route table, the trace and `roll preview traces --routes`.
-4. **A preview's own variables only in roll secrets** (roll secrets' review, 2026-11-19): `PUT
-   …/{id}/env` keeps their values as plain JSON in the previews table though they go to the
-   preview's ephemeral environment anyway; keep only their names there (roll secrets the one copy,
-   sealed), or seal the column bound to the preview's id. Nothing logs or prints the map today.
+1. **References a person chooses** (after roll secrets' #407, `bind_ref`/`resolve_as`): a
+   preview's own variables take `roll://` too, and the rules' references (who wrote each is kept,
+   `env_refs`) move to bindings, so a writer who loses reveal stops theirs.
+2. **A trace's ids masked like its words**: a span's name, service and attributes are masked,
+   but its trace and span ids are the code's choice too (a fork could send a hex secret as one);
+   refuse ids that aren't 32/16 hex characters at the intake, and mask the rest as the words are.
+3. **A preview of a repo with only a Compose file**: say in the sheet and the docs that roll apps'
+   Compose import (`roll apps import-compose`, New service's "A file") makes its services, whose
+   previews then come with the project's (roll apps' `pv-` environments), rather than a second
+   Compose reader in previews.
+4. **In review**: where a slower route's time went (#459), the comparison with main checked live
+   end to end with the strip shot on it (#464), new errors that see past each preview's own names
+   (#460), keeping a pasted credential in roll secrets from the rules dialog (#461).
 5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
 6. **Watch: pg-control's recovery to a time seconds old** (unowned).
 
-In review after turn 9: the routes slower than main's preview on the record, the verdict strip,
-the change page and the pull request's comment (#431); an error group opens its request's trace
-(#433). An independent review of them, and of #436, #438 and #441, found 13 things, all fixed
-before they land (a reference past the reveal check by a leading space, reads that held up the
-reconcile pass, reports on every trace's drift, false new errors where main's can't be read, log
-lines in a public comment, unmasked span services and keys) or written down as limits.
+Landed in previews' lock turn 10 of 2026-11-19 (main 020da3033, exactly its gated tree): the
+routes slower than main's preview in the verdict strip, the change page and the comment (#431),
+new errors against main's preview (#438), repeated queries in traces (#441), an error group
+opening its request's trace (#433), `roll://` references in the preview rules (#436, reviewed by
+roll secrets) and a preview's own variables sealed at rest (#452). An independent review of
+them found 13 things, all fixed before they landed or written down as limits; a look at them on
+real data found the route table cutting names to two characters (fixed on #441).
 
 Landed in previews' lock turn 9 of 2026-11-19 (main 84d246b60, exactly its gated tree): turns 7
 and 8's review fixes (span bytes bounded, traces off for roll apps, the intake's token first,

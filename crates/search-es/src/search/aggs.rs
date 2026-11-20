@@ -606,7 +606,7 @@ impl Lookup<'_> {
     /// A hit sort on a runtime field (it shadows a mapped field of the name).
     fn runtime_sort(&self, field: &str, reverse: bool) -> search_aggs::Result<Option<search_aggs::HitSort>> {
         let err = |e: EsError| search_aggs::AggError::new(e.status, e.kind.to_string(), e.reason().to_string());
-        let ctx = QueryCtx::new(self.cluster, self.st, &self.idx, &self.table, &self.searcher, self.now);
+        let ctx = QueryCtx::new(self.cluster, self.st, &self.idx, &self.table, &self.searcher, self.now, crate::search::query::Reader::of(self.security.clone()));
         let rf = super::runtime::RuntimeScope::ambient().filter(|s| s.index_name() == self.idx.name).and_then(|s| s.field(field).cloned()).or_else(|| ctx.runtime_field(field));
         let Some(rf) = rf.filter(|f| f.ty != super::runtime::RtType::GeoPoint) else { return Ok(None) };
         let ev = super::runtime::Evaluator::new(&self.cluster.scripts, self.st, &self.table, self.shard.0 as i32, &self.idx.name, rf).map_err(err)?.counted();
@@ -616,7 +616,7 @@ impl Lookup<'_> {
     fn computed_sort(&self, item: &Json) -> search_aggs::Result<search_aggs::HitSort> {
         let err = |e: EsError| search_aggs::AggError::new(e.status, e.kind.to_string(), e.reason().to_string());
         let sorts = crate::search_source::parse_sorts_value(&from_json(item)).map_err(err)?;
-        let ctx = QueryCtx::new(self.cluster, self.st, &self.idx, &self.table, &self.searcher, self.now);
+        let ctx = QueryCtx::new(self.cluster, self.st, &self.idx, &self.table, &self.searcher, self.now, crate::search::query::Reader::of(self.security.clone()));
         match sorts.into_iter().next() {
             Some(crate::search_source::Sort::Script { script, ty, order, .. }) => {
                 let reverse = order == Some(crate::search_source::SortOrder::Desc);
@@ -790,7 +790,7 @@ impl FieldLookup for Lookup<'_> {
     fn query(&self, query: &Json) -> search_aggs::Result<QueryRef> {
         let v = from_json(query);
         let q = crate::query::parse_query(&v, None, &[]).map_err(|e| search_aggs::AggError::new(e.status, e.kind.to_string(), e.reason().to_string()))?.0;
-        let ctx = QueryCtx::new(self.cluster, self.st, &self.idx, &self.table, &self.searcher, self.now);
+        let ctx = QueryCtx::new(self.cluster, self.st, &self.idx, &self.table, &self.searcher, self.now, crate::search::query::Reader::of(self.security.clone()));
         ctx.to_query(&q).map_err(|e| search_aggs::AggError::new(e.status, e.kind.to_string(), e.reason().to_string()))
     }
 
@@ -828,7 +828,7 @@ impl FieldLookup for Lookup<'_> {
             Arc::new(search_index::query::MatchAllQuery)
         };
         let Some(af) = &self.alias_filter else { return root };
-        let ctx = QueryCtx::new(self.cluster, self.st, &self.idx, &self.table, &self.searcher, self.now);
+        let ctx = QueryCtx::new(self.cluster, self.st, &self.idx, &self.table, &self.searcher, self.now, crate::search::query::Reader::of(self.security.clone()));
         match ctx.to_filter(af) {
             Ok(f) => Arc::new(search_index::query::BooleanQuery::new().add(search_index::query::Occur::Filter, f).add(search_index::query::Occur::Filter, root)),
             Err(_) => root,

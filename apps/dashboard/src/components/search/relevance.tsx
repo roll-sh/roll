@@ -21,6 +21,7 @@ import { rulePrefill, synonymPrefill } from "@/lib/search-analytics";
 import { Segmented } from "../redis/shared";
 import { btn, Confirm, CopyButton, ErrorNote, input, Panel, primary, useCopy } from "../ui";
 import { SearchAnalyticsPanel } from "./analytics";
+import { AutocompletePanel } from "./autocomplete";
 import { QueryRules, RuleEditor, RulesetView } from "./query-rules";
 import { BackTo, Empty, errText, LoadError, useLoad } from "./relevance-shared";
 
@@ -65,6 +66,7 @@ export function RelevanceTab({ cluster, onOpenConsole }: { cluster: SearchCluste
   return (
     <div className="space-y-6">
       <SearchAnalyticsPanel cluster={cluster} onAct={(p) => setView(p.kind === "synonym" ? { kind: "synonym-for", query: p.query } : { kind: "rule-for", query: p.query })} />
+      <AutocompletePanel cluster={cluster} />
       <SynonymSets cluster={cluster} onOpen={(id) => setView({ kind: "set", id })} />
       <QueryRules cluster={cluster} onOpen={(id) => setView({ kind: "ruleset", id })} />
     </div>
