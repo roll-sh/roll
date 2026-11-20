@@ -60,6 +60,7 @@ interface Form {
   healthCommand: string;
   drain: string;
   cpuTarget: string;
+  latencyTarget: string;
   memoryTarget: string;
   alertMemory: string;
   alertErrors: string;
@@ -142,6 +143,7 @@ export function formOf(s: Service): Form {
     healthCommand: str(s.run.health_command),
     drain: str(s.run.drain_s),
     cpuTarget: str(s.run.cpu_target),
+    latencyTarget: str(s.run.latency_target_ms),
     memoryTarget: str(s.run.memory_target),
     alertMemory: str(s.run.alerts?.memory_pct),
     alertErrors: str(s.run.alerts?.error_pct),
@@ -240,6 +242,7 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   if (f.healthCommand !== before.healthCommand) run.health_command = text(f.healthCommand);
   if (f.drain !== before.drain) run.drain_s = num(f.drain);
   if (f.cpuTarget !== before.cpuTarget) run.cpu_target = num(f.cpuTarget);
+  if (f.latencyTarget !== before.latencyTarget) run.latency_target_ms = num(f.latencyTarget);
   if (f.memoryTarget !== before.memoryTarget) run.memory_target = num(f.memoryTarget);
   if (f.alertMemory !== before.alertMemory || f.alertErrors !== before.alertErrors || f.alertP95 !== before.alertP95 || f.alertCapacity !== before.alertCapacity || f.alertLog !== before.alertLog || f.alertLogCount !== before.alertLogCount)
     run.alerts = {
@@ -296,7 +299,7 @@ export function logMetrics(text: string): { name: string; pattern: string }[] {
     });
 }
 
-const NUMERIC: (keyof Form)[] = ["scalePer", "port", "timeout", "retries", "min", "max", "concurrency", "queue", "healthTimeout", "healthEvery", "healthFailures", "drain", "cpuTarget", "memoryTarget", "suspendAfter", "sleepAfter", "volumeSize", "backupEvery", "backupKeep", "alertMemory", "alertErrors", "alertP95", "sloObjective", "sloLatency", "sloWindow", "metricsPort", "alertCapacity", "alertLogCount", "rolloutStep", "rolloutErrors", "restartTries"];
+const NUMERIC: (keyof Form)[] = ["scalePer", "port", "timeout", "retries", "min", "max", "concurrency", "queue", "healthTimeout", "healthEvery", "healthFailures", "drain", "cpuTarget", "latencyTarget", "memoryTarget", "suspendAfter", "sleepAfter", "volumeSize", "backupEvery", "backupKeep", "alertMemory", "alertErrors", "alertP95", "sloObjective", "sloLatency", "sloWindow", "metricsPort", "alertCapacity", "alertLogCount", "rolloutStep", "rolloutErrors", "restartTries"];
 
 /** A rollout's steps as typed (`10, 50`): increasing percents 1–99, at most five; null when they aren't. */
 export function rolloutSteps(v: string): number[] | null {
@@ -574,6 +577,9 @@ export function SettingsTab({
                   </Field>
                   <Field label="CPU target (%)" hint="another instance while they average over it for a minute; empty: requests only">
                     {t("cpuTarget", "70")}
+                  </Field>
+                  <Field label="p95 target (ms)" hint="another instance while a window's p95 is over it; empty: not on latency">
+                    {t("latencyTarget", "300")}
                   </Field>
                   <Field label="Memory target (%)" hint="of each instance's memory, the same way; empty: not on memory">
                     {t("memoryTarget", "80")}

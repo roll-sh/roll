@@ -123,7 +123,7 @@ impl Apps {
         let freeze = self.db(move |s| Ok(s.environment(&sid, &e).ok().and_then(|r| r.freeze))).await?;
         let Some(f) = freeze.filter(|f| f.on(code_sql::now_ms())) else { return Ok(()) };
         if !over {
-            return Err(Error::Conflict(format!("{}: deploying anyway takes `override: true` (rolling back to what was live never is)", f.says())));
+            return Err(Error::Conflict(format!("{}: deploying anyway takes the header `X-Roll-Override: 1`, an admin's call (rolling back to what was live never is)", f.says())));
         }
         self.audit("freeze.overridden", service, env, actor, serde_json::json!({ "reason": f.reason })).await;
         Ok(())

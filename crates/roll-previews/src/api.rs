@@ -25,6 +25,7 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route("/v1/previews/{id}/refresh", post(refresh))
         .route("/v1/previews/{id}/keep", post(keep))
         .route("/v1/previews/{id}/visual/accept", post(accept_visual))
+        .route("/v1/previews/{id}/regressions/accept", post(accept_regressions))
         .route("/v1/previews/{id}/approve", post(approve))
         .route("/v1/previews/{id}/visit", post(visit))
         .route("/v1/previews/{id}/env", get(vars).put(put_vars))
@@ -309,12 +310,39 @@ async fn accept_visual(AxState(e): S, Path(id): Path<String>, who: Option<axum::
     let AcceptBody { head: seen, path } = if b.is_empty() { AcceptBody::default() } else { body::<AcceptBody>(&b)? };
     // The person behind a token too: their own token doesn't let an author accept their change.
     let behind = who.as_ref().map(|u| u.handle.clone());
+    // A signed-in person who can write to the change's repo in roll code (an admin can).
+    let writer = who.as_ref().filter(|u| grant.is_none() && !u.admin).map(|u| u.code_owner.clone());
     let (by, person) = match (who, grant) {
         (Some(axum::Extension(u)), None) => (u.handle, true),
         (_, Some(axum::Extension(g))) => (format!("token:{}", g.name), false),
         (None, None) => ("operator".into(), true),
     };
-    e.accept_visual(&id, &by, behind.as_deref(), person, seen.as_deref(), path.as_deref()).await.map(Json)
+    e.accept_visual(&id, &by, behind.as_deref(), person, writer.as_ref().map(|o| o.as_deref()), seen.as_deref(), path.as_deref()).await.map(Json)
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct AcceptRegressionsBody {
+    /// The head that was looked at: refused (409) when a newer push came in.
+    head: Option<String>,
+}
+
+async fn accept_regressions(AxState(e): S, Path(id): Path<String>, who: Option<axum::Extension<roll_auth::SignedIn>>, grant: Option<axum::Extension<roll_auth::Grant>>, b: Bytes) -> crate::Result<Json<Preview>> {
+    check_id(&id)?;
+    let AcceptRegressionsBody { head: seen } = if b.is_empty() { AcceptRegressionsBody::default() } else { body::<AcceptRegressionsBody>(&b)? };
+    // As the visual review's: the person behind a token too.
+    let behind = who.as_ref().map(|u| u.handle.clone());
+    let signed = who.as_ref().filter(|_| grant.is_none()).map(|axum::Extension(u)| u.clone());
+    let (by, person) = match (who, grant) {
+        (Some(axum::Extension(u)), None) => (u.handle, true),
+        (_, Some(axum::Extension(g))) => (format!("token:{}", g.name), false),
+        (None, None) => ("operator".into(), true),
+    };
+    // A person signed in to roll, not the operator's token (a CI job may hold it), who can write to
+    // the change's repo (an admin can).
+    let person = person && by != "operator";
+    let writer = signed.filter(|u| !u.admin).map(|u| u.code_owner);
+    e.accept_regressions(&id, &by, behind.as_deref(), person, writer.as_ref().map(|o| o.as_deref()), seen.as_deref()).await.map(Json)
 }
 
 #[derive(Deserialize)]

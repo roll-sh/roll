@@ -118,8 +118,8 @@ pub struct SearchConfig {
     pub defaults: Defaults,
     pub pricing: Pricing,
     /// Seals the secrets clusters store (watch passwords, connector and Fleet secrets, `s3`
-    /// repository credentials) under the deployment's key (rolld: `ROLL_SECRET_KEY`); `None`:
-    /// stored as given.
+    /// repository credentials) and clusters' own passwords in the catalog under the deployment's
+    /// key (rolld: `ROLL_SECRET_KEY`); `None`: stored as given.
     pub sealer: Option<Arc<search_es::seal::Sealer>>,
     /// The name every cluster's default snapshot repository has (`found-snapshots`, as on
     /// Elastic Cloud): an `s3` repository on roll's own object storage, so `_snapshot` and
@@ -425,10 +425,17 @@ const OS_KEY_PREFIX: &str = "roll-key-";
 
 /// A link's credential ([`Control::mint_link`]): its variables (unprefixed) and what revoking
 /// it takes.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct LinkCredential {
     pub vars: Vec<(String, String)>,
     pub kept: String,
+}
+
+impl std::fmt::Debug for LinkCredential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let vars: Vec<_> = self.vars.iter().map(|(k, _)| (k.as_str(), "<redacted>")).collect();
+        f.debug_struct("LinkCredential").field("vars", &vars).field("kept", &self.kept).finish()
+    }
 }
 
 /// `spec` with a secret nobody knows.
@@ -543,6 +550,9 @@ impl Control {
             (None, Some(url)) => Arc::new(Store::postgres(url, code_sql::PgOptions { max_connections: cfg.catalog_connections.max(1), ..Default::default() })?),
             (None, None) => Arc::new(Store::open(&cfg.home.join("search.db"))?),
         };
+        if let Some(s) = &cfg.sealer {
+            store.seal_passwords(s.clone());
+        }
         let scfg = StoreConfig {
             node: cfg.node_name.clone(),
             wal: WalConfig { sync_objects: cfg.sync_objects, ..WalConfig::default() },
