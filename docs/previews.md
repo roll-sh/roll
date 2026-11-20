@@ -2154,19 +2154,16 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **References a person chooses** (after roll secrets' #407, `bind_ref`/`resolve_as`): a
+1. **Regressions against main as a check, and required to land, in review** (#484, #489):
+   `roll/regressions` from slower routes and new errors, a `regressions` blocker with
+   `required`, accepted by someone other than the author at a head.
+2. **References a person chooses** (after roll secrets' #407, `bind_ref`/`resolve_as`): a
    preview's own variables take `roll://` too, and the rules' references (who wrote each is kept,
    `env_refs`) move to bindings, so a writer who loses reveal stops theirs.
-2. **A trace's ids masked like its words**: a span's name, service and attributes are masked,
-   but its trace and span ids are the code's choice too (a fork could send a hex secret as one);
-   refuse ids that aren't 32/16 hex characters at the intake, and mask the rest as the words are.
-3. **A preview of a repo with only a Compose file**: say in the sheet and the docs that roll apps'
-   Compose import (`roll apps import-compose`, New service's "A file") makes its services, whose
-   previews then come with the project's (roll apps' `pv-` environments), rather than a second
-   Compose reader in previews.
-4. **In review**: where a slower route's time went (#459), the comparison with main checked live
-   end to end with the strip shot on it (#464), new errors that see past each preview's own names
-   (#460), keeping a pasted credential in roll secrets from the rules dialog (#461).
+3. **Regressions in the project's chat** (roll code's chat ops, `crates/code-chat`): a change whose
+   preview regresses against main says so in the channel its automation binds, with the counts
+   and a link to accept, as a failing check does.
+4. **In review**: a protected base's change request in the keep-in-secrets button (#482).
 5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
 6. **Watch: pg-control's recovery to a time seconds old** (unowned).
