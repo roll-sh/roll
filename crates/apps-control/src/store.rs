@@ -883,6 +883,11 @@ impl Store {
         db.add_column("environments", "mirror", "TEXT")?;
         db.add_column("environments", "pause_schedule", "TEXT")?;
         db.add_column("environments", "snippets", "TEXT")?;
+        // An error group's lifecycle (`errors::Lifecycle`): resolved or muted (open when NULL),
+        // since when, and the deployment it was first seen in.
+        db.add_column("error_groups", "state", "TEXT")?;
+        db.add_column("error_groups", "resolved_at", "INTEGER")?;
+        db.add_column("error_groups", "first_deployment", "TEXT")?;
         // Drains made before their filters sent every environment's runtime output: still so.
         db.add_column("log_drains", "sources", "TEXT")?;
         db.add_column("log_drains", "environments", "TEXT")?;
@@ -2329,14 +2334,57 @@ impl Store {
         Ok(())
     }
 
-    /// An error seen: whether it's the first time the environment has had it.
-    pub fn remember_error(&self, service: &str, env: &str, fingerprint: &str, name: &str, at: i64) -> Result<bool> {
-        // At most 1,000 kept an environment: past that, nothing more is new.
-        let n: i64 = self.db.query_row("SELECT COUNT(*) FROM error_groups WHERE service = ? AND env = ?", params![service, env], |r| r.get(0))?;
-        if n >= 1000 {
-            return Ok(false);
-        }
-        Ok(self.db.execute("INSERT INTO error_groups (service, env, fingerprint, name, first_seen) VALUES (?, ?, ?, ?, ?) ON CONFLICT (service, env, fingerprint) DO NOTHING", params![service, env, fingerprint, name, at])? > 0)
+    /// An error seen at `at` in `deployment`: new to the environment, back after it was
+    /// resolved (open again), or neither (known, or muted: never said).
+    pub fn remember_error(&self, service: &str, env: &str, fingerprint: &str, name: &str, at: i64, deployment: Option<&str>) -> Result<crate::errors::Seen> {
+        use crate::errors::Seen;
+        self.db.write(|c| {
+            let row: Option<(Option<String>, Option<i64>)> = c.query_row("SELECT state, resolved_at FROM error_groups WHERE service = ? AND env = ? AND fingerprint = ?", params![service, env, fingerprint], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+            match row {
+                // At most 1,000 kept an environment: past that, nothing more is new.
+                None => {
+                    let n: i64 = c.query_row("SELECT COUNT(*) FROM error_groups WHERE service = ? AND env = ?", params![service, env], |r| r.get(0))?;
+                    if n >= 1000 {
+                        return Ok(Seen::Known);
+                    }
+                    c.execute("INSERT INTO error_groups (service, env, fingerprint, name, first_seen, first_deployment) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (service, env, fingerprint) DO NOTHING", params![service, env, fingerprint, name, at, deployment])?;
+                    Ok(Seen::New)
+                }
+                Some((Some(s), Some(r))) if s == "resolved" && at > r => {
+                    c.execute("UPDATE error_groups SET state = NULL, resolved_at = NULL WHERE service = ? AND env = ? AND fingerprint = ?", params![service, env, fingerprint])?;
+                    Ok(Seen::Regressed)
+                }
+                _ => Ok(Seen::Known),
+            }
+        })
+    }
+
+    /// An error group resolved, muted or open again; false when the environment never had it.
+    pub fn set_error_state(&self, service: &str, env: &str, fingerprint: &str, state: crate::errors::Lifecycle, at: i64) -> Result<bool> {
+        use crate::errors::Lifecycle;
+        let (s, r) = match state {
+            Lifecycle::Open => (None, None),
+            Lifecycle::Resolved => (Some("resolved"), Some(at)),
+            Lifecycle::Muted => (Some("muted"), None),
+        };
+        Ok(self.db.execute("UPDATE error_groups SET state = ?, resolved_at = ? WHERE service = ? AND env = ? AND fingerprint = ?", params![s, r, service, env, fingerprint])? > 0)
+    }
+
+    /// Each kept error group's state and first deployment, by fingerprint.
+    pub fn error_states(&self, service: &str, env: &str) -> Result<HashMap<String, (crate::errors::Lifecycle, Option<String>)>> {
+        use crate::errors::Lifecycle;
+        let rows: Vec<(String, Option<String>, Option<String>)> = self.db.query("SELECT fingerprint, state, first_deployment FROM error_groups WHERE service = ? AND env = ?", params![service, env], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        Ok(rows
+            .into_iter()
+            .map(|(f, s, d)| {
+                let s = match s.as_deref() {
+                    Some("resolved") => Lifecycle::Resolved,
+                    Some("muted") => Lifecycle::Muted,
+                    _ => Lifecycle::Open,
+                };
+                (f, (s, d))
+            })
+            .collect())
     }
 
     /// The environment's variables kept as files: name → path.
