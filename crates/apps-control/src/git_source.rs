@@ -166,6 +166,22 @@ pub async fn head(r: &Remote<'_>, branch: Option<&str>) -> anyhow::Result<(Strin
     Ok((r.oid.to_string(), name.trim_start_matches("refs/heads/").to_string()))
 }
 
+/// A branch's or a tag's commit by its name (`feature-x`, `v1.2.0`), the branch first, a tag
+/// peeled to its commit; and which it was. A deploy of one revision, not a branch to follow.
+pub async fn named(r: &Remote<'_>, name: &str) -> anyhow::Result<(String, &'static str)> {
+    let ok = !name.is_empty() && name.len() <= 255 && !name.starts_with('-') && !name.contains("..") && name.bytes().all(|b| b.is_ascii_graphic() && !b"~^:?*[\\".contains(&b));
+    anyhow::ensure!(ok, "{name:?} isn't a branch or tag name");
+    let (branch, tag) = (format!("refs/heads/{name}"), format!("refs/tags/{name}"));
+    let refs = r.client.ls_refs_with(r.url, r.auth.as_ref(), &[branch.as_str(), tag.as_str()]).await?;
+    if let Some(b) = refs.get(&branch) {
+        return Ok((b.oid.to_string(), "branch"));
+    }
+    if let Some(t) = refs.get(&tag) {
+        return Ok((t.peeled.unwrap_or(t.oid).to_string(), "tag"));
+    }
+    anyhow::bail!("{} has no branch or tag {name}", r.url)
+}
+
 /// The tree at `sha`, fetched shallowly and written into `dir` (empty). How many files.
 pub async fn materialize(r: &Remote<'_>, sha: &str, dir: &Path) -> anyhow::Result<usize> {
     let oid: ObjectId = sha.parse().map_err(|_| anyhow::anyhow!("{sha} isn't a commit id"))?;

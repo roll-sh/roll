@@ -138,6 +138,7 @@ fn postgres() -> Router {
         .route("/v1/apps/services/{id}", axum::routing::patch(|| async { axum::Json(json!({ "ok": true })) }))
         .route("/v1/apps/services/{id}/links/{kind}/{ref}", axum::routing::put(|| async { axum::Json(json!({ "ok": true })) }))
         .route("/v1/apps/services/{id}/environments/{env}", axum::routing::put(|| async { axum::Json(json!({ "ok": true })) }))
+        .route("/v1/apps/services/{id}/environments/{env}/redeploy", post(|| async { axum::Json(json!({ "ok": true })) }))
         .route("/v1/search/clusters/{id}/indices/{index}/search", post(|| async { axum::Json(json!({ "hits": [] })) }))
         .route("/v1/search/clusters", post(|| async { axum::Json(json!({ "id": "cl_new", "password": "fresh" })) }))
         .route("/v1/search/clusters/{id}/indices", get(|| async { axum::Json(json!([])) }))
@@ -565,6 +566,31 @@ async fn ask_waits_for_a_person() {
     assert_eq!(s, StatusCode::OK);
     let again = d.send(&token, Method::DELETE, "/v1/projects/pc", None, &[("x-roll-approval", &id)]).await;
     assert_eq!(again.1["code"], "approval_used");
+}
+
+/// A deploy past a freeze (`X-Roll-Override: 1`) is admin, and a deploy's approval is never one
+/// for the same request with the override: it's another request, asked about on its own.
+#[tokio::test]
+async fn an_approved_deploy_is_no_approval_past_a_freeze() {
+    let d = Daemon::new(50);
+    let (token, _) = d.token(json!([{ "product": "apps", "resources": "*", "actions": { "deploy": "ask", "admin": "ask" } }]), json!({})).await;
+    let path = "/v1/apps/services/svc_a/environments/production/redeploy";
+    let (s, out) = d.call(&token, Method::POST, path, Some(json!({}))).await;
+    assert_eq!((s, out["code"].as_str()), (StatusCode::FORBIDDEN, Some("approval_pending")), "{out}");
+    let id = out["approval"].as_str().unwrap().to_string();
+    let (_, list) = d.call(OPERATOR, Method::GET, "/v1/access/approvals?state=pending", None).await;
+    assert_eq!(list[0]["action"], "deploy", "{list}");
+    assert_eq!(d.call(OPERATOR, Method::POST, &format!("/v1/access/approvals/{id}/approve"), None).await.0, StatusCode::OK);
+    // The same request with the override: not what was approved.
+    let over = d.send(&token, Method::POST, path, Some(json!({})), &[("x-roll-approval", &id), ("x-roll-override", "1")]).await;
+    assert_eq!(over.1["code"], "approval_mismatch", "{over:?}");
+    // Asked on its own, it's about admin.
+    let (s, out) = d.send(&token, Method::POST, path, Some(json!({})), &[("x-roll-override", "1")]).await;
+    assert_eq!((s, out["code"].as_str()), (StatusCode::FORBIDDEN, Some("approval_pending")), "{out}");
+    let (_, list) = d.call(OPERATOR, Method::GET, "/v1/access/approvals?state=pending", None).await;
+    assert!(list.as_array().unwrap().iter().any(|a| a["action"] == "admin"), "{list}");
+    // The approved request itself still runs once.
+    assert_eq!(d.send(&token, Method::POST, path, Some(json!({})), &[("x-roll-approval", &id)]).await.0, StatusCode::OK);
 }
 
 /// A token allowed to manage access makes only tokens it covers, for no longer than it lives;
@@ -1474,15 +1500,19 @@ async fn approvals_can_be_remembered() {
         async move { d.call(OPERATOR, Method::POST, &format!("/v1/access/approvals/{apr}/approve"), Some(json!({ "remember": remember }))).await }
     };
     assert_eq!(approve(apr.clone(), json!("forever")).await.0, StatusCode::BAD_REQUEST, "nothing is decided");
-    assert_eq!(approve(apr.clone(), json!("1h")).await.0, StatusCode::OK);
+    // For 30 days (a developer's own CLI): the longest a while lasts.
+    assert_eq!(approve(apr.clone(), json!("30d")).await.0, StatusCode::OK);
     // The product is told which approval let the request run, who decided it and, for a
     // remembered rule, until when (its audit names them).
     let (s, ran) = d.send(&token, Method::DELETE, "/v1/projects/pa", None, &[("x-roll-approval", &apr)]).await;
     assert_eq!((s, ran["approved"]["id"].as_str(), ran["approved"]["by"][0].as_str()), (StatusCode::OK, Some(apr.as_str()), Some("operator")), "{ran}");
     let hour = apr.clone();
-    // For an hour: the same request runs without asking; another project still asks.
+    // For 30 days: the same request runs without asking; another project still asks.
     let (s, ran) = ask("pa").await;
-    assert_eq!((s, ran["approved"]["id"].as_str(), ran["approved"]["until"].is_i64()), (StatusCode::OK, Some(hour.as_str()), true), "{ran}");
+    let until = ran["approved"]["until"].as_i64().unwrap_or(0);
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+    assert_eq!((s, ran["approved"]["id"].as_str()), (StatusCode::OK, Some(hour.as_str())), "{ran}");
+    assert!(until > now + 29 * 24 * 3_600_000 && until <= now + 30 * 24 * 3_600_000, "until in 30 days: {ran}");
     let (_, pending) = ask("pb").await;
     assert_eq!(pending["code"], "approval_pending");
     // Approved once: that request alone (no until).
@@ -1500,7 +1530,7 @@ async fn approvals_can_be_remembered() {
     assert_eq!((g["temporary"].as_array().map(Vec::len), g["rules"].as_array().map(Vec::len)), (Some(1), Some(3)), "{g}");
     assert_eq!(g["temporary"][0]["approval"].as_str(), Some(hour.as_str()), "a while names the approval that allowed it");
     assert_eq!(ask("pc").await.0, StatusCode::OK);
-    // Taken back before the hour is up: asking again.
+    // Taken back before it's up: asking again.
     assert_eq!(d.call(&token, Method::DELETE, &format!("/v1/access/tokens/{id}/temporary/{hour}"), None).await.0, StatusCode::FORBIDDEN, "only the operator");
     assert_eq!(d.call(OPERATOR, Method::DELETE, &format!("/v1/access/tokens/{id}/temporary/{hour}"), None).await.0, StatusCode::OK);
     // (The approval itself is taken back too: it never ran the request, the rule did.)
@@ -1884,6 +1914,8 @@ async fn a_rule_can_grant_some_indices() {
         let (d, path) = (&d, format!("/v1/access/audit?{q}"));
         async move { d.call(OPERATOR, Method::GET, &path, None).await.1.as_array().unwrap().iter().map(|e| e["resource"].as_str().unwrap_or("").to_string()).collect::<Vec<_>>() }
     };
+    // The audit writer batches: wait for the searches' rows rather than a fixed time.
+    d.audit_until("/v1/access/audit?resource=cl_1", |l| l.as_array().is_some_and(|a| a.iter().any(|e| e["resource"] == "cl_1/logs-2025"))).await;
     let all = who("resource=cl_1").await;
     assert!(all.contains(&"cl_1".to_string()) && all.contains(&"cl_1/logs-2025".to_string()), "{all:?}");
     assert!(who("resource=cl_1/logs-2025&action=read").await.iter().all(|r| r == "cl_1/logs-2025"));
@@ -1942,6 +1974,25 @@ async fn a_link_needs_reveal_on_what_it_links() {
         { "product": "streams", "resources": [{ "id": "st_9" }], "actions": { "read": "allow" } },
     ]), json!({})).await;
     assert_eq!(d.call(&reader, Method::PATCH, "/v1/apps/services/svc_a", Some(scale)).await.0, StatusCode::OK);
+    // A stream pushed to a web service: read on it (apps consumes it for the service), and write
+    // with a dead-letter topic (apps appends to it).
+    let push = |dead: bool| {
+        let mut rule = json!({ "stream": "st_9", "topic": "orders", "group": "web", "path": "/events" });
+        if dead {
+            rule["dead_letter"] = json!("orders-dead");
+        }
+        json!({ "run": { "push": [rule] } })
+    };
+    let (s, e) = d.call(&apps, Method::PATCH, "/v1/apps/services/svc_a", Some(push(false))).await;
+    assert_eq!((s, e["needs"]["product"].as_str(), e["needs"]["action"].as_str()), (StatusCode::FORBIDDEN, Some("streams"), Some("read")), "{e}");
+    // (A setting that changes what production does, `push` is deploy-level, not `write`.)
+    let (pusher, _) = d.token(json!([
+        { "product": "apps", "resources": "*", "actions": { "write": "allow", "deploy": "allow" } },
+        { "product": "streams", "resources": [{ "id": "st_9" }], "actions": { "read": "allow" } },
+    ]), json!({})).await;
+    assert_eq!(d.call(&pusher, Method::PATCH, "/v1/apps/services/svc_a", Some(push(false))).await.0, StatusCode::OK);
+    let (s, e) = d.call(&pusher, Method::PATCH, "/v1/apps/services/svc_a", Some(push(true))).await;
+    assert_eq!((s, e["needs"]["action"].as_str()), (StatusCode::FORBIDDEN, Some("write")), "{e}");
     // A roll code repo apps reads for the caller (a service built from it, a plan of it): read on
     // that repo too, so no apps grant reaches a repo's code, head or stack by itself.
     let from_repo = json!({ "project": "p", "name": "api", "source": { "kind": "repo", "repo": "acme/secret" } });

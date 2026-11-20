@@ -309,7 +309,7 @@ impl Edge {
         let apps_tls = args.apps.tls;
         // Stored certificates and the ACME account: ROLL_SECRET_KEY seals them.
         let jobs = match e.cert_dir.is_none() || apps_tls == AppsTls::Acme {
-            true => Some(CertJobs::new(e, storage)?),
+            true => Some(CertJobs::new(e, storage, args.secret_key().as_deref().map(String::as_str))?),
             false => None,
         };
         load_certificates(e, &hosts, jobs.as_ref(), &store, singleton.clone(), apps_tls)?;
@@ -514,9 +514,9 @@ struct CertJobs {
 }
 
 impl CertJobs {
-    fn new(e: &EdgeArgs, storage: &StorageConfig) -> anyhow::Result<Self> {
-        let secret = std::env::var("ROLL_SECRET_KEY").map_err(|_| anyhow::anyhow!("the edge needs ROLL_SECRET_KEY (stored certificates are sealed with it) or ROLL_EDGE_CERT_DIR"))?;
-        let sealer = roll_edge::seal::Sealer::new(&secret)?;
+    fn new(e: &EdgeArgs, storage: &StorageConfig, secret_key: Option<&str>) -> anyhow::Result<Self> {
+        let secret = secret_key.ok_or_else(|| anyhow::anyhow!("the edge needs ROLL_SECRET_KEY (stored certificates are sealed with it) or ROLL_EDGE_CERT_DIR"))?;
+        let sealer = roll_edge::seal::Sealer::new(secret)?;
         let objects = pg_storage::Objects::new_durable(storage)?;
         let account = e.acme_directory.as_deref().filter(|d| !d.is_empty()).map(|dir| {
             let cfg = roll_edge::acme::AcmeConfig {

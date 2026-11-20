@@ -19,11 +19,18 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 use tower::ServiceExt;
+mod acme;
 mod clouds;
+mod directory;
+pub mod gateway;
 mod github;
 
 mod outside;
+mod relay;
 mod syncs;
+
+/// roll search's inference endpoints keyed by a project's secret (`syncs::search`).
+pub use syncs::search::router as search_inference;
 
 /// `X-Roll-Guard` (a credential guard's scan, audited apart as `secrets.guard`) is roll MCP's
 /// alone: kept only on a request its guard tool makes in process (`McpCall` with tool `guard`),
@@ -52,9 +59,17 @@ impl Api {
     /// Call a product's route as the operator: its status and JSON answer, whatever the status.
     /// Runs on the store's blocking threads.
     fn call_status(&self, method: Method, path: &str, body: Option<Json>) -> roll_secrets::Result<(axum::http::StatusCode, Json)> {
+        self.call_status_as(method, path, body, |e| {
+            e.insert(roll_auth::Operator);
+        })
+    }
+
+    /// [`Api::call_status`] as whoever `who` puts on the request (`Operator`, `SignedIn`), so the
+    /// product scopes the answer to them (roll search: a person's own clusters).
+    fn call_status_as(&self, method: Method, path: &str, body: Option<Json>, who: impl FnOnce(&mut axum::http::Extensions)) -> roll_secrets::Result<(axum::http::StatusCode, Json)> {
         let router = self.0.get().ok_or_else(|| Error::Link("the product APIs aren't up yet".into()))?.clone();
         let mut req = Request::builder().method(method).uri(path).header("content-type", "application/json");
-        req.extensions_mut().map(|e| e.insert(roll_auth::Operator));
+        req.extensions_mut().map(who);
         let req = req.body(body.map_or(Body::empty(), |b| Body::from(b.to_string()))).map_err(|e| Error::Internal(e.to_string()))?;
         tokio::runtime::Handle::current().block_on(async move {
             let resp = router.oneshot(req).await.map_err(|e| Error::Link(e.to_string()))?;
@@ -117,9 +132,13 @@ impl Api {
     }
 }
 
-/// The deployment key: `ROLL_SECRET_KEY_KMS` (a KMS ciphertext, decrypted at startup), else
-/// `ROLL_SECRET_KEY`, else (one node) a generated key file.
-fn keyring(home: &Path, shared: bool) -> (Result<Keyring, String>, KeySource) {
+/// The deployment key: the one a sealed start's shares gave (`ROLL_SECRET_KEY_SEALED`),
+/// `ROLL_SECRET_KEY_KMS` (a KMS ciphertext, decrypted at startup), `ROLL_SECRET_KEY`, else (one
+/// node) a generated key file.
+fn keyring(args: &crate::Args, home: &Path, shared: bool) -> (Result<Keyring, String>, KeySource) {
+    if let Some(k) = &args.unsealed_key {
+        return (Keyring::new(k, None).map_err(|e| e.to_string()), KeySource::Shares);
+    }
     let env = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
     if let Some(ct) = env("ROLL_SECRET_KEY_KMS") {
         let run = async {
@@ -134,7 +153,7 @@ fn keyring(home: &Path, shared: bool) -> (Result<Keyring, String>, KeySource) {
         let keyring = tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(run));
         return (keyring, KeySource::Kms);
     }
-    if let Some(k) = env("ROLL_SECRET_KEY") {
+    if let Some(k) = args.secret_key() {
         return (Keyring::new(&k, env("ROLL_SECRET_KEY_PREVIOUS").as_deref()).map_err(|e| e.to_string()), KeySource::Env);
     }
     if shared {
@@ -393,17 +412,23 @@ pub fn oidc_fetch(args: &crate::Args, open: bool) -> Arc<dyn roll_oidc::Fetch + 
     Arc::new(syncs::OidcFetch::new(args.code_webhook_allow_private.unwrap_or(open)))
 }
 
-pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Workspace>, open: bool, api: Api, access: Arc<roll_access::Access>, people: People) -> anyhow::Result<Arc<Secrets>> {
-    let system = args.code.cluster.system_database.as_deref().filter(|u| !u.is_empty());
-    let target = match system {
+/// Where roll secrets keeps its data: the system database's `secrets` schema, else
+/// `<home>/secrets.db`.
+pub fn store(args: &crate::Args, home: &Path) -> anyhow::Result<(code_sql::Target, code_sql::PgOptions)> {
+    let target = match args.code.cluster.system_database.as_deref().filter(|u| !u.is_empty()) {
         Some(url) => code_sql::Target::Postgres { url: url.to_string(), schema: "secrets".into() },
         None => code_sql::Target::Sqlite(home.join("secrets.db")),
     };
-    let (keyring, key_source) = keyring(home, system.is_some());
+    Ok((target, code_sql::PgOptions { max_connections: args.db_budget()?.secrets, ca: args.code.code_db_ca.clone(), ..Default::default() }))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Workspace>, open: bool, api: Api, access: Arc<roll_access::Access>, people: People, gateways: Arc<gateway::Gateways>) -> anyhow::Result<Arc<Secrets>> {
+    let (target, pg) = store(args, home)?;
+    let (keyring, key_source) = keyring(args, home, matches!(target, code_sql::Target::Postgres { .. }));
     if let Err(why) = &keyring {
         tracing::error!("roll secrets is unavailable: {why}");
     }
-    let pg = code_sql::PgOptions { max_connections: args.db_budget()?.secrets, ca: args.code.code_db_ca.clone(), ..Default::default() };
     let web_url = std::env::var("ROLL_WEB_URL").ok().filter(|u| !u.trim().is_empty());
     // Syncs' webhooks go to private addresses only where roll code's may (local development).
     let allow_private = args.code_webhook_allow_private.unwrap_or(open);
@@ -412,17 +437,42 @@ pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Work
         grants: Some(access.clone() as Arc<dyn roll_auth::Grants>),
         workloads: Some(Arc::new(Workloads(access.clone()))),
         people: Some(Arc::new(people)),
-        kms: Some(Arc::new(CustomerKms::new(None))), sts: Some(Arc::new(RollSts::new(None))), outside: Some(Arc::new(outside::Guarded { allow_private })), github: Some(Arc::new(github::RollGitHub::new(allow_private))), clouds: Some(roll_secrets::clouds::Clouds { issuer: issuer_url(args), tokens: Arc::new(clouds::RollClouds::new()) }),
+        kms: Some(Arc::new(CustomerKms::new(None))), sts: Some(Arc::new(RollSts::new(None))), outside: Some(Arc::new(outside::Guarded { allow_private, gateways: gateways.clone() })), directory: Some(Arc::new(directory::Guarded { allow_private, gateways: gateways.clone() })), github: Some(Arc::new(github::RollGitHub::new(allow_private))), clouds: Some(roll_secrets::clouds::Clouds { issuer: issuer_url(args), tokens: Arc::new(clouds::RollClouds::new()) }),
+        // A deleted gateway, or a revoked credential that opened one, closes its link at once.
+        gateways: Some(gateways.clone()),
     };
     // Opening blocks on the database.
     let secrets = Arc::new(tokio::task::block_in_place(|| Secrets::open(&target, pg, workspace.clone(), opts))?);
+    gateways.set_secrets(secrets.clone());
     // How many reads of values a token or a person makes a minute on this node (0: no limit).
     if let Ok(n) = std::env::var("ROLL_SECRETS_READS_PER_MINUTE") {
         secrets.set_reads_per_minute(n.trim().parse().map_err(|_| anyhow::anyhow!("ROLL_SECRETS_READS_PER_MINUTE is a number of reads a minute (0: no limit), not {n:?}"))?);
     }
     // Where clients reach rolld: a CA's certificates name its CRL there.
     secrets.set_public_api(args.code_public_url.clone().unwrap_or_else(|| format!("http://{}:{}", args.public_host, args.api.port())));
+    // How often roll's issuer key rotates (90 days unless set).
+    if let Ok(days) = std::env::var("ROLL_SECRETS_OIDC_ROTATE_DAYS") {
+        match days.trim().parse::<u32>() {
+            Ok(d) => secrets.set_issuer_rotation_days(d),
+            Err(_) => tracing::warn!("ROLL_SECRETS_OIDC_ROTATE_DAYS isn't a number of days: rotating every {}", roll_secrets::issuer::ROTATE_DAYS),
+        }
+    }
+    // And the audit log's digest key (90 days unless set).
+    if let Ok(days) = std::env::var("ROLL_SECRETS_AUDIT_KEY_ROTATE_DAYS") {
+        match days.trim().parse::<u32>() {
+            Ok(d) => secrets.set_audit_key_rotation_days(d),
+            Err(_) => tracing::warn!("ROLL_SECRETS_AUDIT_KEY_ROTATE_DAYS isn't a number of days: rotating every {}", roll_secrets::audit_key::ROTATE_DAYS),
+        }
+    }
+    // What AWS identities' signed requests name (X-Roll-Server-ID): ROLL_SECRETS_AWS_SERVER_ID, or
+    // the configured public URL. Never the host and port made up above, which two deployments can
+    // share: unset, roll-secrets derives one from the deployment key.
+    if let Some(id) = std::env::var("ROLL_SECRETS_AWS_SERVER_ID").ok().filter(|v| !v.trim().is_empty()).or_else(|| args.code_public_url.clone()) {
+        secrets.set_aws_server_id(id);
+    }
     tell_decoys(&access, secrets.clone());
+    // ACME's http-01 and dns-01 checks: public addresses only, as webhooks.
+    secrets.set_acme_checks(Arc::new(acme::Checks::new(allow_private)));
     // A deleted project's secrets go with it.
     let s = secrets.clone();
     workspace.on_delete(Box::new(move |id| {
@@ -522,6 +572,8 @@ pub fn link_provider(api: &Api, kind: &str) -> Option<Arc<dyn LinkProvider>> {
         "bucket" => Some(Arc::new(Bucket(api.clone()))),
         "stream" => Some(Arc::new(Stream(api.clone()))),
         "nosql" => Some(Arc::new(Nosql(api.clone()))),
+        // A vhost user of the link's own (`AMQP_URL`), never the vhost's admin.
+        "queue" => Some(Arc::new(Queue(api.clone()))),
         // A data-only key of the cluster's own (`ELASTICSEARCH_API_KEY`, or an OpenSearch-flavor
         // cluster's internal user), never its password.
         "search" => Some(Arc::new(Search(api.clone(), Default::default()))),
@@ -537,6 +589,7 @@ fn links(api: Api) -> Links {
     l.register(Arc::new(Stream(api.clone())));
     l.register(Arc::new(Bucket(api.clone())));
     l.register(Arc::new(Nosql(api.clone())));
+    l.register(Arc::new(Queue(api.clone())));
     l.register(Arc::new(Search(api, Default::default())));
     l
 }
@@ -885,6 +938,129 @@ impl LinkProvider for Nosql {
     }
 }
 
+/// Queues (a roll queues vhost, by name): where clients reach it (live), and a user of its own
+/// (managed or dynamic) made through `/v1/queues/users` with permissions on that vhost only. The
+/// vhost's own user can't be read back (`…/credentials` shows its password once, and every call
+/// makes a new one), so no credential is live. Option `permission`: `read` (consume), `write`
+/// (publish and consume) or `configure` (default: also declare and delete queues, exchanges and
+/// bindings, as the vhost's own user may).
+struct Queue(Api);
+
+impl Queue {
+    /// The vhost's AMQP URL as roll queues answers it (the admin's user in it: only its scheme,
+    /// host, port, path and query are used, never edited into a link's value).
+    fn amqp_url(&self, vhost: &str) -> roll_secrets::Result<url::Url> {
+        let list = self.0.call(Method::GET, "/v1/queues/vhosts", None)?;
+        let v = list.as_array().into_iter().flatten().find(|v| v["name"] == vhost).ok_or_else(|| Error::Link(format!("roll queues has no vhost {vhost}")))?;
+        let u = v["amqp_url"].as_str().ok_or_else(|| Error::Link("the product didn't return amqp_url".into()))?;
+        url::Url::parse(u).map_err(|_| Error::Link("the vhost's AMQP URL doesn't parse".into()))
+    }
+
+    /// RabbitMQ's `configure`, `write` and `read` patterns for `permission`. A pattern that
+    /// matches nothing is `$.`, not empty: an empty pattern matches the default exchange's name.
+    fn patterns(permission: &str) -> Option<(&'static str, &'static str, &'static str)> {
+        match permission {
+            "read" => Some(("$.", "$.", ".*")),
+            "write" => Some(("$.", ".*", ".*")),
+            "configure" => Some((".*", ".*", ".*")),
+            _ => None,
+        }
+    }
+
+    fn permission(link: &Link) -> &str {
+        link.options.get("permission").and_then(Json::as_str).unwrap_or("configure")
+    }
+
+    /// `user`'s URL for the vhost `admin` reaches, built from its scheme, host, port, path and
+    /// query: the admin's user and password are never in it, and anything that doesn't come out
+    /// exactly as built is refused rather than handed out.
+    fn user_url(admin: &url::Url, user: &str, password: &str) -> roll_secrets::Result<String> {
+        let bad = || Error::Link("the vhost's AMQP URL can't carry a user of its own".into());
+        let host = admin.host_str().filter(|h| !h.is_empty()).ok_or_else(bad)?;
+        let port = admin.port().map(|p| format!(":{p}")).unwrap_or_default();
+        let query = admin.query().map(|q| format!("?{q}")).unwrap_or_default();
+        let u = url::Url::parse(&format!("{}://{user}:{password}@{host}{port}{}{query}", admin.scheme(), admin.path())).map_err(|_| bad())?;
+        if u.username() != user || u.password() != Some(password) || u.host_str() != Some(host) || u.port() != admin.port() || u.path() != admin.path() {
+            return Err(bad());
+        }
+        Ok(u.to_string())
+    }
+
+    /// Only a user this provider made (`roll-` and its random part): a lease never names another.
+    fn ours(user: &str) -> bool {
+        user.strip_prefix("roll-").is_some_and(|r| !r.is_empty() && r.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()))
+    }
+}
+
+impl LinkProvider for Queue {
+    fn kind(&self) -> &str {
+        "queue"
+    }
+    fn fields(&self) -> &[Field] {
+        const F: &[Field] = &[
+            live("host", "Host", false, "AMQP_HOST"),
+            live("port", "Port", false, "AMQP_PORT"),
+            live("vhost", "Virtual host", false, "AMQP_VHOST"),
+            issued("url", "AMQP URL", true, "AMQP_URL", "user"),
+            issued("username", "Username", false, "AMQP_USERNAME", "user"),
+            issued("password", "Password", true, "AMQP_PASSWORD", "user"),
+        ];
+        F
+    }
+    fn suggested(&self) -> &[(&'static str, Mode)] {
+        // A user of the app's own, never the vhost's.
+        &[("url", Mode::Managed)]
+    }
+    fn read(&self, r#ref: &str, field: &str, _: &Link) -> roll_secrets::Result<Value> {
+        if field == "vhost" {
+            return Ok(Value::new(r#ref));
+        }
+        let u = self.amqp_url(r#ref)?;
+        match field {
+            "host" => Ok(Value::new(u.host_str().unwrap_or_default())),
+            "port" => Ok(Value::new(u.port().unwrap_or(if u.scheme() == "amqps" { 5671 } else { 5672 }).to_string())),
+            f => Err(Error::BadRequest(format!("queue has no live field {f}"))),
+        }
+    }
+    fn issue(&self, r#ref: &str, _: &str, link: &Link, _: &str, _: Option<u64>) -> roll_secrets::Result<Issued> {
+        let (configure, write, read) = Self::patterns(Self::permission(link)).ok_or_else(|| Error::BadRequest("a queue link's permission is read, write or configure".into()))?;
+        let admin = self.amqp_url(r#ref)?;
+        // Only letters and digits we made: nothing to escape.
+        let user = format!("roll-{}", random(12));
+        let password = random(32);
+        // Before the user exists: a URL that can't carry it is refused, never handed out.
+        let url = Self::user_url(&admin, &user, &password)?;
+        // No tags: the user can't sign in to the management API.
+        self.0.call(Method::PUT, &format!("/v1/queues/users/{}", enc(&user)), Some(json!({ "password": password, "tags": [] })))?;
+        let granted = self.0.call(Method::PUT, &format!("/v1/queues/permissions/{}/{}", enc(r#ref), enc(&user)), Some(json!({ "configure": configure, "write": write, "read": read })));
+        if let Err(e) = granted {
+            // A user without its permission is no use: it goes again.
+            let _ = self.0.delete_gone(&format!("/v1/queues/users/{}", enc(&user)));
+            return Err(e);
+        }
+        let parts = BTreeMap::from([
+            ("url".to_string(), Value::new(url)),
+            ("username".to_string(), Value::new(user.clone())),
+            ("password".to_string(), Value::new(password)),
+        ]);
+        Ok(Issued { parts, handle: json!({ "user": user }) })
+    }
+    /// Deletes the user, which closes its connections and drops its permissions.
+    fn revoke(&self, _: &str, h: &Json) -> roll_secrets::Result<()> {
+        let Some(user) = h["user"].as_str() else { return Ok(()) };
+        if !Self::ours(user) {
+            return Err(Error::Internal("a lease names a queue user roll didn't make".into()));
+        }
+        self.0.delete_gone(&format!("/v1/queues/users/{}", enc(user)))
+    }
+    fn check(&self, link: &Link) -> roll_secrets::Result<()> {
+        if link.mode != Mode::Live && Self::patterns(Self::permission(link)).is_none() {
+            return Err(Error::BadRequest("a queue link's permission is read, write or configure".into()));
+        }
+        Ok(())
+    }
+}
+
 /// Search clusters (roll search): where clients reach one (live), and credentials of their own
 /// (managed or dynamic) from `POST /v1/search/clusters/{id}/keys`: an API key on an Elasticsearch
 /// cluster, an internal user (`user`, `password`) on an OpenSearch one, which has no API keys.
@@ -1175,6 +1351,25 @@ impl apps_control::integrations::SecretSource for ForApps {
 
     /// apps' `…/variables/values` shows secrets' values: only to whoever may reveal `env` by roll
     /// secrets' own rules (a token's scope, a person's own projects, protected environments).
+    /// A variable's `roll://` reference to its own environment (apps refuses another's), read as
+    /// the service through `resolve_for`: the project is the one whose canvas holds the service
+    /// and stands for it, and the read is audited as `apps:service:<id>`. An untrusted preview
+    /// reads as an untrusted copy (no protected environment, no sensitive key).
+    async fn resolve_ref(&self, project: &str, env: &str, service: &str, reference: &str) -> anyhow::Result<String> {
+        let (secrets, _) = self.0.get().cloned().ok_or_else(|| anyhow::anyhow!("roll secrets is starting: deploy again in a moment"))?;
+        let (project, env, service, reference) = (project.to_string(), env.to_string(), service.to_string(), reference.to_string());
+        tokio::task::spawn_blocking(move || {
+            let caller = roll_secrets::Caller::consumer(&format!("app:{service}"));
+            let untrusted = matches!(secrets.environment(&project, &env, &caller), Ok(e) if e.kind == roll_secrets::EnvironmentKind::Ephemeral && !e.trusted);
+            let mut r = roll_secrets::ResourceRef::new(roll_workspace::Kind::Service, &service);
+            if untrusted {
+                r = r.untrusted();
+            }
+            secrets.resolve_for(&r, &reference).map(|v| v.value.expose().to_string()).map_err(|e| anyhow::anyhow!("{e}"))
+        })
+        .await?
+    }
+
     /// The environment's digest (versions and keyed fingerprints, nothing decrypted): apps keeps
     /// it with each live deployment and says when the secrets changed since. None for a project
     /// or environment roll secrets doesn't have.
@@ -1221,12 +1416,64 @@ impl apps_control::integrations::SecretSource for ForApps {
         .await?
     }
 
+    /// An instance's token from roll's issuer, only for a service its project stands for
+    /// (`Workspace::trusts`, as `resolve`), and only for an environment roll secrets has that
+    /// isn't an untrusted preview (`Secrets::issue` refuses one: where `resolve` gives a fork's
+    /// preview a narrowed read, it gets no token at all). None where the issuer isn't (no public
+    /// URL).
+    async fn issue(&self, project: &str, service: &str, env: &str, aud: &str, ttl: std::time::Duration) -> anyhow::Result<Option<String>> {
+        let (secrets, ws) = self.0.get().cloned().ok_or_else(|| anyhow::anyhow!("roll secrets is starting: try again in a moment"))?;
+        let subject = roll_secrets::Subject::App { project: project.to_string(), service: service.to_string(), env: env.to_string() };
+        let aud = aud.to_string();
+        tokio::task::spawn_blocking(move || {
+            let roll_secrets::Subject::App { project, service, .. } = &subject;
+            let p = ws.get(roll_workspace::Scope::All, project).map_err(|e| anyhow::anyhow!("{e}"))?;
+            if !ws.trusts(&p, roll_workspace::Kind::Service, service) {
+                anyhow::bail!("project {project} doesn't stand for {service}, so roll signs no token for it");
+            }
+            if !secrets.issues() {
+                return Ok(None);
+            }
+            Ok(Some(secrets.issue(subject, &aud, ttl)?))
+        })
+        .await?
+    }
+
     async fn may_reveal(&self, who: apps_control::integrations::Asker<'_>, project: &str, env: &str) -> bool {
         let Some((secrets, _)) = self.0.get().cloned() else { return false };
         match secrets.caller_of(who.operator, who.user, who.grant) {
             Ok(caller) => caller.allows(roll_secrets::Action::Reveal, &roll_secrets::Scope::at(project, env, "/")),
             Err(_) => false,
         }
+    }
+}
+
+/// roll secrets for roll storage's replication targets (`s3_server::TargetCredentials`): a
+/// target's `roll://` references resolve for the source bucket, the canvas resource asking
+/// (`Secrets::resolve_for`: its project must stand for it; audited as `storage:bucket:<name>`).
+/// Set once the store is open (it opens after storage starts).
+#[derive(Clone, Default)]
+pub struct ForStorage(Arc<OnceLock<Arc<Secrets>>>);
+
+impl ForStorage {
+    pub fn set(&self, secrets: Arc<Secrets>) {
+        let _ = self.0.set(secrets);
+    }
+
+    async fn run<T: Send + 'static>(&self, bucket: &str, reference: &str, f: fn(&Secrets, &roll_secrets::ResourceRef, &str) -> Result<T, roll_secrets::Refusal>) -> Result<T, String> {
+        let secrets = self.0.get().cloned().ok_or("roll secrets is starting")?;
+        let (resource, reference) = (roll_secrets::ResourceRef::new(roll_workspace::Kind::Bucket, bucket), reference.to_string());
+        tokio::task::spawn_blocking(move || f(&secrets, &resource, &reference).map_err(|e| e.to_string())).await.map_err(|e| e.to_string())?
+    }
+}
+
+impl s3_server::TargetCredentials for ForStorage {
+    fn resolve<'a>(&'a self, bucket: &'a str, reference: &'a str) -> futures::future::BoxFuture<'a, Result<s3_store::Secret, String>> {
+        Box::pin(async move { self.run(bucket, reference, |s, r, x| s.resolve_for(r, x).map(|v| s3_store::Secret::new(v.value.expose()))).await })
+    }
+
+    fn digest<'a>(&'a self, bucket: &'a str, reference: &'a str) -> futures::future::BoxFuture<'a, Result<String, String>> {
+        Box::pin(async move { self.run(bucket, reference, |s, r, x| s.digest_for(r, x)).await })
     }
 }
 
@@ -1256,6 +1503,34 @@ impl roll_secrets::Workloads for Workloads {
         self.0.revoke_workload(id, "its workload identity was deleted").map(|_| ()).map_err(|e| Error::Internal(format!("revoking a workload token: {e}")))
     }
 
+    /// A gateway's token, made for the request's caller as `POST /v1/access/tokens` makes one.
+    /// Refusals are said in the gateway form's words: roll-access's are about its own callers and
+    /// fields.
+    fn token(&self, ext: &axum::http::Extensions, name: &str, rule: roll_auth::scope::Rule) -> roll_secrets::Result<roll_secrets::Minted> {
+        let new = roll_access::store::NewGrant { name: name.chars().take(64).collect(), rules: roll_auth::scope::Scope(vec![rule]), ..Default::default() };
+        let (access, ext) = (self.0.clone(), ext.clone());
+        // On the store's blocking threads, as `mint`.
+        match tokio::runtime::Handle::current().block_on(async move { access.create_grant(&ext, new).await }) {
+            Ok((g, secret)) => Ok(roll_secrets::Minted { id: g.id, secret, expires_at: g.expires_at.unwrap_or_default() }),
+            Err(roll_access::Error::Forbidden(_) | roll_access::Error::Unauthorized(_)) => {
+                Err(Error::Forbidden("roll couldn't tell whose this gateway's token would be: sign in, or add the gateway without a token and log it in through a workload identity".into()))
+            }
+            Err(roll_access::Error::BadRequest(m)) if m.starts_with("roll's policy") => {
+                Err(Error::BadRequest("roll's token policy has every token expire, and a gateway's lasts until the gateway is deleted: add the gateway without a token and log it in through a workload identity".into()))
+            }
+            Err(roll_access::Error::BadRequest(m)) => Err(Error::BadRequest(m)),
+            Err(roll_access::Error::Conflict(m) | roll_access::Error::TooMany(m)) => Err(Error::TooMany(m)),
+            Err(e) => Err(Error::Internal(format!("making a gateway's token: {e}"))),
+        }
+    }
+
+    fn revoke_token(&self, id: &str, why: &str) -> roll_secrets::Result<()> {
+        match self.0.store.revoke(id) {
+            Ok(_) | Err(roll_access::Error::NotFound(_)) => Ok(()),
+            Err(e) => Err(Error::Internal(format!("revoking {id} ({why}): {e}"))),
+        }
+    }
+
     /// A decoy token for a decoy key: roll-access's own decoys, owned by whoever planted it.
     fn mint_decoy(&self, name: &str, rule: roll_auth::scope::Rule, owner: Option<&str>) -> roll_secrets::Result<roll_secrets::Minted> {
         match self.0.mint_decoy(name, roll_auth::scope::Scope(vec![rule]), owner.unwrap_or("operator"), owner) {
@@ -1268,6 +1543,18 @@ impl roll_secrets::Workloads for Workloads {
 
     fn revoke_decoy(&self, id: &str) -> roll_secrets::Result<()> {
         self.0.revoke_decoy(id, "its decoy key was changed or deleted").map(|_| ()).map_err(|e| Error::Internal(format!("revoking a decoy token: {e}")))
+    }
+
+    /// An incident's cut-off: `Access::revoke_many`, one write, all or none, an audit row per grant
+    /// with why and who. Called from roll secrets' blocking threads, as `mint` is.
+    fn revoke_many(&self, ids: &[String], why: &str, by: &str) -> roll_secrets::Result<()> {
+        let (access, ids, why, by) = (self.0.clone(), ids.to_vec(), why.to_string(), by.to_string());
+        match tokio::runtime::Handle::current().block_on(async move { access.revoke_many(ids, &why, &by).await }) {
+            Ok(_) => Ok(()),
+            Err(roll_access::Error::NotFound(m)) => Err(Error::NotFound(m)),
+            Err(roll_access::Error::BadRequest(m)) => Err(Error::BadRequest(m)),
+            Err(e) => Err(Error::Internal(format!("revoking tokens: {e}"))),
+        }
     }
 
     /// Each token as roll-access answers it now: gone once revoked or expired, or (a person's own)
@@ -1288,31 +1575,72 @@ impl ForCode {
         let _ = self.0.set((secrets, workspace));
     }
 
-    /// `environment` (`env` or `env:/folder`) of `project`, for `consumer`: never a protected
-    /// environment, never with an unresolved reference.
-    async fn resolve(&self, project: String, environment: &str, consumer: &str) -> anyhow::Result<Vec<(String, String)>> {
+    /// `environment` (`env` or `env:/folder`) of `project` for `consumer`: never a protected
+    /// environment, never with an unresolved reference. With `asker` (a person or a token), as
+    /// far as their own rules reach, and the audit row is `<consumer> for <principal>`; the
+    /// principal comes back with the values.
+    async fn resolve(&self, project: String, environment: &str, consumer: &str, asker: Option<Asker>) -> anyhow::Result<(String, Vec<(String, String)>)> {
         let (secrets, _) = self.0.get().cloned().ok_or_else(|| anyhow::anyhow!("roll secrets is starting"))?;
         let (slug, path) = environment.split_once(':').unwrap_or((environment, "/"));
         let (slug, path, consumer) = (slug.to_string(), path.to_string(), consumer.to_string());
         tokio::task::spawn_blocking(move || {
+            let (base, consumer) = match asker {
+                // As the person or token that asked: managing a code owner isn't revealing a
+                // project's values. Their rules decide references and imports too.
+                Some(a) => {
+                    let caller = a.caller(&secrets)?;
+                    match caller.need(roll_secrets::Action::Reveal, &roll_secrets::Scope::at(&project, &slug, &path)) {
+                        Ok(()) => {
+                            let consumer = format!("{consumer} for {}", caller.principal);
+                            (caller, consumer)
+                        }
+                        Err(roll_secrets::Error::Forbidden(_)) => return Err(code_control::Refused(format!("{} may not reveal {environment}", caller.principal, environment = if path == "/" { slug.clone() } else { format!("{slug}:{path}") })).into()),
+                        Err(e) => return Err(e.into()),
+                    }
+                }
+                None => (roll_secrets::Caller::consumer(&consumer), consumer),
+            };
             // Never a protected environment: not asked for, nor through a reference, an import or
             // an ephemeral environment's base.
             // Not a runtime: a sandbox is a terminal, so sensitive keys stay out (checks too).
-            let caller = secrets.untrusted(&project, &roll_secrets::Caller::consumer(&consumer).not_runtime())?;
-            if !caller.allows(roll_secrets::Action::Reveal, &roll_secrets::Scope::env(&project, &slug)) {
+            let principal = base.principal.clone();
+            let caller = secrets.untrusted(&project, &base.not_runtime())?;
+            if !caller.allows(roll_secrets::Action::Reveal, &roll_secrets::Scope::at(&project, &slug, &path)) {
                 anyhow::bail!("{slug} is protected: protected environments never go to checks or sandboxes");
             }
-            let v = secrets.values(&project, &slug, &path, true, Some(&consumer), &caller)?;
+            let v = secrets.values(&project, &slug, &path, true, Some(&consumer), &caller).map_err(|e| match e {
+                roll_secrets::Error::Forbidden(m) => code_control::Refused(m).into(),
+                e => anyhow::Error::from(e),
+            })?;
             if let Some(p) = v.problems.first() {
                 anyhow::bail!("{} of {slug} didn't resolve ({}: {})", v.problems.len(), p.key, p.problem);
             }
-            Ok(v.values.into_iter().map(|(k, v)| (k, v.expose().to_string())).collect())
+            Ok((principal, v.values.into_iter().map(|(k, v)| (k, v.expose().to_string())).collect()))
         })
         .await?
     }
 
     fn workspace(&self) -> anyhow::Result<Arc<roll_workspace::Workspace>> {
         Ok(self.0.get().ok_or_else(|| anyhow::anyhow!("roll secrets is starting"))?.1.clone())
+    }
+}
+
+/// Who asked roll code for an environment's values ([`code_control::Asker`], owned to cross onto
+/// the store's blocking threads).
+struct Asker {
+    operator: bool,
+    user: Option<roll_auth::SignedIn>,
+    grant: Option<roll_auth::Grant>,
+}
+
+impl Asker {
+    /// As roll secrets answers a request of theirs; one it wouldn't answer at all (a roll code
+    /// owner token is no one to roll secrets) is refused.
+    fn caller(&self, secrets: &Secrets) -> anyhow::Result<roll_secrets::Caller> {
+        secrets.caller_of(self.operator, self.user.as_ref(), self.grant.as_ref()).map_err(|e| match e {
+            roll_secrets::Error::Unauthorized(_) => code_control::Refused("copying secrets into a sandbox needs a session, the operator token or a roll token (rlt_…) that may reveal them".into()).into(),
+            e => anyhow::Error::from(e),
+        })
     }
 }
 
@@ -1344,10 +1672,11 @@ impl code_control::SecretEnv for ForCode {
         let project = tokio::task::spawn_blocking(move || ws.projects_of(roll_workspace::Kind::Repo.as_str(), &r).map(|ps| ps.into_iter().find(|p| secrets.counts_for_repo(p, &r))))
             .await??
             .ok_or_else(|| anyhow::anyhow!("{repo} isn't on a workspace project's canvas, so it has no secrets"))?;
-        self.resolve(project, environment, consumer).await
+        Ok(self.resolve(project, environment, consumer, None).await?.1)
     }
 
-    async fn for_owner(&self, owner: &str, project: &str, environment: &str, consumer: &str) -> anyhow::Result<Vec<(String, String)>> {
+    async fn for_owner(&self, owner: &str, project: &str, environment: &str, consumer: &str, who: code_control::Asker<'_>) -> anyhow::Result<code_control::Revealed> {
+        let asker = Asker { operator: who.operator, user: who.user.cloned(), grant: who.grant.cloned() };
         let (secrets, ws) = self.0.get().cloned().ok_or_else(|| anyhow::anyhow!("roll secrets is starting"))?;
         let prefix = format!("{owner}/");
         // One of the owner's repositories on its canvas, which the project may reach.
@@ -1362,7 +1691,8 @@ impl code_control::SecretEnv for ForCode {
             anyhow::bail!("no project {project}");
         }
         let p = named.iter().find(|p| has_repo(p)).cloned().ok_or_else(|| anyhow::anyhow!("project {project} has none of {owner}'s repos on its canvas"))?;
-        self.resolve(p.id, environment, consumer).await
+        let (by, values) = self.resolve(p.id, environment, consumer, Some(asker)).await?;
+        Ok(code_control::Revealed { by, values })
     }
 
     async fn leaks(&self, repo: &str, candidates: Vec<String>) -> anyhow::Result<Vec<(usize, String, String, String)>> {
@@ -1376,6 +1706,54 @@ impl code_control::SecretEnv for ForCode {
             Ok(out)
         })
         .await?
+    }
+
+    async fn store_target(&self, repo: &str, asker: &code_control::SecretsAsker, prefer: Option<&str>) -> code_control::Result<code_control::StoreTarget> {
+        let secrets = self.secrets()?;
+        let (repo, asker, prefer) = (repo.to_string(), asker.clone(), prefer.map(str::to_string));
+        let t = tokio::task::spawn_blocking(move || {
+            let caller = secrets.caller_of(asker.operator, asker.user.as_ref(), asker.grant.as_ref())?;
+            secrets.found_target(&repo, prefer.as_deref(), &caller)
+        })
+        .await
+        .map_err(|e| code_control::Error::Internal(e.into()))?
+        .map_err(for_code)?;
+        Ok(code_control::StoreTarget { project: t.project, project_name: t.project_name, environments: t.environments, environment: t.environment })
+    }
+
+    async fn store(&self, repo: &str, asker: &code_control::SecretsAsker, c: code_control::StoreCredential) -> code_control::Result<code_control::StoredCredential> {
+        let secrets = self.secrets()?;
+        let (repo, asker) = (repo.to_string(), asker.clone());
+        let s = tokio::task::spawn_blocking(move || {
+            let caller = secrets.caller_of(asker.operator, asker.user.as_ref(), asker.grant.as_ref())?;
+            secrets.store_found(&repo, c.environment.as_deref(), c.prefer.as_deref(), &c.path, &c.key, c.value.0, c.message, &caller)
+        })
+        .await
+        .map_err(|e| code_control::Error::Internal(e.into()))?
+        .map_err(for_code)?;
+        Ok(code_control::StoredCredential { project: s.project, environment: s.environment, path: s.path, change: s.change, request: s.request })
+    }
+}
+
+impl ForCode {
+    fn secrets(&self) -> code_control::Result<Arc<Secrets>> {
+        Ok(self.0.get().ok_or_else(|| code_control::Error::Unavailable("roll secrets is starting".into()))?.0.clone())
+    }
+}
+
+/// roll secrets' answer as roll code's API answers it (the same statuses).
+fn for_code(e: Error) -> code_control::Error {
+    use code_control::Error as C;
+    match e {
+        Error::BadRequest(m) => C::Invalid(m),
+        Error::Unauthorized(_) => C::Unauthorized,
+        Error::Forbidden(m) => C::Forbidden(m),
+        // "no environment staging" reads "environment staging not found".
+        Error::NotFound(m) => C::NotFound(m.strip_prefix("no ").map(str::to_string).unwrap_or(m)),
+        Error::Conflict("no_project", m) => C::Unprocessable(m),
+        Error::Conflict(_, m) => C::Conflict(m),
+        Error::Unavailable(m) => C::Unavailable(m),
+        e => C::Internal(anyhow::anyhow!(e.to_string())),
     }
 }
 
@@ -1407,6 +1785,197 @@ mod tests {
         assert!(super::search_parts(&json!({ "id": "x" })).is_err());
     }
 
+    /// roll queues in process (a broker with an AMQP listener, mq-control's routes behind the
+    /// links' `Api`) and roll secrets with rolld's providers, a vhost `orders` and the operator's
+    /// project `shop` with it on the canvas.
+    struct Queues {
+        broker: Arc<mq_core::Broker>,
+        secrets: Arc<roll_secrets::Secrets>,
+        ws: Arc<roll_workspace::Workspace>,
+        project: String,
+        _dir: tempfile::TempDir,
+    }
+
+    impl Queues {
+        async fn start(people: Option<super::People>) -> Queues {
+            let dir = tempfile::tempdir().unwrap();
+            let broker = mq_core::Broker::start(mq_core::BrokerConfig::default(), mq_core::meta::MemMeta::new(), mq_core::log::MemStore::new()).await.unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let b = broker.clone();
+            tokio::spawn(async move {
+                let _ = mq_amqp::serve_listener(b, listener, mq_amqp::ServerConfig { listen: addr, amqp10: None }).await;
+            });
+            let endpoints = mq_control::Endpoints { amqp: Some(format!("amqp://{addr}")), ..Default::default() };
+            let control = mq_control::QueuesControl::with_config(broker.clone(), endpoints, mq_control::ControlConfig::default()).unwrap();
+            let router = mq_control::api::router(control);
+            assert_eq!(send(&router, "POST", "/v1/queues/vhosts", Some(json!({ "name": "orders" }))).await.0, 201);
+            let api = super::Api::default();
+            api.set(router);
+            let ws_db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("workspace.db")), "workspace").unwrap();
+            let ws = Arc::new(roll_workspace::Workspace::new(ws_db).unwrap());
+            if let Some(p) = &people {
+                ws.set_owners(Arc::new(p.clone()));
+            }
+            let project = ws.create("", "shop", "", None).unwrap().id;
+            ws.place(roll_workspace::Scope::All, &project, roll_workspace::Kind::Queue, "orders", 0.0, 0.0).unwrap();
+            let db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("secrets.db")), "secrets").unwrap();
+            let opts = roll_secrets::Options {
+                keyring: Ok(roll_secrets::Keyring::new(&"k".repeat(32), None).unwrap()),
+                key_source: roll_secrets::KeySource::Env,
+                links: super::links(api),
+                syncs: Default::default(),
+                open: true,
+                trust_forwarded_for: false,
+                web_url: None,
+                deliver: None,
+                grants: None,
+                people: people.map(|p| Arc::new(p) as Arc<dyn roll_secrets::People>),
+                kms: None,
+                sts: None,
+                outside: None,
+                directory: None,
+                github: None,
+                clouds: None,
+                workloads: None,
+                gateways: None,
+            };
+            let secrets = Arc::new(roll_secrets::Secrets::new(db, ws.clone(), opts).unwrap());
+            Queues { broker, secrets, ws, project, _dir: dir }
+        }
+
+        /// A request to the project's routes (`/environments/…`) as the operator.
+        async fn call(&self, method: &str, path: &str, body: Option<Json>) -> (u16, Json) {
+            send(&roll_secrets::router(self.secrets.clone()), method, &format!("/v1/secrets/projects/{}{path}", self.project), body).await
+        }
+
+        async fn ok(&self, method: &str, path: &str, body: Option<Json>) -> Json {
+            let (s, v) = self.call(method, path, body).await;
+            assert!((200..300).contains(&s), "{method} {path}: {s} {v}");
+            v
+        }
+
+        /// `AMQP_URL` as `env` resolves it.
+        async fn amqp_url(&self, env: &str) -> String {
+            self.ok("GET", &format!("/environments/{env}/values"), None).await["values"]["AMQP_URL"].as_str().unwrap().to_string()
+        }
+
+        /// Users roll made on the broker, with their permissions on `orders`.
+        fn users(&self) -> Vec<(String, Option<String>)> {
+            let mut out: Vec<_> = self.broker.users().into_iter().filter(|u| u.name.starts_with("roll-")).map(|u| (u.name.clone(), self.broker.permission("orders", &u.name).map(|p| format!("{} {} {}", p.configure, p.write, p.read)))).collect();
+            out.sort();
+            out
+        }
+    }
+
+    async fn send(router: &axum::Router, method: &str, path: &str, body: Option<Json>) -> (u16, Json) {
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+        let req = axum::http::Request::builder().method(method).uri(path).header("content-type", "application/json").body(body.map_or(axum::body::Body::empty(), |b| axum::body::Body::from(b.to_string()))).unwrap();
+        let resp = router.clone().oneshot(req).await.unwrap();
+        let status = resp.status().as_u16();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Json::Null))
+    }
+
+    fn queue_link(field: &str, mode: &str, options: Json) -> Json {
+        json!({ "link": { "kind": "queue", "ref": "orders", "field": field, "mode": mode, "options": options } })
+    }
+
+    /// Whether `url`'s user can publish to a queue `jobs` on its vhost (a broker confirm).
+    async fn publishes(url: &str) -> bool {
+        let conn = lapin::Connection::connect(url, lapin::ConnectionProperties::default()).await.unwrap();
+        let ch = conn.create_channel().await.unwrap();
+        ch.confirm_select(Default::default()).await.unwrap();
+        match ch.basic_publish("".into(), "jobs".into(), Default::default(), b"job 1", Default::default()).await {
+            Ok(confirm) => confirm.await.is_ok_and(|c| c.is_ack()),
+            Err(_) => false,
+        }
+    }
+
+    /// A queue links live (where it is), managed (a user of its own, rotated by replacing it) and
+    /// dynamic (a user per lease, deleted when the lease ends).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_queue_links_live_managed_and_dynamic() {
+        let q = Queues::start(None).await;
+        let targets = q.ok("GET", "/links", None).await;
+        assert_eq!(targets[0]["kind"], "queue", "{targets}");
+        q.ok("PUT", "/environments/production/secrets/AMQP_VHOST", Some(queue_link("vhost", "live", json!({})))).await;
+        q.ok("PUT", "/environments/production/secrets/AMQP_PORT", Some(queue_link("port", "live", json!({})))).await;
+        q.ok("PUT", "/environments/production/secrets/AMQP_URL", Some(queue_link("url", "managed", json!({})))).await;
+        let v = q.ok("GET", "/environments/production/values", None).await["values"].clone();
+        assert_eq!(v["AMQP_VHOST"], "orders");
+        assert!(v["AMQP_PORT"].as_str().unwrap().parse::<u16>().is_ok(), "{v}");
+        let users = q.users();
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0].1.as_deref(), Some(".* .* .*"), "configure by default, on its vhost only");
+        let first = users[0].0.clone();
+        assert!(v["AMQP_URL"].as_str().unwrap().starts_with(&format!("amqp://{first}:")), "{v}");
+
+        // Rotating makes a new user; the old one is a retired lease until its grace ends, then goes.
+        q.ok("POST", "/environments/production/secrets/AMQP_URL/rotate", None).await;
+        assert_eq!(q.users().len(), 2);
+        let retired = q.ok("GET", "/leases", None).await[0]["id"].as_str().unwrap().to_string();
+        q.ok("DELETE", &format!("/leases/{retired}"), None).await;
+        let users = q.users();
+        assert!(users.len() == 1 && users[0].0 != first, "{users:?}");
+
+        // Dynamic: each resolve makes a user, deleted when its lease ends.
+        q.ok("PUT", "/environments/staging/secrets/WORKER_AMQP_URL", Some(queue_link("url", "dynamic", json!({ "ttl_minutes": 15 })))).await;
+        let r = q.ok("POST", "/environments/staging/resolve", Some(json!({ "consumer": "app:worker" }))).await;
+        assert_eq!(q.users().len(), 2);
+        q.ok("DELETE", &format!("/leases/{}", r["leases"][0].as_str().unwrap()), None).await;
+        assert_eq!(q.users().len(), 1, "the lease's user is deleted");
+    }
+
+    /// A linked user connects with the URL alone, with only the access its link asked for.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_linked_queue_user_connects_with_only_the_access_it_asked_for() {
+        let q = Queues::start(None).await;
+        q.ok("PUT", "/environments/production/secrets/AMQP_URL", Some(queue_link("url", "managed", json!({})))).await;
+        q.ok("PUT", "/environments/staging/secrets/AMQP_URL", Some(queue_link("url", "managed", json!({ "permission": "read" })))).await;
+        let (writer, reader) = (q.amqp_url("production").await, q.amqp_url("staging").await);
+        let conn = lapin::Connection::connect(&writer, lapin::ConnectionProperties::default()).await.unwrap();
+        conn.create_channel().await.unwrap().queue_declare("jobs".into(), Default::default(), Default::default()).await.unwrap();
+        assert!(publishes(&writer).await);
+        assert!(!publishes(&reader).await, "a read link's user can't publish");
+        let (s, e) = q.call("PUT", "/environments/development/secrets/AMQP_URL", Some(queue_link("url", "managed", json!({ "permission": "admin" })))).await;
+        assert_eq!((s, e["error"].as_str()), (400, Some("a queue link's permission is read, write or configure")));
+    }
+
+    /// A person's project stands for a queue only where rolld trusts it (queues say no owner, so an
+    /// admin's): a link to one on anyone else's canvas is refused.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_queue_the_project_isnt_trusted_for_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = roll_accounts::Config {
+            api_url: "http://api.example.com".into(),
+            web_url: "http://roll.example.com".into(),
+            mail: roll_accounts::MailConfig::Off,
+            github: None,
+            google: None,
+            secret_key: None,
+            open: false,
+            sso_allow_private: false,
+        };
+        let db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("accounts.db")), "accounts").unwrap();
+        let accounts = Arc::new(roll_accounts::Accounts::new(db, config, None).await.unwrap());
+        let (_, invite, _) = accounts.invite("operator", "dev@example.com", false, None).unwrap();
+        let mail = accounts.email_start("chal-test", "dev@example.com", Some(&invite)).unwrap().unwrap();
+        let (user, _) = accounts.email_verify("chal-test", mail.subject.split(' ').next().unwrap()).unwrap();
+        let q = Queues::start(Some(super::People { accounts: accounts.clone(), code: None, search: None })).await;
+        let mine = q.ws.create(&user, "side-project", "", None).unwrap().id;
+        q.ws.place(roll_workspace::Scope::Owner(&user), &mine, roll_workspace::Kind::Queue, "orders", 0.0, 0.0).unwrap();
+        let path = format!("/v1/secrets/projects/{mine}/environments/production/secrets/AMQP_URL");
+        let (s, e) = send(&roll_secrets::router(q.secrets.clone()), "PUT", &path, Some(queue_link("url", "managed", json!({})))).await;
+        assert!(s == 400 && e["error"].as_str().is_some_and(|m| m.starts_with("queue orders is on this project's canvas, but roll can't tell it's yours")), "{s} {e}");
+        assert!(q.users().is_empty(), "nothing issued");
+        // The same canvas once its person is an admin.
+        accounts.update_user(&user, Some(true), None).unwrap();
+        let (s, e) = send(&roll_secrets::router(q.secrets.clone()), "PUT", &path, Some(queue_link("url", "managed", json!({})))).await;
+        assert!((200..300).contains(&s), "{s} {e}");
+    }
+
 
     /// A service's deploy gets its project's environment as `app:<svc>`; where roll secrets has no
     /// such project or environment it gets nothing (a service needn't use secrets), never a failure.
@@ -1433,9 +2002,11 @@ mod tests {
             kms: None,
             sts: None,
             outside: None,
+            directory: None,
             github: None,
             clouds: None,
             workloads: None,
+            gateways: None,
         };
         let secrets = Arc::new(roll_secrets::Secrets::new(db, ws.clone(), opts).unwrap());
         let set = axum::http::Request::put(format!("/v1/secrets/projects/{project}/environments/production/secrets/DB_URL"))
@@ -1448,7 +2019,7 @@ mod tests {
         let set = axum::http::Request::post(format!("/v1/secrets/projects/{project}/environments/production/changes")).header("content-type", "application/json").body(axum::body::Body::from(ops.to_string())).unwrap();
         assert!(roll_secrets::router(secrets.clone()).oneshot(set).await.unwrap().status().is_success());
         let apps = super::ForApps::default();
-        apps.set(secrets.clone(), ws);
+        apps.set(secrets.clone(), ws.clone());
         let got = apps.resolve(&project, "production", "svc_web").await.unwrap();
         assert_eq!(got.iter().map(|v| (v.name.as_str(), v.value.as_str(), v.linked, v.sensitive)).collect::<Vec<_>>(), [("DB_URL", "postgres://db/shop", false, false), ("PAYMENTS_KEY", "sk_live_x", false, true)]);
         assert!(apps.resolve(&project, "pr-9", "svc_web").await.unwrap().is_empty());
@@ -1473,6 +2044,14 @@ mod tests {
         assert!(roll_secrets::router(secrets.clone()).oneshot(set).await.unwrap().status().is_success());
         assert_ne!(apps.digest(&project, "production").await.unwrap(), Some(before));
         assert_eq!(apps.digest(&project, "pr-9").await.unwrap(), None);
+        // A variable's roll:// reference, read as the service (resolve_for): only once a project
+        // that stands for it holds it on its canvas.
+        let reference = "roll://production/DB_URL";
+        assert!(apps.resolve_ref(&project, "production", "svc_web", reference).await.is_err(), "on no canvas");
+        ws.place(roll_workspace::Scope::All, &project, roll_workspace::Kind::Service, "svc_web", 0.0, 0.0).unwrap();
+        assert_eq!(apps.resolve_ref(&project, "production", "svc_web", reference).await.unwrap(), "postgres://db/shop2");
+        let audit = secrets.audit(&project, roll_secrets::AuditFilter::default(), &roll_secrets::Caller::operator()).unwrap();
+        assert!(audit.iter().any(|a| a.actor.contains("apps:service:svc_web")), "{audit:?}");
     }
 
     /// A decoy key's token, used where it was planted: roll-access refuses it and roll secrets
@@ -1500,9 +2079,11 @@ mod tests {
             kms: None,
             sts: None,
             outside: None,
+            directory: None,
             github: None,
             clouds: None,
             workloads: Some(Arc::new(super::Workloads(access.clone()))),
+            gateways: None,
         };
         let secrets = Arc::new(roll_secrets::Secrets::new(db, ws, opts).unwrap());
         super::tell_decoys(&access, secrets.clone());
@@ -1535,6 +2116,219 @@ mod tests {
         assert!(call("DELETE", "/secrets/OLD_DEPLOY_TOKEN", None).await.unwrap().status().is_success());
         assert!(access.store.by_secret(value.expose()).unwrap().is_none());
         assert!(access.store.get(&g.id).unwrap().revoked_at.is_some());
+    }
+
+    /// A frozen folder stops roll's own readers, which do everything in-process: a service's
+    /// deploy (`ForApps`) and a check or sandbox (`ForCode`, untrusted) both get 423 `frozen`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_frozen_folder_stops_services_checks_and_sandboxes() {
+        use apps_control::integrations::SecretSource;
+        use tower::ServiceExt;
+        let dir = tempfile::tempdir().unwrap();
+        let ws_db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("workspace.db")), "workspace").unwrap();
+        let ws = Arc::new(roll_workspace::Workspace::new(ws_db).unwrap());
+        let project = ws.create("", "shop", "", None).unwrap().id;
+        let db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("secrets.db")), "secrets").unwrap();
+        let opts = roll_secrets::Options {
+            keyring: Ok(roll_secrets::Keyring::new(&"k".repeat(32), None).unwrap()),
+            key_source: roll_secrets::KeySource::Env,
+            links: Default::default(),
+            syncs: Default::default(),
+            open: true,
+            trust_forwarded_for: false,
+            web_url: None,
+            deliver: None,
+            grants: None,
+            people: None,
+            kms: None,
+            sts: None,
+            outside: None,
+            directory: None,
+            github: None,
+            clouds: None,
+            workloads: None,
+            gateways: None,
+        };
+        let secrets = Arc::new(roll_secrets::Secrets::new(db, ws.clone(), opts).unwrap());
+        let post = |method: &str, path: &str, body: Json| {
+            axum::http::Request::builder().method(method).uri(format!("/v1/secrets/projects/{project}/environments/staging{path}")).header("content-type", "application/json").body(axum::body::Body::from(body.to_string())).unwrap()
+        };
+        let set = roll_secrets::router(secrets.clone()).oneshot(post("PUT", "/secrets/STRIPE_KEY", json!({ "value": "sk_test_fake_staging" }))).await.unwrap();
+        assert!(set.status().is_success());
+        let cut = roll_secrets::router(secrets.clone()).oneshot(post("POST", "/reach/cut-off?path=/", json!({ "why": "fake incident", "tokens": false, "freeze": true }))).await.unwrap();
+        assert!(cut.status().is_success(), "{}", cut.status());
+        let frozen = |e: anyhow::Error| matches!(e.downcast_ref::<roll_secrets::Error>(), Some(roll_secrets::Error::Frozen(_)));
+        let apps = super::ForApps::default();
+        apps.set(secrets.clone(), ws.clone());
+        assert!(frozen(apps.resolve(&project, "staging", "svc_web").await.unwrap_err()), "a service's deploy");
+        let code = super::ForCode::default();
+        code.set(secrets.clone(), ws);
+        assert!(frozen(code.resolve(project.clone(), "staging", "check:acme/web", None).await.unwrap_err()), "a check or a sandbox");
+    }
+
+    /// An incident's cut-off revokes through roll-access's own bulk revoke: every token that
+    /// reaches the folder, 500 a call (one write each, all or none), each with why; none other.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_cut_off_revokes_tokens_through_roll_access_500_at_a_time() {
+        use tower::ServiceExt;
+        let dir = tempfile::tempdir().unwrap();
+        let ws_db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("workspace.db")), "workspace").unwrap();
+        let ws = Arc::new(roll_workspace::Workspace::new(ws_db).unwrap());
+        let project = ws.create("", "shop", "", None).unwrap().id;
+        let access = roll_access::Access::open(&code_sql::Target::Sqlite(dir.path().join("access.db")), Default::default(), Default::default(), Default::default()).unwrap();
+        let db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("secrets.db")), "secrets").unwrap();
+        let opts = roll_secrets::Options {
+            keyring: Ok(roll_secrets::Keyring::new(&"k".repeat(32), None).unwrap()),
+            key_source: roll_secrets::KeySource::Env,
+            links: Default::default(),
+            syncs: Default::default(),
+            open: true,
+            trust_forwarded_for: false,
+            web_url: None,
+            deliver: None,
+            grants: Some(access.clone() as Arc<dyn roll_auth::Grants>),
+            people: None,
+            kms: None,
+            sts: None,
+            outside: None,
+            directory: None,
+            github: None,
+            clouds: None,
+            workloads: Some(Arc::new(super::Workloads(access.clone()))),
+            gateways: None,
+        };
+        let secrets = Arc::new(roll_secrets::Secrets::new(db, ws, opts).unwrap());
+        let token = |env: &str, n: usize| {
+            let rule = roll_secrets::access::rule(&project, Some(vec![env.into()]), None, &[roll_secrets::Action::Read, roll_secrets::Action::Reveal]);
+            let new = roll_access::store::NewGrant { name: format!("fake-{env}-{n}"), rules: roll_auth::scope::Scope(vec![rule]), ..Default::default() };
+            access.store.create(&new, roll_auth::GrantKind::Token, "operator", None, None).unwrap().0.id
+        };
+        let reaching: Vec<String> = (0..501).map(|n| token("production", n)).collect();
+        let other = token("staging", 0);
+        let cut = axum::http::Request::post(format!("/v1/secrets/projects/{project}/environments/production/reach/cut-off?path=/"))
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(json!({ "why": "incident 9: a fake leak" }).to_string()))
+            .unwrap();
+        let resp = roll_secrets::router(secrets).oneshot(cut).await.unwrap();
+        assert!(resp.status().is_success(), "{}", resp.status());
+        let r: Json = serde_json::from_slice(&http_body_util::BodyExt::collect(resp.into_body()).await.unwrap().to_bytes()).unwrap();
+        assert_eq!((r["tokens"].as_array().unwrap().len(), r["batches"].as_u64(), r["failed"].clone()), (501, Some(2), json!([])));
+        for id in [&reaching[0], &reaching[500]] {
+            let g = access.store.get(id).unwrap();
+            assert!(g.revoked_at.is_some() && g.revoked_why.as_deref().is_some_and(|w| w.contains("incident 9")), "{g:?}");
+        }
+        assert!(access.store.get(&other).unwrap().revoked_at.is_none(), "a token that doesn't reach it stays");
+    }
+
+    /// A sandbox gets a project's environment only as far as whoever creates it may reveal it in
+    /// roll secrets: managing the code owner isn't enough, and the audit row names them.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_sandbox_gets_an_environment_only_for_someone_who_may_reveal_it() {
+        use code_control::SecretEnv;
+        use tower::ServiceExt;
+        let dir = tempfile::tempdir().unwrap();
+        let ws_db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("workspace.db")), "workspace").unwrap();
+        let ws = Arc::new(roll_workspace::Workspace::new(ws_db).unwrap());
+        let project = ws.create("", "shop", "", None).unwrap().id;
+        ws.place(roll_workspace::Scope::All, &project, roll_workspace::Kind::Repo, "acme/api", 0.0, 0.0).unwrap();
+        let db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("secrets.db")), "secrets").unwrap();
+        let opts = roll_secrets::Options {
+            keyring: Ok(roll_secrets::Keyring::new(&"k".repeat(32), None).unwrap()),
+            key_source: roll_secrets::KeySource::Env,
+            links: Default::default(),
+            syncs: Default::default(),
+            open: false,
+            trust_forwarded_for: false,
+            web_url: None,
+            deliver: None,
+            grants: None,
+            people: None,
+            kms: None,
+            sts: None,
+            outside: None,
+            directory: None,
+            github: None,
+            clouds: None,
+            workloads: None,
+            gateways: None,
+        };
+        let secrets = Arc::new(roll_secrets::Secrets::new(db, ws.clone(), opts).unwrap());
+        let mut set = axum::http::Request::put(format!("/v1/secrets/projects/{project}/environments/development/secrets/DB_URL"))
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(json!({ "value": "postgres://dev" }).to_string()))
+            .unwrap();
+        set.extensions_mut().insert(roll_auth::Operator);
+        let r = roll_secrets::router(secrets.clone()).oneshot(set).await.unwrap();
+        assert!(r.status().is_success(), "{}", r.status());
+        let code = super::ForCode::default();
+        code.set(secrets.clone(), ws);
+        let grant = |id: &str, on: &str| {
+            let rule = roll_auth::scope::Rule { product: "secrets".into(), resources: roll_auth::scope::Resources::Some(vec![roll_auth::scope::Selector::Project { project: on.into() }]), environments: None, paths: None, actions: std::collections::BTreeMap::from([(roll_auth::scope::Action::Reveal, roll_auth::scope::Effect::Allow)]) };
+            roll_auth::Grant { user: None, ask_otherwise: false, id: id.into(), name: id.into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(roll_auth::scope::Scope(vec![rule])) }
+        };
+        let refused = |r: anyhow::Result<code_control::Revealed>| r.err().and_then(|e| e.downcast::<code_control::Refused>().ok()).map(|r| r.0);
+        // A token with code manage but no reveal here, and a code owner token (no one to roll
+        // secrets): refused, and nothing read.
+        let other = grant("tok_other", "prj_other");
+        let asker = code_control::Asker { operator: true, user: None, grant: Some(&other) };
+        assert!(refused(code.for_owner("acme", "shop", "development", "sandbox:sbx_1", asker).await).is_some_and(|m| m.contains("may not reveal development")));
+        assert!(refused(code.for_owner("acme", "shop", "development", "sandbox:sbx_1", code_control::Asker::default()).await).is_some());
+        // A token that may reveal it, and the operator: the values, and who copied them.
+        let mine = grant("tok_mine", &project);
+        let got = code.for_owner("acme", "shop", "development", "sandbox:sbx_2", code_control::Asker { operator: true, user: None, grant: Some(&mine) }).await.unwrap();
+        assert_eq!((got.by.as_str(), got.values), ("token:tok_mine", vec![("DB_URL".to_string(), "postgres://dev".to_string())]));
+        let got = code.for_owner("acme", "shop", "development", "sandbox:sbx_3", code_control::Asker { operator: true, user: None, grant: None }).await.unwrap();
+        assert_eq!(got.by, "operator");
+        let audit = secrets.audit(&project, roll_secrets::AuditFilter::default(), &roll_secrets::Caller::operator()).unwrap();
+        // The read is the person's or token's own, for the sandbox.
+        let reads: Vec<(&str, &str)> = audit.iter().filter(|a| a.summary.contains("sandbox:")).map(|a| (a.actor.as_str(), a.summary.as_str())).collect();
+        assert!(reads.contains(&("token:tok_mine", "resolved 1 value for sandbox:sbx_2 for token:tok_mine")), "{reads:?}");
+        assert!(reads.contains(&("operator", "resolved 1 value for sandbox:sbx_3 for operator")), "{reads:?}");
+        assert!(!reads.iter().any(|(_, s)| s.contains("sbx_1")), "a refused copy read nothing: {reads:?}");
+    }
+
+    /// An instance's token from roll's issuer goes only to a service its project stands for, in an
+    /// environment roll secrets has, and never to an untrusted preview (a fork's code).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_service_gets_an_issuer_token_only_from_a_project_that_stands_for_it() {
+        use apps_control::integrations::SecretSource;
+        use tower::ServiceExt;
+        struct Nobody;
+        impl roll_workspace::Owners for Nobody {
+            fn trusts(&self, _: &str, _: roll_workspace::Kind, _: &str) -> bool {
+                false
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let ws_db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("workspace.db")), "workspace").unwrap();
+        let ws = Arc::new(roll_workspace::Workspace::new(ws_db).unwrap());
+        ws.set_owners(Arc::new(Nobody));
+        let (operators, adas) = (ws.create("", "shop", "", None).unwrap().id, ws.create("usr_ada", "mine", "", None).unwrap().id);
+        let db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("secrets.db")), "secrets").unwrap();
+        let clouds = roll_secrets::clouds::Clouds { issuer: "https://roll.example/v1/secrets/oidc".into(), tokens: Arc::new(super::clouds::RollClouds::new()) };
+        let opts = roll_secrets::Options { keyring: Ok(roll_secrets::Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None, kms: None, sts: None, outside: None, github: None, clouds: Some(clouds), workloads: None, directory: None, gateways: None };
+        let secrets = Arc::new(roll_secrets::Secrets::new(db, ws.clone(), opts).unwrap());
+        let apps = super::ForApps::default();
+        apps.set(secrets.clone(), ws);
+        let ttl = std::time::Duration::from_secs(900);
+        let token = apps.issue(&operators, "svc_web", "production", "sts.amazonaws.com", ttl).await.unwrap().expect("a token");
+        use base64::Engine as _;
+        let claims: Json = serde_json::from_slice(&base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(token.split('.').nth(1).unwrap()).unwrap()).unwrap();
+        assert_eq!(claims["sub"], json!(format!("roll-apps:{operators}:svc_web:production")));
+        // A person's project stands only for their own services.
+        assert!(apps.issue(&adas, "svc_theirs", "production", "sts.amazonaws.com", ttl).await.is_err());
+        // Previews: a fork's (untrusted) gets no token, a vetted one does, under its own slug; an
+        // environment roll secrets doesn't have gets none either.
+        for (slug, trusted) in [("pv-fork", false), ("pv-vetted", true)] {
+            let new = axum::http::Request::post(format!("/v1/secrets/projects/{operators}/environments")).header("content-type", "application/json").body(axum::body::Body::from(json!({ "slug": slug, "base": "production", "trusted": trusted }).to_string())).unwrap();
+            assert!(roll_secrets::router(secrets.clone()).oneshot(new).await.unwrap().status().is_success());
+        }
+        let refused = apps.issue(&operators, "svc_web", "pv-fork", "sts.amazonaws.com", ttl).await.unwrap_err();
+        assert!(refused.to_string().contains("untrusted preview"), "{refused}");
+        let token = apps.issue(&operators, "svc_web", "pv-vetted", "sts.amazonaws.com", ttl).await.unwrap().expect("a vetted preview's token");
+        let claims: Json = serde_json::from_slice(&base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(token.split('.').nth(1).unwrap()).unwrap()).unwrap();
+        assert_eq!((claims["sub"].clone(), claims["environment"].clone()), (json!(format!("roll-apps:{operators}:svc_web:pv-vetted")), json!("pv-vetted")));
+        assert!(apps.issue(&operators, "svc_web", "nowhere", "sts.amazonaws.com", ttl).await.is_err());
     }
 
     /// A customer's key wraps a project's data key: Encrypt and Decrypt name the key and carry the

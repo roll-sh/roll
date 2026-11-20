@@ -196,7 +196,7 @@ impl Secrets {
                 "INSERT INTO rotators (id, project_id, name, host, url, secret, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 params![id, project, r.name, r.host, url, sealed, now, r.created_by],
             )?;
-            audit::record(c, project, caller, "rotator.add", None, None, &[], &format!("added rotator {} ({})", r.name, r.host), now)
+            audit::record(c, self.keys()?, project, caller, "rotator.add", None, None, &[], &format!("added rotator {} ({})", r.name, r.host), now)
         })?;
         Ok((r, secret))
     }
@@ -250,7 +250,7 @@ impl Secrets {
                 changed.push("URL");
             }
             if !changed.is_empty() {
-                audit::record(c, project, caller, "rotator.update", None, None, &[], &format!("changed rotator {}'s {}", r.name, changed.join(", ")), now)?;
+                audit::record(c, self.keys()?, project, caller, "rotator.update", None, None, &[], &format!("changed rotator {}'s {}", r.name, changed.join(", ")), now)?;
             }
             Ok(())
         })?;
@@ -268,7 +268,7 @@ impl Secrets {
         let now = self.db.now_ms()?;
         self.db.write(|c| {
             c.execute("UPDATE rotators SET secret = ? WHERE id = ?", params![sealed, id])?;
-            audit::record(c, project, caller, "rotator.rotate_secret", None, None, &[], &format!("rotated rotator {}'s signing secret", r.name), now)
+            audit::record(c, self.keys()?, project, caller, "rotator.rotate_secret", None, None, &[], &format!("rotated rotator {}'s signing secret", r.name), now)
         })?;
         Ok((r, secret))
     }
@@ -282,7 +282,7 @@ impl Secrets {
             let name: String = c.query_row("SELECT name FROM rotators WHERE id = ? AND project_id = ?", [id, project], |r| r.get(0)).optional()?.ok_or_else(|| Error::NotFound(format!("no rotator {id}")))?;
             in_use(c, project, KIND, id, &name)?;
             c.execute("DELETE FROM rotators WHERE id = ?", [id])?;
-            audit::record(c, project, caller, "rotator.delete", None, None, &[], &format!("deleted rotator {name}"), now)
+            audit::record(c, self.keys()?, project, caller, "rotator.delete", None, None, &[], &format!("deleted rotator {name}"), now)
         })
     }
 

@@ -3,10 +3,12 @@ import { appsApi } from "@/lib/apps-api";
 import { useWorkspace } from "@/lib/workspace-store";
 import { btn, Panel } from "../ui";
 import { DeletedPanel } from "./deleted";
+import { PreviewDomainPanel } from "./preview-domain";
 import { DrainsPanel } from "./drains";
 import { NotificationsPanel } from "./notifications";
 import { RunnerError, useRunner } from "./shared";
 import { SpendPanel } from "./spend";
+import { StatusPagePanel } from "./status-page";
 
 /** A project's roll apps settings, which cover all of its services: where its notifications
  *  go, its log drains, its spending limits, and its recently deleted services. The same panels as a service's Settings → The
@@ -43,7 +45,9 @@ export function ProjectApps({ project, projectName }: { project: string; project
       </Panel>
       <NotificationsPanel project={project} projectName={projectName} runner={runner} />
       <DrainsPanel project={project} projectName={projectName} runner={runner} />
+      <StatusPagePanel project={project} projectName={projectName} runner={runner} />
       <SpendPanel project={project} projectName={projectName} runner={runner} />
+      <PreviewDomainPanel project={project} projectName={projectName} runner={runner} />
       <DeletedPanel project={project} projectName={projectName} runner={runner} />
       <RunnerError runner={runner} />
     </div>

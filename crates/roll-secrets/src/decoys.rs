@@ -12,7 +12,7 @@
 //! fails).
 
 use crate::access::{Action, Caller, Scope};
-use crate::caller::Maker;
+use crate::caller::Origin;
 use crate::envs;
 use crate::write::{Item, ItemAction, SecretType, current};
 use crate::{Error, Planted, Result, Secret, Secrets, Value, audit, names};
@@ -122,9 +122,9 @@ impl Secrets {
         }
         // Whose it is: they're mailed when it's used, as the admins are.
         let owner = match self.maker(&caller.principal)? {
-            Maker::Person(u) => Some(u),
-            Maker::Operator => None,
-            Maker::Gone => return Err(Error::Forbidden("whoever made this token can't make decoys any more".into())),
+            Origin::Person(u) => Some(u),
+            Origin::Operator => None,
+            Origin::Gone => return Err(Error::Forbidden("whoever made this token can't make decoys any more".into())),
         };
         let planted = match &n.resource {
             None => {
@@ -146,13 +146,13 @@ impl Secrets {
         let (key, kind, handle, by) = (n.key.clone(), n.kind.clone(), planted.handle, caller.principal.clone());
         // `if_version` 0: only while the key doesn't exist. The decoy's row in the change's own
         // transaction: never a decoy key without its mark.
-        let written = self.commit_then(project, env, vec![item], &[(0, 0)], "write", "", None, true, caller, &|c, e, now| {
+        let written = self.commit_then(project, env, vec![item], &[(0, 0)], "write", "", None, true, caller, &|c, e, _, now| {
             let id = current(c, &e.id, &path, &key, "")?.ok_or_else(|| Error::Internal(format!("{key} wasn't written")))?.id;
             c.execute(
                 "INSERT INTO decoys (id, project_id, env_id, secret_id, path, key, kind, ref, created_by, created_at, uses) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
                 params![names::new_id("dcy", 16), project, e.id, id, path, key, kind, handle, by, now],
             )?;
-            audit::record(c, project, caller, "secrets.decoy", Some(&e.slug), Some(&path), std::slice::from_ref(&key), &format!("planted decoy {key} ({kind})"), now)
+            audit::record(c, self.keys()?, project, caller, "secrets.decoy", Some(&e.slug), Some(&path), std::slice::from_ref(&key), &format!("planted decoy {key} ({kind})"), now)
         });
         if let Err(e) = written {
             if let Err(r) = self.remove_decoy(&n.kind, &handle) {
@@ -195,7 +195,7 @@ impl Secrets {
             let text = format!("decoy {key} in {slug}:{path} was used{from}, calling {route}");
             let mut who = Caller::consumer("roll:decoys");
             who.ip = ip.clone();
-            audit::record(c, &project, &who, "secrets.alert.decoy_used", Some(&slug), Some(&path), std::slice::from_ref(&key), &text, now)?;
+            audit::record(c, self.keys()?, &project, &who, "secrets.alert.decoy_used", Some(&slug), Some(&path), std::slice::from_ref(&key), &text, now)?;
             if notify {
                 let link = web.as_ref().map(|w| format!("{}/dashboard/projects/{project}/secrets?env={slug}&tab=activity", w.trim_end_matches('/')));
                 let mut said = format!("roll secrets: {text}. Whoever used it found it where it was planted: cut them off and rotate what sits beside it.");

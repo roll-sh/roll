@@ -384,7 +384,7 @@ impl Aggregator for TsRateAgg {
 }
 
 /// `InternalResetTrackingRate`.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ResetTrackingRate {
     pub start_value: f64,
     pub end_value: f64,

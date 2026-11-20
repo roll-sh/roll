@@ -64,7 +64,7 @@ pub fn parse(p: &mut XParser<'_>, kind: GeoMetricKind) -> Result<GeoMetricSpec> 
 }
 
 /// `InternalGeoBounds`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct GeoBounds {
     pub top: f64,
     pub bottom: f64,
@@ -181,7 +181,7 @@ impl Internal for GeoBounds {
 }
 
 /// `InternalGeoCentroid`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct GeoCentroid {
     /// `(lat, lon)`; `None` with no points.
     pub centroid: Option<(f64, f64)>,

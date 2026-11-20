@@ -50,17 +50,29 @@ pub struct Settings {
     pub env_for: BTreeMap<String, BTreeMap<String, String>>,
     pub github: GithubRule,
     /// Who may open a preview's URLs: `link` (default) needs the preview's link, which carries
-    /// its access token once and then a cookie; `public` is anyone who can reach the domain.
+    /// its access token once and then a cookie; `team` is people signed in to roll who may open
+    /// the project (`visit.rs`), and the link's token lets nobody in; `public` is anyone who can
+    /// reach the domain. Share links and the CI bypass work under `link` and `team`.
     pub access: Access,
     /// Chromatic's UI Review, with screenshots on: `check` gives a change a visual review (the
     /// `roll/visual` commit status), pending while its pages differ from the baseline's and
     /// nobody has accepted them at that head; `required` also keeps it from landing in roll.
     pub visual_review: VisualReviewRule,
+    /// Lighthouse CI's budgets and Sentry's regression gates for what the preview ran: `check`
+    /// posts `roll/regressions`, failing while the change has routes slower than main's preview or
+    /// errors main's doesn't have (`slower_routes`, `new_errors`); `required` also keeps it from
+    /// landing in roll until they're gone or someone other than its author accepts them.
+    pub regressions: RegressionsRule,
     /// `catch` (the default): services send mail to roll's catcher (`SMTP_*` are roll's, mail
     /// providers' API keys are removed), listed on the preview, never delivered; `deliver`: the
     /// project's own mail settings reach previews.
     #[serde(default)]
     pub mail: MailRule,
+    /// Its `roll.toml` services get the OpenTelemetry SDK's variables, so an app with an SDK sends
+    /// its spans to the preview (the sheet's traces). Off by default: they're a preview's code's
+    /// words, kept a few hours.
+    #[serde(default)]
+    pub traces: bool,
     /// What its services' code may reach (docs/previews.md, "Egress"): `open` (the default)
     /// anything; `roll` only roll's own products, on a Docker network with no route out.
     #[serde(default)]
@@ -79,8 +91,8 @@ pub struct Settings {
     /// at most 30 days back. Products without history branch as of now and say so.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_at: Option<String>,
-    /// A feedback button on the pages of people who came in through roll (link access): it pins a
-    /// note to an element and posts it on the change, from roll.
+    /// A feedback button on the pages of people who came in through roll (link access, or a team
+    /// session): it pins a note to an element and posts it on the change, from roll.
     pub feedback: bool,
     /// Wake the change's services as soon as a new head is deployed, so the first visit (often
     /// the pull request comment's link) doesn't wait for a cold start.
@@ -143,6 +155,15 @@ pub enum EgressRule {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+pub enum RegressionsRule {
+    #[default]
+    Off,
+    Check,
+    Required,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum VisualReviewRule {
     #[default]
     Off,
@@ -155,6 +176,7 @@ pub enum VisualReviewRule {
 pub enum Access {
     #[default]
     Link,
+    Team,
     Public,
 }
 
@@ -275,7 +297,14 @@ pub struct Budget {
     pub lcp_ms: u32,
     /// Cumulative layout shift ("good" is up to 0.1).
     pub cls: f64,
+    /// Routes held to a time of their own (a trace's root span name → its p50 in ms, over the
+    /// last hour's traces): over it, a route counts as a regression whatever main's does.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub routes: std::collections::BTreeMap<String, u32>,
 }
+
+/// The most routes a project budgets.
+pub const MAX_ROUTE_BUDGETS: usize = 50;
 
 pub const MAX_HIDE: usize = 20;
 
@@ -348,7 +377,9 @@ impl Default for Settings {
             github: GithubRule::default(),
             access: Access::Link,
             visual_review: VisualReviewRule::Off,
+            regressions: RegressionsRule::Off,
             mail: MailRule::Catch,
+            traces: false,
             egress: EgressRule::Open,
             egress_hosts: Vec::new(),
             egress_forks: EgressRule::Roll,
@@ -378,6 +409,35 @@ impl Default for GithubRule {
 /// Whether an environment name is production's.
 /// Whether an environment name looks like production's. Errs on the side of yes: `prod`,
 /// `production-eu`, `prd`, `live`, `main`, `master`.
+/// Whether a variable's value is a reference into roll secrets (`roll://ENV[/folder…]/KEY`).
+pub fn is_reference(v: &str) -> bool {
+    v.starts_with("roll://")
+}
+
+/// A reference's shape: `roll://ENV[/folder…]/KEY` in the preview's own project (no `PROJECT@`:
+/// a preview reads its own project's environments). roll secrets checks the rest when it reads it.
+pub fn check_reference(v: &str) -> std::result::Result<(), String> {
+    let rest = v.strip_prefix("roll://").unwrap_or(v);
+    if rest.contains('@') {
+        return Err("a preview reads its own project's environments: roll://ENV/KEY, without PROJECT@".into());
+    }
+    let parts: Vec<&str> = rest.split('/').collect();
+    let ok = |p: &str| !p.is_empty() && p.len() <= 128 && p.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'));
+    if parts.len() < 2 || !parts.iter().all(|p| ok(p)) {
+        return Err("a reference is roll://ENV/KEY or roll://ENV/folder/KEY".into());
+    }
+    Ok(())
+}
+
+/// The references a project's rules hold: `(scope, name, reference)`, `scope` `env` or
+/// `env_for <glob>`.
+pub fn references(s: &Settings) -> Vec<(String, String, String)> {
+    std::iter::once(("env".to_string(), &s.env))
+        .chain(s.env_for.iter().map(|(g, v)| (format!("env_for {g}"), v)))
+        .flat_map(|(scope, vars)| vars.iter().filter(|(_, v)| is_reference(v)).map(move |(k, v)| (scope.clone(), k.clone(), v.clone())))
+        .collect()
+}
+
 pub fn is_production(env: &str) -> bool {
     let e = env.to_ascii_lowercase();
     e.contains("prod") || e.split(['-', '_']).any(|w| matches!(w, "prd" | "live" | "main" | "master"))
@@ -460,6 +520,21 @@ impl Settings {
         if base.is_empty() || base.len() > 64 || !base.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
             return bad("secrets.base: an environment name (1–64 of a-z, 0-9, - and _)".into());
         }
+        // A `roll://ENV[/folder]/KEY` value is a reference into roll secrets, read there with the
+        // preview's environment (untrusted: never a protected environment or a sensitive key).
+        for (glob, vars) in std::iter::once(("env", &self.env)).chain(self.env_for.iter().map(|(g, v)| (g.as_str(), v))) {
+            for (k, v) in vars {
+                if is_reference(v)
+                    && let Err(m) = check_reference(v)
+                {
+                    return bad(format!("{glob}: {k}: {m}"));
+                }
+                // One that reads as a reference only once trimmed is refused, not kept as text.
+                if !is_reference(v) && v.trim_start().to_ascii_lowercase().starts_with("roll://") {
+                    return bad(format!("{glob}: {k}: a reference starts with roll:// itself (no spaces before it, lowercase)"));
+                }
+            }
+        }
         if is_production(base) && !self.secrets.allow_production {
             return bad(format!("secrets.base {base:?} is production's: set secrets.allow_production to inherit it"));
         }
@@ -488,9 +563,11 @@ impl Settings {
                 return bad(format!("masking: {key}: at most 200 columns"));
             }
             if search {
-                // `index.field` (a nested field's path: `users.address.city`) → a search rule.
+                // `index.field` (a nested field's path: `users.address.city`; a data stream's
+                // backing index starts with a dot: `.ds-logs-….user.email`) → a search rule.
                 for (field, rule) in cols {
-                    let ok = field.len() <= 200 && field.split('.').count() >= 2 && !field.split('.').any(str::is_empty) && !field.contains(['*', ',', '/', ' ', '\\']);
+                    let named = if field.starts_with(".ds-") { &field[1..] } else { field.as_str() };
+                    let ok = field.len() <= 200 && named.split('.').count() >= 2 && !named.split('.').any(str::is_empty) && !field.contains(['*', ',', '/', ' ', '\\']);
                     if !ok || !SEARCH_MASKS.contains(&rule.as_str()) {
                         return bad(format!("masking: {key}: {field:?} → {rule:?} isn't \"index.field\" → one of {}", SEARCH_MASKS.join(", ")));
                     }
@@ -547,6 +624,9 @@ impl Settings {
         if b.load_ms > 600_000 || b.bytes > 10 << 30 || b.lcp_ms > 600_000 || !(0.0..=100.0).contains(&b.cls) {
             return bad("github.budget: load_ms and lcp_ms up to 600000, bytes up to 10 GiB, cls from 0 to 100".into());
         }
+        if b.routes.len() > MAX_ROUTE_BUDGETS || b.routes.iter().any(|(name, ms)| name.trim().is_empty() || name.len() > 200 || name.chars().any(char::is_control) || *ms == 0 || *ms > 600_000) {
+            return bad(format!("github.budget.routes: up to {MAX_ROUTE_BUDGETS} routes (a trace's root span name, as GET /orders), each 1 to 600000 ms"));
+        }
         let pages = &self.github.pages;
         if pages.len() > MAX_PAGES || pages.iter().any(|p| page_entry(p).is_none() || p == "/") || pages.iter().enumerate().any(|(i, p)| pages[..i].contains(p)) {
             return bad(format!(
@@ -598,7 +678,7 @@ fn merge(into: &mut Value, patch: &Value) {
                 match a.get_mut(k) {
                     // `resources`, `env`, `env_for` and `masking` are maps: a patch replaces them
                     // whole, so a key can be removed.
-                    Some(slot) if v.is_object() && !matches!(k.as_str(), "resources" | "env" | "env_for" | "masking") => merge(slot, v),
+                    Some(slot) if v.is_object() && !matches!(k.as_str(), "resources" | "env" | "env_for" | "masking" | "routes") => merge(slot, v),
                     _ => {
                         a.insert(k.clone(), v.clone());
                     }
@@ -660,6 +740,10 @@ mod tests {
         let two = Settings::default().patched(&json!({ "env_for": { "feat/*": { "A": "1", "B": "2" } } })).unwrap();
         let one = two.patched(&json!({ "env_for": { "feat/*": { "A": "1" } } })).unwrap();
         assert_eq!(one.env_for["feat/*"].len(), 1);
+        // Route budgets too: a route taken out of them goes.
+        let two = Settings::default().patched(&json!({ "github": { "budget": { "routes": { "GET /a": 300, "GET /b": 200 } } } })).unwrap();
+        let one = two.patched(&json!({ "github": { "budget": { "routes": { "GET /b": 200 } } } })).unwrap();
+        assert_eq!(one.github.budget.routes.keys().collect::<Vec<_>>(), ["GET /b"]);
         let r = Settings::default().patched(&json!({ "resources": { "redis:rdb_1": "skip", "nosql:n1": "schema" } })).unwrap();
         assert_eq!(r.mode_of(Kind::Redis, "rdb_1"), None);
         assert_eq!(r.mode_of(Kind::Nosql, "n1"), Some(Mode::Schema));
@@ -667,8 +751,8 @@ mod tests {
         // Structure-only where a kind can't do it: refused, never a silent full copy.
         assert!(Settings::default().patched(&json!({ "resources": { "bucket:b": "schema" } })).is_err());
         assert!(Settings::default().patched(&json!({ "github": { "hide": ["time", ".clock, #ad"] } })).is_ok());
-        assert!(Settings::default().patched(&json!({ "masking": { "search:catalog": { "users.email": "email", "users.address.city": "redact" } } })).is_ok());
-        for bad in [json!({ "users": "redact" }), json!({ "users.email": "hash" }), json!({ "*.email": "redact" })] {
+        assert!(Settings::default().patched(&json!({ "masking": { "search:catalog": { "users.email": "email", "users.address.city": "redact", ".ds-logs-2026.11.18-000001.user.email": "redact" } } })).is_ok());
+        for bad in [json!({ "users": "redact" }), json!({ "users.email": "hash" }), json!({ "*.email": "redact" }), json!({ ".kibana.email": "redact" })] {
             assert!(Settings::default().patched(&json!({ "masking": { "search:catalog": bad } })).is_err(), "{bad}");
         }
         assert!(Settings::default().patched(&json!({ "github": { "hide": ["a} body {display:none"] } })).is_err());

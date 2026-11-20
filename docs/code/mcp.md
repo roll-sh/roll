@@ -47,6 +47,7 @@ Repos are `"owner/repo"`. Changes are `"chg_…"` or `"owner/repo#N"`, and work 
 | `search_code` | literal or regex search; `rev` searches a change's head or a branch | `GET /repos/{r}/search` |
 | `read_file` | a file at a revision; long files come back in line ranges (`start_line`, `end_line`) | `GET /repos/{r}/blob/{rev}/{path}` |
 | `list_tree` | a directory, with each entry's last change | `GET /repos/{r}/tree/{rev}/{path}` |
+| `list_repos` | the repositories the caller can read, optionally one owner's | `GET /repos` |
 | `log` | first-parent history, optionally for one path | `GET /repos/{r}/log` |
 | `blame` | which changeset last changed each line | `GET /repos/{r}/blame/{rev}/{path}` |
 | `get_changeset` | a changeset and its diff | `GET /repos/{r}/changesets/{id}` |

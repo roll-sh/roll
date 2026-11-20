@@ -291,7 +291,7 @@ fn credential_id(state: &Option<Json>) -> Option<String> {
 
 /// Apply `items` to `env` as one change. Inside a write closure: only the database.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn apply(c: &Conn<'_>, dek: &Dek, env: &EnvRow, items: &[Item], kind: &str, message: &str, caller: &Caller, now: i64) -> Result<(Change, Vec<ItemDiff>)> {
+pub(crate) fn apply(c: &Conn<'_>, dek: &Dek, mac: &crate::Keyring, env: &EnvRow, items: &[Item], kind: &str, message: &str, caller: &Caller, now: i64) -> Result<(Change, Vec<ItemDiff>)> {
     let project = &env.project_id;
     c.execute("UPDATE projects SET seq = seq + 1 WHERE project_id = ?", [project])?;
     // The project's syncs check their digests next, within seconds, ahead of their turn.
@@ -456,7 +456,7 @@ pub(crate) fn apply(c: &Conn<'_>, dek: &Dek, env: &EnvRow, items: &[Item], kind:
     )?;
     let keys: Vec<String> = diffs.iter().map(|d| d.key.clone()).collect();
     let summary = summarize(&diffs);
-    audit::record(c, project, caller, &format!("secrets.{kind}"), Some(&env.slug), Some(&change.path), &keys, &format!("#{seq} {summary}"), now)?;
+    audit::record(c, mac, project, caller, &format!("secrets.{kind}"), Some(&env.slug), Some(&change.path), &keys, &format!("#{seq} {summary}"), now)?;
     Ok((change, diffs))
 }
 
@@ -638,7 +638,7 @@ impl Secrets {
     }
 
     /// What this project may link, sink to or sync to, as (kind, ref): its canvas's resources and
-    /// its own registrations (rotators, SaaS rotators, databases outside roll, AWS roles and IAM users, cloud
+    /// its own registrations (rotators, SaaS rotators, databases, directories, Snowflake accounts and MongoDB Atlas projects outside roll, AWS roles and IAM users, cloud
     /// accounts, Kubernetes clusters, CAs, SSH CAs and GitHub Apps), checked on every write, read, issue, rotation and delivery (a
     /// resource can move to another project).
     ///
@@ -656,6 +656,9 @@ impl Secrets {
         out.extend(self.aws_role_refs(project)?.into_iter().map(|(id, _)| (crate::aws::KIND.to_string(), id)));
         out.extend(self.aws_user_refs(project)?.into_iter().map(|(id, _)| (crate::iam::KIND.to_string(), id)));
         out.extend(self.outside_db_refs(project)?.into_iter().map(|(id, _)| (crate::outside::KIND.to_string(), id)));
+        out.extend(self.directory_refs(project)?.into_iter().map(|(id, _)| (crate::directories::KIND.to_string(), id)));
+        out.extend(self.snowflake_refs(project)?.into_iter().map(|(id, _)| (crate::snowflake::KIND.to_string(), id)));
+        out.extend(self.atlas_refs(project)?.into_iter().map(|(id, _)| (crate::atlas::KIND.to_string(), id)));
         out.extend(self.kubernetes_refs(project)?.into_iter().map(|(id, _)| (crate::kubernetes::KIND.to_string(), id)));
         out.extend(self.github_app_refs(project)?.into_iter().map(|(id, _)| (crate::github_app::KIND.to_string(), id)));
         Ok(out)
@@ -710,11 +713,12 @@ impl Secrets {
     /// (`if_version`: the key moved since it was read, so the change is refused as `stale`).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn commit_with(&self, project: &str, env_slug: &str, items: Vec<Item>, expect: &[(usize, i64)], kind: &str, message: &str, if_seq: Option<i64>, force: bool, caller: &Caller) -> Result<Applied> {
-        self.commit_then(project, env_slug, items, expect, kind, message, if_seq, force, caller, &|_, _, _| Ok(()))
+        self.commit_then(project, env_slug, items, expect, kind, message, if_seq, force, caller, &|_, _, _, _| Ok(()))
     }
 
     /// [`Self::commit_with`], running `then` in the change's own transaction after it's applied
-    /// (a decoy's mark). Inside the write: only the database.
+    /// (a decoy's mark; a secret request's answer, claimed there so the answer and its change
+    /// happen together or not at all). Inside the write, which may retry: only the database.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn commit_then(
         &self,
@@ -727,7 +731,7 @@ impl Secrets {
         if_seq: Option<i64>,
         force: bool,
         caller: &Caller,
-        then: &dyn Fn(&Conn<'_>, &EnvRow, i64) -> Result<()>,
+        then: &dyn Fn(&Conn<'_>, &EnvRow, &Change, i64) -> Result<()>,
     ) -> Result<Applied> {
         let warnings = self.warnings(project, env_slug, &items, caller);
         // A rollback restores what was there, typed or not.
@@ -756,8 +760,8 @@ impl Secrets {
             {
                 return Err(Error::Conflict("stale", format!("{} changed after #{s}", env.slug)));
             }
-            let applied = apply(c, &dek, &env, &prepared.items, kind, message, caller, now)?;
-            then(c, &env, now)?;
+            let applied = apply(c, &dek, self.keys()?, &env, &prepared.items, kind, message, caller, now)?;
+            then(c, &env, &applied.0, now)?;
             Ok(applied)
         });
         match res {

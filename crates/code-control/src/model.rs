@@ -291,6 +291,14 @@ impl Preview {
         let v = self.environment.as_ref()?.visual_review.as_ref().filter(|v| v.state == "changed")?;
         Some(v.head.as_deref().unwrap_or(""))
     }
+
+    /// The head at which its preview regressed against main's (routes slower, or errors new).
+    pub fn regressions_at(&self) -> Option<&str> {
+        // Up at its head (a push still deploying hasn't been compared at it).
+        let e = self.environment.as_ref().filter(|e| matches!(e.state.as_str(), "ready" | "sleeping"))?;
+        let any = e.slower_routes.as_ref().is_some_and(|s| !s.routes.is_empty()) || e.new_errors.as_ref().is_some_and(|n| n.total > 0);
+        any.then(|| e.head.as_deref().unwrap_or(""))
+    }
 }
 
 /// What a change shows of its preview environment (roll previews' `Preview`, summed up).
@@ -355,6 +363,12 @@ pub struct PreviewEnvironment {
     /// Its first page's own links that are broken, of those checked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page_links: Option<PreviewPageLinks>,
+    /// Its routes (from its traces) clearly slower than the same routes on main's preview.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slower_routes: Option<PreviewSlowerRoutes>,
+    /// Its error groups (from its services' output) that main's preview doesn't have.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_errors: Option<PreviewNewErrors>,
     /// How much its page differs from the project's preview of the default branch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_change: Option<PreviewBaseChange>,
@@ -368,6 +382,16 @@ pub struct PreviewEnvironment {
     /// How slow and heavy its first page may get (`roll/speed`), when the project set a budget.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speed_budget: Option<PreviewSpeedBudget>,
+    /// The project's rule for regressions against main's preview (`check`: the `roll/regressions`
+    /// status), when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub regressions: Option<String>,
+    /// Who accepted its regressions at this head (not its author, for `required`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub regressions_accepted_by: Option<String>,
+    /// Whether its preview was compared with main's at its head (errors, and routes with traces).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub regressions_compared: bool,
     /// The `roll/visual` status (the project's `github.visual_review`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visual_review: Option<PreviewVisualReview>,
@@ -512,6 +536,43 @@ pub struct PreviewBaseChange {
     pub endpoints: Vec<PreviewEndpoint>,
 }
 
+/// Error groups the branch's preview doesn't have: how many, and the most frequent few. A title
+/// is the preview's code's words (untrusted, masked).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PreviewNewErrors {
+    pub branch: String,
+    pub total: usize,
+    pub errors: Vec<PreviewNewError>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PreviewNewError {
+    pub service: String,
+    pub title: String,
+}
+
+/// Routes slower than on the branch's preview, the slowest against it first. A route's name is
+/// the preview's code's words (untrusted).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PreviewSlowerRoutes {
+    pub branch: String,
+    pub routes: Vec<PreviewSlowerRoute>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PreviewSlowerRoute {
+    pub name: String,
+    pub p50_ms: u64,
+    pub main_p50_ms: u64,
+    /// The span inside it whose time grew most against the branch's preview: `(name, ms, the
+    /// branch's ms)`. A name is the preview's code's words (untrusted).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grew: Option<(String, u64, u64)>,
+    /// The project's budget for it, when its p50 is over it (roll previews' `github.budget.routes`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_ms: Option<u64>,
+}
+
 /// One endpoint's time against the branch's.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PreviewEndpoint {
@@ -647,8 +708,9 @@ pub struct PreviewResourceLink {
 pub struct Blocker {
     /// `state`, `draft`, `untrusted`, `checks`, `needs_approval`, `needs_codeowner`,
     /// `changes_requested`, `unresolved_threads`, `review_pending`, `review_required` or
-    /// `secret_leak` (the change adds a roll secrets value; docs/secrets.md) (more kinds may be
-    /// added; show unknown ones by their message).
+    /// `secret_leak` (the change adds a roll secrets value; docs/secrets.md) or `secret_unstored`
+    /// (a credential roll secrets doesn't hold, when the repo's `roll.toml` blocks them; a notice
+    /// otherwise) (more kinds may be added; show unknown ones by their message).
     pub kind: String,
     pub message: String,
     /// The roll secrets key a `secret_leak` blocker or `secret_missing` notice is about, and the
@@ -657,11 +719,19 @@ pub struct Blocker {
     pub key: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub environments: Vec<String>,
+    /// `secret_unstored`: where the credential is (path and 1-based line) and its fingerprint (what
+    /// `.roll/secrets-allow` names to keep it); never its value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
 }
 
 impl Blocker {
     pub fn new(kind: &str, message: impl Into<String>) -> Blocker {
-        Blocker { kind: kind.into(), message: message.into(), key: None, environments: Vec::new() }
+        Blocker { kind: kind.into(), message: message.into(), key: None, environments: Vec::new(), path: None, line: None, fingerprint: None }
     }
 
     /// One about roll secrets key `key` in `environments`.

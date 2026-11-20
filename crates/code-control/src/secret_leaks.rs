@@ -4,6 +4,14 @@
 //! ([`crate::SecretEnv::leaks`]), and the answer is cached per (repo, head) with the merge base it
 //! was found from, as review facts are. Blockers name keys and environments, never a value or a line.
 //!
+//! The same pass finds credentials roll secrets doesn't hold yet (`roll_auth::credentials::find_all`:
+//! AWS, GitHub, Slack, Stripe, Google, Anthropic, OpenAI keys, private keys, roll's tokens) in the
+//! added lines: one that isn't a stored value, isn't obviously a placeholder
+//! (`credentials::placeholder`) and isn't in the repo's `.roll/secrets-allow` (read from the default
+//! branch's head) is a `secret_unstored` notice naming its kind, path and line, or a blocker when
+//! the default branch's `roll.toml` says `[secrets] unstored_credentials = "block"`. It works
+//! without roll secrets too (then nothing counts as stored).
+//!
 //! A scan ([`Code::scan_leaks`], `GET …/repos/{owner}/{name}/leaks`, for the repo's managers)
 //! checks the default branch's whole head tree the same way, for values that landed before the
 //! repo was on a project's canvas or before the secret was set, and says where: path and line,
@@ -21,7 +29,7 @@ const MAX_CANDIDATES: usize = 20_000;
 /// Added lines longer than this (bytes) are skipped: minified or generated text.
 const MAX_LINE: usize = 4096;
 /// Files larger than this (bytes, either side) aren't diffed.
-const MAX_FILE: u64 = 1 << 20;
+pub(crate) const MAX_FILE: u64 = 1 << 20;
 
 /// The most files a scan reads, the most candidates it checks, and how many go to roll secrets at
 /// once.
@@ -121,8 +129,50 @@ pub struct InHistory {
     pub path: String,
 }
 
-/// (key, environment) of every secret whose value a change adds.
-pub(crate) type Leaks = Arc<Vec<(String, String)>>;
+/// What a change's added lines hold, per head.
+#[derive(Default)]
+pub(crate) struct LeakFacts {
+    /// (key, environment) of every secret whose value it adds.
+    leaks: Vec<(String, String)>,
+    /// The credentials it adds that roll secrets doesn't hold, in order (placeholders left out;
+    /// the allow-list is applied when they're shown, as it can change without the change moving).
+    pub(crate) unstored: Vec<Unstored>,
+    /// Its diff couldn't be read: nothing is known, so under `block` that's a blocker.
+    unread: bool,
+    /// Something failed (the diff, or roll secrets' lookup, when every credential counts as
+    /// unstored): the next prepare tries again.
+    retry: bool,
+}
+pub(crate) type Leaks = Arc<LeakFacts>;
+
+/// A credential a change adds that roll secrets doesn't hold: never its value.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Unstored {
+    pub(crate) kind: &'static str,
+    pub(crate) path: String,
+    /// 1-based, in the change's version of the file.
+    pub(crate) line: usize,
+    pub(crate) fingerprint: String,
+    /// The key it would be stored as (`credentials::suggested_key`).
+    pub(crate) key: String,
+}
+
+impl Unstored {
+    /// Whether the default branch's `.roll/secrets-allow` keeps it, by fingerprint or path.
+    pub(crate) fn allowed(&self, allow: &roll_auth::credentials::Allow) -> bool {
+        allow.fingerprints.contains(&self.fingerprint) || code_review::glob::any(&allow.paths, &self.path)
+    }
+}
+
+/// A credential found in a change's added lines, before roll secrets is asked about it.
+struct Added {
+    value: String,
+    unstored: Unstored,
+}
+
+/// The most credentials kept per change, and the most shown (the rest are counted).
+const MAX_UNSTORED: usize = 200;
+const UNSTORED_SHOWN: usize = 20;
 /// (key, environments that lack it) of every environment variable a change starts reading.
 pub(crate) type Missing = Arc<Vec<(String, Vec<String>)>>;
 /// The most variable names a change's reads are looked up for.
@@ -130,38 +180,70 @@ const MAX_ENV_READS: usize = 200;
 
 impl Code {
     /// Make sure [`leak_blockers`](Self::leak_blockers) knows whether `c`'s head adds a
-    /// secret's value. Nothing without roll secrets; an error is logged and tried again next time.
+    /// secret's value. Without roll secrets only the credentials are looked for (none counts as
+    /// stored). An error is logged and tried again next time, and fails closed for credentials:
+    /// a diff that can't be read is marked unread, and when roll secrets can't say which values
+    /// it holds, every credential counts as unstored.
     pub(crate) async fn prepare_leaks(&self, r: &RepoRow, c: &Change) {
-        let Some(secrets) = self.secret_env.get().cloned() else { return };
+        let secrets = self.secret_env.get().cloned();
         if matches!(c.state, ChangeState::Landed | ChangeState::Closed) {
             return;
         }
         let Ok(Some(head)) = self.store.resolve(&r.id, &c.head) else { return };
-        let Ok(mb) = self.merge_base(r, &head) else { return };
         let key = (r.id.clone(), head);
-        if self.leak_facts.get(&key).is_some_and(|(at, _)| at == mb) {
+        let unread = |e: &dyn std::fmt::Display, mb: Option<ChangesetId>| {
+            tracing::warn!(change = %c.id, error = %e, "checking a change for leaked secrets");
+            self.leak_facts.put(key.clone(), (mb, Arc::new(LeakFacts { unread: true, retry: true, ..Default::default() })));
+        };
+        let mb = match self.merge_base(r, &head) {
+            Ok(mb) => mb,
+            Err(e) => return unread(&e, None),
+        };
+        if self.leak_facts.get(&key).is_some_and(|(at, f)| at == mb && !f.retry) {
             return;
         }
-        let (candidates, reads) = match self.added_candidates(r, mb.as_ref(), &head).await {
+        let (mut candidates, reads, added) = match self.added_candidates(r, mb.as_ref(), &head).await {
             Ok(found) => found,
-            Err(e) => {
-                tracing::warn!(change = %c.id, error = %e, "checking a change for leaked secrets");
-                return;
-            }
+            Err(e) => return unread(&e, mb),
+        };
+        let Some(secrets) = secrets else {
+            let unstored = added.into_iter().map(|a| a.unstored).collect();
+            self.leak_facts.put(key, (mb, Arc::new(LeakFacts { unstored, ..Default::default() })));
+            return;
         };
         // The variables it starts reading that an environment lacks: a notice, never a blocker.
         match if reads.is_empty() { Ok(Vec::new()) } else { secrets.missing(&r.full_name(), reads.into_iter().collect()).await } {
             Ok(missing) => self.env_facts.put(key.clone(), (mb, Arc::new(missing))),
             Err(e) => tracing::warn!(change = %c.id, error = %e, "checking a change's environment variables"),
         }
-        let found = if candidates.is_empty() { Ok(Vec::new()) } else { secrets.leaks(&r.full_name(), candidates).await.map(|l| l.into_iter().map(|(_, key, env, _)| (key, env)).collect()) };
+        // The credentials go with the candidates: one roll secrets holds is a `secret_leak`.
+        let mut index: HashMap<String, usize> = candidates.iter().enumerate().map(|(i, c)| (c.clone(), i)).collect();
+        let at: Vec<usize> = added
+            .iter()
+            .map(|a| {
+                *index.entry(a.value.clone()).or_insert_with(|| {
+                    candidates.push(a.value.clone());
+                    candidates.len() - 1
+                })
+            })
+            .collect();
+        let found = if candidates.is_empty() { Ok(Vec::new()) } else { secrets.leaks(&r.full_name(), candidates).await };
         match found {
-            Ok(mut leaks) => {
+            Ok(found) => {
+                let stored: HashSet<usize> = found.iter().map(|(i, ..)| *i).collect();
+                let mut leaks: Vec<(String, String)> = found.into_iter().map(|(_, key, env, _)| (key, env)).collect();
                 leaks.sort();
                 leaks.dedup();
-                self.leak_facts.put(key, (mb, Arc::new(leaks)));
+                let unstored = added.into_iter().zip(at).filter(|(_, i)| !stored.contains(i)).map(|(a, _)| a.unstored).collect();
+                self.leak_facts.put(key, (mb, Arc::new(LeakFacts { leaks, unstored, ..Default::default() })));
             }
-            Err(e) => tracing::warn!(change = %c.id, error = %e, "checking a change for leaked secrets"),
+            // Finding credentials needs nothing from roll secrets: they all count as unstored
+            // until the lookup answers (a `secret_leak` is found then).
+            Err(e) => {
+                tracing::warn!(change = %c.id, error = %e, "checking a change for leaked secrets");
+                let unstored = added.into_iter().map(|a| a.unstored).collect();
+                self.leak_facts.put(key, (mb, Arc::new(LeakFacts { unstored, retry: true, ..Default::default() })));
+            }
         }
     }
 
@@ -174,13 +256,55 @@ impl Code {
         let Ok(Some(head)) = self.store.resolve(&r.id, &c.head) else { return Vec::new() };
         let Some((_, leaks)) = self.leak_facts.get(&(r.id.clone(), head)) else { return Vec::new() };
         let mut by_key: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-        for (key, env) in leaks.iter() {
+        for (key, env) in leaks.leaks.iter() {
             by_key.entry(key).or_default().push(env);
         }
         by_key
             .into_iter()
             .map(|(key, envs)| Blocker::secret("secret_leak", format!("adds the value of {key} ({}): rotate it and remove it from the change", envs.join(", ")), key, envs.iter().map(|e| e.to_string()).collect()))
             .collect()
+    }
+
+    /// One `secret_unstored` finding per credential `c` adds that roll secrets doesn't hold and the
+    /// default branch's `.roll/secrets-allow` doesn't allow (from what
+    /// [`prepare_leaks`](Self::prepare_leaks) last found): a notice, or a blocker under
+    /// `[secrets] unstored_credentials = "block"`. The first [`UNSTORED_SHOWN`], then one that
+    /// counts the rest. Kind, path and line, never the value. Under `block`, a head whose diff
+    /// couldn't be read is a blocker too (an admin may land over it).
+    pub(crate) fn unstored_findings(&self, r: &RepoRow, c: &Change, settings: &crate::settings::Settings) -> Vec<Blocker> {
+        if matches!(c.state, ChangeState::Landed | ChangeState::Closed) {
+            return Vec::new();
+        }
+        let Ok(Some(head)) = self.store.resolve(&r.id, &c.head) else { return Vec::new() };
+        let Some((_, facts)) = self.leak_facts.get(&(r.id.clone(), head)) else { return Vec::new() };
+        if facts.unread {
+            let block = settings.secrets.unstored_credentials == crate::settings::Unstored::Block;
+            return if block { vec![Blocker::new("secret_unstored", "couldn't check this change for credentials: try again, or an admin can land it over this")] } else { Vec::new() };
+        }
+        let found: Vec<&Unstored> = facts.unstored.iter().filter(|u| !u.allowed(&settings.secrets_allow)).collect();
+        let mut out: Vec<Blocker> = found
+            .iter()
+            .take(UNSTORED_SHOWN)
+            .map(|u| {
+                let at = format!("{}:{}", u.path, u.line);
+                let read = roll_auth::credentials::env_read(&u.path, &u.key);
+                Blocker {
+                    path: Some(u.path.clone()),
+                    line: Some(u.line),
+                    fingerprint: Some(u.fingerprint.clone()),
+                    ..Blocker::new(
+                        "secret_unstored",
+                        format!("adds what looks like {} at {at}, which roll secrets doesn't hold: store it as {} (roll secrets scan --store {}={at}) and read it with {read}, or allow it in .roll/secrets-allow", u.kind, u.key, u.key),
+                    )
+                }
+            })
+            .collect();
+        // Two of one kind on one line read the same: one line in the list.
+        out.dedup_by(|a, b| a.message == b.message);
+        if found.len() > UNSTORED_SHOWN {
+            out.push(Blocker::new("secret_unstored", format!("and {} more credentials roll secrets doesn't hold", found.len() - UNSTORED_SHOWN)));
+        }
+        out
     }
 
     /// One `secret_missing` notice per environment variable `c` starts reading that a roll secrets
@@ -319,11 +443,12 @@ impl Code {
         Ok(())
     }
 
-    /// The candidate tokens of the lines `head` adds since `mb`, bounded by [`MAX_CANDIDATES`].
-    /// Binary files, files over [`MAX_FILE`] and lines over [`MAX_LINE`] are skipped.
-    /// The candidate tokens of the lines a change adds, and the environment variables they read.
-    async fn added_candidates(&self, r: &RepoRow, mb: Option<&ChangesetId>, head: &ChangesetId) -> Result<(Vec<String>, BTreeSet<String>)> {
-        let (mut out, mut reads) = (HashSet::new(), BTreeSet::new());
+    /// The candidate tokens of the lines `head` adds since `mb` (bounded by [`MAX_CANDIDATES`]),
+    /// the environment variables they read, and the credentials they hold that aren't
+    /// placeholders (at most [`MAX_UNSTORED`]). Binary files, files over [`MAX_FILE`] and lines
+    /// over [`MAX_LINE`] are skipped.
+    async fn added_candidates(&self, r: &RepoRow, mb: Option<&ChangesetId>, head: &ChangesetId) -> Result<(Vec<String>, BTreeSet<String>, Vec<Added>)> {
+        let (mut out, mut reads, mut added) = (HashSet::new(), BTreeSet::new(), Vec::new());
         for d in self.changed_paths(r, mb, head)? {
             if out.len() >= MAX_CANDIDATES {
                 break;
@@ -338,8 +463,12 @@ impl Code {
                     break;
                 }
             }
+            if added.len() < MAX_UNSTORED {
+                credentials_in(d.path.as_str(), &patch, &mut added);
+            }
         }
-        Ok((out.into_iter().take(MAX_CANDIDATES).collect(), reads))
+        added.truncate(MAX_UNSTORED);
+        Ok((out.into_iter().take(MAX_CANDIDATES).collect(), reads, added))
     }
 
     /// A file diff's unified patch, when it adds text worth reading: not a deletion, a
@@ -394,6 +523,66 @@ fn env_reads(line: &str, out: &mut BTreeSet<String>) {
             }
         }
     }
+}
+
+/// The credentials in the lines a file's patch adds, with the line each starts on in the new
+/// file: each run of added lines is read as one text (a private key's block spans lines), a line
+/// over [`MAX_LINE`] read as empty. Placeholders are left out.
+fn credentials_in(path: &str, patch: &str, out: &mut Vec<Added>) {
+    // The run of added lines being read: its text and the line it starts on.
+    let mut run: Option<(String, usize)> = None;
+    let mut next = 0usize;
+    let flush = |run: &mut Option<(String, usize)>, out: &mut Vec<Added>| {
+        let Some((text, first)) = run.take() else { return };
+        // Matches come in order: the line is counted on from the last one.
+        let (mut line, mut seen) = (first, 0);
+        for m in roll_auth::credentials::find_all(&text) {
+            if out.len() >= MAX_UNSTORED {
+                return;
+            }
+            line += text[seen..m.start].matches('\n').count();
+            seen = m.start;
+            let value = &text[m.start..m.end];
+            if roll_auth::credentials::placeholder(value) {
+                continue;
+            }
+            let line_start = text[..m.start].rfind('\n').map_or(0, |i| i + 1);
+            let unstored = Unstored {
+                kind: m.kind,
+                path: path.to_string(),
+                line,
+                fingerprint: roll_auth::credentials::fingerprint(value),
+                key: roll_auth::credentials::suggested_key(m.kind, &text[line_start..m.start]),
+            };
+            if !out.iter().any(|a| a.unstored == unstored) {
+                out.push(Added { value: value.to_string(), unstored });
+            }
+        }
+    };
+    for l in patch.lines().skip_while(|l| !l.starts_with("@@")) {
+        if let Some(h) = l.strip_prefix("@@ ") {
+            flush(&mut run, out);
+            // `@@ -a,b +c,d @@`: the new file's lines start at c.
+            next = h.split(' ').find_map(|p| p.strip_prefix('+')).and_then(|p| p.split(',').next()?.parse().ok()).unwrap_or(1);
+        } else if let Some(added) = l.strip_prefix('+') {
+            let line = if added.len() <= MAX_LINE { added } else { "" };
+            match &mut run {
+                Some((text, _)) => {
+                    text.push('\n');
+                    text.push_str(line);
+                }
+                None => run = Some((line.to_string(), next)),
+            }
+            next += 1;
+        } else if l.starts_with(' ') || l.is_empty() {
+            // A context line (diffy writes a blank one as an empty line, without its space).
+            flush(&mut run, out);
+            next += 1;
+        } else if l.starts_with('-') {
+            flush(&mut run, out);
+        }
+    }
+    flush(&mut run, out);
 }
 
 /// The lines a unified patch adds (up to [`MAX_LINE`] bytes each).
@@ -472,6 +661,16 @@ mod tests {
         }
         let found: Vec<&str> = found.iter().map(String::as_str).collect();
         assert_eq!(found, ["API_KEY", "DATABASE_URL", "REDIS_URL", "SENTRY_DSN", "STRIPE_KEY", "TOKEN"]);
+    }
+
+    #[test]
+    fn a_credential_is_on_its_line_of_the_new_file_past_blank_context() {
+        let key = ["AKIA", "ROLLFIXTURE", "23456"].concat();
+        // diffy's patch: the blank context line is empty, without a leading space.
+        let patch = format!("--- a/deploy.py\n+++ b/deploy.py\n@@ -1,3 +1,4 @@\n import os\n\n REGION = 1\n+aws_access_key_id = \"{key}\"\n");
+        let mut out = Vec::new();
+        super::credentials_in("deploy.py", &patch, &mut out);
+        assert_eq!(out.iter().map(|a| a.unstored.line).collect::<Vec<_>>(), [4]);
     }
 
     #[test]

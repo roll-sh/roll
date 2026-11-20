@@ -11,7 +11,7 @@
 use crate::error::{AggError, Result};
 
 /// The integer counts histogram (`org.HdrHistogram.Histogram`).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct IntHistogram {
     highest_trackable_value: i64,
     digits: u32,
@@ -304,7 +304,7 @@ impl IntHistogram {
 }
 
 /// `org.HdrHistogram.DoubleHistogram` with auto-resize.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct DoubleHistogram {
     configured_ratio: i64,
     lowest_in_range: f64,

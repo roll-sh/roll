@@ -15,12 +15,15 @@ anyhow.workspace = true
 base64.workspace = true
 hmac.workspace = true
 pbkdf2.workspace = true
+bcrypt.workspace = true
 sha2.workspace = true
 axum.workspace = true
 bytes.workspace = true
 chrono.workspace = true
 clap.workspace = true
 ipnet.workspace = true
+roll-gateway.workspace = true
+serde.workspace = true
 roll-cluster.workspace = true
 code-control.workspace = true
 code-github.workspace = true
@@ -51,6 +54,8 @@ mq-storage.workspace = true
 mq-stream.workspace = true
 nosql-alternator.workspace = true
 nosql-control.workspace = true
+# roll secrets' Cassandra/ScyllaDB outside roll: frames and messages, no client.
+nosql-proto.workspace = true
 nosql-server.workspace = true
 nosql-storage.workspace = true
 object_store.workspace = true
@@ -68,6 +73,8 @@ roll-edge.workspace = true
 roll-workspace.workspace = true
 roll-secrets.workspace = true
 http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
 tower.workspace = true
 url.workspace = true
 roll-accounts.workspace = true
@@ -90,10 +97,13 @@ tokio.workspace = true
 tokio-rustls.workspace = true
 tokio-postgres.workspace = true
 tokio-postgres-rustls.workspace = true
+ldap3.workspace = true
 rustls-native-certs.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 urlencoding.workspace = true
+# roll secrets' ACME: tls-alpn-01's challenge certificate.
+x509-parser.workspace = true
 zeroize.workspace = true
 # The deployment key of roll secrets as a KMS ciphertext (ROLL_SECRET_KEY_KMS).
 aws-config.workspace = true
@@ -109,6 +119,7 @@ rdkafka = { workspace = true, optional = true }
 fleet-e2e = ["dep:rdkafka"]
 
 [dev-dependencies]
+roll-gateway = { workspace = true, features = ["agent"] }
 aws-sdk-s3.workspace = true
 aws-smithy-http-client.workspace = true
 aws-smithy-runtime-api.workspace = true
@@ -125,6 +136,7 @@ reqwest = { workspace = true, features = ["json", "rustls"] }
 rusqlite.workspace = true
 # The Google Secret Manager sync's test signs with a key made then (no key in the repo).
 rsa = { workspace = true, features = ["sha2"] }
+roll-keyshares.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 tokio.workspace = true

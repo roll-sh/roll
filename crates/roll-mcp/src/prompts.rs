@@ -128,6 +128,32 @@ const PROMPTS: &[Prompt] = &[
         },
     },
     Prompt {
+        name: "security_checkup",
+        title: "Security checkup",
+        description: "What needs attention in roll's tokens, most serious first, with a narrower rule set for each over-broad one, then what's open to the internet; changes nothing.",
+        args: &[],
+        needs: &["access_checkup", "access_tighten_token", "access_token_networks"],
+        text: |_| {
+            "Run a security checkup of my roll access. Call access_checkup and go through its tokens most serious \
+             first. For each one flagged everything or narrower, call access_tighten_token and show which rules it \
+             would drop, in plain words. For each one that roams, call access_token_networks and name the networks \
+             it was used from, so I can tell whether one is unexpected. Say which tokens to revoke (unused) and \
+             which need an expiry. If you also have secrets_findings or previews_mask_suggestions, add the secrets \
+             that need fixing and the personal data previews don't mask yet; with secrets_verify_audit, each \
+             project whose secrets audit log doesn't hold (its first break); with storage_list_keys, the S3 access \
+             keys that are admin over every bucket or unused for 90 days. Then what's open to the internet, with \
+             whichever of these you have: buckets that are public (storage_list_buckets), search clusters with no \
+             IP allowlist (search_list_clusters), and previews shared outside the team (previews_list, then \
+             previews_list_shares for who and until when), secrets' one-off share links still open (secrets_list_shares), a project's public status page (apps_status_page: \
+             what it shows), and the live deploys whose images have critical or \
+             high vulnerabilities with a fix (apps_deploy_vulnerabilities with severity high). Change nothing \
+             yourself: applying a \
+             tighten, revoking or limiting a token is for me or the operator, on the token's page or with roll \
+             token. Never print a secret."
+                .into()
+        },
+    },
+    Prompt {
         name: "debug_failing_service",
         title: "Debug a failing service",
         description: "Why an app service's environment is failing: its last deploys, errors and metrics, then a fix or a rollback.",
@@ -178,6 +204,7 @@ pub fn source(prompt: &str, arg: &str) -> Option<Source> {
         "project" => Some(workspace_projects()),
         "service" => Some(Source { tool: "apps_list_services", args: |_| json!({}), fields: &["id"] }),
         "env" => Some(Source { tool: "apps_list_environments", args: |ctx| json!({ "service": ctx["service"] }), fields: &["name"] }),
+        "branch" => crate::ask::source("postgres", "branch"),
         _ => None,
     }
 }
@@ -195,7 +222,7 @@ pub fn values(answer: &Value, fields: &[&str], typed: &str) -> (Vec<String>, boo
     for item in items {
         for f in fields {
             if let Some(v) = item.get(*f).and_then(Value::as_str)
-                && is_id(v)
+                && is_choice(v)
                 && v.to_lowercase().starts_with(&typed)
                 && !out.iter().any(|o| o == v)
             {
@@ -219,6 +246,12 @@ fn clean(v: Option<&Value>) -> String {
 /// and a prompt's text is the person's own message to the agent.
 pub(crate) fn is_id(s: &str) -> bool {
     !s.is_empty() && s.len() <= 64 && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+}
+
+/// What a form or a completion may offer: an id, or a repo's `owner/name` (each part an id, and
+/// neither only dots, so it names nothing above).
+pub(crate) fn is_choice(s: &str) -> bool {
+    is_id(s) || s.split_once('/').is_some_and(|(o, n)| [o, n].iter().all(|p| is_id(p) && !p.chars().all(|c| c == '.')))
 }
 
 fn offered<'a>(tools: &'a [String]) -> impl Iterator<Item = &'static Prompt> + 'a {

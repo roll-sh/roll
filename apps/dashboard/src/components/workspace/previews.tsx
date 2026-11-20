@@ -284,6 +284,63 @@ function NewAgainstMain({ preview: p }: { preview: Preview }) {
   );
 }
 
+/** Rows' error counts in flight at once: a long list asks a few at a time, not one request per row together. */
+const COUNTS_AT_ONCE = 3;
+let countsRunning = 0;
+const countsWaiting: (() => void)[] = [];
+
+/** `read` once a slot is free (see {@link COUNTS_AT_ONCE}). */
+async function inTurn<T>(read: () => Promise<T>): Promise<T> {
+  if (countsRunning >= COUNTS_AT_ONCE) await new Promise<void>((go) => countsWaiting.push(go));
+  countsRunning++;
+  try {
+    return await read();
+  } finally {
+    countsRunning--;
+    countsWaiting.shift()?.();
+  }
+}
+
+/** How many errors its services wrote in the last hour, read once its row is on screen while it runs or sleeps (counted only: the sheet's Errors tab lists them). */
+function RecentErrors({ preview: p }: { preview: Preview }) {
+  const [count, setCount] = useState(0);
+  const [seen, setSeen] = useState(false);
+  const ref = useRef<HTMLSpanElement>(null);
+  const up = p.desired !== "deleted" && (p.state === "ready" || p.state === "sleeping");
+  useEffect(() => {
+    // Its row's line: this one's `contents` has no box of its own to intersect.
+    const el = ref.current?.parentElement;
+    if (seen || !el) return;
+    if (typeof IntersectionObserver === "undefined") return setSeen(true);
+    const io = new IntersectionObserver((entries) => entries.some((e) => e.isIntersecting) && setSeen(true));
+    io.observe(el);
+    return () => io.disconnect();
+  }, [seen]);
+  useEffect(() => {
+    if (!up || !seen) {
+      setCount(0);
+      return;
+    }
+    let live = true;
+    inTurn(() => (live ? previewsApi.errorCount(p.id, 60) : Promise.resolve({ count: 0, minutes: 60 }))).then(
+      (r) => live && setCount(r.count),
+      () => {},
+    );
+    return () => {
+      live = false;
+    };
+  }, [p.id, up, seen]);
+  return (
+    <span ref={ref} className="contents">
+      {count > 0 && (
+        <span className="shrink-0 rounded border border-danger/40 px-1 font-mono text-[10.5px] text-danger tabular-nums" title={`${count} ${count === 1 ? "error" : "errors"} in its output in the last hour: open it for which`}>
+          {count > 999 ? "999+" : count} {count === 1 ? "error" : "errors"}
+        </span>
+      )}
+    </span>
+  );
+}
+
 function Row({ preview: p, open, onOpen }: { preview: Preview; open: boolean; onOpen: () => void }) {
   const what = previewOf(p);
   return (
@@ -300,6 +357,7 @@ function Row({ preview: p, open, onOpen }: { preview: Preview; open: boolean; on
             </span>
           )}
           <NewAgainstMain preview={p} />
+          <RecentErrors preview={p} />
           {p.reported_by && (
             <span className="shrink-0 rounded border border-line-2 px-1 text-[10.5px] text-muted" title={`${p.reported_by} reports this pull request (its roll/preview status and comment); this preview says nothing there`}>
               quiet
@@ -382,6 +440,12 @@ function Empty({ repos, onBranch }: { repos: string[]; onBranch: () => void }) {
           "Add a repository to this project: each change or pull request in it gets its own copy of the project, with a branch of every database."
         )}
       </p>
+      {repos.length > 0 && (
+        <p className="mt-2 max-w-[440px] text-[11.5px] text-subtle">
+          Its services are the project's roll apps services, or a repo's <span className="font-mono">roll.toml</span> <span className="font-mono">[preview]</span>. A repo with a
+          Compose file becomes roll apps services with New service → A file.
+        </p>
+      )}
       {repos.length > 0 && (
         <button onClick={onBranch} className={`${btn} mt-4`}>
           <GitBranch className="size-3.5" strokeWidth={1.5} />
