@@ -2973,8 +2973,8 @@ async fn esql_across_clusters_answers_as_one_cluster() {
     let (s, v) = e.es(&all, &all_pw, Method::PUT, "/logs/_doc/1?refresh=true", Some(json!({ "msg": "a", "code": 1 }))).await;
     assert_eq!(s, 201, "{v}");
     assert_eq!(e.call(Method::PUT, "/v1/search/clusters/esql-near/remotes/far2", Some(json!({ "cluster": "esql-all" }))).await.0, 200);
-    let (s, v) = query(&near, &near_pw, json!({ "query": "FROM items,far:missing,far2:logs | STATS c = COUNT(*)" })).await;
-    assert_eq!((s, v["values"].clone()), (200, json!([[61]])), "{v}");
+    let (s, v) = query(&near, &near_pw, json!({ "query": "FROM items,far:missing,far2:logs | STATS c = COUNT(*), m = MAX(code)" })).await;
+    assert_eq!((s, v["values"].clone()), (200, json!([[61, 1]])), "only far2 maps `code`: {v}");
     assert_eq!(e.es(&near, &near_pw, Method::PUT, "/_cluster/settings", Some(json!({ "persistent": { "cluster.remote.far.skip_unavailable": false } }))).await.0, 200);
     let (s, v) = query(&near, &near_pw, json!({ "query": "FROM items,far:missing | LIMIT 1" })).await;
     assert_eq!((s, v["error"]["reason"].as_str()), (400, Some("Unknown index [far:missing]")), "{v}");
@@ -2992,6 +2992,8 @@ async fn esql_across_clusters_answers_as_one_cluster() {
         ("FROM items,far:items | SORT n | LIMIT 2 | ENRICH tag_label | KEEP n, label", json!([[0, "N-a"], [1, "N-b"]])),
         // Sorted on the parts' `n`, which the policy then overwrites.
         ("FROM items,far:items | WHERE n > 0 | SORT n | LIMIT 3 | ENRICH _remote:tag_label WITH n = label | KEEP n", json!([["N-b"], ["N-c"], ["F-d"]])),
+        // Each cluster's policy also after the commands between `SORT` and `LIMIT`.
+        ("FROM items,far:items | SORT n | KEEP n, tag | LIMIT 3 | ENRICH _remote:tag_label | KEEP n, label", json!([[0, "F-a"], [1, "N-b"], [2, "N-c"]])),
     ] {
         let (s, v) = query(&near, &near_pw, json!({ "query": q })).await;
         assert_eq!((s, v["values"].clone()), (200, want), "{q}: {v}");
@@ -2999,6 +3001,9 @@ async fn esql_across_clusters_answers_as_one_cluster() {
     for (q, reason) in [
         ("FROM items,far:items | STATS c=COUNT(*) BY tag | ENRICH _remote:tag_label | SORT tag", "Found 1 problem\nline 1:50: ENRICH with remote policy can't be executed after [STATS c=COUNT(*) BY tag]@1:24"),
         ("FROM items,far:items | ENRICH only_near | LIMIT 1", "Found 1 problem\nline 1:31: cannot find enrich policy [only_near] on clusters [far]"),
+        // Never this cluster's lookup index or policy where Elasticsearch reads each cluster's.
+        ("FROM far:items | ENRICH _coordinator:tag_label | LOOKUP JOIN lk ON tag", "Found 1 problem\nline 1:50: LOOKUP JOIN with remote indices can't be executed after [ENRICH _coordinator:tag_label]@1:18"),
+        ("FROM far:items | INLINE STATS m = MAX(n) | ENRICH _remote:tag_label | KEEP n, m, label", "Found 1 problem\nline 1:44: ENRICH with remote policy can't be executed after [INLINE STATS m = MAX(n)]@1:18"),
     ] {
         let (s, v) = query(&near, &near_pw, json!({ "query": q })).await;
         assert_eq!((s, v["error"]["reason"].as_str()), (400, Some(reason)), "{q}: {v}");
@@ -3068,6 +3073,8 @@ async fn esql_across_clusters_reads_as_the_link_allows() {
     // `remote_cluster` grants only Elasticsearch's remote cluster privileges.
     let (s, v) = e.es(&near, &near_pw, Method::PUT, "/_security/role/bad", Some(json!({ "remote_cluster": [{ "clusters": ["far"], "privileges": ["all"] }] }))).await;
     assert_eq!((s, v["error"]["reason"].as_str()), (400, Some("failed to parse remote_cluster for role [bad]. [monitor_enrich, monitor_stats] are the only values allowed for [privileges] within [remote_cluster]. Found [all]")), "{v}");
+    let (s, v) = e.es(&near, &near_pw, Method::PUT, "/_security/role/bad", Some(json!({ "remote_cluster": [{ "clusters": ["far"] }] }))).await;
+    assert_eq!((s, v["error"]["reason"].as_str()), (400, Some("failed to parse remote_cluster for role [bad]. [privileges] must be defined when [clusters] are defined ")), "{v}");
     // A remote's ENRICH needs `monitor_enrich` there (`remote_cluster`), whatever the key's own.
     ccs_policy(&e, &far, &far_pw, "tag_label", "F").await;
     let enrich = json!({ "query": "FROM far:items | ENRICH _remote:tag_label | KEEP n, label | SORT n | LIMIT 1" });
@@ -3078,6 +3085,23 @@ async fn esql_across_clusters_reads_as_the_link_allows() {
     assert_eq!(e.es(&near, &near_pw, Method::PUT, "/_security/role/reader", Some(reader)).await.0, 200);
     let (s, v) = e.es(&format!("reader@{near}"), "pass-word-1", Method::POST, "/_query", Some(enrich)).await;
     assert_eq!((s, v["values"].clone()), (200, json!([[0, "F-a"]])), "{v}");
+
+    // A remote runs only what it parses a part to be: a STATS part whose text is no STATS, or a
+    // part naming no alias, is refused whatever the request says.
+    {
+        let links = e.control.node.cfg.links.clone().unwrap();
+        let near_id = e.get("/v1/search/clusters/esql-sec-near").await["id"].as_str().unwrap().to_string();
+        let roles = json!([{ "r0": { "cluster": [], "indices": [{ "names": ["*"], "privileges": ["read"] }] } }]);
+        for (alias, mode, want) in [(json!("far"), "stats", "an ES|QL part this cluster won't run: its commands aren't a STATS part"), (Value::Null, "rows", "an ES|QL part roll can't read")] {
+            let body = json!({ "query": "FROM \"items\" | LIMIT 5", "__roll_esql_part": { "alias": alias, "mode": mode, "schema": [], "policies": [] } });
+            let mut req = search_es::rest::EsRequest::json("POST", "/_query", body.to_string().into_bytes());
+            req.headers.push(("x-roll-remote-access".into(), json!({ "cluster": "esql-sec-near", "who": "user [t]", "roles": roles }).to_string()));
+            req.headers.push(("x-roll-esql-part".into(), "1".into()));
+            let r = links.send(&near_id, "far", "esql-sec-far", req).await.unwrap();
+            let v: Value = serde_json::from_slice(&r.body).unwrap();
+            assert_eq!((r.status, v["error"]["reason"].as_str()), (400, Some(want)), "{v}");
+        }
+    }
 
     // A part's answer is a link's only: a client asking gets an ordinary one.
     let part = r#"{"mode":"rows","schema":[],"policies":[]}"#;

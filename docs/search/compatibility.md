@@ -1589,7 +1589,13 @@ the rest are skipped by the tests' own prerequisites.
   cross-cluster search on the coordinating cluster (no `_clusters`, and `ENRICH` there uses the
   local policies). A quoted `METADATA` name is unresolved as in Elasticsearch, but one holding
   characters Elasticsearch's lexer refuses there (a `|`) is that verification error rather than
-  Elasticsearch's lexer error. roll doesn't require the local `monitor_enrich` an ENRICH's policy resolution
+  Elasticsearch's lexer error. A command that reads each cluster's own resources (`ENRICH _remote`, `ENRICH` in
+  `_any` mode before any `LIMIT`, `STATS` or `ENRICH _coordinator`, `LOOKUP JOIN`) runs in the
+  clusters' parts or is refused: Elasticsearch first drops an `INLINE STATS` whose columns
+  nothing reads, and then runs such a command after it, where roll refuses it as after one
+  that's read (`… can't be executed after [INLINE STATS …]`), and it drops a `SORT` before a
+  `STATS`, where roll refuses an `ENRICH _remote` between them. roll doesn't require the local
+  `monitor_enrich` an ENRICH's policy resolution
   needs in Elasticsearch (the remote's is required, as there). A
   remote that can't be reached while it may not be skipped fails the query with roll's own
   `connect_transport_exception` reason (502, as Elasticsearch's status). A policy a remote lacks

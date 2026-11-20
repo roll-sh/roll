@@ -301,15 +301,30 @@ async fn run(ctx: &Ctx<'_>, req: &Request, body: &Value, part: Option<std::sync:
     // A remote's part runs only what it is, as this cluster parses it ([`ccs::admit_part`]): its
     // shape, its `ENRICH`es' `monitor_enrich` here (the `remote_cluster` privilege the link
     // carries) and their policies.
-    if let Some(p) = part.as_ref().filter(|p| p.alias.is_some()) {
-        let parsed = parser::parse_with(&req.query, &req.params)?;
-        ccs::admit_part(ctx, &parsed, p)?;
-    }
+    let part = match part {
+        Some(p) => {
+            let parsed = parser::parse_with(&req.query, &req.params)?;
+            ccs::admit_part(ctx, &parsed, &p)?;
+            // A rows part with nothing to bound it answers at most this cluster's own cap when
+            // the request names none: never everything it reads.
+            let bounded = parsed.cmds.iter().any(|c| matches!(c, parser::Cmd::Limit(_)));
+            if p.mode == ccs::Mode::Rows && !bounded && p.max_bytes.is_none() {
+                let b = ctx.cluster.breakers.request(ctx.cluster, &ctx.state());
+                let mut capped = (*p).clone();
+                capped.max_bytes = Some(b.limit().saturating_sub(b.used()));
+                Some(std::sync::Arc::new(capped))
+            } else {
+                Some(p)
+            }
+        }
+        None => None,
+    };
     let remotes = if part.is_some() { None } else { ccs::Ccs::of(ctx, body, &req.params) };
     let is_part = part.clone();
     let (mut out, table, stats) = ccs::part_scope(part, ccs::scope(remotes, run_query(ctx, req))).await?;
     if let Some(p) = is_part {
-        // A `STATS` part answers its states or nothing: never final rows as if it had none.
+        // Defensive: `admit_part` runs only `STATS` parts the executor answers with states;
+        // one that didn't would be read as no groups, so it's an error, never empty.
         if p.mode == ccs::Mode::Stats && stats.partial.is_none() {
             return Err(EsError::illegal_state("this cluster's part of the query can't answer STATS partially"));
         }

@@ -2577,7 +2577,8 @@ impl TopN {
 /// first (Elasticsearch's optimizer pushes it down the same way).
 fn sort_then_limit(cmds: &[Cmd]) -> Option<(&[super::parser::SortKey], usize, usize)> {
     let Some(Cmd::Sort(keys)) = cmds.first() else { return None };
-    let j = 1 + cmds[1..].iter().take_while(|c| matches!(c, Cmd::Eval(_) | Cmd::Keep(_) | Cmd::Drop(_) | Cmd::Rename(_))).count();
+    // `ENRICH` keeps one row per row too (a match's values are one multi-value).
+    let j = 1 + cmds[1..].iter().take_while(|c| matches!(c, Cmd::Eval(_) | Cmd::Keep(_) | Cmd::Drop(_) | Cmd::Rename(_) | Cmd::Enrich { .. })).count();
     match cmds.get(j) {
         Some(Cmd::Limit(n)) => Some((keys, *n, j)),
         _ => None,
@@ -2790,16 +2791,26 @@ fn metadata_type(m: &str) -> Option<DataType> {
 }
 
 /// Every cluster's source fields for a query over remote clusters: one resolution of all of
-/// `sources` (field capabilities across clusters), else of the local ones alone (a remote's
-/// missing index fails that remote's part, not the query), else none.
-/// `true` with them: every cluster's (else only what this cluster maps, or nothing).
-pub(super) async fn source_schema(cluster: &Cluster, text: &str, sources: &[String], local: &[String], at: usize) -> EsResult<(Vec<Col>, bool)> {
+/// `sources` (field capabilities across clusters), else of the `groups` (each cluster's
+/// expressions) that resolve on their own: a remote's missing index fails that remote's part,
+/// not the query. `true` with fields to compile against (`false`: none resolved).
+pub(super) async fn source_schema(cluster: &Cluster, text: &str, sources: &[String], groups: &[Vec<String>], at: usize) -> EsResult<(Vec<Col>, bool)> {
     let fields = |s: Source| -> Vec<Col> { s.cols.into_iter().take(s.fields.len()).collect() };
-    match resolve_source(cluster, text, sources, &[], at).await {
-        Ok(s) => Ok((fields(s), true)),
-        Err(_) if !local.is_empty() => Ok((fields(resolve_source(cluster, text, local, &[], at).await?), false)),
-        Err(_) => Ok((Vec::new(), false)),
+    if let Ok(s) = resolve_source(cluster, text, sources, &[], at).await {
+        return Ok((fields(s), true));
     }
+    // Some cluster's expressions don't resolve (it will be skipped, or fail): every other
+    // cluster's, resolved as one source, as Elasticsearch resolves the clusters that answered.
+    let mut kept: Vec<String> = Vec::new();
+    for g in groups {
+        if resolve_source(cluster, text, g, &[], at).await.is_ok() {
+            kept.extend(g.iter().cloned());
+        }
+    }
+    if kept.is_empty() {
+        return Ok((Vec::new(), false));
+    }
+    Ok((fields(resolve_source(cluster, text, &kept, &[], at).await?), true))
 }
 
 /// The columns a part's row-by-row `prefix` makes over `schema` and `metadata` (for an answer
@@ -2818,7 +2829,7 @@ pub(super) fn part_columns(src: &Src<'_>, schema: &[Col], metadata: &[String], p
 /// query's own errors are the query's: the columns its row-by-row commands make (a `STATS`'s
 /// input). `Ok(None)`: no columns to compile over, or a command reads a resource this cluster
 /// doesn't have (an enrich policy or lookup index of the remotes only), which the parts decide.
-pub(super) fn verify_part(src: &Src<'_>, schema: &[Col], metadata: &[String], part: &[Cmd], pre: usize) -> EsResult<Option<Vec<Col>>> {
+pub(super) fn verify_part(src: &Src<'_>, schema: &[Col], metadata: &[String], part: &[Cmd], pre: usize) -> EsResult<Option<Verified>> {
     if schema.is_empty() {
         return Ok(None);
     }
@@ -2827,7 +2838,7 @@ pub(super) fn verify_part(src: &Src<'_>, schema: &[Col], metadata: &[String], pa
     let mut cols = schema.to_vec();
     cols.extend(metadata.iter().filter_map(|m| metadata_type(m).map(|ty| Col { name: m.clone(), ty })));
     cols.extend((0..ft.len()).map(|i| Col { name: format!("{}{i}", super::fulltext::HIDDEN), ty: DataType::Boolean }));
-    for c in &cmds[..pre] {
+    for c in &cmds {
         let here = match c {
             Cmd::Enrich { policy, .. } => src.res.enrich.contains_key(policy.rsplit(':').next().unwrap_or(policy)),
             Cmd::LookupJoin { index, .. } => src.res.lookup.contains_key(index),
@@ -2837,17 +2848,31 @@ pub(super) fn verify_part(src: &Src<'_>, schema: &[Col], metadata: &[String], pa
             return Ok(None);
         }
     }
-    let (_, out) = build_pipeline(src, &cmds[..pre], cols)?;
+    let (_, prefix) = build_pipeline(src, &cmds[..pre], cols)?;
+    let mut sort_types = Vec::new();
     match cmds.get(pre) {
         Some(Cmd::Stats { aggs, by }) => {
-            Grouper::new(src, aggs, by, &out)?;
+            Grouper::new(src, aggs, by, &prefix)?;
         }
         Some(Cmd::Sort(keys)) => {
-            SortSpec::new(src, keys, &out)?;
+            sort_types = SortSpec::new(src, keys, &prefix)?.0.iter().map(|k| k.3).collect();
         }
         _ => {}
     }
-    Ok(Some(out))
+    // The commands after the breaker that the part runs too keep one row per row.
+    let after: Vec<Cmd> = cmds.get(pre..).unwrap_or_default().iter().filter(|c| !matches!(c, Cmd::Sort(_) | Cmd::Limit(_) | Cmd::Stats { .. })).cloned().collect();
+    let (_, out) = build_pipeline(src, &after, prefix.clone())?;
+    Ok(Some(Verified { prefix, out, sort_types }))
+}
+
+/// A cross-cluster part as [`verify_part`] compiled it.
+pub(super) struct Verified {
+    /// The columns its row-by-row commands make (a partial `STATS`'s input).
+    pub prefix: Vec<Col>,
+    /// The columns it answers (a rows part's, before any carried sort keys).
+    pub out: Vec<Col>,
+    /// Its sort keys' types, when it sorts.
+    pub sort_types: Vec<DataType>,
 }
 
 /// Every cluster's rows in one table: a column whose types differ between clusters is
@@ -4450,23 +4475,38 @@ async fn execute_plain(cluster: &Cluster, q: Query, filter: Option<Value>, w: &m
                             .await?
                         }
                     }
-                    let mut t = Table { cols: out_cols, rows: top.finish() };
-                    // A part whose `ENRICH _remote` after the limit may overwrite a sort key carries
-                    // the keys' values from before it, for the coordinating cluster's sort.
-                    if part.as_ref().is_some_and(|p| p.sort_keys) {
+                    let t = Table { cols: out_cols, rows: top.finish() };
+                    // A part whose commands after its sort may drop or overwrite a key carries the
+                    // keys' values from the sort, after its own columns, for the coordinating
+                    // cluster's sort (those commands keep one row per row, in order).
+                    let carried = if part.as_ref().is_some_and(|p| p.sort_keys) {
                         let spec = SortSpec::new(&src, keys, &t.cols)?;
-                        for r in t.rows.iter_mut() {
-                            let mut vals = Vec::with_capacity(spec.0.len());
+                        let mut vals: Vec<Vec<V>> = Vec::with_capacity(t.rows.len());
+                        for r in &t.rows {
+                            let mut v = Vec::with_capacity(spec.0.len());
                             for (c, ..) in &spec.0 {
-                                vals.push(eval(c, r, &[], w)?);
+                                v.push(eval(c, r, &[], w)?);
                             }
-                            r.extend(vals);
+                            vals.push(v);
                         }
-                        t.cols.extend(spec.0.iter().enumerate().map(|(k, (.., ty))| Col { name: format!("{}{k}", super::ccs::SORT_CARRY), ty: *ty }));
-                    }
+                        let cols: Vec<Col> = spec.0.iter().enumerate().map(|(k, (.., ty))| Col { name: format!("{}{k}", super::ccs::SORT_CARRY), ty: *ty }).collect();
+                        Some((cols, vals))
+                    } else {
+                        None
+                    };
                     // The one-row-per-row commands between `SORT` and `LIMIT` run on the `n` rows.
                     let after: Vec<Cmd> = rest[1..j].iter().chain(&rest[j + 1..]).cloned().collect();
-                    return finish(cluster, &src, t, &after, w, stats).await;
+                    let (mut t, stats) = finish(cluster, &src, t, &after, w, stats).await?;
+                    if let Some((cols, vals)) = carried {
+                        if vals.len() != t.rows.len() {
+                            return Err(EsError::illegal_state("a part's commands after its sort changed its row count"));
+                        }
+                        for (r, v) in t.rows.iter_mut().zip(vals) {
+                            r.extend(v);
+                        }
+                        t.cols.extend(cols);
+                    }
+                    return Ok((t, stats));
                 }
                 Some(Cmd::Limit(n)) => {
                     let n = (*n).min(MAX_LIMIT);

@@ -289,8 +289,11 @@ Elasticsearch-flavor.
   `LOOKUP JOIN`...) and its first breaker's own part: `STATS` reduced partially (each group's
   accumulator states: sums with their compensation, HyperLogLog++ sketches, collected values,
   merged here as one cluster's rows would have been, over just the columns it reads),
-  `SORT ... | LIMIT n` (with `EVAL`, `KEEP`, `DROP`, `RENAME` between) or `LIMIT n` applied
-  there and again on the coordinating cluster; a `LIMIT` (the implicit one too) also runs in the
+  `SORT ... | LIMIT n` (with `EVAL`, `KEEP`, `DROP`, `RENAME` and `ENRICH` between, the parts
+  carrying their sort keys' values) or `LIMIT n` applied there and again on the coordinating
+  cluster, and an `ENRICH _remote` after the limit (with the commands before it) still in the
+  parts; a command reading each cluster's own policy or lookup index never runs on the
+  coordinating cluster: it's in the parts or refused with Elasticsearch's error; a `LIMIT` (the implicit one too) also runs in the
   parts below the commands it commutes with (`ENRICH` in any mode, `EVAL`...), and a part with
   nothing to bound it stops at what the coordinating cluster's request breaker can hold (a
   `circuit_breaking_exception`). What follows runs on the coordinating

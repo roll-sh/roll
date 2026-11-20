@@ -119,17 +119,11 @@ impl Part {
     }
 }
 
-/// What a row costs the coordinating cluster once answered: per value, its parsed and decoded
-/// size and its text.
+/// What a row costs the coordinating cluster once answered, counted as it counts an answer
+/// before parsing it: its encoded bytes, and per value they may hold, a parsed and decoded one.
 pub fn row_bytes(r: &[V]) -> u64 {
-    fn text(v: &V) -> u64 {
-        match v {
-            V::Str(s) | V::Ip(s) => s.len() as u64,
-            V::Multi(vs) => vs.iter().map(|x| PER_ELEMENT + text(x)).sum(),
-            _ => 0,
-        }
-    }
-    r.iter().map(|v| PER_ELEMENT + text(v)).sum()
+    let text = Value::Arr(r.iter().map(encode_v).collect()).to_json();
+    (text.len() as u64).saturating_add(json_elements(text.as_bytes()).saturating_mul(PER_ELEMENT))
 }
 
 /// A part's rows past [`Part::max_bytes`].
@@ -358,7 +352,8 @@ pub fn requested(ctx: &Ctx, body: &mut Value) -> EsResult<Option<Arc<Part>>> {
         return Ok(None);
     }
     let v = body.as_object_mut().and_then(|m| m.shift_remove(PART_FIELD)).unwrap_or(Value::Null);
-    Part::of_value(&v).map(|p| Some(Arc::new(p))).ok_or_else(|| EsError::illegal_argument("an ES|QL part roll can't read"))
+    // A remote's part always names the alias it's reached by: every check keyed on it applies.
+    Part::of_value(&v).filter(|p| p.alias.is_some()).map(|p| Some(Arc::new(p))).ok_or_else(|| EsError::illegal_argument("an ES|QL part roll can't read"))
 }
 
 /// A remote part's `FROM` naming ES|QL views: Elasticsearch's 400 (views on remote clusters
@@ -473,6 +468,33 @@ fn runs_in_parts(c: &Cmd) -> bool {
     }
 }
 
+/// Commands between a `SORT` and its `LIMIT` that each part runs too: they keep one row per
+/// row (an `ENRICH` before the limit uses each cluster's policy, as Elasticsearch runs it).
+fn between_sort_and_limit(c: &Cmd) -> bool {
+    match c {
+        Cmd::Eval(_) | Cmd::Keep(_) | Cmd::Drop(_) | Cmd::Rename(_) => true,
+        Cmd::Enrich { policy, .. } => enrich_mode(policy) != "_coordinator",
+        _ => false,
+    }
+}
+
+/// Commands after a part's `LIMIT` that it still runs, when an `ENRICH _remote` comes later
+/// among them: they keep one row per row and read nothing but that row.
+fn after_limit(c: &Cmd) -> bool {
+    match c {
+        Cmd::Eval(_) | Cmd::Keep(_) | Cmd::Drop(_) | Cmd::Rename(_) | Cmd::Dissect { .. } | Cmd::Grok { .. } => true,
+        Cmd::Enrich { policy, .. } => enrich_mode(policy) == "_remote",
+        _ => false,
+    }
+}
+
+/// The run of commands from `from` a part runs after its limit: [`after_limit`] commands up to
+/// the last `ENRICH _remote` among them (none: nothing).
+fn trailing_remote(cmds: &[Cmd], from: usize) -> usize {
+    let run = cmds[from..].iter().take_while(|c| after_limit(c)).count();
+    cmds[from..from + run].iter().rposition(|c| matches!(c, Cmd::Enrich { .. })).map_or(from, |p| from + p + 1)
+}
+
 /// Where `cmds` (the source first; `parsed` of them are the text's, a last one may be the
 /// implicit `LIMIT`) split into the parts and the rest.
 pub fn cut(cmds: &[Cmd], parsed: usize) -> Cut {
@@ -483,19 +505,6 @@ pub fn cut(cmds: &[Cmd], parsed: usize) -> Cut {
         i += 1;
     }
     let synthetic = |k: usize| k >= parsed;
-    // `ENRICH _remote` right after the breaker still runs in the parts (it keeps one row per
-    // row, so the limit commutes with it).
-    let trailing_remote = |from: usize, part: &mut Vec<usize>| -> usize {
-        let mut k = from;
-        while let Some(Cmd::Enrich { policy, .. }) = cmds.get(k) {
-            if enrich_mode(policy) != "_remote" || synthetic(k) {
-                break;
-            }
-            part.push(k);
-            k += 1;
-        }
-        k
-    };
     match cmds.get(i) {
         Some(c @ Cmd::Stats { .. }) => {
             part.push(i);
@@ -508,27 +517,33 @@ pub fn cut(cmds: &[Cmd], parsed: usize) -> Cut {
                 i + 1
             } else {
                 part.push(i);
-                trailing_remote(i + 1, &mut part)
+                let end = trailing_remote(cmds, i + 1);
+                part.extend(i + 1..end);
+                end
             };
             let mut rest = vec![Cmd::Limit(*n)];
             rest.extend(cmds[after..].iter().cloned());
             Cut { mode: Mode::Rows, part, append_limit, rest, stats: None, sort_keys: false, bounded: true }
         }
-        Some(Cmd::Sort(keys)) if cmds.get(i + 1).is_some_and(|c| matches!(c, Cmd::Limit(_))) => {
-            // `SORT ... | LIMIT n`: every part sorts and limits, then again here.
-            let Some(Cmd::Limit(n)) = cmds.get(i + 1) else { unreachable!() };
-            part.push(i);
+        // `SORT ... | (EVAL, KEEP, ENRICH...)* | LIMIT n`: every part sorts, runs the commands
+        // between and limits (and an `ENRICH _remote` after), then the rows sort again here.
+        Some(Cmd::Sort(keys)) if matches!(cmds.get(i + 1 + cmds[i + 1..].iter().take_while(|c| between_sort_and_limit(c)).count()), Some(Cmd::Limit(_))) => {
+            let j = i + 1 + cmds[i + 1..].iter().take_while(|c| between_sort_and_limit(c)).count();
+            let Some(Cmd::Limit(n)) = cmds.get(j) else { unreachable!() };
+            part.extend(i..j);
             let mut append_limit = None;
-            let after = if synthetic(i + 1) {
+            let after = if synthetic(j) {
                 append_limit = Some(*n);
-                i + 2
+                j + 1
             } else {
-                part.push(i + 1);
-                trailing_remote(i + 2, &mut part)
+                part.push(j);
+                let end = trailing_remote(cmds, j + 1);
+                part.extend(j + 1..end);
+                end
             };
-            // An `ENRICH _remote` the parts ran after their limit may overwrite a sort key: they
-            // carry the keys' values from before it, and the rows sort on those here.
-            let sort_keys = after > i + 2;
+            // Commands the parts ran after their sort may drop or overwrite a key: they carry the
+            // keys' values from the sort, and the rows sort on those here.
+            let sort_keys = j > i + 1 || after > j + 1;
             let mut rest = if sort_keys {
                 let carried: Vec<super::parser::SortKey> = keys
                     .iter()
@@ -543,14 +558,6 @@ pub fn cut(cmds: &[Cmd], parsed: usize) -> Cut {
             rest.extend(cmds[after..].iter().cloned());
             Cut { mode: Mode::Rows, part, append_limit, rest, stats: None, sort_keys, bounded: true }
         }
-        // `SORT ... | EVAL ... | LIMIT n`: every part sorts and limits (the commands between keep
-        // one row per row and run here), then here again from the `SORT`.
-        Some(Cmd::Sort(_)) if matches!(cmds.get(i + 1 + cmds[i + 1..].iter().take_while(|c| matches!(c, Cmd::Eval(_) | Cmd::Keep(_) | Cmd::Drop(_) | Cmd::Rename(_))).count()), Some(Cmd::Limit(_))) => {
-            let j = i + 1 + cmds[i + 1..].iter().take_while(|c| matches!(c, Cmd::Eval(_) | Cmd::Keep(_) | Cmd::Drop(_) | Cmd::Rename(_))).count();
-            let Some(Cmd::Limit(n)) = cmds.get(j) else { unreachable!() };
-            part.push(i);
-            Cut { mode: Mode::Rows, part, append_limit: Some(*n), rest: cmds[i..].to_vec(), stats: None, sort_keys: false, bounded: true }
-        }
         // Anything else runs here over the parts' rows. A `LIMIT` the commands up to it commute
         // with (the implicit one too) still bounds the parts; without one they're capped.
         _ => {
@@ -564,11 +571,49 @@ pub fn cut(cmds: &[Cmd], parsed: usize) -> Cut {
     }
 }
 
+/// Commands left to the coordinating cluster that would read its own resources where
+/// Elasticsearch reads each cluster's: an `ENRICH _remote` or `LOOKUP JOIN`, or an `ENRICH` in
+/// `_any` mode before any `LIMIT`, `STATS` or `ENRICH _coordinator` (after one, it's the
+/// coordinator's, as there). Refused, naming the command the parts stopped at; never run here.
+pub fn check_left_here(src: &str, spans: &[Span], cmds: &[Cmd], cut: &Cut) -> EsResult<()> {
+    let first = (1..cmds.len()).find(|k| !cut.part.contains(k));
+    let Some(first) = first else { return Ok(()) };
+    // A `LIMIT` or `STATS` the parts ran is behind everything left here.
+    let mut coordinators = cut.part.iter().any(|&k| matches!(cmds[k], Cmd::Limit(_) | Cmd::Stats { .. }));
+    for (k, c) in cmds.iter().enumerate().skip(first) {
+        if cut.part.contains(&k) {
+            continue;
+        }
+        let at = spans.get(first).map(|s| cmd_text(src, s));
+        match c {
+            Cmd::Limit(_) | Cmd::Stats { .. } => coordinators = true,
+            Cmd::Enrich { policy, at: e, .. } => match enrich_mode(policy) {
+                "_coordinator" => coordinators = true,
+                "_any" if coordinators => {}
+                _ => {
+                    let after = at.unwrap_or_default();
+                    return Err(super::exec::verification_at(src, *e, &format!("ENRICH with remote policy can't be executed after {after}")));
+                }
+            },
+            Cmd::LookupJoin { .. } => {
+                let after = at.unwrap_or_default();
+                let start = spans.get(k).map_or(0, |s| s.start);
+                return Err(super::exec::verification_at(src, start, &format!("LOOKUP JOIN with remote indices can't be executed after {after}")));
+            }
+            Cmd::Fork { branches, .. } if branches.iter().flatten().any(|c| matches!(c, Cmd::LookupJoin { .. }) || matches!(c, Cmd::Enrich { policy, .. } if enrich_mode(policy) != "_coordinator")) => {
+                return Err(EsError::illegal_argument("roll can't run ENRICH or LOOKUP JOIN inside FORK over remote clusters yet"));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// Whether a part's commands (`cmds`, as the part parsed them) are a shape the coordinating
 /// cluster cuts for `mode` ([`cut`]): the source naming this cluster's own indices, commands
-/// that run row by row, then exactly one `STATS` ([`Mode::Stats`]), or at most `LIMIT`,
-/// `SORT | LIMIT` and the `ENRICH _remote`s after them ([`Mode::Rows`]). Whatever the request
-/// says, a remote runs only such a part.
+/// that run row by row, then exactly one `STATS` ([`Mode::Stats`]), or at most a `LIMIT` (after
+/// a `SORT` and the commands between them) and the commands after it up to an `ENRICH _remote`
+/// ([`Mode::Rows`]). Whatever the request says, a remote runs only such a part.
 pub fn check_shape(cmds: &[Cmd], mode: Mode) -> Result<(), String> {
     let Some(Cmd::From { sources, .. }) = cmds.first() else { return Err("its source isn't a FROM".into()) };
     if sources.iter().any(|s| crate::remote::split_expression(s.trim_start_matches('-')).is_some()) {
@@ -579,12 +624,20 @@ pub fn check_shape(cmds: &[Cmd], mode: Mode) -> Result<(), String> {
     let ok = match mode {
         Mode::Stats => matches!(tail, [Cmd::Stats { .. }]),
         Mode::Rows => {
-            let after = match tail {
-                [] => Some(&tail[..0]),
-                [Cmd::Limit(_), rest @ ..] | [Cmd::Sort(_), Cmd::Limit(_), rest @ ..] => Some(rest),
-                _ => None,
+            let from_limit = match tail {
+                [] => None,
+                [Cmd::Limit(_), ..] => Some(0),
+                [Cmd::Sort(_), rest @ ..] => {
+                    let m = rest.iter().take_while(|c| between_sort_and_limit(c)).count();
+                    matches!(rest.get(m), Some(Cmd::Limit(_))).then_some(1 + m).or(Some(usize::MAX))
+                }
+                _ => Some(usize::MAX),
             };
-            after.is_some_and(|rest| rest.iter().all(|c| matches!(c, Cmd::Enrich { policy, .. } if enrich_mode(policy) == "_remote")))
+            match from_limit {
+                None => true,
+                Some(usize::MAX) => false,
+                Some(l) => trailing_remote(tail, l + 1) == tail.len(),
+            }
         }
     };
     if ok { Ok(()) } else { Err(format!("its commands aren't a {} part", if mode == Mode::Stats { "STATS" } else { "rows" })) }
@@ -664,8 +717,9 @@ fn cmd_text(src: &str, s: &Span) -> String {
 }
 
 /// Elasticsearch's checks on where commands that read each cluster's own resources may go in a
-/// query over remote clusters: `ENRICH _remote` not after `STATS` or `ENRICH _coordinator`,
-/// `LOOKUP JOIN` not after `STATS` or `LIMIT`.
+/// query over remote clusters: `ENRICH _remote` not after `STATS`, `INLINE STATS` or
+/// `ENRICH _coordinator`, `LOOKUP JOIN` not after those, a `LIMIT` or a `SORT`. (Elasticsearch
+/// drops an `INLINE STATS` whose columns nothing reads first; roll refuses it as one that's read.)
 pub fn check_placement(src: &str, spans: &[Span], cmds: &[Cmd]) -> EsResult<()> {
     let mut limited: Option<usize> = None;
     let mut coordinator: Option<usize> = None;
@@ -673,16 +727,18 @@ pub fn check_placement(src: &str, spans: &[Span], cmds: &[Cmd]) -> EsResult<()> 
         let Some(span) = spans.get(k) else { break };
         let after = |b: Option<usize>| b.and_then(|b| spans.get(b)).map(|s| cmd_text(src, s));
         match c {
-            Cmd::Stats { .. } => {
-                limited.get_or_insert(k);
+            // `LOOKUP JOIN`'s error names the nearest command before it that stops it.
+            Cmd::Stats { .. } | Cmd::InlineStats { .. } => {
+                limited = Some(k);
                 coordinator.get_or_insert(k);
             }
-            Cmd::Limit(_) => {
-                limited.get_or_insert(k);
+            Cmd::Limit(_) | Cmd::Sort(_) => {
+                limited = Some(k);
             }
             Cmd::Enrich { policy, at, .. } => match enrich_mode(policy) {
                 "_coordinator" => {
                     coordinator.get_or_insert(k);
+                    limited = Some(k);
                 }
                 "_remote" => {
                     if let Some(t) = after(coordinator) {
@@ -1028,6 +1084,7 @@ pub async fn run(cluster: &crate::cluster::Cluster, ccs: &Ccs, q: &Query, filter
         None => return Ok(None),
     };
     check_placement(&q.src, &q.spans, &q.cmds)?;
+    check_left_here(&q.src, &q.spans, &q.cmds, &cut)?;
     // Each part's text, parsed as its cluster will parse it, must be exactly the commands cut
     // for it (never trusted to be: a remote also decides from what it parsed, [`admit_part`]).
     let part_cmds: Vec<Cmd> = cut.part.iter().map(|&k| q.cmds[k].clone()).collect();
@@ -1053,8 +1110,16 @@ pub async fn run(cluster: &crate::cluster::Cluster, ccs: &Ccs, q: &Query, filter
         return Err(e);
     }
 
-    // Every cluster's columns, as one source of them all.
-    let (schema, complete) = super::exec::source_schema(cluster, &q.src, sources, &local_sources, *at).await?;
+    // Every cluster's columns, as one source of them all (of every cluster that resolves its
+    // expressions, when one doesn't).
+    let mut groups: Vec<Vec<String>> = Vec::new();
+    if !local_sources.is_empty() {
+        groups.push(local_sources.clone());
+    }
+    for (l, exprs) in &legs {
+        groups.push(exprs.iter().map(|e| format!("{}:{e}", l.remote.alias)).collect());
+    }
+    let (schema, complete) = super::exec::source_schema(cluster, &q.src, sources, &groups, *at).await?;
     let text = q.src.clone();
     let res = super::exec::load_resources(cluster, &text, &q.cmds[1..]).await?;
     let tz = q.settings.time_zone.as_deref().and_then(|z| crate::time::Zone::parse(z).ok()).filter(|z| *z != crate::time::Zone::UTC);
@@ -1064,12 +1129,20 @@ pub async fn run(cluster: &crate::cluster::Cluster, ccs: &Ccs, q: &Query, filter
     // parts' row-by-row commands make. Only over every cluster's columns: a schema of the local
     // ones alone (a remote's field capabilities failed) would refuse the remotes' fields.
     let pre = part_cmds.iter().take_while(|c| runs_in_parts(c)).count();
-    let expected = if complete { super::exec::verify_part(&src, &schema, metadata, &part_cmds, pre)? } else { None };
+    let verified = if complete { super::exec::verify_part(&src, &schema, metadata, &part_cmds, pre)? } else { None };
     // A partial `STATS`'s input: the columns it reads ([`super::exec::stats_reads`]).
-    let expected_input: Option<Vec<Col>> = match (&cut.stats, &expected) {
-        (Some(st), Some(out)) => Some(super::exec::stats_reads(st, out).into_iter().map(|i| out[i].clone()).collect()),
+    let expected_input: Option<Vec<Col>> = match (&cut.stats, &verified) {
+        (Some(st), Some(v)) => Some(super::exec::stats_reads(st, &v.prefix).into_iter().map(|i| v.prefix[i].clone()).collect()),
         _ => None,
     };
+    // A rows part's answer: its columns, then the carried sort keys.
+    let expected_rows: Option<Vec<Col>> = verified.as_ref().filter(|_| cut.mode == Mode::Rows).map(|v| {
+        let mut cols: Vec<Col> = v.out.iter().filter(|c| !c.name.starts_with(super::fulltext::HIDDEN)).cloned().collect();
+        if cut.sort_keys {
+            cols.extend(v.sort_types.iter().enumerate().map(|(k, ty)| Col { name: format!("{SORT_CARRY}{k}"), ty: *ty }));
+        }
+        cols
+    });
 
     // Enrich policies: `_any` must be here and on every part's cluster, `_remote` on every
     // part's cluster, `_coordinator` here (as one cluster's query checks it).
@@ -1099,10 +1172,10 @@ pub async fn run(cluster: &crate::cluster::Cluster, ccs: &Ccs, q: &Query, filter
     };
 
     let schema_cols: Vec<(String, DataType)> = schema.iter().map(|c| (c.name.clone(), c.ty)).collect();
-    // A rows part without a limit answers at most what this cluster can hold.
+    // A rows part without a limit answers at most its share of what this cluster can hold.
     let max_bytes = (!cut.bounded).then(|| {
         let b = cluster.breakers.request(cluster, &cluster.state());
-        b.limit().saturating_sub(b.used())
+        b.limit().saturating_sub(b.used()) / legs.len().max(1) as u64
     });
     let mut sent: Vec<Leg> = Vec::new();
     let mut refused: Vec<(String, bool, String, EsError)> = Vec::new();
@@ -1139,6 +1212,7 @@ pub async fn run(cluster: &crate::cluster::Cluster, ccs: &Ccs, q: &Query, filter
         let lq = Query { src: q.src.clone(), cmds, sql: false, locale: q.locale.clone(), settings: q.settings.clone(), spans: Vec::new() };
         let part = Arc::new(Part { alias: None, mode: cut.mode, schema: schema_cols.clone(), policies: Vec::new(), sort_keys: cut.sort_keys, max_bytes: None });
         let (t, s) = PART.scope(part, super::exec::execute_part(cluster, lq, filter.clone(), w)).await?;
+        // Defensive: the cut only makes `STATS` parts the executor answers with states.
         if cut.mode == Mode::Stats && s.partial.is_none() {
             return Err(EsError::illegal_state("the local cluster's part answered STATS without its partial states"));
         }
@@ -1177,7 +1251,7 @@ pub async fn run(cluster: &crate::cluster::Cluster, ccs: &Ccs, q: &Query, filter
             let e = links::error_of(resp.status, &v);
             if e.kind == MISSING_POLICY {
                 for name in e.reason().split(',') {
-                    let Some((_, _, at)) = used.iter().find(|(n, _, _)| n == name) else {
+                    let Some((_, _, at)) = used.iter().find(|(n, m, _)| n == name && m != "_coordinator") else {
                         return Err(EsError::illegal_state(format!("remote cluster [{}] reported missing an enrich policy the query doesn't use", leg.alias)));
                     };
                     note(name, *at, &leg.alias);
@@ -1197,7 +1271,7 @@ pub async fn run(cluster: &crate::cluster::Cluster, ccs: &Ccs, q: &Query, filter
                 w.add(msg);
             }
         }
-        match decode_answer(&v, cut.mode).and_then(|a| planned_columns(&a, &cut, &part_cmds, expected.as_deref()).map(|()| a)) {
+        match decode_answer(&v, cut.mode).and_then(|a| planned_columns(&a, &cut, &part_cmds, expected_rows.as_deref()).map(|()| a)) {
             Ok(a) => outcomes.push((leg.alias.clone(), leg.indices.clone(), Outcome::Done(a))),
             Err(why) => return Err(EsError::illegal_state(format!("remote cluster [{}] answered a part roll can't read: {why}", leg.alias))),
         }
@@ -1251,10 +1325,10 @@ pub async fn run(cluster: &crate::cluster::Cluster, ccs: &Ccs, q: &Query, filter
 
     // The columns the parts make when none answered (every one skipped).
     let empty_cols = || -> EsResult<Vec<Col>> {
-        let mut cols = match &expected {
-            Some(c) => c.clone(),
-            None => super::exec::part_columns(&src, &schema, metadata, &part_cmds[..pre])?,
-        };
+        if let Some(c) = &expected_rows {
+            return Ok(c.clone());
+        }
+        let mut cols = super::exec::part_columns(&src, &schema, metadata, &part_cmds[..pre])?;
         if cut.sort_keys {
             cols.extend((0..part_cmds.iter().find_map(|c| if let Cmd::Sort(k) = c { Some(k.len()) } else { None }).unwrap_or(0)).map(|k| Col { name: format!("{SORT_CARRY}{k}"), ty: DataType::Null }));
         }
@@ -1312,29 +1386,28 @@ fn same_command(a: &Cmd, b: &Cmd) -> bool {
     }
 }
 
-/// A rows part's answer has the columns planned for it: the carried sort keys when it carries
-/// them, and (when this cluster compiled the parts' commands) the columns they make, by name,
-/// and by type too unless an `ENRICH` or `LOOKUP JOIN` (each cluster's own) made some. Full-text
-/// columns aren't answered.
+/// A rows part's answer has the columns planned for it: exactly `expected` (names and types,
+/// the carried sort keys last) when this cluster compiled the part's commands, the policies'
+/// and lookup indices' columns included; else at least the carried sort keys. Full-text
+/// columns are never answered.
 fn planned_columns(a: &Answer, cut: &Cut, part_cmds: &[Cmd], expected: Option<&[Col]>) -> Result<(), String> {
     if cut.mode != Mode::Rows {
         return Ok(());
     }
     let cols = &a.table.cols;
+    if cols.iter().any(|c| c.name.starts_with(super::fulltext::HIDDEN)) {
+        return Err("a full-text column".into());
+    }
+    if let Some(expected) = expected {
+        if cols.len() != expected.len() || cols.iter().zip(expected).any(|(c, e)| c.name != e.name || c.ty != e.ty) {
+            return Err("columns other than the query's".into());
+        }
+        return Ok(());
+    }
     if cut.sort_keys {
         let keys = part_cmds.iter().find_map(|c| if let Cmd::Sort(k) = c { Some(k.len()) } else { None }).unwrap_or(0);
         if (0..keys).any(|k| !cols.iter().any(|c| c.name == format!("{SORT_CARRY}{k}"))) {
             return Err("no sort keys".into());
-        }
-    }
-    let trailing_enrich = part_cmds.iter().skip_while(|c| runs_in_parts(c)).any(|c| matches!(c, Cmd::Enrich { .. }));
-    if let Some(expected) = expected
-        && !trailing_enrich
-    {
-        let own = part_cmds.iter().any(|c| matches!(c, Cmd::Enrich { .. } | Cmd::LookupJoin { .. }));
-        let shown = |cs: &[Col]| -> Vec<(String, Option<DataType>)> { cs.iter().filter(|c| !c.name.starts_with(super::fulltext::HIDDEN)).map(|c| (c.name.clone(), (!own).then_some(c.ty))).collect() };
-        if shown(cols) != shown(expected) {
-            return Err("columns other than the query's".into());
         }
     }
     Ok(())
@@ -1373,8 +1446,9 @@ mod tests {
     fn parts_keep_the_querys_positions() {
         let q = parse("FROM items,far:items METADATA _index | WHERE n > 1 | SORT n | EVAL x = 1 | LIMIT 5 | ENRICH _remote:p | STATS c = COUNT(*)");
         let c = cut(&q.cmds, q.spans.len());
-        // Commands between `SORT` and `LIMIT`: the parts sort and limit, those run here.
-        assert_eq!((c.mode, c.part.clone(), c.append_limit, c.rest.len()), (Mode::Rows, vec![1, 2], Some(5), 5), "{c:?}");
+        // Commands between `SORT` and `LIMIT`, and the `ENRICH _remote` after: all in the parts,
+        // which carry the sort keys; here the rows sort on those, then `STATS`.
+        assert_eq!((c.mode, c.part.clone(), c.append_limit, c.sort_keys, c.rest.len()), (Mode::Rows, vec![1, 2, 3, 4, 5], None, true, 4), "{c:?}");
         let q = parse("FROM items,far:items METADATA _index | WHERE n > 1 | SORT n | LIMIT 5 | ENRICH _remote:p | STATS c = COUNT(*)");
         let c = cut(&q.cmds, q.spans.len());
         assert_eq!((c.mode, c.part.as_slice()), (Mode::Rows, [1, 2, 3, 4].as_slice()));
@@ -1412,6 +1486,38 @@ mod tests {
         let q = parse("FROM far:items | INLINE STATS m = MAX(n) | LIMIT 3");
         let c = cut(&q.cmds, q.spans.len());
         assert_eq!((c.append_limit, c.bounded), (None, false));
+        // A `LIMIT` and the commands after it up to an `ENRICH _remote`.
+        let q = parse("FROM far:items | LIMIT 3 | EVAL x = 1 | ENRICH _remote:p | KEEP x | ENRICH p");
+        let c = cut(&q.cmds, q.spans.len());
+        assert_eq!((c.part.as_slice(), c.rest.len()), ([1, 2, 3].as_slice(), 3));
+        assert!(check_shape(&parse("FROM items | LIMIT 3 | EVAL x = 1 | ENRICH _remote:p").cmds, Mode::Rows).is_ok());
+    }
+
+    /// A command that reads a cluster's own resources never runs on the coordinating cluster:
+    /// in the parts, or refused with Elasticsearch's error.
+    #[test]
+    fn resources_of_each_cluster_stay_in_its_part() {
+        // `SORT | KEEP | LIMIT | ENRICH _remote` runs in each part.
+        let q = parse("FROM far:items | SORT n | KEEP n, tag | LIMIT 5 | ENRICH _remote:p");
+        let c = cut(&q.cmds, q.spans.len());
+        assert_eq!((c.part.as_slice(), c.sort_keys), ([1, 2, 3, 4].as_slice(), true));
+        assert!(check_left_here(&q.src, &q.spans, &q.cmds, &c).is_ok());
+        assert!(check_shape(&parse("FROM items | SORT n | KEEP n, tag | LIMIT 5 | ENRICH _remote:p").cmds, Mode::Rows).is_ok());
+        for (q, reason) in [
+            ("FROM far:items | ENRICH _coordinator:p | LOOKUP JOIN lk ON tag", "Found 1 problem\nline 1:42: LOOKUP JOIN with remote indices can't be executed after [ENRICH _coordinator:p]@1:18"),
+            ("FROM far:items | INLINE STATS m = MAX(n) | ENRICH _remote:p | KEEP n, m, label", "Found 1 problem\nline 1:44: ENRICH with remote policy can't be executed after [INLINE STATS m = MAX(n)]@1:18"),
+            ("FROM far:items | SORT n DESC | LOOKUP JOIN lk ON tag | KEEP n, lab | LIMIT 2", "Found 1 problem\nline 1:32: LOOKUP JOIN with remote indices can't be executed after [SORT n DESC]@1:18"),
+        ] {
+            let q = parse(q);
+            assert_eq!(check_placement(&q.src, &q.spans, &q.cmds).unwrap_err().reason(), reason);
+        }
+        // Whatever escapes the placement rules is refused rather than run here.
+        let q = parse("FROM far:items | INLINE STATS m = MAX(n) | ENRICH p | KEEP n, m, label");
+        let c = cut(&q.cmds, q.spans.len());
+        assert!(check_left_here(&q.src, &q.spans, &q.cmds, &c).is_err());
+        let q = parse("FROM far:items | LIMIT 2 | ENRICH p");
+        let c = cut(&q.cmds, q.spans.len());
+        assert!(check_left_here(&q.src, &q.spans, &q.cmds, &c).is_ok(), "after a LIMIT `_any` is the coordinator's");
     }
 
     /// A remote runs only the shapes the coordinating cluster cuts, as it parsed them: a STATS
