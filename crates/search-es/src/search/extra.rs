@@ -83,6 +83,7 @@ pub fn to_query(ctx: &QueryCtx, q: &Query) -> EsResult<QueryRef> {
 
 /// A script of a query compiled for `context` as an engine hook.
 pub fn painless(ctx: &QueryCtx, s: &crate::query::script::Script, context: search_painless::Context) -> EsResult<Painless> {
+    ctx.no_scripts()?;
     let bound = ctx.cluster.scripts.compile(ctx.st, s, context)?;
     let id_fielddata = super::id_fielddata::scripts(ctx.st);
     Ok(Painless { bound, table: ctx.table.clone(), shard: ctx.shard as i32, index: ctx.idx.name.clone(), id_fielddata, counted: false })

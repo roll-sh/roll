@@ -225,24 +225,48 @@ applications). A web page calls a cluster directly, with no backend of its own i
   it. Review its roles before sharing it.
 - *What a browser key may ask for* (`search_es::xpack::security::browser`; Algolia's search-only
   keys): it's a public credential, so it gets what search-as-you-type needs and nothing else.
-  Searches (`_search`, `_msearch`, `_count`), document reads, `_terms_enum`, a search
-  application's `_search`, and the root and `_security/_authenticate` that clients call first;
-  any other API is a 400 naming why: no scrolls, points in time or stored async searches (they
-  hold state on the cluster), no term vectors or `_explain`, no SQL, ES|QL or EQL, no search
-  templates. In a search: no `explain` or `profile`; no painless (`script`, `script_fields`,
-  `runtime_mappings`, scripted scores, aggregations and sorts) unless the key's
-  `limits.allow_scripts`; none of the query families Elasticsearch's
-  `search.allow_expensive_queries: false` turns off (`regexp`, `wildcard`, `prefix`, `fuzzy`,
-  `query_string`; a `match` with `fuzziness` and a completion suggester's options stay) unless
-  `limits.allow_expensive_queries`; `from + size` at most `limits.max_result_window` (1,000);
-  aggregations at most `limits.max_buckets` (1,000) buckets; `_msearch` and `_mget` at most
-  `limits.max_items` (100) items. The owner widens them in `limits` when making the key
-  (`max_concurrent` 1-64, `max_result_window` up to 10,000, `max_buckets` up to 65,536,
-  `max_items` up to 1,000, the two `allow_` switches); the list shows them.
+  The policy (the key's `limits` over safe defaults) rides with the request's reads
+  (`dls::ReadSecurity`) and is enforced where the engine has the request parsed, never on the
+  raw request:
+  - *APIs*, by the routed API's name: searches (`_search`, `_msearch`, `_count`), document reads,
+    `_terms_enum`, a search application's `_search`, and the root and `_security/_authenticate`
+    that clients call first. Any other API is a 400 naming why: no scrolls, points in time or
+    stored async searches (they hold state on the cluster), no term vectors or `_explain`, no
+    SQL, ES|QL or EQL, no search templates.
+  - *Queries*: every query the request builds (the query, `post_filter`, aggregations' filters,
+    highlight and rescore queries, inner hits, collapse, a search application's rendered
+    template) runs as Elasticsearch's `search.allow_expensive_queries: false` unless
+    `limits.allow_expensive_queries`: no `regexp`, `wildcard`, `prefix` or `fuzzy` queries,
+    joining queries (`nested`, `has_child`, `has_parent`), ranges on `text` or `keyword`, or
+    queries on runtime fields; and no `query_string` (so no `?q=`), intervals' `prefix`,
+    `wildcard`, `regexp` or `fuzzy` rules, or `span_multi` over them. A `match` with
+    `fuzziness`, `match_phrase_prefix`, `match_bool_prefix`, `multi_match` (`bool_prefix`
+    included), `simple_query_string`, `search_as_you_type` fields and the completion suggester
+    stay: that's search-as-you-type. A search application's template a browser key runs is held
+    to the same list: write it with those (Elastic's default template uses `query_string`, so a
+    browser key can't run it).
+  - *Painless*: none compiles for the key unless `limits.allow_scripts`: script queries and
+    scores, `script_fields`, `runtime_mappings` and the mapping's runtime fields, scripted sorts,
+    aggregations and pipelines, highlighters over runtime fields.
+  - *The search source*, URL and body merged, every `_msearch` item included: no `explain` (at
+    any level: `top_hits` and inner hits too) or `profile`, no `pit` or scroll; `from + size` at
+    most `limits.max_result_window` (1,000).
+  - *One fetch budget per request*: every document the request fetches (hits, `top_hits` in
+    every bucket, inner hits; an `_msearch`'s items share it) counts against
+    `limits.max_result_window`, past it 400; aggregations stop at `limits.max_buckets` (1,000).
+  - *Items*: an `_msearch`'s searches and an `_mget`'s documents, as the engine parsed them
+    (whatever the URL, `?source=` or body format), are charged to the key's rate limits before
+    they run (below); more than `limits.max_items` (100) is a 429.
+
+  The owner widens them in `limits` when making the key (`max_concurrent` 1-64,
+  `max_result_window` up to 10,000, `max_buckets` up to 65,536, `max_items` up to 1,000, the two
+  `allow_` switches); the list shows them.
 - *Term statistics aren't filtered* (as in Elasticsearch): a filter (document level security)
-  hides documents from searches and gets, but scores, term vectors' `term_statistics` and
-  `_explain`'s idf come from every document of the shard, so a user or API key with a filter can
-  learn about hidden documents through them. A browser key can't ask for any of them.
+  hides documents from searches and gets, and exact counts, but `_score` (idf, average field
+  lengths), term vectors' `term_statistics` and `_explain` come from every document of the
+  shard, so a user or API key with a filter can learn about hidden documents through them. A
+  browser key can't ask for term vectors or `_explain`; its scores still reflect every
+  document.
 - *Rate limits* (Algolia's `maxQueriesPerIPPerHour`): per key `rate_limit: {per_minute?,
   per_ip_per_minute?}` (defaults 600 and 60 a minute, at most 100,000), kept in the key's
   `metadata.roll_browser`, so they travel with the cluster; a key's limit is shared by all its
@@ -259,8 +283,9 @@ applications). A web page calls a cluster directly, with no backend of its own i
   cluster; past it the fullest are forgotten first, so a drained address keeps its debt): a takeover, a drain or an unload starts them full again.
   roll's own requests (the console) aren't counted.
 - *Running at once*: browser requests are capped per key (`limits.max_concurrent`, 4) and per
-  cluster (a quarter of the cluster's `max_in_flight`, at least 4), past either 429 with
-  `Retry-After: 1`, so the owner's own clients always find permits.
+  cluster (a quarter of the cluster's `max_in_flight`, at least 4 but never more than half, so
+  the owner's own clients always find a permit; a cluster of one permit runs no browser
+  request). Past either: 429 with `Retry-After: 1`, and the request's token goes back.
 - *The safe surface* is `_application/search_application/{name}/_search` with a key limited to
   that application: a page sends only the template's `params`. Search UI's
   `@elastic/search-ui-elasticsearch-connector` and InstantSearch through Searchkit send whole

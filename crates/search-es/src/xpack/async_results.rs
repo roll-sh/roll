@@ -40,7 +40,7 @@ pub struct Entry {
     /// Extra state a kind needs (SQL cursors: the remaining rows and columns).
     pub extra: Value,
     /// Who opened it ([`crate::xpack::security::resource_owner`]): anyone else finds it missing.
-    /// `None` for results stored before owners were recorded.
+    /// `None` for results stored before owners were recorded: the superuser's alone.
     pub owner: Option<String>,
 }
 
@@ -65,8 +65,13 @@ pub fn owner(ctx: &crate::rest::Ctx) -> Option<String> {
     Some(crate::xpack::security::resource_owner(ctx))
 }
 
+/// Whether the caller opened `e`. A result stored before owners were recorded has none: only the
+/// cluster's superuser reaches it (to read, extend or delete).
 fn opened_by_caller(ctx: &crate::rest::Ctx, e: &Entry) -> bool {
-    e.owner.as_deref().is_none_or(|o| o == crate::xpack::security::resource_owner(ctx))
+    match e.owner.as_deref() {
+        Some(o) => o == crate::xpack::security::resource_owner(ctx),
+        None => crate::xpack::security::principal(ctx).is_superuser(),
+    }
 }
 
 /// At most this many stored results per cluster...

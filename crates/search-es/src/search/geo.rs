@@ -289,6 +289,10 @@ fn analyzer_for(ctx: &QueryCtx, f: &FieldInfo, name: Option<&str>) -> EsResult<s
 fn interval_source(ctx: &QueryCtx, f: &Arc<FieldInfo>, s: &crate::query::full_text::IntervalsSource) -> EsResult<search_index::query::IntervalsSource> {
     use crate::query::full_text::IntervalsSource as D;
     use search_index::query::IntervalsSource as S;
+    // Rules that walk the term dictionary are expensive queries.
+    if matches!(s, D::Prefix { .. } | D::Wildcard { .. } | D::Regexp { .. } | D::Fuzzy { .. }) {
+        ctx.check_expensive("intervals")?;
+    }
     let field_of = |use_field: &Option<String>| -> EsResult<Arc<FieldInfo>> {
         match use_field {
             Some(u) => ctx.field(u).ok_or_else(|| EsError::illegal_argument(format!("Cannot create interval source for unmapped field [{u}]"))),
@@ -422,6 +426,7 @@ fn apply_filter(ctx: &QueryCtx, f: &Arc<FieldInfo>, src: search_index::query::In
             })
         }
         IntervalFilter::Script(script) => {
+            ctx.no_scripts()?;
             let bound = ctx.cluster.scripts.compile(ctx.st, script, search_painless::Context::Interval)?;
             let Some(compiled) = bound.painless().cloned() else {
                 return Err(EsError::illegal_argument(format!("script_lang not supported [{}]", script.lang.as_deref().unwrap_or("painless"))));

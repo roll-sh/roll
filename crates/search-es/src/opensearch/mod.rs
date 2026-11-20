@@ -366,7 +366,6 @@ pub fn lookup_by_query(ctx: &crate::search::query::QueryCtx, l: &crate::query::t
     let req = crate::search::SearchRequest {
         slowlog: Default::default(),
         partial_aggs: false,
-        max_buckets: None,
         indices: vec![l.index.clone()],
         opts: crate::meta::resolve::IndicesOptions::STRICT_EXPAND_OPEN_FORBID_CLOSED,
         source,

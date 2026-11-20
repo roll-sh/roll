@@ -394,17 +394,14 @@ pub struct Lease {
     link: Option<String>,
     /// When it started waiting for its permits: its latency is measured from here.
     since: Option<Instant>,
-    /// A browser key's request: what its further items are charged to, and its running slot
-    /// ([`crate::browser`]), given back when the lease ends.
+    /// A browser key's request: its running slot ([`crate::browser`]), given back when the
+    /// lease ends.
     browser: Option<BrowserCharge>,
 }
 
 /// A browser key's request, admitted with one token and a running slot.
 struct BrowserCharge {
     id: String,
-    limit: crate::browser::KeyLimit,
-    ceiling: u64,
-    ip: Option<std::net::IpAddr>,
 }
 
 /// Counts a request in the cluster's queue for as long as it waits, however the wait ends
@@ -434,26 +431,6 @@ impl Drop for Lease {
 }
 
 impl Lease {
-    /// Charges a browser key's request for the items its body holds past the first (`_msearch`
-    /// searches, `_mget` documents): every item costs a token, all or none. `Err`: the 429 and
-    /// its `Retry-After`.
-    pub fn charge_items(&self, req: &EsRequest) -> Result<(), (Rejected, u64)> {
-        let Some(b) = &self.browser else { return Ok(()) };
-        let n = items(req);
-        if n <= 1 {
-            return Ok(());
-        }
-        self.loaded.browser.check(&b.id, b.ip, b.limit, b.ceiling, n - 1).map_err(|retry_after| {
-            // Refused whole: the token its admission took goes back too.
-            self.loaded.browser.refund(&b.id, b.ip, b.limit, 1);
-            let error = EsError::too_many_requests(format!(
-                "rejected execution of REST request [{} {}]: its [{n}] items exceed what API key [{}] has left of its rate of [{}] requests per minute",
-                req.method, req.uri, b.id, b.limit.per_minute
-            ));
-            (Rejected { error, dialect: self.dialect }, retry_after)
-        })
-    }
-
     pub fn max_body_bytes(&self, node: &Node) -> usize {
         self.loaded.spec().max_body_bytes.unwrap_or(node.cfg.max_body_bytes)
     }
@@ -747,25 +724,34 @@ fn browser_key(loaded: &Loaded, p: &search_es::xpack::security::Principal) -> Re
         (Some(made_for), Some(id)) if made_for == id => {}
         _ => return Err(()),
     }
-    let n = |section: &str, f: &str| b.get(section).and_then(|r| r.get(f)).and_then(|v| v.as_i64());
-    let limit = crate::browser::KeyLimit::new(n("rate_limit", "per_minute"), n("rate_limit", "per_ip_per_minute"), n("limits", "max_concurrent"));
-    Ok(Some((k.id.clone(), limit)))
+    Ok(key_limit(loaded, &k.id).map(|limit| (k.id.clone(), limit)))
 }
 
-/// The items a request's body holds: an `_msearch`'s searches, an `_mget`'s documents (`1` for
-/// anything else).
-fn items(req: &EsRequest) -> u64 {
-    let path = req.uri.split('?').next().unwrap_or("");
-    if path.ends_with("/_msearch") || path.ends_with("/_msearch/template") {
-        let lines = req.body.split(|b| *b == b'\n').filter(|l| !l.iter().all(u8::is_ascii_whitespace)).count() as u64;
-        return lines.div_ceil(2).max(1);
+/// Browser key `key_id`'s limits, from its `metadata.roll_browser` (`None`: not a browser key).
+fn key_limit(loaded: &Loaded, key_id: &str) -> Option<crate::browser::KeyLimit> {
+    let meta = search_es::xpack::security::api_keys::metadata(&loaded.cluster, key_id)?;
+    let b = meta.get(crate::browser::METADATA)?;
+    let n = |section: &str, f: &str| b.get(section).and_then(|r| r.get(f)).and_then(|v| v.as_i64());
+    Some(crate::browser::KeyLimit::new(n("rate_limit", "per_minute"), n("rate_limit", "per_ip_per_minute"), n("limits", "max_concurrent")))
+}
+
+/// Charges browser keys' items ([`search_es::xpack::security::browser::charge_items`]) to the
+/// loaded cluster's limiter.
+struct Charger {
+    node: std::sync::Weak<Node>,
+    name: String,
+}
+
+impl search_es::xpack::security::browser::ItemCharge for Charger {
+    fn charge(&self, key_id: &str, client: Option<std::net::IpAddr>, n: u64) -> Result<(), u64> {
+        let Some(l) = self.node.upgrade().and_then(|node| node.get_loaded(&self.name)) else { return Ok(()) };
+        let Some(limit) = key_limit(&l, key_id) else { return Ok(()) };
+        let ceiling = l.spec().browser_per_minute.unwrap_or(crate::browser::DEFAULT_CLUSTER_PER_MINUTE);
+        l.browser.check(key_id, client, limit, ceiling, n).inspect_err(|_| {
+            // Refused whole: the token its admission took goes back too.
+            l.browser.refund(key_id, client, limit, 1);
+        })
     }
-    if path.ends_with("/_mget") || path.ends_with("/_mtermvectors") {
-        let v: serde_json::Value = serde_json::from_slice(&req.body).unwrap_or_default();
-        let n = v.get("docs").or_else(|| v.get("ids")).and_then(|a| a.as_array()).map_or(1, |a| a.len() as u64);
-        return n.max(1);
-    }
-    1
 }
 
 /// The `http.cors.*` node settings a cluster shows for its spec (none with CORS off).
@@ -1171,7 +1157,7 @@ impl Node {
     }
 
     async fn load_inner(
-        &self,
+        self: &Arc<Self>,
         spec: &ClusterSpec,
         data_store: Option<search_store::Store>,
         deadline: Option<Instant>,
@@ -1196,6 +1182,8 @@ impl Node {
         cfg.node_name = self.cfg.node_name.clone();
         cfg.destructive_requires_name = spec.destructive_requires_name;
         cfg.node_settings = self.cfg.node_settings.clone();
+        // Browser keys' `_msearch`/`_mget` items are charged where search-es parses them.
+        cfg.item_charge = Some(Arc::new(Charger { node: Arc::downgrade(self), name: spec.name.clone() }));
         cfg.test_features = self.cfg.test_features;
         cfg.host_metrics = self.cfg.host_metrics;
         cfg.sealer = self.cfg.sealer.clone();
@@ -2098,9 +2086,13 @@ impl Node {
                 return Err(Refused::Throttled(Rejected { error, dialect: lease.dialect }, retry_after));
             }
             // Browser requests running at once: the key's own cap, and a quarter of the cluster's
-            // (at least 4), so the owner's clients always find permits.
-            let per_cluster = (lease.loaded.spec().max_in_flight as u64 / 4).max(4);
+            // permits (at least 4) but never more than half, so the owner's clients always find
+            // one (a cluster of one permit runs no browser request).
+            let mif = lease.loaded.spec().max_in_flight as u64;
+            let per_cluster = (mif / 4).max(4).min(mif / 2);
             if !lease.loaded.browser.enter(&id, limit.max_concurrent, per_cluster) {
+                // Refused: the token its admission took goes back.
+                lease.loaded.browser.refund(&id, ip, limit, 1);
                 Lease::refused(&lease.loaded, req);
                 let error = EsError::too_many_requests(format!(
                     "rejected execution of REST request [{} {}]: API key [{id}] already runs [{}] requests at once, or the cluster's browser keys [{per_cluster}]",
@@ -2108,7 +2100,7 @@ impl Node {
                 ));
                 return Err(Refused::Throttled(Rejected { error, dialect: lease.dialect }, 1));
             }
-            lease.browser = Some(BrowserCharge { id, limit, ceiling, ip });
+            lease.browser = Some(BrowserCharge { id });
         }
         Ok(lease)
     }

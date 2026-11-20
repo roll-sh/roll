@@ -629,12 +629,6 @@ async fn answer<B: RequestBody>(
         _ => body,
     };
     es.body = body;
-    // A browser key pays a token for each item past the first ([`crate::browser`]).
-    if let Err((r, retry_after)) = lease.charge_items(&es) {
-        let mut resp = search_es::rest::error_response(&r.error, &es, r.dialect);
-        resp.headers.push(("Retry-After".into(), retry_after.to_string()));
-        return Ok(to_hyper(resp, gzip_ok).await);
-    }
     if let Err(r) = lease.acquire(&es).await {
         return Ok(to_hyper(search_es::rest::error_response(&r.error, &es, r.dialect), gzip_ok).await);
     }

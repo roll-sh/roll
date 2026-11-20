@@ -176,7 +176,6 @@ pub(super) fn plan(
     let req = crate::search::SearchRequest {
         slowlog: Default::default(),
         partial_aggs: false,
-        max_buckets: None,
         indices: crate::meta::resolve::split_expressions(index),
         opts: crate::meta::resolve::IndicesOptions { ignore_unavailable: true, ..crate::meta::resolve::IndicesOptions::STRICT_EXPAND_OPEN_FORBID_CLOSED },
         source: crate::search_source::SearchSource::default(),

@@ -986,19 +986,29 @@ async fn stored_results_belong_to_their_opener() {
     assert_eq!(console("GET", &format!("/_query/async/{esql}"), Value::Null).await["status"], 200);
 }
 
-/// A browser key only searches: it can't run painless or expensive queries, ask for a large
-/// window, explain, or hold state on the cluster (scrolls, points in time, stored async searches),
-/// and has no term vectors (their statistics come from every document, filtered or not).
+/// A browser key's refusals happen where the engine has the request parsed: a query type it
+/// may not run anywhere in the request (`?q=` builds a `query_string`), painless in any form,
+/// `explain` at any level, a window past its `max_result_window` however `size` is written,
+/// and APIs that hold state or read term statistics.
 #[tokio::test]
 async fn a_browser_key_only_searches() {
     let e = env().await;
     let key = filtered_key(&e).await;
+    let terms = |sub: Value| json!({"size": 0, "aggs": {"c": {"terms": {"field": "color.keyword"}, "aggs": {"t": sub}}}});
     let refused = [
+        (reqwest::Method::POST, "/products/_search?q=title:sh*", None),
+        (reqwest::Method::POST, "/products/_search", Some(json!({"query": {"bool": {"filter": [{"wildcard": {"title": "s*"}}]}}}))),
+        (reqwest::Method::POST, "/products/_search", Some(json!({"size": 0, "aggs": {"suggest": {"filter": {"regexp": {"title": "s.*"}}}}}))),
+        (reqwest::Method::POST, "/products/_search", Some(json!({"query": {"intervals": {"title": {"prefix": {"prefix": "sh"}}}}}))),
         (reqwest::Method::POST, "/products/_search", Some(json!({"script_fields": {"x": {"script": "1"}}}))),
         (reqwest::Method::POST, "/products/_search", Some(json!({"query": {"script_score": {"query": {"match_all": {}}, "script": {"source": "1"}}}}))),
-        (reqwest::Method::POST, "/products/_search", Some(json!({"query": {"regexp": {"title": "s.*"}}}))),
-        (reqwest::Method::POST, "/products/_search", Some(json!({"from": 990, "size": 20}))),
-        (reqwest::Method::POST, "/products/_search", Some(json!({"explain": true}))),
+        (reqwest::Method::POST, "/products/_search", Some(json!({"sort": {"_script": {"type": "number", "script": "1"}}}))),
+        (reqwest::Method::POST, "/products/_search", Some(json!({"runtime_mappings": {"r": {"type": "long", "script": "emit(1)"}}}))),
+        (reqwest::Method::POST, "/products/_search", Some(terms(json!({"sum": {"script": "1"}})))),
+        (reqwest::Method::POST, "/products/_search", Some(terms(json!({"top_hits": {"explain": true}})))),
+        (reqwest::Method::POST, "/products/_search?explain=true", Some(json!({}))),
+        (reqwest::Method::POST, "/products/_search", Some(json!({"size": "5000"}))),
+        (reqwest::Method::POST, "/products/_search?size=600", Some(json!({"from": 500}))),
         (reqwest::Method::POST, "/products/_search?scroll=1m", Some(json!({}))),
         (reqwest::Method::POST, "/products/_pit?keep_alive=1m", None),
         (reqwest::Method::POST, "/products/_async_search?keep_on_completion=true", Some(json!({}))),
@@ -1007,51 +1017,84 @@ async fn a_browser_key_only_searches() {
     ];
     for (m, p, b) in refused {
         let (s, v) = as_key(&e, &key, m.clone(), p, b.clone()).await;
-        assert_eq!(s, 400, "{m} {p} {b:?}: {v}");
-        assert!(v["error"]["reason"].as_str().unwrap_or_default().contains("browser key"), "{v}");
+        assert!((400..500).contains(&s) && s != 429, "{m} {p} {b:?}: {s} {v}");
     }
     let (s, v) = as_key(&e, &key, reqwest::Method::POST, "/products/_search", Some(json!({"query": {"match": {"title": {"query": "shose", "fuzziness": "AUTO"}}}}))).await;
     assert_eq!((s, total(&v)), (200, 1), "search-as-you-type still works: {v}");
 }
 
-/// A browser key's request costs a token per item (an `_msearch` of N searches N), and browser
-/// requests running at once are capped below the cluster's own permits: past the key's cap a
-/// browser request gets 429 while the owner's clients go on.
+/// One fetch budget per request: hits, and `top_hits` in every bucket, together within the
+/// key's `max_result_window`.
+#[tokio::test]
+async fn a_browser_keys_fetches_share_one_budget() {
+    let e = env().await;
+    filtered_key(&e).await;
+    let bulk: String = (0..10).map(|i| format!("{{\"index\":{{\"_index\":\"items\",\"_id\":\"{i}\"}}}}\n{{\"color\":\"{}\"}}\n", if i % 2 == 0 { "red" } else { "blue" })).collect();
+    let r = e.post("/v1/search/clusters/shop/request", json!({"method": "POST", "path": "/_bulk?refresh=true", "body": bulk})).await;
+    assert_eq!(r["status"], 200, "{r}");
+    let key = e.post("/v1/search/clusters/shop/browser-keys", json!({"name": "five", "indices": ["items"], "limits": {"max_result_window": 5}})).await["api_key"].as_str().unwrap().to_string();
+    let search = |size: i64, top: i64| json!({"size": size, "aggs": {"c": {"terms": {"field": "color.keyword"}, "aggs": {"t": {"top_hits": {"size": top}}}}}});
+    let (s, v) = as_key(&e, &key, reqwest::Method::POST, "/items/_search", Some(search(1, 2))).await;
+    assert_eq!(s, 200, "1 hit and 2 buckets of 2: {v}");
+    let (s, v) = as_key(&e, &key, reqwest::Method::POST, "/items/_search", Some(search(3, 3))).await;
+    assert_eq!(s, 400, "3 hits and 2 buckets of 3: {v}");
+}
+
+/// A browser key pays for every item the engine parses (an `_msearch`'s searches however its
+/// lines or URL are written, an `_mget`'s documents however its body is given), each search
+/// checked; more than its `max_items` is a 429.
+/// Browser requests running at once are capped per key and per cluster, below the cluster's own
+/// permits: past either a browser request gets 429 while the owner's clients go on.
 #[tokio::test]
 async fn browser_keys_pay_per_item_and_leave_the_owner_permits() {
     let e = env().await;
     filtered_key(&e).await;
-    let k = e.post("/v1/search/clusters/shop/browser-keys", json!({"name": "few", "indices": ["products"], "rate_limit": {"per_minute": 10}, "limits": {"max_concurrent": 1}})).await;
+    let k = e.post("/v1/search/clusters/shop/browser-keys", json!({"name": "few", "indices": ["products"], "rate_limit": {"per_minute": 10}})).await;
     let key = k["api_key"].as_str().unwrap().to_string();
-    let msearch = |n: usize| {
-        let body = "{\"index\":\"products\"}\n{\"size\":0}\n".repeat(n);
-        e.http.post(format!("{}/_msearch", e.es)).header("authorization", format!("ApiKey {key}")).header("content-type", "application/x-ndjson").body(body).send()
-    };
-    assert_eq!(msearch(7).await.unwrap().status().as_u16(), 200);
-    let r = msearch(4).await.unwrap();
-    assert_eq!(r.status().as_u16(), 429, "3 tokens left can't pay for 4 searches");
+    let send = |method: reqwest::Method, url: String, body: String| e.http.request(method, url).header("authorization", format!("ApiKey {key}")).header("content-type", "application/x-ndjson").body(body).send();
+    let items = |n: usize| "{\"index\":\"products\"}\n{\"size\":0}\n".repeat(n);
+    // A trailing slash: 7 searches, 7 tokens.
+    assert_eq!(send(reqwest::Method::POST, format!("{}/_msearch/", e.es), items(7)).await.unwrap().status().as_u16(), 200);
+    // An `_mget` given in `?source=`: 4 documents, and 3 tokens left.
+    let url = format!("{}/products/_mget?source={}&source_content_type=application/json", e.es, urlencoding::encode(r#"{"ids":["1","2","3","4"]}"#));
+    let r = send(reqwest::Method::GET, url, String::new()).await.unwrap();
+    assert_eq!(r.status().as_u16(), 429, "3 tokens left can't pay for 4 documents");
     assert!(r.headers().contains_key("retry-after"));
-    assert_eq!(msearch(3).await.unwrap().status().as_u16(), 200);
+    // Blank lines are empty headers: 3 searches, 3 tokens.
+    let blank = "{\"index\":\"products\"}\n{}\n\n{}\n\n{}\n".to_string();
+    assert_eq!(send(reqwest::Method::POST, format!("{}/_msearch", e.es), blank).await.unwrap().status().as_u16(), 200, "3 searches, 3 tokens");
+    // Each search is checked, an empty header's too; more than the key's 100 items is a 429.
+    let big = e.post("/v1/search/clusters/shop/browser-keys", json!({"name": "big", "indices": ["products"], "rate_limit": {"per_minute": 10000}})).await["api_key"].as_str().unwrap().to_string();
+    let as_big = |body: String| e.http.post(format!("{}/_msearch", e.es)).header("authorization", format!("ApiKey {big}")).header("content-type", "application/x-ndjson").body(body).send();
+    let explained = "{\"index\":\"products\"}\n{}\n\n{\"explain\":true}\n".to_string();
+    assert_eq!(as_big(explained).await.unwrap().status().as_u16(), 400);
+    assert_eq!(as_big(items(101)).await.unwrap().status().as_u16(), 429);
 
-    // One browser request of this key running (a lease held as a request would hold it): the
-    // next gets 429, the owner's still runs.
-    let k2 = e.post("/v1/search/clusters/shop/browser-keys", json!({"name": "one at a time", "indices": ["products"], "limits": {"max_concurrent": 1}})).await;
-    let key2 = k2["api_key"].as_str().unwrap().to_string();
-    let mut held = search_es::EsRequest::new("GET", "/");
-    held.headers.push(("authorization".into(), format!("ApiKey {key2}")));
-    let Ok(lease) = e.control.node.enter_from(&held, None, search_server::Origin::Client("203.0.113.9".parse().unwrap())).await else { panic!("not admitted") };
-    let (s, _) = as_key(&e, &key2, reqwest::Method::POST, "/products/_search", Some(json!({}))).await;
-    assert_eq!(s, 429);
+    // Running at once: a cluster of 8 permits gives browser keys 4. Four browser requests held
+    // (as running requests hold their leases): the next browser request gets 429, the owner's
+    // still runs.
+    let (s, _) = e.call(reqwest::Method::PATCH, "/v1/search/clusters/shop", Some(json!({"max_in_flight": 8}))).await;
+    assert_eq!(s, 200);
+    let wide = e.post("/v1/search/clusters/shop/browser-keys", json!({"name": "wide", "indices": ["products"], "limits": {"max_concurrent": 10}})).await["api_key"].as_str().unwrap().to_string();
+    let mut held = Vec::new();
+    for _ in 0..4 {
+        let mut r = search_es::EsRequest::new("GET", "/");
+        r.headers.push(("authorization".into(), format!("ApiKey {wide}")));
+        let Ok(lease) = e.control.node.enter_from(&r, None, search_server::Origin::Client("203.0.113.9".parse().unwrap())).await else { panic!("not admitted") };
+        held.push(lease);
+    }
+    let (s, _) = as_key(&e, &wide, reqwest::Method::POST, "/products/_search", Some(json!({}))).await;
+    assert_eq!(s, 429, "the cluster's browser permits are taken");
     let c = e.post("/v1/search/clusters/shop/password", json!({})).await;
     let (user, pw) = creds(&c);
     let (s, _) = e.es(&user, &pw, reqwest::Method::POST, "/products/_search", Some(json!({}))).await;
     assert_eq!(s, 200, "the owner's request isn't held back by browser keys");
-    drop(lease);
-    let (s, _) = as_key(&e, &key2, reqwest::Method::POST, "/products/_search", Some(json!({}))).await;
+    held.clear();
+    let (s, _) = as_key(&e, &wide, reqwest::Method::POST, "/products/_search", Some(json!({}))).await;
     assert_eq!(s, 200);
 
     // At most 20 browser keys a cluster.
-    for i in 3..20 {
+    for i in 4..20 {
         e.post("/v1/search/clusters/shop/browser-keys", json!({"name": format!("k{i}"), "indices": ["products"]})).await;
     }
     let (s, v) = e.call(reqwest::Method::POST, "/v1/search/clusters/shop/browser-keys", Some(json!({"name": "k20", "indices": ["products"]}))).await;

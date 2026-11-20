@@ -908,6 +908,8 @@ pub fn mget(ctx: &Ctx) -> EsResult<Reply> {
     if !errs.is_empty() {
         return Err(EsError::action_request_validation(&errs));
     }
+    // A browser key pays for every document, as parsed here, before any is read.
+    crate::xpack::security::browser::charge_items(ctx, items.len())?;
     // Documents are read per shard, each shard request authorized on the names its documents
     // were asked by; one that doesn't resolve fails on its own first.
     let denied = if crate::xpack::security::checks_items(ctx) {

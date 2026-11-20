@@ -1046,7 +1046,8 @@ Checked against Elasticsearch 9.5.5 (captures in
   (400 `action_request_validation_exception`) where the caller's documents are restricted. A
   stored result (async search, ES|QL, EQL, SQL, and SQL cursors) is its opener's (the API key, or
   the user and realm): anyone else gets 404 for it, its status and its delete (a cursor: unknown),
-  except that `cancel_task` may delete it.
+  except that `cancel_task` may delete it. One stored before owners were recorded is the
+  cluster's superuser's alone.
 - Slow logs: `index.search.slowlog.threshold.{query,fetch}.*` and
   `index.indexing.slowlog.threshold.index.*` log a shard's query or fetch phase, or an index
   operation on the primary, that took longer than a threshold (`took > threshold`, the highest

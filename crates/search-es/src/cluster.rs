@@ -115,6 +115,9 @@ pub struct ClusterConfig {
     /// Reaches the roll search clusters this one names as remotes ([`crate::remote::links`]);
     /// `None`: remotes reach only the node itself.
     pub links: Option<std::sync::Arc<dyn crate::remote::links::Links>>,
+    /// Charges browser keys' `_msearch` and `_mget` items to their rate limits
+    /// ([`crate::xpack::security::browser::charge_items`]); `None`: not charged.
+    pub item_charge: Option<std::sync::Arc<dyn crate::xpack::security::browser::ItemCharge>>,
     /// The cluster's id in roll's catalog (`srch_…`), when it has one: how it names itself to
     /// `links`.
     pub catalog_id: Option<String>,
@@ -142,6 +145,7 @@ impl ClusterConfig {
             sealer: None,
             default_repository: None,
             links: None,
+            item_charge: None,
             catalog_id: None,
             file_service_tokens: false,
             audit: None,

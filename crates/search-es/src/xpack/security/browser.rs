@@ -4,21 +4,31 @@
 //! search-only keys do. Its owner may widen the limits when making the key
 //! (`metadata.roll_browser.limits`).
 //!
-//! - **APIs**: searches (`_search`, `_msearch`, `_count`), document reads (`_doc`, `_source`,
-//!   `_mget`), `_terms_enum`, a search application's `_search`, and the cluster's root and
-//!   `_security/_authenticate` that clients call first. Anything else is refused: no scrolls,
-//!   points in time or stored async searches (they hold state on the cluster), no term vectors
-//!   or `_explain` (term statistics come from every document, filtered or not), no SQL, ES|QL or
-//!   EQL, no search templates (a template renders whatever query it likes).
-//! - **Searches**: no `explain` or `profile`; no painless (`script`, `script_fields`,
-//!   `runtime_mappings`, scripted scores, aggregations and sorts) unless `allow_scripts`; none of
-//!   the query families Elasticsearch's `search.allow_expensive_queries: false` turns off
-//!   (`regexp`, `wildcard`, `prefix`, `fuzzy`, `query_string`) unless `allow_expensive_queries`
-//!   (a completion suggester's `prefix`/`fuzzy` options are search-as-you-type and stay);
-//!   `from + size` at most `max_result_window` (1,000); aggregations at most `max_buckets`
-//!   (1,000) buckets; `_msearch` and `_mget` at most `max_items` (100) items.
+//! The policy is enforced where the engine has the request parsed, never on the raw request:
 //!
-//! A refusal is a 400 `illegal_argument_exception` naming what and why.
+//! - **APIs** ([`check`], after routing): searches (`_search`, `_msearch`, `_count`), document
+//!   reads (`_doc`, `_source`, `_mget`), `_terms_enum`, a search application's `_search`, and the
+//!   cluster's root and `_security/_authenticate` that clients call first. Anything else is a
+//!   400: no scrolls, points in time or stored async searches (state on the cluster), no term
+//!   vectors or `_explain`, no SQL, ES|QL or EQL, no search templates.
+//! - **Queries**: the policy rides with the request's reads ([`super::dls::ReadSecurity`]), so
+//!   every [`crate::search::query::QueryCtx`] built for it (the query, aggregations' filters,
+//!   highlight and rescore queries, inner hits, collapse, a search application's rendered
+//!   template) runs with `search.allow_expensive_queries: false` unless the key allows them
+//!   (`regexp`, `wildcard`, `prefix`, `fuzzy`, joining queries, ranges on text and keyword,
+//!   runtime-field queries), and refuses `query_string` (`?q=` builds one), `span_multi` and
+//!   intervals' `wildcard`, `prefix`, `regexp` and `fuzzy` rules.
+//! - **Scripts**: no painless compiles for the key (queries, sorts, aggregations and their
+//!   reduce, script fields, runtime fields, highlighters) unless `allow_scripts`.
+//! - **The search source** ([`check_source`], URL and body merged): no `explain` or `profile`
+//!   (nor `explain` in `top_hits` or inner hits), no `pit`, no scroll, `from + size` within
+//!   `max_result_window`.
+//! - **One fetch budget per request**: every document fetched (hits, `top_hits` in every bucket,
+//!   inner hits) counts against `max_result_window` ([`super::dls::ReadSecurity::spend_fetch`]);
+//!   aggregations stop at `max_buckets`.
+//! - **Items**: an `_msearch`'s searches and an `_mget`'s documents, as the engine parsed them,
+//!   are charged to the key's rate limits before they run ([`charge_items`]); more than
+//!   `max_items` is a 429.
 
 use crate::error::{EsError, EsResult};
 use crate::json::Value;
@@ -33,10 +43,18 @@ const APIS: &[&str] = &[
     "search_application.search", "info", "ping", "security.authenticate",
 ];
 
-/// Query and request keys that run painless.
-const SCRIPTS: &[&str] = &["script", "script_fields", "runtime_mappings", "script_score", "scripted_metric"];
-/// Query families `search.allow_expensive_queries: false` turns off.
-const EXPENSIVE: &[&str] = &["regexp", "wildcard", "prefix", "fuzzy", "query_string"];
+/// Charges a browser key's items to its rate limits (the node's, `search_server::browser`).
+pub trait ItemCharge: Send + Sync {
+    /// Charges `n` more items to browser key `key_id` from `client`; `Err`: refused, retry after
+    /// that many seconds (the request's admission token is given back then).
+    fn charge(&self, key_id: &str, client: Option<std::net::IpAddr>, n: u64) -> Result<(), u64>;
+}
+
+impl std::fmt::Debug for dyn ItemCharge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ItemCharge")
+    }
+}
 
 /// A browser key's limits, its owner's choices over the defaults.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -51,6 +69,24 @@ pub struct Policy {
 impl Default for Policy {
     fn default() -> Policy {
         Policy { max_result_window: 1_000, max_buckets: 1_000, max_items: 100, allow_scripts: false, allow_expensive_queries: false }
+    }
+}
+
+/// What a policy may refuse.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Banned {
+    Scripts,
+    Explain,
+    Profile,
+}
+
+impl Banned {
+    pub fn describe(self) -> &'static str {
+        match self {
+            Banned::Scripts => "painless",
+            Banned::Explain => "[explain]",
+            Banned::Profile => "[profile]",
+        }
     }
 }
 
@@ -69,6 +105,13 @@ impl Policy {
             allow_expensive_queries: b("allow_expensive_queries"),
         }
     }
+
+    pub fn allows(&self, what: Banned) -> bool {
+        match what {
+            Banned::Scripts => self.allow_scripts,
+            Banned::Explain | Banned::Profile => false,
+        }
+    }
 }
 
 /// The policy of the request's principal when it is a browser key.
@@ -79,109 +122,70 @@ pub fn policy(ctx: &Ctx) -> Option<Policy> {
     meta.get(METADATA).map(Policy::of)
 }
 
-fn refused(what: impl std::fmt::Display) -> EsError {
+/// A browser key's refusal: a 400 naming what.
+pub fn refused(what: impl std::fmt::Display) -> EsError {
     EsError::illegal_argument(format!("{what} isn't available to a browser key (a key a web page ships only searches)"))
 }
 
-/// Refuses what a browser key may not ask for (see the module docs).
+/// Refuses an API a browser key may not call, by the routed API's name.
 pub fn check(ctx: &Ctx) -> EsResult<()> {
-    let Some(p) = policy(ctx) else { return Ok(()) };
+    if policy(ctx).is_none() {
+        return Ok(());
+    }
     let api = ctx.api.name();
     if !APIS.contains(&api) {
         return Err(refused(format!("[{api}]")));
     }
-    match api {
-        "search" | "count" => {
-            for param in ["scroll", "explain"] {
-                if ctx.has_query(param) && !(param == "explain" && ctx.query(param) == Some("false")) {
-                    return Err(refused(format!("[{param}]")));
-                }
-            }
-            let window = ctx.query("from").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0) + ctx.query("size").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
-            if window > p.max_result_window {
-                return Err(window_error(&p));
-            }
-            if let Some(body) = ctx.body()? {
-                check_search(&body, &p)?;
-            }
+    Ok(())
+}
+
+/// Checks a parsed search source (URL parameters merged in) for a browser key: no `explain`,
+/// `profile`, `pit` or scroll, and `from + size` within the key's window.
+pub fn check_source(ctx: &Ctx, src: &crate::search_source::SearchSource, scroll: bool) -> EsResult<()> {
+    let Some(p) = policy(ctx) else { return Ok(()) };
+    if src.explain == Some(true) {
+        return Err(refused(Banned::Explain.describe()));
+    }
+    if src.profile {
+        return Err(refused(Banned::Profile.describe()));
+    }
+    if src.pit.is_some() {
+        return Err(refused("[pit]"));
+    }
+    if scroll {
+        return Err(refused("[scroll]"));
+    }
+    if !p.allow_scripts {
+        let scripted_sort = src.sort.iter().any(|s| matches!(s, crate::search_source::Sort::Script { .. }));
+        if !src.script_fields.is_empty() || src.runtime_mappings.as_ref().is_some_and(|m| !m.is_empty()) || scripted_sort {
+            return Err(refused("painless ([script_fields], [runtime_mappings] or a [_script] sort)"));
         }
-        "msearch" => {
-            let lines: Vec<&[u8]> = ctx.body.split(|b| *b == b'\n').filter(|l| !l.iter().all(u8::is_ascii_whitespace)).collect();
-            if lines.len().div_ceil(2) > p.max_items {
-                return Err(items_error(&p));
-            }
-            for (i, line) in lines.iter().enumerate() {
-                let Ok(Some(v)) = crate::json::parse(line) else { continue };
-                if i % 2 == 0 {
-                    if v.get("scroll").is_some() {
-                        return Err(refused("[scroll]"));
-                    }
-                } else {
-                    check_search(&v, &p)?;
-                }
-            }
-        }
-        "mget" => {
-            let body = ctx.body()?.unwrap_or(Value::Null);
-            let n = body.get("docs").or_else(|| body.get("ids")).and_then(Value::as_array).map_or(0, |a| a.len());
-            if n > p.max_items {
-                return Err(items_error(&p));
-            }
-        }
-        _ => {}
+    }
+    let window = i64::from(src.from.unwrap_or(0).max(0)) + i64::from(src.size.unwrap_or(10).max(0));
+    if window > p.max_result_window {
+        return Err(EsError::illegal_argument(format!(
+            "Result window is too large for a browser key, from + size must be less than or equal to: [{}] (the key's max_result_window)",
+            p.max_result_window
+        )));
     }
     Ok(())
 }
 
-fn window_error(p: &Policy) -> EsError {
-    EsError::illegal_argument(format!(
-        "Result window is too large for a browser key, from + size must be less than or equal to: [{}] (the key's max_result_window)",
-        p.max_result_window
-    ))
-}
-
-fn items_error(p: &Policy) -> EsError {
-    EsError::illegal_argument(format!("a browser key's request may hold at most [{}] items (the key's max_items)", p.max_items))
-}
-
-/// One search body: no explain, profile, point in time, painless or expensive queries, and a
-/// bounded window.
-fn check_search(body: &Value, p: &Policy) -> EsResult<()> {
-    for k in ["explain", "profile"] {
-        if body.get(k).and_then(Value::as_bool) == Some(true) {
-            return Err(refused(format!("[{k}]")));
-        }
+/// Charges an `_msearch`'s or `_mget`'s items, as the engine parsed them, to a browser key's
+/// rate limits before they run (its admission paid for one). More than the key's `max_items`,
+/// or more than its limits have left, is a 429 with `Retry-After`.
+pub fn charge_items(ctx: &Ctx, n: usize) -> EsResult<()> {
+    let Some(p) = policy(ctx) else { return Ok(()) };
+    let Some(principal) = ctx.principal.get() else { return Ok(()) };
+    let super::AuthKind::ApiKey(k) = &principal.kind else { return Ok(()) };
+    let too_many = |retry_after: u64, why: String| EsError::too_many_requests(format!("rejected execution of [{}]: {why}", ctx.api.name())).with_header("Retry-After", retry_after.to_string());
+    if n > p.max_items {
+        return Err(too_many(60, format!("a browser key's request holds at most [{}] items, this one [{n}] (the key's max_items)", p.max_items)));
     }
-    if body.get("pit").is_some() {
-        return Err(refused("[pit]"));
+    let Some(charge) = &ctx.cluster.config.item_charge else { return Ok(()) };
+    if n <= 1 {
+        return Ok(());
     }
-    let n = |k: &str| body.get(k).and_then(Value::as_i64).unwrap_or(0);
-    if n("from") + n("size") > p.max_result_window {
-        return Err(window_error(p));
-    }
-    walk(body, p)
-}
-
-/// Every key of the body but a suggester's options (a completion suggester's `prefix` and
-/// `fuzzy` are search-as-you-type).
-fn walk(v: &Value, p: &Policy) -> EsResult<()> {
-    match v {
-        Value::Obj(m) => {
-            for (k, x) in m {
-                if k == "suggest" {
-                    continue;
-                }
-                if !p.allow_scripts && (SCRIPTS.contains(&k.as_str()) || k == "_script") {
-                    return Err(refused(format!("painless ([{k}])")));
-                }
-                if !p.allow_expensive_queries && EXPENSIVE.contains(&k.as_str()) {
-                    return Err(refused(format!("a [{k}] query (search.allow_expensive_queries)")));
-                }
-                walk(x, p)?;
-            }
-            Ok(())
-        }
-        Value::Arr(a) => a.iter().try_for_each(|x| walk(x, p)),
-        _ => Ok(()),
-    }
+    let client = ctx.request.header(super::audit::CLIENT_ADDRESS_HEADER).and_then(|a| a.parse().ok());
+    charge.charge(&k.id, client, n as u64 - 1).map_err(|retry_after| too_many(retry_after, format!("its [{n}] items exceed what API key [{}] has left of its rate limits", k.id)))
 }
