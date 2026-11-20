@@ -11898,6 +11898,77 @@ at open, a compaction): older builds ignore the manifest's `format` and fail on 
   the probe needs from the OS page cache, as PostgreSQL's 8 kB page), each a format change for
   its own round.
 
+## Analytic CPU, round 8 (agent 272)
+
+TPC-H SF1 on lane C, plain dist builds only (BENCH.md "Analytic CPU, round 8" has the tables).
+Base `68e5a2ebd`. Harness: agent 270's (`~/.cache/a272/tpch/pair.sh`: per arm a fresh engine in a
+container on a copy of the loaded data, a 2 GB cache, a warm-up of the 22, then per query 3 runs in
+one `perf stat -e instructions:u,cycles:u` window over the engine's cgroup, opened 2.5 s early),
+ONE pair per `tools/lane.sh c` hold. **Lane C was never quiet** (the pairs' own reading 0.9-3.2
+foreign cores, lane.sh's 5-7): the gates are decided on user instructions (they repeat within
+0.05-0.2% from pair to pair here); cycles are in BENCH and mean little. Every pass's 22 result
+hashes are PostgreSQL's. Stacked: `cand/a272` (the first change and this section), `cand/a272-2`
+(on it).
+
+- **What the brief's item 1 found**: of the "scans with two or more join stages", only q10's
+  lineitem scan is probed into a hash table, and by one stage (its rows then build the customer
+  join's table; nothing aggregates in the scan). q05, q07, q08 and q09 run nested loops' index
+  lookups as their stages (`Stage::Lookup`: customer -> orders -> lineitem, part -> partsupp ->
+  lineitem -> supplier -> orders), so a batch chain of hash probes has nothing to take there.
+  Their per-row cost between the stages (profile of the base, `perf record -e instructions:u`,
+  `~/.cache/a272/perf/p-b0-*.report.txt`): q09's 7.8 G: `Lookup::batch` 13% (the index reads),
+  `Value` drops 6%, `joined_from` 5.4%, `K::num` over the joined rows 3.4%, `joined_to` 2.6%,
+  `joined` 2.1%, `run_stages` 2.1%, malloc / free 5%. What the stages build and drop is what this
+  round cut.
+- **cand/a272: a pipeline's rows are made with room for the stages after them, and a stage drops
+  an outer row's scalars without a call each** (`pipe::spare`, `pipe::drop_row`): a scan's row
+  under stages, and each joined row a stage makes for the next, gets the capacity of the values
+  the stages up to the last add (`Decode::row_with`, `Lazy::into_row*`, `Joined::into_row_spare`),
+  so `joined_from` extends it in place instead of moving it to a larger allocation at every stage;
+  `joined_from` doesn't drop and rewrite a column it NULLs when it is NULL already; an outer row
+  whose joined rows went out as pairs, and a lookup stage's inner rows, are dropped by
+  `drop_row` (NULLs and plain scalars forgotten, only owning values dropped; `Value`'s drop is out
+  of line, a call and a jump per value of rows of 30 to 50). Against the base (2 pairs, the 22):
+  q09 -2.92 / -2.93% user instructions, q05 -1.80 / -1.82, q03 -0.55 / -0.59, q07 -0.46 / -0.45,
+  q21 -0.35 / -0.37, q08 -0.25 / -0.25, q16 +0.84 / +0.85, q14 +0.46 / +0.38, the 22 -0.42 /
+  -0.43% (107.22 -> 106.77 G). q16's +0.85% (24 M instructions) is not explained (its one probe
+  takes no spare room; `drop_row` or code placement; not looked into further). q14's goes with
+  cand/a272-2.
+- **cand/a272-2: a bitmap heap scan's parallel chunks are fills, and an aggregating scan's one
+  probe takes its joined columns past the walk's reach once most rows pass** (`IndexChunk::keyed`
+  through `fill_source`, `FillIter` removed; `VPlan`, `Pre::repick`): the chunks of a bitmap's
+  row keys (q14's lineitem of one month) went a row at a time (`FillIter`, since 6e5eed7cc:
+  their chunks thought too small for the batch's per-chunk cut-off); as fills, their rows are
+  decoded, filtered and probed a batch at a time like a table's. Agent 267's joined path
+  (`Pre::joined`) decodes the outer columns the joined rows keep only where the walk reaches anyway
+  (q12's orders, 98% dropped by the probe, were walked to `o_orderpriority` for every row:
+  +3.2%); now the scan also compiles a wide plan with them decoded, and every chunk takes it once
+  a quarter or more of the scan's first 1,024 rows decoded passed the probe (counted across
+  chunks: `VPlan::seen`, `passed`), the narrow plan before. Against cand/a272 (one pair of the 22;
+  two earlier pairs of the same change against its parent before the counting moved, n1 -> n2):
+  q14 -12.77% user instructions (-12.83 / -12.70; 1.67 -> 1.46 G; PostgreSQL 1.05 by round 6's
+  table), q22 +1.04, q13 +0.61 (+0.48 / +0.50), q12 +0.12, the rest within +-0.1; the 22 -0.14%.
+  q13's +0.6% (25 M) is in `partial_chunk` and `Col::value` (`perf` of both builds,
+  `~/.cache/a272/perf/c-n*-q13.report.txt`): q13 doesn't take the wide plan (its columns are in
+  reach), so likely the loop's code placement; not resolved. Golden `a272_bitmap_probe_agg`
+  (recorded from PostgreSQL 18.6: q14's shape through a bitmap heap scan, groups by outer and
+  inner columns, outer string columns kept, duplicate and missing inner keys, NULL keys and
+  values, rows stored before ADD COLUMN).
+- **The 22, plain dist** (one pair, the base against both): 107.22 -> 106.59 G user instructions
+  (-0.59%): q14 -12.3%, q09 -2.9, q05 -1.8, q03 -0.65, q07 -0.44, q21 -0.36, q10 -0.22, q08 -0.21,
+  q16 +0.88, q13 +0.64, q22 +0.58, the rest within +-0.2. VmHWM level (1,679 -> 1,681 MB). Against
+  pgrust's 90.4 G (round 6's) 1.18x. Every result hash PostgreSQL's.
+- **Not done**: item 3 (q02, q11, q20's joined rows in the serial executor); a PGO build (no
+  change here is to inlining or function boundaries).
+- **Left** (largest first): q09's and q07's index lookup stages themselves (`Lookup::batch` 13% of q09,
+  14% of q07 in agent 267's profile: index key encoding, entry spans, a sorted multi-get per 64 outer rows, then each inner row
+  decoded whole by `Decode::row` and filtered through a `Joined` view: a lookup stage that decodes
+  only the columns kept and builds the next stage's row once); q10's lineitem rows passed by its
+  one probe are still walked again and made rows by the row path (no aggregate in the scan, so
+  `Pre::joined` doesn't apply: a joined row made straight from the batch's columns would spare
+  `LazyBuf::read`, `into_row_passed`, `run_stages`; ~5-8% of q10); the typed walk (`Pre::decode`
+  26% of q10) and the store's `fill_batch_with` (14%); q13's and q16's small regressions above.
+
 ## Analytic CPU, round 7 (agent 267)
 
 TPC-H SF1 on lane C, plain dist builds only (BENCH.md "Analytic CPU, round 7" has the tables).
