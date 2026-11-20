@@ -613,6 +613,7 @@ previews are listed once those products are on.
 | `postgres_create_branch` | A copy-on-write branch of a project, from its parent now or at a point in time. | `POST /v1/projects/{project}/branches` |
 | `postgres_delete_branch` | Delete a branch and its compute. | `DELETE /v1/projects/{project}/branches/{branch}` |
 | `postgres_branch_history` | The range a branch can be restored to or branched from. | `GET /v1/projects/{project}/branches/{branch}/history` |
+| `postgres_create_replica` | A read-only endpoint on a branch that follows its primary. | `POST /v1/projects/{project}/branches/{branch}/replicas` |
 | `postgres_restore_branch` | Rewind a branch in place to a past point (the current state is kept as a branch). | `POST /v1/projects/{project}/branches/{branch}/restore` |
 | `postgres_reset_branch` | A branch back to its parent's current state, in place (Neon's reset from parent). | `POST /v1/projects/{id}/branches/{branch}/reset` |
 | `postgres_get_endpoint` | An endpoint's compute state and limits. | `GET /v1/endpoints/{id}` |
@@ -633,6 +634,9 @@ previews are listed once those products are on.
 | `postgres_usage` | Compute and storage use of a project, with cost estimates. | `GET /v1/projects/{project}/usage` |
 | `redis_list_databases` | Serverless Redis databases. | `GET /v1/redis/databases` |
 | `redis_get_database` | A Redis database's settings and connection (credentials need reveal). | `GET /v1/redis/databases/{database}` |
+| `redis_overview` | What roll Redis offers here: version, region, defaults, endpoints, pricing. | `GET /v1/redis` |
+| `redis_create_replica` | A read replica of a database (its password is a credential). | `POST /v1/redis/databases/{database}/replicas` |
+| `redis_delete_replica` | Remove a read replica. | `DELETE /v1/redis/replicas/{replica}` |
 | `redis_create_database` | A new serverless Redis database. | `POST /v1/redis/databases` |
 | `redis_delete_database` | Delete a database and its data. Irreversible. | `DELETE /v1/redis/databases/{database}` |
 | `redis_create_branch` | A fork of a database's data, now or at a point in time. | `POST /v1/redis/databases/{database}/branches` |
@@ -657,14 +661,19 @@ previews are listed once those products are on.
 | `storage_usage` | A bucket's usage. | `GET /v1/storage/buckets/{bucket}/usage` |
 | `storage_usage_all` | Storage and requests across every bucket. | `GET /v1/storage/usage` |
 | `storage_list_accounts` | Storage's accounts (12-digit ids): name, alias, the default. | `GET /v1/storage/accounts` |
+| `storage_overview` | What roll storage offers here: the S3 endpoint, region and the account's ids. | `GET /v1/storage` |
+| `storage_get_account` | One storage account. | `GET /v1/storage/accounts/{id}` |
 | `storage_list_keys` | An account's access keys: permission, buckets, IAM user, last use (never a secret). | `GET /v1/storage/keys` |
 | `storage_revoke_key` | Revoke an S3 access key at once. | `DELETE /v1/storage/keys/{id}` |
 | `storage_list_roles` | An account's IAM roles: ARN, trust, permissions policy, session length. | `GET /v1/storage/roles` |
 | `storage_get_role` | One IAM role. | `GET /v1/storage/roles/{name}` |
+| `storage_revoke_role_sessions` | Deny every session issued for a role until now. | `POST /v1/storage/roles/{name}/revoke` |
 | `storage_list_replication_targets` | Buckets outside roll that replication copies to (never the secret). | `GET /v1/storage/replication-targets` |
+| `storage_get_replication_target` | One replication target (never its secret). | `GET /v1/storage/replication-targets/{name}` |
 | `storage_update_bucket` | Change a bucket's versioning, lifecycle rules, CORS, trash days, tags or whether it's public: what's left out stays. | `PATCH /v1/storage/buckets/{bucket}` |
 | `storage_delete_objects` | Delete these keys, or every object under a prefix (to the trash). | `POST /v1/storage/buckets/{bucket}/delete` |
 | `streams_list` | Kafka-compatible streams. | `GET /v1/streams` |
+| `streams_overview` | What roll streams offers here: bootstrap address, SASL, pricing. | `GET /v1/kafka` |
 | `streams_get` | A stream's bootstrap address, topics and throughput. | `GET /v1/streams/{stream}` |
 | `streams_create` | A new stream (its first API key needs reveal to see). | `POST /v1/streams` |
 | `streams_delete` | Delete a stream with its topics and data. Irreversible. | `DELETE /v1/streams/{stream}` |
@@ -685,6 +694,7 @@ previews are listed once those products are on.
 | `streams_update_topic` | Grow a topic's partitions or change its configs, online. | `PATCH /v1/streams/{stream}/topics/{topic}` |
 | `streams_delete_group` | Delete a group and its committed offsets (refused while it has members). | `DELETE /v1/streams/{stream}/groups/{group}` |
 | `nosql_list_databases` | ScyllaDB/Cassandra-compatible databases. | `GET /v1/nosql/databases` |
+| `nosql_overview` | What roll NoSQL offers here: dialects, versions, endpoints. | `GET /v1/nosql` |
 | `nosql_get_database` | A database's settings and endpoints (credentials need reveal). | `GET /v1/nosql/databases/{database}` |
 | `nosql_create_database` | A new database. | `POST /v1/nosql/databases` |
 | `nosql_delete_database` | Delete a database and its data. Irreversible. | `DELETE /v1/nosql/databases/{database}` |
@@ -702,6 +712,8 @@ previews are listed once those products are on.
 | `queues_list_vhosts` | RabbitMQ-compatible virtual hosts. | `GET /v1/queues/vhosts` |
 | `queues_create_vhost` | A new virtual host. | `POST /v1/queues/vhosts` |
 | `queues_delete_vhost` | Delete a virtual host and everything in it. | `DELETE /v1/queues/vhosts/{vhost}` |
+| `queues_suspend_vhost` | Scale a virtual host to zero now (a client connecting wakes it). | `POST /v1/queues/vhosts/{vhost}/suspend` |
+| `queues_wake_vhost` | Start a suspended virtual host now. | `POST /v1/queues/vhosts/{vhost}/wake` |
 | `queues_list_queues` | A virtual host's queues with message counts. | `GET /v1/queues/vhosts/{vhost}/queues` |
 | `queues_declare_queue` | Create a queue. | `POST /v1/queues/vhosts/{vhost}/queues` |
 | `queues_delete_queue` | Delete a queue and its messages. | `DELETE /v1/queues/vhosts/{vhost}/queues/{queue}` |
@@ -742,7 +754,9 @@ previews are listed once those products are on.
 | `tasks_rerun` | A past run's function run again with its input. | `POST /v1/tasks/runs/{id}/rerun` |
 | `tasks_list_functions` | Durable functions. | `GET /v1/tasks/functions` |
 | `tasks_list_apps` | Synced apps: URL, functions, SDK, last sync. | `GET /v1/tasks/apps` |
+| `tasks_delete_app` | Stop syncing an app whose functions tasks runs. | `DELETE /v1/tasks/apps/{id}` |
 | `tasks_list_api_keys` | Tasks' API keys: name, prefix, made, last used (never the key). | `GET /v1/tasks/api-keys` |
+| `tasks_delete_api_key` | Revoke an API key at once. | `DELETE /v1/tasks/api-keys/{id}` |
 | `tasks_list_queues` | Queues with their parallelism, rate and backlog. | `GET /v1/tasks/queues` |
 | `tasks_stats` | Nodes, queue stats, dead letters, schedules and functions. | `GET /v1/tasks/stats` |
 | `tasks_list_dead_letters` | Messages that ran out of retries, newest first. | `GET /v1/tasks/dlq` |
