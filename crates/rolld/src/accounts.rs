@@ -33,7 +33,9 @@ pub async fn open(args: &crate::Args, home: &Path, code: Option<Arc<code_control
     };
     let pg = code_sql::PgOptions { max_connections: args.db_budget()?.accounts, ca: args.code.code_db_ca.clone(), ..Default::default() };
     let api = args.code_public_url.clone().unwrap_or_else(|| format!("http://{}:{}", args.public_host, args.api.port()));
-    let config = roll_accounts::Config::from_env(&api, &args.web_url, open);
+    let mut config = roll_accounts::Config::from_env(&api, &args.web_url, open);
+    // The deployment key as every product has it (a sealed start's is in memory only).
+    config.secret_key = args.secret_key().map(|k| roll_accounts::Secret::new(k.trim()));
     tracing::info!(
         email = !matches!(config.mail, roll_accounts::MailConfig::Off),
         github = config.github.is_some(),
@@ -91,6 +93,20 @@ impl roll_accounts::audit::Audit for AccessAudit {
 
     fn client_ip(&self, req: &axum::extract::Request) -> Option<std::net::IpAddr> {
         roll_access::evaluate::client_ip(req, &self.0.config)
+    }
+
+    fn tokens(&self, user: &str) -> Vec<serde_json::Value> {
+        let Ok(all) = self.0.store.list() else { return Vec::new() };
+        all.into_iter()
+            .filter(|g| g.user.as_deref() == Some(user))
+            .map(|g| {
+                serde_json::json!({
+                    "id": g.id, "name": g.name, "kind": g.kind, "rules": g.rules, "client": g.client.map(|c| c.name),
+                    "created_at": g.created_at, "expires_at": g.expires_at, "last_used_at": g.last_used_at, "last_used_ip": g.last_used_ip,
+                    "revoked_at": g.revoked_at, "revoked_why": g.revoked_why, "decoy": g.decoy,
+                })
+            })
+            .collect()
     }
 
     fn activity(&self, user: &str, before: Option<i64>, limit: usize) -> Vec<roll_accounts::audit::Activity> {

@@ -134,7 +134,7 @@ pub fn with_global_stats(cluster: &crate::cluster::Cluster, req: &super::SearchR
         let rec = Arc::new(Recorder::default());
         let recording = view.with_global_stats(Some(rec.clone() as Arc<dyn search_index::StatsSource>));
         let table = t.table();
-        let qctx = super::query::QueryCtx::new(cluster, &st, &t.idx, &table, &recording, req.now_ms);
+        let qctx = super::query::QueryCtx::new(cluster, &st, &t.idx, &table, &recording, req.now_ms, t.reader());
         // Inner hits are extracted before the query is built (`SearchService.parseSource`).
         if let Err(e) = super::check_inner_hit_names(&req.source) {
             failures.push((i, e));

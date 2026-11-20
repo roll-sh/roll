@@ -48,6 +48,9 @@ pub struct Template {
     /// A static site whose files were exported (`sites.rs`): the proxy serves them by this key
     /// (the image's digest) and no instance ever runs.
     pub site: Option<String>,
+    /// That site's edge functions ([`crate::edge`]), and the service that runs them.
+    pub edge: Vec<apps_build::edge::EdgeFn>,
+    pub edge_service: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -84,6 +87,12 @@ pub struct Inst {
     /// Its last hour by minute (Railway's per replica): `(minute, CPU seconds, seconds measured,
     /// peak memory bytes)`, from the reaper's samples.
     minutes: Mutex<std::collections::VecDeque<(i64, f64, f64, u64)>>,
+    /// Its template's other ports (custom domains' own), and where they answer, learned at each
+    /// start.
+    wanted: Vec<u16>,
+    ports: Mutex<HashMap<u16, SocketAddr>>,
+    /// A scrape of its metrics endpoint is out ([`crate::prom`]).
+    scraping: AtomicBool,
 }
 
 /// An instance's last hour by minute ([`EnvLive::by_instance`]).
@@ -144,7 +153,41 @@ impl Inst {
             health_fails: AtomicU32::new(0),
             stopping: Mutex::new(None),
             minutes: Mutex::new(std::collections::VecDeque::new()),
+            wanted: Vec::new(),
+            ports: Mutex::new(HashMap::new()),
+            scraping: AtomicBool::new(false),
         })
+    }
+
+    /// An instance of `tpl`'s deployment, knowing the other ports it publishes.
+    fn of(name: String, tpl: &Template) -> Arc<Inst> {
+        let mut i = Inst::new(name, tpl.deployment.clone());
+        if let Some(i) = Arc::get_mut(&mut i) {
+            i.wanted = tpl.spec.ports.clone();
+        }
+        i
+    }
+
+    /// Where it answers while it runs (never while suspended or stopped).
+    pub fn running_addr(&self) -> Option<SocketAddr> {
+        match *self.phase.lock() {
+            Phase::Running(a) => a,
+            _ => None,
+        }
+    }
+
+    /// Whether this scrape may start (none other is out).
+    pub fn begin_scrape(&self) -> bool {
+        !self.scraping.swap(true, Ordering::SeqCst)
+    }
+
+    pub fn end_scrape(&self) {
+        self.scraping.store(false, Ordering::SeqCst);
+    }
+
+    /// Where it answers on `port` (a custom domain's own), if it publishes it.
+    pub fn port_addr(&self, port: u16) -> Option<SocketAddr> {
+        self.ports.lock().get(&port).copied()
     }
 
     fn phase(&self) -> Phase {
@@ -189,6 +232,8 @@ pub struct Lease {
     pub timeout: Option<Duration>,
     /// Its deployment keeps visitors on one instance ([`crate::model::Run::affinity`]).
     pub affinity: bool,
+    /// Its environment's "a slot is free", for a request queued at the hard limit.
+    freed: Arc<tokio::sync::Notify>,
 }
 
 /// What a visitor's affinity cookie holds for an instance: a short digest of its name (the name
@@ -201,6 +246,7 @@ impl Drop for Lease {
     fn drop(&mut self) {
         self.inst.in_flight.fetch_sub(1, Ordering::SeqCst);
         *self.inst.last_used.lock() = Instant::now();
+        self.freed.notify_one();
     }
 }
 
@@ -225,6 +271,9 @@ pub enum WakeError {
     Timeout(Duration),
     #[error("too many requests are waiting for this service to start")]
     Busy,
+    /// Every instance at its concurrency, at max_instances, for all of `run.queue_s`.
+    #[error("every instance was busy for {0:?}")]
+    Full(Duration),
     #[error("this project reached its spending limit for the month")]
     Capped,
     #[error("this environment is paused")]
@@ -244,17 +293,64 @@ impl Drop for Held {
 }
 
 /// One deployment's answers during a canary step.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Served {
     pub requests: u64,
     pub errors: u64,
     /// Its instances that crashed or failed their health check (no request sees those).
     pub crashes: u64,
+    /// Its answers' times (to their headers): how many in each of [`LAT_BUCKETS`] buckets of
+    /// 2^¼ steps (ms, about 19% each).
+    pub lat: [u32; LAT_BUCKETS],
+}
+
+/// Buckets of a step's answer times: bucket `i` holds up to 2^((i+1)/4) ms (the last, the
+/// rest: past 16 s).
+pub const LAT_BUCKETS: usize = 96;
+
+impl Default for Served {
+    fn default() -> Self {
+        Served { requests: 0, errors: 0, crashes: 0, lat: [0; LAT_BUCKETS] }
+    }
 }
 
 impl Served {
     pub fn error_pct(&self) -> f64 {
         if self.requests == 0 { 0.0 } else { self.errors as f64 * 100.0 / self.requests as f64 }
+    }
+
+    /// One answer that took `ms`.
+    pub fn took(&mut self, ms: f64) {
+        let i = if ms <= 1.0 { 0 } else { ((ms.log2() * 4.0).ceil() as usize).saturating_sub(1).min(LAT_BUCKETS - 1) };
+        self.lat[i] = self.lat[i].saturating_add(1);
+    }
+
+    /// Its answers' p95 (ms, read between its bucket's ends by rank), when it timed any.
+    pub fn p95_ms(&self) -> Option<f64> {
+        let n: u64 = self.lat.iter().map(|&c| c as u64).sum();
+        if n == 0 {
+            return None;
+        }
+        let want = (n as f64 * 0.95).ceil() as u64;
+        let mut seen = 0;
+        for (i, &c) in self.lat.iter().enumerate() {
+            if c > 0 && seen + c as u64 >= want {
+                let (lo, hi) = (if i == 0 { 0.0 } else { 2f64.powf(i as f64 / 4.0) }, 2f64.powf((i + 1) as f64 / 4.0));
+                return Some(lo + (hi - lo) * (want - seen) as f64 / c as f64);
+            }
+            seen += c as u64;
+        }
+        None
+    }
+
+    /// Another's counts added in.
+    pub fn add(&mut self, o: &Served) {
+        self.requests += o.requests;
+        self.errors += o.errors;
+        self.crashes += o.crashes;
+        for (a, b) in self.lat.iter_mut().zip(o.lat.iter()) {
+            *a = a.saturating_add(*b);
+        }
     }
 }
 
@@ -284,6 +380,12 @@ pub struct Gate {
     pub vitals: bool,
     /// Its challenge rules' key ([`crate::challenge`]), when it has such a rule.
     pub challenge_key: Option<Vec<u8>>,
+    /// Its split test.
+    pub split: Option<crate::model::Split>,
+    /// Where a share of its bodiless requests is copied.
+    pub mirror: Option<crate::model::Split>,
+    /// Its snippets, joined: before `</head>`, before `</body>`.
+    pub snippets: Option<(bytes::Bytes, bytes::Bytes)>,
 }
 
 /// A rate-limit bucket: which (0 the environment's, 1 + i firewall rule i's) and whose.
@@ -307,8 +409,8 @@ impl Gate {
     /// matching, it does.
     /// What its firewall says of the request: the first rule that matches decides; none lets it
     /// in.
-    pub fn firewall_verdict(&self, method: &str, path: &str, user_agent: &str) -> Verdict {
-        match self.firewall.iter().enumerate().find(|(_, r)| r.matches(method, path, user_agent)) {
+    pub fn firewall_verdict(&self, asked: &crate::model::Asked<'_>) -> Verdict {
+        match self.firewall.iter().enumerate().find(|(_, r)| r.matches(asked)) {
             None => Verdict::Allow,
             Some((_, r)) if r.action == crate::model::FirewallAction::Allow => Verdict::Allow,
             Some((i, r)) if r.action == crate::model::FirewallAction::Limit => Verdict::Limit(i as u16 + 1, crate::model::RateLimit { per_minute: r.per_minute.unwrap_or(60), burst: r.burst }),
@@ -430,6 +532,8 @@ pub struct EnvLive {
     viewed: Mutex<HashMap<String, (Arc<Template>, Instant)>>,
     /// Requests waiting on a wake.
     waiters: AtomicU32,
+    /// A lease ended: a request queued at the hard limit ([`crate::model::Run::queue_s`]) looks again.
+    freed: Arc<tokio::sync::Notify>,
     /// The last failed wake, of which deployment, and how many failed in a row: the requests
     /// behind it get its error instead of each trying again, for a backoff that grows from 1 s to
     /// 30 s. A canary's failures don't hold back the active deployment's wakes.
@@ -499,6 +603,7 @@ impl EnvLive {
             served: Mutex::new(HashMap::new()),
             viewed: Mutex::new(HashMap::new()),
             waiters: AtomicU32::new(0),
+            freed: Arc::new(tokio::sync::Notify::new()),
             failed: Mutex::new(None),
             crashes: Mutex::new(std::collections::VecDeque::new()),
             seq: AtomicU64::new(0),
@@ -564,11 +669,14 @@ impl EnvLive {
 
     /// The proxy's answer to a request `inst` served: counted per deployment while a canary
     /// runs (the rollout judges the new deployment by them).
-    pub fn answered(&self, inst: &Inst, status: u16) {
+    pub fn answered(&self, inst: &Inst, status: u16, ms: Option<f64>) {
         self.count(&inst.deployment, |s| {
             s.requests += 1;
             if status >= 500 {
                 s.errors += 1;
+            }
+            if let Some(ms) = ms {
+                s.took(ms);
             }
         });
     }
@@ -627,7 +735,7 @@ impl EnvLive {
         };
         spec.vars.push(("ROLL_INSTANCE".into(), spec.name.clone()));
         self.runtime.create(&spec).await?;
-        Ok(Inst::new(spec.name, tpl.deployment.clone()))
+        Ok(Inst::of(spec.name, tpl))
     }
 
     async fn make(&self, tpl: &Template) -> anyhow::Result<Arc<Inst>> {
@@ -639,7 +747,7 @@ impl EnvLive {
         spec.vars.push(("ROLL_INSTANCE".into(), spec.name.clone()));
         self.mine.lock().insert(spec.name.clone());
         self.runtime.create(&spec).await?;
-        Ok(Inst::new(spec.name, tpl.deployment.clone()))
+        Ok(Inst::of(spec.name, tpl))
     }
 
     /// Whether something answers HTTP at `addr` (`path`: a 2xx or 3xx there; none: any answer,
@@ -721,6 +829,14 @@ impl EnvLive {
                 }
             }
         }
+        // Its other ports (custom domains' own) answer where the runtime published them.
+        let mut found = HashMap::new();
+        for p in inst.wanted.iter().copied() {
+            if let Some(a) = self.runtime.port_address(&inst.name, p).await {
+                found.insert(p, a);
+            }
+        }
+        *inst.ports.lock() = found;
         *inst.phase.lock() = Phase::Running(addr);
         *inst.last_used.lock() = Instant::now();
         // Up: from here it runs within its CPU limit (it started with a boost).
@@ -760,7 +876,7 @@ impl EnvLive {
         if best.0.in_flight.fetch_add(1, Ordering::SeqCst) >= concurrency {
             self.meter.lock().over_capacity(code_sql::now_ms());
         }
-        Some(Lease { addr: best.1, inst: best.0.clone(), waited: Duration::ZERO, cold: false, h2c: false, timeout: None, affinity: false })
+        Some(Lease { addr: best.1, inst: best.0.clone(), waited: Duration::ZERO, cold: false, h2c: false, timeout: None, affinity: false, freed: self.freed.clone() })
     }
 
     /// The instance a visitor's affinity cookie names, if it's up with room.
@@ -771,7 +887,7 @@ impl EnvLive {
             _ => None,
         })?;
         i.in_flight.fetch_add(1, Ordering::SeqCst);
-        Some(Lease { addr: a, inst: i.clone(), waited: Duration::ZERO, cold: false, h2c: false, timeout: None, affinity: false })
+        Some(Lease { addr: a, inst: i.clone(), waited: Duration::ZERO, cold: false, h2c: false, timeout: None, affinity: false, freed: self.freed.clone() })
     }
 
     /// Take an idle instance out of rotation before stopping or suspending it: under the lock
@@ -887,6 +1003,13 @@ impl EnvLive {
         if let Some(l) = self.pick(dep, run.concurrency, false) {
             return Ok(l);
         }
+        // The hard limit: at max_instances, wait for a slot rather than go past concurrency.
+        if let Some(q) = run.queue_s
+            && self.running_count(dep) > 0
+            && self.awake_of(dep) as u32 >= run.max_instances
+        {
+            return self.queued(dep, run.concurrency, Duration::from_secs(q as u64), began).await;
+        }
         // Everything is busy but something's running: scale out behind it, and go to the least
         // busy.
         if self.running_count(dep) > 0 && (self.awake_of(dep) as u32) < run.max_instances {
@@ -920,6 +1043,26 @@ impl EnvLive {
             });
         }
         r
+    }
+
+    /// Wait up to `wait` for an instance of `dep` with room under `concurrency`; counted over
+    /// capacity when none comes (`alert.capacity` reads it).
+    async fn queued(&self, dep: &str, concurrency: u32, wait: Duration, began: Instant) -> Result<Lease, WakeError> {
+        let deadline = tokio::time::Instant::now() + wait;
+        loop {
+            // Listening before looking: a slot freed in between still wakes it.
+            let freed = self.freed.notified();
+            tokio::pin!(freed);
+            freed.as_mut().enable();
+            if let Some(mut l) = self.pick(dep, concurrency, false) {
+                l.waited = began.elapsed();
+                return Ok(l);
+            }
+            if tokio::time::timeout_at(deadline, freed).await.is_err() {
+                self.meter.lock().over_capacity(now_ms());
+                return Err(WakeError::Full(wait));
+            }
+        }
     }
 
     async fn wake_slow(self: &Arc<Self>, began: Instant, routed: Arc<Template>, pinned: bool) -> Result<Lease, WakeError> {
@@ -1496,7 +1639,14 @@ impl EnvLive {
                 self.runtime.remove(&name).await;
                 continue;
             };
-            let i = Inst::new(name.clone(), tpl.deployment.clone());
+            let i = Inst::of(name.clone(), tpl);
+            let mut found = HashMap::new();
+            for p in i.wanted.iter().copied() {
+                if let Some(a) = self.runtime.port_address(&name, p).await {
+                    found.insert(p, a);
+                }
+            }
+            *i.ports.lock() = found;
             *i.phase.lock() = phase;
             *i.started_at.lock() = Some(now_ms());
             self.insts.lock().push(i);
@@ -1804,16 +1954,17 @@ impl EnvLive {
                         let d = u.cpu_ns.saturating_sub(prev) as f64 / 1e9;
                         i.record(now_ms() / 60_000, d, elapsed, u.memory_bytes);
                         cpu += d;
+                        // Its sidecars' use is the instance's (usage adds it): so is their size.
                         if let Some(tpl) = self.serving(&i.deployment) {
                             used += d;
-                            capacity += tpl.run.cpu * elapsed;
+                            capacity += (tpl.run.cpu + tpl.spec.sidecars_size().0) * elapsed;
                         }
                     }
                     *seen = Some(u.cpu_ns);
                     mem += u.memory_bytes;
                     if let Some(tpl) = self.serving(&i.deployment) {
                         mem_used += u.memory_bytes as f64;
-                        mem_cap += ((tpl.run.memory_mb as u64) << 20) as f64;
+                        mem_cap += (((tpl.run.memory_mb + tpl.spec.sidecars_size().1) as u64) << 20) as f64;
                     }
                 }
                 // A runtime that can't say what an instance uses (Fargate, which bills by size ×
@@ -1925,7 +2076,9 @@ impl EnvLive {
     }
 
     async fn reap_web(self: &Arc<Self>, tpl: &Arc<Template>) {
-        let run = &tpl.run;
+        // Its floor as its schedule has it now.
+        let scheduled = tpl.run.at(code_sql::now_ms());
+        let run = &scheduled;
         // A deployment's own URL's instances are reap_viewed's, not part of the scale.
         let insts: Vec<Arc<Inst>> = self.instances().into_iter().filter(|i| !self.only_viewed(&i.deployment)).collect();
         let suspend_after = Duration::from_secs(run.suspend_after_s as u64);
@@ -2054,7 +2207,8 @@ impl EnvLive {
     }
 
     async fn keep_workers(self: &Arc<Self>, tpl: &Arc<Template>) {
-        let run = &tpl.run;
+        let scheduled = tpl.run.at(code_sql::now_ms());
+        let run = &scheduled;
         // A worker that follows its work runs what its backlog wants; else its floor.
         let target = match &run.scale {
             Some(_) => self.wanted.load(Ordering::SeqCst).clamp(run.min_instances, run.max_instances.max(run.min_instances)),
@@ -2233,10 +2387,64 @@ impl EnvLive {
         let _ = self.runtime.stop(&inst.name, Duration::from_secs(10)).await;
         let secs = began.elapsed().as_secs_f64();
         // A run is metered at its allocation: it's short, and the container is gone after.
-        self.meter.lock().sample(now_ms(), secs * tpl.run.cpu * 0.5, (tpl.run.memory_mb as u64) << 20, secs, 1);
+        // With its sidecars' size: they run beside it.
+        let (side_cpu, side_mb) = tpl.spec.sidecars_size();
+        self.meter.lock().sample(now_ms(), secs * (tpl.run.cpu + side_cpu) * 0.5, ((tpl.run.memory_mb + side_mb) as u64) << 20, secs, 1);
         self.runtime.remove(&inst.name).await;
         let (code, timed_out, canceled) = ran?;
         Ok(Exit { deployment: tpl.deployment.clone(), container: inst.name.clone(), code, timed_out, canceled })
+    }
+}
+
+/// A one-off console's container ([`EnvLive::start_console`]): what to meter and remove at its end.
+pub struct ConsoleBox {
+    pub name: String,
+    began: Instant,
+    cpu: f64,
+    memory_mb: u32,
+}
+
+impl EnvLive {
+    /// A one-off console (`roll apps run -it`, Heroku's `heroku run bash`): a fresh container of
+    /// the live deployment, with its variables and on its network, no port and no volume, its own
+    /// `cpu` and `memory_mb` when asked; it waits (`sleep`) for the terminal opened in it.
+    pub async fn start_console(self: &Arc<Self>, cpu: Option<f64>, memory_mb: Option<u32>) -> anyhow::Result<ConsoleBox> {
+        let mut tpl = (*self.template().ok_or_else(|| anyhow::anyhow!("no deployment"))?).clone();
+        // Kept up while the terminal is open (a day at most: the shell's idle limit ends it first).
+        tpl.spec.command = Some("exec sleep 86400".into());
+        tpl.spec.port = None;
+        tpl.spec.ports.clear();
+        tpl.spec.volume = None;
+        tpl.spec.aliases.clear();
+        tpl.spec.health = None;
+        if let Some(c) = cpu {
+            tpl.spec.cpu = c;
+            tpl.run.cpu = c;
+        }
+        if let Some(m) = memory_mb {
+            tpl.spec.memory_mb = m;
+            tpl.run.memory_mb = m;
+        }
+        let n = self.seq.fetch_add(1, Ordering::SeqCst);
+        let name = format!("{}console{n}", instance_prefix(&self.service, &self.env, &tpl.deployment));
+        let inst = self.make_run(&tpl, Some(name)).await?;
+        let log = self.log.instance(&inst.name, &inst.deployment);
+        if let Err(e) = self.runtime.start(&inst.name, log).await {
+            self.runtime.remove(&inst.name).await;
+            return Err(e);
+        }
+        self.runtime.settle(&inst.name).await;
+        // Metered with its sidecars, which run beside it.
+        let (side_cpu, side_mb) = tpl.spec.sidecars_size();
+        Ok(ConsoleBox { name: inst.name.clone(), began: Instant::now(), cpu: tpl.run.cpu + side_cpu, memory_mb: tpl.run.memory_mb + side_mb })
+    }
+
+    /// A console ended: its container stops and goes, metered at its allocation as a run is.
+    pub async fn end_console(&self, c: ConsoleBox) {
+        let _ = self.runtime.stop(&c.name, Duration::from_secs(5)).await;
+        let secs = c.began.elapsed().as_secs_f64();
+        self.meter.lock().sample(now_ms(), secs * c.cpu * 0.5, (c.memory_mb as u64) << 20, secs, 1);
+        self.runtime.remove(&c.name).await;
     }
 }
 
@@ -2272,6 +2480,7 @@ mod tests {
                 command: None,
                 vars: vars.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
                 port: Some(8080),
+                ports: vec![],
                 cpu: 0.5,
                 memory_mb: 512,
                 network: None,
@@ -2282,10 +2491,13 @@ mod tests {
                 registry: None,
                 files: vec![],
                 health: None,
+                sidecars: vec![],
             },
             run,
             spa: false,
             site: None,
+            edge: Vec::new(),
+            edge_service: String::new(),
         })
     }
 
@@ -2359,7 +2571,7 @@ mod tests {
     async fn a_volume_rollout_never_starts_the_old_deployment_on_the_volume() {
         let fake = Fake::new();
         let live = live(&fake);
-        let run = Run { volume: Some(crate::model::Volume { mount: "/data".into(), size_gb: 1 }), min_instances: 1, ..Run::default() };
+        let run = Run { volume: Some(crate::model::Volume { mount: "/data".into(), size_gb: 1, backups: None }), min_instances: 1, ..Run::default() };
         let old = template_of("dep_aaaaaaaaaaaa", run.clone(), &[]);
         let prepared = live.prepare(&old, None).await.unwrap();
         live.commit(old, prepared).await;

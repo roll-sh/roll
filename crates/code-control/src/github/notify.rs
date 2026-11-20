@@ -307,7 +307,7 @@ fn fnv(b: &[u8]) -> u64 {
 }
 
 /// The commit status, the deployment status and their description for a preview.
-fn preview_states(p: Option<&Preview>) -> (Option<&'static str>, Option<&'static str>, String) {
+pub fn preview_states(p: Option<&Preview>) -> (Option<&'static str>, Option<&'static str>, String) {
     let Some(p) = p else { return (None, Some("inactive"), "Preview deleted".into()) };
     let state = p.environment.as_ref().map(|e| e.state.as_str()).unwrap_or(match p.state {
         PreviewState::Creating => "creating",
@@ -609,6 +609,16 @@ fn page_checks(e: &crate::model::PreviewEnvironment) -> Option<String> {
             details.push_str(&format!("![Where it differs from {}]({url})\n\n", branch_name(&b.branch)));
         }
     }
+    if let Some(s) = e.slower_routes.as_ref().filter(|s| !s.routes.is_empty()) {
+        let branch = branch_name(&s.branch);
+        summary.push(format!("{} slower than {branch}", plural(s.routes.len() as u64, "route", "routes")));
+        details.push_str(&routes_line(s, &branch));
+    }
+    if let Some(n) = e.new_errors.as_ref().filter(|n| n.total > 0) {
+        let branch = branch_name(&n.branch);
+        summary.push(format!("{} against {branch}", plural(n.total as u64, "new error", "new errors")));
+        details.push_str(&new_errors_line(n, &branch));
+    }
     if let Some(v) = &e.visual_change {
         summary.push(if v.percent <= 0.0 { "unchanged since the push before".into() } else { format!("changed {} since the push before", pct(v.percent)) });
         details.push_str(&visual_line(v));
@@ -776,8 +786,13 @@ fn output_fence(text: &str) -> String {
 }
 
 fn preview_comment(c: &Change, teardown: Option<&str>) -> String {
-    let marker = format!("<!-- roll-preview:{} -->", c.id);
-    let Some(p) = &c.preview else {
+    preview_comment_for(c.preview.as_ref(), &format!("<!-- roll-preview:{} -->", c.id), teardown)
+}
+
+/// The preview's pull request comment, for a change's preview or another one's (a Git URL
+/// service's on roll apps: roll previews posts it there itself), ended by `marker`.
+pub fn preview_comment_for(p: Option<&Preview>, marker: &str, teardown: Option<&str>) -> String {
+    let Some(p) = p else {
         return match teardown {
             // The job's output is the change's code's: one fence nothing in it can close.
             Some(t) => format!("**roll preview**: deleted. Its teardown failed:\n\n{}\n\n{marker}", output_fence(t)),
@@ -859,6 +874,36 @@ fn preview_comment(c: &Change, teardown: Option<&str>) -> String {
     }
     out.push_str(&format!("\n{marker}"));
     out
+}
+
+/// Its error groups the branch's preview doesn't have: how many, by service. Their titles are log
+/// lines (a branch's data can be in them), so they stay in roll (the change page, the sheet),
+/// never in a comment anyone reading the pull request reads.
+fn new_errors_line(n: &crate::model::PreviewNewErrors, branch: &str) -> String {
+    let mut by: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for x in &n.errors {
+        *by.entry(x.service.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_')).collect()).or_default() += 1;
+    }
+    let each: Vec<String> = by.iter().map(|(service, k)| format!("{k} in {service}")).collect();
+    let more = n.total.saturating_sub(n.errors.len());
+    let more = if more > 0 { format!(", and {more} more") } else { String::new() };
+    format!("Errors in its output that `{branch}`'s preview doesn't have (the last hour): {}{more}. Their lines are on its page in roll.\n\n", each.join(", "))
+}
+
+/// Its routes slower than the branch's preview's, from their traces: each name the preview's
+/// code gave it, in a code span nothing in it can close or break out of (at most 80 characters).
+fn routes_line(s: &crate::model::PreviewSlowerRoutes, branch: &str) -> String {
+    let each: Vec<String> = s
+        .routes
+        .iter()
+        .map(|x| {
+            let span = |s: &str| -> String { s.chars().map(|c| if c == '`' || c.is_control() { '\'' } else { c }).take(80).collect() };
+            // Where its time went: the span that grew most against the branch's.
+            let why = x.grew.as_ref().map(|(s, ms, main)| format!(", `{}` {ms} ms ({branch} {main} ms)", span(s))).unwrap_or_default();
+            format!("`{}` {} ms ({branch} {} ms{why})", span(&x.name), x.p50_ms, x.main_p50_ms)
+        })
+        .collect();
+    format!("Routes slower than on `{branch}`'s preview (the median of the last hour's traces): {}.\n\n", each.join("; "))
 }
 
 /// The endpoints' times against the branch's (`github.endpoints`): each path the project named,
@@ -1019,6 +1064,8 @@ mod preview_tests {
             page_health: None,
             page_a11y: None,
             page_links: None,
+            slower_routes: None,
+            new_errors: None,
             base_change: None,
             diff_url: None,
             pages: Vec::new(),
@@ -1131,6 +1178,19 @@ mod preview_tests {
         timed.speed_budget = None;
         timed.base_change = Some(crate::model::PreviewBaseChange { branch: "main".into(), percent: 0.0, phone_percent: None, load_ms: Some(900), lcp_ms: None, a11y_added: None, errors_added: None, text: None, links_added: None, seo_added: None, api: None, api_breaking: Vec::new(), api_unread: false, endpoints: Vec::new() });
         assert!(page_checks(&timed).unwrap().contains("loads in 1.2 s, 300 ms slower than main</summary>"));
+        // Routes slower than main's preview's: in the summary, and named where nothing in a name
+        // can close its code span.
+        timed.slower_routes = Some(crate::model::PreviewSlowerRoutes { branch: "main".into(), routes: vec![crate::model::PreviewSlowerRoute { name: "GET /a`b\n".into(), p50_ms: 420, main_p50_ms: 120, grew: Some(("SELECT items".into(), 300, 0)) }] });
+        let checks = page_checks(&timed).unwrap();
+        assert!(checks.contains("1 route slower than main"), "{checks}");
+        assert!(checks.contains("`GET /a'b'` 420 ms (main 120 ms, `SELECT items` 300 ms (main 0 ms))"), "{checks}");
+        timed.slower_routes = None;
+        // New errors against main's preview: counted in the summary and by service, never their lines.
+        timed.new_errors = Some(crate::model::PreviewNewErrors { branch: "main".into(), total: 7, errors: vec![crate::model::PreviewNewError { service: "web".into(), title: "TypeError: x`y".into() }] });
+        let checks = page_checks(&timed).unwrap();
+        assert!(checks.contains("7 new errors against main"), "{checks}");
+        assert!(checks.contains("1 in web, and 6 more.") && !checks.contains("TypeError"), "{checks}");
+        timed.new_errors = None;
         // Core Web Vitals: in the line, against main's paint, and in the budget.
         let ps = timed.page_speed.as_mut().unwrap();
         (ps.lcp_ms, ps.cls) = (Some(1300), Some(0.123));

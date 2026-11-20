@@ -35,6 +35,19 @@ impl Branched {
     }
 }
 
+/// What [`Brancher::columns`] fails with when the parent sleeps: reading its columns would wake
+/// it (and keep it awake), which suggestions aren't worth.
+#[derive(Debug)]
+pub struct Asleep;
+
+impl std::fmt::Display for Asleep {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("asleep")
+    }
+}
+
+impl std::error::Error for Asleep {}
+
 /// One data product's branches. Every method is idempotent: the engine may call it again after
 /// a crash, a timeout or a retry.
 #[async_trait]
@@ -100,6 +113,13 @@ pub trait Brancher: Send + Sync {
     /// out): `None` from products whose branches need none.
     async fn credentials(&self, _parent: &str, _branch: &str, _name: &str) -> anyhow::Result<Option<String>> {
         Ok(None)
+    }
+
+    /// The parent's columns (or a search cluster's fields) with their types, at most `max`, for
+    /// mask suggestions ([`crate::mask::suggest`]). None from products without columns to mask.
+    /// A parent that sleeps isn't woken for it: [`Asleep`].
+    async fn columns(&self, _parent: &str, _max: usize) -> anyhow::Result<Vec<crate::mask::Column>> {
+        Ok(Vec::new())
     }
 
     /// The parent's schema and the branch's, one line per object, for [`crate::schema::diff`].
@@ -240,11 +260,39 @@ pub struct GitPush {
     pub sha: Option<String>,
     /// The push's commit message (`[skip preview]` in it skips one).
     pub message: String,
+    /// Who pushed or acted, as the provider says (GitHub's `sender.login`): untrusted text, for
+    /// `skip_authors` only (a dependency bot's branch push makes no preview), never for trust.
+    pub pusher: Option<String>,
     /// The pull request the push is of (GitHub's `pull_request`, GitLab's merge request events),
     /// every claim checked against the repository's refs by roll apps first. A fork's is
     /// `branch: "pull/<n>"`; a same-repo one names its real branch. `sha: None` with a pull: it
     /// closed.
     pub pull: Option<GitPull>,
+}
+
+/// What a Git URL service's preview says on its repository ([`Source::git_report_body`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct GitReportBody {
+    /// The commit status (`pending`, `success`, `failure`; `None`: no status, e.g. deleted).
+    pub state: Option<String>,
+    pub description: String,
+    /// The service's URL (plain: never the access token) or roll's dashboard.
+    pub target_url: Option<String>,
+    /// The pull request's comment, edited in place.
+    pub comment: String,
+}
+
+/// Posts a Git URL service's preview where its code lives (rolld: roll apps' GitHub App
+/// connection, a short-lived token for that one repository; never the service's git login).
+/// `Ok(false)` / `Ok(None)`: the service isn't connected, so nothing was posted.
+#[async_trait]
+pub trait GitReport: Send + Sync {
+    /// The commit status `roll/preview` on `sha`.
+    async fn status(&self, service: &str, sha: &str, state: &str, description: &str, target_url: Option<&str>) -> anyhow::Result<bool>;
+    /// Pull request `number` of `repo` (`owner/name`)'s comment, `existing` edited in place (made
+    /// again if it's gone): its id. Nothing (`None`) when the service is connected to another
+    /// repository now: a number and a comment id are that repository's.
+    async fn comment(&self, service: &str, repo: &str, number: u64, body: &str, existing: Option<u64>) -> anyhow::Result<Option<u64>>;
 }
 
 /// A pull request of a Git URL service's repository, as roll apps hands it on.
@@ -257,6 +305,9 @@ pub struct GitPull {
     pub url: String,
     /// From another repository (its head repo isn't the base's): it runs only once approved.
     pub fork: bool,
+    /// Who opened it, as the provider says (GitHub's `user.login`): untrusted text, for
+    /// `skip_authors` only, never for trust.
+    pub author: Option<String>,
 }
 
 /// A note's element to crop in a screenshot run: its page and its selector, both checked.
@@ -347,6 +398,13 @@ pub trait Source: Send + Sync {
     async fn report(&self, preview: &Preview, settings: &crate::Settings);
     /// The preview is gone; `teardown`: what the project's teardown said when it failed.
     async fn forget(&self, preview: &Preview, teardown: Option<&str>);
+    /// What a Git URL service's preview (no roll code change) says on its repository: the
+    /// `roll/preview` status and the pull request's comment, as a roll code change's preview
+    /// says them (`None`: nothing, e.g. a preview being deleted's status). `deleted`: its last
+    /// comment.
+    fn git_report_body(&self, _preview: &Preview, _settings: &crate::Settings, _deleted: Option<Option<&str>>) -> Option<GitReportBody> {
+        None
+    }
     /// The project's previews passed `alert.percent` of their monthly budget: tell the people
     /// who follow its repos (roll code: each repo's `budget` event). `Err` when it couldn't be
     /// queued: the engine tries again on its next pass.
@@ -383,8 +441,11 @@ pub struct Target {
     /// The preview's access token when its project's previews are private (`access: "link"`):
     /// a backend that serves the service itself (roll apps) checks it like the runtime does.
     pub access_token: Option<String>,
-    /// With `access_token`: the project's bypass secret's SHA-256 (hex), which opens it for
-    /// automation too (`x-roll-preview-bypass`).
+    /// The project's previews let in people signed in to roll who may open it (`access:
+    /// "team"`): a backend that serves the service itself (roll apps) gates it on signing in.
+    pub signed_in: bool,
+    /// With `access_token` or `signed_in`: the project's bypass secret's SHA-256 (hex), which
+    /// opens it for automation too (`x-roll-preview-bypass`).
     pub bypass_sha256: Option<String>,
     /// The feedback button on its pages (the project's `feedback`, a change's preview, link
     /// access): a backend that serves the pages itself (roll apps) adds it as the runtime does.
@@ -395,6 +456,13 @@ pub struct Target {
     /// With `egress` `roll`: the hosts outside roll it may still reach, through the preview's
     /// egress proxy.
     pub egress_hosts: Vec<String>,
+    /// The `n`th rebuild a deploy hook asked for: built again at the same head with nothing
+    /// cached (a static site reads its content at build time). roll apps builds with `no_cache`;
+    /// the runtime builds at each start anyway.
+    pub rebuild: Option<i64>,
+    /// The project's `traces`: a backend that keeps traces itself (roll apps) turns its own on
+    /// for the preview's environment.
+    pub traces: bool,
 }
 
 /// A deploy the backend accepted that hasn't finished (a build, a rollout): the converge leaves
@@ -422,6 +490,70 @@ pub struct BudgetAlert {
     pub percent: u32,
     pub spent_usd_month: f64,
     pub max_usd_month: f64,
+}
+
+/// What's at a path in a service, as a tar, as it's read.
+pub type FileStream = Box<dyn tokio::io::AsyncRead + Send + Unpin>;
+
+/// Who asks, as rolld's gate put it on the request: roll secrets decides from it.
+pub struct Asker<'a> {
+    pub operator: bool,
+    pub user: Option<&'a roll_auth::SignedIn>,
+    pub grant: Option<&'a roll_auth::Grant>,
+}
+
+impl Asker<'_> {
+    pub fn of(ext: &axum::http::Extensions) -> Asker<'_> {
+        Asker { operator: roll_auth::Operator::on(ext), user: ext.get::<roll_auth::SignedIn>(), grant: roll_auth::Grant::on(ext) }
+    }
+
+    /// Who they are in what's kept: a token by its id, a person by theirs, else the operator.
+    pub fn principal(&self) -> String {
+        match (self.grant, self.user) {
+            (Some(g), _) => format!("token:{}", g.id),
+            (None, Some(u)) => u.user.clone(),
+            (None, None) => "operator".into(),
+        }
+    }
+}
+
+/// Whether someone may reveal a folder of a project's environment in roll secrets (rolld: roll
+/// secrets' own check, `Caller::allows(Reveal, …)`).
+pub trait Reveal: Send + Sync {
+    fn may_reveal(&self, who: &Asker<'_>, project: &str, env: &str, folder: &str) -> bool;
+    /// A reference's environment and folder as roll secrets reads it, or why it can't be one.
+    fn place(&self, reference: &str) -> std::result::Result<(String, String), String>;
+}
+
+/// Seals a preview's own variables at rest (rolld: AES-256-GCM under `ROLL_SECRET_KEY`), each
+/// bound to its `aad` (the preview's id), so a value copied to another row doesn't open.
+pub trait Sealer: Send + Sync {
+    fn seal(&self, aad: &str, plain: &str) -> String;
+    /// `None`: not one this key sealed for `aad`.
+    fn open(&self, aad: &str, sealed: &str) -> Option<String>;
+}
+
+/// What reads an OpenTelemetry export request (OTLP/HTTP: protobuf or JSON, gzip or not) into
+/// spans (rolld: roll apps' reader). An error is the request's fault.
+pub trait SpanReader: Send + Sync {
+    fn spans(&self, body: &[u8], json: bool, gzip: bool) -> anyhow::Result<Vec<crate::engine::traces::Span>>;
+}
+
+/// A terminal's stream, both ways (a hijacked Docker exec).
+pub trait ShellIo: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
+impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> ShellIo for T {}
+
+/// A terminal in a running service: what [`Apps::resize_shell`] takes, and its stream.
+pub struct Shell {
+    pub id: String,
+    pub io: Box<dyn ShellIo>,
+}
+
+impl Shell {
+    /// A Docker exec's hijacked connection as a terminal.
+    pub fn upgraded(id: String, io: hyper::upgrade::Upgraded) -> Shell {
+        Shell { id, io: Box::new(hyper_util::rt::TokioIo::new(io)) }
+    }
 }
 
 /// A seed run: the project's command, on the preview's tree, with its variables. (No `Debug`:
@@ -459,6 +591,44 @@ pub trait EnvSource: Send + Sync {
     fn touched(&self, preview: &str);
 }
 
+/// A line a preview's service wrote, masked, for a log drain: when (ms), whether on stderr, what.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DrainLine {
+    pub t: i64,
+    pub stderr: bool,
+    pub text: String,
+}
+
+/// Which of a drain's sources a preview's lines are: a running service's output, or a job's
+/// (`release`, `seed`, `teardown`: roll apps' `build`, where deploy-time commands go).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum DrainSource {
+    Runtime,
+    Build,
+}
+
+impl DrainSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DrainSource::Runtime => "runtime",
+            DrainSource::Build => "build",
+        }
+    }
+}
+
+/// A project's log drains (roll apps' `…/projects/{project}/drains`): the ones that take
+/// previews' runtime output get a preview's services on roll's runtime too, in its `pv-`
+/// environment, as roll apps' own preview environments' output.
+#[async_trait]
+pub trait Drains: Send + Sync {
+    /// Whether any of the project's drains takes previews' lines of `source` (cheap: asked each
+    /// pass).
+    async fn wanted(&self, project: &str, source: DrainSource) -> bool;
+    /// A service's (or a job's) lines, masked, oldest first. Never waits (a drain that can't keep
+    /// up loses lines).
+    fn send(&self, project: &str, environment: &str, service: &str, source: DrainSource, lines: Vec<DrainLine>);
+}
+
 /// Where services run: roll apps once it lands, [`crate::runtime::Runtime`] until then.
 #[async_trait]
 pub trait Apps: Send + Sync {
@@ -484,16 +654,40 @@ pub trait Apps: Send + Sync {
     fn requests(&self, _preview: &str) -> Vec<crate::RequestLine> {
         Vec::new()
     }
+    /// What the service uses right now, `(cores, resident bytes)`: `None` when it isn't running
+    /// (or the backend can't tell).
+    async fn metrics(&self, _preview: &str, _service: &str) -> Option<(f64, u64)> {
+        None
+    }
+    /// Its errors in the last `minutes`, grouped (none where the backend can't tell when a line
+    /// was written). Text the backend cuts before grouping it is masked first with `masks`' values
+    /// (`crate::mask_cut`), read only when there's an error; the engine masks every title and
+    /// sample again. `None`: only the counts are used, nothing is masked and no text leaves.
+    async fn errors(&self, _preview: &str, _service: &str, _minutes: i64, _masks: Option<&crate::engine::ErrorMasks<'_>>) -> crate::Result<Vec<crate::ErrorGroup>> {
+        Ok(Vec::new())
+    }
     /// The service's output as it comes, after its last `lines`: `None` where it can't be
     /// followed (the engine reads `logs` again every few seconds instead).
-    async fn follow(&self, _preview: &str, _service: &str, _lines: usize) -> Option<tokio::sync::mpsc::Receiver<String>> {
+    async fn follow(&self, _preview: &str, _service: &str, _lines: usize) -> Option<tokio::sync::mpsc::Receiver<(bool, String)>> {
+        None
+    }
+    /// The service's output from `since` (a Docker stamp, RFC 3339, or Unix seconds) as it comes,
+    /// each line `(stderr, "<RFC 3339 stamp> <text>")`, for the project's log drains. `None`
+    /// where this backend doesn't run it (roll apps drains its own instances' output).
+    async fn drain_from(&self, _preview: &str, _service: &str, _since: &str) -> Option<tokio::sync::mpsc::Receiver<(bool, String)>> {
         None
     }
     /// Run a project's seed command to its end: `Ok((exit code, the output's tail))`.
     async fn seed(&self, _job: &SeedJob) -> anyhow::Result<(i32, String)> {
         anyhow::bail!("this server can't run seed commands")
     }
-    /// A PNG of the service's page as it first shows (`None`: this backend can't take one).
+    /// The project's own preview domain, verified (roll apps' project preview domain: a wildcard
+    /// custom domain, `*.preview.acme.dev`), as `(base, https)`: its previews answer on
+    /// `<label>.<base>`. `None`: none, or not verified yet (rolld's preview domain then).
+    async fn preview_domain(&self, _project: &str) -> Option<(String, bool)> {
+        None
+    }
+
     /// The memory the service's live deployment runs with in this preview (a backend's preview
     /// settings and the environment's own over the service's). `None`: not known, the catalog's.
     async fn memory_mb(&self, _preview: &str, _service: &str) -> Option<u32> {
@@ -521,6 +715,52 @@ pub trait Apps: Send + Sync {
     /// The hosts the preview's egress proxy refused lately (its project's `egress_hosts` don't
     /// list them), each once. No default, as `warm`.
     async fn egress_refused(&self, preview: &str) -> Vec<String>;
+    /// A login shell in the running service (started if it sleeps), `cols` by `rows`. `None`
+    /// where this backend has none here: roll apps' services have roll apps' own shell, on
+    /// their `pv-` environment.
+    async fn shell(&self, _preview: &str, _service: &str, _cols: u16, _rows: u16) -> anyhow::Result<Option<Shell>> {
+        Ok(None)
+    }
+    async fn resize_shell(&self, _id: &str, _cols: u16, _rows: u16) -> anyhow::Result<()> {
+        Ok(())
+    }
+    /// Someone is using the service through a terminal: it doesn't go to sleep meanwhile.
+    fn hold(&self, _preview: &str, _service: &str) {}
+    /// What's at `path` in the running service (started if it sleeps), as a tar. `None` where
+    /// this backend has none here: roll apps' services have roll apps' own `…/files`, on their
+    /// `pv-` environment.
+    async fn read_files(&self, _preview: &str, _service: &str, _path: &str) -> anyhow::Result<Option<FileStream>> {
+        Ok(None)
+    }
+    /// The service's recent traces where the backend keeps them itself (roll apps' `pv-`
+    /// environment's), newest first; none elsewhere (roll's runtime: the engine keeps those).
+    async fn traces(&self, _preview: &str, _service: &str, _minutes: i64) -> Vec<crate::engine::traces::TraceRow> {
+        Vec::new()
+    }
+    /// One of those traces' spans, oldest first; `None` where it isn't this backend's.
+    async fn trace(&self, _preview: &str, _service: &str, _trace: &str) -> Option<Vec<crate::engine::traces::Span>> {
+        None
+    }
+    /// One TCP connection to `port` inside the running service (started if it sleeps), from its
+    /// own network namespace, so any port it listens on is reachable, published or not. `None`
+    /// where this backend has none here (roll apps' services: roll apps' own tunnel).
+    async fn forward(&self, _preview: &str, _service: &str, _port: u16) -> anyhow::Result<Option<Box<dyn ShellIo>>> {
+        Ok(None)
+    }
+    /// A tar's files written under `dir` in the running service (started if it sleeps). `false`
+    /// where this backend has none here.
+    async fn write_files(&self, _preview: &str, _service: &str, _dir: &str, _tar: bytes::Bytes) -> anyhow::Result<bool> {
+        Ok(false)
+    }
+}
+
+/// Who may open a project's previews under `access: "team"` (rolld fills it from roll's
+/// accounts and the workspace): asked when a ticket is given and again every few minutes of a
+/// session. `session` is the roll session (`ses_…`) that asked for the ticket: once it no longer
+/// signs its person in (signed out, revoked, expired), the answer is no. A failed lookup is a
+/// no. It may read a database: it's called off the async workers.
+pub trait Visitors: Send + Sync {
+    fn may_open(&self, user: &str, session: &str, project: &str) -> bool;
 }
 
 /// A project's secrets, per environment (roll secrets; docs/secrets.md).
@@ -534,7 +774,10 @@ pub trait Secrets: Send + Sync {
     /// `branches`: what the preview branched (`(kind, parent)`): a link of the environment (or its
     /// base) to one of those parents isn't resolved but comes back in [`Resolved::followed`].
     #[allow(clippy::too_many_arguments)]
-    async fn ensure(&self, project: &str, env: &str, base: &str, vars: &[(String, String)], trusted: bool, expires_at: i64, branches: &[(Kind, String)]) -> anyhow::Result<()>;
+    /// `refs`: the project's rules' `roll://` references (checked when they were saved), kept as
+    /// roll secrets' own references; every value in `vars` is plain text, whatever it looks like.
+    #[allow(clippy::too_many_arguments)]
+    async fn ensure(&self, project: &str, env: &str, base: &str, vars: &[(String, String)], refs: &[(String, String)], trusted: bool, expires_at: i64, branches: &[(Kind, String)]) -> anyhow::Result<()>;
     /// Every variable of `env`, inherited ones included, for `consumer` (a start of one service,
     /// a job): a dynamic link issues it a fresh credential under a lease ([`Resolved::leases`]),
     /// which the caller renews while it runs and revokes when it stops.
@@ -583,7 +826,7 @@ pub struct NoSecrets;
 
 #[async_trait]
 impl Secrets for NoSecrets {
-    async fn ensure(&self, _: &str, _: &str, _: &str, _: &[(String, String)], _: bool, _: i64, _: &[(Kind, String)]) -> anyhow::Result<()> {
+    async fn ensure(&self, _: &str, _: &str, _: &str, _: &[(String, String)], _: &[(String, String)], _: bool, _: i64, _: &[(Kind, String)]) -> anyhow::Result<()> {
         Ok(())
     }
 

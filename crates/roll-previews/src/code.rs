@@ -175,6 +175,15 @@ impl CodeSource {
                     title: a.title,
                     seo: a.seo.as_ref().map(|s| s.problems().into_iter().map(String::from).collect()).unwrap_or_default(),
                 }),
+                slower_routes: p.slower_routes.as_ref().map(|s| code_control::model::PreviewSlowerRoutes {
+                    branch: s.branch.clone(),
+                    routes: s.routes.iter().map(|x| code_control::model::PreviewSlowerRoute { name: x.name.clone(), p50_ms: x.p50_ms, main_p50_ms: x.main_p50_ms, grew: x.grew.as_ref().map(|g| (g.span.clone(), g.ms, g.main_ms)) }).collect(),
+                }),
+                new_errors: p.new_errors.as_ref().map(|n| code_control::model::PreviewNewErrors {
+                    branch: n.branch.clone(),
+                    total: n.total,
+                    errors: n.errors.iter().map(|x| code_control::model::PreviewNewError { service: x.service.clone(), title: x.title.clone() }).collect(),
+                }),
                 page_links: p.page_links.as_ref().map(|l| code_control::model::PreviewPageLinks {
                     checked: l.checked,
                     broken: l.broken.iter().map(|b| code_control::model::PreviewBrokenLink { path: b.path.clone(), status: b.status }).collect(),
@@ -365,6 +374,18 @@ impl Source for CodeSource {
         Ok(())
     }
 
+    fn git_report_body(&self, p: &Preview, s: &Settings, deleted: Option<Option<&str>>) -> Option<crate::ports::GitReportBody> {
+        let marker = format!("<!-- roll-preview:{} -->", p.id);
+        if let Some(teardown) = deleted {
+            return Some(crate::ports::GitReportBody { state: None, description: String::new(), target_url: None, comment: code_control::github::preview_comment_for(None, &marker, teardown) });
+        }
+        let summary = self.summary(p, s);
+        let (state, _, description) = code_control::github::preview_states(Some(&summary));
+        let env = summary.environment.as_ref();
+        let target_url = env.and_then(|e| e.services.first().map(|x| x.url.clone()).filter(|u| !u.is_empty())).or_else(|| env.and_then(|e| e.dashboard_url.clone()));
+        Some(crate::ports::GitReportBody { state: state.map(str::to_string), description, target_url, comment: code_control::github::preview_comment_for(Some(&summary), &marker, None) })
+    }
+
     async fn forget(&self, p: &Preview, teardown: Option<&str>) {
         let Some(change) = &p.change else { return };
         // Only the change's preview environment, never roll code's own preview of it.
@@ -403,13 +424,12 @@ impl Trees for CodeSource {
 pub struct Backend {
     inner: Arc<dyn PreviewBackend>,
     engine: OnceLock<Weak<Engine>>,
-    workspace: Arc<roll_workspace::Workspace>,
     source: Arc<CodeSource>,
 }
 
 impl Backend {
-    pub fn new(inner: Arc<dyn PreviewBackend>, workspace: Arc<roll_workspace::Workspace>, source: Arc<CodeSource>) -> Arc<Backend> {
-        Arc::new(Backend { inner, engine: OnceLock::new(), workspace, source })
+    pub fn new(inner: Arc<dyn PreviewBackend>, source: Arc<CodeSource>) -> Arc<Backend> {
+        Arc::new(Backend { inner, engine: OnceLock::new(), source })
     }
 
     pub fn attach(&self, engine: &Arc<Engine>) {
@@ -420,10 +440,10 @@ impl Backend {
     fn environment_for(&self, repo: &RepoRow) -> Option<(Arc<Engine>, String)> {
         let engine = self.engine.get().and_then(Weak::upgrade)?;
         let full = repo.full_name();
-        // The first project that stands for the repo (`Workspace::trusts`), not just any canvas it's on.
-        let project = self.workspace.list(roll_workspace::Scope::All).ok()?.into_iter().find(|p| p.resources.iter().any(|r| r.kind == roll_workspace::Kind::Repo && r.r#ref == full) && self.workspace.trusts(p, roll_workspace::Kind::Repo, &full))?;
-        engine.store.settings(&project.id).ok().filter(|s| s.enabled)?;
-        Some((engine, project.id))
+        // The project that speaks for the repo (one that stands for it, `Workspace::trusts`, with
+        // previews on): the same one whose preview reports to the change.
+        let (project, _) = engine.speaker(roll_workspace::Kind::Repo, &full)?;
+        Some((engine, project))
     }
 }
 
@@ -431,6 +451,11 @@ impl Backend {
 impl PreviewBackend for Backend {
     async fn create(&self, repo: &RepoRow, change: &code_control::model::Change, dir: &Path) -> anyhow::Result<code_control::model::Preview> {
         let Some((engine, project)) = self.environment_for(repo) else { return self.inner.create(repo, change, dir).await };
+        // roll code's own call: the change's preview, whichever project made it (one per change).
+        if let Some(existing) = engine.store.row_by_change(&change.id)? {
+            let s = engine.store.settings(&existing.project_id)?;
+            return Ok(self.source.summary(&engine.store.view(existing)?, &s));
+        }
         let (p, _) = engine.create(&project, &repo.full_name(), None, Some(&change.id), "roll").await.map_err(|e| anyhow::anyhow!("{e}"))?;
         let s = engine.store.settings(&project)?;
         Ok(self.source.summary(&p, &s))

@@ -26,6 +26,10 @@ pub struct Settings {
     /// … that none of these match (empty: none ignored). A change's paths are everything since
     /// its merge base with the default branch.
     pub ignore_paths: Vec<String>,
+    /// Globs on a change's author (a pull request's GitHub login: `dependabot[bot]`, `*[bot]`):
+    /// a change by one gets no preview unless its title or a label asks (Netlify's and Vercel's
+    /// ignored builds for dependency bots). Empty: everyone's.
+    pub skip_authors: Vec<String>,
     /// `"<kind>:<ref>"` → `branch`, `schema` or `skip`; resources not listed get `data`.
     pub resources: BTreeMap<String, ResourceRule>,
     pub data: Mode,
@@ -46,7 +50,9 @@ pub struct Settings {
     pub env_for: BTreeMap<String, BTreeMap<String, String>>,
     pub github: GithubRule,
     /// Who may open a preview's URLs: `link` (default) needs the preview's link, which carries
-    /// its access token once and then a cookie; `public` is anyone who can reach the domain.
+    /// its access token once and then a cookie; `team` is people signed in to roll who may open
+    /// the project (`visit.rs`), and the link's token lets nobody in; `public` is anyone who can
+    /// reach the domain. Share links and the CI bypass work under `link` and `team`.
     pub access: Access,
     /// Chromatic's UI Review, with screenshots on: `check` gives a change a visual review (the
     /// `roll/visual` commit status), pending while its pages differ from the baseline's and
@@ -57,6 +63,11 @@ pub struct Settings {
     /// project's own mail settings reach previews.
     #[serde(default)]
     pub mail: MailRule,
+    /// Its `roll.toml` services get the OpenTelemetry SDK's variables, so an app with an SDK sends
+    /// its spans to the preview (the sheet's traces). Off by default: they're a preview's code's
+    /// words, kept a few hours.
+    #[serde(default)]
+    pub traces: bool,
     /// What its services' code may reach (docs/previews.md, "Egress"): `open` (the default)
     /// anything; `roll` only roll's own products, on a Docker network with no route out.
     #[serde(default)]
@@ -75,8 +86,8 @@ pub struct Settings {
     /// at most 30 days back. Products without history branch as of now and say so.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_at: Option<String>,
-    /// A feedback button on the pages of people who came in through roll (link access): it pins a
-    /// note to an element and posts it on the change, from roll.
+    /// A feedback button on the pages of people who came in through roll (link access, or a team
+    /// session): it pins a note to an element and posts it on the change, from roll.
     pub feedback: bool,
     /// Wake the change's services as soon as a new head is deployed, so the first visit (often
     /// the pull request comment's link) doesn't wait for a cold start.
@@ -151,6 +162,7 @@ pub enum VisualReviewRule {
 pub enum Access {
     #[default]
     Link,
+    Team,
     Public,
 }
 
@@ -329,6 +341,7 @@ impl Default for Settings {
             manual: false,
             paths: Vec::new(),
             ignore_paths: Vec::new(),
+            skip_authors: Vec::new(),
             resources: BTreeMap::new(),
             data: Mode::Branch,
             reset_every_hours: 0,
@@ -344,6 +357,7 @@ impl Default for Settings {
             access: Access::Link,
             visual_review: VisualReviewRule::Off,
             mail: MailRule::Catch,
+            traces: false,
             egress: EgressRule::Open,
             egress_hosts: Vec::new(),
             egress_forks: EgressRule::Roll,
@@ -373,6 +387,35 @@ impl Default for GithubRule {
 /// Whether an environment name is production's.
 /// Whether an environment name looks like production's. Errs on the side of yes: `prod`,
 /// `production-eu`, `prd`, `live`, `main`, `master`.
+/// Whether a variable's value is a reference into roll secrets (`roll://ENV[/folder…]/KEY`).
+pub fn is_reference(v: &str) -> bool {
+    v.starts_with("roll://")
+}
+
+/// A reference's shape: `roll://ENV[/folder…]/KEY` in the preview's own project (no `PROJECT@`:
+/// a preview reads its own project's environments). roll secrets checks the rest when it reads it.
+pub fn check_reference(v: &str) -> std::result::Result<(), String> {
+    let rest = v.strip_prefix("roll://").unwrap_or(v);
+    if rest.contains('@') {
+        return Err("a preview reads its own project's environments: roll://ENV/KEY, without PROJECT@".into());
+    }
+    let parts: Vec<&str> = rest.split('/').collect();
+    let ok = |p: &str| !p.is_empty() && p.len() <= 128 && p.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'));
+    if parts.len() < 2 || !parts.iter().all(|p| ok(p)) {
+        return Err("a reference is roll://ENV/KEY or roll://ENV/folder/KEY".into());
+    }
+    Ok(())
+}
+
+/// The references a project's rules hold: `(scope, name, reference)`, `scope` `env` or
+/// `env_for <glob>`.
+pub fn references(s: &Settings) -> Vec<(String, String, String)> {
+    std::iter::once(("env".to_string(), &s.env))
+        .chain(s.env_for.iter().map(|(g, v)| (format!("env_for {g}"), v)))
+        .flat_map(|(scope, vars)| vars.iter().filter(|(_, v)| is_reference(v)).map(move |(k, v)| (scope.clone(), k.clone(), v.clone())))
+        .collect()
+}
+
 pub fn is_production(env: &str) -> bool {
     let e = env.to_ascii_lowercase();
     e.contains("prod") || e.split(['-', '_']).any(|w| matches!(w, "prd" | "live" | "main" | "master"))
@@ -402,6 +445,9 @@ impl Settings {
         let bad = |m: String| Err(Error::BadRequest(m));
         if self.branches.is_empty() || self.branches.len() > MAX_BRANCH_GLOBS || self.branches.iter().any(|b| b.is_empty() || b.len() > 200) {
             return bad(format!("branches: 1–{MAX_BRANCH_GLOBS} globs of 1–200 characters"));
+        }
+        if self.skip_authors.len() > MAX_BRANCH_GLOBS || self.skip_authors.iter().any(|a| a.is_empty() || a.len() > 200) {
+            return bad(format!("skip_authors: at most {MAX_BRANCH_GLOBS} globs of 1–200 characters"));
         }
         for (name, list) in [("paths", &self.paths), ("ignore_paths", &self.ignore_paths)] {
             if list.len() > MAX_BRANCH_GLOBS || list.iter().any(|p| p.len() > 200 || code_control::review::pattern::Pattern::new(p).is_none()) {
@@ -452,6 +498,21 @@ impl Settings {
         if base.is_empty() || base.len() > 64 || !base.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
             return bad("secrets.base: an environment name (1–64 of a-z, 0-9, - and _)".into());
         }
+        // A `roll://ENV[/folder]/KEY` value is a reference into roll secrets, read there with the
+        // preview's environment (untrusted: never a protected environment or a sensitive key).
+        for (glob, vars) in std::iter::once(("env", &self.env)).chain(self.env_for.iter().map(|(g, v)| (g.as_str(), v))) {
+            for (k, v) in vars {
+                if is_reference(v)
+                    && let Err(m) = check_reference(v)
+                {
+                    return bad(format!("{glob}: {k}: {m}"));
+                }
+                // One that reads as a reference only once trimmed is refused, not kept as text.
+                if !is_reference(v) && v.trim_start().to_ascii_lowercase().starts_with("roll://") {
+                    return bad(format!("{glob}: {k}: a reference starts with roll:// itself (no spaces before it, lowercase)"));
+                }
+            }
+        }
         if is_production(base) && !self.secrets.allow_production {
             return bad(format!("secrets.base {base:?} is production's: set secrets.allow_production to inherit it"));
         }
@@ -480,9 +541,11 @@ impl Settings {
                 return bad(format!("masking: {key}: at most 200 columns"));
             }
             if search {
-                // `index.field` (a nested field's path: `users.address.city`) → a search rule.
+                // `index.field` (a nested field's path: `users.address.city`; a data stream's
+                // backing index starts with a dot: `.ds-logs-….user.email`) → a search rule.
                 for (field, rule) in cols {
-                    let ok = field.len() <= 200 && field.split('.').count() >= 2 && !field.split('.').any(str::is_empty) && !field.contains(['*', ',', '/', ' ', '\\']);
+                    let named = if field.starts_with(".ds-") { &field[1..] } else { field.as_str() };
+                    let ok = field.len() <= 200 && named.split('.').count() >= 2 && !named.split('.').any(str::is_empty) && !field.contains(['*', ',', '/', ' ', '\\']);
                     if !ok || !SEARCH_MASKS.contains(&rule.as_str()) {
                         return bad(format!("masking: {key}: {field:?} → {rule:?} isn't \"index.field\" → one of {}", SEARCH_MASKS.join(", ")));
                     }
@@ -659,8 +722,8 @@ mod tests {
         // Structure-only where a kind can't do it: refused, never a silent full copy.
         assert!(Settings::default().patched(&json!({ "resources": { "bucket:b": "schema" } })).is_err());
         assert!(Settings::default().patched(&json!({ "github": { "hide": ["time", ".clock, #ad"] } })).is_ok());
-        assert!(Settings::default().patched(&json!({ "masking": { "search:catalog": { "users.email": "email", "users.address.city": "redact" } } })).is_ok());
-        for bad in [json!({ "users": "redact" }), json!({ "users.email": "hash" }), json!({ "*.email": "redact" })] {
+        assert!(Settings::default().patched(&json!({ "masking": { "search:catalog": { "users.email": "email", "users.address.city": "redact", ".ds-logs-2026.11.18-000001.user.email": "redact" } } })).is_ok());
+        for bad in [json!({ "users": "redact" }), json!({ "users.email": "hash" }), json!({ "*.email": "redact" }), json!({ ".kibana.email": "redact" })] {
             assert!(Settings::default().patched(&json!({ "masking": { "search:catalog": bad } })).is_err(), "{bad}");
         }
         assert!(Settings::default().patched(&json!({ "github": { "hide": ["a} body {display:none"] } })).is_err());

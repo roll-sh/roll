@@ -71,7 +71,8 @@ impl EnvSource for Engine {
         let untrusted = !(s.secrets.allow_production && r.trusted);
         let (secrets, leases, plain) = self.resolve_secrets(&r, untrusted, true, service).await?;
         self.keep_leases(&r, service, &leases).await?;
-        let own: Vec<(String, String)> = project_env(&s, r.branch.as_deref()).into_iter().chain(self.store.vars(preview)?).collect();
+        // A reference (`roll://…`) is roll secrets' to resolve (`secrets` has its value): never set as its text.
+        let own: Vec<(String, String)> = project_env(&s, r.branch.as_deref()).into_iter().chain(self.store.vars(preview)?).filter(|(_, v)| !crate::settings::is_reference(v)).collect();
         let branches = self.resource_env(preview).await?;
         // Its logs hide what this start is given (its dynamic credentials included).
         self.add_masks(preview, masks::secret_values(&secrets, &plain, &own, &branches));
@@ -80,6 +81,15 @@ impl EnvSource for Engine {
         }
         if s.mail == crate::settings::MailRule::Catch {
             self.catch_mail(&r.id, &mut env)?;
+        }
+        if s.traces
+            && let Some(vars) = self.otlp_vars(&r.id, service)?
+        {
+            // Its token is a credential (its traces' only lock): out of what the preview shows.
+            self.add_masks(preview, vec![self.store.trace_token(&r.id)?]);
+            for (k, v) in vars {
+                set(&mut env, k, v);
+            }
         }
         set(&mut env, "ROLL_PREVIEW", r.id.clone());
         set(&mut env, "ROLL_PREVIEW_URL", url);
@@ -106,11 +116,14 @@ impl EnvSource for Engine {
             vars: Vec::new(),
             branches: Vec::new(),
             access_token: None,
+            signed_in: false,
             bypass_sha256: None,
             // The runtime's proxy adds the button per request (`runtime::Tagger`).
             feedback: false,
             egress: s.egress_for(r.trusted),
             egress_hosts: s.egress_hosts.clone(),
+            rebuild: None,
+            traces: s.traces,
         };
         Ok((t, env))
     }

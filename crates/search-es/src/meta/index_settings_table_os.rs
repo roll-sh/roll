@@ -190,6 +190,21 @@ pub static OS_INDEX_SETTINGS: &[IndexSetting] = &[
     s!("index.remote_store.translog.repository", D(""), Str, Private),
     s!("index.replication.type", D("DOCUMENT"), Str, Final),
     s!("index.requests.cache.enable", D("true"), Bool, Dynamic),
+    // roll's own: search analytics (`crate::analytics`), with no default to print.
+    s!("index.roll.analytics.enabled", Dflt::None, Bool, Dynamic),
+    // roll's own: query suggestions (`crate::query_suggestions`), with no defaults to print.
+    s!("index.roll.suggestions.block", Dflt::None, List, Dynamic),
+    s!("index.roll.suggestions.block_prefix", Dflt::None, List, Dynamic),
+    s!("index.roll.suggestions.click_boost", Dflt::None, Double(0.0, 100.0), Dynamic),
+    s!("index.roll.suggestions.enabled", Dflt::None, Bool, Dynamic),
+    s!("index.roll.suggestions.interval", Dflt::None, Check(&Time(0), crate::query_suggestions::check_interval), Dynamic),
+    s!("index.roll.suggestions.lookback", Dflt::None, Check(&Time(0), crate::query_suggestions::check_lookback), Dynamic),
+    s!("index.roll.suggestions.max", Dflt::None, Int(1, crate::query_suggestions::MAX_SUGGESTIONS as i64), Dynamic),
+    s!("index.roll.suggestions.min_count", Dflt::None, Int(1, i32::MAX as i64), Dynamic),
+    s!("index.roll.suggestions.min_hits", Dflt::None, Int(0, i32::MAX as i64), Dynamic),
+    // Private: only roll's suggestions build sets them (`query_suggestions::create_build`).
+    s!("index.roll.suggestions.source", Dflt::None, Str, Private),
+    s!("index.roll.suggestions.source_uuid", Dflt::None, Str, Private),
     s!("index.routing.allocation.enable", D("all"), Enum(&["all", "primaries", "new_primaries", "none", "ALL", "PRIMARIES", "NEW_PRIMARIES", "NONE"], EnumErr::OneOf), Dynamic),
     s!("index.routing.allocation.total_primary_shards_per_node", D("-1"), Long(-1, i64::MAX), Dynamic),
     s!("index.routing.allocation.total_remote_capable_primary_shards_per_node", D("-1"), Long(-1, i64::MAX), Dynamic),

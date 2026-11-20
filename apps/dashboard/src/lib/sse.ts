@@ -87,3 +87,36 @@ export function streamSse(url: string | (() => string), opts: SseOptions): () =>
   })();
   return () => ctrl.abort();
 }
+
+/** What a shell's screen tells its viewer: its bytes, a reconnect (the scrollback comes again), its end. */
+export interface ScreenHandlers {
+  onChunk: (bytes: Uint8Array) => void;
+  onReset: () => void;
+  onClosed: () => void;
+}
+
+/** A shell session's screen over SSE (roll apps' and previews' `…/shell/sessions/{sh}/screen`):
+ * base64 chunks, the scrollback first (again after a reconnect: `onReset`), then `event: closed`.
+ * Returns the function that stops it. */
+export function followScreen(url: string, headers: () => Record<string, string>, opts: ScreenHandlers): () => void {
+  let opened = false;
+  const stop = streamSse(url, {
+    headers,
+    onOpen: (open) => {
+      if (open && opened) opts.onReset();
+      if (open) opened = true;
+    },
+    onEvent: (ev) => {
+      if (ev.event === "closed") {
+        stop();
+        opts.onClosed();
+        return;
+      }
+      const bin = atob(ev.data);
+      const out = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+      opts.onChunk(out);
+    },
+  });
+  return stop;
+}

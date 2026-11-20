@@ -3,10 +3,11 @@
 //! (roll-secrets-chain, docs/secrets.md "Tamper evidence").
 
 use crate::access::{Action, Caller, Scope};
-use crate::chain::{self, Digest, Verification, Walk};
+use crate::chain::{self, Digest, Gap, Verification, Walk};
 use crate::crypto::Keyring;
 use crate::{Error, Result, Secrets, from_json, json};
 use code_sql::{Conn, OptionalExtension, params};
+use std::sync::Arc;
 
 use serde::Deserialize;
 
@@ -87,7 +88,11 @@ pub struct AuditFilter {
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn record(c: &Conn<'_>, mac: &Keyring, project: &str, caller: &Caller, action: &str, env: Option<&str>, path: Option<&str>, keys: &[String], summary: &str, now: i64) -> Result<()> {
-    let e = AuditEntry {
+    append(c, mac, project, &[entry(caller, action, env, path, keys, summary, now)], None).map(|_| ())
+}
+
+fn entry(caller: &Caller, action: &str, env: Option<&str>, path: Option<&str>, keys: &[String], summary: &str, now: i64) -> AuditEntry {
+    AuditEntry {
         at: now,
         actor: caller.principal.clone(),
         action: action.into(),
@@ -98,51 +103,113 @@ pub(crate) fn record(c: &Conn<'_>, mac: &Keyring, project: &str, caller: &Caller
         ip: caller.ip.clone(),
         approval: caller.approval.clone(),
         ..AuditEntry::default()
-    };
-    append(c, mac, project, e, None).map(|_| ())
+    }
 }
 
-/// Add a row to the end of `project`'s chain, in the caller's transaction: its number and the hash
-/// before it come from the project's head, which this updates first. The head's row lock (Postgres
-/// re-runs a serializable write that loses it) or SQLite's one writer means two writers never take
-/// one number, and `audit_seq` refuses a second row at one anyway. The head carries a MAC
-/// ([`head_msg`]), checked before it moves: a head changed outside roll isn't MACed again, so it
-/// stays visibly broken and the sweeper won't sign it. `start` moves where the log starts
-/// (retention's cut). Returns the row's `seq`.
-fn append(c: &Conn<'_>, mac: &Keyring, project: &str, mut e: AuditEntry, start: Option<i64>) -> Result<i64> {
+/// Add rows to the end of `project`'s chain, in the caller's transaction: their numbers and the
+/// hash before them come from the project's head, which this updates first. The head's row lock
+/// (on Postgres a serializable write that loses it re-runs, a read-committed one waits for it) or
+/// SQLite's one writer means two writers never take one number, and `audit_seq` refuses a second
+/// row at one anyway. Every writer claims the chain first ([`Conn::claim`]): reads' batches queue
+/// on it, and a write that lost to them gets its next attempt with them held off, so a stream of
+/// reads can't starve a change. The head carries a MAC ([`head_msg`]), checked before it moves:
+/// a head changed outside roll isn't MACed again, so it stays visibly broken and the sweeper won't
+/// sign it. `start` moves where the log starts (retention's cut). Returns the last row's `seq`.
+fn append(c: &Conn<'_>, mac: &Keyring, project: &str, entries: &[AuditEntry], start: Option<i64>) -> Result<i64> {
     type Head = (i64, String, i64, Option<String>);
+    let (n, at) = (entries.len() as i64, entries.last().map_or(0, |e| e.at));
+    c.claim(&format!("audit:{project}"))?;
     let take = |c: &Conn<'_>| -> Result<Option<Head>> {
-        Ok(c.query("UPDATE audit_heads SET seq = seq + 1, at = ? WHERE project_id = ? RETURNING seq, hash, start_seq, mac", params![e.at, project], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?.pop())
+        Ok(c.query("UPDATE audit_heads SET seq = seq + ?, at = ? WHERE project_id = ? RETURNING seq, hash, start_seq, mac", params![n, at, project], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?.pop())
     };
-    let (seq, prev, was_start, tag) = match take(c)? {
+    let (last, prev, was_start, tag) = match take(c)? {
         Some(h) => h,
         None => {
             // The project's first chained row: older rows stay unchained.
             let tag = mac.audit_mac(&head_msg(project, 0, "", 1));
-            c.execute("INSERT OR IGNORE INTO audit_heads (project_id, seq, hash, at, digest_seq, digest_at, start_seq, mac) VALUES (?, 0, '', ?, 0, 0, 1, ?)", params![project, e.at, tag])?;
+            c.execute("INSERT OR IGNORE INTO audit_heads (project_id, seq, hash, at, digest_seq, digest_at, start_seq, mac) VALUES (?, 0, '', ?, 0, 0, 1, ?)", params![project, at, tag])?;
             take(c)?.ok_or_else(|| Error::Internal("the audit chain's head vanished".into()))?
         }
     };
-    let intact = tag.is_some_and(|t| mac.audit_mac_ok(&head_msg(project, seq - 1, &prev, was_start), &t));
+    let first = last - n + 1;
+    let intact = tag.is_some_and(|t| mac.audit_mac_ok(&head_msg(project, first - 1, &prev, was_start), &t));
     if !intact {
         tracing::warn!(project, "the audit chain's head isn't one roll wrote (changed in the database): it stays broken and unsigned");
     }
     let start = start.unwrap_or(was_start);
-    e.seq = Some(seq);
-    let hash = chain::link(&prev, project, &e);
-    // The row and the head's new hash in one round trip on Postgres.
+    // Each row hashed onto the one before it.
+    let mut hash = prev;
+    let linked: Vec<(AuditEntry, String, String, Option<String>)> = entries
+        .iter()
+        .zip(first..)
+        .map(|(e, seq)| {
+            let e = AuditEntry { seq: Some(seq), ..e.clone() };
+            hash = chain::link(&hash, project, &e);
+            let (keys, approval) = (json(&e.keys), e.approval.as_ref().map(json));
+            (e, hash.clone(), keys, approval)
+        })
+        .collect();
+    // The rows and the head's new hash in one round trip on Postgres.
     use code_sql::ValueRef::{Int, Null, Text};
     fn opt(v: &Option<String>) -> code_sql::ValueRef<'_> {
         v.as_deref().map_or(Null, Text)
     }
-    let (keys, approval) = (json(&e.keys), e.approval.as_ref().map(json));
-    let tag = intact.then(|| mac.audit_mac(&head_msg(project, seq, &hash, start)));
-    let row = vec![Text(project), Int(seq), Text(&hash), Int(e.at), Text(&e.actor), Text(&e.action), opt(&e.environment), opt(&e.path), Text(&keys), Text(&e.summary), opt(&e.ip), opt(&approval), opt(&e.digest)];
+    let tag = intact.then(|| mac.audit_mac(&head_msg(project, last, &hash, start)));
+    let rows = linked
+        .iter()
+        .map(|(e, hash, keys, approval)| vec![Text(project), Int(e.seq.unwrap_or(0)), Text(hash), Int(e.at), Text(&e.actor), Text(&e.action), opt(&e.environment), opt(&e.path), Text(keys), Text(&e.summary), opt(&e.ip), opt(approval), opt(&e.digest)])
+        .collect();
     c.execute_pipeline(&[
-        ("INSERT INTO audit (project_id, seq, hash, at, actor, action, env, path, keys, summary, ip, approval, digest) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", vec![row]),
+        ("INSERT INTO audit (project_id, seq, hash, at, actor, action, env, path, keys, summary, ip, approval, digest) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows),
         ("UPDATE audit_heads SET hash = ?, start_seq = ?, mac = ? WHERE project_id = ?", vec![vec![Text(&hash), Int(start), opt(&tag), Text(project)]]),
     ])?;
-    Ok(seq)
+    Ok(last)
+}
+
+/// Rows recorded at once by [`Secrets::audit_now`]: a transaction's worth.
+const BATCH: usize = 256;
+
+/// Reads waiting for their audit rows, per project. Every read of values is audited in its own
+/// transaction, and each takes the project's head: one at a time, they'd queue on its row lock
+/// (on Postgres, losers re-run). So they're group-committed: one waiting reader writes everyone's
+/// rows in one transaction, in the order they came, while the next batch gathers. A project here
+/// has a reader writing for it; it leaves when no one is waiting. Measured in docs/secrets.md
+/// ("Tamper evidence").
+#[derive(Default)]
+pub(crate) struct Recorder(std::sync::Mutex<std::collections::HashMap<String, Vec<Waiting>>>);
+
+struct Waiting {
+    entry: AuditEntry,
+    turn: Arc<Turn>,
+}
+
+/// What a waiting reader is told: to write a batch (its own row first), or how its row went.
+#[derive(Default)]
+struct Turn {
+    told: std::sync::Mutex<Option<Told>>,
+    cv: std::sync::Condvar,
+}
+
+enum Told {
+    Write(Vec<Waiting>),
+    Done(std::result::Result<(), String>),
+}
+
+impl Turn {
+    fn tell(&self, t: Told) {
+        *self.told.lock().unwrap_or_else(|e| e.into_inner()) = Some(t);
+        self.cv.notify_one();
+    }
+
+    fn wait(&self) -> Told {
+        let mut told = self.told.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            if let Some(t) = told.take() {
+                return t;
+            }
+            told = self.cv.wait(told).unwrap_or_else(|e| e.into_inner());
+        }
+    }
 }
 
 impl Secrets {
@@ -150,10 +217,72 @@ impl Secrets {
     /// failure is logged): the database that would hold the row is the one that's failing.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn audit_now(&self, project: &str, caller: &Caller, action: &str, env: Option<&str>, path: Option<&str>, keys: &[String], summary: &str) {
-        let res = self.db.now_ms().map_err(crate::Error::from).and_then(|now| self.keys().and_then(|mac| self.db.write(|c| record(c, mac, project, caller, action, env, path, keys, summary, now))));
+        let res = self.db.now_ms().map_err(crate::Error::from).and_then(|now| self.keys().map(|mac| (now, mac)));
+        let res = res.map_err(|e| e.to_string()).and_then(|(now, mac)| self.record_batched(project, mac, entry(caller, action, env, path, keys, summary, now)));
         if let Err(e) = res {
             tracing::error!(project, action, "recording an audit row failed: {e}");
         }
+    }
+
+    /// Record `entry` with whatever else is waiting for `project` ([`Recorder`]): written by this
+    /// reader, or by another one, before this returns.
+    fn record_batched(&self, project: &str, mac: &Keyring, entry: AuditEntry) -> std::result::Result<(), String> {
+        let turn = Arc::new(Turn::default());
+        let me = Waiting { entry, turn: turn.clone() };
+        {
+            let mut waiting = self.recorder.0.lock().unwrap_or_else(|e| e.into_inner());
+            match waiting.get_mut(project) {
+                Some(w) => w.push(me),
+                None => {
+                    waiting.insert(project.to_string(), Vec::new());
+                    drop(waiting);
+                    return self.write_batch(project, mac, vec![me]);
+                }
+            }
+        }
+        match turn.wait() {
+            Told::Write(batch) => self.write_batch(project, mac, batch),
+            Told::Done(res) => res,
+        }
+    }
+
+    /// Write `batch` (the caller's own row first) in one transaction, tell the others how it
+    /// went, and hand the next batch to its first reader. Its own row's outcome.
+    fn write_batch(&self, project: &str, mac: &Keyring, batch: Vec<Waiting>) -> std::result::Result<(), String> {
+        /// Tells and hands on even if writing panics: nobody waits forever.
+        struct Finish<'a> {
+            s: &'a Secrets,
+            project: &'a str,
+            batch: Vec<Waiting>,
+            res: Option<std::result::Result<(), String>>,
+        }
+        impl Drop for Finish<'_> {
+            fn drop(&mut self) {
+                let res = self.res.take().unwrap_or_else(|| Err("writing the batch panicked".into()));
+                for w in self.batch.drain(..).skip(1) {
+                    w.turn.tell(Told::Done(res.clone()));
+                }
+                let mut waiting = self.s.recorder.0.lock().unwrap_or_else(|e| e.into_inner());
+                let Some(w) = waiting.get_mut(self.project) else { return };
+                if w.is_empty() {
+                    waiting.remove(self.project);
+                    return;
+                }
+                let next: Vec<Waiting> = w.drain(..w.len().min(BATCH)).collect();
+                drop(waiting);
+                let first = next[0].turn.clone();
+                first.tell(Told::Write(next));
+            }
+        }
+        let mut f = Finish { s: self, project, batch, res: None };
+        let entries: Vec<AuditEntry> = f.batch.iter().map(|w| w.entry.clone()).collect();
+        // Read committed: the transaction's first statements claim the chain and take the head's
+        // row lock, reading the head as committed once they have them, and the rest runs holding
+        // them, so batches on other nodes queue rather than fail and re-run (serializable would,
+        // every time).
+        let res = self.db.write_with(code_sql::Isolation::ReadCommitted, |c| append(c, mac, project, &entries, None)).map(drop).map_err(|e: Error| e.to_string());
+        f.res = Some(res.clone());
+        res
     }
 
     pub fn audit(&self, project: &str, f: AuditFilter, caller: &Caller) -> Result<Vec<AuditEntry>> {
@@ -184,9 +313,12 @@ impl Secrets {
         sql.push_str(" ORDER BY id DESC LIMIT ?");
         args.push(code_sql::Value::Int(limit));
         let rows = self.db.read(|c| c.query(&sql, &args, row))?;
+        // Which keys are decoys is the admins' to know.
+        let decoys = self.sees_decoys(project, caller);
         // A token limited to some environments sees only their rows.
         Ok(rows
             .into_iter()
+            .filter(|r| decoys || !crate::decoys::ADMIN_ACTIONS.contains(&r.action.as_str()))
             .filter(|r| r.environment.as_deref().is_none_or(|e| caller.allows(Action::Read, &Scope::at(project, e, r.path.as_deref().unwrap_or("/")))))
             .collect())
     }
@@ -282,14 +414,20 @@ impl Secrets {
     /// digests written.
     #[doc(hidden)]
     pub fn sweep_audit_chain(&self, keep_ms: i64) -> Result<usize> {
-        Ok(self.sign_digests(keep_ms, false)?.1)
+        self.sweep_audit_chain_at(keep_ms, self.db.now_ms()?)
+    }
+
+    /// [`Secrets::sweep_audit_chain`] at `now` (tests move the clock).
+    #[doc(hidden)]
+    pub fn sweep_audit_chain_at(&self, keep_ms: i64, now: i64) -> Result<usize> {
+        Ok(self.sign_digests(keep_ms, now, false)?.1)
     }
 
     /// What roll wrote before the digest key: digests signed with the issuer key (RS256). For the
     /// legacy path's tests only.
     #[doc(hidden)]
     pub fn sweep_audit_chain_as_before_the_digest_key(&self, keep_ms: i64) -> Result<usize> {
-        Ok(self.sign_digests(keep_ms, true)?.1)
+        Ok(self.sign_digests(keep_ms, self.db.now_ms()?, true)?.1)
     }
 
     /// Sign every chain that's due now, page after page (an emergency rotation of the digest key
@@ -297,7 +435,7 @@ impl Secrets {
     pub(crate) fn sign_due_digests(&self) -> Result<usize> {
         let mut written = 0;
         for _ in 0..10_000 {
-            let (due, n) = self.sign_digests(RETENTION_DAYS * 86_400_000, false)?;
+            let (due, n) = self.sign_digests(RETENTION_DAYS * 86_400_000, self.db.now_ms()?, false)?;
             written += n;
             if due == 0 {
                 break;
@@ -306,9 +444,8 @@ impl Secrets {
         Ok(written)
     }
 
-    /// One pass of the signer: (projects due, digests written).
-    fn sign_digests(&self, keep_ms: i64, issuer_key: bool) -> Result<(usize, usize)> {
-        let now = self.db.now_ms()?;
+    /// One pass of the signer at `now`: (projects due, digests written).
+    fn sign_digests(&self, keep_ms: i64, now: i64, issuer_key: bool) -> Result<(usize, usize)> {
         let cutoff = now - keep_ms;
         // Rows from before the chain began go by age, as every row did.
         self.db.write(|c| c.execute("DELETE FROM audit WHERE seq IS NULL AND at < ?", [cutoff]))?;
@@ -345,9 +482,9 @@ impl Secrets {
         for project in due {
             // The write is the claim: a node that comes second finds nothing due.
             let wrote = self.db.write(|c| {
-                type Head = (i64, String, i64, i64, i64, Option<String>);
-                let (seq, hash, last_at, digest_at, start, tag): Head =
-                    c.query_row("SELECT seq, hash, at, digest_at, start_seq, mac FROM audit_heads WHERE project_id = ?", [&project], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?;
+                type Head = (i64, String, i64, i64, i64, i64, Option<String>);
+                let (seq, hash, last_at, digest_seq, digest_at, start, tag): Head =
+                    c.query_row("SELECT seq, hash, at, digest_seq, digest_at, start_seq, mac FROM audit_heads WHERE project_id = ?", [&project], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)))?;
                 let cut: Option<i64> = c.query_row("SELECT MAX(seq) FROM audit WHERE project_id = ? AND action = ? AND at < ? AND seq > ?", params![project, chain::DIGEST, cutoff, start], |r| r.get(0))?;
                 if cut.is_none() && digest_at > now - chain::DIGEST_EVERY_MS {
                     return Ok(false);
@@ -359,6 +496,20 @@ impl Secrets {
                     c.execute("UPDATE audit_heads SET digest_at = ? WHERE project_id = ?", params![now, project])?;
                     return Ok(false);
                 }
+                // The newest digest the chain itself holds (signed, so a database writer can't make
+                // one up), or with none the chain's first row. Older than `verify` allows, or not
+                // the one the head says roll last wrote, and the rows after it can't be vouched
+                // for: an old head put back from a copy passes its MAC. This digest says so, and
+                // `verify` reports the gap for as long as it's in the log.
+                let last: Option<(i64, i64)> = c.query("SELECT seq, at FROM audit WHERE project_id = ? AND action = ? AND seq <= ? ORDER BY seq DESC LIMIT 1", params![project, chain::DIGEST, seq], |r| Ok((r.get(0)?, r.get(1)?)))?.pop();
+                let (after, since) = match last {
+                    Some(d) => d,
+                    None => (0, c.query_row("SELECT MIN(at) FROM audit WHERE project_id = ? AND seq IS NOT NULL", [&project], |r| r.get::<_, Option<i64>>(0))?.unwrap_or(0)),
+                };
+                let gap = (now - since > STALE_MS || after != digest_seq).then_some(Gap { after, since });
+                if gap.is_some() {
+                    tracing::warn!(project, after, "the audit log went unsigned past the stale limit, or its last digest is gone: the next digest records the gap");
+                }
                 let start = match cut {
                     Some(at) => {
                         c.execute("DELETE FROM audit WHERE project_id = ? AND seq < ?", params![project, at])?;
@@ -366,16 +517,20 @@ impl Secrets {
                     }
                     None => start,
                 };
-                let d = Digest { project: project.clone(), seq, hash, last_at, at: now, start };
+                let summary = match &gap {
+                    Some(_) => format!("signed the log through #{seq} after a gap"),
+                    None => format!("signed the log through #{seq}"),
+                };
+                let d = Digest { project: project.clone(), seq, hash, last_at, at: now, start, gap };
                 let e = AuditEntry {
                     at: now,
                     actor: chain::DIGEST_ACTOR.into(),
                     action: chain::DIGEST.into(),
-                    summary: format!("signed the log through #{seq}"),
+                    summary,
                     digest: Some(sign(&d)?),
                     ..AuditEntry::default()
                 };
-                let own = append(c, mac, &project, e, Some(start))?;
+                let own = append(c, mac, &project, std::slice::from_ref(&e), Some(start))?;
                 c.execute("UPDATE audit_heads SET digest_seq = ?, digest_at = ? WHERE project_id = ?", params![own, now, project])?;
                 Ok::<_, Error>(true)
             })?;

@@ -39,9 +39,11 @@ pub enum Inference {
     /// The cluster's endpoints (wakes it).
     #[command(alias = "ls")]
     List { cluster: String },
-    /// A new endpoint. The provider's API key is read from the environment (`--api-key-env`,
-    /// by default OPENAI_API_KEY, COHERE_API_KEY or ANTHROPIC_API_KEY) or from stdin with
-    /// `--api-key-stdin`, never from the command line; the cluster seals it.
+    /// A new endpoint. The provider's API key comes from a roll secret of the project the
+    /// cluster is on (`--secret`: rotating the secret updates the endpoint), or is read from the
+    /// environment (`--api-key-env`, by default OPENAI_API_KEY, COHERE_API_KEY or
+    /// ANTHROPIC_API_KEY) or from stdin with `--api-key-stdin`, never from the command line; the
+    /// cluster seals it.
     Create {
         cluster: String,
         id: String,
@@ -69,6 +71,14 @@ pub enum Inference {
         /// Read the API key from stdin instead.
         #[arg(long, conflicts_with = "api_key_env")]
         api_key_stdin: bool,
+        /// The key from a roll secret: its name (in --environment, at the folder's root) or a
+        /// reference, `roll://ENV[/folder]/KEY` (`roll://PROJECT@ENV/KEY` when the cluster is on
+        /// several projects' canvases). You need reveal on it; the endpoint follows its rotations.
+        #[arg(long, conflicts_with_all = ["api_key_env", "api_key_stdin"])]
+        secret: Option<String>,
+        /// The environment of --secret's name.
+        #[arg(long, default_value = "production", requires = "secret")]
+        environment: String,
     },
     /// Run an endpoint on some text (a rerank endpoint ranks the --doc texts against it).
     Test {
@@ -219,6 +229,7 @@ pub enum Clusters {
     /// Show a cluster: state, URL, indices, branches.
     Show { cluster: String },
     /// Change settings.
+    #[command(alias = "update")]
     Set {
         cluster: String,
         #[arg(long)]
@@ -232,6 +243,14 @@ pub enum Clusters {
         /// Default of `action.destructive_requires_name`.
         #[arg(long)]
         destructive_requires_name: Option<bool>,
+        /// Let only these networks reach the cluster's endpoint (repeat it; replaces the list):
+        /// a CIDR or an address, optionally `=description` (`--allow 203.0.113.0/24=office`).
+        /// The dashboard and `roll search` aren't filtered.
+        #[arg(long = "allow", value_name = "CIDR[=DESCRIPTION]", conflicts_with = "allow_any")]
+        allow: Vec<String>,
+        /// Let any address reach the endpoint again (clears the allowlist).
+        #[arg(long)]
+        allow_any: bool,
     },
     /// Delete a cluster (restorable for the node's window, 7 days by default; branches keep
     /// their data).
@@ -323,6 +342,31 @@ pub fn url_with_password(url: &str, user: &str, password: &str) -> String {
     }
 }
 
+/// `--allow` values (`CIDR` or `CIDR=description`) as the API's `ip_allowlist`.
+fn allow_rules(allow: &[String]) -> Value {
+    Value::Array(
+        allow
+            .iter()
+            .map(|a| match a.split_once('=') {
+                Some((cidr, d)) => json!({ "cidr": cidr.trim(), "description": d.trim() }),
+                None => json!({ "cidr": a.trim() }),
+            })
+            .collect(),
+    )
+}
+
+fn print_allowlist(v: &Value) {
+    let rules = v["ip_allowlist"].as_array().cloned().unwrap_or_default();
+    if rules.is_empty() {
+        println!("allowed   any address");
+        return;
+    }
+    for (i, r) in rules.iter().enumerate() {
+        let d = r["description"].as_str().map(|d| format!("  {d}")).unwrap_or_default();
+        println!("{}{}{d}", if i == 0 { "allowed   " } else { "          " }, s(&r["cidr"]));
+    }
+}
+
 fn print_cluster(c: &Value) {
     let st = &c["status"];
     let state = s(&st["state"]);
@@ -376,7 +420,7 @@ async fn index_call(api: &Api, as_json: bool, method: reqwest::Method, cluster: 
     if let Some((ct, b)) = body {
         req = req.header("content-type", ct).body(b);
     }
-    let res = req.send().await.with_context(|| format!("can't reach {} (is it running?)", api.base))?;
+    let res = req.send().await.with_context(|| crate::unreachable(&api.base))?;
     let status = res.status();
     let text = res.text().await?;
     if !text.is_empty() {
@@ -462,7 +506,33 @@ pub async fn run(api: &Api, as_json: bool, cmd: Search) -> anyhow::Result<()> {
                 }
                 Value::Array(list)
             }
-            Inference::Create { cluster, id, service, task, model, url, dimensions, max_tokens, api_key_env, api_key_stdin } => {
+            Inference::Create { cluster, id, service, task, model, url, dimensions, max_tokens, api_key_env, api_key_stdin, secret, environment } => {
+                let mut settings = json!({ "model_id": model });
+                if let Some(u) = url {
+                    settings["url"] = json!(u);
+                }
+                if let Some(d) = dimensions {
+                    settings["dimensions"] = json!(d);
+                }
+                let mut body = json!({ "service": service, "service_settings": settings });
+                if let Some(m) = max_tokens {
+                    body["task_settings"] = json!({ "max_tokens": m });
+                }
+                let c = find(api, &cluster).await?;
+                if let Some(name) = secret {
+                    let r = match crate::secret_refs::Ref::parse(&name)? {
+                        Some(r) => r,
+                        None => crate::secret_refs::Ref { project: None, env: environment, path: "/".into(), key: name },
+                    };
+                    let req = json!({ "inference_id": id, "task_type": task, "config": body, "secret": { "project": r.project, "environment": r.env, "path": r.path, "key": r.key } });
+                    let v = api.post(&format!("/v1/search/clusters/{}/inference/secrets", s(&c["id"])), req).await?;
+                    if !as_json {
+                        println!("inference endpoint {id} ({task}, {service}) on {}; its key is {} and follows it", s(&c["name"]), r.text());
+                        return Ok(());
+                    }
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                    return Ok(());
+                }
                 let key = if api_key_stdin {
                     let mut k = String::new();
                     std::io::Read::read_to_string(&mut std::io::stdin(), &mut k)?;
@@ -474,18 +544,7 @@ pub async fn run(api: &Api, as_json: bool, cmd: Search) -> anyhow::Result<()> {
                 if key.is_empty() {
                     bail!("the API key is empty");
                 }
-                let c = find(api, &cluster).await?;
-                let mut settings = json!({ "api_key": key, "model_id": model });
-                if let Some(u) = url {
-                    settings["url"] = json!(u);
-                }
-                if let Some(d) = dimensions {
-                    settings["dimensions"] = json!(d);
-                }
-                let mut body = json!({ "service": service, "service_settings": settings });
-                if let Some(m) = max_tokens {
-                    body["task_settings"] = json!({ "max_tokens": m });
-                }
+                body["service_settings"]["api_key"] = json!(key);
                 let v = es_request(api, &c, "PUT", &format!("/_inference/{}/{}", urlencoding::encode(&task), urlencoding::encode(&id)), Some(body)).await?;
                 if !as_json {
                     println!("inference endpoint {id} ({task}, {service}) on {}; the key is sealed in the cluster", s(&c["name"]));
@@ -691,6 +750,7 @@ pub async fn run(api: &Api, as_json: bool, cmd: Search) -> anyhow::Result<()> {
                     let idle = v["idle_timeout_s"].as_i64().unwrap_or(0);
                     println!("idle      {}", if idle == 0 { "always loaded".to_string() } else { format!("{idle}s") });
                     println!("limits    {} in flight, {} MiB bodies", s(&v["max_in_flight"]), s(&v["max_body_mb"]));
+                    print_allowlist(&v);
                     println!("created   {}", ago(v["created_at"].as_i64().unwrap_or(0)));
                     for b in v["branches"].as_array().into_iter().flatten() {
                         println!("  branch {}  {}  as of {}", s(&b["name"]), s(&b["id"]), ago(b["parent_at"].as_i64().unwrap_or(0)));
@@ -699,15 +759,19 @@ pub async fn run(api: &Api, as_json: bool, cmd: Search) -> anyhow::Result<()> {
                 }
                 v
             }
-            Clusters::Set { cluster, flavor, idle, max_in_flight, max_body_mb, destructive_requires_name } => {
+            Clusters::Set { cluster, flavor, idle, max_in_flight, max_body_mb, destructive_requires_name, allow, allow_any } => {
                 let c = find(api, &cluster).await?;
-                let body = json!({
+                let mut body = json!({
                     "flavor": flavor, "idle_timeout_s": idle, "max_in_flight": max_in_flight, "max_body_mb": max_body_mb,
                     "destructive_requires_name": destructive_requires_name,
                 });
+                if allow_any || !allow.is_empty() {
+                    body["ip_allowlist"] = allow_rules(&allow);
+                }
                 let v = api.call(reqwest::Method::PATCH, &format!("/v1/search/clusters/{}", s(&c["id"])), Some(body)).await?;
                 if !as_json {
                     print_cluster(&v);
+                    print_allowlist(&v);
                     return Ok(());
                 }
                 v

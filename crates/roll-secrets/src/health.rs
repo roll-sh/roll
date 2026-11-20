@@ -18,6 +18,9 @@ const READS_MAX: i64 = 100_000;
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum Issue {
+    /// A decoy key's credential was used (docs/secrets.md, "Decoys"): someone found it where it
+    /// was planted. Only the project's admins see it.
+    DecoyUsed,
     /// Its value stopped working outside roll.
     Expired,
     /// Its scheduled rotation fails (the database, vendor or rotator refused or didn't answer).
@@ -129,13 +132,17 @@ impl Secrets {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?)),
             )?;
             let reads: Vec<(String, String, String)> = c.query(
-                "SELECT env, path, keys FROM audit WHERE project_id = ? AND at >= ? AND action IN ('secrets.reveal', 'secrets.export', 'secrets.resolve', 'secrets.revalidate', 'sync.push') ORDER BY id DESC LIMIT ?",
+                "SELECT env, path, keys FROM audit WHERE project_id = ? AND at >= ? AND action IN ('secrets.reveal', 'secrets.export', 'secrets.resolve', 'secrets.revalidate', 'secrets.totp', 'sync.push') ORDER BY id DESC LIMIT ?",
                 params![project, now - UNREAD_DAYS * 86_400_000, READS_MAX],
                 |r| Ok((r.get::<_, Option<String>>(0)?.unwrap_or_default(), r.get::<_, Option<String>>(1)?.unwrap_or_default(), r.get(2)?)),
             )?;
             Ok::<_, crate::Error>((envs, rows, reads))
         })?;
         let slug: HashMap<&str, &envs::EnvRow> = envs.iter().map(|e| (e.id.as_str(), e)).collect();
+        // Decoys, for the admins: their use first, and no staleness or disuse (nobody should read one).
+        let admin = self.sees_decoys(project, caller);
+        let used = if admin { self.used_decoys(project)? } else { vec![] };
+        let decoys: HashSet<(String, String, String)> = if admin { self.live_decoys(project)? } else { HashSet::new() };
         let mut read: HashSet<(String, String, String)> = HashSet::new();
         for (env, path, keys) in reads {
             for k in from_json::<Vec<String>>(&keys) {
@@ -156,6 +163,13 @@ impl Secrets {
             }
         }
         let mut out = vec![];
+        for d in used {
+            // An ephemeral environment's (or a deleted one's) shows where the decoy was planted.
+            let env = slug.get(d.env_id.as_str()).map_or_else(|| d.env_id.clone(), |e| e.slug.clone());
+            let from = d.used_ip.map(|i| format!(" from {i}")).unwrap_or_default();
+            let times = if d.uses == 1 { "once".to_string() } else { format!("{} times", d.uses) };
+            out.push(Finding { issue: Issue::DecoyUsed, environment: env, path: d.path, key: d.key, detail: format!("used {times}, last on {}{from}: cut it off and rotate what sits beside it", chrono_day(d.used_at)), owner: None });
+        }
         let mut have: HashSet<(String, String, String)> = HashSet::new();
         for (env_id, path, key, fp, link, refs, updated_at, expires_at, weak, public) in &rows {
             let Some(e) = slug.get(env_id.as_str()) else { continue };
@@ -197,14 +211,15 @@ impl Secrets {
                     add(Issue::Exposed, format!("also in {}", named.join(", ")));
                 }
             }
-            let changes_alone = link.as_deref().is_none_or(|l| l.contains("\"mode\":\"managed\""));
+            let decoy = decoys.contains(&(env_id.clone(), path.clone(), key.clone()));
+            let changes_alone = !decoy && link.as_deref().is_none_or(|l| l.contains("\"mode\":\"managed\""));
             if let Some(d) = e.max_age_days
                 && changes_alone
                 && now - updated_at > d * 86_400_000
             {
                 add(Issue::Stale, format!("unchanged for over {d} days"));
             }
-            if !read.contains(&(e.slug.clone(), path.clone(), key.clone())) && now - updated_at > UNREAD_DAYS * 86_400_000 {
+            if !decoy && !read.contains(&(e.slug.clone(), path.clone(), key.clone())) && now - updated_at > UNREAD_DAYS * 86_400_000 {
                 add(Issue::Unread, format!("not read in {UNREAD_DAYS} days"));
             }
         }

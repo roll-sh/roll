@@ -47,6 +47,10 @@ pub struct AppsArgs {
     /// BuildKit asks for, which `docker build` can't limit per build).
     #[arg(id = "apps_builds", long = "apps-builds", env = "ROLL_APPS_BUILDS", default_value_t = 2)]
     pub builds: usize,
+    /// The longest a build may take on this node, in minutes: a service's own `build.timeout_s`
+    /// is held to it.
+    #[arg(id = "apps_build_timeout", long = "apps-build-timeout", env = "ROLL_APPS_BUILD_TIMEOUT", default_value_t = 30)]
+    pub build_timeout_min: u64,
     /// Custom domains' certificates (docs/apps/README.md, "Networking").
     #[arg(id = "apps_tls", long = "apps-tls", env = "ROLL_APPS_TLS", value_enum, default_value_t = AppsTls::None)]
     pub tls: AppsTls,
@@ -475,7 +479,7 @@ impl Resources for RollResources {
                 })
                 .await
             }
-            LinkKind::Bucket | LinkKind::Stream | LinkKind::Nosql | LinkKind::Search => match self.provided(kind, r#ref, None).await? {
+            LinkKind::Bucket | LinkKind::Stream | LinkKind::Nosql | LinkKind::Search | LinkKind::Queue => match self.provided(kind, r#ref, None).await? {
                 Some(p) => Ok(p.vars),
                 None => anyhow::bail!("links to {} aren't wired on this node yet", kind.as_str()),
             },
@@ -487,7 +491,7 @@ impl Resources for RollResources {
     /// for the service; a search key has data access only, never the cluster's password), made once, revoked when the link goes; only those are kept with the link, and
     /// what's read (an endpoint, NoSQL's login, a database's URL) is read again at each deploy.
     async fn link(&self, kind: LinkKind, r#ref: &str, service: &str) -> anyhow::Result<Option<apps_control::integrations::Minted>> {
-        if !matches!(kind, LinkKind::Bucket | LinkKind::Stream | LinkKind::Nosql | LinkKind::Search) {
+        if !matches!(kind, LinkKind::Bucket | LinkKind::Stream | LinkKind::Nosql | LinkKind::Search | LinkKind::Queue) {
             return Ok(None);
         }
         let Some(p) = self.provided(kind, r#ref, Some(format!("roll apps {service}"))).await? else { return Ok(None) };
@@ -522,10 +526,11 @@ pub struct AppsNode {
     ports_host: std::net::IpAddr,
 }
 
-/// The variable-sealing key: `ROLL_SECRET_KEY`, else a key of this node's own made once.
-fn sealer(home: &Path) -> anyhow::Result<Sealer> {
-    if let Some(k) = std::env::var("ROLL_SECRET_KEY").ok().filter(|k| k.trim().len() >= 32) {
-        return Sealer::new(&k);
+/// The variable-sealing key: the deployment key (`Args::secret_key`), else a key of this node's
+/// own made once.
+fn sealer(home: &Path, secret_key: Option<&str>) -> anyhow::Result<Sealer> {
+    if let Some(k) = secret_key.filter(|k| k.trim().len() >= 32) {
+        return Sealer::new(k);
     }
     let path = home.join("apps").join("key");
     if let Ok(k) = std::fs::read_to_string(&path) {
@@ -567,8 +572,9 @@ pub async fn start(
             tokio::task::block_in_place(|| code_sql::Db::connect(url, schema, pg))?
         }
     };
-    let store = tokio::task::block_in_place(|| Store::new(db, sealer(home)?).map_err(|e| anyhow::anyhow!("{e}")))?;
+    let store = tokio::task::block_in_place(|| Store::new(db, sealer(home, args.secret_key().as_deref().map(String::as_str))?).map_err(|e| anyhow::anyhow!("{e}")))?;
     let mut cfg = AppsConfig::new(home.to_path_buf());
+    cfg.build_timeout = std::time::Duration::from_secs(a.build_timeout_min.clamp(1, 24 * 60) * 60);
     cfg.web_url = Some(args.web_url.trim_end_matches('/').to_string()).filter(|u| !u.is_empty());
     // Traces' address: `ROLL_APPS_OTLP_URL` (a fleet's public apps address), else the apps
     // listener on loopback, which the runtime makes reachable from instances. Never the API:
@@ -765,6 +771,11 @@ impl apps_control::integrations::Visitors for AccountsVisitors {
     fn may_open(&self, user: &str, _project: &str) -> bool {
         matches!(self.0.user(user), Ok(u) if !u.disabled && u.admin)
     }
+
+    /// The login is one of the person's live (unexpired, not signed out, not revoked) sessions.
+    fn session_live(&self, user: &str, session: &str) -> bool {
+        self.0.sessions_of(user, "").is_ok_and(|all| all.iter().any(|s| s.id == session))
+    }
 }
 
 #[cfg(test)]
@@ -811,5 +822,35 @@ mod tests {
         assert!(listed.iter().all(|(k, _)| !k.starts_with("AWS_ACCESS")), "{listed:?}");
         r.unlink(LinkKind::Bucket, "photos", &m.kept).await.unwrap();
         assert_eq!(*seen.lock().unwrap(), [r#"key roll apps svc_a "write" ["photos"]"#.to_string(), "revoked AKIA1".to_string()]);
+    }
+
+    /// A queue's link gets a vhost user of its own (roll secrets' queue provider): its
+    /// `AMQP_URL` carries that user, never the vhost admin's; unlinking deletes the user.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_queues_link_gets_a_user_of_its_own_and_unlinking_deletes_it() {
+        use axum::routing::put;
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let (s1, s2, s3) = (seen.clone(), seen.clone(), seen.clone());
+        let router = axum::Router::new()
+            .route("/v1/queues/vhosts", get(|| async { axum::Json(serde_json::json!([{ "name": "orders", "amqp_url": "amqp://admin:admin-pw@127.0.0.1:5672/orders" }])) }))
+            .route("/v1/queues/users/{user}", put(move |axum::extract::Path(u): axum::extract::Path<String>| async move {
+                s1.lock().unwrap().push(format!("user {}", u.starts_with("roll-")));
+                axum::http::StatusCode::NO_CONTENT
+            }).delete(move |axum::extract::Path(u): axum::extract::Path<String>| async move {
+                s3.lock().unwrap().push(format!("deleted {}", u.starts_with("roll-")));
+                axum::http::StatusCode::NO_CONTENT
+            }))
+            .route("/v1/queues/permissions/{vhost}/{user}", put(move |axum::extract::Path((v, _)): axum::extract::Path<(String, String)>, axum::Json(b): axum::Json<serde_json::Value>| async move {
+                s2.lock().unwrap().push(format!("permissions {v} {}", b["configure"]));
+                axum::http::StatusCode::NO_CONTENT
+            }));
+        let products = crate::secrets::Api::default();
+        products.set(router);
+        let r = RollResources { postgres: None, redis: None, api: (String::new(), None, reqwest::Client::new()), products };
+        let m = r.link(LinkKind::Queue, "orders", "svc_a").await.unwrap().expect("a user of its own");
+        let url = &m.vars.iter().find(|(k, _)| k == "AMQP_URL").expect("AMQP_URL").1;
+        assert!(url.starts_with("amqp://roll-") && url.ends_with("@127.0.0.1:5672/orders") && !url.contains("admin"), "{url}");
+        r.unlink(LinkKind::Queue, "orders", &m.kept).await.unwrap();
+        assert_eq!(*seen.lock().unwrap(), ["user true", r#"permissions orders ".*""#, "deleted true"]);
     }
 }

@@ -425,7 +425,7 @@ fn collects_breadth_first(spec: &TermsSpec, cfg: &TermsConfig, mode: &Mode, subs
 }
 
 /// Settings every terms result carries.
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct TermsConfig {
     pub order: BucketOrder,
     pub size: usize,
@@ -1195,7 +1195,7 @@ impl Aggregator for UnmappedTermsAgg {
 }
 
 /// Which terms result.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TermsKind {
     Str,
     Long,
@@ -1205,13 +1205,33 @@ pub enum TermsKind {
     Multi,
 }
 
-/// A terms bucket key.
-#[derive(Clone, Debug, PartialEq)]
+/// A terms bucket key. Decoding it from [`crate::wire`] counts its nesting.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub enum TermKey {
     Bytes(Vec<u8>),
     Long(i64),
     Double(f64),
     Multi(Vec<TermKey>),
+}
+
+#[derive(serde::Deserialize)]
+enum TermKeyDe {
+    Bytes(Vec<u8>),
+    Long(i64),
+    Double(f64),
+    Multi(Vec<TermKey>),
+}
+
+impl<'de> serde::Deserialize<'de> for TermKey {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        let _level = crate::wire::Nested::enter::<D::Error>()?;
+        Ok(match TermKeyDe::deserialize(d)? {
+            TermKeyDe::Bytes(b) => TermKey::Bytes(b),
+            TermKeyDe::Long(l) => TermKey::Long(l),
+            TermKeyDe::Double(x) => TermKey::Double(x),
+            TermKeyDe::Multi(m) => TermKey::Multi(m),
+        })
+    }
 }
 
 impl TermKey {
@@ -1264,7 +1284,7 @@ impl TermKey {
 }
 
 /// One terms bucket.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct TermsBucket {
     pub key: TermKey,
     pub doc_count: u64,
@@ -1273,7 +1293,7 @@ pub struct TermsBucket {
 }
 
 /// `StringTerms` / `LongTerms` / `DoubleTerms` / `UnmappedTerms` / `InternalMultiTerms`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Terms {
     pub kind: TermsKind,
     pub buckets: Vec<TermsBucket>,

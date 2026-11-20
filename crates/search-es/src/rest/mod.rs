@@ -147,6 +147,11 @@ impl<'a> Ctx<'a> {
         self.params.iter().any(|(k, _)| k == name)
     }
 
+    /// The query parameters in request order (repeats included).
+    pub fn query_pairs(&self) -> &[(String, String)] {
+        &self.params
+    }
+
     /// The query parameter names in request order (repeats included).
     pub fn query_names(&self) -> impl Iterator<Item = &str> {
         self.params.iter().map(|(k, _)| k.as_str())
@@ -463,6 +468,8 @@ fn flag(params: &[(String, String)], name: &str) -> Result<bool, EsError> {
 pub type Admitted = Result<crate::thread_pool::Admission, crate::thread_pool::Rejected>;
 
 async fn handle_inner(cluster: &Cluster, req: &EsRequest, admitted: Option<Admitted>) -> EsResponse {
+    // Set for the client's request itself, not for the calls it makes to the cluster.
+    let audit = crate::xpack::security::audit::enter();
     let (raw_path, query) = req.uri.split_once('?').unwrap_or((&req.uri, ""));
     let raw_path = if raw_path.is_empty() { "/" } else { raw_path };
     let head_req = req.method.eq_ignore_ascii_case("HEAD");
@@ -583,7 +590,17 @@ async fn handle_inner(cluster: &Cluster, req: &EsRequest, admitted: Option<Admit
     // Authentication comes first (Elasticsearch's security REST filter), authorization after
     // the request was parsed (its transport action).
     let charged = in_flight.as_ref().map(|_| ()).map_err(Clone::clone);
-    let authenticated = charged.and_then(|_| crate::xpack::security::authenticate(&ctx)).map(|()| {
+    let authenticated = charged.and_then(|_| crate::xpack::security::authenticate(&ctx)).inspect_err(|e| {
+        if e.status == 401
+            && let Some(a) = &audit
+        {
+            a.authentication_failed(req);
+        }
+    });
+    if let (Ok(()), Some(a)) = (&authenticated, &audit) {
+        a.authenticated(&ctx);
+    }
+    let authenticated = authenticated.map(|()| {
         // An internal call without credentials inside `internal::as_principal` (a watch running
         // as its owner) is that principal's.
         if ctx.principal.get().is_none()
@@ -608,6 +625,9 @@ async fn handle_inner(cluster: &Cluster, req: &EsRequest, admitted: Option<Admit
             }) {
                 Err(e)
             } else {
+                if let Some(a) = &audit {
+                    a.granted(&ctx);
+                }
                 // The API's thread pool slot (`es_rejected_execution_exception` when full).
                 let admission = match admitted {
                     Some(Ok(a)) => Ok(Some(a)),
@@ -616,8 +636,8 @@ async fn handle_inner(cluster: &Cluster, req: &EsRequest, admitted: Option<Admit
                 };
                 match admission {
                     Ok(admission) => {
-                        // Boxed: the dispatch future is large, and internal calls nest it.
-                        let r = crate::xpack::security::in_workflow(&ctx, Box::pin(dispatch_off_reactor(&ctx))).await;
+                        // Not boxed: the handler's future is (`crate::api::dispatch`).
+                        let r = crate::xpack::security::in_workflow(&ctx, dispatch_off_reactor(&ctx)).await;
                         drop(admission);
                         r
                     }
@@ -626,6 +646,9 @@ async fn handle_inner(cluster: &Cluster, req: &EsRequest, admitted: Option<Admit
             }
         }
     };
+    if let (Some(a), Ok(reply)) = (&audit, &result) {
+        a.finished(&ctx, reply);
+    }
     let warnings = warning_headers(&ctx.warnings.lock(), cluster.dialect);
     match result {
         // `GET /` prints pretty unless `pretty` is given (`RestMainAction`).
@@ -758,11 +781,13 @@ pub async fn handle_shared(cluster: &std::sync::Arc<Cluster>, req: EsRequest) ->
 
 /// [`handle_shared`] for a request whose pool slot the caller took ([`handle_admitted`]).
 pub async fn handle_shared_admitted(cluster: &std::sync::Arc<Cluster>, req: EsRequest, admitted: Option<Admitted>) -> EsResponse {
+    // A client's request: its audit context covers the calls it makes to the cluster too.
+    let audit = crate::xpack::security::audit::scope(cluster, &req);
     let raw_path = req.uri.split_once('?').map(|(p, _)| p).unwrap_or(&req.uri);
     let searches = Method::parse(&req.method.to_ascii_uppercase())
         .is_some_and(|m| matches!(routes::route_in(cluster.dialect, m, if raw_path.is_empty() { "/" } else { raw_path }), Routed::Found(r) if runs_searches(r.api)));
     if !searches || !can_block_in_place() {
-        return handle_admitted(cluster, req, admitted).await;
+        return crate::xpack::security::audit::run(audit, handle_admitted(cluster, req, admitted)).await;
     }
     let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut guard = CancelOnDrop(Some(flag.clone()));
@@ -771,7 +796,7 @@ pub async fn handle_shared_admitted(cluster: &std::sync::Arc<Cluster>, req: EsRe
     let task = tokio::task::spawn_blocking(move || {
         let ctl = search_index::search::SearchControl { deadline: None, cancelled: Some(flag), ext: None };
         let _ambient = search_index::search::set_ambient_control(Some(ctl));
-        rt.block_on(handle_admitted(&cluster, req, admitted))
+        rt.block_on(crate::xpack::security::audit::run(audit, handle_admitted(&cluster, req, admitted)))
     });
     let r = task.await;
     guard.disarm();

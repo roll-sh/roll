@@ -382,6 +382,9 @@ impl Node {
         loop {
             attempt += 1;
             let db = Database::new(spec.id.clone(), spec.config.clone(), spec.shards);
+            // Never a password-less default user: it logs in with the platform's secret (checked
+            // against the catalog on every AUTH) or a password the tenant gives it.
+            db.acl.write().remove_default_password();
             db.sync_writes.store(spec.sync_writes, Ordering::Relaxed);
             self.set_idle_timeout(&spec.id, spec.idle_timeout);
             self.retention.lock().insert(spec.id.clone(), spec.history_retention);
@@ -660,12 +663,16 @@ impl Directory for Node {
                         }
                         u
                     } else {
+                        // A database's id is no secret (it's in every URL and server name), so a
+                        // user without a password (`nopass`, which a tenant can set again) never
+                        // logs in here, whatever a client sends.
+                        let name = user.as_deref().unwrap_or("default");
+                        let passwordless = acl.user(name.as_bytes()).is_some_and(|u| u.nopass());
                         match acl.authenticate(user.as_deref().map(str::as_bytes), secret) {
-                            Ok(u) => u,
-                            // Including `AUTH <token>` against a nopass default user.
-                            Err(_) => {
+                            Ok(u) if !passwordless => u,
+                            _ => {
                                 if let Some(c) = req.client {
-                                    acl.log_auth_failure(c, req.command, user.as_deref().unwrap_or("default").as_bytes());
+                                    acl.log_auth_failure(c, req.command, name.as_bytes());
                                 }
                                 return Err(AuthError::WrongPass);
                             }

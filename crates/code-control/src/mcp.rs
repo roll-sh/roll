@@ -404,8 +404,22 @@ fn files_schema() -> Value {
     })
 }
 
+/// Tools that reach outside roll (MCP's `openWorldHint`): a model provider (an AI review, a coding
+/// agent's turns and automations) or a branch's remote (publishing an agent's work).
+const OPEN_WORLD: [&str; 7] = ["request_ai_review", "create_agent_thread", "send_agent_message", "respond_agent_request", "claim_agent_work", "run_agent_automation", "publish_agent_thread"];
+
 /// Every tool, with its JSON Schema.
 pub fn tools() -> Vec<Value> {
+    let mut all = every_tool();
+    for t in &mut all {
+        if t["name"].as_str().is_some_and(|n| OPEN_WORLD.contains(&n)) {
+            t["annotations"]["openWorldHint"] = Value::Bool(true);
+        }
+    }
+    all
+}
+
+fn every_tool() -> Vec<Value> {
     let repo = s("Repository, \"owner/repo\"");
     let rev = s("Revision: a branch, tag, changeset (cs_…) or git commit; default: the default branch");
     let change = s("Change: \"chg_…\" or \"owner/repo#N\"");

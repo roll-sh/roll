@@ -85,7 +85,35 @@ CREATE TABLE IF NOT EXISTS shares (
     expires_at INTEGER NOT NULL,
     created_by TEXT NOT NULL,
     created_at INTEGER NOT NULL,
-    revoked INTEGER NOT NULL DEFAULT 0
+    revoked INTEGER NOT NULL DEFAULT 0,
+    opened_day INTEGER
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS visit_tickets (
+    hash TEXT PRIMARY KEY,
+    preview_id TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    roll_session TEXT NOT NULL,
+    expires_at INTEGER NOT NULL,
+    handle TEXT NOT NULL DEFAULT ''
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS visit_sessions (
+    hash TEXT PRIMARY KEY,
+    preview_id TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    roll_session TEXT NOT NULL,
+    expires_at INTEGER NOT NULL,
+    checked_at INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS visit_sessions_project ON visit_sessions (project_id);
+CREATE TABLE IF NOT EXISTS visits (
+    preview_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    handle TEXT NOT NULL,
+    first_at INTEGER NOT NULL,
+    last_at INTEGER NOT NULL,
+    PRIMARY KEY (preview_id, user_id)
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS pinned (
     preview_id TEXT NOT NULL,
@@ -174,10 +202,59 @@ CREATE TABLE IF NOT EXISTS budget_alerts (
     at INTEGER NOT NULL,
     PRIMARY KEY (project_id, month, max_usd, level)
 );
+CREATE TABLE IF NOT EXISTS hooks (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    branches TEXT NOT NULL,
+    hash TEXT NOT NULL UNIQUE,
+    created_at INTEGER NOT NULL,
+    fired_at INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS project_domains (
+    project_id TEXT PRIMARY KEY,
+    base TEXT NOT NULL UNIQUE,
+    https INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS git_skips (
+    project_id TEXT NOT NULL,
+    repo TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    PRIMARY KEY (project_id, repo, branch)
+);
 CREATE TABLE IF NOT EXISTS bypass (
     project_id TEXT PRIMARY KEY,
     hash TEXT NOT NULL,
     created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS runtime_facts (
+    preview_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    json TEXT NOT NULL,
+    PRIMARY KEY (preview_id, kind)
+);
+CREATE TABLE IF NOT EXISTS env_refs (
+    project_id TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    name TEXT NOT NULL,
+    reference TEXT NOT NULL,
+    by TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    PRIMARY KEY (project_id, scope, name)
+);
+CREATE TABLE IF NOT EXISTS git_reports (
+    preview_id TEXT PRIMARY KEY,
+    status TEXT,
+    comment_id INTEGER,
+    comment_hash TEXT
+);
+CREATE TABLE IF NOT EXISTS pull_comments (
+    service TEXT NOT NULL,
+    repo TEXT NOT NULL,
+    number INTEGER NOT NULL,
+    comment_id INTEGER NOT NULL,
+    PRIMARY KEY (service, repo, number)
 );
 CREATE TABLE IF NOT EXISTS git_pulls (
     preview_id TEXT PRIMARY KEY,
@@ -294,19 +371,66 @@ pub const SLUG_MAX: usize = 40;
 /// Who may open a preview's services (`runtime`'s gate).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Access {
-    /// The link's token.
+    /// The link's token (it lets people in only under `access: link`).
     pub token: String,
-    /// Whether the link is needed (`access: link`), or anyone may (`public`).
-    pub required: bool,
+    /// The project's rule.
+    pub mode: crate::settings::Access,
     /// The project's bypass secret's SHA-256 (hex), for automation (`x-roll-preview-bypass`);
     /// never for a fork's (`trusted: false`) preview.
     pub bypass: Option<String>,
 }
 
+impl Access {
+    /// Whether anything at all is needed to open it (not `public`).
+    pub fn required(&self) -> bool {
+        self.mode != crate::settings::Access::Public
+    }
+
+    /// The link's token, while it lets people in (`access: link`).
+    pub fn link_token(&self) -> Option<&str> {
+        (self.mode == crate::settings::Access::Link && !self.token.is_empty()).then_some(self.token.as_str())
+    }
+}
+
+/// The most deploy hooks a project has.
+pub const MAX_HOOKS: i64 = 20;
+
+/// A project's deploy hook (Vercel's and Netlify's): a secret URL that rebuilds its previews of
+/// `branches` at their heads, for a headless CMS's publish webhook.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct Hook {
+    pub id: String,
+    pub project: String,
+    pub name: String,
+    pub branches: Vec<String>,
+    pub created_at: i64,
+    /// When it last rebuilt anything.
+    pub fired_at: Option<i64>,
+}
+
+fn hook_row(r: &code_sql::Row<'_>) -> code_sql::Result<Hook> {
+    let globs: String = r.get(3)?;
+    Ok(Hook { id: r.get(0)?, project: r.get(1)?, name: r.get(2)?, branches: serde_json::from_str(&globs).unwrap_or_default(), created_at: r.get(4)?, fired_at: r.get(5)? })
+}
+
+/// How many people [`Store::visitors`] names.
+pub const VISITORS: usize = 8;
+
 /// The SHA-256 (hex) a bypass secret is kept as.
 pub fn bypass_hash(secret: &str) -> String {
     use sha2::Digest;
     hex::encode(sha2::Sha256::digest(secret.as_bytes()))
+}
+
+/// A signed-in visitor's session ([`Store::visit_session`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VisitSession {
+    pub user: String,
+    /// The roll session (`ses_…`) that got its ticket: the visit lasts no longer than it does.
+    pub roll_session: String,
+    pub project: String,
+    pub expires_at: i64,
+    pub checked_at: i64,
 }
 
 /// Which preview a branched resource belongs to (for scoped tokens: feature/roll-mcp).
@@ -455,10 +579,18 @@ pub struct Store {
     signing: std::sync::OnceLock<Vec<u8>>,
     db: Db,
     rates: Rates,
+    /// Seals a preview's own variables (rolld: with `ROLL_SECRET_KEY`); unset, they're kept as
+    /// written, and read either way.
+    pub sealer: std::sync::OnceLock<std::sync::Arc<dyn crate::ports::Sealer>>,
 }
 
 const COLUMNS: &str = "id, project_id, slug, repo, change_id, branch, number, title, github_pr, head, trusted, desired, state, error, attempts, \
      next_at, asleep, reset_requested, last_reset_at, last_active_at, expires_at, created_by, created_at, updated_at, generation, runs";
+
+/// What a preview's sealed variables are bound to.
+fn vars_aad(id: &str) -> String {
+    format!("preview-vars:{id}")
+}
 
 fn row(r: &code_sql::Row<'_>) -> code_sql::Result<Row> {
     let desired: String = r.get(11)?;
@@ -615,17 +747,26 @@ impl Store {
                 db.add_column("previews", col, "INTEGER")?;
             }
         }
+        if !db.has_column("previews", "rebuilds")? {
+            db.add_column("previews", "rebuilds", "INTEGER NOT NULL DEFAULT 0")?;
+        }
         for col in ["release_ms", "prev_release_ms"] {
             if !db.has_column("previews", col)? {
                 db.add_column("previews", col, "INTEGER")?;
             }
         }
-        for col in ["released", "schema_head", "schema_changes", "runs", "ran_head", "teardown_error", "schema_risks"] {
+        for col in ["released", "schema_head", "schema_changes", "runs", "ran_head", "teardown_error", "schema_risks", "reported_by"] {
             if !db.has_column("previews", col)? {
                 db.add_column("previews", col, "TEXT")?;
             }
         }
-        Ok(Store { db, rates: Rates::default(), signing: std::sync::OnceLock::new() })
+        if !db.has_column("visit_tickets", "handle")? {
+            db.add_column("visit_tickets", "handle", "TEXT NOT NULL DEFAULT ''")?;
+        }
+        if !db.has_column("shares", "opened_day")? {
+            db.add_column("shares", "opened_day", "INTEGER")?;
+        }
+        Ok(Store { db, rates: Rates::default(), signing: std::sync::OnceLock::new(), sealer: std::sync::OnceLock::new() })
     }
 
     pub fn now_ms(&self) -> Result<i64> {
@@ -735,15 +876,48 @@ impl Store {
         })
     }
 
+    /// Who wrote each of a project's rules' references (`(scope, name, reference)`): one kept as
+    /// it was keeps its writer, a new or changed one is `by`'s, one gone goes.
+    pub fn set_env_refs(&self, project: &str, refs: &[(String, String, String)], by: &str) -> Result<()> {
+        let now = self.now_ms()?;
+        self.db.write(|c| {
+            let kept: Vec<(String, String, String)> = c.query("SELECT scope, name, reference FROM env_refs WHERE project_id = ?", [project], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            for k in kept.iter().filter(|k| !refs.contains(k)) {
+                c.execute("DELETE FROM env_refs WHERE project_id = ? AND scope = ? AND name = ?", params![project, k.0, k.1])?;
+            }
+            for (scope, name, reference) in refs.iter().filter(|r| !kept.contains(r)) {
+                c.execute(
+                    "INSERT INTO env_refs (project_id, scope, name, reference, by, at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (project_id, scope, name) DO UPDATE SET reference = excluded.reference, by = excluded.by, at = excluded.at",
+                    params![project, scope, name, reference, by, now],
+                )?;
+            }
+            Ok::<_, Error>(())
+        })
+    }
+
     pub fn put_settings(&self, project: &str, s: &Settings) -> Result<Settings> {
         s.check()?;
         let json = serde_json::to_string(s).expect("JSON");
         let now = self.now_ms()?;
         self.db.write(|c| {
+            let before: Option<String> = c.query_row("SELECT json FROM settings WHERE project_id = ?", [project], |r| r.get(0)).optional()?;
+            let before = before.and_then(|j| serde_json::from_str::<Settings>(&j).ok()).unwrap_or_default();
             c.execute(
                 "INSERT INTO settings (project_id, json, updated_at) VALUES (?, ?, ?) ON CONFLICT (project_id) DO UPDATE SET json = excluded.json, updated_at = excluded.updated_at",
                 params![project, json, now],
             )?;
+            // A change of who may open its previews ends every signed-in visitor's session.
+            if before.access != s.access {
+                c.execute("DELETE FROM visit_sessions WHERE project_id = ?", [project])?;
+                c.execute("DELETE FROM visit_tickets WHERE project_id = ?", [project])?;
+            }
+            // Leaving link access retires every link handed out: back on `link`, its previews
+            // have new ones.
+            if before.access == crate::settings::Access::Link && s.access != crate::settings::Access::Link {
+                for id in c.query("SELECT id FROM previews WHERE project_id = ?", [project], |r| r.get::<_, String>(0))? {
+                    c.execute("UPDATE previews SET token = ? WHERE id = ?", params![new_token(), id])?;
+                }
+            }
             Ok::<_, Error>(())
         })?;
         Ok(s.clone())
@@ -753,7 +927,12 @@ impl Store {
         self.db.write(|c| {
             c.execute("DELETE FROM settings WHERE project_id = ?", [project])?;
             c.execute("DELETE FROM bypass WHERE project_id = ?", [project])?;
+            c.execute("DELETE FROM hooks WHERE project_id = ?", [project])?;
+            c.execute("DELETE FROM project_domains WHERE project_id = ?", [project])?;
+            c.execute("DELETE FROM git_skips WHERE project_id = ?", [project])?;
             c.execute("DELETE FROM budget_alerts WHERE project_id = ?", [project])?;
+            c.execute("DELETE FROM visit_sessions WHERE project_id = ?", [project])?;
+            c.execute("DELETE FROM visit_tickets WHERE project_id = ?", [project])?;
             Ok::<_, Error>(())
         })
     }
@@ -885,7 +1064,7 @@ impl Store {
     /// Remove a preview's rows (after its branches and services are gone).
     pub fn remove(&self, id: &str) -> Result<()> {
         self.db.write(|c| {
-            for t in ["resources", "services", "pinned", "shares", "activity", "screenshots", "page_shots", "visual_page_accepts", "mail", "resolved_notes", "base_history", "leases", "note_crops", "git_pulls", "previews"] {
+            for t in ["resources", "services", "pinned", "shares", "visit_tickets", "visit_sessions", "visits", "activity", "screenshots", "page_shots", "visual_page_accepts", "mail", "resolved_notes", "base_history", "leases", "note_crops", "git_pulls", "git_reports", "runtime_facts", "previews"] {
                 let col = if t == "previews" { "id" } else { "preview_id" };
                 c.execute(&format!("DELETE FROM {t} WHERE {col} = ?"), [id])?;
             }
@@ -1097,7 +1276,21 @@ impl Store {
     /// The preview's own variables (`PUT …/env`), over the project's `env`.
     pub fn vars(&self, id: &str) -> Result<std::collections::BTreeMap<String, String>> {
         let raw: Option<String> = self.db.read(|c| c.query_row("SELECT vars FROM previews WHERE id = ?", [id], |r| r.get(0)).optional())?.flatten();
-        Ok(raw.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default())
+        self.open_vars(id, raw)
+    }
+
+    /// A preview's own variables as kept: sealed (`v1:…`, bound to its id) or, from before a key
+    /// or without one, plain JSON. Sealed without this node having the key is an error, never an
+    /// empty map: its services would start without them.
+    fn open_vars(&self, id: &str, raw: Option<String>) -> Result<std::collections::BTreeMap<String, String>> {
+        let Some(raw) = raw else { return Ok(Default::default()) };
+        let json = if raw.starts_with("v1:") {
+            let sealer = self.sealer.get().ok_or_else(|| Error::Internal(format!("{id}'s variables are sealed with ROLL_SECRET_KEY, which this node doesn't have")))?;
+            sealer.open(&vars_aad(id), &raw).ok_or_else(|| Error::Internal(format!("{id}'s variables don't open with this ROLL_SECRET_KEY")))?
+        } else {
+            raw
+        };
+        Ok(serde_json::from_str(&json).unwrap_or_default())
     }
 
     /// Change the preview's own variables in one write (`f` may run again; it only edits the map).
@@ -1105,9 +1298,13 @@ impl Store {
         self.db.write(|c| {
             let raw: Option<Option<String>> = c.query_row("SELECT vars FROM previews WHERE id = ?", [id], |r| r.get(0)).optional()?;
             let Some(raw) = raw else { return Err(Error::NotFound(format!("no preview {id}"))) };
-            let mut vars: std::collections::BTreeMap<String, String> = raw.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+            let mut vars = self.open_vars(id, raw)?;
             f(&mut vars)?;
-            let raw = (!vars.is_empty()).then(|| serde_json::to_string(&vars).unwrap_or_default());
+            // Sealed whenever this node can (the plain JSON of an older write goes at this one).
+            let raw = (!vars.is_empty()).then(|| serde_json::to_string(&vars).unwrap_or_default()).map(|json| match self.sealer.get() {
+                Some(s) => s.seal(&vars_aad(id), &json),
+                None => json,
+            });
             c.execute("UPDATE previews SET vars = ? WHERE id = ?", params![raw, id])?;
             Ok(vars)
         })
@@ -1117,6 +1314,26 @@ impl Store {
     /// warning; `None`: not close).
     pub fn goes_at(&self, id: &str) -> Result<Option<i64>> {
         Ok(self.db.read(|c| c.query_row("SELECT goes_at FROM previews WHERE id = ?", [id], |r| r.get(0)).optional())?.flatten())
+    }
+
+    /// The name of the project that reports this preview's change (or pull request) when it's
+    /// another project's (roll previews' `refresh_voice`); `None`: this one reports it.
+    pub fn reported_by(&self, id: &str) -> Result<Option<String>> {
+        Ok(self.db.read(|c| c.query_row("SELECT reported_by FROM previews WHERE id = ?", [id], |r| r.get(0)).optional())?.flatten())
+    }
+
+    /// Sets [`Store::reported_by`]: whether it changed (written only then).
+    pub fn set_reported_by(&self, id: &str, by: Option<&str>) -> Result<bool> {
+        if self.reported_by(id)?.as_deref() == by {
+            return Ok(false);
+        }
+        Ok(self.db.write(|c| Ok::<_, Error>(c.execute("UPDATE previews SET reported_by = ? WHERE id = ? AND reported_by IS NOT ?", params![by, id, by])?))? > 0)
+    }
+
+    /// The active previews of `repo`'s `branch` in every project (a Git URL service's branch has
+    /// one in each project whose canvas holds the service).
+    pub fn branch_rows(&self, repo: &str, branch: Option<&str>) -> Result<Vec<Row>> {
+        Ok(self.db.read(|c| c.query(&format!("SELECT {COLUMNS} FROM previews WHERE repo = ? AND branch IS ? AND desired = 'active' ORDER BY id"), params![repo, branch], row))?)
     }
 
     pub fn set_goes_at(&self, id: &str, at: Option<i64>) -> Result<()> {
@@ -1703,6 +1920,16 @@ impl Store {
         Ok(hex::encode(&m.finalize().into_bytes()[..16]))
     }
 
+    /// The token in a preview's OpenTelemetry intake's path (`…/otlp/{token}`), derived as its SMTP
+    /// password is (nothing kept; a new signing key changes them all).
+    pub fn trace_token(&self, id: &str) -> Result<String> {
+        use hmac::Mac;
+        let mut m = hmac::Hmac::<sha2::Sha256>::new_from_slice(&self.signing_key()?).map_err(|e| Error::Internal(e.to_string()))?;
+        m.update(b"otlp:");
+        m.update(id.as_bytes());
+        Ok(hex::encode(&m.finalize().into_bytes()[..16]))
+    }
+
     /// Whether `user`/`password` are a live preview's SMTP sign-in (compared in constant time).
     pub fn mail_signs_in(&self, user: &str, password: &str) -> Result<bool> {
         let Ok(r) = self.row(user) else { return Ok(false) };
@@ -1890,10 +2117,10 @@ impl Store {
             .optional()
         })?;
         let Some((token, project, bypass, trusted)) = row else { return Ok(None) };
-        let required = self.settings(&project)?.access == crate::settings::Access::Link;
+        let mode = self.settings(&project)?.access;
         // A fork's preview never opens to the project's secret: CI that visits it would hand the
         // secret to the fork's code.
-        Ok(Some(Access { token: token.unwrap_or_default(), required, bypass: bypass.filter(|_| trusted) }))
+        Ok(Some(Access { token: token.unwrap_or_default(), mode, bypass: bypass.filter(|_| trusted) }))
     }
 
     /// A new bypass secret for `project`'s private previews (replacing any): returned once,
@@ -1918,6 +2145,79 @@ impl Store {
         })
     }
 
+    // ── deploy hooks: a secret URL that rebuilds a project's previews of some branches ──
+
+    /// A new hook for `project`'s previews of `branches` (globs): its secret, returned once and
+    /// kept only as its SHA-256 (`rlb_…`, a roll secret leak scanning finds).
+    pub fn create_hook(&self, project: &str, name: &str, branches: &[String]) -> Result<(Hook, String)> {
+        let secret = roll_auth::credentials::new_secret("rlb_");
+        let (id, hash, now) = (format!("hk_{}", crate::new_id()), bypass_hash(&secret), self.now_ms()?);
+        let globs = serde_json::to_string(branches).map_err(|e| Error::Internal(e.to_string()))?;
+        self.db.write(|c| {
+            let n: i64 = c.query_row("SELECT COUNT(*) FROM hooks WHERE project_id = ?", [project], |r| r.get(0))?;
+            if n >= MAX_HOOKS {
+                return Err(Error::Conflict(format!("the project has {MAX_HOOKS} deploy hooks: delete one first")));
+            }
+            c.execute("INSERT INTO hooks (id, project_id, name, branches, hash, created_at) VALUES (?, ?, ?, ?, ?, ?)", params![id, project, name, globs, hash, now])?;
+            Ok(())
+        })?;
+        Ok((Hook { id, project: project.to_string(), name: name.to_string(), branches: branches.to_vec(), created_at: now, fired_at: None }, secret))
+    }
+
+    /// `project`'s hooks (never their secrets).
+    pub fn hooks(&self, project: &str) -> Result<Vec<Hook>> {
+        Ok(self.db.read(|c| c.query("SELECT id, project_id, name, branches, created_at, fired_at FROM hooks WHERE project_id = ? ORDER BY created_at, id", [project], hook_row))?)
+    }
+
+    pub fn delete_hook(&self, project: &str, id: &str) -> Result<()> {
+        let n = self.db.write(|c| Ok::<_, Error>(c.execute("DELETE FROM hooks WHERE project_id = ? AND id = ?", [project, id])?))?;
+        if n == 0 {
+            return Err(Error::NotFound("no such deploy hook".into()));
+        }
+        Ok(())
+    }
+
+    /// The hook a secret is, if it's a live one.
+    pub fn hook_by_secret(&self, secret: &str) -> Result<Option<Hook>> {
+        let hash = bypass_hash(secret);
+        Ok(self.db.read(|c| c.query_row("SELECT id, project_id, name, branches, created_at, fired_at FROM hooks WHERE hash = ?", [hash.as_str()], hook_row).optional())?)
+    }
+
+    /// Records a firing at `now` unless the hook fired less than `every` ms ago: whether it
+    /// counts (a CMS that saves often makes one rebuild a minute, not one a save).
+    pub fn fire_hook(&self, id: &str, now: i64, every: i64) -> Result<bool> {
+        Ok(self.db.write(|c| Ok::<_, Error>(c.execute("UPDATE hooks SET fired_at = ?1 WHERE id = ?2 AND (fired_at IS NULL OR fired_at <= ?1 - ?3)", params![now, id, every])?))? > 0)
+    }
+
+    /// One more rebuild asked of a preview (a deploy hook): its services are built again at their
+    /// heads, with nothing cached.
+    pub fn add_rebuild(&self, id: &str) -> Result<()> {
+        self.db.write(|c| Ok::<_, Error>(c.execute("UPDATE previews SET rebuilds = rebuilds + 1, next_at = 0, generation = generation + 1 WHERE id = ?", [id])?))?;
+        Ok(())
+    }
+
+    /// How many rebuilds were asked of a preview.
+    pub fn rebuilds(&self, id: &str) -> Result<i64> {
+        Ok(self.db.read(|c| c.query_row("SELECT rebuilds FROM previews WHERE id = ?", [id], |r| r.get(0)).optional())?.unwrap_or(0))
+    }
+
+    /// A Git URL service's branch whose pull request's opener the project skips (`skip_authors`):
+    /// its pushes make no preview until the pull request closes, the branch goes or a title asks.
+    pub fn set_git_skip(&self, project: &str, repo: &str, branch: &str, on: bool) -> Result<()> {
+        self.db.write(|c| {
+            if on {
+                c.execute("INSERT INTO git_skips (project_id, repo, branch) VALUES (?, ?, ?) ON CONFLICT DO NOTHING", [project, repo, branch])?;
+            } else {
+                c.execute("DELETE FROM git_skips WHERE project_id = ? AND repo = ? AND branch = ?", [project, repo, branch])?;
+            }
+            Ok::<_, Error>(())
+        })
+    }
+
+    pub fn git_skipped(&self, project: &str, repo: &str, branch: &str) -> Result<bool> {
+        Ok(self.db.read(|c| c.query_row("SELECT 1 FROM git_skips WHERE project_id = ? AND repo = ? AND branch = ?", [project, repo, branch], |_| Ok(())).optional())?.is_some())
+    }
+
     /// When `project`'s bypass secret was made, if it has one.
     pub fn bypass_created(&self, project: &str) -> Result<Option<i64>> {
         Ok(self.db.read(|c| c.query_row("SELECT created_at FROM bypass WHERE project_id = ?", [project], |r| r.get(0)).optional())?)
@@ -1930,6 +2230,61 @@ impl Store {
 
     /// The preview and service a host label serves.
     /// The preview and service a host label is; an earlier push's host is `<service>@<revision>`.
+    /// The project's own preview domain as last read from roll apps (`(base, https)`).
+    pub fn project_domain(&self, project: &str) -> Result<Option<(String, bool)>> {
+        Ok(self.db.read(|c| c.query_row("SELECT base, https FROM project_domains WHERE project_id = ?", [project], |r| Ok((r.get(0)?, r.get::<_, i64>(1)? != 0))).optional())?)
+    }
+
+    /// Keeps `project`'s own preview domain: whether it changed. Its runtime services' URLs move
+    /// with it (`url`: a host label's URL under the domain now in force; `old_url`: under the one
+    /// before); a URL roll apps chose isn't previews' to move (apps says its own at each deploy).
+    pub fn set_project_domain(&self, project: &str, domain: Option<(&str, bool)>, url: &dyn Fn(&str) -> String, old_url: &dyn Fn(&str) -> String) -> Result<bool> {
+        if self.project_domain(project)?.as_ref().map(|(b, h)| (b.as_str(), *h)) == domain {
+            return Ok(false);
+        }
+        self.db.write(|c| {
+            match domain {
+                // roll apps verified one owner of a base: another project's row for it is stale.
+                Some((base, https)) => {
+                    c.execute("DELETE FROM project_domains WHERE base = ? AND project_id <> ?", [base, project])?;
+                    c.execute(
+                        "INSERT INTO project_domains (project_id, base, https) VALUES (?, ?, ?) ON CONFLICT (project_id) DO UPDATE SET base = excluded.base, https = excluded.https",
+                        params![project, base, https as i64],
+                    )?;
+                }
+                None => {
+                    c.execute("DELETE FROM project_domains WHERE project_id = ?", [project])?;
+                }
+            }
+            let hosts: Vec<(String, String, String, String)> = c.query(
+                "SELECT s.preview_id, s.name, s.host, s.url FROM services s JOIN previews p ON p.id = s.preview_id WHERE p.project_id = ?",
+                [project],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )?;
+            for (preview, name, host, was) in hosts {
+                if was == old_url(&host) {
+                    c.execute("UPDATE services SET url = ? WHERE preview_id = ? AND name = ?", params![url(&host), preview, name])?;
+                }
+            }
+            Ok::<_, Error>(())
+        })?;
+        Ok(true)
+    }
+
+    /// Every project's own preview domain's base.
+    pub fn domain_bases(&self) -> Result<Vec<String>> {
+        Ok(self.db.read(|c| c.query("SELECT base FROM project_domains", (), |r| r.get(0)))?)
+    }
+
+    /// The preview and service `<label>.<base>` names under a project's own preview domain: only
+    /// a preview of the project that holds the domain.
+    pub fn service_for_domain_host(&self, label: &str, base: &str) -> Result<Option<(String, String)>> {
+        let Some(project) = self.db.read(|c| c.query_row("SELECT project_id FROM project_domains WHERE base = ?", [base], |r| r.get::<_, String>(0)).optional())? else { return Ok(None) };
+        let Some((preview, service)) = self.service_for_host(label)? else { return Ok(None) };
+        let theirs = self.db.read(|c| c.query_row("SELECT project_id FROM previews WHERE id = ?", [preview.as_str()], |r| r.get::<_, String>(0)).optional())?;
+        Ok((theirs.as_deref() == Some(project.as_str())).then_some((preview, service)))
+    }
+
     pub fn service_for_host(&self, host: &str) -> Result<Option<(String, String)>> {
         Ok(self.db.read(|c| {
             if let Some(found) = c.query_row("SELECT preview_id, name FROM services WHERE host = ?", [host], |r| Ok((r.get(0)?, r.get(1)?))).optional()? {
@@ -2057,6 +2412,61 @@ impl Store {
         })
     }
 
+    /// What was last posted on a Git URL service's repository for a preview: the status (its sha,
+    /// state and description, as one string), the pull request comment's id and its body's hash.
+    /// What its holder last read of a preview's running code against main's preview (`kind`:
+    /// `slower_routes`), kept so any node shows it.
+    pub fn runtime_fact<T: serde::de::DeserializeOwned>(&self, id: &str, kind: &str) -> Result<Option<T>> {
+        let json: Option<String> = self.db.read(|c| c.query_row("SELECT json FROM runtime_facts WHERE preview_id = ? AND kind = ?", [id, kind], |r| r.get(0)).optional())?;
+        Ok(json.and_then(|j| serde_json::from_str(&j).ok()))
+    }
+
+    /// Keep what its holder read (`None`: nothing to say); whether that changed what was kept.
+    pub fn set_runtime_fact<T: serde::Serialize>(&self, id: &str, kind: &str, fact: Option<&T>) -> Result<bool> {
+        let json = fact.map(serde_json::to_string).transpose().map_err(|e| Error::Internal(e.to_string()))?;
+        self.db.write(|c| {
+            let was: Option<String> = c.query_row("SELECT json FROM runtime_facts WHERE preview_id = ? AND kind = ?", [id, kind], |r| r.get(0)).optional()?;
+            if was == json {
+                return Ok::<_, Error>(false);
+            }
+            match &json {
+                Some(j) => c.execute("INSERT INTO runtime_facts (preview_id, kind, json) VALUES (?1, ?2, ?3) ON CONFLICT (preview_id, kind) DO UPDATE SET json = excluded.json", params![id, kind, j])?,
+                None => c.execute("DELETE FROM runtime_facts WHERE preview_id = ? AND kind = ?", [id, kind])?,
+            };
+            Ok(true)
+        })
+    }
+
+    pub fn git_report(&self, id: &str) -> Result<(Option<String>, Option<i64>, Option<String>)> {
+        Ok(self.db.read(|c| c.query_row("SELECT status, comment_id, comment_hash FROM git_reports WHERE preview_id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional())?.unwrap_or((None, None, None)))
+    }
+
+    pub fn set_git_report(&self, id: &str, status: Option<&str>, comment: Option<(i64, &str)>) -> Result<()> {
+        self.db.write(|c| {
+            c.execute("INSERT INTO git_reports (preview_id) VALUES (?1) ON CONFLICT (preview_id) DO NOTHING", [id])?;
+            if let Some(s) = status {
+                c.execute("UPDATE git_reports SET status = ?2 WHERE preview_id = ?1", params![id, s])?;
+            }
+            if let Some((cid, hash)) = comment {
+                c.execute("UPDATE git_reports SET comment_id = ?2, comment_hash = ?3 WHERE preview_id = ?1", params![id, cid, hash])?;
+            }
+            Ok::<_, Error>(())
+        })
+    }
+
+    /// The comment a Git URL service's previews keep on pull request `number` of `repo`, whichever
+    /// project's preview posted it: the next project to speak for the service edits the same one.
+    pub fn pull_comment(&self, service: &str, repo: &str, number: i64) -> Result<Option<i64>> {
+        Ok(self.db.read(|c| c.query_row("SELECT comment_id FROM pull_comments WHERE service = ? AND repo = ? AND number = ?", params![service, repo, number], |r| r.get(0)).optional())?)
+    }
+
+    pub fn set_pull_comment(&self, service: &str, repo: &str, number: i64, comment_id: i64) -> Result<()> {
+        self.db.write(|c| {
+            c.execute("INSERT INTO pull_comments (service, repo, number, comment_id) VALUES (?1, ?2, ?3, ?4) ON CONFLICT (service, repo, number) DO UPDATE SET comment_id = excluded.comment_id", params![service, repo, number, comment_id])?;
+            Ok::<_, Error>(())
+        })
+    }
+
     // ── leases: the dynamic credentials a service started with (roll secrets'; ids only) ──
 
     /// Lease ids a start of `service` was given, each thought to end `expires_at` (ms) until a
@@ -2137,6 +2547,118 @@ impl Store {
         })?)
     }
 
+    // ── signed-in visitors (`access: team`, `visit.rs`) ──
+
+    /// A one-use ticket for `user` (`handle`, signed in as roll session `roll_session`) into
+    /// preview `id`, kept by its SHA-256. `false`, and nothing kept, unless the project has team
+    /// access: read in the same write, so a change of access (which deletes tickets) can't miss it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn put_visit_ticket(&self, hash: &str, id: &str, project: &str, user: &str, handle: &str, roll_session: &str, expires_at: i64) -> Result<bool> {
+        self.db.write(|c| {
+            if !team_access(c, project)? {
+                return Ok(false);
+            }
+            c.execute(
+                "INSERT INTO visit_tickets (hash, preview_id, project_id, user_id, handle, roll_session, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                params![hash, id, project, user, handle, roll_session, expires_at],
+            )?;
+            Ok::<_, Error>(true)
+        })
+    }
+
+    /// A ticket used: it goes either way (and every expired one with it), and if it was this
+    /// preview's, still good, and its project still has team access, a session (`session`, by
+    /// its SHA-256, until `expires_at`) takes its place in the same write. The session's
+    /// person, roll session and project. Who it is goes in the preview's activity (once per
+    /// session: a session is opened once) and its visitors ([`Store::visitors`]).
+    pub fn open_visit_session(&self, ticket: &str, session: &str, id: &str, expires_at: i64, now: i64) -> Result<Option<VisitSession>> {
+        self.db.write(|c| {
+            let row: Option<(String, String, String, String, i64, String)> = c
+                .query_row("SELECT preview_id, project_id, user_id, roll_session, expires_at, handle FROM visit_tickets WHERE hash = ?", [ticket], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+                })
+                .optional()?;
+            c.execute("DELETE FROM visit_tickets WHERE hash = ? OR expires_at < ?", params![ticket, now])?;
+            let Some((_, project, user, roll_session, _, handle)) = row.filter(|(p, _, _, _, exp, _)| p == id && *exp >= now) else { return Ok(None) };
+            if !team_access(c, &project)? {
+                return Ok(None);
+            }
+            c.execute("DELETE FROM visit_sessions WHERE expires_at < ?", [now])?;
+            c.execute(
+                "INSERT INTO visit_sessions (hash, preview_id, project_id, user_id, roll_session, expires_at, checked_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                params![session, id, project, user, roll_session, expires_at, now],
+            )?;
+            // A ticket from a node that predates handles has none: the handle kept stays.
+            let who = if handle.is_empty() { user.as_str() } else { handle.as_str() };
+            let last: Option<i64> = c.query_row("SELECT last_at FROM visits WHERE preview_id = ? AND user_id = ?", [id, user.as_str()], |r| r.get(0)).optional()?;
+            c.execute(
+                "INSERT INTO visits (preview_id, user_id, handle, first_at, last_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (preview_id, user_id) DO UPDATE SET handle = CASE WHEN ? = '' THEN visits.handle ELSE excluded.handle END, last_at = excluded.last_at",
+                params![id, user, who, now, now, handle],
+            )?;
+            // In the activity once a day per person: a new device or an ended session isn't news,
+            // and the log keeps the last ACTIVITY_KEEP lines.
+            if last.is_none_or(|t| now - t >= 86_400_000) {
+                append(c, id, now, &format!("{who} opened it (signed in to roll)"))?;
+            }
+            Ok::<_, Error>(Some(VisitSession { user, roll_session, project, expires_at, checked_at: now }))
+        })
+    }
+
+    /// A session in preview `id`: its person, project, when it ends and when its person was last
+    /// asked about.
+    pub fn visit_session(&self, hash: &str, id: &str) -> Result<Option<VisitSession>> {
+        Ok(self.db.read(|c| {
+            c.query_row("SELECT user_id, roll_session, project_id, expires_at, checked_at FROM visit_sessions WHERE hash = ? AND preview_id = ?", [hash, id], |r| {
+                Ok(VisitSession { user: r.get(0)?, roll_session: r.get(1)?, project: r.get(2)?, expires_at: r.get(3)?, checked_at: r.get(4)? })
+            })
+            .optional()
+        })?)
+    }
+
+    /// Its person (`user`, in preview `id`) may still open the project, as of `now`: also when
+    /// they were last in it ([`Store::visitors`]), so that's as fresh as the recheck.
+    pub fn visit_checked(&self, hash: &str, id: &str, user: &str, now: i64) -> Result<()> {
+        self.db.write(|c| {
+            c.execute("UPDATE visit_sessions SET checked_at = ? WHERE hash = ?", params![now, hash])?;
+            c.execute("UPDATE visits SET last_at = ? WHERE preview_id = ? AND user_id = ? AND last_at < ?", params![now, id, user, now])?;
+            Ok::<_, Error>(())
+        })
+    }
+
+    /// Who signed in to preview `id` (`access: team`), the last [`VISITORS`] by when they were
+    /// last in it (as of a session's recheck), latest first.
+    pub fn visitors(&self, id: &str) -> Result<Vec<crate::Visitor>> {
+        Ok(self.db.read(|c| {
+            c.query(&format!("SELECT handle, last_at FROM visits WHERE preview_id = ? ORDER BY last_at DESC, handle LIMIT {VISITORS}"), [id], |r| Ok(crate::Visitor { who: r.get(0)?, last_at: r.get(1)? }))
+        })?)
+    }
+
+    /// Share link `token` of preview `id` was followed on `day` (days since 1970): a line in the
+    /// preview's activity, once per link per day. Whether this was the day's first.
+    /// A read first: a client that keeps no cookie follows the link on every request, and only the
+    /// day's first is a write.
+    pub fn share_opened(&self, id: &str, token: &str, day: i64, now: i64) -> Result<bool> {
+        let hash = bypass_hash(token);
+        let seen: Option<Option<i64>> = self.db.read(|c| c.query_row("SELECT opened_day FROM shares WHERE preview_id = ? AND hash = ?", params![id, hash], |r| r.get(0)).optional())?;
+        if seen.flatten().is_some_and(|d| d >= day) {
+            return Ok(false);
+        }
+        self.db.write(|c| {
+            let first = c.execute("UPDATE shares SET opened_day = ? WHERE preview_id = ? AND hash = ? AND (opened_day IS NULL OR opened_day < ?)", params![day, id, bypass_hash(token), day])? > 0;
+            if first {
+                append(c, id, now, "a share link opened it")?;
+            }
+            Ok::<_, Error>(first)
+        })
+    }
+
+    pub fn end_visit_session(&self, hash: &str) -> Result<()> {
+        self.db.write(|c| {
+            c.execute("DELETE FROM visit_sessions WHERE hash = ?", [hash])?;
+            Ok::<_, Error>(())
+        })
+    }
+
     /// The earlier pushes a preview keeps reachable, newest first.
     pub fn pinned(&self, id: &str) -> Result<Vec<crate::Pinned>> {
         Ok(self.db.read(|c| {
@@ -2186,11 +2708,9 @@ impl Store {
         let resources = self.resources(&r.id)?;
         let services = self.services_with_time(&r.id)?;
         let cost = self.cost_of(&r, &resources, &services)?;
-        // With link access, the links roll hands out carry the token (once; then a cookie).
-        let token = match self.access(&r.id)? {
-            Some(Access { token: t, required: true, .. }) if !t.is_empty() => Some(t),
-            _ => None,
-        };
+        // With link access, the links roll hands out carry the token (once; then a cookie). With
+        // team access they're plain: people sign in instead.
+        let token = self.access(&r.id)?.and_then(|a| a.link_token().map(str::to_string));
         let share = |u: &str| match &token {
             Some(t) => format!("{}/?roll_access={t}", u.trim_end_matches('/')),
             None => u.to_string(),
@@ -2199,8 +2719,15 @@ impl Store {
         let share_url = url.as_deref().map(share);
         let (schema_changes, schema_risks, release) = self.release_facts(&r.id)?;
         let kept_until = self.kept_until(&r.id)?;
-        let pull = self.git_pull(&r.id)?;
+        // Its page as a link only when it's `https://` (it's kept whole to tell its repository).
+        let pull = self.git_pull(&r.id)?.map(|mut g| {
+            if !g.url.starts_with("https://") {
+                g.url.clear();
+            }
+            g
+        });
         let goes_at = self.goes_at(&r.id)?;
+        let reported_by = self.reported_by(&r.id)?;
         // The screenshot row in one read, without its images.
         let f = self.shot_facts(&r.id)?;
         let screenshot_at = f.at;
@@ -2235,6 +2762,8 @@ impl Store {
         let first_unstable = page_health.as_ref().is_some_and(|h| h.unstable);
         let visual_review = self.visual_review(&r, settings.visual_review, settings.github.visual_threshold, base_change.as_ref(), &pages, first_unstable, f.head)?;
         let page_speed = f.speed.map(|now| crate::PageSpeedView { now, before: f.prev_speed });
+        let new_errors = self.runtime_fact(&r.id, "new_errors")?;
+        let slower_routes = if settings.traces { self.runtime_fact(&r.id, "slower_routes")? } else { None };
         let screenshot_link = screenshot_at.map(|at| self.link_at(&r.id, at, None)).transpose()?;
         let diff_link = match screenshot_at.filter(|_| base_differs) {
             Some(at) => Some(self.link_at(&r.id, at, Some("diff=base"))?),
@@ -2285,6 +2814,7 @@ impl Store {
             kept_until,
             pull,
             goes_at,
+            reported_by,
             earlier,
             screenshot_at,
             visual_change,
@@ -2293,6 +2823,8 @@ impl Store {
             pages,
             visual_review,
             page_links,
+            slower_routes,
+            new_errors,
             page_speed,
             page_health,
             page_a11y,
@@ -2310,8 +2842,14 @@ impl Store {
     }
 }
 
+/// Whether `project`'s previews let people in by signing in (`access: team`), inside a write.
+fn team_access(c: &code_sql::Conn<'_>, project: &str) -> Result<bool> {
+    let json: Option<String> = c.query_row("SELECT json FROM settings WHERE project_id = ?", [project], |r| r.get(0)).optional()?;
+    Ok(json.and_then(|j| serde_json::from_str::<Settings>(&j).ok()).is_some_and(|s| s.access == crate::settings::Access::Team))
+}
+
 /// A preview's access token: 24 random characters of lowercase base32 (120 bits).
-fn new_token() -> String {
+pub(crate) fn new_token() -> String {
     const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
     let mut b = [0u8; 24];
     getrandom::fill(&mut b).expect("system randomness");
@@ -2483,6 +3021,45 @@ mod tests {
     }
 
     use super::*;
+
+    /// A preview's own variables are sealed at rest when the node has a key, bound to the
+    /// preview: the column holds no value, another preview's copy doesn't open, and plain ones
+    /// from before still read (sealed at their next write).
+    #[test]
+    fn a_previews_own_variables_are_sealed_at_rest_to_it() {
+        struct Rot;
+        impl crate::ports::Sealer for Rot {
+            fn seal(&self, aad: &str, plain: &str) -> String {
+                format!("v1:{aad}|{}", plain.chars().rev().collect::<String>())
+            }
+            fn open(&self, aad: &str, sealed: &str) -> Option<String> {
+                sealed.strip_prefix(&format!("v1:{aad}|")).map(|s| s.chars().rev().collect())
+            }
+        }
+        let (_dir, store) = store();
+        let (a, _) = store.create(&new("chg_va")).unwrap();
+        let (b, _) = store.create(&new("chg_vb")).unwrap();
+        let raw = |id: &str| store.db.read(|c| c.query_row("SELECT vars FROM previews WHERE id = ?", [id], |r| r.get::<_, Option<String>>(0))).unwrap().unwrap_or_default();
+        store.update_vars(&a.id, |v| {
+            v.insert("STRIPE_KEY".into(), "sk_test_51Hx9".into());
+            Ok(())
+        })
+        .unwrap();
+        assert!(raw(&a.id).contains("sk_test_51Hx9"), "no key: kept as written");
+        let _ = store.sealer.set(std::sync::Arc::new(Rot));
+        assert_eq!(store.vars(&a.id).unwrap()["STRIPE_KEY"], "sk_test_51Hx9", "a plain one from before still reads");
+        store.update_vars(&a.id, |v| {
+            v.insert("MODE".into(), "test".into());
+            Ok(())
+        })
+        .unwrap();
+        assert!(raw(&a.id).starts_with("v1:") && !raw(&a.id).contains("sk_test_51Hx9"), "sealed at its next write");
+        assert_eq!(store.vars(&a.id).unwrap().len(), 2);
+        // Copied onto another preview's row, it doesn't open there.
+        let sealed = raw(&a.id);
+        store.db.write(|c| c.execute("UPDATE previews SET vars = ? WHERE id = ?", params![sealed, b.id]).map(drop)).unwrap();
+        assert!(store.vars(&b.id).is_err());
+    }
 
     fn store() -> (tempfile::TempDir, Store) {
         let dir = tempfile::tempdir().unwrap();

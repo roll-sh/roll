@@ -164,6 +164,7 @@ pub(crate) fn target(access: &Access, row: &Row, params: &[(String, String)], qu
             }
             r.index = row.index.and_then(param);
             r.filters_itself = row.filters_itself;
+            r.filters_index = row.filters_index;
             if let Some(name) = row.path_query {
                 let path = query.and_then(|qs| url::form_urlencoded::parse(qs.as_bytes()).find(|(k, _)| k == name).map(|(_, v)| v.into_owned()));
                 r.path = Some(path.filter(|p| !p.is_empty()).unwrap_or_else(|| "/".into()));
@@ -295,6 +296,16 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
         blocking(move || a.store.by_secret(&t)).await
     };
     let grant = match lookup {
+        // A decoy (docs/permissions.md, "Decoy tokens"): nobody should ever use it, so whoever did
+        // found it where it was planted. It answers as an unknown token does (they learn nothing),
+        // and its owner and the admins are told. Before the idle rule: a decoy is never used.
+        Ok(Some(g)) if g.decoy => {
+            let ip = client_ip(&req, &access.config);
+            let route = req.extensions().get::<MatchedPath>().map_or_else(|| "unmatched".to_string(), |m| m.as_str().to_string());
+            let ua = req.headers().get(header::USER_AGENT).and_then(|v| v.to_str().ok()).map(|s| s.chars().filter(|c| !c.is_control()).take(120).collect::<String>());
+            access.decoy_tripped(&g, ip.map(|i| i.to_string()), &route, ua);
+            return invalid_token(&access);
+        }
         // Unused longer than the operator's policy allows: it stops (making it again is a person's
         // choice, not an agent's).
         Ok(Some(g)) if access.policy_now().idle(&g, code_sql::now_ms()) => return invalid_token(&access),
@@ -386,7 +397,12 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
         Some(user) => {
             let Some(people) = access.people.get().cloned() else { return invalid_token(&access) };
             match people.person(&user).await {
-                Ok(Some(p)) => Some(p),
+                Ok(Some(p)) => {
+                    // Their token's use counts as their activity (dormant people), off the request.
+                    let (people, user) = (people.clone(), user.clone());
+                    drop(tokio::task::spawn_blocking(move || people.used(&user)));
+                    Some(p)
+                }
                 Ok(None) => return invalid_token(&access),
                 Err(e) => {
                     tracing::warn!(error = %e, "looking up a token's user");
@@ -482,7 +498,7 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     // What the request needs: one action, or every action a push's ref updates take.
     let mut needs = vec![match row.act {
         catalog::Act::Raw(f) => f(buffered.as_deref().unwrap_or_default()),
-        _ => row.action(&ctx.method, &params, json_body.as_ref()),
+        _ => row.action_with(&ctx.method, &params, json_body.as_ref(), &parts.headers),
     }];
     // A git push: its ref updates come first; the pack after them streams on untouched.
     let mut git_commands: Option<bytes::Bytes> = None;
@@ -607,10 +623,12 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
             }
             let bytes = buffered.clone().unwrap_or_default();
             // Bound to everything that decides what the request does: the method, path and body,
-            // what it's about, and the headers that change it (account, project, reviewer).
+            // what it's about, and the headers that change it (account, project, reviewer, and the
+            // row's own, `X-Roll-Override`: an approval of a deploy is never one past a freeze).
             let bound: Vec<String> = ["x-roll-account", "x-roll-project", "x-roll-user", "x-roll-agent"]
-                .iter()
-                .map(|h| format!("{h}={}", parts.headers.get(*h).and_then(|v| v.to_str().ok()).unwrap_or("")))
+                .into_iter()
+                .chain(row.admin_if)
+                .map(|h| format!("{h}={}", parts.headers.get(h).and_then(|v| v.to_str().ok()).unwrap_or("")))
                 .collect();
             let request_hash = hash(&format!(
                 "{}\n{}\n{}\n{:?}\n{}",

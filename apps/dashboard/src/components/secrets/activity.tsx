@@ -6,10 +6,13 @@ import { ActorMark, ApprovalMark, ago, button, Chip, ErrorNote, errorText, sized
 
 type Kind = "all" | "changes" | "reads" | "requests" | "syncs" | "alerts";
 
+/** Read alerts (`secrets.alert`) and a decoy's use (`secrets.alert.decoy_used`, admins only). */
+const isAlert = (action: string) => action === "secrets.alert" || action.startsWith("secrets.alert.");
+
 const KIND_OF = (action: string): Exclude<Kind, "all"> | "other" =>
-  action === "secrets.alert"
+  isAlert(action)
     ? "alerts"
-    : action.startsWith("secrets.reveal") || action === "secrets.export" || action === "secrets.resolve" || action === "request.reveal" || action.startsWith("share.")
+    : action.startsWith("secrets.reveal") || action === "secrets.export" || action === "secrets.resolve" || action === "secrets.totp" || action === "request.reveal" || action.startsWith("share.")
     ? "reads"
     : action.startsWith("request.")
       ? "requests"
@@ -76,7 +79,7 @@ export function Activity({ env }: { env: Environment }) {
             <li key={r.id}>
               {head && <p className="mt-3 mb-1 text-[11px] font-medium text-subtle first:mt-0">{d}</p>}
               <div className="flex flex-wrap items-baseline gap-x-2 rounded-md px-1.5 py-1 text-[12.5px] hover:bg-fg/[0.03]">
-                <Icon className={`size-3.5 shrink-0 translate-y-0.5 ${r.action === "secrets.alert" ? "text-danger" : "text-muted"}`} />
+                <Icon className={`size-3.5 shrink-0 translate-y-0.5 ${isAlert(r.action) ? "text-danger" : "text-muted"}`} />
                 <span className="text-soft">{r.summary}</span>
                 {r.keys.slice(0, 6).map((k) => (
                   <button key={k} className="font-mono text-[11px] text-muted transition-colors hover:text-accent hover:underline" onClick={() => go({ env: env.slug, path: r.path && r.path !== "/" ? r.path : undefined, key: k })}>

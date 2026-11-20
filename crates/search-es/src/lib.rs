@@ -14,13 +14,17 @@
 //! See `docs/search/architecture.md` and `docs/search/contracts.md`.
 
 pub mod analysis;
+pub mod analytics;
 pub mod api;
+pub mod azure;
+pub mod blob;
 pub mod breaker;
 pub mod cluster;
 pub mod document;
 pub mod engine;
 pub mod error;
 pub mod failure_store;
+pub mod gcs;
 pub mod fetch;
 pub mod ingest;
 pub mod join;
@@ -29,6 +33,7 @@ pub mod mapping;
 pub mod meta;
 pub mod opensearch;
 pub mod query;
+pub mod query_suggestions;
 pub mod remote;
 pub mod rest;
 pub mod routes;
@@ -36,11 +41,10 @@ pub mod s3;
 pub mod scripting;
 pub mod search;
 pub mod seal;
+pub mod slowlog;
 pub mod search_source;
 pub mod stack;
 pub mod tasks;
-#[cfg(test)]
-pub(crate) mod test_support;
 pub mod thread_pool;
 pub mod time;
 pub mod tsds;

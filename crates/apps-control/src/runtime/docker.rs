@@ -63,6 +63,8 @@ struct Known {
     /// Instance → the connections its network had accepted when it went to sleep, or when it
     /// was last asked about callers ([`super::Runtime::take_callers`]).
     marks: HashMap<String, u64>,
+    /// Instance → its sidecars' containers ([`InstanceSpec::sidecars`]), by name.
+    sidecars: HashMap<String, Vec<String>>,
 }
 
 /// Where to read who's at an instance's port: its sandbox's process (`/proc/<pid>/net`), the
@@ -148,6 +150,13 @@ impl Docker {
             Some(_) if !spec.closed => Some(free_port()?),
             _ => None,
         };
+        // Other ports a domain sends to: published on loopback as the main one is.
+        let mut extra = Vec::new();
+        if host_port.is_some() {
+            for p in spec.ports.iter().filter(|p| Some(**p) != spec.port) {
+                extra.push((*p, free_port()?));
+            }
+        }
         let host_gateway = match (&spec.network, spec.closed) {
             (Some(net), true) => gateway(net).await,
             _ => Some("host-gateway".to_string()),
@@ -165,7 +174,7 @@ impl Docker {
                 };
                 let ing = ingress.as_ref().map(|(d, u, g)| (d.as_path(), *u, *g));
                 let made = async {
-                    let config = sandbox_config(spec, host_port, host_gateway.as_deref(), ing);
+                    let config = sandbox_config(spec, host_port, &extra, host_gateway.as_deref(), ing);
                     match engine.create(&sandbox, &config).await {
                         // The relay's image isn't here yet: pulled once.
                         Err(e) if ing.is_some() && e.to_string().contains("No such image") => {
@@ -180,7 +189,7 @@ impl Docker {
                 }
                 .await;
                 match made {
-                    Ok(()) => match engine.create(&spec.name, &joined(engine_config(spec, None, None)?, &sandbox)).await {
+                    Ok(()) => match engine.create(&spec.name, &joined(engine_config(spec, None, &[], None)?, &sandbox)).await {
                         Ok(id) => {
                             self.known.lock().containers.insert(spec.name.clone(), (id, host_port, Some(nanos(spec.cpu))));
                             // Without a waker a stopped instance only wakes through rolld.
@@ -209,7 +218,7 @@ impl Docker {
                     }
                 }
             }
-            match engine.create(&spec.name, &engine_config(spec, host_port, host_gateway.as_deref())?).await {
+            match engine.create(&spec.name, &engine_config(spec, host_port, &extra, host_gateway.as_deref())?).await {
                 Ok(id) => {
                     self.known.lock().containers.insert(spec.name.clone(), (id, host_port, Some(nanos(spec.cpu))));
                     return Ok(());
@@ -260,7 +269,10 @@ impl Docker {
             args.extend(["--cap-drop".into(), c.into()]);
         }
         if let (Some(p), Some(hp)) = (spec.port, host_port) {
-            args.extend(["--publish".into(), format!("127.0.0.1:{hp}:{p}")]);
+            args.extend(["--publish".into(), format!("127.0.0.1:{hp}:{p}"), "--label".into(), format!("{LABEL}.port={p}")]);
+            for (cp, hp) in &extra {
+                args.extend(["--publish".into(), format!("127.0.0.1:{hp}:{cp}")]);
+            }
         }
         if let Some(net) = &spec.network {
             args.extend(["--network".into(), net.clone()]);
@@ -525,6 +537,61 @@ impl Docker {
         }
     }
 
+    /// An instance's sidecars' containers, as created or adopted here.
+    fn sidecars_of(&self, instance: &str) -> Vec<String> {
+        self.known.lock().sidecars.get(instance).cloned().unwrap_or_default()
+    }
+
+    /// Its sidecars, in its network namespace: its sandbox's when it has one (always up), else
+    /// its own. Made with it, never started yet.
+    async fn create_sidecars(&self, spec: &InstanceSpec) -> anyhow::Result<()> {
+        let Some(engine) = &self.engine else { return Ok(()) };
+        if spec.sidecars.is_empty() {
+            return Ok(());
+        }
+        let holder = match engine.inspect(&sandbox_name(&spec.name)).await {
+            Ok(_) => sandbox_name(&spec.name),
+            Err(_) => spec.name.clone(),
+        };
+        let mut made = Vec::new();
+        for sc in &spec.sidecars {
+            let name = super::sidecar_name(&spec.name, &sc.name);
+            let config = sidecar_config(spec, sc, &holder)?;
+            let r = match engine.create(&name, &config).await {
+                // Pulled when the deployment was made; a host that's lost it since pulls it again.
+                Err(e) if e.to_string().contains("No such image") => {
+                    docker_within(&["pull", "-q", &sc.image], Some(Duration::from_secs(300))).await?;
+                    engine.create(&name, &config).await
+                }
+                r => r,
+            };
+            r.with_context(|| format!("sidecar {}", sc.name))?;
+            made.push(name);
+        }
+        self.known.lock().sidecars.insert(spec.name.clone(), made);
+        Ok(())
+    }
+
+    /// After the app started: each sidecar again, so it joins the namespace as it is now (one
+    /// whose holder restarted keeps a dead one), its output in the instance's log under its own name.
+    async fn start_sidecars(&self, engine: &Engine, instance: &str, since: chrono::DateTime<chrono::Utc>, log: &LogSink) -> anyhow::Result<()> {
+        for sc in self.sidecars_of(instance) {
+            let _ = engine.kill(&sc).await;
+            engine.start(&sc).await.with_context(|| format!("starting {sc}"))?;
+            let l = log.renamed(&sc);
+            self.follow_logs(&sc, since, l.stream(Stream::Stdout), l.stream(Stream::Stderr));
+        }
+        Ok(())
+    }
+
+    async fn cgroup_usage(id: &str) -> Option<Usage> {
+        let dir = Self::cgroup_dir(id)?;
+        let stat = tokio::fs::read_to_string(dir.join("cpu.stat")).await.ok()?;
+        let usec: u64 = stat.lines().find_map(|l| l.strip_prefix("usage_usec ")).and_then(|v| v.trim().parse().ok())?;
+        let mem: u64 = tokio::fs::read_to_string(dir.join("memory.current")).await.ok()?.trim().parse().ok()?;
+        Some(Usage { cpu_ns: usec * 1000, memory_bytes: mem })
+    }
+
     fn cgroup_dir(id: &str) -> Option<PathBuf> {
         [format!("/sys/fs/cgroup/system.slice/docker-{id}.scope"), format!("/sys/fs/cgroup/docker/{id}")]
             .into_iter()
@@ -647,7 +714,14 @@ impl Runtime for Docker {
     }
 
     async fn create(&self, spec: &InstanceSpec) -> anyhow::Result<()> {
+        if !spec.sidecars.is_empty() && self.engine.is_none() {
+            bail!("sidecars need Docker on a local socket");
+        }
         self.create_container(spec).await?;
+        if let Err(e) = self.create_sidecars(spec).await {
+            self.remove(&spec.name).await;
+            return Err(e);
+        }
         // Its variables kept as files, in before it ever starts (a tar from the root, so their
         // folders are made too). Readable by the app's user, whoever it runs as.
         if !spec.files.is_empty() {
@@ -668,6 +742,20 @@ impl Runtime for Docker {
         }
         Ok(())
     }
+    async fn port_address(&self, name: &str, port: u16) -> Option<SocketAddr> {
+        // Published on the sandbox when it has one, else on the instance.
+        for c in [sandbox_name(name), name.to_string()] {
+            let hp = match &self.engine {
+                Some(e) => e.inspect(&c).await.ok().and_then(|i| i.published.get(&port).copied()),
+                None => docker(&["port", &c, &format!("{port}/tcp")]).await.ok().and_then(|o| o.lines().next()?.rsplit_once(':')?.1.trim().parse().ok()),
+            };
+            if let Some(hp) = hp {
+                return Some(SocketAddr::from(([127, 0, 0, 1], hp)));
+            }
+        }
+        None
+    }
+
     async fn start(&self, name: &str, log: LogSink) -> anyhow::Result<Option<SocketAddr>> {
         let now = chrono::Utc::now();
         let (o, e) = (log.stream(Stream::Stdout), log.stream(Stream::Stderr));
@@ -676,6 +764,7 @@ impl Runtime for Docker {
             // Running: its own connections aren't callers; the next sleep marks it again.
             self.known.lock().marks.remove(name);
             engine.start(name).await?;
+            self.start_sidecars(engine, name, now, &log).await?;
         } else {
             docker(&["start", name]).await?;
         }
@@ -695,7 +784,17 @@ impl Runtime for Docker {
         }
         let (_, port) = self.id_and_port(&spec.name).await.ok()?;
         let addr = self.address(&spec.name, port).await.ok()?;
-        self.follow_logs(&spec.name, chrono::Utc::now(), log.stream(Stream::Stdout), log.stream(Stream::Stderr));
+        let now = chrono::Utc::now();
+        self.follow_logs(&spec.name, now, log.stream(Stream::Stdout), log.stream(Stream::Stderr));
+        // Its sidecars, as an earlier process made them.
+        let sidecars: Vec<String> = spec.sidecars.iter().map(|s| super::sidecar_name(&spec.name, &s.name)).collect();
+        for sc in &sidecars {
+            let l = log.renamed(sc);
+            self.follow_logs(sc, now, l.stream(Stream::Stdout), l.stream(Stream::Stderr));
+        }
+        if !sidecars.is_empty() {
+            self.known.lock().sidecars.insert(spec.name.clone(), sidecars);
+        }
         Some(super::Adopted { addr, paused })
     }
 
@@ -715,13 +814,25 @@ impl Runtime for Docker {
         if let Some(n) = self.sandbox(name).await.and_then(|sb| sb.accepted()) {
             self.known.lock().marks.insert(name.to_string(), n);
         }
-        match &self.engine {
+        let paused = match &self.engine {
             Some(e) => e.pause(name).await,
             None => docker(&["pause", name]).await.map(|_| ()),
+        };
+        // Frozen with it: a sidecar meters nothing while the app doesn't run.
+        if let (Ok(()), Some(e)) = (&paused, &self.engine) {
+            for sc in self.sidecars_of(name) {
+                let _ = e.pause(&sc).await;
+            }
         }
+        paused
     }
 
     async fn resume(&self, name: &str) -> anyhow::Result<()> {
+        if let Some(e) = &self.engine {
+            for sc in self.sidecars_of(name) {
+                let _ = e.unpause(&sc).await;
+            }
+        }
         match &self.engine {
             Some(e) => e.unpause(name).await,
             None => docker(&["unpause", name]).await.map(|_| ()),
@@ -737,6 +848,10 @@ impl Runtime for Docker {
             None => docker_within(&["stop", "-t", &secs.to_string(), name], Some(Duration::from_secs(secs + 60))).await.map(|_| ()),
         };
         if let (Ok(()), Some(engine)) = (&stopped, &self.engine) {
+            // Its sidecars after it (a proxy outlives the app's last requests), then the waker.
+            for sc in self.sidecars_of(name) {
+                let _ = engine.stop(&sc, secs).await;
+            }
             self.arm_waker(engine, name).await;
         }
         // The next start gets the boost again (set now, off the wake's path).
@@ -751,6 +866,15 @@ impl Runtime for Docker {
     }
 
     async fn remove(&self, name: &str) {
+        // Its sidecars, known or not (an earlier process's): by the label naming their instance.
+        let filter = format!("label={LABEL}.of={name}");
+        let mut sidecars: Vec<String> = docker(&["ps", "-aq", "--filter", &filter]).await.map(|s| s.lines().map(str::to_string).collect()).unwrap_or_default();
+        sidecars.extend(self.sidecars_of(name));
+        if !sidecars.is_empty() {
+            let mut args = vec!["rm", "-f", "-v"];
+            args.extend(sidecars.iter().map(String::as_str));
+            let _ = docker(&args).await;
+        }
         let _ = docker(&["rm", "-f", "-v", name, &waker_name(name), &sandbox_name(name)]).await;
         if let Some(i) = &self.ingress {
             i.forget(&sandbox_name(name));
@@ -760,6 +884,7 @@ impl Runtime for Docker {
         k.sandboxes.remove(name);
         k.wakers.remove(name);
         k.marks.remove(name);
+        k.sidecars.remove(name);
     }
 
     async fn network_container(&self, name: &str) -> Option<String> {
@@ -823,11 +948,17 @@ impl Runtime for Docker {
 
     async fn usage(&self, name: &str) -> Option<Usage> {
         let (id, _) = self.id_and_port(name).await.ok()?;
-        let dir = Self::cgroup_dir(&id)?;
-        let stat = tokio::fs::read_to_string(dir.join("cpu.stat")).await.ok()?;
-        let usec: u64 = stat.lines().find_map(|l| l.strip_prefix("usage_usec ")).and_then(|v| v.trim().parse().ok())?;
-        let mem: u64 = tokio::fs::read_to_string(dir.join("memory.current")).await.ok()?.trim().parse().ok()?;
-        Some(Usage { cpu_ns: usec * 1000, memory_bytes: mem })
+        let mut u = Self::cgroup_usage(&id).await?;
+        // Its sidecars' are the instance's: metered with it.
+        for sc in self.sidecars_of(name) {
+            if let Ok((id, _)) = self.id_and_port(&sc).await
+                && let Some(s) = Self::cgroup_usage(&id).await
+            {
+                u.cpu_ns += s.cpu_ns;
+                u.memory_bytes += s.memory_bytes;
+            }
+        }
+        Some(u)
     }
 
     async fn list(&self, service: Option<&str>) -> Vec<String> {
@@ -835,12 +966,12 @@ impl Runtime for Docker {
             Some(s) => format!("label={LABEL}={s}"),
             None => format!("label={LABEL}"),
         };
-        docker(&["ps", "-a", "--filter", &filter, "--format", "{{.Names}}"]).await.map(|s| s.lines().map(str::to_string).collect()).unwrap_or_default()
+        listed(docker(&["ps", "-a", "--filter", &filter, "--format", LISTED]).await)
     }
 
     async fn list_env(&self, service: &str, env: &str) -> Vec<String> {
         let (s, e) = (format!("label={LABEL}={service}"), format!("label={LABEL}.env={env}"));
-        docker(&["ps", "-a", "--filter", &s, "--filter", &e, "--format", "{{.Names}}"]).await.map(|s| s.lines().map(str::to_string).collect()).unwrap_or_default()
+        listed(docker(&["ps", "-a", "--filter", &s, "--filter", &e, "--format", LISTED]).await)
     }
 
     async fn ensure_network(&self, name: &str, service: &str, closed: bool) -> anyhow::Result<()> {
@@ -1040,10 +1171,12 @@ impl Runtime for Docker {
         }
     }
 
-    async fn shell(&self, name: &str, cols: u16, rows: u16) -> anyhow::Result<super::Shell> {
+    async fn shell(&self, name: &str, command: Option<&str>, cols: u16, rows: u16) -> anyhow::Result<super::Shell> {
         let Some(engine) = &self.engine else { bail!("a shell needs Docker on a local socket") };
-        // bash when the image has it, else sh; a login shell, so the image's profile applies.
-        let cmd = ["sh", "-c", "if command -v bash >/dev/null 2>&1; then exec bash -l; else exec sh -l; fi"];
+        // bash when the image has it, else sh; a login shell, so the image's profile applies. A
+        // command (`rails console`) runs as `sh -c` would.
+        let login = "if command -v bash >/dev/null 2>&1; then exec bash -l; else exec sh -l; fi";
+        let cmd = ["sh", "-c", command.unwrap_or(login)];
         let (id, io) = engine.exec_tty(name, &cmd, &["TERM=xterm-256color"], cols, rows).await?;
         Ok(super::Shell { id, io: Box::new(hyper_util::rt::TokioIo::new(io)) })
     }
@@ -1081,7 +1214,7 @@ pub const CAP_DROP: [&str; 4] = ["NET_RAW", "MKNOD", "AUDIT_WRITE", "SETFCAP"];
 /// The sandbox holding an instance's network. `ingress` (a closed web instance's, with the owner
 /// to run as): `socat` joins each caller on `<dir>/s.sock` to the app's port in the sandbox's
 /// network namespace, instead of only sleeping.
-fn sandbox_config(spec: &InstanceSpec, host_port: Option<u16>, host_gateway: Option<&str>, ingress: Option<(&std::path::Path, u32, u32)>) -> serde_json::Value {
+fn sandbox_config(spec: &InstanceSpec, host_port: Option<u16>, extra: &[(u16, u16)], host_gateway: Option<&str>, ingress: Option<(&std::path::Path, u32, u32)>) -> serde_json::Value {
     use serde_json::json;
     let mut host = json!({
         "Memory": 16i64 << 20,
@@ -1108,6 +1241,12 @@ fn sandbox_config(spec: &InstanceSpec, host_port: Option<u16>, host_gateway: Opt
         config["ExposedPorts"] = json!({ &port: {} });
         if let Some(hp) = host_port {
             host["PortBindings"] = json!({ &port: [{"HostIp": "127.0.0.1", "HostPort": hp.to_string()}] });
+            config["Labels"][format!("{LABEL}.port")] = json!(p.to_string());
+            for (cp, hp) in extra {
+                let k = format!("{cp}/tcp");
+                config["ExposedPorts"][&k] = json!({});
+                host["PortBindings"][&k] = json!([{"HostIp": "127.0.0.1", "HostPort": hp.to_string()}]);
+            }
         }
         if spec.closed {
             config["Labels"][format!("{LABEL}.closed")] = json!(p.to_string());
@@ -1161,6 +1300,55 @@ fn waker_config(spec: &InstanceSpec, sandbox: &str) -> serde_json::Value {
 
 /// An instance's config joined to its sandbox's network: no network, port or hosts of its own
 /// (Docker refuses those with another container's network).
+/// `docker ps`'s names with their role: an instance's sidecars are left out of lists (they go
+/// with it, [`Runtime::remove`]), so nothing mistakes one for an instance of its own.
+const LISTED: &str = "{{.Names}} {{.Label \"sh.roll.apps.role\"}}";
+
+fn listed(out: anyhow::Result<String>) -> Vec<String> {
+    out.map(|s| s.lines().filter_map(|l| l.split_once(' ').map_or(Some(l), |(n, role)| (role.trim() != "sidecar").then_some(n))).filter(|n| !n.is_empty()).map(str::to_string).collect()).unwrap_or_default()
+}
+
+/// A sidecar's container: its own image, command, settings and size, in `holder`'s network
+/// namespace, hardened as the instance is, restarted if it fails.
+fn sidecar_config(spec: &InstanceSpec, sc: &super::SidecarSpec, holder: &str) -> anyhow::Result<serde_json::Value> {
+    use serde_json::json;
+    let mut env = Vec::with_capacity(sc.vars.len());
+    for (k, v) in &sc.vars {
+        if v.contains('\0') {
+            bail!("sidecar {}: variable {k} holds a NUL byte", sc.name);
+        }
+        env.push(format!("{k}={v}"));
+    }
+    let mut config = json!({
+        "Image": sc.image,
+        "Env": env,
+        "Labels": {
+            LABEL: spec.service,
+            format!("{LABEL}.env"): spec.env,
+            format!("{LABEL}.deployment"): spec.deployment,
+            format!("{LABEL}.role"): "sidecar",
+            format!("{LABEL}.of"): spec.name,
+        },
+        "HostConfig": {
+            "Memory": (sc.memory_mb as i64) << 20,
+            "MemorySwap": (sc.memory_mb as i64) << 20,
+            "NanoCpus": nanos(sc.cpu),
+            "PidsLimit": 1024,
+            "SecurityOpt": ["no-new-privileges"],
+            "CapDrop": CAP_DROP,
+            "RestartPolicy": {"Name": "on-failure", "MaximumRetryCount": 5},
+            "Init": true,
+            "LogConfig": {"Type": "local", "Config": {}},
+            "NetworkMode": format!("container:{holder}"),
+        },
+    });
+    if let Some(cmd) = &sc.command {
+        config["Entrypoint"] = json!(["sh"]);
+        config["Cmd"] = json!(["-c", cmd]);
+    }
+    Ok(config)
+}
+
 fn joined(mut config: serde_json::Value, sandbox: &str) -> serde_json::Value {
     if let Some(o) = config.as_object_mut() {
         o.remove("ExposedPorts");
@@ -1174,7 +1362,7 @@ fn joined(mut config: serde_json::Value, sandbox: &str) -> serde_json::Value {
     config
 }
 
-fn engine_config(spec: &InstanceSpec, host_port: Option<u16>, host_gateway: Option<&str>) -> anyhow::Result<serde_json::Value> {
+fn engine_config(spec: &InstanceSpec, host_port: Option<u16>, extra: &[(u16, u16)], host_gateway: Option<&str>) -> anyhow::Result<serde_json::Value> {
     use serde_json::json;
     let mut env = Vec::with_capacity(spec.vars.len());
     for (k, v) in &spec.vars {
@@ -1212,6 +1400,12 @@ fn engine_config(spec: &InstanceSpec, host_port: Option<u16>, host_gateway: Opti
         let port = format!("{p}/tcp");
         config["ExposedPorts"] = json!({ &port: {} });
         host["PortBindings"] = json!({ &port: [{"HostIp": "127.0.0.1", "HostPort": hp.to_string()}] });
+        config["Labels"][format!("{LABEL}.port")] = json!(p.to_string());
+        for (cp, hp) in extra {
+            let k = format!("{cp}/tcp");
+            config["ExposedPorts"][&k] = json!({});
+            host["PortBindings"][&k] = json!([{"HostIp": "127.0.0.1", "HostPort": hp.to_string()}]);
+        }
     }
     if let Some(net) = &spec.network {
         host["NetworkMode"] = json!(net);
@@ -1334,11 +1528,12 @@ impl tokio::io::AsyncRead for ChildReader {
 /// burst of pushes queues instead of taking every CPU and all memory of the node.
 pub struct DockerBuilder {
     slots: tokio::sync::Semaphore,
+    scanner: super::scan::Scanner,
 }
 
 impl DockerBuilder {
     pub fn new(at_once: usize) -> DockerBuilder {
-        DockerBuilder { slots: tokio::sync::Semaphore::new(at_once) }
+        DockerBuilder { slots: tokio::sync::Semaphore::new(at_once), scanner: Default::default() }
     }
 }
 
@@ -1452,6 +1647,11 @@ impl Builder for DockerBuilder {
         }
     }
 
+    async fn scan(&self, image: &str, service: &str, log: &LogSink) -> anyhow::Result<Option<super::Scanned>> {
+        let (found, sbom) = self.scanner.scan(image, service, |n| log.line(n)).await?;
+        Ok(Some(super::Scanned { scanner: super::scan::SCANNER.to_string(), found, sbom }))
+    }
+
     async fn load(&self, archive: &std::path::Path, tag: &str, log: &LogSink) -> anyhow::Result<String> {
         anyhow::ensure!(tag.starts_with(super::PREFIX), "{tag} isn't a roll apps image name");
         let a = archive.to_string_lossy().to_string();
@@ -1480,6 +1680,7 @@ mod tests {
             command: None,
             vars: vec![("TLS_KEY".into(), pem.into())],
             port: Some(8080),
+            ports: vec![9000],
             cpu: 0.5,
             memory_mb: 512,
             network: Some("roll-apps-net-p-production".into()),
@@ -1490,14 +1691,16 @@ mod tests {
             registry: None,
             files: vec![],
             health: None,
+            sidecars: vec![],
         };
-        let c = engine_config(&spec, Some(41234), Some("host-gateway")).unwrap();
+        let c = engine_config(&spec, Some(41234), &[(9000, 41235)], Some("host-gateway")).unwrap();
+        assert_eq!((c["HostConfig"]["PortBindings"]["9000/tcp"][0]["HostPort"].as_str(), c["Labels"]["sh.roll.apps.port"].as_str()), (Some("41235"), Some("8080")));
         assert_eq!(c["Env"][0], format!("TLS_KEY={pem}"));
         assert_eq!(c["HostConfig"]["PortBindings"]["8080/tcp"][0]["HostIp"], "127.0.0.1");
         assert_eq!(c["HostConfig"]["CapDrop"][0], "NET_RAW");
         assert_eq!(c["NetworkingConfig"]["EndpointsConfig"]["roll-apps-net-p-production"]["Aliases"][0], "web");
         assert_eq!(c["Labels"]["sh.roll.apps"], "svc_x");
         let nul = InstanceSpec { vars: vec![("A".into(), "a\0b".into())], ..spec };
-        assert!(engine_config(&nul, None, None).is_err());
+        assert!(engine_config(&nul, None, &[], None).is_err());
     }
 }

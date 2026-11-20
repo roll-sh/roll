@@ -1,7 +1,7 @@
-//! A small S3 client for buckets a tenant names (the `s3` snapshot repository,
-//! [`crate::api::repository_s3`]): objects are read, written (optionally only when absent),
-//! deleted and listed, with Signature Version 4 when the repository has credentials and
-//! anonymously when it has none. roll's own credentials (its environment, instance role or
+//! A small S3 client for buckets a tenant names (the `s3` snapshot repository): objects are
+//! read (whole, or streamed and ranged), written (optionally only when absent or unchanged, and
+//! in parts with multipart uploads), deleted and listed, with Signature Version 4 when the
+//! repository has credentials and anonymously when it has none. roll's own credentials (its environment, instance role or
 //! storage configuration) are never used for a tenant's bucket.
 //!
 //! The endpoint is the tenant's choice, so the client is built as AGENTS.md requires for any such
@@ -16,9 +16,13 @@ use sha2::{Digest, Sha256};
 use std::time::Duration;
 
 /// Read at most this much of an error response.
-const ERROR_BODY_MAX: usize = 64 << 10;
+pub(crate) const ERROR_BODY_MAX: usize = 64 << 10;
 /// Attempts per request: S3 asks clients to retry 500 and 503.
-const ATTEMPTS: u32 = 3;
+pub(crate) const ATTEMPTS: u32 = 3;
+/// A whole request's limit, except streamed reads ([`Client::open`]): a throttled restore reads
+/// a large object for longer, and only [`READ_IDLE`] bounds it.
+pub(crate) const REQUEST_MAX: Duration = Duration::from_secs(600);
+pub(crate) const READ_IDLE: Duration = Duration::from_secs(60);
 /// Bounds on one listing ([`Client::list`]): S3 answers 1,000 keys a page.
 pub const LIST_PAGES_MAX: usize = 10_000;
 pub const LIST_ENTRIES_MAX: usize = 1_000_000;
@@ -56,7 +60,7 @@ impl std::fmt::Display for Error {
     }
 }
 
-fn err(code: &str, message: impl Into<String>) -> Error {
+pub(crate) fn err(code: &str, message: impl Into<String>) -> Error {
     Error { status: None, code: code.into(), message: message.into() }
 }
 
@@ -130,8 +134,7 @@ impl Client {
         }
         let mut b = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
-            .read_timeout(Duration::from_secs(60))
-            .timeout(Duration::from_secs(600))
+            .read_timeout(READ_IDLE)
             .redirect(reqwest::redirect::Policy::none())
             .no_proxy();
         if !allow_private {
@@ -159,6 +162,10 @@ impl Client {
     }
 
     async fn send(&self, method: reqwest::Method, key: &str, query: &[(&str, &str)], extra: &[(&str, &str)], body: Bytes) -> Result<reqwest::Response, Error> {
+        self.send_within(method, key, query, extra, body, Some(REQUEST_MAX)).await
+    }
+
+    async fn send_within(&self, method: reqwest::Method, key: &str, query: &[(&str, &str)], extra: &[(&str, &str)], body: Bytes, total: Option<Duration>) -> Result<reqwest::Response, Error> {
         let (url, path) = self.url(key, query);
         let payload = hex(&Sha256::digest(&body));
         let mut last = err("RequestFailed", "no attempt was made");
@@ -184,6 +191,9 @@ impl Client {
                 headers.push(("authorization".into(), auth));
             }
             let mut rb = self.http.request(method.clone(), url.clone());
+            if let Some(t) = total {
+                rb = rb.timeout(t);
+            }
             for (k, v) in &headers {
                 if k != "host" {
                     rb = rb.header(k.as_str(), v.as_str());
@@ -221,13 +231,140 @@ impl Client {
     /// Writes the object at `key` only when there is none (`If-None-Match: *`): `false` when
     /// one exists.
     pub async fn put_new(&self, key: &str, body: Bytes) -> Result<bool, Error> {
-        let r = self.send(reqwest::Method::PUT, key, &[], &[("If-None-Match", "*")], body).await?;
+        Ok(self.put_if(key, body, None).await?.is_some())
+    }
+
+    /// Writes the object at `key` only when its ETag is `etag` (`If-Match`), or, with `None`,
+    /// only when there is none: the new ETag, or `None` when the condition failed.
+    pub async fn put_if(&self, key: &str, body: Bytes, etag: Option<&str>) -> Result<Option<String>, Error> {
+        let condition = match etag {
+            Some(e) => ("If-Match", e),
+            None => ("If-None-Match", "*"),
+        };
+        let r = self.send(reqwest::Method::PUT, key, &[], &[condition], body).await?;
         match r.status().as_u16() {
-            200..=299 => Ok(true),
+            200..=299 => Ok(Some(etag_of(&r))),
             // 409: a conditional write raced another one on the same key.
-            412 | 409 => Ok(false),
+            412 | 409 => Ok(None),
             _ => Err(failure(r).await),
         }
+    }
+
+    /// The object at `key` and its ETag, or `None` when there is none. More than `max` bytes is
+    /// an error.
+    pub async fn get_tagged(&self, key: &str, max: usize) -> Result<Option<(Bytes, String)>, Error> {
+        let r = self.send(reqwest::Method::GET, key, &[], &[], Bytes::new()).await?;
+        match r.status().as_u16() {
+            200 => {
+                let etag = etag_of(&r);
+                read_bounded(r, max).await.map(|b| Some((b, etag)))
+            }
+            404 => Ok(None),
+            _ => Err(failure(r).await),
+        }
+    }
+
+    /// The object at `key` (bytes `start..end` of it with `range`) as it arrives, or `None` when
+    /// there is none. Only an idle read times out, so a throttled reader may take its time.
+    pub async fn open(&self, key: &str, range: Option<(u64, u64)>) -> Result<Option<Download>, Error> {
+        let header = range.map(|(a, b)| format!("bytes={a}-{}", b.saturating_sub(1)));
+        let extra: Vec<(&str, &str)> = header.iter().map(|h| ("Range", h.as_str())).collect();
+        let r = self.send_within(reqwest::Method::GET, key, &[], &extra, Bytes::new(), None).await?;
+        match r.status().as_u16() {
+            200 | 206 => Ok(Some(Download(r))),
+            404 => Ok(None),
+            _ => Err(failure(r).await),
+        }
+    }
+
+    /// Starts a multipart upload of `key`: its upload id.
+    pub async fn create_multipart(&self, key: &str) -> Result<String, Error> {
+        let r = self.send(reqwest::Method::POST, key, &[("uploads", "")], &[], Bytes::new()).await?;
+        if !r.status().is_success() {
+            return Err(failure(r).await);
+        }
+        let body = read_bounded(r, ERROR_BODY_MAX).await?;
+        let text = String::from_utf8_lossy(&body);
+        elements(&text, "UploadId").next().map(xml_unescape).filter(|id| !id.is_empty()).ok_or_else(|| err("BadResponse", "CreateMultipartUpload answered no UploadId"))
+    }
+
+    /// Uploads part `part` (from 1) of upload `upload_id`: the part's ETag.
+    pub async fn upload_part(&self, key: &str, upload_id: &str, part: u32, body: Bytes) -> Result<String, Error> {
+        let n = part.to_string();
+        let r = self.send(reqwest::Method::PUT, key, &[("partNumber", &n), ("uploadId", upload_id)], &[], body).await?;
+        match r.status().is_success() {
+            true => Ok(etag_of(&r)),
+            false => Err(failure(r).await),
+        }
+    }
+
+    /// Completes upload `upload_id` from its parts' ETags, in order.
+    pub async fn complete_multipart(&self, key: &str, upload_id: &str, etags: &[String]) -> Result<(), Error> {
+        let parts: String = etags.iter().enumerate().map(|(i, e)| format!("<Part><PartNumber>{}</PartNumber><ETag>{}</ETag></Part>", i + 1, xml_escape(e))).collect();
+        let body = Bytes::from(format!("<CompleteMultipartUpload>{parts}</CompleteMultipartUpload>"));
+        let r = self.send(reqwest::Method::POST, key, &[("uploadId", upload_id)], &[], body).await?;
+        if !r.status().is_success() {
+            return Err(failure(r).await);
+        }
+        // S3 may answer 200 and fail in the body.
+        let body = read_bounded(r, ERROR_BODY_MAX).await?;
+        let text = String::from_utf8_lossy(&body);
+        match text.contains("<Error>") {
+            true => Err(Error {
+                status: Some(200),
+                code: elements(&text, "Code").next().map(xml_unescape).unwrap_or_else(|| "InternalError".into()),
+                message: elements(&text, "Message").next().map(xml_unescape).unwrap_or_default(),
+            }),
+            false => Ok(()),
+        }
+    }
+
+    /// Aborts upload `upload_id` (one already gone is fine).
+    pub async fn abort_multipart(&self, key: &str, upload_id: &str) -> Result<(), Error> {
+        let r = self.send(reqwest::Method::DELETE, key, &[("uploadId", upload_id)], &[], Bytes::new()).await?;
+        match r.status().as_u16() {
+            200..=299 | 404 => Ok(()),
+            _ => Err(failure(r).await),
+        }
+    }
+
+    /// The multipart uploads in progress under `prefix`, as `(key, upload id)`, at most `max`
+    /// of them. Pages are bounded as [`Client::list`]'s are.
+    pub async fn list_uploads(&self, prefix: &str, max: usize) -> Result<Vec<(String, String)>, Error> {
+        const PAGE_MAX: usize = 4 << 20;
+        let mut out = Vec::new();
+        let (mut key_marker, mut id_marker) = (String::new(), String::new());
+        for _ in 0..LIST_PAGES_MAX {
+            let mut q = vec![("uploads", ""), ("prefix", prefix)];
+            if !key_marker.is_empty() {
+                q.push(("key-marker", key_marker.as_str()));
+                q.push(("upload-id-marker", id_marker.as_str()));
+            }
+            let r = self.send(reqwest::Method::GET, "", &q, &[], Bytes::new()).await?;
+            if !r.status().is_success() {
+                return Err(failure(r).await);
+            }
+            let page = read_bounded(r, PAGE_MAX).await?;
+            let page = String::from_utf8_lossy(&page);
+            for item in elements(&page, "Upload") {
+                let key = elements(item, "Key").next().map(xml_unescape).unwrap_or_default();
+                let id = elements(item, "UploadId").next().map(xml_unescape).unwrap_or_default();
+                // A server matching keys only exactly may answer more than was asked for.
+                if key.starts_with(prefix) && !id.is_empty() {
+                    out.push((key, id));
+                }
+                if out.len() >= max {
+                    return Ok(out);
+                }
+            }
+            let truncated = elements(&page, "IsTruncated").next().is_some_and(|t| t.trim() == "true");
+            let next = (elements(&page, "NextKeyMarker").next().map(xml_unescape).unwrap_or_default(), elements(&page, "NextUploadIdMarker").next().map(xml_unescape).unwrap_or_default());
+            if !truncated || next.0.is_empty() || (next.0 == key_marker && next.1 == id_marker) {
+                return Ok(out);
+            }
+            (key_marker, id_marker) = next;
+        }
+        Err(err("TooLarge", format!("the listing of uploads under [{prefix}] is more than [{LIST_PAGES_MAX}] pages")))
     }
 
     /// Deletes the object at `key` (none there is fine).
@@ -277,15 +414,29 @@ impl Client {
     }
 }
 
+/// An object being read ([`Client::open`]).
+pub struct Download(pub(crate) reqwest::Response);
+
+impl Download {
+    /// The next bytes, `None` at the end.
+    pub async fn next(&mut self) -> Result<Option<Bytes>, Error> {
+        self.0.chunk().await.map_err(|e| err("RequestFailed", transport(&e)))
+    }
+}
+
+pub(crate) fn etag_of(r: &reqwest::Response) -> String {
+    r.headers().get("etag").and_then(|v| v.to_str().ok()).unwrap_or_default().to_string()
+}
+
 /// `host[:port]` of a URL as the `Host` header carries it.
-fn authority(u: &reqwest::Url) -> String {
+pub(crate) fn authority(u: &reqwest::Url) -> String {
     match u.port() {
         Some(p) => format!("{}:{p}", u.host_str().unwrap_or_default()),
         None => u.host_str().unwrap_or_default().to_string(),
     }
 }
 
-fn transport(e: &reqwest::Error) -> String {
+pub(crate) fn transport(e: &reqwest::Error) -> String {
     let mut s = e.to_string();
     let mut src = std::error::Error::source(e);
     while let Some(x) = src {
@@ -295,7 +446,7 @@ fn transport(e: &reqwest::Error) -> String {
     s
 }
 
-async fn read_bounded(mut r: reqwest::Response, max: usize) -> Result<Bytes, Error> {
+pub(crate) async fn read_bounded(mut r: reqwest::Response, max: usize) -> Result<Bytes, Error> {
     if r.content_length().is_some_and(|n| n > max as u64) {
         return Err(err("TooLarge", format!("the object is larger than {max} bytes")));
     }
@@ -320,7 +471,7 @@ async fn failure(r: reqwest::Response) -> Error {
 }
 
 /// The contents of each `<tag>…</tag>` in `xml` (S3's responses have no attributes on these).
-fn elements<'a>(xml: &'a str, tag: &str) -> impl Iterator<Item = &'a str> + 'a {
+pub(crate) fn elements<'a>(xml: &'a str, tag: &str) -> impl Iterator<Item = &'a str> + 'a {
     let (open, close) = (format!("<{tag}>"), format!("</{tag}>"));
     let mut rest = xml;
     std::iter::from_fn(move || {
@@ -332,7 +483,11 @@ fn elements<'a>(xml: &'a str, tag: &str) -> impl Iterator<Item = &'a str> + 'a {
     })
 }
 
-fn xml_unescape(s: &str) -> String {
+pub(crate) fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+}
+
+pub(crate) fn xml_unescape(s: &str) -> String {
     s.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&apos;", "'").replace("&amp;", "&")
 }
 
@@ -347,7 +502,7 @@ pub(crate) fn hex(b: &[u8]) -> String {
 }
 
 /// SigV4's URI encoding: unreserved characters kept, `/` kept unless `slash`, the rest `%XX`.
-fn uri_encode(s: &str, slash: bool) -> String {
+pub(crate) fn uri_encode(s: &str, slash: bool) -> String {
     let mut out = String::with_capacity(s.len());
     for &b in s.as_bytes() {
         match b {

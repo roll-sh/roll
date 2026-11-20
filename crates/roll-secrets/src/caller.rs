@@ -89,12 +89,13 @@ impl Secrets {
         // A roll-access grant first: the gate may put the operator marker beside it, narrowed by
         // its rules, so the marker alone would read as everything.
         if let Some(g) = grant {
-            // A workload token an identity's login got is that identity in the audit log.
-            let principal = match self.login_of(&g.id)? {
-                Some(identity) => format!("identity:{identity}"),
-                None => format!("token:{}", g.id),
-            };
-            return Ok(Caller { principal, grants: self.grant_grants(g)?, ip: None, runtime: false, approval: None });
+            // A workload token an identity's login got is that identity in the audit log, and
+            // reads as one: never past a freeze, whatever its rules.
+            let grants = self.grant_grants(g)?;
+            return Ok(match self.login_of(&g.id)? {
+                Some(identity) => Caller::acting(format!("identity:{identity}"), grants),
+                None => Caller::token(&g.id, grants),
+            });
         }
         // A signed-in person (the gate resolved the session on this request): their own projects.
         // An admin's session is the operator, as their token would be.
@@ -140,7 +141,7 @@ impl Secrets {
         if admin {
             return Ok(Caller::operator());
         }
-        Ok(Caller { principal: user.to_string(), grants: Arc::new(self.own_projects(user)?), ip: None, runtime: false, approval: None })
+        Ok(Caller::person(user, Arc::new(self.own_projects(user)?)))
     }
 
     /// The projects `user` owns, as the workspace has them now, and their roll code owner.

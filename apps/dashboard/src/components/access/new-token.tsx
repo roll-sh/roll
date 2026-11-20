@@ -20,6 +20,7 @@ export function NewToken() {
   const [ips, setIps] = useState("");
   const [rateText, setRateText] = useState("");
   const [askOtherwise, setAskOtherwise] = useState(false);
+  const [decoy, setDecoy] = useState(false);
   const [busy, setBusy] = useState(false);
   const [made, setMade] = useState<{ grant: Grant; token: string } | null>(null);
 
@@ -53,7 +54,7 @@ export function NewToken() {
     setError(null);
     try {
       const ms = EXPIRIES[expiry].ms;
-      setMade(await accessApi.create({ name: name.trim(), rules, not_before: startMs, expires_at: ms === null ? null : (startMs ?? Date.now()) + ms, ip_allow: ipList, rate_per_minute: rate.rate, ask_otherwise: askOtherwise }));
+      setMade(await accessApi.create({ name: name.trim(), rules, not_before: startMs, expires_at: ms === null ? null : (startMs ?? Date.now()) + ms, ip_allow: ipList, rate_per_minute: rate.rate, ask_otherwise: askOtherwise, decoy }));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -86,6 +87,16 @@ export function NewToken() {
                     <span className="block text-[12px] text-muted">
                       What these rules don't allow waits for your approval instead of being refused. Approve once, for a while, or always,
                       and the token grows as you go.
+                    </span>
+                  </span>
+                </label>
+                <label className="mt-3 flex items-start gap-2 text-[13px]">
+                  <input type="checkbox" checked={decoy} onChange={(e) => setDecoy(e.target.checked)} className="mt-0.5" />
+                  <span>
+                    A decoy
+                    <span className="block text-[12px] text-muted">
+                      It never works. Plant it where only an intruder would look (an old repo, a wiki page, a config): any use tells you and
+                      your admins where it came from, and the caller is told it isn&apos;t a valid token.
                     </span>
                   </span>
                 </label>

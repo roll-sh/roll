@@ -652,6 +652,8 @@ mod tests {
 
     fn req(indices: &[&str], body: &str) -> SearchRequest {
         SearchRequest {
+            slowlog: Default::default(),
+            partial_aggs: false,
             indices: indices.iter().map(|s| s.to_string()).collect(),
             opts: crate::meta::resolve::IndicesOptions::STRICT_EXPAND_OPEN_FORBID_CLOSED,
             source: source(body),

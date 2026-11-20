@@ -280,9 +280,9 @@ impl Builder {
     fn finish(mut self) -> Automaton {
         let mut a = Automaton::new();
         let n = self.accept.len();
-        for s in 0..n {
+        for (s, &accept) in self.accept.iter().enumerate() {
             a.create_state();
-            a.set_accept(s as i32, self.accept[s]);
+            a.set_accept(s as i32, accept);
         }
         self.trans.sort_by_key(|&(s, d, min, max)| (s, min, max, d));
         for &(s, d, min, max) in &self.trans {
@@ -1662,11 +1662,11 @@ mod tests {
         too_complex("([a-z]{999}&[a-y]{999}){600}");
         // `a?a?…a?` concatenates into a quadratic number of transitions.
         too_complex(&"a?".repeat(5_000));
-        // Large but bounded counts still work, in linear time.
-        let t = std::time::Instant::now();
-        assert_eq!(lm("a{0,200000}", &"a".repeat(10)), Some(10));
-        assert_eq!(lm("a{100000}", &"a".repeat(100_001)), Some(100_000));
-        assert!(t.elapsed() < std::time::Duration::from_secs(20));
+        // Large but bounded counts still work (up to `a{0,200000}` and `a{100000}`), in linear time.
+        search_test_support::assert_linear("bounded repetition counts", 12_500, |n| n, |n| {
+            assert_eq!(lm(&format!("a{{0,{}}}", 2 * n), &"a".repeat(10)), Some(10));
+            assert_eq!(lm(&format!("a{{{n}}}"), &"a".repeat(n + 1)), Some(n));
+        });
         // Not deterministic, and too much work to determinize, as in Lucene.
         assert_eq!(
             compile(&"a?".repeat(500), true).unwrap_err().kind,
