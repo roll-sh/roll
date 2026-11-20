@@ -31,6 +31,17 @@ impl roll_previews::ports::Reveal for SecretsReveal {
             Err(e) => Err(e.to_string()),
         }
     }
+
+    fn still(&self, project: &str, repo: &str, untrusted: bool, reference: &str, maker: &str) -> Result<(), String> {
+        // Named for this preview's project: its repo may be on other projects' canvases too.
+        let named = reference.strip_prefix("roll://").map(|rest| format!("roll://{project}@{rest}")).ok_or("not a roll:// reference")?;
+        let mut resource = roll_secrets::ResourceRef::new(roll_workspace::Kind::Repo, repo);
+        if untrusted {
+            resource = resource.untrusted();
+        }
+        let maker: roll_secrets::Maker = serde_json::from_value(serde_json::Value::String(maker.into())).map_err(|e| e.to_string())?;
+        self.0.digest_as(&resource, &named, &maker).map(|_| ()).map_err(|e| e.to_string())
+    }
 }
 
 

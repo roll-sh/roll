@@ -135,6 +135,7 @@ mod tests {
             skew_protection: true,
             queue_s: Some(5),
             latency_target_ms: Some(300),
+            oidc_audiences: vec!["roll".into()],
             schedules: vec![crate::model::Scheduled { name: "a".into(), schedule: "@daily".into(), command: "x".into(), path: None, timezone: None, timeout_s: None }],
             push: vec![crate::model::Push { stream: "st_aaaaaaaaaaaa".into(), topic: "t".into(), group: "g".into(), path: "/e".into(), environment: None, dead_letter: None, max_attempts: None, timeout_s: None, max_in_flight: None }],
             sidecars: vec![crate::model::Sidecar { name: "a".into(), image: "x".into(), command: None, env: Default::default(), variables: vec![], cpu: 0.25, memory_mb: 128 }],

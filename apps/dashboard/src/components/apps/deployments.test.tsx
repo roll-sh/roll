@@ -40,6 +40,11 @@ describe("Deployments", () => {
     await waitFor(() => expect(api.explain).toHaveBeenCalledWith("svc_1", "production", "dep_bad", false));
     expect(await screen.findByText("It never listened on $PORT.")).toBeInTheDocument();
     expect(screen.getByText("<b>listen 3000</b>")).toBeInTheDocument();
+    // Asked anew: a refusal (once a minute) is said, not swallowed.
+    api.explain.mockRejectedValueOnce(new Error("it was explained less than a minute ago"));
+    await userEvent.click(screen.getByRole("button", { name: /ask again/i }));
+    await waitFor(() => expect(api.explain).toHaveBeenLastCalledWith("svc_1", "production", "dep_bad", true));
+    expect(await screen.findByText("it was explained less than a minute ago")).toBeInTheDocument();
   });
 
   it("puts a ready deployment live the same way", async () => {

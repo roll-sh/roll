@@ -109,6 +109,15 @@ pub trait SecretEnv: Send + Sync {
         let _ = (repo, asker, credential);
         Err(crate::Error::Unprocessable("roll secrets isn't on this server".into()))
     }
+    /// Whether credentials a change of repo `owner/name` adds work, asked of their providers when
+    /// a project with the repo on its canvas has roll secrets' validity checks on (docs/secrets.md,
+    /// "Is it live?"): (value, the AWS secret access key next to an access key id) in, an answer
+    /// per credential (by fingerprint) out; empty when checks are off. Waits for the answers: call
+    /// it from background work. The values go nowhere but the providers.
+    async fn validity(&self, repo: &str, found: Vec<(String, Option<String>)>) -> anyhow::Result<Vec<crate::model::CredentialValidity>> {
+        let _ = (repo, found);
+        Ok(Vec::new())
+    }
 }
 
 /// Who asks roll secrets, as rolld's gate put them on the request: roll secrets decides with them

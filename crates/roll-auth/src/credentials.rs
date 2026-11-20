@@ -19,9 +19,10 @@ use serde_json::Value;
 
 /// The secrets roll makes that scanners look for: grants' (`rlt_`, `rlo_`, `rlf_`), machine
 /// clients' (`rlc_`), and other products' made the same way: apps' deploy hooks (`rlk_`), SSO
-/// connections' SCIM tokens (`rlp_`, roll-accounts) and previews' deploy hooks (`rlb_`, a rebuild).
+/// connections' SCIM tokens (`rlp_`, roll-accounts), previews' deploy hooks (`rlb_`, a rebuild) and
+/// apps' instance addresses (`rlr_`: where an environment's instances read roll's OIDC tokens).
 /// (`rlh_` is roll code's automations' inbound webhook secrets: another shape, not ours.)
-pub const SECRET_PREFIXES: [&str; 8] = ["rlt_", "rlo_", "rlf_", "rlc_", "rlk_", "rlp_", "rlb_", "rlq_"];
+pub const SECRET_PREFIXES: [&str; 9] = ["rlt_", "rlo_", "rlf_", "rlc_", "rlk_", "rlp_", "rlb_", "rlq_", "rlr_"];
 
 /// A secret: `prefix`, 34 random characters of lowercase base32 (170 bits) and 6 of checksum, so a
 /// scanner can tell a real roll token from look-alike text without asking roll ([`checksum_ok`],
@@ -247,6 +248,68 @@ fn kind_of(w: &str) -> Option<&'static str> {
         return Some("an OpenAI API key");
     }
     None
+}
+
+/// The kinds roll secrets' validity checks can say something about (AWS: its account, read
+/// offline; GitHub, Stripe, Slack, OpenAI, Anthropic: their providers; roll's own tokens: looked up
+/// by hash): what callers send it, and nothing else.
+pub const VERIFIABLE: [&str; 7] = ["an AWS access key", "a GitHub token", "a Stripe live key", "a Slack token", "an OpenAI API key", "an Anthropic API key", ROLL];
+
+/// The AWS account an access key id (`AKIA…`, `ASIA…`) belongs to, read from the id itself with no
+/// request: after the 4-character prefix the id is base32 (RFC 4648), and bits 1–40 of its first
+/// 6 bytes are the account number (Tal Be'ery's note on AWS key ids, "A short note on AWS KEY
+/// ID"). Ids whose fifth character is `I` or `J` predate that encoding and say nothing: `None`.
+pub fn aws_account(key_id: &str) -> Option<String> {
+    const ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    let rest = key_id.strip_prefix("AKIA").or_else(|| key_id.strip_prefix("ASIA"))?;
+    if rest.len() != 16 || rest.starts_with(['I', 'J']) {
+        return None;
+    }
+    let mut bits: u64 = 0;
+    for b in rest.bytes().take(10) {
+        bits = (bits << 5) | ALPHABET.iter().position(|a| *a == b)? as u64;
+    }
+    if !rest.bytes().all(|b| ALPHABET.contains(&b)) {
+        return None;
+    }
+    // 10 characters are 50 bits: the first 48 are the 6 bytes.
+    let z = bits >> 2;
+    Some(format!("{:012}", (z & 0x7fff_ffff_ff80) >> 7))
+}
+
+/// How many lines either side of an AWS access key id [`aws_secret_near`] looks.
+const AWS_PAIR_LINES: usize = 5;
+
+/// The secret access key that goes with an AWS access key id found at `m` in `text`: the nearest
+/// word on the key's line or within 5 lines of it that is 40 characters of base64's alphabet
+/// (`A-Z a-z 0-9 / +`) with a lowercase letter, a capital and a digit, and not AWS's documented
+/// `…EXAMPLEKEY`. What a validity check signs with, as GitGuardian pairs the two; `None` when
+/// there's no such word (the check then says `unknown` without asking AWS).
+pub fn aws_secret_near<'a>(text: &'a str, m: &Match) -> Option<&'a str> {
+    let line_of = |at: usize| text[..at].matches('\n').count();
+    let key_line = line_of(m.start);
+    let secretish = |w: &str| w.len() == 40 && w.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'/' || b == b'+') && w.bytes().any(|b| b.is_ascii_lowercase()) && w.bytes().any(|b| b.is_ascii_uppercase()) && w.bytes().any(|b| b.is_ascii_digit()) && !w.contains("EXAMPLE");
+    let mut best: Option<(usize, &str)> = None;
+    let mut start = 0;
+    for (n, line) in text.split('\n').enumerate() {
+        let here = start;
+        start += line.len() + 1;
+        if n + AWS_PAIR_LINES < key_line || n > key_line + AWS_PAIR_LINES {
+            continue;
+        }
+        let mut at = 0;
+        for w in line.split(|c: char| !(c.is_ascii_alphanumeric() || c == '/' || c == '+')) {
+            let w_start = here + at;
+            at += w.len() + 1;
+            if secretish(w) && !(m.start..m.end).contains(&w_start) {
+                let d = n.abs_diff(key_line);
+                if best.is_none_or(|(bd, _)| d < bd) {
+                    best = Some((d, w));
+                }
+            }
+        }
+    }
+    best.map(|(_, w)| w)
 }
 
 /// The prefixes the detectors know a credential by: what [`placeholder`] looks past.
@@ -567,6 +630,41 @@ mod unstored_tests {
         let real_looking = ["AKIA", "ROLLFIXTURE", "23456"].concat();
         assert!(find_all(&real_looking).len() == 1 && !placeholder(&real_looking));
         assert!(!placeholder(&format!("{live}51Hx9Q2aB7cD3eF5gH8jK")));
+    }
+
+    /// An AWS key id carrying `account` (the encoding [`aws_account`] reads), built here: no real
+    /// key's shape is in the repo.
+    pub(crate) fn fake_aws_key_id(account: u64) -> String {
+        const ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+        let bits = (account << 7) << 2;
+        let head: String = (0..10).rev().map(|i| ALPHABET[((bits >> (i * 5)) & 31) as usize] as char).collect();
+        format!("AKIA{head}ROLLFX")
+    }
+
+    #[test]
+    fn an_aws_key_ids_account_is_read_from_the_id() {
+        let id = fake_aws_key_id(123_456_789_012);
+        assert_eq!(find_all(&id).first().map(|m| m.kind), Some("an AWS access key"));
+        assert_eq!(aws_account(&id).as_deref(), Some("123456789012"));
+        assert_eq!(aws_account(&fake_aws_key_id(52_310_077_262)).as_deref(), Some("052310077262"), "zero-padded to 12 digits");
+        // Old ids (AKIAI…, AKIAJ…) don't carry it; nor does anything else.
+        assert_eq!(aws_account("AKIAIOSFODNN7EXAMPLE"), None);
+        assert_eq!(aws_account("AKIA0123"), None);
+    }
+
+    #[test]
+    fn an_aws_key_id_is_paired_with_the_secret_near_it() {
+        // Built from pieces: push protection scans the repo.
+        let id = ["AKIA", "ROLLFIXTURE", "23456"].concat();
+        let secret = ["rollFixture", "SecretKey", "0123456789", "abcdefghij"].concat();
+        let text = format!("[default]\naws_access_key_id = {id}\nregion = us-east-1\naws_secret_access_key = {secret}\n");
+        let m = find_all(&text).into_iter().find(|m| m.kind == "an AWS access key").unwrap();
+        assert_eq!(aws_secret_near(&text, &m), Some(secret.as_str()));
+        // AWS's documented secret, or nothing near enough: no pair.
+        let docs = format!("{id}\nwJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\n");
+        assert_eq!(aws_secret_near(&docs, &find_all(&docs)[0]), None);
+        let far = format!("{id}{}{secret}\n", "\n".repeat(8));
+        assert_eq!(aws_secret_near(&far, &find_all(&far)[0]), None);
     }
 
     #[test]

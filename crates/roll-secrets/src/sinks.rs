@@ -210,6 +210,8 @@ impl Secrets {
     /// A new sink; the second value is its signing secret, shown once.
     pub fn create_sink(&self, project: &str, n: NewSink, caller: &Caller) -> Result<(Sink, String)> {
         caller.need(Action::Admin, &Scope::project(project))?;
+        // Whether it gets the rows that say a decoy was used: made by someone who sees decoys.
+        let decoys = self.sees_decoys(project, caller);
         let format = n.format.clone().unwrap_or_else(|| "roll".into());
         if !FORMATS.contains(&format.as_str()) {
             return Err(Error::BadRequest(format!("format is one of {}", FORMATS.join(", "))));
@@ -258,9 +260,9 @@ impl Secrets {
             }
             let cursor: i64 = if n.from_start { 0 } else { c.query_row("SELECT COALESCE(MAX(id), 0) FROM audit WHERE project_id = ?", [project], |r| r.get(0))? };
             c.execute(
-                "INSERT INTO audit_sinks (id, project_id, url, secret, cursor, status, error, delivered_at, running_until, retry_at, created_at, created_by, format, token)
-                 VALUES (?, ?, ?, ?, ?, 'new', NULL, NULL, 0, 0, ?, ?, ?, ?)",
-                params![id, project, n.url.trim(), sealed, cursor, now, caller.principal, format, sealed_token],
+                "INSERT INTO audit_sinks (id, project_id, url, secret, cursor, status, error, delivered_at, running_until, retry_at, created_at, created_by, format, token, decoys)
+                 VALUES (?, ?, ?, ?, ?, 'new', NULL, NULL, 0, 0, ?, ?, ?, ?, ?)",
+                params![id, project, n.url.trim(), sealed, cursor, now, caller.principal, format, sealed_token, decoys as i64],
             )?;
             audit::record(c, self.keys()?, project, caller, "sink.create", None, None, &[], &format!("audit stream to {} ({format})", host(&n.url)), now)?;
             Ok(c.query_row(&format!("SELECT {COLUMNS} FROM audit_sinks WHERE id = ?"), [&id], sink_row)?)
@@ -287,17 +289,17 @@ impl Secrets {
         // Only rows older than SETTLE_MS: ids are given out when a row is written, so on Postgres a
         // row can commit after a higher one is already visible, and a cursor past it would skip it.
         let settled = now - SETTLE_MS;
-        type Due = (String, String, String, Vec<u8>, i64, String, Option<Vec<u8>>);
+        type Due = (String, String, String, Vec<u8>, i64, String, Option<Vec<u8>>, bool);
         let due: Vec<Due> = self.db.read(|c| {
             c.query(
-                "SELECT s.id, s.project_id, s.url, s.secret, s.cursor, COALESCE(s.format, 'roll'), s.token FROM audit_sinks s WHERE s.running_until <= ? AND s.retry_at <= ?
+                "SELECT s.id, s.project_id, s.url, s.secret, s.cursor, COALESCE(s.format, 'roll'), s.token, COALESCE(s.decoys, 0) FROM audit_sinks s WHERE s.running_until <= ? AND s.retry_at <= ?
                  AND EXISTS (SELECT 1 FROM audit a WHERE a.project_id = s.project_id AND a.id > s.cursor AND a.at <= ?) LIMIT 100",
                 params![now, now, settled],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get::<_, i64>(7)? == 1)),
             )
         })?;
         let (mut ok, mut failed) = (0, 0);
-        for (id, project, url, sealed, cursor, format, sealed_token) in due {
+        for (id, project, url, sealed, cursor, format, sealed_token, decoys) in due {
             let hold = now + HOLD_MS;
             if self.db.write(|c| c.execute("UPDATE audit_sinks SET running_until = ? WHERE id = ? AND running_until <= ? AND cursor = ?", params![hold, id, now, cursor]))? != 1 {
                 continue;
@@ -312,6 +314,13 @@ impl Secrets {
                 continue;
             }
             let last = rows.last().map(|r| r.id).unwrap_or(cursor);
+            // Which keys are decoys only reaches a sink a session or the operator made, as the
+            // listing only shows it to them (`Secrets::sees_decoys`); the cursor still moves past.
+            rows.retain(|r| decoys || !crate::decoys::DECOY_ACTIONS.contains(&r.action.as_str()));
+            if rows.is_empty() {
+                self.db.write(|c| c.execute("UPDATE audit_sinks SET cursor = ?, running_until = 0 WHERE id = ? AND running_until = ?", params![last, id, hold]))?;
+                continue;
+            }
             // A bucket must still be on the project's canvas: one moved to another project, or
             // removed, gets nothing more.
             let gone = roll_target(&url).is_some_and(|(kind, name)| !self.members(&project).map(|m| m.contains(&(kind.to_string(), name.to_string()))).unwrap_or(false));

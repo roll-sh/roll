@@ -31,6 +31,10 @@ const BATCH: usize = 100;
 const CONSUMER: &str = "roll-apps-";
 /// The longest wait between tries.
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
+/// How long a loop works on what one read handed it: under the 60 s lease rolld reads with
+/// (`RollResources::read_group`), so a record refused past it is read again from the committed
+/// offset by a fresh consumer, never after a sibling took the partition and delivered past it.
+const HOLD: Duration = Duration::from_secs(45);
 /// What of an answer's body is read (and dropped) before the next.
 const ANSWER_BYTES: usize = 64 * 1024;
 
@@ -244,11 +248,15 @@ impl Apps {
         // A consumer of its own, the last loop's left (its partitions free at once, unless a read
         // of it is still out: then they wait out its lease).
         let mut consumer = self.new_consumer(&key, &rule).await;
-        loop {
+        // A record's tries so far, kept when its batch is read again (its dead letter still
+        // comes after `max_attempts`).
+        let mut tries: HashMap<(i32, i64), u32> = HashMap::new();
+        'read: loop {
             // Another node took the service: it delivers from here (this loop stops at its pass).
             if !self.owns(&service) {
                 return;
             }
+            let read_at = std::time::Instant::now();
             let records = match resources.read_group(&rule.stream, &rule.topic, &rule.group, &consumer, WAIT_MS, BATCH).await {
                 Ok(r) => {
                     read_failures = 0;
@@ -266,7 +274,7 @@ impl Apps {
                 }
             };
             for r in records {
-                let mut attempt = 1;
+                let mut attempt = tries.remove(&(r.partition, r.offset)).unwrap_or(1);
                 loop {
                     if !self.owns(&service) {
                         return;
@@ -319,6 +327,14 @@ impl Apps {
                         }
                     }
                     let wait = backoff(attempt);
+                    // Its lease would lapse before the next try: let the batch go and read it again
+                    // (this record first) as a fresh consumer.
+                    if read_at.elapsed() + wait >= HOLD {
+                        tries.insert((r.partition, r.offset), attempt + 1);
+                        tokio::time::sleep(wait).await;
+                        consumer = self.new_consumer(&key, &rule).await;
+                        continue 'read;
+                    }
                     // Said on the first failure and then each minute's worth, not every try.
                     if attempt == 1 || wait == MAX_BACKOFF {
                         log.line(format!("push {}: {} {why} for offset {} of partition {}; trying again in {} s", rule.topic, rule.path, r.offset, r.partition, wait.as_secs()));
