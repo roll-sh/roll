@@ -1183,8 +1183,12 @@ waits on a sibling PR reaching main is last.
    as #230 and #235 land (their turn began 2026-11-18 03:00).
 17. **Gate flakes under load, for their owners:** code-sql's `writes_are_serializable_and_retried`
    and `killed_connections_never_lose_or_repeat_acknowledged_writes` (16 threads on one row exhaust
-   the 40 conflict re-runs), and code-control's Linear e2e (30 s for the elicitation). A test-side
-   deadline, not more retries in production, is the likely fix. (The 2026-11-18 turn's combined
+   the 40 conflict re-runs), and code-control's Linear e2e (30 s for the elicitation). Measured
+   2026-11-20 on Postgres 18 at load 40-48: the first took 633-727 runs for its 400 increments
+   (about 1.7 attempts a write, the limit 40) and both passed 5 of 5, so the failures were heavier
+   load than that and no test was changed (8 threads × 50 would take about 1.3). When one fails
+   again, keep its run's "increments took" line and the load: that says whether contention or the
+   machine was the cause. A test-side deadline, not more retries in production, stays the fix. (The 2026-11-18 turn's combined
    gate passed without them: #208, #209, #210, #225, #226, #231, #236 and #239 landed as one gated
    tree, main 53b939213.)
 18. **Enterprise sign-in (#210), what's left:** a live check with a real provider's ID-JAG (Okta's
