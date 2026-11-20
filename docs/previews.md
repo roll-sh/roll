@@ -318,7 +318,11 @@ behind the `Apps` trait:
     those.
   - Deleting the preview deletes the environments.
 - **`roll.toml` containers**, when the project has no roll apps services. The services are the
-  project's repos whose `roll.toml` has a `[preview]` section, named after the repo
+  project's repos whose `roll.toml` has a `[preview]` section, named after the repo. A repo with
+  a Compose file and no `roll.toml` gets its services from roll apps' Compose import (`roll apps
+  import-compose`, New service's "A file"; docs/apps/README.md), whose services then come into
+  each preview through their `pv-` environments: previews read no Compose file themselves, so the
+  two never disagree about one (the Previews tab's empty state says so)
   (`[preview] name = "api"` overrides that). Each runs in the container `roll.toml` describes,
   through code-preview's `Isolation`: Docker here, a Fargate task on the fleet.
   - With `[[preview.states]]` (a name, a page and steps, as `github.states`), `pages =
