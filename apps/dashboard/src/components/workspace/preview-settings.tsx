@@ -3,7 +3,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { isProduction, previewsApi, unmaskedNote, type MaskSuggestion, type MaskSuggestions, type PageState, type PreviewBypass, type PreviewHook, type PreviewJob, type PreviewSettings, type ResourceRule, type SettingsPatch } from "@/lib/previews-api";
 import { ROLL_API } from "@/lib/roll-api";
 import { keepable } from "@/lib/secret-names";
-import { secretsApi } from "@/lib/secrets-api";
+import { needsApproval, secretsApi } from "@/lib/secrets-api";
 import type { PlacedResource } from "@/lib/workspace-api";
 import { KIND_LABEL, resourceKey } from "@/lib/workspace-resources";
 import { Dialog } from "../agents/ui/dialog";
@@ -113,7 +113,17 @@ function Form({
     setKeeping(i);
     setKept(null);
     try {
-      await secretsApi(projectId).set(base, key, { value, message: "kept from the preview rules" });
+      const api = secretsApi(projectId);
+      try {
+        await api.set(base, key, { value, message: "kept from the preview rules" });
+      } catch (e) {
+        // A protected base takes a change request (as roll secrets' own Find opens one): until it's
+        // approved the key isn't there, so the rule keeps its value (a reference would read nothing).
+        if (!needsApproval(e)) throw e;
+        await api.openRequest(base, { path: "/", message: "kept from the preview rules", ops: [{ op: "set", key, value }] });
+        setKept(`${base} is protected: a change request for ${key} waits for approval in roll secrets. Use roll://${base}/${key} here once it's approved.`);
+        return;
+      }
       setEnv((rows) => rows.map((x, j) => (j === i ? [x[0], `roll://${base}/${key}`] : x)));
       setKept(`${key} is in roll secrets (${base}); Save to use it from there.`);
     } catch (e) {
@@ -536,6 +546,13 @@ function Form({
             />
           </Field>
         )}
+        <Field
+          group
+          label="Regressions against main"
+          note="A change whose routes are slower than on the default branch's preview, or whose output has errors that one doesn't, fails the roll/regressions status until they're gone or someone accepts them (routes need traces); required also keeps it from landing in roll."
+        >
+          <Choice value={s.regressions ?? "off"} options={["off", "check", "required"]} onChange={(v) => set("regressions", v)} labels={{ off: "Off", check: "A check", required: "Required to land" }} />
+        </Field>
         {s.github.screenshot && (
           <Field label="Other pages" note="Taken with / at each push and compared the same way (up to 10: /pricing, or another service's, admin:/users).">
             <input value={pages} onChange={(e) => setPages(e.target.value)} placeholder="/ only" className={`${field} h-8 w-full font-mono text-[12px]`} spellCheck={false} />

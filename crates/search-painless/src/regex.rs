@@ -483,7 +483,19 @@ struct Parser<'a> {
     names: Vec<(String, usize)>,
     /// Joni's warnings in [`ONIG`] mode (grok in runtime fields refuses patterns with any).
     warnings: Vec<String>,
+    /// Groups around the one being parsed.
+    depth: usize,
 }
+
+/// Groups a pattern may nest. Parsing, compiling and dropping the tree recurse once per group,
+/// and patterns also compile outside a script's compile thread (grok in ingest pipelines and
+/// runtime fields): Java fails with a `StackOverflowError` in the low thousands, Oniguruma at
+/// its parse depth limit (4096).
+const MAX_NESTING: usize = 1000;
+
+/// Opening parentheses above which [`Regex::compile`] moves to a thread with [`DEEP_STACK`].
+const SHALLOW_OPENS: usize = 64;
+const DEEP_STACK: usize = 64 << 20;
 
 type PR<T> = Result<T, PatternError>;
 
@@ -825,6 +837,19 @@ impl Parser<'_> {
 
     /// After `(`; `None` for a flags-only group like `(?i)`.
     fn group(&mut self) -> PR<Option<Node>> {
+        if self.depth >= MAX_NESTING {
+            if self.onig() {
+                return Err(self.joni("syntax_exception", "parse depth limit over"));
+            }
+            return Err(self.err("Stack overflow during pattern compilation", self.i.saturating_sub(1)));
+        }
+        self.depth += 1;
+        let r = self.group_at();
+        self.depth -= 1;
+        r
+    }
+
+    fn group_at(&mut self) -> PR<Option<Node>> {
         let save_flags = self.flags;
         let open = self.i - 1;
         let node;
@@ -1588,10 +1613,23 @@ impl Compiler {
 
 impl Regex {
     pub fn compile(p: &str, flags: u32) -> Result<Regex, PatternError> {
+        // A deeply nested pattern compiles on a large stack, wherever it's compiled.
+        if p.bytes().filter(|&b| b == b'(').count() > SHALLOW_OPENS {
+            let deep = std::thread::scope(|s| std::thread::Builder::new().name("regex-compile".into()).stack_size(DEEP_STACK).spawn_scoped(s, || Self::compile_here(p, flags)).ok().map(|h| h.join()));
+            match deep {
+                Some(Ok(r)) => return r,
+                Some(Err(panic)) => std::panic::resume_unwind(panic),
+                None => {}
+            }
+        }
+        Self::compile_here(p, flags)
+    }
+
+    fn compile_here(p: &str, flags: u32) -> Result<Regex, PatternError> {
         // `Pattern`'s constructor: Unicode character classes imply Unicode case folding
         let flags = if flags & UNICODE_CHARACTER_CLASS != 0 { flags | UNICODE_CASE } else { flags };
         let chars: Vec<char> = p.chars().collect();
-        let mut ps = Parser { p: &chars, i: 0, flags, groups: 0, names: Vec::new(), warnings: Vec::new() };
+        let mut ps = Parser { p: &chars, i: 0, flags, groups: 0, names: Vec::new(), warnings: Vec::new(), depth: 0 };
         let node = if flags & LITERAL != 0 {
             let fold = ps.fold();
             Node::Concat(chars.iter().map(|&c| Node::Lit(c as u32, fold)).collect())

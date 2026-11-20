@@ -320,6 +320,7 @@ mod tests {
                     owner: None,
                     restored_at: None,
                     ip_allowlist: Vec::new(),
+                    inherit_pending: false,
                     reindex_whitelist: Vec::new(),
                 },
                 crate::store::Caps::NONE,
