@@ -546,6 +546,10 @@ pub struct PreviewSlowerRoute {
     pub name: String,
     pub p50_ms: u64,
     pub main_p50_ms: u64,
+    /// The span inside it whose time grew most against the branch's preview: `(name, ms, the
+    /// branch's ms)`. A name is the preview's code's words (untrusted).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grew: Option<(String, u64, u64)>,
 }
 
 /// One endpoint's time against the branch's.

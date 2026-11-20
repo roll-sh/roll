@@ -196,13 +196,44 @@ pub struct RouteCompared {
 }
 
 pub const MIN_SAMPLES: usize = 5;
-/// How often the holder reads its previews' slower routes onto their records.
-pub const ROUTES_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
-/// How often the holder reads its previews' errors against main's (each a read of their logs).
-pub const NEW_ERRORS_EVERY: std::time::Duration = std::time::Duration::from_secs(300);
 pub const SLOWER_MS: u64 = 100;
 
 /// Each of the preview's routes with main's same one; the slower ones first.
+/// Under one route (traces whose root span is named `route`), each span name's median time in ms:
+/// a trace's spans of one name summed (an N+1's queries are one), the root itself left out.
+pub fn span_medians<'a>(spans: impl IntoIterator<Item = &'a Span>, route: &str) -> HashMap<String, u64> {
+    let spans: Vec<&Span> = spans.into_iter().collect();
+    let roots: std::collections::HashSet<&str> = spans.iter().filter(|s| s.parent.is_empty() && s.name == route).map(|s| s.trace.as_str()).collect();
+    let mut per_trace: HashMap<(&str, &str), u64> = HashMap::new();
+    for s in spans.iter().filter(|s| !s.parent.is_empty() && roots.contains(s.trace.as_str())) {
+        *per_trace.entry((s.trace.as_str(), s.name.as_str())).or_default() += s.end.saturating_sub(s.start) / 1_000_000;
+    }
+    let mut by: HashMap<&str, Vec<u64>> = HashMap::new();
+    for ((_, name), ms) in per_trace {
+        by.entry(name).or_default().push(ms);
+    }
+    by.into_iter()
+        .map(|(name, mut ms)| {
+            // A trace without the span counts as 0 for it: the median is over every trace of the route.
+            ms.resize(roots.len().max(ms.len()), 0);
+            ms.sort_unstable();
+            (name.to_string(), ms[(ms.len() - 1) / 2])
+        })
+        .collect()
+}
+
+/// The span whose median grew most against main's, when it grew by [`GREW_MS`] or more.
+pub fn grew(mine: &HashMap<String, u64>, main: &HashMap<String, u64>) -> Option<crate::GrewSpan> {
+    mine.iter()
+        .map(|(name, ms)| (name, *ms, main.get(name).copied().unwrap_or_default()))
+        .filter(|(_, ms, main_ms)| *ms >= main_ms + GREW_MS)
+        .max_by(|a, b| (a.1 - a.2).cmp(&(b.1 - b.2)).then_with(|| b.0.cmp(a.0)))
+        .map(|(span, ms, main_ms)| crate::GrewSpan { span: span.clone(), ms, main_ms })
+}
+
+/// How much a span must grow to be the reason given (its noise).
+pub const GREW_MS: u64 = 20;
+
 pub fn compare_routes(mine: &[RouteStat], main: &[RouteStat]) -> Vec<RouteCompared> {
     let mut out: Vec<RouteCompared> = mine
         .iter()
@@ -278,11 +309,13 @@ impl Engine {
         out.truncate(100);
         // Names, services (its SDK's resource) and repeated statements are its code's words: masked
         // as its logs are.
-        let words: Vec<String> = out.iter().flat_map(|o| [o.name.clone(), o.service.clone()]).chain(out.iter().filter_map(|o| o.repeated.as_ref().map(|r| r.statement.clone()))).collect();
+        // Its id too: the code chose it (a hex secret sent as one shows as `***`, and opens nothing).
+        let words: Vec<String> = out.iter().flat_map(|o| [o.name.clone(), o.service.clone(), o.trace.clone()]).chain(out.iter().filter_map(|o| o.repeated.as_ref().map(|r| r.statement.clone()))).collect();
         let mut masked = self.masked(id, words).await?.into_iter();
         for o in out.iter_mut() {
             o.name = masked.next().unwrap_or_default();
             o.service = masked.next().unwrap_or_default();
+            o.trace = masked.next().unwrap_or_default();
         }
         for r in out.iter_mut().filter_map(|o| o.repeated.as_mut()) {
             r.statement = masked.next().unwrap_or_default();
@@ -339,8 +372,15 @@ impl Engine {
             None => Vec::new(),
         };
         let mut compared = compare_routes(&mine, &main);
+        // A slower one says where its time went (its spans against main's, kept on this node).
+        let mut grown: Vec<Option<crate::GrewSpan>> = compared.iter().map(|c| if c.slower { base.as_ref().and_then(|b| self.grew_in(id, &b.id, &c.name)) } else { None }).collect();
         if !compared.is_empty() {
-            let words: Vec<String> = compared.iter().map(|c| c.name.clone()).chain(compared.iter().filter_map(|c| c.repeated.as_ref().map(|r| r.statement.clone()))).collect();
+            let words: Vec<String> = compared
+                .iter()
+                .map(|c| c.name.clone())
+                .chain(compared.iter().filter_map(|c| c.repeated.as_ref().map(|r| r.statement.clone())))
+                .chain(grown.iter().flatten().map(|g| g.span.clone()))
+                .collect();
             let mut masked = self.masked(id, words).await?.into_iter();
             for c in compared.iter_mut() {
                 c.name = masked.next().unwrap_or_default();
@@ -348,10 +388,14 @@ impl Engine {
             for r in compared.iter_mut().filter_map(|c| c.repeated.as_mut()) {
                 r.statement = masked.next().unwrap_or_default();
             }
+            for g in grown.iter_mut().flatten() {
+                g.span = masked.next().unwrap_or_default();
+            }
         }
         let routes: Vec<Value> = compared
             .into_iter()
-            .map(|c| json!({ "name": c.name, "count": c.count, "p50_ms": c.p50, "p95_ms": c.p95, "main_p50_ms": c.main_p50, "main_count": c.main_count, "slower": c.slower, "repeated": c.repeated }))
+            .zip(grown)
+            .map(|(c, g)| json!({ "name": c.name, "count": c.count, "p50_ms": c.p50, "p95_ms": c.p95, "main_p50_ms": c.main_p50, "main_count": c.main_count, "slower": c.slower, "repeated": c.repeated, "grew": g }))
             .collect();
         Ok(json!({ "minutes": minutes, "main": base.map(|b| b.id), "routes": routes }))
     }
@@ -380,11 +424,11 @@ impl Engine {
 
     /// The previews this node holds, while their project keeps traces: their routes slower than
     /// main's kept on the record (the verdict strip, the pull request's comment), read at most
-    /// once a [`ROUTES_EVERY`]; a change reports the preview again.
+    /// once a `Config::routes_every`; a change reports the preview again.
     pub(super) fn tend_routes(self: &std::sync::Arc<Self>) {
         {
             let mut last = self.routes_read.lock();
-            if last.is_some_and(|at| at.elapsed() < ROUTES_EVERY) {
+            if last.is_some_and(|at| at.elapsed() < self.cfg.routes_every) {
                 return;
             }
             *last = Some(std::time::Instant::now());
@@ -399,7 +443,7 @@ impl Engine {
             // Errors against main's every few minutes (each a read of their logs).
             let due = {
                 let mut last = me.new_errors_read.lock();
-                let due = last.is_none_or(|at| at.elapsed() >= NEW_ERRORS_EVERY);
+                let due = last.is_none_or(|at| at.elapsed() >= me.cfg.new_errors_every);
                 if due {
                     *last = Some(std::time::Instant::now());
                 }
@@ -412,7 +456,7 @@ impl Engine {
         });
     }
 
-    /// What `tend_routes` does each [`ROUTES_EVERY`], now: main's routes read once for every
+    /// What `tend_routes` does each `Config::routes_every`, now: main's routes read once for every
     /// preview compared with it, and only where its spans are (its holder: elsewhere nothing is
     /// said rather than everything); then the previews', a few at a time.
     pub async fn read_slower_routes(&self) {
@@ -461,14 +505,28 @@ impl Engine {
                 if slower.is_empty() {
                     None
                 } else {
+                    // Where each one's time went: its spans against main's (both kept here).
+                    let grown: Vec<Option<crate::GrewSpan>> = slower.iter().map(|c| self.grew_in(&r.id, &base.id, &c.name)).collect();
                     let known = self.routes_masked.lock().get(&r.id).cloned().unwrap_or_default();
-                    let fresh: Vec<String> = slower.iter().map(|c| c.name.clone()).filter(|n| !known.contains_key(n)).collect();
+                    let mut fresh: Vec<String> = slower.iter().map(|c| c.name.clone()).chain(grown.iter().flatten().map(|g| g.span.clone())).filter(|n| !known.contains_key(n)).collect();
+                    fresh.sort();
+                    fresh.dedup();
                     let mut names = known;
                     if !fresh.is_empty() {
                         let Ok(masked) = self.masked(&r.id, fresh.clone()).await else { return };
                         names.extend(fresh.into_iter().zip(masked));
                     }
-                    let routes = slower.iter().map(|c| crate::SlowerRoute { name: names.get(&c.name).cloned().unwrap_or_default(), count: c.count, p50_ms: c.p50, main_p50_ms: c.main_p50.unwrap_or_default() }).collect();
+                    let routes = slower
+                        .iter()
+                        .zip(grown)
+                        .map(|(c, g)| crate::SlowerRoute {
+                            name: names.get(&c.name).cloned().unwrap_or_default(),
+                            count: c.count,
+                            p50_ms: c.p50,
+                            main_p50_ms: c.main_p50.unwrap_or_default(),
+                            grew: g.map(|g| crate::GrewSpan { span: names.get(&g.span).cloned().unwrap_or_default(), ..g }),
+                        })
+                        .collect();
                     self.routes_masked.lock().insert(r.id.clone(), names);
                     Some(crate::SlowerRoutes { branch: base.branch.clone().unwrap_or_else(|| "main".into()), routes })
                 }
@@ -484,6 +542,18 @@ impl Engine {
         if self.store.set_runtime_fact(&r.id, "slower_routes", kept.as_ref()).unwrap_or(false) && moved {
             self.report(r).await;
         }
+    }
+
+    /// The span of `route` whose time grew most in preview `id` against `main`'s (spans this node
+    /// keeps; names unmasked).
+    pub(super) fn grew_in(&self, id: &str, main: &str, route: &str) -> Option<crate::GrewSpan> {
+        let kept = self.traces.lock();
+        let of = |p: &str| kept.get(p).map(|k| span_medians(k.list.iter().map(|(s, _)| s), route)).unwrap_or_default();
+        let (mine, theirs) = (of(id), of(main));
+        if theirs.is_empty() && kept.get(main).is_none_or(|k| k.list.is_empty()) {
+            return None;
+        }
+        grew(&mine, &theirs)
     }
 
     /// `GET …/{id}/traces/{trace}`: one trace's spans, oldest first, names and attributes masked.
@@ -513,6 +583,10 @@ impl Engine {
             // Its code chose all of it: the name, the service (its SDK's resource) and each attribute.
             s.name = code_preview::runner::mask(&s.name, &values);
             s.service = code_preview::runner::mask(&s.service, &values);
+            // Its ids are the code's choice too.
+            for x in [&mut s.span, &mut s.parent] {
+                *x = code_preview::runner::mask(x, &values);
+            }
             for (k, v) in &mut s.attrs {
                 *k = code_preview::runner::mask(k, &values);
                 *v = code_preview::runner::mask(v, &values);
@@ -554,6 +628,28 @@ mod tests {
         let id = "4bf92f3577b34da6a3ce929d0e0e4736";
         let found: Vec<String> = trace_ids_in(&format!("trace_id={id} traceparent=00-{}-00f067aa0ba902b7-01 x{id}0 {}", id.to_ascii_uppercase(), &id[..31])).collect();
         assert_eq!(found, [id, id]);
+    }
+
+    /// Where a slower route's time went: each span name's median under the route (a trace's
+    /// spans of a name summed, a trace without it counted as 0), the one that grew most and by
+    /// at least the noise.
+    #[test]
+    fn a_slower_routes_time_is_put_on_the_span_that_grew() {
+        let span = |t: &str, id: &str, parent: &str, name: &str, ms: u64| Span { trace: t.repeat(32), span: id.into(), parent: parent.into(), name: name.into(), service: "web".into(), start: 0, end: ms * 1_000_000, error: false, attrs: vec![] };
+        let main = [span("a", "1", "", "GET /orders", 120), span("a", "2", "1", "SELECT orders", 40), span("a", "3", "1", "render", 30)];
+        let mine = [
+            span("b", "1", "", "GET /orders", 420),
+            span("b", "2", "1", "SELECT orders", 40),
+            span("b", "3", "1", "SELECT items", 150),
+            span("b", "4", "1", "SELECT items", 150),
+            span("b", "5", "1", "render", 35),
+            span("c", "1", "", "GET /other", 900),
+            span("c", "2", "1", "SELECT items", 900),
+        ];
+        let (mine, main) = (span_medians(&mine, "GET /orders"), span_medians(&main, "GET /orders"));
+        assert_eq!(mine.get("SELECT items"), Some(&300), "summed in its trace, other routes' left out");
+        assert_eq!(grew(&mine, &main), Some(crate::GrewSpan { span: "SELECT items".into(), ms: 300, main_ms: 0 }));
+        assert_eq!(grew(&main, &main), None, "nothing grew");
     }
 
     #[test]
