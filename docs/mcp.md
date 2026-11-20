@@ -372,7 +372,8 @@ roll implements the MCP authorization spec (2025-06-18 and 2025-11-25) with OAut
     for `tools/call`, `resources/read` and `prompts/get` (the `=?base64?…?=` form decoded), or 400
     `HeaderMismatch` (`-32020`), so a proxy routing on headers and roll running the body agree. A
     version roll doesn't speak is 400 `UnsupportedProtocolVersion` (`-32022`) with `supported`; an
-    unknown method is 404 with `-32601`. It's one message, never a batch.
+    unknown method is 404 with `-32601`. It's one message, never a batch. A resource that isn't
+    there is `-32602` (Invalid Params, SEP-2164); the handshake revisions keep their `-32002`.
   - `server/discover` answers the versions, capabilities and instructions. Every result has
     `resultType` and `_meta["io.modelcontextprotocol/serverInfo"]`; lists (and discover) have
     `ttlMs: 60000` and `cacheScope: "private"`: a token's tools are its own, and its rules can
