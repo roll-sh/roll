@@ -191,7 +191,7 @@ impl Secrets {
         let url = dek.seal(&aad(project, &id, "url"), &Value::new(n.url.clone()));
         let sealed = dek.seal(&aad(project, &id, "secret"), &Value::new(secret.clone()));
         let now = self.db.now_ms()?;
-        let r = Rotator { id: id.clone(), name: n.name, host: names::url_host(&n.url), created_at: now, created_by: caller.principal.clone() };
+        let r = Rotator { id: id.clone(), name: n.name, host: names::url_host(&n.url), created_at: now, created_by: caller.maker_id() };
         self.db.write(|c| {
             if c.query_row("SELECT 1 FROM rotators WHERE project_id = ? AND name = ?", [project, &r.name], |_| Ok(())).optional()?.is_some() {
                 return Err(Error::Conflict("exists", format!("a rotator named {} exists", r.name)));

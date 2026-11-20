@@ -1392,6 +1392,10 @@ impl roll_auth::Grants for Access {
 
     /// A person's session grant now (their memberships), for what they made that acts later:
     /// `None` once they can't sign in. Blocking; never cached.
+    fn owner(&self, id: &str) -> Option<Option<String>> {
+        self.store.get(id).ok().map(|g| g.user)
+    }
+
     fn session(&self, user: &str) -> Option<roll_auth::Grant> {
         self.people.get()?.person_now(user).ok()??;
         self.session_grant(user, None).ok()

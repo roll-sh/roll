@@ -619,15 +619,20 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
         // can name any product's resources, whatever the person reaches. A person places only what
         // `Owners` says is theirs (their repo, their cluster), or moves on its canvas what's already
         // at home in the project.
-        let ok = !as_user && moved.is_some_and(|m| scope.outcome(&Target::One(m), Action::Admin) == Outcome::Allow);
-        let user = person.as_ref().filter(|_| as_user).map(|p| p.user.clone());
+        // Taking a resource off a person's own canvas is theirs to do (the project's write): only
+        // putting one on, or making a project its home, needs it to be theirs.
+        let taking_off = as_user && ctx.method == "DELETE";
+        let ok = taking_off || (!as_user && moved.is_some_and(|m| scope.outcome(&Target::One(m), Action::Admin) == Outcome::Allow));
+        let user = person.as_ref().filter(|_| as_user && !ok).map(|p| p.user.clone());
         let kind = params.iter().find(|(k, _)| k == "kind").and_then(|(_, v)| roll_workspace::Kind::parse(v).ok());
         let project = params.iter().find(|(k, _)| k == "id").map(|(_, v)| v.clone());
         let own = match (user, kind, project) {
             (Some(u), Some(k), Some(p)) => {
                 let a = access.clone();
                 tokio::task::spawn_blocking(move || {
-                    a.workspace.get().is_some_and(|ws| ws.owned_by(&u, k, &r#ref) || ws.home_of(k, &r#ref).ok().flatten().as_deref() == Some(p.as_str()))
+                    a.workspace.get().is_some_and(|ws| {
+                        ws.owned_by(&u, k, &r#ref) || (roll_workspace::members::HOME_KINDS.contains(&k) && ws.home_of(k, &r#ref).ok().flatten().as_deref() == Some(p.as_str()))
+                    })
                 })
                 .await
                 .unwrap_or(false)

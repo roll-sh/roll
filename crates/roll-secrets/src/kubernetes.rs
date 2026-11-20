@@ -440,6 +440,10 @@ impl LinkProvider for Provider {
         &[("token", Mode::Dynamic), ("api_url", Mode::Dynamic), ("ca", Mode::Dynamic)]
     }
 
+    fn maker(&self, r#ref: &str) -> Option<(String, String)> {
+        self.db.read(|c| c.query_row("SELECT project_id, created_by FROM kubernetes_clusters WHERE id = ?", [r#ref], |r| Ok((r.get(0)?, r.get(1)?))).optional()).ok().flatten()
+    }
+
     fn name(&self, r#ref: &str) -> Option<String> {
         self.db.read(|c| c.query_row("SELECT name FROM kubernetes_clusters WHERE id = ?", [r#ref], |r| r.get::<_, String>(0)).optional()).ok().flatten()
     }
@@ -561,7 +565,7 @@ impl Secrets {
         let sealed_token = dek.seal(&aad(project, &id, "token"), &token);
         let sealed_ca = ca.map(|c| dek.seal(&aad(project, &id, "ca"), &Value::new(c)));
         let now = self.db.now_ms()?;
-        let k = KubernetesCluster { id: id.clone(), name: n.name, api_url, has_ca: sealed_ca.is_some(), created_at: now, created_by: caller.principal.clone() };
+        let k = KubernetesCluster { id: id.clone(), name: n.name, api_url, has_ca: sealed_ca.is_some(), created_at: now, created_by: caller.maker_id() };
         self.db.write(|c| {
             if c.query_row("SELECT 1 FROM kubernetes_clusters WHERE project_id = ? AND name = ?", [project, &k.name], |_| Ok(())).optional()?.is_some() {
                 return Err(Error::Conflict("exists", format!("a Kubernetes cluster named {} exists", k.name)));

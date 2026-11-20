@@ -48,7 +48,8 @@ The answer:
     stream, nosql, search, service); a product deleting the resource drops it
     (`Workspace::forget_resource`). A person homes or places only what `Owners` says is theirs;
   - what `Owners` (set by rolld) says is one of the project's **owners'** (role `owner`):
-    - everything, for an admin;
+    - for the person who made the project, as before members: everything, when they're an admin
+      account (`Owners::trusts`); for another owner, only what's their own (`Owners::owns`);
     - a repo under the owner's roll code owner (`ada/…`);
     - a search cluster the owner owns;
     - nothing else, until a product says who owns its resources.

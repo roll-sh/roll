@@ -224,6 +224,13 @@ pub trait Grants: Send + Sync + 'static {
         let _ = user;
         None
     }
+    /// Whose grant `id` is, whether or not it still works: `Some(Some(usr_…))` a person's,
+    /// `Some(None)` the operator's, `None` unknown. What a person registered through their token
+    /// (a rotator, a sink) is theirs, and acts while they may, after the token ends. Blocking.
+    fn owner(&self, id: &str) -> Option<Option<String>> {
+        let _ = id;
+        None
+    }
 }
 
 /// The evaluator for scoped tokens (`roll-access`).

@@ -260,7 +260,7 @@ impl Secrets {
             c.execute(
                 "INSERT INTO audit_sinks (id, project_id, url, secret, cursor, status, error, delivered_at, running_until, retry_at, created_at, created_by, format, token)
                  VALUES (?, ?, ?, ?, ?, 'new', NULL, NULL, 0, 0, ?, ?, ?, ?)",
-                params![id, project, n.url.trim(), sealed, cursor, now, caller.principal, format, sealed_token],
+                params![id, project, n.url.trim(), sealed, cursor, now, caller.maker_id(), format, sealed_token],
             )?;
             audit::record(c, self.keys()?, project, caller, "sink.create", None, None, &[], &format!("audit stream to {} ({format})", host(&n.url)), now)?;
             Ok(c.query_row(&format!("SELECT {COLUMNS} FROM audit_sinks WHERE id = ?"), [&id], sink_row)?)
@@ -317,7 +317,7 @@ impl Secrets {
             let gone = roll_target(&url).is_some_and(|(kind, name)| !self.members(&project).map(|m| m.contains(&(kind.to_string(), name.to_string()))).unwrap_or(false));
             // The project's audit log goes out only while whoever set the sink up may still manage
             // the project: a removed or demoted admin's URL stops getting it.
-            let maker_ok = self.maker_reaches(&by, &[(crate::access::Action::Admin, crate::access::Scope::whole(&project))])?;
+            let maker_ok = self.registration_reaches(&by, &[(crate::access::Action::Admin, crate::access::Scope::whole(&project))])?;
             let sent = if gone {
                 Err(Error::BadRequest(format!("{url} isn't on this project's canvas any more")))
             } else if !maker_ok {

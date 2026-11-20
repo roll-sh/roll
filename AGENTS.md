@@ -380,10 +380,13 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     what's on it: anything acting on a resource through a project asks
     `roll_workspace::Workspace::trusts` (secrets' `members`, `counts_for_repo`, roll previews),
     never membership alone, and a person's own grant never proves a resource is theirs (placing and
-    homing take `Owners`). What a person made acts later only at their rights now:
-    `maker_reaches(by, needs)` with the action and scope it exercises (an identity's rule, `admin`
-    for backups, gateways, ACME bindings, sinks, notify URLs and registered rotators, outside
-    databases and directories), checked on every use; syncs push as them (`person_caller`).
+    homing take `Owners`). What a person made acts later only at their rights now, checked on every
+    use with the action and scope it exercises: `maker_reaches(by, needs)` for identities (their
+    rule), backups, gateways and ACME bindings; `registration_reaches` for sinks, notify URLs and
+    every registered provider (`LinkProvider::maker`, through `Secrets::provider_for`); exports on
+    every read (`dead_exports`); syncs push as them (`person_caller`). A registration stores the
+    person, never their token (`Caller::maker_id`); shares and leases follow their maker through
+    `Secrets::maker` (`member_changed`).
   - Workload identities (`identities.rs`) log CI in with its own OIDC token: an issuer is a URL a
     tenant chose, fetched only through rolld's guarded client (`Deliver::get`), and a shared issuer
     (GitHub, GitLab) needs a subject that names one repo.

@@ -181,6 +181,10 @@ impl LinkProvider for Provider {
         &[("access_token", Mode::Dynamic)]
     }
 
+    fn maker(&self, r#ref: &str) -> Option<(String, String)> {
+        self.db.read(|c| c.query_row("SELECT project_id, created_by FROM cloud_accounts WHERE id = ?", [r#ref], |r| Ok((r.get(0)?, r.get(1)?))).optional()).ok().flatten()
+    }
+
     fn name(&self, r#ref: &str) -> Option<String> {
         self.account(r#ref).ok().map(|(_, name, _)| name)
     }
@@ -277,7 +281,7 @@ impl Secrets {
         exchange(&clouds, &self.db, keys, project, &n.account, 900)
             .map_err(|why| Error::BadRequest(format!("{} didn't give roll a token: {why} (its trust names issuer {} and subject {sub})", n.account.label(), clouds.issuer)))?;
         let now = self.db.now_ms()?;
-        let a = CloudAccount { id: names::new_id("cla", 16), name: n.name, account: n.account, created_at: now, created_by: caller.principal.clone() };
+        let a = CloudAccount { id: names::new_id("cla", 16), name: n.name, account: n.account, created_at: now, created_by: caller.maker_id() };
         self.db.write(|c| {
             if c.query_row("SELECT 1 FROM cloud_accounts WHERE project_id = ? AND name = ?", [project, &a.name], |_| Ok(())).optional()?.is_some() {
                 return Err(Error::Conflict("exists", format!("a cloud account named {} exists", a.name)));

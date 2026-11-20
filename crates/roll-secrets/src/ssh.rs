@@ -418,6 +418,10 @@ impl LinkProvider for Provider {
         &[("certificate", Mode::Dynamic), ("private_key", Mode::Dynamic)]
     }
 
+    fn maker(&self, r#ref: &str) -> Option<(String, String)> {
+        self.db.read(|c| c.query_row("SELECT project_id, created_by FROM ssh_cas WHERE id = ?", [r#ref], |r| Ok((r.get(0)?, r.get(1)?))).optional()).ok().flatten()
+    }
+
     fn name(&self, r#ref: &str) -> Option<String> {
         self.db.read(|c| c.query_row("SELECT name FROM ssh_cas WHERE id = ?", [r#ref], |r| r.get::<_, String>(0)).optional()).ok().flatten()
     }
@@ -510,7 +514,7 @@ impl Secrets {
         let public_key = format!("ssh-ed25519 {} roll-secrets:{}", b64(&ed25519_blob(&key.verifying_key().to_bytes())), n.name);
         let sealed = dek.seal(&aad(project, &id), &Value::new(b64(&key.to_bytes())));
         let now = self.db.now_ms()?;
-        let ca = SshCa { id: id.clone(), name: n.name, known_hosts: known_hosts(&public_key, &policy), public_key, policy, created_at: now, created_by: caller.principal.clone() };
+        let ca = SshCa { id: id.clone(), name: n.name, known_hosts: known_hosts(&public_key, &policy), public_key, policy, created_at: now, created_by: caller.maker_id() };
         self.db.write(|c| {
             if c.query_row("SELECT 1 FROM ssh_cas WHERE project_id = ? AND name = ?", [project, &ca.name], |_| Ok(())).optional()?.is_some() {
                 return Err(Error::Conflict("exists", format!("an SSH CA named {} exists", ca.name)));

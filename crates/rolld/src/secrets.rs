@@ -1200,7 +1200,7 @@ impl roll_secrets::People for People {
 impl roll_workspace::People for People {
     fn person(&self, user: &str) -> Option<roll_workspace::Person> {
         let u = self.accounts.user(user).ok().filter(|u| !u.disabled)?;
-        Some(roll_workspace::Person { handle: u.handle, email: Some(u.email).filter(|e| !e.is_empty()) })
+        Some(roll_workspace::Person { handle: u.handle, email: Some(u.email).filter(|e| !e.is_empty()), admin: u.admin })
     }
 
     fn mail(&self, email: &str, subject: &str, text: &str) {

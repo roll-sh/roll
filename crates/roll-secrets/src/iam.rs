@@ -104,6 +104,10 @@ impl LinkProvider for Provider {
         &[("access_key_id", Mode::Managed), ("secret_access_key", Mode::Managed)]
     }
 
+    fn maker(&self, r#ref: &str) -> Option<(String, String)> {
+        self.db.read(|c| c.query_row("SELECT project_id, created_by FROM aws_users WHERE id = ?", [r#ref], |r| Ok((r.get(0)?, r.get(1)?))).optional()).ok().flatten()
+    }
+
     fn name(&self, r#ref: &str) -> Option<String> {
         self.user(r#ref).ok().map(|(name, ..)| name)
     }
@@ -165,7 +169,7 @@ impl Secrets {
             .ok_or_else(|| Error::BadRequest(format!("no AWS role {} in this project that trusts roll by ExternalId: register the role first (IAM users act through an ExternalId role)", n.role)))?;
         sts.iam_keys(&arn, &external_id(project), &n.user).map_err(|why| Error::BadRequest(format!("roll couldn't list {}'s access keys as {arn}: {why}", n.user)))?;
         let now = self.db.now_ms()?;
-        let u = AwsUser { id: names::new_id("awu", 16), name: n.name, role: n.role, user: n.user, created_at: now, created_by: caller.principal.clone() };
+        let u = AwsUser { id: names::new_id("awu", 16), name: n.name, role: n.role, user: n.user, created_at: now, created_by: caller.maker_id() };
         self.db.write(|c| {
             if c.query_row("SELECT 1 FROM aws_users WHERE project_id = ? AND name = ?", [project, &u.name], |_| Ok(())).optional()?.is_some() {
                 return Err(Error::Conflict("exists", format!("an AWS user named {} exists", u.name)));

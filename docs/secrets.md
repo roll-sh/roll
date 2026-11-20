@@ -3847,10 +3847,18 @@ every use with the action and scope the made thing exercises, nothing broader; a
 and the operator always pass):
 
 - a scheduled backup runs while its maker may still `admin` and `reveal` the whole project;
-- a gateway, an ACME external account binding, an audit sink, an environment's notify URL, and a
-  rotator, SaaS rotator, outside database or directory someone registered work while their maker is
-  still the project's admin (`Secrets::provider_for` before issuing, reading, renewing or rotating
-  through one; revoking what one issued always goes on);
+- a gateway, an ACME external account binding, an audit sink, an environment's notify URL, and
+  every registered provider (a rotator, SaaS rotator, outside database, directory, Kubernetes
+  cluster, GitHub App, Snowflake or Atlas account, AWS role or IAM user, cloud account, CA or SSH
+  CA) work while their maker is still the project's admin (`Secrets::provider_for` before issuing,
+  reading, leasing, renewing or rotating through one; revoking what one issued always goes on);
+- what a person **registers** through a token of theirs (a sink, a notify URL, a provider) is
+  theirs (`Caller::maker_id` stores `usr_…`): it outlives the token, at their rights now. A row from
+  before that names the token stands for its person through roll-access (`Grants::owner`). What a
+  token **does** stays the token's: a folder it shared with another project, a one-time share and a
+  lease end with the token or its person, whichever comes first (`dead_exports` on every read,
+  `member_changed`). Identities, gateways, backups and ACME bindings stay bound to the token that
+  made them, as before members, so revoking a leaked token stops them;
 - a workload identity logs in only while its maker's session allows every action of its rule in
   each of its environments and folders, and the token it gets runs within that session too (it's
   the maker's, so `Within` caps it on each request);

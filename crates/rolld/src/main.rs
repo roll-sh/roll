@@ -617,6 +617,21 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
     // above this line, or its links 404.
     // People's accounts: what a person made acts while they can sign in, and a person's canvas
     // stands only for what's theirs (roll_workspace::Workspace::trusts, asked by every consumer).
+    // A deleted account leaves every project through the removal path (docs/members.md): roll
+    // accounts' outbox calls this after the deletion's write, and again until it succeeds.
+    {
+        let ws = workspace.clone();
+        accounts.on_deleted(Box::new(move |user| ws.forget_person(user, None).map(|_| ()).map_err(|e| e.to_string())));
+        let a = accounts.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                tick.tick().await;
+                let a = a.clone();
+                let _ = tokio::task::spawn_blocking(move || a.run_deletions()).await;
+            }
+        });
+    }
     let people = secrets::People { accounts, code: code.as_ref().map(|c| c.code.clone()), search: search.as_ref().map(|s| s.control.clone()) };
     workspace.set_owners(std::sync::Arc::new(people.clone()));
     // Members' handles and addresses, and invite links to the dashboard (docs/members.md).

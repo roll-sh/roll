@@ -56,22 +56,6 @@ pub struct AccessAudit(pub Arc<roll_access::Access>);
 
 impl roll_accounts::audit::Audit for AccessAudit {
     fn record(&self, e: roll_accounts::audit::AccountEvent) {
-        // A deleted account leaves every project through the removal path (docs/members.md,
-        // "The last owner"): the audit log, D7's revocations and secrets' hook, as a removal.
-        if e.ok && e.action == "DELETE /v1/accounts/me"
-            && let (Some(user), Some(ws)) = (e.target.clone(), self.0.workspace.get().cloned())
-        {
-            let ip = e.ip.map(|ip| ip.to_string());
-            let left = move || {
-                if let Err(err) = ws.forget_person(&user, ip) {
-                    tracing::error!(error = %err, "removing a deleted account's memberships");
-                }
-            };
-            match tokio::runtime::Handle::try_current() {
-                Ok(rt) => drop(rt.spawn_blocking(left)),
-                Err(_) => left(),
-            }
-        }
         let mut args = serde_json::json!({ "actor": e.actor });
         if !e.detail.is_null() {
             args["detail"] = e.detail;

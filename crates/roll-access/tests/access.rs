@@ -104,7 +104,7 @@ struct Addresses(Arc<People>);
 impl roll_workspace::People for Addresses {
     fn person(&self, user: &str) -> Option<roll_workspace::Person> {
         let p = self.0.0.lock().unwrap().get(user).cloned()?;
-        Some(roll_workspace::Person { email: Some(format!("{}@acme.test", p.handle)), handle: p.handle })
+        Some(roll_workspace::Person { email: Some(format!("{}@acme.test", p.handle)), handle: p.handle, admin: p.admin })
     }
 }
 
@@ -2642,4 +2642,8 @@ async fn a_persons_grant_never_homes_or_places_someone_elses_resource() {
     assert_eq!(d.as_user("usr_mal", Method::PUT, &format!("/v1/workspace/projects/{id}/resources/postgres/prj_theirs"), Some(json!({ "x": 1, "y": 1 }))).await.0, StatusCode::OK);
     // A bucket's name can be made again by someone else: it gets no home at all.
     assert_eq!(d.call(OPERATOR, Method::PUT, &format!("/v1/workspace/projects/{id}/homes/bucket/acme-prod"), None).await.0, StatusCode::BAD_REQUEST);
+    // Taking something off her own canvas is hers to do, whoever put it there.
+    let place = format!("/v1/workspace/projects/{id}/resources/bucket/acme-prod");
+    assert_eq!(d.call(OPERATOR, Method::PUT, &place, Some(json!({ "x": 0, "y": 0 }))).await.0, StatusCode::OK);
+    assert_eq!(d.as_user("usr_mal", Method::DELETE, &place, None).await.0, StatusCode::NO_CONTENT);
 }

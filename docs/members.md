@@ -201,14 +201,17 @@ ref)` answers yes when:
 
 1. the project is the operator's (`owner` empty), as now; or
 2. the resource's **home** is this project: it was made through this project (a create the
-   evaluator placed with `X-Roll-Project`), or the operator or an admin set it there; or
-3. `Owners` says the resource is one of the project's **owners'** (role `owner`): their repos,
-   their search clusters, and everything for an admin, as today. Before members, this was asked
-   of the project's creator.
+   evaluator placed with `X-Roll-Project`), or someone set it there who may: the operator, or a
+   person whose own it is (`Owners`). Only kinds whose ids are never given out again have homes
+   (`HOME_KINDS`); or
+3. `Owners` says the resource is one of the project's **owners'** (role `owner`): their repos and
+   their search clusters (`Owners::owns`). The person who made the project also counts as before
+   members (`Owners::trusts`: everything, when they're an admin account); an admin account added
+   as an owner later adds only what's its own.
 
 A resource has at most one home (`homes`, keyed by kind and ref). Moving it to another project's
-canvas doesn't move its home. Only the operator, an admin, or an owner of both projects can
-re-home it, in one write.
+canvas doesn't move its home. Moving a home away from a project takes being that project's admin
+too, in one write.
 
 What this means for members:
 

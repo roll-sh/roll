@@ -802,7 +802,7 @@ impl roll_workspace::People for People {
     fn person(&self, user: &str) -> Option<roll_workspace::Person> {
         roll_secrets::People::person(self, user).ok().flatten()?;
         let handle = user.strip_prefix("usr_")?;
-        Some(roll_workspace::Person { handle: handle.into(), email: Some(format!("{handle}@example.com")) })
+        Some(roll_workspace::Person { handle: handle.into(), email: Some(format!("{handle}@example.com")), admin: false })
     }
 }
 
@@ -811,6 +811,12 @@ impl roll_workspace::Owners for People {
     fn trusts(&self, user: &str, kind: roll_workspace::Kind, r#ref: &str) -> bool {
         match roll_secrets::People::person(self, user) {
             Ok(Some(p)) => p.admin || (kind == roll_workspace::Kind::Repo && r#ref.starts_with(&format!("{}/", p.code_owner.unwrap_or_default()))),
+            _ => false,
+        }
+    }
+    fn owns(&self, user: &str, kind: roll_workspace::Kind, r#ref: &str) -> bool {
+        match roll_secrets::People::person(self, user) {
+            Ok(Some(p)) => kind == roll_workspace::Kind::Repo && r#ref.starts_with(&format!("{}/", p.code_owner.unwrap_or_default())),
             _ => false,
         }
     }
@@ -920,6 +926,8 @@ struct Gate {
     secrets: std::sync::OnceLock<Arc<Secrets>>,
     /// Workload logins' grants: roll-access's token list leaves them out.
     workloads: Mutex<std::collections::BTreeSet<String>>,
+    /// Every grant's person, revoked ones too (roll-access keeps revoked rows).
+    owners: Mutex<BTreeMap<String, Option<String>>>,
 }
 
 impl Gate {
@@ -930,6 +938,7 @@ impl Gate {
         let (secret, id) = (format!("rlt_test{n}"), format!("tok_{n}"));
         let grant = roll_auth::Grant { ask_otherwise: false, user: user.map(Into::into), id: id.clone().into(), name: name.into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(roll_auth::scope::Scope(vec![rule])) };
         tokens.insert(secret.clone(), grant);
+        self.owners.lock().unwrap().insert(id.clone(), user.map(Into::into));
         (secret, id)
     }
 
@@ -962,6 +971,10 @@ impl roll_auth::Grants for Granted {
             Some(user) if roll_secrets::People::person(&*self.people, user).ok().flatten().is_none() => None,
             _ => Some(g),
         }
+    }
+
+    fn owner(&self, id: &str) -> Option<Option<String>> {
+        self.gate.owners.lock().unwrap().get(id).cloned()
     }
 
     fn session(&self, user: &str) -> Option<roll_auth::Grant> {
@@ -1087,6 +1100,12 @@ impl Api {
         let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links, syncs, open: true, trust_forwarded_for: false, web_url: None, deliver: Some(sent.clone()), grants: Some(granted), people: Some(people.clone()), workloads: Some(gate.clone()), kms: Some(kms.clone()), sts: Some(sts.clone()), outside: Some(outside.clone()), directory: Some(directory.clone()), github: Some(github.clone()), clouds: Some(roll_secrets::clouds::Clouds { issuer: ISSUER_URL.into(), tokens: clouds.clone() }), gateways: None };
         let secrets = Arc::new(Secrets::new(db.clone(), ws.clone(), opts).unwrap());
         let _ = gate.secrets.set(secrets.clone());
+        // As rolld: a member removed, demoted or gone ends what they shared and handed out.
+        let s2 = secrets.clone();
+        ws.on_event(Box::new(move |e| match (e.action.as_str(), &e.subject) {
+            ("member.remove" | "member.leave" | "member.role", Some(user)) => s2.member_changed(&e.project, user).map_err(|e| e.to_string()),
+            _ => Ok(()),
+        }));
         let router = roll_workspace::router(ws.clone()).merge(roll_secrets::router(secrets.clone())).layer(axum::middleware::from_fn_with_state(gate.clone(), fake_gate));
         let mut api = Api { sent, gate, kms, sts, ws: ws.clone(), people, router, secrets, db, fake, sync, outside, directory, github, clouds, project: String::new(), _dir: dir };
         let (_, p) = api.call(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "shop" }))).await;
@@ -4909,4 +4928,83 @@ async fn a_removed_admins_rotator_stops_choosing_values() {
     let (s, e) = api.call(Method::POST, "/environments/production/secrets/STRIPE_KEY/rotate", None).await;
     assert!(!s.is_success() && e.to_string().contains("usr_cat"), "{s} {e}");
     assert_eq!(api.values("production", "/").await["values"]["STRIPE_KEY"], "vendor-key-1", "the old value stands");
+}
+
+
+/// The re-review (docs/members.md, "Remove, and leave"): what a member did through their own
+/// token is theirs. What they registered (a sink, a notify URL) outlives the token, at their rights
+/// now; what the token handed out (a folder shared with another project, a one-time share, a
+/// lease) ends with them. Removed, all of it stops.
+#[tokio::test]
+async fn what_a_member_did_through_their_token_follows_them() {
+    use base64::Engine as _;
+    let api = Api::new().await;
+    let p = api.project.clone();
+    let (_, inv) = api.call(Method::POST, &format!("/v1/workspace/projects/{p}/invites"), Some(json!({ "email": "cat@example.com", "role": "admin" }))).await;
+    let t = inv["url"].as_str().unwrap().split("token=").nth(1).unwrap().to_string();
+    assert_eq!(api.signed_in("cat", false, Method::POST, &format!("/v1/workspace/invites/{t}/accept"), None).await.0, StatusCode::OK);
+    api.ok(Method::PUT, &format!("/v1/workspace/projects/{p}/resources/bucket/assets"), Some(json!({ "x": 0, "y": 0 }))).await;
+    api.set("production", "DB", "prod-db").await;
+    api.ok(Method::PUT, "/environments/staging/secrets/TEMP_KEY", Some(json!({ "link": { "kind": "bucket", "ref": "assets", "field": "access_key_id", "mode": "dynamic", "options": { "ttl_minutes": 60 } } }))).await;
+    let (_, other) = api.call(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "platform" }))).await;
+    let platform = other["id"].as_str().unwrap().to_string();
+    // She's in platform too: a folder is shared only with a project its sharer can see.
+    let (_, inv) = api.call(Method::POST, &format!("/v1/workspace/projects/{platform}/invites"), Some(json!({ "email": "cat@example.com", "role": "viewer" }))).await;
+    let t = inv["url"].as_str().unwrap().split("token=").nth(1).unwrap().to_string();
+    assert_eq!(api.signed_in("cat", false, Method::POST, &format!("/v1/workspace/invites/{t}/accept"), None).await.0, StatusCode::OK);
+
+    let actions = [roll_secrets::Action::Read, roll_secrets::Action::Reveal, roll_secrets::Action::Write, roll_secrets::Action::Admin];
+    let token = api.gate.issue("cat's cli", roll_secrets::access::rule(&p, None, None, &actions), Some("usr_cat"));
+    let with = |m: Method, path: &str, body: Value| {
+        let (api, token, path) = (&api, token.clone(), path.to_string());
+        async move {
+            let (s, v) = api.req(m.clone(), &path, Some(body), Some(&token)).await;
+            assert!(s.is_success(), "{m} {path}: {s} {v}");
+            v
+        }
+    };
+    // Through the token: share production with platform, a one-time share, a lease, a sink, a
+    // notify URL.
+    with(Method::PUT, "/environments/production/exports?path=/", json!([{ "project": platform }])).await;
+    api.ok(Method::PUT, &format!("/v1/secrets/projects/{platform}/environments/staging/imports?path=/"), Some(json!([{ "project": p, "environment": "production", "path": "/" }]))).await;
+    let imported = || {
+        let (api, path) = (&api, format!("/v1/secrets/projects/{platform}/environments/staging/values"));
+        async move { api.ok(Method::GET, &path, None).await }
+    };
+    assert_eq!(imported().await["values"]["DB"], "prod-db");
+    let blob = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([7u8; 40]);
+    let share = with(Method::POST, "/shares", json!({ "ciphertext": blob, "note": "db", "views": 3, "ttl_minutes": 60 })).await;
+    let lease = with(Method::POST, "/environments/staging/resolve", json!({ "consumer": "ci:deploy" })).await["leases"][0].as_str().unwrap().to_string();
+    with(Method::POST, "/audit/sinks", json!({ "url": "https://siem.example/roll" })).await;
+    with(Method::PUT, "/environments/production/policy", json!({ "protected": true, "approvals": 1, "notify_url": "https://hooks.example/T0/B0/x" })).await;
+    let sweep = || {
+        let (s, db) = (api.secrets.clone(), api.db.clone());
+        async move {
+            // Every audit row settled, so the sink has something to send.
+            db.write(|c| c.execute("UPDATE audit SET at = at - 60000", ())).unwrap();
+            tokio::task::spawn_blocking(move || s.sweep().unwrap()).await.unwrap();
+        }
+    };
+    let sent = || api.sent.0.lock().unwrap().len();
+
+    // The token ends: what she registered is hers and goes on; what the token shared ends with it.
+    api.gate.tokens.lock().unwrap().retain(|secret, _| *secret != token);
+    sweep().await;
+    let delivered = sent();
+    assert!(delivered >= 1, "her sink outlives the token that made it");
+    assert!(imported().await["values"].get("DB").is_none(), "a share the token made ends with the token");
+    let open = |id: String| {
+        let api = &api;
+        async move { api.call(Method::GET, &format!("/v1/secrets/shares/{id}"), None).await.0 }
+    };
+    assert_eq!(open(share["id"].as_str().unwrap().to_string()).await, StatusCode::OK, "a one-time share stands until its maker goes");
+
+    // She's removed: her share and lease end, her sink and notify URL stop.
+    assert_eq!(api.call(Method::DELETE, &format!("/v1/workspace/projects/{p}/members/usr_cat"), None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(open(share["id"].as_str().unwrap().to_string()).await, StatusCode::NOT_FOUND);
+    let leases = api.ok(Method::GET, "/leases", None).await;
+    assert!(leases.as_array().unwrap().iter().find(|l| l["id"] == lease.as_str()).is_none_or(|l| l["revoked_at"].is_number()), "{leases}");
+    api.ok(Method::POST, "/environments/production/requests", Some(json!({ "ops": [{ "op": "set", "key": "DB", "value": "x" }] }))).await;
+    sweep().await;
+    assert_eq!(sent(), delivered, "no sink batch and no approval notice once she's gone");
 }

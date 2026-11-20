@@ -170,10 +170,9 @@ pub trait Owners: Send + Sync {
     fn trusts(&self, user: &str, kind: Kind, r#ref: &str) -> bool;
     /// Whether `kind ref` is `user`'s own (their repo, their cluster), whatever their account is:
     /// what an owner adds to a project they didn't make, and what a person may place or home. An
-    /// admin account is no wider here (docs/members.md, "The canvas rule").
-    fn owns(&self, user: &str, kind: Kind, r#ref: &str) -> bool {
-        self.trusts(user, kind, r#ref)
-    }
+    /// admin account is no wider here (docs/members.md, "The canvas rule"). No default: each
+    /// implementer says it.
+    fn owns(&self, user: &str, kind: Kind, r#ref: &str) -> bool;
 }
 
 /// The workspace store.
@@ -182,6 +181,8 @@ pub struct Workspace {
     on_delete: std::sync::RwLock<Vec<OnDelete>>,
     owners: std::sync::OnceLock<std::sync::Arc<dyn Owners>>,
     people: std::sync::OnceLock<std::sync::Arc<dyn People>>,
+    /// roll-access's grants as they are now, for an invite's inviter at accept time.
+    grants: std::sync::OnceLock<std::sync::Arc<dyn roll_auth::Grants>>,
     web_url: std::sync::OnceLock<String>,
     on_event: std::sync::RwLock<Vec<members::OnEvent>>,
 }
@@ -220,7 +221,7 @@ impl Workspace {
         })?;
         // Members came after owners: every project's maker is its owner.
         db.migrate("workspace-members", members::migrate)?;
-        Ok(Workspace { db, on_delete: Default::default(), owners: Default::default(), people: Default::default(), web_url: Default::default(), on_event: Default::default() })
+        Ok(Workspace { db, on_delete: Default::default(), owners: Default::default(), people: Default::default(), grants: Default::default(), web_url: Default::default(), on_event: Default::default() })
     }
 
     /// Every project `scope` sees, with its resources, oldest first.

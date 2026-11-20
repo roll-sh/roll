@@ -101,6 +101,8 @@ pub trait People: Send + Sync {
 pub struct Person {
     pub handle: String,
     pub email: Option<String>,
+    /// One of roll's admin accounts: the operator in every project (D9).
+    pub admin: bool,
 }
 
 /// Who is changing membership, and what they hold: the operator (no grant: everything), or a
@@ -296,6 +298,42 @@ impl Workspace {
     /// Who people are (set once, by rolld).
     pub fn set_people(&self, people: std::sync::Arc<dyn People>) {
         let _ = self.people.set(people);
+    }
+
+    /// roll-access's grants, for an invite made with a token (set once, by rolld).
+    pub fn set_grants(&self, grants: std::sync::Arc<dyn roll_auth::Grants>) {
+        let _ = self.grants.set(grants);
+    }
+
+    /// Who made an invite (`created_by`), as they are now: the operator; a person by their account
+    /// and memberships (an admin account is the operator, D9); a token by its grant now, and a
+    /// person's token within their session too. `None`: gone, disabled or revoked.
+    fn inviter(&self, by: &str) -> Option<Actor> {
+        let as_person = |user: &str, grant: Option<Rules>| -> Option<Actor> {
+            let p = self.person(user)?;
+            if p.admin && roles::decisions::ADMIN_IS_OPERATOR {
+                return Some(Actor { id: by.into(), grant, ..Default::default() });
+            }
+            let session = roles::session_scope(&self.memberships_of(user).ok()?);
+            Some(match grant {
+                Some(g) => Actor { id: by.into(), user: Some(user.into()), grant: Some(g), session: Some(session), ip: None },
+                None => Actor { id: by.into(), user: Some(user.into()), grant: Some(session), session: None, ip: None },
+            })
+        };
+        if by == "operator" {
+            return Some(Actor::operator());
+        }
+        if let Some(id) = by.strip_prefix("token:") {
+            let g = self.grants.get()?.grant(id)?;
+            return match g.user.as_deref() {
+                Some(u) => as_person(u, Some((*g.scope).clone())),
+                None => Some(Actor { id: by.into(), grant: Some((*g.scope).clone()), ..Default::default() }),
+            };
+        }
+        if by.starts_with("usr_") {
+            return as_person(by, None);
+        }
+        None
     }
 
     /// The dashboard's address, for invite links (set once, by rolld).
@@ -511,6 +549,22 @@ impl Workspace {
         let gone = || Error::NotFound("this invite was used, revoked or has expired, or it's for another address".into());
         let email = self.person(user).and_then(|p| p.email).ok_or_else(gone)?.to_ascii_lowercase();
         let now = self.db.now_ms()?;
+        // Accepting gives the role the invite names: only while whoever invited may still give it
+        // (removed, demoted, disabled, an admin no longer one, a token revoked: none of it stands).
+        let pending: Option<(String, String, Option<String>, String)> = self.db.read(|c| {
+            c.query_row("SELECT id, role, environments, created_by FROM project_invites WHERE token_hash = ? AND state = 'pending'", [hash_token(token)], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).optional()
+        })?;
+        let checked = match &pending {
+            Some((id, role, envs, by)) if accept => {
+                let project: String = self.db.read(|c| c.query_row("SELECT project_id FROM project_invites WHERE id = ?", [id.as_str()], |r| r.get(0)))?;
+                let still = Role::parse(role).is_some_and(|r| self.inviter(by).is_some_and(|a| a.may_grant(&project, r, envs_of(envs.clone()).as_deref())));
+                if !still {
+                    return Err(Error::Forbidden("whoever invited you can no longer give this role: ask a project admin for a new invite".into()));
+                }
+                Some(id.clone())
+            }
+            _ => None,
+        };
         let actor = Actor { id: user.into(), user: Some(user.into()), ip, ..Default::default() };
         let project = self.db.write(|c| {
             let found = c
@@ -520,6 +574,10 @@ impl Workspace {
                 .optional()?;
             let Some(Pending { id, project, role, envs, email: invited, expires_at, invited_by }) = found else { return Err(gone()) };
             if invited != email || expires_at <= now {
+                return Err(gone());
+            }
+            // The invite checked above, still the same one.
+            if accept && checked.as_deref() != Some(id.as_str()) {
                 return Err(gone());
             }
             if !accept {
@@ -667,7 +725,11 @@ impl Workspace {
                 c.execute("DELETE FROM members WHERE project_id = ? AND user_id = ?", [project.as_str(), user])?;
                 record(c, now, "member.remove", project, &actor, Some(user), json!({ "role": role, "why": "account deleted" }))?;
             }
-            c.execute("UPDATE project_invites SET state = 'revoked' WHERE created_by = ? AND state = 'pending'", [user])?;
+            let invites: Vec<(String, String)> = c.query("SELECT id, project_id FROM project_invites WHERE created_by = ? AND state = 'pending'", [user], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            for (id, project) in &invites {
+                c.execute("UPDATE project_invites SET state = 'revoked' WHERE id = ?", [id.as_str()])?;
+                record(c, now, "member.invite_revoke", project, &actor, Some(user), json!({ "invite": id, "why": "its inviter's account was deleted" }))?;
+            }
             Ok::<_, Error>(projects.len())
         })?;
         self.run_events();

@@ -138,7 +138,7 @@ impl Secrets {
             // Announced only while whoever set the URL may still manage the project (set before
             // members recorded who: as it was).
             let maker_ok = match &by {
-                Some(by) => self.maker_reaches(by, &[(crate::access::Action::Admin, crate::access::Scope::whole(&project))])?,
+                Some(by) => self.registration_reaches(by, &[(crate::access::Action::Admin, crate::access::Scope::whole(&project))])?,
                 None => true,
             };
             let Some(sealed) = sealed.filter(|_| maker_ok) else {

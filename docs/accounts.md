@@ -626,8 +626,10 @@ being the person's handle, answers 204 and clears the session cookie.
 - The old address gets "Your roll account was deleted", in case it wasn't them.
 - They leave every workspace project through the same path as a removal (docs/members.md): the
   audit log's `member.remove`, their tokens confined to a project revoked (D7), their shares,
-  leases and shared folders ended, and their pending invites revoked. A project left with no owner
-  who can sign in is the operator's or an admin's to give one.
+  leases and shared folders ended, and their pending invites revoked (an audit row each). A project
+  left with no owner who can sign in is the operator's or an admin's to give one. The deletion's
+  write records it in an outbox (`account_deletions`), and other products' hooks
+  (`Accounts::on_deleted`) run from it after the write, and again until each succeeds.
 
 ## Routes
 

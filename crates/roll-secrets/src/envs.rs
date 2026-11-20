@@ -635,7 +635,7 @@ impl Secrets {
                 Some(Some(u)) => {
                     let sealed = dek.seal(&crate::notices::notify_aad(project, &env.id), &crate::Value::new(u.trim()));
                     let host = crate::names::url_host(u);
-                    c.execute("UPDATE environments SET notify_url = ?, notify_host = ?, notify_by = ? WHERE id = ?", params![sealed, host, caller.principal, env.id])?;
+                    c.execute("UPDATE environments SET notify_url = ?, notify_host = ?, notify_by = ? WHERE id = ?", params![sealed, host, caller.maker_id(), env.id])?;
                 }
                 Some(None) => {
                     c.execute("UPDATE environments SET notify_url = NULL, notify_host = NULL, notify_by = NULL WHERE id = ?", [&env.id])?;
@@ -829,6 +829,7 @@ impl Secrets {
         // resolves to without a change: an admin's decision, like its policy. Checked in the write,
         // so a policy added meanwhile counts.
         let admin = caller.allows(Action::Admin, &Scope::at(project, slug, &path));
+        let dead = self.dead_exports("x.to_project = ?", project)?;
         self.db.write(|c| {
             let env = by_slug(c, project, slug)?;
             if !admin && (env.protected || !crate::folder_policy::covering(c, &env.id, &[path.as_str()])?.is_empty()) {
@@ -842,7 +843,7 @@ impl Secrets {
                 let from = match &i.project {
                     None => by_slug(c, project, &i.environment)?,
                     Some(p) => match by_slug(c, p, &i.environment) {
-                        Ok(f) if crate::exports::exported(c, &f.id, &i.path, project)? => f,
+                        Ok(f) if crate::exports::exported(c, &f.id, &i.path, project, &dead)? => f,
                         _ => return Err(not_shared(p)),
                     },
                 };

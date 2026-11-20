@@ -273,7 +273,7 @@ fn unfrozen(c: &Conn<'_>, env: &EnvRow, path: &str, pass: Pass<'_>) -> Result<()
 /// environment through another that it couldn't read itself. `cols`: [`ROW_COLUMNS`], or
 /// [`DIGEST_COLUMNS`] for a digest.
 #[allow(clippy::too_many_arguments)]
-fn view_in(c: &Conn<'_>, env: &EnvRow, path: &str, principal: Option<&str>, through: Through<'_>, pass: Pass<'_>, untrusted: bool, cols: &str, depth: usize, seen: &mut HashSet<(String, String)>) -> Result<Vec<Entry>> {
+fn view_in(c: &Conn<'_>, env: &EnvRow, path: &str, principal: Option<&str>, through: Through<'_>, pass: Pass<'_>, untrusted: bool, cols: &str, depth: usize, seen: &mut HashSet<(String, String)>, dead: &crate::exports::Dead) -> Result<Vec<Entry>> {
     if depth > DEPTH || !seen.insert((env.id.clone(), path.to_string())) {
         return Ok(vec![]);
     }
@@ -301,7 +301,7 @@ fn view_in(c: &Conn<'_>, env: &EnvRow, path: &str, principal: Option<&str>, thro
                 if !through(&from.slug, &imp.path) {
                     continue;
                 }
-                view_in(c, &from, &imp.path, principal, through, pass, untrusted, cols, depth + 1, seen)?
+                view_in(c, &from, &imp.path, principal, through, pass, untrusted, cols, depth + 1, seen, dead)?
             }
             // Another project's folder, while it's shared with this one: its own stored values
             // (no personal ones, nothing it imports, no reference or live link, which would
@@ -309,7 +309,7 @@ fn view_in(c: &Conn<'_>, env: &EnvRow, path: &str, principal: Option<&str>, thro
             Some(p) => {
                 let Ok(from) = envs::by_slug(c, p, &imp.environment) else { continue };
                 // An untrusted consumer never reads a protected environment, shared or not.
-                if (untrusted && from.protected) || !crate::exports::exported(c, &from.id, &imp.path, &env.project_id)? {
+                if (untrusted && from.protected) || !crate::exports::exported(c, &from.id, &imp.path, &env.project_id, dead)? {
                     continue;
                 }
                 unfrozen(c, &from, &imp.path, pass)?;
@@ -331,7 +331,7 @@ fn view_in(c: &Conn<'_>, env: &EnvRow, path: &str, principal: Option<&str>, thro
     }
     if let Some(base) = &env.base_id {
         let base = envs::by_id(c, base)?;
-        let inherited = if through(&base.slug, path) { view_in(c, &base, path, principal, through, pass, untrusted, cols, depth + 1, seen)? } else { vec![] };
+        let inherited = if through(&base.slug, path) { view_in(c, &base, path, principal, through, pass, untrusted, cols, depth + 1, seen, dead)? } else { vec![] };
         for mut e in inherited {
             if have.insert(e.row.key.clone()) {
                 if e.source == Source::Own {
@@ -466,7 +466,7 @@ impl Digests {
 /// change number (every write of a stored value takes one: `write::apply`), its environments, their
 /// imports, its required keys, and for each folder another project shares into it, that project's
 /// change number and whether it still shares it.
-fn digest_state(c: &Conn<'_>, project: &str) -> Result<String> {
+fn digest_state(c: &Conn<'_>, project: &str, dead: &crate::exports::Dead) -> Result<String> {
     use sha2::{Digest, Sha256};
     let seq = |p: &str| c.query_row("SELECT seq FROM projects WHERE project_id = ?", [p], |r| r.get::<_, i64>(0)).optional();
     let mut h = Sha256::new();
@@ -487,7 +487,7 @@ fn digest_state(c: &Conn<'_>, project: &str) -> Result<String> {
     )?;
     for (of, from, at, row) in imports {
         if let Some(other) = of.as_deref().filter(|p| *p != project) {
-            h.update(format!("{:?}\0{}\n", seq(other)?, crate::exports::exported(c, &from, &at, project)?));
+            h.update(format!("{:?}\0{}\n", seq(other)?, crate::exports::exported(c, &from, &at, project, dead)?));
         }
         h.update(format!("{row}\n"));
     }
@@ -631,9 +631,10 @@ impl Secrets {
         let through = |e: &str, p: &str| caller.allows(action, &Scope::at(project, e, p));
         let passes = |p: &str, e: &str, at: &str| caller.passes_freeze(p, e, at);
         let pass: Pass<'_> = (action == Action::Reveal).then_some(&passes);
+        let dead = self.dead_exports("x.to_project = ?", project)?;
         self.db.read(|c| {
             let env = envs::by_slug(c, project, slug)?;
-            view_in(c, &env, path, principal, &through, pass, caller.grants.untrusted(), ROW_COLUMNS, 0, &mut HashSet::new())
+            view_in(c, &env, path, principal, &through, pass, caller.grants.untrusted(), ROW_COLUMNS, 0, &mut HashSet::new(), &dead)
         })
     }
 
@@ -971,7 +972,8 @@ impl Secrets {
         let dek = self.project(project)?;
         // Read first: a digest computed after it reflects at least this state, so one kept with it
         // is never newer than what it vouches for.
-        let state = self.db.read(|c| digest_state(c, project))?;
+        let dead = self.dead_exports("x.to_project = ?", project)?;
+        let state = self.db.read(|c| digest_state(c, project, &dead))?;
         let key = (project.to_string(), slug.to_string(), path.clone(), caller.principal.clone(), caller.grants.untrusted());
         if let Some(d) = self.digests.get(&key, &state)
             && self.still(project, &dek, &d, caller)?
@@ -1007,6 +1009,7 @@ impl Secrets {
         use std::rc::Rc;
         let principal = caller.personal().then_some(caller.principal.as_str());
         let untrusted = caller.grants.untrusted();
+        let dead = self.dead_exports("x.to_project = ?", project)?;
         // Every permission the digest depends on, with its answer: a kept digest is reused only
         // for a caller who gets the same answers (`still`).
         let asked: RefCell<BTreeMap<(Action, String, String), bool>> = RefCell::default();
@@ -1026,7 +1029,7 @@ impl Secrets {
         let passes = |p: &str, e: &str, at: &str| caller.passes_freeze(p, e, at);
         let (branches, entries) = self.db.read(|c| {
             let env = envs::by_slug(c, project, slug)?;
-            let entries = view_in(c, &env, path, principal, &reveal, Some(&passes), untrusted, DIGEST_COLUMNS, 0, &mut HashSet::new())?;
+            let entries = view_in(c, &env, path, principal, &reveal, Some(&passes), untrusted, DIGEST_COLUMNS, 0, &mut HashSet::new(), &dead)?;
             Ok::<_, Error>((env.branches, entries))
         })?;
         let mut h = Sha256::new();
@@ -1091,7 +1094,7 @@ impl Secrets {
                 let view = match views.get(&(env.clone(), at.clone())) {
                     Some(v) => v.clone(),
                     None => {
-                        let v = match self.db.read(|c| view_in(c, &envs::by_slug(c, project, &env)?, &at, principal, &read, None, untrusted, DIGEST_COLUMNS, 0, &mut HashSet::new())) {
+                        let v = match self.db.read(|c| view_in(c, &envs::by_slug(c, project, &env)?, &at, principal, &read, None, untrusted, DIGEST_COLUMNS, 0, &mut HashSet::new(), &dead)) {
                             Ok(v) => v,
                             // A reference to an environment that isn't there reaches nothing.
                             Err(Error::NotFound(_)) => vec![],
@@ -1241,6 +1244,7 @@ impl Secrets {
         caller.need(Action::Read, &Scope::project(project))?;
         let dek = self.project(project)?;
         let principal = caller.personal().then_some(caller.principal.as_str());
+        let dead = self.dead_exports("x.to_project = ?", project)?;
         let (envs, views, folders, previews) = self.db.read(|c| {
             let all = envs::all(c, project)?;
             let previews = all.iter().filter(|e| e.kind == Kind::Ephemeral).count() as i64;
@@ -1249,7 +1253,7 @@ impl Secrets {
             let mut folders = BTreeSet::new();
             for e in &envs {
                 let through = |x: &str, p: &str| caller.allows(Action::Read, &Scope::at(project, x, p));
-                views.push(view_in(c, e, &path, principal, &through, None, caller.grants.untrusted(), ROW_COLUMNS, 0, &mut HashSet::new())?);
+                views.push(view_in(c, e, &path, principal, &through, None, caller.grants.untrusted(), ROW_COLUMNS, 0, &mut HashSet::new(), &dead)?);
                 for f in c.query("SELECT path FROM folders WHERE env_id = ?", [&e.id], |r| r.get::<_, String>(0))? {
                     if f != path && names::parents(&f).last() == Some(&path) {
                         folders.insert(f);

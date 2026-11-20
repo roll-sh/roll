@@ -1165,7 +1165,7 @@ async fn a_signed_in_person_sees_only_their_own_projects_previews() {
     impl roll_workspace::People for Addresses {
         fn person(&self, user: &str) -> Option<roll_workspace::Person> {
             let h = user.strip_prefix("usr_")?;
-            Some(roll_workspace::Person { handle: h.into(), email: Some(format!("{h}@example.com")) })
+            Some(roll_workspace::Person { handle: h.into(), email: Some(format!("{h}@example.com")), admin: false })
         }
     }
     e.ws.set_people(std::sync::Arc::new(Addresses));
@@ -1706,6 +1706,9 @@ async fn the_project_that_has_had_a_service_longest_speaks_for_its_branches() {
         fn trusts(&self, user: &str, _kind: Res, r: &str) -> bool {
             user == "usr_ada" && r == "svc_shop"
         }
+        fn owns(&self, user: &str, kind: Res, r: &str) -> bool {
+            self.trusts(user, kind, r)
+        }
     }
     let e = env(json!({ "enabled": true, "branches": ["feat/*"] }));
     e.ws.set_owners(Arc::new(Ada));
@@ -1764,6 +1767,9 @@ async fn a_preview_made_by_hand_is_only_of_a_repo_the_project_stands_for() {
     impl roll_workspace::Owners for Ada {
         fn trusts(&self, user: &str, _kind: Res, r: &str) -> bool {
             user == "usr_ada" && r == "acme/api"
+        }
+        fn owns(&self, user: &str, kind: Res, r: &str) -> bool {
+            self.trusts(user, kind, r)
         }
     }
     let e = env(json!({ "enabled": true }));

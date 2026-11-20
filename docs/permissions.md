@@ -661,8 +661,11 @@ route goes on as it did.
   session request leaves no audit row either, only its answer. Membership changes are
   (`product=workspace`: `member.invite`, `member.accept`, `member.role`, `member.remove`,
   `member.leave`, `home.set`, …).
-- Placing a resource on a canvas from a session needs `admin` outright on it where it is, or that
-  it's the person's own (`Owners`: their repo, their search cluster).
+- A person (their session, or a token of theirs) puts a resource on a canvas, or makes a project
+  its home, only when `Owners` says it's theirs (their repo, their search cluster), or when it's
+  already at home in that project. Their grant's rules never count for this: a token can name any
+  resource. Taking a resource off their project's canvas is the project's `write`, whoever put it
+  there. The operator's tokens keep the rule of `admin` outright on the resource where it is.
 
 On an open daemon (loopback, no `ROLL_ADMIN_TOKEN`), requests without a token still pass, and a
 request **with** a scoped token is still evaluated. That keeps a well-behaved client to its rules,

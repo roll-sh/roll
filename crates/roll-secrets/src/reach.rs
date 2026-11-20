@@ -173,6 +173,7 @@ impl Secrets {
         // happen, so each of those is looked at too.
         type Source = (String, String, String);
         type Held = (Vec<LeaseReach>, Vec<ShareReach>, usize, Option<crate::cutoff::Freeze>);
+        let dead = self.dead_exports("e.project_id = ?", project)?;
         let (env, sources, reads, truncated, (leases, shares, unattributed_shares, frozen)) = self.db.read(|c| {
             let env = envs::by_slug(c, project, slug)?;
             // What it handed out that's still out: dynamic credentials not yet revoked (one past
@@ -216,7 +217,7 @@ impl Secrets {
                         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
                     )?;
                     for (iid, ipid, islug, ipath) in importers {
-                        if ipid != eproject && (eproject != project || !crate::exports::exported(c, &eid, &at, &ipid)?) {
+                        if ipid != eproject && (eproject != project || !crate::exports::exported(c, &eid, &at, &ipid, &dead)?) {
                             continue;
                         }
                         if sources.len() >= SOURCES_MAX {

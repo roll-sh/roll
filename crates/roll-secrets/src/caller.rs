@@ -99,7 +99,7 @@ impl Secrets {
             // reads as one: never past a freeze, whatever its rules.
             return Ok(match self.login_of(&g.id)? {
                 Some(identity) => Caller::acting(format!("identity:{identity}"), grants),
-                None => Caller::token(&g.id, grants),
+                None => Caller::token(&g.id, grants).of_person(g.user.as_deref()),
             });
         }
         // A signed-in person without a grant beside them (an in-process call on their behalf): their
@@ -209,6 +209,40 @@ impl Secrets {
         }
     }
 
+    /// As [`Secrets::maker_reaches`], for something registered (a rotator, an outside database, a
+    /// sink, a notify URL…): a person's token that registered it stands for its person even once
+    /// the token has ended (rows from before `Caller::maker_id` named the token), so it acts while
+    /// that person may, never past them.
+    pub(crate) fn registration_reaches(&self, by: &str, needs: &[(Action, Scope<'_>)]) -> Result<bool> {
+        if let (Some(id), Some(grants)) = (by.strip_prefix("token:"), &self.grants)
+            && let Some(Some(user)) = grants.owner(id)
+        {
+            return self.maker_reaches(&user, needs);
+        }
+        self.maker_reaches(by, needs)
+    }
+
+    /// The exports (`(env_id, path, to_project)`) matching `filter` whose maker may no longer manage
+    /// the folder they share: they count for nothing (`crate::exports::exported`). An export is
+    /// bound to whoever made it (a token: until it ends, or its person leaves), checked on every
+    /// read that crosses it.
+    pub(crate) fn dead_exports(&self, filter: &str, arg: &str) -> Result<crate::exports::Dead> {
+        let rows: Vec<(String, String, String, String, String, String)> = self.db.read(|c| {
+            c.query(
+                &format!("SELECT x.env_id, x.path, x.to_project, x.created_by, e.project_id, e.slug FROM exports x JOIN environments e ON e.id = x.env_id WHERE {filter}"),
+                [arg],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+            )
+        })?;
+        let mut dead = crate::exports::Dead::default();
+        for (env, path, to, by, project, slug) in rows {
+            if !self.maker_reaches(&by, &[(Action::Admin, Scope::at(&project, &slug, &path))])? {
+                dead.insert((env, path, to));
+            }
+        }
+        Ok(dead)
+    }
+
     /// The provider of `kind`, for `ref`: when `ref` is a project's own record (a rotator, an outside
     /// database, …), only while whoever registered it may still manage the project, as they are
     /// now. A removed or demoted admin's rotator stops choosing values at once. Revoking what one
@@ -216,7 +250,7 @@ impl Secrets {
     pub(crate) fn provider_for(&self, kind: &str, r#ref: &str) -> Result<&Arc<dyn crate::links::LinkProvider>> {
         let p = self.links.get(kind)?;
         if let Some((project, by)) = p.maker(r#ref)
-            && !self.maker_reaches(&by, &[(Action::Admin, Scope::whole(&project))])?
+            && !self.registration_reaches(&by, &[(Action::Admin, Scope::whole(&project))])?
         {
             return Err(Error::Link(format!("{kind} {ref} was registered by {by}, who may no longer manage project {project}: an admin of it registers it again", ref = r#ref)));
         }
