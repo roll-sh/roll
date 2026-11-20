@@ -2165,22 +2165,17 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Regressions against main as a check, and required to land, in review** (#484, #489, #490;
-   reviewed, its findings fixed): `roll/regressions` from slower routes and new errors at each
-   head, a `regressions` blocker with `required`, accepted by someone other than the author who can
-   write to the repo, and `became: regressions` once a head for automations.
-2. **References a person chooses** (after roll secrets' #407, `bind_ref`/`resolve_as`): a
-   preview's own variables take `roll://` too, and the rules' references (who wrote each is kept,
-   `env_refs`) move to bindings, so a writer who loses reveal stops theirs.
-3. **The author as an account, not a name, in review** (`feature/roll-previews-author-names`):
-   the accepts tell a person from the change's author by every name they go by (their roll handle
-   and each linked GitHub login). Next for it: roll code's own approvals the same way.
-4. **In review**: a protected base's change request in the keep-in-secrets button (#482).
-5. **Previews on the session grant with project members** (roll secrets' members v1.1, after its
-   #501): a project's people get roles (viewer, developer, admin, owner); previews' routes decide
-   through roll-access's session grant as workspace and secrets do: a viewer reads a preview's
-   status, a developer and up gets shells, files, connect and deploy hooks. Until then previews
-   stay the project owner's (and admins').
+1. **Route budgets** (Lighthouse CI's budgets, beside its comparisons): a project's
+   `github.budget.routes` (`{"GET /orders": 300}`, p50 in ms) holds a route to a time of its own,
+   not only to main's; a route over its budget counts in `roll/regressions` and the record (with
+   main's time when there is one), so a slow new route fails too.
+2. **The author as an account, not a name, in review** (#507): the accepts tell a person from the
+   change's author by every name they go by (their roll handle and each linked GitHub login).
+3. **Previews on the session grant with project members** (roll secrets' members v1.1, after its
+   #501): viewers read a preview's status, developers and up get shells, files, connect and
+   deploy hooks; until then previews stay the project owner's (and admins').
+4. **References a person chooses** (after roll secrets' #407, `bind_ref`/`resolve_as`): a
+   preview's own variables take `roll://` too, and the rules' references move to bindings.
 5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
 6. **Watch: pg-control's recovery to a time seconds old** (unowned).
