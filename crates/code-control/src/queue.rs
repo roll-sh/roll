@@ -193,7 +193,10 @@ impl Code {
             let routes = e.slower_routes.as_ref().map_or(0, |s| s.routes.len());
             let errors = e.new_errors.as_ref().map_or(0, |n| n.total);
             let own = e.regressions_accepted_by.as_deref().is_some_and(|by| by.eq_ignore_ascii_case(&c.author) || by.eq_ignore_ascii_case(c.author.trim_start_matches('@')));
-            if routes + errors > 0 && (e.regressions_accepted_by.is_none() || own) {
+            // Not compared at the change's own head isn't clean: it waits for the comparison.
+            if !e.regressions_compared || e.head.as_deref().is_some_and(|h| h != c.head) {
+                out.push(Blocker::new("regressions", "not compared with main's preview at its head yet (a few minutes after its preview is ready, while main's preview is kept)"));
+            } else if routes + errors > 0 && (e.regressions_accepted_by.is_none() || own) {
                 out.push(Blocker::new("regressions", format!("against main's preview: {routes} route(s) slower, {errors} new error(s): fix them, or someone else accepts them on its preview")));
             }
         }

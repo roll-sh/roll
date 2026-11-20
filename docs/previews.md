@@ -1243,13 +1243,19 @@ apps service's traces have no spans here, so its routes say no reason.
 
 Regressions as a check (Lighthouse CI's budgets, Sentry's regression gates): with the project's
 `regressions: "check"` (the rules dialog's "Regressions against main"), a change's head gets the
-`roll/regressions` commit status, failing while its preview has routes slower than main's or
-errors main's doesn't have ("1 route slower, 2 new errors against main": counts only, a status is
+`roll/regressions` commit status, `pending` until the holder has compared it with main's preview at
+that head (errors, and routes when the project keeps traces; main's preview asleep still
+compares, held elsewhere doesn't), then failing while its preview has routes slower than main's or
+errors main's doesn't have (each read is bound to the head it was read at, so a push never shows
+the head before's) ("1 route slower, 2 new errors against main": counts only, a status is
 public) and passing once they're gone or accepted. `regressions: "required"` also keeps it from
 landing in roll (a `regressions` blocker in `Code::blockers`) until then. Someone other than the
 change's author accepts them at its head (`POST …/regressions/accept`, the sheet's "Accept them";
-a required rule's by a person, not a token): the status passes with who did ("Accepted by ada:
-…"), and a new push asks again. `an_error_mains_preview_doesnt_have_reaches_the_record_and_the_report`
+a required rule's by a person signed in to roll, never a token or the operator's token; the
+author is read for sure, and an unknown one refuses): the acceptance names what it accepted, so
+anything new at the same head asks again, and nothing (or nothing compared yet) is a 409. The
+status passes with who did ("Accepted by ada: …"), and a new push asks again. The blocker also
+waits while the change's preview isn't compared at the change's own head. `an_error_mains_preview_doesnt_have_reaches_the_record_and_the_report`
 (accepting), `code-control/tests/queue.rs` (the blocker).
 
 Repeated queries (Sentry's N+1 detection): a trace whose spans run one database statement

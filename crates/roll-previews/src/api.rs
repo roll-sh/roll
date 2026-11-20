@@ -335,6 +335,8 @@ async fn accept_regressions(AxState(e): S, Path(id): Path<String>, who: Option<a
         (_, Some(axum::Extension(g))) => (format!("token:{}", g.name), false),
         (None, None) => ("operator".into(), true),
     };
+    // A person signed in to roll, not the operator's token (a CI job may hold it).
+    let person = person && by != "operator";
     e.accept_regressions(&id, &by, behind.as_deref(), person, seen.as_deref()).await.map(Json)
 }
 

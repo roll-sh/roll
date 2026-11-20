@@ -603,7 +603,10 @@ async fn an_error_mains_preview_doesnt_have_reaches_the_record_and_the_report() 
     e.apps.errors.lock().insert(format!("{}/{web}", base.id), vec![group("old", "a flaky upstream", 3), group("own-main", &own(&base.id), 2)]);
     e.apps.errors.lock().insert(format!("{}/{web}", p.id), vec![group("old", "a flaky upstream", 4), group("rare", "RangeError", 1), group("new", "Stripe rejected sk_test_51Hx9", 9), group("own-mine", &own(&p.id), 2)]);
     e.engine.read_new_errors().await;
-    let n = e.engine.store.preview(&p.id).unwrap().new_errors.expect("new against main's");
+    let seen = e.engine.store.preview(&p.id).unwrap();
+    assert!(seen.regressions_compared, "compared at its head");
+    let n = seen.new_errors.expect("new against main's");
+    assert_eq!(n.head, p.head, "read at its head");
     assert_eq!((n.branch.as_str(), n.total, n.errors.iter().map(|x| x.title.as_str()).collect::<Vec<_>>()), ("main", 2, vec!["Stripe rejected ***", "RangeError"]));
     assert_eq!(e.code.last_report("chg_ne").new_errors, Some(n), "reported again with it");
     // Required, someone other than its author accepts them at its head (a person, not a token).
@@ -615,6 +618,10 @@ async fn an_error_mains_preview_doesnt_have_reaches_the_record_and_the_report() 
     assert!(matches!(e.engine.accept_regressions(&p.id, "ada", None, true, Some("cs_old")).await, Err(roll_previews::Error::Conflict(_))), "a newer push");
     let accepted = e.engine.accept_regressions(&p.id, "ada", None, true, Some(&p.head)).await.unwrap();
     assert_eq!((accepted.regressions.as_deref(), accepted.regressions_accepted.map(|a| a.by)), (Some("required"), Some("ada".to_string())));
+    // A new one at the same head isn't covered by it: accepted again or not at all.
+    e.apps.errors.lock().get_mut(&format!("{}/{web}", p.id)).unwrap().push(group("later", "TimeoutError", 1));
+    e.engine.read_new_errors().await;
+    assert!(e.engine.store.preview(&p.id).unwrap().regressions_accepted.is_none(), "more than was accepted");
     // Fixed (gone from its output): it goes.
     e.apps.errors.lock().insert(format!("{}/{web}", p.id), vec![group("old", "a flaky upstream", 5)]);
     e.engine.read_new_errors().await;

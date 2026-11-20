@@ -551,6 +551,7 @@ async fn blockers_keep_changes_out_of_the_queue() {
             speed_budget: None,
             regressions: None,
             regressions_accepted_by: None,
+            regressions_compared: false,
             visual_review: Some(code_control::model::PreviewVisualReview { state: state.into(), branch: "main".into(), percent: 8.0, by: by.map(Into::into), required: true, head: None, pages: Vec::new() }),
             notes: Vec::new(),
             issues: Vec::new(),
@@ -573,11 +574,15 @@ async fn blockers_keep_changes_out_of_the_queue() {
         let mut p = preview("accepted", Some("someone-else"));
         let e = p.environment.as_mut().unwrap();
         e.regressions = Some("required".into());
+        e.regressions_compared = by != Some("not compared");
         e.new_errors = Some(code_control::model::PreviewNewErrors { branch: "main".into(), total: 1, errors: Vec::new() });
         e.regressions_accepted_by = by.map(Into::into);
         p
     };
     a.code.report_environment(&id(&c), Some(&regressed(None))).unwrap();
+    assert_eq!(kinds(&a.ok("GET", &format!("/v1/code/changes/{}", id(&c)), None).await), ["regressions"]);
+    // Not compared at its head isn't clean: it waits too.
+    a.code.report_environment(&id(&c), Some(&regressed(Some("not compared")))).unwrap();
     assert_eq!(kinds(&a.ok("GET", &format!("/v1/code/changes/{}", id(&c)), None).await), ["regressions"]);
     a.code.report_environment(&id(&c), Some(&regressed(Some(&author)))).unwrap();
     assert_eq!(kinds(&a.ok("GET", &format!("/v1/code/changes/{}", id(&c)), None).await), ["regressions"]);

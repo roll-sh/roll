@@ -504,17 +504,26 @@ impl Engine {
         if !person && self.store.settings(&r.project_id)?.regressions == crate::settings::RegressionsRule::Required {
             return Err(Error::Forbidden("required regressions are accepted by a person, in roll, not by a token".into()));
         }
-        if let Some(change) = &r.change_id
-            && let Ok(Some(c)) = self.source.change(change).await
-            && [Some(by), behind].into_iter().flatten().any(|who| who.eq_ignore_ascii_case(&c.author) || who.eq_ignore_ascii_case(c.author.trim_start_matches('@')))
-        {
+        // Its author, read for sure (an error refuses, it doesn't pass), and known.
+        let change = r.change_id.as_deref().unwrap_or_default();
+        let c = self.source.change(change).await.map_err(|e| Error::Internal(format!("reading the change's author: {e}")))?.ok_or_else(|| Error::NotFound(format!("no change {change}")))?;
+        if c.author.is_empty() || c.author == "github" {
+            return Err(Error::Conflict("the change's author isn't known, so nobody can be told apart from them".into()));
+        }
+        if [Some(by), behind].into_iter().flatten().any(|who| who.eq_ignore_ascii_case(&c.author) || who.eq_ignore_ascii_case(c.author.trim_start_matches('@'))) {
             return Err(Error::Forbidden("the change's own author can't accept its regressions: someone else looks at them".into()));
         }
         if seen.is_some_and(|s| s != r.head) {
             return Err(Error::Conflict(format!("a newer push came in (at {}): look at it first", short(&r.head))));
         }
+        // Something compared at this head to accept: what it is goes with the acceptance.
+        let view = self.store.view(r.clone())?;
+        let what = crate::RegressionsAccepted::of(view.slower_routes.as_ref(), view.new_errors.as_ref());
+        if !view.regressions_compared || what.is_empty() {
+            return Err(Error::Conflict("nothing to accept: it has no regressions against main's preview at this push (or isn't compared yet)".into()));
+        }
         let at = self.store.now_ms()?;
-        self.store.set_runtime_fact(id, "regressions_accepted", Some(&crate::RegressionsAccepted { head: r.head.clone(), by: by.to_string(), at }))?;
+        self.store.set_runtime_fact(id, "regressions_accepted", Some(&crate::RegressionsAccepted { head: r.head.clone(), by: by.to_string(), at, person, what, errors_total: view.new_errors.as_ref().map_or(0, |n| n.total) }))?;
         self.store.log(id, &format!("{by} accepted its regressions against main at {}", short(&r.head)))?;
         self.report(r.clone()).await;
         self.store.view(self.store.row(id)?)
@@ -761,7 +770,8 @@ impl Engine {
             let main = match bases[&key].clone().filter(|b| b.id != r.id) {
                 Some(b) => {
                     if !mains.contains_key(&b.id) {
-                        let read = if b.state == crate::State::Ready && self.holds(&b.id).await { self.raw_errors(&b.id).await.ok() } else { None };
+                        // Asleep, its logs are still there to read (a frozen or stopped container's).
+                        let read = if matches!(b.state, crate::State::Ready | crate::State::Sleeping) && self.holds(&b.id).await { self.raw_errors(&b.id).await.ok() } else { None };
                         mains.insert(b.id.clone(), read);
                     }
                     mains[&b.id].clone().map(|groups| (b, groups))
@@ -784,6 +794,10 @@ impl Engine {
             }
             Some((base, main)) => {
                 let Ok(mine) = self.raw_errors(&r.id).await else { return };
+                // Compared at this head (what a required rule waits for); the change's says so.
+                if self.store.set_runtime_fact(&r.id, "compared_errors", Some(&r.head)).unwrap_or(false) {
+                    self.report(r.clone()).await;
+                }
                 let theirs: std::collections::HashSet<(&str, &str)> = main.iter().map(|g| (g.service.as_str(), g.fingerprint.as_str())).collect();
                 // The same error says each preview's own names (its id, its branches, its hosts):
                 // with those taken out, a title main's has too isn't new either.
@@ -796,7 +810,7 @@ impl Engine {
                 new.sort_by(|a, b| b.count.cmp(&a.count).then(b.last_seen.cmp(&a.last_seen)));
                 let total = new.len();
                 new.truncate(crate::NewErrors::MAX);
-                let seen: Vec<String> = new.iter().map(|g| format!("{}\0{}", g.service, g.fingerprint)).chain([total.to_string()]).collect();
+                let seen: Vec<String> = new.iter().map(|g| format!("{}\0{}", g.service, g.fingerprint)).chain([total.to_string(), r.head.clone()]).collect();
                 if self.new_errors_seen.lock().get(&r.id) == Some(&seen) {
                     return;
                 }
@@ -807,7 +821,7 @@ impl Engine {
                     // A title was cut (at 300) before it was masked: shown only to 120, short of
                     // where a cut could have split a value.
                     let errors = new.iter().map(|g| crate::NewError { service: g.service.clone(), title: crate::mask_cut(&g.title, &values).chars().take(120).collect() }).collect();
-                    Some(crate::NewErrors { branch: base.branch.clone().unwrap_or_else(|| "main".into()), total, errors })
+                    Some(crate::NewErrors { branch: base.branch.clone().unwrap_or_else(|| "main".into()), total, errors, head: r.head.clone() })
                 };
                 self.new_errors_seen.lock().insert(r.id.clone(), seen);
                 kept

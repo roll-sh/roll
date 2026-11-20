@@ -2762,14 +2762,25 @@ impl Store {
         let first_unstable = page_health.as_ref().is_some_and(|h| h.unstable);
         let visual_review = self.visual_review(&r, settings.visual_review, settings.github.visual_threshold, base_change.as_ref(), &pages, first_unstable, f.head)?;
         let page_speed = f.speed.map(|now| crate::PageSpeedView { now, before: f.prev_speed });
-        let new_errors = self.runtime_fact(&r.id, "new_errors")?;
+        // What the holder read against main's, for this head only (a push reads it again), and
+        // whether it compared at this head at all (errors; routes too with traces).
+        let new_errors = self.runtime_fact::<crate::NewErrors>(&r.id, "new_errors")?.filter(|f| f.head == r.head);
+        let slower_routes = if settings.traces { self.runtime_fact::<crate::SlowerRoutes>(&r.id, "slower_routes")?.filter(|f| f.head == r.head) } else { None };
+        let compared_at = |kind: &str| -> Result<bool> { Ok(self.runtime_fact::<String>(&r.id, kind)?.as_deref() == Some(r.head.as_str())) };
+        let regressions_compared = compared_at("compared_errors")? && (!settings.traces || compared_at("compared_routes")?);
         let regressions = match settings.regressions {
             crate::settings::RegressionsRule::Off => None,
             crate::settings::RegressionsRule::Check => Some("check".to_string()),
             crate::settings::RegressionsRule::Required => Some("required".to_string()),
         };
-        let regressions_accepted = self.runtime_fact::<crate::RegressionsAccepted>(&r.id, "regressions_accepted")?.filter(|a| a.head == r.head);
-        let slower_routes = if settings.traces { self.runtime_fact(&r.id, "slower_routes")? } else { None };
+        // An acceptance counts at its head, for what it accepted (more at that head asks again), and
+        // for a required rule only a person's.
+        let showing = crate::RegressionsAccepted::of(slower_routes.as_ref(), new_errors.as_ref());
+        let errors_total = new_errors.as_ref().map_or(0, |n| n.total);
+        let regressions_accepted = self
+            .runtime_fact::<crate::RegressionsAccepted>(&r.id, "regressions_accepted")?
+            .filter(|a| a.head == r.head && errors_total <= a.errors_total && showing.iter().all(|w| a.what.contains(w)))
+            .filter(|a| a.person || settings.regressions != crate::settings::RegressionsRule::Required);
         let screenshot_link = screenshot_at.map(|at| self.link_at(&r.id, at, None)).transpose()?;
         let diff_link = match screenshot_at.filter(|_| base_differs) {
             Some(at) => Some(self.link_at(&r.id, at, Some("diff=base"))?),
@@ -2833,6 +2844,7 @@ impl Store {
             new_errors,
             regressions,
             regressions_accepted,
+            regressions_compared,
             page_speed,
             page_health,
             page_a11y,

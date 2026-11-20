@@ -200,7 +200,7 @@ pub(super) async fn preview(code: &Code, hub: &Hub, c: &Change) -> Result<()> {
     let regressions = env.and_then(regressions_status);
     // Statuses go out when they change for this head, not on every wake and sleep.
     let state_key = format!("pv-state:{}", c.id);
-    let state_now = format!("{sha}:{status:?}:{deploy:?}:{description}:{visual:?}:{speed:?}");
+    let state_now = format!("{sha}:{status:?}:{deploy:?}:{description}:{visual:?}:{speed:?}:{regressions:?}");
     if mark(code, &state_key)?.as_deref() == Some(state_now.as_str()) {
         return Ok(());
     }
@@ -457,6 +457,11 @@ fn release_line(e: &crate::model::PreviewEnvironment) -> Option<String> {
 /// slower and how many errors are new against main's preview (counts only: a status is public).
 fn regressions_status(e: &crate::model::PreviewEnvironment) -> Option<(&'static str, String)> {
     e.regressions.as_ref()?;
+    // Nothing is said clean before it was compared at this head (main's preview asleep elsewhere,
+    // or the first read still to come).
+    if !e.regressions_compared {
+        return Some(("pending", "Comparing with main's preview (a few minutes after the preview is ready)".into()));
+    }
     let routes = e.slower_routes.as_ref().map_or(0, |s| s.routes.len());
     let errors = e.new_errors.as_ref().map_or(0, |n| n.total);
     let branch = branch_name(e.slower_routes.as_ref().map(|s| s.branch.as_str()).or(e.new_errors.as_ref().map(|n| n.branch.as_str())).unwrap_or("main"));
@@ -1098,6 +1103,7 @@ mod preview_tests {
             speed_budget: None,
             regressions: None,
             regressions_accepted_by: None,
+            regressions_compared: false,
             visual_review: None,
             notes: Vec::new(),
             issues: Vec::new(),
@@ -1215,6 +1221,8 @@ mod preview_tests {
         // With the project's `regressions` rule, a failing `roll/regressions` while any of them stays.
         assert_eq!(regressions_status(&timed), None, "no rule, no status");
         timed.regressions = Some("check".into());
+        assert_eq!(regressions_status(&timed).map(|s| s.0), Some("pending"), "not compared at this head yet");
+        timed.regressions_compared = true;
         assert_eq!(regressions_status(&timed), Some(("failure", "1 route slower than main".into())));
         timed.regressions_accepted_by = Some("ada".into());
         assert_eq!(regressions_status(&timed), Some(("success", "Accepted by ada: 1 route slower, 0 new errors against main".into())));

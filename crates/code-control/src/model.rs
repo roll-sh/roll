@@ -381,6 +381,9 @@ pub struct PreviewEnvironment {
     /// Who accepted its regressions at this head (not its author, for `required`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub regressions_accepted_by: Option<String>,
+    /// Whether its preview was compared with main's at its head (errors, and routes with traces).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub regressions_compared: bool,
     /// The `roll/visual` status (the project's `github.visual_review`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visual_review: Option<PreviewVisualReview>,
