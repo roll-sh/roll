@@ -81,7 +81,24 @@ pub struct Decoy {
     /// Times it was used (each refused).
     pub uses: i64,
     pub used_at: Option<i64>,
+    /// Where the last use came from.
     pub used_ip: Option<String>,
+    /// The route pattern the last use called (`rlt`), never its path or query.
+    pub used_route: Option<String>,
+    /// The endpoint the last login tried (`postgres`).
+    pub used_endpoint: Option<String>,
+}
+
+impl Decoy {
+    const COLUMNS: &'static str = "kind, created_at, created_by, uses, used_at, used_ip, used_route";
+
+    /// From [`Self::COLUMNS`] at `at`: `used_route` holds an `rlt`'s route, a `postgres`'s endpoint.
+    fn row(r: &code_sql::Row<'_>, at: usize) -> code_sql::Result<Self> {
+        let kind: String = r.get(at)?;
+        let on: Option<String> = r.get(at + 6)?;
+        let (used_route, used_endpoint) = if kind == "postgres" { (None, on) } else { (on, None) };
+        Ok(Decoy { kind, created_at: r.get(at + 1)?, created_by: r.get(at + 2)?, uses: r.get(at + 3)?, used_at: r.get(at + 4)?, used_ip: r.get(at + 5)?, used_route, used_endpoint })
+    }
 }
 
 /// A live decoy that was used, for health.
@@ -89,9 +106,7 @@ pub(crate) struct UsedDecoy {
     pub env_id: String,
     pub path: String,
     pub key: String,
-    pub uses: i64,
-    pub used_at: i64,
-    pub used_ip: Option<String>,
+    pub decoy: Decoy,
 }
 
 impl Secrets {
@@ -173,16 +188,18 @@ impl Secrets {
         self.secret(project, env, &path, &n.key, Some(SecretType::Shared), caller)
     }
 
-    /// A decoy credential of `kind` was used, from `ip`, calling `route`: roll-access's decoy token
-    /// `handle` (`rlt`), or the role a product's [`crate::LinkProvider::plant_decoy`] named
-    /// `handle`. If it's a decoy key's, the use is counted and, once an hour per decoy,
-    /// `decoy_used` is raised: an audit row (the environment's activity, audit sinks) and a notice
-    /// to the environment's notify URL. Names, the address and the route, never a value. Whether
-    /// it was a decoy key's.
-    pub fn decoy_used(&self, kind: &str, handle: &str, ip: Option<&str>, route: &str) -> Result<bool> {
+    /// A decoy credential of `kind` was used, from `ip`, on `on`: roll-access's decoy token
+    /// `handle` (`rlt`; `on` is the route pattern it called), or the role a product's
+    /// [`crate::LinkProvider::plant_decoy`] named `handle` (`postgres`; `on` is the endpoint). If
+    /// it's a decoy key's, the use is counted (its where kept for the admins) and, once an hour
+    /// per decoy, `decoy_used` is raised: an audit row (the environment's activity, audit sinks)
+    /// and a notice to the environment's notify URL. Names, the address and the route, never a
+    /// value. Whether it was a decoy key's.
+    pub fn decoy_used(&self, kind: &str, handle: &str, ip: Option<&str>, on: &str) -> Result<bool> {
         let now = self.db.now_ms()?;
         let ip: Option<String> = ip.map(|i| i.chars().filter(|c| !c.is_control()).take(64).collect());
-        let route: String = route.chars().filter(|c| !c.is_control()).take(200).collect();
+        let on: String = on.chars().filter(|c| !c.is_control()).take(200).collect();
+        let route = if kind == "postgres" { format!("Postgres endpoint {on}") } else { on.clone() };
         let web = self.web_url.clone();
         self.db.write(|c| {
             type Row = (String, String, String, String, String, Option<i64>);
@@ -194,7 +211,7 @@ impl Secrets {
                 )
                 .optional()?;
             let Some((id, project, env_id, path, key, alerted)) = row else { return Ok(false) };
-            c.execute("UPDATE decoys SET uses = uses + 1, used_at = ?, used_ip = ?, used_route = ? WHERE id = ?", params![now, ip, route, id])?;
+            c.execute("UPDATE decoys SET uses = uses + 1, used_at = ?, used_ip = ?, used_route = ? WHERE id = ?", params![now, ip, on, id])?;
             if alerted.is_some_and(|a| now - a < ALERT_EVERY_MS) {
                 return Ok(true);
             }
@@ -271,9 +288,7 @@ impl Secrets {
         Ok(self
             .db
             .read(|c| {
-                c.query("SELECT secret_id, kind, created_at, created_by, uses, used_at, used_ip FROM decoys WHERE project_id = ? AND ended_at IS NULL", [project], |r| {
-                    Ok((r.get::<_, String>(0)?, Decoy { kind: r.get(1)?, created_at: r.get(2)?, created_by: r.get(3)?, uses: r.get(4)?, used_at: r.get(5)?, used_ip: r.get(6)? }))
-                })
+                c.query(&format!("SELECT secret_id, {} FROM decoys WHERE project_id = ? AND ended_at IS NULL", Decoy::COLUMNS), [project], |r| Ok((r.get::<_, String>(0)?, Decoy::row(r, 1)?)))
             })?
             .into_iter()
             .collect())
@@ -288,9 +303,9 @@ impl Secrets {
     pub(crate) fn used_decoys(&self, project: &str) -> Result<Vec<UsedDecoy>> {
         Ok(self.db.read(|c| {
             c.query(
-                "SELECT env_id, path, key, uses, used_at, used_ip FROM decoys WHERE project_id = ? AND ended_at IS NULL AND used_at IS NOT NULL",
+                &format!("SELECT env_id, path, key, {} FROM decoys WHERE project_id = ? AND ended_at IS NULL AND used_at IS NOT NULL", Decoy::COLUMNS),
                 [project],
-                |r| Ok(UsedDecoy { env_id: r.get(0)?, path: r.get(1)?, key: r.get(2)?, uses: r.get(3)?, used_at: r.get(4)?, used_ip: r.get(5)? }),
+                |r| Ok(UsedDecoy { env_id: r.get(0)?, path: r.get(1)?, key: r.get(2)?, decoy: Decoy::row(r, 3)? }),
             )
         })?)
     }
