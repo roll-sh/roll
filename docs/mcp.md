@@ -48,7 +48,15 @@ p99 in release (`tools_list_cost`, an ignored test: linear in the tools, 3.2 ms 
 client keeps it for a minute (`ttlMs`). Connect to `/v1/mcp?toolsets=postgres,code` (or send `X-MCP-Toolsets: postgres,code`) to
 list only those products' tools, as GitHub's MCP server does; the access tools (approvals,
 `access_check`) are always listed. Redis alone is 10 tools and the access tools 11, ~2.2k
-tokens instead of ~47k. An unknown name is `400`, naming the toolsets there are. The dashboard's connect
+tokens instead of ~47k. A product too big for some clients on its own splits into areas, as GitHub's server splits its
+toolsets: apps (89 tools) is `apps.observe` (logs, metrics, errors, traces, vitals, SLOs, usage,
+events: 19 tools, ~2.9k tokens), `apps.deploy` (deploys, promotions, rollbacks, jobs, cron runs,
+restarts: 38, ~5.7k), `apps.configure` (services, environments, variables, domains, volumes,
+forms, links: 29, ~5.2k) and `apps.project` (drains, notifications, limits, the status page, the
+preview domain: 29, ~3.8k). The lookups every area needs (the overview, services, environments)
+are in each. An area comes from its tool's route (`tools::apps_area`), and a test fails on an
+apps route it doesn't place; `GET /v1/mcp/toolsets` answers each area's cost under `areas`. An
+unknown name is `400`, naming the toolsets and areas there are. The dashboard's connect
 panel picks them. A toolset only narrows the list: the token's rules decide every call as before,
 and OAuth's resource is the server whatever the toolsets (checked with the TypeScript SDK).
 
