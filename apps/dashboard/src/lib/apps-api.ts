@@ -556,6 +556,8 @@ export interface EnvironmentPut {
   mirror?: { environment: string; percent: number } | null;
   /** Its own HTML in every page: before `</head>` or `</body>` (at most 5, each up to 16 KiB); null: none. */
   snippets?: Snippet[] | null;
+  /** Runtime config its instances read at `ROLL_CONFIG_URL` without a deploy (at most 200 keys, 64 KiB); null: none. */
+  config?: Record<string, unknown> | null;
   /** Its split test: `percent` of visitors (1–99) served by `environment`, or null to end it. */
   split?: { environment: string; percent: number } | null;
   /** Its heartbeats (at most 10), or null for none; one kept by name keeps its URL. */
@@ -687,6 +689,9 @@ export interface Environment extends EnvironmentSummary {
   /** Where a share of its GET and HEAD requests is copied, answers dropped. */
   mirror?: { environment: string; percent: number };
   snippets?: Snippet[];
+  /** Its runtime config, and the version its instances read. */
+  config?: Record<string, unknown>;
+  config_version?: number;
   freeze?: Freeze;
   /** Its freeze is on now: automatic deploys build to ready, a person's deploy needs the `X-Roll-Override: 1` header (admin). */
   frozen?: boolean;
@@ -1164,7 +1169,7 @@ export interface AppEvent {
 }
 
 /** A project's log drain: where its services' runtime output is POSTed (NDJSON). */
-export type DrainSource = "runtime" | "http" | "build" | "audit";
+export type DrainSource = "runtime" | "http" | "build" | "audit" | "traces" | "metrics";
 
 export interface DrainSettings {
   sources?: DrainSource[];
