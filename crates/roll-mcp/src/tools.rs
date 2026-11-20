@@ -76,6 +76,9 @@ pub struct Tool {
     /// Fields of its answer that anyone outside can write (a site's form submissions): withheld in
     /// lockdown wherever they sit, as an outside record's text is (lockdown::withhold_fields).
     pub outside: &'static [&'static str],
+    /// What it writes goes on a public page (a status page's incidents): the credential guard
+    /// refuses what it would anywhere people read (`roll_auth::credentials`, `published`).
+    pub published: bool,
     /// It makes roll reach outside it, to an address the caller chose (a task's URL, a webhook, a log
     /// drain, a Git URL or image, a vendor's API): MCP's `openWorldHint`, so a client can say so.
     pub open_world: bool,
@@ -243,6 +246,13 @@ impl Tool {
                     body[p.name] = v.clone();
                     body_used = true;
                 }
+                // A yes/no header is `1` when yes and left out when no (apps' `X-Roll-Override`
+                // takes exactly `1`: `true` would be no override at all).
+                At::Header(h) if p.ty == Ty::Bool => {
+                    if v.as_bool() == Some(true) {
+                        headers.push((h, "1".into()));
+                    }
+                }
                 At::Header(h) => headers.push((h, as_text(v))),
                 At::RawText => raw = Some((as_text(v).into_bytes(), "application/octet-stream")),
                 At::RawJson => raw = Some((as_text(v).into_bytes(), "application/json")),
@@ -277,6 +287,10 @@ impl Tool {
 const fn req(name: &'static str, desc: &'static str) -> P {
     P { name, ty: Ty::Str, at: At::Path, required: true, desc }
 }
+/// A path parameter the route parses as a number (a change's seq, a version).
+const fn req_int(name: &'static str, desc: &'static str) -> P {
+    P { name, ty: Ty::Int, at: At::Path, required: true, desc }
+}
 const fn q(name: &'static str, ty: Ty, desc: &'static str) -> P {
     P { name, ty, at: At::Query, required: false, desc }
 }
@@ -296,10 +310,13 @@ const fn qreq(name: &'static str, desc: &'static str) -> P {
 /// The workspace project a new resource goes in (`X-Roll-Project`): needed by project-scoped tokens.
 /// A key a retried call sends again, so a route that honours it (apps' deploys) runs it once.
 const IDEMPOTENCY: P = P { name: "idempotency_key", ty: Ty::Str, at: At::Header("idempotency-key"), required: false, desc: "Any unique string: a call retried with the same key runs once" };
+/// Past an environment's deploy freeze: an admin's call (roll-access makes the request `admin` and
+/// binds the header into its approval), audited by roll apps as `freeze.overridden`.
+const OVERRIDE: P = P { name: "override", ty: Ty::Bool, at: At::Header("x-roll-override"), required: false, desc: "Go past the environment's deploy freeze: an admin's call (a token that may only deploy can't), audited" };
 const IN_PROJECT: P = P { name: "workspace_project", ty: Ty::Str, at: At::Header("x-roll-project"), required: false, desc: "Workspace project (prj_…) to put the new resource in" };
 
 const fn t(name: &'static str, title: &'static str, description: &'static str, product: &'static str, method: &'static str, path: &'static str, params: &'static [P]) -> Tool {
-    Tool { name, title, description, product, method, path, params, fixed: None, wrap: None, hint: Hint::Auto, until: None, outside: &[], open_world: false }
+    Tool { name, title, description, product, method, path, params, fixed: None, wrap: None, hint: Hint::Auto, until: None, outside: &[], published: false, open_world: false }
 }
 
 /// A tasks run that's over (`completed`, `failed` or `canceled`).
@@ -339,6 +356,10 @@ impl Tool {
     }
     const fn until(mut self, f: fn(&Value) -> bool) -> Tool {
         self.until = Some(f);
+        self
+    }
+    const fn published(mut self) -> Tool {
+        self.published = true;
         self
     }
     const fn open_world(mut self) -> Tool {
@@ -807,6 +828,8 @@ static TOOLS: &[Tool] = &[
     t("search_slowlog", "Search slow log", "A cluster's slowest recent requests: what ran, on which index, and how long it took.", "search", "GET", "/v1/search/clusters/{cluster}/slowlog", &[req("cluster", "Cluster id or name")]),
     t("search_audit", "Search audit log", "A cluster's security audit log, newest first: failed logins, access denials and changes to users, roles, role mappings and API keys (granted access and successful logins too when the cluster records them), in Elasticsearch's or OpenSearch's event names (authentication_failed, access_denied, security_config_change, …). Never a secret or a request body.", "search", "GET", "/v1/search/clusters/{cluster}/audit", &[req("cluster", "Cluster id or name"), q("from", Ty::Int, "From (Unix ms, inclusive)"), q("to", Ty::Int, "To (Unix ms, exclusive)"), q("event", Ty::Str, "Event names or categories, comma-separated"), q("size", Ty::Int, "Entries (default 100)")]),
     t("search_analytics", "Search analytics", "What a cluster's users search for, over range 24h (default), 7d or 30d: top queries, queries that found nothing, and click-through, for one index or all. Only indices with index.roll.analytics.enabled record it.", "search", "GET", "/v1/search/clusters/{cluster}/analytics", &[req("cluster", "Cluster id or name"), q("index", Ty::Str, "One index (default: all)"), q("range", Ty::Str, "24h, 7d or 30d")]).outside(&["query"]),
+    t("search_suggestions", "Query suggestions", "An index's query suggestions built from its search analytics: its settings (index.roll.suggestions.*), its last build (when, how many, any error) and its heaviest suggestions.", "search", "GET", "/v1/search/clusters/{cluster}/indices/{index}/suggestions", &[req("cluster", "Cluster id or name"), req("index", "Index whose analytics the suggestions come from")]).outside(&["query"]),
+    t("search_rebuild_suggestions", "Rebuild query suggestions", "Rebuild an index's suggestions index from its search analytics now (it is rebuilt on its schedule anyway); the alias moves to the new build at once. Needs index.roll.analytics.enabled and index.roll.suggestions.enabled.", "search", "POST", "/v1/search/clusters/{cluster}/indices/{index}/suggestions/rebuild", &[req("cluster", "Cluster id or name"), req("index", "Index whose analytics the suggestions come from")]),
     t("search_usage", "Search usage", "A cluster's metering and cost, against the same workload on Elastic Cloud and Amazon OpenSearch.", "search", "GET", "/v1/search/clusters/{cluster}/usage", &[req("cluster", "Cluster id or name"), q("days", Ty::Int, "Days back (default 30)")]),
     t("search_list_indices", "List indices", "A cluster's indices.", "search", "GET", "/v1/search/clusters/{cluster}/indices", &[req("cluster", "Cluster id or name")]),
     t("search_get_index", "Get an index", "An index's mappings, settings and aliases.", "search", "GET", "/v1/search/clusters/{cluster}/indices/{index}", &[req("cluster", "Cluster"), req("index", "Index")]),
@@ -867,7 +890,7 @@ static TOOLS: &[Tool] = &[
     t("secrets_list_gateways", "Gateways: is a private network reachable", "A project's gateways into private networks, each with its link's status: online, the node holding it, its version, the allow-list it reported, when it connected and was last seen. Use it when a directory or outside database behind one fails (never a token; making one is the project admin's).", "secrets", "GET", "/v1/secrets/projects/{project}/gateways", &[SECRET_PROJECT]),
     t("secrets_ca_acme", "A CA's ACME server", "A certificate authority's ACME directory URL, whether names are pre-authorized, the challenges it checks, and its external account bindings (label, names, expiry, last use, accounts; never an HMAC key; making one is the project admin's).", "secrets", "GET", "/v1/secrets/projects/{project}/cas/{id}/acme", &[SECRET_PROJECT, req("id", "Certificate authority id")]),
     t("secrets_changes", "Secret changes", "What changed in an environment, newest first: who, when, which keys (fingerprints, never values).", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/changes", &[SECRET_PROJECT, ENV, q("before", Ty::Int, "Changes before this sequence number"), q("limit", Ty::Int, "How many")]),
-    t("secrets_get_change", "Get a secrets change", "One change of an environment (seq, from secrets_changes): who, when, why, and what it did to each key (fingerprints, never values); state: true adds every key as it was after it.", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/changes/{seq}", &[SECRET_PROJECT, ENV, req("seq", "The change's seq"), q("state", Ty::Bool, "Every key as it was after it")]),
+    t("secrets_get_change", "Get a secrets change", "One change of an environment (seq, from secrets_changes): who, when, why, and what it did to each key (fingerprints, never values); state: true adds every key as it was after it.", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/changes/{seq}", &[SECRET_PROJECT, ENV, req_int("seq", "The change's seq"), q("state", Ty::Bool, "Every key as it was after it")]),
     t("secrets_insights", "Secret insights", "Each key in a folder: its version, who changed it and when, its last read and reads in 30 days, and whether it's stale (unchanged past the environment's max age) or expiring. Which keys nobody uses, which to rotate.", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/insights", &[SECRET_PROJECT, ENV, q("path", Ty::Str, "Folder")]),
     t("secrets_verify_audit", "Is a project's secrets audit log intact", "Walk a project's secrets audit chain and say whether it holds: the rows walked, how far roll's signed digests vouch for them, and the first break (edited, missing, rewritten, signature, truncated, cut, unchained, head, stale or gap) with where. Use it after an incident, or before trusting the log's history.", "secrets", "GET", "/v1/secrets/projects/{project}/audit/verify", &[SECRET_PROJECT, q("since", Ty::Int, "From the last digest before this time (unix ms; the chain's start when left out)")]),
     t("secrets_required", "Required keys", "The keys every standard environment of a project must define (and their types or patterns, when set): what an environment is missing before it runs.", "secrets", "GET", "/v1/secrets/projects/{project}/required", &[SECRET_PROJECT]),
@@ -896,7 +919,7 @@ static TOOLS: &[Tool] = &[
         "secrets",
         "GET",
         "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/versions/{v}/value",
-        &[SECRET_PROJECT, ENV, req("name", "Secret name"), req("v", "Version number"), q("path", Ty::Str, "Folder")],
+        &[SECRET_PROJECT, ENV, req("name", "Secret name"), req_int("v", "Version number"), q("path", Ty::Str, "Folder")],
     ),
     t("secrets_renew_lease", "Renew a lease", "Push a dynamic credential's expiry out, as a long-running consumer does instead of restarting.", "secrets", "POST", "/v1/secrets/projects/{project}/leases/{id}/renew", &[SECRET_PROJECT, req("id", "Lease id"), b("ttl_minutes", Ty::Int, "Minutes from now")]),
     t("secrets_reach", "Who reaches a secret", "Which tokens and identities reach an environment's folder or key, whether code nobody vetted can, where it flows (syncs, shares, imports) and who read it in 30 days: names only. Who has to rotate what after a leak (the project admin's).", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/reach", &[SECRET_PROJECT, ENV, q("path", Ty::Str, "Folder"), q("key", Ty::Str, "One key")]),
@@ -983,6 +1006,7 @@ static TOOLS: &[Tool] = &[
             b("no_traffic", Ty::Bool, "Build and health-check it, then stop at status ready without sending it traffic"),
             b("no_cache", Ty::Bool, "Build from scratch: no cached layer, no reused build"),
             b("closed", Ty::Bool, "Refuse (409) unless the environment builds closed (its builds get no secret value)"),
+            OVERRIDE,
             IDEMPOTENCY,
         ],
     ).open_world(),
@@ -995,7 +1019,7 @@ static TOOLS: &[Tool] = &[
         "apps",
         "POST",
         "/v1/apps/services/{service}/environments/{env}/promote",
-        &[SERVICE, ENV, breq("from", Ty::Str, "The environment to take it from"), b("message", Ty::Str, "Why")],
+        &[SERVICE, ENV, breq("from", Ty::Str, "The environment to take it from"), b("message", Ty::Str, "Why"), OVERRIDE],
     ),
     t("apps_cancel_deploy", "Cancel a deploy", "Stop a deploy that hasn't gone live.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/deploys/{deploy}/cancel", &[SERVICE, ENV, req("deploy", "Deploy id")]),
     t(
@@ -1021,7 +1045,7 @@ static TOOLS: &[Tool] = &[
         &[SERVICE, ENV, b("paths", Ty::Arr, "1-100 absolute paths (any query; a trailing * is a prefix)"), b("tags", Ty::Arr, "1-100 cache tags its answers carried (any case)")],
     ),
     t("apps_restart_instance", "Restart one instance", "Replace one instance of a web service (a fresh one answers before this one drains; if it doesn't start, this one keeps serving). Instance names are in apps_get_environment. Production is a \"deploy\" action.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/instances/{name}/restart", &[SERVICE, ENV, req("name", "Instance id (instances[].id in apps_get_environment)")]),
-    t("apps_redeploy", "Redeploy", "Deploy what's running again with the current settings and variables (production is a \"deploy\" action).", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/redeploy", &[SERVICE, ENV, b("message", Ty::Str, "Why"), b("closed", Ty::Bool, "Refuse (409) unless the environment builds closed")]),
+    t("apps_redeploy", "Redeploy", "Deploy what's running again with the current settings and variables (production is a \"deploy\" action).", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/redeploy", &[SERVICE, ENV, b("message", Ty::Str, "Why"), b("closed", Ty::Bool, "Refuse (409) unless the environment builds closed"), OVERRIDE]),
     t(
         "apps_run_job",
         "Run a job",
@@ -1128,11 +1152,16 @@ static TOOLS: &[Tool] = &[
     t("apps_pending", "What the next deploy changes", "Before deploying: which variables (names, never values), run settings and project secrets the next deploy changes against what's live.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/pending", &[SERVICE, ENV]),
     t("apps_deploy_commits", "A deploy's commits", "The commits a deploy brings over the one live before it, newest first (at most 50).", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/deploys/{deploy}/commits", &[SERVICE, ENV, req("deploy", "Deploy id")]),
     t("apps_deploy_vulnerabilities", "A deploy's vulnerabilities", "Known vulnerabilities in a deploy's image, most severe first, then those with a fix: id (CVE-…, GHSA-…), severity, package, installed and fixed versions, and where (the OS's packages or a lockfile), at most 2,000, with the scan's counts. Use it before promoting a deploy, or to find what to upgrade.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/deploys/{deploy}/vulnerabilities", &[SERVICE, ENV, req("deploy", "Deploy id"), q("severity", Ty::Str, "Only this severity or worse: critical, high, medium or low")]),
+    t("apps_deploy_sbom", "A deploy's software bill of materials", "A deploy's image as a CycloneDX SBOM (JSON) from the same scan as its vulnerabilities: every package and version it ships. 404 when it wasn't scanned or was pruned.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/deploys/{deploy}/sbom", &[SERVICE, ENV, req("deploy", "Deploy id")]),
+    t("apps_status_page", "The project's public status page", "A project's public status page: its title, its public URL and what it shows (which services' checks and heartbeats, names and up or down only). 404 without one; making one is a person's choice, in the dashboard.", "apps", "GET", "/v1/apps/projects/{project}/status-page", &[req("project", "Workspace project")]),
+    t("apps_list_incidents", "Status page incidents", "The last 90 days' incidents on a project's status page and the open ones, newest first: title, state, whether roll opened it, and its updates.", "apps", "GET", "/v1/apps/projects/{project}/status-page/incidents", &[req("project", "Workspace project")]),
+    t("apps_create_incident", "Post an incident on the status page", "Post an incident on a project's public status page: anyone can read its title and text, so write for the public and never put a credential, an internal address or a customer's data in it (roll refuses credentials). States: investigating (default), identified, monitoring, resolved.", "apps", "POST", "/v1/apps/projects/{project}/status-page/incidents", &[req("project", "Workspace project"), breq("title", Ty::Str, "1-120 characters, public"), breq("text", Ty::Str, "1-2000 characters, public"), b("state", Ty::Str, "investigating, identified, monitoring or resolved")]).published(),
+    t("apps_update_incident", "Update an incident on the status page", "Add a public update to a status page incident (resolved closes it). Anyone can read it.", "apps", "POST", "/v1/apps/projects/{project}/status-page/incidents/{incident}/updates", &[req("project", "Workspace project"), req("incident", "Incident id"), breq("state", Ty::Str, "investigating, identified, monitoring or resolved"), breq("text", Ty::Str, "1-2000 characters, public")]).published(),
     t("apps_environment_slo", "SLO and error budget", "An environment's objective against its window: per indicator (availability, latency) the total, the failures, the share that met it and the error budget left (1 untouched, below 0 spent), and whether it's burning now.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/slo", &[SERVICE, ENV]),
     t("apps_list_forms", "List a site's forms", "A static site's forms with their submission counts and the last one's time (never what people sent; apps_form_submissions reads that).", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/forms", &[SERVICE, ENV]),
     t("apps_form_submissions", "Read form submissions", "What people sent through a site's form, newest first: each submission's id, time and fields. People's own data: every read is audited.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/forms/{form}/submissions", &[SERVICE, ENV, req("form", "Form name"), q("limit", Ty::Int, "At most (1-200, default 50)"), q("before", Ty::Str, "A submission's id: the page after it")]).outside(&["fields"]),
     t("apps_delete_form_submission", "Delete a form submission", "Delete one submission for good (someone asked to be forgotten, or spam). Audited.", "apps", "DELETE", "/v1/apps/services/{service}/environments/{env}/forms/{form}/submissions/{submission}", &[SERVICE, ENV, req("form", "Form name"), req("submission", "Submission id")]),
-    t("apps_rollback", "Roll back a deployment", "Roll an environment back to an earlier deploy, with the variables it went live with (keep_variables: true keeps today's).", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/deploys/{deploy}/rollback", &[SERVICE, ENV, req("deploy", "Deploy id"), b("keep_variables", Ty::Bool, "Keep the variables as they are now")]),
+    t("apps_rollback", "Roll back a deployment", "Roll an environment back to an earlier deploy, with the variables it went live with (keep_variables: true keeps today's).", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/deploys/{deploy}/rollback", &[SERVICE, ENV, req("deploy", "Deploy id"), b("keep_variables", Ty::Bool, "Keep the variables as they are now"), OVERRIDE]),
     t("apps_rollback_previous", "Roll back to the last deploy", "Put back the deploy that was live before this one, with its variables (keep_variables: true keeps today's).", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/rollback", &[SERVICE, ENV, b("keep_variables", Ty::Bool, "Keep the variables as they are now")]),
     t("apps_logs", "Service logs", "Recent logs of a service's environment, or with http its requests (method, path, status, ms): the quickest way to find failing or slow ones.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/logs", &[
         SERVICE,
@@ -1179,6 +1208,7 @@ static TOOLS: &[Tool] = &[
     t("previews_refresh", "Refresh a preview", "Redeploy a preview now.", "previews", "POST", "/v1/previews/{id}/refresh", &[req("id", "Preview id")]),
     t("previews_errors", "Preview errors", "A preview's errors over the last minutes (5-1440, default 60), grouped by service and fingerprint, with counts, first and last seen and a sample (masked as its logs are). Start here when a preview fails.", "previews", "GET", "/v1/previews/{id}/errors", &[req("id", "Preview id"), q("minutes", Ty::Int, "How far back, 5-1440 (default 60)")]),
     t("previews_traces", "Preview traces: slow or failing requests", "A preview's recent traces (5-360 minutes back, default 60), newest first, at most 100: each one's root span, service, duration, span count and whether it failed. previews_get_trace has one trace's spans. Names and attributes are masked as its logs are.", "previews", "GET", "/v1/previews/{id}/traces", &[req("id", "Preview id"), q("minutes", Ty::Int, "How far back, 5-360 (default 60)")]),
+    t("previews_routes", "Preview route times against main", "Each route's p50 and p95 in a preview (from its traces, 5-360 minutes back, default 60) against the same route on main's preview, the slower ones first: `slower` when both sides have 5 traces and the preview's p50 is half again main's and 100 ms more. Which request got slower before it merges. Names are masked as its traces are.", "previews", "GET", "/v1/previews/{id}/routes", &[req("id", "Preview id"), q("minutes", Ty::Int, "How far back, 5-360 (default 60)")]),
     t("previews_get_trace", "A preview trace's spans", "One trace's spans, oldest first: where a slow or failing request spent its time across the preview's services (names and attributes masked).", "previews", "GET", "/v1/previews/{id}/traces/{trace}", &[req("id", "Preview id"), req("trace", "Trace id (from previews_traces)")]),
     t("previews_mask_suggestions", "Unmasked personal data", "Columns in a project's databases and indices that look like people's data (emails, names, phone numbers…) and aren't masked in its previews yet, with the masking rule each would take and why; only resources this token can read.", "previews", "GET", "/v1/previews/projects/{project}/mask-suggestions", &[req("project", "Workspace project")]),
     t("previews_metrics", "Preview metrics", "Each of a preview's services' CPU and memory now: which one is slow or about to run out.", "previews", "GET", "/v1/previews/{id}/metrics", &[req("id", "Preview id")]),
@@ -1273,6 +1303,11 @@ mod tests {
         let r = all().iter().find(|t| t.name == "apps_restart").unwrap().request(&json!({ "service": "svc_a-b~c", "env": ".." })).unwrap();
         assert_eq!(r.uri, "/v1/apps/services/svc_a-b~c/environments/%2E%2E/restart");
         assert!(all()[0].request(&json!({ "nope": 1 })).is_err());
+        // Past a freeze: the header apps reads (exactly `1`), never a body field; no override, no header.
+        let deploy = all().iter().find(|t| t.name == "apps_deploy").unwrap();
+        let r = deploy.request(&json!({ "service": "svc_a", "env": "production", "override": true })).unwrap();
+        assert!(r.headers.contains(&("x-roll-override", "1".into())) && matches!(r.body, Built::Json(ref b) if b.get("override").is_none()), "{:?}", r.headers);
+        assert!(!deploy.request(&json!({ "service": "svc_a", "env": "production", "override": false })).unwrap().headers.iter().any(|(h, _)| *h == "x-roll-override"));
         // Explain plans the agent's statement in a read-only transaction, and runs nothing.
         let r = all().iter().find(|t| t.name == "postgres_explain").unwrap().request(&json!({ "endpoint": "ep_1", "sql": "select * from users;" })).unwrap();
         assert!(matches!(r.body, Built::Json(ref b) if b["sql"] == "EXPLAIN (FORMAT JSON) select * from users" && b["read_only"] == true));
@@ -1295,6 +1330,10 @@ mod tests {
         }
         // What a cluster's users typed into a search box (top queries, queries that found nothing).
         assert!(all().iter().find(|t| t.name == "search_analytics").unwrap().outside.contains(&"query"));
+        // What goes on a public page is held to the credential guard as anywhere people read.
+        for n in ["apps_create_incident", "apps_update_incident"] {
+            assert!(all().iter().find(|t| t.name == n).unwrap().published, "{n}");
+        }
         // docs/mcp.md lists every tool.
         let doc = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/mcp.md")).unwrap();
         let missing: Vec<_> = all().iter().filter(|t| !doc.contains(&format!("| `{}` |", t.name))).map(|t| t.name).collect();

@@ -2308,12 +2308,18 @@ async fn a_link_credential_uses_the_data_and_is_revoked() {
     assert_eq!(as_user(&u, &p, reqwest::Method::GET, "/items/_doc/2", None).await, 401, "removed");
     let (s, _) = e.call(reqwest::Method::DELETE, "/v1/search/clusters/os-link/keys/admin", None).await;
     assert_eq!(s, 404, "the keys route removes only users it made");
-    // Three seconds, not one: a loaded host can take a second between minting and first use.
-    let k = e.post("/v1/search/clusters/os-link/keys", json!({"name": "brief", "expires_in_s": 3})).await;
-    assert!(k["expires_at"].as_i64().is_some(), "{k}");
+    // An expiring key: the user carries the expiry the route answered, and once that moment has
+    // passed it is refused. No clock is waited on: the expiry is moved into the past instead.
+    let k = e.post("/v1/search/clusters/os-link/keys", json!({"name": "brief", "expires_in_s": 3600})).await;
+    let expires_at = k["expires_at"].as_i64().unwrap_or_else(|| panic!("no expires_at: {k}"));
     let (u, p) = (k["username"].as_str().unwrap().to_string(), k["password"].as_str().unwrap().to_string());
     assert_eq!(as_user(&u, &p, reqwest::Method::GET, "/items/_doc/2", None).await, 200);
-    tokio::time::sleep(std::time::Duration::from_millis(3100)).await;
+    let user_path = format!("/_plugins/_security/api/internalusers/{}", k["id"].as_str().unwrap());
+    let stored = body(&e.post("/v1/search/clusters/os-link/request", json!({"method": "GET", "path": user_path})).await);
+    let at_ms: i64 = stored[k["id"].as_str().unwrap()]["attributes"]["roll_expires_at"].as_str().and_then(|v| v.parse().ok()).unwrap_or_else(|| panic!("{stored}"));
+    assert_eq!(at_ms.div_euclid(1000), expires_at, "{stored}");
+    let moved = e.post("/v1/search/clusters/os-link/request", json!({"method": "PATCH", "path": user_path, "body": [{"op": "replace", "path": "/attributes/roll_expires_at", "value": "1"}]})).await;
+    assert_eq!(moved["status"], 200, "{moved}");
     assert_eq!(as_user(&u, &p, reqwest::Method::GET, "/items/_doc/2", None).await, 401, "expired");
 }
 
@@ -2977,4 +2983,227 @@ async fn an_alias_pattern_over_a_link_and_a_loopback_is_authorized_locally() {
     let r = e.http.post(format!("{}/_msearch", e.es)).basic_auth(&user, Some("pass-word-1")).header("content-type", "application/x-ndjson").body("{\"index\":\"*:secret\"}\n{}\n").send().await.unwrap();
     let m = r.text().await.unwrap();
     assert!(!m.contains("secret doc"), "{m}");
+}
+
+/// Query suggestions from search analytics: with analytics and suggestions on, the metering
+/// pass builds `<index>-suggestions` from the index's searches (weighted by count, raised by
+/// click-through), which the completion suggester and `search_as_you_type` serve; a rare query,
+/// a blocked one and one that finds nothing are never suggested. A rebuild swaps the alias in
+/// one step (searches during it see the old build or the new, never none) and writes nothing
+/// when nothing changed. A sleeping cluster is woken only when its suggestions are due and
+/// would change. Turning analytics off deletes the suggestions index.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn query_suggestions_from_search_analytics() {
+    use reqwest::Method;
+    let e = env_with(|c| c.job_wake_interval = Some(Duration::from_millis(200))).await;
+    let c = e.post("/v1/search/clusters", json!({"name": "shop"})).await;
+    let id = c["id"].as_str().unwrap().to_string();
+    let (user, pw) = creds(&c);
+    let es = |m: Method, p: &str, b: Option<Value>| {
+        let (user, pw, p, e) = (user.clone(), pw.clone(), p.to_string(), &e);
+        async move {
+            let (s, v) = e.es(&user, &pw, m, &p, b).await;
+            assert!(s < 300, "{p}: {s} {v}");
+            v
+        }
+    };
+    es(Method::PUT, "/products", Some(json!({"mappings": {"properties": {"title": {"type": "text"}}}}))).await;
+    for (i, t) in ["red shoes", "blue shoes", "rare query", "blocked one", "secret sale", "green shoes", "purple hat"].iter().enumerate() {
+        es(Method::PUT, &format!("/products/_doc/{i}?refresh=true"), Some(json!({ "title": t }))).await;
+    }
+    let status = async || e.get("/v1/search/clusters/shop/indices/products/suggestions").await;
+    let search = |q: &str| es(Method::POST, "/products/_search", Some(json!({"query": {"match_phrase": {"title": q}}})));
+    let complete = async |prefix: &str| {
+        let v = es(Method::POST, "/products-suggestions/_search", Some(json!({"suggest": {"s": {"prefix": prefix, "completion": {"field": "suggest", "size": 10}}}}))).await;
+        v["suggest"]["s"][0]["options"].as_array().unwrap().iter().map(|o| (o["text"].as_str().unwrap().to_string(), o["_score"].as_f64().unwrap() as u64)).collect::<Vec<_>>()
+    };
+
+    // Off: nothing to rebuild.
+    let (s, v) = e.call(Method::POST, "/v1/search/clusters/shop/indices/products/suggestions/rebuild", None).await;
+    assert_eq!(s, 400, "{v}");
+    es(Method::PUT, "/products/_settings", Some(json!({"index.roll.analytics.enabled": true, "index.roll.suggestions": {"enabled": true, "block": ["Blocked One"], "block_prefix": ["secret"]}}))).await;
+    for (q, n) in [("red shoes", 6), ("blue shoes", 5), ("rare query", 2), ("blocked one", 6), ("secret sale", 6), ("sandals", 6)] {
+        for _ in 0..n {
+            search(q).await;
+        }
+    }
+    // Every search for blue shoes was clicked through: its weight doubles past red shoes'.
+    es(Method::PUT, "/_application/analytics/web", None).await;
+    for _ in 0..5 {
+        let click = json!({"session": {"id": "s"}, "user": {"id": "u"}, "document": {"index": "products", "id": "1"}, "search": {"query": "blue shoes"}});
+        es(Method::POST, "/_application/analytics/web/event/search_click", Some(click)).await;
+    }
+    // The metering pass stores the analytics and builds what's due: these never were.
+    e.control.sample().await.unwrap();
+    let st = status().await;
+    assert_eq!((st["enabled"].as_bool(), st["analytics"].as_bool(), st["last_build"]["count"].as_i64()), (Some(true), Some(true), Some(2)), "{st}");
+    assert_eq!(st["suggestions"].as_array().unwrap().iter().map(|s| s["query"].as_str().unwrap()).collect::<Vec<_>>(), ["blue shoes", "red shoes"], "{st}");
+    assert_eq!(complete("b").await, [("blue shoes".to_string(), 10)]);
+    assert_eq!(complete("r").await, [("red shoes".to_string(), 6)], "the rare query isn't suggested");
+    assert!(complete("s").await.is_empty(), "blocked by prefix, and a query that found nothing");
+    let v = es(Method::POST, "/products-suggestions/_search", Some(json!({"query": {"multi_match": {"query": "sho", "type": "bool_prefix", "fields": ["query", "query._2gram", "query._3gram"]}}}))).await;
+    assert_eq!(v["hits"]["total"]["value"].as_u64(), Some(2), "{v}");
+    let first = st["last_build"]["index"].as_str().unwrap().to_string();
+
+    // Nothing changed: a rebuild writes nothing.
+    let v = e.post("/v1/search/clusters/shop/indices/products/suggestions/rebuild", json!({})).await;
+    assert_eq!((v["changed"].as_bool(), v["last_build"]["index"].as_str()), (Some(false), Some(first.as_str())), "{v}");
+
+    // New searches: a rebuild swaps the alias while clients search it.
+    for _ in 0..5 {
+        search("green shoes").await;
+    }
+    e.control.sample().await.unwrap();
+    assert_eq!(status().await["last_build"]["index"].as_str(), Some(first.as_str()), "not due again yet");
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let reader = {
+        let (stop, url, user, pw) = (stop.clone(), format!("{}/products-suggestions/_search", e.es), user.clone(), pw.clone());
+        tokio::spawn(async move {
+            let http = reqwest::Client::new();
+            let mut seen = 0;
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let r = http.post(&url).basic_auth(&user, Some(&pw)).json(&json!({"size": 0, "query": {"match_all": {}}})).send().await.unwrap();
+                assert_eq!(r.status().as_u16(), 200);
+                let v: Value = r.json().await.unwrap();
+                let n = v["hits"]["total"]["value"].as_u64().unwrap();
+                assert!(n == 2 || n == 3, "a reader saw {n} suggestions: {v}");
+                seen += 1;
+            }
+            seen
+        })
+    };
+    let v = e.post("/v1/search/clusters/shop/indices/products/suggestions/rebuild", json!({})).await;
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    assert!(reader.await.unwrap() > 0);
+    let second = v["last_build"]["index"].as_str().unwrap().to_string();
+    assert!(v["changed"] == true && second != first, "{v}");
+    let aliases = es(Method::GET, "/_alias/products-suggestions", None).await;
+    assert_eq!(aliases.as_object().unwrap().keys().collect::<Vec<_>>(), [&second], "{aliases}");
+    let (s, _) = e.es(&user, &pw, Method::GET, &format!("/{first}"), None).await;
+    assert_eq!(s, 404, "the previous build is gone");
+    assert_eq!(complete("g").await, [("green shoes".to_string(), 5)]);
+
+    // Blocking a term (the dashboard's one click: the setting, then a rebuild).
+    es(Method::PUT, "/products/_settings", Some(json!({"index.roll.suggestions.block": ["blocked one", "red shoes"]}))).await;
+    e.control.sample().await.unwrap();
+    assert!(complete("r").await.is_empty(), "a changed setting rebuilds on the next pass");
+
+    // Asleep: not woken before it's due, nor when due with nothing new to suggest.
+    let unload = async || {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            let v = e.post("/v1/search/clusters/shop/unload", json!({})).await;
+            if v["unloaded"] == true || !e.control.node.loaded().iter().any(|n| &**n == "shop") {
+                break;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "never unloaded: {v}");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    };
+    let loaded = || e.control.node.loaded().iter().any(|n| &**n == "shop");
+    e.control.sample().await.unwrap();
+    unload().await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert!(!loaded(), "woken before its suggestions were due");
+    let row = e.control.store.suggestion(&id, "products").await.unwrap().unwrap();
+    assert!(row.due_at > search_control::meter::now_ms() + 3_600_000, "{row:?}");
+    e.control.store.set_suggestion_due(&id, "products", 0, None).await.unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while e.control.store.suggestion(&id, "products").await.unwrap().unwrap().due_at == 0 {
+        assert!(tokio::time::Instant::now() < deadline, "the due check never ran");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(!loaded(), "woken though its suggestions wouldn't change");
+    // Due with something new (searches another node handed on): woken, and rebuilt.
+    let mut b = search_es::analytics::Bucket::new(100, 50);
+    b.searches = 9;
+    b.top.add("purple hat", &search_es::analytics::QueryStats { searches: 9, hits: 9, ..Default::default() });
+    let hour = (search_control::meter::now_ms() / 3_600_000) as u64;
+    e.control.store.record_analytics(&id, &[], None, &[("products".to_string(), hour, b)]).await.unwrap();
+    e.control.store.set_suggestion_due(&id, "products", 0, None).await.unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while !status().await["suggestions"].as_array().unwrap().iter().any(|s| s["query"] == "purple hat") {
+        assert!(tokio::time::Instant::now() < deadline, "the due rebuild never woke its cluster");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(loaded());
+    assert_eq!(complete("p").await, [("purple hat".to_string(), 9)]);
+
+    // Another person's cluster: no such cluster.
+    let (s, _) = e.call_as("mallory", Method::GET, "/v1/search/clusters/shop/indices/products/suggestions", None).await;
+    assert_eq!(s, 404);
+    // Analytics off: the suggestions (query text) go with them.
+    es(Method::PUT, "/products/_settings", Some(json!({"index.roll.analytics.enabled": null}))).await;
+    e.control.sample().await.unwrap();
+    let (s, v) = e.es(&user, &pw, Method::GET, "/products-suggestions", None).await;
+    assert_eq!(s, 404, "{v}");
+    assert!(e.control.store.suggestion(&id, "products").await.unwrap().is_none());
+}
+
+/// A suggestions build touches only its own names: the alias is always `<index>-suggestions`
+/// (no setting names another), only roll's build can mark an index as one (the mark's settings
+/// are private: refused on a user's create and update), and when that name is already someone else's index, or an alias
+/// over an index roll didn't build from this source, the build records the error and writes
+/// nothing: the index keeps its documents, the alias keeps pointing where it did, and no build
+/// is left behind.
+#[tokio::test]
+async fn suggestions_never_touch_a_name_they_did_not_build() {
+    use reqwest::Method;
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({"name": "mall"})).await;
+    let (user, pw) = creds(&c);
+    let es = |m: Method, p: &str, b: Option<Value>| {
+        let (user, pw, p, e) = (user.clone(), pw.clone(), p.to_string(), &e);
+        async move { e.es(&user, &pw, m, &p, b).await }
+    };
+    let ok = async |m: Method, p: &str, b: Option<Value>| {
+        let (s, v) = es(m, p, b).await;
+        assert!(s < 300, "{p}: {s} {v}");
+        v
+    };
+    // The alias can't be set to another name.
+    ok(Method::PUT, "/orders", Some(json!({"mappings": {"properties": {"title": {"type": "text"}}}}))).await;
+    let (s, v) = es(Method::PUT, "/orders/_settings", Some(json!({"index.roll.suggestions.index": "accounts"}))).await;
+    assert_eq!(s, 400, "{v}");
+    // Nor can anyone mark an index as a build: the mark is private, refused on create and update.
+    let uuid = ok(Method::GET, "/orders/_settings/index.uuid?flat_settings=true", None).await["orders"]["settings"]["index.uuid"].as_str().unwrap().to_string();
+    let mark = json!({"index.roll.suggestions.source": "orders", "index.roll.suggestions.source_uuid": uuid});
+    let (s, v) = es(Method::PUT, "/fake-build", Some(json!({ "settings": mark }))).await;
+    assert!(s == 400 && v.to_string().contains("private index setting [index.roll.suggestions.source"), "{s} {v}");
+    let (s, v) = es(Method::GET, "/fake-build", None).await;
+    assert_eq!(s, 404, "{v}");
+    let (s, v) = es(Method::PUT, "/orders/_settings", Some(mark.clone())).await;
+    assert!(s == 400 && v.to_string().contains("can not update private setting [index.roll.suggestions.source"), "{s} {v}");
+    // Someone else's index under `orders-suggestions`, and an alias `crm-suggestions` over theirs.
+    ok(Method::PUT, "/orders-suggestions/_doc/1?refresh=true", Some(json!({"theirs": true}))).await;
+    ok(Method::PUT, "/accounts/_doc/1?refresh=true", Some(json!({"theirs": true}))).await;
+    ok(Method::POST, "/_aliases", Some(json!({"actions": [{"add": {"index": "accounts", "alias": "crm-suggestions"}}]}))).await;
+    for index in ["orders", "crm"] {
+        ok(Method::PUT, &format!("/{index}/_doc/1?refresh=true"), Some(json!({"title": "blue bag"}))).await;
+        ok(Method::PUT, &format!("/{index}/_settings"), Some(json!({"index.roll.analytics.enabled": true, "index.roll.suggestions.enabled": true}))).await;
+        for _ in 0..5 {
+            ok(Method::POST, &format!("/{index}/_search"), Some(json!({"query": {"match": {"title": "blue bag"}}}))).await;
+        }
+    }
+    // The scheduled build and a rebuild both refuse, and say why.
+    e.control.sample().await.unwrap();
+    for (index, why) in [("orders", "[orders-suggestions] is an index roll didn't build"), ("crm", "the alias [crm-suggestions] points at [accounts]")] {
+        let st = e.get(&format!("/v1/search/clusters/mall/indices/{index}/suggestions")).await;
+        assert!(st["last_build"]["error"].as_str().is_some_and(|m| m.contains(why)), "{st}");
+        assert!(st["last_build"]["at"].is_null(), "{st}");
+        let (s, v) = e.call(Method::POST, &format!("/v1/search/clusters/mall/indices/{index}/suggestions/rebuild"), None).await;
+        assert!(s == 409 && v["error"].as_str().is_some_and(|m| m.contains(why)), "{s} {v}");
+    }
+    // Untouched: their documents, where the alias points, and no build left behind.
+    for index in ["orders-suggestions", "accounts"] {
+        let v = ok(Method::GET, &format!("/{index}/_doc/1"), None).await;
+        assert_eq!(v["_source"], json!({"theirs": true}), "{v}");
+    }
+    let v = ok(Method::GET, "/_alias/crm-suggestions", None).await;
+    assert_eq!(v.as_object().unwrap().keys().collect::<Vec<_>>(), ["accounts"], "{v}");
+    let v = ok(Method::GET, "/orders-suggestions/_alias", None).await;
+    assert_eq!(v["orders-suggestions"]["aliases"], json!({}), "{v}");
+    let v = ok(Method::GET, "/_cat/indices?format=json&h=index", None).await;
+    let names: Vec<&str> = v.as_array().unwrap().iter().filter_map(|r| r["index"].as_str()).collect();
+    assert!(!names.iter().any(|n| n.starts_with("orders-suggestions-") || n.starts_with("crm-suggestions-")), "{names:?}");
 }
