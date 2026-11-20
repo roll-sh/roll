@@ -478,21 +478,20 @@ impl Engine {
         if !person && self.store.settings(&r.project_id)?.visual_review == crate::settings::VisualReviewRule::Required {
             return Err(Error::Forbidden("a required visual review is accepted by a person, in roll, not by a token".into()));
         }
-        // Not by the change's own author, as approvals aren't (and as GitHub's button isn't).
-        if let Some(change) = &r.change_id
-            && let Ok(Some(c)) = self.source.change(change).await
-            && std::iter::once(by).chain(aliases.iter().map(String::as_str)).any(|who| who.eq_ignore_ascii_case(&c.author) || who.eq_ignore_ascii_case(c.author.trim_start_matches('@')))
-        {
+        // Not by the change's own author, as approvals aren't (and as GitHub's button isn't): its
+        // author read for sure (an error refuses, it doesn't pass), and known.
+        let change = r.change_id.as_deref().unwrap_or_default();
+        let c = self.source.change(change).await.map_err(|e| Error::Internal(format!("reading the change's author: {e}")))?.ok_or_else(|| Error::NotFound(format!("no change {change}")))?;
+        if c.author.is_empty() || c.author == "github" {
+            return Err(Error::Conflict("the change's author isn't known, so nobody can be told apart from them".into()));
+        }
+        if std::iter::once(by).chain(aliases.iter().map(String::as_str)).any(|who| who.eq_ignore_ascii_case(&c.author) || who.eq_ignore_ascii_case(c.author.trim_start_matches('@'))) {
             return Err(Error::Forbidden("the change's own author can't accept its visual change: someone else looks at it".into()));
         }
-        if let Some(owner) = writer {
-            let c = match &r.change_id {
-                Some(change) => self.source.change(change).await.map_err(|e| Error::Internal(format!("reading the change: {e}")))?,
-                None => None,
-            };
-            if c.as_ref().is_none_or(|c| owner != Some(c.owner_id.as_str())) {
-                return Err(Error::Forbidden(format!("accepting {}'s visual change needs write access to it in roll code", r.repo)));
-            }
+        if let Some(owner) = writer
+            && owner != Some(c.owner_id.as_str())
+        {
+            return Err(Error::Forbidden(format!("accepting {}'s visual change needs write access to it in roll code", r.repo)));
         }
         let head = self.store.accept_visual(id, by, seen, page)?.ok_or_else(|| Error::Conflict("the preview has no screenshot to accept yet".into()))?;
         let what = match page {
