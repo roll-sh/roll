@@ -252,7 +252,7 @@ type Run = {
    *  share reaches error_pct (1–100, default 5) of 20+ requests, and beats the old one's, rolls
    *  back. Web services only; refused with a volume. manual: each step, once it passes, holds
    *  its split until a person says (`…/deploys/{dep}/rollout`), still judged while it waits. */
-  rollout: { steps: number[]; step_s: number; error_pct: number; manual?: boolean; slo_burn?: number /* with run.slo: a step fails when the new deployment spends its budget this many times as fast as it lasts (1–1000, default 14.4) */; p95_pct?: number /* a step fails when the new deployment's p95 response time is more than this many percent above the old one's, with 20 requests on each side (1–1000, off unless set) */ };
+  rollout: { steps: number[]; step_s: number; error_pct: number; manual?: boolean; slo_burn?: number /* with run.slo: a step fails when the new deployment spends its budget this many times as fast as it lasts (1–1000, default 14.4) */; p95_pct?: number /* a step fails when the new deployment's p95 response time is more than this many percent above the old one's, with 20 requests on each side (1–1000, off unless set) */; overlap?: false /* the old instances stop (draining for drain_s) before the new ones start, so two never run at once (a bot, a scheduler); a web service's requests wait for the new one; no steps with it */ };
   /** The app speaks HTTP/2 without TLS (a gRPC server): the proxy and health checks use h2c,
    *  `te: trailers` passes, trailers come back. A WebSocket upgrade stays HTTP/1.1. Default false. */
   h2c?: boolean;
@@ -559,7 +559,7 @@ type DeployCommits = {
   complete: boolean;         // `since` was reached (false: more than 50, or not in its history: a rollback, another branch)
 };
 
-type NewDeploy = { revision?: string; image?: string; message?: string; no_traffic?: boolean; no_cache?: boolean /* build from scratch (400 with an image): no cached layer, base images pulled again, the service's cache mounts empty from then on; an upload says it with `X-Roll-No-Cache: 1` */; /* during a freeze, the header X-Roll-Override: 1 (admin; audited): a body `override` is a 400 */ closed?: boolean /* true: 409 unless the environment is built closed (egress `roll` on a node that closes it: its own network, no secret value); a node that predates the field answers 400, so the request fails closed (roll previews sends it for a fork's head) */ };
+type NewDeploy = { revision?: string /* a commit, or a branch or tag by name (deployed once: the environment keeps following its branch); a repo service's: a full or short sha or a branch */; image?: string; message?: string; no_traffic?: boolean; no_cache?: boolean /* build from scratch (400 with an image): no cached layer, base images pulled again, the service's cache mounts empty from then on; an upload says it with `X-Roll-No-Cache: 1` */; /* during a freeze, the header X-Roll-Override: 1 (admin; audited): a body `override` is a 400 */ closed?: boolean /* true: 409 unless the environment is built closed (egress `roll` on a node that closes it: its own network, no secret value); a node that predates the field answers 400, so the request fails closed (roll previews sends it for a fork's head) */ };
 
 type Deployment = {
   id: string;

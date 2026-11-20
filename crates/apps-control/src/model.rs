@@ -1014,11 +1014,16 @@ pub struct Rollout {
     /// above the old one's (Flagger's request duration check); off unless set.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub p95_pct: Option<u32>,
+    /// `false`: the old instances stop (draining for `drain_s`) before the new ones start, so
+    /// two never run at once (Fly's `immediate`, Heroku's workers): a bot, a scheduler, a
+    /// consumer that must be alone. A web service's requests wait for the new one meanwhile.
+    #[serde(skip_serializing_if = "is_true")]
+    pub overlap: bool,
 }
 
 impl Default for Rollout {
     fn default() -> Self {
-        Rollout { steps: Vec::new(), step_s: 120, error_pct: 5, manual: false, slo_burn: None, p95_pct: None }
+        Rollout { steps: Vec::new(), step_s: 120, error_pct: 5, manual: false, slo_burn: None, p95_pct: None, overlap: true }
     }
 }
 
@@ -1415,6 +1420,9 @@ impl Run {
         if self.kind != RunType::Web {
             // Only requests can be split: a worker or a cron run switches at once.
             self.rollout.steps.clear();
+        }
+        if !self.rollout.overlap && !self.rollout.steps.is_empty() {
+            return bad("rollout: without overlap nothing runs beside the new deployment, so it can't take a share of requests (no steps)");
         }
         match self.kind {
             RunType::Cron => {

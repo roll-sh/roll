@@ -59,7 +59,8 @@ pub struct Up {
 pub struct Deploy {
     #[command(flatten)]
     pub target: Target,
-    /// The commit to deploy (a repo service; default: its branch's head).
+    /// What to deploy once: a commit, or a branch or tag by name (default: its branch's head;
+    /// the environment keeps following its branch).
     #[arg(long)]
     pub revision: Option<String>,
     /// Deploy this public image instead of the service's source.
@@ -391,6 +392,10 @@ pub enum AppsCmd {
         /// `roll apps rollout advance|all|abort` decides.
         #[arg(long)]
         rollout_manual: Option<bool>,
+        /// `false`: the old instances stop before the new ones start, so two never run at once
+        /// (a bot, a scheduler); `true` (the default): the new ones start beside them.
+        #[arg(long, value_name = "BOOL")]
+        overlap: Option<bool>,
         /// The app speaks HTTP/2 without TLS (a gRPC server): `true` or `false`.
         #[arg(long)]
         h2c: Option<bool>,
@@ -2700,10 +2705,10 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Set { target, name, repo, root, image, upload, builder, dockerfile, stage, install, build_command, build_start, health_timeout, health_every, health_failures, health_command, alert_memory, alert_errors, alert_p95, alert_log, alert_log_count, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, retries, volume, watch, packages, build_timeout, rollout, rollout_step, rollout_errors, rollout_manual, h2c, scale, public, drain, cpu_target, memory_target, restart, restart_tries, affinity, tcp, rollback_on_crash, rebuild_on_base, block_on } => {
+        AppsCmd::Set { target, name, repo, root, image, upload, builder, dockerfile, stage, install, build_command, build_start, health_timeout, health_every, health_failures, health_command, alert_memory, alert_errors, alert_p95, alert_log, alert_log_count, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, retries, volume, watch, packages, build_timeout, rollout, rollout_step, rollout_errors, rollout_manual, overlap, h2c, scale, public, drain, cpu_target, memory_target, restart, restart_tries, affinity, tcp, rollback_on_crash, rebuild_on_base, block_on } => {
             let svc = service(api, &target).await?;
             // The service's rollout with what was given replaced (the API takes it whole).
-            let rollout = if rollout.is_some() || rollout_step.is_some() || rollout_errors.is_some() || rollout_manual.is_some() {
+            let rollout = if rollout.is_some() || rollout_step.is_some() || rollout_errors.is_some() || rollout_manual.is_some() || overlap.is_some() {
                 let mut r = svc["run"]["rollout"].as_object().cloned().unwrap_or_default();
                 match rollout.as_deref() {
                     None => {}
@@ -2723,6 +2728,9 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 }
                 if let Some(m) = rollout_manual {
                     r.insert("manual".into(), json!(m));
+                }
+                if let Some(o) = overlap {
+                    r.insert("overlap".into(), json!(o));
                 }
                 Some(Value::Object(r))
             } else {

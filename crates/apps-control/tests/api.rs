@@ -6353,6 +6353,14 @@ async fn a_public_git_url_deploys_its_branch_and_follows_new_commits() {
     assert!(st == StatusCode::OK && v["ignored"].as_str().unwrap().contains("no environment follows it"), "{v}");
     assert_eq!(call(&w.api, "POST", &hook, Some(json!({ "zen": "Keep it logically awesome.", "hook_id": 1 }))).await.1["ignored"], "pong");
     assert_eq!(settled(&w, &id, "production", d3["id"].as_str().unwrap()).await["status"], "active");
+    // Another branch deployed once by its name (Render's manual deploy): its head, said in the
+    // message; a name the repository hasn't is a 400.
+    git.branches.lock().insert("feature-x".into(), second.parse().unwrap());
+    let deploys = format!("/v1/apps/services/{id}/environments/production/deploys");
+    let (st, d) = call(&w.api, "POST", &deploys, Some(json!({ "revision": "feature-x" }))).await;
+    assert!(st == StatusCode::ACCEPTED && d["revision"] == second.as_str() && d["message"].as_str().unwrap().starts_with("branch feature-x at "), "{d}");
+    assert_eq!(settled(&w, &id, "production", d["id"].as_str().unwrap()).await["status"], "active");
+    assert_eq!(call(&w.api, "POST", &deploys, Some(json!({ "revision": "nope" }))).await.0, StatusCode::BAD_REQUEST);
     // What a repository sends that isn't a branch push deploys nothing: a tag, another event,
     // a body that isn't a push. GitHub's default form encoding is read as its JSON is.
     let raw = |ct: &'static str, event: Option<&'static str>, body: String| {
@@ -7229,4 +7237,42 @@ async fn a_stream_is_pushed_to_a_web_service() {
     // Push is a web service's.
     let worker = json!({ "project": w.project, "name": "jobs", "source": {"kind": "image", "image": "nginx:1.27"}, "run": {"type": "worker", "push": [push[0].clone()]} });
     assert_eq!(call(&w.api, "POST", "/v1/apps/services", Some(worker)).await.0, StatusCode::BAD_REQUEST);
+}
+
+/// A worker that must run alone (`rollout.overlap: false`, Fly's `immediate`, Heroku's workers):
+/// a deploy stops the old instance before the new one starts, so two never run at once (with
+/// overlap, the default, they do for a moment); without overlap there are no gradual steps.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_worker_without_overlap_never_runs_twice() {
+    let w = world().await;
+    let peak_of = |run: Value| {
+        let w = &w;
+        async move {
+            let (svc, d1) = image_service(w, if run["rollout"]["overlap"] == false { "alone" } else { "pair" }, run).await;
+            assert_eq!(d1["status"], "active", "{d1}");
+            let id = svc["id"].as_str().unwrap().to_string();
+            let (fake, sid, stop) = (w.fake.clone(), id.clone(), Arc::new(std::sync::atomic::AtomicBool::new(false)));
+            let stop2 = stop.clone();
+            let sampler = tokio::spawn(async move {
+                let mut peak = 0;
+                while !stop2.load(Ordering::SeqCst) {
+                    peak = peak.max(fake.instances(&sid).iter().filter(|(_, _, st)| *st == FakeState::Running).count());
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+                peak
+            });
+            let (_, d2) = call(&w.api, "POST", &format!("/v1/apps/services/{id}/environments/production/redeploy"), Some(json!({}))).await;
+            assert_eq!(settled(w, &id, "production", d2["id"].as_str().unwrap()).await["status"], "active");
+            stop.store(true, Ordering::SeqCst);
+            (id, sampler.await.unwrap())
+        }
+    };
+    let (id, alone) = peak_of(json!({"type": "worker", "min_instances": 1, "rollout": {"overlap": false}})).await;
+    assert_eq!(alone, 1, "never two at once");
+    let (_, svc) = call(&w.api, "GET", &format!("/v1/apps/services/{id}"), None).await;
+    assert_eq!(svc["run"]["rollout"]["overlap"], false, "{svc}");
+    let (_, pair) = peak_of(json!({"type": "worker", "min_instances": 1})).await;
+    assert_eq!(pair, 2, "the default overlaps");
+    let steps = json!({ "project": w.project, "name": "web", "source": {"kind": "image", "image": "nginx:1.27"}, "run": {"port": 80, "rollout": {"overlap": false, "steps": [10]}} });
+    assert_eq!(call(&w.api, "POST", "/v1/apps/services", Some(steps)).await.0, StatusCode::BAD_REQUEST);
 }
