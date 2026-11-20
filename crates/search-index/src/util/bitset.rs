@@ -160,6 +160,29 @@ impl FixedBitSet {
         }
     }
 
+    /// Appends the set bits in `start..end` (ascending) to `out`, a word at a time.
+    pub fn push_set_bits(&self, start: u32, end: u32, out: &mut Vec<u32>) {
+        let end = end.min(self.len);
+        if start >= end {
+            return;
+        }
+        let (first, last) = ((start >> 6) as usize, ((end - 1) >> 6) as usize);
+        for wi in first..=last {
+            let mut w = self.words[wi];
+            if wi == first {
+                w &= u64::MAX << (start & 63);
+            }
+            if wi == last {
+                w &= u64::MAX >> (63 - ((end - 1) & 63));
+            }
+            let base = (wi as u32) << 6;
+            while w != 0 {
+                out.push(base + w.trailing_zeros());
+                w &= w - 1;
+            }
+        }
+    }
+
     /// Last set bit at or before `from`, or `None`.
     pub fn prev_set_bit(&self, from: u32) -> Option<u32> {
         if self.len == 0 {
@@ -455,6 +478,11 @@ mod tests {
         assert_eq!(b.prev_set_bit(1000), Some(199));
         let all: Vec<u32> = b.iter().collect();
         assert_eq!(all.len(), 34);
+        for (s, e) in [(0, 200), (3, 4), (4, 64), (63, 65), (64, 131), (101, 199), (0, 0), (150, 100), (190, 900)] {
+            let mut got = Vec::new();
+            b.push_set_bits(s, e, &mut got);
+            assert_eq!(got, all.iter().copied().filter(|&d| d >= s && d < e).collect::<Vec<_>>(), "{s}..{e}");
+        }
         let f = FixedBitSet::full(70);
         assert_eq!(f.cardinality(), 70);
     }

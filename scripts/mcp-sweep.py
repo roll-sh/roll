@@ -33,7 +33,9 @@ tools = listed["tools"]
 print(f"tools/list: {len(tools)} tools, {len(json.dumps(listed)) // 1024} KB")
 if "-v" in sys.argv:
     with urllib.request.urlopen(urllib.request.Request(f"{api}/v1/mcp/toolsets", headers={"authorization": f"Bearer {tok}"}), timeout=30) as r:
-        print("toolsets:", json.dumps(json.load(r))[:1500])
+        costs = json.load(r)
+        print("toolsets:", json.dumps(costs["products"])[:1500])
+        print("areas:", ", ".join(f"{a['toolset']} {a['tools']} tools ~{a['context_tokens']} tokens" for a in costs.get("areas", [])))
 reads = [t for t in tools if t.get("annotations", {}).get("readOnlyHint") and (only is None or t["name"] == only)]
 FAIL_WORDS = ("unknown argument", "is required", "can't be empty", "no route", "method not allowed", "invalid type", "missing field", "unknown field",
               "Invalid URL: Cannot parse")  # a path segment of a type the route doesn't take
