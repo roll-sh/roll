@@ -509,6 +509,10 @@ impl Secrets {
         if let Err(e) = self.end_decoys() {
             tracing::warn!("revoking ended decoys failed: {e}");
         }
+        // The issuer key's rotation, before the digests it signs (issuer.rs).
+        if let Err(e) = self.sweep_issuer() {
+            tracing::warn!("rotating roll's OIDC issuer key failed: {e}");
+        }
         // Digests of the audit log, and its retention (at a digest: audit.rs).
         if let Err(e) = self.sweep_audit_chain(crate::audit::RETENTION_DAYS * 86_400_000) {
             tracing::warn!("signing the audit log's digests failed: {e}");

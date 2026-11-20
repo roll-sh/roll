@@ -5036,3 +5036,167 @@ async fn a_secret_request_into_a_folder_that_needs_approval_opens_a_change_reque
     api.ok(Method::POST, &format!("/environments/production/requests/{request}/apply"), None).await;
     assert_eq!(api.values("production", "/payments").await["values"]["PSP_KEY"], "fake-psp-key");
 }
+
+/// A token of roll's issuer: its header and claims, and whether a key of `jwks` signed it.
+fn roll_token(jwks: &Value, token: &str) -> (Value, Value, bool) {
+    use base64::Engine;
+    let b64 = |s: &str| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(s).unwrap();
+    let parts: Vec<&str> = token.split('.').collect();
+    let (header, claims): (Value, Value) = (serde_json::from_slice(&b64(parts[0])).unwrap(), serde_json::from_slice(&b64(parts[1])).unwrap());
+    let signed = jwks["keys"].as_array().unwrap().iter().filter(|k| k["kid"] == header["kid"]).any(|k| {
+        let public = ring::signature::RsaPublicKeyComponents { n: b64(k["n"].as_str().unwrap()), e: b64(k["e"].as_str().unwrap()) };
+        public.verify(&ring::signature::RSA_PKCS1_2048_8192_SHA256, format!("{}.{}", parts[0], parts[1]).as_bytes(), &b64(parts[2])).is_ok()
+    });
+    (header, claims, signed)
+}
+
+fn app(project: &str, service: &str, env: &str) -> roll_secrets::Subject {
+    roll_secrets::Subject::App { project: project.into(), service: service.into(), env: env.into() }
+}
+
+#[tokio::test]
+async fn roll_signs_an_apps_instance_a_token_for_an_hour_at_most() {
+    let api = Api::new().await;
+    let (s, p) = (api.secrets.clone(), api.project.clone());
+    let (tokens, refused) = tokio::task::spawn_blocking(move || {
+        let hour = std::time::Duration::from_secs(3600);
+        let tokens: Vec<String> = (0..3).map(|_| s.issue(app(&p, "svc_web", "production"), "sts.amazonaws.com", 2 * hour).unwrap()).collect();
+        // No part may hold a `:` (a sub names one environment), nor an audience be empty or huge.
+        let refused = [s.issue(app(&p, "svc_web", "prod:x"), "a", hour), s.issue(app(&p, "svc:web", "production"), "a", hour), s.issue(app(&p, "svc_web", "production"), "", hour), s.issue(app(&p, "svc_web", "production"), &"a".repeat(257), hour)]
+            .into_iter()
+            .map(|r| matches!(r, Err(roll_secrets::Error::BadRequest(_))))
+            .collect::<Vec<_>>();
+        (tokens, refused)
+    })
+    .await
+    .unwrap();
+    assert_eq!(refused, [true; 4]);
+    let jwks = api.ok(Method::GET, "/v1/secrets/oidc/jwks", None).await;
+    let (header, claims, signed) = roll_token(&jwks, &tokens[0]);
+    assert!(signed && header["alg"] == "RS256", "{header}");
+    let sub = format!("roll-apps:{}:svc_web:production", api.project);
+    assert_eq!((claims["iss"].as_str(), claims["sub"].as_str(), claims["aud"].as_str()), (Some(ISSUER_URL), Some(sub.as_str()), Some("sts.amazonaws.com")));
+    assert_eq!((claims["project"].as_str(), claims["service"].as_str(), claims["environment"].as_str()), (Some(api.project.as_str()), Some("svc_web"), Some("production")));
+    assert_eq!(claims["exp"].as_i64().unwrap() - claims["iat"].as_i64().unwrap(), 3600, "two hours asked, one given");
+    assert!(claims["nbf"] == claims["iat"] && claims["jti"].is_string() && claims["jti"] != roll_token(&jwks, &tokens[1]).1["jti"]);
+    // Three tokens, one audit row for the hour.
+    let audit = api.ok(Method::GET, "/audit", None).await;
+    let issued: Vec<&Value> = audit.as_array().unwrap().iter().filter(|a| a["action"] == "oidc.issue").collect();
+    assert_eq!(issued.len(), 1, "{audit}");
+    assert_eq!((issued[0]["actor"].as_str(), issued[0]["environment"].as_str()), (Some("app:svc_web"), Some("production")));
+    assert!(!audit.to_string().contains(tokens[0].as_str()), "never the token");
+}
+
+#[tokio::test]
+async fn the_issuers_key_rotates_published_a_day_before_it_signs_and_retires_after_its_tokens() {
+    use roll_secrets::issuer::{PUBLISH_AHEAD_MS, RETIRE_AFTER_MS};
+    let api = Api::new().await;
+    api.set("production", "A", "v").await;
+    let issue = || {
+        let (s, p) = (api.secrets.clone(), api.project.clone());
+        async move { tokio::task::spawn_blocking(move || s.issue(app(&p, "svc_web", "production"), "roll", std::time::Duration::from_secs(3600)).unwrap()).await.unwrap() }
+    };
+    let sweep = || {
+        let s = api.secrets.clone();
+        async move { tokio::task::spawn_blocking(move || s.sweep().unwrap()).await.unwrap() }
+    };
+    let kids = |jwks: &Value| jwks["keys"].as_array().unwrap().iter().map(|k| k["kid"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+    let old_token = issue().await;
+    let jwks = api.ok(Method::GET, "/v1/secrets/oidc/jwks", None).await;
+    let old = roll_token(&jwks, &old_token).0["kid"].as_str().unwrap().to_string();
+    // A digest signed with the key that will be replaced.
+    let s = api.secrets.clone();
+    tokio::task::spawn_blocking(move || s.sweep_audit_chain(i64::MAX / 2).unwrap()).await.unwrap();
+    let now = code_sql::now_ms();
+    let at = |kid: &str, signs_from: i64| {
+        let kid = kid.to_string();
+        api.db.write(move |c| c.execute("UPDATE oidc_keys SET signs_from = ? WHERE kid = ?", code_sql::params![signs_from, kid])).unwrap();
+    };
+
+    // Not due yet: nothing changes.
+    sweep().await;
+    assert_eq!(kids(&api.ok(Method::GET, "/v1/secrets/oidc/jwks", None).await), [old.as_str()]);
+    // 88 days on, the next key is published, and waits two days to sign.
+    at(&old, now - 88 * 86_400_000 - 1000);
+    sweep().await;
+    let jwks = api.ok(Method::GET, "/v1/secrets/oidc/jwks", None).await;
+    let next = kids(&jwks).into_iter().find(|k| *k != old).expect("the next key is published");
+    assert_eq!(kids(&jwks).len(), 2);
+    let waits: i64 = api.db.read(|c| c.query_row("SELECT signs_from FROM oidc_keys WHERE kid = ?", [next.as_str()], |r| r.get(0))).unwrap();
+    assert!(waits >= now + PUBLISH_AHEAD_MS, "it signs a day or more after it's published");
+    assert_eq!(roll_token(&jwks, &issue().await).0["kid"], json!(old), "the old key signs until then");
+    // The operator's rotate-now answers the key already waiting, not another.
+    let r = api.ok(Method::POST, "/v1/secrets/issuer/rotate", None).await;
+    assert_eq!(r["kid"], json!(next));
+    // Its time comes: it signs, and the old key still verifies its tokens.
+    at(&next, now - 1000);
+    let jwks = api.ok(Method::GET, "/v1/secrets/oidc/jwks", None).await;
+    assert_eq!(roll_token(&jwks, &issue().await).0["kid"], json!(next));
+    assert!(roll_token(&jwks, &old_token).2, "an old token verifies until it expires");
+    sweep().await;
+    assert_eq!(kids(&api.ok(Method::GET, "/v1/secrets/oidc/jwks", None).await).len(), 2);
+    // Once the old key's last token has expired, it leaves the JWKS; the digests it signed still verify.
+    at(&next, now - RETIRE_AFTER_MS - 1000);
+    sweep().await;
+    assert_eq!(kids(&api.ok(Method::GET, "/v1/secrets/oidc/jwks", None).await), [next.as_str()]);
+    let v = api.ok(Method::GET, "/audit/verify", None).await;
+    assert_eq!(v["ok"], true, "{v}");
+}
+
+/// A leaked key is pulled at once: a new key signs now and the old one leaves the JWKS, so its
+/// tokens stop verifying; health names it, and the project's log has the rotation.
+#[tokio::test]
+async fn an_emergency_rotation_signs_with_a_new_key_now_and_pulls_the_old_one() {
+    let api = Api::new().await;
+    let issue = || {
+        let (s, p) = (api.secrets.clone(), api.project.clone());
+        async move { tokio::task::spawn_blocking(move || s.issue(app(&p, "svc_web", "production"), "roll", std::time::Duration::from_secs(3600)).unwrap()).await.unwrap() }
+    };
+    let jwks = || api.ok(Method::GET, "/v1/secrets/oidc/jwks", None);
+    let kids = |jwks: &Value| jwks["keys"].as_array().unwrap().iter().map(|k| k["kid"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+    let old_token = issue().await;
+    let old = roll_token(&jwks().await, &old_token).0["kid"].as_str().unwrap().to_string();
+    // Half an emergency is refused, and so is a key that isn't in the JWKS.
+    let rotate = "/v1/secrets/issuer/rotate";
+    for (body, status) in [(json!({ "now": true }), StatusCode::BAD_REQUEST), (json!({ "retire": old }), StatusCode::BAD_REQUEST), (json!({ "now": true, "retire": "k_nope" }), StatusCode::NOT_FOUND)] {
+        assert_eq!(api.call(Method::POST, rotate, Some(body)).await.0, status);
+    }
+    let r = api.ok(Method::POST, rotate, Some(json!({ "now": true, "retire": old }))).await;
+    let new = r["kid"].as_str().unwrap().to_string();
+    assert_ne!(new, old);
+    let s = api.secrets.clone();
+    tokio::task::spawn_blocking(move || s.sweep().unwrap()).await.unwrap();
+    let jwks = jwks().await;
+    assert_eq!(kids(&jwks), [new.as_str()], "the pulled key is out of the JWKS at once");
+    assert!(!roll_token(&jwks, &old_token).2, "a token the pulled key signed no longer verifies");
+    let (header, _, signed) = roll_token(&jwks, &issue().await);
+    assert!(signed && header["kid"] == json!(new), "{header}");
+    let health = api.ok(Method::GET, "/v1/secrets/health", None).await;
+    assert_eq!(health["issuer_pulled"][0]["kid"], json!(old), "{health}");
+    let audit = api.ok(Method::GET, "/audit", None).await;
+    assert!(audit.as_array().unwrap().iter().any(|a| a["action"] == "issuer.rotate" && a["actor"] == "operator"), "{audit}");
+}
+
+#[tokio::test]
+async fn an_apps_instance_logs_in_with_rolls_own_token_for_its_own_project_only() {
+    let api = Api::new().await;
+    api.set("production", "API_KEY", "prod-key").await;
+    let other = api.ok(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "elsewhere" }))).await["id"].as_str().unwrap().to_string();
+    let identity = |subject: String| json!({ "name": "web", "issuer": ISSUER_URL, "audience": "roll", "subject": subject, "environments": ["production"], "actions": ["read", "reveal"] });
+    // roll signs for every project: an identity of its own issuer names one of this project's.
+    for subject in [format!("roll-apps:{other}:svc_web:production"), format!("roll-apps:{}:svc_*:production", api.project), format!("roll-secrets:{}", api.project)] {
+        assert_eq!(api.call(Method::POST, "/identities", Some(identity(subject))).await.0, StatusCode::BAD_REQUEST);
+    }
+    let i = api.ok(Method::POST, "/identities", Some(identity(format!("roll-apps:{}:svc_web:production", api.project)))).await;
+    let token = |project: String| {
+        let s = api.secrets.clone();
+        async move { tokio::task::spawn_blocking(move || s.issue(app(&project, "svc_web", "production"), "roll", std::time::Duration::from_secs(600)).unwrap()).await.unwrap() }
+    };
+    // Checked against roll's own keys in process: the fake fetcher has no keys at roll's URL.
+    let login = |t: String| api.call(Method::POST, "/v1/secrets/login", Some(json!({ "identity": i["id"], "token": t })));
+    let (s, l) = login(token(api.project.clone()).await).await;
+    assert_eq!(s, StatusCode::OK, "{l}");
+    let (s, v) = api.req(Method::GET, "/environments/production/values", None, l["token"].as_str()).await;
+    assert_eq!((s, v["values"]["API_KEY"].as_str()), (StatusCode::OK, Some("prod-key")));
+    assert_eq!(login(token(other).await).await.0, StatusCode::FORBIDDEN, "another project's instance");
+}

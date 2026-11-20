@@ -364,7 +364,8 @@ export type SyncField = { name: string; label: string; required: boolean; placeh
 export type SyncKind = { kind: string; label: string; values: boolean; signed: boolean; fields: SyncField[] };
 /** `resealed`: "all", or how many projects still need the previous key (null without a key); `links`, `syncs`: the kinds registered. */
 /** `customer_managed`: projects whose data key a customer's own KMS key wraps too. */
-export type Health = { ok: boolean; key: "env" | "kms" | "file" | "missing"; resealed: "all" | number | null; customer_managed: number; links: string[]; syncs: string[] };
+/** `issuer_pulled`: issuer keys an emergency rotation pulled from the JWKS in the last 30 days. */
+export type Health = { ok: boolean; key: "env" | "kms" | "file" | "missing"; resealed: "all" | number | null; customer_managed: number; issuer_pulled?: { kid: string; pulled_at: number; detail: string }[]; links: string[]; syncs: string[] };
 /** An IAM user whose access keys roll rotates, acting as one of the project's AWS roles (`role` is its id). */
 export type AwsUser = { id: string; name: string; role: string; user: string; created_at: number; created_by: string };
 /** An AWS role a project registered for dynamic credentials (its trust policy pins `sts:ExternalId` = `roll-secrets:<project>`). */
