@@ -501,12 +501,19 @@ Two resources an agent can read before it acts (`resources/list`, `resources/rea
 `roll://access/me` is read from `GET /v1/access` through the gated router with the caller's token,
 as a tool is, so it says what the gate decides and the read is in the audit log.
 
-One template (`resources/templates/list`), listed when the connection may list workspace projects:
+Two templates (`resources/templates/list`). Listed when the connection may list workspace projects:
 `roll://projects/{project}` is a project and every resource on its canvas (kind and id, names
 quoted), read from `GET /v1/workspace/projects/{project}` the same way, for a client to attach
 before acting on a project. Its id completes like a prompt's (`completion/complete` with
 `ref/resource`); an id that isn't letters, digits, `_` and `-` is "resource not found", so a URI
 never reaches another route.
+
+Listed when the connection has `code_read_file`: `roll://code/{owner}/{repo}/{+path}` is a file on a
+roll code repo's default branch, as GitHub's server has repository contents as resources, for a
+client to attach a file as context. It's read through `code_read_file` as the caller (the gate
+decides, the audit log has the call); a binary file says what it is, and a long one says where
+`code_read_file` reads on. Owner and repo are ids and complete from `code_list_repos`; a path's
+segments are percent-decoded and never empty, `.`, `..` or a hidden `/`, else "resource not found".
 
 ## Prompts
 
@@ -562,6 +569,13 @@ commands:
   `skills::tests::every_skill_follows_the_agent_skills_rules`.
 
 ## Tools
+
+Every catalogued route of a product here is a tool's, or a line in `crates/roll-mcp/src/no-tool.txt`
+with why it has none: it answers or sets a credential, it's a person's call, the operator's, the
+dashboard's, interactive, the data plane, an outside integration's setup, or `no tool yet` (a gap
+to close). A test fails on a route with neither, and on a line whose route has a tool now, so a
+product's new route can't go without a decision (as `prefix-reviewed.txt` does for the
+catalogue). A line may name a route an open PR is about to add, so that PR lands green.
 
 Arguments are checked against each tool's JSON Schema (closed: unknown arguments are refused).
 Every tool also takes `approval` (see [Approvals](#approvals)). Creating tools take
@@ -898,6 +912,7 @@ previews are listed once those products are on.
 | `apps_plan` | How roll would build and run a repo, before making a service (a dry run). | `POST /v1/apps/plan` |
 | `apps_errors` | An environment's errors, grouped, the most frequent first. | `GET /v1/apps/services/{service}/environments/{env}/errors` |
 | `apps_set_error_state` | Resolve, mute or reopen an error group (a resolved one seen again reopens as a regression). | `PATCH /v1/apps/services/{service}/environments/{env}/errors/{fingerprint}` |
+| `apps_rotate_config` | A new read token for an environment's runtime config (the old one reads until a redeploy). | `POST /v1/apps/services/{service}/environments/{env}/config/rotate` |
 | `apps_traces` | Recent traces (root span, duration, failures); `min_ms` keeps the slow ones. | `GET /v1/apps/services/{service}/environments/{env}/traces` |
 | `apps_get_trace` | One trace's spans, in start order. | `GET /v1/apps/services/{service}/environments/{env}/traces/{trace}` |
 | `apps_app_metrics` | The app's own OpenTelemetry metrics, as series. | `GET /v1/apps/services/{service}/environments/{env}/app-metrics` |
@@ -941,6 +956,7 @@ previews are listed once those products are on.
 | `apps_pending` | What the next deploy changes: variables (names), run settings, project secrets. | `GET /v1/apps/services/{service}/environments/{env}/pending` |
 | `apps_deploy_commits` | The commits a deploy brings over the one live before it. | `GET /v1/apps/services/{service}/environments/{env}/deploys/{deploy}/commits` |
 | `apps_deploy_vulnerabilities` | Known vulnerabilities in a deploy's image, most severe first (`severity` keeps that or worse), with the scan's counts. | `GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}/vulnerabilities` |
+| `apps_explain_deploy` | Why a failed deploy failed, from the repo owner's model (kept; `again` asks anew). | `POST /v1/apps/services/{service}/environments/{env}/deploys/{deploy}/explain` |
 | `apps_deploy_sbom` | A deploy's image as a CycloneDX SBOM (every package and version). | `GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}/sbom` |
 | `apps_status_page` | A project's public status page: title, URL, what it shows. | `GET /v1/apps/projects/{project}/status-page` |
 | `apps_remove_status_page` | Take a project's public status page down (making or changing one is a person's: admin, no tool). | `DELETE /v1/apps/projects/{project}/status-page` |

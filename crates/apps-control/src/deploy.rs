@@ -2471,6 +2471,7 @@ impl Apps {
     pub async fn cron_pass(self: &Arc<Self>, now: i64) {
         let Ok(services) = self.db(|s| s.services(None)).await else { return };
         self.schedules_pass(&services, now).await;
+        self.push_pass(&services).await;
         self.checks_pass(&services, now).await;
         self.heartbeats_pass(&services, now).await;
         self.rescan_pass(&services, now).await;

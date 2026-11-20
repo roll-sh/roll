@@ -3400,13 +3400,17 @@ async fn query_suggestions_from_search_analytics() {
         tokio::spawn(async move {
             let http = reqwest::Client::new();
             let mut seen = 0;
-            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+            // At least one search, even when the rebuild returns before this task first runs.
+            loop {
                 let r = http.post(&url).basic_auth(&user, Some(&pw)).json(&json!({"size": 0, "query": {"match_all": {}}})).send().await.unwrap();
                 assert_eq!(r.status().as_u16(), 200);
                 let v: Value = r.json().await.unwrap();
                 let n = v["hits"]["total"]["value"].as_u64().unwrap();
                 assert!(n == 2 || n == 3, "a reader saw {n} suggestions: {v}");
                 seen += 1;
+                if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
             }
             seen
         })

@@ -340,7 +340,7 @@ fn apps_area(method: &str, path: &str) -> Area {
         ["services", "environments", s, ..] => match *s {
             "analytics" | "app-metrics" | "errors" | "logs" | "metrics" | "routes" | "slo" | "traces" | "usage" | "vitals" => "observe",
             "deploys" | "promote" | "redeploy" | "rollback" | "pending" | "diff" | "jobs" | "runs" | "restart" | "sleep" | "wake" | "instances" | "cache" => "deploy",
-            "variables" | "domains" | "forms" | "volume" => "configure",
+            "variables" | "domains" | "forms" | "volume" | "config" => "configure",
             _ => return Area::Unplaced,
         },
         ["services", "activity"] | ["events"] => "observe",
@@ -1201,6 +1201,7 @@ static TOOLS: &[Tool] = &[
     t("apps_route_stats", "Route stats", "An environment's routes from its access log over the last minutes (5-60, default 60): requests, 5xx and 4xx errors, p50/p95/max latency per route (ids folded as :id), the busiest, most failing and slowest 50 of each. Start here when a service is slow or failing.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/routes", &[SERVICE, ENV, q("minutes", Ty::Int, "How far back, 5-60 (default 60)")]),
     t("apps_errors", "Errors: why a service is failing", "An environment's errors over the last minutes (5-10080, default 1440), grouped (the same error once, with its count, first and last seen and a sample), the most frequent first, at most 50. Start here when a service is failing or erroring.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/errors", &[SERVICE, ENV, q("minutes", Ty::Int, "How far back, 5-10080 (default 1440)")]),
     t("apps_set_error_state", "Resolve, mute or reopen an error", "Triage an error group (its fingerprint from apps_errors): resolved goes quiet until it's seen again, which reopens it as a regression naming the deploy it came back in; muted stays quiet; open reopens it.", "apps", "PATCH", "/v1/apps/services/{service}/environments/{env}/errors/{fingerprint}", &[SERVICE, ENV, req("fingerprint", "The error group's fingerprint"), breq("state", Ty::Str, "open, resolved or muted")]),
+    t("apps_rotate_config", "Rotate the runtime config's address", "Give an environment's runtime config a new read token (a leaked ROLL_CONFIG_URL): the old address reads until a deploy made after the rotation is live, so redeploy to finish it. 409 while the last rotation's old address still reads.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/config/rotate", &[SERVICE, ENV]).destructive(),
     t("apps_traces", "Traces of slow requests", "An environment's recent traces (traces on), newest first, at most 100: each one's root span, service, duration, span count and whether any span failed; min_ms keeps the slow ones. apps_get_trace has one's spans.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/traces", &[SERVICE, ENV, q("minutes", Ty::Int, "How far back (default 60)"), q("min_ms", Ty::Int, "Only traces at least this slow")]),
     t("apps_get_trace", "Get a trace", "One trace by its id (from apps_traces): its spans in start order, from the last week.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/traces/{trace}", &[SERVICE, ENV, req("trace", "Trace id")]),
     t("apps_app_metrics", "App metrics", "What the app's OpenTelemetry SDK sent as metrics (traces on) over the last minutes (default 60): each series (a name and its attributes, the busiest 50) as at most 60 points.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/app-metrics", &[SERVICE, ENV, q("minutes", Ty::Int, "How far back (default 60)")]),
@@ -1244,6 +1245,7 @@ static TOOLS: &[Tool] = &[
     t("apps_pending", "What the next deploy changes", "Before deploying: which variables (names, never values), run settings and project secrets the next deploy changes against what's live.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/pending", &[SERVICE, ENV]),
     t("apps_deploy_commits", "A deploy's commits", "The commits a deploy brings over the one live before it, newest first (at most 50).", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/deploys/{deploy}/commits", &[SERVICE, ENV, req("deploy", "Deploy id")]),
     t("apps_deploy_vulnerabilities", "A deploy's vulnerabilities", "Known vulnerabilities in a deploy's image, most severe first, then those with a fix: id (CVE-…, GHSA-…), severity, package, installed and fixed versions, and where (the OS's packages or a lockfile), at most 2,000, with the scan's counts. Use it before promoting a deploy, or to find what to upgrade.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/deploys/{deploy}/vulnerabilities", &[SERVICE, ENV, req("deploy", "Deploy id"), q("severity", Ty::Str, "Only this severity or worse: critical, high, medium or low")]),
+    t("apps_explain_deploy", "Why did a deploy fail", "Ask why a failed deploy failed: the model of the owner of the service's roll code repo reads its error, plan, steps and the newest lines of its build log and output (masked) and answers what went wrong and what to change. The answer is kept with the deploy and answered again without a model call; again: true asks anew (at most once a minute). 409 when it didn't fail.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/deploys/{deploy}/explain", &[SERVICE, ENV, req("deploy", "Deploy id"), q("again", Ty::Bool, "Ask the model anew instead of the kept answer")]).open_world(),
     t("apps_deploy_sbom", "A deploy's software bill of materials", "A deploy's image as a CycloneDX SBOM (JSON) from the same scan as its vulnerabilities: every package and version it ships. 404 when it wasn't scanned or was pruned.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/deploys/{deploy}/sbom", &[SERVICE, ENV, req("deploy", "Deploy id")]),
     t("apps_status_page", "The project's public status page", "A project's public status page: its title, its public URL and what it shows (which services' checks and heartbeats, names and up or down only). 404 without one; making one is a person's choice, in the dashboard.", "apps", "GET", "/v1/apps/projects/{project}/status-page", &[req("project", "Workspace project")]),
     t("apps_remove_status_page", "Take down the status page", "Take a project's public status page down: its address answers nothing after, and its incidents go with it. Making or changing one stays a person's (it makes the project's service names public; admin, no tool).", "apps", "DELETE", "/v1/apps/projects/{project}/status-page", &[req("project", "Workspace project")]).destructive(),
@@ -1394,6 +1396,33 @@ mod tests {
         }
         assert_eq!(all().iter().find(|t| t.name == "apps_logs").unwrap().area(), Area::One("observe"));
         assert_eq!(all().iter().find(|t| t.name == "apps_list_services").unwrap().area(), Area::Every);
+        // Every catalogued route of a product with tools here is a tool's, or in no-tool.txt with
+        // why (`no tool yet` for a gap): a new route can't go without a decision, as
+        // prefix-reviewed.txt does for the catalogue. roll code's and agents' have their own map.
+        let norm = |p: &str| p.split('/').map(|s| if s.starts_with('{') { "{}" } else { s }).collect::<Vec<_>>().join("/").trim_end_matches('/').to_string();
+        let products: std::collections::BTreeSet<&str> = all().iter().map(|t| t.product).collect();
+        let covered = |method: &str, route: &str| all().iter().any(|t| (method == "*" || t.method == method) && norm(t.path) == norm(route));
+        let listed: Vec<(&str, &str)> = include_str!("no-tool.txt")
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+            .filter_map(|l| {
+                let mut w = l.split_whitespace();
+                Some((w.next()?, w.next()?))
+            })
+            .collect();
+        let product_of = |method: &str, route: &str| {
+            let sample = route.split('/').map(|s| if s.starts_with('{') { "x" } else { s }).collect::<Vec<_>>().join("/");
+            catalog::by_path(if method == "*" { "GET" } else { method }, &sample).map(|f| f.row.product)
+        };
+        let mut routes: Vec<(&str, &str)> = catalog::rows().iter().filter(|r| !r.route.ends_with('/') && products.contains(r.product)).map(|r| (r.method, r.route)).collect();
+        routes.extend(catalog::prefix_reviewed_routes().filter(|(m, r)| product_of(m, r).is_some_and(|p| products.contains(p))));
+        let is_listed = |m: &str, r: &str| listed.iter().any(|(lm, lr)| *lm == m && norm(lr) == norm(r));
+        let undecided: Vec<String> = routes.iter().filter(|(m, r)| !covered(m, r) && !is_listed(m, r)).map(|(m, r)| format!("{m} {r}")).collect();
+        assert!(undecided.is_empty(), "catalogued routes with no MCP tool and no reason: map each in tools.rs, or add `METHOD route  why` to crates/roll-mcp/src/no-tool.txt:\n{}", undecided.join("\n"));
+        // A line may name a route an open PR is about to add (declared ahead, so its gate passes);
+        // one whose route has a tool now is wrong.
+        let stale: Vec<String> = listed.iter().filter(|(m, r)| covered(m, r)).map(|(m, r)| format!("{m} {r}")).collect();
+        assert!(stale.is_empty(), "no-tool.txt lines for routes that have a tool now: remove them:\n{}", stale.join("\n"));
         // A tool that removes, revokes or replaces something says so (clients ask a person before a
         // destructive call), unless it's marked undoable: the review that found five revoke tools
         // unmarked is why this is a test, not a habit.

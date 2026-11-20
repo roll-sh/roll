@@ -95,7 +95,8 @@ async fn runtime_config(apps: Arc<Apps>, req: Request) -> Response {
     }
     // A deleted service's (kept for a restore) answers nothing, whatever its token.
     let (sid, e, t) = (id.clone(), env.clone(), token.clone());
-    if !apps.db(move |s| Ok(s.service(&sid).is_ok() && s.runtime_config_token(&sid, &e)?.is_some_and(|k| same(&k, &t)))).await.unwrap_or(false) {
+    let reads = move |s: &crate::store::Store| Ok(s.service(&sid).is_ok() && s.runtime_config_tokens(&sid, &e)?.is_some_and(|(now, before)| same(&now, &t) || before.is_some_and(|b| same(&b, &t))));
+    if !apps.db(reads).await.unwrap_or(false) {
         return (StatusCode::NOT_FOUND, "").into_response();
     }
     let has = req.headers().get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()).map(|v| v.trim_start_matches("W/").trim_matches('"').to_string());
@@ -1240,7 +1241,7 @@ fn strip_roll_headers(h: &mut axum::http::HeaderMap) {
 
 /// The waking proxy on the owner: an instance (woken if need be), the request forwarded, the
 /// answer metered.
-async fn proxy(apps: Arc<Apps>, service: &str, env: &str, deployment: Option<&str>, req: Request) -> Response {
+pub(crate) async fn proxy(apps: Arc<Apps>, service: &str, env: &str, deployment: Option<&str>, req: Request) -> Response {
     let (began, seen) = (Instant::now(), Seen::of(&req));
     let path = crate::model::normal_path(&seen.path);
     let r = proxy_inner(apps.clone(), service, env, deployment, req).await;
