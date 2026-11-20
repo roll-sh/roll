@@ -125,8 +125,8 @@ async fn create(ctx: &Ctx<'_>, id: String) -> EsResult<(bool, String)> {
             let Value::Obj(mut c) = new_connector(&id, &body) else { return Err(not_found(&id)) };
             sync::config::fill_schema(&mut c);
             remember_user(st, &id, &c, user, now)?;
-            // Put again on a branch: the connector is the branch's own now.
-            crate::branch::adopt_connector(st, &id, now)?;
+            // Put again (on a branch, or from before roll ran syncs): the cluster's own now.
+            sync::adopt(st, &id, now)?;
             store::put(st, CONNECTORS, &id, Value::Obj(c), now)
         })
         .await?;
@@ -855,6 +855,8 @@ pub async fn update(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let now_ms = ctx.now_ms;
     let sealer = ctx.cluster.config.sealer.clone();
     let user = crate::xpack::internal::stored_user(crate::xpack::security::principal(ctx));
+    let cluster = ctx.cluster;
+    let me = crate::branch::cluster_id(cluster);
     let noop = ctx
         .cluster
         .update(move |st| {
@@ -990,18 +992,22 @@ pub async fn update(ctx: &Ctx<'_>) -> EsResult<Reply> {
                 }
                 _ => {}
             }
+            let mut adopting = false;
             match api {
                 // The service now runs on roll (or another service does): its schema.
                 Api::ConnectorUpdateServiceType | Api::ConnectorUpdateNative => sync::config::fill_schema(&mut m),
-                // The sync runs as whoever configured the connector last; on a branch, a
-                // connector whose configuration it writes is its own.
+                // The sync runs as whoever configured the connector last; a waiting connector
+                // whose configuration is written is the cluster's own (with only the
+                // credentials this write gives: `protect`).
                 Api::ConnectorUpdateConfiguration => {
+                    adopting = sync::waits_for_adoption(cluster, st, &id);
                     remember_user(st, &id, &m, user, now_ms)?;
-                    crate::branch::adopt_connector(st, &id, now_ms)?;
+                    sync::adopt(st, &id, now_ms)?;
                 }
                 _ => {}
             }
-            sync::config::protect(&mut m, &before, sealer.as_deref());
+            sync::config::protect(&mut m, &before, sealer.as_deref(), &me, adopting);
+            sync::mark_current(st, now_ms)?;
             store::put(st, CONNECTORS, &id, updated_doc(m), now_ms).map(|_| false)
         })
         .await?;

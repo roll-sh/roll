@@ -65,18 +65,29 @@ fn doc_id(bucket: &str, key: &str) -> String {
     md5::Md5::digest(format!("{bucket}/{key}").as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Listing pages in a row that may list nothing a sync reads (an endpoint paging through
+/// nothing, or a prefix of folder markers) before the sync gives up.
+const EMPTY_PAGES_MAX: usize = 100;
+
 /// One bucket (under a prefix): the newest `LastModified` it listed.
+///
+/// Every listing's bytes count against the sync's rate and its time limit like objects' do, so
+/// an endpoint can't keep a sync listing pages that add nothing.
 async fn read_bucket(client: &Client, sink: &mut Sink<'_>, t: &S3Rule, since: Option<&str>, page_size: usize) -> Result<Option<String>, Stop> {
     let mut token: Option<String> = None;
     let mut newest: Option<String> = None;
+    let mut empty = 0usize;
     loop {
         let listed = tokio::select! {
             r = client.list_page(&t.prefix, token.as_deref(), page_size) => r,
             s = sink.stopped() => return Err(s),
         };
-        let (objects, next) = listed.map_err(|e| Stop::Failed(format!("listing bucket [{}] failed: {e}", t.bucket)))?;
+        let (objects, next, listing) = listed.map_err(|e| Stop::Failed(format!("listing bucket [{}] failed: {e}", t.bucket)))?;
+        sink.read(listing as u64);
         let mut docs = Vec::new();
         let mut bytes = 0usize;
+        let mut held = sink.reserve();
+        let mut added = false;
         for o in objects {
             // Folder markers.
             if o.key.ends_with('/') && o.size == 0 {
@@ -85,6 +96,7 @@ async fn read_bucket(client: &Client, sink: &mut Sink<'_>, t: &S3Rule, since: Op
             if !t.extensions.is_empty() && !t.extensions.contains(&extract::extension(&o.key)) {
                 continue;
             }
+            added = true;
             if newest.as_deref().is_none_or(|n| o.last_modified.as_str() > n) {
                 newest = Some(o.last_modified.clone());
             }
@@ -111,6 +123,7 @@ async fn read_bucket(client: &Client, sink: &mut Sink<'_>, t: &S3Rule, since: Op
                     Ok(Some(body)) => {
                         sink.read(body.len() as u64);
                         bytes += body.len();
+                        held.add(body.len() as u64, "connector page").map_err(|e| Stop::Failed(format!("reading bucket [{}] failed: {}", t.bucket, e.reason())))?;
                         doc.insert("body".into(), extract::text(kind, &body).into());
                     }
                     // Gone since the listing.
@@ -122,10 +135,17 @@ async fn read_bucket(client: &Client, sink: &mut Sink<'_>, t: &S3Rule, since: Op
             // A page holds at most PAGE_BYTES of objects' text.
             if bytes >= PAGE_BYTES {
                 sink.page(std::mem::take(&mut docs)).await?;
+                held = sink.reserve();
                 bytes = 0;
             }
         }
+        // Called on an empty page too: it throttles, and notices a cancel or the time limit.
         sink.page(docs).await?;
+        drop(held);
+        empty = if added { 0 } else { empty + 1 };
+        if empty >= EMPTY_PAGES_MAX && next.is_some() {
+            return Err(Stop::Failed(format!("listing bucket [{}] gave {EMPTY_PAGES_MAX} pages in a row with no object to read", t.bucket)));
+        }
         match next {
             Some(n) => token = Some(n),
             None => return Ok(newest),

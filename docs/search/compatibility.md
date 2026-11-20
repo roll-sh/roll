@@ -1314,6 +1314,9 @@ roll runs the syncs of Elastic-managed (`is_native: true`) `postgresql` and `s3`
   incremental syncs (objects modified since the last sync). Text comes from plain text, JSON,
   HTML and XML only: roll has no `attachment` processor, so PDFs and Office files are indexed
   by their metadata.
+- A connector a branch inherited, or a native one a cluster held before roll ran syncs, waits:
+  its jobs stay `pending` until the connector is put again or its configuration written, and
+  that write keeps only the credentials it gives.
 - Access control syncs fail (neither service syncs permissions on Elastic either). A job's
   `indexed_document_volume` is in MiB, as Elastic's connectors report it.
 

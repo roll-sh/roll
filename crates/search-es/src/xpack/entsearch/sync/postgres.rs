@@ -12,12 +12,20 @@
 //! - A page is a keyset query (`WHERE (key) > (last key) ORDER BY key LIMIT n`) whose rows the
 //!   server cuts at [`PAGE_BYTES`] with a running sum of their sizes; a row over
 //!   [`DOC_BYTES_MAX`] comes back as NULL (skipped and counted), so an honest page is at most
-//!   about `PAGE_BYTES + DOC_BYTES_MAX`.
+//!   `PAGE_BYTES + DOC_BYTES_MAX` of rows' text, and a page past that (or past its row count)
+//!   fails the sync.
+//! - A page's rows are streamed: each is turned into its document and dropped as it arrives
+//!   (the client library hands rows over one message at a time and reads no further ahead), and
+//!   the documents a page holds are charged to the cluster's request breaker until indexed.
 //! - The connection counts the bytes it reads ([`Counted`]): a query whose answer passes its
 //!   window ([`PAGE_WINDOW`]) fails the sync, so a server ignoring the cut can't grow a page.
 //! - Every message's 5-byte header is read on the plaintext side ([`Framed`], under TLS through
 //!   [`FramedTls`]) before the client library sees it: a length over [`PAGE_WINDOW`] fails the
-//!   connection, since the library reserves a message's whole length from its header.
+//!   connection, since the library reserves a message's whole length from its header, and so
+//!   does a row (or row description) of more than [`COLUMNS_MAX`] columns, since the library
+//!   keeps a position per column of every row.
+//! - The server's notices are dropped as they arrive (their bytes count in the window): none is
+//!   kept, and none of a server's text reaches the node's logs.
 //! - Every statement has a client-side timeout a little over the session's `statement_timeout`
 //!   and races the job's cancel, and the socket has TCP keepalives: a silent server or a dead
 //!   network ends the sync instead of holding its slot.
@@ -31,6 +39,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
+use futures_util::StreamExt;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio_postgres::config::SslMode;
 use tokio_postgres::tls::{MakeTlsConnect, TlsConnect, TlsStream};
@@ -46,8 +55,14 @@ const SESSION: &str = "-c statement_timeout=300000 -c idle_in_transaction_sessio
 const QUERY_TIMEOUT: Duration = Duration::from_secs(330);
 /// The most a page's answer may take on the wire (rows, their keys again, framing, TLS).
 pub const PAGE_WINDOW: u64 = 2 * (PAGE_BYTES + DOC_BYTES_MAX) as u64 + (4 << 20);
-/// The most a catalog query's answer may take.
-const CATALOG_WINDOW: u64 = 64 << 20;
+/// The most a catalog query's answer may take (its rows are collected: a few hundred thousand
+/// table names).
+const CATALOG_WINDOW: u64 = 8 << 20;
+/// The most columns a row may have: roll's queries answer a row's JSON and its primary key's
+/// columns (an index has at most 32 in Postgres).
+const COLUMNS_MAX: u16 = 64;
+/// What a page's documents are charged to the breaker per byte of rows' text (parsed JSON).
+const PARSED_FACTOR: u64 = 3;
 
 /// `"name"`, quotes doubled.
 fn ident(name: &str) -> String {
@@ -96,13 +111,15 @@ fn tls_config(ca: Option<&str>) -> Result<rustls::ClientConfig, String> {
 /// The server's own message, or the client's error with its cause (an I/O error, a refused
 /// frame); never the connection's settings.
 fn db_error(e: tokio_postgres::Error) -> String {
-    if let Some(d) = e.as_db_error() {
-        return d.message().to_string();
-    }
-    match std::error::Error::source(&e) {
-        Some(cause) => format!("{e}: {cause}"),
-        None => e.to_string(),
-    }
+    let text = if let Some(d) = e.as_db_error() {
+        d.message().to_string()
+    } else {
+        match std::error::Error::source(&e) {
+            Some(cause) => format!("{e}: {cause}"),
+            None => e.to_string(),
+        }
+    };
+    super::capped(text)
 }
 
 /// How many bytes the connection may still read before the current query fails.
@@ -113,6 +130,8 @@ struct Window {
     /// Why the connection's task ended, when it failed (a refused frame, an I/O error): a query
     /// only sees the connection close.
     failure: Arc<parking_lot::Mutex<Option<String>>>,
+    /// The server's notices, dropped as they arrived ([`drive`]).
+    notices: Arc<AtomicU64>,
 }
 
 impl Window {
@@ -158,8 +177,29 @@ impl AsyncWrite for Counted {
     }
 }
 
-/// A connection's I/O task, whatever its TLS.
-type ConnTask = Pin<Box<dyn std::future::Future<Output = Result<(), tokio_postgres::Error>> + Send>>;
+/// Runs a connection's I/O until it ends, recording why it failed. Its messages are taken one by
+/// one rather than by awaiting the connection, which logs each notice the server sends: a
+/// notice is counted and dropped.
+async fn drive<S, T>(mut conn: tokio_postgres::Connection<S, T>, window: Window)
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    T: AsyncRead + AsyncWrite + Unpin,
+{
+    loop {
+        match std::future::poll_fn(|cx| conn.poll_message(cx)).await {
+            Some(Ok(tokio_postgres::AsyncMessage::Notice(_))) => {
+                window.notices.fetch_add(1, Ordering::SeqCst);
+            }
+            // Notifications: roll listens on no channel.
+            Some(Ok(_)) => {}
+            Some(Err(e)) => {
+                *window.failure.lock() = Some(db_error(e));
+                return;
+            }
+            None => return,
+        }
+    }
+}
 
 /// Postgres's framing of server messages: a type byte, then a 4-byte big-endian length that
 /// counts itself.
@@ -173,6 +213,9 @@ struct Frames {
     /// one for the connection's life, so a server could grow it without end.
     params: u64,
     param_bytes: u64,
+    /// The column count of the current row (`D`) or row description (`T`), as its first two body
+    /// bytes arrive.
+    columns: Option<(usize, [u8; 2])>,
 }
 
 /// The most `ParameterStatus` messages, and bytes of them, one connection takes (a server sends
@@ -184,6 +227,20 @@ impl Frames {
     fn feed(&mut self, mut bytes: &[u8]) -> std::io::Result<()> {
         while !bytes.is_empty() {
             if self.remaining > 0 {
+                if let Some((have, count)) = &mut self.columns {
+                    count[*have] = bytes[0];
+                    *have += 1;
+                    self.remaining -= 1;
+                    bytes = &bytes[1..];
+                    if *have == 2 {
+                        let n = u16::from_be_bytes(*count);
+                        self.columns = None;
+                        if n > COLUMNS_MAX {
+                            return Err(std::io::Error::other(format!("the server sent a row of {n} columns: roll's queries answer at most {COLUMNS_MAX}")));
+                        }
+                    }
+                    continue;
+                }
                 let n = (self.remaining.min(bytes.len() as u64)) as usize;
                 self.remaining -= n as u64;
                 bytes = &bytes[n..];
@@ -200,6 +257,9 @@ impl Frames {
                     return Err(std::io::Error::other(format!("the server sent a message of {len} bytes: over what one page may hold")));
                 }
                 self.remaining = len - 4;
+                if matches!(self.header[0], b'D' | b'T') && self.remaining >= 2 {
+                    self.columns = Some((0, [0; 2]));
+                }
                 if self.header[0] == b'S' {
                     self.params += 1;
                     self.param_bytes += len;
@@ -310,24 +370,16 @@ async fn connect(v: &Values, allow_private: bool) -> Result<Conn, String> {
     let window = Window::default();
     window.open(CATALOG_WINDOW);
     let stream = Counted { inner: tcp, window: window.clone() };
-    let failure = window.failure.clone();
-    let spawn = move |conn: ConnTask| {
-        let failure = failure.clone();
-        tokio::spawn(async move {
-            if let Err(e) = conn.await {
-                *failure.lock() = Some(db_error(e));
-            }
-        })
-    };
+    let w = window.clone();
     let handshake = async {
         let connected = if v.bool("ssl_enabled", true) {
             cfg.ssl_mode(SslMode::Require);
             let mut make = tokio_postgres_rustls::MakeRustlsConnect::new(tls_config(v.text("ssl_ca").as_deref())?);
             let tls = MakeTlsConnect::<Counted>::make_tls_connect(&mut make, &host).map_err(|e| format!("TLS: {e}"))?;
-            cfg.connect_raw(stream, FramedTls(tls)).await.map(|(c, conn)| (c, spawn(Box::pin(conn))))
+            cfg.connect_raw(stream, FramedTls(tls)).await.map(|(c, conn)| (c, tokio::spawn(drive(conn, w))))
         } else {
             cfg.ssl_mode(SslMode::Disable);
-            cfg.connect_raw(Framed::new(stream), tokio_postgres::NoTls).await.map(|(c, conn)| (c, spawn(Box::pin(conn))))
+            cfg.connect_raw(Framed::new(stream), tokio_postgres::NoTls).await.map(|(c, conn)| (c, tokio::spawn(drive(conn, w))))
         };
         connected.map_err(|e| format!("connecting to [{host}] failed: {}", db_error(e)))
     };
@@ -517,22 +569,36 @@ async fn read_table(conn: &mut Conn, sink: &mut Sink<'_>, r: &Read<'_>) -> Resul
     loop {
         let n = (PAGE_BYTES / largest.max(1024)).clamp(1, r.fetch);
         window.open(PAGE_WINDOW);
-        let rows = wait(sink, &window, &label, tx.query(&page_sql(r, &qualified, after.as_deref(), n), &[])).await?;
-        let Some(last) = rows.last() else { break };
-        after = Some((0..t.key.len()).map(|i| last.get::<_, String>(i + 1)).collect());
-        let mut docs = Vec::with_capacity(rows.len());
+        let failed = |e: tokio_postgres::Error| Stop::Failed(format!("{label} failed: {}", db_error(e)));
+        let rows = wait(sink, &window, &label, tx.query_raw(&page_sql(r, &qualified, after.as_deref(), n), std::iter::empty::<&(dyn tokio_postgres::types::ToSql + Sync)>())).await?;
+        let mut rows = std::pin::pin!(rows);
+        let mut docs = Vec::new();
+        let mut held = sink.reserve();
+        let (mut got, mut text) = (0usize, 0usize);
         largest = 0;
-        for row in &rows {
-            let Some(j) = row.get::<_, Option<String>>(0) else {
+        while let Some(row) = wait(sink, &window, &label, async { rows.as_mut().next().await.transpose() }).await? {
+            got += 1;
+            let keys = (0..t.key.len()).map(|i| row.try_get::<_, String>(i + 1)).collect::<Result<Vec<_>, _>>().map_err(failed)?;
+            let j = row.try_get::<_, Option<String>>(0).map_err(failed)?;
+            drop(row);
+            after = Some(keys);
+            let Some(j) = j else {
                 sink.skip();
                 largest = DOC_BYTES_MAX;
                 continue;
             };
+            text += j.len();
+            // The server cuts a page at PAGE_BYTES of rows (the last may add a row's limit).
+            if got > n || text > PAGE_BYTES + DOC_BYTES_MAX {
+                return Err(Stop::Failed(format!("{label} failed: the server sent more than one page may hold")));
+            }
+            held.add(j.len() as u64 * PARSED_FACTOR, "connector page").map_err(|e| Stop::Failed(format!("{label} failed: {}", e.reason())))?;
             largest = largest.max(j.len());
             let Ok(Some(Value::Obj(cols))) = crate::json::parse(j.as_bytes()) else {
                 sink.skip();
                 continue;
             };
+            drop(j);
             let ids: Vec<String> = t.key.iter().map(|(k, _)| cols.get(k).map(Value::to_es_string).unwrap_or_default()).collect();
             let mut doc = Map::new();
             doc.insert("_id".into(), format!("{}_{}_{}_{}", r.database, r.schema, t.name, ids.join("_")).into());
@@ -545,8 +611,11 @@ async fn read_table(conn: &mut Conn, sink: &mut Sink<'_>, r: &Read<'_>) -> Resul
             }
             docs.push(doc);
         }
-        drop(rows);
+        if got == 0 {
+            break;
+        }
         sink.page(docs).await?;
+        drop(held);
     }
     window.open(CATALOG_WINDOW);
     wait(sink, &window, &label, tx.commit()).await?;
@@ -575,6 +644,63 @@ mod tests {
         }
         let err = frames.feed(&one("one_too_many")).unwrap_err();
         assert!(err.to_string().contains("parameter statuses"), "{err}");
+    }
+
+    /// A row (or row description) of more columns than roll's queries answer fails the
+    /// connection before the client library keeps a position for each.
+    #[test]
+    fn rows_of_too_many_columns_are_refused() {
+        let message = |kind: u8, columns: u16| {
+            let mut m = vec![kind];
+            m.extend_from_slice(&(4u32 + 2 + 4 * columns as u32).to_be_bytes());
+            m.extend_from_slice(&columns.to_be_bytes());
+            for _ in 0..columns {
+                m.extend_from_slice(&(-1i32).to_be_bytes());
+            }
+            m
+        };
+        let mut frames = Frames::default();
+        frames.feed(&message(b'D', 3)).unwrap();
+        // Split anywhere, the count is still read.
+        let big = message(b'T', 2000);
+        frames.feed(&big[..6]).unwrap();
+        let err = frames.feed(&big[6..]).unwrap_err();
+        assert!(err.to_string().contains("2000 columns"), "{err}");
+    }
+
+    /// The server's notices are taken and dropped by the connection's task (never logged, never
+    /// kept), and the connection goes on.
+    #[tokio::test]
+    async fn notices_are_dropped_not_logged() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let len = s.read_i32().await.unwrap();
+            let mut startup = vec![0; len as usize - 4];
+            s.read_exact(&mut startup).await.unwrap();
+            // AuthenticationOk, ReadyForQuery.
+            s.write_all(&[b'R', 0, 0, 0, 8, 0, 0, 0, 0, b'Z', 0, 0, 0, 5, b'I']).await.unwrap();
+            let body = b"SNOTICE\0C00000\0Mthe server's own text\0\0";
+            for _ in 0..3 {
+                let mut m = vec![b'N'];
+                m.extend_from_slice(&((body.len() + 4) as u32).to_be_bytes());
+                m.extend_from_slice(body);
+                s.write_all(&m).await.unwrap();
+            }
+            s.shutdown().await.unwrap();
+            let mut rest = Vec::new();
+            let _ = s.read_to_end(&mut rest).await;
+        });
+        let mut cfg = tokio_postgres::Config::new();
+        cfg.host("127.0.0.1").user("roll").dbname("shop").ssl_mode(SslMode::Disable);
+        let window = Window::default();
+        window.open(1 << 20);
+        let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let stream = Framed::new(Counted { inner: tcp, window: window.clone() });
+        let (_client, conn) = cfg.connect_raw(stream, tokio_postgres::NoTls).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), drive(conn, window.clone())).await.expect("the connection ends");
+        assert_eq!(window.notices.load(Ordering::SeqCst), 3);
     }
 
     /// A TLS session in name only: the plaintext stream after a handshake (what [`FramedTls`]

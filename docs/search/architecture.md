@@ -520,9 +520,10 @@ both with Elasticsearch 9.5.5's shapes, validation and state machines
   node's slots waits in a FIFO queue: a slot that frees wakes the first waiter whose owner is
   under its cap, and nobody behind it (the cluster that freed it included) takes the slot first.
   A waiter counts only while its cluster is loaded and still has a job it could start (checked
-  whenever the queue is looked at, so a canceled job or a removed connector never holds it
-  up), a woken waiter that doesn't take its slot within 30 seconds loses its place, and a
-  successful take wakes the next waiter, so slots that free together all find a taker. While every slot of its own is taken a
+  whenever the queue is looked at, against a few of its own jobs, so a canceled job or a
+  removed connector never holds it up), a woken waiter that doesn't take its slot within 30
+  seconds loses its place, and a successful take, or a waiter dropped for no longer counting,
+  wakes the next waiter, so slots that free together all find a taker. While every slot of its own is taken a
   pending job isn't due (a slot freeing wakes the scheduler), and a sync running here isn't
   due again for its stale time (a long statement can outlast it). While
   one runs the cluster is pinned loaded (`Syncs::busy`), and every write it makes goes through
@@ -531,11 +532,22 @@ both with Elasticsearch 9.5.5's shapes, validation and state machines
   slot and the node's permit are freed, a job it left unfinished is settled (`error`, or
   `canceled` when it was canceling), and the scheduler is woken, so no bug can pin a cluster or
   strand a job.
-- **On a branch.** The connectors a branch inherited stay paused there
-  (`branch::inherited_connector`, the marker its first load records): none of their jobs
-  becomes due or starts, and their schedules make none, so the branch never reads the parent's
-  source with the parent's credentials. Putting a connector again or writing its configuration
-  makes it the branch's own (`branch::adopt_connector`).
+- **On a branch, and connectors from before.** Some connectors wait to be made the cluster's
+  own (`sync::waits_for_adoption`): none of their jobs becomes due or starts, and their
+  schedules make none. They are the connectors a branch inherited (`branch::inherited_connector`,
+  the marker its first load records), so a branch never reads the parent's source with the
+  parent's credentials; and, once per cluster, the native connectors it held when roll began
+  running syncs (`sync::adopt_existing`, on the first load after the upgrade, before the
+  scheduler starts: their credentials, stored in the clear until then, are sealed where they
+  lie). That one rule also covers branches made before branches recorded what they inherited,
+  and native connectors whose credentials a tenant stored expecting nothing to run them. Every
+  write to a connector records that the cluster's connectors are made under roll's syncs (a
+  branch has its parent's record), so no connector made since ever waits, and a cluster with
+  nothing to pause isn't written to on load. Putting a connector again or
+  writing its configuration makes it the cluster's own (`sync::adopt`), and that write is
+  treated as roll starting to run it: only the credentials given in it are kept (sealed);
+  stored sealed values and `********` are cleared, and the connector needs configuration until
+  they are given. An empty configuration write adopts a connector without any password.
 - **A run.** Claim the job (`in_progress`, `worker_hostname: roll`, `started_at`), read the
   source a page at a time, apply the active sync rules, and bulk-index each page into
   `index_name` through the connector's `pipeline` when that pipeline exists, as the user who
@@ -553,21 +565,35 @@ both with Elasticsearch 9.5.5's shapes, validation and state machines
 - **Limits.** A sync reads at most `roll.connectors.max_docs_per_second` documents (1,000) and
   `roll.connectors.max_bytes_per_second` bytes (10 MiB) per second (node settings), sleeping
   between pages to stay under them. A page is at most 500 rows or objects and is held in memory
-  only while it is indexed:
+  only while it is indexed; its documents are charged to the cluster's request circuit breaker
+  meanwhile (three times a row's text, for its parsed fields; an object's text), so a node
+  under memory pressure fails the sync rather than the node:
   - A table is read in one `REPEATABLE READ READ ONLY` transaction, a keyset page at a time
     (`WHERE (key) > (last key) ORDER BY key LIMIT n`). The server cuts each page once its rows'
     sizes pass 20 MiB (a running sum in the query), and a row over 10 MiB comes back as NULL
-    (skipped and counted), so an honest page is at most about 30 MiB. `n` follows the largest
-    row seen, starting from 10 MiB.
+    (skipped and counted), so an honest page is at most 30 MiB of rows' text; a page past that,
+    or past `n` rows, fails the sync. `n` follows the largest row seen, starting from 10 MiB.
+    A page's rows are streamed: each becomes its document and is dropped as it arrives (the
+    client library reads no further ahead than the row being taken), so a page in memory is its
+    documents, not its rows as well.
   - The connection counts the bytes it reads: a page's answer past 64 MiB (twice the page, plus
-    framing) fails the sync, so a server ignoring the cut can't grow memory. Every message's
-    header is read on the plaintext side (after TLS) before the client library sees it, and a
-    length over 64 MiB fails the connection: the library reserves a message's whole length
-    from its header. `ParameterStatus` messages, which the library keeps for the connection's
-    life, are capped at 256 and 64 KiB per connection.
+    framing) fails the sync, and a catalog query's (the table list, keys) past 8 MiB, so a
+    server ignoring the cut can't grow memory. Every message's header is read on the plaintext
+    side (after TLS) before the client library sees it, and a length over 64 MiB fails the
+    connection: the library reserves a message's whole length from its header. So does a row
+    or row description of more than 64 columns (roll's queries answer a row's JSON and its
+    primary key, at most 32 columns in Postgres), since the library keeps 24 bytes per column
+    of a row. `ParameterStatus` messages, which the library keeps for the connection's life,
+    are capped at 256 and 64 KiB per connection. The server's notices are dropped as they
+    arrive (their bytes count in the window); none reaches the node's logs.
   - A bucket is listed a page at a time (4 MiB of listing at most) and a page is indexed once
     its objects' text passes 20 MiB; an object over 10 MiB is indexed without its text
-    (Elastic's default extraction limit).
+    (Elastic's default extraction limit). Listings' bytes count against the sync's rate like
+    objects' do, and 100 listing pages in a row with no object in them fail the sync, so an
+    endpoint can't keep one listing nothing.
+  - An error a job or a connector records is cut to 4 KiB. Finished jobs are kept, as on
+    Elasticsearch, until deleted (`DELETE _connector/_sync_job/{id}`); they're small (counters
+    and a redacted snapshot of the connector).
   - Postgres sessions get `statement_timeout` (5 min) and `idle_in_transaction_session_timeout`
     so a stuck sync can't hold a transaction open; on the client every statement times out a
     little after that, the socket has TCP keepalives, and every wait on a database or a bucket
@@ -626,12 +652,17 @@ both with Elasticsearch 9.5.5's shapes, validation and state machines
     writing `********` back keeps the stored value, so a client can round-trip a
     configuration. A sealed value shows as `********` on every connector, self-managed ones
     included.
-  - A value's associated data is `connector configuration:<connector id>:<field>`, so a sealed
-    value copied into another connector or field doesn't open. It isn't bound to the cluster:
-    a branch and a snapshot restore carry the connector to a cluster with another uuid, and
-    its syncs must keep working there.
-  - When roll stops running a connector (made self-managed, given a service roll doesn't run,
-    deleted) the values it sealed are cleared. When roll starts running one (created native, made
+  - A value's associated data is `connector configuration:<cluster id>:<connector id>:<field>`
+    (the cluster's id in roll's catalog), so a sealed value copied into another connector or
+    field, or carried to another cluster (a branch's copy of its parent's state), doesn't
+    open. A branch adopting an inherited connector gives its credentials again (above).
+    Snapshots don't hold connectors (they live in the cluster's state, not in an index), so a
+    restore carries none.
+  - When roll stops running a connector (made self-managed, given a service roll doesn't run)
+    the values it sealed are cleared. Deleting a connector marks it deleted, as Elasticsearch
+    does (`?hard=true` removes it), its sealed values staying unreadable in the cluster's
+    state; putting one again under its id replaces its configuration, sealed values included,
+    with the service's empty schema. When roll starts running one (created native, made
     native, or given a service roll runs) every sensitive value it holds is sealed as given, and
     a sealed box is cleared instead: roll cleared its own, so a sealed box then was written by a
     client. A value written back keeps the stored one only when the stored entry was sensitive

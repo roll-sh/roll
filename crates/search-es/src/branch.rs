@@ -50,6 +50,12 @@ fn marker<'a>(cluster: &Cluster, st: &'a ClusterState) -> Option<&'a Value> {
 }
 
 fn me(cluster: &Cluster) -> String {
+    cluster_id(cluster)
+}
+
+/// The cluster's id in roll's catalog (its name without one): what a branch's marker names, and
+/// what connectors' sealed credentials are bound to.
+pub fn cluster_id(cluster: &Cluster) -> String {
     cluster.config.catalog_id.clone().unwrap_or_else(|| cluster.name.clone())
 }
 

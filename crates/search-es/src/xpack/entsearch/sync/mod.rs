@@ -31,6 +31,8 @@ pub const WORKER: &str = "roll";
 /// roll's own record of a connector it runs (who configured it, when its schedules last fired),
 /// kept apart so the connector document keeps Elasticsearch's shape.
 pub const RECORDS: &str = "connector.roll";
+/// The record that a cluster's connectors were looked at once roll ran syncs ([`adopt_existing`]).
+const EXISTING: (&str, &str) = ("connector.roll.existing", "v1");
 /// Node settings.
 pub const ALLOW_PRIVATE: &str = "roll.connectors.allow_private_hosts";
 pub const MAX_DOCS_PER_SECOND: &str = "roll.connectors.max_docs_per_second";
@@ -287,13 +289,15 @@ pub async fn run_due(cluster: &Cluster, now: i64) {
         pool.leave(&key);
     }
     let weak = Arc::downgrade(&handle);
+    // What a waiter checks it still wants a slot for: a few of its jobs, each a lookup.
+    let wanted: Arc<Vec<(String, String)>> = Arc::new(pending.iter().take(16).map(|(_, j, c)| (j.clone(), c.clone())).collect());
     for (_, job, cid) in pending {
         if !syncs.has_room() {
             break;
         }
-        let (alive, woken) = (weak.clone(), weak.clone());
+        let (alive, woken, wanted) = (weak.clone(), weak.clone(), wanted.clone());
         // A waiter counts only while its cluster is loaded and still has a job to start.
-        let alive: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(move || alive.upgrade().is_some_and(|c| !pending_jobs(&c, &c.state(), &c.xpack.connector_syncs).is_empty()));
+        let alive: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(move || alive.upgrade().is_some_and(|c| wanted.iter().any(|(j, cid)| startable(&c, j, cid))));
         let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
             if let Some(c) = woken.upgrade() {
                 c.jobs.kick(&c);
@@ -343,6 +347,15 @@ async fn supervise(cluster: Arc<Cluster>, job: String, cid: String, permit: Opti
     cluster.jobs.kick(&cluster);
 }
 
+/// Whether job `job` of connector `cid` could start now (a few lookups: the slot pool asks under
+/// its lock).
+fn startable(cluster: &Cluster, job: &str, cid: &str) -> bool {
+    let st = cluster.state();
+    st.metadata.xpack.get(SYNC_JOBS, job).is_some_and(|j| str_of(j, "status") == "pending")
+        && st.metadata.xpack.get(CONNECTORS, cid).is_some_and(|c| syncs_here(cluster, &st, cid, c))
+        && !cluster.xpack.connector_syncs.is_running(cid)
+}
+
 /// The pending jobs a cluster could start now, oldest first (`created_at`, job, connector): of
 /// connectors roll runs, with nothing in progress or starting.
 fn pending_jobs(cluster: &Cluster, st: &crate::meta::ClusterState, syncs: &Syncs) -> Vec<(String, String, String)> {
@@ -362,11 +375,76 @@ fn pending_jobs(cluster: &Cluster, st: &crate::meta::ClusterState, syncs: &Syncs
     pending
 }
 
-/// Whether roll runs connector `id`'s syncs on this cluster: one it runs, and not one a branch
-/// inherited from its parent ([`crate::branch::inherited_connector`]: paused until the branch
-/// makes it its own).
+/// Whether roll runs connector `id`'s syncs on this cluster: one it runs, and not one waiting to
+/// be made the cluster's own ([`waits_for_adoption`]).
 fn syncs_here(cluster: &Cluster, st: &crate::meta::ClusterState, id: &str, c: &Value) -> bool {
-    config::runs(c) && !crate::branch::inherited_connector(cluster, st, id)
+    config::runs(c) && !waits_for_adoption(cluster, st, id)
+}
+
+/// Whether connector `id`'s syncs stay paused until the cluster makes it its own (puts it again
+/// or writes its configuration: [`adopt`]): one a branch inherited from its parent
+/// ([`crate::branch::inherited_connector`]), or one that was there before roll ran syncs
+/// ([`adopt_existing`]).
+pub fn waits_for_adoption(cluster: &Cluster, st: &crate::meta::ClusterState, id: &str) -> bool {
+    crate::branch::inherited_connector(cluster, st, id) || st.metadata.xpack.get(RECORDS, id).and_then(|r| r.get("waiting")).and_then(Value::as_bool) == Some(true)
+}
+
+/// Records, once, that the cluster's connectors are made under roll's syncs (every write to a
+/// connector does): [`adopt_existing`] then never pauses one.
+pub fn mark_current(st: &mut crate::meta::ClusterState, now_ms: i64) -> crate::error::EsResult<()> {
+    if st.metadata.xpack.get(EXISTING.0, EXISTING.1).is_some() {
+        return Ok(());
+    }
+    store::put(st, EXISTING.0, EXISTING.1, obj! { "at" => now_ms }, now_ms).map(|_| ())
+}
+
+/// Makes connector `id` the cluster's own: its syncs run from now on.
+pub fn adopt(st: &mut crate::meta::ClusterState, id: &str, now_ms: i64) -> crate::error::EsResult<()> {
+    mark_current(st, now_ms)?;
+    crate::branch::adopt_connector(st, id, now_ms)?;
+    if let Some(Value::Obj(mut rec)) = st.metadata.xpack.get(RECORDS, id).cloned()
+        && rec.shift_remove("waiting").is_some()
+    {
+        store::put(st, RECORDS, id, Value::Obj(rec), now_ms)?;
+    }
+    Ok(())
+}
+
+/// Once per cluster, before its scheduler starts: the connectors it held before roll ran syncs
+/// (made when roll only stored them, credentials in the clear as given, or on a branch made
+/// before branches recorded what they inherited) wait to be made its own ([`waits_for_adoption`]),
+/// so nothing starts reading a source on deploy with credentials nobody gave roll to use, and
+/// their credentials are sealed where they lie. Adopting one keeps only credentials given again
+/// ([`config::protect`]). The record that this was done is written here when there was
+/// something to pause, and otherwise by the first write to a connector ([`mark_current`]), so a
+/// connector made under roll's syncs never waits (a branch has its parent's record), and a
+/// cluster without connectors isn't written to on load.
+pub async fn adopt_existing(cluster: &Cluster) -> crate::error::EsResult<()> {
+    let st = cluster.state();
+    if st.metadata.xpack.get(EXISTING.0, EXISTING.1).is_some() || !st.metadata.xpack.iter(CONNECTORS).any(|(_, c)| config::runs(c)) {
+        return Ok(());
+    }
+    drop(st);
+    let me = crate::branch::cluster_id(cluster);
+    let sealer = cluster.config.sealer.clone();
+    let now = crate::time::now_millis();
+    cluster
+        .update(move |st| {
+            if st.metadata.xpack.get(EXISTING.0, EXISTING.1).is_some() {
+                return Ok(());
+            }
+            let existing: Vec<(String, Value)> = st.metadata.xpack.iter(CONNECTORS).filter(|(_, c)| config::runs(c)).map(|(k, v)| (k.clone(), v.clone())).collect();
+            for (id, c) in existing {
+                let Value::Obj(mut m) = c else { continue };
+                config::seal_in_place(&mut m, &me, sealer.as_deref());
+                store::put(st, CONNECTORS, &id, Value::Obj(m), now)?;
+                let mut rec = st.metadata.xpack.get(RECORDS, &id).and_then(Value::as_object).cloned().unwrap_or_default();
+                rec.insert("waiting".into(), true.into());
+                store::put(st, RECORDS, &id, Value::Obj(rec), now)?;
+            }
+            mark_current(st, now)
+        })
+        .await
 }
 
 /// How a sync ended.
@@ -388,6 +466,22 @@ impl From<String> for Stop {
     }
 }
 
+/// The most of an error's text a job or a connector keeps.
+const ERROR_BYTES_MAX: usize = 4 << 10;
+
+/// `text`, cut to [`ERROR_BYTES_MAX`] on a character boundary.
+pub(crate) fn capped(mut text: String) -> String {
+    if text.len() > ERROR_BYTES_MAX {
+        let mut at = ERROR_BYTES_MAX - 3;
+        while !text.is_char_boundary(at) {
+            at -= 1;
+        }
+        text.truncate(at);
+        text.push_str("...");
+    }
+    text
+}
+
 /// The job's fields an outcome sets.
 fn settle_job(j: &mut Map, outcome: &Outcome, t: &str) {
     j.insert("last_seen".into(), t.into());
@@ -402,7 +496,7 @@ fn settle_job(j: &mut Map, outcome: &Outcome, t: &str) {
         }
         Outcome::Failed(e) => {
             j.insert("status".into(), "error".into());
-            j.insert("error".into(), e.clone().into());
+            j.insert("error".into(), capped(e.clone()).into());
         }
     }
 }
@@ -431,6 +525,7 @@ fn settle_connector(st: &mut crate::meta::ClusterState, cid: &str, outcome: &Out
             c.insert("last_sync_status".into(), "canceled".into());
         }
         Outcome::Failed(e) => {
+            let e = &capped(e.clone());
             c.insert("last_sync_status".into(), "error".into());
             c.insert("last_sync_error".into(), e.clone().into());
             c.insert("status".into(), "error".into());
@@ -451,8 +546,8 @@ async fn run(cluster: &Arc<Cluster>, job_id: &str, cid: &str) {
             if j.get("status").and_then(Value::as_str) != Some("pending") {
                 return Ok(false);
             }
-            // A connector the branch inherited doesn't start (it stays pending).
-            if crate::branch::inherited_connector(&me, st, &connector_id) {
+            // A connector waiting to be the cluster's own doesn't start (it stays pending).
+            if waits_for_adoption(&me, st, &connector_id) {
                 return Ok(false);
             }
             let t = now_nanos_string();
@@ -660,6 +755,11 @@ impl Sink<'_> {
         self.counters.bytes += bytes;
     }
 
+    /// A hold on the cluster's request breaker for what a page keeps until it's indexed.
+    pub fn reserve(&self) -> crate::breaker::Reservation {
+        crate::breaker::Reservation::new(self.cluster.breakers.request(self.cluster, &self.cluster.state()))
+    }
+
     /// Records a document the source couldn't hand over (too large).
     pub fn skip(&mut self) {
         self.counters.skipped += 1;
@@ -846,6 +946,52 @@ mod tests {
         assert_eq!(j.get("status").and_then(Value::as_str), Some("error"), "{j:?}");
         let conn = call(&c, "GET", "/_connector/x", "").await;
         assert_eq!(conn.get("last_sync_status").and_then(Value::as_str), Some("error"));
+    }
+
+    /// The native connectors a cluster held before roll ran syncs wait to be made its own (their
+    /// credentials, stored in the clear, sealed where they lie); adopting one keeps none of them,
+    /// and a connector made afterwards never waits.
+    #[tokio::test]
+    async fn connectors_from_before_roll_ran_syncs_wait_to_be_adopted() {
+        let mut cfg = ClusterConfig::new("c");
+        cfg.sealer = crate::seal::Sealer::from_secret("0123456789abcdef0123456789abcdef-upgrade");
+        let c = Arc::new(Cluster::open(cfg, Arc::new(MemoryStore::new())).await.unwrap());
+        call(&c, "PUT", "/_connector/x", r#"{"index_name":"content-x","is_native":true,"service_type":"postgresql"}"#).await;
+        // As stored before roll ran syncs: the password in the clear, and no record of the upgrade.
+        c.update(|st| {
+            store::remove(st, EXISTING.0, EXISTING.1);
+            let Some(Value::Obj(mut m)) = st.metadata.xpack.get(CONNECTORS, "x").cloned() else { panic!("no connector") };
+            let Some(Value::Obj(cfg)) = m.get_mut("configuration") else { panic!("no configuration") };
+            let Some(Value::Obj(e)) = cfg.get_mut("password") else { panic!("no password field") };
+            e.insert("value".into(), "pw-from-before".into());
+            store::put(st, CONNECTORS, "x", Value::Obj(m), 0).map(|_| ())
+        })
+        .await
+        .unwrap();
+        call(&c, "POST", "/_connector/_sync_job", r#"{"id":"x"}"#).await;
+        let password = |c: &Cluster| c.state().metadata.xpack.get(CONNECTORS, "x").and_then(|m| m.pointer(&["configuration", "password", "value"])).map(Value::to_es_string).unwrap_or_default();
+
+        adopt_existing(&c).await.unwrap();
+        assert!(crate::seal::is_sealed(&password(&c)), "sealed where it lies");
+        assert!(waits_for_adoption(&c, &c.state(), "x"));
+        assert_eq!(next_due(&c, &c.state(), Some(&c.xpack.connector_syncs)), None, "its job isn't due");
+        // Once per cluster: a connector made since doesn't wait.
+        call(&c, "PUT", "/_connector/y", r#"{"index_name":"content-y","is_native":true,"service_type":"postgresql"}"#).await;
+        adopt_existing(&c).await.unwrap();
+        assert!(!waits_for_adoption(&c, &c.state(), "y"));
+        // Nor on a cluster that had none: its first connector records that.
+        let fresh = Arc::new(Cluster::open(ClusterConfig::new("fresh"), Arc::new(MemoryStore::new())).await.unwrap());
+        adopt_existing(&fresh).await.unwrap();
+        call(&fresh, "PUT", "/_connector/z", r#"{"index_name":"content-z","is_native":true,"service_type":"postgresql"}"#).await;
+        adopt_existing(&fresh).await.unwrap();
+        assert!(!waits_for_adoption(&fresh, &fresh.state(), "z"));
+
+        // Adopted by a configuration write that gives no password: none is kept.
+        call(&c, "PUT", "/_connector/x/_configuration", r#"{"values":{}}"#).await;
+        assert!(!waits_for_adoption(&c, &c.state(), "x"));
+        assert_eq!(password(&c), "");
+        let x = call(&c, "GET", "/_connector/x", "").await;
+        assert_eq!(x.get("status").and_then(Value::as_str), Some("needs_configuration"), "{x:?}");
     }
 
     /// A sync running here whose statement outlasts the stale time isn't due again (the

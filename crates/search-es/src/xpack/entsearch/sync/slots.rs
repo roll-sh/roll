@@ -8,7 +8,9 @@
 //! wants a slot (its cluster is loaded and has a runnable pending job, checked whenever the
 //! queue is looked at), and a woken waiter that doesn't take its slot within [`WAKE_DEADLINE`]
 //! is dropped, so no cluster holds up the queue, on purpose or not. A successful take wakes the
-//! next waiter too, so slots that free together all find a taker.
+//! next waiter too, so slots that free together all find a taker, and so does dropping a waiter
+//! that no longer counts. A waiter's check looks at a few of its own jobs (a map lookup each),
+//! never every job, since it runs under the node's lock.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -98,18 +100,32 @@ impl Slots {
         st.waiting.iter().take_while(|w| w.key != key).any(|w| self.under_cap(st, &w.owner))
     }
 
+    /// Drops the waiters that no longer count: whether any went.
+    fn prune(st: &mut State) -> bool {
+        let before = st.waiting.len();
+        st.waiting.retain(Waiter::counts);
+        st.waiting.len() != before
+    }
+
     /// Whether `key` (of `owner`) would get a slot now.
     pub fn admits(&self, key: &str, owner: &str) -> bool {
-        let mut st = self.state.lock();
-        st.waiting.retain(Waiter::counts);
-        st.running < self.max && self.under_cap(&st, owner) && !self.ahead(&st, key)
+        let (admits, pruned) = {
+            let mut st = self.state.lock();
+            let pruned = Self::prune(&mut st);
+            (st.running < self.max && self.under_cap(&st, owner) && !self.ahead(&st, key), pruned)
+        };
+        // A waiter that went may have stood before one that can take a free slot now.
+        if pruned {
+            self.wake_next();
+        }
+        admits
     }
 
     /// A slot for `key` (of `owner`) when it's its turn; otherwise `key` waits in the queue
     /// (once), and `wake` is called when a slot may be its.
     pub fn take(self: &Arc<Self>, key: &str, owner: &str, alive: Check, wake: Wake) -> Option<Permit> {
         let mut st = self.state.lock();
-        st.waiting.retain(Waiter::counts);
+        let pruned = Self::prune(&mut st);
         if st.running < self.max && self.under_cap(&st, owner) && !self.ahead(&st, key) {
             st.waiting.retain(|w| w.key != key);
             st.running += 1;
@@ -121,6 +137,10 @@ impl Slots {
         }
         if !st.waiting.iter().any(|w| w.key == key) {
             st.waiting.push_back(Waiter { key: key.to_string(), owner: owner.to_string(), alive, wake, woken: None });
+        }
+        drop(st);
+        if pruned {
+            self.wake_next();
         }
         None
     }
@@ -148,7 +168,7 @@ impl Slots {
     fn wake_next(&self) {
         let wake = {
             let mut st = self.state.lock();
-            st.waiting.retain(Waiter::counts);
+            Self::prune(&mut st);
             if st.running >= self.max {
                 return;
             }
@@ -240,6 +260,21 @@ mod tests {
         wants.store(false, Ordering::SeqCst);
         drop(held);
         assert_eq!((a_wakes.load(Ordering::SeqCst), b_wakes.load(Ordering::SeqCst)), (0, 1), "B is woken, not A");
-        assert!(slots.take("b", "bob", Arc::new(|| true), b_wake).is_some());
+        assert!(slots.take("b", "bob", Arc::new(|| true), b_wake.clone()).is_some());
+
+        // A free slot with a dead waiter in front: whoever looks at the queue next drops it and
+        // wakes the one behind, without a slot having to free first.
+        let slots = Slots::new(1, 1);
+        let held = slots.take("x", "xavier", Arc::new(|| true), Arc::new(|| {})).unwrap();
+        wants.store(true, Ordering::SeqCst);
+        let w = wants.clone();
+        assert!(slots.take("a", "alice", Arc::new(move || w.load(Ordering::SeqCst)), Arc::new(|| {})).is_none());
+        assert!(slots.take("b", "bob", Arc::new(|| true), b_wake).is_none());
+        // B is woken for this slot only now that A is gone and the slot is free.
+        drop(held);
+        let before = b_wakes.load(Ordering::SeqCst);
+        wants.store(false, Ordering::SeqCst);
+        assert!(!slots.admits("c", "carol"), "B is ahead of C");
+        assert_eq!(b_wakes.load(Ordering::SeqCst), before + 1, "dropping A woke B");
     }
 }

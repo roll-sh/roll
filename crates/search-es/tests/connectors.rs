@@ -608,6 +608,16 @@ async fn a_branch_runs_no_inherited_sync_until_the_connector_is_its_own() {
         assert_eq!(call(&b, "PUT", &format!("/_connector/_sync_job/{id}/_cancel"), None).await.0, 200);
     }
 
+    // A configuration write that gives no password makes it the branch's own without one: the
+    // parent's stored password is cleared, and a sync sends none.
+    assert_eq!(call(&b, "PUT", "/_connector/pg/_configuration", Some(r#"{"values":{}}"#)).await.0, 200);
+    let (_, c, _) = call(&b, "GET", "/_connector/pg", None).await;
+    assert_eq!(at(&c, "status").as_str(), Some("needs_configuration"), "{c:?}");
+    assert_eq!(c.pointer(&["configuration", "password", "value"]).and_then(Value::as_str), Some(""), "{c:?}");
+    let job = finished(&b, &start(&b, "pg", "full").await).await;
+    assert_eq!(at(&job, "status").as_str(), Some("error"), "{job:?}");
+    assert!(got.lock().unwrap().is_empty(), "the parent's password was sent: {:?}", got.lock().unwrap());
+
     // Put again and configured on the branch: its own, and its syncs run.
     let (s, _, t) = call(&b, "PUT", "/_connector/pg", Some(r#"{"index_name":"content-pg","is_native":true,"service_type":"postgresql","name":"shop"}"#)).await;
     assert_eq!(s, 200, "{t}");

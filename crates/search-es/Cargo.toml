@@ -8,6 +8,8 @@ publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+# Streaming a connector's Postgres rows (`xpack::entsearch::sync::postgres`).
+futures-util.workspace = true
 async-trait.workspace = true
 aes-gcm.workspace = true
 # Inference: SigV4 for Amazon Bedrock and SageMaker (`xpack::inference::services::aws`).

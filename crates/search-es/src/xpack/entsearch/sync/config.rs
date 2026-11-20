@@ -141,12 +141,33 @@ fn sensitive(entry: &Value) -> bool {
     entry.get("sensitive").and_then(Value::as_bool) == Some(true)
 }
 
-/// What a connector's sensitive field is sealed as: bound to the connector and the field, so a
-/// sealed value moved into another connector's (or another field's) slot doesn't open. Not bound
-/// to the cluster: a branch and a snapshot restore carry the connector to a cluster with another
-/// uuid, and its syncs must keep working there.
-fn kind_of(connector: &str, field: &str) -> String {
-    format!("{SECRET_KIND}:{connector}:{field}")
+/// What a connector's sensitive field is sealed as: bound to the cluster (its catalog id), the
+/// connector and the field, so a sealed value moved into another connector's or field's slot, or
+/// carried to another cluster's state (a branch's copy of its parent), doesn't open. A branch
+/// adopting an inherited connector gives its credentials again ([`protect`]).
+fn kind_of(cluster: &str, connector: &str, field: &str) -> String {
+    format!("{SECRET_KIND}:{cluster}:{connector}:{field}")
+}
+
+/// Seals in place the sensitive values a connector holds in the clear (written before roll ran
+/// syncs, when they were stored as given): what an upgrade does once per cluster.
+pub fn seal_in_place(m: &mut Map, cluster: &str, sealer: Option<&crate::seal::Sealer>) {
+    let id = m.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
+    let Some(Value::Obj(cfg)) = m.get_mut("configuration") else { return };
+    for (k, entry) in cfg.iter_mut() {
+        if !sensitive(entry) {
+            continue;
+        }
+        if let Value::Obj(e) = entry
+            && let Some(Value::Str(v)) = e.get("value")
+            && !v.is_empty()
+            && v != REDACTED
+            && !crate::seal::is_sealed(v)
+        {
+            let sealed = crate::seal::seal_given_with(sealer, &kind_of(cluster, &id, k), v);
+            e.insert("value".into(), sealed.into());
+        }
+    }
 }
 
 /// The fields a credential is sent to, per service: changing one without giving the credential
@@ -180,7 +201,13 @@ fn value_of<'a>(m: &'a Map, field: &str) -> Option<&'a Value> {
 /// - A change of service starts from the new service's schema (`needs_configuration`): nothing
 ///   of the old service's configuration, its credentials included, carries over, so fields one
 ///   service doesn't guard can't be set aside for the other.
-pub fn protect(m: &mut Map, before: &Map, sealer: Option<&crate::seal::Sealer>) {
+/// - A write that `adopting` makes a waiting connector the cluster's own (one a branch inherited,
+///   or one from before an upgrade: [`super::waits_for_adoption`]) is treated as roll starting to
+///   run it: only credentials given in that write are kept, so its syncs only ever use
+///   credentials this cluster's owner entered.
+///
+/// `cluster` is the cluster's catalog id, which seals are bound to ([`kind_of`]).
+pub fn protect(m: &mut Map, before: &Map, sealer: Option<&crate::seal::Sealer>, cluster: &str, adopting: bool) {
     let ran = runs(&Value::Obj(before.clone()));
     if !runs(&Value::Obj(m.clone())) {
         if ran {
@@ -194,7 +221,7 @@ pub fn protect(m: &mut Map, before: &Map, sealer: Option<&crate::seal::Sealer>) 
         m.insert("status".into(), "needs_configuration".into());
         return;
     }
-    let started = !ran;
+    let started = !ran || adopting;
     let id = m.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
     let had_secret = before.get("configuration").and_then(Value::as_object).is_some_and(|c| {
         c.values().any(|e| sensitive(e) && e.get("value").and_then(Value::as_str).is_some_and(|v| !v.is_empty()))
@@ -217,7 +244,7 @@ pub fn protect(m: &mut Map, before: &Map, sealer: Option<&crate::seal::Sealer>) 
                 cleared = true;
                 Value::from("")
             } else {
-                Value::from(crate::seal::seal_given_with(sealer, &kind_of(&id, k), &v))
+                Value::from(crate::seal::seal_given_with(sealer, &kind_of(cluster, &id, k), &v))
             };
             e.insert("value".into(), next);
             continue;
@@ -231,7 +258,7 @@ pub fn protect(m: &mut Map, before: &Map, sealer: Option<&crate::seal::Sealer>) 
             // The placeholder with nothing stored keeps nothing.
             stored.unwrap_or_else(|| Value::from(""))
         } else {
-            Value::from(crate::seal::seal_given_with(sealer, &kind_of(&id, k), &v))
+            Value::from(crate::seal::seal_given_with(sealer, &kind_of(cluster, &id, k), &v))
         };
         e.insert("value".into(), next);
     }
@@ -311,13 +338,14 @@ pub struct Values {
 impl Values {
     pub fn open(cluster: &Cluster, connector: &Value) -> EsResult<Values> {
         let id = connector.get("id").and_then(Value::as_str).unwrap_or_default();
+        let me = crate::branch::cluster_id(cluster);
         let mut values = Map::new();
         let mut secrets = Vec::new();
         for (k, e) in connector.get("configuration").and_then(Value::as_object).into_iter().flatten() {
             let v = e.get("value").cloned().unwrap_or(Value::Null);
             let v = match (&v, sensitive(e)) {
                 (Value::Str(s), true) if !s.is_empty() => {
-                    let plain = crate::seal::open(cluster, &kind_of(id, k), s)?;
+                    let plain = crate::seal::open(cluster, &kind_of(&me, id, k), s)?;
                     secrets.push(plain.clone());
                     Value::from(plain)
                 }
@@ -405,7 +433,7 @@ mod tests {
         {
             e.insert("value".into(), "https://elsewhere.example".into());
         }
-        protect(&mut after, &before, None);
+        protect(&mut after, &before, None, "c", false);
         assert_eq!(secret(&after, "aws_secret_access_key"), "");
         assert_eq!(after.get("status").and_then(Value::as_str), Some("needs_configuration"));
         // The same write giving the secret again keeps it (sealed).
@@ -420,7 +448,7 @@ mod tests {
         {
             e.insert("value".into(), "https://other.example".into());
         }
-        protect(&mut again, &after, None);
+        protect(&mut again, &after, None, "c", false);
         assert_eq!(secret(&again, "aws_secret_access_key"), "new-secret", "no sealer: kept as given");
     }
 }

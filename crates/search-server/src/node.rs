@@ -1139,6 +1139,7 @@ impl Node {
         }
         // Before any job can run: a branch's inherited jobs must not act as its parent's.
         Box::pin(search_es::branch::mark_inherited(&cluster)).await.map_err(|e| anyhow::anyhow!("marking what the branch inherited: {}", e.reason()))?;
+        Box::pin(search_es::xpack::entsearch::sync::adopt_existing(&cluster)).await.map_err(|e| anyhow::anyhow!("pausing the connectors from before roll ran syncs: {}", e.reason()))?;
         let mut stats = persist::RecoveryStats::default();
         let data = match data_store {
             Some(ds) => {

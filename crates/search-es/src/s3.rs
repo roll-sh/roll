@@ -379,7 +379,8 @@ impl Client {
     /// One page of the objects under `prefix` (at most `max_keys`, S3's own cap is 1,000) after
     /// `token`, and the token of the next page when there is one. A page's body is read up to
     /// 4 MiB.
-    pub async fn list_page(&self, prefix: &str, token: Option<&str>, max_keys: usize) -> Result<(Vec<Object>, Option<String>), Error> {
+    /// One page of a listing: its objects, the next page's token, and the bytes the page took.
+    pub async fn list_page(&self, prefix: &str, token: Option<&str>, max_keys: usize) -> Result<(Vec<Object>, Option<String>, usize), Error> {
         let max = max_keys.clamp(1, 1000).to_string();
         let mut q = vec![("list-type", "2"), ("prefix", prefix), ("max-keys", max.as_str())];
         if let Some(t) = token {
@@ -390,6 +391,7 @@ impl Client {
             return Err(failure(r).await);
         }
         let page = read_bounded(r, 4 << 20).await?;
+        let bytes = page.len();
         let page = String::from_utf8_lossy(&page);
         let objects = elements(&page, "Contents")
             .map(|item| {
@@ -399,7 +401,7 @@ impl Client {
             .collect();
         let truncated = elements(&page, "IsTruncated").next().is_some_and(|t| t.trim() == "true");
         let next = elements(&page, "NextContinuationToken").next().map(xml_unescape).filter(|t| truncated && !t.is_empty() && Some(t.as_str()) != token);
-        Ok((objects, next))
+        Ok((objects, next, bytes))
     }
 
     /// Every object under `prefix`, as `(key, size)`. The endpoint decides how many pages there

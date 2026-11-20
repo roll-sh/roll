@@ -176,7 +176,8 @@ are then paused too (put them again to resume them).
   job of an inherited connector becomes due or starts on the branch (one already waiting stays
   `pending`, and its schedule makes none). Putting the connector again, or writing its
   configuration, makes it the branch's own, and its syncs run from then on, as an SLM policy
-  put again does.
+  put again does. The parent's credentials don't come along: the branch gives them again in
+  that write (or later), since sealed values are bound to the cluster they were written on.
 - ILM, ISM, data stream lifecycles, transforms and rollups work inside the branch's own indices
   and keep running. A step of theirs that writes to an inherited repository is refused like
   any write there, and ILM's `cleanup-snapshot` leaves a snapshot in one alone (it is the
