@@ -441,6 +441,7 @@ impl Engine {
         let rule_refs: Vec<(String, String)> = project_env(&s, r.branch.as_deref()).into_iter().filter(|(k, v)| crate::settings::is_reference(v) && !own.contains_key(k)).collect();
         let refs: Vec<(String, String)> = vars.iter().filter(|kv| rule_refs.contains(kv)).cloned().collect();
         vars.retain(|kv| !refs.contains(kv));
+        let refs = self.refs_still_chosen(r, &s, trusted, refs).await?;
         self.secrets.ensure(&r.project_id, &env_name(&r.id), &s.secrets.base, &vars, &refs, trusted, expires_at, &branched).await.map_err(|e| anyhow::anyhow!("secrets: {e:#}"))?;
         // Its logs' masks follow what it's given now: these values at once (roll apps' instances
         // get them without a start here), roll secrets' read again at the next logs read.
@@ -740,6 +741,43 @@ impl Engine {
     }
 
     /// The project's column masks for a fresh branch, if it has any for this resource.
+    /// The rules' references to an environment other than the one the previews follow, each kept
+    /// only while its writer may still choose it for this preview (roll secrets reads it as them:
+    /// `Reveal::still`); the rest are left out, said once in the activity. A reference to the base
+    /// reads what the preview reads anyway.
+    async fn refs_still_chosen(&self, r: &Row, s: &crate::settings::Settings, trusted: bool, refs: Vec<(String, String)>) -> anyhow::Result<Vec<(String, String)>> {
+        if refs.is_empty() {
+            return Ok(refs);
+        }
+        let Some(reveal) = self.reveal.get().cloned() else { anyhow::bail!("roll:// references need roll secrets on this node") };
+        let writers = self.store.env_ref_writers(&r.project_id)?;
+        let (project, repo, base) = (r.project_id.clone(), r.repo.clone(), s.secrets.base.clone());
+        let (kept, dropped) = tokio::task::spawn_blocking(move || {
+            let (mut kept, mut dropped) = (Vec::new(), Vec::new());
+            for (k, v) in refs {
+                let why = match reveal.place(&v) {
+                    Ok((env, _)) if env == base => None,
+                    Ok(_) => match writers.iter().find(|(n, reference, _)| *n == k && *reference == v) {
+                        Some((_, _, by)) => reveal.still(&project, &repo, !trusted, &v, by).err(),
+                        None => Some("no writer is kept for it: save the rules again".into()),
+                    },
+                    Err(e) => Some(e),
+                };
+                match why {
+                    None => kept.push((k, v)),
+                    Some(why) => dropped.push(format!("{k}: {why}")),
+                }
+            }
+            (kept, dropped)
+        })
+        .await?;
+        let new = self.refs_told.lock().insert(r.id.clone(), dropped.clone()).is_none_or(|before| before != dropped);
+        if new && !dropped.is_empty() {
+            self.store.log(&r.id, &format!("references left out (who chose them can't now): {}", dropped.join("; ")))?;
+        }
+        Ok(kept)
+    }
+
     /// The first service's screenshot at `r`'s head: `true` when one was kept. Not taken (a
     /// backend that can't, a failure) is remembered for the head, and the last one taken stays.
     pub(super) async fn take_screenshot(&self, r: &Row) -> bool {

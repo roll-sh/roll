@@ -239,6 +239,8 @@ pub struct Engine {
     deploying_since: Mutex<HashMap<(String, String), i64>>,
     /// The unresolved secrets last told per preview (each set once in its activity).
     secrets_told: Mutex<HashMap<String, Vec<String>>>,
+    /// The rules' references last left out per preview, their writers unable to now (told once).
+    refs_told: Mutex<HashMap<String, Vec<String>>>,
     /// When each project's own preview domain was last read from roll apps (ms).
     domain_read: Mutex<HashMap<String, i64>>,
     /// The paths a head changes (`repo`, `head`, or `from..head`), for the path filters. Between
@@ -303,6 +305,7 @@ impl Engine {
                 k
             },
             secrets_told: Mutex::new(HashMap::new()),
+            refs_told: Mutex::new(HashMap::new()),
             domain_read: Mutex::new(HashMap::new()),
             paths_seen: Mutex::new(HashMap::new()),
             shots_wanted: Mutex::new(std::collections::HashSet::new()),

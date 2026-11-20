@@ -20,6 +20,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_postgres::error::SqlState;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_postgres::{Client, NoTls};
 
 // ── harness ──
@@ -898,4 +899,306 @@ async fn postgres_16() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn postgres_17() {
     version_roundtrip(17).await;
+}
+
+// ── decoy roles ──
+
+/// A raw client: just enough of the protocol to send what a prober would and keep every byte the
+/// server sends back.
+struct Raw(tokio::net::TcpStream);
+
+impl Raw {
+    async fn start(port: u16, version: i32, params: &[(&str, &str)]) -> Raw {
+        let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let mut body = version.to_be_bytes().to_vec();
+        for (k, v) in params {
+            body.extend_from_slice(k.as_bytes());
+            body.push(0);
+            body.extend_from_slice(v.as_bytes());
+            body.push(0);
+        }
+        body.push(0);
+        let mut packet = ((body.len() + 4) as i32).to_be_bytes().to_vec();
+        packet.extend_from_slice(&body);
+        s.write_all(&packet).await.unwrap();
+        Raw(s)
+    }
+
+    /// One whole message, or `None` once the server hangs up.
+    async fn read(&mut self) -> Option<Vec<u8>> {
+        let mut head = [0u8; 5];
+        self.0.read_exact(&mut head).await.ok()?;
+        let len = i32::from_be_bytes(head[1..].try_into().unwrap()) as usize;
+        let mut m = head.to_vec();
+        m.resize(len + 1, 0);
+        self.0.read_exact(&mut m[5..]).await.ok()?;
+        Some(m)
+    }
+
+    async fn send(&mut self, bytes: &[u8]) {
+        let _ = self.0.write_all(bytes).await;
+    }
+}
+
+/// A `p` message: the SASL mechanism and initial response (`None`: no response, length -1).
+fn sasl_initial(mech: &str, data: Option<&[u8]>) -> Vec<u8> {
+    let mut body = mech.as_bytes().to_vec();
+    body.push(0);
+    match data {
+        Some(d) => {
+            body.extend_from_slice(&(d.len() as i32).to_be_bytes());
+            body.extend_from_slice(d);
+        }
+        None => body.extend_from_slice(&(-1i32).to_be_bytes()),
+    }
+    sasl(&body)
+}
+
+fn sasl(body: &[u8]) -> Vec<u8> {
+    let mut m = vec![b'p'];
+    m.extend_from_slice(&((body.len() + 4) as i32).to_be_bytes());
+    m.extend_from_slice(body);
+    m
+}
+
+/// A proof of the right length that's wrong: base64 of 32 zero bytes.
+const WRONG_PROOF: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+
+/// What a prober might send after the server asks for SCRAM.
+#[derive(Clone, Copy, Debug)]
+enum Probe {
+    /// A whole exchange with a wrong password (flag `n` or `y`).
+    WrongPassword(u8),
+    /// A client-first-message Postgres refuses.
+    First(&'static [u8]),
+    /// A client-final-message (from the server's nonce `r`) Postgres refuses.
+    Final(fn(&str) -> String),
+    Mechanism,
+    NotSasl,
+    Oversized,
+    /// No initial response: the server asks again with an empty challenge.
+    NoInitial,
+}
+
+const CLIENT_NONCE: &str = "fakeclientnonce0000000000";
+
+/// Everything the server says to `user` for `probe`, until it hangs up.
+async fn transcript(port: u16, endpoint: &str, user: &str, version: i32, extra: &[(&str, &str)], probe: Probe) -> Vec<Vec<u8>> {
+    let options = format!("endpoint={endpoint}");
+    let mut params = vec![("user", user), ("database", "main"), ("options", options.as_str())];
+    params.extend_from_slice(extra);
+    let mut c = Raw::start(port, version, &params).await;
+    let mut got = vec![];
+    loop {
+        let Some(m) = c.read().await else { return got };
+        let tag = m[0];
+        got.push(m);
+        if tag == b'R' {
+            break;
+        }
+        if tag == b'E' {
+            return got;
+        }
+    }
+    let first = |flag: u8| format!("{},,n=,r={CLIENT_NONCE}", flag as char).into_bytes();
+    match probe {
+        // Only what Postgres reads before it gives up: bytes it never reads would reset the
+        // connection under its answer.
+        Probe::NotSasl => c.send(b"X").await,
+        Probe::Mechanism => c.send(&sasl_initial("PLAIN", Some(&first(b'n')))).await,
+        Probe::First(f) => c.send(&sasl_initial("SCRAM-SHA-256", Some(f))).await,
+        Probe::Oversized => c.send(&[&b"p"[..], &2000i32.to_be_bytes()].concat()).await,
+        Probe::NoInitial | Probe::WrongPassword(_) | Probe::Final(_) => {
+            let flag = if let Probe::WrongPassword(f) = probe { f } else { b'n' };
+            if let Probe::NoInitial = probe {
+                c.send(&sasl_initial("SCRAM-SHA-256", None)).await;
+                got.push(c.read().await.unwrap());
+                c.send(&sasl(&first(flag))).await;
+            } else {
+                c.send(&sasl_initial("SCRAM-SHA-256", Some(&first(flag)))).await;
+            }
+            let Some(m) = c.read().await else { return got };
+            let text = String::from_utf8_lossy(&m[9..]).to_string();
+            got.push(m);
+            if let Some(r) = text.strip_prefix("r=").and_then(|t| t.split(',').next()) {
+                let binding = if flag == b'y' { "eSws" } else { "biws" };
+                let last = match probe {
+                    Probe::Final(f) => f(r),
+                    _ => format!("c={binding},r={r},p={WRONG_PROOF}"),
+                };
+                c.send(&sasl(last.as_bytes())).await;
+            }
+        }
+    }
+    while let Some(m) = c.read().await {
+        got.push(m);
+    }
+    got
+}
+
+/// A transcript as comparable text: the server's random nonce, the salt (each role has its own)
+/// and the role's name taken out, after checking their shape.
+fn shape(t: &[Vec<u8>], user: &str) -> Vec<String> {
+    t.iter()
+        .map(|m| {
+            if m[0] == b'R' && m[5..9] == 11i32.to_be_bytes() && m.len() > 9 {
+                let text = String::from_utf8_lossy(&m[9..]).to_string();
+                let parts: Vec<&str> = text.split(',').collect();
+                let r = parts[0].strip_prefix(&format!("r={CLIENT_NONCE}")).unwrap_or_else(|| panic!("{text}"));
+                let s = parts[1].strip_prefix("s=").unwrap_or_else(|| panic!("{text}"));
+                assert_eq!((r.len(), s.len(), parts[2], parts.len()), (24, 24, "i=4096", 3), "{text}");
+                return "R11 r=<client><24> s=<16 bytes> i=4096".to_string();
+            }
+            String::from_utf8_lossy(m).replace(user, "<role>")
+        })
+        .collect()
+}
+
+/// Every way a prober can poke a login, besides the password itself.
+/// A probe: the protocol version, extra startup parameters, and what's sent after.
+type Poke = (i32, Vec<(&'static str, &'static str)>, Probe);
+
+fn probes() -> Vec<Poke> {
+    let v3 = 3 << 16;
+    let plain = |p| (v3, vec![], p);
+    vec![
+        plain(Probe::WrongPassword(b'n')),
+        plain(Probe::WrongPassword(b'y')),
+        plain(Probe::NoInitial),
+        plain(Probe::Mechanism),
+        plain(Probe::NotSasl),
+        plain(Probe::Oversized),
+        plain(Probe::First(b"")),
+        plain(Probe::First(b"n,,n=,r=a\0b")),
+        plain(Probe::First(b"garbage")),
+        plain(Probe::First(b"nx")),
+        plain(Probe::First(b"y")),
+        plain(Probe::First(b"p=tls-server-end-point,,n=,r=abc")),
+        plain(Probe::First(b"n,a=someone,n=,r=abc")),
+        plain(Probe::First(b"n,x")),
+        plain(Probe::First(b"n,,m=ext,n=,r=abc")),
+        plain(Probe::First(b"n,,r=abc")),
+        plain(Probe::First(b"n,,n")),
+        plain(Probe::First(b"n,,n=,r=ab\x7fc")),
+        plain(Probe::First(b"n,,n=,r=abc,1=x")),
+        plain(Probe::First(b"n,,n=,r=abc,x")),
+        plain(Probe::Final(|r| format!("c=eSws,r={r},p={WRONG_PROOF}"))),
+        plain(Probe::Final(|r| format!("c=biws,r={r}x,p={WRONG_PROOF}"))),
+        plain(Probe::Final(|r| format!("c=biws,r={r},p=AAAA"))),
+        plain(Probe::Final(|r| format!("c=biws,r={r},p={WRONG_PROOF},x=1"))),
+        plain(Probe::Final(|r| format!("c=biws,r={r}"))),
+        plain(Probe::Final(|r| format!("d=biws,r={r}"))),
+        (v3 | 2, vec![("_pq_.fake_option", "1")], Probe::WrongPassword(b'n')),
+        (v3 | 9, vec![], Probe::WrongPassword(b'n')),
+        (v3, vec![("replication", "maybe")], Probe::WrongPassword(b'n')),
+        (v3, vec![("replication", "database")], Probe::WrongPassword(b'n')),
+    ]
+}
+
+/// A decoy role (roll secrets' Postgres decoys) is refused by the proxy exactly as Postgres
+/// refuses a wrong password: every probe gets the bytes a compute gives a role that doesn't exist,
+/// on 16, 17 and 18, whether or not the proxy has seen the compute refuse anyone yet. Its logins
+/// wake no compute and each is told once; it's `NOLOGIN` in Postgres too, and dropping it ends it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_decoy_role_is_refused_as_a_wrong_password_is() {
+    let h = harness!();
+    let told: Arc<std::sync::Mutex<Vec<pg_control::DecoyLogin>>> = Arc::default();
+    let t = told.clone();
+    h.control.on_decoy_login(move |l| t.lock().unwrap().push(l.clone()));
+    // Obviously fake, and as long as each other.
+    let (decoy, missing) = ("roll_fakedecoy01", "roll_fakemissin1");
+    for v in [18, 17, 16] {
+        let db = h.project(Some(v)).await;
+        let ep = &db.ep.id;
+        let (status, made) = h.post(&format!("/v1/projects/{}/decoy-roles", db.project.id), json!({ "role": decoy })).await;
+        assert_eq!((status, made["role"].as_str(), made["endpoint_id"].as_str()), (201, Some(decoy), Some(ep.as_str())), "{made}");
+        // A name that exists can't be a decoy, nor can one twice.
+        assert_eq!(h.post(&format!("/v1/projects/{}/decoy-roles", db.project.id), json!({ "role": "roll" })).await.0, 400);
+        assert_eq!(h.post(&format!("/v1/projects/{}/decoy-roles", db.project.id), json!({ "role": decoy })).await.0, 409);
+        let c = h.connect(&db, ep).await;
+        let can_login: bool = c.query_one("SELECT rolcanlogin FROM pg_roles WHERE rolname = $1", &[&decoy]).await.unwrap().get(0);
+        assert!(!can_login);
+
+        // The decoy first, before the proxy has seen this compute refuse anyone (its own table),
+        // then again after (what it learned from the compute).
+        let before = told.lock().unwrap().len();
+        let mut from_table = vec![];
+        for (version, extra, probe) in probes() {
+            from_table.push(shape(&transcript(h.proxy_port, ep, decoy, version, &extra, probe).await, decoy));
+        }
+        assert_eq!(told.lock().unwrap().len() - before, probes().len(), "one alert per login");
+        let mut real = vec![];
+        for (version, extra, probe) in probes() {
+            real.push(shape(&transcript(h.proxy_port, ep, missing, version, &extra, probe).await, missing));
+        }
+        for (i, (version, extra, probe)) in probes().into_iter().enumerate() {
+            assert_eq!(from_table[i], real[i], "Postgres {v}: {probe:?} {version:#x} {extra:?}");
+            let learned = shape(&transcript(h.proxy_port, ep, decoy, version, &extra, probe).await, decoy);
+            assert_eq!(learned, real[i], "Postgres {v}, learned: {probe:?} {version:#x} {extra:?}");
+        }
+        // One role, one salt, as Postgres has.
+        let salt = |t: Vec<Vec<u8>>| String::from_utf8_lossy(&t[1][9..]).split(",s=").nth(1).unwrap().to_string();
+        let a = salt(transcript(h.proxy_port, ep, decoy, 3 << 16, &[], Probe::WrongPassword(b'n')).await);
+        assert_eq!(a, salt(transcript(h.proxy_port, ep, decoy, 3 << 16, &[], Probe::WrongPassword(b'n')).await));
+
+        let l = told.lock().unwrap().last().cloned().unwrap();
+        assert_eq!((l.project_id.as_str(), l.endpoint_id.as_str(), l.role.as_str(), l.peer), (db.project.id.as_str(), ep.as_str(), decoy, Some("127.0.0.1".parse().unwrap())));
+        drop(c);
+        if v != 18 {
+            continue;
+        }
+
+        // A suspended endpoint: refused as a wrong password, after as long as a start takes, and
+        // it stays asleep. A real driver sees Postgres' own error.
+        h.control.suspend(ep).await.unwrap();
+        let n = told.lock().unwrap().len();
+        let at = Instant::now();
+        let mut cfg = tokio_postgres::Config::new();
+        cfg.host("127.0.0.1").port(h.proxy_port).user(decoy).password("fake-decoy-password").dbname("main").options(format!("endpoint={ep}"));
+        let Err(err) = cfg.connect(NoTls).await else { panic!("refused") };
+        let took = at.elapsed();
+        let db_err = err.as_db_error().unwrap_or_else(|| panic!("{err:?}"));
+        assert_eq!((db_err.code(), db_err.message()), (&SqlState::INVALID_PASSWORD, format!("password authentication failed for user \"{decoy}\"").as_str()));
+        assert_eq!((db_err.file(), db_err.routine()), (Some("auth.c"), Some("auth_failed")));
+        assert_eq!(h.control.endpoint_or_404(ep).unwrap().state, EndpointState::Suspended);
+        assert_eq!(h.docker_inspect(ep, "{{.State.Running}}").await, "false");
+        assert_eq!(told.lock().unwrap().len(), n + 1);
+        eprintln!("decoy refused on a suspended endpoint after {took:?}");
+        // As long as an ordinary start (initdb's first start isn't one).
+        assert!(took < Duration::from_secs(5), "{took:?}");
+        let at = Instant::now();
+        let Err(err) = h.connect_as(missing, "fake-password", ep).await else { panic!("refused") };
+        eprintln!("a missing role refused on a suspended endpoint (a start) after {:?}", at.elapsed());
+        assert_eq!(sql_state(&err), Some(&SqlState::INVALID_PASSWORD));
+
+        // The read every login makes.
+        let n = 20_000;
+        let at = Instant::now();
+        for _ in 0..n {
+            assert!(h.control.store.decoy_at(ep, "roll").unwrap().is_none());
+        }
+        eprintln!("decoy lookup per login (not a decoy): {:?}", at.elapsed() / n);
+        let at = Instant::now();
+        for _ in 0..n {
+            assert!(h.control.store.decoy_at(ep, decoy).unwrap().is_some());
+        }
+        eprintln!("decoy lookup per login (a decoy): {:?}", at.elapsed() / n);
+        let at = Instant::now();
+        for _ in 0..200 {
+            h.connect(&db, ep).await;
+        }
+        eprintln!("a whole login through the proxy: {:?}", at.elapsed() / 200);
+
+        // Dropping it: gone from Postgres and from the proxy (Postgres answers it now).
+        let drop_url = format!("{}/v1/projects/{}/decoy-roles/{decoy}", h.api, db.project.id);
+        assert_eq!(h.http.delete(&drop_url).send().await.unwrap().status().as_u16(), 204);
+        assert_eq!(h.http.delete(&drop_url).send().await.unwrap().status().as_u16(), 204, "gone already is fine");
+        assert!(!h.control.store.is_decoy_role(&db.project.id, decoy).unwrap());
+        let c = h.connect(&db, ep).await;
+        assert_eq!(count(&c, &format!("SELECT count(*) FROM pg_roles WHERE rolname = '{decoy}'")).await, 0);
+        let n = told.lock().unwrap().len();
+        let Err(err) = h.connect_as(decoy, "fake-decoy-password", ep).await else { panic!("refused") };
+        assert_eq!(sql_state(&err), Some(&SqlState::INVALID_PASSWORD));
+        assert_eq!(told.lock().unwrap().len(), n);
+    }
 }
