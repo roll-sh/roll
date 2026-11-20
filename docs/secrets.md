@@ -5106,6 +5106,22 @@ The other threads' work that builds on these:
 
 roll MCP adds no cut-off tool: #304 is a person's call, since it can revoke the agent's own token.
 
+**State, 2026-11-20 16:55.** Batch 5 is on main (8b20ce290, CI green, exactly the gated tree):
+#407, #430, #440, #451; #277, #397, #432, #488; #357, #330; #465, #514, in four rounds.
+
+Batch 6, each gated green, none enqueued:
+- #499 claims;
+- #511 batched writes;
+- #494 the first hour;
+- #487 validity checks;
+- #513 decoys session-only;
+- #520 placeholders;
+- #517 interception CA;
+- #467 then #493, the Postgres decoy dashboard and decoy where, now on main's #432.
+
+#501 (members v1) is still being fixed after its security review. #455 waits for a full
+`--docker` run at low load.
+
 **Ranked, 2026-11-20 04:30** (the thirty-third product review, cold, after batch 4 and #475). The store
 is still level with or ahead of the category. The gaps are at the new features' seams.
 
