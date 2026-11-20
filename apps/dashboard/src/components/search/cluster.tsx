@@ -27,6 +27,7 @@ import { ImportPanel } from "./import";
 import { NewIndexPanel } from "./new-index";
 import { Templates } from "./templates";
 import { InferenceTab } from "./inference";
+import { ConnectorsTab } from "./connectors";
 import { ApiKeys } from "./api-keys";
 import { AuditLog } from "./audit-log";
 import { SearchConsole } from "./console";
@@ -39,7 +40,7 @@ import { Remotes } from "./remotes";
 import { SnapshotsTab } from "./snapshots";
 import { CredentialsOnce, SearchStateDot, settingsOf, SettingsFields, stateLabel, useAction, useSearchClusters, type Run } from "./shared";
 
-const TABS = ["overview", "indices", "console", "playground", "analyze", "relevance", "inference", "pipelines", "snapshots", "branches", "performance", "usage", "settings"] as const;
+const TABS = ["overview", "indices", "console", "playground", "analyze", "relevance", "inference", "pipelines", "snapshots", "connectors", "branches", "performance", "usage", "settings"] as const;
 type Tab = (typeof TABS)[number];
 
 /** Placeholder while the route's params resolve. */
@@ -210,6 +211,16 @@ export function SearchClusterPage({ id }: { id: string }) {
         )}
         {tab === "inference" && (
           <InferenceTab
+            key={cluster.id}
+            cluster={cluster}
+            onOpenConsole={(text) => {
+              setPrefill((p) => ({ text, n: (p?.n ?? 0) + 1 }));
+              setTab("console");
+            }}
+          />
+        )}
+        {tab === "connectors" && (
+          <ConnectorsTab
             key={cluster.id}
             cluster={cluster}
             onOpenConsole={(text) => {

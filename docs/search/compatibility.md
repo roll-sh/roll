@@ -1296,6 +1296,30 @@ as given), the multimodal `embedding` task type and the new `semantic` field typ
 a `text_similarity_reranker` inside a compound retriever, its `chunk_rescorer`, and the reranker's
 explanation and profile details.
 
+## Connectors (`_connector`)
+
+roll runs the syncs of Elastic-managed (`is_native: true`) `postgresql` and `s3` connectors
+(docs/search/architecture.md, "Connectors"); every other connector behaves as on Elasticsearch
+9.5.5, its jobs moved by the tenant's own connector service. Where a connector roll runs differs:
+
+- Its `sensitive` configuration values (`password`, `aws_secret_access_key`) are sealed at rest
+  and shown as `********` in `GET _connector`, its list and job snapshots; writing `********`
+  back keeps the stored value. Elasticsearch returns them in the clear. Changing where a
+  credential goes (a Postgres `host`, `port`, `username`, `database` or TLS setting; an S3
+  `endpoint`, `region`, access key id or `buckets`) without giving it again clears it and sets
+  the connector to `needs_configuration`.
+- `postgresql` has incremental syncs (Elastic's has none) through roll's `incremental_column`;
+  advanced sync rules (custom SQL) aren't supported yet and make a draft `invalid`.
+- `s3` takes roll's `endpoint` and `region` (any S3-compatible store), not `buckets: *`, and
+  incremental syncs (objects modified since the last sync). Text comes from plain text, JSON,
+  HTML and XML only: roll has no `attachment` processor, so PDFs and Office files are indexed
+  by their metadata.
+- A connector a branch inherited, or a native one a cluster held before roll ran syncs, waits:
+  its jobs stay `pending` until the connector is put again or its configuration written, and
+  that write keeps only the credentials it gives.
+- Access control syncs fail (neither service syncs permissions on Elastic either). A job's
+  `indexed_document_volume` is in MiB, as Elastic's connectors report it.
+
 ## Per area
 
 `roll` = baseline tests roll passes, `ES` = tests passing on Elasticsearch 9.5.5. The most
@@ -1734,7 +1758,10 @@ the rest are skipped by the tests' own prerequisites.
 - x-pack (`crates/search-es/src/xpack/`): security (native realm, API keys, tokens, role
   mappings, privileges, request authorization), ES|QL, SQL, EQL, enrich, transforms, async
   search, ILM, search applications, query rules, connectors, graph, terms enum, text structure
-  and watcher run for real (watches fire on the cluster's job scheduler and wake a sleeping
+  and watcher run for real (roll runs the syncs of Elastic-managed `postgresql` and `s3`
+  connectors, on demand and on their schedules, as Elastic Cloud runs native connectors:
+  architecture.md "Connectors"; self-managed connectors are left to the tenant's connector
+  service; watches fire on the cluster's job scheduler and wake a sleeping
   cluster; `http` inputs and webhooks reach public addresses only; email, Slack, PagerDuty and
   Jira actions are simulated but never sent); ML jobs/datafeeds/trained models, logstash pipelines, searchable
   snapshots, migration, SSL certificates and streams keep their stored objects, validation,

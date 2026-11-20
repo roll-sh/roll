@@ -99,6 +99,10 @@ pub struct SearchArgs {
     /// Let `s3` snapshot repositories reach private addresses (local development with MinIO).
     #[arg(long = "search-repository-allow-private", env = "ROLL_SEARCH_REPOSITORY_ALLOW_PRIVATE", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
     pub search_repository_allow_private: bool,
+    /// Let connectors reach databases and buckets at private addresses (local development only:
+    /// a tenant could otherwise point one at the node's own network).
+    #[arg(long = "search-connectors-allow-private", env = "ROLL_SEARCH_CONNECTORS_ALLOW_PRIVATE", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
+    pub search_connectors_allow_private: bool,
     /// Let inference endpoints reach private addresses (local development with a model server
     /// on this machine, tests).
     #[arg(long = "search-inference-allow-private", env = "ROLL_SEARCH_INFERENCE_ALLOW_PRIVATE", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
@@ -170,6 +174,9 @@ impl Search {
         cfg.deleted_retention = Duration::from_secs(args.search_deleted_retention_days.saturating_mul(86_400));
         cfg.default_repository = Some(args.search_default_repository.trim().to_string()).filter(|n| !n.is_empty());
         cfg.person_caps = search_control::store::Caps { clusters: args.search_max_clusters_per_person.into(), always_on: args.search_max_always_on_per_person.into() };
+        if args.search_connectors_allow_private {
+            cfg.node_settings.push((search_control::CONNECTORS_ALLOW_PRIVATE.to_string(), "true".to_string()));
+        }
         cfg.audit.retention = Duration::from_secs(args.search_audit_retention_days.max(1) * 86_400);
         cfg.audit.max_bytes = args.search_audit_max_mb.max(1) << 20;
         if args.search_repository_allow_private {

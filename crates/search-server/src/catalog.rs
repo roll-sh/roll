@@ -95,6 +95,8 @@ pub struct ClusterSpec {
     pub ip_allowlist: crate::allow::IpAllowlist,
     /// Its id in the control plane's catalog, when it has one (`search_es::ClusterConfig::catalog_id`).
     pub catalog_id: Option<String>,
+    /// Who it belongs to (`search_es::ClusterConfig::owner`), when known.
+    pub owner: Option<String>,
     /// The parent's catalog id when the cluster is a branch (`search_es::ClusterConfig::branch_of`).
     pub branch_of: Option<String>,
 }
@@ -114,6 +116,7 @@ impl ClusterSpec {
             max_resident_bytes: None,
             ip_allowlist: Default::default(),
             catalog_id: None,
+            owner: None,
             branch_of: None,
         }
     }

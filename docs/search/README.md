@@ -172,8 +172,12 @@ are then paused too (put them again to resume them).
   `step_info` that says why (one already waiting when the branch was made keeps the parent's).
 - Watches are inactive (`status.state.active: false`, as `_deactivate` leaves them), so a
   webhook or email isn't sent twice. Activating one is the branch owner's decision.
-- Connectors are recorded too, for syncs that read a source with stored credentials (#318) to
-  stay paused on the branch.
+- Connectors stay paused: a sync reads its source with the parent's stored credentials, so no
+  job of an inherited connector becomes due or starts on the branch (one already waiting stays
+  `pending`, and its schedule makes none). Putting the connector again, or writing its
+  configuration, makes it the branch's own, and its syncs run from then on, as an SLM policy
+  put again does. The parent's credentials don't come along: the branch gives them again in
+  that write (or later), since sealed values are bound to the cluster they were written on.
 - ILM, ISM, data stream lifecycles, transforms and rollups work inside the branch's own indices
   and keep running. A step of theirs that writes to an inherited repository is refused like
   any write there, and ILM's `cleanup-snapshot` leaves a snapshot in one alone (it is the
