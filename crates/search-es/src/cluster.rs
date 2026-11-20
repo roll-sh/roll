@@ -123,6 +123,10 @@ pub struct ClusterConfig {
     /// Where the cluster's security audit entries go ([`crate::xpack::security::audit`]);
     /// `None`: it records none.
     pub audit: Option<crate::xpack::security::audit::AuditLog>,
+    /// The node's embedding pool, which runs `multilingual-e5-small` for the `elasticsearch`
+    /// inference service ([`crate::xpack::inference::local`]); `None`: E5 endpoints answer as
+    /// on a cluster without ML nodes.
+    pub embedder: Option<std::sync::Arc<dyn crate::xpack::inference::local::Embedder>>,
 }
 
 impl ClusterConfig {
@@ -141,6 +145,7 @@ impl ClusterConfig {
             catalog_id: None,
             file_service_tokens: false,
             audit: None,
+            embedder: None,
         }
     }
 

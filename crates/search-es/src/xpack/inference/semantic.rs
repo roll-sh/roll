@@ -92,7 +92,8 @@ impl ModelSettings {
             TaskType::TextEmbedding | TaskType::Embedding => Some(ModelSettings {
                 service: Some(ep.service.clone()),
                 task: ep.task,
-                dimensions: ss.get("dimensions").and_then(Value::as_i64),
+                // E5's are known without asking it (`MultilingualE5SmallModel`).
+                dimensions: ss.get("dimensions").and_then(Value::as_i64).or_else(|| super::services::builtin::is_e5(ep).then_some(super::services::builtin::E5_DIMS)),
                 similarity: Some(ss.get("similarity").map(|v| v.to_es_string()).unwrap_or_else(|| "cosine".into())),
                 element_type: Some(
                     ss.get("element_type").or_else(|| ss.get("embedding_type")).map(|v| v.to_es_string()).map(|t| match t.as_str() {

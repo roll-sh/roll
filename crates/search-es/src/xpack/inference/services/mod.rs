@@ -426,7 +426,7 @@ impl Service {
             Service::DeepSeek => deepseek::infer(cluster, ep, req).await,
             Service::HuggingFace => huggingface::infer(cluster, ep, req).await,
             Service::Custom => custom::infer(cluster, ep, req).await,
-            Service::Elasticsearch => Err(builtin::infer_error(ep, req)),
+            Service::Elasticsearch => builtin::infer(cluster, ep, req).await,
             Service::Test(k) => k.infer(ep, req),
         }
     }

@@ -12,6 +12,11 @@
 //! [`Meter::count_requests`] by every metering pass; each request is billed once, also when its
 //! cluster unloaded in between.
 //!
+//! Inference is billed by the CPU time it took: the node's embedding pool measures each job's
+//! thread CPU time (`search_server::embed`), and every metering pass hands each cluster's to
+//! [`Meter::count_inference`], recorded with the interval's requests (milliseconds, rounded up
+//! per pass so no cluster's work is lost to rounding).
+//!
 //! Request metrics, slow log entries and search analytics (`search_server::Node::take_observations`)
 //! go to the catalog's rings with the same pass ([`Meter::observe`]): nothing per cluster runs for them
 //! either, and a cluster's history stays in the catalog wherever it loads next.
@@ -129,6 +134,8 @@ struct State {
     loaded: HashMap<String, Resident>,
     /// Requests counted since the last sample, by cluster name.
     requests: HashMap<String, i64>,
+    /// Inference CPU time since the last sample, by cluster name.
+    inference: HashMap<String, std::time::Duration>,
     /// Clusters whose figures (indices, docs, stored bytes) should be refreshed.
     dirty: HashSet<String>,
     /// Index counts seen when clusters unloaded, for the next refresh.
@@ -153,6 +160,11 @@ impl Meter {
         *self.state.lock().requests.entry(cluster.to_string()).or_default() += n;
     }
 
+    /// CPU time the node's embedding pool spent on `cluster`'s inputs.
+    pub fn count_inference(&self, cluster: &str, cpu: std::time::Duration) {
+        *self.state.lock().inference.entry(cluster.to_string()).or_default() += cpu;
+    }
+
     pub fn is_loaded(&self, cluster: &str) -> bool {
         self.state.lock().loaded.contains_key(cluster)
     }
@@ -168,18 +180,21 @@ impl Meter {
     /// Accounts the rest of a cluster's loaded time and marks it for a figures refresh.
     /// `resident` is its size measured now.
     pub async fn on_unloading(&self, cluster: &str, at_ms: i64, indices: Option<i64>, resident: Option<i64>) -> anyhow::Result<()> {
-        let (r, requests) = {
+        let (r, requests, inference) = {
             let mut st = self.state.lock();
             let r = st.loaded.remove(cluster);
             st.dirty.insert(cluster.to_string());
             if let Some(n) = indices {
                 st.indices.insert(cluster.to_string(), n);
             }
-            (r, st.requests.remove(cluster).unwrap_or(0))
+            (r, st.requests.remove(cluster).unwrap_or(0), st.inference.remove(cluster).map_or(0, ms))
         };
-        let Some(r) = r else { return Ok(()) };
+        let Some(r) = r else {
+            // Counted after its last interval: billed on its own.
+            return self.record(cluster, at_ms, 0, requests, inference, None).await;
+        };
         let seconds = ((at_ms - r.since).max(0) + 999) / 1000;
-        self.record(cluster, at_ms, seconds, requests, larger(r.bytes, resident)).await
+        self.record(cluster, at_ms, seconds, requests, inference, larger(r.bytes, resident)).await
     }
 
     /// One metering interval: accounts whole loaded seconds and the requests counted since the
@@ -193,27 +208,35 @@ impl Meter {
         };
         let measured: HashMap<String, i64> = instances.iter().map(|(n, c)| (n.clone(), resident_bytes(c))).collect();
         drop(instances);
-        let work: Vec<(String, i64, i64, Option<i64>)> = {
+        let work: Vec<(String, i64, i64, i64, Option<i64>)> = {
             let mut st = self.state.lock();
-            let State { loaded, requests, .. } = &mut *st;
+            let State { loaded, requests, inference, .. } = &mut *st;
             let mut out = Vec::new();
             for (name, r) in loaded.iter_mut() {
                 let seconds = (at_ms - r.since).max(0) / 1000;
                 r.since += seconds * 1000;
                 let now = measured.get(name).copied();
-                out.push((name.clone(), seconds, requests.remove(name).unwrap_or(0), larger(r.bytes, now)));
+                out.push((name.clone(), seconds, requests.remove(name).unwrap_or(0), inference.remove(name).map_or(0, ms), larger(r.bytes, now)));
                 if now.is_some() {
                     r.bytes = now;
                 }
             }
-            // Requests of clusters that unloaded since (counted after their last interval).
+            // Requests and inference of clusters that unloaded since (counted after their last
+            // interval).
+            let mut rest: HashMap<String, (i64, i64)> = HashMap::new();
             for (name, n) in requests.drain() {
-                out.push((name, 0, n, None));
+                rest.entry(name).or_default().0 = n;
+            }
+            for (name, cpu) in inference.drain() {
+                rest.entry(name).or_default().1 = ms(cpu);
+            }
+            for (name, (n, cpu)) in rest {
+                out.push((name, 0, n, cpu, None));
             }
             out
         };
-        for (name, seconds, requests, bytes) in &work {
-            self.record(name, at_ms, *seconds, *requests, *bytes).await?;
+        for (name, seconds, requests, inference_ms, bytes) in &work {
+            self.record(name, at_ms, *seconds, *requests, *inference_ms, *bytes).await?;
         }
         let mut st = self.state.lock();
         let mut refresh: Vec<(String, bool)> = st.dirty.drain().map(|n| (n, true)).collect();
@@ -252,16 +275,21 @@ impl Meter {
 
     /// `resident`: the measured size over the interval; without a measurement (a cluster the
     /// meter can't see), its base plus stored bytes.
-    async fn record(&self, name: &str, at_ms: i64, seconds: i64, requests: i64, resident: Option<i64>) -> anyhow::Result<()> {
-        if seconds == 0 && requests == 0 {
+    async fn record(&self, name: &str, at_ms: i64, seconds: i64, requests: i64, inference_ms: i64, resident: Option<i64>) -> anyhow::Result<()> {
+        if seconds == 0 && requests == 0 && inference_ms == 0 {
             return Ok(());
         }
         // Deleted meanwhile: nothing to bill.
         let Some(c) = self.store.by_name(name).await? else { return Ok(()) };
         let loaded_bytes = if seconds == 0 { 0 } else { resident.unwrap_or_else(|| LOADED_BASE_BYTES.saturating_add(c.stored_bytes)) };
-        let sample = UsageSample { at: at_ms / 1000, seconds, loaded_bytes, requests };
+        let sample = UsageSample { at: at_ms / 1000, seconds, loaded_bytes, requests, inference_ms };
         self.store.record_usage(&c.id, &sample).await
     }
+}
+
+/// Milliseconds, rounded up.
+fn ms(d: std::time::Duration) -> i64 {
+    d.as_micros().div_ceil(1000).min(i64::MAX as u128) as i64
 }
 
 fn larger(a: Option<i64>, b: Option<i64>) -> Option<i64> {

@@ -1163,7 +1163,7 @@ Elasticsearch's (headers, `encoding_format: base64`, `n: 1`, `stream_options`).
 | `deepseek` | `completion`, `chat_completion` | `https://api.deepseek.com/chat/completions` or the endpoint's `url` |
 | `hugging_face` | `text_embedding`, `sparse_embedding`, `rerank`, `completion`, `chat_completion` | the endpoint's `url`: an Inference Endpoint, Text Embeddings Inference or Text Generation Inference server (`{"inputs": …}`, `{"texts": …, "query": …}`, OpenAI-shaped chat) |
 | `custom` | `text_embedding`, `sparse_embedding`, `rerank`, `completion` | Elasticsearch 9's generic service: `url`, `headers`, `query_parameters` and a `request` template filled from `${input}`, `${query}`, `${top_n}`, `${return_documents}`, `${input_type}` (through `input_type.translation`), the task settings' `parameters` and the endpoint's `secret_parameters`; `response.json_parser` JSON paths per task type; `batch_size`. Templates reach only the endpoint's own secrets, and the URL and query parameters are filled only from what the endpoint's manager stored (its secrets and stored `parameters`), never from a caller's per-request `task_settings`, so a caller can't send the endpoint's secrets to a host of its choosing. Not supported: `response.error_parser` (errors are read the OpenAI way). Like Elasticsearch, `_services` doesn't list it |
-| `elasticsearch` | (needs ML nodes) | the three preconfigured endpoints (`.elser-2-elasticsearch`, `.multilingual-e5-small-elasticsearch`, `.rerank-v1-elasticsearch`) are listed, and running them or creating an endpoint of the service answers what a cluster without ML nodes answers (captured: 429, `Could not start deployment because no ML nodes with sufficient capacity were found`; such an endpoint is stored first, as there). roll never makes up their output |
+| `elasticsearch` | `text_embedding` (E5); the rest needs ML nodes | the three preconfigured endpoints (`.elser-2-elasticsearch`, `.multilingual-e5-small-elasticsearch`, `.rerank-v1-elasticsearch`) are listed. E5 runs on the node ("E5 on the node" below): the preconfigured endpoint, and endpoints created with `model_id` `.multilingual-e5-small` or `.multilingual-e5-small_linux-x86_64`. ELSER, the reranker and other trained models answer what a cluster without ML nodes answers (captured: 429, `Could not start deployment because no ML nodes with sufficient capacity were found`; such an endpoint is stored first, as there), and so does E5 on a node whose operator turned it off. roll never makes up their output |
 
 Creating and updating an endpoint calls the service once (`how big`, as Elasticsearch's model
 validators do), which also learns a text embedding model's dimensions and similarity;
@@ -1208,7 +1208,95 @@ Left: `alibabacloud-ai-search`, `watsonxai` (an IBM Cloud IAM token flow), `amaz
 `openshift_ai`; Bedrock's `chat_completion` and streamed completions; Azure OpenAI's and OpenAI's
 OAuth2 client credentials; Vertex AI's Model Garden providers; Jina AI's and OpenAI's multimodal
 `embedding` task; `custom`'s `error_parser`. Out of scope: `elastic` (the Elastic Inference
-Service needs Elastic Cloud credentials) and running ELSER or E5 models on the cluster.
+Service needs Elastic Cloud credentials), and running ELSER (its weights are under Elastic's
+terms) or the Elastic reranker on the cluster; an open sparse model and an open reranker are
+follow-ups.
+
+### E5 on the node
+
+roll runs `intfloat/multilingual-e5-small` (MIT, 384 dimensions, about 100 languages) itself, as
+Elasticsearch 9.5.5 runs its `.multilingual-e5-small` deployment, so `semantic_text` with
+`inference_id: .multilingual-e5-small-elasticsearch`, `_inference/text_embedding/.multilingual-e5-small-elasticsearch`
+and the clients and YAML tests that use them work unchanged, with no provider key
+(`crates/search-embed`: Hugging Face's `tokenizers` and the BERT encoder in Rust on the CPU, its
+products through `gemm`; no Python, no GPU). Checked against a private Elasticsearch 9.5.5 with
+an ML node on Linux x86-64 deploying both of the model's builds:
+
+- Prefixes, the model's `prefix_strings`: `input_type` `ingest` puts `passage: ` before each
+  input, `search` puts `query: `, `classification`, `clustering`, `unspecified` and none put
+  nothing (in any case: `INGEST` is `ingest`). `semantic_text` embeds documents as `ingest` and its
+  `semantic`, `match` and `knn` queries as `search`.
+- Tokens: XLM-RoBERTa's (`tokenizer.json` of the pinned revision), trailing whitespace dropped
+  first as Elasticsearch's tokenizer drops it, `<s>` and `</s>` around them, cut to 512
+  (`truncate: first`): a longer input is embedded from its first 510 tokens, no error. Each input
+  is embedded on its own (Elasticsearch's answers don't depend on what else is in the call
+  either: checked).
+  `semantic_text` chunks first, with the endpoint's default sentence chunking (250 words, one
+  sentence of overlap), so chunks stay under the cut.
+- The model build: Elasticsearch deploys the 8-bit `.multilingual-e5-small_linux-x86_64` on
+  Linux x86-64 ML nodes and the float `.multilingual-e5-small` everywhere else. roll runs the
+  float build on every platform: its embeddings equal that build's (every fixture case to a
+  cosine of 1.000000), and against the x86-64 build they agree as well as Elasticsearch's own
+  two builds agree with each other (numbers below). The 8-bit build is reproduced too
+  (`search_embed::quant` and `model.rs`: Elastic's selective dynamic quantization layer by
+  layer, read from the build's TorchScript code and constants; the 8-bit weights derived from
+  the MIT weights with the same observers give its scales and weights exactly; activations
+  quantized per call to `quint8` over `[0, 127]`, fbgemm's rounding), but it isn't used yet: its
+  activations are rounded to 7 bits per call, so where a float operation before them rounds
+  differently from Elasticsearch's (MKL's summation order) a value lands on the other side of a
+  step, and a few inputs then agree only to 0.993. It becomes the default on x86-64 once every
+  case reaches 0.999.
+- Embeddings: the mean of the last hidden states over every token, `<s>` and `</s>` included,
+  normalized to length 1, as 384 floats; `model_settings` `{"service":"elasticsearch",
+  "task_type":"text_embedding","dimensions":384,"similarity":"cosine","element_type":"float"}`,
+  recorded when the first document is embedded.
+- Answers: `{"text_embedding":[{"embedding":[…]}]}`; `GET _inference` lists the endpoint with
+  `model_id` `.multilingual-e5-small`, the build roll runs (Elasticsearch on a Linux x86-64 ML
+  node names `_linux-x86_64`); `_inference/_services` is unchanged. An endpoint created with
+  either `model_id` runs the float build. Creating an
+  endpoint needs `num_allocations` or `adaptive_allocations` and refuses other settings, as there.
+  Past a cluster's queue: 429 `es_rejected_execution_exception` (`inference process queue is full.
+  Unable to execute command`, what a deployment with a full queue answers); past the request's
+  `timeout`: 408 (`timeout [30s] waiting for inference result`).
+- `crates/search-es/tests/e5.rs` replays the REST flows against Elasticsearch's answers
+  (`tests/fixtures/e5/es-9.5.5.json`) and checks what reaches the model;
+  `crates/search-embed/tests/agreement.rs` (opt-in: `ROLL_E5_WEIGHTS=<dir with the pinned
+  files>`) embeds the texts of `tests/fixtures/e5-es-9.5.5.json` and compares with the vectors
+  Elasticsearch answered (64 cases: 17 short texts in 12 languages, each with no `input_type`,
+  `ingest` and `search`; long passages in English, Japanese and German; inputs of 508 to 514
+  tokens and far over 512). roll's float build against Elasticsearch's float build: every case
+  at cosine 1.000000 (identical to six digits). Against the x86-64 8-bit deployment: roll's
+  float build mean 0.994716, lowest 0.990233, the same as Elasticsearch's own float build
+  against it; roll's 8-bit reproduction mean 0.999064, lowest 0.993876, 35 of 64 cases
+  identical to six digits.
+
+On a node serving many tenants: one pool per node (`--search-embed-workers`, a third of the CPUs
+by default, `--search-embed-cpus` to pin them), clusters served in turns (jobs of 8 inputs,
+round-robin across clusters), at most `--search-embed-queue` inputs (4,096) queued per cluster,
+2,048 inputs per call and 1,048,576 characters per input (400 past either), the model's memory
+counted against the node's memory budget, and each cluster billed the CPU time its inputs took.
+The weights are the operator's: fetched once per node from the pinned revision (or a mirror,
+`--search-embed-url`) and checked by SHA-256, or read from `--search-embed-dir` on air-gapped
+nodes; never from a URL a tenant chooses. Loaded on first use, dropped after
+`--search-embed-idle` seconds without inputs. `--search-embed-model off` turns it off (the
+endpoint then answers as without ML nodes). README, "Run it".
+
+Differences: on Linux x86-64 Elasticsearch's preconfigured endpoint runs the 8-bit build and
+roll the float build (above): their vectors differ by what Elasticsearch's two builds differ by,
+so an index embedded by one and searched through the other ranks the same way to within that.
+A deployment
+on Elasticsearch caches answers by input text (`cache_size`); roll recomputes them. `GET
+_inference` prints an endpoint's `service_settings` as created
+(Elasticsearch adds `num_allocations`, the deployment's current count, once it has started);
+an `input_type` Elasticsearch's parser rejects (`internal_ingest`, a misspelling) is taken as no
+prefix instead of a 400; `_stream` on the endpoint answers roll's 400 for any service that can't
+stream (Elasticsearch answers a 405 error event); there is no deployment to start, stop or
+scale (`_ml/trained_models`), and a cold node answers its first call after loading the model
+(about a second) where Elasticsearch may answer 408 while its deployment starts.
+`semantic_text` keeps the float embeddings it was given in `_inference_fields`, where
+Elasticsearch 9.5.5 returns them rebuilt from its index at bfloat16 precision (the same vector to
+a cosine of 0.99999). Performance against Elasticsearch's deployment on the same CPUs:
+PERF_NUMBERS.
 
 YAML: `platinum/inference` 22 of the 23 tests that pass on Elasticsearch (the last needs the
 `random_reranker` retriever). The `inference` extended suite runs the

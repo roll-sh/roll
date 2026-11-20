@@ -863,6 +863,7 @@ pub async fn run(api: &Api, as_json: bool, cmd: Search) -> anyhow::Result<()> {
                     println!("  loaded         {:>10.1} h", f(&u["loaded_seconds"]) / 3600.0);
                     println!("  memory         {:>10.4} GiB-h   ${:.4}", f(&u["loaded_gib_hours"]), f(&cost["memory_usd"]));
                     println!("  requests       {:>10}         ${:.4}", s(&u["requests"]), f(&cost["requests_usd"]));
+                    println!("  inference      {:>10.1} CPU-s   ${:.4}", f(&u["inference_cpu_seconds"]), f(&cost["inference_usd"]));
                     println!("  storage        {:>10.4} GiB-mo  ${:.4}  (now {})", f(&u["stored_gib_months"]), f(&cost["storage_usd"]), bytes(f(&u["stored_bytes"])));
                     println!("  total                           ${:.4}", f(&cost["total_usd"]));
                     println!("  Elastic Cloud                   ${:.2}", f(&cost["elastic_cloud_usd"]));
