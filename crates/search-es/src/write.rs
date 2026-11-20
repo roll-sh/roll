@@ -572,16 +572,18 @@ pub async fn prepare_checked(
             continue;
         }
         crate::search::index_time::apply(&cluster.scripts, &st, &idx.mapping, value, &mut parsed)?;
-        // `dense_vector` fields without `dims` take them from their first vector.
+        // `dense_vector` and `rank_vectors` fields without `dims` take them from their first
+        // vector.
         let mut dims: Vec<(String, i64)> = Vec::new();
         for f in parsed.fields.iter().chain(parsed.nested.iter().flat_map(|n| n.fields.iter())) {
             let n = match &f.value {
                 crate::document::FieldValue::DenseVector(v) => v.len() as i64,
                 crate::document::FieldValue::ByteVector(v) => v.len() as i64,
+                crate::document::FieldValue::RankVectors { width, .. } => *width as i64,
                 _ => continue,
             };
             if let Some(crate::mapping::MapperRef::Field(fm)) = idx.mapping.lookup(&f.name)
-                && fm.ty == "dense_vector"
+                && matches!(fm.ty, "dense_vector" | "rank_vectors")
                 && fm.raw("dims").is_none()
                 && !dims.iter().any(|(p, _)| p.as_str() == &*f.name)
             {
