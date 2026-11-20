@@ -840,6 +840,9 @@ async fn credentials_are_kept_out_of_what_agents_write() {
     assert!(!refused.to_string().contains(&gh), "never the value");
     let (_, _, projects) = d.http(OPERATOR, Method::GET, "/v1/workspace/projects", None).await;
     assert_eq!(projects.as_array().map(Vec::len), Some(0), "nothing was sent");
+    // What a tool publishes (a status page's incident) is held to the same rule, whatever its product.
+    let public = d.tool(OPERATOR, "apps_create_incident", json!({ "project": "prj_x", "title": "Login is down", "text": format!("rotating {gh}") })).await;
+    assert_eq!((public["isError"].as_bool(), public["structuredContent"]["kind"].as_str()), (Some(true), Some("a GitHub token")), "{public}");
     // roll's own token, checksummed, anywhere but roll secrets.
     let leaked = d.tool(&agent, "postgres_delete_project", json!({ "project": agent })).await;
     assert_eq!(leaked["structuredContent"]["kind"], "a roll token", "{leaked}");
