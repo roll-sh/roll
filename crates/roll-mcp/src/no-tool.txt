@@ -148,7 +148,7 @@ DELETE /v1/secrets/projects/{project}/outside-databases/{id}                   a
 PATCH /v1/secrets/projects/{project}/outside-databases/{id}                    an outside integration's setup: an admin's, with its credentials
 POST /v1/secrets/projects/{project}/outside-databases/{id}/rotate-admin        an outside integration's setup: an admin's, with its credentials
 DELETE /v1/secrets/projects/{project}/placeholders                             no tool yet: revoking placeholders (#520; checked when it lands)
-GET /v1/secrets/projects/{project}/placeholders                                no tool yet: a project's placeholders (#520; checked when it lands)
+GET /v1/secrets/projects/{project}/placeholders                                no tool yet: secrets_list_placeholders maps it once #520 lands (never a placeholder or value)
 DELETE /v1/secrets/projects/{project}/placeholders/{id}                        no tool yet: revoking a placeholder (#520; checked when it lands)
 POST /v1/secrets/projects/{project}/restore                                    a person's call (a project's secrets put back from a backup)
 POST /v1/secrets/projects/{project}/rotators                                   an outside integration's setup: an admin's, with its credentials
@@ -203,8 +203,6 @@ DELETE /v1/tasks/topics/{name}/endpoints                                       c
 POST /v1/tasks/topics/{name}/endpoints                                         covered by tasks_set_topic (a topic's endpoints, whole)
 PUT /v1/workspace/projects/{id}/homes/{product}/{ref}                          an admin's: where a product's resource lives for the project (#501)
 GET /v1/workspace/projects/{id}/invites                                        a person's call: invites are a signed-in person's (#501)
-POST /v1/workspace/projects/{id}/invites                                       a person's call: inviting someone into a project (#501)
 DELETE /v1/workspace/projects/{id}/invites/{invite}                            a person's call: invites are a signed-in person's (#501)
 DELETE /v1/workspace/projects/{id}/members/me                                  a person's call: leaving a project is the person's own (#501)
-PATCH /v1/workspace/projects/{id}/members/{user}                               a person's call: a member's role (#501)
 GET /v1/workspace/roles                                                        no tool yet: the roles a project member can have (#501)
