@@ -554,7 +554,7 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
           {(service.source.kind === "repo" || service.source.kind === "git") && (
             <label className="flex flex-col gap-1 text-[12px] text-muted">
               Revision
-              <input value={rev} onChange={(e) => setRev(e.target.value)} placeholder="the branch's head" spellCheck={false} className={`${input} w-56 font-mono text-[12px]`} />
+              <input value={rev} onChange={(e) => setRev(e.target.value)} placeholder="the branch's head; or a branch, tag or commit" spellCheck={false} className={`${input} w-56 font-mono text-[12px]`} />
             </label>
           )}
           {service.source.kind === "image" && (
