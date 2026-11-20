@@ -223,7 +223,7 @@ pub struct LogDrain {
 pub const DRAIN_FORMATS: [&str; 3] = ["ndjson", "otlp", "syslog"];
 
 /// What a drain can be sent.
-pub const DRAIN_SOURCES: [&str; 4] = ["runtime", "http", "build", "audit"];
+pub const DRAIN_SOURCES: [&str; 6] = ["runtime", "http", "build", "audit", "traces", "metrics"];
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct NotifyTarget {
@@ -1575,6 +1575,12 @@ pub struct Environment {
     /// HTML of its own in every page (Netlify's snippet injection).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub snippets: Vec<Snippet>,
+    /// Its runtime config (Vercel's Edge Config): values its instances read at `ROLL_CONFIG_URL`
+    /// without a deploy, and the version they're at.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config_version: Option<i64>,
     /// Its deploy freeze, and whether it's on now ([`crate::freeze`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub freeze: Option<crate::freeze::Freeze>,
@@ -2589,6 +2595,13 @@ pub fn secret_ref_env(v: &str) -> Option<Result<String>> {
         Some((env, key)) if !env.is_empty() && !key.is_empty() && !key.ends_with('/') => Some(Ok(env.to_string())),
         _ => bad("a roll:// reference is roll://ENV/KEY or roll://ENV/folder/KEY"),
     }
+}
+
+/// Whether a `roll://` reference's folder may be read by `service`: one under `/services/<id>`
+/// (where "Move to roll secrets" keeps a service's own) only by that service.
+pub fn secret_ref_folder_ok(v: &str, service: &str) -> bool {
+    let parts: Vec<&str> = v.strip_prefix("roll://").unwrap_or(v).split('/').collect();
+    !(parts.len() >= 4 && parts[1] == "services" && parts[2] != service)
 }
 
 /// An environment variable's name: `[A-Za-z_][A-Za-z0-9_]*`, at most 128 characters.

@@ -552,7 +552,10 @@ commands:
 Arguments are checked against each tool's JSON Schema (closed: unknown arguments are refused).
 Every tool also takes `approval` (see [Approvals](#approvals)). Creating tools take
 `workspace_project`, the workspace project the new resource goes in; a token limited to projects
-needs it. Tools for products that are off aren't listed. Tools for search, secrets, apps and
+needs it. A `null` argument is left out, as if it weren't sent (some clients fill every field they
+don't use with one). A tool with fields its route clears (an environment's `egress` or `routes`, a
+domain's redirect, a queue's rate limit) takes `clear`, a list of those fields' names: only a field
+named there is sent as `null`. Tools for products that are off aren't listed. Tools for search, secrets, apps and
 previews are listed once those products are on.
 
 | tool | what it does | route |
