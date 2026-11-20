@@ -5131,6 +5131,9 @@ work found). First what can be built now:
 6. **The audit chain under concurrency, and a sealed-start rolld test** (building, `feature/roll-secrets-chain-load`).
 7. **`Reference::parse` exact** (#451, gated green; batch 5): the trim bypass.
 8. **roll code's secrets out of `Debug`, and its signing secrets sealed** (#455, gated).
+9. **A product sync's maker can pause it** (S; #304's rule was admin for every pause; gating
+   `fix/secrets-sync-pause-rights`): pausing or resuming needs what running the kind needs (`reveal`
+   for a product's kind), and resuming what a cut-off paused stays admin only.
 
 Waiting on another thread or on a merge:
 - **Batch 5:** #407, #430, #440; #277, #397, #432; #357, #330 (being levelled and gated); the strict
