@@ -1221,6 +1221,13 @@ async fn earlier_pushes_stay_reachable_at_their_own_urls() {
     assert_eq!(earlier, ["cs_8d", "cs_8c", "cs_8b"]);
     assert!(view.earlier.iter().all(|x| x.service == "web" && x.url != view.url.clone().unwrap()));
     assert!(e.apps.removed.lock().contains(&(p.id.clone(), "web@cs_8a".into())), "the oldest's container goes");
+    // Its link says it's gone, with the way to the latest (not a 404 that reads as broken).
+    let label = |url: &str| url.split("://").nth(1).unwrap().split('.').next().unwrap().to_string();
+    let b = view.earlier.iter().find(|x| x.revision == "cs_8b").unwrap();
+    let a = label(&b.url).replacen("-8b-", "-8a-", 1);
+    let web = view.services.iter().find(|x| x.name == "web").map(|x| x.url.clone());
+    let gone = roll_previews::store::GonePush { preview: p.id.clone(), service: "web".into(), revision: "cs_8a".into(), current_url: web };
+    assert_eq!(e.engine.store.gone_push(&a).unwrap(), Some(gone), "that service's latest push");
     // An earlier push runs its own head on its own host.
     let (t, _) = e.engine.env(&p.id, "web@cs_8c").await.unwrap();
     assert_eq!(t.revision, "cs_8c");
