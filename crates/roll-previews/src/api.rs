@@ -96,11 +96,15 @@ impl Visible {
 /// projects are), so they can't learn it exists. The screenshot's signed link stays public.
 async fn scoped(AxState(e): S, mut req: axum::extract::Request, next: axum::middleware::Next) -> Response {
     let who = req.extensions().get::<roll_auth::SignedIn>().filter(|u| !u.admin).map(|u| u.user.clone());
+    // roll-access decided a person's request by their role (their session's grant, or their token's,
+    // is beside it). Without one it came another way (in process, past the gate): only the
+    // projects they own, so reaching this router directly never widens a member's role.
+    let decided = req.extensions().get::<roll_auth::Grant>().is_some();
     let visible = match who {
         None => Visible(None),
         Some(user) => {
             let e2 = e.clone();
-            match blocking(e2, move |e| e.projects_of(&user)).await {
+            match blocking(e2, move |e| if decided { e.projects_of(&user) } else { e.projects_owned(&user) }).await {
                 Ok(ids) => Visible(Some(ids)),
                 Err(err) => return err.into_response(),
             }

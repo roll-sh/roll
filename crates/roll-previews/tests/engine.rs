@@ -1166,9 +1166,10 @@ async fn a_signed_in_person_sees_only_their_own_projects_previews() {
         .body(axum::body::Body::from(json!({ "project": e.project, "repo": "acme/web", "branch": "main" }).to_string()))
         .unwrap();
     assert_eq!(roll_previews::api::router(e.engine.clone()).oneshot(req).await.unwrap().status().as_u16(), 400);
-    // A member (a viewer here) passes previews' own check: what their role lets them do there,
-    // roll-access decides before the request gets here (roll-access/tests/access.rs::
+    // A member (a viewer here) passes previews' own check once roll-access decided the request by
+    // their role (their session's grant beside it; roll-access/tests/access.rs::
     // a_members_role_decides_what_they_do_to_a_preview: a viewer reads it, never its credentials).
+    // Without a decision (past the gate), only an owner does.
     struct Addresses;
     impl roll_workspace::People for Addresses {
         fn person(&self, user: &str) -> Option<roll_workspace::Person> {
@@ -1179,7 +1180,11 @@ async fn a_signed_in_person_sees_only_their_own_projects_previews() {
     e.ws.set_people(std::sync::Arc::new(Addresses));
     let (_, url) = e.ws.invite(&roll_workspace::Actor::operator(), &e.project, "v@example.com", "viewer", None).unwrap();
     e.ws.accept("usr_v", url.split("token=").nth(1).unwrap(), None).unwrap();
-    assert_eq!(call(Some(("usr_v", false)), format!("/v1/previews/{}", p.id)).await.0, 200);
+    assert_eq!(call(Some(("usr_v", false)), format!("/v1/previews/{}", p.id)).await.0, 404, "no role decided");
+    let mut req = axum::http::Request::get(format!("/v1/previews/{}", p.id)).body(axum::body::Body::empty()).unwrap();
+    req.extensions_mut().insert(roll_auth::SignedIn { user: "usr_v".into(), handle: "v".into(), admin: false, code_owner: None, session: "ses_v".into() });
+    req.extensions_mut().insert(roll_auth::Grant { id: "ses_v".into(), name: "session".into(), kind: roll_auth::GrantKind::Session, scope: std::sync::Arc::new(roll_auth::scope::Scope(Vec::new())), user: Some("usr_v".into()), ask_otherwise: false });
+    assert_eq!(roll_previews::api::router(e.engine.clone()).oneshot(req).await.unwrap().status().as_u16(), 200, "decided by their role");
     // A token (no signed-in person) and an admin see it.
     assert_eq!(call(None, format!("/v1/previews/{}", p.id)).await.0, 200);
     assert_eq!(call(Some(("usr_c", true)), format!("/v1/previews/{}", p.id)).await.0, 200);

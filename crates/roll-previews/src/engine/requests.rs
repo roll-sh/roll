@@ -75,6 +75,12 @@ impl Engine {
         Ok(self.workspace.list(roll_workspace::Scope::Member(owner))?.into_iter().map(|p| p.id).collect())
     }
 
+    /// The ids of the workspace projects `owner` owns (role `owner`): all a person reaches when no
+    /// role was decided for the request (it didn't come through roll-access's gate).
+    pub fn projects_owned(&self, owner: &str) -> Result<std::collections::HashSet<String>> {
+        Ok(self.workspace.list(roll_workspace::Scope::Member(owner))?.into_iter().filter(|p| p.role.is_some_and(|r| r.as_str() == "owner")).map(|p| p.id).collect())
+    }
+
     /// A workspace project, or a 404.
     pub fn workspace_project(&self, id: &str) -> Result<roll_workspace::Project> {
         Ok(self.workspace.get(roll_workspace::Scope::All, id)?)
