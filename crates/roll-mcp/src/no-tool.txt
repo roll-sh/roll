@@ -36,11 +36,9 @@ DELETE /v1/apps/services/{id}/registry                                       ans
 PUT /v1/apps/services/{id}/registry                                          answers or sets a credential
 GET /v1/health                                                               the operator's (health, migrations, process control)
 GET /v1/info                                                                 the operator's (health, migrations, process control)
-GET /v1/kafka                                                                no tool yet: streams' overview
 * /v1/mcp                                                                    the MCP server itself
 GET /v1/mcp/toolsets                                                         the dashboard's (the connect panel's costs)
-GET /v1/nosql                                                                no tool yet: NoSQL's overview
-GET /v1/nosql/databases/{id}/alternator                                      no tool yet: a database's Alternator endpoint
+GET /v1/nosql/databases/{id}/alternator                                      answers or sets a credential (its access key, a reveal)
 POST /v1/nosql/databases/{id}/compact                                        the operator's (health, migrations, process control)
 POST /v1/nosql/databases/{id}/flush                                          the operator's (health, migrations, process control)
 POST /v1/nosql/databases/{id}/imports                                        the operator's (an SSTable backup import from storage the operator holds)
@@ -68,7 +66,6 @@ GET /v1/previews/{id}/shell/sessions/{sh}/screen                             int
 POST /v1/previews/{id}/visual/accept                                         a person's call (approving, accepting, cutting off)
 POST /v1/projects/{id}/branches/{branch}/app-role                            answers or sets a credential
 POST /v1/projects/{id}/branches/{branch}/evict                               the operator's (health, migrations, process control)
-POST /v1/projects/{id}/branches/{branch}/replicas                            no tool yet: a branch's read replica
 POST /v1/projects/{id}/decoy-roles                                           a person's call: decoys are planted by a person (#432)
 DELETE /v1/projects/{id}/decoy-roles/{role}                                  a person's call: decoys are planted by a person (#432)
 GET /v1/queues/definitions                                                   answers or sets a credential (definitions carry users' password hashes)
@@ -80,13 +77,8 @@ PUT /v1/queues/permissions/{vhost}/{user}                                    a p
 DELETE /v1/queues/users/{name}                                               a person's call (a broker user)
 PUT /v1/queues/users/{name}                                                  answers or sets a credential (a broker user's password)
 POST /v1/queues/vhosts/{vhost}/credentials                                   answers or sets a credential
-POST /v1/queues/vhosts/{vhost}/suspend                                       no tool yet: suspending a vhost
-POST /v1/queues/vhosts/{vhost}/wake                                          no tool yet: waking a vhost
-GET /v1/redis                                                                no tool yet: Redis' overview (as apps_overview)
 POST /v1/redis/databases/{id}/password                                       answers or sets a credential
-POST /v1/redis/databases/{id}/replicas                                       no tool yet: a read replica
 POST /v1/redis/databases/{id}/unload                                         the operator's (health, migrations, process control)
-DELETE /v1/redis/replicas/{id}                                               no tool yet: removing a read replica
 POST /v1/redis/replicas/{id}/unload                                          the operator's (health, migrations, process control)
 GET /v1/search/clusters/{id}/browser-keys                                    no tool yet: maps after #358 lands
 POST /v1/search/clusters/{id}/browser-keys                                   answers or sets a credential (#358)
@@ -197,13 +189,11 @@ POST /v1/secrets/projects/{project}/transit/{name}/rotate                    no 
 GET /v1/secrets/projects/{project}/unstored/{fingerprint}                    no tool yet: a found credential's kind, place and liveness, never its value (#487)
 POST /v1/secrets/projects/{project}/validity                                 a person's call: it contacts outside providers (#487)
 GET /v1/secrets/whoami                                                       the operator's (health, migrations, process control)
-GET /v1/storage                                                              no tool yet: storage's overview
 * /v1/storage/accounts/{id}                                                  an outside integration's setup: an admin's, with its credentials
-GET /v1/storage/accounts/{id}                                                no tool yet: one account (storage_list_accounts lists them)
 GET /v1/storage/api                                                          the dashboard's (the developer API's settings)
 PUT /v1/storage/api/auth                                                     answers or sets a credential
 POST /v1/storage/api/keys/rotate                                             answers or sets a credential
-POST /v1/storage/buckets/{name}/rules                                        no tool yet: a bucket's lifecycle rules
+POST /v1/storage/buckets/{name}/rules                                        a person's call: a preset can make a bucket public
 POST /v1/storage/buckets/{name}/url                                          answers or sets a credential
 GET /v1/storage/cdn                                                          an outside integration's setup: an admin's, with its credentials
 PATCH /v1/storage/cdn                                                        an outside integration's setup: an admin's, with its credentials
@@ -211,8 +201,6 @@ GET /v1/storage/cdn/worker                                                   an 
 POST /v1/storage/iam                                                         an outside integration's setup: an admin's, with its credentials
 POST /v1/storage/keys                                                        answers or sets a credential
 * /v1/storage/replication-targets/{name}                                     answers or sets a credential (a target's secret)
-GET /v1/storage/replication-targets/{name}                                   no tool yet: one replication target (never its secret)
-POST /v1/storage/roles/{name}/revoke                                         no tool yet: revoking a role's sessions (destructive)
 POST /v1/storage/roles/{name}/sessions                                       answers or sets a credential (temporary credentials)
 POST /v1/storage/session-keys/rotate                                         answers or sets a credential
 POST /v1/streams/{s}/groups/{g}/commit                                       the data plane (clients' own protocol)
@@ -221,9 +209,7 @@ POST /v1/streams/{s}/keys                                                    ans
 GET /v1/streams/{s}/topics/{t}/partitions/{p}/records                        the data plane (clients' own protocol)
 GET /v1/streams/{s}/topics/{t}/tail                                          the data plane (clients' own protocol)
 POST /v1/tasks/api-keys                                                      answers or sets a credential
-DELETE /v1/tasks/api-keys/{id}                                               no tool yet: revoking an API key (destructive)
 POST /v1/tasks/apps                                                          answers or sets a credential (an app's signing secret)
-DELETE /v1/tasks/apps/{id}                                                   no tool yet: deleting an app
 POST /v1/tasks/batch                                                         the data plane (clients' own protocol)
 POST /v1/tasks/e/{*name}                                                     the data plane (clients' own protocol)
 GET /v1/tasks/health                                                         the operator's (health, migrations, process control)
