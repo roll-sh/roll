@@ -2108,6 +2108,14 @@ async fn a_branch_runs_none_of_its_parents_jobs() {
     assert_eq!((s, v["error"]["type"].as_str()), (400, Some("illegal_argument_exception")), "{v}");
     let (s, v) = e.es(&bu, &bp, Method::DELETE, "/_snapshot/backup/base", None).await;
     assert_eq!(s, 500, "{v}");
+    let (s, v) = e.es(&bu, &bp, Method::PUT, "/_snapshot/backup/base/_clone/copy", Some(json!({"indices": "docs"}))).await;
+    assert_eq!((s, v["error"]["type"].as_str()), (500, Some("repository_exception")), "{v}");
+    // Another spelling of the parent's place is the parent's too.
+    let again = json!({"type": "s3", "settings": {"bucket": "backups", "base_path": "prod/", "endpoint": endpoint, "path_style_access": true}});
+    let (s, v) = e.es(&bu, &bp, Method::PUT, "/_snapshot/mine", Some(again)).await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = e.es(&bu, &bp, Method::PUT, "/_snapshot/mine/mine?wait_for_completion=true", Some(json!({"indices": "docs"}))).await;
+    assert_eq!((s, v["error"]["type"].as_str()), (400, Some("illegal_argument_exception")), "{v}");
 
     // SLM running on the branch neither runs the inherited policy nor applies its retention.
     let (s, v) = e.es(&bu, &bp, Method::POST, "/_slm/start", None).await;
@@ -2120,6 +2128,10 @@ async fn a_branch_runs_none_of_its_parents_jobs() {
     assert!(policy["last_failure"]["details"].as_str().unwrap_or_default().contains("inherited from the parent"), "{v}");
     assert!(policy.get("next_execution_millis").is_none(), "{v}");
     assert_eq!((&policy["stats"]["snapshots_taken"], &policy["stats"]["snapshots_failed"], &policy["stats"]["snapshot_deletion_failures"]), (&json!(0), &json!(0), &json!(0)), "{v}");
+    let (s, v) = e.es(&bu, &bp, Method::PUT, "/_slm/policy/nightly/_execute", None).await;
+    assert_eq!((s, v["error"]["type"].as_str()), (409, Some("illegal_state_exception")), "{v}");
+    // Marked once: later loads don't mark again.
+    assert!(!e.control.store.by_name("prod-dev").await.unwrap().unwrap().inherit_pending);
 
     // The watch came inactive: the webhook gets one call per execution of the parent's.
     let (_, v) = e.es(&bu, &bp, Method::GET, "/_watcher/watch/ping", None).await;
@@ -2138,6 +2150,15 @@ async fn a_branch_runs_none_of_its_parents_jobs() {
     let names: Vec<&str> = v["snapshots"].as_array().unwrap().iter().filter_map(|s| s["snapshot"].as_str()).collect();
     assert_eq!(names, ["base"], "{v}");
     assert_eq!(bucket.keys("prod/"), objects);
+
+    // A branch made before marking existed (no pending mark) keeps its jobs as its own.
+    let old = e.post(&format!("/v1/search/clusters/{id}/branches"), json!({"name": "prod-old"})).await;
+    e.control.store.set_inherit_pending("prod-old", false).await.unwrap();
+    let (ou, op) = creds(&old);
+    let (_, v) = e.es(&ou, &op, Method::GET, "/_snapshot/backup", None).await;
+    assert_eq!(v["backup"]["settings"]["readonly"], Value::Null, "{v}");
+    let (_, v) = e.es(&ou, &op, Method::GET, "/_slm/policy/nightly", None).await;
+    assert!(v["nightly"]["next_execution_millis"].is_i64() && v["nightly"].get("last_failure").is_none(), "{v}");
 }
 
 #[path = "control/cloud_repositories.rs"]

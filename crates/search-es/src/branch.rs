@@ -3,9 +3,10 @@
 //! A branch ([`crate::ClusterConfig::branch_of`]) starts from a copy of its parent's state,
 //! recurring jobs and outside storage included. Left alone, the branch would run them a second
 //! time: its SLM policies would take snapshots into, and retention would delete them from, the
-//! parent's bucket; its watches would send every webhook and email twice. So the first time a
-//! branch loads, before its scheduler starts, [`mark_inherited`] records what it inherited
-//! (a marker naming the branch, so a branch of a branch marks again) and:
+//! parent's bucket; its watches would send every webhook and email twice. So on a new branch's
+//! first load (the host passes `branch_of` only then), before its scheduler starts,
+//! [`mark_inherited`] records what it inherited (a marker naming the branch, so a branch of a
+//! branch marks again) and:
 //!
 //! - registers every repository in a tenant's bucket (`s3`, `gcs`, `azure`) read-only, as
 //!   Elastic Cloud registers another deployment's repository: listing and restoring work,
@@ -55,10 +56,11 @@ fn listed(m: &Value, key: &str, v: &str) -> bool {
     m.get(key).and_then(Value::as_array).is_some_and(|a| a.iter().any(|x| x.as_str() == Some(v)))
 }
 
-/// Whether `repo` (being registered on this cluster) points at a location the branch
-/// inherited from its parent.
+/// Whether `repo` (being registered on this cluster) reaches bucket storage the branch
+/// inherited from its parent ([`Repository::bucket_place`]: the marker and this check compare
+/// the same key, so another spelling of the parent's place is the parent's too).
 pub fn inherited_location(cluster: &Cluster, st: &ClusterState, repo: &Repository) -> bool {
-    repo.in_bucket() && marker(cluster, st).is_some_and(|m| listed(m, "repositories", &repo.location_key()))
+    repo.bucket_place().is_some_and(|place| marker(cluster, st).is_some_and(|m| listed(m, "repositories", &place)))
 }
 
 /// Whether repository `name` points at a location the branch inherited from its parent.
@@ -84,10 +86,8 @@ pub async fn mark_inherited(cluster: &Cluster) -> EsResult<()> {
         .update(move |st| {
             let mut locations: Vec<Value> = Vec::new();
             for r in st.metadata.repositories.values_mut() {
-                if !r.in_bucket() {
-                    continue;
-                }
-                locations.push(r.location_key().into());
+                let Some(place) = r.bucket_place() else { continue };
+                locations.push(place.into());
                 if !r.read_only() {
                     Arc::make_mut(r).settings.set("readonly", "true");
                 }

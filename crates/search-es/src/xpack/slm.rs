@@ -256,6 +256,9 @@ fn bump_policy(stats: &mut Map, id: &str, k: &str, by: i64) {
 /// (`None`: the policy is gone).
 async fn execute(cluster: &Cluster, id: &str, now: i64, scheduled: bool) -> Option<String> {
     let rec = cluster.state().metadata.xpack.get(POLICIES, id).cloned()?;
+    if crate::branch::paused_policy(&rec) {
+        return None;
+    }
     let p = policy_body(&rec).clone();
     let owner = rec.pointer(&["_roll", "user"]).and_then(internal::principal_of);
     let repo = str_of(&p, "repository").to_string();
@@ -450,6 +453,9 @@ pub(crate) enum Since {
     NoPolicy,
     /// No successful snapshot started at or after the time asked about.
     NotYet,
+    /// As [`Since::NotYet`], and the policy is one a branch inherited: it won't run until the
+    /// branch puts it again ([`crate::branch`]).
+    Paused,
     /// The last successful snapshot doesn't include the index.
     Without,
     Taken,
@@ -459,7 +465,9 @@ pub(crate) enum Since {
 /// `index`.
 pub(crate) fn snapshot_since(st: &ClusterState, id: &str, index: &str, since: i64) -> Since {
     let Some(rec) = st.metadata.xpack.get(POLICIES, id) else { return Since::NoPolicy };
-    let Some(last) = rec.get("last_success").filter(|l| num(l, "start_time").is_some_and(|t| t >= since)) else { return Since::NotYet };
+    let Some(last) = rec.get("last_success").filter(|l| num(l, "start_time").is_some_and(|t| t >= since)) else {
+        return if crate::branch::paused_policy(rec) { Since::Paused } else { Since::NotYet };
+    };
     let name = str_of(last, "snapshot_name");
     let repo = str_of(policy_body(rec), "repository");
     let included = st
@@ -804,6 +812,10 @@ pub async fn delete_lifecycle(ctx: &Ctx<'_>) -> EsResult<Reply> {
 pub async fn execute_lifecycle(ctx: &Ctx<'_>) -> EsResult<Reply> {
     ctx.validate_timeouts()?;
     let id = ctx.path_param("policy_id").unwrap_or_default().to_string();
+    // A policy a branch inherited would snapshot as the parent's user: put it again first.
+    if ctx.state().metadata.xpack.get(POLICIES, &id).is_some_and(crate::branch::paused_policy) {
+        return Err(EsError::new(409, "illegal_state_exception", format!("snapshot lifecycle policy [{id}]: {}", crate::branch::SLM_PAUSED)));
+    }
     match execute(ctx.cluster, &id, ctx.now_ms, false).await {
         Some(name) => Reply::ok(obj! { "snapshot_name" => name }),
         None => Err(EsError::illegal_argument(format!("no such snapshot lifecycle policy [{id}]"))),

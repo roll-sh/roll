@@ -115,9 +115,10 @@ pub struct ClusterConfig {
     /// The cluster's id in roll's catalog (`srch_…`), when it has one: how it names itself to
     /// `links`.
     pub catalog_id: Option<String>,
-    /// The parent's catalog id when this cluster is a branch: what it inherited from the parent
-    /// is marked when it first loads, so its jobs don't act on the parent's outside storage or
-    /// run twice ([`crate::branch`]).
+    /// The parent's catalog id, on a new branch's first load only: what it inherited from the
+    /// parent is marked then, so its jobs don't act on the parent's outside storage or run twice
+    /// ([`crate::branch`]). Later loads, and branches made before marking existed, have none:
+    /// their jobs are their own.
     pub branch_of: Option<String>,
     /// Read service account tokens from `<path.conf>/service_tokens` too, as Elasticsearch
     /// does. The file is the node's, so a token in it would sign in to every cluster the node

@@ -53,6 +53,7 @@ mod s3;
 mod transfer;
 pub use analyze::analyze_repository;
 pub use s3::ALLOW_PRIVATE as S3_ALLOW_PRIVATE;
+pub(crate) use cloud::AZURE_CONTAINER;
 
 /// The shard contents of this process's snapshots, by snapshot uuid and index name (one
 /// searcher per shard), and the snapshot operations running here.

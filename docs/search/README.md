@@ -143,22 +143,28 @@ them (`api::Caller`):
 `people_are_held_to_their_cluster_caps` cover it.
 
 **Branches and what they inherit.** A branch starts from a copy of its parent's state, its
-recurring jobs and outside storage included. So that it never acts as its parent, the first
-time a branch loads (before any job can run) roll marks what it inherited
-(`search_es::branch`; the control plane passes the parent's id as `ClusterConfig::branch_of`):
+recurring jobs and outside storage included. So that it never acts as its parent, a new
+branch's first load (before any job can run) marks what it inherited (`search_es::branch`).
+The catalog records a pending mark when the branch is made (`inherit_pending`), the control
+plane passes the parent's id as `ClusterConfig::branch_of` only while it is pending, and a load
+that marked clears it. Branches made before this existed have no pending mark: their jobs stay
+their own.
 
 - Repositories in a bucket the tenant named (`s3`, `gcs`, `azure`) are registered read-only, as
   Elastic Cloud registers another deployment's repository. The branch lists and restores the
   parent's snapshots there; creating, cloning and deleting snapshots, `_cleanup` and SLM
   retention are refused with Elasticsearch's read-only repository errors. Registering a
-  repository at an inherited location again keeps it read-only unless the request says
-  `readonly: false` (the owner's decision); a repository at a new location behaves as on any
-  cluster. roll's default repository (`found-snapshots`) and `fs` repositories keep their
+  repository at an inherited place again keeps it read-only unless the request says
+  `readonly: false` (the owner's decision, with the credentials sent again). A place is the
+  bucket (an `azure` container, its default when unnamed) and the `base_path` without outer
+  slashes, whatever the type or endpoint, so `prod/` is `prod`. A repository anywhere else
+  behaves as on any cluster. roll's default repository (`found-snapshots`) and `fs` repositories keep their
   contents in the cluster's own storage, which a branch has its own copy of: they stay writable,
   and the branch's snapshots and deletions there never reach the parent's.
 - SLM policies stay visible but don't run, and their retention deletes nothing:
-  `last_failure` says the policy was inherited, and `next_execution` is left out. Putting the
-  policy again makes it the branch's own.
+  `last_failure` says the policy was inherited, `next_execution` is left out and `_execute`
+  answers 409. Putting the policy again makes it the branch's own. Until then an ILM
+  `wait_for_snapshot` on one waits, and its `step_info` says why.
 - Watches are inactive (`status.state.active: false`, as `_deactivate` leaves them), so a
   webhook or email isn't sent twice. Activating one is the branch owner's decision.
 - Connectors are recorded too, for syncs that read a source with stored credentials (#318) to
