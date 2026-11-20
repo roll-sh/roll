@@ -1,10 +1,11 @@
-import { ClipboardPaste, Copy, Eye, EyeOff, FileText, Link2, Lock, LockOpen, Plus, Rocket, Trash2, Undo2 } from "lucide-react";
+import { ClipboardPaste, Copy, Eye, EyeOff, FileText, KeyRound, Link2, Lock, LockOpen, Plus, Rocket, Trash2, Undo2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { appsApi, describePending, parseEnv, toEnv, VARIABLE_NAME, type Environment, type Link, type LinkKind, type VariableSource, type Variables } from "@/lib/apps-api";
 import { KIND_LABEL, resourceKey, type ResourceView } from "@/lib/workspace-resources";
 import { useWorkspace } from "@/lib/workspace-store";
 import { btn, input, panel, primary } from "../ui";
 import { looksSecret } from "@/lib/secret-names";
+import { needsApproval, secretsApi } from "@/lib/secrets-api";
 import type { RefCatalog } from "@/lib/var-refs";
 import { RefInput } from "./ref-input";
 import { message, SureButton, type Runner } from "./shared";
@@ -140,6 +141,34 @@ export function VariablesTab({
     if (out) {
       setVars(out);
       setRaw(null);
+      setValues(null);
+    }
+  };
+
+  /** A secret-looking variable into roll secrets (its own folder, `/services/<id>`: no other
+   *  service gets it), leaving a `roll://` reference to it in its place. */
+  const moveToSecrets = async (name: string) => {
+    const out = await runner.run(`move:${name}`, async () => {
+      const value = (await appsApi.reveal(service, env.name))[name];
+      if (value === undefined) throw new Error(`${name}'s value can't be read here, so it can't be moved`);
+      const path = `/services/${service}`;
+      const s = secretsApi(project);
+      const body = { value, message: `moved from roll apps ${service}` };
+      // Its folder is made by the write.
+      try {
+        await s.set(env.name, name, body, path);
+      } catch (e) {
+        if (needsApproval(e)) throw new Error(`${env.name}'s secrets change only through an approved request: add ${name} there, then set this variable to roll://${env.name}${path}/${name}`);
+        throw e;
+      }
+      try {
+        return await appsApi.setVariables(service, env.name, { set: { [name]: `roll://${env.name}${path}/${name}` } });
+      } catch (e) {
+        throw new Error(`${name} is in roll secrets now, but the variable here still holds its value: ${message(e)}. Set it to roll://${env.name}${path}/${name}`);
+      }
+    });
+    if (out) {
+      setVars(out);
       setValues(null);
     }
   };
@@ -327,6 +356,18 @@ export function VariablesTab({
                     >
                       {sealing.has(v.name) ? <Lock className="size-3.5" /> : <LockOpen className="size-3.5" />}
                     </button>
+                  )}
+                  {editable && !v.sealed && !gone && v.source === "service" && !v.reference && looksSecret(v.name) && (
+                    <SureButton
+                      className="p-1 text-subtle hover:text-fg"
+                      disabled={runner.busy !== null}
+                      label={`Move ${v.name} to roll secrets`}
+                      sure={`Sure? Move ${v.name}`}
+                      title="Into roll secrets (rotation, audit, its leak guard), leaving a roll:// reference here"
+                      onSure={() => void moveToSecrets(v.name)}
+                    >
+                      <KeyRound className="size-3.5" />
+                    </SureButton>
                   )}
                   {editable && !gone && (
                     <button

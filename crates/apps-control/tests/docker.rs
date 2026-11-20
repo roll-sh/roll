@@ -454,8 +454,12 @@ async fn a_sites_edge_functions_run_on_deno() {
         ("index.html", "<h1>site</h1>"),
         ("netlify/edge-functions/hi.ts", "export default (req: Request) => new Response(`hi from ${typeof Deno}`);\nexport const config = { path: '/hi' };\n"),
         ("netlify/edge-functions/shout.ts", "export default async (req: Request, ctx: any) => new Response((await (await ctx.next()).text()).toUpperCase(), { headers: { 'x-edge': '1' } });\nexport const config = { path: ['/', '/index.html'] };\n"),
+        ("netlify/edge-functions/flag.ts", "export default (req: Request, ctx: any) => new Response(String(ctx.config.banner));\nexport const config = { path: '/flag' };\n"),
     ];
     let (site, host) = deploy_tree(&w, "edgy", &files).await;
+    // The site's runtime config: its functions read it as `context.config`.
+    let site_env = format!("/v1/apps/services/{site}/environments/production");
+    assert_eq!(call(&w.api, "PUT", &site_env, Some(json!({"config": {"banner": "sale"}})), "application/json", None).await.0, StatusCode::OK);
     let (fns, _) = deploy_tree_with(&w, "edgy-fn", &files, json!({"builder": "functions"})).await;
     let fetch = |path: &'static str| {
         let req = Request::get(path).header("host", host.as_str()).body(Body::empty()).unwrap();
@@ -470,6 +474,25 @@ async fn a_sites_edge_functions_run_on_deno() {
     let got = fetch("/").await;
     let (_, log) = call(&w.api, "GET", &format!("/v1/apps/services/{fns}/environments/production/logs?tail=40"), None, "application/json", None).await;
     assert_eq!(got, (StatusCode::OK, "<H1>SITE</H1>".to_string()), "next() read the site's own file: {log}");
+    // Its config, and a change to it without a deploy (the server's long poll has it at once).
+    let mut flag = (StatusCode::NOT_FOUND, String::new());
+    for _ in 0..100 {
+        flag = fetch("/flag").await;
+        if flag.1 == "sale" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(flag, (StatusCode::OK, "sale".to_string()));
+    call(&w.api, "PUT", &site_env, Some(json!({"config": {"banner": "gone"}})), "application/json", None).await;
+    for _ in 0..100 {
+        flag = fetch("/flag").await;
+        if flag.1 == "gone" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(flag, (StatusCode::OK, "gone".to_string()), "no deploy");
     for id in [&site, &fns] {
         assert_eq!(delete_for_good(&w.api, id).await.0, StatusCode::NO_CONTENT);
     }
