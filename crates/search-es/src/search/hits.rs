@@ -137,6 +137,24 @@ pub fn doc_values(seg: &SegmentContext, local: u32, f: &FieldInfo, format: Optio
                 out.push(v);
             }
         }
+        // One value: the document's vectors, each an array (floats, or the byte values of
+        // `byte` and `bit` vectors).
+        Kind::RankVectors => {
+            if let Some(raw) = r.binary(n).and_then(|b| b.get(local))
+                && let Some(v) = f.rank_vectors(raw)
+                && !v.is_empty()
+            {
+                let per = v.values_per_vector();
+                let vectors = if v.element().is_float() {
+                    let mut x = Vec::new();
+                    v.floats_into(&mut x);
+                    x.chunks(per).map(|c| Value::Arr(c.iter().map(|x| crate::query::xparser::float_value(*x)).collect())).collect()
+                } else {
+                    v.bytes().chunks(per).map(|c| Value::Arr(c.iter().map(|b| Value::from(*b as i8 as i64)).collect())).collect()
+                };
+                out.push(Value::Arr(vectors));
+            }
+        }
         Kind::Binary => {
             if let Some(dv) = r.binary(n)
                 && let Some(b) = dv.get(local)
@@ -171,10 +189,7 @@ fn dense_vector_value(seg: &SegmentContext, local: u32, f: &FieldInfo, format: O
         _ => "float".into(),
     });
     let floats = || raw.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)).collect::<Vec<f32>>();
-    let bf16 = |x: f32| -> u16 {
-        let b = x.to_bits();
-        ((b + 0x7fff + ((b >> 16) & 1)) >> 16) as u16
-    };
+    let bf16 = search_codec::vectors::multi::bfloat16_bits;
     match format {
         None | Some("array") => Ok(Some(Value::Arr(match element.as_str() {
             "byte" | "bit" => raw.iter().map(|b| Value::from(*b as i8 as i64)).collect(),
