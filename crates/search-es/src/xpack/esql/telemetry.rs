@@ -153,16 +153,16 @@ impl Used {
                     }
                     self.functions.insert(name);
                 }
-                args.iter().for_each(|a| self.expr(a));
+                args.iter().for_each(|a| crate::stack::maybe_grow(|| self.expr(a)));
             }
-            ExprKind::Neg(x) | ExprKind::Not(x) | ExprKind::IsNull(x, _) | ExprKind::Like(x, ..) | ExprKind::Cast(x, _) => self.expr(x),
+            ExprKind::Neg(x) | ExprKind::Not(x) | ExprKind::IsNull(x, _) | ExprKind::Like(x, ..) | ExprKind::Cast(x, _) => crate::stack::maybe_grow(|| self.expr(x)),
             ExprKind::Bin(_, a, b) => {
-                self.expr(a);
-                self.expr(b);
+                crate::stack::maybe_grow(|| self.expr(a));
+                crate::stack::maybe_grow(|| self.expr(b));
             }
             ExprKind::In(x, list, _) => {
-                self.expr(x);
-                list.iter().for_each(|a| self.expr(a));
+                crate::stack::maybe_grow(|| self.expr(x));
+                list.iter().for_each(|a| crate::stack::maybe_grow(|| self.expr(a)));
             }
             _ => {}
         }

@@ -138,16 +138,16 @@ fn reject(src: &str, e: &Expr, what: &str) -> EsResult<()> {
 fn walk(e: &Expr, f: &mut impl FnMut(&Expr)) {
     f(e);
     match &e.kind {
-        ExprKind::Neg(x) | ExprKind::Not(x) | ExprKind::IsNull(x, _) | ExprKind::Like(x, ..) | ExprKind::Cast(x, _) => walk(x, f),
+        ExprKind::Neg(x) | ExprKind::Not(x) | ExprKind::IsNull(x, _) | ExprKind::Like(x, ..) | ExprKind::Cast(x, _) => crate::stack::maybe_grow(|| walk(x, f)),
         ExprKind::Bin(_, a, b) => {
-            walk(a, f);
-            walk(b, f);
+            crate::stack::maybe_grow(|| walk(a, f));
+            crate::stack::maybe_grow(|| walk(b, f));
         }
         ExprKind::In(x, list, _) => {
-            walk(x, f);
-            list.iter().for_each(|y| walk(y, f));
+            crate::stack::maybe_grow(|| walk(x, f));
+            list.iter().for_each(|y| crate::stack::maybe_grow(|| walk(y, f)));
         }
-        ExprKind::Call(_, args) => args.iter().for_each(|y| walk(y, f)),
+        ExprKind::Call(_, args) => args.iter().for_each(|y| crate::stack::maybe_grow(|| walk(y, f))),
         _ => {}
     }
 }
@@ -170,7 +170,7 @@ fn rewrite(src: &str, e: &mut Expr, queries: &mut Vec<(String, Value)>, resolve:
                         return Err(verification(src, args[1].start, &format!("second argument of [{}] cannot be null, received [null]", &src[e.start..e.end])));
                     }
                     let q = query_text(src, &args[1], &src[e.start..e.end])?;
-                    let q = Expr { kind: ExprKind::Lit(json_value(&q)), start: args[1].start, end: args[1].end };
+                    let q = Expr::new(ExprKind::Lit(json_value(&q)), args[1].start, args[1].end);
                     e.kind = ExprKind::Call(RUNTIME.into(), vec![args[0].clone(), q]);
                     return Ok(());
                 }
@@ -187,24 +187,24 @@ fn rewrite(src: &str, e: &mut Expr, queries: &mut Vec<(String, Value)>, resolve:
             Some(format!("{HIDDEN}{i}"))
         }
         ExprKind::Neg(x) | ExprKind::Not(x) | ExprKind::IsNull(x, _) | ExprKind::Like(x, ..) | ExprKind::Cast(x, _) => {
-            rewrite(src, x, queries, resolve)?;
+            crate::stack::maybe_grow(|| rewrite(src, x, queries, resolve))?;
             None
         }
         ExprKind::Bin(_, a, b) => {
-            rewrite(src, a, queries, resolve)?;
-            rewrite(src, b, queries, resolve)?;
+            crate::stack::maybe_grow(|| rewrite(src, a, queries, resolve))?;
+            crate::stack::maybe_grow(|| rewrite(src, b, queries, resolve))?;
             None
         }
         ExprKind::In(x, list, _) => {
-            rewrite(src, x, queries, resolve)?;
+            crate::stack::maybe_grow(|| rewrite(src, x, queries, resolve))?;
             for y in list.iter_mut() {
-                rewrite(src, y, queries, resolve)?;
+                crate::stack::maybe_grow(|| rewrite(src, y, queries, resolve))?;
             }
             None
         }
         ExprKind::Call(_, args) => {
             for y in args.iter_mut() {
-                rewrite(src, y, queries, resolve)?;
+                crate::stack::maybe_grow(|| rewrite(src, y, queries, resolve))?;
             }
             None
         }

@@ -1473,6 +1473,11 @@ function Traces({ preview: p, n }: { preview: Preview; n: number }) {
                 <span className={r.slower ? "text-danger" : "text-muted"}>p50 {r.p50_ms} ms</span>
                 <span>p95 {r.p95_ms} ms</span>
                 <span>main {r.main_p50_ms == null ? "—" : `${r.main_p50_ms} ms`}</span>
+                {r.grew && (
+                  <span className="min-w-0 truncate text-danger" title={`${r.grew.span}: ${r.grew.ms} ms here, ${r.grew.main_ms} ms on main's preview`}>
+                    {r.grew.span} +{r.grew.ms - r.grew.main_ms} ms
+                  </span>
+                )}
               </div>
             </div>
           ))}

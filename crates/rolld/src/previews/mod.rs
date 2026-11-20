@@ -143,7 +143,13 @@ pub fn start(
     let apps_for_notes = apps.clone();
     let shots: Option<Arc<dyn fleet::Shoot>> = apps.clone().map(|a| Arc::new(services::AppsShots { reach: Arc::new(services::AppsReach(a)), runtime: runtime.clone() }) as Arc<dyn fleet::Shoot>);
     let engine = roll_previews::Engine::new(
-        roll_previews::engine::Config { domain, port: Some(args.api.port()), mail: Some(format!("127.0.0.1:{}", args.previews_smtp.port())), otlp: Some(format!("127.0.0.1:{}", args.api.port())), ..Default::default() },
+        {
+            let mut c = roll_previews::engine::Config { domain, port: Some(args.api.port()), mail: Some(format!("127.0.0.1:{}", args.previews_smtp.port())), otlp: Some(format!("127.0.0.1:{}", args.api.port())), ..Default::default() };
+            if let Some(s) = args.previews_compare_every {
+                (c.routes_every, c.new_errors_every) = (std::time::Duration::from_secs(s), std::time::Duration::from_secs(s));
+            }
+            c
+        },
         store.clone(),
         workspace,
         source.clone(),

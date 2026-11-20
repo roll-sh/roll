@@ -468,7 +468,7 @@ impl Aggregator for FiltersAgg {
 }
 
 /// A `filters` / `adjacency_matrix` bucket.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct FilterBucket {
     pub key: String,
     pub doc_count: u64,
@@ -476,7 +476,7 @@ pub struct FilterBucket {
 }
 
 /// `InternalFilters`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Filters {
     pub buckets: Vec<FilterBucket>,
     pub keyed: bool,
@@ -571,7 +571,7 @@ impl MultiBuckets for Filters {
 }
 
 /// `InternalAdjacencyMatrix`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct AdjacencyMatrix {
     pub buckets: Vec<FilterBucket>,
 }
