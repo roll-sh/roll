@@ -56,7 +56,8 @@ fn two_nodes_racing_on_one_environment_lose_no_change_and_share_no_number() {
     let (a, b) = (node(dir.path(), ws.clone()), node(dir.path(), ws));
 
     // Both nodes touch the project first at once: one data key and one set of environments.
-    // Each writes 20 changes to one key and one key of its own.
+    // Each writes 20 changes to one key and one key of its own, while four readers on each read
+    // values ten times (each read audited, the readers' rows written together).
     let writers: Vec<_> = [("a", a.clone()), ("b", b.clone())]
         .into_iter()
         .map(|(name, s)| {
@@ -70,7 +71,25 @@ fn two_nodes_racing_on_one_environment_lose_no_change_and_share_no_number() {
             })
         })
         .collect();
-    for w in writers {
+    let readers: Vec<_> = [a.clone(), b.clone()]
+        .into_iter()
+        .flat_map(|s| std::iter::repeat_n(s, 4))
+        .map(|s| {
+            let project = project.clone();
+            std::thread::spawn(move || {
+                // Until the writers' first touch makes the environments, there's nothing to read.
+                let mut read = 0;
+                while read < 10 {
+                    match s.values(&project, "production", "/", true, None, &Caller::operator()) {
+                        Ok(_) => read += 1,
+                        Err(roll_secrets::Error::NotFound(_)) => std::thread::yield_now(),
+                        Err(e) => panic!("{e}"),
+                    }
+                }
+            })
+        })
+        .collect();
+    for w in writers.into_iter().chain(readers) {
         w.join().unwrap();
     }
 
@@ -88,9 +107,12 @@ fn two_nodes_racing_on_one_environment_lose_no_change_and_share_no_number() {
     let show = |v: &roll_secrets::Values| v.values.iter().map(|(k, x)| format!("{k}={}", x.expose())).collect::<Vec<_>>();
     assert_eq!(show(&va), show(&vb));
     assert_eq!((va.values["ONLY_A"].expose(), va.values["ONLY_B"].expose()), ("19", "19"));
-    // Their audit rows form one chain: every number once, each row after the one before it.
+    // Their audit rows form one chain: every number once, each row after the one before it, and
+    // a row for every read.
     let chain = b.verify_audit(&project, Default::default(), &caller).unwrap();
-    assert!(chain.ok && chain.from == Some(1) && chain.rows >= 40, "{chain:?}");
+    assert!(chain.ok && chain.from == Some(1) && chain.rows >= 122, "{chain:?}");
+    let reads = a.audit(&project, roll_secrets::AuditFilter { action: Some("secrets.export".into()), limit: Some(1000), ..Default::default() }, &caller).unwrap();
+    assert_eq!(reads.len(), 82);
 }
 
 #[test]

@@ -146,7 +146,7 @@ export function PreviewEnvironmentView({ env, compact = false }: { env: PreviewE
       {!!env.slower_routes?.routes.length && (
         <p className="break-words text-[12px] text-muted">
           {env.slower_routes.routes.length} {env.slower_routes.routes.length === 1 ? "route" : "routes"} slower than on {env.slower_routes.branch}'s preview:{" "}
-          <span className="font-mono text-[11.5px] tabular-nums">{env.slower_routes.routes.map((r) => `${r.name} ${r.p50_ms} ms (${r.main_p50_ms})`).join(", ")}</span>
+          <span className="font-mono text-[11.5px] tabular-nums">{env.slower_routes.routes.map((r) => `${r.name} ${r.p50_ms} ms, main ${r.main_p50_ms} ms${r.grew ? ` (${r.grew[0]} +${r.grew[1] - r.grew[2]} ms)` : ""}`).join("; ")}</span>
         </p>
       )}
       {env.visual_review && env.visual_review.state !== "unchanged" && <VisualReview previewId={env.id} review={env.visual_review} />}

@@ -49,8 +49,9 @@ pub fn checksum_ok(s: &str) -> bool {
     rest.len() == 40 && rest.bytes().all(|b| b.is_ascii_lowercase() || (b'2'..=b'7').contains(&b)) && checksum(&s[..s.len() - 6]) == s[s.len() - 6..]
 }
 
-/// Products whose writes people and other agents read.
-const READ_BY_OTHERS: &[&str] = &["code", "previews", "workspace", "agents"];
+/// Products whose writes people and other agents read, and `published`: what a tool puts on a public
+/// page (roll-mcp's `Tool::published`, a status page's incidents), read by anyone.
+const READ_BY_OTHERS: &[&str] = &["code", "previews", "workspace", "agents", "published"];
 
 /// What a call's arguments would leak: the kind of credential, and where (`arguments.body`).
 #[derive(Debug, PartialEq, Eq)]
