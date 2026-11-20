@@ -115,6 +115,17 @@ fn command(rest: &str) -> Command {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn preview_commands_name_what_they_do() {
+        let p = |b: &str| parse(b);
+        assert_eq!(p("@roll preview reset"), Some(Command::Preview(Some(PreviewAction::Reset))));
+        assert_eq!(p("@roll preview rebuild please"), Some(Command::Preview(Some(PreviewAction::Redeploy))));
+        assert_eq!(p("@roll preview keep"), Some(Command::Preview(Some(PreviewAction::Keep(24)))));
+        assert_eq!(p("@roll preview keep 72h"), Some(Command::Preview(Some(PreviewAction::Keep(72)))));
+        assert_eq!(p("@roll preview keep forever"), Some(Command::Preview(None)));
+        assert_eq!(p("@roll preview"), Some(Command::Preview(None)));
+    }
     use super::*;
 
     #[test]
