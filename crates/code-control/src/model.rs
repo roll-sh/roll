@@ -291,6 +291,14 @@ impl Preview {
         let v = self.environment.as_ref()?.visual_review.as_ref().filter(|v| v.state == "changed")?;
         Some(v.head.as_deref().unwrap_or(""))
     }
+
+    /// The head at which its preview regressed against main's (routes slower, or errors new).
+    pub fn regressions_at(&self) -> Option<&str> {
+        // Up at its head (a push still deploying hasn't been compared at it).
+        let e = self.environment.as_ref().filter(|e| matches!(e.state.as_str(), "ready" | "sleeping"))?;
+        let any = e.slower_routes.as_ref().is_some_and(|s| !s.routes.is_empty()) || e.new_errors.as_ref().is_some_and(|n| n.total > 0);
+        any.then(|| e.head.as_deref().unwrap_or(""))
+    }
 }
 
 /// What a change shows of its preview environment (roll previews' `Preview`, summed up).
@@ -374,6 +382,16 @@ pub struct PreviewEnvironment {
     /// How slow and heavy its first page may get (`roll/speed`), when the project set a budget.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speed_budget: Option<PreviewSpeedBudget>,
+    /// The project's rule for regressions against main's preview (`check`: the `roll/regressions`
+    /// status), when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub regressions: Option<String>,
+    /// Who accepted its regressions at this head (not its author, for `required`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub regressions_accepted_by: Option<String>,
+    /// Whether its preview was compared with main's at its head (errors, and routes with traces).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub regressions_compared: bool,
     /// The `roll/visual` status (the project's `github.visual_review`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visual_review: Option<PreviewVisualReview>,
