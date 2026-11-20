@@ -42,6 +42,15 @@ enum Tk {
     Tilde(Option<String>),
 }
 
+/// Groups nested in one another. Parsing and building the query recurse once per group, and a
+/// stack overflow aborts the whole node (Lucene's parser fails with the JVM's
+/// `StackOverflowError` somewhere past a few thousand): roll's own limit.
+const MAX_GROUP_DEPTH: usize = 300;
+
+fn too_deep(q: &str) -> EsError {
+    parse_error(q, &format!("the query nests groups deeper than {MAX_GROUP_DEPTH} levels"))
+}
+
 /// `QueryParserBase.parse`: Lucene's `ParseException` (or `TokenMgrError`, for lexical
 /// errors) wrapped in a `ParseException` naming the query. Neither is an Elasticsearch
 /// exception, so the root cause stays the `query_shard_exception` around them.
@@ -824,9 +833,12 @@ impl Parser<'_, '_> {
         let field: Option<String> = field.map(str::to_string);
         match self.next() {
             Some(Tk::LParen) => {
+                if self.depth >= MAX_GROUP_DEPTH {
+                    return Err(too_deep(&self.src));
+                }
                 self.depth += 1;
                 let start = self.pos;
-                let q = self.query(field.as_deref())?;
+                let q = crate::stack::maybe_grow(|| self.query(field.as_deref()))?;
                 match self.peek() {
                     // A group holds at least one clause.
                     Some(Tk::RParen) if self.pos > start => self.pos += 1,
@@ -1200,7 +1212,7 @@ pub fn simple_query_string(ctx: &QueryCtx, s: &SimpleQueryString) -> EsResult<Qu
     let fields = text::hash_ordered(fields);
     let lenient = s.lenient.unwrap_or(!explicit);
     let flags = if s.flags == sqs_flags::ALL { i32::MAX } else { s.flags };
-    let mut sp = Simple { ctx, s, fields, lenient, flags, chars: s.query.chars().collect() };
+    let mut sp = Simple { ctx, s, fields, lenient, flags, chars: s.query.chars().collect(), depth: 0 };
     let q = if s.query.trim() == "*" { Some(arc(search_index::query::MatchAllQuery) as QueryRef) } else { sp.parse_range(0, sp.chars.len())? };
     let q = match q {
         Some(q) => q,
@@ -1226,6 +1238,8 @@ struct Simple<'c, 'q> {
     lenient: bool,
     flags: i32,
     chars: Vec<char>,
+    /// Sub-queries around the one being parsed.
+    depth: usize,
 }
 
 const F_AND: i32 = 1;
@@ -1312,7 +1326,13 @@ impl Simple<'_, '_> {
             st.current = None;
             st.index += 1;
         } else {
-            let sub = self.parse_range(start, st.index)?;
+            if self.depth >= MAX_GROUP_DEPTH {
+                return Err(too_deep(&self.s.query));
+            }
+            self.depth += 1;
+            let sub = crate::stack::maybe_grow(|| self.parse_range(start, st.index));
+            self.depth -= 1;
+            let sub = sub?;
             self.build_tree(st, sub);
             st.index += 1;
         }

@@ -1635,7 +1635,7 @@
         "tags": [
           "services"
         ],
-        "x-roll-action": "deploy*"
+        "x-roll-action": "deploy*; admin with `X-Roll-Override: 1`"
       }
     },
     "/v1/apps/services/{id}/environments/{env}/deploys/{dep}": {
@@ -1856,7 +1856,7 @@
               }
             }
           },
-          "description": "`{ keep_variables?, override? }` (default false: the variables come back as they were when it was live; `override` puts a never-live `ready` build live during a freeze, audited)"
+          "description": "`{ keep_variables? }` (default false: the variables come back as they were when it was live); `X-Roll-Override: 1` puts a never-live `ready` build live during a freeze, audited"
         },
         "responses": {
           "202": {
@@ -1870,7 +1870,7 @@
         "tags": [
           "services"
         ],
-        "x-roll-action": "deploy*"
+        "x-roll-action": "deploy*; admin with `X-Roll-Override: 1`"
       }
     },
     "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/rollout": {
@@ -3023,7 +3023,7 @@
         "tags": [
           "services"
         ],
-        "x-roll-action": "deploy*"
+        "x-roll-action": "deploy*; admin with `X-Roll-Override: 1`"
       }
     },
     "/v1/apps/services/{id}/environments/{env}/redeploy": {
@@ -3070,7 +3070,7 @@
         "tags": [
           "services"
         ],
-        "x-roll-action": "deploy*"
+        "x-roll-action": "deploy*; admin with `X-Roll-Override: 1`"
       }
     },
     "/v1/apps/services/{id}/environments/{env}/restart": {
