@@ -127,6 +127,11 @@ impl Tool {
     }
 
     /// Whether any grant may call it (an `AnyGrant` route).
+    /// Which area of its product's toolset this tool is in (`?toolsets=apps.observe`).
+    pub fn area(&self) -> Area {
+        if self.product == "apps" { apps_area(self.method, self.path) } else { Area::Every }
+    }
+
     pub fn open(&self) -> bool {
         PREPARED.get(self.name).map_or_else(|| self.find_open(), |p| p.open)
     }
@@ -297,6 +302,46 @@ impl Tool {
         };
         Ok(Request { uri, headers, body })
     }
+}
+
+/// The areas a product's toolset splits into, as GitHub's server splits its own: a client with a
+/// tool limit (Windsurf 100, Cursor about 40) takes the area it works in. Only apps so far: alone it
+/// is 89 tools, at Windsurf's limit with the access tools.
+pub const AREAS: &[(&str, &[&str])] = &[("apps", &["observe", "deploy", "configure", "project"])];
+
+/// Where a tool sits in its product's areas.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Area {
+    /// The product has no areas, or this is a lookup every area needs (a service, an environment).
+    Every,
+    One(&'static str),
+    /// A route the table below doesn't place: a test fails until it does.
+    Unplaced,
+}
+
+/// An apps tool's area, from its route: what an agent does with it (watch, ship, set up, run the
+/// project).
+fn apps_area(method: &str, path: &str) -> Area {
+    let Some(rest) = path.strip_prefix("/v1/apps") else { return Area::Unplaced };
+    let parts: Vec<&str> = rest.split('/').filter(|s| !s.is_empty() && !s.starts_with('{')).collect();
+    let read = method == "GET";
+    let area = match parts.as_slice() {
+        // Finding a service and its environments: every area starts there.
+        [] | ["services"] | ["services", "environments"] if read => return Area::Every,
+        ["projects", "services"] if read => return Area::Every,
+        ["services"] | ["services", "environments"] | ["projects", "services"] => "configure",
+        ["services", "environments", s, ..] => match *s {
+            "analytics" | "app-metrics" | "errors" | "logs" | "metrics" | "routes" | "slo" | "traces" | "usage" | "vitals" => "observe",
+            "deploys" | "promote" | "redeploy" | "rollback" | "pending" | "diff" | "jobs" | "runs" | "restart" | "sleep" | "wake" | "instances" | "cache" => "deploy",
+            "variables" | "domains" | "forms" | "volume" => "configure",
+            _ => return Area::Unplaced,
+        },
+        ["services", "activity"] | ["events"] => "observe",
+        ["services", "links"] | ["services", "restore"] | ["import"] | ["plan"] => "configure",
+        ["projects", "drains" | "notifications" | "limits" | "status-page" | "preview-domain" | "export", ..] => "project",
+        _ => return Area::Unplaced,
+    };
+    Area::One(area)
 }
 
 const fn req(name: &'static str, desc: &'static str) -> P {
@@ -1318,6 +1363,16 @@ mod tests {
         assert_eq!(def("apps_deploy")["annotations"]["destructiveHint"], true);
         // Taking a status page down deletes its incidents too: a write the catalogue calls write.
         assert_eq!(def("apps_remove_status_page")["annotations"]["destructiveHint"], true);
+        // Every apps tool has an area (or is a lookup every area lists), and each area is a fraction of the whole.
+        let apps: Vec<&Tool> = all().iter().filter(|t| t.product == "apps").collect();
+        let unplaced: Vec<&str> = apps.iter().filter(|t| t.area() == Area::Unplaced).map(|t| t.name).collect();
+        assert!(unplaced.is_empty(), "apps tools with no area (add their route to apps_area): {unplaced:?}");
+        for area in AREAS[0].1 {
+            let n = apps.iter().filter(|t| matches!(t.area(), Area::Every) || t.area() == Area::One(area)).count();
+            assert!(n > 5 && n < 45, "apps.{area}: {n} tools");
+        }
+        assert_eq!(all().iter().find(|t| t.name == "apps_logs").unwrap().area(), Area::One("observe"));
+        assert_eq!(all().iter().find(|t| t.name == "apps_list_services").unwrap().area(), Area::Every);
         // Revoking a credential can't be undone: clients that ask before destructive calls ask.
         for n in ["storage_revoke_key", "streams_revoke_key", "search_revoke_key", "search_unlink_remote", "previews_delete_hook"] {
             assert_eq!(def(n)["annotations"]["destructiveHint"], true, "{n}");
