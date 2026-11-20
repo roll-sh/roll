@@ -2,9 +2,10 @@ import { CircleCheck, Dices, FileSearch, RotateCw } from "lucide-react";
 import { useState } from "react";
 import { Link } from "@/components/link";
 import { needsApproval, type Finding, type Op, type SecretsApi, type SetSecret } from "@/lib/secrets-api";
+import { decoyUse } from "@/lib/secrets-decoy";
 import { generateValue } from "@/lib/secrets-generate";
 import { secretsHref, useSecrets } from "./secrets-page";
-import { card, errorText, ErrorNote, ghost, Section, sized, useLoad } from "./ui";
+import { ago, card, errorText, ErrorNote, ghost, Section, sized, useLoad } from "./ui";
 
 const ISSUES: { issue: Finding["issue"]; title: string; what: string; serious: boolean }[] = [
   { issue: "decoy_used", title: "Decoy used", what: "Someone used a decoy key's credential (its token or database login): they found it where it was planted. Cut off whatever could reach that place, rotate the real credentials beside it, then delete the decoy and plant a new one.", serious: true },
@@ -130,7 +131,13 @@ export function HealthView() {
                     </Link>
                   )}
                   {f.owner && <span className="text-[11.5px] text-muted" title="Who supplies it (the required key's owner)">ask {f.owner}</span>}
-                  <span className={`ml-auto text-[11.5px] ${serious ? "text-danger" : "text-muted"}`}>{f.detail}</span>
+                  {f.decoy ? (
+                    <span className="ml-auto font-mono text-[11.5px] text-danger tabular-nums" title={f.detail}>
+                      {decoyUse(f.decoy, ago)}
+                    </span>
+                  ) : (
+                    <span className={`ml-auto text-[11.5px] ${serious ? "text-danger" : "text-muted"}`}>{f.detail}</span>
+                  )}
                   {f.issue === "weak" && (
                     <button className={`${ghost} h-6`} onClick={() => fix(f, { value: fresh(f) }, "a new random value")} title="48 random letters and digits (or what the key's password policy asks), made here; a change request where the environment is protected">
                       <Dices className="size-3.5" /> New value

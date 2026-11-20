@@ -2,6 +2,7 @@ import { Clock, Copy, Dices, Download, Folder, FolderPlus, History, Import as Im
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "@/components/link";
 import { canRotate, needsApproval, SECRET_KEY, TAG, type Batch, type Environment, type ExportFormat, type Import, type KeyInsight, type Op, type Secret, type SecretType } from "@/lib/secrets-api";
+import { decoyUse } from "@/lib/secrets-decoy";
 import { generateValue } from "@/lib/secrets-generate";
 import { childPath, folderName } from "@/lib/secrets-grid";
 import { rollRef } from "@/lib/secrets-ref";
@@ -884,7 +885,7 @@ function ValueHead({ onGenerate }: { onGenerate?: () => void }) {
 function DecoyMark({ decoy }: { decoy: NonNullable<Secret["decoy"]> }) {
   const used = decoy.uses > 0;
   const title = used
-    ? `A decoy, used ${decoy.uses === 1 ? "once" : `${decoy.uses} times`}${decoy.used_at ? `, last ${ago(decoy.used_at)}` : ""}${decoy.used_ip ? ` from ${decoy.used_ip}` : ""}. Whoever used it found it where it was planted: cut them off and rotate what sits beside it.`
+    ? `A decoy, ${decoyUse(decoy, ago)}. Whoever used it found it where it was planted: cut them off and rotate what sits beside it.`
     : `A decoy: its value is ${decoy.kind === "postgres" ? "a database login that never logs in" : "a roll token that opens nothing"}, and any use raises an alert. Only admins see this mark.`;
   return (
     <span className={`shrink-0 rounded border px-1 font-mono text-[10px] ${used ? "border-danger/40 text-danger" : "border-accent/40 text-accent"}`} title={title}>

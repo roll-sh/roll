@@ -2746,6 +2746,7 @@ async fn a_decoy_key_reads_as_any_other_and_its_use_is_alerted() {
 
 /// Only the project's admins can tell a key is a decoy: to a reader, writer or revealer it's the
 /// same as any other key, in listings, health and the audit log; and only an admin plants one.
+/// Admins see where it was last used: the route pattern and the address.
 #[tokio::test]
 async fn only_admins_can_tell_a_key_is_a_decoy() {
     let api = Api::new().await;
@@ -2753,19 +2754,31 @@ async fn only_admins_can_tell_a_key_is_a_decoy() {
     api.ok(Method::POST, "/environments/production/decoys", Some(json!({ "key": "BACKUP_DB_TOKEN", "kind": "rlt" }))).await;
     let dev = api.token(json!({ "actions": ["read", "reveal", "write", "delete"] }));
     assert_eq!(api.req(Method::POST, "/environments/production/decoys", Some(json!({ "key": "OTHER", "kind": "rlt" })), Some(&dev)).await.0, StatusCode::FORBIDDEN);
+    // Its use is the admins' news.
+    let (_, value) = api.req(Method::GET, "/environments/production/secrets/BACKUP_DB_TOKEN/value", None, Some(&dev)).await;
+    let value = value["value"].as_str().unwrap().to_string();
+    api.req(Method::GET, "/v1/secrets/whoami", None, Some(&value)).await;
     let (_, listed) = api.req(Method::GET, "/environments/production/secrets", None, Some(&dev)).await;
     let shape = |key: &str| listed.as_array().unwrap().iter().find(|s| s["key"] == key).unwrap().as_object().unwrap().keys().cloned().collect::<Vec<_>>();
     assert_eq!(shape("BACKUP_DB_TOKEN"), shape("STRIPE_KEY"), "{listed}");
     let (_, one) = api.req(Method::GET, "/environments/production/secrets/BACKUP_DB_TOKEN", None, Some(&dev)).await;
     assert!(one.get("decoy").is_none(), "{one}");
-    // Its use is the admins' news.
-    let (_, value) = api.req(Method::GET, "/environments/production/secrets/BACKUP_DB_TOKEN/value", None, Some(&dev)).await;
-    api.req(Method::GET, "/v1/secrets/whoami", None, value["value"].as_str()).await;
     let (_, health) = api.req(Method::GET, "/health", None, Some(&dev)).await;
-    assert!(!health.to_string().contains("decoy"), "{health}");
+    assert!(!health.to_string().contains("decoy") && !health.to_string().contains("203.0.113.7"), "{health}");
     let (_, audit) = api.req(Method::GET, "/audit", None, Some(&dev)).await;
     assert!(!audit.to_string().contains("decoy"), "{audit}");
     assert!(api.ok(Method::GET, "/audit", None).await.to_string().contains("secrets.alert.decoy_used"));
+    // An admin sees where: the route pattern it called and the address, on the key and in health.
+    let listed = api.ok(Method::GET, "/environments/production/secrets", None).await;
+    let decoy = &listed.as_array().unwrap().iter().find(|s| s["key"] == "BACKUP_DB_TOKEN").unwrap()["decoy"];
+    assert_eq!((decoy["uses"].as_i64(), decoy["used_ip"].as_str(), decoy["used_route"].as_str(), decoy["used_endpoint"].as_str()), (Some(1), Some("203.0.113.7"), Some("/v1/secrets/whoami"), None), "{decoy}");
+    assert!(decoy["used_at"].as_i64().is_some(), "{decoy}");
+    let health = api.ok(Method::GET, "/health", None).await;
+    assert_eq!(&health[0]["decoy"], decoy, "{health}");
+    assert!(health[0]["detail"].as_str().unwrap().contains("from 203.0.113.7 calling /v1/secrets/whoami"), "{health}");
+    for told in [listed.to_string(), health.to_string()] {
+        assert!(!told.contains(&value), "{told}");
+    }
 }
 
 /// Deleting a decoy key, or giving it a value of its own, ends the decoy: its token is revoked
@@ -2806,11 +2819,13 @@ async fn a_postgres_decoy_is_a_role_whose_login_is_alerted_and_that_goes_with_it
     // roll Postgres' proxy refused a login as the role and said so (rolld's `tell_postgres_decoys`).
     let s = api.secrets.clone();
     let h = handle.clone();
-    let used = tokio::task::spawn_blocking(move || (s.decoy_used("postgres", &h, Some("198.51.100.23"), "Postgres endpoint ep_fake"), s.decoy_used("rlt", &h, None, "/"))).await.unwrap();
+    let used = tokio::task::spawn_blocking(move || (s.decoy_used("postgres", &h, Some("198.51.100.23"), "ep_fake"), s.decoy_used("rlt", &h, None, "/"))).await.unwrap();
     assert_eq!((used.0.unwrap(), used.1.unwrap()), (true, false), "another kind's handle isn't this decoy");
     let health = api.ok(Method::GET, "/health", None).await;
     assert_eq!((health[0]["issue"].as_str(), health[0]["key"].as_str()), (Some("decoy_used"), Some("LEGACY_DATABASE_URL")), "{health}");
-    assert!(health[0]["detail"].as_str().unwrap().contains("198.51.100.23"), "{health}");
+    assert!(health[0]["detail"].as_str().unwrap().contains("from 198.51.100.23 on Postgres endpoint ep_fake"), "{health}");
+    let d = &health[0]["decoy"];
+    assert_eq!((d["used_endpoint"].as_str(), d["used_route"].as_str(), d["used_ip"].as_str(), d["uses"].as_i64()), (Some("ep_fake"), None, Some("198.51.100.23"), Some(1)), "{health}");
     let logged = api.ok(Method::GET, "/audit?action=secrets.alert", None).await;
     assert_eq!((logged[0]["action"].as_str(), logged[0]["ip"].as_str()), (Some("secrets.alert.decoy_used"), Some("198.51.100.23")), "{logged}");
     assert!(logged[0]["summary"].as_str().unwrap().contains("Postgres endpoint ep_fake"), "{logged}");
