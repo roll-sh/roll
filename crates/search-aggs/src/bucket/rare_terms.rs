@@ -83,7 +83,7 @@ pub fn parse(p: &mut XParser<'_>, name: &str) -> Result<RareTermsSpec> {
 }
 
 /// Which result.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RareKind {
     Str,
     Long,
@@ -91,7 +91,7 @@ pub enum RareKind {
 }
 
 /// A rare terms bucket.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct RareBucket {
     pub key: TermKey,
     pub doc_count: u64,
@@ -99,7 +99,7 @@ pub struct RareBucket {
 }
 
 /// `StringRareTerms` / `LongRareTerms` / `UnmappedRareTerms`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct RareTerms {
     pub kind: RareKind,
     pub max_doc_count: u64,

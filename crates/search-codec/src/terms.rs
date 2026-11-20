@@ -513,8 +513,8 @@ impl TermsReader {
             pay_fp: read_vu64(m, &mut p),
             ..MetaBlock::default()
         };
-        for c in 0..5 {
-            h.widths[c] = (m.get(p).copied().unwrap_or(0) as u32).min(64);
+        for w in &mut h.widths {
+            *w = (m.get(p).copied().unwrap_or(0) as u32).min(64);
             p += 1;
         }
         h.row_bits = h.widths.iter().map(|&w| w as u64).sum();
