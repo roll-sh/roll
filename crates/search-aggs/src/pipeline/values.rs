@@ -16,7 +16,7 @@ fn as_string(out: &mut Json, key: &str, f: &DocValueFormat, v: f64) {
 }
 
 /// `InternalSimpleValue`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SimpleValue {
     pub value: f64,
     pub format: DocValueFormat,
@@ -45,7 +45,7 @@ impl Internal for SimpleValue {
 }
 
 /// `InternalSimpleLongValue` (`cumulative_cardinality`).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SimpleLongValue {
     pub value: i64,
     pub format: DocValueFormat,
@@ -73,7 +73,7 @@ impl Internal for SimpleLongValue {
 }
 
 /// `Derivative`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Derivative {
     pub value: f64,
     /// `xDiff` of the buckets in `unit`s; `<= 0` when no unit was requested.
@@ -121,7 +121,7 @@ impl Internal for Derivative {
 }
 
 /// `InternalBucketMetricValue` (`max_bucket`, `min_bucket`).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct BucketMetricValue {
     pub keys: Vec<String>,
     pub value: f64,
@@ -158,7 +158,7 @@ impl Internal for BucketMetricValue {
 }
 
 /// `InternalStatsBucket`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct StatsBucket(pub Stats);
 
 impl Internal for StatsBucket {
@@ -180,7 +180,7 @@ impl Internal for StatsBucket {
 }
 
 /// `InternalExtendedStatsBucket`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ExtendedStatsBucket(pub ExtendedStats);
 
 impl Internal for ExtendedStatsBucket {
@@ -202,7 +202,7 @@ impl Internal for ExtendedStatsBucket {
 }
 
 /// `InternalPercentilesBucket`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PercentilesBucket {
     pub percents: Vec<f64>,
     pub values: Vec<f64>,

@@ -1437,9 +1437,10 @@ impl Shard {
         self.inner.gc_deletes_ms.store(gc.as_millis() as u64, Ordering::Relaxed);
     }
 
-    /// `index.codec: best_compression`: segments written from now on (refreshes and merges)
-    /// store their fields in [`StoredOptions::best_compression`]'s larger, slower chunks;
-    /// existing segments change when merged.
+    /// `index.codec: best_compression`: segments written from now on store their fields in
+    /// [`StoredOptions::best_compression`]'s larger, slower chunks (written from the buffer:
+    /// [`StoredOptions::best_compression_buffer`]'s faster level); existing segments change
+    /// when merged.
     pub fn set_best_compression(&self, on: bool) {
         self.inner.best_compression.store(on, Ordering::Relaxed);
     }
@@ -1833,7 +1834,11 @@ impl Shard {
     }
 
     fn write_options(&self, refresh: bool) -> WriteOptions {
-        let mut stored = if self.inner.best_compression.load(Ordering::Relaxed) { StoredOptions::best_compression() } else { StoredOptions::default() };
+        let mut stored = match (self.inner.best_compression.load(Ordering::Relaxed), refresh) {
+            (true, true) => StoredOptions::best_compression_buffer(),
+            (true, false) => StoredOptions::best_compression(),
+            (false, _) => StoredOptions::default(),
+        };
         if refresh {
             stored.train = self.inner.cfg.refresh_stored_dictionary;
         }

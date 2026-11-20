@@ -185,6 +185,59 @@ impl State {
     }
 }
 
+/// A preview's routes slower than the same routes on main's preview (`branch`), the slowest
+/// against main first, at most [`SlowerRoutes::MAX`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SlowerRoutes {
+    pub branch: String,
+    pub routes: Vec<SlowerRoute>,
+}
+
+impl SlowerRoutes {
+    pub const MAX: usize = 5;
+}
+
+/// One route (a trace's root span's name, masked) with its p50 and main's, over the last hour.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SlowerRoute {
+    pub name: String,
+    pub count: usize,
+    pub p50_ms: u64,
+    pub main_p50_ms: u64,
+    /// The span inside it whose time grew most against main's (Sentry's span comparison): where
+    /// the time went. `None` when no span of it did (or main's spans aren't on this node).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grew: Option<GrewSpan>,
+}
+
+/// A span name's median time in one route's traces (each trace's spans of that name summed: an
+/// N+1's 24 queries are one), here and on main's preview (0: main's has none of it).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GrewSpan {
+    pub span: String,
+    pub ms: u64,
+    pub main_ms: u64,
+}
+
+/// A preview's error groups that main's preview (`branch`) doesn't have: how many, and the most
+/// frequent few by service and title (masked).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct NewErrors {
+    pub branch: String,
+    pub total: usize,
+    pub errors: Vec<NewError>,
+}
+
+impl NewErrors {
+    pub const MAX: usize = 5;
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct NewError {
+    pub service: String,
+    pub title: String,
+}
+
 /// A preview as the API shows it (docs/previews.md, "HTTP contract").
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Preview {
@@ -266,6 +319,14 @@ pub struct Preview {
     pub page_a11y: Option<PageA11y>,
     /// Its first page's own links that are broken, of those checked (with the screenshot).
     pub page_links: Option<PageLinks>,
+    /// Its traces' routes clearly slower than main's preview's same routes (`…/routes`), as its
+    /// holder last read them (about once a minute, while the project keeps traces).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slower_routes: Option<SlowerRoutes>,
+    /// Its error groups main's preview doesn't have, as its holder last read them (every few
+    /// minutes: Sentry's new issues in a release).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new_errors: Option<NewErrors>,
     /// The screenshot's signed link (`(expiry, signature)`), for roll code's summary; never in
     /// API answers.
     #[serde(skip)]
@@ -563,7 +624,7 @@ pub struct ServiceMetrics {
 /// stack trace joined from its lines, or an error line, by its fingerprint (its type and first
 /// frames, with what varies taken out). How many, first and last seen (ms), and the newest one
 /// whole. Title and sample are masked as its logs are.
-#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, serde::Deserialize)]
 pub struct ErrorGroup {
     #[serde(default)]
     pub service: String,
@@ -574,6 +635,10 @@ pub struct ErrorGroup {
     pub first_seen: i64,
     pub last_seen: i64,
     pub sample: String,
+    /// The trace its newest sample names, when the preview keeps that trace (most OpenTelemetry
+    /// SDKs log the request's trace id with its error): its spans are one click from it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace: Option<String>,
 }
 
 /// `text` with every secret value replaced by `***` (`code_preview::runner::mask`), and then, on
