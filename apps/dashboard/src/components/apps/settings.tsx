@@ -61,6 +61,8 @@ interface Form {
   drain: string;
   cpuTarget: string;
   latencyTarget: string;
+  /** run.oidc_audiences, comma-separated. */
+  oidcAudiences: string;
   memoryTarget: string;
   alertMemory: string;
   alertErrors: string;
@@ -162,6 +164,7 @@ export function formOf(s: Service): Form {
     drain: str(s.run.drain_s),
     cpuTarget: str(s.run.cpu_target),
     latencyTarget: str(s.run.latency_target_ms),
+    oidcAudiences: (s.run.oidc_audiences ?? []).join(", "),
     memoryTarget: str(s.run.memory_target),
     alertMemory: str(s.run.alerts?.memory_pct),
     alertErrors: str(s.run.alerts?.error_pct),
@@ -267,6 +270,10 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   if (f.drain !== before.drain) run.drain_s = num(f.drain);
   if (f.cpuTarget !== before.cpuTarget) run.cpu_target = num(f.cpuTarget);
   if (f.latencyTarget !== before.latencyTarget) run.latency_target_ms = num(f.latencyTarget);
+  if (f.oidcAudiences !== before.oidcAudiences) {
+    const list = f.oidcAudiences.split(/[,\s]+/).filter(Boolean);
+    run.oidc_audiences = list.length ? list : null;
+  }
   if (f.memoryTarget !== before.memoryTarget) run.memory_target = num(f.memoryTarget);
   if (f.alertMemory !== before.alertMemory || f.alertErrors !== before.alertErrors || f.alertP95 !== before.alertP95 || f.alertCapacity !== before.alertCapacity || f.alertLog !== before.alertLog || f.alertLogCount !== before.alertLogCount)
     run.alerts = {
@@ -398,6 +405,7 @@ export function SettingsTab({
     ...(form.sourceKind !== "image" ? ([["build", "Build"]] as [string, string][]) : []),
     ["run", "Run"],
     ...(form.type !== "cron" ? ([["scaling", "Scaling"]] as [string, string][]) : []),
+    ["identity", "Identity"],
     ["health", "Health and alerts"],
     ...(web ? ([["networking", "Networking"], ["rollout", "Rollout"]] as [string, string][]) : []),
     ...(form.type !== "cron" ? ([["sidecars", "Sidecars"]] as [string, string][]) : []),
@@ -689,6 +697,14 @@ export function SettingsTab({
             </Grid>
           </Section>
         )}
+
+        <Section id="identity" title="Identity">
+          <Grid>
+            <Field label="OIDC audiences" hint="its instances read roll's token for these at $ROLL_OIDC_URL (?aud=, the first by default): clouds trust it, no key in the app">
+              {t("oidcAudiences", "sts.amazonaws.com")}
+            </Field>
+          </Grid>
+        </Section>
 
         <Section id="health" title="Health and alerts">
           <Grid>

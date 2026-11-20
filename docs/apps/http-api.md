@@ -273,6 +273,7 @@ type Run = {
    *  Only what the runtime measures counts (Docker's cgroup; not Fargate, which bills by size). */
   cpu_target?: number;
   latency_target_ms?: number; /* 50–60,000: a web service also scaled on its answers' p95 (another instance while a window's p95 is over it) */
+  oidc_audiences?: string[]; /* at most 5, 1–256 printable characters each: audiences its instances may ask roll's OIDC issuer for at ROLL_OIDC_URL (sealed; GET ?aud=, the first by default, also ROLL_OIDC_AUDIENCE) → {token, expires_at}: sub = roll-apps:<project>:<service>:<env>, an hour, the same token answered for a minute; 403 for another audience, an untrusted preview or a project that doesn't stand for the service; 503 with no issuer */
   /** And on memory (Render's target memory): the same, against the percent of each instance's
    *  `memory_mb` in use. 10–100; unset, not on memory. With both, whichever asks for more
    *  instances decides. Docker only, as cpu_target. */
