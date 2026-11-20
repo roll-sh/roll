@@ -32,6 +32,7 @@ use std::sync::Arc;
 mod gin;
 mod near;
 
+pub(crate) use gin::jsonpath_entries;
 pub use near::Near;
 
 /// Rows' data keys (past the table's prefix), back to back: row `i` of a structure is its

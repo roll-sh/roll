@@ -4207,11 +4207,40 @@ fn gin_index_pages(
     indexes: &[BoundIndex],
     ctx: &ExecCtx,
 ) -> Result<Option<u64>> {
-    if let Some(n) = shared_model(t, bix.index.oid, ctx, || Ok(gin_model(t, bix, indexes, ctx)?.map(|g| g.nblocks())))? {
+    Ok(gin_sizes(t, bix, indexes, ctx)?.map(|s| s.0))
+}
+
+/// A GIN index's metapage statistics as its model has them (ginGetStats; None: not
+/// modelled, as a table too big to model).
+pub fn gin_stats(
+    t: &Arc<Table>,
+    bix: &BoundIndex,
+    indexes: &[BoundIndex],
+    ctx: &ExecCtx,
+) -> Option<crate::catalog::ginsim::GinStats> {
+    if bix.index.method != "gin" || is_estimated(t.oid, &ctx.sess.db) {
+        return None;
+    }
+    gin_sizes(t, bix, indexes, ctx).ok().flatten().map(|s| s.1)
+}
+
+/// A GIN index's pages and metapage statistics, from its model (shared, else cached for
+/// the transaction: `model_pages`).
+fn gin_sizes(
+    t: &Arc<Table>,
+    bix: &BoundIndex,
+    indexes: &[BoundIndex],
+    ctx: &ExecCtx,
+) -> Result<Option<GinSizes>> {
+    let sizes = || Ok(gin_model(t, bix, indexes, ctx)?.map(|g| (g.nblocks(), g.stats())));
+    if let Some(n) = shared_model(t, bix.index.oid, ctx, sizes)? {
         return Ok(n);
     }
-    model_pages(t.oid, bix.index.oid, ctx, || Ok(gin_model(t, bix, indexes, ctx)?.map(|g| g.nblocks())))
+    model_pages(t.oid, bix.index.oid, ctx, sizes)
 }
+
+/// A GIN index's pages and its metapage's statistics.
+type GinSizes = (u64, crate::catalog::ginsim::GinStats);
 
 /// A size model of an index (or what is computed from one), shared by every session
 /// (`txn::watch`, in the index's model slot): what a snapshot that saw every commit up to
@@ -4287,11 +4316,6 @@ fn gin_model(
     let fastupdate = option(&bix.index.options, "fastupdate")
         .is_none_or(|v| !matches!(v.to_ascii_lowercase().as_str(), "off" | "false" | "0"));
     let opclass = bix.index.columns.first().map_or(0, |c| c.opclass);
-    // (jsonb_path_ops' keys are only sized for a table too big to model, `am_measure`: their
-    // order among themselves isn't PostgreSQL's, which SSI's page locks would show.)
-    if opclass == 10091 {
-        return Ok(None);
-    }
     let ty = bix.keys[0].ty();
     let start = index_prefix(t.oid, 0);
     let end = prefix_end(&start);
@@ -4352,6 +4376,7 @@ fn gin_model(
     for (key, tids) in entries {
         g.insert(key, tids);
     }
+    g.record_stats();
     // Rows written after it: through the pending list (cleaned up by the VACUUMs that
     // saw them), or straight into the tree.
     let n = later.len();
@@ -4367,6 +4392,7 @@ fn gin_model(
         }
         if i + 1 < n && !history.is_empty() {
             g.cleanup();
+            g.record_stats();
         }
     }
     Ok(Some(g))
@@ -4385,6 +4411,11 @@ pub fn gin_ssi_pages(
     ctx: &ExecCtx,
 ) -> Result<Option<Vec<u32>>> {
     let opclass = bix.index.columns.first().map_or(0, |c| c.opclass);
+    // (jsonb_path_ops' keys have PostgreSQL's count and sizes, so its pages, but not its
+    // order among themselves, which SSI's page locks would show.)
+    if opclass == 10091 {
+        return Ok(None);
+    }
     let ty = bix.keys.first().map(|k| k.ty());
     let Some(ty) = ty else { return Ok(None) };
     let fastupdate = option(&bix.index.options, "fastupdate")
@@ -4457,15 +4488,15 @@ fn gist_model_shared(t: &Arc<Table>, bix: &BoundIndex, indexes: &[BoundIndex], c
 }
 
 thread_local! {
-    /// GIN and GiST models' page counts, by index, with what they were computed from.
-    static MODEL_PAGES: std::cell::RefCell<HashMap<u32, ((u64, u64, u64, u64, usize), Option<u64>)>> = Default::default();
+    /// GIN models' page counts and statistics, by index, with what they were computed from.
+    static MODEL_PAGES: std::cell::RefCell<HashMap<u32, ((u64, u64, u64, u64, usize), Option<GinSizes>)>> = Default::default();
 }
 
-/// A GIN or GiST index's modelled pages (`pages`, which reads every row of its table):
+/// A GIN index's modelled pages and statistics (`pages`, which reads every row of its table):
 /// computed again only when something it depends on may have changed: the snapshot, the
 /// catalog, the index's build history. (Not cached for a transaction with writes of its
 /// own, which a savepoint rollback may undo.) The planner asks for them on every plan.
-fn model_pages(table: u32, index: u32, ctx: &ExecCtx, pages: impl FnOnce() -> Result<Option<u64>>) -> Result<Option<u64>> {
+fn model_pages(table: u32, index: u32, ctx: &ExecCtx, pages: impl FnOnce() -> Result<Option<GinSizes>>) -> Result<Option<GinSizes>> {
     let (writes, id) = {
         let txn = ctx.txn.borrow();
         (txn.journal_pos() > 0 || txn.has_writes(), txn.id)
@@ -5361,6 +5392,18 @@ pub fn index_built(t: &Table, index: u32, build: bool, prebuilt: Option<(Btree, 
         },
     );
     Ok(())
+}
+
+/// brinGetStats' revmapNumPages: the block number of the revmap's last page less one (the
+/// revmap starts at block 1, and grows a page per REVMAP_PAGE_MAXITEMS ranges as ranges are
+/// summarized). None: no record of the index's ranges.
+pub fn brin_revmap_pages(table: u32, ix: &crate::catalog::Index, db: &Database) -> Option<u32> {
+    let ppr = brin_pages_per_range(ix);
+    let rf = db.relfiles.of(table).read();
+    let st = rf.brin.get(&ix.oid)?;
+    let built = st.built_blocks.max(1).div_ceil(ppr);
+    let last = st.added.last().copied().unwrap_or(0).max(built - 1);
+    Some(last / 1360)
 }
 
 /// A BRIN index's pages_per_range.

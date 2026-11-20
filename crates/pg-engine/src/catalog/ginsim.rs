@@ -227,6 +227,18 @@ struct Node {
     items: Vec<Item>,
 }
 
+/// The metapage's statistics (GinStatsData): the pending list's pages as they are now, the
+/// rest as the build or the last VACUUM counted them (ginbuild's buildStats,
+/// ginvacuumcleanup's count of the pages).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct GinStats {
+    pub pending_pages: u32,
+    pub total_pages: u32,
+    pub entry_pages: u32,
+    pub data_pages: u32,
+    pub entries: u64,
+}
+
 /// A GIN index as its pages hold it: the entry tree (with posting trees), the pending
 /// list, and the file's pages (some freed for reuse).
 pub struct GinIndex {
@@ -239,6 +251,8 @@ pub struct GinIndex {
     pending_pages: u32,
     tail_free: Option<usize>,
     pending: Vec<(Vec<GinKey>, u64)>,
+    /// The metapage's counts (`GinStats`) as last recorded (`record_stats`).
+    meta: GinStats,
 }
 
 impl Default for GinIndex {
@@ -261,6 +275,37 @@ impl GinIndex {
             pending_pages: 0,
             tail_free: None,
             pending: Vec::new(),
+            meta: GinStats::default(),
+        }
+    }
+
+    /// The build's or a VACUUM's count of the pages into the metapage (ginUpdateStats): the
+    /// file's pages, the entry tree's pages and leaf tuples, the posting trees' pages.
+    pub fn record_stats(&mut self) {
+        let mut data_pages = 0;
+        let mut entries = 0u64;
+        for n in self.nodes.iter().filter(|n| n.leaf) {
+            entries += n.items.len() as u64;
+            for it in &n.items {
+                if let Some(Post::Tree(_, pages)) = &it.post {
+                    data_pages += *pages;
+                }
+            }
+        }
+        self.meta = GinStats {
+            pending_pages: 0,
+            total_pages: self.pages,
+            entry_pages: self.nodes.len() as u32,
+            data_pages,
+            entries,
+        };
+    }
+
+    /// ginGetStats: the metapage's statistics.
+    pub fn stats(&self) -> GinStats {
+        GinStats {
+            pending_pages: self.pending_pages,
+            ..self.meta
         }
     }
 

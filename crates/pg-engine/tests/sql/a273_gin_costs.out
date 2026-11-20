@@ -1,0 +1,228 @@
+> create table a273_g (a int[], v tsvector) with (autovacuum_enabled = off)
+-- CREATE TABLE
+
+> insert into a273_g select array[g % 50, g % 7, g], to_tsvector('simple', 'w' || (g % 20) || ' z' || (g % 5)) from generate_series(1, 2000) g
+-- INSERT 0 2000
+
+> create index a273_ga on a273_g using gin (a)
+-- CREATE INDEX
+
+> create index a273_gv on a273_g using gin (v)
+-- CREATE INDEX
+
+> analyze a273_g
+-- ANALYZE
+
+> set enable_seqscan = off
+-- SET
+
+> explain select * from a273_g where a @> '{3}'
+QUERY PLAN:text
+Bitmap Heap Scan on a273_g  (cost=14.49..41.49 rows=320 width=59)
+  Recheck Cond: (a @> '{3}'::integer[])
+  ->  Bitmap Index Scan on a273_ga  (cost=0.00..14.41 rows=320 width=0)
+        Index Cond: (a @> '{3}'::integer[])
+-- EXPLAIN
+
+> explain select * from a273_g where a && '{3,4,5}'
+QUERY PLAN:text
+Bitmap Heap Scan on a273_g  (cost=34.45..67.64 rows=815 width=59)
+  Recheck Cond: (a && '{3,4,5}'::integer[])
+  ->  Bitmap Index Scan on a273_ga  (cost=0.00..34.25 rows=815 width=0)
+        Index Cond: (a && '{3,4,5}'::integer[])
+-- EXPLAIN
+
+> explain select * from a273_g where v @@ 'w3 & z3'
+QUERY PLAN:text
+Bitmap Heap Scan on a273_g  (cost=13.04..36.52 rows=20 width=59)
+  Recheck Cond: (v @@ '''w3'' & ''z3'''::tsquery)
+  ->  Bitmap Index Scan on a273_gv  (cost=0.00..13.03 rows=20 width=0)
+        Index Cond: (v @@ '''w3'' & ''z3'''::tsquery)
+-- EXPLAIN
+
+> explain select * from a273_g where v @@ 'w1:*'
+QUERY PLAN:text
+Bitmap Heap Scan on a273_g  (cost=12.99..36.94 rows=40 width=59)
+  Recheck Cond: (v @@ '''w1'':*'::tsquery)
+  ->  Bitmap Index Scan on a273_gv  (cost=0.00..12.98 rows=40 width=0)
+        Index Cond: (v @@ '''w1'':*'::tsquery)
+-- EXPLAIN
+
+> explain select * from a273_g where v @@ '!w3'
+QUERY PLAN:text
+Bitmap Heap Scan on a273_g  (cost=124.16..170.91 rows=1900 width=59)
+  Recheck Cond: (v @@ '!''w3'''::tsquery)
+  ->  Bitmap Index Scan on a273_gv  (cost=0.00..123.69 rows=1900 width=0)
+        Index Cond: (v @@ '!''w3'''::tsquery)
+-- EXPLAIN
+
+> explain select * from a273_g where v @@ to_tsquery('simple', 'w3 | z4')
+QUERY PLAN:text
+Bitmap Heap Scan on a273_g  (cost=15.45..44.45 rows=480 width=59)
+  Recheck Cond: (v @@ '''w3'' | ''z4'''::tsquery)
+  ->  Bitmap Index Scan on a273_gv  (cost=0.00..15.33 rows=480 width=0)
+        Index Cond: (v @@ '''w3'' | ''z4'''::tsquery)
+-- EXPLAIN
+
+> insert into a273_g select array[g % 50, g], to_tsvector('simple', 'w' || (g % 20)) from generate_series(2001, 2300) g
+-- INSERT 0 300
+
+> explain select * from a273_g where a @> '{3}'
+QUERY PLAN:text
+Bitmap Heap Scan on a273_g  (cost=23.21..53.74 rows=362 width=59)
+  Recheck Cond: (a @> '{3}'::integer[])
+  ->  Bitmap Index Scan on a273_ga  (cost=0.00..23.12 rows=362 width=0)
+        Index Cond: (a @> '{3}'::integer[])
+-- EXPLAIN
+
+> explain select * from a273_g where v @@ 'w3'
+QUERY PLAN:text
+Bitmap Heap Scan on a273_g  (cost=13.38..40.79 rows=113 width=59)
+  Recheck Cond: (v @@ '''w3'''::tsquery)
+  ->  Bitmap Index Scan on a273_gv  (cost=0.00..13.35 rows=113 width=0)
+        Index Cond: (v @@ '''w3'''::tsquery)
+-- EXPLAIN
+
+> vacuum a273_g
+-- VACUUM
+
+> explain select * from a273_g where a @> '{3}'
+QUERY PLAN:text
+Bitmap Heap Scan on a273_g  (cost=14.74..45.34 rows=368 width=59)
+  Recheck Cond: (a @> '{3}'::integer[])
+  ->  Bitmap Index Scan on a273_ga  (cost=0.00..14.65 rows=368 width=0)
+        Index Cond: (a @> '{3}'::integer[])
+-- EXPLAIN
+
+> explain select * from a273_g where v @@ 'w3'
+QUERY PLAN:text
+Bitmap Heap Scan on a273_g  (cost=9.13..36.57 rows=115 width=59)
+  Recheck Cond: (v @@ '''w3'''::tsquery)
+  ->  Bitmap Index Scan on a273_gv  (cost=0.00..9.10 rows=115 width=0)
+        Index Cond: (v @@ '''w3'''::tsquery)
+-- EXPLAIN
+
+> create table a273_j (j jsonb) with (autovacuum_enabled = off)
+-- CREATE TABLE
+
+> insert into a273_j select jsonb_build_object('k', g % 10, 'w', 'x' || (g % 3), 'l', jsonb_build_array(g % 4, 'e')) from generate_series(1, 1500) g
+-- INSERT 0 1500
+
+> create index a273_jo on a273_j using gin (j)
+-- CREATE INDEX
+
+> analyze a273_j
+-- ANALYZE
+
+> explain select * from a273_j where j @> '{"k": 3}'
+QUERY PLAN:text
+Bitmap Heap Scan on a273_j  (cost=13.72..33.59 rows=150 width=63)
+  Recheck Cond: (j @> '{"k": 3}'::jsonb)
+  ->  Bitmap Index Scan on a273_jo  (cost=0.00..13.68 rows=150 width=0)
+        Index Cond: (j @> '{"k": 3}'::jsonb)
+-- EXPLAIN
+
+> explain select * from a273_j where j @> '{"k": 3, "w": "x1"}'
+QUERY PLAN:text
+Bitmap Heap Scan on a273_j  (cost=22.00..40.62 rows=50 width=63)
+  Recheck Cond: (j @> '{"k": 3, "w": "x1"}'::jsonb)
+  ->  Bitmap Index Scan on a273_jo  (cost=0.00..21.99 rows=50 width=0)
+        Index Cond: (j @> '{"k": 3, "w": "x1"}'::jsonb)
+-- EXPLAIN
+
+> explain select * from a273_j where j ? 'w'
+QUERY PLAN:text
+Bitmap Heap Scan on a273_j  (cost=16.40..53.15 rows=1500 width=63)
+  Recheck Cond: (j ? 'w'::text)
+  ->  Bitmap Index Scan on a273_jo  (cost=0.00..16.03 rows=1500 width=0)
+        Index Cond: (j ? 'w'::text)
+-- EXPLAIN
+
+> explain select * from a273_j where j ?| array['k', 'q']
+QUERY PLAN:text
+Bitmap Heap Scan on a273_j  (cost=20.80..57.55 rows=1500 width=63)
+  Recheck Cond: (j ?| '{k,q}'::text[])
+  ->  Bitmap Index Scan on a273_jo  (cost=0.00..20.43 rows=1500 width=0)
+        Index Cond: (j ?| '{k,q}'::text[])
+-- EXPLAIN
+
+> explain select * from a273_j where j @@ '$.k == 3'
+QUERY PLAN:text
+Bitmap Heap Scan on a273_j  (cost=13.72..33.59 rows=150 width=63)
+  Recheck Cond: (j @@ '($."k" == 3)'::jsonpath)
+  ->  Bitmap Index Scan on a273_jo  (cost=0.00..13.68 rows=150 width=0)
+        Index Cond: (j @@ '($."k" == 3)'::jsonpath)
+-- EXPLAIN
+
+> explain select * from a273_j where j @? '$.l[*] ? (@ == "e")'
+QUERY PLAN:text
+Bitmap Heap Scan on a273_j  (cost=25.21..61.96 rows=1500 width=63)
+  Recheck Cond: (j @? '$."l"[*]?(@ == "e")'::jsonpath)
+  ->  Bitmap Index Scan on a273_jo  (cost=0.00..24.83 rows=1500 width=0)
+        Index Cond: (j @? '$."l"[*]?(@ == "e")'::jsonpath)
+-- EXPLAIN
+
+> explain select * from a273_j where j @? '$.k'
+QUERY PLAN:text
+Bitmap Heap Scan on a273_j  (cost=86.84..123.59 rows=1500 width=63)
+  Recheck Cond: (j @? '$."k"'::jsonpath)
+  ->  Bitmap Index Scan on a273_jo  (cost=0.00..86.47 rows=1500 width=0)
+        Index Cond: (j @? '$."k"'::jsonpath)
+-- EXPLAIN
+
+> drop index a273_jo
+-- DROP INDEX
+
+> create index a273_jp on a273_j using gin (j jsonb_path_ops)
+-- CREATE INDEX
+
+> explain select * from a273_j where j @> '{"k": 3, "w": "x1"}'
+QUERY PLAN:text
+Bitmap Heap Scan on a273_j  (cost=13.19..31.82 rows=50 width=63)
+  Recheck Cond: (j @> '{"k": 3, "w": "x1"}'::jsonb)
+  ->  Bitmap Index Scan on a273_jp  (cost=0.00..13.18 rows=50 width=0)
+        Index Cond: (j @> '{"k": 3, "w": "x1"}'::jsonb)
+-- EXPLAIN
+
+> explain select * from a273_j where j @@ '$.k == 3'
+QUERY PLAN:text
+Bitmap Heap Scan on a273_j  (cost=9.32..29.19 rows=150 width=63)
+  Recheck Cond: (j @@ '($."k" == 3)'::jsonpath)
+  ->  Bitmap Index Scan on a273_jp  (cost=0.00..9.28 rows=150 width=0)
+        Index Cond: (j @@ '($."k" == 3)'::jsonpath)
+-- EXPLAIN
+
+> explain select * from a273_j where j @> '{}'
+QUERY PLAN:text
+Bitmap Heap Scan on a273_j  (cost=91.24..127.99 rows=1500 width=63)
+  Recheck Cond: (j @> '{}'::jsonb)
+  ->  Bitmap Index Scan on a273_jp  (cost=0.00..90.87 rows=1500 width=0)
+        Index Cond: (j @> '{}'::jsonb)
+-- EXPLAIN
+
+> create table a273_b (x int) with (autovacuum_enabled = off)
+-- CREATE TABLE
+
+> insert into a273_b select generate_series(1, 20000)
+-- INSERT 0 20000
+
+> create index a273_bx on a273_b using brin (x) with (pages_per_range = 4)
+-- CREATE INDEX
+
+> analyze a273_b
+-- ANALYZE
+
+> explain select * from a273_b where x < 100
+QUERY PLAN:text
+Bitmap Heap Scan on a273_b  (cost=12.03..111.90 rows=99 width=4)
+  Recheck Cond: (x < 100)
+  ->  Bitmap Index Scan on a273_bx  (cost=0.00..12.00 rows=870 width=0)
+        Index Cond: (x < 100)
+-- EXPLAIN
+
+> reset enable_seqscan
+-- RESET
+
+> drop table a273_g, a273_j, a273_b
+-- DROP TABLE
+

@@ -725,6 +725,29 @@ impl Elements {
     }
 }
 
+impl JpNode {
+    /// The entries PostgreSQL's node has: one per entry node, two for a string jsonb_ops
+    /// can't tell a key from a value (its OR of a key and a value entry, which here is one
+    /// node of both tokens of a key, `JpExtract::key`, and the value's: three tokens).
+    fn pg_entries(&self) -> usize {
+        match self {
+            JpNode::Entry(toks) if toks.len() == 3 => 2,
+            JpNode::Entry(_) | JpNode::Prefix(_) => 1,
+            JpNode::And(xs) | JpNode::Or(xs) => xs.iter().map(JpNode::pg_entries).sum(),
+        }
+    }
+}
+
+/// The GIN entries extract_jsp_query gives for jsonpath `path` (`@?` when `exists`, else
+/// `@@`) under jsonb_ops or jsonb_path_ops (`path_ops`): 0 when it extracts none (a full
+/// index scan). None: not a jsonpath.
+pub(crate) fn jsonpath_entries(path_ops: bool, exists: bool, path: &str) -> Option<usize> {
+    let jp = crate::types::jsonpath::parse(path).ok()?;
+    let x = JpExtract { col: 0, path_ops, lax: !jp.strict };
+    let node = if exists { x.path_expr(Vec::new(), &jp.expr, None) } else { x.bool_expr(Vec::new(), &jp.expr, false) };
+    Some(node.map_or(0, |n| n.pg_entries()))
+}
+
 /// Whether index `bix`'s column `col` has jsonb_path_ops.
 pub(super) fn path_ops(bix: &crate::sql::plan::BoundIndex, col: usize) -> bool {
     bix.index.columns.get(col).and_then(|c| crate::catalog::system::opclass_name(c.opclass)).is_some_and(|(n, _)| n == "jsonb_path_ops")

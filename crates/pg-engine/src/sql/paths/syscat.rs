@@ -230,6 +230,7 @@ pub(super) fn sys_index_infos(t: SysTable, tuples: f64) -> Vec<IndexInfo> {
                 kcolls: Vec::new(),
                 fam_ops: Vec::new(),
                 user_ops: Vec::new(),
+                gin: None,
             }
         })
         .collect();

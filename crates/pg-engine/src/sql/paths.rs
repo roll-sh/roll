@@ -49,6 +49,7 @@ pub(crate) use rowmarks::{OWN_LOCK, PUSHED_LEVEL};
 pub(crate) mod sublinkcopy;
 pub(crate) use sublinkcopy::make_copy as make_subquery_copy;
 mod syscat;
+mod gincost;
 pub use syscat::{sys_index_order, sys_size, sys_table};
 pub(crate) use syscat::{stand_in_indexes, stand_in_of, sys_unique_col};
 
@@ -311,6 +312,9 @@ struct IndexInfo {
     /// Per key column, the collation its entries are in the order of (`BoundIndex::colls`;
     /// None: bytes).
     kcolls: Vec<Option<crate::storage::keys::KeyColl>>,
+    /// A GIN index's metapage statistics (ginGetStats; None: all zero, as a hypothetical
+    /// index's).
+    gin: Option<crate::catalog::ginsim::GinStats>,
 }
 
 /// A user-defined operator of an index's operator family.
@@ -527,7 +531,7 @@ fn index_infos(ctx: &ExecCtx, t: &Arc<Table>, rel_tuples: f64) -> Vec<IndexInfo>
     let db = &ctx.sess.db;
     let cat = ctx.catalog();
     let mut out = Vec::new();
-    for b in bound {
+    for b in &bound {
         let ix = b.index.clone();
         if !ix.valid {
             continue;
@@ -686,6 +690,7 @@ fn index_infos(ctx: &ExecCtx, t: &Arc<Table>, rel_tuples: f64) -> Vec<IndexInfo>
             fam_ops,
             colls,
             kcolls: b.colls.clone(),
+            gin: if am == Am::Gin { crate::exec::sizing::gin_stats(t, b, &bound, ctx) } else { None },
         });
     }
     // get_relation_info builds its list with lcons over ascending OIDs.
@@ -2612,9 +2617,10 @@ impl Planner<'_, '_> {
     fn brincost(&self, rel: &Rel, ii: &IndexInfo, quals: &[IClause], loop_count: f64) -> AmCost {
         let ppr = crate::exec::sizing::brin_pages_per_range(&ii.ix) as f64;
         let index_ranges = (rel.size.pages / ppr).ceil().max(1.0);
-        // REVMAP_PAGE_MAXITEMS: the revmap's pages are those after the metapage up to
-        // the last one the ranges need.
-        let revmap_pages = (index_ranges / 1360.0).floor() + 1.0;
+        // brinGetStats' revmapNumPages (REVMAP_PAGE_MAXITEMS ranges a page); without a
+        // record of the summarized ranges, every range the heap has now.
+        let revmap_pages = crate::exec::sizing::brin_revmap_pages(rel.table.oid, &ii.ix, &self.ctx.sess.db)
+            .map_or_else(|| ((index_ranges - 1.0) / 1360.0).floor(), f64::from);
         let mut corr: f64 = 0.0;
         for q in quals {
             let c = match ii.keys.get(q.col) {
@@ -2656,7 +2662,8 @@ impl Planner<'_, '_> {
     ) -> AmCost {
         match ii.am {
             Am::Btree => self.btcost(rel, ii, quals, loop_count),
-            Am::Hash | Am::Gin => self.generic(rel, ii, quals, 0.0, 0.0, loop_count, 0).0,
+            Am::Hash => self.generic(rel, ii, quals, 0.0, 0.0, loop_count, 0).0,
+            Am::Gin => self.gincost(rel, ii, quals, loop_count),
             Am::Gist | Am::Spgist => self.gistcost(rel, ii, quals, loop_count, orderbys),
             Am::Brin => self.brincost(rel, ii, quals, loop_count),
             Am::Native(n) => self.native_cost(n.0, rel, ii, quals, loop_count, orderbys),
