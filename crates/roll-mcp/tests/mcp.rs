@@ -712,6 +712,22 @@ async fn skills_are_the_workflows_a_connection_has() {
     }
 }
 
+/// An area (`?toolsets=secrets.security`) lists its own tools and the lookups every area needs,
+/// and nothing of its product's other areas; the access tools stay.
+#[tokio::test]
+async fn an_area_lists_its_tools_and_the_lookups() {
+    let d = Daemon::with_products(vec!["secrets".into(), "workspace".into()]);
+    let (s, _, out) = d.http(OPERATOR, Method::POST, "/v1/mcp?toolsets=secrets.security", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))).await;
+    assert_eq!(s, StatusCode::OK, "{out}");
+    let listed = names(&out["result"]);
+    for has in ["secrets_audit", "secrets_findings", "secrets_list_environments", "access_wait_approval"] {
+        assert!(listed.contains(&has.to_string()), "secrets.security lists {has}: {listed:?}");
+    }
+    for not in ["secrets_set", "secrets_transit_encrypt", "workspace_list_projects"] {
+        assert!(!listed.contains(&not.to_string()), "secrets.security doesn't list {not}");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn prompt_arguments_complete_from_what_it_may_read() {
     let d = Daemon::with_products(vec!["postgres".into(), "secrets".into(), "workspace".into()]);
@@ -746,7 +762,7 @@ async fn prompt_arguments_complete_from_what_it_may_read() {
     assert_eq!(templates["resourceTemplates"][1]["uriTemplate"], "roll://code/{owner}/{repo}/{+path}", "{templates}");
     let file = d.rpc(OPERATOR, "resources/read", json!({ "uri": "roll://code/acme/api/src/main.rs" })).await;
     assert_eq!(file["contents"][0]["text"], "fn main() {}\n", "{file}");
-    for bad in ["roll://code/acme/api/src/../../x", "roll://code/acme/api/a%2Fb", "roll://code/acme/api/missing.rs"] {
+    for bad in ["roll://code/acme/api/src/../../x", "roll://code/acme/api/a%2Fb", "roll://code/acme/api/missing.rs", "roll://code/../../x"] {
         let out = d.http(OPERATOR, Method::POST, "/v1/mcp", Some(json!({ "jsonrpc": "2.0", "id": 9, "method": "resources/read", "params": { "uri": bad } }))).await.2;
         assert_eq!(out["error"]["code"], -32002, "{bad}: {out}");
     }

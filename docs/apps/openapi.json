@@ -3165,7 +3165,7 @@
     },
     "/v1/apps/services/{id}/environments/{env}/push": {
       "get": {
-        "description": "Answers `PushState[]`: the environment's `run.push` rules as they stand, read on the service's owner: each group's `lag` (records not committed, every partition), `delivered`, `dead_lettered`, `last_delivered_at`, `failing_since` and `last_error` since that node began delivering, and `off` (why nothing is delivered).",
+        "description": "Answers `PushState[]`: the environment's `run.push` rules as they stand, read on the service's owner: each group's `lag` (records past its committed offset, on the partitions it has committed on: Kafka's rule, so 0 before its first delivery), `delivered`, `dead_lettered`, `last_delivered_at`, `failing_since` and `last_error` since that node began delivering, and `off` (why nothing is delivered).",
         "operationId": "getServicesIdEnvironmentsEnvPush",
         "parameters": [
           {
@@ -3187,7 +3187,7 @@
         ],
         "responses": {
           "200": {
-            "description": "`PushState[]`: the environment's `run.push` rules as they stand, read on the service's owner: each group's `lag` (records not committed, every partition), `delivered`, `dead_lettered`, `last_delivered_at`, `failing_since` and `last_error` since that node began delivering, and `off` (why nothing is delivered)"
+            "description": "`PushState[]`: the environment's `run.push` rules as they stand, read on the service's owner: each group's `lag` (records past its committed offset, on the partitions it has committed on: Kafka's rule, so 0 before its first delivery), `delivered`, `dead_lettered`, `last_delivered_at`, `failing_since` and `last_error` since that node began delivering, and `off` (why nothing is delivered)"
           },
           "4XX": {
             "$ref": "#/components/responses/Error"

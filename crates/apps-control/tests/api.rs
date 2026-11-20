@@ -7344,3 +7344,84 @@ async fn an_ecr_image_pulls_with_a_token_from_its_access_key() {
     let (_, hub) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "hub", "source": {"kind": "image", "image": "nginx:1.27"}, "run": {"port": 80} }))).await;
     assert_eq!(call(&w.api, "PUT", &format!("/v1/apps/services/{}/registry", hub["id"].as_str().unwrap()), Some(key)).await.0, StatusCode::BAD_REQUEST);
 }
+
+/// roll's issuer as rolld lends it: a token naming the instance's subject and audience, counted;
+/// none for a service its project doesn't stand for.
+#[derive(Default)]
+struct FakeIssuer(std::sync::atomic::AtomicUsize);
+
+#[async_trait]
+impl apps_control::integrations::SecretSource for FakeIssuer {
+    fn name(&self) -> &'static str {
+        "fake issuer"
+    }
+    async fn resolve(&self, _project: &str, _env: &str, _service: &str) -> anyhow::Result<Vec<apps_control::integrations::SecretVar>> {
+        Ok(Vec::new())
+    }
+    async fn issue(&self, project: &str, service: &str, env: &str, aud: &str, _ttl: Duration) -> anyhow::Result<Option<String>> {
+        anyhow::ensure!(!service.is_empty() && project.starts_with("prj"), "project {project} doesn't stand for {service}");
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(Some(format!("jwt.roll-apps:{project}:{service}:{env}.{aud}")))
+    }
+}
+
+/// Instances' OIDC tokens (Vercel's OIDC federation): with `run.oidc_audiences`, each instance has
+/// a sealed `ROLL_OIDC_URL` that answers roll's token for its own subject, for an audience the
+/// service names (the first by default; another is a 403), kept until it nears its expiry; a
+/// wrong token reads nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_instance_reads_its_oidc_token_for_an_allowed_audience() {
+    let issuer = Arc::new(FakeIssuer::default());
+    let i2 = issuer.clone();
+    let w = world_full(|_| {}, false, move |d| d.secrets = i2).await;
+    let run = json!({"port": 80, "oidc_audiences": ["sts.amazonaws.com", "roll"]});
+    let (svc, d) = image_service(&w, "api", run).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    call(&w.api, "PATCH", &format!("{base}/variables"), Some(json!({"set": {"FAKE_ECHO": "ROLL_OIDC_URL,ROLL_OIDC_AUDIENCE"}}))).await;
+    let (_, d2) = call(&w.api, "POST", &format!("{base}/redeploy"), Some(json!({}))).await;
+    let d2 = settled(&w, &id, "production", d2["id"].as_str().unwrap()).await;
+    let _ = d;
+    let (_, body) = visit_deployment(&w, &host(&svc["environments"][0]["url"]), d2["id"].as_str().unwrap()).await;
+    let url = body["vars"]["ROLL_OIDC_URL"].as_str().unwrap_or_else(|| panic!("{body}")).to_string();
+    assert_eq!(body["vars"]["ROLL_OIDC_AUDIENCE"], "sts.amazonaws.com");
+    assert!(!call(&w.api, "GET", &format!("{base}/variables"), None).await.1.to_string().contains(&url), "sealed");
+    let path = url.trim_start_matches("http://127.0.0.1:7070").to_string();
+    let get = |p: String| {
+        let public = w.public.clone();
+        async move {
+            let resp = public.oneshot(Request::builder().uri(p).body(Body::empty()).unwrap()).await.unwrap();
+            let st = resp.status();
+            (st, serde_json::from_slice::<Value>(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap_or(Value::Null))
+        }
+    };
+    let (st, t) = get(path.clone()).await;
+    assert_eq!(st, StatusCode::OK, "{t}");
+    assert_eq!(t["token"], format!("jwt.roll-apps:{}:{id}:production.sts.amazonaws.com", w.project), "{t}");
+    assert_eq!(get(format!("{path}?aud=roll")).await.1["token"], format!("jwt.roll-apps:{}:{id}:production.roll", w.project));
+    assert_eq!(get(path.clone()).await.1["token"], t["token"], "kept");
+    assert_eq!(issuer.0.load(Ordering::SeqCst), 2, "one signature an audience");
+    assert_eq!(get(format!("{path}?aud=evil.example")).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(get(format!("{path}x")).await.0, StatusCode::NOT_FOUND);
+    // Its token is apps' own kind, checksummed for scanners; found leaked, the address reads
+    // nothing at once and a redeploy hands the instances a new one.
+    let secret = path.rsplit('/').next().unwrap().to_string();
+    assert!(secret.starts_with("rlr_") && roll_auth::credentials::checksum_ok(&secret), "{secret}");
+    assert!(w.apps.revoke_leaked_oidc(&secret).is_some());
+    assert_eq!(get(path.clone()).await.0, StatusCode::NOT_FOUND);
+    let mut fresh = String::new();
+    for _ in 0..200 {
+        let (_, ds) = call(&w.api, "GET", &format!("{base}/deploys"), None).await;
+        if let Some(d) = ds.as_array().unwrap().iter().find(|d| d["message"] == "a new OIDC address (the last one leaked)" && d["status"] == "active") {
+            let (_, b) = visit_deployment(&w, &host(&svc["environments"][0]["url"]), d["id"].as_str().unwrap()).await;
+            fresh = b["vars"]["ROLL_OIDC_URL"].as_str().unwrap_or_default().trim_start_matches("http://127.0.0.1:7070").to_string();
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(!fresh.is_empty() && fresh != path, "redeployed with a new address");
+    assert_eq!(get(fresh).await.0, StatusCode::OK);
+    // Too many or empty audiences are refused.
+    let (_, s2) = call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"oidc_audiences": ["a", "b", "c", "d", "e", "f"]}}))).await;
+    assert!(s2.to_string().contains("oidc_audiences"), "{s2}");
+}

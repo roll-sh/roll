@@ -664,6 +664,8 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
     if let Some(a) = &apps {
         let apps = a.apps.clone();
         access.on_leaked("rlk_", move |secret, _why| apps.revoke_leaked_hook(secret));
+        let apps = a.apps.clone();
+        access.on_leaked("rlr_", move |secret, _why| apps.revoke_leaked_oidc(secret));
     }
     // …and previews' (`rlb_`).
     if let Some(e) = previews_engine.clone() {

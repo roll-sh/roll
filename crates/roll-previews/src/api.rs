@@ -495,10 +495,10 @@ async fn connect(AxState(e): S, Path(id): Path<String>) -> crate::Result<Json<se
     Ok(Json(serde_json::json!({ "branches": branches })))
 }
 
-async fn put_vars(AxState(e): S, Path(id): Path<String>, b: Bytes) -> crate::Result<Json<serde_json::Value>> {
+async fn put_vars(AxState(e): S, Path(id): Path<String>, ext: axum::http::Extensions, b: Bytes) -> crate::Result<Json<serde_json::Value>> {
     check_id(&id)?;
     let v: VarsBody = body(&b)?;
-    let vars = e.set_vars(&id, v.vars).await?;
+    let vars = e.set_vars_as(&id, v.vars, &crate::ports::Asker::of(&ext)).await?;
     Ok(Json(serde_json::json!({ "vars": vars })))
 }
 
