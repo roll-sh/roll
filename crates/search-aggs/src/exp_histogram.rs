@@ -125,7 +125,7 @@ fn clamp(value: f64, min: f64, max: f64) -> f64 {
 /// `ZeroBucket`: the count of values with `|v| <= threshold`. The threshold is either a real
 /// number or an exponentially scaled index (after collapsing buckets into it); both forms are
 /// kept since comparisons use the index and estimates the value.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ZeroBucket {
     scale: i32,
     index: i64,
@@ -404,7 +404,7 @@ impl<A: BucketIter, B: BucketIter> BucketIter for Merging<A, B> {
 }
 
 /// An exponential histogram (`ExponentialHistogram`): buckets ascending by index.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ExpHistogram {
     pub scale: i32,
     pub zero: ZeroBucket,
@@ -556,12 +556,13 @@ pub fn estimate_max(zero: &ZeroBucket, negative: &[(i64, u64)], positive: &[(i64
 
 /// `ExponentialHistogramMerger`: merges histograms into one of at most `limit` buckets,
 /// lowering the scale as little as possible when they don't fit. Buffers are reused.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Merger {
     limit: usize,
     max_scale: i32,
     result: Option<ExpHistogram>,
     spare: ExpHistogram,
+    #[serde(with = "crate::wire::big_array")]
     collapsed: [u32; MAX_INDEX_BITS as usize],
 }
 

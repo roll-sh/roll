@@ -1195,6 +1195,10 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/search/clusters/{id}/indices/{index}/delete_by_query", "search", D, one(PG, "cluster")).index("index"),
     // A bulk can delete as well as index: its action lines decide.
     row("POST", "/v1/search/clusters/{id}/indices/{index}/bulk", "search", Act::Raw(bulk_action), one(PG, "cluster")).index("index"),
+    // Query suggestions built from the index's search analytics: reading them (aggregated query
+    // text, like the analytics) and rebuilding its suggestions index now (a write of the cluster).
+    row("GET", "/v1/search/clusters/{id}/indices/{index}/suggestions", "search", R, one(PG, "cluster")).index("index"),
+    row("POST", "/v1/search/clusters/{id}/indices/{index}/suggestions/rebuild", "search", W, one(PG, "cluster")).index("index"),
     // ── secrets (feature/roll-secrets, docs/secrets.md) ──
     // The caller and its grant's project (`roll run`), and health: any grant.
     row("GET", "/v1/secrets/whoami", "secrets", R, Tgt::AnyGrant),

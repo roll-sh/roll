@@ -321,7 +321,7 @@ fn serialized_len(v: &crate::json::Value, buf: &mut Vec<u8>) -> u64 {
 }
 
 /// `estimateHitBytes`.
-fn estimate_hit(h: &crate::json::Value, buf: &mut Vec<u8>) -> u64 {
+pub(crate) fn estimate_hit(h: &crate::json::Value, buf: &mut Vec<u8>) -> u64 {
     use crate::json::Value;
     const PER_HIT_OBJECT_OVERHEAD: u64 = 400;
     const PER_FIELD_OVERHEAD: u64 = 200;

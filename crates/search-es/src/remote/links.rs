@@ -48,6 +48,82 @@ pub const MAX_REMOTE_ACCESS: usize = 64 << 10;
 /// The most failed shards one remote's answer stands for in a merged search.
 const MAX_REMOTE_SHARD_FAILURES: i64 = 10_000;
 
+/// The header asking a linked cluster's search for its aggregations partially reduced
+/// ([`search_aggs::wire`]), for the coordinating cluster's final reduce. Honored only on a
+/// link's own request ([`is_link_call`]): a client can't ask for internal state.
+pub const PARTIAL_AGGS_HEADER: &str = "x-roll-partial-aggs";
+
+/// The answer field that carries them (base64).
+pub const PARTIAL_AGGS_FIELD: &str = "__roll_partial_aggs";
+
+/// The header turning a link's `_search/scroll` into a keep-alive call: this cluster's part of a
+/// scroll over linked clusters is kept alive, nothing is fetched (`remote::contexts`). Honored
+/// only on a link's own request ([`is_link_call`]).
+pub const SCROLL_KEEP_ALIVE_HEADER: &str = "x-roll-scroll-keep-alive";
+
+/// Whether the request is a linked remote cluster's (a `cross_cluster` key with the remote
+/// access header, which only roll's own calls carry).
+pub fn is_link_call(ctx: &Ctx) -> bool {
+    matches!(&crate::xpack::security::principal(ctx).kind, crate::xpack::security::AuthKind::ApiKey(a) if a.remote.is_some())
+}
+
+/// Whether a link's search asks for its aggregations partially reduced.
+pub fn wants_partial(ctx: &Ctx) -> bool {
+    ctx.request.header(PARTIAL_AGGS_HEADER).is_some() && is_link_call(ctx)
+}
+
+/// Adds a link search's partially reduced aggregations to its answer.
+pub fn attach_partial(v: &mut Value, aggs: &search_aggs::Aggs) -> EsResult<()> {
+    use base64::Engine as _;
+    let bytes = search_aggs::wire::encode(aggs).map_err(crate::search::aggs::agg_error)?;
+    if let Value::Obj(m) = v {
+        m.insert(PARTIAL_AGGS_FIELD.into(), Value::Str(base64::engine::general_purpose::STANDARD.encode(bytes)));
+    }
+    Ok(())
+}
+
+/// How many times its encoded size a remote's aggregation state is held on the request breaker
+/// before it's decoded (postcard is compact; the decoded tree's vectors and strings aren't).
+const DECODED_PER_ENCODED_BYTE: u64 = 16;
+
+/// A remote's partially reduced aggregations from its answer, held on the request breaker
+/// (`held`) before decoding: the outer error is the breaker's, which fails the search; the inner
+/// one says they're missing or unreadable (a node of another roll release, nesting past
+/// `search_aggs::wire::MAX_NESTING`), which fails the remote's part.
+fn partial_of(alias: &str, v: &Value, held: &mut crate::breaker::Reservation) -> EsResult<Result<search_aggs::Aggs, EsError>> {
+    use base64::Engine as _;
+    let bad = |why: String| EsError::illegal_state(format!("remote cluster [{alias}] answered no aggregations roll can merge: {why}"));
+    let Some(encoded) = v.get(PARTIAL_AGGS_FIELD).and_then(Value::as_str) else { return Ok(Err(bad("they're missing".into()))) };
+    let reserved = encoded.len() as u64 * DECODED_PER_ENCODED_BYTE;
+    held.add(reserved, "<remote_cluster_response>")?;
+    let bytes = match base64::engine::general_purpose::STANDARD.decode(encoded) {
+        Ok(b) => b,
+        Err(e) => return Ok(Err(bad(e.to_string()))),
+    };
+    let mut aggs = match search_aggs::wire::decode(&bytes, Some(crate::search::aggs::date_factory())) {
+        Ok(a) => a,
+        Err(e) => return Ok(Err(bad(e.reason))),
+    };
+    // A tree bigger than estimated holds the rest too.
+    let size = aggs.ram_bytes() as u64;
+    if size > reserved {
+        held.add(size - reserved, "<remote_cluster_response>")?;
+    }
+    // Its top hits name their indices `alias:index`, as its search hits do.
+    let _ = aggs.visit_top_hits_mut(&mut |t: &mut search_aggs::internal::TopHits| -> Result<(), ()> {
+        for h in t.hits.iter_mut() {
+            if let search_aggs::Json::Obj(fields) = &mut h.json
+                && let Some((_, search_aggs::Json::Str(i))) = fields.iter_mut().find(|(k, _)| k == "_index")
+                && !i.contains(':')
+            {
+                *i = format!("{alias}:{i}");
+            }
+        }
+        Ok(())
+    });
+    Ok(Ok(aggs))
+}
+
 /// How long a request waits for a linked remote cluster by default (a sleeping one wakes for
 /// it): Elasticsearch's `cluster.remote.initial_connect_timeout`.
 pub const DEFAULT_WAIT: Duration = Duration::from_secs(30);
@@ -393,7 +469,7 @@ pub fn split(ctx: &Ctx, expressions: &[String]) -> EsResult<Option<Split>> {
 }
 
 /// Prefixes the index names in a remote's answer with its alias (`hits`, failures).
-fn prefix_index(v: &mut Value, alias: &str) {
+pub(crate) fn prefix_index(v: &mut Value, alias: &str) {
     if let Some(Value::Str(i)) = v.as_object_mut().and_then(|m| m.get_mut("_index"))
         && !i.contains(':')
     {
@@ -452,39 +528,33 @@ fn cluster_failure(e: &EsError) -> Value {
 /// `_clusters` section. A remote that can't be reached or fails is skipped when its
 /// `skip_unavailable` says so (the default) and fails the search otherwise.
 pub async fn search(ctx: &Ctx<'_>, req: &SearchRequest, body: Option<&Value>) -> EsResult<Option<SearchOutcome>> {
+    // A point in time over linked clusters names each cluster's own.
+    if let Some(pit) = &req.source.pit
+        && super::contexts::is_ccs(&pit.id)
+    {
+        return Box::pin(super::contexts::pit_search(ctx, req, body)).await.map(Some);
+    }
     let Some(split) = split(ctx, &req.indices)? else { return Ok(None) };
     if req.scroll.is_some() {
-        return Err(EsError::illegal_argument("roll can't scroll across linked remote clusters yet: search them without [scroll], or use [search_after]"));
+        return Box::pin(super::contexts::start_scroll(ctx, req, body, split)).await.map(Some);
     }
     let started = Instant::now();
     let from = req.source.from.unwrap_or(0).max(0) as i64;
     let size = req.source.size.unwrap_or(10).max(0) as i64;
     // Each cluster holds its own indices to `index.max_result_window`; the merged page must fit
     // the request's own window too.
-    let window = from + size;
-    if window > i32::MAX as i64 {
-        return Err(EsError::illegal_argument(format!(
-            "Result window is too large, from + size must be less than or equal to: [{}] but was [{window}]",
-            i32::MAX
-        )));
-    }
-    let participants = split.legs.len() + usize::from(!split.local.is_empty());
-    let has_aggs = req.source.aggs.as_ref().is_some_and(|a| !a.is_empty());
-    // Several clusters' aggregations merge by type: everyone renders typed keys.
-    let typed = has_aggs && participants > 1;
-    let mut remote_body = match body {
-        Some(Value::Obj(m)) => m.clone(),
-        _ => Map::new(),
-    };
-    remote_body.insert("from".into(), Value::from(0i64));
-    remote_body.insert("size".into(), Value::from(window));
-    const DROP: &[&str] = &["from", "size", "typed_keys", "rest_total_hits_as_int", "ccs_minimize_roundtrips", "filter_path", "pretty", "human", "error_trace", "format", "scroll", "index"];
-    let qs = query_string(ctx, DROP, if typed { &[("typed_keys", "true")] } else { &[] });
+    let window = check_window(from + size)?;
+    let has_aggs = has_aggs(req);
+    let remote_body = part_body(body, window);
+    let qs = query_string(ctx, PART_DROP, &[]);
     let mut legs = Vec::new();
     for (r, target, exprs) in &split.legs {
         let uri = format!("/{}/_search{qs}", path_segment(exprs));
-        let rq = request(ctx, &r.alias, "POST", &uri, Some(Value::Obj(remote_body.clone())));
-        legs.push((r.clone(), exprs.join(","), leg(ctx, r, target.clone(), rq)));
+        let mut rq = request(ctx, &r.alias, "POST", &uri, Some(remote_body.clone()));
+        if has_aggs {
+            rq.headers.push((PARTIAL_AGGS_HEADER.into(), "1".into()));
+        }
+        legs.push(Leg { remote: r.clone(), indices: exprs.join(","), handle: leg(ctx, r, target.clone(), rq) });
     }
     // The local part, while the remotes run theirs.
     let local = if split.local.is_empty() {
@@ -494,9 +564,71 @@ pub async fn search(ctx: &Ctx<'_>, req: &SearchRequest, body: Option<&Value>) ->
         lreq.indices = split.local.clone();
         lreq.source.from = Some(0);
         lreq.source.size = Some(window as i32);
-        lreq.typed_keys = typed || req.typed_keys;
+        lreq.partial_aggs = has_aggs;
         Some(crate::search::run(ctx, lreq)?)
     };
+    let mut m = Box::pin(merge(ctx, req, &req.source.sort, None, local, &split.local.join(","), legs, split.wildcards, started)).await?;
+    m.out.hits = m.hits.into_iter().skip(from as usize).take(size as usize).map(|(_, h)| h).collect();
+    Ok(Some(m.out))
+}
+
+/// A merged page's window (`from + size`): a 400 past `i32::MAX` instead of wrapping.
+pub(crate) fn check_window(window: i64) -> EsResult<i64> {
+    if window > i32::MAX as i64 {
+        return Err(EsError::illegal_argument(format!("Result window is too large, from + size must be less than or equal to: [{}] but was [{window}]", i32::MAX)));
+    }
+    Ok(window)
+}
+
+/// Whether a search has aggregations: every cluster reduces them partially and the final
+/// reduce runs on the coordinating cluster.
+pub(crate) fn has_aggs(req: &SearchRequest) -> bool {
+    req.source.aggs.as_ref().is_some_and(|a| !a.is_empty())
+}
+
+/// The URL parameters a remote's part leaves out: the coordinating cluster renders the answer.
+pub(crate) const PART_DROP: &[&str] = &["from", "size", "typed_keys", "rest_total_hits_as_int", "ccs_minimize_roundtrips", "filter_path", "pretty", "human", "error_trace", "format", "scroll", "index"];
+
+/// The body a remote's part runs: the client's, for the first `window` hits.
+pub(crate) fn part_body(body: Option<&Value>, window: i64) -> Value {
+    let mut m = match body {
+        Some(Value::Obj(m)) => m.clone(),
+        _ => Map::new(),
+    };
+    m.insert("from".into(), Value::from(0i64));
+    m.insert("size".into(), Value::from(window));
+    Value::Obj(m)
+}
+
+/// A remote's part of a search over linked clusters, running.
+pub(crate) struct Leg {
+    pub remote: Remote,
+    /// Its expressions (`_clusters.details.<alias>.indices`).
+    pub indices: String,
+    pub handle: tokio::task::JoinHandle<Answer>,
+}
+
+/// Several clusters' parts merged ([`merge`]).
+pub(crate) struct Merged {
+    /// The answer, without its hits.
+    pub out: SearchOutcome,
+    /// Every part's hits, best first, by part (0: the local one, then the legs in order).
+    pub hits: Vec<(usize, Value)>,
+    /// Each leg's answer when it gave one (its hits taken out).
+    pub answers: Vec<Option<Value>>,
+}
+
+/// Merges the local part (`local`, over `local_indices`) and the legs' answers as
+/// `SearchResponseMerger` does: hits by score or `sort`'s values, totals summed, shards and
+/// failures added up, aggregations reduced, and a `_clusters` section. A leg that can't be
+/// reached or fails is skipped when its `skip_unavailable` says so and fails the search
+/// otherwise. `tiebreaker`: the position of a point in time's `_shard_doc` sort value, which
+/// each hit's part is folded into ([`super::contexts::tag_shard_doc`]).
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn merge(ctx: &Ctx<'_>, req: &SearchRequest, sort: &[Sort], tiebreaker: Option<usize>, local: Option<SearchOutcome>, local_indices: &str, legs: Vec<Leg>, wildcards: bool, started: Instant) -> EsResult<Merged> {
+    let has_aggs = has_aggs(req);
+    let no_local = local.is_none();
+    let mut answers: Vec<Option<Value>> = Vec::with_capacity(legs.len());
     let mut parts: Vec<ClusterPart> = Vec::new();
     let mut out = match local {
         Some(mut o) => {
@@ -526,7 +658,7 @@ pub async fn search(ctx: &Ctx<'_>, req: &SearchRequest, body: Option<&Value>) ->
                     let total = o.shards_total as i64;
                     parts.push(ClusterPart {
                         name: "(local)".into(),
-                        indices: split.local.join(","),
+                        indices: local_indices.to_string(),
                         status: if failed > 0 { "partial" } else { "successful" },
                         took: o.took_ms as i64,
                         timed_out: o.timed_out,
@@ -539,34 +671,45 @@ pub async fn search(ctx: &Ctx<'_>, req: &SearchRequest, body: Option<&Value>) ->
         }
         None => crate::opensearch::can_match::all_skipped(0),
     };
-    if split.local.is_empty() {
+    if no_local {
         out.total = Some((0, search_index::collector::top_docs::TotalRelation::EqualTo));
         out.max_score = None;
     }
-    let mut aggs: Vec<Value> = Vec::new();
-    if let Some(a) = out.aggs.take() {
-        aggs.push(a);
-    }
+    let mut aggs: Vec<search_aggs::Aggs> = out.partial_aggs.take().into_iter().collect();
     let mut suggests: Vec<Value> = out.suggest.take().into_iter().collect();
-    let mut hits: Vec<(usize, Value)> = std::mem::take(&mut out.hits).into_iter().map(|h| (0, h)).collect();
-    // Remotes' answers are held on the request breaker until the merged page is built.
+    let tag = |part: usize, mut h: Value| {
+        if let Some(p) = tiebreaker {
+            super::contexts::tag_shard_doc(&mut h, p, part);
+        }
+        (part, h)
+    };
+    let mut hits: Vec<(usize, Value)> = std::mem::take(&mut out.hits).into_iter().map(|h| tag(0, h)).collect();
+    // Remotes' answers (and the aggregation state they carry) are held on the request breaker
+    // until the merged page is built.
     let mut held = crate::breaker::Reservation::new(ctx.cluster.breakers.request(ctx.cluster, &ctx.state()));
     let index_sorts: Vec<usize> = req.source.sort.iter().enumerate().filter(|(_, s)| matches!(s, Sort::Field { field, .. } if field == "_index")).map(|(i, _)| i).collect();
-    for (i, (r, indices, h)) in legs.into_iter().enumerate() {
+    for (i, Leg { remote: r, indices, handle: h }) in legs.into_iter().enumerate() {
         let alias = r.alias.clone();
         let answer = join(&alias, h).await;
-        let (v, e) = match answer {
-            Answer::Ok(v) => (v, None),
-            Answer::Failed(e) | Answer::Unavailable(e) => (Value::Null, Some(e)),
+        let (v, partial, e) = match answer {
+            Answer::Ok(v) if has_aggs => match partial_of(&alias, &v, &mut held)? {
+                Ok(p) => (v, Some(p), None),
+                Err(e) => (Value::Null, None, Some(e)),
+            },
+            Answer::Ok(v) => (v, None, None),
+            Answer::Failed(e) | Answer::Unavailable(e) => (Value::Null, None, Some(e)),
         };
         if let Some(e) = e {
             if !r.skip_unavailable {
                 return Err(e);
             }
             parts.push(ClusterPart { name: alias, indices, status: "skipped", took: 0, timed_out: false, shards: None, failures: vec![cluster_failure(&e)] });
+            answers.push(None);
             continue;
         }
         held.add(crate::breaker::estimate_search_response(&v), "<remote_cluster_response>")?;
+        let mut v = v;
+        let leg_hits = v.as_object_mut().and_then(|m| m.get_mut("hits")).and_then(Value::as_object_mut).and_then(|h| h.shift_remove("hits"));
         let num = |p: &[&str]| v.pointer(p).and_then(Value::as_i64).unwrap_or(0);
         let (total, successful, skipped, failed) = (num(&["_shards", "total"]), num(&["_shards", "successful"]), num(&["_shards", "skipped"]), num(&["_shards", "failed"]));
         out.shards_total += total as usize;
@@ -603,7 +746,11 @@ pub async fn search(ctx: &Ctx<'_>, req: &SearchRequest, body: Option<&Value>) ->
         if let Some(s) = v.pointer(&["hits", "max_score"]).and_then(Value::as_f64) {
             out.max_score = Some(out.max_score.map_or(s as f32, |m| if m.is_nan() { s as f32 } else { m.max(s as f32) }));
         }
-        for mut h in v.pointer(&["hits", "hits"]).and_then(Value::as_array).cloned().unwrap_or_default() {
+        let leg_hits = match leg_hits {
+            Some(Value::Arr(a)) => a,
+            _ => Vec::new(),
+        };
+        for mut h in leg_hits {
             prefix_index(&mut h, &alias);
             // A sort on `_index` sorts by the name the hit has here.
             for p in index_sorts.iter() {
@@ -615,11 +762,9 @@ pub async fn search(ctx: &Ctx<'_>, req: &SearchRequest, body: Option<&Value>) ->
                     *s = format!("{alias}:{s}");
                 }
             }
-            hits.push((i + 1, h));
+            hits.push(tag(i + 1, h));
         }
-        if let Some(a) = v.get("aggregations") {
-            aggs.push(a.clone());
-        }
+        aggs.extend(partial);
         if let Some(s) = v.get("suggest") {
             suggests.push(s.clone());
         }
@@ -648,41 +793,25 @@ pub async fn search(ctx: &Ctx<'_>, req: &SearchRequest, body: Option<&Value>) ->
             shards: Some((total, successful, skipped, failed)),
             failures: Vec::new(),
         });
+        answers.push(Some(v));
     }
     // Hits: best first, as the request sorts them; ties keep the clusters' order.
-    sort_hits(&mut hits, &req.source.sort);
-    let mut hits: Vec<Value> = hits.into_iter().map(|(_, h)| h).collect();
+    sort_hits(&mut hits, sort);
     if let Some(c) = &req.source.collapse {
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        hits.retain(|h| seen.insert(h.pointer(&["fields", c.field.as_str()]).and_then(Value::as_array).and_then(|a| a.first()).map_or_else(|| "null".into(), super::merge::key_of)));
+        hits.retain(|(_, h)| seen.insert(h.pointer(&["fields", c.field.as_str()]).and_then(Value::as_array).and_then(|a| a.first()).map_or_else(|| "null".into(), key_of)));
     }
-    out.hits = hits.into_iter().skip(from as usize).take(size as usize).collect();
     out.ranked = Vec::new();
-    out.aggs = match aggs.len() {
-        0 => None,
-        1 if !typed => aggs.pop(),
-        _ => {
-            let request = req.source.aggs.clone().map(Value::Obj).unwrap_or_else(Value::object);
-            let merged = super::merge::aggs(&aggs, &request)?;
-            // `MultiBucketConsumerService`: the merged result is held to `search.max_buckets`.
-            let max = ctx.state().metadata.cluster_setting("search.max_buckets").and_then(|v| v.parse::<usize>().ok()).unwrap_or(65_536);
-            if super::merge::bucket_count(&merged) > max {
-                return Err(EsError::new(400, "too_many_buckets_exception", format!(
-                    "Trying to create too many buckets. Must be less than or equal to: [{max}] but this number of buckets was exceeded. This limit can be set by changing the [search.max_buckets] cluster level setting."
-                ))
-                .with_meta("max_buckets", Value::from(max as i64)));
-            }
-            // `InternalAggregations` reduced across clusters come out of a `HashMap`.
-            Some(match super::merge::untyped(merged.clone()) {
-                Value::Obj(m) if !req.typed_keys => Value::Obj(crate::json::java_hash_map(m, 16)),
-                _ => merged,
-            })
-        }
+    let merged = aggs.len();
+    out.aggs = match crate::search::reduce_clusters(ctx, req, aggs)? {
+        // `InternalAggregations` reduced across clusters come out of a `HashMap`.
+        Some(Value::Obj(m)) if merged > 1 && !req.typed_keys => Some(Value::Obj(crate::json::java_hash_map(m, 16))),
+        a => a,
     };
     out.suggest = match suggests.len() {
         0 => None,
         1 => suggests.pop(),
-        _ => Some(super::merge::suggest(&suggests, &req.source)?),
+        _ => return Err(EsError::illegal_argument("roll can't merge suggestions across clusters yet: run the suggester on one cluster")),
     };
     out.took_ms = started.elapsed().as_millis() as u64;
     // As Elasticsearch counts them: one per cluster that answered, plus the final one when the
@@ -690,12 +819,12 @@ pub async fn search(ctx: &Ctx<'_>, req: &SearchRequest, body: Option<&Value>) ->
     let answered = parts.iter().filter(|p| p.status != "skipped").count();
     out.reduce_phases = Some(match answered {
         0 => 0,
-        1 if split.local.is_empty() => 1,
+        1 if no_local => 1,
         n => n + 1,
     });
-    ctx.cluster.ccs.record_parts(parts.iter().map(|p| (p.name.as_str(), p.status == "skipped")), split.wildcards, out.took_ms, out.failures.is_empty(), ctx.query("ccs_minimize_roundtrips").is_none_or(|v| v != "false"));
+    ctx.cluster.ccs.record_parts(parts.iter().map(|p| (p.name.as_str(), p.status == "skipped")), wildcards, out.took_ms, out.failures.is_empty(), ctx.query("ccs_minimize_roundtrips").is_none_or(|v| v != "false"));
     out.clusters = Some(clusters_section(&parts));
-    Ok(Some(out))
+    Ok(Merged { out, hits, answers })
 }
 
 /// `SearchResponse.Clusters` from each cluster's part.
@@ -713,6 +842,19 @@ fn clusters_section(parts: &[ClusterPart]) -> Value {
         "partial" => count("partial"),
         "failed" => count("failed"),
         "details" => Value::Obj(details),
+    }
+}
+
+/// A collapse key as one string, equal for keys [`cmp_sort_value`] calls equal (`1` and `1.0`).
+pub fn key_of(k: &Value) -> String {
+    match k {
+        Value::Num(n) => match n {
+            Number::Int(i) => format!("n:{i}"),
+            Number::Float(f) if f.fract() == 0.0 && f.abs() < 9.0e15 => format!("n:{}", *f as i64),
+            n => format!("f:{}", n.as_f64().to_bits()),
+        },
+        Value::Str(s) => format!("s:{s}"),
+        other => format!("j:{}", other.to_json()),
     }
 }
 
@@ -734,7 +876,7 @@ pub fn cmp_sort_value(a: &Value, b: &Value) -> std::cmp::Ordering {
     }
 }
 
-fn sort_hits(hits: &mut [(usize, Value)], sort: &[Sort]) {
+pub(crate) fn sort_hits(hits: &mut [(usize, Value)], sort: &[Sort]) {
     use std::cmp::Ordering;
     let by_score = sort.is_empty() || matches!(sort, [Sort::Score { order: SortOrder::Desc }]);
     if by_score {

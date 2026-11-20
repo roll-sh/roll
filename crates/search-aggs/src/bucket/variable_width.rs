@@ -509,7 +509,7 @@ impl Aggregator for VwAgg {
 }
 
 /// A `variable_width_histogram` bucket.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct VwBucket {
     pub centroid: f64,
     pub min: f64,
@@ -519,7 +519,7 @@ pub struct VwBucket {
 }
 
 /// `InternalVariableWidthHistogram`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct VariableWidthHistogram {
     pub buckets: Vec<VwBucket>,
     pub target: i32,

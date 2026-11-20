@@ -260,7 +260,7 @@ pub fn dfs(ctx: &crate::cluster::Cluster, st: &crate::meta::ClusterState, now: i
             };
             let started = std::time::Instant::now();
             let table = t.table();
-            let qctx = QueryCtx::new(ctx, st, &t.idx, &table, &searcher, now);
+            let qctx = QueryCtx::new(ctx, st, &t.idx, &table, &searcher, now, t.reader());
             // The boost applies once, to the score-doc queries below; an alias filter is one
             // more pre-filter of the vector search (`filtersInitial`).
             let mut kq = k.clone();
@@ -424,6 +424,12 @@ pub fn lookup_vector(ctx: &crate::rest::Ctx, builder: &crate::json::Value) -> Es
     }
     let field = table.get(&path);
     let missing = || EsError::status(404, format!("Field [{path}] not found in document with id [{id}] for lookup query vector builder."));
+    // A field the reader's field level security hides isn't in the document it reads.
+    if let Some(f) = crate::xpack::security::dls::ReadSecurity::of(ctx).and_then(|s| s.fields(crate::xpack::security::dls::READ, &idx.name))
+        && !f.allows(&path)
+    {
+        return Err(missing());
+    }
     let v = match &source {
         Value::Obj(m) => source_at(m, &path).cloned().ok_or_else(missing)?,
         _ => return Err(missing()),
