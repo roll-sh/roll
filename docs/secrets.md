@@ -5276,6 +5276,48 @@ still covers 304s, and a product changing its own password.
 Every lookup by key inside a request is a hash map (a grid of ~11k keys over 5 environments took
 3.07 s before that, 0.43 s after, on a debug build).
 
+### Large changes
+
+An `.env` import, a move-in (`roll secrets import …`) or a promote of a big folder is one change
+of thousands of keys. A change used to cost five statements per key, each its own round trip:
+the key's row, a deleted key's old id, the new row, its folders, its version. On Postgres that was
+about 1.2 ms per key, and only about 1.6 s of a 9,900-key change's 11 s was the server executing
+statements (`pg_stat_statements`); the rest was waiting on round trips. Now `write::apply` reads
+every key's row and old id in lookups of up to 512 keys per folder, works out each key's version as
+before (the value sealed with the project's data key, bound to its project, id and version), then
+writes all the rows in one `execute_pipeline` inside the same transaction. On Postgres each
+statement carries up to 128 rows (2,432 parameters; the limit is 65,535), so the whole change is
+one round trip. An existing key's row is updated in place (`ON CONFLICT (id) DO UPDATE`). The
+audit chain still gets the one row per change it got before.
+
+SQLite runs in process, so a statement costs it no round trip. A statement that writes several rows
+inside a transaction needs a statement journal, which goes to a temporary file past 64 KiB, so
+SQLite keeps one row per statement. A first version wrote 128 rows per statement there too: its CPU
+time stayed the same, but its system time went from 0.06–0.10 s to 0.25–0.40 s for the bench's two
+changes, and the 9,900-key rewrite took about twice as long.
+
+`cargo run -p roll-secrets --release --example bench -- big 1000,9900` measures this. It writes one
+change of new keys into a fresh project, then one change of new values for all of them, and on
+Postgres with `pg_stat_statements` loaded it also counts the statements. Measured on 2026-11-20 on
+ai-server (release, Postgres 18 in Docker with `max_connections=500`): two alternated pairs under
+load averages of 20 to 26. Before is main at `d04cc26d4`, which already has #281 and #475. Each
+cell gives both runs.
+
+| one change of | SQLite before | SQLite after | Postgres before | Postgres after | Postgres statements |
+| --- | --- | --- | --- | --- | --- |
+| 1,000 new keys | 45, 23 ms | 42, 19 ms | 1.28, 1.20 s | 146, 161 ms | 5,029 → 62 |
+| 1,000 new values | 39, 35 ms | 39, 40 ms | 1.06, 0.97 s | 129, 121 ms | 4,022 → 58 |
+| 9,900 new keys | 304, 314 ms | 260, 195 ms | 12.0, 10.9 s | 1.15, 1.09 s | 49,529 → 236 |
+| 9,900 new values | 336, 236 ms | 419, 257 ms | 9.9, 9.9 s | 1.18, 1.02 s | 39,622 → 285 |
+
+On SQLite the two builds are within each other's noise: over three more alternated runs of the
+9,900-key bench, user CPU was 0.55–0.64 s and system 0.05–0.11 s for both. On Postgres, what's left
+is mostly the server inserting rows: the 77 inserts into `secrets` (four indexes) take 0.51–0.66 s
+of server time, and those into `versions` 0.23–0.31 s.
+`a_change_of_thousands_of_keys_keeps_every_version_and_the_audit_chain` (`tests/api.rs`) covers a
+3,000-key import and a change that rewrites, deletes and adds a thousand keys each, on both
+databases.
+
 ## Next
 
 Done and in PR #20:
