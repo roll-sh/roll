@@ -34,6 +34,11 @@
 //!   list of top queries and of queries with no results. A slot is replaced when its time comes
 //!   round again; an index whose analytics go off or that is deleted loses its rows.
 //!
+//! A cluster's password is sealed in its row under the deployment's key ([`Store::seal_passwords`]:
+//! rolld's `ROLL_SECRET_KEY`), bound to the cluster's id, and opened as the row is read. A row
+//! still holding one in the clear (written before sealing) is sealed as it's read. Without a key
+//! (local development) passwords are stored as given, like every secret search keeps.
+//!
 //! The schema is created with `CREATE … IF NOT EXISTS` (`Db::ensure_schema`: on Postgres under
 //! an advisory lock, since nodes start together); it reads the `search.db` files the earlier
 //! catalog wrote.
@@ -42,12 +47,14 @@
 //! microseconds; Postgres on a runtime of its own).
 
 use code_sql::{Db, OptionalExtension, Row, params};
+use search_es::seal::{Sealer, is_sealed};
 use search_server::metrics::Stats;
 use serde::{Deserialize, Serialize};
 
 use std::path::Path;
+use std::sync::{Arc, OnceLock};
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Serialize)]
 pub struct SearchCluster {
     pub id: String,
     /// The tenant's name on the node: the Basic auth user, the host label under the node's
@@ -96,6 +103,35 @@ pub struct SearchCluster {
     /// Who may reach its data plane (Elastic Cloud's traffic filters): canonical CIDRs, each with
     /// an optional description; empty: anyone. Branches start with their parent's.
     pub ip_allowlist: Vec<IpRule>,
+}
+
+impl std::fmt::Debug for SearchCluster {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SearchCluster")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("region", &self.region)
+            .field("flavor", &self.flavor)
+            .field("password", &"<redacted>")
+            .field("idle_timeout_s", &self.idle_timeout_s)
+            .field("max_in_flight", &self.max_in_flight)
+            .field("max_body_mb", &self.max_body_mb)
+            .field("destructive_requires_name", &self.destructive_requires_name)
+            .field("parent_id", &self.parent_id)
+            .field("parent_at", &self.parent_at)
+            .field("created_at", &self.created_at)
+            .field("password_rotated_at", &self.password_rotated_at)
+            .field("indices", &self.indices)
+            .field("docs", &self.docs)
+            .field("stored_bytes", &self.stored_bytes)
+            .field("own_bytes", &self.own_bytes)
+            .field("loaded_on", &self.loaded_on)
+            .field("wake_at", &self.wake_at)
+            .field("owner", &self.owner)
+            .field("restored_at", &self.restored_at)
+            .field("ip_allowlist", &self.ip_allowlist)
+            .finish()
+    }
 }
 
 /// A remote cluster's credentials: a `cross_cluster` API key of cluster `target_id` that
@@ -204,6 +240,14 @@ const LIVE: &str = "deleting = 0 AND deleted_at IS NULL";
 
 pub struct Store {
     db: Db,
+    /// Seals clusters' passwords in their rows ([`Store::seal_passwords`]); unset: as given.
+    sealer: OnceLock<Arc<Sealer>>,
+}
+
+/// What a cluster's sealed password is bound to: its row, so a password can't be moved into
+/// another cluster's.
+fn password_kind(id: &str) -> String {
+    format!("search_cluster_password:{id}")
 }
 
 /// Per-person limits a write checks in its own transaction (`0`: no cap). Only clusters with an
@@ -456,7 +500,53 @@ impl Store {
         )?;
         // Catalogs written before `code-sql` lack nothing but may lack the index on parents
         // (created above); their extra columns (`seq`) and tables (`search_tombstones`) are unused.
-        Ok(Self { db })
+        Ok(Self { db, sealer: OnceLock::new() })
+    }
+
+    /// Seals clusters' passwords under the deployment's key from now on (rolld:
+    /// `ROLL_SECRET_KEY`), each bound to its cluster's id; rows written in the clear before are
+    /// sealed as they're read. The first sealer given stays.
+    pub fn seal_passwords(&self, sealer: Arc<Sealer>) {
+        let _ = self.sealer.set(sealer);
+    }
+
+    /// `c`'s password as its row keeps it.
+    fn stored_password(&self, c: &SearchCluster) -> String {
+        match self.sealer.get() {
+            Some(s) => s.seal_text(&password_kind(&c.id), &c.password),
+            None => c.password.clone(),
+        }
+    }
+
+    /// Opens the passwords of clusters just read. A row still holding its password in the clear
+    /// is sealed in one write, only where it still holds what was read (a rotation since keeps
+    /// its own). A sealed password this node can't open (no key, another key) fails the read,
+    /// naming the cluster, never the value.
+    fn reveal<'a>(&self, clusters: impl IntoIterator<Item = &'a mut SearchCluster>) -> anyhow::Result<()> {
+        let sealer = self.sealer.get();
+        let mut legacy = Vec::new();
+        for c in clusters {
+            if is_sealed(&c.password) {
+                let Some(plain) = sealer.and_then(|s| s.open_text(&password_kind(&c.id), &c.password)) else {
+                    anyhow::bail!("cluster {}'s password is sealed under another key than this node's (ROLL_SECRET_KEY unset or changed)", c.id);
+                };
+                c.password = plain;
+            } else if let Some(s) = sealer {
+                legacy.push((c.id.clone(), s.seal_text(&password_kind(&c.id), &c.password), c.password.clone()));
+            }
+        }
+        if !legacy.is_empty() {
+            let r = self.db.write(|x| {
+                for (id, sealed, plain) in &legacy {
+                    x.execute("UPDATE search_clusters SET password = ?2 WHERE id = ?1 AND password = ?3", params![id, sealed, plain])?;
+                }
+                Ok::<_, code_sql::Error>(())
+            });
+            if let Err(e) = r {
+                tracing::warn!(clusters = legacy.len(), error = %e, "sealing clusters' passwords failed: they stay in the clear until read again");
+            }
+        }
+        Ok(())
     }
 
     /// Inserts a new cluster, unless its name (or id) is taken or its owner is at a cap. The
@@ -464,6 +554,7 @@ impl Store {
     /// Postgres `SERIALIZABLE`, which re-runs one of two racing creates), so two creates at the
     /// cap can't both pass.
     pub async fn insert(&self, c: &SearchCluster, caps: Caps) -> anyhow::Result<Inserted> {
+        let password = self.stored_password(c);
         let r = self.db.write(|x| {
             if let Some(owner) = &c.owner
                 && let Some(over) = over_caps(x, owner, c.idle_timeout_s, caps)?
@@ -477,7 +568,7 @@ impl Store {
                     c.name,
                     c.region,
                     c.flavor,
-                    c.password,
+                    password,
                     c.idle_timeout_s,
                     c.max_in_flight,
                     c.max_body_mb,
@@ -511,6 +602,7 @@ impl Store {
     /// Saves the settings and the password (not the metering figures: see [`Store::set_stats`]).
     /// Making an owned cluster always-on checks `caps.always_on` in the same transaction.
     pub async fn update(&self, c: &SearchCluster, caps: Caps) -> anyhow::Result<Result<(), Over>> {
+        let password = self.stored_password(c);
         Ok(self.db.write(|x| {
             if let Some(owner) = &c.owner
                 && let Some(over) = over_always_on(x, owner, Some(&c.id), c.idle_timeout_s, caps)?
@@ -523,7 +615,7 @@ impl Store {
                 params![
                     c.id,
                     c.flavor,
-                    c.password,
+                    password,
                     c.idle_timeout_s,
                     c.max_in_flight,
                     c.max_body_mb,
@@ -554,7 +646,9 @@ impl Store {
     }
 
     async fn one(&self, filter: &str, arg: &str) -> anyhow::Result<Option<SearchCluster>> {
-        Ok(self.db.read(|x| x.query_row(&format!("SELECT {READ_COLS} FROM search_clusters WHERE {filter} = ?1 AND {LIVE}"), params![arg], row).optional())?)
+        let mut c = self.db.read(|x| x.query_row(&format!("SELECT {READ_COLS} FROM search_clusters WHERE {filter} = ?1 AND {LIVE}"), params![arg], row).optional())?;
+        self.reveal(c.iter_mut())?;
+        Ok(c)
     }
 
     pub async fn get(&self, id: &str) -> anyhow::Result<Option<SearchCluster>> {
@@ -568,10 +662,12 @@ impl Store {
 
     async fn many(&self, filter: &str, arg: Option<&str>) -> anyhow::Result<Vec<SearchCluster>> {
         let sql = format!("SELECT {READ_COLS} FROM search_clusters WHERE {LIVE} {filter} ORDER BY created_at, rowid");
-        Ok(self.db.read(|x| match arg {
+        let mut v = self.db.read(|x| match arg {
             Some(a) => x.query(&sql, params![a], row),
             None => x.query(&sql, params![], row),
-        })?)
+        })?;
+        self.reveal(v.iter_mut())?;
+        Ok(v)
     }
 
     pub async fn list(&self) -> anyhow::Result<Vec<SearchCluster>> {
@@ -614,7 +710,9 @@ impl Store {
     /// Sleeping clusters with a background job due by `now_ms`.
     pub async fn due_wakes(&self, now_ms: i64) -> anyhow::Result<Vec<SearchCluster>> {
         let sql = format!("SELECT {READ_COLS} FROM search_clusters WHERE {LIVE} AND wake_at IS NOT NULL AND wake_at <= ?1 ORDER BY wake_at");
-        Ok(self.db.read(|x| x.query(&sql, params![now_ms], row))?)
+        let mut v = self.db.read(|x| x.query(&sql, params![now_ms], row))?;
+        self.reveal(v.iter_mut())?;
+        Ok(v)
     }
 
     /// Hides a cluster from lookups while its data is deleted (`on`), or shows it again (the
@@ -641,22 +739,28 @@ impl Store {
     /// Deleted clusters kept for restoring (of `owner` only, when given), newest first.
     pub async fn list_deleted(&self, owner: Option<&str>) -> anyhow::Result<Vec<DeletedCluster>> {
         let sql = format!("SELECT {READ_COLS}, {DELETED_COLS} FROM search_clusters WHERE deleted_at IS NOT NULL {} ORDER BY deleted_at DESC, rowid DESC", if owner.is_some() { "AND owner = ?1" } else { "" });
-        Ok(self.db.read(|x| match owner {
+        let mut v = self.db.read(|x| match owner {
             Some(o) => x.query(&sql, params![o], deleted_row),
             None => x.query(&sql, params![], deleted_row),
-        })?)
+        })?;
+        self.reveal(v.iter_mut().map(|d| &mut d.cluster))?;
+        Ok(v)
     }
 
     /// The deleted cluster `id`, if it is kept.
     pub async fn get_deleted(&self, id: &str) -> anyhow::Result<Option<DeletedCluster>> {
         let sql = format!("SELECT {READ_COLS}, {DELETED_COLS} FROM search_clusters WHERE id = ?1 AND deleted_at IS NOT NULL");
-        Ok(self.db.read(|x| x.query_row(&sql, params![id], deleted_row).optional())?)
+        let mut d = self.db.read(|x| x.query_row(&sql, params![id], deleted_row).optional())?;
+        self.reveal(d.iter_mut().map(|d| &mut d.cluster))?;
+        Ok(d)
     }
 
     /// Deleted clusters whose window ended by `now` (Unix seconds).
     pub async fn due_purges(&self, now: i64) -> anyhow::Result<Vec<DeletedCluster>> {
         let sql = format!("SELECT {READ_COLS}, {DELETED_COLS} FROM search_clusters WHERE deleted_at IS NOT NULL AND purge_at <= ?1 ORDER BY purge_at");
-        Ok(self.db.read(|x| x.query(&sql, params![now], deleted_row))?)
+        let mut v = self.db.read(|x| x.query(&sql, params![now], deleted_row))?;
+        self.reveal(v.iter_mut().map(|d| &mut d.cluster))?;
+        Ok(v)
     }
 
     /// Claims deleted cluster `id` for a restore (`restore_as`: the name it comes back under,
@@ -1426,6 +1530,43 @@ mod tests {
         s.delete("srch_o").await.unwrap();
         all(&s).await;
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// With a key, a password is sealed in its row and bound to it; a row written in the clear
+    /// is sealed as it's read.
+    #[tokio::test]
+    async fn passwords_are_sealed_in_their_rows() {
+        let s = Store::memory().unwrap();
+        let stored = |id: &str| s.db.read(|x| x.query_row("SELECT password FROM search_clusters WHERE id = ?1", params![id], |r| r.get::<_, String>(0))).unwrap();
+        // Written before the node had a key: in the clear.
+        s.insert(&cluster("srch_l", "legacy"), Caps::NONE).await.unwrap();
+        assert_eq!(stored("srch_l"), "pw");
+        s.seal_passwords(Sealer::from_secret("0123456789abcdef0123456789abcdef").unwrap());
+        let mut c = cluster("srch_s", "sealed");
+        c.password = "hunter2-hunter2".into();
+        s.insert(&c, Caps::NONE).await.unwrap();
+        assert!(is_sealed(&stored("srch_s")) && !stored("srch_s").contains("hunter2"));
+        assert_eq!(s.get("srch_s").await.unwrap().unwrap().password, "hunter2-hunter2");
+
+        assert_eq!(s.by_name("legacy").await.unwrap().unwrap().password, "pw");
+        let migrated = stored("srch_l");
+        assert!(is_sealed(&migrated), "sealed on its first read");
+        assert_eq!(s.list().await.unwrap().iter().map(|c| c.password.as_str()).collect::<Vec<_>>(), ["pw", "hunter2-hunter2"]);
+        assert_eq!(stored("srch_l"), migrated, "sealed once");
+
+        // Another cluster's sealed password doesn't open in this row.
+        let moved = stored("srch_s");
+        s.db.write(|x| x.execute("UPDATE search_clusters SET password = ?2 WHERE id = ?1", params!["srch_l", moved])).unwrap();
+        let e = s.get("srch_l").await.unwrap_err().to_string();
+        assert!(e.contains("srch_l") && !e.contains("hunter2"), "{e}");
+    }
+
+    #[test]
+    fn debug_hides_the_password() {
+        let mut c = cluster("srch_d", "debug");
+        c.password = "hunter2-hunter2".into();
+        let printed = format!("{c:?}");
+        assert!(printed.contains("srch_d") && !printed.contains("hunter2"), "{printed}");
     }
 
     #[test]
