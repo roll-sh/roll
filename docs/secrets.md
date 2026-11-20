@@ -5119,7 +5119,8 @@ Batch 6, each gated green, none enqueued:
 - #517 interception CA;
 - #467 then #493, the Postgres decoy dashboard and decoy where, now on main's #432.
 
-#501 (members v1) is still being fixed after its security review. #455 waits for a full
+#501 (members v1) has all 12 security-review findings fixed (d0c455c90, CI green); a fresh re-review of
+the fix commit runs before it lands with #445, ahead of previews' #524. #455 waits for a full
 `--docker` run at low load.
 
 **Ranked, 2026-11-20 04:30** (the thirty-third product review, cold, after batch 4 and #475). The store
