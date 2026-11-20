@@ -36,7 +36,8 @@ export function verdict(p: Preview): VerdictItem[] {
   const slower = p.base_change?.endpoints?.filter(endpointSlower).length ?? 0;
   if (slower) out.push({ target: "endpoints", text: `${plural(slower, "endpoint")} slower than ${p.base_change?.branch ?? "main"}`, tone: "note" });
   const routes = p.slower_routes?.routes.length ?? 0;
-  if (routes) out.push({ target: "routes", text: `${plural(routes, "route")} slower than ${p.slower_routes?.branch}`, tone: "note" });
+  const budgeted = p.slower_routes?.routes.some((r) => r.budget_ms != null) ?? false;
+  if (routes) out.push({ target: "routes", text: `${plural(routes, "route")} slower than ${p.slower_routes?.branch}${budgeted ? " or over budget" : ""}`, tone: budgeted ? "danger" : "note" });
   const moving = v?.pages.filter((x) => x.unstable).length ?? 0;
   if (moving) out.push({ target: "visual", text: `${plural(moving, "page")} ${moving === 1 ? "moves" : "move"} by itself`, tone: "note" });
   return out;

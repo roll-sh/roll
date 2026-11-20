@@ -15,6 +15,7 @@ GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}/logs
 POST /v1/apps/services/{id}/environments/{env}/deploys/{dep}/rollout
 GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}/vulnerabilities
 GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}/sbom
+POST /v1/apps/services/{id}/environments/{env}/deploys/{dep}/explain
 GET /v1/apps/services/{id}/environments/{env}/domains
 POST /v1/apps/services/{id}/environments/{env}/domains
 PATCH /v1/apps/services/{id}/environments/{env}/domains/{host}
@@ -27,6 +28,8 @@ GET /v1/apps/services/{id}/environments/{env}/runs/{run}/logs
 POST /v1/apps/services/{id}/environments/{env}/runs/{run}/cancel
 POST /v1/apps/services/{id}/environments/{env}/instances/{name}/restart
 GET /v1/apps/services/{id}/environments/{env}/logs
+POST /v1/apps/services/{id}/environments/{env}/config/rotate
+GET /v1/apps/services/{id}/environments/{env}/push
 GET /v1/apps/services/{id}/environments/{env}/metrics
 POST /v1/apps/services/{id}/environments/{env}/restart
 POST /v1/apps/services/{id}/environments/{env}/cache/purge

@@ -25,6 +25,19 @@ pub fn matches(pattern: &str, path: &str) -> bool {
     match_segs(&pat, &segs)
 }
 
+/// `pattern` against the whole of `name`, segment by segment, with no file-name rule: branch
+/// names (roll secrets' `[secrets] branches`). `release/*` matches `release/1.2` but not
+/// `release/1/2`, `main` only `main`, `**` every name.
+pub fn whole(pattern: &str, name: &str) -> bool {
+    let pattern = pattern.trim();
+    if pattern.is_empty() || name.is_empty() {
+        return false;
+    }
+    let pat: Vec<&str> = pattern.split('/').collect();
+    let segs: Vec<&str> = name.split('/').collect();
+    match_segs(&pat, &segs)
+}
+
 pub fn any(patterns: &[String], path: &str) -> bool {
     patterns.iter().any(|p| matches(p, path))
 }
@@ -84,7 +97,7 @@ fn seg_match(p: &[u8], s: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::matches;
+    use super::{matches, whole};
 
     #[test]
     fn globs() {
@@ -103,6 +116,11 @@ mod tests {
         assert!(matches("src/?.rs", "src/a.rs"));
         assert!(matches("/README.md", "README.md"));
         assert!(!matches("", "x"));
+        // Whole names (branches): no file-name rule.
+        assert!(whole("release/*", "release/1.2"));
+        assert!(!whole("release/*", "release/1/2"));
+        assert!(whole("main", "main") && !whole("main", "user/main"));
+        assert!(whole("**", "user/feature/x") && whole("feature/**", "feature/a/b"));
     }
 
     #[test]
