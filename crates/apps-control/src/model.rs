@@ -283,11 +283,24 @@ pub struct Access {
 }
 
 /// A private registry's login for a service's image (`PUT …/registry`); the password is sealed
-/// and never returned.
+/// and never returned. An ECR login (`kind: "ecr"`) is an access key (its id as `username`) that
+/// each pull exchanges for ECR's 12-hour token in `region`.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Registry {
     pub server: String,
     pub username: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
+}
+
+/// An ECR registry host (`<account>.dkr.ecr.<region>.amazonaws.com`): its region.
+pub fn ecr_region(host: &str) -> Option<&str> {
+    let rest = host.strip_suffix(".amazonaws.com")?;
+    let (account, region) = rest.split_once(".dkr.ecr.")?;
+    let ok = account.len() == 12 && account.bytes().all(|b| b.is_ascii_digit()) && !region.is_empty() && region.len() <= 32 && region.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+    ok.then_some(region)
 }
 
 /// A private Git repository's login for a Git URL service (`PUT …/git-login`): sent only to

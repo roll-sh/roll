@@ -7290,3 +7290,57 @@ async fn a_worker_without_overlap_never_runs_twice() {
     let steps = json!({ "project": w.project, "name": "web", "source": {"kind": "image", "image": "nginx:1.27"}, "run": {"port": 80, "rollout": {"overlap": false, "steps": [10]}} });
     assert_eq!(call(&w.api, "POST", "/v1/apps/services", Some(steps)).await.0, StatusCode::BAD_REQUEST);
 }
+
+/// A private ECR image (Render's ECR credentials, Cloud Run's Artifact Registry): the service's
+/// access key, sealed, is exchanged at a pull for ECR's token (user `AWS`), kept until it nears
+/// its expiry; a key for another registry or region is refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_ecr_image_pulls_with_a_token_from_its_access_key() {
+    use base64::Engine;
+    // ECR's GetAuthorizationToken, as the AWS SDK asks it: what was asked is kept.
+    let asked: Arc<Mutex<Vec<String>>> = Arc::default();
+    let a2 = asked.clone();
+    let ecr = axum::Router::new().fallback(move |headers: axum::http::HeaderMap| {
+        let asked = a2.clone();
+        async move {
+            let target = headers.get("x-amz-target").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+            let auth = headers.get("authorization").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+            asked.lock().push(format!("{target} {auth}"));
+            let token = base64::engine::general_purpose::STANDARD.encode("AWS:ecr-token-1");
+            let expires = (code_sql::now_ms() / 1000 + 12 * 3600) as f64;
+            ([("content-type", "application/x-amz-json-1.1")], json!({ "authorizationData": [{ "authorizationToken": token, "expiresAt": expires, "proxyEndpoint": "https://123456789012.dkr.ecr.eu-west-1.amazonaws.com" }] }).to_string())
+        }
+    });
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", l.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(l, ecr).await.unwrap() });
+    let w = world_with(move |c| c.ecr_endpoint = Some(endpoint)).await;
+    let image = "123456789012.dkr.ecr.eu-west-1.amazonaws.com/api:1";
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "api", "source": {"kind": "image", "image": image}, "run": {"port": 80} }))).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    settled(&w, &id, "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await;
+    let reg = format!("/v1/apps/services/{id}/registry");
+    let key = json!({"kind": "ecr", "access_key_id": "AKIAEXAMPLEKEY12345", "secret_access_key": "ecr-secret-key"});
+    let (st, s) = call(&w.api, "PUT", &reg, Some(key.clone())).await;
+    assert_eq!(st, StatusCode::OK, "{s}");
+    assert_eq!(s["registry"], json!({"server": "123456789012.dkr.ecr.eu-west-1.amazonaws.com", "username": "AKIAEXAMPLEKEY12345", "kind": "ecr", "region": "eu-west-1"}));
+    assert!(!s.to_string().contains("ecr-secret-key"));
+    {
+        let asked = asked.lock();
+        assert!(asked[0].starts_with("AmazonEC2ContainerRegistry_V20150921.GetAuthorizationToken AWS4-HMAC-SHA256 Credential=AKIAEXAMPLEKEY12345/") && asked[0].contains("/eu-west-1/ecr/"), "{asked:?}");
+    }
+    // A deploy pulls as ECR's user, with the token kept (no second exchange).
+    let (_, d) = call(&w.api, "POST", &format!("/v1/apps/services/{id}/environments/production/deploys"), Some(json!({}))).await;
+    assert_eq!(settled(&w, &id, "production", d["id"].as_str().unwrap()).await["status"], "active");
+    assert_eq!(w.fake.pulled_as.lock().as_deref(), Some("AWS"));
+    assert_eq!(asked.lock().len(), 1, "the token is kept until it nears its expiry");
+    let raw = std::fs::read(w.apps.cfg.home.join("apps.db")).unwrap();
+    assert!(!raw.windows(14).any(|x| x == b"ecr-secret-key"));
+    // Another region than the registry's, or an image that isn't on ECR, is refused.
+    let mut other = key.clone();
+    other["region"] = json!("us-east-1");
+    assert_eq!(call(&w.api, "PUT", &reg, Some(other)).await.0, StatusCode::BAD_REQUEST);
+    let (_, hub) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "hub", "source": {"kind": "image", "image": "nginx:1.27"}, "run": {"port": 80} }))).await;
+    assert_eq!(call(&w.api, "PUT", &format!("/v1/apps/services/{}/registry", hub["id"].as_str().unwrap()), Some(key)).await.0, StatusCode::BAD_REQUEST);
+}

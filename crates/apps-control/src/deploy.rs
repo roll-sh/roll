@@ -782,11 +782,7 @@ impl Apps {
                 let sid = svc.id.clone();
                 self.check_registry(img).await?;
                 // The login goes only to the registry it's for, whatever the image names now.
-                let login = self
-                    .db(move |s| s.registry_login(&sid))
-                    .await?
-                    .filter(|(r, _)| crate::model::registry_key(&r.server) == crate::model::image_registry(img))
-                    .map(|(r, password)| crate::runtime::RegistryLogin { server: r.server, username: r.username, password });
+                let login = self.pull_login(&sid, img).await?;
                 let pinned = self.deps.runtime.pull(img, log, login.as_ref()).await?;
                 log.line(format!("pinned {pinned}"));
                 // A preview's defaults (an image service has no roll.toml), frozen with it.
@@ -1574,11 +1570,7 @@ impl Apps {
         // registry it's for gets it.
         let registry = match &svc.source {
             Source::Image { .. } => {
-                let sid = svc.id.clone();
-                self.db(move |s| s.registry_login(&sid))
-                    .await?
-                    .filter(|(r, _)| crate::model::registry_key(&r.server) == crate::model::image_registry(&image))
-                    .map(|(r, password)| crate::runtime::RegistryLogin { server: r.server, username: r.username, password })
+                self.pull_login(&svc.id, &image).await?
             }
             _ => None,
         };
@@ -2477,6 +2469,7 @@ impl Apps {
         let Ok(services) = self.db(|s| s.services(None)).await else { return };
         self.schedules_pass(&services, now).await;
         self.push_pass(&services).await;
+        self.ecr_refresh_pass().await;
         self.checks_pass(&services, now).await;
         self.heartbeats_pass(&services, now).await;
         self.rescan_pass(&services, now).await;
