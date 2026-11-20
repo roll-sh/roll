@@ -3,6 +3,7 @@ import { appsApi, followLog, type LogLine, atLeast, type LogLevel } from "@/lib/
 import { matchesTerms, splitFilter } from "@/lib/log-where";
 import { btn } from "../ui";
 import { LogBar, LogView } from "./shared";
+import { usePageVisible } from "./live";
 
 const MAX_LINES = 5000;
 
@@ -50,7 +51,10 @@ export function RuntimeLogs({ service, env, onGroup }: { service: string; env: s
   const pausedRef = useRef(paused);
   pausedRef.current = paused;
 
+  // A tab nobody sees follows nothing; shown again, it reads the newest lines afresh.
+  const visible = usePageVisible();
   useEffect(() => {
+    if (!visible) return;
     buffer.current = [];
     setLines([]);
     let pending = false;
@@ -79,7 +83,7 @@ export function RuntimeLogs({ service, env, onGroup }: { service: string; env: s
       },
     );
     return stop;
-  }, [service, env, requests]);
+  }, [service, env, requests, visible]);
 
   useEffect(() => {
     if (!paused) setLines(buffer.current.slice());

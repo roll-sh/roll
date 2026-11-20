@@ -204,6 +204,16 @@
           "maximum": 60000,
           "description": "A web service scaled on its answers' p95 too: over this many ms for a window, another instance."
         },
+        "oidc_audiences": {
+          "type": "array",
+          "maxItems": 5,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "description": "Audiences its instances may ask roll's OIDC issuer for, at ROLL_OIDC_URL (?aud=, the first by default): tokens clouds' federation and roll secrets' workload logins trust."
+        },
         "queue_s": {
           "type": "integer",
           "minimum": 1,

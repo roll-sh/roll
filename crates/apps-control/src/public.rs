@@ -29,6 +29,10 @@ pub fn router(apps: Arc<Apps>) -> axum::Router {
             if req.uri().path().starts_with(CONFIG) {
                 return runtime_config(apps, req).await;
             }
+            // Roll's OIDC tokens for an environment's instances, with its token.
+            if req.uri().path().starts_with(OIDC) {
+                return oidc_token(apps, req).await;
+            }
             // An edge function's `context.next()` ([`crate::edge`]): signed, any host.
             if req.uri().path().starts_with(crate::edge::NEXT) {
                 return crate::edge::next(apps, req).await;
@@ -79,6 +83,66 @@ struct TargetPort(u16);
 /// Where instances send traces: `/_roll/otlp/{service}/{env}/{token}/v1/traces`, any host.
 pub const OTLP: &str = "/_roll/otlp/";
 
+/// Where an environment's instances read roll's OIDC tokens (`ROLL_OIDC_URL`):
+/// `/_roll/oidc/<service>/<env>/<token>`.
+pub const OIDC: &str = "/_roll/oidc/";
+
+/// How long a signed token is answered again (ms): instances that ask before every call cost a
+/// signature a minute, and a key rotation, a project that stops standing for the service or an
+/// environment that turns untrusted takes effect within that minute.
+const OIDC_KEEP_MS: i64 = 60 * 1000;
+/// A token's life.
+const OIDC_TTL_MS: i64 = 3600 * 1000;
+
+/// `GET …/_roll/oidc/<service>/<env>/<token>[?aud=]`: `{token, expires_at}`, roll's OIDC token
+/// for the environment's instances (`sub = roll-apps:<project>:<service>:<env>`) for `aud`, one
+/// of `run.oidc_audiences` (the first by default), from roll secrets' issuer, an hour long. One is
+/// answered again for a minute ([`OIDC_KEEP_MS`]), so instances that ask often don't each cost a
+/// signature. A wrong token is a 404; an audience not in the list a 403; a project that doesn't
+/// stand for the service, or an untrusted preview, a 403 saying why; no issuer here a 503.
+async fn oidc_token(apps: Arc<Apps>, req: Request) -> Response {
+    let parts: Vec<String> = req.uri().path()[OIDC.len()..].split('/').map(|s| percent_encoding::percent_decode_str(s).decode_utf8_lossy().into_owned()).collect();
+    let [id, env, token] = parts.as_slice() else { return (StatusCode::NOT_FOUND, "").into_response() };
+    if req.method() != axum::http::Method::GET || !id.starts_with("svc_") || !token.starts_with("rlr_") {
+        return (StatusCode::NOT_FOUND, "").into_response();
+    }
+    let (sid, e, t) = (id.clone(), env.clone(), token.clone());
+    let found = apps
+        .db(move |s| {
+            let Ok(svc) = s.service(&sid) else { return Ok(None) };
+            if !s.oidc_token_of(&sid, &e)?.is_some_and(|k| same(&k, &t)) {
+                return Ok(None);
+            }
+            let row = s.environment(&sid, &e)?;
+            Ok(Some((svc.project.clone(), svc.for_env(&row)?.run.oidc_audiences)))
+        })
+        .await;
+    let Ok(Some((project, audiences))) = found else { return (StatusCode::NOT_FOUND, "").into_response() };
+    let asked = req.uri().query().and_then(|q| url::form_urlencoded::parse(q.as_bytes()).find(|(k, _)| k == "aud").map(|(_, v)| v.into_owned()));
+    let Some(aud) = asked.or_else(|| audiences.first().cloned()) else {
+        return (StatusCode::FORBIDDEN, axum::Json(serde_json::json!({ "error": "this service names no audience (run.oidc_audiences)" }))).into_response();
+    };
+    if !audiences.contains(&aud) {
+        return (StatusCode::FORBIDDEN, axum::Json(serde_json::json!({ "error": format!("{aud} isn't one of run.oidc_audiences") }))).into_response();
+    }
+    let key = format!("{id}/{env}/{aud}");
+    let now = code_sql::now_ms();
+    let kept = apps.oidc_tokens.lock().get(&key).cloned().filter(|(_, until)| until - now > OIDC_TTL_MS - OIDC_KEEP_MS);
+    let (jwt, until) = match kept {
+        Some(k) => k,
+        None => match apps.deps.secrets.issue(&project, id, env, &aud, std::time::Duration::from_millis(OIDC_TTL_MS as u64)).await {
+            Ok(Some(jwt)) => {
+                let until = now + OIDC_TTL_MS;
+                apps.oidc_tokens.lock().insert(key, (jwt.clone(), until));
+                (jwt, until)
+            }
+            Ok(None) => return (StatusCode::SERVICE_UNAVAILABLE, axum::Json(serde_json::json!({ "error": "roll's OIDC issuer isn't on this deployment (it needs a public URL)" }))).into_response(),
+            Err(e) => return (StatusCode::FORBIDDEN, axum::Json(serde_json::json!({ "error": format!("{e:#}") }))).into_response(),
+        },
+    };
+    (StatusCode::OK, [(header::CACHE_CONTROL, "no-store")], axum::Json(serde_json::json!({ "token": jwt, "expires_at": until }))).into_response()
+}
+
 /// Where an environment's instances read its runtime config (`ROLL_CONFIG_URL`):
 /// `/_roll/config/<service>/<env>/<token>`.
 pub const CONFIG: &str = "/_roll/config/";
@@ -90,7 +154,8 @@ pub const CONFIG: &str = "/_roll/config/";
 async fn runtime_config(apps: Arc<Apps>, req: Request) -> Response {
     let parts: Vec<String> = req.uri().path()[CONFIG.len()..].split('/').map(|s| percent_encoding::percent_decode_str(s).decode_utf8_lossy().into_owned()).collect();
     let [id, env, token] = parts.as_slice() else { return (StatusCode::NOT_FOUND, "").into_response() };
-    if req.method() != axum::http::Method::GET || !id.starts_with("svc_") || !token.starts_with("rlc_") {
+    // `rlr_` (apps' own secrets), or `rlc_` from before them (still on running instances).
+    if req.method() != axum::http::Method::GET || !id.starts_with("svc_") || !(token.starts_with("rlr_") || token.starts_with("rlc_")) {
         return (StatusCode::NOT_FOUND, "").into_response();
     }
     // A deleted service's (kept for a restore) answers nothing, whatever its token.

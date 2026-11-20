@@ -349,6 +349,7 @@ mod finds {
             ("post an incident on the status page", "apps_create_incident"),
             ("sbom of my image", "apps_deploy_sbom"),
             ("traces of a preview", "previews_traces"),
+            ("wait until my preview is ready", "previews_wait"),
         ]
         .iter()
         .filter_map(|(q, want)| {
