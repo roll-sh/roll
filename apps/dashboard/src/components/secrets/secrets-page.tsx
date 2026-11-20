@@ -10,6 +10,7 @@ import { resourceKey } from "@/lib/workspace-resources";
 import { useWorkspace } from "@/lib/workspace-store";
 import { AppShell } from "../app-shell";
 import { ProjectIcon } from "../workspace/project-icon";
+import { MissingProject } from "../workspace/missing-project";
 import { AccessView } from "./access";
 import { AuditView } from "./audit";
 import { CompareView } from "./compare";
@@ -20,7 +21,7 @@ import { HealthView } from "./health";
 import { OverviewGrid } from "./grid";
 import { CredentialsView, KeysView } from "./panels";
 import { SyncsView } from "./syncs";
-import { ErrorNote, useLoad } from "./ui";
+import { button, ErrorNote, useLoad } from "./ui";
 
 export type View = "overview" | "health" | "compare" | "environments" | "access" | "syncs" | "credentials" | "keys" | "audit";
 
@@ -60,14 +61,7 @@ export const secretsHref = (project: string, search: Search = {}) => `/dashboard
 export function SecretsPage({ id, search }: { id: string; search: Search }) {
   const ws = useWorkspace();
   const project = ws.projects.find((p) => p.id === id);
-  if (!project)
-    return (
-      <AppShell crumb={ws.status === "loading" ? "" : "Secrets"} bleed>
-        <div className="grid h-full place-items-center text-[13px] text-muted">
-          {ws.status === "loading" ? "" : ws.status === "error" ? `Projects didn't load: ${ws.error}` : "There's no such project."}
-        </div>
-      </AppShell>
-    );
+  if (!project) return <MissingProject crumb="Secrets" to={(p) => secretsHref(p)} />;
   return <Surface key={project.id} project={project} search={search} />;
 }
 
@@ -109,7 +103,15 @@ function Surface({ project, search }: { project: WorkspaceProject; search: Searc
   }, [moved, hash, navigate, project.id, search]);
 
   let body: ReactNode;
-  if (overview.error && !overview.data) body = <ErrorNote error={`Secrets didn't load: ${overview.error}`} className="m-4" />;
+  if (overview.error && !overview.data)
+    body = (
+      <div className="m-4 flex flex-wrap items-start gap-2">
+        <ErrorNote error={`Secrets didn't load: ${overview.error}`} className="min-w-0 flex-1" />
+        <button className={button} onClick={overview.reload}>
+          Try again
+        </button>
+      </div>
+    );
   else if (!overview.data) body = null;
   else if (search.env && !env) body = <ErrorNote error={`There's no environment "${search.env}" in ${project.name}.`} className="m-4" />;
   else if (env) body = <EnvView key={env.slug} env={env} />;
