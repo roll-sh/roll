@@ -1745,14 +1745,25 @@ fn parse_rank_vectors(w: &mut Cx<'_, '_>, f: &FieldMapper, full: &str, ctx: &Map
     }
 }
 
-/// `Element.checkNanAndInfinite` of a float vector, with `appendErrorElements`' preview.
+/// `Element.checkNanAndInfinite` of a float vector, then its squared magnitude (summed in float,
+/// in order: `float` and `bfloat16` alike, before rounding), with `appendErrorElements`' preview.
+/// Values whose square overflows (from about 1.8e19) are refused, so nothing stored rounds to an
+/// infinite `bfloat16` either.
 fn check_finite(element: &str, v: &[f32]) -> Result<(), ValueError> {
-    let Some((i, x)) = v.iter().enumerate().find(|(_, x)| !x.is_finite()) else { return Ok(()) };
     let java = crate::json::write::java_float;
-    let mut msg = if x.is_nan() {
-        format!("element_type [{element}] vectors do not support NaN values but found [NaN] at dim [{i}];")
-    } else {
-        format!("element_type [{element}] vectors do not support infinite values but found [{}] at dim [{i}];", java(*x))
+    let mut msg = match v.iter().enumerate().find(|(_, x)| !x.is_finite()) {
+        Some((i, x)) if x.is_nan() => format!("element_type [{element}] vectors do not support NaN values but found [NaN] at dim [{i}];"),
+        Some((i, x)) => format!("element_type [{element}] vectors do not support infinite values but found [{}] at dim [{i}];", java(*x)),
+        None => {
+            let mut sq = 0f32;
+            for x in v {
+                sq += x * x;
+            }
+            if sq.is_finite() {
+                return Ok(());
+            }
+            "NaN or Infinite magnitude detected, this usually means the vector values are too extreme to fit within a float.".to_string()
+        }
     };
     msg.push_str(" Preview of invalid vector: [");
     msg.push_str(&v.iter().take(5).map(|x| java(*x)).collect::<Vec<_>>().join(", "));

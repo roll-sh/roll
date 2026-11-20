@@ -25,11 +25,12 @@ fn path_of(seg: &search_index::SegmentContext, d: u32, path: &str) -> bool {
 
 /// The `inner_hits` object of one hit.
 /// `parent_id` is the hit's `_id` (its nested hits print it).
-/// `show_vectors`: the request's own `_source` sets `exclude_vectors: false` (Elasticsearch cuts
-/// nested hits out of the root source as the request fetched it, so an inner hit's own
-/// `exclude_vectors` changes nothing).
+/// `vectors`: the vectors the request's own fetch kept (`None`: all of them, with
+/// `exclude_vectors: false`; else those its includes name). Elasticsearch cuts nested hits out of
+/// the root source as the request fetched it, before its includes filter it, so an inner hit's
+/// own `exclude_vectors` changes nothing.
 #[allow(clippy::too_many_arguments)]
-pub fn render(qctx: &super::query::QueryCtx, t: &Target, r: &ShardResult, parent: u32, parent_id: &str, source: Option<&Value>, show_vectors: bool, total_as_int: bool) -> EsResult<Value> {
+pub fn render(qctx: &super::query::QueryCtx, t: &Target, r: &ShardResult, parent: u32, parent_id: &str, source: Option<&Value>, vectors: Option<&[String]>, total_as_int: bool) -> EsResult<Value> {
     // Nested hits' sources are cut out of their root's: under field level security, of the
     // fields the reader may see, and without the vectors the root leaves out.
     let mut visible = match (source, &qctx.table.source_filter) {
@@ -42,7 +43,8 @@ pub fn render(qctx: &super::query::QueryCtx, t: &Target, r: &ShardResult, parent
     {
         let mut s = s;
         if let Value::Obj(m) = &mut s {
-            crate::engine::synthetic::vectors(qctx.table, "", m, !show_vectors);
+            let keep = vectors.map(crate::engine::source::Globs::new);
+            crate::engine::synthetic::vectors_keeping(qctx.table, "", m, keep.as_ref(), true);
         }
         visible = Some(s);
     }

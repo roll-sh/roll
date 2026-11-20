@@ -33,7 +33,7 @@ Reproduce the YAML numbers with `scripts/search-yaml-suites.sh roll` (set `ROLL_
   `-kuromoji`, `-nori`, `-smartcn` and `-icu` plugins added; `logsdb` and runtime fields rerun on
   2026-11-17). 46 suites pass every test
   Elasticsearch passes. What's left, largest first: x-pack
-  `platinum` (1,065 of 1,412; machine learning is most of it), plugins roll doesn't ship
+  `platinum` (1,080 of 1,412; machine learning is most of it), plugins roll doesn't ship
   (`mapper-annotated-text`, `-murmur3` and `-size`, `ingest-attachment`, `ingest-otel`, `prometheus`), `apm-data`'s templates and
   pipelines (1 of 26), cross-cluster replication (none),
   `mapper-unsigned-long` (33 of 34: a `terms` aggregation across `long` and `unsigned_long`

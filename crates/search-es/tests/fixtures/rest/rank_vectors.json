@@ -1,5 +1,5 @@
 {
-  "description": "rank_vectors: non-finite float vectors refused (dense_vector too), dims bounds and empty first vectors, element types printed as stored through a partial update, and nested inner hits hiding vectors unless the request shows them. Steps that patch several vectors back into one object don't pin key order: Elasticsearch's changes with each JVM start.",
+  "description": "rank_vectors: non-finite float vectors and magnitudes refused (dense_vector too), fields without dims skipped by _execute and percolate, dims bounds and empty first vectors, element types printed as stored through a partial update, and nested inner hits showing the vectors the request's own fetch kept (exclude_vectors: false or its includes; never the inner hit's own exclude_vectors). Steps that patch several vectors back into one object don't pin key order: Elasticsearch's changes with each JVM start.",
   "steps": [
     {
       "req": "PUT /esm-rv",
@@ -431,6 +431,7 @@
         },
         "_source": true
       },
+      "unordered": true,
       "status": 200,
       "response": {
         "get": {
@@ -463,12 +464,6 @@
                 ]
               }
             ],
-            "rby": [
-              [
-                1,
-                -3
-              ]
-            ],
             "bf": [
               [
                 300.0,
@@ -481,17 +476,23 @@
                 2
               ]
             ],
+            "rby": [
+              [
+                1,
+                -3
+              ]
+            ],
             "x": 1
           }
         }
       },
       "response_headers": {
         "content-type": "application/json"
-      },
-      "unordered": true
+      }
     },
     {
       "req": "GET /esm-rv/_doc/1?_source_exclude_vectors=false&filter_path=_source",
+      "unordered": true,
       "status": 200,
       "response": {
         "_source": {
@@ -524,12 +525,6 @@
             }
           ],
           "x": 1,
-          "rb": [
-            [
-              1,
-              2
-            ]
-          ],
           "bf": [
             [
               300.0,
@@ -541,13 +536,18 @@
               1,
               -3
             ]
+          ],
+          "rb": [
+            [
+              1,
+              2
+            ]
           ]
         }
       },
       "response_headers": {
         "content-type": "application/json"
-      },
-      "unordered": true
+      }
     },
     {
       "req": "POST /esm-rv/_search?filter_path=hits.hits._source,hits.hits.inner_hits.nested.hits.hits._source",
@@ -620,6 +620,7 @@
           "exclude_vectors": false
         }
       },
+      "unordered": true,
       "status": 200,
       "response": {
         "hits": {
@@ -669,8 +670,421 @@
       },
       "response_headers": {
         "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rv/_doc/bfmag",
+      "body": {
+        "bf": [
+          [
+            3.4e+38,
+            1
+          ]
+        ]
       },
-      "unordered": true
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "document_parsing_exception",
+              "reason": "[1:17] failed to parse: NaN or Infinite magnitude detected, this usually means the vector values are too extreme to fit within a float. Preview of invalid vector: [3.4E38, 1.0]"
+            }
+          ],
+          "type": "document_parsing_exception",
+          "reason": "[1:17] failed to parse: NaN or Infinite magnitude detected, this usually means the vector values are too extreme to fit within a float. Preview of invalid vector: [3.4E38, 1.0]",
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "NaN or Infinite magnitude detected, this usually means the vector values are too extreme to fit within a float. Preview of invalid vector: [3.4E38, 1.0]"
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rv/_doc/dmag",
+      "body": {
+        "d": [
+          2e+19,
+          1
+        ]
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "document_parsing_exception",
+              "reason": "[1:15] failed to parse: NaN or Infinite magnitude detected, this usually means the vector values are too extreme to fit within a float. Preview of invalid vector: [2.0E19, 1.0]"
+            }
+          ],
+          "type": "document_parsing_exception",
+          "reason": "[1:15] failed to parse: NaN or Infinite magnitude detected, this usually means the vector values are too extreme to fit within a float. Preview of invalid vector: [2.0E19, 1.0]",
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "NaN or Infinite magnitude detected, this usually means the vector values are too extreme to fit within a float. Preview of invalid vector: [2.0E19, 1.0]"
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "POST /_scripts/painless/_execute",
+      "body": {
+        "script": {
+          "source": "1"
+        },
+        "context": "score",
+        "context_setup": {
+          "index": "esm-rv",
+          "document": {
+            "rd": [
+              [
+                1,
+                2
+              ]
+            ]
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "result": 1.0
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rv-pq",
+      "body": {
+        "mappings": {
+          "properties": {
+            "q": {
+              "type": "percolator"
+            },
+            "k": {
+              "type": "keyword"
+            },
+            "rd": {
+              "type": "rank_vectors"
+            }
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "esm-rv-pq"
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "PUT /esm-rv-pq/_doc/1?refresh=true",
+      "body": {
+        "q": {
+          "term": {
+            "k": "a"
+          }
+        }
+      },
+      "status": 201,
+      "response": {
+        "_index": "esm-rv-pq",
+        "_id": "1",
+        "_version": 1,
+        "result": "created",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 2,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 0,
+        "_primary_term": 1
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "POST /esm-rv-pq/_search?filter_path=hits.total",
+      "body": {
+        "query": {
+          "percolate": {
+            "field": "q",
+            "document": {
+              "k": "a",
+              "rd": [
+                [
+                  1,
+                  2
+                ]
+              ]
+            }
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "hits": {
+          "total": {
+            "value": 1,
+            "relation": "eq"
+          }
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-rv/_mapping/field/rd",
+      "status": 200,
+      "response": {
+        "esm-rv": {
+          "mappings": {
+            "rd": {
+              "full_name": "rd",
+              "mapping": {
+                "rd": {
+                  "type": "rank_vectors"
+                }
+              }
+            }
+          }
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "GET /esm-rv-pq/_mapping/field/rd",
+      "status": 200,
+      "response": {
+        "esm-rv-pq": {
+          "mappings": {
+            "rd": {
+              "full_name": "rd",
+              "mapping": {
+                "rd": {
+                  "type": "rank_vectors"
+                }
+              }
+            }
+          }
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "POST /esm-rv/_search?filter_path=hits.hits._source,hits.hits.inner_hits.nested.hits.hits._source",
+      "body": {
+        "query": {
+          "nested": {
+            "path": "nested",
+            "query": {
+              "match_all": {}
+            },
+            "inner_hits": {}
+          }
+        },
+        "_source": [
+          "nested.rv",
+          "nested.p"
+        ]
+      },
+      "unordered": true,
+      "status": 200,
+      "response": {
+        "hits": {
+          "hits": [
+            {
+              "_source": {
+                "nested": [
+                  {
+                    "p": "a",
+                    "rv": [
+                      [
+                        1.0,
+                        2.0
+                      ]
+                    ]
+                  },
+                  {
+                    "p": "b",
+                    "rv": [
+                      [
+                        3.0,
+                        4.0
+                      ]
+                    ]
+                  }
+                ]
+              },
+              "inner_hits": {
+                "nested": {
+                  "hits": {
+                    "hits": [
+                      {
+                        "_source": {
+                          "p": "a",
+                          "rv": [
+                            [
+                              1.0,
+                              2.0
+                            ]
+                          ]
+                        }
+                      },
+                      {
+                        "_source": {
+                          "p": "b",
+                          "rv": [
+                            [
+                              3.0,
+                              4.0
+                            ]
+                          ]
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "POST /esm-rv/_search?filter_path=hits.hits._source,hits.hits.inner_hits.nested.hits.hits._source",
+      "body": {
+        "query": {
+          "nested": {
+            "path": "nested",
+            "query": {
+              "match_all": {}
+            },
+            "inner_hits": {}
+          }
+        },
+        "_source": [
+          "rby"
+        ]
+      },
+      "status": 200,
+      "response": {
+        "hits": {
+          "hits": [
+            {
+              "_source": {
+                "rby": [
+                  [
+                    1,
+                    -3
+                  ]
+                ]
+              },
+              "inner_hits": {
+                "nested": {
+                  "hits": {
+                    "hits": [
+                      {
+                        "_source": {
+                          "p": "a"
+                        }
+                      },
+                      {
+                        "_source": {
+                          "p": "b"
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "POST /esm-rv/_search?filter_path=hits.hits._source,hits.hits.inner_hits.nested.hits.hits._source",
+      "body": {
+        "query": {
+          "nested": {
+            "path": "nested",
+            "query": {
+              "match_all": {}
+            },
+            "inner_hits": {
+              "_source": {
+                "exclude_vectors": false
+              }
+            }
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "hits": {
+          "hits": [
+            {
+              "_source": {
+                "nested": [
+                  {
+                    "p": "a"
+                  },
+                  {
+                    "p": "b"
+                  }
+                ],
+                "x": 1
+              },
+              "inner_hits": {
+                "nested": {
+                  "hits": {
+                    "hits": [
+                      {
+                        "_source": {
+                          "p": "a"
+                        }
+                      },
+                      {
+                        "_source": {
+                          "p": "b"
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
     }
   ]
 }
